@@ -49,7 +49,6 @@ impl FileHandler for DefaultParquetHandler {
     }
 }
 
-#[async_trait::async_trait]
 impl ParquetHandler for DefaultParquetHandler {
     fn read_parquet_files(
         &self,
@@ -67,6 +66,14 @@ impl ParquetHandler for DefaultParquetHandler {
         let files = files.into_iter().map(|f| f.meta).collect::<Vec<_>>();
         let stream = FileStream::new(files, schema, file_reader)?;
         Ok(stream.boxed())
+    }
+
+    fn read_parquet_files_sync(
+        &self,
+        files: Vec<<Self as FileHandler>::FileReadContext>,
+        physical_schema: SchemaRef,
+    ) -> DeltaResult<crate::FileDataReadResultIter> {
+        todo!("read_parquet_files_sync")
     }
 }
 

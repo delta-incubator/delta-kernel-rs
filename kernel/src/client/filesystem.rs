@@ -1,7 +1,11 @@
 use std::sync::Arc;
 
 use bytes::Bytes;
-use futures::stream::{BoxStream, StreamExt, TryStreamExt};
+use futures::{
+    future::BoxFuture,
+    stream::{BoxStream, StreamExt, TryStreamExt},
+    FutureExt,
+};
 use object_store::path::Path;
 use object_store::DynObjectStore;
 use url::Url;
@@ -25,41 +29,61 @@ impl ObjectStoreFileSystemClient {
 
 #[async_trait::async_trait]
 impl FileSystemClient for ObjectStoreFileSystemClient {
-    async fn list_from(&self, path: &Url) -> DeltaResult<BoxStream<'_, DeltaResult<FileMeta>>> {
+    fn list_from(
+        &self,
+        path: &Url,
+    ) -> BoxFuture<'_, DeltaResult<BoxStream<'_, DeltaResult<FileMeta>>>> {
         let url = path.clone();
         let offset = Path::from(path.path());
         // TODO properly handle table prefix
         let prefix = self.table_root.child("_delta_log");
-        Ok(self
-            .inner
-            .list_with_offset(Some(&prefix), &offset)
-            .await?
-            .map_err(Error::from)
-            .map_ok(move |meta| {
-                let mut location = url.clone();
-                location.set_path(&format!("/{}", meta.location.as_ref()));
-                FileMeta {
-                    location,
-                    last_modified: meta.last_modified.timestamp(),
-                    size: meta.size,
-                }
-            })
-            .boxed())
+        (async move {
+            Ok(self
+                .inner
+                .list_with_offset(Some(&prefix), &offset)
+                .await?
+                .map_err(Error::from)
+                .map_ok(move |meta| {
+                    let mut location = url.clone();
+                    location.set_path(&format!("/{}", meta.location.as_ref()));
+                    FileMeta {
+                        location,
+                        last_modified: meta.last_modified.timestamp(),
+                        size: meta.size,
+                    }
+                })
+                .boxed())
+        })
+        .boxed()
+    }
+
+    fn list_from_sync(
+        &self,
+        path: &Url,
+    ) -> DeltaResult<Box<dyn Iterator<Item = DeltaResult<FileMeta>>>> {
+        todo!("default client does not support sync API")
     }
 
     /// Read data specified by the start and end offset from the file.
-    async fn read_files(&self, files: Vec<FileSlice>) -> DeltaResult<Vec<Bytes>> {
-        let mut bytes = Vec::new();
-        for (url, range) in files {
-            let path = Path::from(url.path());
-            let data = if let Some(rng) = range {
-                self.inner.get_range(&path, rng).await?
-            } else {
-                self.inner.get(&path).await?.bytes().await?
-            };
-            bytes.push(data);
-        }
-        Ok(bytes)
+    fn read_files(&self, files: Vec<FileSlice>) -> BoxFuture<'_, DeltaResult<Vec<Bytes>>> {
+        let fut = async move {
+            let mut bytes = Vec::new();
+            for (url, range) in files {
+                let path = Path::from(url.path());
+                let data = if let Some(rng) = range {
+                    self.inner.get_range(&path, rng).await?
+                } else {
+                    self.inner.get(&path).await?.bytes().await?
+                };
+                bytes.push(data);
+            }
+            Ok(bytes)
+        };
+        fut.boxed()
+    }
+
+    fn read_files_sync(&self, files: Vec<FileSlice>) -> DeltaResult<Vec<Bytes>> {
+        todo!("default client does not support sync API")
     }
 }
 

@@ -2,6 +2,7 @@
 //! has schema etc.)
 //!
 
+use std::cmp::Ordering;
 use std::sync::Arc;
 use std::sync::RwLock;
 
@@ -66,37 +67,105 @@ impl LogSegment {
         Ok(batches)
     }
 
+    #[cfg(feature = "sync")]
+    fn replay_sync<JRC: Send, PRC: Send>(
+        &self,
+        table_client: &dyn TableClient<JsonReadContext = JRC, ParquetReadContext = PRC>,
+    ) -> DeltaResult<Vec<RecordBatch>> {
+        let read_schema = Arc::new(ArrowSchema {
+            fields: Fields::from_iter([ActionType::Metadata.field(), ActionType::Protocol.field()]),
+            metadata: Default::default(),
+        });
+
+        let mut commit_files: Vec<_> = self.commit_files().cloned().collect();
+        // NOTE this will already sort in reverse order
+        commit_files.sort_unstable_by(|a, b| b.location.cmp(&a.location));
+        let json_client = table_client.get_json_handler();
+        let read_contexts = json_client.contextualize_file_reads(commit_files, None)?;
+        let commit_stream = json_client
+            .read_json_files_sync(read_contexts, Arc::new(read_schema.clone().try_into()?))?;
+
+        let parquet_client = table_client.get_parquet_handler();
+        let read_contexts =
+            parquet_client.contextualize_file_reads(self.checkpoint_files.clone(), None)?;
+        let checkpoint_stream = parquet_client
+            .read_parquet_files_sync(read_contexts, Arc::new(read_schema.clone().try_into()?))?;
+
+        let batches = commit_stream
+            .chain(checkpoint_stream)
+            .collect::<DeltaResult<Vec<_>>>()?;
+
+        Ok(batches)
+    }
+
     async fn read_metadata<JRC: Send, PRC: Send>(
         &self,
         table_client: &dyn TableClient<JsonReadContext = JRC, ParquetReadContext = PRC>,
     ) -> DeltaResult<Option<(Metadata, Protocol)>> {
+        let mut parser = MetadataParser::default();
+
         let batches = self.replay(table_client).await?;
-        let mut metadata_opt = None;
-        let mut protocol_opt = None;
         for batch in batches {
-            if let Ok(mut metas) = parse_action(&batch, &ActionType::Metadata) {
-                match metas.next() {
-                    Some(Action::Metadata(meta)) => {
-                        metadata_opt = Some(meta.clone());
-                    }
-                    _ => (),
-                }
-            }
-
-            if let Ok(mut protos) = parse_action(&batch, &ActionType::Protocol) {
-                match protos.next() {
-                    Some(Action::Protocol(proto)) => {
-                        protocol_opt = Some(proto.clone());
-                    }
-                    _ => (),
-                }
-            }
-
-            if let (Some(metadata), Some(protocol)) = (&metadata_opt, &protocol_opt) {
-                return Ok(Some((metadata.clone(), protocol.clone())));
+            if let Some((metadata, protocol)) = parser.check_log_batch(&batch)? {
+                return Ok(Some((metadata, protocol)));
             }
         }
+
         Ok(None)
+    }
+
+    #[cfg(feature = "sync")]
+    fn read_metadata_sync<JRC: Send, PRC: Send>(
+        &self,
+        table_client: &dyn TableClient<JsonReadContext = JRC, ParquetReadContext = PRC>,
+    ) -> DeltaResult<Option<(Metadata, Protocol)>> {
+        let mut parser = MetadataParser::default();
+
+        let batches = self.replay_sync(table_client)?;
+        for batch in batches {
+            if let Some((metadata, protocol)) = parser.check_log_batch(&batch)? {
+                return Ok(Some((metadata, protocol)));
+            }
+        }
+
+        Ok(None)
+    }
+}
+
+#[derive(Default)]
+struct MetadataParser {
+    metadata: Option<Metadata>,
+    protocol: Option<Protocol>,
+}
+
+impl MetadataParser {
+    fn check_log_batch(
+        &mut self,
+        log_batch: &RecordBatch,
+    ) -> DeltaResult<Option<(Metadata, Protocol)>> {
+        if let Ok(mut metas) = parse_action(&log_batch, &ActionType::Metadata) {
+            match metas.next() {
+                Some(Action::Metadata(meta)) => {
+                    self.metadata = Some(meta.clone());
+                }
+                _ => (),
+            }
+        }
+
+        if let Ok(mut protos) = parse_action(&log_batch, &ActionType::Protocol) {
+            match protos.next() {
+                Some(Action::Protocol(proto)) => {
+                    self.protocol = Some(proto.clone());
+                }
+                _ => (),
+            }
+        }
+
+        if let (Some(metadata), Some(protocol)) = (&self.metadata, &self.protocol) {
+            Ok(Some((metadata.clone(), protocol.clone())))
+        } else {
+            Ok(None)
+        }
     }
 }
 
@@ -131,80 +200,64 @@ impl<JRC: Send, PRC: Send + Sync> Snapshot<JRC, PRC> {
     /// - `location`: url pointing at the table root (where `_delta_log` folder is located)
     /// - `table_client`: Implementation of [`TableClient`] apis.
     /// - `version`: target version of the [`Snapshot`]
+    #[cfg(feature = "async")]
     pub async fn try_new(
         table_root: Url,
         table_client: Arc<dyn TableClient<JsonReadContext = JRC, ParquetReadContext = PRC>>,
         version: Option<Version>,
     ) -> DeltaResult<Self> {
+        let mut builder = SnapshotBuilder::new(table_root, version);
+
         let fs_client = table_client.get_file_system_client();
-        let log_url = LogPath(&table_root).child("_delta_log/").unwrap();
-
-        // List relevant files from log
-        let (mut commit_files, checkpoint_files) =
-            match read_last_checkpoint(fs_client.as_ref(), &log_url).await {
-                Err(err) => return Err(err),
-                Ok(Some(cp)) => {
-                    if let Some(v) = version {
-                        if cp.version >= v {
-                            list_log_files_with_checkpoint(&cp, fs_client.as_ref(), &log_url)
-                                .await?
-                        } else {
-                            list_log_files(fs_client.as_ref(), &log_url).await?
-                        }
-                    } else {
-                        list_log_files(fs_client.as_ref(), &log_url).await?
-                    }
-                }
-                Ok(None) => list_log_files(fs_client.as_ref(), &log_url).await?,
-            };
-
-        // remove all files above requested version
-        if let Some(version) = version {
-            commit_files.retain(|meta| {
-                if let Some(v) = LogPath(&meta.location).commit_version() {
-                    v <= version
-                } else {
-                    false
-                }
-            });
-        }
-
-        // get the effective version from chosen files
-        let version_eff = if !commit_files.is_empty() {
-            commit_files
-                .first()
-                .and_then(|f| LogPath(&f.location).commit_version())
-                .unwrap()
-        } else if !checkpoint_files.is_empty() {
-            checkpoint_files
-                .first()
-                .and_then(|f| LogPath(&f.location).commit_version())
-                .unwrap()
-        } else {
-            // TODO more descriptive error
-            return Err(Error::MissingVersion);
+        let path = builder.last_checkpoint_path();
+        let last_checkpoint_data = match fs_client.read_files(vec![(path, None)]).await {
+            Ok(data) => Some(data[0].clone()),
+            Err(Error::FileNotFound(_)) => None,
+            Err(err) => return Err(err),
         };
 
-        if let Some(v) = version {
-            if version_eff != v {
-                // TODO more descriptive error
-                return Err(Error::MissingVersion);
-            }
+        let data_ref = last_checkpoint_data.as_deref().map(|bytes| bytes.as_ref());
+        let list_request = builder.handle_checkpoint(data_ref)?;
+        let mut file_stream = fs_client.list_from(&list_request.start_from).await?;
+
+        while let Some(file) = file_stream.next().await {
+            builder.receive_file(file?);
         }
 
-        let log_segment = LogSegment {
-            log_root: log_url,
-            commit_files,
-            checkpoint_files,
+        builder.build(table_client)
+    }
+
+    /// Create a new [`Snapshot`] instance for the given version.
+    ///
+    /// # Parameters
+    ///
+    /// - `location`: url pointing at the table root (where `_delta_log` folder is located)
+    /// - `table_client`: Implementation of [`TableClient`] apis.
+    /// - `version`: target version of the [`Snapshot`]
+    #[cfg(feature = "sync")]
+    pub fn try_new_sync(
+        table_root: Url,
+        table_client: Arc<dyn TableClient<JsonReadContext = JRC, ParquetReadContext = PRC>>,
+        version: Option<Version>,
+    ) -> DeltaResult<Self> {
+        let mut builder = SnapshotBuilder::new(table_root, version);
+
+        let fs_client = table_client.get_file_system_client();
+        let path = builder.last_checkpoint_path();
+        let last_checkpoint_data = match fs_client.read_files_sync(vec![(path, None)]) {
+            Ok(data) => Some(data[0].clone()),
+            Err(Error::FileNotFound(_)) => None,
+            Err(err) => return Err(err),
         };
 
-        Ok(Self {
-            table_root,
-            table_client,
-            log_segment,
-            version: version_eff,
-            metadata: Default::default(),
-        })
+        let list_request = builder.handle_checkpoint(last_checkpoint_data.as_deref())?;
+        let file_iter = fs_client.list_from_sync(&list_request.start_from)?;
+
+        for file in file_iter {
+            builder.receive_file(file?);
+        }
+
+        builder.build(table_client)
     }
 
     /// Create a new [`Snapshot`] instance.
@@ -298,111 +351,154 @@ pub struct CheckpointMetadata {
     pub checksum: Option<String>,
 }
 
-/// Try reading the `_last_checkpoint` file.
-///
-/// In case the file is not found, `None` is returned.
-async fn read_last_checkpoint(
-    fs_client: &dyn FileSystemClient,
-    log_root: &Url,
-) -> DeltaResult<Option<CheckpointMetadata>> {
-    let file_path = LogPath(log_root).child(LAST_CHECKPOINT_FILE_NAME)?;
-    match fs_client.read_files(vec![(file_path, None)]).await {
-        Ok(data) => match data.first() {
-            Some(data) => Ok(Some(serde_json::from_slice(data)?)),
-            None => Ok(None),
-        },
-        Err(Error::FileNotFound(_)) => Ok(None),
-        Err(err) => Err(err),
-    }
+struct SnapshotBuilder {
+    table_root: Url,
+    version: Option<Version>,
+    last_checkpoint: Option<CheckpointMetadata>,
+    commit_files: Vec<FileMeta>,
+    checkpoint_files: Vec<FileMeta>,
+    max_checkpoint_version: i64,
 }
 
-/// List all log files after a givben checkpoint.
-async fn list_log_files_with_checkpoint(
-    cp: &CheckpointMetadata,
-    fs_client: &dyn FileSystemClient,
-    log_root: &Url,
-) -> DeltaResult<(Vec<FileMeta>, Vec<FileMeta>)> {
-    let version_prefix = format!("{:020}", cp.version);
-    let start_from = log_root.join(&version_prefix)?;
-
-    let files = fs_client
-        .list_from(&start_from)
-        .await?
-        .try_collect::<Vec<_>>()
-        .await?
-        .into_iter()
-        // TODO this filters out .crc files etc which start with "." - how do we want to use these kind of files?
-        .filter(|f| LogPath(&f.location).commit_version().is_some())
-        .collect::<Vec<_>>();
-
-    let mut commit_files = files
-        .iter()
-        .filter_map(|f| {
-            if LogPath(&f.location).is_commit_file() {
-                Some(f.clone())
-            } else {
-                None
-            }
-        })
-        .collect_vec();
-    // NOTE this will sort in reverse order
-    commit_files.sort_unstable_by(|a, b| b.location.cmp(&a.location));
-
-    let checkpoint_files = files
-        .iter()
-        .filter_map(|f| {
-            if LogPath(&f.location).is_checkpoint_file() {
-                Some(f.clone())
-            } else {
-                None
-            }
-        })
-        .collect_vec();
-
-    // TODO raise a proper error
-    assert_eq!(checkpoint_files.len(), cp.parts.unwrap_or(1) as usize);
-
-    Ok((commit_files, checkpoint_files))
-}
-
-/// List relevant log files.
-///
-/// Relevant files are the max checkpoint found and all subsequent commits.
-async fn list_log_files(
-    fs_client: &dyn FileSystemClient,
-    log_root: &Url,
-) -> DeltaResult<(Vec<FileMeta>, Vec<FileMeta>)> {
-    let version_prefix = format!("{:020}", 0);
-    let start_from = log_root.join(&version_prefix)?;
-
-    let mut max_checkpoint_version = -1_i64;
-    let mut commit_files = Vec::new();
-    let mut checkpoint_files = Vec::with_capacity(10);
-
-    let mut stream = fs_client.list_from(&start_from).await?;
-    while let Some(maybe_meta) = stream.next().await {
-        let meta = maybe_meta?;
-        if LogPath(&meta.location).is_checkpoint_file() {
-            let version = LogPath(&meta.location).commit_version().unwrap_or(0) as i64;
-            if version > max_checkpoint_version {
-                max_checkpoint_version = version;
-                checkpoint_files.clear();
-                checkpoint_files.push(meta);
-            } else if version == max_checkpoint_version {
-                checkpoint_files.push(meta);
-            }
-        } else if LogPath(&meta.location).is_commit_file() {
-            commit_files.push(meta);
+impl SnapshotBuilder {
+    fn new(table_root: Url, version: Option<Version>) -> Self {
+        Self {
+            table_root,
+            version,
+            last_checkpoint: None,
+            commit_files: vec![],
+            checkpoint_files: vec![],
+            max_checkpoint_version: -1,
         }
     }
 
-    commit_files.retain(|f| {
-        LogPath(&f.location).commit_version().unwrap_or(0) as i64 > max_checkpoint_version
-    });
-    // NOTE this will sort in reverse order
-    commit_files.sort_unstable_by(|a, b| b.location.cmp(&a.location));
+    fn last_checkpoint_path(&self) -> Url {
+        let log_root = LogPath(&self.table_root).child("_delta_log/").unwrap();
+        LogPath(&log_root).child(LAST_CHECKPOINT_FILE_NAME).unwrap()
+    }
 
-    Ok((commit_files, checkpoint_files))
+    fn handle_checkpoint(
+        &mut self,
+        checkpoint_data: Option<&[u8]>,
+    ) -> DeltaResult<ListFilesRequest> {
+        self.last_checkpoint = match checkpoint_data {
+            Some(data) => Some(serde_json::from_slice(data)?),
+            None => None,
+        };
+
+        let start_version = self
+            .last_checkpoint
+            .as_ref()
+            .map(|cp| cp.version)
+            .unwrap_or(0);
+        let version_prefix = format!("{:020}", start_version);
+        let log_root = LogPath(&self.table_root).child("_delta_log/")?;
+        let start_from = log_root.join(&version_prefix)?;
+
+        Ok(ListFilesRequest {
+            root: log_root,
+            start_from,
+        })
+    }
+
+    fn receive_file(&mut self, file: FileMeta) {
+        let path = LogPath(&file.location);
+        if path.is_checkpoint_file() {
+            let commit_version = path.commit_version().unwrap_or(0) as i64;
+            match commit_version.cmp(&self.max_checkpoint_version) {
+                Ordering::Greater => {
+                    self.max_checkpoint_version = commit_version;
+                    self.checkpoint_files.clear();
+                    self.checkpoint_files.push(file);
+                }
+                Ordering::Equal => {
+                    self.checkpoint_files.push(file);
+                }
+                Ordering::Less => {}
+            }
+        } else if path.is_commit_file() {
+            self.commit_files.push(file);
+        }
+    }
+
+    fn build<JRC: Send, PRC: Send>(
+        mut self,
+        table_client: Arc<dyn TableClient<JsonReadContext = JRC, ParquetReadContext = PRC>>,
+    ) -> DeltaResult<Snapshot<JRC, PRC>> {
+        // Build the snapshot
+        // remove all files above requested version
+        if let Some(version) = self.version {
+            self.commit_files.retain(|meta| {
+                if let Some(v) = LogPath(&meta.location).commit_version() {
+                    v <= version
+                } else {
+                    false
+                }
+            });
+        }
+
+        // sort commit files in reverse chronological order
+        self.commit_files
+            .sort_unstable_by(|a, b| b.location.cmp(&a.location));
+
+        if let Some(cp) = self.last_checkpoint {
+            if self.checkpoint_files.len() != cp.parts.unwrap_or(1) as usize {
+                // TODO more descriptive error
+                return Err(Error::FileNotFound(format!("Expected to find {} checkpoint files but only found {}. The table may be corrupted.",
+                    cp.parts.unwrap_or(1), self.checkpoint_files.len())));
+            }
+        }
+
+        // Remove log files at or before the checkpoint
+        self.commit_files.retain(|f| {
+            LogPath(&f.location)
+                .commit_version()
+                .map(|v| v as i64 > self.max_checkpoint_version)
+                .unwrap_or(false)
+        });
+
+        // get the effective version from chosen files
+        let version_eff = if !self.commit_files.is_empty() {
+            self.commit_files
+                .first()
+                .and_then(|f| LogPath(&f.location).commit_version())
+                .unwrap()
+        } else if !self.checkpoint_files.is_empty() {
+            self.checkpoint_files
+                .first()
+                .and_then(|f| LogPath(&f.location).commit_version())
+                .unwrap()
+        } else {
+            // TODO more descriptive error
+            return Err(Error::MissingVersion);
+        };
+
+        if let Some(v) = self.version {
+            if version_eff != v {
+                // TODO more descriptive error
+                return Err(Error::MissingVersion);
+            }
+        }
+
+        let log_segment = LogSegment {
+            log_root: LogPath(&self.table_root).child("_delta_log/")?,
+            commit_files: self.commit_files,
+            checkpoint_files: self.checkpoint_files,
+        };
+
+        Ok(Snapshot {
+            table_root: self.table_root,
+            table_client,
+            log_segment,
+            version: version_eff,
+            metadata: Default::default(),
+        })
+    }
+}
+
+struct ListFilesRequest {
+    root: Url,
+    start_from: Url,
 }
 
 #[cfg(test)]
@@ -475,13 +571,27 @@ mod tests {
             "./tests/data/table-with-dv-small/_delta_log/",
         ))
         .unwrap();
-        let url = url::Url::from_directory_path(path).unwrap();
+        let location = url::Url::from_directory_path(path).unwrap();
 
-        let store = Arc::new(LocalFileSystem::new());
-        let prefix = Path::from(url.path());
-        let client = ObjectStoreFileSystemClient::new(store, prefix);
-        let cp = read_last_checkpoint(&client, &url).await.unwrap();
-        assert!(cp.is_none())
+        let table_client = Arc::new(
+            DefaultTableClient::try_new(&location, HashMap::<String, String>::new()).unwrap(),
+        );
+        let snapshot = Snapshot::try_new(location, table_client, None)
+            .await
+            .unwrap();
+
+        assert_eq!(snapshot.log_segment.checkpoint_files.len(), 0);
+
+        assert_eq!(
+            snapshot.log_segment.commit_files.len(),
+            2,
+            "expected 1 commit file, but got {:?}",
+            snapshot.log_segment.commit_files
+        );
+        assert_eq!(
+            LogPath(&snapshot.log_segment.commit_files[0].location).commit_version(),
+            Some(1)
+        );
     }
 
     #[tokio::test]
@@ -503,7 +613,12 @@ mod tests {
             LogPath(&snapshot.log_segment.checkpoint_files[0].location).commit_version(),
             Some(2)
         );
-        assert_eq!(snapshot.log_segment.commit_files.len(), 1);
+        assert_eq!(
+            snapshot.log_segment.commit_files.len(),
+            1,
+            "expected 1 commit file, but got {:?}",
+            snapshot.log_segment.commit_files
+        );
         assert_eq!(
             LogPath(&snapshot.log_segment.commit_files[0].location).commit_version(),
             Some(3)

@@ -44,6 +44,7 @@ use std::sync::Arc;
 use arrow_array::{RecordBatch, StringArray};
 use arrow_schema::SchemaRef as ArrowSchemaRef;
 use bytes::Bytes;
+use futures::future::BoxFuture;
 use futures::stream::{BoxStream, Stream};
 use url::Url;
 
@@ -76,6 +77,7 @@ pub type FileSlice = (Url, Option<Range<usize>>);
 /// Data read from a Delta table file and the corresponding scan file information.
 pub type FileDataReadResult = (FileMeta, RecordBatch);
 pub type FileDataReadResultStream = Pin<Box<dyn Stream<Item = DeltaResult<RecordBatch>> + Send>>;
+pub type FileDataReadResultIter = Box<dyn Iterator<Item = DeltaResult<RecordBatch>> + Send>;
 
 /// The metadata that describes an object.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -127,14 +129,40 @@ pub trait ExpressionHandler {
 /// Delta Kernel uses this client whenever it needs to access the underlying
 /// file system where the Delta table is present. Connector implementation of
 /// this interface can hide filesystem specific details from Delta Kernel.
-#[async_trait::async_trait]
 pub trait FileSystemClient: Send + Sync {
     /// List the paths in the same directory that are lexicographically greater or equal to
     /// (UTF-8 sorting) the given `path`. The result should also be sorted by the file name.
-    async fn list_from(&self, path: &Url) -> DeltaResult<BoxStream<'_, DeltaResult<FileMeta>>>;
+    #[cfg(feature = "async")]
+    fn list_from(
+        &self,
+        path: &Url,
+    ) -> BoxFuture<'_, DeltaResult<BoxStream<'_, DeltaResult<FileMeta>>>>;
 
     /// Read data specified by the start and end offset from the file.
-    async fn read_files(&self, files: Vec<FileSlice>) -> DeltaResult<Vec<Bytes>>;
+    #[cfg(feature = "async")]
+    fn read_files(&self, files: Vec<FileSlice>) -> BoxFuture<'_, DeltaResult<Vec<Bytes>>>;
+
+    /// List the paths in the same directory that are lexicographically greater or equal to
+    /// (UTF-8 sorting) the given `path`. The result should also be sorted by the file name.
+    #[cfg(feature = "sync")]
+    fn list_from_sync(
+        &self,
+        path: &Url,
+    ) -> DeltaResult<Box<dyn Iterator<Item = DeltaResult<FileMeta>>>>;
+
+    /// Read data specified by the start and end offset from the file.
+    #[cfg(feature = "sync")]
+    fn read_files_sync(&self, files: Vec<FileSlice>) -> DeltaResult<Vec<Bytes>>;
+}
+
+/// Sync version of [`FileSystemClient`].
+pub trait SyncFileSystemClient {
+    /// List the paths in the same directory that are lexicographically greater or equal to
+    /// (UTF-8 sorting) the given `path`. The result should also be sorted by the file name.
+    fn list_from(&self, path: &Url) -> DeltaResult<Vec<DeltaResult<FileMeta>>>;
+
+    /// Read data specified by the start and end offset from the file.
+    fn read_files(&self, files: Vec<FileSlice>) -> DeltaResult<Vec<Bytes>>;
 }
 
 /// Provides file handling functionality to Delta Kernel.
@@ -173,7 +201,6 @@ pub trait FileHandler {
 /// Delta Kernel can use this client to parse JSON strings into Row or read content from JSON files.
 /// Connectors can leverage this interface to provide their best implementation of the JSON parsing
 /// capability to Delta Kernel.
-#[async_trait::async_trait]
 pub trait JsonHandler: FileHandler {
     /// Parse the given json strings and return the fields requested by output schema as columns in a [`RecordBatch`].
     fn parse_json(
@@ -189,18 +216,32 @@ pub trait JsonHandler: FileHandler {
     ///
     /// - `files` - Vec of FileReadContext objects to read data from.
     /// - `physical_schema` - Select list of columns to read from the JSON file.
+    #[cfg(feature = "async")]
     fn read_json_files(
         &self,
         files: Vec<<Self as FileHandler>::FileReadContext>,
         physical_schema: SchemaRef,
     ) -> DeltaResult<FileDataReadResultStream>;
+
+    /// Read and parse the JSON format file at given locations and return
+    /// the data as a RecordBatch with the columns requested by physical schema.
+    ///
+    /// # Parameters
+    ///
+    /// - `files` - Vec of FileReadContext objects to read data from.
+    /// - `physical_schema` - Select list of columns to read from the JSON file.
+    #[cfg(feature = "sync")]
+    fn read_json_files_sync(
+        &self,
+        files: Vec<<Self as FileHandler>::FileReadContext>,
+        physical_schema: SchemaRef,
+    ) -> DeltaResult<FileDataReadResultIter>;
 }
 
 /// Provides Parquet file related functionalities to Delta Kernel.
 ///
 /// Connectors can leverage this interface to provide their own custom
 /// implementation of Parquet data file functionalities to Delta Kernel.
-#[async_trait::async_trait]
 pub trait ParquetHandler: FileHandler + Send + Sync {
     /// Read and parse the JSON format file at given locations and return
     /// the data as a RecordBatch with the columns requested by physical schema.
@@ -209,11 +250,26 @@ pub trait ParquetHandler: FileHandler + Send + Sync {
     ///
     /// - `files` - Vec of FileReadContext objects to read data from.
     /// - `physical_schema` - Select list of columns to read from the JSON file.
+    #[cfg(feature = "async")]
     fn read_parquet_files(
         &self,
         files: Vec<<Self as FileHandler>::FileReadContext>,
         physical_schema: SchemaRef,
     ) -> DeltaResult<FileDataReadResultStream>;
+
+    /// Read and parse the JSON format file at given locations and return
+    /// the data as a RecordBatch with the columns requested by physical schema.
+    ///
+    /// # Parameters
+    ///
+    /// - `files` - Vec of FileReadContext objects to read data from.
+    /// - `physical_schema` - Select list of columns to read from the JSON file.
+    #[cfg(feature = "sync")]
+    fn read_parquet_files_sync(
+        &self,
+        files: Vec<<Self as FileHandler>::FileReadContext>,
+        physical_schema: SchemaRef,
+    ) -> DeltaResult<FileDataReadResultIter>;
 }
 
 /// Interface encapsulating all clients needed by the Delta Kernel in order to read the Delta table.

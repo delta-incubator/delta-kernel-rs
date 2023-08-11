@@ -56,7 +56,6 @@ impl FileHandler for DefaultJsonHandler {
     }
 }
 
-#[async_trait::async_trait]
 impl JsonHandler for DefaultJsonHandler {
     fn parse_json(
         &self,
@@ -100,6 +99,14 @@ impl JsonHandler for DefaultJsonHandler {
         let files = files.into_iter().map(|f| f.meta).collect::<Vec<_>>();
         let stream = FileStream::new(files, schema, file_reader)?;
         Ok(stream.boxed())
+    }
+
+    fn read_json_files_sync(
+        &self,
+        files: Vec<<Self as FileHandler>::FileReadContext>,
+        physical_schema: SchemaRef,
+    ) -> DeltaResult<crate::FileDataReadResultIter> {
+        todo!("read_json_files_sync")
     }
 }
 
