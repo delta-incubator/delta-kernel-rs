@@ -148,7 +148,7 @@ pub trait FileSystemClient: Send + Sync {
     fn list_from_sync(
         &self,
         path: &Url,
-    ) -> DeltaResult<Box<dyn Iterator<Item = DeltaResult<FileMeta>>>>;
+    ) -> DeltaResult<Box<dyn Iterator<Item = DeltaResult<FileMeta>> + '_>>;
 
     /// Read data specified by the start and end offset from the file.
     #[cfg(feature = "sync")]

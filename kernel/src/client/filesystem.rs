@@ -60,8 +60,11 @@ impl FileSystemClient for ObjectStoreFileSystemClient {
     fn list_from_sync(
         &self,
         path: &Url,
-    ) -> DeltaResult<Box<dyn Iterator<Item = DeltaResult<FileMeta>>>> {
-        todo!("default client does not support sync API")
+    ) -> DeltaResult<Box<dyn Iterator<Item = DeltaResult<FileMeta>> + '_>> {
+        let mut stream = futures::executor::block_on(self.list_from(path))?;
+        Ok(Box::new(std::iter::from_fn(move || {
+            futures::executor::block_on(stream.try_next()).transpose()
+        })))
     }
 
     /// Read data specified by the start and end offset from the file.
@@ -83,7 +86,7 @@ impl FileSystemClient for ObjectStoreFileSystemClient {
     }
 
     fn read_files_sync(&self, files: Vec<FileSlice>) -> DeltaResult<Vec<Bytes>> {
-        todo!("default client does not support sync API")
+        futures::executor::block_on(self.read_files(files))
     }
 }
 

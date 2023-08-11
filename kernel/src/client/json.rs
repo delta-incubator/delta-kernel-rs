@@ -106,7 +106,11 @@ impl JsonHandler for DefaultJsonHandler {
         files: Vec<<Self as FileHandler>::FileReadContext>,
         physical_schema: SchemaRef,
     ) -> DeltaResult<crate::FileDataReadResultIter> {
-        todo!("read_json_files_sync")
+        // TODO: rewrite to not use a stream.
+        let mut stream = self.read_json_files(files, physical_schema)?;
+        Ok(Box::new(std::iter::from_fn(move || {
+            futures::executor::block_on(stream.try_next()).transpose()
+        })))
     }
 }
 

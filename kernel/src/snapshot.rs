@@ -9,7 +9,6 @@ use std::sync::RwLock;
 use arrow_array::RecordBatch;
 use arrow_schema::{Fields, Schema as ArrowSchema};
 use futures::{StreamExt, TryStreamExt};
-use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use url::Url;
 
@@ -17,7 +16,7 @@ use crate::actions::{parse_action, Action, ActionType, Metadata, Protocol};
 use crate::path::LogPath;
 use crate::scan::ScanBuilder;
 use crate::schema::Schema;
-use crate::{DeltaResult, Error, FileMeta, FileSystemClient, TableClient, Version};
+use crate::{DeltaResult, Error, FileMeta, TableClient, Version};
 
 const LAST_CHECKPOINT_FILE_NAME: &str = "_last_checkpoint";
 
@@ -217,8 +216,8 @@ impl<JRC: Send, PRC: Send + Sync> Snapshot<JRC, PRC> {
         };
 
         let data_ref = last_checkpoint_data.as_deref().map(|bytes| bytes.as_ref());
-        let list_request = builder.handle_checkpoint(data_ref)?;
-        let mut file_stream = fs_client.list_from(&list_request.start_from).await?;
+        let start_from = builder.handle_checkpoint(data_ref)?;
+        let mut file_stream = fs_client.list_from(&start_from).await?;
 
         while let Some(file) = file_stream.next().await {
             builder.receive_file(file?);
@@ -250,8 +249,8 @@ impl<JRC: Send, PRC: Send + Sync> Snapshot<JRC, PRC> {
             Err(err) => return Err(err),
         };
 
-        let list_request = builder.handle_checkpoint(last_checkpoint_data.as_deref())?;
-        let file_iter = fs_client.list_from_sync(&list_request.start_from)?;
+        let start_from = builder.handle_checkpoint(last_checkpoint_data.as_deref())?;
+        let file_iter = fs_client.list_from_sync(&start_from)?;
 
         for file in file_iter {
             builder.receive_file(file?);
@@ -372,15 +371,15 @@ impl SnapshotBuilder {
         }
     }
 
+    /// Get the URL of the _last_checkpoint file.
     fn last_checkpoint_path(&self) -> Url {
         let log_root = LogPath(&self.table_root).child("_delta_log/").unwrap();
         LogPath(&log_root).child(LAST_CHECKPOINT_FILE_NAME).unwrap()
     }
 
-    fn handle_checkpoint(
-        &mut self,
-        checkpoint_data: Option<&[u8]>,
-    ) -> DeltaResult<ListFilesRequest> {
+    /// Receive the data from the _last_checkpoint file and return the URL to start
+    /// listing log files from.
+    fn handle_checkpoint(&mut self, checkpoint_data: Option<&[u8]>) -> DeltaResult<Url> {
         self.last_checkpoint = match checkpoint_data {
             Some(data) => Some(serde_json::from_slice(data)?),
             None => None,
@@ -395,12 +394,10 @@ impl SnapshotBuilder {
         let log_root = LogPath(&self.table_root).child("_delta_log/")?;
         let start_from = log_root.join(&version_prefix)?;
 
-        Ok(ListFilesRequest {
-            root: log_root,
-            start_from,
-        })
+        Ok(start_from)
     }
 
+    /// Receive a file from the log and store it in the builder.
     fn receive_file(&mut self, file: FileMeta) {
         let path = LogPath(&file.location);
         if path.is_checkpoint_file() {
@@ -421,6 +418,7 @@ impl SnapshotBuilder {
         }
     }
 
+    /// Build the snapshot based on the log files received so far.
     fn build<JRC: Send, PRC: Send>(
         mut self,
         table_client: Arc<dyn TableClient<JsonReadContext = JRC, ParquetReadContext = PRC>>,
@@ -494,11 +492,6 @@ impl SnapshotBuilder {
             metadata: Default::default(),
         })
     }
-}
-
-struct ListFilesRequest {
-    root: Url,
-    start_from: Url,
 }
 
 #[cfg(test)]
