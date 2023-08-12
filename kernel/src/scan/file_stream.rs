@@ -100,18 +100,17 @@ pub fn log_replay_iter(
 ) -> impl Iterator<Item = DeltaResult<Add>> {
     let mut log_scanner = LogReplayScanner::new(predicate);
 
-    action_iter
-        .flat_map(
-            move |actions| -> Box<dyn Iterator<Item = DeltaResult<Add>>> {
-                match actions {
-                    Ok(actions) => match log_scanner.process_batch(actions) {
-                        Ok(adds) => Box::new(adds.into_iter().map(Ok)),
-                        Err(err) => Box::new(std::iter::once(Err(err))),
-                    },
+    action_iter.flat_map(
+        move |actions| -> Box<dyn Iterator<Item = DeltaResult<Add>>> {
+            match actions {
+                Ok(actions) => match log_scanner.process_batch(actions) {
+                    Ok(adds) => Box::new(adds.into_iter().map(Ok)),
                     Err(err) => Box::new(std::iter::once(Err(err))),
-                }
-            },
-        )
+                },
+                Err(err) => Box::new(std::iter::once(Err(err))),
+            }
+        },
+    )
 }
 
 #[cfg(test)]

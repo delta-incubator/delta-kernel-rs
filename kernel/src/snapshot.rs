@@ -639,31 +639,32 @@ mod tests {
 
     #[tokio::test]
     async fn test_read_table_with_last_checkpoint() {
-        let path = std::fs::canonicalize(PathBuf::from(
-            "./tests/data/table-with-dv-small/_delta_log/",
-        ))
-        .unwrap();
+        let path =
+            std::fs::canonicalize(PathBuf::from("./tests/data/table-with-dv-small/")).unwrap();
         let location = url::Url::from_directory_path(path).unwrap();
 
         let table_client = Arc::new(
             DefaultTableClient::try_new(&location, HashMap::<String, String>::new()).unwrap(),
         );
-        let snapshot = Snapshot::try_new(location, table_client, None)
+        let snapshot = Snapshot::try_new(location.clone(), table_client.clone(), None)
             .await
             .unwrap();
+        let snapshot_sync = Snapshot::try_new_sync(location, table_client, None).unwrap();
 
-        assert_eq!(snapshot.log_segment.checkpoint_files.len(), 0);
+        for snapshot in vec![snapshot, snapshot_sync] {
+            assert_eq!(snapshot.log_segment.checkpoint_files.len(), 0);
 
-        assert_eq!(
-            snapshot.log_segment.commit_files.len(),
-            2,
-            "expected 1 commit file, but got {:?}",
-            snapshot.log_segment.commit_files
-        );
-        assert_eq!(
-            LogPath(&snapshot.log_segment.commit_files[0].location).commit_version(),
-            Some(1)
-        );
+            assert_eq!(
+                snapshot.log_segment.commit_files.len(),
+                2,
+                "expected 1 commit file, but got {:?}",
+                snapshot.log_segment.commit_files
+            );
+            assert_eq!(
+                LogPath(&snapshot.log_segment.commit_files[0].location).commit_version(),
+                Some(1)
+            );
+        }
     }
 
     #[tokio::test]
@@ -676,24 +677,28 @@ mod tests {
         let table_client = Arc::new(
             DefaultTableClient::try_new(&location, HashMap::<String, String>::new()).unwrap(),
         );
-        let snapshot = Snapshot::try_new(location, table_client, None)
+        let snapshot = Snapshot::try_new(location.clone(), table_client.clone(), None)
             .await
             .unwrap();
 
-        assert_eq!(snapshot.log_segment.checkpoint_files.len(), 1);
-        assert_eq!(
-            LogPath(&snapshot.log_segment.checkpoint_files[0].location).commit_version(),
-            Some(2)
-        );
-        assert_eq!(
-            snapshot.log_segment.commit_files.len(),
-            1,
-            "expected 1 commit file, but got {:?}",
-            snapshot.log_segment.commit_files
-        );
-        assert_eq!(
-            LogPath(&snapshot.log_segment.commit_files[0].location).commit_version(),
-            Some(3)
-        );
+        let snapshot_sync = Snapshot::try_new_sync(location, table_client, None).unwrap();
+
+        for snapshot in vec![snapshot, snapshot_sync] {
+            assert_eq!(snapshot.log_segment.checkpoint_files.len(), 1);
+            assert_eq!(
+                LogPath(&snapshot.log_segment.checkpoint_files[0].location).commit_version(),
+                Some(2)
+            );
+            assert_eq!(
+                snapshot.log_segment.commit_files.len(),
+                1,
+                "expected 1 commit file, but got {:?}",
+                snapshot.log_segment.commit_files
+            );
+            assert_eq!(
+                LogPath(&snapshot.log_segment.commit_files[0].location).commit_version(),
+                Some(3)
+            );
+        }
     }
 }

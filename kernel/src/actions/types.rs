@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::ops::Range;
 use std::sync::Arc;
 
 #[cfg(feature = "async")]
@@ -205,11 +206,38 @@ impl DeletionVectorDescriptor {
     }
 
     /// Parse an inline deletion vector
-    pub fn parse_inline(data: &str) -> DeltaResult<RoaringTreemap> {
+    fn parse_inline(data: &str) -> DeltaResult<RoaringTreemap> {
         let bytes = z85::decode(data)
             .map_err(|_| Error::DeletionVector("Failed to decode DV".to_string()))?;
         RoaringTreemap::deserialize_from(&bytes[12..])
             .map_err(|err| Error::DeletionVector(err.to_string()))
+    }
+
+    fn get_fetch_range(&self) -> DeltaResult<Range<usize>> {
+        if self.storage_type == "i" {
+            return Err(Error::DeletionVector(
+                "Inline deletion vectors cannot be fetched".to_string(),
+            ));
+        }
+        let offset = self.offset.ok_or_else(|| {
+            Error::MissingData("Deletion vector is in file but no offset provided".to_string())
+        })?;
+        let size_in_bytes = self.size_in_bytes;
+        // The first 4 bytes are the size of the data, which we already have.
+        // The next 4 bytes are the magic number, which we fetch to check
+        Ok(((offset + 4) as usize)..((offset + size_in_bytes + 8) as usize))
+    }
+
+    fn check_magic(data: &[u8]) -> DeltaResult<()> {
+        let magic_bytes: [u8; 4] = data[..4].try_into().unwrap();
+        let magic_number = i32::from_le_bytes(magic_bytes);
+        if magic_number != 1681511377 {
+            return Err(Error::DeletionVector(format!(
+                "Unknown magic number: {}",
+                magic_number
+            )));
+        }
+        Ok(())
     }
 
     /// Read the deletion vector.
@@ -222,26 +250,22 @@ impl DeletionVectorDescriptor {
         match self.absolute_path(&parent)? {
             None => Ok(futures::future::ready(Self::parse_inline(&self.path_or_inline_dv)).boxed()),
             Some(path) => {
-                let offset = self.offset.ok_or_else(|| {
-                    Error::MissingData(
-                        "Deletion vector is in file but no offset provided".to_string(),
-                    )
-                })?;
-                let size_in_bytes = self.size_in_bytes;
+                let range = self.get_fetch_range()?;
+                dbg!(&path);
+                dbg!(&range);
 
                 Ok(Box::pin(async move {
-                    dbg!("path  --> : {}", &path);
-                    dbg!("offset  --> : {:?}", &offset);
-                    dbg!("size_in_bytes  --> : {}", &size_in_bytes);
-                    let range = (offset as usize)..((offset + size_in_bytes) as usize);
-                    let dv_data = fs_client
+                    let data = fs_client
                         .read_files(vec![(path, Some(range))])
                         .await?
                         .first()
                         .ok_or(Error::MissingData("No deletion Vector data".to_string()))?
                         .clone();
 
-                    RoaringTreemap::deserialize_from(dv_data.as_ref())
+                    Self::check_magic(&data)?;
+
+                    let dv_data = &data[4..];
+                    RoaringTreemap::deserialize_from(dv_data)
                         .map_err(|err| Error::DeletionVector(err.to_string()))
                 }))
             }
@@ -258,25 +282,20 @@ impl DeletionVectorDescriptor {
         match self.absolute_path(&parent)? {
             None => Self::parse_inline(&self.path_or_inline_dv),
             Some(path) => {
-                let offset = self.offset.ok_or_else(|| {
-                    Error::MissingData(
-                        "Deletion vector is in file but no offset provided".to_string(),
-                    )
-                })?;
-                let size_in_bytes = self.size_in_bytes;
+                let range = self.get_fetch_range()?;
+                dbg!(&path);
+                dbg!(&range);
 
-                dbg!("path  --> : {}", &path);
-                dbg!("offset  --> : {:?}", &offset);
-                dbg!("size_in_bytes  --> : {}", &size_in_bytes);
-
-                let range = (offset as usize)..((offset + size_in_bytes) as usize);
-                let dv_data = fs_client
+                let data = fs_client
                     .read_files_sync(vec![(path, Some(range))])?
                     .first()
                     .ok_or(Error::MissingData("No deletion Vector data".to_string()))?
                     .clone();
 
-                RoaringTreemap::deserialize_from(dv_data.as_ref())
+                Self::check_magic(&data)?;
+
+                let dv_data = &data[4..];
+                RoaringTreemap::deserialize_from(dv_data)
                     .map_err(|err| Error::DeletionVector(err.to_string()))
             }
         }
@@ -480,10 +499,21 @@ mod tests {
         let fs_client = Arc::new(ObjectStoreFileSystemClient::new(store, root));
 
         let example = dv_example();
-        let tree_map = example.read(fs_client, parent).unwrap().await.unwrap();
+        let tree_map = example
+            .read(fs_client.clone(), parent.clone())
+            .unwrap()
+            .await
+            .unwrap();
 
         let expected: Vec<u64> = vec![0, 9];
         let found = tree_map.iter().collect::<Vec<_>>();
-        assert_eq!(found, expected)
+        assert_eq!(found, expected);
+
+        // Also check sync API
+        let tree_map = example.read_sync(fs_client, parent).unwrap();
+
+        let expected: Vec<u64> = vec![0, 9];
+        let found = tree_map.iter().collect::<Vec<_>>();
+        assert_eq!(found, expected);
     }
 }

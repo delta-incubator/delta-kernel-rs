@@ -54,5 +54,3 @@ jobs:
       - name: test
         run: |
           cargo test --verbose --all-features
-          cargo test --no-default-features --features default-client sync
-          cargo test --no-default-features --features default-client async
