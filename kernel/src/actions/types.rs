@@ -509,11 +509,14 @@ mod tests {
         let found = tree_map.iter().collect::<Vec<_>>();
         assert_eq!(found, expected);
 
-        // Also check sync API
-        let tree_map = example.read_sync(fs_client, parent).unwrap();
+        #[cfg(feature = "sync")]
+        {
+            // Also check sync API
+            let tree_map = example.read_sync(fs_client, parent).unwrap();
 
-        let expected: Vec<u64> = vec![0, 9];
-        let found = tree_map.iter().collect::<Vec<_>>();
-        assert_eq!(found, expected);
+            let expected: Vec<u64> = vec![0, 9];
+            let found = tree_map.iter().collect::<Vec<_>>();
+            assert_eq!(found, expected);
+        }
     }
 }

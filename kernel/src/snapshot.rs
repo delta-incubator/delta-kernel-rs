@@ -646,12 +646,15 @@ mod tests {
         let table_client = Arc::new(
             DefaultTableClient::try_new(&location, HashMap::<String, String>::new()).unwrap(),
         );
-        let snapshot = Snapshot::try_new(location.clone(), table_client.clone(), None)
-            .await
-            .unwrap();
-        let snapshot_sync = Snapshot::try_new_sync(location, table_client, None).unwrap();
+        let snapshots = vec![
+            Snapshot::try_new(location.clone(), table_client.clone(), None)
+                .await
+                .unwrap(),
+            #[cfg(feature = "sync")]
+            Snapshot::try_new_sync(location, table_client, None).unwrap(),
+        ];
 
-        for snapshot in vec![snapshot, snapshot_sync] {
+        for snapshot in snapshots {
             assert_eq!(snapshot.log_segment.checkpoint_files.len(), 0);
 
             assert_eq!(
@@ -677,13 +680,15 @@ mod tests {
         let table_client = Arc::new(
             DefaultTableClient::try_new(&location, HashMap::<String, String>::new()).unwrap(),
         );
-        let snapshot = Snapshot::try_new(location.clone(), table_client.clone(), None)
-            .await
-            .unwrap();
+        let snapshots = vec![
+            Snapshot::try_new(location.clone(), table_client.clone(), None)
+                .await
+                .unwrap(),
+            #[cfg(feature = "sync")]
+            Snapshot::try_new_sync(location, table_client, None).unwrap(),
+        ];
 
-        let snapshot_sync = Snapshot::try_new_sync(location, table_client, None).unwrap();
-
-        for snapshot in vec![snapshot, snapshot_sync] {
+        for snapshot in snapshots {
             assert_eq!(snapshot.log_segment.checkpoint_files.len(), 1);
             assert_eq!(
                 LogPath(&snapshot.log_segment.checkpoint_files[0].location).commit_version(),
