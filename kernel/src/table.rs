@@ -41,8 +41,17 @@ impl<JRC: Send, PRC: Send + Sync> Table<JRC, PRC> {
     /// Create a [`Snapshot`] of the table corresponding to `version`.
     ///
     /// If no version is supplied, a snapshot for the latest version will be created.
+    #[cfg(feature = "async")]
     pub async fn snapshot(&self, version: Option<Version>) -> DeltaResult<Snapshot<JRC, PRC>> {
         Snapshot::try_new(self.location.clone(), self.table_client.clone(), version).await
+    }
+
+    /// Create a [`Snapshot`] of the table corresponding to `version`.
+    ///
+    /// If no version is supplied, a snapshot for the latest version will be created.
+    #[cfg(feature = "sync")]
+    pub fn snapshot_sync(&self, version: Option<Version>) -> DeltaResult<Snapshot<JRC, PRC>> {
+        Snapshot::try_new_sync(self.location.clone(), self.table_client.clone(), version)
     }
 }
 
@@ -64,6 +73,19 @@ mod tests {
 
         let table = Table::new(url, table_client);
         let snapshot = table.snapshot(None).await.unwrap();
+        assert_eq!(snapshot.version(), 1)
+    }
+
+    #[test]
+    fn test_table_sync() {
+        let path =
+            std::fs::canonicalize(PathBuf::from("./tests/data/table-with-dv-small/")).unwrap();
+        let url = url::Url::from_directory_path(path).unwrap();
+        let table_client =
+            Arc::new(DefaultTableClient::try_new(&url, HashMap::<String, String>::new()).unwrap());
+
+        let table = Table::new(url, table_client);
+        let snapshot = table.snapshot_sync(None).unwrap();
         assert_eq!(snapshot.version(), 1)
     }
 }

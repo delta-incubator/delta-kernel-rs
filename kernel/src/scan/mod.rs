@@ -5,14 +5,16 @@ use arrow_schema::{Fields, Schema as ArrowSchema};
 use arrow_select::concat::concat_batches;
 use arrow_select::filter::filter_record_batch;
 use futures::stream::{StreamExt, TryStreamExt};
+use futures::Stream;
+use roaring::RoaringTreemap;
 use url::Url;
 
-use self::file_stream::LogReplayStream;
+use self::file_stream::{log_replay_iter, log_replay_stream};
 use crate::actions::ActionType;
 use crate::expressions::Expression;
-use crate::schema::{Schema, SchemaRef};
+use crate::schema::SchemaRef;
 use crate::snapshot::LogSegment;
-use crate::{DeltaResult, FileMeta, TableClient};
+use crate::{Add, DeltaResult, TableClient};
 
 mod data_skipping;
 pub mod file_stream;
@@ -109,7 +111,7 @@ impl<JRC: Send, PRC: Send + Sync> std::fmt::Debug for Scan<JRC, PRC> {
     }
 }
 
-impl<JRC: Send, PRC: Send + Sync + 'static> Scan<JRC, PRC> {
+impl<JRC: Send + 'static, PRC: Send + Sync + 'static> Scan<JRC, PRC> {
     /// Get a shred refernce to the [`Schema`] of the scan.
     ///
     /// [`Schema`]: crate::schema::Schema
@@ -126,77 +128,107 @@ impl<JRC: Send, PRC: Send + Sync + 'static> Scan<JRC, PRC> {
     /// which yields record batches of scan files and their associated metadata. Rows of the scan
     /// files batches correspond to data reads, and the DeltaReader is used to materialize the scan
     /// files into actual table data.
-    pub fn files(&self) -> DeltaResult<LogReplayStream> {
-        // TODO use LogSegmentNEw replay ...
-        // TODO create function to generate native schema
-        let schema = ArrowSchema {
+    #[cfg(feature = "async")]
+    pub fn files(&self) -> DeltaResult<impl Stream<Item = DeltaResult<Add>>> {
+        let schema = Arc::new(ArrowSchema {
             fields: Fields::from_iter([ActionType::Add.field(), ActionType::Remove.field()]),
             metadata: Default::default(),
-        };
-        let schema = Arc::new(Schema::try_from(&schema).unwrap());
+        });
 
-        let json_handler = self.table_client.get_json_handler();
-        let commit_reads = json_handler.contextualize_file_reads(
-            // NOTE commit files are sorted in reverse on creations
-            self.log_segment.commit_files.clone(),
-            self.predicate.clone(),
-        )?;
+        let stream =
+            self.log_segment
+                .replay(self.table_client.as_ref(), schema, self.predicate.clone())?;
 
-        let parquet_handler = self.table_client.get_parquet_handler();
-        let checkpoint_reads = parquet_handler.contextualize_file_reads(
-            self.log_segment.checkpoint_files.clone(),
-            self.predicate.clone(),
-        )?;
-
-        let stream = json_handler
-            .read_json_files(commit_reads, schema.clone())?
-            .chain(parquet_handler.read_parquet_files(checkpoint_reads, schema.clone())?)
-            .boxed();
-
-        LogReplayStream::new(
-            stream,
-            self.predicate.clone(),
-            self.table_client.get_file_system_client(),
-            self.table_root.clone(),
-        )
+        Ok(log_replay_stream(Box::pin(stream), self.predicate.clone()))
     }
 
+    #[cfg(feature = "sync")]
+    pub fn files_sync(&self) -> DeltaResult<impl Iterator<Item = DeltaResult<Add>>> {
+        let schema = Arc::new(ArrowSchema {
+            fields: Fields::from_iter([ActionType::Add.field(), ActionType::Remove.field()]),
+            metadata: Default::default(),
+        });
+
+        let log_iter = self.log_segment.replay_sync(
+            self.table_client.as_ref(),
+            schema,
+            self.predicate.clone(),
+        )?;
+
+        Ok(log_replay_iter(log_iter, self.predicate.clone()))
+    }
+
+    #[cfg(feature = "async")]
     pub async fn execute(&self) -> DeltaResult<Vec<RecordBatch>> {
         let parquet_handler = self.table_client.get_parquet_handler();
         let mut stream = self.files()?.boxed();
 
         let mut results = Vec::new();
-        while let Some(Ok(data)) = stream.next().await {
-            for file in data {
-                let meta = FileMeta {
-                    last_modified: file.add.modification_time,
-                    size: file.add.size as usize,
-                    location: self.table_root.join(&file.add.path)?,
-                };
-                let context = parquet_handler.contextualize_file_reads(vec![meta], None)?;
-                let batches = parquet_handler
-                    .read_parquet_files(context, self.schema.clone())?
-                    .try_collect::<Vec<_>>()
+        while let Some(Ok(add)) = stream.next().await {
+            let meta = add.as_file_meta(&self.table_root)?;
+            let context = parquet_handler.contextualize_file_reads(vec![meta], None)?;
+            let batches = parquet_handler
+                .read_parquet_files(context, self.schema.clone())?
+                .try_collect::<Vec<_>>()
+                .await?;
+            if batches.is_empty() {
+                continue;
+            }
+            let schema = batches[0].schema();
+            // TODO: write a filter that works on Vec<RecordBatch> so we don't
+            // have to concat batches here
+            let batch = concat_batches(&schema, &batches)?;
+            if let Some(dv_descriptor) = add.deletion_vector {
+                let fs_client = self.table_client.get_file_system_client();
+                let dv = dv_descriptor
+                    .read(fs_client, self.table_root.clone())?
                     .await?;
-                if batches.is_empty() {
-                    continue;
-                }
-                let schema = batches[0].schema();
-                let batch = concat_batches(&schema, &batches)?;
-                if let Some(fut_dv) = file.dv {
-                    let dv = fut_dv.await?;
-                    let vec: Vec<_> = (0..batch.num_rows())
-                        .map(|i| Some(!dv.contains(i.try_into().expect("fit into u32"))))
-                        .collect();
-                    let dv = BooleanArray::from(vec);
-                    results.push(filter_record_batch(&batch, &dv)?);
-                } else {
-                    results.push(batch);
-                }
+                results.push(Self::apply_dv(batch, &dv)?);
+            } else {
+                results.push(batch);
             }
         }
 
         Ok(results)
+    }
+
+    #[cfg(feature = "sync")]
+    pub fn execute_sync(&self) -> DeltaResult<Vec<RecordBatch>> {
+        let parquet_handler = self.table_client.get_parquet_handler();
+        let add_iter = self.files_sync()?;
+
+        let mut results = Vec::new();
+        for add in add_iter {
+            let add = add?;
+            let meta = add.as_file_meta(&self.table_root)?;
+            let context = parquet_handler.contextualize_file_reads(vec![meta], None)?;
+            let batches = parquet_handler
+                .read_parquet_files_sync(context, self.schema.clone())?
+                .collect::<DeltaResult<Vec<_>>>()?;
+            if batches.is_empty() {
+                continue;
+            }
+            let schema = batches[0].schema();
+            // TODO: write a filter that works on Vec<RecordBatch> so we don't
+            // have to concat batches here
+            let batch = concat_batches(&schema, &batches)?;
+            if let Some(dv_descriptor) = add.deletion_vector {
+                let fs_client = self.table_client.get_file_system_client();
+                let dv = dv_descriptor.read_sync(fs_client, self.table_root.clone())?;
+                results.push(Self::apply_dv(batch, &dv)?);
+            } else {
+                results.push(batch);
+            }
+        }
+
+        Ok(results)
+    }
+
+    fn apply_dv(batch: RecordBatch, dv: &RoaringTreemap) -> DeltaResult<RecordBatch> {
+        let values =
+            (0..batch.num_rows()).map(|i| Some(!dv.contains(i.try_into().expect("fit into u32"))));
+        let dv_mask = BooleanArray::from_iter(values);
+        Ok(filter_record_batch(&batch, &dv_mask)?)
     }
 }
 
@@ -225,7 +257,6 @@ mod tests {
         let files = scan.files().unwrap().try_collect::<Vec<_>>().await.unwrap();
 
         assert_eq!(files.len(), 1);
-        assert_eq!(files[0].len(), 1)
     }
 
     #[tokio::test]

@@ -8,7 +8,8 @@ use std::sync::RwLock;
 
 use arrow_array::RecordBatch;
 use arrow_schema::{Fields, Schema as ArrowSchema};
-use futures::{StreamExt, TryStreamExt};
+use futures::Stream;
+use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use url::Url;
 
@@ -16,6 +17,7 @@ use crate::actions::{parse_action, Action, ActionType, Metadata, Protocol};
 use crate::path::LogPath;
 use crate::scan::ScanBuilder;
 use crate::schema::Schema;
+use crate::Expression;
 use crate::{DeltaResult, Error, FileMeta, TableClient, Version};
 
 const LAST_CHECKPOINT_FILE_NAME: &str = "_last_checkpoint";
@@ -34,77 +36,81 @@ impl LogSegment {
         self.commit_files.iter()
     }
 
-    // TODO just a stop gap implementation, eventually we likely want a stream of batches...
-    async fn replay<JRC: Send, PRC: Send>(
+    /// Read a stream of log records from the log segment.
+    ///
+    /// Use `read_schema` to prune the fields to be read.
+    /// Use `predicate` to filter the rows to be read.
+    #[cfg(feature = "async")]
+    pub fn replay<JRC: Send, PRC: Send>(
         &self,
         table_client: &dyn TableClient<JsonReadContext = JRC, ParquetReadContext = PRC>,
-    ) -> DeltaResult<Vec<RecordBatch>> {
-        let read_schema = Arc::new(ArrowSchema {
-            fields: Fields::from_iter([ActionType::Metadata.field(), ActionType::Protocol.field()]),
-            metadata: Default::default(),
-        });
-
+        read_schema: Arc<ArrowSchema>,
+        predicate: Option<Expression>,
+    ) -> DeltaResult<impl Stream<Item = DeltaResult<RecordBatch>>> {
         let mut commit_files: Vec<_> = self.commit_files().cloned().collect();
+
         // NOTE this will already sort in reverse order
         commit_files.sort_unstable_by(|a, b| b.location.cmp(&a.location));
         let json_client = table_client.get_json_handler();
-        let read_contexts = json_client.contextualize_file_reads(commit_files, None)?;
+        let read_contexts =
+            json_client.contextualize_file_reads(commit_files, predicate.clone())?;
         let commit_stream = json_client
             .read_json_files(read_contexts, Arc::new(read_schema.clone().try_into()?))?;
 
         let parquet_client = table_client.get_parquet_handler();
         let read_contexts =
-            parquet_client.contextualize_file_reads(self.checkpoint_files.clone(), None)?;
+            parquet_client.contextualize_file_reads(self.checkpoint_files.clone(), predicate)?;
         let checkpoint_stream = parquet_client
             .read_parquet_files(read_contexts, Arc::new(read_schema.clone().try_into()?))?;
 
-        let batches = commit_stream
-            .chain(checkpoint_stream)
-            .try_collect::<Vec<_>>()
-            .await?;
+        let batches = commit_stream.chain(checkpoint_stream);
 
         Ok(batches)
     }
 
     #[cfg(feature = "sync")]
-    fn replay_sync<JRC: Send, PRC: Send>(
+    pub fn replay_sync<JRC: Send, PRC: Send>(
         &self,
         table_client: &dyn TableClient<JsonReadContext = JRC, ParquetReadContext = PRC>,
-    ) -> DeltaResult<Vec<RecordBatch>> {
-        let read_schema = Arc::new(ArrowSchema {
-            fields: Fields::from_iter([ActionType::Metadata.field(), ActionType::Protocol.field()]),
-            metadata: Default::default(),
-        });
-
+        read_schema: Arc<ArrowSchema>,
+        predicate: Option<Expression>,
+    ) -> DeltaResult<impl Iterator<Item = DeltaResult<RecordBatch>>> {
         let mut commit_files: Vec<_> = self.commit_files().cloned().collect();
+
         // NOTE this will already sort in reverse order
         commit_files.sort_unstable_by(|a, b| b.location.cmp(&a.location));
         let json_client = table_client.get_json_handler();
-        let read_contexts = json_client.contextualize_file_reads(commit_files, None)?;
+        let read_contexts =
+            json_client.contextualize_file_reads(commit_files, predicate.clone())?;
         let commit_stream = json_client
             .read_json_files_sync(read_contexts, Arc::new(read_schema.clone().try_into()?))?;
 
         let parquet_client = table_client.get_parquet_handler();
         let read_contexts =
-            parquet_client.contextualize_file_reads(self.checkpoint_files.clone(), None)?;
+            parquet_client.contextualize_file_reads(self.checkpoint_files.clone(), predicate)?;
         let checkpoint_stream = parquet_client
             .read_parquet_files_sync(read_contexts, Arc::new(read_schema.clone().try_into()?))?;
 
-        let batches = commit_stream
-            .chain(checkpoint_stream)
-            .collect::<DeltaResult<Vec<_>>>()?;
+        let batches = commit_stream.chain(checkpoint_stream);
 
         Ok(batches)
     }
 
+    #[cfg(feature = "async")]
     async fn read_metadata<JRC: Send, PRC: Send>(
         &self,
         table_client: &dyn TableClient<JsonReadContext = JRC, ParquetReadContext = PRC>,
     ) -> DeltaResult<Option<(Metadata, Protocol)>> {
         let mut parser = MetadataParser::default();
 
-        let batches = self.replay(table_client).await?;
-        for batch in batches {
+        let read_schema = Arc::new(ArrowSchema {
+            fields: Fields::from_iter([ActionType::Metadata.field(), ActionType::Protocol.field()]),
+            metadata: Default::default(),
+        });
+
+        let mut batches = self.replay(table_client, read_schema, None)?;
+        while let Some(batch) = batches.next().await {
+            let batch = batch?;
             if let Some((metadata, protocol)) = parser.check_log_batch(&batch)? {
                 return Ok(Some((metadata, protocol)));
             }
@@ -120,8 +126,14 @@ impl LogSegment {
     ) -> DeltaResult<Option<(Metadata, Protocol)>> {
         let mut parser = MetadataParser::default();
 
-        let batches = self.replay_sync(table_client)?;
+        let read_schema = Arc::new(ArrowSchema {
+            fields: Fields::from_iter([ActionType::Metadata.field(), ActionType::Protocol.field()]),
+            metadata: Default::default(),
+        });
+
+        let batches = self.replay_sync(table_client, read_schema, None)?;
         for batch in batches {
+            let batch = batch?;
             if let Some((metadata, protocol)) = parser.check_log_batch(&batch)? {
                 return Ok(Some((metadata, protocol)));
             }

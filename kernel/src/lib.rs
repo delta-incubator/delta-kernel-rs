@@ -26,6 +26,14 @@
 //! invoking methods on the [`FileHandler`] trait. All specifc file handlers must also provide
 //! the contextualization APis.
 //!
+//! ## Sync and Async APIs
+//!
+//! All methods that involve IO are exposed in both a sync and async variant. The sync variants
+//! all have the suffix `_sync` and return the result directly.
+//!
+//! Enable the `sync` feature to enable the sync APIs.
+//!
+//! Enable the `async` feature to enable the async APIs. This requires additional dependencies.
 
 #![warn(
     unreachable_pub,

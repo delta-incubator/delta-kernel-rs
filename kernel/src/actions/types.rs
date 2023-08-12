@@ -7,7 +7,7 @@ use roaring::RoaringTreemap;
 use url::Url;
 
 use crate::schema::StructType;
-use crate::{DeltaResult, Error, FileSystemClient};
+use crate::{DeltaResult, Error, FileMeta, FileSystemClient};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Format {
@@ -205,6 +205,7 @@ impl DeletionVectorDescriptor {
     }
 
     // TODO read only required byte ranges
+    #[cfg(feature = "async")]
     pub fn read(
         &self,
         fs_client: Arc<dyn FileSystemClient>,
@@ -262,6 +263,15 @@ impl DeletionVectorDescriptor {
             }
         }
     }
+
+    #[cfg(feature = "sync")]
+    pub fn read_sync(
+        &self,
+        fs_client: Arc<dyn FileSystemClient>,
+        parent: Url,
+    ) -> DeltaResult<RoaringTreemap> {
+        todo!("read_sync for deletion vector")
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -314,6 +324,14 @@ impl Add {
     pub fn with_base_row_id(mut self, base_row_id: i64) -> Self {
         self.base_row_id = Some(base_row_id);
         self
+    }
+
+    pub fn as_file_meta(&self, table_root: &Url) -> std::result::Result<FileMeta, url::ParseError> {
+        Ok(FileMeta {
+            last_modified: self.modification_time,
+            size: self.size as usize,
+            location: table_root.join(&self.path)?,
+        })
     }
 }
 
