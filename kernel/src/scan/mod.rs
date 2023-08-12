@@ -4,12 +4,17 @@ use arrow_array::{BooleanArray, RecordBatch};
 use arrow_schema::{Fields, Schema as ArrowSchema};
 use arrow_select::concat::concat_batches;
 use arrow_select::filter::filter_record_batch;
+#[cfg(feature = "async")]
 use futures::stream::{StreamExt, TryStreamExt};
+#[cfg(feature = "async")]
 use futures::Stream;
 use roaring::RoaringTreemap;
 use url::Url;
 
-use self::file_stream::{log_replay_iter, log_replay_stream};
+#[cfg(feature = "sync")]
+use self::file_stream::log_replay_iter;
+#[cfg(feature = "async")]
+use self::file_stream::log_replay_stream;
 use crate::actions::ActionType;
 use crate::expressions::Expression;
 use crate::schema::SchemaRef;

@@ -52,7 +52,9 @@ use std::sync::Arc;
 use arrow_array::{RecordBatch, StringArray};
 use arrow_schema::SchemaRef as ArrowSchemaRef;
 use bytes::Bytes;
+#[cfg(feature = "async")]
 use futures::future::BoxFuture;
+#[cfg(feature = "async")]
 use futures::stream::{BoxStream, Stream};
 use url::Url;
 
@@ -84,6 +86,7 @@ pub type FileSlice = (Url, Option<Range<usize>>);
 
 /// Data read from a Delta table file and the corresponding scan file information.
 pub type FileDataReadResult = (FileMeta, RecordBatch);
+#[cfg(feature = "async")]
 pub type FileDataReadResultStream = Pin<Box<dyn Stream<Item = DeltaResult<RecordBatch>> + Send>>;
 pub type FileDataReadResultIter = Box<dyn Iterator<Item = DeltaResult<RecordBatch>> + Send>;
 

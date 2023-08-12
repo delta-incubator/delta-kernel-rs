@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::io::{Cursor, Read};
 use std::sync::Arc;
 
+#[cfg(feature = "async")]
 use futures::future::{BoxFuture, FutureExt};
 use roaring::RoaringTreemap;
 use url::Url;

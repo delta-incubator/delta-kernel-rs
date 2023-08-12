@@ -17,6 +17,7 @@ pub enum Error {
     #[error("Arrow error: {0}")]
     Parquet(#[from] parquet::errors::ParquetError),
 
+    #[cfg(feature = "default-client")]
     #[error("Error interacting with object store: {0}")]
     ObjectStore(object_store::Error),
 
@@ -48,6 +49,7 @@ pub enum Error {
     MissingMetadata,
 }
 
+#[cfg(feature = "default-client")]
 impl From<object_store::Error> for Error {
     fn from(value: object_store::Error) -> Self {
         match value {

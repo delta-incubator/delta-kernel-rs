@@ -5,7 +5,9 @@ use crate::actions::{parse_actions, Action, ActionType, Add};
 use crate::expressions::Expression;
 use crate::DeltaResult;
 use arrow_array::RecordBatch;
+#[cfg(feature = "async")]
 use futures::stream::{BoxStream, Stream};
+#[cfg(feature = "async")]
 use futures::StreamExt;
 
 struct LogReplayScanner {

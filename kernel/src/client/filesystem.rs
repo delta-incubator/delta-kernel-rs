@@ -27,8 +27,8 @@ impl ObjectStoreFileSystemClient {
     }
 }
 
-#[async_trait::async_trait]
 impl FileSystemClient for ObjectStoreFileSystemClient {
+    #[cfg(feature = "async")]
     fn list_from(
         &self,
         path: &Url,
@@ -57,6 +57,7 @@ impl FileSystemClient for ObjectStoreFileSystemClient {
         .boxed()
     }
 
+    #[cfg(feature = "sync")]
     fn list_from_sync(
         &self,
         path: &Url,
@@ -68,6 +69,7 @@ impl FileSystemClient for ObjectStoreFileSystemClient {
     }
 
     /// Read data specified by the start and end offset from the file.
+    #[cfg(feature = "async")]
     fn read_files(&self, files: Vec<FileSlice>) -> BoxFuture<'_, DeltaResult<Vec<Bytes>>> {
         let fut = async move {
             let mut bytes = Vec::new();
@@ -85,6 +87,7 @@ impl FileSystemClient for ObjectStoreFileSystemClient {
         fut.boxed()
     }
 
+    #[cfg(feature = "sync")]
     fn read_files_sync(&self, files: Vec<FileSlice>) -> DeltaResult<Vec<Bytes>> {
         futures::executor::block_on(self.read_files(files))
     }

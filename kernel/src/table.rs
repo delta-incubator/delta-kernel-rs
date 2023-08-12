@@ -76,6 +76,7 @@ mod tests {
         assert_eq!(snapshot.version(), 1)
     }
 
+    #[cfg(feature = "sync")]
     #[test]
     fn test_table_sync() {
         let path =

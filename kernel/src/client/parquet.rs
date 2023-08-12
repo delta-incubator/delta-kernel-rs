@@ -50,6 +50,7 @@ impl FileHandler for DefaultParquetHandler {
 }
 
 impl ParquetHandler for DefaultParquetHandler {
+    #[cfg(feature = "async")]
     fn read_parquet_files(
         &self,
         files: Vec<<Self as FileHandler>::FileReadContext>,
@@ -68,6 +69,7 @@ impl ParquetHandler for DefaultParquetHandler {
         Ok(stream.boxed())
     }
 
+    #[cfg(feature = "sync")]
     fn read_parquet_files_sync(
         &self,
         files: Vec<<Self as FileHandler>::FileReadContext>,

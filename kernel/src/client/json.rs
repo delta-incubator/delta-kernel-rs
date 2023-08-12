@@ -83,6 +83,7 @@ impl JsonHandler for DefaultJsonHandler {
         Ok(concat_batches(&output_schema, &batches)?)
     }
 
+    #[cfg(feature = "async")]
     fn read_json_files(
         &self,
         files: Vec<<Self as FileHandler>::FileReadContext>,
@@ -101,6 +102,7 @@ impl JsonHandler for DefaultJsonHandler {
         Ok(stream.boxed())
     }
 
+    #[cfg(feature = "sync")]
     fn read_json_files_sync(
         &self,
         files: Vec<<Self as FileHandler>::FileReadContext>,

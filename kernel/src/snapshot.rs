@@ -8,7 +8,9 @@ use std::sync::RwLock;
 
 use arrow_array::RecordBatch;
 use arrow_schema::{Fields, Schema as ArrowSchema};
+#[cfg(feature = "async")]
 use futures::Stream;
+#[cfg(feature = "async")]
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use url::Url;
@@ -55,13 +57,13 @@ impl LogSegment {
         let read_contexts =
             json_client.contextualize_file_reads(commit_files, predicate.clone())?;
         let commit_stream = json_client
-            .read_json_files(read_contexts, Arc::new(read_schema.clone().try_into()?))?;
+            .read_json_files(read_contexts, Arc::new(read_schema.as_ref().try_into()?))?;
 
         let parquet_client = table_client.get_parquet_handler();
         let read_contexts =
             parquet_client.contextualize_file_reads(self.checkpoint_files.clone(), predicate)?;
         let checkpoint_stream = parquet_client
-            .read_parquet_files(read_contexts, Arc::new(read_schema.clone().try_into()?))?;
+            .read_parquet_files(read_contexts, Arc::new(read_schema.as_ref().try_into()?))?;
 
         let batches = commit_stream.chain(checkpoint_stream);
 
@@ -83,13 +85,13 @@ impl LogSegment {
         let read_contexts =
             json_client.contextualize_file_reads(commit_files, predicate.clone())?;
         let commit_stream = json_client
-            .read_json_files_sync(read_contexts, Arc::new(read_schema.clone().try_into()?))?;
+            .read_json_files_sync(read_contexts, Arc::new(read_schema.as_ref().try_into()?))?;
 
         let parquet_client = table_client.get_parquet_handler();
         let read_contexts =
             parquet_client.contextualize_file_reads(self.checkpoint_files.clone(), predicate)?;
         let checkpoint_stream = parquet_client
-            .read_parquet_files_sync(read_contexts, Arc::new(read_schema.clone().try_into()?))?;
+            .read_parquet_files_sync(read_contexts, Arc::new(read_schema.as_ref().try_into()?))?;
 
         let batches = commit_stream.chain(checkpoint_stream);
 
@@ -292,6 +294,7 @@ impl<JRC: Send, PRC: Send + Sync> Snapshot<JRC, PRC> {
         self.version
     }
 
+    #[cfg(feature = "async")]
     async fn get_or_insert_metadata(&self) -> DeltaResult<(Metadata, Protocol)> {
         let read_lock = self
             .metadata

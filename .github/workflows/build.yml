@@ -35,7 +35,11 @@ jobs:
           override: true
       - uses: Swatinem/rust-cache@v2
       - name: build and lint with clippy
-        run: cargo clippy --tests
+        run: |
+          cargo clippy --tests
+          cargo clippy --tests --no-default-features --features default-client,sync
+          cargo clippy --tests --no-default-features --features default-client,async
+          cargo clippy --tests --no-default-features --features sync,async
   test:
     runs-on: ubuntu-latest
     steps:
@@ -48,4 +52,7 @@ jobs:
           override: true
       - uses: Swatinem/rust-cache@v2
       - name: test
-        run: cargo test --verbose --all-features
+        run: |
+          cargo test --verbose --all-features
+          cargo test --no-default-features --features default-client sync
+          cargo test --no-default-features --features default-client async
