@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::io::{Cursor, Read};
 use std::sync::Arc;
 
 #[cfg(feature = "async")]
@@ -205,7 +204,15 @@ impl DeletionVectorDescriptor {
         }
     }
 
-    // TODO read only required byte ranges
+    /// Parse an inline deletion vector
+    pub fn parse_inline(data: &str) -> DeltaResult<RoaringTreemap> {
+        let bytes = z85::decode(data)
+            .map_err(|_| Error::DeletionVector("Failed to decode DV".to_string()))?;
+        RoaringTreemap::deserialize_from(&bytes[12..])
+            .map_err(|err| Error::DeletionVector(err.to_string()))
+    }
+
+    /// Read the deletion vector.
     #[cfg(feature = "async")]
     pub fn read(
         &self,
@@ -213,65 +220,66 @@ impl DeletionVectorDescriptor {
         parent: Url,
     ) -> DeltaResult<BoxFuture<'static, DeltaResult<RoaringTreemap>>> {
         match self.absolute_path(&parent)? {
-            None => {
-                let bytes = z85::decode(&self.path_or_inline_dv)
-                    .map_err(|_| Error::DeletionVector("Failed to decode DV".to_string()))?;
-                let rtm = RoaringTreemap::deserialize_from(&bytes[12..])
-                    .map_err(|err| Error::DeletionVector(err.to_string()));
-                Ok(async { rtm }.boxed())
-            }
+            None => Ok(futures::future::ready(Self::parse_inline(&self.path_or_inline_dv)).boxed()),
             Some(path) => {
-                let offset = self.offset;
+                let offset = self.offset.ok_or_else(|| {
+                    Error::MissingData(
+                        "Deletion vector is in file but no offset provided".to_string(),
+                    )
+                })?;
                 let size_in_bytes = self.size_in_bytes;
 
                 Ok(Box::pin(async move {
-                    println!("path  --> : {}", path);
-                    println!("offset  --> : {:?}", offset);
-                    println!("size_in_bytes  --> : {}", size_in_bytes);
-
+                    dbg!("path  --> : {}", &path);
+                    dbg!("offset  --> : {:?}", &offset);
+                    dbg!("size_in_bytes  --> : {}", &size_in_bytes);
+                    let range = (offset as usize)..((offset + size_in_bytes) as usize);
                     let dv_data = fs_client
-                        .read_files(vec![(path, None)])
+                        .read_files(vec![(path, Some(range))])
                         .await?
                         .first()
-                        .ok_or(Error::MissingData("No deletion Vecor data".to_string()))?
+                        .ok_or(Error::MissingData("No deletion Vector data".to_string()))?
                         .clone();
 
-                    let mut cursor = Cursor::new(dv_data);
-                    if let Some(offset) = offset {
-                        // TODO should we read the datasize from the DV file?
-                        // offset plus datasize bytes
-                        cursor.set_position((offset + 4) as u64);
-                    }
-
-                    let mut buf = vec![0; 4];
-                    cursor
-                        .read(&mut buf)
-                        .map_err(|err| Error::DeletionVector(err.to_string()))?;
-                    let magic = i32::from_le_bytes(buf.try_into().map_err(|_| {
-                        Error::DeletionVector("filed to read magic bytes".to_string())
-                    })?);
-                    println!("magic  --> : {}", magic);
-                    // assert!(magic == 1681511377);
-
-                    let mut buf = vec![0; size_in_bytes as usize];
-                    cursor
-                        .read(&mut buf)
-                        .map_err(|err| Error::DeletionVector(err.to_string()))?;
-
-                    RoaringTreemap::deserialize_from(Cursor::new(buf))
+                    RoaringTreemap::deserialize_from(dv_data.as_ref())
                         .map_err(|err| Error::DeletionVector(err.to_string()))
                 }))
             }
         }
     }
 
+    /// Read the deletion vector.
     #[cfg(feature = "sync")]
     pub fn read_sync(
         &self,
         fs_client: Arc<dyn FileSystemClient>,
         parent: Url,
     ) -> DeltaResult<RoaringTreemap> {
-        todo!("read_sync for deletion vector")
+        match self.absolute_path(&parent)? {
+            None => Self::parse_inline(&self.path_or_inline_dv),
+            Some(path) => {
+                let offset = self.offset.ok_or_else(|| {
+                    Error::MissingData(
+                        "Deletion vector is in file but no offset provided".to_string(),
+                    )
+                })?;
+                let size_in_bytes = self.size_in_bytes;
+
+                dbg!("path  --> : {}", &path);
+                dbg!("offset  --> : {:?}", &offset);
+                dbg!("size_in_bytes  --> : {}", &size_in_bytes);
+
+                let range = (offset as usize)..((offset + size_in_bytes) as usize);
+                let dv_data = fs_client
+                    .read_files_sync(vec![(path, Some(range))])?
+                    .first()
+                    .ok_or(Error::MissingData("No deletion Vector data".to_string()))?
+                    .clone();
+
+                RoaringTreemap::deserialize_from(dv_data.as_ref())
+                    .map_err(|err| Error::DeletionVector(err.to_string()))
+            }
+        }
     }
 }
 
@@ -392,7 +400,7 @@ mod tests {
     use super::*;
     use crate::client::filesystem::ObjectStoreFileSystemClient;
 
-    fn dv_relateive() -> DeletionVectorDescriptor {
+    fn dv_relative() -> DeletionVectorDescriptor {
         DeletionVectorDescriptor {
             storage_type: "u".to_string(),
             path_or_inline_dv: "ab^-aqEH.-t@S}K{vb[*k^".to_string(),
@@ -437,7 +445,7 @@ mod tests {
     fn test_deletion_vector_absolute_path() {
         let parent = Url::parse("s3://mytable/").unwrap();
 
-        let relative = dv_relateive();
+        let relative = dv_relative();
         let expected =
             Url::parse("s3://mytable/ab/deletion_vector_d2c639aa-8816-431a-aaf6-d3fe2512ff61.bin")
                 .unwrap();

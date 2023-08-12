@@ -47,7 +47,18 @@ Some design principles which should be considered:
   have async traits and implementations, but strive to avoid the need of a
   runtime so that implementers can use tokio, smol, async-std, or whatever
   might be needed. Essentially, we want to strive to design without actually
-  evaluating futures and leave that to the implementers on top of possible
+  evaluating futures and leave that to the implementers on top of possible.
+    * The only exception to this is the default client implementation of sync
+      helpers. This is because there isn't a good synchronous alternative to
+      ObjectStore. Users who want to use the synchronous API but don't want an
+      embedded runtime should implement their own filesystem helpers.
+- Provide parallel async and sync APIs. The async APIs are the primary API for
+  Rust, but the sync API is useful for FFI bindings and other languages. Core
+  logic should factor out IO operations. Then the async and sync APIs can be
+  implemented in parallel as wrappers around the core sans-IO logic. All methods
+  that involve IO should provide a sync and async variant, enabled by their 
+  respective feature. All sync methods are suffixed with `_sync` in Rust, since
+  `async` is the primary API in Rust.
 - No `DeltaTable`. The initial prototype intentionally exposes the concept of
   immutable versions of tables through the snapshot API. This encourages users
   to think about the Delta table state more accurately.

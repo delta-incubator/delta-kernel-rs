@@ -3,6 +3,8 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
+pub mod arrow;
+
 pub type Schema = StructType;
 pub type SchemaRef = Arc<StructType>;
 

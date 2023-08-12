@@ -101,7 +101,7 @@ pub fn log_replay_iter(
     let mut log_scanner = LogReplayScanner::new(predicate);
 
     action_iter
-        .map(
+        .flat_map(
             move |actions| -> Box<dyn Iterator<Item = DeltaResult<Add>>> {
                 match actions {
                     Ok(actions) => match log_scanner.process_batch(actions) {
@@ -112,7 +112,6 @@ pub fn log_replay_iter(
                 }
             },
         )
-        .flatten()
 }
 
 #[cfg(test)]

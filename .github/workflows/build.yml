@@ -39,7 +39,7 @@ jobs:
           cargo clippy --tests
           cargo clippy --tests --no-default-features --features default-client,sync
           cargo clippy --tests --no-default-features --features default-client,async
-          cargo clippy --tests --no-default-features --features sync,async
+          cargo clippy --no-default-features --features sync,async
   test:
     runs-on: ubuntu-latest
     steps:

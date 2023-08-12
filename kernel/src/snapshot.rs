@@ -156,21 +156,15 @@ impl MetadataParser {
         &mut self,
         log_batch: &RecordBatch,
     ) -> DeltaResult<Option<(Metadata, Protocol)>> {
-        if let Ok(mut metas) = parse_action(&log_batch, &ActionType::Metadata) {
-            match metas.next() {
-                Some(Action::Metadata(meta)) => {
-                    self.metadata = Some(meta.clone());
-                }
-                _ => (),
+        if let Ok(mut metas) = parse_action(log_batch, &ActionType::Metadata) {
+            if let Some(Action::Metadata(meta)) = metas.next() {
+                self.metadata = Some(meta.clone());
             }
         }
 
-        if let Ok(mut protos) = parse_action(&log_batch, &ActionType::Protocol) {
-            match protos.next() {
-                Some(Action::Protocol(proto)) => {
-                    self.protocol = Some(proto.clone());
-                }
-                _ => (),
+        if let Ok(mut protos) = parse_action(log_batch, &ActionType::Protocol) {
+            if let Some(Action::Protocol(proto)) = protos.next() {
+                self.protocol = Some(proto.clone());
             }
         }
 
@@ -229,7 +223,7 @@ impl<JRC: Send, PRC: Send + Sync> Snapshot<JRC, PRC> {
             Err(err) => return Err(err),
         };
 
-        let data_ref = last_checkpoint_data.as_deref().map(|bytes| bytes.as_ref());
+        let data_ref = last_checkpoint_data.as_deref();
         let start_from = builder.handle_checkpoint(data_ref)?;
         let mut file_stream = fs_client.list_from(&start_from).await?;
 
@@ -294,16 +288,21 @@ impl<JRC: Send, PRC: Send + Sync> Snapshot<JRC, PRC> {
         self.version
     }
 
+    /// Get the metadata and protocol of this [`Snapshot`].
+    ///
+    /// On the first call, this method will read the metadata and protocol from
+    /// the log segment and cache it. Subsequent calls will return the cached
+    /// values.
     #[cfg(feature = "async")]
-    async fn get_or_insert_metadata(&self) -> DeltaResult<(Metadata, Protocol)> {
+    async fn get_or_fetch_metadata(&self) -> DeltaResult<(Metadata, Protocol)> {
         let read_lock = self
             .metadata
             .read()
-            .map_err(|_| Error::Generic("filed to get read lock".into()))?;
-        if let Some((metadata, protocol)) = read_lock.as_ref() {
-            return Ok((metadata.clone(), protocol.clone()));
+            .map_err(|_| Error::Generic("filed to get read lock".into()))?
+            .clone();
+        if let Some((metadata, protocol)) = read_lock {
+            return Ok((metadata, protocol));
         }
-        drop(read_lock);
 
         let (metadata, protocol) = self
             .log_segment
@@ -319,30 +318,99 @@ impl<JRC: Send, PRC: Send + Sync> Snapshot<JRC, PRC> {
         Ok((metadata, protocol))
     }
 
-    /// Table [`Schema`] at this [`Snapshot`]s version.
-    pub async fn schema(&self) -> DeltaResult<Schema> {
-        self.metadata().await?.schema()
-    }
+    /// Get the metadata and protocol of this [`Snapshot`].
+    ///
+    /// On the first call, this method will read the metadata and protocol from
+    /// the log segment and cache it. Subsequent calls will return the cached
+    /// values.
+    #[cfg(feature = "sync")]
+    fn get_or_fetch_metadata_sync(&self) -> DeltaResult<(Metadata, Protocol)> {
+        let read_lock = self
+            .metadata
+            .read()
+            .map_err(|_| Error::Generic("filed to get read lock".into()))?;
+        if let Some((metadata, protocol)) = read_lock.as_ref() {
+            return Ok((metadata.clone(), protocol.clone()));
+        }
+        drop(read_lock);
 
-    /// Table [`Metadata`] at this [`Snapshot`]s version.
-    pub async fn metadata(&self) -> DeltaResult<Metadata> {
-        let (metadata, _) = self.get_or_insert_metadata().await?;
-        Ok(metadata)
-    }
+        let (metadata, protocol) = self
+            .log_segment
+            .read_metadata_sync(self.table_client.as_ref())?
+            .ok_or(Error::MissingMetadata)?;
+        let mut meta = self
+            .metadata
+            .write()
+            .map_err(|_| Error::Generic("filed to get write lock".into()))?;
+        *meta = Some((metadata.clone(), protocol.clone()));
 
-    pub async fn protocol(&self) -> DeltaResult<Protocol> {
-        let (_, protocol) = self.get_or_insert_metadata().await?;
-        Ok(protocol)
+        Ok((metadata, protocol))
     }
+}
 
-    pub async fn scan(self) -> DeltaResult<ScanBuilder<JRC, PRC>> {
-        let schema = Arc::new(self.schema().await?);
-        Ok(ScanBuilder::new(
-            self.table_root,
-            schema,
-            self.log_segment,
-            self.table_client,
-        ))
+#[cfg(feature = "async")]
+mod async_api {
+    use super::*;
+
+    impl<JRC: Send, PRC: Send + Sync> Snapshot<JRC, PRC> {
+        /// Table [`Schema`] at this [`Snapshot`]s version.
+        pub async fn schema(&self) -> DeltaResult<Schema> {
+            self.metadata().await?.schema()
+        }
+
+        /// Table [`Metadata`] at this [`Snapshot`]s version.
+        pub async fn metadata(&self) -> DeltaResult<Metadata> {
+            let (metadata, _) = self.get_or_fetch_metadata().await?;
+            Ok(metadata)
+        }
+
+        pub async fn protocol(&self) -> DeltaResult<Protocol> {
+            let (_, protocol) = self.get_or_fetch_metadata().await?;
+            Ok(protocol)
+        }
+
+        pub async fn scan(self) -> DeltaResult<ScanBuilder<JRC, PRC>> {
+            let schema = Arc::new(self.schema().await?);
+            Ok(ScanBuilder::new(
+                self.table_root,
+                schema,
+                self.log_segment,
+                self.table_client,
+            ))
+        }
+    }
+}
+
+#[cfg(feature = "sync")]
+mod sync_api {
+    use super::*;
+
+    impl<JRC: Send, PRC: Send + Sync> Snapshot<JRC, PRC> {
+        /// Table [`Schema`] at this [`Snapshot`]s version.
+        pub fn schema_sync(&self) -> DeltaResult<Schema> {
+            self.metadata_sync()?.schema()
+        }
+
+        /// Table [`Metadata`] at this [`Snapshot`]s version.
+        pub fn metadata_sync(&self) -> DeltaResult<Metadata> {
+            let (metadata, _) = self.get_or_fetch_metadata_sync()?;
+            Ok(metadata)
+        }
+
+        pub fn protocol_sync(&self) -> DeltaResult<Protocol> {
+            let (_, protocol) = self.get_or_fetch_metadata_sync()?;
+            Ok(protocol)
+        }
+
+        pub fn scan_sync(self) -> DeltaResult<ScanBuilder<JRC, PRC>> {
+            let schema = Arc::new(self.schema_sync()?);
+            Ok(ScanBuilder::new(
+                self.table_root,
+                schema,
+                self.log_segment,
+                self.table_client,
+            ))
+        }
     }
 }
 
@@ -516,11 +584,7 @@ mod tests {
     use std::collections::HashMap;
     use std::path::PathBuf;
 
-    use object_store::local::LocalFileSystem;
-    use object_store::path::Path;
-
     use crate::client::DefaultTableClient;
-    use crate::filesystem::ObjectStoreFileSystemClient;
     use crate::schema::StructType;
 
     #[tokio::test]
