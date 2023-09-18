@@ -48,6 +48,7 @@ use url::Url;
 use self::schema::SchemaRef;
 
 pub mod actions;
+pub mod columnar_batch;
 pub mod error;
 pub mod expressions;
 pub mod path;
