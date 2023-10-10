@@ -6,7 +6,10 @@ use object_store::path::Path;
 use object_store::DynObjectStore;
 use url::Url;
 
-use crate::{executor::TaskExecutor, DeltaResult, Error, FileMeta, FileSlice, FileSystemClient};
+use crate::{
+    executor::TaskExecutor, DefaultFileMeta, DeltaResult, Error, FileMeta, FileSlice,
+    FileSystemClient,
+};
 
 #[derive(Debug)]
 pub struct ObjectStoreFileSystemClient<E: TaskExecutor> {
@@ -69,11 +72,11 @@ impl<E: TaskExecutor> FileSystemClient for ObjectStoreFileSystemClient<E> {
                         let mut location = url.clone();
                         location.set_path(&format!("/{}", meta.location.as_ref()));
                         sender
-                            .send(Ok(FileMeta {
+                            .send(Ok(Box::new(DefaultFileMeta {
                                 location,
                                 last_modified: meta.last_modified.timestamp(),
                                 size: meta.size,
-                            }))
+                            })))
                             .ok();
                     }
                     Err(e) => {

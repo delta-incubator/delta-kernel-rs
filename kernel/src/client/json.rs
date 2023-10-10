@@ -22,7 +22,6 @@ use crate::{
     DeltaResult, Error, Expression, FileDataReadResultIterator, FileHandler, FileMeta, JsonHandler,
 };
 
-#[derive(Debug)]
 pub struct JsonReadContext {
     pub(crate) store: Arc<DynObjectStore>,
     pub(crate) meta: FileMeta,
@@ -160,7 +159,7 @@ impl FileOpener for JsonOpener {
         let batch_size = self.batch_size;
 
         Ok(Box::pin(async move {
-            let path = Path::from(file_meta.location.path());
+            let path = Path::from(file_meta.get_location().path());
             match store.get(&path).await?.payload {
                 GetResultPayload::File(file, _) => {
                     let reader = ReaderBuilder::new(schema)

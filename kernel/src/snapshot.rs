@@ -21,7 +21,6 @@ use crate::{DeltaResult, Error, FileMeta, FileSystemClient, TableClient, Version
 
 const LAST_CHECKPOINT_FILE_NAME: &str = "_last_checkpoint";
 
-#[derive(Debug)]
 pub struct LogSegment {
     log_root: Url,
     /// Reverse order sorted commit files in the log segment
@@ -149,7 +148,7 @@ impl<JRC: Send, PRC: Send + Sync> Snapshot<JRC, PRC> {
         // remove all files above requested version
         if let Some(version) = version {
             commit_files.retain(|meta| {
-                if let Some(v) = LogPath(&meta.location).commit_version() {
+                if let Some(v) = LogPath(&meta.get_location()).commit_version() {
                     v <= version
                 } else {
                     false
@@ -161,12 +160,12 @@ impl<JRC: Send, PRC: Send + Sync> Snapshot<JRC, PRC> {
         let version_eff = if !commit_files.is_empty() {
             commit_files
                 .first()
-                .and_then(|f| LogPath(&f.location).commit_version())
+                .and_then(|f| LogPath(&f.get_location()).commit_version())
                 .unwrap()
         } else if !checkpoint_files.is_empty() {
             checkpoint_files
                 .first()
-                .and_then(|f| LogPath(&f.location).commit_version())
+                .and_then(|f| LogPath(&f.get_location()).commit_version())
                 .unwrap()
         } else {
             // TODO more descriptive error
@@ -305,11 +304,11 @@ fn read_last_checkpoint(
 }
 
 /// List all log files after a given checkpoint.
-fn list_log_files_with_checkpoint(
-    cp: &CheckpointMetadata,
-    fs_client: &dyn FileSystemClient,
-    log_root: &Url,
-) -> DeltaResult<(Vec<FileMeta>, Vec<FileMeta>)> {
+fn list_log_files_with_checkpoint<'a>(
+    cp: &'a CheckpointMetadata,
+    fs_client: &'a dyn FileSystemClient,
+    log_root: &'a Url,
+) -> DeltaResult<(Vec<&'a FileMeta>, Vec<&'a FileMeta>)> {
     let version_prefix = format!("{:020}", cp.version);
     let start_from = log_root.join(&version_prefix)?;
 
@@ -318,13 +317,13 @@ fn list_log_files_with_checkpoint(
         .collect::<Result<Vec<_>, Error>>()?
         .into_iter()
         // TODO this filters out .crc files etc which start with "." - how do we want to use these kind of files?
-        .filter(|f| LogPath(&f.location).commit_version().is_some())
+        .filter(|f| LogPath(&f.get_location()).commit_version().is_some())
         .collect::<Vec<_>>();
 
     let mut commit_files = files
         .iter()
         .filter_map(|f| {
-            if LogPath(&f.location).is_commit_file() {
+            if LogPath(&f.get_location()).is_commit_file() {
                 Some(f.clone())
             } else {
                 None
@@ -332,12 +331,12 @@ fn list_log_files_with_checkpoint(
         })
         .collect_vec();
     // NOTE this will sort in reverse order
-    commit_files.sort_unstable_by(|a, b| b.location.cmp(&a.location));
+    commit_files.sort_unstable_by(|a, b| b.get_location().cmp(&a.get_location()));
 
     let checkpoint_files = files
         .iter()
         .filter_map(|f| {
-            if LogPath(&f.location).is_checkpoint_file() {
+            if LogPath(&f.get_location()).is_checkpoint_file() {
                 Some(f.clone())
             } else {
                 None
@@ -367,8 +366,8 @@ fn list_log_files(
 
     for maybe_meta in fs_client.list_from(&start_from)? {
         let meta = maybe_meta?;
-        if LogPath(&meta.location).is_checkpoint_file() {
-            let version = LogPath(&meta.location).commit_version().unwrap_or(0) as i64;
+        if LogPath(&meta.get_location()).is_checkpoint_file() {
+            let version = LogPath(&meta.get_location()).commit_version().unwrap_or(0) as i64;
             match version.cmp(&max_checkpoint_version) {
                 Ordering::Greater => {
                     max_checkpoint_version = version;
@@ -380,16 +379,16 @@ fn list_log_files(
                 }
                 _ => {}
             }
-        } else if LogPath(&meta.location).is_commit_file() {
+        } else if LogPath(&meta.get_location()).is_commit_file() {
             commit_files.push(meta);
         }
     }
 
     commit_files.retain(|f| {
-        LogPath(&f.location).commit_version().unwrap_or(0) as i64 > max_checkpoint_version
+        LogPath(&f.get_location()).commit_version().unwrap_or(0) as i64 > max_checkpoint_version
     });
     // NOTE this will sort in reverse order
-    commit_files.sort_unstable_by(|a, b| b.location.cmp(&a.location));
+    commit_files.sort_unstable_by(|a, b| b.get_location().cmp(&a.get_location()));
 
     Ok((commit_files, checkpoint_files))
 }

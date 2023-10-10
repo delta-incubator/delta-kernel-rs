@@ -19,7 +19,6 @@ use crate::{
     ParquetHandler,
 };
 
-#[derive(Debug)]
 pub struct ParquetReadContext {
     // pub(crate) reader: ParquetObjectReader,
     pub(crate) meta: FileMeta,
@@ -123,7 +122,7 @@ impl ParquetOpener {
 
 impl FileOpener for ParquetOpener {
     fn open(&self, file_meta: FileMeta, _range: Option<Range<i64>>) -> DeltaResult<FileOpenFuture> {
-        let path = Path::from(file_meta.location.path());
+        let path = Path::from(file_meta.get_location().path());
         let store = self.store.clone();
 
         let batch_size = self.batch_size;

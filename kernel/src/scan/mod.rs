@@ -12,7 +12,7 @@ use crate::actions::ActionType;
 use crate::expressions::Expression;
 use crate::schema::SchemaRef;
 use crate::snapshot::LogSegment;
-use crate::{Add, DeltaResult, FileMeta, TableClient};
+use crate::{Add, DefaultFileMeta, DeltaResult, TableClient};
 
 mod data_skipping;
 pub mod file_stream;
@@ -145,12 +145,12 @@ impl<JRC: Send, PRC: Send + Sync + 'static> Scan<JRC, PRC> {
         self.files()?
             .map(|res| {
                 let add = res?;
-                let meta = FileMeta {
+                let meta = DefaultFileMeta {
                     last_modified: add.modification_time,
                     size: add.size as usize,
                     location: self.table_root.join(&add.path)?,
                 };
-                let context = parquet_handler.contextualize_file_reads(&[meta], None)?;
+                let context = parquet_handler.contextualize_file_reads(&[Box::new(meta)], None)?;
                 let batches = parquet_handler
                     .read_parquet_files(context, self.schema.clone())?
                     .collect::<DeltaResult<Vec<_>>>()?;

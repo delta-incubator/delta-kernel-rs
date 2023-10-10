@@ -74,16 +74,35 @@ pub type FileSlice = (Url, Option<Range<usize>>);
 /// Data read from a Delta table file and the corresponding scan file information.
 pub type FileDataReadResult = (FileMeta, RecordBatch);
 pub type FileDataReadResultIterator = Box<dyn Iterator<Item = DeltaResult<RecordBatch>> + Send>;
+pub type FileMeta = Box<dyn FileMetaInterface + Send>;
 
-/// The metadata that describes an object.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FileMeta {
+pub trait FileMetaInterface {
     /// The fully qualified path to the object
-    pub location: Url,
+    fn get_location(&self) -> Url;
     /// The last modified time
-    pub last_modified: i64,
+    fn get_last_modified(&self) -> i64;
     /// The size in bytes of the object
-    pub size: usize,
+    fn get_size(&self) -> usize;
+}
+
+/// Crate-local FileMeta implementation which can be used internally
+#[derive(Clone, Debug)]
+pub(crate) struct DefaultFileMeta {
+    location: Url,
+    last_modified: i64,
+    size: usize,
+}
+
+impl FileMetaInterface for DefaultFileMeta {
+    fn get_location(&self) -> Url {
+        self.location
+    }
+    fn get_last_modified(&self) -> i64 {
+        self.last_modified
+    }
+    fn get_size(&self) -> usize {
+        self.size
+    }
 }
 
 /// Interface for implementing an Expression evaluator.
