@@ -71,13 +71,12 @@ impl<E: TaskExecutor> FileSystemClient for ObjectStoreFileSystemClient<E> {
                     Ok(meta) => {
                         let mut location = url.clone();
                         location.set_path(&format!("/{}", meta.location.as_ref()));
-                        sender
-                            .send(Ok(Box::new(DefaultFileMeta {
-                                location,
-                                last_modified: meta.last_modified.timestamp(),
-                                size: meta.size,
-                            })))
-                            .ok();
+                        let meta = DefaultFileMeta {
+                            location,
+                            last_modified: meta.last_modified.timestamp(),
+                            size: meta.size,
+                        };
+                        sender.send(Ok(Box::new(meta))).ok();
                     }
                     Err(e) => {
                         sender.send(Err(e.into())).ok();

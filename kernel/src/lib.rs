@@ -78,7 +78,7 @@ pub type FileMeta = Box<dyn FileMetaInterface + Send>;
 
 pub trait FileMetaInterface {
     /// The fully qualified path to the object
-    fn get_location(&self) -> Url;
+    fn get_location(&self) -> &Url;
     /// The last modified time
     fn get_last_modified(&self) -> i64;
     /// The size in bytes of the object
@@ -86,16 +86,26 @@ pub trait FileMetaInterface {
 }
 
 /// Crate-local FileMeta implementation which can be used internally
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub(crate) struct DefaultFileMeta {
     location: Url,
     last_modified: i64,
     size: usize,
 }
 
+impl From<Box<dyn FileMetaInterface>> for DefaultFileMeta {
+    fn from(native: Box<(dyn FileMetaInterface + 'static)>) -> Self {
+        DefaultFileMeta {
+            location: native.get_location().clone(),
+            last_modified: native.get_last_modified(),
+            size: native.get_size(),
+        }
+    }
+}
+
 impl FileMetaInterface for DefaultFileMeta {
-    fn get_location(&self) -> Url {
-        self.location
+    fn get_location(&self) -> &Url {
+        &self.location
     }
     fn get_last_modified(&self) -> i64 {
         self.last_modified

@@ -64,7 +64,7 @@ impl<E: TaskExecutor> FileHandler for DefaultJsonHandler<E> {
             .iter()
             .map(|meta| JsonReadContext {
                 store: self.store.clone(),
-                meta: meta.clone(),
+                meta: (*meta).into(),
             })
             .collect())
     }
@@ -110,7 +110,7 @@ impl<E: TaskExecutor> JsonHandler for DefaultJsonHandler<E> {
         let store = files.first().unwrap().store.clone();
         let file_reader = JsonOpener::new(1024, schema.clone(), store);
 
-        let files = files.iter().map(|f| f.meta.clone()).collect::<Vec<_>>();
+        let files = files.iter().map(|f| f.meta.into()).collect::<Vec<_>>();
         let stream = FileStream::new(files, schema, file_reader)?;
 
         // This channel will become the output iterator

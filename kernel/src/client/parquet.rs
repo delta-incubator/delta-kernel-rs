@@ -59,7 +59,9 @@ impl<E: TaskExecutor> FileHandler for DefaultParquetHandler<E> {
     ) -> DeltaResult<Vec<ParquetReadContext>> {
         Ok(files
             .iter()
-            .map(|meta| ParquetReadContext { meta: meta.clone() })
+            .map(|meta| ParquetReadContext {
+                meta: (*meta).into(),
+            })
             .collect())
     }
 }
