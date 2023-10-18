@@ -8,7 +8,6 @@ use std::sync::RwLock;
 
 use arrow_array::RecordBatch;
 use arrow_schema::{Fields, Schema as ArrowSchema};
-use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use url::Url;
 
@@ -304,11 +303,11 @@ fn read_last_checkpoint(
 }
 
 /// List all log files after a given checkpoint.
-fn list_log_files_with_checkpoint<'a>(
-    cp: &'a CheckpointMetadata,
-    fs_client: &'a dyn FileSystemClient,
-    log_root: &'a Url,
-) -> DeltaResult<(Vec<&'a FileMeta>, Vec<&'a FileMeta>)> {
+fn list_log_files_with_checkpoint(
+    cp: &CheckpointMetadata,
+    fs_client: &dyn FileSystemClient,
+    log_root: &Url,
+) -> DeltaResult<(Vec<FileMeta>, Vec<FileMeta>)> {
     let version_prefix = format!("{:020}", cp.version);
     let start_from = log_root.join(&version_prefix)?;
 
@@ -320,29 +319,23 @@ fn list_log_files_with_checkpoint<'a>(
         .filter(|f| LogPath(&f.get_location()).commit_version().is_some())
         .collect::<Vec<_>>();
 
-    let mut commit_files = files
-        .iter()
-        .filter_map(|f| {
-            if LogPath(&f.get_location()).is_commit_file() {
-                Some(f.clone())
-            } else {
-                None
+    let mut commit_files = vec![];
+    let mut checkpoint_files = vec![];
+
+    let _: Vec<_> = files
+        .into_iter()
+        .map(|f| {
+            let log_path = LogPath(&f.get_location());
+            if log_path.is_commit_file() {
+                commit_files.push(f);
+            } else if log_path.is_checkpoint_file() {
+                checkpoint_files.push(f);
             }
         })
-        .collect_vec();
+        .collect();
+
     // NOTE this will sort in reverse order
     commit_files.sort_unstable_by(|a, b| b.get_location().cmp(&a.get_location()));
-
-    let checkpoint_files = files
-        .iter()
-        .filter_map(|f| {
-            if LogPath(&f.get_location()).is_checkpoint_file() {
-                Some(f.clone())
-            } else {
-                None
-            }
-        })
-        .collect_vec();
 
     // TODO raise a proper error
     assert_eq!(checkpoint_files.len(), cp.parts.unwrap_or(1) as usize);
