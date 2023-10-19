@@ -145,11 +145,11 @@ impl StructType {
 #[serde(rename_all = "camelCase")]
 pub struct ArrayType {
     #[serde(rename = "type")]
-    pub type_name: String,
+    type_name: String,
     /// The type of element stored in this array
-    pub element_type: DataType,
+    element_type: DataType,
     /// Denoting whether this array can contain one or more null values
-    pub contains_null: bool,
+    contains_null: bool,
 }
 
 impl ArrayType {

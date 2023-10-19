@@ -3,6 +3,18 @@ use crate::{
     DeltaResult,
 };
 
+// TODO: Should all these methods perform bounds checking? Should they return
+// errors for out of bounds?
+
+/// A columnar batch of data.
+///
+/// There should be a single implementation of this trait and the associated
+/// [ColumnVector] trait. This trait is used to abstract over different in-memory
+/// columnar formats.
+///
+/// An implementation is provided for [arrow_array::RecordBatch] in the [arrow]
+/// sub-module. Engines may provide their own implementations optimized for their
+/// in-memory format.
 pub trait ColumnarBatch {
     type Column: ColumnVector;
 
@@ -19,7 +31,7 @@ pub trait ColumnarBatch {
     fn with_column(
         &self,
         index: usize,
-        field: StructField,
+        field: &StructField,
         column: Self::Column,
     ) -> DeltaResult<Self>
     where
@@ -30,53 +42,82 @@ pub trait ColumnarBatch {
     where
         Self: Sized;
 
-    // fn with_schema(&self, schema: Schema) -> DeltaResult<Self>
-    // where
-    //     Self: Sized;
-
+    /// Get a new columnar batch containing a slice of the rows in this batch.
     fn slice(&self, offset: usize, length: usize) -> DeltaResult<Self>
     where
         Self: Sized;
 
+    /// Iterate over the rows in the batch.
     fn rows(&self) -> Box<dyn Iterator<Item = Box<dyn Row<Column = Self::Column>>>>;
 }
 
-// TODO: do all these methods do bounds checking? Should we offer alternative
-// methods that don't require it (i.e. iterators)?
-
-// TODO: should these methods type check?
-
+/// A column in a [ColumnarBatch].
 pub trait ColumnVector {
+    /// Get the data type of the column.
     fn data_type(&self) -> DeltaResult<DataType>;
+
+    /// Get the number of elements in the column.
     fn size(&self) -> usize;
+
+    /// Check if the element at the specified index is null.
     fn is_null(&self, i: usize) -> bool;
+
+    // TODO: should these methods type check?
+
+    /// Get the i32 value at the specified index.
     fn get_i32(&self, i: usize) -> DeltaResult<Option<i32>>;
+
+    /// Get the string value at the specified index.
     fn get_string(&self, i: usize) -> DeltaResult<Option<&str>>;
+
     // TODO: add other primitive types
+
+    /// Get the struct value at the specified index.
     fn get_struct(&self, i: usize) -> DeltaResult<Option<Box<dyn Row<Column = Self>>>>;
+
+    /// Get the array value at the specified index.
     fn get_array(&self, i: usize) -> DeltaResult<Option<Box<dyn ArrayValue<Column = Self>>>>;
+
+    /// Get the map value at the specified index.
     fn get_map(&self, i: usize) -> DeltaResult<Option<Box<dyn MapValue<Column = Self>>>>;
 }
 
+/// A row reference in a [ColumnarBatch].
 pub trait Row {
+    /// The column implementation associated with this Row.
     type Column: ColumnVector;
 
+    /// Get the schema of the row.
     fn schema(&self) -> DeltaResult<Schema>;
+
+    /// Check if the element at the specified column index is null.
     fn is_null(&self, i: usize) -> bool;
+
+    /// Get the i32 value in the specified column index.
     fn get_i32(&self, i: usize) -> DeltaResult<Option<i32>>;
+
+    /// Get the string value in the specified column index.
     fn get_string(&self, i: usize) -> DeltaResult<Option<&str>>;
+
     // TODO: add other primitive types
+
+    /// Get the struct value in the specified column index.
     fn get_struct(&self, i: usize) -> DeltaResult<Option<Box<dyn Row<Column = Self::Column>>>>;
+
+    /// Get the array value in the specified column index.
     fn get_array(
         &self,
         i: usize,
     ) -> DeltaResult<Option<Box<dyn ArrayValue<Column = Self::Column>>>>;
+
+    /// Get the map value in the specified column index.
     fn get_map(&self, i: usize) -> DeltaResult<Option<Box<dyn MapValue<Column = Self::Column>>>>;
 }
 
-// Based on: https://github.com/delta-io/delta/pull/2087
-
+/// An array value in a [ColumnarBatch].
 pub trait ArrayValue {
+    /// The column implementation associated with this ArrayValue. This is returned
+    /// by the [elements] method.
     type Column: ColumnVector;
 
     /// Return the number of elements in the array
@@ -87,6 +128,8 @@ pub trait ArrayValue {
 }
 
 pub trait MapValue {
+    /// The column implementation associated with this MapValue. This is returned
+    /// by the [keys] and [values] methods.
     type Column: ColumnVector;
 
     /// Return the number of elements in the map
@@ -104,10 +147,8 @@ pub mod arrow {
 
     use arrow_array::cast::AsArray;
     use arrow_array::types::Int32Type;
-    use arrow_array::Array as ArrowArray;
-    use arrow_array::RecordBatch;
-    use arrow_array::StructArray;
-    use arrow_schema::{DataType as ArrowDataType, Schema as ArrowSchema};
+    use arrow_array::{Array as ArrowArray, RecordBatch, StructArray};
+    use arrow_schema::{DataType as ArrowDataType, Field as ArrowField, Schema as ArrowSchema};
 
     use crate::Error;
 
@@ -138,13 +179,19 @@ pub mod arrow {
         fn with_column(
             &self,
             index: usize,
-            field: StructField,
+            field: &StructField,
             column: Self::Column,
         ) -> DeltaResult<Self>
         where
             Self: Sized,
         {
-            todo!()
+            let arrow_field = Arc::new(ArrowField::try_from(field)?);
+            let mut fields = self.schema().as_ref().clone().fields().to_vec();
+            fields.insert(index, arrow_field);
+            let schema = Arc::new(ArrowSchema::new(fields));
+            let mut columns = self.columns().to_vec();
+            columns.insert(index, column);
+            RecordBatch::try_new(schema, columns).map_err(Error::Arrow)
         }
 
         fn with_deleted_column_at(&self, index: usize) -> DeltaResult<Self>
@@ -154,7 +201,7 @@ pub mod arrow {
             let indices = (0..self.num_columns())
                 .filter(|i| *i != index)
                 .collect::<Vec<_>>();
-            RecordBatch::project(&self, &indices).map_err(|err| Error::Arrow(err))
+            RecordBatch::project(self, &indices).map_err(Error::Arrow)
         }
 
         fn slice(&self, offset: usize, length: usize) -> DeltaResult<Self>
@@ -166,12 +213,12 @@ pub mod arrow {
 
         fn rows(&self) -> Box<dyn Iterator<Item = Box<dyn Row<Column = Self::Column>>>> {
             let batch = self.clone();
-            Box::new((0..self.size()).into_iter().map(move |i| {
-                let row = Box::new(ArrowRow {
+            Box::new((0..self.size()).map(move |i| {
+                let row: Box<dyn Row<Column = Self::Column>> = Box::new(ArrowRow {
                     batch: batch.clone(),
                     row_index: i,
                 });
-                row as Box<dyn Row<Column = Self::Column>>
+                row
             }))
         }
     }
@@ -275,7 +322,7 @@ pub mod arrow {
         }
 
         fn column(&self, index: usize) -> &Arc<dyn ArrowArray> {
-            &self.column(index)
+            self.column(index)
         }
     }
 
@@ -285,7 +332,7 @@ pub mod arrow {
         }
 
         fn column(&self, index: usize) -> &Arc<dyn ArrowArray> {
-            &self.column(index)
+            self.column(index)
         }
     }
 
@@ -302,7 +349,7 @@ pub mod arrow {
         fn schema(&self) -> DeltaResult<Schema> {
             ArrowTabular::schema(&self.batch)
                 .try_into()
-                .map_err(|err| Error::Arrow(err))
+                .map_err(Error::Arrow)
         }
 
         fn is_null(&self, i: usize) -> bool {
@@ -375,10 +422,10 @@ pub mod arrow {
 
     #[cfg(test)]
     mod tests {
-        use arrow_array::{Int32Array, StringArray};
+        use arrow_array::{Int32Array, ListArray, MapArray, StringArray};
         use arrow_schema::Field as ArrowField;
 
-        use crate::schema::{PrimitiveType, StructType};
+        use crate::schema::{ArrayType, MapType, PrimitiveType, StructType};
 
         use super::*;
 
@@ -460,27 +507,235 @@ pub mod arrow {
 
         #[test]
         fn test_recordbatch_slice() {
-            todo!()
+            let schema = ArrowSchema::new(vec![
+                ArrowField::new("a", ArrowDataType::Int32, true),
+                ArrowField::new("b", ArrowDataType::Utf8, true),
+            ]);
+
+            let batch = RecordBatch::try_new(
+                Arc::new(schema),
+                vec![
+                    Arc::new(Int32Array::from(vec![Some(1), None, Some(3)])),
+                    Arc::new(StringArray::from(vec![Some("a"), Some("b"), None])),
+                ],
+            )
+            .unwrap();
+
+            let batch = ColumnarBatch::slice(&batch, 1, 2).unwrap();
+            assert_eq!(ColumnarBatch::size(&batch), 2);
+
+            let column = ColumnarBatch::column(&batch, 0).unwrap();
+            assert_eq!(ColumnVector::size(&column), 2);
+            assert_eq!(ColumnVector::get_i32(&column, 0).unwrap(), None);
+            assert_eq!(ColumnVector::get_i32(&column, 1).unwrap(), Some(3));
+
+            let column = ColumnarBatch::column(&batch, 1).unwrap();
+            assert_eq!(ColumnVector::size(&column), 2);
+            assert_eq!(ColumnVector::get_string(&column, 0).unwrap(), Some("b"));
+            assert_eq!(ColumnVector::get_string(&column, 1).unwrap(), None);
+
+            assert!(ColumnarBatch::column(&batch, 2).is_err());
         }
 
         #[test]
         fn test_recordbatch_modification() {
-            todo!()
+            let schema = ArrowSchema::new(vec![ArrowField::new("a", ArrowDataType::Int32, true)]);
+
+            let batch = RecordBatch::try_new(
+                Arc::new(schema),
+                vec![Arc::new(Int32Array::from(vec![1, 2, 3]))],
+            )
+            .unwrap();
+
+            // Can add a new column
+            let new_column = Arc::new(Int32Array::from(vec![4, 5, 6]));
+            let batch = ColumnarBatch::with_column(
+                &batch,
+                0,
+                &StructField::new("b", DataType::Primitive(PrimitiveType::Integer), true),
+                new_column,
+            )
+            .unwrap();
+
+            // Can delete a column
+            let batch = ColumnarBatch::with_deleted_column_at(&batch, 1).unwrap();
+            assert_eq!(
+                ColumnarBatch::schema(&batch).unwrap(),
+                StructType::new(vec![StructField::new(
+                    "b",
+                    DataType::Primitive(PrimitiveType::Integer),
+                    true
+                ),])
+            );
         }
 
         #[test]
         fn test_struct_array() {
-            todo!()
+            let inner_fields = vec![
+                ArrowField::new("a", ArrowDataType::Int32, true),
+                ArrowField::new("b", ArrowDataType::Utf8, true),
+            ];
+            let schema = ArrowSchema::new(vec![ArrowField::new(
+                "struct",
+                ArrowDataType::Struct(inner_fields.clone().into()),
+                true,
+            )]);
+
+            let batch = RecordBatch::try_new(
+                Arc::new(schema),
+                vec![Arc::new(StructArray::new(
+                    inner_fields.into(),
+                    vec![
+                        Arc::new(Int32Array::from(vec![Some(1), None, Some(3)])),
+                        Arc::new(StringArray::from(vec![Some("a"), Some("b"), None])),
+                    ],
+                    None,
+                ))],
+            )
+            .unwrap();
+
+            // Get as a struct column.
+            let struct_column = ColumnarBatch::column(&batch, 0).unwrap();
+            assert_eq!(ColumnVector::size(&struct_column), 3);
+            assert_eq!(
+                ColumnVector::data_type(&struct_column).unwrap(),
+                DataType::Struct(Box::new(StructType::new(vec![
+                    StructField::new("a", DataType::Primitive(PrimitiveType::Integer), true),
+                    StructField::new("b", DataType::Primitive(PrimitiveType::String), true),
+                ])))
+            );
+            let struct_row = ColumnVector::get_struct(&struct_column, 0)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                DataType::Struct(Box::new(struct_row.schema().unwrap())),
+                ColumnVector::data_type(&struct_column).unwrap()
+            );
+            assert_eq!(struct_row.get_i32(0).unwrap(), Some(1));
+            assert_eq!(struct_row.get_string(1).unwrap(), Some("a"));
+
+            // Get as rows.
+            let mut rows = ColumnarBatch::rows(&batch);
+            let row = rows.next().unwrap();
+            let struct_row = row.get_struct(0).unwrap().unwrap();
+            assert_eq!(struct_row.get_i32(0).unwrap(), Some(1));
+            assert_eq!(struct_row.get_string(1).unwrap(), Some("a"));
         }
 
         #[test]
         fn test_array_array() {
-            todo!()
+            let arrow_schema = ArrowSchema::new(vec![ArrowField::new(
+                "array",
+                ArrowDataType::List(Arc::new(ArrowField::new(
+                    "item",
+                    ArrowDataType::Int32,
+                    true,
+                ))),
+                true,
+            )]);
+
+            let data = vec![
+                Some(vec![Some(1), Some(2), Some(3)]),
+                Some(vec![Some(4), Some(5)]),
+                Some(vec![Some(6), Some(7)]),
+            ];
+            let batch = RecordBatch::try_new(
+                Arc::new(arrow_schema),
+                vec![Arc::new(ListArray::from_iter_primitive::<Int32Type, _, _>(
+                    data,
+                ))],
+            )
+            .unwrap();
+
+            // Get as a column
+            let array_column = ColumnarBatch::column(&batch, 0).unwrap();
+            assert_eq!(ColumnVector::size(&array_column), 3);
+            assert_eq!(
+                ColumnVector::data_type(&array_column).unwrap(),
+                DataType::Array(Box::new(ArrayType::new(
+                    DataType::Primitive(PrimitiveType::Integer),
+                    true
+                )))
+            );
+            let inner0 = ColumnVector::get_array(&array_column, 0).unwrap().unwrap();
+            assert_eq!(inner0.size(), 3);
+            assert_eq!(ColumnVector::size(&inner0.elements()), 3);
+            assert_eq!(inner0.elements().get_i32(0).unwrap(), Some(1));
+            assert_eq!(inner0.elements().get_i32(2).unwrap(), Some(3));
+            let inner2 = ColumnVector::get_array(&array_column, 2).unwrap().unwrap();
+            assert_eq!(inner2.size(), 2);
+            assert_eq!(ColumnVector::size(&inner2.elements()), 2);
+            assert_eq!(inner2.elements().get_i32(0).unwrap(), Some(6));
+            assert_eq!(inner2.elements().get_i32(1).unwrap(), Some(7));
+
+            // Get as rows
+            let mut rows = ColumnarBatch::rows(&batch);
+            let row = rows.next().unwrap();
+            let array_row = row.get_array(0).unwrap().unwrap();
+            assert_eq!(array_row.size(), 3);
+            assert_eq!(array_row.elements().get_i32(0).unwrap(), Some(1));
+            assert_eq!(array_row.elements().get_i32(2).unwrap(), Some(3));
+            let row = rows.next().unwrap();
+            let array_row = row.get_array(0).unwrap().unwrap();
+            assert_eq!(array_row.size(), 2);
+            assert_eq!(array_row.elements().get_i32(0).unwrap(), Some(4));
+            assert_eq!(array_row.elements().get_i32(1).unwrap(), Some(5));
         }
 
         #[test]
         fn test_map_array() {
-            todo!()
+            let arrow_schema = ArrowSchema::new(vec![ArrowField::new_map(
+                "map",
+                "entries",
+                Arc::new(ArrowField::new("keys", ArrowDataType::Utf8, false)),
+                Arc::new(ArrowField::new("values", ArrowDataType::Int32, false)),
+                false,
+                true,
+            )]);
+
+            let array = MapArray::new_from_strings(
+                vec!["key1", "key2", "key1", "key3"].into_iter(),
+                &Int32Array::from_iter_values(0..4),
+                &[0, 2, 4],
+            )
+            .unwrap();
+
+            let batch =
+                RecordBatch::try_new(Arc::new(arrow_schema), vec![Arc::new(array)]).unwrap();
+
+            // Get as a column
+            let map_column = ColumnarBatch::column(&batch, 0).unwrap();
+            assert_eq!(ColumnVector::size(&map_column), 2);
+            assert_eq!(
+                ColumnVector::data_type(&map_column).unwrap(),
+                DataType::Map(Box::new(MapType::new(
+                    DataType::Primitive(PrimitiveType::String),
+                    DataType::Primitive(PrimitiveType::Integer),
+                    false
+                )))
+            );
+            let map_value = ColumnVector::get_map(&map_column, 0).unwrap().unwrap();
+            assert_eq!(map_value.size(), 2);
+            assert_eq!(map_value.keys().get_string(0).unwrap(), Some("key1"));
+            assert_eq!(map_value.keys().get_string(1).unwrap(), Some("key2"));
+            assert_eq!(map_value.values().get_i32(0).unwrap(), Some(0));
+            assert_eq!(map_value.values().get_i32(1).unwrap(), Some(1));
+            let map_value = ColumnVector::get_map(&map_column, 1).unwrap().unwrap();
+            assert_eq!(map_value.size(), 2);
+            assert_eq!(map_value.keys().get_string(0).unwrap(), Some("key1"));
+            assert_eq!(map_value.keys().get_string(1).unwrap(), Some("key3"));
+            assert_eq!(map_value.values().get_i32(0).unwrap(), Some(2));
+            assert_eq!(map_value.values().get_i32(1).unwrap(), Some(3));
+
+            // Get as rows
+            let mut rows = ColumnarBatch::rows(&batch);
+            let row = rows.next().unwrap();
+            let map_row = row.get_map(0).unwrap().unwrap();
+            assert_eq!(map_row.size(), 2);
+            assert_eq!(map_row.keys().get_string(0).unwrap(), Some("key1"));
+            assert_eq!(map_row.keys().get_string(1).unwrap(), Some("key2"));
+            assert_eq!(map_row.values().get_i32(0).unwrap(), Some(0));
+            assert_eq!(map_row.values().get_i32(1).unwrap(), Some(1));
         }
     }
 }
