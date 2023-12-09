@@ -1,12 +1,9 @@
-use std::{
-    collections::HashSet,
-    fmt::{Display, Formatter},
-};
+use std::collections::HashSet;
+use std::fmt::{Display, Formatter};
 
-use self::scalars::Scalar;
+pub use self::scalars::Scalar;
 
-pub mod rewrite;
-pub mod scalars;
+mod scalars;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 /// A binary operator.

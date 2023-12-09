@@ -131,7 +131,12 @@ impl<JRC: Send, PRC: Send + Sync + 'static> Scan<JRC, PRC> {
             self.predicate.clone(),
         )?;
 
-        Ok(log_replay_iter(log_iter, &self.schema, &self.predicate))
+        Ok(log_replay_iter(
+            self.snapshot.table_client.as_ref(),
+            log_iter,
+            &self.schema,
+            &self.predicate,
+        ))
     }
 
     pub fn execute(&self) -> DeltaResult<Vec<RecordBatch>> {
