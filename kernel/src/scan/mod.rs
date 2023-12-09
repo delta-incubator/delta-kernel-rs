@@ -117,6 +117,8 @@ impl<JRC: Send, PRC: Send + Sync + 'static> Scan<JRC, PRC> {
     pub fn files(&self) -> DeltaResult<impl Iterator<Item = DeltaResult<Add>>> {
         let action_schema = Arc::new(ArrowSchema {
             fields: Fields::from_iter([
+                // TODO as these conversions should be infallible, we could use `unwrap` here
+                // and avoid wrapping the result in a `DeltaResult`.
                 ArrowField::try_from(ActionType::Add)?,
                 ArrowField::try_from(ActionType::Remove)?,
             ]),

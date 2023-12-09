@@ -5,6 +5,7 @@ use std::{
 
 use self::scalars::Scalar;
 
+pub mod rewrite;
 pub mod scalars;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
