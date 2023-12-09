@@ -6,14 +6,13 @@ use std::cmp::Ordering;
 use std::sync::Arc;
 
 use arrow_array::RecordBatch;
-use arrow_schema::{Field as ArrowField, Fields, Schema as ArrowSchema};
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use url::Url;
 
 use crate::actions::{parse_action, Action, ActionType, Metadata, Protocol};
 use crate::path::LogPath;
-use crate::schema::Schema;
+use crate::schema::{Schema, SchemaRef, StructType};
 use crate::Expression;
 use crate::{DeltaResult, Error, FileMeta, FileSystemClient, TableClient, Version};
 
@@ -46,24 +45,21 @@ impl LogSegment {
     fn replay<JRC: Send, PRC: Send>(
         &self,
         table_client: &dyn TableClient<JsonReadContext = JRC, ParquetReadContext = PRC>,
-        read_schema: Arc<ArrowSchema>,
+        read_schema: SchemaRef,
         predicate: Option<Expression>,
     ) -> DeltaResult<impl Iterator<Item = DeltaResult<(RecordBatch, bool)>>> {
         let json_client = table_client.get_json_handler();
         let read_contexts =
             json_client.contextualize_file_reads(&self.commit_files, predicate.clone())?;
         let commit_stream = json_client
-            .read_json_files(
-                read_contexts.as_slice(),
-                Arc::new(read_schema.as_ref().try_into()?),
-            )?
+            .read_json_files(read_contexts.as_slice(), read_schema.clone())?
             .map_ok(|batch| (batch, true));
 
         let parquet_client = table_client.get_parquet_handler();
         let read_contexts =
             parquet_client.contextualize_file_reads(&self.checkpoint_files, predicate)?;
         let checkpoint_stream = parquet_client
-            .read_parquet_files(read_contexts, Arc::new(read_schema.as_ref().try_into()?))?
+            .read_parquet_files(read_contexts, read_schema.clone())?
             .map_ok(|batch| (batch, false));
 
         let batches = commit_stream.chain(checkpoint_stream);
@@ -75,13 +71,12 @@ impl LogSegment {
         &self,
         table_client: &dyn TableClient<JsonReadContext = JRC, ParquetReadContext = PRC>,
     ) -> DeltaResult<Option<(Metadata, Protocol)>> {
-        let read_schema = Arc::new(ArrowSchema {
-            fields: Fields::from_iter([
-                ArrowField::try_from(ActionType::Metadata)?,
-                ArrowField::try_from(ActionType::Protocol)?,
-            ]),
-            metadata: Default::default(),
-        });
+        lazy_static::lazy_static! {
+            static ref ACTION_SCHEMA: SchemaRef = Arc::new(StructType::new(vec![
+                ActionType::Metadata.schema_field().clone(),
+                ActionType::Protocol.schema_field().clone(),
+            ]));
+        }
 
         let mut metadata_opt: Option<Metadata> = None;
         let mut protocol_opt: Option<Protocol> = None;
@@ -89,7 +84,7 @@ impl LogSegment {
         // TODO should we request teh checkpoint iterator only if we don't find the metadata in the commit files?
         // since the engine might pre-fetch data o.a.? On the other hand, if the engine is smart about it, it should not be
         // too much extra work to request the checkpoint iterator as well.
-        let batches = self.replay(table_client, read_schema, None)?;
+        let batches = self.replay(table_client, ACTION_SCHEMA.clone(), None)?;
         for maybe_batch in batches {
             let (batch, _) = maybe_batch?;
 

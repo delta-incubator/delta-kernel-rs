@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use arrow_array::{BooleanArray, RecordBatch};
-use arrow_schema::{Field as ArrowField, Fields, Schema as ArrowSchema};
 use arrow_select::concat::concat_batches;
 use arrow_select::filter::filter_record_batch;
 use itertools::Itertools;
@@ -9,7 +8,7 @@ use itertools::Itertools;
 use self::file_stream::log_replay_iter;
 use crate::actions::ActionType;
 use crate::expressions::Expression;
-use crate::schema::SchemaRef;
+use crate::schema::{SchemaRef, StructType};
 use crate::snapshot::Snapshot;
 use crate::{Add, DeltaResult, FileMeta};
 
@@ -20,7 +19,6 @@ pub mod file_stream;
 /// Builder to scan a snapshot of a table.
 pub struct ScanBuilder<JRC: Send, PRC: Send> {
     snapshot: Arc<Snapshot<JRC, PRC>>,
-    snapshot_schema: SchemaRef,
     schema: Option<SchemaRef>,
     predicate: Option<Expression>,
 }
@@ -37,10 +35,8 @@ impl<JRC: Send, PRC: Send> std::fmt::Debug for ScanBuilder<JRC, PRC> {
 impl<JRC: Send, PRC: Send + Sync> ScanBuilder<JRC, PRC> {
     /// Create a new [`ScanBuilder`] instance.
     pub fn new(snapshot: Arc<Snapshot<JRC, PRC>>) -> Self {
-        let snapshot_schema = Arc::new(snapshot.schema().clone());
         Self {
             snapshot,
-            snapshot_schema,
             schema: None,
             predicate: None,
         }
@@ -73,7 +69,9 @@ impl<JRC: Send, PRC: Send + Sync> ScanBuilder<JRC, PRC> {
     /// to fetch the files and associated metadata required to perform actual data reads.
     pub fn build(self) -> Scan<JRC, PRC> {
         // if no schema is provided, use snapshot's entire schema (e.g. SELECT *)
-        let schema = self.schema.unwrap_or_else(|| self.snapshot_schema.clone());
+        let schema = self
+            .schema
+            .unwrap_or_else(|| self.snapshot.schema().clone().into());
         Scan {
             snapshot: self.snapshot,
             schema,
@@ -100,6 +98,9 @@ impl<JRC: Send, PRC: Send + Sync> std::fmt::Debug for Scan<JRC, PRC> {
 impl<JRC: Send, PRC: Send + Sync + 'static> Scan<JRC, PRC> {
     /// Get a shred reference to the [`Schema`] of the scan.
     ///
+    /// This is the schema of the columns that will be returned by the scan,
+    /// and not the schema of the entire table.
+    ///
     /// [`Schema`]: crate::schema::Schema
     pub fn schema(&self) -> &SchemaRef {
         &self.schema
@@ -115,19 +116,16 @@ impl<JRC: Send, PRC: Send + Sync + 'static> Scan<JRC, PRC> {
     /// files batches correspond to data reads, and the DeltaReader is used to materialize the scan
     /// files into actual table data.
     pub fn files(&self) -> DeltaResult<impl Iterator<Item = DeltaResult<Add>>> {
-        let action_schema = Arc::new(ArrowSchema {
-            fields: Fields::from_iter([
-                // TODO as these conversions should be infallible, we could use `unwrap` here
-                // and avoid wrapping the result in a `DeltaResult`.
-                ArrowField::try_from(ActionType::Add)?,
-                ArrowField::try_from(ActionType::Remove)?,
-            ]),
-            metadata: Default::default(),
-        });
+        lazy_static::lazy_static! {
+            static ref ACTION_SCHEMA: SchemaRef = Arc::new(StructType::new(vec![
+                ActionType::Add.schema_field().clone(),
+                ActionType::Remove.schema_field().clone(),
+            ]));
+        }
 
         let log_iter = self.snapshot.log_segment.replay(
             self.snapshot.table_client.as_ref(),
-            action_schema,
+            ACTION_SCHEMA.clone(),
             self.predicate.clone(),
         )?;
 
