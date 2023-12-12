@@ -1,4 +1,4 @@
-use crate::{schema::Schema, DeltaResult};
+use crate::schema::Schema;
 
 use std::any::{Any, TypeId};
 
@@ -10,7 +10,7 @@ use std::any::{Any, TypeId};
 pub trait DataVisitor {
     // Receive some data from a call to `extract`. The data in the Vec should not be assumed to live
     // beyond the call to this funtion (i.e. it should be copied if needed)
-    fn visit(&mut self, vals: Vec<Option<&dyn Any>>) -> ();
+    fn visit(&mut self, vals: Vec<Option<&dyn Any>>);
 }
 
 /// A TypeTag identifies the class that an Engine is using to represent data read by its
@@ -74,7 +74,7 @@ pub trait EngineData {
 pub trait DataExtractor {
     /// Extract data as requested by [`schema`] and then call back into `visitor.visit` with a Vec
     /// of that data.
-    fn extract(&self, blob: &dyn EngineData, schema: &Schema, visitor: &mut dyn DataVisitor) -> ();
+    fn extract(&self, blob: &dyn EngineData, schema: &Schema, visitor: &mut dyn DataVisitor);
     // Return the number of items (rows?) in blob
     fn length(&self, blob: &dyn EngineData) -> usize;
 }

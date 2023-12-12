@@ -94,21 +94,21 @@ struct MetadataVisitor {
 
 impl DataVisitor for MetadataVisitor {
     fn visit(&mut self, vals: Vec<Option<&dyn Any>>) {
-        let id: &str = *vals[0]
+        let id: &str = vals[0]
             .expect("metadata should have an id")
             .downcast_ref::<&str>()
             .unwrap();
-        let provider: &str = *vals[1]
+        let provider: &str = vals[1]
             .expect("metadata.format should have a provider")
             .downcast_ref::<&str>()
             .unwrap();
         // TODO: Options
-        let schema_string: &str = *vals[2]
+        let schema_string: &str = vals[2]
             .expect("metadata should have a schema_string")
             .downcast_ref::<&str>()
             .unwrap();
         // TODO: Partition cols
-        let partition_columns: Vec<String> = vec!();
+        let partition_columns: Vec<String> = vec![];
         // TODO: Config
         self.extracted = Some(Metadata::new(
             id,
