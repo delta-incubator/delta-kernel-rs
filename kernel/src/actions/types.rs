@@ -1,3 +1,4 @@
+use std::any::Any;
 use std::collections::HashMap;
 use std::io::{Cursor, Read};
 use std::sync::Arc;
@@ -5,6 +6,7 @@ use std::sync::Arc;
 use roaring::RoaringTreemap;
 use url::Url;
 
+use crate::data_batch::DataVisitor;
 use crate::schema::StructType;
 use crate::{DeltaResult, Error, FileSystemClient};
 
@@ -82,6 +84,42 @@ impl Metadata {
 
     pub fn schema(&self) -> DeltaResult<StructType> {
         Ok(serde_json::from_str(&self.schema_string)?)
+    }
+}
+
+#[derive(Default)]
+struct MetadataVisitor {
+    extracted: Option<Metadata>,
+}
+
+impl DataVisitor for MetadataVisitor {
+    fn visit(&mut self, vals: Vec<Option<&dyn Any>>) {
+        let id: &str = *vals[0]
+            .expect("metadata should have an id")
+            .downcast_ref::<&str>()
+            .unwrap();
+        let provider: &str = *vals[1]
+            .expect("metadata.format should have a provider")
+            .downcast_ref::<&str>()
+            .unwrap();
+        // TODO: Options
+        let schema_string: &str = *vals[2]
+            .expect("metadata should have a schema_string")
+            .downcast_ref::<&str>()
+            .unwrap();
+        // TODO: Partition cols
+        let partition_columns: Vec<String> = vec!();
+        // TODO: Config
+        self.extracted = Some(Metadata::new(
+            id,
+            Format {
+                provider: provider.to_string(),
+                options: HashMap::new(),
+            },
+            schema_string,
+            partition_columns.iter(),
+            None,
+        ));
     }
 }
 
