@@ -40,7 +40,7 @@ pub trait TypeTag: 'static {
 /// as easy as defining a tag to represent it that implements [`TypeTag`], and then returning it for
 /// the `type_tag` method.
 /// ```
-/// use deltakernel::data_batch::{DataExtractor, DataVisitor, EngineData, TypeTag};
+/// use deltakernel::engine_data::{DataExtractor, DataVisitor, EngineData, TypeTag};
 /// use deltakernel::schema::Schema;
 /// struct MyTypeTag;
 /// impl TypeTag for MyTypeTag {}
