@@ -66,6 +66,8 @@ pub mod client;
 #[cfg(feature = "default-client")]
 pub use client::*;
 
+mod simple_client;
+
 /// Delta table version is 8 byte unsigned int
 pub type Version = u64;
 
