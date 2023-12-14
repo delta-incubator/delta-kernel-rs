@@ -109,7 +109,7 @@ mod tests {
         let ct_array = Int64Array::from(vec![1]);
         let schema = Schema::new(vec![
             Field::new("id", DataType::Utf8, false),
-            Field::new("created_at", DataType::Int64, false),
+            Field::new("created_time", DataType::Int64, false),
         ]);
         RecordBatch::try_new(
             Arc::new(schema),
@@ -124,13 +124,16 @@ mod tests {
         let metadata_test_schema = StructType::new(
             vec![
                 StructField::new("id", DataType::Primitive(PrimitiveType::String), false),
-                StructField::new("created_at", DataType::Primitive(PrimitiveType::Long), false),
+                StructField::new("created_time", DataType::Primitive(PrimitiveType::Long), false),
             ],
         );
         let mut metadata_visitor = crate::actions::types::MetadataVisitor::default();
         s.extract(Arc::new(metadata_test_schema), &mut metadata_visitor);
 
         println!("Got: {:?}", metadata_visitor.extracted);
+
+        assert!(metadata_visitor.extracted.id == "id");
+        assert!(metadata_visitor.extracted.created_time == Some(1));
     }
     
 }
