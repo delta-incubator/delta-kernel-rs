@@ -52,6 +52,7 @@ pub struct SimpleClient {
 }
 
 impl SimpleClient {
+    #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         SimpleClient {
             json_handler: Arc::new(SimpleJsonHandler {}),

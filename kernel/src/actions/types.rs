@@ -95,6 +95,7 @@ pub struct MetadataVisitor {
 impl DataVisitor for MetadataVisitor {
     fn visit_str(&mut self, _row: usize, index: usize, val: &str) {
         // TODO: validate row
+        #[allow(clippy::single_match)] // more to come
         match index {
             0 => {
                 self.extracted.id = val.to_string();
