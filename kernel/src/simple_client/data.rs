@@ -1,9 +1,9 @@
-use crate::DeltaResult;
 use crate::engine_data::{DataVisitor, EngineData, TypeTag};
 use crate::schema::SchemaRef;
+use crate::DeltaResult;
 
 use arrow_array::{array, RecordBatch, StringArray};
-use arrow_schema::{Schema as ArrowSchema, DataType};
+use arrow_schema::{DataType, Schema as ArrowSchema};
 use url::Url;
 
 use std::any::Any;
@@ -20,9 +20,9 @@ pub struct SimpleData {
 }
 
 impl EngineData for SimpleData {
-   fn type_tag(&self) -> &dyn TypeTag {
-       &SimpleDataTypeTag
-   }
+    fn type_tag(&self) -> &dyn TypeTag {
+        &SimpleDataTypeTag
+    }
 
     fn as_any(&self) -> &dyn Any {
         self
@@ -34,7 +34,9 @@ impl SimpleData {
         let arrow_schema: ArrowSchema = (&*schema).try_into()?;
         // todo: Check scheme of url
         let file = File::open(location.to_file_path().unwrap()).unwrap(); // todo: fix to_file_path.unwrap()
-        let mut json = arrow_json::ReaderBuilder::new(Arc::new(arrow_schema)).build(BufReader::new(file)).unwrap();
+        let mut json = arrow_json::ReaderBuilder::new(Arc::new(arrow_schema))
+            .build(BufReader::new(file))
+            .unwrap();
         let data = json.next().unwrap().unwrap();
         Ok(SimpleData { data })
     }
@@ -49,7 +51,11 @@ impl SimpleData {
                 // NB: We'll use a macro to remove a lot of the repetion below
                 match arrow_field.data_type() {
                     DataType::Boolean => {
-                        if field.data_type() != &crate::schema::DataType::Primitive(crate::schema::PrimitiveType::Boolean) {
+                        if field.data_type()
+                            != &crate::schema::DataType::Primitive(
+                                crate::schema::PrimitiveType::Boolean,
+                            )
+                        {
                             panic!("Schema's don't match");
                         }
                         let bool_array = col
@@ -63,7 +69,11 @@ impl SimpleData {
                         }
                     }
                     DataType::Int64 => {
-                        if field.data_type() != &crate::schema::DataType::Primitive(crate::schema::PrimitiveType::Long) {
+                        if field.data_type()
+                            != &crate::schema::DataType::Primitive(
+                                crate::schema::PrimitiveType::Long,
+                            )
+                        {
                             panic!("Schema's don't match");
                         }
                         let int64_array = col
@@ -77,17 +87,24 @@ impl SimpleData {
                         }
                     }
                     DataType::Utf8 => {
-                        if field.data_type() != &crate::schema::DataType::Primitive(crate::schema::PrimitiveType::String) {
+                        if field.data_type()
+                            != &crate::schema::DataType::Primitive(
+                                crate::schema::PrimitiveType::String,
+                            )
+                        {
                             panic!("Schema's don't match");
                         }
-                        let str_array = col.as_any().downcast_ref::<StringArray>().expect("failed to downcast");
+                        let str_array = col
+                            .as_any()
+                            .downcast_ref::<StringArray>()
+                            .expect("failed to downcast");
                         for (row, item) in str_array.iter().enumerate() {
                             if let Some(s) = item {
                                 visitor.visit_str(row, index, s);
                             }
                         }
                     }
-                    _ => unimplemented!()
+                    _ => unimplemented!(),
                 }
             }
         }
@@ -101,7 +118,7 @@ impl SimpleData {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow_array::{StringArray, Int64Array};
+    use arrow_array::{Int64Array, StringArray};
     use arrow_schema::{DataType, Field, Schema};
 
     fn create_batch() -> RecordBatch {
@@ -114,19 +131,24 @@ mod tests {
         RecordBatch::try_new(
             Arc::new(schema),
             vec![Arc::new(id_array), Arc::new(ct_array)],
-        ).unwrap()
+        )
+        .unwrap()
     }
-    
+
     #[test]
     fn test_md_extract() {
-        use crate::schema::{DataType, PrimitiveType, StructType, StructField};
-        let s = SimpleData { data: create_batch() };
-        let metadata_test_schema = StructType::new(
-            vec![
-                StructField::new("id", DataType::Primitive(PrimitiveType::String), false),
-                StructField::new("created_time", DataType::Primitive(PrimitiveType::Long), false),
-            ],
-        );
+        use crate::schema::{DataType, PrimitiveType, StructField, StructType};
+        let s = SimpleData {
+            data: create_batch(),
+        };
+        let metadata_test_schema = StructType::new(vec![
+            StructField::new("id", DataType::Primitive(PrimitiveType::String), false),
+            StructField::new(
+                "created_time",
+                DataType::Primitive(PrimitiveType::Long),
+                false,
+            ),
+        ]);
         let mut metadata_visitor = crate::actions::types::MetadataVisitor::default();
         s.extract(Arc::new(metadata_test_schema), &mut metadata_visitor);
 
@@ -135,5 +157,4 @@ mod tests {
         assert!(metadata_visitor.extracted.id == "id");
         assert!(metadata_visitor.extracted.created_time == Some(1));
     }
-    
 }

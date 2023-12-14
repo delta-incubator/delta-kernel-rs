@@ -102,7 +102,7 @@ impl DataVisitor for MetadataVisitor {
             _ => {}
         }
     }
-    
+
     fn visit(&mut self, _row: usize, index: usize, val: &dyn Any) {
         // TODO: validate row
         match index {
@@ -110,7 +110,7 @@ impl DataVisitor for MetadataVisitor {
                 let ct: &i64 = val.downcast_ref::<i64>().unwrap();
                 self.extracted.created_time = Some(*ct);
             }
-            _ => panic!("Nope")
+            _ => panic!("Nope"),
         }
     }
 }
