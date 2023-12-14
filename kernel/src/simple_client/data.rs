@@ -29,6 +29,20 @@ impl EngineData for SimpleData {
     }
 }
 
+macro_rules! extract_primitive {
+    ($field: expr, $col: expr, $($visit_fn:ident).+, $index: expr, $prim_type: expr, $arry_type: ty) => {
+        if $field.data_type() != &crate::schema::DataType::Primitive($prim_type) {
+            panic!("Schema's don't match");
+        }
+        let arry = $col.as_any().downcast_ref::<$arry_type>().expect("Failed to downcast");
+        for (row, item) in arry.iter().enumerate() {
+            if let Some(i) = item {
+                $( $visit_fn ).+(row, $index, &i);
+            }
+        }
+    };
+}
+
 impl SimpleData {
     pub fn try_create_from_json(schema: SchemaRef, location: Url) -> DeltaResult<Self> {
         let arrow_schema: ArrowSchema = (&*schema).try_into()?;
@@ -43,66 +57,42 @@ impl SimpleData {
 
     pub fn extract(&self, schema: SchemaRef, visitor: &mut dyn DataVisitor) {
         //let arrow_schema: ArrowSchema = (&*schema).try_into().unwrap(); // todo
+        use crate::schema::PrimitiveType;
         let arrow_schema = self.data.schema();
         for (index, field) in schema.fields.iter().enumerate() {
             let name = field.name();
             if let Some((arrow_index, arrow_field)) = arrow_schema.column_with_name(name) {
                 let col = self.data.column(arrow_index);
-                // NB: We'll use a macro to remove a lot of the repetion below
                 match arrow_field.data_type() {
                     DataType::Boolean => {
-                        if field.data_type()
-                            != &crate::schema::DataType::Primitive(
-                                crate::schema::PrimitiveType::Boolean,
-                            )
-                        {
-                            panic!("Schema's don't match");
-                        }
-                        let bool_array = col
-                            .as_any()
-                            .downcast_ref::<array::BooleanArray>()
-                            .expect("Failed to downcast");
-                        for (row, item) in bool_array.iter().enumerate() {
-                            if let Some(i) = item {
-                                visitor.visit(row, index, &i);
-                            }
-                        }
+                        extract_primitive!(
+                            field,
+                            col,
+                            visitor.visit,
+                            index,
+                            PrimitiveType::Boolean,
+                            array::BooleanArray
+                        );
                     }
                     DataType::Int64 => {
-                        if field.data_type()
-                            != &crate::schema::DataType::Primitive(
-                                crate::schema::PrimitiveType::Long,
-                            )
-                        {
-                            panic!("Schema's don't match");
-                        }
-                        let int64_array = col
-                            .as_any()
-                            .downcast_ref::<array::Int64Array>()
-                            .expect("Failed to downcast");
-                        for (row, item) in int64_array.iter().enumerate() {
-                            if let Some(i) = item {
-                                visitor.visit(row, index, &i);
-                            }
-                        }
+                        extract_primitive!(
+                            field,
+                            col,
+                            visitor.visit,
+                            index,
+                            PrimitiveType::Long,
+                            array::Int64Array
+                        );
                     }
                     DataType::Utf8 => {
-                        if field.data_type()
-                            != &crate::schema::DataType::Primitive(
-                                crate::schema::PrimitiveType::String,
-                            )
-                        {
-                            panic!("Schema's don't match");
-                        }
-                        let str_array = col
-                            .as_any()
-                            .downcast_ref::<StringArray>()
-                            .expect("failed to downcast");
-                        for (row, item) in str_array.iter().enumerate() {
-                            if let Some(s) = item {
-                                visitor.visit_str(row, index, s);
-                            }
-                        }
+                        extract_primitive!(
+                            field,
+                            col,
+                            visitor.visit_str,
+                            index,
+                            PrimitiveType::String,
+                            StringArray
+                        );
                     }
                     _ => unimplemented!(),
                 }
