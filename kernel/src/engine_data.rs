@@ -1,4 +1,4 @@
-use crate::schema::Schema;
+use crate::schema::SchemaRef;
 
 use std::any::{Any, TypeId};
 
@@ -10,7 +10,9 @@ use std::any::{Any, TypeId};
 pub trait DataVisitor {
     // Receive some data from a call to `extract`. The data in the Vec should not be assumed to live
     // beyond the call to this funtion (i.e. it should be copied if needed)
-    fn visit(&mut self, vals: Vec<Option<&dyn Any>>);
+    fn visit(&mut self, row: usize, col: usize, val: &dyn Any);
+
+    fn visit_str(&mut self, row: usize, col: usize, val: &str);
 }
 
 /// A TypeTag identifies the class that an Engine is using to represent data read by its
@@ -40,8 +42,9 @@ pub trait TypeTag: 'static {
 /// as easy as defining a tag to represent it that implements [`TypeTag`], and then returning it for
 /// the `type_tag` method.
 /// ```
+/// use std::any::Any;
 /// use deltakernel::engine_data::{DataExtractor, DataVisitor, EngineData, TypeTag};
-/// use deltakernel::schema::Schema;
+/// use deltakernel::schema::SchemaRef;
 /// struct MyTypeTag;
 /// impl TypeTag for MyTypeTag {}
 /// struct MyDataType; // Whatever the engine wants here
@@ -49,12 +52,13 @@ pub trait TypeTag: 'static {
 ///    fn type_tag(&self) -> &dyn TypeTag {
 ///        &MyTypeTag
 ///    }
+///    fn as_any(&self) -> &(dyn Any + 'static) { todo!() }
 /// }
 /// struct MyDataExtractor {
 ///   expected_tag: MyTypeTag,
 /// }
 /// impl DataExtractor for MyDataExtractor {
-///   fn extract(&self, blob: &dyn EngineData, _schema: &Schema, visitor: &mut dyn DataVisitor) -> () {
+///   fn extract(&self, blob: &dyn EngineData, _schema: SchemaRef, visitor: &mut dyn DataVisitor) -> () {
 ///     assert!(self.expected_tag.eq(blob.type_tag())); // Ensure correct data type
 ///     // extract the data and call back visitor
 ///   }
@@ -67,6 +71,8 @@ pub trait TypeTag: 'static {
 /// ```
 pub trait EngineData {
     fn type_tag(&self) -> &dyn TypeTag;
+
+    fn as_any(&self) -> &dyn Any;
 }
 
 /// A data extractor can take whatever the engine defines as its `EngineData` type and can call back
@@ -74,7 +80,7 @@ pub trait EngineData {
 pub trait DataExtractor {
     /// Extract data as requested by [`schema`] and then call back into `visitor.visit` with a Vec
     /// of that data.
-    fn extract(&self, blob: &dyn EngineData, schema: &Schema, visitor: &mut dyn DataVisitor);
+    fn extract(&self, blob: &dyn EngineData, schema: SchemaRef, visitor: &mut dyn DataVisitor);
     // Return the number of items (rows?) in blob
     fn length(&self, blob: &dyn EngineData) -> usize;
 }

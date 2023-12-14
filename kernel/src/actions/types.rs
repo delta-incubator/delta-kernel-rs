@@ -27,7 +27,7 @@ impl Default for Format {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Metadata {
     /// Unique identifier for this table
     pub id: String,
@@ -88,38 +88,30 @@ impl Metadata {
 }
 
 #[derive(Default)]
-struct MetadataVisitor {
-    extracted: Option<Metadata>,
+pub struct MetadataVisitor {
+    pub(crate) extracted: Metadata,
 }
 
 impl DataVisitor for MetadataVisitor {
-    fn visit(&mut self, vals: Vec<Option<&dyn Any>>) {
-        let id: &str = vals[0]
-            .expect("metadata should have an id")
-            .downcast_ref::<&str>()
-            .unwrap();
-        let provider: &str = vals[1]
-            .expect("metadata.format should have a provider")
-            .downcast_ref::<&str>()
-            .unwrap();
-        // TODO: Options
-        let schema_string: &str = vals[2]
-            .expect("metadata should have a schema_string")
-            .downcast_ref::<&str>()
-            .unwrap();
-        // TODO: Partition cols
-        let partition_columns: Vec<String> = vec![];
-        // TODO: Config
-        self.extracted = Some(Metadata::new(
-            id,
-            Format {
-                provider: provider.to_string(),
-                options: HashMap::new(),
-            },
-            schema_string,
-            partition_columns.iter(),
-            None,
-        ));
+    fn visit_str(&mut self, _row: usize, index: usize, val: &str) {
+        // TODO: validate row
+        match index {
+            0 => {
+                self.extracted.id = val.to_string();
+            }
+            _ => {}
+        }
+    }
+    
+    fn visit(&mut self, _row: usize, index: usize, val: &dyn Any) {
+        // TODO: validate row
+        match index {
+            1 => {
+                let ct: &i64 = val.downcast_ref::<i64>().unwrap();
+                self.extracted.created_time = Some(*ct);
+            }
+            _ => panic!("Nope")
+        }
     }
 }
 
