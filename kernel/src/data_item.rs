@@ -8,7 +8,7 @@ macro_rules! gen_prim_type_none_methods {
         fn $fnname(&self) -> Option<$typ> { None }
     };
     (($fnname: ident, $typ: ty), $(($fnname_rest: ident, $typ_rest: ty)),+) => {
-        fn $fnname(&self) -> Option<$typ> { None }
+        gen_prim_type_none_methods!(($fnname, $typ));
         gen_prim_type_none_methods!($(($fnname_rest, $typ_rest)),+);
     };
 }
@@ -20,9 +20,7 @@ macro_rules! gen_prim_impls {
         }
     };
     (($fnname: ident, $typ: ty), $(($fnname_rest: ident, $typ_rest: ty)),+) => {
-        impl DataItem for $typ {
-            fn $fnname(&self) -> Option<$typ> { Some(*self) }
-        }
+        gen_prim_impls!(($fnname, $typ));
         gen_prim_impls!($(($fnname_rest, $typ_rest)),+);
     };
 }
@@ -38,12 +36,9 @@ trait DataItem {
         (as_i32, i32),
         (as_u32, u32),
         (as_u64, u64),
-        (as_str, &str)
-        // ... and so on for all types we want to support ...
+        (as_str, &str),
+        (as_map, &dyn MapItem) // ... and so on for all types we want to support ...
     );
-    fn as_map(&self) -> Option<&dyn MapItem> {
-        None
-    }
 }
 
 gen_prim_impls!(
@@ -74,7 +69,7 @@ impl DataItem for &dyn MapItem {
 
 // Something that can be called back to visit extracted data.
 trait DataVisitor {
-    fn visit(&mut self, val: Vec<Option<&dyn DataItem>>);
+    fn visit(&mut self, val: &[Option<&dyn DataItem>]);
 }
 
 // Just a dummy action to show what we might extract into
@@ -93,7 +88,7 @@ struct ActionVisitor {
 }
 
 impl DataVisitor for ActionVisitor {
-    fn visit(&mut self, vals: Vec<Option<&dyn DataItem>>) {
+    fn visit(&mut self, vals: &[Option<&dyn DataItem>]) {
         let i = vals[0]
             .expect("Action must have an i")
             .as_u32()
@@ -200,14 +195,17 @@ impl DataExtractor for StrExtractor {
         };
         let emp: &dyn MapItem = &em;
         x.push(Some(&emp));
-        visitor.visit(x);
+        visitor.visit(&x);
     }
 }
 
 struct Engine;
 impl EngineClient for Engine {
     fn get_data_extractor(&self, include_bool: bool) -> Arc<dyn DataExtractor> {
-        let s = StrExtractor { include_bool, ..Default::default() };
+        let s = StrExtractor {
+            include_bool,
+            ..Default::default()
+        };
         Arc::new(s)
     }
 
@@ -217,28 +215,38 @@ impl EngineClient for Engine {
 }
 
 // ---- example usage ----
-#[allow(dead_code)]
-fn main() {
-    let engine = Engine;
-    let mut visitor = ActionVisitor::default();
-    let extractor = engine.get_data_extractor(false);
-    // our extractor doesn't actually look at "blob", it's just a dummy value here
-    extractor.extract(&"blob".to_string(), "schema", &mut visitor);
-    println!(
-        "without bool\t{:?}",
-        visitor
-            .action
-            .expect("Should have got an action in extract")
-    );
+#[cfg(test)]
+mod tests {
 
-    let mut visitor2 = ActionVisitor::default();
-    let extractor_bool = engine.get_data_extractor(true);
-    // our extractor doesn't actually look at "blob", it's just a dummy value here
-    extractor_bool.extract(&"blob".to_string(), "schema", &mut visitor2);
-    println!(
-        "with bool\t{:?}",
-        visitor2
-            .action
-            .expect("Should have got an action in extract")
-    );
+    use super::*;
+
+    #[test]
+    fn test_no_bool() {
+        let engine = Engine;
+        let mut visitor = ActionVisitor::default();
+        let extractor = engine.get_data_extractor(false);
+        // our extractor doesn't actually look at "blob", it's just a dummy value here
+        extractor.extract(&"blob".to_string(), "schema", &mut visitor);
+        assert!(visitor.action.is_some());
+        let action = visitor.action.unwrap();
+        assert_eq!(action.i, 1);
+        assert_eq!(action.s.as_str(), "foot");
+        assert_eq!(action.o, None);
+        assert_eq!(action.m.as_str(), "mapval");
+    }
+
+    #[test]
+    fn test_bool() {
+        let engine = Engine;
+        let mut visitor = ActionVisitor::default();
+        let extractor = engine.get_data_extractor(true);
+        // our extractor doesn't actually look at "blob", it's just a dummy value here
+        extractor.extract(&"blob".to_string(), "schema", &mut visitor);
+        assert!(visitor.action.is_some());
+        let action = visitor.action.unwrap();
+        assert_eq!(action.i, 1);
+        assert_eq!(action.s.as_str(), "foot");
+        assert_eq!(action.o, Some(true));
+        assert_eq!(action.m.as_str(), "mapval");
+    }
 }
