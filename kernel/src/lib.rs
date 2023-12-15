@@ -55,6 +55,8 @@ pub mod schema;
 pub mod snapshot;
 pub mod table;
 
+pub mod data_item;
+
 pub use actions::{types::*, ActionType};
 pub use error::{DeltaResult, Error};
 pub use expressions::Expression;
