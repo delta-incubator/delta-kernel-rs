@@ -1,4 +1,4 @@
-use crate::engine_data::{DataVisitor, EngineData, TypeTag};
+use crate::engine_data::{DataItem, DataVisitor, EngineData, TypeTag};
 use crate::schema::SchemaRef;
 use crate::DeltaResult;
 
@@ -29,15 +29,15 @@ impl EngineData for SimpleData {
     }
 }
 
-macro_rules! extract_primitive {
-    ($field: expr, $col: expr, $($visit_fn:ident).+, $index: expr, $prim_type: expr, $arry_type: ty) => {
+macro_rules! push_primitive {
+    ($field: expr, $col: expr, $prim_type: expr, $arry_type: ty, $result_arry: expr, $enum_typ: expr) => {
         if $field.data_type() != &crate::schema::DataType::Primitive($prim_type) {
             panic!("Schema's don't match");
         }
         let arry = $col.as_any().downcast_ref::<$arry_type>().expect("Failed to downcast");
-        for (row, item) in arry.iter().enumerate() {
+        for item in arry.iter() {
             if let Some(i) = item {
-                $( $visit_fn ).+(row, $index, &i);
+                $result_arry.push(Some($enum_typ(i)));
             }
         }
     };
@@ -56,48 +56,74 @@ impl SimpleData {
     }
 
     pub fn extract(&self, schema: SchemaRef, visitor: &mut dyn DataVisitor) {
-        //let arrow_schema: ArrowSchema = (&*schema).try_into().unwrap(); // todo
         use crate::schema::PrimitiveType;
         let arrow_schema = self.data.schema();
-        for (index, field) in schema.fields.iter().enumerate() {
+        // let cols: Vec<&ArrayRef> = schema.fields.iter().map(|field| {
+        //     let name = field.name();
+        //     if let Some((arrow_index, _)) = arrow_schema.column_with_name(name) {
+        //         self.data.column(arrow_index)
+        //     } else {
+        //         panic!("bad col name");
+        //     }
+        // }).collect();
+
+        // // HACK
+        // let mut idx = 0;
+        // for i in 0..cols[0].len() {
+        //     if cols[0].is_valid(i) {
+        //         idx = i;
+        //     }
+        // }
+
+        // let data: Vec<&dyn DataItem> = cols.iter().map(|col| {
+        //     if let Some(arry) = col.as_string_opt::<i64>() {
+        //         &arry.value(idx) as &dyn DataItem
+        //     } else {
+        //         &col.as_primitive::<Int64Type>().value(idx)
+        //     }
+        // }).collect();
+        
+        let mut res_arry: Vec<Option<DataItem<'_>>> = vec![];
+        for field in schema.fields.iter() {
             let name = field.name();
             if let Some((arrow_index, arrow_field)) = arrow_schema.column_with_name(name) {
                 let col = self.data.column(arrow_index);
                 match arrow_field.data_type() {
                     DataType::Boolean => {
-                        extract_primitive!(
+                        push_primitive!(
                             field,
                             col,
-                            visitor.visit,
-                            index,
                             PrimitiveType::Boolean,
-                            array::BooleanArray
+                            array::BooleanArray,
+                            res_arry,
+                            DataItem::Bool
                         );
                     }
                     DataType::Int64 => {
-                        extract_primitive!(
+                        push_primitive!(
                             field,
                             col,
-                            visitor.visit,
-                            index,
                             PrimitiveType::Long,
-                            array::Int64Array
+                            array::Int64Array,
+                            res_arry,
+                            DataItem::I64
                         );
                     }
                     DataType::Utf8 => {
-                        extract_primitive!(
+                        push_primitive!(
                             field,
                             col,
-                            visitor.visit_str,
-                            index,
                             PrimitiveType::String,
-                            StringArray
+                            StringArray,
+                            res_arry,
+                            DataItem::Str
                         );
                     }
                     _ => unimplemented!(),
                 }
             }
         }
+        visitor.visit(&res_arry);
     }
 
     pub fn length(&self) -> usize {
@@ -143,8 +169,10 @@ mod tests {
         s.extract(Arc::new(metadata_test_schema), &mut metadata_visitor);
 
         println!("Got: {:?}", metadata_visitor.extracted);
-
-        assert!(metadata_visitor.extracted.id == "id");
-        assert!(metadata_visitor.extracted.created_time == Some(1));
+        
+        assert!(metadata_visitor.extracted.is_some());
+        let metadata = metadata_visitor.extracted.unwrap();
+        assert!(metadata.id == "id");
+        assert!(metadata.created_time == Some(1));
     }
 }

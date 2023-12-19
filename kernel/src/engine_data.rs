@@ -2,17 +2,59 @@ use crate::schema::SchemaRef;
 
 use std::any::{Any, TypeId};
 
-/// This module defines an interface for the kernel to transer data between a client (engine) and
-/// the kernel itself. (TODO: Explain more)
+macro_rules! gen_casts {
+    (($fnname: ident, $enum_ty: ident, $typ: ty)) => {
+        pub fn $fnname(&self) -> Option<$typ> {
+            if let DataItem::$enum_ty(x) = self {
+                Some(*x)
+            } else {
+                None
+            }
+        }
+    };
+    (($fnname: ident, $enum_ty: ident, $typ: ty), $(($fnname_rest: ident, $enum_ty_rest: ident, $typ_rest: ty)),+) => {
+        gen_casts!(($fnname, $enum_ty, $typ));
+        gen_casts!($(($fnname_rest, $enum_ty_rest, $typ_rest)),+);
+    };
+}
+
+// a map that can go inside a DataItem
+pub trait MapItem {
+    fn get<'a>(&'a self, key: &str) -> Option<&'a str>;
+}
+
+pub enum DataItem<'a> {
+    Bool(bool),
+    F32(f32),
+    F64(f64),
+    I32(i32),
+    I64(i64),
+    U32(u32),
+    U64(u64),
+    Str(&'a str),
+    Map(&'a dyn MapItem)
+}
+
+impl<'a> DataItem<'a> {
+    gen_casts!(
+        (as_bool, Bool, bool),
+        (as_f32, F32, f32),
+        (as_f64, F64, f64),
+        (as_i32, I32, i32),
+        (as_i64, I64, i64),
+        (as_u32, U32, u32),
+        (as_u64, U64, u64),
+        (as_str, Str, &str),
+        (as_map, Map, &dyn MapItem)
+    );
+}
 
 /// A `DataVisitor` can be called back to visit extracted data. Aside from calling [`visit`] on the
 /// visitor passed to [`extract`], engines do not need to worry about this trait.
 pub trait DataVisitor {
-    // Receive some data from a call to `extract`. The data in the Vec should not be assumed to live
+    // Receive some data from a call to `extract`. The data in [vals] should not be assumed to live
     // beyond the call to this funtion (i.e. it should be copied if needed)
-    fn visit(&mut self, row: usize, col: usize, val: &dyn Any);
-
-    fn visit_str(&mut self, row: usize, col: usize, val: &str);
+    fn visit(&mut self, vals: &[Option<DataItem<'_>>]);    
 }
 
 /// A TypeTag identifies the class that an Engine is using to represent data read by its

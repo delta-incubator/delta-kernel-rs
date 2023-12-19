@@ -1,4 +1,3 @@
-use std::any::Any;
 use std::collections::HashMap;
 use std::io::{Cursor, Read};
 use std::sync::Arc;
@@ -6,7 +5,7 @@ use std::sync::Arc;
 use roaring::RoaringTreemap;
 use url::Url;
 
-use crate::engine_data::DataVisitor;
+use crate::engine_data::{DataVisitor, DataItem};
 use crate::schema::StructType;
 use crate::{DeltaResult, Error, FileSystemClient};
 
@@ -89,30 +88,35 @@ impl Metadata {
 
 #[derive(Default)]
 pub struct MetadataVisitor {
-    pub(crate) extracted: Metadata,
+    pub(crate) extracted: Option<Metadata>,
 }
 
 impl DataVisitor for MetadataVisitor {
-    fn visit_str(&mut self, _row: usize, index: usize, val: &str) {
-        // TODO: validate row
-        #[allow(clippy::single_match)] // more to come
-        match index {
-            0 => {
-                self.extracted.id = val.to_string();
-            }
-            _ => {}
-        }
-    }
+    // fn visit_str(&mut self, _row: usize, index: usize, val: &str) {
+    //     // TODO: validate row
+    //     #[allow(clippy::single_match)] // more to come
+    //     match index {
+    //         0 => {
+    //             self.extracted.id = val.to_string();
+    //         }
+    //         _ => {}
+    //     }
+    // }
 
-    fn visit(&mut self, _row: usize, index: usize, val: &dyn Any) {
-        // TODO: validate row
-        match index {
-            1 => {
-                let ct: &i64 = val.downcast_ref::<i64>().unwrap();
-                self.extracted.created_time = Some(*ct);
-            }
-            _ => panic!("Nope"),
-        }
+    fn visit(&mut self, vals: &[Option<DataItem<'_>>]) {
+        let id = vals[0].as_ref()
+            .expect("MetaData must have an id")
+            .as_str()
+            .expect("id must be str");
+        let created_time = vals[1].as_ref()
+            .expect("Action must have a created_time")
+            .as_i64()
+            .expect("created_time must be i64");
+        self.extracted = Some(Metadata {
+            id: id.to_string(),
+            created_time: Some(created_time),
+            ..Default::default()
+        })
     }
 }
 
