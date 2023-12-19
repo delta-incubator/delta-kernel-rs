@@ -34,7 +34,10 @@ macro_rules! push_primitive {
         if $field.data_type() != &crate::schema::DataType::Primitive($prim_type) {
             panic!("Schema's don't match");
         }
-        let arry = $col.as_any().downcast_ref::<$arry_type>().expect("Failed to downcast");
+        let arry = $col
+            .as_any()
+            .downcast_ref::<$arry_type>()
+            .expect("Failed to downcast");
         for item in arry.iter() {
             if let Some(i) = item {
                 $result_arry.push(Some($enum_typ(i)));
@@ -82,7 +85,7 @@ impl SimpleData {
         //         &col.as_primitive::<Int64Type>().value(idx)
         //     }
         // }).collect();
-        
+
         let mut res_arry: Vec<Option<DataItem<'_>>> = vec![];
         for field in schema.fields.iter() {
             let name = field.name();
@@ -169,7 +172,7 @@ mod tests {
         s.extract(Arc::new(metadata_test_schema), &mut metadata_visitor);
 
         println!("Got: {:?}", metadata_visitor.extracted);
-        
+
         assert!(metadata_visitor.extracted.is_some());
         let metadata = metadata_visitor.extracted.unwrap();
         assert!(metadata.id == "id");
