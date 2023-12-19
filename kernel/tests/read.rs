@@ -1,9 +1,8 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use arrow::array::{ArrayRef, Int32Array, StringArray};
-use arrow::error::ArrowError;
-use arrow::record_batch::RecordBatch;
+use arrow_array::{Int64Array, RecordBatch, StringArray};
+use arrow_schema::{ArrowError, DataType, Field, Schema};
 use arrow_select::concat::concat_batches;
 use deltakernel::client::DefaultTableClient;
 use deltakernel::executor::tokio::TokioBackgroundExecutor;
@@ -20,10 +19,10 @@ const PARQUET_FILE2: &str = "part-00001-c506e79a-0bf8-4e2b-a42b-9731b2e490ae-c00
 
 const METADATA: &str = r#"{"commitInfo":{"timestamp":1587968586154,"operation":"WRITE","operationParameters":{"mode":"ErrorIfExists","partitionBy":"[]"},"isBlindAppend":true}}
 {"protocol":{"minReaderVersion":1,"minWriterVersion":2}}
-{"metaData":{"id":"5fba94ed-9794-4965-ba6e-6ee3c0d22af9","format":{"provider":"parquet","options":{}},"schemaString":"{\"type\":\"struct\",\"fields\":[{\"name\":\"id\",\"type\":\"long\",\"nullable\":true,\"metadata\":{}}]}","partitionColumns":[],"configuration":{},"createdTime":1587968585495}}"#;
+{"metaData":{"id":"5fba94ed-9794-4965-ba6e-6ee3c0d22af9","format":{"provider":"parquet","options":{}},"schemaString":"{\"type\":\"struct\",\"fields\":[{\"name\":\"id\",\"type\":\"long\",\"nullable\":true,\"metadata\":{}},{\"name\":\"val\",\"type\":\"string\",\"nullable\":true,\"metadata\":{}}]}","partitionColumns":[],"configuration":{},"createdTime":1587968585495}}"#;
 
 enum TestAction {
-    Add(String),
+    Add(String, i32),
     Remove(String),
     Metadata,
 }
@@ -32,7 +31,7 @@ fn generate_commit(actions: Vec<TestAction>) -> String {
     actions
             .into_iter()
             .map(|test_action| match test_action {
-                TestAction::Add(path) => format!(r#"{{"{action}":{{"path":"{path}","partitionValues":{{}},"size":262,"modificationTime":1587968586000,"dataChange":true, "stats":"{{\"numRecords\":2,\"nullCount\":{{\"id\":0}},\"minValues\":{{\"id\": 1}},\"maxValues\":{{\"id\":3}}}}"}}}}"#, action = "add", path = path),
+                TestAction::Add(path, size) => format!(r#"{{"{action}":{{"path":"{path}","partitionValues":{{}},"size":{size},"modificationTime":1587968586000,"dataChange":true, "stats":"{{\"numRecords\":2,\"nullCount\":{{\"id\":0}},\"minValues\":{{\"id\": 1}},\"maxValues\":{{\"id\":3}}}}"}}}}"#, action = "add", path = path),
                 TestAction::Remove(path) => format!(r#"{{"{action}":{{"path":"{path}","partitionValues":{{}},"size":262,"modificationTime":1587968586000,"dataChange":true}}}}"#, action = "remove", path = path),
                 TestAction::Metadata => METADATA.into(),
             })
@@ -50,12 +49,15 @@ fn load_parquet(batch: &RecordBatch) -> Vec<u8> {
 }
 
 fn generate_simple_batch() -> Result<RecordBatch, ArrowError> {
-    let ids = Int32Array::from(vec![1, 2, 3]);
+    let ids = Int64Array::from(vec![1, 2, 3]);
     let vals = StringArray::from(vec!["a", "b", "c"]);
-    RecordBatch::try_from_iter(vec![
-        ("id", Arc::new(ids) as ArrayRef),
-        ("val", Arc::new(vals) as ArrayRef),
-    ])
+    RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, true),
+            Field::new("val", DataType::Utf8, true),
+        ])),
+        vec![Arc::new(ids), Arc::new(vals)],
+    )
 }
 
 async fn add_commit(
@@ -72,22 +74,26 @@ async fn add_commit(
 async fn single_commit_two_add_files() -> Result<(), Box<dyn std::error::Error>> {
     let batch = generate_simple_batch()?;
     let storage = Arc::new(InMemory::new());
+
+    storage
+        .put(&Path::from(PARQUET_FILE1), load_parquet(&batch).into())
+        .await?;
+    let p1 = storage.head(&Path::from(PARQUET_FILE1)).await?;
+    storage
+        .put(&Path::from(PARQUET_FILE2), load_parquet(&batch).into())
+        .await?;
+    let p2 = storage.head(&Path::from(PARQUET_FILE2)).await?;
+
     add_commit(
         storage.as_ref(),
         0,
         generate_commit(vec![
             TestAction::Metadata,
-            TestAction::Add(PARQUET_FILE1.to_string()),
-            TestAction::Add(PARQUET_FILE2.to_string()),
+            TestAction::Add(PARQUET_FILE1.to_string(), p1.size as i32),
+            TestAction::Add(PARQUET_FILE2.to_string(), p2.size as i32),
         ]),
     )
     .await?;
-    storage
-        .put(&Path::from(PARQUET_FILE1), load_parquet(&batch).into())
-        .await?;
-    storage
-        .put(&Path::from(PARQUET_FILE2), load_parquet(&batch).into())
-        .await?;
 
     let location = Url::parse("memory:///")?;
     let table_client = DefaultTableClient::new(
@@ -117,27 +123,34 @@ async fn single_commit_two_add_files() -> Result<(), Box<dyn std::error::Error>>
 async fn two_commits() -> Result<(), Box<dyn std::error::Error>> {
     let batch = generate_simple_batch()?;
     let storage = Arc::new(InMemory::new());
+
+    storage
+        .put(&Path::from(PARQUET_FILE1), load_parquet(&batch).into())
+        .await?;
+    let p1 = storage.head(&Path::from(PARQUET_FILE1)).await?;
+    storage
+        .put(&Path::from(PARQUET_FILE2), load_parquet(&batch).into())
+        .await?;
+    let p2 = storage.head(&Path::from(PARQUET_FILE2)).await?;
+
     add_commit(
         storage.as_ref(),
         0,
         generate_commit(vec![
             TestAction::Metadata,
-            TestAction::Add(PARQUET_FILE1.to_string()),
+            TestAction::Add(PARQUET_FILE1.to_string(), p1.size as i32),
         ]),
     )
     .await?;
     add_commit(
         storage.as_ref(),
         1,
-        generate_commit(vec![TestAction::Add(PARQUET_FILE2.to_string())]),
+        generate_commit(vec![TestAction::Add(
+            PARQUET_FILE2.to_string(),
+            p2.size as i32,
+        )]),
     )
     .await?;
-    storage
-        .put(&Path::from(PARQUET_FILE1), load_parquet(&batch).into())
-        .await?;
-    storage
-        .put(&Path::from(PARQUET_FILE2), load_parquet(&batch).into())
-        .await?;
 
     let location = Url::parse("memory:///").unwrap();
     let table_client = DefaultTableClient::new(
@@ -168,19 +181,25 @@ async fn two_commits() -> Result<(), Box<dyn std::error::Error>> {
 async fn remove_action() -> Result<(), Box<dyn std::error::Error>> {
     let batch = generate_simple_batch()?;
     let storage = Arc::new(InMemory::new());
+
+    storage
+        .put(&Path::from(PARQUET_FILE1), load_parquet(&batch).into())
+        .await?;
+    let p1 = storage.head(&Path::from(PARQUET_FILE1)).await?;
+
     add_commit(
         storage.as_ref(),
         0,
         generate_commit(vec![
             TestAction::Metadata,
-            TestAction::Add(PARQUET_FILE1.to_string()),
+            TestAction::Add(PARQUET_FILE1.to_string(), p1.size as i32),
         ]),
     )
     .await?;
     add_commit(
         storage.as_ref(),
         1,
-        generate_commit(vec![TestAction::Add(PARQUET_FILE2.to_string())]),
+        generate_commit(vec![TestAction::Add(PARQUET_FILE2.to_string(), 727)]),
     )
     .await?;
     add_commit(
@@ -189,9 +208,6 @@ async fn remove_action() -> Result<(), Box<dyn std::error::Error>> {
         generate_commit(vec![TestAction::Remove(PARQUET_FILE2.to_string())]),
     )
     .await?;
-    storage
-        .put(&Path::from(PARQUET_FILE1), load_parquet(&batch).into())
-        .await?;
 
     let location = Url::parse("memory:///").unwrap();
     let table_client = DefaultTableClient::new(
@@ -223,31 +239,44 @@ async fn stats() -> Result<(), Box<dyn std::error::Error>> {
         actions
             .into_iter()
             .map(|test_action| match test_action {
-                TestAction::Add(path) => format!(r#"{{"{action}":{{"path":"{path}","partitionValues":{{}},"size":262,"modificationTime":1587968586000,"dataChange":true, "stats":"{{\"numRecords\":2,\"nullCount\":{{\"id\":0}},\"minValues\":{{\"id\": 5}},\"maxValues\":{{\"id\":7}}}}"}}}}"#, action = "add", path = path),
+                TestAction::Add(path, size) => format!(r#"{{"{action}":{{"path":"{path}","partitionValues":{{}},"size":{size},"modificationTime":1587968586000,"dataChange":true, "stats":"{{\"numRecords\":2,\"nullCount\":{{\"id\":0}},\"minValues\":{{\"id\": 5}},\"maxValues\":{{\"id\":7}}}}"}}}}"#, action = "add", path = path),
                 TestAction::Remove(path) => format!(r#"{{"{action}":{{"path":"{path}","partitionValues":{{}},"size":262,"modificationTime":1587968586000,"dataChange":true}}}}"#, action = "remove", path = path),
                 TestAction::Metadata => METADATA.into(),
             })
             .fold(String::new(), |a, b| a + &b + "\n")
     }
     fn generate_simple_batch2() -> Result<RecordBatch, ArrowError> {
-        let ids = Int32Array::from(vec![5, 7]);
+        let ids = Int64Array::from(vec![5, 7]);
         let vals = StringArray::from(vec!["e", "g"]);
-        RecordBatch::try_from_iter(vec![
-            ("id", Arc::new(ids) as ArrayRef),
-            ("val", Arc::new(vals) as ArrayRef),
-        ])
+        RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("id", DataType::Int64, true),
+                Field::new("val", DataType::Utf8, true),
+            ])),
+            vec![Arc::new(ids), Arc::new(vals)],
+        )
     }
 
     let batch1 = generate_simple_batch()?;
     let batch2 = generate_simple_batch2()?;
     let storage = Arc::new(InMemory::new());
+
+    storage
+        .put(&Path::from(PARQUET_FILE1), load_parquet(&batch1).into())
+        .await?;
+    let p1 = storage.head(&Path::from(PARQUET_FILE1)).await?;
+    storage
+        .put(&Path::from(PARQUET_FILE2), load_parquet(&batch2).into())
+        .await?;
+    let p2 = storage.head(&Path::from(PARQUET_FILE2)).await?;
+
     // valid commit with min/max (0, 2)
     add_commit(
         storage.as_ref(),
         0,
         generate_commit(vec![
             TestAction::Metadata,
-            TestAction::Add(PARQUET_FILE1.to_string()),
+            TestAction::Add(PARQUET_FILE1.to_string(), p1.size as i32),
         ]),
     )
     .await?;
@@ -255,17 +284,12 @@ async fn stats() -> Result<(), Box<dyn std::error::Error>> {
     add_commit(
         storage.as_ref(),
         1,
-        generate_commit2(vec![TestAction::Add(PARQUET_FILE2.to_string())]),
+        generate_commit2(vec![TestAction::Add(
+            PARQUET_FILE2.to_string(),
+            p2.size as i32,
+        )]),
     )
     .await?;
-
-    storage
-        .put(&Path::from(PARQUET_FILE1), load_parquet(&batch1).into())
-        .await?;
-
-    storage
-        .put(&Path::from(PARQUET_FILE2), load_parquet(&batch2).into())
-        .await?;
 
     let location = Url::parse("memory:///").unwrap();
     let table_client = DefaultTableClient::new(

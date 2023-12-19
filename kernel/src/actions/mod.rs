@@ -508,8 +508,8 @@ fn cast_struct_column<T: 'static>(arr: &StructArray, name: impl AsRef<str>) -> D
 }
 
 fn struct_array_to_map(arr: &StructArray) -> DeltaResult<HashMap<String, Option<String>>> {
-    let keys = cast_struct_column::<StringArray>(arr, "keys")?;
-    let values = cast_struct_column::<StringArray>(arr, "values")?;
+    let keys = cast_struct_column::<StringArray>(arr, "key")?;
+    let values = cast_struct_column::<StringArray>(arr, "value")?;
     Ok(keys
         .into_iter()
         .zip(values)

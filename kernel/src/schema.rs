@@ -146,6 +146,33 @@ impl StructType {
     }
 }
 
+impl FromIterator<StructField> for StructType {
+    fn from_iter<T: IntoIterator<Item = StructField>>(iter: T) -> Self {
+        Self {
+            type_name: "struct".into(),
+            fields: iter.into_iter().collect(),
+        }
+    }
+}
+
+impl<const N: usize> From<[StructField; N]> for StructType {
+    fn from(value: [StructField; N]) -> Self {
+        Self {
+            type_name: "struct".into(),
+            fields: value.to_vec(),
+        }
+    }
+}
+
+impl<'a> IntoIterator for &'a StructType {
+    type Item = &'a StructField;
+    type IntoIter = std::slice::Iter<'a, StructField>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.fields.iter()
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ArrayType {

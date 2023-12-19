@@ -54,12 +54,11 @@ impl TryFrom<&StructField> for ArrowField {
 
 impl TryFrom<&ArrayType> for ArrowField {
     type Error = ArrowError;
-
     fn try_from(a: &ArrayType) -> Result<Self, ArrowError> {
         Ok(ArrowField::new(
-            "item",
+            "element",
             ArrowDataType::try_from(a.element_type())?,
-            a.contains_null(),
+            true, // a.contains_null(),
         ))
     }
 }
@@ -72,9 +71,9 @@ impl TryFrom<&MapType> for ArrowField {
             "entries",
             ArrowDataType::Struct(
                 vec![
-                    ArrowField::new("keys", ArrowDataType::try_from(a.key_type())?, false),
+                    ArrowField::new("key", ArrowDataType::try_from(a.key_type())?, false),
                     ArrowField::new(
-                        "values",
+                        "value",
                         ArrowDataType::try_from(a.value_type())?,
                         a.value_contains_null(),
                     ),
@@ -141,19 +140,19 @@ impl TryFrom<&DataType> for ArrowDataType {
                     ArrowDataType::Struct(
                         vec![
                             ArrowField::new(
-                                "keys",
+                                "key",
                                 <ArrowDataType as TryFrom<&DataType>>::try_from(m.key_type())?,
                                 false,
                             ),
                             ArrowField::new(
-                                "values",
+                                "value",
                                 <ArrowDataType as TryFrom<&DataType>>::try_from(m.value_type())?,
                                 m.value_contains_null(),
                             ),
                         ]
                         .into(),
                     ),
-                    true,
+                    false,
                 )),
                 false,
             )),

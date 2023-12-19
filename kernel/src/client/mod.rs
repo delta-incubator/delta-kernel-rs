@@ -20,13 +20,14 @@ use crate::{
     DeltaResult, ExpressionHandler, FileSystemClient, JsonHandler, ParquetHandler, TableClient,
 };
 
-pub mod conversion;
 pub mod executor;
 pub mod expression;
 pub mod file_handler;
 pub mod filesystem;
 pub mod json;
 pub mod parquet;
+mod schema_util;
+mod util;
 
 #[derive(Debug)]
 pub struct DefaultTableClient<E: TaskExecutor> {

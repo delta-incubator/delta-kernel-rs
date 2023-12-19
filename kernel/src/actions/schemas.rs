@@ -10,30 +10,30 @@ lazy_static! {
     static ref METADATA_FIELD: StructField = StructField::new(
         "metaData",
         StructType::new(vec![
-            StructField::new("id", DataType::STRING, false),
+            StructField::new("id", DataType::STRING, true),
             StructField::new("name", DataType::STRING, true),
             StructField::new("description", DataType::STRING, true),
             StructField::new(
                 "format",
                 StructType::new(vec![
-                    StructField::new("provider", DataType::STRING, false),
+                    StructField::new("provider", DataType::STRING, true),
                     StructField::new(
-                        "configuration",
+                        "options",
                         MapType::new(
                             DataType::STRING,
                             DataType::STRING,
                             true,
                         ),
-                        true,
+                        false,
                     ),
                 ]),
                 false,
             ),
-            StructField::new("schemaString", DataType::STRING, false),
+            StructField::new("schemaString", DataType::STRING, true),
             StructField::new(
                 "partitionColumns",
                 ArrayType::new(DataType::STRING, false),
-                false,
+                true,
             ),
             StructField::new("createdTime", DataType::LONG, true),
             StructField::new(
@@ -52,16 +52,16 @@ lazy_static! {
     static ref PROTOCOL_FIELD: StructField = StructField::new(
         "protocol",
         StructType::new(vec![
-            StructField::new("minReaderVersion", DataType::INTEGER, false),
-            StructField::new("minWriterVersion", DataType::INTEGER, false),
+            StructField::new("minReaderVersion", DataType::INTEGER, true),
+            StructField::new("minWriterVersion", DataType::INTEGER, true),
             StructField::new(
                 "readerFeatures",
-                ArrayType::new(DataType::STRING, false),
+                ArrayType::new(DataType::STRING, true),
                 true,
             ),
             StructField::new(
                 "writerFeatures",
-                ArrayType::new(DataType::STRING, false),
+                ArrayType::new(DataType::STRING, true),
                 true,
             ),
         ]),

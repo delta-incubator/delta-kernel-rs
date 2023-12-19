@@ -15,11 +15,11 @@ use arrow_ord::cmp::{eq, gt, gt_eq, lt, lt_eq, neq};
 use arrow_schema::{ArrowError, Schema as ArrowSchema};
 use arrow_select::nullif::nullif;
 
+use super::util::extract_column;
 use crate::error::{DeltaResult, Error};
 use crate::expressions::{BinaryOperator, Expression, Scalar, UnaryOperator, VariadicOperator};
 use crate::schema::{DataType, PrimitiveType, SchemaRef};
 use crate::{ExpressionEvaluator, ExpressionHandler};
-
 // TODO leverage scalars / Datum
 
 fn downcast_to_bool(arr: &dyn Array) -> DeltaResult<&BooleanArray> {
@@ -80,57 +80,6 @@ impl Scalar {
 
 fn wrap_comparison_result(arr: BooleanArray) -> ArrayRef {
     Arc::new(arr) as Arc<dyn Array>
-}
-
-trait ProvidesColumnByName {
-    fn column_by_name(&self, name: &str) -> Option<&Arc<dyn Array>>;
-}
-
-impl ProvidesColumnByName for RecordBatch {
-    fn column_by_name(&self, name: &str) -> Option<&Arc<dyn Array>> {
-        self.column_by_name(name)
-    }
-}
-
-impl ProvidesColumnByName for StructArray {
-    fn column_by_name(&self, name: &str) -> Option<&Arc<dyn Array>> {
-        self.column_by_name(name)
-    }
-}
-
-fn extract_column<'a>(
-    array: &'a dyn ProvidesColumnByName,
-    path_step: &str,
-    remaining_path_steps: &mut impl Iterator<Item = &'a str>,
-) -> Result<&'a Arc<dyn Array>, ArrowError> {
-    let child = array
-        .column_by_name(path_step)
-        .ok_or(ArrowError::SchemaError(format!(
-            "No such field: {}",
-            path_step,
-        )))?;
-    if let Some(next_path_step) = remaining_path_steps.next() {
-        // This is not the last path step. Drill deeper.
-        extract_column(
-            column_as_struct(path_step, &Some(child))?,
-            next_path_step,
-            remaining_path_steps,
-        )
-    } else {
-        // Last path step. Return it.
-        Ok(child)
-    }
-}
-
-fn column_as_struct<'a>(
-    name: &str,
-    column: &Option<&'a Arc<dyn Array>>,
-) -> Result<&'a StructArray, ArrowError> {
-    column
-        .ok_or(ArrowError::SchemaError(format!("No such column: {}", name)))?
-        .as_any()
-        .downcast_ref::<StructArray>()
-        .ok_or(ArrowError::SchemaError(format!("{} is not a struct", name)))
 }
 
 fn evaluate_expression(
