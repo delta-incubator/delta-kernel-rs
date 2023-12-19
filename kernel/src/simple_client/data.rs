@@ -29,7 +29,7 @@ impl EngineData for SimpleData {
     }
 }
 
-macro_rules! push_primitive {
+macro_rules! push_item {
     ($field: expr, $col: expr, $prim_type: expr, $arry_type: ty, $result_arry: expr, $enum_typ: expr) => {
         if $field.data_type() != &crate::schema::DataType::Primitive($prim_type) {
             panic!("Schema's don't match");
@@ -61,31 +61,6 @@ impl SimpleData {
     pub fn extract(&self, schema: SchemaRef, visitor: &mut dyn DataVisitor) {
         use crate::schema::PrimitiveType;
         let arrow_schema = self.data.schema();
-        // let cols: Vec<&ArrayRef> = schema.fields.iter().map(|field| {
-        //     let name = field.name();
-        //     if let Some((arrow_index, _)) = arrow_schema.column_with_name(name) {
-        //         self.data.column(arrow_index)
-        //     } else {
-        //         panic!("bad col name");
-        //     }
-        // }).collect();
-
-        // // HACK
-        // let mut idx = 0;
-        // for i in 0..cols[0].len() {
-        //     if cols[0].is_valid(i) {
-        //         idx = i;
-        //     }
-        // }
-
-        // let data: Vec<&dyn DataItem> = cols.iter().map(|col| {
-        //     if let Some(arry) = col.as_string_opt::<i64>() {
-        //         &arry.value(idx) as &dyn DataItem
-        //     } else {
-        //         &col.as_primitive::<Int64Type>().value(idx)
-        //     }
-        // }).collect();
-
         let mut res_arry: Vec<Option<DataItem<'_>>> = vec![];
         for field in schema.fields.iter() {
             let name = field.name();
@@ -93,7 +68,7 @@ impl SimpleData {
                 let col = self.data.column(arrow_index);
                 match arrow_field.data_type() {
                     DataType::Boolean => {
-                        push_primitive!(
+                        push_item!(
                             field,
                             col,
                             PrimitiveType::Boolean,
@@ -103,7 +78,7 @@ impl SimpleData {
                         );
                     }
                     DataType::Int64 => {
-                        push_primitive!(
+                        push_item!(
                             field,
                             col,
                             PrimitiveType::Long,
@@ -113,7 +88,7 @@ impl SimpleData {
                         );
                     }
                     DataType::Utf8 => {
-                        push_primitive!(
+                        push_item!(
                             field,
                             col,
                             PrimitiveType::String,
