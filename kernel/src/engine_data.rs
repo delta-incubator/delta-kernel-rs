@@ -32,7 +32,7 @@ pub enum DataItem<'a> {
     U32(u32),
     U64(u64),
     Str(&'a str),
-    Map(&'a dyn MapItem)
+    Map(&'a dyn MapItem),
 }
 
 impl<'a> DataItem<'a> {
@@ -54,7 +54,7 @@ impl<'a> DataItem<'a> {
 pub trait DataVisitor {
     // Receive some data from a call to `extract`. The data in [vals] should not be assumed to live
     // beyond the call to this funtion (i.e. it should be copied if needed)
-    fn visit(&mut self, vals: &[Option<DataItem<'_>>]);    
+    fn visit(&mut self, vals: &[Option<DataItem<'_>>]);
 }
 
 /// A TypeTag identifies the class that an Engine is using to represent data read by its
