@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use url::Url;
 
+use crate::scan::ScanBuilder;
 use crate::snapshot::Snapshot;
 use crate::{DeltaResult, TableClient, Version};
 
@@ -40,6 +41,14 @@ impl Table {
         version: Option<Version>,
     ) -> DeltaResult<Arc<Snapshot>> {
         Snapshot::try_new(self.location.clone(), table_client, version)
+    }
+
+    pub fn scan(
+        &self,
+        table_client: &dyn TableClient,
+        version: Option<Version>,
+    ) -> DeltaResult<ScanBuilder> {
+        Ok(ScanBuilder::new(self.snapshot(table_client, version)?))
     }
 }
 

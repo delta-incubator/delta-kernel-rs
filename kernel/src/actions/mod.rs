@@ -7,6 +7,7 @@ use arrow_array::{
 use either::Either;
 use fix_hidden_lifetime_bug::fix_hidden_lifetime_bug;
 use itertools::izip;
+use serde::{Deserialize, Serialize};
 
 use crate::{DeltaResult, Error};
 
@@ -37,7 +38,13 @@ pub enum ActionType {
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
+#[cfg_attr(
+    feature = "serde",
+    derive(Serialize, Deserialize),
+    serde(rename_all = "camelCase")
+)]
 pub enum Action {
+    #[cfg_attr(feature = "serde", serde(rename = "metaData"))]
     Metadata(Metadata),
     Protocol(Protocol),
     Add(Add),

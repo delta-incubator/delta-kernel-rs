@@ -53,10 +53,13 @@ pub mod scan;
 pub mod schema;
 pub mod snapshot;
 pub mod table;
+#[cfg(any(test, feature = "test-utils"))]
+pub mod test_util;
 
 pub use actions::{types::*, ActionType};
 pub use error::{DeltaResult, Error};
 pub use expressions::Expression;
+pub use scan::{Scan, ScanBuilder};
 pub use table::Table;
 
 #[cfg(feature = "default-client")]

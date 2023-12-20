@@ -1,116 +1,32 @@
-use std::path::PathBuf;
-use std::sync::Arc;
+#![cfg(feature = "test-utils")]
+use std::collections::HashMap;
 
-use arrow_array::{Int64Array, RecordBatch, StringArray};
-use arrow_schema::{ArrowError, DataType, Field, Schema};
 use arrow_select::concat::concat_batches;
-use deltakernel::client::DefaultTableClient;
-use deltakernel::executor::tokio::TokioBackgroundExecutor;
 use deltakernel::expressions::{BinaryOperator, Expression};
 use deltakernel::scan::ScanBuilder;
-use deltakernel::Table;
-use object_store::{memory::InMemory, path::Path, ObjectStore};
-use parquet::arrow::arrow_writer::ArrowWriter;
-use parquet::file::properties::WriterProperties;
-use url::Url;
+use deltakernel::test_util::{assert_batches_sorted_eq, TestResult, TestTableFactory};
 
-const PARQUET_FILE1: &str = "part-00000-a72b1fb3-f2df-41fe-a8f0-e65b746382dd-c000.snappy.parquet";
-const PARQUET_FILE2: &str = "part-00001-c506e79a-0bf8-4e2b-a42b-9731b2e490ae-c000.snappy.parquet";
+#[test]
+fn single_commit_two_add_files() -> TestResult {
+    let mut factory = TestTableFactory::default();
+    let schema = factory.schemas().simple().clone();
+    let tt = factory.get_table("stats");
 
-const METADATA: &str = r#"{"commitInfo":{"timestamp":1587968586154,"operation":"WRITE","operationParameters":{"mode":"ErrorIfExists","partitionBy":"[]"},"isBlindAppend":true}}
-{"protocol":{"minReaderVersion":1,"minWriterVersion":2}}
-{"metaData":{"id":"5fba94ed-9794-4965-ba6e-6ee3c0d22af9","format":{"provider":"parquet","options":{}},"schemaString":"{\"type\":\"struct\",\"fields\":[{\"name\":\"id\",\"type\":\"long\",\"nullable\":true,\"metadata\":{}},{\"name\":\"val\",\"type\":\"string\",\"nullable\":true,\"metadata\":{}}]}","partitionColumns":[],"configuration":{},"createdTime":1587968585495}}"#;
+    let protocol = factory.create_protocol(1, 2, None, None);
+    let metadata = factory.create_metadata(&schema, None, None);
+    let batch = factory.generate_batch(
+        &schema,
+        100,
+        HashMap::from_iter([("id".to_string(), ("1", "3"))]),
+    )?;
+    tt.write_commit(0, &[protocol, metadata], &[batch.clone(), batch.clone()])?;
 
-enum TestAction {
-    Add(String, i32),
-    Remove(String),
-    Metadata,
-}
-
-fn generate_commit(actions: Vec<TestAction>) -> String {
-    actions
-            .into_iter()
-            .map(|test_action| match test_action {
-                TestAction::Add(path, size) => format!(r#"{{"{action}":{{"path":"{path}","partitionValues":{{}},"size":{size},"modificationTime":1587968586000,"dataChange":true, "stats":"{{\"numRecords\":2,\"nullCount\":{{\"id\":0}},\"minValues\":{{\"id\": 1}},\"maxValues\":{{\"id\":3}}}}"}}}}"#, action = "add", path = path),
-                TestAction::Remove(path) => format!(r#"{{"{action}":{{"path":"{path}","partitionValues":{{}},"size":262,"modificationTime":1587968586000,"dataChange":true}}}}"#, action = "remove", path = path),
-                TestAction::Metadata => METADATA.into(),
-            })
-            .fold(String::new(), |a, b| a + &b + "\n")
-}
-
-fn load_parquet(batch: &RecordBatch) -> Vec<u8> {
-    let mut data: Vec<u8> = Vec::new();
-    let props = WriterProperties::builder().build();
-    let mut writer = ArrowWriter::try_new(&mut data, batch.schema(), Some(props)).unwrap();
-    writer.write(batch).expect("Writing batch");
-    // writer must be closed to write footer
-    writer.close().unwrap();
-    data
-}
-
-fn generate_simple_batch() -> Result<RecordBatch, ArrowError> {
-    let ids = Int64Array::from(vec![1, 2, 3]);
-    let vals = StringArray::from(vec!["a", "b", "c"]);
-    RecordBatch::try_new(
-        Arc::new(Schema::new(vec![
-            Field::new("id", DataType::Int64, true),
-            Field::new("val", DataType::Utf8, true),
-        ])),
-        vec![Arc::new(ids), Arc::new(vals)],
-    )
-}
-
-async fn add_commit(
-    store: &dyn ObjectStore,
-    version: u64,
-    data: String,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let filename = format!("_delta_log/{:0>20}.json", version);
-    store.put(&Path::from(filename), data.into()).await?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn single_commit_two_add_files() -> Result<(), Box<dyn std::error::Error>> {
-    let batch = generate_simple_batch()?;
-    let storage = Arc::new(InMemory::new());
-
-    storage
-        .put(&Path::from(PARQUET_FILE1), load_parquet(&batch).into())
-        .await?;
-    let p1 = storage.head(&Path::from(PARQUET_FILE1)).await?;
-    storage
-        .put(&Path::from(PARQUET_FILE2), load_parquet(&batch).into())
-        .await?;
-    let p2 = storage.head(&Path::from(PARQUET_FILE2)).await?;
-
-    add_commit(
-        storage.as_ref(),
-        0,
-        generate_commit(vec![
-            TestAction::Metadata,
-            TestAction::Add(PARQUET_FILE1.to_string(), p1.size as i32),
-            TestAction::Add(PARQUET_FILE2.to_string(), p2.size as i32),
-        ]),
-    )
-    .await?;
-
-    let location = Url::parse("memory:///")?;
-    let table_client = DefaultTableClient::new(
-        storage.clone(),
-        Path::from("/"),
-        Arc::new(TokioBackgroundExecutor::new()),
-    );
-
-    let table = Table::new(location);
     let expected_data = vec![batch.clone(), batch];
-
-    let snapshot = table.snapshot(&table_client, None)?;
-    let scan = ScanBuilder::new(snapshot).build();
+    let (table, engine) = tt.table();
+    let scan = table.scan(&engine, None)?.build();
 
     let mut files = 0;
-    let stream = scan.execute(&table_client)?.into_iter().zip(expected_data);
-
+    let stream = scan.execute(&engine)?.into_iter().zip(expected_data);
     for (data, expected) in stream {
         files += 1;
         assert_eq!(data, expected);
@@ -119,54 +35,34 @@ async fn single_commit_two_add_files() -> Result<(), Box<dyn std::error::Error>>
     Ok(())
 }
 
-#[tokio::test]
-async fn two_commits() -> Result<(), Box<dyn std::error::Error>> {
-    let batch = generate_simple_batch()?;
-    let storage = Arc::new(InMemory::new());
+#[test]
+fn two_commits() -> TestResult {
+    let mut factory = TestTableFactory::default();
+    let schema = factory.schemas().simple().clone();
+    let tt = factory.get_table("stats");
 
-    storage
-        .put(&Path::from(PARQUET_FILE1), load_parquet(&batch).into())
-        .await?;
-    let p1 = storage.head(&Path::from(PARQUET_FILE1)).await?;
-    storage
-        .put(&Path::from(PARQUET_FILE2), load_parquet(&batch).into())
-        .await?;
-    let p2 = storage.head(&Path::from(PARQUET_FILE2)).await?;
+    let protocol = factory.create_protocol(1, 2, None, None);
+    let metadata = factory.create_metadata(&schema, None, None);
+    let batch1 = factory.generate_batch(
+        &schema,
+        100,
+        HashMap::from_iter([("id".to_string(), ("1", "3"))]),
+    )?;
+    tt.write_commit(0, &[protocol, metadata], &[batch1.clone()])?;
 
-    add_commit(
-        storage.as_ref(),
-        0,
-        generate_commit(vec![
-            TestAction::Metadata,
-            TestAction::Add(PARQUET_FILE1.to_string(), p1.size as i32),
-        ]),
-    )
-    .await?;
-    add_commit(
-        storage.as_ref(),
-        1,
-        generate_commit(vec![TestAction::Add(
-            PARQUET_FILE2.to_string(),
-            p2.size as i32,
-        )]),
-    )
-    .await?;
+    let batch2 = factory.generate_batch(
+        &schema,
+        100,
+        HashMap::from_iter([("id".to_string(), ("5", "7"))]),
+    )?;
+    tt.write_commit(1, &[], &[batch2.clone()])?;
 
-    let location = Url::parse("memory:///").unwrap();
-    let table_client = DefaultTableClient::new(
-        storage.clone(),
-        Path::from("/"),
-        Arc::new(TokioBackgroundExecutor::new()),
-    );
-
-    let table = Table::new(location);
-    let expected_data = vec![batch.clone(), batch];
-
-    let snapshot = table.snapshot(&table_client, None).unwrap();
-    let scan = ScanBuilder::new(snapshot).build();
+    let expected_data = vec![batch2, batch1];
+    let (table, engine) = tt.table();
+    let scan = table.scan(&engine, None)?.build();
 
     let mut files = 0;
-    let stream = scan.execute(&table_client)?.into_iter().zip(expected_data);
+    let stream = scan.execute(&engine)?.into_iter().zip(expected_data);
 
     for (data, expected) in stream {
         files += 1;
@@ -177,52 +73,35 @@ async fn two_commits() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-#[tokio::test]
-async fn remove_action() -> Result<(), Box<dyn std::error::Error>> {
-    let batch = generate_simple_batch()?;
-    let storage = Arc::new(InMemory::new());
+#[test]
+fn remove_action() -> Result<(), Box<dyn std::error::Error>> {
+    let mut factory = TestTableFactory::default();
+    let schema = factory.schemas().simple().clone();
+    let tt = factory.get_table("stats");
 
-    storage
-        .put(&Path::from(PARQUET_FILE1), load_parquet(&batch).into())
-        .await?;
-    let p1 = storage.head(&Path::from(PARQUET_FILE1)).await?;
+    let protocol = factory.create_protocol(1, 2, None, None);
+    let metadata = factory.create_metadata(&schema, None, None);
+    let batch1 = factory.generate_batch(
+        &schema,
+        100,
+        HashMap::from_iter([("id".to_string(), ("1", "3"))]),
+    )?;
+    tt.write_commit(0, &[protocol, metadata], &[batch1.clone()])?;
 
-    add_commit(
-        storage.as_ref(),
-        0,
-        generate_commit(vec![
-            TestAction::Metadata,
-            TestAction::Add(PARQUET_FILE1.to_string(), p1.size as i32),
-        ]),
-    )
-    .await?;
-    add_commit(
-        storage.as_ref(),
-        1,
-        generate_commit(vec![TestAction::Add(PARQUET_FILE2.to_string(), 727)]),
-    )
-    .await?;
-    add_commit(
-        storage.as_ref(),
-        2,
-        generate_commit(vec![TestAction::Remove(PARQUET_FILE2.to_string())]),
-    )
-    .await?;
+    let batch2 = factory.generate_batch(
+        &schema,
+        100,
+        HashMap::from_iter([("id".to_string(), ("5", "7"))]),
+    )?;
+    let adds = tt.write_commit(1, &[], &[batch2])?;
+    let removes = tt.get_remove_actions(&adds);
+    tt.write_commit(2, &removes, &[])?;
 
-    let location = Url::parse("memory:///").unwrap();
-    let table_client = DefaultTableClient::new(
-        storage.clone(),
-        Path::from("/"),
-        Arc::new(TokioBackgroundExecutor::new()),
-    );
+    let expected_data = vec![batch1];
 
-    let table = Table::new(location);
-    let expected_data = vec![batch];
-
-    let snapshot = table.snapshot(&table_client, None)?;
-    let scan = ScanBuilder::new(snapshot).build();
-
-    let stream = scan.execute(&table_client)?.into_iter().zip(expected_data);
+    let (table, engine) = tt.table();
+    let scan = table.scan(&engine, None)?.build();
+    let stream = scan.execute(&engine)?.into_iter().zip(expected_data);
 
     let mut files = 0;
     for (data, expected) in stream {
@@ -233,73 +112,30 @@ async fn remove_action() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-#[tokio::test]
-async fn stats() -> Result<(), Box<dyn std::error::Error>> {
-    fn generate_commit2(actions: Vec<TestAction>) -> String {
-        actions
-            .into_iter()
-            .map(|test_action| match test_action {
-                TestAction::Add(path, size) => format!(r#"{{"{action}":{{"path":"{path}","partitionValues":{{}},"size":{size},"modificationTime":1587968586000,"dataChange":true, "stats":"{{\"numRecords\":2,\"nullCount\":{{\"id\":0}},\"minValues\":{{\"id\": 5}},\"maxValues\":{{\"id\":7}}}}"}}}}"#, action = "add", path = path),
-                TestAction::Remove(path) => format!(r#"{{"{action}":{{"path":"{path}","partitionValues":{{}},"size":262,"modificationTime":1587968586000,"dataChange":true}}}}"#, action = "remove", path = path),
-                TestAction::Metadata => METADATA.into(),
-            })
-            .fold(String::new(), |a, b| a + &b + "\n")
-    }
-    fn generate_simple_batch2() -> Result<RecordBatch, ArrowError> {
-        let ids = Int64Array::from(vec![5, 7]);
-        let vals = StringArray::from(vec!["e", "g"]);
-        RecordBatch::try_new(
-            Arc::new(Schema::new(vec![
-                Field::new("id", DataType::Int64, true),
-                Field::new("val", DataType::Utf8, true),
-            ])),
-            vec![Arc::new(ids), Arc::new(vals)],
-        )
-    }
+#[test]
+fn stats() -> TestResult {
+    let mut factory = TestTableFactory::default();
+    let schema = factory.schemas().simple().clone();
+    let tt = factory.get_table("stats");
 
-    let batch1 = generate_simple_batch()?;
-    let batch2 = generate_simple_batch2()?;
-    let storage = Arc::new(InMemory::new());
+    let protocol = factory.create_protocol(1, 2, None, None);
+    let metadata = factory.create_metadata(&schema, None, None);
+    tt.write_commit(0, &[protocol, metadata], &[])?;
 
-    storage
-        .put(&Path::from(PARQUET_FILE1), load_parquet(&batch1).into())
-        .await?;
-    let p1 = storage.head(&Path::from(PARQUET_FILE1)).await?;
-    storage
-        .put(&Path::from(PARQUET_FILE2), load_parquet(&batch2).into())
-        .await?;
-    let p2 = storage.head(&Path::from(PARQUET_FILE2)).await?;
+    let batch1 = factory.generate_batch(
+        &schema,
+        100,
+        HashMap::from_iter([("id".to_string(), ("1", "3"))]),
+    )?;
+    let batch2 = factory.generate_batch(
+        &schema,
+        100,
+        HashMap::from_iter([("id".to_string(), ("5", "7"))]),
+    )?;
+    tt.write_commit(1, &[], &[batch1.clone()])?;
+    tt.write_commit(2, &[], &[batch2.clone()])?;
 
-    // valid commit with min/max (0, 2)
-    add_commit(
-        storage.as_ref(),
-        0,
-        generate_commit(vec![
-            TestAction::Metadata,
-            TestAction::Add(PARQUET_FILE1.to_string(), p1.size as i32),
-        ]),
-    )
-    .await?;
-    // storage.add_commit(1, &format!("{}\n", r#"{{"add":{{"path":"doesnotexist","partitionValues":{{}},"size":262,"modificationTime":1587968586000,"dataChange":true, "stats":"{{\"numRecords\":2,\"nullCount\":{{\"id\":0}},\"minValues\":{{\"id\": 0}},\"maxValues\":{{\"id\":2}}}}"}}}}"#));
-    add_commit(
-        storage.as_ref(),
-        1,
-        generate_commit2(vec![TestAction::Add(
-            PARQUET_FILE2.to_string(),
-            p2.size as i32,
-        )]),
-    )
-    .await?;
-
-    let location = Url::parse("memory:///").unwrap();
-    let table_client = DefaultTableClient::new(
-        storage.clone(),
-        Path::from("/"),
-        Arc::new(TokioBackgroundExecutor::new()),
-    );
-
-    let table = Table::new(location);
-    let snapshot = table.snapshot(&table_client, None)?;
+    let (table, engine) = tt.table();
 
     // The first file has id between 1 and 3; the second has id between 5 and 7. For each operator,
     // we validate the boundary values where we expect the set of matched files to change.
@@ -347,16 +183,11 @@ async fn stats() -> Result<(), Box<dyn std::error::Error>> {
             left: Box::new(Expression::column("id")),
             right: Box::new(Expression::literal(value)),
         };
-        let scan = ScanBuilder::new(snapshot.clone())
-            .with_predicate(predicate)
-            .build();
+        let scan = table.scan(&engine, None)?.with_predicate(predicate).build();
 
         let expected_files = expected_batches.len();
         let mut files_scanned = 0;
-        let stream = scan
-            .execute(&table_client)?
-            .into_iter()
-            .zip(expected_batches);
+        let stream = scan.execute(&engine)?.into_iter().zip(expected_batches);
 
         for (batch, expected) in stream {
             files_scanned += 1;
@@ -367,51 +198,15 @@ async fn stats() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-macro_rules! assert_batches_sorted_eq {
-    ($EXPECTED_LINES: expr, $CHUNKS: expr) => {
-        let mut expected_lines: Vec<String> = $EXPECTED_LINES.iter().map(|&s| s.into()).collect();
+fn read_table_data(path: &str, expected: Vec<&str>) -> TestResult {
+    let mut factory = TestTableFactory::default();
+    let tt = factory.load_table("test", path);
 
-        // sort except for header + footer
-        let num_lines = expected_lines.len();
-        if num_lines > 3 {
-            expected_lines.as_mut_slice()[2..num_lines - 1].sort_unstable()
-        }
-
-        let formatted = arrow::util::pretty::pretty_format_batches($CHUNKS)
-            .unwrap()
-            .to_string();
-        // fix for windows: \r\n -->
-
-        let mut actual_lines: Vec<&str> = formatted.trim().lines().collect();
-
-        // sort except for header + footer
-        let num_lines = actual_lines.len();
-        if num_lines > 3 {
-            actual_lines.as_mut_slice()[2..num_lines - 1].sort_unstable()
-        }
-
-        assert_eq!(
-            expected_lines, actual_lines,
-            "\n\nexpected:\n\n{:#?}\nactual:\n\n{:#?}\n\n",
-            expected_lines, actual_lines
-        );
-    };
-}
-
-fn read_table_data(path: &str, expected: Vec<&str>) -> Result<(), Box<dyn std::error::Error>> {
-    let path = std::fs::canonicalize(PathBuf::from(path))?;
-    let url = url::Url::from_directory_path(path).unwrap();
-    let table_client = DefaultTableClient::try_new(
-        &url,
-        std::iter::empty::<(&str, &str)>(),
-        Arc::new(TokioBackgroundExecutor::new()),
-    )?;
-
-    let table = Table::new(url);
-    let snapshot = table.snapshot(&table_client, None)?;
+    let (table, engine) = tt.table();
+    let snapshot = table.snapshot(&engine, None)?;
     let scan = ScanBuilder::new(snapshot).build();
 
-    let batches = scan.execute(&table_client)?;
+    let batches = scan.execute(&engine)?;
     let schema = batches[0].schema();
     let batch = concat_batches(&schema, &batches)?;
 
@@ -420,7 +215,7 @@ fn read_table_data(path: &str, expected: Vec<&str>) -> Result<(), Box<dyn std::e
 }
 
 #[test]
-fn data() -> Result<(), Box<dyn std::error::Error>> {
+fn data() -> TestResult {
     let expected = vec![
         "+--------+--------+---------+",
         "| letter | number | a_float |",

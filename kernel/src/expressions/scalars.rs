@@ -47,6 +47,59 @@ impl Scalar {
             Self::Null(data_type) => data_type.clone(),
         }
     }
+
+    pub fn serialize(&self) -> String {
+        match self {
+            Self::String(s) => s.to_owned(),
+            Self::Byte(b) => b.to_string(),
+            Self::Short(s) => s.to_string(),
+            Self::Integer(i) => i.to_string(),
+            Self::Long(l) => l.to_string(),
+            Self::Float(f) => f.to_string(),
+            Self::Double(d) => d.to_string(),
+            Self::Boolean(b) => {
+                if *b {
+                    "true".to_string()
+                } else {
+                    "false".to_string()
+                }
+            }
+            Self::Timestamp(ts) => {
+                let ts = Utc.timestamp_millis_opt(*ts).single().unwrap();
+                ts.format("%Y-%m-%d %H:%M:%S%.6f").to_string()
+            }
+            Self::Date(days) => {
+                let date = Utc.from_utc_datetime(
+                    &NaiveDateTime::from_timestamp_opt(*days as i64 * 24 * 3600, 0).unwrap(),
+                );
+                date.format("%Y-%m-%d").to_string()
+            }
+            Self::Decimal(value, _, scale) => match scale.cmp(&0) {
+                Ordering::Equal => value.to_string(),
+                Ordering::Greater => {
+                    let scalar_multiple = 10_i128.pow(*scale as u32);
+                    let mut s = String::new();
+                    s.push_str((value / scalar_multiple).to_string().as_str());
+                    s.push('.');
+                    s.push_str(&format!(
+                        "{:0>scale$}",
+                        value % scalar_multiple,
+                        scale = *scale as usize
+                    ));
+                    s
+                }
+                Ordering::Less => {
+                    let mut s = value.to_string();
+                    for _ in 0..(scale.abs()) {
+                        s.push('0');
+                    }
+                    s
+                }
+            },
+            Self::Null(_) => "null".to_string(),
+            _ => todo!(),
+        }
+    }
 }
 
 impl Display for Scalar {

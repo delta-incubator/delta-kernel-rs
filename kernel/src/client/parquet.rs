@@ -17,6 +17,7 @@ use super::schema_util::SchemaAdapter;
 use crate::executor::TaskExecutor;
 use crate::schema::SchemaRef;
 use crate::{DeltaResult, Error, Expression, FileDataReadResultIterator, FileMeta, ParquetHandler};
+
 #[derive(Debug)]
 pub struct DefaultParquetHandler<E: TaskExecutor> {
     store: Arc<DynObjectStore>,
@@ -161,123 +162,63 @@ impl FileOpener for ParquetOpener {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-
     use arrow_array::RecordBatch;
     use itertools::Itertools;
-    use object_store::{local::LocalFileSystem, ObjectStore};
 
     use super::*;
-    use crate::executor::tokio::TokioBackgroundExecutor;
     use crate::schema::{DataType as DeltaDataType, StructField, StructType};
-    use crate::ActionType;
+    use crate::test_util::{assert_batches_sorted_eq, TestResult, TestTableFactory};
 
-    macro_rules! assert_batches_sorted_eq {
-        ($EXPECTED_LINES: expr, $CHUNKS: expr) => {
-            let mut expected_lines: Vec<String> =
-                $EXPECTED_LINES.iter().map(|&s| s.into()).collect();
+    use crate::{ActionType, TableClient};
 
-            // sort except for header + footer
-            let num_lines = expected_lines.len();
-            if num_lines > 3 {
-                expected_lines.as_mut_slice()[2..num_lines - 1].sort_unstable()
-            }
+    #[test]
+    fn test_read_parquet_files() -> TestResult {
+        let mut factory = TestTableFactory::new();
+        let path = "./tests/data/table-with-dv-small/";
+        let file_path =
+            Path::from("part-00000-fae5310a-a37d-4e51-827b-c3d5516560ca-c000.snappy.parquet");
+        let tt = factory.load_table("test", path);
+        let files = &[tt.head(&file_path)?];
 
-            let formatted = arrow::util::pretty::pretty_format_batches($CHUNKS)
-                .unwrap()
-                .to_string();
-            // fix for windows: \r\n -->
+        let (table, engine) = tt.table();
+        let handler = engine.get_parquet_handler();
+        let read_schema = table.snapshot(&engine, None)?.schema().clone();
 
-            let mut actual_lines: Vec<&str> = formatted.trim().lines().collect();
-
-            // sort except for header + footer
-            let num_lines = actual_lines.len();
-            if num_lines > 3 {
-                actual_lines.as_mut_slice()[2..num_lines - 1].sort_unstable()
-            }
-
-            assert_eq!(
-                expected_lines, actual_lines,
-                "\n\nexpected:\n\n{:#?}\nactual:\n\n{:#?}\n\n",
-                expected_lines, actual_lines
-            );
-        };
-    }
-
-    #[tokio::test]
-    async fn test_read_parquet_files() {
-        let store = Arc::new(LocalFileSystem::new());
-
-        let path = std::fs::canonicalize(PathBuf::from(
-            "./tests/data/table-with-dv-small/part-00000-fae5310a-a37d-4e51-827b-c3d5516560ca-c000.snappy.parquet"
-        )).unwrap();
-        let url = url::Url::from_file_path(path).unwrap();
-        let location = Path::from(url.path());
-        let meta = store.head(&location).await.unwrap();
-
-        let reader = ParquetObjectReader::new(store.clone(), meta.clone());
-        let physical_schema = ParquetRecordBatchStreamBuilder::new(reader)
-            .await
-            .unwrap()
-            .schema()
-            .clone();
-
-        let files = &[FileMeta {
-            location: url.clone(),
-            last_modified: meta.last_modified.timestamp_millis(),
-            size: meta.size,
-        }];
-
-        let handler = DefaultParquetHandler::new(store, Arc::new(TokioBackgroundExecutor::new()));
         let data: Vec<RecordBatch> = handler
-            .read_parquet_files(files, Arc::new(physical_schema.try_into().unwrap()), None)
-            .unwrap()
-            .try_collect()
-            .unwrap();
+            .read_parquet_files(files, Arc::new(read_schema.try_into().unwrap()), None)?
+            .try_collect()?;
 
         assert_eq!(data.len(), 1);
         assert_eq!(data[0].num_rows(), 10);
+
+        Ok(())
     }
 
-    async fn get_parquet_builder(
-        path: impl AsRef<std::path::Path>,
-    ) -> (
-        ParquetRecordBatchStreamBuilder<ParquetObjectReader>,
-        [FileMeta; 1],
-        Arc<dyn ObjectStore>,
-    ) {
-        let store = Arc::new(LocalFileSystem::new());
-        let path = std::fs::canonicalize(path).unwrap();
-        let url = url::Url::from_file_path(path).unwrap();
-        let location = Path::from(url.path());
-        let meta = store.head(&location).await.unwrap();
-        let reader = ParquetObjectReader::new(store.clone(), meta.clone());
-        let files = [FileMeta {
-            location: url.clone(),
-            last_modified: meta.last_modified.timestamp_millis(),
-            size: meta.size,
-        }];
-        (
-            ParquetRecordBatchStreamBuilder::new(reader).await.unwrap(),
-            files,
-            store,
-        )
+    #[test]
+    fn test_projection_pushdown() -> TestResult {
+        let mut factory = TestTableFactory::new();
+        let _test_table = factory.get_table("default");
+        Ok(())
     }
 
-    #[tokio::test]
-    async fn test_read_parquet_projection() {
-        let path = "../acceptance/tests/dat/out/reader_tests/generated/with_checkpoint/delta/_delta_log/00000000000000000002.checkpoint.parquet";
-        let (_, files, store) = get_parquet_builder(path).await;
-        let handler = DefaultParquetHandler::new(store, Arc::new(TokioBackgroundExecutor::new()));
+    #[test]
+    fn test_read_parquet_projection() -> TestResult {
+        let mut factory = TestTableFactory::new();
+        let path = "../acceptance/tests/dat/out/reader_tests/generated/with_checkpoint/delta/";
+        let file_path = Path::from("_delta_log/00000000000000000002.checkpoint.parquet");
+        let tt = factory.load_table("test", path);
+        let checkpoint_file = &[tt.head(&file_path)?];
 
-        let read_schema: Arc<StructType> = Arc::new(StructType::new(vec![ActionType::Metadata
+        let (_, engine) = tt.table();
+        let handler = engine.get_parquet_handler();
+
+        let read_schema = Arc::new(StructType::new(vec![ActionType::Metadata
             .schema_field()
             .clone()]));
-        let data: Vec<RecordBatch> = handler
-            .read_parquet_files(&files, read_schema, None)
-            .unwrap()
-            .try_collect()
-            .unwrap();
+
+        let data: Vec<_> = handler
+            .read_parquet_files(checkpoint_file, read_schema, None)?
+            .try_collect()?;
 
         let expected = [
             "+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+",
@@ -296,10 +237,8 @@ mod tests {
             .schema_field()
             .clone()]));
         let data: Vec<RecordBatch> = handler
-            .read_parquet_files(&files, read_schema, None)
-            .unwrap()
-            .try_collect()
-            .unwrap();
+            .read_parquet_files(checkpoint_file, read_schema, None)?
+            .try_collect()?;
 
         let expected = [
             "+--------------------------------------------------------------------------------+",
@@ -323,10 +262,8 @@ mod tests {
             true,
         )]));
         let data: Vec<RecordBatch> = handler
-            .read_parquet_files(&files, read_schema, None)
-            .unwrap()
-            .try_collect()
-            .unwrap();
+            .read_parquet_files(checkpoint_file, read_schema, None)?
+            .try_collect()?;
 
         let expected = [
             "+-----------------------+",
@@ -339,5 +276,7 @@ mod tests {
             "+-----------------------+",
         ];
         assert_batches_sorted_eq!(expected, &data);
+
+        Ok(())
     }
 }

@@ -2,13 +2,16 @@ use std::collections::HashMap;
 use std::io::{Cursor, Read};
 use std::sync::Arc;
 
-use roaring::RoaringTreemap;
-use url::Url;
+#[cfg(feature = "serde")]
+use serde::{Deserialize, Serialize};
 
 use crate::schema::StructType;
 use crate::{DeltaResult, Error, FileSystemClient};
+use roaring::RoaringTreemap;
+use url::Url;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct Format {
     /// Name of the encoding for files in this table
     pub provider: String,
@@ -26,6 +29,11 @@ impl Default for Format {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    feature = "serde",
+    derive(Serialize, Deserialize),
+    serde(rename_all = "camelCase")
+)]
 pub struct Metadata {
     /// Unique identifier for this table
     pub id: String,
@@ -86,6 +94,11 @@ impl Metadata {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    feature = "serde",
+    derive(Serialize, Deserialize),
+    serde(rename_all = "camelCase")
+)]
 pub struct Protocol {
     /// The minimum version of the Delta read protocol that a client must implement
     /// in order to correctly read this table
@@ -95,9 +108,11 @@ pub struct Protocol {
     pub min_writer_version: i32,
     /// A collection of features that a client must implement in order to correctly
     /// read this table (exist only when minReaderVersion is set to 3)
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
     pub reader_features: Option<Vec<String>>,
     /// A collection of features that a client must implement in order to correctly
     /// write this table (exist only when minWriterVersion is set to 7)
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
     pub writer_features: Option<Vec<String>>,
 }
 
@@ -129,6 +144,11 @@ impl Protocol {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    feature = "serde",
+    derive(Serialize, Deserialize),
+    serde(rename_all = "camelCase")
+)]
 pub struct DeletionVectorDescriptor {
     /// A single character to indicate how to access the DV. Legal options are: ['u', 'i', 'p'].
     pub storage_type: String,
@@ -260,6 +280,11 @@ impl DeletionVectorDescriptor {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    feature = "serde",
+    derive(Serialize, Deserialize),
+    serde(rename_all = "camelCase")
+)]
 pub struct Add {
     /// A relative path to a data file from the root of the table or an absolute path to a file
     /// that should be added to the table. The path is a URI as specified by
@@ -313,6 +338,11 @@ impl Add {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    feature = "serde",
+    derive(Serialize, Deserialize),
+    serde(rename_all = "camelCase")
+)]
 pub struct Remove {
     /// A relative path to a data file from the root of the table or an absolute path to a file
     /// that should be added to the table. The path is a URI as specified by

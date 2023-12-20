@@ -95,6 +95,12 @@ impl std::fmt::Debug for Scan {
     }
 }
 
+impl From<ScanBuilder> for Scan {
+    fn from(builder: ScanBuilder) -> Self {
+        builder.build()
+    }
+}
+
 impl Scan {
     /// Get a shred reference to the [`Schema`] of the scan.
     ///
