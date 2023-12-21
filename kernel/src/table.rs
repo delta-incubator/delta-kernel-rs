@@ -39,7 +39,7 @@ impl Table {
         table_client: &dyn TableClient<JsonReadContext = JRC, ParquetReadContext = PRC>,
         version: Option<Version>,
     ) -> DeltaResult<Arc<Snapshot>> {
-        Snapshot::try_new(self.location.clone(), table_client, version)
+        Snapshot::try_new(self.location.clone(), table_client, None, version)
     }
 }
 

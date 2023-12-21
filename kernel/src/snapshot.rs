@@ -12,8 +12,10 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 
 use crate::actions::{parse_action, Action, ActionType, Metadata, Protocol};
+use crate::engine_data::EngineData;
 use crate::path::LogPath;
-use crate::schema::Schema;
+use crate::schema::{Schema, SchemaRef, StructType};
+use crate::simple_client::EngineClient;
 use crate::Expression;
 use crate::{DeltaResult, Error, FileMeta, FileSystemClient, TableClient, Version};
 
@@ -49,6 +51,7 @@ impl LogSegment {
         read_schema: Arc<ArrowSchema>,
         predicate: Option<Expression>,
     ) -> DeltaResult<impl Iterator<Item = DeltaResult<(RecordBatch, bool)>>> {
+        println!("read schema here: {:#?}", read_schema);
         let json_client = table_client.get_json_handler();
         let read_contexts =
             json_client.contextualize_file_reads(&self.commit_files, predicate.clone())?;
@@ -118,6 +121,64 @@ impl LogSegment {
     }
 }
 
+// will replace above, uses new apis
+pub struct LogSegmentV2 {
+    log_root: Url,
+    /// Reverse order sorted commit files in the log segment
+    pub(crate) commit_files: Vec<FileMeta>,
+    /// checkpoint files in the log segment.
+    pub(crate) checkpoint_files: Vec<FileMeta>,
+}
+
+impl LogSegmentV2 {
+    fn replay(
+        &self,
+        engine_client: &dyn EngineClient,
+        read_schema: SchemaRef,
+        predicate: Option<Expression>,
+    ) -> DeltaResult<impl Iterator<Item = DeltaResult<(Box<dyn EngineData>, bool)>>> {
+        let json_client = engine_client.get_json_handler();
+        let commit_stream = json_client
+            .read_json_files(
+                self.commit_files
+                    .iter()
+                    .map(|fm| fm.location.clone())
+                    .collect(),
+                read_schema,
+            )?
+            .map_ok(|batch| (batch, true));
+
+        // let parquet_client = table_client.get_parquet_handler();
+        // let read_contexts =
+        //     parquet_client.contextualize_file_reads(&self.checkpoint_files, predicate)?;
+        // let checkpoint_stream = parquet_client
+        //     .read_parquet_files(read_contexts, Arc::new(read_schema.as_ref().try_into()?))?
+        //     .map_ok(|batch| (batch, false));
+
+        // let batches = commit_stream.chain(checkpoint_stream);
+
+        Ok(commit_stream)
+    }
+
+    fn read_metadata(&self, engine_client: &dyn EngineClient) -> DeltaResult<Option<Metadata>> {
+        //let metadata_schema = crate::actions::schemas::METADATA_SCHEMA.clone();
+        let schema = StructType::new(vec![crate::actions::schemas::METADATA_FIELD.clone()]);
+        let data_batches = self.replay(engine_client, Arc::new(schema), None)?;
+        let mut metadata_opt: Option<Metadata> = None;
+        for batch in data_batches {
+            let (batch, _) = batch?;
+            match crate::actions::action_definitions::Metadata::try_new_from_data(
+                engine_client,
+                batch.as_ref(),
+            ) {
+                Ok(md) => metadata_opt = Some(md.into()),
+                _ => {}
+            }
+        }
+        Ok(metadata_opt)
+    }
+}
+
 // TODO expose methods for accessing the files of a table (with file pruning).
 /// In-memory representation of a specific snapshot of a Delta table. While a `DeltaTable` exists
 /// throughout time, `Snapshot`s represent a view of a table at a specific point in time; they
@@ -153,6 +214,7 @@ impl Snapshot {
     pub fn try_new<JRC: Send, PRC: Send>(
         table_root: Url,
         table_client: &dyn TableClient<JsonReadContext = JRC, ParquetReadContext = PRC>,
+        engine_client: Option<&dyn EngineClient>, // will become non-optional and replace above
         version: Option<Version>,
     ) -> DeltaResult<Arc<Self>> {
         let fs_client = table_client.get_file_system_client();
@@ -193,17 +255,33 @@ impl Snapshot {
         }
 
         let log_segment = LogSegment {
-            log_root: log_url,
-            commit_files,
-            checkpoint_files,
+            log_root: log_url.clone(),
+            commit_files: commit_files.clone(),
+            checkpoint_files: checkpoint_files.clone(),
         };
 
-        Ok(Arc::new(Self::try_new_from_log_segment(
-            table_root,
-            log_segment,
-            version_eff,
-            table_client,
-        )?))
+        match engine_client {
+            Some(ec) => {
+                let log_segmentv2 = LogSegmentV2 {
+                    log_root: log_url,
+                    commit_files,
+                    checkpoint_files,
+                };
+                Ok(Arc::new(Self::try_new_from_log_segmentV2(
+                    table_root,
+                    log_segment,
+                    log_segmentv2,
+                    version_eff,
+                    ec,
+                )?))
+            }
+            None => Ok(Arc::new(Self::try_new_from_log_segment(
+                table_root,
+                log_segment,
+                version_eff,
+                table_client,
+            )?)),
+        }
     }
 
     /// Create a new [`Snapshot`] instance.
@@ -224,6 +302,29 @@ impl Snapshot {
             version,
             metadata,
             protocol,
+            schema,
+        })
+    }
+
+    /// Create a new [`Snapshot`] instance.
+    pub(crate) fn try_new_from_log_segmentV2(
+        location: Url,
+        log_segment: LogSegment,
+        log_segmentv2: LogSegmentV2,
+        version: Version,
+        engine_client: &dyn EngineClient,
+    ) -> DeltaResult<Self> {
+        let metadata = log_segmentv2
+            .read_metadata(engine_client)?
+            .ok_or(Error::MissingMetadata)?;
+
+        let schema = metadata.schema()?;
+        Ok(Self {
+            table_root: location,
+            log_segment,
+            version,
+            metadata,
+            protocol: Protocol::default(),
             schema,
         })
     }
@@ -398,6 +499,7 @@ mod tests {
     use crate::executor::tokio::TokioBackgroundExecutor;
     use crate::filesystem::ObjectStoreFileSystemClient;
     use crate::schema::StructType;
+    use crate::simple_client::SimpleClient;
 
     fn default_table_client(url: &Url) -> DefaultTableClient<TokioBackgroundExecutor> {
         DefaultTableClient::try_new(
@@ -415,7 +517,7 @@ mod tests {
         let url = url::Url::from_directory_path(path).unwrap();
 
         let client = default_table_client(&url);
-        let snapshot = Snapshot::try_new(url, &client, Some(1)).unwrap();
+        let snapshot = Snapshot::try_new(url, &client, None, Some(1)).unwrap();
 
         let expected = Protocol {
             min_reader_version: 3,
@@ -437,7 +539,7 @@ mod tests {
         let url = url::Url::from_directory_path(path).unwrap();
 
         let client = default_table_client(&url);
-        let snapshot = Snapshot::try_new(url, &client, None).unwrap();
+        let snapshot = Snapshot::try_new(url, &client, None, None).unwrap();
 
         let expected = Protocol {
             min_reader_version: 3,
@@ -479,7 +581,7 @@ mod tests {
         .unwrap();
         let location = url::Url::from_directory_path(path).unwrap();
         let table_client = default_table_client(&location);
-        let snapshot = Snapshot::try_new(location, &table_client, None).unwrap();
+        let snapshot = Snapshot::try_new(location, &table_client, None, None).unwrap();
 
         assert_eq!(snapshot.log_segment.checkpoint_files.len(), 1);
         assert_eq!(
@@ -491,5 +593,28 @@ mod tests {
             LogPath(&snapshot.log_segment.commit_files[0].location).commit_version(),
             Some(3)
         );
+    }
+
+    #[test]
+    fn test_snapshot_read_metadata_new() {
+        let path =
+            std::fs::canonicalize(PathBuf::from("./tests/data/table-with-dv-small/")).unwrap();
+        let url = url::Url::from_directory_path(path).unwrap();
+
+        let client = default_table_client(&url);
+        let engine_client = SimpleClient::new();
+        let snapshot = Snapshot::try_new(url, &client, Some(&engine_client), Some(1)).unwrap();
+
+        // let expected = Protocol {
+        //     min_reader_version: 3,
+        //     min_writer_version: 7,
+        //     reader_features: Some(vec!["deletionVectors".into()]),
+        //     writer_features: Some(vec!["deletionVectors".into()]),
+        // };
+        // assert_eq!(snapshot.protocol(), &expected);
+
+        // let schema_string = r#"{"type":"struct","fields":[{"name":"value","type":"integer","nullable":true,"metadata":{}}]}"#;
+        // let expected: StructType = serde_json::from_str(schema_string).unwrap();
+        // assert_eq!(snapshot.schema(), &expected);
     }
 }

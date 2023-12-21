@@ -86,32 +86,25 @@ impl Metadata {
     }
 }
 
-#[derive(Default)]
-pub struct MetadataVisitor {
-    pub(crate) extracted: Option<Metadata>,
-}
-
-impl DataVisitor for MetadataVisitor {
-    fn visit(&mut self, vals: &[Option<DataItem<'_>>]) {
-        let id = vals[0]
-            .as_ref()
-            .expect("MetaData must have an id")
-            .as_str()
-            .expect("id must be str");
-        let created_time = vals[1]
-            .as_ref()
-            .expect("Action must have a created_time")
-            .as_i64()
-            .expect("created_time must be i64");
-        self.extracted = Some(Metadata {
-            id: id.to_string(),
-            created_time: Some(created_time),
-            ..Default::default()
-        })
+impl From<super::action_definitions::Metadata> for Metadata {
+    fn from(other: super::action_definitions::Metadata) -> Self {
+        Metadata {
+            id: other.id,
+            name: other.name,
+            description: other.description,
+            format: Format {
+                provider: other.format.provider,
+                options: other.format.options,
+            },
+            schema_string: other.schema_string,
+            partition_columns: other.partition_columns,
+            created_time: other.created_time,
+            configuration: other.configuration,
+        }
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub struct Protocol {
     /// The minimum version of the Delta read protocol that a client must implement
     /// in order to correctly read this table

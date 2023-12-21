@@ -1,51 +1,60 @@
 //! Schema definitions for action types
 
+use std::sync::Arc;
+
 use lazy_static::lazy_static;
 
 use super::ActionType;
 use crate::schema::{ArrayType, DataType, MapType, StructField, StructType};
 
 lazy_static! {
-    // https://github.com/delta-io/delta/blob/master/PROTOCOL.md#change-metadata
-    static ref METADATA_FIELD: StructField = StructField::new(
-        "metaData",
-        StructType::new(vec![
-            StructField::new("id", DataType::STRING, false),
-            StructField::new("name", DataType::STRING, true),
-            StructField::new("description", DataType::STRING, true),
-            StructField::new(
-                "format",
-                StructType::new(vec![
-                    StructField::new("provider", DataType::STRING, false),
-                    StructField::new(
-                        "configuration",
-                        MapType::new(
-                            DataType::STRING,
-                            DataType::STRING,
-                            true,
-                        ),
+    pub static ref METADATA_FIELDS: StructType = StructType::new(vec![
+        StructField::new("id", DataType::STRING, false),
+        StructField::new("name", DataType::STRING, true),
+        StructField::new("description", DataType::STRING, true),
+        StructField::new(
+            "format",
+            StructType::new(vec![
+                StructField::new("provider", DataType::STRING, false),
+                StructField::new(
+                    "configuration",
+                    MapType::new(
+                        DataType::STRING,
+                        DataType::STRING,
                         true,
                     ),
-                ]),
-                false,
-            ),
-            StructField::new("schemaString", DataType::STRING, false),
-            StructField::new(
-                "partitionColumns",
-                ArrayType::new(DataType::STRING, false),
-                false,
-            ),
-            StructField::new("createdTime", DataType::LONG, true),
-            StructField::new(
-                "configuration",
-                MapType::new(
-                    DataType::STRING,
-                    DataType::STRING,
                     true,
                 ),
-                false,
+            ]),
+            false,
+        ),
+        StructField::new("schemaString", DataType::STRING, false),
+        StructField::new(
+            "partitionColumns",
+            ArrayType::new(DataType::STRING, false),
+            false,
+        ),
+        StructField::new("createdTime", DataType::LONG, true),
+        StructField::new(
+            "configuration",
+            MapType::new(
+                DataType::STRING,
+                DataType::STRING,
+                true,
             ),
-        ]),
+            false,
+        ),
+    ]);
+
+    pub static ref METADATA_SCHEMA: Arc<StructType> = Arc::new(StructType {
+        type_name: "metaData".to_string(),
+        fields: METADATA_FIELDS.fields.clone(),
+    });
+
+    // https://github.com/delta-io/delta/blob/master/PROTOCOL.md#change-metadata
+    pub static ref METADATA_FIELD: StructField = StructField::new(
+        "metaData",
+        METADATA_FIELDS.clone(),
         true,
     );
     // https://github.com/delta-io/delta/blob/master/PROTOCOL.md#protocol-evolution

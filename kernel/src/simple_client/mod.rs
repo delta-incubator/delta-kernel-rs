@@ -9,17 +9,14 @@ pub mod data;
 
 struct SimpleJsonHandler {}
 impl JsonHandler for SimpleJsonHandler {
-    fn read_json_files(&self, files: Vec<Url>, schema: SchemaRef) -> DeltaResult<FileReadResult> {
-        files
-            .into_iter()
-            .map(|file| {
-                let d = data::SimpleData::try_create_from_json(schema.clone(), file);
-                d.map(|d| {
-                    let b: Box<dyn EngineData> = Box::new(d);
-                    b
-                })
+    fn read_json_files(&self, files: Vec<Url>, schema: SchemaRef) -> DeltaResult<FileReadResultIt> {
+        Ok(Box::new(files.into_iter().map(move |file| {
+            let d = data::SimpleData::try_create_from_json(schema.clone(), file);
+            d.map(|d| {
+                let b: Box<dyn EngineData> = Box::new(d);
+                b
             })
-            .collect()
+        })))
     }
 }
 
@@ -75,10 +72,11 @@ impl EngineClient for SimpleClient {
 
 // Everything below will be moved to ../../lib.rs when we switch to EngineClient from TableClient
 
-pub type FileReadResult = Vec<Box<dyn EngineData>>;
+pub type FileReadResult = (crate::FileMeta, Box<dyn EngineData>);
+pub type FileReadResultIt = Box<dyn Iterator<Item = DeltaResult<Box<dyn EngineData>>> + Send>;
 
 pub trait JsonHandler {
-    fn read_json_files(&self, files: Vec<Url>, schema: SchemaRef) -> DeltaResult<FileReadResult>;
+    fn read_json_files(&self, files: Vec<Url>, schema: SchemaRef) -> DeltaResult<FileReadResultIt>;
 }
 pub trait EngineClient {
     fn get_json_handler(&self) -> Arc<dyn JsonHandler>;
