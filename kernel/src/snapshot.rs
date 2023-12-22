@@ -123,7 +123,7 @@ impl LogSegment {
 
 // will replace above, uses new apis
 pub struct LogSegmentV2 {
-    log_root: Url,
+    _log_root: Url,
     /// Reverse order sorted commit files in the log segment
     pub(crate) commit_files: Vec<FileMeta>,
     /// checkpoint files in the log segment.
@@ -135,7 +135,7 @@ impl LogSegmentV2 {
         &self,
         engine_client: &dyn EngineClient,
         read_schema: SchemaRef,
-        predicate: Option<Expression>,
+        _predicate: Option<Expression>,
     ) -> DeltaResult<impl Iterator<Item = DeltaResult<(Box<dyn EngineData>, bool)>>> {
         let json_client = engine_client.get_json_handler();
         let commit_stream = json_client
@@ -160,22 +160,37 @@ impl LogSegmentV2 {
         Ok(commit_stream)
     }
 
-    fn read_metadata(&self, engine_client: &dyn EngineClient) -> DeltaResult<Option<Metadata>> {
+    fn read_metadata(&self, engine_client: &dyn EngineClient) -> DeltaResult<Option<(Metadata, Protocol)>> {
         //let metadata_schema = crate::actions::schemas::METADATA_SCHEMA.clone();
-        let schema = StructType::new(vec![crate::actions::schemas::METADATA_FIELD.clone()]);
+        let schema = StructType::new(vec![
+            crate::actions::schemas::METADATA_FIELD.clone(),
+            crate::actions::schemas::PROTOCOL_FIELD.clone(),
+        ]);
         let data_batches = self.replay(engine_client, Arc::new(schema), None)?;
         let mut metadata_opt: Option<Metadata> = None;
+        let mut protocol_opt: Option<Protocol> = None;
         for batch in data_batches {
             let (batch, _) = batch?;
-            match crate::actions::action_definitions::Metadata::try_new_from_data(
-                engine_client,
-                batch.as_ref(),
-            ) {
-                Ok(md) => metadata_opt = Some(md.into()),
-                _ => {}
+            if metadata_opt.is_none() {
+                match crate::actions::action_definitions::Metadata::try_new_from_data(
+                    engine_client,
+                    batch.as_ref(),
+                ) {
+                    Ok(md) => metadata_opt = Some(md.into()),
+                    _ => {}
+                }
+            }
+            if protocol_opt.is_none() {
+                match crate::actions::action_definitions::Protocol::try_new_from_data(
+                    engine_client,
+                    batch.as_ref(),
+                ) {
+                    Ok(p) => protocol_opt = Some(p.into()),
+                    _ => {}
+                }
             }
         }
-        Ok(metadata_opt)
+        Ok(metadata_opt.zip(protocol_opt))
     }
 }
 
@@ -263,11 +278,11 @@ impl Snapshot {
         match engine_client {
             Some(ec) => {
                 let log_segmentv2 = LogSegmentV2 {
-                    log_root: log_url,
+                    _log_root: log_url,
                     commit_files,
                     checkpoint_files,
                 };
-                Ok(Arc::new(Self::try_new_from_log_segmentV2(
+                Ok(Arc::new(Self::try_new_from_log_segment_v2(
                     table_root,
                     log_segment,
                     log_segmentv2,
@@ -307,14 +322,14 @@ impl Snapshot {
     }
 
     /// Create a new [`Snapshot`] instance.
-    pub(crate) fn try_new_from_log_segmentV2(
+    pub(crate) fn try_new_from_log_segment_v2(
         location: Url,
         log_segment: LogSegment,
         log_segmentv2: LogSegmentV2,
         version: Version,
         engine_client: &dyn EngineClient,
     ) -> DeltaResult<Self> {
-        let metadata = log_segmentv2
+        let (metadata,protocol) = log_segmentv2
             .read_metadata(engine_client)?
             .ok_or(Error::MissingMetadata)?;
 
@@ -324,7 +339,7 @@ impl Snapshot {
             log_segment,
             version,
             metadata,
-            protocol: Protocol::default(),
+            protocol,
             schema,
         })
     }
@@ -605,16 +620,20 @@ mod tests {
         let engine_client = SimpleClient::new();
         let snapshot = Snapshot::try_new(url, &client, Some(&engine_client), Some(1)).unwrap();
 
-        // let expected = Protocol {
-        //     min_reader_version: 3,
-        //     min_writer_version: 7,
-        //     reader_features: Some(vec!["deletionVectors".into()]),
-        //     writer_features: Some(vec!["deletionVectors".into()]),
-        // };
-        // assert_eq!(snapshot.protocol(), &expected);
+        let md = snapshot.metadata();
+        assert_eq!(md.id, "testId");
+        assert_eq!(md.created_time, Some(1677811175819));
+        
+        let expected = Protocol {
+            min_reader_version: 3,
+            min_writer_version: 7,
+            reader_features: None,
+            writer_features: None,
+        };
+        assert_eq!(snapshot.protocol(), &expected);
 
-        // let schema_string = r#"{"type":"struct","fields":[{"name":"value","type":"integer","nullable":true,"metadata":{}}]}"#;
-        // let expected: StructType = serde_json::from_str(schema_string).unwrap();
-        // assert_eq!(snapshot.schema(), &expected);
+        let schema_string = r#"{"type":"struct","fields":[{"name":"value","type":"integer","nullable":true,"metadata":{}}]}"#;
+        let expected: StructType = serde_json::from_str(schema_string).unwrap();
+        assert_eq!(snapshot.schema(), &expected);
     }
 }

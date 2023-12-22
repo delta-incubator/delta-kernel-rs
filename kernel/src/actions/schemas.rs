@@ -58,7 +58,7 @@ lazy_static! {
         true,
     );
     // https://github.com/delta-io/delta/blob/master/PROTOCOL.md#protocol-evolution
-    static ref PROTOCOL_FIELD: StructField = StructField::new(
+    pub static ref PROTOCOL_FIELD: StructField = StructField::new(
         "protocol",
         StructType::new(vec![
             StructField::new("minReaderVersion", DataType::INTEGER, false),

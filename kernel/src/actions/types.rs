@@ -5,7 +5,6 @@ use std::sync::Arc;
 use roaring::RoaringTreemap;
 use url::Url;
 
-use crate::engine_data::{DataItem, DataVisitor};
 use crate::schema::StructType;
 use crate::{DeltaResult, Error, FileSystemClient};
 
@@ -146,6 +145,18 @@ impl Protocol {
         self
     }
 }
+
+impl From<super::action_definitions::Protocol> for Protocol {
+    fn from(other: super::action_definitions::Protocol) -> Self {
+        Protocol {
+            min_reader_version: other.min_reader_version,
+            min_writer_version: other.min_writer_version,
+            reader_features: other.reader_features,
+            writer_features: other.writer_features,
+        }
+    }
+}
+
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeletionVectorDescriptor {
