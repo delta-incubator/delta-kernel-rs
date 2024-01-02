@@ -31,10 +31,12 @@ pub trait TaskExecutor: Send + Sync + 'static {
 
 #[cfg(any(feature = "tokio", test))]
 pub mod tokio {
-    use super::TaskExecutor;
-    use futures::{future::BoxFuture, Future};
     use std::sync::mpsc::channel;
+
+    use futures::{future::BoxFuture, Future};
     use tokio::runtime::RuntimeFlavor;
+
+    use super::TaskExecutor;
 
     /// A [`TaskExecutor`] that uses the tokio single-threaded runtime in a
     /// background thread to service tasks.

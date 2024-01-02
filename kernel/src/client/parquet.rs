@@ -1,5 +1,4 @@
 //! Default Parquet handler implementation
-
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -11,6 +10,7 @@ use object_store::{DynObjectStore, ObjectMeta};
 use parquet::arrow::arrow_reader::ArrowReaderOptions;
 use parquet::arrow::async_reader::{ParquetObjectReader, ParquetRecordBatchStreamBuilder};
 use parquet::arrow::ProjectionMask;
+use tracing::debug;
 
 use super::file_handler::{FileOpenFuture, FileOpener, FileStream};
 use super::schema_util::SchemaAdapter;
@@ -136,6 +136,8 @@ impl FileOpener for ParquetOpener {
             let (mapping, projection) =
                 adapter.map_schema(builder.schema(), builder.parquet_schema())?;
 
+            debug!("projection: {:?}", projection);
+
             let mask = ProjectionMask::leaves(builder.parquet_schema(), projection);
             if let Some(limit) = limit {
                 builder = builder.with_limit(limit)
@@ -162,14 +164,13 @@ impl FileOpener for ParquetOpener {
 
 #[cfg(test)]
 mod tests {
-    use arrow_array::RecordBatch;
+    use arrow_array::{RecordBatch, StructArray};
     use itertools::Itertools;
 
     use super::*;
     use crate::schema::{DataType as DeltaDataType, StructField, StructType};
     use crate::test_util::{assert_batches_sorted_eq, TestResult, TestTableFactory};
-
-    use crate::{ActionType, TableClient};
+    use crate::{actions::Action, ActionType, TableClient};
 
     #[test]
     fn test_read_parquet_files() -> TestResult {
@@ -177,7 +178,7 @@ mod tests {
         let path = "./tests/data/table-with-dv-small/";
         let file_path =
             Path::from("part-00000-fae5310a-a37d-4e51-827b-c3d5516560ca-c000.snappy.parquet");
-        let tt = factory.load_table("test", path);
+        let tt = factory.load_location("test", path);
         let files = &[tt.head(&file_path)?];
 
         let (table, engine) = tt.table();
@@ -185,7 +186,7 @@ mod tests {
         let read_schema = table.snapshot(&engine, None)?.schema().clone();
 
         let data: Vec<RecordBatch> = handler
-            .read_parquet_files(files, Arc::new(read_schema.try_into().unwrap()), None)?
+            .read_parquet_files(files, Arc::new(read_schema), None)?
             .try_collect()?;
 
         assert_eq!(data.len(), 1);
@@ -196,8 +197,89 @@ mod tests {
 
     #[test]
     fn test_projection_pushdown() -> TestResult {
+        let table_schema = StructType::new(vec![
+            StructField::new("id", DeltaDataType::LONG, true),
+            StructField::new("float", DeltaDataType::DOUBLE, true),
+            StructField::new("string", DeltaDataType::STRING, true),
+        ]);
+
         let mut factory = TestTableFactory::new();
-        let _test_table = factory.get_table("default");
+
+        let tt = factory.get_table("default");
+        let protocol = factory.create_protocol(1, 2, None, None);
+        let metadata = factory.create_metadata(&table_schema, None, None);
+        tt.write_commit(0, &[protocol, metadata], &[])?;
+
+        let batch = factory.generate_batch(&table_schema, 10, Default::default())?;
+        let written = tt.write_commit(1, &[], &[batch.clone()])?;
+        assert_eq!(written.len(), 1);
+        let file_path = match &written[0] {
+            Action::Add(add) => Path::parse(&add.path)?,
+            _ => panic!("No file path in commit"),
+        };
+        let meta = tt.head(&file_path)?;
+
+        let read_schema = Arc::new(StructType::new(vec![
+            StructField::new("id", DeltaDataType::LONG, true),
+            StructField::new("float", DeltaDataType::DOUBLE, true),
+        ]));
+
+        let (_, engine) = tt.table();
+        let handler = engine.get_parquet_handler();
+        let data: Vec<_> = handler
+            .read_parquet_files(&[meta], read_schema.clone(), None)?
+            .try_collect()?;
+
+        let expected_schema: ArrowSchemaRef = Arc::new(read_schema.as_ref().try_into()?);
+        assert_eq!(&data[0].schema(), &expected_schema);
+
+        let struct_schema = StructType::new(vec![
+            StructField::new("a", DeltaDataType::LONG, true),
+            StructField::new("b", DeltaDataType::DOUBLE, true),
+        ]);
+        let table_schema_struct = StructType::new(vec![
+            StructField::new("id", DeltaDataType::LONG, true),
+            StructField::new("float", DeltaDataType::DOUBLE, true),
+            StructField::new("string", DeltaDataType::STRING, true),
+            StructField::new("struct", struct_schema.clone(), true),
+        ]);
+
+        let struct_batch: StructArray = factory
+            .generate_batch(&struct_schema, 10, Default::default())?
+            .into();
+
+        let new_batch = RecordBatch::try_new(
+            Arc::new((&table_schema_struct).try_into()?),
+            vec![
+                batch.column(0).clone(),
+                batch.column(1).clone(),
+                batch.column(2).clone(),
+                Arc::new(struct_batch),
+            ],
+        )?;
+        let written = tt.write_commit(1, &[], &[new_batch.clone()])?;
+        assert_eq!(written.len(), 1);
+        let file_path = match &written[0] {
+            Action::Add(add) => Path::parse(&add.path)?,
+            _ => panic!("No file path in commit"),
+        };
+        let meta = tt.head(&file_path)?;
+
+        let read_schema_struct = Arc::new(StructType::new(vec![
+            StructField::new("id", DeltaDataType::LONG, true),
+            StructField::new(
+                "struct",
+                StructType::new(vec![StructField::new("b", DeltaDataType::DOUBLE, false)]),
+                true,
+            ),
+        ]));
+        let data: Vec<_> = handler
+            .read_parquet_files(&[meta], read_schema_struct.clone(), None)?
+            .try_collect()?;
+
+        let expected_schema: ArrowSchemaRef = Arc::new(read_schema_struct.as_ref().try_into()?);
+        assert_eq!(&data[0].schema(), &expected_schema);
+
         Ok(())
     }
 
@@ -206,7 +288,7 @@ mod tests {
         let mut factory = TestTableFactory::new();
         let path = "../acceptance/tests/dat/out/reader_tests/generated/with_checkpoint/delta/";
         let file_path = Path::from("_delta_log/00000000000000000002.checkpoint.parquet");
-        let tt = factory.load_table("test", path);
+        let tt = factory.load_location("test", path);
         let checkpoint_file = &[tt.head(&file_path)?];
 
         let (_, engine) = tt.table();
@@ -224,9 +306,9 @@ mod tests {
             "+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+",
             "| metaData                                                                                                                                                                                                                                                                                                                                                                                                                                       |",
             "+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+",
-            "| {id: , name: , description: , format: {provider: , options: {}}, schemaString: , partitionColumns: , createdTime: , configuration: {}}                                                                                                                                                                                                                                                                                                         |",
-            "| {id: , name: , description: , format: {provider: , options: {}}, schemaString: , partitionColumns: , createdTime: , configuration: {}}                                                                                                                                                                                                                                                                                                         |",
-            "| {id: , name: , description: , format: {provider: , options: {}}, schemaString: , partitionColumns: , createdTime: , configuration: {}}                                                                                                                                                                                                                                                                                                         |",
+            "|                                                                                                                                                                                                                                                                                                                                                                                                                                                |",
+            "|                                                                                                                                                                                                                                                                                                                                                                                                                                                |",
+            "|                                                                                                                                                                                                                                                                                                                                                                                                                                                |",
             "| {id: 84b09beb-329c-4b5e-b493-f58c6c78b8fd, name: , description: , format: {provider: parquet, options: {}}, schemaString: {\"type\":\"struct\",\"fields\":[{\"name\":\"letter\",\"type\":\"string\",\"nullable\":true,\"metadata\":{}},{\"name\":\"int\",\"type\":\"long\",\"nullable\":true,\"metadata\":{}},{\"name\":\"date\",\"type\":\"date\",\"nullable\":true,\"metadata\":{}}]}, partitionColumns: [], createdTime: 1674611455081, configuration: {delta.checkpointInterval: 2}} |",
             "+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+",
         ];
@@ -244,9 +326,9 @@ mod tests {
             "+--------------------------------------------------------------------------------+",
             "| protocol                                                                       |",
             "+--------------------------------------------------------------------------------+",
-            "| {minReaderVersion: , minWriterVersion: , readerFeatures: , writerFeatures: }   |",
-            "| {minReaderVersion: , minWriterVersion: , readerFeatures: , writerFeatures: }   |",
-            "| {minReaderVersion: , minWriterVersion: , readerFeatures: , writerFeatures: }   |",
+            "|                                                                                |",
+            "|                                                                                |",
+            "|                                                                                |",
             "| {minReaderVersion: 1, minWriterVersion: 2, readerFeatures: , writerFeatures: } |",
             "+--------------------------------------------------------------------------------+",
         ];
@@ -269,10 +351,10 @@ mod tests {
             "+-----------------------+",
             "| protocol              |",
             "+-----------------------+",
+            "|                       |",
+            "|                       |",
+            "|                       |",
             "| {minWriterVersion: 2} |",
-            "| {minWriterVersion: }  |",
-            "| {minWriterVersion: }  |",
-            "| {minWriterVersion: }  |",
             "+-----------------------+",
         ];
         assert_batches_sorted_eq!(expected, &data);

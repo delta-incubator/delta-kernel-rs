@@ -27,7 +27,7 @@ pub mod filesystem;
 pub mod json;
 pub mod parquet;
 mod schema_util;
-mod util;
+pub(crate) mod util;
 
 #[derive(Debug)]
 pub struct DefaultTableClient<E: TaskExecutor> {

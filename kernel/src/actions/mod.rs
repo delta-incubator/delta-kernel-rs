@@ -7,6 +7,7 @@ use arrow_array::{
 use either::Either;
 use fix_hidden_lifetime_bug::fix_hidden_lifetime_bug;
 use itertools::izip;
+#[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
 use crate::{DeltaResult, Error};

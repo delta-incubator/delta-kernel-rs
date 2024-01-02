@@ -5,6 +5,7 @@ use arrow_schema::{
     SchemaRef as ArrowSchemaRef, TimeUnit,
 };
 
+use super::{LIST_ROOT_DEFAULT, MAP_KEY_DEFAULT, MAP_ROOT_DEFAULT, MAP_VALUE_DEFAULT};
 use crate::actions::ActionType;
 use crate::schema::{ArrayType, DataType, MapType, PrimitiveType, StructField, StructType};
 
@@ -56,8 +57,9 @@ impl TryFrom<&ArrayType> for ArrowField {
     type Error = ArrowError;
     fn try_from(a: &ArrayType) -> Result<Self, ArrowError> {
         Ok(ArrowField::new(
-            "element",
+            LIST_ROOT_DEFAULT,
             ArrowDataType::try_from(a.element_type())?,
+            // TODO check how to handle nullability
             true, // a.contains_null(),
         ))
     }
@@ -68,19 +70,24 @@ impl TryFrom<&MapType> for ArrowField {
 
     fn try_from(a: &MapType) -> Result<Self, ArrowError> {
         Ok(ArrowField::new(
-            "entries",
+            MAP_ROOT_DEFAULT,
             ArrowDataType::Struct(
                 vec![
-                    ArrowField::new("key", ArrowDataType::try_from(a.key_type())?, false),
                     ArrowField::new(
-                        "value",
+                        MAP_KEY_DEFAULT,
+                        ArrowDataType::try_from(a.key_type())?,
+                        false,
+                    ),
+                    ArrowField::new(
+                        MAP_VALUE_DEFAULT,
                         ArrowDataType::try_from(a.value_type())?,
                         a.value_contains_null(),
                     ),
                 ]
                 .into(),
             ),
-            false, // always non-null
+            // always non-null
+            false,
         ))
     }
 }
@@ -127,35 +134,12 @@ impl TryFrom<&DataType> for ArrowDataType {
             DataType::Struct(s) => Ok(ArrowDataType::Struct(
                 s.fields()
                     .iter()
-                    .map(|f| <ArrowField as TryFrom<&StructField>>::try_from(*f))
+                    .map(|f| (*f).try_into())
                     .collect::<Result<Vec<ArrowField>, ArrowError>>()?
                     .into(),
             )),
-            DataType::Array(a) => Ok(ArrowDataType::List(Arc::new(<ArrowField as TryFrom<
-                &ArrayType,
-            >>::try_from(a)?))),
-            DataType::Map(m) => Ok(ArrowDataType::Map(
-                Arc::new(ArrowField::new(
-                    "entries",
-                    ArrowDataType::Struct(
-                        vec![
-                            ArrowField::new(
-                                "key",
-                                <ArrowDataType as TryFrom<&DataType>>::try_from(m.key_type())?,
-                                false,
-                            ),
-                            ArrowField::new(
-                                "value",
-                                <ArrowDataType as TryFrom<&DataType>>::try_from(m.value_type())?,
-                                m.value_contains_null(),
-                            ),
-                        ]
-                        .into(),
-                    ),
-                    false,
-                )),
-                false,
-            )),
+            DataType::Array(a) => Ok(ArrowDataType::List(Arc::new(a.as_ref().try_into()?))),
+            DataType::Map(m) => Ok(ArrowDataType::Map(Arc::new(m.as_ref().try_into()?), false)),
         }
     }
 }

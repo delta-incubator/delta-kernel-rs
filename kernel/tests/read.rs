@@ -200,7 +200,7 @@ fn stats() -> TestResult {
 
 fn read_table_data(path: &str, expected: Vec<&str>) -> TestResult {
     let mut factory = TestTableFactory::default();
-    let tt = factory.load_table("test", path);
+    let tt = factory.load_location("test", path);
 
     let (table, engine) = tt.table();
     let snapshot = table.snapshot(&engine, None)?;

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use arrow_array::{new_null_array, RecordBatch, RecordBatchOptions};
-use arrow_cast::{can_cast_types, cast};
+use arrow_cast::{cast_with_options, CastOptions};
 use arrow_schema::{ArrowError, FieldRef, Schema, SchemaRef};
 use parquet::schema::types::SchemaDescriptor;
 
@@ -10,8 +10,7 @@ use super::super::util::extract_column;
 use super::fields::*;
 use crate::error::DeltaResult;
 
-/// A utility which can adapt file-level record batches to a table schema which may have a schema
-/// obtained from merging multiple file-level schemas.
+/// A utility which can adapt file-level record batches to a table schema.
 ///
 /// This is useful for enabling schema evolution in partitioned datasets.
 ///
@@ -28,6 +27,7 @@ pub(crate) struct SchemaAdapter {
     /// Schema for the table
     table_schema: SchemaRef,
     table_leaf_map: Arc<Vec<(ColumnPath, (usize, FieldRef))>>,
+    safe_cast: bool,
 }
 
 impl SchemaAdapter {
@@ -36,6 +36,7 @@ impl SchemaAdapter {
         Ok(Self {
             table_schema,
             table_leaf_map,
+            safe_cast: false,
         })
     }
 
@@ -67,7 +68,11 @@ impl SchemaAdapter {
         let visit = |_: usize, path: &mut ColumnPath, _: &FieldRef| {
             if let Some((tp, _)) = self.table_leaf_map.iter().find(|(k, _)| k == path) {
                 file_leaf_map.insert(tp.clone(), path.clone());
-                projection.push(*pq_leaf_keys.get(path).unwrap());
+                if let Some(pq_idx) = pq_leaf_keys.get(path) {
+                    projection.push(*pq_idx);
+                } else {
+                    println!("path: {:?}", path);
+                }
             }
             Ok(())
         };
@@ -87,6 +92,7 @@ impl SchemaAdapter {
             SchemaMapping {
                 table_schema: self.table_schema.clone(),
                 table_path_map: leaf_field_mappings,
+                safe_cast: self.safe_cast,
             },
             projection,
         ))
@@ -97,20 +103,23 @@ impl SchemaAdapter {
 /// and any necessary type conversions that need to be applied.
 #[derive(Debug)]
 pub(crate) struct SchemaMapping {
-    /// The schema of the table. This is the expected schema after conversion and it should match the schema of the query result.
+    /// The schema of the table. This is the expected schema after conversion.
+    /// The schema mapper will try to cast leaf columns to match this schema.
     table_schema: SchemaRef,
-    /// A sorted array (in reverse order of table leaf index) of tuples
-    /// (table_path, (file_path, field)) where table_path is the path of the leaf field in the table schema
-    /// and file_path is the path of the leaf field in the file schema. field is the corresponding field in the
-    /// table schema, the file array sould be cases to.
     pub(crate) table_path_map: HashMap<ColumnPath, Option<ColumnPath>>,
+    safe_cast: bool,
 }
 
 impl SchemaMapping {
     /// Adapts a `RecordBatch` to match the `table_schema` using the stored mapping and conversions.
     pub(crate) fn map_batch(&self, batch: RecordBatch) -> Result<RecordBatch, ArrowError> {
         let num_rows = batch.num_rows();
+        let cast_options = CastOptions {
+            safe: self.safe_cast,
+            ..Default::default()
+        };
 
+        // Visit a field in the table schema and try to find the corresponding column in the data.
         let visit =
             |_: usize, path: &ColumnPath, field: &FieldRef| match self.table_path_map.get(path) {
                 Some(Some(file_path)) => {
@@ -118,16 +127,14 @@ impl SchemaMapping {
                     let mut field_idents = names.iter().map(|n| n.as_str());
                     if let Some(next_path_step) = field_idents.next() {
                         let array = extract_column(&batch, next_path_step, &mut field_idents)?;
-                        if can_cast_types(array.data_type(), field.data_type()) {
-                            cast(&array, field.data_type())
-                        } else {
-                            Ok(new_null_array(field.data_type(), num_rows))
-                        }
+                        cast_with_options(&array, field.data_type(), &cast_options)
                     } else {
                         Ok(new_null_array(field.data_type(), num_rows))
                     }
                 }
                 Some(None) => Ok(new_null_array(field.data_type(), num_rows)),
+                // NOTE: this should never happen as we are only mapping fields that are present in
+                // the table schema.
                 _ => Err(ArrowError::InvalidArgumentError(format!(
                     "Field {} not found in table schema",
                     field.name()
@@ -151,8 +158,9 @@ impl SchemaMapping {
             }
         };
 
-        let arrays = self.table_schema.fields().pick_arrays(visit, pick)?;
+        // NOTE: required to handle empty batches
         let options = RecordBatchOptions::new().with_row_count(Some(num_rows));
+        let arrays = self.table_schema.fields().pick_arrays(visit, pick)?;
         RecordBatch::try_new_with_options(self.table_schema.clone(), arrays, &options)
     }
 }
@@ -161,217 +169,306 @@ impl SchemaMapping {
 mod tests {
     use std::sync::Arc;
 
-    use arrow_schema::{DataType, Field, Fields};
+    use arrow_schema::Field;
+    use object_store::path::Path;
 
     use super::*;
-    use crate::ActionType;
+    use crate::schema::{ArrayType, DataType, MapType, StructField, StructType};
+    use crate::test_util::{assert_batches_sorted_eq, TestResult, TestTableFactory};
+    use crate::{ActionType, TableClient};
 
-    lazy_static::lazy_static! {
-        static ref STRUCT_FIELDS: Fields = Fields::from(vec![
-            Field::new("a", DataType::Float32, true),
-            Field::new("b", DataType::Float32, true),
-        ]);
-        static ref STRUCT_FIELDS_SEL: Fields = Fields::from(vec![
-            Field::new("a", DataType::Float32, true),
-        ]);
-        static ref SIMPLE_MAP: FieldRef = Arc::new(Field::new(
-            "entries",
-            DataType::Struct(Fields::from(vec![
-                Field::new("keys", DataType::Utf8, false),
-                Field::new("values", DataType::Int32, true),
-            ])),
-            false,
-        ));
-        static ref COMPLEX_MAP_ENTRIES: FieldRef = Arc::new(Field::new(
-            "entries",
-            DataType::Struct(Fields::from(vec![
-                Field::new("keys", DataType::Utf8, false),
-                Field::new("values", DataType::Struct(STRUCT_FIELDS.clone()), true),
-            ])),
-            false,
-        ));
-        static ref COMPLEX_MAP_ENTRIES_SEL: FieldRef = Arc::new(Field::new(
-            "entries",
-            DataType::Struct(Fields::from(vec![
-                Field::new("keys", DataType::Utf8, false),
-                Field::new("values", DataType::Struct(STRUCT_FIELDS_SEL.clone()), true),
-            ])),
-            false,
-        ));
-        static ref SIMPLE_LIST: FieldRef = Arc::new(Field::new(
-            "list",
-            DataType::List(Arc::new(Field::new("element", DataType::Utf8, false))),
-            true,
-        ));
-        static ref COMPLEX_LIST: FieldRef = Arc::new(Field::new(
-            "list_complex",
-            DataType::List(Arc::new(Field::new("element", DataType::Struct(STRUCT_FIELDS.clone()), false))),
-            true,
-        ));
-        static ref COMPLEX_LIST_SEL: FieldRef = Arc::new(Field::new(
-            "list_complex",
-            DataType::List(Arc::new(Field::new("element", DataType::Struct(STRUCT_FIELDS_SEL.clone()), false))),
-            true,
-        ));
+    // TODO
+    // - handle updating nullability of columns
+
+    #[allow(dead_code)]
+    enum Scenario {
+        /// A table with a schema that is a superset of the file schema.
+        Superset,
+        /// A table with a schema that is a subset of the file schema.
+        Subset,
+        /// A table with a schema that matches the file schema.
+        Match,
     }
 
-    // #[test]
-    // fn schema_mapping_map_batch() {
-    //     let table_schema = Arc::new(Schema::new(vec![
-    //         Field::new("c1", DataType::Utf8, true),
-    //         Field::new("c2", DataType::UInt32, true),
-    //         Field::new("c3", DataType::Float64, true),
-    //     ]));
-    //
-    //     let adapter = SchemaAdapter::new(table_schema.clone());
-    //
-    //     let file_schema = Schema::new(vec![
-    //         Field::new("c1", DataType::Utf8, true),
-    //         Field::new("c2", DataType::UInt64, true),
-    //         Field::new("c3", DataType::Float32, true),
-    //     ]);
-    //
-    //     let (mapping, _) = adapter.map_schema(&file_schema).expect("map schema failed");
-    //
-    //     let c1 = StringArray::from(vec!["hello", "world"]);
-    //     let c2 = UInt64Array::from(vec![9_u64, 5_u64]);
-    //     let c3 = Float32Array::from(vec![2.0_f32, 7.0_f32]);
-    //     let batch = RecordBatch::try_new(
-    //         Arc::new(file_schema),
-    //         vec![Arc::new(c1), Arc::new(c2), Arc::new(c3)],
-    //     )
-    //     .unwrap();
-    //
-    //     let mapped_batch = mapping.map_batch(batch).unwrap();
-    //
-    //     assert_eq!(mapped_batch.schema(), table_schema);
-    //     assert_eq!(mapped_batch.num_columns(), 3);
-    //     assert_eq!(mapped_batch.num_rows(), 2);
-    //
-    //     let c1 = mapped_batch.column(0).as_string::<i32>();
-    //     let c2 = mapped_batch.column(1).as_primitive::<UInt32Type>();
-    //     let c3 = mapped_batch.column(2).as_primitive::<Float64Type>();
-    //
-    //     assert_eq!(c1.value(0), "hello");
-    //     assert_eq!(c1.value(1), "world");
-    //     assert_eq!(c2.value(0), 9_u32);
-    //     assert_eq!(c2.value(1), 5_u32);
-    //     assert_eq!(c3.value(0), 2.0_f64);
-    //     assert_eq!(c3.value(1), 7.0_f64);
-    // }
-
-    // #[test]
-    // fn schema_adapter_map_schema_with_projection() {
-    //     let table_schema = Arc::new(Schema::new(vec![
-    //         Field::new("c0", DataType::Utf8, true),
-    //         Field::new("c1", DataType::Utf8, true),
-    //         Field::new("c2", DataType::Float64, true),
-    //         Field::new("c3", DataType::Int32, true),
-    //         Field::new("c4", DataType::Float32, true),
-    //     ]));
-    //
-    //     let file_schema = Schema::new(vec![
-    //         Field::new("id", DataType::Int32, true),
-    //         Field::new("c1", DataType::Boolean, true),
-    //         Field::new("c2", DataType::Float32, true),
-    //         Field::new("c3", DataType::Binary, true),
-    //         Field::new("c4", DataType::Int64, true),
-    //     ]);
-    //
-    //     let indices = vec![1, 2, 4];
-    //     let schema = SchemaRef::from(table_schema.project(&indices).unwrap());
-    //     let adapter = SchemaAdapter::new(schema);
-    //     let (mapping, projection) = adapter.map_schema(&file_schema).unwrap();
-    //
-    //     let id = Int32Array::from(vec![Some(1), Some(2), Some(3)]);
-    //     let c1 = BooleanArray::from(vec![Some(true), Some(false), Some(true)]);
-    //     let c2 = Float32Array::from(vec![Some(2.0_f32), Some(7.0_f32), Some(3.0_f32)]);
-    //     let c3 = BinaryArray::from_opt_vec(vec![Some(b"hallo"), Some(b"danke"), Some(b"super")]);
-    //     let c4 = Int64Array::from(vec![1, 2, 3]);
-    //     let batch = RecordBatch::try_new(
-    //         Arc::new(file_schema),
-    //         vec![
-    //             Arc::new(id),
-    //             Arc::new(c1),
-    //             Arc::new(c2),
-    //             Arc::new(c3),
-    //             Arc::new(c4),
-    //         ],
-    //     )
-    //     .unwrap();
-    //     let rows_num = batch.num_rows();
-    //     let projected = batch.project(&projection).unwrap();
-    //     let mapped_batch = mapping.map_batch(projected).unwrap();
-    //
-    //     assert_eq!(
-    //         mapped_batch.schema(),
-    //         Arc::new(table_schema.project(&indices).unwrap())
-    //     );
-    //     assert_eq!(mapped_batch.num_columns(), indices.len());
-    //     assert_eq!(mapped_batch.num_rows(), rows_num);
-    //
-    //     let c1 = mapped_batch.column(0).as_string::<i32>();
-    //     let c2 = mapped_batch.column(1).as_primitive::<Float64Type>();
-    //     let c4 = mapped_batch.column(2).as_primitive::<Float32Type>();
-    //
-    //     assert_eq!(c1.value(0), "true");
-    //     assert_eq!(c1.value(1), "false");
-    //     assert_eq!(c1.value(2), "true");
-    //
-    //     assert_eq!(c2.value(0), 2.0_f64);
-    //     assert_eq!(c2.value(1), 7.0_f64);
-    //     assert_eq!(c2.value(2), 3.0_f64);
-    //
-    //     assert_eq!(c4.value(0), 1.0_f32);
-    //     assert_eq!(c4.value(1), 2.0_f32);
-    //     assert_eq!(c4.value(2), 3.0_f32);
-    // }
-
-    fn validate_mapping(
-        leaf_field_mappings: &[Option<(ColumnPath, FieldRef)>],
-        expected: &[(ColumnPath, &str)],
-    ) {
-        assert_eq!(
-            leaf_field_mappings
-                .iter()
-                .filter_map(|o| o.as_ref())
-                .count(),
-            expected.len(),
-            "leaf_field_mappings: {:?}",
-            leaf_field_mappings
-        );
-        for (path, name) in expected {
-            let (idx, field) = leaf_field_mappings
-                .iter()
-                .find(|opt| match opt {
-                    Some((p, _)) => p == path,
-                    _ => false,
-                })
-                .unwrap()
-                .as_ref()
-                .unwrap();
-            assert_eq!(path, idx);
-            assert_eq!(field.name(), name);
+    fn get_parquet_schema<'a>(
+        fields: impl IntoIterator<Item = &'a str>,
+        scenario: Scenario,
+    ) -> Arc<StructType> {
+        let mut columns = Vec::new();
+        for field in fields {
+            match field {
+                "int" => {
+                    columns.push(StructField::new("int", DataType::LONG, true));
+                }
+                "float" => {
+                    columns.push(StructField::new("float", DataType::DOUBLE, true));
+                }
+                "struct" => {
+                    let struct_fields = match scenario {
+                        Scenario::Match => StructType::new(vec![
+                            StructField::new("a", DataType::LONG, true),
+                            StructField::new(
+                                "b",
+                                DataType::Array(Box::new(ArrayType::new(DataType::LONG, true))),
+                                true,
+                            ),
+                            StructField::new("c", DataType::LONG, true),
+                        ]),
+                        Scenario::Subset => StructType::new(vec![
+                            StructField::new("a", DataType::LONG, true),
+                            StructField::new("c", DataType::LONG, true),
+                        ]),
+                        Scenario::Superset => StructType::new(vec![
+                            StructField::new("a", DataType::LONG, true),
+                            StructField::new("c", DataType::LONG, true),
+                            StructField::new("d", DataType::LONG, true),
+                        ]),
+                    };
+                    columns.push(StructField::new(
+                        "struct",
+                        DataType::Struct(Box::new(struct_fields)),
+                        true,
+                    ));
+                }
+                "list" => {
+                    let list_fields = match scenario {
+                        Scenario::Match => StructType::new(vec![
+                            StructField::new("a", DataType::LONG, false),
+                            StructField::new("b", DataType::LONG, true),
+                        ]),
+                        Scenario::Subset => {
+                            StructType::new(vec![StructField::new("b", DataType::LONG, true)])
+                        }
+                        Scenario::Superset => StructType::new(vec![
+                            StructField::new("a", DataType::LONG, false),
+                            StructField::new("b", DataType::LONG, true),
+                            StructField::new("c", DataType::LONG, true),
+                        ]),
+                    };
+                    columns.push(StructField::new(
+                        "list",
+                        DataType::Array(Box::new(ArrayType::new(
+                            DataType::Struct(Box::new(list_fields)),
+                            true,
+                        ))),
+                        true,
+                    ));
+                }
+                "map" => {
+                    columns.push(StructField::new(
+                        "map",
+                        DataType::Map(Box::new(MapType::new(
+                            DataType::STRING,
+                            DataType::INTEGER,
+                            true,
+                        ))),
+                        true,
+                    ));
+                }
+                _ => (),
+            }
         }
+
+        Arc::new(StructType::new(columns))
     }
 
     #[test]
-    fn test_map_schema_leaves_maps() {
-        // let table_schema = Arc::new(Schema::new(vec![
-        //     Field::new("c1", DataType::Utf8, true),
-        //     Field::new(
-        //         "c2",
-        //         DataType::Map(COMPLEX_MAP_ENTRIES.clone(), false),
-        //         true,
-        //     ),
-        //     Field::new("c3", DataType::Utf8, true),
-        // ]));
-        //
-        // let leaf_map = table_schema.fields().leaf_map();
-        // leaf_map.iter().for_each(|f| {
-        //     println!("1: {:?}", f);
-        // });
+    fn test_load_complex_parquet() -> TestResult {
+        let mut factory = TestTableFactory::new();
+        let path = "./tests/parquet/";
+        let tt = factory.load_location("parquet", path);
+        let (_, engine) = tt.table();
+        let handler = engine.get_parquet_handler();
 
+        // Reading all fields from a complex parquet file written by different engines.
+        // NOTE: It seems that the parquet writer in polars does not write maps as pyarrow and spark do.
+        //       Specifically the map seems to be written as a list of structs with two fields, key and value
+        //
+        // spark / pyarrow:
+        //   map: map<string, int32 ('map')>
+        //     child 0, map: struct<key: string not null, value: int32> not null
+        //       child 0, key: string not null
+        //       child 1, value: int32
+        //
+        // polars:
+        //   map: large_list<item: struct<key: large_string, value: int32>>
+        //     child 0, item: struct<key: large_string, value: int32>
+        //       child 0, key: large_string
+        //       child 1, value: int32
+
+        let variants = ["pyarrow", "spark", "duckdb"];
+        let read_schema =
+            get_parquet_schema(["int", "float", "struct", "list", "map"], Scenario::Match);
+        let expected = &[
+            "+-----+-------+------------------------+------------------------------+--------------+",
+            "| int | float | struct                 | list                         | map          |",
+            "+-----+-------+------------------------+------------------------------+--------------+",
+            "| 1   | 1.0   |                        |                              | {a: 1, b: 2} |",
+            "| 2   |       | {a: 1, b: [2, 3], c: } | [{a: 1, b: 2}, {a: 3, b: 4}] |              |",
+            "| 3   | 3.0   | {a: 3, b: [4], c: 5}   | [{a: 5, b: }, {a: 6, b: 7}]  | {d: 4}       |",
+            "+-----+-------+------------------------+------------------------------+--------------+",
+          ];
+        for variant in variants {
+            let files = &[tt.head(&Path::from(format!("{}.parquet", variant)))?];
+            let data = handler
+                .read_parquet_files(files, read_schema.clone(), None)?
+                .collect::<Result<Vec<_>, _>>()?;
+            assert_batches_sorted_eq!(expected, &data);
+        }
+
+        let variants = ["pyarrow", "spark", "duckdb"];
+        let read_schema = get_parquet_schema(["int", "float", "struct", "list"], Scenario::Match);
+        let expected = &[
+            "+-----+-------+------------------------+------------------------------+",
+            "| int | float | struct                 | list                         |",
+            "+-----+-------+------------------------+------------------------------+",
+            "| 1   | 1.0   |                        |                              |",
+            "| 2   |       | {a: 1, b: [2, 3], c: } | [{a: 1, b: 2}, {a: 3, b: 4}] |",
+            "| 3   | 3.0   | {a: 3, b: [4], c: 5}   | [{a: 5, b: }, {a: 6, b: 7}]  |",
+            "+-----+-------+------------------------+------------------------------+",
+        ];
+        for variant in variants {
+            let files = &[tt.head(&Path::from(format!("{}.parquet", variant)))?];
+            let data = handler
+                .read_parquet_files(files, read_schema.clone(), None)?
+                .collect::<Result<Vec<_>, _>>()?;
+            assert_batches_sorted_eq!(expected, &data);
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_project_nested_fields() -> TestResult {
+        let mut factory = TestTableFactory::new();
+        let path = "./tests/parquet/";
+        let tt = factory.load_location("parquet", path);
+        let (_, engine) = tt.table();
+        let handler = engine.get_parquet_handler();
+
+        let variants = ["pyarrow", "spark", "duckdb"];
+        let read_schema =
+            get_parquet_schema(["int", "float", "struct", "list", "map"], Scenario::Subset);
+        let expected = &[
+            "+-----+-------+--------------+------------------+--------------+",
+            "| int | float | struct       | list             | map          |",
+            "+-----+-------+--------------+------------------+--------------+",
+            "| 1   | 1.0   |              |                  | {a: 1, b: 2} |",
+            "| 2   |       | {a: 1, c: }  | [{b: 2}, {b: 4}] |              |",
+            "| 3   | 3.0   | {a: 3, c: 5} | [{b: }, {b: 7}]  | {d: 4}       |",
+            "+-----+-------+--------------+------------------+--------------+",
+        ];
+        for variant in variants {
+            let files = &[tt.head(&Path::from(format!("{}.parquet", variant)))?];
+            let data = handler
+                .read_parquet_files(files, read_schema.clone(), None)?
+                .collect::<Result<Vec<_>, _>>()?;
+            assert_batches_sorted_eq!(expected, &data);
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_read_checkpoints() -> TestResult {
+        let mut factory = TestTableFactory::new();
+        let path = "./tests/parquet/checkpoints/";
+        let tt = factory.load_location("parquet", path);
+        let (_, engine) = tt.table();
+        let handler = engine.get_parquet_handler();
+
+        let files = &[tt.head(&Path::from("d121_only_struct_stats.checkpoint.parquet"))?];
+
+        let read_schema = Arc::new(StructType::new(vec![ActionType::Add
+            .schema_field()
+            .clone()]));
+        let expected = &[
+            "+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+",
+            "| add                                                                                                                                                                                                                                                                                                                                  |",
+            "+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+",
+            "|                                                                                                                                                                                                                                                                                                                                      |",
+            "|                                                                                                                                                                                                                                                                                                                                      |",
+            "| {path: part-00000-1c2d1a32-02dc-484f-87ff-4328ea56045d-c000.snappy.parquet, partitionValues: {}, size: 5488, modificationTime: 1666652376000, dataChange: false, stats: , tags: {INSERTION_TIME: 1666652376000000, OPTIMIZE_TARGET_SIZE: 268435456}, deletionVector: , baseRowId: , defaultRowCommitVersion: , clusteringProvider: } |",
+            "| {path: part-00000-28925d3a-bdf2-411e-bca9-b067444cbcb0-c000.snappy.parquet, partitionValues: {}, size: 5489, modificationTime: 1666652374000, dataChange: false, stats: , tags: {INSERTION_TIME: 1666652374000000, OPTIMIZE_TARGET_SIZE: 268435456}, deletionVector: , baseRowId: , defaultRowCommitVersion: , clusteringProvider: } |",
+            "| {path: part-00000-6630b7c4-0aca-405b-be86-68a812f2e4c8-c000.snappy.parquet, partitionValues: {}, size: 5489, modificationTime: 1666652378000, dataChange: false, stats: , tags: {INSERTION_TIME: 1666652378000000, OPTIMIZE_TARGET_SIZE: 268435456}, deletionVector: , baseRowId: , defaultRowCommitVersion: , clusteringProvider: } |",
+            "| {path: part-00000-74151571-7ec6-4bd6-9293-b5daab2ce667-c000.snappy.parquet, partitionValues: {}, size: 5489, modificationTime: 1666652377000, dataChange: false, stats: , tags: {INSERTION_TIME: 1666652377000000, OPTIMIZE_TARGET_SIZE: 268435456}, deletionVector: , baseRowId: , defaultRowCommitVersion: , clusteringProvider: } |",
+            "| {path: part-00000-7a509247-4f58-4453-9202-51d75dee59af-c000.snappy.parquet, partitionValues: {}, size: 5489, modificationTime: 1666652373000, dataChange: false, stats: , tags: {INSERTION_TIME: 1666652373000000, OPTIMIZE_TARGET_SIZE: 268435456}, deletionVector: , baseRowId: , defaultRowCommitVersion: , clusteringProvider: } |",
+            "| {path: part-00000-b26ba634-874c-45b0-a7ff-2f0395a53966-c000.snappy.parquet, partitionValues: {}, size: 5489, modificationTime: 1666652375000, dataChange: false, stats: , tags: {INSERTION_TIME: 1666652375000000, OPTIMIZE_TARGET_SIZE: 268435456}, deletionVector: , baseRowId: , defaultRowCommitVersion: , clusteringProvider: } |",
+            "| {path: part-00000-c4c8caec-299d-42a4-b50c-5a4bf724c037-c000.snappy.parquet, partitionValues: {}, size: 5489, modificationTime: 1666652379000, dataChange: false, stats: , tags: {INSERTION_TIME: 1666652379000000, OPTIMIZE_TARGET_SIZE: 268435456}, deletionVector: , baseRowId: , defaultRowCommitVersion: , clusteringProvider: } |",
+            "| {path: part-00000-ce300400-58ff-4b8f-8ba9-49422fdf9f2e-c000.snappy.parquet, partitionValues: {}, size: 5489, modificationTime: 1666652382000, dataChange: false, stats: , tags: {INSERTION_TIME: 1666652382000000, OPTIMIZE_TARGET_SIZE: 268435456}, deletionVector: , baseRowId: , defaultRowCommitVersion: , clusteringProvider: } |",
+            "| {path: part-00000-e8e3753f-e2f6-4c9f-98f9-8f3d346727ba-c000.snappy.parquet, partitionValues: {}, size: 5489, modificationTime: 1666652380000, dataChange: false, stats: , tags: {INSERTION_TIME: 1666652380000000, OPTIMIZE_TARGET_SIZE: 268435456}, deletionVector: , baseRowId: , defaultRowCommitVersion: , clusteringProvider: } |",
+            "| {path: part-00000-f73ff835-0571-4d67-ac43-4fbf948bfb9b-c000.snappy.parquet, partitionValues: {}, size: 5731, modificationTime: 1666652383000, dataChange: false, stats: , tags: {INSERTION_TIME: 1666652383000000, OPTIMIZE_TARGET_SIZE: 268435456}, deletionVector: , baseRowId: , defaultRowCommitVersion: , clusteringProvider: } |",
+            "+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+",
+        ];
+        let data = handler
+            .read_parquet_files(files, read_schema.clone(), None)?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_batches_sorted_eq!(expected, &data);
+
+        let read_schema = Arc::new(StructType::new(vec![ActionType::Protocol
+            .schema_field()
+            .clone()]));
+        let expected = &[
+            "+--------------------------------------------------------------------------------+",
+            "| protocol                                                                       |",
+            "+--------------------------------------------------------------------------------+",
+            "|                                                                                |",
+            "|                                                                                |",
+            "|                                                                                |",
+            "|                                                                                |",
+            "|                                                                                |",
+            "|                                                                                |",
+            "|                                                                                |",
+            "|                                                                                |",
+            "|                                                                                |",
+            "|                                                                                |",
+            "|                                                                                |",
+            "| {minReaderVersion: 1, minWriterVersion: 2, readerFeatures: , writerFeatures: } |",
+            "+--------------------------------------------------------------------------------+",
+        ];
+        let data = handler
+            .read_parquet_files(files, read_schema.clone(), None)?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_batches_sorted_eq!(expected, &data);
+
+        Ok(())
+    }
+
+    // #[test]
+    // fn test_fill_missing_nested_fields() -> TestResult {
+    //     let mut factory = TestTableFactory::new();
+    //     let path = "./tests/parquet/";
+    //     let tt = factory.load_location("parquet", path);
+    //     let (_, engine) = tt.table();
+    //     let handler = engine.get_parquet_handler();
+    //
+    //     let variants = ["pyarrow", "spark"];
+    //     let read_schema = get_parquet_schema(
+    //         ["int", "float", "struct", "list", "map"],
+    //         Scenbario::Superset,
+    //     );
+    //     let expected = &[
+    //         "+-----+-------+--------------+------------------+--------------+",
+    //         "| int | float | struct       | list             | map          |",
+    //         "+-----+-------+--------------+------------------+--------------+",
+    //         "| 1   | 1.0   | {a: , c: }   |                  | {a: 1, b: 2} |",
+    //         "| 2   |       | {a: 1, c: }  | [{b: 2}, {b: 4}] | {}           |",
+    //         "| 3   | 3.0   | {a: 3, c: 5} | [{b: }, {b: 7}]  | {d: 4}       |",
+    //         "+-----+-------+--------------+------------------+--------------+",
+    //     ];
+    //     for variant in variants {
+    //         let files = &[tt.head(&Path::from(format!("{}.parquet", variant)))?];
+    //         let data = handler
+    //             .read_parquet_files(files, read_schema.clone(), None)?
+    //             .collect::<Result<Vec<_>, _>>()?;
+    //         assert_batches_sorted_eq!(expected, &data);
+    //     }
+    //
+    //     Ok(())
+    // }
+
+    #[test]
+    fn test_map_schema_leaves_maps() {
         let table_schema: Field = ActionType::Metadata.try_into().unwrap();
         let table_schema = Arc::new(Schema::new(vec![table_schema]));
 
@@ -382,210 +479,5 @@ mod tests {
         leaf_map.iter().for_each(|f| {
             println!("2: {:?}", f);
         });
-
-        //     let adapter = SchemaAdapter::new(table_schema.clone());
-        //
-        //     let file_schema = Arc::new(Schema::new(vec![
-        //         Field::new("c1", DataType::Utf8, true),
-        //         Field::new(
-        //             "c2",
-        //             DataType::Map(COMPLEX_MAP_ENTRIES.clone(), false),
-        //             true,
-        //         ),
-        //     ]));
-        //     let (mapping, projection) = adapter.map_schema(&file_schema).expect("map failed");
-        //
-        //     assert_eq!(projection, [0, 1, 2, 3]);
-        //     let fields = [
-        //         (ColumnPath(vec![ColumnSegment::field("c1")]), "c1"),
-        //         (
-        //             ColumnPath(vec![
-        //                 ColumnSegment::field("c2"),
-        //                 ColumnSegment::map_root("entries"),
-        //                 ColumnSegment::map_key("keys"),
-        //             ]),
-        //             "keys",
-        //         ),
-        //         (
-        //             ColumnPath(vec![
-        //                 ColumnSegment::field("c2"),
-        //                 ColumnSegment::map_root("entries"),
-        //                 ColumnSegment::map_value("values"),
-        //                 ColumnSegment::field("a"),
-        //             ]),
-        //             "a",
-        //         ),
-        //         (
-        //             ColumnPath(vec![
-        //                 ColumnSegment::field("c2"),
-        //                 ColumnSegment::map_root("entries"),
-        //                 ColumnSegment::map_value("values"),
-        //                 ColumnSegment::field("b"),
-        //             ]),
-        //             "b",
-        //         ),
-        //     ];
-        //     validate_mapping(&mapping, &fields);
-        //
-        //     let file_schema = Arc::new(Schema::new(vec![
-        //         Field::new("c1", DataType::Utf8, true),
-        //         Field::new(
-        //             "c2",
-        //             DataType::Map(COMPLEX_MAP_ENTRIES_SEL.clone(), false),
-        //             true,
-        //         ),
-        //     ]));
-        //     let (mapping, projection) = adapter.map_schema(&file_schema).expect("map failed");
-        //
-        //     assert_eq!(projection, [0, 1, 2]);
-        //     let fields = [
-        //         (ColumnPath(vec![ColumnSegment::field("c1")]), "c1"),
-        //         (
-        //             ColumnPath(vec![
-        //                 ColumnSegment::field("c2"),
-        //                 ColumnSegment::map_root("entries"),
-        //                 ColumnSegment::map_key("keys"),
-        //             ]),
-        //             "keys",
-        //         ),
-        //         (
-        //             ColumnPath(vec![
-        //                 ColumnSegment::field("c2"),
-        //                 ColumnSegment::map_root("entries"),
-        //                 ColumnSegment::map_value("values"),
-        //                 ColumnSegment::field("a"),
-        //             ]),
-        //             "a",
-        //         ),
-        //     ];
-        //     validate_mapping(&mapping, &fields);
-        //
-        //     let table_schema = Arc::new(Schema::new(vec![
-        //         Field::new("c1", DataType::Utf8, true),
-        //         COMPLEX_LIST.as_ref().clone(),
-        //     ]));
-        //     let adapter = SchemaAdapter::new(table_schema.clone());
-        //
-        //     let file_schema = Arc::new(Schema::new(vec![
-        //         Field::new("c1", DataType::Utf8, true),
-        //         COMPLEX_LIST_SEL.as_ref().clone(),
-        //     ]));
-        //     let (mapping, projection) = adapter.map_schema(&file_schema).expect("map failed");
-        //     mapping.leaf_field_mappings.iter().for_each(|f| {
-        //         println!("leaf_field_mappings: {:?}", f);
-        //     });
     }
-
-    // #[test]
-    // fn test_map_schema_leafs() {
-    //     let floats = Fields::from(vec![
-    //         Field::new("a", DataType::Float32, true),
-    //         Field::new("b", DataType::Float32, true),
-    //     ]);
-    //     let map_field = Arc::new(Field::new(
-    //         "entries",
-    //         DataType::Struct(Fields::from(vec![
-    //             Field::new("keys", DataType::Utf8, false),
-    //             Field::new("values", DataType::Int32, true),
-    //         ])),
-    //         false,
-    //     ));
-    //     let table_schema = Arc::new(Schema::new(vec![
-    //         Field::new("c3", DataType::Struct(floats.clone()), true),
-    //         Field::new("c1", DataType::Utf8, true),
-    //         Field::new("c2", DataType::Int32, true),
-    //         Field::new("c4", DataType::Map(map_field.clone(), false), true),
-    //     ]));
-    //     let adapter = SchemaAdapter::new(table_schema.clone());
-    //
-    //     let file_schema: SchemaRef = Arc::new(Schema::new(vec![
-    //         Field::new("c0", DataType::Utf8, true),
-    //         Field::new("c1", DataType::Utf8, true),
-    //         Field::new("c3", DataType::Struct(floats.clone()), true),
-    //         Field::new("c4", DataType::Map(map_field.clone(), false), true),
-    //     ]));
-    //     let (mapping, projection) = adapter.map_schema(&file_schema).expect("map failed");
-    //
-    //     // assert_eq!(projection, [1, 2, 3]);
-    //     println!("projection: {:?}", projection);
-    //     mapping.leaf_field_mappings.iter().for_each(|f| {
-    //         println!("leaf_field_mappings: {:?}", f);
-    //     });
-    //
-    //     let c1 = Arc::new(StringArray::from(vec![Some("hello"), Some("world")]));
-    //     let c2 = Arc::new(Int32Array::from(vec![Some(9_i32), None]));
-    //     let c3_a = Arc::new(Float32Array::from(vec![Some(1.0_f32), Some(2.0_f32)]));
-    //     let c3_b = Arc::new(Float32Array::from(vec![Some(10.0_f32), Some(20.0_f32)]));
-    //     let c3 = Arc::new(StructArray::try_new(floats, vec![c3_a, c3_b], None).unwrap());
-    //
-    //     let string_builder = StringBuilder::new();
-    //     let int_builder = Int32Builder::with_capacity(4);
-    //     let mut builder = MapBuilder::new(None, string_builder, int_builder);
-    //
-    //     builder.keys().append_value("joe");
-    //     builder.values().append_value(1);
-    //     builder.append(true).unwrap();
-    //
-    //     builder.keys().append_value("blogs");
-    //     builder.values().append_value(2);
-    //     builder.append(true).unwrap();
-    //
-    //     let array = Arc::new(builder.finish());
-    //
-    //     let file_data =
-    //         RecordBatch::try_new(file_schema, vec![c1.clone(), c1.clone(), c3, array]).unwrap();
-    // }
-
-    // #[test]
-    // fn test_leaf_filter() {
-    //     let c1 = Arc::new(StringArray::from(vec![Some("hello"), Some("world")]));
-    //     let c2 = Arc::new(Int32Array::from(vec![Some(9_i32), None]));
-    //     let c3_a = Arc::new(Float32Array::from(vec![Some(1.0_f32), Some(2.0_f32)]));
-    //     let c3_b = Arc::new(Float32Array::from(vec![Some(10.0_f32), Some(20.0_f32)]));
-    //
-    //     let floats = Fields::from(vec![
-    //         Field::new("a", DataType::Float32, true),
-    //         Field::new("b", DataType::Float32, true),
-    //     ]);
-    //     let table_schema = Arc::new(Schema::new(vec![
-    //         Field::new("c3", DataType::Struct(floats.clone()), true),
-    //         Field::new("c1", DataType::Utf8, true),
-    //         Field::new("c2", DataType::Int32, true),
-    //     ]));
-    //     let adapter = SchemaAdapter::new(table_schema.clone());
-    //
-    //     let file_schema: SchemaRef = Arc::new(Schema::new(vec![
-    //         Field::new("c1", DataType::Utf8, true),
-    //         Field::new("c2", DataType::Int32, true),
-    //     ]));
-    //     let (_, projection) = adapter
-    //         .map_schema(&file_schema)
-    //         .expect("map leaf schema failed");
-    //     assert_eq!(projection, [0, 1]);
-    //
-    //     let file_floats = Fields::from(vec![
-    //         Field::new("a", DataType::Float64, true),
-    //         Field::new("b", DataType::Float64, true),
-    //     ]);
-    //     let file_schema: SchemaRef = Arc::new(Schema::new(vec![
-    //         Field::new("c3", DataType::Struct(file_floats.clone()), true),
-    //         Field::new("c1", DataType::Utf8, true),
-    //         Field::new("c2", DataType::Int32, true),
-    //     ]));
-    //     let (_, projection) = adapter.map_schema(&file_schema).expect("map failed");
-    //     assert_eq!(projection, [0, 1, 2, 3]);
-    //
-    //     let file_schema: SchemaRef = Arc::new(Schema::new(vec![
-    //         Field::new("c0", DataType::Utf8, true),
-    //         Field::new("c1", DataType::Utf8, true),
-    //         Field::new("c3", DataType::Struct(file_floats), true),
-    //         Field::new("c4", DataType::Int32, true),
-    //     ]));
-    //     let (mapping, projection) = adapter.map_schema(&file_schema).expect("map failed");
-    //
-    //     assert_eq!(projection, [1, 2, 3]);
-    //     mapping.leaf_field_mappings.iter().for_each(|f| {
-    //         println!("leaf_field_mappings: {:?}", f);
-    //     });
-    // }
 }

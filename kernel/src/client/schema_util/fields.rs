@@ -6,6 +6,9 @@ use arrow_schema::{ArrowError, DataType, Field, FieldRef, Fields};
 
 use super::{LIST_ROOT_DEFAULT, MAP_KEY_DEFAULT, MAP_ROOT_DEFAULT, MAP_VALUE_DEFAULT};
 
+/// Convenicence type for making clippy happy
+pub(crate) type LeafMap = Vec<(ColumnPath, (usize, FieldRef))>;
+
 pub(crate) trait FieldsExt {
     fn visit_fields<F: FnMut(usize, &mut ColumnPath, &FieldRef) -> Result<(), ArrowError>>(
         &self,
@@ -21,11 +24,11 @@ pub(crate) trait FieldsExt {
         picker: G,
     ) -> Result<Vec<ArrayRef>, ArrowError>;
 
-    fn leaf_map(&self) -> Result<Vec<(ColumnPath, (usize, FieldRef))>, ArrowError>;
+    fn leaf_map(&self) -> Result<LeafMap, ArrowError>;
 }
 
 impl FieldsExt for Fields {
-    fn leaf_map(&self) -> Result<Vec<(ColumnPath, (usize, FieldRef))>, ArrowError> {
+    fn leaf_map(&self) -> Result<LeafMap, ArrowError> {
         let mut leaf_map = Vec::new();
         let visit = |idx: usize, path: &mut ColumnPath, field: &FieldRef| {
             leaf_map.push((path.clone(), (idx, field.clone())));
@@ -181,8 +184,7 @@ impl FieldsExt for Fields {
                         )),
                         map_arr.offsets().clone(),
                         entries,
-                        // NOTE: map array should never contain nulls
-                        None,
+                        map_arr.nulls().cloned(),
                         *ordered,
                     )?)
                 }
@@ -198,14 +200,13 @@ impl FieldsExt for Fields {
                     } else {
                         let arrays: Vec<_> = fields
                             .iter()
-                            .map(|f| {
-                                Ok((
-                                    f.name().as_str(),
-                                    pick_array(f, visit, pick, &mut path.clone())?,
-                                ))
-                            })
+                            .map(|f| pick_array(f, visit, pick, &mut path.clone()))
                             .collect::<Result<_, ArrowError>>()?;
-                        Arc::new(StructArray::try_from(arrays)?)
+                        Arc::new(StructArray::new(
+                            fields.clone(),
+                            arrays,
+                            struct_arr.nulls().cloned(),
+                        ))
                     }
                 }
                 Union(_fields, _mode) => {
@@ -315,15 +316,6 @@ impl ColumnPath {
         }
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn contains(&self, other: &Self) -> bool {
-        other
-            .segments
-            .iter()
-            .zip(self.segments.iter())
-            .all(|(a, b)| a == b)
-    }
-
     pub(crate) fn scope(&self) -> &Option<ArrayScope> {
         &self.scope
     }
@@ -341,6 +333,7 @@ impl ColumnPath {
             .iter()
             .flat_map(|s| {
                 if matches!(s, ColumnSegment::ListRoot(_)) {
+                    // TODO properly determine list root / item names in parquet files.
                     vec!["list".into(), "element".into()]
                 } else {
                     vec![s.name()]
@@ -476,7 +469,6 @@ mod tests {
             ColumnSegment::MapValue("value".into()),
         ]);
         assert!(p1 == p2);
-        assert!(p1.contains(&p2));
 
         let mut map = HashMap::new();
         map.insert(p1, 10);
@@ -489,6 +481,20 @@ mod tests {
         ]);
         assert_eq!(map.get(&p3), None);
 
-        assert!(!p2.contains(&p3));
+        let p4 = ColumnPath::new_from_segemnts(vec![
+            ColumnSegment::Field("list".into()),
+            ColumnSegment::ListRoot("element".into()),
+            ColumnSegment::Field("a".into()),
+        ]);
+        let p5 = ColumnPath::new_from_segemnts(vec![
+            ColumnSegment::Field("list".into()),
+            ColumnSegment::ListRoot("item".into()),
+            ColumnSegment::Field("a".into()),
+        ]);
+        assert!(p4 == p5);
+
+        let mut map = HashMap::new();
+        map.insert(p4, 10);
+        assert_eq!(map.get(&p5), Some(&10));
     }
 }

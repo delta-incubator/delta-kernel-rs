@@ -89,8 +89,10 @@ impl TestTableFactory {
         &_SCHEMAS
     }
 
-    /// Load a table from a local directory into the in-memory store.
-    pub fn load_table(
+    /// Load a location (folder) from a local directory into the internal in-memory store.
+    /// Each loaded location will be assigned a unique name and can be accessed via
+    /// getting a `TestTable` by its name which will be prefixed with the location.
+    pub fn load_location(
         &mut self,
         name: impl Into<String>,
         path: impl AsRef<std::path::Path>,
@@ -354,11 +356,11 @@ fn create_random_batch(
                 (Scalar::Integer(min), Scalar::Integer(max)) => Uniform::from(min..=max),
                 _ => unreachable!(),
             };
-            let arr = Int32Array::try_from(
+            let arr = Int32Array::from(
                 (0..length)
                     .map(|_| between.sample(&mut rng))
                     .collect::<Vec<_>>(),
-            )?;
+            );
             Ok(Arc::new(arr))
         }
         DataType::Primitive(PrimitiveType::Long) => {
@@ -372,11 +374,11 @@ fn create_random_batch(
                 (Scalar::Long(min), Scalar::Long(max)) => Uniform::from(min..=max),
                 _ => unreachable!(),
             };
-            let arr = Int64Array::try_from(
+            let arr = Int64Array::from(
                 (0..length)
                     .map(|_| between.sample(&mut rng))
                     .collect::<Vec<_>>(),
-            )?;
+            );
             Ok(Arc::new(arr))
         }
         DataType::Primitive(PrimitiveType::Float) => {
@@ -390,11 +392,11 @@ fn create_random_batch(
                 (Scalar::Float(min), Scalar::Float(max)) => Uniform::from(min..=max),
                 _ => unreachable!(),
             };
-            let arr = Float32Array::try_from(
+            let arr = Float32Array::from(
                 (0..length)
                     .map(|_| between.sample(&mut rng))
                     .collect::<Vec<_>>(),
-            )?;
+            );
             Ok(Arc::new(arr))
         }
         DataType::Primitive(PrimitiveType::Double) => {
@@ -408,19 +410,19 @@ fn create_random_batch(
                 (Scalar::Double(min), Scalar::Double(max)) => Uniform::from(min..=max),
                 _ => unreachable!(),
             };
-            let arr = Float64Array::try_from(
+            let arr = Float64Array::from(
                 (0..length)
                     .map(|_| between.sample(&mut rng))
                     .collect::<Vec<_>>(),
-            )?;
+            );
             Ok(Arc::new(arr))
         }
         DataType::Primitive(PrimitiveType::String) => {
-            let arr = StringArray::try_from(
+            let arr = StringArray::from(
                 (0..length)
                     .map(|_| Alphanumeric.sample_string(&mut rng, 16))
                     .collect::<Vec<_>>(),
-            )?;
+            );
             Ok(Arc::new(arr))
         }
         _ => todo!(),
@@ -529,6 +531,7 @@ fn get_stats(batch: &RecordBatch) -> TestResult<FileStats> {
                 Some((null_count, min, max))
             }
             Utf8 => None,
+            Struct(_) => None,
             _ => todo!(),
         };
         if let Some((null_count, min, max)) = stats {
@@ -717,7 +720,7 @@ mod tests {
     fn test_load_table() -> TestResult {
         let mut factory = TestTableFactory::default();
 
-        let test_table = factory.load_table("test", "./tests/data/basic_partitioned");
+        let test_table = factory.load_location("test", "./tests/data/basic_partitioned");
 
         let log_files = test_table
             .list_files(Some(&Path::from("_delta_log")))

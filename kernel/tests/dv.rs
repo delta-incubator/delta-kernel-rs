@@ -6,7 +6,7 @@ use deltakernel::test_util::{TestResult, TestTableFactory};
 #[test]
 fn dv_table() -> TestResult {
     let mut factory = TestTableFactory::default();
-    let tt = factory.load_table("test", "./tests/data/table-with-dv-small/");
+    let tt = factory.load_location("test", "./tests/data/table-with-dv-small/");
     let (table, engine) = tt.table();
     let scan = table.scan(&engine, None)?.build();
 
@@ -22,7 +22,7 @@ fn dv_table() -> TestResult {
 #[test]
 fn non_dv_table() -> TestResult {
     let mut factory = TestTableFactory::default();
-    let tt = factory.load_table("test", "./tests/data/table-without-dv-small/");
+    let tt = factory.load_location("test", "./tests/data/table-without-dv-small/");
     let (table, engine) = tt.table();
     let scan = table.scan(&engine, None)?.build();
 

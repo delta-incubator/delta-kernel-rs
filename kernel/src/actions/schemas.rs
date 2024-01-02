@@ -102,11 +102,11 @@ lazy_static! {
     static ref ADD_FIELD: StructField = StructField::new(
         "add",
         StructType::new(vec![
-            StructField::new("path", DataType::STRING, false),
+            StructField::new("path", DataType::STRING, true),
             partition_values_field(),
-            StructField::new("size", DataType::LONG, false),
-            StructField::new("modificationTime", DataType::LONG, false),
-            StructField::new("dataChange", DataType::BOOLEAN, false),
+            StructField::new("size", DataType::LONG, true),
+            StructField::new("modificationTime", DataType::LONG, true),
+            StructField::new("dataChange", DataType::BOOLEAN, true),
             StructField::new("stats", DataType::STRING, true),
             tags_field(),
             deletion_vector_field(),
@@ -120,9 +120,9 @@ lazy_static! {
     static ref REMOVE_FIELD: StructField = StructField::new(
         "remove",
         StructType::new(vec![
-            StructField::new("path", DataType::STRING, false),
+            StructField::new("path", DataType::STRING, true),
             StructField::new("deletionTimestamp", DataType::LONG, true),
-            StructField::new("dataChange", DataType::BOOLEAN, false),
+            StructField::new("dataChange", DataType::BOOLEAN, true),
             StructField::new("extendedFileMetadata", DataType::BOOLEAN, true),
             partition_values_field(),
             StructField::new("size", DataType::LONG, true),
@@ -177,7 +177,7 @@ lazy_static! {
                     DataType::STRING,
                     true,
                 ),
-                false,
+                true,
             ),
             StructField::new("removed", DataType::BOOLEAN, false),
         ]),
@@ -197,7 +197,7 @@ lazy_static! {
         "sidecar",
         StructType::new(vec![
             StructField::new("path", DataType::STRING, false),
-            StructField::new("sizeInBytes", DataType::LONG, false),
+            StructField::new("sizeInBytes", DataType::LONG, true),
             StructField::new("modificationTime", DataType::LONG, false),
             StructField::new("type", DataType::STRING, false),
             tags_field(),
@@ -231,7 +231,7 @@ fn partition_values_field() -> StructField {
     StructField::new(
         "partitionValues",
         MapType::new(DataType::STRING, DataType::STRING, true),
-        false,
+        true,
     )
 }
 
@@ -239,11 +239,11 @@ fn deletion_vector_field() -> StructField {
     StructField::new(
         "deletionVector",
         DataType::Struct(Box::new(StructType::new(vec![
-            StructField::new("storageType", DataType::STRING, false),
-            StructField::new("pathOrInlineDv", DataType::STRING, false),
+            StructField::new("storageType", DataType::STRING, true),
+            StructField::new("pathOrInlineDv", DataType::STRING, true),
             StructField::new("offset", DataType::INTEGER, true),
-            StructField::new("sizeInBytes", DataType::INTEGER, false),
-            StructField::new("cardinality", DataType::LONG, false),
+            StructField::new("sizeInBytes", DataType::INTEGER, true),
+            StructField::new("cardinality", DataType::LONG, true),
         ]))),
         true,
     )
