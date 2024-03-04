@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use arrow::compute::filter_record_batch;
 use arrow::datatypes::{Schema, SchemaRef};
 use arrow::error::ArrowError;
 use arrow::pyarrow::PyArrowType;
@@ -85,9 +86,9 @@ impl Scan {
         engine_interface: &PythonInterface,
     ) -> DeltaPyResult<PyArrowType<Box<dyn RecordBatchReader + Send>>> {
         let mut results = self.0.execute(engine_interface.0.as_ref())?;
-        // TODO(nick): This is a terrible way to have to get the schema
         match results.pop() {
             Some(last) => {
+                // TODO(nick): This is a terrible way to have to get the schema
                 let rb: RecordBatch = last
                     .raw_data?
                     .into_any()
@@ -113,7 +114,12 @@ impl Scan {
                                 ArrowError::CastError("Couldn't cast to SimpleData".to_string())
                             })?
                             .into();
-                        Ok(record_batch)
+                        if let Some(mask) = res.mask {
+                            let filtered_batch = filter_record_batch(&record_batch, &mask.into())?;
+                            Ok(filtered_batch)
+                        } else {
+                            Ok(record_batch)
+                        }
                     }),
                     schema,
                 );
