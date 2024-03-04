@@ -1,15 +1,18 @@
 use std::sync::Arc;
 
+use arrow::datatypes::{Schema, SchemaRef};
+use arrow::error::ArrowError;
 use arrow::pyarrow::PyArrowType;
+use deltakernel::scan::ScanResult;
 use deltakernel::simple_client::data::SimpleData;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 use url::Url;
 
-use arrow::record_batch::RecordBatch;
-use deltakernel::EngineInterface;
+use arrow::record_batch::{RecordBatch, RecordBatchIterator, RecordBatchReader};
 use deltakernel::simple_client::SimpleClient;
+use deltakernel::EngineInterface;
 
 struct KernelError(deltakernel::Error);
 
@@ -34,14 +37,14 @@ struct Table(deltakernel::Table);
 impl Table {
     #[new]
     fn new(location: &str) -> DeltaPyResult<Self> {
-        let location = Url::parse(location).map_err(|e| deltakernel::Error::InvalidUrl(e))?;
+        let location = Url::parse(location).map_err(deltakernel::Error::InvalidUrl)?;
         let table = deltakernel::Table::new(location);
         Ok(Table(table))
     }
 
-    fn snapshot(&self, engine_interface: &PythonInterface) -> Snapshot {
-        let snapshot = self.0.snapshot(engine_interface.0.as_ref(), None).unwrap();
-        Snapshot(snapshot)
+    fn snapshot(&self, engine_interface: &PythonInterface) -> DeltaPyResult<Snapshot> {
+        let snapshot = self.0.snapshot(engine_interface.0.as_ref(), None)?;
+        Ok(Snapshot(snapshot))
     }
 }
 
@@ -77,34 +80,53 @@ struct Scan(deltakernel::scan::Scan);
 
 #[pymethods]
 impl Scan {
-    fn execute(&self, engine_interface: &PythonInterface) -> DeltaPyResult<ScanResultIter> {
-        let results = self.0.execute(engine_interface.0.as_ref())?;
-        Ok(ScanResultIter {
-            iter: Box::new(results.into_iter().map(|res| {
-                // TODO(nick) PyResult isn't a PyObject (no IntoPy for Result), so we can't return
-                // results from iteration
-                let data = res.raw_data.unwrap();
-                let record_batch: RecordBatch = data.into_any().downcast::<SimpleData>().unwrap().into();
-                PyArrowType(record_batch)
-            }))
-        })
-    }
-}
-
-
-
-#[pyclass]
-struct ScanResultIter {
-    iter: Box<dyn Iterator<Item = PyArrowType<RecordBatch>> + Send>,
-}
-
-#[pymethods]
-impl ScanResultIter {
-    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
-        slf
-    }
-    fn __next__(mut slf: PyRefMut<'_, Self>) -> Option<PyArrowType<RecordBatch>> {
-        slf.iter.next()
+    fn execute(
+        &self,
+        engine_interface: &PythonInterface,
+    ) -> DeltaPyResult<PyArrowType<Box<dyn RecordBatchReader + Send>>> {
+        let mut results = self.0.execute(engine_interface.0.as_ref())?;
+        // TODO(nick): This is a terrible way to have to get the schema
+        match results.pop() {
+            Some(last) => {
+                let rb: RecordBatch = last
+                    .raw_data?
+                    .into_any()
+                    .downcast::<SimpleData>()
+                    .map_err(|_| {
+                        deltakernel::Error::engine_data_type("Couldn't cast to SimpleData")
+                    })?
+                    .into();
+                let schema: SchemaRef = rb.schema();
+                results.push(ScanResult {
+                    raw_data: Ok(Box::new(SimpleData::new(rb))),
+                    mask: last.mask,
+                });
+                let record_batch_iter = RecordBatchIterator::new(
+                    results.into_iter().map(|res| {
+                        let data = res
+                            .raw_data
+                            .map_err(|e| ArrowError::from_external_error(Box::new(e)))?;
+                        let record_batch: RecordBatch = data
+                            .into_any()
+                            .downcast::<SimpleData>()
+                            .map_err(|_| {
+                                ArrowError::CastError("Couldn't cast to SimpleData".to_string())
+                            })?
+                            .into();
+                        Ok(record_batch)
+                    }),
+                    schema,
+                );
+                Ok(PyArrowType(Box::new(record_batch_iter)))
+            }
+            None => {
+                // no results, return empty iterator
+                Ok(PyArrowType(Box::new(RecordBatchIterator::new(
+                    vec![],
+                    Arc::new(Schema::empty()),
+                ))))
+            }
+        }
     }
 }
 
