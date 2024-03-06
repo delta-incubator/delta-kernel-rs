@@ -147,9 +147,11 @@ impl PythonInterface {
     #[new]
     fn new(location: &str) -> DeltaPyResult<Self> {
         let url = Url::parse(location).map_err(deltakernel::Error::InvalidUrl)?;
-        let client = DefaultTableClient::try_new(&url,
-                                                 HashMap::<String, String>::new(),
-                                                 Arc::new(TokioBackgroundExecutor::new()))?;
+        let client = DefaultTableClient::try_new(
+            &url,
+            HashMap::<String, String>::new(),
+            Arc::new(TokioBackgroundExecutor::new()),
+        )?;
         Ok(PythonInterface(Box::new(client)))
     }
 }
