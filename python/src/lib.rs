@@ -4,6 +4,8 @@ use arrow::compute::filter_record_batch;
 use arrow::datatypes::{Schema, SchemaRef};
 use arrow::error::ArrowError;
 use arrow::pyarrow::PyArrowType;
+use deltakernel::client::DefaultTableClient;
+use deltakernel::executor::tokio::TokioBackgroundExecutor;
 use deltakernel::scan::ScanResult;
 use deltakernel::simple_client::data::SimpleData;
 use pyo3::exceptions::PyValueError;
@@ -12,8 +14,9 @@ use pyo3::prelude::*;
 use url::Url;
 
 use arrow::record_batch::{RecordBatch, RecordBatchIterator, RecordBatchReader};
-use deltakernel::simple_client::SimpleClient;
 use deltakernel::EngineInterface;
+
+use std::collections::HashMap;
 
 struct KernelError(deltakernel::Error);
 
@@ -142,9 +145,12 @@ struct PythonInterface(Box<dyn EngineInterface + Send>);
 #[pymethods]
 impl PythonInterface {
     #[new]
-    fn new() -> Self {
-        let simple_client = SimpleClient::new();
-        PythonInterface(Box::new(simple_client))
+    fn new(location: &str) -> DeltaPyResult<Self> {
+        let url = Url::parse(location).map_err(deltakernel::Error::InvalidUrl)?;
+        let client = DefaultTableClient::try_new(&url,
+                                                 HashMap::<String, String>::new(),
+                                                 Arc::new(TokioBackgroundExecutor::new()))?;
+        Ok(PythonInterface(Box::new(client)))
     }
 }
 

@@ -9,7 +9,7 @@ if len(sys.argv) != 2:
 table_path = sys.argv[1]
 print(f"Reading: {table_path}")
 
-interface = delta_kernel_python.PythonInterface()
+interface = delta_kernel_python.PythonInterface(table_path)
 table = delta_kernel_python.Table(table_path)
 snapshot = table.snapshot(interface)
 print("Table Version %i" % snapshot.version())
