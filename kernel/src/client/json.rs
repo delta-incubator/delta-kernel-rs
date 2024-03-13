@@ -2,7 +2,7 @@
 
 use std::io::BufReader;
 use std::ops::Range;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, Condvar};
 use std::task::{ready, Poll};
 
 use arrow_array::{new_null_array, Array, RecordBatch, StringArray, StructArray};
@@ -83,6 +83,54 @@ fn hack_parse(
     }
 }
 
+struct ReadResultFuture {
+    result: Option<DeltaResult<RecordBatch>>,
+    sender: std::sync::mpsc::SyncSender<DeltaResult<RecordBatch>>,
+    cond: Arc<(Mutex<bool>, Condvar)>,
+}
+
+impl futures::Future for ReadResultFuture {
+    type Output = ();
+
+    fn poll(mut self: std::pin::Pin<&mut Self>, cx: &mut futures::task::Context<'_>) -> Poll<Self::Output> {
+        let res = self.result.take();
+        match res {
+            Some(result) => match self.sender.try_send(result) {
+                Ok(()) => {
+                    println!("json sent a batch");
+                    Poll::Ready(())
+                },
+                Err(try_send_err) => match try_send_err {
+                    std::sync::mpsc::TrySendError::Full(result) => {
+                        // put the result back into self
+                        self.result = Some(result);
+                        // Get a handle to the waker for the current task
+                        let waker = cx.waker().clone();
+                        // Spawn a thread to wait to be woken
+                        let pair = self.cond.clone();
+                        std::thread::spawn(move || {
+                            let (lock, cvar) = &*pair;
+                            let mut sent = lock.lock().unwrap();
+                            while !*sent {
+                                sent = cvar.wait(sent).unwrap();
+                            }
+                            waker.wake();
+                        });
+                        Poll::Pending
+                    }
+                    std::sync::mpsc::TrySendError::Disconnected(_) => {
+                        Poll::Ready(())
+                    }
+                }
+            }
+            None => {
+                // already sent
+                Poll::Ready(())
+            }
+        }
+    }
+}
+
 impl<E: TaskExecutor> JsonHandler for DefaultJsonHandler<E> {
     fn parse_json(
         &self,
@@ -134,13 +182,47 @@ impl<E: TaskExecutor> JsonHandler for DefaultJsonHandler<E> {
         // The stream will execute in the background, and we allow up to `readahead`
         // batches to be buffered in the channel.
         let (sender, receiver) = std::sync::mpsc::sync_channel(self.readahead);
+        let pair = Arc::new((Mutex::new(false), Condvar::new()));
+        let pair2 = Arc::clone(&pair);
 
-        self.task_executor.spawn(stream.for_each(move |res| {
-            sender.send(res).ok();
-            futures::future::ready(())
-        }));
+        self.task_executor.spawn_with_name(
+            stream.for_each(move |res| {
+                match sender.try_send(res) {
+                    Ok(()) => {
+                        ReadResultFuture {
+                            result: None,
+                            sender: sender.clone(),
+                            cond: pair.clone(),
+                        }
+                    }
+                    Err(tse) => match tse {
+                        std::sync::mpsc::TrySendError::Full(res) => {
 
-        Ok(Box::new(receiver.into_iter().map(|rbr| {
+                            ReadResultFuture {
+                                result: Some(res),
+                                sender: sender.clone(),
+                                cond: pair.clone(),
+                            }
+                        }
+                        std::sync::mpsc::TrySendError::Disconnected(_) => {
+                            ReadResultFuture {
+                                result: None,
+                                sender: sender.clone(),
+                                cond: pair.clone(),
+                            }
+                        }
+                    }
+                }
+            }),
+            "json_read",
+        );
+
+        Ok(Box::new(receiver.into_iter().map(move |rbr| {
+            println!("Received json");
+            let (lock, cvar) = &*pair2;
+            let mut sent = lock.lock().unwrap();
+            *sent = true;
+            cvar.notify_all();
             rbr.map(|rb| Box::new(SimpleData::new(rb)) as _)
         })))
     }
