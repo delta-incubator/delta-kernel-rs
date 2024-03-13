@@ -98,12 +98,10 @@ pub(crate) fn execute_stream<E: TaskExecutor, F: FileOpener + Send + 'static>(
     let pair = Arc::new((Mutex::new(false), Condvar::new()));
     let pair2 = Arc::clone(&pair);
 
-    task_executor.spawn(stream.for_each(move |res| {
-        ReadResultFuture {
-            result: Some(res),
-            sender: sender.clone(),
-            cond: pair.clone(),
-        }
+    task_executor.spawn(stream.for_each(move |res| ReadResultFuture {
+        result: Some(res),
+        sender: sender.clone(),
+        cond: pair.clone(),
     }));
 
     Ok(Box::new(receiver.into_iter().map(move |rbr| {
