@@ -12,9 +12,8 @@ use parquet::arrow::async_reader::{ParquetObjectReader, ParquetRecordBatchStream
 
 use super::file_handler::{FileOpenFuture, FileOpener};
 use crate::executor::TaskExecutor;
-use crate::file_handler::FileStream;
+use crate::file_handler::{FileStream, execute_stream};
 use crate::schema::SchemaRef;
-use crate::simple_client::data::SimpleData;
 use crate::{DeltaResult, Error, Expression, FileDataReadResultIterator, FileMeta, ParquetHandler};
 
 #[derive(Debug)]
@@ -58,19 +57,7 @@ impl<E: TaskExecutor> ParquetHandler for DefaultParquetHandler<E> {
         let file_reader = ParquetOpener::new(1024, schema.clone(), self.store.clone());
         let stream = FileStream::new(files.to_vec(), schema, file_reader)?;
 
-        // This channel will become the output iterator.
-        // The stream will execute in the background and send results to this channel.
-        // The channel will buffer up to `readahead` results, allowing the background
-        // stream to get ahead of the consumer.
-        let (sender, receiver) = std::sync::mpsc::sync_channel(self.readahead);
-
-        self.task_executor.spawn(stream.for_each(move |res| {
-            sender.send(res).ok();
-            futures::future::ready(())
-        }));
-        Ok(Box::new(receiver.into_iter().map(|rbr| {
-            rbr.map(|rb| Box::new(SimpleData::new(rb)) as _)
-        })))
+        execute_stream(self.readahead, self.task_executor.clone(), stream)
     }
 }
 
@@ -139,7 +126,7 @@ mod tests {
     use arrow_array::RecordBatch;
     use object_store::{local::LocalFileSystem, ObjectStore};
 
-    use crate::{executor::tokio::TokioBackgroundExecutor, EngineData};
+    use crate::{executor::tokio::TokioBackgroundExecutor, EngineData, simple_client::data::SimpleData};
 
     use itertools::Itertools;
 

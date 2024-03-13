@@ -2,6 +2,8 @@ use std::collections::VecDeque;
 use std::mem;
 use std::ops::Range;
 use std::pin::Pin;
+use std::sync::mpsc::{SyncSender, TrySendError};
+use std::sync::{Arc, Condvar, Mutex};
 use std::task::{ready, Context, Poll};
 
 use arrow_array::RecordBatch;
@@ -10,7 +12,9 @@ use futures::future::BoxFuture;
 use futures::stream::{BoxStream, Stream, StreamExt};
 use futures::FutureExt;
 
-use crate::{DeltaResult, FileMeta};
+use crate::executor::TaskExecutor;
+use crate::simple_client::data::SimpleData;
+use crate::{DeltaResult, FileDataReadResultIterator, FileMeta};
 
 /// A fallible future that resolves to a stream of [`RecordBatch`]
 pub type FileOpenFuture =
@@ -24,6 +28,91 @@ pub trait FileOpener: Unpin {
     /// Asynchronously open the specified file and return a stream
     /// of [`RecordBatch`]
     fn open(&self, file_meta: FileMeta, range: Option<Range<i64>>) -> DeltaResult<FileOpenFuture>;
+}
+
+/// A future that will keep trying to send a result on a channel until it suceeds or the channel is
+/// closed. This expects a ([`Mutex`], [`Condvar`]) pair, and in the case that the channel is full
+/// it will wait on the condition variable (in a new thread) until notified that it should try and
+/// send again
+struct ReadResultFuture {
+    result: Option<DeltaResult<RecordBatch>>,
+    sender: SyncSender<DeltaResult<RecordBatch>>,
+    cond: Arc<(Mutex<bool>, Condvar)>,
+}
+
+impl futures::Future for ReadResultFuture {
+    type Output = ();
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut futures::task::Context<'_>,
+    ) -> Poll<Self::Output> {
+        let res = self.result.take();
+        match res {
+            Some(result) => match self.sender.try_send(result) {
+                Ok(()) => Poll::Ready(()),
+                Err(try_send_err) => match try_send_err {
+                    TrySendError::Full(result) => {
+                        // put the result back into self
+                        self.result = Some(result);
+                        let waker = cx.waker().clone();
+                        let pair = self.cond.clone();
+                        std::thread::spawn(move || {
+                            let (lock, cvar) = &*pair;
+                            let mut sent = lock.lock().unwrap();
+                            while !*sent {
+                                sent = cvar.wait(sent).unwrap();
+                            }
+                            waker.wake();
+                        });
+                        Poll::Pending
+                    }
+                    TrySendError::Disconnected(_) => Poll::Ready(()),
+                },
+            },
+            None => {
+                // already sent
+                Poll::Ready(())
+            }
+        }
+    }
+}
+
+/// Handles communication between sync and async land. This executes a file read stream
+/// asynchronously, but returns an iter that can be read synchronously. There are some subtleties to
+/// this. We bound the channel we send back on to hold max `readahead` items. This means that if the
+/// consumer side doesn't read fast enough, we can fail to send more data to them. We cannot block
+/// the async executor in this case however. We therefore use a [`ReadResultFuture`] which will say
+/// it is `Pending` if the channel is full, and will not try and resend until the iterator returned
+/// from this method consumes an item.
+pub(crate) fn execute_stream<E: TaskExecutor, F: FileOpener + Send + 'static>(
+    readahead: usize,
+    task_executor: Arc<E>,
+    stream: FileStream<F>,
+) -> DeltaResult<FileDataReadResultIterator> {
+    // This channel will become the output iterator.
+    // The stream will execute in the background and send results to this channel.
+    // The channel will buffer up to `readahead` results, allowing the background
+    // stream to get ahead of the consumer.
+    let (sender, receiver) = std::sync::mpsc::sync_channel(readahead);
+    let pair = Arc::new((Mutex::new(false), Condvar::new()));
+    let pair2 = Arc::clone(&pair);
+
+    task_executor.spawn(stream.for_each(move |res| {
+        ReadResultFuture {
+            result: Some(res),
+            sender: sender.clone(),
+            cond: pair.clone(),
+        }
+    }));
+
+    Ok(Box::new(receiver.into_iter().map(move |rbr| {
+        let (lock, cvar) = &*pair2;
+        let mut sent = lock.lock().unwrap();
+        *sent = true;
+        cvar.notify_all();
+        rbr.map(|rb| Box::new(SimpleData::new(rb)) as _)
+    })))
 }
 
 /// Describes the behavior of the `FileStream` if file opening or scanning fails
