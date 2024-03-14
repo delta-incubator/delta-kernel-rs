@@ -14,6 +14,7 @@ pub mod file_stream;
 
 // TODO projection: something like fn select(self, columns: &[&str])
 /// Builder to scan a snapshot of a table.
+#[derive(Clone)]
 pub struct ScanBuilder {
     snapshot: Arc<Snapshot>,
     schema: Option<SchemaRef>,
