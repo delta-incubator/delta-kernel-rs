@@ -250,6 +250,14 @@ impl Scan {
                     }
                 });
 
+                if let Some(ref mut mask) = dv_mask {
+                    if mask.len() < len {
+                        // we need to extend the mask with `true` to fulfill the contract
+                        let to_add = len - mask.len();
+                        mask.extend(itertools::repeat_n(true, to_add));
+                    }
+                }
+
                 let scan_result = ScanResult {
                     raw_data: read_result,
                     mask: dv_mask,
