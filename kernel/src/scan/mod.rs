@@ -220,15 +220,17 @@ impl Scan {
                     read_result
                 } else {
                     let mut fields = Vec::with_capacity(partition_fields.len() + len);
+                    fields.extend(select_fields.clone());
                     for field in &partition_fields {
                         let value_expression = parse_partition_value(
                             add.partition_values.get(field.name()),
                             field.data_type(),
                         )?;
-                        fields.push(Expression::Literal(value_expression));
+                        let field_position = self.schema().field_index(&field.name).unwrap();
+                        // need to ensure the field goes in the expected location in the output
+                        // schema
+                        fields.insert(field_position, Expression::Literal(value_expression));
                     }
-                    fields.extend(select_fields.clone());
-
                     let evaluator = engine_interface.get_expression_handler().get_evaluator(
                         read_schema.clone(),
                         Expression::Struct(fields),
