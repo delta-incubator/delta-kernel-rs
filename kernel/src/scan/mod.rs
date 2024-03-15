@@ -416,7 +416,7 @@ mod tests {
                 .into_iter()
                 .map(|file| file.unwrap().path)
                 .collect::<Vec<_>>(),
-            vec!["https://blahblah"]
+            vec!["https://fixme"]
         );
         Ok(())
     }
