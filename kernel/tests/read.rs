@@ -448,3 +448,11 @@ fn presigned_urls() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
+
+#[test]
+fn presigned_dvs() -> Result<(), Box<dyn std::error::Error>> {
+    let expected = vec!["+----+", "| id |", "+----+", "| 2  |", "+----+"];
+    read_table_data("./tests/data/table-with-presigned-dv", expected)?;
+
+    Ok(())
+}

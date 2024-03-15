@@ -97,11 +97,15 @@ impl<E: TaskExecutor> FileSystemClient for ObjectStoreFileSystemClient<E> {
                     let path = Path::from(url.path());
                     let store = store.clone();
                     async move {
-                        if let Some(rng) = range {
-                            store.get_range(&path, rng).await
+                        if url.scheme() == "https" {
+                            Ok(reqwest::get(url).await.unwrap().bytes().await.unwrap())
                         } else {
-                            let result = store.get(&path).await?;
-                            result.bytes().await
+                            if let Some(rng) = range {
+                                store.get_range(&path, rng).await
+                            } else {
+                                let result = store.get(&path).await?;
+                                result.bytes().await
+                            }
                         }
                     }
                 })
