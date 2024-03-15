@@ -242,10 +242,13 @@ impl Scan {
 
                 // need to split the dv_mask. what's left in dv_mask covers this result, and rest
                 // will cover the following results
-                println!();
-                println!("{:?}", dv_mask);
-                println!();
-                let rest = dv_mask.as_mut().map(|mask| mask.split_off(len));
+                let rest = dv_mask.as_mut().and_then(|mask| {
+                    if mask.len() >= len {
+                        Some(mask.split_off(len))
+                    } else {
+                        None
+                    }
+                });
 
                 let scan_result = ScanResult {
                     raw_data: read_result,
