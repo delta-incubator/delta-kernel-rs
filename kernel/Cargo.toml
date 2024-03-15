@@ -39,6 +39,7 @@ arrow-ord = { version = "^49.0", optional = true }
 arrow-schema = { version = "^49.0", optional = true }
 futures = { version = "0.3", optional = true }
 object_store = { version = "^0.8.0", optional = true }
+reqwest = { version = "^0.11.0", optional = true }
 # Used in default and simple client
 parquet = { version = "^49.0", optional = true }
 
@@ -60,7 +61,8 @@ default-client = [
   "object_store",
   "parquet/async",
   "parquet/object_store",
-  "tokio"
+  "reqwest",
+  "tokio",
 ]
 
 developer-visibility = []

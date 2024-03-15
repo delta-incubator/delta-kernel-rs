@@ -396,4 +396,28 @@ mod tests {
         );
         Ok(())
     }
+
+    #[test_log::test]
+    fn test_scan_with_presigned_data_urls() -> DeltaResult<()> {
+        let path = std::fs::canonicalize(PathBuf::from(
+            "./tests/data/local_log_with_presigned_data_urls",
+        ))?;
+
+        let url = url::Url::from_directory_path(path).unwrap();
+        let engine_interface = SimpleClient::new();
+
+        let table = Table::new(url);
+        let snapshot = table.snapshot(&engine_interface, None)?;
+        let scan = ScanBuilder::new(snapshot).build();
+        let files: Vec<DeltaResult<Add>> = scan.files(&engine_interface)?.collect();
+
+        assert_eq!(
+            files
+                .into_iter()
+                .map(|file| file.unwrap().path)
+                .collect::<Vec<_>>(),
+            vec!["https://blahblah"]
+        );
+        Ok(())
+    }
 }

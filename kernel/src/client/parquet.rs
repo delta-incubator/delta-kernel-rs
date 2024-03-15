@@ -7,7 +7,7 @@ use arrow_schema::SchemaRef as ArrowSchemaRef;
 use futures::{StreamExt, TryStreamExt};
 use object_store::path::Path;
 use object_store::DynObjectStore;
-use parquet::arrow::arrow_reader::ArrowReaderOptions;
+use parquet::arrow::arrow_reader::{ArrowReaderOptions, ParquetRecordBatchReaderBuilder};
 use parquet::arrow::async_reader::{ParquetObjectReader, ParquetRecordBatchStreamBuilder};
 
 use super::file_handler::{FileOpenFuture, FileOpener};
@@ -55,8 +55,28 @@ impl<E: TaskExecutor> ParquetHandler for DefaultParquetHandler<E> {
         }
 
         let schema: ArrowSchemaRef = Arc::new(physical_schema.as_ref().try_into()?);
-        let file_reader = ParquetOpener::new(1024, schema.clone(), self.store.clone());
-        let mut stream = FileStream::new(files.to_vec(), schema, file_reader)?;
+        // get the first FileMeta to decide how to fetch the file
+        // s3://    -> aws   (ParquetOpener)
+        // nothing  -> local (ParquetOpener)
+        // https:// -> assume presigned URL (and fetch without object_store)
+        //   -> reqwest to get data
+        //   -> parse to parquet
+        // SAFETY: we did is_empty check above, this is ok.
+
+        let mut stream: std::pin::Pin<
+            Box<dyn futures::Stream<Item = DeltaResult<arrow_array::RecordBatch>> + Send>,
+        > = match files[0].location.scheme() {
+            "https" => Box::pin(FileStream::new(
+                files.to_vec(),
+                schema.clone(),
+                PresignedUrlOpener::new(1024, schema.clone()),
+            )?),
+            _ => Box::pin(FileStream::new(
+                files.to_vec(),
+                schema.clone(),
+                ParquetOpener::new(1024, schema.clone(), self.store.clone()),
+            )?),
+        };
 
         // This channel will become the output iterator.
         // The stream will execute in the background and send results to this channel.
@@ -89,7 +109,7 @@ impl<E: TaskExecutor> ParquetHandler for DefaultParquetHandler<E> {
     }
 }
 
-/// Implements [`FileOpener`] for a parquet file
+/// Implements [`FileOpener`] for a opening a parquet file from object storage
 struct ParquetOpener {
     // projection: Arc<[usize]>,
     batch_size: usize,
@@ -140,6 +160,56 @@ impl FileOpener for ParquetOpener {
                 // .with_projection(mask)
                 .with_batch_size(batch_size)
                 .build()?;
+
+            let adapted = stream.map_err(Error::generic_err);
+            Ok(adapted.boxed())
+        }))
+    }
+}
+
+/// Implements [`FileOpener`] for a opening a parquet file from a presigned URL
+struct PresignedUrlOpener {
+    batch_size: usize,
+    limit: Option<usize>,
+    table_schema: ArrowSchemaRef,
+}
+
+impl PresignedUrlOpener {
+    pub(crate) fn new(batch_size: usize, schema: ArrowSchemaRef) -> Self {
+        Self {
+            batch_size,
+            table_schema: schema,
+            limit: None,
+        }
+    }
+}
+
+impl FileOpener for PresignedUrlOpener {
+    fn open(&self, file_meta: FileMeta, _range: Option<Range<i64>>) -> DeltaResult<FileOpenFuture> {
+        let batch_size = self.batch_size;
+        let _table_schema = self.table_schema.clone();
+        let limit = self.limit;
+
+        Ok(Box::pin(async move {
+            // fetch the file from the interweb FIXME use client
+            let reader = reqwest::get(file_meta.location)
+                .await
+                .unwrap()
+                .bytes()
+                .await
+                .unwrap();
+
+            let options = ArrowReaderOptions::new();
+            let mut builder =
+                ParquetRecordBatchReaderBuilder::try_new_with_options(reader, options)?;
+
+            if let Some(limit) = limit {
+                builder = builder.with_limit(limit)
+            }
+
+            let reader = builder.with_batch_size(batch_size).build()?;
+
+            let stream = futures::stream::iter(reader);
 
             let adapted = stream.map_err(Error::generic_err);
             Ok(adapted.boxed())

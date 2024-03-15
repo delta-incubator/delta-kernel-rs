@@ -7,6 +7,7 @@
 //! the [executor] module.
 
 use std::sync::Arc;
+// use std::collections::HashMap;
 
 use object_store::{parse_url_opts, path::Path, DynObjectStore};
 use url::Url;
@@ -29,6 +30,7 @@ pub mod parquet;
 
 #[derive(Debug)]
 pub struct DefaultTableClient<E: TaskExecutor> {
+    // stores: HashMap<String, Arc<DynObjectStore>>,
     store: Arc<DynObjectStore>,
     file_system: Arc<ObjectStoreFileSystemClient<E>>,
     json: Arc<DefaultJsonHandler<E>>,
@@ -48,6 +50,10 @@ impl<E: TaskExecutor> DefaultTableClient<E> {
         K: AsRef<str>,
         V: Into<String>,
     {
+        // path to table (with a _delta_log) used to determine the kind of ObjectStore to
+        // initialize to read the log.
+
+        // let store_scheme = path.scheme();
         let (store, prefix) = parse_url_opts(path, options)?;
         let store = Arc::new(store);
         Ok(Self {
@@ -61,6 +67,7 @@ impl<E: TaskExecutor> DefaultTableClient<E> {
                 task_executor.clone(),
             )),
             parquet: Arc::new(DefaultParquetHandler::new(store.clone(), task_executor)),
+            // stores: HashMap::from([(store_scheme.to_string(), store)]),
             store,
             expression: Arc::new(DefaultExpressionHandler {}),
         })
