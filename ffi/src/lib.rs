@@ -1,6 +1,7 @@
 /// FFI interface for the delta kernel
 ///
 /// Exposes that an engine needs to call from C/C++ to interface with kernel
+use std::any::Any;
 use std::collections::HashMap;
 use std::default::Default;
 use std::os::raw::{c_char, c_void};
@@ -9,11 +10,12 @@ use std::sync::Arc;
 use url::Url;
 
 use deltakernel::actions::Add;
+use deltakernel::engine_data::GetData;
 use deltakernel::expressions::{BinaryOperator, Expression, Scalar};
 use deltakernel::scan::ScanBuilder;
-use deltakernel::schema::{DataType, PrimitiveType, StructField, StructType};
+use deltakernel::schema::{DataType, PrimitiveType, Schema, SchemaRef, StructField, StructType};
 use deltakernel::snapshot::Snapshot;
-use deltakernel::{DeltaResult, EngineInterface, Error};
+use deltakernel::{DataVisitor, DeltaResult, EngineData, EngineInterface, Error};
 
 mod handle;
 use handle::{ArcHandle, BoxHandle, SizedArcHandle, Unconstructable};
@@ -78,6 +80,36 @@ pub struct KernelStringSlice {
     ptr: *const c_char,
     len: usize,
 }
+impl KernelStringSlice {
+    /// Attempts to convert to a string reference that cannot outlive self.
+    ///
+    /// # Safety
+    ///
+    /// The slice must be a valid (non-null) pointer, and must point to the indicated number of
+    /// valid utf8 bytes.
+    pub unsafe fn try_as_str(&self) -> DeltaResult<&str> {
+        self.try_leak_as_str()
+    }
+
+    /// Like [try_as_str], but with lifetime supplied by the caller instead of bounded by self.
+    ///
+    /// # Safety
+    ///
+    /// In addition to the requirements for [try_as_str], caller must ensure that the &str does not
+    /// outlive the referred-to data (since the &str _can_ outlive self).
+    pub unsafe fn try_leak_as_str<'a>(&self) -> DeltaResult<&'a str> {
+        let slice = unsafe { std::slice::from_raw_parts(self.ptr.cast(), self.len) };
+        std::str::from_utf8(slice).map_err(Error::generic_err)
+    }
+}
+impl Default for KernelStringSlice {
+    fn default() -> Self {
+        Self {
+            ptr: "".as_ptr().cast(),
+            len: 0,
+        }
+    }
+}
 
 // Intentionally not From, in order to reduce risk of accidental misuse. The main use is for callers
 // to pass e.g. `my_str.as_str().into()` as a function arg.
@@ -103,16 +135,12 @@ impl TryFromStringSlice for String {
     /// The slice must be a valid (non-null) pointer, and must point to the indicated number of
     /// valid utf8 bytes.
     unsafe fn try_from_slice(slice: KernelStringSlice) -> DeltaResult<String> {
-        let slice = unsafe { std::slice::from_raw_parts(slice.ptr.cast(), slice.len) };
-        match std::str::from_utf8(slice) {
-            Ok(s) => Ok(s.to_string()),
-            Err(e) => Err(Error::generic_err(e)),
-        }
+        slice.try_as_str().map(|s| s.to_string())
     }
 }
 
 #[repr(C)]
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 pub enum KernelError {
     UnknownError, // catch-all for unrecognized kernel Error types
     FFIError,     // errors encountered in the code layer that supports FFI
@@ -279,6 +307,22 @@ impl<T> IntoExternResult<T> for DeltaResult<T> {
     }
 }
 
+trait FromExternResult<T> {
+    unsafe fn from_extern_result(result: ExternResult<T>) -> Self;
+}
+impl<T> FromExternResult<T> for DeltaResult<T> {
+    unsafe fn from_extern_result(result: ExternResult<T>) -> Self {
+        match result {
+            ExternResult::Ok(val) => Ok(val),
+            ExternResult::Err(err) => {
+                let err = unsafe { &*err };
+                let err = err.etype;
+                Err(Error::generic(format!("{err:?}")))
+            }
+        }
+    }
+}
+
 // A wrapper for EngineInterface which defines additional FFI-specific methods.
 pub trait ExternEngineInterface {
     fn table_client(&self) -> Arc<dyn EngineInterface>;
@@ -318,6 +362,374 @@ impl ExternEngineInterface for ExternEngineInterfaceVtable {
     fn error_allocator(&self) -> &dyn AllocateError {
         &self.allocate_error
     }
+}
+
+#[repr(C)]
+pub struct KernelEngineDataContext {
+    // An arbitrary 64-bit value that mainly prevents this class from being zero-sized, but which
+    // can also be used to distinguish between data objects of different types.
+    pub type_id: usize,
+}
+
+pub struct SchemaHandle {
+    _unconstructable: Unconstructable,
+}
+
+impl SizedArcHandle for SchemaHandle {
+    type Target = Schema;
+}
+
+pub struct ExternDataVisitorContext {
+    // An arbitrary 64-bit value that mainly prevents this class from being zero-sized, but which
+    // can also be used to distinguish between data objects of different types.
+    pub type_id: usize,
+}
+
+// Non-owned visitor.
+#[repr(C)]
+pub struct ExternDataVisitorVtable {
+    context: *mut ExternDataVisitorContext,
+    visit: unsafe extern "C" fn(context: *mut ExternDataVisitorContext),
+}
+
+pub struct KernelDataVisitorHandle<'a> {
+    data: &'a KernelEngineDataVtable,
+    visitor: &'a mut dyn DataVisitor,
+}
+
+#[repr(C)]
+pub struct ExternGetDataVtableContext {
+    pub type_id: usize,
+}
+
+#[repr(C)]
+pub struct ExternGetDataVtable {
+    context: *mut ExternGetDataVtableContext,
+    get_bool: Option<
+        unsafe extern "C" fn(
+            context: *mut ExternGetDataVtableContext,
+            row_index: usize,
+            field_name: KernelStringSlice,
+            dest: *mut bool,
+        ) -> ExternResult<bool>,
+    >,
+    get_int: Option<
+        unsafe extern "C" fn(
+            context: *mut ExternGetDataVtableContext,
+            row_index: usize,
+            field_name: KernelStringSlice,
+            dest: *mut i32,
+        ) -> ExternResult<bool>,
+    >,
+    get_long: Option<
+        unsafe extern "C" fn(
+            context: *mut ExternGetDataVtableContext,
+            row_index: usize,
+            field_name: KernelStringSlice,
+            dest: *mut i64,
+        ) -> ExternResult<bool>,
+    >,
+    // TODO: This probably isn't quite right... but maybe it works
+    get_str: Option<
+        unsafe extern "C" fn(
+            context: *mut ExternGetDataVtableContext,
+            row_index: usize,
+            field_name: KernelStringSlice,
+            dest: *mut KernelStringSlice,
+        ) -> ExternResult<bool>,
+    >,
+    /*
+    get_list: Option<unsafe extern "C" fn(
+        context: *mut ExternGetDataVtableContext,
+        row_index: usize,
+        field_name: KernelStringSlice,
+        dest: *mut ExternListItemVtable,
+    ) -> ExternResult<bool>>,
+    get_map: Option<unsafe extern "C" fn (
+        context: *mut ExternGetDataVtableContext,
+        row_index: usize,
+        field_name: KernelStringSlice,
+        dest: *mut ExternMapItemVtable,
+    ) -> ExternResult<bool>>,
+    */
+}
+
+impl ExternGetDataVtable {
+    fn get<T: Default>(
+        &self,
+        getter: Option<
+            unsafe extern "C" fn(
+                context: *mut ExternGetDataVtableContext,
+                row_index: usize,
+                field_name: KernelStringSlice,
+                dest: *mut T,
+            ) -> ExternResult<bool>,
+        >,
+        row_index: usize,
+        field_name: &str,
+    ) -> DeltaResult<Option<T>> {
+        match getter {
+            Some(getter) => {
+                let mut val: T = Default::default();
+                let result =
+                    unsafe { getter(self.context, row_index, field_name.into(), &mut val as _) };
+                let result = unsafe { DeltaResult::from_extern_result(result) };
+                result.map(|is_null| if is_null { None } else { Some(val) })
+            }
+            None => Err(Error::UnexpectedColumnType(format!(
+                "{field_name} is not of type {}",
+                stringify!(T)
+            ))),
+        }
+    }
+}
+
+impl<'a> GetData<'a> for ExternGetDataVtable {
+    fn get_bool(&self, row_index: usize, field_name: &str) -> DeltaResult<Option<bool>> {
+        self.get(self.get_bool, row_index, field_name)
+    }
+    fn get_int(&self, row_index: usize, field_name: &str) -> DeltaResult<Option<i32>> {
+        self.get(self.get_int, row_index, field_name)
+    }
+    fn get_long(&self, row_index: usize, field_name: &str) -> DeltaResult<Option<i64>> {
+        self.get(self.get_long, row_index, field_name)
+    }
+    fn get_str(&self, row_index: usize, field_name: &str) -> DeltaResult<Option<&'a str>> {
+        let result = self.get(self.get_str, row_index, field_name)?;
+        match result {
+            Some(slice) => Ok(Some(unsafe { slice.try_leak_as_str() }?)),
+            None => Ok(None),
+        }
+    }
+}
+
+pub struct KernelEngineDataVtable {
+    context: *mut KernelEngineDataContext,
+    drop_context: unsafe extern "C" fn(context: *mut KernelEngineDataContext),
+    length: unsafe extern "C" fn(context: *mut KernelEngineDataContext) -> usize,
+    extract: unsafe extern "C" fn(
+        context: *mut KernelEngineDataContext,
+        schema: *const SchemaHandle, // can call visit_schema with it
+        visitor_context: *mut KernelDataVisitorHandle,
+        visitor: unsafe extern "C" fn(
+            kernel_context: *mut KernelDataVisitorHandle,
+            allocate_error: AllocateErrorFn,
+            getters: *const ExternGetDataVtable,
+            num_getters: usize,
+        ) -> ExternResult<usize>,
+    ) -> ExternResult<usize>,
+}
+
+pub struct EngineDataHandle {
+    _unconstructable: Unconstructable,
+}
+
+impl ArcHandle for EngineDataHandle {
+    type Target = dyn EngineData;
+}
+
+unsafe impl Send for KernelEngineDataVtable {}
+unsafe impl Sync for KernelEngineDataVtable {}
+
+impl Drop for KernelEngineDataVtable {
+    fn drop(&mut self) {
+        unsafe { (self.drop_context)(self.context) }
+    }
+}
+
+impl EngineData for KernelEngineDataVtable {
+    fn extract(&self, schema: SchemaRef, visitor: &mut dyn DataVisitor) -> DeltaResult<()> {
+        let mut kernel_context = KernelDataVisitorHandle {
+            data: self,
+            visitor,
+        };
+        let result = unsafe {
+            (self.extract)(
+                self.context,
+                ArcHandle::into_handle(schema),
+                &mut kernel_context,
+                Self::visit,
+            )
+        };
+        let _ = unsafe { DeltaResult::from_extern_result(result) }?;
+        Ok(())
+    }
+
+    /// Return the number of items (rows) in blob
+    fn length(&self) -> usize {
+        unsafe { (self.length)(self.context) }
+    }
+
+    // TODO(nick) implement this and below here in the trait when it doesn't cause a compiler error
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn into_any(self: Box<Self>) -> Box<dyn Any> {
+        self
+    }
+}
+
+/// # Safety
+///
+/// TODO...
+#[no_mangle]
+pub unsafe extern "C" fn create_engine_data(
+    context: *mut KernelEngineDataContext,
+    drop_context: unsafe extern "C" fn(context: *mut KernelEngineDataContext),
+    length: unsafe extern "C" fn(context: *mut KernelEngineDataContext) -> usize,
+    extract: unsafe extern "C" fn(
+        context: *mut KernelEngineDataContext,
+        schema: *const SchemaHandle, // can call visit_schema with it
+        visitor_context: *mut KernelDataVisitorHandle,
+        visitor: unsafe extern "C" fn(
+            kernel_context: *mut KernelDataVisitorHandle,
+            allocate_error: AllocateErrorFn,
+            getters: *const ExternGetDataVtable,
+            num_getters: usize,
+        ) -> ExternResult<usize>,
+    ) -> ExternResult<usize>,
+) -> *const EngineDataHandle {
+    let handle: Arc<dyn EngineData> = Arc::new(KernelEngineDataVtable {
+        context,
+        drop_context,
+        length,
+        extract,
+    });
+    ArcHandle::into_handle(handle)
+}
+
+impl KernelEngineDataVtable {
+    unsafe extern "C" fn visit(
+        kernel_context: *mut KernelDataVisitorHandle,
+        allocate_error: AllocateErrorFn,
+        getters: *const ExternGetDataVtable,
+        num_getters: usize,
+    ) -> ExternResult<usize> {
+        let kernel_context = unsafe { &mut *kernel_context };
+        let getters = unsafe { std::slice::from_raw_parts(getters, num_getters) };
+        let getters: Vec<_> = getters.iter().map(|item| item as _).collect();
+        kernel_context
+            .visitor
+            .visit(kernel_context.data.length(), &getters)
+            .map(|_| 0)
+            .into_extern_result(allocate_error)
+    }
+
+    pub fn extract_columns<'a>(
+        &'a self,
+        out_col_array: &mut Vec<&dyn GetData<'a>>,
+        schema: &Schema,
+    ) -> DeltaResult<()> {
+        println!("Extracting column getters for {:#?}", schema);
+        todo!()
+        //Self::extract_columns_from_array(out_col_array, schema, Some(&self.data))
+    }
+
+    /*
+    fn extract_columns_from_array<'a>(
+        out_col_array: &mut Vec<&dyn GetData<'a>>,
+        schema: &Schema,
+        array: Option<&'a dyn ProvidesColumnByName>,
+    ) -> DeltaResult<()> {
+        for field in schema.fields() {
+            let col = array
+                .and_then(|a| a.column_by_name(&field.name))
+                .filter(|a| *a.data_type() != ArrowDataType::Null);
+            // Note: if col is None we have either:
+            //   a) encountered a column that is all nulls or,
+            //   b) recursed into a struct that was all null.
+            // So below if the field is allowed to be null, we push that, otherwise we error out.
+            if let Some(col) = col {
+                Self::extract_column(out_col_array, field, col)?;
+            } else if field.is_nullable() {
+                if let DataType::Struct(_) = field.data_type() {
+                    Self::extract_columns_from_array(out_col_array, schema, None)?;
+                } else {
+                    println!("Pushing a null field for {}", field.name);
+                    out_col_array.push(&());
+                }
+            } else {
+                return Err(Error::MissingData(format!(
+                    "Found required field {}, but it's null",
+                    field.name
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn extract_column<'a>(
+        out_col_array: &mut Vec<&dyn GetData<'a>>,
+        field: &StructField,
+        col: &'a dyn Array,
+    ) -> DeltaResult<()> {
+        match (col.data_type(), &field.data_type) {
+            (&ArrowDataType::Struct(_), DataType::Struct(fields)) => {
+                // both structs, so recurse into col
+                let struct_array = col.as_struct();
+                Self::extract_columns_from_array(out_col_array, fields, Some(struct_array))?;
+            }
+            (&ArrowDataType::Boolean, &DataType::Primitive(PrimitiveType::Boolean)) => {
+                println!("Pushing boolean array for {}", field.name);
+                out_col_array.push(col.as_boolean());
+            }
+            (&ArrowDataType::Utf8, &DataType::Primitive(PrimitiveType::String)) => {
+                println!("Pushing string array for {}", field.name);
+                out_col_array.push(col.as_string::<i32>());
+            }
+            (&ArrowDataType::Int32, &DataType::Primitive(PrimitiveType::Integer)) => {
+                println!("Pushing int32 array for {}", field.name);
+                out_col_array.push(col.as_primitive::<Int32Type>());
+            }
+            (&ArrowDataType::Int64, &DataType::Primitive(PrimitiveType::Long)) => {
+                println!("Pushing int64 array for {}", field.name);
+                out_col_array.push(col.as_primitive::<Int64Type>());
+            }
+            (ArrowDataType::List(_arrow_field), DataType::Array(_array_type)) => {
+                // TODO(nick): validate the element types match
+                println!("Pushing list for {}", field.name);
+                out_col_array.push(col.as_list());
+            }
+            (&ArrowDataType::Map(_, _), &DataType::Map(_)) => {
+                println!("Pushing map for {}", field.name);
+                out_col_array.push(col.as_map());
+            }
+            (arrow_data_type, data_type) => {
+                println!(
+                    "Can't extract {}. Arrow Type: {arrow_data_type}\n Kernel Type: {data_type}",
+                    field.name
+                );
+                return Err(Self::get_error_for_types(data_type, arrow_data_type, &field.name));
+            }
+        }
+        Ok(())
+    }
+
+    fn get_error_for_types(
+        data_type: &DataType,
+        arrow_data_type: &ArrowDataType,
+        field_name: &str,
+    ) -> Error {
+        let expected_type: Result<ArrowDataType, ArrowError> = data_type.try_into();
+        match expected_type {
+            Ok(expected_type) => {
+                if expected_type == *arrow_data_type {
+                    Error::UnexpectedColumnType(format!(
+                        "On {field_name}: Don't know how to extract something of type {data_type}",
+                    ))
+                } else {
+                    Error::UnexpectedColumnType(format!(
+                        "Type mismatch on {field_name}: expected {data_type}, got {arrow_data_type}",
+                    ))
+                }
+            }
+            Err(e) => Error::UnexpectedColumnType(format!(
+                "On {field_name}: Unsupported data type {data_type}: {e}",
+            )),
+        }
+    }
+    */
 }
 
 /// # Safety
@@ -445,11 +857,25 @@ pub struct EngineSchemaVisitor {
 ///
 /// Caller is responsible to pass a valid handle.
 #[no_mangle]
-pub unsafe extern "C" fn visit_schema(
+pub unsafe extern "C" fn visit_snapshot_schema(
     snapshot: *const SnapshotHandle,
     visitor: &mut EngineSchemaVisitor,
 ) -> usize {
     let snapshot = unsafe { ArcHandle::clone_as_arc(snapshot) };
+    visit_schema_impl(snapshot.schema(), visitor)
+}
+/// # Safety
+///
+/// Caller is responsible to pass a valid handle.
+#[no_mangle]
+pub unsafe extern "C" fn visit_schema(
+    schema: *const SchemaHandle,
+    visitor: &mut EngineSchemaVisitor,
+) -> usize {
+    let schema = unsafe { ArcHandle::clone_as_arc(schema) };
+    visit_schema_impl(schema.as_ref(), visitor)
+}
+unsafe fn visit_schema_impl(schema: &StructType, visitor: &mut EngineSchemaVisitor) -> usize {
     // Visit all the fields of a struct and return the list of children
     fn visit_struct_fields(visitor: &EngineSchemaVisitor, s: &StructType) -> usize {
         let child_list_id = (visitor.make_field_list)(visitor.data, s.fields.len());
@@ -480,7 +906,7 @@ pub unsafe extern "C" fn visit_schema(
         }
     }
 
-    visit_struct_fields(visitor, snapshot.schema())
+    visit_struct_fields(visitor, schema)
 }
 
 // A set that can identify its contents by address

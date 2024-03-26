@@ -87,6 +87,12 @@ impl<E: TaskExecutor> DefaultEngineInterface<E> {
     }
 }
 
+impl<E: TaskExecutor> Drop for DefaultEngineInterface<E> {
+    fn drop(&mut self) {
+        println!("DefaultTableClient dropped");
+    }
+}
+
 impl<E: TaskExecutor> EngineInterface for DefaultEngineInterface<E> {
     fn get_expression_handler(&self) -> Arc<dyn ExpressionHandler> {
         self.expression.clone()
