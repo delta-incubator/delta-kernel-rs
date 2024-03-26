@@ -398,45 +398,41 @@ pub struct KernelDataVisitorHandle<'a> {
 }
 
 #[repr(C)]
-pub struct ExternGetDataVtableContext {
+pub struct ExternGetDataContext {
     pub type_id: usize,
 }
 
 #[repr(C)]
 pub struct ExternGetDataVtable {
-    context: *mut ExternGetDataVtableContext,
+    context: *mut ExternGetDataContext,
     get_bool: Option<
         unsafe extern "C" fn(
-            context: *mut ExternGetDataVtableContext,
+            context: *mut ExternGetDataContext,
             row_index: usize,
-            field_name: KernelStringSlice,
             dest: *mut bool,
-        ) -> ExternResult<bool>,
+        ) -> bool,
     >,
     get_int: Option<
         unsafe extern "C" fn(
-            context: *mut ExternGetDataVtableContext,
+            context: *mut ExternGetDataContext,
             row_index: usize,
-            field_name: KernelStringSlice,
             dest: *mut i32,
-        ) -> ExternResult<bool>,
+        ) -> bool,
     >,
     get_long: Option<
         unsafe extern "C" fn(
-            context: *mut ExternGetDataVtableContext,
+            context: *mut ExternGetDataContext,
             row_index: usize,
-            field_name: KernelStringSlice,
             dest: *mut i64,
-        ) -> ExternResult<bool>,
+        ) -> bool,
     >,
     // TODO: This probably isn't quite right... but maybe it works
     get_str: Option<
         unsafe extern "C" fn(
-            context: *mut ExternGetDataVtableContext,
+            context: *mut ExternGetDataContext,
             row_index: usize,
-            field_name: KernelStringSlice,
             dest: *mut KernelStringSlice,
-        ) -> ExternResult<bool>,
+        ) -> bool,
     >,
     /*
     get_list: Option<unsafe extern "C" fn(
@@ -446,7 +442,7 @@ pub struct ExternGetDataVtable {
         dest: *mut ExternListItemVtable,
     ) -> ExternResult<bool>>,
     get_map: Option<unsafe extern "C" fn (
-        context: *mut ExternGetDataVtableContext,
+        context: *mut ExternGetDataContext,
         row_index: usize,
         field_name: KernelStringSlice,
         dest: *mut ExternMapItemVtable,
@@ -459,11 +455,10 @@ impl ExternGetDataVtable {
         &self,
         getter: Option<
             unsafe extern "C" fn(
-                context: *mut ExternGetDataVtableContext,
+                context: *mut ExternGetDataContext,
                 row_index: usize,
-                field_name: KernelStringSlice,
                 dest: *mut T,
-            ) -> ExternResult<bool>,
+            ) -> bool,
         >,
         row_index: usize,
         field_name: &str,
@@ -471,10 +466,9 @@ impl ExternGetDataVtable {
         match getter {
             Some(getter) => {
                 let mut val: T = Default::default();
-                let result =
-                    unsafe { getter(self.context, row_index, field_name.into(), &mut val as _) };
-                let result = unsafe { DeltaResult::from_extern_result(result) };
-                result.map(|is_null| if is_null { None } else { Some(val) })
+                let is_null = unsafe { getter(self.context, row_index, &mut val as _) };
+                let result = if is_null { None } else { Some(val) };
+                Ok(result)
             }
             None => Err(Error::UnexpectedColumnType(format!(
                 "{field_name} is not of type {}",
@@ -543,12 +537,28 @@ impl EngineData for KernelEngineDataVtable {
             data: self,
             visitor,
         };
+
+        unsafe extern "C" fn visit(
+            kernel_context: *mut KernelDataVisitorHandle,
+            allocate_error: AllocateErrorFn,
+            getters: *const ExternGetDataVtable,
+            num_getters: usize,
+        ) -> ExternResult<usize> {
+            let kernel_context = unsafe { &mut *kernel_context };
+            let getters = unsafe { std::slice::from_raw_parts(getters, num_getters) };
+            let getters: Vec<_> = getters.iter().map(|item| item as _).collect();
+            kernel_context
+                .visitor
+                .visit(kernel_context.data.length(), &getters)
+                .map(|_| 0)
+                .into_extern_result(allocate_error)
+        }
         let result = unsafe {
             (self.extract)(
                 self.context,
                 ArcHandle::into_handle(schema),
                 &mut kernel_context,
-                Self::visit,
+                visit,
             )
         };
         let _ = unsafe { DeltaResult::from_extern_result(result) }?;
@@ -597,139 +607,6 @@ pub unsafe extern "C" fn create_engine_data(
         extract,
     });
     ArcHandle::into_handle(handle)
-}
-
-impl KernelEngineDataVtable {
-    unsafe extern "C" fn visit(
-        kernel_context: *mut KernelDataVisitorHandle,
-        allocate_error: AllocateErrorFn,
-        getters: *const ExternGetDataVtable,
-        num_getters: usize,
-    ) -> ExternResult<usize> {
-        let kernel_context = unsafe { &mut *kernel_context };
-        let getters = unsafe { std::slice::from_raw_parts(getters, num_getters) };
-        let getters: Vec<_> = getters.iter().map(|item| item as _).collect();
-        kernel_context
-            .visitor
-            .visit(kernel_context.data.length(), &getters)
-            .map(|_| 0)
-            .into_extern_result(allocate_error)
-    }
-
-    pub fn extract_columns<'a>(
-        &'a self,
-        out_col_array: &mut Vec<&dyn GetData<'a>>,
-        schema: &Schema,
-    ) -> DeltaResult<()> {
-        println!("Extracting column getters for {:#?}", schema);
-        todo!()
-        //Self::extract_columns_from_array(out_col_array, schema, Some(&self.data))
-    }
-
-    /*
-    fn extract_columns_from_array<'a>(
-        out_col_array: &mut Vec<&dyn GetData<'a>>,
-        schema: &Schema,
-        array: Option<&'a dyn ProvidesColumnByName>,
-    ) -> DeltaResult<()> {
-        for field in schema.fields() {
-            let col = array
-                .and_then(|a| a.column_by_name(&field.name))
-                .filter(|a| *a.data_type() != ArrowDataType::Null);
-            // Note: if col is None we have either:
-            //   a) encountered a column that is all nulls or,
-            //   b) recursed into a struct that was all null.
-            // So below if the field is allowed to be null, we push that, otherwise we error out.
-            if let Some(col) = col {
-                Self::extract_column(out_col_array, field, col)?;
-            } else if field.is_nullable() {
-                if let DataType::Struct(_) = field.data_type() {
-                    Self::extract_columns_from_array(out_col_array, schema, None)?;
-                } else {
-                    println!("Pushing a null field for {}", field.name);
-                    out_col_array.push(&());
-                }
-            } else {
-                return Err(Error::MissingData(format!(
-                    "Found required field {}, but it's null",
-                    field.name
-                )));
-            }
-        }
-        Ok(())
-    }
-
-    fn extract_column<'a>(
-        out_col_array: &mut Vec<&dyn GetData<'a>>,
-        field: &StructField,
-        col: &'a dyn Array,
-    ) -> DeltaResult<()> {
-        match (col.data_type(), &field.data_type) {
-            (&ArrowDataType::Struct(_), DataType::Struct(fields)) => {
-                // both structs, so recurse into col
-                let struct_array = col.as_struct();
-                Self::extract_columns_from_array(out_col_array, fields, Some(struct_array))?;
-            }
-            (&ArrowDataType::Boolean, &DataType::Primitive(PrimitiveType::Boolean)) => {
-                println!("Pushing boolean array for {}", field.name);
-                out_col_array.push(col.as_boolean());
-            }
-            (&ArrowDataType::Utf8, &DataType::Primitive(PrimitiveType::String)) => {
-                println!("Pushing string array for {}", field.name);
-                out_col_array.push(col.as_string::<i32>());
-            }
-            (&ArrowDataType::Int32, &DataType::Primitive(PrimitiveType::Integer)) => {
-                println!("Pushing int32 array for {}", field.name);
-                out_col_array.push(col.as_primitive::<Int32Type>());
-            }
-            (&ArrowDataType::Int64, &DataType::Primitive(PrimitiveType::Long)) => {
-                println!("Pushing int64 array for {}", field.name);
-                out_col_array.push(col.as_primitive::<Int64Type>());
-            }
-            (ArrowDataType::List(_arrow_field), DataType::Array(_array_type)) => {
-                // TODO(nick): validate the element types match
-                println!("Pushing list for {}", field.name);
-                out_col_array.push(col.as_list());
-            }
-            (&ArrowDataType::Map(_, _), &DataType::Map(_)) => {
-                println!("Pushing map for {}", field.name);
-                out_col_array.push(col.as_map());
-            }
-            (arrow_data_type, data_type) => {
-                println!(
-                    "Can't extract {}. Arrow Type: {arrow_data_type}\n Kernel Type: {data_type}",
-                    field.name
-                );
-                return Err(Self::get_error_for_types(data_type, arrow_data_type, &field.name));
-            }
-        }
-        Ok(())
-    }
-
-    fn get_error_for_types(
-        data_type: &DataType,
-        arrow_data_type: &ArrowDataType,
-        field_name: &str,
-    ) -> Error {
-        let expected_type: Result<ArrowDataType, ArrowError> = data_type.try_into();
-        match expected_type {
-            Ok(expected_type) => {
-                if expected_type == *arrow_data_type {
-                    Error::UnexpectedColumnType(format!(
-                        "On {field_name}: Don't know how to extract something of type {data_type}",
-                    ))
-                } else {
-                    Error::UnexpectedColumnType(format!(
-                        "Type mismatch on {field_name}: expected {data_type}, got {arrow_data_type}",
-                    ))
-                }
-            }
-            Err(e) => Error::UnexpectedColumnType(format!(
-                "On {field_name}: Unsupported data type {data_type}: {e}",
-            )),
-        }
-    }
-    */
 }
 
 /// # Safety
