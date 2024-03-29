@@ -97,6 +97,17 @@ impl LogSegment {
     }
 }
 
+/// Modes of column mapping a table can be in
+#[derive(Debug)]
+pub enum ColumnMappingMode {
+    None,
+    Id,
+    Name,
+}
+
+// key to look in metadata.configuration for to get column mapping mode
+static COLUMN_MAPPING_MODE_KEY: &str = "delta.columnMapping.mode";
+
 // TODO expose methods for accessing the files of a table (with file pruning).
 /// In-memory representation of a specific snapshot of a Delta table. While a `DeltaTable` exists
 /// throughout time, `Snapshot`s represent a view of a table at a specific point in time; they
@@ -229,6 +240,22 @@ impl Snapshot {
 
     pub fn protocol(&self) -> &Protocol {
         &self.protocol
+    }
+
+    pub fn column_mapping_mode(&self) -> DeltaResult<ColumnMappingMode> {
+        if self.protocol.min_reader_version >= 2 {
+            match self.metadata.configuration.get(COLUMN_MAPPING_MODE_KEY) {
+                Some(mode) => match mode.as_ref().unwrap().as_str() {
+                    "none" => Ok(ColumnMappingMode::None),
+                    "id" => Ok(ColumnMappingMode::Id),
+                    "name" => Ok(ColumnMappingMode::Name),
+                    _ => Err(Error::invalid_column_mapping_mode(mode.as_ref().unwrap())),
+                },
+                None => Ok(ColumnMappingMode::None),
+            }
+        } else {
+            Ok(ColumnMappingMode::None)
+        }
     }
 }
 

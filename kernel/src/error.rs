@@ -100,6 +100,9 @@ pub enum Error {
 
     #[error("Could not parse int: {0}")]
     ParseIntError(#[from] ParseIntError),
+
+    #[error("Invalid column mapping mode: {0}")]
+    InvalidColumnMappingMode(String),
 }
 
 // Convenience constructors for Error types that take a String argument
@@ -132,6 +135,10 @@ impl Error {
     }
     pub fn join_failure(msg: impl ToString) -> Self {
         Self::JoinFailure(msg.to_string())
+    }
+
+    pub fn invalid_column_mapping_mode(mode: impl ToString) -> Self {
+        Self::InvalidColumnMappingMode(mode.to_string())
     }
 
     // Capture a backtrace when the error is constructed.
