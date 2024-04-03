@@ -6,10 +6,8 @@ use tracing::debug;
 use self::file_stream::log_replay_iter;
 use crate::actions::{get_log_schema, Add, ADD_NAME, REMOVE_NAME};
 use crate::expressions::{Expression, Scalar};
-use crate::schema::{
-    ColumnMetadataKey, DataType, MetadataValue, SchemaRef, StructField, StructType,
-};
-use crate::snapshot::{ColumnMappingMode, Snapshot};
+use crate::schema::{DataType, SchemaRef, StructField, StructType};
+use crate::snapshot::Snapshot;
 use crate::{DeltaResult, EngineData, EngineInterface, Error, FileMeta};
 
 mod data_skipping;
@@ -194,34 +192,12 @@ impl Scan {
                 }
             })
             .collect();
-        let read_schema = Arc::new(StructType::new(read_fields));
-        let parquet_schema = match self.snapshot.column_mapping_mode()? {
-            ColumnMappingMode::None => {
-                debug!("Executing scan with read schema {read_schema:#?}");
-                read_schema.clone()
-            }
-            ColumnMappingMode::Id => {
-                return Err(Error::generic("Don't support id mapping atm"));
-            }
-            ColumnMappingMode::Name => {
-                let parquet_fields: Vec<StructField> = read_schema.fields().map(|field| {
-                    match field.metadata.get(ColumnMetadataKey::ColumnMappingPhysicalName.as_ref()) {
-                        Some(val) => match val {
-                            MetadataValue::Number(_) => {
-                                Err(Error::generic("{ColumnMetadataKey::ColumnMappingPhysicalName} must be a string in name mapping mode"))
-                            }
-                            MetadataValue::String(name) => {
-                                Ok(StructField::new(name, field.data_type().clone(), field.is_nullable()))
-                            }
-                        }
-                        None => {
-                            Err(Error::generic("fields MUST have a {ColumnMetadataKey::ColumnMappingPhysicalName} key in their metadata in name mapping mode"))
-                        }
-                    }
-                }).try_collect()?;
-                Arc::new(StructType::new(parquet_fields))
-            }
-        };
+        let logical_schema = Arc::new(StructType::new(read_fields));
+        let parquet_schema = crate::column_mapping::transform_to_parquet_schema(
+            &logical_schema,
+            self.snapshot.column_mapping_mode()?,
+        )?;
+        debug!("Executing scan with logical_schema: {logical_schema:#?} and parquet schema {parquet_schema:#?}");
         let output_schema = DataType::Struct(Box::new(self.schema().as_ref().clone()));
         let parquet_handler = engine_interface.get_parquet_handler();
 
@@ -281,7 +257,7 @@ impl Scan {
                     Some(ref read_expression) => engine_interface
                         .get_expression_handler()
                         .get_evaluator(
-                            read_schema.clone(),
+                            logical_schema.clone(),
                             read_expression.clone(),
                             output_schema.clone(),
                         )

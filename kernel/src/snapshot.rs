@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 
 use crate::actions::{get_log_schema, Metadata, Protocol, METADATA_NAME, PROTOCOL_NAME};
+use crate::column_mapping::{ColumnMappingMode, COLUMN_MAPPING_MODE_KEY};
 use crate::path::LogPath;
 use crate::schema::{Schema, SchemaRef};
 use crate::{DeltaResult, EngineInterface, Error, FileMeta, FileSystemClient, Version};
@@ -96,17 +97,6 @@ impl LogSegment {
         }
     }
 }
-
-/// Modes of column mapping a table can be in
-#[derive(Debug)]
-pub enum ColumnMappingMode {
-    None,
-    Id,
-    Name,
-}
-
-// key to look in metadata.configuration for to get column mapping mode
-static COLUMN_MAPPING_MODE_KEY: &str = "delta.columnMapping.mode";
 
 // TODO expose methods for accessing the files of a table (with file pruning).
 /// In-memory representation of a specific snapshot of a Delta table. While a `DeltaTable` exists
@@ -245,12 +235,7 @@ impl Snapshot {
     pub fn column_mapping_mode(&self) -> DeltaResult<ColumnMappingMode> {
         if self.protocol.min_reader_version >= 2 {
             match self.metadata.configuration.get(COLUMN_MAPPING_MODE_KEY) {
-                Some(mode) => match mode.as_ref().unwrap().as_str() {
-                    "none" => Ok(ColumnMappingMode::None),
-                    "id" => Ok(ColumnMappingMode::Id),
-                    "name" => Ok(ColumnMappingMode::Name),
-                    _ => Err(Error::invalid_column_mapping_mode(mode.as_ref().unwrap())),
-                },
+                Some(mode) => ColumnMappingMode::try_from(mode.as_ref().unwrap().as_ref()),
                 None => Ok(ColumnMappingMode::None),
             }
         } else {
