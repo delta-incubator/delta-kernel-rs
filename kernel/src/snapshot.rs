@@ -111,6 +111,12 @@ pub struct Snapshot {
     schema: Schema,
 }
 
+impl Drop for Snapshot {
+    fn drop(&mut self) {
+        println!("Dropping Snapshot")
+    }
+}
+
 impl std::fmt::Debug for Snapshot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Snapshot")
