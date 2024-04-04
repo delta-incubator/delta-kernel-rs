@@ -235,7 +235,7 @@ impl Snapshot {
     pub fn column_mapping_mode(&self) -> DeltaResult<ColumnMappingMode> {
         if self.protocol.min_reader_version >= 2 {
             match self.metadata.configuration.get(COLUMN_MAPPING_MODE_KEY) {
-                Some(mode) => ColumnMappingMode::try_from(mode.as_ref().unwrap().as_ref()),
+                Some(mode) => ColumnMappingMode::try_from(mode.as_str()),
                 None => Ok(ColumnMappingMode::None),
             }
         } else {
