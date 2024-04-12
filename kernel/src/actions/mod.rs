@@ -1,5 +1,5 @@
 /// Code to parse and handle actions from the delta log
-pub(crate) mod deletion_vector;
+pub mod deletion_vector;
 pub(crate) mod schemas;
 pub(crate) mod visitors;
 
