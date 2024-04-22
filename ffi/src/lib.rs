@@ -15,6 +15,8 @@ use delta_kernel::schema::{ArrayType, DataType, MapType, PrimitiveType, StructTy
 use delta_kernel::snapshot::Snapshot;
 use delta_kernel::{DeltaResult, Engine, Error};
 
+pub mod engine_interface_funcs;
+
 mod handle;
 use handle::{ArcHandle, SizedArcHandle, Unconstructable};
 
