@@ -103,8 +103,12 @@ impl<H: SizedBoxHandle> BoxHandle for H {
         Box::into_raw(target.into())
     }
 
-    unsafe fn drop_handle(ptr: *mut Self) {
-        let _ = unsafe { Box::from_raw(ptr) };
+    unsafe fn as_ref<'a>(handle: &'a *const Self) -> &'a Self::Target {
+        unsafe { & **handle }
+    }
+
+    unsafe fn as_mut<'a>(handle: &'a *mut Self) -> &'a mut Self::Target {
+        unsafe { &mut **handle }
     }
 }
 
@@ -229,7 +233,7 @@ pub trait ArcHandle: Sized {
 
     /// Obtains a shared reference to the underlying
     unsafe fn as_ref<'a>(handle: &'a *const Self) -> &'a Self::Target {
-        let ptr = *handle as *mut Box<Self::Target>;
+        let ptr = *handle as *const Arc<Self::Target>;
         unsafe { & *ptr }
     }
 
@@ -294,6 +298,10 @@ impl<H: SizedArcHandle> ArcHandle for H {
 
     fn into_handle(target: impl Into<Arc<Self>>) -> *const Self {
         Arc::into_raw(target.into())
+    }
+
+    unsafe fn as_ref<'a>(handle: &'a *const Self) -> &'a Self::Target {
+        unsafe { & **handle }
     }
 
     unsafe fn clone_as_arc(handle: *const Self) -> Arc<Self> {
