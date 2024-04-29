@@ -11,23 +11,6 @@
 //! are more suitable for shared and/or unsized data.
 use std::sync::Arc;
 
-/// Helper trait that simplifies passing an instance of a Sized type across the FFI boundary as a
-/// leaked thin pointer. Does not include any reference-counting capability, so engine is
-/// responsible to do whatever reference counting the engine may need. Engine is also responsible
-/// not to drop an in-use handle, so kernel code can safely dereference the pointer.
-pub trait BoxHandle: Sized {
-    fn into_handle(self) -> *mut Self {
-        Box::into_raw(Box::new(self))
-    }
-    /// # Safety
-    ///
-    /// The `handle` was returned by a call to `into_handle`, has not already been passed to
-    /// `drop_handle`, and has no other live references.
-    unsafe fn drop_handle(handle: *mut Self) {
-        let _ = unsafe { Box::from_raw(handle) };
-    }
-}
-
 mod unconstructable {
     /// A struct that cannot be instantiated by any rust code because this module exposes no public
     /// constructor for it. Intentionally _NOT_ a zero-sized type, to avoid weirdness in C/C++ land.
@@ -39,9 +22,88 @@ mod unconstructable {
 // Make it easy to use (the module was only used to enforce member privacy).
 pub type Unconstructable = unconstructable::Unconstructable;
 
-/// Helper trait that allows passing `Arc<Target>` across the FFI boundary as a thin-pointer handle
-/// type. The pointer remains valid until freed by a call to [ArcHandle::drop_handle]. The handle is
-/// strongly typed, in the sense that each handle type maps to a single `Target` type.
+
+/// Helper trait that simplifies passing a leaked instance of a (possibly unsized) type across the
+/// FFI boundary as a leaked thin pointer. Does not include any reference-counting capability, so
+/// the engine is responsible to do whatever reference counting the engine may need. Engine is also
+/// responsible not to drop an in-use handle, so that kernel code can safely dereference the
+/// pointer.
+pub trait BoxHandle: Sized {
+    /// The target type this handle represents.
+    type Target: ?Sized;
+
+    /// Converts the target into a (leaked) "handle" that can cross the FFI boundary. The handle
+    /// remains valid until passed to [Self::drop_handle].
+    fn into_handle(target: impl Into<Box<Self::Target>>) -> *mut Self {
+        // NOTE: We need a double-box to ensure the handle is a thin pointer.
+        Box::into_raw(Box::new(target.into())) as _
+    }
+
+    /// Drops the handle, invalidating it and freeing the underlying object.
+    ///
+    /// # Safety
+    ///
+    /// Caller of this method asserts that `handle` satisfies all of the following conditions:
+    ///
+    /// * Obtained by calling [into_handle]
+    /// * Not previously passed to [drop_handle]
+    /// * Has no other live references
+    unsafe fn drop_handle(handle: *mut Self) {
+        let ptr = handle as *mut Box<Self::Target>;
+        let _ = unsafe { Box::from_raw(ptr) };
+    }
+
+}
+
+/// A marker trait that allows a [Sized] type to act as its own [BoxHandle]. This is more efficient
+/// and also produces a pointer of the same type that can be used directly (no type aliasing).
+pub trait SizedBoxHandle: Sized { }
+
+// A blanket implementation of `BoxHandle` for all types satisfying `SizedBoxHandle`.
+//
+// Unlike the default (unsized) implementation, which must wrap the `Box` in second `Box` in order
+// to obtain a thin pointer, the sized implementation can directly return a pointer to the
+// underlying type. This blanket implementation applies automatically to all types that implement
+// `SizedBoxHandle`, so a type that implements `SizedBoxHandle` cannot directly implement
+// `BoxHandle` (which is a Good Thing, because it preserves the important type safety invariant that
+// every handle has exactly one `Target` type):
+//
+// This blanket implementation applies automatically to all types that implement `SizedBoxHandle`,
+// so a type that implements `SizedBoxHandle` cannot directly implement `BoxHandle` (which is a Good
+// Thing, because it preserves the important type safety invariant that every handle has exactly one
+// `Target` type):
+//
+// ```
+// error[E0119]: conflicting implementations of trait `BoxHandle` for type `FooHandle`
+//   --> src/main.rs:55:1
+//    |
+// 28 | impl<H, T> BoxHandle for H where H: SizedBoxHandle<Target = T> {
+//    | -------------------------------------------------------------- first implementation here
+// ...
+// 55 | impl BoxHandle for FooHandle {
+//    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ conflicting implementation for `FooHandle`
+// ```
+impl<H: SizedBoxHandle> BoxHandle for H {
+    type Target = Self; // not actually needed, but required by the trait
+
+    fn into_handle(target: impl Into<Box<Self>>) -> *mut Self {
+        // One layer of boxing is enough, we just need it to be heap-allocated
+        Box::into_raw(target.into())
+    }
+
+    unsafe fn drop_handle(ptr: *mut Self) {
+        let _ = unsafe { Box::from_raw(ptr) };
+    }
+}
+
+/// Helper trait that allows passing an `Arc<Target>` across the FFI boundary as a thin-pointer
+/// handle type. The pointer remains valid until freed by a call to [ArcHandle::drop_handle]. The
+/// handle is strongly typed, in the sense that each handle type maps to a single `Target` type.
+///
+/// This trait tracks a shared reference to the underlying, which differs from `BoxHandle` in that
+/// the latter tracks an owned reference. Thus, constructing an `ArcHandle` only leaks a reference
+/// count (which in turn may cause the underlying to leak), and it is easy to clone additional `Arc`
+/// from a given `ArcHandle` as needed.
 ///
 /// Typically, the handle (`Self`) is an opaque struct (_not_ `repr(C)`) with an FFI-friendly name
 /// name, containing an [Unconstructable] member so rust code cannot legally instantiate it.
@@ -149,8 +211,8 @@ pub trait ArcHandle: Sized {
 
     /// Converts the target Arc into a (leaked) "handle" that can cross the FFI boundary. The Arc
     /// refcount does not change. The handle remains valid until passed to [Self::drop_handle].
-    fn into_handle(target: Arc<Self::Target>) -> *const Self {
-        Box::into_raw(Box::new(target)) as _
+    fn into_handle(target: impl Into<Arc<Self::Target>>) -> *const Self {
+        Box::into_raw(Box::new(target.into())) as _
     }
 
     /// Clones an Arc from an FFI handle for kernel use, without dropping the handle. The Arc
@@ -186,20 +248,18 @@ pub trait ArcHandle: Sized {
     }
 }
 
-/// A special kind of [ArcHandle] which is optimized for [Sized] types. Handles for sized types are
-/// more efficient if they implement this trait instead of [ArcHandle].
-pub trait SizedArcHandle: Sized {
-    type Target: Sized;
-}
+/// A marker trait that allows a [Sized] type to act as its own [ArcHandle]. This is more efficient
+/// and also produces a pointer of the same type that can be used directly (no type aliasing).
+pub trait SizedArcHandle: Sized { }
 
 // A blanket implementation of `ArcHandle` for all types satisfying `SizedArcHandle`.
 //
-// Unlike the default (unsized) implementation, which must wrap the Arc in a Box in order to obtain
-// a thin pointer, the sized implementation can directly return a pointer to the Arc's underlying
+// Unlike the default (unsized) implementation, which must wrap the `Arc` in a `Box` in order to
+// obtain a thin pointer, the sized implementation can directly return a pointer to the underlying
 // type. This blanket implementation applies automatically to all types that implement
-// SizedArcHandle, so a type that implements SizedArcHandle cannot directly implement ArcHandle
-// (which is a Good Thing, because it preserves the important type safety invariant that every
-// handle has exactly one `Target` type):
+// `SizedArcHandle`, so a type that implements `SizedArcHandle` cannot directly implement
+// `ArcHandle` (which is a Good Thing, because it preserves the important type safety invariant that
+// every handle has exactly one `Target` type):
 //
 // ```
 // error[E0119]: conflicting implementations of trait `ArcHandle` for type `FooHandle`
@@ -211,24 +271,19 @@ pub trait SizedArcHandle: Sized {
 // 55 | impl ArcHandle for FooHandle {
 //    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ conflicting implementation for `FooHandle`
 // ```
-impl<H, T> ArcHandle for H
-where
-    H: SizedArcHandle<Target = T>,
-{
-    type Target = T;
+impl<H: SizedArcHandle> ArcHandle for H {
+    type Target = Self; // not actually needed, but required by the trait
 
-    fn into_handle(target: Arc<Self::Target>) -> *const Self {
-        Arc::into_raw(target) as _
+    fn into_handle(target: impl Into<Arc<Self>>) -> *const Self {
+        Arc::into_raw(target.into())
     }
 
-    unsafe fn clone_as_arc(handle: *const Self) -> Arc<Self::Target> {
-        let ptr = handle as *const Self::Target;
-        unsafe { Arc::increment_strong_count(ptr) };
-        unsafe { Arc::from_raw(ptr) }
+    unsafe fn clone_as_arc(handle: *const Self) -> Arc<Self> {
+        unsafe { Arc::increment_strong_count(handle) };
+        unsafe { Arc::from_raw(handle) }
     }
 
     unsafe fn drop_handle(handle: *const Self) {
-        let ptr = handle as *const Self::Target;
-        let _ = unsafe { Arc::from_raw(ptr) };
+        let _ = unsafe { Arc::from_raw(handle) };
     }
 }

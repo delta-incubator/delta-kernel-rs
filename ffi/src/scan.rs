@@ -13,10 +13,10 @@ use url::Url;
 use crate::{
     unwrap_kernel_expression, AllocateStringFn, EnginePredicate, ExternEngine, ExternEngineHandle,
     ExternResult, FromBoolSlice, IntoExternResult, KernelBoolSlice, KernelExpressionVisitorState,
-    KernelStringSlice, NullableCvoid, SnapshotHandle, TryFromStringSlice,
+    KernelStringSlice, NullableCvoid, Snapshot, TryFromStringSlice,
 };
 
-use super::handle::{ArcHandle, BoxHandle};
+use super::handle::{ArcHandle, BoxHandle, SizedBoxHandle};
 
 // TODO: Do we want this type at all? Perhaps we should just _always_ pass raw *mut c_void pointers
 // that are the engine data
@@ -26,7 +26,7 @@ use super::handle::{ArcHandle, BoxHandle};
 pub struct EngineDataHandle {
     data: Box<dyn EngineData>,
 }
-impl BoxHandle for EngineDataHandle {}
+impl SizedBoxHandle for EngineDataHandle {}
 
 /// Allow an engine to "unwrap" an [`EngineDataHandle`] into the raw pointer for the case it wants
 /// to use its own engine data format
@@ -83,7 +83,7 @@ unsafe fn get_raw_arrow_data_impl(
     Ok(Box::leak(ret_data))
 }
 
-impl BoxHandle for Scan {}
+impl SizedBoxHandle for Scan {}
 
 /// Get a [`Scan`] over the table specified by the passed snapshot.
 /// # Safety
@@ -91,7 +91,7 @@ impl BoxHandle for Scan {}
 /// Caller is responsible for passing a valid snapshot pointer, and engine pointer
 #[no_mangle]
 pub unsafe extern "C" fn scan(
-    snapshot: *const SnapshotHandle,
+    snapshot: *const Snapshot,
     engine: *const ExternEngineHandle,
     predicate: Option<&mut EnginePredicate>,
 ) -> ExternResult<*mut Scan> {
@@ -99,7 +99,7 @@ pub unsafe extern "C" fn scan(
 }
 
 unsafe fn scan_impl(
-    snapshot: *const SnapshotHandle,
+    snapshot: *const Snapshot,
     predicate: Option<&mut EnginePredicate>,
 ) -> DeltaResult<*mut Scan> {
     let snapshot = unsafe { ArcHandle::clone_as_arc(snapshot) };
@@ -115,7 +115,7 @@ unsafe fn scan_impl(
     Ok(BoxHandle::into_handle(scan_builder.build()))
 }
 
-impl BoxHandle for GlobalScanState {}
+impl SizedBoxHandle for GlobalScanState {}
 
 /// Get the global state for a scan. See the docs for [`delta_kernel::scan::state::GlobalScanState`]
 /// for more information.
@@ -147,7 +147,7 @@ pub struct KernelScanDataIterator {
     engine: Arc<dyn ExternEngine>,
 }
 
-impl BoxHandle for KernelScanDataIterator {}
+impl SizedBoxHandle for KernelScanDataIterator {}
 
 impl Drop for KernelScanDataIterator {
     fn drop(&mut self) {
@@ -182,7 +182,7 @@ unsafe fn kernel_scan_data_init_impl(
         data: Box::new(scan_data),
         engine,
     };
-    Ok(data.into_handle())
+    Ok(BoxHandle::into_handle(data))
 }
 
 /// # Safety
@@ -242,12 +242,12 @@ type CScanCallback = extern "C" fn(
     partition_map: *mut CStringMap,
 );
 
-impl BoxHandle for DvInfo {}
+impl SizedBoxHandle for DvInfo {}
 
 pub struct CStringMap {
     values: HashMap<String, String>,
 }
-impl BoxHandle for CStringMap {}
+impl SizedBoxHandle for CStringMap {}
 
 #[no_mangle]
 /// allow probing into a CStringMap. If the specified key is in the map, kernel will call
@@ -290,7 +290,7 @@ unsafe fn selection_vector_from_dv_impl(
     let root_url = Url::parse(&state.table_root)?;
     let vopt = dv_info.get_selection_vector(extern_engine.engine().as_ref(), &root_url)?;
     match vopt {
-        Some(v) => Ok(BoxHandle::into_handle(v.into())),
+        Some(v) => Ok(BoxHandle::into_handle(Box::new(v.into()))),
         None => Ok(std::ptr::null_mut()),
     }
 }

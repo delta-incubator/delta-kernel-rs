@@ -3,7 +3,6 @@
 //!
 
 use std::cmp::Ordering;
-use std::sync::Arc;
 
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
@@ -130,7 +129,7 @@ impl Snapshot {
         table_root: Url,
         engine: &dyn Engine,
         version: Option<Version>,
-    ) -> DeltaResult<Arc<Self>> {
+    ) -> DeltaResult<Self> {
         let fs_client = engine.get_file_system_client();
         let log_url = LogPath::new(&table_root).child("_delta_log/").unwrap();
 
@@ -174,12 +173,12 @@ impl Snapshot {
             checkpoint_files,
         };
 
-        Ok(Arc::new(Self::try_new_from_log_segment(
+        Ok(Self::try_new_from_log_segment(
             table_root,
             log_segment,
             version_eff,
             engine,
-        )?))
+        )?)
     }
 
     /// Create a new [`Snapshot`] instance.
@@ -365,6 +364,7 @@ mod tests {
     use super::*;
 
     use std::path::PathBuf;
+    use std::sync::Arc;
 
     use object_store::local::LocalFileSystem;
     use object_store::path::Path;

@@ -15,7 +15,7 @@ use delta_kernel::snapshot::Snapshot;
 use delta_kernel::{DeltaResult, Engine, Error};
 
 mod handle;
-use handle::{ArcHandle, BoxHandle, SizedArcHandle, Unconstructable};
+use handle::{ArcHandle, SizedArcHandle, SizedBoxHandle, Unconstructable};
 
 pub mod scan;
 
@@ -122,7 +122,7 @@ pub struct KernelBoolSlice {
     len: usize,
 }
 
-impl BoxHandle for KernelBoolSlice {}
+impl SizedBoxHandle for KernelBoolSlice {}
 
 impl From<Vec<bool>> for KernelBoolSlice {
     fn from(val: Vec<bool>) -> Self {
@@ -518,13 +518,7 @@ pub unsafe extern "C" fn drop_engine(engine: *const ExternEngineHandle) {
     ArcHandle::drop_handle(engine);
 }
 
-pub struct SnapshotHandle {
-    _unconstructable: Unconstructable,
-}
-
-impl SizedArcHandle for SnapshotHandle {
-    type Target = Snapshot;
-}
+impl SizedArcHandle for Snapshot {}
 
 /// Get the latest snapshot from the specified table
 ///
@@ -535,14 +529,14 @@ impl SizedArcHandle for SnapshotHandle {
 pub unsafe extern "C" fn snapshot(
     path: KernelStringSlice,
     engine: *const ExternEngineHandle,
-) -> ExternResult<*const SnapshotHandle> {
+) -> ExternResult<*const Snapshot> {
     snapshot_impl(path, engine).into_extern_result(engine)
 }
 
 unsafe fn snapshot_impl(
     path: KernelStringSlice,
     extern_engine: *const ExternEngineHandle,
-) -> DeltaResult<*const SnapshotHandle> {
+) -> DeltaResult<*const Snapshot> {
     let url = unsafe { unwrap_and_parse_path_as_url(path) }?;
     let extern_engine = unsafe { ArcHandle::clone_as_arc(extern_engine) };
     let snapshot = Snapshot::try_new(url, extern_engine.engine().as_ref(), None)?;
@@ -553,7 +547,7 @@ unsafe fn snapshot_impl(
 ///
 /// Caller is responsible for passing a valid handle.
 #[no_mangle]
-pub unsafe extern "C" fn drop_snapshot(snapshot: *const SnapshotHandle) {
+pub unsafe extern "C" fn drop_snapshot(snapshot: *const Snapshot) {
     ArcHandle::drop_handle(snapshot);
 }
 
@@ -563,8 +557,7 @@ pub unsafe extern "C" fn drop_snapshot(snapshot: *const SnapshotHandle) {
 ///
 /// Caller is responsible for passing a valid handle.
 #[no_mangle]
-pub unsafe extern "C" fn version(snapshot: *const SnapshotHandle) -> u64 {
-    let snapshot = unsafe { ArcHandle::clone_as_arc(snapshot) };
+pub unsafe extern "C" fn version(snapshot: &Snapshot) -> u64 {
     snapshot.version()
 }
 
@@ -594,10 +587,9 @@ pub struct EngineSchemaVisitor {
 /// Caller is responsible for passing a valid handle.
 #[no_mangle]
 pub unsafe extern "C" fn visit_schema(
-    snapshot: *const SnapshotHandle,
+    snapshot: &Snapshot,
     visitor: &mut EngineSchemaVisitor,
 ) -> usize {
-    let snapshot = unsafe { ArcHandle::clone_as_arc(snapshot) };
     // Visit all the fields of a struct and return the list of children
     fn visit_struct_fields(visitor: &EngineSchemaVisitor, s: &StructType) -> usize {
         let child_list_id = (visitor.make_field_list)(visitor.data, s.fields.len());

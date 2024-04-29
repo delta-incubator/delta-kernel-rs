@@ -37,9 +37,9 @@ impl std::fmt::Debug for ScanBuilder {
 
 impl ScanBuilder {
     /// Create a new [`ScanBuilder`] instance.
-    pub fn new(snapshot: Arc<Snapshot>) -> Self {
+    pub fn new(snapshot: impl Into<Arc<Snapshot>>) -> Self {
         Self {
-            snapshot,
+            snapshot: snapshot.into(),
             schema: None,
             predicate: None,
         }

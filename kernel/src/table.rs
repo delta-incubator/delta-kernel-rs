@@ -1,8 +1,5 @@
 //! In-memory representation of a Delta table, which acts as an immutable root entity for reading
 //! the different versions
-
-use std::sync::Arc;
-
 use url::Url;
 
 use crate::snapshot::Snapshot;
@@ -41,7 +38,7 @@ impl Table {
         &self,
         engine: &dyn Engine,
         version: Option<Version>,
-    ) -> DeltaResult<Arc<Snapshot>> {
+    ) -> DeltaResult<Snapshot> {
         Snapshot::try_new(self.location.clone(), engine, version)
     }
 }
