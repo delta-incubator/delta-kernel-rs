@@ -86,9 +86,9 @@ fn hack_parse(
 impl<E: TaskExecutor> JsonHandler for DefaultJsonHandler<E> {
     fn parse_json(
         &self,
-        json_strings: Box<dyn EngineData>,
+        json_strings: Box<dyn EngineData + Send + Sync>,
         output_schema: SchemaRef,
-    ) -> DeltaResult<Box<dyn EngineData>> {
+    ) -> DeltaResult<Box<dyn EngineData + Send + Sync>> {
         let json_strings: RecordBatch = ArrowEngineData::try_from_engine_data(json_strings)?.into();
         // TODO(nick): this is pretty terrible
         let struct_array: StructArray = json_strings.into();
@@ -133,14 +133,14 @@ impl<E: TaskExecutor> JsonHandler for DefaultJsonHandler<E> {
         // This channel will become the output iterator
         // The stream will execute in the background, and we allow up to `readahead`
         // batches to be buffered in the channel.
-        let (sender, receiver) = std::sync::mpsc::sync_channel(self.readahead);
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(self.readahead);
 
         let executor_for_block = self.task_executor.clone();
         self.task_executor.spawn(async move {
             while let Some(res) = stream.next().await {
                 let sender = sender.clone();
                 let join_res = executor_for_block
-                    .spawn_blocking(move || sender.send(res))
+                    .spawn_blocking(move || sender.blocking_send(res))
                     .await;
                 match join_res {
                     Ok(send_res) => match send_res {
@@ -154,7 +154,8 @@ impl<E: TaskExecutor> JsonHandler for DefaultJsonHandler<E> {
             }
         });
 
-        Ok(Box::new(receiver.into_iter().map(|rbr| {
+        let iter = std::iter::from_fn(move || receiver.blocking_recv());
+        Ok(Box::new(iter.map(|rbr| {
             rbr.map(|rb| Box::new(ArrowEngineData::new(rb)) as _)
         })))
     }
@@ -252,7 +253,7 @@ mod tests {
         actions::get_log_schema, engine::default::executor::tokio::TokioBackgroundExecutor,
     };
 
-    fn string_array_to_engine_data(string_array: StringArray) -> Box<dyn EngineData> {
+    fn string_array_to_engine_data(string_array: StringArray) -> Box<dyn EngineData + Send + Sync> {
         let string_field = Arc::new(Field::new("a", DataType::Utf8, true));
         let schema = Arc::new(ArrowSchema::new(vec![string_field]));
         let batch = RecordBatch::try_new(schema, vec![Arc::new(string_array)])

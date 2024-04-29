@@ -99,7 +99,7 @@ impl ScanBuilder {
 /// for [`ScanResult::mask`] for details on the mask.
 pub struct ScanResult {
     /// Raw engine data as read from the disk for a particular file included in the query
-    pub raw_data: DeltaResult<Box<dyn EngineData>>,
+    pub raw_data: DeltaResult<Box<dyn EngineData + Send + Sync>>,
     /// If an item at mask\[i\] is true, the row at that row index is valid, otherwise if it is
     /// false, the row at that row index is invalid and should be ignored. If this is None, all rows
     /// are valid.
@@ -114,7 +114,7 @@ pub enum ColumnType<'a> {
     Partition(&'a StructField),
 }
 
-pub type ScanData = (Box<dyn EngineData>, Vec<bool>);
+pub type ScanData = (Box<dyn EngineData + Send + Sync>, Vec<bool>);
 
 /// The result of building a scan over a table. This can be used to get the actual data from
 /// scanning the table.
@@ -151,7 +151,7 @@ impl Scan {
     pub(crate) fn files(
         &self,
         engine: &dyn Engine,
-    ) -> DeltaResult<impl Iterator<Item = DeltaResult<Add>>> {
+    ) -> DeltaResult<impl Iterator<Item = DeltaResult<Add>> + Send + Sync> {
         let commit_read_schema = get_log_schema().project(&[ADD_NAME, REMOVE_NAME])?;
         let checkpoint_read_schema = get_log_schema().project(&[ADD_NAME])?;
 
@@ -180,7 +180,7 @@ impl Scan {
     /// is `true` at index `i` the row *should* be processed.
     pub fn scan_data(
         &self,
-        engine: &dyn Engine,
+        engine: &(dyn Engine + Send + Sync),
     ) -> DeltaResult<impl Iterator<Item = DeltaResult<ScanData>>> {
         let commit_read_schema = get_log_schema().project(&[ADD_NAME, REMOVE_NAME])?;
         let checkpoint_read_schema = get_log_schema().project(&[ADD_NAME])?;
@@ -398,10 +398,10 @@ pub fn selection_vector(
 
 pub fn transform_to_logical(
     engine: &dyn Engine,
-    data: Box<dyn EngineData>,
+    data: Box<dyn EngineData + Send + Sync>,
     global_state: &GlobalScanState,
     partition_values: &std::collections::HashMap<String, String>,
-) -> DeltaResult<Box<dyn EngineData>> {
+) -> DeltaResult<Box<dyn EngineData + Send + Sync>> {
     let (all_fields, _read_fields, have_partition_cols) = get_state_info(
         &global_state.logical_schema,
         &global_state.partition_columns,
@@ -459,7 +459,7 @@ pub(crate) mod test_utils {
     use super::state::DvInfo;
 
     // TODO(nick): Merge all copies of this into one "test utils" thing
-    fn string_array_to_engine_data(string_array: StringArray) -> Box<dyn EngineData> {
+    fn string_array_to_engine_data(string_array: StringArray) -> Box<dyn EngineData + Send + Sync> {
         let string_field = Arc::new(Field::new("a", DataType::Utf8, true));
         let schema = Arc::new(ArrowSchema::new(vec![string_field]));
         let batch = RecordBatch::try_new(schema, vec![Arc::new(string_array)])
@@ -502,7 +502,7 @@ pub(crate) mod test_utils {
     #[allow(clippy::vec_box)]
     pub(crate) fn run_with_validate_callback<T: Clone>(
         batch: Vec<Box<ArrowEngineData>>,
-        expected_sel_vec: Vec<bool>,
+        expected_sel_vec: &[bool],
         context: T,
         validate_callback: fn(
             context: &mut T,
@@ -531,7 +531,7 @@ pub(crate) mod test_utils {
             assert_eq!(sel, expected_sel_vec);
             crate::scan::state::visit_scan_files(
                 batch.as_ref(),
-                sel,
+                &sel,
                 context.clone(),
                 validate_callback,
             )

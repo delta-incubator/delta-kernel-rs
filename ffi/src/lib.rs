@@ -15,7 +15,7 @@ use delta_kernel::snapshot::Snapshot;
 use delta_kernel::{DeltaResult, Engine, Error};
 
 mod handle;
-use handle::{ArcHandle, BoxHandle, SizedArcHandle, Unconstructable};
+use handle::{ArcHandle, SizedArcHandle, Unconstructable};
 
 pub mod scan;
 
@@ -115,40 +115,85 @@ impl TryFromStringSlice for String {
 /// function is that `kernel_str` is _only_ valid until the return from this function
 pub type AllocateStringFn = extern "C" fn(kernel_str: KernelStringSlice) -> NullableCvoid;
 
-/// TODO
-#[repr(C)]
-pub struct KernelBoolSlice {
-    ptr: *mut bool,
-    len: usize,
-}
-
-impl BoxHandle for KernelBoolSlice {}
-
-impl From<Vec<bool>> for KernelBoolSlice {
-    fn from(val: Vec<bool>) -> Self {
-        let len = val.len();
-        let boxed = val.into_boxed_slice();
-        let ptr = Box::into_raw(boxed).cast();
-        KernelBoolSlice { ptr, len }
+// Put KernelBoolSlice in a sub-module, with non-public members, so rust code cannot instantiate it
+// directly. It can only be created by converting `From<Vec<bool>>`.
+mod private {
+    /// Represents an owned slice of boolean values allocated by the kernel. Any time the engine
+    /// receives a `KernelBoolSlice` as a return value from a kernel method, engine is responsible
+    /// to free that slice, by calling [drop_bool_slice] exactly once.
+    #[repr(C)]
+    pub struct KernelBoolSlice {
+        ptr: *mut bool,
+        len: usize,
     }
-}
 
-trait FromBoolSlice {
-    unsafe fn from_slice(slice: KernelBoolSlice) -> Self;
-}
+    impl KernelBoolSlice {
+        /// Creates an empty slice.
+        pub fn empty() -> KernelBoolSlice {
+            KernelBoolSlice {
+                ptr: std::ptr::null_mut(),
+                len: 0,
+            }
+        }
 
-impl FromBoolSlice for Vec<bool> {
-    unsafe fn from_slice(slice: KernelBoolSlice) -> Self {
-        Vec::from_raw_parts(slice.ptr, slice.len, slice.len)
+        /// Converts this slice back into a `Vec<bool>`.
+        ///
+        /// # Safety
+        ///
+        /// The slice must have been originally created `From<Vec<bool>>`, and must not have been
+        /// already been consumed by a previous call tothis method.
+        pub unsafe fn as_ref(&self) -> &[bool] {
+            if self.ptr.is_null() {
+                Default::default()
+            } else {
+                unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
+            }
+        }
+
+        /// Converts this slice back into a `Vec<bool>`.
+        ///
+        /// # Safety
+        ///
+        /// The slice must have been originally created `From<Vec<bool>>`, and must not have been
+        /// already been consumed by a previous call tothis method.
+        pub unsafe fn into_vec(self) -> Vec<bool> {
+            if self.ptr.is_null() {
+                Default::default()
+            } else {
+                Vec::from_raw_parts(self.ptr, self.len, self.len)
+            }
+        }
     }
+
+    impl From<Vec<bool>> for KernelBoolSlice {
+        fn from(val: Vec<bool>) -> Self {
+            let len = val.len();
+            let boxed = val.into_boxed_slice();
+            let ptr = Box::into_raw(boxed).cast();
+            KernelBoolSlice { ptr, len }
+        }
+    }
+
+    /// # Safety
+    ///
+    /// Whenever kernel passes a [KernelBoolSlice] to engine, engine assumes ownership of the slice
+    /// memory, but must only free it by calling [drop_bool_slice]. Since the global allocator is
+    /// threadsafe, it doesn't matter which engine thread invokes that method.
+    unsafe impl Send for KernelBoolSlice {}
+
+    /// # Safety
+    ///
+    /// If engine chooses to leverage concurrency, engine is responsible to prevent data races.
+    unsafe impl Sync for KernelBoolSlice {}
 }
+pub use private::KernelBoolSlice;
 
 /// # Safety
 ///
 /// Caller is responsible for passing a valid handle.
 #[no_mangle]
-pub unsafe extern "C" fn drop_bool_slice(slice: *mut KernelBoolSlice) {
-    let vec = unsafe { Vec::from_raw_parts((*slice).ptr, (*slice).len, (*slice).len) };
+pub unsafe extern "C" fn drop_bool_slice(slice: KernelBoolSlice) {
+    let vec = unsafe { slice.into_vec() };
     debug!("Dropping bool slice. It is {vec:#?}");
 }
 
@@ -336,7 +381,7 @@ impl<T> IntoExternResult<T> for DeltaResult<T> {
 
 // A wrapper for Engine which defines additional FFI-specific methods.
 pub trait ExternEngine {
-    fn engine(&self) -> Arc<dyn Engine>;
+    fn engine(&self) -> Arc<dyn Engine + Send + Sync>;
     fn error_allocator(&self) -> &dyn AllocateError;
 }
 
@@ -345,12 +390,12 @@ pub struct ExternEngineHandle {
 }
 
 impl ArcHandle for ExternEngineHandle {
-    type Target = dyn ExternEngine;
+    type Target = dyn ExternEngine + Send + Sync;
 }
 
 struct ExternEngineVtable {
     // Actual table client instance to use
-    client: Arc<dyn Engine>,
+    client: Arc<dyn Engine + Send + Sync>,
     allocate_error: AllocateErrorFn,
 }
 
@@ -372,7 +417,7 @@ unsafe impl Send for ExternEngineVtable {}
 unsafe impl Sync for ExternEngineVtable {}
 
 impl ExternEngine for ExternEngineVtable {
-    fn engine(&self) -> Arc<dyn Engine> {
+    fn engine(&self) -> Arc<dyn Engine + Send + Sync> {
         self.client.clone()
     }
     fn error_allocator(&self) -> &dyn AllocateError {
@@ -503,7 +548,7 @@ unsafe fn get_default_client_impl(
         Arc::new(TokioBackgroundExecutor::new()),
     );
     let client = Arc::new(engine.map_err(Error::generic)?);
-    let client: Arc<dyn ExternEngine> = Arc::new(ExternEngineVtable {
+    let client: Arc<dyn ExternEngine + Send + Sync> = Arc::new(ExternEngineVtable {
         client,
         allocate_error,
     });

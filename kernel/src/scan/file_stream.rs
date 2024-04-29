@@ -122,7 +122,7 @@ impl LogReplayScanner {
     /// actions in the log.
     fn process_batch(
         &mut self,
-        actions: &dyn EngineData,
+        actions: &(dyn EngineData + Send + Sync),
         is_log_batch: bool,
     ) -> DeltaResult<Vec<Add>> {
         // apply data skipping to get back a selection vector for actions that passed skipping
@@ -170,7 +170,7 @@ impl LogReplayScanner {
     fn process_scan_batch(
         &mut self,
         expression_handler: &dyn ExpressionHandler,
-        actions: &dyn EngineData,
+        actions: &(dyn EngineData + Send + Sync),
         is_log_batch: bool,
     ) -> DeltaResult<ScanData> {
         // apply data skipping to get back a selection vector for actions that passed skipping
@@ -259,7 +259,9 @@ impl LogReplayScanner {
 /// The boolean flag indicates whether the record batch is a log or checkpoint batch.
 pub fn log_replay_iter(
     engine_client: &dyn Engine,
-    action_iter: impl Iterator<Item = DeltaResult<(Box<dyn EngineData>, bool)>>,
+    action_iter: impl Iterator<Item = DeltaResult<(Box<dyn EngineData + Send + Sync>, bool)>>
+        + Send
+        + Sync,
     table_schema: &SchemaRef,
     predicate: &Option<Expression>,
 ) -> impl Iterator<Item = DeltaResult<Add>> {
@@ -282,7 +284,7 @@ pub fn log_replay_iter(
 /// indicates whether the record batch is a log or checkpoint batch.
 pub fn scan_action_iter(
     engine: &dyn Engine,
-    action_iter: impl Iterator<Item = DeltaResult<(Box<dyn EngineData>, bool)>>,
+    action_iter: impl Iterator<Item = DeltaResult<(Box<dyn EngineData + Send + Sync>, bool)>>,
     table_schema: &SchemaRef,
     predicate: &Option<Expression>,
 ) -> impl Iterator<Item = DeltaResult<ScanData>> {
@@ -340,7 +342,7 @@ mod tests {
     fn test_scan_action_iter() {
         run_with_validate_callback(
             vec![add_batch_simple()],
-            vec![true, false],
+            &[true, false],
             (),
             validate_simple,
         );
@@ -350,7 +352,7 @@ mod tests {
     fn test_scan_action_iter_with_remove() {
         run_with_validate_callback(
             vec![add_batch_with_remove()],
-            vec![false, false, true, false],
+            &[false, false, true, false],
             (),
             validate_simple,
         );

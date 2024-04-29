@@ -70,7 +70,7 @@ async fn add_commit(
     Ok(())
 }
 
-fn into_record_batch(engine_data: Box<dyn EngineData>) -> RecordBatch {
+fn into_record_batch(engine_data: Box<dyn EngineData + Send + Sync>) -> RecordBatch {
     ArrowEngineData::try_from_engine_data(engine_data)
         .unwrap()
         .into()

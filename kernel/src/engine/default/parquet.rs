@@ -84,14 +84,14 @@ impl<E: TaskExecutor> ParquetHandler for DefaultParquetHandler<E> {
         // The stream will execute in the background and send results to this channel.
         // The channel will buffer up to `readahead` results, allowing the background
         // stream to get ahead of the consumer.
-        let (sender, receiver) = std::sync::mpsc::sync_channel(self.readahead);
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(self.readahead);
 
         let executor_for_block = self.task_executor.clone();
         self.task_executor.spawn(async move {
             while let Some(res) = stream.next().await {
                 let sender = sender.clone();
                 let join_res = executor_for_block
-                    .spawn_blocking(move || sender.send(res))
+                    .spawn_blocking(move || sender.blocking_send(res))
                     .await;
                 match join_res {
                     Ok(send_res) => match send_res {
@@ -105,7 +105,8 @@ impl<E: TaskExecutor> ParquetHandler for DefaultParquetHandler<E> {
             }
         });
 
-        Ok(Box::new(receiver.into_iter().map(|rbr| {
+        let iter = std::iter::from_fn(move || receiver.blocking_recv());
+        Ok(Box::new(iter.map(|rbr| {
             rbr.map(|rb| Box::new(ArrowEngineData::new(rb)) as _)
         })))
     }
@@ -258,7 +259,7 @@ mod tests {
     use super::*;
 
     fn into_record_batch(
-        engine_data: DeltaResult<Box<dyn EngineData>>,
+        engine_data: DeltaResult<Box<dyn EngineData + Send + Sync>>,
     ) -> DeltaResult<RecordBatch> {
         engine_data
             .and_then(ArrowEngineData::try_from_engine_data)
