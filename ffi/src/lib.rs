@@ -306,7 +306,7 @@ impl AllocateError for *const ExternEngineHandle {
         etype: KernelError,
         msg: KernelStringSlice,
     ) -> *mut EngineError {
-        ArcHandle::clone_as_arc(*self)
+        ArcHandle::as_ref(self)
             .error_allocator()
             .allocate_error(etype, msg)
     }
@@ -538,7 +538,7 @@ unsafe fn snapshot_impl(
     extern_engine: *const ExternEngineHandle,
 ) -> DeltaResult<*const Snapshot> {
     let url = unsafe { unwrap_and_parse_path_as_url(path) }?;
-    let extern_engine = unsafe { ArcHandle::clone_as_arc(extern_engine) };
+    let extern_engine = unsafe { ArcHandle::as_ref(&extern_engine) };
     let snapshot = Snapshot::try_new(url, extern_engine.engine().as_ref(), None)?;
     Ok(ArcHandle::into_handle(snapshot))
 }

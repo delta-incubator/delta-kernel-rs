@@ -39,6 +39,18 @@ pub trait BoxHandle: Sized {
         Box::into_raw(Box::new(target.into())) as _
     }
 
+    /// Obtains a shared reference to the underlying
+    unsafe fn as_ref<'a>(handle: &'a *const Self) -> &'a Self::Target {
+        let ptr = *handle as *const Box<Self::Target>;
+        unsafe { & *ptr }
+    }
+
+    /// Obtains a mutable reference to the underlying
+    unsafe fn as_mut<'a>(handle: &'a *mut Self) -> &'a mut Self::Target {
+        let ptr = *handle as *mut Box<Self::Target>;
+        unsafe { &mut *ptr }
+    }
+
     /// Drops the handle, invalidating it and freeing the underlying object.
     ///
     /// # Safety
@@ -215,6 +227,12 @@ pub trait ArcHandle: Sized {
         Box::into_raw(Box::new(target.into())) as _
     }
 
+    /// Obtains a shared reference to the underlying
+    unsafe fn as_ref<'a>(handle: &'a *const Self) -> &'a Self::Target {
+        let ptr = *handle as *mut Box<Self::Target>;
+        unsafe { & *ptr }
+    }
+
     /// Clones an Arc from an FFI handle for kernel use, without dropping the handle. The Arc
     /// refcount increases by one.
     ///
@@ -226,8 +244,8 @@ pub trait ArcHandle: Sized {
     /// * Never cast to any other type nor dereferenced
     /// * Not previously passed to [drop_handle]
     unsafe fn clone_as_arc(handle: *const Self) -> Arc<Self::Target> {
-        let ptr = handle as *mut Arc<Self::Target>;
-        let arc = unsafe { &*ptr };
+        let ptr = handle as *const Arc<Self::Target>;
+        let arc = unsafe { & *ptr };
         arc.clone()
     }
 
