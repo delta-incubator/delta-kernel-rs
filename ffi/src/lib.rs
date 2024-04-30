@@ -80,6 +80,7 @@ impl Iterator for EngineIterator {
 /// wants_slice(msg.as_ref().into());
 /// ```
 #[repr(C)]
+#[derive(Clone)]
 pub struct KernelStringSlice {
     ptr: *const c_char,
     len: usize,

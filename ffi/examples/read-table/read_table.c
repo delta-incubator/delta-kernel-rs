@@ -10,6 +10,7 @@
 
 struct EngineContext {
   GlobalScanState *global_state;
+  char* table_root;
   const ExternEngineHandle *engine;
 };
 
@@ -59,8 +60,8 @@ void set_builder_opt(EngineBuilder *engine_builder, char* key, char* val) {
 }
 
 void visit_callback(void* engine_context, const KernelStringSlice path, long size, const DvInfo *dv_info, CStringMap *partition_values) {
-  printf("called back to actually read!\n  path: %.*s\n", path.len, path.ptr);
   struct EngineContext *context = engine_context;
+  printf("called back to actually read!\n  path: %s/%.*s\n", context->table_root, path.len, path.ptr);
   ExternResultKernelBoolSlice selection_vector_res = selection_vector_from_dv(dv_info, context->engine, context->global_state);
   if (selection_vector_res.tag != OkKernelBoolSlice) {
     printf("Could not get selection vector from kernel\n");
@@ -160,7 +161,7 @@ int main(int argc, char* argv[]) {
 
   Scan *scan = scan_res.ok;
   GlobalScanState *global_state = get_global_scan_state(scan);
-  struct EngineContext context = { global_state, engine };
+  struct EngineContext context = { global_state, table_path, engine };
 
   ExternResultKernelScanDataIterator data_iter_res =
     kernel_scan_data_init(engine, scan);
