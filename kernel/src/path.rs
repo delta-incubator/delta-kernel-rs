@@ -4,6 +4,10 @@ use url::Url;
 
 use crate::{DeltaResult, Version};
 
+/// The delimiter to separate object namespaces, creating a directory structure. Note this is in url
+/// terms, so we use `/`
+const DELIMITER: &str = "/";
+
 #[derive(Debug)]
 pub(crate) struct LogPath<'a> {
     url: &'a Url,
@@ -17,7 +21,7 @@ fn get_filename(path: &str) -> Option<&str> {
     if path.is_empty() || path.ends_with('/') {
         None
     } else {
-        path.rsplit(std::path::MAIN_SEPARATOR_STR).next()
+        path.rsplit(DELIMITER).next()
     }
 }
 
