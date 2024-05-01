@@ -601,6 +601,14 @@ pub struct EngineSchemaVisitor {
         name: KernelStringSlice,
         child_list_id: usize,
     ),
+    // visit a decimal type with the specified precision and scale
+    visit_decimal: extern "C" fn(
+        data: *mut c_void,
+        sibling_list_id: usize,
+        name: KernelStringSlice,
+        precision: u8,
+        scale: i8,
+    ),
     visit_string: extern "C" fn(data: *mut c_void, sibling_list_id: usize, name: KernelStringSlice),
     visit_long: extern "C" fn(data: *mut c_void, sibling_list_id: usize, name: KernelStringSlice),
     visit_integer:
@@ -610,6 +618,13 @@ pub struct EngineSchemaVisitor {
     visit_float: extern "C" fn(data: *mut c_void, sibling_list_id: usize, name: KernelStringSlice),
     visit_double: extern "C" fn(data: *mut c_void, sibling_list_id: usize, name: KernelStringSlice),
     visit_boolean:
+        extern "C" fn(data: *mut c_void, sibling_list_id: usize, name: KernelStringSlice),
+
+    visit_binary: extern "C" fn(data: *mut c_void, sibling_list_id: usize, name: KernelStringSlice),
+    visit_date: extern "C" fn(data: *mut c_void, sibling_list_id: usize, name: KernelStringSlice),
+    visit_timestamp:
+        extern "C" fn(data: *mut c_void, sibling_list_id: usize, name: KernelStringSlice),
+    visit_timestamp_ntz:
         extern "C" fn(data: *mut c_void, sibling_list_id: usize, name: KernelStringSlice),
 }
 
@@ -621,19 +636,21 @@ macro_rules! gen_visit_match {
                     ($visitor.$visit_fun)($visitor.data, $sibling_list_id, $name.into())
                 }
             )*
-            DataType::Struct(s) => {
-                let child_list_id = visit_struct_fields($visitor, s);
-                ($visitor.visit_struct)($visitor.data, $sibling_list_id, $name.into(), child_list_id);
+            DataType::Primitive(PrimitiveType::Decimal(precision, scale)) => {
+                ($visitor.visit_decimal)($visitor.data, $sibling_list_id, $name.into(), *precision, *scale);
             }
             DataType::Array(at) => {
                 let child_list_id = visit_array_item($visitor, at);
                 ($visitor.visit_array)($visitor.data, $sibling_list_id, $name.into(), at.contains_null, child_list_id);
             }
+            DataType::Struct(s) => {
+                let child_list_id = visit_struct_fields($visitor, s);
+                ($visitor.visit_struct)($visitor.data, $sibling_list_id, $name.into(), child_list_id);
+            }
             DataType::Map(mt) => {
                 let child_list_id = visit_map_types($visitor, mt);
                 ($visitor.visit_map)($visitor.data, $sibling_list_id, $name.into(), child_list_id);
             }
-            other => println!("Unsupported data type: {}", other),
         }
     };
 }
@@ -651,7 +668,7 @@ pub unsafe extern "C" fn visit_schema(
     fn visit_struct_fields(visitor: &EngineSchemaVisitor, s: &StructType) -> usize {
         let child_list_id = (visitor.make_field_list)(visitor.data, s.fields.len());
         for field in s.fields() {
-            visit_schema_item(&field.data_type(), field.name(), visitor, child_list_id);
+            visit_schema_item(field.data_type(), field.name(), visitor, child_list_id);
         }
         child_list_id
     }
@@ -676,6 +693,7 @@ pub unsafe extern "C" fn visit_schema(
         visitor: &EngineSchemaVisitor,
         sibling_list_id: usize,
     ) {
+        // See macro def for how Struct/Map/Array/Decimal are handled
         gen_visit_match!(
             data_type,
             visitor,
@@ -688,7 +706,11 @@ pub unsafe extern "C" fn visit_schema(
             (Byte, visit_byte),
             (Float, visit_float),
             (Double, visit_double),
-            (Boolean, visit_boolean) // See macro def for how Struct/Map/Array are handled
+            (Boolean, visit_boolean),
+            (Binary, visit_binary),
+            (Date, visit_date),
+            (Timestamp, visit_timestamp),
+            (TimestampNtz, visit_timestamp_ntz)
         );
     }
 
