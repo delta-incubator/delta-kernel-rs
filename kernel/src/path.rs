@@ -35,6 +35,13 @@ fn try_get_version(version_str_opt: Option<&str>, expected_digits: usize) -> Opt
     })
 }
 
+pub(crate) fn version_from_location(location: &Url) -> Option<Version> {
+    let path = location.path();
+    get_filename(path)
+        .and_then(|f| f.split_once('.'))
+        .and_then(|(name, _)| try_get_version(Some(name), 20))
+}
+
 impl<'a> LogPath<'a> {
     pub(crate) fn new(url: &'a Url) -> Self {
         let path = url.path();

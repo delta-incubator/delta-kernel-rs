@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 
 use crate::actions::{get_log_schema, Metadata, Protocol, METADATA_NAME, PROTOCOL_NAME};
-use crate::path::LogPath;
+use crate::path::{version_from_location, LogPath};
 use crate::schema::{Schema, SchemaRef};
 use crate::{DeltaResult, EngineInterface, Error, FileMeta, FileSystemClient, Version};
 use crate::{EngineData, Expression};
@@ -286,7 +286,7 @@ fn list_log_files_with_checkpoint(
         .collect::<Result<Vec<_>, Error>>()?
         .into_iter()
         // TODO this filters out .crc files etc which start with "." - how do we want to use these kind of files?
-        .filter(|f| LogPath::new(&f.location).commit_version().is_some())
+        .filter(|f| version_from_location(&f.location).is_some())
         .collect::<Vec<_>>();
 
     let mut commit_files = files
@@ -335,8 +335,9 @@ fn list_log_files(
 
     for maybe_meta in fs_client.list_from(&start_from)? {
         let meta = maybe_meta?;
-        if LogPath::new(&meta.location).is_checkpoint_file() {
-            let version = LogPath::new(&meta.location).commit_version().unwrap_or(0) as i64;
+        let log_path = LogPath::new(&meta.location);
+        if log_path.is_checkpoint_file() {
+            let version = log_path.commit_version().unwrap_or(0) as i64;
             match version.cmp(&max_checkpoint_version) {
                 Ordering::Greater => {
                     max_checkpoint_version = version;
@@ -348,13 +349,13 @@ fn list_log_files(
                 }
                 _ => {}
             }
-        } else if LogPath::new(&meta.location).is_commit_file() {
+        } else if log_path.is_commit_file() {
             commit_files.push(meta);
         }
     }
 
     commit_files.retain(|f| {
-        LogPath::new(&f.location).commit_version().unwrap_or(0) as i64 > max_checkpoint_version
+        version_from_location(&f.location).unwrap_or(0) as i64 > max_checkpoint_version
     });
     // NOTE this will sort in reverse order
     commit_files.sort_unstable_by(|a, b| b.location.cmp(&a.location));
