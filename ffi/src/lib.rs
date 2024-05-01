@@ -10,7 +10,7 @@ use tracing::debug;
 use url::Url;
 
 use delta_kernel::expressions::{BinaryOperator, Expression, Scalar};
-use delta_kernel::schema::{DataType, PrimitiveType, StructField, StructType};
+use delta_kernel::schema::{ArrayType, DataType, MapType, PrimitiveType, StructType};
 use delta_kernel::snapshot::Snapshot;
 use delta_kernel::{DeltaResult, Engine, Error};
 
@@ -569,7 +569,7 @@ pub unsafe extern "C" fn version(snapshot: *const SnapshotHandle) -> u64 {
 }
 
 // WARNING: the visitor MUST NOT retain internal references to the string slices passed to visitor methods
-// TODO: other types, nullability
+// TODO: nullability
 #[repr(C)]
 pub struct EngineSchemaVisitor {
     // opaque state pointer
@@ -583,10 +583,59 @@ pub struct EngineSchemaVisitor {
         name: KernelStringSlice,
         child_list_id: usize,
     ),
+    // Indicate that the schema contains an Array type. `child_list_id` will be a _one_ item list with
+    // the schema type for each item of the array
+    visit_array: extern "C" fn(
+        data: *mut c_void,
+        sibling_list_id: usize,
+        name: KernelStringSlice,
+        contains_null: bool, // if this array can contain null values
+        child_list_id: usize,
+    ),
+    // Indicate that the schema contains an Map type. `child_list_id` will be a _two_ item list
+    // where the first element is the schema type the keys of the map, and the second element is the
+    // schema type of the values of the map
+    visit_map: extern "C" fn(
+        data: *mut c_void,
+        sibling_list_id: usize,
+        name: KernelStringSlice,
+        child_list_id: usize,
+    ),
     visit_string: extern "C" fn(data: *mut c_void, sibling_list_id: usize, name: KernelStringSlice),
+    visit_long: extern "C" fn(data: *mut c_void, sibling_list_id: usize, name: KernelStringSlice),
     visit_integer:
         extern "C" fn(data: *mut c_void, sibling_list_id: usize, name: KernelStringSlice),
-    visit_long: extern "C" fn(data: *mut c_void, sibling_list_id: usize, name: KernelStringSlice),
+    visit_short: extern "C" fn(data: *mut c_void, sibling_list_id: usize, name: KernelStringSlice),
+    visit_byte: extern "C" fn(data: *mut c_void, sibling_list_id: usize, name: KernelStringSlice),
+    visit_float: extern "C" fn(data: *mut c_void, sibling_list_id: usize, name: KernelStringSlice),
+    visit_double: extern "C" fn(data: *mut c_void, sibling_list_id: usize, name: KernelStringSlice),
+    visit_boolean:
+        extern "C" fn(data: *mut c_void, sibling_list_id: usize, name: KernelStringSlice),
+}
+
+macro_rules! gen_visit_match {
+    ( $match_item: expr, $visitor: ident, $sibling_list_id: ident, $name: ident, $(($prim_type: ident, $visit_fun: ident)), * ) => {
+        match $match_item {
+            $(
+                DataType::Primitive(PrimitiveType::$prim_type) => {
+                    ($visitor.$visit_fun)($visitor.data, $sibling_list_id, $name.into())
+                }
+            )*
+            DataType::Struct(s) => {
+                let child_list_id = visit_struct_fields($visitor, s);
+                ($visitor.visit_struct)($visitor.data, $sibling_list_id, $name.into(), child_list_id);
+            }
+            DataType::Array(at) => {
+                let child_list_id = visit_array_item($visitor, at);
+                ($visitor.visit_array)($visitor.data, $sibling_list_id, $name.into(), at.contains_null, child_list_id);
+            }
+            DataType::Map(mt) => {
+                let child_list_id = visit_map_types($visitor, mt);
+                ($visitor.visit_map)($visitor.data, $sibling_list_id, $name.into(), child_list_id);
+            }
+            other => println!("Unsupported data type: {}", other),
+        }
+    };
 }
 
 /// # Safety
@@ -602,30 +651,45 @@ pub unsafe extern "C" fn visit_schema(
     fn visit_struct_fields(visitor: &EngineSchemaVisitor, s: &StructType) -> usize {
         let child_list_id = (visitor.make_field_list)(visitor.data, s.fields.len());
         for field in s.fields() {
-            visit_field(visitor, child_list_id, field);
+            visit_schema_item(&field.data_type(), field.name(), visitor, child_list_id);
         }
         child_list_id
     }
 
+    fn visit_array_item(visitor: &EngineSchemaVisitor, at: &ArrayType) -> usize {
+        let child_list_id = (visitor.make_field_list)(visitor.data, 1);
+        visit_schema_item(&at.element_type, "list_data_type", visitor, child_list_id);
+        child_list_id
+    }
+
+    fn visit_map_types(visitor: &EngineSchemaVisitor, mt: &MapType) -> usize {
+        let child_list_id = (visitor.make_field_list)(visitor.data, 2);
+        visit_schema_item(&mt.key_type, "map_key_type", visitor, child_list_id);
+        visit_schema_item(&mt.value_type, "map_value_type", visitor, child_list_id);
+        child_list_id
+    }
+
     // Visit a struct field (recursively) and add the result to the list of siblings.
-    fn visit_field(visitor: &EngineSchemaVisitor, sibling_list_id: usize, field: &StructField) {
-        let name: &str = field.name.as_ref();
-        match &field.data_type {
-            DataType::Primitive(PrimitiveType::Integer) => {
-                (visitor.visit_integer)(visitor.data, sibling_list_id, name.into())
-            }
-            DataType::Primitive(PrimitiveType::Long) => {
-                (visitor.visit_long)(visitor.data, sibling_list_id, name.into())
-            }
-            DataType::Primitive(PrimitiveType::String) => {
-                (visitor.visit_string)(visitor.data, sibling_list_id, name.into())
-            }
-            DataType::Struct(s) => {
-                let child_list_id = visit_struct_fields(visitor, s);
-                (visitor.visit_struct)(visitor.data, sibling_list_id, name.into(), child_list_id);
-            }
-            other => println!("Unsupported data type: {}", other),
-        }
+    fn visit_schema_item(
+        data_type: &DataType,
+        name: &str,
+        visitor: &EngineSchemaVisitor,
+        sibling_list_id: usize,
+    ) {
+        gen_visit_match!(
+            data_type,
+            visitor,
+            sibling_list_id,
+            name,
+            (String, visit_string),
+            (Long, visit_long),
+            (Integer, visit_integer),
+            (Short, visit_short),
+            (Byte, visit_byte),
+            (Float, visit_float),
+            (Double, visit_double),
+            (Boolean, visit_boolean) // See macro def for how Struct/Map/Array are handled
+        );
     }
 
     visit_struct_fields(visitor, snapshot.schema())
