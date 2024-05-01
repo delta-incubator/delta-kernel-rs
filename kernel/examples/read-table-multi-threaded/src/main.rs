@@ -20,7 +20,7 @@ use clap::{Parser, ValueEnum};
 use url::Url;
 
 /// An example program that reads a table using multiple threads. This shows the use of the
-/// scan_files and scan_state methods on a Scan, that can be used to partition work to either
+/// scan_data and global_scan_state methods on a Scan, that can be used to partition work to either
 /// multiple threads, or workers (in the case of a distributed engine).
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
