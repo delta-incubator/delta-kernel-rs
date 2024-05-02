@@ -568,7 +568,6 @@ pub unsafe extern "C" fn version(snapshot: *const SnapshotHandle) -> u64 {
     snapshot.version()
 }
 
-
 /// The `EngineSchemaVisitor` defines a visitor system to allow engines to build their own
 /// representation of a schema from a particular schema within kernel.
 ///
@@ -604,7 +603,6 @@ pub struct EngineSchemaVisitor {
     pub make_field_list: extern "C" fn(data: *mut c_void, reserve: usize) -> usize,
 
     // visitor methods that should instantiate and append the appropriate type to the field list
-
     /// Indidate that the schema contains a `Struct` type. The top level of a Schema is always a
     /// `Struct`. The children of the `Struct` are in the list identified by `child_list_id`.
     pub visit_struct: extern "C" fn(
@@ -644,36 +642,44 @@ pub struct EngineSchemaVisitor {
     ),
 
     /// Visit a `string` belonging to the list identified by `sibling_list_id`.
-    pub visit_string: extern "C" fn(data: *mut c_void, sibling_list_id: usize, name: KernelStringSlice),
+    pub visit_string:
+        extern "C" fn(data: *mut c_void, sibling_list_id: usize, name: KernelStringSlice),
 
     /// Visit a `long` belonging to the list identified by `sibling_list_id`.
-    pub visit_long: extern "C" fn(data: *mut c_void, sibling_list_id: usize, name: KernelStringSlice),
+    pub visit_long:
+        extern "C" fn(data: *mut c_void, sibling_list_id: usize, name: KernelStringSlice),
 
     /// Visit an `integer` belonging to the list identified by `sibling_list_id`.
     pub visit_integer:
         extern "C" fn(data: *mut c_void, sibling_list_id: usize, name: KernelStringSlice),
 
     /// Visit a `short` belonging to the list identified by `sibling_list_id`.
-    pub visit_short: extern "C" fn(data: *mut c_void, sibling_list_id: usize, name: KernelStringSlice),
+    pub visit_short:
+        extern "C" fn(data: *mut c_void, sibling_list_id: usize, name: KernelStringSlice),
 
     /// Visit a `byte` belonging to the list identified by `sibling_list_id`.
-    pub visit_byte: extern "C" fn(data: *mut c_void, sibling_list_id: usize, name: KernelStringSlice),
+    pub visit_byte:
+        extern "C" fn(data: *mut c_void, sibling_list_id: usize, name: KernelStringSlice),
 
     /// Visit a `float` belonging to the list identified by `sibling_list_id`.
-    pub visit_float: extern "C" fn(data: *mut c_void, sibling_list_id: usize, name: KernelStringSlice),
+    pub visit_float:
+        extern "C" fn(data: *mut c_void, sibling_list_id: usize, name: KernelStringSlice),
 
     /// Visit a `double` belonging to the list identified by `sibling_list_id`.
-    pub visit_double: extern "C" fn(data: *mut c_void, sibling_list_id: usize, name: KernelStringSlice),
+    pub visit_double:
+        extern "C" fn(data: *mut c_void, sibling_list_id: usize, name: KernelStringSlice),
 
     /// Visit a `boolean` belonging to the list identified by `sibling_list_id`.
     pub visit_boolean:
         extern "C" fn(data: *mut c_void, sibling_list_id: usize, name: KernelStringSlice),
 
     /// Visit `binary` belonging to the list identified by `sibling_list_id`.
-    pub visit_binary: extern "C" fn(data: *mut c_void, sibling_list_id: usize, name: KernelStringSlice),
+    pub visit_binary:
+        extern "C" fn(data: *mut c_void, sibling_list_id: usize, name: KernelStringSlice),
 
     /// Visit a `date` belonging to the list identified by `sibling_list_id`.
-    pub visit_date: extern "C" fn(data: *mut c_void, sibling_list_id: usize, name: KernelStringSlice),
+    pub visit_date:
+        extern "C" fn(data: *mut c_void, sibling_list_id: usize, name: KernelStringSlice),
 
     /// Visit a `timestamp` belonging to the list identified by `sibling_list_id`.
     pub visit_timestamp:
