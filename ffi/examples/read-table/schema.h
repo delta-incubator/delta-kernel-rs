@@ -201,6 +201,26 @@ void visit_timestamp_ntz(void *data, uintptr_t sibling_list_id, struct KernelStr
   visit_simple_type(data, sibling_list_id, name, "timestamp_ntz");
 }
 
+// free all the data in the builder (but not the builder itself, since that might be stack allocated)
+void free_builder(SchemaBuilder builder) {
+  for (int i = 0; i < builder.list_count; i++) {
+    SchemaItemList *list = (builder.lists)+i;
+    for (int j = 0; j < list->len; j++) {
+      SchemaItem *item = list->list+j;
+      free(item->name);
+      // don't free item->type, those are static strings
+      if (!strncmp(item->type, "decimal", 7)) {
+        // except decimal types, we malloc'd those :)
+        free(item->type);
+      }
+      // don't free item->children, it's just a list in the builder so will be freed by the outer
+      // loop.
+    }
+    free(list->list); // free all the items in this list (we alloc'd them together)
+  }
+  free(builder.lists);
+}
+
 // Print the schema of the snapshot
 void print_schema(const SnapshotHandle *snapshot) {
   SchemaBuilder builder = {
@@ -234,4 +254,5 @@ void print_schema(const SnapshotHandle *snapshot) {
   printf("Schema:\n");
   print_list(builder.lists+schema_list_id, 0, false);
   printf("\n");
+  free_builder(builder);
 }

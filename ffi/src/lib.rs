@@ -737,7 +737,7 @@ pub unsafe extern "C" fn visit_schema(
 
     fn visit_array_item(visitor: &EngineSchemaVisitor, at: &ArrayType) -> usize {
         let child_list_id = (visitor.make_field_list)(visitor.data, 1);
-        visit_schema_item(&at.element_type, "list_data_type", visitor, child_list_id);
+        visit_schema_item(&at.element_type, "array_data_type", visitor, child_list_id);
         child_list_id
     }
 
