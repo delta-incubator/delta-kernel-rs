@@ -13,6 +13,8 @@ pub(crate) struct LogPath<'a> {
     url: &'a Url,
     path: &'a str,
     version: Option<Version>,
+    // if is compacted, this path spans version [`version`, `compacted_to_version`]
+    compacted_to_version: Option<Version>,
     is_commit: bool,
     is_checkpoint: bool,
 }
@@ -25,7 +27,7 @@ fn get_filename(path: &str) -> Option<&str> {
     }
 }
 
-fn try_get_version(version_str_opt: Option<&str>, expected_digits: usize) -> Option<Version> {
+fn get_version_opt(version_str_opt: Option<&str>, expected_digits: usize) -> Option<Version> {
     version_str_opt.and_then(|version_str| {
         if version_str.len() == expected_digits {
             version_str.parse().ok()
@@ -39,17 +41,18 @@ pub(crate) fn version_from_location(location: &Url) -> Option<Version> {
     let path = location.path();
     get_filename(path)
         .and_then(|f| f.split_once('.'))
-        .and_then(|(name, _)| try_get_version(Some(name), 20))
+        .and_then(|(name, _)| get_version_opt(Some(name), 20))
 }
 
 impl<'a> LogPath<'a> {
     pub(crate) fn new(url: &'a Url) -> Self {
         let path = url.path();
         let version_str = get_filename(path).and_then(|f| f.split_once('.'));
-        let version = version_str.and_then(|(name, _)| try_get_version(Some(name), 20));
+        let version = version_str.and_then(|(name, _)| get_version_opt(Some(name), 20));
 
         let mut is_commit = false;
         let mut is_checkpoint = false;
+        let mut compacted_to_version = None;
         if version.is_some() {
             // could be a checkpoint or commit file, let's check
             let (_, suffix) = version_str.unwrap(); // safe, version.is_some()
@@ -63,8 +66,8 @@ impl<'a> LogPath<'a> {
                     // test if we're a multipart checkpoint
                     let mut split = rest.splitn(3, '.');
                     let (checkpoint_index, checkpoint_max, ext) = (
-                        try_get_version(split.next(), 10),
-                        try_get_version(split.next(), 10),
+                        get_version_opt(split.next(), 10),
+                        get_version_opt(split.next(), 10),
                         split.next(),
                     );
                     is_checkpoint = checkpoint_index.is_some()
@@ -72,11 +75,21 @@ impl<'a> LogPath<'a> {
                         && ext == Some("parquet");
                 }
             }
+
+            if !is_commit && !is_checkpoint {
+                // check if we're a compacted commit
+                if let Some((maybe_compacted_version, suffix)) = suffix.split_once('.') {
+                    if suffix == "json" {
+                        compacted_to_version = get_version_opt(Some(maybe_compacted_version), 20);
+                    }
+                }
+            }
         }
         LogPath {
             url,
             path,
             version,
+            compacted_to_version,
             is_commit,
             is_checkpoint,
         }
@@ -110,7 +123,7 @@ impl<'a> LogPath<'a> {
     }
 
     pub(crate) fn is_commit_file(&self) -> bool {
-        self.is_commit
+        self.is_commit || self.compacted_to_version.is_some()
     }
 
     /// Parse the version number assuming a commit json or checkpoint parquet file
@@ -151,8 +164,8 @@ mod tests {
             .unwrap();
         let log_path = LogPath::new(&log_path);
 
-        assert_eq!("00000000000000000000.json", log_path.filename().unwrap());
-        assert_eq!("json", log_path.extension().unwrap());
+        assert_eq!(log_path.filename(), Some("00000000000000000000.json"));
+        assert_eq!(log_path.extension(), Some("json"));
         assert!(log_path.is_commit_file());
         assert!(!log_path.is_checkpoint_file());
         assert_eq!(log_path.commit_version(), Some(0));
@@ -171,7 +184,7 @@ mod tests {
             "00000000000000000002.checkpoint.parquet",
             log_path.filename().unwrap()
         );
-        assert_eq!("parquet", log_path.extension().unwrap());
+        assert_eq!(log_path.extension(), Some("parquet"));
         assert!(!log_path.is_commit_file());
         assert!(log_path.is_checkpoint_file());
         assert_eq!(log_path.commit_version(), Some(2));
@@ -211,5 +224,24 @@ mod tests {
         ] {
             test_child_is_multi(&log_path, bad_path, false);
         }
+    }
+
+    #[test]
+    fn test_compaction_files() {
+        let table_url = table_url();
+        let log_path = LogPath::new(&table_url)
+            .child("_delta_log/00000000000000000000.00000000000000000004.json")
+            .unwrap();
+        let log_path = LogPath::new(&log_path);
+        assert!(log_path.is_commit_file());
+        assert_eq!(log_path.version, Some(0));
+        assert_eq!(log_path.compacted_to_version, Some(4));
+        assert_eq!(log_path.extension(), Some("json"));
+
+        let log_path_bad = LogPath::new(&table_url)
+            .child("_delta_log/00000000000000000000.0000000000000000000a.json")
+            .unwrap();
+        let log_path_bad = LogPath::new(&log_path_bad);
+        assert!(!log_path_bad.is_commit_file());
     }
 }
