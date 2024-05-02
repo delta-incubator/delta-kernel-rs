@@ -1,5 +1,21 @@
 #include "delta_kernel_ffi.h"
 
+/**
+ * This module defines a very simple model of a schema, just used to be able to print the schema of
+ * a table. It consists of a "SchemaBuilder" which is our user data that gets passed into each visit_x
+ * call. This simply keeps track of all the lists we are asked to allocate.
+ *
+ * Each list is a "SchemaItemList", which just tracks its length an an array of "SchemaItem"s.
+ *
+ * Each "SchemaItem" just has a name and a type, which are just strings. It can also have a list
+ * which is its children. This is initially always NULL, but when visiting a struct, map, or array,
+ * we point this at the list specified in the callback, which allows us to traverse the schema.
+ */
+
+// If you want the visitor to print out what it's being asked to do at each step, uncomment the
+// following line
+// #define PRINT_VISITS
+
 typedef struct SchemaItemList SchemaItemList;
 
 typedef struct {
@@ -24,6 +40,8 @@ char* allocate_name(const KernelStringSlice slice) {
   return buf;
 }
 
+// lists are preallocated to have exactly enough space, so we just fill in the next open slot and
+// increment our length
 SchemaItem* add_to_list(SchemaItemList *list, char* name, char* type) {
   int idx = list->len;
   list->list[idx].name = name;
@@ -32,6 +50,7 @@ SchemaItem* add_to_list(SchemaItemList *list, char* name, char* type) {
   return list->list+idx;
 }
 
+// print out all items in a list, recursing into any children they may have
 void print_list(SchemaItemList *list, int indent, bool last) {
   for (int i = 0; i < list->len; i++) {
     for (int j = 0; j <= indent; j++) {
@@ -62,11 +81,12 @@ void print_list(SchemaItemList *list, int indent, bool last) {
 uintptr_t make_field_list(void *data, uintptr_t reserve) {
   SchemaBuilder *builder = (SchemaBuilder*)data;
   int id = builder->list_count;
-  //printf("Asked to make list of len %i, id %i\n", reserve, id);
+#ifdef PRINT_VISITS
+  printf("Making a list of lenth %i with id %i\n", reserve, id);
+#endif
   builder->list_count++;
   builder->lists = realloc(builder->lists, sizeof(SchemaItemList) * builder->list_count);
   SchemaItem* list = calloc(reserve, sizeof(SchemaItem));
-  //list->children = NULL;
   builder->lists[id].len = 0;
   builder->lists[id].list = list;
   return id;
@@ -76,7 +96,9 @@ void visit_struct(void *data,
 		  uintptr_t sibling_list_id,
 		  struct KernelStringSlice name,
 		  uintptr_t child_list_id) {
-  //printf("Asked to visit struct children are in %i, i am in %i\n", child_list_id, sibling_list_id);
+#ifdef PRINT_VISITS
+  printf("Asked to visit a struct, belonging to list %i. Children are in %i\n", sibling_list_id, child_list_id);
+#endif
   SchemaBuilder *builder = (SchemaBuilder*)data;
   char* name_ptr = allocate_name(name);
   SchemaItem* struct_item = add_to_list(builder->lists+sibling_list_id, name_ptr, "struct");
@@ -87,7 +109,9 @@ void visit_array(void *data,
 		 struct KernelStringSlice name,
 		 bool contains_null,
 		 uintptr_t child_list_id) {
-  //printf("Asked to visit array type is in %i, i am in %i\n", child_list_id, sibling_list_id);
+#ifdef PRINT_VISITS
+  printf("Asked to visit array, belonging to list %i. Types are in %i\n", sibling_list_id, child_list_id);
+#endif
   SchemaBuilder *builder = (SchemaBuilder*)data;
   char* name_ptr = allocate_name(name);
   SchemaItem* array_item = add_to_list(builder->lists+sibling_list_id, name_ptr, "array");
@@ -97,7 +121,9 @@ void visit_map(void *data,
 	       uintptr_t sibling_list_id,
 	       struct KernelStringSlice name,
 	       uintptr_t child_list_id) {
-  //printf("Asked to visit map, types are in %i, i am in %i\n", child_list_id, sibling_list_id);
+#ifdef PRINT_VISITS
+  printf("Asked to visit map, belonging to list %i. Types are in %i\n", sibling_list_id, child_list_id);
+#endif
   SchemaBuilder *builder = (SchemaBuilder*)data;
   char* name_ptr = allocate_name(name);
   SchemaItem* map_item = add_to_list(builder->lists+sibling_list_id, name_ptr, "map");
@@ -109,6 +135,9 @@ void visit_decimal(void *data,
 		   struct KernelStringSlice name,
 		   uint8_t precision,
 		   int8_t scale) {
+#ifdef PRINT_VISITS
+  printf("Asked to visit decimal with precision %i and scale %i, belonging to list %i\n", sibling_list_id);
+#endif
   SchemaBuilder *builder = (SchemaBuilder*)data;
   char* name_ptr = allocate_name(name);
   char* type = malloc(16 * sizeof(char));
@@ -117,6 +146,9 @@ void visit_decimal(void *data,
 }
 
 void visit_simple_type(void *data, uintptr_t sibling_list_id, struct KernelStringSlice name, char* type) {
+#ifdef PRINT_VISITS
+  printf("Asked to visit a(n) %s belonging to list %i\n", type, sibling_list_id);
+#endif
   SchemaBuilder *builder = (SchemaBuilder*)data;
   char* name_ptr = allocate_name(name);
   add_to_list(builder->lists+sibling_list_id, name_ptr, type);
@@ -195,8 +227,11 @@ void print_schema(const SnapshotHandle *snapshot) {
     .visit_timestamp = visit_timestamp,
     .visit_timestamp_ntz = visit_timestamp_ntz
   };
-  visit_schema(snapshot, &visitor);
+  uintptr_t schema_list_id = visit_schema(snapshot, &visitor);
+#ifdef PRINT_VISITS
+  printf("Schema returned in list %i\n", schema_list_id);
+#endif
   printf("Schema:\n");
-  print_list(builder.lists, 0, false);
+  print_list(builder.lists+schema_list_id, 0, false);
   printf("\n");
 }

@@ -388,7 +388,7 @@ unsafe fn unwrap_and_parse_path_as_url(path: KernelStringSlice) -> DeltaResult<U
     Ok(Url::parse(&path)?)
 }
 
-// A client builder allows setting options before building an actual client
+/// A builder that allows setting options on the `Engine` before actually building it
 pub struct EngineBuilder {
     url: Url,
     allocate_fn: AllocateErrorFn,
@@ -568,63 +568,119 @@ pub unsafe extern "C" fn version(snapshot: *const SnapshotHandle) -> u64 {
     snapshot.version()
 }
 
+
+/// The `EngineSchemaVisitor` defines a visitor system to allow engines to build their own
+/// representation of a schema from a particular schema within kernel.
+///
+/// The model is list based. When the kernel needs a list, it will ask engine to allocate one of a
+/// particular size. Once allocated the engine returns an `id`, which can be anything the engine
+/// wants, and will be passed back to the engine to identify the list in the future.
+///
+/// The top level of a schema is always a struct. A schema can be visited by calling
+/// [`visit_schema`] and passing a [`Snapshot`] and an `EngineSchemaVisitor`. As kernel traverses
+/// its schema it will do the following at each node:
+///
+/// - For a struct, map, or array type:
+///     1. Ask engine to allocate a list, specifying enough space to hold associated schema
+///        information.
+///     2. For a struct, visit each child, with `sibling_list_id` set to the just allocated list.
+///     3. For a map, visit the key type and the value type with `sibling_list_id` set to the just
+///        allocated list.
+///     4. For an array, visit the item type with `sibling_list_id` set to the just allocated list.
+///     5. Finally call `visit_[struct/array/map]` with `child_list_id` set to the list allocated
+///        in `1`. This has enough information to build the entire type on the engine side.
+///
+/// - For a simple type simply call `visit_[type]`, with `sibling_list_id` set to the `id` of the
+/// list the type should be added to.
+///
+/// [`visit_schema`] will return the id of the list associated with the top level struct
 // WARNING: the visitor MUST NOT retain internal references to the string slices passed to visitor methods
 // TODO: nullability
 #[repr(C)]
 pub struct EngineSchemaVisitor {
-    // opaque state pointer
-    data: *mut c_void,
-    // Creates a new field list, optionally reserving capacity up front
-    make_field_list: extern "C" fn(data: *mut c_void, reserve: usize) -> usize,
+    /// opaque state pointer
+    pub data: *mut c_void,
+    /// Creates a new field list, optionally reserving capacity up front
+    pub make_field_list: extern "C" fn(data: *mut c_void, reserve: usize) -> usize,
+
     // visitor methods that should instantiate and append the appropriate type to the field list
-    visit_struct: extern "C" fn(
+
+    /// Indidate that the schema contains a `Struct` type. The top level of a Schema is always a
+    /// `Struct`. The children of the `Struct` are in the list identified by `child_list_id`.
+    pub visit_struct: extern "C" fn(
         data: *mut c_void,
         sibling_list_id: usize,
         name: KernelStringSlice,
         child_list_id: usize,
     ),
-    // Indicate that the schema contains an Array type. `child_list_id` will be a _one_ item list with
-    // the schema type for each item of the array
-    visit_array: extern "C" fn(
+
+    /// Indicate that the schema contains an Array type. `child_list_id` will be a _one_ item list
+    /// with the schema type for each item of the array
+    pub visit_array: extern "C" fn(
         data: *mut c_void,
         sibling_list_id: usize,
         name: KernelStringSlice,
         contains_null: bool, // if this array can contain null values
         child_list_id: usize,
     ),
-    // Indicate that the schema contains an Map type. `child_list_id` will be a _two_ item list
-    // where the first element is the schema type the keys of the map, and the second element is the
-    // schema type of the values of the map
-    visit_map: extern "C" fn(
+
+    /// Indicate that the schema contains an Map type. `child_list_id` will be a _two_ item list
+    /// where the first element is the schema type the keys of the map, and the second element is the
+    /// schema type of the values of the map
+    pub visit_map: extern "C" fn(
         data: *mut c_void,
         sibling_list_id: usize,
         name: KernelStringSlice,
         child_list_id: usize,
     ),
-    // visit a decimal type with the specified precision and scale
-    visit_decimal: extern "C" fn(
+
+    /// visit a `decimal` with the specified `precision` and `scale`
+    pub visit_decimal: extern "C" fn(
         data: *mut c_void,
         sibling_list_id: usize,
         name: KernelStringSlice,
         precision: u8,
         scale: i8,
     ),
-    visit_string: extern "C" fn(data: *mut c_void, sibling_list_id: usize, name: KernelStringSlice),
-    visit_long: extern "C" fn(data: *mut c_void, sibling_list_id: usize, name: KernelStringSlice),
-    visit_integer:
-        extern "C" fn(data: *mut c_void, sibling_list_id: usize, name: KernelStringSlice),
-    visit_short: extern "C" fn(data: *mut c_void, sibling_list_id: usize, name: KernelStringSlice),
-    visit_byte: extern "C" fn(data: *mut c_void, sibling_list_id: usize, name: KernelStringSlice),
-    visit_float: extern "C" fn(data: *mut c_void, sibling_list_id: usize, name: KernelStringSlice),
-    visit_double: extern "C" fn(data: *mut c_void, sibling_list_id: usize, name: KernelStringSlice),
-    visit_boolean:
+
+    /// Visit a `string` belonging to the list identified by `sibling_list_id`.
+    pub visit_string: extern "C" fn(data: *mut c_void, sibling_list_id: usize, name: KernelStringSlice),
+
+    /// Visit a `long` belonging to the list identified by `sibling_list_id`.
+    pub visit_long: extern "C" fn(data: *mut c_void, sibling_list_id: usize, name: KernelStringSlice),
+
+    /// Visit an `integer` belonging to the list identified by `sibling_list_id`.
+    pub visit_integer:
         extern "C" fn(data: *mut c_void, sibling_list_id: usize, name: KernelStringSlice),
 
-    visit_binary: extern "C" fn(data: *mut c_void, sibling_list_id: usize, name: KernelStringSlice),
-    visit_date: extern "C" fn(data: *mut c_void, sibling_list_id: usize, name: KernelStringSlice),
-    visit_timestamp:
+    /// Visit a `short` belonging to the list identified by `sibling_list_id`.
+    pub visit_short: extern "C" fn(data: *mut c_void, sibling_list_id: usize, name: KernelStringSlice),
+
+    /// Visit a `byte` belonging to the list identified by `sibling_list_id`.
+    pub visit_byte: extern "C" fn(data: *mut c_void, sibling_list_id: usize, name: KernelStringSlice),
+
+    /// Visit a `float` belonging to the list identified by `sibling_list_id`.
+    pub visit_float: extern "C" fn(data: *mut c_void, sibling_list_id: usize, name: KernelStringSlice),
+
+    /// Visit a `double` belonging to the list identified by `sibling_list_id`.
+    pub visit_double: extern "C" fn(data: *mut c_void, sibling_list_id: usize, name: KernelStringSlice),
+
+    /// Visit a `boolean` belonging to the list identified by `sibling_list_id`.
+    pub visit_boolean:
         extern "C" fn(data: *mut c_void, sibling_list_id: usize, name: KernelStringSlice),
-    visit_timestamp_ntz:
+
+    /// Visit `binary` belonging to the list identified by `sibling_list_id`.
+    pub visit_binary: extern "C" fn(data: *mut c_void, sibling_list_id: usize, name: KernelStringSlice),
+
+    /// Visit a `date` belonging to the list identified by `sibling_list_id`.
+    pub visit_date: extern "C" fn(data: *mut c_void, sibling_list_id: usize, name: KernelStringSlice),
+
+    /// Visit a `timestamp` belonging to the list identified by `sibling_list_id`.
+    pub visit_timestamp:
+        extern "C" fn(data: *mut c_void, sibling_list_id: usize, name: KernelStringSlice),
+
+    /// Visit a `timestamp` with no timezone belonging to the list identified by `sibling_list_id`.
+    pub visit_timestamp_ntz:
         extern "C" fn(data: *mut c_void, sibling_list_id: usize, name: KernelStringSlice),
 }
 
@@ -782,14 +838,16 @@ impl KernelExpressionVisitorState {
     }
 }
 
-// When invoking [[get_scan_files]], The engine provides a pointer to the (engine's native)
-// predicate, along with a visitor function that can be invoked to recursively visit the
-// predicate. This engine state is valid until the call to [[get_scan_files]] returns. Inside that
-// method, the kernel allocates visitor state, which becomes the second argument to the predicate
-// visitor invocation along with the engine-provided predicate pointer. The visitor state is valid
-// for the lifetime of the predicate visitor invocation. Thanks to this double indirection, engine
-// and kernel each retain ownership of their respective objects, with no need to coordinate memory
-// lifetimes with the other.
+/// A predicate that can be used to skip data when scanning.
+///
+/// When invoking [`scan::scan`], The engine provides a pointer to the (engine's native) predicate,
+/// along with a visitor function that can be invoked to recursively visit the predicate. This
+/// engine state must be valid until the call to `scan::scan` returns. Inside that method, the
+/// kernel allocates visitor state, which becomes the second argument to the predicate visitor
+/// invocation along with the engine-provided predicate pointer. The visitor state is valid for the
+/// lifetime of the predicate visitor invocation. Thanks to this double indirection, engine and
+/// kernel each retain ownership of their respective objects, with no need to coordinate memory
+/// lifetimes with the other.
 #[repr(C)]
 pub struct EnginePredicate {
     predicate: *mut c_void,
