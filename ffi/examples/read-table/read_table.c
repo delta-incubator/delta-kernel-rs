@@ -1,6 +1,8 @@
 #include <stdio.h>
 #include <string.h>
+
 #include "delta_kernel_ffi.h"
+#include "schema.h"
 
 #ifdef PRINT_ARROW_DATA
 #include "arrow.h"
@@ -145,7 +147,8 @@ int main(int argc, char* argv[]) {
   const SnapshotHandle *snapshot_handle = snapshot_handle_res.ok;
 
   uint64_t v = version(snapshot_handle);
-  printf("version: %llu\n", v);
+  printf("version: %llu\n\n", v);
+  print_schema(snapshot_handle);
 
   ExternResultScan scan_res = scan(snapshot_handle, engine, NULL);
   if (scan_res.tag != OkScan) {
