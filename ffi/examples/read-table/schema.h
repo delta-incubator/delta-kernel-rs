@@ -1,15 +1,16 @@
 #include "delta_kernel_ffi.h"
 
 /**
- * This module defines a very simple model of a schema, just used to be able to print the schema of
+ * This module defines a very simple model of a schema, used only to be able to print the schema of
  * a table. It consists of a "SchemaBuilder" which is our user data that gets passed into each visit_x
  * call. This simply keeps track of all the lists we are asked to allocate.
  *
- * Each list is a "SchemaItemList", which just tracks its length an an array of "SchemaItem"s.
+ * Each list is a "SchemaItemList", which tracks its length an an array of "SchemaItem"s.
  *
- * Each "SchemaItem" just has a name and a type, which are just strings. It can also have a list
- * which is its children. This is initially always NULL, but when visiting a struct, map, or array,
- * we point this at the list specified in the callback, which allows us to traverse the schema.
+ * Each "SchemaItem" has a name and a type, which are just strings. It can also have a list which is
+ * its children. This is initially always NULL, but when visiting a struct, map, or array, we point
+ * this at the list specified in the callback, which allows us to traverse the schema when printing
+ * it. Note that this points to one of the lists in the builder's set of lists and is not a copy.
  */
 
 // If you want the visitor to print out what it's being asked to do at each step, uncomment the
@@ -51,28 +52,28 @@ SchemaItem* add_to_list(SchemaItemList *list, char* name, char* type) {
 }
 
 // print out all items in a list, recursing into any children they may have
-void print_list(SchemaItemList *list, int indent, bool last) {
+void print_list(SchemaItemList *list, int indent, bool parent_on_last) {
   for (int i = 0; i < list->len; i++) {
+    bool is_last = i == list->len - 1;
     for (int j = 0; j <= indent; j++) {
       if (j == indent) {
-	if (i == list->len - 1) {
-	  printf("└");
-	} else {
-	  printf("├");
-	}
+        if (is_last) {
+          printf("└");
+        } else {
+          printf("├");
+        }
       } else {
-	if (last && j == indent - 1) {
-	  // don't print a dangling | for my last item
-	  printf("   ");
-	} else {
-	  printf("│  ");
-	}
+        if (parent_on_last && j == indent - 1) {
+          // don't print a dangling | on my parent's last item
+          printf("   ");
+        } else {
+          printf("│  ");
+        }
       }
     }
     printf("─ %s: %s\n", list->list[i].name, list->list[i].type);
     if (list->list[i].children) {
-      bool last = i == list->len - 1;
-      print_list(list->list[i].children, indent+1, last);
+      print_list(list->list[i].children, indent+1, is_last);
     }
   }
 }
@@ -93,9 +94,9 @@ uintptr_t make_field_list(void *data, uintptr_t reserve) {
 }
 
 void visit_struct(void *data,
-		  uintptr_t sibling_list_id,
-		  struct KernelStringSlice name,
-		  uintptr_t child_list_id) {
+                  uintptr_t sibling_list_id,
+                  struct KernelStringSlice name,
+                  uintptr_t child_list_id) {
 #ifdef PRINT_VISITS
   printf("Asked to visit a struct, belonging to list %i. Children are in %i\n", sibling_list_id, child_list_id);
 #endif
@@ -105,10 +106,10 @@ void visit_struct(void *data,
   struct_item->children = builder->lists+child_list_id;
 }
 void visit_array(void *data,
-		 uintptr_t sibling_list_id,
-		 struct KernelStringSlice name,
-		 bool contains_null,
-		 uintptr_t child_list_id) {
+                 uintptr_t sibling_list_id,
+                 struct KernelStringSlice name,
+                 bool contains_null,
+                 uintptr_t child_list_id) {
 #ifdef PRINT_VISITS
   printf("Asked to visit array, belonging to list %i. Types are in %i\n", sibling_list_id, child_list_id);
 #endif
@@ -118,9 +119,9 @@ void visit_array(void *data,
   array_item->children = builder->lists+child_list_id;
 }
 void visit_map(void *data,
-	       uintptr_t sibling_list_id,
-	       struct KernelStringSlice name,
-	       uintptr_t child_list_id) {
+               uintptr_t sibling_list_id,
+               struct KernelStringSlice name,
+               uintptr_t child_list_id) {
 #ifdef PRINT_VISITS
   printf("Asked to visit map, belonging to list %i. Types are in %i\n", sibling_list_id, child_list_id);
 #endif
@@ -131,10 +132,10 @@ void visit_map(void *data,
 }
 
 void visit_decimal(void *data,
-		   uintptr_t sibling_list_id,
-		   struct KernelStringSlice name,
-		   uint8_t precision,
-		   int8_t scale) {
+                   uintptr_t sibling_list_id,
+                   struct KernelStringSlice name,
+                   uint8_t precision,
+                   int8_t scale) {
 #ifdef PRINT_VISITS
   printf("Asked to visit decimal with precision %i and scale %i, belonging to list %i\n", sibling_list_id);
 #endif
