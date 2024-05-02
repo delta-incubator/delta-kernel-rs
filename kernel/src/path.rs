@@ -14,7 +14,7 @@ pub(crate) struct LogPath<'a> {
     path: &'a str,
     version: Option<Version>,
     // if is compacted, this path spans version [`version`, `compacted_to_version`]
-    compacted_to_version: Option<Version>,
+    _compacted_to_version: Option<Version>,
     is_commit: bool,
     is_checkpoint: bool,
 }
@@ -81,6 +81,7 @@ impl<'a> LogPath<'a> {
                 if let Some((maybe_compacted_version, suffix)) = suffix.split_once('.') {
                     if suffix == "json" {
                         compacted_to_version = get_version_opt(Some(maybe_compacted_version), 20);
+                        is_commit = compacted_to_version.is_some()
                     }
                 }
             }
@@ -89,7 +90,7 @@ impl<'a> LogPath<'a> {
             url,
             path,
             version,
-            compacted_to_version,
+            _compacted_to_version: compacted_to_version,
             is_commit,
             is_checkpoint,
         }
@@ -123,7 +124,7 @@ impl<'a> LogPath<'a> {
     }
 
     pub(crate) fn is_commit_file(&self) -> bool {
-        self.is_commit || self.compacted_to_version.is_some()
+        self.is_commit
     }
 
     /// Parse the version number assuming a commit json or checkpoint parquet file
@@ -235,7 +236,7 @@ mod tests {
         let log_path = LogPath::new(&log_path);
         assert!(log_path.is_commit_file());
         assert_eq!(log_path.version, Some(0));
-        assert_eq!(log_path.compacted_to_version, Some(4));
+        assert_eq!(log_path._compacted_to_version, Some(4));
         assert_eq!(log_path.extension(), Some("json"));
 
         let log_path_bad = LogPath::new(&table_url)
