@@ -29,7 +29,7 @@ All paths must start with `file://` and be absolute.
 
 - Read and print the table in `kernel/tests/data/table-with-dv-small/`:
 
-`cargo run -- file:///[path-to-kernel-repo]/delta-kernel-rs/kernel/tests/data/table-with-dv-small/`
+`cargo run -- file://[path-to-kernel-repo]/delta-kernel-rs/kernel/tests/data/table-with-dv-small/`
 
 - Get usage info:
 
