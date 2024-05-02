@@ -6,11 +6,12 @@ use std::sync::Arc;
 use bytes::Bytes;
 use delta_kernel_derive::Schema;
 use roaring::RoaringTreemap;
+use serde::{Deserialize, Serialize};
 use url::Url;
 
 use crate::{DeltaResult, Error, FileSystemClient};
 
-#[derive(Debug, Clone, PartialEq, Eq, Schema)]
+#[derive(Debug, Clone, PartialEq, Eq, Schema, Deserialize, Serialize)]
 pub struct DeletionVectorDescriptor {
     /// A single character to indicate how to access the DV. Legal options are: ['u', 'i', 'p'].
     pub storage_type: String,

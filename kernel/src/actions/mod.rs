@@ -5,15 +5,16 @@ pub mod deletion_vector;
 pub(crate) mod schemas;
 pub(crate) mod visitors;
 
+use std::collections::HashMap;
+
 use delta_kernel_derive::Schema;
 use lazy_static::lazy_static;
+use serde::{Deserialize, Serialize};
 use visitors::{AddVisitor, MetadataVisitor, ProtocolVisitor};
 
 use self::deletion_vector::DeletionVectorDescriptor;
 use crate::actions::schemas::GetStructField;
 use crate::{schema::StructType, DeltaResult, EngineData};
-
-use std::collections::HashMap;
 
 pub(crate) const ADD_NAME: &str = "add";
 pub(crate) const REMOVE_NAME: &str = "remove";
@@ -41,7 +42,7 @@ pub(crate) fn get_log_schema() -> &'static StructType {
     &LOG_SCHEMA
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Schema)]
+#[derive(Debug, Clone, PartialEq, Eq, Schema, Serialize, Deserialize)]
 pub struct Format {
     /// Name of the encoding for files in this table
     pub provider: String,
@@ -58,7 +59,7 @@ impl Default for Format {
     }
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq, Schema)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Schema, Serialize, Deserialize)]
 pub struct Metadata {
     /// Unique identifier for this table
     pub id: String,
@@ -90,7 +91,7 @@ impl Metadata {
     }
 }
 
-#[derive(Default, Debug, Clone, PartialEq, Eq, Schema)]
+#[derive(Default, Debug, Clone, PartialEq, Eq, Schema, Serialize, Deserialize)]
 pub struct Protocol {
     /// The minimum version of the Delta read protocol that a client must implement
     /// in order to correctly read this table
@@ -114,7 +115,7 @@ impl Protocol {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Schema)]
+#[derive(Debug, Clone, PartialEq, Eq, Schema, Serialize, Deserialize)]
 pub struct Add {
     /// A relative path to a data file from the root of the table or an absolute path to a file
     /// that should be added to the table. The path is a URI as specified by
@@ -172,7 +173,7 @@ impl Add {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Schema)]
+#[derive(Debug, Clone, PartialEq, Eq, Schema, Serialize, Deserialize)]
 pub(crate) struct Remove {
     /// A relative path to a data file from the root of the table or an absolute path to a file
     /// that should be added to the table. The path is a URI as specified by
@@ -218,7 +219,7 @@ impl Remove {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Schema)]
+#[derive(Debug, Clone, PartialEq, Eq, Schema, Serialize, Deserialize)]
 pub struct Transaction {
     /// A unique identifier for the application performing the transaction.
     pub app_id: String,

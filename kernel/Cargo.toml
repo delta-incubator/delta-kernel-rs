@@ -71,6 +71,7 @@ default-engine = [
   "reqwest",
   "tokio",
 ]
+serde = []
 
 developer-visibility = []
 sync-engine = [
