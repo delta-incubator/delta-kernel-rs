@@ -18,9 +18,13 @@ url = "2"
 delta_kernel = { path = "../kernel", features = ["developer-visibility"] }
 
 # used if we use the default client to be able to move arrow data into the c-ffi format
-arrow-schema = { version = "^49.0", default-features = false, features = ["ffi"], optional = true }
-arrow-data = { version = "^49.0", default-features = false, features = ["ffi"], optional = true }
-arrow-array = { version = "^49.0", default-features = false, optional = true }
+arrow-schema = { version = "^51.0", default-features = false, features = [
+  "ffi",
+], optional = true }
+arrow-data = { version = "51.0.0", default-features = false, features = [
+  "ffi",
+], optional = true }
+arrow-array = { version = "^51.0", default-features = false, optional = true }
 
 [build-dependencies]
 cbindgen = "0.26.0"
@@ -32,5 +36,5 @@ default-engine = [
   "delta_kernel/default-engine",
   "arrow-array",
   "arrow-data",
-  "arrow-schema"
+  "arrow-schema",
 ]
