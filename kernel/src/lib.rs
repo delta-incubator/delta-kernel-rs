@@ -88,7 +88,7 @@ pub type FileDataReadResult = (FileMeta, Box<dyn EngineData>);
 
 /// An iterator of data read from specified files
 pub type FileDataReadResultIterator =
-    Box<dyn Iterator<Item = DeltaResult<Box<dyn EngineData>>> + Send>;
+    Box<dyn Iterator<Item = DeltaResult<Box<dyn EngineData + Send + Sync>>> + Send + Sync>;
 
 /// The metadata that describes an object.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -111,7 +111,7 @@ pub trait ExpressionEvaluator: Send + Sync {
     ///
     /// Contains one value for each row of the input.
     /// The data type of the output is same as the type output of the expression this evaluator is using.
-    fn evaluate(&self, batch: &dyn EngineData) -> DeltaResult<Box<dyn EngineData>>;
+    fn evaluate(&self, batch: &(dyn EngineData + Send + Sync)) -> DeltaResult<Box<dyn EngineData + Send + Sync>>;
 }
 
 /// Provides expression evaluation capability to Delta Kernel.
@@ -135,7 +135,7 @@ pub trait ExpressionHandler {
         schema: SchemaRef,
         expression: Expression,
         output_type: DataType,
-    ) -> Arc<dyn ExpressionEvaluator>;
+    ) -> Arc<dyn ExpressionEvaluator + Send + Sync>;
 }
 
 /// Provides file system related functionalities to Delta Kernel.
@@ -166,9 +166,9 @@ pub trait JsonHandler: Send + Sync {
     /// json_strings MUST be a single column batch of engine data, and the column type must be string
     fn parse_json(
         &self,
-        json_strings: Box<dyn EngineData>,
+        json_strings: Box<dyn EngineData + Send + Sync>,
         output_schema: SchemaRef,
-    ) -> DeltaResult<Box<dyn EngineData>>;
+    ) -> DeltaResult<Box<dyn EngineData + Send + Sync>>;
 
     /// Read and parse the JSON format file at given locations and return
     /// the data as EngineData with the columns requested by physical schema.
@@ -215,14 +215,14 @@ pub trait ParquetHandler: Send + Sync {
 /// table.
 pub trait Engine: Send + Sync {
     /// Get the connector provided [`ExpressionHandler`].
-    fn get_expression_handler(&self) -> Arc<dyn ExpressionHandler>;
+    fn get_expression_handler(&self) -> Arc<dyn ExpressionHandler + Send + Sync>;
 
     /// Get the connector provided [`FileSystemClient`]
-    fn get_file_system_client(&self) -> Arc<dyn FileSystemClient>;
+    fn get_file_system_client(&self) -> Arc<dyn FileSystemClient + Send + Sync>;
 
     /// Get the connector provided [`JsonHandler`].
-    fn get_json_handler(&self) -> Arc<dyn JsonHandler>;
+    fn get_json_handler(&self) -> Arc<dyn JsonHandler + Send + Sync>;
 
     /// Get the connector provided [`ParquetHandler`].
-    fn get_parquet_handler(&self) -> Arc<dyn ParquetHandler>;
+    fn get_parquet_handler(&self) -> Arc<dyn ParquetHandler + Send + Sync>;
 }

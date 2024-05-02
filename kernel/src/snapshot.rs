@@ -46,7 +46,7 @@ impl LogSegment {
         commit_read_schema: SchemaRef,
         checkpoint_read_schema: SchemaRef,
         predicate: Option<Expression>,
-    ) -> DeltaResult<impl Iterator<Item = DeltaResult<(Box<dyn EngineData>, bool)>>> {
+    ) -> DeltaResult<impl Iterator<Item = DeltaResult<(Box<dyn EngineData + Send + Sync>, bool)>> + Send + Sync> {
         let json_client = engine.get_json_handler();
         // TODO change predicate to: predicate AND add.path not null and remove.path not null
         let commit_stream = json_client
@@ -105,6 +105,12 @@ pub struct Snapshot {
     metadata: Metadata,
     protocol: Protocol,
     schema: Schema,
+}
+
+impl Drop for Snapshot {
+    fn drop(&mut self) {
+        println!("Dropping snapshot");
+    }
 }
 
 impl std::fmt::Debug for Snapshot {

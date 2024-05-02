@@ -103,7 +103,7 @@ fn try_main() -> DeltaResult<()> {
     println!("Reading {url}");
 
     // create the requested engine
-    let engine: Arc<dyn Engine> = match cli.engine {
+    let engine: Arc<dyn Engine + Send + Sync> = match cli.engine {
         EngineType::Default => Arc::new(DefaultEngine::try_new(
             &url,
             HashMap::<String, String>::new(),

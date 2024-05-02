@@ -11,41 +11,61 @@ use tracing::debug;
 use url::Url;
 
 use crate::{
-    unwrap_kernel_expression, AllocateStringFn, EnginePredicate, ExternEngine, ExternEngineHandle,
-    ExternResult, FromBoolSlice, IntoExternResult, KernelBoolSlice, KernelExpressionVisitorState,
-    KernelStringSlice, NullableCvoid, Snapshot, TryFromStringSlice,
+    unwrap_kernel_expression, AllocateStringFn, EnginePredicate, ExternEngine,
+    SharedExternEngine, ExternResult, FromBoolSlice, IntoExternResult, KernelBoolSlice, KernelBoolSliceHandle,
+    KernelExpressionVisitorState, KernelStringSlice, NullableCvoid, SharedSnapshot,
+    TryFromStringSlice,
 };
 
-use super::handle::{ArcHandle, BoxHandle, SizedBoxHandle};
+use super::handle::{False, Handle, HandleAsArc, HandleAsMut, HandleDescriptor, True, Unconstructable};
 
 // TODO: Do we want this type at all? Perhaps we should just _always_ pass raw *mut c_void pointers
 // that are the engine data
 /// an opaque struct that encapsulates data read by an engine. this handle can be passed back into
 /// some kernel calls to operate on the data, or can be converted into the raw data as read by the
 /// [`Engine`] by calling [`get_raw_engine_data`]
+// TODO(frj): This is broken. While the engine does have some pointer that represents its data, that
+// pointer becomes just one of several members of the vtable struct that we use to present it as an
+// [EngineData] to the kernel. In order to recover the engine's pointer, we will have to either
+// expose it as part of the trait (perhaps an ExternEngineData trait), or else we'll have to cast
+// back to the vtable struct and extract the pointer from there.
 pub struct EngineDataHandle {
-    data: Box<dyn EngineData>,
+    _unconstructable: Unconstructable,
 }
-impl SizedBoxHandle for EngineDataHandle {}
+impl HandleDescriptor for EngineDataHandle {
+    type Target = dyn EngineData + Send + Sync;
+    type Mutable = True;
+    type Sized = False;
+}
 
 /// Allow an engine to "unwrap" an [`EngineDataHandle`] into the raw pointer for the case it wants
 /// to use its own engine data format
 ///
 /// # Safety
-/// `data_handle` must be a valid pointer to a kernel allocated `EngineDataHandle`
-pub unsafe extern "C" fn get_raw_engine_data(data_handle: *mut EngineDataHandle) -> *mut c_void {
-    let boxed_data = unsafe { Box::from_raw(data_handle) };
-    Box::into_raw(boxed_data.data).cast()
+///
+/// `data_handle` must be a valid pointer to a kernel allocated `EngineDataHandle`. The Engine must
+/// ensure the handle outlives the returned pointer.
+// TODO(frj): What is the engine actually doing with this method??
+#[no_mangle]
+pub unsafe extern "C" fn get_raw_engine_data(mut data: Handle<EngineDataHandle>) -> *mut c_void {
+    let ptr = get_raw_engine_data_impl(&mut data) as *mut dyn EngineData;
+    ptr as _
+}
+
+unsafe fn get_raw_engine_data_impl(data: &mut Handle<EngineDataHandle>) -> &mut dyn EngineData {
+    let _data = unsafe { data.as_mut() };
+    todo!() // See TODO comment for EngineDataHandle
 }
 
 /// Struct to allow binding to the arrow [C Data
 /// Interface](https://arrow.apache.org/docs/format/CDataInterface.html). This includes the data and
 /// the schema.
 #[cfg(feature = "default-engine")]
-#[repr(C)]
+// FIXME: cbindgen doesn't recognize the FFI_ArrowFoo fields in this struct
+//#[repr(C)]
 pub struct ArrowFFIData {
-    array: arrow_data::ffi::FFI_ArrowArray,
-    schema: arrow_schema::ffi::FFI_ArrowSchema,
+    pub array: arrow_data::ffi::FFI_ArrowArray,
+    pub schema: arrow_schema::ffi::FFI_ArrowSchema,
 }
 
 /// Get an [`ArrowFFIData`] to allow binding to the arrow [C Data
@@ -56,19 +76,20 @@ pub struct ArrowFFIData {
 /// data_handle must be a valid EngineDataHandle as read by the [`DefaultEngine`] obtained
 /// from `get_default_client`.
 #[cfg(feature = "default-engine")]
+#[no_mangle]
 pub unsafe extern "C" fn get_raw_arrow_data(
-    data_handle: *mut EngineDataHandle,
-    engine: *const ExternEngineHandle,
+    data: Handle<EngineDataHandle>,
+    engine: Handle<SharedExternEngine>,
 ) -> ExternResult<*mut ArrowFFIData> {
-    get_raw_arrow_data_impl(data_handle).into_extern_result(engine)
+    get_raw_arrow_data_impl(data).into_extern_result(engine)
 }
 
 #[cfg(feature = "default-engine")]
 unsafe fn get_raw_arrow_data_impl(
-    data_handle: *mut EngineDataHandle,
+    data: Handle<EngineDataHandle>,
 ) -> DeltaResult<*mut ArrowFFIData> {
-    let boxed_data = unsafe { Box::from_raw(data_handle) };
-    let data = boxed_data.data;
+    // TODO(frj): This consumes the handle. Is that what we really want?
+    let data = unsafe { data.into_inner() };
     let record_batch: arrow_array::RecordBatch = data
         .into_any()
         .downcast::<delta_kernel::engine::arrow_data::ArrowEngineData>()
@@ -83,7 +104,14 @@ unsafe fn get_raw_arrow_data_impl(
     Ok(Box::leak(ret_data))
 }
 
-impl SizedBoxHandle for Scan {}
+pub struct ScanHandle {
+    _unconstructable: Unconstructable,
+}
+impl HandleDescriptor for ScanHandle {
+    type Target = Scan;
+    type Mutable = True;
+    type Sized = True;
+}
 
 /// Get a [`Scan`] over the table specified by the passed snapshot.
 /// # Safety
@@ -91,19 +119,19 @@ impl SizedBoxHandle for Scan {}
 /// Caller is responsible for passing a valid snapshot pointer, and engine pointer
 #[no_mangle]
 pub unsafe extern "C" fn scan(
-    snapshot: *const Snapshot,
-    engine: *const ExternEngineHandle,
+    snapshot: Handle<SharedSnapshot>,
+    engine: Handle<SharedExternEngine>,
     predicate: Option<&mut EnginePredicate>,
-) -> ExternResult<*mut Scan> {
+) -> ExternResult<Handle<ScanHandle>> {
     scan_impl(snapshot, predicate).into_extern_result(engine)
 }
 
 unsafe fn scan_impl(
-    snapshot: *const Snapshot,
+    snapshot: Handle<SharedSnapshot>,
     predicate: Option<&mut EnginePredicate>,
-) -> DeltaResult<*mut Scan> {
-    let snapshot = unsafe { ArcHandle::clone_as_arc(snapshot) };
-    let mut scan_builder = ScanBuilder::new(snapshot.clone());
+) -> DeltaResult<Handle<ScanHandle>> {
+    let snapshot = unsafe { snapshot.as_arc() };
+    let mut scan_builder = ScanBuilder::new(snapshot);
     if let Some(predicate) = predicate {
         let mut visitor_state = KernelExpressionVisitorState::new();
         let exprid = (predicate.visitor)(predicate.predicate, &mut visitor_state);
@@ -112,10 +140,17 @@ unsafe fn scan_impl(
             scan_builder = scan_builder.with_predicate(predicate);
         }
     }
-    Ok(BoxHandle::into_handle(scan_builder.build()))
+    Ok(Box::new(scan_builder.build()).into())
 }
 
-impl SizedBoxHandle for GlobalScanState {}
+pub struct GlobalScanStateHandle {
+    _unconstructable: Unconstructable,
+}
+impl HandleDescriptor for GlobalScanStateHandle {
+    type Target = GlobalScanState;
+    type Mutable = True;
+    type Sized = True;
+}
 
 /// Get the global state for a scan. See the docs for [`delta_kernel::scan::state::GlobalScanState`]
 /// for more information.
@@ -123,31 +158,38 @@ impl SizedBoxHandle for GlobalScanState {}
 /// # Safety
 /// Engine is responsible for providing a valid scan pointer
 #[no_mangle]
-pub unsafe extern "C" fn get_global_scan_state(scan: &mut Scan) -> *mut GlobalScanState {
-    BoxHandle::into_handle(scan.global_scan_state())
+pub unsafe extern "C" fn get_global_scan_state(scan: &mut Scan) -> Handle<GlobalScanStateHandle> {
+    Box::new(scan.global_scan_state()).into()
 }
 
 /// # Safety
 ///
 /// Caller is responsible for passing a valid global scan pointer.
 #[no_mangle]
-pub unsafe extern "C" fn drop_global_scan_state(state: *mut GlobalScanState) {
-    BoxHandle::drop_handle(state);
+pub unsafe extern "C" fn drop_global_scan_state(state: Handle<GlobalScanStateHandle>) {
+    state.drop_handle();
 }
 
 // Intentionally opaque to the engine.
 pub struct KernelScanDataIterator {
     // Box -> Wrap its unsized content this struct is fixed-size with thin pointers.
     // Item = Box<dyn EngineData>, see above, Vec<bool> -> can become a KernelBoolSlice
-    data: Box<dyn Iterator<Item = DeltaResult<ScanData>>>,
+    data: Box<dyn Iterator<Item = DeltaResult<ScanData>> + Send + Sync>,
 
     // Also keep a reference to the external client for its error allocator.
     // Parquet and Json handlers don't hold any reference to the tokio reactor, so the iterator
     // terminates early if the last table client goes out of scope.
-    engine: Arc<dyn ExternEngine>,
+    engine: Arc<dyn ExternEngine + Send + Sync>,
 }
 
-impl SizedBoxHandle for KernelScanDataIterator {}
+pub struct KernelScanDataIteratorHandle {
+    _unconstructable: Unconstructable,
+}
+impl HandleDescriptor for KernelScanDataIteratorHandle {
+    type Target = KernelScanDataIterator;
+    type Mutable = True;
+    type Sized = True;
+}
 
 impl Drop for KernelScanDataIterator {
     fn drop(&mut self) {
@@ -164,25 +206,25 @@ impl Drop for KernelScanDataIterator {
 /// Engine is responsible for passing a valid [`ExternEngineHandle`] and [`Scan`]
 #[no_mangle]
 pub unsafe extern "C" fn kernel_scan_data_init(
-    engine: *const ExternEngineHandle,
-    scan: *mut Scan,
-) -> ExternResult<*mut KernelScanDataIterator> {
-    kernel_scan_data_init_impl(engine, scan).into_extern_result(engine)
+    engine: Handle<SharedExternEngine>,
+    scan: Handle<ScanHandle>,
+) -> ExternResult<Handle<KernelScanDataIteratorHandle>> {
+    kernel_scan_data_init_impl(&engine, scan).into_extern_result(engine)
 }
 
 unsafe fn kernel_scan_data_init_impl(
-    engine: *const ExternEngineHandle,
-    scan: *mut Scan,
-) -> DeltaResult<*mut KernelScanDataIterator> {
-    let engine = unsafe { ArcHandle::clone_as_arc(engine) };
+    engine: &Handle<SharedExternEngine>,
+    scan: Handle<ScanHandle>,
+) -> DeltaResult<Handle<KernelScanDataIteratorHandle>> {
+    let engine = unsafe { engine.as_arc() };
     // we take back and consume the scan here
-    let boxed_scan = unsafe { Box::from_raw(scan) };
-    let scan_data = boxed_scan.scan_data(engine.engine().as_ref())?;
+    let scan = unsafe { scan.into_inner() };
+    let scan_data = scan.scan_data(engine.engine().as_ref())?;
     let data = KernelScanDataIterator {
         data: Box::new(scan_data),
         engine,
     };
-    Ok(BoxHandle::into_handle(data))
+    Ok(Box::new(data).into())
 }
 
 /// # Safety
@@ -191,14 +233,15 @@ unsafe fn kernel_scan_data_init_impl(
 /// [kernel_scan_data_free]. The visitor function pointer must be non-null.
 #[no_mangle]
 pub unsafe extern "C" fn kernel_scan_data_next(
-    data: &mut KernelScanDataIterator,
+    mut data: Handle<KernelScanDataIteratorHandle>,
     engine_context: NullableCvoid,
     engine_visitor: extern "C" fn(
         engine_context: NullableCvoid,
-        engine_data: *mut EngineDataHandle,
+        engine_data: Handle<EngineDataHandle>,
         selection_vector: KernelBoolSlice,
     ),
 ) -> ExternResult<bool> {
+    let data = unsafe { data.as_mut() };
     kernel_scan_data_next_impl(data, engine_context, engine_visitor)
         .into_extern_result(data.engine.error_allocator())
 }
@@ -207,16 +250,15 @@ fn kernel_scan_data_next_impl(
     engine_context: NullableCvoid,
     engine_visitor: extern "C" fn(
         engine_context: NullableCvoid,
-        engine_data: *mut EngineDataHandle,
+        engine_data: Handle<EngineDataHandle>,
         selection_vector: KernelBoolSlice,
     ),
 ) -> DeltaResult<bool> {
     if let Some((data, sel_vec)) = data.data.next().transpose()? {
         let bool_slice = KernelBoolSlice::from(sel_vec);
-        let data_handle = BoxHandle::into_handle(EngineDataHandle { data });
-        (engine_visitor)(engine_context, data_handle, bool_slice);
-        // ensure we free the data
-        unsafe { BoxHandle::drop_handle(data_handle) };
+        // TODO(frj): We don't need a handle here, we're not passing ownership to the engine. We
+        // just need a way to represent unsized types.
+        (engine_visitor)(engine_context, data.into(), bool_slice);
         Ok(true)
     } else {
         Ok(false)
@@ -230,8 +272,8 @@ fn kernel_scan_data_next_impl(
 // we should probably be consistent with drop vs. free on engine side (probably the latter is more
 // intuitive to non-rust code)
 #[no_mangle]
-pub unsafe extern "C" fn kernel_scan_data_free(data: *mut KernelScanDataIterator) {
-    BoxHandle::drop_handle(data);
+pub unsafe extern "C" fn kernel_scan_data_free(data: Handle<KernelScanDataIteratorHandle>) {
+    data.drop_handle();
 }
 
 type CScanCallback = extern "C" fn(
@@ -239,15 +281,21 @@ type CScanCallback = extern "C" fn(
     path: KernelStringSlice,
     size: i64,
     dv_info: &DvInfo,
-    partition_map: *mut CStringMap,
+    partition_map: &CStringMap,
 );
 
-impl SizedBoxHandle for DvInfo {}
+pub struct DvInfoHandle {
+    _unconstructable: Unconstructable,
+}
+impl HandleDescriptor for DvInfoHandle {
+    type Target = DvInfo;
+    type Mutable = True;
+    type Sized = True;
+}
 
 pub struct CStringMap {
     values: HashMap<String, String>,
 }
-impl SizedBoxHandle for CStringMap {}
 
 #[no_mangle]
 /// allow probing into a CStringMap. If the specified key is in the map, kernel will call
@@ -275,24 +323,23 @@ pub unsafe extern "C" fn get_from_map(
 #[no_mangle]
 pub unsafe extern "C" fn selection_vector_from_dv(
     dv_info: &DvInfo,
-    extern_engine: *const ExternEngineHandle,
-    state: &mut GlobalScanState,
-) -> ExternResult<*mut KernelBoolSlice> {
-    selection_vector_from_dv_impl(dv_info, extern_engine, state).into_extern_result(extern_engine)
+    extern_engine: Handle<SharedExternEngine>,
+    state: Handle<GlobalScanStateHandle>,
+) -> ExternResult<Option<Handle<KernelBoolSliceHandle>>> {
+    selection_vector_from_dv_impl(dv_info, &extern_engine, state)
+        .into_extern_result(extern_engine)
 }
 
 unsafe fn selection_vector_from_dv_impl(
     dv_info: &DvInfo,
-    extern_engine: *const ExternEngineHandle,
-    state: &mut GlobalScanState,
-) -> DeltaResult<*mut KernelBoolSlice> {
-    let extern_engine = unsafe { ArcHandle::clone_as_arc(extern_engine) };
+    extern_engine: &Handle<SharedExternEngine>,
+    state: Handle<GlobalScanStateHandle>,
+) -> DeltaResult<Option<Handle<KernelBoolSliceHandle>>> {
+    let state = unsafe { state.as_ref() };
+    let extern_engine = unsafe { extern_engine.as_arc() };
     let root_url = Url::parse(&state.table_root)?;
-    let vopt = dv_info.get_selection_vector(extern_engine.engine().as_ref(), &root_url)?;
-    match vopt {
-        Some(v) => Ok(BoxHandle::into_handle(Box::new(v.into()))),
-        None => Ok(std::ptr::null_mut()),
-    }
+    Ok(dv_info.get_selection_vector(extern_engine.engine().as_ref(), &root_url)?
+        .map(|v| Handle::from(Box::new(v.into()))))
 }
 
 // Wrapper function that gets called by the kernel, transforms the arguments to make the ffi-able,
@@ -304,15 +351,13 @@ fn rust_callback(
     dv_info: DvInfo,
     partition_values: HashMap<String, String>,
 ) {
-    let partition_map_handle = BoxHandle::into_handle(CStringMap {
-        values: partition_values,
-    });
+    let partition_map = CStringMap { values: partition_values };
     (context.callback)(
         context.engine_context,
         path.into(),
         size,
         &dv_info,
-        partition_map_handle,
+        &partition_map,
     );
 }
 
@@ -329,14 +374,13 @@ struct ContextWrapper {
 /// engine is responsbile for passing a valid [`EngineDataHandle`] and selection vector.
 #[no_mangle]
 pub unsafe extern "C" fn visit_scan_data(
-    data: *mut EngineDataHandle,
+    data: Handle<EngineDataHandle>,
     selection_vector: KernelBoolSlice,
     engine_context: NullableCvoid,
     callback: CScanCallback,
 ) {
     let selection_vec = Vec::<bool>::from_slice(selection_vector);
-    let data = unsafe { &*data };
-    let data = data.data.as_ref();
+    let data = unsafe { data.as_ref() };
     let context_wrapper = ContextWrapper {
         engine_context,
         callback,

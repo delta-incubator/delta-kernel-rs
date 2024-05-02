@@ -13,6 +13,7 @@ use futures::FutureExt;
 use crate::{DeltaResult, FileMeta};
 
 /// A fallible future that resolves to a stream of [`RecordBatch`]
+/// cbindgen:ignore
 pub type FileOpenFuture =
     BoxFuture<'static, DeltaResult<BoxStream<'static, DeltaResult<RecordBatch>>>>;
 
