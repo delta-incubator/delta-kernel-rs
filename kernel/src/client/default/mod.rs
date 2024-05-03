@@ -1,6 +1,6 @@
-//! # Default Engineinterface
+//! # The Default Engine
 //!
-//! The default implementation of [`EngineInterface`] is [`DefaultEngineInterface`].
+//! The default implementation of [`Engine`] is [`DefaultEngineInterface`].
 //!
 //! The underlying implementations use asynchronous IO. Async tasks are run on
 //! a separate thread pool, provided by the [`TaskExecutor`] trait. Read more in
@@ -17,7 +17,7 @@ use self::json::DefaultJsonHandler;
 use self::parquet::DefaultParquetHandler;
 use super::arrow_expression::ArrowExpressionHandler;
 use crate::{
-    DeltaResult, EngineInterface, ExpressionHandler, FileSystemClient, JsonHandler, ParquetHandler,
+    DeltaResult, Engine, ExpressionHandler, FileSystemClient, JsonHandler, ParquetHandler,
 };
 
 pub mod executor;
@@ -87,7 +87,7 @@ impl<E: TaskExecutor> DefaultEngineInterface<E> {
     }
 }
 
-impl<E: TaskExecutor> EngineInterface for DefaultEngineInterface<E> {
+impl<E: TaskExecutor> Engine for DefaultEngineInterface<E> {
     fn get_expression_handler(&self) -> Arc<dyn ExpressionHandler> {
         self.expression.clone()
     }

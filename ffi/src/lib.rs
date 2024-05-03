@@ -12,7 +12,7 @@ use url::Url;
 use delta_kernel::expressions::{BinaryOperator, Expression, Scalar};
 use delta_kernel::schema::{DataType, PrimitiveType, StructField, StructType};
 use delta_kernel::snapshot::Snapshot;
-use delta_kernel::{DeltaResult, EngineInterface, Error};
+use delta_kernel::{DeltaResult, Engine, Error};
 
 mod handle;
 use handle::{ArcHandle, BoxHandle, SizedArcHandle, Unconstructable};
@@ -334,9 +334,9 @@ impl<T> IntoExternResult<T> for DeltaResult<T> {
     }
 }
 
-// A wrapper for EngineInterface which defines additional FFI-specific methods.
+// A wrapper for Engine which defines additional FFI-specific methods.
 pub trait ExternEngineInterface {
-    fn table_client(&self) -> Arc<dyn EngineInterface>;
+    fn table_client(&self) -> Arc<dyn Engine>;
     fn error_allocator(&self) -> &dyn AllocateError;
 }
 
@@ -350,7 +350,7 @@ impl ArcHandle for ExternEngineInterfaceHandle {
 
 struct ExternEngineInterfaceVtable {
     // Actual table client instance to use
-    client: Arc<dyn EngineInterface>,
+    client: Arc<dyn Engine>,
     allocate_error: AllocateErrorFn,
 }
 
@@ -372,7 +372,7 @@ unsafe impl Send for ExternEngineInterfaceVtable {}
 unsafe impl Sync for ExternEngineInterfaceVtable {}
 
 impl ExternEngineInterface for ExternEngineInterfaceVtable {
-    fn table_client(&self) -> Arc<dyn EngineInterface> {
+    fn table_client(&self) -> Arc<dyn Engine> {
         self.client.clone()
     }
     fn error_allocator(&self) -> &dyn AllocateError {
@@ -389,13 +389,13 @@ unsafe fn unwrap_and_parse_path_as_url(path: KernelStringSlice) -> DeltaResult<U
 }
 
 // A client builder allows setting options before building an actual client
-pub struct EngineInterfaceBuilder {
+pub struct EngineBuilder {
     url: Url,
     allocate_fn: AllocateErrorFn,
     options: HashMap<String, String>,
 }
 
-impl EngineInterfaceBuilder {
+impl EngineBuilder {
     fn set_option(&mut self, key: String, val: String) {
         self.options.insert(key, val);
     }
@@ -409,20 +409,20 @@ impl EngineInterfaceBuilder {
 /// Caller is responsible for passing a valid path pointer.
 #[cfg(feature = "default-client")]
 #[no_mangle]
-pub unsafe extern "C" fn get_engine_interface_builder(
+pub unsafe extern "C" fn get_engine_builder(
     path: KernelStringSlice,
     allocate_error: AllocateErrorFn,
-) -> ExternResult<*mut EngineInterfaceBuilder> {
-    get_engine_interface_builder_impl(path, allocate_error).into_extern_result(allocate_error)
+) -> ExternResult<*mut EngineBuilder> {
+    get_engine_builder_impl(path, allocate_error).into_extern_result(allocate_error)
 }
 
 #[cfg(feature = "default-client")]
-unsafe fn get_engine_interface_builder_impl(
+unsafe fn get_engine_builder_impl(
     path: KernelStringSlice,
     allocate_fn: AllocateErrorFn,
-) -> DeltaResult<*mut EngineInterfaceBuilder> {
+) -> DeltaResult<*mut EngineBuilder> {
     let url = unsafe { unwrap_and_parse_path_as_url(path) }?;
-    let builder = Box::new(EngineInterfaceBuilder {
+    let builder = Box::new(EngineBuilder {
         url,
         allocate_fn,
         options: HashMap::default(),
@@ -438,7 +438,7 @@ unsafe fn get_engine_interface_builder_impl(
 #[cfg(feature = "default-client")]
 #[no_mangle]
 pub unsafe extern "C" fn set_builder_option(
-    builder: &mut EngineInterfaceBuilder,
+    builder: &mut EngineBuilder,
     key: KernelStringSlice,
     value: KernelStringSlice,
 ) {
@@ -456,7 +456,7 @@ pub unsafe extern "C" fn set_builder_option(
 #[cfg(feature = "default-client")]
 #[no_mangle]
 pub unsafe extern "C" fn builder_build(
-    builder: *mut EngineInterfaceBuilder,
+    builder: *mut EngineBuilder,
 ) -> ExternResult<*const ExternEngineInterfaceHandle> {
     let builder_box = unsafe { Box::from_raw(builder) };
     get_default_client_impl(

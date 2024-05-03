@@ -98,7 +98,7 @@ async fn single_commit_two_add_files() -> Result<(), Box<dyn std::error::Error>>
         .await?;
 
     let location = Url::parse("memory:///")?;
-    let engine_interface = DefaultEngineInterface::new(
+    let engine = DefaultEngineInterface::new(
         storage.clone(),
         Path::from("/"),
         Arc::new(TokioBackgroundExecutor::new()),
@@ -107,12 +107,12 @@ async fn single_commit_two_add_files() -> Result<(), Box<dyn std::error::Error>>
     let table = Table::new(location);
     let expected_data = vec![batch.clone(), batch];
 
-    let snapshot = table.snapshot(&engine_interface, None)?;
+    let snapshot = table.snapshot(&engine, None)?;
     let scan = ScanBuilder::new(snapshot).build();
 
     let mut files = 0;
     let stream = scan
-        .execute(&engine_interface)?
+        .execute(&engine)?
         .into_iter()
         .zip(expected_data);
 
@@ -152,7 +152,7 @@ async fn two_commits() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     let location = Url::parse("memory:///").unwrap();
-    let engine_interface = DefaultEngineInterface::new(
+    let engine = DefaultEngineInterface::new(
         storage.clone(),
         Path::from("/"),
         Arc::new(TokioBackgroundExecutor::new()),
@@ -161,12 +161,12 @@ async fn two_commits() -> Result<(), Box<dyn std::error::Error>> {
     let table = Table::new(location);
     let expected_data = vec![batch.clone(), batch];
 
-    let snapshot = table.snapshot(&engine_interface, None).unwrap();
+    let snapshot = table.snapshot(&engine, None).unwrap();
     let scan = ScanBuilder::new(snapshot).build();
 
     let mut files = 0;
     let stream = scan
-        .execute(&engine_interface)?
+        .execute(&engine)?
         .into_iter()
         .zip(expected_data);
 
@@ -210,7 +210,7 @@ async fn remove_action() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     let location = Url::parse("memory:///").unwrap();
-    let engine_interface = DefaultEngineInterface::new(
+    let engine = DefaultEngineInterface::new(
         storage.clone(),
         Path::from("/"),
         Arc::new(TokioBackgroundExecutor::new()),
@@ -219,11 +219,11 @@ async fn remove_action() -> Result<(), Box<dyn std::error::Error>> {
     let table = Table::new(location);
     let expected_data = vec![batch];
 
-    let snapshot = table.snapshot(&engine_interface, None)?;
+    let snapshot = table.snapshot(&engine, None)?;
     let scan = ScanBuilder::new(snapshot).build();
 
     let stream = scan
-        .execute(&engine_interface)?
+        .execute(&engine)?
         .into_iter()
         .zip(expected_data);
 
@@ -288,14 +288,14 @@ async fn stats() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     let location = Url::parse("memory:///").unwrap();
-    let engine_interface = DefaultEngineInterface::new(
+    let engine = DefaultEngineInterface::new(
         storage.clone(),
         Path::from(""),
         Arc::new(TokioBackgroundExecutor::new()),
     );
 
     let table = Table::new(location);
-    let snapshot = table.snapshot(&engine_interface, None)?;
+    let snapshot = table.snapshot(&engine, None)?;
 
     // The first file has id between 1 and 3; the second has id between 5 and 7. For each operator,
     // we validate the boundary values where we expect the set of matched files to change.
@@ -350,7 +350,7 @@ async fn stats() -> Result<(), Box<dyn std::error::Error>> {
         let expected_files = expected_batches.len();
         let mut files_scanned = 0;
         let stream = scan
-            .execute(&engine_interface)?
+            .execute(&engine)?
             .into_iter()
             .zip(expected_batches);
 

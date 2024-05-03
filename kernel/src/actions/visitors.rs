@@ -330,7 +330,7 @@ mod tests {
         actions::{get_log_schema, ADD_NAME, TRANSACTION_NAME},
         client::arrow_data::ArrowEngineData,
         client::sync::{json::SyncJsonHandler, SyncEngineInterface},
-        EngineData, EngineInterface, JsonHandler,
+        Engine, EngineData, JsonHandler,
     };
 
     // TODO(nick): Merge all copies of this into one "test utils" thing

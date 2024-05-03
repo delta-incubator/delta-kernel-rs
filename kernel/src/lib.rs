@@ -10,13 +10,12 @@
 //! A full `rust` example for reading table data using the default client can be found
 //! [here](https://github.com/delta-incubator/delta-kernel-rs/blob/main/kernel/examples/dump-table/src/main.rs)
 //!
-//! # EngineInterface interfaces
+//! # Engine traits
 //!
-//! The [`EngineInterface`] interfaces allow connectors to bring their own implementation of functionality
-//! such as reading parquet files, listing files in a file system, parsing a JSON string etc.
-//!
-//! The [`EngineInterface`] trait exposes methods to get sub-clients which expose the core
-//! functionalities customizable by connectors.
+//! The [`Engine`] trait allow connectors to bring their own implementation of functionality such as
+//! reading parquet files, listing files in a file system, parsing a JSON string etc.  This trait
+//! exposes methods to get sub-clients which expose the core functionalities customizable by
+//! connectors.
 //!
 //! ## Expression handling
 //!
@@ -209,10 +208,12 @@ pub trait ParquetHandler: Send + Sync {
     ) -> DeltaResult<FileDataReadResultIterator>;
 }
 
-/// Interface encapsulating all clients needed by the Delta Kernel in order to read the Delta table.
+/// The `Engine` trait encapsulates all the functionality and engine or connector needs to provide
+/// tothe Delta Kernel in order to read the Delta table.
 ///
-/// Connectors are expected to pass an implementation of this interface when reading a Delta table.
-pub trait EngineInterface: Send + Sync {
+/// Engines/Connectors are expected to pass an implementation of this trait when reading a Delta
+/// table.
+pub trait Engine: Send + Sync {
     /// Get the connector provided [`ExpressionHandler`].
     fn get_expression_handler(&self) -> Arc<dyn ExpressionHandler>;
 

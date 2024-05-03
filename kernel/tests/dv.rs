@@ -12,13 +12,13 @@ use test_log::test;
 fn dv_table() -> Result<(), Box<dyn std::error::Error>> {
     let path = std::fs::canonicalize(PathBuf::from("./tests/data/table-with-dv-small/"))?;
     let url = url::Url::from_directory_path(path).unwrap();
-    let engine_interface = SyncEngineInterface::new();
+    let engine = SyncEngineInterface::new();
 
     let table = Table::new(url);
-    let snapshot = table.snapshot(&engine_interface, None)?;
+    let snapshot = table.snapshot(&engine, None)?;
     let scan = ScanBuilder::new(snapshot).build();
 
-    let stream = scan.execute(&engine_interface)?;
+    let stream = scan.execute(&engine)?;
     let mut total_rows = 0;
     for res in stream {
         let data = res.raw_data?;
@@ -37,13 +37,13 @@ fn dv_table() -> Result<(), Box<dyn std::error::Error>> {
 fn non_dv_table() -> Result<(), Box<dyn std::error::Error>> {
     let path = std::fs::canonicalize(PathBuf::from("./tests/data/table-without-dv-small/"))?;
     let url = url::Url::from_directory_path(path).unwrap();
-    let engine_interface = SyncEngineInterface::new();
+    let engine = SyncEngineInterface::new();
 
     let table = Table::new(url);
-    let snapshot = table.snapshot(&engine_interface, None)?;
+    let snapshot = table.snapshot(&engine, None)?;
     let scan = ScanBuilder::new(snapshot).build();
 
-    let stream = scan.execute(&engine_interface)?;
+    let stream = scan.execute(&engine)?;
     let mut total_rows = 0;
     for res in stream {
         let data = res.raw_data?;

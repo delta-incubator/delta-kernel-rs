@@ -340,7 +340,7 @@ mod tests {
     use crate::{
         actions::{get_log_schema, Metadata, Protocol},
         client::sync::SyncEngineInterface,
-        DeltaResult, EngineData, EngineInterface,
+        DeltaResult, Engine, EngineData,
     };
 
     use super::ArrowEngineData;

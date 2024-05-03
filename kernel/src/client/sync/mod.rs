@@ -1,7 +1,7 @@
-//! A simple, single threaded, EngineInterface that can only read from the local filesystem
+//! A simple, single threaded, [`Engine`] that can only read from the local filesystem
 
 use super::arrow_expression::ArrowExpressionHandler;
-use crate::{EngineInterface, ExpressionHandler, FileSystemClient, JsonHandler, ParquetHandler};
+use crate::{Engine, ExpressionHandler, FileSystemClient, JsonHandler, ParquetHandler};
 
 use std::sync::Arc;
 
@@ -9,8 +9,8 @@ mod fs_client;
 pub(crate) mod json;
 mod parquet;
 
-/// This is a simple implemention of [`EngineInterface`]. It only supports reading data from the
-/// local filesystem, and internally represents data using `Arrow`.
+/// This is a simple implemention of [`Engine`]. It only supports reading data from the local
+/// filesystem, and internally represents data using `Arrow`.
 pub struct SyncEngineInterface {
     fs_client: Arc<fs_client::SyncFilesystemClient>,
     json_handler: Arc<json::SyncJsonHandler>,
@@ -30,7 +30,7 @@ impl SyncEngineInterface {
     }
 }
 
-impl EngineInterface for SyncEngineInterface {
+impl Engine for SyncEngineInterface {
     fn get_expression_handler(&self) -> Arc<dyn ExpressionHandler> {
         self.expression_handler.clone()
     }

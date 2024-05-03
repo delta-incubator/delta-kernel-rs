@@ -23,7 +23,7 @@ use super::handle::{ArcHandle, BoxHandle};
 // that are the engine data
 /// an opaque struct that encapsulates data read by an engine. this handle can be passed back into
 /// some kernel calls to operate on the data, or can be converted into the raw data as read by the
-/// [`EngineInterface`] by calling [`get_raw_engine_data`]
+/// [`Engine`] by calling [`get_raw_engine_data`]
 pub struct EngineDataHandle {
     data: Box<dyn EngineData>,
 }
@@ -59,9 +59,9 @@ pub struct ArrowFFIData {
 #[cfg(feature = "default-client")]
 pub unsafe extern "C" fn get_raw_arrow_data(
     data_handle: *mut EngineDataHandle,
-    engine_interface: *const ExternEngineInterfaceHandle,
+    engine: *const ExternEngineInterfaceHandle,
 ) -> ExternResult<*mut ArrowFFIData> {
-    get_raw_arrow_data_impl(data_handle).into_extern_result(engine_interface)
+    get_raw_arrow_data_impl(data_handle).into_extern_result(engine)
 }
 
 #[cfg(feature = "default-client")]
@@ -93,10 +93,10 @@ impl BoxHandle for Scan {}
 #[no_mangle]
 pub unsafe extern "C" fn scan(
     snapshot: *const SnapshotHandle,
-    engine_interface: *const ExternEngineInterfaceHandle,
+    engine: *const ExternEngineInterfaceHandle,
     predicate: Option<&mut EnginePredicate>,
 ) -> ExternResult<*mut Scan> {
-    scan_impl(snapshot, predicate).into_extern_result(engine_interface)
+    scan_impl(snapshot, predicate).into_extern_result(engine)
 }
 
 unsafe fn scan_impl(
@@ -145,7 +145,7 @@ pub struct KernelScanDataIterator {
     // Also keep a reference to the external client for its error allocator.
     // Parquet and Json handlers don't hold any reference to the tokio reactor, so the iterator
     // terminates early if the last table client goes out of scope.
-    engine_interface: Arc<dyn ExternEngineInterface>,
+    engine: Arc<dyn ExternEngineInterface>,
 }
 
 impl BoxHandle for KernelScanDataIterator {}
@@ -165,23 +165,23 @@ impl Drop for KernelScanDataIterator {
 /// Engine is responsible for passing a valid [`ExternEngineInterfaceHandle`] and [`Scan`]
 #[no_mangle]
 pub unsafe extern "C" fn kernel_scan_data_init(
-    engine_interface: *const ExternEngineInterfaceHandle,
+    engine: *const ExternEngineInterfaceHandle,
     scan: *mut Scan,
 ) -> ExternResult<*mut KernelScanDataIterator> {
-    kernel_scan_data_init_impl(engine_interface, scan).into_extern_result(engine_interface)
+    kernel_scan_data_init_impl(engine, scan).into_extern_result(engine)
 }
 
 unsafe fn kernel_scan_data_init_impl(
-    engine_interface: *const ExternEngineInterfaceHandle,
+    engine: *const ExternEngineInterfaceHandle,
     scan: *mut Scan,
 ) -> DeltaResult<*mut KernelScanDataIterator> {
-    let engine_interface = unsafe { ArcHandle::clone_as_arc(engine_interface) };
+    let engine = unsafe { ArcHandle::clone_as_arc(engine) };
     // we take back and consume the scan here
     let boxed_scan = unsafe { Box::from_raw(scan) };
-    let scan_data = boxed_scan.scan_data(engine_interface.table_client().as_ref())?;
+    let scan_data = boxed_scan.scan_data(engine.table_client().as_ref())?;
     let data = KernelScanDataIterator {
         data: Box::new(scan_data),
-        engine_interface,
+        engine,
     };
     Ok(data.into_handle())
 }
@@ -201,7 +201,7 @@ pub unsafe extern "C" fn kernel_scan_data_next(
     ),
 ) -> ExternResult<bool> {
     kernel_scan_data_next_impl(data, engine_context, engine_visitor)
-        .into_extern_result(data.engine_interface.error_allocator())
+        .into_extern_result(data.engine.error_allocator())
 }
 fn kernel_scan_data_next_impl(
     data: &mut KernelScanDataIterator,
@@ -276,22 +276,22 @@ pub unsafe extern "C" fn get_from_map(
 #[no_mangle]
 pub unsafe extern "C" fn selection_vector_from_dv(
     dv_info: &DvInfo,
-    extern_engine_interface: *const ExternEngineInterfaceHandle,
+    extern_engine: *const ExternEngineInterfaceHandle,
     state: &mut GlobalScanState,
 ) -> ExternResult<*mut KernelBoolSlice> {
-    selection_vector_from_dv_impl(dv_info, extern_engine_interface, state)
-        .into_extern_result(extern_engine_interface)
+    selection_vector_from_dv_impl(dv_info, extern_engine, state)
+        .into_extern_result(extern_engine)
 }
 
 unsafe fn selection_vector_from_dv_impl(
     dv_info: &DvInfo,
-    extern_engine_interface: *const ExternEngineInterfaceHandle,
+    extern_engine: *const ExternEngineInterfaceHandle,
     state: &mut GlobalScanState,
 ) -> DeltaResult<*mut KernelBoolSlice> {
-    let extern_engine_interface = unsafe { ArcHandle::clone_as_arc(extern_engine_interface) };
+    let extern_engine = unsafe { ArcHandle::clone_as_arc(extern_engine) };
     let root_url = Url::parse(&state.table_root)?;
     let vopt =
-        dv_info.get_selection_vector(extern_engine_interface.table_client().as_ref(), &root_url)?;
+        dv_info.get_selection_vector(extern_engine.table_client().as_ref(), &root_url)?;
     match vopt {
         Some(v) => Ok(BoxHandle::into_handle(v.into())),
         None => Ok(std::ptr::null_mut()),
