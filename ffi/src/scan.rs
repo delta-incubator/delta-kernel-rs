@@ -177,7 +177,7 @@ unsafe fn kernel_scan_data_init_impl(
     let engine = unsafe { ArcHandle::clone_as_arc(engine) };
     // we take back and consume the scan here
     let boxed_scan = unsafe { Box::from_raw(scan) };
-    let scan_data = boxed_scan.scan_data(engine.table_client().as_ref())?;
+    let scan_data = boxed_scan.scan_data(engine.engine().as_ref())?;
     let data = KernelScanDataIterator {
         data: Box::new(scan_data),
         engine,
@@ -288,7 +288,7 @@ unsafe fn selection_vector_from_dv_impl(
 ) -> DeltaResult<*mut KernelBoolSlice> {
     let extern_engine = unsafe { ArcHandle::clone_as_arc(extern_engine) };
     let root_url = Url::parse(&state.table_root)?;
-    let vopt = dv_info.get_selection_vector(extern_engine.table_client().as_ref(), &root_url)?;
+    let vopt = dv_info.get_selection_vector(extern_engine.engine().as_ref(), &root_url)?;
     match vopt {
         Some(v) => Ok(BoxHandle::into_handle(v.into())),
         None => Ok(std::ptr::null_mut()),

@@ -336,7 +336,7 @@ impl<T> IntoExternResult<T> for DeltaResult<T> {
 
 // A wrapper for Engine which defines additional FFI-specific methods.
 pub trait ExternEngine {
-    fn table_client(&self) -> Arc<dyn Engine>;
+    fn engine(&self) -> Arc<dyn Engine>;
     fn error_allocator(&self) -> &dyn AllocateError;
 }
 
@@ -372,7 +372,7 @@ unsafe impl Send for ExternEngineVtable {}
 unsafe impl Sync for ExternEngineVtable {}
 
 impl ExternEngine for ExternEngineVtable {
-    fn table_client(&self) -> Arc<dyn Engine> {
+    fn engine(&self) -> Arc<dyn Engine> {
         self.client.clone()
     }
     fn error_allocator(&self) -> &dyn AllocateError {
@@ -497,12 +497,12 @@ unsafe fn get_default_client_impl(
 ) -> DeltaResult<*const ExternEngineHandle> {
     use delta_kernel::client::default::executor::tokio::TokioBackgroundExecutor;
     use delta_kernel::client::default::DefaultEngine;
-    let table_client = DefaultEngine::<TokioBackgroundExecutor>::try_new(
+    let engine = DefaultEngine::<TokioBackgroundExecutor>::try_new(
         &url,
         options,
         Arc::new(TokioBackgroundExecutor::new()),
     );
-    let client = Arc::new(table_client.map_err(Error::generic)?);
+    let client = Arc::new(engine.map_err(Error::generic)?);
     let client: Arc<dyn ExternEngine> = Arc::new(ExternEngineVtable {
         client,
         allocate_error,
@@ -514,8 +514,8 @@ unsafe fn get_default_client_impl(
 ///
 /// Caller is responsible for passing a valid handle.
 #[no_mangle]
-pub unsafe extern "C" fn drop_table_client(table_client: *const ExternEngineHandle) {
-    ArcHandle::drop_handle(table_client);
+pub unsafe extern "C" fn drop_engine(engine: *const ExternEngineHandle) {
+    ArcHandle::drop_handle(engine);
 }
 
 pub struct SnapshotHandle {
@@ -534,18 +534,18 @@ impl SizedArcHandle for SnapshotHandle {
 #[no_mangle]
 pub unsafe extern "C" fn snapshot(
     path: KernelStringSlice,
-    table_client: *const ExternEngineHandle,
+    engine: *const ExternEngineHandle,
 ) -> ExternResult<*const SnapshotHandle> {
-    snapshot_impl(path, table_client).into_extern_result(table_client)
+    snapshot_impl(path, engine).into_extern_result(engine)
 }
 
 unsafe fn snapshot_impl(
     path: KernelStringSlice,
-    extern_table_client: *const ExternEngineHandle,
+    extern_engine: *const ExternEngineHandle,
 ) -> DeltaResult<*const SnapshotHandle> {
     let url = unsafe { unwrap_and_parse_path_as_url(path) }?;
-    let extern_table_client = unsafe { ArcHandle::clone_as_arc(extern_table_client) };
-    let snapshot = Snapshot::try_new(url, extern_table_client.table_client().as_ref(), None)?;
+    let extern_engine = unsafe { ArcHandle::clone_as_arc(extern_engine) };
+    let snapshot = Snapshot::try_new(url, extern_engine.engine().as_ref(), None)?;
     Ok(ArcHandle::into_handle(snapshot))
 }
 

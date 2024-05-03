@@ -106,7 +106,7 @@ impl DataSkippingFilter {
     /// NOTE: None is equivalent to a trivial filter that always returns TRUE (= keeps all files),
     /// but using an Option lets the engine easily avoid the overhead of applying trivial filters.
     pub(crate) fn new(
-        table_client: &dyn Engine,
+        engine: &dyn Engine,
         table_schema: &SchemaRef,
         predicate: &Option<Expr>,
     ) -> Option<Self> {
@@ -154,19 +154,19 @@ impl DataSkippingFilter {
         //
         // 3. The selection evaluator does DISTINCT(col(predicate), 'false') to produce true (= keep) when
         //    the predicate is true/null and false (= skip) when the predicate is false.
-        let select_stats_evaluator = table_client.get_expression_handler().get_evaluator(
+        let select_stats_evaluator = engine.get_expression_handler().get_evaluator(
             stats_schema.clone(),
             STATS_EXPR.clone(),
             DataType::STRING,
         );
 
-        let skipping_evaluator = table_client.get_expression_handler().get_evaluator(
+        let skipping_evaluator = engine.get_expression_handler().get_evaluator(
             stats_schema.clone(),
             Expr::struct_expr([as_data_skipping_predicate(predicate)?]),
             PREDICATE_SCHEMA.clone(),
         );
 
-        let filter_evaluator = table_client.get_expression_handler().get_evaluator(
+        let filter_evaluator = engine.get_expression_handler().get_evaluator(
             stats_schema.clone(),
             FILTER_EXPR.clone(),
             DataType::BOOLEAN,
@@ -177,7 +177,7 @@ impl DataSkippingFilter {
             select_stats_evaluator,
             skipping_evaluator,
             filter_evaluator,
-            json_handler: table_client.get_json_handler(),
+            json_handler: engine.get_json_handler(),
         })
     }
 

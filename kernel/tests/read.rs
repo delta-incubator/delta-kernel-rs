@@ -390,14 +390,14 @@ fn read_table_data(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let path = std::fs::canonicalize(PathBuf::from(path))?;
     let url = url::Url::from_directory_path(path).unwrap();
-    let table_client = DefaultEngine::try_new(
+    let engine = DefaultEngine::try_new(
         &url,
         std::iter::empty::<(&str, &str)>(),
         Arc::new(TokioBackgroundExecutor::new()),
     )?;
 
     let table = Table::new(url);
-    let snapshot = table.snapshot(&table_client, None)?;
+    let snapshot = table.snapshot(&engine, None)?;
 
     let read_schema = select_cols.map(|select_cols| {
         let table_schema = snapshot.schema();
@@ -411,7 +411,7 @@ fn read_table_data(
         .with_schema_opt(read_schema)
         .build();
 
-    let scan_results = scan.execute(&table_client)?;
+    let scan_results = scan.execute(&engine)?;
     let batches: Vec<RecordBatch> = scan_results
         .into_iter()
         .map(|sr| {

@@ -110,13 +110,9 @@ lazy_static! {
 
 impl LogReplayScanner {
     /// Create a new [`LogReplayScanner`] instance
-    fn new(
-        table_client: &dyn Engine,
-        table_schema: &SchemaRef,
-        predicate: &Option<Expression>,
-    ) -> Self {
+    fn new(engine: &dyn Engine, table_schema: &SchemaRef, predicate: &Option<Expression>) -> Self {
         Self {
-            filter: DataSkippingFilter::new(table_client, table_schema, predicate),
+            filter: DataSkippingFilter::new(engine, table_schema, predicate),
             seen: Default::default(),
         }
     }

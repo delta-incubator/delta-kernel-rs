@@ -73,7 +73,7 @@ int main(int argc, char* argv[]) {
   }
 
   drop_snapshot(snapshot_handle);
-  drop_table_client(engine);
+  drop_engine(engine);
 
   return 0;
 }
