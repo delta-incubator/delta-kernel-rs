@@ -149,7 +149,7 @@ impl Snapshot {
         // remove all files above requested version
         if let Some(version) = version {
             commit_files.retain(|meta| {
-                if let Some(v) = LogPath::new(&meta.location).commit_version() {
+                if let Some(v) = LogPath::new(&meta.location).version {
                     v <= version
                 } else {
                     false
@@ -161,7 +161,7 @@ impl Snapshot {
         let version_eff = commit_files
             .first()
             .or(checkpoint_files.first())
-            .and_then(|f| LogPath::new(&f.location).commit_version())
+            .and_then(|f| LogPath::new(&f.location).version)
             .ok_or(Error::MissingVersion)?; // TODO: A more descriptive error
 
         if let Some(v) = version {
@@ -292,7 +292,7 @@ fn list_log_files_with_checkpoint(
     let mut commit_files = files
         .iter()
         .filter_map(|f| {
-            if LogPath::new(&f.location).is_commit_file() {
+            if LogPath::new(&f.location).is_commit {
                 Some(f.clone())
             } else {
                 None
@@ -305,7 +305,7 @@ fn list_log_files_with_checkpoint(
     let checkpoint_files = files
         .iter()
         .filter_map(|f| {
-            if LogPath::new(&f.location).is_checkpoint_file() {
+            if LogPath::new(&f.location).is_checkpoint {
                 Some(f.clone())
             } else {
                 None
@@ -336,8 +336,8 @@ fn list_log_files(
     for maybe_meta in fs_client.list_from(&start_from)? {
         let meta = maybe_meta?;
         let log_path = LogPath::new(&meta.location);
-        if log_path.is_checkpoint_file() {
-            let version = log_path.commit_version().unwrap_or(0) as i64;
+        if log_path.is_checkpoint {
+            let version = log_path.version.unwrap_or(0) as i64;
             match version.cmp(&max_checkpoint_version) {
                 Ordering::Greater => {
                     max_checkpoint_version = version;
@@ -349,7 +349,7 @@ fn list_log_files(
                 }
                 _ => {}
             }
-        } else if log_path.is_commit_file() {
+        } else if log_path.is_commit {
             commit_files.push(meta);
         }
     }
@@ -452,12 +452,12 @@ mod tests {
 
         assert_eq!(snapshot.log_segment.checkpoint_files.len(), 1);
         assert_eq!(
-            LogPath::new(&snapshot.log_segment.checkpoint_files[0].location).commit_version(),
+            LogPath::new(&snapshot.log_segment.checkpoint_files[0].location).version,
             Some(2)
         );
         assert_eq!(snapshot.log_segment.commit_files.len(), 1);
         assert_eq!(
-            LogPath::new(&snapshot.log_segment.commit_files[0].location).commit_version(),
+            LogPath::new(&snapshot.log_segment.commit_files[0].location).version,
             Some(3)
         );
     }
