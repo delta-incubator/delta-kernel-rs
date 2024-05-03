@@ -3,7 +3,7 @@
 
 pub mod deletion_vector;
 pub(crate) mod schemas;
-pub(crate) mod visitors;
+pub mod visitors;
 
 use delta_kernel_derive::Schema;
 use lazy_static::lazy_static;
@@ -37,7 +37,9 @@ lazy_static! {
     );
 }
 
-pub(crate) fn get_log_schema() -> &'static StructType {
+#[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
+#[cfg_attr(not(feature = "developer-visibility"), visibility::make(pub(crate)))]
+fn get_log_schema() -> &'static StructType {
     &LOG_SCHEMA
 }
 
@@ -173,7 +175,9 @@ impl Add {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Schema)]
-pub(crate) struct Remove {
+#[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
+#[cfg_attr(not(feature = "developer-visibility"), visibility::make(pub(crate)))]
+struct Remove {
     /// A relative path to a data file from the root of the table or an absolute path to a file
     /// that should be added to the table. The path is a URI as specified by
     /// [RFC 2396 URI Generic Syntax], which needs to be decoded to get the data file path.
