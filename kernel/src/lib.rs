@@ -5,7 +5,7 @@
 //! reads. This library defines a number of interfaces which must be implemented to provide a
 //! working "delta reader". The are detailed below. There is a provided "default client" that
 //! implenents all these interfaces and can be used to ease integration work. See
-//! [`DefaultEngineInterface`](client/default/index.html) for more information.
+//! [`DefaultEngine`](client/default/index.html) for more information.
 //!
 //! A full `rust` example for reading table data using the default client can be found
 //! [here](https://github.com/delta-incubator/delta-kernel-rs/blob/main/kernel/examples/dump-table/src/main.rs)

@@ -74,10 +74,7 @@ static SKIPPED_TESTS: &[&str; 3] = &[
     "multi_partitioned_2",
 ];
 
-pub async fn assert_scan_data(
-    engine: Arc<dyn Engine>,
-    test_case: &TestCaseInfo,
-) -> TestResult<()> {
+pub async fn assert_scan_data(engine: Arc<dyn Engine>, test_case: &TestCaseInfo) -> TestResult<()> {
     let root_dir = test_case.root_dir();
     for skipped in SKIPPED_TESTS {
         if root_dir.ends_with(skipped) {

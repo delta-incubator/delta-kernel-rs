@@ -54,7 +54,7 @@ pub struct ArrowFFIData {
 /// the schema.
 ///
 /// # Safety
-/// data_handle must be a valid EngineDataHandle as read by the [`DefaultEngineInterface`] obtained
+/// data_handle must be a valid EngineDataHandle as read by the [`DefaultEngine`] obtained
 /// from `get_default_client`.
 #[cfg(feature = "default-client")]
 pub unsafe extern "C" fn get_raw_arrow_data(
@@ -279,8 +279,7 @@ pub unsafe extern "C" fn selection_vector_from_dv(
     extern_engine: *const ExternEngineInterfaceHandle,
     state: &mut GlobalScanState,
 ) -> ExternResult<*mut KernelBoolSlice> {
-    selection_vector_from_dv_impl(dv_info, extern_engine, state)
-        .into_extern_result(extern_engine)
+    selection_vector_from_dv_impl(dv_info, extern_engine, state).into_extern_result(extern_engine)
 }
 
 unsafe fn selection_vector_from_dv_impl(
@@ -290,8 +289,7 @@ unsafe fn selection_vector_from_dv_impl(
 ) -> DeltaResult<*mut KernelBoolSlice> {
     let extern_engine = unsafe { ArcHandle::clone_as_arc(extern_engine) };
     let root_url = Url::parse(&state.table_root)?;
-    let vopt =
-        dv_info.get_selection_vector(extern_engine.table_client().as_ref(), &root_url)?;
+    let vopt = dv_info.get_selection_vector(extern_engine.table_client().as_ref(), &root_url)?;
     match vopt {
         Some(v) => Ok(BoxHandle::into_handle(v.into())),
         None => Ok(std::ptr::null_mut()),

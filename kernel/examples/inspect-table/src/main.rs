@@ -1,5 +1,5 @@
 use delta_kernel::client::executor::tokio::TokioBackgroundExecutor;
-use delta_kernel::client::DefaultEngineInterface;
+use delta_kernel::client::DefaultEngine;
 use delta_kernel::scan::ScanBuilder;
 use delta_kernel::schema::StructType;
 use delta_kernel::{DeltaResult, Table};
@@ -54,7 +54,7 @@ fn main() {
         println!("Invalid url");
         return;
     };
-    let engine = DefaultEngineInterface::try_new(
+    let engine = DefaultEngine::try_new(
         &url,
         HashMap::<String, String>::new(),
         Arc::new(TokioBackgroundExecutor::new()),

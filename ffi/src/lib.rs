@@ -496,8 +496,8 @@ unsafe fn get_default_client_impl(
     allocate_error: AllocateErrorFn,
 ) -> DeltaResult<*const ExternEngineInterfaceHandle> {
     use delta_kernel::client::default::executor::tokio::TokioBackgroundExecutor;
-    use delta_kernel::client::default::DefaultEngineInterface;
-    let table_client = DefaultEngineInterface::<TokioBackgroundExecutor>::try_new(
+    use delta_kernel::client::default::DefaultEngine;
+    let table_client = DefaultEngine::<TokioBackgroundExecutor>::try_new(
         &url,
         options,
         Arc::new(TokioBackgroundExecutor::new()),

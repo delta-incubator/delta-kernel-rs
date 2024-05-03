@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use acceptance::read_dat_case;
 use delta_kernel::client::default::executor::tokio::TokioBackgroundExecutor;
-use delta_kernel::client::default::DefaultEngineInterface;
+use delta_kernel::client::default::DefaultEngine;
 
 fn reader_test(path: &Path) -> datatest_stable::Result<()> {
     let root_dir = format!(
@@ -19,7 +19,7 @@ fn reader_test(path: &Path) -> datatest_stable::Result<()> {
             let case = read_dat_case(root_dir).unwrap();
             let table_root = case.table_root().unwrap();
             let engine = Arc::new(
-                DefaultEngineInterface::try_new(
+                DefaultEngine::try_new(
                     &table_root,
                     std::iter::empty::<(&str, &str)>(),
                     Arc::new(TokioBackgroundExecutor::new()),
@@ -27,9 +27,7 @@ fn reader_test(path: &Path) -> datatest_stable::Result<()> {
                 .unwrap(),
             );
 
-            case.assert_metadata(engine.clone())
-                .await
-                .unwrap();
+            case.assert_metadata(engine.clone()).await.unwrap();
             acceptance::data::assert_scan_data(engine.clone(), &case)
                 .await
                 .unwrap();

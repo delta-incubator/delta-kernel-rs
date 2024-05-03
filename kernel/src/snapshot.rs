@@ -65,10 +65,7 @@ impl LogSegment {
         Ok(batches)
     }
 
-    fn read_metadata(
-        &self,
-        engine: &dyn Engine,
-    ) -> DeltaResult<Option<(Metadata, Protocol)>> {
+    fn read_metadata(&self, engine: &dyn Engine) -> DeltaResult<Option<(Metadata, Protocol)>> {
         let schema = get_log_schema().project(&[PROTOCOL_NAME, METADATA_NAME])?;
         // read the same protocol and metadata schema for both commits and checkpoints
         // TODO add metadata.table_id is not null and protocol.something_required is not null

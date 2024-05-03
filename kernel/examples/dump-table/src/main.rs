@@ -7,7 +7,7 @@ use arrow::record_batch::RecordBatch;
 use arrow::util::pretty::print_batches;
 use delta_kernel::client::arrow_data::ArrowEngineData;
 use delta_kernel::client::default::executor::tokio::TokioBackgroundExecutor;
-use delta_kernel::client::default::DefaultEngineInterface;
+use delta_kernel::client::default::DefaultEngine;
 use delta_kernel::client::sync::SyncEngineInterface;
 use delta_kernel::scan::ScanBuilder;
 use delta_kernel::schema::Schema;
@@ -58,7 +58,7 @@ fn try_main() -> DeltaResult<()> {
 
     println!("Reading {url}");
     let engine: Box<dyn Engine> = match cli.engine {
-        EngineType::Default => Box::new(DefaultEngineInterface::try_new(
+        EngineType::Default => Box::new(DefaultEngine::try_new(
             &url,
             HashMap::<String, String>::new(),
             Arc::new(TokioBackgroundExecutor::new()),

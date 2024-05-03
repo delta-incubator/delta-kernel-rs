@@ -7,7 +7,7 @@ use arrow::record_batch::RecordBatch;
 use arrow_select::concat::concat_batches;
 use delta_kernel::client::arrow_data::ArrowEngineData;
 use delta_kernel::client::default::executor::tokio::TokioBackgroundExecutor;
-use delta_kernel::client::default::DefaultEngineInterface;
+use delta_kernel::client::default::DefaultEngine;
 use delta_kernel::expressions::{BinaryOperator, Expression};
 use delta_kernel::scan::ScanBuilder;
 use delta_kernel::schema::Schema;
@@ -98,7 +98,7 @@ async fn single_commit_two_add_files() -> Result<(), Box<dyn std::error::Error>>
         .await?;
 
     let location = Url::parse("memory:///")?;
-    let engine = DefaultEngineInterface::new(
+    let engine = DefaultEngine::new(
         storage.clone(),
         Path::from("/"),
         Arc::new(TokioBackgroundExecutor::new()),
@@ -111,10 +111,7 @@ async fn single_commit_two_add_files() -> Result<(), Box<dyn std::error::Error>>
     let scan = ScanBuilder::new(snapshot).build();
 
     let mut files = 0;
-    let stream = scan
-        .execute(&engine)?
-        .into_iter()
-        .zip(expected_data);
+    let stream = scan.execute(&engine)?.into_iter().zip(expected_data);
 
     for (data, expected) in stream {
         let raw_data = data.raw_data?;
@@ -152,7 +149,7 @@ async fn two_commits() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     let location = Url::parse("memory:///").unwrap();
-    let engine = DefaultEngineInterface::new(
+    let engine = DefaultEngine::new(
         storage.clone(),
         Path::from("/"),
         Arc::new(TokioBackgroundExecutor::new()),
@@ -165,10 +162,7 @@ async fn two_commits() -> Result<(), Box<dyn std::error::Error>> {
     let scan = ScanBuilder::new(snapshot).build();
 
     let mut files = 0;
-    let stream = scan
-        .execute(&engine)?
-        .into_iter()
-        .zip(expected_data);
+    let stream = scan.execute(&engine)?.into_iter().zip(expected_data);
 
     for (data, expected) in stream {
         let raw_data = data.raw_data?;
@@ -210,7 +204,7 @@ async fn remove_action() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     let location = Url::parse("memory:///").unwrap();
-    let engine = DefaultEngineInterface::new(
+    let engine = DefaultEngine::new(
         storage.clone(),
         Path::from("/"),
         Arc::new(TokioBackgroundExecutor::new()),
@@ -222,10 +216,7 @@ async fn remove_action() -> Result<(), Box<dyn std::error::Error>> {
     let snapshot = table.snapshot(&engine, None)?;
     let scan = ScanBuilder::new(snapshot).build();
 
-    let stream = scan
-        .execute(&engine)?
-        .into_iter()
-        .zip(expected_data);
+    let stream = scan.execute(&engine)?.into_iter().zip(expected_data);
 
     let mut files = 0;
     for (data, expected) in stream {
@@ -288,7 +279,7 @@ async fn stats() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     let location = Url::parse("memory:///").unwrap();
-    let engine = DefaultEngineInterface::new(
+    let engine = DefaultEngine::new(
         storage.clone(),
         Path::from(""),
         Arc::new(TokioBackgroundExecutor::new()),
@@ -349,10 +340,7 @@ async fn stats() -> Result<(), Box<dyn std::error::Error>> {
 
         let expected_files = expected_batches.len();
         let mut files_scanned = 0;
-        let stream = scan
-            .execute(&engine)?
-            .into_iter()
-            .zip(expected_batches);
+        let stream = scan.execute(&engine)?.into_iter().zip(expected_batches);
 
         for (batch, expected) in stream {
             let raw_data = batch.raw_data?;
@@ -402,7 +390,7 @@ fn read_table_data(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let path = std::fs::canonicalize(PathBuf::from(path))?;
     let url = url::Url::from_directory_path(path).unwrap();
-    let table_client = DefaultEngineInterface::try_new(
+    let table_client = DefaultEngine::try_new(
         &url,
         std::iter::empty::<(&str, &str)>(),
         Arc::new(TokioBackgroundExecutor::new()),

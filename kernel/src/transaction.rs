@@ -78,12 +78,8 @@ mod tests {
         let txn_scan = TransactionScanner::new(snapshot.clone());
 
         (
-            txn_scan
-                .application_transactions(&engine)
-                .unwrap(),
-            txn_scan
-                .application_transaction(&engine, app_id)
-                .unwrap(),
+            txn_scan.application_transactions(&engine).unwrap(),
+            txn_scan.application_transaction(&engine, app_id).unwrap(),
         )
     }
 

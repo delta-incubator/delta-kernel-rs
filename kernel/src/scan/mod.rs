@@ -561,11 +561,7 @@ mod tests {
         let table = Table::new(url);
         let snapshot = table.snapshot(&engine, None).unwrap();
         let scan = ScanBuilder::new(snapshot).build();
-        let files: Vec<Add> = scan
-            .files(&engine)
-            .unwrap()
-            .try_collect()
-            .unwrap();
+        let files: Vec<Add> = scan.files(&engine).unwrap().try_collect().unwrap();
 
         assert_eq!(files.len(), 1);
         assert_eq!(

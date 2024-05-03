@@ -9,7 +9,7 @@ use arrow::record_batch::RecordBatch;
 use arrow::util::pretty::print_batches;
 use delta_kernel::client::arrow_data::ArrowEngineData;
 use delta_kernel::client::default::executor::tokio::TokioBackgroundExecutor;
-use delta_kernel::client::default::DefaultEngineInterface;
+use delta_kernel::client::default::DefaultEngine;
 use delta_kernel::client::sync::SyncEngineInterface;
 use delta_kernel::scan::state::{DvInfo, GlobalScanState};
 use delta_kernel::scan::{transform_to_logical, ScanBuilder};
@@ -104,7 +104,7 @@ fn try_main() -> DeltaResult<()> {
 
     // create the requested engine
     let engine: Arc<dyn Engine> = match cli.engine {
-        EngineType::Default => Arc::new(DefaultEngineInterface::try_new(
+        EngineType::Default => Arc::new(DefaultEngine::try_new(
             &url,
             HashMap::<String, String>::new(),
             Arc::new(TokioBackgroundExecutor::new()),
