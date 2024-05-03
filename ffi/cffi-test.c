@@ -4,7 +4,7 @@
 
 #include "delta_kernel_ffi.h"
 
-void visit_callback(void* engine_context, const struct KernelStringSlice path, long size, struct CDvInfo *dv_info, struct CStringMap *partition_values) {
+void visit_callback(void* engine_context, const struct KernelStringSlice path, long size, const DvInfo *dv_info, struct CStringMap *partition_values) {
   printf("file: %.*s\n", (int)path.len, path.ptr);
 }
 
@@ -25,14 +25,14 @@ int main(int argc, char* argv[]) {
 
   KernelStringSlice table_path_slice = {table_path, strlen(table_path)};
 
-  ExternResultExternEngineInterfaceHandle engine_res =
+  ExternResultExternEngineHandle engine_res =
     get_default_client(table_path_slice, NULL);
-  if (engine_res.tag != OkExternEngineInterfaceHandle) {
+  if (engine_res.tag != OkExternEngineHandle) {
     printf("Failed to get client\n");
     return -1;
   }
 
-  const ExternEngineInterfaceHandle *engine = engine_res.ok;
+  const ExternEngineHandle *engine = engine_res.ok;
 
   ExternResultSnapshotHandle snapshot_handle_res = snapshot(table_path_slice, engine);
   if (snapshot_handle_res.tag != OkSnapshotHandle) {

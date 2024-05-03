@@ -297,7 +297,7 @@ impl AllocateError for AllocateErrorFn {
         self(etype, msg)
     }
 }
-impl AllocateError for *const ExternEngineInterfaceHandle {
+impl AllocateError for *const ExternEngineHandle {
     /// # Safety
     ///
     /// In addition to the usual requirements, the table client handle must be valid.
@@ -335,20 +335,20 @@ impl<T> IntoExternResult<T> for DeltaResult<T> {
 }
 
 // A wrapper for Engine which defines additional FFI-specific methods.
-pub trait ExternEngineInterface {
+pub trait ExternEngine {
     fn table_client(&self) -> Arc<dyn Engine>;
     fn error_allocator(&self) -> &dyn AllocateError;
 }
 
-pub struct ExternEngineInterfaceHandle {
+pub struct ExternEngineHandle {
     _unconstructable: Unconstructable,
 }
 
-impl ArcHandle for ExternEngineInterfaceHandle {
-    type Target = dyn ExternEngineInterface;
+impl ArcHandle for ExternEngineHandle {
+    type Target = dyn ExternEngine;
 }
 
-struct ExternEngineInterfaceVtable {
+struct ExternEngineVtable {
     // Actual table client instance to use
     client: Arc<dyn Engine>,
     allocate_error: AllocateErrorFn,
@@ -358,7 +358,7 @@ struct ExternEngineInterfaceVtable {
 ///
 /// Kernel doesn't use any threading or concurrency. If engine chooses to do so, engine is
 /// responsible for handling  any races that could result.
-unsafe impl Send for ExternEngineInterfaceVtable {}
+unsafe impl Send for ExternEngineVtable {}
 
 /// # Safety
 ///
@@ -369,9 +369,9 @@ unsafe impl Send for ExternEngineInterfaceVtable {}
 /// Basically, by failing to implement these traits, we forbid the engine from being able to declare
 /// its thread-safety (because rust assumes it is not threadsafe). By implementing them, we leave it
 /// up to the engine to enforce thread safety if engine chooses to use threads at all.
-unsafe impl Sync for ExternEngineInterfaceVtable {}
+unsafe impl Sync for ExternEngineVtable {}
 
-impl ExternEngineInterface for ExternEngineInterfaceVtable {
+impl ExternEngine for ExternEngineVtable {
     fn table_client(&self) -> Arc<dyn Engine> {
         self.client.clone()
     }
@@ -447,7 +447,7 @@ pub unsafe extern "C" fn set_builder_option(
     builder.set_option(key, value);
 }
 
-/// Consume the builder and return an engine interface. After calling, the passed pointer is _no
+/// Consume the builder and return an engine. After calling, the passed pointer is _no
 /// longer valid_.
 ///
 /// # Safety
@@ -457,7 +457,7 @@ pub unsafe extern "C" fn set_builder_option(
 #[no_mangle]
 pub unsafe extern "C" fn builder_build(
     builder: *mut EngineBuilder,
-) -> ExternResult<*const ExternEngineInterfaceHandle> {
+) -> ExternResult<*const ExternEngineHandle> {
     let builder_box = unsafe { Box::from_raw(builder) };
     get_default_client_impl(
         builder_box.url,
@@ -475,7 +475,7 @@ pub unsafe extern "C" fn builder_build(
 pub unsafe extern "C" fn get_default_client(
     path: KernelStringSlice,
     allocate_error: AllocateErrorFn,
-) -> ExternResult<*const ExternEngineInterfaceHandle> {
+) -> ExternResult<*const ExternEngineHandle> {
     get_default_default_client_impl(path, allocate_error).into_extern_result(allocate_error)
 }
 
@@ -484,7 +484,7 @@ pub unsafe extern "C" fn get_default_client(
 unsafe fn get_default_default_client_impl(
     path: KernelStringSlice,
     allocate_error: AllocateErrorFn,
-) -> DeltaResult<*const ExternEngineInterfaceHandle> {
+) -> DeltaResult<*const ExternEngineHandle> {
     let url = unsafe { unwrap_and_parse_path_as_url(path) }?;
     get_default_client_impl(url, Default::default(), allocate_error)
 }
@@ -494,7 +494,7 @@ unsafe fn get_default_client_impl(
     url: Url,
     options: HashMap<String, String>,
     allocate_error: AllocateErrorFn,
-) -> DeltaResult<*const ExternEngineInterfaceHandle> {
+) -> DeltaResult<*const ExternEngineHandle> {
     use delta_kernel::client::default::executor::tokio::TokioBackgroundExecutor;
     use delta_kernel::client::default::DefaultEngine;
     let table_client = DefaultEngine::<TokioBackgroundExecutor>::try_new(
@@ -503,7 +503,7 @@ unsafe fn get_default_client_impl(
         Arc::new(TokioBackgroundExecutor::new()),
     );
     let client = Arc::new(table_client.map_err(Error::generic)?);
-    let client: Arc<dyn ExternEngineInterface> = Arc::new(ExternEngineInterfaceVtable {
+    let client: Arc<dyn ExternEngine> = Arc::new(ExternEngineVtable {
         client,
         allocate_error,
     });
@@ -514,7 +514,7 @@ unsafe fn get_default_client_impl(
 ///
 /// Caller is responsible for passing a valid handle.
 #[no_mangle]
-pub unsafe extern "C" fn drop_table_client(table_client: *const ExternEngineInterfaceHandle) {
+pub unsafe extern "C" fn drop_table_client(table_client: *const ExternEngineHandle) {
     ArcHandle::drop_handle(table_client);
 }
 
@@ -534,14 +534,14 @@ impl SizedArcHandle for SnapshotHandle {
 #[no_mangle]
 pub unsafe extern "C" fn snapshot(
     path: KernelStringSlice,
-    table_client: *const ExternEngineInterfaceHandle,
+    table_client: *const ExternEngineHandle,
 ) -> ExternResult<*const SnapshotHandle> {
     snapshot_impl(path, table_client).into_extern_result(table_client)
 }
 
 unsafe fn snapshot_impl(
     path: KernelStringSlice,
-    extern_table_client: *const ExternEngineInterfaceHandle,
+    extern_table_client: *const ExternEngineHandle,
 ) -> DeltaResult<*const SnapshotHandle> {
     let url = unsafe { unwrap_and_parse_path_as_url(path) }?;
     let extern_table_client = unsafe { ArcHandle::clone_as_arc(extern_table_client) };

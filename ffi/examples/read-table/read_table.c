@@ -8,7 +8,7 @@
 
 struct EngineContext {
   GlobalScanState *global_state;
-  const ExternEngineInterfaceHandle *engine;
+  const ExternEngineHandle *engine;
 };
 
 // This is how we represent our errors. The kernel will ask us to contruct this struct whenever it
@@ -50,10 +50,10 @@ void print_error(const char* indent, Error* err) {
   printf("%sMsg: %s\n", indent, err->msg);
 }
 
-void set_builder_opt(EngineBuilder *interface_builder, char* key, char* val) {
+void set_builder_opt(EngineBuilder *engine_builder, char* key, char* val) {
   KernelStringSlice key_slice = {key, strlen(key)};
   KernelStringSlice val_slice = {val, strlen(val)};
-  set_builder_option(interface_builder, key_slice, val_slice);
+  set_builder_option(engine_builder, key_slice, val_slice);
 }
 
 void visit_callback(void* engine_context, const KernelStringSlice path, long size, const DvInfo *dv_info, CStringMap *partition_values) {
@@ -103,36 +103,36 @@ int main(int argc, char* argv[]) {
 
   KernelStringSlice table_path_slice = {table_path, strlen(table_path)};
 
-  ExternResultEngineBuilder interface_builder_res =
+  ExternResultEngineBuilder engine_builder_res =
     get_engine_builder(table_path_slice, allocate_error);
-  if (interface_builder_res.tag != OkEngineBuilder) {
-    printf("Could not get engine interface builder.\n");
-    print_error("  ", (Error*)interface_builder_res.err);
-    free_error((Error*)interface_builder_res.err);
+  if (engine_builder_res.tag != OkEngineBuilder) {
+    printf("Could not get engine builder.\n");
+    print_error("  ", (Error*)engine_builder_res.err);
+    free_error((Error*)engine_builder_res.err);
     return -1;
   }
 
-  // an example of using a builder to set options when building a engine interface
-  EngineBuilder *interface_builder = interface_builder_res.ok;
-  set_builder_opt(interface_builder, "aws_region", "us-west-2");
+  // an example of using a builder to set options when building an engine
+  EngineBuilder *engine_builder = engine_builder_res.ok;
+  set_builder_opt(engine_builder, "aws_region", "us-west-2");
   // potentially set credentials here
-  //set_builder_opt(interface_builder, "aws_access_key_id" , "[redacted]");
-  //set_builder_opt(interface_builder, "aws_secret_access_key", "[redacted]");
-  ExternResultExternEngineInterfaceHandle engine_res =
-    builder_build(interface_builder);
+  //set_builder_opt(engine_builder, "aws_access_key_id" , "[redacted]");
+  //set_builder_opt(engine_builder, "aws_secret_access_key", "[redacted]");
+  ExternResultExternEngineHandle engine_res =
+    builder_build(engine_builder);
 
   // alternately if we don't care to set any options on the builder:
-  // ExternResultExternEngineInterfaceHandle engine_res =
+  // ExternResultExternEngineHandle engine_res =
   //   get_default_client(table_path_slice, NULL);
 
-  if (engine_res.tag != OkExternEngineInterfaceHandle) {
+  if (engine_res.tag != OkExternEngineHandle) {
     printf("Failed to get client\n");
-    print_error("  ", (Error*)interface_builder_res.err);
-    free_error((Error*)interface_builder_res.err);
+    print_error("  ", (Error*)engine_builder_res.err);
+    free_error((Error*)engine_builder_res.err);
     return -1;
   }
 
-  const ExternEngineInterfaceHandle *engine = engine_res.ok;
+  const ExternEngineHandle *engine = engine_res.ok;
 
   ExternResultSnapshotHandle snapshot_handle_res = snapshot(table_path_slice, engine);
   if (snapshot_handle_res.tag != OkSnapshotHandle) {

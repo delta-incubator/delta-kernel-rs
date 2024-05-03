@@ -11,10 +11,9 @@ use tracing::debug;
 use url::Url;
 
 use crate::{
-    unwrap_kernel_expression, AllocateStringFn, EnginePredicate, ExternEngineInterface,
-    ExternEngineInterfaceHandle, ExternResult, FromBoolSlice, IntoExternResult, KernelBoolSlice,
-    KernelExpressionVisitorState, KernelStringSlice, NullableCvoid, SnapshotHandle,
-    TryFromStringSlice,
+    unwrap_kernel_expression, AllocateStringFn, EnginePredicate, ExternEngine, ExternEngineHandle,
+    ExternResult, FromBoolSlice, IntoExternResult, KernelBoolSlice, KernelExpressionVisitorState,
+    KernelStringSlice, NullableCvoid, SnapshotHandle, TryFromStringSlice,
 };
 
 use super::handle::{ArcHandle, BoxHandle};
@@ -59,7 +58,7 @@ pub struct ArrowFFIData {
 #[cfg(feature = "default-client")]
 pub unsafe extern "C" fn get_raw_arrow_data(
     data_handle: *mut EngineDataHandle,
-    engine: *const ExternEngineInterfaceHandle,
+    engine: *const ExternEngineHandle,
 ) -> ExternResult<*mut ArrowFFIData> {
     get_raw_arrow_data_impl(data_handle).into_extern_result(engine)
 }
@@ -89,11 +88,11 @@ impl BoxHandle for Scan {}
 /// Get a [`Scan`] over the table specified by the passed snapshot.
 /// # Safety
 ///
-/// Caller is responsible for passing a valid snapshot pointer, and engine interface pointer
+/// Caller is responsible for passing a valid snapshot pointer, and engine pointer
 #[no_mangle]
 pub unsafe extern "C" fn scan(
     snapshot: *const SnapshotHandle,
-    engine: *const ExternEngineInterfaceHandle,
+    engine: *const ExternEngineHandle,
     predicate: Option<&mut EnginePredicate>,
 ) -> ExternResult<*mut Scan> {
     scan_impl(snapshot, predicate).into_extern_result(engine)
@@ -145,7 +144,7 @@ pub struct KernelScanDataIterator {
     // Also keep a reference to the external client for its error allocator.
     // Parquet and Json handlers don't hold any reference to the tokio reactor, so the iterator
     // terminates early if the last table client goes out of scope.
-    engine: Arc<dyn ExternEngineInterface>,
+    engine: Arc<dyn ExternEngine>,
 }
 
 impl BoxHandle for KernelScanDataIterator {}
@@ -162,17 +161,17 @@ impl Drop for KernelScanDataIterator {
 ///
 /// # Safety
 ///
-/// Engine is responsible for passing a valid [`ExternEngineInterfaceHandle`] and [`Scan`]
+/// Engine is responsible for passing a valid [`ExternEngineHandle`] and [`Scan`]
 #[no_mangle]
 pub unsafe extern "C" fn kernel_scan_data_init(
-    engine: *const ExternEngineInterfaceHandle,
+    engine: *const ExternEngineHandle,
     scan: *mut Scan,
 ) -> ExternResult<*mut KernelScanDataIterator> {
     kernel_scan_data_init_impl(engine, scan).into_extern_result(engine)
 }
 
 unsafe fn kernel_scan_data_init_impl(
-    engine: *const ExternEngineInterfaceHandle,
+    engine: *const ExternEngineHandle,
     scan: *mut Scan,
 ) -> DeltaResult<*mut KernelScanDataIterator> {
     let engine = unsafe { ArcHandle::clone_as_arc(engine) };
@@ -276,7 +275,7 @@ pub unsafe extern "C" fn get_from_map(
 #[no_mangle]
 pub unsafe extern "C" fn selection_vector_from_dv(
     dv_info: &DvInfo,
-    extern_engine: *const ExternEngineInterfaceHandle,
+    extern_engine: *const ExternEngineHandle,
     state: &mut GlobalScanState,
 ) -> ExternResult<*mut KernelBoolSlice> {
     selection_vector_from_dv_impl(dv_info, extern_engine, state).into_extern_result(extern_engine)
@@ -284,7 +283,7 @@ pub unsafe extern "C" fn selection_vector_from_dv(
 
 unsafe fn selection_vector_from_dv_impl(
     dv_info: &DvInfo,
-    extern_engine: *const ExternEngineInterfaceHandle,
+    extern_engine: *const ExternEngineHandle,
     state: &mut GlobalScanState,
 ) -> DeltaResult<*mut KernelBoolSlice> {
     let extern_engine = unsafe { ArcHandle::clone_as_arc(extern_engine) };

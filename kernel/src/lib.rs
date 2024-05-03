@@ -2,9 +2,9 @@
 //!
 //! Delta-kernel-rs is an experimental [Delta](https://github.com/delta-io/delta/) implementation
 //! focused on interoperability with a wide range of query engines. It currently only supports
-//! reads. This library defines a number of interfaces which must be implemented to provide a
+//! reads. This library defines a number of traits which must be implemented to provide a
 //! working "delta reader". The are detailed below. There is a provided "default client" that
-//! implenents all these interfaces and can be used to ease integration work. See
+//! implenents all these traits and can be used to ease integration work. See
 //! [`DefaultEngine`](client/default/index.html) for more information.
 //!
 //! A full `rust` example for reading table data using the default client can be found
@@ -101,10 +101,10 @@ pub struct FileMeta {
     pub size: usize,
 }
 
-/// Interface for implementing an Expression evaluator.
+/// Trait for implementing an Expression evaluator.
 ///
 /// It contains one Expression which can be evaluated on multiple ColumnarBatches.
-/// Connectors can implement this interface to optimize the evaluation using the
+/// Connectors can implement this trait to optimize the evaluation using the
 /// connector specific capabilities.
 pub trait ExpressionEvaluator: Send + Sync {
     /// Evaluate the expression on a given EngineData.
@@ -142,7 +142,7 @@ pub trait ExpressionHandler {
 ///
 /// Delta Kernel uses this client whenever it needs to access the underlying
 /// file system where the Delta table is present. Connector implementation of
-/// this interface can hide filesystem specific details from Delta Kernel.
+/// this trait can hide filesystem specific details from Delta Kernel.
 pub trait FileSystemClient: Send + Sync {
     /// List the paths in the same directory that are lexicographically greater or equal to
     /// (UTF-8 sorting) the given `path`. The result should also be sorted by the file name.
@@ -159,7 +159,7 @@ pub trait FileSystemClient: Send + Sync {
 /// Provides JSON handling functionality to Delta Kernel.
 ///
 /// Delta Kernel can use this client to parse JSON strings into Row or read content from JSON files.
-/// Connectors can leverage this interface to provide their best implementation of the JSON parsing
+/// Connectors can leverage this trait to provide their best implementation of the JSON parsing
 /// capability to Delta Kernel.
 pub trait JsonHandler: Send + Sync {
     /// Parse the given json strings and return the fields requested by output schema as columns in [`EngineData`].
@@ -188,7 +188,7 @@ pub trait JsonHandler: Send + Sync {
 
 /// Provides Parquet file related functionalities to Delta Kernel.
 ///
-/// Connectors can leverage this interface to provide their own custom
+/// Connectors can leverage this trait to provide their own custom
 /// implementation of Parquet data file functionalities to Delta Kernel.
 pub trait ParquetHandler: Send + Sync {
     /// Read and parse the Parquet file at given locations and return the data as EngineData with

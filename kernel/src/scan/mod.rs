@@ -512,7 +512,7 @@ pub(crate) mod test_utils {
             partition_values: HashMap<String, String>,
         ),
     ) {
-        let interface = SyncEngine::new();
+        let engine = SyncEngine::new();
         // doesn't matter here
         let table_schema = Arc::new(StructType::new(vec![StructField::new(
             "foo",
@@ -520,7 +520,7 @@ pub(crate) mod test_utils {
             false,
         )]));
         let iter = scan_action_iter(
-            &interface,
+            &engine,
             batch.into_iter().map(|batch| Ok((batch as _, true))),
             &table_schema,
             &None,
