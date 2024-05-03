@@ -209,7 +209,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::{client::sync::SyncEngine, Engine};
+    use crate::{engine::sync::SyncEngine, Engine};
 
     use super::DeletionVectorDescriptor;
 

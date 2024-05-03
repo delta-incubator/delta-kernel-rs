@@ -2,7 +2,7 @@
 //! Must run at the root of the crate
 use std::path::PathBuf;
 
-use delta_kernel::client::sync::SyncEngine;
+use delta_kernel::engine::sync::SyncEngine;
 use delta_kernel::scan::ScanBuilder;
 use delta_kernel::Table;
 

@@ -65,7 +65,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::client::sync::SyncEngine;
+    use crate::engine::sync::SyncEngine;
     use crate::Table;
 
     fn get_latest_transactions(path: &str, app_id: &str) -> (TransactionMap, Option<Transaction>) {

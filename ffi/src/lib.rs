@@ -495,8 +495,8 @@ unsafe fn get_default_client_impl(
     options: HashMap<String, String>,
     allocate_error: AllocateErrorFn,
 ) -> DeltaResult<*const ExternEngineHandle> {
-    use delta_kernel::client::default::executor::tokio::TokioBackgroundExecutor;
-    use delta_kernel::client::default::DefaultEngine;
+    use delta_kernel::engine::default::executor::tokio::TokioBackgroundExecutor;
+    use delta_kernel::engine::default::DefaultEngine;
     let engine = DefaultEngine::<TokioBackgroundExecutor>::try_new(
         &url,
         options,

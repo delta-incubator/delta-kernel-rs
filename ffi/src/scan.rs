@@ -71,7 +71,7 @@ unsafe fn get_raw_arrow_data_impl(
     let data = boxed_data.data;
     let record_batch: arrow_array::RecordBatch = data
         .into_any()
-        .downcast::<delta_kernel::client::arrow_data::ArrowEngineData>()
+        .downcast::<delta_kernel::engine::arrow_data::ArrowEngineData>()
         .map_err(|_| delta_kernel::Error::EngineDataType("ArrowEngineData".to_string()))?
         .into();
     let sa: arrow_array::StructArray = record_batch.into();

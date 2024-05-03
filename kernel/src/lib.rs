@@ -75,7 +75,7 @@ pub use table::Table;
     feature = "sync-client",
     feature = "arrow-conversion"
 ))]
-pub mod client;
+pub mod engine;
 
 /// Delta table version is 8 byte unsigned int
 pub type Version = u64;

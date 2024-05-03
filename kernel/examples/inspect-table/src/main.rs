@@ -1,5 +1,5 @@
-use delta_kernel::client::executor::tokio::TokioBackgroundExecutor;
-use delta_kernel::client::DefaultEngine;
+use delta_kernel::engine::executor::tokio::TokioBackgroundExecutor;
+use delta_kernel::engine::DefaultEngine;
 use delta_kernel::scan::ScanBuilder;
 use delta_kernel::schema::StructType;
 use delta_kernel::{DeltaResult, Table};

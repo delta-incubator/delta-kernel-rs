@@ -447,7 +447,7 @@ pub(crate) mod test_utils {
 
     use crate::{
         actions::get_log_schema,
-        client::{
+        engine::{
             arrow_data::ArrowEngineData,
             sync::{json::SyncJsonHandler, SyncEngine},
         },
@@ -547,7 +547,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::client::sync::SyncEngine;
+    use crate::engine::sync::SyncEngine;
     use crate::schema::PrimitiveType;
     use crate::Table;
 

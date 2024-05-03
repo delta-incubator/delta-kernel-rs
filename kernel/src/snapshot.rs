@@ -369,9 +369,9 @@ mod tests {
     use object_store::local::LocalFileSystem;
     use object_store::path::Path;
 
-    use crate::client::default::executor::tokio::TokioBackgroundExecutor;
-    use crate::client::default::filesystem::ObjectStoreFileSystemClient;
-    use crate::client::sync::SyncEngine;
+    use crate::engine::default::executor::tokio::TokioBackgroundExecutor;
+    use crate::engine::default::filesystem::ObjectStoreFileSystemClient;
+    use crate::engine::sync::SyncEngine;
     use crate::schema::StructType;
 
     #[test]

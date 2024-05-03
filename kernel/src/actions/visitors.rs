@@ -328,8 +328,8 @@ mod tests {
     use super::*;
     use crate::{
         actions::{get_log_schema, ADD_NAME, TRANSACTION_NAME},
-        client::arrow_data::ArrowEngineData,
-        client::sync::{json::SyncJsonHandler, SyncEngine},
+        engine::arrow_data::ArrowEngineData,
+        engine::sync::{json::SyncJsonHandler, SyncEngine},
         Engine, EngineData, JsonHandler,
     };
 

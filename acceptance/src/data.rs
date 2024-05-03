@@ -6,7 +6,7 @@ use arrow_schema::DataType;
 use arrow_select::{concat::concat_batches, filter::filter_record_batch, take::take};
 
 use delta_kernel::{
-    client::arrow_data::ArrowEngineData, scan::ScanBuilder, DeltaResult, Engine, Error, Table,
+    engine::arrow_data::ArrowEngineData, scan::ScanBuilder, DeltaResult, Engine, Error, Table,
 };
 use futures::{stream::TryStreamExt, StreamExt};
 use object_store::{local::LocalFileSystem, ObjectStore};

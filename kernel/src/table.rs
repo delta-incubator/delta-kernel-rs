@@ -51,7 +51,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::client::sync::SyncEngine;
+    use crate::engine::sync::SyncEngine;
 
     #[test]
     fn test_table() {
