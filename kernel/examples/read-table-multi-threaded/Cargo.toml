@@ -5,7 +5,7 @@ edition = "2021"
 publish = false
 
 [dependencies]
-arrow = { version = "^49.0", features = ["prettyprint"] }
+arrow = { version = "^49.0", features = ["prettyprint", "chrono-tz"] }
 clap = { version = "^4.4", features = ["derive"] }
 delta_kernel = { path = "../../../kernel", features = [
   "default-client",
