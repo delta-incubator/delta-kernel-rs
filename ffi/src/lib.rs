@@ -163,11 +163,11 @@ pub enum KernelError {
     GenericError,
     IOErrorError,
     ParquetError,
-    #[cfg(feature = "default-client")]
+    #[cfg(feature = "default-engine")]
     ObjectStoreError,
-    #[cfg(feature = "default-client")]
+    #[cfg(feature = "default-engine")]
     ObjectStorePathError,
-    #[cfg(feature = "default-client")]
+    #[cfg(feature = "default-engine")]
     Reqwest,
     FileNotFoundError,
     MissingColumnError,
@@ -197,11 +197,11 @@ impl From<Error> for KernelError {
             Error::GenericError { .. } => KernelError::GenericError,
             Error::IOError(_) => KernelError::IOErrorError,
             Error::Parquet(_) => KernelError::ParquetError,
-            #[cfg(feature = "default-client")]
+            #[cfg(feature = "default-engine")]
             Error::ObjectStore(_) => KernelError::ObjectStoreError,
-            #[cfg(feature = "default-client")]
+            #[cfg(feature = "default-engine")]
             Error::ObjectStorePath(_) => KernelError::ObjectStorePathError,
-            #[cfg(feature = "default-client")]
+            #[cfg(feature = "default-engine")]
             Error::Reqwest(_) => KernelError::Reqwest,
             Error::FileNotFound(_) => KernelError::FileNotFoundError,
             Error::MissingColumn(_) => KernelError::MissingColumnError,
@@ -407,7 +407,7 @@ impl EngineBuilder {
 ///
 /// # Safety
 /// Caller is responsible for passing a valid path pointer.
-#[cfg(feature = "default-client")]
+#[cfg(feature = "default-engine")]
 #[no_mangle]
 pub unsafe extern "C" fn get_engine_builder(
     path: KernelStringSlice,
@@ -416,7 +416,7 @@ pub unsafe extern "C" fn get_engine_builder(
     get_engine_builder_impl(path, allocate_error).into_extern_result(allocate_error)
 }
 
-#[cfg(feature = "default-client")]
+#[cfg(feature = "default-engine")]
 unsafe fn get_engine_builder_impl(
     path: KernelStringSlice,
     allocate_fn: AllocateErrorFn,
@@ -435,7 +435,7 @@ unsafe fn get_engine_builder_impl(
 /// # Safety
 ///
 /// Client must pass a valid ClientBuilder pointer, and valid slices for key and value
-#[cfg(feature = "default-client")]
+#[cfg(feature = "default-engine")]
 #[no_mangle]
 pub unsafe extern "C" fn set_builder_option(
     builder: &mut EngineBuilder,
@@ -453,7 +453,7 @@ pub unsafe extern "C" fn set_builder_option(
 /// # Safety
 ///
 /// Caller is responsible to pass a valid ClientBuilder pointer, and to not use it again afterwards
-#[cfg(feature = "default-client")]
+#[cfg(feature = "default-engine")]
 #[no_mangle]
 pub unsafe extern "C" fn builder_build(
     builder: *mut EngineBuilder,
@@ -470,7 +470,7 @@ pub unsafe extern "C" fn builder_build(
 /// # Safety
 ///
 /// Caller is responsible for passing a valid path pointer.
-#[cfg(feature = "default-client")]
+#[cfg(feature = "default-engine")]
 #[no_mangle]
 pub unsafe extern "C" fn get_default_client(
     path: KernelStringSlice,
@@ -480,7 +480,7 @@ pub unsafe extern "C" fn get_default_client(
 }
 
 // get the default version of the default client :)
-#[cfg(feature = "default-client")]
+#[cfg(feature = "default-engine")]
 unsafe fn get_default_default_client_impl(
     path: KernelStringSlice,
     allocate_error: AllocateErrorFn,
@@ -489,7 +489,7 @@ unsafe fn get_default_default_client_impl(
     get_default_client_impl(url, Default::default(), allocate_error)
 }
 
-#[cfg(feature = "default-client")]
+#[cfg(feature = "default-engine")]
 unsafe fn get_default_client_impl(
     url: Url,
     options: HashMap<String, String>,

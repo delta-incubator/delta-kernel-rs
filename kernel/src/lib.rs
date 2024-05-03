@@ -71,8 +71,8 @@ pub use expressions::Expression;
 pub use table::Table;
 
 #[cfg(any(
-    feature = "default-client",
-    feature = "sync-client",
+    feature = "default-engine",
+    feature = "sync-engine",
     feature = "arrow-conversion"
 ))]
 pub mod engine;

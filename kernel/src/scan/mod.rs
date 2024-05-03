@@ -542,7 +542,7 @@ pub(crate) mod test_utils {
     }
 }
 
-#[cfg(all(test, feature = "sync-client"))]
+#[cfg(all(test, feature = "sync-engine"))]
 mod tests {
     use std::path::PathBuf;
 

@@ -60,7 +60,7 @@ impl TransactionScanner {
     }
 }
 
-#[cfg(all(test, feature = "default-client"))]
+#[cfg(all(test, feature = "default-engine"))]
 mod tests {
     use std::path::PathBuf;
 

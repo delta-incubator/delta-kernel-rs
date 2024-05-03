@@ -41,7 +41,7 @@ pub unsafe extern "C" fn get_raw_engine_data(data_handle: *mut EngineDataHandle)
 /// Struct to allow binding to the arrow [C Data
 /// Interface](https://arrow.apache.org/docs/format/CDataInterface.html). This includes the data and
 /// the schema.
-#[cfg(feature = "default-client")]
+#[cfg(feature = "default-engine")]
 #[repr(C)]
 pub struct ArrowFFIData {
     array: arrow_data::ffi::FFI_ArrowArray,
@@ -55,7 +55,7 @@ pub struct ArrowFFIData {
 /// # Safety
 /// data_handle must be a valid EngineDataHandle as read by the [`DefaultEngine`] obtained
 /// from `get_default_client`.
-#[cfg(feature = "default-client")]
+#[cfg(feature = "default-engine")]
 pub unsafe extern "C" fn get_raw_arrow_data(
     data_handle: *mut EngineDataHandle,
     engine: *const ExternEngineHandle,
@@ -63,7 +63,7 @@ pub unsafe extern "C" fn get_raw_arrow_data(
     get_raw_arrow_data_impl(data_handle).into_extern_result(engine)
 }
 
-#[cfg(feature = "default-client")]
+#[cfg(feature = "default-engine")]
 unsafe fn get_raw_arrow_data_impl(
     data_handle: *mut EngineDataHandle,
 ) -> DeltaResult<*mut ArrowFFIData> {
