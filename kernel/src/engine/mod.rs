@@ -1,6 +1,6 @@
-//! Provides clients that implement the required traits. These clients can optionally be built
-//! into the kernel by setting the `default-engine` or `sync-engine` feature flag. See the related
-//! modules for more information.
+//! Provides engine implementation that implement the required traits. These engines can optionally
+//! be built into the kernel by setting the `default-engine` or `sync-engine` feature flags. See the
+//! related modules for more information.
 
 #[cfg(feature = "arrow-conversion")]
 pub(crate) mod arrow_conversion;
