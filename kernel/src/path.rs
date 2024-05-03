@@ -65,8 +65,8 @@ impl<'a> LogPath<'a> {
             is_commit = suffix == "json"; // if we were just [version].json, we're a commit file
 
             if !is_commit && suffix.starts_with("checkpoint.") {
+                // check if name is just [version].checkpoint.parquet, i.e. we have a classic checkpoint
                 let rest = &suffix[11..]; // strip off the "checkpoint." which is 11 chars
-                                          // check if name is just [version].checkpoint.parquet, i.e. we have a classic checkpoint
                 is_checkpoint = rest == "parquet";
                 if !is_checkpoint {
                     // test if we're a multipart checkpoint
