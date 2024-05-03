@@ -65,13 +65,13 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::client::sync::SyncEngineInterface;
+    use crate::client::sync::SyncEngine;
     use crate::Table;
 
     fn get_latest_transactions(path: &str, app_id: &str) -> (TransactionMap, Option<Transaction>) {
         let path = std::fs::canonicalize(PathBuf::from(path)).unwrap();
         let url = url::Url::from_directory_path(path).unwrap();
-        let engine = SyncEngineInterface::new();
+        let engine = SyncEngine::new();
 
         let table = Table::new(url);
         let snapshot = table.snapshot(&engine, None).unwrap();

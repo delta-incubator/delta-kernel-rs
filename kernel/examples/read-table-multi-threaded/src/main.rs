@@ -10,7 +10,7 @@ use arrow::util::pretty::print_batches;
 use delta_kernel::client::arrow_data::ArrowEngineData;
 use delta_kernel::client::default::executor::tokio::TokioBackgroundExecutor;
 use delta_kernel::client::default::DefaultEngine;
-use delta_kernel::client::sync::SyncEngineInterface;
+use delta_kernel::client::sync::SyncEngine;
 use delta_kernel::scan::state::{DvInfo, GlobalScanState};
 use delta_kernel::scan::{transform_to_logical, ScanBuilder};
 use delta_kernel::schema::Schema;
@@ -109,7 +109,7 @@ fn try_main() -> DeltaResult<()> {
             HashMap::<String, String>::new(),
             Arc::new(TokioBackgroundExecutor::new()),
         )?),
-        EngineType::Sync => Arc::new(SyncEngineInterface::new()),
+        EngineType::Sync => Arc::new(SyncEngine::new()),
     };
 
     // build a table and get the lastest snapshot from it

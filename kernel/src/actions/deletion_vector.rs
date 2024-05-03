@@ -209,7 +209,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::{client::sync::SyncEngineInterface, Engine};
+    use crate::{client::sync::SyncEngine, Engine};
 
     use super::DeletionVectorDescriptor;
 
@@ -288,7 +288,7 @@ mod tests {
         let path =
             std::fs::canonicalize(PathBuf::from("./tests/data/table-with-dv-small/")).unwrap();
         let parent = url::Url::from_directory_path(path).unwrap();
-        let sync_interface = SyncEngineInterface::new();
+        let sync_interface = SyncEngine::new();
         let fs_client = sync_interface.get_file_system_client();
 
         let example = dv_example();

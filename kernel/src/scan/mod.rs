@@ -449,7 +449,7 @@ pub(crate) mod test_utils {
         actions::get_log_schema,
         client::{
             arrow_data::ArrowEngineData,
-            sync::{json::SyncJsonHandler, SyncEngineInterface},
+            sync::{json::SyncJsonHandler, SyncEngine},
         },
         scan::file_stream::scan_action_iter,
         schema::{StructField, StructType},
@@ -512,7 +512,7 @@ pub(crate) mod test_utils {
             partition_values: HashMap<String, String>,
         ),
     ) {
-        let interface = SyncEngineInterface::new();
+        let interface = SyncEngine::new();
         // doesn't matter here
         let table_schema = Arc::new(StructType::new(vec![StructField::new(
             "foo",
@@ -547,7 +547,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::client::sync::SyncEngineInterface;
+    use crate::client::sync::SyncEngine;
     use crate::schema::PrimitiveType;
     use crate::Table;
 
@@ -556,7 +556,7 @@ mod tests {
         let path =
             std::fs::canonicalize(PathBuf::from("./tests/data/table-without-dv-small/")).unwrap();
         let url = url::Url::from_directory_path(path).unwrap();
-        let engine = SyncEngineInterface::new();
+        let engine = SyncEngine::new();
 
         let table = Table::new(url);
         let snapshot = table.snapshot(&engine, None).unwrap();
@@ -576,7 +576,7 @@ mod tests {
         let path =
             std::fs::canonicalize(PathBuf::from("./tests/data/table-without-dv-small/")).unwrap();
         let url = url::Url::from_directory_path(path).unwrap();
-        let engine = SyncEngineInterface::new();
+        let engine = SyncEngine::new();
 
         let table = Table::new(url);
         let snapshot = table.snapshot(&engine, None).unwrap();
@@ -639,7 +639,7 @@ mod tests {
         ))?;
 
         let url = url::Url::from_directory_path(path).unwrap();
-        let engine = SyncEngineInterface::new();
+        let engine = SyncEngine::new();
 
         let table = Table::new(url);
         let snapshot = table.snapshot(&engine, None)?;

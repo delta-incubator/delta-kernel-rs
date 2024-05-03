@@ -11,17 +11,17 @@ mod parquet;
 
 /// This is a simple implemention of [`Engine`]. It only supports reading data from the local
 /// filesystem, and internally represents data using `Arrow`.
-pub struct SyncEngineInterface {
+pub struct SyncEngine {
     fs_client: Arc<fs_client::SyncFilesystemClient>,
     json_handler: Arc<json::SyncJsonHandler>,
     parquet_handler: Arc<parquet::SyncParquetHandler>,
     expression_handler: Arc<ArrowExpressionHandler>,
 }
 
-impl SyncEngineInterface {
+impl SyncEngine {
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
-        SyncEngineInterface {
+        SyncEngine {
             fs_client: Arc::new(fs_client::SyncFilesystemClient {}),
             json_handler: Arc::new(json::SyncJsonHandler {}),
             parquet_handler: Arc::new(parquet::SyncParquetHandler {}),
@@ -30,7 +30,7 @@ impl SyncEngineInterface {
     }
 }
 
-impl Engine for SyncEngineInterface {
+impl Engine for SyncEngine {
     fn get_expression_handler(&self) -> Arc<dyn ExpressionHandler> {
         self.expression_handler.clone()
     }
