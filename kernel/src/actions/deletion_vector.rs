@@ -12,6 +12,7 @@ use url::Url;
 use crate::{DeltaResult, Error, FileSystemClient};
 
 #[derive(Debug, Clone, PartialEq, Eq, Schema, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DeletionVectorDescriptor {
     /// A single character to indicate how to access the DV. Legal options are: ['u', 'i', 'p'].
     pub storage_type: String,
@@ -34,6 +35,7 @@ pub struct DeletionVectorDescriptor {
 
     /// Start of the data for this DV in number of bytes from the beginning of the file it is stored in.
     /// Always None (absent in JSON) when `storageType = 'i'`.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub offset: Option<i32>,
 
     /// Size of the serialized DV in bytes (raw data size, i.e. before base85 encoding, if inline).

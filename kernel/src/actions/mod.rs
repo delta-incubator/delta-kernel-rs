@@ -60,6 +60,7 @@ impl Default for Format {
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Schema, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Metadata {
     /// Unique identifier for this table
     pub id: String,
@@ -92,6 +93,7 @@ impl Metadata {
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Eq, Schema, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Protocol {
     /// The minimum version of the Delta read protocol that a client must implement
     /// in order to correctly read this table
@@ -101,9 +103,11 @@ pub struct Protocol {
     pub min_writer_version: i32,
     /// A collection of features that a client must implement in order to correctly
     /// read this table (exist only when minReaderVersion is set to 3)
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub reader_features: Option<Vec<String>>,
     /// A collection of features that a client must implement in order to correctly
     /// write this table (exist only when minWriterVersion is set to 7)
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub writer_features: Option<Vec<String>>,
 }
 
@@ -116,6 +120,7 @@ impl Protocol {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Schema, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Add {
     /// A relative path to a data file from the root of the table or an absolute path to a file
     /// that should be added to the table. The path is a URI as specified by
@@ -174,43 +179,52 @@ impl Add {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Schema, Serialize, Deserialize)]
-pub(crate) struct Remove {
+#[serde(rename_all = "camelCase")]
+pub struct Remove {
     /// A relative path to a data file from the root of the table or an absolute path to a file
     /// that should be added to the table. The path is a URI as specified by
     /// [RFC 2396 URI Generic Syntax], which needs to be decoded to get the data file path.
     ///
     /// [RFC 2396 URI Generic Syntax]: https://www.ietf.org/rfc/rfc2396.txt
-    pub(crate) path: String,
+    pub path: String,
 
     /// The time this logical file was created, as milliseconds since the epoch.
-    pub(crate) deletion_timestamp: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deletion_timestamp: Option<i64>,
 
     /// When `false` the logical file must already be present in the table or the records
     /// in the added file must be contained in one or more remove actions in the same version.
-    pub(crate) data_change: bool,
+    pub data_change: bool,
 
     /// When true the fields `partition_values`, `size`, and `tags` are present
-    pub(crate) extended_file_metadata: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extended_file_metadata: Option<bool>,
 
     /// A map from partition column to value for this logical file.
-    pub(crate) partition_values: Option<HashMap<String, String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub partition_values: Option<HashMap<String, String>>,
 
     /// The size of this data file in bytes
-    pub(crate) size: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<i64>,
 
     /// Map containing metadata about this logical file.
-    pub(crate) tags: Option<HashMap<String, String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tags: Option<HashMap<String, String>>,
 
     /// Information about deletion vector (DV) associated with this add action
-    pub(crate) deletion_vector: Option<DeletionVectorDescriptor>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deletion_vector: Option<DeletionVectorDescriptor>,
 
     /// Default generated Row ID of the first row in the file. The default generated Row IDs
     /// of the other rows in the file can be reconstructed by adding the physical index of the
     /// row within the file to the base Row ID
-    pub(crate) base_row_id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_row_id: Option<i64>,
 
     /// First commit version in which an add action with the same path was committed to the table.
-    pub(crate) default_row_commit_version: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_row_commit_version: Option<i64>,
 }
 
 impl Remove {
@@ -220,6 +234,7 @@ impl Remove {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Schema, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Transaction {
     /// A unique identifier for the application performing the transaction.
     pub app_id: String,
