@@ -142,7 +142,7 @@ mod private {
         /// # Safety
         ///
         /// The slice must have been originally created `From<Vec<bool>>`, and must not have been
-        /// already been consumed by a previous call tothis method.
+        /// already been consumed by a previous call to this method.
         pub unsafe fn as_ref(&self) -> &[bool] {
             if self.ptr.is_null() {
                 Default::default()
@@ -156,7 +156,7 @@ mod private {
         /// # Safety
         ///
         /// The slice must have been originally created `From<Vec<bool>>`, and must not have been
-        /// already been consumed by a previous call tothis method.
+        /// already been consumed by a previous call to this method.
         pub unsafe fn into_vec(self) -> Vec<bool> {
             if self.ptr.is_null() {
                 Default::default()
