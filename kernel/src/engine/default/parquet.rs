@@ -11,10 +11,9 @@ use parquet::arrow::arrow_reader::{
 };
 use parquet::arrow::async_reader::{ParquetObjectReader, ParquetRecordBatchStreamBuilder};
 
-use super::file_handler::{FileOpenFuture, FileOpener};
+use super::file_stream::{FileOpenFuture, FileOpener, FileStream};
 use crate::engine::arrow_utils::{generate_mask, get_requested_indices, reorder_record_batch};
 use crate::engine::default::executor::TaskExecutor;
-use crate::engine::default::file_handler::FileStream;
 use crate::schema::SchemaRef;
 use crate::{DeltaResult, Error, Expression, FileDataReadResultIterator, FileMeta, ParquetHandler};
 
@@ -62,7 +61,7 @@ impl<E: TaskExecutor> ParquetHandler for DefaultParquetHandler<E> {
         //   -> reqwest to get data
         //   -> parse to parquet
         // SAFETY: we did is_empty check above, this is ok.
-        let file_reader: Box<dyn FileOpener> = match files[0].location.scheme() {
+        let file_opener: Box<dyn FileOpener> = match files[0].location.scheme() {
             "http" | "https" => Box::new(PresignedUrlOpener::new(1024, physical_schema.clone())),
             _ => Box::new(ParquetOpener::new(
                 1024,
@@ -70,10 +69,10 @@ impl<E: TaskExecutor> ParquetHandler for DefaultParquetHandler<E> {
                 self.store.clone(),
             )),
         };
-        FileStream::new_file_data_read_iterator(
+        FileStream::new_async_read_iterator(
             self.task_executor.clone(),
             Arc::new(physical_schema.as_ref().try_into()?),
-            file_reader,
+            file_opener,
             files,
             self.readahead,
         )

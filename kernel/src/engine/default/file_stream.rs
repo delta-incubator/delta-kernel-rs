@@ -98,7 +98,7 @@ pub struct FileStream {
 }
 
 impl FileStream {
-    pub fn new_file_data_read_iterator<E: TaskExecutor>(
+    pub fn new_async_read_iterator<E: TaskExecutor>(
         task_executor: Arc<E>,
         schema: ArrowSchemaRef,
         file_reader: Box<dyn FileOpener>,
