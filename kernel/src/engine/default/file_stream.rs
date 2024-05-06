@@ -90,7 +90,7 @@ pub struct FileStream {
     /// (before reaching the limit) and returns a batch iterator. If the file reader
     /// is not capable of limiting the number of records in the last batch, the file
     /// stream will take care of truncating it.
-    file_reader: Box<dyn FileOpener>,
+    file_opener: Box<dyn FileOpener>,
     /// The stream state
     state: FileStreamState,
     /// Describes the behavior of the `FileStream` if file opening or scanning fails
@@ -101,11 +101,11 @@ impl FileStream {
     pub fn new_async_read_iterator<E: TaskExecutor>(
         task_executor: Arc<E>,
         schema: ArrowSchemaRef,
-        file_reader: Box<dyn FileOpener>,
+        file_opener: Box<dyn FileOpener>,
         files: &[FileMeta],
         readahead: usize,
     ) -> DeltaResult<FileDataReadResultIterator> {
-        let mut stream = FileStream::new(files.to_vec(), schema, file_reader)?;
+        let mut stream = FileStream::new(files.to_vec(), schema, file_opener)?;
 
         // This channel will become the output iterator
         // The stream will execute in the background, and we allow up to `readahead`
@@ -147,12 +147,12 @@ impl FileStream {
     pub fn new(
         files: impl IntoIterator<Item = FileMeta>,
         schema: ArrowSchemaRef,
-        file_reader: Box<dyn FileOpener>,
+        file_opener: Box<dyn FileOpener>,
     ) -> DeltaResult<Self> {
         Ok(Self {
             file_iter: files.into_iter().collect(),
             projected_schema: schema,
-            file_reader,
+            file_opener,
             state: FileStreamState::Idle,
             on_error: OnError::Fail,
         })
@@ -173,7 +173,7 @@ impl FileStream {
     /// bunch of sequential IO), it can be parallelized with decoding.
     fn start_next_file(&mut self) -> Option<DeltaResult<FileOpenFuture>> {
         let file_meta = self.file_iter.pop_front()?;
-        Some(self.file_reader.open(file_meta, None))
+        Some(self.file_opener.open(file_meta, None))
     }
 
     fn poll_inner(&mut self, cx: &mut Context<'_>) -> Poll<Option<DeltaResult<RecordBatch>>> {
