@@ -580,14 +580,13 @@ pub unsafe extern "C" fn version(snapshot: *const SnapshotHandle) -> u64 {
 /// its schema it will do the following at each node:
 ///
 /// - For a struct, map, or array type:
-///     1. Ask engine to allocate a list, specifying enough space to hold associated schema
-///        information.
+///     1. Ask engine to allocate a "child" list, indicating how many items will be needed.
 ///     2. For a struct, visit each child, with `sibling_list_id` set to the just allocated list.
 ///     3. For a map, visit the key type and the value type with `sibling_list_id` set to the just
 ///        allocated list.
 ///     4. For an array, visit the item type with `sibling_list_id` set to the just allocated list.
 ///     5. Finally call `visit_[struct/array/map]` with `child_list_id` set to the list allocated
-///        in `1`. This has enough information to build the entire type on the engine side.
+///        in step 1. This has enough information to build the entire type on the engine side.
 ///
 /// - For a simple type simply call `visit_[type]`, with `sibling_list_id` set to the `id` of the
 /// list the type should be added to.
@@ -603,7 +602,7 @@ pub struct EngineSchemaVisitor {
     pub make_field_list: extern "C" fn(data: *mut c_void, reserve: usize) -> usize,
 
     // visitor methods that should instantiate and append the appropriate type to the field list
-    /// Indidate that the schema contains a `Struct` type. The top level of a Schema is always a
+    /// Indicate that the schema contains a `Struct` type. The top level of a Schema is always a
     /// `Struct`. The children of the `Struct` are in the list identified by `child_list_id`.
     pub visit_struct: extern "C" fn(
         data: *mut c_void,
