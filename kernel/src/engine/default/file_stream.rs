@@ -98,6 +98,9 @@ pub struct FileStream {
 }
 
 impl FileStream {
+    /// Creates a new `FileStream` from a given schema, `FileOpener`, and files list; the files are
+    /// processed asynchronously by the provided `TaskExecutor`. Returns an `Iterator` that consumes
+    /// the results.
     pub fn new_async_read_iterator<E: TaskExecutor>(
         task_executor: Arc<E>,
         schema: ArrowSchemaRef,
@@ -148,7 +151,7 @@ impl FileStream {
         Ok(Box::new(it))
     }
 
-    /// Create a new `FileStream` using the give `FileOpener` to scan underlying files
+    /// Create a new `FileStream` using the given `FileOpener` to scan underlying files
     pub fn new(
         files: impl IntoIterator<Item = FileMeta>,
         schema: ArrowSchemaRef,
