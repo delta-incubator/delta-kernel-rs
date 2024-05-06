@@ -132,6 +132,11 @@ impl FileStream {
         });
 
         // Create a thread-safe iterator, because engine may consume it from multiple threads.
+        //
+        // NOTE: Every call to the iterator's `next` method will lock the mutex before accessing the
+        // underlying stream. This should not be a bottleneck because the stream will immediately
+        // return an item (if ready) and would anyway block if not ready. Additionally, each
+        // iterator element corresponds to a file access whose cost dwarfs any mutex overhead.
         let it = receiver
             .into_iter()
             .map(|rbr| rbr.map(|rb| Box::new(ArrowEngineData::new(rb)) as _));
