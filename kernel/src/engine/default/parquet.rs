@@ -64,14 +64,19 @@ impl<E: TaskExecutor> ParquetHandler for DefaultParquetHandler<E> {
         // SAFETY: we did is_empty check above, this is ok.
         let file_reader: Box<dyn FileOpener> = match files[0].location.scheme() {
             "http" | "https" => Box::new(PresignedUrlOpener::new(1024, physical_schema.clone())),
-            _ => Box::new(ParquetOpener::new(1024, physical_schema.clone(), self.store.clone())),
+            _ => Box::new(ParquetOpener::new(
+                1024,
+                physical_schema.clone(),
+                self.store.clone(),
+            )),
         };
         FileStream::new_file_data_read_iterator(
             self.task_executor.clone(),
             Arc::new(physical_schema.as_ref().try_into()?),
             file_reader,
             files,
-            self.readahead)
+            self.readahead,
+        )
     }
 }
 
@@ -224,7 +229,7 @@ mod tests {
     use super::*;
 
     fn into_record_batch(
-        engine_data: DeltaResult<Box<dyn EngineData + Send + Sync>>,
+        engine_data: DeltaResult<Box<dyn EngineData>>,
     ) -> DeltaResult<RecordBatch> {
         engine_data
             .and_then(ArrowEngineData::try_from_engine_data)

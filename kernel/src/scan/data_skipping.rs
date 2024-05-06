@@ -93,10 +93,10 @@ fn as_data_skipping_predicate(expr: &Expr) -> Option<Expr> {
 
 pub(crate) struct DataSkippingFilter {
     stats_schema: SchemaRef,
-    select_stats_evaluator: Arc<dyn ExpressionEvaluator + Send + Sync>,
-    skipping_evaluator: Arc<dyn ExpressionEvaluator + Send + Sync>,
-    filter_evaluator: Arc<dyn ExpressionEvaluator + Send + Sync>,
-    json_handler: Arc<dyn JsonHandler + Send + Sync>,
+    select_stats_evaluator: Arc<dyn ExpressionEvaluator>,
+    skipping_evaluator: Arc<dyn ExpressionEvaluator>,
+    filter_evaluator: Arc<dyn ExpressionEvaluator>,
+    json_handler: Arc<dyn JsonHandler>,
 }
 
 impl DataSkippingFilter {
@@ -183,7 +183,7 @@ impl DataSkippingFilter {
 
     /// Apply the DataSkippingFilter to an EngineData batch of actions. Returns a selection vector
     /// which can be applied to the actions to find those that passed data skipping.
-    pub(crate) fn apply(&self, actions: &(dyn EngineData + Send + Sync)) -> DeltaResult<Vec<bool>> {
+    pub(crate) fn apply(&self, actions: &dyn EngineData) -> DeltaResult<Vec<bool>> {
         // retrieve and parse stats from actions data
         let stats = self.select_stats_evaluator.evaluate(actions)?;
         let parsed_stats = self

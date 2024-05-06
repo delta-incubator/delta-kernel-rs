@@ -88,7 +88,7 @@ pub type FileDataReadResult = (FileMeta, Box<dyn EngineData>);
 
 /// An iterator of data read from specified files
 pub type FileDataReadResultIterator =
-    Box<dyn Iterator<Item = DeltaResult<Box<dyn EngineData + Send + Sync>>> + Send + Sync>;
+    Box<dyn Iterator<Item = DeltaResult<Box<dyn EngineData>>> + Send + Sync>;
 
 /// The metadata that describes an object.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -111,17 +111,14 @@ pub trait ExpressionEvaluator: Send + Sync {
     ///
     /// Contains one value for each row of the input.
     /// The data type of the output is same as the type output of the expression this evaluator is using.
-    fn evaluate(
-        &self,
-        batch: &(dyn EngineData + Send + Sync),
-    ) -> DeltaResult<Box<dyn EngineData + Send + Sync>>;
+    fn evaluate(&self, batch: &dyn EngineData) -> DeltaResult<Box<dyn EngineData>>;
 }
 
 /// Provides expression evaluation capability to Delta Kernel.
 ///
 /// Delta Kernel can use this client to evaluate predicate on partition filters,
 /// fill up partition column values and any computation on data using Expressions.
-pub trait ExpressionHandler {
+pub trait ExpressionHandler: Send + Sync {
     /// Create an [`ExpressionEvaluator`] that can evaluate the given [`Expression`]
     /// on columnar batches with the given [`Schema`] to produce data of [`DataType`].
     ///
@@ -138,7 +135,7 @@ pub trait ExpressionHandler {
         schema: SchemaRef,
         expression: Expression,
         output_type: DataType,
-    ) -> Arc<dyn ExpressionEvaluator + Send + Sync>;
+    ) -> Arc<dyn ExpressionEvaluator>;
 }
 
 /// Provides file system related functionalities to Delta Kernel.
@@ -169,9 +166,9 @@ pub trait JsonHandler: Send + Sync {
     /// json_strings MUST be a single column batch of engine data, and the column type must be string
     fn parse_json(
         &self,
-        json_strings: Box<dyn EngineData + Send + Sync>,
+        json_strings: Box<dyn EngineData>,
         output_schema: SchemaRef,
-    ) -> DeltaResult<Box<dyn EngineData + Send + Sync>>;
+    ) -> DeltaResult<Box<dyn EngineData>>;
 
     /// Read and parse the JSON format file at given locations and return
     /// the data as EngineData with the columns requested by physical schema.
@@ -218,14 +215,14 @@ pub trait ParquetHandler: Send + Sync {
 /// table.
 pub trait Engine: Send + Sync {
     /// Get the connector provided [`ExpressionHandler`].
-    fn get_expression_handler(&self) -> Arc<dyn ExpressionHandler + Send + Sync>;
+    fn get_expression_handler(&self) -> Arc<dyn ExpressionHandler>;
 
     /// Get the connector provided [`FileSystemClient`]
-    fn get_file_system_client(&self) -> Arc<dyn FileSystemClient + Send + Sync>;
+    fn get_file_system_client(&self) -> Arc<dyn FileSystemClient>;
 
     /// Get the connector provided [`JsonHandler`].
-    fn get_json_handler(&self) -> Arc<dyn JsonHandler + Send + Sync>;
+    fn get_json_handler(&self) -> Arc<dyn JsonHandler>;
 
     /// Get the connector provided [`ParquetHandler`].
-    fn get_parquet_handler(&self) -> Arc<dyn ParquetHandler + Send + Sync>;
+    fn get_parquet_handler(&self) -> Arc<dyn ParquetHandler>;
 }

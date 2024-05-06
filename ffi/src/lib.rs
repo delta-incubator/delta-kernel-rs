@@ -380,8 +380,8 @@ impl<T> IntoExternResult<T> for DeltaResult<T> {
 }
 
 // A wrapper for Engine which defines additional FFI-specific methods.
-pub trait ExternEngine {
-    fn engine(&self) -> Arc<dyn Engine + Send + Sync>;
+pub trait ExternEngine: Send + Sync {
+    fn engine(&self) -> Arc<dyn Engine>;
     fn error_allocator(&self) -> &dyn AllocateError;
 }
 
@@ -390,12 +390,12 @@ pub struct ExternEngineHandle {
 }
 
 impl ArcHandle for ExternEngineHandle {
-    type Target = dyn ExternEngine + Send + Sync;
+    type Target = dyn ExternEngine;
 }
 
 struct ExternEngineVtable {
     // Actual table client instance to use
-    client: Arc<dyn Engine + Send + Sync>,
+    client: Arc<dyn Engine>,
     allocate_error: AllocateErrorFn,
 }
 
@@ -417,7 +417,7 @@ unsafe impl Send for ExternEngineVtable {}
 unsafe impl Sync for ExternEngineVtable {}
 
 impl ExternEngine for ExternEngineVtable {
-    fn engine(&self) -> Arc<dyn Engine + Send + Sync> {
+    fn engine(&self) -> Arc<dyn Engine> {
         self.client.clone()
     }
     fn error_allocator(&self) -> &dyn AllocateError {
@@ -548,7 +548,7 @@ unsafe fn get_default_client_impl(
         Arc::new(TokioBackgroundExecutor::new()),
     );
     let client = Arc::new(engine.map_err(Error::generic)?);
-    let client: Arc<dyn ExternEngine + Send + Sync> = Arc::new(ExternEngineVtable {
+    let client: Arc<dyn ExternEngine> = Arc::new(ExternEngineVtable {
         client,
         allocate_error,
     });

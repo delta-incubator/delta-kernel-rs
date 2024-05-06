@@ -24,9 +24,7 @@ impl ArrowEngineData {
     }
 
     /// Utility constructor to get a `Box<ArrowEngineData>` out of a `Box<dyn EngineData>`
-    pub fn try_from_engine_data(
-        engine_data: Box<dyn EngineData + Send + Sync>,
-    ) -> DeltaResult<Box<Self>> {
+    pub fn try_from_engine_data(engine_data: Box<dyn EngineData>) -> DeltaResult<Box<Self>> {
         engine_data
             .into_any()
             .downcast::<ArrowEngineData>()
@@ -347,7 +345,7 @@ mod tests {
 
     use super::ArrowEngineData;
 
-    fn string_array_to_engine_data(string_array: StringArray) -> Box<dyn EngineData + Send + Sync> {
+    fn string_array_to_engine_data(string_array: StringArray) -> Box<dyn EngineData> {
         let string_field = Arc::new(Field::new("a", DataType::Utf8, true));
         let schema = Arc::new(ArrowSchema::new(vec![string_field]));
         let batch = RecordBatch::try_new(schema, vec![Arc::new(string_array)])

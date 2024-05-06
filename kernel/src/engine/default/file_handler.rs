@@ -2,8 +2,8 @@ use std::collections::VecDeque;
 use std::mem;
 use std::ops::Range;
 use std::pin::Pin;
-use std::task::{ready, Context, Poll};
 use std::sync::Arc;
+use std::task::{ready, Context, Poll};
 
 use arrow_array::RecordBatch;
 use arrow_schema::SchemaRef as ArrowSchemaRef;
@@ -11,9 +11,9 @@ use futures::future::BoxFuture;
 use futures::stream::{BoxStream, Stream, StreamExt};
 use futures::FutureExt;
 
-use crate::{DeltaResult, Error, FileDataReadResultIterator, FileMeta};
-use crate::engine::arrow_data::ArrowEngineData;
 use super::executor::TaskExecutor;
+use crate::engine::arrow_data::ArrowEngineData;
+use crate::{DeltaResult, Error, FileDataReadResultIterator, FileMeta};
 
 /// A fallible future that resolves to a stream of [`RecordBatch`]
 /// cbindgen:ignore
@@ -103,7 +103,7 @@ impl FileStream {
         schema: ArrowSchemaRef,
         file_reader: Box<dyn FileOpener>,
         files: &[FileMeta],
-        readahead: usize
+        readahead: usize,
     ) -> DeltaResult<FileDataReadResultIterator> {
         let mut stream = FileStream::new(files.to_vec(), schema, file_reader)?;
 
@@ -132,9 +132,9 @@ impl FileStream {
         });
 
         // Create a thread-safe iterator, because engine may consume it from multiple threads.
-        let it = receiver.into_iter().map(|rbr| {
-            rbr.map(|rb| Box::new(ArrowEngineData::new(rb)) as _)
-        });
+        let it = receiver
+            .into_iter()
+            .map(|rbr| rbr.map(|rb| Box::new(ArrowEngineData::new(rb)) as _));
         let it = std::sync::Mutex::new(it);
         let it = std::iter::from_fn(move || match it.lock() {
             Ok(mut i) => i.next(),

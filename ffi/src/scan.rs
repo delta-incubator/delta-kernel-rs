@@ -24,7 +24,7 @@ use super::handle::{ArcHandle, BoxHandle};
 /// some kernel calls to operate on the data, or can be converted into the raw data as read by the
 /// [`Engine`] by calling [`get_raw_engine_data`]
 pub struct EngineDataHandle {
-    data: Box<dyn EngineData + Send + Sync>,
+    data: Box<dyn EngineData>,
 }
 impl BoxHandle for EngineDataHandle {}
 
@@ -144,7 +144,7 @@ pub struct KernelScanDataIterator {
     // Also keep a reference to the external client for its error allocator.
     // Parquet and Json handlers don't hold any reference to the tokio reactor, so the iterator
     // terminates early if the last table client goes out of scope.
-    engine: Arc<dyn ExternEngine + Send + Sync>,
+    engine: Arc<dyn ExternEngine>,
 }
 
 impl BoxHandle for KernelScanDataIterator {}
