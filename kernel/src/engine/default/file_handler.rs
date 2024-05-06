@@ -2,6 +2,7 @@ use std::collections::VecDeque;
 use std::mem;
 use std::ops::Range;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{ready, Context, Poll};
 
 use arrow_array::RecordBatch;
@@ -10,9 +11,12 @@ use futures::future::BoxFuture;
 use futures::stream::{BoxStream, Stream, StreamExt};
 use futures::FutureExt;
 
-use crate::{DeltaResult, FileMeta};
+use super::executor::TaskExecutor;
+use crate::engine::arrow_data::ArrowEngineData;
+use crate::{DeltaResult, Error, FileDataReadResultIterator, FileMeta};
 
 /// A fallible future that resolves to a stream of [`RecordBatch`]
+/// cbindgen:ignore
 pub type FileOpenFuture =
     BoxFuture<'static, DeltaResult<BoxStream<'static, DeltaResult<RecordBatch>>>>;
 
@@ -20,7 +24,7 @@ pub type FileOpenFuture =
 /// stream of [`RecordBatch`]
 ///
 /// [`ObjectStore`]: object_store::ObjectStore
-pub trait FileOpener: Unpin {
+pub trait FileOpener: Send + Unpin {
     /// Asynchronously open the specified file and return a stream
     /// of [`RecordBatch`]
     fn open(&self, file_meta: FileMeta, range: Option<Range<i64>>) -> DeltaResult<FileOpenFuture>;
@@ -75,7 +79,7 @@ enum FileStreamState {
 
 /// A stream that iterates record batch by record batch, file over file.
 #[allow(missing_debug_implementations)]
-pub struct FileStream<F: FileOpener> {
+pub struct FileStream {
     /// An iterator over input files.
     file_iter: VecDeque<FileMeta>,
     /// The stream schema (file schema including partition columns and after
@@ -86,19 +90,64 @@ pub struct FileStream<F: FileOpener> {
     /// (before reaching the limit) and returns a batch iterator. If the file reader
     /// is not capable of limiting the number of records in the last batch, the file
     /// stream will take care of truncating it.
-    file_reader: F,
+    file_reader: Box<dyn FileOpener>,
     /// The stream state
     state: FileStreamState,
     /// Describes the behavior of the `FileStream` if file opening or scanning fails
     on_error: OnError,
 }
 
-impl<F: FileOpener> FileStream<F> {
+impl FileStream {
+    pub fn new_file_data_read_iterator<E: TaskExecutor>(
+        task_executor: Arc<E>,
+        schema: ArrowSchemaRef,
+        file_reader: Box<dyn FileOpener>,
+        files: &[FileMeta],
+        readahead: usize,
+    ) -> DeltaResult<FileDataReadResultIterator> {
+        let mut stream = FileStream::new(files.to_vec(), schema, file_reader)?;
+
+        // This channel will become the output iterator
+        // The stream will execute in the background, and we allow up to `readahead`
+        // batches to be buffered in the channel.
+        let (sender, receiver) = std::sync::mpsc::sync_channel(readahead);
+
+        let executor_for_block = task_executor.clone();
+        task_executor.spawn(async move {
+            while let Some(res) = stream.next().await {
+                let sender = sender.clone();
+                let join_res = executor_for_block
+                    .spawn_blocking(move || sender.send(res))
+                    .await;
+                match join_res {
+                    Ok(send_res) => match send_res {
+                        Ok(()) => continue,
+                        Err(_) => break,
+                    },
+                    Err(je) => {
+                        panic!("Couldn't join spawned task, runtime is likely in bad state: {je}")
+                    }
+                }
+            }
+        });
+
+        // Create a thread-safe iterator, because engine may consume it from multiple threads.
+        let it = receiver
+            .into_iter()
+            .map(|rbr| rbr.map(|rb| Box::new(ArrowEngineData::new(rb)) as _));
+        let it = std::sync::Mutex::new(it);
+        let it = std::iter::from_fn(move || match it.lock() {
+            Ok(mut i) => i.next(),
+            Err(_) => Some(Err(Error::generic("Poisoned mutex"))),
+        });
+        Ok(Box::new(it))
+    }
+
     /// Create a new `FileStream` using the give `FileOpener` to scan underlying files
     pub fn new(
         files: impl IntoIterator<Item = FileMeta>,
         schema: ArrowSchemaRef,
-        file_reader: F,
+        file_reader: Box<dyn FileOpener>,
     ) -> DeltaResult<Self> {
         Ok(Self {
             file_iter: files.into_iter().collect(),
@@ -223,7 +272,7 @@ impl<F: FileOpener> FileStream<F> {
     }
 }
 
-impl<F: FileOpener> Stream for FileStream<F> {
+impl Stream for FileStream {
     type Item = DeltaResult<RecordBatch>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
