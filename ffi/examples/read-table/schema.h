@@ -1,3 +1,4 @@
+#include <stdint.h>
 #include "delta_kernel_ffi.h"
 
 /**
@@ -8,21 +9,21 @@
  * Each list is a "SchemaItemList", which tracks its length an an array of "SchemaItem"s.
  *
  * Each "SchemaItem" has a name and a type, which are just strings. It can also have a list which is
- * its children. This is initially always NULL, but when visiting a struct, map, or array, we point
- * this at the list specified in the callback, which allows us to traverse the schema when printing
- * it. Note that this points to one of the lists in the builder's set of lists and is not a copy.
+ * its children. This is initially always UINTPTR_MAX, but when visiting a struct, map, or array, we
+ * point this at the list id specified in the callback, which allows us to traverse the schema when
+ * printing it.
  */
 
 // If you want the visitor to print out what it's being asked to do at each step, uncomment the
 // following line
-// #define PRINT_VISITS
+//#define PRINT_VISITS
 
 typedef struct SchemaItemList SchemaItemList;
 
 typedef struct {
   char* name;
   char* type;
-  SchemaItemList* children;
+  uintptr_t children;
 } SchemaItem;
 
 typedef struct SchemaItemList {
@@ -52,7 +53,8 @@ SchemaItem* add_to_list(SchemaItemList *list, char* name, char* type) {
 }
 
 // print out all items in a list, recursing into any children they may have
-void print_list(SchemaItemList *list, int indent, bool parent_on_last) {
+void print_list(SchemaBuilder* builder, uintptr_t list_id, int indent, bool parent_on_last) {
+  SchemaItemList *list = builder->lists+list_id;
   for (int i = 0; i < list->len; i++) {
     bool is_last = i == list->len - 1;
     for (int j = 0; j <= indent; j++) {
@@ -72,8 +74,8 @@ void print_list(SchemaItemList *list, int indent, bool parent_on_last) {
       }
     }
     printf("─ %s: %s\n", list->list[i].name, list->list[i].type);
-    if (list->list[i].children) {
-      print_list(list->list[i].children, indent+1, is_last);
+    if (list->list[i].children != UINTPTR_MAX) {
+      print_list(builder, list->list[i].children, indent+1, is_last);
     }
   }
 }
@@ -88,6 +90,9 @@ uintptr_t make_field_list(void *data, uintptr_t reserve) {
   builder->list_count++;
   builder->lists = realloc(builder->lists, sizeof(SchemaItemList) * builder->list_count);
   SchemaItem* list = calloc(reserve, sizeof(SchemaItem));
+  for (int i = 0; i < reserve; i++) {
+    list[i].children = UINTPTR_MAX;
+  }
   builder->lists[id].len = 0;
   builder->lists[id].list = list;
   return id;
@@ -97,38 +102,38 @@ void visit_struct(void *data,
                   uintptr_t sibling_list_id,
                   struct KernelStringSlice name,
                   uintptr_t child_list_id) {
-#ifdef PRINT_VISITS
-  printf("Asked to visit a struct, belonging to list %i. Children are in %i\n", sibling_list_id, child_list_id);
-#endif
   SchemaBuilder *builder = (SchemaBuilder*)data;
   char* name_ptr = allocate_name(name);
+#ifdef PRINT_VISITS
+  printf("Asked to visit a struct, belonging to list %i for %s. Children are in %i\n", sibling_list_id, name_ptr, child_list_id);
+#endif
   SchemaItem* struct_item = add_to_list(builder->lists+sibling_list_id, name_ptr, "struct");
-  struct_item->children = builder->lists+child_list_id;
+  struct_item->children = child_list_id;
 }
 void visit_array(void *data,
                  uintptr_t sibling_list_id,
                  struct KernelStringSlice name,
                  bool contains_null,
                  uintptr_t child_list_id) {
-#ifdef PRINT_VISITS
-  printf("Asked to visit array, belonging to list %i. Types are in %i\n", sibling_list_id, child_list_id);
-#endif
   SchemaBuilder *builder = (SchemaBuilder*)data;
   char* name_ptr = allocate_name(name);
+#ifdef PRINT_VISITS
+  printf("Asked to visit array, belonging to list %i for %s. Types are in %i\n", sibling_list_id, name_ptr, child_list_id);
+#endif
   SchemaItem* array_item = add_to_list(builder->lists+sibling_list_id, name_ptr, "array");
-  array_item->children = builder->lists+child_list_id;
+  array_item->children = child_list_id;
 }
 void visit_map(void *data,
                uintptr_t sibling_list_id,
                struct KernelStringSlice name,
                uintptr_t child_list_id) {
-#ifdef PRINT_VISITS
-  printf("Asked to visit map, belonging to list %i. Types are in %i\n", sibling_list_id, child_list_id);
-#endif
   SchemaBuilder *builder = (SchemaBuilder*)data;
   char* name_ptr = allocate_name(name);
+#ifdef PRINT_VISITS
+  printf("Asked to visit map, belonging to list %i for %s. Types are in %i\n", sibling_list_id, name_ptr, child_list_id);
+#endif
   SchemaItem* map_item = add_to_list(builder->lists+sibling_list_id, name_ptr, "map");
-  map_item->children = builder->lists+child_list_id;
+  map_item->children = child_list_id;
 }
 
 void visit_decimal(void *data,
@@ -147,11 +152,11 @@ void visit_decimal(void *data,
 }
 
 void visit_simple_type(void *data, uintptr_t sibling_list_id, struct KernelStringSlice name, char* type) {
-#ifdef PRINT_VISITS
-  printf("Asked to visit a(n) %s belonging to list %i\n", type, sibling_list_id);
-#endif
   SchemaBuilder *builder = (SchemaBuilder*)data;
   char* name_ptr = allocate_name(name);
+#ifdef PRINT_VISITS
+  printf("Asked to visit a(n) %s belonging to list %i for %s\n", type, sibling_list_id, name_ptr);
+#endif
   add_to_list(builder->lists+sibling_list_id, name_ptr, type);
 }
 
@@ -202,7 +207,7 @@ void visit_timestamp_ntz(void *data, uintptr_t sibling_list_id, struct KernelStr
   visit_simple_type(data, sibling_list_id, name, "timestamp_ntz");
 }
 
-// free all the data in the builder (but not the builder itself, since that might be stack allocated)
+// free all the data in the builder (but not the builder itself, it's stack allocated)
 void free_builder(SchemaBuilder builder) {
   for (int i = 0; i < builder.list_count; i++) {
     SchemaItemList *list = (builder.lists)+i;
@@ -214,8 +219,6 @@ void free_builder(SchemaBuilder builder) {
         // except decimal types, we malloc'd those :)
         free(item->type);
       }
-      // don't free item->children, it's just a list in the builder so will be freed by the outer
-      // loop.
     }
     free(list->list); // free all the items in this list (we alloc'd them together)
   }
@@ -253,7 +256,7 @@ void print_schema(const SnapshotHandle *snapshot) {
   printf("Schema returned in list %i\n", schema_list_id);
 #endif
   printf("Schema:\n");
-  print_list(builder.lists+schema_list_id, 0, false);
+  print_list(&builder, schema_list_id, 0, false);
   printf("\n");
   free_builder(builder);
 }
