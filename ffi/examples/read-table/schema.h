@@ -37,9 +37,7 @@ typedef struct {
 } SchemaBuilder;
 
 char* allocate_name(const KernelStringSlice slice) {
-  char* buf = malloc(sizeof(char) * (slice.len + 1)); // +1 for null
-  snprintf(buf, slice.len + 1, "%s", slice.ptr);
-  return buf;
+  return strndup(slice.ptr, slice.len);
 }
 
 // lists are preallocated to have exactly enough space, so we just fill in the next open slot and
@@ -57,23 +55,17 @@ void print_list(SchemaBuilder* builder, uintptr_t list_id, int indent, bool pare
   SchemaItemList *list = builder->lists+list_id;
   for (int i = 0; i < list->len; i++) {
     bool is_last = i == list->len - 1;
-    for (int j = 0; j <= indent; j++) {
-      if (j == indent) {
-        if (is_last) {
-          printf("└");
-        } else {
-          printf("├");
-        }
+    for (int j = 0; j < indent; j++) {
+      if (parent_on_last && j == indent - 1) {
+	// don't print a dangling | on my parent's last item
+	printf("   ");
       } else {
-        if (parent_on_last && j == indent - 1) {
-          // don't print a dangling | on my parent's last item
-          printf("   ");
-        } else {
-          printf("│  ");
-        }
+	printf("│  ");
       }
     }
-    printf("─ %s: %s\n", list->list[i].name, list->list[i].type);
+    SchemaItem* item = &list->list[i];
+    char* prefix = is_last? "└" : "├";
+    printf("%s─ %s: %s\n", prefix, item->name, item->type);
     if (list->list[i].children != UINTPTR_MAX) {
       print_list(builder, list->list[i].children, indent+1, is_last);
     }
@@ -82,7 +74,7 @@ void print_list(SchemaBuilder* builder, uintptr_t list_id, int indent, bool pare
 
 // declare all our visitor methods
 uintptr_t make_field_list(void *data, uintptr_t reserve) {
-  SchemaBuilder *builder = (SchemaBuilder*)data;
+  SchemaBuilder *builder = data;
   int id = builder->list_count;
 #ifdef PRINT_VISITS
   printf("Making a list of lenth %i with id %i\n", reserve, id);
@@ -102,7 +94,7 @@ void visit_struct(void *data,
                   uintptr_t sibling_list_id,
                   struct KernelStringSlice name,
                   uintptr_t child_list_id) {
-  SchemaBuilder *builder = (SchemaBuilder*)data;
+  SchemaBuilder *builder = data;
   char* name_ptr = allocate_name(name);
 #ifdef PRINT_VISITS
   printf("Asked to visit a struct, belonging to list %i for %s. Children are in %i\n", sibling_list_id, name_ptr, child_list_id);
@@ -115,7 +107,7 @@ void visit_array(void *data,
                  struct KernelStringSlice name,
                  bool contains_null,
                  uintptr_t child_list_id) {
-  SchemaBuilder *builder = (SchemaBuilder*)data;
+  SchemaBuilder *builder = data;
   char* name_ptr = allocate_name(name);
 #ifdef PRINT_VISITS
   printf("Asked to visit array, belonging to list %i for %s. Types are in %i\n", sibling_list_id, name_ptr, child_list_id);
@@ -127,7 +119,7 @@ void visit_map(void *data,
                uintptr_t sibling_list_id,
                struct KernelStringSlice name,
                uintptr_t child_list_id) {
-  SchemaBuilder *builder = (SchemaBuilder*)data;
+  SchemaBuilder *builder = data;
   char* name_ptr = allocate_name(name);
 #ifdef PRINT_VISITS
   printf("Asked to visit map, belonging to list %i for %s. Types are in %i\n", sibling_list_id, name_ptr, child_list_id);
@@ -144,15 +136,17 @@ void visit_decimal(void *data,
 #ifdef PRINT_VISITS
   printf("Asked to visit decimal with precision %i and scale %i, belonging to list %i\n", sibling_list_id);
 #endif
-  SchemaBuilder *builder = (SchemaBuilder*)data;
+  SchemaBuilder *builder = data;
   char* name_ptr = allocate_name(name);
   char* type = malloc(16 * sizeof(char));
-  sprintf(type, "decimal(%i)(%i)", precision, scale);
+  snprintf(type, 16, "decimal(%i)(%i)", precision, scale);
   add_to_list(builder->lists+sibling_list_id, name_ptr, type);
 }
 
+
+
 void visit_simple_type(void *data, uintptr_t sibling_list_id, struct KernelStringSlice name, char* type) {
-  SchemaBuilder *builder = (SchemaBuilder*)data;
+  SchemaBuilder *builder = data;
   char* name_ptr = allocate_name(name);
 #ifdef PRINT_VISITS
   printf("Asked to visit a(n) %s belonging to list %i for %s\n", type, sibling_list_id, name_ptr);
@@ -160,52 +154,22 @@ void visit_simple_type(void *data, uintptr_t sibling_list_id, struct KernelStrin
   add_to_list(builder->lists+sibling_list_id, name_ptr, type);
 }
 
-void visit_string(void *data, uintptr_t sibling_list_id, struct KernelStringSlice name) {
-  visit_simple_type(data, sibling_list_id, name, "string");
-}
+#define DEFINE_VISIT_SIMPLE_TYPE(typename) \
+  void visit_##typename(void *data, uintptr_t sibling_list_id, struct KernelStringSlice name) { \
+    visit_simple_type(data, sibling_list_id, name, #typename);		\
+  }
 
-void visit_long(void *data, uintptr_t sibling_list_id, struct KernelStringSlice name) {
-  visit_simple_type(data, sibling_list_id, name, "long");
-}
-
-void visit_integer(void *data, uintptr_t sibling_list_id, struct KernelStringSlice name) {
-  visit_simple_type(data, sibling_list_id, name, "integer");
-}
-
-void visit_short(void *data, uintptr_t sibling_list_id, struct KernelStringSlice name) {
-  visit_simple_type(data, sibling_list_id, name, "short");
-}
-
-void visit_byte(void *data, uintptr_t sibling_list_id, struct KernelStringSlice name) {
-  visit_simple_type(data, sibling_list_id, name, "byte");
-}
-void visit_float(void *data, uintptr_t sibling_list_id, struct KernelStringSlice name) {
-  visit_simple_type(data, sibling_list_id, name, "float");
-}
-
-void visit_double(void *data, uintptr_t sibling_list_id, struct KernelStringSlice name) {
-  visit_simple_type(data, sibling_list_id, name, "double");
-}
-
-void visit_boolean(void *data, uintptr_t sibling_list_id, struct KernelStringSlice name) {
-  visit_simple_type(data, sibling_list_id, name, "boolean");
-}
-
-void visit_binary(void *data, uintptr_t sibling_list_id, struct KernelStringSlice name) {
-  visit_simple_type(data, sibling_list_id, name, "binary");
-}
-
-void visit_date(void *data, uintptr_t sibling_list_id, struct KernelStringSlice name) {
-  visit_simple_type(data, sibling_list_id, name, "date");
-}
-
-void visit_timestamp(void *data, uintptr_t sibling_list_id, struct KernelStringSlice name) {
-  visit_simple_type(data, sibling_list_id, name, "timestamp");
-}
-
-void visit_timestamp_ntz(void *data, uintptr_t sibling_list_id, struct KernelStringSlice name) {
-  visit_simple_type(data, sibling_list_id, name, "timestamp_ntz");
-}
+DEFINE_VISIT_SIMPLE_TYPE(string);
+DEFINE_VISIT_SIMPLE_TYPE(integer);
+DEFINE_VISIT_SIMPLE_TYPE(short);
+DEFINE_VISIT_SIMPLE_TYPE(byte);
+DEFINE_VISIT_SIMPLE_TYPE(float);
+DEFINE_VISIT_SIMPLE_TYPE(double);
+DEFINE_VISIT_SIMPLE_TYPE(boolean);
+DEFINE_VISIT_SIMPLE_TYPE(binary);
+DEFINE_VISIT_SIMPLE_TYPE(date);
+DEFINE_VISIT_SIMPLE_TYPE(timestamp);
+DEFINE_VISIT_SIMPLE_TYPE(timestamp_ntz);
 
 // free all the data in the builder (but not the builder itself, it's stack allocated)
 void free_builder(SchemaBuilder builder) {
