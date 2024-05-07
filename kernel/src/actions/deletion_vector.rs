@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use delta_kernel_derive::Schema;
-use roaring::{RoaringBitmap, RoaringTreemap};
+use roaring::RoaringTreemap;
 use url::Url;
 
 use crate::{DeltaResult, Error, FileSystemClient};
@@ -106,28 +106,8 @@ impl DeletionVectorDescriptor {
                 let mut cursor = Cursor::new(Bytes::copy_from_slice(&byte_slice));
                 let magic = read_u32(&mut cursor, Endian::Little)?;
                 match magic {
-                    1681511377 => {
-                        let number_of_bitmaps = read_u64(&mut cursor, Endian::Little)?;
-                        let mut bitmaps = Vec::with_capacity(number_of_bitmaps as usize);
-                        let mut last_index = 0;
-                        for _ in 0..number_of_bitmaps {
-                            let key = read_u32(&mut cursor, Endian::Little)?;
-                            if last_index < key {
-                                return Err(Error::DeletionVector(format!(
-                                    "Invalid key in bitmap array {key}"
-                                )));
-                            }
-                            while last_index < key {
-                                bitmaps.push((last_index, RoaringBitmap::default()));
-                                last_index += 1;
-                            }
-                            let bitmap = RoaringBitmap::deserialize_from(&mut cursor)
-                                .map_err(|err| Error::DeletionVector(err.to_string()))?;
-                            bitmaps.push((key, bitmap));
-                            last_index = key;
-                        }
-                        Ok(RoaringTreemap::from_bitmaps(bitmaps))
-                    }
+                    1681511377 => RoaringTreemap::deserialize_from(cursor)
+                        .map_err(|err| Error::DeletionVector(err.to_string())),
                     1681511376 => {
                         todo!("Don't support native serialization in inline bitmaps yet");
                     }
@@ -200,18 +180,6 @@ fn read_u32(cursor: &mut Cursor<Bytes>, endian: Endian) -> DeltaResult<u32> {
     match endian {
         Endian::Big => Ok(u32::from_be_bytes(buf)),
         Endian::Little => Ok(u32::from_le_bytes(buf)),
-    }
-}
-
-/// small helper to read a big or little endian u64 from a cursor
-fn read_u64(cursor: &mut Cursor<Bytes>, endian: Endian) -> DeltaResult<u64> {
-    let mut buf = [0; 8];
-    cursor
-        .read(&mut buf)
-        .map_err(|err| Error::DeletionVector(err.to_string()))?;
-    match endian {
-        Endian::Big => Ok(u64::from_be_bytes(buf)),
-        Endian::Little => Ok(u64::from_le_bytes(buf)),
     }
 }
 
