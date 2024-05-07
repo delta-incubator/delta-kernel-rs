@@ -112,8 +112,10 @@ impl DeletionVectorDescriptor {
                         let mut last_index = 0;
                         for _ in 0..number_of_bitmaps {
                             let key = read_u32(&mut cursor, Endian::Little)?;
-                            if last_index < key{
-                                return Err(Error::DeletionVector(format!("Invalid key in bitmap array {key}")));
+                            if last_index < key {
+                                return Err(Error::DeletionVector(format!(
+                                    "Invalid key in bitmap array {key}"
+                                )));
                             }
                             while last_index < key {
                                 bitmaps.push((last_index, RoaringBitmap::default()));
@@ -129,9 +131,7 @@ impl DeletionVectorDescriptor {
                     1681511376 => {
                         todo!("Don't support native serialization in inline bitmaps yet");
                     }
-                    _ => {
-                        Err(Error::DeletionVector(format!("Invalid magic {magic}")))
-                    }
+                    _ => Err(Error::DeletionVector(format!("Invalid magic {magic}"))),
                 }
             }
             Some(path) => {
@@ -277,7 +277,8 @@ mod tests {
     fn dv_inline() -> DeletionVectorDescriptor {
         DeletionVectorDescriptor {
             storage_type: "i".to_string(),
-            path_or_inline_dv: "^Bg9^0rr910000000000iXQKl0rr91000f55c8Xg0@@D72lkbi5=-{L".to_string(),
+            path_or_inline_dv: "^Bg9^0rr910000000000iXQKl0rr91000f55c8Xg0@@D72lkbi5=-{L"
+                .to_string(),
             offset: None,
             size_in_bytes: 44,
             cardinality: 6,
@@ -331,10 +332,10 @@ mod tests {
         let parent = Url::parse("http://not.used").unwrap();
         let tree_map = inline.read(fs_client, &parent).unwrap();
         assert_eq!(tree_map.len(), 6);
-        for i in [3,4,7,11,18,29] {
+        for i in [3, 4, 7, 11, 18, 29] {
             assert!(tree_map.contains(i));
         }
-        for i in [1,2,8,17,55,200] {
+        for i in [1, 2, 8, 17, 55, 200] {
             assert!(!tree_map.contains(i));
         }
     }
