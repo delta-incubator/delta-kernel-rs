@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use delta_kernel_derive::Schema;
-use roaring::RoaringTreemap;
+use roaring::{RoaringBitmap, RoaringTreemap};
 use url::Url;
 
 use crate::{DeltaResult, Error, FileSystemClient};
@@ -101,10 +101,38 @@ impl DeletionVectorDescriptor {
     ) -> DeltaResult<RoaringTreemap> {
         match self.absolute_path(parent)? {
             None => {
-                let bytes = z85::decode(&self.path_or_inline_dv)
+                let byte_slice = z85::decode(&self.path_or_inline_dv)
                     .map_err(|_| Error::deletion_vector("Failed to decode DV"))?;
-                RoaringTreemap::deserialize_from(&bytes[12..])
-                    .map_err(|err| Error::DeletionVector(err.to_string()))
+                let mut cursor = Cursor::new(Bytes::copy_from_slice(&byte_slice));
+                let magic = read_u32(&mut cursor, Endian::Little)?;
+                match magic {
+                    1681511377 => {
+                        let number_of_bitmaps = read_u64(&mut cursor, Endian::Little)?;
+                        let mut bitmaps = Vec::with_capacity(number_of_bitmaps as usize);
+                        let mut last_index = 0;
+                        for _ in 0..number_of_bitmaps {
+                            let key = read_u32(&mut cursor, Endian::Little)?;
+                            if last_index < key{
+                                return Err(Error::DeletionVector(format!("Invalid key in bitmap array {key}")));
+                            }
+                            while last_index < key {
+                                bitmaps.push((last_index, RoaringBitmap::default()));
+                                last_index += 1;
+                            }
+                            let bitmap = RoaringBitmap::deserialize_from(&mut cursor)
+                                .map_err(|err| Error::DeletionVector(err.to_string()))?;
+                            bitmaps.push((key, bitmap));
+                            last_index = key;
+                        }
+                        Ok(RoaringTreemap::from_bitmaps(bitmaps))
+                    }
+                    1681511376 => {
+                        todo!("Don't support native serialization in inline bitmaps yet");
+                    }
+                    _ => {
+                        Err(Error::DeletionVector(format!("Invalid magic {magic}")))
+                    }
+                }
             }
             Some(path) => {
                 let offset = self.offset;
@@ -175,6 +203,18 @@ fn read_u32(cursor: &mut Cursor<Bytes>, endian: Endian) -> DeltaResult<u32> {
     }
 }
 
+/// small helper to read a big or little endian u32 from a cursor
+fn read_u64(cursor: &mut Cursor<Bytes>, endian: Endian) -> DeltaResult<u64> {
+    let mut buf = [0; 8];
+    cursor
+        .read(&mut buf)
+        .map_err(|err| Error::DeletionVector(err.to_string()))?;
+    match endian {
+        Endian::Big => Ok(u64::from_be_bytes(buf)),
+        Endian::Little => Ok(u64::from_le_bytes(buf)),
+    }
+}
+
 /// helper function to convert a treemap into a boolean vector where, for index i, if the bit is
 /// set, the vector will be false, and otherwise at index i the vector will be true
 pub(crate) fn treemap_to_bools(treemap: RoaringTreemap) -> Vec<bool> {
@@ -237,9 +277,9 @@ mod tests {
     fn dv_inline() -> DeletionVectorDescriptor {
         DeletionVectorDescriptor {
             storage_type: "i".to_string(),
-            path_or_inline_dv: "wi5b=000010000siXQKl0rr91000f55c8Xg0@@D72lkbi5=-{L".to_string(),
+            path_or_inline_dv: "^Bg9^0rr910000000000iXQKl0rr91000f55c8Xg0@@D72lkbi5=-{L".to_string(),
             offset: None,
-            size_in_bytes: 40,
+            size_in_bytes: 44,
             cardinality: 6,
         }
     }
@@ -281,6 +321,22 @@ mod tests {
             .unwrap();
         let example = dv_example();
         assert_eq!(dv_url, example.absolute_path(&parent).unwrap().unwrap());
+    }
+
+    #[test]
+    fn test_inline_read() {
+        let inline = dv_inline();
+        let sync_engine = SyncEngine::new();
+        let fs_client = sync_engine.get_file_system_client();
+        let parent = Url::parse("http://not.used").unwrap();
+        let tree_map = inline.read(fs_client, &parent).unwrap();
+        assert_eq!(tree_map.len(), 6);
+        for i in [3,4,7,11,18,29] {
+            assert!(tree_map.contains(i));
+        }
+        for i in [1,2,8,17,55,200] {
+            assert!(!tree_map.contains(i));
+        }
     }
 
     #[test]
