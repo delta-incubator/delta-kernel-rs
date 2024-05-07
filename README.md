@@ -15,7 +15,8 @@ Delta-kernel-rs is split into a few different crates:
 - kernel: The actual core kernel crate
 - acceptance: Acceptance tests that validate correctness  via the [Delta Acceptance Tests][dat]
 - derive-macros: A crate for our [derive-macros] to live in
-- ffi: Functionallity that enables delta-kernel-rs to be used from `C` or `C++`
+- ffi: Functionallity that enables delta-kernel-rs to be used from `C` or `C++` See the [ffi](ffi)
+  directory for more information.
 
 ## Building
 By default we build only the `kernel` and `acceptance` crates, which will also build `derive-macros`
@@ -29,10 +30,6 @@ cargo test
 
 This will build the kernel, run all unit tests, fetch the [Delta Acceptance Tests][dat] data and run
 the acceptance tests against it.
-
-```sh
-cargo test --features acceptance,default-engine
-```
 
 As it is a library, in general you will want to depend on `delta-kernel-rs` by adding it as a
 dependency to your `Cargo.toml`.
