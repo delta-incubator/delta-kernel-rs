@@ -16,7 +16,7 @@ use object_store::path::Path;
 use object_store::{DynObjectStore, GetResultPayload};
 
 use super::executor::TaskExecutor;
-use super::file_handler::{FileOpenFuture, FileOpener, FileStream};
+use super::file_stream::{FileOpenFuture, FileOpener, FileStream};
 use crate::engine::arrow_data::ArrowEngineData;
 use crate::schema::SchemaRef;
 use crate::{
@@ -126,11 +126,11 @@ impl<E: TaskExecutor> JsonHandler for DefaultJsonHandler<E> {
         }
 
         let schema: ArrowSchemaRef = Arc::new(physical_schema.as_ref().try_into()?);
-        let file_reader = JsonOpener::new(self.batch_size, schema.clone(), self.store.clone());
-        FileStream::new_file_data_read_iterator(
+        let file_opener = JsonOpener::new(self.batch_size, schema.clone(), self.store.clone());
+        FileStream::new_async_read_iterator(
             self.task_executor.clone(),
             schema,
-            Box::new(file_reader),
+            Box::new(file_opener),
             files,
             self.readahead,
         )

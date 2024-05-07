@@ -90,7 +90,7 @@ pub struct FileStream {
     /// (before reaching the limit) and returns a batch iterator. If the file reader
     /// is not capable of limiting the number of records in the last batch, the file
     /// stream will take care of truncating it.
-    file_reader: Box<dyn FileOpener>,
+    file_opener: Box<dyn FileOpener>,
     /// The stream state
     state: FileStreamState,
     /// Describes the behavior of the `FileStream` if file opening or scanning fails
@@ -98,14 +98,17 @@ pub struct FileStream {
 }
 
 impl FileStream {
-    pub fn new_file_data_read_iterator<E: TaskExecutor>(
+    /// Creates a new `FileStream` from a given schema, `FileOpener`, and files list; the files are
+    /// processed asynchronously by the provided `TaskExecutor`. Returns an `Iterator` that consumes
+    /// the results.
+    pub fn new_async_read_iterator<E: TaskExecutor>(
         task_executor: Arc<E>,
         schema: ArrowSchemaRef,
-        file_reader: Box<dyn FileOpener>,
+        file_opener: Box<dyn FileOpener>,
         files: &[FileMeta],
         readahead: usize,
     ) -> DeltaResult<FileDataReadResultIterator> {
-        let mut stream = FileStream::new(files.to_vec(), schema, file_reader)?;
+        let mut stream = FileStream::new(files.to_vec(), schema, file_opener)?;
 
         // This channel will become the output iterator
         // The stream will execute in the background, and we allow up to `readahead`
@@ -132,6 +135,11 @@ impl FileStream {
         });
 
         // Create a thread-safe iterator, because engine may consume it from multiple threads.
+        //
+        // NOTE: Every call to the iterator's `next` method will lock the mutex before accessing the
+        // underlying stream. This should not be a bottleneck because the stream will immediately
+        // return an item (if ready) and would anyway block if not ready. Additionally, each
+        // iterator element corresponds to a file access whose cost dwarfs any mutex overhead.
         let it = receiver
             .into_iter()
             .map(|rbr| rbr.map(|rb| Box::new(ArrowEngineData::new(rb)) as _));
@@ -143,16 +151,16 @@ impl FileStream {
         Ok(Box::new(it))
     }
 
-    /// Create a new `FileStream` using the give `FileOpener` to scan underlying files
+    /// Create a new `FileStream` using the given `FileOpener` to scan underlying files
     pub fn new(
         files: impl IntoIterator<Item = FileMeta>,
         schema: ArrowSchemaRef,
-        file_reader: Box<dyn FileOpener>,
+        file_opener: Box<dyn FileOpener>,
     ) -> DeltaResult<Self> {
         Ok(Self {
             file_iter: files.into_iter().collect(),
             projected_schema: schema,
-            file_reader,
+            file_opener,
             state: FileStreamState::Idle,
             on_error: OnError::Fail,
         })
@@ -173,7 +181,7 @@ impl FileStream {
     /// bunch of sequential IO), it can be parallelized with decoding.
     fn start_next_file(&mut self) -> Option<DeltaResult<FileOpenFuture>> {
         let file_meta = self.file_iter.pop_front()?;
-        Some(self.file_reader.open(file_meta, None))
+        Some(self.file_opener.open(file_meta, None))
     }
 
     fn poll_inner(&mut self, cx: &mut Context<'_>) -> Poll<Option<DeltaResult<RecordBatch>>> {
