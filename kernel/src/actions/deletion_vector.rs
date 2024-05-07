@@ -203,7 +203,7 @@ fn read_u32(cursor: &mut Cursor<Bytes>, endian: Endian) -> DeltaResult<u32> {
     }
 }
 
-/// small helper to read a big or little endian u32 from a cursor
+/// small helper to read a big or little endian u64 from a cursor
 fn read_u64(cursor: &mut Cursor<Bytes>, endian: Endian) -> DeltaResult<u64> {
     let mut buf = [0; 8];
     cursor
