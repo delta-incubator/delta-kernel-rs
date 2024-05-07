@@ -680,6 +680,7 @@ pub struct EngineSchemaVisitor {
         data: *mut c_void,
         sibling_list_id: usize,
         name: KernelStringSlice,
+        value_contains_null: bool, // if this map can contain null values
         child_list_id: usize,
     ),
 
@@ -762,7 +763,7 @@ macro_rules! gen_visit_match {
             }
             DataType::Map(mt) => {
                 let child_list_id = visit_map_types($visitor, mt);
-                ($visitor.visit_map)($visitor.data, $sibling_list_id, $name.into(), child_list_id);
+                ($visitor.visit_map)($visitor.data, $sibling_list_id, $name.into(), mt.value_contains_null, child_list_id);
             }
         }
     };

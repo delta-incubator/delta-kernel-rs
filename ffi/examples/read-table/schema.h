@@ -108,7 +108,9 @@ void visit_array(void *data,
                  bool contains_null,
                  uintptr_t child_list_id) {
   SchemaBuilder *builder = data;
-  char* name_ptr = allocate_name(name);
+  char* name_ptr = malloc(sizeof(char) * (name.len + 24));
+  snprintf(name_ptr, name.len+1, "%s", name.ptr);
+  snprintf(name_ptr+name.len, 24, " (contains null: %s)", contains_null ? "true" : "false");
 #ifdef PRINT_VISITS
   printf("Asked to visit array, belonging to list %i for %s. Types are in %i\n", sibling_list_id, name_ptr, child_list_id);
 #endif
@@ -118,9 +120,12 @@ void visit_array(void *data,
 void visit_map(void *data,
                uintptr_t sibling_list_id,
                struct KernelStringSlice name,
+	       bool value_contains_null,
                uintptr_t child_list_id) {
   SchemaBuilder *builder = data;
-  char* name_ptr = allocate_name(name);
+  char* name_ptr = malloc(sizeof(char) * (name.len + 24));
+  snprintf(name_ptr, name.len+1, "%s", name.ptr);
+  snprintf(name_ptr+name.len, 24, " (contains null: %s)", value_contains_null ? "true" : "false");
 #ifdef PRINT_VISITS
   printf("Asked to visit map, belonging to list %i for %s. Types are in %i\n", sibling_list_id, name_ptr, child_list_id);
 #endif
