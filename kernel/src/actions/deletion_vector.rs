@@ -103,10 +103,9 @@ impl DeletionVectorDescriptor {
             None => {
                 let byte_slice = z85::decode(&self.path_or_inline_dv)
                     .map_err(|_| Error::deletion_vector("Failed to decode DV"))?;
-                let mut cursor = Cursor::new(Bytes::copy_from_slice(&byte_slice));
-                let magic = read_u32(&mut cursor, Endian::Little)?;
+                let magic = slice_to_u32(&byte_slice[0..4], Endian::Little)?;
                 match magic {
-                    1681511377 => RoaringTreemap::deserialize_from(cursor)
+                    1681511377 => RoaringTreemap::deserialize_from(&byte_slice[4..])
                         .map_err(|err| Error::DeletionVector(err.to_string())),
                     1681511376 => {
                         todo!("Don't support native serialization in inline bitmaps yet");
@@ -180,6 +179,17 @@ fn read_u32(cursor: &mut Cursor<Bytes>, endian: Endian) -> DeltaResult<u32> {
     match endian {
         Endian::Big => Ok(u32::from_be_bytes(buf)),
         Endian::Little => Ok(u32::from_le_bytes(buf)),
+    }
+}
+
+/// decode a slice into a u32
+fn slice_to_u32(buf: &[u8], endian: Endian) -> DeltaResult<u32> {
+    let arry = buf
+        .try_into()
+        .map_err(|_| Error::generic("Must have a 4 byte slice to decode to u32"))?;
+    match endian {
+        Endian::Big => Ok(u32::from_be_bytes(arry)),
+        Endian::Little => Ok(u32::from_le_bytes(arry)),
     }
 }
 
