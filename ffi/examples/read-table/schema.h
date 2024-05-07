@@ -57,10 +57,10 @@ void print_list(SchemaBuilder* builder, uintptr_t list_id, int indent, bool pare
     bool is_last = i == list->len - 1;
     for (int j = 0; j < indent; j++) {
       if (parent_on_last && j == indent - 1) {
-	// don't print a dangling | on my parent's last item
-	printf("   ");
+        // don't print a dangling | on my parent's last item
+        printf("   ");
       } else {
-	printf("│  ");
+        printf("│  ");
       }
     }
     SchemaItem* item = &list->list[i];
@@ -156,7 +156,7 @@ void visit_simple_type(void *data, uintptr_t sibling_list_id, struct KernelStrin
 
 #define DEFINE_VISIT_SIMPLE_TYPE(typename) \
   void visit_##typename(void *data, uintptr_t sibling_list_id, struct KernelStringSlice name) { \
-    visit_simple_type(data, sibling_list_id, name, #typename);		\
+    visit_simple_type(data, sibling_list_id, name, #typename);          \
   }
 
 DEFINE_VISIT_SIMPLE_TYPE(string);
