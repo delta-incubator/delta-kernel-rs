@@ -624,26 +624,26 @@ pub unsafe extern "C" fn version(snapshot: *const SnapshotHandle) -> u64 {
 /// representation of a schema from a particular schema within kernel.
 ///
 /// The model is list based. When the kernel needs a list, it will ask engine to allocate one of a
-/// particular size. Once allocated the engine returns an `id`, which can be anything the engine
-/// wants, and will be passed back to the engine to identify the list in the future.
+/// particular size. Once allocated the engine returns an `id`, which can be any identifier the
+/// engine wants, and will be passed back to the engine to identify the list in the future.
 ///
-/// The top level of a schema is always a struct. A schema can be visited by calling
-/// [`visit_schema`] and passing a [`Snapshot`] and an `EngineSchemaVisitor`. As kernel traverses
-/// its schema it will do the following at each node:
-///
-/// - For a struct, map, or array type:
-///     1. Ask engine to allocate a "child" list, indicating how many items will be needed.
-///     2. For a struct, visit each child, with `sibling_list_id` set to the just allocated list.
-///     3. For a map, visit the key type and the value type with `sibling_list_id` set to the just
-///        allocated list.
-///     4. For an array, visit the item type with `sibling_list_id` set to the just allocated list.
-///     5. Finally call `visit_[struct/array/map]` with `child_list_id` set to the list allocated
-///        in step 1. This has enough information to build the entire type on the engine side.
-///
-/// - For a simple type simply call `visit_[type]`, with `sibling_list_id` set to the `id` of the
-/// list the type should be added to.
-///
-/// [`visit_schema`] will return the id of the list associated with the top level struct
+/// Every schema element the kernel visits belongs to some list of "sibling" elements. The schema
+/// itself is a list of schema elements, and every complex type (struct, map, array) contains a list
+/// of "child" elements.
+///  1. Before visiting schema or any complex type, the kernel asks the engine to allocate a list to
+///     hold its children
+///  2. When visiting any schema element, the kernel passes its parent's "child list" as the
+///     "sibling list" the element should be appended to:
+///      - For the top-level schema, visit each top-level column, passing the column's name and type
+///      - For a struct, first visit each struct field, passing the field's name, type, nullability,
+///        and metadata
+///      - For a map, visit the key and value, passing its special name ("key" or "value"), type,
+///        and value nullability (keys are never nullable)
+///      - For a list, visit the element, passing its special name ("element"), type, and
+///        nullability
+///  3. When visiting a complex schema element, the kernel also passes the "child list" containing
+///     that element's (already-visited) children.
+///  4. The [`visit_schema`] method returns the id of the list of top-level columns
 // WARNING: the visitor MUST NOT retain internal references to the string slices passed to visitor methods
 // TODO: nullability
 #[repr(C)]
@@ -742,9 +742,14 @@ pub struct EngineSchemaVisitor {
         extern "C" fn(data: *mut c_void, sibling_list_id: usize, name: KernelStringSlice),
 }
 
+/// Visit the schema of the passed `SnapshotHandle`, using the provided `visitor`. See the
+/// documentation of [`EngineSchemaVisitor`] for a description of how this visitor works.
+///
+/// This method returns the id of the list allocated to hold the top level schema columns.
+///
 /// # Safety
 ///
-/// Caller is responsible for passing a valid handle.
+/// Caller is responsible for passing a valid snapshot handle and schema visitor.
 #[no_mangle]
 pub unsafe extern "C" fn visit_schema(
     snapshot: *const SnapshotHandle,
