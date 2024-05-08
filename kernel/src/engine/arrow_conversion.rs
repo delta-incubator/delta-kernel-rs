@@ -207,7 +207,7 @@ impl TryFrom<&ArrowDataType> for DataType {
             ArrowDataType::FixedSizeBinary(_) => Ok(DataType::Primitive(PrimitiveType::Binary)),
             ArrowDataType::LargeBinary => Ok(DataType::Primitive(PrimitiveType::Binary)),
             ArrowDataType::Decimal128(p, s) => {
-                if p > &38 || s > 38 {
+                if p > &38 || s > &38 {
                     return Err(ArrowError::SchemaError(format!(
                         "Precision too large to be represented as Delta type: {} > 38",
                         p
