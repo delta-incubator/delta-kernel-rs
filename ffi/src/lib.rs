@@ -742,33 +742,6 @@ pub struct EngineSchemaVisitor {
         extern "C" fn(data: *mut c_void, sibling_list_id: usize, name: KernelStringSlice),
 }
 
-macro_rules! gen_visit_match {
-    ( $match_item: expr, $visitor: ident, $sibling_list_id: ident, $name: ident, $(($prim_type: ident, $visit_fun: ident)), * ) => {
-        match $match_item {
-            $(
-                DataType::Primitive(PrimitiveType::$prim_type) => {
-                    ($visitor.$visit_fun)($visitor.data, $sibling_list_id, $name.into())
-                }
-            )*
-            DataType::Primitive(PrimitiveType::Decimal(precision, scale)) => {
-                ($visitor.visit_decimal)($visitor.data, $sibling_list_id, $name.into(), *precision, *scale);
-            }
-            DataType::Array(at) => {
-                let child_list_id = visit_array_item($visitor, at);
-                ($visitor.visit_array)($visitor.data, $sibling_list_id, $name.into(), at.contains_null, child_list_id);
-            }
-            DataType::Struct(s) => {
-                let child_list_id = visit_struct_fields($visitor, s);
-                ($visitor.visit_struct)($visitor.data, $sibling_list_id, $name.into(), child_list_id);
-            }
-            DataType::Map(mt) => {
-                let child_list_id = visit_map_types($visitor, mt);
-                ($visitor.visit_map)($visitor.data, $sibling_list_id, $name.into(), mt.value_contains_null, child_list_id);
-            }
-        }
-    };
-}
-
 /// # Safety
 ///
 /// Caller is responsible for passing a valid handle.
@@ -807,25 +780,37 @@ pub unsafe extern "C" fn visit_schema(
         visitor: &EngineSchemaVisitor,
         sibling_list_id: usize,
     ) {
-        // See macro def for how Struct/Map/Array/Decimal are handled
-        gen_visit_match!(
-            data_type,
-            visitor,
-            sibling_list_id,
-            name,
-            (String, visit_string),
-            (Long, visit_long),
-            (Integer, visit_integer),
-            (Short, visit_short),
-            (Byte, visit_byte),
-            (Float, visit_float),
-            (Double, visit_double),
-            (Boolean, visit_boolean),
-            (Binary, visit_binary),
-            (Date, visit_date),
-            (Timestamp, visit_timestamp),
-            (TimestampNtz, visit_timestamp_ntz)
-        );
+        macro_rules! call {
+            ( $visitor_fn:ident $(, $extra_args:expr) *) => {
+                (visitor.$visitor_fn)(visitor.data, sibling_list_id, name.into() $(, $extra_args) *)
+            };
+        }
+        match data_type {
+            DataType::Struct(st) => call!(visit_struct, visit_struct_fields(visitor, st)),
+            DataType::Map(mt) => call!(
+                visit_map,
+                mt.value_contains_null,
+                visit_map_types(visitor, mt)
+            ),
+            DataType::Array(at) => {
+                call!(visit_array, at.contains_null, visit_array_item(visitor, at));
+            }
+            DataType::Primitive(PrimitiveType::Decimal(precision, scale)) => {
+                call!(visit_decimal, *precision, *scale);
+            }
+            &DataType::STRING => call!(visit_string),
+            &DataType::LONG => call!(visit_long),
+            &DataType::INTEGER => call!(visit_integer),
+            &DataType::SHORT => call!(visit_short),
+            &DataType::BYTE => call!(visit_byte),
+            &DataType::FLOAT => call!(visit_float),
+            &DataType::DOUBLE => call!(visit_double),
+            &DataType::BOOLEAN => call!(visit_boolean),
+            &DataType::BINARY => call!(visit_binary),
+            &DataType::DATE => call!(visit_date),
+            &DataType::TIMESTAMP => call!(visit_timestamp),
+            &DataType::TIMESTAMP_NTZ => call!(visit_timestamp_ntz),
+        }
     }
 
     visit_struct_fields(visitor, snapshot.schema())
