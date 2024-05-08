@@ -148,7 +148,9 @@ impl Scan {
 
     /// Get an iterator of Add actions that should be included in scan for a query. This handles
     /// log-replay, reconciling Add and Remove actions, and applying data skipping (if possible)
-    pub(crate) fn files(
+    #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
+    #[cfg_attr(not(feature = "developer-visibility"), visibility::make(pub(crate)))]
+    fn files(
         &self,
         engine: &dyn Engine,
     ) -> DeltaResult<impl Iterator<Item = DeltaResult<Add>> + Send + Sync> {

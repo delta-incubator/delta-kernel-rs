@@ -3,7 +3,7 @@
 
 pub mod deletion_vector;
 pub(crate) mod schemas;
-pub(crate) mod visitors;
+pub mod visitors;
 
 use std::collections::HashMap;
 
@@ -38,7 +38,9 @@ lazy_static! {
     );
 }
 
-pub(crate) fn get_log_schema() -> &'static StructType {
+#[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
+#[cfg_attr(not(feature = "developer-visibility"), visibility::make(pub(crate)))]
+pub fn get_log_schema() -> &'static StructType {
     &LOG_SCHEMA
 }
 
