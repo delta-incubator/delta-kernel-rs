@@ -637,9 +637,9 @@ pub unsafe extern "C" fn version(snapshot: *const SnapshotHandle) -> u64 {
 ///      - For the top-level schema, visit each top-level column, passing the column's name and type
 ///      - For a struct, first visit each struct field, passing the field's name, type, nullability,
 ///        and metadata
-///      - For a map, visit the key and value, passing its special name ("key" or "value"), type,
-///        and value nullability (keys are never nullable)
-///      - For a list, visit the element, passing its special name ("element"), type, and
+///      - For a map, visit the key and value, passing its special name ("map_key" or "map_value"),
+///        type, and value nullability (keys are never nullable)
+///      - For a list, visit the element, passing its special name ("array_element"), type, and
 ///        nullability
 ///  3. When visiting a complex schema element, the kernel also passes the "child list" containing
 ///     that element's (already-visited) children.
@@ -767,14 +767,14 @@ pub unsafe extern "C" fn visit_schema(
 
     fn visit_array_item(visitor: &EngineSchemaVisitor, at: &ArrayType) -> usize {
         let child_list_id = (visitor.make_field_list)(visitor.data, 1);
-        visit_schema_item(&at.element_type, "array_data_type", visitor, child_list_id);
+        visit_schema_item(&at.element_type, "array_element", visitor, child_list_id);
         child_list_id
     }
 
     fn visit_map_types(visitor: &EngineSchemaVisitor, mt: &MapType) -> usize {
         let child_list_id = (visitor.make_field_list)(visitor.data, 2);
-        visit_schema_item(&mt.key_type, "map_key_type", visitor, child_list_id);
-        visit_schema_item(&mt.value_type, "map_value_type", visitor, child_list_id);
+        visit_schema_item(&mt.key_type, "map_key", visitor, child_list_id);
+        visit_schema_item(&mt.value_type, "map_value", visitor, child_list_id);
         child_list_id
     }
 
