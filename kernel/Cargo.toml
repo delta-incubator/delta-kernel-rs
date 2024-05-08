@@ -44,7 +44,7 @@ arrow-json = { version = "^51.0", optional = true }
 arrow-ord = { version = "^51.0", optional = true }
 arrow-schema = { version = "^51.0", optional = true }
 futures = { version = "0.3", optional = true }
-object_store = { version = "^0.8.0", optional = true }
+object_store = { version = "^0.9.0", optional = true }
 # Used in default and sync engine
 parquet = { version = "^51.0", optional = true }
 # Used for fetching direct urls (like pre-signed urls)
