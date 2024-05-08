@@ -51,13 +51,13 @@ SchemaItem* add_to_list(SchemaItemList *list, char* name, char* type) {
 }
 
 // print out all items in a list, recursing into any children they may have
-void print_list(SchemaBuilder* builder, uintptr_t list_id, int indent, bool parent_on_last) {
+void print_list(SchemaBuilder* builder, uintptr_t list_id, int indent, int parents_on_last) {
   SchemaItemList *list = builder->lists+list_id;
   for (int i = 0; i < list->len; i++) {
     bool is_last = i == list->len - 1;
     for (int j = 0; j < indent; j++) {
-      if (parent_on_last && j == indent - 1) {
-        // don't print a dangling | on my parent's last item
+      if ((indent - parents_on_last) <= j) {
+        // don't print a dangling | on any parents that are on their last item
         printf("   ");
       } else {
         printf("│  ");
@@ -67,7 +67,7 @@ void print_list(SchemaBuilder* builder, uintptr_t list_id, int indent, bool pare
     char* prefix = is_last? "└" : "├";
     printf("%s─ %s: %s\n", prefix, item->name, item->type);
     if (list->list[i].children != UINTPTR_MAX) {
-      print_list(builder, list->list[i].children, indent+1, is_last);
+      print_list(builder, list->list[i].children, indent+1, parents_on_last + is_last);
     }
   }
 }
@@ -226,7 +226,7 @@ void print_schema(const SnapshotHandle *snapshot) {
   printf("Schema returned in list %i\n", schema_list_id);
 #endif
   printf("Schema:\n");
-  print_list(&builder, schema_list_id, 0, false);
+  print_list(&builder, schema_list_id, 0, 0);
   printf("\n");
   free_builder(builder);
 }
