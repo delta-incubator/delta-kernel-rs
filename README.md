@@ -32,7 +32,11 @@ This will build the kernel, run all unit tests, fetch the [Delta Acceptance Test
 the acceptance tests against it.
 
 As it is a library, in general you will want to depend on `delta-kernel-rs` by adding it as a
-dependency to your `Cargo.toml`.
+dependency to your `Cargo.toml`. For example:
+
+```toml
+delta_kernel = "0.0.1"
+```
 
 ## Documentation
 
