@@ -64,7 +64,7 @@ void visit_callback(void* engine_context, const KernelStringSlice path, long siz
     printf("Could not get selection vector from kernel\n");
     return;
   }
-  KernelBoolSlice *selection_vector = selection_vector_res.ok;
+  KernelBoolSlice selection_vector = selection_vector_res.ok;
   if (selection_vector) {
     printf("  Selection vector:\n");
     print_selection_vector("    ", selection_vector);
@@ -123,10 +123,10 @@ int main(int argc, char* argv[]) {
 
   // alternately if we don't care to set any options on the builder:
   // ExternResultExternEngineHandle engine_res =
-  //   get_default_client(table_path_slice, NULL);
+  //   get_default_engine(table_path_slice, NULL);
 
   if (engine_res.tag != OkExternEngineHandle) {
-    printf("Failed to get client\n");
+    printf("Failed to get engine\n");
     print_error("  ", (Error*)engine_builder_res.err);
     free_error((Error*)engine_builder_res.err);
     return -1;

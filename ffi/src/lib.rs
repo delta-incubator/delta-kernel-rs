@@ -1,6 +1,7 @@
 /// FFI interface for the delta kernel
 ///
 /// Exposes that an engine needs to call from C/C++ to interface with kernel
+#[cfg(any(feature = "default-engine", feature = "sync-engine"))]
 use std::collections::HashMap;
 use std::default::Default;
 use std::os::raw::{c_char, c_void};
@@ -15,7 +16,7 @@ use delta_kernel::snapshot::Snapshot;
 use delta_kernel::{DeltaResult, Engine, Error};
 
 mod handle;
-use handle::{ArcHandle, BoxHandle, SizedArcHandle, Unconstructable};
+use handle::{ArcHandle, SizedArcHandle, Unconstructable};
 
 pub mod scan;
 
@@ -115,40 +116,85 @@ impl TryFromStringSlice for String {
 /// function is that `kernel_str` is _only_ valid until the return from this function
 pub type AllocateStringFn = extern "C" fn(kernel_str: KernelStringSlice) -> NullableCvoid;
 
-/// TODO
-#[repr(C)]
-pub struct KernelBoolSlice {
-    ptr: *mut bool,
-    len: usize,
-}
-
-impl BoxHandle for KernelBoolSlice {}
-
-impl From<Vec<bool>> for KernelBoolSlice {
-    fn from(val: Vec<bool>) -> Self {
-        let len = val.len();
-        let boxed = val.into_boxed_slice();
-        let ptr = Box::into_raw(boxed).cast();
-        KernelBoolSlice { ptr, len }
+// Put KernelBoolSlice in a sub-module, with non-public members, so rust code cannot instantiate it
+// directly. It can only be created by converting `From<Vec<bool>>`.
+mod private {
+    /// Represents an owned slice of boolean values allocated by the kernel. Any time the engine
+    /// receives a `KernelBoolSlice` as a return value from a kernel method, engine is responsible
+    /// to free that slice, by calling [drop_bool_slice] exactly once.
+    #[repr(C)]
+    pub struct KernelBoolSlice {
+        ptr: *mut bool,
+        len: usize,
     }
-}
 
-trait FromBoolSlice {
-    unsafe fn from_slice(slice: KernelBoolSlice) -> Self;
-}
+    impl KernelBoolSlice {
+        /// Creates an empty slice.
+        pub fn empty() -> KernelBoolSlice {
+            KernelBoolSlice {
+                ptr: std::ptr::null_mut(),
+                len: 0,
+            }
+        }
 
-impl FromBoolSlice for Vec<bool> {
-    unsafe fn from_slice(slice: KernelBoolSlice) -> Self {
-        Vec::from_raw_parts(slice.ptr, slice.len, slice.len)
+        /// Converts this slice back into a `Vec<bool>`.
+        ///
+        /// # Safety
+        ///
+        /// The slice must have been originally created `From<Vec<bool>>`, and must not have been
+        /// already been consumed by a previous call to this method.
+        pub unsafe fn as_ref(&self) -> &[bool] {
+            if self.ptr.is_null() {
+                Default::default()
+            } else {
+                unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
+            }
+        }
+
+        /// Converts this slice back into a `Vec<bool>`.
+        ///
+        /// # Safety
+        ///
+        /// The slice must have been originally created `From<Vec<bool>>`, and must not have been
+        /// already been consumed by a previous call to this method.
+        pub unsafe fn into_vec(self) -> Vec<bool> {
+            if self.ptr.is_null() {
+                Default::default()
+            } else {
+                Vec::from_raw_parts(self.ptr, self.len, self.len)
+            }
+        }
     }
+
+    impl From<Vec<bool>> for KernelBoolSlice {
+        fn from(val: Vec<bool>) -> Self {
+            let len = val.len();
+            let boxed = val.into_boxed_slice();
+            let ptr = Box::into_raw(boxed).cast();
+            KernelBoolSlice { ptr, len }
+        }
+    }
+
+    /// # Safety
+    ///
+    /// Whenever kernel passes a [KernelBoolSlice] to engine, engine assumes ownership of the slice
+    /// memory, but must only free it by calling [drop_bool_slice]. Since the global allocator is
+    /// threadsafe, it doesn't matter which engine thread invokes that method.
+    unsafe impl Send for KernelBoolSlice {}
+
+    /// # Safety
+    ///
+    /// If engine chooses to leverage concurrency, engine is responsible to prevent data races.
+    unsafe impl Sync for KernelBoolSlice {}
 }
+pub use private::KernelBoolSlice;
 
 /// # Safety
 ///
 /// Caller is responsible for passing a valid handle.
 #[no_mangle]
-pub unsafe extern "C" fn drop_bool_slice(slice: *mut KernelBoolSlice) {
-    let vec = unsafe { Vec::from_raw_parts((*slice).ptr, (*slice).len, (*slice).len) };
+pub unsafe extern "C" fn drop_bool_slice(slice: KernelBoolSlice) {
+    let vec = unsafe { slice.into_vec() };
     debug!("Dropping bool slice. It is {vec:#?}");
 }
 
@@ -157,11 +203,13 @@ pub unsafe extern "C" fn drop_bool_slice(slice: *mut KernelBoolSlice) {
 pub enum KernelError {
     UnknownError, // catch-all for unrecognized kernel Error types
     FFIError,     // errors encountered in the code layer that supports FFI
+    #[cfg(any(feature = "default-engine", feature = "sync-engine"))]
     ArrowError,
     EngineDataTypeError,
     ExtractError,
     GenericError,
     IOErrorError,
+    #[cfg(any(feature = "default-engine", feature = "sync-engine"))]
     ParquetError,
     #[cfg(feature = "default-engine")]
     ObjectStoreError,
@@ -190,12 +238,14 @@ impl From<Error> for KernelError {
     fn from(e: Error) -> Self {
         match e {
             // NOTE: By definition, no kernel Error maps to FFIError
+            #[cfg(any(feature = "default-engine", feature = "sync-engine"))]
             Error::Arrow(_) => KernelError::ArrowError,
             Error::EngineDataType(_) => KernelError::EngineDataTypeError,
             Error::Extract(..) => KernelError::ExtractError,
             Error::Generic(_) => KernelError::GenericError,
             Error::GenericError { .. } => KernelError::GenericError,
             Error::IOError(_) => KernelError::IOErrorError,
+            #[cfg(any(feature = "default-engine", feature = "sync-engine"))]
             Error::Parquet(_) => KernelError::ParquetError,
             #[cfg(feature = "default-engine")]
             Error::ObjectStore(_) => KernelError::ObjectStoreError,
@@ -300,7 +350,7 @@ impl AllocateError for AllocateErrorFn {
 impl AllocateError for *const ExternEngineHandle {
     /// # Safety
     ///
-    /// In addition to the usual requirements, the table client handle must be valid.
+    /// In addition to the usual requirements, the engine handle must be valid.
     unsafe fn allocate_error(
         &self,
         etype: KernelError,
@@ -335,7 +385,7 @@ impl<T> IntoExternResult<T> for DeltaResult<T> {
 }
 
 // A wrapper for Engine which defines additional FFI-specific methods.
-pub trait ExternEngine {
+pub trait ExternEngine: Send + Sync {
     fn engine(&self) -> Arc<dyn Engine>;
     fn error_allocator(&self) -> &dyn AllocateError;
 }
@@ -349,8 +399,8 @@ impl ArcHandle for ExternEngineHandle {
 }
 
 struct ExternEngineVtable {
-    // Actual table client instance to use
-    client: Arc<dyn Engine>,
+    // Actual engine instance to use
+    engine: Arc<dyn Engine>,
     allocate_error: AllocateErrorFn,
 }
 
@@ -373,7 +423,7 @@ unsafe impl Sync for ExternEngineVtable {}
 
 impl ExternEngine for ExternEngineVtable {
     fn engine(&self) -> Arc<dyn Engine> {
-        self.client.clone()
+        self.engine.clone()
     }
     fn error_allocator(&self) -> &dyn AllocateError {
         &self.allocate_error
@@ -389,21 +439,23 @@ unsafe fn unwrap_and_parse_path_as_url(path: KernelStringSlice) -> DeltaResult<U
 }
 
 // A client builder allows setting options before building an actual client
+#[cfg(any(feature = "default-engine", feature = "sync-engine"))]
 pub struct EngineBuilder {
     url: Url,
     allocate_fn: AllocateErrorFn,
     options: HashMap<String, String>,
 }
 
+#[cfg(any(feature = "default-engine", feature = "sync-engine"))]
 impl EngineBuilder {
     fn set_option(&mut self, key: String, val: String) {
         self.options.insert(key, val);
     }
 }
 
-/// Get a "builder" that can be used to construct an engine client. The function
+/// Get a "builder" that can be used to construct an engine. The function
 /// [`set_builder_option`] can be used to set options on the builder prior to constructing the
-/// actual client
+/// actual engine
 ///
 /// # Safety
 /// Caller is responsible for passing a valid path pointer.
@@ -434,7 +486,7 @@ unsafe fn get_engine_builder_impl(
 ///
 /// # Safety
 ///
-/// Client must pass a valid ClientBuilder pointer, and valid slices for key and value
+/// Caller must pass a valid EngineBuilder pointer, and valid slices for key and value
 #[cfg(feature = "default-engine")]
 #[no_mangle]
 pub unsafe extern "C" fn set_builder_option(
@@ -452,14 +504,14 @@ pub unsafe extern "C" fn set_builder_option(
 ///
 /// # Safety
 ///
-/// Caller is responsible to pass a valid ClientBuilder pointer, and to not use it again afterwards
+/// Caller is responsible to pass a valid EngineBuilder pointer, and to not use it again afterwards
 #[cfg(feature = "default-engine")]
 #[no_mangle]
 pub unsafe extern "C" fn builder_build(
     builder: *mut EngineBuilder,
 ) -> ExternResult<*const ExternEngineHandle> {
     let builder_box = unsafe { Box::from_raw(builder) };
-    get_default_client_impl(
+    get_default_engine_impl(
         builder_box.url,
         builder_box.options,
         builder_box.allocate_fn,
@@ -472,25 +524,25 @@ pub unsafe extern "C" fn builder_build(
 /// Caller is responsible for passing a valid path pointer.
 #[cfg(feature = "default-engine")]
 #[no_mangle]
-pub unsafe extern "C" fn get_default_client(
+pub unsafe extern "C" fn get_default_engine(
     path: KernelStringSlice,
     allocate_error: AllocateErrorFn,
 ) -> ExternResult<*const ExternEngineHandle> {
-    get_default_default_client_impl(path, allocate_error).into_extern_result(allocate_error)
+    get_default_default_engine_impl(path, allocate_error).into_extern_result(allocate_error)
 }
 
-// get the default version of the default client :)
+// get the default version of the default engine :)
 #[cfg(feature = "default-engine")]
-unsafe fn get_default_default_client_impl(
+unsafe fn get_default_default_engine_impl(
     path: KernelStringSlice,
     allocate_error: AllocateErrorFn,
 ) -> DeltaResult<*const ExternEngineHandle> {
     let url = unsafe { unwrap_and_parse_path_as_url(path) }?;
-    get_default_client_impl(url, Default::default(), allocate_error)
+    get_default_engine_impl(url, Default::default(), allocate_error)
 }
 
 #[cfg(feature = "default-engine")]
-unsafe fn get_default_client_impl(
+unsafe fn get_default_engine_impl(
     url: Url,
     options: HashMap<String, String>,
     allocate_error: AllocateErrorFn,
@@ -502,12 +554,12 @@ unsafe fn get_default_client_impl(
         options,
         Arc::new(TokioBackgroundExecutor::new()),
     );
-    let client = Arc::new(engine.map_err(Error::generic)?);
-    let client: Arc<dyn ExternEngine> = Arc::new(ExternEngineVtable {
-        client,
+    let engine = Arc::new(engine.map_err(Error::generic)?);
+    let engine: Arc<dyn ExternEngine> = Arc::new(ExternEngineVtable {
+        engine,
         allocate_error,
     });
-    Ok(ArcHandle::into_handle(client))
+    Ok(ArcHandle::into_handle(engine))
 }
 
 /// # Safety

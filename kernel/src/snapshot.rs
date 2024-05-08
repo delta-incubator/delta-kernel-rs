@@ -47,7 +47,8 @@ impl LogSegment {
         commit_read_schema: SchemaRef,
         checkpoint_read_schema: SchemaRef,
         predicate: Option<Expression>,
-    ) -> DeltaResult<impl Iterator<Item = DeltaResult<(Box<dyn EngineData>, bool)>>> {
+    ) -> DeltaResult<impl Iterator<Item = DeltaResult<(Box<dyn EngineData>, bool)>> + Send + Sync>
+    {
         let json_client = engine.get_json_handler();
         // TODO change predicate to: predicate AND add.path not null and remove.path not null
         let commit_stream = json_client
@@ -380,8 +381,8 @@ mod tests {
             std::fs::canonicalize(PathBuf::from("./tests/data/table-with-dv-small/")).unwrap();
         let url = url::Url::from_directory_path(path).unwrap();
 
-        let client = SyncEngine::new();
-        let snapshot = Snapshot::try_new(url, &client, Some(1)).unwrap();
+        let engine = SyncEngine::new();
+        let snapshot = Snapshot::try_new(url, &engine, Some(1)).unwrap();
 
         let expected = Protocol {
             min_reader_version: 3,
@@ -402,8 +403,8 @@ mod tests {
             std::fs::canonicalize(PathBuf::from("./tests/data/table-with-dv-small/")).unwrap();
         let url = url::Url::from_directory_path(path).unwrap();
 
-        let client = SyncEngine::new();
-        let snapshot = Snapshot::try_new(url, &client, None).unwrap();
+        let engine = SyncEngine::new();
+        let snapshot = Snapshot::try_new(url, &engine, None).unwrap();
 
         let expected = Protocol {
             min_reader_version: 3,
