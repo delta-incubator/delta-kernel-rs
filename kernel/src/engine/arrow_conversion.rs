@@ -209,8 +209,8 @@ impl TryFrom<&ArrowDataType> for DataType {
             ArrowDataType::Decimal128(p, s) => {
                 if p > &38 || s > &38 {
                     return Err(ArrowError::SchemaError(format!(
-                        "Precision too large to be represented as Delta type: {} > 38",
-                        p
+                        "Precision and scale must not exceed 38/38 to be represented as Delta type: found {}/{}",
+                        p, s
                     )));
                 }
                 Ok(DataType::decimal(*p, *s))
