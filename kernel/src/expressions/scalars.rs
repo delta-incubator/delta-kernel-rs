@@ -50,6 +50,38 @@ impl Scalar {
             Self::Null(data_type) => data_type.clone(),
         }
     }
+
+    /// Returns true if this scalar is null.
+    pub fn is_null(&self) -> bool {
+        matches!(self, Self::Null(_))
+    }
+}
+
+impl PartialOrd for Scalar {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        use Scalar::*;
+        match (self, other) {
+            (Null(_), Null(_)) => Some(Ordering::Equal),
+            (Integer(a), Integer(b)) => a.partial_cmp(b),
+            (Long(a), Long(b)) => a.partial_cmp(b),
+            (Short(a), Short(b)) => a.partial_cmp(b),
+            (Byte(a), Byte(b)) => a.partial_cmp(b),
+            (Float(a), Float(b)) => a.partial_cmp(b),
+            (Double(a), Double(b)) => a.partial_cmp(b),
+            (String(a), String(b)) => a.partial_cmp(b),
+            (Boolean(a), Boolean(b)) => a.partial_cmp(b),
+            (Timestamp(a), Timestamp(b)) => a.partial_cmp(b),
+            (TimestampNtz(a), TimestampNtz(b)) => a.partial_cmp(b),
+            (Date(a), Date(b)) => a.partial_cmp(b),
+            (Binary(a), Binary(b)) => a.partial_cmp(b),
+            (Decimal(a, _, _), Decimal(b, _, _)) => a.partial_cmp(b),
+            // TODO should we make an assumption about the ordering of nulls?
+            // rigth now this is only used for internal purposes.
+            (Null(_), _) => Some(Ordering::Less),
+            (_, Null(_)) => Some(Ordering::Greater),
+            _ => None,
+        }
+    }
 }
 
 impl Display for Scalar {
