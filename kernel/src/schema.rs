@@ -18,6 +18,7 @@ pub type SchemaRef = Arc<StructType>;
 pub enum MetadataValue {
     Number(i32),
     String(String),
+    Boolean(bool),
 }
 
 impl From<String> for MetadataValue {
@@ -35,6 +36,18 @@ impl From<&String> for MetadataValue {
 impl From<i32> for MetadataValue {
     fn from(value: i32) -> Self {
         Self::Number(value)
+    }
+}
+
+impl From<bool> for MetadataValue {
+    fn from(value: bool) -> Self {
+        Self::Boolean(value)
+    }
+}
+
+impl From<serde_json::Value> for MetadataValue {
+    fn from(value: serde_json::Value) -> Self {
+        Self::String(value.to_string())
     }
 }
 
