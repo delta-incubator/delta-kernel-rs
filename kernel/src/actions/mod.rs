@@ -6,6 +6,7 @@ pub(crate) mod schemas;
 pub mod visitors;
 
 use std::collections::HashMap;
+use std::fmt;
 
 use delta_kernel_derive::Schema;
 use lazy_static::lazy_static;
@@ -14,7 +15,7 @@ use visitors::{AddVisitor, MetadataVisitor, ProtocolVisitor};
 
 use self::deletion_vector::DeletionVectorDescriptor;
 use crate::actions::schemas::GetStructField;
-use crate::{schema::StructType, DeltaResult, EngineData};
+use crate::{schema::StructType, DeltaResult, EngineData, Error};
 
 pub(crate) const ADD_NAME: &str = "add";
 pub(crate) const REMOVE_NAME: &str = "remove";
@@ -94,6 +95,154 @@ impl Metadata {
     }
 }
 
+/// Features table readers can support as well as let users know
+/// what is supported
+#[derive(Serialize, Deserialize, Debug, Clone, Eq, PartialEq, Hash)]
+#[serde(rename_all = "camelCase")]
+pub enum ReaderFeatures {
+    /// Mapping of one column to another
+    ColumnMapping,
+    /// Deletion vectors for merge, update, delete
+    DeletionVectors,
+    /// timestamps without timezone support
+    #[serde(rename = "timestampNtz")]
+    TimestampWithoutTimezone,
+    /// version 2 of checkpointing
+    V2Checkpoint,
+}
+
+impl TryFrom<String> for ReaderFeatures {
+    type Error = Error;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        value.as_str().try_into()
+    }
+}
+
+impl TryFrom<&str> for ReaderFeatures {
+    type Error = Error;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        let val = match value {
+            "columnMapping" => ReaderFeatures::ColumnMapping,
+            "deletionVectors" => ReaderFeatures::DeletionVectors,
+            "timestampNtz" => ReaderFeatures::TimestampWithoutTimezone,
+            "v2Checkpoint" => ReaderFeatures::V2Checkpoint,
+            _ => return Err(Error::generic(format!("Unknown reader feature: {}", value))),
+        };
+        Ok(val)
+    }
+}
+
+impl AsRef<str> for ReaderFeatures {
+    fn as_ref(&self) -> &str {
+        match self {
+            ReaderFeatures::ColumnMapping => "columnMapping",
+            ReaderFeatures::DeletionVectors => "deletionVectors",
+            ReaderFeatures::TimestampWithoutTimezone => "timestampNtz",
+            ReaderFeatures::V2Checkpoint => "v2Checkpoint",
+        }
+    }
+}
+
+impl fmt::Display for ReaderFeatures {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.as_ref())
+    }
+}
+
+/// Features table writers can support as well as let users know
+/// what is supported
+#[derive(Serialize, Deserialize, Debug, Clone, Eq, PartialEq, Hash)]
+#[serde(rename_all = "camelCase")]
+pub enum WriterFeatures {
+    /// Append Only Tables
+    AppendOnly,
+    /// Table invariants
+    Invariants,
+    /// Check constraints on columns
+    CheckConstraints,
+    /// CDF on a table
+    ChangeDataFeed,
+    /// Columns with generated values
+    GeneratedColumns,
+    /// Mapping of one column to another
+    ColumnMapping,
+    /// ID Columns
+    IdentityColumns,
+    /// Deletion vectors for merge, update, delete
+    DeletionVectors,
+    /// Row tracking on tables
+    RowTracking,
+    /// timestamps without timezone support
+    #[serde(rename = "timestampNtz")]
+    TimestampWithoutTimezone,
+    /// domain specific metadata
+    DomainMetadata,
+    /// version 2 of checkpointing
+    V2Checkpoint,
+    /// Iceberg compatibility support
+    IcebergCompatV1,
+}
+
+impl TryFrom<String> for WriterFeatures {
+    type Error = Error;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        value.as_str().try_into()
+    }
+}
+
+impl TryFrom<&str> for WriterFeatures {
+    type Error = Error;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        let val = match value {
+            "appendOnly" | "delta.appendOnly" => WriterFeatures::AppendOnly,
+            "invariants" | "delta.invariants" => WriterFeatures::Invariants,
+            "checkConstraints" | "delta.checkConstraints" => WriterFeatures::CheckConstraints,
+            "changeDataFeed" | "delta.enableChangeDataFeed" => WriterFeatures::ChangeDataFeed,
+            "generatedColumns" => WriterFeatures::GeneratedColumns,
+            "columnMapping" => WriterFeatures::ColumnMapping,
+            "identityColumns" => WriterFeatures::IdentityColumns,
+            "deletionVectors" | "delta.enableDeletionVectors" => WriterFeatures::DeletionVectors,
+            "rowTracking" | "delta.enableRowTracking" => WriterFeatures::RowTracking,
+            "timestampNtz" => WriterFeatures::TimestampWithoutTimezone,
+            "domainMetadata" => WriterFeatures::DomainMetadata,
+            "v2Checkpoint" => WriterFeatures::V2Checkpoint,
+            "icebergCompatV1" => WriterFeatures::IcebergCompatV1,
+            _ => return Err(Error::generic(format!("Unknown writer feature: {}", value))),
+        };
+        Ok(val)
+    }
+}
+
+impl AsRef<str> for WriterFeatures {
+    fn as_ref(&self) -> &str {
+        match self {
+            WriterFeatures::AppendOnly => "appendOnly",
+            WriterFeatures::Invariants => "invariants",
+            WriterFeatures::CheckConstraints => "checkConstraints",
+            WriterFeatures::ChangeDataFeed => "changeDataFeed",
+            WriterFeatures::GeneratedColumns => "generatedColumns",
+            WriterFeatures::ColumnMapping => "columnMapping",
+            WriterFeatures::IdentityColumns => "identityColumns",
+            WriterFeatures::DeletionVectors => "deletionVectors",
+            WriterFeatures::RowTracking => "rowTracking",
+            WriterFeatures::TimestampWithoutTimezone => "timestampNtz",
+            WriterFeatures::DomainMetadata => "domainMetadata",
+            WriterFeatures::V2Checkpoint => "v2Checkpoint",
+            WriterFeatures::IcebergCompatV1 => "icebergCompatV1",
+        }
+    }
+}
+
+impl fmt::Display for WriterFeatures {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.as_ref())
+    }
+}
+
 #[derive(Default, Debug, Clone, PartialEq, Eq, Schema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Protocol {
@@ -118,6 +267,20 @@ impl Protocol {
         let mut visitor = ProtocolVisitor::default();
         data.extract(get_log_schema().project(&[PROTOCOL_NAME])?, &mut visitor)?;
         Ok(visitor.protocol)
+    }
+
+    pub fn has_reader_feature(&self, feature: &ReaderFeatures) -> bool {
+        self.reader_features
+            .as_ref()
+            .map(|features| features.iter().any(|f| f == feature.as_ref()))
+            .unwrap_or_default()
+    }
+
+    pub fn has_writer_feature(&self, feature: &WriterFeatures) -> bool {
+        self.writer_features
+            .as_ref()
+            .map(|features| features.iter().any(|f| f == feature.as_ref()))
+            .unwrap_or_default()
     }
 }
 
