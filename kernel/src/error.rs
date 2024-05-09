@@ -132,9 +132,6 @@ pub enum Error {
     /// Could not parse an integer
     #[error("Could not parse int: {0}")]
     ParseIntError(#[from] ParseIntError),
-
-    #[error("Table metadata is invalid: {0}")]
-    MetadataError(String),
 }
 
 // Convenience constructors for Error types that take a String argument

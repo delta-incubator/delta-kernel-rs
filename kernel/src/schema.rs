@@ -141,14 +141,12 @@ impl StructField {
     /// Equal to the field name if column mapping is not enabled on table
     pub fn physical_name(&self) -> Result<&str, Error> {
         // Even on mapping type id the physical name should be there for partitions
-        let phys_name = self.get_config_value(&ColumnMetadataKey::ColumnMappingPhysicalName);
-        match phys_name {
-            None => Ok(&self.name),
-            Some(MetadataValue::Boolean(_)) => Ok(&self.name),
+        match self.get_config_value(&ColumnMetadataKey::ColumnMappingPhysicalName) {
+            None | Some(MetadataValue::Boolean(_)) => Ok(&self.name),
             Some(MetadataValue::String(s)) => Ok(s),
-            Some(MetadataValue::Number(_)) => Err(Error::MetadataError(
-                "Unexpected type for physical name".to_string(),
-            )),
+            Some(MetadataValue::Number(_)) => {
+                Err(Error::generic("Unexpected type for physical name"))
+            }
         }
     }
 }
@@ -426,7 +424,12 @@ where
         .ok_or_else(|| {
             serde::de::Error::custom(format!("Invalid scale in decimal: {}", str_value))
         })?;
-
+    if precision > 38 || scale > 38 {
+        return Err(serde::de::Error::custom(format!(
+            "Precision or scale is larger than 38: {}, {}",
+            precision, scale
+        )));
+    }
     Ok((precision, scale))
 }
 
@@ -672,6 +675,35 @@ mod tests {
         assert!(
             matches!(physical_name, MetadataValue::String(name) if *name == "col-5f422f40-de70-45b2-88ab-1d5c90e94db1")
         );
+    }
+
+    #[test]
+    fn test_invalid_decimal() {
+        let data = r#"
+        {
+            "name": "a",
+            "type": "decimal(39, 10)",
+            "nullable": false,
+            "metadata": {}
+        }
+        "#;
+        assert!(matches!(
+            serde_json::from_str::<StructField>(data).unwrap_err(),
+            _
+        ));
+
+        let data = r#"
+        {
+            "name": "a",
+            "type": "decimal(10, 39)",
+            "nullable": false,
+            "metadata": {}
+        }
+        "#;
+        assert!(matches!(
+            serde_json::from_str::<StructField>(data).unwrap_err(),
+            _
+        ));
     }
 
     #[test]
