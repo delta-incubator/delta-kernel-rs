@@ -245,6 +245,7 @@ impl TryFrom<&ArrowDataType> for DataType {
             ArrowDataType::FixedSizeList(field, _) => Ok(DataType::Array(Box::new(
                 ArrayType::new((*field).data_type().try_into()?, (*field).is_nullable()),
             ))),
+            ArrowDataType::Dictionary(_, value_type) => Ok(value_type.as_ref().try_into()?),
             ArrowDataType::Map(field, _) => {
                 if let ArrowDataType::Struct(struct_fields) = field.data_type() {
                     let key_type = struct_fields[0].data_type().try_into()?;
