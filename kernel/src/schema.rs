@@ -195,6 +195,42 @@ impl StructType {
     }
 }
 
+impl FromIterator<StructField> for StructType {
+    fn from_iter<T: IntoIterator<Item = StructField>>(iter: T) -> Self {
+        Self {
+            type_name: "struct".into(),
+            fields: iter.into_iter().map(|f| (f.name.clone(), f)).collect(),
+        }
+    }
+}
+
+impl<'a> FromIterator<&'a StructField> for StructType {
+    fn from_iter<T: IntoIterator<Item = &'a StructField>>(iter: T) -> Self {
+        iter.into_iter().cloned().collect()
+    }
+}
+
+impl<const N: usize> From<[StructField; N]> for StructType {
+    fn from(value: [StructField; N]) -> Self {
+        value.into_iter().collect()
+    }
+}
+
+impl<'a, const N: usize> From<[&'a StructField; N]> for StructType {
+    fn from(value: [&'a StructField; N]) -> Self {
+        value.into_iter().cloned().collect()
+    }
+}
+
+impl<'a> IntoIterator for &'a StructType {
+    type Item = &'a StructField;
+    type IntoIter = indexmap::map::Values<'a, std::string::String, StructField>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.fields.values()
+    }
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct StructTypeSerDeHelper {
