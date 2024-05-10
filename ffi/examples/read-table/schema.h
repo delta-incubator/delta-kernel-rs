@@ -16,7 +16,19 @@
 
 // If you want the visitor to print out what it's being asked to do at each step, uncomment the
 // following line
-//#define PRINT_VISITS
+//#define VERBOSE
+
+#ifdef VERBOSE
+#define _NTH_ARG(_1, _2, _3, _4, _5, N, ...) N
+#define NUMARGS(...) _NTH_ARG(__VA_ARGS__, 5, 4, 3, 2, 1)
+#define CHILD_FMT "Asked to visit %s named %s belonging to list %i. %s are in %i.\n"
+#define NO_CHILD_FMT "Asked to visit %s named %s belonging to list %i.\n"
+#define PRINT_VISIT(...) NUMARGS(__VA_ARGS__) == 5?\
+    printf(CHILD_FMT, __VA_ARGS__):		   \
+    printf(NO_CHILD_FMT, __VA_ARGS__)
+#else
+#define PRINT_VISIT(...)
+#endif
 
 typedef struct SchemaItemList SchemaItemList;
 
@@ -76,7 +88,7 @@ void print_list(SchemaBuilder* builder, uintptr_t list_id, int indent, int paren
 uintptr_t make_field_list(void *data, uintptr_t reserve) {
   SchemaBuilder *builder = data;
   int id = builder->list_count;
-#ifdef PRINT_VISITS
+#ifdef VERBOSE
   printf("Making a list of lenth %i with id %i\n", reserve, id);
 #endif
   builder->list_count++;
@@ -96,9 +108,7 @@ void visit_struct(void *data,
                   uintptr_t child_list_id) {
   SchemaBuilder *builder = data;
   char* name_ptr = allocate_name(name);
-#ifdef PRINT_VISITS
-  printf("Asked to visit a struct, belonging to list %i for %s. Children are in %i\n", sibling_list_id, name_ptr, child_list_id);
-#endif
+  PRINT_VISIT("struct", name_ptr, sibling_list_id, "Children", child_list_id);
   SchemaItem* struct_item = add_to_list(builder->lists+sibling_list_id, name_ptr, "struct");
   struct_item->children = child_list_id;
 }
@@ -111,9 +121,7 @@ void visit_array(void *data,
   char* name_ptr = malloc(sizeof(char) * (name.len + 24));
   snprintf(name_ptr, name.len+1, "%s", name.ptr);
   snprintf(name_ptr+name.len, 24, " (contains null: %s)", contains_null ? "true" : "false");
-#ifdef PRINT_VISITS
-  printf("Asked to visit array, belonging to list %i for %s. Types are in %i\n", sibling_list_id, name_ptr, child_list_id);
-#endif
+  PRINT_VISIT("array", name_ptr, sibling_list_id, "Types", child_list_id);
   SchemaItem* array_item = add_to_list(builder->lists+sibling_list_id, name_ptr, "array");
   array_item->children = child_list_id;
 }
@@ -126,9 +134,7 @@ void visit_map(void *data,
   char* name_ptr = malloc(sizeof(char) * (name.len + 24));
   snprintf(name_ptr, name.len+1, "%s", name.ptr);
   snprintf(name_ptr+name.len, 24, " (contains null: %s)", value_contains_null ? "true" : "false");
-#ifdef PRINT_VISITS
-  printf("Asked to visit map, belonging to list %i for %s. Types are in %i\n", sibling_list_id, name_ptr, child_list_id);
-#endif
+  PRINT_VISIT("map", name_ptr, sibling_list_id, "Types", child_list_id);
   SchemaItem* map_item = add_to_list(builder->lists+sibling_list_id, name_ptr, "map");
   map_item->children = child_list_id;
 }
@@ -138,13 +144,11 @@ void visit_decimal(void *data,
                    struct KernelStringSlice name,
                    uint8_t precision,
                    int8_t scale) {
-#ifdef PRINT_VISITS
-  printf("Asked to visit decimal with precision %i and scale %i, belonging to list %i\n", sibling_list_id);
-#endif
   SchemaBuilder *builder = data;
   char* name_ptr = allocate_name(name);
   char* type = malloc(16 * sizeof(char));
   snprintf(type, 16, "decimal(%i)(%i)", precision, scale);
+  PRINT_VISIT(type, name_ptr, sibling_list_id);
   add_to_list(builder->lists+sibling_list_id, name_ptr, type);
 }
 
@@ -153,9 +157,7 @@ void visit_decimal(void *data,
 void visit_simple_type(void *data, uintptr_t sibling_list_id, struct KernelStringSlice name, char* type) {
   SchemaBuilder *builder = data;
   char* name_ptr = allocate_name(name);
-#ifdef PRINT_VISITS
-  printf("Asked to visit a(n) %s belonging to list %i for %s\n", type, sibling_list_id, name_ptr);
-#endif
+  PRINT_VISIT(type, name_ptr, sibling_list_id);
   add_to_list(builder->lists+sibling_list_id, name_ptr, type);
 }
 
