@@ -64,7 +64,7 @@ SchemaItem* add_to_list(SchemaItemList *list, char* name, char* type) {
 
 // print out all items in a list, recursing into any children they may have
 void print_list(SchemaBuilder* builder, uintptr_t list_id, int indent, int parents_on_last) {
-  SchemaItemList *list = builder->lists+list_id;
+  SchemaItemList *list = builder->lists + list_id;
   for (int i = 0; i < list->len; i++) {
     bool is_last = i == list->len - 1;
     for (int j = 0; j < indent; j++) {

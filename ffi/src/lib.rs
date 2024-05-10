@@ -655,7 +655,7 @@ pub struct EngineSchemaVisitor {
 
     // visitor methods that should instantiate and append the appropriate type to the field list
     /// Indicate that the schema contains a `Struct` type. The top level of a Schema is always a
-    /// `Struct`. The children of the `Struct` are in the list identified by `child_list_id`.
+    /// `Struct`. The fields of the `Struct` are in the list identified by `child_list_id`.
     pub visit_struct: extern "C" fn(
         data: *mut c_void,
         sibling_list_id: usize,
@@ -664,7 +664,7 @@ pub struct EngineSchemaVisitor {
     ),
 
     /// Indicate that the schema contains an Array type. `child_list_id` will be a _one_ item list
-    /// with the schema type for each item of the array
+    /// with the array's element type
     pub visit_array: extern "C" fn(
         data: *mut c_void,
         sibling_list_id: usize,
@@ -674,8 +674,8 @@ pub struct EngineSchemaVisitor {
     ),
 
     /// Indicate that the schema contains an Map type. `child_list_id` will be a _two_ item list
-    /// where the first element is the schema type the keys of the map, and the second element is the
-    /// schema type of the values of the map
+    /// where the first element is the map's key type and the second element is the
+    /// map's value type
     pub visit_map: extern "C" fn(
         data: *mut c_void,
         sibling_list_id: usize,
