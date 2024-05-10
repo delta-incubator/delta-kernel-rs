@@ -624,8 +624,9 @@ pub unsafe extern "C" fn version(snapshot: *const SnapshotHandle) -> u64 {
 /// representation of a schema from a particular schema within kernel.
 ///
 /// The model is list based. When the kernel needs a list, it will ask engine to allocate one of a
-/// particular size. Once allocated the engine returns an `id`, which can be any identifier the
-/// engine wants, and will be passed back to the engine to identify the list in the future.
+/// particular size. Once allocated the engine returns an `id`, which can be any integer identifier
+/// ([`usize`]) the engine wants, and will be passed back to the engine to identify the list in the
+/// future.
 ///
 /// Every schema element the kernel visits belongs to some list of "sibling" elements. The schema
 /// itself is a list of schema elements, and every complex type (struct, map, array) contains a list
