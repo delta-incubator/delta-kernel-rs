@@ -793,16 +793,18 @@ pub unsafe extern "C" fn visit_schema(
         }
         match data_type {
             DataType::Struct(st) => call!(visit_struct, visit_struct_fields(visitor, st)),
-            DataType::Map(mt) => call!(
-                visit_map,
-                mt.value_contains_null,
-                visit_map_types(visitor, mt)
-            ),
+            DataType::Map(mt) => {
+                call!(
+                    visit_map,
+                    mt.value_contains_null,
+                    visit_map_types(visitor, mt)
+                )
+            }
             DataType::Array(at) => {
-                call!(visit_array, at.contains_null, visit_array_item(visitor, at));
+                call!(visit_array, at.contains_null, visit_array_item(visitor, at))
             }
             DataType::Primitive(PrimitiveType::Decimal(precision, scale)) => {
-                call!(visit_decimal, *precision, *scale);
+                call!(visit_decimal, *precision, *scale)
             }
             &DataType::STRING => call!(visit_string),
             &DataType::LONG => call!(visit_long),
