@@ -59,12 +59,12 @@ SchemaItem* add_to_list(SchemaItemList *list, char* name, char* type) {
   list->list[idx].name = name;
   list->list[idx].type = type;
   list->len++;
-  return list->list+idx;
+  return &list->list[idx];
 }
 
 // print out all items in a list, recursing into any children they may have
 void print_list(SchemaBuilder* builder, uintptr_t list_id, int indent, int parents_on_last) {
-  SchemaItemList *list = builder->lists + list_id;
+  SchemaItemList *list = &builder->lists[list_id];
   for (int i = 0; i < list->len; i++) {
     bool is_last = i == list->len - 1;
     for (int j = 0; j < indent; j++) {
@@ -109,7 +109,7 @@ void visit_struct(void *data,
   SchemaBuilder *builder = data;
   char* name_ptr = allocate_name(name);
   PRINT_VISIT("struct", name_ptr, sibling_list_id, "Children", child_list_id);
-  SchemaItem* struct_item = add_to_list(builder->lists+sibling_list_id, name_ptr, "struct");
+  SchemaItem* struct_item = add_to_list(&builder->lists[sibling_list_id], name_ptr, "struct");
   struct_item->children = child_list_id;
 }
 void visit_array(void *data,
@@ -122,7 +122,7 @@ void visit_array(void *data,
   snprintf(name_ptr, name.len+1, "%s", name.ptr);
   snprintf(name_ptr+name.len, 24, " (contains null: %s)", contains_null ? "true" : "false");
   PRINT_VISIT("array", name_ptr, sibling_list_id, "Types", child_list_id);
-  SchemaItem* array_item = add_to_list(builder->lists+sibling_list_id, name_ptr, "array");
+  SchemaItem* array_item = add_to_list(&builder->lists[sibling_list_id], name_ptr, "array");
   array_item->children = child_list_id;
 }
 void visit_map(void *data,
@@ -135,7 +135,7 @@ void visit_map(void *data,
   snprintf(name_ptr, name.len+1, "%s", name.ptr);
   snprintf(name_ptr+name.len, 24, " (contains null: %s)", value_contains_null ? "true" : "false");
   PRINT_VISIT("map", name_ptr, sibling_list_id, "Types", child_list_id);
-  SchemaItem* map_item = add_to_list(builder->lists+sibling_list_id, name_ptr, "map");
+  SchemaItem* map_item = add_to_list(&builder->lists[sibling_list_id], name_ptr, "map");
   map_item->children = child_list_id;
 }
 
@@ -149,7 +149,7 @@ void visit_decimal(void *data,
   char* type = malloc(16 * sizeof(char));
   snprintf(type, 16, "decimal(%i)(%i)", precision, scale);
   PRINT_VISIT(type, name_ptr, sibling_list_id);
-  add_to_list(builder->lists+sibling_list_id, name_ptr, type);
+  add_to_list(&builder->lists[sibling_list_id], name_ptr, type);
 }
 
 
@@ -158,7 +158,7 @@ void visit_simple_type(void *data, uintptr_t sibling_list_id, struct KernelStrin
   SchemaBuilder *builder = data;
   char* name_ptr = allocate_name(name);
   PRINT_VISIT(type, name_ptr, sibling_list_id);
-  add_to_list(builder->lists+sibling_list_id, name_ptr, type);
+  add_to_list(&builder->lists[sibling_list_id], name_ptr, type);
 }
 
 #define DEFINE_VISIT_SIMPLE_TYPE(typename) \
