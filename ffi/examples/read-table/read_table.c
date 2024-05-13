@@ -1,7 +1,9 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "delta_kernel_ffi.h"
+#include <delta_kernel_ffi.h>
+
+#include "read_table.h"
 #include "schema.h"
 
 #ifdef PRINT_ARROW_DATA
@@ -10,8 +12,10 @@
 
 struct EngineContext {
   GlobalScanState *global_state;
-  char* table_root;
+  char *table_root;
   const ExternEngineHandle *engine;
+  PartitionList *partition_cols;
+  CStringMap *partition_values;
 #ifdef PRINT_ARROW_DATA
   ArrowContext *arrow_context;
 #endif
@@ -25,11 +29,13 @@ typedef struct Error {
 } Error;
 
 
-// create a char* from a KernelStringSlice
-void* allocate_string(const KernelStringSlice slice) {
-  char* buf = malloc(sizeof(char) * (slice.len + 1)); // +1 for null
-  snprintf(buf, slice.len + 1, "%s", slice.ptr);
-  return buf;
+
+void print_selection_vector(const char* indent, const KernelBoolSlice *selection_vec) {
+#ifdef VERBOSE
+  for (int i = 0; i < selection_vec->len; i++) {
+    printf("%ssel[%i] = %b\n", indent, i, selection_vec->ptr[i]);
+  }
+#endif
 }
 
 EngineError* allocate_error(KernelError etype, const KernelStringSlice msg) {
@@ -45,12 +51,6 @@ void free_error(Error* error) {
   free(error);
 }
 
-void print_selection_vector(const char* indent, const KernelBoolSlice *selection_vec) {
-  for (int i = 0; i < selection_vec->len; i++) {
-    printf("%ssel[%i] = %b\n", indent, i, selection_vec->ptr[i]);
-  }
-}
-
 void print_error(const char* indent, Error* err) {
   printf("%sCode: %i\n", indent, err->etype);
   printf("%sMsg: %s\n", indent, err->msg);
@@ -62,7 +62,32 @@ void set_builder_opt(EngineBuilder *engine_builder, char* key, char* val) {
   set_builder_option(engine_builder, key_slice, val_slice);
 }
 
+#ifdef PRINT_ARROW_DATA
+// convert to a garrow boolean array. can't use garrow_boolean_array_builder_append_values as that
+// expects a gboolean*, which is actually an int* whic is 4 bytes, but our slice is a C99 _Bool*
+// which is 1 byte
+GArrowBooleanArray* slice_to_arrow_bool_array(const KernelBoolSlice slice) {
+  GArrowBooleanArrayBuilder* builder = garrow_boolean_array_builder_new();
+  for (int i = 0; i < slice.len; i++) {
+    gboolean val = FALSE;
+    if (slice.ptr[i]) {
+      val = TRUE;
+    }
+    garrow_boolean_array_builder_append_value(
+      builder,
+      val,
+      NULL
+    );
+  }
+  GArrowArray* ret = garrow_array_builder_finish((GArrowArrayBuilder*)builder, NULL);
+  if (ret == NULL) {
+    printf("ERROR IN BUILDING\n");
+  }
+  return (GArrowBooleanArray*)ret;
+}
+
 void visit_read_data(void* vcontext, EngineDataHandle *data) {
+  print_diag("  Converting read data to arrow and adding to context\n");
   struct EngineContext *context = vcontext;
   ExternResultArrowFFIData arrow_res = get_raw_arrow_data(data, context->engine);
   if (arrow_res.tag != OkArrowFFIData) {
@@ -72,16 +97,24 @@ void visit_read_data(void* vcontext, EngineDataHandle *data) {
     exit(-1);
   }
   ArrowFFIData *arrow_data = arrow_res.ok;
-#ifdef PRINT_ARROW_DATA
-  add_batch_to_context(context->arrow_context, arrow_data);
+  add_batch_to_context(
+    context->arrow_context,
+    arrow_data,
+    context->partition_cols,
+    context->partition_values,
+#ifdef VERBOSE
+    true
+#else
+    false
 #endif
+  );
 }
 
-void read_parquet_file(struct EngineContext *context, const KernelStringSlice path) {
+void read_parquet_file(struct EngineContext *context, const KernelStringSlice path, const KernelBoolSlice selection_vector) {
   int full_len = strlen(context->table_root) + path.len + 1;
   char* full_path = malloc(sizeof(char) * full_len);
   snprintf(full_path, full_len, "%s%.*s", context->table_root, path.len, path.ptr);
-  //printf("going to actually read!\n  path: %s\n", full_path);
+  print_diag("  Reading parquet file at %s\n", full_path);
   KernelStringSlice path_slice = {full_path, full_len};
   Schema *read_schema = get_global_read_schema(context->global_state);
   FileMeta meta = {
@@ -92,7 +125,10 @@ void read_parquet_file(struct EngineContext *context, const KernelStringSlice pa
     printf("Couldn't read data\n");
     return;
   }
-
+  if (selection_vector.len > 0) {
+    GArrowBooleanArray* sel_array = slice_to_arrow_bool_array(selection_vector);
+    context->arrow_context->cur_filter = sel_array;
+  }
   FileReadResultIterator *read_iter = read_res.ok;
   for (;;) {
     ExternResultbool ok_res = read_result_next(read_iter, context, visit_read_data);
@@ -102,47 +138,81 @@ void read_parquet_file(struct EngineContext *context, const KernelStringSlice pa
       free_error((Error*)ok_res.err);
       exit(-1);
     } else if (!ok_res.ok) {
-      printf("Iterator done\n");
+      print_diag("  Done reading parquet file\n");
       break;
     }
   }
 }
+#endif
+
+void print_partition_info(struct EngineContext* context, CStringMap *partition_values) {
+#ifdef VERBOSE
+  for (int i = 0; i < context->partition_cols->len; i++) {
+    char *col = context->partition_cols->cols[i];
+    KernelStringSlice key = {col, strlen(col)};
+    char *partition_val = get_from_map(partition_values, key, allocate_string);
+    if (partition_val) {
+      print_diag("  partition '%s' here: %s\n", col, partition_val);
+      free(partition_val);
+    } else {
+      print_diag("  no partition here\n");
+    }
+  }
+#endif
+}
 
 void visit_callback(void* engine_context, const KernelStringSlice path, long size, const DvInfo *dv_info, CStringMap *partition_values) {
   struct EngineContext *context = engine_context;
+  print_diag("Called back to read file: %.*s\n", (int)path.len, path.ptr);
   ExternResultKernelBoolSlice selection_vector_res = selection_vector_from_dv(dv_info, context->engine, context->global_state);
   if (selection_vector_res.tag != OkKernelBoolSlice) {
     printf("Could not get selection vector from kernel\n");
-    return;
+    exit(-1);
   }
   KernelBoolSlice selection_vector = selection_vector_res.ok;
   if (selection_vector.len > 0) {
-    printf("  Selection vector:\n");
+    print_diag("  Selection vector for this file:\n");
     print_selection_vector("    ", &selection_vector);
   } else {
-    printf("  No selection vector for this call\n");
+    print_diag("  No selection vector for this file\n");
   }
-  // todo: pass the selection vector through
-  read_parquet_file(context, path);
+  context->partition_values = partition_values;
+  print_partition_info(context, partition_values);
+#ifdef PRINT_ARROW_DATA
+  read_parquet_file(context, path, selection_vector);
+#endif
   drop_bool_slice(selection_vector);
-  // normally this would be picked out of the schema
-  char* letter_key = "letter";
-  KernelStringSlice key = {letter_key, strlen(letter_key)};
-  char* partition_val = get_from_map(partition_values, key, allocate_string);
-  if (partition_val) {
-    printf("  letter partition here: %s\n", partition_val);
-    free(partition_val);
-  } else {
-    printf("  no partition here\n");
-  }
+  context->partition_values = NULL;
 }
 
 void visit_data(void *engine_context, EngineDataHandle *engine_data, KernelBoolSlice selection_vec) {
-  printf("Got some data\n");
-  printf("  Of this data, here is a selection vector\n");
+  print_diag("\nScan iterator found some data to read\n  Of this data, here is a selection vector\n");
   print_selection_vector("    ", &selection_vec);
   visit_scan_data(engine_data, selection_vec, engine_context, visit_callback);
   drop_bool_slice(selection_vec);
+}
+
+void visit_partition(void* context, const KernelStringSlice partition) {
+  PartitionList* list = context;
+  char *col = allocate_string(partition);
+  list->cols[list->len] = col;
+  list->len++;
+}
+
+PartitionList* get_partition_list(GlobalScanState *state) {
+  int count = get_partition_column_count(state);
+  PartitionList *list = malloc(sizeof(PartitionList));
+  list->len = 0;
+  list->cols = malloc(sizeof(char*) * count);
+  StringSliceIterator *part_iter = get_partition_columns(state);
+  for(;;) {
+    bool has_next = string_slice_next(part_iter, list, visit_partition);
+    if (!has_next) {
+      print_diag("Done iterating partition columns");
+      break;
+    }
+  }
+  return list;
 }
 
 int main(int argc, char* argv[]) {
@@ -211,10 +281,13 @@ int main(int argc, char* argv[]) {
 
   Scan *scan = scan_res.ok;
   GlobalScanState *global_state = get_global_scan_state(scan);
+  PartitionList *partition_cols = get_partition_list(global_state);
   struct EngineContext context = {
     global_state,
     table_path,
     engine,
+    partition_cols,
+    .partition_values = NULL,
 #ifdef PRINT_ARROW_DATA
     .arrow_context = init_arrow_context(),
 #endif
@@ -240,12 +313,12 @@ int main(int argc, char* argv[]) {
       free_error((Error*)ok_res.err);
       return -1;
     } else if (!ok_res.ok) {
-      printf("Iterator done\n");
+      print_diag("Iterator done\n");
       break;
     }
   }
 
-  printf("All done\n");
+  print_diag("All done\n");
 
 #ifdef PRINT_ARROW_DATA
   print_arrow_context(context.arrow_context);

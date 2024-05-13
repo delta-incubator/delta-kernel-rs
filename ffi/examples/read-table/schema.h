@@ -1,4 +1,5 @@
 #include <stdint.h>
+#include "read_table.h"
 #include "delta_kernel_ffi.h"
 
 /**
@@ -47,10 +48,6 @@ typedef struct {
   int list_count;
   SchemaItemList* lists;
 } SchemaBuilder;
-
-char* allocate_name(const KernelStringSlice slice) {
-  return strndup(slice.ptr, slice.len);
-}
 
 // lists are preallocated to have exactly enough space, so we just fill in the next open slot and
 // increment our length
@@ -107,7 +104,7 @@ void visit_struct(void *data,
                   struct KernelStringSlice name,
                   uintptr_t child_list_id) {
   SchemaBuilder *builder = data;
-  char* name_ptr = allocate_name(name);
+  char* name_ptr = allocate_string(name);
   PRINT_VISIT("struct", name_ptr, sibling_list_id, "Children", child_list_id);
   SchemaItem* struct_item = add_to_list(&builder->lists[sibling_list_id], name_ptr, "struct");
   struct_item->children = child_list_id;
@@ -145,7 +142,7 @@ void visit_decimal(void *data,
                    uint8_t precision,
                    int8_t scale) {
   SchemaBuilder *builder = data;
-  char* name_ptr = allocate_name(name);
+  char* name_ptr = allocate_string(name);
   char* type = malloc(16 * sizeof(char));
   snprintf(type, 16, "decimal(%i)(%i)", precision, scale);
   PRINT_VISIT(type, name_ptr, sibling_list_id);
@@ -156,7 +153,7 @@ void visit_decimal(void *data,
 
 void visit_simple_type(void *data, uintptr_t sibling_list_id, struct KernelStringSlice name, char* type) {
   SchemaBuilder *builder = data;
-  char* name_ptr = allocate_name(name);
+  char* name_ptr = allocate_string(name);
   PRINT_VISIT(type, name_ptr, sibling_list_id);
   add_to_list(&builder->lists[sibling_list_id], name_ptr, type);
 }

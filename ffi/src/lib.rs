@@ -18,7 +18,7 @@ use delta_kernel::{DeltaResult, Engine, Error};
 pub mod engine_interface_funcs;
 
 mod handle;
-use handle::{ArcHandle, SizedArcHandle, Unconstructable};
+use handle::{ArcHandle, BoxHandle, SizedArcHandle, Unconstructable};
 
 pub mod scan;
 
@@ -621,6 +621,55 @@ pub unsafe extern "C" fn drop_snapshot(snapshot: *const SnapshotHandle) {
 pub unsafe extern "C" fn version(snapshot: *const SnapshotHandle) -> u64 {
     let snapshot = unsafe { ArcHandle::clone_as_arc(snapshot) };
     snapshot.version()
+}
+
+// Intentionally opaque to the engine.
+pub struct StringSliceIterator {
+    // Box -> Wrap its unsized content this struct is fixed-size with thin pointers.
+    // Item = String
+    data: Box<dyn Iterator<Item = String> + Send + Sync>,
+}
+
+impl BoxHandle for StringSliceIterator {}
+
+impl Drop for StringSliceIterator {
+    fn drop(&mut self) {
+        debug!("dropping StringSliceIterator");
+    }
+}
+
+/// # Safety
+///
+/// The iterator must be valid (returned by [kernel_scan_data_init]) and not yet freed by
+/// [kernel_scan_data_free]. The visitor function pointer must be non-null.
+#[no_mangle]
+pub unsafe extern "C" fn string_slice_next(
+    data: &mut StringSliceIterator,
+    engine_context: NullableCvoid,
+    engine_visitor: extern "C" fn(engine_context: NullableCvoid, slice: KernelStringSlice),
+) -> bool {
+    string_slice_next_impl(data, engine_context, engine_visitor)
+}
+
+fn string_slice_next_impl(
+    data: &mut StringSliceIterator,
+    engine_context: NullableCvoid,
+    engine_visitor: extern "C" fn(engine_context: NullableCvoid, slice: KernelStringSlice),
+) -> bool {
+    if let Some(data) = data.data.next() {
+        (engine_visitor)(engine_context, data.as_str().into());
+        true
+    } else {
+        false
+    }
+}
+
+/// # Safety
+///
+/// Caller is responsible for (at most once) passing a valid pointer to a [`StringSliceIterator`]
+#[no_mangle]
+pub unsafe extern "C" fn string_slice_data_free(data: *mut StringSliceIterator) {
+    BoxHandle::drop_handle(data)
 }
 
 /// The `EngineSchemaVisitor` defines a visitor system to allow engines to build their own

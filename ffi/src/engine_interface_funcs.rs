@@ -5,7 +5,12 @@ use std::sync::Arc;
 use delta_kernel::{schema::Schema, DeltaResult, Error, FileDataReadResultIterator};
 use tracing::debug;
 
-use crate::{handle::{ArcHandle, BoxHandle}, scan::EngineDataHandle, unwrap_and_parse_path_as_url, ExternEngine, ExternEngineHandle, ExternResult, IntoExternResult, KernelStringSlice, NullableCvoid};
+use crate::{
+    handle::{ArcHandle, BoxHandle},
+    scan::EngineDataHandle,
+    unwrap_and_parse_path_as_url, ExternEngine, ExternEngineHandle, ExternResult, IntoExternResult,
+    KernelStringSlice, NullableCvoid,
+};
 
 #[repr(C)]
 pub struct FileMeta {
@@ -85,7 +90,12 @@ fn read_result_next_impl(
     }
 }
 
+// TODO DROP READ ITER?
 
+/// Use the specified engine's [`delta_kernel::ParquetHandler`] to read the specified file
+///
+/// # Safety
+/// Caller is responsible for calling with a valid `ExternEngineHandle` and `FileMeta`
 #[no_mangle]
 pub unsafe extern "C" fn read_parquet_files(
     extern_engine: *const ExternEngineHandle,
@@ -104,15 +114,11 @@ unsafe fn read_parquet_files_impl(
     let engine = extern_engine.engine();
     let delta_fm: delta_kernel::FileMeta = file.try_into()?;
     let parquet_handler = engine.get_parquet_handler();
-    let data = parquet_handler.read_parquet_files(
-        &[delta_fm],
-        Arc::new(physical_schema.clone()),
-        None
-    )?;
+    let data =
+        parquet_handler.read_parquet_files(&[delta_fm], Arc::new(physical_schema.clone()), None)?;
     let res = FileReadResultIterator {
         data,
         engine: extern_engine.clone(),
     };
     Ok(res.into_handle())
 }
-

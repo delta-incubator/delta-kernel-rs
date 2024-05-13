@@ -14,7 +14,7 @@ use url::Url;
 use crate::{
     unwrap_kernel_expression, AllocateStringFn, EnginePredicate, ExternEngine, ExternEngineHandle,
     ExternResult, IntoExternResult, KernelBoolSlice, KernelExpressionVisitorState,
-    KernelStringSlice, NullableCvoid, SnapshotHandle, TryFromStringSlice,
+    KernelStringSlice, NullableCvoid, SnapshotHandle, StringSliceIterator, TryFromStringSlice,
 };
 
 use super::handle::{ArcHandle, BoxHandle};
@@ -28,6 +28,14 @@ pub struct EngineDataHandle {
     pub(crate) data: Box<dyn EngineData>,
 }
 impl BoxHandle for EngineDataHandle {}
+
+/// Get the number of rows in an engine data
+///
+/// # Safety
+/// `data_handle` must be a valid pointer to a kernel allocated `EngineDataHandle`
+pub unsafe extern "C" fn engine_data_length(data_handle: &EngineDataHandle) -> usize {
+    data_handle.data.length()
+}
 
 /// Allow an engine to "unwrap" an [`EngineDataHandle`] into the raw pointer for the case it wants
 /// to use its own engine data format
@@ -140,9 +148,33 @@ pub unsafe extern "C" fn get_global_read_schema(state: &GlobalScanState) -> *mut
     BoxHandle::into_handle(state.read_schema.clone())
 }
 
+
+/// Get a count of the number of partition columns for this scan
+///
+/// # Safety
+/// Caller is responsible for passing a valid global scan pointer.
+#[no_mangle]
+pub unsafe extern "C" fn get_partition_column_count(
+    state: &GlobalScanState,
+) -> usize {
+    state.partition_columns.len()
+}
+
+/// Get an iterator of the list of partition columns for this scan.
+///
+/// # Safety
+/// Caller is responsible for passing a valid global scan pointer.
+#[no_mangle]
+pub unsafe extern "C" fn get_partition_columns(
+    state: &GlobalScanState,
+) -> *mut StringSliceIterator {
+    let iter = Box::new(state.partition_columns.clone().into_iter());
+    StringSliceIterator { data: iter }.into_handle()
+}
+
 /// # Safety
 ///
-/// Caller is responsible for passing a valid global scan pointer.
+/// Caller is responsible for passing a valid global scan state pointer.
 #[no_mangle]
 pub unsafe extern "C" fn drop_global_scan_state(state: *mut GlobalScanState) {
     BoxHandle::drop_handle(state);
@@ -151,12 +183,10 @@ pub unsafe extern "C" fn drop_global_scan_state(state: *mut GlobalScanState) {
 // Intentionally opaque to the engine.
 pub struct KernelScanDataIterator {
     // Box -> Wrap its unsized content this struct is fixed-size with thin pointers.
-    // Item = Box<dyn EngineData>, see above, Vec<bool> -> can become a KernelBoolSlice
+    // Item = DeltaResult<ScanData>
     data: Box<dyn Iterator<Item = DeltaResult<ScanData>> + Send + Sync>,
 
     // Also keep a reference to the external engine for its error allocator.
-    // Parquet and Json handlers don't hold any reference to the tokio reactor, so the iterator
-    // terminates early if the last engine goes out of scope.
     engine: Arc<dyn ExternEngine>,
 }
 
