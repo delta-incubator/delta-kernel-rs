@@ -6,9 +6,8 @@ static GArrowSchema* get_schema(FFI_ArrowSchema *schema) {
   GError *error = NULL;
   GArrowSchema *garrow_schema = garrow_schema_import((gpointer)schema, &error);
   if (error != NULL) {
-    // Report error to user, and free error
-    fprintf (stderr, "Can't get schema: %s\n", error->message);
-    g_error_free (error);
+    fprintf(stderr, "Can't get schema: %s\n", error->message);
+    g_error_free(error);
   }
   return garrow_schema;
 }
@@ -17,9 +16,8 @@ static GArrowRecordBatch* get_record_batch(FFI_ArrowArray *array, GArrowSchema *
   GError *error = NULL;
   GArrowRecordBatch *record_batch = garrow_record_batch_import((gpointer)array, schema, &error);
   if (error != NULL) {
-    // Report error to user, and free error
-    fprintf (stderr, "Can't get record batch: %s\n", error->message);
-    g_error_free (error);
+    fprintf(stderr, "Can't get record batch: %s\n", error->message);
+    g_error_free(error);
   }
   return record_batch;
 }
@@ -74,8 +72,8 @@ static GArrowRecordBatch* add_partition_columns(
       if (new_record_batch == NULL) {
 	if (error != NULL) {
 	  // Report error to user, and free error
-	  fprintf (stderr, "Could not add column at %u: %s\n", pos, error->message);
-	  g_error_free (error);
+	  fprintf(stderr, "Could not add column at %u: %s\n", pos, error->message);
+	  g_error_free(error);
 	}
       }
       free(partition_val);
@@ -90,13 +88,12 @@ void add_batch_to_context(
   ArrowContext *context,
   ArrowFFIData *arrow_data,
   PartitionList *partition_cols,
-  CStringMap *partition_values,
-  bool verbose
+  CStringMap *partition_values
 ) {
   GArrowSchema *schema = get_schema(&arrow_data->schema);
   GArrowRecordBatch *record_batch = get_record_batch(&arrow_data->array, schema);
   if (context->cur_filter != NULL) {
-    record_batch = garrow_record_batch_filter (
+    record_batch = garrow_record_batch_filter(
       record_batch,
       context->cur_filter,
       NULL,
@@ -108,9 +105,7 @@ void add_batch_to_context(
   context->batches = realloc(context->batches, sizeof(GArrowRecordBatch*) * (context->num_batches+1));
   context->batches[context->num_batches] = record_batch;
   context->num_batches++;
-  if (verbose) {
-    printf("  Added batch to arrow context, have %i in context now\n", context->num_batches);
-  }
+  print_diag("  Added batch to arrow context, have %i in context now\n", context->num_batches);
 }
 
 void print_arrow_context(ArrowContext *context) {
@@ -124,13 +119,13 @@ void print_arrow_context(ArrowContext *context) {
       &error);
     if (error != NULL) {
       // Report error to user, and free error
-      fprintf (stderr, "Can't create table from batches: %s\n", error->message);
-      g_error_free (error);
+      fprintf(stderr, "Can't create table from batches: %s\n", error->message);
+      g_error_free(error);
     }
     gchar *out = garrow_table_to_string(table, &error);
     if (error != NULL) {
-      fprintf (stderr, "Can't turn table into string: %s\n", error->message);
-      g_error_free (error);
+      fprintf(stderr, "Can't turn table into string: %s\n", error->message);
+      g_error_free(error);
     } else {
       printf("\nTable Data:\n-----------\n\n%s\n", out);
       g_free(out);

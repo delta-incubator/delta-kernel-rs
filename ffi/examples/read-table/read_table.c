@@ -101,12 +101,7 @@ void visit_read_data(void* vcontext, EngineDataHandle *data) {
     context->arrow_context,
     arrow_data,
     context->partition_cols,
-    context->partition_values,
-#ifdef VERBOSE
-    true
-#else
-    false
-#endif
+    context->partition_values
   );
 }
 
