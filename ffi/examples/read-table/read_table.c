@@ -64,15 +64,12 @@ void set_builder_opt(EngineBuilder *engine_builder, char* key, char* val) {
 
 #ifdef PRINT_ARROW_DATA
 // convert to a garrow boolean array. can't use garrow_boolean_array_builder_append_values as that
-// expects a gboolean*, which is actually an int* whic is 4 bytes, but our slice is a C99 _Bool*
+// expects a gboolean*, which is actually an int* which is 4 bytes, but our slice is a C99 _Bool*
 // which is 1 byte
 GArrowBooleanArray* slice_to_arrow_bool_array(const KernelBoolSlice slice) {
   GArrowBooleanArrayBuilder* builder = garrow_boolean_array_builder_new();
   for (int i = 0; i < slice.len; i++) {
-    gboolean val = FALSE;
-    if (slice.ptr[i]) {
-      val = TRUE;
-    }
+    gboolean val = slice.ptr[i]?TRUE:FALSE;
     garrow_boolean_array_builder_append_value(
       builder,
       val,
