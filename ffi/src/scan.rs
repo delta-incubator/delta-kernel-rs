@@ -148,15 +148,12 @@ pub unsafe extern "C" fn get_global_read_schema(state: &GlobalScanState) -> *mut
     BoxHandle::into_handle(state.read_schema.clone())
 }
 
-
 /// Get a count of the number of partition columns for this scan
 ///
 /// # Safety
 /// Caller is responsible for passing a valid global scan pointer.
 #[no_mangle]
-pub unsafe extern "C" fn get_partition_column_count(
-    state: &GlobalScanState,
-) -> usize {
+pub unsafe extern "C" fn get_partition_column_count(state: &GlobalScanState) -> usize {
     state.partition_columns.len()
 }
 
