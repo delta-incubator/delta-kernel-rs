@@ -48,10 +48,11 @@ static GArrowRecordBatch* add_partition_columns(
   GArrowRecordBatch *new_record_batch = record_batch;
   for (int i = 0; i < partition_cols->len; i++) {
     char *col = partition_cols->cols[i];
+    guint pos = cols + i;
     KernelStringSlice key = {col, strlen(col)};
     char *partition_val = get_from_map(partition_values, key, allocate_string);
     if (partition_val) {
-      print_diag("  Adding partition column '%s' with value '%s'\n", col, partition_val);
+      print_diag("  Adding partition column '%s' with value '%s' at %u\n", col, partition_val, pos);
       GArrowStringArrayBuilder* builder = garrow_string_array_builder_new();
       for (gint64 i = 0; i < rows; i++) {
 	garrow_string_array_builder_append_string(
@@ -62,15 +63,20 @@ static GArrowRecordBatch* add_partition_columns(
       }
       GArrowArray *ret = garrow_array_builder_finish((GArrowArrayBuilder*)builder, NULL);
       GArrowField *field = garrow_field_new(col, (GArrowDataType*)garrow_string_data_type_new());
+      GError *error = NULL;
       new_record_batch = garrow_record_batch_add_column(
-	record_batch,
-	cols + i,
+	new_record_batch,
+	pos,
 	field,
 	ret,
-	NULL
+	&error
       );
       if (new_record_batch == NULL) {
-	printf("FAILED TO ADD COL\n");
+	if (error != NULL) {
+	  // Report error to user, and free error
+	  fprintf (stderr, "Could not add column at %u: %s\n", pos, error->message);
+	  g_error_free (error);
+	}
       }
       free(partition_val);
     } else {
