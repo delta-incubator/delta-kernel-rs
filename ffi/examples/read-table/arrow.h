@@ -1,64 +1,72 @@
 #include <arrow-glib/arrow-glib.h>
+#include "delta_kernel_ffi.h"
 
-static void
-print_array(GArrowArray *array)
-{
-  GArrowType value_type;
-  gint64 i, n;
-
-  value_type = garrow_array_get_value_type(array);
-
-  g_print("[");
-  n = garrow_array_get_length(array);
-
-#define ARRAY_CASE(type, Type, TYPE, format)                                             \
-  case GARROW_TYPE_##TYPE:                                                               \
-    {                                                                                    \
-      GArrow##Type##Array *real_array;                                                   \
-      real_array = GARROW_##TYPE##_ARRAY(array);                                         \
-      for (i = 0; i < n; i++) {                                                          \
-        if (i > 0) {                                                                     \
-          g_print(", ");                                                                 \
-        }                                                                                \
-        g_print(format, garrow_##type##_array_get_value(real_array, i));                 \
-      }                                                                                  \
-    }                                                                                    \
-    break
-
-  switch (value_type) {
-    ARRAY_CASE(uint8, UInt8, UINT8, "%hhu");
-    ARRAY_CASE(uint16, UInt16, UINT16, "%" G_GUINT16_FORMAT);
-    ARRAY_CASE(uint32, UInt32, UINT32, "%" G_GUINT32_FORMAT);
-    ARRAY_CASE(uint64, UInt64, UINT64, "%" G_GUINT64_FORMAT);
-    ARRAY_CASE(int8, Int8, INT8, "%hhd");
-    ARRAY_CASE(int16, Int16, INT16, "%" G_GINT16_FORMAT);
-    ARRAY_CASE(int32, Int32, INT32, "%" G_GINT32_FORMAT);
-    ARRAY_CASE(int64, Int64, INT64, "%" G_GINT64_FORMAT);
-    ARRAY_CASE(float, Float, FLOAT, "%g");
-    ARRAY_CASE(double, Double, DOUBLE, "%g");
-  default:
-    break;
+static GArrowSchema* get_schema(FFI_ArrowSchema *schema) {
+  GError *error = NULL;
+  GArrowSchema *garrow_schema = garrow_schema_import((gpointer)schema, &error);
+  if (error != NULL) {
+    // Report error to user, and free error
+    fprintf (stderr, "Can't get schema: %s\n", error->message);
+    g_error_free (error);
   }
-#undef ARRAY_CASE
-
-  g_print("]\n");
+  return garrow_schema;
 }
 
-static void
-print_record_batch(GArrowRecordBatch *record_batch)
-{
-  guint nth_column, n_columns;
-
-  n_columns = garrow_record_batch_get_n_columns(record_batch);
-  for (nth_column = 0; nth_column < n_columns; nth_column++) {
-    GArrowArray *array;
-
-    g_print("columns[%u](%s): ",
-            nth_column,
-            garrow_record_batch_get_column_name(record_batch, nth_column));
-    array = garrow_record_batch_get_column_data(record_batch, nth_column);
-    print_array(array);
-    g_object_unref(array);
+static GArrowRecordBatch* get_record_batch(FFI_ArrowArray *array, GArrowSchema *schema) {
+  GError *error = NULL;
+  GArrowRecordBatch *record_batch = garrow_record_batch_import((gpointer)array, schema, &error);
+  if (error != NULL) {
+    // Report error to user, and free error
+    fprintf (stderr, "Can't get record batch: %s\n", error->message);
+    g_error_free (error);
   }
+  return record_batch;
 }
 
+typedef struct ArrowContext {
+  gsize num_batches;
+  GArrowRecordBatch **batches;
+} ArrowContext;
+
+ArrowContext* init_arrow_context() {
+  ArrowContext *context = malloc(sizeof(ArrowContext));
+  context->num_batches = 0;
+  context->batches = calloc(0, sizeof(GArrowRecordBatch*));
+  return context;
+}
+
+void add_batch_to_context(ArrowContext *context, ArrowFFIData *arrow_data) {
+  GArrowSchema *schema = get_schema(&arrow_data->schema);
+  GArrowRecordBatch *record_batch = get_record_batch(&arrow_data->array, schema);
+  context->batches = realloc(context->batches, sizeof(GArrowRecordBatch*) * (context->num_batches+1));
+  context->batches[context->num_batches] = record_batch;
+  context->num_batches++;
+  printf("Added to context, have %i now\n", context->num_batches);
+}
+
+void print_arrow_context(ArrowContext *context) {
+  if (context->num_batches > 0) {
+    GError *error = NULL;
+    GArrowSchema *schema = garrow_record_batch_get_schema(context->batches[0]);
+    GArrowTable* table = garrow_table_new_record_batches(
+      schema,
+      context->batches,
+      context->num_batches,
+      &error);
+    if (error != NULL) {
+      // Report error to user, and free error
+      fprintf (stderr, "Can't create table from batches: %s\n", error->message);
+      g_error_free (error);
+    }
+    gchar *out = garrow_table_to_string(table, &error);
+    if (error != NULL) {
+      fprintf (stderr, "Can't turn table into string: %s\n", error->message);
+      g_error_free (error);
+    } else {
+      printf("%s\n", out);
+      g_free(out);
+    }
+  } else {
+    printf("[No data]\n");
+  }
+}

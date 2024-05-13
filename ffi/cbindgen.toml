@@ -18,4 +18,4 @@ remove_underscores = true
 
 [parse]
 parse_deps = true
-include = ["delta_kernel"]
+include = ["delta_kernel", "arrow-data", "arrow-schema"]

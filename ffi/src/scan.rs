@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use delta_kernel::scan::state::{visit_scan_files, DvInfo, GlobalScanState};
 use delta_kernel::scan::{Scan, ScanBuilder, ScanData};
+use delta_kernel::schema::Schema;
 use delta_kernel::{DeltaResult, EngineData};
 use tracing::debug;
 use url::Url;
@@ -24,7 +25,7 @@ use super::handle::{ArcHandle, BoxHandle};
 /// some kernel calls to operate on the data, or can be converted into the raw data as read by the
 /// [`delta_kernel::Engine`] by calling [`get_raw_engine_data`]
 pub struct EngineDataHandle {
-    data: Box<dyn EngineData>,
+    pub(crate) data: Box<dyn EngineData>,
 }
 impl BoxHandle for EngineDataHandle {}
 
@@ -56,6 +57,7 @@ pub struct ArrowFFIData {
 /// data_handle must be a valid EngineDataHandle as read by the
 /// [`delta_kernel::engine::default::DefaultEngine`] obtained from `get_default_engine`.
 #[cfg(feature = "default-engine")]
+#[no_mangle]
 pub unsafe extern "C" fn get_raw_arrow_data(
     data_handle: *mut EngineDataHandle,
     engine: *const ExternEngineHandle,
@@ -116,6 +118,7 @@ unsafe fn scan_impl(
 }
 
 impl BoxHandle for GlobalScanState {}
+impl BoxHandle for Schema {}
 
 /// Get the global state for a scan. See the docs for [`delta_kernel::scan::state::GlobalScanState`]
 /// for more information.
@@ -125,6 +128,16 @@ impl BoxHandle for GlobalScanState {}
 #[no_mangle]
 pub unsafe extern "C" fn get_global_scan_state(scan: &mut Scan) -> *mut GlobalScanState {
     BoxHandle::into_handle(scan.global_scan_state())
+}
+
+/// Get the kernel view of the physical read schema that an engine should read from parquet file in
+/// a scan
+///
+/// # Safety
+/// Engine is responsible for providing a valid GlobalScanState pointer
+#[no_mangle]
+pub unsafe extern "C" fn get_global_read_schema(state: &GlobalScanState) -> *mut Schema {
+    BoxHandle::into_handle(state.read_schema.clone())
 }
 
 /// # Safety

@@ -12,6 +12,9 @@ struct EngineContext {
   GlobalScanState *global_state;
   char* table_root;
   const ExternEngineHandle *engine;
+#ifdef PRINT_ARROW_DATA
+  ArrowContext *arrow_context;
+#endif
 };
 
 // This is how we represent our errors. The kernel will ask us to contruct this struct whenever it
@@ -59,9 +62,54 @@ void set_builder_opt(EngineBuilder *engine_builder, char* key, char* val) {
   set_builder_option(engine_builder, key_slice, val_slice);
 }
 
+void visit_read_data(void* vcontext, EngineDataHandle *data) {
+  struct EngineContext *context = vcontext;
+  ExternResultArrowFFIData arrow_res = get_raw_arrow_data(data, context->engine);
+  if (arrow_res.tag != OkArrowFFIData) {
+    printf("Failed to get arrow data\n");
+    print_error("  ", (Error*)arrow_res.err);
+    free_error((Error*)arrow_res.err);
+    exit(-1);
+  }
+  ArrowFFIData *arrow_data = arrow_res.ok;
+#ifdef PRINT_ARROW_DATA
+  add_batch_to_context(context->arrow_context, arrow_data);
+#endif
+}
+
+void read_parquet_file(struct EngineContext *context, const KernelStringSlice path) {
+  int full_len = strlen(context->table_root) + path.len + 1;
+  char* full_path = malloc(sizeof(char) * full_len);
+  snprintf(full_path, full_len, "%s%.*s", context->table_root, path.len, path.ptr);
+  //printf("going to actually read!\n  path: %s\n", full_path);
+  KernelStringSlice path_slice = {full_path, full_len};
+  Schema *read_schema = get_global_read_schema(context->global_state);
+  FileMeta meta = {
+    .path = path_slice,
+  };
+  ExternResultFileReadResultIterator read_res = read_parquet_files(context->engine, &meta, read_schema);
+  if (read_res.tag != OkFileReadResultIterator) {
+    printf("Couldn't read data\n");
+    return;
+  }
+
+  FileReadResultIterator *read_iter = read_res.ok;
+  for (;;) {
+    ExternResultbool ok_res = read_result_next(read_iter, context, visit_read_data);
+    if (ok_res.tag != Okbool) {
+      printf("Failed to iterate read data\n");
+      print_error("  ", (Error*)ok_res.err);
+      free_error((Error*)ok_res.err);
+      exit(-1);
+    } else if (!ok_res.ok) {
+      printf("Iterator done\n");
+      break;
+    }
+  }
+}
+
 void visit_callback(void* engine_context, const KernelStringSlice path, long size, const DvInfo *dv_info, CStringMap *partition_values) {
   struct EngineContext *context = engine_context;
-  printf("called back to actually read!\n  path: %s/%.*s\n", context->table_root, path.len, path.ptr);
   ExternResultKernelBoolSlice selection_vector_res = selection_vector_from_dv(dv_info, context->engine, context->global_state);
   if (selection_vector_res.tag != OkKernelBoolSlice) {
     printf("Could not get selection vector from kernel\n");
@@ -74,6 +122,8 @@ void visit_callback(void* engine_context, const KernelStringSlice path, long siz
   } else {
     printf("  No selection vector for this call\n");
   }
+  // todo: pass the selection vector through
+  read_parquet_file(context, path);
   drop_bool_slice(selection_vector);
   // normally this would be picked out of the schema
   char* letter_key = "letter";
@@ -161,7 +211,14 @@ int main(int argc, char* argv[]) {
 
   Scan *scan = scan_res.ok;
   GlobalScanState *global_state = get_global_scan_state(scan);
-  struct EngineContext context = { global_state, table_path, engine };
+  struct EngineContext context = {
+    global_state,
+    table_path,
+    engine,
+#ifdef PRINT_ARROW_DATA
+    .arrow_context = init_arrow_context(),
+#endif
+  };
 
   ExternResultKernelScanDataIterator data_iter_res =
     kernel_scan_data_init(engine, scan);
@@ -189,6 +246,10 @@ int main(int argc, char* argv[]) {
   }
 
   printf("All done\n");
+
+#ifdef PRINT_ARROW_DATA
+  print_arrow_context(context.arrow_context);
+#endif
 
   kernel_scan_data_free(data_iter);
   drop_global_scan_state(global_state);
