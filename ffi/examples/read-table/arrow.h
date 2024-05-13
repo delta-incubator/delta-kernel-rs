@@ -53,28 +53,28 @@ static GArrowRecordBatch* add_partition_columns(
       print_diag("  Adding partition column '%s' with value '%s' at %u\n", col, partition_val, pos);
       GArrowStringArrayBuilder* builder = garrow_string_array_builder_new();
       for (gint64 i = 0; i < rows; i++) {
-	garrow_string_array_builder_append_string(
+        garrow_string_array_builder_append_string(
           builder,
           partition_val,
           NULL
-	);
+        );
       }
       GArrowArray *ret = garrow_array_builder_finish((GArrowArrayBuilder*)builder, NULL);
       GArrowField *field = garrow_field_new(col, (GArrowDataType*)garrow_string_data_type_new());
       GError *error = NULL;
       new_record_batch = garrow_record_batch_add_column(
-	new_record_batch,
-	pos,
-	field,
-	ret,
-	&error
+        new_record_batch,
+        pos,
+        field,
+        ret,
+        &error
       );
       if (new_record_batch == NULL) {
-	if (error != NULL) {
-	  // Report error to user, and free error
-	  fprintf(stderr, "Could not add column at %u: %s\n", pos, error->message);
-	  g_error_free(error);
-	}
+        if (error != NULL) {
+          // Report error to user, and free error
+          fprintf(stderr, "Could not add column at %u: %s\n", pos, error->message);
+          g_error_free(error);
+        }
       }
       free(partition_val);
     } else {
