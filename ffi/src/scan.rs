@@ -148,6 +148,15 @@ pub unsafe extern "C" fn get_global_read_schema(state: &GlobalScanState) -> *mut
     BoxHandle::into_handle(state.read_schema.clone())
 }
 
+/// Free a global read schema
+///
+/// # Safety
+/// Engine is responsible for providing a valid schema obtained via [`get_global_read_schema`]
+#[no_mangle]
+pub unsafe extern "C" fn free_global_read_schema(schema: *mut Schema) {
+    BoxHandle::drop_handle(schema);
+}
+
 /// Get a count of the number of partition columns for this scan
 ///
 /// # Safety
@@ -173,7 +182,7 @@ pub unsafe extern "C" fn get_partition_columns(
 ///
 /// Caller is responsible for passing a valid global scan state pointer.
 #[no_mangle]
-pub unsafe extern "C" fn drop_global_scan_state(state: *mut GlobalScanState) {
+pub unsafe extern "C" fn free_global_scan_state(state: *mut GlobalScanState) {
     BoxHandle::drop_handle(state);
 }
 
@@ -228,7 +237,7 @@ unsafe fn kernel_scan_data_init_impl(
 /// # Safety
 ///
 /// The iterator must be valid (returned by [kernel_scan_data_init]) and not yet freed by
-/// [kernel_scan_data_free]. The visitor function pointer must be non-null.
+/// [`free_kernel_scan_data`]. The visitor function pointer must be non-null.
 #[no_mangle]
 pub unsafe extern "C" fn kernel_scan_data_next(
     data: &mut KernelScanDataIterator,
@@ -269,7 +278,7 @@ fn kernel_scan_data_next_impl(
 // we should probably be consistent with drop vs. free on engine side (probably the latter is more
 // intuitive to non-rust code)
 #[no_mangle]
-pub unsafe extern "C" fn kernel_scan_data_free(data: *mut KernelScanDataIterator) {
+pub unsafe extern "C" fn free_kernel_scan_data(data: *mut KernelScanDataIterator) {
     BoxHandle::drop_handle(data);
 }
 

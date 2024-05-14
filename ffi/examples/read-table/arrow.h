@@ -179,12 +179,11 @@ void read_parquet_file(struct EngineContext* context,
   snprintf(full_path, full_len, "%s%.*s", context->table_root, path.len, path.ptr);
   print_diag("  Reading parquet file at %s\n", full_path);
   KernelStringSlice path_slice = { full_path, full_len };
-  Schema* read_schema = get_global_read_schema(context->global_state);
   FileMeta meta = {
     .path = path_slice,
   };
   ExternResultFileReadResultIterator read_res =
-    read_parquet_files(context->engine, &meta, read_schema);
+    read_parquet_files(context->engine, &meta, context->read_schema);
   if (read_res.tag != OkFileReadResultIterator) {
     printf("Couldn't read data\n");
     return;

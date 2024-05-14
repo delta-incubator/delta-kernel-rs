@@ -200,9 +200,11 @@ int main(int argc, char* argv[]) {
 
   Scan* scan = scan_res.ok;
   GlobalScanState* global_state = get_global_scan_state(scan);
+  Schema* read_schema = get_global_read_schema(global_state);
   PartitionList* partition_cols = get_partition_list(global_state);
   struct EngineContext context = {
     global_state,
+    read_schema,
     table_path,
     engine,
     partition_cols,
@@ -242,8 +244,9 @@ int main(int argc, char* argv[]) {
   print_arrow_context(context.arrow_context);
 #endif
 
-  kernel_scan_data_free(data_iter);
-  drop_global_scan_state(global_state);
+  free_kernel_scan_data(data_iter);
+  free_global_read_schema(read_schema);
+  free_global_scan_state(global_state);
   drop_snapshot(snapshot_handle);
   drop_engine(engine);
 

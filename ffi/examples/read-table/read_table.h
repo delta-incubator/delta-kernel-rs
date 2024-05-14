@@ -24,6 +24,7 @@ typedef struct PartitionList {
 // "context" argument, and then pass it back when calling a callback.
 struct EngineContext {
   GlobalScanState* global_state;
+  Schema* read_schema;
   char* table_root;
   const ExternEngineHandle* engine;
   PartitionList* partition_cols;
