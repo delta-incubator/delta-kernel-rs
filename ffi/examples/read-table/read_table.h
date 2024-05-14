@@ -1,8 +1,7 @@
 #pragma once
 
-
 // uncomment below for more diagnotic messages
-//#define VERBOSE
+// #define VERBOSE
 
 // create a char* from a KernelStringSlice
 void* allocate_string(const KernelStringSlice slice) {
