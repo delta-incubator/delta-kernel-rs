@@ -1,26 +1,9 @@
+// This file contains code to work with arrow data. Used when we are actually reading and printing
+// the content of the table
+
+#include <arrow-glib/arrow-glib.h>
 #include "delta_kernel_ffi.h"
 #include "read_table.h"
-#include <arrow-glib/arrow-glib.h>
-
-static GArrowSchema* get_schema(FFI_ArrowSchema* schema) {
-  GError* error = NULL;
-  GArrowSchema* garrow_schema = garrow_schema_import((gpointer)schema, &error);
-  if (error != NULL) {
-    fprintf(stderr, "Can't get schema: %s\n", error->message);
-    g_error_free(error);
-  }
-  return garrow_schema;
-}
-
-static GArrowRecordBatch* get_record_batch(FFI_ArrowArray* array, GArrowSchema* schema) {
-  GError* error = NULL;
-  GArrowRecordBatch* record_batch = garrow_record_batch_import((gpointer)array, schema, &error);
-  if (error != NULL) {
-    fprintf(stderr, "Can't get record batch: %s\n", error->message);
-    g_error_free(error);
-  }
-  return record_batch;
-}
 
 typedef struct ArrowContext {
   gsize num_batches;
@@ -36,6 +19,29 @@ ArrowContext* init_arrow_context() {
   return context;
 }
 
+// Turn ffi formatted schema data into a GArrowSchema
+static GArrowSchema* get_schema(FFI_ArrowSchema* schema) {
+  GError* error = NULL;
+  GArrowSchema* garrow_schema = garrow_schema_import((gpointer)schema, &error);
+  if (error != NULL) {
+    fprintf(stderr, "Can't get schema: %s\n", error->message);
+    g_error_free(error);
+  }
+  return garrow_schema;
+}
+
+// Turn ffi formatted record batch data into a GArrowRecordBatch
+static GArrowRecordBatch* get_record_batch(FFI_ArrowArray* array, GArrowSchema* schema) {
+  GError* error = NULL;
+  GArrowRecordBatch* record_batch = garrow_record_batch_import((gpointer)array, schema, &error);
+  if (error != NULL) {
+    fprintf(stderr, "Can't get record batch: %s\n", error->message);
+    g_error_free(error);
+  }
+  return record_batch;
+}
+
+// Add columns to a record batch for each partition
 static GArrowRecordBatch* add_partition_columns(GArrowRecordBatch* record_batch,
                                                 PartitionList* partition_cols,
                                                 CStringMap* partition_values) {
@@ -72,7 +78,8 @@ static GArrowRecordBatch* add_partition_columns(GArrowRecordBatch* record_batch,
   return new_record_batch;
 }
 
-void add_batch_to_context(ArrowContext* context,
+// append a batch to our context
+static void add_batch_to_context(ArrowContext* context,
                           ArrowFFIData* arrow_data,
                           PartitionList* partition_cols,
                           CStringMap* partition_values) {
@@ -90,6 +97,77 @@ void add_batch_to_context(ArrowContext* context,
   print_diag("  Added batch to arrow context, have %i in context now\n", context->num_batches);
 }
 
+// convert to a garrow boolean array. can't use garrow_boolean_array_builder_append_values as that
+// expects a gboolean*, which is actually an int* which is 4 bytes, but our slice is a C99 _Bool*
+// which is 1 byte
+static GArrowBooleanArray* slice_to_arrow_bool_array(const KernelBoolSlice slice) {
+  GArrowBooleanArrayBuilder* builder = garrow_boolean_array_builder_new();
+  for (int i = 0; i < slice.len; i++) {
+    gboolean val = slice.ptr[i] ? TRUE : FALSE;
+    garrow_boolean_array_builder_append_value(builder, val, NULL);
+  }
+  GArrowArray* ret = garrow_array_builder_finish((GArrowArrayBuilder*)builder, NULL);
+  if (ret == NULL) {
+    printf("ERROR IN BUILDING\n");
+  }
+  return (GArrowBooleanArray*)ret;
+}
+
+// This is the callback that will be called for each chunk of data read from the parquet file
+static void visit_read_data(void* vcontext, EngineDataHandle* data) {
+  print_diag("  Converting read data to arrow and adding to context\n");
+  struct EngineContext* context = vcontext;
+  ExternResultArrowFFIData arrow_res = get_raw_arrow_data(data, context->engine);
+  if (arrow_res.tag != OkArrowFFIData) {
+    printf("Failed to get arrow data\n");
+    print_error("  ", (Error*)arrow_res.err);
+    free_error((Error*)arrow_res.err);
+    exit(-1);
+  }
+  ArrowFFIData* arrow_data = arrow_res.ok;
+  add_batch_to_context(
+    context->arrow_context, arrow_data, context->partition_cols, context->partition_values);
+}
+
+// We call this for each file we get called back to read in read_table.c::visit_callback
+void read_parquet_file(struct EngineContext* context,
+                       const KernelStringSlice path,
+                       const KernelBoolSlice selection_vector) {
+  int full_len = strlen(context->table_root) + path.len + 1;
+  char* full_path = malloc(sizeof(char) * full_len);
+  snprintf(full_path, full_len, "%s%.*s", context->table_root, path.len, path.ptr);
+  print_diag("  Reading parquet file at %s\n", full_path);
+  KernelStringSlice path_slice = { full_path, full_len };
+  Schema* read_schema = get_global_read_schema(context->global_state);
+  FileMeta meta = {
+    .path = path_slice,
+  };
+  ExternResultFileReadResultIterator read_res =
+    read_parquet_files(context->engine, &meta, read_schema);
+  if (read_res.tag != OkFileReadResultIterator) {
+    printf("Couldn't read data\n");
+    return;
+  }
+  if (selection_vector.len > 0) {
+    GArrowBooleanArray* sel_array = slice_to_arrow_bool_array(selection_vector);
+    context->arrow_context->cur_filter = sel_array;
+  }
+  FileReadResultIterator* read_iter = read_res.ok;
+  for (;;) {
+    ExternResultbool ok_res = read_result_next(read_iter, context, visit_read_data);
+    if (ok_res.tag != Okbool) {
+      printf("Failed to iterate read data\n");
+      print_error("  ", (Error*)ok_res.err);
+      free_error((Error*)ok_res.err);
+      exit(-1);
+    } else if (!ok_res.ok) {
+      print_diag("  Done reading parquet file\n");
+      break;
+    }
+  }
+}
+
+// Concat all our batches into a `GArrowTable`, call to_string on it, and print the result
 void print_arrow_context(ArrowContext* context) {
   if (context->num_batches > 0) {
     GError* error = NULL;
