@@ -19,6 +19,13 @@ ArrowContext* init_arrow_context() {
   return context;
 }
 
+// unref all the data in the context
+void free_arrow_context(ArrowContext* context) {
+  for (int i = 0; i < context->num_batches; i++) {
+    g_object_unref(context->batches[i]);
+  }
+}
+
 // report and free an error if it's not NULL. Return true if error was not null, false otherwise
 static bool report_g_error(char* msg, GError* error) {
   if (error != NULL) {
@@ -53,7 +60,7 @@ static GArrowRecordBatch* add_partition_columns(GArrowRecordBatch* record_batch,
                                                 CStringMap* partition_values) {
   gint64 rows = garrow_record_batch_get_n_rows(record_batch);
   gint64 cols = garrow_record_batch_get_n_columns(record_batch);
-  GArrowRecordBatch* new_record_batch = record_batch;
+  GArrowRecordBatch* cur_record_batch = record_batch;
   GError* error = NULL;
   for (int i = 0; i < partition_cols->len; i++) {
     char* col = partition_cols->cols[i];
@@ -85,8 +92,10 @@ static GArrowRecordBatch* add_partition_columns(GArrowRecordBatch* record_batch,
       }
       g_object_unref(builder);
       GArrowField* field = garrow_field_new(col, (GArrowDataType*)garrow_string_data_type_new());
-      new_record_batch = garrow_record_batch_add_column(new_record_batch, pos, field, ret, &error);
-      if (new_record_batch == NULL) {
+      GArrowRecordBatch* old_batch = cur_record_batch;
+      cur_record_batch = garrow_record_batch_add_column(old_batch, pos, field, ret, &error);
+      g_object_unref(old_batch);
+      if (cur_record_batch == NULL) {
         if (error != NULL) {
           printf("Could not add column at %u: %s\n", pos, error->message);
           g_error_free(error);
@@ -98,7 +107,7 @@ static GArrowRecordBatch* add_partition_columns(GArrowRecordBatch* record_batch,
       exit(-1);
     }
   }
-  return new_record_batch;
+  return cur_record_batch;
 }
 
 // append a batch to our context
@@ -109,12 +118,18 @@ static void add_batch_to_context(ArrowContext* context,
   GArrowSchema* schema = get_schema(&arrow_data->schema);
   GArrowRecordBatch* record_batch = get_record_batch(&arrow_data->array, schema);
   if (context->cur_filter != NULL) {
-    record_batch = garrow_record_batch_filter(record_batch, context->cur_filter, NULL, NULL);
-    // unref the filter since we don't need it anymore
+    GArrowRecordBatch* unfiltered = record_batch;
+    record_batch = garrow_record_batch_filter(unfiltered, context->cur_filter, NULL, NULL);
+    // unref the old batch and filter since we don't need them anymore
+    g_object_unref(unfiltered);
     g_object_unref(context->cur_filter);
     context->cur_filter = NULL;
   }
   record_batch = add_partition_columns(record_batch, partition_cols, partition_values);
+  if (record_batch == NULL) {
+    printf("Failed to add parition columns, not adding batch\n");
+    return;
+  }
   context->batches =
     realloc(context->batches, sizeof(GArrowRecordBatch*) * (context->num_batches + 1));
   context->batches[context->num_batches] = record_batch;

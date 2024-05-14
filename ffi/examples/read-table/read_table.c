@@ -242,6 +242,8 @@ int main(int argc, char* argv[]) {
 
 #ifdef PRINT_ARROW_DATA
   print_arrow_context(context.arrow_context);
+  free_arrow_context(context.arrow_context);
+  context.arrow_context = NULL;
 #endif
 
   free_kernel_scan_data(data_iter);
