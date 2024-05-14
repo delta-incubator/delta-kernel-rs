@@ -41,7 +41,9 @@ static GArrowRecordBatch* get_record_batch(FFI_ArrowArray* array, GArrowSchema* 
   return record_batch;
 }
 
-// Add columns to a record batch for each partition
+// Add columns to a record batch for each partition. In a "real" engine we would want to parse the
+// string values into the correct data type. This program just adds all partition columns as strings
+// for simplicity
 static GArrowRecordBatch* add_partition_columns(GArrowRecordBatch* record_batch,
                                                 PartitionList* partition_cols,
                                                 CStringMap* partition_values) {
