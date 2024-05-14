@@ -52,10 +52,11 @@ impl Drop for FileReadResultIterator {
     }
 }
 
+/// Call the engine back with the next `EngingeData` batch read by Parquet/Json handler
 /// # Safety
 ///
-/// The iterator must be valid (returned by [kernel_scan_data_init]) and not yet freed by
-/// [kernel_scan_data_free]. The visitor function pointer must be non-null.
+/// The iterator must be valid (returned by [`read_parquet_files`]) and not yet freed by
+/// [`free_read_result_iter`]. The visitor function pointer must be non-null.
 #[no_mangle]
 pub unsafe extern "C" fn read_result_next(
     data: &mut FileReadResultIterator,
@@ -80,8 +81,7 @@ fn read_result_next_impl(
     if let Some(data) = data.data.next().transpose()? {
         let data_handle = BoxHandle::into_handle(EngineDataHandle { data });
         (engine_visitor)(engine_context, data_handle);
-        // ensure we free the data
-        // TODO: calling into_raw in the visitor causes this to segfault
+        // TODO: calling `into_raw` in the visitor causes this to segfault
         //       perhaps the callback needs to indicate if it took ownership or not
         // unsafe { BoxHandle::drop_handle(data_handle) };
         Ok(true)
@@ -90,9 +90,17 @@ fn read_result_next_impl(
     }
 }
 
-// TODO DROP READ ITER?
+/// Free the memory from the passed read result iterator
+/// # Safety
+///
+/// Caller is responsible for (at most once) passing a valid pointer returned by a call to
+/// [`read_parquet_files`].
+#[no_mangle]
+pub unsafe extern "C" fn free_read_result_iter(data: *mut FileReadResultIterator) {
+    BoxHandle::drop_handle(data);
+}
 
-/// Use the specified engine's [`delta_kernel::ParquetHandler`] to read the specified file
+/// Use the specified engine's [`delta_kernel::ParquetHandler`] to read the specified file.
 ///
 /// # Safety
 /// Caller is responsible for calling with a valid `ExternEngineHandle` and `FileMeta`

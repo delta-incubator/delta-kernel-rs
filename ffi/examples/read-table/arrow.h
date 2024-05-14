@@ -222,6 +222,7 @@ void read_parquet_file(struct EngineContext* context,
       break;
     }
   }
+  free_read_result_iter(read_iter);
 }
 
 // Concat all our batches into a `GArrowTable`, call to_string on it, and print the result
