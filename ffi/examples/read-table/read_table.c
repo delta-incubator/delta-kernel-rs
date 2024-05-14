@@ -1,3 +1,4 @@
+#include <inttypes.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -11,9 +12,12 @@
 // Print the content of a selection vector if `VERBOSE` is defined in read_table.h
 void print_selection_vector(const char* indent, const KernelBoolSlice* selection_vec) {
 #ifdef VERBOSE
-  for (int i = 0; i < selection_vec->len; i++) {
+  for (uintptr_t i = 0; i < selection_vec->len; i++) {
     printf("%ssel[%i] = %b\n", indent, i, selection_vec->ptr[i]);
   }
+#else
+  (void)indent;
+  (void)selection_vec;
 #endif
 }
 
@@ -31,6 +35,9 @@ void print_partition_info(struct EngineContext* context, CStringMap* partition_v
       print_diag("  no partition here\n");
     }
   }
+#else
+  (void)context;
+  (void)partition_values;
 #endif
 }
 
@@ -58,6 +65,7 @@ void scan_row_callback(void* engine_context,
                        long size,
                        const DvInfo* dv_info,
                        CStringMap* partition_values) {
+  (void)size; // not using this at the moment
   struct EngineContext* context = engine_context;
   print_diag("Called back to read file: %.*s\n", (int)path.len, path.ptr);
   ExternResultKernelBoolSlice selection_vector_res =
@@ -186,7 +194,7 @@ int main(int argc, char* argv[]) {
   const SnapshotHandle* snapshot_handle = snapshot_handle_res.ok;
 
   uint64_t v = version(snapshot_handle);
-  printf("version: %llu\n\n", v);
+  printf("version: %" PRIu64 "\n\n", v);
   print_schema(snapshot_handle);
 
   print_diag("Starting table scan\n\n");

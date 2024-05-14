@@ -11,6 +11,8 @@ void print_diag(char* fmt, ...) {
   va_start(args, fmt);
   vprintf(fmt, args);
   va_end(args);
+#else
+  (void)(fmt);
 #endif
 }
 
@@ -44,7 +46,7 @@ typedef struct Error {
 // Print out an error message, plus the code and kernel message of an error
 void print_error(const char* msg, Error* err) {
   printf("[ERROR] %s\n", msg);
-  printf("  Kernel Code: %i\n", err->etype);
+  printf("  Kernel Code: %i\n", err->etype.etype);
   printf("  Kernel Msg: %s\n", err->msg);
 }
 

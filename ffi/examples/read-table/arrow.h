@@ -21,7 +21,7 @@ ArrowContext* init_arrow_context() {
 
 // unref all the data in the context
 void free_arrow_context(ArrowContext* context) {
-  for (int i = 0; i < context->num_batches; i++) {
+  for (gsize i = 0; i < context->num_batches; i++) {
     g_object_unref(context->batches[i]);
   }
 }
@@ -144,7 +144,7 @@ static void add_batch_to_context(ArrowContext* context,
 static GArrowBooleanArray* slice_to_arrow_bool_array(const KernelBoolSlice slice) {
   GArrowBooleanArrayBuilder* builder = garrow_boolean_array_builder_new();
   GError* error = NULL;
-  for (int i = 0; i < slice.len; i++) {
+  for (uintptr_t i = 0; i < slice.len; i++) {
     gboolean val = slice.ptr[i] ? TRUE : FALSE;
     garrow_boolean_array_builder_append_value(builder, val, &error);
     if (report_g_error("Can't append to boolean builder", error)) {
@@ -191,7 +191,7 @@ void read_parquet_file(struct EngineContext* context,
                        const KernelBoolSlice selection_vector) {
   int full_len = strlen(context->table_root) + path.len + 1;
   char* full_path = malloc(sizeof(char) * full_len);
-  snprintf(full_path, full_len, "%s%.*s", context->table_root, path.len, path.ptr);
+  snprintf(full_path, full_len, "%s%.*s", context->table_root, (int)path.len, path.ptr);
   print_diag("  Reading parquet file at %s\n", full_path);
   KernelStringSlice path_slice = { full_path, full_len };
   FileMeta meta = {

@@ -13,6 +13,12 @@ if(WIN32)
   target_link_libraries(read_table PUBLIC ws2_32 userenv bcrypt ntdll)
 endif(WIN32)
 
+if(MSVC)
+  target_compile_options(read_table PRIVATE /W4 /WX)
+else()
+  target_compile_options(read_table PRIVATE -Wall -Wextra -Wpedantic -Werror)
+endif()
+
 if(PRINT_DATA)
   include(FindPkgConfig)
   pkg_check_modules(ARROW_GLIB REQUIRED arrow-glib)

@@ -16,14 +16,18 @@
  */
 
 #ifdef VERBOSE
+// this macro magic freaks out gcc
+#pragma GCC diagnostic ignored "-Wformat-extra-args"
+#pragma GCC diagnostic ignored "-Wformat"
 #define _NTH_ARG(_1, _2, _3, _4, _5, N, ...) N
 #define NUMARGS(...) _NTH_ARG(__VA_ARGS__, 5, 4, 3, 2, 1)
-#define CHILD_FMT "Asked to visit %s named %s belonging to list %i. %s are in %i.\n"
-#define NO_CHILD_FMT "Asked to visit %s named %s belonging to list %i.\n"
+#define CHILD_FMT "Asked to visit %s named %s belonging to list %li. %s are in %li.\n"
+#define NO_CHILD_FMT "Asked to visit %s named %s belonging to list %li.\n"
 #define PRINT_VISIT(...)                                                                           \
   NUMARGS(__VA_ARGS__) == 5 ? printf(CHILD_FMT, __VA_ARGS__) : printf(NO_CHILD_FMT, __VA_ARGS__)
 #else
 #define PRINT_VISIT(...)
+#pragma GCC diagnostic pop
 #endif
 
 typedef struct SchemaItemList SchemaItemList;
@@ -57,7 +61,7 @@ SchemaItem* add_to_list(SchemaItemList* list, char* name, char* type) {
 // print out all items in a list, recursing into any children they may have
 void print_list(SchemaBuilder* builder, uintptr_t list_id, int indent, int parents_on_last) {
   SchemaItemList* list = &builder->lists[list_id];
-  for (int i = 0; i < list->len; i++) {
+  for (uint32_t i = 0; i < list->len; i++) {
     bool is_last = i == list->len - 1;
     for (int j = 0; j < indent; j++) {
       if ((indent - parents_on_last) <= j) {
@@ -81,12 +85,12 @@ uintptr_t make_field_list(void* data, uintptr_t reserve) {
   SchemaBuilder* builder = data;
   int id = builder->list_count;
 #ifdef VERBOSE
-  printf("Making a list of lenth %i with id %i\n", reserve, id);
+  printf("Making a list of lenth %li with id %i\n", reserve, id);
 #endif
   builder->list_count++;
   builder->lists = realloc(builder->lists, sizeof(SchemaItemList) * builder->list_count);
   SchemaItem* list = calloc(reserve, sizeof(SchemaItem));
-  for (int i = 0; i < reserve; i++) {
+  for (uintptr_t i = 0; i < reserve; i++) {
     list[i].children = UINTPTR_MAX;
   }
   builder->lists[id].len = 0;
@@ -138,8 +142,8 @@ void visit_decimal(void* data,
                    int8_t scale) {
   SchemaBuilder* builder = data;
   char* name_ptr = allocate_string(name);
-  char* type = malloc(16 * sizeof(char));
-  snprintf(type, 16, "decimal(%i)(%i)", precision, scale);
+  char* type = malloc(19 * sizeof(char));
+  snprintf(type, 19, "decimal(%u)(%d)", precision, scale);
   PRINT_VISIT(type, name_ptr, sibling_list_id);
   add_to_list(&builder->lists[sibling_list_id], name_ptr, type);
 }
@@ -159,24 +163,24 @@ void visit_simple_type(void* data,
     visit_simple_type(data, sibling_list_id, name, #typename);                                     \
   }
 
-DEFINE_VISIT_SIMPLE_TYPE(string);
-DEFINE_VISIT_SIMPLE_TYPE(integer);
-DEFINE_VISIT_SIMPLE_TYPE(short);
-DEFINE_VISIT_SIMPLE_TYPE(byte);
-DEFINE_VISIT_SIMPLE_TYPE(long);
-DEFINE_VISIT_SIMPLE_TYPE(float);
-DEFINE_VISIT_SIMPLE_TYPE(double);
-DEFINE_VISIT_SIMPLE_TYPE(boolean);
-DEFINE_VISIT_SIMPLE_TYPE(binary);
-DEFINE_VISIT_SIMPLE_TYPE(date);
-DEFINE_VISIT_SIMPLE_TYPE(timestamp);
-DEFINE_VISIT_SIMPLE_TYPE(timestamp_ntz);
+DEFINE_VISIT_SIMPLE_TYPE(string)
+DEFINE_VISIT_SIMPLE_TYPE(integer)
+DEFINE_VISIT_SIMPLE_TYPE(short)
+DEFINE_VISIT_SIMPLE_TYPE(byte)
+DEFINE_VISIT_SIMPLE_TYPE(long)
+DEFINE_VISIT_SIMPLE_TYPE(float)
+DEFINE_VISIT_SIMPLE_TYPE(double)
+DEFINE_VISIT_SIMPLE_TYPE(boolean)
+DEFINE_VISIT_SIMPLE_TYPE(binary)
+DEFINE_VISIT_SIMPLE_TYPE(date)
+DEFINE_VISIT_SIMPLE_TYPE(timestamp)
+DEFINE_VISIT_SIMPLE_TYPE(timestamp_ntz)
 
 // free all the data in the builder (but not the builder itself, it's stack allocated)
 void free_builder(SchemaBuilder builder) {
   for (int i = 0; i < builder.list_count; i++) {
     SchemaItemList* list = (builder.lists) + i;
-    for (int j = 0; j < list->len; j++) {
+    for (uint32_t j = 0; j < list->len; j++) {
       SchemaItem* item = list->list + j;
       free(item->name);
       // don't free item->type, those are static strings
