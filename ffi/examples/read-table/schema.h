@@ -15,10 +15,6 @@
  * printing it.
  */
 
-// If you want the visitor to print out what it's being asked to do at each step, uncomment the
-// following line
-// #define VERBOSE
-
 #ifdef VERBOSE
 #define _NTH_ARG(_1, _2, _3, _4, _5, N, ...) N
 #define NUMARGS(...) _NTH_ARG(__VA_ARGS__, 5, 4, 3, 2, 1)
@@ -196,6 +192,7 @@ void free_builder(SchemaBuilder builder) {
 
 // Print the schema of the snapshot
 void print_schema(const SnapshotHandle* snapshot) {
+  print_diag("Building schema\n");
   SchemaBuilder builder = {
     .list_count = 0,
     .lists = calloc(0, sizeof(SchemaItem*)),
@@ -219,9 +216,10 @@ void print_schema(const SnapshotHandle* snapshot) {
                                   .visit_timestamp = visit_timestamp,
                                   .visit_timestamp_ntz = visit_timestamp_ntz };
   uintptr_t schema_list_id = visit_schema(snapshot, &visitor);
-#ifdef PRINT_VISITS
+#ifdef VERBOSE
   printf("Schema returned in list %i\n", schema_list_id);
 #endif
+  print_diag("Done building schema\n");
   printf("Schema:\n");
   print_list(&builder, schema_list_id, 0, 0);
   printf("\n");

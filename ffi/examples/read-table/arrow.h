@@ -1,9 +1,9 @@
 // This file contains code to work with arrow data. Used when we are actually reading and printing
 // the content of the table
 
-#include <arrow-glib/arrow-glib.h>
 #include "delta_kernel_ffi.h"
 #include "read_table.h"
+#include <arrow-glib/arrow-glib.h>
 
 typedef struct ArrowContext {
   gsize num_batches;
@@ -54,7 +54,8 @@ static GArrowRecordBatch* add_partition_columns(GArrowRecordBatch* record_batch,
     KernelStringSlice key = { col, strlen(col) };
     char* partition_val = get_from_map(partition_values, key, allocate_string);
     if (partition_val) {
-      print_diag("  Adding partition column '%s' with value '%s' at %u\n", col, partition_val, pos);
+      print_diag(
+        "  Adding partition column '%s' with value '%s' at column %u\n", col, partition_val, pos);
       GArrowStringArrayBuilder* builder = garrow_string_array_builder_new();
       for (gint64 i = 0; i < rows; i++) {
         garrow_string_array_builder_append_string(builder, partition_val, NULL);
@@ -72,7 +73,8 @@ static GArrowRecordBatch* add_partition_columns(GArrowRecordBatch* record_batch,
       }
       free(partition_val);
     } else {
-      print_diag("  no partition here\n");
+      printf("Error: Did not find value for expected partition column '%s'\n", col);
+      exit(-1);
     }
   }
   return new_record_batch;
@@ -80,9 +82,9 @@ static GArrowRecordBatch* add_partition_columns(GArrowRecordBatch* record_batch,
 
 // append a batch to our context
 static void add_batch_to_context(ArrowContext* context,
-                          ArrowFFIData* arrow_data,
-                          PartitionList* partition_cols,
-                          CStringMap* partition_values) {
+                                 ArrowFFIData* arrow_data,
+                                 PartitionList* partition_cols,
+                                 CStringMap* partition_values) {
   GArrowSchema* schema = get_schema(&arrow_data->schema);
   GArrowRecordBatch* record_batch = get_record_batch(&arrow_data->array, schema);
   if (context->cur_filter != NULL) {
@@ -94,7 +96,8 @@ static void add_batch_to_context(ArrowContext* context,
     realloc(context->batches, sizeof(GArrowRecordBatch*) * (context->num_batches + 1));
   context->batches[context->num_batches] = record_batch;
   context->num_batches++;
-  print_diag("  Added batch to arrow context, have %i in context now\n", context->num_batches);
+  print_diag("  Added batch to arrow context, have %i batches in context now\n",
+             context->num_batches);
 }
 
 // convert to a garrow boolean array. can't use garrow_boolean_array_builder_append_values as that
@@ -115,12 +118,11 @@ static GArrowBooleanArray* slice_to_arrow_bool_array(const KernelBoolSlice slice
 
 // This is the callback that will be called for each chunk of data read from the parquet file
 static void visit_read_data(void* vcontext, EngineDataHandle* data) {
-  print_diag("  Converting read data to arrow and adding to context\n");
+  print_diag("  Converting read data to arrow\n");
   struct EngineContext* context = vcontext;
   ExternResultArrowFFIData arrow_res = get_raw_arrow_data(data, context->engine);
   if (arrow_res.tag != OkArrowFFIData) {
-    printf("Failed to get arrow data\n");
-    print_error("  ", (Error*)arrow_res.err);
+    print_error("Failed to get arrow data.", (Error*)arrow_res.err);
     free_error((Error*)arrow_res.err);
     exit(-1);
   }
@@ -156,8 +158,7 @@ void read_parquet_file(struct EngineContext* context,
   for (;;) {
     ExternResultbool ok_res = read_result_next(read_iter, context, visit_read_data);
     if (ok_res.tag != Okbool) {
-      printf("Failed to iterate read data\n");
-      print_error("  ", (Error*)ok_res.err);
+      print_error("Failed to iterate read data.", (Error*)ok_res.err);
       free_error((Error*)ok_res.err);
       exit(-1);
     } else if (!ok_res.ok) {

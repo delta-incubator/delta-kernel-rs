@@ -33,7 +33,6 @@ struct EngineContext {
 #endif
 };
 
-
 // This is how we represent our errors. The kernel will ask us to contruct this struct whenever it
 // enounters an error, and then return the contructed EngineError to us
 typedef struct Error {
@@ -41,10 +40,11 @@ typedef struct Error {
   char* msg;
 } Error;
 
-// Print out the code and message of an error
-void print_error(const char* indent, Error* err) {
-  printf("%sCode: %i\n", indent, err->etype);
-  printf("%sMsg: %s\n", indent, err->msg);
+// Print out an error message, plus the code and kernel message of an error
+void print_error(const char* msg, Error* err) {
+  printf("[ERROR] %s\n", msg);
+  printf("  Kernel Code: %i\n", err->etype);
+  printf("  Kernel Msg: %s\n", err->msg);
 }
 
 // free an error
