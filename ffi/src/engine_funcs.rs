@@ -1,4 +1,4 @@
-//! Generate functions to perform the "normal" engine interface operations
+//! Generate functions to perform the "normal" engine operations
 
 use std::sync::Arc;
 
