@@ -1,16 +1,15 @@
 //! Code to handle column mapping, including modes and schema transforms
 
-use std::sync::Arc;
-
 use itertools::Itertools;
 
 use crate::{
-    schema::{ColumnMetadataKey, MetadataValue, SchemaRef, StructField, StructType},
+    schema::{ColumnMetadataKey, MetadataValue, Schema, StructField, StructType},
     DeltaResult, Error,
 };
+use serde::{Deserialize, Serialize};
 
 /// Modes of column mapping a table can be in
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ColumnMappingMode {
     None,
     Id,
@@ -33,15 +32,15 @@ impl TryFrom<&str> for ColumnMappingMode {
     }
 }
 
-pub(crate) fn transform_to_parquet_schema(
-    logical_schema: &SchemaRef,
-    mapping_mode: ColumnMappingMode,
-) -> DeltaResult<SchemaRef> {
+pub(crate) fn create_parquet_schema(
+    logical_fields: Vec<StructField>,
+    mapping_mode: &ColumnMappingMode,
+) -> DeltaResult<Schema> {
     match mapping_mode {
-        ColumnMappingMode::None => Ok(logical_schema.clone()),
+        ColumnMappingMode::None => Ok(StructType::new(logical_fields)),
         ColumnMappingMode::Id => Err(Error::generic("Don't support id mapping atm")),
         ColumnMappingMode::Name => {
-            let parquet_fields: Vec<StructField> = logical_schema.fields().map(|field| {
+            let parquet_fields: Vec<StructField> = logical_fields.into_iter().map(|field| {
                 match field.metadata.get(ColumnMetadataKey::ColumnMappingPhysicalName.as_ref()) {
                     Some(val) => match val {
                         MetadataValue::Number(_) => {
@@ -56,7 +55,7 @@ pub(crate) fn transform_to_parquet_schema(
                     }
                 }
             }).try_collect()?;
-            Ok(Arc::new(StructType::new(parquet_fields)))
+            Ok(StructType::new(parquet_fields))
         }
     }
 }
