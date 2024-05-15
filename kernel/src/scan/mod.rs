@@ -10,9 +10,9 @@ use self::log_replay::{log_replay_iter, scan_action_iter};
 use self::state::GlobalScanState;
 use crate::actions::deletion_vector::{treemap_to_bools, DeletionVectorDescriptor};
 use crate::actions::{get_log_schema, Add, ADD_NAME, REMOVE_NAME};
-use crate::column_mapping::{create_parquet_schema, ColumnMappingMode};
+use crate::column_mapping::{get_name_mapped_physical_field, ColumnMappingMode};
 use crate::expressions::{Expression, Scalar};
-use crate::schema::{ColumnMetadataKey, DataType, MetadataValue, Schema, SchemaRef, StructField};
+use crate::schema::{DataType, Schema, SchemaRef, StructField, StructType};
 use crate::snapshot::Snapshot;
 use crate::{DeltaResult, Engine, EngineData, Error, FileMeta};
 
@@ -215,7 +215,7 @@ impl Scan {
             partition_columns,
             &column_mapping_mode,
         );
-        let read_schema = create_parquet_schema(read_fields, &column_mapping_mode).unwrap();
+        let read_schema = StructType::new(read_fields);
         let logical_schema = self.schema().as_ref().clone();
         GlobalScanState {
             table_root: self.snapshot.table_root.to_string(),
@@ -239,7 +239,7 @@ impl Scan {
         let mapping_mode = self.snapshot.column_mapping_mode()?;
         let (all_fields, read_fields, have_partition_cols) =
             get_state_info(self.schema().as_ref(), partition_columns, &mapping_mode);
-        let read_schema = Arc::new(create_parquet_schema(read_fields, &mapping_mode)?);
+        let read_schema = Arc::new(StructType::new(read_fields));
         debug!("Executing scan with read schema {read_schema:#?}");
         let output_schema = DataType::Struct(Box::new(self.schema().as_ref().clone()));
         let parquet_handler = engine.get_parquet_handler();
@@ -368,7 +368,8 @@ fn parse_partition_value(raw: Option<&String>, data_type: &DataType) -> DeltaRes
 /// Get the state needed to process a scan. In particular this returns a triple of
 /// (all_fields_in_query, fields_to_read_from_parquet, have_partition_cols) where:
 /// - all_fields_in_query - all fields in the query as [`ColumnType`] enums
-/// - fields_to_read_from_parquet - Which fields should be read from the raw parquet files
+/// - fields_to_read_from_parquet - Which fields should be read from the raw parquet files. This takes
+///   into account column mapping
 /// - have_partition_cols - boolean indicating if we have partition columns in this query
 fn get_state_info<'a>(
     schema: &'a Schema,
@@ -392,27 +393,18 @@ fn get_state_info<'a>(
             } else {
                 // Add to read schema, store field so we can build a `Column` expression later
                 // if needed (i.e. if we have partition columns)
-                read_fields.push(field.clone());
+
                 match column_mapping_mode {
                     ColumnMappingMode::Id => unimplemented!("Don't support id mapping yet"),
                     ColumnMappingMode::Name => {
-                        // this is the value we'll look for in the parquet, so we need to pass the physical name
-                        let physical_name = match field.metadata.get(ColumnMetadataKey::ColumnMappingPhysicalName.as_ref()) {
-                            Some(val) => match val {
-                                MetadataValue::Number(_) => {
-                                    Err(Error::generic("{ColumnMetadataKey::ColumnMappingPhysicalName} must be a string in name mapping mode"))
-                                }
-                                MetadataValue::String(name) => {
-                                    Ok(name)
-                                }
-                            }
-                            None => {
-                                Err(Error::generic("fields MUST have a {ColumnMetadataKey::ColumnMappingPhysicalName} key in their metadata in name mapping mode"))
-                            }
-                        }.unwrap();
+                        // this is the value we'll look for in the parquet, so we need to pass the
+                        // physical name
+                        let (physical_field, physical_name) = get_name_mapped_physical_field(field).unwrap();
+                        read_fields.push(physical_field);
                         ColumnType::NameMapped(physical_name)
                     }
                     ColumnMappingMode::None => {
+                        read_fields.push(field.clone());
                         ColumnType::Selected(field)
                     }
                 }

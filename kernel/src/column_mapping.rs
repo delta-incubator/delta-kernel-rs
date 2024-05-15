@@ -1,9 +1,7 @@
 //! Code to handle column mapping, including modes and schema transforms
 
-use itertools::Itertools;
-
 use crate::{
-    schema::{ColumnMetadataKey, MetadataValue, Schema, StructField, StructType},
+    schema::{ColumnMetadataKey, MetadataValue, StructField},
     DeltaResult, Error,
 };
 use serde::{Deserialize, Serialize};
@@ -32,30 +30,26 @@ impl TryFrom<&str> for ColumnMappingMode {
     }
 }
 
-pub(crate) fn create_parquet_schema(
-    logical_fields: Vec<StructField>,
-    mapping_mode: &ColumnMappingMode,
-) -> DeltaResult<Schema> {
-    match mapping_mode {
-        ColumnMappingMode::None => Ok(StructType::new(logical_fields)),
-        ColumnMappingMode::Id => Err(Error::generic("Don't support id mapping atm")),
-        ColumnMappingMode::Name => {
-            let parquet_fields: Vec<StructField> = logical_fields.into_iter().map(|field| {
-                match field.metadata.get(ColumnMetadataKey::ColumnMappingPhysicalName.as_ref()) {
-                    Some(val) => match val {
-                        MetadataValue::Number(_) => {
-                            Err(Error::generic("{ColumnMetadataKey::ColumnMappingPhysicalName} must be a string in name mapping mode"))
-                        }
-                        MetadataValue::String(name) => {
-                            Ok(StructField::new(name, field.data_type().clone(), field.is_nullable()))
-                        }
-                    }
-                    None => {
-                        Err(Error::generic("fields MUST have a {ColumnMetadataKey::ColumnMappingPhysicalName} key in their metadata in name mapping mode"))
-                    }
-                }
-            }).try_collect()?;
-            Ok(StructType::new(parquet_fields))
+/// Transform a logical `StructField` into the field as it should be read from parquet. *Only* valid
+/// to call this from a scan operating in ColumnMappingMode::Name mode.
+///
+/// This returns both the field and the name of the field. The name has the same lifetime as the
+/// logical field
+pub(crate) fn get_name_mapped_physical_field(logical_field: &StructField) -> DeltaResult<(StructField, &str)> {
+    match logical_field.metadata.get(ColumnMetadataKey::ColumnMappingPhysicalName.as_ref()) {
+        Some(val) => match val {
+            MetadataValue::Number(_) => {
+                Err(Error::generic("{ColumnMetadataKey::ColumnMappingPhysicalName} must be a string in name mapping mode"))
+            }
+            MetadataValue::String(name) => {
+                Ok((
+                    StructField::new(name, logical_field.data_type().clone(), logical_field.is_nullable()),
+                    name
+                ))
+            }
+        }
+        None => {
+            Err(Error::generic("fields MUST have a {ColumnMetadataKey::ColumnMappingPhysicalName} key in their metadata in name mapping mode"))
         }
     }
 }
