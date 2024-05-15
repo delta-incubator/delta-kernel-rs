@@ -135,7 +135,7 @@ pub trait ExpressionHandler: Send + Sync {
         schema: SchemaRef,
         expression: Expression,
         output_type: DataType,
-    ) -> Arc<dyn ExpressionEvaluator + Send + Sync>;
+    ) -> Arc<dyn ExpressionEvaluator>;
 }
 
 /// Provides file system related functionalities to Delta Kernel.
@@ -215,14 +215,14 @@ pub trait ParquetHandler: Send + Sync {
 /// table.
 pub trait Engine: Send + Sync {
     /// Get the connector provided [`ExpressionHandler`].
-    fn get_expression_handler(&self) -> Arc<dyn ExpressionHandler + Send + Sync>;
+    fn get_expression_handler(&self) -> Arc<dyn ExpressionHandler>;
 
     /// Get the connector provided [`FileSystemClient`]
-    fn get_file_system_client(&self) -> Arc<dyn FileSystemClient + Send + Sync>;
+    fn get_file_system_client(&self) -> Arc<dyn FileSystemClient>;
 
     /// Get the connector provided [`JsonHandler`].
-    fn get_json_handler(&self) -> Arc<dyn JsonHandler + Send + Sync>;
+    fn get_json_handler(&self) -> Arc<dyn JsonHandler>;
 
     /// Get the connector provided [`ParquetHandler`].
-    fn get_parquet_handler(&self) -> Arc<dyn ParquetHandler + Send + Sync>;
+    fn get_parquet_handler(&self) -> Arc<dyn ParquetHandler>;
 }

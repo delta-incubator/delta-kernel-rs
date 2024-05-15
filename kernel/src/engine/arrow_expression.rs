@@ -235,7 +235,7 @@ impl ExpressionHandler for ArrowExpressionHandler {
         schema: SchemaRef,
         expression: Expression,
         output_type: DataType,
-    ) -> Arc<dyn ExpressionEvaluator + Send + Sync> {
+    ) -> Arc<dyn ExpressionEvaluator> {
         Arc::new(DefaultExpressionEvaluator {
             input_schema: schema,
             expression: Box::new(expression),

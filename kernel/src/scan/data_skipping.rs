@@ -93,10 +93,10 @@ fn as_data_skipping_predicate(expr: &Expr) -> Option<Expr> {
 
 pub(crate) struct DataSkippingFilter {
     stats_schema: SchemaRef,
-    select_stats_evaluator: Arc<dyn ExpressionEvaluator + Send + Sync>,
-    skipping_evaluator: Arc<dyn ExpressionEvaluator + Send + Sync>,
-    filter_evaluator: Arc<dyn ExpressionEvaluator + Send + Sync>,
-    json_handler: Arc<dyn JsonHandler + Send + Sync>,
+    select_stats_evaluator: Arc<dyn ExpressionEvaluator>,
+    skipping_evaluator: Arc<dyn ExpressionEvaluator>,
+    filter_evaluator: Arc<dyn ExpressionEvaluator>,
+    json_handler: Arc<dyn JsonHandler>,
 }
 
 impl DataSkippingFilter {

@@ -31,20 +31,20 @@ impl SyncEngine {
 }
 
 impl Engine for SyncEngine {
-    fn get_expression_handler(&self) -> Arc<dyn ExpressionHandler + Send + Sync> {
+    fn get_expression_handler(&self) -> Arc<dyn ExpressionHandler> {
         self.expression_handler.clone()
     }
 
-    fn get_file_system_client(&self) -> Arc<dyn FileSystemClient + Send + Sync> {
+    fn get_file_system_client(&self) -> Arc<dyn FileSystemClient> {
         self.fs_client.clone()
     }
 
     /// Get the connector provided [`ParquetHandler`].
-    fn get_parquet_handler(&self) -> Arc<dyn ParquetHandler + Send + Sync> {
+    fn get_parquet_handler(&self) -> Arc<dyn ParquetHandler> {
         self.parquet_handler.clone()
     }
 
-    fn get_json_handler(&self) -> Arc<dyn JsonHandler + Send + Sync> {
+    fn get_json_handler(&self) -> Arc<dyn JsonHandler> {
         self.json_handler.clone()
     }
 }

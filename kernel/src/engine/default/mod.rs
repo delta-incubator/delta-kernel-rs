@@ -88,19 +88,19 @@ impl<E: TaskExecutor> DefaultEngine<E> {
 }
 
 impl<E: TaskExecutor> Engine for DefaultEngine<E> {
-    fn get_expression_handler(&self) -> Arc<dyn ExpressionHandler + Send + Sync> {
+    fn get_expression_handler(&self) -> Arc<dyn ExpressionHandler> {
         self.expression.clone()
     }
 
-    fn get_file_system_client(&self) -> Arc<dyn FileSystemClient + Send + Sync> {
+    fn get_file_system_client(&self) -> Arc<dyn FileSystemClient> {
         self.file_system.clone()
     }
 
-    fn get_json_handler(&self) -> Arc<dyn JsonHandler + Send + Sync> {
+    fn get_json_handler(&self) -> Arc<dyn JsonHandler> {
         self.json.clone()
     }
 
-    fn get_parquet_handler(&self) -> Arc<dyn ParquetHandler + Send + Sync> {
+    fn get_parquet_handler(&self) -> Arc<dyn ParquetHandler> {
         self.parquet.clone()
     }
 }
