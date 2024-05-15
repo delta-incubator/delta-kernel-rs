@@ -5,9 +5,8 @@ use arrow_ord::sort::{lexsort_to_indices, SortColumn};
 use arrow_schema::DataType;
 use arrow_select::{concat::concat_batches, filter::filter_record_batch, take::take};
 
-use deltakernel::{
-    client::arrow_data::ArrowEngineData, scan::ScanBuilder, DeltaResult, EngineInterface, Error,
-    Table,
+use delta_kernel::{
+    engine::arrow_data::ArrowEngineData, scan::ScanBuilder, DeltaResult, Engine, Error, Table,
 };
 use futures::{stream::TryStreamExt, StreamExt};
 use object_store::{local::LocalFileSystem, ObjectStore};
@@ -75,10 +74,7 @@ static SKIPPED_TESTS: &[&str; 3] = &[
     "multi_partitioned_2",
 ];
 
-pub async fn assert_scan_data(
-    engine_interface: Arc<dyn EngineInterface>,
-    test_case: &TestCaseInfo,
-) -> TestResult<()> {
+pub async fn assert_scan_data(engine: Arc<dyn Engine>, test_case: &TestCaseInfo) -> TestResult<()> {
     let root_dir = test_case.root_dir();
     for skipped in SKIPPED_TESTS {
         if root_dir.ends_with(skipped) {
@@ -86,14 +82,14 @@ pub async fn assert_scan_data(
         }
     }
 
-    let engine_interface = engine_interface.as_ref();
+    let engine = engine.as_ref();
     let table_root = test_case.table_root()?;
     let table = Table::new(table_root);
-    let snapshot = table.snapshot(engine_interface, None)?;
+    let snapshot = table.snapshot(engine, None)?;
     let scan = ScanBuilder::new(snapshot).build();
     let mut schema = None;
     let batches: Vec<RecordBatch> = scan
-        .execute(engine_interface)?
+        .execute(engine)?
         .into_iter()
         .map(|res| {
             let data = res.raw_data.unwrap();

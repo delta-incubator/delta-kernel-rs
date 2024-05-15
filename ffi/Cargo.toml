@@ -1,6 +1,6 @@
 [package]
-name = "deltakernel-ffi"
-authors.workspace = true
+name = "delta_kernel_ffi"
+description = "Provide C FFI bindings for the delta_kernel crate"
 edition.workspace = true
 homepage.workspace = true
 license.workspace = true
@@ -12,8 +12,26 @@ build = "build.rs"
 [lib]
 crate-type = ["cdylib", "staticlib"]
 
+[dependencies]
+tracing = "0.1"
+url = "2"
+delta_kernel = { path = "../kernel", default-features = false, features = ["developer-visibility"] }
+
+# used if we use the default engine to be able to move arrow data into the c-ffi format
+arrow-schema = { version = "^49.0", default-features = false, features = ["ffi"], optional = true }
+arrow-data = { version = "^49.0", default-features = false, features = ["ffi"], optional = true }
+arrow-array = { version = "^49.0", default-features = false, optional = true }
+
 [build-dependencies]
 cbindgen = "0.26.0"
-deltakernel = { path = "../kernel" }
 libc = "0.2.147"
 
+[features]
+default = ["default-engine"]
+default-engine = [
+  "delta_kernel/default-engine",
+  "arrow-array",
+  "arrow-data",
+  "arrow-schema"
+]
+sync-engine = ["delta_kernel/sync-engine"]

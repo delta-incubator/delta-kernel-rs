@@ -4,7 +4,7 @@ use std::io::{Cursor, Read};
 use std::sync::Arc;
 
 use bytes::Bytes;
-use derive_macros::Schema;
+use delta_kernel_derive::Schema;
 use roaring::RoaringTreemap;
 use url::Url;
 
@@ -97,14 +97,21 @@ impl DeletionVectorDescriptor {
     pub fn read(
         &self,
         fs_client: Arc<dyn FileSystemClient>,
-        parent: Url,
+        parent: &Url,
     ) -> DeltaResult<RoaringTreemap> {
-        match self.absolute_path(&parent)? {
+        match self.absolute_path(parent)? {
             None => {
-                let bytes = z85::decode(&self.path_or_inline_dv)
+                let byte_slice = z85::decode(&self.path_or_inline_dv)
                     .map_err(|_| Error::deletion_vector("Failed to decode DV"))?;
-                RoaringTreemap::deserialize_from(&bytes[12..])
-                    .map_err(|err| Error::DeletionVector(err.to_string()))
+                let magic = slice_to_u32(&byte_slice[0..4], Endian::Little)?;
+                match magic {
+                    1681511377 => RoaringTreemap::deserialize_from(&byte_slice[4..])
+                        .map_err(|err| Error::DeletionVector(err.to_string())),
+                    1681511376 => {
+                        todo!("Don't support native serialization in inline bitmaps yet");
+                    }
+                    _ => Err(Error::DeletionVector(format!("Invalid magic {magic}"))),
+                }
             }
             Some(path) => {
                 let offset = self.offset;
@@ -175,6 +182,17 @@ fn read_u32(cursor: &mut Cursor<Bytes>, endian: Endian) -> DeltaResult<u32> {
     }
 }
 
+/// decode a slice into a u32
+fn slice_to_u32(buf: &[u8], endian: Endian) -> DeltaResult<u32> {
+    let array = buf
+        .try_into()
+        .map_err(|_| Error::generic("Must have a 4 byte slice to decode to u32"))?;
+    match endian {
+        Endian::Big => Ok(u32::from_be_bytes(array)),
+        Endian::Little => Ok(u32::from_le_bytes(array)),
+    }
+}
+
 /// helper function to convert a treemap into a boolean vector where, for index i, if the bit is
 /// set, the vector will be false, and otherwise at index i the vector will be true
 pub(crate) fn treemap_to_bools(treemap: RoaringTreemap) -> Vec<bool> {
@@ -209,7 +227,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::{client::sync::SyncEngineInterface, EngineInterface};
+    use crate::{engine::sync::SyncEngine, Engine};
 
     use super::DeletionVectorDescriptor;
 
@@ -237,9 +255,10 @@ mod tests {
     fn dv_inline() -> DeletionVectorDescriptor {
         DeletionVectorDescriptor {
             storage_type: "i".to_string(),
-            path_or_inline_dv: "wi5b=000010000siXQKl0rr91000f55c8Xg0@@D72lkbi5=-{L".to_string(),
+            path_or_inline_dv: "^Bg9^0rr910000000000iXQKl0rr91000f55c8Xg0@@D72lkbi5=-{L"
+                .to_string(),
             offset: None,
-            size_in_bytes: 40,
+            size_in_bytes: 44,
             cardinality: 6,
         }
     }
@@ -284,15 +303,31 @@ mod tests {
     }
 
     #[test]
+    fn test_inline_read() {
+        let inline = dv_inline();
+        let sync_engine = SyncEngine::new();
+        let fs_client = sync_engine.get_file_system_client();
+        let parent = Url::parse("http://not.used").unwrap();
+        let tree_map = inline.read(fs_client, &parent).unwrap();
+        assert_eq!(tree_map.len(), 6);
+        for i in [3, 4, 7, 11, 18, 29] {
+            assert!(tree_map.contains(i));
+        }
+        for i in [1, 2, 8, 17, 55, 200] {
+            assert!(!tree_map.contains(i));
+        }
+    }
+
+    #[test]
     fn test_deletion_vector_read() {
         let path =
             std::fs::canonicalize(PathBuf::from("./tests/data/table-with-dv-small/")).unwrap();
         let parent = url::Url::from_directory_path(path).unwrap();
-        let sync_interface = SyncEngineInterface::new();
-        let fs_client = sync_interface.get_file_system_client();
+        let sync_engine = SyncEngine::new();
+        let fs_client = sync_engine.get_file_system_client();
 
         let example = dv_example();
-        let tree_map = example.read(fs_client, parent).unwrap();
+        let tree_map = example.read(fs_client, &parent).unwrap();
 
         let expected: Vec<u64> = vec![0, 9];
         let found = tree_map.iter().collect::<Vec<_>>();

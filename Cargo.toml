@@ -5,21 +5,17 @@ members = [
     "ffi",
     "kernel",
     "kernel/examples/dump-table", # todo: put back to `examples/*` when inspect-table is fixed
+    "kernel/examples/read-table-multi-threaded"
 ]
 # Only check / build main crates by default (check all with `--workspace`)
 default-members = ["acceptance", "kernel"]
 resolver = "2"
 
 [workspace.package]
-authors = [
-  "Zach Schuermann <zach@zvs.io>",
-  "R. Tyler Croy <rtyler@brokenco.de>",
-  "Robert Pack <robstar.pack@gmail.com>",
-]
 edition = "2021"
 homepage = "https://delta.io"
 keywords = ["deltalake", "delta", "datalake"]
 license = "Apache-2.0"
 repository = "https://github.com/delta-incubator/delta-kernel-rs"
 readme = "README.md"
-version = "0.0.0"
+version = "0.0.1"

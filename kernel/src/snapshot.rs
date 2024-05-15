@@ -11,9 +11,9 @@ use url::Url;
 
 use crate::actions::{get_log_schema, Metadata, Protocol, METADATA_NAME, PROTOCOL_NAME};
 use crate::column_mapping::{ColumnMappingMode, COLUMN_MAPPING_MODE_KEY};
-use crate::path::LogPath;
+use crate::path::{version_from_location, LogPath};
 use crate::schema::{Schema, SchemaRef};
-use crate::{DeltaResult, EngineInterface, Error, FileMeta, FileSystemClient, Version};
+use crate::{DeltaResult, Engine, Error, FileMeta, FileSystemClient, Version};
 use crate::{EngineData, Expression};
 
 const LAST_CHECKPOINT_FILE_NAME: &str = "_last_checkpoint";
@@ -44,18 +44,19 @@ impl LogSegment {
     #[cfg_attr(not(feature = "developer-visibility"), visibility::make(pub(crate)))]
     fn replay(
         &self,
-        engine_interface: &dyn EngineInterface,
+        engine: &dyn Engine,
         commit_read_schema: SchemaRef,
         checkpoint_read_schema: SchemaRef,
         predicate: Option<Expression>,
-    ) -> DeltaResult<impl Iterator<Item = DeltaResult<(Box<dyn EngineData>, bool)>>> {
-        let json_client = engine_interface.get_json_handler();
+    ) -> DeltaResult<impl Iterator<Item = DeltaResult<(Box<dyn EngineData>, bool)>> + Send + Sync>
+    {
+        let json_client = engine.get_json_handler();
         // TODO change predicate to: predicate AND add.path not null and remove.path not null
         let commit_stream = json_client
             .read_json_files(&self.commit_files, commit_read_schema, predicate.clone())?
             .map_ok(|batch| (batch, true));
 
-        let parquet_client = engine_interface.get_parquet_handler();
+        let parquet_client = engine.get_parquet_handler();
         // TODO change predicate to: predicate AND add.path not null
         let checkpoint_stream = parquet_client
             .read_parquet_files(&self.checkpoint_files, checkpoint_read_schema, predicate)?
@@ -66,14 +67,11 @@ impl LogSegment {
         Ok(batches)
     }
 
-    fn read_metadata(
-        &self,
-        engine_interface: &dyn EngineInterface,
-    ) -> DeltaResult<Option<(Metadata, Protocol)>> {
+    fn read_metadata(&self, engine: &dyn Engine) -> DeltaResult<Option<(Metadata, Protocol)>> {
         let schema = get_log_schema().project(&[PROTOCOL_NAME, METADATA_NAME])?;
         // read the same protocol and metadata schema for both commits and checkpoints
         // TODO add metadata.table_id is not null and protocol.something_required is not null
-        let data_batches = self.replay(engine_interface, schema.clone(), schema, None)?;
+        let data_batches = self.replay(engine, schema.clone(), schema, None)?;
         let mut metadata_opt: Option<Metadata> = None;
         let mut protocol_opt: Option<Protocol> = None;
         for batch in data_batches {
@@ -128,15 +126,15 @@ impl Snapshot {
     /// # Parameters
     ///
     /// - `location`: url pointing at the table root (where `_delta_log` folder is located)
-    /// - `engine_interface`: Implementation of [`EngineInterface`] apis.
+    /// - `engine`: Implementation of [`Engine`] apis.
     /// - `version`: target version of the [`Snapshot`]
     pub fn try_new(
         table_root: Url,
-        engine_interface: &dyn EngineInterface,
+        engine: &dyn Engine,
         version: Option<Version>,
     ) -> DeltaResult<Arc<Self>> {
-        let fs_client = engine_interface.get_file_system_client();
-        let log_url = LogPath(&table_root).child("_delta_log/").unwrap();
+        let fs_client = engine.get_file_system_client();
+        let log_url = LogPath::new(&table_root).child("_delta_log/").unwrap();
 
         // List relevant files from log
         let (mut commit_files, checkpoint_files) =
@@ -150,7 +148,7 @@ impl Snapshot {
         // remove all files above requested version
         if let Some(version) = version {
             commit_files.retain(|meta| {
-                if let Some(v) = LogPath(&meta.location).commit_version() {
+                if let Some(v) = LogPath::new(&meta.location).version {
                     v <= version
                 } else {
                     false
@@ -162,7 +160,7 @@ impl Snapshot {
         let version_eff = commit_files
             .first()
             .or(checkpoint_files.first())
-            .and_then(|f| LogPath(&f.location).commit_version())
+            .and_then(|f| LogPath::new(&f.location).version)
             .ok_or(Error::MissingVersion)?; // TODO: A more descriptive error
 
         if let Some(v) = version {
@@ -182,7 +180,7 @@ impl Snapshot {
             table_root,
             log_segment,
             version_eff,
-            engine_interface,
+            engine,
         )?))
     }
 
@@ -191,10 +189,10 @@ impl Snapshot {
         location: Url,
         log_segment: LogSegment,
         version: Version,
-        engine_interface: &dyn EngineInterface,
+        engine: &dyn Engine,
     ) -> DeltaResult<Self> {
         let (metadata, protocol) = log_segment
-            .read_metadata(engine_interface)?
+            .read_metadata(engine)?
             .ok_or(Error::MissingMetadata)?;
         let schema = metadata.schema()?;
         Ok(Self {
@@ -273,7 +271,7 @@ fn read_last_checkpoint(
     fs_client: &dyn FileSystemClient,
     log_root: &Url,
 ) -> DeltaResult<Option<CheckpointMetadata>> {
-    let file_path = LogPath(log_root).child(LAST_CHECKPOINT_FILE_NAME)?;
+    let file_path = LogPath::new(log_root).child(LAST_CHECKPOINT_FILE_NAME)?;
     match fs_client
         .read_files(vec![(file_path, None)])
         .and_then(|mut data| data.next().expect("read_files should return one file"))
@@ -298,13 +296,13 @@ fn list_log_files_with_checkpoint(
         .collect::<Result<Vec<_>, Error>>()?
         .into_iter()
         // TODO this filters out .crc files etc which start with "." - how do we want to use these kind of files?
-        .filter(|f| LogPath(&f.location).commit_version().is_some())
+        .filter(|f| version_from_location(&f.location).is_some())
         .collect::<Vec<_>>();
 
     let mut commit_files = files
         .iter()
         .filter_map(|f| {
-            if LogPath(&f.location).is_commit_file() {
+            if LogPath::new(&f.location).is_commit {
                 Some(f.clone())
             } else {
                 None
@@ -317,7 +315,7 @@ fn list_log_files_with_checkpoint(
     let checkpoint_files = files
         .iter()
         .filter_map(|f| {
-            if LogPath(&f.location).is_checkpoint_file() {
+            if LogPath::new(&f.location).is_checkpoint {
                 Some(f.clone())
             } else {
                 None
@@ -347,8 +345,9 @@ fn list_log_files(
 
     for maybe_meta in fs_client.list_from(&start_from)? {
         let meta = maybe_meta?;
-        if LogPath(&meta.location).is_checkpoint_file() {
-            let version = LogPath(&meta.location).commit_version().unwrap_or(0) as i64;
+        let log_path = LogPath::new(&meta.location);
+        if log_path.is_checkpoint {
+            let version = log_path.version.unwrap_or(0) as i64;
             match version.cmp(&max_checkpoint_version) {
                 Ordering::Greater => {
                     max_checkpoint_version = version;
@@ -360,13 +359,13 @@ fn list_log_files(
                 }
                 _ => {}
             }
-        } else if LogPath(&meta.location).is_commit_file() {
+        } else if log_path.is_commit {
             commit_files.push(meta);
         }
     }
 
     commit_files.retain(|f| {
-        LogPath(&f.location).commit_version().unwrap_or(0) as i64 > max_checkpoint_version
+        version_from_location(&f.location).unwrap_or(0) as i64 > max_checkpoint_version
     });
     // NOTE this will sort in reverse order
     commit_files.sort_unstable_by(|a, b| b.location.cmp(&a.location));
@@ -383,9 +382,9 @@ mod tests {
     use object_store::local::LocalFileSystem;
     use object_store::path::Path;
 
-    use crate::client::default::executor::tokio::TokioBackgroundExecutor;
-    use crate::client::default::filesystem::ObjectStoreFileSystemClient;
-    use crate::client::sync::SyncEngineInterface;
+    use crate::engine::default::executor::tokio::TokioBackgroundExecutor;
+    use crate::engine::default::filesystem::ObjectStoreFileSystemClient;
+    use crate::engine::sync::SyncEngine;
     use crate::schema::StructType;
 
     #[test]
@@ -394,8 +393,8 @@ mod tests {
             std::fs::canonicalize(PathBuf::from("./tests/data/table-with-dv-small/")).unwrap();
         let url = url::Url::from_directory_path(path).unwrap();
 
-        let client = SyncEngineInterface::new();
-        let snapshot = Snapshot::try_new(url, &client, Some(1)).unwrap();
+        let engine = SyncEngine::new();
+        let snapshot = Snapshot::try_new(url, &engine, Some(1)).unwrap();
 
         let expected = Protocol {
             min_reader_version: 3,
@@ -416,8 +415,8 @@ mod tests {
             std::fs::canonicalize(PathBuf::from("./tests/data/table-with-dv-small/")).unwrap();
         let url = url::Url::from_directory_path(path).unwrap();
 
-        let client = SyncEngineInterface::new();
-        let snapshot = Snapshot::try_new(url, &client, None).unwrap();
+        let engine = SyncEngine::new();
+        let snapshot = Snapshot::try_new(url, &engine, None).unwrap();
 
         let expected = Protocol {
             min_reader_version: 3,
@@ -458,17 +457,17 @@ mod tests {
         ))
         .unwrap();
         let location = url::Url::from_directory_path(path).unwrap();
-        let engine_interface = SyncEngineInterface::new();
-        let snapshot = Snapshot::try_new(location, &engine_interface, None).unwrap();
+        let engine = SyncEngine::new();
+        let snapshot = Snapshot::try_new(location, &engine, None).unwrap();
 
         assert_eq!(snapshot.log_segment.checkpoint_files.len(), 1);
         assert_eq!(
-            LogPath(&snapshot.log_segment.checkpoint_files[0].location).commit_version(),
+            LogPath::new(&snapshot.log_segment.checkpoint_files[0].location).version,
             Some(2)
         );
         assert_eq!(snapshot.log_segment.commit_files.len(), 1);
         assert_eq!(
-            LogPath(&snapshot.log_segment.commit_files[0].location).commit_version(),
+            LogPath::new(&snapshot.log_segment.commit_files[0].location).version,
             Some(3)
         );
     }

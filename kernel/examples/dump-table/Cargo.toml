@@ -7,8 +7,8 @@ publish = false
 [dependencies]
 arrow = { version = "^49.0", features = ["prettyprint"] }
 clap = { version = "^4.4", features = ["derive"] }
-deltakernel = { path = "../../../kernel", features = [
-  "default-client",
+delta_kernel = { path = "../../../kernel", features = [
+  "default-engine",
   "tokio",
   "developer-visibility",
 ] }

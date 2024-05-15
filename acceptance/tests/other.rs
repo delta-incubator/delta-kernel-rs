@@ -3,7 +3,7 @@
 /// Since each new `.rs` file in this directory results in increased build and link time, it is
 /// important to only add new files if absolutely necessary for code readability or test
 /// performance.
-use deltakernel::snapshot::CheckpointMetadata;
+use delta_kernel::snapshot::CheckpointMetadata;
 
 #[test]
 fn test_checkpoint_serde() {
@@ -38,10 +38,10 @@ async fn test_read_table_with_checkpoint() {
     ))
     .unwrap();
     let location = url::Url::from_directory_path(path).unwrap();
-    let engine_interface = Arc::new(
-        DefaultEngineInterface::try_new(&location, HashMap::<String, String>::new()).unwrap(),
+    let engine = Arc::new(
+        DefaultEngine::try_new(&location, HashMap::<String, String>::new()).unwrap(),
     );
-    let snapshot = Snapshot::try_new(location, engine_interface, None)
+    let snapshot = Snapshot::try_new(location, engine, None)
         .await
         .unwrap();
 
