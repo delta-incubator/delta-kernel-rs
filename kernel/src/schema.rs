@@ -261,7 +261,7 @@ pub struct MapType {
     pub key_type: DataType,
     /// The type of element used for the value of this map
     pub value_type: DataType,
-    /// Denoting whether this array can contain one or more null values
+    /// Denoting whether this map can contain one or more null values
     #[serde(default = "default_true")]
     pub value_contains_null: bool,
 }
@@ -321,7 +321,6 @@ pub enum PrimitiveType {
     Timestamp,
     #[serde(rename = "timestamp_ntz")]
     TimestampNtz,
-    // TODO: timestamp without timezone
     #[serde(
         serialize_with = "serialize_decimal",
         deserialize_with = "deserialize_decimal",
@@ -435,6 +434,7 @@ impl DataType {
     pub const BINARY: Self = DataType::Primitive(PrimitiveType::Binary);
     pub const DATE: Self = DataType::Primitive(PrimitiveType::Date);
     pub const TIMESTAMP: Self = DataType::Primitive(PrimitiveType::Timestamp);
+    pub const TIMESTAMP_NTZ: Self = DataType::Primitive(PrimitiveType::TimestampNtz);
 
     pub fn decimal(precision: u8, scale: i8) -> Self {
         DataType::Primitive(PrimitiveType::Decimal(precision, scale))

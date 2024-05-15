@@ -258,12 +258,12 @@ impl LogReplayScanner {
 /// Given an iterator of (engine_data, bool) tuples and a predicate, returns an iterator of `Adds`.
 /// The boolean flag indicates whether the record batch is a log or checkpoint batch.
 pub fn log_replay_iter(
-    engine_client: &dyn Engine,
-    action_iter: impl Iterator<Item = DeltaResult<(Box<dyn EngineData + Send + Sync>, bool)>> + Send + Sync,
+    engine: &dyn Engine,
+    action_iter: impl Iterator<Item = DeltaResult<(Box<dyn EngineData>, bool)>> + Send + Sync,
     table_schema: &SchemaRef,
     predicate: &Option<Expression>,
 ) -> impl Iterator<Item = DeltaResult<Add>> {
-    let mut log_scanner = LogReplayScanner::new(engine_client, table_schema, predicate);
+    let mut log_scanner = LogReplayScanner::new(engine, table_schema, predicate);
 
     action_iter.flat_map(move |actions| match actions {
         Ok((batch, is_log_batch)) => {
@@ -340,7 +340,7 @@ mod tests {
     fn test_scan_action_iter() {
         run_with_validate_callback(
             vec![add_batch_simple()],
-            vec![true, false],
+            &[true, false],
             (),
             validate_simple,
         );
@@ -350,7 +350,7 @@ mod tests {
     fn test_scan_action_iter_with_remove() {
         run_with_validate_callback(
             vec![add_batch_with_remove()],
-            vec![false, false, true, false],
+            &[false, false, true, false],
             (),
             validate_simple,
         );

@@ -17,7 +17,7 @@ use std::sync::Arc;
 /// Used for mutable access to a mutable handle's underlying object.
 /// Similar to [AsMut], but unsafe and hard-wired to the handle's target type.
 pub trait HandleAsMut {
-    type Target: ?Sized;
+    type Target: ?Sized + Send + Sync;
 
     /// Obtains a mutable reference to the handle's underlying object.
     unsafe fn as_mut(&mut self) -> &mut Self::Target;
@@ -25,7 +25,7 @@ pub trait HandleAsMut {
 
 /// Used for [Arc] access to a shared handle's underlying object.
 pub trait HandleAsArc {
-    type Target: ?Sized;
+    type Target: ?Sized + Send + Sync;
 
     /// Creates a new [Arc] from the handle, increasing the underlying object's refcount by one.
     unsafe fn as_arc(&self) -> Arc<Self::Target>;
@@ -698,7 +698,7 @@ pub trait SizedArcHandle: Sized {
 impl<H, T> ArcHandle for H
 where
     H: SizedArcHandle<Target = T>,
-    T: Send + Sync
+    T: Send + Sync,
 {
     type Target = T;
 

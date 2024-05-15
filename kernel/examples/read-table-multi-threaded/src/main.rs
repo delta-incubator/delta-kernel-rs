@@ -181,7 +181,7 @@ fn try_main() -> DeltaResult<()> {
         let (data, vector) = res?;
         scan_file_tx = delta_kernel::scan::state::visit_scan_files(
             data.as_ref(),
-            vector,
+            &vector,
             scan_file_tx,
             send_scan_file,
         )?;
@@ -226,7 +226,7 @@ fn do_work(
             location,
         };
 
-        // this example uses the parquet_handler from the engine_client, but an engine could
+        // this example uses the parquet_handler from the engine, but an engine could
         // choose to use whatever method it might want to read a parquet file. The reader
         // could, for example, fill in the parition columns, or apply deletion vectors. Here
         // we assume a more naive parquet reader and fix the data up after the fact.

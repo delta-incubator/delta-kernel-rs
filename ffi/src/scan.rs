@@ -12,7 +12,7 @@ use url::Url;
 
 use crate::{
     unwrap_kernel_expression, AllocateStringFn, EnginePredicate, ExternEngine,
-    SharedExternEngine, ExternResult, FromBoolSlice, IntoExternResult, KernelBoolSlice, KernelBoolSliceHandle,
+    SharedExternEngine, ExternResult, FromBoolSlice, IntoExternResult, KernelBoolSlice,
     KernelExpressionVisitorState, KernelStringSlice, NullableCvoid, SharedSnapshot,
     TryFromStringSlice,
 };
@@ -23,12 +23,7 @@ use super::handle::{False, Handle, HandleAsArc, HandleAsMut, HandleDescriptor, T
 // that are the engine data
 /// an opaque struct that encapsulates data read by an engine. this handle can be passed back into
 /// some kernel calls to operate on the data, or can be converted into the raw data as read by the
-/// [`Engine`] by calling [`get_raw_engine_data`]
-// TODO(frj): This is broken. While the engine does have some pointer that represents its data, that
-// pointer becomes just one of several members of the vtable struct that we use to present it as an
-// [EngineData] to the kernel. In order to recover the engine's pointer, we will have to either
-// expose it as part of the trait (perhaps an ExternEngineData trait), or else we'll have to cast
-// back to the vtable struct and extract the pointer from there.
+/// [`delta_kernel::Engine`] by calling [`get_raw_engine_data`]
 pub struct EngineDataHandle {
     _unconstructable: Unconstructable,
 }
@@ -73,8 +68,8 @@ pub struct ArrowFFIData {
 /// the schema.
 ///
 /// # Safety
-/// data_handle must be a valid EngineDataHandle as read by the [`DefaultEngine`] obtained
-/// from `get_default_client`.
+/// data_handle must be a valid EngineDataHandle as read by the
+/// [`delta_kernel::engine::default::DefaultEngine`] obtained from `get_default_engine`.
 #[cfg(feature = "default-engine")]
 #[no_mangle]
 pub unsafe extern "C" fn get_raw_arrow_data(
@@ -176,10 +171,10 @@ pub struct KernelScanDataIterator {
     // Item = Box<dyn EngineData>, see above, Vec<bool> -> can become a KernelBoolSlice
     data: Box<dyn Iterator<Item = DeltaResult<ScanData>> + Send + Sync>,
 
-    // Also keep a reference to the external client for its error allocator.
+    // Also keep a reference to the external engine for its error allocator.
     // Parquet and Json handlers don't hold any reference to the tokio reactor, so the iterator
-    // terminates early if the last table client goes out of scope.
-    engine: Arc<dyn ExternEngine + Send + Sync>,
+    // terminates early if the last engine goes out of scope.
+    engine: Arc<dyn ExternEngine>,
 }
 
 pub struct KernelScanDataIteratorHandle {
@@ -268,7 +263,7 @@ fn kernel_scan_data_next_impl(
 /// # Safety
 ///
 /// Caller is responsible for (at most once) passing a valid pointer returned by a call to
-/// [kernel_scan_files_init].
+/// [`kernel_scan_data_init`].
 // we should probably be consistent with drop vs. free on engine side (probably the latter is more
 // intuitive to non-rust code)
 #[no_mangle]
@@ -325,7 +320,7 @@ pub unsafe extern "C" fn selection_vector_from_dv(
     dv_info: &DvInfo,
     extern_engine: Handle<SharedExternEngine>,
     state: Handle<GlobalScanStateHandle>,
-) -> ExternResult<Option<Handle<KernelBoolSliceHandle>>> {
+) -> ExternResult<KernelBoolSlice> {
     selection_vector_from_dv_impl(dv_info, &extern_engine, state)
         .into_extern_result(extern_engine)
 }
@@ -334,7 +329,7 @@ unsafe fn selection_vector_from_dv_impl(
     dv_info: &DvInfo,
     extern_engine: &Handle<SharedExternEngine>,
     state: Handle<GlobalScanStateHandle>,
-) -> DeltaResult<Option<Handle<KernelBoolSliceHandle>>> {
+) -> DeltaResult<KernelBoolSlice> {
     let state = unsafe { state.as_ref() };
     let extern_engine = unsafe { extern_engine.as_arc() };
     let root_url = Url::parse(&state.table_root)?;
@@ -385,6 +380,5 @@ pub unsafe extern "C" fn visit_scan_data(
         engine_context,
         callback,
     };
-    visit_scan_files(data, selection_vec.clone(), context_wrapper, rust_callback).unwrap();
-    Box::new(selection_vec).leak();
+    visit_scan_files(data, selection_vec, context_wrapper, rust_callback).unwrap();
 }

@@ -4,11 +4,14 @@
 # default to generating c bindings
 language = "C"
 
+pragma_once = true
+
 # only applies to Cxx
 namespace = "ffi"
 
 [defines]
 "feature = default-engine" = "DEFINE_DEFAULT_ENGINE"
+"feature = sync-engine" = "DEFINE_SYNC_ENGINE"
 
 [export.mangle]
 remove_underscores = true
