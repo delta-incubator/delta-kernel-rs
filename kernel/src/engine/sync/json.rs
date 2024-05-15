@@ -59,7 +59,7 @@ impl JsonHandler for SyncJsonHandler {
 
     fn parse_json(
         &self,
-        json_strings: Box<dyn EngineData + Send + Sync>,
+        json_strings: Box<dyn EngineData>,
         output_schema: SchemaRef,
     ) -> DeltaResult<Box<dyn EngineData>> {
         // TODO: This is taken from the default engine as it's the same. We should share an

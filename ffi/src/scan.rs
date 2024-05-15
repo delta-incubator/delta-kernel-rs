@@ -11,13 +11,14 @@ use tracing::debug;
 use url::Url;
 
 use crate::{
-    unwrap_kernel_expression, AllocateStringFn, EnginePredicate, ExternEngine,
-    SharedExternEngine, ExternResult, FromBoolSlice, IntoExternResult, KernelBoolSlice,
-    KernelExpressionVisitorState, KernelStringSlice, NullableCvoid, SharedSnapshot,
-    TryFromStringSlice,
+    unwrap_kernel_expression, AllocateStringFn, EnginePredicate, ExternEngine, ExternResult,
+    IntoExternResult, KernelBoolSlice, KernelExpressionVisitorState, KernelStringSlice,
+    NullableCvoid, SharedExternEngine, SharedSnapshot, TryFromStringSlice,
 };
 
-use super::handle::{False, Handle, HandleAsArc, HandleAsMut, HandleDescriptor, True, Unconstructable};
+use super::handle::{
+    False, Handle, HandleAsArc, HandleAsMut, HandleDescriptor, True, Unconstructable,
+};
 
 // TODO: Do we want this type at all? Perhaps we should just _always_ pass raw *mut c_void pointers
 // that are the engine data
@@ -28,7 +29,7 @@ pub struct EngineDataHandle {
     _unconstructable: Unconstructable,
 }
 impl HandleDescriptor for EngineDataHandle {
-    type Target = dyn EngineData + Send + Sync;
+    type Target = dyn EngineData;
     type Mutable = True;
     type Sized = False;
 }
@@ -321,8 +322,7 @@ pub unsafe extern "C" fn selection_vector_from_dv(
     extern_engine: Handle<SharedExternEngine>,
     state: Handle<GlobalScanStateHandle>,
 ) -> ExternResult<KernelBoolSlice> {
-    selection_vector_from_dv_impl(dv_info, &extern_engine, state)
-        .into_extern_result(extern_engine)
+    selection_vector_from_dv_impl(dv_info, &extern_engine, state).into_extern_result(extern_engine)
 }
 
 unsafe fn selection_vector_from_dv_impl(
@@ -333,8 +333,10 @@ unsafe fn selection_vector_from_dv_impl(
     let state = unsafe { state.as_ref() };
     let extern_engine = unsafe { extern_engine.as_arc() };
     let root_url = Url::parse(&state.table_root)?;
-    Ok(dv_info.get_selection_vector(extern_engine.engine().as_ref(), &root_url)?
-        .map(|v| Handle::from(Box::new(v.into()))))
+    match dv_info.get_selection_vector(extern_engine.engine().as_ref(), &root_url)? {
+        Some(v) => Ok(v.into()),
+        None => Ok(KernelBoolSlice::empty()),
+    }
 }
 
 // Wrapper function that gets called by the kernel, transforms the arguments to make the ffi-able,
@@ -346,7 +348,9 @@ fn rust_callback(
     dv_info: DvInfo,
     partition_values: HashMap<String, String>,
 ) {
-    let partition_map = CStringMap { values: partition_values };
+    let partition_map = CStringMap {
+        values: partition_values,
+    };
     (context.callback)(
         context.engine_context,
         path.into(),
@@ -370,11 +374,11 @@ struct ContextWrapper {
 #[no_mangle]
 pub unsafe extern "C" fn visit_scan_data(
     data: Handle<EngineDataHandle>,
-    selection_vector: KernelBoolSlice,
+    selection_vec: KernelBoolSlice,
     engine_context: NullableCvoid,
     callback: CScanCallback,
 ) {
-    let selection_vec = Vec::<bool>::from_slice(selection_vector);
+    let selection_vec = unsafe { selection_vec.as_ref() };
     let data = unsafe { data.as_ref() };
     let context_wrapper = ContextWrapper {
         engine_context,

@@ -22,7 +22,7 @@ pub mod scan;
 
 #[repr(C)]
 pub struct Foo {
-    foo: usize
+    foo: usize,
 }
 
 pub type FooAlias = Foo;
@@ -47,7 +47,8 @@ pub unsafe extern "C" fn test_foo(
     _fptr_nullable: Option<extern "C" fn(Foo)>,
     _foo_box: Box<Foo>,
     _foo_box_option: Option<Box<Foo>>,
-) {}
+) {
+}
 
 pub(crate) type NullableCvoid = Option<NonNull<c_void>>;
 
@@ -425,7 +426,7 @@ pub struct SharedExternEngine {
 }
 
 impl HandleDescriptor for SharedExternEngine {
-    type Target = dyn ExternEngine + Send + Sync;
+    type Target = dyn ExternEngine;
     type Mutable = False;
     type Sized = False;
 }
@@ -610,7 +611,7 @@ pub unsafe extern "C" fn drop_engine(engine: Handle<SharedExternEngine>) {
 }
 
 pub struct SharedSnapshot {
-    _unconstructable: Unconstructable
+    _unconstructable: Unconstructable,
 }
 
 impl HandleDescriptor for SharedSnapshot {

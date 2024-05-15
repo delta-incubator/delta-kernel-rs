@@ -111,7 +111,7 @@ pub trait ExpressionEvaluator: Send + Sync {
     ///
     /// Contains one value for each row of the input.
     /// The data type of the output is same as the type output of the expression this evaluator is using.
-    fn evaluate(&self, batch: &(dyn EngineData + Send + Sync)) -> DeltaResult<Box<dyn EngineData + Send + Sync>>;
+    fn evaluate(&self, batch: &dyn EngineData) -> DeltaResult<Box<dyn EngineData>>;
 }
 
 /// Provides expression evaluation capability to Delta Kernel.
@@ -166,9 +166,9 @@ pub trait JsonHandler: Send + Sync {
     /// json_strings MUST be a single column batch of engine data, and the column type must be string
     fn parse_json(
         &self,
-        json_strings: Box<dyn EngineData + Send + Sync>,
+        json_strings: Box<dyn EngineData>,
         output_schema: SchemaRef,
-    ) -> DeltaResult<Box<dyn EngineData + Send + Sync>>;
+    ) -> DeltaResult<Box<dyn EngineData>>;
 
     /// Read and parse the JSON format file at given locations and return
     /// the data as EngineData with the columns requested by physical schema.

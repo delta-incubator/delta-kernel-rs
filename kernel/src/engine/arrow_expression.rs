@@ -252,7 +252,7 @@ pub struct DefaultExpressionEvaluator {
 }
 
 impl ExpressionEvaluator for DefaultExpressionEvaluator {
-    fn evaluate(&self, batch: &(dyn EngineData + Send + Sync)) -> DeltaResult<Box<dyn EngineData + Send + Sync>> {
+    fn evaluate(&self, batch: &dyn EngineData) -> DeltaResult<Box<dyn EngineData>> {
         let batch = batch
             .as_any()
             .downcast_ref::<ArrowEngineData>()

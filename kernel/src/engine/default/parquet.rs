@@ -228,7 +228,7 @@ mod tests {
     use super::*;
 
     fn into_record_batch(
-        engine_data: DeltaResult<Box<dyn EngineData + Send + Sync>>,
+        engine_data: DeltaResult<Box<dyn EngineData>>,
     ) -> DeltaResult<RecordBatch> {
         engine_data
             .and_then(ArrowEngineData::try_from_engine_data)

@@ -183,7 +183,7 @@ impl DataSkippingFilter {
 
     /// Apply the DataSkippingFilter to an EngineData batch of actions. Returns a selection vector
     /// which can be applied to the actions to find those that passed data skipping.
-    pub(crate) fn apply(&self, actions: &(dyn EngineData + Send + Sync)) -> DeltaResult<Vec<bool>> {
+    pub(crate) fn apply(&self, actions: &dyn EngineData) -> DeltaResult<Vec<bool>> {
         // retrieve and parse stats from actions data
         let stats = self.select_stats_evaluator.evaluate(actions)?;
         let parsed_stats = self

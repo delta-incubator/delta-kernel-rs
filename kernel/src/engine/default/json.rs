@@ -86,9 +86,9 @@ fn hack_parse(
 impl<E: TaskExecutor> JsonHandler for DefaultJsonHandler<E> {
     fn parse_json(
         &self,
-        json_strings: Box<dyn EngineData + Send + Sync>,
+        json_strings: Box<dyn EngineData>,
         output_schema: SchemaRef,
-    ) -> DeltaResult<Box<dyn EngineData + Send + Sync>> {
+    ) -> DeltaResult<Box<dyn EngineData>> {
         let json_strings: RecordBatch = ArrowEngineData::try_from_engine_data(json_strings)?.into();
         // TODO(nick): this is pretty terrible
         let struct_array: StructArray = json_strings.into();
@@ -229,7 +229,7 @@ mod tests {
         actions::get_log_schema, engine::default::executor::tokio::TokioBackgroundExecutor,
     };
 
-    fn string_array_to_engine_data(string_array: StringArray) -> Box<dyn EngineData + Send + Sync> {
+    fn string_array_to_engine_data(string_array: StringArray) -> Box<dyn EngineData> {
         let string_field = Arc::new(Field::new("a", DataType::Utf8, true));
         let schema = Arc::new(ArrowSchema::new(vec![string_field]));
         let batch = RecordBatch::try_new(schema, vec![Arc::new(string_array)])

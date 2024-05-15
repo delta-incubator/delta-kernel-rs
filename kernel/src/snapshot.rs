@@ -180,12 +180,12 @@ impl Snapshot {
             checkpoint_files,
         };
 
-        Ok(Self::try_new_from_log_segment(
+        Self::try_new_from_log_segment(
             table_root,
             log_segment,
             version_eff,
             engine,
-        )?)
+        )
     }
 
     /// Create a new [`Snapshot`] instance.
