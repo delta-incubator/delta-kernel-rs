@@ -63,8 +63,6 @@ pub fn sort_record_batch(batch: RecordBatch) -> DeltaResult<RecordBatch> {
 }
 
 static SKIPPED_TESTS: &[&str; 2] = &[
-    // Kernel does not support column mapping yet
-    //"column_mapping",
     // iceberg compat requires column mapping
     "iceberg_compat_v1",
     // For multi_partitioned_2: The golden table stores the timestamp as an INT96 (which is
