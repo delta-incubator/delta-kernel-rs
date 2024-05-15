@@ -51,6 +51,8 @@ mod private {
 
     /// Represents an object that crosses the FFI boundary and which outlives the scope that created
     /// it. It remains valid until explicitly dropped by a call to [Handle::drop_handle].
+    ///
+    /// cbindgen:transparent-typedef
     #[repr(transparent)]
     pub struct Handle<H: HandleDescriptor> {
         ptr: NonNull<H>,
