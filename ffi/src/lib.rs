@@ -232,6 +232,7 @@ pub enum KernelError {
     JoinFailureError,
     Utf8Error,
     ParseIntError,
+    InvalidColumnMappingMode,
 }
 
 impl From<Error> for KernelError {
@@ -268,6 +269,7 @@ impl From<Error> for KernelError {
             Error::JoinFailure(_) => KernelError::JoinFailureError,
             Error::Utf8Error(_) => KernelError::Utf8Error,
             Error::ParseIntError(_) => KernelError::ParseIntError,
+            Error::InvalidColumnMappingMode(_) => KernelError::InvalidColumnMappingMode,
             Error::Backtraced {
                 source,
                 backtrace: _,

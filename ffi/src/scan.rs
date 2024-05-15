@@ -112,7 +112,7 @@ unsafe fn scan_impl(
             scan_builder = scan_builder.with_predicate(predicate);
         }
     }
-    Ok(BoxHandle::into_handle(scan_builder.build()))
+    Ok(BoxHandle::into_handle(scan_builder.build()?))
 }
 
 impl BoxHandle for GlobalScanState {}

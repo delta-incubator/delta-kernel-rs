@@ -80,16 +80,16 @@ impl ScanBuilder {
     ///
     /// This is lazy and performs no 'work' at this point. The [`Scan`] type itself can be used
     /// to fetch the files and associated metadata required to perform actual data reads.
-    pub fn build(self) -> Scan {
+    pub fn build(self) -> DeltaResult<Scan> {
         // if no schema is provided, use snapshot's entire schema (e.g. SELECT *)
         let read_schema = self
             .schema
             .unwrap_or_else(|| self.snapshot.schema().clone().into());
-        Scan {
+        Ok(Scan {
             snapshot: self.snapshot,
             read_schema,
             predicate: self.predicate,
-        }
+        })
     }
 }
 
@@ -590,7 +590,7 @@ mod tests {
 
         let table = Table::new(url);
         let snapshot = table.snapshot(&engine, None).unwrap();
-        let scan = ScanBuilder::new(snapshot).build();
+        let scan = ScanBuilder::new(snapshot).build().unwrap();
         let files: Vec<Add> = scan.files(&engine).unwrap().try_collect().unwrap();
 
         assert_eq!(files.len(), 1);
@@ -610,7 +610,7 @@ mod tests {
 
         let table = Table::new(url);
         let snapshot = table.snapshot(&engine, None).unwrap();
-        let scan = ScanBuilder::new(snapshot).build();
+        let scan = ScanBuilder::new(snapshot).build().unwrap();
         let files = scan.execute(&engine).unwrap();
 
         assert_eq!(files.len(), 1);
@@ -673,7 +673,7 @@ mod tests {
 
         let table = Table::new(url);
         let snapshot = table.snapshot(&engine, None)?;
-        let scan = ScanBuilder::new(snapshot).build();
+        let scan = ScanBuilder::new(snapshot).build()?;
         let files: Vec<DeltaResult<Add>> = scan.files(&engine)?.collect();
 
         // test case:
