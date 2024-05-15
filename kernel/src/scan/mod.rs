@@ -78,17 +78,21 @@ impl ScanBuilder {
 
     /// Build the [`Scan`].
     ///
-    /// This is lazy and performs no 'work' at this point. The [`Scan`] type itself can be used
-    /// to fetch the files and associated metadata required to perform actual data reads.
+    /// This does not scan the table at this point, but does do some work to ensure that the
+    /// provided schema make sense, and to prepare some metadata that the scan will need.  The
+    /// [`Scan`] type itself can be used to fetch the files and associated metadata required to
+    /// perform actual data reads.
     pub fn build(self) -> DeltaResult<Scan> {
         // if no schema is provided, use snapshot's entire schema (e.g. SELECT *)
         let read_schema = self
             .schema
             .unwrap_or_else(|| self.snapshot.schema().clone().into());
+        let column_mapping_mode = self.snapshot.column_mapping_mode()?;
         Ok(Scan {
             snapshot: self.snapshot,
             read_schema,
             predicate: self.predicate,
+            column_mapping_mode,
         })
     }
 }
@@ -127,6 +131,7 @@ pub struct Scan {
     snapshot: Arc<Snapshot>,
     read_schema: SchemaRef,
     predicate: Option<Expression>,
+    column_mapping_mode: ColumnMappingMode,
 }
 
 impl std::fmt::Debug for Scan {
@@ -209,11 +214,10 @@ impl Scan {
     /// only be called once per scan.
     pub fn global_scan_state(&self) -> GlobalScanState {
         let partition_columns = &self.snapshot.metadata().partition_columns;
-        let column_mapping_mode = self.snapshot.column_mapping_mode().unwrap(); // TODO fix unwrap
         let (_all_fields, read_fields, _have_partition_cols) = get_state_info(
             self.schema().as_ref(),
             partition_columns,
-            &column_mapping_mode,
+            &self.column_mapping_mode,
         );
         let read_schema = StructType::new(read_fields);
         let logical_schema = self.schema().as_ref().clone();
@@ -222,7 +226,7 @@ impl Scan {
             partition_columns: partition_columns.clone(),
             logical_schema,
             read_schema,
-            column_mapping_mode,
+            column_mapping_mode: self.column_mapping_mode.clone(),
         }
     }
 
@@ -236,9 +240,8 @@ impl Scan {
     // `engine`'s [`crate::ParquetHandler`] to read the actual table data.
     pub fn execute(&self, engine: &dyn Engine) -> DeltaResult<Vec<ScanResult>> {
         let partition_columns = &self.snapshot.metadata().partition_columns;
-        let mapping_mode = self.snapshot.column_mapping_mode()?;
         let (all_fields, read_fields, have_partition_cols) =
-            get_state_info(self.schema().as_ref(), partition_columns, &mapping_mode);
+            get_state_info(self.schema().as_ref(), partition_columns, &self.column_mapping_mode);
         let read_schema = Arc::new(StructType::new(read_fields));
         debug!("Executing scan with read schema {read_schema:#?}");
         let output_schema = DataType::Struct(Box::new(self.schema().as_ref().clone()));
@@ -257,7 +260,7 @@ impl Scan {
             let read_results =
                 parquet_handler.read_parquet_files(&[meta], read_schema.clone(), None)?;
 
-            let read_expression = if have_partition_cols || mapping_mode != ColumnMappingMode::None
+            let read_expression = if have_partition_cols || self.column_mapping_mode != ColumnMappingMode::None
             {
                 // Loop over all fields and create the correct expressions for them
                 let all_fields: Vec<Expression> = all_fields
