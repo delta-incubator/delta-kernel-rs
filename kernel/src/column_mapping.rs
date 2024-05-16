@@ -35,7 +35,9 @@ impl TryFrom<&str> for ColumnMappingMode {
 ///
 /// This returns both the field and the name of the field. The name has the same lifetime as the
 /// logical field
-pub(crate) fn get_name_mapped_physical_field(logical_field: &StructField) -> DeltaResult<(StructField, &str)> {
+pub(crate) fn get_name_mapped_physical_field(
+    logical_field: &StructField,
+) -> DeltaResult<(StructField, &str)> {
     match logical_field.metadata.get(ColumnMetadataKey::ColumnMappingPhysicalName.as_ref()) {
         Some(val) => match val {
             MetadataValue::Number(_) => {
