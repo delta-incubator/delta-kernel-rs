@@ -226,14 +226,11 @@ impl Scan {
     /// Get global state that is valid for the entire scan. This is somewhat expensive so should
     /// only be called once per scan.
     pub fn global_scan_state(&self) -> GlobalScanState {
-        let partition_columns = self.snapshot.metadata().partition_columns.clone();
-        let logical_schema = self.logical_schema.as_ref().clone();
-        let read_schema = self.physical_schema.as_ref().clone();
         GlobalScanState {
             table_root: self.snapshot.table_root.to_string(),
-            partition_columns,
-            logical_schema,
-            read_schema,
+            partition_columns: self.snapshot.metadata().partition_columns.clone(),
+            logical_schema: self.logical_schema.as_ref().clone(),
+            read_schema: self.physical_schema.as_ref().clone(),
             column_mapping_mode: self.column_mapping_mode.clone(),
         }
     }
