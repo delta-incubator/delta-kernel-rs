@@ -14,9 +14,10 @@ use delta_kernel::expressions::{BinaryOperator, Expression, Scalar};
 use delta_kernel::schema::{ArrayType, DataType, MapType, PrimitiveType, StructType};
 use delta_kernel::snapshot::Snapshot;
 use delta_kernel::{DeltaResult, Engine, Error};
+use delta_kernel_ffi_macros::handle_descriptor;
 
-mod handle;
-use handle::{False, Handle, HandleDescriptor, True, Unconstructable};
+pub mod handle;
+use handle::Handle;
 
 pub mod scan;
 
@@ -154,7 +155,7 @@ pub type AllocateStringFn = extern "C" fn(kernel_str: KernelStringSlice) -> Null
 mod private {
     /// Represents an owned slice of boolean values allocated by the kernel. Any time the engine
     /// receives a `KernelBoolSlice` as a return value from a kernel method, engine is responsible
-    /// to free that slice, by calling [drop_bool_slice] exactly once.
+    /// to free that slice, by calling [super::drop_bool_slice] exactly once.
     #[repr(C)]
     pub struct KernelBoolSlice {
         ptr: *mut bool,
@@ -211,8 +212,8 @@ mod private {
     /// # Safety
     ///
     /// Whenever kernel passes a [KernelBoolSlice] to engine, engine assumes ownership of the slice
-    /// memory, but must only free it by calling [drop_bool_slice]. Since the global allocator is
-    /// threadsafe, it doesn't matter which engine thread invokes that method.
+    /// memory, but must only free it by calling [super::drop_bool_slice]. Since the global
+    /// allocator is threadsafe, it doesn't matter which engine thread invokes that method.
     unsafe impl Send for KernelBoolSlice {}
 
     /// # Safety
@@ -421,15 +422,8 @@ pub trait ExternEngine: Send + Sync {
     fn error_allocator(&self) -> &dyn AllocateError;
 }
 
-pub struct SharedExternEngine {
-    _unconstructable: Unconstructable,
-}
-
-impl HandleDescriptor for SharedExternEngine {
-    type Target = dyn ExternEngine;
-    type Mutable = False;
-    type Sized = False;
-}
+#[handle_descriptor(target=dyn ExternEngine, mutable=false)]
+pub struct SharedExternEngine;
 
 struct ExternEngineVtable {
     // Actual engine instance to use
@@ -610,15 +604,8 @@ pub unsafe extern "C" fn drop_engine(engine: Handle<SharedExternEngine>) {
     engine.drop_handle();
 }
 
-pub struct SharedSnapshot {
-    _unconstructable: Unconstructable,
-}
-
-impl HandleDescriptor for SharedSnapshot {
-    type Target = Snapshot;
-    type Mutable = False;
-    type Sized = True;
-}
+#[handle_descriptor(target=Snapshot, mutable=false, sized=true)]
+pub struct SharedSnapshot;
 
 /// Get the latest snapshot from the specified table
 ///

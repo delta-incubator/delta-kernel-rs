@@ -7,6 +7,7 @@ use std::sync::Arc;
 use delta_kernel::scan::state::{visit_scan_files, DvInfo, GlobalScanState};
 use delta_kernel::scan::{Scan, ScanBuilder, ScanData};
 use delta_kernel::{DeltaResult, EngineData};
+use delta_kernel_ffi_macros::handle_descriptor;
 use tracing::debug;
 use url::Url;
 
@@ -16,23 +17,15 @@ use crate::{
     NullableCvoid, SharedExternEngine, SharedSnapshot, TryFromStringSlice,
 };
 
-use super::handle::{
-    False, Handle, HandleAsArc, HandleAsMut, HandleDescriptor, True, Unconstructable,
-};
+use super::handle::{CloneHandle, Handle, HandleAsMut};
 
 // TODO: Do we want this type at all? Perhaps we should just _always_ pass raw *mut c_void pointers
 // that are the engine data
 /// an opaque struct that encapsulates data read by an engine. this handle can be passed back into
 /// some kernel calls to operate on the data, or can be converted into the raw data as read by the
 /// [`delta_kernel::Engine`] by calling [`get_raw_engine_data`]
-pub struct EngineDataHandle {
-    _unconstructable: Unconstructable,
-}
-impl HandleDescriptor for EngineDataHandle {
-    type Target = dyn EngineData;
-    type Mutable = True;
-    type Sized = False;
-}
+#[handle_descriptor(target=dyn EngineData, mutable=true, sized=false)]
+pub struct EngineDataHandle;
 
 /// Allow an engine to "unwrap" an [`EngineDataHandle`] into the raw pointer for the case it wants
 /// to use its own engine data format
@@ -100,14 +93,8 @@ unsafe fn get_raw_arrow_data_impl(
     Ok(Box::leak(ret_data))
 }
 
-pub struct ScanHandle {
-    _unconstructable: Unconstructable,
-}
-impl HandleDescriptor for ScanHandle {
-    type Target = Scan;
-    type Mutable = True;
-    type Sized = True;
-}
+#[handle_descriptor(target=Scan, mutable=true, sized=true)]
+pub struct ScanHandle;
 
 /// Get a [`Scan`] over the table specified by the passed snapshot.
 /// # Safety
@@ -126,7 +113,7 @@ unsafe fn scan_impl(
     snapshot: Handle<SharedSnapshot>,
     predicate: Option<&mut EnginePredicate>,
 ) -> DeltaResult<Handle<ScanHandle>> {
-    let snapshot = unsafe { snapshot.as_arc() };
+    let snapshot = unsafe { snapshot.clone_as_arc() };
     let mut scan_builder = ScanBuilder::new(snapshot);
     if let Some(predicate) = predicate {
         let mut visitor_state = KernelExpressionVisitorState::new();
@@ -139,14 +126,8 @@ unsafe fn scan_impl(
     Ok(Box::new(scan_builder.build()).into())
 }
 
-pub struct GlobalScanStateHandle {
-    _unconstructable: Unconstructable,
-}
-impl HandleDescriptor for GlobalScanStateHandle {
-    type Target = GlobalScanState;
-    type Mutable = True;
-    type Sized = True;
-}
+#[handle_descriptor(target=GlobalScanState, mutable=true, sized=true)]
+pub struct GlobalScanStateHandle;
 
 /// Get the global state for a scan. See the docs for [`delta_kernel::scan::state::GlobalScanState`]
 /// for more information.
@@ -178,14 +159,8 @@ pub struct KernelScanDataIterator {
     engine: Arc<dyn ExternEngine>,
 }
 
-pub struct KernelScanDataIteratorHandle {
-    _unconstructable: Unconstructable,
-}
-impl HandleDescriptor for KernelScanDataIteratorHandle {
-    type Target = KernelScanDataIterator;
-    type Mutable = True;
-    type Sized = True;
-}
+#[handle_descriptor(target=KernelScanDataIterator, mutable=true, sized=true)]
+pub struct KernelScanDataIteratorHandle;
 
 impl Drop for KernelScanDataIterator {
     fn drop(&mut self) {
@@ -199,7 +174,7 @@ impl Drop for KernelScanDataIterator {
 ///
 /// # Safety
 ///
-/// Engine is responsible for passing a valid [`ExternEngineHandle`] and [`Scan`]
+/// Engine is responsible for passing a valid [`SharedExternEngine`] and [`Scan`]
 #[no_mangle]
 pub unsafe extern "C" fn kernel_scan_data_init(
     engine: Handle<SharedExternEngine>,
@@ -212,7 +187,7 @@ unsafe fn kernel_scan_data_init_impl(
     engine: &Handle<SharedExternEngine>,
     scan: Handle<ScanHandle>,
 ) -> DeltaResult<Handle<KernelScanDataIteratorHandle>> {
-    let engine = unsafe { engine.as_arc() };
+    let engine = unsafe { engine.clone_as_arc() };
     // we take back and consume the scan here
     let scan = unsafe { scan.into_inner() };
     let scan_data = scan.scan_data(engine.engine().as_ref())?;
@@ -280,14 +255,8 @@ type CScanCallback = extern "C" fn(
     partition_map: &CStringMap,
 );
 
-pub struct DvInfoHandle {
-    _unconstructable: Unconstructable,
-}
-impl HandleDescriptor for DvInfoHandle {
-    type Target = DvInfo;
-    type Mutable = True;
-    type Sized = True;
-}
+#[handle_descriptor(target=DvInfo, mutable=true, sized=true)]
+pub struct DvInfoHandle;
 
 pub struct CStringMap {
     values: HashMap<String, String>,
@@ -331,7 +300,7 @@ unsafe fn selection_vector_from_dv_impl(
     state: Handle<GlobalScanStateHandle>,
 ) -> DeltaResult<KernelBoolSlice> {
     let state = unsafe { state.as_ref() };
-    let extern_engine = unsafe { extern_engine.as_arc() };
+    let extern_engine = unsafe { extern_engine.clone_as_arc() };
     let root_url = Url::parse(&state.table_root)?;
     match dv_info.get_selection_vector(extern_engine.engine().as_ref(), &root_url)? {
         Some(v) => Ok(v.into()),

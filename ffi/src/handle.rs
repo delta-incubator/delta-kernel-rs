@@ -1,44 +1,90 @@
-//! Primitives for conspicuously transferring ownership of rust objects across an FFI boundary.
+//! [`Handle`] is an idiom for visibly transferring ownership of opaque rust objects across the FFI
+//! boundary.
 //!
-//! Creating a handle always implies some kind of ownership transfer. A mutable handle takes
-//! ownership of the object itself (analagous to `Box<T>`), while a non-mutable (shared) handle
-//! takes ownership of a shared reference to the object (analagous to one instance instance of an
-//! `Arc<T>`). Thus, a created handle remains valid, and its underlying object remains accessible,
-//! until the handle is explicitly dropped. Dropping a mutable handle always drops the underlying
-//! object, while dropping a shared handle only drops the underlying object if the handle was the
+//! Creating a [`Handle<T>`] always implies some kind of ownership transfer. A mutable handle takes
+//! ownership of the object itself (analagous to [`Box<T>`]), while a non-mutable (shared) handle
+//! takes ownership of a shared reference to the object (analagous to [`Arc<T>`]). Thus, a created
+//! handle remains [valid][Handle#Validity], and its underlying object remains accessible, until the
+//! handle is explicitly dropped or consumed. Dropping a mutable handle always drops the underlying
+//! object as well; dropping a shared handle only drops the underlying object if the handle was the
 //! last reference to that object.
 //!
 //! Because handles carry ownership semantics, and lifetime information is not preserved across the
-//! FFI boundary, handles are always opaque types to avoid confusiong them with normal shared
-//! references (`&Foo`, `*const Foo`, etc) that are only valid until the FFI call returns.
+//! FFI boundary, handles are always opaque types to avoid confusiong them with normal references
+//! and pointers (`&Foo`, `*const Foo`, etc) that are possibly only valid until the FFI call
+//! returns. For the same reason, mutable handles implement neither [`Copy`] nor [`Clone`]. However,
+//! this only helps on the Rust side, because handles appear as simple pointers in the FFI and are
+//! thus easily duplicated there. In order to improve safety, external (non-Rust) code is strongly
+//! advised to maintain "unique pointer" semantics for mutable handles.
+//!
+//! NOTE: While shared handles could conceptually impl [`Clone`], cloning would require unsafe code
+//! and so we can't actually implement the trait. Use [`CloneHandle::clone_handle`] instead.
 use std::ptr::NonNull;
 use std::sync::Arc;
 
-/// Used for mutable access to a mutable handle's underlying object.
-/// Similar to [AsMut], but unsafe and hard-wired to the handle's target type.
+/// Provides mutable access to the underlying object of a mutable [`Handle`] .
+/// Similar to [`AsMut`], but unsafe and hard-wired to the handle's target type.
 pub trait HandleAsMut {
-    type Target: ?Sized + Send + Sync;
+    /// The true type of the underlying object.
+    type Target: ?Sized;
 
     /// Obtains a mutable reference to the handle's underlying object.
+    ///
+    /// # Safety
+    ///
+    /// Caller asserts that this handle obeys [mutable reference
+    /// semantics](https://doc.rust-lang.org/book/ch04-02-references-and-borrowing.html#the-rules-of-references),
+    /// namely:
+    ///
+    /// * The handle is [valid][Handle#Validity].
+    ///
+    /// * No other references (neither shared nor mutable) can overlap with the returned reference.
     unsafe fn as_mut(&mut self) -> &mut Self::Target;
 }
 
-/// Used for [Arc] access to a shared handle's underlying object.
-pub trait HandleAsArc {
-    type Target: ?Sized + Send + Sync;
+/// Clones a a shared [`Handle`]. Similar to [`Clone`], but unsafe. Also allows to clone the handle
+/// as an [`Arc`] for easy access to the handle's underlying object.
+pub trait CloneHandle {
+    /// The true type of the underlying object.
+    type Target: ?Sized;
 
-    /// Creates a new [Arc] from the handle, increasing the underlying object's refcount by one.
-    unsafe fn as_arc(&self) -> Arc<Self::Target>;
+    /// Clones this handle, increasing the underlying object's refcount by one. The new handle is
+    /// independent of the source handle, and should be dropped when it is no longer needed.
+    ///
+    /// # Safety
+    ///
+    /// Caller asserts that the handle is [valid][Handle#Validity].
+    unsafe fn clone_handle(&self) -> Self;
+
+    /// Creates a new `Arc<T>` from this handle, increasing the underlying object's refcount by one.
+    ///
+    /// # Safety
+    ///
+    /// Caller asserts that the handle is [valid][Handle#Validity].
+    unsafe fn clone_as_arc(&self) -> Arc<Self::Target>;
 }
 
 /// Describes the kind of handle a given opaque pointer type represents.
+///
+/// It is not normally necessary to implement this trait directly; instead, use the provided
+/// attribute macro `#[handle_descriptor]` to generate the implementation automatically, e.g.
+/// ```
+/// pub struct Foo {
+///     x: usize,
+/// }
+///
+/// #[handle_descriptor(target = "Foo", mutable = true, sized = true)]
+/// pub struct MutableFoo;
+/// ```
 pub trait HandleDescriptor {
-    /// The actual type of the handle's underlying object
+    /// The true type of the handle's underlying object
     type Target: ?Sized + Send + Sync;
-    /// If true, the handle owns the object (`Box`-like); otherwise, the handle owns a reference to
-    /// the object (`Arc`-like).
+
+    /// If `True`, the handle owns the underlying object (`Box`-like); otherwise, the handle owns a
+    /// shared reference to the underlying object (`Arc`-like).
     type Mutable: Boolean;
-    /// True if the handle's [Target] is [Sized].
+
+    /// `True` iff the handle's `Target` is [`Sized`].
     type Sized: Boolean;
 }
 
@@ -50,7 +96,16 @@ mod private {
     use super::*;
 
     /// Represents an object that crosses the FFI boundary and which outlives the scope that created
-    /// it. It remains valid until explicitly dropped by a call to [Handle::drop_handle].
+    /// it. It can be passed freely between rust code and external code.
+    ///
+    /// # Validity
+    ///
+    /// A `Handle` is _valid_ if all of the following hold:
+    ///
+    /// * It was created by a call to [`Handle::from`]
+    /// * Not dropped by a call to [`Handle::drop_handle`]
+    /// * Not consumed by a call to [`Handle::into_inner`]
+    /// * All concurrent uses in external code uphold [`Send`] and [`Sync`] semantics
     ///
     /// cbindgen:transparent-typedef
     #[repr(transparent)]
@@ -58,7 +113,24 @@ mod private {
         ptr: NonNull<H>,
     }
 
+    /// # Safety
+    ///
+    /// Kernel does not directly employ concurrency, but is nevertheless concurrency-friendly. The
+    /// underlying type of a `Handle` is always `Send`, so Rust code will handle it correctly even
+    /// if the external code calls into kernel from a different thread than the one that created the
+    /// handle. External code that uses concurrency must use appropriate mutual exclusion to uphold
+    /// the [`Send`
+    /// contract](https://doc.rust-lang.org/book/ch16-04-extensible-concurrency-sync-and-send.html#allowing-transference-of-ownership-between-threads-with-send).
     unsafe impl<H: HandleDescriptor> Send for Handle<H> {}
+
+    /// # Safety
+    ///
+    /// Kernel does not directly employ concurrency, but is nevertheless concurrency-friendly. The
+    /// underlying type of a `Handle` is always `Sync`, so Rust code will handle it correctly even
+    /// if the external code calls into kernel from a different thread than the one that created the
+    /// handle. External code that uses concurrency must use appropriate mutual exclusion to uphold
+    /// the [`Sync`
+    /// contract](https://doc.rust-lang.org/book/ch16-04-extensible-concurrency-sync-and-send.html#allowing-access-from-multiple-threads-with-sync).
     unsafe impl<H: HandleDescriptor> Sync for Handle<H> {}
 
     impl<T, M, S, H> Handle<H>
@@ -67,19 +139,44 @@ mod private {
         H: HandleDescriptor<Target = T, Mutable = M, Sized = S> + HandleOps<T, M, S>,
     {
         /// Obtains a shared reference to this handle's underlying object.
+        ///
+        /// # Safety
+        ///
+        /// Caller asserts that this handle obeys [shared reference
+        /// semantics](https://doc.rust-lang.org/book/ch04-02-references-and-borrowing.html#the-rules-of-references),
+        /// namely:
+        ///
+        /// * The handle is [valid][Handle#Validity].
+        ///
+        /// * No mutable references can overlap with the returned reference.
         pub unsafe fn as_ref(&self) -> &H::Target {
             H::as_ref(self.ptr.cast().as_ptr())
         }
 
+        /// Consumes this handle and returns the resource it was originally created `From` ([`Box<T>`]
+        /// for mutable handles, and [`Arc<T>`] for shared handles).
+        ///
+        /// # Safety
+        ///
+        /// Caller asserts that the handle is [valid][Handle#Validity].
         pub unsafe fn into_inner(self) -> H::From {
             H::into_inner(self.ptr.cast().as_ptr())
         }
-        /// Destroys this handle.
+        /// Drops this handle. Dropping a mutable handle always drops the underlying object as well;
+        /// dropping a shared handle only drops the underlying object if the handle was the last
+        /// reference to that object.
+        ///
+        /// # Safety
+        ///
+        /// Caller asserts that the handle is [valid][Handle#Validity].
         pub unsafe fn drop_handle(self) {
             drop(self.into_inner())
         }
     }
 
+    // NOTE: While it would be really convenient to `impl From<T> for Handle<H>`, that definition is
+    // not disjoint and conflicts with the standard `impl From<T> for T` (since there's no way to
+    // prove categorically that T != H). Ditto for `impl<X: Into<Box<T>>> From<X> for Handle<H>`.
     impl<T, S, H> From<Box<T>> for Handle<H>
     where
         T: ?Sized + Send + Sync,
@@ -116,39 +213,71 @@ mod private {
         }
     }
 
-    impl<T, S, H> HandleAsArc for Handle<H>
+    impl<T, S, H> CloneHandle for Handle<H>
     where
         T: ?Sized + Send + Sync,
-        H: HandleDescriptor<Target = T, Mutable = False, Sized = S> + HandleOps<T, False, S>,
+        H: HandleDescriptor<Target = T, Mutable = False, Sized = S>
+            + HandleOps<T, False, S, From = Arc<T>>,
     {
         type Target = T;
 
-        unsafe fn as_arc(&self) -> Arc<T> {
+        unsafe fn clone_handle(&self) -> Self {
+            self.clone_as_arc().into()
+        }
+        unsafe fn clone_as_arc(&self) -> Arc<T> {
             H::clone_arc(self.ptr.cast().as_ptr())
         }
     }
 
-    // NOTE: The functions in this trait assign arbitrary lifetime 'a to the references they return
-    // and are thus VERY unsafe to call directly. Instead, `Handle` methods call them, and are thus
-    // able to impose at least the semi-sane lifetime of not outliving the `Handle` itself.
+    // Helper for [`Handle`] that encapsulates the various operations for each specialization. By
+    // taking `M` (mutable) and `S` (sized) as generic parameters, we can define disjoint generic
+    // impl for each of the four combinations of `M` and `S`, without risk of ambiguity.
+    //
+    // NOTE: This trait is only public because otherwise `Handle` cannot impl it. It is not part of
+    // stable public API.
+    #[doc(hidden)]
     pub trait HandleOps<T: ?Sized, M, S> {
         type From: Sized;
         type Raw: Sized;
 
         fn into_handle_ptr(val: Self::From) -> NonNull<Self::Raw>;
 
+        // # Safety
+        //
+        // This method is VERY unsafe to call directly, because the returned reference receives an
+        // arbitrary lifetime provided by its caller. Assuming the safety requirements of
+        // [`Handle::as_ref`] are met, that method will ensure safety by assigning a lifetime that
+        // does not outlive the source `Handle` itself, and can thus safely call this method..
         unsafe fn as_ref<'a>(ptr: *const Self::Raw) -> &'a T;
 
-        // WARNING: unimplemented when M=False
+        // This method is only required when `M=True`, and implementations with `M=False` should
+        // leave it `unimplemented!`.
+        //
+        // # Safety
+        //
+        // This method is VERY unsafe to call directly, because the returned reference receives an
+        // arbitrary lifetime provided by its caller. Assuming the safety requirements of
+        // [`HandleAsMut::as_mut`] are met, that method will ensure safety by assigning a lifetime
+        // that does not outlive the source `Handle` itself, and can thus safely call this method.
         unsafe fn as_mut<'a>(ptr: *mut Self::Raw) -> &'a mut T;
 
-        // WARNING: unimplemented when M=True
+        // This method is only required when `M=False`, and implementations with `M=True` should
+        // leave it `unimplemented!`.
+        //
+        // # Safety
+        //
+        // Assuming the safety requirements of [`CloneHandle::clone_as_arc`] are met, that method
+        // can safely call this method.
         unsafe fn clone_arc(ptr: *const Self::Raw) -> Arc<T>;
 
+        // # Safety
+        //
+        // Assuming the safety requirements of [`Handle::into_inner`] are met, that method can
+        // safely call this method.
         unsafe fn into_inner(ptr: *mut Self::Raw) -> Self::From;
     }
 
-    // Acts like Box<T: Sized> -- can directly use the input Box
+    // Acts like `Box<T: Sized>` -- we can directly use the input `Box`
     impl<T, H> HandleOps<T, True, True> for H
     where
         H: HandleDescriptor<Target = T, Mutable = True, Sized = True>,
@@ -174,7 +303,7 @@ mod private {
         }
     }
 
-    // Acts like Arc<T: Sized> -- can directly use the input Arc
+    // Acts like `Arc<T: Sized>` -- we can directly use the input `Arc`
     impl<T, H> HandleOps<T, False, True> for H
     where
         H: HandleDescriptor<Target = T, Mutable = False, Sized = True>,
@@ -201,7 +330,7 @@ mod private {
         }
     }
 
-    // Acts like Box<T: ?Sized> -- could be a fat pointer, so have to box it up
+    // Acts like `Box<T: ?Sized>` -- could be a fat pointer, so we have to box it up
     impl<T, H> HandleOps<T, True, False> for H
     where
         T: ?Sized,
@@ -227,12 +356,11 @@ mod private {
             unimplemented!()
         }
         unsafe fn into_inner(ptr: *mut Box<T>) -> Box<T> {
-            let boxed = unsafe { Box::from_raw(ptr) };
-            *boxed
+            *Box::from_raw(ptr)
         }
     }
 
-    // Acts like Arc<T: ?Sized> -- could be a fat pointer, so have to box it up
+    // Acts like `Arc<T: ?Sized>` -- could be a fat pointer, so we have to box it up
     impl<T, H> HandleOps<T, False, False> for H
     where
         T: ?Sized,
@@ -258,26 +386,35 @@ mod private {
             arc.clone()
         }
         unsafe fn into_inner(ptr: *mut Arc<T>) -> Arc<T> {
-            let boxed = unsafe { Box::from_raw(ptr) };
-            *boxed
+            *Box::from_raw(ptr)
         }
     }
 
-    /// A struct that cannot be instantiated by any rust code because this module exposes no public
-    /// constructor for it. Intentionally _NOT_ a zero-sized type, to avoid FFI weirdness.
+    // A NZST struct that cannot be instantiated by any Rust code because this module exposes no
+    // public constructor for it. Intentionally _NOT_ a zero-sized type, to avoid FFI weirdness.
+    #[doc(hidden)]
     pub struct Unconstructable {
         _private: usize,
     }
 
-    // workaround for #![feature(associated_const_equality)]
+    // This trait is a workaround until
+    // [`#![feature(associated_const_equality)]`](https://github.com/rust-lang/rust/labels/F-associated_const_equality)
+    // stabilizes. Ideally, the `M` and `S` parameters would be actual constant boolean values, but
+    // we cannot specialize generics based on constant values. So instead we define this sealed
+    // `Boolean` trait along with a couple implementing structs that represent true and false.
+    #[doc(hidden)]
+    pub trait Boolean: Sealed {}
+    #[doc(hidden)]
+    pub trait Sealed {}
+
+    #[doc(hidden)]
     pub struct True {}
+    #[doc(hidden)]
     pub struct False {}
 
-    pub trait Boolean: Sealed {}
     impl Boolean for True {}
     impl Boolean for False {}
 
-    pub trait Sealed {}
     impl Sealed for True {}
     impl Sealed for False {}
 }
@@ -382,7 +519,7 @@ mod tests {
         // error[E0599]: the method `as_mut` exists for struct `Handle<BarHandle>`, but its trait bounds were not satisfied
         // let r = unsafe { h.as_mut() };
 
-        let r = unsafe { h.as_arc() };
+        let r = unsafe { h.clone_as_arc() };
         println!("{r:?}");
         unsafe { h.drop_handle() };
 
@@ -411,7 +548,7 @@ mod tests {
         let h: Handle<SharedBaz> = t.into();
         let r = unsafe { h.as_ref() };
         r.squawk();
-        let r = unsafe { h.as_arc() };
+        let r = unsafe { h.clone_as_arc() };
         r.squawk();
     }
 }
