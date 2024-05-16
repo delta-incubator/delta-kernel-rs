@@ -13,6 +13,7 @@ use crate::actions::{get_log_schema, Metadata, Protocol, METADATA_NAME, PROTOCOL
 use crate::column_mapping::{ColumnMappingMode, COLUMN_MAPPING_MODE_KEY};
 use crate::path::{version_from_location, LogPath};
 use crate::schema::{Schema, SchemaRef};
+use crate::utils::require;
 use crate::{DeltaResult, Engine, Error, FileMeta, FileSystemClient, Version};
 use crate::{EngineData, Expression};
 
@@ -164,10 +165,10 @@ impl Snapshot {
             .ok_or(Error::MissingVersion)?; // TODO: A more descriptive error
 
         if let Some(v) = version {
-            if version_eff != v {
-                // TODO more descriptive error
-                return Err(Error::MissingVersion);
-            }
+            require!(
+                version_eff == v,
+                Error::MissingVersion // TODO more descriptive error
+            );
         }
 
         let log_segment = LogSegment {
