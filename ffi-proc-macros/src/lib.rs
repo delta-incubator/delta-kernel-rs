@@ -108,7 +108,7 @@ pub fn handle_descriptor(attr: TokenStream, item: TokenStream) -> TokenStream {
     let new_struct = parse_macro_input!(new_struct as ItemStruct);
     st.fields = new_struct.fields;
 
-    // Emit the modified struct and also derive the impl `HandleDescriptor` for it.
+    // Emit the modified struct and also derive the impl HandleDescriptor for it.
     let mutable = bool_to_boolean(descriptor_params.mutable);
     let sized = bool_to_boolean(descriptor_params.sized);
     let target = &descriptor_params.target;

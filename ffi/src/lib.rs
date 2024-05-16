@@ -21,36 +21,6 @@ use handle::Handle;
 
 pub mod scan;
 
-#[repr(C)]
-pub struct Foo {
-    foo: usize,
-}
-
-pub type FooAlias = Foo;
-
-#[repr(transparent)]
-pub struct Transparent<T> {
-    pub ptr: NonNull<T>,
-}
-#[no_mangle]
-pub unsafe extern "C" fn test_foo(
-    _foo: Foo,
-    _foo_alias: FooAlias,
-    _foo_ref: &Foo,
-    _foo_mut: &mut Foo,
-    _foo_ref_option: Option<&Foo>,
-    _foo_mut_option: Option<&mut Foo>,
-    _foo_non_null: NonNull<Foo>,
-    _foo_non_null_option: Option<NonNull<Foo>>,
-    _foo_transparent: Transparent<Foo>,
-    _foo_transparent_option: Option<Transparent<Foo>>,
-    _fptr: extern "C" fn(Foo),
-    _fptr_nullable: Option<extern "C" fn(Foo)>,
-    _foo_box: Box<Foo>,
-    _foo_box_option: Option<Box<Foo>>,
-) {
-}
-
 pub(crate) type NullableCvoid = Option<NonNull<c_void>>;
 
 /// Model iterators. This allows an engine to specify iteration however it likes, and we simply wrap
@@ -64,16 +34,6 @@ pub struct EngineIterator {
     /// If the iterator is complete, it should return null. It should be safe to
     /// call `get_next()` multiple times if it returns null.
     get_next: extern "C" fn(data: NonNull<c_void>) -> *const c_void,
-}
-
-/// test function to print for items. this assumes each item is an `int`
-#[no_mangle]
-extern "C" fn iterate(it: &mut EngineIterator) {
-    for i in it {
-        let i = i as *mut i32;
-        let ii = unsafe { &*i };
-        println!("Got an item: {:?}", ii);
-    }
 }
 
 impl Iterator for EngineIterator {
@@ -433,7 +393,7 @@ struct ExternEngineVtable {
 
 impl Drop for ExternEngineVtable {
     fn drop(&mut self) {
-        println!("dropping engine interface");
+        debug!("dropping engine interface");
     }
 }
 
@@ -600,7 +560,7 @@ unsafe fn get_default_engine_impl(
 /// Caller is responsible for passing a valid handle.
 #[no_mangle]
 pub unsafe extern "C" fn drop_engine(engine: Handle<SharedExternEngine>) {
-    println!("engine released engine");
+    debug!("engine released engine");
     engine.drop_handle();
 }
 
@@ -635,7 +595,7 @@ unsafe fn snapshot_impl(
 /// Caller is responsible for passing a valid handle.
 #[no_mangle]
 pub unsafe extern "C" fn drop_snapshot(snapshot: Handle<SharedSnapshot>) {
-    println!("engine released snapshot");
+    debug!("engine released snapshot");
     snapshot.drop_handle();
 }
 
@@ -851,7 +811,6 @@ pub unsafe extern "C" fn visit_schema(
         }
     }
 
-    //panic!("foo");//println!("Visiting schema: {:?}", snapshot.schema());
     visit_struct_fields(visitor, snapshot.schema())
 }
 

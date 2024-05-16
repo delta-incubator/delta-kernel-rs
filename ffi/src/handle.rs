@@ -424,6 +424,7 @@ pub use private::{Boolean, False, Handle, True, Unconstructable};
 #[cfg(test)]
 mod tests {
     use super::*;
+    use delta_kernel_ffi_macros::handle_descriptor;
 
     #[derive(Debug)]
     pub struct Foo {
@@ -431,9 +432,8 @@ mod tests {
         pub y: String,
     }
 
-    pub struct MutableFoo {
-        _unused: usize,
-    }
+    #[handle_descriptor(target=Foo, mutable=true, sized=true)]
+    pub struct MutableFoo;
 
     #[derive(Debug)]
     pub struct Bar {
@@ -441,21 +441,8 @@ mod tests {
         pub y: String,
     }
 
-    pub struct SharedBar {
-        _unused: usize,
-    }
-
-    impl HandleDescriptor for MutableFoo {
-        type Target = Foo;
-        type Mutable = True;
-        type Sized = True;
-    }
-
-    impl HandleDescriptor for SharedBar {
-        type Target = Bar;
-        type Mutable = False;
-        type Sized = True;
-    }
+    #[handle_descriptor(target=Bar, mutable=false, sized=true)]
+    pub struct SharedBar;
 
     pub trait Baz: Send + Sync {
         fn squawk(&self);
@@ -467,25 +454,11 @@ mod tests {
         }
     }
 
-    pub struct MutableBaz {
-        _unused: usize,
-    }
+    #[handle_descriptor(target=dyn Baz, mutable=true)]
+    pub struct MutableBaz;
 
-    pub struct SharedBaz {
-        _unused: usize,
-    }
-
-    impl HandleDescriptor for MutableBaz {
-        type Target = dyn Baz;
-        type Mutable = True;
-        type Sized = False;
-    }
-
-    impl HandleDescriptor for SharedBaz {
-        type Target = dyn Baz;
-        type Mutable = False;
-        type Sized = False;
-    }
+    #[handle_descriptor(target=dyn Baz, mutable=false)]
+    pub struct SharedBaz;
 
     #[test]
     fn test_handle_use_cases_compile() {

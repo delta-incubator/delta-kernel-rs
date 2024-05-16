@@ -6,6 +6,7 @@ use std::cmp::Ordering;
 
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
+use tracing::debug;
 use url::Url;
 
 use crate::actions::{get_log_schema, Metadata, Protocol, METADATA_NAME, PROTOCOL_NAME};
@@ -110,7 +111,7 @@ pub struct Snapshot {
 
 impl Drop for Snapshot {
     fn drop(&mut self) {
-        println!("Dropping snapshot");
+        debug!("Dropping snapshot");
     }
 }
 
