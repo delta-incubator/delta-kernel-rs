@@ -92,7 +92,7 @@ impl TryFrom<&DataType> for ArrowDataType {
                     PrimitiveType::Boolean => Ok(ArrowDataType::Boolean),
                     PrimitiveType::Binary => Ok(ArrowDataType::Binary),
                     PrimitiveType::Decimal(precision, scale) => {
-                        if precision <= &38 {
+                        if precision <= &38 && scale <= &38 {
                             Ok(ArrowDataType::Decimal128(*precision, *scale))
                         } else {
                             // NOTE: since we are converting from delta, we should never get here.
@@ -107,10 +107,10 @@ impl TryFrom<&DataType> for ArrowDataType {
                         // timezone. Stored as 4 bytes integer representing days since 1970-01-01
                         Ok(ArrowDataType::Date32)
                     }
-                    PrimitiveType::Timestamp => {
-                        // Issue: https://github.com/delta-io/delta/issues/643
-                        Ok(ArrowDataType::Timestamp(TimeUnit::Microsecond, None))
-                    }
+                    PrimitiveType::Timestamp => Ok(ArrowDataType::Timestamp(
+                        TimeUnit::Microsecond,
+                        Some("UTC".into()),
+                    )),
                     PrimitiveType::TimestampNtz => {
                         Ok(ArrowDataType::Timestamp(TimeUnit::Microsecond, None))
                     }
@@ -206,11 +206,19 @@ impl TryFrom<&ArrowDataType> for DataType {
             ArrowDataType::Binary => Ok(DataType::Primitive(PrimitiveType::Binary)),
             ArrowDataType::FixedSizeBinary(_) => Ok(DataType::Primitive(PrimitiveType::Binary)),
             ArrowDataType::LargeBinary => Ok(DataType::Primitive(PrimitiveType::Binary)),
-            ArrowDataType::Decimal128(p, s) => Ok(DataType::decimal(*p, *s)),
+            ArrowDataType::Decimal128(p, s) => {
+                if p > &38 || s > &38 {
+                    return Err(ArrowError::SchemaError(format!(
+                        "Precision and scale must not exceed 38/38 to be represented as Delta type: found {}/{}",
+                        p, s
+                    )));
+                }
+                Ok(DataType::decimal(*p, *s))
+            }
             ArrowDataType::Date32 => Ok(DataType::Primitive(PrimitiveType::Date)),
             ArrowDataType::Date64 => Ok(DataType::Primitive(PrimitiveType::Date)),
             ArrowDataType::Timestamp(TimeUnit::Microsecond, None) => {
-                Ok(DataType::Primitive(PrimitiveType::Timestamp))
+                Ok(DataType::Primitive(PrimitiveType::TimestampNtz))
             }
             ArrowDataType::Timestamp(TimeUnit::Microsecond, Some(tz))
                 if tz.eq_ignore_ascii_case("utc") =>
@@ -237,6 +245,7 @@ impl TryFrom<&ArrowDataType> for DataType {
             ArrowDataType::FixedSizeList(field, _) => Ok(DataType::Array(Box::new(
                 ArrayType::new((*field).data_type().try_into()?, (*field).is_nullable()),
             ))),
+            ArrowDataType::Dictionary(_, value_type) => Ok(value_type.as_ref().try_into()?),
             ArrowDataType::Map(field, _) => {
                 if let ArrowDataType::Struct(struct_fields) = field.data_type() {
                     let key_type = struct_fields[0].data_type().try_into()?;

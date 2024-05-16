@@ -19,6 +19,7 @@ pub type SchemaRef = Arc<StructType>;
 pub enum MetadataValue {
     Number(i32),
     String(String),
+    Boolean(bool),
 }
 
 impl From<String> for MetadataValue {
@@ -36,6 +37,18 @@ impl From<&String> for MetadataValue {
 impl From<i32> for MetadataValue {
     fn from(value: i32) -> Self {
         Self::Number(value)
+    }
+}
+
+impl From<bool> for MetadataValue {
+    fn from(value: bool) -> Self {
+        Self::Boolean(value)
+    }
+}
+
+impl From<serde_json::Value> for MetadataValue {
+    fn from(value: serde_json::Value) -> Self {
+        Self::String(value.to_string())
     }
 }
 
@@ -124,6 +137,19 @@ impl StructField {
     pub const fn metadata(&self) -> &HashMap<String, MetadataValue> {
         &self.metadata
     }
+
+    /// Returns the physical name of the column
+    /// Equal to the field name if column mapping is not enabled on table
+    pub fn physical_name(&self) -> Result<&str, Error> {
+        // Even on mapping type id the physical name should be there for partitions
+        match self.get_config_value(&ColumnMetadataKey::ColumnMappingPhysicalName) {
+            None | Some(MetadataValue::Boolean(_)) => Ok(&self.name),
+            Some(MetadataValue::String(s)) => Ok(s),
+            Some(MetadataValue::Number(_)) => {
+                Err(Error::generic("Unexpected type for physical name"))
+            }
+        }
+    }
 }
 
 /// A struct is used to represent both the top-level schema of the table
@@ -179,6 +205,42 @@ impl StructType {
     }
 
     pub fn fields(&self) -> impl Iterator<Item = &StructField> {
+        self.fields.values()
+    }
+}
+
+impl FromIterator<StructField> for StructType {
+    fn from_iter<T: IntoIterator<Item = StructField>>(iter: T) -> Self {
+        Self {
+            type_name: "struct".into(),
+            fields: iter.into_iter().map(|f| (f.name.clone(), f)).collect(),
+        }
+    }
+}
+
+impl<'a> FromIterator<&'a StructField> for StructType {
+    fn from_iter<T: IntoIterator<Item = &'a StructField>>(iter: T) -> Self {
+        iter.into_iter().cloned().collect()
+    }
+}
+
+impl<const N: usize> From<[StructField; N]> for StructType {
+    fn from(value: [StructField; N]) -> Self {
+        value.into_iter().collect()
+    }
+}
+
+impl<'a, const N: usize> From<[&'a StructField; N]> for StructType {
+    fn from(value: [&'a StructField; N]) -> Self {
+        value.into_iter().cloned().collect()
+    }
+}
+
+impl<'a> IntoIterator for &'a StructType {
+    type Item = &'a StructField;
+    type IntoIter = indexmap::map::Values<'a, std::string::String, StructField>;
+
+    fn into_iter(self) -> Self::IntoIter {
         self.fields.values()
     }
 }
@@ -361,7 +423,12 @@ where
         .ok_or_else(|| {
             serde::de::Error::custom(format!("Invalid scale in decimal: {}", str_value))
         })?;
-
+    if precision > 38 || scale > 38 {
+        return Err(serde::de::Error::custom(format!(
+            "Precision or scale is larger than 38: {}, {}",
+            precision, scale
+        )));
+    }
     Ok((precision, scale))
 }
 
@@ -607,6 +674,35 @@ mod tests {
         assert!(
             matches!(physical_name, MetadataValue::String(name) if *name == "col-5f422f40-de70-45b2-88ab-1d5c90e94db1")
         );
+    }
+
+    #[test]
+    fn test_invalid_decimal() {
+        let data = r#"
+        {
+            "name": "a",
+            "type": "decimal(39, 10)",
+            "nullable": false,
+            "metadata": {}
+        }
+        "#;
+        assert!(matches!(
+            serde_json::from_str::<StructField>(data).unwrap_err(),
+            _
+        ));
+
+        let data = r#"
+        {
+            "name": "a",
+            "type": "decimal(10, 39)",
+            "nullable": false,
+            "metadata": {}
+        }
+        "#;
+        assert!(matches!(
+            serde_json::from_str::<StructField>(data).unwrap_err(),
+            _
+        ));
     }
 
     #[test]

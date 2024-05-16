@@ -104,7 +104,7 @@ pub trait GetData<'a> {
 
 // This is a convenience wrapper over `GetData` to allow code like:
 // `let name: Option<String> = getters[1].get_opt(row_index, "metadata.name")?;`
-pub(crate) trait TypedGetData<'a, T> {
+pub trait TypedGetData<'a, T> {
     fn get_opt(&'a self, row_index: usize, field_name: &str) -> DeltaResult<Option<T>>;
     fn get(&'a self, row_index: usize, field_name: &str) -> DeltaResult<T> {
         let val = self.get_opt(row_index, field_name)?;

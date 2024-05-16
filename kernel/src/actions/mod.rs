@@ -3,17 +3,19 @@
 
 pub mod deletion_vector;
 pub(crate) mod schemas;
-pub(crate) mod visitors;
+pub mod visitors;
+
+use std::collections::HashMap;
+use std::fmt;
 
 use delta_kernel_derive::Schema;
 use lazy_static::lazy_static;
+use serde::{Deserialize, Serialize};
 use visitors::{AddVisitor, MetadataVisitor, ProtocolVisitor};
 
 use self::deletion_vector::DeletionVectorDescriptor;
 use crate::actions::schemas::GetStructField;
-use crate::{schema::StructType, DeltaResult, EngineData};
-
-use std::collections::HashMap;
+use crate::{schema::StructType, DeltaResult, EngineData, Error};
 
 pub(crate) const ADD_NAME: &str = "add";
 pub(crate) const REMOVE_NAME: &str = "remove";
@@ -37,11 +39,13 @@ lazy_static! {
     );
 }
 
-pub(crate) fn get_log_schema() -> &'static StructType {
+#[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
+#[cfg_attr(not(feature = "developer-visibility"), visibility::make(pub(crate)))]
+pub fn get_log_schema() -> &'static StructType {
     &LOG_SCHEMA
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Schema)]
+#[derive(Debug, Clone, PartialEq, Eq, Schema, Serialize, Deserialize)]
 pub struct Format {
     /// Name of the encoding for files in this table
     pub provider: String,
@@ -58,7 +62,8 @@ impl Default for Format {
     }
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq, Schema)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Schema, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Metadata {
     /// Unique identifier for this table
     pub id: String,
@@ -90,7 +95,156 @@ impl Metadata {
     }
 }
 
-#[derive(Default, Debug, Clone, PartialEq, Eq, Schema)]
+/// Features table readers can support as well as let users know
+/// what is supported
+#[derive(Serialize, Deserialize, Debug, Clone, Eq, PartialEq, Hash)]
+#[serde(rename_all = "camelCase")]
+pub enum ReaderFeatures {
+    /// Mapping of one column to another
+    ColumnMapping,
+    /// Deletion vectors for merge, update, delete
+    DeletionVectors,
+    /// timestamps without timezone support
+    #[serde(rename = "timestampNtz")]
+    TimestampWithoutTimezone,
+    /// version 2 of checkpointing
+    V2Checkpoint,
+}
+
+impl TryFrom<String> for ReaderFeatures {
+    type Error = Error;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        value.as_str().try_into()
+    }
+}
+
+impl TryFrom<&str> for ReaderFeatures {
+    type Error = Error;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        let val = match value {
+            "columnMapping" => ReaderFeatures::ColumnMapping,
+            "deletionVectors" => ReaderFeatures::DeletionVectors,
+            "timestampNtz" => ReaderFeatures::TimestampWithoutTimezone,
+            "v2Checkpoint" => ReaderFeatures::V2Checkpoint,
+            _ => return Err(Error::generic(format!("Unknown reader feature: {}", value))),
+        };
+        Ok(val)
+    }
+}
+
+impl AsRef<str> for ReaderFeatures {
+    fn as_ref(&self) -> &str {
+        match self {
+            ReaderFeatures::ColumnMapping => "columnMapping",
+            ReaderFeatures::DeletionVectors => "deletionVectors",
+            ReaderFeatures::TimestampWithoutTimezone => "timestampNtz",
+            ReaderFeatures::V2Checkpoint => "v2Checkpoint",
+        }
+    }
+}
+
+impl fmt::Display for ReaderFeatures {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.as_ref())
+    }
+}
+
+/// Features table writers can support as well as let users know
+/// what is supported
+#[derive(Serialize, Deserialize, Debug, Clone, Eq, PartialEq, Hash)]
+#[serde(rename_all = "camelCase")]
+pub enum WriterFeatures {
+    /// Append Only Tables
+    AppendOnly,
+    /// Table invariants
+    Invariants,
+    /// Check constraints on columns
+    CheckConstraints,
+    /// CDF on a table
+    ChangeDataFeed,
+    /// Columns with generated values
+    GeneratedColumns,
+    /// Mapping of one column to another
+    ColumnMapping,
+    /// ID Columns
+    IdentityColumns,
+    /// Deletion vectors for merge, update, delete
+    DeletionVectors,
+    /// Row tracking on tables
+    RowTracking,
+    /// timestamps without timezone support
+    #[serde(rename = "timestampNtz")]
+    TimestampWithoutTimezone,
+    /// domain specific metadata
+    DomainMetadata,
+    /// version 2 of checkpointing
+    V2Checkpoint,
+    /// Iceberg compatibility support
+    IcebergCompatV1,
+}
+
+impl TryFrom<String> for WriterFeatures {
+    type Error = Error;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        value.as_str().try_into()
+    }
+}
+
+impl TryFrom<&str> for WriterFeatures {
+    type Error = Error;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        let val = match value {
+            "appendOnly" | "delta.appendOnly" => WriterFeatures::AppendOnly,
+            "invariants" | "delta.invariants" => WriterFeatures::Invariants,
+            "checkConstraints" | "delta.checkConstraints" => WriterFeatures::CheckConstraints,
+            "changeDataFeed" | "delta.enableChangeDataFeed" => WriterFeatures::ChangeDataFeed,
+            "generatedColumns" => WriterFeatures::GeneratedColumns,
+            "columnMapping" => WriterFeatures::ColumnMapping,
+            "identityColumns" => WriterFeatures::IdentityColumns,
+            "deletionVectors" | "delta.enableDeletionVectors" => WriterFeatures::DeletionVectors,
+            "rowTracking" | "delta.enableRowTracking" => WriterFeatures::RowTracking,
+            "timestampNtz" => WriterFeatures::TimestampWithoutTimezone,
+            "domainMetadata" => WriterFeatures::DomainMetadata,
+            "v2Checkpoint" => WriterFeatures::V2Checkpoint,
+            "icebergCompatV1" => WriterFeatures::IcebergCompatV1,
+            _ => return Err(Error::generic(format!("Unknown writer feature: {}", value))),
+        };
+        Ok(val)
+    }
+}
+
+impl AsRef<str> for WriterFeatures {
+    fn as_ref(&self) -> &str {
+        match self {
+            WriterFeatures::AppendOnly => "appendOnly",
+            WriterFeatures::Invariants => "invariants",
+            WriterFeatures::CheckConstraints => "checkConstraints",
+            WriterFeatures::ChangeDataFeed => "changeDataFeed",
+            WriterFeatures::GeneratedColumns => "generatedColumns",
+            WriterFeatures::ColumnMapping => "columnMapping",
+            WriterFeatures::IdentityColumns => "identityColumns",
+            WriterFeatures::DeletionVectors => "deletionVectors",
+            WriterFeatures::RowTracking => "rowTracking",
+            WriterFeatures::TimestampWithoutTimezone => "timestampNtz",
+            WriterFeatures::DomainMetadata => "domainMetadata",
+            WriterFeatures::V2Checkpoint => "v2Checkpoint",
+            WriterFeatures::IcebergCompatV1 => "icebergCompatV1",
+        }
+    }
+}
+
+impl fmt::Display for WriterFeatures {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.as_ref())
+    }
+}
+
+#[derive(Default, Debug, Clone, PartialEq, Eq, Schema, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Protocol {
     /// The minimum version of the Delta read protocol that a client must implement
     /// in order to correctly read this table
@@ -100,9 +254,11 @@ pub struct Protocol {
     pub min_writer_version: i32,
     /// A collection of features that a client must implement in order to correctly
     /// read this table (exist only when minReaderVersion is set to 3)
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub reader_features: Option<Vec<String>>,
     /// A collection of features that a client must implement in order to correctly
     /// write this table (exist only when minWriterVersion is set to 7)
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub writer_features: Option<Vec<String>>,
 }
 
@@ -112,9 +268,24 @@ impl Protocol {
         data.extract(get_log_schema().project(&[PROTOCOL_NAME])?, &mut visitor)?;
         Ok(visitor.protocol)
     }
+
+    pub fn has_reader_feature(&self, feature: &ReaderFeatures) -> bool {
+        self.reader_features
+            .as_ref()
+            .map(|features| features.iter().any(|f| f == feature.as_ref()))
+            .unwrap_or_default()
+    }
+
+    pub fn has_writer_feature(&self, feature: &WriterFeatures) -> bool {
+        self.writer_features
+            .as_ref()
+            .map(|features| features.iter().any(|f| f == feature.as_ref()))
+            .unwrap_or_default()
+    }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Schema)]
+#[derive(Debug, Clone, PartialEq, Eq, Schema, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Add {
     /// A relative path to a data file from the root of the table or an absolute path to a file
     /// that should be added to the table. The path is a URI as specified by
@@ -172,44 +343,53 @@ impl Add {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Schema)]
-pub(crate) struct Remove {
+#[derive(Debug, Clone, PartialEq, Eq, Schema, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Remove {
     /// A relative path to a data file from the root of the table or an absolute path to a file
     /// that should be added to the table. The path is a URI as specified by
     /// [RFC 2396 URI Generic Syntax], which needs to be decoded to get the data file path.
     ///
     /// [RFC 2396 URI Generic Syntax]: https://www.ietf.org/rfc/rfc2396.txt
-    pub(crate) path: String,
+    pub path: String,
 
     /// The time this logical file was created, as milliseconds since the epoch.
-    pub(crate) deletion_timestamp: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deletion_timestamp: Option<i64>,
 
     /// When `false` the logical file must already be present in the table or the records
     /// in the added file must be contained in one or more remove actions in the same version.
-    pub(crate) data_change: bool,
+    pub data_change: bool,
 
     /// When true the fields `partition_values`, `size`, and `tags` are present
-    pub(crate) extended_file_metadata: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extended_file_metadata: Option<bool>,
 
     /// A map from partition column to value for this logical file.
-    pub(crate) partition_values: Option<HashMap<String, String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub partition_values: Option<HashMap<String, String>>,
 
     /// The size of this data file in bytes
-    pub(crate) size: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<i64>,
 
     /// Map containing metadata about this logical file.
-    pub(crate) tags: Option<HashMap<String, String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tags: Option<HashMap<String, String>>,
 
     /// Information about deletion vector (DV) associated with this add action
-    pub(crate) deletion_vector: Option<DeletionVectorDescriptor>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deletion_vector: Option<DeletionVectorDescriptor>,
 
     /// Default generated Row ID of the first row in the file. The default generated Row IDs
     /// of the other rows in the file can be reconstructed by adding the physical index of the
     /// row within the file to the base Row ID
-    pub(crate) base_row_id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_row_id: Option<i64>,
 
     /// First commit version in which an add action with the same path was committed to the table.
-    pub(crate) default_row_commit_version: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_row_commit_version: Option<i64>,
 }
 
 impl Remove {
@@ -218,7 +398,8 @@ impl Remove {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Schema)]
+#[derive(Debug, Clone, PartialEq, Eq, Schema, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Transaction {
     /// A unique identifier for the application performing the transaction.
     pub app_id: String,

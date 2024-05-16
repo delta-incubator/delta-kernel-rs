@@ -37,16 +37,16 @@ delta_kernel_derive = { path = "../derive-macros", version = "0.0.1" }
 visibility = "0.1.0"
 
 # Used in default engine
-arrow-array = { version = "^49.0", optional = true }
-arrow-select = { version = "^49.0", optional = true }
-arrow-arith = { version = "^49.0", optional = true }
-arrow-json = { version = "^49.0", optional = true }
-arrow-ord = { version = "^49.0", optional = true }
-arrow-schema = { version = "^49.0", optional = true }
+arrow-array = { version = "^51.0", optional = true }
+arrow-select = { version = "^51.0", optional = true }
+arrow-arith = { version = "^51.0", optional = true }
+arrow-json = { version = "^51.0", optional = true }
+arrow-ord = { version = "^51.0", optional = true }
+arrow-schema = { version = "^51.0", optional = true }
 futures = { version = "0.3", optional = true }
-object_store = { version = "^0.8.0", optional = true }
+object_store = { version = "^0.9.0", optional = true }
 # Used in default and sync engine
-parquet = { version = "^49.0", optional = true }
+parquet = { version = "^51.0", optional = true }
 # Used for fetching direct urls (like pre-signed urls)
 reqwest = { version = "^0.11.0", optional = true }
 
@@ -71,6 +71,7 @@ default-engine = [
   "reqwest",
   "tokio",
 ]
+serde = []
 
 developer-visibility = []
 sync-engine = [
@@ -79,14 +80,14 @@ sync-engine = [
   "arrow-array",
   "arrow-json",
   "arrow-select",
-  "parquet"
+  "parquet",
 ]
 
 [build-dependencies]
 rustc_version = "0.4.0"
 
 [dev-dependencies]
-arrow = { version = "^49.0", features = ["json", "prettyprint"] }
+arrow = { version = "^51.0", features = ["json", "prettyprint"] }
 delta_kernel = { path = ".", features = ["default-engine", "sync-engine"] }
 test-log = { version = "0.2", default-features = false, features = ["trace"] }
 tempfile = "3"
