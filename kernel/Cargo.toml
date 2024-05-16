@@ -70,7 +70,6 @@ default-engine = [
   "parquet/object_store",
   "reqwest",
   "tokio",
-  "tokio/sync"
 ]
 
 developer-visibility = []

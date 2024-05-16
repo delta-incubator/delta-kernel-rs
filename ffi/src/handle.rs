@@ -49,14 +49,16 @@ pub trait CloneHandle {
     type Target: ?Sized;
 
     /// Clones this handle, increasing the underlying object's refcount by one. The new handle is
-    /// independent of the source handle, and should be dropped when it is no longer needed.
+    /// independent of the source handle, and should be dropped when it is no longer needed. This is
+    /// equivalent to calling `clone_as_arc().into_handle()`.
     ///
     /// # Safety
     ///
     /// Caller asserts that the handle is [valid][Handle#Validity].
     unsafe fn clone_handle(&self) -> Self;
 
-    /// Creates a new `Arc<T>` from this handle, increasing the underlying object's refcount by one.
+    /// Creates a new `Arc<T>` from this handle, increasing the underlying object's refcount by
+    /// one. This is equivalent to calling `clone_handle().into_inner()`.
     ///
     /// # Safety
     ///
@@ -445,12 +447,12 @@ mod tests {
     pub struct SharedBar;
 
     pub trait Baz: Send + Sync {
-        fn squawk(&self);
+        fn squawk(&self) -> String;
     }
 
     impl Baz for Bar {
-        fn squawk(&self) {
-            println!("Bar!")
+        fn squawk(&self) -> String {
+            format!("{self:?}")
         }
     }
 
@@ -462,16 +464,21 @@ mod tests {
 
     #[test]
     fn test_handle_use_cases_compile() {
+        let randstr = rand::random::<usize>().to_string();
+        let randint = rand::random::<usize>();
+
         let f = Foo {
-            x: 10,
-            y: "hi".into(),
+            x: randint,
+            y: randstr.clone(),
         };
+        let s = format!("{f:?}");
         let mut h: Handle<MutableFoo> = Box::new(f).into();
         let r = unsafe { h.as_mut() };
-        println!("{r:?}");
+        assert_eq!(format!("{r:?}"), s);
 
-        // error[E0599]: the method `clone_arc` exists for struct `Handle<FooHandle>`, but its trait bounds were not satisfied
-        //let _ = unsafe { h.clone_arc() };
+        // error[E0599]: the method `clone_as_arc` exists for struct `Handle<FooHandle>`,
+        //               but its trait bounds were not satisfied
+        //let _ = unsafe { h.clone_as_arc() };
 
         unsafe { h.drop_handle() };
 
@@ -481,23 +488,46 @@ mod tests {
         // error[E0451]: field `ptr` of struct `Handle` is private
         // let h = Handle::<FooHandle>{ ptr: std::ptr::null() };
 
+        let randstr = rand::random::<usize>().to_string();
+        let randint = rand::random::<usize>();
+
         let b = Bar {
-            x: 10,
-            y: "hi".into(),
+            x: randint,
+            y: randstr.clone(),
         };
+        let s = format!("{b:?}");
         let h: Handle<SharedBar> = Arc::new(b).into();
         let r = unsafe { h.as_ref() };
-        println!("{r:?}");
+        assert_eq!(format!("{r:?}"), s);
 
-        // error[E0599]: the method `as_mut` exists for struct `Handle<BarHandle>`, but its trait bounds were not satisfied
+        // error[E0599]: the method `as_mut` exists for struct `Handle<BarHandle>`,
+        //               but its trait bounds were not satisfied
         // let r = unsafe { h.as_mut() };
 
         let r = unsafe { h.clone_as_arc() };
-        println!("{r:?}");
+        assert_eq!(format!("{r:?}"), s);
         unsafe { h.drop_handle() };
 
         // error[E0382]: borrow of moved value: `h`
         // let _ = unsafe { h.as_ref() };
+
+        let randstr = rand::random::<usize>().to_string();
+        let randint = rand::random::<usize>();
+
+        let b = Bar {
+            x: randint,
+            y: randstr.clone(),
+        };
+        let s = format!("{b:?}");
+        let t: Arc<dyn Baz> = Arc::new(b);
+        let h: Handle<SharedBaz> = t.into();
+        let r = unsafe { h.as_ref() };
+        r.squawk();
+        let r = unsafe { h.clone_as_arc() };
+        r.squawk();
+
+        let h2 = unsafe { h.clone_handle() };
+        unsafe { h.drop_handle() };
 
         let b = Bar {
             x: 10,
@@ -510,18 +540,14 @@ mod tests {
         let r = unsafe { h.as_ref() };
         r.squawk();
 
-        // error[E0599]: the method `clone_arc` exists for struct `Handle<FooHandle>`, but its trait bounds were not satisfied
-        //let _ = unsafe { h.clone_arc() };
+        unsafe { h.drop_handle() };
 
-        let b = Bar {
-            x: 10,
-            y: "hello".into(),
-        };
-        let t: Arc<dyn Baz> = Arc::new(b);
-        let h: Handle<SharedBaz> = t.into();
-        let r = unsafe { h.as_ref() };
-        r.squawk();
-        let r = unsafe { h.clone_as_arc() };
-        r.squawk();
+        // error[E0599]: the method `clone_as_arc` exists for struct `Handle<FooHandle>`,
+        //               but its trait bounds were not satisfied
+        //let _ = unsafe { h.clone_as_arc() };
+
+        let r = unsafe { h2.as_ref() };
+        assert_eq!(r.squawk(), s);
+        unsafe { h2.drop_handle() };
     }
 }

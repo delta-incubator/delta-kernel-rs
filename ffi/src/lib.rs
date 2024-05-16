@@ -16,7 +16,7 @@ use delta_kernel::snapshot::Snapshot;
 use delta_kernel::{DeltaResult, Engine, Error};
 use delta_kernel_ffi_macros::handle_descriptor;
 
-pub mod handle;
+pub(crate) mod handle;
 use handle::Handle;
 
 pub mod scan;

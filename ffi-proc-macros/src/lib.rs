@@ -53,8 +53,11 @@ impl Parse for HandleDescriptorParams {
                     }
                     sized = Some(value.value());
                 }
-                _ => {
-                    return Err(Error::new(ident.span(), "unknown or duplicated field"));
+                field => {
+                    return Err(Error::new(
+                        ident.span(),
+                        format!("unknown or duplicated field `{}`", field),
+                    ));
                 }
             }
         }
@@ -80,8 +83,7 @@ fn bool_to_boolean(b: bool) -> TokenStream2 {
     quote! { crate::handle::#name }
 }
 
-/// Macro for conveniently deriving a
-/// [delta_kernel_ffi::HandleDescriptordelta_kernel_ffi::handle::HandleDescriptor].
+/// Macro for conveniently deriving a `delta_kernel_ffi::handle::HandleDescriptor`.
 #[proc_macro_attribute]
 pub fn handle_descriptor(attr: TokenStream, item: TokenStream) -> TokenStream {
     let descriptor_params = parse_macro_input!(attr as HandleDescriptorParams);
