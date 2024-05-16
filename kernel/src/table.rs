@@ -34,11 +34,7 @@ impl Table {
     /// Create a [`Snapshot`] of the table corresponding to `version`.
     ///
     /// If no version is supplied, a snapshot for the latest version will be created.
-    pub fn snapshot(
-        &self,
-        engine: &dyn Engine,
-        version: Option<Version>,
-    ) -> DeltaResult<Snapshot> {
+    pub fn snapshot(&self, engine: &dyn Engine, version: Option<Version>) -> DeltaResult<Snapshot> {
         Snapshot::try_new(self.location.clone(), engine, version)
     }
 }

@@ -68,11 +68,11 @@ mod private {
     {
         /// Obtains a shared reference to this handle's underlying object.
         pub unsafe fn as_ref(&self) -> &H::Target {
-            H::as_ref(&self.ptr)
+            H::as_ref(self.ptr.cast().as_ptr())
         }
 
         pub unsafe fn into_inner(self) -> H::From {
-            H::into_inner(self.ptr)
+            H::into_inner(self.ptr.cast().as_ptr())
         }
         /// Destroys this handle.
         pub unsafe fn drop_handle(self) {
@@ -87,7 +87,7 @@ mod private {
             + HandleOps<T, True, S, From = Box<T>>,
     {
         fn from(val: Box<T>) -> Handle<H> {
-            let ptr = H::into_handle(val).cast();
+            let ptr = H::into_handle_ptr(val).cast();
             Handle { ptr }
         }
     }
@@ -99,7 +99,7 @@ mod private {
             + HandleOps<T, False, S, From = Arc<T>>,
     {
         fn from(val: Arc<T>) -> Handle<H> {
-            let ptr = H::into_handle(val).cast();
+            let ptr = H::into_handle_ptr(val).cast();
             Handle { ptr }
         }
     }
@@ -112,7 +112,7 @@ mod private {
         type Target = T;
 
         unsafe fn as_mut(&mut self) -> &mut T {
-            H::as_mut(&mut self.ptr)
+            H::as_mut(self.ptr.cast().as_ptr())
         }
     }
 
@@ -124,25 +124,28 @@ mod private {
         type Target = T;
 
         unsafe fn as_arc(&self) -> Arc<T> {
-            H::clone_arc(self.ptr)
+            H::clone_arc(self.ptr.cast().as_ptr())
         }
     }
 
+    // NOTE: The functions in this trait assign arbitrary lifetime 'a to the references they return
+    // and are thus VERY unsafe to call directly. Instead, `Handle` methods call them, and are thus
+    // able to impose at least the semi-sane lifetime of not outliving the `Handle` itself.
     pub trait HandleOps<T: ?Sized, M, S> {
         type From: Sized;
         type Raw: Sized;
 
-        fn into_handle(val: Self::From) -> NonNull<Self::Raw>;
+        fn into_handle_ptr(val: Self::From) -> NonNull<Self::Raw>;
 
-        unsafe fn as_ref(ptr: &NonNull<Self>) -> &T;
+        unsafe fn as_ref<'a>(ptr: *const Self::Raw) -> &'a T;
 
         // WARNING: unimplemented when M=False
-        unsafe fn as_mut(ptr: &mut NonNull<Self>) -> &mut T;
+        unsafe fn as_mut<'a>(ptr: *mut Self::Raw) -> &'a mut T;
 
         // WARNING: unimplemented when M=True
-        unsafe fn clone_arc(ptr: NonNull<Self>) -> Arc<T>;
+        unsafe fn clone_arc(ptr: *const Self::Raw) -> Arc<T>;
 
-        unsafe fn into_inner(ptr: NonNull<Self>) -> Self::From;
+        unsafe fn into_inner(ptr: *mut Self::Raw) -> Self::From;
     }
 
     // Acts like Box<T: Sized> -- can directly use the input Box
@@ -153,24 +156,21 @@ mod private {
         type From = Box<T>;
         type Raw = T;
 
-        fn into_handle(val: Box<T>) -> NonNull<T> {
+        fn into_handle_ptr(val: Box<T>) -> NonNull<T> {
             let val = ManuallyDrop::new(val);
             val.as_ref().into()
         }
-        unsafe fn as_ref(ptr: &NonNull<H>) -> &T {
-            let ptr = ptr.cast();
-            unsafe { ptr.as_ref() }
+        unsafe fn as_ref<'a>(ptr: *const T) -> &'a T {
+            &*ptr
         }
-        unsafe fn as_mut(ptr: &mut NonNull<H>) -> &mut T {
-            let mut ptr = ptr.cast();
-            unsafe { ptr.as_mut() }
+        unsafe fn as_mut<'a>(ptr: *mut T) -> &'a mut T {
+            &mut *ptr
         }
-        unsafe fn clone_arc(_: NonNull<H>) -> Arc<T> {
+        unsafe fn clone_arc(_: *const T) -> Arc<T> {
             unimplemented!()
         }
-        unsafe fn into_inner(ptr: NonNull<H>) -> Box<T> {
-            let ptr = ptr.cast().as_ptr();
-            unsafe { Box::from_raw(ptr) }
+        unsafe fn into_inner(ptr: *mut T) -> Box<T> {
+            Box::from_raw(ptr)
         }
     }
 
@@ -182,25 +182,22 @@ mod private {
         type From = Arc<T>;
         type Raw = T;
 
-        fn into_handle(val: Arc<T>) -> NonNull<T> {
+        fn into_handle_ptr(val: Arc<T>) -> NonNull<T> {
             let val = ManuallyDrop::new(val);
             val.as_ref().into()
         }
-        unsafe fn as_ref(ptr: &NonNull<H>) -> &T {
-            let ptr = ptr.cast();
-            unsafe { ptr.as_ref() }
+        unsafe fn as_ref<'a>(ptr: *const T) -> &'a T {
+            &*ptr
         }
-        unsafe fn as_mut(_: &mut NonNull<H>) -> &mut T {
+        unsafe fn as_mut<'a>(_: *mut T) -> &'a mut T {
             unimplemented!()
         }
-        unsafe fn clone_arc(ptr: NonNull<H>) -> Arc<T> {
-            let ptr = ptr.cast().as_ptr();
-            unsafe { Arc::increment_strong_count(ptr) };
-            unsafe { Arc::from_raw(ptr) }
+        unsafe fn clone_arc(ptr: *const T) -> Arc<T> {
+            Arc::increment_strong_count(ptr);
+            Arc::from_raw(ptr)
         }
-        unsafe fn into_inner(ptr: NonNull<H>) -> Arc<T> {
-            let ptr = ptr.cast().as_ptr();
-            unsafe { Arc::from_raw(ptr) }
+        unsafe fn into_inner(ptr: *mut T) -> Arc<T> {
+            Arc::from_raw(ptr)
         }
     }
 
@@ -213,26 +210,23 @@ mod private {
         type From = Box<T>;
         type Raw = Box<T>;
 
-        fn into_handle(val: Box<T>) -> NonNull<Box<T>> {
+        fn into_handle_ptr(val: Box<T>) -> NonNull<Box<T>> {
             // Double-boxing needed in order to obtain a thin pointer
             let val = ManuallyDrop::new(Box::new(val));
             val.as_ref().into()
         }
-        unsafe fn as_ref(ptr: &NonNull<H>) -> &T {
-            let ptr: NonNull<Box<T>> = ptr.cast();
-            let boxed = unsafe { ptr.as_ref() };
+        unsafe fn as_ref<'a>(ptr: *const Box<T>) -> &'a T {
+            let boxed = unsafe { &*ptr };
             boxed.as_ref()
         }
-        unsafe fn as_mut(ptr: &mut NonNull<H>) -> &mut T {
-            let mut ptr = ptr.cast();
-            let boxed: &mut Box<T> = unsafe { ptr.as_mut() };
+        unsafe fn as_mut<'a>(ptr: *mut Box<T>) -> &'a mut T {
+            let boxed = unsafe { &mut *ptr };
             boxed.as_mut()
         }
-        unsafe fn clone_arc(_: NonNull<H>) -> Arc<T> {
+        unsafe fn clone_arc(_: *const Box<T>) -> Arc<T> {
             unimplemented!()
         }
-        unsafe fn into_inner(ptr: NonNull<H>) -> Box<T> {
-            let ptr = ptr.cast().as_ptr();
+        unsafe fn into_inner(ptr: *mut Box<T>) -> Box<T> {
             let boxed = unsafe { Box::from_raw(ptr) };
             *boxed
         }
@@ -247,26 +241,23 @@ mod private {
         type From = Arc<T>;
         type Raw = Arc<T>;
 
-        fn into_handle(val: Arc<T>) -> NonNull<Arc<T>> {
+        fn into_handle_ptr(val: Arc<T>) -> NonNull<Arc<T>> {
             // Double-boxing needed in order to obtain a thin pointer
             let val = ManuallyDrop::new(Box::new(val));
             val.as_ref().into()
         }
-        unsafe fn as_ref(ptr: &NonNull<H>) -> &T {
-            let ptr: NonNull<Arc<T>> = ptr.cast();
-            let arc = unsafe { ptr.as_ref() };
+        unsafe fn as_ref<'a>(ptr: *const Arc<T>) -> &'a T {
+            let arc = unsafe { &*ptr };
             arc.as_ref()
         }
-        unsafe fn as_mut(_: &mut NonNull<H>) -> &mut T {
+        unsafe fn as_mut<'a>(_: *mut Arc<T>) -> &'a mut T {
             unimplemented!()
         }
-        unsafe fn clone_arc(ptr: NonNull<H>) -> Arc<T> {
-            let ptr = ptr.cast();
-            let arc: &Arc<T> = unsafe { ptr.as_ref() };
+        unsafe fn clone_arc(ptr: *const Arc<T>) -> Arc<T> {
+            let arc = unsafe { &*ptr };
             arc.clone()
         }
-        unsafe fn into_inner(ptr: NonNull<H>) -> Arc<T> {
-            let ptr = ptr.cast().as_ptr();
+        unsafe fn into_inner(ptr: *mut Arc<T>) -> Arc<T> {
             let boxed = unsafe { Box::from_raw(ptr) };
             *boxed
         }
