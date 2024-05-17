@@ -176,7 +176,12 @@ mod tests {
             }
         }
 
-        for x in ["unknown://foo/bar", "file://foo/bar", "s2://foo/bar"] {
+        for x in [
+            "unknown://foo/bar",
+            #[cfg(not(windows))]
+            "file://foo/bar",
+            "s2://foo/bar",
+        ] {
             resolve_uri_type(x).expect_err(format!("Should not have parsed: {x}").as_str());
         }
     }
