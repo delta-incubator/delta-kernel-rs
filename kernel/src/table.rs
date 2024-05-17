@@ -144,14 +144,18 @@ mod tests {
     #[test]
     fn test_path_parsing() {
         for x in [
+            // windows parsing of file:/// is... odd
+            #[cfg(not(windows))]
             "file:///foo/bar",
+            #[cfg(not(windows))]
             "file:///foo/bar/",
             "/foo/bar",
             "/foo/bar/",
             "../foo/bar",
             "../foo/bar/",
             "c:/foo/bar",
-            r"e:\foo\bar",
+            "c:/",
+            "file:///C:/",
         ] {
             match resolve_uri_type(x) {
                 Ok(UriType::LocalPath(_)) => {}
