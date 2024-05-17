@@ -83,6 +83,7 @@ impl Table {
     }
 }
 
+#[derive(Debug)]
 enum UriType {
     LocalPath(PathBuf),
     Url(Url),
@@ -138,5 +139,42 @@ mod tests {
         let table = Table::new(url);
         let snapshot = table.snapshot(&engine, None).unwrap();
         assert_eq!(snapshot.version(), 1)
+    }
+
+    #[test]
+    fn test_path_parsing() {
+        for x in [
+            "file:///foo/bar",
+            "file:///foo/bar/",
+            "/foo/bar",
+            "/foo/bar/",
+            "../foo/bar",
+            "../foo/bar/",
+        ] {
+            match resolve_uri_type(x) {
+                Ok(UriType::LocalPath(_)) => {}
+                x => panic!("Should have parsed as a local path {x:?}"),
+            }
+        }
+
+        for x in [
+            "s3://foo/bar",
+            "s3a://foo/bar",
+            "memory://foo/bar",
+            "gs://foo/bar",
+            "https://foo/bar/",
+        ] {
+            match resolve_uri_type(x) {
+                Ok(UriType::Url(_)) => {}
+                x => panic!("Should have parsed as a url {x:?}"),
+            }
+        }
+
+        for x in ["unknown://foo/bar", "file://foo/bar", "s2://foo/bar"] {
+            let res = resolve_uri_type(x);
+            if res.is_ok() {
+                panic!("Should not have parsed: {x}");
+            }
+        }
     }
 }
