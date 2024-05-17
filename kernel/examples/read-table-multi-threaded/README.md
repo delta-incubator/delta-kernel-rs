@@ -25,7 +25,7 @@ thread has exited (which closes that last sender).
 
 # Examples
 
-Assuming you're running for the directory this README is in:
+Assuming you're running in the directory this README is in:
 
 - Read and print the table in `kernel/tests/data/table-with-dv-small/`:
 

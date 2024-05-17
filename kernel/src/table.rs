@@ -119,7 +119,7 @@ fn resolve_uri_type(table_uri: impl AsRef<str>) -> DeltaResult<UriType> {
             )))
         }
     } else {
-        Ok(UriType::LocalPath(PathBuf::from(table_uri)))
+        Ok(UriType::LocalPath(table_uri.into()))
     }
 }
 
@@ -150,6 +150,8 @@ mod tests {
             "/foo/bar/",
             "../foo/bar",
             "../foo/bar/",
+            "c:/foo/bar",
+            r"e:\foo\bar",
         ] {
             match resolve_uri_type(x) {
                 Ok(UriType::LocalPath(_)) => {}
@@ -171,10 +173,7 @@ mod tests {
         }
 
         for x in ["unknown://foo/bar", "file://foo/bar", "s2://foo/bar"] {
-            let res = resolve_uri_type(x);
-            if res.is_ok() {
-                panic!("Should not have parsed: {x}");
-            }
+            resolve_uri_type(x).expect_err(format!("Should not have parsed: {x}").as_str());
         }
     }
 }
