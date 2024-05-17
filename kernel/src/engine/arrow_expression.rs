@@ -139,6 +139,105 @@ fn column_as_struct<'a>(
         .ok_or(ArrowError::SchemaError(format!("{} is not a struct", name)))
 }
 
+fn make_arrow_error(s: String) -> Error {
+    Error::Arrow(arrow_schema::ArrowError::InvalidArgumentError(s))
+}
+
+/// Ensure the data types of a kernel schema matches those in an arrow array. Returns the correct
+/// type for the passed array, if all checks pass, or a descriptive error if not
+fn ensure_data_types(
+    kernel_type: &DataType,
+    arrow_type: &ArrowDataType,
+) -> DeltaResult<ArrowDataType> {
+    match kernel_type {
+        DataType::Primitive(PrimitiveType::String) => {
+            // strings aren't primitive in arrow
+            match arrow_type {
+                string_type @ ArrowDataType::Utf8 => Ok(string_type.clone()),
+                _ => {
+                    return Err(make_arrow_error(format!(
+                        "Incorrect datatype. Expected Utf8, got {}",
+                        arrow_type
+                    )))
+                }
+            }
+        }
+        DataType::Primitive(_) => {
+            if arrow_type.is_primitive() {
+                Ok(arrow_type.clone())
+            } else {
+                return Err(make_arrow_error(format!(
+                    "Incorrect datatype. Expected primitive, got {}",
+                    arrow_type
+                )));
+            }
+        }
+        DataType::Array(inner_type) => match arrow_type {
+            list_type @ ArrowDataType::List(arrow_list_type) => {
+                let kernel_array_type = &inner_type.element_type;
+                let arrow_list_type = arrow_list_type.data_type();
+                let _ = ensure_data_types(kernel_array_type, arrow_list_type)?;
+                Ok(list_type.clone())
+            }
+            _ => {
+                return Err(make_arrow_error(format!(
+                    "Incorrect datatype. Expected List, got {}",
+                    arrow_type
+                )))
+            }
+        },
+        DataType::Map(kernel_map_type) => match arrow_type {
+            map_type @ ArrowDataType::Map(arrow_map_type, _) => {
+                if let ArrowDataType::Struct(fields) = arrow_map_type.data_type() {
+                    let mut fiter = fields.iter();
+                    if let Some(key_type) = fiter.next() {
+                        let _ = ensure_data_types(&kernel_map_type.key_type, key_type.data_type())?;
+                    } else {
+                        return Err(make_arrow_error(
+                            "Arrow map struct didn't have a key type".to_string(),
+                        ));
+                    }
+                    if let Some(value_type) = fiter.next() {
+                        let _ =
+                            ensure_data_types(&kernel_map_type.value_type, value_type.data_type())?;
+                    } else {
+                        return Err(make_arrow_error(
+                            "Arrow map struct didn't have a value type".to_string(),
+                        ));
+                    }
+                } else {
+                    return Err(make_arrow_error(
+                        "Arrow map type wasn't a struct.".to_string(),
+                    ));
+                }
+                Ok(map_type.clone())
+            }
+            _ => {
+                return Err(Error::Arrow(
+                    arrow_schema::ArrowError::InvalidArgumentError(format!(
+                        "Incorrect datatype. Expected Map, got {}",
+                        arrow_type
+                    )),
+                ))
+            }
+        },
+        DataType::Struct(kernel_fields) => match arrow_type {
+            struct_type @ ArrowDataType::Struct(arrow_fields) => {
+                for (kernel_field, arrow_field) in kernel_fields.fields().zip(arrow_fields.iter()) {
+                    let _ = ensure_data_types(&kernel_field.data_type, arrow_field.data_type())?;
+                }
+                Ok(struct_type.clone())
+            }
+            _ => {
+                return Err(make_arrow_error(format!(
+                    "Incorrect datatype. Expected Struct, got {}",
+                    arrow_type
+                )))
+            }
+        },
+    }
+}
+
 fn evaluate_expression(
     expression: &Expression,
     batch: &RecordBatch,
@@ -164,13 +263,24 @@ fn evaluate_expression(
             }
         }
         (Struct(fields), Some(DataType::Struct(schema))) => {
-            let output_schema: ArrowSchema = schema.as_ref().try_into()?;
             let columns = fields
                 .iter()
                 .zip(schema.fields())
                 .map(|(expr, field)| evaluate_expression(expr, batch, Some(field.data_type())));
-            let result =
-                StructArray::try_new(output_schema.fields().clone(), columns.try_collect()?, None)?;
+            let output_cols: Vec<Arc<dyn Array>> = columns.try_collect()?;
+            let output_fields: Vec<ArrowField> = output_cols
+                .iter()
+                .zip(schema.fields())
+                .map(|(array, input_field)| {
+                    let output_data_type =
+                        ensure_data_types(input_field.data_type(), array.data_type());
+                    // use a `map` here so rustc doesn't have to infer the error type
+                    output_data_type.map(|output_type| {
+                        ArrowField::new(input_field.name(), output_type, array.is_nullable())
+                    })
+                })
+                .try_collect()?;
+            let result = StructArray::try_new(output_fields.into(), output_cols, None)?;
             Ok(Arc::new(result))
         }
         (Struct(_), _) => Err(Error::generic(
