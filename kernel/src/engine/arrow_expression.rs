@@ -160,6 +160,16 @@ fn ensure_data_types(
                 ))),
             }
         }
+        DataType::Primitive(PrimitiveType::Binary) => {
+            // binary isn't primitive in arrow
+            match arrow_type {
+                string_type @ ArrowDataType::Binary => Ok(string_type.clone()),
+                _ => Err(make_arrow_error(format!(
+                    "Incorrect datatype. Expected Binary, got {}",
+                    arrow_type
+                ))),
+            }
+        }
         DataType::Primitive(_) => {
             if arrow_type.is_primitive() {
                 Ok(arrow_type.clone())
