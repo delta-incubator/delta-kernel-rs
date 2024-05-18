@@ -143,100 +143,75 @@ fn make_arrow_error(s: String) -> Error {
     Error::Arrow(arrow_schema::ArrowError::InvalidArgumentError(s))
 }
 
-/// Ensure the data types of a kernel schema matches those in an arrow array. Returns the correct
-/// type for the passed array, if all checks pass, or a descriptive error if not
+/// Ensure a kernel data type matches an arrow data type. This only ensures that the actually "type"
+/// is the same, but does so recursively into structs, and ensures lists and maps have the correct
+/// associated types as well. This returns an `Ok` of the arrow type that can be used if the types
+/// match, or an error if the types do not match.
 fn ensure_data_types(
     kernel_type: &DataType,
     arrow_type: &ArrowDataType,
 ) -> DeltaResult<ArrowDataType> {
-    match kernel_type {
-        DataType::Primitive(PrimitiveType::String) => {
+    match (kernel_type, arrow_type) {
+        (DataType::Primitive(_), _) if arrow_type.is_primitive() => Ok(arrow_type.clone()),
+        (DataType::Primitive(PrimitiveType::Boolean), ArrowDataType::Boolean) => {
+            // bools aren't primitive in arrow
+            Ok(arrow_type.clone())
+        }
+        (DataType::Primitive(PrimitiveType::String), ArrowDataType::Utf8) => {
             // strings aren't primitive in arrow
-            match arrow_type {
-                string_type @ ArrowDataType::Utf8 => Ok(string_type.clone()),
-                _ => Err(make_arrow_error(format!(
-                    "Incorrect datatype. Expected Utf8, got {}",
-                    arrow_type
-                ))),
-            }
+            Ok(arrow_type.clone())
         }
-        DataType::Primitive(PrimitiveType::Binary) => {
+        (DataType::Primitive(PrimitiveType::Binary), ArrowDataType::Binary) => {
             // binary isn't primitive in arrow
-            match arrow_type {
-                string_type @ ArrowDataType::Binary => Ok(string_type.clone()),
-                _ => Err(make_arrow_error(format!(
-                    "Incorrect datatype. Expected Binary, got {}",
-                    arrow_type
-                ))),
-            }
+            Ok(arrow_type.clone())
         }
-        DataType::Primitive(_) => {
-            if arrow_type.is_primitive() {
-                Ok(arrow_type.clone())
-            } else {
-                Err(make_arrow_error(format!(
-                    "Incorrect datatype. Expected primitive, got {}",
-                    arrow_type
-                )))
-            }
+        (
+            DataType::Primitive(PrimitiveType::Decimal(kernel_prec, kernel_scale)),
+            ArrowDataType::Decimal128(arrow_prec, arrow_scale),
+        ) if arrow_prec == kernel_prec && arrow_scale == kernel_scale => {
+            // decimal isn't primitive in arrow
+            Ok(arrow_type.clone())
         }
-        DataType::Array(inner_type) => match arrow_type {
-            list_type @ ArrowDataType::List(arrow_list_type) => {
-                let kernel_array_type = &inner_type.element_type;
-                let arrow_list_type = arrow_list_type.data_type();
-                let _ = ensure_data_types(kernel_array_type, arrow_list_type)?;
-                Ok(list_type.clone())
-            }
-            _ => Err(make_arrow_error(format!(
-                "Incorrect datatype. Expected List, got {}",
-                arrow_type
-            ))),
-        },
-        DataType::Map(kernel_map_type) => match arrow_type {
-            map_type @ ArrowDataType::Map(arrow_map_type, _) => {
-                if let ArrowDataType::Struct(fields) = arrow_map_type.data_type() {
-                    let mut fiter = fields.iter();
-                    if let Some(key_type) = fiter.next() {
-                        let _ = ensure_data_types(&kernel_map_type.key_type, key_type.data_type())?;
-                    } else {
-                        return Err(make_arrow_error(
-                            "Arrow map struct didn't have a key type".to_string(),
-                        ));
-                    }
-                    if let Some(value_type) = fiter.next() {
-                        let _ =
-                            ensure_data_types(&kernel_map_type.value_type, value_type.data_type())?;
-                    } else {
-                        return Err(make_arrow_error(
-                            "Arrow map struct didn't have a value type".to_string(),
-                        ));
-                    }
+        (DataType::Array(inner_type), ArrowDataType::List(arrow_list_type)) => {
+            let kernel_array_type = &inner_type.element_type;
+            let arrow_list_type = arrow_list_type.data_type();
+            let _ = ensure_data_types(kernel_array_type, arrow_list_type)?;
+            Ok(arrow_type.clone())
+        }
+        (DataType::Map(kernel_map_type), ArrowDataType::Map(arrow_map_type, _)) => {
+            if let ArrowDataType::Struct(fields) = arrow_map_type.data_type() {
+                let mut fiter = fields.iter();
+                if let Some(key_type) = fiter.next() {
+                    let _ = ensure_data_types(&kernel_map_type.key_type, key_type.data_type())?;
                 } else {
                     return Err(make_arrow_error(
-                        "Arrow map type wasn't a struct.".to_string(),
+                        "Arrow map struct didn't have a key type".to_string(),
                     ));
                 }
-                Ok(map_type.clone())
-            }
-            _ => Err(Error::Arrow(
-                arrow_schema::ArrowError::InvalidArgumentError(format!(
-                    "Incorrect datatype. Expected Map, got {}",
-                    arrow_type
-                )),
-            )),
-        },
-        DataType::Struct(kernel_fields) => match arrow_type {
-            struct_type @ ArrowDataType::Struct(arrow_fields) => {
-                for (kernel_field, arrow_field) in kernel_fields.fields().zip(arrow_fields.iter()) {
-                    let _ = ensure_data_types(&kernel_field.data_type, arrow_field.data_type())?;
+                if let Some(value_type) = fiter.next() {
+                    let _ = ensure_data_types(&kernel_map_type.value_type, value_type.data_type())?;
+                } else {
+                    return Err(make_arrow_error(
+                        "Arrow map struct didn't have a value type".to_string(),
+                    ));
                 }
-                Ok(struct_type.clone())
+            } else {
+                return Err(make_arrow_error(
+                    "Arrow map type wasn't a struct.".to_string(),
+                ));
             }
-            _ => Err(make_arrow_error(format!(
-                "Incorrect datatype. Expected Struct, got {}",
-                arrow_type
-            ))),
-        },
+            Ok(arrow_type.clone())
+        }
+        (DataType::Struct(kernel_fields), ArrowDataType::Struct(arrow_fields)) => {
+            for (kernel_field, arrow_field) in kernel_fields.fields().zip(arrow_fields.iter()) {
+                let _ = ensure_data_types(&kernel_field.data_type, arrow_field.data_type())?;
+            }
+            Ok(arrow_type.clone())
+        }
+        _ => Err(make_arrow_error(format!(
+            "Incorrect datatype. Expected {}, got {}",
+            kernel_type, arrow_type
+        ))),
     }
 }
 
