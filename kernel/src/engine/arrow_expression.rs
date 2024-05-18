@@ -195,12 +195,12 @@ fn ensure_data_types(
                         "Arrow map struct didn't have a value type".to_string(),
                     ));
                 }
+                Ok(arrow_type.clone())
             } else {
-                return Err(make_arrow_error(
+                Err(make_arrow_error(
                     "Arrow map type wasn't a struct.".to_string(),
-                ));
+                ))
             }
-            Ok(arrow_type.clone())
         }
         (DataType::Struct(kernel_fields), ArrowDataType::Struct(arrow_fields)) => {
             for (kernel_field, arrow_field) in kernel_fields.fields().zip(arrow_fields.iter()) {
