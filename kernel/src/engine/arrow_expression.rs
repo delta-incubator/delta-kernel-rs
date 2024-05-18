@@ -154,22 +154,20 @@ fn ensure_data_types(
             // strings aren't primitive in arrow
             match arrow_type {
                 string_type @ ArrowDataType::Utf8 => Ok(string_type.clone()),
-                _ => {
-                    return Err(make_arrow_error(format!(
-                        "Incorrect datatype. Expected Utf8, got {}",
-                        arrow_type
-                    )))
-                }
+                _ => Err(make_arrow_error(format!(
+                    "Incorrect datatype. Expected Utf8, got {}",
+                    arrow_type
+                ))),
             }
         }
         DataType::Primitive(_) => {
             if arrow_type.is_primitive() {
                 Ok(arrow_type.clone())
             } else {
-                return Err(make_arrow_error(format!(
+                Err(make_arrow_error(format!(
                     "Incorrect datatype. Expected primitive, got {}",
                     arrow_type
-                )));
+                )))
             }
         }
         DataType::Array(inner_type) => match arrow_type {
@@ -179,12 +177,10 @@ fn ensure_data_types(
                 let _ = ensure_data_types(kernel_array_type, arrow_list_type)?;
                 Ok(list_type.clone())
             }
-            _ => {
-                return Err(make_arrow_error(format!(
-                    "Incorrect datatype. Expected List, got {}",
-                    arrow_type
-                )))
-            }
+            _ => Err(make_arrow_error(format!(
+                "Incorrect datatype. Expected List, got {}",
+                arrow_type
+            ))),
         },
         DataType::Map(kernel_map_type) => match arrow_type {
             map_type @ ArrowDataType::Map(arrow_map_type, _) => {
@@ -212,14 +208,12 @@ fn ensure_data_types(
                 }
                 Ok(map_type.clone())
             }
-            _ => {
-                return Err(Error::Arrow(
-                    arrow_schema::ArrowError::InvalidArgumentError(format!(
-                        "Incorrect datatype. Expected Map, got {}",
-                        arrow_type
-                    )),
-                ))
-            }
+            _ => Err(Error::Arrow(
+                arrow_schema::ArrowError::InvalidArgumentError(format!(
+                    "Incorrect datatype. Expected Map, got {}",
+                    arrow_type
+                )),
+            )),
         },
         DataType::Struct(kernel_fields) => match arrow_type {
             struct_type @ ArrowDataType::Struct(arrow_fields) => {
@@ -228,12 +222,10 @@ fn ensure_data_types(
                 }
                 Ok(struct_type.clone())
             }
-            _ => {
-                return Err(make_arrow_error(format!(
-                    "Incorrect datatype. Expected Struct, got {}",
-                    arrow_type
-                )))
-            }
+            _ => Err(make_arrow_error(format!(
+                "Incorrect datatype. Expected Struct, got {}",
+                arrow_type
+            ))),
         },
     }
 }
