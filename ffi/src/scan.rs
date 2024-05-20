@@ -196,7 +196,7 @@ impl Drop for KernelScanDataIterator {
 ///
 /// # Safety
 ///
-/// Engine is responsible for passing a valid [`SharedExternEngine`] and [`Scan`]
+/// Engine is responsible for passing a valid [`SharedExternEngine`] and [`SharedScan`]
 #[no_mangle]
 pub unsafe extern "C" fn kernel_scan_data_init(
     engine: Handle<SharedExternEngine>,
@@ -252,8 +252,6 @@ fn kernel_scan_data_next_impl(
         .map_err(|_| Error::generic("poisoned mutex"))?;
     if let Some((data, sel_vec)) = data.next().transpose()? {
         let bool_slice = KernelBoolSlice::from(sel_vec);
-        // TODO(frj): We don't need a handle here, we're not passing ownership to the engine. We
-        // just need a way to represent unsized types.
         (engine_visitor)(engine_context, data.into(), bool_slice);
         Ok(true)
     } else {
