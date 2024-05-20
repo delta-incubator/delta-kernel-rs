@@ -107,6 +107,7 @@ impl TryFrom<&DataType> for ArrowDataType {
                         // timezone. Stored as 4 bytes integer representing days since 1970-01-01
                         Ok(ArrowDataType::Date32)
                     }
+                    // TODO: https://github.com/delta-io/delta/issues/643
                     PrimitiveType::Timestamp => Ok(ArrowDataType::Timestamp(
                         TimeUnit::Microsecond,
                         Some("UTC".into()),

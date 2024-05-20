@@ -672,10 +672,7 @@ mod tests {
             "metadata": {}
         }
         "#;
-        assert!(matches!(
-            serde_json::from_str::<StructField>(data).unwrap_err(),
-            _
-        ));
+        assert!(serde_json::from_str::<StructField>(data).is_err());
 
         let data = r#"
         {
@@ -685,9 +682,6 @@ mod tests {
             "metadata": {}
         }
         "#;
-        assert!(matches!(
-            serde_json::from_str::<StructField>(data).unwrap_err(),
-            _
-        ));
+        assert!(serde_json::from_str::<StructField>(data).is_err());
     }
 }
