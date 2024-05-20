@@ -531,12 +531,9 @@ mod tests {
         // let h: Handle<SharedNotSync> = Arc::new(s).into();
         // unsafe { h.drop_handle() };
 
-        let randstr = rand::random::<usize>().to_string();
-        let randint = rand::random::<usize>();
-
         let f = Foo {
-            x: randint,
-            y: randstr.clone(),
+            x: rand::random::<usize>(),
+            y: rand::random::<usize>().to_string(),
         };
         let s = format!("{f:?}");
         let mut h: Handle<MutableFoo> = Box::new(f).into();
@@ -555,12 +552,9 @@ mod tests {
         // error[E0451]: field `ptr` of struct `Handle` is private
         // let h = Handle::<FooHandle>{ ptr: std::ptr::null() };
 
-        let randstr = rand::random::<usize>().to_string();
-        let randint = rand::random::<usize>();
-
         let b = Bar {
-            x: randint,
-            y: randstr.clone(),
+            x: rand::random::<usize>(),
+            y: rand::random::<usize>().to_string(),
         };
         let s = format!("{b:?}");
         let h: Handle<SharedBar> = Arc::new(b).into();
@@ -578,6 +572,22 @@ mod tests {
         // error[E0382]: borrow of moved value: `h`
         // let _ = unsafe { h.as_ref() };
 
+        let b = Bar {
+            x: rand::random::<usize>(),
+            y: rand::random::<usize>().to_string(),
+        };
+        let s = b.squawk();
+        let t: Arc<dyn Baz> = Arc::new(b);
+        let h: Handle<SharedBaz> = t.into();
+        let r = unsafe { h.as_ref() };
+        assert_eq!(s, r.squawk());
+        let r = unsafe { h.clone_as_arc() };
+        assert_eq!(s, r.squawk());
+
+        let h2 = unsafe { h.clone_handle() };
+        let s2 = s;
+        unsafe { h.drop_handle() };
+
         let randstr = rand::random::<usize>().to_string();
         let randint = rand::random::<usize>();
 
@@ -585,27 +595,13 @@ mod tests {
             x: randint,
             y: randstr.clone(),
         };
-        let s = format!("{b:?}");
-        let t: Arc<dyn Baz> = Arc::new(b);
-        let h: Handle<SharedBaz> = t.into();
-        let r = unsafe { h.as_ref() };
-        r.squawk();
-        let r = unsafe { h.clone_as_arc() };
-        r.squawk();
-
-        let h2 = unsafe { h.clone_handle() };
-        unsafe { h.drop_handle() };
-
-        let b = Bar {
-            x: 10,
-            y: "hello".into(),
-        };
+        let s = b.squawk();
         let t: Box<dyn Baz> = Box::new(b);
         let mut h: Handle<MutableBaz> = t.into();
         let r = unsafe { h.as_mut() };
-        r.squawk();
+        assert_eq!(s, r.squawk());
         let r = unsafe { h.as_ref() };
-        r.squawk();
+        assert_eq!(s, r.squawk());
 
         unsafe { h.drop_handle() };
 
@@ -614,7 +610,7 @@ mod tests {
         //let _ = unsafe { h.clone_as_arc() };
 
         let r = unsafe { h2.as_ref() };
-        assert_eq!(r.squawk(), s);
+        assert_eq!(r.squawk(), s2);
         unsafe { h2.drop_handle() };
     }
 }
