@@ -121,9 +121,10 @@ pub struct ScanResult {
     pub mask: Option<Vec<bool>>,
 }
 
-/// Scan uses this to set up what kinds of columns it is scanning. For Selected and Partition, the
-/// index into the logical_schema for the scan is stored, so we can get the name and data-type out
-/// later
+/// Scan uses this to set up what kinds of columns it is scanning. For `Selected` we just store the
+/// name of the column, as that's all that's needed during the actual query. For `Partition` we
+/// store an index into the logical schema for this query since later we need the data type as well
+/// to materialize the partition column.
 pub enum ColumnType {
     // A column, selected from the data, as is
     Selected(String),
