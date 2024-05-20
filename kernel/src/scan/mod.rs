@@ -393,9 +393,9 @@ fn get_state_info(
         .enumerate()
         .map(|(index, logical_field)| {
             if partition_columns.contains(logical_field.name()) {
-                // todo: this is slow(ish)
-                // Store the raw field, we will turn it into an expression in the inner loop
-                // since the expression could be different for each add file
+                // Store the index into the schema for this field. When we turn it into an
+                // expression in the inner loop, we will index into the schema and get the name and
+                // data type, which we need to properly materialize the column.
                 have_partition_cols = true;
                 Ok::<ColumnType, Error>(ColumnType::Partition(index))
             } else {
