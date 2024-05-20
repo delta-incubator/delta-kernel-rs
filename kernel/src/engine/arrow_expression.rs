@@ -203,10 +203,17 @@ fn ensure_data_types(
             }
         }
         (DataType::Struct(kernel_fields), ArrowDataType::Struct(arrow_fields)) => {
-            for (kernel_field, arrow_field) in kernel_fields.fields().zip(arrow_fields.iter()) {
-                let _ = ensure_data_types(&kernel_field.data_type, arrow_field.data_type())?;
+            if kernel_fields.fields.len() == arrow_fields.len() {
+                for (kernel_field, arrow_field) in kernel_fields.fields().zip(arrow_fields.iter()) {
+                    let _ = ensure_data_types(&kernel_field.data_type, arrow_field.data_type())?;
+                }
+                Ok(arrow_type.clone())
+            } else {
+                Err(make_arrow_error(format!(
+                    "Struct types have different numbers of fields. Expected {}, got {}",
+                    kernel_fields.fields.len(), arrow_fields.len()
+                )))
             }
-            Ok(arrow_type.clone())
         }
         _ => Err(make_arrow_error(format!(
             "Incorrect datatype. Expected {}, got {}",
