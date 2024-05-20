@@ -8,6 +8,7 @@ use indexmap::IndexMap;
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 
+use crate::column_mapping::ColumnMappingMode;
 use crate::utils::require;
 use crate::{DeltaResult, Error};
 
@@ -103,6 +104,30 @@ impl StructField {
 
     pub fn get_config_value(&self, key: &ColumnMetadataKey) -> Option<&MetadataValue> {
         self.metadata.get(key.as_ref())
+    }
+
+    /// Get the physical name for this field as it should be read from parquet, based on the
+    /// specified column mapping mode.
+    pub fn physical_name(&self, mapping_mode: &ColumnMappingMode) -> DeltaResult<&str> {
+        let name_mapped_name = self
+            .metadata
+            .get(ColumnMetadataKey::ColumnMappingPhysicalName.as_ref());
+        match (mapping_mode, name_mapped_name) {
+            (ColumnMappingMode::None, _) => Ok(self.name.as_str()),
+            (ColumnMappingMode::Name, None) => {
+                Err(Error::MissingData(
+                    format!("No {} key found in field metadata",
+                            ColumnMetadataKey::ColumnMappingPhysicalName.as_ref())
+                ))
+            }
+            (ColumnMappingMode::Name, Some(val)) => match val {
+                MetadataValue::Number(_) => {
+                    Err(Error::generic("{ColumnMetadataKey::ColumnMappingPhysicalName} must be a string in name mapping mode"))
+                }
+                MetadataValue::String(name) => Ok(name),
+            }
+            (ColumnMappingMode::Id, _) => Err(Error::generic("Don't support id column mapping yet")),
+        }
     }
 
     #[inline]

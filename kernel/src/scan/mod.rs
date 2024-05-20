@@ -10,7 +10,7 @@ use self::log_replay::{log_replay_iter, scan_action_iter};
 use self::state::GlobalScanState;
 use crate::actions::deletion_vector::{treemap_to_bools, DeletionVectorDescriptor};
 use crate::actions::{get_log_schema, Add, ADD_NAME, REMOVE_NAME};
-use crate::column_mapping::{get_name_mapped_physical_field, ColumnMappingMode};
+use crate::column_mapping::ColumnMappingMode;
 use crate::expressions::{Expression, Scalar};
 use crate::schema::{DataType, Schema, SchemaRef, StructField, StructType};
 use crate::snapshot::Snapshot;
@@ -126,9 +126,7 @@ pub struct ScanResult {
 /// later
 pub enum ColumnType {
     // A column, selected from the data, as is
-    Selected(StructField),
-    // A column, selected from the data, that should have its name mapped
-    NameMapped(String),
+    Selected(String),
     // A partition column that needs to be added back in
     Partition(usize),
 }
@@ -280,8 +278,7 @@ impl Scan {
                             )?;
                             Ok::<Expression, Error>(Expression::Literal(value_expression))
                         }
-                        ColumnType::Selected(field) => Ok(Expression::column(field.name())),
-                        ColumnType::NameMapped(name) => Ok(Expression::column(name)),
+                        ColumnType::Selected(field_name) => Ok(Expression::column(field_name)),
                     })
                     .try_collect()?;
                 Some(Expression::Struct(all_fields))
@@ -404,20 +401,19 @@ fn get_state_info(
             } else {
                 // Add to read schema, store field so we can build a `Column` expression later
                 // if needed (i.e. if we have partition columns)
-
                 match column_mapping_mode {
                     ColumnMappingMode::Id => unimplemented!("Don't support id mapping yet"),
                     ColumnMappingMode::Name => {
                         // this is the value we'll look for in the parquet, so we need to pass the
                         // physical name
-                        let (physical_field, physical_name) =
-                            get_name_mapped_physical_field(field).unwrap();
+                        let physical_name = field.physical_name(column_mapping_mode).unwrap();
+                        let physical_field = StructField::new(physical_name, field.data_type().clone(), field.is_nullable());
                         read_fields.push(physical_field);
-                        ColumnType::NameMapped(physical_name.to_string())
+                        ColumnType::Selected(physical_name.to_string())
                     }
                     ColumnMappingMode::None => {
                         read_fields.push(field.clone());
-                        ColumnType::Selected(field.clone())
+                        ColumnType::Selected(field.name().to_string())
                     }
                 }
             }
@@ -466,8 +462,7 @@ pub fn transform_to_logical(
                     )?;
                     Ok::<Expression, Error>(Expression::Literal(value_expression))
                 }
-                ColumnType::NameMapped(name) => Ok(Expression::column(name)),
-                ColumnType::Selected(field) => Ok(Expression::column(field.name())),
+                ColumnType::Selected(field_name) => Ok(Expression::column(field_name)),
             })
             .try_collect()?;
         let read_expression = Expression::Struct(all_fields);
