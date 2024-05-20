@@ -272,7 +272,9 @@ impl Scan {
                     .iter()
                     .map(|field| match field {
                         ColumnType::Partition(field_idx) => {
-                            let field = self.logical_schema.fields.get_index(*field_idx).unwrap().1;
+                            let field = self.logical_schema.fields.get_index(*field_idx).ok_or_else(|| {
+                                Error::generic("logical schema did not contain expected field, can't execute scan")
+                            })?.1;
                             let value_expression = parse_partition_value(
                                 add.partition_values.get(field.name()),
                                 field.data_type(),
@@ -448,8 +450,9 @@ pub fn transform_to_logical(
                         .logical_schema
                         .fields
                         .get_index(*field_idx)
-                        .unwrap()
-                        .1;
+                        .ok_or_else(|| {
+                            Error::generic("logical schema did not contain expected field, can't transform data")
+                        })?.1;
                     let value_expression = parse_partition_value(
                         partition_values.get(field.name()),
                         field.data_type(),
