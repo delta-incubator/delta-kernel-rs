@@ -9,7 +9,7 @@ void visit_callback(void* engine_context, KernelStringSlice path, long long size
 }
 
 
-void visit_data(void *engine_context, EngineDataHandle *engine_data, const KernelBoolSlice selection_vec) {
+void visit_data(void *engine_context, EngineData *engine_data, const KernelBoolSlice selection_vec) {
   visit_scan_data(engine_data, selection_vec, engine_context, visit_callback);
 }
 
@@ -44,22 +44,22 @@ int main(int argc, char* argv[]) {
 
   uint64_t v = version(snapshot);
   printf("version: %" PRIu64 "\n", v);
-  ExternResultHandleScanHandle scan_res = scan(snapshot, engine, NULL);
-  if (scan_res.tag != OkHandleScanHandle) {
+  ExternResultHandleSharedScan scan_res = scan(snapshot, engine, NULL);
+  if (scan_res.tag != OkHandleSharedScan) {
     printf("Failed to create scan\n");
     return -1;
   }
 
-  ScanHandle *scan = scan_res.ok;
+  SharedScan *scan = scan_res.ok;
 
-  ExternResultHandleKernelScanDataIteratorHandle data_iter_res =
+  ExternResultHandleSharedScanDataIterator data_iter_res =
     kernel_scan_data_init(engine, scan);
-  if (data_iter_res.tag != OkHandleKernelScanDataIteratorHandle) {
+  if (data_iter_res.tag != OkHandleSharedScanDataIterator) {
     printf("Failed to construct scan data iterator\n");
     return -1;
   }
 
-  KernelScanDataIteratorHandle *data_iter = data_iter_res.ok;
+  SharedScanDataIterator *data_iter = data_iter_res.ok;
 
   // iterate scan files
   for (;;) {
@@ -72,6 +72,7 @@ int main(int argc, char* argv[]) {
     }
   }
 
+  drop_scan(scan);
   drop_snapshot(snapshot);
   drop_engine(engine);
 

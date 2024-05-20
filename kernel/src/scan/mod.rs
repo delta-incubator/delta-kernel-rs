@@ -151,7 +151,7 @@ impl Scan {
     pub(crate) fn files(
         &self,
         engine: &dyn Engine,
-    ) -> DeltaResult<impl Iterator<Item = DeltaResult<Add>> + Send + Sync> {
+    ) -> DeltaResult<impl Iterator<Item = DeltaResult<Add>> + Send> {
         let commit_read_schema = get_log_schema().project(&[ADD_NAME, REMOVE_NAME])?;
         let checkpoint_read_schema = get_log_schema().project(&[ADD_NAME])?;
 

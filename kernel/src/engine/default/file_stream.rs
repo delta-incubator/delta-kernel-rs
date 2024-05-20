@@ -13,7 +13,7 @@ use futures::FutureExt;
 
 use super::executor::TaskExecutor;
 use crate::engine::arrow_data::ArrowEngineData;
-use crate::{DeltaResult, Error, FileDataReadResultIterator, FileMeta};
+use crate::{DeltaResult, FileDataReadResultIterator, FileMeta};
 
 /// A fallible future that resolves to a stream of [`RecordBatch`]
 /// cbindgen:ignore
@@ -140,14 +140,10 @@ impl FileStream {
         // underlying stream. This should not be a bottleneck because the stream will immediately
         // return an item (if ready) and would anyway block if not ready. Additionally, each
         // iterator element corresponds to a file access whose cost dwarfs any mutex overhead.
-        let it = receiver
+        let mut it = receiver
             .into_iter()
             .map(|rbr| rbr.map(|rb| Box::new(ArrowEngineData::new(rb)) as _));
-        let it = std::sync::Mutex::new(it);
-        let it = std::iter::from_fn(move || match it.lock() {
-            Ok(mut i) => i.next(),
-            Err(_) => Some(Err(Error::generic("Poisoned mutex"))),
-        });
+        let it = std::iter::from_fn(move || it.next());
         Ok(Box::new(it))
     }
 
