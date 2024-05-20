@@ -92,7 +92,7 @@ impl ScanBuilder {
             logical_schema.as_ref(),
             &self.snapshot.metadata().partition_columns,
             &column_mapping_mode,
-        );
+        )?;
         let physical_schema = Arc::new(StructType::new(read_fields));
         Ok(Scan {
             snapshot: self.snapshot,
@@ -229,7 +229,7 @@ impl Scan {
             partition_columns: self.snapshot.metadata().partition_columns.clone(),
             logical_schema: self.logical_schema.as_ref().clone(),
             read_schema: self.physical_schema.as_ref().clone(),
-            column_mapping_mode: self.column_mapping_mode.clone(),
+            column_mapping_mode: self.column_mapping_mode,
         }
     }
 
@@ -266,7 +266,7 @@ impl Scan {
                 || self.column_mapping_mode != ColumnMappingMode::None
             {
                 // Loop over all fields and create the correct expressions for them
-                let all_fields: Vec<Expression> = self
+                let all_fields = self
                     .all_fields
                     .iter()
                     .map(|field| match field {
@@ -382,7 +382,7 @@ fn get_state_info(
     schema: &Schema,
     partition_columns: &[String],
     column_mapping_mode: &ColumnMappingMode,
-) -> (Vec<ColumnType>, Vec<StructField>, bool) {
+) -> DeltaResult<(Vec<ColumnType>, Vec<StructField>, bool)> {
     let mut have_partition_cols = false;
     let mut read_fields = Vec::with_capacity(schema.fields.len());
     // Loop over all selected fields and note if they are columns that will be read from the
@@ -391,35 +391,28 @@ fn get_state_info(
     let column_types = schema
         .fields()
         .enumerate()
-        .map(|(index, field)| {
-            if partition_columns.contains(field.name()) {
+        .map(|(index, logical_field)| {
+            if partition_columns.contains(logical_field.name()) {
                 // todo: this is slow(ish)
                 // Store the raw field, we will turn it into an expression in the inner loop
                 // since the expression could be different for each add file
                 have_partition_cols = true;
-                ColumnType::Partition(index)
+                Ok::<ColumnType, Error>(ColumnType::Partition(index))
             } else {
                 // Add to read schema, store field so we can build a `Column` expression later
                 // if needed (i.e. if we have partition columns)
-                match column_mapping_mode {
-                    ColumnMappingMode::Id => unimplemented!("Don't support id mapping yet"),
-                    ColumnMappingMode::Name => {
-                        // this is the value we'll look for in the parquet, so we need to pass the
-                        // physical name
-                        let physical_name = field.physical_name(column_mapping_mode).unwrap();
-                        let physical_field = StructField::new(physical_name, field.data_type().clone(), field.is_nullable());
-                        read_fields.push(physical_field);
-                        ColumnType::Selected(physical_name.to_string())
-                    }
-                    ColumnMappingMode::None => {
-                        read_fields.push(field.clone());
-                        ColumnType::Selected(field.name().to_string())
-                    }
-                }
+                let physical_name = logical_field.physical_name(column_mapping_mode)?;
+                let physical_field = StructField::new(
+                    physical_name,
+                    logical_field.data_type().clone(),
+                    logical_field.is_nullable(),
+                );
+                read_fields.push(physical_field);
+                Ok(ColumnType::Selected(physical_name.to_string()))
             }
         })
-        .collect();
-    (column_types, read_fields, have_partition_cols)
+        .try_collect()?;
+    Ok((column_types, read_fields, have_partition_cols))
 }
 
 pub fn selection_vector(
@@ -442,11 +435,11 @@ pub fn transform_to_logical(
         &global_state.logical_schema,
         &global_state.partition_columns,
         &global_state.column_mapping_mode,
-    );
+    )?;
     let read_schema = Arc::new(global_state.read_schema.clone());
     if have_partition_cols || global_state.column_mapping_mode != ColumnMappingMode::None {
         // need to add back partition cols and/or fix-up mapped columns
-        let all_fields: Vec<Expression> = all_fields
+        let all_fields = all_fields
             .iter()
             .map(|field| match field {
                 ColumnType::Partition(field_idx) => {
