@@ -390,7 +390,12 @@ where
         .ok_or_else(|| {
             serde::de::Error::custom(format!("Invalid scale in decimal: {}", str_value))
         })?;
-
+    if precision > 38 || scale > 38 {
+        return Err(serde::de::Error::custom(format!(
+            "Precision or scale is larger than 38: {}, {}",
+            precision, scale
+        )));
+    }
     Ok((precision, scale))
 }
 
@@ -464,8 +469,16 @@ impl DataType {
     pub const TIMESTAMP: Self = DataType::Primitive(PrimitiveType::Timestamp);
     pub const TIMESTAMP_NTZ: Self = DataType::Primitive(PrimitiveType::TimestampNtz);
 
-    pub fn decimal(precision: u8, scale: i8) -> Self {
-        DataType::Primitive(PrimitiveType::Decimal(precision, scale))
+    pub fn decimal(precision: u8, scale: i8) -> DeltaResult<Self> {
+        if precision > 38 || scale > 38 {
+            return Err(Error::generic(format!(
+                "Precision and scale must not exceed 38/38, found: {}/{}",
+                precision, scale
+            )));
+        }
+        Ok(DataType::Primitive(PrimitiveType::Decimal(
+            precision, scale,
+        )))
     }
 }
 
@@ -647,5 +660,34 @@ mod tests {
         let file = std::fs::File::open("./tests/serde/checkpoint_schema.json").unwrap();
         let schema: Result<Schema, _> = serde_json::from_reader(file);
         assert!(schema.is_ok())
+    }
+
+    #[test]
+    fn test_invalid_decimal() {
+        let data = r#"
+        {
+            "name": "a",
+            "type": "decimal(39, 10)",
+            "nullable": false,
+            "metadata": {}
+        }
+        "#;
+        assert!(matches!(
+            serde_json::from_str::<StructField>(data).unwrap_err(),
+            _
+        ));
+
+        let data = r#"
+        {
+            "name": "a",
+            "type": "decimal(10, 39)",
+            "nullable": false,
+            "metadata": {}
+        }
+        "#;
+        assert!(matches!(
+            serde_json::from_str::<StructField>(data).unwrap_err(),
+            _
+        ));
     }
 }

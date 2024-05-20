@@ -5,7 +5,7 @@ use chrono::{DateTime, NaiveDate, NaiveDateTime, TimeZone, Utc};
 
 use crate::schema::{DataType, PrimitiveType};
 use crate::utils::require;
-use crate::Error;
+use crate::{DeltaResult, Error};
 
 /// A single value, which can be null. Used for representing literal values
 /// in [Expressions][crate::expressions::Expression].
@@ -33,8 +33,8 @@ pub enum Scalar {
 }
 
 impl Scalar {
-    pub fn data_type(&self) -> DataType {
-        match self {
+    pub fn data_type(&self) -> DeltaResult<DataType> {
+        let data_type = match self {
             Self::Integer(_) => DataType::INTEGER,
             Self::Long(_) => DataType::LONG,
             Self::Short(_) => DataType::SHORT,
@@ -47,9 +47,10 @@ impl Scalar {
             Self::TimestampNtz(_) => DataType::TIMESTAMP_NTZ,
             Self::Date(_) => DataType::DATE,
             Self::Binary(_) => DataType::BINARY,
-            Self::Decimal(_, precision, scale) => DataType::decimal(*precision, *scale),
+            Self::Decimal(_, precision, scale) => DataType::decimal(*precision, *scale)?,
             Self::Null(data_type) => data_type.clone(),
-        }
+        };
+        Ok(data_type)
     }
 }
 
