@@ -90,7 +90,7 @@ impl<T: AsRef<[u8]>> From<T> for KernelStringSlice {
 }
 
 trait TryFromStringSlice: Sized {
-    unsafe fn try_from_slice(slice: KernelStringSlice) -> Self;
+    unsafe fn try_from_slice(slice: KernelStringSlice) -> DeltaResult<Self>;
 }
 
 impl TryFromStringSlice for String {
@@ -100,9 +100,10 @@ impl TryFromStringSlice for String {
     ///
     /// The slice must be a valid (non-null) pointer, and must point to the indicated number of
     /// valid utf8 bytes.
-    unsafe fn try_from_slice(slice: KernelStringSlice) -> String {
+    unsafe fn try_from_slice(slice: KernelStringSlice) -> DeltaResult<String> {
         let slice = unsafe { std::slice::from_raw_parts(slice.ptr.cast(), slice.len) };
-        std::str::from_utf8(slice).unwrap().to_string()
+        let slice = std::str::from_utf8(slice)?;
+        Ok(slice.into())
     }
 }
 
@@ -321,17 +322,6 @@ pub trait AllocateError {
         -> *mut EngineError;
 }
 
-// TODO: Why is this even needed...
-impl AllocateError for &dyn AllocateError {
-    unsafe fn allocate_error(
-        &self,
-        etype: KernelError,
-        msg: KernelStringSlice,
-    ) -> *mut EngineError {
-        (*self).allocate_error(etype, msg)
-    }
-}
-
 impl AllocateError for AllocateErrorFn {
     unsafe fn allocate_error(
         &self,
@@ -341,7 +331,8 @@ impl AllocateError for AllocateErrorFn {
         self(etype, msg)
     }
 }
-impl AllocateError for Handle<SharedExternEngine> {
+
+impl AllocateError for &dyn ExternEngine {
     /// # Safety
     ///
     /// In addition to the usual requirements, the engine handle must be valid.
@@ -350,7 +341,7 @@ impl AllocateError for Handle<SharedExternEngine> {
         etype: KernelError,
         msg: KernelStringSlice,
     ) -> *mut EngineError {
-        self.as_ref().error_allocator().allocate_error(etype, msg)
+        self.error_allocator().allocate_error(etype, msg)
     }
 }
 
@@ -360,16 +351,16 @@ impl AllocateError for Handle<SharedExternEngine> {
 ///
 /// The allocator must be valid.
 trait IntoExternResult<T> {
-    unsafe fn into_extern_result(self, allocate_error: impl AllocateError) -> ExternResult<T>;
+    unsafe fn into_extern_result(self, alloc: &dyn AllocateError) -> ExternResult<T>;
 }
 
 impl<T> IntoExternResult<T> for DeltaResult<T> {
-    unsafe fn into_extern_result(self, allocate_error: impl AllocateError) -> ExternResult<T> {
+    unsafe fn into_extern_result(self, alloc: &dyn AllocateError) -> ExternResult<T> {
         match self {
             Ok(ok) => ExternResult::Ok(ok),
             Err(err) => {
                 let msg = format!("{}", err);
-                let err = unsafe { allocate_error.allocate_error(err.into(), msg.as_str().into()) };
+                let err = unsafe { alloc.allocate_error(err.into(), msg.as_str().into()) };
                 ExternResult::Err(err)
             }
         }
@@ -427,7 +418,7 @@ impl ExternEngine for ExternEngineVtable {
 ///
 /// Caller is responsible for passing a valid path pointer.
 unsafe fn unwrap_and_parse_path_as_url(path: KernelStringSlice) -> DeltaResult<Url> {
-    let path = unsafe { String::try_from_slice(path) };
+    let path = unsafe { String::try_from_slice(path) }?;
     Ok(Url::parse(&path)?)
 }
 
@@ -458,17 +449,17 @@ pub unsafe extern "C" fn get_engine_builder(
     path: KernelStringSlice,
     allocate_error: AllocateErrorFn,
 ) -> ExternResult<*mut EngineBuilder> {
-    get_engine_builder_impl(path, allocate_error).into_extern_result(allocate_error)
+    let url = unsafe { unwrap_and_parse_path_as_url(path) };
+    get_engine_builder_impl(url, allocate_error).into_extern_result(&allocate_error)
 }
 
 #[cfg(feature = "default-engine")]
-unsafe fn get_engine_builder_impl(
-    path: KernelStringSlice,
+fn get_engine_builder_impl(
+    url: DeltaResult<Url>,
     allocate_fn: AllocateErrorFn,
 ) -> DeltaResult<*mut EngineBuilder> {
-    let url = unsafe { unwrap_and_parse_path_as_url(path) }?;
     let builder = Box::new(EngineBuilder {
-        url,
+        url: url?,
         allocate_fn,
         options: HashMap::default(),
     });
@@ -489,7 +480,8 @@ pub unsafe extern "C" fn set_builder_option(
 ) {
     let key = unsafe { String::try_from_slice(key) };
     let value = unsafe { String::try_from_slice(value) };
-    builder.set_option(key, value);
+    // TODO: Return ExternalError if key or value is invalid? (builder has an error allocator)
+    builder.set_option(key.unwrap(), value.unwrap());
 }
 
 /// Consume the builder and return an engine. After calling, the passed pointer is _no
@@ -503,13 +495,9 @@ pub unsafe extern "C" fn set_builder_option(
 pub unsafe extern "C" fn builder_build(
     builder: *mut EngineBuilder,
 ) -> ExternResult<Handle<SharedExternEngine>> {
-    let builder_box = unsafe { Box::from_raw(builder) };
-    get_default_engine_impl(
-        builder_box.url,
-        builder_box.options,
-        builder_box.allocate_fn,
-    )
-    .into_extern_result(builder_box.allocate_fn)
+    let builder = unsafe { Box::from_raw(builder) };
+    get_default_engine_impl(builder.url, builder.options, builder.allocate_fn)
+        .into_extern_result(&builder.allocate_fn)
 }
 
 /// # Safety
@@ -521,21 +509,21 @@ pub unsafe extern "C" fn get_default_engine(
     path: KernelStringSlice,
     allocate_error: AllocateErrorFn,
 ) -> ExternResult<Handle<SharedExternEngine>> {
-    get_default_default_engine_impl(path, allocate_error).into_extern_result(allocate_error)
+    let url = unsafe { unwrap_and_parse_path_as_url(path) };
+    get_default_default_engine_impl(url, allocate_error).into_extern_result(&allocate_error)
 }
 
 // get the default version of the default engine :)
 #[cfg(feature = "default-engine")]
-unsafe fn get_default_default_engine_impl(
-    path: KernelStringSlice,
+fn get_default_default_engine_impl(
+    url: DeltaResult<Url>,
     allocate_error: AllocateErrorFn,
 ) -> DeltaResult<Handle<SharedExternEngine>> {
-    let url = unsafe { unwrap_and_parse_path_as_url(path) }?;
-    get_default_engine_impl(url, Default::default(), allocate_error)
+    get_default_engine_impl(url?, Default::default(), allocate_error)
 }
 
 #[cfg(feature = "default-engine")]
-unsafe fn get_default_engine_impl(
+fn get_default_engine_impl(
     url: Url,
     options: HashMap<String, String>,
     allocate_error: AllocateErrorFn,
@@ -547,9 +535,8 @@ unsafe fn get_default_engine_impl(
         options,
         Arc::new(TokioBackgroundExecutor::new()),
     );
-    let engine = Arc::new(engine.map_err(Error::generic)?);
     let engine: Arc<dyn ExternEngine> = Arc::new(ExternEngineVtable {
-        engine,
+        engine: Arc::new(engine?),
         allocate_error,
     });
     Ok(engine.into())
@@ -577,16 +564,16 @@ pub unsafe extern "C" fn snapshot(
     path: KernelStringSlice,
     engine: Handle<SharedExternEngine>,
 ) -> ExternResult<Handle<SharedSnapshot>> {
-    snapshot_impl(path, &engine).into_extern_result(engine)
+    let url = unsafe { unwrap_and_parse_path_as_url(path) };
+    let engine = unsafe { engine.as_ref() };
+    snapshot_impl(url, engine).into_extern_result(&engine)
 }
 
-unsafe fn snapshot_impl(
-    path: KernelStringSlice,
-    extern_engine: &Handle<SharedExternEngine>,
+fn snapshot_impl(
+    url: DeltaResult<Url>,
+    extern_engine: &dyn ExternEngine,
 ) -> DeltaResult<Handle<SharedSnapshot>> {
-    let url = unsafe { unwrap_and_parse_path_as_url(path) }?;
-    let extern_engine = unsafe { extern_engine.as_ref() };
-    let snapshot = Snapshot::try_new(url, extern_engine.engine().as_ref(), None)?;
+    let snapshot = Snapshot::try_new(url?, extern_engine.engine().as_ref(), None)?;
     Ok(Arc::new(snapshot).into())
 }
 
@@ -989,14 +976,14 @@ pub unsafe extern "C" fn visit_expression_column(
     name: KernelStringSlice,
     allocate_error: AllocateErrorFn,
 ) -> ExternResult<usize> {
-    visit_expression_column_impl(state, name).into_extern_result(allocate_error)
-}
-unsafe fn visit_expression_column_impl(
-    state: &mut KernelExpressionVisitorState,
-    name: KernelStringSlice,
-) -> DeltaResult<usize> {
     let name = unsafe { String::try_from_slice(name) };
-    Ok(wrap_expression(state, Expression::Column(name)))
+    visit_expression_column_impl(state, name).into_extern_result(&allocate_error)
+}
+fn visit_expression_column_impl(
+    state: &mut KernelExpressionVisitorState,
+    name: DeltaResult<String>,
+) -> DeltaResult<usize> {
+    Ok(wrap_expression(state, Expression::Column(name?)))
 }
 
 /// # Safety
@@ -1007,16 +994,16 @@ pub unsafe extern "C" fn visit_expression_literal_string(
     value: KernelStringSlice,
     allocate_error: AllocateErrorFn,
 ) -> ExternResult<usize> {
-    visit_expression_literal_string_impl(state, value).into_extern_result(allocate_error)
-}
-unsafe fn visit_expression_literal_string_impl(
-    state: &mut KernelExpressionVisitorState,
-    value: KernelStringSlice,
-) -> DeltaResult<usize> {
     let value = unsafe { String::try_from_slice(value) };
+    visit_expression_literal_string_impl(state, value).into_extern_result(&allocate_error)
+}
+fn visit_expression_literal_string_impl(
+    state: &mut KernelExpressionVisitorState,
+    value: DeltaResult<String>,
+) -> DeltaResult<usize> {
     Ok(wrap_expression(
         state,
-        Expression::Literal(Scalar::from(value)),
+        Expression::Literal(Scalar::from(value?)),
     ))
 }
 
