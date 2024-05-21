@@ -145,10 +145,13 @@ impl PrimitiveType {
     pub fn check_decimal(precision: u8, scale: i8) -> DeltaResult<()> {
         require!(
             precision > 0 && precision <= 38,
-            Error::invalid_decimal("precision must in range 1..38 inclusive.")
+            Error::invalid_decimal(format!(
+                "precision must in range 1..38 inclusive, found: {}.",
+                precision
+            ))
         );
         require!(
-            scale >= 0 && scale <= precision as i8,
+            scale.abs() <= 38,
             Error::invalid_decimal("scale must be in range 0..precision inclusive.")
         );
         Ok(())
@@ -318,7 +321,7 @@ mod tests {
 
     #[test]
     fn test_parse_decimal() -> Result<(), Box<dyn std::error::Error>> {
-        assert_decimal("0", 0, 0, 0)?;
+        assert_decimal("0", 0, 1, 0)?;
         assert_decimal("0.00", 0, 3, 2)?;
         assert_decimal("123", 123, 3, 0)?;
         assert_decimal("-123", -123, 3, 0)?;
@@ -331,8 +334,8 @@ mod tests {
         assert_decimal("0.00123", 123, 5, 5)?;
         assert_decimal("-1.23E-12", -123, 3, 14)?;
         assert_decimal("1234.5E-4", 12345, 5, 5)?;
-        assert_decimal("0E+7", 0, 0, -7)?;
-        assert_decimal("-0", 0, 0, 0)?;
+        assert_decimal("0E+7", 0, 1, -7)?;
+        assert_decimal("-0", 0, 1, 0)?;
         assert_decimal("12.000000000000000000", 12000000000000000000, 38, 18)?;
         Ok(())
     }
