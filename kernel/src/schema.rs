@@ -390,7 +390,7 @@ where
         .ok_or_else(|| {
             serde::de::Error::custom(format!("Invalid scale in decimal: {}", str_value))
         })?;
-    PrimitiveType::check_decimal(precision, scale).map_err(|e| serde::de::Error::custom(e))?;
+    PrimitiveType::check_decimal(precision, scale).map_err(serde::de::Error::custom)?;
     Ok((precision, scale))
 }
 
