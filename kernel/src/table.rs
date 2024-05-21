@@ -95,10 +95,6 @@ enum UriType {
 /// Will return an error if the path is not valid.
 fn resolve_uri_type(table_uri: impl AsRef<str>) -> DeltaResult<UriType> {
     let table_uri = table_uri.as_ref();
-    let known_schemes = [
-        "file", "memory", "s3", "s3a", "az", "adl", "azure", "abfs", "abfss", "gs", "http", "https",
-    ]; // hard-code for now, TODO: pull these out of object_store
-
     if let Ok(url) = Url::parse(table_uri) {
         let scheme = url.scheme().to_string();
         if url.scheme() == "file" {
@@ -106,17 +102,12 @@ fn resolve_uri_type(table_uri: impl AsRef<str>) -> DeltaResult<UriType> {
                 url.to_file_path()
                     .map_err(|_| Error::invalid_table_location(table_uri))?,
             ))
-        } else if known_schemes.contains(&scheme.as_str()) {
-            Ok(UriType::Url(url))
-        // NOTE this check is required to support absolute windows paths which may properly parse as url
-        // we assume here that a single character scheme is a windows drive letter
         } else if scheme.len() == 1 {
+            // NOTE this check is required to support absolute windows paths which may properly
+            // parse as url we assume here that a single character scheme is a windows drive letter
             Ok(UriType::LocalPath(PathBuf::from(table_uri)))
         } else {
-            Err(Error::InvalidTableLocation(format!(
-                "Unknown scheme: {}",
-                scheme
-            )))
+            Ok(UriType::Url(url))
         }
     } else {
         Ok(UriType::LocalPath(table_uri.into()))
@@ -169,6 +160,8 @@ mod tests {
             "memory://foo/bar",
             "gs://foo/bar",
             "https://foo/bar/",
+            "unknown://foo/bar",
+            "s2://foo/bar",
         ] {
             match resolve_uri_type(x) {
                 Ok(UriType::Url(_)) => {}
@@ -176,13 +169,7 @@ mod tests {
             }
         }
 
-        for x in [
-            "unknown://foo/bar",
-            #[cfg(not(windows))]
-            "file://foo/bar",
-            "s2://foo/bar",
-        ] {
-            resolve_uri_type(x).expect_err(format!("Should not have parsed: {x}").as_str());
-        }
+        #[cfg(not(windows))]
+        resolve_uri_type("file://foo/bar").expect_err("file://foo/bar should not have parsed");
     }
 }
