@@ -382,16 +382,16 @@ fn parse_partition_value(raw: Option<&String>, data_type: &DataType) -> DeltaRes
 ///   into account column mapping
 /// - have_partition_cols - boolean indicating if we have partition columns in this query
 fn get_state_info(
-    schema: &Schema,
+    logical_schema: &Schema,
     partition_columns: &[String],
     column_mapping_mode: &ColumnMappingMode,
 ) -> DeltaResult<(Vec<ColumnType>, Vec<StructField>, bool)> {
     let mut have_partition_cols = false;
-    let mut read_fields = Vec::with_capacity(schema.fields.len());
+    let mut read_fields = Vec::with_capacity(logical_schema.fields.len());
     // Loop over all selected fields and note if they are columns that will be read from the
     // parquet file ([`ColumnType::Selected`]) or if they are partition columns and will need to
     // be filled in by evaluating an expression ([`ColumnType::Partition`])
-    let column_types = schema
+    let column_types = logical_schema
         .fields()
         .enumerate()
         .map(|(index, logical_field)| {
