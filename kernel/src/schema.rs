@@ -390,12 +390,7 @@ where
         .ok_or_else(|| {
             serde::de::Error::custom(format!("Invalid scale in decimal: {}", str_value))
         })?;
-    if precision > 38 || scale > 38 {
-        return Err(serde::de::Error::custom(format!(
-            "Precision or scale is larger than 38: {}, {}",
-            precision, scale
-        )));
-    }
+    PrimitiveType::check_decimal(precision, scale).map_err(|e| serde::de::Error::custom(e))?;
     Ok((precision, scale))
 }
 
@@ -470,15 +465,16 @@ impl DataType {
     pub const TIMESTAMP_NTZ: Self = DataType::Primitive(PrimitiveType::TimestampNtz);
 
     pub fn decimal(precision: u8, scale: i8) -> DeltaResult<Self> {
-        if precision > 38 || scale > 38 {
-            return Err(Error::generic(format!(
-                "Precision and scale must not exceed 38/38, found: {}/{}",
-                precision, scale
-            )));
-        }
+        PrimitiveType::check_decimal(precision, scale)?;
         Ok(DataType::Primitive(PrimitiveType::Decimal(
             precision, scale,
         )))
+    }
+
+    // This function assumes that the caller has already checked the precision and scale
+    // and that they are valid. Will panic if they are not.
+    pub fn decimal_unchecked(precision: u8, scale: i8) -> Self {
+        Self::decimal(precision, scale).unwrap()
     }
 }
 

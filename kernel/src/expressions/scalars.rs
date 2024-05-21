@@ -33,8 +33,8 @@ pub enum Scalar {
 }
 
 impl Scalar {
-    pub fn data_type(&self) -> DeltaResult<DataType> {
-        let data_type = match self {
+    pub fn data_type(&self) -> DataType {
+        match self {
             Self::Integer(_) => DataType::INTEGER,
             Self::Long(_) => DataType::LONG,
             Self::Short(_) => DataType::SHORT,
@@ -47,10 +47,9 @@ impl Scalar {
             Self::TimestampNtz(_) => DataType::TIMESTAMP_NTZ,
             Self::Date(_) => DataType::DATE,
             Self::Binary(_) => DataType::BINARY,
-            Self::Decimal(_, precision, scale) => DataType::decimal(*precision, *scale)?,
+            Self::Decimal(_, precision, scale) => DataType::decimal_unchecked(*precision, *scale),
             Self::Null(data_type) => data_type.clone(),
-        };
-        Ok(data_type)
+        }
     }
 }
 
@@ -142,6 +141,19 @@ impl From<String> for Scalar {
 // TODO: add more From impls
 
 impl PrimitiveType {
+    /// Check if the given precision and scale are valid for a decimal type.
+    pub fn check_decimal(precision: u8, scale: i8) -> DeltaResult<()> {
+        require!(
+            precision > 0 && precision <= 38,
+            Error::invalid_decimal("precision must in range 1..38 inclusive.")
+        );
+        require!(
+            scale >= 0 && scale <= precision as i8,
+            Error::invalid_decimal("scale must be in range 0..precision inclusive.")
+        );
+        Ok(())
+    }
+
     fn data_type(&self) -> DataType {
         DataType::Primitive(self.clone())
     }
@@ -185,7 +197,10 @@ impl PrimitiveType {
                 let days = date.signed_duration_since(*UNIX_EPOCH).num_days() as i32;
                 Ok(Scalar::Date(days))
             }
-            // TODO: Handle timezones properly
+            // NOTE: Timestamp and TimestampNtz are parsed in the same way, as microsecond since unix epoch.
+            // The difference arrises mostly in how they are to be handled on the engine side - i.e. timestampNTZ
+            // is not adjusted to UTC, this is just so we can (de-)serialize it as a date sting.
+            // https://github.com/delta-io/delta/blob/master/PROTOCOL.md#partition-value-serialization
             Timestamp | TimestampNtz => {
                 let timestamp = NaiveDateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S%.f")
                     .map_err(|_| self.parse_error(raw))?;
@@ -194,7 +209,11 @@ impl PrimitiveType {
                     .signed_duration_since(*UNIX_EPOCH)
                     .num_microseconds()
                     .ok_or(self.parse_error(raw))?;
-                Ok(Scalar::Timestamp(micros))
+                match self {
+                    Timestamp => Ok(Scalar::Timestamp(micros)),
+                    TimestampNtz => Ok(Scalar::TimestampNtz(micros)),
+                    _ => unreachable!(),
+                }
             }
         }
     }
@@ -250,6 +269,7 @@ impl PrimitiveType {
         let scale = frac_digits - exp;
         let scale: i8 = scale.try_into().map_err(|_| self.parse_error(raw))?;
         require!(scale == expected_scale, self.parse_error(raw));
+        Self::check_decimal(precision, scale)?;
 
         let int: i128 = match frac_part {
             None => int_part.parse()?,

@@ -92,15 +92,9 @@ impl TryFrom<&DataType> for ArrowDataType {
                     PrimitiveType::Boolean => Ok(ArrowDataType::Boolean),
                     PrimitiveType::Binary => Ok(ArrowDataType::Binary),
                     PrimitiveType::Decimal(precision, scale) => {
-                        if precision <= &38 {
-                            Ok(ArrowDataType::Decimal128(*precision, *scale))
-                        } else {
-                            // NOTE: since we are converting from delta, we should never get here.
-                            Err(ArrowError::SchemaError(format!(
-                                "Precision too large to be represented as Delta type: {} > 38",
-                                precision
-                            )))
-                        }
+                        PrimitiveType::check_decimal(*precision, *scale)
+                            .map_err(|e| ArrowError::from_external_error(e.into()))?;
+                        Ok(ArrowDataType::Decimal128(*precision, *scale))
                     }
                     PrimitiveType::Date => {
                         // A calendar date, represented as a year-month-day triple without a
