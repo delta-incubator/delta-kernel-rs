@@ -13,7 +13,7 @@ use url::Url;
 use delta_kernel::expressions::{BinaryOperator, Expression, Scalar};
 use delta_kernel::schema::{ArrayType, DataType, MapType, PrimitiveType, StructType};
 use delta_kernel::snapshot::Snapshot;
-use delta_kernel::{DeltaResult, Engine, Error};
+use delta_kernel::{DeltaResult, Engine, Error, Table};
 
 mod handle;
 use handle::{ArcHandle, SizedArcHandle, Unconstructable};
@@ -233,6 +233,7 @@ pub enum KernelError {
     Utf8Error,
     ParseIntError,
     InvalidColumnMappingMode,
+    InvalidTableLocation,
 }
 
 impl From<Error> for KernelError {
@@ -270,6 +271,7 @@ impl From<Error> for KernelError {
             Error::Utf8Error(_) => KernelError::Utf8Error,
             Error::ParseIntError(_) => KernelError::ParseIntError,
             Error::InvalidColumnMappingMode(_) => KernelError::InvalidColumnMappingMode,
+            Error::InvalidTableLocation(_) => KernelError::InvalidTableLocation,
             Error::Backtraced {
                 source,
                 backtrace: _,
@@ -437,7 +439,8 @@ impl ExternEngine for ExternEngineVtable {
 /// Caller is responsible for passing a valid path pointer.
 unsafe fn unwrap_and_parse_path_as_url(path: KernelStringSlice) -> DeltaResult<Url> {
     let path = unsafe { String::try_from_slice(path) };
-    Ok(Url::parse(&path)?)
+    let table = Table::try_from_uri(path)?;
+    Ok(table.location().clone())
 }
 
 /// A builder that allows setting options on the `Engine` before actually building it

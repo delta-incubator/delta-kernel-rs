@@ -135,6 +135,10 @@ pub enum Error {
 
     #[error("Invalid column mapping mode: {0}")]
     InvalidColumnMappingMode(String),
+
+    /// Asked for a table at an invalid location
+    #[error("Invalid table location: {0}.")]
+    InvalidTableLocation(String),
 }
 
 // Convenience constructors for Error types that take a String argument
@@ -167,6 +171,9 @@ impl Error {
     }
     pub fn join_failure(msg: impl ToString) -> Self {
         Self::JoinFailure(msg.to_string())
+    }
+    pub fn invalid_table_location(location: impl ToString) -> Self {
+        Self::InvalidTableLocation(location.to_string())
     }
 
     pub fn invalid_column_mapping_mode(mode: impl ToString) -> Self {
