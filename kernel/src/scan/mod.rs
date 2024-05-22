@@ -91,7 +91,7 @@ impl ScanBuilder {
         let (all_fields, read_fields, have_partition_cols) = get_state_info(
             logical_schema.as_ref(),
             &self.snapshot.metadata().partition_columns,
-            &column_mapping_mode,
+            column_mapping_mode,
         )?;
         let physical_schema = Arc::new(StructType::new(read_fields));
         Ok(Scan {
@@ -384,7 +384,7 @@ fn parse_partition_value(raw: Option<&String>, data_type: &DataType) -> DeltaRes
 fn get_state_info(
     logical_schema: &Schema,
     partition_columns: &[String],
-    column_mapping_mode: &ColumnMappingMode,
+    column_mapping_mode: ColumnMappingMode,
 ) -> DeltaResult<(Vec<ColumnType>, Vec<StructField>, bool)> {
     let mut have_partition_cols = false;
     let mut read_fields = Vec::with_capacity(logical_schema.fields.len());
@@ -394,22 +394,18 @@ fn get_state_info(
     let column_types = logical_schema
         .fields()
         .enumerate()
-        .map(|(index, logical_field)| {
+        .map(|(index, logical_field)| -> DeltaResult<_> {
             if partition_columns.contains(logical_field.name()) {
                 // Store the index into the schema for this field. When we turn it into an
                 // expression in the inner loop, we will index into the schema and get the name and
                 // data type, which we need to properly materialize the column.
                 have_partition_cols = true;
-                Ok::<ColumnType, Error>(ColumnType::Partition(index))
+                Ok(ColumnType::Partition(index))
             } else {
                 // Add to read schema, store field so we can build a `Column` expression later
                 // if needed (i.e. if we have partition columns)
                 let physical_name = logical_field.physical_name(column_mapping_mode)?;
-                let physical_field = StructField::new(
-                    physical_name,
-                    logical_field.data_type().clone(),
-                    logical_field.is_nullable(),
-                );
+                let physical_field = logical_field.with_name(physical_name);
                 read_fields.push(physical_field);
                 Ok(ColumnType::Selected(physical_name.to_string()))
             }
@@ -437,7 +433,7 @@ pub fn transform_to_logical(
     let (all_fields, _read_fields, have_partition_cols) = get_state_info(
         &global_state.logical_schema,
         &global_state.partition_columns,
-        &global_state.column_mapping_mode,
+        global_state.column_mapping_mode,
     )?;
     let read_schema = Arc::new(global_state.read_schema.clone());
     if have_partition_cols || global_state.column_mapping_mode != ColumnMappingMode::None {

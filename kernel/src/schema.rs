@@ -108,7 +108,7 @@ impl StructField {
 
     /// Get the physical name for this field as it should be read from parquet, based on the
     /// specified column mapping mode.
-    pub fn physical_name(&self, mapping_mode: &ColumnMappingMode) -> DeltaResult<&str> {
+    pub fn physical_name(&self, mapping_mode: ColumnMappingMode) -> DeltaResult<&str> {
         let name_mapped_name = self
             .metadata
             .get(ColumnMetadataKey::ColumnMappingPhysicalName.as_ref());
@@ -127,6 +127,17 @@ impl StructField {
                 MetadataValue::String(name) => Ok(name),
             }
             (ColumnMappingMode::Id, _) => Err(Error::generic("Don't support id column mapping yet")),
+        }
+    }
+
+    /// Change the name of a field. The field will preserve its data type and nullability. Note that
+    /// this allocates a new field.
+    pub fn with_name(&self, new_name: impl Into<String>) -> Self {
+        StructField {
+            name: new_name.into(),
+            data_type: self.data_type().clone(),
+            nullable: self.nullable,
+            metadata: self.metadata.clone(),
         }
     }
 
