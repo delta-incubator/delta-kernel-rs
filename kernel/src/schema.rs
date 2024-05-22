@@ -109,22 +109,14 @@ impl StructField {
     /// Get the physical name for this field as it should be read from parquet, based on the
     /// specified column mapping mode.
     pub fn physical_name(&self, mapping_mode: ColumnMappingMode) -> DeltaResult<&str> {
-        let name_mapped_name = self
-            .metadata
-            .get(ColumnMetadataKey::ColumnMappingPhysicalName.as_ref());
+        let physical_name_key = ColumnMetadataKey::ColumnMappingPhysicalName.as_ref();
+        let name_mapped_name = self.metadata.get(physical_name_key);
         match (mapping_mode, name_mapped_name) {
             (ColumnMappingMode::None, _) => Ok(self.name.as_str()),
-            (ColumnMappingMode::Name, None) => Err(Error::MissingData(format!(
-                "No {} key found in field metadata",
-                ColumnMetadataKey::ColumnMappingPhysicalName.as_ref()
+            (ColumnMappingMode::Name, Some(MetadataValue::String(name))) => Ok(name),
+            (ColumnMappingMode::Name, invalid) => Err(Error::generic(format!(
+                "Missing or invalid {physical_name_key}: {invalid:?}"
             ))),
-            (ColumnMappingMode::Name, Some(val)) => match val {
-                MetadataValue::Number(_) => Err(Error::Generic(format!(
-                    "{} must be a string in name mapping mode",
-                    ColumnMetadataKey::ColumnMappingPhysicalName.as_ref()
-                ))),
-                MetadataValue::String(name) => Ok(name),
-            },
             (ColumnMappingMode::Id, _) => {
                 Err(Error::generic("Don't support id column mapping yet"))
             }

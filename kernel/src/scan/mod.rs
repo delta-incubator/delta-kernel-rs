@@ -87,11 +87,10 @@ impl ScanBuilder {
         let logical_schema = self
             .schema
             .unwrap_or_else(|| self.snapshot.schema().clone().into());
-        let column_mapping_mode = self.snapshot.column_mapping_mode()?;
         let (all_fields, read_fields, have_partition_cols) = get_state_info(
             logical_schema.as_ref(),
             &self.snapshot.metadata().partition_columns,
-            column_mapping_mode,
+            self.snapshot.column_mapping_mode,
         )?;
         let physical_schema = Arc::new(StructType::new(read_fields));
         Ok(Scan {
@@ -101,7 +100,6 @@ impl ScanBuilder {
             predicate: self.predicate,
             all_fields,
             have_partition_cols,
-            column_mapping_mode,
         })
     }
 }
@@ -143,7 +141,6 @@ pub struct Scan {
     predicate: Option<Expression>,
     all_fields: Vec<ColumnType>,
     have_partition_cols: bool,
-    column_mapping_mode: ColumnMappingMode,
 }
 
 impl std::fmt::Debug for Scan {
@@ -230,7 +227,7 @@ impl Scan {
             partition_columns: self.snapshot.metadata().partition_columns.clone(),
             logical_schema: self.logical_schema.as_ref().clone(),
             read_schema: self.physical_schema.as_ref().clone(),
-            column_mapping_mode: self.column_mapping_mode,
+            column_mapping_mode: self.snapshot.column_mapping_mode,
         }
     }
 
@@ -264,7 +261,7 @@ impl Scan {
                 parquet_handler.read_parquet_files(&[meta], self.physical_schema.clone(), None)?;
 
             let read_expression = if self.have_partition_cols
-                || self.column_mapping_mode != ColumnMappingMode::None
+                || self.snapshot.column_mapping_mode != ColumnMappingMode::None
             {
                 // Loop over all fields and create the correct expressions for them
                 let all_fields = self

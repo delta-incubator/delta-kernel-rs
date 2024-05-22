@@ -109,6 +109,7 @@ pub struct Snapshot {
     metadata: Metadata,
     protocol: Protocol,
     schema: Schema,
+    pub(crate) column_mapping_mode: ColumnMappingMode,
 }
 
 impl std::fmt::Debug for Snapshot {
@@ -196,6 +197,10 @@ impl Snapshot {
             .read_metadata(engine)?
             .ok_or(Error::MissingMetadata)?;
         let schema = metadata.schema()?;
+        let column_mapping_mode = match metadata.configuration.get(COLUMN_MAPPING_MODE_KEY) {
+            Some(mode) if protocol.min_reader_version >= 2 => mode.as_str().try_into(),
+            _ => Ok(ColumnMappingMode::None),
+        }?;
         Ok(Self {
             table_root: location,
             log_segment,
@@ -203,6 +208,7 @@ impl Snapshot {
             metadata,
             protocol,
             schema,
+            column_mapping_mode,
         })
     }
 
@@ -212,30 +218,31 @@ impl Snapshot {
         &self.log_segment
     }
 
-    /// Version of this [`Snapshot`] in the table.
+    /// Version of this `Snapshot` in the table.
     pub fn version(&self) -> Version {
         self.version
     }
 
-    /// Table [`Schema`] at this [`Snapshot`]s version.
+    /// Table [`Schema`] at this `Snapshot`s version.
     pub fn schema(&self) -> &Schema {
         &self.schema
     }
 
-    /// Table [`Metadata`] at this [`Snapshot`]s version.
+    /// Table [`Metadata`] at this `Snapshot`s version.
     pub fn metadata(&self) -> &Metadata {
         &self.metadata
     }
 
+    /// Table [`Protocol`] at this `Snapshot`s version.
     pub fn protocol(&self) -> &Protocol {
         &self.protocol
     }
 
-    pub fn column_mapping_mode(&self) -> DeltaResult<ColumnMappingMode> {
-        match self.metadata.configuration.get(COLUMN_MAPPING_MODE_KEY) {
-            Some(mode) if self.protocol.min_reader_version >= 2 => mode.as_str().try_into(),
-            _ => Ok(ColumnMappingMode::None),
-        }
+    /// Get the [column mapping
+    /// mode](https://github.com/delta-io/delta/blob/master/PROTOCOL.md#column-mapping) at this
+    /// `Snapshot`s version.
+    pub fn column_mapping_mode(&self) -> ColumnMappingMode {
+        self.column_mapping_mode
     }
 }
 
