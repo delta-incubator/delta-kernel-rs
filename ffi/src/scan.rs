@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use delta_kernel::scan::state::{visit_scan_files, DvInfo, GlobalScanState};
 use delta_kernel::scan::{Scan, ScanBuilder, ScanData};
+use delta_kernel::snapshot::Snapshot;
 use delta_kernel::{DeltaResult, EngineData as KernelEngineData, Error};
 use delta_kernel_ffi_macros::handle_descriptor;
 use tracing::debug;
@@ -14,7 +15,7 @@ use url::Url;
 use crate::{
     unwrap_kernel_expression, AllocateStringFn, EnginePredicate, ExternEngine, ExternResult,
     IntoExternResult, KernelBoolSlice, KernelExpressionVisitorState, KernelStringSlice,
-    NullableCvoid, SharedExternEngine, SharedSnapshot, Snapshot, TryFromStringSlice,
+    NullableCvoid, SharedExternEngine, SharedSnapshot, TryFromStringSlice,
 };
 
 use super::handle::Handle;
