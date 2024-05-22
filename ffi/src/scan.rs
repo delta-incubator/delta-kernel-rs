@@ -74,8 +74,7 @@ pub unsafe extern "C" fn get_raw_arrow_data(
     engine: Handle<SharedExternEngine>,
 ) -> ExternResult<*mut ArrowFFIData> {
     // TODO(frj): This consumes the handle. Is that what we really want?
-    let data = unsafe { data.into_inner() };
-    get_raw_arrow_data_impl(data).into_extern_result(&engine.as_ref())
+    get_raw_arrow_data_impl(data.into_inner()).into_extern_result(&engine.as_ref())
 }
 
 // TODO: This method leaks the returned pointer memory. How will the engine free it?
@@ -119,8 +118,7 @@ pub unsafe extern "C" fn scan(
     engine: Handle<SharedExternEngine>,
     predicate: Option<&mut EnginePredicate>,
 ) -> ExternResult<Handle<SharedScan>> {
-    let snapshot = unsafe { snapshot.clone_as_arc() };
-    scan_impl(snapshot, predicate).into_extern_result(&engine.as_ref())
+    scan_impl(snapshot.clone_as_arc(), predicate).into_extern_result(&engine.as_ref())
 }
 
 fn scan_impl(
@@ -202,9 +200,8 @@ pub unsafe extern "C" fn kernel_scan_data_init(
     engine: Handle<SharedExternEngine>,
     scan: Handle<SharedScan>,
 ) -> ExternResult<Handle<SharedScanDataIterator>> {
-    let engine = unsafe { engine.clone_as_arc() };
-    let scan = unsafe { scan.as_ref() };
-    kernel_scan_data_init_impl(&engine, scan).into_extern_result(&engine.as_ref())
+    let engine = engine.clone_as_arc();
+    kernel_scan_data_init_impl(&engine, scan.as_ref()).into_extern_result(&engine.as_ref())
 }
 
 fn kernel_scan_data_init_impl(
@@ -233,7 +230,7 @@ pub unsafe extern "C" fn kernel_scan_data_next(
         selection_vector: KernelBoolSlice,
     ),
 ) -> ExternResult<bool> {
-    let data = unsafe { data.as_ref() };
+    let data = data.as_ref();
     kernel_scan_data_next_impl(data, engine_context, engine_visitor)
         .into_extern_result(&data.engine.as_ref())
 }
@@ -312,9 +309,8 @@ pub unsafe extern "C" fn selection_vector_from_dv(
     engine: Handle<SharedExternEngine>,
     state: Handle<SharedGlobalScanState>,
 ) -> ExternResult<KernelBoolSlice> {
-    let state = unsafe { state.as_ref() };
-    let engine = unsafe { engine.as_ref() };
-    selection_vector_from_dv_impl(dv_info, engine, state).into_extern_result(&engine)
+    let engine = engine.as_ref();
+    selection_vector_from_dv_impl(dv_info, engine, state.as_ref()).into_extern_result(&engine)
 }
 
 fn selection_vector_from_dv_impl(
