@@ -449,7 +449,7 @@ pub unsafe extern "C" fn get_engine_builder(
     path: KernelStringSlice,
     allocate_error: AllocateErrorFn,
 ) -> ExternResult<*mut EngineBuilder> {
-    let url = unwrap_and_parse_path_as_url(path);
+    let url = unsafe { unwrap_and_parse_path_as_url(path) };
     get_engine_builder_impl(url, allocate_error).into_extern_result(&allocate_error)
 }
 
@@ -478,8 +478,8 @@ pub unsafe extern "C" fn set_builder_option(
     key: KernelStringSlice,
     value: KernelStringSlice,
 ) {
-    let key = String::try_from_slice(key);
-    let value = String::try_from_slice(value);
+    let key = unsafe { String::try_from_slice(key) };
+    let value = unsafe { String::try_from_slice(value) };
     // TODO: Return ExternalError if key or value is invalid? (builder has an error allocator)
     builder.set_option(key.unwrap(), value.unwrap());
 }
@@ -495,7 +495,7 @@ pub unsafe extern "C" fn set_builder_option(
 pub unsafe extern "C" fn builder_build(
     builder: *mut EngineBuilder,
 ) -> ExternResult<Handle<SharedExternEngine>> {
-    let builder = Box::from_raw(builder);
+    let builder = unsafe { Box::from_raw(builder) };
     get_default_engine_impl(builder.url, builder.options, builder.allocate_fn)
         .into_extern_result(&builder.allocate_fn)
 }
@@ -509,7 +509,7 @@ pub unsafe extern "C" fn get_default_engine(
     path: KernelStringSlice,
     allocate_error: AllocateErrorFn,
 ) -> ExternResult<Handle<SharedExternEngine>> {
-    let url = unwrap_and_parse_path_as_url(path);
+    let url = unsafe { unwrap_and_parse_path_as_url(path) };
     get_default_default_engine_impl(url, allocate_error).into_extern_result(&allocate_error)
 }
 
@@ -564,8 +564,8 @@ pub unsafe extern "C" fn snapshot(
     path: KernelStringSlice,
     engine: Handle<SharedExternEngine>,
 ) -> ExternResult<Handle<SharedSnapshot>> {
-    let url = unwrap_and_parse_path_as_url(path);
-    let engine = engine.as_ref();
+    let url = unsafe { unwrap_and_parse_path_as_url(path) };
+    let engine = unsafe { engine.as_ref() };
     snapshot_impl(url, engine).into_extern_result(&engine)
 }
 
@@ -976,7 +976,7 @@ pub unsafe extern "C" fn visit_expression_column(
     name: KernelStringSlice,
     allocate_error: AllocateErrorFn,
 ) -> ExternResult<usize> {
-    let name = String::try_from_slice(name);
+    let name = unsafe { String::try_from_slice(name) };
     visit_expression_column_impl(state, name).into_extern_result(&allocate_error)
 }
 fn visit_expression_column_impl(
@@ -994,7 +994,7 @@ pub unsafe extern "C" fn visit_expression_literal_string(
     value: KernelStringSlice,
     allocate_error: AllocateErrorFn,
 ) -> ExternResult<usize> {
-    let value = String::try_from_slice(value);
+    let value = unsafe { String::try_from_slice(value) };
     visit_expression_literal_string_impl(state, value).into_extern_result(&allocate_error)
 }
 fn visit_expression_literal_string_impl(
