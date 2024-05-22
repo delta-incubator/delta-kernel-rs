@@ -3,7 +3,7 @@
 //!
 //! Creating a [`Handle<T>`] always implies some kind of ownership transfer. A mutable handle takes
 //! ownership of the object itself (analagous to [`Box<T>`]), while a non-mutable (shared) handle
-//! takes ownership of a shared reference to the object (analagous to [`Arc<T>`]). Thus, a created
+//! takes ownership of a shared reference to the object (analagous to [`std::sync::Arc<T>`]). Thus, a created
 //! handle remains [valid][Handle#Validity], and its underlying object remains accessible, until the
 //! handle is explicitly dropped or consumed. Dropping a mutable handle always drops the underlying
 //! object as well; dropping a shared handle only drops the underlying object if the handle was the
@@ -18,18 +18,20 @@
 //! advised to maintain "unique pointer" semantics for mutable handles.
 //!
 //! NOTE: While shared handles could conceptually impl [`Clone`], cloning would require unsafe code
-//! and so we can't actually implement the trait. Use [`CloneHandle::clone_handle`] instead.
+//! and so we can't actually implement the trait. Use [`Handle::clone_handle`] instead.
 
 /// Describes the kind of handle a given opaque pointer type represents.
 ///
 /// It is not normally necessary to implement this trait directly; instead, use the provided
 /// attribute macro `#[handle_descriptor]` to generate the implementation automatically, e.g.
 /// ```
+/// # use delta_kernel_ffi_macros::handle_descriptor;
+/// # use delta_kernel_ffi::handle::Handle;
 /// pub struct Foo {
 ///     x: usize,
 /// }
 ///
-/// #[handle_descriptor(target = "Foo", mutable = true, sized = true)]
+/// #[handle_descriptor(target = Foo, mutable = true, sized = true)]
 /// pub struct MutableFoo;
 /// ```
 pub trait HandleDescriptor {
@@ -465,6 +467,29 @@ mod private {
 
 pub use private::{Boolean, False, Handle, True, Unconstructable};
 
+
+/// ```
+/// # use delta_kernel_ffi_macros::handle_descriptor;
+/// # use delta_kernel_ffi::handle::Handle;
+/// # use std::sync::Arc;
+/// pub struct NotSync {
+///     pub ptr: *mut u32,
+/// }
+/// unsafe impl Send for NotSync {}
+///
+/// #[handle_descriptor(target=NotSync, mutable=false, sized=true)]
+/// pub struct SharedNotSync;
+///
+/// let s = NotSync { ptr: std::ptr::null_mut() };
+/// let h: Handle<SharedNotSync> = Arc::new(s).into();
+/// unsafe { h.drop_handle() };
+/// ```
+#[cfg(doctest)]
+pub struct SharedNotSyncHandleFailsToCompile;
+
+//    #[handle_descriptor(target=NotSync, mutable=true, sized=true)]
+//    pub struct MutNotSync;
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -512,11 +537,23 @@ mod tests {
     }
     unsafe impl Send for NotSync {}
 
+    /// ```
+    /// let s = NotSync { ptr: std::ptr::null_mut() };
+    /// let h: Handle<SharedNotSync> = Arc::new(s).into();
+    /// unsafe { h.drop_handle() };
+    /// ```
+    #[cfg(doctest)]
     #[handle_descriptor(target=NotSync, mutable=false, sized=true)]
     pub struct SharedNotSync;
 
     #[handle_descriptor(target=NotSync, mutable=true, sized=true)]
     pub struct MutNotSync;
+
+    #[test]
+    fn invalid_handle_code() {
+        let t = trybuild::TestCases::new();
+        t.compile_fail("tests/invalid-handle-code/*.rs");
+    }
 
     #[test]
     fn test_handle_use_cases_compile() {

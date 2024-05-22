@@ -16,8 +16,17 @@ use delta_kernel::snapshot::Snapshot;
 use delta_kernel::{DeltaResult, Engine, Error, Table};
 use delta_kernel_ffi_macros::handle_descriptor;
 
+#[cfg(feature="doc-tests")]
+pub mod handle;
+#[cfg(not(feature="doc-tests"))]
 pub(crate) mod handle;
+
 use handle::Handle;
+
+// The handle_descriptor macro needs this, because it needs to emit fully qualified type names. THe
+// actual prod code could use `crate::`, but doc tests can't because they're not "inside" the crate.
+// relies on `crate::`
+extern crate self as delta_kernel_ffi;
 
 pub mod scan;
 
@@ -66,9 +75,10 @@ impl Iterator for EngineIterator {
 /// references to the slice or its data that could outlive the function call.
 ///
 /// ```
-/// fn wants_slice(slice: KernelStringSlice) { ... }
-/// let msg = String::from(...);
-/// wants_slice(msg.as_ref().into());
+/// # use delta_kernel_ffi::KernelStringSlice;
+/// fn wants_slice(slice: KernelStringSlice) { }
+/// let msg = String::from("hello");
+/// wants_slice(msg.into());
 /// ```
 #[repr(C)]
 pub struct KernelStringSlice {
