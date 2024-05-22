@@ -68,7 +68,7 @@ impl Iterator for EngineIterator {
 /// ```
 /// fn wants_slice(slice: KernelStringSlice) { ... }
 /// let msg = String::from(...);
-/// wants_slice(msg.as_ref().into());
+/// wants_slice(msg.into());
 /// ```
 #[repr(C)]
 pub struct KernelStringSlice {
