@@ -114,19 +114,20 @@ impl StructField {
             .get(ColumnMetadataKey::ColumnMappingPhysicalName.as_ref());
         match (mapping_mode, name_mapped_name) {
             (ColumnMappingMode::None, _) => Ok(self.name.as_str()),
-            (ColumnMappingMode::Name, None) => {
-                Err(Error::MissingData(
-                    format!("No {} key found in field metadata",
-                            ColumnMetadataKey::ColumnMappingPhysicalName.as_ref())
-                ))
-            }
+            (ColumnMappingMode::Name, None) => Err(Error::MissingData(format!(
+                "No {} key found in field metadata",
+                ColumnMetadataKey::ColumnMappingPhysicalName.as_ref()
+            ))),
             (ColumnMappingMode::Name, Some(val)) => match val {
-                MetadataValue::Number(_) => {
-                    Err(Error::generic("{ColumnMetadataKey::ColumnMappingPhysicalName} must be a string in name mapping mode"))
-                }
+                MetadataValue::Number(_) => Err(Error::Generic(format!(
+                    "{} must be a string in name mapping mode",
+                    ColumnMetadataKey::ColumnMappingPhysicalName.as_ref()
+                ))),
                 MetadataValue::String(name) => Ok(name),
+            },
+            (ColumnMappingMode::Id, _) => {
+                Err(Error::generic("Don't support id column mapping yet"))
             }
-            (ColumnMappingMode::Id, _) => Err(Error::generic("Don't support id column mapping yet")),
         }
     }
 
