@@ -295,10 +295,11 @@ pub unsafe extern "C" fn get_from_map(
     key: KernelStringSlice,
     allocate_fn: AllocateStringFn,
 ) -> NullableCvoid {
-    let string_key = String::try_from_slice(key);
+    // TODO: Return ExternResult to caller instead of panicking?
+    let string_key = unsafe { String::try_from_slice(key) };
     map.values
-        .get(&string_key)
-        .and_then(|v| allocate_fn(v.as_str().into()))
+        .get(&string_key.unwrap())
+        .and_then(|v| allocate_fn(v.into()))
 }
 
 /// Get a selection vector out of a [`DvInfo`] struct

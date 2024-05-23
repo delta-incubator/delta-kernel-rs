@@ -84,6 +84,18 @@ fn bool_to_boolean(b: bool) -> TokenStream2 {
 }
 
 /// Macro for conveniently deriving a `delta_kernel_ffi::handle::HandleDescriptor`.
+///
+/// When targeting a struct, it is invoked with three arguments:
+/// ```ignore
+/// #[handle_descriptor(target = Foo, mutable = false. sized = true)]
+/// pub struct SharedFoo;
+/// ```
+///
+/// When targeting a trait, two arguments suffice (`sized = false` is implied):
+/// ```ignore
+/// #[handle_descriptor(target = dyn Bar, mutable = true)]
+/// pub struct MutableBar;
+/// ```
 #[proc_macro_attribute]
 pub fn handle_descriptor(attr: TokenStream, item: TokenStream) -> TokenStream {
     let descriptor_params = parse_macro_input!(attr as HandleDescriptorParams);

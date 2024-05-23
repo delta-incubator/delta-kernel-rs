@@ -40,4 +40,4 @@ default-engine = [
   "arrow-schema"
 ]
 sync-engine = ["delta_kernel/sync-engine"]
-doc-tests = []
+developer-visibility = []
