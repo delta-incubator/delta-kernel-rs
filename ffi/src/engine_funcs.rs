@@ -5,10 +5,10 @@ use std::sync::Arc;
 use delta_kernel::{schema::Schema, DeltaResult, Error, FileDataReadResultIterator};
 use delta_kernel_ffi_macros::handle_descriptor;
 use tracing::debug;
+use url::Url;
 
 use crate::{
-    unwrap_and_parse_path_as_url, EngineData, ExternEngine, ExternResult, IntoExternResult,
-    KernelStringSlice, NullableCvoid, SharedExternEngine,
+    scan::SharedSchema, EngineData, ExternEngine, ExternResult, IntoExternResult, KernelStringSlice, NullableCvoid, SharedExternEngine, TryFromStringSlice
 };
 
 use super::handle::Handle;
@@ -24,7 +24,8 @@ impl TryFrom<&FileMeta> for delta_kernel::FileMeta {
     type Error = Error;
 
     fn try_from(fm: &FileMeta) -> Result<Self, Error> {
-        let location = unsafe { unwrap_and_parse_path_as_url(fm.path.clone()) }?;
+        let path = unsafe { String::try_from_slice(fm.path.clone()) };
+        let location = Url::parse(&path)?;
         Ok(delta_kernel::FileMeta {
             location,
             last_modified: fm.last_modified,
@@ -110,22 +111,28 @@ pub unsafe extern "C" fn free_read_result_iter(data: Handle<MutFileReadResultIte
 pub unsafe extern "C" fn read_parquet_files(
     engine: Handle<SharedExternEngine>,
     file: &FileMeta,
-    physical_schema: &Schema,
+    physical_schema: Handle<SharedSchema>,
 ) -> ExternResult<Handle<MutFileReadResultIterator>> {
     let extern_engine = unsafe { engine.clone_as_arc() };
-    read_parquet_files_impl(extern_engine, file, physical_schema).into_extern_result(engine)
+    let physical_schema = unsafe { physical_schema.clone_as_arc() };
+    let res = read_parquet_files_impl(extern_engine, file, physical_schema);
+    println!("{}", res.is_ok());
+    if let Err(ref e) = res {
+        println!("{:#?}", e);
+    }
+    res.into_extern_result(engine)
 }
 
 fn read_parquet_files_impl(
     extern_engine: Arc<dyn ExternEngine>,
     file: &FileMeta,
-    physical_schema: &Schema,
+    physical_schema: Arc<Schema>,
 ) -> DeltaResult<Handle<MutFileReadResultIterator>> {
     let engine = extern_engine.engine();
     let delta_fm: delta_kernel::FileMeta = file.try_into()?;
     let parquet_handler = engine.get_parquet_handler();
     let data =
-        parquet_handler.read_parquet_files(&[delta_fm], Arc::new(physical_schema.clone()), None)?;
+        parquet_handler.read_parquet_files(&[delta_fm], physical_schema, None)?;
     let res = Box::new(FileReadResultIterator {
         data,
         engine: extern_engine.clone(),

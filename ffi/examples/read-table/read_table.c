@@ -197,6 +197,9 @@ int main(int argc, char* argv[]) {
   printf("version: %" PRIu64 "\n\n", v);
   print_schema(snapshot);
 
+  char* table_root = snapshot_table_root(snapshot, allocate_string);
+  print_diag("Table root: %s\n", table_root);
+
   print_diag("Starting table scan\n\n");
 
   ExternResultHandleSharedScan scan_res = scan(snapshot, engine, NULL);
@@ -212,7 +215,7 @@ int main(int argc, char* argv[]) {
   struct EngineContext context = {
     global_state,
     read_schema,
-    table_path,
+    table_root,
     engine,
     partition_cols,
     .partition_values = NULL,
@@ -258,6 +261,7 @@ int main(int argc, char* argv[]) {
   free_global_scan_state(global_state);
   drop_snapshot(snapshot);
   drop_engine(engine);
+  free(context.table_root);
 
   return 0;
 }

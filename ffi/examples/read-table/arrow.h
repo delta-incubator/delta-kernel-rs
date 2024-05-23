@@ -14,7 +14,7 @@ typedef struct ArrowContext {
 ArrowContext* init_arrow_context() {
   ArrowContext* context = malloc(sizeof(ArrowContext));
   context->num_batches = 0;
-  context->batches = calloc(0, sizeof(GArrowRecordBatch*));
+  context->batches = NULL;
   context->cur_filter = NULL;
   return context;
 }
@@ -57,7 +57,7 @@ static GArrowRecordBatch* get_record_batch(FFI_ArrowArray* array, GArrowSchema* 
 // for simplicity
 static GArrowRecordBatch* add_partition_columns(GArrowRecordBatch* record_batch,
                                                 PartitionList* partition_cols,
-                                                CStringMap* partition_values) {
+                                                const CStringMap* partition_values) {
   gint64 rows = garrow_record_batch_get_n_rows(record_batch);
   gint64 cols = garrow_record_batch_get_n_columns(record_batch);
   GArrowRecordBatch* cur_record_batch = record_batch;
@@ -114,7 +114,7 @@ static GArrowRecordBatch* add_partition_columns(GArrowRecordBatch* record_batch,
 static void add_batch_to_context(ArrowContext* context,
                                  ArrowFFIData* arrow_data,
                                  PartitionList* partition_cols,
-                                 CStringMap* partition_values) {
+                                 const CStringMap* partition_values) {
   GArrowSchema* schema = get_schema(&arrow_data->schema);
   GArrowRecordBatch* record_batch = get_record_batch(&arrow_data->array, schema);
   if (context->cur_filter != NULL) {
@@ -171,7 +171,7 @@ static GArrowBooleanArray* slice_to_arrow_bool_array(const KernelBoolSlice slice
 }
 
 // This is the callback that will be called for each chunk of data read from the parquet file
-static void visit_read_data(void* vcontext, EngineDataHandle* data) {
+static void visit_read_data(void* vcontext, EngineData* data) {
   print_diag("  Converting read data to arrow\n");
   struct EngineContext* context = vcontext;
   ExternResultArrowFFIData arrow_res = get_raw_arrow_data(data, context->engine);
@@ -197,9 +197,9 @@ void read_parquet_file(struct EngineContext* context,
   FileMeta meta = {
     .path = path_slice,
   };
-  ExternResultFileReadResultIterator read_res =
+  ExternResultHandleMutFileReadResultIterator read_res =
     read_parquet_files(context->engine, &meta, context->read_schema);
-  if (read_res.tag != OkFileReadResultIterator) {
+  if (read_res.tag != OkHandleMutFileReadResultIterator) {
     printf("Couldn't read data\n");
     return;
   }
@@ -210,7 +210,7 @@ void read_parquet_file(struct EngineContext* context,
     }
     context->arrow_context->cur_filter = sel_array;
   }
-  FileReadResultIterator* read_iter = read_res.ok;
+  MutFileReadResultIterator* read_iter = read_res.ok;
   for (;;) {
     ExternResultbool ok_res = read_result_next(read_iter, context, visit_read_data);
     if (ok_res.tag != Okbool) {

@@ -626,6 +626,19 @@ pub unsafe extern "C" fn version(snapshot: Handle<SharedSnapshot>) -> u64 {
     snapshot.version()
 }
 
+/// Get the resolved root of the table. This should be used in any future calls that require
+/// constructing a path
+///
+/// # Safety
+///
+/// Caller is responsible for passing a valid handle.
+#[no_mangle]
+pub unsafe extern "C" fn snapshot_table_root(snapshot: Handle<SharedSnapshot>, allocate_fn: AllocateStringFn) -> NullableCvoid {
+    let snapshot = unsafe { snapshot.as_ref() };
+    allocate_fn(snapshot.table_root().to_string().as_str().into())
+}
+
+
 type StringIter = dyn Iterator<Item = String> + Send;
 
 #[handle_descriptor(target=StringIter, mutable=true, sized=false)]

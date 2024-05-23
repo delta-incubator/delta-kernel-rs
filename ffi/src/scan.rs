@@ -22,6 +22,7 @@ use super::handle::Handle;
 ///
 /// # Safety
 /// `data_handle` must be a valid pointer to a kernel allocated `EngineDataHandle`
+#[no_mangle]
 pub unsafe extern "C" fn engine_data_length(data: &mut Handle<EngineData>) -> usize {
     let data = unsafe { data.as_mut() };
     data.length()
@@ -53,8 +54,7 @@ unsafe fn get_raw_engine_data_impl(data: &mut Handle<EngineData>) -> &mut dyn Ke
 /// Interface](https://arrow.apache.org/docs/format/CDataInterface.html). This includes the data and
 /// the schema.
 #[cfg(feature = "default-engine")]
-// FIXME: cbindgen doesn't recognize the FFI_ArrowFoo fields in this struct
-//#[repr(C)]
+#[repr(C)]
 pub struct ArrowFFIData {
     pub array: arrow_data::ffi::FFI_ArrowArray,
     pub schema: arrow_schema::ffi::FFI_ArrowSchema,
@@ -336,7 +336,7 @@ pub struct CStringMap {
 ///
 /// The engine is responsible for providing a valid [`CStringMap`] pointer and [`KernelStringSlice`]
 pub unsafe extern "C" fn get_from_map(
-    map: &mut CStringMap,
+    map: &CStringMap,
     key: KernelStringSlice,
     allocate_fn: AllocateStringFn,
 ) -> NullableCvoid {
