@@ -3,14 +3,15 @@
 use std::sync::Arc;
 
 use delta_kernel::{schema::Schema, DeltaResult, Error, FileDataReadResultIterator};
+use delta_kernel_ffi_macros::handle_descriptor;
 use tracing::debug;
 
 use crate::{
-    handle::{ArcHandle, BoxHandle},
-    scan::EngineDataHandle,
-    unwrap_and_parse_path_as_url, ExternEngine, ExternEngineHandle, ExternResult, IntoExternResult,
-    KernelStringSlice, NullableCvoid,
+    unwrap_and_parse_path_as_url, EngineData, ExternEngine, ExternResult, IntoExternResult,
+    KernelStringSlice, NullableCvoid, SharedExternEngine,
 };
+
+use super::handle::Handle;
 
 #[repr(C)]
 pub struct FileMeta {
@@ -44,7 +45,8 @@ pub struct FileReadResultIterator {
     engine: Arc<dyn ExternEngine>,
 }
 
-impl BoxHandle for FileReadResultIterator {}
+#[handle_descriptor(target=FileReadResultIterator, mutable=true, sized=true)]
+pub struct MutFileReadResultIterator;
 
 impl Drop for FileReadResultIterator {
     fn drop(&mut self) {
@@ -59,28 +61,28 @@ impl Drop for FileReadResultIterator {
 /// [`free_read_result_iter`]. The visitor function pointer must be non-null.
 #[no_mangle]
 pub unsafe extern "C" fn read_result_next(
-    data: &mut FileReadResultIterator,
+    mut data: Handle<MutFileReadResultIterator>,
     engine_context: NullableCvoid,
     engine_visitor: extern "C" fn(
         engine_context: NullableCvoid,
-        engine_data: *mut EngineDataHandle,
+        engine_data: Handle<EngineData>,
     ),
 ) -> ExternResult<bool> {
-    read_result_next_impl(data, engine_context, engine_visitor)
-        .into_extern_result(data.engine.error_allocator())
+    let iter = unsafe { data.as_mut() };
+    read_result_next_impl(iter, engine_context, engine_visitor)
+        .into_extern_result(iter.engine.error_allocator())
 }
 
 fn read_result_next_impl(
-    data: &mut FileReadResultIterator,
+    iter: &mut FileReadResultIterator,
     engine_context: NullableCvoid,
     engine_visitor: extern "C" fn(
         engine_context: NullableCvoid,
-        engine_data: *mut EngineDataHandle,
+        engine_data: Handle<EngineData>,
     ),
 ) -> DeltaResult<bool> {
-    if let Some(data) = data.data.next().transpose()? {
-        let data_handle = BoxHandle::into_handle(EngineDataHandle { data });
-        (engine_visitor)(engine_context, data_handle);
+    if let Some(data) = iter.data.next().transpose()? {
+        (engine_visitor)(engine_context, data.into());
         // TODO: calling `into_raw` in the visitor causes this to segfault
         //       perhaps the callback needs to indicate if it took ownership or not
         // unsafe { BoxHandle::drop_handle(data_handle) };
@@ -96,8 +98,8 @@ fn read_result_next_impl(
 /// Caller is responsible for (at most once) passing a valid pointer returned by a call to
 /// [`read_parquet_files`].
 #[no_mangle]
-pub unsafe extern "C" fn free_read_result_iter(data: *mut FileReadResultIterator) {
-    BoxHandle::drop_handle(data);
+pub unsafe extern "C" fn free_read_result_iter(data: Handle<MutFileReadResultIterator>) {
+    data.drop_handle();
 }
 
 /// Use the specified engine's [`delta_kernel::ParquetHandler`] to read the specified file.
@@ -106,27 +108,27 @@ pub unsafe extern "C" fn free_read_result_iter(data: *mut FileReadResultIterator
 /// Caller is responsible for calling with a valid `ExternEngineHandle` and `FileMeta`
 #[no_mangle]
 pub unsafe extern "C" fn read_parquet_files(
-    extern_engine: *const ExternEngineHandle,
+    engine: Handle<SharedExternEngine>,
     file: &FileMeta,
     physical_schema: &Schema,
-) -> ExternResult<*mut FileReadResultIterator> {
-    read_parquet_files_impl(extern_engine, file, physical_schema).into_extern_result(extern_engine)
+) -> ExternResult<Handle<MutFileReadResultIterator>> {
+    let extern_engine = unsafe { engine.clone_as_arc() };
+    read_parquet_files_impl(extern_engine, file, physical_schema).into_extern_result(engine)
 }
 
-unsafe fn read_parquet_files_impl(
-    extern_engine: *const ExternEngineHandle,
+fn read_parquet_files_impl(
+    extern_engine: Arc<dyn ExternEngine>,
     file: &FileMeta,
     physical_schema: &Schema,
-) -> DeltaResult<*mut FileReadResultIterator> {
-    let extern_engine = unsafe { ArcHandle::clone_as_arc(extern_engine) };
+) -> DeltaResult<Handle<MutFileReadResultIterator>> {
     let engine = extern_engine.engine();
     let delta_fm: delta_kernel::FileMeta = file.try_into()?;
     let parquet_handler = engine.get_parquet_handler();
     let data =
         parquet_handler.read_parquet_files(&[delta_fm], Arc::new(physical_schema.clone()), None)?;
-    let res = FileReadResultIterator {
+    let res = Box::new(FileReadResultIterator {
         data,
         engine: extern_engine.clone(),
-    };
-    Ok(res.into_handle())
+    });
+    Ok(res.into())
 }

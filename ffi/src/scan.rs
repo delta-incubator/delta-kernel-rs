@@ -4,36 +4,27 @@ use std::collections::HashMap;
 use std::ffi::c_void;
 use std::sync::{Arc, Mutex};
 
+use delta_kernel::{DeltaResult, EngineData as KernelEngineData, Error};
 use delta_kernel::scan::state::{visit_scan_files, DvInfo, GlobalScanState};
 use delta_kernel::scan::{Scan, ScanBuilder, ScanData};
 use delta_kernel::schema::Schema;
-use delta_kernel::{DeltaResult, EngineData as KernelEngineData, Error};
 use delta_kernel_ffi_macros::handle_descriptor;
 use tracing::debug;
 use url::Url;
 
 use crate::{
-    unwrap_kernel_expression, AllocateStringFn, EnginePredicate, ExternEngine, ExternResult,
-    IntoExternResult, KernelBoolSlice, KernelExpressionVisitorState, KernelStringSlice,
-    NullableCvoid, SharedExternEngine, SharedSnapshot, StringSliceIterator, TryFromStringSlice,
+    unwrap_kernel_expression, AllocateStringFn, EngineData, EnginePredicate, ExternEngine, ExternResult, IntoExternResult, KernelBoolSlice, KernelExpressionVisitorState, KernelStringSlice, NullableCvoid, SharedExternEngine, SharedSnapshot, StringIter, StringSliceIterator, TryFromStringSlice
 };
 
 use super::handle::Handle;
-
-// TODO: Do we want this handle at all? Perhaps we should just _always_ pass raw *mut c_void pointers
-// that are the engine data? Even if we want the type, should it be a shared handle instead?
-/// an opaque struct that encapsulates data read by an engine. this handle can be passed back into
-/// some kernel calls to operate on the data, or can be converted into the raw data as read by the
-/// [`delta_kernel::Engine`] by calling [`get_raw_engine_data`]
-#[handle_descriptor(target=dyn KernelEngineData, mutable=true, sized=false)]
-pub struct EngineData;
 
 /// Get the number of rows in an engine data
 ///
 /// # Safety
 /// `data_handle` must be a valid pointer to a kernel allocated `EngineDataHandle`
-pub unsafe extern "C" fn engine_data_length(data_handle: &EngineDataHandle) -> usize {
-    data_handle.data.length()
+pub unsafe extern "C" fn engine_data_length(data: &mut Handle<EngineData>) -> usize {
+    let data = unsafe { data.as_mut() };
+    data.length()
 }
 
 /// Allow an engine to "unwrap" an [`EngineData`] into the raw pointer for the case it wants
@@ -172,8 +163,9 @@ pub unsafe extern "C" fn get_global_scan_state(
 /// # Safety
 /// Engine is responsible for providing a valid GlobalScanState pointer
 #[no_mangle]
-pub unsafe extern "C" fn get_global_read_schema(state: &GlobalScanState) -> *mut Schema {
-    BoxHandle::into_handle(state.read_schema.clone())
+pub unsafe extern "C" fn get_global_read_schema(state: Handle<SharedGlobalScanState>) -> Handle<SharedSchema> {
+    let state = unsafe { state.as_ref() };
+    Arc::new(state.read_schema.clone()).into()
 }
 
 /// Free a global read schema
@@ -181,8 +173,8 @@ pub unsafe extern "C" fn get_global_read_schema(state: &GlobalScanState) -> *mut
 /// # Safety
 /// Engine is responsible for providing a valid schema obtained via [`get_global_read_schema`]
 #[no_mangle]
-pub unsafe extern "C" fn free_global_read_schema(schema: *mut Schema) {
-    BoxHandle::drop_handle(schema);
+pub unsafe extern "C" fn free_global_read_schema(schema: Handle<SharedSchema>) {
+    schema.drop_handle();
 }
 
 /// Get a count of the number of partition columns for this scan
@@ -201,9 +193,9 @@ pub unsafe extern "C" fn get_partition_column_count(state: &GlobalScanState) -> 
 #[no_mangle]
 pub unsafe extern "C" fn get_partition_columns(
     state: &GlobalScanState,
-) -> *mut StringSliceIterator {
-    let iter = Box::new(state.partition_columns.clone().into_iter());
-    StringSliceIterator { data: iter }.into_handle()
+) -> Handle<StringSliceIterator> {
+    let iter: Box<StringIter> = Box::new(state.partition_columns.clone().into_iter());
+    iter.into()
 }
 
 /// # Safety

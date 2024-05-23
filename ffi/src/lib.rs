@@ -13,7 +13,7 @@ use url::Url;
 use delta_kernel::expressions::{BinaryOperator, Expression, Scalar};
 use delta_kernel::schema::{ArrayType, DataType, MapType, PrimitiveType, StructType};
 use delta_kernel::snapshot::Snapshot;
-use delta_kernel::{DeltaResult, Engine, Error, Table};
+use delta_kernel::{DeltaResult, Engine, EngineData as KernelEngineData, Error, Table};
 use delta_kernel_ffi_macros::handle_descriptor;
 
 pub(crate) mod handle;
@@ -193,6 +193,15 @@ pub unsafe extern "C" fn drop_bool_slice(slice: KernelBoolSlice) {
     let vec = unsafe { slice.into_vec() };
     debug!("Dropping bool slice. It is {vec:#?}");
 }
+
+// TODO: Do we want this handle at all? Perhaps we should just _always_ pass raw *mut c_void pointers
+// that are the engine data? Even if we want the type, should it be a shared handle instead?
+/// an opaque struct that encapsulates data read by an engine. this handle can be passed back into
+/// some kernel calls to operate on the data, or can be converted into the raw data as read by the
+/// [`delta_kernel::Engine`] by calling [`get_raw_engine_data`]
+#[handle_descriptor(target=dyn KernelEngineData, mutable=true, sized=false)]
+pub struct EngineData;
+
 
 #[repr(C)]
 #[derive(Debug)]
@@ -617,20 +626,10 @@ pub unsafe extern "C" fn version(snapshot: Handle<SharedSnapshot>) -> u64 {
     snapshot.version()
 }
 
-// Intentionally opaque to the engine.
-pub struct StringSliceIterator {
-    // Box -> Wrap its unsized content this struct is fixed-size with thin pointers.
-    // Item = String
-    data: Box<dyn Iterator<Item = String> + Send + Sync>,
-}
+type StringIter = dyn Iterator<Item = String> + Send;
 
-impl BoxHandle for StringSliceIterator {}
-
-impl Drop for StringSliceIterator {
-    fn drop(&mut self) {
-        debug!("dropping StringSliceIterator");
-    }
-}
+#[handle_descriptor(target=StringIter, mutable=true, sized=false)]
+pub struct StringSliceIterator;
 
 /// # Safety
 ///
@@ -638,7 +637,7 @@ impl Drop for StringSliceIterator {
 /// [kernel_scan_data_free]. The visitor function pointer must be non-null.
 #[no_mangle]
 pub unsafe extern "C" fn string_slice_next(
-    data: &mut StringSliceIterator,
+    data: Handle<StringSliceIterator>,
     engine_context: NullableCvoid,
     engine_visitor: extern "C" fn(engine_context: NullableCvoid, slice: KernelStringSlice),
 ) -> bool {
@@ -646,11 +645,12 @@ pub unsafe extern "C" fn string_slice_next(
 }
 
 fn string_slice_next_impl(
-    data: &mut StringSliceIterator,
+    mut data: Handle<StringSliceIterator>,
     engine_context: NullableCvoid,
     engine_visitor: extern "C" fn(engine_context: NullableCvoid, slice: KernelStringSlice),
 ) -> bool {
-    if let Some(data) = data.data.next() {
+    let data = unsafe { data.as_mut() };
+    if let Some(data) = data.next() {
         (engine_visitor)(engine_context, data.as_str().into());
         true
     } else {
@@ -662,8 +662,8 @@ fn string_slice_next_impl(
 ///
 /// Caller is responsible for (at most once) passing a valid pointer to a [`StringSliceIterator`]
 #[no_mangle]
-pub unsafe extern "C" fn string_slice_data_free(data: *mut StringSliceIterator) {
-    BoxHandle::drop_handle(data)
+pub unsafe extern "C" fn free_string_slice_data(data: Handle<StringSliceIterator>) {
+    data.drop_handle();
 }
 
 /// The `EngineSchemaVisitor` defines a visitor system to allow engines to build their own
