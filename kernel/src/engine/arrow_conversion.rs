@@ -203,7 +203,7 @@ impl TryFrom<&ArrowDataType> for DataType {
             ArrowDataType::FixedSizeBinary(_) => Ok(DataType::Primitive(PrimitiveType::Binary)),
             ArrowDataType::LargeBinary => Ok(DataType::Primitive(PrimitiveType::Binary)),
             ArrowDataType::Decimal128(p, s) => {
-                if s < &0 {
+                if *s < 0 {
                     return Err(ArrowError::from_external_error(
                         Error::invalid_decimal("Negative scales are not supported in Delta").into(),
                     ));
