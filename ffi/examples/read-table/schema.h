@@ -195,11 +195,11 @@ void free_builder(SchemaBuilder builder) {
 }
 
 // Print the schema of the snapshot
-void print_schema(const SnapshotHandle* snapshot) {
+void print_schema(SharedSnapshot* snapshot) {
   print_diag("Building schema\n");
   SchemaBuilder builder = {
     .list_count = 0,
-    .lists = calloc(0, sizeof(SchemaItem*)),
+    .lists = NULL,
   };
   EngineSchemaVisitor visitor = { .data = &builder,
                                   .make_field_list = make_field_list,

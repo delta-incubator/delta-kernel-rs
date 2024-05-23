@@ -25,12 +25,12 @@ typedef struct PartitionList {
 // This is information we want to pass between callbacks. The kernel will generally take a `void*`
 // "context" argument, and then pass it back when calling a callback.
 struct EngineContext {
-  GlobalScanState* global_state;
-  Schema* read_schema;
+  SharedGlobalScanState* global_state;
+  SharedSchema* read_schema;
   char* table_root;
-  const ExternEngineHandle* engine;
+  SharedExternEngine* engine;
   PartitionList* partition_cols;
-  CStringMap* partition_values;
+  const CStringMap* partition_values;
 #ifdef PRINT_ARROW_DATA
   struct ArrowContext* arrow_context;
 #endif

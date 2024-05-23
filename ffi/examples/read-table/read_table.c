@@ -22,7 +22,7 @@ void print_selection_vector(const char* indent, const KernelBoolSlice* selection
 }
 
 // Print info about table partitions if `VERBOSE` is defined in read_table.h
-void print_partition_info(struct EngineContext* context, CStringMap* partition_values) {
+void print_partition_info(struct EngineContext* context, const CStringMap* partition_values) {
 #ifdef VERBOSE
   for (int i = 0; i < context->partition_cols->len; i++) {
     char* col = context->partition_cols->cols[i];
@@ -61,10 +61,10 @@ void set_builder_opt(EngineBuilder* engine_builder, char* key, char* val) {
 // Kernel will call this function for each file that should be scanned. The arguments include enough
 // context to constuct the correct logical data from the physically read parquet
 void scan_row_callback(void* engine_context,
-                       const KernelStringSlice path,
-                       long size,
+                       KernelStringSlice path,
+                       int64_t size,
                        const DvInfo* dv_info,
-                       CStringMap* partition_values) {
+                       const CStringMap* partition_values) {
   (void)size; // not using this at the moment
   struct EngineContext* context = engine_context;
   print_diag("Called back to read file: %.*s\n", (int)path.len, path.ptr);
@@ -93,7 +93,7 @@ void scan_row_callback(void* engine_context,
 // For each chunk of scan data (which may contain multiple files to scan), kernel will call this
 // function (named do_visit_scan_data to avoid conflict with visit_scan_data exported by kernel)
 void do_visit_scan_data(void* engine_context,
-                        EngineDataHandle* engine_data,
+                        EngineData* engine_data,
                         KernelBoolSlice selection_vec) {
   print_diag("\nScan iterator found some data to read\n  Of this data, here is "
              "a selection vector\n");
@@ -115,7 +115,7 @@ void visit_partition(void* context, const KernelStringSlice partition) {
 }
 
 // Build a list of partition column names.
-PartitionList* get_partition_list(GlobalScanState* state) {
+PartitionList* get_partition_list(SharedGlobalScanState* state) {
   print_diag("Building list of partition columns\n");
   int count = get_partition_column_count(state);
   PartitionList* list = malloc(sizeof(PartitionList));
@@ -170,45 +170,44 @@ int main(int argc, char* argv[]) {
   // potentially set credentials here
   // set_builder_opt(engine_builder, "aws_access_key_id" , "[redacted]");
   // set_builder_opt(engine_builder, "aws_secret_access_key", "[redacted]");
-  ExternResultExternEngineHandle engine_res = builder_build(engine_builder);
+  ExternResultHandleSharedExternEngine engine_res = builder_build(engine_builder);
 
   // alternately if we don't care to set any options on the builder:
   // ExternResultExternEngineHandle engine_res =
   //   get_default_engine(table_path_slice, NULL);
 
-  if (engine_res.tag != OkExternEngineHandle) {
+  if (engine_res.tag != OkHandleSharedExternEngine) {
     print_error("File to get engine", (Error*)engine_builder_res.err);
     free_error((Error*)engine_builder_res.err);
     return -1;
   }
 
-  const ExternEngineHandle* engine = engine_res.ok;
+  SharedExternEngine* engine = engine_res.ok;
 
-  ExternResultSnapshotHandle snapshot_handle_res = snapshot(table_path_slice, engine);
-  if (snapshot_handle_res.tag != OkSnapshotHandle) {
-    print_error("Failed to create snapshot.", (Error*)snapshot_handle_res.err);
-    free_error((Error*)snapshot_handle_res.err);
+  ExternResultHandleSharedSnapshot snapshot_res = snapshot(table_path_slice, engine);
+  if (snapshot_res.tag != OkHandleSharedSnapshot) {
+    print_error("Failed to create snapshot.", (Error*)snapshot_res.err);
+    free_error((Error*)snapshot_res.err);
     return -1;
   }
 
-  const SnapshotHandle* snapshot_handle = snapshot_handle_res.ok;
+  SharedSnapshot* snapshot = snapshot_res.ok;
 
-  uint64_t v = version(snapshot_handle);
+  uint64_t v = version(snapshot);
   printf("version: %" PRIu64 "\n\n", v);
-  print_schema(snapshot_handle);
+  print_schema(snapshot);
 
   print_diag("Starting table scan\n\n");
 
-  ExternResultScan scan_res = scan(snapshot_handle, engine, NULL);
-  if (scan_res.tag != OkScan) {
-    print_error("Failed to create scan.", (Error*)scan_res.err);
-    free_error((Error*)scan_res.err);
+  ExternResultHandleSharedScan scan_res = scan(snapshot, engine, NULL);
+  if (scan_res.tag != OkHandleSharedScan) {
+    printf("Failed to create scan\n");
     return -1;
   }
 
-  Scan* scan = scan_res.ok;
-  GlobalScanState* global_state = get_global_scan_state(scan);
-  Schema* read_schema = get_global_read_schema(global_state);
+  SharedScan* scan = scan_res.ok;
+  SharedGlobalScanState* global_state = get_global_scan_state(scan);
+  SharedSchema* read_schema = get_global_read_schema(global_state);
   PartitionList* partition_cols = get_partition_list(global_state);
   struct EngineContext context = {
     global_state,
@@ -222,14 +221,14 @@ int main(int argc, char* argv[]) {
 #endif
   };
 
-  ExternResultKernelScanDataIterator data_iter_res = kernel_scan_data_init(engine, scan);
-  if (data_iter_res.tag != OkKernelScanDataIterator) {
+  ExternResultHandleSharedScanDataIterator data_iter_res = kernel_scan_data_init(engine, scan);
+  if (data_iter_res.tag != OkHandleSharedScanDataIterator) {
     print_error("Failed to construct scan data iterator.", (Error*)data_iter_res.err);
     free_error((Error*)data_iter_res.err);
     return -1;
   }
 
-  KernelScanDataIterator* data_iter = data_iter_res.ok;
+  SharedScanDataIterator* data_iter = data_iter_res.ok;
 
   print_diag("\nIterating scan data\n");
 
@@ -257,7 +256,7 @@ int main(int argc, char* argv[]) {
   free_kernel_scan_data(data_iter);
   free_global_read_schema(read_schema);
   free_global_scan_state(global_state);
-  drop_snapshot(snapshot_handle);
+  drop_snapshot(snapshot);
   drop_engine(engine);
 
   return 0;

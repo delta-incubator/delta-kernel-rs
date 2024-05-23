@@ -182,7 +182,8 @@ pub unsafe extern "C" fn free_global_read_schema(schema: Handle<SharedSchema>) {
 /// # Safety
 /// Caller is responsible for passing a valid global scan pointer.
 #[no_mangle]
-pub unsafe extern "C" fn get_partition_column_count(state: &GlobalScanState) -> usize {
+pub unsafe extern "C" fn get_partition_column_count(state: Handle<SharedGlobalScanState>) -> usize {
+    let state = unsafe { state.as_ref() };
     state.partition_columns.len()
 }
 
@@ -192,8 +193,9 @@ pub unsafe extern "C" fn get_partition_column_count(state: &GlobalScanState) -> 
 /// Caller is responsible for passing a valid global scan pointer.
 #[no_mangle]
 pub unsafe extern "C" fn get_partition_columns(
-    state: &GlobalScanState,
+    state: Handle<SharedGlobalScanState>,
 ) -> Handle<StringSliceIterator> {
+    let state = unsafe { state.as_ref() };
     let iter: Box<StringIter> = Box::new(state.partition_columns.clone().into_iter());
     iter.into()
 }
@@ -201,7 +203,8 @@ pub unsafe extern "C" fn get_partition_columns(
 /// # Safety
 ///
 /// Caller is responsible for passing a valid global scan state pointer.
-pub unsafe extern "C" fn drop_global_scan_state(state: Handle<SharedGlobalScanState>) {
+#[no_mangle]
+pub unsafe extern "C" fn free_global_scan_state(state: Handle<SharedGlobalScanState>) {
     state.drop_handle();
 }
 
