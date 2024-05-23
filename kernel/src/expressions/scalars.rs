@@ -85,7 +85,7 @@ impl Display for Scalar {
                 }
                 Ordering::Less => {
                     write!(f, "{}", value)?;
-                    for _ in 0..(*scale) {
+                    for _ in 0..*scale {
                         write!(f, "0")?;
                     }
                     Ok(())
