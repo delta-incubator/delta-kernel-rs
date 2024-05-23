@@ -8,7 +8,8 @@ use tracing::debug;
 use url::Url;
 
 use crate::{
-    scan::SharedSchema, EngineData, ExternEngine, ExternResult, IntoExternResult, KernelStringSlice, NullableCvoid, SharedExternEngine, TryFromStringSlice
+    scan::SharedSchema, EngineData, ExternEngine, ExternResult, IntoExternResult,
+    KernelStringSlice, NullableCvoid, SharedExternEngine, TryFromStringSlice,
 };
 
 use super::handle::Handle;
@@ -64,10 +65,7 @@ impl Drop for FileReadResultIterator {
 pub unsafe extern "C" fn read_result_next(
     mut data: Handle<MutFileReadResultIterator>,
     engine_context: NullableCvoid,
-    engine_visitor: extern "C" fn(
-        engine_context: NullableCvoid,
-        engine_data: Handle<EngineData>,
-    ),
+    engine_visitor: extern "C" fn(engine_context: NullableCvoid, engine_data: Handle<EngineData>),
 ) -> ExternResult<bool> {
     let iter = unsafe { data.as_mut() };
     read_result_next_impl(iter, engine_context, engine_visitor)
@@ -77,10 +75,7 @@ pub unsafe extern "C" fn read_result_next(
 fn read_result_next_impl(
     iter: &mut FileReadResultIterator,
     engine_context: NullableCvoid,
-    engine_visitor: extern "C" fn(
-        engine_context: NullableCvoid,
-        engine_data: Handle<EngineData>,
-    ),
+    engine_visitor: extern "C" fn(engine_context: NullableCvoid, engine_data: Handle<EngineData>),
 ) -> DeltaResult<bool> {
     if let Some(data) = iter.data.next().transpose()? {
         (engine_visitor)(engine_context, data.into());
@@ -131,8 +126,7 @@ fn read_parquet_files_impl(
     let engine = extern_engine.engine();
     let delta_fm: delta_kernel::FileMeta = file.try_into()?;
     let parquet_handler = engine.get_parquet_handler();
-    let data =
-        parquet_handler.read_parquet_files(&[delta_fm], physical_schema, None)?;
+    let data = parquet_handler.read_parquet_files(&[delta_fm], physical_schema, None)?;
     let res = Box::new(FileReadResultIterator {
         data,
         engine: extern_engine.clone(),

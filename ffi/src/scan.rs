@@ -4,16 +4,19 @@ use std::collections::HashMap;
 use std::ffi::c_void;
 use std::sync::{Arc, Mutex};
 
-use delta_kernel::{DeltaResult, EngineData as KernelEngineData, Error};
 use delta_kernel::scan::state::{visit_scan_files, DvInfo, GlobalScanState};
 use delta_kernel::scan::{Scan, ScanBuilder, ScanData};
 use delta_kernel::schema::Schema;
+use delta_kernel::{DeltaResult, EngineData as KernelEngineData, Error};
 use delta_kernel_ffi_macros::handle_descriptor;
 use tracing::debug;
 use url::Url;
 
 use crate::{
-    unwrap_kernel_expression, AllocateStringFn, EngineData, EnginePredicate, ExternEngine, ExternResult, IntoExternResult, KernelBoolSlice, KernelExpressionVisitorState, KernelStringSlice, NullableCvoid, SharedExternEngine, SharedSnapshot, StringIter, StringSliceIterator, TryFromStringSlice
+    unwrap_kernel_expression, AllocateStringFn, EngineData, EnginePredicate, ExternEngine,
+    ExternResult, IntoExternResult, KernelBoolSlice, KernelExpressionVisitorState,
+    KernelStringSlice, NullableCvoid, SharedExternEngine, SharedSnapshot, StringIter,
+    StringSliceIterator, TryFromStringSlice,
 };
 
 use super::handle::Handle;
@@ -163,7 +166,9 @@ pub unsafe extern "C" fn get_global_scan_state(
 /// # Safety
 /// Engine is responsible for providing a valid GlobalScanState pointer
 #[no_mangle]
-pub unsafe extern "C" fn get_global_read_schema(state: Handle<SharedGlobalScanState>) -> Handle<SharedSchema> {
+pub unsafe extern "C" fn get_global_read_schema(
+    state: Handle<SharedGlobalScanState>,
+) -> Handle<SharedSchema> {
     let state = unsafe { state.as_ref() };
     Arc::new(state.read_schema.clone()).into()
 }
