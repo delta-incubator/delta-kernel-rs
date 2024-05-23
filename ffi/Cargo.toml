@@ -7,7 +7,7 @@ license.workspace = true
 repository.workspace = true
 readme.workspace = true
 version.workspace = true
-build = false#"build.rs"
+build = "build.rs"
 
 [lib]
 crate-type = ["lib", "cdylib", "staticlib"]
