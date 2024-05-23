@@ -137,7 +137,7 @@ fn scan_impl(
             scan_builder = scan_builder.with_predicate(predicate);
         }
     }
-    Ok(Arc::new(scan_builder.build()).into())
+    Ok(Arc::new(scan_builder.build()?).into())
 }
 
 #[handle_descriptor(target=GlobalScanState, mutable=false, sized=true)]

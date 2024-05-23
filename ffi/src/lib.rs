@@ -227,6 +227,7 @@ pub enum KernelError {
     JoinFailureError,
     Utf8Error,
     ParseIntError,
+    InvalidColumnMappingMode,
     InvalidTableLocation,
 }
 
@@ -264,6 +265,7 @@ impl From<Error> for KernelError {
             Error::JoinFailure(_) => KernelError::JoinFailureError,
             Error::Utf8Error(_) => KernelError::Utf8Error,
             Error::ParseIntError(_) => KernelError::ParseIntError,
+            Error::InvalidColumnMappingMode(_) => KernelError::InvalidColumnMappingMode,
             Error::InvalidTableLocation(_) => KernelError::InvalidTableLocation,
             Error::Backtraced {
                 source,
