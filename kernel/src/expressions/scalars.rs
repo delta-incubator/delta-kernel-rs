@@ -144,7 +144,7 @@ impl PrimitiveType {
     /// Check if the given precision and scale are valid for a decimal type.
     pub fn check_decimal(precision: u8, scale: u8) -> DeltaResult<()> {
         require!(
-            precision > 0 && precision <= 38,
+            0 < precision && precision <= 38,
             Error::invalid_decimal(format!(
                 "precision must in range 1..38 inclusive, found: {}.",
                 precision
