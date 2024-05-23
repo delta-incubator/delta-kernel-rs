@@ -16,9 +16,9 @@ use delta_kernel::snapshot::Snapshot;
 use delta_kernel::{DeltaResult, Engine, Error, Table};
 use delta_kernel_ffi_macros::handle_descriptor;
 
-#[cfg(feature="developer-visibility")]
+#[cfg(feature = "developer-visibility")]
 pub mod handle;
-#[cfg(not(feature="developer-visibility"))]
+#[cfg(not(feature = "developer-visibility"))]
 pub(crate) mod handle;
 
 use handle::Handle;
