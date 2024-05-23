@@ -3,15 +3,17 @@
 //!
 
 use std::cmp::Ordering;
-use std::sync::Arc;
 
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
+use tracing::debug;
 use url::Url;
 
 use crate::actions::{get_log_schema, Metadata, Protocol, METADATA_NAME, PROTOCOL_NAME};
+use crate::column_mapping::{ColumnMappingMode, COLUMN_MAPPING_MODE_KEY};
 use crate::path::{version_from_location, LogPath};
 use crate::schema::{Schema, SchemaRef};
+use crate::utils::require;
 use crate::{DeltaResult, Engine, Error, FileMeta, FileSystemClient, Version};
 use crate::{EngineData, Expression};
 
@@ -47,8 +49,7 @@ impl LogSegment {
         commit_read_schema: SchemaRef,
         checkpoint_read_schema: SchemaRef,
         predicate: Option<Expression>,
-    ) -> DeltaResult<impl Iterator<Item = DeltaResult<(Box<dyn EngineData>, bool)>> + Send + Sync>
-    {
+    ) -> DeltaResult<impl Iterator<Item = DeltaResult<(Box<dyn EngineData>, bool)>> + Send> {
         let json_client = engine.get_json_handler();
         // TODO change predicate to: predicate AND add.path not null and remove.path not null
         let commit_stream = json_client
@@ -107,6 +108,13 @@ pub struct Snapshot {
     metadata: Metadata,
     protocol: Protocol,
     schema: Schema,
+    pub(crate) column_mapping_mode: ColumnMappingMode,
+}
+
+impl Drop for Snapshot {
+    fn drop(&mut self) {
+        debug!("Dropping snapshot");
+    }
 }
 
 impl std::fmt::Debug for Snapshot {
@@ -131,7 +139,7 @@ impl Snapshot {
         table_root: Url,
         engine: &dyn Engine,
         version: Option<Version>,
-    ) -> DeltaResult<Arc<Self>> {
+    ) -> DeltaResult<Self> {
         let fs_client = engine.get_file_system_client();
         let log_url = LogPath::new(&table_root).child("_delta_log/").unwrap();
 
@@ -163,10 +171,10 @@ impl Snapshot {
             .ok_or(Error::MissingVersion)?; // TODO: A more descriptive error
 
         if let Some(v) = version {
-            if version_eff != v {
-                // TODO more descriptive error
-                return Err(Error::MissingVersion);
-            }
+            require!(
+                version_eff == v,
+                Error::MissingVersion // TODO more descriptive error
+            );
         }
 
         let log_segment = LogSegment {
@@ -175,12 +183,7 @@ impl Snapshot {
             checkpoint_files,
         };
 
-        Ok(Arc::new(Self::try_new_from_log_segment(
-            table_root,
-            log_segment,
-            version_eff,
-            engine,
-        )?))
+        Self::try_new_from_log_segment(table_root, log_segment, version_eff, engine)
     }
 
     /// Create a new [`Snapshot`] instance.
@@ -194,6 +197,10 @@ impl Snapshot {
             .read_metadata(engine)?
             .ok_or(Error::MissingMetadata)?;
         let schema = metadata.schema()?;
+        let column_mapping_mode = match metadata.configuration.get(COLUMN_MAPPING_MODE_KEY) {
+            Some(mode) if protocol.min_reader_version >= 2 => mode.as_str().try_into(),
+            _ => Ok(ColumnMappingMode::None),
+        }?;
         Ok(Self {
             table_root: location,
             log_segment,
@@ -201,6 +208,7 @@ impl Snapshot {
             metadata,
             protocol,
             schema,
+            column_mapping_mode,
         })
     }
 
@@ -210,23 +218,31 @@ impl Snapshot {
         &self.log_segment
     }
 
-    /// Version of this [`Snapshot`] in the table.
+    /// Version of this `Snapshot` in the table.
     pub fn version(&self) -> Version {
         self.version
     }
 
-    /// Table [`Schema`] at this [`Snapshot`]s version.
+    /// Table [`Schema`] at this `Snapshot`s version.
     pub fn schema(&self) -> &Schema {
         &self.schema
     }
 
-    /// Table [`Metadata`] at this [`Snapshot`]s version.
+    /// Table [`Metadata`] at this `Snapshot`s version.
     pub fn metadata(&self) -> &Metadata {
         &self.metadata
     }
 
+    /// Table [`Protocol`] at this `Snapshot`s version.
     pub fn protocol(&self) -> &Protocol {
         &self.protocol
+    }
+
+    /// Get the [column mapping
+    /// mode](https://github.com/delta-io/delta/blob/master/PROTOCOL.md#column-mapping) at this
+    /// `Snapshot`s version.
+    pub fn column_mapping_mode(&self) -> ColumnMappingMode {
+        self.column_mapping_mode
     }
 }
 
@@ -366,6 +382,7 @@ mod tests {
     use super::*;
 
     use std::path::PathBuf;
+    use std::sync::Arc;
 
     use object_store::local::LocalFileSystem;
     use object_store::path::Path;

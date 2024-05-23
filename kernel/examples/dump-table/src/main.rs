@@ -54,19 +54,20 @@ fn main() -> ExitCode {
 
 fn try_main() -> DeltaResult<()> {
     let cli = Cli::parse();
-    let url = url::Url::parse(&cli.path)?;
 
-    println!("Reading {url}");
+    // build a table and get the lastest snapshot from it
+    let table = Table::try_from_uri(&cli.path)?;
+    println!("Reading {}", table.location());
+
     let engine: Box<dyn Engine> = match cli.engine {
         EngineType::Default => Box::new(DefaultEngine::try_new(
-            &url,
+            table.location(),
             HashMap::<String, String>::new(),
             Arc::new(TokioBackgroundExecutor::new()),
         )?),
         EngineType::Sync => Box::new(SyncEngine::new()),
     };
 
-    let table = Table::new(url);
     let snapshot = table.snapshot(engine.as_ref(), None)?;
 
     let read_schema_opt = cli
@@ -90,7 +91,7 @@ fn try_main() -> DeltaResult<()> {
         .transpose()?;
     let scan = ScanBuilder::new(snapshot)
         .with_schema_opt(read_schema_opt)
-        .build();
+        .build()?;
 
     let mut batches = vec![];
     for res in scan.execute(engine.as_ref())?.into_iter() {

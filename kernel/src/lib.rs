@@ -55,6 +55,7 @@ use url::Url;
 use self::schema::{DataType, SchemaRef};
 
 pub mod actions;
+pub mod column_mapping;
 pub mod engine_data;
 pub mod error;
 pub mod expressions;
@@ -64,6 +65,7 @@ pub mod schema;
 pub mod snapshot;
 pub mod table;
 pub mod transaction;
+pub(crate) mod utils;
 
 pub use engine_data::{DataVisitor, EngineData};
 pub use error::{DeltaResult, Error};
@@ -88,7 +90,7 @@ pub type FileDataReadResult = (FileMeta, Box<dyn EngineData>);
 
 /// An iterator of data read from specified files
 pub type FileDataReadResultIterator =
-    Box<dyn Iterator<Item = DeltaResult<Box<dyn EngineData>>> + Send + Sync>;
+    Box<dyn Iterator<Item = DeltaResult<Box<dyn EngineData>>> + Send>;
 
 /// The metadata that describes an object.
 #[derive(Debug, Clone, PartialEq, Eq)]

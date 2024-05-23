@@ -8,6 +8,8 @@ use indexmap::IndexMap;
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 
+use crate::column_mapping::ColumnMappingMode;
+use crate::utils::require;
 use crate::{DeltaResult, Error};
 
 pub type Schema = StructType;
@@ -102,6 +104,34 @@ impl StructField {
 
     pub fn get_config_value(&self, key: &ColumnMetadataKey) -> Option<&MetadataValue> {
         self.metadata.get(key.as_ref())
+    }
+
+    /// Get the physical name for this field as it should be read from parquet, based on the
+    /// specified column mapping mode.
+    pub fn physical_name(&self, mapping_mode: ColumnMappingMode) -> DeltaResult<&str> {
+        let physical_name_key = ColumnMetadataKey::ColumnMappingPhysicalName.as_ref();
+        let name_mapped_name = self.metadata.get(physical_name_key);
+        match (mapping_mode, name_mapped_name) {
+            (ColumnMappingMode::None, _) => Ok(self.name.as_str()),
+            (ColumnMappingMode::Name, Some(MetadataValue::String(name))) => Ok(name),
+            (ColumnMappingMode::Name, invalid) => Err(Error::generic(format!(
+                "Missing or invalid {physical_name_key}: {invalid:?}"
+            ))),
+            (ColumnMappingMode::Id, _) => {
+                Err(Error::generic("Don't support id column mapping yet"))
+            }
+        }
+    }
+
+    /// Change the name of a field. The field will preserve its data type and nullability. Note that
+    /// this allocates a new field.
+    pub fn with_name(&self, new_name: impl Into<String>) -> Self {
+        StructField {
+            name: new_name.into(),
+            data_type: self.data_type().clone(),
+            nullable: self.nullable,
+            metadata: self.metadata.clone(),
+        }
     }
 
     #[inline]
@@ -342,12 +372,10 @@ where
     D: serde::Deserializer<'de>,
 {
     let str_value = String::deserialize(deserializer)?;
-    if !str_value.starts_with("decimal(") || !str_value.ends_with(')') {
-        return Err(serde::de::Error::custom(format!(
-            "Invalid decimal: {}",
-            str_value
-        )));
-    }
+    require!(
+        str_value.starts_with("decimal(") && str_value.ends_with(')'),
+        serde::de::Error::custom(format!("Invalid decimal: {}", str_value))
+    );
 
     let mut parts = str_value[8..str_value.len() - 1].split(',');
     let precision = parts

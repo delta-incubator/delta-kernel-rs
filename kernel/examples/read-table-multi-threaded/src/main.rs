@@ -98,22 +98,21 @@ fn send_scan_file(
 
 fn try_main() -> DeltaResult<()> {
     let cli = Cli::parse();
-    let url = url::Url::parse(&cli.path)?;
 
-    println!("Reading {url}");
+    // build a table and get the lastest snapshot from it
+    let table = Table::try_from_uri(&cli.path)?;
+    println!("Reading {}", table.location());
 
     // create the requested engine
     let engine: Arc<dyn Engine> = match cli.engine {
         EngineType::Default => Arc::new(DefaultEngine::try_new(
-            &url,
+            table.location(),
             HashMap::<String, String>::new(),
             Arc::new(TokioBackgroundExecutor::new()),
         )?),
         EngineType::Sync => Arc::new(SyncEngine::new()),
     };
 
-    // build a table and get the lastest snapshot from it
-    let table = Table::new(url.clone());
     let snapshot = table.snapshot(engine.as_ref(), None)?;
 
     // process the columns requested and build a schema from them
@@ -140,7 +139,7 @@ fn try_main() -> DeltaResult<()> {
     // build a scan with the specified schema
     let scan = ScanBuilder::new(snapshot)
         .with_schema_opt(read_schema_opt)
-        .build();
+        .build()?;
 
     // this gives us an iterator of (our engine data, selection vector). our engine data is just
     // arrow data. The schema can be obtained by calling

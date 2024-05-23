@@ -108,7 +108,7 @@ async fn single_commit_two_add_files() -> Result<(), Box<dyn std::error::Error>>
     let expected_data = vec![batch.clone(), batch];
 
     let snapshot = table.snapshot(&engine, None)?;
-    let scan = ScanBuilder::new(snapshot).build();
+    let scan = ScanBuilder::new(snapshot).build()?;
 
     let mut files = 0;
     let stream = scan.execute(&engine)?.into_iter().zip(expected_data);
@@ -159,7 +159,7 @@ async fn two_commits() -> Result<(), Box<dyn std::error::Error>> {
     let expected_data = vec![batch.clone(), batch];
 
     let snapshot = table.snapshot(&engine, None).unwrap();
-    let scan = ScanBuilder::new(snapshot).build();
+    let scan = ScanBuilder::new(snapshot).build()?;
 
     let mut files = 0;
     let stream = scan.execute(&engine)?.into_iter().zip(expected_data);
@@ -214,7 +214,7 @@ async fn remove_action() -> Result<(), Box<dyn std::error::Error>> {
     let expected_data = vec![batch];
 
     let snapshot = table.snapshot(&engine, None)?;
-    let scan = ScanBuilder::new(snapshot).build();
+    let scan = ScanBuilder::new(snapshot).build()?;
 
     let stream = scan.execute(&engine)?.into_iter().zip(expected_data);
 
@@ -286,7 +286,7 @@ async fn stats() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let table = Table::new(location);
-    let snapshot = table.snapshot(&engine, None)?;
+    let snapshot = Arc::new(table.snapshot(&engine, None)?);
 
     // The first file has id between 1 and 3; the second has id between 5 and 7. For each operator,
     // we validate the boundary values where we expect the set of matched files to change.
@@ -336,7 +336,7 @@ async fn stats() -> Result<(), Box<dyn std::error::Error>> {
         };
         let scan = ScanBuilder::new(snapshot.clone())
             .with_predicate(predicate)
-            .build();
+            .build()?;
 
         let expected_files = expected_batches.len();
         let mut files_scanned = 0;
@@ -407,9 +407,9 @@ fn read_table_data(
             .collect();
         Arc::new(Schema::new(selected_fields))
     });
-    let scan = ScanBuilder::new(snapshot.clone())
+    let scan = ScanBuilder::new(snapshot)
         .with_schema_opt(read_schema)
-        .build();
+        .build()?;
 
     let scan_results = scan.execute(&engine)?;
     let batches: Vec<RecordBatch> = scan_results
