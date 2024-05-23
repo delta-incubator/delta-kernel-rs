@@ -8,6 +8,7 @@ use arrow_schema::{
 };
 use itertools::Itertools;
 
+use crate::error::Error;
 use crate::schema::{ArrayType, DataType, MapType, PrimitiveType, StructField, StructType};
 
 impl TryFrom<&StructType> for ArrowSchema {
@@ -94,7 +95,7 @@ impl TryFrom<&DataType> for ArrowDataType {
                     PrimitiveType::Decimal(precision, scale) => {
                         PrimitiveType::check_decimal(*precision, *scale)
                             .map_err(|e| ArrowError::from_external_error(e.into()))?;
-                        Ok(ArrowDataType::Decimal128(*precision, *scale))
+                        Ok(ArrowDataType::Decimal128(*precision, *scale as i8))
                     }
                     PrimitiveType::Date => {
                         // A calendar date, represented as a year-month-day triple without a
@@ -202,7 +203,13 @@ impl TryFrom<&ArrowDataType> for DataType {
             ArrowDataType::FixedSizeBinary(_) => Ok(DataType::Primitive(PrimitiveType::Binary)),
             ArrowDataType::LargeBinary => Ok(DataType::Primitive(PrimitiveType::Binary)),
             ArrowDataType::Decimal128(p, s) => {
-                DataType::decimal(*p, *s).map_err(|e| ArrowError::from_external_error(e.into()))
+                if s < &0 {
+                    return Err(ArrowError::from_external_error(
+                        Error::invalid_decimal("Negative scales are not supported in Delta").into(),
+                    ));
+                };
+                DataType::decimal(*p, *s as u8)
+                    .map_err(|e| ArrowError::from_external_error(e.into()))
             }
             ArrowDataType::Date32 => Ok(DataType::Primitive(PrimitiveType::Date)),
             ArrowDataType::Date64 => Ok(DataType::Primitive(PrimitiveType::Date)),
@@ -248,6 +255,8 @@ impl TryFrom<&ArrowDataType> for DataType {
                     panic!("DataType::Map should contain a struct field child");
                 }
             }
+            // Dictionary types are just an optimized in-memory representation of an array.
+            // Schema-wise, they are the same as the value type.
             ArrowDataType::Dictionary(_, value_type) => Ok(value_type.as_ref().try_into()?),
             s => Err(ArrowError::SchemaError(format!(
                 "Invalid data type for Delta Lake: {s}"

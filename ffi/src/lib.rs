@@ -688,7 +688,7 @@ pub struct EngineSchemaVisitor {
         sibling_list_id: usize,
         name: KernelStringSlice,
         precision: u8,
-        scale: i8,
+        scale: u8,
     ),
 
     /// Visit a `string` belonging to the list identified by `sibling_list_id`.

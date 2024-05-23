@@ -356,18 +356,18 @@ pub enum PrimitiveType {
         deserialize_with = "deserialize_decimal",
         untagged
     )]
-    Decimal(u8, i8),
+    Decimal(u8, u8),
 }
 
 fn serialize_decimal<S: serde::Serializer>(
     precision: &u8,
-    scale: &i8,
+    scale: &u8,
     serializer: S,
 ) -> Result<S::Ok, S::Error> {
     serializer.serialize_str(&format!("decimal({},{})", precision, scale))
 }
 
-fn deserialize_decimal<'de, D>(deserializer: D) -> Result<(u8, i8), D::Error>
+fn deserialize_decimal<'de, D>(deserializer: D) -> Result<(u8, u8), D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -386,7 +386,7 @@ where
         })?;
     let scale = parts
         .next()
-        .and_then(|part| part.trim().parse::<i8>().ok())
+        .and_then(|part| part.trim().parse::<u8>().ok())
         .ok_or_else(|| {
             serde::de::Error::custom(format!("Invalid scale in decimal: {}", str_value))
         })?;
@@ -464,7 +464,7 @@ impl DataType {
     pub const TIMESTAMP: Self = DataType::Primitive(PrimitiveType::Timestamp);
     pub const TIMESTAMP_NTZ: Self = DataType::Primitive(PrimitiveType::TimestampNtz);
 
-    pub fn decimal(precision: u8, scale: i8) -> DeltaResult<Self> {
+    pub fn decimal(precision: u8, scale: u8) -> DeltaResult<Self> {
         PrimitiveType::check_decimal(precision, scale)?;
         Ok(DataType::Primitive(PrimitiveType::Decimal(
             precision, scale,
@@ -473,7 +473,7 @@ impl DataType {
 
     // This function assumes that the caller has already checked the precision and scale
     // and that they are valid. Will panic if they are not.
-    pub fn decimal_unchecked(precision: u8, scale: i8) -> Self {
+    pub fn decimal_unchecked(precision: u8, scale: u8) -> Self {
         Self::decimal(precision, scale).unwrap()
     }
 }

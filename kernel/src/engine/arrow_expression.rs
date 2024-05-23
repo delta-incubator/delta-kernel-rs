@@ -50,7 +50,7 @@ impl Scalar {
             Binary(val) => Arc::new(BinaryArray::from(vec![val.as_slice(); num_rows])),
             Decimal(val, precision, scale) => Arc::new(
                 Decimal128Array::from_value(*val, num_rows)
-                    .with_precision_and_scale(*precision, *scale)?,
+                    .with_precision_and_scale(*precision, *scale as i8)?,
             ),
             Null(data_type) => match data_type {
                 DataType::Primitive(primitive) => match primitive {
@@ -72,7 +72,7 @@ impl Scalar {
                     PrimitiveType::Binary => Arc::new(BinaryArray::new_null(num_rows)),
                     PrimitiveType::Decimal(precision, scale) => Arc::new(
                         Decimal128Array::new_null(num_rows)
-                            .with_precision_and_scale(*precision, *scale)?,
+                            .with_precision_and_scale(*precision, *scale as i8)?,
                     ),
                 },
                 DataType::Array(_) => unimplemented!(),

@@ -28,7 +28,7 @@ pub enum Scalar {
     /// Date stored as a signed 32bit int days since UNIX epoch 1970-01-01
     Date(i32),
     Binary(Vec<u8>),
-    Decimal(i128, u8, i8),
+    Decimal(i128, u8, u8),
     Null(DataType),
 }
 
@@ -85,7 +85,7 @@ impl Display for Scalar {
                 }
                 Ordering::Less => {
                     write!(f, "{}", value)?;
-                    for _ in 0..(scale.abs()) {
+                    for _ in 0..(*scale) {
                         write!(f, "0")?;
                     }
                     Ok(())
@@ -142,7 +142,7 @@ impl From<String> for Scalar {
 
 impl PrimitiveType {
     /// Check if the given precision and scale are valid for a decimal type.
-    pub fn check_decimal(precision: u8, scale: i8) -> DeltaResult<()> {
+    pub fn check_decimal(precision: u8, scale: u8) -> DeltaResult<()> {
         require!(
             precision > 0 && precision <= 38,
             Error::invalid_decimal(format!(
@@ -151,8 +151,10 @@ impl PrimitiveType {
             ))
         );
         require!(
-            scale.abs() <= 38,
-            Error::invalid_decimal("scale must be in range 0..precision inclusive.")
+            scale <= precision,
+            Error::invalid_decimal(format!(
+                "scale must be in range 0..precision inclusive, found: {scale}."
+            ))
         );
         Ok(())
     }
@@ -240,7 +242,7 @@ impl PrimitiveType {
         }
     }
 
-    fn parse_decimal(&self, raw: &str, precision: u8, expected_scale: i8) -> Result<Scalar, Error> {
+    fn parse_decimal(&self, raw: &str, precision: u8, expected_scale: u8) -> Result<Scalar, Error> {
         let (base, exp): (&str, i128) = match raw.find(['e', 'E']) {
             None => (raw, 0), // no 'e' or 'E', so there's no exponent
             Some(pos) => {
@@ -270,7 +272,7 @@ impl PrimitiveType {
         // we can assume this won't underflow since `frac_digits` is at minimum 0, and exp is at
         // most i128::MAX, and 0-i128::MAX doesn't underflow
         let scale = frac_digits - exp;
-        let scale: i8 = scale.try_into().map_err(|_| self.parse_error(raw))?;
+        let scale: u8 = scale.try_into().map_err(|_| self.parse_error(raw))?;
         require!(scale == expected_scale, self.parse_error(raw));
         Self::check_decimal(precision, scale)?;
 
@@ -296,16 +298,13 @@ mod tests {
 
         let s = Scalar::Decimal(123456789, 9, 9);
         assert_eq!(s.to_string(), "0.123456789");
-
-        let s = Scalar::Decimal(123, 9, -3);
-        assert_eq!(s.to_string(), "123000");
     }
 
     fn assert_decimal(
         raw: &str,
         expect_int: i128,
         expect_prec: u8,
-        expect_scale: i8,
+        expect_scale: u8,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let s = PrimitiveType::Decimal(expect_prec, expect_scale);
         match s.parse_scalar(raw)? {
@@ -326,21 +325,17 @@ mod tests {
         assert_decimal("123", 123, 3, 0)?;
         assert_decimal("-123", -123, 3, 0)?;
         assert_decimal("-123.", -123, 3, 0)?;
-        assert_decimal("1.23E3", 123, 3, -1)?;
         assert_decimal("123000", 123000, 6, 0)?;
-        assert_decimal("12.3E+7", 123, 9, -6)?;
         assert_decimal("12.0", 120, 3, 1)?;
         assert_decimal("12.3", 123, 3, 1)?;
         assert_decimal("0.00123", 123, 5, 5)?;
-        assert_decimal("-1.23E-12", -123, 3, 14)?;
         assert_decimal("1234.5E-4", 12345, 5, 5)?;
-        assert_decimal("0E+7", 0, 1, -7)?;
         assert_decimal("-0", 0, 1, 0)?;
         assert_decimal("12.000000000000000000", 12000000000000000000, 38, 18)?;
         Ok(())
     }
 
-    fn expect_fail_parse(raw: &str, prec: u8, scale: i8) {
+    fn expect_fail_parse(raw: &str, prec: u8, scale: u8) {
         let s = PrimitiveType::Decimal(prec, scale);
         let res = s.parse_scalar(raw);
         assert!(res.is_err(), "Fail on {raw}");
