@@ -19,6 +19,7 @@ use crate::engine::arrow_data::ArrowEngineData;
 use crate::error::{DeltaResult, Error};
 use crate::expressions::{BinaryOperator, Expression, Scalar, UnaryOperator, VariadicOperator};
 use crate::schema::{DataType, PrimitiveType, SchemaRef};
+use crate::utils::require;
 use crate::{EngineData, ExpressionEvaluator, ExpressionHandler};
 
 // TODO leverage scalars / Datum
@@ -193,18 +194,18 @@ fn ensure_data_types(kernel_type: &DataType, arrow_type: &ArrowDataType) -> Delt
             }
         }
         (DataType::Struct(kernel_fields), ArrowDataType::Struct(arrow_fields)) => {
-            if kernel_fields.fields.len() == arrow_fields.len() {
-                for (kernel_field, arrow_field) in kernel_fields.fields().zip(arrow_fields.iter()) {
-                    ensure_data_types(&kernel_field.data_type, arrow_field.data_type())?;
-                }
-                Ok(())
-            } else {
-                Err(make_arrow_error(format!(
+            require!(
+                kernel_fields.fields.len() == arrow_fields.len(),
+                make_arrow_error(format!(
                     "Struct types have different numbers of fields. Expected {}, got {}",
                     kernel_fields.fields.len(),
                     arrow_fields.len()
-                )))
+                ))
+            );
+            for (kernel_field, arrow_field) in kernel_fields.fields().zip(arrow_fields.iter()) {
+                ensure_data_types(&kernel_field.data_type, arrow_field.data_type())?;
             }
+            Ok(())
         }
         _ => Err(make_arrow_error(format!(
             "Incorrect datatype. Expected {}, got {}",
@@ -246,15 +247,13 @@ fn evaluate_expression(
             let output_fields: Vec<ArrowField> = output_cols
                 .iter()
                 .zip(schema.fields())
-                .map(|(array, input_field)| {
+                .map(|(array, input_field)| -> DeltaResult<_> {
                     ensure_data_types(input_field.data_type(), array.data_type())?;
-                    // need to help type inference a bit so it knows what the error type is
-                    let res: DeltaResult<ArrowField> = Ok(ArrowField::new(
+                    Ok(ArrowField::new(
                         input_field.name(),
                         array.data_type().clone(),
                         array.is_nullable(),
-                    ));
-                    res
+                    ))
                 })
                 .try_collect()?;
             let result = StructArray::try_new(output_fields.into(), output_cols, None)?;
