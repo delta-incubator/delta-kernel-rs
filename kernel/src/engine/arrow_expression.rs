@@ -159,8 +159,8 @@ fn ensure_data_types(kernel_type: &DataType, arrow_type: &ArrowDataType) -> Delt
         (
             DataType::Primitive(PrimitiveType::Decimal(kernel_prec, kernel_scale)),
             ArrowDataType::Decimal128(arrow_prec, arrow_scale),
-        ) if arrow_prec == kernel_prec && arrow_scale == kernel_scale => {
-            // decimal isn't primitive in arrow
+        ) if arrow_prec == kernel_prec && *arrow_scale == *kernel_scale as i8 => {
+            // decimal isn't primitive in arrow. cast above is okay as we limit range
             Ok(())
         }
         (DataType::Array(inner_type), ArrowDataType::List(arrow_list_type)) => {
