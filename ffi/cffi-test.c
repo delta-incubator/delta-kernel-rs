@@ -18,7 +18,8 @@ void visit_data(void* engine_context,
   visit_scan_data(engine_data, selection_vec, engine_context, visit_callback);
 }
 
-int main_impl(KernelStringSlice table_path_slice, ExternResultHandleSharedExternEngine engine_res) {
+int test_engine(KernelStringSlice table_path_slice,
+                ExternResultHandleSharedExternEngine engine_res) {
   if (engine_res.tag != OkHandleSharedExternEngine) {
     printf("Failed to get engine\n");
     return -1;
@@ -86,9 +87,9 @@ int main(int argc, char* argv[]) {
   ExternResultHandleSharedExternEngine sync_engine_res = get_sync_engine(NULL);
 
   printf("Executing with default engine\n");
-  int default_test_res = main_impl(table_path_slice, default_engine_res);
+  int default_test_res = test_engine(table_path_slice, default_engine_res);
   printf("Executing with sync engine\n");
-  int sync_test_res = main_impl(table_path_slice, sync_engine_res);
+  int sync_test_res = test_engine(table_path_slice, sync_engine_res);
 
   // return 0 iff neither test passes
   return default_test_res | sync_test_res;

@@ -445,7 +445,6 @@ pub struct EngineBuilder {
 
 #[cfg(feature = "default-engine")]
 impl EngineBuilder {
-    #[cfg(feature = "default-engine")]
     fn set_option(&mut self, key: String, val: String) {
         self.options.insert(key, val);
     }
@@ -549,15 +548,7 @@ fn get_default_default_engine_impl(
 pub unsafe extern "C" fn get_sync_engine(
     allocate_error: AllocateErrorFn,
 ) -> ExternResult<Handle<SharedExternEngine>> {
-    get_default_sync_engine_impl(allocate_error).into_extern_result(&allocate_error)
-}
-
-// get the default version of the sync engine :^)
-#[cfg(feature = "sync-engine")]
-fn get_default_sync_engine_impl(
-    allocate_error: AllocateErrorFn,
-) -> DeltaResult<Handle<SharedExternEngine>> {
-    get_sync_engine_impl(allocate_error)
+    get_sync_engine_impl(allocate_error).into_extern_result(&allocate_error)
 }
 
 #[cfg(feature = "default-engine")]
