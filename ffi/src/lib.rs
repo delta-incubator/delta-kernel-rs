@@ -1,7 +1,7 @@
 /// FFI interface for the delta kernel
 ///
 /// Exposes that an engine needs to call from C/C++ to interface with kernel
-#[cfg(any(feature = "default-engine", feature = "sync-engine"))]
+#[cfg(feature = "default-engine")]
 use std::collections::HashMap;
 use std::default::Default;
 use std::os::raw::{c_char, c_void};
@@ -432,13 +432,16 @@ unsafe fn unwrap_and_parse_path_as_url(path: KernelStringSlice) -> DeltaResult<U
 /// A builder that allows setting options on the `Engine` before actually building it
 #[cfg(any(feature = "default-engine", feature = "sync-engine"))]
 pub struct EngineBuilder {
+    #[cfg(feature = "default-engine")]
     url: Url,
     allocate_fn: AllocateErrorFn,
+    #[cfg(feature = "default-engine")]
     options: HashMap<String, String>,
 }
 
 #[cfg(any(feature = "default-engine", feature = "sync-engine"))]
 impl EngineBuilder {
+    #[cfg(feature = "default-engine")]
     fn set_option(&mut self, key: String, val: String) {
         self.options.insert(key, val);
     }
@@ -491,15 +494,16 @@ pub unsafe extern "C" fn set_builder_option(
     builder.set_option(key.unwrap(), value.unwrap());
 }
 
-/// Consume the builder and return an engine. After calling, the passed pointer is _no
+/// Consume the builder and return a `default` engine. After calling, the passed pointer is _no
 /// longer valid_.
+///
 ///
 /// # Safety
 ///
 /// Caller is responsible to pass a valid EngineBuilder pointer, and to not use it again afterwards
 #[cfg(feature = "default-engine")]
 #[no_mangle]
-pub unsafe extern "C" fn builder_build(
+pub unsafe extern "C" fn build_default_engine(
     builder: *mut EngineBuilder,
 ) -> ExternResult<Handle<SharedExternEngine>> {
     let builder_box = unsafe { Box::from_raw(builder) };
@@ -509,6 +513,21 @@ pub unsafe extern "C" fn builder_build(
         builder_box.allocate_fn,
     )
     .into_extern_result(&builder_box.allocate_fn)
+}
+
+/// Consume the builder and return a `sync` engine. After calling, the passed pointer is _no
+/// longer valid_.
+///
+/// # Safety
+///
+/// Caller is responsible to pass a valid EngineBuilder pointer, and to not use it again afterwards
+#[cfg(feature = "sync-engine")]
+#[no_mangle]
+pub unsafe extern "C" fn build_sync_engine(
+    builder: *mut EngineBuilder,
+) -> ExternResult<Handle<SharedExternEngine>> {
+    let builder_box = unsafe { Box::from_raw(builder) };
+    get_sync_engine_impl(builder_box.allocate_fn).into_extern_result(&builder_box.allocate_fn)
 }
 
 /// # Safety
@@ -533,6 +552,25 @@ fn get_default_default_engine_impl(
     get_default_engine_impl(url?, Default::default(), allocate_error)
 }
 
+/// # Safety
+///
+/// Caller is responsible for passing a valid path pointer.
+#[cfg(feature = "sync-engine")]
+#[no_mangle]
+pub unsafe extern "C" fn get_sync_engine(
+    allocate_error: AllocateErrorFn,
+) -> ExternResult<Handle<SharedExternEngine>> {
+    get_default_sync_engine_impl(allocate_error).into_extern_result(&allocate_error)
+}
+
+// get the default version of the sync engine :^)
+#[cfg(feature = "sync-engine")]
+fn get_default_sync_engine_impl(
+    allocate_error: AllocateErrorFn,
+) -> DeltaResult<Handle<SharedExternEngine>> {
+    get_sync_engine_impl(allocate_error)
+}
+
 #[cfg(feature = "default-engine")]
 fn get_default_engine_impl(
     url: Url,
@@ -548,6 +586,19 @@ fn get_default_engine_impl(
     );
     let engine: Arc<dyn ExternEngine> = Arc::new(ExternEngineVtable {
         engine: Arc::new(engine?),
+        allocate_error,
+    });
+    Ok(engine.into())
+}
+
+#[cfg(feature = "sync-engine")]
+fn get_sync_engine_impl(
+    allocate_error: AllocateErrorFn,
+) -> DeltaResult<Handle<SharedExternEngine>> {
+    use delta_kernel::engine::sync::SyncEngine;
+    let engine = SyncEngine::new();
+    let engine: Arc<dyn ExternEngine> = Arc::new(ExternEngineVtable {
+        engine: Arc::new(engine),
         allocate_error,
     });
     Ok(engine.into())
