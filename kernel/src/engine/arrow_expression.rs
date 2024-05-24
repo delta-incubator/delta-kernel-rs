@@ -144,7 +144,7 @@ fn make_arrow_error(s: String) -> Error {
     Error::Arrow(arrow_schema::ArrowError::InvalidArgumentError(s))
 }
 
-/// Ensure a kernel data type matches an arrow data type. This only ensures that the actually "type"
+/// Ensure a kernel data type matches an arrow data type. This only ensures that the actual "type"
 /// is the same, but does so recursively into structs, and ensures lists and maps have the correct
 /// associated types as well. This returns an `Ok(())` if the types are compatible, or an error if
 /// the types do not match.
