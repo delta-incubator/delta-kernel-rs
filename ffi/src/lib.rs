@@ -297,7 +297,7 @@ pub enum ExternResult<T> {
 }
 
 pub type AllocateErrorFn =
-    Option<extern "C" fn(etype: KernelError, msg: KernelStringSlice) -> *mut EngineError>;
+    extern "C" fn(etype: KernelError, msg: KernelStringSlice) -> *mut EngineError;
 
 // NOTE: We can't "just" impl From<DeltaResult<T>> because we require an error allocator.
 impl<T> ExternResult<T> {
@@ -334,13 +334,7 @@ impl AllocateError for AllocateErrorFn {
         etype: KernelError,
         msg: KernelStringSlice,
     ) -> *mut EngineError {
-        match self {
-            Some(error_fn) => error_fn(etype, msg),
-            None => {
-                let msg = unsafe { String::try_from_slice(msg) }.expect("invalid string slice");
-                panic!("{etype:?}: {msg}");
-            }
-        }
+        self(etype, msg)
     }
 }
 
