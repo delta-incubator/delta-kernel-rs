@@ -72,6 +72,7 @@ int main_impl(KernelStringSlice table_path_slice, ExternResultHandleSharedExtern
   drop_scan(scan);
   drop_snapshot(snapshot);
   drop_engine(engine);
+  return 0;
 }
 
 int main(int argc, char *argv[])
@@ -89,9 +90,11 @@ int main(int argc, char *argv[])
   KernelStringSlice table_path_slice = {table_path, strlen(table_path)};
 
   ExternResultHandleSharedExternEngine default_engine_res = get_default_engine(table_path_slice, NULL);
-  ExternResultHandleSharedExternEngine sync_engine_res = get_sync_engine(table_path_slice, NULL);
+  ExternResultHandleSharedExternEngine sync_engine_res = get_sync_engine(NULL);
 
+  printf("Executing with default engine\n");
   int default_test_res = main_impl(table_path_slice, default_engine_res);
+  printf("Executing with sync engine\n");
   int sync_test_res = main_impl(table_path_slice, sync_engine_res);
 
   // return 0 iff neither test passes

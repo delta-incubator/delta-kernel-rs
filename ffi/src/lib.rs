@@ -297,7 +297,7 @@ pub enum ExternResult<T> {
 }
 
 pub type AllocateErrorFn =
-    extern "C" fn(etype: KernelError, msg: KernelStringSlice) -> *mut EngineError;
+    Option<extern "C" fn(etype: KernelError, msg: KernelStringSlice) -> *mut EngineError>;
 
 // NOTE: We can't "just" impl From<DeltaResult<T>> because we require an error allocator.
 impl<T> ExternResult<T> {
@@ -334,7 +334,13 @@ impl AllocateError for AllocateErrorFn {
         etype: KernelError,
         msg: KernelStringSlice,
     ) -> *mut EngineError {
-        self(etype, msg)
+        match self {
+            Some(error_fn) => error_fn(etype, msg),
+            None => {
+                let msg = unsafe { String::try_from_slice(msg) }.expect("invalid string slice");
+                panic!("{etype:?}: {msg}");
+            }
+        }
     }
 }
 
@@ -430,16 +436,14 @@ unsafe fn unwrap_and_parse_path_as_url(path: KernelStringSlice) -> DeltaResult<U
 }
 
 /// A builder that allows setting options on the `Engine` before actually building it
-#[cfg(any(feature = "default-engine", feature = "sync-engine"))]
+#[cfg(feature = "default-engine")]
 pub struct EngineBuilder {
-    #[cfg(feature = "default-engine")]
     url: Url,
     allocate_fn: AllocateErrorFn,
-    #[cfg(feature = "default-engine")]
     options: HashMap<String, String>,
 }
 
-#[cfg(any(feature = "default-engine", feature = "sync-engine"))]
+#[cfg(feature = "default-engine")]
 impl EngineBuilder {
     #[cfg(feature = "default-engine")]
     fn set_option(&mut self, key: String, val: String) {
@@ -515,21 +519,6 @@ pub unsafe extern "C" fn build_default_engine(
     .into_extern_result(&builder_box.allocate_fn)
 }
 
-/// Consume the builder and return a `sync` engine. After calling, the passed pointer is _no
-/// longer valid_.
-///
-/// # Safety
-///
-/// Caller is responsible to pass a valid EngineBuilder pointer, and to not use it again afterwards
-#[cfg(feature = "sync-engine")]
-#[no_mangle]
-pub unsafe extern "C" fn build_sync_engine(
-    builder: *mut EngineBuilder,
-) -> ExternResult<Handle<SharedExternEngine>> {
-    let builder_box = unsafe { Box::from_raw(builder) };
-    get_sync_engine_impl(builder_box.allocate_fn).into_extern_result(&builder_box.allocate_fn)
-}
-
 /// # Safety
 ///
 /// Caller is responsible for passing a valid path pointer.
@@ -595,8 +584,7 @@ fn get_default_engine_impl(
 fn get_sync_engine_impl(
     allocate_error: AllocateErrorFn,
 ) -> DeltaResult<Handle<SharedExternEngine>> {
-    use delta_kernel::engine::sync::SyncEngine;
-    let engine = SyncEngine::new();
+    let engine = delta_kernel::engine::sync::SyncEngine::new();
     let engine: Arc<dyn ExternEngine> = Arc::new(ExternEngineVtable {
         engine: Arc::new(engine),
         allocate_error,
