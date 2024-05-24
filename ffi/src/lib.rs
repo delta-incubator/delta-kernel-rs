@@ -506,7 +506,7 @@ pub unsafe extern "C" fn set_builder_option(
 /// Caller is responsible to pass a valid EngineBuilder pointer, and to not use it again afterwards
 #[cfg(feature = "default-engine")]
 #[no_mangle]
-pub unsafe extern "C" fn build_default_engine(
+pub unsafe extern "C" fn builder_build(
     builder: *mut EngineBuilder,
 ) -> ExternResult<Handle<SharedExternEngine>> {
     let builder_box = unsafe { Box::from_raw(builder) };
