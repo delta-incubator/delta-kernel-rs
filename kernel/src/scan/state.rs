@@ -32,6 +32,9 @@ pub struct DvInfo {
     deletion_vector: Option<DeletionVectorDescriptor>,
 }
 
+/// Give engines an easy way to consume stats
+//pub
+
 impl DvInfo {
     pub fn get_selection_vector(
         &self,
@@ -67,7 +70,7 @@ impl DvInfo {
 ///
 /// ## Example
 /// ```ignore
-/// let context = [my context];
+/// let mut context = [my context];
 /// for res in scan_data { // scan data from scan.get_scan_data()
 ///     let (data, vector) = res?;
 ///     context = delta_kernel::scan::state::visit_scan_files(
@@ -116,13 +119,15 @@ impl<T> DataVisitor for ScanFileVisitor<'_, T> {
             // Since path column is required, use it to detect presence of an Add action
             if let Some(path) = getters[0].get_opt(row_index, "scanFile.path")? {
                 let size = getters[1].get(row_index, "scanFile.size")?;
+                let _stats: Option<String> = getters[3].get_opt(row_index, "scanFile.stats")?;
+                // todo: parse them here
                 let dv_index = SCAN_ROW_SCHEMA
                     .index_of("deletionVector")
                     .ok_or_else(|| Error::missing_column("deletionVector"))?;
                 let deletion_vector = visit_deletion_vector_at(row_index, &getters[dv_index..])?;
                 let dv_info = DvInfo { deletion_vector };
                 let partition_values =
-                    getters[8].get(row_index, "scanFile.fileConstantValues.partitionValues")?;
+                    getters[9].get(row_index, "scanFile.fileConstantValues.partitionValues")?;
                 (self.callback)(&mut self.context, path, size, dv_info, partition_values)
             }
         }

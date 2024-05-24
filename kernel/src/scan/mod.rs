@@ -353,6 +353,7 @@ impl Scan {
 ///    path: string,
 ///    size: long,
 ///    modificationTime: long,
+///    stats: string,
 ///    deletionVector: {
 ///      storageType: string,
 ///      pathOrInlineDv: string,

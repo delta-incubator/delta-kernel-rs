@@ -79,11 +79,13 @@ impl DataVisitor for AddRemoveVisitor {
 
 lazy_static! {
     // NB: If you update this schema, ensure you update the comment describing it in the doc comment
-    // for `scan_row_schema` in scan/mod.rs!
+    // for `scan_row_schema` in scan/mod.rs! You'll also need to update ScanFileVisitor as the
+    // indexes will be off
     pub(crate) static ref SCAN_ROW_SCHEMA: Arc<StructType> = Arc::new(StructType::new(vec!(
         StructField::new("path", DataType::STRING, true),
         StructField::new("size", DataType::LONG, true),
         StructField::new("modificationTime", DataType::LONG, true),
+        StructField::new("stats", DataType::STRING, true),
         StructField::new(
             "deletionVector",
             StructType::new(vec![
@@ -162,6 +164,7 @@ impl LogReplayScanner {
             Expression::column("add.path"),
             Expression::column("add.size"),
             Expression::column("add.modificationTime"),
+            Expression::column("add.stats"),
             Expression::column("add.deletionVector"),
             Expression::Struct(vec![Expression::column("add.partitionValues")]),
         ])
