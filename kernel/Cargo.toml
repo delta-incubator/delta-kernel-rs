@@ -60,6 +60,7 @@ cloud = [
   "object_store/aws",
   "object_store/azure",
   "object_store/gcp",
+  "object_store/http",
 ]
 default = ["sync-engine"]
 default-engine = [
