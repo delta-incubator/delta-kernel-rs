@@ -5,7 +5,7 @@ pub mod deletion_vector;
 pub(crate) mod schemas;
 pub(crate) mod visitors;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use delta_kernel_derive::Schema;
 use lazy_static::lazy_static;
@@ -104,11 +104,11 @@ pub struct Protocol {
     /// A collection of features that a client must implement in order to correctly
     /// read this table (exist only when minReaderVersion is set to 3)
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub reader_features: Option<HashSet<String>>,
+    pub reader_features: Option<Vec<String>>,
     /// A collection of features that a client must implement in order to correctly
     /// write this table (exist only when minWriterVersion is set to 7)
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub writer_features: Option<HashSet<String>>,
+    pub writer_features: Option<Vec<String>>,
 }
 
 impl Protocol {
@@ -121,14 +121,14 @@ impl Protocol {
     pub fn has_reader_feature(&self, feature: &ReaderFeatures) -> bool {
         self.reader_features
             .as_ref()
-            .map(|features| features.contains(feature.as_ref()))
+            .map(|features| features.iter().any(|f| f == feature.as_ref()))
             .unwrap_or_default()
     }
 
     pub fn has_writer_feature(&self, feature: &WriterFeatures) -> bool {
         self.writer_features
             .as_ref()
-            .map(|features| features.contains(feature.as_ref()))
+            .map(|features| features.iter().any(|f| f == feature.as_ref()))
             .unwrap_or_default()
     }
 }

@@ -1,7 +1,7 @@
 //! This module defines visitors that can be used to extract the various delta actions from
 //! [`EngineData`] types.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use crate::{
     engine_data::{GetData, TypedGetData},
@@ -99,8 +99,8 @@ impl ProtocolVisitor {
         Ok(Protocol {
             min_reader_version,
             min_writer_version,
-            reader_features: reader_features.map(HashSet::from_iter),
-            writer_features: writer_features.map(HashSet::from_iter),
+            reader_features,
+            writer_features,
         })
     }
 }
