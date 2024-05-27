@@ -10,7 +10,7 @@ use tracing::debug;
 use url::Url;
 
 use crate::actions::{get_log_schema, Metadata, Protocol, METADATA_NAME, PROTOCOL_NAME};
-use crate::column_mapping::{ColumnMappingMode, COLUMN_MAPPING_MODE_KEY};
+use crate::features::{ColumnMappingMode, COLUMN_MAPPING_MODE_KEY};
 use crate::path::{version_from_location, LogPath};
 use crate::schema::{Schema, SchemaRef};
 use crate::utils::require;
@@ -404,8 +404,8 @@ mod tests {
         let expected = Protocol {
             min_reader_version: 3,
             min_writer_version: 7,
-            reader_features: Some(vec!["deletionVectors".into()]),
-            writer_features: Some(vec!["deletionVectors".into()]),
+            reader_features: Some(vec!["deletionVectors".into()].into_iter().collect()),
+            writer_features: Some(vec!["deletionVectors".into()].into_iter().collect()),
         };
         assert_eq!(snapshot.protocol(), &expected);
 
@@ -426,8 +426,8 @@ mod tests {
         let expected = Protocol {
             min_reader_version: 3,
             min_writer_version: 7,
-            reader_features: Some(vec!["deletionVectors".into()]),
-            writer_features: Some(vec!["deletionVectors".into()]),
+            reader_features: Some(vec!["deletionVectors".into()].into_iter().collect()),
+            writer_features: Some(vec!["deletionVectors".into()].into_iter().collect()),
         };
         assert_eq!(snapshot.protocol(), &expected);
 
