@@ -13,6 +13,7 @@ use crate::{
     DataVisitor, DeltaResult, Engine, EngineData, Error,
 };
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 
 use super::log_replay::SCAN_ROW_SCHEMA;
 
@@ -33,7 +34,12 @@ pub struct DvInfo {
 }
 
 /// Give engines an easy way to consume stats
-//pub
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Stats {
+    pub num_records: u64,
+    pub tight_bounds: bool,
+}
 
 impl DvInfo {
     pub fn get_selection_vector(
@@ -52,6 +58,15 @@ impl DvInfo {
         Ok(dv_treemap.map(treemap_to_bools))
     }
 }
+
+pub type ScanCallback<T> = fn(
+    context: &mut T,
+    path: &str,
+    size: i64,
+    stats: Option<Stats>,
+    dv_info: DvInfo,
+    partition_values: HashMap<String, String>,
+);
 
 /// Request that the kernel call a callback on each valid file that needs to be read for the
 /// scan.
@@ -85,13 +100,7 @@ pub fn visit_scan_files<T>(
     data: &dyn EngineData,
     selection_vector: &[bool],
     context: T,
-    callback: fn(
-        context: &mut T,
-        path: &str,
-        size: i64,
-        dv_info: DvInfo,
-        partition_values: HashMap<String, String>,
-    ),
+    callback: ScanCallback<T>,
 ) -> DeltaResult<T> {
     let mut visitor = ScanFileVisitor {
         callback,
@@ -104,7 +113,7 @@ pub fn visit_scan_files<T>(
 
 // add some visitor magic for engines
 struct ScanFileVisitor<'a, T> {
-    callback: fn(&mut T, &str, i64, DvInfo, HashMap<String, String>),
+    callback: ScanCallback<T>,
     selection_vector: &'a [bool],
     context: T,
 }
@@ -119,8 +128,16 @@ impl<T> DataVisitor for ScanFileVisitor<'_, T> {
             // Since path column is required, use it to detect presence of an Add action
             if let Some(path) = getters[0].get_opt(row_index, "scanFile.path")? {
                 let size = getters[1].get(row_index, "scanFile.size")?;
-                let _stats: Option<String> = getters[3].get_opt(row_index, "scanFile.stats")?;
-                // todo: parse them here
+                let stats_json: Option<String> = getters[3].get_opt(row_index, "scanFile.stats")?;
+                let stats: Option<Stats> =
+                    stats_json.and_then(|json| match serde_json::from_str(json.as_str()) {
+                        Ok(stats) => Some(stats),
+                        Err(e) => {
+                            warn!("Invalid stats string in Add file {json}: {}", e);
+                            None
+                        }
+                    });
+
                 let dv_index = SCAN_ROW_SCHEMA
                     .index_of("deletionVector")
                     .ok_or_else(|| Error::missing_column("deletionVector"))?;
@@ -128,7 +145,14 @@ impl<T> DataVisitor for ScanFileVisitor<'_, T> {
                 let dv_info = DvInfo { deletion_vector };
                 let partition_values =
                     getters[9].get(row_index, "scanFile.fileConstantValues.partitionValues")?;
-                (self.callback)(&mut self.context, path, size, dv_info, partition_values)
+                (self.callback)(
+                    &mut self.context,
+                    path,
+                    size,
+                    stats,
+                    dv_info,
+                    partition_values,
+                )
             }
         }
         Ok(())
@@ -141,7 +165,7 @@ mod tests {
 
     use crate::scan::test_utils::{add_batch_simple, run_with_validate_callback};
 
-    use super::DvInfo;
+    use super::{DvInfo, Stats};
 
     #[derive(Clone)]
     struct TestContext {
@@ -152,6 +176,7 @@ mod tests {
         context: &mut TestContext,
         path: &str,
         size: i64,
+        stats: Option<Stats>,
         dv_info: DvInfo,
         part_vals: HashMap<String, String>,
     ) {
@@ -160,6 +185,9 @@ mod tests {
             "part-00000-fae5310a-a37d-4e51-827b-c3d5516560ca-c000.snappy.parquet"
         );
         assert_eq!(size, 635);
+        assert!(stats.is_some());
+        assert_eq!(stats.as_ref().unwrap().num_records, 10);
+        assert!(stats.as_ref().unwrap().tight_bounds);
         assert_eq!(part_vals.get("date"), Some(&"2017-12-10".to_string()));
         assert_eq!(part_vals.get("non-existent"), None);
         assert!(dv_info.deletion_vector.is_some());

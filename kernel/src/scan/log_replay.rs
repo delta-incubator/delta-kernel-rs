@@ -319,7 +319,7 @@ mod tests {
     use std::collections::HashMap;
 
     use crate::scan::{
-        state::DvInfo,
+        state::{DvInfo, Stats},
         test_utils::{add_batch_simple, add_batch_with_remove, run_with_validate_callback},
     };
 
@@ -329,6 +329,7 @@ mod tests {
         _: &mut (),
         path: &str,
         size: i64,
+        stats: Option<Stats>,
         _: DvInfo,
         part_vals: HashMap<String, String>,
     ) {
@@ -337,6 +338,9 @@ mod tests {
             "part-00000-fae5310a-a37d-4e51-827b-c3d5516560ca-c000.snappy.parquet"
         );
         assert_eq!(size, 635);
+        assert!(stats.is_some());
+        assert_eq!(stats.as_ref().unwrap().num_records, 10);
+        assert!(stats.as_ref().unwrap().tight_bounds);
         assert_eq!(part_vals.get("date"), Some(&"2017-12-10".to_string()));
         assert_eq!(part_vals.get("non-existent"), None);
     }
