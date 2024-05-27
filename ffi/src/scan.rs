@@ -271,10 +271,17 @@ pub unsafe extern "C" fn kernel_scan_data_free(data: Handle<SharedScanDataIterat
     data.drop_handle();
 }
 
+#[repr(C)]
+pub struct Stats {
+    num_records: u64,
+    tight_bounds: bool,
+}
+
 type CScanCallback = extern "C" fn(
     engine_context: NullableCvoid,
     path: KernelStringSlice,
     size: i64,
+    stats: Option<&Stats>,
     dv_info: &DvInfo,
     partition_map: &CStringMap,
 );
@@ -336,16 +343,22 @@ fn rust_callback(
     context: &mut ContextWrapper,
     path: &str,
     size: i64,
+    kernel_stats: Option<delta_kernel::scan::state::Stats>,
     dv_info: DvInfo,
     partition_values: HashMap<String, String>,
 ) {
     let partition_map = CStringMap {
         values: partition_values,
     };
+    let stats = kernel_stats.map(|ks| Stats {
+        num_records: ks.num_records,
+        tight_bounds: ks.tight_bounds,
+    });
     (context.callback)(
         context.engine_context,
         path.into(),
         size,
+        stats.as_ref(),
         &dv_info,
         &partition_map,
     );

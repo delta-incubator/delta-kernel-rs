@@ -33,11 +33,16 @@ pub struct DvInfo {
     deletion_vector: Option<DeletionVectorDescriptor>,
 }
 
+fn default_false() -> bool {
+    false
+}
+
 /// Give engines an easy way to consume stats
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Stats {
     pub num_records: u64,
+    #[serde(default = "default_false")]
     pub tight_bounds: bool,
 }
 
