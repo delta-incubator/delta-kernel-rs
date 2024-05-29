@@ -225,8 +225,8 @@ impl Scan {
         GlobalScanState {
             table_root: self.snapshot.table_root.to_string(),
             partition_columns: self.snapshot.metadata().partition_columns.clone(),
-            logical_schema: self.logical_schema.as_ref().clone(),
-            read_schema: self.physical_schema.as_ref().clone(),
+            logical_schema: self.logical_schema.clone(),
+            read_schema: self.physical_schema.clone(),
             column_mapping_mode: self.snapshot.column_mapping_mode,
         }
     }
@@ -432,7 +432,7 @@ pub fn transform_to_logical(
         &global_state.partition_columns,
         global_state.column_mapping_mode,
     )?;
-    let read_schema = Arc::new(global_state.read_schema.clone());
+    let read_schema = global_state.read_schema.clone();
     if have_partition_cols || global_state.column_mapping_mode != ColumnMappingMode::None {
         // need to add back partition cols and/or fix-up mapped columns
         let all_fields = all_fields
@@ -459,9 +459,9 @@ pub fn transform_to_logical(
         let result = engine
             .get_expression_handler()
             .get_evaluator(
-                read_schema.clone(),
+                read_schema,
                 read_expression.clone(),
-                DataType::Struct(Box::new(global_state.logical_schema.clone())),
+                DataType::Struct(Box::new((*global_state.logical_schema).clone())),
             )
             .evaluate(data.as_ref())?;
         Ok(result)
