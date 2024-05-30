@@ -33,8 +33,8 @@ pub struct DvInfo {
     deletion_vector: Option<DeletionVectorDescriptor>,
 }
 
-fn default_false() -> bool {
-    false
+fn default_true() -> bool {
+    true
 }
 
 /// Give engines an easy way to consume stats
@@ -42,7 +42,7 @@ fn default_false() -> bool {
 #[serde(rename_all = "camelCase")]
 pub struct Stats {
     pub num_records: u64,
-    #[serde(default = "default_false")]
+    #[serde(default = "default_true")]
     pub tight_bounds: bool,
 }
 
