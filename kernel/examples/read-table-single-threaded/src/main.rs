@@ -82,7 +82,7 @@ fn try_main() -> DeltaResult<()> {
             Box::new(DefaultEngine::try_new(
                 table.location(),
                 options,
-                Arc::new(TokioBackgroundExecutor::new())
+                Arc::new(TokioBackgroundExecutor::new()),
             )?)
         }
         EngineType::Sync => Box::new(SyncEngine::new()),
