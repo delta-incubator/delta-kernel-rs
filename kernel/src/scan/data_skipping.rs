@@ -1,12 +1,13 @@
 use std::collections::HashSet;
+use std::ops::Not;
 use std::sync::Arc;
 
 use tracing::debug;
 
 use crate::actions::visitors::SelectionVectorVisitor;
 use crate::error::DeltaResult;
-use crate::expressions::{BinaryOperator, Expression as Expr, VariadicOperator};
-use crate::schema::{DataType, SchemaRef, StructField, StructType};
+use crate::expressions::{BinaryOperator, Expression as Expr, Scalar, UnaryOperator, VariadicOperator};
+use crate::schema::{DataType, PrimitiveType, SchemaRef, StructField, StructType};
 use crate::{Engine, EngineData, ExpressionEvaluator, JsonHandler};
 
 /// Returns `<op2>` (if any) such that `B <op2> A` is equivalent to `A <op> B`.
@@ -22,12 +23,43 @@ fn commute(op: &BinaryOperator) -> Option<BinaryOperator> {
     }
 }
 
+/// Get the expression that checks if a col could be null, assuming tight_bounds = true. In this
+/// case a column can contain null if any value > 0 is in the nullCount. This is further complicated
+/// by the default for tightBounds being true, so we have to check if it's EITHER `null` OR `true`
+fn get_tight_null_expr(null_col: String) -> Expr {
+    use Expr::*;
+    Expr::and_kleene(
+        Expr::or_kleene(
+            Column("tightBounds".to_string()).is_null(),
+            Expr::eq(Column("tightBounds".to_string()), Literal(Scalar::Boolean(true))),
+        ),
+        Expr::gt(Column(null_col), Literal(Scalar::Long(0)))
+    )
+}
+
+/// Get the expression that checks if a col could be null, assuming tight_bounds = false. In this
+/// case, we can only check if the WHOLE column is null, but checking if the number of records is
+/// equal to the null count, since all other values of nullCount must be ignored (except 0, which
+/// doesn't help us)
+fn get_not_tight_null_expr(null_col: String) -> Expr {
+    use Expr::*;
+    Expr::and_kleene(
+        Expr::eq(Column("tightBounds".to_string()), Literal(Scalar::Boolean(false))),
+        Expr::eq(Column("numRecords".to_string()), Column(null_col)),
+    )
+}
+
+
 /// Rewrites a predicate to a predicate that can be used to skip files based on their stats.
 /// Returns `None` if the predicate is not eligible for data skipping.
 ///
 /// We normalize each binary operation to a comparison between a column and a literal value
 /// and rewite that in terms of the min/max values of the column.
 /// For example, `1 < a` is rewritten as `minValues.a > 1`.
+///
+/// Unary `NOT` is transformed recursively then inverted
+///
+/// Unary `IsNull` checks if the null counts indicate that the column could contain a null
 ///
 /// The variadic operations are rewritten as follows:
 /// - `AND` is rewritten as a conjunction of the rewritten operands where we just skip
@@ -66,6 +98,28 @@ fn as_data_skipping_predicate(expr: &Expr) -> Option<Expr> {
             };
             let col = format!("{}.{}", stats_col, col);
             Some(Expr::binary(op, Column(col), Literal(val.clone())))
+        }
+        UnaryOperation { op, expr } => match op {
+            UnaryOperator::Not => {
+                // get the expr as a skipping predicate, then invert it
+                as_data_skipping_predicate(expr).map(|expr| {
+                    Expr::not(expr)
+                })
+            }
+            UnaryOperator::IsNull => {
+                // to check if a column could have a null, we need two different checks, to see if
+                // the bounds are tight and then to actually do the check
+                match expr.as_ref() {
+                    Column(col) => {
+                        let null_col = format!("nullCount.{col}");
+                        Some(Expr::or_kleene(
+                             get_tight_null_expr(null_col.clone()),
+                             get_not_tight_null_expr(null_col),
+                        ))
+                    }
+                    _ => None // can't check anything other than a col for null
+                }
+            }
         }
         VariadicOperation {
             op: op @ VariadicOperator::And,
@@ -139,6 +193,11 @@ impl DataSkippingFilter {
         }
 
         let stats_schema = Arc::new(StructType::new(vec![
+            StructField::new("numRecords", DataType::Primitive(PrimitiveType::Long), true),
+            StructField::new("tightBounds", DataType::Primitive(PrimitiveType::Boolean), true),
+            StructField::new("nullCount", StructType::new(data_fields.iter().map(|data_field| {
+                StructField::new(&data_field.name, DataType::Primitive(PrimitiveType::Long), true)
+            }).collect()), true),
             StructField::new("minValues", StructType::new(data_fields.clone()), true),
             StructField::new("maxValues", StructType::new(data_fields), true),
         ]));

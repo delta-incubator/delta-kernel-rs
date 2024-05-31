@@ -1,7 +1,7 @@
 //! Expression handling based on arrow-rs compute kernels.
 use std::sync::Arc;
 
-use arrow_arith::boolean::{and, is_null, not, or};
+use arrow_arith::boolean::{and, and_kleene, is_null, not, or, or_kleene};
 use arrow_arith::numeric::{add, div, mul, sub};
 use arrow_array::cast::AsArray;
 use arrow_array::{
@@ -316,6 +316,8 @@ fn evaluate_expression(
             let (reducer, default): (Operation, _) = match op {
                 VariadicOperator::And => (and, true),
                 VariadicOperator::Or => (or, false),
+                VariadicOperator::AndKleene => (and_kleene, true),
+                VariadicOperator::OrKleene => (or_kleene, false),
             };
             exprs
                 .iter()

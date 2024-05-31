@@ -40,6 +40,8 @@ pub enum BinaryOperator {
 pub enum VariadicOperator {
     And,
     Or,
+    AndKleene,
+    OrKleene,
 }
 
 impl Display for BinaryOperator {
@@ -151,6 +153,20 @@ impl Display for Expression {
                         &exprs.iter().map(|e| format!("{e}")).join(", ")
                     )
                 }
+                VariadicOperator::AndKleene => {
+                    write!(
+                        f,
+                        "ANDKLEENE({})",
+                        &exprs.iter().map(|e| format!("{e}")).join(", ")
+                    )
+                }
+                VariadicOperator::OrKleene => {
+                    write!(
+                        f,
+                        "ORKLEENE({})",
+                        &exprs.iter().map(|e| format!("{e}")).join(", ")
+                    )
+                }
             },
         }
     }
@@ -217,9 +233,19 @@ impl Expression {
         Self::variadic(VariadicOperator::And, exprs)
     }
 
+    /// Creates a new expression ANDKLEENE(exprs...)
+    pub fn and_kleene_from(exprs: impl IntoIterator<Item = Self>) -> Self {
+        Self::variadic(VariadicOperator::AndKleene, exprs)
+    }
+
     /// Creates a new expression OR(exprs...)
     pub fn or_from(exprs: impl IntoIterator<Item = Self>) -> Self {
         Self::variadic(VariadicOperator::Or, exprs)
+    }
+
+    /// Creates a new expression ORKLEENE(exprs...)
+    pub fn or_kleene_from(exprs: impl IntoIterator<Item = Self>) -> Self {
+        Self::variadic(VariadicOperator::OrKleene, exprs)
     }
 
     /// Create a new expression `self IS NULL`
@@ -272,9 +298,19 @@ impl Expression {
         Self::and_from([self, other])
     }
 
+    /// Create a new expression `self ANDKLEENE other`
+    pub fn and_kleene(self, other: Self) -> Self {
+        Self::and_kleene_from([self, other])
+    }
+
     /// Create a new expression `self OR other`
     pub fn or(self, other: Self) -> Self {
         Self::or_from([self, other])
+    }
+
+    /// Create a new expression `self ORKLEENE other`
+    pub fn or_kleene(self, other: Self) -> Self {
+        Self::or_kleene_from([self, other])
     }
 
     /// Create a new expression `DISTINCT(self, other)`
