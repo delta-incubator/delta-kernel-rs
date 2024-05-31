@@ -25,7 +25,7 @@ impl TryFrom<&FileMeta> for delta_kernel::FileMeta {
     type Error = Error;
 
     fn try_from(fm: &FileMeta) -> Result<Self, Error> {
-        let path = unsafe { String::try_from_slice(fm.path.clone()) };
+        let path = unsafe { String::try_from_slice(fm.path.clone()) }?;
         let location = Url::parse(&path)?;
         Ok(delta_kernel::FileMeta {
             location,
@@ -110,8 +110,8 @@ pub unsafe extern "C" fn read_parquet_files(
 ) -> ExternResult<Handle<MutFileReadResultIterator>> {
     let extern_engine = unsafe { engine.clone_as_arc() };
     let physical_schema = unsafe { physical_schema.clone_as_arc() };
-    let res = read_parquet_files_impl(extern_engine, file, physical_schema);
-    res.into_extern_result(engine)
+    let res = read_parquet_files_impl(extern_engine.clone(), file, physical_schema);
+    res.into_extern_result(&extern_engine.as_ref())
 }
 
 fn read_parquet_files_impl(

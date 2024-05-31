@@ -139,7 +139,7 @@ void visit_decimal(void* data,
                    uintptr_t sibling_list_id,
                    struct KernelStringSlice name,
                    uint8_t precision,
-                   int8_t scale) {
+                   uint8_t scale) {
   SchemaBuilder* builder = data;
   char* name_ptr = allocate_string(name);
   char* type = malloc(19 * sizeof(char));
