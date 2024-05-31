@@ -6,7 +6,9 @@ use tracing::debug;
 
 use crate::actions::visitors::SelectionVectorVisitor;
 use crate::error::DeltaResult;
-use crate::expressions::{BinaryOperator, Expression as Expr, Scalar, UnaryOperator, VariadicOperator};
+use crate::expressions::{
+    BinaryOperator, Expression as Expr, Scalar, UnaryOperator, VariadicOperator,
+};
 use crate::schema::{DataType, PrimitiveType, SchemaRef, StructField, StructType};
 use crate::{Engine, EngineData, ExpressionEvaluator, JsonHandler};
 
@@ -31,9 +33,12 @@ fn get_tight_null_expr(null_col: String) -> Expr {
     Expr::and_kleene(
         Expr::or_kleene(
             Column("tightBounds".to_string()).is_null(),
-            Expr::eq(Column("tightBounds".to_string()), Literal(Scalar::Boolean(true))),
+            Expr::eq(
+                Column("tightBounds".to_string()),
+                Literal(Scalar::Boolean(true)),
+            ),
         ),
-        Expr::gt(Column(null_col), Literal(Scalar::Long(0)))
+        Expr::gt(Column(null_col), Literal(Scalar::Long(0))),
     )
 }
 
@@ -44,11 +49,13 @@ fn get_tight_null_expr(null_col: String) -> Expr {
 fn get_not_tight_null_expr(null_col: String) -> Expr {
     use Expr::*;
     Expr::and_kleene(
-        Expr::eq(Column("tightBounds".to_string()), Literal(Scalar::Boolean(false))),
+        Expr::eq(
+            Column("tightBounds".to_string()),
+            Literal(Scalar::Boolean(false)),
+        ),
         Expr::eq(Column("numRecords".to_string()), Column(null_col)),
     )
 }
-
 
 /// Rewrites a predicate to a predicate that can be used to skip files based on their stats.
 /// Returns `None` if the predicate is not eligible for data skipping.
@@ -102,9 +109,7 @@ fn as_data_skipping_predicate(expr: &Expr) -> Option<Expr> {
         UnaryOperation { op, expr } => match op {
             UnaryOperator::Not => {
                 // get the expr as a skipping predicate, then invert it
-                as_data_skipping_predicate(expr).map(|expr| {
-                    Expr::not(expr)
-                })
+                as_data_skipping_predicate(expr).map(Expr::not)
             }
             UnaryOperator::IsNull => {
                 // to check if a column could have a null, we need two different checks, to see if
@@ -113,14 +118,14 @@ fn as_data_skipping_predicate(expr: &Expr) -> Option<Expr> {
                     Column(col) => {
                         let null_col = format!("nullCount.{col}");
                         Some(Expr::or_kleene(
-                             get_tight_null_expr(null_col.clone()),
-                             get_not_tight_null_expr(null_col),
+                            get_tight_null_expr(null_col.clone()),
+                            get_not_tight_null_expr(null_col),
                         ))
                     }
-                    _ => None // can't check anything other than a col for null
+                    _ => None, // can't check anything other than a col for null
                 }
             }
-        }
+        },
         VariadicOperation {
             op: op @ VariadicOperator::And,
             exprs,
@@ -194,10 +199,27 @@ impl DataSkippingFilter {
 
         let stats_schema = Arc::new(StructType::new(vec![
             StructField::new("numRecords", DataType::Primitive(PrimitiveType::Long), true),
-            StructField::new("tightBounds", DataType::Primitive(PrimitiveType::Boolean), true),
-            StructField::new("nullCount", StructType::new(data_fields.iter().map(|data_field| {
-                StructField::new(&data_field.name, DataType::Primitive(PrimitiveType::Long), true)
-            }).collect()), true),
+            StructField::new(
+                "tightBounds",
+                DataType::Primitive(PrimitiveType::Boolean),
+                true,
+            ),
+            StructField::new(
+                "nullCount",
+                StructType::new(
+                    data_fields
+                        .iter()
+                        .map(|data_field| {
+                            StructField::new(
+                                &data_field.name,
+                                DataType::Primitive(PrimitiveType::Long),
+                                true,
+                            )
+                        })
+                        .collect(),
+                ),
+                true,
+            ),
             StructField::new("minValues", StructType::new(data_fields.clone()), true),
             StructField::new("maxValues", StructType::new(data_fields), true),
         ]));
