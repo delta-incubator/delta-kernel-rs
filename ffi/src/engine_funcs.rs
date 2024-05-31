@@ -111,10 +111,6 @@ pub unsafe extern "C" fn read_parquet_files(
     let extern_engine = unsafe { engine.clone_as_arc() };
     let physical_schema = unsafe { physical_schema.clone_as_arc() };
     let res = read_parquet_files_impl(extern_engine, file, physical_schema);
-    println!("{}", res.is_ok());
-    if let Err(ref e) = res {
-        println!("{:#?}", e);
-    }
     res.into_extern_result(engine)
 }
 

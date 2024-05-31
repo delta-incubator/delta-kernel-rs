@@ -67,44 +67,47 @@ static GArrowRecordBatch* add_partition_columns(GArrowRecordBatch* record_batch,
     guint pos = cols + i;
     KernelStringSlice key = { col, strlen(col) };
     char* partition_val = get_from_map(partition_values, key, allocate_string);
-    if (partition_val) {
-      print_diag(
-        "  Adding partition column '%s' with value '%s' at column %u\n", col, partition_val, pos);
-      GArrowStringArrayBuilder* builder = garrow_string_array_builder_new();
-      for (gint64 i = 0; i < rows; i++) {
+    print_diag("  Adding partition column '%s' with value '%s' at column %u\n",
+               col,
+               partition_val ? partition_val : "NULL",
+               pos);
+    GArrowStringArrayBuilder* builder = garrow_string_array_builder_new();
+    for (gint64 i = 0; i < rows; i++) {
+      if (partition_val) {
         garrow_string_array_builder_append_string(builder, partition_val, &error);
-        if (report_g_error("Can't append to partition column builder", error)) {
-          break;
-        }
+      } else {
+        garrow_array_builder_append_null((GArrowArrayBuilder*)builder, &error);
       }
-      if (error != NULL) {
-        printf("Giving up on column %s\n", col);
-        g_object_unref(builder);
-        error = NULL;
-        continue;
+      if (report_g_error("Can't append to partition column builder", error)) {
+        break;
       }
-      GArrowArray* ret = garrow_array_builder_finish((GArrowArrayBuilder*)builder, &error);
-      if (report_g_error("Can't build string array for parition column", error)) {
-        printf("Giving up on column %s\n", col);
-        g_object_unref(builder);
-        error = NULL;
-        continue;
-      }
+    }
+    if (error != NULL) {
+      printf("Giving up on column %s\n", col);
       g_object_unref(builder);
-      GArrowField* field = garrow_field_new(col, (GArrowDataType*)garrow_string_data_type_new());
-      GArrowRecordBatch* old_batch = cur_record_batch;
-      cur_record_batch = garrow_record_batch_add_column(old_batch, pos, field, ret, &error);
-      g_object_unref(old_batch);
-      if (cur_record_batch == NULL) {
-        if (error != NULL) {
-          printf("Could not add column at %u: %s\n", pos, error->message);
-          g_error_free(error);
-        }
+      error = NULL;
+      continue;
+    }
+    GArrowArray* ret = garrow_array_builder_finish((GArrowArrayBuilder*)builder, &error);
+    if (report_g_error("Can't build string array for parition column", error)) {
+      printf("Giving up on column %s\n", col);
+      g_object_unref(builder);
+      error = NULL;
+      continue;
+    }
+    g_object_unref(builder);
+    GArrowField* field = garrow_field_new(col, (GArrowDataType*)garrow_string_data_type_new());
+    GArrowRecordBatch* old_batch = cur_record_batch;
+    cur_record_batch = garrow_record_batch_add_column(old_batch, pos, field, ret, &error);
+    g_object_unref(old_batch);
+    if (cur_record_batch == NULL) {
+      if (error != NULL) {
+        printf("Could not add column at %u: %s\n", pos, error->message);
+        g_error_free(error);
       }
+    }
+    if (partition_val) {
       free(partition_val);
-    } else {
-      printf("Error: Did not find value for expected partition column '%s'\n", col);
-      exit(-1);
     }
   }
   return cur_record_batch;
