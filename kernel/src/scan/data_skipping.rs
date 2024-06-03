@@ -30,8 +30,8 @@ fn commute(op: &BinaryOperator) -> Option<BinaryOperator> {
 /// by the default for tightBounds being true, so we have to check if it's EITHER `null` OR `true`
 fn get_tight_null_expr(null_col: String) -> Expr {
     use Expr::*;
-    Expr::and_kleene(
-        Expr::or_kleene(
+    Expr::and(
+        Expr::or(
             Column("tightBounds".to_string()).is_null(),
             Expr::eq(
                 Column("tightBounds".to_string()),
@@ -48,7 +48,7 @@ fn get_tight_null_expr(null_col: String) -> Expr {
 /// doesn't help us)
 fn get_not_tight_null_expr(null_col: String) -> Expr {
     use Expr::*;
-    Expr::and_kleene(
+    Expr::and(
         Expr::eq(
             Column("tightBounds".to_string()),
             Literal(Scalar::Boolean(false)),
@@ -117,7 +117,7 @@ fn as_data_skipping_predicate(expr: &Expr) -> Option<Expr> {
                 match expr.as_ref() {
                     Column(col) => {
                         let null_col = format!("nullCount.{col}");
-                        Some(Expr::or_kleene(
+                        Some(Expr::or(
                             get_tight_null_expr(null_col.clone()),
                             get_not_tight_null_expr(null_col),
                         ))
