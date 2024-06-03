@@ -35,8 +35,14 @@ As it is a library, in general you will want to depend on `delta-kernel-rs` by a
 dependency to your `Cargo.toml`. For example:
 
 ```toml
-delta_kernel = "0.0.1"
+delta_kernel = "0.1"
 ```
+
+### Versions and Api Stability
+We aim to not break APIs in patch version updates. That means it should be safe to depend on
+`delta_kernel = 0.1`, because updates like `0.1.0 -> 0.1.1` are "api safe". We are not providing
+guarantees on how long a particular minor version will be "current" however. So it's possible we
+will release `0.2.0` in the near future, if we need to break API compatibility.
 
 ## Documentation
 
