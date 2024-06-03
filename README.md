@@ -39,10 +39,9 @@ delta_kernel = "0.1"
 ```
 
 ### Versions and Api Stability
-We aim to not break APIs in patch version updates. That means it should be safe to depend on
-`delta_kernel = 0.1`, because updates like `0.1.0 -> 0.1.1` are "api safe". We are not providing
-guarantees on how long a particular minor version will be "current" however. So it's possible we
-will release `0.2.0` in the near future, if we need to break API compatibility.
+We intend to follow [Semantic Versioning](https://semver.org/). However, in the `0.x` line, the APIs
+are still unstable. We therefore may break APIs within minor releases (that is, `0.1` -> `0.2`), but
+we will not break APIs in patch releases (`0.1.0` -> `0.1.1`).
 
 ## Documentation
 
