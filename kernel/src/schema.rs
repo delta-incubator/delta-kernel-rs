@@ -456,6 +456,12 @@ impl From<ArrayType> for DataType {
     }
 }
 
+impl From<SchemaRef> for DataType {
+    fn from(schema: SchemaRef) -> Self {
+        DataType::Struct(Box::new(Arc::unwrap_or_clone(schema)))
+    }
+}
+
 /// cbindgen:ignore
 impl DataType {
     pub const STRING: Self = DataType::Primitive(PrimitiveType::String);

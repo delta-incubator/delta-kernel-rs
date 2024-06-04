@@ -244,7 +244,7 @@ impl Scan {
             "Executing scan with logical schema {:#?} and physical schema {:#?}",
             self.logical_schema, self.physical_schema
         );
-        let output_schema = DataType::Struct(Box::new(self.schema().as_ref().clone()));
+        let output_schema: DataType = self.schema().clone().into();
         let parquet_handler = engine.get_parquet_handler();
 
         let mut results: Vec<ScanResult> = vec![];
@@ -461,7 +461,7 @@ pub fn transform_to_logical(
             .get_evaluator(
                 read_schema,
                 read_expression.clone(),
-                DataType::Struct(Box::new((*global_state.logical_schema).clone())),
+                global_state.logical_schema.clone().into(),
             )
             .evaluate(data.as_ref())?;
         Ok(result)
