@@ -458,7 +458,7 @@ impl From<ArrayType> for DataType {
 
 impl From<SchemaRef> for DataType {
     fn from(schema: SchemaRef) -> Self {
-        DataType::Struct(Box::new(Arc::unwrap_or_clone(schema)))
+        Arc::unwrap_or_clone(schema).into()
     }
 }
 

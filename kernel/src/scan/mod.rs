@@ -244,7 +244,7 @@ impl Scan {
             "Executing scan with logical schema {:#?} and physical schema {:#?}",
             self.logical_schema, self.physical_schema
         );
-        let output_schema: DataType = self.schema().clone().into();
+        let output_schema = DataType::from(self.schema().clone());
         let parquet_handler = engine.get_parquet_handler();
 
         let mut results: Vec<ScanResult> = vec![];
