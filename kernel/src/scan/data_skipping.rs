@@ -37,7 +37,7 @@ fn get_tight_null_expr(null_col: String) -> Expr {
 /// case, we can only check if the WHOLE column is null, but checking if the number of records is
 /// equal to the null count, since all other values of nullCount must be ignored (except 0, which
 /// doesn't help us)
-fn get_not_tight_null_expr(null_col: String) -> Expr {
+fn get_wide_null_expr(null_col: String) -> Expr {
     Expr::and(
         Expr::eq(Expr::column("tightBounds"), Expr::literal(false)),
         Expr::eq(Expr::column("numRecords"), Expr::column(null_col)),
@@ -111,7 +111,7 @@ fn as_data_skipping_predicate(expr: &Expr) -> Option<Expr> {
                     let null_col = format!("nullCount.{col}");
                     Some(Expr::or(
                         get_tight_null_expr(null_col.clone()),
-                        get_not_tight_null_expr(null_col),
+                        get_wide_null_expr(null_col),
                     ))
                 }
                 _ => None, // can't check anything other than a col for null
