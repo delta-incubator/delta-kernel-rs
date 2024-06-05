@@ -31,13 +31,7 @@ fn commute(op: &BinaryOperator) -> Option<BinaryOperator> {
 fn get_tight_null_expr(null_col: String) -> Expr {
     use Expr::*;
     Expr::and(
-        Expr::or(
-            Column("tightBounds".to_string()).is_null(),
-            Expr::eq(
-                Column("tightBounds".to_string()),
-                Literal(Scalar::Boolean(true)),
-            ),
-        ),
+        Expr::distinct(Expr::column("tightBounds"), Expr::literal(false)),
         Expr::gt(Column(null_col), Literal(Scalar::Long(0))),
     )
 }
