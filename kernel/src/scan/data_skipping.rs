@@ -93,26 +93,24 @@ fn as_data_skipping_predicate(expr: &Expr) -> Option<Expr> {
             let col = format!("{}.{}", stats_col, col);
             Some(Expr::binary(op, Column(col), Literal(val.clone())))
         }
-        UnaryOperation { op, expr } => match op {
-            UnaryOperator::Not => {
-                // get the expr as a skipping predicate, then invert it
-                as_data_skipping_predicate(expr).map(Expr::not)
-            }
-            UnaryOperator::IsNull => {
-                // to check if a column could have a null, we need two different checks, to see if
-                // the bounds are tight and then to actually do the check
-                match expr.as_ref() {
-                    Column(col) => {
-                        let null_col = format!("nullCount.{col}");
-                        Some(Expr::or(
-                            get_tight_null_expr(null_col.clone()),
-                            get_not_tight_null_expr(null_col),
-                        ))
-                    }
-                    _ => None, // can't check anything other than a col for null
+        UnaryOperation { op: UnaryOperator::Not, expr } => {
+            // get the expr as a skipping predicate, then invert it
+            as_data_skipping_predicate(expr).map(Expr::not)
+        }
+        UnaryOperation { op: UnaryOperator::IsNull, expr } => {
+            // to check if a column could have a null, we need two different checks, to see if
+            // the bounds are tight and then to actually do the check
+            match expr.as_ref() {
+                Column(col) => {
+                    let null_col = format!("nullCount.{col}");
+                    Some(Expr::or(
+                        get_tight_null_expr(null_col.clone()),
+                        get_not_tight_null_expr(null_col),
+                    ))
                 }
+                _ => None, // can't check anything other than a col for null
             }
-        },
+        }
         VariadicOperation {
             op: op @ VariadicOperator::And,
             exprs,
