@@ -6,9 +6,7 @@ use tracing::debug;
 
 use crate::actions::visitors::SelectionVectorVisitor;
 use crate::error::DeltaResult;
-use crate::expressions::{
-    BinaryOperator, Expression as Expr, Scalar, UnaryOperator, VariadicOperator,
-};
+use crate::expressions::{BinaryOperator, Expression as Expr, UnaryOperator, VariadicOperator};
 use crate::schema::{DataType, PrimitiveType, SchemaRef, StructField, StructType};
 use crate::{Engine, EngineData, ExpressionEvaluator, JsonHandler};
 
@@ -29,10 +27,9 @@ fn commute(op: &BinaryOperator) -> Option<BinaryOperator> {
 /// case a column can contain null if any value > 0 is in the nullCount. This is further complicated
 /// by the default for tightBounds being true, so we have to check if it's EITHER `null` OR `true`
 fn get_tight_null_expr(null_col: String) -> Expr {
-    use Expr::*;
     Expr::and(
         Expr::distinct(Expr::column("tightBounds"), Expr::literal(false)),
-        Expr::gt(Column(null_col), Expr::literal(0i64)),
+        Expr::gt(Expr::column(null_col), Expr::literal(0i64)),
     )
 }
 
