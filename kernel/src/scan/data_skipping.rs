@@ -106,15 +106,15 @@ fn as_data_skipping_predicate(expr: &Expr) -> Option<Expr> {
         } => {
             // to check if a column could have a null, we need two different checks, to see if
             // the bounds are tight and then to actually do the check
-            match expr.as_ref() {
-                Column(col) => {
-                    let null_col = format!("nullCount.{col}");
-                    Some(Expr::or(
-                        get_tight_null_expr(null_col.clone()),
-                        get_wide_null_expr(null_col),
-                    ))
-                }
-                _ => None, // can't check anything other than a col for null
+            if let Column(col) = expr.as_ref() {
+                let null_col = format!("nullCount.{col}");
+                Some(Expr::or(
+                    get_tight_null_expr(null_col.clone()),
+                    get_wide_null_expr(null_col),
+                ))
+            } else {
+                // can't check anything other than a col for null
+                None
             }
         }
         VariadicOperation { op, exprs } => {
