@@ -93,11 +93,17 @@ fn as_data_skipping_predicate(expr: &Expr) -> Option<Expr> {
             let col = format!("{}.{}", stats_col, col);
             Some(Expr::binary(op, Column(col), Literal(val.clone())))
         }
-        UnaryOperation { op: UnaryOperator::Not, expr } => {
+        UnaryOperation {
+            op: UnaryOperator::Not,
+            expr,
+        } => {
             // get the expr as a skipping predicate, then invert it
             as_data_skipping_predicate(expr).map(Expr::not)
         }
-        UnaryOperation { op: UnaryOperator::IsNull, expr } => {
+        UnaryOperation {
+            op: UnaryOperator::IsNull,
+            expr,
+        } => {
             // to check if a column could have a null, we need two different checks, to see if
             // the bounds are tight and then to actually do the check
             match expr.as_ref() {
@@ -111,26 +117,13 @@ fn as_data_skipping_predicate(expr: &Expr) -> Option<Expr> {
                 _ => None, // can't check anything other than a col for null
             }
         }
-        VariadicOperation {
-            op: op @ VariadicOperator::And,
-            exprs,
-        } => Some(VariadicOperation {
-            op: op.clone(),
-            exprs: exprs
-                .iter()
-                .filter_map(as_data_skipping_predicate)
-                .collect::<Vec<_>>(),
-        }),
-        VariadicOperation {
-            op: op @ VariadicOperator::Or,
-            exprs,
-        } => Some(VariadicOperation {
-            op: op.clone(),
-            exprs: exprs
-                .iter()
-                .map(as_data_skipping_predicate)
-                .collect::<Option<Vec<_>>>()?,
-        }),
+        VariadicOperation { op, exprs } => {
+            let exprs = exprs.iter().map(as_data_skipping_predicate);
+            match op {
+                VariadicOperator::And => Some(Expr::and_from(exprs.flatten())),
+                VariadicOperator::Or => Some(Expr::or_from(exprs.collect::<Option<Vec<_>>>()?)),
+            }
+        }
         _ => None,
     }
 }
