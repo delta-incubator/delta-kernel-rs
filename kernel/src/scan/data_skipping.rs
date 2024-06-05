@@ -32,7 +32,7 @@ fn get_tight_null_expr(null_col: String) -> Expr {
     use Expr::*;
     Expr::and(
         Expr::distinct(Expr::column("tightBounds"), Expr::literal(false)),
-        Expr::gt(Column(null_col), Literal(Scalar::Long(0))),
+        Expr::gt(Column(null_col), Expr::literal(0i64)),
     )
 }
 
@@ -41,13 +41,9 @@ fn get_tight_null_expr(null_col: String) -> Expr {
 /// equal to the null count, since all other values of nullCount must be ignored (except 0, which
 /// doesn't help us)
 fn get_not_tight_null_expr(null_col: String) -> Expr {
-    use Expr::*;
     Expr::and(
-        Expr::eq(
-            Column("tightBounds".to_string()),
-            Literal(Scalar::Boolean(false)),
-        ),
-        Expr::eq(Column("numRecords".to_string()), Column(null_col)),
+        Expr::eq(Expr::column("tightBounds"), Expr::literal(false)),
+        Expr::eq(Expr::column("numRecords"), Expr::column(null_col)),
     )
 }
 
@@ -192,12 +188,8 @@ impl DataSkippingFilter {
         }
 
         let stats_schema = Arc::new(StructType::new(vec![
-            StructField::new("numRecords", DataType::Primitive(PrimitiveType::Long), true),
-            StructField::new(
-                "tightBounds",
-                DataType::Primitive(PrimitiveType::Boolean),
-                true,
-            ),
+            StructField::new("numRecords", DataType::LONG, true),
+            StructField::new("tightBounds", DataType::BOOLEAN, true),
             StructField::new(
                 "nullCount",
                 StructType::new(
