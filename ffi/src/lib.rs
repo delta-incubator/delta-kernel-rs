@@ -1093,7 +1093,7 @@ macro_rules! fn_visit_literal_prim {
             #[no_mangle]
             pub extern "C" fn $name(
                 state: &mut KernelExpressionVisitorState,
-                value: i64,
+                value: $typ,
             ) -> usize {
                 wrap_expression(state, Expression::Literal(Scalar::from(value)))
             }
