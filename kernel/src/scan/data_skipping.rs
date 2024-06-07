@@ -55,11 +55,13 @@ fn get_tight_not_null_expr(null_col: String) -> Expr {
 }
 
 /// Get the expression that checks if a col could NOT be null, assuming tight_bounds = false. In
-/// this case, we can only check if the WHOLE column is NOT null, by checking if the nullCount == 0
+/// this case, we can only check if the WHOLE column null, by checking if the nullCount ==
+/// numRecords. So by inverting that check and seeing if nullCount != numRecords, we can check if
+/// there is a possibility of a NOT null
 fn get_wide_not_null_expr(null_col: String) -> Expr {
     Expr::and(
         Expr::eq(Expr::column("tightBounds"), Expr::literal(false)),
-        Expr::eq(Expr::column(null_col), Expr::literal(0i64)),
+        Expr::ne(Expr::column("numRecords"), Expr::column(null_col)),
     )
 }
 
