@@ -1095,7 +1095,7 @@ macro_rules! fn_visit_literal_prim {
                 state: &mut KernelExpressionVisitorState,
                 value: $typ,
             ) -> usize {
-                wrap_expression(state, Expression::Literal(Scalar::from(value)))
+                wrap_expression(state, Expression::literal(value))
             }
         )*
     };
