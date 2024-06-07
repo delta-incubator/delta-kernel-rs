@@ -36,10 +36,39 @@ pub enum BinaryOperator {
     Distinct,
 }
 
+impl BinaryOperator {
+    // invert an operator. Returns Some<InvertedOp> if the operator supports inversion, None if it
+    // cannot be inverted
+    pub(crate) fn invert(&self) -> Option<BinaryOperator> {
+        use BinaryOperator::*;
+        match self {
+            LessThan => Some(GreaterThanOrEqual),
+            LessThanOrEqual => Some(GreaterThan),
+            GreaterThan => Some(LessThanOrEqual),
+            GreaterThanOrEqual => Some(LessThan),
+            Equal => Some(NotEqual),
+            NotEqual => Some(Equal),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum VariadicOperator {
     And,
     Or,
+}
+
+impl VariadicOperator {
+    // invert an operator. Returns Some<InvertedOp> if the operator supports inversion, None if it
+    // cannot be inverted
+    pub(crate) fn invert(&self) -> Option<VariadicOperator> {
+        use VariadicOperator::*;
+        match self {
+            And => Some(Or),
+            Or => Some(And),
+        }
+    }
 }
 
 impl Display for BinaryOperator {

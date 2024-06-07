@@ -34,7 +34,7 @@ fn get_tight_null_expr(null_col: String) -> Expr {
 }
 
 /// Get the expression that checks if a col could be null, assuming tight_bounds = false. In this
-/// case, we can only check if the WHOLE column is null, but checking if the number of records is
+/// case, we can only check if the WHOLE column is null, by checking if the number of records is
 /// equal to the null count, since all other values of nullCount must be ignored (except 0, which
 /// doesn't help us)
 fn get_wide_null_expr(null_col: String) -> Expr {
@@ -42,6 +42,58 @@ fn get_wide_null_expr(null_col: String) -> Expr {
         Expr::eq(Expr::column("tightBounds"), Expr::literal(false)),
         Expr::eq(Expr::column("numRecords"), Expr::column(null_col)),
     )
+}
+
+/// Get the expression that checks if a col could NOT be null, assuming tight_bounds = true. In this
+/// case a column has a NOT NULL record if nullCount < numRecords. This is further complicated by
+/// the default for tightBounds being true, so we have to check if it's EITHER `null` OR `true`
+fn get_tight_not_null_expr(null_col: String) -> Expr {
+    Expr::and(
+        Expr::distinct(Expr::column("tightBounds"), Expr::literal(false)),
+        Expr::lt(Expr::column(null_col), Expr::column("numRecords")),
+    )
+}
+
+/// Get the expression that checks if a col could NOT be null, assuming tight_bounds = false. In
+/// this case, we can only check if the WHOLE column is NOT null, by checking if the nullCount == 0
+fn get_wide_not_null_expr(null_col: String) -> Expr {
+    Expr::and(
+        Expr::eq(Expr::column("tightBounds"), Expr::literal(false)),
+        Expr::eq(Expr::column(null_col), Expr::literal(0i64)),
+    )
+}
+
+/// Use De Morgan's Laws to push a NOT expression down the tree
+fn as_inverted_data_skipping_predicate(expr: &Expr) -> Option<Expr> {
+    use Expr::*;
+    match expr {
+        UnaryOperation { op, expr } => match op {
+            UnaryOperator::Not => as_data_skipping_predicate(expr),
+            UnaryOperator::IsNull => {
+                // to check if a column could NOT have a null, we need two different checks, to see
+                // if the bounds are tight and then to actually do the check
+                if let Column(col) = expr.as_ref() {
+                    let null_col = format!("nullCount.{col}");
+                    Some(Expr::or(
+                        get_tight_not_null_expr(null_col.clone()),
+                        get_wide_not_null_expr(null_col),
+                    ))
+                } else {
+                    // can't check anything other than a col for null
+                    None
+                }
+            }
+        },
+        BinaryOperation { op, left, right } => {
+            let expr = Expr::binary(op.invert()?, left.as_ref().clone(), right.as_ref().clone());
+            as_data_skipping_predicate(&expr)
+        }
+        VariadicOperation { op, exprs } => {
+            let expr = Expr::variadic(op.invert()?, exprs.iter().cloned().map(Expr::not));
+            as_data_skipping_predicate(&expr)
+        }
+        _ => None,
+    }
 }
 
 /// Rewrites a predicate to a predicate that can be used to skip files based on their stats.
@@ -97,8 +149,8 @@ fn as_data_skipping_predicate(expr: &Expr) -> Option<Expr> {
             op: UnaryOperator::Not,
             expr,
         } => {
-            // get the expr as a skipping predicate, then invert it
-            as_data_skipping_predicate(expr).map(Expr::not)
+            // push down the not by inverting everything below
+            as_inverted_data_skipping_predicate(expr)
         }
         UnaryOperation {
             op: UnaryOperator::IsNull,
