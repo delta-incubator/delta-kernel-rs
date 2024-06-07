@@ -967,12 +967,9 @@ fn visit_expression_unary(
     op: UnaryOperator,
     inner_expr: usize,
 ) -> usize {
-    if let Some(expr) = unwrap_kernel_expression(state, inner_expr).map(Box::new) {
-        wrap_expression(state, Expression::UnaryOperation { op, expr })
-    } else {
-        // invalid child => invalid node
-        0
-    }
+    unwrap_kernel_expression(state, inner_expr).map_or(0, |expr| {
+        wrap_expression(state, Expression::unary(op, expr))
+    })
 }
 
 // The EngineIterator is not thread safe, not reentrant, not owned by callee, not freed by callee.
