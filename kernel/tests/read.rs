@@ -556,3 +556,57 @@ fn predicate_null() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     Ok(())
 }
+
+#[test]
+fn mixed_null() -> Result<(), Box<dyn std::error::Error>> {
+    let expected = vec![
+        "+------+--------------+",
+        "| part | n            |",
+        "+------+--------------+",
+        "| 0    |              |",
+        "| 0    |              |",
+        "| 0    |              |",
+        "| 0    |              |",
+        "| 0    |              |",
+        "| 2    |              |",
+        "| 2    | non-null-mix |",
+        "| 2    |              |",
+        "| 2    | non-null-mix |",
+        "| 2    |              |",
+        "+------+--------------+",
+    ];
+    read_table_data(
+        "./tests/data/mixed-nulls",
+        Some(&["part", "n"]),
+        Some(Expression::column("n").is_null()),
+        expected,
+    )?;
+    Ok(())
+}
+
+#[test]
+fn mixed_not_null() -> Result<(), Box<dyn std::error::Error>> {
+    let expected = vec![
+        "+------+--------------+",
+        "| part | n            |",
+        "+------+--------------+",
+        "| 1    | non-null     |",
+        "| 1    | non-null     |",
+        "| 1    | non-null     |",
+        "| 1    | non-null     |",
+        "| 1    | non-null     |",
+        "| 2    |              |",
+        "| 2    |              |",
+        "| 2    |              |",
+        "| 2    | non-null-mix |",
+        "| 2    | non-null-mix |",
+        "+------+--------------+",
+    ];
+    read_table_data(
+        "./tests/data/mixed-nulls",
+        Some(&["part", "n"]),
+        Some(Expression::column("n").is_null().not()),
+        expected,
+    )?;
+    Ok(())
+}
