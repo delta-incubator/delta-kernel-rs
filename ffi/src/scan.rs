@@ -347,7 +347,7 @@ pub unsafe extern "C" fn get_from_map(
     allocate_fn: AllocateStringFn,
 ) -> NullableCvoid {
     // TODO: Return ExternResult to caller instead of panicking?
-    let string_key = unsafe { String::try_from_slice(key) };
+    let string_key = unsafe { String::try_from_slice(&key) };
     map.values
         .get(&string_key.unwrap())
         .and_then(|v| allocate_fn(v.into()))

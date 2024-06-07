@@ -25,7 +25,7 @@ impl TryFrom<&FileMeta> for delta_kernel::FileMeta {
     type Error = Error;
 
     fn try_from(fm: &FileMeta) -> Result<Self, Error> {
-        let path = unsafe { String::try_from_slice(fm.path.clone()) }?;
+        let path = unsafe { String::try_from_slice(&fm.path) }?;
         let location = Url::parse(&path)?;
         Ok(delta_kernel::FileMeta {
             location,

@@ -85,7 +85,6 @@ impl Iterator for EngineIterator {
 /// wants_slice(msg.into());
 /// ```
 #[repr(C)]
-#[derive(Clone)]
 pub struct KernelStringSlice {
     ptr: *const c_char,
     len: usize,
@@ -105,7 +104,7 @@ impl<T: AsRef<[u8]>> From<T> for KernelStringSlice {
 }
 
 trait TryFromStringSlice: Sized {
-    unsafe fn try_from_slice(slice: KernelStringSlice) -> DeltaResult<Self>;
+    unsafe fn try_from_slice(slice: &KernelStringSlice) -> DeltaResult<Self>;
 }
 
 impl TryFromStringSlice for String {
@@ -115,7 +114,7 @@ impl TryFromStringSlice for String {
     ///
     /// The slice must be a valid (non-null) pointer, and must point to the indicated number of
     /// valid utf8 bytes.
-    unsafe fn try_from_slice(slice: KernelStringSlice) -> DeltaResult<String> {
+    unsafe fn try_from_slice(slice: &KernelStringSlice) -> DeltaResult<String> {
         let slice = unsafe { std::slice::from_raw_parts(slice.ptr.cast(), slice.len) };
         let slice = std::str::from_utf8(slice)?;
         Ok(slice.into())
@@ -449,7 +448,7 @@ impl ExternEngine for ExternEngineVtable {
 ///
 /// Caller is responsible for passing a valid path pointer.
 unsafe fn unwrap_and_parse_path_as_url(path: KernelStringSlice) -> DeltaResult<Url> {
-    let path = unsafe { String::try_from_slice(path) }?;
+    let path = unsafe { String::try_from_slice(&path) }?;
     let table = Table::try_from_uri(path)?;
     Ok(table.location().clone())
 }
@@ -510,8 +509,8 @@ pub unsafe extern "C" fn set_builder_option(
     key: KernelStringSlice,
     value: KernelStringSlice,
 ) {
-    let key = unsafe { String::try_from_slice(key) };
-    let value = unsafe { String::try_from_slice(value) };
+    let key = unsafe { String::try_from_slice(&key) };
+    let value = unsafe { String::try_from_slice(&value) };
     // TODO: Return ExternalError if key or value is invalid? (builder has an error allocator)
     builder.set_option(key.unwrap(), value.unwrap());
 }
@@ -1102,7 +1101,7 @@ pub unsafe extern "C" fn visit_expression_column(
     name: KernelStringSlice,
     allocate_error: AllocateErrorFn,
 ) -> ExternResult<usize> {
-    let name = unsafe { String::try_from_slice(name) };
+    let name = unsafe { String::try_from_slice(&name) };
     visit_expression_column_impl(state, name).into_extern_result(&allocate_error)
 }
 fn visit_expression_column_impl(
@@ -1136,7 +1135,7 @@ pub unsafe extern "C" fn visit_expression_literal_string(
     value: KernelStringSlice,
     allocate_error: AllocateErrorFn,
 ) -> ExternResult<usize> {
-    let value = unsafe { String::try_from_slice(value) };
+    let value = unsafe { String::try_from_slice(&value) };
     visit_expression_literal_string_impl(state, value).into_extern_result(&allocate_error)
 }
 fn visit_expression_literal_string_impl(
