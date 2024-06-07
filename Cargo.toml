@@ -4,7 +4,7 @@ members = [
     "derive-macros",
     "ffi",
     "kernel",
-    "kernel/examples/dump-table", # todo: put back to `examples/*` when inspect-table is fixed
+    "kernel/examples/read-table-single-threaded", # todo: put back to `examples/*` when inspect-table is fixed
     "kernel/examples/read-table-multi-threaded"
 ]
 # Only check / build main crates by default (check all with `--workspace`)
@@ -18,4 +18,4 @@ keywords = ["deltalake", "delta", "datalake"]
 license = "Apache-2.0"
 repository = "https://github.com/delta-incubator/delta-kernel-rs"
 readme = "README.md"
-version = "0.0.1"
+version = "0.1.0"
