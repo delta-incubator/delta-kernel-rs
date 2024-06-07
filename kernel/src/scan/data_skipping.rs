@@ -91,7 +91,7 @@ fn as_inverted_data_skipping_predicate(expr: &Expr) -> Option<Expr> {
             as_data_skipping_predicate(&expr)
         }
         VariadicOperation { op, exprs } => {
-            let expr = Expr::variadic(op.invert()?, exprs.iter().cloned().map(Expr::not));
+            let expr = Expr::variadic(op.invert(), exprs.iter().cloned().map(Expr::not));
             as_data_skipping_predicate(&expr)
         }
         _ => None,
@@ -101,19 +101,19 @@ fn as_inverted_data_skipping_predicate(expr: &Expr) -> Option<Expr> {
 /// Rewrites a predicate to a predicate that can be used to skip files based on their stats.
 /// Returns `None` if the predicate is not eligible for data skipping.
 ///
-/// We normalize each binary operation to a comparison between a column and a literal value
-/// and rewite that in terms of the min/max values of the column.
+/// We normalize each binary operation to a comparison between a column and a literal value and
+/// rewite that in terms of the min/max values of the column.
 /// For example, `1 < a` is rewritten as `minValues.a > 1`.
 ///
-/// Unary `NOT` is transformed recursively then inverted
+/// For Unary `Not`, we push the Not down using De Morgan's Laws to invert everything below the Not.
 ///
-/// Unary `IsNull` checks if the null counts indicate that the column could contain a null
+/// Unary `IsNull` checks if the null counts indicate that the column could contain a null.
 ///
 /// The variadic operations are rewritten as follows:
-/// - `AND` is rewritten as a conjunction of the rewritten operands where we just skip
-///   operands that are not eligible for data skipping.
-/// - `OR` is rewritten only if all operands are eligible for data skipping. Otherwise,
-///   the whole OR expression is dropped.
+/// - `AND` is rewritten as a conjunction of the rewritten operands where we just skip operands that
+///         are not eligible for data skipping.
+/// - `OR` is rewritten only if all operands are eligible for data skipping. Otherwise, the whole OR
+///        expression is dropped.
 fn as_data_skipping_predicate(expr: &Expr) -> Option<Expr> {
     use BinaryOperator::*;
     use Expr::*;

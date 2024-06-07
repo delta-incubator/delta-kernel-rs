@@ -60,13 +60,11 @@ pub enum VariadicOperator {
 }
 
 impl VariadicOperator {
-    // invert an operator. Returns Some<InvertedOp> if the operator supports inversion, None if it
-    // cannot be inverted
-    pub(crate) fn invert(&self) -> Option<VariadicOperator> {
+    pub(crate) fn invert(&self) -> VariadicOperator {
         use VariadicOperator::*;
         match self {
-            And => Some(Or),
-            Or => Some(And),
+            And => Or,
+            Or => And,
         }
     }
 }
