@@ -171,7 +171,7 @@ pub unsafe extern "C" fn get_global_read_schema(
     state: Handle<SharedGlobalScanState>,
 ) -> Handle<SharedSchema> {
     let state = unsafe { state.as_ref() };
-    Arc::new(state.read_schema.clone()).into()
+    state.read_schema.clone().into()
 }
 
 /// Free a global read schema
