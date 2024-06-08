@@ -117,6 +117,7 @@ fn as_inverted_data_skipping_predicate(expr: &Expr) -> Option<Expr> {
 fn as_data_skipping_predicate(expr: &Expr) -> Option<Expr> {
     use BinaryOperator::*;
     use Expr::*;
+    use UnaryOperator::*;
 
     match expr {
         BinaryOperation { op, left, right } => {
@@ -147,17 +148,9 @@ fn as_data_skipping_predicate(expr: &Expr) -> Option<Expr> {
             let col = format!("{}.{}", stats_col, col);
             Some(Expr::binary(op, Column(col), Literal(val.clone())))
         }
-        UnaryOperation {
-            op: UnaryOperator::Not,
-            expr,
-        } => {
-            // push down the not by inverting everything below
-            as_inverted_data_skipping_predicate(expr)
-        }
-        UnaryOperation {
-            op: UnaryOperator::IsNull,
-            expr,
-        } => {
+        // push down Not by inverting everything below it
+        UnaryOperation { op: Not, expr } => as_inverted_data_skipping_predicate(expr),
+        UnaryOperation { op: IsNull, expr } => {
             // to check if a column could have a null, we need two different checks, to see if
             // the bounds are tight and then to actually do the check
             if let Column(col) = expr.as_ref() {
