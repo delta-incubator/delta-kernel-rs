@@ -577,39 +577,27 @@ fn predicate_on_number() -> Result<(), Box<dyn std::error::Error>> {
 fn predicate_on_number_not() -> Result<(), Box<dyn std::error::Error>> {
     let cases = vec![
         (
-            Expression::column("number")
-                .lt(Expression::literal(4i64))
-                .not(),
+            Expression::not(Expression::column("number").lt(Expression::literal(4i64))),
             table_for_numbers(vec![4, 5, 6]),
         ),
         (
-            Expression::column("number")
-                .le(Expression::literal(4i64))
-                .not(),
+            Expression::not(Expression::column("number").le(Expression::literal(4i64))),
             table_for_numbers(vec![5, 6]),
         ),
         (
-            Expression::column("number")
-                .gt(Expression::literal(4i64))
-                .not(),
+            Expression::not(Expression::column("number").gt(Expression::literal(4i64))),
             table_for_numbers(vec![1, 2, 3, 4]),
         ),
         (
-            Expression::column("number")
-                .ge(Expression::literal(4i64))
-                .not(),
+            Expression::not(Expression::column("number").ge(Expression::literal(4i64))),
             table_for_numbers(vec![1, 2, 3]),
         ),
         (
-            Expression::column("number")
-                .eq(Expression::literal(4i64))
-                .not(),
+            Expression::not(Expression::column("number").eq(Expression::literal(4i64))),
             table_for_numbers(vec![1, 2, 3, 5, 6]),
         ),
         (
-            Expression::column("number")
-                .ne(Expression::literal(4i64))
-                .not(),
+            Expression::not(Expression::column("number").ne(Expression::literal(4i64))),
             table_for_numbers(vec![4]),
         ),
     ];
@@ -638,7 +626,7 @@ fn predicate_on_number_with_not_null() -> Result<(), Box<dyn std::error::Error>>
         "./tests/data/basic_partitioned",
         Some(&["a_float", "number"]),
         Some(Expression::and(
-            Expression::column("number").is_null().not(),
+            Expression::not(Expression::column("number").is_null()),
             Expression::column("number").lt(Expression::literal(3i64)),
         )),
         expected,
@@ -706,7 +694,7 @@ fn mixed_not_null() -> Result<(), Box<dyn std::error::Error>> {
     read_table_data_str(
         "./tests/data/mixed-nulls",
         Some(&["part", "n"]),
-        Some(Expression::column("n").is_null().not()),
+        Some(Expression::not(Expression::column("n").is_null())),
         expected,
     )?;
     Ok(())
@@ -724,11 +712,9 @@ fn and_or_predicates() -> Result<(), Box<dyn std::error::Error>> {
         (
             Expression::column("number")
                 .gt(Expression::literal(4i64))
-                .and(
-                    Expression::column("a_float")
-                        .gt(Expression::literal(5.5))
-                        .not(),
-                ),
+                .and(Expression::not(
+                    Expression::column("a_float").gt(Expression::literal(5.5)),
+                )),
             table_for_numbers(vec![5]),
         ),
         (
@@ -740,9 +726,9 @@ fn and_or_predicates() -> Result<(), Box<dyn std::error::Error>> {
         (
             Expression::column("number")
                 .gt(Expression::literal(4i64))
-                .or(Expression::column("a_float")
-                    .gt(Expression::literal(5.5))
-                    .not()),
+                .or(Expression::not(
+                    Expression::column("a_float").gt(Expression::literal(5.5)),
+                )),
             table_for_numbers(vec![1, 2, 3, 4, 5, 6]),
         ),
     ];
@@ -761,37 +747,39 @@ fn and_or_predicates() -> Result<(), Box<dyn std::error::Error>> {
 fn not_and_or_predicates() -> Result<(), Box<dyn std::error::Error>> {
     let cases = vec![
         (
-            Expression::column("number")
-                .gt(Expression::literal(4i64))
-                .and(Expression::column("a_float").gt(Expression::literal(5.5)))
-                .not(),
+            Expression::not(
+                Expression::column("number")
+                    .gt(Expression::literal(4i64))
+                    .and(Expression::column("a_float").gt(Expression::literal(5.5))),
+            ),
             table_for_numbers(vec![1, 2, 3, 4, 5]),
         ),
         (
-            Expression::column("number")
-                .gt(Expression::literal(4i64))
-                .and(
-                    Expression::column("a_float")
-                        .gt(Expression::literal(5.5))
-                        .not(),
-                )
-                .not(),
+            Expression::not(
+                Expression::column("number")
+                    .gt(Expression::literal(4i64))
+                    .and(Expression::not(
+                        Expression::column("a_float").gt(Expression::literal(5.5)),
+                    )),
+            ),
             table_for_numbers(vec![1, 2, 3, 4, 6]),
         ),
         (
-            Expression::column("number")
-                .gt(Expression::literal(4i64))
-                .or(Expression::column("a_float").gt(Expression::literal(5.5)))
-                .not(),
+            Expression::not(
+                Expression::column("number")
+                    .gt(Expression::literal(4i64))
+                    .or(Expression::column("a_float").gt(Expression::literal(5.5))),
+            ),
             table_for_numbers(vec![1, 2, 3, 4]),
         ),
         (
-            Expression::column("number")
-                .gt(Expression::literal(4i64))
-                .or(Expression::column("a_float")
-                    .gt(Expression::literal(5.5))
-                    .not())
-                .not(),
+            Expression::not(
+                Expression::column("number")
+                    .gt(Expression::literal(4i64))
+                    .or(Expression::not(
+                        Expression::column("a_float").gt(Expression::literal(5.5)),
+                    )),
+            ),
             vec![],
         ),
     ];
@@ -826,15 +814,13 @@ fn invalid_skips_none_predicates() -> Result<(), Box<dyn std::error::Error>> {
             table_for_numbers(vec![1, 2, 3, 4, 5, 6]),
         ),
         (
-            Expression::column("number")
-                .gt(Expression::struct_expr(vec![]))
-                .not(),
+            Expression::not(Expression::column("number").gt(Expression::struct_expr(vec![]))),
             table_for_numbers(vec![1, 2, 3, 4, 5, 6]),
         ),
         (
-            Expression::column("number")
-                .and(Expression::struct_expr(vec![]).is_null())
-                .not(),
+            Expression::not(
+                Expression::column("number").and(Expression::struct_expr(vec![]).is_null()),
+            ),
             table_for_numbers(vec![1, 2, 3, 4, 5, 6]),
         ),
     ];

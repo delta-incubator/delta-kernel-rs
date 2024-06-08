@@ -130,11 +130,10 @@ fn as_data_skipping_predicate(expr: &Expr) -> Option<Expr> {
                 LessThan | LessThanOrEqual => "minValues",
                 GreaterThan | GreaterThanOrEqual => "maxValues",
                 Equal => {
-                    let exprs = [
+                    return as_data_skipping_predicate(&Expr::and(
                         Expr::le(Column(col.clone()), Literal(val.clone())),
                         Expr::le(Literal(val.clone()), Column(col.clone())),
-                    ];
-                    return as_data_skipping_predicate(&Expr::and_from(exprs));
+                    ));
                 }
                 NotEqual => {
                     let exprs = [
