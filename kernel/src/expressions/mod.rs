@@ -37,6 +37,19 @@ pub enum BinaryOperator {
 }
 
 impl BinaryOperator {
+    /// Returns `<op2>` (if any) such that `B <op2> A` is equivalent to `A <op> B`.
+    pub(crate) fn commute(&self) -> Option<BinaryOperator> {
+        use BinaryOperator::*;
+        match self {
+            GreaterThan => Some(LessThan),
+            GreaterThanOrEqual => Some(LessThanOrEqual),
+            LessThan => Some(GreaterThan),
+            LessThanOrEqual => Some(GreaterThanOrEqual),
+            Equal | NotEqual | Plus | Multiply => Some(self.clone()),
+            _ => None,
+        }
+    }
+
     // invert an operator. Returns Some<InvertedOp> if the operator supports inversion, None if it
     // cannot be inverted
     pub(crate) fn invert(&self) -> Option<BinaryOperator> {

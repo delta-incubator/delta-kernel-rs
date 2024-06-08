@@ -10,19 +10,6 @@ use crate::expressions::{BinaryOperator, Expression as Expr, UnaryOperator, Vari
 use crate::schema::{DataType, PrimitiveType, SchemaRef, StructField, StructType};
 use crate::{Engine, EngineData, ExpressionEvaluator, JsonHandler};
 
-/// Returns `<op2>` (if any) such that `B <op2> A` is equivalent to `A <op> B`.
-fn commute(op: &BinaryOperator) -> Option<BinaryOperator> {
-    use BinaryOperator::*;
-    match op {
-        GreaterThan => Some(LessThan),
-        GreaterThanOrEqual => Some(LessThanOrEqual),
-        LessThan => Some(GreaterThan),
-        LessThanOrEqual => Some(GreaterThanOrEqual),
-        Equal | NotEqual | Plus | Multiply => Some(op.clone()),
-        _ => None,
-    }
-}
-
 /// Get the expression that checks if a col could be null, assuming tight_bounds = true. In this
 /// case a column can contain null if any value > 0 is in the nullCount. This is further complicated
 /// by the default for tightBounds being true, so we have to check if it's EITHER `null` OR `true`
@@ -123,7 +110,7 @@ fn as_data_skipping_predicate(expr: &Expr) -> Option<Expr> {
         BinaryOperation { op, left, right } => {
             let (op, col, val) = match (left.as_ref(), right.as_ref()) {
                 (Column(col), Literal(val)) => (op.clone(), col, val),
-                (Literal(val), Column(col)) => (commute(op)?, col, val),
+                (Literal(val), Column(col)) => (op.commute()?, col, val),
                 _ => return None, // unsupported combination of operands
             };
             let stats_col = match op {
