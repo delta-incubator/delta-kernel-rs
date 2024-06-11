@@ -21,6 +21,14 @@ pub enum MetadataValue {
     Number(i32),
     String(String),
     Boolean(bool),
+    // to support things like icebergv2 compat, where we can have fields like:
+    // "parquet.field.nested.ids": {
+    //    "col1.element": 100,
+    //    "col1.element.element": 101
+    // }
+    // TODO: Perhaps make this more restrictive, the PROTOCOL seems to indicate that this should
+    // always be a `String->Int` map
+    Object(serde_json::Map<String, serde_json::Value>),
 }
 
 impl From<String> for MetadataValue {
