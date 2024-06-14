@@ -373,15 +373,8 @@ macro_rules! assert_batches_sorted_eq {
             .unwrap()
             .to_string();
         // fix for windows: \r\n -->
-
         let mut actual_lines: Vec<&str> = formatted.trim().lines().collect();
-
-        // sort except for header + footer
-        let num_lines = actual_lines.len();
-        if num_lines > 3 {
-            actual_lines.as_mut_slice()[2..num_lines - 1].sort_unstable()
-        }
-
+        sort_lines!(actual_lines);
         assert_eq!(
             $expected_lines_sorted, actual_lines,
             "\n\nexpected:\n\n{:#?}\nactual:\n\n{:#?}\n\n",
