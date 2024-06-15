@@ -267,20 +267,11 @@ impl Scan {
                 location: self.snapshot.table_root.join(&add.path)?,
             };
 
-            // Equivalent of Java kernel's transformPhysicalData
-            // How do we find out the parquet file's phyiscal schema?
-            // TODO(r.chen): maybe we should be returning the physical file schema with the
-            // the results.
-            // Actually we probably don't need to do this because the arrow batch is aware of its
-            // schema. Does this mean that other engine's EngineData will be aware of its own schema
-            // though?
-            // this means we also don't have to keep casting the kernel schema to the
-            // arrow schema.
             let read_results =
                 parquet_handler.read_parquet_files(&[meta], self.physical_schema.clone(), None)?;
 
-            // First thing is to rebuild variants. Other expressions expect that VariantType is
-            // wellformed.
+            // The rest of the kernel expects variants to be reconstructed, so they must be
+            // reconstructed immediately after scanning the parquet files.
             let variant_coalesce_expr = match &self.snapshot.protocol().reader_features {
                 Some(reader_features) => {
                     // TODO(r.chen): Only check this if the variantType feature is enabled.
