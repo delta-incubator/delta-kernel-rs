@@ -1,3 +1,4 @@
+use core::panic;
 use std::cmp::Ordering;
 use std::fmt::{Display, Formatter};
 
@@ -314,6 +315,8 @@ impl PrimitiveType {
                     _ => unreachable!(),
                 }
             }
+            // TODO(r.chen): handle this
+            Variant => panic!("UNSUPPORTED")
         }
     }
 

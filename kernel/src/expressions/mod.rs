@@ -70,6 +70,8 @@ pub enum UnaryOperator {
     Not,
     /// Unary Is Null
     IsNull,
+    /// Unary VariantCoalesce
+    VariantCoalesce,
 }
 
 /// A SQL expression.
@@ -135,6 +137,7 @@ impl Display for Expression {
             Self::UnaryOperation { op, expr } => match op {
                 UnaryOperator::Not => write!(f, "NOT {}", expr),
                 UnaryOperator::IsNull => write!(f, "{} IS NULL", expr),
+                UnaryOperator::VariantCoalesce => write!(f, "VARIANT_COALESCE({})", expr),
             },
             Self::VariadicOperation { op, exprs } => match op {
                 VariadicOperator::And => {
@@ -225,6 +228,11 @@ impl Expression {
     /// Create a new expression `self IS NULL`
     pub fn is_null(self) -> Self {
         Self::unary(UnaryOperator::IsNull, self)
+    }
+
+    /// Create a new expression `variant_coalesce(self)`
+    pub fn variant_coalesce(self) -> Self {
+        Self::unary(UnaryOperator::VariantCoalesce, self)
     }
 
     /// Create a new expression `self == other`

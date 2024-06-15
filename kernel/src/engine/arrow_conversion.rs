@@ -1,10 +1,11 @@
 //! Conversions from kernel types to arrow types
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use arrow_schema::{
-    ArrowError, DataType as ArrowDataType, Field as ArrowField, Schema as ArrowSchema,
-    SchemaRef as ArrowSchemaRef, TimeUnit,
+    ArrowError, DataType as ArrowDataType, Field as ArrowField, Fields as ArrowFields,
+    Schema as ArrowSchema, SchemaRef as ArrowSchemaRef, TimeUnit,
 };
 use itertools::Itertools;
 
@@ -26,12 +27,16 @@ impl TryFrom<&StructField> for ArrowField {
     type Error = ArrowError;
 
     fn try_from(f: &StructField) -> Result<Self, ArrowError> {
-        let metadata = f
+        let mut metadata = f
             .metadata()
             .iter()
             .map(|(key, val)| Ok((key.clone(), serde_json::to_string(val)?)))
-            .collect::<Result<_, serde_json::Error>>()
+            .collect::<Result<HashMap<String, String>, serde_json::Error>>()
             .map_err(|err| ArrowError::JsonError(err.to_string()))?;
+
+        if f.data_type == DataType::VARIANT {
+            metadata.insert("isVariant".to_string(), "true".to_string());
+        }
 
         let field = ArrowField::new(
             f.name(),
@@ -111,7 +116,16 @@ impl TryFrom<&DataType> for ArrowDataType {
                     )),
                     PrimitiveType::TimestampNtz => {
                         Ok(ArrowDataType::Timestamp(TimeUnit::Microsecond, None))
-                    }
+                    },
+                    // The Delta spec does not enforce the field indexes of the "value" and
+                    // "Metadata" fields. However, within kernel defaults, the "variant_coalesce"
+                    // expression will always return variants with this physical representation.
+                    PrimitiveType::Variant => Ok(ArrowDataType::Struct(ArrowFields::from(
+                        vec![
+                            ArrowField::new("value", ArrowDataType::Binary, false),
+                            ArrowField::new("metadata", ArrowDataType::Binary, false),
+                        ]
+                    )))
                 }
             }
             DataType::Struct(s) => Ok(ArrowDataType::Struct(

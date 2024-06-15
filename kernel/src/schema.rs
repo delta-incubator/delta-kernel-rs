@@ -358,6 +358,7 @@ pub enum PrimitiveType {
     Timestamp,
     #[serde(rename = "timestamp_ntz")]
     TimestampNtz,
+    Variant,
     #[serde(
         serialize_with = "serialize_decimal",
         deserialize_with = "deserialize_decimal",
@@ -418,7 +419,8 @@ impl Display for PrimitiveType {
             PrimitiveType::TimestampNtz => write!(f, "timestamp_ntz"),
             PrimitiveType::Decimal(precision, scale) => {
                 write!(f, "decimal({},{})", precision, scale)
-            }
+            },
+            PrimitiveType::Variant => write!(f, "variant")
         }
     }
 }
@@ -476,6 +478,7 @@ impl DataType {
     pub const DATE: Self = DataType::Primitive(PrimitiveType::Date);
     pub const TIMESTAMP: Self = DataType::Primitive(PrimitiveType::Timestamp);
     pub const TIMESTAMP_NTZ: Self = DataType::Primitive(PrimitiveType::TimestampNtz);
+    pub const VARIANT: Self = DataType::Primitive(PrimitiveType::Variant);
 
     pub fn decimal(precision: u8, scale: u8) -> DeltaResult<Self> {
         PrimitiveType::check_decimal(precision, scale)?;
