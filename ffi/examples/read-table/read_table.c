@@ -170,6 +170,7 @@ PartitionList* get_partition_list(SharedGlobalScanState* state) {
   } else {
     print_diag("Table has no partition columns\n");
   }
+  free_string_slice_data(part_iter);
   return list;
 }
 

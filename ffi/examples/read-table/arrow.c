@@ -17,6 +17,7 @@ void free_arrow_context(ArrowContext* context) {
   for (gsize i = 0; i < context->num_batches; i++) {
     g_object_unref(context->batches[i]);
   }
+  free(context);
 }
 
 // report and free an error if it's not NULL. Return true if error was not null, false otherwise
@@ -75,12 +76,18 @@ static GArrowRecordBatch* add_partition_columns(GArrowRecordBatch* record_batch,
         break;
       }
     }
+
+    if (partition_val) {
+      free(partition_val);
+    }
+
     if (error != NULL) {
       printf("Giving up on column %s\n", col);
       g_object_unref(builder);
       error = NULL;
       continue;
     }
+
     GArrowArray* ret = garrow_array_builder_finish((GArrowArrayBuilder*)builder, &error);
     if (report_g_error("Can't build string array for parition column", error)) {
       printf("Giving up on column %s\n", col);
@@ -89,6 +96,7 @@ static GArrowRecordBatch* add_partition_columns(GArrowRecordBatch* record_batch,
       continue;
     }
     g_object_unref(builder);
+
     GArrowField* field = garrow_field_new(col, (GArrowDataType*)garrow_string_data_type_new());
     GArrowRecordBatch* old_batch = cur_record_batch;
     cur_record_batch = garrow_record_batch_add_column(old_batch, pos, field, ret, &error);
@@ -98,9 +106,6 @@ static GArrowRecordBatch* add_partition_columns(GArrowRecordBatch* record_batch,
         printf("Could not add column at %u: %s\n", pos, error->message);
         g_error_free(error);
       }
-    }
-    if (partition_val) {
-      free(partition_val);
     }
   }
   return cur_record_batch;
