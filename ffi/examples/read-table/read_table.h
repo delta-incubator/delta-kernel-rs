@@ -5,17 +5,6 @@
 
 #include <delta_kernel_ffi.h>
 
-void print_diag(char* fmt, ...) {
-#ifdef VERBOSE
-  va_list args;
-  va_start(args, fmt);
-  vprintf(fmt, args);
-  va_end(args);
-#else
-  (void)(fmt);
-#endif
-}
-
 // A list of partition column names
 typedef struct PartitionList {
   int len;
@@ -43,20 +32,10 @@ typedef struct Error {
   char* msg;
 } Error;
 
+void print_diag(char* fmt, ...);
 // Print out an error message, plus the code and kernel message of an error
-void print_error(const char* msg, Error* err) {
-  printf("[ERROR] %s\n", msg);
-  printf("  Kernel Code: %i\n", err->etype.etype);
-  printf("  Kernel Msg: %s\n", err->msg);
-}
-
+void print_error(const char* msg, Error* err);
 // free an error
-void free_error(Error* error) {
-  free(error->msg);
-  free(error);
-}
-
+void free_error(Error* error);
 // create a char* from a KernelStringSlice
-void* allocate_string(const KernelStringSlice slice) {
-  return strndup(slice.ptr, slice.len);
-}
+void* allocate_string(const KernelStringSlice slice);

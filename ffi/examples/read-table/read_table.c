@@ -2,12 +2,34 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "arrow.h"
 #include "read_table.h"
 #include "schema.h"
 
-#ifdef PRINT_ARROW_DATA
-#include "arrow.h"
+// some diagnostic functions
+void print_diag(char* fmt, ...) {
+#ifdef VERBOSE
+  va_list args;
+  va_start(args, fmt);
+  vprintf(fmt, args);
+  va_end(args);
+#else
+  (void)(fmt);
 #endif
+}
+
+// Print out an error message, plus the code and kernel message of an error
+void print_error(const char* msg, Error* err) {
+  printf("[ERROR] %s\n", msg);
+  printf("  Kernel Code: %i\n", err->etype.etype);
+  printf("  Kernel Msg: %s\n", err->msg);
+}
+
+// free an error
+void free_error(Error* error) {
+  free(error->msg);
+  free(error);
+}
 
 // Print the content of a selection vector if `VERBOSE` is defined in read_table.h
 void print_selection_vector(const char* indent, const KernelBoolSlice* selection_vec) {
@@ -50,6 +72,12 @@ EngineError* allocate_error(KernelError etype, const KernelStringSlice msg) {
   error->msg = charmsg;
   return (EngineError*)error;
 }
+
+// utility to turn a slice into a char*
+void* allocate_string(const KernelStringSlice slice) {
+  return strndup(slice.ptr, slice.len);
+}
+
 
 // utility function to convert key/val into slices and set them on a builder
 void set_builder_opt(EngineBuilder* engine_builder, char* key, char* val) {
