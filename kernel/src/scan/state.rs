@@ -37,7 +37,7 @@ pub struct DvInfo {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Stats {
-    /// For any file where the deletion vector is not present (see [`DvInfo.has_vector`]), the
+    /// For any file where the deletion vector is not present (see [`DvInfo::has_vector`]), the
     /// `num_records` statistic must be present and accurate, and must equal the number of records
     /// in the data file. In the presence of Deletion Vectors the statistics may be somewhat
     /// outdated, i.e. not reflecting deleted rows yet.
