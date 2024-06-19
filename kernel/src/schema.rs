@@ -21,14 +21,11 @@ pub enum MetadataValue {
     Number(i32),
     String(String),
     Boolean(bool),
-    // to support things like icebergv2 compat, where we can have fields like:
-    // "parquet.field.nested.ids": {
-    //    "col1.element": 100,
-    //    "col1.element.element": 101
-    // }
-    // TODO: Perhaps make this more restrictive, the PROTOCOL seems to indicate that this should
-    // always be a `String->Int` map
-    Object(serde_json::Map<String, serde_json::Value>),
+    // The [PROTOCOL](https://github.com/delta-io/delta/blob/master/PROTOCOL.md#struct-field) states
+    // only that the metadata is "A JSON map containing information about this column.", so we can
+    // actually have any valid json here. `Other` is therefore a catchall for things we don't need
+    // to handle.
+    Other(serde_json::Value),
 }
 
 impl From<String> for MetadataValue {
