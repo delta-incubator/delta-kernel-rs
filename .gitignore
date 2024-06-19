@@ -1,7 +1,19 @@
-/target
-/kernel/target
+# OS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+.vim
+
+# Rust
+.cargo/
+target/
 /Cargo.lock
+
+# Project
 acceptance/tests/dat/
-.vscode
 ffi/examples/read-table/build
 /build
+/kernel/target
+/target
