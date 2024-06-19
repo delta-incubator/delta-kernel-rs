@@ -33,20 +33,24 @@ pub struct DvInfo {
     deletion_vector: Option<DeletionVectorDescriptor>,
 }
 
-fn default_true() -> bool {
-    true
-}
-
 /// Give engines an easy way to consume stats
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Stats {
+    /// For any file where the deletion vector is not present (see [`DvInfo.has_vector`]), the
+    /// `num_records` statistic must be present and accurate, and must equal the number of records
+    /// in the data file. In the presence of Deletion Vectors the statistics may be somewhat
+    /// outdated, i.e. not reflecting deleted rows yet.
     pub num_records: u64,
-    #[serde(default = "default_true")]
-    pub tight_bounds: bool,
 }
 
 impl DvInfo {
+    /// Check if this DvInfo contains a Deletion Vector. This is mostly used to know if the
+    /// associated [`Stats`] struct has fully accurate information or not.
+    pub fn has_vector(&self) -> bool {
+        self.deletion_vector.is_some()
+    }
+
     pub fn get_selection_vector(
         &self,
         engine: &dyn Engine,
@@ -192,7 +196,6 @@ mod tests {
         assert_eq!(size, 635);
         assert!(stats.is_some());
         assert_eq!(stats.as_ref().unwrap().num_records, 10);
-        assert!(stats.as_ref().unwrap().tight_bounds);
         assert_eq!(part_vals.get("date"), Some(&"2017-12-10".to_string()));
         assert_eq!(part_vals.get("non-existent"), None);
         assert!(dv_info.deletion_vector.is_some());

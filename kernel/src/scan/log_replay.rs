@@ -340,7 +340,6 @@ mod tests {
         assert_eq!(size, 635);
         assert!(stats.is_some());
         assert_eq!(stats.as_ref().unwrap().num_records, 10);
-        assert!(stats.as_ref().unwrap().tight_bounds);
         assert_eq!(part_vals.get("date"), Some(&"2017-12-10".to_string()));
         assert_eq!(part_vals.get("non-existent"), None);
     }

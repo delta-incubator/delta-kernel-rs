@@ -271,10 +271,14 @@ pub unsafe extern "C" fn kernel_scan_data_free(data: Handle<SharedScanDataIterat
     data.drop_handle();
 }
 
+/// Give engines an easy way to consume stats
 #[repr(C)]
 pub struct Stats {
+    /// For any file where the deletion vector is not present (see [`DvInfo.has_vector`]), the
+    /// `num_records` statistic must be present and accurate, and must equal the number of records
+    /// in the data file. In the presence of Deletion Vectors the statistics may be somewhat
+    /// outdated, i.e. not reflecting deleted rows yet.
     num_records: u64,
-    tight_bounds: bool,
 }
 
 type CScanCallback = extern "C" fn(
@@ -352,7 +356,6 @@ fn rust_callback(
     };
     let stats = kernel_stats.map(|ks| Stats {
         num_records: ks.num_records,
-        tight_bounds: ks.tight_bounds,
     });
     (context.callback)(
         context.engine_context,
