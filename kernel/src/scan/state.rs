@@ -133,9 +133,9 @@ impl<T> DataVisitor for ScanFileVisitor<'_, T> {
             // Since path column is required, use it to detect presence of an Add action
             if let Some(path) = getters[0].get_opt(row_index, "scanFile.path")? {
                 let size = getters[1].get(row_index, "scanFile.size")?;
-                let stats_json: Option<String> = getters[3].get_opt(row_index, "scanFile.stats")?;
+                let stats: Option<String> = getters[3].get_opt(row_index, "scanFile.stats")?;
                 let stats: Option<Stats> =
-                    stats_json.and_then(|json| match serde_json::from_str(json.as_str()) {
+                    stats.and_then(|json| match serde_json::from_str(json.as_str()) {
                         Ok(stats) => Some(stats),
                         Err(e) => {
                             warn!("Invalid stats string in Add file {json}: {}", e);
