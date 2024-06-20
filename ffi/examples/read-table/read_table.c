@@ -112,7 +112,7 @@ void scan_row_callback(void* engine_context,
   context->partition_values = partition_values;
   print_partition_info(context, partition_values);
 #ifdef PRINT_ARROW_DATA
-  read_parquet_file(context, path, selection_vector);
+  c_read_parquet_file(context, path, selection_vector);
 #endif
   free_bool_slice(selection_vector);
   context->partition_values = NULL;

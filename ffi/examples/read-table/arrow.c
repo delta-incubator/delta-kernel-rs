@@ -187,7 +187,7 @@ static void visit_read_data(void* vcontext, EngineData* data) {
 }
 
 // We call this for each file we get called back to read in read_table.c::visit_callback
-void read_parquet_file(struct EngineContext* context,
+void c_read_parquet_file(struct EngineContext* context,
                        const KernelStringSlice path,
                        const KernelBoolSlice selection_vector) {
   int full_len = strlen(context->table_root) + path.len + 1;
@@ -199,7 +199,7 @@ void read_parquet_file(struct EngineContext* context,
     .path = path_slice,
   };
   ExternResultHandleExclusiveFileReadResultIterator read_res =
-    read_parquet_files(context->engine, &meta, context->read_schema);
+    read_parquet_file(context->engine, &meta, context->read_schema);
   if (read_res.tag != OkHandleExclusiveFileReadResultIterator) {
     printf("Couldn't read data\n");
     return;

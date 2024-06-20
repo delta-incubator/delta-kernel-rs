@@ -89,7 +89,7 @@ pub unsafe extern "C" fn free_read_result_iter(data: Handle<ExclusiveFileReadRes
 /// # Safety
 /// Caller is responsible for calling with a valid `ExternEngineHandle` and `FileMeta`
 #[no_mangle]
-pub unsafe extern "C" fn read_parquet_files(
+pub unsafe extern "C" fn read_parquet_file(
     engine: Handle<SharedExternEngine>,
     file: &FileMeta,
     physical_schema: Handle<SharedSchema>,
@@ -97,11 +97,11 @@ pub unsafe extern "C" fn read_parquet_files(
     let engine = unsafe { engine.clone_as_arc() };
     let physical_schema = unsafe { physical_schema.clone_as_arc() };
     let path = unsafe { String::try_from_slice(&file.path) };
-    let res = read_parquet_files_impl(engine.clone(), path, file, physical_schema);
+    let res = read_parquet_file_impl(engine.clone(), path, file, physical_schema);
     res.into_extern_result(&engine.as_ref())
 }
 
-fn read_parquet_files_impl(
+fn read_parquet_file_impl(
     extern_engine: Arc<dyn ExternEngine>,
     path: DeltaResult<String>,
     file: &FileMeta,

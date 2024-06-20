@@ -15,9 +15,9 @@ typedef struct ArrowContext {
 } ArrowContext;
 
 ArrowContext* init_arrow_context();
-void read_parquet_file(struct EngineContext* context,
-                       const KernelStringSlice path,
-                       const KernelBoolSlice selection_vector);
+void c_read_parquet_file(struct EngineContext* context,
+                         const KernelStringSlice path,
+                         const KernelBoolSlice selection_vector);
 void print_arrow_context(ArrowContext* context);
 void free_arrow_context(ArrowContext* context);
 
