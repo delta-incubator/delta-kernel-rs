@@ -45,7 +45,7 @@ impl Drop for FileReadResultIterator {
 /// Call the engine back with the next `EngingeData` batch read by Parquet/Json handler
 /// # Safety
 ///
-/// The iterator must be valid (returned by [`read_parquet_files`]) and not yet freed by
+/// The iterator must be valid (returned by [`read_parquet_file`]) and not yet freed by
 /// [`free_read_result_iter`]. The visitor function pointer must be non-null.
 #[no_mangle]
 pub unsafe extern "C" fn read_result_next(
@@ -78,7 +78,7 @@ fn read_result_next_impl(
 /// # Safety
 ///
 /// Caller is responsible for (at most once) passing a valid pointer returned by a call to
-/// [`read_parquet_files`].
+/// [`read_parquet_file`].
 #[no_mangle]
 pub unsafe extern "C" fn free_read_result_iter(data: Handle<ExclusiveFileReadResultIterator>) {
     data.drop_handle();
