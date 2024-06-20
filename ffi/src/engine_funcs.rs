@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use delta_kernel::{schema::Schema, DeltaResult, Error, FileDataReadResultIterator};
+use delta_kernel::{schema::Schema, DeltaResult, FileDataReadResultIterator};
 use delta_kernel_ffi_macros::handle_descriptor;
 use tracing::debug;
 use url::Url;
@@ -21,20 +21,6 @@ pub struct FileMeta {
     pub size: usize,
 }
 
-impl TryFrom<&FileMeta> for delta_kernel::FileMeta {
-    type Error = Error;
-
-    fn try_from(fm: &FileMeta) -> Result<Self, Error> {
-        let path = unsafe { String::try_from_slice(&fm.path) }?;
-        let location = Url::parse(&path)?;
-        Ok(delta_kernel::FileMeta {
-            location,
-            last_modified: fm.last_modified,
-            size: fm.size,
-        })
-    }
-}
-
 // Intentionally opaque to the engine.
 pub struct FileReadResultIterator {
     // Box -> Wrap its unsized content this struct is fixed-size with thin pointers.
@@ -48,7 +34,7 @@ pub struct FileReadResultIterator {
 }
 
 #[handle_descriptor(target=FileReadResultIterator, mutable=true, sized=true)]
-pub struct MutFileReadResultIterator;
+pub struct ExclusiveFileReadResultIterator;
 
 impl Drop for FileReadResultIterator {
     fn drop(&mut self) {
@@ -63,7 +49,7 @@ impl Drop for FileReadResultIterator {
 /// [`free_read_result_iter`]. The visitor function pointer must be non-null.
 #[no_mangle]
 pub unsafe extern "C" fn read_result_next(
-    mut data: Handle<MutFileReadResultIterator>,
+    mut data: Handle<ExclusiveFileReadResultIterator>,
     engine_context: NullableCvoid,
     engine_visitor: extern "C" fn(engine_context: NullableCvoid, engine_data: Handle<EngineData>),
 ) -> ExternResult<bool> {
@@ -94,7 +80,7 @@ fn read_result_next_impl(
 /// Caller is responsible for (at most once) passing a valid pointer returned by a call to
 /// [`read_parquet_files`].
 #[no_mangle]
-pub unsafe extern "C" fn free_read_result_iter(data: Handle<MutFileReadResultIterator>) {
+pub unsafe extern "C" fn free_read_result_iter(data: Handle<ExclusiveFileReadResultIterator>) {
     data.drop_handle();
 }
 
@@ -107,21 +93,28 @@ pub unsafe extern "C" fn read_parquet_files(
     engine: Handle<SharedExternEngine>,
     file: &FileMeta,
     physical_schema: Handle<SharedSchema>,
-) -> ExternResult<Handle<MutFileReadResultIterator>> {
+) -> ExternResult<Handle<ExclusiveFileReadResultIterator>> {
     let extern_engine = unsafe { engine.clone_as_arc() };
     let physical_schema = unsafe { physical_schema.clone_as_arc() };
-    let res = read_parquet_files_impl(extern_engine.clone(), file, physical_schema);
+    let path = unsafe { String::try_from_slice(&file.path) };
+    let res = read_parquet_files_impl(extern_engine.clone(), path, file, physical_schema);
     res.into_extern_result(&extern_engine.as_ref())
 }
 
 fn read_parquet_files_impl(
     extern_engine: Arc<dyn ExternEngine>,
+    path: DeltaResult<String>,
     file: &FileMeta,
     physical_schema: Arc<Schema>,
-) -> DeltaResult<Handle<MutFileReadResultIterator>> {
+) -> DeltaResult<Handle<ExclusiveFileReadResultIterator>> {
     let engine = extern_engine.engine();
-    let delta_fm: delta_kernel::FileMeta = file.try_into()?;
     let parquet_handler = engine.get_parquet_handler();
+    let location = Url::parse(&path?)?;
+    let delta_fm = delta_kernel::FileMeta {
+        location,
+        last_modified: file.last_modified,
+        size: file.size,
+    };
     let data = parquet_handler.read_parquet_files(&[delta_fm], physical_schema, None)?;
     let res = Box::new(FileReadResultIterator {
         data,

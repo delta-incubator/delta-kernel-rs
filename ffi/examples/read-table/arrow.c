@@ -198,9 +198,9 @@ void read_parquet_file(struct EngineContext* context,
   FileMeta meta = {
     .path = path_slice,
   };
-  ExternResultHandleMutFileReadResultIterator read_res =
+  ExternResultHandleExclusiveFileReadResultIterator read_res =
     read_parquet_files(context->engine, &meta, context->read_schema);
-  if (read_res.tag != OkHandleMutFileReadResultIterator) {
+  if (read_res.tag != OkHandleExclusiveFileReadResultIterator) {
     printf("Couldn't read data\n");
     return;
   }
@@ -211,7 +211,7 @@ void read_parquet_file(struct EngineContext* context,
     }
     context->arrow_context->cur_filter = sel_array;
   }
-  MutFileReadResultIterator* read_iter = read_res.ok;
+  ExclusiveFileReadResultIterator* read_iter = read_res.ok;
   for (;;) {
     ExternResultbool ok_res = read_result_next(read_iter, context, visit_read_data);
     if (ok_res.tag != Okbool) {
