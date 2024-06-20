@@ -64,9 +64,9 @@ int test_engine(KernelStringSlice table_path_slice,
     }
   }
 
-  drop_scan(scan);
-  drop_snapshot(snapshot);
-  drop_engine(engine);
+  free_scan(scan);
+  free_snapshot(snapshot);
+  free_engine(engine);
   return 0;
 }
 
