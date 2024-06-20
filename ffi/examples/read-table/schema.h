@@ -32,25 +32,29 @@
 
 typedef struct SchemaItemList SchemaItemList;
 
-typedef struct {
+typedef struct
+{
   char* name;
   char* type;
   uintptr_t children;
 } SchemaItem;
 
-typedef struct SchemaItemList {
+typedef struct SchemaItemList
+{
   uint32_t len;
   SchemaItem* list;
 } SchemaItemList;
 
-typedef struct {
+typedef struct
+{
   int list_count;
   SchemaItemList* lists;
 } SchemaBuilder;
 
 // lists are preallocated to have exactly enough space, so we just fill in the next open slot and
 // increment our length
-SchemaItem* add_to_list(SchemaItemList* list, char* name, char* type) {
+SchemaItem* add_to_list(SchemaItemList* list, char* name, char* type)
+{
   int idx = list->len;
   list->list[idx].name = name;
   list->list[idx].type = type;
@@ -59,7 +63,8 @@ SchemaItem* add_to_list(SchemaItemList* list, char* name, char* type) {
 }
 
 // print out all items in a list, recursing into any children they may have
-void print_list(SchemaBuilder* builder, uintptr_t list_id, int indent, int parents_on_last) {
+void print_list(SchemaBuilder* builder, uintptr_t list_id, int indent, int parents_on_last)
+{
   SchemaItemList* list = &builder->lists[list_id];
   for (uint32_t i = 0; i < list->len; i++) {
     bool is_last = i == list->len - 1;
@@ -81,7 +86,8 @@ void print_list(SchemaBuilder* builder, uintptr_t list_id, int indent, int paren
 }
 
 // declare all our visitor methods
-uintptr_t make_field_list(void* data, uintptr_t reserve) {
+uintptr_t make_field_list(void* data, uintptr_t reserve)
+{
   SchemaBuilder* builder = data;
   int id = builder->list_count;
 #ifdef VERBOSE
@@ -98,21 +104,25 @@ uintptr_t make_field_list(void* data, uintptr_t reserve) {
   return id;
 }
 
-void visit_struct(void* data,
-                  uintptr_t sibling_list_id,
-                  struct KernelStringSlice name,
-                  uintptr_t child_list_id) {
+void visit_struct(
+  void* data,
+  uintptr_t sibling_list_id,
+  struct KernelStringSlice name,
+  uintptr_t child_list_id)
+{
   SchemaBuilder* builder = data;
   char* name_ptr = allocate_string(name);
   PRINT_VISIT("struct", name_ptr, sibling_list_id, "Children", child_list_id);
   SchemaItem* struct_item = add_to_list(&builder->lists[sibling_list_id], name_ptr, "struct");
   struct_item->children = child_list_id;
 }
-void visit_array(void* data,
-                 uintptr_t sibling_list_id,
-                 struct KernelStringSlice name,
-                 bool contains_null,
-                 uintptr_t child_list_id) {
+void visit_array(
+  void* data,
+  uintptr_t sibling_list_id,
+  struct KernelStringSlice name,
+  bool contains_null,
+  uintptr_t child_list_id)
+{
   SchemaBuilder* builder = data;
   char* name_ptr = malloc(sizeof(char) * (name.len + 24));
   snprintf(name_ptr, name.len + 1, "%s", name.ptr);
@@ -121,11 +131,13 @@ void visit_array(void* data,
   SchemaItem* array_item = add_to_list(&builder->lists[sibling_list_id], name_ptr, "array");
   array_item->children = child_list_id;
 }
-void visit_map(void* data,
-               uintptr_t sibling_list_id,
-               struct KernelStringSlice name,
-               bool value_contains_null,
-               uintptr_t child_list_id) {
+void visit_map(
+  void* data,
+  uintptr_t sibling_list_id,
+  struct KernelStringSlice name,
+  bool value_contains_null,
+  uintptr_t child_list_id)
+{
   SchemaBuilder* builder = data;
   char* name_ptr = malloc(sizeof(char) * (name.len + 24));
   snprintf(name_ptr, name.len + 1, "%s", name.ptr);
@@ -135,11 +147,13 @@ void visit_map(void* data,
   map_item->children = child_list_id;
 }
 
-void visit_decimal(void* data,
-                   uintptr_t sibling_list_id,
-                   struct KernelStringSlice name,
-                   uint8_t precision,
-                   uint8_t scale) {
+void visit_decimal(
+  void* data,
+  uintptr_t sibling_list_id,
+  struct KernelStringSlice name,
+  uint8_t precision,
+  uint8_t scale)
+{
   SchemaBuilder* builder = data;
   char* name_ptr = allocate_string(name);
   char* type = malloc(19 * sizeof(char));
@@ -148,10 +162,12 @@ void visit_decimal(void* data,
   add_to_list(&builder->lists[sibling_list_id], name_ptr, type);
 }
 
-void visit_simple_type(void* data,
-                       uintptr_t sibling_list_id,
-                       struct KernelStringSlice name,
-                       char* type) {
+void visit_simple_type(
+  void* data,
+  uintptr_t sibling_list_id,
+  struct KernelStringSlice name,
+  char* type)
+{
   SchemaBuilder* builder = data;
   char* name_ptr = allocate_string(name);
   PRINT_VISIT(type, name_ptr, sibling_list_id);
@@ -159,7 +175,8 @@ void visit_simple_type(void* data,
 }
 
 #define DEFINE_VISIT_SIMPLE_TYPE(typename)                                                         \
-  void visit_##typename(void* data, uintptr_t sibling_list_id, struct KernelStringSlice name) {    \
+  void visit_##typename(void* data, uintptr_t sibling_list_id, struct KernelStringSlice name)      \
+  {                                                                                                \
     visit_simple_type(data, sibling_list_id, name, #typename);                                     \
   }
 
@@ -177,7 +194,8 @@ DEFINE_VISIT_SIMPLE_TYPE(timestamp)
 DEFINE_VISIT_SIMPLE_TYPE(timestamp_ntz)
 
 // free all the data in the builder (but not the builder itself, it's stack allocated)
-void free_builder(SchemaBuilder builder) {
+void free_builder(SchemaBuilder builder)
+{
   for (int i = 0; i < builder.list_count; i++) {
     SchemaItemList* list = (builder.lists) + i;
     for (uint32_t j = 0; j < list->len; j++) {
@@ -195,30 +213,33 @@ void free_builder(SchemaBuilder builder) {
 }
 
 // Print the schema of the snapshot
-void print_schema(SharedSnapshot* snapshot) {
+void print_schema(SharedSnapshot* snapshot)
+{
   print_diag("Building schema\n");
   SchemaBuilder builder = {
     .list_count = 0,
     .lists = NULL,
   };
-  EngineSchemaVisitor visitor = { .data = &builder,
-                                  .make_field_list = make_field_list,
-                                  .visit_struct = visit_struct,
-                                  .visit_array = visit_array,
-                                  .visit_map = visit_map,
-                                  .visit_decimal = visit_decimal,
-                                  .visit_string = visit_string,
-                                  .visit_long = visit_long,
-                                  .visit_integer = visit_integer,
-                                  .visit_short = visit_short,
-                                  .visit_byte = visit_byte,
-                                  .visit_float = visit_float,
-                                  .visit_double = visit_double,
-                                  .visit_boolean = visit_boolean,
-                                  .visit_binary = visit_binary,
-                                  .visit_date = visit_date,
-                                  .visit_timestamp = visit_timestamp,
-                                  .visit_timestamp_ntz = visit_timestamp_ntz };
+  EngineSchemaVisitor visitor = {
+    .data = &builder,
+    .make_field_list = make_field_list,
+    .visit_struct = visit_struct,
+    .visit_array = visit_array,
+    .visit_map = visit_map,
+    .visit_decimal = visit_decimal,
+    .visit_string = visit_string,
+    .visit_long = visit_long,
+    .visit_integer = visit_integer,
+    .visit_short = visit_short,
+    .visit_byte = visit_byte,
+    .visit_float = visit_float,
+    .visit_double = visit_double,
+    .visit_boolean = visit_boolean,
+    .visit_binary = visit_binary,
+    .visit_date = visit_date,
+    .visit_timestamp = visit_timestamp,
+    .visit_timestamp_ntz = visit_timestamp_ntz,
+  };
   uintptr_t schema_list_id = visit_schema(snapshot, &visitor);
 #ifdef VERBOSE
   printf("Schema returned in list %i\n", schema_list_id);

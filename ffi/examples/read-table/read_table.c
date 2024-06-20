@@ -7,7 +7,8 @@
 #include "schema.h"
 
 // some diagnostic functions
-void print_diag(char* fmt, ...) {
+void print_diag(char* fmt, ...)
+{
 #ifdef VERBOSE
   va_list args;
   va_start(args, fmt);
@@ -19,20 +20,23 @@ void print_diag(char* fmt, ...) {
 }
 
 // Print out an error message, plus the code and kernel message of an error
-void print_error(const char* msg, Error* err) {
+void print_error(const char* msg, Error* err)
+{
   printf("[ERROR] %s\n", msg);
   printf("  Kernel Code: %i\n", err->etype.etype);
   printf("  Kernel Msg: %s\n", err->msg);
 }
 
 // free an error
-void free_error(Error* error) {
+void free_error(Error* error)
+{
   free(error->msg);
   free(error);
 }
 
 // Print the content of a selection vector if `VERBOSE` is defined in read_table.h
-void print_selection_vector(const char* indent, const KernelBoolSlice* selection_vec) {
+void print_selection_vector(const char* indent, const KernelBoolSlice* selection_vec)
+{
 #ifdef VERBOSE
   for (uintptr_t i = 0; i < selection_vec->len; i++) {
     printf("%ssel[%i] = %b\n", indent, i, selection_vec->ptr[i]);
@@ -44,7 +48,8 @@ void print_selection_vector(const char* indent, const KernelBoolSlice* selection
 }
 
 // Print info about table partitions if `VERBOSE` is defined in read_table.h
-void print_partition_info(struct EngineContext* context, const CStringMap* partition_values) {
+void print_partition_info(struct EngineContext* context, const CStringMap* partition_values)
+{
 #ifdef VERBOSE
   for (int i = 0; i < context->partition_cols->len; i++) {
     char* col = context->partition_cols->cols[i];
@@ -65,7 +70,8 @@ void print_partition_info(struct EngineContext* context, const CStringMap* parti
 
 // kernel will call this to allocate our errors. This can be used to create an "engine native" type
 // error
-EngineError* allocate_error(KernelError etype, const KernelStringSlice msg) {
+EngineError* allocate_error(KernelError etype, const KernelStringSlice msg)
+{
   Error* error = malloc(sizeof(Error));
   error->etype.etype = etype;
   char* charmsg = allocate_string(msg);
@@ -74,13 +80,14 @@ EngineError* allocate_error(KernelError etype, const KernelStringSlice msg) {
 }
 
 // utility to turn a slice into a char*
-void* allocate_string(const KernelStringSlice slice) {
+void* allocate_string(const KernelStringSlice slice)
+{
   return strndup(slice.ptr, slice.len);
 }
 
-
 // utility function to convert key/val into slices and set them on a builder
-void set_builder_opt(EngineBuilder* engine_builder, char* key, char* val) {
+void set_builder_opt(EngineBuilder* engine_builder, char* key, char* val)
+{
   KernelStringSlice key_slice = { key, strlen(key) };
   KernelStringSlice val_slice = { val, strlen(val) };
   set_builder_option(engine_builder, key_slice, val_slice);
@@ -88,11 +95,13 @@ void set_builder_opt(EngineBuilder* engine_builder, char* key, char* val) {
 
 // Kernel will call this function for each file that should be scanned. The arguments include enough
 // context to constuct the correct logical data from the physically read parquet
-void scan_row_callback(void* engine_context,
-                       KernelStringSlice path,
-                       int64_t size,
-                       const DvInfo* dv_info,
-                       const CStringMap* partition_values) {
+void scan_row_callback(
+  void* engine_context,
+  KernelStringSlice path,
+  int64_t size,
+  const DvInfo* dv_info,
+  const CStringMap* partition_values)
+{
   (void)size; // not using this at the moment
   struct EngineContext* context = engine_context;
   print_diag("Called back to read file: %.*s\n", (int)path.len, path.ptr);
@@ -120,9 +129,11 @@ void scan_row_callback(void* engine_context,
 
 // For each chunk of scan data (which may contain multiple files to scan), kernel will call this
 // function (named do_visit_scan_data to avoid conflict with visit_scan_data exported by kernel)
-void do_visit_scan_data(void* engine_context,
-                        EngineData* engine_data,
-                        KernelBoolSlice selection_vec) {
+void do_visit_scan_data(
+  void* engine_context,
+  EngineData* engine_data,
+  KernelBoolSlice selection_vec)
+{
   print_diag("\nScan iterator found some data to read\n  Of this data, here is "
              "a selection vector\n");
   print_selection_vector("    ", &selection_vec);
@@ -135,7 +146,8 @@ void do_visit_scan_data(void* engine_context,
 // Called for each element of the partition StringSliceIterator. We just turn the slice into a
 // `char*` and append it to our list. We knew the total number of partitions up front, so this
 // assumes that `list->cols` has been allocated with enough space to store the pointer.
-void visit_partition(void* context, const KernelStringSlice partition) {
+void visit_partition(void* context, const KernelStringSlice partition)
+{
   PartitionList* list = context;
   char* col = allocate_string(partition);
   list->cols[list->len] = col;
@@ -143,7 +155,8 @@ void visit_partition(void* context, const KernelStringSlice partition) {
 }
 
 // Build a list of partition column names.
-PartitionList* get_partition_list(SharedGlobalScanState* state) {
+PartitionList* get_partition_list(SharedGlobalScanState* state)
+{
   print_diag("Building list of partition columns\n");
   int count = get_partition_column_count(state);
   PartitionList* list = malloc(sizeof(PartitionList));
@@ -174,7 +187,8 @@ PartitionList* get_partition_list(SharedGlobalScanState* state) {
   return list;
 }
 
-int main(int argc, char* argv[]) {
+int main(int argc, char* argv[])
+{
   if (argc < 2) {
     printf("Usage: %s table/path\n", argv[0]);
     return -1;

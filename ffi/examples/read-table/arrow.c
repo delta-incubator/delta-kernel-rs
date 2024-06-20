@@ -1,10 +1,11 @@
+#include "arrow.h"
 #include <stdio.h>
 #include <string.h>
-#include "arrow.h"
 
 #ifdef PRINT_ARROW_DATA
 
-ArrowContext* init_arrow_context() {
+ArrowContext* init_arrow_context()
+{
   ArrowContext* context = malloc(sizeof(ArrowContext));
   context->num_batches = 0;
   context->batches = NULL;
@@ -13,7 +14,8 @@ ArrowContext* init_arrow_context() {
 }
 
 // unref all the data in the context
-void free_arrow_context(ArrowContext* context) {
+void free_arrow_context(ArrowContext* context)
+{
   for (gsize i = 0; i < context->num_batches; i++) {
     g_object_unref(context->batches[i]);
   }
@@ -21,7 +23,8 @@ void free_arrow_context(ArrowContext* context) {
 }
 
 // report and free an error if it's not NULL. Return true if error was not null, false otherwise
-static bool report_g_error(char* msg, GError* error) {
+static bool report_g_error(char* msg, GError* error)
+{
   if (error != NULL) {
     printf("%s: %s\n", msg, error->message);
     g_error_free(error);
@@ -31,7 +34,8 @@ static bool report_g_error(char* msg, GError* error) {
 }
 
 // Turn ffi formatted schema data into a GArrowSchema
-static GArrowSchema* get_schema(FFI_ArrowSchema* schema) {
+static GArrowSchema* get_schema(FFI_ArrowSchema* schema)
+{
   GError* error = NULL;
   GArrowSchema* garrow_schema = garrow_schema_import((gpointer)schema, &error);
   report_g_error("Can't get schema", error);
@@ -39,7 +43,8 @@ static GArrowSchema* get_schema(FFI_ArrowSchema* schema) {
 }
 
 // Turn ffi formatted record batch data into a GArrowRecordBatch
-static GArrowRecordBatch* get_record_batch(FFI_ArrowArray* array, GArrowSchema* schema) {
+static GArrowRecordBatch* get_record_batch(FFI_ArrowArray* array, GArrowSchema* schema)
+{
   GError* error = NULL;
   GArrowRecordBatch* record_batch = garrow_record_batch_import((gpointer)array, schema, &error);
   report_g_error("Can't get record batch", error);
@@ -49,9 +54,11 @@ static GArrowRecordBatch* get_record_batch(FFI_ArrowArray* array, GArrowSchema* 
 // Add columns to a record batch for each partition. In a "real" engine we would want to parse the
 // string values into the correct data type. This program just adds all partition columns as strings
 // for simplicity
-static GArrowRecordBatch* add_partition_columns(GArrowRecordBatch* record_batch,
-                                                PartitionList* partition_cols,
-                                                const CStringMap* partition_values) {
+static GArrowRecordBatch* add_partition_columns(
+  GArrowRecordBatch* record_batch,
+  PartitionList* partition_cols,
+  const CStringMap* partition_values)
+{
   gint64 rows = garrow_record_batch_get_n_rows(record_batch);
   gint64 cols = garrow_record_batch_get_n_columns(record_batch);
   GArrowRecordBatch* cur_record_batch = record_batch;
@@ -61,10 +68,11 @@ static GArrowRecordBatch* add_partition_columns(GArrowRecordBatch* record_batch,
     guint pos = cols + i;
     KernelStringSlice key = { col, strlen(col) };
     char* partition_val = get_from_map(partition_values, key, allocate_string);
-    print_diag("  Adding partition column '%s' with value '%s' at column %u\n",
-               col,
-               partition_val ? partition_val : "NULL",
-               pos);
+    print_diag(
+      "  Adding partition column '%s' with value '%s' at column %u\n",
+      col,
+      partition_val ? partition_val : "NULL",
+      pos);
     GArrowStringArrayBuilder* builder = garrow_string_array_builder_new();
     for (gint64 i = 0; i < rows; i++) {
       if (partition_val) {
@@ -112,10 +120,12 @@ static GArrowRecordBatch* add_partition_columns(GArrowRecordBatch* record_batch,
 }
 
 // append a batch to our context
-static void add_batch_to_context(ArrowContext* context,
-                                 ArrowFFIData* arrow_data,
-                                 PartitionList* partition_cols,
-                                 const CStringMap* partition_values) {
+static void add_batch_to_context(
+  ArrowContext* context,
+  ArrowFFIData* arrow_data,
+  PartitionList* partition_cols,
+  const CStringMap* partition_values)
+{
   GArrowSchema* schema = get_schema(&arrow_data->schema);
   GArrowRecordBatch* record_batch = get_record_batch(&arrow_data->array, schema);
   if (context->cur_filter != NULL) {
@@ -135,14 +145,15 @@ static void add_batch_to_context(ArrowContext* context,
     realloc(context->batches, sizeof(GArrowRecordBatch*) * (context->num_batches + 1));
   context->batches[context->num_batches] = record_batch;
   context->num_batches++;
-  print_diag("  Added batch to arrow context, have %i batches in context now\n",
-             context->num_batches);
+  print_diag(
+    "  Added batch to arrow context, have %i batches in context now\n", context->num_batches);
 }
 
 // convert to a garrow boolean array. can't use garrow_boolean_array_builder_append_values as that
 // expects a gboolean*, which is actually an int* which is 4 bytes, but our slice is a C99 _Bool*
 // which is 1 byte
-static GArrowBooleanArray* slice_to_arrow_bool_array(const KernelBoolSlice slice) {
+static GArrowBooleanArray* slice_to_arrow_bool_array(const KernelBoolSlice slice)
+{
   GArrowBooleanArrayBuilder* builder = garrow_boolean_array_builder_new();
   GError* error = NULL;
   for (uintptr_t i = 0; i < slice.len; i++) {
@@ -172,7 +183,8 @@ static GArrowBooleanArray* slice_to_arrow_bool_array(const KernelBoolSlice slice
 }
 
 // This is the callback that will be called for each chunk of data read from the parquet file
-static void visit_read_data(void* vcontext, EngineData* data) {
+static void visit_read_data(void* vcontext, EngineData* data)
+{
   print_diag("  Converting read data to arrow\n");
   struct EngineContext* context = vcontext;
   ExternResultArrowFFIData arrow_res = get_raw_arrow_data(data, context->engine);
@@ -187,9 +199,11 @@ static void visit_read_data(void* vcontext, EngineData* data) {
 }
 
 // We call this for each file we get called back to read in read_table.c::visit_callback
-void c_read_parquet_file(struct EngineContext* context,
-                       const KernelStringSlice path,
-                       const KernelBoolSlice selection_vector) {
+void c_read_parquet_file(
+  struct EngineContext* context,
+  const KernelStringSlice path,
+  const KernelBoolSlice selection_vector)
+{
   int full_len = strlen(context->table_root) + path.len + 1;
   char* full_path = malloc(sizeof(char) * full_len);
   snprintf(full_path, full_len, "%s%.*s", context->table_root, (int)path.len, path.ptr);
@@ -227,7 +241,8 @@ void c_read_parquet_file(struct EngineContext* context,
 }
 
 // Concat all our batches into a `GArrowTable`, call to_string on it, and print the result
-void print_arrow_context(ArrowContext* context) {
+void print_arrow_context(ArrowContext* context)
+{
   if (context->num_batches > 0) {
     GError* error = NULL;
     GArrowSchema* schema = garrow_record_batch_get_schema(context->batches[0]);

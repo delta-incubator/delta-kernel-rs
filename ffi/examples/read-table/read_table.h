@@ -6,14 +6,16 @@
 #include <delta_kernel_ffi.h>
 
 // A list of partition column names
-typedef struct PartitionList {
+typedef struct PartitionList
+{
   int len;
   char** cols;
 } PartitionList;
 
 // This is information we want to pass between callbacks. The kernel will generally take a `void*`
 // "context" argument, and then pass it back when calling a callback.
-struct EngineContext {
+struct EngineContext
+{
   SharedGlobalScanState* global_state;
   SharedSchema* read_schema;
   char* table_root;
@@ -27,7 +29,8 @@ struct EngineContext {
 
 // This is how we represent our errors. The kernel will ask us to contruct this struct whenever it
 // enounters an error, and then return the contructed EngineError to us
-typedef struct Error {
+typedef struct Error
+{
   struct EngineError etype;
   char* msg;
 } Error;
