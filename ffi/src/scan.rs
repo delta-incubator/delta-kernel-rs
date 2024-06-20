@@ -109,7 +109,7 @@ pub struct SharedScan;
 /// # Safety
 /// Caller is responsible for passing a [valid][Handle#Validity] scan handle.
 #[no_mangle]
-pub unsafe extern "C" fn drop_scan(scan: Handle<SharedScan>) {
+pub unsafe extern "C" fn free_scan(scan: Handle<SharedScan>) {
     scan.drop_handle();
 }
 

@@ -130,7 +130,7 @@ pub type AllocateStringFn = extern "C" fn(kernel_str: KernelStringSlice) -> Null
 mod private {
     /// Represents an owned slice of boolean values allocated by the kernel. Any time the engine
     /// receives a `KernelBoolSlice` as a return value from a kernel method, engine is responsible
-    /// to free that slice, by calling [super::drop_bool_slice] exactly once.
+    /// to free that slice, by calling [super::free_bool_slice] exactly once.
     #[repr(C)]
     pub struct KernelBoolSlice {
         ptr: *mut bool,
@@ -187,7 +187,7 @@ mod private {
     /// # Safety
     ///
     /// Whenever kernel passes a [KernelBoolSlice] to engine, engine assumes ownership of the slice
-    /// memory, but must only free it by calling [super::drop_bool_slice]. Since the global
+    /// memory, but must only free it by calling [super::free_bool_slice]. Since the global
     /// allocator is threadsafe, it doesn't matter which engine thread invokes that method.
     unsafe impl Send for KernelBoolSlice {}
 
@@ -202,7 +202,7 @@ pub use private::KernelBoolSlice;
 ///
 /// Caller is responsible for passing a valid handle.
 #[no_mangle]
-pub unsafe extern "C" fn drop_bool_slice(slice: KernelBoolSlice) {
+pub unsafe extern "C" fn free_bool_slice(slice: KernelBoolSlice) {
     let vec = unsafe { slice.into_vec() };
     debug!("Dropping bool slice. It is {vec:#?}");
 }
@@ -605,7 +605,7 @@ fn get_sync_engine_impl(
 ///
 /// Caller is responsible for passing a valid handle.
 #[no_mangle]
-pub unsafe extern "C" fn drop_engine(engine: Handle<SharedExternEngine>) {
+pub unsafe extern "C" fn free_engine(engine: Handle<SharedExternEngine>) {
     debug!("engine released engine");
     engine.drop_handle();
 }
@@ -640,7 +640,7 @@ fn snapshot_impl(
 ///
 /// Caller is responsible for passing a valid handle.
 #[no_mangle]
-pub unsafe extern "C" fn drop_snapshot(snapshot: Handle<SharedSnapshot>) {
+pub unsafe extern "C" fn free_snapshot(snapshot: Handle<SharedSnapshot>) {
     debug!("engine released snapshot");
     snapshot.drop_handle();
 }

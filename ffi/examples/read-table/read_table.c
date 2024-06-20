@@ -114,7 +114,7 @@ void scan_row_callback(void* engine_context,
 #ifdef PRINT_ARROW_DATA
   read_parquet_file(context, path, selection_vector);
 #endif
-  drop_bool_slice(selection_vector);
+  free_bool_slice(selection_vector);
   context->partition_values = NULL;
 }
 
@@ -129,7 +129,7 @@ void do_visit_scan_data(void* engine_context,
   // Ask kernel to iterate each individual file and call us back with extracted metadata
   print_diag("Asking kernel to call us back for each scan row (file to read)\n");
   visit_scan_data(engine_data, selection_vec, engine_context, scan_row_callback);
-  drop_bool_slice(selection_vec);
+  free_bool_slice(selection_vec);
 }
 
 // Called for each element of the partition StringSliceIterator. We just turn the slice into a
@@ -288,8 +288,8 @@ int main(int argc, char* argv[]) {
   free_kernel_scan_data(data_iter);
   free_global_read_schema(read_schema);
   free_global_scan_state(global_state);
-  drop_snapshot(snapshot);
-  drop_engine(engine);
+  free_snapshot(snapshot);
+  free_engine(engine);
   free(context.table_root);
 
   return 0;
