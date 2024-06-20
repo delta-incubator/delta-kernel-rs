@@ -94,11 +94,11 @@ pub unsafe extern "C" fn read_parquet_files(
     file: &FileMeta,
     physical_schema: Handle<SharedSchema>,
 ) -> ExternResult<Handle<ExclusiveFileReadResultIterator>> {
-    let extern_engine = unsafe { engine.clone_as_arc() };
+    let engine = unsafe { engine.clone_as_arc() };
     let physical_schema = unsafe { physical_schema.clone_as_arc() };
     let path = unsafe { String::try_from_slice(&file.path) };
-    let res = read_parquet_files_impl(extern_engine.clone(), path, file, physical_schema);
-    res.into_extern_result(&extern_engine.as_ref())
+    let res = read_parquet_files_impl(engine.clone(), path, file, physical_schema);
+    res.into_extern_result(&engine.as_ref())
 }
 
 fn read_parquet_files_impl(
@@ -118,7 +118,7 @@ fn read_parquet_files_impl(
     let data = parquet_handler.read_parquet_files(&[delta_fm], physical_schema, None)?;
     let res = Box::new(FileReadResultIterator {
         data,
-        engine: extern_engine.clone(),
+        engine: extern_engine,
     });
     Ok(res.into())
 }
