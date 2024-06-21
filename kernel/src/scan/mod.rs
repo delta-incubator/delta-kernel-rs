@@ -292,6 +292,10 @@ impl Scan {
                 } else {
                     0
                 };
+                // need to split the dv_mask. what's left in dv_mask covers this result, and rest
+                // will cover the following results. we `take()` out of `selection_vector` to avoid
+                // trying to return a captured variable. We're going to reassign `selection_vector`
+                // to `rest` in a moment anyway
                 let mut sv = selection_vector.take();
                 let rest = sv.as_mut().map(|mask| mask.split_off(len));
                 let result = ScanResult {
@@ -302,6 +306,7 @@ impl Scan {
                 Ok(result)
             }))
         }).flatten_ok().try_collect::<Result<ScanResult, crate::error::Error>, Vec<Result<ScanResult, crate::error::Error>>, crate::error::Error>()?.into_iter().collect()
+        // TODO: Have `execute` return an iterator and not need the crazyness above (issue: #123)
     }
 }
 
