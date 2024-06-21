@@ -449,7 +449,7 @@ fn read_with_scan_data(
     scan: &Scan,
     expected: &[String],
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let global_state = scan.global_scan_state();
+    let global_state = Arc::new(scan.global_scan_state());
     let scan_data = scan.scan_data(engine)?;
     let mut scan_files = vec![];
     for data in scan_data {
