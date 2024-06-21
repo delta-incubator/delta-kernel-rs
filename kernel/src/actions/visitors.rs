@@ -139,11 +139,11 @@ impl AddVisitor {
 
         let deletion_vector = visit_deletion_vector_at(row_index, &getters[7..])?;
 
-        let base_row_id: Option<i64> = getters[12].get_opt(row_index, "add.base_row_id")?;
+        let base_row_id: Option<i64> = getters[13].get_opt(row_index, "add.base_row_id")?;
         let default_row_commit_version: Option<i64> =
-            getters[13].get_opt(row_index, "add.default_row_commit")?;
+            getters[14].get_opt(row_index, "add.default_row_commit")?;
         let clustering_provider: Option<String> =
-            getters[14].get_opt(row_index, "add.clustering_provider")?;
+            getters[15].get_opt(row_index, "add.clustering_provider")?;
 
         Ok(Add {
             path,
@@ -198,9 +198,9 @@ impl RemoveVisitor {
 
         let deletion_vector = visit_deletion_vector_at(row_index, &getters[7..])?;
 
-        let base_row_id: Option<i64> = getters[12].get_opt(row_index, "remove.baseRowId")?;
+        let base_row_id: Option<i64> = getters[13].get_opt(row_index, "remove.baseRowId")?;
         let default_row_commit_version: Option<i64> =
-            getters[13].get_opt(row_index, "remove.defaultRowCommitVersion")?;
+            getters[14].get_opt(row_index, "remove.defaultRowCommitVersion")?;
 
         Ok(Remove {
             path,
@@ -306,12 +306,15 @@ pub(crate) fn visit_deletion_vector_at<'a>(
         let offset: Option<i32> = getters[2].get_opt(row_index, "deletionVector.offset")?;
         let size_in_bytes: i32 = getters[3].get(row_index, "deletionVector.sizeInBytes")?;
         let cardinality: i64 = getters[4].get(row_index, "deletionVector.cardinality")?;
+        let max_row_index: Option<i64> =
+            getters[5].get_opt(row_index, "deletionVector.maxRowIndex")?;
         Ok(Some(DeletionVectorDescriptor {
             storage_type,
             path_or_inline_dv,
             offset,
             size_in_bytes,
             cardinality,
+            max_row_index,
         }))
     } else {
         Ok(None)

@@ -41,6 +41,9 @@ pub struct DeletionVectorDescriptor {
 
     /// Number of rows the given DV logically removes from the file.
     pub cardinality: i64,
+
+    /// Used in row tracking (TODO: Update with details when this is added to spec)
+    pub max_row_index: Option<i64>,
 }
 
 impl DeletionVectorDescriptor {
@@ -240,6 +243,7 @@ mod tests {
             offset: Some(4),
             size_in_bytes: 40,
             cardinality: 6,
+            max_row_index: None,
         }
     }
 
@@ -251,6 +255,7 @@ mod tests {
             offset: Some(4),
             size_in_bytes: 40,
             cardinality: 6,
+            max_row_index: None,
         }
     }
 
@@ -262,6 +267,7 @@ mod tests {
             offset: None,
             size_in_bytes: 44,
             cardinality: 6,
+            max_row_index: None,
         }
     }
 
@@ -272,6 +278,7 @@ mod tests {
             offset: Some(1),
             size_in_bytes: 36,
             cardinality: 2,
+            max_row_index: None,
         }
     }
 

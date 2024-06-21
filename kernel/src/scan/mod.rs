@@ -359,6 +359,7 @@ impl Scan {
 ///      offset: int,
 ///      sizeInBytes: int,
 ///      cardinality: long,
+///      maxRowIndex: long
 ///    },
 ///    fileConstantValues: {
 ///      partitionValues: map<string, string>

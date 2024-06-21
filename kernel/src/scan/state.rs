@@ -122,7 +122,7 @@ impl<T> DataVisitor for ScanFileVisitor<'_, T> {
                 let deletion_vector = visit_deletion_vector_at(row_index, &getters[dv_index..])?;
                 let dv_info = DvInfo { deletion_vector };
                 let partition_values =
-                    getters[8].get(row_index, "scanFile.fileConstantValues.partitionValues")?;
+                    getters[9].get(row_index, "scanFile.fileConstantValues.partitionValues")?;
                 (self.callback)(&mut self.context, path, size, dv_info, partition_values)
             }
         }

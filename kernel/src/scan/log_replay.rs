@@ -32,7 +32,7 @@ struct AddRemoveVisitor {
     is_log_batch: bool,
 }
 
-const ADD_FIELD_COUNT: usize = 15;
+const ADD_FIELD_COUNT: usize = 16;
 
 impl AddRemoveVisitor {
     fn new(selection_vector: Option<Vec<bool>>, is_log_batch: bool) -> Self {
@@ -92,6 +92,7 @@ lazy_static! {
                 StructField::new("offset", DataType::INTEGER, true),
                 StructField::new("sizeInBytes", DataType::INTEGER, false),
                 StructField::new("cardinality", DataType::LONG, false),
+                StructField::new("maxRowIndex", DataType::LONG, true),
             ]),
             true
         ),

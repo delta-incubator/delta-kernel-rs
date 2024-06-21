@@ -304,6 +304,7 @@ mod tests {
                 StructField::new("offset", DataType::INTEGER, true),
                 StructField::new("sizeInBytes", DataType::INTEGER, false),
                 StructField::new("cardinality", DataType::LONG, false),
+                StructField::new("maxRowIndex", DataType::LONG, true),
             ]))),
             true,
         )

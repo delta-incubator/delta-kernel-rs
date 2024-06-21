@@ -162,7 +162,7 @@ fn column_as_struct<'a>(
 }
 
 fn make_arrow_error(s: String) -> Error {
-    Error::Arrow(arrow_schema::ArrowError::InvalidArgumentError(s))
+    Error::Arrow(arrow_schema::ArrowError::InvalidArgumentError(s)).with_backtrace()
 }
 
 /// Ensure a kernel data type matches an arrow data type. This only ensures that the actual "type"
