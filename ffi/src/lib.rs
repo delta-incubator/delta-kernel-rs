@@ -108,7 +108,7 @@ trait TryFromStringSlice: Sized {
 }
 
 impl TryFromStringSlice for String {
-    /// Converts a slice back to a string
+    /// Converts a slice into a `String`. The slice remains valid after this call.
     ///
     /// # Safety
     ///
