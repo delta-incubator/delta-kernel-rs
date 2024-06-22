@@ -13,7 +13,7 @@ use url::Url;
 use delta_kernel::expressions::{BinaryOperator, Expression, Scalar, UnaryOperator};
 use delta_kernel::schema::{ArrayType, DataType, MapType, PrimitiveType, StructType};
 use delta_kernel::snapshot::Snapshot;
-use delta_kernel::{DeltaResult, Engine, EngineData as KernelEngineData, Error, Table};
+use delta_kernel::{DeltaResult, Engine, EngineData, Error, Table};
 use delta_kernel_ffi_macros::handle_descriptor;
 
 // cbindgen doesn't understand our use of feature flags here, and by default it parses `mod handle`
@@ -212,8 +212,18 @@ pub unsafe extern "C" fn free_bool_slice(slice: KernelBoolSlice) {
 /// an opaque struct that encapsulates data read by an engine. this handle can be passed back into
 /// some kernel calls to operate on the data, or can be converted into the raw data as read by the
 /// [`delta_kernel::Engine`] by calling [`get_raw_engine_data`]
-#[handle_descriptor(target=dyn KernelEngineData, mutable=true, sized=false)]
-pub struct EngineData;
+#[handle_descriptor(target=dyn EngineData, mutable=true, sized=false)]
+pub struct ExclusiveEngineData;
+
+/// Drop an `ExclusiveEngineData`.
+///
+/// # Safety
+///
+/// Caller is responsible for passing a valid handle as engine_data
+#[no_mangle]
+pub unsafe extern "C" fn free_engine_data(engine_data: Handle<ExclusiveEngineData>) {
+    engine_data.drop_handle();
+}
 
 #[repr(C)]
 #[derive(Debug)]

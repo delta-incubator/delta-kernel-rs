@@ -131,7 +131,7 @@ void scan_row_callback(
 // function (named do_visit_scan_data to avoid conflict with visit_scan_data exported by kernel)
 void do_visit_scan_data(
   void* engine_context,
-  EngineData* engine_data,
+  ExclusiveEngineData* engine_data,
   KernelBoolSlice selection_vec)
 {
   print_diag("\nScan iterator found some data to read\n  Of this data, here is "

@@ -183,7 +183,7 @@ static GArrowBooleanArray* slice_to_arrow_bool_array(const KernelBoolSlice slice
 }
 
 // This is the callback that will be called for each chunk of data read from the parquet file
-static void visit_read_data(void* vcontext, EngineData* data)
+static void visit_read_data(void* vcontext, ExclusiveEngineData* data)
 {
   print_diag("  Converting read data to arrow\n");
   struct EngineContext* context = vcontext;

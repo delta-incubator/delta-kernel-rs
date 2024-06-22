@@ -8,7 +8,7 @@ use tracing::debug;
 use url::Url;
 
 use crate::{
-    scan::SharedSchema, EngineData, ExternEngine, ExternResult, IntoExternResult,
+    scan::SharedSchema, ExclusiveEngineData, ExternEngine, ExternResult, IntoExternResult,
     KernelStringSlice, NullableCvoid, SharedExternEngine, TryFromStringSlice,
 };
 
@@ -42,7 +42,11 @@ impl Drop for FileReadResultIterator {
     }
 }
 
-/// Call the engine back with the next `EngingeData` batch read by Parquet/Json handler
+/// Call the engine back with the next `EngingeData` batch read by Parquet/Json handler. The
+/// _engine_ "owns" the data that is passed into the `engine_visitor`, since it is allocated by the
+/// `Engine` being used for log-replay. If the engine wants the kernel to free this data, it _must_
+/// call [`free_engine_data`] on it.
+///
 /// # Safety
 ///
 /// The iterator must be valid (returned by [`read_parquet_file`]) and not yet freed by
@@ -51,7 +55,10 @@ impl Drop for FileReadResultIterator {
 pub unsafe extern "C" fn read_result_next(
     mut data: Handle<ExclusiveFileReadResultIterator>,
     engine_context: NullableCvoid,
-    engine_visitor: extern "C" fn(engine_context: NullableCvoid, engine_data: Handle<EngineData>),
+    engine_visitor: extern "C" fn(
+        engine_context: NullableCvoid,
+        engine_data: Handle<ExclusiveEngineData>,
+    ),
 ) -> ExternResult<bool> {
     let iter = unsafe { data.as_mut() };
     read_result_next_impl(iter, engine_context, engine_visitor)
@@ -61,13 +68,13 @@ pub unsafe extern "C" fn read_result_next(
 fn read_result_next_impl(
     iter: &mut FileReadResultIterator,
     engine_context: NullableCvoid,
-    engine_visitor: extern "C" fn(engine_context: NullableCvoid, engine_data: Handle<EngineData>),
+    engine_visitor: extern "C" fn(
+        engine_context: NullableCvoid,
+        engine_data: Handle<ExclusiveEngineData>,
+    ),
 ) -> DeltaResult<bool> {
     if let Some(data) = iter.data.next().transpose()? {
         (engine_visitor)(engine_context, data.into());
-        // TODO: calling `into_raw` in the visitor causes this to segfault
-        //       perhaps the callback needs to indicate if it took ownership or not
-        // unsafe { BoxHandle::drop_handle(data_handle) };
         Ok(true)
     } else {
         Ok(false)
