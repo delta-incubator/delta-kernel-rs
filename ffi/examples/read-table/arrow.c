@@ -164,22 +164,23 @@ static GArrowBooleanArray* slice_to_arrow_bool_array(const KernelBoolSlice slice
       break;
     }
   }
-  if (error == NULL) {
-    GArrowArray* ret = garrow_array_builder_finish((GArrowArrayBuilder*)builder, &error);
-    g_object_unref(builder);
-    if (ret == NULL) {
-      printf("Error in building boolean array");
-      if (error != NULL) {
-        printf(": %s\n", error->message);
-        g_error_free(error);
-      } else {
-        printf(".\n");
-      }
-    }
-    return (GArrowBooleanArray*)ret;
-  } else {
+
+  if (error != NULL) {
     return NULL;
   }
+
+  GArrowArray* ret = garrow_array_builder_finish((GArrowArrayBuilder*)builder, &error);
+  g_object_unref(builder);
+  if (ret == NULL) {
+    printf("Error in building boolean array");
+    if (error != NULL) {
+      printf(": %s\n", error->message);
+      g_error_free(error);
+    } else {
+      printf(".\n");
+    }
+  }
+  return (GArrowBooleanArray*)ret;
 }
 
 // This is the callback that will be called for each chunk of data read from the parquet file
