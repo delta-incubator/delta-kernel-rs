@@ -20,7 +20,6 @@ use crate::engine::arrow_data::ArrowEngineData;
 use crate::error::{DeltaResult, Error};
 use crate::expressions::{BinaryOperator, Expression, Scalar, UnaryOperator, VariadicOperator};
 use crate::schema::{DataType, PrimitiveType, SchemaRef};
-use crate::utils::require;
 use crate::{EngineData, ExpressionEvaluator, ExpressionHandler};
 
 // TODO leverage scalars / Datum
@@ -215,15 +214,21 @@ fn ensure_data_types(kernel_type: &DataType, arrow_type: &ArrowDataType) -> Delt
             }
         }
         (DataType::Struct(kernel_fields), ArrowDataType::Struct(arrow_fields)) => {
-            require!(
-                kernel_fields.fields.len() == arrow_fields.len(),
-                make_arrow_error(format!(
-                    "Struct types have different numbers of fields. Expected {}, got {}",
-                    kernel_fields.fields.len(),
-                    arrow_fields.len()
-                ))
-            );
-            for (kernel_field, arrow_field) in kernel_fields.fields().zip(arrow_fields.iter()) {
+            let arrow_fields = if kernel_fields.fields.len() < arrow_fields.len() {
+                // we are dropping one or more fields, which is allowed. drop by name
+                either::Either::Left(arrow_fields.into_iter().filter(|field| {
+                    kernel_fields.fields.contains_key(field.name())
+                }))
+            } else if kernel_fields.fields.len() == arrow_fields.len() {
+                either::Either::Right(arrow_fields.iter())
+            } else {
+                let kernel_field_names = kernel_fields.fields.keys().join(", ");
+                let arrow_field_names = arrow_fields.iter().map(|f| f.name()).join(", ");
+                return Err(make_arrow_error(format!(
+                    "Missing Struct fields. Requested:  {}, found: {}", kernel_field_names, arrow_field_names,
+                )));
+            };
+            for (kernel_field, arrow_field) in kernel_fields.fields().zip(arrow_fields) {
                 ensure_data_types(&kernel_field.data_type, arrow_field.data_type())?;
             }
             Ok(())
