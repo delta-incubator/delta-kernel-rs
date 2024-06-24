@@ -13,7 +13,7 @@ void visit_callback(void* engine_context,
 }
 
 void visit_data(void* engine_context,
-                EngineData* engine_data,
+                ExclusiveEngineData* engine_data,
                 const KernelBoolSlice selection_vec) {
   visit_scan_data(engine_data, selection_vec, engine_context, visit_callback);
 }
