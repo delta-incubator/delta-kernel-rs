@@ -168,7 +168,9 @@ fn make_arrow_error(s: String) -> Error {
 /// Ensure a kernel data type matches an arrow data type. This only ensures that the actual "type"
 /// is the same, but does so recursively into structs, and ensures lists and maps have the correct
 /// associated types as well. This returns an `Ok(())` if the types are compatible, or an error if
-/// the types do not match.
+/// the types do not match. If there is a `struct` type included, we only ensure that the named
+/// fields that the kernel is asking for exist, and that for those fields the types
+/// match. Un-selected fields are ignored.
 fn ensure_data_types(kernel_type: &DataType, arrow_type: &ArrowDataType) -> DeltaResult<()> {
     match (kernel_type, arrow_type) {
         (DataType::Primitive(_), _) if arrow_type.is_primitive() => Ok(()),
