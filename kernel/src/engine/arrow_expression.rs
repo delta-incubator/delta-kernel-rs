@@ -145,8 +145,7 @@ fn extract_column<'array, 'path>(
     let (_, field) = input_schema
         .column_with_name(path_step)
         .ok_or(ArrowError::SchemaError(format!(
-            "No such field in schema {:#?}: {}",
-            input_schema, path_step,
+            "Field '{path_step}' is not in schema: {input_schema:?}"
         )))?;
     let child_opt = array.column_by_name(path_step);
     if child_opt.is_none() && field.is_nullable() {
