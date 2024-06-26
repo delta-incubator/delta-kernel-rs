@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use tracing::debug;
 
-use crate::actions::{get_log_schema, ADD_NAME};
 use crate::actions::visitors::SelectionVectorVisitor;
+use crate::actions::{get_log_schema, ADD_NAME};
 use crate::error::DeltaResult;
 use crate::expressions::{BinaryOperator, Expression as Expr, UnaryOperator, VariadicOperator};
 use crate::schema::{DataType, PrimitiveType, SchemaRef, StructField, StructType};
