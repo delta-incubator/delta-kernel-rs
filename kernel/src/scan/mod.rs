@@ -13,7 +13,7 @@ use crate::actions::deletion_vector::{treemap_to_bools, DeletionVectorDescriptor
 use crate::actions::{get_log_schema, ADD_NAME, REMOVE_NAME};
 use crate::column_mapping::ColumnMappingMode;
 use crate::expressions::{Expression, Scalar};
-use crate::scan::state::DvInfo;
+use crate::scan::state::{DvInfo, Stats};
 use crate::schema::{DataType, Schema, SchemaRef, StructField, StructType};
 use crate::snapshot::Snapshot;
 use crate::{DeltaResult, Engine, EngineData, Error, FileMeta};
@@ -237,6 +237,7 @@ impl Scan {
             batches: &mut Vec<ScanFile>,
             path: &str,
             size: i64,
+            _: Option<Stats>,
             dv_info: DvInfo,
             partition_values: HashMap<String, String>,
         ) {
@@ -581,6 +582,7 @@ mod tests {
             paths: &mut Vec<String>,
             path: &str,
             _size: i64,
+            _: Option<Stats>,
             dv_info: DvInfo,
             _partition_values: HashMap<String, String>,
         ) {
