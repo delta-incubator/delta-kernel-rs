@@ -4,9 +4,10 @@ use std::io::{Cursor, Read};
 use std::sync::Arc;
 
 use bytes::Bytes;
-use delta_kernel_derive::Schema;
 use roaring::RoaringTreemap;
 use url::Url;
+
+use delta_kernel_derive::Schema;
 
 use crate::utils::require;
 use crate::{DeltaResult, Error, FileSystemClient};
@@ -165,6 +166,14 @@ impl DeletionVectorDescriptor {
             }
         }
     }
+
+    pub fn row_indexes(
+        &self,
+        fs_client: Arc<dyn FileSystemClient>,
+        parent: &Url,
+    ) -> DeltaResult<Vec<u64>> {
+        Ok(self.read(fs_client, parent)?.into_iter().collect())
+    }
 }
 
 enum Endian {
@@ -225,13 +234,14 @@ pub(crate) fn treemap_to_bools(treemap: RoaringTreemap) -> Vec<bool> {
 
 #[cfg(test)]
 mod tests {
-    use roaring::RoaringTreemap;
     use std::path::PathBuf;
 
-    use super::*;
+    use roaring::RoaringTreemap;
+
     use crate::{engine::sync::SyncEngine, Engine};
 
     use super::DeletionVectorDescriptor;
+    use super::*;
 
     fn dv_relative() -> DeletionVectorDescriptor {
         DeletionVectorDescriptor {
@@ -357,5 +367,17 @@ mod tests {
         expected[4294967297] = false;
         expected[4294967300] = false;
         assert_eq!(bools, expected);
+    }
+
+    #[test]
+    fn test_dv_wrapper() {
+        let example = dv_inline();
+        let sync_engine = SyncEngine::new();
+        let fs_client = sync_engine.get_file_system_client();
+        let parent = Url::parse("http://not.used").unwrap();
+        let row_idx = example.row_indexes(fs_client, &parent).unwrap();
+
+        assert_eq!(row_idx.len(), 6);
+        assert_eq!(&row_idx, &[3, 4, 7, 11, 18, 29]);
     }
 }
