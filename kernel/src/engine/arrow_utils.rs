@@ -224,6 +224,24 @@ mod tests {
         }};
     }
 
+    fn nested_arrow_schema() -> Arc<ArrowSchema> {
+        Arc::new(ArrowSchema::new(vec![
+            ArrowField::new("i", ArrowDataType::Int32, false),
+            ArrowField::new(
+                "nested",
+                ArrowDataType::Struct(
+                    vec![
+                        ArrowField::new("int32", ArrowDataType::Int32, false),
+                        ArrowField::new("string", ArrowDataType::Utf8, false),
+                    ]
+                    .into(),
+                ),
+                false,
+            ),
+            ArrowField::new("j", ArrowDataType::Int32, false),
+        ]))
+    }
+
     #[test]
     fn simple_mask_indices() {
         let kernel_schema = Arc::new(StructType::new(vec![
@@ -278,21 +296,7 @@ mod tests {
             ),
             StructField::new("j", DataType::INTEGER, false),
         ]));
-        let arrow_schema = Arc::new(ArrowSchema::new(vec![
-            ArrowField::new("i", ArrowDataType::Int32, false),
-            ArrowField::new(
-                "nested",
-                ArrowDataType::Struct(
-                    vec![
-                        ArrowField::new("int32", ArrowDataType::Int32, false),
-                        ArrowField::new("string", ArrowDataType::Utf8, false),
-                    ]
-                    .into(),
-                ),
-                false,
-            ),
-            ArrowField::new("j", ArrowDataType::Int32, false),
-        ]));
+        let arrow_schema = nested_arrow_schema();
         let (mask_indices, reorder_indices) =
             get_requested_indices(&kernel_schema, &arrow_schema).unwrap();
         let expect_mask = vec![0, 1, 2, 3];
@@ -319,21 +323,7 @@ mod tests {
             ),
             StructField::new("i", DataType::INTEGER, false),
         ]));
-        let arrow_schema = Arc::new(ArrowSchema::new(vec![
-            ArrowField::new("i", ArrowDataType::Int32, false),
-            ArrowField::new(
-                "nested",
-                ArrowDataType::Struct(
-                    vec![
-                        ArrowField::new("int32", ArrowDataType::Int32, false),
-                        ArrowField::new("string", ArrowDataType::Utf8, false),
-                    ]
-                    .into(),
-                ),
-                false,
-            ),
-            ArrowField::new("j", ArrowDataType::Int32, false),
-        ]));
+        let arrow_schema = nested_arrow_schema();
         let (mask_indices, reorder_indices) =
             get_requested_indices(&kernel_schema, &arrow_schema).unwrap();
         let expect_mask = vec![0, 1, 2, 3];
@@ -357,21 +347,7 @@ mod tests {
             ),
             StructField::new("j", DataType::INTEGER, false),
         ]));
-        let arrow_schema = Arc::new(ArrowSchema::new(vec![
-            ArrowField::new("i", ArrowDataType::Int32, false),
-            ArrowField::new(
-                "nested",
-                ArrowDataType::Struct(
-                    vec![
-                        ArrowField::new("int32", ArrowDataType::Int32, false),
-                        ArrowField::new("string", ArrowDataType::Utf8, false),
-                    ]
-                    .into(),
-                ),
-                false,
-            ),
-            ArrowField::new("j", ArrowDataType::Int32, false),
-        ]));
+        let arrow_schema = nested_arrow_schema();
         let (mask_indices, reorder_indices) =
             get_requested_indices(&kernel_schema, &arrow_schema).unwrap();
         let expect_mask = vec![0, 1, 3];
