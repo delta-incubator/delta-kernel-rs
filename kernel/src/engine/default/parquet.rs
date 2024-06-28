@@ -142,7 +142,7 @@ impl FileOpener for ParquetOpener {
             let stream = stream.map(move |rbr| {
                 // re-order each batch if needed
                 rbr.map_err(Error::Parquet)
-                //.and_then(|rb| reorder_record_batch(rb, &requested_ordering)) FIX ME
+                    .and_then(|rb| reorder_record_batch(rb, &requested_ordering))
             });
             Ok(stream.boxed())
         }))
@@ -205,7 +205,7 @@ impl FileOpener for PresignedUrlOpener {
             let stream = stream.map(move |rbr| {
                 // re-order each batch if needed
                 rbr.map_err(Error::Arrow)
-                //.and_then(|rb| reorder_record_batch(rb, &requested_ordering)) FIX ME
+                    .and_then(|rb| reorder_record_batch(rb, &requested_ordering))
             });
             Ok(stream.boxed())
         }))

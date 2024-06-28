@@ -28,6 +28,23 @@ pub(crate) enum ReorderIndex {
     },
 }
 
+impl ReorderIndex {
+    fn index(&self) -> usize {
+        match self {
+            ReorderIndex::Index(index) => *index,
+            ReorderIndex::Child{ index, .. } => *index,
+        }
+    }
+
+    /// check if this indexing is ordered. an `Index` variant is ordered by definition
+    fn is_ordered(&self) -> bool {
+        match self {
+            ReorderIndex::Index(_) => true,
+            ReorderIndex::Child{ index: _ , ref children } => is_ordered(children)
+        }
+    }
+}
+
 /// helper function, does the same as `get_requested_indices` but at an offset. used to recurse into
 /// structs. this is called recursively to traverse into structs and lists. `parquet_offset` is how
 /// many parquet fields exist before processing this potentially nested schema. `reorder_offset` is
@@ -199,13 +216,28 @@ pub(crate) fn generate_mask(
     ))
 }
 
+/// Check if an ordering is already ordered
+fn is_ordered(requested_ordering: &[ReorderIndex]) -> bool {
+    if requested_ordering.len() == 0 {
+        return true;
+    }
+    // we have >=1 element. check that the first element is ordered
+    if !requested_ordering[0].is_ordered() {
+        return false;
+    }
+    // now check that all elements are ordered wrt. each other, and are internally ordered
+    requested_ordering.windows(2).all(|ri| {
+        (ri[0].index() < ri[1].index()) && ri[1].is_ordered()
+    })
+}
+
 /// Reorder a RecordBatch to match `requested_ordering`. For each non-zero value in
 /// `requested_ordering`, the column at that index will be added in order to returned batch
 pub(crate) fn reorder_record_batch(
     input_data: RecordBatch,
-    requested_ordering: &[usize],
+    requested_ordering: &[ReorderIndex],
 ) -> DeltaResult<RecordBatch> {
-    if requested_ordering.windows(2).all(|is| is[0] < is[1]) {
+    if is_ordered(requested_ordering) {
         // indices is already sorted, meaning we requested in the order that the columns were
         // stored in the parquet
         Ok(input_data)
@@ -215,9 +247,9 @@ pub(crate) fn reorder_record_batch(
         let mut fields = Vec::with_capacity(requested_ordering.len());
         let reordered_columns = requested_ordering
             .iter()
-            .map(|index| {
-                fields.push(input_schema.field(*index).clone());
-                input_data.column(*index).clone() // cheap Arc clone
+            .map(|reorder_index| {
+                fields.push(input_schema.field(reorder_index.index()).clone());
+                input_data.column(reorder_index.index()).clone() // cheap Arc clone
             })
             .collect();
         let schema = Arc::new(ArrowSchema::new(fields));
