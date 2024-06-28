@@ -8,20 +8,21 @@ use crate::{
     DeltaResult, Error,
 };
 
-use arrow_array::RecordBatch;
+use arrow_array::{Array as ArrowArray, RecordBatch};
 use arrow_schema::{
-    DataType as ArrowDataType, Fields, Schema as ArrowSchema, SchemaRef as ArrowSchemaRef,
+    DataType as ArrowDataType, Field as ArrowField, Fields, Schema as ArrowSchema,
+    SchemaRef as ArrowSchemaRef,
 };
 use parquet::{arrow::ProjectionMask, schema::types::SchemaDescriptor};
 
 /// Reordering is specified as a tree. Each level is a vec of `ReorderIndex`s. Each element's index
-/// represents a column that will be in the read parquet data at that level and index. If the value
-/// stored is an `Index` variant, the associated `usize` is the position that the column should
-/// appear in the final output. If it is a `Child` variant, then at that index there is a `Struct`
-/// whose ordering is specified by the values in the associated `Vec` according to these same rules.
+/// represents a column that will be in the read parquet data at that level and index. The `index()`
+/// of the element is the position that the column should appear in the final output. If it is a
+/// `Child` variant, then at that index there is a `Struct` whose ordering is specified by the
+/// values in the associated `Vec` according to these same rules.
 #[derive(Debug, PartialEq)]
 pub(crate) enum ReorderIndex {
-    Index{
+    Index {
         index: usize,
         is_null: bool,
     },
@@ -35,16 +36,16 @@ pub(crate) enum ReorderIndex {
 impl ReorderIndex {
     fn index(&self) -> usize {
         match self {
-            ReorderIndex::Index{ index, .. } => *index,
-            ReorderIndex::Child{ index, .. } => *index,
+            ReorderIndex::Index { index, .. } => *index,
+            ReorderIndex::Child { index, .. } => *index,
         }
     }
 
     /// check if this indexing is ordered. an `Index` variant is ordered by definition
     fn is_ordered(&self) -> bool {
         match self {
-            ReorderIndex::Index{ .. } => true,
-            ReorderIndex::Child{ ref children, .. } => is_ordered(children)
+            ReorderIndex::Index { .. } => true,
+            ReorderIndex::Child { ref children, .. } => is_ordered(children),
         }
     }
 }
@@ -87,7 +88,11 @@ fn get_indices(
                             // note that we found this field
                             found_fields.push(requested_field);
                             // push the child reorder on
-                            reorder_indices.push(ReorderIndex::Child { index, is_null: false, children, });
+                            reorder_indices.push(ReorderIndex::Child {
+                                index,
+                                is_null: false,
+                                children,
+                            });
                         }
                         _ => {
                             return Err(Error::unexpected_column_type(field.name()));
@@ -147,7 +152,10 @@ fn get_indices(
                                 }
                                 reorder_indices.push(children);
                             } else {
-                                reorder_indices.push(ReorderIndex::Index{index, is_null: false});
+                                reorder_indices.push(ReorderIndex::Index {
+                                    index,
+                                    is_null: false,
+                                });
                             }
                         }
                         _ => {
@@ -157,10 +165,15 @@ fn get_indices(
                 }
             }
             _ => {
-                if let Some((index, _, requested_field)) = requested_schema.fields.get_full(field.name()) {
+                if let Some((index, _, requested_field)) =
+                    requested_schema.fields.get_full(field.name())
+                {
                     found_fields.push(requested_field);
                     mask_indices.push(parquet_offset + parquet_index);
-                    reorder_indices.push(ReorderIndex::Index{index, is_null: false});
+                    reorder_indices.push(ReorderIndex::Index {
+                        index,
+                        is_null: false,
+                    });
                 }
             }
         }
@@ -169,7 +182,10 @@ fn get_indices(
     //println!("found {found_fields}, requested {}. req schema: {:?}", requested_schema.fields.len(), requested_schema);
     if found_fields.len() != requested_schema.fields.len() {
         // some fields are missing, but they might be nullable, need to insert them into the reorder_indices
-        println!("Found {found_fields:?}, but requested {}", requested_schema.fields.len());
+        println!(
+            "Found {found_fields:?}, but requested {}",
+            requested_schema.fields.len()
+        );
         println!("reorder here is: {reorder_indices:?}");
     }
     require!(
@@ -235,9 +251,9 @@ fn is_ordered(requested_ordering: &[ReorderIndex]) -> bool {
         return false;
     }
     // now check that all elements are ordered wrt. each other, and are internally ordered
-    requested_ordering.windows(2).all(|ri| {
-        (ri[0].index() < ri[1].index()) && ri[1].is_ordered()
-    })
+    requested_ordering
+        .windows(2)
+        .all(|ri| (ri[0].index() < ri[1].index()) && ri[1].is_ordered())
 }
 
 /// Reorder a RecordBatch to match `requested_ordering`. For each non-zero value in
@@ -251,18 +267,26 @@ pub(crate) fn reorder_record_batch(
         // stored in the parquet
         Ok(input_data)
     } else {
-        println!("ORDERING {requested_ordering:?}");
+        //println!("ORDERING {requested_ordering:?}");
         // requested an order different from the parquet, reorder
         let input_schema = input_data.schema();
-        let mut fields = Vec::with_capacity(requested_ordering.len());
-        let reordered_columns = requested_ordering
+        let mut final_fields_cols: Vec<Option<(Arc<ArrowField>, Arc<dyn ArrowArray>)>> =
+            std::iter::repeat_with(|| None)
+                .take(requested_ordering.len())
+                .collect();
+        for (parquet_position, reorder_index) in requested_ordering.iter().enumerate() {
+            // for each item, reorder_index.index() tells us where to put it, and its position in
+            // requested_ordering tells us where it is in the parquet data
+            final_fields_cols[reorder_index.index()] = Some((
+                Arc::new(input_schema.field(parquet_position).clone()),
+                input_data.column(parquet_position).clone(), // cheap Arc clone
+            ));
+        }
+        let field_iter = final_fields_cols
             .iter()
-            .map(|reorder_index| {
-                fields.push(input_schema.field(reorder_index.index()).clone());
-                input_data.column(reorder_index.index()).clone() // cheap Arc clone
-            })
-            .collect();
-        let schema = Arc::new(ArrowSchema::new(fields));
+            .map(|fco| fco.as_ref().unwrap().0.clone());
+        let schema = Arc::new(ArrowSchema::new(Fields::from_iter(field_iter)));
+        let reordered_columns = final_fields_cols.into_iter().map(|fco| fco.unwrap().1).collect();
         Ok(RecordBatch::try_new(schema, reordered_columns)?)
     }
 }
@@ -282,7 +306,10 @@ mod tests {
 
     macro_rules! rii {
         ($index: expr) => {{
-            ReorderIndex::Index{index: $index, is_null: false}
+            ReorderIndex::Index {
+                index: $index,
+                is_null: false,
+            }
         }};
     }
 
