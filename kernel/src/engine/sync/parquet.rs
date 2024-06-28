@@ -29,12 +29,10 @@ fn try_create_from_parquet(schema: SchemaRef, location: Url) -> DeltaResult<Arro
     let data = reader
         .next()
         .ok_or_else(|| Error::generic("No data found reading parquet file"))?;
-    Ok(ArrowEngineData::new(data?))
-
-    //     reorder_record_batch( FIX ME
-    //     data?,
-    //     &requested_ordering,
-    // )?))
+    Ok(ArrowEngineData::new(reorder_record_batch(
+        data?,
+        &requested_ordering,
+    )?))
 }
 
 impl ParquetHandler for SyncParquetHandler {
