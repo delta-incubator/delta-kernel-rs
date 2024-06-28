@@ -19,7 +19,8 @@ use parquet::{arrow::ProjectionMask, schema::types::SchemaDescriptor};
 /// stored is an `Index` variant, the associated `usize` is the position that the column should
 /// appear in the final output. If it is a `Child` variant, then at that index there is a `Struct`
 /// whose ordering is specified by the values in the associated `Vec` according to these same rules.
-enum ReorderIndex {
+#[derive(Debug, PartialEq)]
+pub(crate) enum ReorderIndex {
     Index(usize),
     Child(Vec<ReorderIndex>),
 }
@@ -31,41 +32,39 @@ enum ReorderIndex {
 /// of parquet fields and the number of requested fields processed
 fn get_indices(
     start_parquet_offset: usize,
-    start_reorder_offset: usize,
     requested_schema: &Schema,
     fields: &Fields,
     mask_indices: &mut Vec<usize>,
-    reorder_indices: &mut Vec<usize>,
-) -> DeltaResult<(usize, usize)> {
+) -> DeltaResult<(usize, Vec<ReorderIndex>)> {
     let mut found_fields = 0;
     let mut parquet_offset = start_parquet_offset;
-    let mut reorder_offset = start_reorder_offset;
-    println!("at top with parquet_offset {parquet_offset} and reorder_offset {reorder_offset}");
+    let mut reorder_indices = vec![];
+    //println!("at top with parquet_offset {parquet_offset}");
     for (parquet_index, field) in fields.iter().enumerate() {
-        println!("looking at field {}", field.name());
+        //println!("looking at field {}", field.name());
         match field.data_type() {
             ArrowDataType::Struct(fields) => {
-                if let Some(requested_field) = requested_schema.fields.get(field.name()) {
+                if let Some((_index, _, requested_field)) =
+                    requested_schema.fields.get_full(field.name())
+                {
                     match requested_field.data_type {
                         DataType::Struct(ref requested_schema) => {
-                            let (parquet_advance, reorder_advance) = get_indices(
+                            let (parquet_advance, child_indices) = get_indices(
                                 found_fields + parquet_offset,
-                                found_fields + reorder_offset,
                                 requested_schema.as_ref(),
                                 fields,
                                 mask_indices,
-                                reorder_indices,
                             )?;
                             // advance the number of parquet fields, but subtract 1 because the
                             // struct will be counted by the `enumerate` call but doesn't count as
                             // an actual index.
-                            println!("here:\n parquet_offset: {parquet_offset}\n parquet_advance: {parquet_advance}\n reorder_offset: {reorder_offset}\n reorder_advance: {reorder_advance}");
+                            //println!("here:\n parquet_offset: {parquet_offset}\n parquet_advance: {parquet_advance}");
                             parquet_offset += parquet_advance - 1;
-                            // advance the reorder offset
-                            reorder_offset += reorder_advance;
                             // also increase found_fields because the struct is a field we've found
                             // and will count in the `requested_schema.fields.len()` call below
                             found_fields += 1;
+                            // push the child reorder on
+                            reorder_indices.push(ReorderIndex::Child(child_indices));
                         }
                         _ => {
                             return Err(Error::unexpected_column_type(field.name()));
@@ -74,7 +73,9 @@ fn get_indices(
                 }
             }
             ArrowDataType::List(list_field) | ArrowDataType::ListView(list_field) => {
-                if let Some(requested_field) = requested_schema.fields.get(field.name()) {
+                if let Some((index, _, requested_field)) =
+                    requested_schema.fields.get_full(field.name())
+                {
                     // we just want to transparently recurse into lists, need to transform the kernel
                     // list data type into a schema
                     match requested_field.data_type() {
@@ -84,19 +85,28 @@ fn get_indices(
                                 array_type.element_type.clone(),
                                 array_type.contains_null,
                             )]);
-                            let (parquet_advance, reorder_advance) = get_indices(
+                            let (parquet_advance, child_indices) = get_indices(
                                 found_fields + parquet_offset,
-                                found_fields + reorder_offset,
                                 &requested_schema,
                                 &[list_field.clone()].into(),
                                 mask_indices,
-                                reorder_indices,
                             )?;
                             // see comment above in struct match arm
-                            println!("here list:\n parquet_offset: {parquet_offset}\n parquet_advance: {parquet_advance}\n reorder_offset: {reorder_offset}\n reorder_advance: {reorder_advance}");
+                            //println!("here list:\n parquet_offset: {parquet_offset}\n parquet_advance: {parquet_advance}");
                             parquet_offset += parquet_advance - 1;
-                            reorder_offset += reorder_advance - 1; // inner array field doesn't count
                             found_fields += 1;
+                            // we have to recurse to find the type, but for reordering a list we
+                            // only need a child reordering if the inner type is a struct
+                            if let ArrowDataType::Struct(_) = list_field.data_type() {
+                                if child_indices.len() != 1 {
+                                    return Err(Error::generic("List call should not have generated more than one reorder index"));
+                                }
+                                // safety, checked that we have 1 element
+                                let child_indices = child_indices.into_iter().next().unwrap();
+                                reorder_indices.push(child_indices);
+                            } else {
+                                reorder_indices.push(ReorderIndex::Index(index));
+                            }
                         }
                         _ => {
                             return Err(Error::unexpected_column_type(list_field.name()));
@@ -108,12 +118,12 @@ fn get_indices(
                 if let Some(index) = requested_schema.index_of(field.name()) {
                     found_fields += 1;
                     mask_indices.push(parquet_offset + parquet_index);
-                    reorder_indices.push(reorder_offset + index); // this should add the number of FOUND fields in total so far, not offset_index
+                    reorder_indices.push(ReorderIndex::Index(index));
                 }
             }
         }
     }
-    println!("found {found_fields}");
+    //println!("found {found_fields}");
     //println!("found {found_fields}, requested {}. req schema: {:?}", requested_schema.fields.len(), requested_schema);
     require!(
         found_fields == requested_schema.fields.len(),
@@ -121,7 +131,7 @@ fn get_indices(
     );
     Ok((
         parquet_offset + fields.len() - start_parquet_offset,
-        reorder_offset + requested_schema.fields.len() - start_reorder_offset,
+        reorder_indices,
     ))
 }
 
@@ -139,18 +149,15 @@ fn get_indices(
 pub(crate) fn get_requested_indices(
     requested_schema: &SchemaRef,
     parquet_schema: &ArrowSchemaRef,
-) -> DeltaResult<(Vec<usize>, Vec<usize>)> {
+) -> DeltaResult<(Vec<usize>, Vec<ReorderIndex>)> {
     let mut mask_indices = vec![];
-    let mut reorder_indices = vec![];
-    get_indices(
-        0,
+    let (_, reorder_indexes) = get_indices(
         0,
         requested_schema,
         parquet_schema.fields(),
         &mut mask_indices,
-        &mut reorder_indices,
     )?;
-    Ok((mask_indices, reorder_indices))
+    Ok((mask_indices, reorder_indexes)) // FIX ME
 }
 
 /// Create a mask that will only select the specified indices from the parquet. Currently we only
@@ -209,7 +216,13 @@ mod tests {
 
     use crate::schema::{ArrayType, DataType, StructField, StructType};
 
-    use super::get_requested_indices;
+    use super::{get_requested_indices, ReorderIndex};
+
+    macro_rules! rii {
+        ($index: expr) => {{
+            ReorderIndex::Index($index)
+        }};
+    }
 
     #[test]
     fn simple_mask_indices() {
@@ -225,9 +238,10 @@ mod tests {
         ]));
         let (mask_indices, reorder_indices) =
             get_requested_indices(&kernel_schema, &arrow_schema).unwrap();
-        let expect = vec![0, 1, 2];
-        assert_eq!(mask_indices, expect);
-        assert_eq!(reorder_indices, expect);
+        let expect_mask = vec![0, 1, 2];
+        let expect_reorder = vec![rii!(0), rii!(1), rii!(2)];
+        assert_eq!(mask_indices, expect_mask);
+        assert_eq!(reorder_indices, expect_reorder);
     }
 
     #[test]
@@ -245,7 +259,7 @@ mod tests {
         let (mask_indices, reorder_indices) =
             get_requested_indices(&kernel_schema, &arrow_schema).unwrap();
         let expect_mask = vec![0, 1, 2];
-        let expect_reorder = vec![2, 0, 1];
+        let expect_reorder = vec![rii!(2), rii!(0), rii!(1)];
         assert_eq!(mask_indices, expect_mask);
         assert_eq!(reorder_indices, expect_reorder);
     }
@@ -282,7 +296,11 @@ mod tests {
         let (mask_indices, reorder_indices) =
             get_requested_indices(&kernel_schema, &arrow_schema).unwrap();
         let expect_mask = vec![0, 1, 2, 3];
-        let expect_reorder = vec![0, 1, 2, 3];
+        let expect_reorder = vec![
+            rii!(0),
+            ReorderIndex::Child(vec![rii!(0), rii!(1)]),
+            rii!(2),
+        ];
         assert_eq!(mask_indices, expect_mask);
         assert_eq!(reorder_indices, expect_reorder);
     }
@@ -319,7 +337,11 @@ mod tests {
         let (mask_indices, reorder_indices) =
             get_requested_indices(&kernel_schema, &arrow_schema).unwrap();
         let expect_mask = vec![0, 1, 2, 3];
-        let expect_reorder = vec![0, 1, 2, 3];
+        let expect_reorder = vec![
+            rii!(2),
+            ReorderIndex::Child(vec![rii!(1), rii!(0)]),
+            rii!(0),
+        ];
         assert_eq!(mask_indices, expect_mask);
         assert_eq!(reorder_indices, expect_reorder);
     }
@@ -353,7 +375,7 @@ mod tests {
         let (mask_indices, reorder_indices) =
             get_requested_indices(&kernel_schema, &arrow_schema).unwrap();
         let expect_mask = vec![0, 1, 3];
-        let expect_reorder = vec![0, 1, 3];
+        let expect_reorder = vec![rii!(0), ReorderIndex::Child(vec![rii!(0)]), rii!(2)];
         assert_eq!(mask_indices, expect_mask);
         assert_eq!(reorder_indices, expect_reorder);
     }
@@ -381,7 +403,56 @@ mod tests {
         let (mask_indices, reorder_indices) =
             get_requested_indices(&kernel_schema, &arrow_schema).unwrap();
         let expect_mask = vec![0, 1, 2];
-        let expect_reorder = vec![0, 1, 2];
+        let expect_reorder = vec![rii!(0), rii!(1), rii!(2)];
+        assert_eq!(mask_indices, expect_mask);
+        assert_eq!(reorder_indices, expect_reorder);
+    }
+
+    #[test]
+    fn nested_indices_list() {
+        let kernel_schema = Arc::new(StructType::new(vec![
+            StructField::new("i", DataType::INTEGER, false),
+            StructField::new(
+                "list",
+                ArrayType::new(
+                    StructType::new(vec![
+                        StructField::new("int32", DataType::INTEGER, false),
+                        StructField::new("string", DataType::STRING, false),
+                    ])
+                    .into(),
+                    false,
+                ),
+                false,
+            ),
+            StructField::new("j", DataType::INTEGER, false),
+        ]));
+        let arrow_schema = Arc::new(ArrowSchema::new(vec![
+            ArrowField::new("i", ArrowDataType::Int32, false),
+            ArrowField::new(
+                "list",
+                ArrowDataType::List(Arc::new(ArrowField::new(
+                    "nested",
+                    ArrowDataType::Struct(
+                        vec![
+                            ArrowField::new("int32", ArrowDataType::Int32, false),
+                            ArrowField::new("string", ArrowDataType::Utf8, false),
+                        ]
+                        .into(),
+                    ),
+                    false,
+                ))),
+                false,
+            ),
+            ArrowField::new("j", ArrowDataType::Int32, false),
+        ]));
+        let (mask_indices, reorder_indices) =
+            get_requested_indices(&kernel_schema, &arrow_schema).unwrap();
+        let expect_mask = vec![0, 1, 2, 3];
+        let expect_reorder = vec![
+            rii!(0),
+            ReorderIndex::Child(vec![rii!(0), rii!(1)]),
+            rii!(2),
+        ];
         assert_eq!(mask_indices, expect_mask);
         assert_eq!(reorder_indices, expect_reorder);
     }
@@ -423,7 +494,7 @@ mod tests {
         let (mask_indices, reorder_indices) =
             get_requested_indices(&kernel_schema, &arrow_schema).unwrap();
         let expect_mask = vec![0, 1, 3];
-        let expect_reorder = vec![0, 1, 3];
+        let expect_reorder = vec![rii!(0), ReorderIndex::Child(vec![rii!(0)]), rii!(2)];
         assert_eq!(mask_indices, expect_mask);
         assert_eq!(reorder_indices, expect_reorder);
     }
@@ -469,7 +540,11 @@ mod tests {
         let (mask_indices, reorder_indices) =
             get_requested_indices(&kernel_schema, &arrow_schema).unwrap();
         let expect_mask = vec![0, 2, 3, 4];
-        let expect_reorder = vec![0, 2, 1, 3];
+        let expect_reorder = vec![
+            rii!(0),
+            ReorderIndex::Child(vec![rii!(1), rii!(0)]),
+            rii!(2),
+        ];
         assert_eq!(mask_indices, expect_mask);
         assert_eq!(reorder_indices, expect_reorder);
     }
