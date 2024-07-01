@@ -68,10 +68,9 @@ fn _count_cols(dt: &ArrowDataType) -> usize {
 }
 
 /// helper function, does the same as `get_requested_indices` but at an offset. used to recurse into
-/// structs. this is called recursively to traverse into structs and lists. `parquet_offset` is how
-/// many parquet fields exist before processing this potentially nested schema. `reorder_offset` is
-/// how many fields we've found so far before processing at this nested schema. returns the number
-/// of parquet fields and the number of requested fields processed
+/// structs, lists, and maps. `parquet_offset` is how many parquet fields exist before processing
+/// this potentially nested schema. returns the number of parquet fields in `fields` (regardless of
+/// if they are selected or not) and reordering information for the requested fields.
 fn get_indices(
     start_parquet_offset: usize,
     requested_schema: &Schema,
@@ -272,17 +271,13 @@ fn get_indices(
     ))
 }
 
-/// Get the indices in `parquet_schema` of the specified columns in `requested_schema`. This
-/// returns a tuples of (mask_indices: Vec<parquet_schema_index>, reorder_indices:
+/// Get the indices in `parquet_schema` of the specified columns in `requested_schema`. This returns
+/// a tuples of (mask_indices: Vec<parquet_schema_index>, reorder_indices:
 /// Vec<requested_index>). `mask_indices` is used for generating the mask for reading from the
 /// parquet file, and simply contains an entry for each index we wish to select from the parquet
 /// file set to the index of the requested column in the parquet. `reorder_indices` is used for
-/// re-ordering and will be the same size as `requested_schema`. Each index in `reorder_indices`
-/// represents a column that will be in the read parquet data at that index. The value stored in
-/// `reorder_indices` is the position that the column should appear in the final output. For
-/// example, if `reorder_indices` is `[2,0,1]`, then the re-ordering code should take the third
-/// column in the raw-read parquet data, and move it to the first column in the final output, the
-/// first column to the second, and the second to the third.
+/// re-ordering. See the documentation for [`ReorderIndex`] to understand what each element in the
+/// returned array means
 pub(crate) fn get_requested_indices(
     requested_schema: &SchemaRef,
     parquet_schema: &ArrowSchemaRef,
