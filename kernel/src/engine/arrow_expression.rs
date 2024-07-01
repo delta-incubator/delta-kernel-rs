@@ -1,4 +1,5 @@
 //! Expression handling based on arrow-rs compute kernels.
+use std::primitive;
 use std::sync::Arc;
 
 use arrow_arith::boolean::{and_kleene, is_null, not, or_kleene};
@@ -6,7 +7,7 @@ use arrow_arith::numeric::{add, div, mul, sub};
 use arrow_array::cast::AsArray;
 use arrow_array::{
     Array, ArrayRef, BinaryArray, BooleanArray, Date32Array, Datum, Decimal128Array, Float32Array,
-    Float64Array, Int16Array, Int32Array, Int64Array, Int8Array, ListArray, RecordBatch,
+    Float64Array, Int16Array, Int32Array, Int64Array, Int8Array, ListArray, MapArray, RecordBatch,
     StringArray, StructArray, TimestampMicrosecondArray,
 };
 use arrow_ord::cmp::{distinct, eq, gt, gt_eq, lt, lt_eq, neq};
@@ -89,6 +90,10 @@ impl Scalar {
                         Decimal128Array::new_null(num_rows)
                             .with_precision_and_scale(*precision, *scale as i8)?,
                     ),
+                    // TODO(r.chen): Fill this out correctly.
+                    PrimitiveType::Variant => {
+                        panic!("UNSUPPORTED - VARIANT DOESNT HAVE AN ARROW TYPE")
+                    }
                 },
                 DataType::Struct(t) => {
                     let fields: Fields = t.fields().map(ArrowField::try_from).try_collect()?;
@@ -241,10 +246,128 @@ fn ensure_data_types(kernel_type: &DataType, arrow_type: &ArrowDataType) -> Delt
             });
             Ok(())
         }
+        (DataType::Primitive(PrimitiveType::Variant), ArrowDataType::Struct(_)) => Ok(()),
         _ => Err(make_arrow_error(format!(
             "Incorrect datatype. Expected {}, got {}",
             kernel_type, arrow_type
         ))),
+    }
+}
+
+fn variant_coalesce_impl(arr: Arc<dyn Array>, kernel_dt: &DataType) -> DeltaResult<ArrayRef> {
+    // TODO(r.chen): Figure out how bad these clone() calls are.
+    match kernel_dt {
+        DataType::Struct(kernel_struct_type) => {
+            if let Some(struct_array) = arr.as_any().downcast_ref::<StructArray>() {
+                let (fields, arrays, nulls) = struct_array.clone().into_parts();
+                let new_arrays = arrays
+                    .into_iter()
+                    .zip(kernel_struct_type.fields().into_iter())
+                    .map(|(child_arr, struct_field)| {
+                        variant_coalesce_impl(child_arr, struct_field.data_type())
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(Arc::new(StructArray::new(
+                    // TODO(r.chen): Should we be setting this with the new isVariant metadata?
+                    // or will that be handled elsewhere?
+                    fields, new_arrays, nulls,
+                )))
+            } else {
+                Err(Error::unexpected_column_type(kernel_dt))
+            }
+        }
+        DataType::Array(kernel_array_type) => {
+            if let Some(list_array) = arr.as_any().downcast_ref::<ListArray>() {
+                let (field, offsets, values, nulls) = list_array.clone().into_parts();
+                let new_values =
+                    variant_coalesce_impl(values.clone(), kernel_array_type.element_type())?;
+                Ok(Arc::<ListArray>::new(ListArray::new(
+                    // TODO(r.chen): Should we be setting this with the new isVariant metadata?
+                    // or will that be handled elsewhere?
+                    field, offsets, new_values, nulls,
+                )))
+            } else {
+                Err(Error::unexpected_column_type(kernel_dt))
+            }
+        }
+        DataType::Map(kernel_map_type) => {
+            if let Some(map_array) = arr.as_any().downcast_ref::<MapArray>() {
+                let (field, offsets, entries, nulls, ordered) = map_array.clone().into_parts();
+                let new_entries = StructArray::new(
+                    entries.fields().clone(),
+                    vec![
+                        entries.column(0).clone(),
+                        // Map keys cannot be of variant type.
+                        variant_coalesce_impl(
+                            entries.column(1).clone(),
+                            kernel_map_type.value_type(),
+                        )?,
+                    ],
+                    entries.nulls().cloned(),
+                );
+                Ok(Arc::<MapArray>::new(MapArray::new(
+                    // TODO(r.chen): Should we be setting this with the new isVariant metadata?
+                    // or will that be handled elsewhere?
+                    field,
+                    offsets,
+                    new_entries,
+                    nulls,
+                    ordered,
+                )))
+            } else {
+                Err(Error::unexpected_column_type(kernel_dt))
+            }
+        }
+        DataType::Primitive(primitive_type) => match primitive_type {
+            PrimitiveType::Variant => {
+                if let Some(struct_array) = arr.as_any().downcast_ref::<StructArray>() {
+                    let (fields, arrays, nulls) = struct_array.clone().into_parts();
+
+                    let value_idx = if let Some((idx, field)) = fields.find("value") {
+                        if field.data_type() == &ArrowDataType::Binary {
+                            Ok::<usize, Error>(idx)
+                        } else {
+                            Err(Error::invalid_variant_representation(
+                                "\"value\" field is not of binary type.",
+                            ))
+                        }
+                    } else {
+                        Err(Error::invalid_variant_representation(
+                            "\"value\" field is not found.",
+                        ))
+                    }?;
+
+                    let metadata_idx = if let Some((idx, field)) = fields.find("metadata") {
+                        if field.data_type() == &ArrowDataType::Binary {
+                            Ok::<usize, Error>(idx)
+                        } else {
+                            Err(Error::invalid_variant_representation(
+                                "\"metadata\" field is not of binary type.",
+                            ))
+                        }
+                    } else {
+                        Err(Error::invalid_variant_representation(
+                            "\"metadata\" field is not found.",
+                        ))
+                    }?;
+
+                    let new_fields = Fields::from(vec![
+                        fields[value_idx].clone(),
+                        fields[metadata_idx].clone(),
+                    ]);
+                    let new_arrays = vec![
+                        Arc::clone(&arrays[value_idx]),
+                        Arc::clone(&arrays[metadata_idx]),
+                    ];
+                    Ok(Arc::new(StructArray::new(new_fields, new_arrays, nulls)))
+                } else {
+                    Err(Error::invalid_variant_representation(
+                        "variants should be represented in storage as structs.",
+                    ))
+                }
+            }
+            _ => Ok(Arc::new(arr)),
+        },
     }
 }
 
@@ -301,6 +424,12 @@ fn evaluate_expression(
             Ok(match op {
                 UnaryOperator::Not => Arc::new(not(downcast_to_bool(&arr)?)?),
                 UnaryOperator::IsNull => Arc::new(is_null(&arr)?),
+                UnaryOperator::VariantCoalesce => {
+                    let result_type = result_type.ok_or(Error::generic(
+                        "Kernel data type must be supplied to the 'variant_coalesce' expression.",
+                    ))?;
+                    variant_coalesce_impl(arr, result_type)?
+                }
             })
         }
         (BinaryOperation { op, left, right }, _) => {
