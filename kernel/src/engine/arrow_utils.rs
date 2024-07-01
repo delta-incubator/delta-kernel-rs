@@ -7,10 +7,9 @@ use crate::{
     DeltaResult, Error,
 };
 
-use arrow_array::{Array as ArrowArray, RecordBatch};
+use arrow_array::{Array as ArrowArray, StructArray};
 use arrow_schema::{
-    DataType as ArrowDataType, Field as ArrowField, Fields, Schema as ArrowSchema,
-    SchemaRef as ArrowSchemaRef,
+    DataType as ArrowDataType, Field as ArrowField, Fields, SchemaRef as ArrowSchemaRef,
 };
 use parquet::{arrow::ProjectionMask, schema::types::SchemaDescriptor};
 use tracing::debug;
@@ -60,9 +59,9 @@ fn _count_cols(dt: &ArrowDataType) -> usize {
         ArrowDataType::Struct(fields) => fields.iter().fold(0, |acc, f| acc + count_cols(f)),
         ArrowDataType::Union(fields, _) => fields.iter().fold(0, |acc, (_, f)| acc + count_cols(f)),
         ArrowDataType::List(field)
-            | ArrowDataType::LargeList(field)
-            | ArrowDataType::FixedSizeList(field, _)
-            | ArrowDataType::Map(field, _) => count_cols(field),
+        | ArrowDataType::LargeList(field)
+        | ArrowDataType::FixedSizeList(field, _)
+        | ArrowDataType::Map(field, _) => count_cols(field),
         ArrowDataType::Dictionary(_, value_field) => _count_cols(value_field.as_ref()),
         _ => 1, // other types are "real" fields, so count
     }
@@ -82,9 +81,11 @@ fn get_indices(
     let mut found_fields = HashSet::with_capacity(requested_schema.fields.len());
     let mut reorder_indices = Vec::with_capacity(requested_schema.fields.len());
     let mut parquet_offset = start_parquet_offset;
-    //println!("at top with parquet_offset {parquet_offset}");
     for (parquet_index, field) in fields.iter().enumerate() {
-        debug!("Getting indices for field {} with offset {parquet_offset}, with index {parquet_index}", field.name());
+        debug!(
+            "Getting indices for field {} with offset {parquet_offset}, with index {parquet_index}",
+            field.name()
+        );
         match field.data_type() {
             ArrowDataType::Struct(fields) => {
                 if let Some((index, _, requested_field)) =
@@ -101,7 +102,6 @@ fn get_indices(
                             // advance the number of parquet fields, but subtract 1 because the
                             // struct will be counted by the `enumerate` call but doesn't count as
                             // an actual index.
-                            //println!("here:\n parquet_offset: {parquet_offset}\n parquet_advance: {parquet_advance}");
                             parquet_offset += parquet_advance - 1;
                             // note that we found this field
                             found_fields.insert(requested_field.name());
@@ -121,7 +121,7 @@ fn get_indices(
                     debug!("Skipping over un-selected struct: {}", field.name());
                     // offset by number of inner fields. subtract one, because the enumerate still
                     // counts this field
-                    parquet_offset += count_cols(field)  - 1;
+                    parquet_offset += count_cols(field) - 1;
                 }
             }
             ArrowDataType::List(list_field) | ArrowDataType::ListView(list_field) => {
@@ -144,7 +144,6 @@ fn get_indices(
                                 mask_indices,
                             )?;
                             // see comment above in struct match arm
-                            //println!("here list:\n parquet_offset: {parquet_offset}\n parquet_advance: {parquet_advance}");
                             parquet_offset += parquet_advance - 1;
                             found_fields.insert(requested_field.name());
                             // we have to recurse to find the type, but for reordering a list we
@@ -188,6 +187,52 @@ fn get_indices(
                     }
                 }
             }
+            ArrowDataType::Map(key_val_field, _) => {
+                if let Some((index, _, requested_field)) =
+                    requested_schema.fields.get_full(field.name())
+                {
+                    match (key_val_field.data_type(), requested_field.data_type()) {
+                        (ArrowDataType::Struct(inner_fields), DataType::Map(map_type)) => {
+                            let mut key_val_names =
+                                inner_fields.iter().map(|f| f.name().to_string());
+                            let key_name = if let Some(key_name) = key_val_names.next() {
+                                key_name
+                            } else {
+                                return Err(Error::generic("map fields didn't include a key col"));
+                            };
+                            let val_name = if let Some(val_name) = key_val_names.next() {
+                                val_name
+                            } else {
+                                return Err(Error::generic("map fields didn't include a val col"));
+                            };
+                            if key_val_names.next().is_some() {
+                                return Err(Error::generic("map fields had more than 2 members"));
+                            }
+                            let inner_schema = map_type.as_struct_schema(key_name, val_name);
+                            let (parquet_advance, _children) = get_indices(
+                                parquet_index + parquet_offset,
+                                &inner_schema,
+                                inner_fields,
+                                mask_indices,
+                            )?;
+                            // advance the number of parquet fields, but subtract 1 because the
+                            // map will be counted by the `enumerate` call but doesn't count as
+                            // an actual index.
+                            parquet_offset += parquet_advance - 1;
+                            // note that we found this field
+                            found_fields.insert(requested_field.name());
+                            // push the child reorder on, currently no reordering for maps
+                            reorder_indices.push(ReorderIndex::Index {
+                                index,
+                                is_null: false,
+                            });
+                        }
+                        _ => {
+                            return Err(Error::unexpected_column_type(field.name()));
+                        }
+                    }
+                }
+            }
             _ => {
                 if let Some((index, _, requested_field)) =
                     requested_schema.fields.get_full(field.name())
@@ -202,15 +247,16 @@ fn get_indices(
             }
         }
     }
-    //println!("found {found_fields}");
-    //println!("found {found_fields}, requested {}. req schema: {:?}", requested_schema.fields.len(), requested_schema);
     if found_fields.len() != requested_schema.fields.len() {
         // some fields are missing, but they might be nullable, need to insert them into the reorder_indices
         for (requested_position, field) in requested_schema.fields().enumerate() {
             if !found_fields.contains(field.name()) {
                 if field.nullable {
-                    println!("Inserting missing and nullable field: {}", field.name());
-                    reorder_indices.push(ReorderIndex::Index{ index: requested_position, is_null: true});
+                    debug!("Inserting missing and nullable field: {}", field.name());
+                    reorder_indices.push(ReorderIndex::Index {
+                        index: requested_position,
+                        is_null: true,
+                    });
                 } else {
                     return Err(Error::Generic(format!(
                         "Requested field not found in parquet schema, and field is not nullable: {}",
@@ -220,10 +266,6 @@ fn get_indices(
             }
         }
     }
-    // require!(
-    //     found_fields.len() == requested_schema.fields.len(),
-    //     Error::generic("Didn't find all requested columns in parquet schema")
-    // );
     Ok((
         parquet_offset + fields.len() - start_parquet_offset,
         reorder_indices,
@@ -245,7 +287,6 @@ pub(crate) fn get_requested_indices(
     requested_schema: &SchemaRef,
     parquet_schema: &ArrowSchemaRef,
 ) -> DeltaResult<(Vec<usize>, Vec<ReorderIndex>)> {
-    //println!("Called with\n---\n{requested_schema:#?}\n---\n{parquet_schema:#?}");
     let mut mask_indices = vec![];
     let (_, reorder_indexes) = get_indices(
         0,
@@ -253,8 +294,6 @@ pub(crate) fn get_requested_indices(
         parquet_schema.fields(),
         &mut mask_indices,
     )?;
-    println!("parquet_schema: {parquet_schema:#?}");
-    println!("mask {mask_indices:?}");
     Ok((mask_indices, reorder_indexes))
 }
 
@@ -277,7 +316,7 @@ pub(crate) fn generate_mask(
 
 /// Check if an ordering is already ordered
 fn is_ordered(requested_ordering: &[ReorderIndex]) -> bool {
-    if requested_ordering.len() == 0 {
+    if requested_ordering.is_empty() {
         return true;
     }
     // we have >=1 element. check that the first element is ordered
@@ -290,40 +329,68 @@ fn is_ordered(requested_ordering: &[ReorderIndex]) -> bool {
         .all(|ri| (ri[0].index() < ri[1].index()) && ri[1].is_ordered())
 }
 
+// we use this as a placeholder for an array and its associated field. We can fill in a Vec of None
+// of this type and then set elements of the Vec to Some(FieldArrayOpt) for each column
+type FieldArrayOpt = Option<(Arc<ArrowField>, Arc<dyn ArrowArray>)>;
+
 /// Reorder a RecordBatch to match `requested_ordering`. For each non-zero value in
 /// `requested_ordering`, the column at that index will be added in order to returned batch
-pub(crate) fn reorder_record_batch(
-    input_data: RecordBatch,
+pub(crate) fn reorder_struct_array(
+    input_data: StructArray,
     requested_ordering: &[ReorderIndex],
-) -> DeltaResult<RecordBatch> {
+) -> DeltaResult<StructArray> {
     if is_ordered(requested_ordering) {
         // indices is already sorted, meaning we requested in the order that the columns were
         // stored in the parquet
         Ok(input_data)
     } else {
-        println!("ORDERING {requested_ordering:#?}, rows {}", input_data.num_rows());
         // requested an order different from the parquet, reorder
-        let input_schema = input_data.schema();
-        println!("data: {input_data:#?}");
-        let mut final_fields_cols: Vec<Option<(Arc<ArrowField>, Arc<dyn ArrowArray>)>> =
-            std::iter::repeat_with(|| None)
-                .take(requested_ordering.len())
-                .collect();
+        debug!("Have requested reorder {requested_ordering:#?} on {input_data:?}");
+        let (input_fields, input_cols, null_buffer) = input_data.into_parts();
+        let mut final_fields_cols: Vec<FieldArrayOpt> = std::iter::repeat_with(|| None)
+            .take(requested_ordering.len())
+            .collect();
         for (parquet_position, reorder_index) in requested_ordering.iter().enumerate() {
             // for each item, reorder_index.index() tells us where to put it, and its position in
             // requested_ordering tells us where it is in the parquet data
-            println!("{parquet_position} in {input_schema:?}");
-            final_fields_cols[reorder_index.index()] = Some((
-                Arc::new(input_schema.field(parquet_position).clone()),
-                input_data.column(parquet_position).clone(), // cheap Arc clone
-            ));
+            match reorder_index {
+                ReorderIndex::Child {
+                    index,
+                    is_null: _is_null,
+                    children: _children,
+                } => {
+                    // TODO: This turns out to be *hard*. You cannot (easily) get a owned copy of
+                    // the column without cloning, but we need that to be able to sort internally.
+                    final_fields_cols[*index] = Some((
+                        input_fields[parquet_position].clone(), // cheap Arc clone
+                        input_cols[parquet_position].clone(),   // cheap Arc clone
+                    ));
+                }
+                ReorderIndex::Index {
+                    index,
+                    is_null: _is_null,
+                } => {
+                    final_fields_cols[*index] = Some((
+                        input_fields[parquet_position].clone(), // cheap Arc clone
+                        input_cols[parquet_position].clone(),   // cheap Arc clone
+                    ));
+                }
+            }
         }
-        let field_iter = final_fields_cols
-            .iter()
-            .map(|fco| fco.as_ref().unwrap().0.clone());
-        let schema = Arc::new(ArrowSchema::new(Fields::from_iter(field_iter)));
-        let reordered_columns = final_fields_cols.into_iter().map(|fco| fco.unwrap().1).collect();
-        Ok(RecordBatch::try_new(schema, reordered_columns)?)
+        let fields = Fields::from_iter(
+            final_fields_cols
+                .iter()
+                .map(|fco| fco.as_ref().unwrap().0.clone()), // cheap Arc clone
+        );
+        let reordered_columns = final_fields_cols
+            .into_iter()
+            .map(|fco| fco.unwrap().1)
+            .collect();
+        Ok(StructArray::try_new(
+            fields,
+            reordered_columns,
+            null_buffer,
+        )?)
     }
 }
 
