@@ -1,10 +1,9 @@
 //! Some utilities for working with arrow data types
 
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use crate::{
     schema::{DataType, Schema, SchemaRef, StructField, StructType},
-    utils::require,
     DeltaResult, Error,
 };
 
@@ -14,6 +13,7 @@ use arrow_schema::{
     SchemaRef as ArrowSchemaRef,
 };
 use parquet::{arrow::ProjectionMask, schema::types::SchemaDescriptor};
+use tracing::debug;
 
 /// Reordering is specified as a tree. Each level is a vec of `ReorderIndex`s. Each element's index
 /// represents a column that will be in the read parquet data at that level and index. The `index()`
@@ -50,6 +50,24 @@ impl ReorderIndex {
     }
 }
 
+// count the number of physical columns, including nested ones in an `ArrowField`
+fn count_cols(field: &ArrowField) -> usize {
+    _count_cols(field.data_type())
+}
+
+fn _count_cols(dt: &ArrowDataType) -> usize {
+    match dt {
+        ArrowDataType::Struct(fields) => fields.iter().fold(0, |acc, f| acc + count_cols(f)),
+        ArrowDataType::Union(fields, _) => fields.iter().fold(0, |acc, (_, f)| acc + count_cols(f)),
+        ArrowDataType::List(field)
+            | ArrowDataType::LargeList(field)
+            | ArrowDataType::FixedSizeList(field, _)
+            | ArrowDataType::Map(field, _) => count_cols(field),
+        ArrowDataType::Dictionary(_, value_field) => _count_cols(value_field.as_ref()),
+        _ => 1, // other types are "real" fields, so count
+    }
+}
+
 /// helper function, does the same as `get_requested_indices` but at an offset. used to recurse into
 /// structs. this is called recursively to traverse into structs and lists. `parquet_offset` is how
 /// many parquet fields exist before processing this potentially nested schema. `reorder_offset` is
@@ -61,12 +79,12 @@ fn get_indices(
     fields: &Fields,
     mask_indices: &mut Vec<usize>,
 ) -> DeltaResult<(usize, Vec<ReorderIndex>)> {
-    let mut found_fields = Vec::with_capacity(requested_schema.fields.len());
+    let mut found_fields = HashSet::with_capacity(requested_schema.fields.len());
     let mut reorder_indices = Vec::with_capacity(requested_schema.fields.len());
     let mut parquet_offset = start_parquet_offset;
     //println!("at top with parquet_offset {parquet_offset}");
     for (parquet_index, field) in fields.iter().enumerate() {
-        //println!("looking at field {}", field.name());
+        debug!("Getting indices for field {} with offset {parquet_offset}, with index {parquet_index}", field.name());
         match field.data_type() {
             ArrowDataType::Struct(fields) => {
                 if let Some((index, _, requested_field)) =
@@ -75,7 +93,7 @@ fn get_indices(
                     match requested_field.data_type {
                         DataType::Struct(ref requested_schema) => {
                             let (parquet_advance, children) = get_indices(
-                                found_fields.len() + parquet_offset,
+                                parquet_index + parquet_offset,
                                 requested_schema.as_ref(),
                                 fields,
                                 mask_indices,
@@ -86,7 +104,7 @@ fn get_indices(
                             //println!("here:\n parquet_offset: {parquet_offset}\n parquet_advance: {parquet_advance}");
                             parquet_offset += parquet_advance - 1;
                             // note that we found this field
-                            found_fields.push(requested_field);
+                            found_fields.insert(requested_field.name());
                             // push the child reorder on
                             reorder_indices.push(ReorderIndex::Child {
                                 index,
@@ -98,6 +116,12 @@ fn get_indices(
                             return Err(Error::unexpected_column_type(field.name()));
                         }
                     }
+                } else {
+                    // We're NOT selecting this field, but we still need to update how much we skip
+                    debug!("Skipping over un-selected struct: {}", field.name());
+                    // offset by number of inner fields. subtract one, because the enumerate still
+                    // counts this field
+                    parquet_offset += count_cols(field)  - 1;
                 }
             }
             ArrowDataType::List(list_field) | ArrowDataType::ListView(list_field) => {
@@ -122,7 +146,7 @@ fn get_indices(
                             // see comment above in struct match arm
                             //println!("here list:\n parquet_offset: {parquet_offset}\n parquet_advance: {parquet_advance}");
                             parquet_offset += parquet_advance - 1;
-                            found_fields.push(requested_field);
+                            found_fields.insert(requested_field.name());
                             // we have to recurse to find the type, but for reordering a list we
                             // only need a child reordering if the inner type is a struct
                             if let ArrowDataType::Struct(_) = list_field.data_type() {
@@ -168,7 +192,7 @@ fn get_indices(
                 if let Some((index, _, requested_field)) =
                     requested_schema.fields.get_full(field.name())
                 {
-                    found_fields.push(requested_field);
+                    found_fields.insert(requested_field.name());
                     mask_indices.push(parquet_offset + parquet_index);
                     reorder_indices.push(ReorderIndex::Index {
                         index,
@@ -182,16 +206,24 @@ fn get_indices(
     //println!("found {found_fields}, requested {}. req schema: {:?}", requested_schema.fields.len(), requested_schema);
     if found_fields.len() != requested_schema.fields.len() {
         // some fields are missing, but they might be nullable, need to insert them into the reorder_indices
-        println!(
-            "Found {found_fields:?}, but requested {}",
-            requested_schema.fields.len()
-        );
-        println!("reorder here is: {reorder_indices:?}");
+        for (requested_position, field) in requested_schema.fields().enumerate() {
+            if !found_fields.contains(field.name()) {
+                if field.nullable {
+                    println!("Inserting missing and nullable field: {}", field.name());
+                    reorder_indices.push(ReorderIndex::Index{ index: requested_position, is_null: true});
+                } else {
+                    return Err(Error::Generic(format!(
+                        "Requested field not found in parquet schema, and field is not nullable: {}",
+                        field.name()
+                    )));
+                }
+            }
+        }
     }
-    require!(
-        found_fields.len() == requested_schema.fields.len(),
-        Error::generic("Didn't find all requested columns in parquet schema")
-    );
+    // require!(
+    //     found_fields.len() == requested_schema.fields.len(),
+    //     Error::generic("Didn't find all requested columns in parquet schema")
+    // );
     Ok((
         parquet_offset + fields.len() - start_parquet_offset,
         reorder_indices,
@@ -221,6 +253,8 @@ pub(crate) fn get_requested_indices(
         parquet_schema.fields(),
         &mut mask_indices,
     )?;
+    println!("parquet_schema: {parquet_schema:#?}");
+    println!("mask {mask_indices:?}");
     Ok((mask_indices, reorder_indexes))
 }
 
@@ -267,9 +301,10 @@ pub(crate) fn reorder_record_batch(
         // stored in the parquet
         Ok(input_data)
     } else {
-        //println!("ORDERING {requested_ordering:?}");
+        println!("ORDERING {requested_ordering:#?}, rows {}", input_data.num_rows());
         // requested an order different from the parquet, reorder
         let input_schema = input_data.schema();
+        println!("data: {input_data:#?}");
         let mut final_fields_cols: Vec<Option<(Arc<ArrowField>, Arc<dyn ArrowArray>)>> =
             std::iter::repeat_with(|| None)
                 .take(requested_ordering.len())
@@ -277,6 +312,7 @@ pub(crate) fn reorder_record_batch(
         for (parquet_position, reorder_index) in requested_ordering.iter().enumerate() {
             // for each item, reorder_index.index() tells us where to put it, and its position in
             // requested_ordering tells us where it is in the parquet data
+            println!("{parquet_position} in {input_schema:?}");
             final_fields_cols[reorder_index.index()] = Some((
                 Arc::new(input_schema.field(parquet_position).clone()),
                 input_data.column(parquet_position).clone(), // cheap Arc clone
@@ -309,6 +345,15 @@ mod tests {
             ReorderIndex::Index {
                 index: $index,
                 is_null: false,
+            }
+        }};
+    }
+
+    macro_rules! rii_null {
+        ($index: expr) => {{
+            ReorderIndex::Index {
+                index: $index,
+                is_null: true,
             }
         }};
     }
@@ -384,8 +429,8 @@ mod tests {
         ]));
         let (mask_indices, reorder_indices) =
             get_requested_indices(&kernel_schema, &arrow_schema).unwrap();
-        let expect_mask = vec![0, 1, 2];
-        let expect_reorder = vec![rii!(0), rii!(1), rii!(2)];
+        let expect_mask = vec![0, 1];
+        let expect_reorder = vec![rii!(0), rii!(2), rii_null!(1)];
         assert_eq!(mask_indices, expect_mask);
         assert_eq!(reorder_indices, expect_reorder);
     }
@@ -660,6 +705,62 @@ mod tests {
                 children: vec![rii!(1), rii!(0)],
             },
             rii!(2),
+        ];
+        assert_eq!(mask_indices, expect_mask);
+        assert_eq!(reorder_indices, expect_reorder);
+    }
+
+    #[test]
+    fn skipped_struct() {
+        let kernel_schema = Arc::new(StructType::new(vec![
+            StructField::new("i", DataType::INTEGER, false),
+            StructField::new(
+                "nested",
+                StructType::new(vec![
+                    StructField::new("int32", DataType::INTEGER, false),
+                    StructField::new("string", DataType::STRING, false),
+                ]),
+                false,
+            ),
+            StructField::new("j", DataType::INTEGER, false),
+        ]));
+        let arrow_schema = Arc::new(ArrowSchema::new(vec![
+            ArrowField::new(
+                "skipped",
+                ArrowDataType::Struct(
+                    vec![
+                        ArrowField::new("int32", ArrowDataType::Int32, false),
+                        ArrowField::new("string", ArrowDataType::Utf8, false),
+                    ]
+                    .into(),
+                ),
+                false,
+            ),
+            ArrowField::new("j", ArrowDataType::Int32, false),
+            ArrowField::new(
+                "nested",
+                ArrowDataType::Struct(
+                    vec![
+                        ArrowField::new("int32", ArrowDataType::Int32, false),
+                        ArrowField::new("string", ArrowDataType::Utf8, false),
+                    ]
+                    .into(),
+                ),
+                false,
+            ),
+            ArrowField::new("i", ArrowDataType::Int32, false),
+        ]));
+        let (mask_indices, reorder_indices) =
+            get_requested_indices(&kernel_schema, &arrow_schema).unwrap();
+        let expect_mask = vec![2, 3, 4, 5];
+        let expect_reorder = vec![
+            rii!(2),
+            ReorderIndex::Child {
+                index: 1,
+                is_null: false,
+                children: vec![rii!(0), rii!(1)],
+            },
+            rii!(0),
         ];
         assert_eq!(mask_indices, expect_mask);
         assert_eq!(reorder_indices, expect_reorder);
