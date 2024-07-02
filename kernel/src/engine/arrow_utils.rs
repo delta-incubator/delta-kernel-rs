@@ -357,12 +357,7 @@ pub(crate) fn reorder_struct_array(
                         result_array.fields().clone(),
                         input_fields[parquet_position].is_nullable(),
                     ));
-                    let mut sa: Arc<dyn ArrowArray> = Arc::new(result_array);
-                    std::mem::swap(&mut input_cols[parquet_position], &mut sa);
-                    final_fields_cols[*index] = Some((
-                        new_field,
-                        input_cols[parquet_position].clone(), // cheap Arc clone
-                    ));
+                    final_fields_cols[*index] = Some((new_field, Arc::new(result_array)));
                 }
                 ReorderIndex::Index { index } => {
                     final_fields_cols[*index] = Some((
