@@ -337,9 +337,7 @@ pub(crate) fn reorder_struct_array(
         debug!("Have requested reorder {requested_ordering:#?} on {input_data:?}");
         let num_rows = input_data.len();
         let (input_fields, mut input_cols, null_buffer) = input_data.into_parts();
-        let mut final_fields_cols: Vec<FieldArrayOpt> = std::iter::repeat_with(|| None)
-            .take(requested_ordering.len())
-            .collect();
+        let mut final_fields_cols: Vec<FieldArrayOpt> = vec![None; requested_ordering.len()];
         for (parquet_position, reorder_index) in requested_ordering.iter().enumerate() {
             // for each item, reorder_index.index() tells us where to put it, and its position in
             // requested_ordering tells us where it is in the parquet data
