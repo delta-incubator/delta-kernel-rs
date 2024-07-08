@@ -7,7 +7,7 @@ use crate::{
     DeltaResult, Error,
 };
 
-use arrow_array::{new_null_array, Array as ArrowArray, StructArray};
+use arrow_array::{cast::AsArray, new_null_array, Array as ArrowArray, StructArray};
 use arrow_schema::{
     DataType as ArrowDataType, Field as ArrowField, FieldRef as ArrowFieldRef, Fields,
     SchemaRef as ArrowSchemaRef,
@@ -337,18 +337,14 @@ pub(crate) fn reorder_struct_array(
         debug!("Have requested reorder {requested_ordering:#?} on {input_data:?}");
         let num_rows = input_data.len();
         let num_cols = requested_ordering.len();
-        let (input_fields, mut input_cols, null_buffer) = input_data.into_parts();
+        let (input_fields, input_cols, null_buffer) = input_data.into_parts();
         let mut final_fields_cols: Vec<FieldArrayOpt> = vec![None; num_cols];
         for (parquet_position, reorder_index) in requested_ordering.iter().enumerate() {
             // for each item, reorder_index.index() tells us where to put it, and its position in
             // requested_ordering tells us where it is in the parquet data
             match reorder_index {
                 ReorderIndex::Child { index, children } => {
-                    let mut placeholder: Arc<dyn ArrowArray> =
-                        Arc::new(StructArray::new_empty_fields(0, None));
-                    std::mem::swap(&mut input_cols[parquet_position], &mut placeholder);
-                    // placeholder now holds our struct array that we want to reorder
-                    let struct_array: StructArray = placeholder.into_data().into();
+                    let struct_array = input_cols[parquet_position].as_struct().clone();
                     let result_array = reorder_struct_array(struct_array, children)?;
                     // create the new field specifying the correct order for the struct
                     let new_field = Arc::new(ArrowField::new_struct(
@@ -374,9 +370,11 @@ pub(crate) fn reorder_struct_array(
         let mut field_vec = Vec::with_capacity(num_cols);
         let mut reordered_columns = Vec::with_capacity(num_cols);
         for field_array_opt in final_fields_cols.into_iter() {
-            let (field, array) = field_array_opt.ok_or_else(|| Error::generic(
-                "Found a None in final_fields_cols. This is a kernel bug, please report."
-            ))?;
+            let (field, array) = field_array_opt.ok_or_else(|| {
+                Error::generic(
+                    "Found a None in final_fields_cols. This is a kernel bug, please report.",
+                )
+            })?;
             field_vec.push(field);
             reordered_columns.push(array);
         }
