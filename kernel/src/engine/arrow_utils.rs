@@ -336,8 +336,9 @@ pub(crate) fn reorder_struct_array(
         // requested an order different from the parquet, reorder
         debug!("Have requested reorder {requested_ordering:#?} on {input_data:?}");
         let num_rows = input_data.len();
+        let num_cols = requested_ordering.len();
         let (input_fields, mut input_cols, null_buffer) = input_data.into_parts();
-        let mut final_fields_cols: Vec<FieldArrayOpt> = vec![None; requested_ordering.len()];
+        let mut final_fields_cols: Vec<FieldArrayOpt> = vec![None; num_cols];
         for (parquet_position, reorder_index) in requested_ordering.iter().enumerate() {
             // for each item, reorder_index.index() tells us where to put it, and its position in
             // requested_ordering tells us where it is in the parquet data
@@ -370,17 +371,17 @@ pub(crate) fn reorder_struct_array(
                 }
             }
         }
-        let fields = Fields::from_iter(
-            final_fields_cols
-                .iter()
-                .map(|fco| fco.as_ref().unwrap().0.clone()), // cheap Arc clone
-        );
-        let reordered_columns = final_fields_cols
-            .into_iter()
-            .map(|fco| fco.unwrap().1)
-            .collect();
+        let mut field_vec = Vec::with_capacity(num_cols);
+        let mut reordered_columns = Vec::with_capacity(num_cols);
+        for field_array_opt in final_fields_cols.into_iter() {
+            let (field, array) = field_array_opt.ok_or_else(|| Error::generic(
+                "Found a None in final_fields_cols. This is a kernel bug, please report."
+            ))?;
+            field_vec.push(field);
+            reordered_columns.push(array);
+        }
         Ok(StructArray::try_new(
-            fields,
+            field_vec.into(),
             reordered_columns,
             null_buffer,
         )?)
