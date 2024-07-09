@@ -281,9 +281,8 @@ pub(crate) fn get_requested_indices(
     Ok((mask_indices, reorder_indexes))
 }
 
-/// Create a mask that will only select the specified indices from the parquet. Currently we only
-/// handle "root" level columns, and hence use `ProjectionMask::roots`, but will support leaf
-/// selection in the future. See issues #86 and #96 as well.
+/// Create a mask that will only select the specified indices from the parquet. `indices` can be
+/// computed from a [`Schema`] using [`get_requested_indices`]
 pub(crate) fn generate_mask(
     _requested_schema: &SchemaRef,
     _parquet_schema: &ArrowSchemaRef,
