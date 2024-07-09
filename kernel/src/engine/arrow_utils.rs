@@ -7,7 +7,10 @@ use crate::{
     DeltaResult, Error,
 };
 
-use arrow_array::{cast::AsArray, new_null_array, Array as ArrowArray, StructArray};
+use arrow_array::{
+    cast::AsArray, new_null_array, Array as ArrowArray, GenericListArray, OffsetSizeTrait,
+    StructArray,
+};
 use arrow_schema::{
     DataType as ArrowDataType, Field as ArrowField, FieldRef as ArrowFieldRef, Fields,
     SchemaRef as ArrowSchemaRef,
@@ -126,7 +129,9 @@ fn get_indices(
                     parquet_offset += count_cols(field) - 1;
                 }
             }
-            ArrowDataType::List(list_field) | ArrowDataType::ListView(list_field) => {
+            ArrowDataType::List(list_field)
+            | ArrowDataType::LargeList(list_field)
+            | ArrowDataType::ListView(list_field) => {
                 if let Some((index, _, requested_field)) =
                     requested_schema.fields.get_full(field.name())
                 {
@@ -344,15 +349,41 @@ pub(crate) fn reorder_struct_array(
             // requested_ordering tells us where it is in the parquet data
             match reorder_index {
                 ReorderIndex::Child { index, children } => {
-                    let struct_array = input_cols[parquet_position].as_struct().clone();
-                    let result_array = reorder_struct_array(struct_array, children)?;
-                    // create the new field specifying the correct order for the struct
-                    let new_field = Arc::new(ArrowField::new_struct(
-                        input_fields[parquet_position].name(),
-                        result_array.fields().clone(),
-                        input_fields[parquet_position].is_nullable(),
-                    ));
-                    final_fields_cols[*index] = Some((new_field, Arc::new(result_array)));
+                    match input_cols[parquet_position].data_type() {
+                        ArrowDataType::Struct(_) => {
+                            let struct_array = input_cols[parquet_position].as_struct().clone();
+                            let result_array = reorder_struct_array(struct_array, children)?;
+                            // create the new field specifying the correct order for the struct
+                            let new_field = Arc::new(ArrowField::new_struct(
+                                input_fields[parquet_position].name(),
+                                result_array.fields().clone(),
+                                input_fields[parquet_position].is_nullable(),
+                            ));
+                            final_fields_cols[*index] = Some((new_field, Arc::new(result_array)));
+                        }
+                        ArrowDataType::List(_) => {
+                            let list_array = input_cols[parquet_position].as_list::<i32>().clone();
+                            final_fields_cols[*index] = reorder_list(
+                                list_array,
+                                input_fields[parquet_position].name(),
+                                children,
+                            )?;
+                        }
+                        ArrowDataType::LargeList(_) => {
+                            let list_array = input_cols[parquet_position].as_list::<i64>().clone();
+                            final_fields_cols[*index] = reorder_list(
+                                list_array,
+                                input_fields[parquet_position].name(),
+                                children,
+                            )?;
+                        }
+                        // TODO: MAP
+                        _ => {
+                            return Err(Error::generic(
+                            "Child reorder can only apply to struct/list/map. This is a kernel bug, please report"
+                        ));
+                        }
+                    }
                 }
                 ReorderIndex::Index { index } => {
                     final_fields_cols[*index] = Some((
@@ -386,12 +417,46 @@ pub(crate) fn reorder_struct_array(
     }
 }
 
+fn reorder_list<O: OffsetSizeTrait>(
+    list_array: GenericListArray<O>,
+    input_field_name: &str,
+    children: &[ReorderIndex],
+) -> DeltaResult<FieldArrayOpt> {
+    let (list_field, offset_buffer, maybe_sa, null_buf) = list_array.into_parts();
+    if let Some(struct_array) = maybe_sa.as_struct_opt() {
+        let struct_array = struct_array.clone();
+        let result_array = Arc::new(reorder_struct_array(struct_array, children)?);
+        let new_list_field = Arc::new(ArrowField::new_struct(
+            list_field.name(),
+            result_array.fields().clone(),
+            result_array.is_nullable(),
+        ));
+        let new_field = Arc::new(ArrowField::new_list(
+            input_field_name,
+            new_list_field.clone(),
+            list_field.is_nullable(),
+        ));
+        let list =
+            GenericListArray::try_new(new_list_field, offset_buffer, result_array, null_buf)?;
+        Ok(Some((new_field, Arc::new(list))))
+    } else {
+        Err(Error::generic(
+            "Child reorder of list should have had struct child. This is a kernel bug, please report"
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
-    use arrow::array::AsArray;
-    use arrow_array::{ArrayRef as ArrowArrayRef, BooleanArray, Int32Array, StructArray};
+    use arrow::{
+        array::AsArray,
+        buffer::{OffsetBuffer, ScalarBuffer},
+    };
+    use arrow_array::{
+        Array, ArrayRef as ArrowArrayRef, BooleanArray, GenericListArray, Int32Array, StructArray,
+    };
     use arrow_schema::{
         DataType as ArrowDataType, Field as ArrowField, Fields, Schema as ArrowSchema,
         SchemaRef as ArrowSchemaRef,
@@ -888,5 +953,53 @@ mod tests {
         assert_eq!(ordered_s2.column_names(), vec!["b", "c", "s"]);
         let ordered_s1 = ordered.column(1).as_struct();
         assert_eq!(ordered_s1.column_names(), vec!["c", "b"]);
+    }
+
+    #[test]
+    fn reorder_list_of_struct() {
+        let boolean = Arc::new(BooleanArray::from(vec![
+            false, false, true, true, false, true,
+        ]));
+        let int = Arc::new(Int32Array::from(vec![42, 28, 19, 31, 0, 3]));
+        let list_sa = StructArray::from(vec![
+            (
+                Arc::new(ArrowField::new("b", ArrowDataType::Boolean, false)),
+                boolean.clone() as ArrowArrayRef,
+            ),
+            (
+                Arc::new(ArrowField::new("c", ArrowDataType::Int32, false)),
+                int.clone() as ArrowArrayRef,
+            ),
+        ]);
+        let offsets = OffsetBuffer::new(ScalarBuffer::from(vec![0, 3, 6]));
+        let list_field = ArrowField::new("item", list_sa.data_type().clone(), false);
+        let list = Arc::new(GenericListArray::new(
+            Arc::new(list_field),
+            offsets,
+            Arc::new(list_sa),
+            None,
+        ));
+        let fields: Fields = vec![
+            Arc::new(ArrowField::new("b", ArrowDataType::Boolean, false)),
+            Arc::new(ArrowField::new("c", ArrowDataType::Int32, false)),
+        ]
+        .into();
+        let list_dt = Arc::new(ArrowField::new(
+            "list",
+            ArrowDataType::new_list(ArrowDataType::Struct(fields), false),
+            false,
+        ));
+        let struct_array = StructArray::from(vec![(list_dt, list as ArrowArrayRef)]);
+        let reorder = vec![ReorderIndex::Child {
+            index: 0,
+            children: vec![rii!(1), rii!(0)],
+        }];
+        let ordered = reorder_struct_array(struct_array, &reorder).unwrap();
+        let ordered_list_col = ordered.column(0).as_list::<i32>();
+        for i in 0..ordered_list_col.len() {
+            let array_item = ordered_list_col.value(i);
+            let struct_item = array_item.as_struct();
+            assert_eq!(struct_item.column_names(), vec!["c", "b"]);
+        }
     }
 }
