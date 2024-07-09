@@ -47,6 +47,14 @@ impl ReorderIndex {
         }
     }
 
+    fn set_index(&mut self, target_index: usize) {
+        match self {
+            ReorderIndex::Child { ref mut index, .. } => *index = target_index,
+            ReorderIndex::Index { ref mut index } => *index = target_index,
+            ReorderIndex::Null { ref mut index, .. } => *index = target_index,
+        }
+    }
+
     /// check if this indexing is ordered. an `Index` variant is ordered by definition. a `Null`
     /// variant is not because if we have a `Null` variant we need to do work in
     /// reorder_struct_array to insert the null col
@@ -153,37 +161,19 @@ fn get_indices(
                             // see comment above in struct match arm
                             parquet_offset += parquet_advance - 1;
                             found_fields.insert(requested_field.name());
-                            // we have to recurse to find the type, but for reordering a list we
-                            // only need a child reordering if the inner type is a struct
-                            if let ArrowDataType::Struct(_) = list_field.data_type() {
-                                if children.len() != 1 {
-                                    return Err(
-                                        Error::generic(
-                                            "List call should not have generated more than one reorder index"
-                                        )
-                                    );
-                                }
-                                // safety, checked that we have 1 element
-                                let mut children = children.into_iter().next().unwrap();
-                                // the index is wrong though, as it's the index from the inner
-                                // schema. Adjust it to be our index
-                                if let ReorderIndex::Child {
-                                    index: ref mut child_index,
-                                    ..
-                                } = children
-                                {
-                                    *child_index = index;
-                                } else {
-                                    return Err(
-                                        Error::generic(
-                                            "List call should have returned a ReorderIndex::Child variant"
-                                        )
-                                    );
-                                }
-                                reorder_indices.push(children);
-                            } else {
-                                reorder_indices.push(ReorderIndex::Index { index });
+                            if children.len() != 1 {
+                                return Err(
+                                    Error::generic(
+                                        "List call should not have generated more than one reorder index"
+                                    )
+                                );
                             }
+                            // safety, checked that we have 1 element
+                            let mut children = children.into_iter().next().unwrap();
+                            // the index is wrong, as it's the index from the inner schema. Adjust
+                            // it to be our index
+                            children.set_index(index);
+                            reorder_indices.push(children);
                         }
                         _ => {
                             return Err(Error::unexpected_column_type(list_field.name()));
