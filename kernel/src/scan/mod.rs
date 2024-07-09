@@ -402,7 +402,7 @@ pub fn selection_vector(
 pub fn transform_to_logical(
     engine: &dyn Engine,
     data: Box<dyn EngineData>,
-    global_state: &Arc<GlobalScanState>,
+    global_state: &GlobalScanState,
     partition_values: &std::collections::HashMap<String, String>,
 ) -> DeltaResult<Box<dyn EngineData>> {
     let (all_fields, _read_fields, have_partition_cols) = get_state_info(
@@ -425,7 +425,7 @@ pub fn transform_to_logical(
 fn transform_to_logical_internal(
     engine: &dyn Engine,
     data: Box<dyn EngineData>,
-    global_state: &Arc<GlobalScanState>,
+    global_state: &GlobalScanState,
     partition_values: &std::collections::HashMap<String, String>,
     all_fields: &[ColumnType],
     have_partition_cols: bool,
