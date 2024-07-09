@@ -262,52 +262,56 @@ impl Scan {
             scan_files =
                 state::visit_scan_files(data.as_ref(), &vec, scan_files, scan_data_callback)?;
         }
-        scan_files.into_iter().map(|scan_file| {
-            let file_path = self.snapshot.table_root.join(&scan_file.path)?;
-            let mut selection_vector = scan_file
-                .dv_info
-                .get_selection_vector(engine, &self.snapshot.table_root)?;
-            let meta = FileMeta {
-                last_modified: 0,
-                size: scan_file.size as usize,
-                location: file_path,
-            };
-            let read_results = engine
-                .get_parquet_handler()
-                .read_parquet_files(&[meta], global_state.read_schema.clone(), None)?;
-
-            let gs = global_state.clone();
-            Ok(read_results.into_iter().map(move |read_result| {
-                let read_result = read_result?;
-                // to transform the physical data into the correct logical form
-                let logical = transform_to_logical_internal(
-                    engine,
-                    read_result,
-                    &gs,
-                    &scan_file.partition_values,
-                    &self.all_fields,
-                    self.have_partition_cols,
-                );
-                let len = if let Ok(ref res) = logical {
-                    res.length()
-                } else {
-                    0
+        scan_files
+            .into_iter()
+            .map(|scan_file| -> DeltaResult<_> {
+                let file_path = self.snapshot.table_root.join(&scan_file.path)?;
+                let mut selection_vector = scan_file
+                    .dv_info
+                    .get_selection_vector(engine, &self.snapshot.table_root)?;
+                let meta = FileMeta {
+                    last_modified: 0,
+                    size: scan_file.size as usize,
+                    location: file_path,
                 };
-                // need to split the dv_mask. what's left in dv_mask covers this result, and rest
-                // will cover the following results. we `take()` out of `selection_vector` to avoid
-                // trying to return a captured variable. We're going to reassign `selection_vector`
-                // to `rest` in a moment anyway
-                let mut sv = selection_vector.take();
-                let rest = sv.as_mut().map(|mask| mask.split_off(len));
-                let result = ScanResult {
-                    raw_data: logical,
-                    mask: sv,
-                };
-                selection_vector = rest;
-                Ok(result)
-            }))
-        }).flatten_ok().try_collect::<Result<ScanResult, crate::error::Error>, Vec<Result<ScanResult, crate::error::Error>>, crate::error::Error>()?.into_iter().collect()
-        // TODO: Have `execute` return an iterator and not need the crazyness above (issue: #123)
+                let read_result_iter = engine.get_parquet_handler().read_parquet_files(
+                    &[meta],
+                    global_state.read_schema.clone(),
+                    None,
+                )?;
+                let gs = global_state.clone();
+                Ok(read_result_iter.into_iter().map(move |read_result| {
+                    let read_result = read_result?;
+                    // to transform the physical data into the correct logical form
+                    let logical = transform_to_logical_internal(
+                        engine,
+                        read_result,
+                        &gs,
+                        &scan_file.partition_values,
+                        &self.all_fields,
+                        self.have_partition_cols,
+                    );
+                    let len = if let Ok(ref res) = logical {
+                        res.length()
+                    } else {
+                        0
+                    };
+                    // need to split the dv_mask. what's left in dv_mask covers this result, and rest
+                    // will cover the following results. we `take()` out of `selection_vector` to avoid
+                    // trying to return a captured variable. We're going to reassign `selection_vector`
+                    // to `rest` in a moment anyway
+                    let mut sv = selection_vector.take();
+                    let rest = sv.as_mut().map(|mask| mask.split_off(len));
+                    let result = ScanResult {
+                        raw_data: logical,
+                        mask: sv,
+                    };
+                    selection_vector = rest;
+                    Ok(result)
+                }))
+            })
+            .flatten_ok()
+            .try_collect()?
     }
 }
 
