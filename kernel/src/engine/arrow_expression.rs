@@ -134,7 +134,8 @@ fn extract_column<'array, 'path>(
     let child = array
         .column_by_name(path_step)
         .ok_or(ArrowError::SchemaError(format!(
-            "Field '{path_step}' is not in schema: {input_schema:?}"
+            "No such field: {}",
+            path_step,
         )))?;
     if let Some(next_path_step) = remaining_path_steps.next() {
         // This is not the last path step. Drill deeper.
