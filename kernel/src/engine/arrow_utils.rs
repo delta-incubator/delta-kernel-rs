@@ -134,7 +134,7 @@ pub(crate) enum ReorderIndex {
     Index {
         index: usize,
     },
-    Null {
+    Missing {
         index: usize,
         field: ArrowFieldRef,
     },
@@ -145,7 +145,7 @@ impl ReorderIndex {
         match self {
             ReorderIndex::Child { index, .. } => *index,
             ReorderIndex::Index { index, .. } => *index,
-            ReorderIndex::Null { index, .. } => *index,
+            ReorderIndex::Missing { index, .. } => *index,
         }
     }
 
@@ -153,7 +153,7 @@ impl ReorderIndex {
         match self {
             ReorderIndex::Child { ref mut index, .. } => *index = target_index,
             ReorderIndex::Index { ref mut index } => *index = target_index,
-            ReorderIndex::Null { ref mut index, .. } => *index = target_index,
+            ReorderIndex::Missing { ref mut index, .. } => *index = target_index,
         }
     }
 
@@ -164,7 +164,7 @@ impl ReorderIndex {
         match self {
             ReorderIndex::Child { children, .. } => is_ordered(children),
             ReorderIndex::Index { .. } => true,
-            ReorderIndex::Null { .. } => false,
+            ReorderIndex::Missing { .. } => false,
         }
     }
 }
@@ -335,7 +335,7 @@ fn get_indices(
             if !found_fields.contains(field.name()) {
                 if field.nullable {
                     debug!("Inserting missing and nullable field: {}", field.name());
-                    reorder_indices.push(ReorderIndex::Null {
+                    reorder_indices.push(ReorderIndex::Missing {
                         index: requested_position,
                         field: Arc::new(field.try_into()?),
                     });
@@ -474,7 +474,7 @@ pub(crate) fn reorder_struct_array(
                         input_cols[parquet_position].clone(),   // cheap Arc clone
                     ));
                 }
-                ReorderIndex::Null { index, field } => {
+                ReorderIndex::Missing { index, field } => {
                     let null_array = Arc::new(new_null_array(field.data_type(), num_rows));
                     let field = field.clone(); // cheap Arc clone
                     final_fields_cols[*index] = Some((field, null_array));
@@ -685,7 +685,7 @@ mod tests {
         let expect_reorder = vec![
             rii(0),
             rii(2),
-            ReorderIndex::Null {
+            ReorderIndex::Missing {
                 index: 1,
                 field: Arc::new(ArrowField::new("s", ArrowDataType::Utf8, true)),
             },
@@ -1078,7 +1078,7 @@ mod tests {
                 children: vec![
                     rii(0),
                     rii(1),
-                    ReorderIndex::Null {
+                    ReorderIndex::Missing {
                         index: 2,
                         field: Arc::new(ArrowField::new("s", ArrowDataType::Utf8, true)),
                     },
