@@ -3,7 +3,8 @@
 use std::{collections::HashSet, sync::Arc};
 
 use crate::{
-    schema::{DataType, Schema, SchemaRef, StructField, StructType},
+    schema::{DataType, PrimitiveType, Schema, SchemaRef, StructField, StructType},
+    utils::require,
     DeltaResult, Error,
 };
 
@@ -15,8 +16,109 @@ use arrow_schema::{
     DataType as ArrowDataType, Field as ArrowField, FieldRef as ArrowFieldRef, Fields,
     SchemaRef as ArrowSchemaRef,
 };
+use itertools::Itertools;
 use parquet::{arrow::ProjectionMask, schema::types::SchemaDescriptor};
 use tracing::debug;
+
+fn make_arrow_error(s: String) -> Error {
+    Error::Arrow(arrow_schema::ArrowError::InvalidArgumentError(s))
+}
+
+/// Ensure a kernel data type matches an arrow data type. This only ensures that the actual "type"
+/// is the same, but does so recursively into structs, and ensures lists and maps have the correct
+/// associated types as well. This returns an `Ok(())` if the types are compatible, or an error if
+/// the types do not match. If there is a `struct` type included, we only ensure that the named
+/// fields that the kernel is asking for exist, and that for those fields the types
+/// match. Un-selected fields are ignored.
+pub(crate) fn ensure_data_types(
+    kernel_type: &DataType,
+    arrow_type: &ArrowDataType,
+) -> DeltaResult<()> {
+    match (kernel_type, arrow_type) {
+        (DataType::Primitive(_), _) if arrow_type.is_primitive() => {
+            let converted_type: ArrowDataType = kernel_type.try_into()?;
+            if &converted_type == arrow_type {
+                Ok(())
+            } else {
+                Err(make_arrow_error(format!(
+                    "Incorrect datatype. Expected {}, got {}",
+                    kernel_type, arrow_type
+                )))
+            }
+        }
+        (DataType::Primitive(PrimitiveType::Boolean), ArrowDataType::Boolean)
+        | (DataType::Primitive(PrimitiveType::String), ArrowDataType::Utf8)
+        | (DataType::Primitive(PrimitiveType::Binary), ArrowDataType::Binary) => {
+            // strings, bools, and binary  aren't primitive in arrow
+            Ok(())
+        }
+        (
+            DataType::Primitive(PrimitiveType::Decimal(kernel_prec, kernel_scale)),
+            ArrowDataType::Decimal128(arrow_prec, arrow_scale),
+        ) if arrow_prec == kernel_prec && *arrow_scale == *kernel_scale as i8 => {
+            // decimal isn't primitive in arrow. cast above is okay as we limit range
+            Ok(())
+        }
+        (DataType::Array(inner_type), ArrowDataType::List(arrow_list_type)) => {
+            let kernel_array_type = &inner_type.element_type;
+            let arrow_list_type = arrow_list_type.data_type();
+            ensure_data_types(kernel_array_type, arrow_list_type)
+        }
+        (DataType::Map(kernel_map_type), ArrowDataType::Map(arrow_map_type, _)) => {
+            if let ArrowDataType::Struct(fields) = arrow_map_type.data_type() {
+                let mut fiter = fields.iter();
+                if let Some(key_type) = fiter.next() {
+                    ensure_data_types(&kernel_map_type.key_type, key_type.data_type())?;
+                } else {
+                    return Err(make_arrow_error(
+                        "Arrow map struct didn't have a key type".to_string(),
+                    ));
+                }
+                if let Some(value_type) = fiter.next() {
+                    ensure_data_types(&kernel_map_type.value_type, value_type.data_type())?;
+                } else {
+                    return Err(make_arrow_error(
+                        "Arrow map struct didn't have a value type".to_string(),
+                    ));
+                }
+                Ok(())
+            } else {
+                Err(make_arrow_error(
+                    "Arrow map type wasn't a struct.".to_string(),
+                ))
+            }
+        }
+        (DataType::Struct(kernel_fields), ArrowDataType::Struct(arrow_fields)) => {
+            // build a list of kernel fields that matches the order of the arrow fields
+            let mapped_fields = arrow_fields
+                .iter()
+                .flat_map(|f| kernel_fields.fields.get(f.name()));
+
+            // keep track of how many fields we matched up
+            let mut found_fields = 0;
+            // ensure that for the fields that we found, the types match
+            for (kernel_field, arrow_field) in mapped_fields.zip(arrow_fields) {
+                ensure_data_types(&kernel_field.data_type, arrow_field.data_type())?;
+                found_fields += 1;
+            }
+
+            // require that we found the number of fields that we requested.
+            require!(kernel_fields.fields.len() == found_fields, {
+                let kernel_field_names = kernel_fields.fields.keys().join(", ");
+                let arrow_field_names = arrow_fields.iter().map(|f| f.name()).join(", ");
+                make_arrow_error(format!(
+                    "Missing Struct fields. Requested: {}, found: {}",
+                    kernel_field_names, arrow_field_names,
+                ))
+            });
+            Ok(())
+        }
+        _ => Err(make_arrow_error(format!(
+            "Incorrect datatype. Expected {}, got {}",
+            kernel_type, arrow_type
+        ))),
+    }
+}
 
 /// Reordering is specified as a tree. Each level is a vec of `ReorderIndex`s. Each element's index
 /// represents a column that will be in the read parquet data at that level and index. The `index()`
@@ -74,8 +176,8 @@ fn count_cols(field: &ArrowField) -> usize {
 
 fn _count_cols(dt: &ArrowDataType) -> usize {
     match dt {
-        ArrowDataType::Struct(fields) => fields.iter().fold(0, |acc, f| acc + count_cols(f)),
-        ArrowDataType::Union(fields, _) => fields.iter().fold(0, |acc, (_, f)| acc + count_cols(f)),
+        ArrowDataType::Struct(fields) => fields.iter().map(|f| count_cols(f)).sum(),
+        ArrowDataType::Union(fields, _) => fields.iter().map(|(_, f)| count_cols(f)).sum(),
         ArrowDataType::List(field)
         | ArrowDataType::LargeList(field)
         | ArrowDataType::FixedSizeList(field, _)
@@ -228,6 +330,7 @@ fn get_indices(
                 if let Some((index, _, requested_field)) =
                     requested_schema.fields.get_full(field.name())
                 {
+                    ensure_data_types(&requested_field.data_type, field.data_type())?;
                     found_fields.insert(requested_field.name());
                     mask_indices.push(parquet_offset + parquet_index);
                     reorder_indices.push(ReorderIndex::Index { index });
@@ -381,9 +484,9 @@ pub(crate) fn reorder_struct_array(
                     ));
                 }
                 ReorderIndex::Null { index, field } => {
-                    let null_arry = Arc::new(new_null_array(field.data_type(), num_rows));
+                    let null_array = Arc::new(new_null_array(field.data_type(), num_rows));
                     let field = field.clone(); // cheap Arc clone
-                    final_fields_cols[*index] = Some((field, null_arry));
+                    final_fields_cols[*index] = Some((field, null_array));
                 }
             }
         }
@@ -425,8 +528,12 @@ fn reorder_list<O: OffsetSizeTrait>(
             new_list_field.clone(),
             list_field.is_nullable(),
         ));
-        let list =
-            Arc::new(GenericListArray::try_new(new_list_field, offset_buffer, result_array, null_buf)?);
+        let list = Arc::new(GenericListArray::try_new(
+            new_list_field,
+            offset_buffer,
+            result_array,
+            null_buf,
+        )?);
         Ok(Some((new_field, list)))
     } else {
         Err(Error::generic(
@@ -495,6 +602,32 @@ mod tests {
         let expect_reorder = vec![rii(0), rii(1), rii(2)];
         assert_eq!(mask_indices, expect_mask);
         assert_eq!(reorder_indices, expect_reorder);
+    }
+
+    #[test]
+    fn ensure_data_types_fails_correctly() {
+        let kernel_schema = Arc::new(StructType::new(vec![
+            StructField::new("i", DataType::INTEGER, false),
+            StructField::new("s", DataType::INTEGER, true),
+        ]));
+        let arrow_schema = Arc::new(ArrowSchema::new(vec![
+            ArrowField::new("i", ArrowDataType::Int32, false),
+            ArrowField::new("s", ArrowDataType::Utf8, true),
+        ]));
+        let res = get_requested_indices(&kernel_schema, &arrow_schema);
+        assert!(res.is_err());
+
+        let kernel_schema = Arc::new(StructType::new(vec![
+            StructField::new("i", DataType::INTEGER, false),
+            StructField::new("s", DataType::STRING, true),
+        ]));
+        let arrow_schema = Arc::new(ArrowSchema::new(vec![
+            ArrowField::new("i", ArrowDataType::Int32, false),
+            ArrowField::new("s", ArrowDataType::Int32, true),
+        ]));
+        let res = get_requested_indices(&kernel_schema, &arrow_schema);
+        println!("{res:#?}");
+        assert!(res.is_err());
     }
 
     #[test]
@@ -767,7 +900,7 @@ mod tests {
                 "list",
                 ArrayType::new(
                     StructType::new(vec![
-                        StructField::new("string", DataType::INTEGER, false),
+                        StructField::new("string", DataType::STRING, false),
                         StructField::new("int2", DataType::INTEGER, false),
                     ])
                     .into(),
