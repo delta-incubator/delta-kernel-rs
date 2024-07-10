@@ -162,7 +162,7 @@ impl ReorderIndex {
     /// reorder_struct_array to insert the null col
     fn is_ordered(&self) -> bool {
         match self {
-            ReorderIndex::Child { ref children, .. } => is_ordered(children),
+            ReorderIndex::Child { children, .. } => is_ordered(children),
             ReorderIndex::Index { .. } => true,
             ReorderIndex::Null { .. } => false,
         }
