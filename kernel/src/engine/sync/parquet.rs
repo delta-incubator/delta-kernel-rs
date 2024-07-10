@@ -29,7 +29,7 @@ fn try_create_from_parquet(schema: SchemaRef, location: Url) -> DeltaResult<Arro
     let data = reader
         .next()
         .ok_or_else(|| Error::generic("No data found reading parquet file"))?;
-    let reordered = reorder_struct_array(data?.into(), &requested_ordering).map(|sa| sa.into())?;
+    let reordered = reorder_struct_array(data?.into(), &requested_ordering).map(Into::into)?;
     Ok(ArrowEngineData::new(reordered))
 }
 

@@ -142,7 +142,7 @@ impl FileOpener for ParquetOpener {
             let stream = stream.map(move |rbr| {
                 // re-order each batch if needed
                 rbr.map_err(Error::Parquet).and_then(|rb| {
-                    reorder_struct_array(rb.into(), &requested_ordering).map(|sa| sa.into())
+                    reorder_struct_array(rb.into(), &requested_ordering).map(Into::into)
                 })
             });
             Ok(stream.boxed())
@@ -206,7 +206,7 @@ impl FileOpener for PresignedUrlOpener {
             let stream = stream.map(move |rbr| {
                 // re-order each batch if needed
                 rbr.map_err(Error::Arrow).and_then(|rb| {
-                    reorder_struct_array(rb.into(), &requested_ordering).map(|sa| sa.into())
+                    reorder_struct_array(rb.into(), &requested_ordering).map(Into::into)
                 })
             });
             Ok(stream.boxed())
@@ -234,7 +234,7 @@ mod tests {
     ) -> DeltaResult<RecordBatch> {
         engine_data
             .and_then(ArrowEngineData::try_from_engine_data)
-            .map(|sd| sd.into())
+            .map(Into::into)
     }
 
     #[tokio::test]
