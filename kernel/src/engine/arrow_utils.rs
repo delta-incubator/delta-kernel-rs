@@ -291,16 +291,12 @@ fn get_indices(
                         (ArrowDataType::Struct(inner_fields), DataType::Map(map_type)) => {
                             let mut key_val_names =
                                 inner_fields.iter().map(|f| f.name().to_string());
-                            let key_name = if let Some(key_name) = key_val_names.next() {
-                                key_name
-                            } else {
-                                return Err(Error::generic("map fields didn't include a key col"));
-                            };
-                            let val_name = if let Some(val_name) = key_val_names.next() {
-                                val_name
-                            } else {
-                                return Err(Error::generic("map fields didn't include a val col"));
-                            };
+                            let key_name = key_val_names.next().ok_or_else(|| {
+                                Error::generic("map fields didn't include a key col")
+                            })?;
+                            let val_name = key_val_names.next().ok_or_else(|| {
+                                Error::generic("map fields didn't include a val col")
+                            })?;
                             if key_val_names.next().is_some() {
                                 return Err(Error::generic("map fields had more than 2 members"));
                             }
