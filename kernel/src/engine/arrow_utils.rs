@@ -210,26 +210,24 @@ fn get_indices(
                 if let Some((index, _, requested_field)) =
                     requested_schema.fields.get_full(field.name())
                 {
-                    match requested_field.data_type {
-                        DataType::Struct(ref requested_schema) => {
-                            let (parquet_advance, children) = get_indices(
-                                parquet_index + parquet_offset,
-                                requested_schema.as_ref(),
-                                fields,
-                                mask_indices,
-                            )?;
-                            // advance the number of parquet fields, but subtract 1 because the
-                            // struct will be counted by the `enumerate` call but doesn't count as
-                            // an actual index.
-                            parquet_offset += parquet_advance - 1;
-                            // note that we found this field
-                            found_fields.insert(requested_field.name());
-                            // push the child reorder on
-                            reorder_indices.push(ReorderIndex::Child { index, children });
-                        }
-                        _ => {
-                            return Err(Error::unexpected_column_type(field.name()));
-                        }
+                    if let DataType::Struct(ref requested_schema) = requested_field.data_type {
+                        let (parquet_advance, children) = get_indices(
+                            parquet_index + parquet_offset,
+                            requested_schema.as_ref(),
+                            fields,
+                            mask_indices,
+                        )?;
+                        // advance the number of parquet fields, but subtract 1 because the
+                        // struct will be counted by the `enumerate` call but doesn't count as
+                        // an actual index.
+                        parquet_offset += parquet_advance - 1;
+                        // note that we found this field
+                        found_fields.insert(requested_field.name());
+                        // push the child reorder on
+                        reorder_indices.push(ReorderIndex::Child { index, children });
+                    }
+                    else {
+                        return Err(Error::unexpected_column_type(field.name()));
                     }
                 } else {
                     // We're NOT selecting this field, but we still need to update how much we skip
@@ -247,39 +245,36 @@ fn get_indices(
                 {
                     // we just want to transparently recurse into lists, need to transform the kernel
                     // list data type into a schema
-                    match requested_field.data_type() {
-                        DataType::Array(array_type) => {
-                            let requested_schema = StructType::new(vec![StructField::new(
-                                list_field.name().clone(), // so we find it in the inner call
-                                array_type.element_type.clone(),
-                                array_type.contains_null,
-                            )]);
-                            let (parquet_advance, children) = get_indices(
-                                found_fields.len() + parquet_offset,
-                                &requested_schema,
-                                &[list_field.clone()].into(),
-                                mask_indices,
-                            )?;
-                            // see comment above in struct match arm
-                            parquet_offset += parquet_advance - 1;
-                            found_fields.insert(requested_field.name());
-                            if children.len() != 1 {
-                                return Err(
-                                    Error::generic(
-                                        "List call should not have generated more than one reorder index"
-                                    )
-                                );
-                            }
-                            // safety, checked that we have 1 element
-                            let mut children = children.into_iter().next().unwrap();
-                            // the index is wrong, as it's the index from the inner schema. Adjust
-                            // it to be our index
-                            children.set_index(index);
-                            reorder_indices.push(children);
+                    if let DataType::Array(array_type) = requested_field.data_type() {
+                        let requested_schema = StructType::new(vec![StructField::new(
+                            list_field.name().clone(), // so we find it in the inner call
+                            array_type.element_type.clone(),
+                            array_type.contains_null,
+                        )]);
+                        let (parquet_advance, children) = get_indices(
+                            found_fields.len() + parquet_offset,
+                            &requested_schema,
+                            &[list_field.clone()].into(),
+                            mask_indices,
+                        )?;
+                        // see comment above in struct match arm
+                        parquet_offset += parquet_advance - 1;
+                        found_fields.insert(requested_field.name());
+                        if children.len() != 1 {
+                            return Err(
+                                Error::generic(
+                                    "List call should not have generated more than one reorder index"
+                                )
+                            );
                         }
-                        _ => {
-                            return Err(Error::unexpected_column_type(list_field.name()));
-                        }
+                        // safety, checked that we have 1 element
+                        let mut children = children.into_iter().next().unwrap();
+                        // the index is wrong, as it's the index from the inner schema. Adjust
+                        // it to be our index
+                        children.set_index(index);
+                        reorder_indices.push(children);
+                    } else {
+                        return Err(Error::unexpected_column_type(list_field.name()));
                     }
                 }
             }
