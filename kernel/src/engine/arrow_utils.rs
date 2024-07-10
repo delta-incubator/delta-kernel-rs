@@ -554,7 +554,7 @@ mod tests {
         SchemaRef as ArrowSchemaRef,
     };
 
-    use crate::schema::{ArrayType, DataType, StructField, StructType};
+    use crate::schema::{ArrayType, DataType, MapType, StructField, StructType};
 
     use super::{get_requested_indices, reorder_struct_array, ReorderIndex};
 
@@ -624,6 +624,33 @@ mod tests {
         let res = get_requested_indices(&kernel_schema, &arrow_schema);
         println!("{res:#?}");
         assert!(res.is_err());
+    }
+
+    #[test]
+    fn mask_with_map() {
+        let kernel_schema = Arc::new(StructType::new(vec![StructField::new(
+            "map",
+            DataType::Map(Box::new(MapType::new(
+                DataType::INTEGER,
+                DataType::STRING,
+                false,
+            ))),
+            false,
+        )]));
+        let arrow_schema = Arc::new(ArrowSchema::new(vec![ArrowField::new_map(
+            "map",
+            "entries",
+            ArrowField::new("i", ArrowDataType::Int32, false),
+            ArrowField::new("s", ArrowDataType::Utf8, false),
+            false,
+            false,
+        )]));
+        let (mask_indices, reorder_indices) =
+            get_requested_indices(&kernel_schema, &arrow_schema).unwrap();
+        let expect_mask = vec![0, 1];
+        let expect_reorder = vec![rii(0)];
+        assert_eq!(mask_indices, expect_mask);
+        assert_eq!(reorder_indices, expect_reorder);
     }
 
     #[test]
