@@ -426,8 +426,8 @@ fn reorder_list<O: OffsetSizeTrait>(
             list_field.is_nullable(),
         ));
         let list =
-            GenericListArray::try_new(new_list_field, offset_buffer, result_array, null_buf)?;
-        Ok(Some((new_field, Arc::new(list))))
+            Arc::new(GenericListArray::try_new(new_list_field, offset_buffer, result_array, null_buf)?);
+        Ok(Some((new_field, list)))
     } else {
         Err(Error::generic(
             "Child reorder of list should have had struct child. This is a kernel bug, please report"
