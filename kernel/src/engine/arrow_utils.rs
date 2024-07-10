@@ -1177,4 +1177,20 @@ mod tests {
         assert_eq!(mask_indices, expect_mask);
         assert_eq!(reorder_indices, expect_reorder);
     }
+
+    #[test]
+    fn empty_requested_schema() {
+        let requested_schema = Arc::new(StructType::new(vec![]));
+        let parquet_schema = Arc::new(ArrowSchema::new(vec![
+            ArrowField::new("i", ArrowDataType::Int32, false),
+            ArrowField::new("s", ArrowDataType::Utf8, true),
+            ArrowField::new("i2", ArrowDataType::Int32, true),
+        ]));
+        let (mask_indices, reorder_indices) =
+            get_requested_indices(&requested_schema, &parquet_schema).unwrap();
+        let expect_mask: Vec<usize> = vec![];
+        let expect_reorder = vec![];
+        assert_eq!(mask_indices, expect_mask);
+        assert_eq!(reorder_indices, expect_reorder);
+    }
 }
