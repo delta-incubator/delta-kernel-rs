@@ -455,10 +455,8 @@ mod tests {
 
     use super::{get_requested_indices, reorder_struct_array, ReorderIndex};
 
-    macro_rules! rii {
-        ($index: expr) => {{
-            ReorderIndex::Index { index: $index }
-        }};
+    const fn rii(index: usize) -> ReorderIndex {
+        ReorderIndex::Index { index }
     }
 
     fn nested_arrow_schema() -> ArrowSchemaRef {
@@ -494,7 +492,7 @@ mod tests {
         let (mask_indices, reorder_indices) =
             get_requested_indices(&kernel_schema, &arrow_schema).unwrap();
         let expect_mask = vec![0, 1, 2];
-        let expect_reorder = vec![rii!(0), rii!(1), rii!(2)];
+        let expect_reorder = vec![rii(0), rii(1), rii(2)];
         assert_eq!(mask_indices, expect_mask);
         assert_eq!(reorder_indices, expect_reorder);
     }
@@ -514,7 +512,7 @@ mod tests {
         let (mask_indices, reorder_indices) =
             get_requested_indices(&kernel_schema, &arrow_schema).unwrap();
         let expect_mask = vec![0, 1, 2];
-        let expect_reorder = vec![rii!(2), rii!(0), rii!(1)];
+        let expect_reorder = vec![rii(2), rii(0), rii(1)];
         assert_eq!(mask_indices, expect_mask);
         assert_eq!(reorder_indices, expect_reorder);
     }
@@ -534,8 +532,8 @@ mod tests {
             get_requested_indices(&kernel_schema, &arrow_schema).unwrap();
         let expect_mask = vec![0, 1];
         let expect_reorder = vec![
-            rii!(0),
-            rii!(2),
+            rii(0),
+            rii(2),
             ReorderIndex::Null {
                 index: 1,
                 field: Arc::new(ArrowField::new("s", ArrowDataType::Utf8, true)),
@@ -564,12 +562,12 @@ mod tests {
             get_requested_indices(&kernel_schema, &arrow_schema).unwrap();
         let expect_mask = vec![0, 1, 2, 3];
         let expect_reorder = vec![
-            rii!(0),
+            rii(0),
             ReorderIndex::Child {
                 index: 1,
-                children: vec![rii!(0), rii!(1)],
+                children: vec![rii(0), rii(1)],
             },
-            rii!(2),
+            rii(2),
         ];
         assert_eq!(mask_indices, expect_mask);
         assert_eq!(reorder_indices, expect_reorder);
@@ -594,12 +592,12 @@ mod tests {
             get_requested_indices(&kernel_schema, &arrow_schema).unwrap();
         let expect_mask = vec![0, 1, 2, 3];
         let expect_reorder = vec![
-            rii!(2),
+            rii(2),
             ReorderIndex::Child {
                 index: 0,
-                children: vec![rii!(1), rii!(0)],
+                children: vec![rii(1), rii(0)],
             },
-            rii!(1),
+            rii(1),
         ];
         assert_eq!(mask_indices, expect_mask);
         assert_eq!(reorder_indices, expect_reorder);
@@ -621,12 +619,12 @@ mod tests {
             get_requested_indices(&kernel_schema, &arrow_schema).unwrap();
         let expect_mask = vec![0, 1, 3];
         let expect_reorder = vec![
-            rii!(0),
+            rii(0),
             ReorderIndex::Child {
                 index: 1,
-                children: vec![rii!(0)],
+                children: vec![rii(0)],
             },
-            rii!(2),
+            rii(2),
         ];
         assert_eq!(mask_indices, expect_mask);
         assert_eq!(reorder_indices, expect_reorder);
@@ -655,7 +653,7 @@ mod tests {
         let (mask_indices, reorder_indices) =
             get_requested_indices(&kernel_schema, &arrow_schema).unwrap();
         let expect_mask = vec![0, 1, 2];
-        let expect_reorder = vec![rii!(0), rii!(1), rii!(2)];
+        let expect_reorder = vec![rii(0), rii(1), rii(2)];
         assert_eq!(mask_indices, expect_mask);
         assert_eq!(reorder_indices, expect_reorder);
     }
@@ -701,12 +699,12 @@ mod tests {
             get_requested_indices(&kernel_schema, &arrow_schema).unwrap();
         let expect_mask = vec![0, 1, 2, 3];
         let expect_reorder = vec![
-            rii!(0),
+            rii(0),
             ReorderIndex::Child {
                 index: 1,
-                children: vec![rii!(0), rii!(1)],
+                children: vec![rii(0), rii(1)],
             },
-            rii!(2),
+            rii(2),
         ];
         assert_eq!(mask_indices, expect_mask);
         assert_eq!(reorder_indices, expect_reorder);
@@ -750,12 +748,12 @@ mod tests {
             get_requested_indices(&kernel_schema, &arrow_schema).unwrap();
         let expect_mask = vec![0, 1, 3];
         let expect_reorder = vec![
-            rii!(0),
+            rii(0),
             ReorderIndex::Child {
                 index: 1,
-                children: vec![rii!(0)],
+                children: vec![rii(0)],
             },
-            rii!(2),
+            rii(2),
         ];
         assert_eq!(mask_indices, expect_mask);
         assert_eq!(reorder_indices, expect_reorder);
@@ -803,12 +801,12 @@ mod tests {
             get_requested_indices(&kernel_schema, &arrow_schema).unwrap();
         let expect_mask = vec![0, 2, 3, 4];
         let expect_reorder = vec![
-            rii!(0),
+            rii(0),
             ReorderIndex::Child {
                 index: 1,
-                children: vec![rii!(1), rii!(0)],
+                children: vec![rii(1), rii(0)],
             },
-            rii!(2),
+            rii(2),
         ];
         assert_eq!(mask_indices, expect_mask);
         assert_eq!(reorder_indices, expect_reorder);
@@ -858,12 +856,12 @@ mod tests {
             get_requested_indices(&kernel_schema, &arrow_schema).unwrap();
         let expect_mask = vec![2, 3, 4, 5];
         let expect_reorder = vec![
-            rii!(2),
+            rii(2),
             ReorderIndex::Child {
                 index: 1,
-                children: vec![rii!(0), rii!(1)],
+                children: vec![rii(0), rii(1)],
             },
-            rii!(0),
+            rii(0),
         ];
         assert_eq!(mask_indices, expect_mask);
         assert_eq!(reorder_indices, expect_reorder);
@@ -887,7 +885,7 @@ mod tests {
     #[test]
     fn simple_reorder_struct() {
         let arry = make_struct_array();
-        let reorder = vec![rii!(1), rii!(0)];
+        let reorder = vec![rii(1), rii(0)];
         let ordered = reorder_struct_array(arry, &reorder).unwrap();
         assert_eq!(ordered.column_names(), vec!["c", "b"]);
     }
@@ -922,13 +920,13 @@ mod tests {
         let reorder = vec![
             ReorderIndex::Child {
                 index: 1,
-                children: vec![rii!(1), rii!(0)],
+                children: vec![rii(1), rii(0)],
             },
             ReorderIndex::Child {
                 index: 0,
                 children: vec![
-                    rii!(0),
-                    rii!(1),
+                    rii(0),
+                    rii(1),
                     ReorderIndex::Null {
                         index: 2,
                         field: Arc::new(ArrowField::new("s", ArrowDataType::Utf8, true)),
@@ -981,7 +979,7 @@ mod tests {
         let struct_array = StructArray::from(vec![(list_dt, list as ArrowArrayRef)]);
         let reorder = vec![ReorderIndex::Child {
             index: 0,
-            children: vec![rii!(1), rii!(0)],
+            children: vec![rii(1), rii(0)],
         }];
         let ordered = reorder_struct_array(struct_array, &reorder).unwrap();
         let ordered_list_col = ordered.column(0).as_list::<i32>();
