@@ -126,45 +126,47 @@ pub(crate) fn ensure_data_types(
 /// `Child` variant, then at that index there is a `Struct` whose ordering is specified by the
 /// values in the associated `Vec` according to these same rules.
 #[derive(Debug, PartialEq)]
-pub(crate) enum ReorderIndex {
-    Child {
-        index: usize,
-        children: Vec<ReorderIndex>,
-    },
-    Index {
-        index: usize,
-    },
-    Missing {
-        index: usize,
-        field: ArrowFieldRef,
-    },
+pub(crate) struct ReorderIndex {
+    pub(crate) index: usize,
+    kind: ReorderIndexKind,
+}
+
+#[derive(Debug, PartialEq)]
+pub(crate) enum ReorderIndexKind {
+    Child(Vec<ReorderIndex>),
+    Index,
+    Missing(ArrowFieldRef),
 }
 
 impl ReorderIndex {
-    fn index(&self) -> usize {
-        match self {
-            ReorderIndex::Child { index, .. } => *index,
-            ReorderIndex::Index { index, .. } => *index,
-            ReorderIndex::Missing { index, .. } => *index,
+    fn new_child(index: usize, children: Vec<ReorderIndex>) -> Self {
+        ReorderIndex {
+            index,
+            kind: ReorderIndexKind::Child(children),
         }
     }
 
-    fn set_index(&mut self, target_index: usize) {
-        match self {
-            ReorderIndex::Child { ref mut index, .. } => *index = target_index,
-            ReorderIndex::Index { ref mut index } => *index = target_index,
-            ReorderIndex::Missing { ref mut index, .. } => *index = target_index,
+    fn new_index(index: usize) -> Self {
+        ReorderIndex {
+            index,
+            kind: ReorderIndexKind::Index,
         }
     }
 
-    /// check if this indexing is ordered. an `Index` variant is ordered by definition. a `Null`
-    /// variant is not because if we have a `Null` variant we need to do work in
-    /// reorder_struct_array to insert the null col
-    fn is_ordered(&self) -> bool {
-        match self {
-            ReorderIndex::Child { children, .. } => is_ordered(children),
-            ReorderIndex::Index { .. } => true,
-            ReorderIndex::Missing { .. } => false,
+    fn new_missing(index: usize, field: ArrowFieldRef) -> Self {
+        ReorderIndex {
+            index,
+            kind: ReorderIndexKind::Missing(field),
+        }
+    }
+
+    /// Check if this reordering contains a `Missing` variant anywhere. See comment below on
+    /// [`is_ordered`] to understand why this is needed.
+    fn contains_missing(&self) -> bool {
+        match self.kind {
+            ReorderIndexKind::Child(ref children) => is_ordered(children),
+            ReorderIndexKind::Index => true,
+            ReorderIndexKind::Missing(_) => false,
         }
     }
 }
@@ -224,9 +226,8 @@ fn get_indices(
                         // note that we found this field
                         found_fields.insert(requested_field.name());
                         // push the child reorder on
-                        reorder_indices.push(ReorderIndex::Child { index, children });
-                    }
-                    else {
+                        reorder_indices.push(ReorderIndex::new_child(index, children));
+                    } else {
                         return Err(Error::unexpected_column_type(field.name()));
                     }
                 } else {
@@ -261,17 +262,15 @@ fn get_indices(
                         parquet_offset += parquet_advance - 1;
                         found_fields.insert(requested_field.name());
                         if children.len() != 1 {
-                            return Err(
-                                Error::generic(
-                                    "List call should not have generated more than one reorder index"
-                                )
-                            );
+                            return Err(Error::generic(
+                                "List call should not have generated more than one reorder index",
+                            ));
                         }
                         // safety, checked that we have 1 element
                         let mut children = children.into_iter().next().unwrap();
                         // the index is wrong, as it's the index from the inner schema. Adjust
                         // it to be our index
-                        children.set_index(index);
+                        children.index = index;
                         reorder_indices.push(children);
                     } else {
                         return Err(Error::unexpected_column_type(list_field.name()));
@@ -309,7 +308,7 @@ fn get_indices(
                             // note that we found this field
                             found_fields.insert(requested_field.name());
                             // push the child reorder on, currently no reordering for maps
-                            reorder_indices.push(ReorderIndex::Index { index });
+                            reorder_indices.push(ReorderIndex::new_index(index));
                         }
                         _ => {
                             return Err(Error::unexpected_column_type(field.name()));
@@ -324,7 +323,7 @@ fn get_indices(
                     ensure_data_types(&requested_field.data_type, field.data_type())?;
                     found_fields.insert(requested_field.name());
                     mask_indices.push(parquet_offset + parquet_index);
-                    reorder_indices.push(ReorderIndex::Index { index });
+                    reorder_indices.push(ReorderIndex::new_index(index));
                 }
             }
         }
@@ -335,10 +334,10 @@ fn get_indices(
             if !found_fields.contains(field.name()) {
                 if field.nullable {
                     debug!("Inserting missing and nullable field: {}", field.name());
-                    reorder_indices.push(ReorderIndex::Missing {
-                        index: requested_position,
-                        field: Arc::new(field.try_into()?),
-                    });
+                    reorder_indices.push(ReorderIndex::new_missing(
+                        requested_position,
+                        Arc::new(field.try_into()?),
+                    ));
                 } else {
                     return Err(Error::Generic(format!(
                         "Requested field not found in parquet schema, and field is not nullable: {}",
@@ -391,19 +390,24 @@ pub(crate) fn generate_mask(
     ))
 }
 
-/// Check if an ordering is already ordered
+/// Check if an ordering is already ordered. We check if the indices are in ascending order. That's
+/// enough to ensure we don't need to do any transformation on the data read from parquet _iff_
+/// there are no `null` columns to insert. If we _do_ need to insert a null column then we need to
+/// transform the data. Therefore we also call [`contains_missing`] to ensure both the ascending
+/// nature of the indices AND that no `Missing` variants exist, and only if both are true do we
+/// consider an ordering "ordered".
 fn is_ordered(requested_ordering: &[ReorderIndex]) -> bool {
     if requested_ordering.is_empty() {
         return true;
     }
     // we have >=1 element. check that the first element is ordered
-    if !requested_ordering[0].is_ordered() {
+    if !requested_ordering[0].contains_missing() {
         return false;
     }
     // now check that all elements are ordered wrt. each other, and are internally ordered
     requested_ordering
         .windows(2)
-        .all(|ri| (ri[0].index() < ri[1].index()) && ri[1].is_ordered())
+        .all(|ri| (ri[0].index < ri[1].index) && ri[1].contains_missing())
 }
 
 // we use this as a placeholder for an array and its associated field. We can fill in a Vec of None
@@ -430,8 +434,8 @@ pub(crate) fn reorder_struct_array(
         for (parquet_position, reorder_index) in requested_ordering.iter().enumerate() {
             // for each item, reorder_index.index() tells us where to put it, and its position in
             // requested_ordering tells us where it is in the parquet data
-            match reorder_index {
-                ReorderIndex::Child { index, children } => {
+            match &reorder_index.kind {
+                ReorderIndexKind::Child(children) => {
                     match input_cols[parquet_position].data_type() {
                         ArrowDataType::Struct(_) => {
                             let struct_array = input_cols[parquet_position].as_struct().clone();
@@ -442,11 +446,12 @@ pub(crate) fn reorder_struct_array(
                                 result_array.fields().clone(),
                                 input_fields[parquet_position].is_nullable(),
                             ));
-                            final_fields_cols[*index] = Some((new_field, Arc::new(result_array)));
+                            final_fields_cols[reorder_index.index] =
+                                Some((new_field, Arc::new(result_array)));
                         }
                         ArrowDataType::List(_) => {
                             let list_array = input_cols[parquet_position].as_list::<i32>().clone();
-                            final_fields_cols[*index] = reorder_list(
+                            final_fields_cols[reorder_index.index] = reorder_list(
                                 list_array,
                                 input_fields[parquet_position].name(),
                                 children,
@@ -454,7 +459,7 @@ pub(crate) fn reorder_struct_array(
                         }
                         ArrowDataType::LargeList(_) => {
                             let list_array = input_cols[parquet_position].as_list::<i64>().clone();
-                            final_fields_cols[*index] = reorder_list(
+                            final_fields_cols[reorder_index.index] = reorder_list(
                                 list_array,
                                 input_fields[parquet_position].name(),
                                 children,
@@ -468,16 +473,16 @@ pub(crate) fn reorder_struct_array(
                         }
                     }
                 }
-                ReorderIndex::Index { index } => {
-                    final_fields_cols[*index] = Some((
+                ReorderIndexKind::Index => {
+                    final_fields_cols[reorder_index.index] = Some((
                         input_fields[parquet_position].clone(), // cheap Arc clone
                         input_cols[parquet_position].clone(),   // cheap Arc clone
                     ));
                 }
-                ReorderIndex::Missing { index, field } => {
+                ReorderIndexKind::Missing(field) => {
                     let null_array = Arc::new(new_null_array(field.data_type(), num_rows));
                     let field = field.clone(); // cheap Arc clone
-                    final_fields_cols[*index] = Some((field, null_array));
+                    final_fields_cols[reorder_index.index] = Some((field, null_array));
                 }
             }
         }
@@ -553,10 +558,6 @@ mod tests {
 
     use super::{get_requested_indices, reorder_struct_array, ReorderIndex};
 
-    const fn rii(index: usize) -> ReorderIndex {
-        ReorderIndex::Index { index }
-    }
-
     fn nested_arrow_schema() -> ArrowSchemaRef {
         Arc::new(ArrowSchema::new(vec![
             ArrowField::new("i", ArrowDataType::Int32, false),
@@ -590,7 +591,11 @@ mod tests {
         let (mask_indices, reorder_indices) =
             get_requested_indices(&kernel_schema, &arrow_schema).unwrap();
         let expect_mask = vec![0, 1, 2];
-        let expect_reorder = vec![rii(0), rii(1), rii(2)];
+        let expect_reorder = vec![
+            ReorderIndex::new_index(0),
+            ReorderIndex::new_index(1),
+            ReorderIndex::new_index(2),
+        ];
         assert_eq!(mask_indices, expect_mask);
         assert_eq!(reorder_indices, expect_reorder);
     }
@@ -643,7 +648,7 @@ mod tests {
         let (mask_indices, reorder_indices) =
             get_requested_indices(&kernel_schema, &arrow_schema).unwrap();
         let expect_mask = vec![0, 1];
-        let expect_reorder = vec![rii(0)];
+        let expect_reorder = vec![ReorderIndex::new_index(0)];
         assert_eq!(mask_indices, expect_mask);
         assert_eq!(reorder_indices, expect_reorder);
     }
@@ -663,7 +668,11 @@ mod tests {
         let (mask_indices, reorder_indices) =
             get_requested_indices(&kernel_schema, &arrow_schema).unwrap();
         let expect_mask = vec![0, 1, 2];
-        let expect_reorder = vec![rii(2), rii(0), rii(1)];
+        let expect_reorder = vec![
+            ReorderIndex::new_index(2),
+            ReorderIndex::new_index(0),
+            ReorderIndex::new_index(1),
+        ];
         assert_eq!(mask_indices, expect_mask);
         assert_eq!(reorder_indices, expect_reorder);
     }
@@ -683,12 +692,9 @@ mod tests {
             get_requested_indices(&kernel_schema, &arrow_schema).unwrap();
         let expect_mask = vec![0, 1];
         let expect_reorder = vec![
-            rii(0),
-            rii(2),
-            ReorderIndex::Missing {
-                index: 1,
-                field: Arc::new(ArrowField::new("s", ArrowDataType::Utf8, true)),
-            },
+            ReorderIndex::new_index(0),
+            ReorderIndex::new_index(2),
+            ReorderIndex::new_missing(1, Arc::new(ArrowField::new("s", ArrowDataType::Utf8, true))),
         ];
         assert_eq!(mask_indices, expect_mask);
         assert_eq!(reorder_indices, expect_reorder);
@@ -713,12 +719,12 @@ mod tests {
             get_requested_indices(&kernel_schema, &arrow_schema).unwrap();
         let expect_mask = vec![0, 1, 2, 3];
         let expect_reorder = vec![
-            rii(0),
-            ReorderIndex::Child {
-                index: 1,
-                children: vec![rii(0), rii(1)],
-            },
-            rii(2),
+            ReorderIndex::new_index(0),
+            ReorderIndex::new_child(
+                1,
+                vec![ReorderIndex::new_index(0), ReorderIndex::new_index(1)],
+            ),
+            ReorderIndex::new_index(2),
         ];
         assert_eq!(mask_indices, expect_mask);
         assert_eq!(reorder_indices, expect_reorder);
@@ -743,12 +749,12 @@ mod tests {
             get_requested_indices(&kernel_schema, &arrow_schema).unwrap();
         let expect_mask = vec![0, 1, 2, 3];
         let expect_reorder = vec![
-            rii(2),
-            ReorderIndex::Child {
-                index: 0,
-                children: vec![rii(1), rii(0)],
-            },
-            rii(1),
+            ReorderIndex::new_index(2),
+            ReorderIndex::new_child(
+                0,
+                vec![ReorderIndex::new_index(1), ReorderIndex::new_index(0)],
+            ),
+            ReorderIndex::new_index(1),
         ];
         assert_eq!(mask_indices, expect_mask);
         assert_eq!(reorder_indices, expect_reorder);
@@ -770,12 +776,9 @@ mod tests {
             get_requested_indices(&kernel_schema, &arrow_schema).unwrap();
         let expect_mask = vec![0, 1, 3];
         let expect_reorder = vec![
-            rii(0),
-            ReorderIndex::Child {
-                index: 1,
-                children: vec![rii(0)],
-            },
-            rii(2),
+            ReorderIndex::new_index(0),
+            ReorderIndex::new_child(1, vec![ReorderIndex::new_index(0)]),
+            ReorderIndex::new_index(2),
         ];
         assert_eq!(mask_indices, expect_mask);
         assert_eq!(reorder_indices, expect_reorder);
@@ -804,7 +807,11 @@ mod tests {
         let (mask_indices, reorder_indices) =
             get_requested_indices(&kernel_schema, &arrow_schema).unwrap();
         let expect_mask = vec![0, 1, 2];
-        let expect_reorder = vec![rii(0), rii(1), rii(2)];
+        let expect_reorder = vec![
+            ReorderIndex::new_index(0),
+            ReorderIndex::new_index(1),
+            ReorderIndex::new_index(2),
+        ];
         assert_eq!(mask_indices, expect_mask);
         assert_eq!(reorder_indices, expect_reorder);
     }
@@ -850,12 +857,12 @@ mod tests {
             get_requested_indices(&kernel_schema, &arrow_schema).unwrap();
         let expect_mask = vec![0, 1, 2, 3];
         let expect_reorder = vec![
-            rii(0),
-            ReorderIndex::Child {
-                index: 1,
-                children: vec![rii(0), rii(1)],
-            },
-            rii(2),
+            ReorderIndex::new_index(0),
+            ReorderIndex::new_child(
+                1,
+                vec![ReorderIndex::new_index(0), ReorderIndex::new_index(1)],
+            ),
+            ReorderIndex::new_index(2),
         ];
         assert_eq!(mask_indices, expect_mask);
         assert_eq!(reorder_indices, expect_reorder);
@@ -899,12 +906,9 @@ mod tests {
             get_requested_indices(&kernel_schema, &arrow_schema).unwrap();
         let expect_mask = vec![0, 1, 3];
         let expect_reorder = vec![
-            rii(0),
-            ReorderIndex::Child {
-                index: 1,
-                children: vec![rii(0)],
-            },
-            rii(2),
+            ReorderIndex::new_index(0),
+            ReorderIndex::new_child(1, vec![ReorderIndex::new_index(0)]),
+            ReorderIndex::new_index(2),
         ];
         assert_eq!(mask_indices, expect_mask);
         assert_eq!(reorder_indices, expect_reorder);
@@ -952,12 +956,12 @@ mod tests {
             get_requested_indices(&kernel_schema, &arrow_schema).unwrap();
         let expect_mask = vec![0, 2, 3, 4];
         let expect_reorder = vec![
-            rii(0),
-            ReorderIndex::Child {
-                index: 1,
-                children: vec![rii(1), rii(0)],
-            },
-            rii(2),
+            ReorderIndex::new_index(0),
+            ReorderIndex::new_child(
+                1,
+                vec![ReorderIndex::new_index(1), ReorderIndex::new_index(0)],
+            ),
+            ReorderIndex::new_index(2),
         ];
         assert_eq!(mask_indices, expect_mask);
         assert_eq!(reorder_indices, expect_reorder);
@@ -1007,12 +1011,12 @@ mod tests {
             get_requested_indices(&kernel_schema, &arrow_schema).unwrap();
         let expect_mask = vec![2, 3, 4, 5];
         let expect_reorder = vec![
-            rii(2),
-            ReorderIndex::Child {
-                index: 1,
-                children: vec![rii(0), rii(1)],
-            },
-            rii(0),
+            ReorderIndex::new_index(2),
+            ReorderIndex::new_child(
+                1,
+                vec![ReorderIndex::new_index(0), ReorderIndex::new_index(1)],
+            ),
+            ReorderIndex::new_index(0),
         ];
         assert_eq!(mask_indices, expect_mask);
         assert_eq!(reorder_indices, expect_reorder);
@@ -1036,7 +1040,7 @@ mod tests {
     #[test]
     fn simple_reorder_struct() {
         let arry = make_struct_array();
-        let reorder = vec![rii(1), rii(0)];
+        let reorder = vec![ReorderIndex::new_index(1), ReorderIndex::new_index(0)];
         let ordered = reorder_struct_array(arry, &reorder).unwrap();
         assert_eq!(ordered.column_names(), vec!["c", "b"]);
     }
@@ -1069,21 +1073,21 @@ mod tests {
             ),
         ]);
         let reorder = vec![
-            ReorderIndex::Child {
-                index: 1,
-                children: vec![rii(1), rii(0)],
-            },
-            ReorderIndex::Child {
-                index: 0,
-                children: vec![
-                    rii(0),
-                    rii(1),
-                    ReorderIndex::Missing {
-                        index: 2,
-                        field: Arc::new(ArrowField::new("s", ArrowDataType::Utf8, true)),
-                    },
+            ReorderIndex::new_child(
+                1,
+                vec![ReorderIndex::new_index(1), ReorderIndex::new_index(0)],
+            ),
+            ReorderIndex::new_child(
+                0,
+                vec![
+                    ReorderIndex::new_index(0),
+                    ReorderIndex::new_index(1),
+                    ReorderIndex::new_missing(
+                        2,
+                        Arc::new(ArrowField::new("s", ArrowDataType::Utf8, true)),
+                    ),
                 ],
-            },
+            ),
         ];
         let ordered = reorder_struct_array(nested, &reorder).unwrap();
         assert_eq!(ordered.column_names(), vec!["struct2", "struct1"]);
@@ -1128,10 +1132,10 @@ mod tests {
             false,
         ));
         let struct_array = StructArray::from(vec![(list_dt, list as ArrowArrayRef)]);
-        let reorder = vec![ReorderIndex::Child {
-            index: 0,
-            children: vec![rii(1), rii(0)],
-        }];
+        let reorder = vec![ReorderIndex::new_child(
+            0,
+            vec![ReorderIndex::new_index(1), ReorderIndex::new_index(0)],
+        )];
         let ordered = reorder_struct_array(struct_array, &reorder).unwrap();
         let ordered_list_col = ordered.column(0).as_list::<i32>();
         for i in 0..ordered_list_col.len() {
