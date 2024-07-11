@@ -130,6 +130,96 @@ pub(crate) fn ensure_data_types(
     }
 }
 
+/*
+* The code below implements proper pruning of columns when reading parquet, reordering of columns to
+* match the specified schema, and insertion of null columns if the requested schema includes a
+* nullable column that isn't included in the parquet file.
+*
+* At a high level there are three schemas/concepts to worry about:
+*  - The parquet file's physical schema (= the columns that are actually available), called
+*    "parquet_schema" below
+*  - The requested logical schema from the engine (= the columns we actually want, a superset of
+*    the read schema), called "requested_schema" below
+*  - A `ProjectionMask` that goes to the parquet reader which specifies which subset of columns from
+*    the file schema to actually read. (See "Example" below)
+*
+* In other words, the ProjectionMask is the intersection of file schema and logical schema, and then
+* mapped to indices in the parquet file. Columns unique to the file schema need to be masked out (=
+* ignored), while columns unique to the logical schema need to be backfilled with nulls.
+*
+* We also have to worry about field ordering differences between read schema and logical schema. We
+* represent any reordering needed as a tree. Each level of the tree is a vec of
+* `ReorderIndex`s. Each element's index represents a column that will be in the read parquet data
+* (as an arrow StructArray) at that level and index. The `ReorderIndex::index` field of the element
+* is the position that the column should appear in the final output.
+
+* The algorithm has three parts, handled by `get_requested_indices`, `generate_mask` and
+* `reorder_struct_array` respectively.
+
+* `get_requested_indices` generates indices to select and reordering information:
+* 1. Loop over each field in parquet_schema, keeping track of how many physical fields (i.e. actual
+*    stored columns) we have seen so far
+* 2. If a requested field matches the physical field, push the index of the field onto the mask.
+* 3. Also push a ReorderIndex element that indicates where this item should be in the final output.
+* 4. If a nested element (struct/map/list) is encountered, recurse into it, pushing indices onto the
+*    same vector, but producing a new reorder level, which is added to the parent with a `Child` kind
+*
+* `generate_mask` is simple, and just calls `ProjectionMask::leaves` in the parquet crate with the
+* indices computed by `get_requested_indices`
+*
+* `reorder_struct_array` handles reordering:
+* 1. First check if we're already in order (see doc comment for `is_ordered`)
+* 2. If ordered we're done, return, otherwise:
+* 3. Create a Vec[None, ..., None] of placeholders that will hold the correctly ordered columns
+* 4. Deconstruct the existing struct array and then loop over the `ReorderIndex` list
+* 5. If the `kind` is Index: put the column at the correct location
+* 6. If the `kind` is Missing: put a column of `null` at the correct location
+* 7. If the `kind` is Child([child_order]) and the data is a `StructArray` o, recursively call
+*    `reorder_struct_array` on the column with `child_order` and put the resulting, now correctly
+*    ordered array, at the correct location
+* 8. If the `kind` is Child and the data is a `List<StructArray>`, get the inner struct array out of
+*    the list, reorder it recursively as above, rebuild the list, and the put the column at the
+*    correct location
+*
+* Example:
+* The parquet crate treats columns being actually "flat", so a struct column is purely a schema
+* level thing and doesn't "count" wrt. column indices.
+*
+* So if we have the following file physical schema:
+*
+*  a
+*    d
+*    x
+*  b
+*    y
+*      z
+*    e
+*    f
+*  c
+*
+* and a logical requested schema of:
+*
+*  b
+*    f
+*    e
+*  a
+*    x
+*  c
+*
+* The mask is [1, 3, 4, 5] because a, b, and y don't contribute to the column indices.
+*
+* The reorder tree is:
+* [
+*   // col a is at position 0 in the struct array, and should be moved to position 1
+*   { index: 1, Child([{ index: 0 }]) },
+*   // col b is at position 1 in the struct array, and should be moved to position 0
+*   //   also, the inner struct array needs to be reordered to swap 'f' and 'e'
+*   { index: 0, Child([{ index: 1 }, {index: 0}]) },
+*   // col c is at position 2 in the struct array, and should stay there
+*   { index: 2 }
+* ]
+*/
+
 /// Reordering is specified as a tree. Each level is a vec of `ReorderIndex`s. Each element's index
 /// represents a column that will be in the read parquet data at that level and index. The `index()`
 /// of the element is the position that the column should appear in the final output. If it is a
