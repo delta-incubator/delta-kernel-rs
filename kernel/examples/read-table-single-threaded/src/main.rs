@@ -9,7 +9,6 @@ use delta_kernel::engine::arrow_data::ArrowEngineData;
 use delta_kernel::engine::default::executor::tokio::TokioBackgroundExecutor;
 use delta_kernel::engine::default::DefaultEngine;
 use delta_kernel::engine::sync::SyncEngine;
-use delta_kernel::scan::ScanBuilder;
 use delta_kernel::schema::Schema;
 use delta_kernel::{DeltaResult, Engine, Table};
 

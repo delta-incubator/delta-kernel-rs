@@ -13,7 +13,7 @@ use delta_kernel::engine::default::executor::tokio::TokioBackgroundExecutor;
 use delta_kernel::engine::default::DefaultEngine;
 use delta_kernel::engine::sync::SyncEngine;
 use delta_kernel::scan::state::{DvInfo, GlobalScanState, Stats};
-use delta_kernel::scan::{transform_to_logical, ScanBuilder};
+use delta_kernel::scan::transform_to_logical;
 use delta_kernel::schema::Schema;
 use delta_kernel::{DeltaResult, Engine, EngineData, FileMeta, Table};
 
