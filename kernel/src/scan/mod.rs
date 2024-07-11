@@ -124,7 +124,9 @@ pub struct ScanResult {
     /// If an item at mask\[i\] is true, the row at that row index is valid, otherwise if it is
     /// false, the row at that row index is invalid and should be ignored. If the mask is *shorter*
     /// than the number of rows returned, missing elements are considered `true`, i.e. included in
-    /// the query. If this is None, all rows are valid.
+    /// the query. If this is None, all rows are valid. NB: If you are using the default engine and
+    /// plan to call arrow's `filter_record_batch`, you _need_ to extend this vector to the full
+    /// length of the batch or arrow will drop the extra rows
     // TODO(nick) this should be allocated by the engine
     pub mask: Option<Vec<bool>>,
 }
@@ -208,7 +210,9 @@ impl Scan {
     /// index `i`, then that row should *not* be processed (i.e. it is filtered out). If the vector
     /// is `true` at index `i` the row *should* be processed. If the selector vector is *shorter*
     /// than the number of rows returned, missing elements are considered `true`, i.e. included in
-    /// the query.
+    /// the query. NB: If you are using the default engine and plan to call arrow's
+    /// `filter_record_batch`, you _need_ to extend this vector to the full length of the batch or
+    /// arrow will drop the extra rows.
     pub fn scan_data(
         &self,
         engine: &dyn Engine,
