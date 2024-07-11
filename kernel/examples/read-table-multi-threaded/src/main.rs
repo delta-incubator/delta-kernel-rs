@@ -7,6 +7,7 @@ use std::thread;
 use arrow::compute::filter_record_batch;
 use arrow::record_batch::RecordBatch;
 use arrow::util::pretty::print_batches;
+use delta_kernel::actions::deletion_vector::split_vector;
 use delta_kernel::engine::arrow_data::ArrowEngineData;
 use delta_kernel::engine::default::executor::tokio::TokioBackgroundExecutor;
 use delta_kernel::engine::default::DefaultEngine;
@@ -277,7 +278,7 @@ fn do_work(
 
             // need to split the dv_mask. what's left in dv_mask covers this result, and rest
             // will cover the following results
-            let rest = selection_vector.as_mut().map(|mask| mask.split_off(len));
+            let rest = split_vector(selection_vector.as_mut(), len);
             let batch = if let Some(mask) = selection_vector.clone() {
                 // apply the selection vector
                 filter_record_batch(&record_batch, &mask.into()).unwrap()

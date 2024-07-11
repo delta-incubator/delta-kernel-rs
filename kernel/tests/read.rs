@@ -8,6 +8,7 @@ use arrow::compute::filter_record_batch;
 use arrow::error::ArrowError;
 use arrow::record_batch::RecordBatch;
 use arrow_select::concat::concat_batches;
+use delta_kernel::actions::deletion_vector::split_vector;
 use delta_kernel::engine::arrow_data::ArrowEngineData;
 use delta_kernel::engine::default::executor::tokio::TokioBackgroundExecutor;
 use delta_kernel::engine::default::DefaultEngine;
@@ -490,7 +491,7 @@ fn read_with_scan_data(
             .unwrap();
 
             let record_batch = to_arrow(logical).unwrap();
-            let rest = selection_vector.as_mut().map(|mask| mask.split_off(len));
+            let rest = split_vector(selection_vector.as_mut(), len);
             let batch = if let Some(mask) = selection_vector.clone() {
                 // apply the selection vector
                 filter_record_batch(&record_batch, &mask.into()).unwrap()

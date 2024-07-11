@@ -223,6 +223,19 @@ pub(crate) fn treemap_to_bools(treemap: RoaringTreemap) -> Vec<bool> {
     }
 }
 
+/// helper function to split an `Option<Vec<bool>>`. Because deletion vectors apply to a whole file,
+/// but parquet readers can chunk the file, there is a need to split the vector up. This takes an
+/// optional vector, and if it's `Some`, splits it at `split_index`. The passed vector is modified
+/// in place, and the split off component is returned. If `vector` is `None`, or if the
+/// `split_index` is >= to the length of the vector, the passed vector is left untouched and `None`
+/// is returned.
+pub fn split_vector(vector: Option<&mut Vec<bool>>, split_index: usize) -> Option<Vec<bool>> {
+    match vector {
+        Some(vector) if split_index < vector.len() => Some(vector.split_off(split_index)),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use roaring::RoaringTreemap;

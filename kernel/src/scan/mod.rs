@@ -8,7 +8,7 @@ use url::Url;
 
 use self::log_replay::{log_replay_iter, scan_action_iter};
 use self::state::GlobalScanState;
-use crate::actions::deletion_vector::{treemap_to_bools, DeletionVectorDescriptor};
+use crate::actions::deletion_vector::{split_vector, treemap_to_bools, DeletionVectorDescriptor};
 use crate::actions::{get_log_schema, Add, ADD_NAME, REMOVE_NAME};
 use crate::column_mapping::ColumnMappingMode;
 use crate::expressions::{Expression, Scalar};
@@ -122,8 +122,9 @@ pub struct ScanResult {
     /// Raw engine data as read from the disk for a particular file included in the query
     pub raw_data: DeltaResult<Box<dyn EngineData>>,
     /// If an item at mask\[i\] is true, the row at that row index is valid, otherwise if it is
-    /// false, the row at that row index is invalid and should be ignored. If this is None, all rows
-    /// are valid.
+    /// false, the row at that row index is invalid and should be ignored. If the mask is *shorter*
+    /// than the number of rows returned, missing elements are considered `true`, i.e. included in
+    /// the query. If this is None, all rows are valid.
     // TODO(nick) this should be allocated by the engine
     pub mask: Option<Vec<bool>>,
 }
@@ -205,7 +206,9 @@ impl Scan {
     /// scanned. The schema for each row can be obtained by calling [`scan_row_schema`].
     /// - `Vec<bool>`: A selection vector. If a row is at index `i` and this vector is `false` at
     /// index `i`, then that row should *not* be processed (i.e. it is filtered out). If the vector
-    /// is `true` at index `i` the row *should* be processed.
+    /// is `true` at index `i` the row *should* be processed. If the selector vector is *shorter*
+    /// than the number of rows returned, missing elements are considered `true`, i.e. included in
+    /// the query.
     pub fn scan_data(
         &self,
         engine: &dyn Engine,
@@ -331,8 +334,7 @@ impl Scan {
 
                 // need to split the dv_mask. what's left in dv_mask covers this result, and rest
                 // will cover the following results
-                let rest = dv_mask.as_mut().map(|mask| mask.split_off(len));
-
+                let rest = split_vector(dv_mask.as_mut(), len);
                 let scan_result = ScanResult {
                     raw_data: read_result,
                     mask: dv_mask,
