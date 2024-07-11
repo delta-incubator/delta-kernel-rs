@@ -407,7 +407,7 @@ fn read_with_execute(
             let record_batch = to_arrow(data).unwrap();
             if let Some(mut mask) = sr.mask {
                 let extra_rows = record_batch.num_rows() - mask.len();
-                if  extra_rows > 0 {
+                if extra_rows > 0 {
                     // we need to extend the mask here in case it's too short
                     mask.extend(std::iter::repeat(true).take(extra_rows));
                 }
