@@ -334,7 +334,7 @@ impl Scan {
 
                 // need to split the dv_mask. what's left in dv_mask covers this result, and rest
                 // will cover the following results
-                let rest = split_vector(dv_mask.as_mut(), len);
+                let rest = split_vector(dv_mask.as_mut(), len, None);
                 let scan_result = ScanResult {
                     raw_data: read_result,
                     mask: dv_mask,

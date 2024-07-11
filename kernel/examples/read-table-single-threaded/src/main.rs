@@ -121,7 +121,12 @@ fn try_main() -> DeltaResult<()> {
             .downcast::<ArrowEngineData>()
             .map_err(|_| delta_kernel::Error::EngineDataType("ArrowEngineData".to_string()))?
             .into();
-        let batch = if let Some(mask) = res.mask {
+        let batch = if let Some(mut mask) = res.mask {
+            let extra_rows = record_batch.num_rows() - mask.len();
+            if  extra_rows > 0 {
+                // we need to extend the mask here in case it's too short
+                mask.extend(std::iter::repeat(true).take(extra_rows));
+            }
             filter_record_batch(&record_batch, &mask.into())?
         } else {
             record_batch

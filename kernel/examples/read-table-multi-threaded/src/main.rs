@@ -278,7 +278,7 @@ fn do_work(
 
             // need to split the dv_mask. what's left in dv_mask covers this result, and rest
             // will cover the following results
-            let rest = split_vector(selection_vector.as_mut(), len);
+            let rest = split_vector(selection_vector.as_mut(), len, Some(true));
             let batch = if let Some(mask) = selection_vector.clone() {
                 // apply the selection vector
                 filter_record_batch(&record_batch, &mask.into()).unwrap()
