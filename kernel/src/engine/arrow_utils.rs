@@ -496,16 +496,13 @@ pub(crate) fn reorder_struct_array(
                 }
             }
         }
-        let mut field_vec = Vec::with_capacity(num_cols);
-        let mut reordered_columns = Vec::with_capacity(num_cols);
-        for field_array_opt in final_fields_cols.into_iter() {
-            let (field, array) = field_array_opt.ok_or_else(|| {
-                Error::generic(
-                    "Found a None in final_fields_cols. This is a kernel bug, please report.",
-                )
-            })?;
-            field_vec.push(field);
-            reordered_columns.push(array);
+        let num_cols = final_fields_cols.len();
+        let (field_vec, reordered_columns): (Vec<Arc<ArrowField>>, _) =
+            final_fields_cols.into_iter().flatten().unzip();
+        if field_vec.len() != num_cols {
+            return Err(Error::generic(
+                "Found a None in final_fields_cols. This is a kernel bug, please report.",
+            ));
         }
         Ok(StructArray::try_new(
             field_vec.into(),
