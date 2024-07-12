@@ -24,6 +24,34 @@ fn make_arrow_error(s: String) -> Error {
     Error::Arrow(arrow_schema::ArrowError::InvalidArgumentError(s))
 }
 
+/// Capture the compatibility between two data-types, as passed to [`ensure_data_types`]
+pub(crate) enum DataTypeCompat {
+    /// The two types are the same
+    Identical,
+    /// What is read from parquet needs to be cast to the associated type
+    NeedsCast(ArrowDataType),
+    /// Types are compatible, but are nested types. This is used when comparing types where casting
+    /// is not desired (i.e. in the expression evaluator)
+    Nested,
+}
+
+// Check if two types can be cast
+fn check_cast_compat(
+    source_type: &ArrowDataType,
+    target_type: ArrowDataType,
+) -> DeltaResult<DataTypeCompat> {
+    match (source_type, &target_type) {
+        (&ArrowDataType::Timestamp(_, _), &ArrowDataType::Timestamp(_, _)) => {
+            // timestamps are able to be cast between each other
+            Ok(DataTypeCompat::NeedsCast(target_type))
+        }
+        _ => Err(make_arrow_error(format!(
+            "Incorrect datatype. Expected {}, got {}",
+            target_type, source_type
+        ))), //| (DataType::Primitive(PrimitiveType::TimestampNtz), ArrowDataType::Timestamp(_, _)) => {
+    }
+}
+
 /// Ensure a kernel data type matches an arrow data type. This only ensures that the actual "type"
 /// is the same, but does so recursively into structs, and ensures lists and maps have the correct
 /// associated types as well. This returns an `Ok(())` if the types are compatible, or an error if
@@ -33,31 +61,28 @@ fn make_arrow_error(s: String) -> Error {
 pub(crate) fn ensure_data_types(
     kernel_type: &DataType,
     arrow_type: &ArrowDataType,
-) -> DeltaResult<()> {
+) -> DeltaResult<DataTypeCompat> {
     match (kernel_type, arrow_type) {
         (DataType::Primitive(_), _) if arrow_type.is_primitive() => {
             let converted_type: ArrowDataType = kernel_type.try_into()?;
             if &converted_type == arrow_type {
-                Ok(())
+                Ok(DataTypeCompat::Identical)
             } else {
-                Err(make_arrow_error(format!(
-                    "Incorrect datatype. Expected {}, got {}",
-                    converted_type, arrow_type
-                )))
+                check_cast_compat(arrow_type, converted_type)
             }
         }
         (DataType::Primitive(PrimitiveType::Boolean), ArrowDataType::Boolean)
         | (DataType::Primitive(PrimitiveType::String), ArrowDataType::Utf8)
         | (DataType::Primitive(PrimitiveType::Binary), ArrowDataType::Binary) => {
             // strings, bools, and binary  aren't primitive in arrow
-            Ok(())
+            Ok(DataTypeCompat::Identical)
         }
         (
             DataType::Primitive(PrimitiveType::Decimal(kernel_prec, kernel_scale)),
             ArrowDataType::Decimal128(arrow_prec, arrow_scale),
         ) if arrow_prec == kernel_prec && *arrow_scale == *kernel_scale as i8 => {
             // decimal isn't primitive in arrow. cast above is okay as we limit range
-            Ok(())
+            Ok(DataTypeCompat::Identical)
         }
         (DataType::Array(inner_type), ArrowDataType::List(arrow_list_type)) => {
             let kernel_array_type = &inner_type.element_type;
@@ -81,7 +106,7 @@ pub(crate) fn ensure_data_types(
                         "Arrow map struct didn't have a value type".to_string(),
                     ));
                 }
-                Ok(())
+                Ok(DataTypeCompat::Nested)
             } else {
                 Err(make_arrow_error(
                     "Arrow map type wasn't a struct.".to_string(),
@@ -111,7 +136,7 @@ pub(crate) fn ensure_data_types(
                     kernel_field_names, arrow_field_names,
                 ))
             });
-            Ok(())
+            Ok(DataTypeCompat::Nested)
         }
         _ => Err(make_arrow_error(format!(
             "Incorrect datatype. Expected {}, got {}",
@@ -211,52 +236,65 @@ pub(crate) fn ensure_data_types(
 */
 
 /// Reordering is specified as a tree. Each level is a vec of `ReorderIndex`s. Each element's index
-/// represents a column that will be in the read parquet data at that level and index. The `index()`
-/// of the element is the position that the column should appear in the final output. If it is a
-/// `Child` variant, then at that index there is a `Struct` whose ordering is specified by the
-/// values in the associated `Vec` according to these same rules.
+/// represents a column that will be in the read parquet data at that level and index. The `index`
+/// of the element is the position that the column should appear in the final output. The `transform`
+/// indicates what, if any, transforms are needed. See the docs for [`ReorderIndexTransform`] for the
+/// meaning.
 #[derive(Debug, PartialEq)]
 pub(crate) struct ReorderIndex {
     pub(crate) index: usize,
-    kind: ReorderIndexKind,
+    transform: ReorderIndexTransform,
 }
 
 #[derive(Debug, PartialEq)]
-pub(crate) enum ReorderIndexKind {
+pub(crate) enum ReorderIndexTransform {
+    /// For a non-nested type, indicates that we need to cast to the contained type
+    Cast(ArrowDataType),
+    /// Used for struct/list/map. Potentially transform child fields using contained reordering
     Child(Vec<ReorderIndex>),
-    Index,
+    /// No work needed to transform this data
+    None,
+    /// Data is missing, fill in with a null column
     Missing(ArrowFieldRef),
 }
 
 impl ReorderIndex {
+    fn new_cast(index: usize, target: ArrowDataType) -> Self {
+        ReorderIndex {
+            index,
+            transform: ReorderIndexTransform::Cast(target),
+        }
+    }
+
     fn new_child(index: usize, children: Vec<ReorderIndex>) -> Self {
         ReorderIndex {
             index,
-            kind: ReorderIndexKind::Child(children),
+            transform: ReorderIndexTransform::Child(children),
         }
     }
 
     fn new_index(index: usize) -> Self {
         ReorderIndex {
             index,
-            kind: ReorderIndexKind::Index,
+            transform: ReorderIndexTransform::None,
         }
     }
 
     fn new_missing(index: usize, field: ArrowFieldRef) -> Self {
         ReorderIndex {
             index,
-            kind: ReorderIndexKind::Missing(field),
+            transform: ReorderIndexTransform::Missing(field),
         }
     }
 
-    /// Check if this reordering contains a `Missing` variant anywhere. See comment below on
+    /// Check if this reordering requires a transformation anywhere. See comment below on
     /// [`is_ordered`] to understand why this is needed.
-    fn contains_missing(&self) -> bool {
-        match self.kind {
-            ReorderIndexKind::Child(ref children) => is_ordered(children),
-            ReorderIndexKind::Index => true,
-            ReorderIndexKind::Missing(_) => false,
+    fn needs_transform(&self) -> bool {
+        match self.transform {
+            ReorderIndexTransform::Cast(_) => true,
+            ReorderIndexTransform::Child(ref children) => is_ordered(children),
+            ReorderIndexTransform::None => true,
+            ReorderIndexTransform::Missing(_) => false,
         }
     }
 }
@@ -410,10 +448,18 @@ fn get_indices(
                 if let Some((index, _, requested_field)) =
                     requested_schema.fields.get_full(field.name())
                 {
-                    ensure_data_types(&requested_field.data_type, field.data_type())?;
+                    match ensure_data_types(&requested_field.data_type, field.data_type())? {
+                        DataTypeCompat::Identical =>
+                            reorder_indices.push(ReorderIndex::new_index(index)),
+                        DataTypeCompat::NeedsCast(target) =>
+                            reorder_indices.push(ReorderIndex::new_cast(index, target)),
+                        DataTypeCompat::Nested => return
+                            Err(Error::generic(
+                                "Comparing nested types in get_indices. This is a kernel bug, please report"
+                            ))
+                    }
                     found_fields.insert(requested_field.name());
                     mask_indices.push(parquet_offset + parquet_index);
-                    reorder_indices.push(ReorderIndex::new_index(index));
                 }
             }
         }
@@ -491,13 +537,13 @@ fn is_ordered(requested_ordering: &[ReorderIndex]) -> bool {
         return true;
     }
     // we have >=1 element. check that the first element is ordered
-    if !requested_ordering[0].contains_missing() {
+    if !requested_ordering[0].needs_transform() {
         return false;
     }
     // now check that all elements are ordered wrt. each other, and are internally ordered
     requested_ordering
         .windows(2)
-        .all(|ri| (ri[0].index < ri[1].index) && ri[1].contains_missing())
+        .all(|ri| (ri[0].index < ri[1].index) && !ri[1].needs_transform())
 }
 
 // we use this as a placeholder for an array and its associated field. We can fill in a Vec of None
@@ -524,8 +570,19 @@ pub(crate) fn reorder_struct_array(
         for (parquet_position, reorder_index) in requested_ordering.iter().enumerate() {
             // for each item, reorder_index.index() tells us where to put it, and its position in
             // requested_ordering tells us where it is in the parquet data
-            match &reorder_index.kind {
-                ReorderIndexKind::Child(children) => {
+            match &reorder_index.transform {
+                ReorderIndexTransform::Cast(target) => {
+                    let source_col = input_cols[parquet_position].as_ref();
+                    let new_col = Arc::new(arrow_cast::cast::cast(source_col, target)?);
+                    let new_field = Arc::new(
+                        input_fields[parquet_position]
+                            .as_ref()
+                            .clone()
+                            .with_data_type(new_col.data_type().clone()),
+                    );
+                    final_fields_cols[reorder_index.index] = Some((new_field, new_col));
+                }
+                ReorderIndexTransform::Child(children) => {
                     match input_cols[parquet_position].data_type() {
                         ArrowDataType::Struct(_) => {
                             let struct_array = input_cols[parquet_position].as_struct().clone();
@@ -563,13 +620,13 @@ pub(crate) fn reorder_struct_array(
                         }
                     }
                 }
-                ReorderIndexKind::Index => {
+                ReorderIndexTransform::None => {
                     final_fields_cols[reorder_index.index] = Some((
                         input_fields[parquet_position].clone(), // cheap Arc clone
                         input_cols[parquet_position].clone(),   // cheap Arc clone
                     ));
                 }
-                ReorderIndexKind::Missing(field) => {
+                ReorderIndexTransform::Missing(field) => {
                     let null_array = Arc::new(new_null_array(field.data_type(), num_rows));
                     let field = field.clone(); // cheap Arc clone
                     final_fields_cols[reorder_index.index] = Some((field, null_array));
