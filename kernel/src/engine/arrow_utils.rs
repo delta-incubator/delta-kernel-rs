@@ -54,10 +54,10 @@ fn check_cast_compat(
 
 /// Ensure a kernel data type matches an arrow data type. This only ensures that the actual "type"
 /// is the same, but does so recursively into structs, and ensures lists and maps have the correct
-/// associated types as well. This returns an `Ok(())` if the types are compatible, or an error if
-/// the types do not match. If there is a `struct` type included, we only ensure that the named
-/// fields that the kernel is asking for exist, and that for those fields the types
-/// match. Un-selected fields are ignored.
+/// associated types as well. This returns an `Ok(DataTypeCompat)` if the types are compatible, and
+/// will indicate what kind of compatibility they have, or an error if the types do not match. If
+/// there is a `struct` type included, we only ensure that the named fields that the kernel is
+/// asking for exist, and that for those fields the types match. Un-selected fields are ignored.
 pub(crate) fn ensure_data_types(
     kernel_type: &DataType,
     arrow_type: &ArrowDataType,
@@ -175,9 +175,12 @@ pub(crate) fn ensure_data_types(
 * 1. Loop over each field in parquet_schema, keeping track of how many physical fields (i.e. actual
 *    stored columns) we have seen so far
 * 2. If a requested field matches the physical field, push the index of the field onto the mask.
-* 3. Also push a ReorderIndex element that indicates where this item should be in the final output.
-* 4. If a nested element (struct/map/list) is encountered, recurse into it, pushing indices onto the
-*    same vector, but producing a new reorder level, which is added to the parent with a `Child` kind
+
+* 3. Also push a ReorderIndex element that indicates where this item should be in the final output,
+*    and if it needs any transformation (i.e. casting, create null column)
+* 4. If a nested element (struct/map/list) is encountered, recurse into it, pushing indices onto
+*    the same vector, but producing a new reorder level, which is added to the parent with a `Child`
+*    transform
 *
 * `generate_mask` is simple, and just calls `ProjectionMask::leaves` in the parquet crate with the
 * indices computed by `get_requested_indices`
@@ -187,14 +190,16 @@ pub(crate) fn ensure_data_types(
 * 2. If ordered we're done, return, otherwise:
 * 3. Create a Vec[None, ..., None] of placeholders that will hold the correctly ordered columns
 * 4. Deconstruct the existing struct array and then loop over the `ReorderIndex` list
-* 5. If the `kind` is Index: put the column at the correct location
-* 6. If the `kind` is Missing: put a column of `null` at the correct location
-* 7. If the `kind` is Child([child_order]) and the data is a `StructArray` o, recursively call
-*    `reorder_struct_array` on the column with `child_order` and put the resulting, now correctly
-*    ordered array, at the correct location
-* 8. If the `kind` is Child and the data is a `List<StructArray>`, get the inner struct array out of
-*    the list, reorder it recursively as above, rebuild the list, and the put the column at the
-*    correct location
+* 5. If the `transform` is Index: put the column at the correct location
+* 6. If the `transform` is Cast: cast the column to the specified type, and put it at the correct
+*     location
+* 7. If the `transform` is Missing: put a column of `null` at the correct location
+* 8. If the `transform` is Child([child_order]) and the data is a `StructArray` o, recursively call
+*     `reorder_struct_array` on the column with `child_order` and put the resulting, now correctly
+*     ordered array, at the correct location
+* 9. If the `transform` is Child and the data is a `List<StructArray>`, get the inner struct array
+*     out of the list, reorder it recursively as above, rebuild the list, and the put the column
+*     at the correct location
 *
 * Example:
 * The parquet crate treats columns being actually "flat", so a struct column is purely a schema
