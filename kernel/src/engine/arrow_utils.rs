@@ -35,16 +35,6 @@ pub(crate) fn ensure_data_types(
     arrow_type: &ArrowDataType,
 ) -> DeltaResult<()> {
     match (kernel_type, arrow_type) {
-        (DataType::Primitive(PrimitiveType::Timestamp), ArrowDataType::Timestamp(_, _))
-        | (DataType::Primitive(PrimitiveType::TimestampNtz), ArrowDataType::Timestamp(_, _)) => {
-            // We assume that any timestamp data read from a delta table is correctly written in
-            // microseconds and with the right timezone info. there seems to be an issue at least on
-            // MacOS where the parquet crate reports `Timestamp(Nanoseconds, None)` even though the
-            // parquet footer indicates `timeUnit=microseconds` and `isAdjustedToUTC=true`. Will
-            // follow-up upstream to see if this is a bug in the parquet crate.
-            // TODO: FILL IN ISSUE NUMBER(s)
-            Ok(())
-        }
         (DataType::Primitive(_), _) if arrow_type.is_primitive() => {
             let converted_type: ArrowDataType = kernel_type.try_into()?;
             if &converted_type == arrow_type {
