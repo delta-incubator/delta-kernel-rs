@@ -7,6 +7,7 @@ use arrow::array::{ArrayRef, Int32Array, StringArray};
 use arrow::compute::filter_record_batch;
 use arrow::error::ArrowError;
 use arrow::record_batch::RecordBatch;
+use arrow_schema::{SchemaRef as ArrowSchemaRef};
 use arrow_select::concat::concat_batches;
 use delta_kernel::actions::deletion_vector::split_vector;
 use delta_kernel::engine::arrow_data::ArrowEngineData;
@@ -399,6 +400,7 @@ fn read_with_execute(
     scan: &Scan,
     expected: &[String],
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let result_schema: ArrowSchemaRef = Arc::new(scan.schema().as_ref().try_into()?);
     let scan_results = scan.execute(engine)?;
     let batches: Vec<RecordBatch> = scan_results
         .into_iter()
@@ -421,8 +423,7 @@ fn read_with_execute(
     if expected.is_empty() {
         assert_eq!(batches.len(), 0);
     } else {
-        let schema = batches[0].schema();
-        let batch = concat_batches(&schema, &batches)?;
+        let batch = concat_batches(&result_schema, &batches)?;
         assert_batches_sorted_eq!(expected, &[batch]);
     }
     Ok(())
@@ -458,6 +459,7 @@ fn read_with_scan_data(
     expected: &[String],
 ) -> Result<(), Box<dyn std::error::Error>> {
     let global_state = scan.global_scan_state();
+    let result_schema: ArrowSchemaRef = Arc::new(scan.schema().as_ref().try_into()?);
     let scan_data = scan.scan_data(engine)?;
     let mut scan_files = vec![];
     for data in scan_data {
@@ -511,8 +513,7 @@ fn read_with_scan_data(
     if expected.is_empty() {
         assert_eq!(batches.len(), 0);
     } else {
-        let schema = batches[0].schema();
-        let batch = concat_batches(&schema, &batches)?;
+        let batch = concat_batches(&result_schema, &batches)?;
         assert_batches_sorted_eq!(expected, &[batch]);
     }
     Ok(())
@@ -1016,5 +1017,26 @@ fn basic_decimal() -> Result<(), Box<dyn std::error::Error>> {
         "+----------------+---------+--------------+------------------------+",
     ];
     read_table_data_str("./tests/data/basic-decimal-table/", None, None, expected)?;
+    Ok(())
+}
+
+#[test]
+fn timestamp_ntz() -> Result<(), Box<dyn std::error::Error>> {
+    let expected = vec![
+        "+----+----------------------------+----------------------------+",
+        "| id | tsNtz                      | tsNtzPartition             |",
+        "+----+----------------------------+----------------------------+",
+        "| 0  | 2021-11-18T02:30:00.123456 | 2021-11-18T02:30:00.123456 |",
+        "| 1  | 2013-07-05T17:01:00.123456 | 2021-11-18T02:30:00.123456 |",
+        "| 2  |                            | 2021-11-18T02:30:00.123456 |",
+        "| 3  | 2021-11-18T02:30:00.123456 | 2013-07-05T17:01:00.123456 |",
+        "| 4  | 2013-07-05T17:01:00.123456 | 2013-07-05T17:01:00.123456 |",
+        "| 5  |                            | 2013-07-05T17:01:00.123456 |",
+        "| 6  | 2021-11-18T02:30:00.123456 |                            |",
+        "| 7  | 2013-07-05T17:01:00.123456 |                            |",
+        "| 8  |                            |                            |",
+        "+----+----------------------------+----------------------------+",
+    ];
+    read_table_data_str("./tests/data/data-reader-timestamp_ntz/", None, None, expected)?;
     Ok(())
 }
