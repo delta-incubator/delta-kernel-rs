@@ -7,7 +7,7 @@ use arrow::array::{ArrayRef, Int32Array, StringArray};
 use arrow::compute::filter_record_batch;
 use arrow::error::ArrowError;
 use arrow::record_batch::RecordBatch;
-use arrow_schema::{SchemaRef as ArrowSchemaRef};
+use arrow_schema::SchemaRef as ArrowSchemaRef;
 use arrow_select::concat::concat_batches;
 use delta_kernel::actions::deletion_vector::split_vector;
 use delta_kernel::engine::arrow_data::ArrowEngineData;
@@ -1037,6 +1037,11 @@ fn timestamp_ntz() -> Result<(), Box<dyn std::error::Error>> {
         "| 8  |                            |                            |",
         "+----+----------------------------+----------------------------+",
     ];
-    read_table_data_str("./tests/data/data-reader-timestamp_ntz/", None, None, expected)?;
+    read_table_data_str(
+        "./tests/data/data-reader-timestamp_ntz/",
+        None,
+        None,
+        expected,
+    )?;
     Ok(())
 }

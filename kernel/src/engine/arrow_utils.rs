@@ -48,7 +48,7 @@ fn check_cast_compat(
         _ => Err(make_arrow_error(format!(
             "Incorrect datatype. Expected {}, got {}",
             target_type, source_type
-        ))), //| (DataType::Primitive(PrimitiveType::TimestampNtz), ArrowDataType::Timestamp(_, _)) => {
+        ))),
     }
 }
 
