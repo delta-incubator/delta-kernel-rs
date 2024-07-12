@@ -296,10 +296,12 @@ impl ReorderIndex {
     /// [`is_ordered`] to understand why this is needed.
     fn needs_transform(&self) -> bool {
         match self.transform {
-            ReorderIndexTransform::Cast(_) => true,
-            ReorderIndexTransform::Child(ref children) => is_ordered(children),
-            ReorderIndexTransform::None => true,
-            ReorderIndexTransform::Missing(_) => false,
+            // if we're casting or inserting null, we need to transform
+            ReorderIndexTransform::Cast(_) | ReorderIndexTransform::Missing(_) => true,
+            // if our children are not ordered somehow, we need a transform
+            ReorderIndexTransform::Child(ref children) => !is_ordered(children),
+            // no transform needed
+            ReorderIndexTransform::None => false,
         }
     }
 }
@@ -533,19 +535,20 @@ pub(crate) fn generate_mask(
 
 /// Check if an ordering is already ordered. We check if the indices are in ascending order. That's
 /// enough to ensure we don't need to do any transformation on the data read from parquet _iff_
-/// there are no `null` columns to insert. If we _do_ need to insert a null column then we need to
-/// transform the data. Therefore we also call [`contains_missing`] to ensure both the ascending
-/// nature of the indices AND that no `Missing` variants exist, and only if both are true do we
-/// consider an ordering "ordered".
+/// there are no `null` columns to insert and no casts are needed. If we _do_ need to insert a null
+/// column or cast something then we need to transform the data. Therefore we also call
+/// [`needs_transform`] to ensure both the ascending nature of the indices AND that no transform is
+/// required.
 fn is_ordered(requested_ordering: &[ReorderIndex]) -> bool {
     if requested_ordering.is_empty() {
         return true;
     }
-    // we have >=1 element. check that the first element is ordered
-    if !requested_ordering[0].needs_transform() {
+    // we have >=1 element. check that the first element doesn't need a transform
+    if requested_ordering[0].needs_transform() {
         return false;
     }
-    // now check that all elements are ordered wrt. each other, and are internally ordered
+    // now check that all elements are ordered wrt. each other, and internally don't need
+    // transformation
     requested_ordering
         .windows(2)
         .all(|ri| (ri[0].index < ri[1].index) && !ri[1].needs_transform())
