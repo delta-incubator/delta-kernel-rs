@@ -171,7 +171,7 @@ pub(crate) fn ensure_data_types(
 * The algorithm has three parts, handled by `get_requested_indices`, `generate_mask` and
 * `reorder_struct_array` respectively.
 
-* `get_requested_indices` generates indices to select and reordering information:
+* `get_requested_indices` generates indices to select, along with reordering information:
 * 1. Loop over each field in parquet_schema, keeping track of how many physical fields (i.e. actual
 *    stored columns) we have seen so far
 * 2. If a requested field matches the physical field, push the index of the field onto the mask.
@@ -187,14 +187,14 @@ pub(crate) fn ensure_data_types(
 *
 * `reorder_struct_array` handles reordering:
 * 1. First check if we're already in order (see doc comment for `is_ordered`)
-* 2. If ordered we're done, return, otherwise:
+* 2. If ordered we're done (return); otherwise:
 * 3. Create a Vec[None, ..., None] of placeholders that will hold the correctly ordered columns
 * 4. Deconstruct the existing struct array and then loop over the `ReorderIndex` list
 * 5. If the `transform` is Index: put the column at the correct location
 * 6. If the `transform` is Cast: cast the column to the specified type, and put it at the correct
 *     location
 * 7. If the `transform` is Missing: put a column of `null` at the correct location
-* 8. If the `transform` is Child([child_order]) and the data is a `StructArray` o, recursively call
+* 8. If the `transform` is Child([child_order]) and the data is a `StructArray`, recursively call
 *     `reorder_struct_array` on the column with `child_order` and put the resulting, now correctly
 *     ordered array, at the correct location
 * 9. If the `transform` is Child and the data is a `List<StructArray>`, get the inner struct array
@@ -202,8 +202,8 @@ pub(crate) fn ensure_data_types(
 *     at the correct location
 *
 * Example:
-* The parquet crate treats columns being actually "flat", so a struct column is purely a schema
-* level thing and doesn't "count" wrt. column indices.
+* The parquet crate `ProjectionMask::leaves` method only considers leaf columns -- a "flat" schema -- 
+* so a struct column is purely a schema level thing and doesn't "count" wrt. column indices.
 *
 * So if we have the following file physical schema:
 *
