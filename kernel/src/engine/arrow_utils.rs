@@ -383,7 +383,7 @@ fn get_indices(
                             array_type.element_type.clone(),
                             array_type.contains_null,
                         )]);
-                        let (parquet_advance, children) = get_indices(
+                        let (parquet_advance, mut children) = get_indices(
                             found_fields.len() + parquet_offset,
                             &requested_schema,
                             &[list_field.clone()].into(),
@@ -398,7 +398,7 @@ fn get_indices(
                             ));
                         }
                         // safety, checked that we have 1 element
-                        let mut children = children.into_iter().next().unwrap();
+                        let mut children = children.swap_remove(0);
                         // the index is wrong, as it's the index from the inner schema. Adjust
                         // it to be our index
                         children.index = index;
