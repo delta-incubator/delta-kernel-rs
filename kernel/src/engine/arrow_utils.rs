@@ -133,13 +133,7 @@ pub(crate) fn ensure_data_types(
                 let missing_field_names = kernel_fields
                     .fields
                     .keys()
-                    .filter_map(|kernel_field| {
-                        if arrow_field_map.contains(kernel_field) {
-                            None
-                        } else {
-                            Some(kernel_field)
-                        }
-                    })
+                    .filter(|kernel_field| !arrow_field_map.contains(kernel_field))
                     .take(5)
                     .join(", ");
                 make_arrow_error(format!(
@@ -255,11 +249,11 @@ pub(crate) fn ensure_data_types(
 * ]
 */
 
-/// Reordering is specified as a tree. Each level is a vec of `ReorderIndex`s. Each element's index
-/// represents a column that will be in the read parquet data at that level and index. The `index`
-/// of the element is the position that the column should appear in the final output. The `transform`
-/// indicates what, if any, transforms are needed. See the docs for [`ReorderIndexTransform`] for the
-/// meaning.
+/// Reordering is specified as a tree. Each level is a vec of `ReorderIndex`s. Each element's
+/// position represents a column that will be in the read parquet data at that level and
+/// position. The `index` of the element is the position that the column should appear in the final
+/// output. The `transform` indicates what, if any, transforms are needed. See the docs for
+/// [`ReorderIndexTransform`] for the meaning.
 #[derive(Debug, PartialEq)]
 pub(crate) struct ReorderIndex {
     pub(crate) index: usize,
@@ -344,16 +338,21 @@ fn get_indices(
     let mut found_fields = HashSet::with_capacity(requested_schema.fields.len());
     let mut reorder_indices = Vec::with_capacity(requested_schema.fields.len());
     let mut parquet_offset = start_parquet_offset;
-    for (parquet_index, field) in fields.iter().enumerate() {
+    // for each field, get its position in the parquet (via enumerate), a reference to the arrow
+    // field, and info about where it appears in the requested_schema, or None if the field is not
+    // requested
+    let all_field_info = fields.iter().enumerate().map(|(parquet_index, field)| {
+        let field_info = requested_schema.fields.get_full(field.name());
+        (parquet_index, field, field_info)
+    });
+    for (parquet_index, field, field_info) in all_field_info {
         debug!(
             "Getting indices for field {} with offset {parquet_offset}, with index {parquet_index}",
             field.name()
         );
-        match field.data_type() {
-            ArrowDataType::Struct(fields) => {
-                if let Some((index, _, requested_field)) =
-                    requested_schema.fields.get_full(field.name())
-                {
+        if let Some((index, _, requested_field)) = field_info {
+            match field.data_type() {
+                ArrowDataType::Struct(fields) => {
                     if let DataType::Struct(ref requested_schema) = requested_field.data_type {
                         let (parquet_advance, children) = get_indices(
                             parquet_index + parquet_offset,
@@ -372,20 +371,10 @@ fn get_indices(
                     } else {
                         return Err(Error::unexpected_column_type(field.name()));
                     }
-                } else {
-                    // We're NOT selecting this field, but we still need to update how much we skip
-                    debug!("Skipping over un-selected struct: {}", field.name());
-                    // offset by number of inner fields. subtract one, because the enumerate still
-                    // counts this field
-                    parquet_offset += count_cols(field) - 1;
                 }
-            }
-            ArrowDataType::List(list_field)
-            | ArrowDataType::LargeList(list_field)
-            | ArrowDataType::ListView(list_field) => {
-                if let Some((index, _, requested_field)) =
-                    requested_schema.fields.get_full(field.name())
-                {
+                ArrowDataType::List(list_field)
+                | ArrowDataType::LargeList(list_field)
+                | ArrowDataType::ListView(list_field) => {
                     // we just want to transparently recurse into lists, need to transform the kernel
                     // list data type into a schema
                     if let DataType::Array(array_type) = requested_field.data_type() {
@@ -418,11 +407,7 @@ fn get_indices(
                         return Err(Error::unexpected_column_type(list_field.name()));
                     }
                 }
-            }
-            ArrowDataType::Map(key_val_field, _) => {
-                if let Some((index, _, requested_field)) =
-                    requested_schema.fields.get_full(field.name())
-                {
+                ArrowDataType::Map(key_val_field, _) => {
                     match (key_val_field.data_type(), requested_field.data_type()) {
                         (ArrowDataType::Struct(inner_fields), DataType::Map(map_type)) => {
                             let mut key_val_names =
@@ -457,27 +442,31 @@ fn get_indices(
                         }
                     }
                 }
-            }
-            _ => {
-                if let Some((index, _, requested_field)) =
-                    requested_schema.fields.get_full(field.name())
-                {
+                _ => {
                     match ensure_data_types(&requested_field.data_type, field.data_type())? {
-                        DataTypeCompat::Identical =>
-                            reorder_indices.push(ReorderIndex::identity(index)),
-                        DataTypeCompat::NeedsCast(target) =>
-                            reorder_indices.push(ReorderIndex::cast(index, target)),
-                        DataTypeCompat::Nested => return
-                            Err(Error::generic(
-                                "Comparing nested types in get_indices. This is a kernel bug, please report"
-                            ))
-                    }
+                    DataTypeCompat::Identical =>
+                        reorder_indices.push(ReorderIndex::identity(index)),
+                    DataTypeCompat::NeedsCast(target) =>
+                        reorder_indices.push(ReorderIndex::cast(index, target)),
+                    DataTypeCompat::Nested => return
+                        Err(Error::generic(
+                            "Comparing nested types in get_indices. This is a kernel bug, please report"
+                        ))
+                }
                     found_fields.insert(requested_field.name());
                     mask_indices.push(parquet_offset + parquet_index);
                 }
             }
+        } else {
+            // We're NOT selecting this field, but we still need to track how many leaf columns we
+            // skipped over
+            debug!("Skipping over un-selected field: {}", field.name());
+            // offset by number of inner fields. subtract one, because the enumerate still
+            // counts this logical "parent" field
+            parquet_offset += count_cols(field) - 1;
         }
     }
+
     if found_fields.len() != requested_schema.fields.len() {
         // some fields are missing, but they might be nullable, need to insert them into the reorder_indices
         for (requested_position, field) in requested_schema.fields().enumerate() {
@@ -1023,6 +1012,39 @@ mod tests {
             ),
             ReorderIndex::identity(2),
         ];
+        assert_eq!(mask_indices, expect_mask);
+        assert_eq!(reorder_indices, expect_reorder);
+    }
+
+    #[test]
+    fn nested_indices_unselected_list() {
+        let requested_schema = Arc::new(StructType::new(vec![
+            StructField::new("i", DataType::INTEGER, false),
+            StructField::new("j", DataType::INTEGER, false),
+        ]));
+        let parquet_schema = Arc::new(ArrowSchema::new(vec![
+            ArrowField::new("i", ArrowDataType::Int32, false),
+            ArrowField::new(
+                "list",
+                ArrowDataType::List(Arc::new(ArrowField::new(
+                    "nested",
+                    ArrowDataType::Struct(
+                        vec![
+                            ArrowField::new("int32", ArrowDataType::Int32, false),
+                            ArrowField::new("string", ArrowDataType::Utf8, false),
+                        ]
+                        .into(),
+                    ),
+                    false,
+                ))),
+                false,
+            ),
+            ArrowField::new("j", ArrowDataType::Int32, false),
+        ]));
+        let (mask_indices, reorder_indices) =
+            get_requested_indices(&requested_schema, &parquet_schema).unwrap();
+        let expect_mask = vec![0, 3];
+        let expect_reorder = vec![ReorderIndex::identity(0), ReorderIndex::identity(1)];
         assert_eq!(mask_indices, expect_mask);
         assert_eq!(reorder_indices, expect_reorder);
     }
