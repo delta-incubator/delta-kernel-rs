@@ -37,10 +37,11 @@ pub(crate) enum DataTypeCompat {
 
 // Check if two types can be cast
 fn check_cast_compat(
-    source_type: &ArrowDataType,
     target_type: ArrowDataType,
+    source_type: &ArrowDataType,
 ) -> DeltaResult<DataTypeCompat> {
     match (source_type, &target_type) {
+        (source_type, target_type) if source_type == target_type => Ok(DataTypeCompat::Identical),
         (&ArrowDataType::Timestamp(_, _), &ArrowDataType::Timestamp(_, _)) => {
             // timestamps are able to be cast between each other
             Ok(DataTypeCompat::NeedsCast(target_type))
@@ -64,12 +65,7 @@ pub(crate) fn ensure_data_types(
 ) -> DeltaResult<DataTypeCompat> {
     match (kernel_type, arrow_type) {
         (DataType::Primitive(_), _) if arrow_type.is_primitive() => {
-            let converted_type: ArrowDataType = kernel_type.try_into()?;
-            if &converted_type == arrow_type {
-                Ok(DataTypeCompat::Identical)
-            } else {
-                check_cast_compat(arrow_type, converted_type)
-            }
+            check_cast_compat(kernel_type.try_into()?, arrow_type)
         }
         (DataType::Primitive(PrimitiveType::Boolean), ArrowDataType::Boolean)
         | (DataType::Primitive(PrimitiveType::String), ArrowDataType::Utf8)
@@ -91,20 +87,23 @@ pub(crate) fn ensure_data_types(
         }
         (DataType::Map(kernel_map_type), ArrowDataType::Map(arrow_map_type, _)) => {
             if let ArrowDataType::Struct(fields) = arrow_map_type.data_type() {
-                let mut fiter = fields.iter();
-                if let Some(key_type) = fiter.next() {
+                let mut fields = fields.iter();
+                if let Some(key_type) = fields.next() {
                     ensure_data_types(&kernel_map_type.key_type, key_type.data_type())?;
                 } else {
                     return Err(make_arrow_error(
                         "Arrow map struct didn't have a key type".to_string(),
                     ));
                 }
-                if let Some(value_type) = fiter.next() {
+                if let Some(value_type) = fields.next() {
                     ensure_data_types(&kernel_map_type.value_type, value_type.data_type())?;
                 } else {
                     return Err(make_arrow_error(
                         "Arrow map struct didn't have a value type".to_string(),
                     ));
+                }
+                if fields.next().is_some() {
+                    return Err(Error::generic("map fields had more than 2 members"));
                 }
                 Ok(DataTypeCompat::Nested)
             } else {
@@ -117,7 +116,7 @@ pub(crate) fn ensure_data_types(
             // build a list of kernel fields that matches the order of the arrow fields
             let mapped_fields = arrow_fields
                 .iter()
-                .flat_map(|f| kernel_fields.fields.get(f.name()));
+                .filter_map(|f| kernel_fields.fields.get(f.name()));
 
             // keep track of how many fields we matched up
             let mut found_fields = 0;
@@ -129,11 +128,19 @@ pub(crate) fn ensure_data_types(
 
             // require that we found the number of fields that we requested.
             require!(kernel_fields.fields.len() == found_fields, {
-                let kernel_field_names = kernel_fields.fields.keys().join(", ");
-                let arrow_field_names = arrow_fields.iter().map(|f| f.name()).join(", ");
+                let arrow_field_map: HashSet<&String> = HashSet::from_iter(
+                    arrow_fields.iter().map(|f| f.name())
+                );
+                let missing_field_names = kernel_fields.fields.keys().filter_map(|kernel_field| {
+                    if arrow_field_map.contains(kernel_field) {
+                        None
+                    } else {
+                        Some(kernel_field)
+                    }
+                }).take(5).join(", ");
                 make_arrow_error(format!(
-                    "Missing Struct fields. Requested: {}, found: {}",
-                    kernel_field_names, arrow_field_names,
+                    "Missing Struct fields {} (Up to five missing fields shown)",
+                    missing_field_names
                 ))
             });
             Ok(DataTypeCompat::Nested)
@@ -153,17 +160,20 @@ pub(crate) fn ensure_data_types(
 * At a high level there are three schemas/concepts to worry about:
 *  - The parquet file's physical schema (= the columns that are actually available), called
 *    "parquet_schema" below
-*  - The requested logical schema from the engine (= the columns we actually want, a superset of
-*    the read schema), called "requested_schema" below
+*  - The requested logical schema from the engine (= the columns we actually want), called
+*    "requested_schema" below
+*  - The Read schema (and intersection of 1. and 2., in logical schema order). This is never
+*    materialized, but is useful to be able to refer to here
 *  - A `ProjectionMask` that goes to the parquet reader which specifies which subset of columns from
 *    the file schema to actually read. (See "Example" below)
 *
-* In other words, the ProjectionMask is the intersection of file schema and logical schema, and then
-* mapped to indices in the parquet file. Columns unique to the file schema need to be masked out (=
-* ignored), while columns unique to the logical schema need to be backfilled with nulls.
+* In other words, the ProjectionMask is the intersection of the parquet schema and logical schema,
+* and then mapped to indices in the parquet file. Columns unique to the file schema need to be
+* masked out (= ignored), while columns unique to the logical schema need to be backfilled with
+* nulls.
 *
-* We also have to worry about field ordering differences between read schema and logical schema. We
-* represent any reordering needed as a tree. Each level of the tree is a vec of
+* We also have to worry about field ordering differences between the read schema and logical
+* schema. We represent any reordering needed as a tree. Each level of the tree is a vec of
 * `ReorderIndex`s. Each element's index represents a column that will be in the read parquet data
 * (as an arrow StructArray) at that level and index. The `ReorderIndex::index` field of the element
 * is the position that the column should appear in the final output.
@@ -172,14 +182,14 @@ pub(crate) fn ensure_data_types(
 * `reorder_struct_array` respectively.
 
 * `get_requested_indices` generates indices to select, along with reordering information:
-* 1. Loop over each field in parquet_schema, keeping track of how many physical fields (i.e. actual
-*    stored columns) we have seen so far
+* 1. Loop over each field in parquet_schema, keeping track of how many physical fields (i.e. leaf
+*    columns) we have seen so far
 * 2. If a requested field matches the physical field, push the index of the field onto the mask.
 
 * 3. Also push a ReorderIndex element that indicates where this item should be in the final output,
 *    and if it needs any transformation (i.e. casting, create null column)
 * 4. If a nested element (struct/map/list) is encountered, recurse into it, pushing indices onto
-*    the same vector, but producing a new reorder level, which is added to the parent with a `Child`
+*    the same vector, but producing a new reorder level, which is added to the parent with a `Nested`
 *    transform
 *
 * `generate_mask` is simple, and just calls `ProjectionMask::leaves` in the parquet crate with the
@@ -190,16 +200,16 @@ pub(crate) fn ensure_data_types(
 * 2. If ordered we're done (return); otherwise:
 * 3. Create a Vec[None, ..., None] of placeholders that will hold the correctly ordered columns
 * 4. Deconstruct the existing struct array and then loop over the `ReorderIndex` list
-* 5. If the `transform` is Index: put the column at the correct location
-* 6. If the `transform` is Cast: cast the column to the specified type, and put it at the correct
-*     location
-* 7. If the `transform` is Missing: put a column of `null` at the correct location
-* 8. If the `transform` is Child([child_order]) and the data is a `StructArray`, recursively call
-*     `reorder_struct_array` on the column with `child_order` and put the resulting, now correctly
-*     ordered array, at the correct location
-* 9. If the `transform` is Child and the data is a `List<StructArray>`, get the inner struct array
-*     out of the list, reorder it recursively as above, rebuild the list, and the put the column
-*     at the correct location
+* 5. Use the `ReorderIndex::index` value to put the column at the correct location
+* 6. Additionally, if `ReorderIndex::transform` is not `Identity`, then if it is:
+*      - `Cast`: cast the column to the specified type
+*      - `Missing`: put a column of `null` at the correct location
+*      - `Nested([child_order])` and the data is a `StructArray`: recursively call
+*         `reorder_struct_array` on the column with `child_order` to correctly ordered the child
+*         array
+*      - `Nested` and the data is a `List<StructArray>`: get the inner struct array out of the list,
+*         reorder it recursively as above, rebuild the list, and the put the column at the correct
+*         location
 *
 * Example:
 * The parquet crate `ProjectionMask::leaves` method only considers leaf columns -- a "flat" schema -- 
@@ -231,10 +241,10 @@ pub(crate) fn ensure_data_types(
 * The reorder tree is:
 * [
 *   // col a is at position 0 in the struct array, and should be moved to position 1
-*   { index: 1, Child([{ index: 0 }]) },
+*   { index: 1, Nested([{ index: 0 }]) },
 *   // col b is at position 1 in the struct array, and should be moved to position 0
 *   //   also, the inner struct array needs to be reordered to swap 'f' and 'e'
-*   { index: 0, Child([{ index: 1 }, {index: 0}]) },
+*   { index: 0, Nested([{ index: 1 }, {index: 0}]) },
 *   // col c is at position 2 in the struct array, and should stay there
 *   { index: 2 }
 * ]
@@ -256,7 +266,7 @@ pub(crate) enum ReorderIndexTransform {
     /// For a non-nested type, indicates that we need to cast to the contained type
     Cast(ArrowDataType),
     /// Used for struct/list/map. Potentially transform child fields using contained reordering
-    Child(Vec<ReorderIndex>),
+    Nested(Vec<ReorderIndex>),
     /// No work needed to transform this data
     None,
     /// Data is missing, fill in with a null column
@@ -274,7 +284,7 @@ impl ReorderIndex {
     fn new_child(index: usize, children: Vec<ReorderIndex>) -> Self {
         ReorderIndex {
             index,
-            transform: ReorderIndexTransform::Child(children),
+            transform: ReorderIndexTransform::Nested(children),
         }
     }
 
@@ -299,7 +309,7 @@ impl ReorderIndex {
             // if we're casting or inserting null, we need to transform
             ReorderIndexTransform::Cast(_) | ReorderIndexTransform::Missing(_) => true,
             // if our children are not ordered somehow, we need a transform
-            ReorderIndexTransform::Child(ref children) => !is_ordered(children),
+            ReorderIndexTransform::Nested(ref children) => !is_ordered(children),
             // no transform needed
             ReorderIndexTransform::None => false,
         }
@@ -590,7 +600,7 @@ pub(crate) fn reorder_struct_array(
                     );
                     final_fields_cols[reorder_index.index] = Some((new_field, new_col));
                 }
-                ReorderIndexTransform::Child(children) => {
+                ReorderIndexTransform::Nested(children) => {
                     match input_cols[parquet_position].data_type() {
                         ArrowDataType::Struct(_) => {
                             let struct_array = input_cols[parquet_position].as_struct().clone();
@@ -623,7 +633,7 @@ pub(crate) fn reorder_struct_array(
                         // TODO: MAP
                         _ => {
                             return Err(Error::generic(
-                            "Child reorder can only apply to struct/list/map. This is a kernel bug, please report"
+                            "Nested reorder can only apply to struct/list/map. This is a kernel bug, please report"
                         ));
                         }
                     }
@@ -685,7 +695,7 @@ fn reorder_list<O: OffsetSizeTrait>(
         Ok(Some((new_field, list)))
     } else {
         Err(Error::generic(
-            "Child reorder of list should have had struct child. This is a kernel bug, please report"
+            "Nested reorder of list should have had struct child. This is a kernel bug, please report"
         ))
     }
 }
