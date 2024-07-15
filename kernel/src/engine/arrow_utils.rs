@@ -268,7 +268,7 @@ pub(crate) enum ReorderIndexTransform {
     /// Used for struct/list/map. Potentially transform child fields using contained reordering
     Nested(Vec<ReorderIndex>),
     /// No work needed to transform this data
-    None,
+    Identity,
     /// Data is missing, fill in with a null column
     Missing(ArrowFieldRef),
 }
@@ -291,7 +291,7 @@ impl ReorderIndex {
     fn new_none(index: usize) -> Self {
         ReorderIndex {
             index,
-            transform: ReorderIndexTransform::None,
+            transform: ReorderIndexTransform::Identity,
         }
     }
 
@@ -311,7 +311,7 @@ impl ReorderIndex {
             // if our children are not ordered somehow, we need a transform
             ReorderIndexTransform::Nested(ref children) => !is_ordered(children),
             // no transform needed
-            ReorderIndexTransform::None => false,
+            ReorderIndexTransform::Identity => false,
         }
     }
 }
@@ -638,7 +638,7 @@ pub(crate) fn reorder_struct_array(
                         }
                     }
                 }
-                ReorderIndexTransform::None => {
+                ReorderIndexTransform::Identity => {
                     final_fields_cols[reorder_index.index] = Some((
                         input_fields[parquet_position].clone(), // cheap Arc clone
                         input_cols[parquet_position].clone(),   // cheap Arc clone
