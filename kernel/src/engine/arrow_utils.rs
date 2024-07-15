@@ -199,9 +199,10 @@ pub(crate) fn ensure_data_types(
 * `generate_mask` is simple, and just calls `ProjectionMask::leaves` in the parquet crate with the
 * indices computed by `get_requested_indices`
 *
-* `reorder_struct_array` handles reordering:
-* 1. First check if we're already in order (see doc comment for `is_ordered`)
-* 2. If ordered we're done (return); otherwise:
+* `reorder_struct_array` handles reordering and data transforms:
+* 1. First check if we need to do any transformations (see doc comment for
+*    `ordering_needs_transform`)
+* 2. If nothing is required we're done (return); otherwise:
 * 3. Create a Vec[None, ..., None] of placeholders that will hold the correctly ordered columns
 * 4. Deconstruct the existing struct array and then loop over the `ReorderIndex` list
 * 5. Use the `ReorderIndex::index` value to put the column at the correct location
@@ -299,13 +300,13 @@ impl ReorderIndex {
     }
 
     /// Check if this reordering requires a transformation anywhere. See comment below on
-    /// [`is_ordered`] to understand why this is needed.
+    /// [`ordering_needs_transform`] to understand why this is needed.
     fn needs_transform(&self) -> bool {
         match self.transform {
             // if we're casting or inserting null, we need to transform
             ReorderIndexTransform::Cast(_) | ReorderIndexTransform::Missing(_) => true,
-            // if our children are not ordered somehow, we need a transform
-            ReorderIndexTransform::Nested(ref children) => !is_ordered(children),
+            // if our nested ordering needs a transform, we need a transform
+            ReorderIndexTransform::Nested(ref children) => ordering_needs_transform(children),
             // no transform needed
             ReorderIndexTransform::Identity => false,
         }
@@ -539,25 +540,24 @@ pub(crate) fn generate_mask(
     ))
 }
 
-/// Check if an ordering is already ordered. We check if the indices are in ascending order. That's
-/// enough to ensure we don't need to do any transformation on the data read from parquet _iff_
-/// there are no `null` columns to insert and no casts are needed. If we _do_ need to insert a null
-/// column or cast something then we need to transform the data. Therefore we also call
-/// [`needs_transform`] to ensure both the ascending nature of the indices AND that no transform is
-/// required.
-fn is_ordered(requested_ordering: &[ReorderIndex]) -> bool {
+/// Check if an ordering requires transforming the data in any way.  This is true if the indices are
+/// NOT in ascending order (so we have to reorder things), or if we need to do any transformation on
+/// the data read from parquet. We check the ordering here, and also call
+/// `ReorderIndex::needs_transform` on each element to check for other transforms, and to check
+/// `Nested` variants recursively.
+fn ordering_needs_transform(requested_ordering: &[ReorderIndex]) -> bool {
     if requested_ordering.is_empty() {
-        return true;
+        return false;
     }
     // we have >=1 element. check that the first element doesn't need a transform
     if requested_ordering[0].needs_transform() {
-        return false;
+        return true;
     }
-    // now check that all elements are ordered wrt. each other, and internally don't need
-    // transformation
+    // Check for all elements if we need a transform. This is true if any elements are not in order
+    // (i.e. element[i].index < element[i+1].index), or any element needs a transform
     requested_ordering
         .windows(2)
-        .all(|ri| (ri[0].index < ri[1].index) && !ri[1].needs_transform())
+        .any(|ri| (ri[0].index >= ri[1].index) || ri[1].needs_transform())
 }
 
 // we use this as a placeholder for an array and its associated field. We can fill in a Vec of None
@@ -570,7 +570,7 @@ pub(crate) fn reorder_struct_array(
     input_data: StructArray,
     requested_ordering: &[ReorderIndex],
 ) -> DeltaResult<StructArray> {
-    if is_ordered(requested_ordering) {
+    if !ordering_needs_transform(requested_ordering) {
         // indices is already sorted, meaning we requested in the order that the columns were
         // stored in the parquet
         Ok(input_data)
