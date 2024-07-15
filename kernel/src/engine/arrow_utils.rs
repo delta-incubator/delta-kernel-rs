@@ -586,21 +586,22 @@ pub(crate) fn reorder_struct_array(
             // requested_ordering tells us where it is in the parquet data
             match &reorder_index.transform {
                 ReorderIndexTransform::Cast(target) => {
-                    let source_col = input_cols[parquet_position].as_ref();
-                    let new_col = Arc::new(arrow_cast::cast::cast(source_col, target)?);
+                    let col = input_cols[parquet_position].as_ref();
+                    let col = Arc::new(arrow_cast::cast::cast(col, target)?);
                     let new_field = Arc::new(
                         input_fields[parquet_position]
                             .as_ref()
                             .clone()
-                            .with_data_type(new_col.data_type().clone()),
+                            .with_data_type(col.data_type().clone()),
                     );
-                    final_fields_cols[reorder_index.index] = Some((new_field, new_col));
+                    final_fields_cols[reorder_index.index] = Some((new_field, col));
                 }
                 ReorderIndexTransform::Nested(children) => {
                     match input_cols[parquet_position].data_type() {
                         ArrowDataType::Struct(_) => {
                             let struct_array = input_cols[parquet_position].as_struct().clone();
-                            let result_array = reorder_struct_array(struct_array, children)?;
+                            let result_array =
+                                Arc::new(reorder_struct_array(struct_array, children)?);
                             // create the new field specifying the correct order for the struct
                             let new_field = Arc::new(ArrowField::new_struct(
                                 input_fields[parquet_position].name(),
@@ -608,7 +609,7 @@ pub(crate) fn reorder_struct_array(
                                 input_fields[parquet_position].is_nullable(),
                             ));
                             final_fields_cols[reorder_index.index] =
-                                Some((new_field, Arc::new(result_array)));
+                                Some((new_field, result_array));
                         }
                         ArrowDataType::List(_) => {
                             let list_array = input_cols[parquet_position].as_list::<i32>().clone();
