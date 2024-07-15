@@ -444,15 +444,18 @@ fn get_indices(
                 }
                 _ => {
                     match ensure_data_types(&requested_field.data_type, field.data_type())? {
-                    DataTypeCompat::Identical =>
-                        reorder_indices.push(ReorderIndex::identity(index)),
-                    DataTypeCompat::NeedsCast(target) =>
-                        reorder_indices.push(ReorderIndex::cast(index, target)),
-                    DataTypeCompat::Nested => return
-                        Err(Error::generic(
-                            "Comparing nested types in get_indices. This is a kernel bug, please report"
-                        ))
-                }
+                        DataTypeCompat::Identical => {
+                            reorder_indices.push(ReorderIndex::identity(index))
+                        }
+                        DataTypeCompat::NeedsCast(target) => {
+                            reorder_indices.push(ReorderIndex::cast(index, target))
+                        }
+                        DataTypeCompat::Nested => {
+                            return Err(Error::internal_error(
+                                "Comparing nested types in get_indices",
+                            ))
+                        }
+                    }
                     found_fields.insert(requested_field.name());
                     mask_indices.push(parquet_offset + parquet_index);
                 }
@@ -618,9 +621,9 @@ pub(crate) fn reorder_struct_array(
                         }
                         // TODO: MAP
                         _ => {
-                            return Err(Error::generic(
-                            "Nested reorder can only apply to struct/list/map. This is a kernel bug, please report"
-                        ));
+                            return Err(Error::internal_error(
+                                "Nested reorder can only apply to struct/list/map.",
+                            ));
                         }
                     }
                 }
@@ -641,15 +644,14 @@ pub(crate) fn reorder_struct_array(
         let (field_vec, reordered_columns): (Vec<Arc<ArrowField>>, _) =
             final_fields_cols.into_iter().flatten().unzip();
         if field_vec.len() != num_cols {
-            return Err(Error::generic(
-                "Found a None in final_fields_cols. This is a kernel bug, please report.",
-            ));
+            Err(Error::internal_error("Found a None in final_fields_cols."))
+        } else {
+            Ok(StructArray::try_new(
+                field_vec.into(),
+                reordered_columns,
+                null_buffer,
+            )?)
         }
-        Ok(StructArray::try_new(
-            field_vec.into(),
-            reordered_columns,
-            null_buffer,
-        )?)
     }
 }
 
@@ -680,8 +682,8 @@ fn reorder_list<O: OffsetSizeTrait>(
         )?);
         Ok(Some((new_field, list)))
     } else {
-        Err(Error::generic(
-            "Nested reorder of list should have had struct child. This is a kernel bug, please report"
+        Err(Error::internal_error(
+            "Nested reorder of list should have had struct child.",
         ))
     }
 }
