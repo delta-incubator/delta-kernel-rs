@@ -147,6 +147,9 @@ pub enum Error {
     /// Incosistent data passed to struct scalar
     #[error("Invalid struct data: {0}")]
     InvalidStructData(String),
+
+    #[error ("Invalid variant representation: {0}")]
+    InvalidVariantRepresentation(String),
 }
 
 // Convenience constructors for Error types that take a String argument
@@ -191,6 +194,9 @@ impl Error {
     }
     pub fn invalid_struct_data(msg: impl ToString) -> Self {
         Self::InvalidStructData(msg.to_string())
+    }
+    pub fn invalid_variant_representation(msg: impl ToString) -> Self {
+        Self::InvalidVariantRepresentation(msg.to_string())
     }
 
     // Capture a backtrace when the error is constructed.

@@ -1,5 +1,6 @@
 //! Functionality to create and execute scans (reads) over data stored in a delta table
 
+use std::ptr::null;
 use std::sync::Arc;
 
 use itertools::Itertools;
@@ -276,6 +277,45 @@ impl Scan {
             let read_results =
                 parquet_handler.read_parquet_files(&[meta], self.physical_schema.clone(), None)?;
 
+            // The rest of the kernel expects variants to be reconstructed, so they must be
+            // reconstructed immediately after scanning the parquet files.
+            let variant_coalesce_expr = match &self.snapshot.protocol().reader_features {
+                Some(reader_features) => {
+                    // TODO(r.chen): Only check this if the variantType feature is enabled.
+                    // if reader_features.contains(&"variantType-preview".to_string())
+                    let all_fields_expr = 
+                        self.physical_schema
+                            .fields
+                            .iter()
+                            .map(|(_, field)| {
+                                Expression::variant_coalesce(Expression::column(
+                                    field.name.clone(),
+                                ))
+                            })
+                            .collect::<Vec<_>>();
+                    Some(Expression::Struct(all_fields_expr))
+                }
+                None => None,
+            };
+
+            let mut variant_coalesce_results: Vec<DeltaResult<Box<dyn EngineData>>> = vec![];
+            match variant_coalesce_expr {
+                Some(expr) => {
+                    for result in read_results {
+                        let coalesced_batch = engine
+                            .get_expression_handler()
+                            .get_evaluator(
+                                self.physical_schema.clone(),
+                                expr.clone(),
+                                output_schema.clone(),
+                            )
+                            .evaluate(result?.as_ref());
+                        variant_coalesce_results.push(coalesced_batch);
+                    }
+                }
+                None => (),
+            };
+
             let read_expression = if self.have_partition_cols
                 || self.snapshot.column_mapping_mode != ColumnMappingMode::None
             {
@@ -314,7 +354,7 @@ impl Scan {
 
             let mut dv_mask = dv_treemap.map(treemap_to_bools);
 
-            for read_result in read_results {
+            for read_result in variant_coalesce_results {
                 let len = if let Ok(ref res) = read_result {
                     res.length()
                 } else {
