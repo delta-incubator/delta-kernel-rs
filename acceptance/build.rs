@@ -1,9 +1,9 @@
 //! Build script for DAT
 
+use std::env;
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Write};
 use std::path::Path;
-use std::env;
 
 use flate2::read::GzDecoder;
 use tar::Archive;
