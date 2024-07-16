@@ -8,12 +8,13 @@ use arrow::compute::filter_record_batch;
 use arrow::error::ArrowError;
 use arrow::record_batch::RecordBatch;
 use arrow_select::concat::concat_batches;
+use delta_kernel::actions::deletion_vector::split_vector;
 use delta_kernel::engine::arrow_data::ArrowEngineData;
 use delta_kernel::engine::default::executor::tokio::TokioBackgroundExecutor;
 use delta_kernel::engine::default::DefaultEngine;
 use delta_kernel::expressions::{BinaryOperator, Expression};
 use delta_kernel::scan::state::{visit_scan_files, DvInfo, Stats};
-use delta_kernel::scan::{transform_to_logical, Scan, ScanBuilder};
+use delta_kernel::scan::{transform_to_logical, Scan};
 use delta_kernel::schema::Schema;
 use delta_kernel::{DeltaResult, Engine, EngineData, FileMeta, Table};
 use object_store::{memory::InMemory, path::Path, ObjectStore};
@@ -112,7 +113,7 @@ async fn single_commit_two_add_files() -> Result<(), Box<dyn std::error::Error>>
     let expected_data = vec![batch.clone(), batch];
 
     let snapshot = table.snapshot(&engine, None)?;
-    let scan = ScanBuilder::new(snapshot).build()?;
+    let scan = snapshot.into_scan_builder().build()?;
 
     let mut files = 0;
     let stream = scan.execute(&engine)?.into_iter().zip(expected_data);
@@ -163,7 +164,7 @@ async fn two_commits() -> Result<(), Box<dyn std::error::Error>> {
     let expected_data = vec![batch.clone(), batch];
 
     let snapshot = table.snapshot(&engine, None).unwrap();
-    let scan = ScanBuilder::new(snapshot).build()?;
+    let scan = snapshot.into_scan_builder().build()?;
 
     let mut files = 0;
     let stream = scan.execute(&engine)?.into_iter().zip(expected_data);
@@ -218,7 +219,7 @@ async fn remove_action() -> Result<(), Box<dyn std::error::Error>> {
     let expected_data = vec![batch];
 
     let snapshot = table.snapshot(&engine, None)?;
-    let scan = ScanBuilder::new(snapshot).build()?;
+    let scan = snapshot.into_scan_builder().build()?;
 
     let stream = scan.execute(&engine)?.into_iter().zip(expected_data);
 
@@ -338,7 +339,9 @@ async fn stats() -> Result<(), Box<dyn std::error::Error>> {
             left: Box::new(Expression::column("id")),
             right: Box::new(Expression::literal(value)),
         };
-        let scan = ScanBuilder::new(snapshot.clone())
+        let scan = snapshot
+            .clone()
+            .scan_builder()
             .with_predicate(predicate)
             .build()?;
 
@@ -402,7 +405,12 @@ fn read_with_execute(
         .map(|sr| {
             let data = sr.raw_data.unwrap();
             let record_batch = to_arrow(data).unwrap();
-            if let Some(mask) = sr.mask {
+            if let Some(mut mask) = sr.mask {
+                let extra_rows = record_batch.num_rows() - mask.len();
+                if extra_rows > 0 {
+                    // we need to extend the mask here in case it's too short
+                    mask.extend(std::iter::repeat(true).take(extra_rows));
+                }
                 filter_record_batch(&record_batch, &mask.into()).unwrap()
             } else {
                 record_batch
@@ -488,7 +496,7 @@ fn read_with_scan_data(
             .unwrap();
 
             let record_batch = to_arrow(logical).unwrap();
-            let rest = selection_vector.as_mut().map(|mask| mask.split_off(len));
+            let rest = split_vector(selection_vector.as_mut(), len, Some(true));
             let batch = if let Some(mask) = selection_vector.clone() {
                 // apply the selection vector
                 filter_record_batch(&record_batch, &mask.into()).unwrap()
@@ -535,7 +543,8 @@ fn read_table_data(
             .collect();
         Arc::new(Schema::new(selected_fields))
     });
-    let scan = ScanBuilder::new(snapshot)
+    let scan = snapshot
+        .into_scan_builder()
         .with_schema_opt(read_schema)
         .with_predicate_opt(predicate)
         .build()?;
@@ -972,5 +981,24 @@ fn with_predicate_and_removes() -> Result<(), Box<dyn std::error::Error>> {
         )),
         expected,
     )?;
+    Ok(())
+}
+
+#[test]
+fn short_dv() -> Result<(), Box<dyn std::error::Error>> {
+    let expected = vec![
+        "+----+-------+-------------------------+---------------------+",
+        "| id | value | timestamp               | rand                |",
+        "+----+-------+-------------------------+---------------------+",
+        "| 3  | 3     | 2023-05-31T18:58:33.633 | 0.7918174793484931  |",
+        "| 4  | 4     | 2023-05-31T18:58:33.633 | 0.9281049271981882  |",
+        "| 5  | 5     | 2023-05-31T18:58:33.633 | 0.27796520310701633 |",
+        "| 6  | 6     | 2023-05-31T18:58:33.633 | 0.15263801464228832 |",
+        "| 7  | 7     | 2023-05-31T18:58:33.633 | 0.1981143710215575  |",
+        "| 8  | 8     | 2023-05-31T18:58:33.633 | 0.3069439236599195  |",
+        "| 9  | 9     | 2023-05-31T18:58:33.633 | 0.5175919190815845  |",
+        "+----+-------+-------------------------+---------------------+",
+    ];
+    read_table_data_str("./tests/data/with-short-dv/", None, None, expected)?;
     Ok(())
 }

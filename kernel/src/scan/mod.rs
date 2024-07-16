@@ -9,7 +9,7 @@ use url::Url;
 
 use self::log_replay::scan_action_iter;
 use self::state::GlobalScanState;
-use crate::actions::deletion_vector::{treemap_to_bools, DeletionVectorDescriptor};
+use crate::actions::deletion_vector::{split_vector, treemap_to_bools, DeletionVectorDescriptor};
 use crate::actions::{get_log_schema, ADD_NAME, REMOVE_NAME};
 use crate::column_mapping::ColumnMappingMode;
 use crate::expressions::{Expression, Scalar};
@@ -124,8 +124,11 @@ pub struct ScanResult {
     /// Raw engine data as read from the disk for a particular file included in the query
     pub raw_data: DeltaResult<Box<dyn EngineData>>,
     /// If an item at mask\[i\] is true, the row at that row index is valid, otherwise if it is
-    /// false, the row at that row index is invalid and should be ignored. If this is None, all rows
-    /// are valid.
+    /// false, the row at that row index is invalid and should be ignored. If the mask is *shorter*
+    /// than the number of rows returned, missing elements are considered `true`, i.e. included in
+    /// the query. If this is None, all rows are valid. NB: If you are using the default engine and
+    /// plan to call arrow's `filter_record_batch`, you _need_ to extend this vector to the full
+    /// length of the batch or arrow will drop the extra rows
     // TODO(nick) this should be allocated by the engine
     pub mask: Option<Vec<bool>>,
 }
@@ -183,7 +186,11 @@ impl Scan {
     /// scanned. The schema for each row can be obtained by calling [`scan_row_schema`].
     /// - `Vec<bool>`: A selection vector. If a row is at index `i` and this vector is `false` at
     /// index `i`, then that row should *not* be processed (i.e. it is filtered out). If the vector
-    /// is `true` at index `i` the row *should* be processed.
+    /// is `true` at index `i` the row *should* be processed. If the selector vector is *shorter*
+    /// than the number of rows returned, missing elements are considered `true`, i.e. included in
+    /// the query. NB: If you are using the default engine and plan to call arrow's
+    /// `filter_record_batch`, you _need_ to extend this vector to the full length of the batch or
+    /// arrow will drop the extra rows.
     pub fn scan_data(
         &self,
         engine: &dyn Engine,
@@ -448,8 +455,9 @@ fn transform_to_logical_internal(
                         .ok_or_else(|| {
                             Error::generic("logical schema did not contain expected field, can't transform data")
                         })?.1;
+                    let name = field.physical_name(global_state.column_mapping_mode)?;
                     let value_expression = parse_partition_value(
-                        partition_values.get(field.name()),
+                        partition_values.get(name),
                         field.data_type(),
                     )?;
                     Ok::<Expression, Error>(Expression::Literal(value_expression))
@@ -610,7 +618,7 @@ mod tests {
 
         let table = Table::new(url);
         let snapshot = table.snapshot(&engine, None).unwrap();
-        let scan = ScanBuilder::new(snapshot).build().unwrap();
+        let scan = snapshot.into_scan_builder().build().unwrap();
         let files = get_files_for_scan(scan, &engine).unwrap();
         assert_eq!(files.len(), 1);
         assert_eq!(
@@ -628,7 +636,7 @@ mod tests {
 
         let table = Table::new(url);
         let snapshot = table.snapshot(&engine, None).unwrap();
-        let scan = ScanBuilder::new(snapshot).build().unwrap();
+        let scan = snapshot.into_scan_builder().build().unwrap();
         let files = scan.execute(&engine).unwrap();
 
         assert_eq!(files.len(), 1);
@@ -691,7 +699,7 @@ mod tests {
 
         let table = Table::new(url);
         let snapshot = table.snapshot(&engine, None)?;
-        let scan = ScanBuilder::new(snapshot).build()?;
+        let scan = snapshot.into_scan_builder().build()?;
         let files = get_files_for_scan(scan, &engine)?;
         // test case:
         //
