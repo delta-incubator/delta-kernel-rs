@@ -261,7 +261,7 @@ impl Scan {
             self.logical_schema, self.physical_schema
         );
 
-        let global_state = self.global_scan_state();
+        let global_state = Arc::new(self.global_scan_state());
         let scan_data = self.scan_data(engine)?;
         let mut scan_files = vec![];
         for data in scan_data {
@@ -286,7 +286,7 @@ impl Scan {
                     global_state.read_schema.clone(),
                     None,
                 )?;
-                let gs = global_state.clone();
+                let gs = global_state.clone(); // Arc clone
                 Ok(read_result_iter.into_iter().map(move |read_result| {
                     let read_result = read_result?;
                     // to transform the physical data into the correct logical form
