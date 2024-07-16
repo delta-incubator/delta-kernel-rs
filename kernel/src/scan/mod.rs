@@ -308,7 +308,7 @@ impl Scan {
                     // trying to return a captured variable. We're going to reassign `selection_vector`
                     // to `rest` in a moment anyway
                     let mut sv = selection_vector.take();
-                    let rest = sv.as_mut().map(|mask| mask.split_off(len));
+                    let rest = split_vector(sv.as_mut(), len, None);
                     let result = ScanResult {
                         raw_data: logical,
                         mask: sv,
