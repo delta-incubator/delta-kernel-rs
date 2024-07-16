@@ -261,7 +261,7 @@ impl Scan {
             self.logical_schema, self.physical_schema
         );
 
-        let global_state = Arc::new(self.global_scan_state());
+        let global_state = self.global_scan_state();
         let scan_data = self.scan_data(engine)?;
         let mut scan_files = vec![];
         for data in scan_data {
@@ -298,11 +298,7 @@ impl Scan {
                         &self.all_fields,
                         self.have_partition_cols,
                     );
-                    let len = if let Ok(ref res) = logical {
-                        res.length()
-                    } else {
-                        0
-                    };
+                    let len = logical.as_ref().map_or(0, |res| res.length());
                     // need to split the dv_mask. what's left in dv_mask covers this result, and rest
                     // will cover the following results. we `take()` out of `selection_vector` to avoid
                     // trying to return a captured variable. We're going to reassign `selection_vector`
@@ -414,7 +410,7 @@ pub fn transform_to_logical(
     engine: &dyn Engine,
     data: Box<dyn EngineData>,
     global_state: &GlobalScanState,
-    partition_values: &std::collections::HashMap<String, String>,
+    partition_values: &HashMap<String, String>,
 ) -> DeltaResult<Box<dyn EngineData>> {
     let (all_fields, _read_fields, have_partition_cols) = get_state_info(
         &global_state.logical_schema,
