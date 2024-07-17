@@ -1,6 +1,6 @@
 # Changelog
 
-## [v0.2.0](https://github.com/delta-incubator/delta-kernel-rs/tree/v0.2.0/) (2024-07-TBD)
+## [v0.2.0](https://github.com/delta-incubator/delta-kernel-rs/tree/v0.2.0/) (2024-07-17)
 
 [Full Changelog](https://github.com/delta-incubator/delta-kernel-rs/compare/v0.1.1...v0.2.0)
 
