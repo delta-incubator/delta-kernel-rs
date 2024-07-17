@@ -1,6 +1,6 @@
 use std::{path::Path, sync::Arc};
 
-use arrow_array::RecordBatch;
+use arrow_array::{Array, RecordBatch};
 use arrow_ord::sort::{lexsort_to_indices, SortColumn};
 use arrow_schema::{DataType, Schema};
 use arrow_select::{concat::concat_batches, filter::filter_record_batch, take::take};
@@ -60,14 +60,7 @@ pub fn sort_record_batch(batch: RecordBatch) -> DeltaResult<RecordBatch> {
     Ok(RecordBatch::try_new(batch.schema(), columns)?)
 }
 
-static SKIPPED_TESTS: &[&str; 2] = &[
-    // For all_primitive_types and multi_partitioned_2: The golden table stores the timestamp as an
-    // INT96 (which is nanosecond precision), while the spec says we should read partition columns
-    // as microseconds. This means the read and golden data don't line up. When this is released in
-    // `dat` upstream, we can stop skipping these tests
-    "all_primitive_types",
-    "multi_partitioned_2",
-];
+static SKIPPED_TESTS: &[&str; 0] = &[];
 
 // Ensure that two schema have the same field names, data types, and dict_id/ordering.
 // We ignore:
@@ -91,6 +84,31 @@ fn assert_schema_fields_match(schema: &Schema, golden: &Schema) {
             schema_field.dict_is_ordered() == golden_field.dict_is_ordered(),
             "Field dict_is_ordered doesn't match"
         );
+    }
+}
+
+
+// some things are equivalent, but don't show up as equivalent for `==`, so we normalize here
+fn normalize_col(col: Arc<dyn Array>) -> Arc<dyn Array> {
+    if let DataType::Timestamp(unit, Some(zone)) = col.data_type() {
+        if **zone == *"+00:00" {
+            arrow_cast::cast::cast(&col, &DataType::Timestamp(unit.clone(), Some("UTC".into()))).expect("Could not cast to UTC")
+        } else {
+            col
+        }
+    } else {
+        col
+    }
+}
+
+fn assert_columns_match(actual: &[Arc<dyn Array>], expected: &[Arc<dyn Array>]) {
+    for (actual, expected) in actual.into_iter().zip(expected) {
+        let actual = normalize_col(actual.clone());
+        let expected = normalize_col(expected.clone());
+        if actual != expected.clone() {
+            println!("\n{actual:?}\n{expected:?}");
+        }
+        assert!(actual == expected, "Column data didn't match");
     }
 }
 
@@ -135,10 +153,7 @@ pub async fn assert_scan_data(engine: Arc<dyn Engine>, test_case: &TestCaseInfo)
         .expect("Didn't find golden data");
     let golden = sort_record_batch(golden)?;
 
-    assert!(
-        all_data.columns() == golden.columns(),
-        "Read data does not equal golden data"
-    );
+    assert_columns_match(all_data.columns(), golden.columns());
     assert_schema_fields_match(all_data.schema().as_ref(), golden.schema().as_ref());
     assert!(
         all_data.num_rows() == golden.num_rows(),
