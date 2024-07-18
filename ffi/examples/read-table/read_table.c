@@ -99,12 +99,18 @@ void scan_row_callback(
   void* engine_context,
   KernelStringSlice path,
   int64_t size,
+  const Stats* stats,
   const DvInfo* dv_info,
   const CStringMap* partition_values)
 {
   (void)size; // not using this at the moment
   struct EngineContext* context = engine_context;
-  print_diag("Called back to read file: %.*s\n", (int)path.len, path.ptr);
+  print_diag("Called back to read file: %.*s. (size: %" PRIu64 ", num records: ", (int)path.len, path.ptr, size);
+  if (stats) {
+    print_diag("%" PRId64 ")\n", stats->num_records);
+  } else {
+    print_diag(" [no stats])\n");
+  }
   ExternResultKernelBoolSlice selection_vector_res =
     selection_vector_from_dv(dv_info, context->engine, context->global_state);
   if (selection_vector_res.tag != OkKernelBoolSlice) {

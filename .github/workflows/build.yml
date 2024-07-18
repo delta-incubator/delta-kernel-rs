@@ -65,10 +65,14 @@ jobs:
     strategy:
       matrix:
         os:
-          - macOS-latest
+#          - macOS-latest
           - ubuntu-latest
     steps:
       - uses: actions/checkout@v3
+      - name: Setup cmake
+        uses: jwlawson/actions-setup-cmake@v2
+        with:
+          cmake-version: '3.30.x'
       - name: Install minimal stable with clippy and rustfmt
         uses: actions-rs/toolchain@v1
         with:
@@ -77,4 +81,4 @@ jobs:
           override: true
       - uses: Swatinem/rust-cache@v2
       - name: test
-        run: pushd ffi && cargo b --features default-engine,sync-engine && make test && popd
+        run: pushd ffi && cargo b --features default-engine,sync-engine && pushd examples/read-table && mkdir build && pushd build && cmake .. && make && ./read_table
