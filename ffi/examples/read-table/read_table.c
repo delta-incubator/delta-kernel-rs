@@ -39,7 +39,7 @@ void print_selection_vector(const char* indent, const KernelBoolSlice* selection
 {
 #ifdef VERBOSE
   for (uintptr_t i = 0; i < selection_vec->len; i++) {
-    printf("%ssel[%i] = %b\n", indent, i, selection_vec->ptr[i]);
+    printf("%ssel[%" PRIxPTR "] = %u\n", indent, i, selection_vec->ptr[i]);
   }
 #else
   (void)indent;

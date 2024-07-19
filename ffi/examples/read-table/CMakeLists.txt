@@ -23,7 +23,8 @@ endif(WIN32)
 if(MSVC)
   target_compile_options(read_table PRIVATE /W4 /WX)
 else()
-  target_compile_options(read_table PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  # no-strict-prototypes because arrow headers have fn defs without prototypes
+  target_compile_options(read_table PRIVATE -Wall -Wextra -Wpedantic -Werror -Wno-strict-prototypes)
 endif()
 
 if(PRINT_DATA)

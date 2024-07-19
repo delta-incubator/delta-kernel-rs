@@ -15,7 +15,7 @@ typedef struct ArrowContext
   GArrowBooleanArray* cur_filter;
 } ArrowContext;
 
-ArrowContext* init_arrow_context();
+ArrowContext* init_arrow_context(void);
 void c_read_parquet_file(
   struct EngineContext* context,
   const KernelStringSlice path,
