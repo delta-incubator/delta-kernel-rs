@@ -65,7 +65,7 @@ jobs:
     strategy:
       matrix:
         os:
-#          - macOS-latest
+          - macOS-latest
           - ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -75,13 +75,21 @@ jobs:
           cmake-version: '3.30.x'
       - name: Install arrow-glib
         run: |
-          sudo apt update
-          sudo apt install -y -V ca-certificates lsb-release wget
-          wget https://apache.jfrog.io/artifactory/arrow/$(lsb_release --id --short | tr 'A-Z' 'a-z')/apache-arrow-apt-source-latest-$(lsb_release --codename --short).deb
-          sudo apt install -y -V ./apache-arrow-apt-source-latest-$(lsb_release --codename --short).deb
-          sudo apt update
-          sudo apt install -y -V libarrow-dev # For C++
-          sudo apt install -y -V libarrow-glib-dev # For GLib (C)
+          if [ "$RUNNER_OS" == "Linux" ]; then
+              sudo apt update
+              sudo apt install -y -V ca-certificates lsb-release wget
+              wget https://apache.jfrog.io/artifactory/arrow/$(lsb_release --id --short | tr 'A-Z' 'a-z')/apache-arrow-apt-source-latest-$(lsb_release --codename --short).deb
+              sudo apt install -y -V ./apache-arrow-apt-source-latest-$(lsb_release --codename --short).deb
+              sudo apt update
+              sudo apt install -y -V libarrow-dev # For C++
+              sudo apt install -y -V libarrow-glib-dev # For GLib (C)
+          elif [ "$RUNNER_OS" == "macOD" ]; then
+              brew install apache-arrow
+              brew install apache-arrow-glib
+          else
+              echo "$RUNNER_OS not supported"
+              exit 1
+           fi
       - name: Install minimal stable with clippy and rustfmt
         uses: actions-rs/toolchain@v1
         with:
