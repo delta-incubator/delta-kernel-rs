@@ -91,5 +91,19 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Set output on fail
         run: echo "CTEST_OUTPUT_ON_FAILURE=1" >> "$GITHUB_ENV"
-      - name: test
-        run: pushd ffi && cargo b --features default-engine,sync-engine && pushd examples/read-table && mkdir build && pushd build && cmake .. && make && make test
+      - name: Build kernel
+        run: |
+          pushd acceptance
+          cargo build
+          popd
+          pushd ffi
+          cargo b --features default-engine,sync-engine
+          popd
+      - name: build and run test
+        run: |
+          pushd ffi/examples/read-table
+          mkdir build
+          pushd build
+          cmake ..
+          make
+          make test

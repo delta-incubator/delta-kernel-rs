@@ -3,10 +3,7 @@
 set -euxo pipefail
 
 OUT_FILE=$(mktemp)
-pwd
-ls -l
-./read_table "$1"
-cat "$OUT_FILE"
+./read_table "$1" | tee "$OUT_FILE"
 diff -s "$OUT_FILE" "$2"
 DIFF_EXIT_CODE=$?
 echo "Diff exited with $DIFF_EXIT_CODE"
