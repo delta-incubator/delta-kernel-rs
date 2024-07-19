@@ -81,4 +81,4 @@ jobs:
           override: true
       - uses: Swatinem/rust-cache@v2
       - name: test
-        run: pushd ffi && cargo b --features default-engine,sync-engine && pushd examples/read-table && mkdir build && pushd build && cmake .. && make && ./read_table
+        run: pushd ffi && cargo b --features default-engine,sync-engine && pushd examples/read-table && mkdir build && pushd build && cmake .. && make && make test
