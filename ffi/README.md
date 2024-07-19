@@ -29,6 +29,14 @@ By default this has a dependency on
 [`arrow-glib`](https://github.com/apache/arrow/blob/main/c_glib/README.md). You can read install
 instructions for your platform [here](https://arrow.apache.org/install/).
 
+If you don't want to install `arrow-glib` you can run the above `cmake` command as:
+
+```sh
+cmake -DPRINT_DATA=no ..
+```
+
+and the example will only print out the schema of the table, not the data.
+
 ### C/C++ Extension (VSCode)
 
 By default the VSCode C/C++ Extension does not use any defines flags. You can open `settings.json` and set the following line:
