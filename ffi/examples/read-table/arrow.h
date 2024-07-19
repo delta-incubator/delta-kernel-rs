@@ -6,12 +6,14 @@
 
 #include "delta_kernel_ffi.h"
 #include "read_table.h"
+
+#include <glib.h>
 #include <arrow-glib/arrow-glib.h>
 
 typedef struct ArrowContext
 {
   gsize num_batches;
-  GArrowRecordBatch** batches;
+  GList* batches;
   GArrowBooleanArray* cur_filter;
 } ArrowContext;
 

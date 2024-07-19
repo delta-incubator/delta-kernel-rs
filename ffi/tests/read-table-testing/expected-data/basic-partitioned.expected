@@ -6,60 +6,27 @@ Schema:
 ├─ number: long
 └─ a_float: double
 
-
-Table Data:
------------
-
-number: int64
-a_float: double
-letter: string
-----
-number:
-  [
-    [
-      4
-    ],
-    [
-      5
-    ],
-  ...,
-    [
-      2
-    ],
-    [
-      3
-    ]
-  ]
-a_float:
-  [
-    [
-      4.4
-    ],
-    [
-      5.5
-    ],
-  ...,
-    [
-      2.2
-    ],
-    [
-      3.3
-    ]
-  ]
-letter:
-  [
-    [
-      "a"
-    ],
-    [
-      "e"
-    ],
-  ...,
-    [
-      "b"
-    ],
-    [
-      "c"
-    ]
-  ]
-
+number:  [
+  4,
+  5,
+  6,
+  1,
+  2,
+  3
+]
+a_float:  [
+  4.4,
+  5.5,
+  6.6,
+  1.1,
+  2.2,
+  3.3
+]
+letter:  [
+  "a",
+  "e",
+  "f",
+  "a",
+  "b",
+  "c"
+]

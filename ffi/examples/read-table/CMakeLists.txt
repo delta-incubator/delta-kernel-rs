@@ -30,6 +30,7 @@ endif()
 
 if(PRINT_DATA)
   include(FindPkgConfig)
+  pkg_check_modules(GLIB REQUIRED glib-2.0)
   pkg_check_modules(ARROW_GLIB REQUIRED arrow-glib)
   target_include_directories(read_table PUBLIC ${ARROW_GLIB_INCLUDE_DIRS})
   target_link_directories(read_table PUBLIC ${ARROW_GLIB_LIBRARY_DIRS})
