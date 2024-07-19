@@ -5,7 +5,7 @@ set -euxo pipefail
 OUT_FILE=$(mktemp)
 pwd
 ls -l
-./read_table "$1" > "$OUT_FILE"
+./read_table "$1"
 cat "$OUT_FILE"
 diff -s "$OUT_FILE" "$2"
 DIFF_EXIT_CODE=$?
