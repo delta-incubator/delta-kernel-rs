@@ -8,6 +8,13 @@ target_link_directories(read_table PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/../../../
 target_link_libraries(read_table PUBLIC delta_kernel_ffi)
 target_compile_options(read_table PUBLIC)
 
+# Add the test
+include(CTest)
+set(TestRunner "../../../tests/read-table-testing/run_test.sh")
+set(DatPath "../../../../acceptance/tests/dat/out/reader_tests/generated")
+set(ExpectedPath "../../../tests/read-table-testing/expected-data")
+add_test(NAME read_and_print_all_prim COMMAND ${TestRunner} ${DatPath}/all_primitive_types/delta/ ${ExpectedPath}/all-prim-types.expected)
+
 if(WIN32)
   set(CMAKE_C_FLAGS_DEBUG "/MT")
   target_link_libraries(read_table PUBLIC ws2_32 userenv bcrypt ntdll)
