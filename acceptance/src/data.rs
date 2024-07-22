@@ -62,8 +62,9 @@ pub fn sort_record_batch(batch: RecordBatch) -> DeltaResult<RecordBatch> {
 
 static SKIPPED_TESTS: &[&str; 0] = &[];
 
-// Ensure that two schema have the same field names, data types, and dict_id/ordering.
+// Ensure that two schema have the same field names, and dict_id/ordering.
 // We ignore:
+//  - data type: This is checked already in `assert_columns_match`
 //  - nullability: parquet marks many things as nullable that we don't in our schema
 //  - metadata: because that diverges from the real data to the golden tabled data
 fn assert_schema_fields_match(schema: &Schema, golden: &Schema) {
@@ -71,10 +72,6 @@ fn assert_schema_fields_match(schema: &Schema, golden: &Schema) {
         assert!(
             schema_field.name() == golden_field.name(),
             "Field names don't match"
-        );
-        assert!(
-            schema_field.data_type() == golden_field.data_type(),
-            "Field data types don't match"
         );
         assert!(
             schema_field.dict_id() == golden_field.dict_id(),
@@ -87,12 +84,12 @@ fn assert_schema_fields_match(schema: &Schema, golden: &Schema) {
     }
 }
 
-
 // some things are equivalent, but don't show up as equivalent for `==`, so we normalize here
 fn normalize_col(col: Arc<dyn Array>) -> Arc<dyn Array> {
     if let DataType::Timestamp(unit, Some(zone)) = col.data_type() {
         if **zone == *"+00:00" {
-            arrow_cast::cast::cast(&col, &DataType::Timestamp(unit.clone(), Some("UTC".into()))).expect("Could not cast to UTC")
+            arrow_cast::cast::cast(&col, &DataType::Timestamp(unit.clone(), Some("UTC".into())))
+                .expect("Could not cast to UTC")
         } else {
             col
         }
@@ -102,13 +99,19 @@ fn normalize_col(col: Arc<dyn Array>) -> Arc<dyn Array> {
 }
 
 fn assert_columns_match(actual: &[Arc<dyn Array>], expected: &[Arc<dyn Array>]) {
-    for (actual, expected) in actual.into_iter().zip(expected) {
+    for (actual, expected) in actual.iter().zip(expected) {
         let actual = normalize_col(actual.clone());
         let expected = normalize_col(expected.clone());
-        if actual != expected.clone() {
-            println!("\n{actual:?}\n{expected:?}");
-        }
-        assert!(actual == expected, "Column data didn't match");
+        assert_eq!(
+            &actual, &expected,
+            "Column data didn't match. Got {actual:?}, expected {expected:?}"
+        );
+        let actual_dt = actual.data_type();
+        let expected_dt = expected.data_type();
+        assert_eq!(
+            actual_dt, expected_dt,
+            "Column data types didn't match. Got {actual_dt:?}, expected {expected_dt:?}"
+        );
     }
 }
 
