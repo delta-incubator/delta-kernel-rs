@@ -88,7 +88,7 @@ fn assert_schema_fields_match(schema: &Schema, golden: &Schema) {
 fn normalize_col(col: Arc<dyn Array>) -> Arc<dyn Array> {
     if let DataType::Timestamp(unit, Some(zone)) = col.data_type() {
         if **zone == *"+00:00" {
-            arrow_cast::cast::cast(&col, &DataType::Timestamp(unit.clone(), Some("UTC".into())))
+            arrow_cast::cast::cast(&col, &DataType::Timestamp(*unit, Some("UTC".into())))
                 .expect("Could not cast to UTC")
         } else {
             col
