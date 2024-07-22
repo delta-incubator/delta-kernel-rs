@@ -82,7 +82,6 @@ jobs:
               wget https://apache.jfrog.io/artifactory/arrow/$(lsb_release --id --short | tr 'A-Z' 'a-z')/apache-arrow-apt-source-latest-$(lsb_release --codename --short).deb.sha512
               sha512sum -c apache-arrow-apt-source-latest-$(lsb_release --codename --short).deb.sha512 || exit 1
               sudo apt install -y -V ./apache-arrow-apt-source-latest-$(lsb_release --codename --short).deb
-              exit 1
               sudo apt update
               sudo apt install -y -V libarrow-dev # For C++
               sudo apt install -y -V libarrow-glib-dev # For GLib (C)
