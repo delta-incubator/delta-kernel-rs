@@ -1,7 +1,7 @@
 #pragma once
 
 // uncomment below for more diagnotic messages
-#define VERBOSE
+// #define VERBOSE
 
 #include <delta_kernel_ffi.h>
 
