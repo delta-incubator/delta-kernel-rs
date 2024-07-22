@@ -102,15 +102,11 @@ fn assert_columns_match(actual: &[Arc<dyn Array>], expected: &[Arc<dyn Array>]) 
     for (actual, expected) in actual.iter().zip(expected) {
         let actual = normalize_col(actual.clone());
         let expected = normalize_col(expected.clone());
+        // note that array equality includes data_type equality
+        // See: https://arrow.apache.org/rust/arrow_data/equal/fn.equal.html
         assert_eq!(
             &actual, &expected,
             "Column data didn't match. Got {actual:?}, expected {expected:?}"
-        );
-        let actual_dt = actual.data_type();
-        let expected_dt = expected.data_type();
-        assert_eq!(
-            actual_dt, expected_dt,
-            "Column data types didn't match. Got {actual_dt:?}, expected {expected_dt:?}"
         );
     }
 }
