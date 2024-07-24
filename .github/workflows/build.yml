@@ -74,9 +74,12 @@ jobs:
         uses: jwlawson/actions-setup-cmake@v2
         with:
           cmake-version: '3.30.x'
-      - name: install msys2 on windows
+      - name: install msys2 and arrow on windows
         if: matrix.os == 'windows-latest'
         uses: msys2/setup-msys2@v2
+        with:
+          update: true
+          install: mingw-w64-ucrt-x86_64-arrow
       - name: Install arrow-glib
         shell: bash
         run: |
@@ -94,7 +97,7 @@ jobs:
               brew install apache-arrow
               brew install apache-arrow-glib
           elif [ "$RUNNER_OS" == "Windows" ]; then
-              pacman -S --noconfirm mingw-w64-ucrt-x86_64-arrow
+              echo "Handled by previous step"
           else
               echo "$RUNNER_OS not supported"
               exit 1
