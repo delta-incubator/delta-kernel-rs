@@ -20,6 +20,12 @@ pub type SchemaRef = Arc<StructType>;
 pub enum MetadataValue {
     Number(i32),
     String(String),
+    Boolean(bool),
+    // The [PROTOCOL](https://github.com/delta-io/delta/blob/master/PROTOCOL.md#struct-field) states
+    // only that the metadata is "A JSON map containing information about this column.", so we can
+    // actually have any valid json here. `Other` is therefore a catchall for things we don't need
+    // to handle.
+    Other(serde_json::Value),
 }
 
 impl From<String> for MetadataValue {
@@ -37,6 +43,12 @@ impl From<&String> for MetadataValue {
 impl From<i32> for MetadataValue {
     fn from(value: i32) -> Self {
         Self::Number(value)
+    }
+}
+
+impl From<bool> for MetadataValue {
+    fn from(value: bool) -> Self {
+        Self::Boolean(value)
     }
 }
 
@@ -320,6 +332,14 @@ impl MapType {
     pub const fn value_contains_null(&self) -> bool {
         self.value_contains_null
     }
+
+    /// Create a schema assuming the map is stored as a struct with the specified key and value field names
+    pub fn as_struct_schema(&self, key_name: String, val_name: String) -> Schema {
+        StructType::new(vec![
+            StructField::new(key_name, self.key_type.clone(), false),
+            StructField::new(val_name, self.value_type.clone(), self.value_contains_null),
+        ])
+    }
 }
 
 fn default_true() -> bool {
@@ -398,10 +418,10 @@ impl Display for PrimitiveType {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             PrimitiveType::String => write!(f, "string"),
-            PrimitiveType::Long => write!(f, "bigint"),
-            PrimitiveType::Integer => write!(f, "int"),
-            PrimitiveType::Short => write!(f, "smallint"),
-            PrimitiveType::Byte => write!(f, "tinyint"),
+            PrimitiveType::Long => write!(f, "long"),
+            PrimitiveType::Integer => write!(f, "integer"),
+            PrimitiveType::Short => write!(f, "short"),
+            PrimitiveType::Byte => write!(f, "byte"),
             PrimitiveType::Float => write!(f, "float"),
             PrimitiveType::Double => write!(f, "double"),
             PrimitiveType::Boolean => write!(f, "boolean"),
@@ -410,7 +430,7 @@ impl Display for PrimitiveType {
             PrimitiveType::Timestamp => write!(f, "timestamp"),
             PrimitiveType::TimestampNtz => write!(f, "timestamp_ntz"),
             PrimitiveType::Decimal(precision, scale) => {
-                write!(f, "decimal({}, {})", precision, scale)
+                write!(f, "decimal({},{})", precision, scale)
             }
         }
     }
@@ -446,6 +466,12 @@ impl From<StructType> for DataType {
 impl From<ArrayType> for DataType {
     fn from(array_type: ArrayType) -> Self {
         DataType::Array(Box::new(array_type))
+    }
+}
+
+impl From<SchemaRef> for DataType {
+    fn from(schema: SchemaRef) -> Self {
+        Arc::unwrap_or_clone(schema).into()
     }
 }
 

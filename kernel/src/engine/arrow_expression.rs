@@ -1,7 +1,7 @@
 //! Expression handling based on arrow-rs compute kernels.
 use std::sync::Arc;
 
-use arrow_arith::boolean::{and, is_null, not, or};
+use arrow_arith::boolean::{and_kleene, is_null, not, or_kleene};
 use arrow_arith::numeric::{add, div, mul, sub};
 use arrow_array::cast::AsArray;
 use arrow_array::{
@@ -17,10 +17,10 @@ use itertools::Itertools;
 
 use super::arrow_conversion::LIST_ARRAY_ROOT;
 use crate::engine::arrow_data::ArrowEngineData;
+use crate::engine::arrow_utils::ensure_data_types;
 use crate::error::{DeltaResult, Error};
 use crate::expressions::{BinaryOperator, Expression, Scalar, UnaryOperator, VariadicOperator};
 use crate::schema::{DataType, PrimitiveType, SchemaRef};
-use crate::utils::require;
 use crate::{EngineData, ExpressionEvaluator, ExpressionHandler};
 
 // TODO leverage scalars / Datum
@@ -161,80 +161,6 @@ fn column_as_struct<'a>(
         .ok_or(ArrowError::SchemaError(format!("{} is not a struct", name)))
 }
 
-fn make_arrow_error(s: String) -> Error {
-    Error::Arrow(arrow_schema::ArrowError::InvalidArgumentError(s))
-}
-
-/// Ensure a kernel data type matches an arrow data type. This only ensures that the actual "type"
-/// is the same, but does so recursively into structs, and ensures lists and maps have the correct
-/// associated types as well. This returns an `Ok(())` if the types are compatible, or an error if
-/// the types do not match.
-fn ensure_data_types(kernel_type: &DataType, arrow_type: &ArrowDataType) -> DeltaResult<()> {
-    match (kernel_type, arrow_type) {
-        (DataType::Primitive(_), _) if arrow_type.is_primitive() => Ok(()),
-        (DataType::Primitive(PrimitiveType::Boolean), ArrowDataType::Boolean)
-        | (DataType::Primitive(PrimitiveType::String), ArrowDataType::Utf8)
-        | (DataType::Primitive(PrimitiveType::Binary), ArrowDataType::Binary) => {
-            // strings, bools, and binary  aren't primitive in arrow
-            Ok(())
-        }
-        (
-            DataType::Primitive(PrimitiveType::Decimal(kernel_prec, kernel_scale)),
-            ArrowDataType::Decimal128(arrow_prec, arrow_scale),
-        ) if arrow_prec == kernel_prec && *arrow_scale == *kernel_scale as i8 => {
-            // decimal isn't primitive in arrow. cast above is okay as we limit range
-            Ok(())
-        }
-        (DataType::Array(inner_type), ArrowDataType::List(arrow_list_type)) => {
-            let kernel_array_type = &inner_type.element_type;
-            let arrow_list_type = arrow_list_type.data_type();
-            ensure_data_types(kernel_array_type, arrow_list_type)
-        }
-        (DataType::Map(kernel_map_type), ArrowDataType::Map(arrow_map_type, _)) => {
-            if let ArrowDataType::Struct(fields) = arrow_map_type.data_type() {
-                let mut fiter = fields.iter();
-                if let Some(key_type) = fiter.next() {
-                    ensure_data_types(&kernel_map_type.key_type, key_type.data_type())?;
-                } else {
-                    return Err(make_arrow_error(
-                        "Arrow map struct didn't have a key type".to_string(),
-                    ));
-                }
-                if let Some(value_type) = fiter.next() {
-                    ensure_data_types(&kernel_map_type.value_type, value_type.data_type())?;
-                } else {
-                    return Err(make_arrow_error(
-                        "Arrow map struct didn't have a value type".to_string(),
-                    ));
-                }
-                Ok(())
-            } else {
-                Err(make_arrow_error(
-                    "Arrow map type wasn't a struct.".to_string(),
-                ))
-            }
-        }
-        (DataType::Struct(kernel_fields), ArrowDataType::Struct(arrow_fields)) => {
-            require!(
-                kernel_fields.fields.len() == arrow_fields.len(),
-                make_arrow_error(format!(
-                    "Struct types have different numbers of fields. Expected {}, got {}",
-                    kernel_fields.fields.len(),
-                    arrow_fields.len()
-                ))
-            );
-            for (kernel_field, arrow_field) in kernel_fields.fields().zip(arrow_fields.iter()) {
-                ensure_data_types(&kernel_field.data_type, arrow_field.data_type())?;
-            }
-            Ok(())
-        }
-        _ => Err(make_arrow_error(format!(
-            "Incorrect datatype. Expected {}, got {}",
-            kernel_type, arrow_type
-        ))),
-    }
-}
-
 fn evaluate_expression(
     expression: &Expression,
     batch: &RecordBatch,
@@ -314,8 +240,8 @@ fn evaluate_expression(
         (VariadicOperation { op, exprs }, None | Some(&DataType::BOOLEAN)) => {
             type Operation = fn(&BooleanArray, &BooleanArray) -> Result<BooleanArray, ArrowError>;
             let (reducer, default): (Operation, _) = match op {
-                VariadicOperator::And => (and, true),
-                VariadicOperator::Or => (or, false),
+                VariadicOperator::And => (and_kleene, true),
+                VariadicOperator::Or => (or_kleene, false),
             };
             exprs
                 .iter()

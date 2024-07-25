@@ -1,20 +1,36 @@
 cmake_minimum_required(VERSION 3.12)
 project(read_table)
 option(PRINT_DATA "Print out the table data. Requires arrow-glib" ON)
-add_executable(read_table read_table.c)
+add_executable(read_table read_table.c arrow.c)
 target_compile_definitions(read_table PUBLIC DEFINE_DEFAULT_ENGINE)
 target_include_directories(read_table PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/../../../target/ffi-headers")
 target_link_directories(read_table PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/../../../target/debug")
 target_link_libraries(read_table PUBLIC delta_kernel_ffi)
 target_compile_options(read_table PUBLIC)
 
+# Add the test
+include(CTest)
+set(TestRunner "../../../tests/read-table-testing/run_test.sh")
+set(DatPath "../../../../acceptance/tests/dat/out/reader_tests/generated")
+set(ExpectedPath "../../../tests/read-table-testing/expected-data")
+add_test(NAME read_and_print_all_prim COMMAND ${TestRunner} ${DatPath}/all_primitive_types/delta/ ${ExpectedPath}/all-prim-types.expected)
+add_test(NAME read_and_print_basic_partitioned COMMAND ${TestRunner} ${DatPath}/basic_partitioned/delta/ ${ExpectedPath}/basic-partitioned.expected)
+
 if(WIN32)
   set(CMAKE_C_FLAGS_DEBUG "/MT")
   target_link_libraries(read_table PUBLIC ws2_32 userenv bcrypt ntdll)
 endif(WIN32)
 
+if(MSVC)
+  target_compile_options(read_table PRIVATE /W4 /WX)
+else()
+  # no-strict-prototypes because arrow headers have fn defs without prototypes
+  target_compile_options(read_table PRIVATE -Wall -Wextra -Wpedantic -Werror -Wno-strict-prototypes)
+endif()
+
 if(PRINT_DATA)
   include(FindPkgConfig)
+  pkg_check_modules(GLIB REQUIRED glib-2.0)
   pkg_check_modules(ARROW_GLIB REQUIRED arrow-glib)
   target_include_directories(read_table PUBLIC ${ARROW_GLIB_INCLUDE_DIRS})
   target_link_directories(read_table PUBLIC ${ARROW_GLIB_LIBRARY_DIRS})

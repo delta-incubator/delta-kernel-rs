@@ -9,7 +9,6 @@ use delta_kernel::engine::arrow_data::ArrowEngineData;
 use delta_kernel::engine::default::executor::tokio::TokioBackgroundExecutor;
 use delta_kernel::engine::default::DefaultEngine;
 use delta_kernel::engine::sync::SyncEngine;
-use delta_kernel::scan::ScanBuilder;
 use delta_kernel::schema::Schema;
 use delta_kernel::{DeltaResult, Engine, Table};
 
@@ -31,6 +30,16 @@ struct Cli {
     /// Comma separated list of columns to select
     #[arg(long, value_delimiter=',', num_args(0..))]
     columns: Option<Vec<String>>,
+
+    /// Region to specify to the cloud access store (only applies if using the default engine)
+    #[arg(long)]
+    region: Option<String>,
+
+    /// Specify that the table is "public" (i.e. no cloud credentials are needed). This is required
+    /// for things like s3 public buckets, otherwise the kernel will try and authenticate by talking
+    /// to the aws metadata server, which will fail unless you're on an ec2 instance.
+    #[arg(long)]
+    public: bool,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
@@ -60,11 +69,21 @@ fn try_main() -> DeltaResult<()> {
     println!("Reading {}", table.location());
 
     let engine: Box<dyn Engine> = match cli.engine {
-        EngineType::Default => Box::new(DefaultEngine::try_new(
-            table.location(),
-            HashMap::<String, String>::new(),
-            Arc::new(TokioBackgroundExecutor::new()),
-        )?),
+        EngineType::Default => {
+            let mut options = if let Some(region) = cli.region {
+                HashMap::from([("region", region)])
+            } else {
+                HashMap::new()
+            };
+            if cli.public {
+                options.insert("skip_signature", "true".to_string());
+            }
+            Box::new(DefaultEngine::try_new(
+                table.location(),
+                options,
+                Arc::new(TokioBackgroundExecutor::new()),
+            )?)
+        }
         EngineType::Sync => Box::new(SyncEngine::new()),
     };
 
@@ -89,7 +108,8 @@ fn try_main() -> DeltaResult<()> {
             selected_fields.map(|selected_fields| Arc::new(Schema::new(selected_fields)))
         })
         .transpose()?;
-    let scan = ScanBuilder::new(snapshot)
+    let scan = snapshot
+        .into_scan_builder()
         .with_schema_opt(read_schema_opt)
         .build()?;
 
@@ -101,7 +121,12 @@ fn try_main() -> DeltaResult<()> {
             .downcast::<ArrowEngineData>()
             .map_err(|_| delta_kernel::Error::EngineDataType("ArrowEngineData".to_string()))?
             .into();
-        let batch = if let Some(mask) = res.mask {
+        let batch = if let Some(mut mask) = res.mask {
+            let extra_rows = record_batch.num_rows() - mask.len();
+            if extra_rows > 0 {
+                // we need to extend the mask here in case it's too short
+                mask.extend(std::iter::repeat(true).take(extra_rows));
+            }
             filter_record_batch(&record_batch, &mask.into())?
         } else {
             record_batch
