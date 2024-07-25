@@ -115,6 +115,14 @@ impl TryFrom<String> for WriterFeatures {
     }
 }
 
+impl std::str::FromStr for WriterFeatures {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        s.try_into()
+    }
+}
+
 impl TryFrom<&str> for WriterFeatures {
     type Error = Error;
 
@@ -164,5 +172,62 @@ impl AsRef<str> for WriterFeatures {
 impl std::fmt::Display for WriterFeatures {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.as_ref())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_roundtrip_reader_features() {
+        let cases = [
+            (ReaderFeatures::ColumnMapping, "columnMapping"),
+            (ReaderFeatures::DeletionVectors, "deletionVectors"),
+            (ReaderFeatures::TimestampWithoutTimezone, "timestampNtz"),
+            (ReaderFeatures::V2Checkpoint, "v2Checkpoint"),
+        ];
+
+        for (feature, expected) in cases.into_iter() {
+            let serialized = serde_json::to_string(&feature).unwrap();
+            assert_eq!(serialized, format!("\"{}\"", expected));
+
+            let deserialized: ReaderFeatures = serde_json::from_str(&serialized).unwrap();
+            assert_eq!(deserialized, feature);
+
+            let from_str: ReaderFeatures = expected.parse().unwrap();
+            assert_eq!(from_str, feature);
+        }
+    }
+
+    #[test]
+    fn test_roundtrip_writer_features() {
+        let cases = [
+            (WriterFeatures::AppendOnly, "appendOnly"),
+            (WriterFeatures::Invariants, "invariants"),
+            (WriterFeatures::CheckConstraints, "checkConstraints"),
+            (WriterFeatures::ChangeDataFeed, "changeDataFeed"),
+            (WriterFeatures::GeneratedColumns, "generatedColumns"),
+            (WriterFeatures::ColumnMapping, "columnMapping"),
+            (WriterFeatures::IdentityColumns, "identityColumns"),
+            (WriterFeatures::DeletionVectors, "deletionVectors"),
+            (WriterFeatures::RowTracking, "rowTracking"),
+            (WriterFeatures::TimestampWithoutTimezone, "timestampNtz"),
+            (WriterFeatures::DomainMetadata, "domainMetadata"),
+            (WriterFeatures::V2Checkpoint, "v2Checkpoint"),
+            (WriterFeatures::IcebergCompatV1, "icebergCompatV1"),
+            (WriterFeatures::IcebergCompatV2, "icebergCompatV2"),
+        ];
+
+        for (feature, expected) in cases.into_iter() {
+            let serialized = serde_json::to_string(&feature).unwrap();
+            assert_eq!(serialized, format!("\"{}\"", expected));
+
+            let deserialized: WriterFeatures = serde_json::from_str(&serialized).unwrap();
+            assert_eq!(deserialized, feature);
+
+            let from_str: WriterFeatures = expected.parse().unwrap();
+            assert_eq!(from_str, feature);
+        }
     }
 }
