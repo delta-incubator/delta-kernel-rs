@@ -128,15 +128,15 @@ impl TryFrom<&str> for WriterFeatures {
 
     fn try_from(value: &str) -> Result<Self, Self::Error> {
         let val = match value {
-            "appendOnly" | "delta.appendOnly" => WriterFeatures::AppendOnly,
-            "invariants" | "delta.invariants" => WriterFeatures::Invariants,
-            "checkConstraints" | "delta.checkConstraints" => WriterFeatures::CheckConstraints,
-            "changeDataFeed" | "delta.enableChangeDataFeed" => WriterFeatures::ChangeDataFeed,
+            "appendOnly" => WriterFeatures::AppendOnly,
+            "invariants" => WriterFeatures::Invariants,
+            "checkConstraints" => WriterFeatures::CheckConstraints,
+            "changeDataFeed" => WriterFeatures::ChangeDataFeed,
             "generatedColumns" => WriterFeatures::GeneratedColumns,
             "columnMapping" => WriterFeatures::ColumnMapping,
             "identityColumns" => WriterFeatures::IdentityColumns,
-            "deletionVectors" | "delta.enableDeletionVectors" => WriterFeatures::DeletionVectors,
-            "rowTracking" | "delta.enableRowTracking" => WriterFeatures::RowTracking,
+            "deletionVectors" => WriterFeatures::DeletionVectors,
+            "rowTracking" => WriterFeatures::RowTracking,
             "timestampNtz" => WriterFeatures::TimestampWithoutTimezone,
             "domainMetadata" => WriterFeatures::DomainMetadata,
             "v2Checkpoint" => WriterFeatures::V2Checkpoint,
