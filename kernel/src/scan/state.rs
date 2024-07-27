@@ -8,6 +8,7 @@ use crate::{
         visitors::visit_deletion_vector_at,
     },
     engine_data::{GetData, TypedGetData},
+    features::ColumnMappingMode,
     schema::SchemaRef,
     DataVisitor, DeltaResult, Engine, EngineData, Error,
 };
