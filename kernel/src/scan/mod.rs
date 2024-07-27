@@ -7,8 +7,6 @@ use itertools::Itertools;
 use tracing::debug;
 use url::Url;
 
-use self::log_replay::scan_action_iter;
-use self::state::GlobalScanState;
 use crate::actions::deletion_vector::{split_vector, treemap_to_bools, DeletionVectorDescriptor};
 use crate::actions::{get_log_schema, ADD_NAME, REMOVE_NAME};
 use crate::expressions::{Expression, Scalar};
@@ -17,6 +15,9 @@ use crate::scan::state::{DvInfo, Stats};
 use crate::schema::{DataType, Schema, SchemaRef, StructField, StructType};
 use crate::snapshot::Snapshot;
 use crate::{DeltaResult, Engine, EngineData, Error, FileMeta};
+
+use self::log_replay::scan_action_iter;
+use self::state::GlobalScanState;
 
 mod data_skipping;
 pub mod log_replay;
@@ -579,10 +580,11 @@ pub(crate) mod test_utils {
 mod tests {
     use std::path::PathBuf;
 
-    use super::*;
     use crate::engine::sync::SyncEngine;
     use crate::schema::PrimitiveType;
     use crate::Table;
+
+    use super::*;
 
     fn get_files_for_scan(scan: Scan, engine: &dyn Engine) -> DeltaResult<Vec<String>> {
         let scan_data = scan.scan_data(engine)?;
