@@ -1,15 +1,15 @@
 use serde::{Deserialize, Serialize};
 
-use crate::Error;
-
 pub use column_mapping::ColumnMappingMode;
 pub(crate) use column_mapping::COLUMN_MAPPING_MODE_KEY;
+use strum::{Display as StrumDisplay, EnumString};
 
 mod column_mapping;
 
 /// Features table readers can support as well as let users know
 /// what is supported
-#[derive(Serialize, Deserialize, Debug, Clone, Eq, PartialEq, Hash)]
+#[derive(Serialize, Deserialize, Debug, Clone, Eq, PartialEq, EnumString, StrumDisplay)]
+#[strum(serialize_all = "camelCase")]
 #[serde(rename_all = "camelCase")]
 pub enum ReaderFeatures {
     /// Mapping of one column to another
@@ -17,63 +17,17 @@ pub enum ReaderFeatures {
     /// Deletion vectors for merge, update, delete
     DeletionVectors,
     /// timestamps without timezone support
+    #[strum(serialize = "timestampNtz")]
     #[serde(rename = "timestampNtz")]
     TimestampWithoutTimezone,
     /// version 2 of checkpointing
     V2Checkpoint,
 }
 
-impl TryFrom<String> for ReaderFeatures {
-    type Error = Error;
-
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        value.as_str().try_into()
-    }
-}
-
-impl TryFrom<&str> for ReaderFeatures {
-    type Error = Error;
-
-    fn try_from(value: &str) -> Result<Self, Self::Error> {
-        let val = match value {
-            "columnMapping" => ReaderFeatures::ColumnMapping,
-            "deletionVectors" => ReaderFeatures::DeletionVectors,
-            "timestampNtz" => ReaderFeatures::TimestampWithoutTimezone,
-            "v2Checkpoint" => ReaderFeatures::V2Checkpoint,
-            _ => return Err(Error::generic(format!("Unknown reader feature: {}", value))),
-        };
-        Ok(val)
-    }
-}
-
-impl std::str::FromStr for ReaderFeatures {
-    type Err = Error;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        s.try_into()
-    }
-}
-
-impl AsRef<str> for ReaderFeatures {
-    fn as_ref(&self) -> &str {
-        match self {
-            ReaderFeatures::ColumnMapping => "columnMapping",
-            ReaderFeatures::DeletionVectors => "deletionVectors",
-            ReaderFeatures::TimestampWithoutTimezone => "timestampNtz",
-            ReaderFeatures::V2Checkpoint => "v2Checkpoint",
-        }
-    }
-}
-
-impl std::fmt::Display for ReaderFeatures {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.as_ref())
-    }
-}
-
 /// Features table writers can support as well as let users know
 /// what is supported
-#[derive(Serialize, Deserialize, Debug, Clone, Eq, PartialEq, Hash)]
+#[derive(Serialize, Deserialize, Debug, Clone, Eq, PartialEq, EnumString, StrumDisplay)]
+#[strum(serialize_all = "camelCase")]
 #[serde(rename_all = "camelCase")]
 pub enum WriterFeatures {
     /// Append Only Tables
@@ -95,6 +49,7 @@ pub enum WriterFeatures {
     /// Row tracking on tables
     RowTracking,
     /// timestamps without timezone support
+    #[strum(serialize = "timestampNtz")]
     #[serde(rename = "timestampNtz")]
     TimestampWithoutTimezone,
     /// domain specific metadata
@@ -105,74 +60,6 @@ pub enum WriterFeatures {
     IcebergCompatV1,
     /// Iceberg compatibility support
     IcebergCompatV2,
-}
-
-impl TryFrom<String> for WriterFeatures {
-    type Error = Error;
-
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        value.as_str().try_into()
-    }
-}
-
-impl std::str::FromStr for WriterFeatures {
-    type Err = Error;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        s.try_into()
-    }
-}
-
-impl TryFrom<&str> for WriterFeatures {
-    type Error = Error;
-
-    fn try_from(value: &str) -> Result<Self, Self::Error> {
-        let val = match value {
-            "appendOnly" => WriterFeatures::AppendOnly,
-            "invariants" => WriterFeatures::Invariants,
-            "checkConstraints" => WriterFeatures::CheckConstraints,
-            "changeDataFeed" => WriterFeatures::ChangeDataFeed,
-            "generatedColumns" => WriterFeatures::GeneratedColumns,
-            "columnMapping" => WriterFeatures::ColumnMapping,
-            "identityColumns" => WriterFeatures::IdentityColumns,
-            "deletionVectors" => WriterFeatures::DeletionVectors,
-            "rowTracking" => WriterFeatures::RowTracking,
-            "timestampNtz" => WriterFeatures::TimestampWithoutTimezone,
-            "domainMetadata" => WriterFeatures::DomainMetadata,
-            "v2Checkpoint" => WriterFeatures::V2Checkpoint,
-            "icebergCompatV1" => WriterFeatures::IcebergCompatV1,
-            "icebergCompatV2" => WriterFeatures::IcebergCompatV2,
-            _ => return Err(Error::generic(format!("Unknown writer feature: {}", value))),
-        };
-        Ok(val)
-    }
-}
-
-impl AsRef<str> for WriterFeatures {
-    fn as_ref(&self) -> &str {
-        match self {
-            WriterFeatures::AppendOnly => "appendOnly",
-            WriterFeatures::Invariants => "invariants",
-            WriterFeatures::CheckConstraints => "checkConstraints",
-            WriterFeatures::ChangeDataFeed => "changeDataFeed",
-            WriterFeatures::GeneratedColumns => "generatedColumns",
-            WriterFeatures::ColumnMapping => "columnMapping",
-            WriterFeatures::IdentityColumns => "identityColumns",
-            WriterFeatures::DeletionVectors => "deletionVectors",
-            WriterFeatures::RowTracking => "rowTracking",
-            WriterFeatures::TimestampWithoutTimezone => "timestampNtz",
-            WriterFeatures::DomainMetadata => "domainMetadata",
-            WriterFeatures::V2Checkpoint => "v2Checkpoint",
-            WriterFeatures::IcebergCompatV1 => "icebergCompatV1",
-            WriterFeatures::IcebergCompatV2 => "icebergCompatV2",
-        }
-    }
-}
-
-impl std::fmt::Display for WriterFeatures {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.as_ref())
-    }
 }
 
 #[cfg(test)]
