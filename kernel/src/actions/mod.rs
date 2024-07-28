@@ -121,13 +121,13 @@ impl Protocol {
     pub fn has_reader_feature(&self, feature: &ReaderFeatures) -> bool {
         self.reader_features
             .as_ref()
-            .is_some_and(|features| features.iter().any(|f| f == &feature.to_string()))
+            .is_some_and(|features| features.iter().any(|f| f == feature.as_ref()))
     }
 
     pub fn has_writer_feature(&self, feature: &WriterFeatures) -> bool {
         self.writer_features
             .as_ref()
-            .is_some_and(|features| features.iter().any(|f| f == &feature.to_string()))
+            .is_some_and(|features| features.iter().any(|f| f == feature.as_ref()))
     }
 }
 

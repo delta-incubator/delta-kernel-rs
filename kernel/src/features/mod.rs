@@ -2,13 +2,24 @@ use serde::{Deserialize, Serialize};
 
 pub use column_mapping::ColumnMappingMode;
 pub(crate) use column_mapping::COLUMN_MAPPING_MODE_KEY;
-use strum::{Display as StrumDisplay, EnumString};
+use strum::{AsRefStr, Display as StrumDisplay, EnumString, VariantNames};
 
 mod column_mapping;
 
 /// Features table readers can support as well as let users know
 /// what is supported
-#[derive(Serialize, Deserialize, Debug, Clone, Eq, PartialEq, EnumString, StrumDisplay)]
+#[derive(
+    Serialize,
+    Deserialize,
+    Debug,
+    Clone,
+    Eq,
+    PartialEq,
+    EnumString,
+    StrumDisplay,
+    AsRefStr,
+    VariantNames,
+)]
 #[strum(serialize_all = "camelCase")]
 #[serde(rename_all = "camelCase")]
 pub enum ReaderFeatures {
@@ -26,7 +37,18 @@ pub enum ReaderFeatures {
 
 /// Features table writers can support as well as let users know
 /// what is supported
-#[derive(Serialize, Deserialize, Debug, Clone, Eq, PartialEq, EnumString, StrumDisplay)]
+#[derive(
+    Serialize,
+    Deserialize,
+    Debug,
+    Clone,
+    Eq,
+    PartialEq,
+    EnumString,
+    StrumDisplay,
+    AsRefStr,
+    VariantNames,
+)]
 #[strum(serialize_all = "camelCase")]
 #[serde(rename_all = "camelCase")]
 pub enum WriterFeatures {
@@ -75,7 +97,11 @@ mod tests {
             (ReaderFeatures::V2Checkpoint, "v2Checkpoint"),
         ];
 
-        for (feature, expected) in cases.into_iter() {
+        assert_eq!(ReaderFeatures::VARIANTS.len(), cases.len());
+
+        for ((feature, expected), name) in cases.into_iter().zip(ReaderFeatures::VARIANTS) {
+            assert_eq!(*name, expected);
+
             let serialized = serde_json::to_string(&feature).unwrap();
             assert_eq!(serialized, format!("\"{}\"", expected));
 
@@ -106,7 +132,11 @@ mod tests {
             (WriterFeatures::IcebergCompatV2, "icebergCompatV2"),
         ];
 
-        for (feature, expected) in cases.into_iter() {
+        assert_eq!(WriterFeatures::VARIANTS.len(), cases.len());
+
+        for ((feature, expected), name) in cases.into_iter().zip(WriterFeatures::VARIANTS) {
+            assert_eq!(*name, expected);
+
             let serialized = serde_json::to_string(&feature).unwrap();
             assert_eq!(serialized, format!("\"{}\"", expected));
 
