@@ -1,0 +1,48 @@
+[package]
+name = "acceptance"
+publish = false
+edition.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+version.workspace = true
+
+[dependencies]
+arrow-array = { workspace = true }
+arrow-cast = { workspace = true }
+arrow-ord = { workspace = true }
+arrow-select = { workspace = true }
+arrow-schema = { workspace = true }
+delta_kernel = { path = "../kernel", features = [
+  "default-engine",
+  "developer-visibility",
+] }
+futures = "0.3"
+object_store = { workspace = true }
+parquet = { workspace = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+url = "2"
+
+[build-dependencies]
+ureq = "2.2"
+flate2 = "1.0"
+tar = "0.4"
+
+[dev-dependencies]
+datatest-stable = "0.2"
+test-log = { version = "0.2", default-features = false, features = ["trace"] }
+tempfile = "3"
+test-case = { version = "3.1.0" }
+tokio = { version = "1" }
+tracing-subscriber = { version = "0.3", default-features = false, features = [
+  "env-filter",
+  "fmt",
+] }
+
+[[test]]
+name = "dat_reader"
+harness = false
