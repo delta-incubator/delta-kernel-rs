@@ -67,7 +67,11 @@ impl TryFrom<&MapType> for ArrowField {
             MAP_ROOT_DEFAULT,
             ArrowDataType::Struct(
                 vec![
-                    ArrowField::new(MAP_KEY_DEFAULT, ArrowDataType::try_from(a.key_type())?, false),
+                    ArrowField::new(
+                        MAP_KEY_DEFAULT,
+                        ArrowDataType::try_from(a.key_type())?,
+                        false,
+                    ),
                     ArrowField::new(
                         MAP_VALUE_DEFAULT,
                         ArrowDataType::try_from(a.value_type())?,
