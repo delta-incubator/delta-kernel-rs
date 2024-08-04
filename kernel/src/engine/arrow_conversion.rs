@@ -13,19 +13,43 @@ use crate::schema::{ArrayType, DataType, MapType, PrimitiveType, StructField, St
 
 pub(crate) const LIST_ARRAY_ROOT: &str = "item";
 
-impl TryFrom<&StructType> for ArrowSchema {
+#[derive(Clone, Copy)]
+pub enum ArrowTypeSize {
+    Normal,
+    Large,
+    View,
+}
+
+// Custom Delta->Arrow conversion trait
+trait TryFromWithSize<S>: Sized {
+    type Error;
+    fn try_from_with_arrow_size(source: S, args: ArrowTypeSize) -> Result<Self, ArrowError>;
+}
+
+impl TryFromWithSize<&StructType> for ArrowSchema {
     type Error = ArrowError;
 
-    fn try_from(s: &StructType) -> Result<Self, ArrowError> {
-        let fields: Vec<ArrowField> = s.fields().map(TryInto::try_into).try_collect()?;
+    fn try_from_with_arrow_size(s: &StructType, size: ArrowTypeSize) -> Result<Self, ArrowError> {
+        let fields: Vec<ArrowField> = s
+            .fields()
+            .map(|v| ArrowField::try_from_with_arrow_size(v, size))
+            .try_collect()?;
         Ok(ArrowSchema::new(fields))
     }
 }
 
-impl TryFrom<&StructField> for ArrowField {
+impl TryFrom<&StructType> for ArrowSchema {
     type Error = ArrowError;
 
-    fn try_from(f: &StructField) -> Result<Self, ArrowError> {
+    fn try_from(s: &StructType) -> Result<Self, ArrowError> {
+        ArrowSchema::try_from_with_arrow_size(s, ArrowTypeSize::Normal)
+    }
+}
+
+impl TryFromWithSize<&StructField> for ArrowField {
+    type Error = ArrowError;
+
+    fn try_from_with_arrow_size(f: &StructField, size: ArrowTypeSize) -> Result<Self, ArrowError> {
         let metadata = f
             .metadata()
             .iter()
@@ -35,7 +59,7 @@ impl TryFrom<&StructField> for ArrowField {
 
         let field = ArrowField::new(
             f.name(),
-            ArrowDataType::try_from(f.data_type())?,
+            ArrowDataType::try_from_with_arrow_size(f.data_type(), size)?,
             f.is_nullable(),
         )
         .with_metadata(metadata);
@@ -44,30 +68,50 @@ impl TryFrom<&StructField> for ArrowField {
     }
 }
 
-impl TryFrom<&ArrayType> for ArrowField {
+impl TryFrom<&StructField> for ArrowField {
     type Error = ArrowError;
 
-    fn try_from(a: &ArrayType) -> Result<Self, ArrowError> {
+    fn try_from(f: &StructField) -> Result<Self, ArrowError> {
+        ArrowField::try_from_with_arrow_size(f, ArrowTypeSize::Normal)
+    }
+}
+
+impl TryFromWithSize<&ArrayType> for ArrowField {
+    type Error = ArrowError;
+
+    fn try_from_with_arrow_size(a: &ArrayType, size: ArrowTypeSize) -> Result<Self, ArrowError> {
         Ok(ArrowField::new(
             LIST_ARRAY_ROOT,
-            ArrowDataType::try_from(a.element_type())?,
+            ArrowDataType::try_from_with_arrow_size(a.element_type(), size)?,
             a.contains_null(),
         ))
     }
 }
 
-impl TryFrom<&MapType> for ArrowField {
+impl TryFrom<&ArrayType> for ArrowField {
     type Error = ArrowError;
 
-    fn try_from(a: &MapType) -> Result<Self, ArrowError> {
+    fn try_from(a: &ArrayType) -> Result<Self, ArrowError> {
+        ArrowField::try_from_with_arrow_size(a, ArrowTypeSize::Normal)
+    }
+}
+
+impl TryFromWithSize<&MapType> for ArrowField {
+    type Error = ArrowError;
+
+    fn try_from_with_arrow_size(a: &MapType, size: ArrowTypeSize) -> Result<Self, ArrowError> {
         Ok(ArrowField::new(
             "entries",
             ArrowDataType::Struct(
                 vec![
-                    ArrowField::new("keys", ArrowDataType::try_from(a.key_type())?, false),
+                    ArrowField::new(
+                        "keys",
+                        ArrowDataType::try_from_with_arrow_size(a.key_type(), size.clone())?,
+                        false,
+                    ),
                     ArrowField::new(
                         "values",
-                        ArrowDataType::try_from(a.value_type())?,
+                        ArrowDataType::try_from_with_arrow_size(a.value_type(), size)?,
                         a.value_contains_null(),
                     ),
                 ]
@@ -78,14 +122,26 @@ impl TryFrom<&MapType> for ArrowField {
     }
 }
 
-impl TryFrom<&DataType> for ArrowDataType {
+impl TryFrom<&MapType> for ArrowField {
     type Error = ArrowError;
 
-    fn try_from(t: &DataType) -> Result<Self, ArrowError> {
+    fn try_from(a: &MapType) -> Result<Self, ArrowError> {
+        ArrowField::try_from_with_arrow_size(a, ArrowTypeSize::Normal)
+    }
+}
+
+impl TryFromWithSize<&DataType> for ArrowDataType {
+    type Error = ArrowError;
+
+    fn try_from_with_arrow_size(t: &DataType, size: ArrowTypeSize) -> Result<Self, ArrowError> {
         match t {
             DataType::Primitive(p) => {
                 match p {
-                    PrimitiveType::String => Ok(ArrowDataType::Utf8),
+                    PrimitiveType::String => match &size {
+                        ArrowTypeSize::Normal => Ok(ArrowDataType::Utf8),
+                        ArrowTypeSize::Large => Ok(ArrowDataType::LargeUtf8),
+                        ArrowTypeSize::View => Ok(ArrowDataType::Utf8View),
+                    },
                     PrimitiveType::Long => Ok(ArrowDataType::Int64), // undocumented type
                     PrimitiveType::Integer => Ok(ArrowDataType::Int32),
                     PrimitiveType::Short => Ok(ArrowDataType::Int16),
@@ -93,7 +149,11 @@ impl TryFrom<&DataType> for ArrowDataType {
                     PrimitiveType::Float => Ok(ArrowDataType::Float32),
                     PrimitiveType::Double => Ok(ArrowDataType::Float64),
                     PrimitiveType::Boolean => Ok(ArrowDataType::Boolean),
-                    PrimitiveType::Binary => Ok(ArrowDataType::Binary),
+                    PrimitiveType::Binary => match &size {
+                        ArrowTypeSize::Normal => Ok(ArrowDataType::Binary),
+                        ArrowTypeSize::Large => Ok(ArrowDataType::LargeBinary),
+                        ArrowTypeSize::View => Ok(ArrowDataType::BinaryView),
+                    },
                     PrimitiveType::Decimal(precision, scale) => {
                         PrimitiveType::check_decimal(*precision, *scale)
                             .map_err(|e| ArrowError::from_external_error(e.into()))?;
@@ -120,9 +180,25 @@ impl TryFrom<&DataType> for ArrowDataType {
                     .collect::<Result<Vec<ArrowField>, ArrowError>>()?
                     .into(),
             )),
-            DataType::Array(a) => Ok(ArrowDataType::LargeListView(Arc::new(a.as_ref().try_into()?))),
+            DataType::Array(a) => match &size {
+                ArrowTypeSize::Normal => Ok(ArrowDataType::List(Arc::new(a.as_ref().try_into()?))),
+                ArrowTypeSize::Large => {
+                    Ok(ArrowDataType::LargeList(Arc::new(a.as_ref().try_into()?)))
+                }
+                ArrowTypeSize::View => Ok(ArrowDataType::LargeListView(Arc::new(
+                    a.as_ref().try_into()?,
+                ))),
+            },
             DataType::Map(m) => Ok(ArrowDataType::Map(Arc::new(m.as_ref().try_into()?), false)),
         }
+    }
+}
+
+impl TryFrom<&DataType> for ArrowDataType {
+    type Error = ArrowError;
+
+    fn try_from(t: &DataType) -> Result<Self, ArrowError> {
+        ArrowDataType::try_from_with_arrow_size(t, ArrowTypeSize::Normal)
     }
 }
 
