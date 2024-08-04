@@ -120,7 +120,7 @@ impl TryFrom<&DataType> for ArrowDataType {
                     .collect::<Result<Vec<ArrowField>, ArrowError>>()?
                     .into(),
             )),
-            DataType::Array(a) => Ok(ArrowDataType::List(Arc::new(a.as_ref().try_into()?))),
+            DataType::Array(a) => Ok(ArrowDataType::LargeListView(Arc::new(a.as_ref().try_into()?))),
             DataType::Map(m) => Ok(ArrowDataType::Map(Arc::new(m.as_ref().try_into()?), false)),
         }
     }
@@ -167,6 +167,7 @@ impl TryFrom<&ArrowDataType> for DataType {
         match arrow_datatype {
             ArrowDataType::Utf8 => Ok(DataType::Primitive(PrimitiveType::String)),
             ArrowDataType::LargeUtf8 => Ok(DataType::Primitive(PrimitiveType::String)),
+            ArrowDataType::Utf8View => Ok(DataType::Primitive(PrimitiveType::String)),
             ArrowDataType::Int64 => Ok(DataType::Primitive(PrimitiveType::Long)), // undocumented type
             ArrowDataType::Int32 => Ok(DataType::Primitive(PrimitiveType::Integer)),
             ArrowDataType::Int16 => Ok(DataType::Primitive(PrimitiveType::Short)),
@@ -181,6 +182,7 @@ impl TryFrom<&ArrowDataType> for DataType {
             ArrowDataType::Binary => Ok(DataType::Primitive(PrimitiveType::Binary)),
             ArrowDataType::FixedSizeBinary(_) => Ok(DataType::Primitive(PrimitiveType::Binary)),
             ArrowDataType::LargeBinary => Ok(DataType::Primitive(PrimitiveType::Binary)),
+            ArrowDataType::BinaryView => Ok(DataType::Primitive(PrimitiveType::Binary)),
             ArrowDataType::Decimal128(p, s) => {
                 if *s < 0 {
                     return Err(ArrowError::from_external_error(
@@ -214,6 +216,10 @@ impl TryFrom<&ArrowDataType> for DataType {
                 (*field).is_nullable(),
             )))),
             ArrowDataType::LargeList(field) => Ok(DataType::Array(Box::new(ArrayType::new(
+                (*field).data_type().try_into()?,
+                (*field).is_nullable(),
+            )))),
+            ArrowDataType::LargeListView(field) => Ok(DataType::Array(Box::new(ArrayType::new(
                 (*field).data_type().try_into()?,
                 (*field).is_nullable(),
             )))),
