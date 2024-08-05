@@ -108,11 +108,8 @@ impl TryFromWithSize<&MapType> for ArrowField {
             ArrowDataType::Struct(
                 vec![
                     ArrowField::new(
-                        
                         MAP_KEY_DEFAULT,
-                       
-                        ArrowDataType::try_from_with_arrow_size(a.key_type(), size.clone())?,
-                       
+                        ArrowDataType::try_from_with_arrow_size(a.key_type(), size)?,
                         false,
                     ),
                     ArrowField::new(
