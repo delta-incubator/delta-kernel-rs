@@ -12,6 +12,9 @@ use crate::error::Error;
 use crate::schema::{ArrayType, DataType, MapType, PrimitiveType, StructField, StructType};
 
 pub(crate) const LIST_ARRAY_ROOT: &str = "item";
+pub(crate) const MAP_ROOT_DEFAULT: &str = "key_value";
+pub(crate) const MAP_KEY_DEFAULT: &str = "key";
+pub(crate) const MAP_VALUE_DEFAULT: &str = "value";
 
 #[derive(Clone, Copy)]
 pub enum ArrowTypeSize {
@@ -101,16 +104,19 @@ impl TryFromWithSize<&MapType> for ArrowField {
 
     fn try_from_with_arrow_size(a: &MapType, size: ArrowTypeSize) -> Result<Self, ArrowError> {
         Ok(ArrowField::new(
-            "entries",
+            MAP_ROOT_DEFAULT,
             ArrowDataType::Struct(
                 vec![
                     ArrowField::new(
-                        "keys",
+                        
+                        MAP_KEY_DEFAULT,
+                       
                         ArrowDataType::try_from_with_arrow_size(a.key_type(), size.clone())?,
+                       
                         false,
                     ),
                     ArrowField::new(
-                        "values",
+                        MAP_VALUE_DEFAULT,
                         ArrowDataType::try_from_with_arrow_size(a.value_type(), size)?,
                         a.value_contains_null(),
                     ),
