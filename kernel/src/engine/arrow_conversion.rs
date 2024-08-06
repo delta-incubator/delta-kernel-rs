@@ -27,7 +27,7 @@ pub enum ArrowTypeSize {
 // Custom Delta->Arrow conversion trait
 pub trait TryFromWithSize<S>: Sized {
     type Error;
-    fn try_from_with_arrow_size(source: S, args: ArrowTypeSize) -> Result<Self, ArrowError>;
+    fn try_from_with_arrow_size(source: S, size: ArrowTypeSize) -> Result<Self, ArrowError>;
 }
 
 impl TryFromWithSize<&StructType> for ArrowSchema {
