@@ -16,17 +16,12 @@ pub(crate) const MAP_ROOT_DEFAULT: &str = "key_value";
 pub(crate) const MAP_KEY_DEFAULT: &str = "key";
 pub(crate) const MAP_VALUE_DEFAULT: &str = "value";
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 pub enum ArrowTypeSize {
+    #[default]
     Normal,
     Large,
     View,
-}
-
-impl Default for ArrowTypeSize {
-    fn default() -> Self {
-        ArrowTypeSize::Normal
-    }
 }
 
 // Custom Delta->Arrow conversion trait
