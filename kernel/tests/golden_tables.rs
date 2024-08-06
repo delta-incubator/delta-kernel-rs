@@ -325,7 +325,7 @@ golden_test!("data-reader-date-types-Jst", latest_snapshot_test);
 golden_test!("data-reader-date-types-Pst", latest_snapshot_test);
 golden_test!("data-reader-date-types-utc", latest_snapshot_test);
 golden_test!("data-reader-escaped-chars", latest_snapshot_test);
-skip_test!("data-reader-map": "map field named 'entries' vs 'key_value'");
+golden_test!("data-reader-map", latest_snapshot_test);
 golden_test!("data-reader-nested-struct", latest_snapshot_test);
 golden_test!(
     "data-reader-nullable-field-invalid-schema-key",
@@ -394,7 +394,7 @@ golden_test!("snapshot-data3", latest_snapshot_test);
 golden_test!("snapshot-repartitioned", latest_snapshot_test);
 golden_test!("snapshot-vacuumed", latest_snapshot_test);
 
-// TODO use projections
+// TODO fix column mapping
 skip_test!("table-with-columnmapping-mode-id": "id column mapping mode not supported");
 skip_test!("table-with-columnmapping-mode-name":
   "BUG: Parquet(General('partial projection of MapArray is not supported'))");
@@ -415,7 +415,6 @@ golden_test!("v2-checkpoint-parquet", latest_snapshot_test); // passing without 
 // - AddFile: 'file:/some/unqualified/absolute/path'
 // - RemoveFile: '/some/unqualified/absolute/path'
 // --> should give no files for the table, but currently gives 1 file
-// golden_test!("canonicalized-paths-normal-a", canonicalized_paths_test);
 skip_test!("canonicalized-paths-normal-a": "BUG: path canonicalization");
 // BUG:
 // - AddFile: 'file:///some/unqualified/absolute/path'
