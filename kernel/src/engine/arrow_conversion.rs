@@ -23,6 +23,12 @@ pub enum ArrowTypeSize {
     View,
 }
 
+impl Default for ArrowTypeSize {
+    fn default() -> Self {
+        ArrowTypeSize::Normal
+    }
+}
+
 // Custom Delta->Arrow conversion trait
 trait TryFromWithSize<S>: Sized {
     type Error;
