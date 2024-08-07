@@ -1,7 +1,7 @@
 /// FFI interface for the delta kernel
 ///
 /// Exposes that an engine needs to call from C/C++ to interface with kernel
-#[cfg(any(feature = "default-engine", feature = "sync-engine"))]
+#[cfg(feature = "default-engine")]
 use std::collections::HashMap;
 use std::default::Default;
 use std::os::raw::{c_char, c_void};
@@ -10,14 +10,26 @@ use std::sync::Arc;
 use tracing::debug;
 use url::Url;
 
-use delta_kernel::expressions::{BinaryOperator, Expression, Scalar};
+use delta_kernel::expressions::{BinaryOperator, Expression, Scalar, UnaryOperator};
 use delta_kernel::schema::{ArrayType, DataType, MapType, PrimitiveType, StructType};
 use delta_kernel::snapshot::Snapshot;
 use delta_kernel::{DeltaResult, Engine, Error, Table};
 use delta_kernel_ffi_macros::handle_descriptor;
 
+// cbindgen doesn't understand our use of feature flags here, and by default it parses `mod handle`
+// twice. So we tell it to ignore one of the declarations to avoid double-definition errors.
+/// cbindgen:ignore
+#[cfg(feature = "developer-visibility")]
+pub mod handle;
+#[cfg(not(feature = "developer-visibility"))]
 pub(crate) mod handle;
+
 use handle::Handle;
+
+// The handle_descriptor macro needs this, because it needs to emit fully qualified type names. THe
+// actual prod code could use `crate::`, but doc tests can't because they're not "inside" the crate.
+// relies on `crate::`
+extern crate self as delta_kernel_ffi;
 
 pub mod scan;
 
@@ -66,9 +78,10 @@ impl Iterator for EngineIterator {
 /// references to the slice or its data that could outlive the function call.
 ///
 /// ```
-/// fn wants_slice(slice: KernelStringSlice) { ... }
-/// let msg = String::from(...);
-/// wants_slice(msg.as_ref().into());
+/// # use delta_kernel_ffi::KernelStringSlice;
+/// fn wants_slice(slice: KernelStringSlice) { }
+/// let msg = String::from("hello");
+/// wants_slice(msg.into());
 /// ```
 #[repr(C)]
 pub struct KernelStringSlice {
@@ -90,7 +103,7 @@ impl<T: AsRef<[u8]>> From<T> for KernelStringSlice {
 }
 
 trait TryFromStringSlice: Sized {
-    unsafe fn try_from_slice(slice: KernelStringSlice) -> Self;
+    unsafe fn try_from_slice(slice: KernelStringSlice) -> DeltaResult<Self>;
 }
 
 impl TryFromStringSlice for String {
@@ -100,9 +113,10 @@ impl TryFromStringSlice for String {
     ///
     /// The slice must be a valid (non-null) pointer, and must point to the indicated number of
     /// valid utf8 bytes.
-    unsafe fn try_from_slice(slice: KernelStringSlice) -> String {
+    unsafe fn try_from_slice(slice: KernelStringSlice) -> DeltaResult<String> {
         let slice = unsafe { std::slice::from_raw_parts(slice.ptr.cast(), slice.len) };
-        std::str::from_utf8(slice).unwrap().to_string()
+        let slice = std::str::from_utf8(slice)?;
+        Ok(slice.into())
     }
 }
 
@@ -210,7 +224,7 @@ pub enum KernelError {
     #[cfg(feature = "default-engine")]
     ObjectStorePathError,
     #[cfg(feature = "default-engine")]
-    Reqwest,
+    ReqwestError,
     FileNotFoundError,
     MissingColumnError,
     UnexpectedColumnTypeError,
@@ -226,8 +240,10 @@ pub enum KernelError {
     JoinFailureError,
     Utf8Error,
     ParseIntError,
-    InvalidColumnMappingMode,
-    InvalidTableLocation,
+    InvalidColumnMappingModeError,
+    InvalidTableLocationError,
+    InvalidDecimalError,
+    InvalidStructDataError,
 }
 
 impl From<Error> for KernelError {
@@ -248,7 +264,7 @@ impl From<Error> for KernelError {
             #[cfg(feature = "default-engine")]
             Error::ObjectStorePath(_) => KernelError::ObjectStorePathError,
             #[cfg(feature = "default-engine")]
-            Error::Reqwest(_) => KernelError::Reqwest,
+            Error::Reqwest(_) => KernelError::ReqwestError,
             Error::FileNotFound(_) => KernelError::FileNotFoundError,
             Error::MissingColumn(_) => KernelError::MissingColumnError,
             Error::UnexpectedColumnType(_) => KernelError::UnexpectedColumnTypeError,
@@ -264,8 +280,10 @@ impl From<Error> for KernelError {
             Error::JoinFailure(_) => KernelError::JoinFailureError,
             Error::Utf8Error(_) => KernelError::Utf8Error,
             Error::ParseIntError(_) => KernelError::ParseIntError,
-            Error::InvalidColumnMappingMode(_) => KernelError::InvalidColumnMappingMode,
-            Error::InvalidTableLocation(_) => KernelError::InvalidTableLocation,
+            Error::InvalidColumnMappingMode(_) => KernelError::InvalidColumnMappingModeError,
+            Error::InvalidTableLocation(_) => KernelError::InvalidTableLocationError,
+            Error::InvalidDecimal(_) => KernelError::InvalidDecimalError,
+            Error::InvalidStructData(_) => KernelError::InvalidStructDataError,
             Error::Backtraced {
                 source,
                 backtrace: _,
@@ -325,17 +343,6 @@ pub trait AllocateError {
         -> *mut EngineError;
 }
 
-// TODO: Why is this even needed...
-impl AllocateError for &dyn AllocateError {
-    unsafe fn allocate_error(
-        &self,
-        etype: KernelError,
-        msg: KernelStringSlice,
-    ) -> *mut EngineError {
-        (*self).allocate_error(etype, msg)
-    }
-}
-
 impl AllocateError for AllocateErrorFn {
     unsafe fn allocate_error(
         &self,
@@ -345,7 +352,8 @@ impl AllocateError for AllocateErrorFn {
         self(etype, msg)
     }
 }
-impl AllocateError for Handle<SharedExternEngine> {
+
+impl AllocateError for &dyn ExternEngine {
     /// # Safety
     ///
     /// In addition to the usual requirements, the engine handle must be valid.
@@ -354,7 +362,7 @@ impl AllocateError for Handle<SharedExternEngine> {
         etype: KernelError,
         msg: KernelStringSlice,
     ) -> *mut EngineError {
-        self.as_ref().error_allocator().allocate_error(etype, msg)
+        self.error_allocator().allocate_error(etype, msg)
     }
 }
 
@@ -364,16 +372,16 @@ impl AllocateError for Handle<SharedExternEngine> {
 ///
 /// The allocator must be valid.
 trait IntoExternResult<T> {
-    unsafe fn into_extern_result(self, allocate_error: impl AllocateError) -> ExternResult<T>;
+    unsafe fn into_extern_result(self, alloc: &dyn AllocateError) -> ExternResult<T>;
 }
 
 impl<T> IntoExternResult<T> for DeltaResult<T> {
-    unsafe fn into_extern_result(self, allocate_error: impl AllocateError) -> ExternResult<T> {
+    unsafe fn into_extern_result(self, alloc: &dyn AllocateError) -> ExternResult<T> {
         match self {
             Ok(ok) => ExternResult::Ok(ok),
             Err(err) => {
                 let msg = format!("{}", err);
-                let err = unsafe { allocate_error.allocate_error(err.into(), msg.as_str().into()) };
+                let err = unsafe { alloc.allocate_error(err.into(), msg.as_str().into()) };
                 ExternResult::Err(err)
             }
         }
@@ -431,20 +439,20 @@ impl ExternEngine for ExternEngineVtable {
 ///
 /// Caller is responsible for passing a valid path pointer.
 unsafe fn unwrap_and_parse_path_as_url(path: KernelStringSlice) -> DeltaResult<Url> {
-    let path = unsafe { String::try_from_slice(path) };
+    let path = unsafe { String::try_from_slice(path) }?;
     let table = Table::try_from_uri(path)?;
     Ok(table.location().clone())
 }
 
 /// A builder that allows setting options on the `Engine` before actually building it
-#[cfg(any(feature = "default-engine", feature = "sync-engine"))]
+#[cfg(feature = "default-engine")]
 pub struct EngineBuilder {
     url: Url,
     allocate_fn: AllocateErrorFn,
     options: HashMap<String, String>,
 }
 
-#[cfg(any(feature = "default-engine", feature = "sync-engine"))]
+#[cfg(feature = "default-engine")]
 impl EngineBuilder {
     fn set_option(&mut self, key: String, val: String) {
         self.options.insert(key, val);
@@ -463,17 +471,17 @@ pub unsafe extern "C" fn get_engine_builder(
     path: KernelStringSlice,
     allocate_error: AllocateErrorFn,
 ) -> ExternResult<*mut EngineBuilder> {
-    get_engine_builder_impl(path, allocate_error).into_extern_result(allocate_error)
+    let url = unsafe { unwrap_and_parse_path_as_url(path) };
+    get_engine_builder_impl(url, allocate_error).into_extern_result(&allocate_error)
 }
 
 #[cfg(feature = "default-engine")]
-unsafe fn get_engine_builder_impl(
-    path: KernelStringSlice,
+fn get_engine_builder_impl(
+    url: DeltaResult<Url>,
     allocate_fn: AllocateErrorFn,
 ) -> DeltaResult<*mut EngineBuilder> {
-    let url = unsafe { unwrap_and_parse_path_as_url(path) }?;
     let builder = Box::new(EngineBuilder {
-        url,
+        url: url?,
         allocate_fn,
         options: HashMap::default(),
     });
@@ -494,11 +502,13 @@ pub unsafe extern "C" fn set_builder_option(
 ) {
     let key = unsafe { String::try_from_slice(key) };
     let value = unsafe { String::try_from_slice(value) };
-    builder.set_option(key, value);
+    // TODO: Return ExternalError if key or value is invalid? (builder has an error allocator)
+    builder.set_option(key.unwrap(), value.unwrap());
 }
 
-/// Consume the builder and return an engine. After calling, the passed pointer is _no
+/// Consume the builder and return a `default` engine. After calling, the passed pointer is _no
 /// longer valid_.
+///
 ///
 /// # Safety
 ///
@@ -514,7 +524,7 @@ pub unsafe extern "C" fn builder_build(
         builder_box.options,
         builder_box.allocate_fn,
     )
-    .into_extern_result(builder_box.allocate_fn)
+    .into_extern_result(&builder_box.allocate_fn)
 }
 
 /// # Safety
@@ -526,21 +536,32 @@ pub unsafe extern "C" fn get_default_engine(
     path: KernelStringSlice,
     allocate_error: AllocateErrorFn,
 ) -> ExternResult<Handle<SharedExternEngine>> {
-    get_default_default_engine_impl(path, allocate_error).into_extern_result(allocate_error)
+    let url = unsafe { unwrap_and_parse_path_as_url(path) };
+    get_default_default_engine_impl(url, allocate_error).into_extern_result(&allocate_error)
 }
 
 // get the default version of the default engine :)
 #[cfg(feature = "default-engine")]
-unsafe fn get_default_default_engine_impl(
-    path: KernelStringSlice,
+fn get_default_default_engine_impl(
+    url: DeltaResult<Url>,
     allocate_error: AllocateErrorFn,
 ) -> DeltaResult<Handle<SharedExternEngine>> {
-    let url = unsafe { unwrap_and_parse_path_as_url(path) }?;
-    get_default_engine_impl(url, Default::default(), allocate_error)
+    get_default_engine_impl(url?, Default::default(), allocate_error)
+}
+
+/// # Safety
+///
+/// Caller is responsible for passing a valid path pointer.
+#[cfg(feature = "sync-engine")]
+#[no_mangle]
+pub unsafe extern "C" fn get_sync_engine(
+    allocate_error: AllocateErrorFn,
+) -> ExternResult<Handle<SharedExternEngine>> {
+    get_sync_engine_impl(allocate_error).into_extern_result(&allocate_error)
 }
 
 #[cfg(feature = "default-engine")]
-unsafe fn get_default_engine_impl(
+fn get_default_engine_impl(
     url: Url,
     options: HashMap<String, String>,
     allocate_error: AllocateErrorFn,
@@ -552,9 +573,20 @@ unsafe fn get_default_engine_impl(
         options,
         Arc::new(TokioBackgroundExecutor::new()),
     );
-    let engine = Arc::new(engine.map_err(Error::generic)?);
     let engine: Arc<dyn ExternEngine> = Arc::new(ExternEngineVtable {
-        engine,
+        engine: Arc::new(engine?),
+        allocate_error,
+    });
+    Ok(engine.into())
+}
+
+#[cfg(feature = "sync-engine")]
+fn get_sync_engine_impl(
+    allocate_error: AllocateErrorFn,
+) -> DeltaResult<Handle<SharedExternEngine>> {
+    let engine = delta_kernel::engine::sync::SyncEngine::new();
+    let engine: Arc<dyn ExternEngine> = Arc::new(ExternEngineVtable {
+        engine: Arc::new(engine),
         allocate_error,
     });
     Ok(engine.into())
@@ -582,16 +614,16 @@ pub unsafe extern "C" fn snapshot(
     path: KernelStringSlice,
     engine: Handle<SharedExternEngine>,
 ) -> ExternResult<Handle<SharedSnapshot>> {
-    snapshot_impl(path, &engine).into_extern_result(engine)
+    let url = unsafe { unwrap_and_parse_path_as_url(path) };
+    let engine = unsafe { engine.as_ref() };
+    snapshot_impl(url, engine).into_extern_result(&engine)
 }
 
-unsafe fn snapshot_impl(
-    path: KernelStringSlice,
-    extern_engine: &Handle<SharedExternEngine>,
+fn snapshot_impl(
+    url: DeltaResult<Url>,
+    extern_engine: &dyn ExternEngine,
 ) -> DeltaResult<Handle<SharedSnapshot>> {
-    let url = unsafe { unwrap_and_parse_path_as_url(path) }?;
-    let extern_engine = unsafe { extern_engine.as_ref() };
-    let snapshot = Snapshot::try_new(url, extern_engine.engine().as_ref(), None)?;
+    let snapshot = Snapshot::try_new(url?, extern_engine.engine().as_ref(), None)?;
     Ok(Arc::new(snapshot).into())
 }
 
@@ -686,7 +718,7 @@ pub struct EngineSchemaVisitor {
         sibling_list_id: usize,
         name: KernelStringSlice,
         precision: u8,
-        scale: i8,
+        scale: u8,
     ),
 
     /// Visit a `string` belonging to the list identified by `sibling_list_id`.
@@ -819,6 +851,8 @@ pub unsafe extern "C" fn visit_schema(
     visit_struct_fields(visitor, snapshot.schema())
 }
 
+// TODO move expression visitors to separate module
+
 // A set that can identify its contents by address
 pub struct ReferenceSet<T> {
     map: std::collections::HashMap<usize, T>,
@@ -912,7 +946,6 @@ fn unwrap_kernel_expression(
     state.inflight_expressions.take(exprid)
 }
 
-// TODO move visitors to separate module
 fn visit_expression_binary(
     state: &mut KernelExpressionVisitorState,
     op: BinaryOperator,
@@ -927,6 +960,16 @@ fn visit_expression_binary(
         }
         None => 0, // invalid child => invalid node
     }
+}
+
+fn visit_expression_unary(
+    state: &mut KernelExpressionVisitorState,
+    op: UnaryOperator,
+    inner_expr: usize,
+) -> usize {
+    unwrap_kernel_expression(state, inner_expr).map_or(0, |expr| {
+        wrap_expression(state, Expression::unary(op, expr))
+    })
 }
 
 // The EngineIterator is not thread safe, not reentrant, not owned by callee, not freed by callee.
@@ -994,14 +1037,30 @@ pub unsafe extern "C" fn visit_expression_column(
     name: KernelStringSlice,
     allocate_error: AllocateErrorFn,
 ) -> ExternResult<usize> {
-    visit_expression_column_impl(state, name).into_extern_result(allocate_error)
-}
-unsafe fn visit_expression_column_impl(
-    state: &mut KernelExpressionVisitorState,
-    name: KernelStringSlice,
-) -> DeltaResult<usize> {
     let name = unsafe { String::try_from_slice(name) };
-    Ok(wrap_expression(state, Expression::Column(name)))
+    visit_expression_column_impl(state, name).into_extern_result(&allocate_error)
+}
+fn visit_expression_column_impl(
+    state: &mut KernelExpressionVisitorState,
+    name: DeltaResult<String>,
+) -> DeltaResult<usize> {
+    Ok(wrap_expression(state, Expression::Column(name?)))
+}
+
+#[no_mangle]
+pub extern "C" fn visit_expression_not(
+    state: &mut KernelExpressionVisitorState,
+    inner_expr: usize,
+) -> usize {
+    visit_expression_unary(state, UnaryOperator::Not, inner_expr)
+}
+
+#[no_mangle]
+pub extern "C" fn visit_expression_is_null(
+    state: &mut KernelExpressionVisitorState,
+    inner_expr: usize,
+) -> usize {
+    visit_expression_unary(state, UnaryOperator::IsNull, inner_expr)
 }
 
 /// # Safety
@@ -1012,17 +1071,27 @@ pub unsafe extern "C" fn visit_expression_literal_string(
     value: KernelStringSlice,
     allocate_error: AllocateErrorFn,
 ) -> ExternResult<usize> {
-    visit_expression_literal_string_impl(state, value).into_extern_result(allocate_error)
-}
-unsafe fn visit_expression_literal_string_impl(
-    state: &mut KernelExpressionVisitorState,
-    value: KernelStringSlice,
-) -> DeltaResult<usize> {
     let value = unsafe { String::try_from_slice(value) };
+    visit_expression_literal_string_impl(state, value).into_extern_result(&allocate_error)
+}
+fn visit_expression_literal_string_impl(
+    state: &mut KernelExpressionVisitorState,
+    value: DeltaResult<String>,
+) -> DeltaResult<usize> {
     Ok(wrap_expression(
         state,
-        Expression::Literal(Scalar::from(value)),
+        Expression::Literal(Scalar::from(value?)),
     ))
+}
+
+// We need to get parse.expand working to be able to macro everything below, see issue #255
+
+#[no_mangle]
+pub extern "C" fn visit_expression_literal_int(
+    state: &mut KernelExpressionVisitorState,
+    value: i32,
+) -> usize {
+    wrap_expression(state, Expression::literal(value))
 }
 
 #[no_mangle]
@@ -1030,5 +1099,45 @@ pub extern "C" fn visit_expression_literal_long(
     state: &mut KernelExpressionVisitorState,
     value: i64,
 ) -> usize {
-    wrap_expression(state, Expression::Literal(Scalar::from(value)))
+    wrap_expression(state, Expression::literal(value))
+}
+
+#[no_mangle]
+pub extern "C" fn visit_expression_literal_short(
+    state: &mut KernelExpressionVisitorState,
+    value: i16,
+) -> usize {
+    wrap_expression(state, Expression::literal(value))
+}
+
+#[no_mangle]
+pub extern "C" fn visit_expression_literal_byte(
+    state: &mut KernelExpressionVisitorState,
+    value: i8,
+) -> usize {
+    wrap_expression(state, Expression::literal(value))
+}
+
+#[no_mangle]
+pub extern "C" fn visit_expression_literal_float(
+    state: &mut KernelExpressionVisitorState,
+    value: f32,
+) -> usize {
+    wrap_expression(state, Expression::literal(value))
+}
+
+#[no_mangle]
+pub extern "C" fn visit_expression_literal_double(
+    state: &mut KernelExpressionVisitorState,
+    value: f64,
+) -> usize {
+    wrap_expression(state, Expression::literal(value))
+}
+
+#[no_mangle]
+pub extern "C" fn visit_expression_literal_bool(
+    state: &mut KernelExpressionVisitorState,
+    value: bool,
+) -> usize {
+    wrap_expression(state, Expression::literal(value))
 }
