@@ -482,9 +482,7 @@ mod tests {
     }
 
     fn valid_last_checkpoint() -> Vec<u8> {
-        r#"{"size":8,"size_in_bytes":21857,"version":1}"#
-            .as_bytes()
-            .to_vec()
+        r#"{"size":8,"size_in_bytes":21857,"version":1}"#.as_bytes().to_vec()
     }
 
     #[test]
