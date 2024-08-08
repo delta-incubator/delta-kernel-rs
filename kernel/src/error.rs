@@ -151,6 +151,10 @@ pub enum Error {
     /// Incosistent data passed to struct scalar
     #[error("Invalid struct data: {0}")]
     InvalidStructData(String),
+
+    /// Error while reading table configuration.
+    #[error("Invalid configuration: {0}")]
+    InvalidConfiguration(String),
 }
 
 // Convenience constructors for Error types that take a String argument
@@ -195,6 +199,9 @@ impl Error {
     }
     pub fn invalid_struct_data(msg: impl ToString) -> Self {
         Self::InvalidStructData(msg.to_string())
+    }
+    pub fn invalid_configuration(msg: impl ToString) -> Self {
+        Self::InvalidConfiguration(msg.to_string())
     }
 
     pub fn internal_error(msg: impl ToString) -> Self {
