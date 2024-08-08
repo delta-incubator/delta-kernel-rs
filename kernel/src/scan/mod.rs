@@ -102,7 +102,7 @@ impl ScanBuilder {
         let (all_fields, read_fields, have_partition_cols) = get_state_info(
             logical_schema.as_ref(),
             &self.snapshot.metadata().partition_columns,
-            self.snapshot.column_mapping_mode,
+            self.snapshot.table_config().column_mapping_mode(),
         )?;
         let physical_schema = Arc::new(StructType::new(read_fields));
         Ok(Scan {
@@ -222,7 +222,7 @@ impl Scan {
             partition_columns: self.snapshot.metadata().partition_columns.clone(),
             logical_schema: self.logical_schema.clone(),
             read_schema: self.physical_schema.clone(),
-            column_mapping_mode: self.snapshot.column_mapping_mode,
+            column_mapping_mode: self.snapshot.table_config().column_mapping_mode(),
         }
     }
 

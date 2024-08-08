@@ -1,7 +1,6 @@
 use serde::{Deserialize, Serialize};
 
 pub use column_mapping::ColumnMappingMode;
-pub(crate) use column_mapping::COLUMN_MAPPING_MODE_KEY;
 use strum::{AsRefStr, Display as StrumDisplay, EnumString, VariantNames};
 
 mod column_mapping;
