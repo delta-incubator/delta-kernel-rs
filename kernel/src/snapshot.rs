@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
-use tracing::debug;
+use tracing::{debug, warn};
 use url::Url;
 
 use crate::actions::{get_log_schema, Metadata, Protocol, METADATA_NAME, PROTOCOL_NAME};
@@ -287,7 +287,12 @@ struct CheckpointMetadata {
 
 /// Try reading the `_last_checkpoint` file.
 ///
-/// In case the file is not found, `None` is returned.
+/// Note that we typically want to ignore a missing/invalid `_last_checkpoint` file without failing
+/// the read. Thus, the semantics of this function are to return `None` if the file is not found or
+/// is invalid JSON. Unexpected/unrecoverable errors are returned as `Err` case and are assumed to
+/// cause failure.
+///
+/// TODO: java kernel retries three times before failing, should we do the same?
 fn read_last_checkpoint(
     fs_client: &dyn FileSystemClient,
     log_root: &Url,
@@ -297,7 +302,9 @@ fn read_last_checkpoint(
         .read_files(vec![(file_path, None)])
         .and_then(|mut data| data.next().expect("read_files should return one file"))
     {
-        Ok(data) => Ok(Some(serde_json::from_slice(&data)?)),
+        Ok(data) => Ok(serde_json::from_slice(&data)
+            .map_err(|e| warn!("invalid _last_checkpoint JSON: {e}"))
+            .ok()),
         Err(Error::FileNotFound(_)) => Ok(None),
         Err(err) => Err(err),
     }
