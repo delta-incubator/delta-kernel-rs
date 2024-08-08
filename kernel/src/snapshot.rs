@@ -12,7 +12,8 @@ use tracing::{debug, warn};
 use url::Url;
 
 use crate::actions::{get_log_schema, Metadata, Protocol, METADATA_NAME, PROTOCOL_NAME};
-use crate::features::{ColumnMappingMode, COLUMN_MAPPING_MODE_KEY};
+use crate::config::TableConfig;
+use crate::features::ColumnMappingMode;
 use crate::path::ParsedLogPath;
 use crate::scan::ScanBuilder;
 use crate::schema::{Schema, SchemaRef};
@@ -117,7 +118,6 @@ pub struct Snapshot {
     metadata: Metadata,
     protocol: Protocol,
     schema: Schema,
-    pub(crate) column_mapping_mode: ColumnMappingMode,
 }
 
 impl Drop for Snapshot {
@@ -209,10 +209,6 @@ impl Snapshot {
             .read_metadata(engine)?
             .ok_or(Error::MissingMetadata)?;
         let schema = metadata.schema()?;
-        let column_mapping_mode = match metadata.configuration.get(COLUMN_MAPPING_MODE_KEY) {
-            Some(mode) if protocol.min_reader_version >= 2 => mode.as_str().try_into(),
-            _ => Ok(ColumnMappingMode::None),
-        }?;
         Ok(Self {
             table_root: location,
             log_segment,
@@ -220,7 +216,6 @@ impl Snapshot {
             metadata,
             protocol,
             schema,
-            column_mapping_mode,
         })
     }
 
@@ -254,11 +249,8 @@ impl Snapshot {
         &self.protocol
     }
 
-    /// Get the [column mapping
-    /// mode](https://github.com/delta-io/delta/blob/master/PROTOCOL.md#column-mapping) at this
-    /// `Snapshot`s version.
-    pub fn column_mapping_mode(&self) -> ColumnMappingMode {
-        self.column_mapping_mode
+    pub fn table_config(&self) -> TableConfig<'_> {
+        TableConfig(&self.metadata.configuration)
     }
 
     /// Create a [`ScanBuilder`] for an `Arc<Snapshot>`.

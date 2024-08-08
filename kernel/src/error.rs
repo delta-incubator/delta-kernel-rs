@@ -159,6 +159,9 @@ pub enum Error {
     /// Unable to parse the name of a log path
     #[error("Invalid log path: {0}")]
     InvalidLogPath(String),
+    /// Error while reading table configuration.
+    #[error("Invalid configuration: {0}")]
+    InvalidConfiguration(String),
 }
 
 // Convenience constructors for Error types that take a String argument
@@ -210,7 +213,9 @@ impl Error {
     pub(crate) fn invalid_log_path(msg: impl ToString) -> Self {
         Self::InvalidLogPath(msg.to_string())
     }
-
+    pub fn invalid_configuration(msg: impl ToString) -> Self {
+        Self::InvalidConfiguration(msg.to_string())
+    }
     pub fn internal_error(msg: impl ToString) -> Self {
         Self::InternalError(msg.to_string()).with_backtrace()
     }

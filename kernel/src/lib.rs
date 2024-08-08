@@ -59,6 +59,7 @@ use url::Url;
 use self::schema::{DataType, SchemaRef};
 
 pub mod actions;
+pub mod config;
 pub mod engine_data;
 pub mod error;
 pub mod expressions;
