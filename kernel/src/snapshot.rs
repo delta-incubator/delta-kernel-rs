@@ -303,7 +303,7 @@ fn read_last_checkpoint(
         .and_then(|mut data| data.next().expect("read_files should return one file"))
     {
         Ok(data) => Ok(serde_json::from_slice(&data)
-            .map_err(|e| warn!("invalid _last_checkpoint JSON: {e}"))
+            .inspect_err(|e| warn!("invalid _last_checkpoint JSON: {e}"))
             .ok()),
         Err(Error::FileNotFound(_)) => Ok(None),
         Err(err) => Err(err),
