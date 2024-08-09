@@ -151,7 +151,7 @@ impl Snapshot {
             match (read_last_checkpoint(fs_client.as_ref(), &log_url)?, version) {
                 (Some(cp), None) => {
                     list_log_files_with_checkpoint(&cp, fs_client.as_ref(), &log_url)?
-                },
+                }
                 (Some(cp), Some(version)) if cp.version >= version => {
                     list_log_files_with_checkpoint(&cp, fs_client.as_ref(), &log_url)?
                 }
