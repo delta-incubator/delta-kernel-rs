@@ -1,9 +1,11 @@
 use serde::{Deserialize, Serialize};
 
 pub use column_mapping::ColumnMappingMode;
+pub use constraints::Constraint;
 use strum::{AsRefStr, Display as StrumDisplay, EnumString, VariantNames};
 
 mod column_mapping;
+mod constraints;
 
 /// Features table readers can support as well as let users know
 /// what is supported

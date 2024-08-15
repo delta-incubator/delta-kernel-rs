@@ -14,6 +14,7 @@ use visitors::{AddVisitor, MetadataVisitor, ProtocolVisitor};
 
 use self::deletion_vector::DeletionVectorDescriptor;
 use crate::actions::schemas::GetStructField;
+use crate::config::TableConfig;
 use crate::features::{ReaderFeatures, WriterFeatures};
 use crate::{schema::StructType, DeltaResult, EngineData};
 
@@ -89,6 +90,10 @@ impl Metadata {
 
     pub fn schema(&self) -> DeltaResult<StructType> {
         Ok(serde_json::from_str(&self.schema_string)?)
+    }
+
+    pub fn config(&self) -> TableConfig<'_> {
+        TableConfig(&self.configuration)
     }
 }
 
@@ -194,43 +199,43 @@ impl Add {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Schema)]
-pub(crate) struct Remove {
+pub struct Remove {
     /// A relative path to a data file from the root of the table or an absolute path to a file
     /// that should be added to the table. The path is a URI as specified by
     /// [RFC 2396 URI Generic Syntax], which needs to be decoded to get the data file path.
     ///
     /// [RFC 2396 URI Generic Syntax]: https://www.ietf.org/rfc/rfc2396.txt
-    pub(crate) path: String,
+    pub path: String,
 
     /// The time this logical file was created, as milliseconds since the epoch.
-    pub(crate) deletion_timestamp: Option<i64>,
+    pub deletion_timestamp: Option<i64>,
 
     /// When `false` the logical file must already be present in the table or the records
     /// in the added file must be contained in one or more remove actions in the same version.
-    pub(crate) data_change: bool,
+    pub data_change: bool,
 
     /// When true the fields `partition_values`, `size`, and `tags` are present
-    pub(crate) extended_file_metadata: Option<bool>,
+    pub extended_file_metadata: Option<bool>,
 
     /// A map from partition column to value for this logical file.
-    pub(crate) partition_values: Option<HashMap<String, String>>,
+    pub partition_values: Option<HashMap<String, String>>,
 
     /// The size of this data file in bytes
-    pub(crate) size: Option<i64>,
+    pub size: Option<i64>,
 
     /// Map containing metadata about this logical file.
-    pub(crate) tags: Option<HashMap<String, String>>,
+    pub tags: Option<HashMap<String, String>>,
 
     /// Information about deletion vector (DV) associated with this add action
-    pub(crate) deletion_vector: Option<DeletionVectorDescriptor>,
+    pub deletion_vector: Option<DeletionVectorDescriptor>,
 
     /// Default generated Row ID of the first row in the file. The default generated Row IDs
     /// of the other rows in the file can be reconstructed by adding the physical index of the
     /// row within the file to the base Row ID
-    pub(crate) base_row_id: Option<i64>,
+    pub base_row_id: Option<i64>,
 
     /// First commit version in which an add action with the same path was committed to the table.
-    pub(crate) default_row_commit_version: Option<i64>,
+    pub default_row_commit_version: Option<i64>,
 }
 
 impl Remove {

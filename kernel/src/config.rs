@@ -1,49 +1,68 @@
 //! Delta Table configuration
+use std::collections::HashMap;
 use std::time::Duration;
-use std::{collections::HashMap, str::FromStr};
 
 use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
 use strum::{AsRefStr, Display as StrumDisplay, EnumString, VariantNames};
 
 use crate::error::Error;
-use crate::features::ColumnMappingMode;
+use crate::features::{ColumnMappingMode, Constraint};
 
 /// Typed property keys that can be defined on a delta table
 /// <https://docs.delta.io/latest/table-properties.html#delta-table-properties-reference>
 /// <https://learn.microsoft.com/en-us/azure/databricks/delta/table-properties>
-#[derive(Debug, Clone, Eq, PartialEq, EnumString, StrumDisplay, AsRefStr, VariantNames, Hash)]
+#[derive(
+    Serialize,
+    Deserialize,
+    Debug,
+    Clone,
+    Eq,
+    PartialEq,
+    EnumString,
+    StrumDisplay,
+    AsRefStr,
+    VariantNames,
+    Hash,
+)]
 #[non_exhaustive]
 pub enum DeltaConfigKey {
     /// true for this Delta table to be append-only. If append-only,
     /// existing records cannot be deleted, and existing values cannot be updated.
     #[strum(serialize = "delta.appendOnly")]
+    #[serde(rename = "delta.appendOnly")]
     AppendOnly,
 
     /// true for Delta Lake to automatically optimize the layout of the files for this Delta table.
     #[strum(serialize = "delta.autoOptimize.autoCompact")]
+    #[serde(rename = "delta.autoOptimize.autoCompact")]
     AutoOptimizeAutoCompact,
 
     /// true for Delta Lake to automatically optimize the layout of the files for this Delta table during writes.
     #[strum(serialize = "delta.autoOptimize.optimizeWrite")]
+    #[serde(rename = "delta.autoOptimize.optimizeWrite")]
     AutoOptimizeOptimizeWrite,
 
     /// Interval (number of commits) after which a new checkpoint should be created
     #[strum(serialize = "delta.checkpointInterval")]
+    #[serde(rename = "delta.checkpointInterval")]
     CheckpointInterval,
 
     /// true for Delta Lake to write file statistics in checkpoints in JSON format for the stats column.
     #[strum(serialize = "delta.checkpoint.writeStatsAsJson")]
+    #[serde(rename = "delta.checkpoint.writeStatsAsJson")]
     CheckpointWriteStatsAsJson,
 
     /// true for Delta Lake to write file statistics to checkpoints in struct format for the
     /// stats_parsed column and to write partition values as a struct for partitionValues_parsed.
     #[strum(serialize = "delta.checkpoint.writeStatsAsStruct")]
+    #[serde(rename = "delta.checkpoint.writeStatsAsStruct")]
     CheckpointWriteStatsAsStruct,
 
     /// Whether column mapping is enabled for Delta table columns and the corresponding
     /// Parquet columns that use different names.
     #[strum(serialize = "delta.columnMapping.mode")]
+    #[serde(rename = "delta.columnMapping.mode")]
     ColumnMappingMode,
 
     /// The number of columns for Delta Lake to collect statistics about for data skipping.
@@ -53,11 +72,14 @@ pub enum DeltaConfigKey {
     /// (such as during appends and optimizations) as well as data skipping (such as ignoring column
     /// statistics beyond this number, even when such statistics exist).
     #[strum(serialize = "delta.dataSkippingNumIndexedCols")]
+    #[serde(rename = "delta.dataSkippingNumIndexedCols")]
     DataSkippingNumIndexedCols,
 
     /// A comma-separated list of column names on which Delta Lake collects statistics to enhance
     /// data skipping functionality. This property takes precedence over
-    /// [DataSkippingNumIndexedCols](Self::DataSkippingNumIndexedCols).
+    /// [DataSkippingNumIndexedCols](DeltaConfigKey::DataSkippingNumIndexedCols).
+    #[strum(serialize = "delta.dataSkippingStatsColumns")]
+    #[serde(rename = "delta.dataSkippingStatsColumns")]
     DataSkippingStatsColumns,
 
     /// The shortest duration for Delta Lake to keep logically deleted data files before deleting
@@ -70,20 +92,24 @@ pub enum DeltaConfigKey {
     /// * If you run a streaming query that reads from the table, that query does not stop for longer
     ///   than this value. Otherwise, the query may not be able to restart, as it must still read old files.
     #[strum(serialize = "delta.deletedFileRetentionDuration")]
+    #[serde(rename = "delta.deletedFileRetentionDuration")]
     DeletedFileRetentionDuration,
 
     /// true to enable change data feed.
     #[strum(serialize = "delta.enableChangeDataFeed")]
+    #[serde(rename = "delta.enableChangeDataFeed")]
     EnableChangeDataFeed,
 
     /// true to enable deletion vectors and predictive I/O for updates.
     #[strum(serialize = "delta.enableDeletionVectors")]
+    #[serde(rename = "delta.enableDeletionVectors")]
     EnableDeletionVectors,
 
     /// The degree to which a transaction must be isolated from modifications made by concurrent transactions.
     ///
     /// Valid values are `Serializable` and `WriteSerializable`.
     #[strum(serialize = "delta.isolationLevel")]
+    #[serde(rename = "delta.isolationLevel")]
     IsolationLevel,
 
     /// How long the history for a Delta table is kept.
@@ -93,18 +119,22 @@ pub enum DeltaConfigKey {
     /// entries are retained. This should not impact performance as operations against the log are
     /// constant time. Operations on history are parallel but will become more expensive as the log size increases.
     #[strum(serialize = "delta.logRetentionDuration")]
+    #[serde(rename = "delta.logRetentionDuration")]
     LogRetentionDuration,
 
     /// TODO I could not find this property in the documentation, but was defined here and makes sense..?
     #[strum(serialize = "delta.enableExpiredLogCleanup")]
+    #[serde(rename = "delta.enableExpiredLogCleanup")]
     EnableExpiredLogCleanup,
 
     /// The minimum required protocol reader version for a reader that allows to read from this Delta table.
     #[strum(serialize = "delta.minReaderVersion")]
+    #[serde(rename = "delta.minReaderVersion")]
     MinReaderVersion,
 
     /// The minimum required protocol writer version for a writer that allows to write to this Delta table.
     #[strum(serialize = "delta.minWriterVersion")]
+    #[serde(rename = "delta.minWriterVersion")]
     MinWriterVersion,
 
     /// true for Delta Lake to generate a random prefix for a file path instead of partition information.
@@ -113,48 +143,35 @@ pub enum DeltaConfigKey {
     /// y improve Amazon S3 performance when Delta Lake needs to send very high volumes
     /// of Amazon S3 calls to better partition across S3 servers.
     #[strum(serialize = "delta.randomizeFilePrefixes")]
+    #[serde(rename = "delta.randomizeFilePrefixes")]
     RandomizeFilePrefixes,
 
     /// When delta.randomizeFilePrefixes is set to true, the number of characters that Delta Lake generates for random prefixes.
     #[strum(serialize = "delta.randomPrefixLength")]
+    #[serde(rename = "delta.randomPrefixLength")]
     RandomPrefixLength,
 
     /// The shortest duration within which new snapshots will retain transaction identifiers (for example, SetTransactions).
     /// When a new snapshot sees a transaction identifier older than or equal to the duration specified by this property,
     /// the snapshot considers it expired and ignores it. The SetTransaction identifier is used when making the writes idempotent.
     #[strum(serialize = "delta.setTransactionRetentionDuration")]
+    #[serde(rename = "delta.setTransactionRetentionDuration")]
     SetTransactionRetentionDuration,
 
     /// The target file size in bytes or higher units for file tuning. For example, 104857600 (bytes) or 100mb.
     #[strum(serialize = "delta.targetFileSize")]
+    #[serde(rename = "delta.targetFileSize")]
     TargetFileSize,
 
     /// The target file size in bytes or higher units for file tuning. For example, 104857600 (bytes) or 100mb.
     #[strum(serialize = "delta.tuneFileSizesForRewrites")]
+    #[serde(rename = "delta.tuneFileSizesForRewrites")]
     TuneFileSizesForRewrites,
 
     /// 'classic' for classic Delta Lake checkpoints. 'v2' for v2 checkpoints.
     #[strum(serialize = "delta.checkpointPolicy")]
+    #[serde(rename = "delta.checkpointPolicy")]
     CheckpointPolicy,
-}
-
-/// A constraint in a check constraint
-#[derive(Eq, PartialEq, Debug, Default, Clone)]
-pub struct Constraint {
-    /// The full path to the field.
-    pub name: String,
-    /// The SQL string that must always evaluate to true.
-    pub expr: String,
-}
-
-impl Constraint {
-    /// Create a new invariant
-    pub fn new(field_name: &str, invariant_sql: &str) -> Self {
-        Self {
-            name: field_name.to_string(),
-            expr: invariant_sql.to_string(),
-        }
-    }
 }
 
 /// Delta configuration error
@@ -197,6 +214,13 @@ impl<'a> TableConfig<'a> {
             "true for this Delta table to be append-only",
             DeltaConfigKey::AppendOnly,
             append_only,
+            bool,
+            false
+        ),
+        (
+            "true for this Delta table to be append-only",
+            DeltaConfigKey::AutoOptimizeOptimizeWrite,
+            auto_optimize_optimize_write,
             bool,
             false
         ),
@@ -257,7 +281,7 @@ impl<'a> TableConfig<'a> {
             DeltaConfigKey::CheckpointInterval,
             checkpoint_interval,
             i32,
-            100
+            10
         ),
     );
 
@@ -328,7 +352,10 @@ impl<'a> TableConfig<'a> {
             .iter()
             .filter_map(|(field, value)| {
                 if field.starts_with("delta.constraints") {
-                    Some(Constraint::new("*", value))
+                    field
+                        .splitn(3, '.')
+                        .last()
+                        .map(|n| Constraint::new(n, value))
                 } else {
                     None
                 }
@@ -345,7 +372,9 @@ impl<'a> TableConfig<'a> {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Copy, Clone, PartialEq)]
+#[derive(
+    Serialize, Deserialize, Debug, Copy, Clone, PartialEq, EnumString, StrumDisplay, AsRefStr,
+)]
 /// The isolation level applied during transaction
 pub enum IsolationLevel {
     /// The strongest isolation level. It ensures that committed write operations
@@ -353,18 +382,21 @@ pub enum IsolationLevel {
     /// exists a serial sequence of executing them one-at-a-time that generates
     /// the same outcome as that seen in the table. For the write operations,
     /// the serial sequence is exactly the same as that seen in the table’s history.
+    #[strum(ascii_case_insensitive)]
     Serializable,
 
     /// A weaker isolation level than Serializable. It ensures only that the write
     /// operations (that is, not reads) are serializable. However, this is still stronger
     /// than Snapshot isolation. WriteSerializable is the default isolation level because
     /// it provides great balance of data consistency and availability for most common operations.
+    #[strum(ascii_case_insensitive)]
     WriteSerializable,
 
     /// SnapshotIsolation is a guarantee that all reads made in a transaction will see a consistent
     /// snapshot of the database (in practice it reads the last committed values that existed at the
     /// time it started), and the transaction itself will successfully commit only if no updates
     /// it has made conflict with any concurrent updates made since that snapshot.
+    #[strum(ascii_case_insensitive)]
     SnapshotIsolation,
 }
 
@@ -376,70 +408,20 @@ impl Default for IsolationLevel {
     }
 }
 
-impl AsRef<str> for IsolationLevel {
-    fn as_ref(&self) -> &str {
-        match self {
-            Self::Serializable => "Serializable",
-            Self::WriteSerializable => "WriteSerializable",
-            Self::SnapshotIsolation => "SnapshotIsolation",
-        }
-    }
-}
-
-impl FromStr for IsolationLevel {
-    type Err = Error;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_ascii_lowercase().as_str() {
-            "serializable" => Ok(Self::Serializable),
-            "writeserializable" | "write_serializable" => Ok(Self::WriteSerializable),
-            "snapshotisolation" | "snapshot_isolation" => Ok(Self::SnapshotIsolation),
-            _ => Err(Error::invalid_configuration(format!(
-                "Invalid string for IsolationLevel: {s}"
-            ))),
-        }
-    }
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, EnumString, StrumDisplay, AsRefStr)]
 /// The checkpoint policy applied when writing checkpoints
 #[serde(rename_all = "camelCase")]
+#[strum(serialize_all = "camelCase")]
 pub enum CheckpointPolicy {
     /// classic Delta Lake checkpoints
     Classic,
     /// v2 checkpoints
     V2,
-    /// unknown checkpoint policy
-    Other(String),
 }
 
 impl Default for CheckpointPolicy {
     fn default() -> Self {
         Self::Classic
-    }
-}
-
-impl AsRef<str> for CheckpointPolicy {
-    fn as_ref(&self) -> &str {
-        match self {
-            Self::Classic => "classic",
-            Self::V2 => "v2",
-            Self::Other(s) => s,
-        }
-    }
-}
-
-impl FromStr for CheckpointPolicy {
-    type Err = Error;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_ascii_lowercase().as_str() {
-            "classic" => Ok(Self::Classic),
-            "v2" => Ok(Self::V2),
-            _ => Err(Error::invalid_configuration(format!(
-                "Invalid string for CheckpointPolicy: {s}"
-            ))),
-        }
     }
 }
 
@@ -541,7 +523,7 @@ mod tests {
     fn get_long_from_metadata_test() {
         let md = dummy_metadata();
         let config = TableConfig(&md.configuration);
-        assert_eq!(config.checkpoint_interval(), 100,)
+        assert_eq!(config.checkpoint_interval(), 10,)
     }
 
     #[test]
@@ -681,5 +663,140 @@ mod tests {
                 "interval 'interval -25 hours' cannot be negative".to_string()
             )
         );
+    }
+
+    #[test]
+    fn test_constraint() {
+        let md = dummy_metadata();
+        let config = TableConfig(&md.configuration);
+
+        assert_eq!(config.get_constraints().len(), 0);
+
+        let mut md = dummy_metadata();
+        md.configuration.insert(
+            "delta.constraints.name".to_string(),
+            "name = 'foo'".to_string(),
+        );
+        md.configuration
+            .insert("delta.constraints.age".to_string(), "age > 10".to_string());
+        let config = TableConfig(&md.configuration);
+
+        let constraints = config.get_constraints();
+        assert_eq!(constraints.len(), 2);
+        assert!(constraints.contains(&Constraint::new("name", "name = 'foo'")));
+        assert!(constraints.contains(&Constraint::new("age", "age > 10")));
+    }
+
+    #[test]
+    fn test_roundtrip_config_key() {
+        let cases = [
+            (DeltaConfigKey::AppendOnly, "delta.appendOnly"),
+            (
+                DeltaConfigKey::AutoOptimizeAutoCompact,
+                "delta.autoOptimize.autoCompact",
+            ),
+            (
+                DeltaConfigKey::AutoOptimizeOptimizeWrite,
+                "delta.autoOptimize.optimizeWrite",
+            ),
+            (
+                DeltaConfigKey::CheckpointInterval,
+                "delta.checkpointInterval",
+            ),
+            (
+                DeltaConfigKey::CheckpointWriteStatsAsJson,
+                "delta.checkpoint.writeStatsAsJson",
+            ),
+            (
+                DeltaConfigKey::CheckpointWriteStatsAsStruct,
+                "delta.checkpoint.writeStatsAsStruct",
+            ),
+            (
+                DeltaConfigKey::ColumnMappingMode,
+                "delta.columnMapping.mode",
+            ),
+            (
+                DeltaConfigKey::DataSkippingNumIndexedCols,
+                "delta.dataSkippingNumIndexedCols",
+            ),
+            (
+                DeltaConfigKey::DataSkippingStatsColumns,
+                "delta.dataSkippingStatsColumns",
+            ),
+            (
+                DeltaConfigKey::DeletedFileRetentionDuration,
+                "delta.deletedFileRetentionDuration",
+            ),
+            (
+                DeltaConfigKey::EnableChangeDataFeed,
+                "delta.enableChangeDataFeed",
+            ),
+            (
+                DeltaConfigKey::EnableDeletionVectors,
+                "delta.enableDeletionVectors",
+            ),
+            (DeltaConfigKey::IsolationLevel, "delta.isolationLevel"),
+            (
+                DeltaConfigKey::LogRetentionDuration,
+                "delta.logRetentionDuration",
+            ),
+            (DeltaConfigKey::MinReaderVersion, "delta.minReaderVersion"),
+            (DeltaConfigKey::MinWriterVersion, "delta.minWriterVersion"),
+            (
+                DeltaConfigKey::RandomizeFilePrefixes,
+                "delta.randomizeFilePrefixes",
+            ),
+            (
+                DeltaConfigKey::RandomPrefixLength,
+                "delta.randomPrefixLength",
+            ),
+            (
+                DeltaConfigKey::SetTransactionRetentionDuration,
+                "delta.setTransactionRetentionDuration",
+            ),
+            (
+                DeltaConfigKey::EnableExpiredLogCleanup,
+                "delta.enableExpiredLogCleanup",
+            ),
+            (DeltaConfigKey::TargetFileSize, "delta.targetFileSize"),
+            (
+                DeltaConfigKey::TuneFileSizesForRewrites,
+                "delta.tuneFileSizesForRewrites",
+            ),
+            (DeltaConfigKey::CheckpointPolicy, "delta.checkpointPolicy"),
+        ];
+
+        assert_eq!(DeltaConfigKey::VARIANTS.len(), cases.len());
+
+        for (key, expected) in cases {
+            assert_eq!(key.as_ref(), expected);
+
+            let serialized = serde_json::to_string(&key).unwrap();
+            assert_eq!(serialized, format!("\"{}\"", expected));
+
+            let deserialized: DeltaConfigKey = serde_json::from_str(&serialized).unwrap();
+            assert_eq!(deserialized, key);
+
+            let from_str: DeltaConfigKey = expected.parse().unwrap();
+            assert_eq!(from_str, key);
+        }
+    }
+
+    #[test]
+    fn test_default_config() {
+        let md = dummy_metadata();
+        let config = TableConfig(&md.configuration);
+
+        assert_eq!(config.append_only(), false);
+        // assert_eq!(config.auto_optimize_auto_compact(), false);
+        assert_eq!(config.auto_optimize_optimize_write(), false);
+        assert_eq!(config.checkpoint_interval(), 10);
+        assert_eq!(config.write_stats_as_json(), true);
+        assert_eq!(config.write_stats_as_struct(), false);
+        assert_eq!(config.target_file_size(), 104857600);
+        assert_eq!(config.enable_change_data_feed(), false);
+        assert_eq!(config.enable_deletion_vectors(), false);
+        assert_eq!(config.num_indexed_cols(), 32);
+        assert_eq!(config.enable_expired_log_cleanup(), true);
     }
 }

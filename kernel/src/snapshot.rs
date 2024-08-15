@@ -249,8 +249,8 @@ impl Snapshot {
         &self.protocol
     }
 
-    pub fn table_config(&self) -> TableConfig<'_> {
-        TableConfig(&self.metadata.configuration)
+    pub fn config(&self) -> TableConfig<'_> {
+        self.metadata.config()
     }
 
     /// Create a [`ScanBuilder`] for an `Arc<Snapshot>`.
