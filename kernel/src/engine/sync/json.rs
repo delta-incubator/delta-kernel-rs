@@ -95,4 +95,8 @@ impl JsonHandler for SyncJsonHandler {
             .try_collect()?;
         Ok(Box::new(ArrowEngineData::new(concat_batches(&schema, &batches)?)) as _)
     }
+
+    fn put_json(&self, path: &Url, data: Box<dyn EngineData>) -> DeltaResult<()> {
+        unimplemented!()
+    }
 }

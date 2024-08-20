@@ -9,13 +9,18 @@ use object_store::DynObjectStore;
 use parquet::arrow::arrow_reader::{
     ArrowReaderMetadata, ArrowReaderOptions, ParquetRecordBatchReaderBuilder,
 };
+use parquet::arrow::arrow_writer::ArrowWriter;
 use parquet::arrow::async_reader::{ParquetObjectReader, ParquetRecordBatchStreamBuilder};
 
 use super::file_stream::{FileOpenFuture, FileOpener, FileStream};
+use crate::engine::arrow_data::ArrowEngineData;
 use crate::engine::arrow_utils::{generate_mask, get_requested_indices, reorder_struct_array};
 use crate::engine::default::executor::TaskExecutor;
 use crate::schema::SchemaRef;
-use crate::{DeltaResult, Error, Expression, FileDataReadResultIterator, FileMeta, ParquetHandler};
+use crate::{
+    DeltaResult, EngineData, Error, Expression, FileDataReadResultIterator, FileMeta,
+    ParquetHandler,
+};
 
 #[derive(Debug)]
 pub struct DefaultParquetHandler<E: TaskExecutor> {
@@ -76,6 +81,29 @@ impl<E: TaskExecutor> ParquetHandler for DefaultParquetHandler<E> {
             files,
             self.readahead,
         )
+    }
+
+    fn write_parquet_files(
+        &self,
+        path: &url::Url,
+        data: Box<dyn EngineData>,
+    ) -> DeltaResult<url::Url> {
+        let batch: Box<_> = ArrowEngineData::try_from_engine_data(data)?;
+        let record_batch = batch.record_batch();
+        let mut buffer = vec![];
+        let mut writer = ArrowWriter::try_new(&mut buffer, record_batch.schema(), None).unwrap();
+
+        writer.write(&record_batch).expect("Writing batch");
+
+        // writer must be closed to write footer
+        writer.close().unwrap();
+
+        futures::executor::block_on(async {
+            self.store
+                .put(&Path::from(path.path()), buffer.into())
+                .await
+        })?;
+        Ok(path.clone())
     }
 }
 

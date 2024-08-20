@@ -69,6 +69,7 @@ pub mod schema;
 pub mod snapshot;
 pub mod table;
 pub mod transaction;
+pub mod txn;
 pub(crate) mod utils;
 
 pub use engine_data::{DataVisitor, EngineData};
@@ -190,6 +191,8 @@ pub trait JsonHandler: Send + Sync {
         physical_schema: SchemaRef,
         predicate: Option<Expression>,
     ) -> DeltaResult<FileDataReadResultIterator>;
+
+    fn put_json(&self, path: &Url, data: Box<dyn EngineData>) -> DeltaResult<()>;
 }
 
 /// Provides Parquet file related functionalities to Delta Kernel.
@@ -212,6 +215,19 @@ pub trait ParquetHandler: Send + Sync {
         physical_schema: SchemaRef,
         predicate: Option<Expression>,
     ) -> DeltaResult<FileDataReadResultIterator>;
+
+    /// Write EngineData to a given path encoded as Parquet files and return the metadata:
+    /// - url of the file written
+    ///
+    /// # Parameters
+    ///
+    /// - `path` - Url for the location where the Parquet files should be written.
+    /// - `data` - EngineData to be written to Parquet files.
+    fn write_parquet_files(
+        &self,
+        path: &Url,
+        data: Box<dyn EngineData>,
+    ) -> DeltaResult<Url>;
 }
 
 /// The `Engine` trait encapsulates all the functionality an engine or connector needs to provide

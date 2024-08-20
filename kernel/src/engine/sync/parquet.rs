@@ -49,4 +49,11 @@ impl ParquetHandler for SyncParquetHandler {
             try_create_from_parquet(schema.clone(), location).map(|d| Box::new(d) as _)
         })))
     }
+    fn write_parquet_files(
+        &self,
+        path: &Url,
+        data: Box<dyn crate::EngineData>,
+    ) -> DeltaResult<Url> {
+        unimplemented!()
+    }
 }
