@@ -169,6 +169,8 @@ impl Snapshot {
             });
         }
 
+        println!("ZERO");
+
         // get the effective version from chosen files
         let version_eff = commit_files
             .first()
@@ -176,12 +178,16 @@ impl Snapshot {
             .and_then(|f| LogPath::new(&f.location).version)
             .ok_or(Error::MissingVersion)?; // TODO: A more descriptive error
 
+        println!("ONE");
+
         if let Some(v) = version {
             require!(
                 version_eff == v,
                 Error::MissingVersion // TODO more descriptive error
             );
         }
+
+        println!("TWO");
 
         let log_segment = LogSegment {
             log_root: log_url,
@@ -370,11 +376,18 @@ fn list_log_files(
     let version_prefix = format!("{:020}", 0);
     let start_from = log_root.join(&version_prefix)?;
 
+    println!("LIST START FROM: {}", start_from);
+
     let mut max_checkpoint_version = -1_i64;
     let mut commit_files = Vec::new();
     let mut checkpoint_files = Vec::with_capacity(10);
 
+    for f in fs_client.read_files(vec![(start_from.join(".json")?, None)])? {
+        println!("FILE: {:?}", f);
+    }
+
     for maybe_meta in fs_client.list_from(&start_from)? {
+        println!("MAYBE META: {:?}", maybe_meta);
         let meta = maybe_meta?;
         let log_path = LogPath::new(&meta.location);
         if log_path.is_checkpoint {
@@ -394,6 +407,8 @@ fn list_log_files(
             commit_files.push(meta);
         }
     }
+
+    println!("COMMIT FILES: {:?}", commit_files);
 
     commit_files.retain(|f| {
         version_from_location(&f.location).unwrap_or(0) as i64 > max_checkpoint_version

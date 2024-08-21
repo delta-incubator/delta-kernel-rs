@@ -24,8 +24,7 @@ impl TransactionBuilder {
 pub struct Transaction {
     table_location: Url,
     latest_snapshot: Arc<Snapshot>,
-    // write_metadata: Option<Arc<dyn EngineData>>,
-    write_metadata: Vec<Url>,
+    write_metadata: Option<Box<dyn EngineData>>,
 }
 
 impl Transaction {
@@ -33,27 +32,29 @@ impl Transaction {
         Self {
             table_location,
             latest_snapshot: latest_snapshot.into(),
-            // write_metadata: None,
-            write_metadata: vec![],
+            write_metadata: None,
         }
     }
 
     pub fn write(&mut self, engine: &dyn Engine, data: Box<dyn EngineData>) -> DeltaResult<()> {
         // transform to physical
-        let physical_data = transform_to_physical(engine, data.as_ref())?;
+        // let physical_data = transform_to_physical(engine, data.as_ref())?;
         // write the parquet file
         let parquet_handler = engine.get_parquet_handler();
         // parquet_handler.write_parquet_files(&self.table_location, physical_data)?;
-        let write_path = parquet_handler.write_parquet_files(&self.table_location, data)?;
-        self.write_metadata.push(write_path);
+        let write_metadata = parquet_handler.write_parquet_files(&self.table_location, data)?;
+        // FIXME implement how to combine write metadatas
+        self.write_metadata = Some(write_metadata.into());
         Ok(())
     }
 
     pub fn commit(self, engine: &dyn Engine) -> DeltaResult<()> {
         let json_handler = engine.get_json_handler();
         let commit_file_name = format!("{:020}", &self.latest_snapshot.version() + 1);
-        let commit_path = &self.table_location.join("_delta_log").join(commit_file_name);
-        json_handler.put_json(log_path, &self.write_metadata)?;
+        let commit_path = &self.table_location.join("_delta_log")?.join(&commit_file_name)?;
+        // fixme
+        let write_metadata = self.write_metadata.expect("no write metadata");
+        json_handler.put_json(commit_path, write_metadata)?;
         Ok(())
     }
 }

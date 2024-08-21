@@ -139,18 +139,17 @@ impl<E: TaskExecutor> JsonHandler for DefaultJsonHandler<E> {
     // each row represents an action in the delta log. this PUT must:
     // (1) serialize the data to newline-delimited json (each row is a json object)
     // (2) write the data to the object store atomically (i.e. if the file already exists, fail)
-    fn put_json(&self, path: &Path, data: Box<dyn EngineData>) -> DeltaResult<()> {
+    fn put_json(&self, path: &url::Url, data: Box<dyn EngineData>) -> DeltaResult<()> {
         let batch: Box<_> = ArrowEngineData::try_from_engine_data(data)?;
         let record_batch = batch.record_batch();
-        let mut buffer = vec![];
-        let mut writer = arrow_json::LineDelimitedWriter::new(buffer);
-        writer.write_batches(&vec![&record_batch]).unwrap();
+        let mut writer = arrow_json::LineDelimitedWriter::new(vec![]);
+        writer.write_batches(&vec![record_batch]).unwrap();
         writer.finish().unwrap();
-
+        let buffer = writer.into_inner();
         // put if absent
         futures::executor::block_on(async {
             self.store
-                .put_opts(path, buffer.into(), object_store::PutMode::Create.into())
+                .put_opts(&Path::from(path.path()), buffer.into(), object_store::PutMode::Create.into())
                 .await
         })?;
         Ok(())

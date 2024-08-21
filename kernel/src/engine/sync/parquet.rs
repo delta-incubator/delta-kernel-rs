@@ -7,7 +7,10 @@ use url::Url;
 use crate::engine::arrow_data::ArrowEngineData;
 use crate::engine::arrow_utils::{generate_mask, get_requested_indices, reorder_struct_array};
 use crate::schema::SchemaRef;
-use crate::{DeltaResult, Error, Expression, FileDataReadResultIterator, FileMeta, ParquetHandler};
+use crate::{
+    DeltaResult, EngineData, Error, Expression, FileDataReadResultIterator, FileMeta,
+    ParquetHandler,
+};
 
 pub(crate) struct SyncParquetHandler;
 
@@ -53,7 +56,7 @@ impl ParquetHandler for SyncParquetHandler {
         &self,
         path: &Url,
         data: Box<dyn crate::EngineData>,
-    ) -> DeltaResult<Url> {
+    ) -> DeltaResult<Box<dyn EngineData>> {
         unimplemented!()
     }
 }

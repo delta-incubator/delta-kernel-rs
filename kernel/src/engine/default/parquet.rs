@@ -11,6 +11,9 @@ use parquet::arrow::arrow_reader::{
 };
 use parquet::arrow::arrow_writer::ArrowWriter;
 use parquet::arrow::async_reader::{ParquetObjectReader, ParquetRecordBatchStreamBuilder};
+use arrow_array::{ArrayRef, Int64Array, StringArray};
+use arrow_array::RecordBatch;
+use arrow_schema::Field;
 
 use super::file_stream::{FileOpenFuture, FileOpener, FileStream};
 use crate::engine::arrow_data::ArrowEngineData;
@@ -87,7 +90,7 @@ impl<E: TaskExecutor> ParquetHandler for DefaultParquetHandler<E> {
         &self,
         path: &url::Url,
         data: Box<dyn EngineData>,
-    ) -> DeltaResult<url::Url> {
+    ) -> DeltaResult<Box<dyn EngineData>> {
         let batch: Box<_> = ArrowEngineData::try_from_engine_data(data)?;
         let record_batch = batch.record_batch();
         let mut buffer = vec![];
@@ -98,12 +101,29 @@ impl<E: TaskExecutor> ParquetHandler for DefaultParquetHandler<E> {
         // writer must be closed to write footer
         writer.close().unwrap();
 
+        // FIXME safe cast?
+        let size = buffer.len() as i64;
+
         futures::executor::block_on(async {
             self.store
                 .put(&Path::from(path.path()), buffer.into())
                 .await
         })?;
-        Ok(path.clone())
+
+        // FIXME get schema from kernel?
+        let schema = Arc::new(arrow_schema::Schema::new(vec![
+            Field::new("path", arrow_schema::DataType::Utf8, false),
+            Field::new("size", arrow_schema::DataType::Int64, false),
+        ]));
+
+        // Create the data for the record batch
+        let path = Arc::new(StringArray::from(vec![path.to_string()])) as ArrayRef;
+        let size = Arc::new(Int64Array::from(vec![size])) as ArrayRef;
+
+        // Create the record batch
+        let batch = RecordBatch::try_new(schema, vec![path, size]).unwrap();
+
+        Ok(Box::new(ArrowEngineData::new(batch)))
     }
 }
 

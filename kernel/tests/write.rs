@@ -45,12 +45,9 @@ async fn create_table(
 {{"metaData":{{"id":"{}","format":{{"provider":"parquet","options":{{}}}},"schemaString":"{}","partitionColumns":[],"configuration":{{}},"createdTime":1677811175819}}}}"#,
         table_id, schema_string
     ).into_bytes();
-    store
-        .put(
-            &Path::from(format!("{table_path}/_delta_log/00000000000000000000.json",)),
-            data.into(),
-        )
-        .await?;
+    let path = format!("{table_path}/_delta_log/00000000000000000000.json");
+    println!("putting to path: {}", path);
+    store.put(&Path::from(path), data.into()).await?;
     Ok(Table::new(table_path))
 }
 
@@ -62,10 +59,10 @@ async fn create_table(
 #[tokio::test]
 async fn basic_append() -> Result<(), Box<dyn std::error::Error>> {
     // setup in-memory object store and default engine
-    let table_location = Url::parse("memory://test_table/").unwrap();
+    let table_location = Url::parse("memory://test_table").unwrap();
     // prefix is just "/" since we are using in-memory object store - don't really care about
     // collisions TODO check?? lol
-    let (store, engine) = setup(Path::from("/"));
+    let (store, engine) = setup(Path::from("memory://"));
 
     // create a simple table: one int column named 'number'
     let schema = Arc::new(StructType::new(vec![StructField::new(
@@ -75,22 +72,31 @@ async fn basic_append() -> Result<(), Box<dyn std::error::Error>> {
     )]));
     let table = create_table(store.clone(), table_location, schema.clone()).await?;
 
+    println!(
+        "{:?}",
+        store
+            .get(&Path::from(
+                "memory://test_table/_delta_log/00000000000000000000.json"
+            ))
+            .await
+    );
+
     // append an arrow record batch (vec of record batches??)
     let append_data = RecordBatch::try_new(
         Arc::new(schema.as_ref().try_into()?),
         vec![Arc::new(arrow::array::Int32Array::from(vec![1, 2, 3]))],
     )?;
-    let append_data = Arc::new(ArrowEngineData::new(append_data));
+    let append_data = Box::new(ArrowEngineData::new(append_data));
 
     let append_data2 = RecordBatch::try_new(
         Arc::new(schema.as_ref().try_into()?),
         vec![Arc::new(arrow::array::Int32Array::from(vec![4, 5, 6]))],
     )?;
-    let append_data2 = Arc::new(ArrowEngineData::new(append_data2));
+    let append_data2 = Box::new(ArrowEngineData::new(append_data2));
 
     // create a new txn based on current table version
     let txn_builder = table.new_transaction_builder();
-    let txn = txn_builder.build(&engine);
+    let mut txn = txn_builder.build(&engine).expect("build txn");
 
     // // create a new async task to do the write (simulate executors)
     // let writer = tokio::task::spawn(async {
@@ -103,7 +109,14 @@ async fn basic_append() -> Result<(), Box<dyn std::error::Error>> {
     // wait for writes to complete
     // let _ = writer.await?;
 
-    txn.commit()?;
+    txn.commit(&engine)?;
+
+    // let expected_data = RecordBatch::try_new(
+    //     Arc::new(schema.as_ref().try_into()?),
+    //     vec![Arc::new(arrow::array::Int32Array::from(vec![1, 2, 3, 4, 5, 6]))],
+    // )?;
+    // let expected = Box::new(ArrowEngineData::new(expected_data));
+    // test_read(expected: vec![1, 2, 3, 4, 5, 6], table_location).await?;
 
     Ok(())
 }

@@ -227,7 +227,7 @@ pub trait ParquetHandler: Send + Sync {
         &self,
         path: &Url,
         data: Box<dyn EngineData>,
-    ) -> DeltaResult<Url>;
+    ) -> DeltaResult<Box<dyn EngineData>>;
 }
 
 /// The `Engine` trait encapsulates all the functionality an engine or connector needs to provide
