@@ -144,7 +144,9 @@ impl Snapshot {
         version: Option<Version>,
     ) -> DeltaResult<Self> {
         let fs_client = engine.get_file_system_client();
-        let log_url = LogPath::new(&table_root).child("_delta_log/").unwrap();
+        println!("[snapshot::try_new] TABLE ROOT: {:?}", table_root);
+        let log_url = table_root.join("_delta_log/").unwrap();
+        println!("[snapshot::try_new] LOG URL: {:?}", log_url);
 
         // List relevant files from log
         let (mut commit_files, checkpoint_files) =
@@ -373,20 +375,23 @@ fn list_log_files(
     fs_client: &dyn FileSystemClient,
     log_root: &Url,
 ) -> DeltaResult<(Vec<FileMeta>, Vec<FileMeta>)> {
-    let version_prefix = format!("{:020}", 0);
-    let start_from = log_root.join(&version_prefix)?;
-
-    println!("LIST START FROM: {}", start_from);
+    // let version_prefix = format!("{:020}", 0);
+    // let start_from = log_root.join(&version_prefix)?;
 
     let mut max_checkpoint_version = -1_i64;
     let mut commit_files = Vec::new();
     let mut checkpoint_files = Vec::with_capacity(10);
 
-    for f in fs_client.read_files(vec![(start_from.join(".json")?, None)])? {
+    // let v = format!("{:020}", 1);
+    // let start = log_root// .join(&v)?// .join(".json")?;
+    let checker = log_root.clone().join("00000000000000000000.json")?;
+    println!("path to check: {:?}", checker);
+    for f in fs_client.read_files(vec![(checker, None)])? {
         println!("FILE: {:?}", f);
     }
 
-    for maybe_meta in fs_client.list_from(&start_from)? {
+    println!("LIST START FROM: {:?}", log_root);
+    for maybe_meta in fs_client.list_from(&log_root)? {
         println!("MAYBE META: {:?}", maybe_meta);
         let meta = maybe_meta?;
         let log_path = LogPath::new(&meta.location);

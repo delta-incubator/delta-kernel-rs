@@ -45,7 +45,8 @@ async fn create_table(
 {{"metaData":{{"id":"{}","format":{{"provider":"parquet","options":{{}}}},"schemaString":"{}","partitionColumns":[],"configuration":{{}},"createdTime":1677811175819}}}}"#,
         table_id, schema_string
     ).into_bytes();
-    let path = format!("{table_path}/_delta_log/00000000000000000000.json");
+    let path = table_path.path();
+    let path = format!("{path}_delta_log/00000000000000000000.json");
     println!("putting to path: {}", path);
     store.put(&Path::from(path), data.into()).await?;
     Ok(Table::new(table_path))
@@ -58,8 +59,14 @@ async fn create_table(
 
 #[tokio::test]
 async fn basic_append() -> Result<(), Box<dyn std::error::Error>> {
+
+    // setup tracing
+    let _ = tracing_subscriber::fmt::try_init();
+
+
     // setup in-memory object store and default engine
-    let table_location = Url::parse("memory://test_table").unwrap();
+    let table_location = Url::parse("memory:///test_table/").unwrap();
+    println!("table_location: {}", table_location);
     // prefix is just "/" since we are using in-memory object store - don't really care about
     // collisions TODO check?? lol
     let (store, engine) = setup(Path::from("memory://"));
@@ -76,7 +83,7 @@ async fn basic_append() -> Result<(), Box<dyn std::error::Error>> {
         "{:?}",
         store
             .get(&Path::from(
-                "memory://test_table/_delta_log/00000000000000000000.json"
+                "/test_table/_delta_log/00000000000000000000.json"
             ))
             .await
     );
@@ -104,19 +111,74 @@ async fn basic_append() -> Result<(), Box<dyn std::error::Error>> {
     //     txn.write(append_data).expect("write data files");
     // });
     txn.write(&engine, append_data).expect("write append_data");
-    txn.write(&engine, append_data2).expect("write append_data2");
+    txn.write(&engine, append_data2)
+        .expect("write append_data2");
 
     // wait for writes to complete
     // let _ = writer.await?;
 
     txn.commit(&engine)?;
 
-    // let expected_data = RecordBatch::try_new(
-    //     Arc::new(schema.as_ref().try_into()?),
-    //     vec![Arc::new(arrow::array::Int32Array::from(vec![1, 2, 3, 4, 5, 6]))],
-    // )?;
-    // let expected = Box::new(ArrowEngineData::new(expected_data));
-    // test_read(expected: vec![1, 2, 3, 4, 5, 6], table_location).await?;
+    let commit1 =
+        store
+            .get(&Path::from(
+                "/test_table/_delta_log/00000000000000000001.json"
+            ))
+            .await?;
+    println!(
+        "{:?}", commit1
+    );
+
+    println!("{}", String::from_utf8(commit1.bytes().await?.to_vec())?);
+
+    let expected_data = RecordBatch::try_new(
+        Arc::new(schema.as_ref().try_into()?),
+        vec![Arc::new(arrow::array::Int32Array::from(vec![
+            1, 2, 3, 4, 5, 6,
+        ]))],
+    )?;
+    let expected = Box::new(ArrowEngineData::new(expected_data));
+    test_read(expected, table, &engine)?;
+
+    Ok(())
+}
+
+fn test_read(
+    expected: Box<ArrowEngineData>,
+    table: Table,
+    engine: &impl Engine,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let snapshot = table.snapshot(engine, None)?;
+
+    println!("{:?}", snapshot);
+    // println!("snapshot files {:?}", snapshot);
+
+    let scan = snapshot.into_scan_builder().build()?;
+
+    let actual = scan.execute(engine)?;
+    let batches: Vec<RecordBatch> = actual
+        .into_iter()
+        .map(|res| {
+            let data = res.raw_data.unwrap();
+            let record_batch: RecordBatch = data
+                .into_any()
+                .downcast::<ArrowEngineData>()
+                .unwrap()
+                .into();
+            record_batch
+        })
+        .collect();
+
+    let formatted = arrow::util::pretty::pretty_format_batches(&batches)
+        .unwrap()
+        .to_string();
+
+    let expected = arrow::util::pretty::pretty_format_batches(&[expected.record_batch().clone()])
+        .unwrap()
+        .to_string();
+
+    println!("expected:\n{expected}");
+    println!("got:\n{formatted}");
 
     Ok(())
 }

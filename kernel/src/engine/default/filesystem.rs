@@ -42,7 +42,7 @@ impl<E: TaskExecutor> FileSystemClient for ObjectStoreFileSystemClient<E> {
         let url = path.clone();
         let offset = Path::from(path.path());
         // TODO properly handle table prefix
-        let prefix = self.table_root.clone();// .child("_delta_log");
+        // let prefix = self.table_root.clone();// .child("_delta_log");
 
         let store = self.inner.clone();
 
@@ -50,9 +50,11 @@ impl<E: TaskExecutor> FileSystemClient for ObjectStoreFileSystemClient<E> {
         let (sender, receiver) = std::sync::mpsc::sync_channel(4_000);
 
         self.task_executor.spawn(async move {
-            println!("list: prefix: {:?}, offset: {:?}", prefix, offset);
+            // println!("list: prefix: {:?}, offset: {:?}", url, offset);
+            println!("list prefix: {:?}", offset);
 
-            let mut stream = store.list_with_offset(Some(&prefix), &offset);
+            // let mut stream = store.list_with_offset(Some(&url), &offset);
+            let mut stream = store.list(Some(&offset));
 
             while let Some(meta) = stream.next().await {
                 match meta {

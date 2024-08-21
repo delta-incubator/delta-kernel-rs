@@ -50,8 +50,8 @@ impl Transaction {
 
     pub fn commit(self, engine: &dyn Engine) -> DeltaResult<()> {
         let json_handler = engine.get_json_handler();
-        let commit_file_name = format!("{:020}", &self.latest_snapshot.version() + 1);
-        let commit_path = &self.table_location.join("_delta_log")?.join(&commit_file_name)?;
+        let commit_file_name = format!("{:020}", &self.latest_snapshot.version() + 1) + ".json";
+        let commit_path = &self.table_location.join("_delta_log/")?.join(&commit_file_name)?;
         // fixme
         let write_metadata = self.write_metadata.expect("no write metadata");
         json_handler.put_json(commit_path, write_metadata)?;

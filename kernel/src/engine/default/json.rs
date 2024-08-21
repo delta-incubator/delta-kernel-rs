@@ -146,6 +146,8 @@ impl<E: TaskExecutor> JsonHandler for DefaultJsonHandler<E> {
         writer.write_batches(&vec![record_batch]).unwrap();
         writer.finish().unwrap();
         let buffer = writer.into_inner();
+        println!("putting json: {:?}", buffer);
+        println!("commit path: {:?}", path.path());
         // put if absent
         futures::executor::block_on(async {
             self.store
