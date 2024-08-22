@@ -1,0 +1,17 @@
+[package]
+name = "delta-variant"
+edition.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+version.workspace = true
+
+
+[dependencies]
+parquet = { version = "^52", default-features = false, features = ["arrow", "snap"] }
+arrow = { version = "^52" }
+thiserror = "^1"
+serde = "^1"
+serde_json = "^1"
