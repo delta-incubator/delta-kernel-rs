@@ -1,20 +1,15 @@
 //! Code relating to parsing and using deletion vectors
 
 use std::io::{Cursor, Read};
-use std::iter::Peekable;
-use std::marker::PhantomData;
-use std::ops::{Deref, DerefMut, IndexMut};
-
 use std::sync::Arc;
 
 use bytes::Bytes;
-use roaring::treemap::IntoIter;
 use roaring::RoaringTreemap;
 use url::Url;
 
-use crate::utils::require;
 use delta_kernel_derive::Schema;
 
+use crate::utils::require;
 use crate::{DeltaResult, Error, FileSystemClient};
 
 #[derive(Debug, Clone, PartialEq, Eq, Schema)]
@@ -171,6 +166,16 @@ impl DeletionVectorDescriptor {
             }
         }
     }
+
+    /// Materialize the row indexes of the deletion vector as a Vec<u64> in which each element
+    /// represents a row index that is deleted from the table.
+    pub fn row_indexes(
+        &self,
+        fs_client: Arc<dyn FileSystemClient>,
+        parent: &Url,
+    ) -> DeltaResult<Vec<u64>> {
+        Ok(self.read(fs_client, parent)?.into_iter().collect())
+    }
 }
 
 enum Endian {
@@ -229,97 +234,27 @@ pub(crate) fn treemap_to_bools(treemap: RoaringTreemap) -> Vec<bool> {
     }
 }
 
-#[derive(PartialEq)]
-#[repr(C)]
-pub enum VectorType {
-    Selection,
-    Deletion,
-}
-
-pub trait BitSet<V> {
-    fn set_bit(&mut self, idx: usize, value: impl Into<V>);
-}
-
-pub trait ContainerIterator<C, V>
-where
-    C: BitSet<V>,
-{
-    fn next_batch(&mut self, mut container: C, batch_size: usize) -> Option<C> {
-        self.next_batch_with(&mut container, batch_size)
-            .map(|_| container)
-    }
-    fn next_batch_with(&mut self, container: &mut C, batch_size: usize) -> Option<()>;
-}
-
-impl<C, V> BitSet<V> for C
-where
-    C: AsMut<[V]>,
-{
-    fn set_bit(&mut self, idx: usize, value: impl Into<V>) {
-        if let Some(i) = self.as_mut().get_mut(idx) {
-            *i = value.into();
-        } else {
-            tracing::info!("Index value in DV: {} is None", idx);
+/// helper function to split an `Option<Vec<bool>>`. Because deletion vectors apply to a whole file,
+/// but parquet readers can chunk the file, there is a need to split the vector up.
+/// If the passed vector is Some(vector):
+///   - If `split_index < vector.len()`, split `vector` at `split_index`. The passed vector is
+///     modified in place, and the split off component is returned.
+///   - If `split_index` >= vector.len()` will return None. If `extend` is Some(b), the passed
+///     vector will be extended with `b` to have a length of `split_index`. If `extend` is `None`,
+///     do nothing and return `None`
+/// If the passed `vector` is `None`, do nothing and return None
+pub fn split_vector(
+    vector: Option<&mut Vec<bool>>,
+    split_index: usize,
+    extend: Option<bool>,
+) -> Option<Vec<bool>> {
+    match vector {
+        Some(vector) if split_index < vector.len() => Some(vector.split_off(split_index)),
+        Some(vector) if extend.is_some() => {
+            vector.extend(std::iter::repeat(extend.unwrap()).take(split_index - vector.len()));
+            None
         }
-    }
-}
-
-#[repr(C)]
-pub struct DeletionVectorBatch {
-    inner_iter: Peekable<IntoIter>,
-    position: usize,
-    total_rows: usize,
-    vector_type: VectorType,
-   
-}
-
-impl DeletionVectorBatch {
-    pub fn new(treemap: RoaringTreemap, total_rows: usize, vector_type: VectorType) -> Self {
-        let inner_iter = treemap.into_iter().peekable();
-        Self {
-            inner_iter,
-            position: 0,
-            total_rows,
-            vector_type,
-        }
-    }
-
-    pub fn full_vector(&mut self) -> Option<Vec<bool>> {
-        self.next_batch(vec![false; self.total_rows], self.total_rows)
-    }
-    
-    pub fn full_bit_vector(&mut self) -> Option<Vec<u8>> {
-        self.next_batch(vec![0; self.total_rows], self.total_rows)
-    }
-
-    #[inline]
-    fn flip_value(&self) -> bool {
-        self.vector_type == VectorType::Deletion
-    }
-}
-
-impl<C, V> ContainerIterator<C, V> for DeletionVectorBatch
-where
-    C: BitSet<V> + AsMut<[V]>,
-    V: From<bool> + Copy,
-{
-    fn next_batch_with(&mut self, container: &mut C, batch_size: usize) -> Option<()> {
-        if self.position >= self.total_rows {
-            return None;
-        }
-        let slice_range = self.position as u64 + batch_size as u64;
-
-        while let Some(bit) = self.inner_iter.next() {
-            container.set_bit(bit as usize - self.position, self.flip_value());
-
-            if let Some(next_bit) = self.inner_iter.peek() {
-                if *next_bit > slice_range {
-                    break;
-                }
-            }
-        }
-        self.position += batch_size;
-        Some(())
+        _ => None,
     }
 }
 
@@ -328,7 +263,6 @@ mod tests {
     use std::path::PathBuf;
 
     use roaring::RoaringTreemap;
-    use tokio::io::AsyncReadExt;
 
     use crate::{engine::sync::SyncEngine, Engine};
 
@@ -461,31 +395,15 @@ mod tests {
         assert_eq!(bools, expected);
     }
 
-    #[tokio::test]
-    async fn test_dv_wrapper() -> Result<(), Box<dyn std::error::Error>> {
+    #[test]
+    fn test_dv_row_indexes() {
         let example = dv_inline();
+        let sync_engine = SyncEngine::new();
+        let fs_client = sync_engine.get_file_system_client();
+        let parent = Url::parse("http://not.used").unwrap();
+        let row_idx = example.row_indexes(fs_client, &parent).unwrap();
 
-        let de_comp = z85::decode(&example.path_or_inline_dv)?;
-        dbg!(de_comp.len());
-
-        let mut cursor: Cursor<&[u8]> = Cursor::new(&de_comp);
-        let version = cursor.read_u32_le().await?;
-        dbg!(version);
-        let found = RoaringTreemap::deserialize_from(&mut cursor)?;
-        dbg!(&found);
-
-        let mut dvc = DeletionVectorBatch::new(found, 50, VectorType::Deletion);
-
-        // let mut container = [false; 50];
-        // while dvc.next_batch_with(&mut container, 50).is_some() {
-        //     println!("{:?}", container);
-        //     container.fill(false);
-        // }
-
-        while let Some(b) = dvc.next_batch(vec![0; 10], 10) {
-            println!("{:?}", b);
-        }
-
-        Ok(())
+        assert_eq!(row_idx.len(), 6);
+        assert_eq!(&row_idx, &[3, 4, 7, 11, 18, 29]);
     }
 }

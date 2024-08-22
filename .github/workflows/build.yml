@@ -38,7 +38,7 @@ jobs:
           override: true
       - uses: Swatinem/rust-cache@v2
       - name: build and lint with clippy
-        run: cargo clippy --tests -- -D warnings
+        run: cargo clippy --benches --tests --all-features -- -D warnings
       - name: lint without default features
         run: cargo clippy --no-default-features -- -D warnings
   test:
@@ -59,7 +59,8 @@ jobs:
           override: true
       - uses: Swatinem/rust-cache@v2
       - name: test
-        run: cargo test --verbose --all-features
+        run: cargo test --workspace --verbose --all-features -- --skip read_table_version_hdfs
+
   ffi_test:
     runs-on: ${{ matrix.os }}
     strategy:
@@ -68,7 +69,30 @@ jobs:
           - macOS-latest
           - ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
+      - name: Setup cmake
+        uses: jwlawson/actions-setup-cmake@v2
+        with:
+          cmake-version: '3.30.x'
+      - name: Install arrow-glib
+        run: |
+          if [ "$RUNNER_OS" == "Linux" ]; then
+              sudo apt update
+              sudo apt install -y -V ca-certificates lsb-release wget
+              wget https://apache.jfrog.io/artifactory/arrow/$(lsb_release --id --short | tr 'A-Z' 'a-z')/apache-arrow-apt-source-latest-$(lsb_release --codename --short).deb
+              wget https://apache.jfrog.io/artifactory/arrow/$(lsb_release --id --short | tr 'A-Z' 'a-z')/apache-arrow-apt-source-latest-$(lsb_release --codename --short).deb.sha512
+              sha512sum -c apache-arrow-apt-source-latest-$(lsb_release --codename --short).deb.sha512 || exit 1
+              sudo apt install -y -V ./apache-arrow-apt-source-latest-$(lsb_release --codename --short).deb
+              sudo apt update
+              sudo apt install -y -V libarrow-dev # For C++
+              sudo apt install -y -V libarrow-glib-dev # For GLib (C)
+          elif [ "$RUNNER_OS" == "macOS" ]; then
+              brew install apache-arrow
+              brew install apache-arrow-glib
+          else
+              echo "$RUNNER_OS not supported"
+              exit 1
+           fi
       - name: Install minimal stable with clippy and rustfmt
         uses: actions-rs/toolchain@v1
         with:
@@ -76,5 +100,46 @@ jobs:
           toolchain: stable
           override: true
       - uses: Swatinem/rust-cache@v2
-      - name: test
-        run: pushd ffi && cargo b --features default-engine,sync-engine && make test && popd
+      - name: Set output on fail
+        run: echo "CTEST_OUTPUT_ON_FAILURE=1" >> "$GITHUB_ENV"
+      - name: Build kernel
+        run: |
+          pushd acceptance
+          cargo build
+          popd
+          pushd ffi
+          cargo b --features default-engine,sync-engine
+          popd
+      - name: build and run test
+        run: |
+          pushd ffi/examples/read-table
+          mkdir build
+          pushd build
+          cmake ..
+          make
+          make test
+
+  coverage:
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install rust
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: default
+          toolchain: stable
+          override: true
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+      - uses: Swatinem/rust-cache@v2
+      - name: Generate code coverage
+        run: cargo llvm-cov --all-features --workspace --codecov --output-path codecov.json -- --skip read_table_version_hdfs
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: codecov.json
+          fail_ci_if_error: true
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}

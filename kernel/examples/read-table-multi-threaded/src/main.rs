@@ -7,12 +7,13 @@ use std::thread;
 use arrow::compute::filter_record_batch;
 use arrow::record_batch::RecordBatch;
 use arrow::util::pretty::print_batches;
+use delta_kernel::actions::deletion_vector::split_vector;
 use delta_kernel::engine::arrow_data::ArrowEngineData;
 use delta_kernel::engine::default::executor::tokio::TokioBackgroundExecutor;
 use delta_kernel::engine::default::DefaultEngine;
 use delta_kernel::engine::sync::SyncEngine;
 use delta_kernel::scan::state::{DvInfo, GlobalScanState, Stats};
-use delta_kernel::scan::{transform_to_logical, ScanBuilder};
+use delta_kernel::scan::transform_to_logical;
 use delta_kernel::schema::Schema;
 use delta_kernel::{DeltaResult, Engine, EngineData, FileMeta, Table};
 
@@ -50,6 +51,10 @@ struct Cli {
     /// to the aws metadata server, which will fail unless you're on an ec2 instance.
     #[arg(long)]
     public: bool,
+
+    /// Limit to printing only LIMIT rows.
+    #[arg(short, long)]
+    limit: Option<usize>,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
@@ -87,6 +92,16 @@ fn to_arrow(data: Box<dyn EngineData>) -> DeltaResult<RecordBatch> {
         .downcast::<ArrowEngineData>()
         .map_err(|_| delta_kernel::Error::EngineDataType("ArrowEngineData".to_string()))?
         .into())
+}
+
+// truncate a batch to the specified number of rows
+fn truncate_batch(batch: RecordBatch, rows: usize) -> RecordBatch {
+    let cols = batch
+        .columns()
+        .iter()
+        .map(|col| col.slice(0, rows))
+        .collect();
+    RecordBatch::try_new(batch.schema(), cols).unwrap()
 }
 
 // This is the callback that will be called fo each valid scan row
@@ -158,7 +173,8 @@ fn try_main() -> DeltaResult<()> {
         .transpose()?;
 
     // build a scan with the specified schema
-    let scan = ScanBuilder::new(snapshot)
+    let scan = snapshot
+        .into_scan_builder()
         .with_schema_opt(read_schema_opt)
         .build()?;
 
@@ -170,7 +186,7 @@ fn try_main() -> DeltaResult<()> {
     let scan_data = scan.scan_data(engine.as_ref())?;
 
     // get any global state associated with this scan
-    let global_state = scan.global_scan_state();
+    let global_state = Arc::new(scan.global_scan_state());
 
     // create the channels we'll use. record_batch_[t/r]x are used for the threads to send back the
     // processed RecordBatches to themain thread
@@ -210,8 +226,27 @@ fn try_main() -> DeltaResult<()> {
     // have sent all scan files, drop this so threads will exit when there's no more work
     drop(scan_file_tx);
 
-    // simply gather up each batch and print them
-    let batches: Vec<_> = record_batch_rx.iter().collect();
+    let batches = if let Some(limit) = cli.limit {
+        // gather batches while we need
+        let mut batches = vec![];
+        let mut rows_so_far = 0;
+        for mut batch in record_batch_rx.iter() {
+            let batch_rows = batch.num_rows();
+            if rows_so_far < limit {
+                if rows_so_far + batch_rows > limit {
+                    // truncate this batch
+                    batch = truncate_batch(batch, limit - rows_so_far);
+                }
+                batches.push(batch);
+            }
+            rows_so_far += batch_rows;
+        }
+        println!("Printing first {limit} rows of {rows_so_far} total rows");
+        batches
+    } else {
+        // simply gather up all batches
+        record_batch_rx.iter().collect()
+    };
     print_batches(&batches)?;
     Ok(())
 }
@@ -219,7 +254,7 @@ fn try_main() -> DeltaResult<()> {
 // this is the work each thread does
 fn do_work(
     engine: Arc<dyn Engine>,
-    scan_state: GlobalScanState,
+    scan_state: Arc<GlobalScanState>,
     record_batch_tx: Sender<RecordBatch>,
     scan_file_rx: spmc::Receiver<ScanFile>,
 ) {
@@ -276,7 +311,7 @@ fn do_work(
 
             // need to split the dv_mask. what's left in dv_mask covers this result, and rest
             // will cover the following results
-            let rest = selection_vector.as_mut().map(|mask| mask.split_off(len));
+            let rest = split_vector(selection_vector.as_mut(), len, Some(true));
             let batch = if let Some(mask) = selection_vector.clone() {
                 // apply the selection vector
                 filter_record_batch(&record_batch, &mask.into()).unwrap()

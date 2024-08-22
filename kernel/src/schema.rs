@@ -8,7 +8,7 @@ use indexmap::IndexMap;
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 
-use crate::column_mapping::ColumnMappingMode;
+use crate::features::ColumnMappingMode;
 use crate::utils::require;
 use crate::{DeltaResult, Error};
 
@@ -332,6 +332,14 @@ impl MapType {
     pub const fn value_contains_null(&self) -> bool {
         self.value_contains_null
     }
+
+    /// Create a schema assuming the map is stored as a struct with the specified key and value field names
+    pub fn as_struct_schema(&self, key_name: String, val_name: String) -> Schema {
+        StructType::new(vec![
+            StructField::new(key_name, self.key_type.clone(), false),
+            StructField::new(val_name, self.value_type.clone(), self.value_contains_null),
+        ])
+    }
 }
 
 fn default_true() -> bool {
@@ -497,6 +505,10 @@ impl DataType {
 
     pub fn struct_type(fields: Vec<StructField>) -> Self {
         DataType::Struct(Box::new(StructType::new(fields)))
+    }
+
+    pub fn array_type(elements: ArrayType) -> Self {
+        DataType::Array(Box::new(elements))
     }
 }
 

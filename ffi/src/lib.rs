@@ -13,7 +13,7 @@ use url::Url;
 use delta_kernel::expressions::{BinaryOperator, Expression, Scalar, UnaryOperator};
 use delta_kernel::schema::{ArrayType, DataType, MapType, PrimitiveType, StructType};
 use delta_kernel::snapshot::Snapshot;
-use delta_kernel::{DeltaResult, Engine, Error, Table};
+use delta_kernel::{DeltaResult, Engine, EngineData, Error, Table};
 use delta_kernel_ffi_macros::handle_descriptor;
 
 // cbindgen doesn't understand our use of feature flags here, and by default it parses `mod handle`
@@ -31,6 +31,7 @@ use handle::Handle;
 // relies on `crate::`
 extern crate self as delta_kernel_ffi;
 
+pub mod engine_funcs;
 pub mod scan;
 
 pub(crate) type NullableCvoid = Option<NonNull<c_void>>;
@@ -103,17 +104,17 @@ impl<T: AsRef<[u8]>> From<T> for KernelStringSlice {
 }
 
 trait TryFromStringSlice: Sized {
-    unsafe fn try_from_slice(slice: KernelStringSlice) -> DeltaResult<Self>;
+    unsafe fn try_from_slice(slice: &KernelStringSlice) -> DeltaResult<Self>;
 }
 
 impl TryFromStringSlice for String {
-    /// Converts a slice back to a string
+    /// Converts a slice into a `String`. The slice remains valid after this call.
     ///
     /// # Safety
     ///
     /// The slice must be a valid (non-null) pointer, and must point to the indicated number of
     /// valid utf8 bytes.
-    unsafe fn try_from_slice(slice: KernelStringSlice) -> DeltaResult<String> {
+    unsafe fn try_from_slice(slice: &KernelStringSlice) -> DeltaResult<String> {
         let slice = unsafe { std::slice::from_raw_parts(slice.ptr.cast(), slice.len) };
         let slice = std::str::from_utf8(slice)?;
         Ok(slice.into())
@@ -127,12 +128,22 @@ pub type AllocateStringFn = extern "C" fn(kernel_str: KernelStringSlice) -> Null
 // Put KernelBoolSlice in a sub-module, with non-public members, so rust code cannot instantiate it
 // directly. It can only be created by converting `From<Vec<bool>>`.
 mod private {
+    use std::ptr::NonNull;
+
     /// Represents an owned slice of boolean values allocated by the kernel. Any time the engine
     /// receives a `KernelBoolSlice` as a return value from a kernel method, engine is responsible
-    /// to free that slice, by calling [super::drop_bool_slice] exactly once.
+    /// to free that slice, by calling [super::free_bool_slice] exactly once.
     #[repr(C)]
     pub struct KernelBoolSlice {
-        ptr: *mut bool,
+        ptr: NonNull<bool>,
+        len: usize,
+    }
+
+    /// An owned slice of u64 row indexes allocated by the kernel. The engine is responsible for
+    /// freeing this slice by calling [super::free_row_indexes] once.
+    #[repr(C)]
+    pub struct KernelRowIndexArray {
+        ptr: NonNull<u64>,
         len: usize,
     }
 
@@ -140,7 +151,7 @@ mod private {
         /// Creates an empty slice.
         pub fn empty() -> KernelBoolSlice {
             KernelBoolSlice {
-                ptr: std::ptr::null_mut(),
+                ptr: NonNull::dangling(),
                 len: 0,
             }
         }
@@ -152,10 +163,10 @@ mod private {
         /// The slice must have been originally created `From<Vec<bool>>`, and must not have been
         /// already been consumed by a previous call to this method.
         pub unsafe fn as_ref(&self) -> &[bool] {
-            if self.ptr.is_null() {
+            if self.len == 0 {
                 Default::default()
             } else {
-                unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
+                unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), self.len) }
             }
         }
 
@@ -166,10 +177,10 @@ mod private {
         /// The slice must have been originally created `From<Vec<bool>>`, and must not have been
         /// already been consumed by a previous call to this method.
         pub unsafe fn into_vec(self) -> Vec<bool> {
-            if self.ptr.is_null() {
+            if self.len == 0 {
                 Default::default()
             } else {
-                Vec::from_raw_parts(self.ptr, self.len, self.len)
+                Vec::from_raw_parts(self.ptr.as_ptr(), self.len, self.len)
             }
         }
     }
@@ -178,7 +189,9 @@ mod private {
         fn from(val: Vec<bool>) -> Self {
             let len = val.len();
             let boxed = val.into_boxed_slice();
-            let ptr = Box::into_raw(boxed).cast();
+            let leaked_ptr = Box::leak(boxed).as_mut_ptr();
+            let ptr = NonNull::new(leaked_ptr)
+                .expect("This should never be non-null please report this bug.");
             KernelBoolSlice { ptr, len }
         }
     }
@@ -186,24 +199,93 @@ mod private {
     /// # Safety
     ///
     /// Whenever kernel passes a [KernelBoolSlice] to engine, engine assumes ownership of the slice
-    /// memory, but must only free it by calling [super::drop_bool_slice]. Since the global
+    /// memory, but must only free it by calling [super::free_bool_slice]. Since the global
     /// allocator is threadsafe, it doesn't matter which engine thread invokes that method.
     unsafe impl Send for KernelBoolSlice {}
+    /// # Safety
+    ///
+    /// This follows the same contract as KernelBoolSlice above, engine assumes ownership of the
+    /// slice memory, but must only free it by calling [super::free_row_indexes]. It does not matter
+    /// from which thread the engine invoke that method
+    unsafe impl Send for KernelRowIndexArray {}
 
     /// # Safety
     ///
     /// If engine chooses to leverage concurrency, engine is responsible to prevent data races.
     unsafe impl Sync for KernelBoolSlice {}
+    /// # Safety
+    ///
+    /// If engine chooses to leverage concurrency, engine is responsible to prevent data races.
+    /// Same contract as KernelBoolSlice above
+    unsafe impl Sync for KernelRowIndexArray {}
+
+    impl KernelRowIndexArray {
+        /// Converts this slice back into a `Vec<u64>`.
+        ///
+        /// # Safety
+        ///
+        /// The slice must have been originally created `From<Vec<u64>>`, and must not have
+        /// already been consumed by a previous call to this method.
+        pub unsafe fn into_vec(self) -> Vec<u64> {
+            Vec::from_raw_parts(self.ptr.as_ptr(), self.len, self.len)
+        }
+
+        /// Creates an empty slice.
+        pub fn empty() -> KernelRowIndexArray {
+            Self {
+                ptr: NonNull::dangling(),
+                len: 0,
+            }
+        }
+    }
+
+    impl From<Vec<u64>> for KernelRowIndexArray {
+        fn from(vec: Vec<u64>) -> Self {
+            let len = vec.len();
+            let boxed = vec.into_boxed_slice();
+            let leaked_ptr = Box::leak(boxed).as_mut_ptr();
+            let ptr = NonNull::new(leaked_ptr)
+                .expect("This should never be non-null please report this bug.");
+            KernelRowIndexArray { ptr, len }
+        }
+    }
 }
 pub use private::KernelBoolSlice;
+pub use private::KernelRowIndexArray;
 
 /// # Safety
 ///
 /// Caller is responsible for passing a valid handle.
 #[no_mangle]
-pub unsafe extern "C" fn drop_bool_slice(slice: KernelBoolSlice) {
+pub unsafe extern "C" fn free_bool_slice(slice: KernelBoolSlice) {
     let vec = unsafe { slice.into_vec() };
     debug!("Dropping bool slice. It is {vec:#?}");
+}
+
+/// # Safety
+///
+/// Caller is responsible for passing a valid handle.
+#[no_mangle]
+pub unsafe extern "C" fn free_row_indexes(slice: KernelRowIndexArray) {
+    let _ = slice.into_vec();
+}
+
+// TODO: Do we want this handle at all? Perhaps we should just _always_ pass raw *mut c_void pointers
+// that are the engine data? Even if we want the type, should it be a shared handle instead?
+/// an opaque struct that encapsulates data read by an engine. this handle can be passed back into
+/// some kernel calls to operate on the data, or can be converted into the raw data as read by the
+/// [`delta_kernel::Engine`] by calling [`get_raw_engine_data`]
+#[handle_descriptor(target=dyn EngineData, mutable=true, sized=false)]
+pub struct ExclusiveEngineData;
+
+/// Drop an `ExclusiveEngineData`.
+///
+/// # Safety
+///
+/// Caller is responsible for passing a valid handle as engine_data
+#[no_mangle]
+pub unsafe extern "C" fn free_engine_data(engine_data: Handle<ExclusiveEngineData>) {
+    engine_data.drop_handle();
 }
 
 #[repr(C)]
@@ -244,6 +326,8 @@ pub enum KernelError {
     InvalidTableLocationError,
     InvalidDecimalError,
     InvalidStructDataError,
+    InternalError,
+    InvalidExpression,
 }
 
 impl From<Error> for KernelError {
@@ -284,10 +368,12 @@ impl From<Error> for KernelError {
             Error::InvalidTableLocation(_) => KernelError::InvalidTableLocationError,
             Error::InvalidDecimal(_) => KernelError::InvalidDecimalError,
             Error::InvalidStructData(_) => KernelError::InvalidStructDataError,
+            Error::InternalError(_) => KernelError::InternalError,
             Error::Backtraced {
                 source,
                 backtrace: _,
             } => Self::from(*source),
+            Error::InvalidExpressionEvaluation(_) => KernelError::InvalidExpression,
         }
     }
 }
@@ -439,7 +525,7 @@ impl ExternEngine for ExternEngineVtable {
 ///
 /// Caller is responsible for passing a valid path pointer.
 unsafe fn unwrap_and_parse_path_as_url(path: KernelStringSlice) -> DeltaResult<Url> {
-    let path = unsafe { String::try_from_slice(path) }?;
+    let path = unsafe { String::try_from_slice(&path) }?;
     let table = Table::try_from_uri(path)?;
     Ok(table.location().clone())
 }
@@ -500,8 +586,8 @@ pub unsafe extern "C" fn set_builder_option(
     key: KernelStringSlice,
     value: KernelStringSlice,
 ) {
-    let key = unsafe { String::try_from_slice(key) };
-    let value = unsafe { String::try_from_slice(value) };
+    let key = unsafe { String::try_from_slice(&key) };
+    let value = unsafe { String::try_from_slice(&value) };
     // TODO: Return ExternalError if key or value is invalid? (builder has an error allocator)
     builder.set_option(key.unwrap(), value.unwrap());
 }
@@ -596,7 +682,7 @@ fn get_sync_engine_impl(
 ///
 /// Caller is responsible for passing a valid handle.
 #[no_mangle]
-pub unsafe extern "C" fn drop_engine(engine: Handle<SharedExternEngine>) {
+pub unsafe extern "C" fn free_engine(engine: Handle<SharedExternEngine>) {
     debug!("engine released engine");
     engine.drop_handle();
 }
@@ -631,7 +717,7 @@ fn snapshot_impl(
 ///
 /// Caller is responsible for passing a valid handle.
 #[no_mangle]
-pub unsafe extern "C" fn drop_snapshot(snapshot: Handle<SharedSnapshot>) {
+pub unsafe extern "C" fn free_snapshot(snapshot: Handle<SharedSnapshot>) {
     debug!("engine released snapshot");
     snapshot.drop_handle();
 }
@@ -645,6 +731,61 @@ pub unsafe extern "C" fn drop_snapshot(snapshot: Handle<SharedSnapshot>) {
 pub unsafe extern "C" fn version(snapshot: Handle<SharedSnapshot>) -> u64 {
     let snapshot = unsafe { snapshot.as_ref() };
     snapshot.version()
+}
+
+/// Get the resolved root of the table. This should be used in any future calls that require
+/// constructing a path
+///
+/// # Safety
+///
+/// Caller is responsible for passing a valid handle.
+#[no_mangle]
+pub unsafe extern "C" fn snapshot_table_root(
+    snapshot: Handle<SharedSnapshot>,
+    allocate_fn: AllocateStringFn,
+) -> NullableCvoid {
+    let snapshot = unsafe { snapshot.as_ref() };
+    allocate_fn(snapshot.table_root().to_string().as_str().into())
+}
+
+type StringIter = dyn Iterator<Item = String> + Send;
+
+#[handle_descriptor(target=StringIter, mutable=true, sized=false)]
+pub struct StringSliceIterator;
+
+/// # Safety
+///
+/// The iterator must be valid (returned by [kernel_scan_data_init]) and not yet freed by
+/// [kernel_scan_data_free]. The visitor function pointer must be non-null.
+#[no_mangle]
+pub unsafe extern "C" fn string_slice_next(
+    data: Handle<StringSliceIterator>,
+    engine_context: NullableCvoid,
+    engine_visitor: extern "C" fn(engine_context: NullableCvoid, slice: KernelStringSlice),
+) -> bool {
+    string_slice_next_impl(data, engine_context, engine_visitor)
+}
+
+fn string_slice_next_impl(
+    mut data: Handle<StringSliceIterator>,
+    engine_context: NullableCvoid,
+    engine_visitor: extern "C" fn(engine_context: NullableCvoid, slice: KernelStringSlice),
+) -> bool {
+    let data = unsafe { data.as_mut() };
+    if let Some(data) = data.next() {
+        (engine_visitor)(engine_context, data.as_str().into());
+        true
+    } else {
+        false
+    }
+}
+
+/// # Safety
+///
+/// Caller is responsible for (at most once) passing a valid pointer to a [`StringSliceIterator`]
+#[no_mangle]
+pub unsafe extern "C" fn free_string_slice_data(data: Handle<StringSliceIterator>) {
+    data.drop_handle();
 }
 
 /// The `EngineSchemaVisitor` defines a visitor system to allow engines to build their own
@@ -1037,7 +1178,7 @@ pub unsafe extern "C" fn visit_expression_column(
     name: KernelStringSlice,
     allocate_error: AllocateErrorFn,
 ) -> ExternResult<usize> {
-    let name = unsafe { String::try_from_slice(name) };
+    let name = unsafe { String::try_from_slice(&name) };
     visit_expression_column_impl(state, name).into_extern_result(&allocate_error)
 }
 fn visit_expression_column_impl(
@@ -1071,7 +1212,7 @@ pub unsafe extern "C" fn visit_expression_literal_string(
     value: KernelStringSlice,
     allocate_error: AllocateErrorFn,
 ) -> ExternResult<usize> {
-    let value = unsafe { String::try_from_slice(value) };
+    let value = unsafe { String::try_from_slice(&value) };
     visit_expression_literal_string_impl(state, value).into_extern_result(&allocate_error)
 }
 fn visit_expression_literal_string_impl(

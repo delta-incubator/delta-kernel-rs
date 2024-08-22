@@ -7,8 +7,8 @@ use crate::{
         deletion_vector::{treemap_to_bools, DeletionVectorDescriptor},
         visitors::visit_deletion_vector_at,
     },
-    column_mapping::ColumnMappingMode,
     engine_data::{GetData, TypedGetData},
+    features::ColumnMappingMode,
     schema::SchemaRef,
     DataVisitor, DeltaResult, Engine, EngineData, Error,
 };
@@ -17,7 +17,7 @@ use tracing::warn;
 
 use super::log_replay::SCAN_ROW_SCHEMA;
 
-/// State that doesn't change beween scans
+/// State that doesn't change between scans
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GlobalScanState {
     pub table_root: String,
@@ -30,7 +30,7 @@ pub struct GlobalScanState {
 /// this struct can be used by an engine to materialize a selection vector
 #[derive(Debug)]
 pub struct DvInfo {
-    deletion_vector: Option<DeletionVectorDescriptor>,
+    pub(crate) deletion_vector: Option<DeletionVectorDescriptor>,
 }
 
 /// Give engines an easy way to consume stats
@@ -65,6 +65,21 @@ impl DvInfo {
             })
             .transpose()?;
         Ok(dv_treemap.map(treemap_to_bools))
+    }
+
+    /// Returns a vector of row indexes that should be *removed* from the result set
+    pub fn get_row_indexes(
+        &self,
+        engine: &dyn Engine,
+        table_root: &url::Url,
+    ) -> DeltaResult<Option<Vec<u64>>> {
+        self.deletion_vector
+            .as_ref()
+            .map(|dv| {
+                let fs_client = engine.get_file_system_client();
+                dv.row_indexes(fs_client, table_root)
+            })
+            .transpose()
     }
 }
 
