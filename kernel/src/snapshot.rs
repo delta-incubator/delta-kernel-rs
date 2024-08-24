@@ -8,7 +8,7 @@ use std::sync::Arc;
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
-use url::Url;
+use crate::url_util::Url;
 
 use crate::actions::{get_log_schema, Metadata, Protocol, METADATA_NAME, PROTOCOL_NAME};
 use crate::features::{ColumnMappingMode, COLUMN_MAPPING_MODE_KEY};

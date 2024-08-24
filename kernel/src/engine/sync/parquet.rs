@@ -2,7 +2,7 @@ use std::fs::File;
 
 use parquet::arrow::arrow_reader::{ArrowReaderMetadata, ParquetRecordBatchReaderBuilder};
 use tracing::debug;
-use url::Url;
+use crate::url_util::Url;
 
 use crate::engine::arrow_data::ArrowEngineData;
 use crate::engine::arrow_utils::{generate_mask, get_requested_indices, reorder_struct_array};
