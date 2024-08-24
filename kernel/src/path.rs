@@ -1,6 +1,6 @@
 //! Utilities to make working with directory and file paths easier
 
-use url::Url;
+use crate::url_util::Url;
 
 use crate::{DeltaResult, Version};
 

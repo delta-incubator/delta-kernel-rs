@@ -2,7 +2,7 @@ use std::time::SystemTime;
 
 use bytes::Bytes;
 use itertools::Itertools;
-use crate::url_util::Url;
+use crate::url_util::{Url, UrlExt};
 
 use crate::{DeltaResult, Error, FileMeta, FileSlice, FileSystemClient};
 

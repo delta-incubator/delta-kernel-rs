@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use crate::url_util::Url;
+use crate::url_util::{Url, UrlExt};
 
 use crate::snapshot::Snapshot;
 use crate::{DeltaResult, Engine, Error, Version};

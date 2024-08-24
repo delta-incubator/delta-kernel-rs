@@ -26,7 +26,7 @@ impl UrlExt for Url {
         {
             let path = path.as_ref();
             let path_str = path.to_str().ok_or_else(|| url::ParseError::IdnaError)?;
-            Url::parse(&format!(path_str))
+            Url::parse(&format!("{}", path_str))
         }
 
         #[cfg(not(feature = "wasm-engine"))]
@@ -41,7 +41,7 @@ impl UrlExt for Url {
             if !path_str.ends_with('/') {
                 path_str.push('/');
             }
-            Url::parse(&format!(path_str))
+            Url::parse(&format!("{}", path_str))
         }
 
         #[cfg(not(feature = "wasm-engine"))]

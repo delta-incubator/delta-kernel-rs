@@ -14,7 +14,7 @@ use arrow_schema::{Schema as ArrowSchema, SchemaRef as ArrowSchemaRef};
 use arrow_select::concat::concat_batches;
 use itertools::Itertools;
 use tracing::debug;
-use crate::url_util::Url;
+use crate::url_util::{Url, UrlExt};
 
 use crate::engine::arrow_data::ArrowEngineData;
 
