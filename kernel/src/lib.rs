@@ -55,6 +55,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use url::Url;
+mod url_util;
 
 use self::schema::{DataType, SchemaRef};
 
@@ -79,7 +80,8 @@ pub use table::Table;
 #[cfg(any(
     feature = "default-engine",
     feature = "sync-engine",
-    feature = "arrow-conversion"
+    feature = "arrow-conversion",
+    feature = "wasm-engine",
 ))]
 pub mod engine;
 
