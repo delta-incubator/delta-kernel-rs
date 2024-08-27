@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
 use arrow::record_batch::RecordBatch;
+use arrow_schema::Field;
+use futures::future::join_all;
 use object_store::memory::InMemory;
 use object_store::path::Path;
 use object_store::ObjectStore;
@@ -8,16 +10,17 @@ use url::Url;
 
 use delta_kernel::engine::arrow_data::ArrowEngineData;
 use delta_kernel::engine::default::executor::tokio::TokioBackgroundExecutor;
+use delta_kernel::engine::default::parquet::DefaultParquetHandler;
 use delta_kernel::engine::default::DefaultEngine;
 use delta_kernel::schema::{DataType, SchemaRef, StructField, StructType};
 use delta_kernel::{Engine, Table};
 
 // fixme use in macro below
-const PROTOCOL_METADATA_TEMPLATE: &'static str = r#"{{"protocol":{{"minReaderVersion":3,"minWriterVersion":7,"readerFeatures":[],"writerFeatures":[]}}}}
-{{"metaData":{{"id":"{}","format":{{"provider":"parquet","options":{{}}}},"schemaString":"{}","partitionColumns":[],"configuration":{{}},"createdTime":1677811175819}}}}"#;
+// const PROTOCOL_METADATA_TEMPLATE: &'static str = r#"{{"protocol":{{"minReaderVersion":3,"minWriterVersion":7,"readerFeatures":[],"writerFeatures":[]}}}}
+// {{"metaData":{{"id":"{}","format":{{"provider":"parquet","options":{{}}}},"schemaString":"{}","partitionColumns":[],"configuration":{{}},"createdTime":1677811175819}}}}"#;
 
 // setup default engine with in-memory object store.
-fn setup(storage_prefix: Path) -> (Arc<dyn ObjectStore>, impl Engine) {
+fn setup(storage_prefix: Path) -> (Arc<dyn ObjectStore>, DefaultEngine<TokioBackgroundExecutor>) {
     let storage = Arc::new(InMemory::new());
     (
         storage.clone(),
@@ -52,6 +55,48 @@ async fn create_table(
     Ok(Table::new(table_path))
 }
 
+// FIXME delete/unify from default/parquet.rs
+fn get_metadata_schema() -> Arc<arrow_schema::Schema> {
+    let path_field = Field::new("path", arrow_schema::DataType::Utf8, false);
+    let size_field = Field::new("size", arrow_schema::DataType::Int64, false);
+    let partition_field = Field::new(
+        "partitionValues",
+        arrow_schema::DataType::Map(
+            Arc::new(Field::new(
+                "entries",
+                arrow_schema::DataType::Struct(
+                    vec![
+                        Field::new("keys", arrow_schema::DataType::Utf8, false),
+                        Field::new("values", arrow_schema::DataType::Utf8, true),
+                    ]
+                    .into(),
+                ),
+                false,
+            )),
+            false,
+        ),
+        false,
+    );
+    let data_change_field = Field::new("dataChange", arrow_schema::DataType::Boolean, false);
+    let modification_time_field =
+        Field::new("modificationTime", arrow_schema::DataType::Int64, false);
+
+    Arc::new(arrow_schema::Schema::new(vec![Field::new(
+        "add",
+        arrow_schema::DataType::Struct(
+            vec![
+                path_field.clone(),
+                size_field.clone(),
+                partition_field.clone(),
+                data_change_field.clone(),
+                modification_time_field.clone(),
+            ]
+            .into(),
+        ),
+        false,
+    )]))
+}
+
 // tests
 // 1. basic happy path append
 // 2. append with schema mismatch
@@ -59,10 +104,8 @@ async fn create_table(
 
 #[tokio::test]
 async fn basic_append() -> Result<(), Box<dyn std::error::Error>> {
-
     // setup tracing
     let _ = tracing_subscriber::fmt::try_init();
-
 
     // setup in-memory object store and default engine
     let table_location = Url::parse("memory:///test_table/").unwrap();
@@ -79,14 +122,14 @@ async fn basic_append() -> Result<(), Box<dyn std::error::Error>> {
     )]));
     let table = create_table(store.clone(), table_location, schema.clone()).await?;
 
-    println!(
-        "{:?}",
-        store
-            .get(&Path::from(
-                "/test_table/_delta_log/00000000000000000000.json"
-            ))
-            .await
-    );
+    // println!(
+    //     "{:?}",
+    //     store
+    //         .get(&Path::from(
+    //             "/test_table/_delta_log/00000000000000000000.json"
+    //         ))
+    //         .await
+    // );
 
     // append an arrow record batch (vec of record batches??)
     let append_data = RecordBatch::try_new(
@@ -104,32 +147,56 @@ async fn basic_append() -> Result<(), Box<dyn std::error::Error>> {
     // create a new txn based on current table version
     let txn_builder = table.new_transaction_builder();
     let mut txn = txn_builder.build(&engine).expect("build txn");
+    let write_context1 = txn.write_context(&engine);
+    let write_context2 = txn.write_context(&engine);
 
-    // // create a new async task to do the write (simulate executors)
-    // let writer = tokio::task::spawn(async {
-    //     // write will transform logical data to physical data and write to object store
-    //     txn.write(append_data).expect("write data files");
-    // });
-    txn.write(&engine, append_data).expect("write append_data");
-    txn.write(&engine, append_data2)
-        .expect("write append_data2");
+    // create a new async task to do the write (simulate executors)
+    let pq1 = engine.get_parquet_handler();
+    let pq2 = pq1.clone(); // cheap
+    let writers = [
+        (append_data, write_context1, pq1),
+        (append_data2, write_context2, pq2),
+    ]
+    .into_iter()
+    .map(|(data, write_context, pq)| {
+        tokio::task::spawn(async move {
+            // transform to logical then write to object store and give back metadata
+            let pq = pq
+                .as_any()
+                .downcast_ref::<DefaultParquetHandler<TokioBackgroundExecutor>>()
+                .unwrap();
+            pq.write_parquet_files(&write_context.target_directory, data)
+                .await
+                .expect("write parquet data")
+        })
+    })
+    .collect::<Vec<_>>();
 
     // wait for writes to complete
-    // let _ = writer.await?;
+    let metadata = join_all(writers).await;
+    let metadata = metadata
+        .into_iter()
+        .map(|data_result| {
+            RecordBatch::from(ArrowEngineData::try_from_engine_data(data_result.unwrap()).unwrap())
+        })
+        .collect::<Vec<_>>();
 
+    // FIXME
+    let metadata_schema = get_metadata_schema();
+
+    // concat all the metadata into single record batch
+    let metadata = arrow::compute::concat_batches(&metadata_schema, &metadata)?;
+
+    txn.add_write_metadata(Box::new(ArrowEngineData::new(metadata)));
     txn.commit(&engine)?;
 
-    let commit1 =
-        store
-            .get(&Path::from(
-                "/test_table/_delta_log/00000000000000000001.json"
-            ))
-            .await?;
-    println!(
-        "{:?}", commit1
-    );
-
-    println!("{}", String::from_utf8(commit1.bytes().await?.to_vec())?);
+    // let commit1 = store
+    //     .get(&Path::from(
+    //         "/test_table/_delta_log/00000000000000000001.json",
+    //     ))
+    //     .await?;
+    // println!("{:?}", commit1);
+    // println!("{}", String::from_utf8(commit1.bytes().await?.to_vec())?);
 
     let expected_data = RecordBatch::try_new(
         Arc::new(schema.as_ref().try_into()?),
@@ -150,8 +217,7 @@ fn test_read(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let snapshot = table.snapshot(engine, None)?;
 
-    println!("{:?}", snapshot);
-    // println!("snapshot files {:?}", snapshot);
+    // println!("{:?}", snapshot);
 
     let scan = snapshot.into_scan_builder().build()?;
 
@@ -177,6 +243,7 @@ fn test_read(
         .unwrap()
         .to_string();
 
+    assert_eq!(formatted, expected);
     println!("expected:\n{expected}");
     println!("got:\n{formatted}");
 

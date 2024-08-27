@@ -4,7 +4,7 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use arrow_array::RecordBatch;
-use arrow_array::{ArrayRef, BooleanArray, Int64Array, MapArray, StringArray};
+use arrow_array::{ArrayRef, BooleanArray, Int64Array, StringArray};
 use arrow_schema::Field;
 use futures::StreamExt;
 use object_store::path::Path;
@@ -87,7 +87,13 @@ impl<E: TaskExecutor> ParquetHandler for DefaultParquetHandler<E> {
         )
     }
 
-    fn write_parquet_files(
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+impl<E: TaskExecutor> DefaultParquetHandler<E> {
+    pub async fn write_parquet_files(
         &self,
         path: &url::Url,
         data: Box<dyn EngineData>,
@@ -109,11 +115,11 @@ impl<E: TaskExecutor> ParquetHandler for DefaultParquetHandler<E> {
         let path = path.join(&name)?;
         println!("Writing parquet file to {:?}", path);
 
-        futures::executor::block_on(async {
+        // futures::executor::block_on(async {
             self.store
                 .put(&Path::from(path.path()), buffer.into())
-                .await
-        })?;
+                .await?;
+        // })?;
 
         // FIXME get schema from kernel?
         let path_field = Field::new("path", arrow_schema::DataType::Utf8, false);

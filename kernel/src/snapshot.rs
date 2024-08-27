@@ -171,8 +171,6 @@ impl Snapshot {
             });
         }
 
-        println!("ZERO");
-
         // get the effective version from chosen files
         let version_eff = commit_files
             .first()
@@ -180,16 +178,12 @@ impl Snapshot {
             .and_then(|f| LogPath::new(&f.location).version)
             .ok_or(Error::MissingVersion)?; // TODO: A more descriptive error
 
-        println!("ONE");
-
         if let Some(v) = version {
             require!(
                 version_eff == v,
                 Error::MissingVersion // TODO more descriptive error
             );
         }
-
-        println!("TWO");
 
         let log_segment = LogSegment {
             log_root: log_url,
@@ -384,15 +378,15 @@ fn list_log_files(
 
     // let v = format!("{:020}", 1);
     // let start = log_root// .join(&v)?// .join(".json")?;
-    let checker = log_root.clone().join("00000000000000000000.json")?;
-    println!("path to check: {:?}", checker);
-    for f in fs_client.read_files(vec![(checker, None)])? {
-        println!("FILE: {:?}", f);
-    }
+    // let checker = log_root.clone().join("00000000000000000000.json")?;
+    // println!("path to check: {:?}", checker);
+    // for f in fs_client.read_files(vec![(checker, None)])? {
+    //     println!("FILE: {:?}", f);
+    // }
 
-    println!("LIST START FROM: {:?}", log_root);
+    // println!("LIST START FROM: {:?}", log_root);
     for maybe_meta in fs_client.list_from(&log_root)? {
-        println!("MAYBE META: {:?}", maybe_meta);
+        // println!("MAYBE META: {:?}", maybe_meta);
         let meta = maybe_meta?;
         let log_path = LogPath::new(&meta.location);
         if log_path.is_checkpoint {
@@ -413,7 +407,7 @@ fn list_log_files(
         }
     }
 
-    println!("COMMIT FILES: {:?}", commit_files);
+    // println!("COMMIT FILES: {:?}", commit_files);
 
     commit_files.retain(|f| {
         version_from_location(&f.location).unwrap_or(0) as i64 > max_checkpoint_version

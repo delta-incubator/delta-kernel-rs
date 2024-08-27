@@ -266,13 +266,12 @@ impl Scan {
         let scan_data = self.scan_data(engine)?;
         let mut scan_files = vec![];
         for data in scan_data {
-            println!("GOT SCAN DATA");
             let (data, vec) = data?;
             scan_files =
                 state::visit_scan_files(data.as_ref(), &vec, scan_files, scan_data_callback)?;
         }
         let files: Vec<String> = scan_files.iter().map(|f| f.path.clone()).collect();
-        println!("SCAN FILES: {:?}", files);
+        println!("[scan::execute] scan files: {:?}", files);
         scan_files
             .into_iter()
             .map(|scan_file| -> DeltaResult<_> {

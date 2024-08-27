@@ -50,8 +50,7 @@ impl<E: TaskExecutor> FileSystemClient for ObjectStoreFileSystemClient<E> {
         let (sender, receiver) = std::sync::mpsc::sync_channel(4_000);
 
         self.task_executor.spawn(async move {
-            // println!("list: prefix: {:?}, offset: {:?}", url, offset);
-            println!("list prefix: {:?}", offset);
+            // println!("list prefix: {:?}", offset);
 
             // let mut stream = store.list_with_offset(Some(&url), &offset);
             let mut stream = store.list(Some(&offset));

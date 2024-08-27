@@ -7,10 +7,7 @@ use url::Url;
 use crate::engine::arrow_data::ArrowEngineData;
 use crate::engine::arrow_utils::{generate_mask, get_requested_indices, reorder_struct_array};
 use crate::schema::SchemaRef;
-use crate::{
-    DeltaResult, EngineData, Error, Expression, FileDataReadResultIterator, FileMeta,
-    ParquetHandler,
-};
+use crate::{DeltaResult, Error, Expression, FileDataReadResultIterator, FileMeta, ParquetHandler};
 
 pub(crate) struct SyncParquetHandler;
 
@@ -52,11 +49,8 @@ impl ParquetHandler for SyncParquetHandler {
             try_create_from_parquet(schema.clone(), location).map(|d| Box::new(d) as _)
         })))
     }
-    fn write_parquet_files(
-        &self,
-        path: &Url,
-        data: Box<dyn crate::EngineData>,
-    ) -> DeltaResult<Box<dyn EngineData>> {
-        unimplemented!()
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 }
