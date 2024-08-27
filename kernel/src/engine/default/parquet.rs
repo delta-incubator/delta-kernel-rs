@@ -92,14 +92,26 @@ impl<E: TaskExecutor> ParquetHandler for DefaultParquetHandler<E> {
     }
 }
 
+pub struct ParquetMetadata {
+    pub path: String,
+    pub size: u64,
+}
+
+impl ParquetMetadata {
+    pub fn new(path: String, size: u64) -> Self {
+        Self { path, size }
+    }
+}
+
 impl<E: TaskExecutor> DefaultParquetHandler<E> {
     pub async fn write_parquet_files(
         &self,
         path: &url::Url,
         data: Box<dyn EngineData>,
-    ) -> DeltaResult<Box<dyn EngineData>> {
+    ) -> DeltaResult<ParquetMetadata> {
         let batch: Box<_> = ArrowEngineData::try_from_engine_data(data)?;
         let record_batch = batch.record_batch();
+        println!("[write parquet files] physical schema: {:?}", record_batch.schema());
         let mut buffer = vec![];
         let mut writer = ArrowWriter::try_new(&mut buffer, record_batch.schema(), None).unwrap();
 
@@ -108,81 +120,17 @@ impl<E: TaskExecutor> DefaultParquetHandler<E> {
         // writer must be closed to write footer
         writer.close().unwrap();
 
-        // FIXME safe cast?
-        let size = buffer.len() as i64;
-
+        let size = buffer.len();
         let name: String = Uuid::new_v4().to_string() + ".parquet";
         let path = path.join(&name)?;
         println!("Writing parquet file to {:?}", path);
 
-        // futures::executor::block_on(async {
-            self.store
-                .put(&Path::from(path.path()), buffer.into())
-                .await?;
-        // })?;
+        self.store
+            .put(&Path::from(path.path()), buffer.into())
+            .await?;
 
-        // FIXME get schema from kernel?
-        let path_field = Field::new("path", arrow_schema::DataType::Utf8, false);
-        let size_field = Field::new("size", arrow_schema::DataType::Int64, false);
-        let partition_field = Field::new(
-            "partitionValues",
-            arrow_schema::DataType::Map(
-                Arc::new(Field::new(
-                    "entries",
-                    arrow_schema::DataType::Struct(
-                        vec![
-                            Field::new("keys", arrow_schema::DataType::Utf8, false),
-                            Field::new("values", arrow_schema::DataType::Utf8, true),
-                        ]
-                        .into(),
-                    ),
-                    false,
-                )),
-                false,
-            ),
-            false,
-        );
-        let data_change_field = Field::new("dataChange", arrow_schema::DataType::Boolean, false);
-        let modification_time_field = Field::new("modificationTime", arrow_schema::DataType::Int64, false);
-
-        let schema = Arc::new(arrow_schema::Schema::new(vec![Field::new(
-            "add",
-            arrow_schema::DataType::Struct(
-                vec![
-                    path_field.clone(),
-                    size_field.clone(),
-                    partition_field.clone(),
-                    data_change_field.clone(),
-                    modification_time_field.clone(),
-                ]
-                .into(),
-            ),
-            false,
-        )]));
-
-        // Create the data for the record batch
-        let path = Arc::new(StringArray::from(vec![path.to_string()])) as ArrayRef;
-        let size = Arc::new(Int64Array::from(vec![size])) as ArrayRef;
-        use arrow_array::builder::StringBuilder;
-        let mut builder =
-            arrow_array::builder::MapBuilder::new(None, StringBuilder::new(), StringBuilder::new());
-        builder.append(true).unwrap();
-        let partitions = Arc::new(builder.finish()) as ArrayRef;
-        let data_change = Arc::new(BooleanArray::from(vec![true])) as ArrayRef;
-        let modification_time = Arc::new(Int64Array::from(vec![1724265056])) as ArrayRef;
-
-        let add = Arc::new(arrow_array::StructArray::from(vec![
-            (Arc::new(path_field), path),
-            (Arc::new(size_field), size),
-            (Arc::new(partition_field), partitions),
-            (Arc::new(data_change_field), data_change),
-            (Arc::new(modification_time_field), modification_time),
-        ])) as ArrayRef;
-
-        // Create the record batch
-        let batch = RecordBatch::try_new(schema, vec![add]).unwrap();
-
-        Ok(Box::new(ArrowEngineData::new(batch)))
+        // FIXME safe cast?
+        Ok(ParquetMetadata::new(path.to_string(), size as u64))
     }
 }
 

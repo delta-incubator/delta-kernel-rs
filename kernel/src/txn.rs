@@ -1,23 +1,77 @@
 use std::sync::Arc;
 
 // use delta_kernel_derive::Schema;
-use url::Url;
 use tracing::info;
+use url::Url;
 
+use crate::schema::SchemaRef;
 use crate::snapshot::Snapshot;
+use crate::Expression;
 use crate::{DeltaResult, Engine, EngineData};
 
 // derive schema?
 #[derive(Debug)]
 pub struct WriteContext {
     pub target_directory: Url,
+    snapshot_schema: SchemaRef,
+    partition_columns: Vec<String>,
 }
 
 impl WriteContext {
-    fn new(target_directory: &Url) -> Self {
+    fn new(
+        target_directory: &Url,
+        snapshot_schema: SchemaRef,
+        partition_columns: Vec<String>,
+    ) -> Self {
         Self {
-            target_directory: target_directory.clone()
+            target_directory: target_directory.clone(),
+            snapshot_schema,
+            partition_columns,
         }
+    }
+
+    // or should we have this spit out an expression that the engine can apply themselves??
+    pub fn transform_to_physical(
+        &self,
+        engine: &dyn Engine,
+        data: &dyn EngineData,
+    ) -> DeltaResult<Box<dyn EngineData>> {
+        // transform logical data to physical data
+        // 1. remove partition columns (or leave them for iceberg compat)
+        // 2. TODO column mapping
+        // 3. LATER generated columns, default values, row ids
+
+        let fields = self
+            .snapshot_schema
+            .fields()
+            .filter_map(|f| {
+                if self.partition_columns.contains(&f.name().to_string()) {
+                    None
+                } else {
+                    Some(Expression::Column(f.name().to_string()))
+                }
+            })
+            .collect();
+        let expr = Expression::Struct(fields);
+        let cols = self
+            .snapshot_schema
+            .fields()
+            .filter_map(|f| {
+                if self.partition_columns.contains(&f.name().to_string()) {
+                    None
+                } else {
+                    Some(f.name())
+                }
+            })
+            .collect::<Vec<_>>();
+        let physical_schema = self
+            .snapshot_schema
+            .project(&cols)
+            .expect("schema projection");
+        engine
+            .get_expression_handler()
+            .get_evaluator(self.snapshot_schema.clone(), expr, physical_schema.into())
+            .evaluate(data)
     }
 }
 
@@ -40,7 +94,7 @@ impl TransactionBuilder {
 pub struct Transaction {
     read_snapshot: Arc<Snapshot>,
     // TODO rename
-    write_metadata: Option<Box<dyn EngineData>>
+    write_metadata: Option<Box<dyn EngineData>>,
 }
 
 impl Transaction {
@@ -54,9 +108,14 @@ impl Transaction {
     /// get the write context for this transaction
     // should this be WriteContext or DeltaResult<Box<dyn EngineData>>
     // TODO need engine?
-    pub fn write_context(&self, _engine: &dyn Engine) -> WriteContext {
+    pub fn write_context(&self, _engine: &dyn Engine, partition_cols: Vec<String>) -> WriteContext {
         let target_dir = self.read_snapshot.table_root();
-        WriteContext::new(target_dir)
+        let snapshot_schema = self.read_snapshot.schema();
+        WriteContext::new(
+            target_dir,
+            Arc::new(snapshot_schema.clone()),
+            partition_cols,
+        )
     }
 
     /// add write metadata to the transaction, where the metadata has specific schema (link)
@@ -83,16 +142,3 @@ impl Transaction {
         Ok(())
     }
 }
-
-// fn transform_to_physical(
-//     engine: &dyn Engine,
-//     data: &dyn EngineData,
-// ) -> DeltaResult<Box<dyn EngineData>> {
-//     // transform logical data to physical data
-//     // 1. remove partition columns
-//     // 2. column mapping
-//     // 3. generated columns, default values, row ids
-//     // let expr_handler = engine.get_expression_handler();
-//     // let physical_data = expr_handler.get_evaluator().evaluate(data)?;
-//     unimplemented!()
-// }
