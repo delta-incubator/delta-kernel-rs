@@ -384,6 +384,100 @@ async fn append_partitioned() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+#[tokio::test]
+async fn commit_conflict() -> Result<(), Box<dyn std::error::Error>> {
+    // setup tracing
+    let _ = tracing_subscriber::fmt::try_init();
+    // setup in-memory object store and default engine
+    let table_location = Url::parse("memory:///test_table/").unwrap();
+    let (store, engine) = setup(Path::from("memory://"));
+
+    // create a simple table: one int column named 'number'
+    let schema = Arc::new(StructType::new(vec![StructField::new(
+        "number",
+        DataType::INTEGER,
+        true,
+    )]));
+    let schema_string = r#"{\"type\":\"struct\",\"fields\":[{\"name\":\"number\",\"type\":\"integer\",\"nullable\":true,\"metadata\":{}}]}"#;
+    let loc = table_location.clone();
+    let path = loc.path();
+    let table = create_table(
+        store.clone(),
+        table_location,
+        schema.clone(),
+        schema_string,
+        "",
+    )
+    .await?;
+
+    // append an arrow record batch (vec of record batches??)
+    let append_data = RecordBatch::try_new(
+        Arc::new(schema.as_ref().try_into()?),
+        vec![Arc::new(arrow::array::Int32Array::from(vec![1, 2, 3]))],
+    )?;
+    let append_data = Box::new(ArrowEngineData::new(append_data));
+
+    // create a new txn based on current table version
+    let txn_builder = table.new_transaction_builder();
+    let mut txn = txn_builder.build(&engine).expect("build txn");
+    let write_context = txn.write_context(&engine, vec![]);
+
+    // TEST: add a commit for 1.json to conflict
+    let data = format!(r#"{{"add":{{}}}}"#).into_bytes();
+    let path = format!("{path}_delta_log/00000000000000000001.json");
+    println!("putting to path: {}", path);
+    store.put(&Path::from(path), data.into()).await?;
+
+    // create a new async task to do the write (simulate executors)
+    let pq = engine.get_parquet_handler();
+    let handle = tokio::task::spawn(async move {
+        // transform to logical then write to object store and give back metadata
+        let pq = pq
+            .as_any()
+            .downcast_ref::<DefaultParquetHandler<TokioBackgroundExecutor>>()
+            .unwrap();
+        pq.write_parquet_files(&write_context.target_directory, append_data)
+            .await
+            .expect("write parquet data")
+    });
+
+    // wait for writes to complete
+    let metadata = handle.await;
+    let metadata = metadata
+        .into_iter()
+        .map(|write_metadata| {
+            RecordBatch::from(
+                ArrowEngineData::try_from_engine_data(
+                    create_write_metadata(
+                        &write_metadata.path,
+                        write_metadata.size as i64,
+                        vec![],
+                        true,
+                        1724265056,
+                    )
+                    .unwrap(),
+                )
+                .unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    // FIXME
+    let metadata_schema = get_metadata_schema();
+
+    // concat all the metadata into single record batch
+    let metadata = arrow::compute::concat_batches(&metadata_schema, &metadata)?;
+
+    txn.add_write_metadata(Box::new(ArrowEngineData::new(metadata)));
+
+    // TODO better error (make a new Error type) and check we get 'AlreadyExists'
+    assert!(txn.commit(&engine).is_err_and(|e| {
+        e.to_string().contains("already exists")
+    }));
+
+    Ok(())
+}
+
 fn test_read(
     expected: Box<ArrowEngineData>,
     table: Table,
