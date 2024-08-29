@@ -158,8 +158,8 @@ async fn append_basic() -> Result<(), Box<dyn std::error::Error>> {
     // create a new txn based on current table version
     let txn_builder = table.new_transaction_builder();
     let mut txn = txn_builder.build(&engine).expect("build txn");
-    let write_context1 = txn.write_context(&engine, vec![]);
-    let write_context2 = txn.write_context(&engine, vec![]);
+    let write_context1 = txn.write_context();
+    let write_context2 = txn.write_context();
 
     // create a new async task to do the write (simulate executors)
     let pq1 = engine.get_parquet_handler();
@@ -283,8 +283,8 @@ async fn append_partitioned() -> Result<(), Box<dyn std::error::Error>> {
     // create a new txn based on current table version
     let txn_builder = table.new_transaction_builder();
     let mut txn = txn_builder.build(&engine).expect("build txn");
-    let write_context1 = txn.write_context(&engine, vec!["part".to_string()]);
-    let write_context2 = txn.write_context(&engine, vec!["part".to_string()]);
+    let write_context1 = txn.write_context();
+    let write_context2 = txn.write_context();
 
     // create a new async task to do the write (simulate executors)
     let pq1 = engine.get_parquet_handler();
@@ -420,7 +420,7 @@ async fn commit_conflict() -> Result<(), Box<dyn std::error::Error>> {
     // create a new txn based on current table version
     let txn_builder = table.new_transaction_builder();
     let mut txn = txn_builder.build(&engine).expect("build txn");
-    let write_context = txn.write_context(&engine, vec![]);
+    let write_context = txn.write_context();
 
     // TEST: add a commit for 1.json to conflict
     let data = format!(r#"{{"add":{{}}}}"#).into_bytes();

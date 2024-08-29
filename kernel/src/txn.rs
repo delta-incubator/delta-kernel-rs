@@ -6,8 +6,7 @@ use url::Url;
 
 use crate::schema::SchemaRef;
 use crate::snapshot::Snapshot;
-use crate::Expression;
-use crate::{DeltaResult, Engine, EngineData};
+use crate::{DeltaResult, Engine, EngineData, Expression, Version};
 
 // derive schema?
 #[derive(Debug)]
@@ -91,10 +90,43 @@ impl TransactionBuilder {
     }
 }
 
+/// A transaction is an in-progress write operation on a Delta table. It provides a consistent view
+/// of the table during the transaction.
 pub struct Transaction {
     read_snapshot: Arc<Snapshot>,
     // TODO rename
     write_metadata: Option<Box<dyn EngineData>>,
+}
+
+/// Result of committing a transaction.
+// TODO should we expose this to the user or handle retries ourselves and only expose true failure?
+pub enum CommitResult {
+    /// Successfully committed the transaction at version `Version`
+    Committed(Version),
+    /// Nothing to commit
+    NoCommit,
+    /// Failed transaction but can be retried with the latest version + 1
+    // or should we keep a retry_version which is latest_version + 1?
+    Retry {
+        latest_version: Version,
+        transaction: Transaction,
+    },
+    /// The commit failed due to a logical conflict and must undergo some form of 'replay' before
+    /// it can be retried.
+    Failed {
+        latest_version: Version,
+        conflict: CommitConflict,
+        transaction: Transaction,
+    }
+}
+
+pub enum CommitConflict {
+    ConcurrentAppend,
+    ConcurrentDelete,
+    ConcurrentUpdate,
+    ConcurrentMetadata,
+    ConcurrentSchema,
+    ConcurrentTable,
 }
 
 impl Transaction {
@@ -107,10 +139,11 @@ impl Transaction {
 
     /// get the write context for this transaction
     // should this be WriteContext or DeltaResult<Box<dyn EngineData>>
-    // TODO need engine?
-    pub fn write_context(&self, _engine: &dyn Engine, partition_cols: Vec<String>) -> WriteContext {
+    // TODO need engine?, _engine: &dyn Engine
+    pub fn write_context(&self) -> WriteContext {
         let target_dir = self.read_snapshot.table_root();
         let snapshot_schema = self.read_snapshot.schema();
+        let partition_cols = self.read_snapshot.metadata().partition_columns.clone();
         WriteContext::new(
             target_dir,
             Arc::new(snapshot_schema.clone()),
@@ -126,9 +159,11 @@ impl Transaction {
     }
 
     // TODO conflict resolution
-    pub fn commit(self, engine: &dyn Engine) -> DeltaResult<()> {
+    #[must_use]
+    pub fn commit(self, engine: &dyn Engine) -> DeltaResult<CommitResult> {
         let json_handler = engine.get_json_handler();
-        let commit_file_name = format!("{:020}", &self.read_snapshot.version() + 1) + ".json";
+        let commit_version = &self.read_snapshot.version() + 1;
+        let commit_file_name = format!("{:020}", commit_version) + ".json";
         let commit_path = &self
             .read_snapshot
             .table_root
@@ -136,9 +171,11 @@ impl Transaction {
             .join(&commit_file_name)?;
         if let Some(write_metadata) = self.write_metadata {
             json_handler.put_json(commit_path, write_metadata)?;
+            Ok(CommitResult::Committed(commit_version))
         } else {
+            // FIXME this should be error
             info!("No writes to commit");
+            Ok(CommitResult::NoCommit)
         }
-        Ok(())
     }
 }

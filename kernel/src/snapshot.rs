@@ -321,16 +321,20 @@ fn list_log_files_with_checkpoint(
     fs_client: &dyn FileSystemClient,
     log_root: &Url,
 ) -> DeltaResult<(Vec<FileMeta>, Vec<FileMeta>)> {
-    let version_prefix = format!("{:020}", cp.version);
-    let start_from = log_root.join(&version_prefix)?;
+    // let version_prefix = format!("{:020}", cp.version);
+    let start_from = log_root;// .join(&version_prefix)?;
+
+    println!("LIST START FROM: {:?}", start_from);
 
     let files = fs_client
         .list_from(&start_from)?
         .collect::<Result<Vec<_>, Error>>()?
         .into_iter()
         // TODO this filters out .crc files etc which start with "." - how do we want to use these kind of files?
-        .filter(|f| version_from_location(&f.location).is_some())
+        // .filter(|f| version_from_location(&f.location).is_some())
         .collect::<Vec<_>>();
+
+    println!("[snapshot::list_log_files_with_checkpoint] LOG FILES: {:?}", files);
 
     let mut commit_files = files
         .iter()
