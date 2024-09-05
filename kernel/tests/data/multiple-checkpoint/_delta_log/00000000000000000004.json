@@ -1,0 +1,2 @@
+{"add":{"path":"part-00001-1092d017-2263-4d47-a73d-7b8903f79ac5-c000.snappy.parquet","partitionValues":{},"size":864,"modificationTime":1725530488059,"dataChange":true,"stats":"{\"numRecords\":4,\"minValues\":{\"value\":\"AGffh52\",\"id\":35},\"maxValues\":{\"value\":\"o3kV5mT\",\"id\":97},\"nullCount\":{\"id\":0,\"value\":0}}","tags":null,"deletionVector":null,"baseRowId":null,"defaultRowCommitVersion":null,"clusteringProvider":null}}
+{"commitInfo":{"timestamp":1725530488059,"operation":"WRITE","operationParameters":{"mode":"Append"},"clientVersion":"delta-rs.0.19.0"}}
