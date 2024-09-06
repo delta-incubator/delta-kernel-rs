@@ -155,7 +155,9 @@ impl Snapshot {
                 (Some(cp), Some(version)) if cp.version >= version => {
                     list_log_files_with_checkpoint(&cp, fs_client.as_ref(), &log_url)?
                 }
-                _ => list_log_files(fs_client.as_ref(), &log_url)?,
+                _ => {
+                    list_log_files(fs_client.as_ref(), &log_url)?
+                }
             };
 
         debug!("Commit files: {:?}", commit_files.iter().map(|f| f.location.clone()).collect::<Vec<_>>());
@@ -648,5 +650,52 @@ mod tests {
         // Verify the snapshot properties
         assert_eq!(snapshot.version(), 10, "Snapshot version should be 10");
 
+    }
+
+    #[test]
+    fn test_snapshot_with_version_after_last_checkpoint() {
+        // Setup
+        let path = std::fs::canonicalize(PathBuf::from("./tests/data/multiple-checkpoint/")).unwrap();
+        let url = url::Url::from_directory_path(path).unwrap();
+        let engine = SyncEngine::new();
+
+        // Attempt to create a snapshot at version 26
+        let result = Snapshot::try_new(url.clone(), &engine, Some(26));
+
+        // Check if the operation succeeded
+        assert!(result.is_ok(), "Expected snapshot creation to succeed for version 26");
+
+        let snapshot = result.unwrap();
+
+        // Verify the snapshot properties
+        assert_eq!(snapshot.version(), 26, "Snapshot version should be 26");
+        
+        // Verify that the commit files are correct
+        let commit_versions: Vec<_> = snapshot.log_segment.commit_files
+            .iter()
+            .filter_map(|f| LogPath::new(&f.location).version)
+            .collect();
+        
+        assert!(commit_versions.contains(&26), "Snapshot should include commit file for version 26");
+        assert!(commit_versions.contains(&25), "Snapshot should include commit file for version 25");
+        assert!(!commit_versions.contains(&27), "Snapshot should not include commit file for version 27");
+        assert!(!commit_versions.contains(&28), "Snapshot should not include commit file for version 28");
+        
+        // Verify that the checkpoint file is correct
+        assert_eq!(snapshot.log_segment.checkpoint_files.len(), 1, "Snapshot should include one checkpoint file");
+        assert_eq!(
+            LogPath::new(&snapshot.log_segment.checkpoint_files[0].location).version,
+            Some(24),
+            "Snapshot should use the checkpoint file for version 24"
+        );
+
+        // Verify that the log segment contains the correct range of files
+        let min_version = commit_versions.iter().min().unwrap();
+        let max_version = commit_versions.iter().max().unwrap();
+        assert!(min_version >= &25, "Minimum commit version should be at least 25");
+        assert_eq!(max_version, &26, "Maximum commit version should be 26");
+
+        // Verify that the effective version is correct
+        assert_eq!(snapshot.version(), 26, "Effective version should be 26");
     }
 }
