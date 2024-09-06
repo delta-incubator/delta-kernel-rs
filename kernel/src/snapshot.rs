@@ -152,9 +152,15 @@ impl Snapshot {
                 (Some(cp), None) => {
                     list_log_files_with_checkpoint(&cp, fs_client.as_ref(), &log_url)?
                 }
-                (Some(cp), Some(version)) if cp.version >= version => {
+
+                (Some(cp), Some(version)) if cp.version <= version => {
                     list_log_files_with_checkpoint(&cp, fs_client.as_ref(), &log_url)?
                 }
+
+                (Some(cp), Some(version)) if cp.version > version => {
+                    list_log_files_with_checkpoint(&cp, fs_client.as_ref(), &log_url)?
+                }
+                // case where the last_checkpoint file is not found
                 _ => {
                     list_log_files(fs_client.as_ref(), &log_url)?
                 }
