@@ -161,13 +161,23 @@ impl Snapshot {
                     list_log_files_with_checkpoint(&cp, fs_client.as_ref(), &log_url)?
                 }
                 // case where the last_checkpoint file is not found
-                _ => {
-                    list_log_files(fs_client.as_ref(), &log_url)?
-                }
+                _ => list_log_files(fs_client.as_ref(), &log_url)?,
             };
 
-        debug!("Commit files: {:?}", commit_files.iter().map(|f| f.location.clone()).collect::<Vec<_>>());
-        debug!("Checkpoint files: {:?}", checkpoint_files.iter().map(|f| f.location.clone()).collect::<Vec<_>>());
+        debug!(
+            "Commit files: {:?}",
+            commit_files
+                .iter()
+                .map(|f| f.location.clone())
+                .collect::<Vec<_>>()
+        );
+        debug!(
+            "Checkpoint files: {:?}",
+            checkpoint_files
+                .iter()
+                .map(|f| f.location.clone())
+                .collect::<Vec<_>>()
+        );
         // remove all files above requested version
         if let Some(version) = version {
             commit_files.retain(|meta| {
@@ -289,7 +299,7 @@ struct CheckpointMetadata {
     /// The number of fragments if the last checkpoint was written in multiple parts.
     pub(crate) parts: Option<i32>,
     /// The number of bytes of the checkpoint.
-    /// TODO: Temporary fix, checkout this issue for full details: https://github.com/delta-incubator/delta-kernel-rs/issues/326 
+    /// TODO: Temporary fix, checkout this issue for full details: https://github.com/delta-incubator/delta-kernel-rs/issues/326
     #[serde(alias = "size_in_bytes")]
     pub(crate) size_in_bytes: Option<i64>,
     /// The number of AddFile actions in the checkpoint.
@@ -319,12 +329,12 @@ fn read_last_checkpoint(
         .and_then(|mut data| data.next().expect("read_files should return one file"))
     {
         Ok(data) => {
-            // print the data in bytes as a string 
+            // print the data in bytes as a string
             debug!("Data: {:?}", std::str::from_utf8(&data).unwrap());
             Ok(serde_json::from_slice(&data)
-            .inspect_err(|e| warn!("invalid _last_checkpoint JSON: {e}"))
-            .ok())
-        },
+                .inspect_err(|e| warn!("invalid _last_checkpoint JSON: {e}"))
+                .ok())
+        }
         Err(Error::FileNotFound(_)) => Ok(None),
         Err(err) => Err(err),
     }
@@ -640,28 +650,32 @@ mod tests {
 
     #[test]
     fn test_snapshot_with_version_less_than_latest_checkpoint() {
-        let path = std::fs::canonicalize(PathBuf::from("./tests/data/multiple-checkpoint/")).unwrap();
+        let path =
+            std::fs::canonicalize(PathBuf::from("./tests/data/multiple-checkpoint/")).unwrap();
         let url = url::Url::from_directory_path(path).unwrap();
 
         let engine = SyncEngine::new();
-        
+
         // Attempt to create a snapshot at version 10
         let result = Snapshot::try_new(url, &engine, Some(10));
 
         // Check if the operation succeeded
-        assert!(result.is_ok(), "Expected snapshot creation to succeed for version 10");
+        assert!(
+            result.is_ok(),
+            "Expected snapshot creation to succeed for version 10"
+        );
 
         let snapshot = result.unwrap();
 
         // Verify the snapshot properties
         assert_eq!(snapshot.version(), 10, "Snapshot version should be 10");
-
     }
 
     #[test]
     fn test_snapshot_with_version_after_last_checkpoint() {
         // Setup
-        let path = std::fs::canonicalize(PathBuf::from("./tests/data/multiple-checkpoint/")).unwrap();
+        let path =
+            std::fs::canonicalize(PathBuf::from("./tests/data/multiple-checkpoint/")).unwrap();
         let url = url::Url::from_directory_path(path).unwrap();
         let engine = SyncEngine::new();
 
@@ -669,26 +683,47 @@ mod tests {
         let result = Snapshot::try_new(url.clone(), &engine, Some(26));
 
         // Check if the operation succeeded
-        assert!(result.is_ok(), "Expected snapshot creation to succeed for version 26");
+        assert!(
+            result.is_ok(),
+            "Expected snapshot creation to succeed for version 26"
+        );
 
         let snapshot = result.unwrap();
 
         // Verify the snapshot properties
         assert_eq!(snapshot.version(), 26, "Snapshot version should be 26");
-        
+
         // Verify that the commit files are correct
-        let commit_versions: Vec<_> = snapshot.log_segment.commit_files
+        let commit_versions: Vec<_> = snapshot
+            .log_segment
+            .commit_files
             .iter()
             .filter_map(|f| LogPath::new(&f.location).version)
             .collect();
-        
-        assert!(commit_versions.contains(&26), "Snapshot should include commit file for version 26");
-        assert!(commit_versions.contains(&25), "Snapshot should include commit file for version 25");
-        assert!(!commit_versions.contains(&27), "Snapshot should not include commit file for version 27");
-        assert!(!commit_versions.contains(&28), "Snapshot should not include commit file for version 28");
-        
+
+        assert!(
+            commit_versions.contains(&26),
+            "Snapshot should include commit file for version 26"
+        );
+        assert!(
+            commit_versions.contains(&25),
+            "Snapshot should include commit file for version 25"
+        );
+        assert!(
+            !commit_versions.contains(&27),
+            "Snapshot should not include commit file for version 27"
+        );
+        assert!(
+            !commit_versions.contains(&28),
+            "Snapshot should not include commit file for version 28"
+        );
+
         // Verify that the checkpoint file is correct
-        assert_eq!(snapshot.log_segment.checkpoint_files.len(), 1, "Snapshot should include one checkpoint file");
+        assert_eq!(
+            snapshot.log_segment.checkpoint_files.len(),
+            1,
+            "Snapshot should include one checkpoint file"
+        );
         assert_eq!(
             LogPath::new(&snapshot.log_segment.checkpoint_files[0].location).version,
             Some(24),
@@ -698,10 +733,83 @@ mod tests {
         // Verify that the log segment contains the correct range of files
         let min_version = commit_versions.iter().min().unwrap();
         let max_version = commit_versions.iter().max().unwrap();
-        assert!(min_version >= &25, "Minimum commit version should be at least 25");
+        assert!(
+            min_version >= &25,
+            "Minimum commit version should be at least 25"
+        );
         assert_eq!(max_version, &26, "Maximum commit version should be 26");
 
         // Verify that the effective version is correct
         assert_eq!(snapshot.version(), 26, "Effective version should be 26");
+    }
+
+    #[test]
+    fn test_snapshot_at_latest_checkpoint_version() {
+        // Setup
+        let path =
+            std::fs::canonicalize(PathBuf::from("./tests/data/multiple-checkpoint/")).unwrap();
+        let url = url::Url::from_directory_path(path).unwrap();
+        let engine = SyncEngine::new();
+
+        // Read the last checkpoint to get its version
+        let fs_client = engine.get_file_system_client();
+        let log_url = LogPath::new(&url).child("_delta_log/").unwrap();
+        let last_checkpoint = read_last_checkpoint(fs_client.as_ref(), &log_url)
+            .expect("Failed to read last checkpoint")
+            .expect("No checkpoint found");
+
+        let checkpoint_version = last_checkpoint.version;
+
+        // Attempt to create a snapshot at the checkpoint version
+        let result = Snapshot::try_new(url.clone(), &engine, Some(checkpoint_version));
+
+        // Check if the operation succeeded
+        assert!(
+            result.is_ok(),
+            "Expected snapshot creation to succeed for checkpoint version {}",
+            checkpoint_version
+        );
+
+        let snapshot = result.unwrap();
+
+        // Verify the snapshot properties
+        assert_eq!(
+            snapshot.version(),
+            checkpoint_version,
+            "Snapshot version should match checkpoint version"
+        );
+
+        // Verify that the checkpoint file is used
+        assert_eq!(
+            snapshot.log_segment.checkpoint_files.len(),
+            1,
+            "Snapshot should include one checkpoint file"
+        );
+        assert_eq!(
+            LogPath::new(&snapshot.log_segment.checkpoint_files[0].location).version,
+            Some(checkpoint_version),
+            "Snapshot should use the checkpoint file for version {}",
+            checkpoint_version
+        );
+
+        // Verify that no commit files after the checkpoint version are included
+        let commit_versions: Vec<_> = snapshot
+            .log_segment
+            .commit_files
+            .iter()
+            .filter_map(|f| LogPath::new(&f.location).version)
+            .collect();
+
+        assert!(
+            commit_versions.is_empty() || commit_versions.iter().all(|&v| v <= checkpoint_version),
+            "Snapshot should not include commit files after checkpoint version"
+        );
+
+        // Verify that the effective version is correct
+        assert_eq!(
+            snapshot.version(),
+            checkpoint_version,
+            "Effective version should match checkpoint version"
+        );
     }
 }
