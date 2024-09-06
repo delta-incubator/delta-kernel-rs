@@ -147,21 +147,21 @@ impl Snapshot {
         let log_url = LogPath::new(&table_root).child("_delta_log/").unwrap();
 
         // List relevant files from log
-        let (mut commit_files, checkpoint_files) =
+        let (commit_files, checkpoint_files) =
             match (read_last_checkpoint(fs_client.as_ref(), &log_url)?, version) {
                 (Some(cp), None) => {
-                    list_log_files_with_checkpoint(&cp, fs_client.as_ref(), &log_url)?
+                    list_log_files_with_checkpoint(&cp, fs_client.as_ref(), &log_url, None)?
                 }
 
                 (Some(cp), Some(version)) if cp.version <= version => {
-                    list_log_files_with_checkpoint(&cp, fs_client.as_ref(), &log_url)?
+                    list_log_files_with_checkpoint(&cp, fs_client.as_ref(), &log_url, Some(version))?
                 }
 
                 (Some(cp), Some(version)) if cp.version > version => {
-                    list_log_files_with_checkpoint(&cp, fs_client.as_ref(), &log_url)?
+                    list_log_files_with_checkpoint(&cp, fs_client.as_ref(), &log_url, Some(version))?
                 }
                 // case where the last_checkpoint file is not found
-                _ => list_log_files(fs_client.as_ref(), &log_url)?,
+                _ => list_log_files(fs_client.as_ref(), &log_url, version)?,
             };
 
         debug!(
@@ -178,16 +178,6 @@ impl Snapshot {
                 .map(|f| f.location.clone())
                 .collect::<Vec<_>>()
         );
-        // remove all files above requested version
-        if let Some(version) = version {
-            commit_files.retain(|meta| {
-                if let Some(v) = LogPath::new(&meta.location).version {
-                    v <= version
-                } else {
-                    false
-                }
-            });
-        }
 
         // get the effective version from chosen files
         let version_eff = commit_files
@@ -340,11 +330,12 @@ fn read_last_checkpoint(
     }
 }
 
-/// List all log files after a given checkpoint.
+/// List all log files after a given checkpoint, up to a specified version.
 fn list_log_files_with_checkpoint(
     cp: &CheckpointMetadata,
     fs_client: &dyn FileSystemClient,
     log_root: &Url,
+    requested_version: Option<Version>,
 ) -> DeltaResult<(Vec<FileMeta>, Vec<FileMeta>)> {
     let version_prefix = format!("{:020}", cp.version);
     let start_from = log_root.join(&version_prefix)?;
@@ -360,11 +351,19 @@ fn list_log_files_with_checkpoint(
     let mut commit_files = files
         .iter()
         .filter_map(|f| {
-            if LogPath::new(&f.location).is_commit {
-                Some(f.clone())
-            } else {
-                None
+            let log_path = LogPath::new(&f.location);
+            if log_path.is_commit {
+                if let Some(file_version) = log_path.version {
+                    if let Some(req_version) = requested_version {
+                        if file_version <= req_version {
+                            return Some(f.clone());
+                        }
+                    } else {
+                        return Some(f.clone());
+                    }
+                }
             }
+            None
         })
         .collect_vec();
     // NOTE this will sort in reverse order
@@ -393,6 +392,7 @@ fn list_log_files_with_checkpoint(
 fn list_log_files(
     fs_client: &dyn FileSystemClient,
     log_root: &Url,
+    requested_version: Option<Version>,
 ) -> DeltaResult<(Vec<FileMeta>, Vec<FileMeta>)> {
     let version_prefix = format!("{:020}", 0);
     let start_from = log_root.join(&version_prefix)?;
@@ -404,11 +404,18 @@ fn list_log_files(
     for maybe_meta in fs_client.list_from(&start_from)? {
         let meta = maybe_meta?;
         let log_path = LogPath::new(&meta.location);
+        let file_version = log_path.version.map(|v| v as i64).unwrap_or(0);
+
+        if let Some(req_version) = requested_version {
+            if file_version > req_version as i64 {
+                continue;  // Skip files with versions higher than requested
+            }
+        }
+
         if log_path.is_checkpoint {
-            let version = log_path.version.unwrap_or(0) as i64;
-            match version.cmp(&max_checkpoint_version) {
+            match file_version.cmp(&max_checkpoint_version) {
                 Ordering::Greater => {
-                    max_checkpoint_version = version;
+                    max_checkpoint_version = file_version;
                     checkpoint_files.clear();
                     checkpoint_files.push(meta);
                 }
@@ -422,10 +429,12 @@ fn list_log_files(
         }
     }
 
+    // Retain only commit files after the max checkpoint version
     commit_files.retain(|f| {
         version_from_location(&f.location).unwrap_or(0) as i64 > max_checkpoint_version
     });
-    // NOTE this will sort in reverse order
+
+    // Sort commit files in reverse order
     commit_files.sort_unstable_by(|a, b| b.location.cmp(&a.location));
 
     Ok((commit_files, checkpoint_files))
