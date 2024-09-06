@@ -158,8 +158,8 @@ impl Snapshot {
                 _ => list_log_files(fs_client.as_ref(), &log_url)?,
             };
 
-        println!("Commit files: {:?}", commit_files.iter().map(|f| f.location.clone()).collect::<Vec<_>>());
-        println!("Checkpoint files: {:?}", checkpoint_files.iter().map(|f| f.location.clone()).collect::<Vec<_>>());
+        debug!("Commit files: {:?}", commit_files.iter().map(|f| f.location.clone()).collect::<Vec<_>>());
+        debug!("Checkpoint files: {:?}", checkpoint_files.iter().map(|f| f.location.clone()).collect::<Vec<_>>());
         // remove all files above requested version
         if let Some(version) = version {
             commit_files.retain(|meta| {
@@ -281,6 +281,8 @@ struct CheckpointMetadata {
     /// The number of fragments if the last checkpoint was written in multiple parts.
     pub(crate) parts: Option<i32>,
     /// The number of bytes of the checkpoint.
+    /// TODO: Temporary fix, checkout this issue for full details: https://github.com/delta-incubator/delta-kernel-rs/issues/326 
+    #[serde(alias = "size_in_bytes")]
     pub(crate) size_in_bytes: Option<i64>,
     /// The number of AddFile actions in the checkpoint.
     pub(crate) num_of_add_files: Option<i64>,
@@ -303,14 +305,14 @@ fn read_last_checkpoint(
     log_root: &Url,
 ) -> DeltaResult<Option<CheckpointMetadata>> {
     let file_path = LogPath::new(log_root).child(LAST_CHECKPOINT_FILE_NAME)?;
-    println!("Reading last checkpoint from: {}", file_path);
+    debug!("Reading last checkpoint from: {}", file_path);
     match fs_client
         .read_files(vec![(file_path, None)])
         .and_then(|mut data| data.next().expect("read_files should return one file"))
     {
         Ok(data) => {
             // print the data in bytes as a string 
-            println!("Data: {:?}", std::str::from_utf8(&data).unwrap());
+            debug!("Data: {:?}", std::str::from_utf8(&data).unwrap());
             Ok(serde_json::from_slice(&data)
             .inspect_err(|e| warn!("invalid _last_checkpoint JSON: {e}"))
             .ok())
@@ -565,7 +567,6 @@ mod tests {
         // First, let's verify the content of the _last_checkpoint file
         let fs_client = engine.get_file_system_client();
         let log_url = LogPath::new(&url).child("_delta_log/").unwrap();
-        println!("Log root: {}", log_url);
         let last_checkpoint = read_last_checkpoint(fs_client.as_ref(), &log_url).unwrap();
 
         assert!(
@@ -573,17 +574,17 @@ mod tests {
             "_last_checkpoint file should exist"
         );
         let checkpoint_meta = last_checkpoint.unwrap();
-        println!("Checkpoint metadata: {:#?}", checkpoint_meta);
+        debug!("Checkpoint metadata: {:#?}", checkpoint_meta);
         assert_eq!(
             checkpoint_meta.version, 1,
             "Last checkpoint should be at version 1"
         );
         assert_eq!(checkpoint_meta.size, 8, "Checkpoint size should be 8");
-        // assert_eq!(
-        //     checkpoint_meta.size_in_bytes,
-        //     Some(21857),
-        //     "Checkpoint size in bytes should be 21857"
-        // );
+        assert_eq!(
+            checkpoint_meta.size_in_bytes,
+            Some(21857),
+            "Checkpoint size in bytes should be 21857"
+        );
 
         // Now, request snapshot at version 0
         let snapshot = Snapshot::try_new(url.clone(), &engine, Some(0));
@@ -608,8 +609,6 @@ mod tests {
                     snap.log_segment.checkpoint_files.is_empty(),
                     "Snapshot for version 0 should not contain checkpoint files"
                 );
-
-                // You might want to add more assertions here about the content of version 0
             }
             Err(e) => {
                 panic!("Failed to create snapshot for version 0: {:?}", e);
