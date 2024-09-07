@@ -97,6 +97,20 @@ pub enum Error {
     #[error("No table version found.")]
     MissingVersion,
 
+    // A checkpoint version is invalid
+    #[error("Invalid checkpoint version: {checkpoint_version} is greater than requested version: {requested_version}")]
+    InvalidCheckpointVersion {
+        checkpoint_version: u64,
+        requested_version: u64,
+    },
+
+    // Add InvalidCheckpointRequest 
+    #[error("Invalid checkpoint request: {requested} is greater than the latest checkpoint version: {found}")]
+    InvalidCheckpointRequest {
+        requested: u64,
+        found: u64,
+    },
+
     /// An error occured while working with deletion vectors
     #[error("Deletion Vector error: {0}")]
     DeletionVector(String),

@@ -192,24 +192,11 @@ impl Snapshot {
 
         // List relevant files from log
         let (commit_files, checkpoint_files) =
-            match (read_last_checkpoint(fs_client.as_ref(), &log_url)?, version) {
-                (Some(cp), None) => {
-                    list_log_files(fs_client.as_ref(), &log_url, None, Some(&cp))?
-                }
+            list_log_files(fs_client.as_ref(), &log_url, version)?;
 
-                (Some(cp), Some(version)) if cp.version <= version => {
-                    list_log_files(fs_client.as_ref(), &log_url, Some(version), Some(&cp))?
-                }
-
-                (Some(cp), Some(version)) if cp.version > version => {
-                    list_log_files(fs_client.as_ref(), &log_url, Some(version), None)?
-                }
-                // case where the last_checkpoint file is not found
-                _ => list_log_files(fs_client.as_ref(), &log_url, version, None)?,
-            };
         // print the commit_files and checkpoint_files
-        println!("commit_files: {:?}", commit_files);
-        println!("checkpoint_files: {:?}", checkpoint_files);
+        println!("\n\ncommit_files_try_new: {:?}", commit_files);
+        println!("checkpoint_files_try_new: {:?}\n\n", checkpoint_files);
 
         // get the effective version from chosen files
         let version_eff = commit_files
@@ -370,69 +357,107 @@ fn list_log_files(
     fs_client: &dyn FileSystemClient,
     log_root: &Url,
     requested_version: Option<Version>,
-    start_checkpoint: Option<&CheckpointMetadata>,
 ) -> DeltaResult<(Vec<FileMeta>, Vec<FileMeta>)> {
-    let (start_version, start_from) = if let Some(cp) = start_checkpoint {
-        let version_prefix = format!("{:020}", cp.version);
-        (cp.version as i64, log_root.join(&version_prefix)?)
+    let start_from = log_root.join(&format!("{:020}", 0))?;
+
+    let mut commit_files = Vec::new();
+    let mut checkpoint_files = Vec::new();
+    let mut last_checkpoint_version = None;
+    let mut next_checkpoint_version = None;
+
+    // If no requested version, try to get the last checkpoint
+    let last_checkpoint = if requested_version.is_none() {
+        read_last_checkpoint(fs_client, log_root)?
     } else {
-        (0, log_root.join(&format!("{:020}", 0))?)
+        None
     };
 
-    let mut max_checkpoint_version = start_version - 1;
-    let mut commit_files = Vec::new();
-    let mut checkpoint_files = Vec::with_capacity(10);
-
+    // Iterate through files in the log directory
     for maybe_meta in fs_client.list_from(&start_from)? {
         let meta = maybe_meta?;
         let log_path = LogPath::new(&meta.location);
         let file_version = log_path.version.map(|v| v as i64).unwrap_or(0);
 
+        // Stop if we've passed the requested version
         if let Some(req_version) = requested_version {
             if file_version > req_version as i64 {
-                continue; // Skip files with versions higher than requested
+                break;
             }
         }
 
         if log_path.is_checkpoint {
-            match file_version.cmp(&max_checkpoint_version) {
-                Ordering::Greater => {
-                    max_checkpoint_version = file_version;
-                    checkpoint_files.clear();
-                    checkpoint_files.push(meta);
-                }
-                Ordering::Equal => {
-                    checkpoint_files.push(meta);
-                }
-                _ => {}
+            if last_checkpoint_version.is_none() || file_version > last_checkpoint_version.unwrap()
+            {
+                last_checkpoint_version = Some(file_version);
+                checkpoint_files.clear();
+                checkpoint_files.push(meta.clone());
+            }
+
+            // If we're using last_checkpoint and we've found the next checkpoint, stop
+            if requested_version.is_none()
+                && last_checkpoint.is_some()
+                && file_version > last_checkpoint.as_ref().unwrap().version as i64
+            {
+                next_checkpoint_version = Some(file_version);
+                break;
             }
         } else if log_path.is_commit {
             commit_files.push(meta);
         }
     }
 
-    // Retain relevant commit files
+    println!(
+        "\n\n\nlast_checkpoint_version: {:?}",
+        last_checkpoint_version
+    );
+    println!("next_checkpoint_version: {:?}", next_checkpoint_version);
+    println!("requested_version: {:?}", requested_version);
+    println!("checkpoint_files: {:?}", checkpoint_files);
+    println!("commit_files: {:?}\n\n\n", commit_files);
+
+    // Filter commit files based on the last checkpoint version and requested version
     commit_files.retain(|f| {
-        let file_version = version_from_location(&f.location).unwrap_or(0) as i64;
-        match requested_version {
-            Some(req_version) => {
-                if file_version == max_checkpoint_version {
-                    file_version == req_version as i64
-                } else {
-                    file_version > max_checkpoint_version && file_version <= req_version as i64
-                }
+        let version = LogPath::new(&f.location)
+            .version
+            .map(|v| v as i64)
+            .unwrap_or(0);
+        match (last_checkpoint_version, requested_version) {
+            // Case: Checkpoint and requested version are the same
+            // Occurs when: A specific version is requested that matches a checkpoint
+            // Example: last_checkpoint_version = Some(10), requested_version = Some(10)
+            // Keep only commit files with version 10
+            (Some(lcv), Some(rv)) if lcv == rv as i64 => version == lcv,
+
+            // Case: Normal range between checkpoint and requested version
+            // Occurs when: A specific version is requested that's after a known checkpoint
+            // Example: last_checkpoint_version = Some(10), requested_version = Some(15)
+            // Keep commit files with versions 11, 12, 13, 14, 15
+            (Some(lcv), Some(rv)) => version > lcv && version <= rv as i64,
+
+            // Case: No requested version, using last known checkpoint
+            // Occurs when: No version is requested, we use read_last_checkpoint result
+            // Note: A new checkpoint might have been created during file listing
+            // Example: last_checkpoint_version = Some(10), next_checkpoint_version = Some(20)
+            // Keep commit files with versions 11, 12, ..., 19
+            (Some(lcv), None) => {
+                version > lcv && next_checkpoint_version.map_or(true, |ncv| version < ncv)
             }
-            None => file_version > max_checkpoint_version,
+
+            // Case: No last checkpoint, but we have a requested version
+            // Occurs when: A specific version is requested, but no checkpoint was found before it
+            // Example: requested_version = Some(15), no checkpoints found
+            // Keep all commit files up to and including version 15
+            (None, Some(rv)) => version <= rv as i64,
+
+            // Case: No last checkpoint and no requested version
+            // Occurs when: No version is requested and no checkpoints were found
+            // Keep all commit files (this case should be rare in practice)
+            (None, None) => true,
         }
     });
 
-    // Sort commit files in reverse order
+    // Sort commit files in reverse order (newest first)
     commit_files.sort_unstable_by(|a, b| b.location.cmp(&a.location));
-
-    // Verify checkpoint parts if a start checkpoint was provided
-    if let Some(cp) = start_checkpoint {
-        assert_eq!(checkpoint_files.len(), cp.parts.unwrap_or(1) as usize, "Checkpoint parts mismatch");
-    }
 
     Ok((commit_files, checkpoint_files))
 }
@@ -443,6 +468,7 @@ mod tests {
 
     use std::path::PathBuf;
     use std::sync::Arc;
+    use lazy_static::lazy_static;
 
     use object_store::local::LocalFileSystem;
     use object_store::memory::InMemory;
@@ -453,6 +479,60 @@ mod tests {
     use crate::engine::default::filesystem::ObjectStoreFileSystemClient;
     use crate::engine::sync::SyncEngine;
     use crate::schema::StructType;
+
+    // Define a type for the test case elements
+    type TestCase = (
+        Version,         // expected<RequestedVersion>
+        Version,         // expected<ActualVersion>
+        Option<Version>, // expected<CheckpointVersion>
+        Vec<Version>,    // expected<CommitFileVersions>
+        Vec<Version>,    // expected<CheckpointFileVersions>
+    );
+    lazy_static! {
+        static ref TEST_CASES: Vec<TestCase> = vec![
+        // Version 0: No checkpoint, only the initial commit
+        (0, 0, None, vec![0], vec![]),
+        // Version 1-3: No checkpoint yet, accumulating commits
+        (1, 1, None, vec![1, 0], vec![]),
+        (2, 2, None, vec![2, 1, 0], vec![]),
+        (3, 3, None, vec![3, 2, 1, 0], vec![]),
+        // Version 4: First checkpoint, only includes its own commit
+        (4, 4, Some(4), vec![4], vec![4]),
+        // Version 5-8: After first checkpoint, accumulating new commits
+        (5, 5, Some(4), vec![5], vec![4]),
+        (6, 6, Some(4), vec![6, 5], vec![4]),
+        (7, 7, Some(4), vec![7, 6, 5], vec![4]),
+        (8, 8, Some(4), vec![8, 7, 6, 5], vec![4]),
+        // Version 9: Second checkpoint, only includes its own commit
+        (9, 9, Some(9), vec![9], vec![9]),
+        // Version 10-13: After second checkpoint, accumulating new commits
+        (10, 10, Some(9), vec![10], vec![9]),
+        (11, 11, Some(9), vec![11, 10], vec![9]),
+        (12, 12, Some(9), vec![12, 11, 10], vec![9]),
+        (13, 13, Some(9), vec![13, 12, 11, 10], vec![9]),
+        // Version 14: Third checkpoint, only includes its own commit
+        (14, 14, Some(14), vec![14], vec![14]),
+        // Version 15-18: After third checkpoint, accumulating new commits
+        (15, 15, Some(14), vec![15], vec![14]),
+        (16, 16, Some(14), vec![16, 15], vec![14]),
+        (17, 17, Some(14), vec![17, 16, 15], vec![14]),
+        (18, 18, Some(14), vec![18, 17, 16, 15], vec![14]),
+        // Version 19: Fourth checkpoint, only includes its own commit
+        (19, 19, Some(19), vec![19], vec![19]),
+        // Version 20-23: After fourth checkpoint, accumulating new commits
+        (20, 20, Some(19), vec![20], vec![19]),
+        (21, 21, Some(19), vec![21, 20], vec![19]),
+        (22, 22, Some(19), vec![22, 21, 20], vec![19]),
+        (23, 23, Some(19), vec![23, 22, 21, 20], vec![19]),
+        // Version 24: Fifth checkpoint, only includes its own commit
+        (24, 24, Some(24), vec![24], vec![24]),
+        // Version 25-28: After fifth checkpoint, accumulating new commits
+        (25, 25, Some(24), vec![25], vec![24]),
+        (26, 26, Some(24), vec![26, 25], vec![24]),
+        (27, 27, Some(24), vec![27, 26, 25], vec![24]),
+        (28, 28, Some(24), vec![28, 27, 26, 25], vec![24]),
+    ];
+    }
 
     #[test]
     fn test_snapshot_read_metadata() {
@@ -917,70 +997,6 @@ mod tests {
     */
     #[test]
     fn test_snapshot_versions() {
-        // Define a type for the test case elements
-        type TestCase = (
-            Version,         // expected<RequestedVersion>
-            Version,         // expected<ActualVersion>
-            Option<Version>, // expected<CheckpointVersion>
-            Vec<Version>,    // expected<CommitFileVersions>
-            Vec<Version>,    // expected<CheckpointFileVersions>
-        );
-
-        let test_cases: Vec<TestCase> = vec![
-            // Version 0: No checkpoint, only the initial commit
-            (0, 0, None, vec![0], vec![]),
-
-            // Version 1-3: No checkpoint yet, accumulating commits
-            (1, 1, None, vec![1, 0], vec![]),
-            (2, 2, None, vec![2, 1, 0], vec![]),
-            (3, 3, None, vec![3, 2, 1, 0], vec![]),
-
-            // Version 4: First checkpoint, only includes its own commit
-            (4, 4, Some(4), vec![4], vec![4]),
-
-            // Version 5-8: After first checkpoint, accumulating new commits
-            (5, 5, Some(4), vec![5], vec![4]),
-            (6, 6, Some(4), vec![6, 5], vec![4]),
-            (7, 7, Some(4), vec![7, 6, 5], vec![4]),
-            (8, 8, Some(4), vec![8, 7, 6, 5], vec![4]),
-
-            // Version 9: Second checkpoint, only includes its own commit
-            (9, 9, Some(9), vec![9], vec![9]),
-
-            // Version 10-13: After second checkpoint, accumulating new commits
-            (10, 10, Some(9), vec![10], vec![9]),
-            (11, 11, Some(9), vec![11, 10], vec![9]),
-            (12, 12, Some(9), vec![12, 11, 10], vec![9]),
-            (13, 13, Some(9), vec![13, 12, 11, 10], vec![9]),
-
-            // Version 14: Third checkpoint, only includes its own commit
-            (14, 14, Some(14), vec![14], vec![14]),
-
-            // Version 15-18: After third checkpoint, accumulating new commits
-            (15, 15, Some(14), vec![15], vec![14]),
-            (16, 16, Some(14), vec![16, 15], vec![14]),
-            (17, 17, Some(14), vec![17, 16, 15], vec![14]),
-            (18, 18, Some(14), vec![18, 17, 16, 15], vec![14]),
-
-            // Version 19: Fourth checkpoint, only includes its own commit
-            (19, 19, Some(19), vec![19], vec![19]),
-
-            // Version 20-23: After fourth checkpoint, accumulating new commits
-            (20, 20, Some(19), vec![20], vec![19]),
-            (21, 21, Some(19), vec![21, 20], vec![19]),
-            (22, 22, Some(19), vec![22, 21, 20], vec![19]),
-            (23, 23, Some(19), vec![23, 22, 21, 20], vec![19]),
-
-            // Version 24: Fifth checkpoint, only includes its own commit
-            (24, 24, Some(24), vec![24], vec![24]),
-
-            // Version 25-28: After fifth checkpoint, accumulating new commits
-            (25, 25, Some(24), vec![25], vec![24]),
-            (26, 26, Some(24), vec![26, 25], vec![24]),
-            (27, 27, Some(24), vec![27, 26, 25], vec![24]),
-            (28, 28, Some(24), vec![28, 27, 26, 25], vec![24]),
-        ];
-
         let path =
             std::fs::canonicalize(PathBuf::from("./tests/data/multiple-checkpoint/")).unwrap();
         let url = url::Url::from_directory_path(path).unwrap();
@@ -992,16 +1008,21 @@ mod tests {
             expected_checkpoint,
             expected_commits,
             expected_checkpoints,
-        ) in test_cases
+        ) in TEST_CASES.iter()
         {
-            let snapshot = Snapshot::try_new(url.clone(), &engine, Some(requested_version));
-            
-            assert!(snapshot.is_ok(), "Failed to create snapshot for version {}: {:?}", requested_version, snapshot.err());
+            let snapshot = Snapshot::try_new(url.clone(), &engine, Some(*requested_version));
+
+            assert!(
+                snapshot.is_ok(),
+                "Failed to create snapshot for version {}: {:?}",
+                requested_version,
+                snapshot.err()
+            );
             let snapshot = snapshot.unwrap();
 
             assert_eq!(
                 snapshot.version(),
-                expected_version,
+                *expected_version,
                 "For requested version {}, expected version {}, but got {}",
                 requested_version,
                 expected_version,
@@ -1015,7 +1036,7 @@ mod tests {
                 .first()
                 .and_then(|f| LogPath::new(&f.location).version);
             assert_eq!(
-                actual_checkpoint, expected_checkpoint,
+                actual_checkpoint, *expected_checkpoint,
                 "For version {}, expected checkpoint {:?}, but got {:?}",
                 requested_version, expected_checkpoint, actual_checkpoint
             );
@@ -1028,7 +1049,7 @@ mod tests {
                 .filter_map(|f| LogPath::new(&f.location).version)
                 .collect();
             assert_eq!(
-                commit_versions, expected_commits,
+                commit_versions, *expected_commits,
                 "For version {}, expected commit files {:?}, but got {:?}",
                 requested_version, expected_commits, commit_versions
             );
@@ -1041,10 +1062,243 @@ mod tests {
                 .filter_map(|f| LogPath::new(&f.location).version)
                 .collect();
             assert_eq!(
-                checkpoint_versions, expected_checkpoints,
+                checkpoint_versions, *expected_checkpoints,
                 "For version {}, expected checkpoint files {:?}, but got {:?}",
                 requested_version, expected_checkpoints, checkpoint_versions
             );
         }
+    }
+
+    #[test]
+    fn test_list_log_files() {
+        let path =
+            std::fs::canonicalize(PathBuf::from("./tests/data/multiple-checkpoint/")).unwrap();
+        let url = url::Url::from_directory_path(path).unwrap();
+        let engine = SyncEngine::new();
+        let fs_client = engine.get_file_system_client();
+        let log_url = LogPath::new(&url).child("_delta_log/").unwrap();
+
+        for (
+            requested_version,
+            _expected_version,
+            _expected_checkpoint,
+            expected_commits,
+            expected_checkpoints,
+        ) in TEST_CASES.iter()
+        {
+            println!(
+                "Testing list_log_files with requested_version: {:?}",
+                requested_version
+            );
+
+            let (commit_files, checkpoint_files) =
+                list_log_files(fs_client.as_ref(), &log_url, Some(*requested_version)).unwrap();
+
+            let commit_versions: Vec<_> = commit_files
+                .iter()
+                .filter_map(|f| LogPath::new(&f.location).version)
+                .collect();
+            let checkpoint_versions: Vec<_> = checkpoint_files
+                .iter()
+                .filter_map(|f| LogPath::new(&f.location).version)
+                .collect();
+
+            assert_eq!(
+                commit_versions, *expected_commits,
+                "For requested version {:?}, expected commit versions {:?}, but got {:?}",
+                requested_version, expected_commits, commit_versions
+            );
+            assert_eq!(
+                checkpoint_versions, *expected_checkpoints,
+                "For requested version {:?}, expected checkpoint versions {:?}, but got {:?}",
+                requested_version, expected_checkpoints, checkpoint_versions
+            );
+        }
+    }
+
+    #[test]
+    fn test_snapshot_latest_version() {
+        let path =
+            std::fs::canonicalize(PathBuf::from("./tests/data/multiple-checkpoint/")).unwrap();
+        let url = url::Url::from_directory_path(path).unwrap();
+        let engine = SyncEngine::new();
+
+        // Create snapshot with None (latest version)
+        let snapshot = Snapshot::try_new(url.clone(), &engine, None).unwrap();
+
+        // Expected values
+        let expected_version = 28;
+        let expected_checkpoint_version = Some(24);
+        let expected_commits = vec![28, 27, 26, 25];
+        let expected_checkpoints = vec![24];
+
+        // Assertions
+        assert_eq!(
+            snapshot.version(),
+            expected_version,
+            "Expected latest version to be {}, but got {}",
+            expected_version,
+            snapshot.version()
+        );
+
+        // Check checkpoint version
+        let actual_checkpoint = snapshot
+            .log_segment
+            .checkpoint_files
+            .first()
+            .and_then(|f| LogPath::new(&f.location).version);
+        assert_eq!(
+            actual_checkpoint, expected_checkpoint_version,
+            "Expected checkpoint version {:?}, but got {:?}",
+            expected_checkpoint_version, actual_checkpoint
+        );
+
+        // Check commit files
+        let commit_versions: Vec<_> = snapshot
+            .log_segment
+            .commit_files
+            .iter()
+            .filter_map(|f| LogPath::new(&f.location).version)
+            .collect();
+        assert_eq!(
+            commit_versions, expected_commits,
+            "Expected commit files {:?}, but got {:?}",
+            expected_commits, commit_versions
+        );
+
+        // Check checkpoint files
+        let checkpoint_versions: Vec<_> = snapshot
+            .log_segment
+            .checkpoint_files
+            .iter()
+            .filter_map(|f| LogPath::new(&f.location).version)
+            .collect();
+        assert_eq!(
+            checkpoint_versions, expected_checkpoints,
+            "Expected checkpoint files {:?}, but got {:?}",
+            expected_checkpoints, checkpoint_versions
+        );
+    }
+
+    #[test]
+    fn test_list_log_files_scenarios() {
+        let path =
+            std::fs::canonicalize(PathBuf::from("./tests/data/multiple-checkpoint/")).unwrap();
+        let url = url::Url::from_directory_path(path).unwrap();
+        let log_url = LogPath::new(&url).child("_delta_log/").unwrap();
+        let fs_client = SyncEngine::new().get_file_system_client();
+
+        // Scenario 1: requested_version is None
+        let (commit_files, checkpoint_files) =
+            list_log_files(fs_client.as_ref(), &log_url, None).unwrap();
+
+        println!("Scenario 1 - commit_files: {:?}", commit_files);
+        println!("Scenario 1 - checkpoint_files: {:?}", checkpoint_files);
+
+        assert_eq!(
+            commit_files.len(),
+            4,
+            "Expected 4 commit files when requested_version is None"
+        );
+        assert_eq!(
+            checkpoint_files.len(),
+            1,
+            "Expected 1 checkpoint file when requested_version is None"
+        );
+        let commit_versions: Vec<_> = commit_files
+            .iter()
+            .filter_map(|f| LogPath::new(&f.location).version)
+            .collect();
+        assert_eq!(
+            commit_versions,
+            vec![28, 27, 26, 25],
+            "Expected commit versions to be [28, 27, 26, 25]"
+        );
+        assert_eq!(
+            LogPath::new(&checkpoint_files[0].location).version,
+            Some(24),
+            "Expected latest checkpoint version to be 24"
+        );
+
+        // Scenario 2: requested_version is Some(Version)
+        let (commit_files, checkpoint_files) =
+            list_log_files(fs_client.as_ref(), &log_url, Some(15)).unwrap();
+
+        println!("Scenario 2 - commit_files: {:?}", commit_files);
+        println!("Scenario 2 - checkpoint_files: {:?}", checkpoint_files);
+
+        assert_eq!(
+            commit_files.len(),
+            1,
+            "Expected 1 commit file for version 15"
+        );
+        assert_eq!(
+            checkpoint_files.len(),
+            1,
+            "Expected 1 checkpoint file for version 15"
+        );
+        let commit_versions: Vec<_> = commit_files
+            .iter()
+            .filter_map(|f| LogPath::new(&f.location).version)
+            .collect();
+        assert_eq!(
+            commit_versions,
+            vec![15],
+            "Expected commit version to be [15]"
+        );
+        assert_eq!(
+            LogPath::new(&checkpoint_files[0].location).version,
+            Some(14),
+            "Expected checkpoint version to be 14"
+        );
+
+        // Additional test for Scenario 2 to ensure we don't include files after the requested version
+        let (commit_files, checkpoint_files) =
+            list_log_files(fs_client.as_ref(), &log_url, Some(22)).unwrap();
+        let commit_versions: Vec<_> = commit_files
+            .iter()
+            .filter_map(|f| LogPath::new(&f.location).version)
+            .collect();
+        assert_eq!(
+            commit_versions,
+            vec![22, 21, 20],
+            "Expected commit versions to be [22, 21, 20] for requested version 22"
+        );
+        assert_eq!(
+            LogPath::new(&checkpoint_files[0].location).version,
+            Some(19),
+            "Expected checkpoint version to be 19 for requested version 22"
+        );
+        assert!(
+            !commit_versions.contains(&23),
+            "Should not include commit files after the requested version (22)"
+        );
+
+        // Scenario 3: requested_version is the same as a checkpoint version
+        let (commit_files, checkpoint_files) =
+            list_log_files(fs_client.as_ref(), &log_url, Some(24)).unwrap();
+
+        println!("Scenario 3 - commit_files: {:?}", commit_files);
+        println!("Scenario 3 - checkpoint_files: {:?}", checkpoint_files);
+
+        let commit_versions: Vec<_> = commit_files
+            .iter()
+            .filter_map(|f| LogPath::new(&f.location).version)
+            .collect();
+        assert_eq!(
+            commit_versions,
+            vec![24],
+            "Expected only commit version 24 when requested version is 24"
+        );
+        assert_eq!(
+            checkpoint_files.len(),
+            1,
+            "Expected 1 checkpoint file when requested version is 24"
+        );
+        assert_eq!(
+            LogPath::new(&checkpoint_files[0].location).version,
+            Some(24),
+            "Expected checkpoint version to be 24 when requested version is 24"
+        );
     }
 }
