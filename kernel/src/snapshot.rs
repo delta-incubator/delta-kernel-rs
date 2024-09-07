@@ -195,8 +195,8 @@ impl Snapshot {
             list_log_files(fs_client.as_ref(), &log_url, version)?;
 
         // print the commit_files and checkpoint_files
-        println!("\n\ncommit_files_try_new: {:?}", commit_files);
-        println!("checkpoint_files_try_new: {:?}\n\n", checkpoint_files);
+        debug!("\n\ncommit_files_try_new: {:?}", commit_files);
+        debug!("checkpoint_files_try_new: {:?}\n\n", checkpoint_files);
 
         // get the effective version from chosen files
         let version_eff = commit_files
@@ -406,14 +406,14 @@ fn list_log_files(
         }
     }
 
-    println!(
+    debug!(
         "\n\n\nlast_checkpoint_version: {:?}",
         last_checkpoint_version
     );
-    println!("next_checkpoint_version: {:?}", next_checkpoint_version);
-    println!("requested_version: {:?}", requested_version);
-    println!("checkpoint_files: {:?}", checkpoint_files);
-    println!("commit_files: {:?}\n\n\n", commit_files);
+    debug!("next_checkpoint_version: {:?}", next_checkpoint_version);
+    debug!("requested_version: {:?}", requested_version);
+    debug!("checkpoint_files: {:?}", checkpoint_files);
+    debug!("commit_files: {:?}\n\n\n", commit_files);
 
     // Filter commit files based on the last checkpoint version and requested version
     commit_files.retain(|f| {
@@ -1086,7 +1086,7 @@ mod tests {
             expected_checkpoints,
         ) in TEST_CASES.iter()
         {
-            println!(
+            debug!(
                 "Testing list_log_files with requested_version: {:?}",
                 requested_version
             );
@@ -1192,8 +1192,8 @@ mod tests {
         let (commit_files, checkpoint_files) =
             list_log_files(fs_client.as_ref(), &log_url, None).unwrap();
 
-        println!("Scenario 1 - commit_files: {:?}", commit_files);
-        println!("Scenario 1 - checkpoint_files: {:?}", checkpoint_files);
+        debug!("Scenario 1 - commit_files: {:?}", commit_files);
+        debug!("Scenario 1 - checkpoint_files: {:?}", checkpoint_files);
 
         assert_eq!(
             commit_files.len(),
@@ -1224,8 +1224,8 @@ mod tests {
         let (commit_files, checkpoint_files) =
             list_log_files(fs_client.as_ref(), &log_url, Some(15)).unwrap();
 
-        println!("Scenario 2 - commit_files: {:?}", commit_files);
-        println!("Scenario 2 - checkpoint_files: {:?}", checkpoint_files);
+        debug!("Scenario 2 - commit_files: {:?}", commit_files);
+        debug!("Scenario 2 - checkpoint_files: {:?}", checkpoint_files);
 
         assert_eq!(
             commit_files.len(),
@@ -1278,8 +1278,8 @@ mod tests {
         let (commit_files, checkpoint_files) =
             list_log_files(fs_client.as_ref(), &log_url, Some(24)).unwrap();
 
-        println!("Scenario 3 - commit_files: {:?}", commit_files);
-        println!("Scenario 3 - checkpoint_files: {:?}", checkpoint_files);
+        debug!("Scenario 3 - commit_files: {:?}", commit_files);
+        debug!("Scenario 3 - checkpoint_files: {:?}", checkpoint_files);
 
         let commit_versions: Vec<_> = commit_files
             .iter()
