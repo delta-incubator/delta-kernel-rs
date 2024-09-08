@@ -1002,9 +1002,11 @@ mod tests {
 
     #[test]
     fn list_skip_earlier_element() {
-        let requested_schema = Arc::new(StructType::new(vec![
-            StructField::new("list", ArrayType::new(DataType::INTEGER, false), false),
-        ]));
+        let requested_schema = Arc::new(StructType::new(vec![StructField::new(
+            "list",
+            ArrayType::new(DataType::INTEGER, false),
+            false,
+        )]));
         let parquet_schema = Arc::new(ArrowSchema::new(vec![
             ArrowField::new("i", ArrowDataType::Int32, false),
             ArrowField::new(
@@ -1020,9 +1022,7 @@ mod tests {
         let (mask_indices, reorder_indices) =
             get_requested_indices(&requested_schema, &parquet_schema).unwrap();
         let expect_mask = vec![1];
-        let expect_reorder = vec![
-            ReorderIndex::identity(0),
-        ];
+        let expect_reorder = vec![ReorderIndex::identity(0)];
         assert_eq!(mask_indices, expect_mask);
         assert_eq!(reorder_indices, expect_reorder);
     }
