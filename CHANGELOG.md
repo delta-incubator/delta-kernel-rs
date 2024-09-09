@@ -22,7 +22,7 @@
 - Allow kernel to read tables with invalid `_last_checkpoint` [\#311](https://github.com/delta-incubator/delta-kernel-rs/pull/311)
 - List log files with checkpoint hint when constructing latest snapshot (when version requested is `None`) [\#312](https://github.com/delta-incubator/delta-kernel-rs/pull/312)
 - Fix incorrect offset value when computing list offsets [\#327](https://github.com/delta-incubator/delta-kernel-rs/pull/327)
-- Fix metadata string conversion TODO
+- Fix metadata string conversion in default engine arrow conversion [\#328](https://github.com/delta-incubator/delta-kernel-rs/pull/328)
 
 ## [v0.3.0](https://github.com/delta-incubator/delta-kernel-rs/tree/v0.3.0/) (2024-08-07)
 
