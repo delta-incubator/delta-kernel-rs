@@ -391,7 +391,9 @@ fn apply_to_cols(
                             arrow_fields.len()
                         )));
                     }
-                    let sa = col.as_struct_opt().unwrap();
+                    let sa = col.as_struct_opt().ok_or(make_arrow_error(
+                        "Arrow claimed to be a struct but isn't a StructArray".to_string(),
+                    ))?;
                     let (fields, sa_cols, sa_nulls) = sa.clone().into_parts();
                     let transformed = apply_to_cols(&sa_cols, sa_nulls, &fields, kernel_fields)?;
                     let new_field = arrow_field
