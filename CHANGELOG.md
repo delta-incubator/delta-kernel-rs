@@ -8,10 +8,7 @@
 
 *Additions*
 
-1. Two new binary expressions: `In` and `NotIn`, as well as a new `Scalar::Array` variant to represent arrays in the expression framework [\#270](https://github.com/delta-incubator/delta-kernel-rs/pull/270)
-  a. `Scalar::Array` wraps new `ArrayData` type
-  b. New `DataType::Array` constructor: `DataType::array_type(elements: ArrayType) -> Self`
-  c. New `Error` variant: `InvalidExpressionEvaluation` and corresponding `invalid_expression(...)` function
+1. Two new binary expressions: `In` and `NotIn`, as well as a new `Scalar::Array` variant to represent arrays in the expression framework [\#270](https://github.com/delta-incubator/delta-kernel-rs/pull/270) NOTE: exact API for these expressions is still evolving.
 
 **Implemented enhancements:**
 
