@@ -10,7 +10,7 @@ use arrow_array::{
     Float64Array, Int16Array, Int32Array, Int64Array, Int8Array, ListArray, RecordBatch,
     StringArray, StructArray, TimestampMicrosecondArray,
 };
-use arrow_buffer::OffsetBuffer;
+use arrow_buffer::{NullBuffer, OffsetBuffer};
 use arrow_ord::cmp::{distinct, eq, gt, gt_eq, lt, lt_eq, neq};
 use arrow_ord::comparison::in_list_utf8;
 use arrow_schema::{
@@ -21,12 +21,13 @@ use arrow_select::concat::concat;
 use itertools::Itertools;
 
 use super::arrow_conversion::LIST_ARRAY_ROOT;
+use super::arrow_utils::make_arrow_error;
 use crate::engine::arrow_data::ArrowEngineData;
 use crate::engine::arrow_utils::ensure_data_types;
 use crate::engine::arrow_utils::prim_array_cmp;
 use crate::error::{DeltaResult, Error};
 use crate::expressions::{BinaryOperator, Expression, Scalar, UnaryOperator, VariadicOperator};
-use crate::schema::{DataType, PrimitiveType, SchemaRef};
+use crate::schema::{DataType, PrimitiveType, Schema, SchemaRef};
 use crate::{EngineData, ExpressionEvaluator, ExpressionHandler};
 
 // TODO leverage scalars / Datum
@@ -214,10 +215,9 @@ fn evaluate_expression(
             let output_fields: Vec<ArrowField> = output_cols
                 .iter()
                 .zip(schema.fields())
-                .map(|(array, input_field)| -> DeltaResult<_> {
-                    ensure_data_types(input_field.data_type(), array.data_type())?;
+                .map(|(array, output_field)| -> DeltaResult<_> {
                     Ok(ArrowField::new(
-                        input_field.name(),
+                        output_field.name(),
                         array.data_type().clone(),
                         array.is_nullable(),
                     ))
@@ -366,6 +366,60 @@ fn evaluate_expression(
     }
 }
 
+fn apply_schema(batch: RecordBatch, schema: &Schema) -> DeltaResult<RecordBatch> {
+    let cols = batch.columns();
+    let arrow_schema = batch.schema();
+    let sa = apply_to_cols(cols, None, arrow_schema.fields(), schema)?;
+    Ok(sa.into())
+}
+
+fn apply_to_cols(
+    cols: &[Arc<dyn Array>],
+    nulls: Option<NullBuffer>,
+    arrow_fields: &Fields,
+    schema: &Schema,
+) -> DeltaResult<StructArray> {
+    // build up a new set of (col, field) pairs
+    let result_iter = arrow_fields.into_iter().zip(schema.fields()).zip(cols).map(
+        |((arrow_field, kernel_field), col)| -> DeltaResult<(Arc<dyn Array>, ArrowField)> {
+            match (&kernel_field.data_type, arrow_field.data_type()) {
+                (DataType::Struct(kernel_fields), ArrowDataType::Struct(arrow_fields)) => {
+                    if kernel_fields.fields.len() != arrow_fields.len() {
+                        return Err(make_arrow_error(format!(
+                            "Kernel schema had {} fields, but data has {}",
+                            kernel_fields.fields.len(),
+                            arrow_fields.len()
+                        )));
+                    }
+                    let sa = col.as_struct_opt().unwrap();
+                    let (fields, sa_cols, sa_nulls) = sa.clone().into_parts();
+                    let transformed = apply_to_cols(&sa_cols, sa_nulls, &fields, kernel_fields)?;
+                    let new_field = arrow_field
+                        .as_ref()
+                        .clone()
+                        .with_name(kernel_field.name.clone())
+                        .with_data_type(transformed.data_type().clone());
+                    Ok((Arc::new(transformed) as Arc<dyn Array>, new_field))
+                }
+                _ => {
+                    ensure_data_types(&kernel_field.data_type, arrow_field.data_type())?;
+                    Ok((
+                        col.clone(),
+                        arrow_field
+                            .as_ref()
+                            .clone()
+                            .with_name(kernel_field.name.clone()),
+                    ))
+                }
+            }
+        },
+    );
+    let (new_cols, new_fields): (Vec<Arc<dyn Array>>, Vec<ArrowField>) =
+        result_iter.process_results(|iter| iter.unzip())?;
+    let sa = StructArray::try_new(new_fields.into(), new_cols, nulls).unwrap();
+    Ok(sa)
+}
+
 #[derive(Debug)]
 pub struct ArrowExpressionHandler;
 
@@ -407,13 +461,15 @@ impl ExpressionEvaluator for DefaultExpressionEvaluator {
         //         batch.schema()
         //     )));
         // };
+        //println!("Gonna eval {:#?} with output: {:#?}", self.expression, self.output_type);
         let array_ref = evaluate_expression(&self.expression, batch, Some(&self.output_type))?;
         let arrow_type: ArrowDataType = ArrowDataType::try_from(&self.output_type)?;
-        let batch: RecordBatch = if let DataType::Struct(_) = self.output_type {
-            array_ref
+        let batch: RecordBatch = if let DataType::Struct(ref struct_type) = self.output_type {
+            let batch: RecordBatch = array_ref
                 .as_struct_opt()
                 .ok_or(Error::unexpected_column_type("Expected a struct array"))?
-                .into()
+                .into();
+            apply_schema(batch, struct_type)?
         } else {
             let schema = ArrowSchema::new(vec![ArrowField::new("output", arrow_type, true)]);
             RecordBatch::try_new(Arc::new(schema), vec![array_ref])?

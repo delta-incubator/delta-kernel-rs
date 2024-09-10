@@ -384,6 +384,41 @@ fn parse_partition_value(raw: Option<&String>, data_type: &DataType) -> DeltaRes
     }
 }
 
+/// Transform a logical field into the physical form. Currently just renames things for 'name'
+/// column mapping. Also returns the top level name for the passed field
+fn make_physical(
+    logical_field: &StructField,
+    column_mapping_mode: ColumnMappingMode,
+) -> DeltaResult<StructField> {
+    match column_mapping_mode {
+        ColumnMappingMode::None => Ok(logical_field.clone()),
+        ColumnMappingMode::Name => {
+            match &logical_field.data_type {
+                DataType::Struct(struct_type) => {
+                    // build up the mapped child fields
+                    let children = struct_type
+                        .fields()
+                        .map(|field| make_physical(field, column_mapping_mode))
+                        .try_collect()?;
+                    let mapped_type = StructType::new(children);
+                    let physical_name = logical_field.physical_name(column_mapping_mode)?;
+                    Ok(StructField {
+                        name: physical_name.to_string(),
+                        data_type: DataType::Struct(Box::new(mapped_type)),
+                        nullable: logical_field.nullable,
+                        metadata: logical_field.metadata.clone(),
+                    })
+                }
+                _ => {
+                    let physical_name = logical_field.physical_name(column_mapping_mode)?;
+                    Ok(logical_field.with_name(physical_name))
+                }
+            }
+        }
+        ColumnMappingMode::Id => panic!("No id"),
+    }
+}
+
 /// Get the state needed to process a scan. In particular this returns a triple of
 /// (all_fields_in_query, fields_to_read_from_parquet, have_partition_cols) where:
 /// - all_fields_in_query - all fields in the query as [`ColumnType`] enums
@@ -413,10 +448,10 @@ fn get_state_info(
             } else {
                 // Add to read schema, store field so we can build a `Column` expression later
                 // if needed (i.e. if we have partition columns)
-                let physical_name = logical_field.physical_name(column_mapping_mode)?;
-                let physical_field = logical_field.with_name(physical_name);
+                let physical_field = make_physical(logical_field, column_mapping_mode)?;
+                let name = physical_field.name.clone();
                 read_fields.push(physical_field);
-                Ok(ColumnType::Selected(physical_name.to_string()))
+                Ok(ColumnType::Selected(name))
             }
         })
         .try_collect()?;
