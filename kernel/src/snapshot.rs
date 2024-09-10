@@ -148,31 +148,29 @@ Version | File
 8       | 00008.json
 9       | 00009.checkpoint.parquet
 9       | 00009.json
+10      | 00010.json
+11      | 00011.json
+12      | 00012.json
 
 1. If requested_version is None (latest version):
-   - We include all commit files after the last checkpoint (4).
-   - Result: [9, 8, 7, 6, 5]
+   - We include all commit files after the last checkpoint (9).
+   - Result: [12, 11, 10; 9]
 
-2. If requested_version is 6:
-   - We include commit files after the last checkpoint (4) up to and including 6.
-   - Result: [6, 5]
+2. If requested_version is 11:
+   - We include commit files after the last checkpoint (9) up to and including 11.
+   - Result: [11, 10; 9]
 
-3. If requested_version is 4 (same as checkpoint):
-   - We only include the commit file at version 4.
-   - Result: [4]
+3. If requested_version is 9 (same as checkpoint):
+   - We include both the checkpoint file and the commit file at version 9.
+   - Result: [9; 9]
 
-4. If requested_version is 3 (before the checkpoint):
+4. If requested_version is 7 (before the last checkpoint):
+   - We include commit files after the previous checkpoint (4) up to and including 7.
+   - Result: [7, 6, 5; 4]
+
+5. If requested_version is 3 (before any checkpoint):
    - We include all commit files up to and including 3.
-   - Result: [3, 2, 1, 0]
-
-The logic ensures that:
-a) We never include commit files beyond the requested version.
-b) We use the most recent checkpoint as a starting point for efficiency.
-c) We include the checkpoint version file only if it's explicitly requested.
-d) We sort the files in reverse order for proper replay of the log.
-
-This approach optimizes log replay by leveraging checkpoints while ensuring
-correct behavior for all possible requested versions.
+   - Result: [3, 2, 1, 0; ]
 */
 impl Snapshot {
     /// Create a new [`Snapshot`] instance for the given version.
@@ -955,46 +953,47 @@ mod tests {
     }
 
     /*
-    Reasoning and Example:
+Reasoning and Example:
 
-    Consider a Delta table with the following log structure:
-    Version | File
-    --------|---------------------
-    0       | 00000.json
-    1       | 00001.json
-    2       | 00002.json
-    3       | 00003.json
-    4       | 00004.checkpoint.parquet
-    4       | 00004.json
-    5       | 00005.json
-    6       | 00006.json
-    7       | 00007.json
-    8       | 00008.json
-    9       | 00009.checkpoint.parquet
-    9       | 00009.json
+Consider a Delta table with the following log structure:
+Version | File
+--------|---------------------
+0       | 00000.json
+1       | 00001.json
+2       | 00002.json
+3       | 00003.json
+4       | 00004.checkpoint.parquet
+4       | 00004.json
+5       | 00005.json
+6       | 00006.json
+7       | 00007.json
+8       | 00008.json
+9       | 00009.checkpoint.parquet
+9       | 00009.json
+10      | 00010.json
+11      | 00011.json
+12      | 00012.json
 
-    1. If requested_version is None (latest version):
-       - We include all commit files after the last checkpoint (4).
-       - Result: [9, 8, 7, 6, 5]
+1. If requested_version is None (latest version):
+   - We include all commit files after the last checkpoint (9).
+   - Result: [12, 11, 10; 9]
 
-    2. If requested_version is 6:
-       - We include commit files after the last checkpoint (4) up to and including 6.
-       - Result: [6, 5]
+2. If requested_version is 11:
+   - We include commit files after the last checkpoint (9) up to and including 11.
+   - Result: [11, 10; 9]
 
-    3. If requested_version is 4 (same as checkpoint):
-       - We only include the commit file at version 4.
-       - Result: [4]
+3. If requested_version is 9 (same as checkpoint):
+   - We include both the checkpoint file and the commit file at version 9.
+   - Result: [9; 9]
 
-    4. If requested_version is 3 (before the checkpoint):
-       - We include all commit files up to and including 3.
-       - Result: [3, 2, 1, 0]
+4. If requested_version is 7 (before the last checkpoint):
+   - We include commit files after the previous checkpoint (4) up to and including 7.
+   - Result: [7, 6, 5; 4]
 
-    The logic ensures that:
-    a) We never include commit files beyond the requested version.
-    b) We use the most recent checkpoint as a starting point for efficiency.
-    c) We include the checkpoint version file only if it's explicitly requested.
-
-    */
+5. If requested_version is 3 (before any checkpoint):
+   - We include all commit files up to and including 3.
+   - Result: [3, 2, 1, 0; ]
+*/
     #[test]
     fn test_snapshot_versions() {
         let path =
