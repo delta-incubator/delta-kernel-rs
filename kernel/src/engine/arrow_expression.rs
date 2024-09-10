@@ -463,7 +463,6 @@ impl ExpressionEvaluator for DefaultExpressionEvaluator {
         //         batch.schema()
         //     )));
         // };
-        //println!("Gonna eval {:#?} with output: {:#?}", self.expression, self.output_type);
         let array_ref = evaluate_expression(&self.expression, batch, Some(&self.output_type))?;
         let arrow_type: ArrowDataType = ArrowDataType::try_from(&self.output_type)?;
         let batch: RecordBatch = if let DataType::Struct(ref struct_type) = self.output_type {

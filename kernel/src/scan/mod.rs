@@ -385,7 +385,7 @@ fn parse_partition_value(raw: Option<&String>, data_type: &DataType) -> DeltaRes
 }
 
 /// Transform a logical field into the physical form. Currently just renames things for 'name'
-/// column mapping. Also returns the top level name for the passed field
+/// column mapping.
 fn make_physical(
     logical_field: &StructField,
     column_mapping_mode: ColumnMappingMode,
