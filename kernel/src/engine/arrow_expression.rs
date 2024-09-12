@@ -369,12 +369,12 @@ fn evaluate_expression(
 // return a RecordBatch where the names of fields in `sa` have been transformed to match those in
 // schema specified by `output_type`
 fn apply_schema(sa: &StructArray, output_type: &DataType) -> DeltaResult<RecordBatch> {
-    let applied = apply_to_col(sa.data_type(), sa, output_type)?.ok_or(
-        Error::generic("apply_to_col at top-level should return something")
-    )?;
-    let applied_sa = applied.as_struct_opt().ok_or(
-        Error::generic("apply_to_col at top-level should return a struct array")
-    )?;
+    let applied = apply_to_col(sa.data_type(), sa, output_type)?.ok_or(Error::generic(
+        "apply_to_col at top-level should return something",
+    ))?;
+    let applied_sa = applied.as_struct_opt().ok_or(Error::generic(
+        "apply_to_col at top-level should return a struct array",
+    ))?;
     Ok(applied_sa.into())
 }
 
@@ -398,17 +398,27 @@ fn apply_to_col(
                 "Arrow claimed to be a struct but isn't a StructArray".to_string(),
             ))?;
             let (fields, sa_cols, sa_nulls) = sa.clone().into_parts();
-            let result_iter  = fields.into_iter().zip(sa_cols).zip(kernel_fields.fields()).map(|((sa_field, sa_col), kernel_field)| -> DeltaResult<(ArrowField, Arc<dyn Array>)> {
-                let transformed_col = apply_to_col(sa_field.data_type(), &sa_col, kernel_field.data_type())?.unwrap_or(sa_col);
-                let transformed_field = sa_field
-                    .as_ref()
-                    .clone()
-                    .with_name(kernel_field.name.clone())
-                    .with_data_type(transformed_col.data_type().clone());
-                Ok((transformed_field, transformed_col))
-            });
-            let (transformed_fields, transformed_cols): (Vec<ArrowField>, Vec<Arc<dyn Array>>) = result_iter.process_results(|iter| iter.unzip())?;
-            let transformed_array = StructArray::try_new(transformed_fields.into(), transformed_cols, sa_nulls)?;
+            let result_iter = fields
+                .into_iter()
+                .zip(sa_cols)
+                .zip(kernel_fields.fields())
+                .map(
+                |((sa_field, sa_col), kernel_field)| -> DeltaResult<(ArrowField, Arc<dyn Array>)> {
+                    let transformed_col =
+                        apply_to_col(sa_field.data_type(), &sa_col, kernel_field.data_type())?
+                            .unwrap_or(sa_col);
+                    let transformed_field = sa_field
+                        .as_ref()
+                        .clone()
+                        .with_name(kernel_field.name.clone())
+                        .with_data_type(transformed_col.data_type().clone());
+                    Ok((transformed_field, transformed_col))
+                },
+            );
+            let (transformed_fields, transformed_cols): (Vec<ArrowField>, Vec<Arc<dyn Array>>) =
+                result_iter.process_results(|iter| iter.unzip())?;
+            let transformed_array =
+                StructArray::try_new(transformed_fields.into(), transformed_cols, sa_nulls)?;
             Ok(Some(Arc::new(transformed_array)))
         }
         (DataType::Array(inner_type), ArrowDataType::List(_arrow_list_type)) => {
@@ -417,9 +427,17 @@ fn apply_to_col(
                 "Arrow claimed to be a list but isn't a ListArray".to_string(),
             ))?;
             let (field, offset_buffer, values, nulls) = la.clone().into_parts();
-            let transformed_values = apply_to_col(field.data_type(), &values, &inner_type.element_type)?.unwrap_or(values);
-            let transformed_field = Arc::new(field.as_ref().clone().with_data_type(transformed_values.data_type().clone()));
-            let transformed_array = ListArray::try_new(transformed_field,  offset_buffer, transformed_values, nulls)?;
+            let transformed_values =
+                apply_to_col(field.data_type(), &values, &inner_type.element_type)?
+                    .unwrap_or(values);
+            let transformed_field = Arc::new(
+                field
+                    .as_ref()
+                    .clone()
+                    .with_data_type(transformed_values.data_type().clone()),
+            );
+            let transformed_array =
+                ListArray::try_new(transformed_field, offset_buffer, transformed_values, nulls)?;
             Ok(Some(Arc::new(transformed_array)))
         }
         _ => {
