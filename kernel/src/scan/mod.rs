@@ -12,7 +12,7 @@ use crate::actions::{get_log_schema, ADD_NAME, REMOVE_NAME};
 use crate::expressions::{Expression, Scalar};
 use crate::features::ColumnMappingMode;
 use crate::scan::state::{DvInfo, Stats};
-use crate::schema::{ArrayType, DataType, Schema, SchemaRef, StructField, StructType};
+use crate::schema::{ArrayType, DataType, MapType, Schema, SchemaRef, StructField, StructType};
 use crate::snapshot::Snapshot;
 use crate::{DeltaResult, Engine, EngineData, Error, FileMeta};
 
@@ -427,6 +427,17 @@ fn make_data_type_physical(
                         array_type.contains_null,
                     ))))
                 }
+                DataType::Map(map_type) => {
+                    let new_key_type =
+                        make_data_type_physical(&map_type.key_type, column_mapping_mode)?;
+                    let new_value_type =
+                        make_data_type_physical(&map_type.value_type, column_mapping_mode)?;
+                    Ok(DataType::Map(Box::new(MapType::new(
+                        new_key_type,
+                        new_value_type,
+                        map_type.value_contains_null,
+                    ))))
+                }
                 DataType::Struct(struct_type) => {
                     // build up the mapped child fields
                     let children = struct_type
@@ -475,7 +486,7 @@ fn get_state_info(
                 // Add to read schema, store field so we can build a `Column` expression later
                 // if needed (i.e. if we have partition columns)
                 let physical_field = make_field_physical(logical_field, column_mapping_mode)?;
-                println!("\n\n{logical_field:#?}\nAfter mapping: {physical_field:#?}\n\n");
+                debug!("\n\n{logical_field:#?}\nAfter mapping: {physical_field:#?}\n\n");
                 let name = physical_field.name.clone();
                 read_fields.push(physical_field);
                 Ok(ColumnType::Selected(name))
