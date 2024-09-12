@@ -560,7 +560,10 @@ impl ExpressionEvaluator for DefaultExpressionEvaluator {
             let sa: &StructArray = array_ref
                 .as_struct_opt()
                 .ok_or(Error::unexpected_column_type("Expected a struct array"))?;
-            apply_schema(sa, &self.output_type)?
+            match ensure_data_types(&self.output_type, sa.data_type()) {
+                Ok(_) => sa.into(),
+                Err(_) => apply_schema(sa, &self.output_type)?
+            }
         } else {
             let schema = ArrowSchema::new(vec![ArrowField::new("output", arrow_type, true)]);
             RecordBatch::try_new(Arc::new(schema), vec![array_ref])?
