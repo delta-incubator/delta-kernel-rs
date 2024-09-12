@@ -12,7 +12,7 @@ use crate::actions::{get_log_schema, ADD_NAME, REMOVE_NAME};
 use crate::expressions::{Expression, Scalar};
 use crate::features::ColumnMappingMode;
 use crate::scan::state::{DvInfo, Stats};
-use crate::schema::{DataType, Schema, SchemaRef, StructField, StructType};
+use crate::schema::{ArrayType, DataType, Schema, SchemaRef, StructField, StructType};
 use crate::snapshot::Snapshot;
 use crate::{DeltaResult, Engine, EngineData, Error, FileMeta};
 
@@ -384,34 +384,108 @@ fn parse_partition_value(raw: Option<&String>, data_type: &DataType) -> DeltaRes
     }
 }
 
-/// Transform a logical field into the physical form. Currently just renames things for 'name'
+// fn make_datatype_physical(data_type: DataType, column_mapping_mode: ColumnMappingMode) -> DeltaResult<()> {
+//     match data_type {
+//         DataType::Struct(struct_type) => {
+//             // build up the mapped child fields
+//             let children = struct_type
+//                 .fields()
+//                 .map(|field| make_physical(field, column_mapping_mode))
+//                 .try_collect()?;
+//             let mapped_type = StructType::new(children);
+//             let physical_name = logical_field.physical_name(column_mapping_mode)?;
+//             Ok(StructField {
+//                 name: physical_name.to_string(),
+//                 data_type: DataType::Struct(Box::new(mapped_type)),
+//                 nullable: logical_field.nullable,
+//                 metadata: logical_field.metadata.clone(),
+//             })
+//         }
+//         DataType::Array(array_type) => {
+//             println!("Here {array_type:?}");
+//             panic!("Nope");
+//         }
+//         _ => data_type.clone(),
+//     }
+// }
+
+enum FieldOrDataTypeRef<'a> {
+    Field(&'a StructField),
+    DataType(&'a DataType),
+}
+
+impl<'a> FieldOrDataTypeRef<'a> {
+    fn make_owned(self) -> FieldOrDataType {
+        match self {
+            FieldOrDataTypeRef::Field(f) => FieldOrDataType::Field(f.clone()),
+            FieldOrDataTypeRef::DataType(dt) => FieldOrDataType::DataType(dt.clone()),
+        }
+    }
+}
+
+enum FieldOrDataType {
+    Field(StructField),
+    DataType(DataType),
+}
+
+impl FieldOrDataType {
+    fn as_field(self) -> DeltaResult<StructField> {
+        match self {
+            FieldOrDataType::Field(f) => Ok(f),
+            FieldOrDataType::DataType(dt) => panic!("noper"),
+        }
+    }
+
+    fn as_data_type(self) -> DeltaResult<DataType> {
+        match self {
+            FieldOrDataType::DataType(dt) => Ok(dt),
+            FieldOrDataType::Field(f) => panic!("noper"),
+        }
+    }
+}
+
+/// Transform a logical field or data_type into the physical form. Currently just renames things for 'name'
 /// column mapping.
-fn make_physical(
-    logical_field: &StructField,
+fn make_physical<'a>(
+    logical: FieldOrDataTypeRef<'a>,
     column_mapping_mode: ColumnMappingMode,
-) -> DeltaResult<StructField> {
+) -> DeltaResult<FieldOrDataType> {
     match column_mapping_mode {
-        ColumnMappingMode::None => Ok(logical_field.clone()),
+        ColumnMappingMode::None => Ok(logical.make_owned()),
         ColumnMappingMode::Name => {
-            match &logical_field.data_type {
-                DataType::Struct(struct_type) => {
-                    // build up the mapped child fields
-                    let children = struct_type
-                        .fields()
-                        .map(|field| make_physical(field, column_mapping_mode))
-                        .try_collect()?;
-                    let mapped_type = StructType::new(children);
+            match logical {
+                FieldOrDataTypeRef::Field(logical_field) => {
                     let physical_name = logical_field.physical_name(column_mapping_mode)?;
-                    Ok(StructField {
+                    let field_data_type = logical_field.data_type();
+                    let mapped_data_type = make_physical(FieldOrDataTypeRef::DataType(field_data_type), column_mapping_mode).and_then(|dt| dt.as_data_type())?;
+                    Ok(FieldOrDataType::Field(StructField {
                         name: physical_name.to_string(),
-                        data_type: DataType::Struct(Box::new(mapped_type)),
+                        data_type: mapped_data_type,
                         nullable: logical_field.nullable,
                         metadata: logical_field.metadata.clone(),
-                    })
+                    }))
                 }
-                _ => {
-                    let physical_name = logical_field.physical_name(column_mapping_mode)?;
-                    Ok(logical_field.with_name(physical_name))
+                FieldOrDataTypeRef::DataType(data_type) => {
+                    // we don't need to rename at this level, just need to keep the recursion going
+                    // because there might be structs below us
+                    match data_type {
+                        DataType::Array(array_type) => {
+                            let new_type = make_physical(FieldOrDataTypeRef::DataType(&array_type.element_type), column_mapping_mode).and_then(|dt| dt.as_data_type())?;
+                            Ok(FieldOrDataType::DataType(DataType::Array(Box::new(ArrayType::new(new_type, array_type.contains_null)))))
+                        }
+                        DataType::Struct(struct_type) => {
+                            // build up the mapped child fields
+                            let children = struct_type
+                                .fields()
+                                .map(|field| make_physical(FieldOrDataTypeRef::Field(field), column_mapping_mode).and_then(|f| f.as_field()))
+                                .try_collect()?;
+                            Ok(FieldOrDataType::DataType(DataType::Struct(Box::new(StructType::new(children)))))
+                        }
+                        _ => {
+                            // types with no children don't change
+                            Ok(logical.make_owned())
+                        }
+                    }
                 }
             }
         }
@@ -448,7 +522,8 @@ fn get_state_info(
             } else {
                 // Add to read schema, store field so we can build a `Column` expression later
                 // if needed (i.e. if we have partition columns)
-                let physical_field = make_physical(logical_field, column_mapping_mode)?;
+                let physical_field = make_physical(FieldOrDataTypeRef::Field(logical_field), column_mapping_mode).and_then(|f| f.as_field())?;
+                println!("\n\n{logical_field:#?}\nAfter mapping: {physical_field:#?}\n\n");
                 let name = physical_field.name.clone();
                 read_fields.push(physical_field);
                 Ok(ColumnType::Selected(name))

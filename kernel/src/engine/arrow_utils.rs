@@ -636,6 +636,7 @@ pub(crate) fn reorder_struct_array(
     input_data: StructArray,
     requested_ordering: &[ReorderIndex],
 ) -> DeltaResult<StructArray> {
+    debug!("Reordering {input_data:?} with ordering: {requested_ordering:?}");
     if !ordering_needs_transform(requested_ordering) {
         // indices is already sorted, meaning we requested in the order that the columns were
         // stored in the parquet
