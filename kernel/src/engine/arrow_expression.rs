@@ -462,12 +462,14 @@ fn apply_to_col(
                     key_field.data_type(),
                     msa_cols[0].as_ref(),
                     &kernel_map_type.key_type,
-                )?.unwrap_or(msa_cols[0].clone());
+                )?
+                .unwrap_or(msa_cols[0].clone());
                 let transformed_values = apply_to_col(
                     value_field.data_type(),
                     msa_cols[1].as_ref(),
                     &kernel_map_type.value_type,
-                )?.unwrap_or(msa_cols[1].clone());
+                )?
+                .unwrap_or(msa_cols[1].clone());
                 let transformed_struct_fields = vec![
                     key_field
                         .as_ref()
