@@ -3,6 +3,7 @@
 //!
 
 use std::cmp::Ordering;
+use std::ops::Not;
 use std::sync::Arc;
 
 use itertools::Itertools;
@@ -11,7 +12,6 @@ use tracing::{debug, warn};
 use url::Url;
 
 use crate::actions::{get_log_schema, Metadata, Protocol, METADATA_NAME, PROTOCOL_NAME};
-use crate::expressions::UnaryOperator;
 use crate::features::{ColumnMappingMode, COLUMN_MAPPING_MODE_KEY};
 use crate::path::{version_from_location, LogPath};
 use crate::scan::ScanBuilder;
@@ -74,14 +74,12 @@ impl LogSegment {
         let schema = get_log_schema().project(&[PROTOCOL_NAME, METADATA_NAME])?;
         // filter out log files that do not contain metadata or protocol information
         let filter = Some(Expression::or(
-            Expression::unary(
-                UnaryOperator::Not,
-                Expression::is_null(Expression::Column("metaData.id".into())),
-            ),
-            Expression::unary(
-                UnaryOperator::Not,
-                Expression::is_null(Expression::Column("protocol.min_reader_version".into())),
-            ),
+            Expression::not(Expression::is_null(Expression::Column(
+                "metaData.id".into(),
+            ))),
+            Expression::not(Expression::is_null(Expression::Column(
+                "protocol.min_reader_version".into(),
+            ))),
         ));
         // read the same protocol and metadata schema for both commits and checkpoints
         let data_batches = self.replay(engine, schema.clone(), schema, filter)?;
