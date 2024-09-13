@@ -76,7 +76,7 @@ impl LogSegment {
         let filter = Some(Expression::or(
             Expression::unary(
                 UnaryOperator::Not,
-                Expression::is_null(Expression::Column("metadata.table_id".into())),
+                Expression::is_null(Expression::Column("metaData.id".into())),
             ),
             Expression::unary(
                 UnaryOperator::Not,
