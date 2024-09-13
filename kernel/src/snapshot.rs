@@ -72,7 +72,8 @@ impl LogSegment {
 
     fn read_metadata(&self, engine: &dyn Engine) -> DeltaResult<Option<(Metadata, Protocol)>> {
         let schema = get_log_schema().project(&[PROTOCOL_NAME, METADATA_NAME])?;
-        let batch_filter = Some(Expression::or(
+        // filter out log files that do not contain metadata or protocol information
+        let filter = Some(Expression::or(
             Expression::unary(
                 UnaryOperator::Not,
                 Expression::is_null(Expression::Column("metadata.table_id".into())),
@@ -83,7 +84,7 @@ impl LogSegment {
             ),
         ));
         // read the same protocol and metadata schema for both commits and checkpoints
-        let data_batches = self.replay(engine, schema.clone(), schema, batch_filter)?;
+        let data_batches = self.replay(engine, schema.clone(), schema, filter)?;
         let mut metadata_opt: Option<Metadata> = None;
         let mut protocol_opt: Option<Protocol> = None;
         for batch in data_batches {
