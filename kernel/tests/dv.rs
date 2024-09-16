@@ -20,6 +20,7 @@ fn dv_table() -> Result<(), Box<dyn std::error::Error>> {
     let stream = scan.execute(&engine)?;
     let mut total_rows = 0;
     for res in stream {
+        let res = res.unwrap();
         let data = res.raw_data?;
         let rows = data.length();
         for i in 0..rows {
@@ -45,6 +46,7 @@ fn non_dv_table() -> Result<(), Box<dyn std::error::Error>> {
     let stream = scan.execute(&engine)?;
     let mut total_rows = 0;
     for res in stream {
+        let res = res.unwrap();
         let data = res.raw_data?;
         let rows = data.length();
         for i in 0..rows {

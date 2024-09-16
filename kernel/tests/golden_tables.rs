@@ -160,6 +160,7 @@ async fn latest_snapshot_test(
     let batches: Vec<RecordBatch> = scan_res
         .into_iter()
         .map(|sr| {
+            let sr = sr.unwrap();
             let data = sr.raw_data.unwrap();
             let record_batch = to_arrow(data).unwrap();
             if let Some(mut mask) = sr.mask {

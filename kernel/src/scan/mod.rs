@@ -234,7 +234,10 @@ impl Scan {
     /// the execution of the scan.
     // This calls [`Scan::files`] to get a set of `Add` actions for the scan, and then uses the
     // `engine`'s [`crate::ParquetHandler`] to read the actual table data.
-    pub fn execute(&self, engine: &dyn Engine) -> DeltaResult<Vec<ScanResult>> {
+    pub fn execute<'a>(
+        &'a self,
+        engine: &'a dyn Engine,
+    ) -> DeltaResult<Box<dyn Iterator<Item = DeltaResult<ScanResult>> + '_>> {
         struct ScanFile {
             path: String,
             size: i64,
@@ -270,9 +273,9 @@ impl Scan {
             scan_files =
                 state::visit_scan_files(data.as_ref(), &vec, scan_files, scan_data_callback)?;
         }
-        scan_files
+        let iter = scan_files
             .into_iter()
-            .map(|scan_file| -> DeltaResult<_> {
+            .map(move |scan_file| -> DeltaResult<_> {
                 let file_path = self.snapshot.table_root.join(&scan_file.path)?;
                 let mut selection_vector = scan_file
                     .dv_info
@@ -288,7 +291,7 @@ impl Scan {
                     None,
                 )?;
                 let gs = global_state.clone(); // Arc clone
-                Ok(read_result_iter.into_iter().map(move |read_result| {
+                let y = read_result_iter.into_iter().map(move |read_result| {
                     let read_result = read_result?;
                     // to transform the physical data into the correct logical form
                     let logical = transform_to_logical_internal(
@@ -311,11 +314,13 @@ impl Scan {
                         mask: sv,
                     };
                     selection_vector = rest;
-                    Ok(result)
-                }))
+                    Ok::<ScanResult, Error>(result)
+                });
+                Ok(y)
             })
             .flatten_ok()
-            .try_collect()?
+            .flatten();
+        Ok(Box::new(iter))
     }
 }
 
@@ -633,7 +638,7 @@ mod tests {
         let table = Table::new(url);
         let snapshot = table.snapshot(&engine, None).unwrap();
         let scan = snapshot.into_scan_builder().build().unwrap();
-        let files = scan.execute(&engine).unwrap();
+        let files: Vec<ScanResult> = scan.execute(&engine).unwrap().map(|x| x.unwrap()).collect();
 
         assert_eq!(files.len(), 1);
         let num_rows = files[0].raw_data.as_ref().unwrap().length();
