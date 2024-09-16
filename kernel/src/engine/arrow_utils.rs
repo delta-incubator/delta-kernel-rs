@@ -9,9 +9,10 @@ use crate::{
 };
 
 use arrow_array::{
-    cast::AsArray, new_null_array, Array as ArrowArray, GenericListArray, OffsetSizeTrait,
+    cast::AsArray, Array as ArrowArray, ArrayRef as ArrowArrayRef, GenericListArray, MapArray,
     StructArray,
 };
+use arrow_buffer::NullBuffer;
 use arrow_schema::{
     DataType as ArrowDataType, Field as ArrowField, FieldRef as ArrowFieldRef, Fields,
     SchemaRef as ArrowSchemaRef,
@@ -415,10 +416,6 @@ fn get_indices(
         (parquet_index, field, field_info)
     });
     for (parquet_index, field, field_info) in all_field_info {
-        debug!(
-            "Getting indices for field {} with offset {parquet_offset}, with index {parquet_index}",
-            field.name()
-        );
         if let Some((index, _, requested_field)) = field_info {
             match field.data_type() {
                 ArrowDataType::Struct(fields) => {
@@ -452,7 +449,7 @@ fn get_indices(
                             array_type.element_type.clone(),
                             array_type.contains_null,
                         )]);
-                        let (parquet_advance, mut children) = get_indices(
+                        let (parquet_advance, children) = get_indices(
                             parquet_index + parquet_offset,
                             &requested_schema,
                             &[list_field.clone()].into(),
@@ -466,12 +463,7 @@ fn get_indices(
                                 "List call should not have generated more than one reorder index",
                             ));
                         }
-                        // safety, checked that we have 1 element
-                        let mut children = children.swap_remove(0);
-                        // the index is wrong, as it's the index from the inner schema. Adjust
-                        // it to be our index
-                        children.index = index;
-                        reorder_indices.push(children);
+                        reorder_indices.push(ReorderIndex::nested(index, children));
                     } else {
                         return Err(Error::unexpected_column_type(list_field.name()));
                     }
@@ -491,7 +483,7 @@ fn get_indices(
                                 return Err(Error::generic("map fields had more than 2 members"));
                             }
                             let inner_schema = map_type.as_struct_schema(key_name, val_name);
-                            let (parquet_advance, _children) = get_indices(
+                            let (parquet_advance, children) = get_indices(
                                 parquet_index + parquet_offset,
                                 &inner_schema,
                                 inner_fields,
@@ -503,8 +495,8 @@ fn get_indices(
                             parquet_offset += parquet_advance - 1;
                             // note that we found this field
                             found_fields.insert(requested_field.name());
-                            // push the child reorder on, currently no reordering for maps
-                            reorder_indices.push(ReorderIndex::identity(index));
+                            // push the child reorder on
+                            reorder_indices.push(ReorderIndex::nested(index, children));
                         }
                         _ => {
                             return Err(Error::unexpected_column_type(field.name()));
@@ -638,123 +630,124 @@ pub(crate) fn reorder_struct_array(
         Ok(input_data)
     } else {
         // requested an order different from the parquet, reorder
-        debug!("Have requested reorder {requested_ordering:#?} on {input_data:?}");
         let num_rows = input_data.len();
         let num_cols = requested_ordering.len();
         let (input_fields, input_cols, null_buffer) = input_data.into_parts();
         let mut final_fields_cols: Vec<FieldArrayOpt> = vec![None; num_cols];
         for (parquet_position, reorder_index) in requested_ordering.iter().enumerate() {
-            // for each item, reorder_index.index() tells us where to put it, and its position in
-            // requested_ordering tells us where it is in the parquet data
-            match &reorder_index.transform {
-                ReorderIndexTransform::Cast(target) => {
-                    let col = input_cols[parquet_position].as_ref();
-                    let col = Arc::new(arrow_cast::cast::cast(col, target)?);
-                    let new_field = Arc::new(
-                        input_fields[parquet_position]
-                            .as_ref()
-                            .clone()
-                            .with_data_type(col.data_type().clone()),
-                    );
-                    final_fields_cols[reorder_index.index] = Some((new_field, col));
-                }
-                ReorderIndexTransform::Nested(children) => {
-                    match input_cols[parquet_position].data_type() {
-                        ArrowDataType::Struct(_) => {
-                            let struct_array = input_cols[parquet_position].as_struct().clone();
-                            let result_array =
-                                Arc::new(reorder_struct_array(struct_array, children)?);
-                            // create the new field specifying the correct order for the struct
-                            let new_field = Arc::new(ArrowField::new_struct(
-                                input_fields[parquet_position].name(),
-                                result_array.fields().clone(),
-                                input_fields[parquet_position].is_nullable(),
-                            ));
-                            final_fields_cols[reorder_index.index] =
-                                Some((new_field, result_array));
-                        }
-                        ArrowDataType::List(_) => {
-                            let list_array = input_cols[parquet_position].as_list::<i32>().clone();
-                            final_fields_cols[reorder_index.index] = reorder_list(
-                                list_array,
-                                input_fields[parquet_position].name(),
-                                children,
-                            )?;
-                        }
-                        ArrowDataType::LargeList(_) => {
-                            let list_array = input_cols[parquet_position].as_list::<i64>().clone();
-                            final_fields_cols[reorder_index.index] = reorder_list(
-                                list_array,
-                                input_fields[parquet_position].name(),
-                                children,
-                            )?;
-                        }
-                        // TODO: MAP
-                        _ => {
-                            return Err(Error::internal_error(
-                                "Nested reorder can only apply to struct/list/map.",
-                            ));
-                        }
-                    }
-                }
-                ReorderIndexTransform::Identity => {
-                    final_fields_cols[reorder_index.index] = Some((
-                        input_fields[parquet_position].clone(), // cheap Arc clone
-                        input_cols[parquet_position].clone(),   // cheap Arc clone
-                    ));
-                }
-                ReorderIndexTransform::Missing(field) => {
-                    let null_array = Arc::new(new_null_array(field.data_type(), num_rows));
-                    let field = field.clone(); // cheap Arc clone
-                    final_fields_cols[reorder_index.index] = Some((field, null_array));
-                }
-            }
+            let col = input_cols[parquet_position].clone();
+            let field = input_fields[parquet_position].as_ref();
+            let result_array = reorder_internal(col, reorder_index)?;
+            // create the new field specifying the correct order for the struct
+            let new_field = Arc::new(ArrowField::new(
+                field.name(),
+                result_array.data_type().clone(),
+                field.is_nullable(),
+            ));
+            final_fields_cols[reorder_index.index] = Some((new_field, result_array));
         }
         let num_cols = final_fields_cols.len();
-        let (field_vec, reordered_columns): (Vec<Arc<ArrowField>>, _) =
-            final_fields_cols.into_iter().flatten().unzip();
+        let (field_vec, reordered_columns): (
+            Vec<Arc<ArrowField>>,
+            Vec<Arc<dyn arrow_array::Array>>,
+        ) = final_fields_cols.into_iter().flatten().unzip();
         if field_vec.len() != num_cols {
             Err(Error::internal_error("Found a None in final_fields_cols."))
         } else {
-            Ok(StructArray::try_new(
+            let reordered = StructArray::try_new(
                 field_vec.into(),
                 reordered_columns,
-                null_buffer,
-            )?)
+                // Afaict, None and Some(all_valid) should be equivalent, but arraw isn't happy
+                // if we pass a None null_buffer for a non-nullable field (e.g. a map key)
+                // after we cast it. The field then has a Some(all_valid) null_buffer while
+                // the struct has a None null_buffer, resulting in:
+                //   Found unmasked nulls for non-nullable StructArray field 'key'.
+                null_buffer.or(Some(NullBuffer::new_valid(num_rows))),
+            )?;
+            Ok(reordered)
         }
     }
 }
 
-fn reorder_list<O: OffsetSizeTrait>(
-    list_array: GenericListArray<O>,
-    input_field_name: &str,
-    children: &[ReorderIndex],
-) -> DeltaResult<FieldArrayOpt> {
-    let (list_field, offset_buffer, maybe_sa, null_buf) = list_array.into_parts();
-    if let Some(struct_array) = maybe_sa.as_struct_opt() {
-        let struct_array = struct_array.clone();
-        let result_array = Arc::new(reorder_struct_array(struct_array, children)?);
-        let new_list_field = Arc::new(ArrowField::new_struct(
-            list_field.name(),
-            result_array.fields().clone(),
-            result_array.is_nullable(),
-        ));
-        let new_field = Arc::new(ArrowField::new_list(
-            input_field_name,
-            new_list_field.clone(),
-            list_field.is_nullable(),
-        ));
-        let list = Arc::new(GenericListArray::try_new(
-            new_list_field,
-            offset_buffer,
-            result_array,
-            null_buf,
-        )?);
-        Ok(Some((new_field, list)))
-    } else {
-        Err(Error::internal_error(
-            "Nested reorder of list should have had struct child.",
-        ))
+fn reorder_internal(
+    input_data: ArrowArrayRef,
+    requested_ordering: &ReorderIndex,
+) -> DeltaResult<ArrowArrayRef> {
+    match &requested_ordering.transform {
+        ReorderIndexTransform::Cast(target) => Ok(Arc::new(arrow_cast::cast::cast(
+            input_data.as_ref(),
+            target,
+        )?)),
+        ReorderIndexTransform::Nested(children) => match input_data.data_type() {
+            ArrowDataType::Struct(_) => {
+                let struct_array: StructArray = input_data.as_struct().clone();
+                Ok(Arc::new(reorder_struct_array(struct_array, children)?))
+            }
+            // TODO: A lot of the logic for the remaining cases is the same, probably can write this better
+            ArrowDataType::List(_) => {
+                let list_array = input_data.as_list::<i32>().clone();
+                let (list_field, offset_buffer, array, null_buffer) = list_array.into_parts();
+                let reordered_elements = Arc::new(reorder_internal(array, &children[0])?);
+                let new_field = Arc::new(ArrowField::new(
+                    list_field.name(),
+                    reordered_elements.data_type().clone(),
+                    list_field.is_nullable(),
+                ));
+                Ok(Arc::new(GenericListArray::try_new(
+                    new_field,
+                    offset_buffer,
+                    reordered_elements,
+                    null_buffer,
+                )?))
+            }
+            ArrowDataType::LargeList(_) => {
+                let list_array = input_data.as_list::<i64>().clone();
+                let (list_field, offset_buffer, array, null_buffer) = list_array.into_parts();
+                let reordered_elements = Arc::new(reorder_internal(array, &children[0])?);
+                let new_field = Arc::new(ArrowField::new(
+                    list_field.name(),
+                    reordered_elements.data_type().clone(),
+                    list_field.is_nullable(),
+                ));
+                Ok(Arc::new(GenericListArray::try_new(
+                    new_field,
+                    offset_buffer,
+                    reordered_elements,
+                    null_buffer,
+                )?))
+            }
+            ArrowDataType::Map(_, _) => {
+                let map_array = input_data.as_map().clone();
+
+                let (map_field, offset_buffer, entries, null_buffer, ordered) =
+                    map_array.into_parts();
+
+                let reordered_map = reorder_struct_array(entries, children)?;
+                let new_field = Arc::new(ArrowField::new(
+                    map_field.name(),
+                    reordered_map.data_type().clone(),
+                    map_field.is_nullable(),
+                ));
+                Ok(Arc::new(MapArray::try_new(
+                    new_field,
+                    offset_buffer,
+                    reordered_map,
+                    null_buffer,
+                    ordered,
+                )?))
+            }
+            _ => {
+                return Err(Error::internal_error(
+                    "Nested reorder can only apply to struct/list/map.",
+                ));
+            }
+        },
+        ReorderIndexTransform::Identity => Ok(input_data),
+        ReorderIndexTransform::Missing(_field) => {
+            return Err(Error::internal_error(
+                "Reordering must be specified for all fields.",
+            ));
+        }
     }
 }
 

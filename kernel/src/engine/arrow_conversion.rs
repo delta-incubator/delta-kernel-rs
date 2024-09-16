@@ -9,9 +9,7 @@ use arrow_schema::{
 use itertools::Itertools;
 
 use crate::error::Error;
-use crate::schema::{
-    ArrayType, DataType, MapType, MetadataValue, PrimitiveType, StructField, StructType,
-};
+use crate::schema::{ArrayType, DataType, MapType, PrimitiveType, StructField, StructType};
 
 pub(crate) const LIST_ARRAY_ROOT: &str = "element";
 pub(crate) const MAP_ROOT_DEFAULT: &str = "key_value";
@@ -31,22 +29,16 @@ impl TryFrom<&StructField> for ArrowField {
     type Error = ArrowError;
 
     fn try_from(f: &StructField) -> Result<Self, ArrowError> {
-        let metadata = f
-            .metadata()
-            .iter()
-            .map(|(key, val)| match &val {
-                &MetadataValue::String(val) => Ok((key.clone(), val.clone())),
-                _ => Ok((key.clone(), serde_json::to_string(val)?)),
-            })
-            .collect::<Result<_, serde_json::Error>>()
-            .map_err(|err| ArrowError::JsonError(err.to_string()))?;
-
+        // TODO: quick dirty fix to avoid type widening metadata in nested field
+        // tripping the test code assembling results: `concat_batches` in `read_with_execute`
+        // fails because the table schema contains metadata while the data schema doesn't.
+        // This probably also fails for column mapping metadata on nested fields.
+        // TODO: provide a way to strip metadata from StructType when needed
         let field = ArrowField::new(
             f.name(),
             ArrowDataType::try_from(f.data_type())?,
             f.is_nullable(),
-        )
-        .with_metadata(metadata);
+        );
 
         Ok(field)
     }
