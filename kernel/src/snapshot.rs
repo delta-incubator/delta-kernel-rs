@@ -73,11 +73,10 @@ impl LogSegment {
     fn read_metadata(&self, engine: &dyn Engine) -> DeltaResult<Option<(Metadata, Protocol)>> {
         let schema = get_log_schema().project(&[PROTOCOL_NAME, METADATA_NAME])?;
         // filter out log files that do not contain metadata or protocol information
-        let filter = Some(Expression::or(
-            Expression::not(Expression::is_null(Expression::Column(
-                "metaData.id".into(),
-            ))),
-            Expression::not(Expression::is_null(Expression::Column(
+        use Expression as Expr;
+        let filter = Some(Expr::or(
+            Expr::not(Expr::is_null(Expr::Column("metaData.id".into()))),
+            Expr::not(Expr::is_null(Expr::Column(
                 "protocol.min_reader_version".into(),
             ))),
         ));
