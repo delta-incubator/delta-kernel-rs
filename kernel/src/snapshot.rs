@@ -1,8 +1,6 @@
 //! In-memory representation of snapshots of tables (snapshot is a table at given point in time, it
 //! has schema etc.)
 //!
-
-use std::cmp::Ordering;
 use std::sync::Arc;
 
 use itertools::Itertools;
@@ -12,7 +10,8 @@ use url::Url;
 
 use crate::actions::{get_log_schema, Metadata, Protocol, METADATA_NAME, PROTOCOL_NAME};
 use crate::features::{ColumnMappingMode, COLUMN_MAPPING_MODE_KEY};
-use crate::path::{version_from_location, LogPath};
+use crate::group_iterator::DeltaLogGroupingIterator;
+use crate::path::LogPath;
 use crate::scan::ScanBuilder;
 use crate::schema::{Schema, SchemaRef};
 use crate::utils::require;
@@ -347,126 +346,317 @@ fn read_last_checkpoint(
     }
 }
 
-/// List relevant log files.
-///
-/// Relevant files are the max checkpoint found and all subsequent commits.
-/// If a checkpoint is provided, it starts listing from there; otherwise, it starts from the beginning.
 fn list_log_files(
     fs_client: &dyn FileSystemClient,
     log_root: &Url,
     requested_version: Option<Version>,
 ) -> DeltaResult<(Vec<FileMeta>, Vec<FileMeta>)> {
-    let start_from = log_root.join(&format!("{:020}", 0))?;
+    // Read the last checkpoint metadata
+    let last_checkpoint = read_last_checkpoint(fs_client, log_root)?;
 
-    let mut commit_files = Vec::new();
-    let mut checkpoint_files = Vec::new();
-    let mut last_checkpoint_version = None;
-    let mut next_checkpoint_version = None;
+    // Determine the start version and whether to start from the beginning
+    let (start_version, from_beginning) = match (last_checkpoint, requested_version) {
+        // Case 1: Requested version is greater than the last checkpoint version
+        // Example: Last checkpoint version is 10, requested version is 15
+        // Delta log: ..., 10.checkpoint.parquet, 11.json, 12.json, 13.json, 14.json, 15.json
+        // We start from the last checkpoint (version 10) and read up to version 15
+        (Some(lc), Some(rv)) if rv > lc.version => (Some(lc.version), None),
 
-    // If no requested version, try to get the last checkpoint
-    let last_checkpoint = if requested_version.is_none() {
-        read_last_checkpoint(fs_client, log_root)?
-    } else {
-        None
+        // Case 2: No specific version requested, use the latest version
+        // Example: Last checkpoint version is 20
+        // Delta log: ..., 20.checkpoint.parquet, 21.json, 22.json, 23.json
+        // We start from the last checkpoint (version 20) and read up to the latest version
+        (Some(lc), None) => (Some(lc.version), None),
+
+        // Case 3: Requested version is less than or equal to the last checkpoint version,
+        // or there is no last checkpoint
+        // Example 1: Last checkpoint version is 30, requested version is 25
+        // Delta log: ..., 24.json, 25.json, 26.json, ..., 30.checkpoint.parquet, ...
+        // We start from the beginning (version 0) to ensure we capture all necessary data
+        // Example 2: No last checkpoint, requested version is 5
+        // Delta log: 0.json, 1.json, 2.json, 3.json, 4.json, 5.json
+        // We start from the beginning (version 0)
+        _ => (Some(0), Some(true)),
     };
 
-    // Iterate through files in the log directory
-    for maybe_meta in fs_client.list_from(&start_from)? {
-        let meta = maybe_meta?;
-        let log_path = LogPath::new(&meta.location);
-        let file_version = log_path.version.map(|v| v as i64).unwrap_or(0);
+    let files: Vec<FileMeta> = fs_client
+        .list_from(log_root)?
+        .filter_map(|f| f.ok())
+        .filter(|f| LogPath::new(&f.location).version.map_or(true, |v| v >= start_version.unwrap()))
+        .collect();
 
-        // Stop if we've passed the requested version
-        if let Some(req_version) = requested_version {
-            if file_version > req_version as i64 {
-                break;
-            }
+    let mut iterator = DeltaLogGroupingIterator::new(files, from_beginning)?;
+    let first_node = iterator.next();
+
+    // Sample structure of the first node:
+    // Note: The first node never contains a checkpoint file or checkpoint version.
+    // It only contains commits up to the first checkpoint.
+    // CheckpointNode {
+    //     checkpoint_version: None,
+    //     checkpoint_files: None,
+    //     multi_part: false,
+    //     commits: [
+    //         FileMeta { location: "00000000000000000000.json", ... },
+    //         FileMeta { location: "00000000000000000001.json", ... },
+    //         FileMeta { location: "00000000000000000002.json", ... }
+    //     ],
+    //     next: Some(Rc<RefCell<CheckpointNode>>)
+    // }
+
+    let (checkpoints, commits, latest_checkpoint_version) = match (first_node, requested_version) {
+        (None, _) => {
+            // Case: No nodes found in the iterator
+            // This could happen if the log is empty or if there's an issue with file listing
+            // We return an error as we can't create a valid snapshot without any version information
+            return Err(Error::MissingVersion);
         }
+        (Some(node), None) => {
+            // Case: Latest version requested
+            // This case handles when we want to retrieve the most recent version of the table.
+            // We iterate through all nodes to find the last one, which represents the latest state.
+            //
+            // Sample data:
+            // Assume we have the following log structure:
+            // 00000000000000000000.json
+            // 00000000000000000001.json
+            // 00000000000000000002.json
+            // 00000000000000000003.checkpoint.parquet
+            // 00000000000000000004.json
+            // 00000000000000000005.json
+            // 00000000000000000006.checkpoint.parquet
+            // 00000000000000000007.json
+            // 00000000000000000008.json
+            //
+            // The iterator would produce nodes like this:
+            // Node 1: checkpoint_version: None, commits: [0.json, 1.json, 2.json]
+            // Node 2: checkpoint_version: 3, checkpoint_files: [3.checkpoint.parquet], commits: [4.json, 5.json]
+            // Node 3: checkpoint_version: 6, checkpoint_files: [6.checkpoint.parquet], commits: [7.json, 8.json]
+            //
+            // We iterate to the last node (Node 3 in this example) and use its data.
 
-        if log_path.is_checkpoint {
-            if last_checkpoint_version.is_none() || file_version > last_checkpoint_version.unwrap()
-            {
-                last_checkpoint_version = Some(file_version);
-                checkpoint_files.clear();
-                checkpoint_files.push(meta.clone());
+            let mut last_node = node;
+            while let Some(next_node) = iterator.next() {
+                last_node = next_node;
             }
-
-            // If we're using last_checkpoint and we've found the next checkpoint, stop
-            if requested_version.is_none()
-                && last_checkpoint.is_some()
-                && file_version > last_checkpoint.as_ref().unwrap().version as i64
-            {
-                next_checkpoint_version = Some(file_version);
-                break;
-            }
-        } else if log_path.is_commit {
-            commit_files.push(meta);
+            let node = last_node.borrow();
+            (
+                node.checkpoint_files
+                    .as_ref()
+                    .map_or_else(Vec::new, |files| files.clone()),
+                node.commits.clone(),
+                node.checkpoint_version,
+            )
         }
-    }
+        (Some(node), Some(req_version)) => {
+            // Case: Specific version requested
+            // This case handles when we want to retrieve a specific version of the table.
+            // We iterate through nodes until we find the appropriate checkpoint and commits.
+            //
+            // Sample Delta log structure:
+            // 00000000000000000000.json
+            // 00000000000000000001.json
+            // 00000000000000000002.json
+            // 00000000000000000003.checkpoint.parquet
+            // 00000000000000000004.json
+            // 00000000000000000005.json
+            // 00000000000000000006.checkpoint.parquet
+            // 00000000000000000007.json
+            // 00000000000000000008.json
+            //
+            // The iterator would produce nodes like this:
+            // If requested version > last checkpoint's commit version from _last_checkpoint:
+            // Node 1: checkpoint_version: 3, checkpoint_files: [3.checkpoint.parquet], commits: [4.json, 5.json]
+            // Node 2: checkpoint_version: 6, checkpoint_files: [6.checkpoint.parquet], commits: [7.json, 8.json]
+            //
+            // If requested version <= last checkpoint's commit version from _last_checkpoint:
+            // Node 1: checkpoint_version: None, checkpoint_files: None, commits: [0.json, 1.json, 2.json]
+            // Node 2: checkpoint_version: 3, checkpoint_files: [3.checkpoint.parquet], commits: [4.json, 5.json]
+            // Node 3: checkpoint_version: 6, checkpoint_files: [6.checkpoint.parquet], commits: [7.json, 8.json]
 
-    debug!(
-        "\n\n\nlast_checkpoint_version: {:?}",
-        last_checkpoint_version
-    );
-    debug!("next_checkpoint_version: {:?}", next_checkpoint_version);
-    debug!("requested_version: {:?}", requested_version);
-    debug!("checkpoint_files: {:?}", checkpoint_files);
-    debug!("commit_files: {:?}\n\n\n", commit_files);
+            // Initialize variables with the first node's data
+            let mut last_checkpoints = if req_version >= node.borrow().checkpoint_version.unwrap_or(0) {
+                // If requested version is >= first checkpoint version, use its checkpoint files
+                node.borrow().checkpoint_files.clone().unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            let mut last_commits = node.borrow().commits.clone();
+            let mut checkpoint_version = node.borrow().checkpoint_version;
 
-    // Filter commit files based on the last checkpoint version and requested version
-    commit_files.retain(|f| {
-        let version = LogPath::new(&f.location)
-            .version
-            .map(|v| v as i64)
-            .unwrap_or(0);
-        match (last_checkpoint_version, requested_version) {
-            // Case: Checkpoint and requested version are the same
-            // Occurs when: A specific version is requested that matches a checkpoint
-            // Example: last_checkpoint_version = Some(10), requested_version = Some(10)
-            // Keep only commit files with version 10
-            (Some(lcv), Some(rv)) if lcv == rv as i64 => version == lcv,
-
-            // Case: Normal range between checkpoint and requested version
-            // Occurs when: A specific version is requested that's after a known checkpoint
-            // Example: last_checkpoint_version = Some(10), requested_version = Some(15)
-            // Keep commit files with versions 11, 12, 13, 14, 15
-            (Some(lcv), Some(rv)) => version > lcv && version <= rv as i64,
-
-            // Case: No requested version, using last known checkpoint
-            // Occurs when: No version is requested, we use read_last_checkpoint result
-            // Note: A new checkpoint might have been created during file listing
-            // Example: last_checkpoint_version = Some(10), next_checkpoint_version = Some(20)
-            // Keep commit files with versions 11, 12, ..., 19
-            (Some(lcv), None) => {
-                version > lcv && next_checkpoint_version.map_or(true, |ncv| version < ncv)
+            // Sample scenario:
+            // Delta log: 
+            // 00000000000000000000.json
+            // 00000000000000000001.json
+            // 00000000000000000002.checkpoint.parquet
+            // 00000000000000000003.json
+            // 00000000000000000004.json
+            // 00000000000000000005.checkpoint.parquet
+            // 00000000000000000006.json
+            // 00000000000000000007.json
+            //
+            // If req_version is 4:
+            // 1st iteration: node.checkpoint_version = 2, update last_checkpoints, last_commits, checkpoint_version
+            // 2nd iteration: node.checkpoint_version = 5, break the loop (5 > 4)
+            // Result: last_checkpoints = [2.checkpoint.parquet], last_commits = [3.json, 4.json], checkpoint_version = 2
+            while let Some(next_node) = iterator.next() {
+                let node = next_node.borrow();
+                if node.checkpoint_version.is_some() && node.checkpoint_version.unwrap() > req_version {
+                    break;
+                }
+                last_checkpoints = node.checkpoint_files.clone().unwrap_or_default();
+                last_commits = node.commits.clone();
+                checkpoint_version = node.checkpoint_version;
             }
-
-            // Case: No last checkpoint, but we have a requested version
-            // Occurs when: A specific version is requested, but no checkpoint was found before it
-            // Example: requested_version = Some(15), no checkpoints found
-            // Keep all commit files up to and including version 15
-            (None, Some(rv)) => version <= rv as i64,
-
-            // Case: No last checkpoint and no requested version
-            // Occurs when: No version is requested and no checkpoints were found
-            // Keep all commit files (this case should be rare in practice)
-            (None, None) => true,
+            (last_checkpoints, last_commits, checkpoint_version)
         }
-    });
+    };
 
-    // Sort commit files in reverse order (newest first)
-    commit_files.sort_unstable_by(|a, b| b.location.cmp(&a.location));
+    let (commit_files, selected_checkpoint_files) = match (latest_checkpoint_version, requested_version) {
+        (None, None) | (None, Some(_)) => {
+            // This case handles scenarios where there's no checkpoint or the checkpoint version is unknown
+            // Example scenario: As you can see below, there's no checkpoint in the delta log.
+            // Delta log:
+            // 00000000000000000000.json
+            // 00000000000000000001.json
+            // 00000000000000000002.json
+            // 00000000000000000003.json
+            
+            // Even if checkpoint_version is None, we still need to have atleast one commit.
+            if commits.is_empty() {
+                return Err(Error::MissingVersion);
+            }
+            let mut filtered_commits = commits;
+            // Sort commits in descending order by location (which corresponds to version)
+            filtered_commits.sort_unstable_by(|a, b| b.location.cmp(&a.location));
+            
+            if let Some(req_version) = requested_version {
+                // If a specific version is requested, filter commits
+                // Example: If req_version is 2, we'd keep 00000000000000000000.json,
+                // 00000000000000000001.json, and 00000000000000000002.json
+                filtered_commits.retain(|commit| {
+                    LogPath::new(&commit.location)
+                        .version
+                        .map_or(false, |version| version <= req_version)
+                });
+            }
+            // Return filtered commits and an empty vector for checkpoints
+            (filtered_commits, Vec::new())
+        }
+        (Some(_), None) => {
+            // Sort commits in descending order (newest first)
+            let mut sorted_commits = commits;
+            sorted_commits.sort_unstable_by(|a, b| b.location.cmp(&a.location));
 
-    Ok((commit_files, checkpoint_files))
+            // Note: The node commits also contain the commit which is at the same version as the checkpoint.
+            // We need to remove this duplicate commit unless the last commit is equal to the last checkpoint version.
+            // 
+            // Sample log:
+            // 00000000000000000000.json
+            // 00000000000000000001.json
+            // 00000000000000000002.json
+            // 00000000000000000003.checkpoint.parquet
+            // 00000000000000000003.json  <-- This commit is at the same version as the checkpoint
+            // 00000000000000000004.json
+            // 00000000000000000005.json
+            //
+            // In this case, we would remove 00000000000000000003.json because:
+            // 1. It's redundant with the checkpoint file at version 3
+            // 2. It's not the last commit (version 5 is the last)
+            //
+            // However, if the log ended at version 3:
+            // 00000000000000000003.checkpoint.parquet
+            // 00000000000000000003.json
+            //
+            // We would keep 00000000000000000003.json because it's the last commit,
+            // ensuring we don't lose any potential information not captured in the checkpoint.
+
+            if sorted_commits.len() > 1 {
+                sorted_commits.pop();
+            }
+            
+            // Return sorted commits (excluding the oldest) and all checkpoints
+            (sorted_commits, checkpoints)
+        }
+        (Some(checkpoint_version), Some(req_version)) => {
+            // Sample Delta log:
+            // 00000000000000000000.json
+            // 00000000000000000001.json
+            // 00000000000000000002.json
+            // 00000000000000000003.checkpoint.parquet
+            // 00000000000000000004.json
+            // 00000000000000000005.json
+            // 00000000000000000006.checkpoint.parquet
+            // 00000000000000000007.json
+            // 00000000000000000008.json
+
+            // Filter commits up to and including the requested version
+            // Scenarios based on the sample log:
+            // 1. If req_version is 2:
+            //    - Before filter: [2.json, 1.json, 0.json]
+            //    - After filter: [2.json, 1.json, 0.json]
+            //    - (no checkpoint version yet)
+            // 2. If req_version is 5:
+            //    - Before filter: [5.json, 4.json, 3.json]
+            //    - After filter: [5.json, 4.json]
+            //    - (checkpoint version 3)
+            // 3. If req_version is 8:
+            //    - Before filter: [8.json, 7.json, 6.json]
+            //    - After filter: [8.json, 7.json]
+            //    - (checkpoint version 6)
+            // Note: Each scenario contains commits from one node.
+            // The commit equal to the checkpoint version is included in the node
+            // until it's popped off later in the process.
+            let mut filtered_commits: Vec<FileMeta> = commits
+                .into_iter()
+                .filter(|commit| {
+                    LogPath::new(&commit.location)
+                        .version
+                        .map_or(false, |version| version <= req_version)
+                })
+                .collect();
+            
+            // Sort commits in descending order (newest first)
+            filtered_commits.sort_unstable_by(|a, b| b.location.cmp(&a.location));
+            
+            // Remove the oldest commit if it's redundant with the checkpoint
+            // (unless it's the last commit in the requested range)
+            //
+            // Sample log:
+            // 00000000000000000000.json
+            // 00000000000000000001.json
+            // 00000000000000000002.json
+            // 00000000000000000003.checkpoint.parquet
+            // 00000000000000000004.json
+            // 00000000000000000005.json
+            // 00000000000000000006.checkpoint.parquet
+            
+            // in the above log lets say that the requested version is 6, which happnens to be the last checkpoint version.
+            // the commits only contains 00000000000000000006.json, so we don't remove it.
+            // but if let's the requested version is 5, the commits contains [00000000000000000005.json, 00000000000000000004.json, 00000000000000000003.json]
+            // we pop off 00000000000000000003.json because it's redundant with the checkpoint at version 3 after reverse sorting.
+            // so the filtered commits becomes [00000000000000000005.json, 00000000000000000004.json]
+
+            if checkpoint_version < req_version {
+                filtered_commits.pop();
+            }
+            
+            // Return filtered commits and checkpoints
+            // If requested version is less than the first checkpoint, return empty checkpoint
+            // Example: If req_version is 2 and checkpoint_version is 3, checkpoints will be empty
+            (filtered_commits, if checkpoint_version <= req_version { checkpoints } else { Vec::new() })
+        }
+    };
+
+    Ok((commit_files, selected_checkpoint_files))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    use lazy_static::lazy_static;
     use std::path::PathBuf;
     use std::sync::Arc;
-    use lazy_static::lazy_static;
 
     use object_store::local::LocalFileSystem;
     use object_store::memory::InMemory;
@@ -650,6 +840,14 @@ mod tests {
         assert_eq!(
             LogPath::new(&snapshot.log_segment.checkpoint_files[0].location).version,
             Some(2)
+        );
+        debug!(
+            "\n\ncheckpoint_files new fail: {:?}\n\n",
+            snapshot.log_segment.checkpoint_files
+        );
+        debug!(
+            "\n\ncommit_files new fail: {:?}\n\n",
+            snapshot.log_segment.commit_files
         );
         assert_eq!(snapshot.log_segment.commit_files.len(), 1);
         assert_eq!(
@@ -953,47 +1151,47 @@ mod tests {
     }
 
     /*
-Reasoning and Example:
+    Reasoning and Example:
 
-Consider a Delta table with the following log structure:
-Version | File
---------|---------------------
-0       | 00000.json
-1       | 00001.json
-2       | 00002.json
-3       | 00003.json
-4       | 00004.checkpoint.parquet
-4       | 00004.json
-5       | 00005.json
-6       | 00006.json
-7       | 00007.json
-8       | 00008.json
-9       | 00009.checkpoint.parquet
-9       | 00009.json
-10      | 00010.json
-11      | 00011.json
-12      | 00012.json
+    Consider a Delta table with the following log structure:
+    Version | File
+    --------|---------------------
+    0       | 00000.json
+    1       | 00001.json
+    2       | 00002.json
+    3       | 00003.json
+    4       | 00004.checkpoint.parquet
+    4       | 00004.json
+    5       | 00005.json
+    6       | 00006.json
+    7       | 00007.json
+    8       | 00008.json
+    9       | 00009.checkpoint.parquet
+    9       | 00009.json
+    10      | 00010.json
+    11      | 00011.json
+    12      | 00012.json
 
-1. If requested_version is None (latest version):
-   - We include all commit files after the last checkpoint (9).
-   - Result: [12, 11, 10; 9]
+    1. If requested_version is None (latest version):
+       - We include all commit files after the last checkpoint (9).
+       - Result: [12, 11, 10; 9]
 
-2. If requested_version is 11:
-   - We include commit files after the last checkpoint (9) up to and including 11.
-   - Result: [11, 10; 9]
+    2. If requested_version is 11:
+       - We include commit files after the last checkpoint (9) up to and including 11.
+       - Result: [11, 10; 9]
 
-3. If requested_version is 9 (same as checkpoint):
-   - We include both the checkpoint file and the commit file at version 9.
-   - Result: [9; 9]
+    3. If requested_version is 9 (same as checkpoint):
+       - We include both the checkpoint file and the commit file at version 9.
+       - Result: [9; 9]
 
-4. If requested_version is 7 (before the last checkpoint):
-   - We include commit files after the previous checkpoint (4) up to and including 7.
-   - Result: [7, 6, 5; 4]
+    4. If requested_version is 7 (before the last checkpoint):
+       - We include commit files after the previous checkpoint (4) up to and including 7.
+       - Result: [7, 6, 5; 4]
 
-5. If requested_version is 3 (before any checkpoint):
-   - We include all commit files up to and including 3.
-   - Result: [3, 2, 1, 0; ]
-*/
+    5. If requested_version is 3 (before any checkpoint):
+       - We include all commit files up to and including 3.
+       - Result: [3, 2, 1, 0; ]
+    */
     #[test]
     fn test_snapshot_versions() {
         let path =
