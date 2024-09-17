@@ -238,7 +238,6 @@ impl Scan {
         &'a self,
         engine: &'a dyn Engine,
     ) -> DeltaResult<Box<dyn Iterator<Item = DeltaResult<ScanResult>> + 'a>> {
-        #[derive(Debug)]
         struct ScanFile {
             path: String,
             size: i64,
@@ -272,7 +271,7 @@ impl Scan {
             .map_ok(|(data, vec)| {
                 let scan_files = vec![];
                 state::visit_scan_files(data.as_ref(), &vec, scan_files, scan_data_callback)
-                    .map(|batches| batches.into_iter())
+                    .map(IntoIterator::into_iter)
             })
             .flatten_ok()
             .flatten_ok();
@@ -641,7 +640,11 @@ mod tests {
         let table = Table::new(url);
         let snapshot = table.snapshot(&engine, None).unwrap();
         let scan = snapshot.into_scan_builder().build().unwrap();
-        let files: Vec<ScanResult> = scan.execute(&engine).unwrap().map(Result::unwrap).collect();
+        let files = scan
+            .execute(&engine)
+            .unwrap()
+            .map(Result::unwrap)
+            .collect_vec();
 
         assert_eq!(files.len(), 1);
         let num_rows = files[0].raw_data.as_ref().unwrap().length();
