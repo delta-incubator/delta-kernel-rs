@@ -258,7 +258,7 @@ impl Scan {
                 size,
                 dv_info,
                 partition_values,
-            })
+            });
         }
 
         debug!(
