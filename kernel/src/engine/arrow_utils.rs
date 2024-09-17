@@ -86,7 +86,7 @@ fn check_cast_compat(
         (Int16, Int32 | Int64 | Float64) => Ok(DataTypeCompat::NeedsCast(target_type)),
         (Int32, Int64 | Float64) => Ok(DataTypeCompat::NeedsCast(target_type)),
         (Float32, Float64) => Ok(DataTypeCompat::NeedsCast(target_type)),
-        (_, Decimal128(p, s) | Decimal256(p, s)) if can_upcast_to_decimal(source_type, *p, *s) => {
+        (_, Decimal128(p, s)) if can_upcast_to_decimal(source_type, *p, *s) => {
             Ok(DataTypeCompat::NeedsCast(target_type))
         }
         (Date32, Timestamp(_, None)) => Ok(DataTypeCompat::NeedsCast(target_type)),
@@ -108,7 +108,6 @@ pub(crate) fn can_upcast_to_decimal(
 
     let (source_precision, source_scale) = match source_type {
         Decimal128(p, s) => (*p, *s),
-        Decimal256(p, s) => (*p, *s),
         // Allow converting integers to a decimal that can hold all possible values.
         Int8 => (3u8, 0i8),
         Int16 => (5u8, 0i8),
@@ -1480,16 +1479,6 @@ mod tests {
             arrow_schema::DECIMAL128_MAX_PRECISION,
             arrow_schema::DECIMAL128_MAX_SCALE - 5
         ));
-        assert!(can_upcast_to_decimal(&Decimal256(17, 5), 30u8, 5i8));
-        assert!(can_upcast_to_decimal(&Decimal256(17, 5), 30u8, 7i8));
-        assert!(can_upcast_to_decimal(&Decimal256(17, 5), 30u8, 7i8));
-        assert!(can_upcast_to_decimal(&Decimal256(17, -5), 30u8, -5i8));
-        assert!(can_upcast_to_decimal(&Decimal256(17, -5), 30u8, -3i8));
-        assert!(can_upcast_to_decimal(
-            &Decimal256(10, 5),
-            arrow_schema::DECIMAL256_MAX_PRECISION,
-            arrow_schema::DECIMAL256_MAX_SCALE - 5
-        ));
 
         assert!(can_upcast_to_decimal(&Int8, 3u8, 0i8));
         assert!(can_upcast_to_decimal(&Int8, 4u8, 0i8));
@@ -1520,9 +1509,6 @@ mod tests {
         assert!(!can_upcast_to_decimal(&Decimal128(2, 0), 2u8, 1i8));
         assert!(!can_upcast_to_decimal(&Decimal128(2, 0), 2u8, -1i8));
         assert!(!can_upcast_to_decimal(&Decimal128(5, 2), 6u8, 4i8));
-        assert!(!can_upcast_to_decimal(&Decimal256(2, 0), 2u8, 1i8));
-        assert!(!can_upcast_to_decimal(&Decimal256(2, 0), 2u8, -1i8));
-        assert!(!can_upcast_to_decimal(&Decimal256(5, 2), 6u8, 4i8));
 
         assert!(!can_upcast_to_decimal(&Int8, 2u8, 0i8));
         assert!(!can_upcast_to_decimal(&Int8, 3u8, 1i8));
