@@ -155,6 +155,10 @@ pub enum Error {
     /// Expressions did not parse or evaluate correctly
     #[error("Invalid expression evaluation: {0}")]
     InvalidExpressionEvaluation(String),
+
+    /// An error indicating an invalid Delta Log structure
+    #[error("Invalid Delta Log: {0}")]
+    InvalidDeltaLog(String),
 }
 
 // Convenience constructors for Error types that take a String argument

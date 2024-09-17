@@ -120,6 +120,70 @@ impl<'a> LogPath<'a> {
                 }
             })
     }
+
+    /// Determines if the file is a multi-part checkpoint.
+    ///
+    /// Sample checkpoint files:
+    /// - Single-part: "00000000000000000010.checkpoint.parquet"
+    /// - Multi-part: "00000000000000000010.checkpoint.0000000001.0000000003.parquet"
+    ///
+    /// For the multi-part example:
+    /// - "00000000000000000010" is the version
+    /// - "checkpoint" indicates it's a checkpoint file
+    /// - "0000000001" is the part number
+    /// - "0000000003" is the total number of parts
+    /// - "parquet" is the file extension
+    pub(crate) fn is_multi_part_checkpoint(&self) -> bool {
+        // If it's not a checkpoint at all, it can't be a multi-part checkpoint
+        if !self.is_checkpoint {
+            return false;
+        }
+        
+        self.filename
+            .and_then(|f| f.split_once(".checkpoint."))
+            // After splitting at ".checkpoint.", we focus on the part after it
+            .map(|(_, rest)| {
+                // Count the number of parts after ".checkpoint."
+                // A multi-part checkpoint should have 3 parts:
+                // 1. Part number
+                // 2. Total number of parts
+                // 3. File extension (e.g., "parquet")
+                rest.split('.').count() == 3
+            })
+            .unwrap_or(false)
+    }
+
+    /// Extracts the part number and total number of parts for a multi-part checkpoint.
+    ///
+    /// For a multi-part checkpoint file like "00000000000000000010.checkpoint.0000000001.0000000003.parquet":
+    /// - This method would return `Some((1, 3))`, indicating it's part 1 of 3.
+    ///
+    /// Returns `None` for single-part checkpoints or non-checkpoint files.
+    pub(crate) fn get_checkpoint_part_numbers(&self) -> Option<(u64, u64)> {
+        // First, check if it's a multi-part checkpoint
+        if !self.is_multi_part_checkpoint() {
+            return None;
+        }
+
+        // Split the filename into parts
+        let parts: Vec<&str> = self.filename?.split('.').collect();
+
+        // A valid multi-part checkpoint filename should have 5 parts:
+        // 1. Version
+        // 2. "checkpoint"
+        // 3. Part number
+        // 4. Total number of parts
+        // 5. File extension
+        if parts.len() != 5 {
+            return None;
+        }
+
+        // Parse the part number (index 2) and total number (index 3) into u64 integers
+        let part = parts[2].parse().ok()?;
+        let total = parts[3].parse().ok()?;
+
+        Some((part, total))
+    }
 }
 
 impl<'a> AsRef<Url> for LogPath<'a> {

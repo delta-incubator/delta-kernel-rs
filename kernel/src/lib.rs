@@ -67,6 +67,7 @@ pub(crate) mod path;
 pub mod scan;
 pub mod schema;
 pub mod snapshot;
+pub mod group_iterator;
 pub mod table;
 pub mod transaction;
 pub(crate) mod utils;
