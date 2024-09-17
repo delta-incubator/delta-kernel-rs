@@ -238,6 +238,7 @@ impl Scan {
         &'a self,
         engine: &'a dyn Engine,
     ) -> DeltaResult<Box<dyn Iterator<Item = DeltaResult<ScanResult>> + '_>> {
+        #[derive(Debug)]
         struct ScanFile {
             path: String,
             size: i64,
@@ -257,7 +258,7 @@ impl Scan {
                 size,
                 dv_info,
                 partition_values,
-            });
+            })
         }
 
         debug!(
@@ -267,15 +268,17 @@ impl Scan {
 
         let global_state = Arc::new(self.global_scan_state());
         let scan_data = self.scan_data(engine)?;
-        let mut scan_files = vec![];
-        for data in scan_data {
-            let (data, vec) = data?;
-            scan_files =
-                state::visit_scan_files(data.as_ref(), &vec, scan_files, scan_data_callback)?;
-        }
-        let iter = scan_files
-            .into_iter()
-            .map(move |scan_file| -> DeltaResult<_> {
+        let scan_files_iter = scan_data
+            .map_ok(|(data, vec)| {
+                let scan_files = vec![];
+                state::visit_scan_files(data.as_ref(), &vec, scan_files, scan_data_callback)
+                    .map(|batches| batches.into_iter())
+            })
+            .flatten_ok()
+            .flatten_ok();
+
+        let iter = scan_files_iter
+            .map_ok(move |scan_file| -> DeltaResult<_> {
                 let file_path = self.snapshot.table_root.join(&scan_file.path)?;
                 let mut selection_vector = scan_file
                     .dv_info
@@ -291,7 +294,7 @@ impl Scan {
                     None,
                 )?;
                 let gs = global_state.clone(); // Arc clone
-                let y = read_result_iter.into_iter().map(move |read_result| {
+                let x = read_result_iter.into_iter().map(move |read_result| {
                     let read_result = read_result?;
                     // to transform the physical data into the correct logical form
                     let logical = transform_to_logical_internal(
@@ -316,10 +319,11 @@ impl Scan {
                     selection_vector = rest;
                     Ok::<ScanResult, Error>(result)
                 });
-                Ok(y)
+                Ok(x)
             })
             .flatten_ok()
-            .flatten();
+            .flatten_ok()
+            .flatten_ok();
         Ok(Box::new(iter))
     }
 }
