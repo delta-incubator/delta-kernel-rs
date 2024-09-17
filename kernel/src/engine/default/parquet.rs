@@ -10,7 +10,6 @@ use parquet::arrow::arrow_reader::{
     ArrowReaderMetadata, ArrowReaderOptions, ParquetRecordBatchReaderBuilder,
 };
 use parquet::arrow::async_reader::{ParquetObjectReader, ParquetRecordBatchStreamBuilder};
-use tracing::debug;
 
 use super::file_stream::{FileOpenFuture, FileOpener, FileStream};
 use crate::engine::arrow_utils::{generate_mask, get_requested_indices, reorder_struct_array};

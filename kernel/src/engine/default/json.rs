@@ -14,7 +14,6 @@ use futures::{StreamExt, TryStreamExt};
 use itertools::Itertools;
 use object_store::path::Path;
 use object_store::{DynObjectStore, GetResultPayload};
-use tracing::debug;
 
 use super::executor::TaskExecutor;
 use super::file_stream::{FileOpenFuture, FileOpener, FileStream};
