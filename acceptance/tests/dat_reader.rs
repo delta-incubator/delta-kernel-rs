@@ -6,7 +6,6 @@ use delta_kernel::engine::default::executor::tokio::TokioBackgroundExecutor;
 use delta_kernel::engine::default::DefaultEngine;
 
 fn reader_test(path: &Path) -> datatest_stable::Result<()> {
-    let _ = env_logger::try_init();
     let root_dir = format!(
         "{}/{}",
         env!["CARGO_MANIFEST_DIR"],

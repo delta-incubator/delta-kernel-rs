@@ -42,7 +42,6 @@ tracing-subscriber = { version = "0.3", default-features = false, features = [
   "env-filter",
   "fmt",
 ] }
-env_logger = "0.11.5"
 
 [[test]]
 name = "dat_reader"
