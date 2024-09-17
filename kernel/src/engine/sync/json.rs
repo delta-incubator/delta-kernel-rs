@@ -41,9 +41,12 @@ impl JsonHandler for SyncJsonHandler {
         &self,
         files: &[FileMeta],
         schema: SchemaRef,
-        _predicate: Option<Expression>,
+        predicate: Option<Expression>,
     ) -> DeltaResult<FileDataReadResultIterator> {
-        debug!("Reading json files: {:#?}", files);
+        debug!(
+            "Reading json files: {:#?} with predicate {:#?}",
+            files, predicate
+        );
         if files.is_empty() {
             return Ok(Box::new(std::iter::empty()));
         }

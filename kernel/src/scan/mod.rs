@@ -627,6 +627,7 @@ mod tests {
 
     #[test]
     fn test_scan_data() {
+        env_logger::init();
         let path =
             std::fs::canonicalize(PathBuf::from("./tests/data/table-without-dv-small/")).unwrap();
         let url = url::Url::from_directory_path(path).unwrap();
