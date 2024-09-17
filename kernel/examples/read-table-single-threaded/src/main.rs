@@ -114,7 +114,8 @@ fn try_main() -> DeltaResult<()> {
         .build()?;
 
     let mut batches = vec![];
-    for res in scan.execute(engine.as_ref())?.into_iter() {
+    for res in scan.execute(engine.as_ref())? {
+        let res = res?;
         let data = res.raw_data?;
         let record_batch: RecordBatch = data
             .into_any()
