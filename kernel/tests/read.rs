@@ -171,10 +171,10 @@ async fn two_commits() -> Result<(), Box<dyn std::error::Error>> {
     let scan = snapshot.into_scan_builder().build()?;
 
     let mut files = 0;
-    let stream = scan.execute(&engine)?.into_iter().zip(expected_data);
+    let stream = scan.execute(&engine)?.zip(expected_data);
 
     for (data, expected) in stream {
-        let raw_data = data.unwrap().raw_data?;
+        let raw_data = data?.raw_data?;
         files += 1;
         assert_eq!(into_record_batch(raw_data), expected);
     }
@@ -225,11 +225,11 @@ async fn remove_action() -> Result<(), Box<dyn std::error::Error>> {
     let snapshot = table.snapshot(&engine, None)?;
     let scan = snapshot.into_scan_builder().build()?;
 
-    let stream = scan.execute(&engine)?.into_iter().zip(expected_data);
+    let stream = scan.execute(&engine)?.zip(expected_data);
 
     let mut files = 0;
     for (data, expected) in stream {
-        let raw_data = data.unwrap().raw_data?;
+        let raw_data = data?.raw_data?;
         files += 1;
         assert_eq!(into_record_batch(raw_data), expected);
     }
@@ -351,11 +351,10 @@ async fn stats() -> Result<(), Box<dyn std::error::Error>> {
 
         let expected_files = expected_batches.len();
         let mut files_scanned = 0;
-        let stream = scan.execute(&engine)?.into_iter().zip(expected_batches);
+        let stream = scan.execute(&engine)?.zip(expected_batches);
 
         for (batch, expected) in stream {
-            let batch = batch.unwrap();
-            let raw_data = batch.raw_data?;
+            let raw_data = batch?.raw_data?;
             files_scanned += 1;
             assert_eq!(into_record_batch(raw_data), expected.clone());
         }
@@ -399,9 +398,8 @@ fn read_with_execute(
     let result_schema: ArrowSchemaRef = Arc::new(scan.schema().as_ref().try_into()?);
     let scan_results = scan.execute(engine)?;
     let batches: Vec<RecordBatch> = scan_results
-        .into_iter()
+        .map(Result::unwrap)
         .map(|sr| {
-            let sr = sr.unwrap();
             let data = sr.raw_data.unwrap();
             let record_batch = to_arrow(data).unwrap();
             if let Some(mut mask) = sr.mask {

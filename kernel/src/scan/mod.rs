@@ -237,7 +237,7 @@ impl Scan {
     pub fn execute<'a>(
         &'a self,
         engine: &'a dyn Engine,
-    ) -> DeltaResult<Box<dyn Iterator<Item = DeltaResult<ScanResult>> + '_>> {
+    ) -> DeltaResult<Box<dyn Iterator<Item = DeltaResult<ScanResult>> + 'a>> {
         #[derive(Debug)]
         struct ScanFile {
             path: String,
@@ -277,7 +277,7 @@ impl Scan {
             .flatten_ok()
             .flatten_ok();
 
-        let iter = scan_files_iter
+        let scan_result_iter = scan_files_iter
             .map_ok(move |scan_file| -> DeltaResult<_> {
                 let file_path = self.snapshot.table_root.join(&scan_file.path)?;
                 let mut selection_vector = scan_file
@@ -294,7 +294,7 @@ impl Scan {
                     None,
                 )?;
                 let gs = global_state.clone(); // Arc clone
-                let x = read_result_iter.into_iter().map(move |read_result| {
+                Ok(read_result_iter.into_iter().map(move |read_result| {
                     let read_result = read_result?;
                     // to transform the physical data into the correct logical form
                     let logical = transform_to_logical_internal(
@@ -318,13 +318,12 @@ impl Scan {
                     };
                     selection_vector = rest;
                     Ok::<ScanResult, Error>(result)
-                });
-                Ok(x)
+                }))
             })
             .flatten_ok()
             .flatten_ok()
             .flatten_ok();
-        Ok(Box::new(iter))
+        Ok(Box::new(scan_result_iter))
     }
 }
 
