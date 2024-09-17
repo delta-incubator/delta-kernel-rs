@@ -120,10 +120,13 @@ async fn single_commit_two_add_files() -> Result<(), Box<dyn std::error::Error>>
     let scan = snapshot.into_scan_builder().build()?;
 
     let mut files = 0;
-    let stream = scan.execute(&engine)?.zip(expected_data);
+    let stream = scan
+        .execute(&engine)?
+        .map(Result::unwrap)
+        .zip(expected_data);
 
     for (data, expected) in stream {
-        let raw_data = data?.raw_data?;
+        let raw_data = data.raw_data?;
         files += 1;
         assert_eq!(into_record_batch(raw_data), expected);
     }
@@ -171,10 +174,13 @@ async fn two_commits() -> Result<(), Box<dyn std::error::Error>> {
     let scan = snapshot.into_scan_builder().build()?;
 
     let mut files = 0;
-    let stream = scan.execute(&engine)?.zip(expected_data);
+    let stream = scan
+        .execute(&engine)?
+        .map(Result::unwrap)
+        .zip(expected_data);
 
     for (data, expected) in stream {
-        let raw_data = data?.raw_data?;
+        let raw_data = data.raw_data?;
         files += 1;
         assert_eq!(into_record_batch(raw_data), expected);
     }
@@ -351,10 +357,13 @@ async fn stats() -> Result<(), Box<dyn std::error::Error>> {
 
         let expected_files = expected_batches.len();
         let mut files_scanned = 0;
-        let stream = scan.execute(&engine)?.zip(expected_batches);
+        let stream = scan
+            .execute(&engine)?
+            .map(Result::unwrap)
+            .zip(expected_batches);
 
         for (batch, expected) in stream {
-            let raw_data = batch?.raw_data?;
+            let raw_data = batch.raw_data?;
             files_scanned += 1;
             assert_eq!(into_record_batch(raw_data), expected.clone());
         }
@@ -455,10 +464,10 @@ fn read_with_scan_data(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let global_state = scan.global_scan_state();
     let result_schema: ArrowSchemaRef = Arc::new(scan.schema().as_ref().try_into()?);
-    let scan_data = scan.scan_data(engine)?;
+    let scan_data = scan.scan_data(engine)?.map(Result::unwrap);
     let mut scan_files = vec![];
     for data in scan_data {
-        let (data, vec) = data?;
+        let (data, vec) = data;
         scan_files = visit_scan_files(data.as_ref(), &vec, scan_files, scan_data_callback)?;
     }
 
