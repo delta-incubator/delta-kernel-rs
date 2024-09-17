@@ -10,7 +10,6 @@ use parquet::arrow::arrow_reader::{
     ArrowReaderMetadata, ArrowReaderOptions, ParquetRecordBatchReaderBuilder,
 };
 use parquet::arrow::async_reader::{ParquetObjectReader, ParquetRecordBatchStreamBuilder};
-use tracing::debug;
 
 use super::file_stream::{FileOpenFuture, FileOpener, FileStream};
 use crate::engine::arrow_utils::{generate_mask, get_requested_indices, reorder_struct_array};
@@ -48,9 +47,8 @@ impl<E: TaskExecutor> ParquetHandler for DefaultParquetHandler<E> {
         &self,
         files: &[FileMeta],
         physical_schema: SchemaRef,
-        predicate: Option<Expression>,
+        _predicate: Option<Expression>,
     ) -> DeltaResult<FileDataReadResultIterator> {
-        debug!("Reading parquet files with predicate: {:?}", predicate);
         if files.is_empty() {
             return Ok(Box::new(std::iter::empty()));
         }
