@@ -14,6 +14,7 @@ use futures::{StreamExt, TryStreamExt};
 use itertools::Itertools;
 use object_store::path::Path;
 use object_store::{DynObjectStore, GetResultPayload};
+use tracing::debug;
 
 use super::executor::TaskExecutor;
 use super::file_stream::{FileOpenFuture, FileOpener, FileStream};
@@ -119,8 +120,9 @@ impl<E: TaskExecutor> JsonHandler for DefaultJsonHandler<E> {
         &self,
         files: &[FileMeta],
         physical_schema: SchemaRef,
-        _predicate: Option<Expression>,
+        predicate: Option<Expression>,
     ) -> DeltaResult<FileDataReadResultIterator> {
+        debug!("Reading json files with predicate: {:?}", predicate);
         if files.is_empty() {
             return Ok(Box::new(std::iter::empty()));
         }
