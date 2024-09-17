@@ -75,10 +75,8 @@ impl LogSegment {
         // filter out log files that do not contain metadata or protocol information
         use Expression as Expr;
         let filter = Some(Expr::or(
-            Expr::not(Expr::is_null(Expr::Column("metaData.id".into()))),
-            Expr::not(Expr::is_null(Expr::Column(
-                "protocol.min_reader_version".into(),
-            ))),
+            Expr::not(Expr::is_null(Expr::column("metaData.id"))),
+            Expr::not(Expr::is_null(Expr::column("protocol.min_reader_version"))),
         ));
         // read the same protocol and metadata schema for both commits and checkpoints
         let data_batches = self.replay(engine, schema.clone(), schema, filter)?;
