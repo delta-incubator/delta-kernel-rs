@@ -120,9 +120,8 @@ impl<E: TaskExecutor> JsonHandler for DefaultJsonHandler<E> {
         &self,
         files: &[FileMeta],
         physical_schema: SchemaRef,
-        predicate: Option<Expression>,
+        _predicate: Option<Expression>,
     ) -> DeltaResult<FileDataReadResultIterator> {
-        debug!("Reading json files: {files:#?} with predicate {predicate:#?}");
         if files.is_empty() {
             return Ok(Box::new(std::iter::empty()));
         }

@@ -48,9 +48,8 @@ impl<E: TaskExecutor> ParquetHandler for DefaultParquetHandler<E> {
         &self,
         files: &[FileMeta],
         physical_schema: SchemaRef,
-        predicate: Option<Expression>,
+        _predicate: Option<Expression>,
     ) -> DeltaResult<FileDataReadResultIterator> {
-        debug!("Reading parquet files: {files:#?} with schema {physical_schema:#?} and predicate {predicate:#?}");
         if files.is_empty() {
             return Ok(Box::new(std::iter::empty()));
         }
