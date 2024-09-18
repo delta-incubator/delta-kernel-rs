@@ -3,15 +3,19 @@
 use std::ops::Range;
 use std::sync::Arc;
 
+use arrow_schema::ArrowError;
 use futures::StreamExt;
 use object_store::path::Path;
 use object_store::DynObjectStore;
 use parquet::arrow::arrow_reader::{
-    ArrowReaderMetadata, ArrowReaderOptions, ParquetRecordBatchReaderBuilder,
+    ArrowPredicateFn, ArrowReaderMetadata, ArrowReaderOptions, ParquetRecordBatchReaderBuilder,
+    RowFilter,
 };
 use parquet::arrow::async_reader::{ParquetObjectReader, ParquetRecordBatchStreamBuilder};
+use parquet::arrow::ProjectionMask;
 
 use super::file_stream::{FileOpenFuture, FileOpener, FileStream};
+use crate::engine::arrow_expression::{downcast_to_bool, evaluate_expression};
 use crate::engine::arrow_utils::{generate_mask, get_requested_indices, reorder_struct_array};
 use crate::engine::default::executor::TaskExecutor;
 use crate::schema::SchemaRef;
@@ -47,7 +51,7 @@ impl<E: TaskExecutor> ParquetHandler for DefaultParquetHandler<E> {
         &self,
         files: &[FileMeta],
         physical_schema: SchemaRef,
-        _predicate: Option<Expression>,
+        predicate: Option<Expression>,
     ) -> DeltaResult<FileDataReadResultIterator> {
         if files.is_empty() {
             return Ok(Box::new(std::iter::empty()));
@@ -62,11 +66,16 @@ impl<E: TaskExecutor> ParquetHandler for DefaultParquetHandler<E> {
         //   -> parse to parquet
         // SAFETY: we did is_empty check above, this is ok.
         let file_opener: Box<dyn FileOpener> = match files[0].location.scheme() {
-            "http" | "https" => Box::new(PresignedUrlOpener::new(1024, physical_schema.clone())),
+            "http" | "https" => Box::new(PresignedUrlOpener::new(
+                1024,
+                physical_schema.clone(),
+                predicate,
+            )),
             _ => Box::new(ParquetOpener::new(
                 1024,
                 physical_schema.clone(),
                 self.store.clone(),
+                predicate,
             )),
         };
         FileStream::new_async_read_iterator(
@@ -86,6 +95,7 @@ struct ParquetOpener {
     limit: Option<usize>,
     table_schema: SchemaRef,
     store: Arc<DynObjectStore>,
+    predicate: Option<Expression>,
 }
 
 impl ParquetOpener {
@@ -93,12 +103,14 @@ impl ParquetOpener {
         batch_size: usize,
         table_schema: SchemaRef,
         store: Arc<DynObjectStore>,
+        predicate: Option<Expression>,
     ) -> Self {
         Self {
             batch_size,
             table_schema,
             limit: None,
             store,
+            predicate,
         }
     }
 }
@@ -112,7 +124,7 @@ impl FileOpener for ParquetOpener {
         // let projection = self.projection.clone();
         let table_schema = self.table_schema.clone();
         let limit = self.limit;
-
+        let predicate = self.predicate.clone();
         Ok(Box::pin(async move {
             // TODO avoid IO by converting passed file meta to ObjectMeta
             let meta = store.head(&path).await?;
@@ -124,6 +136,18 @@ impl FileOpener for ParquetOpener {
             let options = ArrowReaderOptions::new(); //.with_page_index(enable_page_index);
             let mut builder =
                 ParquetRecordBatchStreamBuilder::new_with_options(reader, options).await?;
+            if let Some(predicate) = predicate {
+                builder = builder.with_row_filter(RowFilter::new(vec![Box::new(
+                    ArrowPredicateFn::new(ProjectionMask::all(), move |batch| {
+                        downcast_to_bool(
+                            &evaluate_expression(&predicate, &batch, None)
+                                .map_err(|err| ArrowError::ExternalError(Box::new(err)))?,
+                        )
+                        .map_err(|err| ArrowError::ExternalError(Box::new(err)))
+                        .cloned()
+                    }),
+                )]));
+            }
             if let Some(mask) = generate_mask(
                 &table_schema,
                 parquet_schema,
@@ -156,15 +180,17 @@ struct PresignedUrlOpener {
     limit: Option<usize>,
     table_schema: SchemaRef,
     client: reqwest::Client,
+    predicate: Option<Expression>,
 }
 
 impl PresignedUrlOpener {
-    pub(crate) fn new(batch_size: usize, schema: SchemaRef) -> Self {
+    pub(crate) fn new(batch_size: usize, schema: SchemaRef, predicate: Option<Expression>) -> Self {
         Self {
             batch_size,
             table_schema: schema,
             limit: None,
             client: reqwest::Client::new(),
+            predicate,
         }
     }
 }
@@ -175,6 +201,7 @@ impl FileOpener for PresignedUrlOpener {
         let table_schema = self.table_schema.clone();
         let limit = self.limit;
         let client = self.client.clone(); // uses Arc internally according to reqwest docs
+        let predicate = self.predicate.clone();
 
         Ok(Box::pin(async move {
             // fetch the file from the interweb
@@ -196,6 +223,18 @@ impl FileOpener for PresignedUrlOpener {
                 builder = builder.with_projection(mask)
             }
 
+            if let Some(predicate) = predicate {
+                builder = builder.with_row_filter(RowFilter::new(vec![Box::new(
+                    ArrowPredicateFn::new(ProjectionMask::all(), move |batch| {
+                        downcast_to_bool(
+                            &evaluate_expression(&predicate, &batch, None)
+                                .map_err(|err| ArrowError::ExternalError(Box::new(err)))?,
+                        )
+                        .map_err(|err| ArrowError::ExternalError(Box::new(err)))
+                        .cloned()
+                    }),
+                )]));
+            }
             if let Some(limit) = limit {
                 builder = builder.with_limit(limit)
             }

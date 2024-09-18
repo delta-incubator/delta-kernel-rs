@@ -1,17 +1,26 @@
 use std::fs::File;
 
-use parquet::arrow::arrow_reader::{ArrowReaderMetadata, ParquetRecordBatchReaderBuilder};
+use arrow_schema::ArrowError;
+use parquet::arrow::arrow_reader::{
+    ArrowPredicateFn, ArrowReaderMetadata, ParquetRecordBatchReaderBuilder, RowFilter,
+};
+use parquet::arrow::ProjectionMask;
 use tracing::debug;
 use url::Url;
 
 use crate::engine::arrow_data::ArrowEngineData;
+use crate::engine::arrow_expression::{downcast_to_bool, evaluate_expression};
 use crate::engine::arrow_utils::{generate_mask, get_requested_indices, reorder_struct_array};
 use crate::schema::SchemaRef;
 use crate::{DeltaResult, Error, Expression, FileDataReadResultIterator, FileMeta, ParquetHandler};
 
 pub(crate) struct SyncParquetHandler;
 
-fn try_create_from_parquet(schema: SchemaRef, location: Url) -> DeltaResult<ArrowEngineData> {
+fn try_create_from_parquet(
+    schema: SchemaRef,
+    location: Url,
+    predicate: Option<Expression>,
+) -> DeltaResult<ArrowEngineData> {
     let file = File::open(
         location
             .to_file_path()
@@ -24,6 +33,19 @@ fn try_create_from_parquet(schema: SchemaRef, location: Url) -> DeltaResult<Arro
     if let Some(mask) = generate_mask(&schema, parquet_schema, builder.parquet_schema(), &indicies)
     {
         builder = builder.with_projection(mask);
+    }
+    if let Some(predicate) = predicate {
+        builder = builder.with_row_filter(RowFilter::new(vec![Box::new(ArrowPredicateFn::new(
+            ProjectionMask::all(),
+            move |batch| {
+                downcast_to_bool(
+                    &evaluate_expression(&predicate, &batch, None)
+                        .map_err(|err| ArrowError::ExternalError(Box::new(err)))?,
+                )
+                .map_err(|err| ArrowError::ExternalError(Box::new(err)))
+                .cloned()
+            },
+        ))]));
     }
     let mut reader = builder.build()?;
     let data = reader
@@ -46,7 +68,8 @@ impl ParquetHandler for SyncParquetHandler {
         }
         let locations: Vec<_> = files.iter().map(|file| file.location.clone()).collect();
         Ok(Box::new(locations.into_iter().map(move |location| {
-            try_create_from_parquet(schema.clone(), location).map(|d| Box::new(d) as _)
+            try_create_from_parquet(schema.clone(), location, predicate.clone())
+                .map(|d| Box::new(d) as _)
         })))
     }
 }

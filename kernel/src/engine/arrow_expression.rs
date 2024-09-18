@@ -31,7 +31,7 @@ use crate::{EngineData, ExpressionEvaluator, ExpressionHandler};
 
 // TODO leverage scalars / Datum
 
-fn downcast_to_bool(arr: &dyn Array) -> DeltaResult<&BooleanArray> {
+pub fn downcast_to_bool(arr: &dyn Array) -> DeltaResult<&BooleanArray> {
     arr.as_any()
         .downcast_ref::<BooleanArray>()
         .ok_or(Error::generic("expected boolean array"))
@@ -182,7 +182,7 @@ fn column_as_struct<'a>(
         .ok_or(ArrowError::SchemaError(format!("{} is not a struct", name)))
 }
 
-fn evaluate_expression(
+pub fn evaluate_expression(
     expression: &Expression,
     batch: &RecordBatch,
     result_type: Option<&DataType>,
@@ -197,7 +197,10 @@ fn evaluate_expression(
             if name.contains('.') {
                 let mut path = name.split('.');
                 // Safety: we know that the first path step exists, because we checked for '.'
-                Ok(extract_column(batch, path.next().unwrap(), &mut path).cloned()?)
+                let x = extract_column(batch, path.next().unwrap(), &mut path)
+                    .cloned()
+                    .expect(&format!("Failed on a name: {:?}", name).to_owned());
+                Ok(x)
             } else {
                 batch
                     .column_by_name(name)
