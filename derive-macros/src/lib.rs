@@ -70,7 +70,7 @@ fn gen_schema_fields(data: &Data) -> TokenStream {
         let name = field.ident.as_ref().unwrap(); // we know these are named fields
         let name = get_schema_name(name);
         let have_schema_null = field.attrs.iter().any(|attr| {
-            // check if we have schema_map_values_null attr
+            // check if we have drop_null_container_values attr
             match &attr.meta {
                 Meta::Path(path) => path.get_ident().is_some_and(|ident| ident == "drop_null_container_values"),
                 _ => false,
