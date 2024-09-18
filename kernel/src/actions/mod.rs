@@ -47,7 +47,7 @@ pub(crate) fn get_log_schema() -> &'static StructType {
 pub struct Format {
     /// Name of the encoding for files in this table
     pub provider: String,
-    /// A map containingconfiguration options for the format
+    /// A map containing configuration options for the format
     pub options: HashMap<String, String>,
 }
 
@@ -141,6 +141,7 @@ pub struct Add {
     pub path: String,
 
     /// A map from partition column to value for this logical file.
+    #[schema_container_values_null]
     pub partition_values: HashMap<String, String>,
 
     /// The size of this data file in bytes
