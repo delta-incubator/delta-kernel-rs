@@ -77,7 +77,8 @@ pub(crate) trait GetNullableContainerStructField {
     fn get_nullable_container_struct_field(name: impl Into<String>) -> StructField;
 }
 
-// Normal types produce non-nullable fields
+// Normal types produce non-nullable fields, but in this case the container they reference has
+// nullable values
 impl<T: ToNullableContainerType> GetNullableContainerStructField for T {
     fn get_nullable_container_struct_field(name: impl Into<String>) -> StructField {
         StructField::new(name, T::to_nullable_container_type(), false)
