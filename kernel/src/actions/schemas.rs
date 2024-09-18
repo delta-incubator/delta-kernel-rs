@@ -42,7 +42,7 @@ impl<T: ToDataType> ToDataType for Vec<T> {
     }
 }
 
-// ToDataType impl for nullable map types
+// ToDataType impl for nullable array types
 impl<T: ToDataType> ToNullableContainerType for Vec<T> {
     fn to_nullable_container_type() -> DataType {
         ArrayType::new(T::to_data_type(), true).into()
