@@ -10,7 +10,12 @@ use syn::{parse_macro_input, Data, DataStruct, DeriveInput, Fields, Meta, PathAr
 /// Change Metadata](https://github.com/delta-io/delta/blob/master/PROTOCOL.md#change-metadata)
 /// action (this macro allows the use of standard rust snake_case, and will convert to the correct
 /// delta schema camelCase version).
-#[proc_macro_derive(Schema, attributes(schema_container_values_null))]
+///
+/// If a field sets `drop_null_container_values`, it means the underlying data can contain null in
+/// the values of the container (i.e. a `key` -> `null` in a `HashMap`). Therefore the schema should
+/// mark the value field as nullable, but those mappings will be dropped when converting to an
+/// actual rust `HashMap`. Currently this can _only_ be set on `HashMap` fields.
+#[proc_macro_derive(Schema, attributes(drop_null_container_values))]
 pub fn derive_schema(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let struct_ident = input.ident;
@@ -67,7 +72,7 @@ fn gen_schema_fields(data: &Data) -> TokenStream {
         let have_schema_null = field.attrs.iter().any(|attr| {
             // check if we have schema_map_values_null attr
             match &attr.meta {
-                Meta::Path(path) => path.get_ident().map(|ident| ident == "schema_container_values_null").unwrap_or(false),
+                Meta::Path(path) => path.get_ident().is_some_and(|ident| ident == "drop_null_container_values"),
                 _ => false,
             }
         });
@@ -84,8 +89,8 @@ fn gen_schema_fields(data: &Data) -> TokenStream {
                 });
                 if have_schema_null {
                     if let Some(first_ident) = type_path.path.segments.first().map(|seg| &seg.ident) {
-                        if first_ident != "HashMap" && first_ident != "Vec" {
-                            panic!("Can only use schema_container_values_null on HashMap or Vec fields, not {first_ident:?}");
+                        if first_ident != "HashMap" {
+                            panic!("Can only use drop_null_container_values on HashMap fields, not {first_ident:?}");
                         }
                     }
                     quote_spanned! { field.span() => #(#type_path_quoted),* get_nullable_container_struct_field(stringify!(#name))}
