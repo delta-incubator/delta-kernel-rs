@@ -31,6 +31,8 @@ use crate::expressions::{BinaryOperator, Expression, Scalar, UnaryOperator, Vari
 use crate::schema::{DataType, PrimitiveType, SchemaRef};
 use crate::{EngineData, ExpressionEvaluator, ExpressionHandler};
 
+// TODO leverage scalars / Datum
+//
 pub fn expression_to_row_filter(predicate: Expression) -> RowFilter {
         let arrow_predicate = ArrowPredicateFn::new(
             ProjectionMask::all(),
@@ -45,8 +47,6 @@ pub fn expression_to_row_filter(predicate: Expression) -> RowFilter {
         );
         RowFilter::new(vec![Box::new(arrow_predicate)])
 }
-
-// TODO leverage scalars / Datum
 
 fn downcast_to_bool(arr: &dyn Array) -> DeltaResult<&BooleanArray> {
     arr.as_any()

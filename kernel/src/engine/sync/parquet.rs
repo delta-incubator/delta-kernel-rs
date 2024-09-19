@@ -1,13 +1,11 @@
 use std::fs::File;
 
-use parquet::arrow::arrow_reader::{
-     ArrowReaderMetadata, ParquetRecordBatchReaderBuilder,
-};
+use parquet::arrow::arrow_reader::{ArrowReaderMetadata, ParquetRecordBatchReaderBuilder};
 use tracing::debug;
 use url::Url;
 
 use crate::engine::arrow_data::ArrowEngineData;
-use crate::engine::arrow_expression::{ expression_to_row_filter};
+use crate::engine::arrow_expression::expression_to_row_filter;
 use crate::engine::arrow_utils::{generate_mask, get_requested_indices, reorder_struct_array};
 use crate::schema::SchemaRef;
 use crate::{DeltaResult, Error, Expression, FileDataReadResultIterator, FileMeta, ParquetHandler};

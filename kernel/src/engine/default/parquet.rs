@@ -7,7 +7,7 @@ use futures::StreamExt;
 use object_store::path::Path;
 use object_store::DynObjectStore;
 use parquet::arrow::arrow_reader::{
-     ArrowReaderMetadata, ArrowReaderOptions, ParquetRecordBatchReaderBuilder,
+    ArrowReaderMetadata, ArrowReaderOptions, ParquetRecordBatchReaderBuilder,
 };
 use parquet::arrow::async_reader::{ParquetObjectReader, ParquetRecordBatchStreamBuilder};
 
@@ -133,9 +133,9 @@ impl FileOpener for ParquetOpener {
             let options = ArrowReaderOptions::new(); //.with_page_index(enable_page_index);
             let mut builder =
                 ParquetRecordBatchStreamBuilder::new_with_options(reader, options).await?;
-                if let Some(predicate) = predicate {
-                    builder = builder.with_row_filter(expression_to_row_filter(predicate));
-                }
+            if let Some(predicate) = predicate {
+                builder = builder.with_row_filter(expression_to_row_filter(predicate));
+            }
             if let Some(mask) = generate_mask(
                 &table_schema,
                 parquet_schema,
