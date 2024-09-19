@@ -51,26 +51,17 @@ impl<E: TaskExecutor> DefaultEngine<E> {
     {
         let (store, prefix) = parse_url_opts(path, options)?;
         let store = Arc::new(store);
-        Ok(Self {
-            file_system: Arc::new(ObjectStoreFileSystemClient::new(
-                store.clone(),
-                prefix,
-                task_executor.clone(),
-            )),
-            json: Arc::new(DefaultJsonHandler::new(
-                store.clone(),
-                task_executor.clone(),
-            )),
-            parquet: Arc::new(DefaultParquetHandler::new(store.clone(), task_executor)),
-            store,
-            expression: Arc::new(ArrowExpressionHandler {}),
-        })
+        Ok(Self::new(store, prefix, task_executor))
     }
 
     pub fn new(store: Arc<DynObjectStore>, prefix: Path, task_executor: Arc<E>) -> Self {
+        // HACK to check if we're using a LocalFileSystem from ObjectStore
+        let store_str = format!("{}", store);
+        let is_local = store_str.starts_with("LocalFileSystem");
         Self {
             file_system: Arc::new(ObjectStoreFileSystemClient::new(
                 store.clone(),
+                is_local,
                 prefix,
                 task_executor.clone(),
             )),
