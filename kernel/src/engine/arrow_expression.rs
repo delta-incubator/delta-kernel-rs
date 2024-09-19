@@ -34,18 +34,15 @@ use crate::{EngineData, ExpressionEvaluator, ExpressionHandler};
 // TODO leverage scalars / Datum
 //
 pub fn expression_to_row_filter(predicate: Expression) -> RowFilter {
-        let arrow_predicate = ArrowPredicateFn::new(
-            ProjectionMask::all(),
-            move |batch| {
-                downcast_to_bool(
-                    &evaluate_expression(&predicate, &batch, None)
-                        .map_err(|err| ArrowError::ExternalError(Box::new(err)))?,
-                )
-                .map_err(|err| ArrowError::ExternalError(Box::new(err)))
-                .cloned()
-            },
-        );
-        RowFilter::new(vec![Box::new(arrow_predicate)])
+    let arrow_predicate = ArrowPredicateFn::new(ProjectionMask::all(), move |batch| {
+        downcast_to_bool(
+            &evaluate_expression(&predicate, &batch, None)
+                .map_err(|err| ArrowError::ExternalError(Box::new(err)))?,
+        )
+        .map_err(|err| ArrowError::ExternalError(Box::new(err)))
+        .cloned()
+    });
+    RowFilter::new(vec![Box::new(arrow_predicate)])
 }
 
 fn downcast_to_bool(arr: &dyn Array) -> DeltaResult<&BooleanArray> {
