@@ -521,6 +521,7 @@ mod tests {
         let prefix = Path::from(url.path());
         let client = ObjectStoreFileSystemClient::new(
             store,
+            true,
             prefix,
             Arc::new(TokioBackgroundExecutor::new()),
         );
@@ -624,6 +625,7 @@ mod tests {
 
         let client = ObjectStoreFileSystemClient::new(
             store,
+            true,
             Path::from("/"),
             Arc::new(TokioBackgroundExecutor::new()),
         );
