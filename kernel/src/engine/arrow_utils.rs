@@ -99,7 +99,7 @@ fn check_cast_compat(
 
 // Returns whether the given source type can be safely cast to a decimal with the given precision and scale without
 // loss of information.
-pub(crate) fn can_upcast_to_decimal(
+fn can_upcast_to_decimal(
     source_type: &ArrowDataType,
     target_precision: u8,
     target_scale: i8,
