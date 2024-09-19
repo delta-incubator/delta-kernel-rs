@@ -430,12 +430,12 @@ mod tests {
     use crate::schema::StructType;
 
     #[test]
-    fn test_snapshot_filtering() {
+    fn test_replay_protocol_metadata_filtering_predicate() {
         let path = std::fs::canonicalize(PathBuf::from("./tests/data/app-txn-checkpoint")).unwrap();
         let url = url::Url::from_directory_path(path).unwrap();
 
         let engine = SyncEngine::new();
-        let snapshot = Snapshot::try_new(url, &engine, Some(1)).unwrap();
+        let snapshot = Snapshot::try_new(url, &engine, None).unwrap();
 
         let expected_protocol = Protocol {
             min_reader_version: 1,
