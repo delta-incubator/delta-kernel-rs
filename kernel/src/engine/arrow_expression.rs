@@ -19,6 +19,8 @@ use arrow_schema::{
 };
 use arrow_select::concat::concat;
 use itertools::Itertools;
+use parquet::arrow::arrow_reader::{ArrowPredicateFn, RowFilter};
+use parquet::arrow::ProjectionMask;
 
 use super::arrow_conversion::LIST_ARRAY_ROOT;
 use crate::engine::arrow_data::ArrowEngineData;
@@ -29,9 +31,24 @@ use crate::expressions::{BinaryOperator, Expression, Scalar, UnaryOperator, Vari
 use crate::schema::{DataType, PrimitiveType, SchemaRef};
 use crate::{EngineData, ExpressionEvaluator, ExpressionHandler};
 
+pub fn expression_to_row_filter(predicate: Expression) -> RowFilter {
+        let arrow_predicate = ArrowPredicateFn::new(
+            ProjectionMask::all(),
+            move |batch| {
+                downcast_to_bool(
+                    &evaluate_expression(&predicate, &batch, None)
+                        .map_err(|err| ArrowError::ExternalError(Box::new(err)))?,
+                )
+                .map_err(|err| ArrowError::ExternalError(Box::new(err)))
+                .cloned()
+            },
+        );
+        RowFilter::new(vec![Box::new(arrow_predicate)])
+}
+
 // TODO leverage scalars / Datum
 
-pub fn downcast_to_bool(arr: &dyn Array) -> DeltaResult<&BooleanArray> {
+fn downcast_to_bool(arr: &dyn Array) -> DeltaResult<&BooleanArray> {
     arr.as_any()
         .downcast_ref::<BooleanArray>()
         .ok_or(Error::generic("expected boolean array"))
@@ -182,7 +199,7 @@ fn column_as_struct<'a>(
         .ok_or(ArrowError::SchemaError(format!("{} is not a struct", name)))
 }
 
-pub fn evaluate_expression(
+fn evaluate_expression(
     expression: &Expression,
     batch: &RecordBatch,
     result_type: Option<&DataType>,
@@ -197,10 +214,7 @@ pub fn evaluate_expression(
             if name.contains('.') {
                 let mut path = name.split('.');
                 // Safety: we know that the first path step exists, because we checked for '.'
-                let x = extract_column(batch, path.next().unwrap(), &mut path)
-                    .cloned()
-                    .expect(&format!("Failed on a name: {:?}", name).to_owned());
-                Ok(x)
+                Ok(extract_column(batch, path.next().unwrap(), &mut path).cloned()?)
             } else {
                 batch
                     .column_by_name(name)

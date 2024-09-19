@@ -3,19 +3,16 @@
 use std::ops::Range;
 use std::sync::Arc;
 
-use arrow_schema::ArrowError;
 use futures::StreamExt;
 use object_store::path::Path;
 use object_store::DynObjectStore;
 use parquet::arrow::arrow_reader::{
-    ArrowPredicateFn, ArrowReaderMetadata, ArrowReaderOptions, ParquetRecordBatchReaderBuilder,
-    RowFilter,
+     ArrowReaderMetadata, ArrowReaderOptions, ParquetRecordBatchReaderBuilder,
 };
 use parquet::arrow::async_reader::{ParquetObjectReader, ParquetRecordBatchStreamBuilder};
-use parquet::arrow::ProjectionMask;
 
 use super::file_stream::{FileOpenFuture, FileOpener, FileStream};
-use crate::engine::arrow_expression::{downcast_to_bool, evaluate_expression};
+use crate::engine::arrow_expression::expression_to_row_filter;
 use crate::engine::arrow_utils::{generate_mask, get_requested_indices, reorder_struct_array};
 use crate::engine::default::executor::TaskExecutor;
 use crate::schema::SchemaRef;
@@ -136,18 +133,9 @@ impl FileOpener for ParquetOpener {
             let options = ArrowReaderOptions::new(); //.with_page_index(enable_page_index);
             let mut builder =
                 ParquetRecordBatchStreamBuilder::new_with_options(reader, options).await?;
-            if let Some(predicate) = predicate {
-                builder = builder.with_row_filter(RowFilter::new(vec![Box::new(
-                    ArrowPredicateFn::new(ProjectionMask::all(), move |batch| {
-                        downcast_to_bool(
-                            &evaluate_expression(&predicate, &batch, None)
-                                .map_err(|err| ArrowError::ExternalError(Box::new(err)))?,
-                        )
-                        .map_err(|err| ArrowError::ExternalError(Box::new(err)))
-                        .cloned()
-                    }),
-                )]));
-            }
+                if let Some(predicate) = predicate {
+                    builder = builder.with_row_filter(expression_to_row_filter(predicate));
+                }
             if let Some(mask) = generate_mask(
                 &table_schema,
                 parquet_schema,
@@ -224,16 +212,7 @@ impl FileOpener for PresignedUrlOpener {
             }
 
             if let Some(predicate) = predicate {
-                builder = builder.with_row_filter(RowFilter::new(vec![Box::new(
-                    ArrowPredicateFn::new(ProjectionMask::all(), move |batch| {
-                        downcast_to_bool(
-                            &evaluate_expression(&predicate, &batch, None)
-                                .map_err(|err| ArrowError::ExternalError(Box::new(err)))?,
-                        )
-                        .map_err(|err| ArrowError::ExternalError(Box::new(err)))
-                        .cloned()
-                    }),
-                )]));
+                builder = builder.with_row_filter(expression_to_row_filter(predicate));
             }
             if let Some(limit) = limit {
                 builder = builder.with_limit(limit)

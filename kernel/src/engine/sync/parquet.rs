@@ -1,15 +1,13 @@
 use std::fs::File;
 
-use arrow_schema::ArrowError;
 use parquet::arrow::arrow_reader::{
-    ArrowPredicateFn, ArrowReaderMetadata, ParquetRecordBatchReaderBuilder, RowFilter,
+     ArrowReaderMetadata, ParquetRecordBatchReaderBuilder,
 };
-use parquet::arrow::ProjectionMask;
 use tracing::debug;
 use url::Url;
 
 use crate::engine::arrow_data::ArrowEngineData;
-use crate::engine::arrow_expression::{downcast_to_bool, evaluate_expression};
+use crate::engine::arrow_expression::{ expression_to_row_filter};
 use crate::engine::arrow_utils::{generate_mask, get_requested_indices, reorder_struct_array};
 use crate::schema::SchemaRef;
 use crate::{DeltaResult, Error, Expression, FileDataReadResultIterator, FileMeta, ParquetHandler};
@@ -35,17 +33,7 @@ fn try_create_from_parquet(
         builder = builder.with_projection(mask);
     }
     if let Some(predicate) = predicate {
-        builder = builder.with_row_filter(RowFilter::new(vec![Box::new(ArrowPredicateFn::new(
-            ProjectionMask::all(),
-            move |batch| {
-                downcast_to_bool(
-                    &evaluate_expression(&predicate, &batch, None)
-                        .map_err(|err| ArrowError::ExternalError(Box::new(err)))?,
-                )
-                .map_err(|err| ArrowError::ExternalError(Box::new(err)))
-                .cloned()
-            },
-        ))]));
+        builder = builder.with_row_filter(expression_to_row_filter(predicate));
     }
     let mut reader = builder.build()?;
     let data = reader
