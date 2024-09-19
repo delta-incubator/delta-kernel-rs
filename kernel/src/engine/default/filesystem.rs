@@ -52,6 +52,8 @@ impl<E: TaskExecutor> FileSystemClient for ObjectStoreFileSystemClient<E> {
         // TODO properly handle table prefix
         let prefix = self.table_root.child("_delta_log");
 
+        println!("Prefix is {:?}", prefix);
+
         let store = self.inner.clone();
 
         // This channel will become the iterator
@@ -234,8 +236,15 @@ mod tests {
 
         let url = Url::from_directory_path(tmp.path()).unwrap();
         let store = Arc::new(LocalFileSystem::new());
-        let prefix = Path::from(url.path());
-        let store: Arc<DynObjectStore> = store;
+        let prefix = Path::from_url_path(url.path()).expect("Couldn't get path");
+
+        // debug code for windows
+        let s = store.clone();
+        let mut l = s.list(Some(&prefix));
+        while let Some(meta) = l.next().await {
+            println!("DBG GOT {:?}", meta.unwrap());
+        }
+
         let engine = DefaultEngine::new(store, prefix, Arc::new(TokioBackgroundExecutor::new()));
         let client = engine.get_file_system_client();
 
