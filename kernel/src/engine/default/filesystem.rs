@@ -83,7 +83,7 @@ impl<E: TaskExecutor> FileSystemClient for ObjectStoreFileSystemClient<E> {
         if self.is_local {
             // LocalFileSystem doesn't return things in the order we require
             let mut fms: Vec<FileMeta> = receiver.into_iter().try_collect()?;
-            fms.sort();
+            fms.sort_unstable();
             Ok(Box::new(fms.into_iter().map(Ok)))
         } else {
             Ok(Box::new(receiver.into_iter()))
