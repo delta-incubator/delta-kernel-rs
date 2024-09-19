@@ -414,6 +414,7 @@ fn list_log_files(
 mod tests {
     use super::*;
 
+    use std::collections::HashMap;
     use std::path::PathBuf;
     use std::sync::Arc;
 
@@ -422,11 +423,44 @@ mod tests {
     use object_store::path::Path;
     use object_store::ObjectStore;
 
+    use crate::actions::Format;
     use crate::engine::default::executor::tokio::TokioBackgroundExecutor;
     use crate::engine::default::filesystem::ObjectStoreFileSystemClient;
     use crate::engine::sync::SyncEngine;
     use crate::schema::StructType;
 
+    #[test]
+    fn test_snapshot_filtering() {
+        let path = std::fs::canonicalize(PathBuf::from("./tests/data/app-txn-checkpoint")).unwrap();
+        let url = url::Url::from_directory_path(path).unwrap();
+
+        let engine = SyncEngine::new();
+        let snapshot = Snapshot::try_new(url, &engine, Some(1)).unwrap();
+
+        let expected_protocol = Protocol {
+            min_reader_version: 1,
+            min_writer_version: 2,
+            reader_features: None,
+            writer_features: None,
+        };
+
+        let expected_metadata = Metadata {
+            id: "e7802058-f49c-4f0b-937f-82a3e42781a3".into(),
+            name: None,
+            description: None,
+            format: Format {
+                provider: "parquet".into(),
+                options: HashMap::new()
+            },
+            schema_string: "{\"type\":\"struct\",\"fields\":[{\"name\":\"id\",\"type\":\"string\",\"nullable\":true,\"metadata\":{}},{\"name\":\"value\",\"type\":\"integer\",\"nullable\":true,\"metadata\":{}},{\"name\":\"modified\",\"type\":\"string\",\"nullable\":true,\"metadata\":{}}]}".into(),
+            partition_columns: vec!["modified".into()],
+            created_time: Some(1713400874275),
+            configuration: HashMap::new()
+        };
+
+        assert_eq!(snapshot.protocol(), &expected_protocol);
+        assert_eq!(snapshot.metadata(), &expected_metadata);
+    }
     #[test]
     fn test_snapshot_read_metadata() {
         let path =
