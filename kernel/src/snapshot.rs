@@ -458,12 +458,12 @@ mod tests {
             description: None,
             format: Format {
                 provider: "parquet".into(),
-                options: HashMap::new()
+                options: HashMap::new(),
             },
             schema_string: schema_string.into(),
             partition_columns: vec!["modified".into()],
             created_time: Some(1713400874275),
-            configuration: HashMap::new()
+            configuration: HashMap::new(),
         };
         assert_eq!(snapshot.metadata(), &expected_metadata);
     }
@@ -563,7 +563,8 @@ mod tests {
 
     #[test_log::test]
     fn test_read_table_with_checkpoint() {
-        let snapshot = get_snapshot_from_path("./tests/data/with_checkpoint_no_last_checkpoint/", None);
+        let snapshot =
+            get_snapshot_from_path("./tests/data/with_checkpoint_no_last_checkpoint/", None);
 
         assert_eq!(snapshot.log_segment.checkpoint_files.len(), 1);
         assert_eq!(
