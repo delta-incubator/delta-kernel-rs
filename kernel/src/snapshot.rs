@@ -429,13 +429,20 @@ mod tests {
     use crate::engine::sync::SyncEngine;
     use crate::schema::StructType;
 
+    fn get_snapshot_from_path(path: &str, version: Option<Version>) -> Snapshot {
+        let path = std::fs::canonicalize(PathBuf::from(path)).unwrap();
+        let url = url::Url::from_directory_path(path).unwrap();
+        let engine = SyncEngine::new();
+        Snapshot::try_new(url, &engine, version).unwrap()
+    }
+
     #[test]
     fn test_replay_protocol_metadata_filtering_predicate() {
-        let path = std::fs::canonicalize(PathBuf::from("./tests/data/app-txn-checkpoint")).unwrap();
-        let url = url::Url::from_directory_path(path).unwrap();
+        let snapshot = get_snapshot_from_path("./tests/data/app-txn-checkpoint", None);
 
-        let engine = SyncEngine::new();
-        let snapshot = Snapshot::try_new(url, &engine, None).unwrap();
+        let schema_string = r#"{"type":"struct","fields":[{"name":"id","type":"string","nullable":true,"metadata":{}},{"name":"value","type":"integer","nullable":true,"metadata":{}},{"name":"modified","type":"string","nullable":true,"metadata":{}}]}"#;
+        let expected_schema: StructType = serde_json::from_str(schema_string).unwrap();
+        assert_eq!(snapshot.schema(), &expected_schema);
 
         let expected_protocol = Protocol {
             min_reader_version: 1,
@@ -443,6 +450,7 @@ mod tests {
             reader_features: None,
             writer_features: None,
         };
+        assert_eq!(snapshot.protocol(), &expected_protocol);
 
         let expected_metadata = Metadata {
             id: "e7802058-f49c-4f0b-937f-82a3e42781a3".into(),
@@ -452,23 +460,16 @@ mod tests {
                 provider: "parquet".into(),
                 options: HashMap::new()
             },
-            schema_string: "{\"type\":\"struct\",\"fields\":[{\"name\":\"id\",\"type\":\"string\",\"nullable\":true,\"metadata\":{}},{\"name\":\"value\",\"type\":\"integer\",\"nullable\":true,\"metadata\":{}},{\"name\":\"modified\",\"type\":\"string\",\"nullable\":true,\"metadata\":{}}]}".into(),
+            schema_string: schema_string.into(),
             partition_columns: vec!["modified".into()],
             created_time: Some(1713400874275),
             configuration: HashMap::new()
         };
-
-        assert_eq!(snapshot.protocol(), &expected_protocol);
         assert_eq!(snapshot.metadata(), &expected_metadata);
     }
     #[test]
     fn test_snapshot_read_metadata() {
-        let path =
-            std::fs::canonicalize(PathBuf::from("./tests/data/table-with-dv-small/")).unwrap();
-        let url = url::Url::from_directory_path(path).unwrap();
-
-        let engine = SyncEngine::new();
-        let snapshot = Snapshot::try_new(url, &engine, Some(1)).unwrap();
+        let snapshot = get_snapshot_from_path("./tests/data/table-with-dv-small/", None);
 
         let expected = Protocol {
             min_reader_version: 3,
@@ -485,12 +486,7 @@ mod tests {
 
     #[test]
     fn test_new_snapshot() {
-        let path =
-            std::fs::canonicalize(PathBuf::from("./tests/data/table-with-dv-small/")).unwrap();
-        let url = url::Url::from_directory_path(path).unwrap();
-
-        let engine = SyncEngine::new();
-        let snapshot = Snapshot::try_new(url, &engine, None).unwrap();
+        let snapshot = get_snapshot_from_path("./tests/data/table-with-dv-small/", None);
 
         let expected = Protocol {
             min_reader_version: 3,
@@ -567,13 +563,7 @@ mod tests {
 
     #[test_log::test]
     fn test_read_table_with_checkpoint() {
-        let path = std::fs::canonicalize(PathBuf::from(
-            "./tests/data/with_checkpoint_no_last_checkpoint/",
-        ))
-        .unwrap();
-        let location = url::Url::from_directory_path(path).unwrap();
-        let engine = SyncEngine::new();
-        let snapshot = Snapshot::try_new(location, &engine, None).unwrap();
+        let snapshot = get_snapshot_from_path("./tests/data/with_checkpoint_no_last_checkpoint/", None);
 
         assert_eq!(snapshot.log_segment.checkpoint_files.len(), 1);
         assert_eq!(
