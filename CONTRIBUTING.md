@@ -20,6 +20,6 @@ Always better to get aligned with the core devs before writing any code.
 
 ## Do you have questions about the source code?
 
-Feel free to create an issue or join the Delta Lake Slack channel with questions!
+Feel free to create an issue or join the [Delta Lake Slack](https://go.delta.io/slack) with questions!  We chat in the `#delta-kernel` channel.
 
 Thanks for reading! :heart: :crab:
