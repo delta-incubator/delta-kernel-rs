@@ -155,7 +155,10 @@ pub enum Expression {
         /// The expressions.
         exprs: Vec<Expression>,
     },
-    // TODO: support more expressions, such as IS IN, LIKE, etc.
+    MapAccess {
+        source: Box<Expression>,
+        key: String,
+    },
 }
 
 impl<T: Into<Scalar>> From<T> for Expression {
@@ -200,6 +203,9 @@ impl Display for Expression {
                     )
                 }
             },
+            Self::MapAccess { source, key } => {
+                write!(f, "{}[{}]", *source, key)
+            }
         }
     }
 }
@@ -218,7 +224,7 @@ impl Expression {
         set
     }
 
-    /// Create an new expression for a column reference
+    /// Create a new expression for a column reference
     pub fn column(name: impl ToString) -> Self {
         Self::Column(name.to_string())
     }
@@ -258,6 +264,13 @@ impl Expression {
     pub fn variadic(op: VariadicOperator, exprs: impl IntoIterator<Item = Self>) -> Self {
         let exprs = exprs.into_iter().collect::<Vec<_>>();
         Self::VariadicOperation { op, exprs }
+    }
+
+    pub fn map(source: impl Into<Expression>, key: impl ToString) -> Self {
+        Self::MapAccess {
+            source: Box::new(source.into()),
+            key: key.to_string(),
+        }
     }
 
     /// Creates a new expression AND(exprs...)
@@ -349,6 +362,9 @@ impl Expression {
                 }
                 Self::VariadicOperation { exprs, .. } => {
                     stack.extend(exprs.iter());
+                }
+                Self::MapAccess { source, .. } => {
+                    stack.push(source);
                 }
             }
             Some(expr)

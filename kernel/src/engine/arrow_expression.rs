@@ -1,13 +1,13 @@
 //! Expression handling based on arrow-rs compute kernels.
 use std::sync::Arc;
 
-use arrow_arith::boolean::{and_kleene, is_null, not, or_kleene};
+use arrow_arith::boolean::{and_kleene, is_not_null, is_null, not, or_kleene};
 use arrow_arith::numeric::{add, div, mul, sub};
 use arrow_array::cast::AsArray;
 use arrow_array::types::*;
 use arrow_array::{
     Array, ArrayRef, BinaryArray, BooleanArray, Date32Array, Datum, Decimal128Array, Float32Array,
-    Float64Array, Int16Array, Int32Array, Int64Array, Int8Array, ListArray, RecordBatch,
+    Float64Array, Int16Array, Int32Array, Int64Array, Int8Array, ListArray, MapArray, RecordBatch,
     StringArray, StructArray, TimestampMicrosecondArray,
 };
 use arrow_buffer::OffsetBuffer;
@@ -18,9 +18,10 @@ use arrow_schema::{
     Schema as ArrowSchema, TimeUnit,
 };
 use arrow_select::concat::concat;
+use arrow_select::filter::filter;
 use itertools::Itertools;
 
-use super::arrow_conversion::LIST_ARRAY_ROOT;
+use super::arrow_conversion::{LIST_ARRAY_ROOT, MAP_ROOT_DEFAULT};
 use crate::engine::arrow_data::ArrowEngineData;
 use crate::engine::arrow_utils::ensure_data_types;
 use crate::engine::arrow_utils::prim_array_cmp;
@@ -50,6 +51,14 @@ impl Scalar {
             Double(val) => Arc::new(Float64Array::from_value(*val, num_rows)),
             String(val) => Arc::new(StringArray::from(vec![val.clone(); num_rows])),
             Boolean(val) => Arc::new(BooleanArray::from(vec![*val; num_rows])),
+            // Integer(val) => Arc::new(Int32Array::new_scalar(*val).into_inner()),
+            // Long(val) => Arc::new(Int64Array::new_scalar(*val).into_inner()),
+            // Short(val) => Arc::new(Int16Array::new_scalar(*val).into_inner()),
+            // Byte(val) => Arc::new(Int8Array::new_scalar(*val).into_inner()),
+            // Float(val) => Arc::new(Float32Array::new_scalar(*val).into_inner()),
+            // Double(val) => Arc::new(Float64Array::new_scalar(*val).into_inner()),
+            // String(val) => Arc::new(StringArray::new_scalar(val).into_inner()),
+            // Boolean(val) => Arc::new(BooleanArray::new_scalar(*val).into_inner()),
             Timestamp(val) => {
                 Arc::new(TimestampMicrosecondArray::from_value(*val, num_rows).with_timezone("UTC"))
             }
@@ -120,7 +129,16 @@ impl Scalar {
                         ArrowField::new(LIST_ARRAY_ROOT, t.element_type().try_into()?, true);
                     Arc::new(ListArray::new_null(Arc::new(field), num_rows))
                 }
-                DataType::Map { .. } => unimplemented!(),
+                DataType::Map(m) => {
+                    let field = ArrowField::new(MAP_ROOT_DEFAULT, m.key_type().try_into()?, true);
+                    Arc::new(MapArray::new(
+                        Arc::new(field),
+                        OffsetBuffer::new_empty(),
+                        StructArray::new_empty_fields(num_rows, None),
+                        None,
+                        false,
+                    ))
+                }
             },
         };
         Ok(arr)
@@ -175,14 +193,18 @@ fn column_as_struct<'a>(
     name: &str,
     column: &Option<&'a Arc<dyn Array>>,
 ) -> Result<&'a StructArray, ArrowError> {
-    column
-        .ok_or(ArrowError::SchemaError(format!("No such column: {}", name)))?
-        .as_any()
-        .downcast_ref::<StructArray>()
-        .ok_or(ArrowError::SchemaError(format!("{} is not a struct", name)))
+    let c = column.ok_or(ArrowError::SchemaError(format!("No such column: {}", name)))?;
+    if let arrow_schema::DataType::Map(_, _) = c.data_type() {
+        Ok(c.as_map_opt()
+            .ok_or(ArrowError::SchemaError(format!("{} is not a map", name)))?
+            .entries())
+    } else {
+        c.as_struct_opt()
+            .ok_or(ArrowError::SchemaError(format!("{} is not a struct", name)))
+    }
 }
 
-fn evaluate_expression(
+pub(crate) fn evaluate_expression(
     expression: &Expression,
     batch: &RecordBatch,
     result_type: Option<&DataType>,
@@ -319,8 +341,14 @@ fn evaluate_expression(
                 .map_err(Error::generic_err)
         }
         (BinaryOperation { op, left, right }, _) => {
-            let left_arr = evaluate_expression(left.as_ref(), batch, None)?;
-            let right_arr = evaluate_expression(right.as_ref(), batch, None)?;
+            let mut left_arr = evaluate_expression(left.as_ref(), batch, None)?;
+            let mut right_arr = evaluate_expression(right.as_ref(), batch, None)?;
+
+            if matches!(**left, MapAccess { .. }) {
+                // Only modify arrays for maps...
+                left_arr = left_arr.as_map().values().clone(); // Compare against values since we already filtered to only matching keys
+                right_arr = right_arr.slice(0, left_arr.len()); // Since we don't use a scalar array, modify the array to be of equal length
+            }
 
             type Operation = fn(&dyn Datum, &dyn Datum) -> Result<Arc<dyn Array>, ArrowError>;
             let eval: Operation = match op {
@@ -362,6 +390,16 @@ fn evaluate_expression(
             Err(Error::Generic(format!(
                 "Variadic {expression:?} is expected to return boolean results, got {result_type:?}"
             )))
+        }
+        (MapAccess { source, key }, _) => {
+            let source = evaluate_expression(source, batch, None)?;
+            let entries = source.as_map();
+            let entry_mask = is_not_null(&entries)?;
+            let filtered_entries = filter(&entries, &entry_mask)?;
+            let entries = filtered_entries.as_map();
+            let key_array = StringArray::new_scalar(key); // Keys shouldn't ever be null by definition in arrow, but doing this second filter to be careful
+            let key_mask = eq(entries.keys(), &key_array)?;
+            filter(entries, &key_mask).map_err(Error::generic_err)
         }
     }
 }

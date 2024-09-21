@@ -28,7 +28,7 @@ struct AddRemoveVisitor {
     adds: Vec<(Add, usize)>,
     removes: Vec<Remove>,
     selection_vector: Option<Vec<bool>>,
-    // whether or not we are visiting commit json (=true) or checkpoint (=false)
+    // whether we are visiting commit json (=true) or checkpoint (=false)
     is_log_batch: bool,
 }
 

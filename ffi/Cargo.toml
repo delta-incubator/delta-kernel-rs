@@ -16,7 +16,7 @@ crate-type = ["lib", "cdylib", "staticlib"]
 tracing = "0.1"
 url = "2"
 delta_kernel = { path = "../kernel", default-features = false, features = [
-  "developer-visibility",
+    "developer-visibility",
 ] }
 delta_kernel_ffi_macros = { path = "../ffi-proc-macros", version = "0.3.1" }
 
@@ -40,10 +40,10 @@ trybuild = "1.0"
 [features]
 default = ["default-engine"]
 default-engine = [
-  "delta_kernel/default-engine",
-  "arrow-array",
-  "arrow-data",
-  "arrow-schema",
+    "delta_kernel/default-engine",
+    "arrow-array",
+    "arrow-data",
+    "arrow-schema",
 ]
 sync-engine = ["delta_kernel/sync-engine"]
 developer-visibility = []

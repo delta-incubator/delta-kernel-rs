@@ -90,7 +90,7 @@ fn as_inverted_data_skipping_predicate(expr: &Expr) -> Option<Expr> {
 /// Returns `None` if the predicate is not eligible for data skipping.
 ///
 /// We normalize each binary operation to a comparison between a column and a literal value and
-/// rewite that in terms of the min/max values of the column.
+/// rewrite that in terms of the min/max values of the column.
 /// For example, `1 < a` is rewritten as `minValues.a > 1`.
 ///
 /// For Unary `Not`, we push the Not down using De Morgan's Laws to invert everything below the Not.
@@ -305,6 +305,12 @@ impl DataSkippingFilter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::arrow_data::ArrowEngineData;
+    use crate::engine::arrow_expression::evaluate_expression;
+    use crate::engine::default::executor::tokio::TokioBackgroundExecutor;
+    use crate::engine::default::DefaultEngine;
+    use crate::scan::log_replay::SCAN_ROW_SCHEMA;
+    use crate::{Expression, Table};
 
     #[test]
     fn test_rewrite_basic_comparison() {
@@ -380,5 +386,55 @@ mod tests {
             let rewritten = as_data_skipping_predicate(&input).unwrap();
             assert_eq!(rewritten, expected)
         }
+    }
+
+    #[test]
+    fn test_data_skipping() -> DeltaResult<()> {
+        let table = Table::try_from_uri(
+            r"..\acceptance\tests\dat\out\reader_tests\generated\basic_partitioned\delta",
+        )?;
+        let engine = DefaultEngine::try_new(
+            table.location(),
+            std::iter::empty::<(String, String)>(),
+            Arc::new(TokioBackgroundExecutor::new()),
+        )?;
+        let snapshot = table.snapshot(&engine, Some(1))?;
+        let schema = Arc::new(snapshot.schema().clone());
+        let predicate_expr = Expression::binary(
+            BinaryOperator::Equal,
+            Expression::map(
+                Expression::column("fileConstantValues.partitionValues"),
+                "letter",
+            ),
+            Expression::literal("e"),
+        );
+        let builder = snapshot
+            .into_scan_builder()
+            .with_schema(schema)
+            .with_predicate(predicate_expr.clone())
+            .build()?;
+
+        // let scan = builder.execute(&engine)?;
+        // for sf in scan {
+        //     let data = sf.raw_data?;
+        //     let batch = data.as_any().downcast_ref::<ArrowEngineData>().unwrap();
+        //     print_batches(&[batch.record_batch().clone()])?
+        // }
+        let scan = builder.scan_data(&engine)?;
+
+        for sd in scan {
+            let sd = sd?;
+            let data = sd.0.as_any().downcast_ref::<ArrowEngineData>().unwrap();
+            let result = evaluate_expression(
+                &predicate_expr,
+                data.record_batch(),
+                Some(&DataType::struct_type(
+                    SCAN_ROW_SCHEMA.fields().cloned().collect(),
+                )),
+            );
+            println!("{:?}", result);
+        }
+
+        Ok(())
     }
 }

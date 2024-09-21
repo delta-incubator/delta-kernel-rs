@@ -129,7 +129,8 @@ impl AddVisitor {
         path: String,
         getters: &[&'a dyn GetData<'a>],
     ) -> DeltaResult<Add> {
-        let partition_values: HashMap<_, _> = getters[1].get(row_index, "add.partitionValues")?;
+        let partition_values: HashMap<_, Option<String>> =
+            getters[1].get(row_index, "add.partitionValues")?;
         let size: i64 = getters[2].get(row_index, "add.size")?;
         let modification_time: i64 = getters[3].get(row_index, "add.modificationTime")?;
         let data_change: bool = getters[4].get(row_index, "add.dataChange")?;
@@ -426,8 +427,8 @@ mod tests {
         let add1 = Add {
             path: "c1=4/c2=c/part-00003-f525f459-34f9-46f5-82d6-d42121d883fd.c000.snappy.parquet".into(),
             partition_values: HashMap::from([
-                ("c1".to_string(), "4".to_string()),
-                ("c2".to_string(), "c".to_string()),
+                ("c1".to_string(), Some("4".to_string())),
+                ("c2".to_string(), Some("c".to_string())),
             ]),
             size: 452,
             modification_time: 1670892998135,
@@ -442,8 +443,8 @@ mod tests {
         let add2 = Add {
             path: "c1=5/c2=b/part-00007-4e73fa3b-2c88-424a-8051-f8b54328ffdb.c000.snappy.parquet".into(),
             partition_values: HashMap::from([
-                ("c1".to_string(), "5".to_string()),
-                ("c2".to_string(), "b".to_string()),
+                ("c1".to_string(), Some("5".to_string())),
+                ("c2".to_string(), Some("b".to_string())),
             ]),
             modification_time: 1670892998136,
             stats: Some("{\"numRecords\":1,\"minValues\":{\"c3\":6},\"maxValues\":{\"c3\":6},\"nullCount\":{\"c3\":0}}".into()),
@@ -452,8 +453,8 @@ mod tests {
         let add3 = Add {
             path: "c1=6/c2=a/part-00011-10619b10-b691-4fd0-acc4-2a9608499d7c.c000.snappy.parquet".into(),
             partition_values: HashMap::from([
-                ("c1".to_string(), "6".to_string()),
-                ("c2".to_string(), "a".to_string()),
+                ("c1".to_string(), Some("6".to_string())),
+                ("c2".to_string(), Some("a".to_string())),
             ]),
             modification_time: 1670892998137,
             stats: Some("{\"numRecords\":1,\"minValues\":{\"c3\":4},\"maxValues\":{\"c3\":4},\"nullCount\":{\"c3\":0}}".into()),

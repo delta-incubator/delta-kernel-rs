@@ -25,6 +25,9 @@ pub fn derive_schema(input: proc_macro::TokenStream) -> proc_macro::TokenStream 
                     #schema_fields
                 ]).into()
             }
+            fn nullable() -> bool {
+                false
+            }
         }
     };
     proc_macro::TokenStream::from(output)

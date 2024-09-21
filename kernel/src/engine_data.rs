@@ -49,9 +49,11 @@ impl<'a> ListItem<'a> {
 /// a trait that an engine exposes to give access to a map
 pub trait EngineMap {
     /// Get the item with the specified key from the map at `row_index` in the raw data, and return it as an `Option<&'a str>`
-    fn get<'a>(&'a self, row_index: usize, key: &str) -> Option<&'a str>;
+    fn get(&self, row_index: usize, key: &str) -> Option<&str>;
     /// Materialize the entire map at `row_index` in the raw data into a `HashMap`
     fn materialize(&self, row_index: usize) -> HashMap<String, String>;
+
+    fn materialize_opt(&self, row_index: usize) -> HashMap<String, Option<String>>;
 }
 
 /// A map item is useful if the Engine needs to know what row of raw data it needs to access to
@@ -72,6 +74,27 @@ impl<'a> MapItem<'a> {
 
     pub fn materialize(&self) -> HashMap<String, String> {
         self.map.materialize(self.row)
+    }
+}
+
+/// A map item is useful if the Engine needs to know what row of raw data it needs to access to
+/// implement the [`EngineMap`] trait. It simply wraps such a map, and the row.
+pub struct OptMapItem<'a> {
+    map: &'a dyn EngineMap,
+    row: usize,
+}
+
+impl<'a> OptMapItem<'a> {
+    pub fn new(map: &'a dyn EngineMap, row: usize) -> OptMapItem<'a> {
+        OptMapItem { map, row }
+    }
+
+    pub fn get(&self, key: &str) -> Option<&'a str> {
+        self.map.get(self.row, key)
+    }
+
+    pub fn materialize(&self) -> HashMap<String, Option<String>> {
+        self.map.materialize_opt(self.row)
     }
 }
 
@@ -98,7 +121,8 @@ pub trait GetData<'a> {
         (get_long, i64),
         (get_str, &'a str),
         (get_list, ListItem<'a>),
-        (get_map, MapItem<'a>)
+        (get_map, MapItem<'a>),
+        (get_map_opt, OptMapItem<'a>)
     );
 }
 
@@ -151,7 +175,8 @@ impl_typed_get_data!(
     (get_long, i64),
     (get_str, &'a str),
     (get_list, ListItem<'a>),
-    (get_map, MapItem<'a>)
+    (get_map, MapItem<'a>),
+    (get_map_opt, OptMapItem<'a>)
 );
 
 impl<'a> TypedGetData<'a, String> for dyn GetData<'a> + '_ {
@@ -183,13 +208,26 @@ impl<'a> TypedGetData<'a, HashMap<String, String>> for dyn GetData<'a> + '_ {
     }
 }
 
+/// Provide an impl to get a map field as a `HashMap<String, String>`. Note that this will
+/// allocate the map and allocate for each entry
+impl<'a> TypedGetData<'a, HashMap<String, Option<String>>> for dyn GetData<'a> + '_ {
+    fn get_opt(
+        &'a self,
+        row_index: usize,
+        field_name: &str,
+    ) -> DeltaResult<Option<HashMap<String, Option<String>>>> {
+        let map_opt: Option<OptMapItem<'_>> = self.get_opt(row_index, field_name)?;
+        Ok(map_opt.map(|map| map.materialize()))
+    }
+}
+
 /// A `DataVisitor` can be called back to visit extracted data. Aside from calling
 /// [`DataVisitor::visit`] on the visitor passed to [`EngineData::extract`], engines do
 /// not need to worry about this trait.
 pub trait DataVisitor {
-    // // Receive some data from a call to `extract`. The data in [vals] should not be assumed to live
-    // // beyond the call to this funtion (i.e. it should be copied if needed)
-    // // The row_index parameter must be the index of the found row in the data batch being processed.
+    // Receive some data from a call to `extract`. The data in [vals] should not be assumed to live
+    // beyond the call to this function (i.e. it should be copied if needed)
+    // The row_index parameter must be the index of the found row in the data batch being processed.
     // fn visit(&mut self, row_index: usize, vals: &[Option<DataItem<'_>>]);
 
     /// The visitor is passed a slice of `GetDataItem` values, and a row count.
