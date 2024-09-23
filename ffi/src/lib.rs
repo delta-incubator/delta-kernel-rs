@@ -375,7 +375,7 @@ impl From<Error> for KernelError {
                 backtrace: _,
             } => Self::from(*source),
             Error::InvalidExpressionEvaluation(_) => KernelError::InvalidExpression,
-            Error::InvalidLogPath(_) => KernelError::InvalidUrlError,
+            Error::InvalidLogPath(_) => KernelError::InvalidLogPath,
         }
     }
 }

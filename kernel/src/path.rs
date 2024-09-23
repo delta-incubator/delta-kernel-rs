@@ -40,7 +40,7 @@ enum LogPathFileType {
 #[derive(Debug)]
 #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
 #[cfg_attr(not(feature = "developer-visibility"), visibility::make(pub(crate)))]
-struct ParsedLogPath<Location: CanTryIntoLogPath = FileMeta> {
+struct ParsedLogPath<Location: AsUrl = FileMeta> {
     pub location: Location,
     pub filename: String,
     pub extension: String,
@@ -53,7 +53,7 @@ struct ParsedLogPath<Location: CanTryIntoLogPath = FileMeta> {
 fn parse_path_part<T: FromStr>(
     value: &str,
     expect_len: usize,
-    location: &impl CanTryIntoLogPath,
+    location: &Url,
 ) -> DeltaResult<T> {
     match value.parse() {
         Ok(result) if value.len() == expect_len => Ok(result),
@@ -61,30 +61,34 @@ fn parse_path_part<T: FromStr>(
     }
 }
 
-// In prod, we ~always construct ParsedLogPath from FileMeta, but in testing it's convenient to use
-// a Url instead. This trait decouples the two.
+// We normally construct ParsedLogPath from FileMeta, but in testing it's convenient to use
+// a Url directly instead. This trait decouples the two.
 #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
 #[cfg_attr(not(feature = "developer-visibility"), visibility::make(pub(crate)))]
-trait CanTryIntoLogPath {
+trait AsUrl {
     fn as_url(&self) -> &Url;
 }
 
-impl CanTryIntoLogPath for FileMeta {
+impl AsUrl for FileMeta {
     fn as_url(&self) -> &Url {
         &self.location
     }
 }
 
-impl<Location: CanTryIntoLogPath> ParsedLogPath<Location> {
+impl<Location: AsUrl> ParsedLogPath<Location> {
     // NOTE: We can't actually impl TryFrom because Option<T> is a foreign struct even if T is local.
     pub fn try_from(location: Location) -> DeltaResult<Option<ParsedLogPath<Location>>> {
-        let filename = location
-            .as_url()
+        let url = location.as_url();
+        let filename = url
             .path_segments()
-            .ok_or_else(|| Error::invalid_log_path(&location))?
+            .ok_or_else(|| Error::invalid_log_path(url))?
             .last()
-            .ok_or_else(|| Error::invalid_log_path(&location))?
+            .unwrap() // "the iterator always contains at least one string (which may be empty)"
             .to_string();
+        if filename.is_empty() {
+            return Err(Error::invalid_log_path(url))
+        }
+
         let mut split = filename.split('.');
 
         // NOTE: str::split always returns at least one item, even for the empty string.
@@ -95,7 +99,7 @@ impl<Location: CanTryIntoLogPath> ParsedLogPath<Location> {
         // parsing succeeds for a wrong-length numeric string.
         let version = match version.parse().ok() {
             Some(v) if version.len() == VERSION_LEN => v,
-            Some(_) => return Err(Error::invalid_log_path(&location)),
+            Some(_) => return Err(Error::invalid_log_path(url)),
             None => return Ok(None),
         };
 
@@ -118,24 +122,24 @@ impl<Location: CanTryIntoLogPath> ParsedLogPath<Location> {
 
             // UUID checkpoint: <n>.checkpoint.<uuid>.[json|parquet]
             3 if split[0] == "checkpoint" && (extension == "json" || extension == "parquet") => {
-                let uuid = parse_path_part(split[1], UUID_PART_LEN, &location)?;
+                let uuid = parse_path_part(split[1], UUID_PART_LEN, url)?;
                 LogPathFileType::UuidCheckpoint(uuid)
             }
 
             // Compacted commit: <lo>.<hi>.compacted.json
             3 if split[1] == "compacted" && extension == "json" => {
-                let hi = parse_path_part(split[0], VERSION_LEN, &location)?;
+                let hi = parse_path_part(split[0], VERSION_LEN, url)?;
                 LogPathFileType::CompactedCommit { hi }
             }
 
             // Multi-part checkpoint: <n>.checkpoint.<part_num>.<num_parts>.parquet
             4 if split[0] == "checkpoint" && extension == "parquet" => {
-                let part_num = parse_path_part(split[1], MULTIPART_PART_LEN, &location)?;
-                let num_parts = parse_path_part(split[2], MULTIPART_PART_LEN, &location)?;
+                let part_num = parse_path_part(split[1], MULTIPART_PART_LEN, url)?;
+                let num_parts = parse_path_part(split[2], MULTIPART_PART_LEN, url)?;
 
                 // A valid part_num must be in the range [1, num_parts]
                 if !(0 < part_num && part_num <= num_parts) {
-                    return Err(Error::invalid_log_path(&location));
+                    return Err(Error::invalid_log_path(url));
                 }
                 LogPathFileType::MultiPartCheckpoint {
                     part_num,
@@ -182,22 +186,30 @@ mod tests {
 
     use super::*;
 
-    // Easier to test with Url instead of FileMeta!
-    impl CanTryIntoLogPath for Url {
+    // Easier to test directly with Url instead of FileMeta!
+    impl AsUrl for Url {
         fn as_url(&self) -> &Url {
             self
         }
     }
 
     fn table_log_dir_url() -> Url {
-        let path = PathBuf::from("./tests/data/table-with-dv-small/_delta_log");
+        let path = PathBuf::from("./tests/data/table-with-dv-small/_delta_log/");
         let path = std::fs::canonicalize(path).unwrap();
-        url::Url::from_file_path(path).unwrap()
+        assert!(path.is_dir());
+        let url = url::Url::from_directory_path(path).unwrap();
+        assert!(url.path().ends_with('/'));
+        url
     }
 
     #[test]
     fn test_unknown_invalid_patterns() {
         let table_log_dir = table_log_dir_url();
+
+        // invalid -- not a file
+        let log_path = table_log_dir.join("subdir/").unwrap();
+        assert!(log_path.path().ends_with("/tests/data/table-with-dv-small/_delta_log/subdir/"));
+        ParsedLogPath::try_from(log_path).expect_err("directory path");
 
         // ignored - not versioned
         let log_path = table_log_dir.join("_last_checkpoint").unwrap();

@@ -6,7 +6,6 @@ use std::{
     str::Utf8Error,
 };
 
-use crate::path::CanTryIntoLogPath;
 use crate::schema::DataType;
 
 /// A [`std::result::Result`] that has the kernel [`Error`] as the error variant
@@ -208,8 +207,8 @@ impl Error {
     pub fn invalid_expression(msg: impl ToString) -> Self {
         Self::InvalidExpressionEvaluation(msg.to_string())
     }
-    pub(crate) fn invalid_log_path(msg: &impl CanTryIntoLogPath) -> Self {
-        Self::InvalidLogPath(msg.as_url().to_string())
+    pub(crate) fn invalid_log_path(msg: impl ToString) -> Self {
+        Self::InvalidLogPath(msg.to_string())
     }
 
     pub fn internal_error(msg: impl ToString) -> Self {
