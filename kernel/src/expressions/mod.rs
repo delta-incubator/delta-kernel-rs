@@ -157,7 +157,7 @@ pub enum Expression {
     },
     MapAccess {
         source: Box<Expression>,
-        key: String,
+        key: Option<String>,
     },
 }
 
@@ -204,7 +204,11 @@ impl Display for Expression {
                 }
             },
             Self::MapAccess { source, key } => {
-                write!(f, "{}[{}]", *source, key)
+                write!(f, "{}", *source)?;
+                if let Some(key) = key {
+                    write!(f, "[{}]", key)?;
+                }
+                Ok(())
             }
         }
     }
@@ -266,10 +270,10 @@ impl Expression {
         Self::VariadicOperation { op, exprs }
     }
 
-    pub fn map(source: impl Into<Expression>, key: impl ToString) -> Self {
+    pub fn map(source: impl Into<Expression>, key: Option<&str>) -> Self {
         Self::MapAccess {
             source: Box::new(source.into()),
-            key: key.to_string(),
+            key: key.map(Into::into),
         }
     }
 

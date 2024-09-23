@@ -101,7 +101,7 @@ lazy_static! {
             "fileConstantValues",
             StructType::new(vec![StructField::new(
                 "partitionValues",
-                MapType::new(DataType::STRING, DataType::STRING, false),
+                MapType::new(DataType::STRING, DataType::STRING, true),
                 true,
             )]),
             true
