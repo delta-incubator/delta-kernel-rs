@@ -234,14 +234,17 @@ impl FileOpener for PresignedUrlOpener {
 
 #[cfg(test)]
 mod tests {
+    use std::ops::Not;
     use std::path::PathBuf;
 
     use arrow_array::RecordBatch;
     use object_store::{local::LocalFileSystem, ObjectStore};
 
+    use crate::actions::{Metadata, Protocol};
     use crate::engine::arrow_data::ArrowEngineData;
     use crate::engine::default::executor::tokio::TokioBackgroundExecutor;
     use crate::EngineData;
+    use Expression as Expr;
 
     use itertools::Itertools;
 
@@ -255,13 +258,10 @@ mod tests {
             .map(Into::into)
     }
 
-    #[tokio::test]
-    async fn test_read_parquet_files() {
+    async fn get_record_batch(path: &str, predicate: Option<Expression>) -> Vec<RecordBatch> {
         let store = Arc::new(LocalFileSystem::new());
 
-        let path = std::fs::canonicalize(PathBuf::from(
-            "./tests/data/table-with-dv-small/part-00000-fae5310a-a37d-4e51-827b-c3d5516560ca-c000.snappy.parquet"
-        )).unwrap();
+        let path = std::fs::canonicalize(PathBuf::from(path)).unwrap();
         let url = url::Url::from_file_path(path).unwrap();
         let location = Path::from(url.path());
         let meta = store.head(&location).await.unwrap();
@@ -280,14 +280,79 @@ mod tests {
         }];
 
         let handler = DefaultParquetHandler::new(store, Arc::new(TokioBackgroundExecutor::new()));
-        let data: Vec<RecordBatch> = handler
-            .read_parquet_files(files, Arc::new(physical_schema.try_into().unwrap()), None)
+        handler
+            .read_parquet_files(
+                files,
+                Arc::new(physical_schema.try_into().unwrap()),
+                predicate,
+            )
             .unwrap()
             .map(into_record_batch)
             .try_collect()
-            .unwrap();
+            .unwrap()
+    }
 
-        assert_eq!(data.len(), 1);
-        assert_eq!(data[0].num_rows(), 10);
+    #[tokio::test]
+    async fn test_read_parquet_files_with_empty_output() {
+        let predicate = Some(Expr::lt(Expr::column("value"), Expr::literal(0)));
+        let path = "./tests/data/table-with-dv-small/part-00000-fae5310a-a37d-4e51-827b-c3d5516560ca-c000.snappy.parquet";
+        let data = get_record_batch(path, predicate).await;
+        assert_eq!(data.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_read_parquet_files_filter_data() {
+        let cases = [
+            (
+                5,
+                Some(Expr::gt_eq(Expr::column("value"), Expr::literal(5))),
+            ),
+            (1, Some(Expr::gt(Expr::column("value"), Expr::literal(8)))),
+            (10, None),
+        ];
+        let path = "./tests/data/table-with-dv-small/part-00000-fae5310a-a37d-4e51-827b-c3d5516560ca-c000.snappy.parquet";
+        for (num_rows, predicate) in cases {
+            let data = get_record_batch(path, predicate).await;
+            assert_eq!(data.len(), 1);
+            assert_eq!(data[0].num_rows(), num_rows);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_parquet_protocol_metadata_filter() {
+        let predicate = Some(Expr::or(
+            Expr::not(Expr::is_null(Expr::column("metaData.id"))),
+            Expr::not(Expr::is_null(Expr::column("protocol.minReaderVersion"))),
+        ));
+
+        let path =
+            "./tests/data/app-txn-checkpoint/_delta_log/00000000000000000001.checkpoint.parquet";
+        let data_filtered = get_record_batch(path, predicate).await;
+        let data = get_record_batch(path, None).await;
+
+        let mut metadata_filtered: Vec<Metadata> = vec![];
+        let mut metadata_expected: Vec<Metadata> = vec![];
+        let mut protocol_filtered: Vec<Protocol> = vec![];
+        let mut protocol_expected: Vec<Protocol> = vec![];
+
+        for batch in data_filtered.into_iter().map(Into::<ArrowEngineData>::into) {
+            if let Some(metadata) = Metadata::try_new_from_data(&batch).unwrap() {
+                metadata_filtered.push(metadata);
+            }
+            if let Some(protocol) = Protocol::try_new_from_data(&batch).unwrap() {
+                protocol_filtered.push(protocol);
+            }
+        }
+        for batch in data.into_iter().map(Into::<ArrowEngineData>::into) {
+            if let Some(metadata) = Metadata::try_new_from_data(&batch).unwrap() {
+                metadata_expected.push(metadata);
+            }
+            if let Some(protocol) = Protocol::try_new_from_data(&batch).unwrap() {
+                protocol_expected.push(protocol);
+            }
+        }
+
+        assert_eq!(metadata_filtered, metadata_expected);
+        assert_eq!(protocol_expected, protocol_expected);
     }
 }
