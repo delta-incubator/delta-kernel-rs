@@ -338,9 +338,10 @@ mod tests {
         for batch in data_filtered.into_iter().map(Into::<ArrowEngineData>::into) {
             if let Some(metadata) = Metadata::try_new_from_data(&batch).unwrap() {
                 metadata_filtered.push(metadata);
-            }
-            if let Some(protocol) = Protocol::try_new_from_data(&batch).unwrap() {
+            } else if let Some(protocol) = Protocol::try_new_from_data(&batch).unwrap() {
                 protocol_filtered.push(protocol);
+            } else {
+                panic!("The filtered data must only have metadata or protocol entries");
             }
         }
         for batch in data.into_iter().map(Into::<ArrowEngineData>::into) {
