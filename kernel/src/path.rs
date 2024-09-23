@@ -50,11 +50,7 @@ struct ParsedLogPath<Location: AsUrl = FileMeta> {
 
 // Internal helper used by TryFrom<FileMeta> below. It parses a fixed-length string into the numeric
 // type expected by the caller. A wrong length produces an error, even if the parse succeeded.
-fn parse_path_part<T: FromStr>(
-    value: &str,
-    expect_len: usize,
-    location: &Url,
-) -> DeltaResult<T> {
+fn parse_path_part<T: FromStr>(value: &str, expect_len: usize, location: &Url) -> DeltaResult<T> {
     match value.parse() {
         Ok(result) if value.len() == expect_len => Ok(result),
         _ => Err(Error::invalid_log_path(location)),
@@ -86,7 +82,7 @@ impl<Location: AsUrl> ParsedLogPath<Location> {
             .unwrap() // "the iterator always contains at least one string (which may be empty)"
             .to_string();
         if filename.is_empty() {
-            return Err(Error::invalid_log_path(url))
+            return Err(Error::invalid_log_path(url));
         }
 
         let mut split = filename.split('.');
@@ -208,7 +204,9 @@ mod tests {
 
         // invalid -- not a file
         let log_path = table_log_dir.join("subdir/").unwrap();
-        assert!(log_path.path().ends_with("/tests/data/table-with-dv-small/_delta_log/subdir/"));
+        assert!(log_path
+            .path()
+            .ends_with("/tests/data/table-with-dv-small/_delta_log/subdir/"));
         ParsedLogPath::try_from(log_path).expect_err("directory path");
 
         // ignored - not versioned
