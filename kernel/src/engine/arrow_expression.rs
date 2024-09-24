@@ -34,13 +34,14 @@ use arrow_schema::SchemaRef as ArrowSchemaRef;
 use parquet::schema::types::SchemaDescriptor;
 
 // TODO leverage scalars / Datum
+
 pub fn expression_to_row_filter(
     predicate: Expression,
     requested_schema: &SchemaRef,
     parquet_schema: &ArrowSchemaRef,
     parquet_physical_schema: &SchemaDescriptor,
 ) -> DeltaResult<RowFilter> {
-    let cols = expression_to_columns(&predicate);
+    let cols = get_columns_from_expression(&predicate);
     let expr_schema = requested_schema.project(&cols).unwrap();
     let (indices, _) = get_requested_indices(&expr_schema, parquet_schema).unwrap();
     let projection_mask = generate_mask(
@@ -61,28 +62,31 @@ pub fn expression_to_row_filter(
     Ok(RowFilter::new(vec![Box::new(arrow_predicate)]))
 }
 
-pub fn expression_to_columns(expr: &Expression) -> Vec<String> {
-    fn expression_to_columns_impl(expr: &Expression, out: &mut Vec<String>) {
+pub fn get_columns_from_expression(expr: &Expression) -> Vec<String> {
+    fn get_columns_from_expression_impl(expr: &Expression, out: &mut Vec<String>) {
         match expr {
             Expression::Column(col_name) => {
-                out.push(col_name.split('.').next().unwrap_or(col_name).to_string())
+                let root_name = col_name.split('.').next().unwrap_or(col_name).to_string();
+                out.push(root_name)
             }
             Expression::Struct(fields) => fields
                 .iter()
-                .for_each(|expr| expression_to_columns_impl(expr, out)),
+                .for_each(|expr| get_columns_from_expression_impl(expr, out)),
             Expression::BinaryOperation { op: _, left, right } => {
-                expression_to_columns_impl(left, out);
-                expression_to_columns_impl(right, out);
+                get_columns_from_expression_impl(left, out);
+                get_columns_from_expression_impl(right, out);
             }
-            Expression::UnaryOperation { op: _, expr } => expression_to_columns_impl(expr, out),
+            Expression::UnaryOperation { op: _, expr } => {
+                get_columns_from_expression_impl(expr, out)
+            }
             Expression::VariadicOperation { op: _, exprs } => exprs
                 .iter()
-                .for_each(|expr| expression_to_columns_impl(expr, out)),
+                .for_each(|expr| get_columns_from_expression_impl(expr, out)),
             _ => (),
         }
     }
     let mut out = vec![];
-    expression_to_columns_impl(expr, &mut out);
+    get_columns_from_expression_impl(expr, &mut out);
     out
 }
 
