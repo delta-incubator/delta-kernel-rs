@@ -237,7 +237,7 @@ impl Scan {
     pub fn execute<'a>(
         &'a self,
         engine: &'a dyn Engine,
-    ) -> DeltaResult<Box<dyn Iterator<Item = DeltaResult<ScanResult>> + 'a>> {
+    ) -> DeltaResult<impl Iterator<Item = DeltaResult<ScanResult>> + 'a> {
         struct ScanFile {
             path: String,
             size: i64,
