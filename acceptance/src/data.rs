@@ -128,7 +128,8 @@ pub async fn assert_scan_data(engine: Arc<dyn Engine>, test_case: &TestCaseInfo)
     let batches: Vec<RecordBatch> = scan
         .execute(engine)?
         .map(|res| {
-            let data = res.unwrap().raw_data.unwrap();
+            let res = res.unwrap();
+            let data = res.raw_data.unwrap();
             let record_batch: RecordBatch = data
                 .into_any()
                 .downcast::<ArrowEngineData>()
