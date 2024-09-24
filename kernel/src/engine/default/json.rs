@@ -139,20 +139,63 @@ impl<E: TaskExecutor> JsonHandler for DefaultJsonHandler<E> {
     // each row represents an action in the delta log. this PUT must:
     // (1) serialize the data to newline-delimited json (each row is a json object)
     // (2) write the data to the object store atomically (i.e. if the file already exists, fail)
-    fn put_json(&self, path: &url::Url, data: Box<dyn EngineData>) -> DeltaResult<()> {
-        let batch: Box<_> = ArrowEngineData::try_from_engine_data(data)?;
-        let record_batch = batch.record_batch();
-        let mut writer = arrow_json::LineDelimitedWriter::new(vec![]);
-        writer.write_batches(&vec![record_batch]).unwrap();
-        writer.finish().unwrap();
+    fn write_json(
+        &self,
+        path: &url::Url,
+        data: Box<dyn Iterator<Item = Box<dyn EngineData>> + Send>,
+    ) -> DeltaResult<()> {
+        // Initialize schema and batches
+        let mut schema: Option<ArrowSchemaRef> = None;
+        let mut batches: Vec<RecordBatch> = Vec::new();
+
+        for chunk in data {
+            // Convert EngineData to ArrowEngineData
+            let arrow_data = ArrowEngineData::try_from_engine_data(chunk)?;
+
+            // Get the RecordBatch (assuming it's a reference)
+            let record_batch = arrow_data.record_batch();
+
+            // Set the schema if not already set
+            if schema.is_none() {
+                schema = Some(record_batch.schema());
+            }
+
+            // Clone and push the RecordBatch into the vector
+            batches.push(record_batch.clone());
+        }
+
+        let schema = match schema {
+            Some(s) => s,
+            None => {
+                return Err(crate::error::Error::Generic(
+                    "No data available to write to JSON.".to_string(),
+                ))
+            }
+        };
+
+        // Concatenate all batches into one
+        let concatenated_batch = concat_batches(&schema, &batches)?;
+
+        // Write the concatenated batch to JSON
+        let mut writer = arrow_json::LineDelimitedWriter::new(Vec::new());
+        writer.write_batches(&[&concatenated_batch])?;
+        writer.finish()?;
+
         let buffer = writer.into_inner();
+
         println!("[Engine put_json] commit path: {:?}", path.path());
-        // put if absent
+
+        // Put if absent
         futures::executor::block_on(async {
             self.store
-                .put_opts(&Path::from(path.path()), buffer.into(), object_store::PutMode::Create.into())
+                .put_opts(
+                    &Path::from(path.path()),
+                    buffer.into(),
+                    object_store::PutMode::Create.into(),
+                )
                 .await
         })?;
+
         Ok(())
     }
 }

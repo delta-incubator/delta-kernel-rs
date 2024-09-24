@@ -63,6 +63,7 @@ pub(crate) fn ensure_data_types(
     kernel_type: &DataType,
     arrow_type: &ArrowDataType,
 ) -> DeltaResult<DataTypeCompat> {
+    println!("ensure_data_types: kernel_type: {:?}, arrow_type: {:?}", kernel_type, arrow_type);
     match (kernel_type, arrow_type) {
         (DataType::Primitive(_), _) if arrow_type.is_primitive() => {
             check_cast_compat(kernel_type.try_into()?, arrow_type)

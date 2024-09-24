@@ -193,7 +193,8 @@ pub trait JsonHandler: Send + Sync {
         predicate: Option<Expression>,
     ) -> DeltaResult<FileDataReadResultIterator>;
 
-    fn put_json(&self, path: &Url, data: Box<dyn EngineData>) -> DeltaResult<()>;
+    /// should write atomically
+    fn write_json(&self, path: &Url, data: Box<dyn Iterator<Item = Box<dyn EngineData>> + Send>) -> DeltaResult<()>;
 }
 
 /// Provides Parquet file related functionalities to Delta Kernel.

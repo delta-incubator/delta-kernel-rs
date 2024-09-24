@@ -104,6 +104,22 @@ impl LogSegment {
 /// have a defined schema (which may change over time for any given table), specific version, and
 /// frozen log segment.
 
+
+
+// 1. self-describing
+// 2. _delta_log/ directory
+// 3. data files
+//
+// table/
+// ├── _delta_log/
+// │   ├── 00000000000000000000.json
+// │   ├── 00000000000000000001.json
+// │   ├── ...
+// │   └── 00000000000000000010.json
+// ├── UUID1.parquet
+// ├── UUID2.parquet
+
+
 pub struct Snapshot {
     pub(crate) table_root: Url,
     pub(crate) log_segment: LogSegment,

@@ -1,10 +1,12 @@
+use std::mem;
 use std::sync::Arc;
 
 // use delta_kernel_derive::Schema;
-use tracing::info;
+use itertools::chain;
 use url::Url;
 
 use crate::schema::SchemaRef;
+use crate::schema::{DataType, StructField};
 use crate::snapshot::Snapshot;
 use crate::{DeltaResult, Engine, EngineData, Expression, Version};
 
@@ -94,8 +96,9 @@ impl TransactionBuilder {
 /// of the table during the transaction.
 pub struct Transaction {
     read_snapshot: Arc<Snapshot>,
-    // TODO rename
-    write_metadata: Option<Box<dyn EngineData>>,
+    commit_info: Option<Box<dyn EngineData>>,
+    // iterator of write metadata
+    write_metadata: Box<dyn Iterator<Item = Box<dyn EngineData>> + Send>,
 }
 
 /// Result of committing a transaction.
@@ -117,7 +120,7 @@ pub enum CommitResult {
         latest_version: Version,
         conflict: CommitConflict,
         transaction: Transaction,
-    }
+    },
 }
 
 pub enum CommitConflict {
@@ -133,7 +136,8 @@ impl Transaction {
     pub fn new(snapshot: impl Into<Arc<Snapshot>>) -> Self {
         Self {
             read_snapshot: snapshot.into(),
-            write_metadata: None,
+            write_metadata: Box::new(std::iter::empty::<Box<dyn EngineData>>()),
+            commit_info: None,
         }
     }
 
@@ -154,8 +158,50 @@ impl Transaction {
     /// add write metadata to the transaction, where the metadata has specific schema (link)
     /// for now this will overwrite any previous write metadata
     /// TODO this should actually stream the data
-    pub fn add_write_metadata(&mut self, data: Box<dyn EngineData>) {
-        self.write_metadata = Some(data);
+    pub fn add_write_metadata(
+        &mut self,
+        data: Box<dyn Iterator<Item = Box<dyn EngineData>> + Send>,
+    ) {
+        let write_metadata = mem::replace(&mut self.write_metadata, Box::new(std::iter::empty()));
+        self.write_metadata = Box::new(chain(write_metadata, data));
+    }
+
+    /// Add commit info to the transaction. This is commit-wide metadata that is written as the
+    /// first action in the commit. Note it is required in order to commit. If the engine does not
+    /// require any commit info, pass an empty `EngineData`.
+    pub fn commit_info(&mut self, commit_info: Box<dyn EngineData>) {
+        self.commit_info = Some(commit_info);
+    }
+
+    fn generate_commit_info(&self, engine: &dyn Engine) -> Box<dyn EngineData> {
+        // augment commit info so that it looks like: {"commitInfo": {<engine's commit info>}}
+        let expr = Expression::Struct(vec![Expression::Column("engineInfo".to_owned())]);
+
+        let engine_commit_info_schema =
+            Box::new(crate::schema::StructType::new(vec![StructField::new(
+                "engineInfo",
+                DataType::STRING,
+                true,
+            )]));
+        let commit_info_schema = Arc::new(crate::schema::StructType::new(vec![StructField::new(
+            "commitInfo",
+            DataType::Struct(engine_commit_info_schema.clone()),
+            true,
+        )]));
+        engine
+            .get_expression_handler()
+            .get_evaluator(
+                Arc::from(engine_commit_info_schema),
+                expr,
+                commit_info_schema.into(),
+            )
+            .evaluate(
+                self.commit_info
+                    .as_ref()
+                    .expect("commit info not set")
+                    .as_ref(),
+            )
+            .unwrap()
     }
 
     // TODO conflict resolution
@@ -169,13 +215,9 @@ impl Transaction {
             .table_root
             .join("_delta_log/")?
             .join(&commit_file_name)?;
-        if let Some(write_metadata) = self.write_metadata {
-            json_handler.put_json(commit_path, write_metadata)?;
-            Ok(CommitResult::Committed(commit_version))
-        } else {
-            // FIXME this should be error
-            info!("No writes to commit");
-            Ok(CommitResult::NoCommit)
-        }
+        let commit_info = self.generate_commit_info(engine);
+        let actions = Box::new(chain(std::iter::once(commit_info), self.write_metadata));
+        json_handler.write_json(commit_path, actions)?;
+        Ok(CommitResult::Committed(commit_version))
     }
 }
