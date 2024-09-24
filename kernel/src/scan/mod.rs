@@ -322,7 +322,7 @@ impl Scan {
             .flatten_ok()
             .flatten_ok()
             .flatten_ok();
-        Ok(Box::new(scan_result_iter))
+        Ok(scan_result_iter)
     }
 }
 
