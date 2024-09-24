@@ -136,7 +136,12 @@ impl FileOpener for ParquetOpener {
             if let Some(predicate) = predicate {
                 let parquet_schema = metadata.schema();
                 let parquet_physical_schema = metadata.parquet_schema();
-                let row_filter = expression_to_row_filter(predicate, &table_schema, parquet_schema, parquet_physical_schema)?;
+                let row_filter = expression_to_row_filter(
+                    predicate,
+                    &table_schema,
+                    parquet_schema,
+                    parquet_physical_schema,
+                )?;
                 builder = builder.with_row_filter(row_filter);
             }
             if let Some(mask) = generate_mask(
@@ -217,7 +222,12 @@ impl FileOpener for PresignedUrlOpener {
             if let Some(predicate) = predicate {
                 let parquet_schema = metadata.schema();
                 let parquet_physical_schema = metadata.parquet_schema();
-                let row_filter = expression_to_row_filter(predicate, &table_schema, parquet_schema, parquet_physical_schema)?;
+                let row_filter = expression_to_row_filter(
+                    predicate,
+                    &table_schema,
+                    parquet_schema,
+                    parquet_physical_schema,
+                )?;
                 builder = builder.with_row_filter(row_filter);
             }
             if let Some(limit) = limit {

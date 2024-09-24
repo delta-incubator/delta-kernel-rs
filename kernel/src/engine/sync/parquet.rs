@@ -33,7 +33,8 @@ fn try_create_from_parquet(
     if let Some(predicate) = predicate {
         let parquet_schema = metadata.schema();
         let parquet_physical_schema = metadata.parquet_schema();
-        let row_filter = expression_to_row_filter(predicate, &schema, parquet_schema, parquet_physical_schema)?;
+        let row_filter =
+            expression_to_row_filter(predicate, &schema, parquet_schema, parquet_physical_schema)?;
         builder = builder.with_row_filter(row_filter);
     }
     let mut reader = builder.build()?;

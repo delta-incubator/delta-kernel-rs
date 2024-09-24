@@ -34,7 +34,6 @@ use arrow_schema::SchemaRef as ArrowSchemaRef;
 use parquet::schema::types::SchemaDescriptor;
 
 // TODO leverage scalars / Datum
-//
 pub fn expression_to_row_filter(
     predicate: Expression,
     requested_schema: &SchemaRef,
@@ -49,7 +48,8 @@ pub fn expression_to_row_filter(
         parquet_schema,
         parquet_physical_schema,
         &indices,
-    ).unwrap_or(ProjectionMask::all());
+    )
+    .unwrap_or(ProjectionMask::all());
     let arrow_predicate = ArrowPredicateFn::new(projection_mask, move |batch| {
         downcast_to_bool(
             &evaluate_expression(&predicate, &batch, None)
@@ -64,7 +64,9 @@ pub fn expression_to_row_filter(
 pub fn expression_to_columns(expr: &Expression) -> Vec<String> {
     fn expression_to_columns_impl(expr: &Expression, out: &mut Vec<String>) {
         match expr {
-            Expression::Column(col_name) => out.push(col_name.split('.').next().unwrap_or(col_name).to_string()),
+            Expression::Column(col_name) => {
+                out.push(col_name.split('.').next().unwrap_or(col_name).to_string())
+            }
             Expression::Struct(fields) => fields
                 .iter()
                 .for_each(|expr| expression_to_columns_impl(expr, out)),
