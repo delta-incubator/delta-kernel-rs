@@ -20,6 +20,39 @@ use itertools::Itertools;
 use parquet::{arrow::ProjectionMask, schema::types::SchemaDescriptor};
 use tracing::debug;
 
+macro_rules! prim_array_cmp {
+    ( $left_arr: ident, $right_arr: ident, $(($data_ty: pat, $prim_ty: ty)),+ ) => {
+
+        return match $left_arr.data_type() {
+        $(
+            $data_ty => {
+                let prim_array = $left_arr.as_primitive_opt::<$prim_ty>()
+                        .ok_or(Error::invalid_expression(
+                            format!("Cannot cast to primitive array: {}", $left_arr.data_type()))
+                        )?;
+                    let list_array = $right_arr.as_list_opt::<i32>()
+                        .ok_or(Error::invalid_expression(
+                            format!("Cannot cast to list array: {}", $right_arr.data_type()))
+                        )?;
+                arrow_ord::comparison::in_list(prim_array, list_array).map(wrap_comparison_result)
+            }
+        )+
+            _ => Err(ArrowError::CastError(
+                        format!("Bad Comparison between: {:?} and {:?}",
+                            $left_arr.data_type(),
+                            $right_arr.data_type())
+                        )
+                )
+        }.map_err(Error::generic_err);
+    };
+}
+
+pub(crate) use prim_array_cmp;
+
+/// Get the indicies in `parquet_schema` of the specified columns in `requested_schema`. This
+/// returns a tuples of (mask_indicies: Vec<parquet_schema_index>, reorder_indicies:
+/// Vec<requested_index>). `mask_indicies` is used for generating the mask for reading from the
+
 fn make_arrow_error(s: String) -> Error {
     Error::Arrow(arrow_schema::ArrowError::InvalidArgumentError(s))
 }
@@ -40,17 +73,52 @@ fn check_cast_compat(
     target_type: ArrowDataType,
     source_type: &ArrowDataType,
 ) -> DeltaResult<DataTypeCompat> {
+    use ArrowDataType::*;
+
     match (source_type, &target_type) {
         (source_type, target_type) if source_type == target_type => Ok(DataTypeCompat::Identical),
         (&ArrowDataType::Timestamp(_, _), &ArrowDataType::Timestamp(_, _)) => {
             // timestamps are able to be cast between each other
             Ok(DataTypeCompat::NeedsCast(target_type))
         }
+        // Allow up-casting to a larger type if it's safe and can't cause overflow or loss of precision.
+        (Int8, Int16 | Int32 | Int64 | Float64) => Ok(DataTypeCompat::NeedsCast(target_type)),
+        (Int16, Int32 | Int64 | Float64) => Ok(DataTypeCompat::NeedsCast(target_type)),
+        (Int32, Int64 | Float64) => Ok(DataTypeCompat::NeedsCast(target_type)),
+        (Float32, Float64) => Ok(DataTypeCompat::NeedsCast(target_type)),
+        (_, Decimal128(p, s)) if can_upcast_to_decimal(source_type, *p, *s) => {
+            Ok(DataTypeCompat::NeedsCast(target_type))
+        }
+        (Date32, Timestamp(_, None)) => Ok(DataTypeCompat::NeedsCast(target_type)),
         _ => Err(make_arrow_error(format!(
             "Incorrect datatype. Expected {}, got {}",
             target_type, source_type
         ))),
     }
+}
+
+// Returns whether the given source type can be safely cast to a decimal with the given precision and scale without
+// loss of information.
+fn can_upcast_to_decimal(
+    source_type: &ArrowDataType,
+    target_precision: u8,
+    target_scale: i8,
+) -> bool {
+    use ArrowDataType::*;
+
+    let (source_precision, source_scale) = match source_type {
+        Decimal128(p, s) => (*p, *s),
+        // Allow converting integers to a decimal that can hold all possible values.
+        Int8 => (3u8, 0i8),
+        Int16 => (5u8, 0i8),
+        Int32 => (10u8, 0i8),
+        Int64 => (20u8, 0i8),
+        _ => return false,
+    };
+
+    target_precision >= source_precision
+        && target_scale >= source_scale
+        && target_precision - source_precision >= (target_scale - source_scale) as u8
 }
 
 /// Ensure a kernel data type matches an arrow data type. This only ensures that the actual "type"
@@ -385,7 +453,7 @@ fn get_indices(
                             array_type.contains_null,
                         )]);
                         let (parquet_advance, mut children) = get_indices(
-                            found_fields.len() + parquet_offset,
+                            parquet_index + parquet_offset,
                             &requested_schema,
                             &[list_field.clone()].into(),
                             mask_indices,
@@ -499,6 +567,7 @@ fn get_indices(
 /// Get the indices in `parquet_schema` of the specified columns in `requested_schema`. This returns
 /// a tuple of (mask_indices: Vec<parquet_schema_index>, reorder_indices:
 /// Vec<requested_index>). `mask_indices` is used for generating the mask for reading from the
+
 /// parquet file, and simply contains an entry for each index we wish to select from the parquet
 /// file set to the index of the requested column in the parquet. `reorder_indices` is used for
 /// re-ordering. See the documentation for [`ReorderIndex`] to understand what each element in the
@@ -968,6 +1037,33 @@ mod tests {
     }
 
     #[test]
+    fn list_skip_earlier_element() {
+        let requested_schema = Arc::new(StructType::new(vec![StructField::new(
+            "list",
+            ArrayType::new(DataType::INTEGER, false),
+            false,
+        )]));
+        let parquet_schema = Arc::new(ArrowSchema::new(vec![
+            ArrowField::new("i", ArrowDataType::Int32, false),
+            ArrowField::new(
+                "list",
+                ArrowDataType::List(Arc::new(ArrowField::new(
+                    "nested",
+                    ArrowDataType::Int32,
+                    false,
+                ))),
+                false,
+            ),
+        ]));
+        let (mask_indices, reorder_indices) =
+            get_requested_indices(&requested_schema, &parquet_schema).unwrap();
+        let expect_mask = vec![1];
+        let expect_reorder = vec![ReorderIndex::identity(0)];
+        assert_eq!(mask_indices, expect_mask);
+        assert_eq!(reorder_indices, expect_reorder);
+    }
+
+    #[test]
     fn nested_indices_list() {
         let requested_schema = Arc::new(StructType::new(vec![
             StructField::new("i", DataType::INTEGER, false),
@@ -1366,5 +1462,62 @@ mod tests {
         let expect_reorder = vec![];
         assert_eq!(mask_indices, expect_mask);
         assert_eq!(reorder_indices, expect_reorder);
+    }
+
+    #[test]
+    fn accepts_safe_decimal_casts() {
+        use super::can_upcast_to_decimal;
+        use ArrowDataType::*;
+
+        assert!(can_upcast_to_decimal(&Decimal128(1, 0), 2u8, 0i8));
+        assert!(can_upcast_to_decimal(&Decimal128(1, 0), 2u8, 1i8));
+        assert!(can_upcast_to_decimal(&Decimal128(5, -2), 6u8, -2i8));
+        assert!(can_upcast_to_decimal(&Decimal128(5, -2), 6u8, -1i8));
+        assert!(can_upcast_to_decimal(&Decimal128(5, 1), 6u8, 1i8));
+        assert!(can_upcast_to_decimal(&Decimal128(5, 1), 6u8, 2i8));
+        assert!(can_upcast_to_decimal(
+            &Decimal128(10, 5),
+            arrow_schema::DECIMAL128_MAX_PRECISION,
+            arrow_schema::DECIMAL128_MAX_SCALE - 5
+        ));
+
+        assert!(can_upcast_to_decimal(&Int8, 3u8, 0i8));
+        assert!(can_upcast_to_decimal(&Int8, 4u8, 0i8));
+        assert!(can_upcast_to_decimal(&Int8, 4u8, 1i8));
+        assert!(can_upcast_to_decimal(&Int8, 7u8, 2i8));
+
+        assert!(can_upcast_to_decimal(&Int16, 5u8, 0i8));
+        assert!(can_upcast_to_decimal(&Int16, 6u8, 0i8));
+        assert!(can_upcast_to_decimal(&Int16, 6u8, 1i8));
+        assert!(can_upcast_to_decimal(&Int16, 9u8, 2i8));
+
+        assert!(can_upcast_to_decimal(&Int32, 10u8, 0i8));
+        assert!(can_upcast_to_decimal(&Int32, 11u8, 0i8));
+        assert!(can_upcast_to_decimal(&Int32, 11u8, 1i8));
+        assert!(can_upcast_to_decimal(&Int32, 14u8, 2i8));
+
+        assert!(can_upcast_to_decimal(&Int64, 20u8, 0i8));
+        assert!(can_upcast_to_decimal(&Int64, 21u8, 0i8));
+        assert!(can_upcast_to_decimal(&Int64, 21u8, 1i8));
+        assert!(can_upcast_to_decimal(&Int64, 24u8, 2i8));
+    }
+
+    #[test]
+    fn rejects_unsafe_decimal_casts() {
+        use super::can_upcast_to_decimal;
+        use ArrowDataType::*;
+
+        assert!(!can_upcast_to_decimal(&Decimal128(2, 0), 2u8, 1i8));
+        assert!(!can_upcast_to_decimal(&Decimal128(2, 0), 2u8, -1i8));
+        assert!(!can_upcast_to_decimal(&Decimal128(5, 2), 6u8, 4i8));
+
+        assert!(!can_upcast_to_decimal(&Int8, 2u8, 0i8));
+        assert!(!can_upcast_to_decimal(&Int8, 3u8, 1i8));
+        assert!(!can_upcast_to_decimal(&Int16, 4u8, 0i8));
+        assert!(!can_upcast_to_decimal(&Int16, 5u8, 1i8));
+        assert!(!can_upcast_to_decimal(&Int32, 9u8, 0i8));
+        assert!(!can_upcast_to_decimal(&Int32, 10u8, 1i8));
+        assert!(!can_upcast_to_decimal(&Int64, 19u8, 0i8));
+        assert!(!can_upcast_to_decimal(&Int64, 20u8, 1i8));
     }
 }

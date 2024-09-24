@@ -627,7 +627,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[test_log::test]
     fn test_scan_data() {
         let path =
             std::fs::canonicalize(PathBuf::from("./tests/data/table-without-dv-small/")).unwrap();
