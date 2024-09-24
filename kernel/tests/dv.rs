@@ -43,9 +43,10 @@ fn non_dv_table() -> Result<(), Box<dyn std::error::Error>> {
     let snapshot = table.snapshot(&engine, None)?;
     let scan = snapshot.into_scan_builder().build()?;
 
-    let stream = scan.execute(&engine)?.map(Result::unwrap);
+    let stream = scan.execute(&engine)?;
     let mut total_rows = 0;
     for res in stream {
+        let res = res?;
         let data = res.raw_data?;
         let rows = data.length();
         for i in 0..rows {

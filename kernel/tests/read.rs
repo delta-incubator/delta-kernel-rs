@@ -18,7 +18,6 @@ use delta_kernel::scan::state::{visit_scan_files, DvInfo, Stats};
 use delta_kernel::scan::{transform_to_logical, Scan};
 use delta_kernel::schema::Schema;
 use delta_kernel::{Engine, EngineData, FileMeta, Table};
-use itertools::Itertools;
 use object_store::{memory::InMemory, path::Path, ObjectStore};
 use parquet::arrow::arrow_writer::ArrowWriter;
 use parquet::file::properties::WriterProperties;
@@ -399,7 +398,8 @@ fn read_with_execute(
     let result_schema: ArrowSchemaRef = Arc::new(scan.schema().as_ref().try_into()?);
     let scan_results = scan.execute(engine)?;
     let batches: Vec<RecordBatch> = scan_results
-        .map_ok(|sr| {
+        .map(|sr| {
+            let sr = sr.unwrap();
             let data = sr.raw_data.unwrap();
             let record_batch = to_arrow(data).unwrap();
             if let Some(mut mask) = sr.mask {
@@ -413,7 +413,7 @@ fn read_with_execute(
                 record_batch
             }
         })
-        .try_collect()?;
+        .collect();
 
     if expected.is_empty() {
         assert_eq!(batches.len(), 0);

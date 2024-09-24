@@ -640,7 +640,7 @@ mod tests {
         let table = Table::new(url);
         let snapshot = table.snapshot(&engine, None).unwrap();
         let scan = snapshot.into_scan_builder().build().unwrap();
-        let files: Vec<_> = scan.execute(&engine).unwrap().try_collect().unwrap();
+        let files: Vec<ScanResult> = scan.execute(&engine).unwrap().try_collect().unwrap();
 
         assert_eq!(files.len(), 1);
         let num_rows = files[0].raw_data.as_ref().unwrap().length();
