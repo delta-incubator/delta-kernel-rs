@@ -42,8 +42,8 @@ pub fn expression_to_row_filter(
     parquet_physical_schema: &SchemaDescriptor,
 ) -> DeltaResult<RowFilter> {
     let cols = get_columns_from_expression(&predicate);
-    let expr_schema = requested_schema.project(&cols).unwrap();
-    let (indices, _) = get_requested_indices(&expr_schema, parquet_schema).unwrap();
+    let expr_schema = requested_schema.project(&cols)?;
+    let (indices, _) = get_requested_indices(&expr_schema, parquet_schema)?;
     let projection_mask = generate_mask(
         &expr_schema,
         parquet_schema,
