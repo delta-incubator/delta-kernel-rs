@@ -321,47 +321,59 @@ fn read_last_checkpoint(
 
 /// List all log files after a given checkpoint.
 fn list_log_files_with_checkpoint(
-    cp: &CheckpointMetadata,
+    checkpoint_metadata: &CheckpointMetadata,
     fs_client: &dyn FileSystemClient,
     log_root: &Url,
 ) -> DeltaResult<(Vec<FileMeta>, Vec<FileMeta>)> {
-    let version_prefix = format!("{:020}", cp.version);
+    let version_prefix = format!("{:020}", checkpoint_metadata.version);
     let start_from = log_root.join(&version_prefix)?;
 
-    let files = fs_client
-        .list_from(&start_from)?
-        .collect::<Result<Vec<_>, Error>>()?
-        .into_iter()
-        // TODO this filters out .crc files etc which start with "." - how do we want to use these kind of files?
-        .filter(|f| version_from_location(&f.location).is_some())
-        .collect::<Vec<_>>();
+    let mut max_checkpoint_version = checkpoint_metadata.version;
+    let mut checkpoint_files = Vec::with_capacity(10);
+    let mut commit_files = vec![];
 
-    let mut commit_files = files
-        .iter()
-        .filter_map(|f| {
-            if LogPath::new(&f.location).is_commit {
-                Some(f.clone())
-            } else {
-                None
+    for meta_res in fs_client.list_from(&start_from)? {
+        let meta = meta_res?;
+        let path = LogPath::new(&meta.location);
+        // TODO this filters out .crc files etc which start with "." - how do we want to use these kind of files?
+        if path.version.is_some() {
+            if path.is_commit {
+                commit_files.push(meta);
+            } else if path.is_checkpoint {
+                let version = path.version.unwrap_or(0);
+                match version.cmp(&max_checkpoint_version) {
+                    Ordering::Greater => {
+                        max_checkpoint_version = version;
+                        checkpoint_files.clear();
+                        checkpoint_files.push(meta);
+                    }
+                    Ordering::Equal => checkpoint_files.push(meta),
+                    Ordering::Less => {}
+                }
             }
-        })
-        .collect_vec();
+        }
+    }
+
+    // NOTE this will sort in reverse order
+    checkpoint_files.sort_unstable_by(|a, b| b.location.cmp(&a.location));
+    if checkpoint_files.is_empty() {
+        return Err(Error::generic(
+            "Had a _last_checkpoint hint but didn't find any checkpoints",
+        ));
+    }
+
+    if max_checkpoint_version != checkpoint_metadata.version {
+        warn!("_last_checkpoint hint is out of date. _last_checkpoint version: {}. Using actual most recent: {}", checkpoint_metadata.version, max_checkpoint_version);
+    } else if checkpoint_files.len() != checkpoint_metadata.parts.unwrap_or(1) as usize {
+        return Err(Error::Generic(format!(
+            "_last_checkpoint indicated that checkpoint should have {} parts, but it has {}",
+            checkpoint_metadata.parts.unwrap_or(1),
+            checkpoint_files.len()
+        )));
+    }
+
     // NOTE this will sort in reverse order
     commit_files.sort_unstable_by(|a, b| b.location.cmp(&a.location));
-
-    let checkpoint_files = files
-        .iter()
-        .filter_map(|f| {
-            if LogPath::new(&f.location).is_checkpoint {
-                Some(f.clone())
-            } else {
-                None
-            }
-        })
-        .collect_vec();
-
-    // TODO raise a proper error
-    assert_eq!(checkpoint_files.len(), cp.parts.unwrap_or(1) as usize);
 
     Ok((commit_files, checkpoint_files))
 }
