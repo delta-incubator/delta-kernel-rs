@@ -227,7 +227,7 @@ impl Scan {
     }
 
     /// Perform an "all in one" scan. This will use the provided `engine` to read and
-    /// process all the data for the query. Each [`ScanResult`] in the resultant vector encapsulates
+    /// process all the data for the query. Each [`ScanResult`] in the resultant iterator encapsulates
     /// the raw data and an optional boolean vector built from the deletion vector if it was
     /// present. See the documentation for [`ScanResult`] for more details. Generally
     /// connectors/engines will want to use [`Scan::scan_data`] so they can have more control over
