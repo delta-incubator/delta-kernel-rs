@@ -3,19 +3,28 @@
 use std::ops::Range;
 use std::sync::Arc;
 
+use arrow_array::RecordBatch;
+use arrow_array::{ArrayRef, BooleanArray, Int64Array, StringArray};
+use arrow_schema::Field;
 use futures::StreamExt;
 use object_store::path::Path;
 use object_store::DynObjectStore;
 use parquet::arrow::arrow_reader::{
     ArrowReaderMetadata, ArrowReaderOptions, ParquetRecordBatchReaderBuilder,
 };
+use parquet::arrow::arrow_writer::ArrowWriter;
 use parquet::arrow::async_reader::{ParquetObjectReader, ParquetRecordBatchStreamBuilder};
+use uuid::Uuid;
 
 use super::file_stream::{FileOpenFuture, FileOpener, FileStream};
+use crate::engine::arrow_data::ArrowEngineData;
 use crate::engine::arrow_utils::{generate_mask, get_requested_indices, reorder_struct_array};
 use crate::engine::default::executor::TaskExecutor;
 use crate::schema::SchemaRef;
-use crate::{DeltaResult, Error, Expression, FileDataReadResultIterator, FileMeta, ParquetHandler};
+use crate::{
+    DeltaResult, EngineData, Error, Expression, FileDataReadResultIterator, FileMeta,
+    ParquetHandler,
+};
 
 #[derive(Debug)]
 pub struct DefaultParquetHandler<E: TaskExecutor> {
@@ -76,6 +85,52 @@ impl<E: TaskExecutor> ParquetHandler for DefaultParquetHandler<E> {
             files,
             self.readahead,
         )
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+pub struct ParquetMetadata {
+    pub path: String,
+    pub size: u64,
+}
+
+impl ParquetMetadata {
+    pub fn new(path: String, size: u64) -> Self {
+        Self { path, size }
+    }
+}
+
+impl<E: TaskExecutor> DefaultParquetHandler<E> {
+    pub async fn write_parquet_files(
+        &self,
+        path: &url::Url,
+        data: Box<dyn EngineData>,
+    ) -> DeltaResult<ParquetMetadata> {
+        let batch: Box<_> = ArrowEngineData::try_from_engine_data(data)?;
+        let record_batch = batch.record_batch();
+        println!("[write parquet files] physical schema: {:?}", record_batch.schema());
+        let mut buffer = vec![];
+        let mut writer = ArrowWriter::try_new(&mut buffer, record_batch.schema(), None).unwrap();
+
+        writer.write(&record_batch).expect("Writing batch");
+
+        // writer must be closed to write footer
+        writer.close().unwrap();
+
+        let size = buffer.len();
+        let name: String = Uuid::new_v4().to_string() + ".parquet";
+        let path = path.join(&name)?;
+        println!("Writing parquet file to {:?}", path);
+
+        self.store
+            .put(&Path::from(path.path()), buffer.into())
+            .await?;
+
+        // FIXME safe cast?
+        Ok(ParquetMetadata::new(path.to_string(), size as u64))
     }
 }
 

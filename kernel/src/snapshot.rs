@@ -110,6 +110,22 @@ impl LogSegment {
 /// have a defined schema (which may change over time for any given table), specific version, and
 /// frozen log segment.
 
+
+
+// 1. self-describing
+// 2. _delta_log/ directory
+// 3. data files
+//
+// table/
+// ├── _delta_log/
+// │   ├── 00000000000000000000.json
+// │   ├── 00000000000000000001.json
+// │   ├── ...
+// │   └── 00000000000000000010.json
+// ├── UUID1.parquet
+// ├── UUID2.parquet
+
+
 pub struct Snapshot {
     pub(crate) table_root: Url,
     pub(crate) log_segment: LogSegment,
@@ -150,7 +166,9 @@ impl Snapshot {
         version: Option<Version>,
     ) -> DeltaResult<Self> {
         let fs_client = engine.get_file_system_client();
-        let log_url = LogPath::new(&table_root).child("_delta_log/").unwrap();
+        println!("[snapshot::try_new] TABLE ROOT: {:?}", table_root);
+        let log_url = table_root.join("_delta_log/").unwrap();
+        println!("[snapshot::try_new] LOG URL: {:?}", log_url);
 
         // List relevant files from log
         let (mut commit_files, checkpoint_files) =
@@ -325,16 +343,20 @@ fn list_log_files_with_checkpoint(
     fs_client: &dyn FileSystemClient,
     log_root: &Url,
 ) -> DeltaResult<(Vec<FileMeta>, Vec<FileMeta>)> {
-    let version_prefix = format!("{:020}", cp.version);
-    let start_from = log_root.join(&version_prefix)?;
+    // let version_prefix = format!("{:020}", cp.version);
+    let start_from = log_root;// .join(&version_prefix)?;
+
+    println!("LIST START FROM: {:?}", start_from);
 
     let files = fs_client
         .list_from(&start_from)?
         .collect::<Result<Vec<_>, Error>>()?
         .into_iter()
         // TODO this filters out .crc files etc which start with "." - how do we want to use these kind of files?
-        .filter(|f| version_from_location(&f.location).is_some())
+        // .filter(|f| version_from_location(&f.location).is_some())
         .collect::<Vec<_>>();
+
+    println!("[snapshot::list_log_files_with_checkpoint] LOG FILES: {:?}", files);
 
     let mut commit_files = files
         .iter()
@@ -373,14 +395,24 @@ fn list_log_files(
     fs_client: &dyn FileSystemClient,
     log_root: &Url,
 ) -> DeltaResult<(Vec<FileMeta>, Vec<FileMeta>)> {
-    let version_prefix = format!("{:020}", 0);
-    let start_from = log_root.join(&version_prefix)?;
+    // let version_prefix = format!("{:020}", 0);
+    // let start_from = log_root.join(&version_prefix)?;
 
     let mut max_checkpoint_version = -1_i64;
     let mut commit_files = Vec::new();
     let mut checkpoint_files = Vec::with_capacity(10);
 
-    for maybe_meta in fs_client.list_from(&start_from)? {
+    // let v = format!("{:020}", 1);
+    // let start = log_root// .join(&v)?// .join(".json")?;
+    // let checker = log_root.clone().join("00000000000000000000.json")?;
+    // println!("path to check: {:?}", checker);
+    // for f in fs_client.read_files(vec![(checker, None)])? {
+    //     println!("FILE: {:?}", f);
+    // }
+
+    // println!("LIST START FROM: {:?}", log_root);
+    for maybe_meta in fs_client.list_from(&log_root)? {
+        // println!("MAYBE META: {:?}", maybe_meta);
         let meta = maybe_meta?;
         let log_path = LogPath::new(&meta.location);
         if log_path.is_checkpoint {
@@ -400,6 +432,8 @@ fn list_log_files(
             commit_files.push(meta);
         }
     }
+
+    // println!("COMMIT FILES: {:?}", commit_files);
 
     commit_files.retain(|f| {
         version_from_location(&f.location).unwrap_or(0) as i64 > max_checkpoint_version

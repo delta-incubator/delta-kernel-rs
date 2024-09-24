@@ -49,4 +49,8 @@ impl ParquetHandler for SyncParquetHandler {
             try_create_from_parquet(schema.clone(), location).map(|d| Box::new(d) as _)
         })))
     }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }

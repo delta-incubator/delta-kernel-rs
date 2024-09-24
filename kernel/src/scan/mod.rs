@@ -270,6 +270,8 @@ impl Scan {
             scan_files =
                 state::visit_scan_files(data.as_ref(), &vec, scan_files, scan_data_callback)?;
         }
+        let files: Vec<String> = scan_files.iter().map(|f| f.path.clone()).collect();
+        println!("[scan::execute] scan files: {:?}", files);
         scan_files
             .into_iter()
             .map(|scan_file| -> DeltaResult<_> {

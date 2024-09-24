@@ -29,7 +29,7 @@ thiserror = "1"
 # only for structured logging
 tracing = { version = "0.1", features = ["log"] }
 url = "2"
-uuid = "1.10.0"
+uuid = { version = "1.10.0", features = ["v4", "fast-rng"] }
 z85 = "3.0.5"
 
 # bring in our derive macros

@@ -52,6 +52,7 @@
 
 use std::ops::Range;
 use std::sync::Arc;
+use std::any::Any;
 
 use bytes::Bytes;
 use url::Url;
@@ -69,6 +70,7 @@ pub mod schema;
 pub mod snapshot;
 pub mod table;
 pub mod transaction;
+pub mod txn;
 pub(crate) mod utils;
 
 pub use engine_data::{DataVisitor, EngineData};
@@ -190,13 +192,16 @@ pub trait JsonHandler: Send + Sync {
         physical_schema: SchemaRef,
         predicate: Option<Expression>,
     ) -> DeltaResult<FileDataReadResultIterator>;
+
+    /// should write atomically
+    fn write_json(&self, path: &Url, data: Box<dyn Iterator<Item = Box<dyn EngineData>> + Send>) -> DeltaResult<()>;
 }
 
 /// Provides Parquet file related functionalities to Delta Kernel.
 ///
 /// Connectors can leverage this trait to provide their own custom
 /// implementation of Parquet data file functionalities to Delta Kernel.
-pub trait ParquetHandler: Send + Sync {
+pub trait ParquetHandler: Any + Send + Sync {
     /// Read and parse the Parquet file at given locations and return the data as EngineData with
     /// the columns requested by physical schema . The ParquetHandler _must_ return exactly the
     /// columns specified in `physical_schema`, and they _must_ be in schema order.
@@ -212,6 +217,8 @@ pub trait ParquetHandler: Send + Sync {
         physical_schema: SchemaRef,
         predicate: Option<Expression>,
     ) -> DeltaResult<FileDataReadResultIterator>;
+
+    fn as_any(&self) -> &dyn std::any::Any;
 }
 
 /// The `Engine` trait encapsulates all the functionality an engine or connector needs to provide
