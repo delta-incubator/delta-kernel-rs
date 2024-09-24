@@ -62,11 +62,11 @@ pub fn expression_to_row_filter(
     Ok(RowFilter::new(vec![Box::new(arrow_predicate)]))
 }
 
-pub fn get_columns_from_expression(expr: &Expression) -> Vec<String> {
-    fn get_columns_from_expression_impl(expr: &Expression, out: &mut Vec<String>) {
+pub fn get_columns_from_expression(expr: &Expression) -> Vec<&str> {
+    fn get_columns_from_expression_impl<'a>(expr: &'a Expression, out: &mut Vec<&'a str>) {
         match expr {
             Expression::Column(col_name) => {
-                let root_name = col_name.split('.').next().unwrap_or(col_name).to_string();
+                let root_name = col_name.split('.').next().unwrap_or(col_name);
                 out.push(root_name)
             }
             Expression::Struct(fields) => fields
@@ -82,7 +82,7 @@ pub fn get_columns_from_expression(expr: &Expression) -> Vec<String> {
             Expression::VariadicOperation { op: _, exprs } => exprs
                 .iter()
                 .for_each(|expr| get_columns_from_expression_impl(expr, out)),
-            _ => (),
+            Expression::Literal(_) => (),
         }
     }
     let mut out = vec![];

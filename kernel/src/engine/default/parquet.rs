@@ -220,7 +220,6 @@ impl FileOpener for PresignedUrlOpener {
             }
 
             if let Some(predicate) = predicate {
-                let parquet_schema = metadata.schema();
                 let parquet_physical_schema = metadata.parquet_schema();
                 let row_filter = expression_to_row_filter(
                     predicate,
@@ -274,7 +273,7 @@ mod tests {
             .map(Into::into)
     }
 
-    async fn get_record_batch(path: &str, predicate: Option<Expression>) -> Vec<RecordBatch> {
+    async fn get_record_batches(path: &str, predicate: Option<Expression>) -> Vec<RecordBatch> {
         let store = Arc::new(LocalFileSystem::new());
 
         let path = std::fs::canonicalize(PathBuf::from(path)).unwrap();
@@ -312,7 +311,7 @@ mod tests {
     async fn test_read_parquet_files_with_empty_output() {
         let predicate = Some(Expr::lt(Expr::column("value"), Expr::literal(0)));
         let path = "./tests/data/table-with-dv-small/part-00000-fae5310a-a37d-4e51-827b-c3d5516560ca-c000.snappy.parquet";
-        let data = get_record_batch(path, predicate).await;
+        let data = get_record_batches(path, predicate).await;
         assert_eq!(data.len(), 0);
     }
 
@@ -328,7 +327,7 @@ mod tests {
         ];
         let path = "./tests/data/table-with-dv-small/part-00000-fae5310a-a37d-4e51-827b-c3d5516560ca-c000.snappy.parquet";
         for (num_rows, predicate) in cases {
-            let data = get_record_batch(path, predicate).await;
+            let data = get_record_batches(path, predicate).await;
             assert_eq!(data.len(), 1);
             assert_eq!(data[0].num_rows(), num_rows);
         }
@@ -343,8 +342,8 @@ mod tests {
 
         let path =
             "./tests/data/app-txn-checkpoint/_delta_log/00000000000000000001.checkpoint.parquet";
-        let data_filtered = get_record_batch(path, predicate).await;
-        let data = get_record_batch(path, None).await;
+        let data_filtered = get_record_batches(path, predicate).await;
+        let data = get_record_batches(path, None).await;
 
         let mut metadata_filtered: Vec<Metadata> = vec![];
         let mut metadata_expected: Vec<Metadata> = vec![];
