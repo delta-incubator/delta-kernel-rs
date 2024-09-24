@@ -24,17 +24,33 @@ use parquet::arrow::ProjectionMask;
 
 use super::arrow_conversion::LIST_ARRAY_ROOT;
 use crate::engine::arrow_data::ArrowEngineData;
-use crate::engine::arrow_utils::ensure_data_types;
 use crate::engine::arrow_utils::prim_array_cmp;
+use crate::engine::arrow_utils::{ensure_data_types, generate_mask, get_requested_indices};
 use crate::error::{DeltaResult, Error};
 use crate::expressions::{BinaryOperator, Expression, Scalar, UnaryOperator, VariadicOperator};
 use crate::schema::{DataType, PrimitiveType, SchemaRef};
 use crate::{EngineData, ExpressionEvaluator, ExpressionHandler};
+use arrow_schema::SchemaRef as ArrowSchemaRef;
+use parquet::schema::types::SchemaDescriptor;
 
 // TODO leverage scalars / Datum
 //
-pub fn expression_to_row_filter(predicate: Expression) -> RowFilter {
-    let arrow_predicate = ArrowPredicateFn::new(ProjectionMask::all(), move |batch| {
+pub fn expression_to_row_filter(
+    predicate: Expression,
+    requested_schema: &SchemaRef,
+    parquet_schema: &ArrowSchemaRef,
+    parquet_physical_schema: &SchemaDescriptor,
+) -> DeltaResult<RowFilter> {
+    let cols = expression_to_columns(&predicate);
+    let expr_schema = requested_schema.project(&cols).unwrap();
+    let (indices, _) = get_requested_indices(&expr_schema, parquet_schema).unwrap();
+    let projection_mask = generate_mask(
+        &expr_schema,
+        parquet_schema,
+        parquet_physical_schema,
+        &indices,
+    ).unwrap_or(ProjectionMask::all());
+    let arrow_predicate = ArrowPredicateFn::new(projection_mask, move |batch| {
         downcast_to_bool(
             &evaluate_expression(&predicate, &batch, None)
                 .map_err(|err| ArrowError::ExternalError(Box::new(err)))?,
@@ -42,7 +58,30 @@ pub fn expression_to_row_filter(predicate: Expression) -> RowFilter {
         .map_err(|err| ArrowError::ExternalError(Box::new(err)))
         .cloned()
     });
-    RowFilter::new(vec![Box::new(arrow_predicate)])
+    Ok(RowFilter::new(vec![Box::new(arrow_predicate)]))
+}
+
+pub fn expression_to_columns(expr: &Expression) -> Vec<String> {
+    fn expression_to_columns_impl(expr: &Expression, out: &mut Vec<String>) {
+        match expr {
+            Expression::Column(col_name) => out.push(col_name.split('.').next().unwrap_or(col_name).to_string()),
+            Expression::Struct(fields) => fields
+                .iter()
+                .for_each(|expr| expression_to_columns_impl(expr, out)),
+            Expression::BinaryOperation { op: _, left, right } => {
+                expression_to_columns_impl(left, out);
+                expression_to_columns_impl(right, out);
+            }
+            Expression::UnaryOperation { op: _, expr } => expression_to_columns_impl(expr, out),
+            Expression::VariadicOperation { op: _, exprs } => exprs
+                .iter()
+                .for_each(|expr| expression_to_columns_impl(expr, out)),
+            _ => (),
+        }
+    }
+    let mut out = vec![];
+    expression_to_columns_impl(expr, &mut out);
+    out
 }
 
 fn downcast_to_bool(arr: &dyn Array) -> DeltaResult<&BooleanArray> {

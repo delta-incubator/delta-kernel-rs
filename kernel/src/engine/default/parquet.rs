@@ -134,7 +134,10 @@ impl FileOpener for ParquetOpener {
             let mut builder =
                 ParquetRecordBatchStreamBuilder::new_with_options(reader, options).await?;
             if let Some(predicate) = predicate {
-                builder = builder.with_row_filter(expression_to_row_filter(predicate));
+                let parquet_schema = metadata.schema();
+                let parquet_physical_schema = metadata.parquet_schema();
+                let row_filter = expression_to_row_filter(predicate, &table_schema, parquet_schema, parquet_physical_schema)?;
+                builder = builder.with_row_filter(row_filter);
             }
             if let Some(mask) = generate_mask(
                 &table_schema,
@@ -212,7 +215,10 @@ impl FileOpener for PresignedUrlOpener {
             }
 
             if let Some(predicate) = predicate {
-                builder = builder.with_row_filter(expression_to_row_filter(predicate));
+                let parquet_schema = metadata.schema();
+                let parquet_physical_schema = metadata.parquet_schema();
+                let row_filter = expression_to_row_filter(predicate, &table_schema, parquet_schema, parquet_physical_schema)?;
+                builder = builder.with_row_filter(row_filter);
             }
             if let Some(limit) = limit {
                 builder = builder.with_limit(limit)
