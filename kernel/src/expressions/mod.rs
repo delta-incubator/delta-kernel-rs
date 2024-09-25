@@ -9,7 +9,7 @@ pub use self::scalars::{ArrayData, Scalar, StructData};
 
 mod scalars;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 /// A binary operator.
 pub enum BinaryOperator {
     /// Arithmetic Plus
@@ -72,7 +72,7 @@ impl BinaryOperator {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum VariadicOperator {
     And,
     Or,
@@ -111,7 +111,7 @@ impl Display for BinaryOperator {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 /// A unary operator.
 pub enum UnaryOperator {
     /// Unary Not
