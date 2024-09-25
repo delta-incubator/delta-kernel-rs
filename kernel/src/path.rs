@@ -107,31 +107,20 @@ impl<Location: AsUrl> ParsedLogPath<Location> {
         };
 
         // Parse the file type, based on the number of remaining parts
-        let file_type = match split.len() {
-            // Commit file: <n>.json
-            1 if extension == "json" => LogPathFileType::Commit,
-
-            // Single-part checkpoint: <n>.checkpoint.parquet
-            2 if split[0] == "checkpoint" && extension == "parquet" => {
-                LogPathFileType::SinglePartCheckpoint
-            }
-
-            // UUID checkpoint: <n>.checkpoint.<uuid>.[json|parquet]
-            3 if split[0] == "checkpoint" && (extension == "json" || extension == "parquet") => {
-                let uuid = parse_path_part(split[1], UUID_PART_LEN, url)?;
+        let file_type = match split.as_slice() {
+            ["json"] => LogPathFileType::Commit,
+            ["checkpoint", "parquet"] => LogPathFileType::SinglePartCheckpoint,
+            ["checkpoint", uuid, "json" | "parquet"] => {
+                let uuid = parse_path_part(uuid, UUID_PART_LEN, url)?;
                 LogPathFileType::UuidCheckpoint(uuid)
             }
-
-            // Compacted commit: <lo>.<hi>.compacted.json
-            3 if split[1] == "compacted" && extension == "json" => {
-                let hi = parse_path_part(split[0], VERSION_LEN, url)?;
+            [hi, "compacted", "json"] => {
+                let hi = parse_path_part(hi, VERSION_LEN, url)?;
                 LogPathFileType::CompactedCommit { hi }
             }
-
-            // Multi-part checkpoint: <n>.checkpoint.<part_num>.<num_parts>.parquet
-            4 if split[0] == "checkpoint" && extension == "parquet" => {
-                let part_num = parse_path_part(split[1], MULTIPART_PART_LEN, url)?;
-                let num_parts = parse_path_part(split[2], MULTIPART_PART_LEN, url)?;
+            ["checkpoint", part_num, num_parts, "parquet"] => {
+                let part_num = parse_path_part(part_num, MULTIPART_PART_LEN, url)?;
+                let num_parts = parse_path_part(num_parts, MULTIPART_PART_LEN, url)?;
 
                 // A valid part_num must be in the range [1, num_parts]
                 if !(0 < part_num && part_num <= num_parts) {
