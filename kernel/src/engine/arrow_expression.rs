@@ -1,4 +1,5 @@
 //! Expression handling based on arrow-rs compute kernels.
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use arrow_arith::boolean::{and_kleene, is_null, not, or_kleene};
@@ -63,11 +64,11 @@ pub fn expression_to_row_filter(
 }
 
 pub fn get_columns_from_expression(expr: &Expression) -> Vec<&str> {
-    fn get_columns_from_expression_impl<'a>(expr: &'a Expression, out: &mut Vec<&'a str>) {
+    fn get_columns_from_expression_impl<'a>(expr: &'a Expression, out: &mut HashSet<&'a str>) {
         match expr {
             Expression::Column(col_name) => {
                 let root_name = col_name.split('.').next().unwrap_or(col_name);
-                out.push(root_name)
+                out.insert(root_name);
             }
             Expression::Struct(fields) => fields
                 .iter()
@@ -85,9 +86,9 @@ pub fn get_columns_from_expression(expr: &Expression) -> Vec<&str> {
             Expression::Literal(_) => (),
         }
     }
-    let mut out = vec![];
+    let mut out = HashSet::new();
     get_columns_from_expression_impl(expr, &mut out);
-    out
+    out.into_iter().collect_vec()
 }
 
 fn downcast_to_bool(arr: &dyn Array) -> DeltaResult<&BooleanArray> {
