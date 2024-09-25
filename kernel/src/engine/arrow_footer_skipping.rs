@@ -60,11 +60,6 @@ pub(crate) trait ParquetFooterSkippingFilter {
         exprs: &[Expression],
         inverted: bool,
     ) -> Option<bool> {
-        let exprs: Vec<_> = exprs
-            .iter()
-            .map(|expr| self.apply_expr(expr, inverted))
-            .collect();
-
         // With AND (OR), any FALSE (TRUE) input forces FALSE (TRUE) output.  If there was no
         // dominating input, then any NULL input forces NULL output.  Otherwise, return the
         // non-dominant value. Inverting the operation also inverts the dominant value.
@@ -72,12 +67,21 @@ pub(crate) trait ParquetFooterSkippingFilter {
             VariadicOperator::And => inverted,
             VariadicOperator::Or => !inverted,
         };
-        if exprs.iter().any(|v| v.is_some_and(|v| v == dominator)) {
-            Some(dominator)
-        } else if exprs.iter().any(|e| e.is_none()) {
-            None
-        } else {
-            Some(!dominator)
+
+        // Evaluate the input expressions. tracking whether we've seen any NULL result. Stop
+        // immediately (short circuit) if we see a dominant value.
+        let result = exprs.iter().try_fold(false, |found_null, expr| {
+            match self.apply_expr(expr, inverted) {
+                Some(v) if v == dominator => None,
+                Some(_) => Some(found_null),
+                None => Some(true),
+            }
+        });
+
+        match result {
+            None => Some(dominator),
+            Some(false) => Some(!dominator),
+            Some(true) => None,
         }
     }
 
