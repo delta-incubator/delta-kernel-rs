@@ -508,7 +508,6 @@ mod tests {
 
     #[test]
     fn test_read_log_with_out_of_date_last_checkpoint() {
-        // in memory file system
         let store = Arc::new(InMemory::new());
 
         fn get_path(index: usize, suffix: &str) -> Path {
@@ -517,7 +516,7 @@ mod tests {
         }
         let data = bytes::Bytes::from("kernel-data");
 
-        // put commit files
+        // add log files to store
         tokio::runtime::Runtime::new()
             .expect("create tokio runtime")
             .block_on(async {
@@ -534,7 +533,7 @@ mod tests {
                     store
                         .put(&path, data.clone().into())
                         .await
-                        .expect("put _last_checkpoint");
+                        .expect("put log file in store");
                 }
             });
 
