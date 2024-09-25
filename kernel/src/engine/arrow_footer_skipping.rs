@@ -20,7 +20,7 @@ pub fn filter_row_groups<T>(
         .filter_map(|(index, row_group)| {
             // We can only skip a row group if the filter is false (true/null means keep)
             let keep = !matches!(RowGroupFilter::apply(filter, row_group), Some(false));
-            keep.then(|| index)
+            keep.then_some(index)
         })
         .collect();
     reader.with_row_groups(indices)
@@ -31,14 +31,15 @@ struct RowGroupFilter<'a> {
     field_indices: HashMap<ColumnPath, usize>,
 }
 
-impl<'a> RowGroupFilter<'a> {
-    fn apply(filter: &Expression, row_group: &'a RowGroupMetaData) -> Option<bool> {
-        let field_indices = compute_field_indices(row_group.schema_descr().columns(), filter);
-        Self {
-            row_group,
-            field_indices,
-        }.apply_expr(filter, false)
-    }
+// TODO: Unit tests can implement this trait in order to easily validate the skipping logic
+pub(crate) trait ParquetFooterSkippingFilter {
+    fn get_min_stat_value(&self, col: &ColumnPath, data_type: &DataType) -> Option<Scalar>;
+
+    fn get_max_stat_value(&self, col: &ColumnPath, data_type: &DataType) -> Option<Scalar>;
+
+    fn get_nullcount_stat_value(&self, col: &ColumnPath) -> Option<i64>;
+
+    fn get_rowcount_stat_value(&self) -> i64;
 
     fn apply_expr(&self, expression: &Expression, inverted: bool) -> Option<bool> {
         use Expression::*;
@@ -46,8 +47,8 @@ impl<'a> RowGroupFilter<'a> {
             VariadicOperation { op, exprs } => self.apply_variadic(op, exprs, inverted),
             BinaryOperation { op, left, right } => self.apply_binary(op, left, right, inverted),
             UnaryOperation { op, expr } => self.apply_unary(op, expr, inverted),
-            // How to handle a leaf expression depends on the parent expression that embeds it
-            Literal(_) | Column(_) => None,
+            Literal(value) => Self::apply_scalar(value, inverted),
+            Column(col) => self.apply_column(col, inverted),
             // We don't support skipping over complex types
             Struct(_) => None,
         }
@@ -65,7 +66,7 @@ impl<'a> RowGroupFilter<'a> {
             .collect();
 
         // With AND (OR), any FALSE (TRUE) input forces FALSE (TRUE) output.  If there was no
-        // dominating value, then any NULL input forces NULL output.  Otherwise, return the
+        // dominating input, then any NULL input forces NULL output.  Otherwise, return the
         // non-dominant value. Inverting the operation also inverts the dominant value.
         let dominator = match op {
             VariadicOperator::And => inverted,
@@ -90,9 +91,12 @@ impl<'a> RowGroupFilter<'a> {
         use BinaryOperator::*;
         use Expression::{Column, Literal};
 
+        // NOTE: We rely on the literal values to provide logical type hints. That means we cannot
+        // perform column-column comparisons, because we cannot infer the logical type to use.
         let (op, col, val) = match (left, right) {
             (Column(col), Literal(val)) => (*op, col, val),
             (Literal(val), Column(col)) => (op.commute()?, col, val),
+            (Literal(a), Literal(b)) => return Self::apply_binary_scalars(op, a, b, inverted),
             _ => None?, // unsupported combination of operands
         };
         let col = col_name_to_path(col);
@@ -109,6 +113,25 @@ impl<'a> RowGroupFilter<'a> {
             LessThanOrEqual => self.partial_cmp_min_stat(&col, val, Ordering::Greater, !inverted),
             GreaterThan => self.partial_cmp_max_stat(&col, val, Ordering::Greater, inverted),
             GreaterThanOrEqual => self.partial_cmp_max_stat(&col, val, Ordering::Less, !inverted),
+            _ => None, // unsupported operation
+        }
+    }
+
+    // Support e.g. `10 == 20 OR ...`
+    fn apply_binary_scalars(
+        op: &BinaryOperator,
+        left: &Scalar,
+        right: &Scalar,
+        inverted: bool,
+    ) -> Option<bool> {
+        use BinaryOperator::*;
+        match op {
+            Equal => partial_cmp_scalars(left, right, Ordering::Equal, inverted),
+            NotEqual => partial_cmp_scalars(left, right, Ordering::Equal, !inverted),
+            LessThan => partial_cmp_scalars(left, right, Ordering::Less, inverted),
+            LessThanOrEqual => partial_cmp_scalars(left, right, Ordering::Greater, !inverted),
+            GreaterThan => partial_cmp_scalars(left, right, Ordering::Greater, inverted),
+            GreaterThanOrEqual => partial_cmp_scalars(left, right, Ordering::Less, !inverted),
             _ => None, // unsupported operation
         }
     }
@@ -134,6 +157,28 @@ impl<'a> RowGroupFilter<'a> {
         }
     }
 
+    // handle e.g. `flag OR ...`
+    fn apply_column(&self, col: &str, inverted: bool) -> Option<bool> {
+        let col = col_name_to_path(col);
+        let min = match self.get_min_stat_value(&col, &DataType::BOOLEAN)? {
+            Scalar::Boolean(value) => value,
+            _ => None?,
+        };
+        let max = match self.get_max_stat_value(&col, &DataType::BOOLEAN)? {
+            Scalar::Boolean(value) => value,
+            _ => None?,
+        };
+        Some(min != inverted || max != inverted)
+    }
+
+    // handle e.g. `FALSE OR ...`
+    fn apply_scalar(value: &Scalar, inverted: bool) -> Option<bool> {
+        match value {
+            Scalar::Boolean(value) => Some(*value != inverted),
+            _ => None,
+        }
+    }
+
     fn partial_cmp_min_stat(
         &self,
         col: &ColumnPath,
@@ -155,7 +200,26 @@ impl<'a> RowGroupFilter<'a> {
         let max = self.get_max_stat_value(col, &val.data_type())?;
         partial_cmp_scalars(&max, val, ord, inverted)
     }
+}
 
+impl<'a> RowGroupFilter<'a> {
+    fn apply(filter: &Expression, row_group: &'a RowGroupMetaData) -> Option<bool> {
+        let field_indices = compute_field_indices(row_group.schema_descr().columns(), filter);
+        Self {
+            row_group,
+            field_indices,
+        }
+        .apply_expr(filter, false)
+    }
+
+    fn get_stats(&self, col: &ColumnPath) -> Option<&Statistics> {
+        let field_index = self.field_indices.get(col)?;
+        self.row_group.column(*field_index).statistics()
+    }
+}
+
+impl<'a> ParquetFooterSkippingFilter for RowGroupFilter<'a> {
+    // Extracts a stat value, converting from its physical to the requested logical type.
     fn get_min_stat_value(&self, col: &ColumnPath, data_type: &DataType) -> Option<Scalar> {
         use PrimitiveType::*;
         let value = match (data_type.as_primitive_opt()?, self.get_stats(col)?) {
@@ -185,8 +249,8 @@ impl<'a> RowGroupFilter<'a> {
             (Timestamp, Statistics::Int64(s)) => Scalar::Timestamp(*s.min_opt()?),
             (Timestamp, _) => None?, // TODO: Int96 timestamps
             (TimestampNtz, Statistics::Int64(s)) => Scalar::TimestampNtz(*s.min_opt()?),
-            (TimestampNtz, _) => None?,  // TODO: Int96 timestamps
-            (Decimal(_, _), _) => None?, // TODO: Decimal (Int32, Int64, FixedLenByteArray)
+            (TimestampNtz, _) => None?, // TODO: Int96 timestamps
+            (Decimal(..), _) => None?,  // TODO: Decimal (Int32, Int64, FixedLenByteArray)
         };
         Some(value)
     }
@@ -220,8 +284,8 @@ impl<'a> RowGroupFilter<'a> {
             (Timestamp, Statistics::Int64(s)) => Scalar::Timestamp(*s.max_opt()?),
             (Timestamp, _) => None?, // TODO: Int96 timestamps
             (TimestampNtz, Statistics::Int64(s)) => Scalar::TimestampNtz(*s.max_opt()?),
-            (TimestampNtz, _) => None?,  // TODO: Int96 timestamps
-            (Decimal(_, _), _) => None?, // TODO: Decimal (Int32, Int64, FixedLenByteArray)
+            (TimestampNtz, _) => None?, // TODO: Int96 timestamps
+            (Decimal(..), _) => None?,  // TODO: Decimal (Int32, Int64, FixedLenByteArray)
         };
         Some(value)
     }
@@ -235,25 +299,25 @@ impl<'a> RowGroupFilter<'a> {
     fn get_rowcount_stat_value(&self) -> i64 {
         self.row_group.num_rows()
     }
-
-    fn get_stats(&self, col: &ColumnPath) -> Option<&Statistics> {
-        let field_index = self.field_indices.get(col)?;
-        self.row_group.column(*field_index).statistics()
-    }
 }
 
-fn partial_cmp_scalars(a: &Scalar, b: &Scalar, ord: Ordering, inverted: bool) -> Option<bool> {
+pub(crate) fn partial_cmp_scalars(
+    a: &Scalar,
+    b: &Scalar,
+    ord: Ordering,
+    inverted: bool,
+) -> Option<bool> {
     let result = a.partial_cmp(b)? == ord;
     Some(result != inverted)
 }
 
-fn col_name_to_path(col: &str) -> ColumnPath {
+pub(crate) fn col_name_to_path(col: &str) -> ColumnPath {
     // TODO: properly handle nested columns
     // https://github.com/delta-incubator/delta-kernel-rs/issues/86
     ColumnPath::new(col.split('.').map(|s| s.to_string()).collect())
 }
 
-fn compute_field_indices(
+pub(crate) fn compute_field_indices(
     fields: &[ColumnDescPtr],
     expression: &Expression,
 ) -> HashMap<ColumnPath, usize> {

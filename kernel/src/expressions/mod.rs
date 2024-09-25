@@ -49,7 +49,7 @@ impl BinaryOperator {
             GreaterThanOrEqual => Some(LessThanOrEqual),
             LessThan => Some(GreaterThan),
             LessThanOrEqual => Some(GreaterThanOrEqual),
-            Equal | NotEqual | Plus | Multiply => Some(self.clone()),
+            Equal | NotEqual | Plus | Multiply => Some(*self),
             _ => None,
         }
     }

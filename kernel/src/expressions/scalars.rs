@@ -234,7 +234,8 @@ impl PartialOrd for Scalar {
             (Double(_), _) => None,
             (String(a), String(b)) => a.partial_cmp(b),
             (String(_), _) => None,
-            (Boolean(_), _) => None, // Boolean not allowed
+            (Boolean(a), Boolean(b)) => a.partial_cmp(b),
+            (Boolean(_), _) => None,
             (Timestamp(a), Timestamp(b)) => a.partial_cmp(b),
             (Timestamp(_), _) => None,
             (TimestampNtz(a), TimestampNtz(b)) => a.partial_cmp(b),
@@ -243,10 +244,10 @@ impl PartialOrd for Scalar {
             (Date(_), _) => None,
             (Binary(a), Binary(b)) => a.partial_cmp(b),
             (Binary(_), _) => None,
-            (Decimal(_, _, _), _) => None, // TODO: Support Decimals
-            (Null(_), _) => None,          // NULL is always incomparable
-            (Struct(_), _) => None,        // Struct not allowed
-            (Array(_), _) => None,         // Array not allowed
+            (Decimal(_, _, _), _) => None, // TODO: Support Decimal
+            (Null(_), _) => None,          // NOTE: NULL values are incomparable by definition
+            (Struct(_), _) => None,        // TODO: Support Struct?
+            (Array(_), _) => None,         // TODO: Support Array?
         }
     }
 }
