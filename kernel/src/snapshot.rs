@@ -13,7 +13,7 @@ use url::Url;
 
 use crate::actions::{get_log_schema, Metadata, Protocol, METADATA_NAME, PROTOCOL_NAME};
 use crate::features::{ColumnMappingMode, COLUMN_MAPPING_MODE_KEY};
-use crate::path::{version_from_location, LogPath};
+use crate::path::ParsedLogPath;
 use crate::scan::ScanBuilder;
 use crate::schema::{Schema, SchemaRef};
 use crate::utils::require;
@@ -150,7 +150,7 @@ impl Snapshot {
         version: Option<Version>,
     ) -> DeltaResult<Self> {
         let fs_client = engine.get_file_system_client();
-        let log_url = LogPath::new(&table_root).child("_delta_log/").unwrap();
+        let log_url = table_root.join("_delta_log/").unwrap();
 
         // List relevant files from log
         let (mut commit_files, checkpoint_files) =
@@ -166,21 +166,15 @@ impl Snapshot {
 
         // remove all files above requested version
         if let Some(version) = version {
-            commit_files.retain(|meta| {
-                if let Some(v) = LogPath::new(&meta.location).version {
-                    v <= version
-                } else {
-                    false
-                }
-            });
+            commit_files.retain(|log_path| log_path.version <= version);
         }
 
         // get the effective version from chosen files
         let version_eff = commit_files
             .first()
             .or(checkpoint_files.first())
-            .and_then(|f| LogPath::new(&f.location).version)
-            .ok_or(Error::MissingVersion)?; // TODO: A more descriptive error
+            .ok_or(Error::MissingVersion)? // TODO: A more descriptive error
+            .version;
 
         if let Some(v) = version {
             require!(
@@ -191,8 +185,14 @@ impl Snapshot {
 
         let log_segment = LogSegment {
             log_root: log_url,
-            commit_files,
-            checkpoint_files,
+            commit_files: commit_files
+                .into_iter()
+                .map(|log_path| log_path.location)
+                .collect(),
+            checkpoint_files: checkpoint_files
+                .into_iter()
+                .map(|log_path| log_path.location)
+                .collect(),
         };
 
         Self::try_new_from_log_segment(table_root, log_segment, version_eff, engine)
@@ -306,7 +306,7 @@ fn read_last_checkpoint(
     fs_client: &dyn FileSystemClient,
     log_root: &Url,
 ) -> DeltaResult<Option<CheckpointMetadata>> {
-    let file_path = LogPath::new(log_root).child(LAST_CHECKPOINT_FILE_NAME)?;
+    let file_path = log_root.join(LAST_CHECKPOINT_FILE_NAME)?;
     match fs_client
         .read_files(vec![(file_path, None)])
         .and_then(|mut data| data.next().expect("read_files should return one file"))
@@ -324,50 +324,50 @@ fn list_log_files_with_checkpoint(
     checkpoint_metadata: &CheckpointMetadata,
     fs_client: &dyn FileSystemClient,
     log_root: &Url,
-) -> DeltaResult<(Vec<FileMeta>, Vec<FileMeta>)> {
+) -> DeltaResult<(Vec<ParsedLogPath>, Vec<ParsedLogPath>)> {
     let version_prefix = format!("{:020}", checkpoint_metadata.version);
     let start_from = log_root.join(&version_prefix)?;
 
     let mut max_checkpoint_version = checkpoint_metadata.version;
-    let mut checkpoint_files = Vec::with_capacity(10);
-    let mut commit_files = vec![];
+    let mut checkpoint_files = vec![];
+    let mut commit_files = Vec::with_capacity(10);
 
     for meta_res in fs_client.list_from(&start_from)? {
         let meta = meta_res?;
-        let path = LogPath::new(&meta.location);
+        let parsed_path = ParsedLogPath::try_from(meta)?;
         // TODO this filters out .crc files etc which start with "." - how do we want to use these kind of files?
-        if path.version.is_some() {
-            if path.is_commit {
-                commit_files.push(meta);
-            } else if path.is_checkpoint {
-                let version = path.version.unwrap_or(0);
-                match version.cmp(&max_checkpoint_version) {
+        if let Some(parsed_path) = parsed_path {
+            if parsed_path.is_commit() {
+                commit_files.push(parsed_path);
+            } else if parsed_path.is_checkpoint() {
+                match parsed_path.version.cmp(&max_checkpoint_version) {
                     Ordering::Greater => {
-                        max_checkpoint_version = version;
+                        max_checkpoint_version = parsed_path.version;
                         checkpoint_files.clear();
-                        checkpoint_files.push(meta);
+                        checkpoint_files.push(parsed_path);
                     }
-                    Ordering::Equal => checkpoint_files.push(meta),
+                    Ordering::Equal => checkpoint_files.push(parsed_path),
                     Ordering::Less => {}
                 }
             }
         }
     }
 
-    // NOTE this will sort in reverse order
-    checkpoint_files.sort_unstable_by(|a, b| b.location.cmp(&a.location));
     if checkpoint_files.is_empty() {
+        // TODO: We could potentially recover here
         return Err(Error::generic(
             "Had a _last_checkpoint hint but didn't find any checkpoints",
         ));
     }
 
     if max_checkpoint_version != checkpoint_metadata.version {
-        warn!("_last_checkpoint hint is out of date. _last_checkpoint version: {}. Using actual most recent: {}", checkpoint_metadata.version, max_checkpoint_version);
+        warn!(
+            "_last_checkpoint hint is out of date. _last_checkpoint version: {}. Using actual most recent: {}",
+            checkpoint_metadata.version,
+            max_checkpoint_version
+        );
         // we may need to drop some commits that are after the actual last checkpoint
-        commit_files.retain(|commit_meta| {
-            version_from_location(&commit_meta.location).unwrap_or(0) > max_checkpoint_version
-        });
+        commit_files.retain(|parsed_path| parsed_path.version > max_checkpoint_version);
     } else if checkpoint_files.len() != checkpoint_metadata.parts.unwrap_or(1) as usize {
         return Err(Error::Generic(format!(
             "_last_checkpoint indicated that checkpoint should have {} parts, but it has {}",
@@ -377,7 +377,7 @@ fn list_log_files_with_checkpoint(
     }
 
     // NOTE this will sort in reverse order
-    commit_files.sort_unstable_by(|a, b| b.location.cmp(&a.location));
+    commit_files.sort_unstable_by(|a, b| b.version.cmp(&a.version));
 
     Ok((commit_files, checkpoint_files))
 }
@@ -388,7 +388,7 @@ fn list_log_files_with_checkpoint(
 fn list_log_files(
     fs_client: &dyn FileSystemClient,
     log_root: &Url,
-) -> DeltaResult<(Vec<FileMeta>, Vec<FileMeta>)> {
+) -> DeltaResult<(Vec<ParsedLogPath>, Vec<ParsedLogPath>)> {
     let version_prefix = format!("{:020}", 0);
     let start_from = log_root.join(&version_prefix)?;
 
@@ -396,32 +396,32 @@ fn list_log_files(
     let mut commit_files = Vec::new();
     let mut checkpoint_files = Vec::with_capacity(10);
 
-    for maybe_meta in fs_client.list_from(&start_from)? {
-        let meta = maybe_meta?;
-        let log_path = LogPath::new(&meta.location);
-        if log_path.is_checkpoint {
-            let version = log_path.version.unwrap_or(0) as i64;
+    let log_paths = fs_client
+        .list_from(&start_from)?
+        .flat_map(|file| file.and_then(ParsedLogPath::try_from).transpose());
+    for log_path in log_paths {
+        let log_path = log_path?;
+        if log_path.is_checkpoint() {
+            let version = log_path.version as i64;
             match version.cmp(&max_checkpoint_version) {
                 Ordering::Greater => {
                     max_checkpoint_version = version;
                     checkpoint_files.clear();
-                    checkpoint_files.push(meta);
+                    checkpoint_files.push(log_path);
                 }
                 Ordering::Equal => {
-                    checkpoint_files.push(meta);
+                    checkpoint_files.push(log_path);
                 }
                 _ => {}
             }
-        } else if log_path.is_commit {
-            commit_files.push(meta);
+        } else if log_path.is_commit() {
+            commit_files.push(log_path);
         }
     }
 
-    commit_files.retain(|f| {
-        version_from_location(&f.location).unwrap_or(0) as i64 > max_checkpoint_version
-    });
+    commit_files.retain(|f| f.version as i64 > max_checkpoint_version);
     // NOTE this will sort in reverse order
-    commit_files.sort_unstable_by(|a, b| b.location.cmp(&a.location));
+    commit_files.sort_unstable_by(|a, b| b.version.cmp(&a.version));
 
     Ok((commit_files, checkpoint_files))
 }
@@ -557,18 +557,9 @@ mod tests {
             list_log_files_with_checkpoint(&checkpoint_metadata, &client, &url).unwrap();
         assert_eq!(checkpoint_files.len(), 1);
         assert_eq!(commit_files.len(), 2);
-        assert_eq!(
-            version_from_location(&checkpoint_files[0].location).unwrap_or(0),
-            5
-        );
-        assert_eq!(
-            version_from_location(&commit_files[0].location).unwrap_or(0),
-            7
-        );
-        assert_eq!(
-            version_from_location(&commit_files[1].location).unwrap_or(0),
-            6
-        );
+        assert_eq!(checkpoint_files[0].version, 5);
+        assert_eq!(commit_files[0].version, 7);
+        assert_eq!(commit_files[1].version, 6);
     }
 
     fn valid_last_checkpoint() -> Vec<u8> {
@@ -624,13 +615,19 @@ mod tests {
 
         assert_eq!(snapshot.log_segment.checkpoint_files.len(), 1);
         assert_eq!(
-            LogPath::new(&snapshot.log_segment.checkpoint_files[0].location).version,
-            Some(2)
+            ParsedLogPath::try_from(snapshot.log_segment.checkpoint_files[0].location.clone())
+                .unwrap()
+                .unwrap()
+                .version,
+            2,
         );
         assert_eq!(snapshot.log_segment.commit_files.len(), 1);
         assert_eq!(
-            LogPath::new(&snapshot.log_segment.commit_files[0].location).version,
-            Some(3)
+            ParsedLogPath::try_from(snapshot.log_segment.commit_files[0].location.clone())
+                .unwrap()
+                .unwrap()
+                .version,
+            3,
         );
     }
 }
