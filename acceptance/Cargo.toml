@@ -20,13 +20,13 @@ delta_kernel = { path = "../kernel", features = [
   "developer-visibility",
 ] }
 futures = "0.3"
+itertools = "0.13"
 object_store = { workspace = true }
 parquet = { workspace = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "1"
 url = "2"
-itertools = "0.13"
 
 [build-dependencies]
 ureq = "2.10"
