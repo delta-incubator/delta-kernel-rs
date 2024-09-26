@@ -318,12 +318,6 @@ impl From<&[u8]> for Scalar {
     }
 }
 
-impl DataType {
-    pub fn as_null_scalar(&self) -> Scalar {
-        Scalar::Null(self.clone())
-    }
-}
-
 // TODO: add more From impls
 
 impl PrimitiveType {

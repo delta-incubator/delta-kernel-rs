@@ -6,6 +6,7 @@ use std::fmt::{Display, Formatter};
 use itertools::Itertools;
 
 pub use self::scalars::{ArrayData, Scalar, StructData};
+use crate::DataType;
 
 mod scalars;
 
@@ -226,6 +227,10 @@ impl Expression {
     /// Create a new expression for a literal value
     pub fn literal(value: impl Into<Scalar>) -> Self {
         Self::Literal(value.into())
+    }
+
+    pub fn null_literal(data_type: DataType) -> Self {
+        Self::Literal(Scalar::Null(data_type))
     }
 
     /// Create a new struct expression
