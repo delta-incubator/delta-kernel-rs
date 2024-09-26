@@ -7,6 +7,7 @@ use arrow_select::{concat::concat_batches, filter::filter_record_batch, take::ta
 
 use delta_kernel::{engine::arrow_data::ArrowEngineData, DeltaResult, Engine, Error, Table};
 use futures::{stream::TryStreamExt, StreamExt};
+use itertools::Itertools;
 use object_store::{local::LocalFileSystem, ObjectStore};
 use parquet::arrow::async_reader::{ParquetObjectReader, ParquetRecordBatchStreamBuilder};
 
@@ -127,9 +128,9 @@ pub async fn assert_scan_data(engine: Arc<dyn Engine>, test_case: &TestCaseInfo)
     let mut schema = None;
     let batches: Vec<RecordBatch> = scan
         .execute(engine)?
-        .map(|res| {
-            let res = res.unwrap();
-            let data = res.raw_data.unwrap();
+        .map(|res| -> DeltaResult<_> {
+            let res = res?;
+            let data = res.raw_data?;
             let record_batch: RecordBatch = data
                 .into_any()
                 .downcast::<ArrowEngineData>()
@@ -139,12 +140,12 @@ pub async fn assert_scan_data(engine: Arc<dyn Engine>, test_case: &TestCaseInfo)
                 schema = Some(record_batch.schema());
             }
             if let Some(mask) = res.mask {
-                filter_record_batch(&record_batch, &mask.into()).unwrap()
+                Ok(filter_record_batch(&record_batch, &mask.into())?)
             } else {
-                record_batch
+                Ok(record_batch)
             }
         })
-        .collect();
+        .try_collect()?;
     let all_data = concat_batches(&schema.unwrap(), batches.iter()).map_err(Error::from)?;
     let all_data = sort_record_batch(all_data)?;
     let golden = read_golden(test_case.root_dir(), None).await?;

@@ -293,31 +293,33 @@ impl Scan {
                     None,
                 )?;
                 let gs = global_state.clone(); // Arc clone
-                Ok(read_result_iter.into_iter().map(move |read_result| {
-                    let read_result = read_result?;
-                    // to transform the physical data into the correct logical form
-                    let logical = transform_to_logical_internal(
-                        engine,
-                        read_result,
-                        &gs,
-                        &scan_file.partition_values,
-                        &self.all_fields,
-                        self.have_partition_cols,
-                    );
-                    let len = logical.as_ref().map_or(0, |res| res.length());
-                    // need to split the dv_mask. what's left in dv_mask covers this result, and rest
-                    // will cover the following results. we `take()` out of `selection_vector` to avoid
-                    // trying to return a captured variable. We're going to reassign `selection_vector`
-                    // to `rest` in a moment anyway
-                    let mut sv = selection_vector.take();
-                    let rest = split_vector(sv.as_mut(), len, None);
-                    let result = ScanResult {
-                        raw_data: logical,
-                        mask: sv,
-                    };
-                    selection_vector = rest;
-                    Ok::<ScanResult, Error>(result)
-                }))
+                Ok(read_result_iter
+                    .into_iter()
+                    .map(move |read_result| -> DeltaResult<_> {
+                        let read_result = read_result?;
+                        // to transform the physical data into the correct logical form
+                        let logical = transform_to_logical_internal(
+                            engine,
+                            read_result,
+                            &gs,
+                            &scan_file.partition_values,
+                            &self.all_fields,
+                            self.have_partition_cols,
+                        );
+                        let len = logical.as_ref().map_or(0, |res| res.length());
+                        // need to split the dv_mask. what's left in dv_mask covers this result, and rest
+                        // will cover the following results. we `take()` out of `selection_vector` to avoid
+                        // trying to return a captured variable. We're going to reassign `selection_vector`
+                        // to `rest` in a moment anyway
+                        let mut sv = selection_vector.take();
+                        let rest = split_vector(sv.as_mut(), len, None);
+                        let result = ScanResult {
+                            raw_data: logical,
+                            mask: sv,
+                        };
+                        selection_vector = rest;
+                        Ok(result)
+                    }))
             })
             .flatten_ok()
             .flatten_ok()
