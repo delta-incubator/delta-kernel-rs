@@ -114,7 +114,7 @@ where
     fn materialize(&self, row_index: usize) -> Vec<String> {
         let mut result = vec![];
         for i in 0..EngineList::len(self, row_index) {
-            result.push(EngineList::get(self, row_index, i));
+            result.push(self.get(row_index, i));
         }
         result
     }
@@ -146,19 +146,6 @@ impl EngineMap for MapArray {
         for (key, value) in keys.iter().zip(values.iter()) {
             if let (Some(key), Some(value)) = (key, value) {
                 ret.insert(key.into(), value.into());
-            }
-        }
-        ret
-    }
-
-    fn materialize_opt(&self, row_index: usize) -> HashMap<String, Option<String>> {
-        let mut ret = HashMap::new();
-        let map_val = self.value(row_index);
-        let keys = map_val.column(0).as_string::<i32>();
-        let values = map_val.column(1).as_string::<i32>();
-        for (key, value) in keys.iter().zip(values.iter()) {
-            if let (Some(key), value) = (key, value) {
-                ret.insert(key.into(), value.map(Into::into));
             }
         }
         ret

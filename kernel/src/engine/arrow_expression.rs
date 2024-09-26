@@ -841,7 +841,7 @@ mod tests {
         let output = evaluate_expression(&map_access, &batch, None)?;
 
         assert_eq!(output.len(), 1);
-        assert_eq!(output.as_ref(), expected_array.as_ref());
+        assert_eq!(*output, *expected_array);
 
         Ok(())
     }
@@ -863,10 +863,15 @@ mod tests {
         let array = setup_map_array(map_values)?;
 
         let batch = RecordBatch::try_new(schema.clone(), vec![array])?;
-        let output = evaluate_expression(&predicate_expr, &batch, None)?;
+        let output = evaluate_expression(
+            &predicate_expr,
+            &batch,
+            Some(&crate::schema::DataType::BOOLEAN),
+        )?;
         let expected = Arc::new(BooleanArray::from(vec![false, true]));
+
         assert_eq!(output.len(), 2);
-        assert_eq!(output.as_ref(), expected.as_ref());
+        assert_eq!(*output, *expected);
 
         Ok(())
     }
