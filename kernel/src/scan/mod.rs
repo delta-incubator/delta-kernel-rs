@@ -276,7 +276,7 @@ impl Scan {
             .flatten_ok()
             .flatten_ok();
 
-        let scan_result_iter = scan_files_iter
+        Ok(scan_files_iter
             .map_ok(move |scan_file| -> DeltaResult<_> {
                 let file_path = self.snapshot.table_root.join(&scan_file.path)?;
                 let mut selection_vector = scan_file
@@ -323,8 +323,7 @@ impl Scan {
             })
             .flatten_ok()
             .flatten_ok()
-            .flatten_ok();
-        Ok(scan_result_iter)
+            .flatten_ok())
     }
 }
 
