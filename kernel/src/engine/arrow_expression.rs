@@ -409,15 +409,19 @@ impl ExpressionEvaluator for DefaultExpressionEvaluator {
         // };
         let array_ref = evaluate_expression(&self.expression, batch, Some(&self.output_type))?;
         let arrow_type: ArrowDataType = ArrowDataType::try_from(&self.output_type)?;
+        println!("arrow_type: {:#?}", arrow_type);
         let batch: RecordBatch = if let DataType::Struct(_) = self.output_type {
+            println!("here");
             array_ref
                 .as_struct_opt()
                 .ok_or(Error::unexpected_column_type("Expected a struct array"))?
                 .into()
         } else {
+            println!("here2");
             let schema = ArrowSchema::new(vec![ArrowField::new("output", arrow_type, true)]);
             RecordBatch::try_new(Arc::new(schema), vec![array_ref])?
         };
+        println!("batch schema: {:#?}", batch.schema());
         Ok(Box::new(ArrowEngineData::new(batch)))
     }
 }

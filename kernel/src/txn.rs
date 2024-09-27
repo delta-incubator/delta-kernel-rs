@@ -173,27 +173,38 @@ impl Transaction {
         self.commit_info = Some(commit_info);
     }
 
-    fn generate_commit_info(&self, engine: &dyn Engine) -> Box<dyn EngineData> {
+    fn generate_commit_info(
+        &self,
+        action_schema: crate::schema::Schema,
+        engine: &dyn Engine,
+    ) -> Box<dyn EngineData> {
         // augment commit info so that it looks like: {"commitInfo": {<engine's commit info>}}
-        let expr = Expression::Struct(vec![Expression::Column("engineInfo".to_owned())]);
+        let expr = Expression::Struct(vec![
+            Expression::Literal(crate::expressions::Scalar::Null(add_schema())),
+            Expression::Struct(vec![
+                Expression::Column("engineInfo".to_owned()),
+                Expression::literal("delta_kernel v0.3.1".to_owned()),
+            ]),
+        ]);
 
-        let engine_commit_info_schema =
-            Box::new(crate::schema::StructType::new(vec![StructField::new(
-                "engineInfo",
-                DataType::STRING,
-                true,
-            )]));
-        let commit_info_schema = Arc::new(crate::schema::StructType::new(vec![StructField::new(
-            "commitInfo",
-            DataType::Struct(engine_commit_info_schema.clone()),
-            true,
-        )]));
-        engine
+        let engine_commit_info_schema = Box::new(crate::schema::StructType::new(vec![
+            StructField::new("engineInfo", DataType::STRING, true),
+            // StructField::new("kernelVersion", DataType::STRING, true),
+        ]));
+        // let commit_info_schema = Arc::new(crate::schema::StructType::new(vec![StructField::new(
+        //     "commitInfo",
+        //     DataType::Struct(engine_commit_info_schema.clone()),
+        //     true,
+        // )]));
+
+        println!("action schema {:#?}", action_schema);
+
+        let r = engine
             .get_expression_handler()
             .get_evaluator(
                 Arc::from(engine_commit_info_schema),
                 expr,
-                commit_info_schema.into(),
+                action_schema.into(),
             )
             .evaluate(
                 self.commit_info
@@ -201,7 +212,37 @@ impl Transaction {
                     .expect("commit info not set")
                     .as_ref(),
             )
-            .unwrap()
+            .unwrap();
+
+        // convert r to ArrowEngineData
+        let a = r
+            .into_any()
+            .downcast::<crate::engine::arrow_data::ArrowEngineData>()
+            .unwrap();
+        println!("-------------------------------------");
+        println!("SCHEMA {:#?}", a.record_batch().schema());
+        println!("-------------------------------------");
+        let s = a.record_batch().schema();
+        let mut i = s.fields().into_iter();
+        let f1 = i.next();
+        let f2 = i.next();
+        // make everything nullable in f2
+        let f2: Option<_> = f2.map(|f| {
+            let f = <arrow_schema::Field as Clone>::clone(f).with_nullable(true);
+            // struct with engineInfo and kernelVersion
+            f.with_data_type(arrow_schema::DataType::Struct(
+                vec![
+                    arrow_schema::Field::new("engineInfo", arrow_schema::DataType::Utf8, true),
+                    arrow_schema::Field::new("kernelVersion", arrow_schema::DataType::Utf8, true),
+                ]
+                .into(),
+            ))
+        });
+        let schema =
+            arrow_schema::Schema::new(vec![f1.unwrap().clone(), f2.unwrap().clone().into()]);
+        let rb = a.record_batch();
+        let rb = rb.clone().with_schema(schema.into());
+        Box::new(crate::engine::arrow_data::ArrowEngineData::new(rb.unwrap()))
     }
 
     // TODO conflict resolution
@@ -215,9 +256,102 @@ impl Transaction {
             .table_root
             .join("_delta_log/")?
             .join(&commit_file_name)?;
-        let commit_info = self.generate_commit_info(engine);
-        let actions = Box::new(chain(std::iter::once(commit_info), self.write_metadata));
+        let action_schema = schema();
+        let commit_info = self.generate_commit_info(action_schema.clone(), engine);
+        // rewrite write_metadata to be add file actions
+        let commit_info_type = DataType::Struct(Box::new(crate::schema::StructType::new(vec![
+            StructField::new("engineInfo", DataType::STRING, true),
+            StructField::new("kernelVersion", DataType::STRING, true),
+        ])));
+        let write_expr = Expression::Struct(vec![
+            Expression::Column("add".to_owned()),
+            Expression::Literal(crate::expressions::Scalar::Null(commit_info_type)),
+        ]);
+        let expression = Box::new(engine.get_expression_handler().get_evaluator(
+            schema().into(),
+            // Arc::new(crate::schema::StructType::new(vec![
+            //     StructField::new("add", DataType::Struct(Box::new(schema())), true),
+            //     StructField::new(
+            //         "commitInfo",
+            //         DataType::Struct(Box::new(crate::schema::StructType::new(vec![
+            //             StructField::new("engineInfo", DataType::STRING, true),
+            //             StructField::new("kernelVersion", DataType::STRING, true),
+            //         ]))),
+            //         true,
+            //     ),
+            // ])),
+            write_expr,
+            action_schema.into(),
+        ));
+        // FIXME leak
+        let expression = Box::leak(expression);
+        let write_metadata = self
+            .write_metadata
+            .map(|write_meta| expression.evaluate(write_meta.as_ref()).unwrap());
+
+        let actions = Box::new(chain(std::iter::once(commit_info), write_metadata));
         json_handler.write_json(commit_path, actions)?;
         Ok(CommitResult::Committed(commit_version))
     }
+}
+
+fn add_schema() -> crate::schema::DataType {
+    let path_field = StructField::new("path", DataType::STRING, false);
+    let size_field = StructField::new("size", DataType::LONG, false);
+    let partition_field = StructField::new(
+        "partitionValues",
+        DataType::Map(Box::new(crate::schema::MapType::new(
+            DataType::STRING,
+            DataType::STRING,
+            true,
+        ))),
+        false,
+    );
+    let data_change_field = StructField::new("dataChange", DataType::BOOLEAN, false);
+    let modification_time_field = StructField::new("modificationTime", DataType::LONG, false);
+    DataType::Struct(Box::new(crate::schema::StructType::new(vec![
+        path_field.clone(),
+        size_field.clone(),
+        partition_field.clone(),
+        data_change_field.clone(),
+        modification_time_field.clone(),
+    ])))
+}
+
+fn schema() -> crate::schema::Schema {
+    let path_field = StructField::new("path", DataType::STRING, false);
+    let size_field = StructField::new("size", DataType::LONG, false);
+    let partition_field = StructField::new(
+        "partitionValues",
+        DataType::Map(Box::new(crate::schema::MapType::new(
+            DataType::STRING,
+            DataType::STRING,
+            true,
+        ))),
+        false,
+    );
+    let data_change_field = StructField::new("dataChange", DataType::BOOLEAN, false);
+    let modification_time_field = StructField::new("modificationTime", DataType::LONG, false);
+
+    crate::schema::Schema::new(vec![
+        StructField::new(
+            "add",
+            DataType::Struct(Box::new(crate::schema::StructType::new(vec![
+                path_field.clone(),
+                size_field.clone(),
+                partition_field.clone(),
+                data_change_field.clone(),
+                modification_time_field.clone(),
+            ]))),
+            true,
+        ),
+        StructField::new(
+            "commitInfo",
+            DataType::Struct(Box::new(crate::schema::StructType::new(vec![
+                StructField::new("engineInfo", DataType::STRING, true),
+                StructField::new("kernelVersion", DataType::STRING, true),
+            ]))),
+            true,
+        ),
+    ])
 }

@@ -22,10 +22,12 @@ pub(crate) const REMOVE_NAME: &str = "remove";
 pub(crate) const METADATA_NAME: &str = "metaData";
 pub(crate) const PROTOCOL_NAME: &str = "protocol";
 pub(crate) const TRANSACTION_NAME: &str = "txn";
+pub(crate) const COMMIT_INFO_NAME: &str = "commitInfo";
 
 lazy_static! {
     static ref LOG_SCHEMA: StructType = StructType::new(
         vec![
+            Option::<CommitInfo>::get_struct_field(COMMIT_INFO_NAME),
             Option::<Add>::get_struct_field(ADD_NAME),
             Option::<Remove>::get_struct_field(REMOVE_NAME),
             Option::<Metadata>::get_struct_field(METADATA_NAME),
@@ -33,7 +35,6 @@ lazy_static! {
             Option::<Transaction>::get_struct_field(TRANSACTION_NAME),
             // We don't support the following actions yet
             //Option<Cdc>::get_field(CDC_NAME),
-            //Option<CommitInfo>::get_field(COMMIT_INFO_NAME),
             //Option<DomainMetadata>::get_field(DOMAIN_METADATA_NAME),
         ]
     );
@@ -240,6 +241,11 @@ impl Remove {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Schema)]
+pub struct CommitInfo {
+    pub engine_info: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Schema)]
 pub struct Transaction {
     /// A unique identifier for the application performing the transaction.
     pub app_id: String,
@@ -328,6 +334,22 @@ mod tests {
                 StructField::new("baseRowId", DataType::LONG, true),
                 StructField::new("defaultRowCommitVersion", DataType::LONG, true),
                 StructField::new("clusteringProvider", DataType::STRING, true),
+            ]),
+            true,
+        )]));
+        assert_eq!(schema, expected);
+    }
+
+    #[test]
+    fn test_commit_info_schema() {
+        let schema = get_log_schema()
+            .project(&["commitInfo"])
+            .expect("Couldn't get commitInfo field");
+
+        let expected = Arc::new(StructType::new(vec![StructField::new(
+            "commitInfo",
+            StructType::new(vec![
+                StructField::new("engineInfo", DataType::STRING, true),
             ]),
             true,
         )]));

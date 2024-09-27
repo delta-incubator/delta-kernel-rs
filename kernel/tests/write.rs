@@ -554,11 +554,11 @@ fn create_write_metadata(
         "partitionValues",
         arrow_schema::DataType::Map(
             Arc::new(Field::new(
-                "entries",
+                "key_value",
                 arrow_schema::DataType::Struct(
                     vec![
-                        Field::new("keys", arrow_schema::DataType::Utf8, false),
-                        Field::new("values", arrow_schema::DataType::Utf8, true),
+                        Field::new("key", arrow_schema::DataType::Utf8, false),
+                        Field::new("value", arrow_schema::DataType::Utf8, true),
                     ]
                     .into(),
                 ),
@@ -577,7 +577,12 @@ fn create_write_metadata(
     use arrow_array::builder::StringBuilder;
     let key_builder = StringBuilder::new();
     let val_builder = StringBuilder::new();
-    let mut builder = arrow_array::builder::MapBuilder::new(None, key_builder, val_builder);
+    let names = arrow_array::builder::MapFieldNames {
+        entry: "key_value".to_string(),
+        key: "key".to_string(),
+        value: "value".to_string(),
+    };
+    let mut builder = arrow_array::builder::MapBuilder::new(Some(names), key_builder, val_builder);
     if partitions.is_empty() {
         builder.append(true).unwrap();
     } else {
@@ -603,7 +608,7 @@ fn create_write_metadata(
             ]
             .into(),
         ),
-        false,
+        true,
     )]));
 
     let add = Arc::new(arrow_array::StructArray::from(vec![
@@ -613,6 +618,10 @@ fn create_write_metadata(
         (Arc::new(data_change_field), data_change),
         (Arc::new(modification_time_field), modification_time),
     ])) as ArrayRef;
+
+    println!("ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ");
+    println!("write metadata schema: {:#?}", schema);
+    println!("ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ");
 
     // Create the record batch
     Ok(Box::new(ArrowEngineData::new(RecordBatch::try_new(

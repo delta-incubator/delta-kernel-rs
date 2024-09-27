@@ -160,6 +160,8 @@ impl<E: TaskExecutor> JsonHandler for DefaultJsonHandler<E> {
                 schema = Some(record_batch.schema());
             }
 
+            println!("[Engine put_json] schema: {:#?}", record_batch.schema());
+
             // Clone and push the RecordBatch into the vector
             batches.push(record_batch.clone());
         }
@@ -173,8 +175,39 @@ impl<E: TaskExecutor> JsonHandler for DefaultJsonHandler<E> {
             }
         };
 
+        for batch in batches.iter() {
+            println!("===============================================================");
+            println!("[Engine put_json] batch: {:#?}", batch);
+            println!("[Engine put_json] schema: {:#?}", batch.schema());
+            println!("===============================================================");
+        }
+
+        fn make_add_nullable(record_batch: &RecordBatch) -> RecordBatch {
+            let schema = record_batch.schema();
+
+            let new_fields = schema
+                .fields()
+                .iter()
+                .map(|field| {
+                    if field.name() == "add" {
+                        arrow_schema::Field::new(field.name(), field.data_type().clone(), true)
+                    } else {
+                        <arrow_schema::Field as Clone>::clone(field)
+                    }
+                })
+                .collect::<Vec<_>>();
+
+            let new_schema = Arc::new(arrow_schema::Schema::new(new_fields));
+            RecordBatch::try_new(new_schema, record_batch.columns().to_vec()).unwrap()
+        }
+
+        let batches = batches.iter().map(|batch| {
+            make_add_nullable(batch)
+        }).collect::<Vec<_>>();
+
         // Concatenate all batches into one
-        let concatenated_batch = concat_batches(&schema, &batches)?;
+        let batches: Vec<&RecordBatch> = batches.iter().collect();
+        let concatenated_batch = concat_batches(&schema, batches)?;
 
         // Write the concatenated batch to JSON
         let mut writer = arrow_json::LineDelimitedWriter::new(Vec::new());
