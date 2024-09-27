@@ -12,7 +12,6 @@ use std::cmp::Ordering;
 /// a SET of rows -- has different semantics than row-based predicate evaluation. The provided
 /// methods of this class convert various supported expressions into data skipping predicates, and
 /// then return the result of evaluating the translated filter.
-#[allow(unused)] // temporary, until we wire up the parquet reader to actually use this
 pub(crate) trait ParquetStatsSkippingFilter {
     /// Retrieves the minimum value of a column, if it exists and has the requested type.
     fn get_min_stat_value(&self, col: &ColumnPath, data_type: &DataType) -> Option<Scalar>;

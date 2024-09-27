@@ -43,7 +43,8 @@ impl LogSegment {
     /// `read_schema` is the schema to read the log files with. This can be used
     /// to project the log files to a subset of the columns.
     ///
-    /// `predicate` is an optional expression to filter the log files with.
+    /// `meta_predicate` is an optional expression to filter the log files with. It is _NOT_ the
+    /// query's predicate, but rather a predicate for filtering log files themselves.
     #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
     #[cfg_attr(not(feature = "developer-visibility"), visibility::make(pub(crate)))]
     fn replay(
@@ -51,18 +52,24 @@ impl LogSegment {
         engine: &dyn Engine,
         commit_read_schema: SchemaRef,
         checkpoint_read_schema: SchemaRef,
-        predicate: Option<Expression>,
+        meta_predicate: Option<Expression>,
     ) -> DeltaResult<impl Iterator<Item = DeltaResult<(Box<dyn EngineData>, bool)>> + Send> {
         let json_client = engine.get_json_handler();
-        // TODO change predicate to: predicate AND add.path not null and remove.path not null
         let commit_stream = json_client
-            .read_json_files(&self.commit_files, commit_read_schema, predicate.clone())?
+            .read_json_files(
+                &self.commit_files,
+                commit_read_schema,
+                meta_predicate.clone(),
+            )?
             .map_ok(|batch| (batch, true));
 
         let parquet_client = engine.get_parquet_handler();
-        // TODO change predicate to: predicate AND add.path not null
         let checkpoint_stream = parquet_client
-            .read_parquet_files(&self.checkpoint_files, checkpoint_read_schema, predicate)?
+            .read_parquet_files(
+                &self.checkpoint_files,
+                checkpoint_read_schema,
+                meta_predicate,
+            )?
             .map_ok(|batch| (batch, false));
 
         let batches = commit_stream.chain(checkpoint_stream);
@@ -74,12 +81,12 @@ impl LogSegment {
         let schema = get_log_schema().project(&[PROTOCOL_NAME, METADATA_NAME])?;
         // filter out log files that do not contain metadata or protocol information
         use Expression as Expr;
-        let filter = Some(Expr::or(
+        let meta_predicate = Some(Expr::or(
             Expr::not(Expr::is_null(Expr::column("metaData.id"))),
             Expr::not(Expr::is_null(Expr::column("protocol.minReaderVersion"))),
         ));
         // read the same protocol and metadata schema for both commits and checkpoints
-        let data_batches = self.replay(engine, schema.clone(), schema, filter)?;
+        let data_batches = self.replay(engine, schema.clone(), schema, meta_predicate)?;
         let mut metadata_opt: Option<Metadata> = None;
         let mut protocol_opt: Option<Protocol> = None;
         for batch in data_batches {
