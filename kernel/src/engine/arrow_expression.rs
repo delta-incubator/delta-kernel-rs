@@ -194,7 +194,7 @@ fn column_as_struct<'a>(
     column: &Option<&'a Arc<dyn Array>>,
 ) -> Result<&'a StructArray, ArrowError> {
     let c = column.ok_or(ArrowError::SchemaError(format!("No such column: {}", name)))?;
-    if let arrow_schema::DataType::Map(_, _) = c.data_type() {
+    if let arrow_schema::DataType::Map(..) = c.data_type() {
         Ok(c.as_map_opt()
             .ok_or(ArrowError::SchemaError(format!("{} is not a map", name)))?
             .entries())
