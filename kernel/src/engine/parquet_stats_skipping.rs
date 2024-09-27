@@ -138,8 +138,7 @@ pub(crate) trait ParquetStatsSkippingFilter {
             UnaryOperation { op, expr } => self.apply_unary(*op, expr, inverted),
             Literal(value) => Self::apply_scalar(value, inverted),
             Column(col) => self.apply_column(col, inverted),
-            // We don't support skipping over complex types
-            Struct(_) => None,
+            Struct(_) => None, // not supported
         }
     }
 
@@ -1156,13 +1155,13 @@ mod tests {
         expect_eq!(AllNullTestFilter.apply_sql_where(col), None, "WHERE {col}");
         expect_eq!(
             AllNullTestFilter.apply_sql_where(&Expression::is_null(col.clone())),
-            Some(true),
+            Some(true), // No injected NULL checks
             "WHERE {col} IS NULL"
         );
         expect_eq!(
-            AllNullTestFilter.apply_sql_where(&!Expression::is_null(col.clone())),
-            Some(false),
-            "WHERE {col} IS NOT NULL"
+            AllNullTestFilter.apply_sql_where(&Expression::lt(TRUE, FALSE)),
+            Some(false), // Injected NULL checks don't short circuit when inputs are NOT NULL
+            "WHERE {TRUE} < {FALSE}"
         );
 
         // Constrast normal vs SQL WHERE semantics - comparison

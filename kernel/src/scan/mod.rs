@@ -199,11 +199,13 @@ impl Scan {
         let commit_read_schema = get_log_schema().project(&[ADD_NAME, REMOVE_NAME])?;
         let checkpoint_read_schema = get_log_schema().project(&[ADD_NAME])?;
 
+        // NOTE: We don't pass any meta-predicate because we expect no meaningful row group skipping
+        // when ~every checkpoint file will contain the adds and removes we are looking for.
         let log_iter = self.snapshot.log_segment.replay(
             engine,
             commit_read_schema,
             checkpoint_read_schema,
-            self.predicate.clone(),
+            None,
         )?;
 
         Ok(scan_action_iter(
@@ -285,7 +287,7 @@ impl Scan {
                 let read_result_iter = engine.get_parquet_handler().read_parquet_files(
                     &[meta],
                     global_state.read_schema.clone(),
-                    None,
+                    self.predicate().clone(),
                 )?;
                 let gs = global_state.clone(); // Arc clone
                 Ok(read_result_iter.into_iter().map(move |read_result| {

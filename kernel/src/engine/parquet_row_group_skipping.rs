@@ -8,20 +8,25 @@ use parquet::file::statistics::Statistics;
 use parquet::schema::types::{ColumnDescPtr, ColumnPath};
 use std::collections::{HashMap, HashSet};
 
-/// Given an [`ArrowReaderBuilder`] and predicate [`Expression`], use parquet footer stats to filter
-/// out any row group that provably contains no rows which satisfy the predicate.
-pub fn filter_row_groups<T>(
-    reader: ArrowReaderBuilder<T>,
-    filter: &Expression,
-) -> ArrowReaderBuilder<T> {
-    let indices = reader
-        .metadata()
-        .row_groups()
-        .iter()
-        .enumerate()
-        .filter_map(|(index, row_group)| RowGroupFilter::apply(filter, row_group).then_some(index))
-        .collect();
-    reader.with_row_groups(indices)
+/// An extension trait for [`ArrowReaderBuilder`] that injects row group skipping capability.
+pub(crate) trait ParquetRowGroupSkipping {
+    /// Instructs the parquet reader to perform row group skipping, eliminating any row group whose
+    /// stats prove that none of the group's rows can satisfy the given `predicate`.
+    fn with_row_group_filter(self, predicate: &Expression) -> Self;
+}
+impl<T> ParquetRowGroupSkipping for ArrowReaderBuilder<T> {
+    fn with_row_group_filter(self, predicate: &Expression) -> Self {
+        let indices = self
+            .metadata()
+            .row_groups()
+            .iter()
+            .enumerate()
+            .filter_map(|(index, row_group)| {
+                RowGroupFilter::apply(predicate, row_group).then_some(index)
+            })
+            .collect();
+        self.with_row_groups(indices)
+    }
 }
 
 /// A ParquetStatsSkippingFilter for row group skipping. It obtains stats from a parquet
@@ -145,27 +150,16 @@ pub(crate) fn compute_field_indices(
     fields: &[ColumnDescPtr],
     expression: &Expression,
 ) -> HashMap<ColumnPath, usize> {
-    fn recurse(expression: &Expression, columns: &mut HashSet<ColumnPath>) {
+    fn do_recurse(expression: &Expression, cols: &mut HashSet<ColumnPath>) {
+        use Expression::*;
+        let mut recurse = |expr| do_recurse(expr, cols); // less arg passing below
         match expression {
-            Expression::Literal(_) => {}
-            Expression::Column(name) => {
-                columns.insert(col_name_to_path(name));
-            }
-            Expression::Struct(fields) => {
-                for field in fields {
-                    recurse(field, columns);
-                }
-            }
-            Expression::UnaryOperation { expr, .. } => recurse(expr, columns),
-            Expression::BinaryOperation { left, right, .. } => {
-                recurse(left, columns);
-                recurse(right, columns);
-            }
-            Expression::VariadicOperation { exprs, .. } => {
-                for expr in exprs {
-                    recurse(expr, columns);
-                }
-            }
+            Literal(_) => {}
+            Column(name) => drop(cols.insert(col_name_to_path(name))),
+            Struct(fields) => fields.iter().for_each(recurse),
+            UnaryOperation { expr, .. } => recurse(expr),
+            BinaryOperation { left, right, .. } => [left, right].iter().for_each(|e| recurse(e)),
+            VariadicOperation { exprs, .. } => exprs.iter().for_each(recurse),
         }
     }
 
@@ -174,7 +168,7 @@ pub(crate) fn compute_field_indices(
     //
     // NOTE: If a requested column was not available, it is silently ignored.
     let mut requested_columns = HashSet::new();
-    recurse(expression, &mut requested_columns);
+    do_recurse(expression, &mut requested_columns);
     fields
         .iter()
         .enumerate()
