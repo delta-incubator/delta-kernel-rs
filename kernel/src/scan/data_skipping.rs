@@ -58,7 +58,7 @@ fn as_inverted_data_skipping_predicate(expr: &Expr) -> Option<Expr> {
     use Expr::*;
     match expr {
         UnaryOperation { op, expr } => match op {
-            UnaryOperator::Not => as_data_skipping_predicate(expr),
+            UnaryOperator::Not | UnaryOperator::NotNull => as_data_skipping_predicate(expr),
             UnaryOperator::IsNull => {
                 // to check if a column could NOT have a null, we need two different checks, to see
                 // if the bounds are tight and then to actually do the check
