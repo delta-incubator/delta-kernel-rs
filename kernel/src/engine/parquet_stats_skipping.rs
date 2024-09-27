@@ -40,19 +40,19 @@ pub(crate) trait ParquetStatsSkippingFilter {
     /// comparison into a null-safe comparison, as long as the comparison's parent expressions are
     /// all AND. To see why, consider a WHERE clause filter of the form:
     ///
-    /// ```
+    /// ```text
     /// AND(..., a {cmp} b, ...)
     /// ```
     ///
     /// In order allow skipping based on the all-null `a` or `b`, we want to actually evaluate:
-    /// ```
+    /// ```text
     /// AND(..., AND(a IS NOT NULL, b IS NOT NULL, a {cmp} b), ...)
     /// ```
     ///
     /// This optimization relies on the fact that we only support IS [NOT] NULL skipping for
     /// columns, and we only support skipping for comparisons between columns and literals. Thus, a
     /// typical case such as: `AND(..., x < 10, ...)` would in the all-null case be evaluated as:
-    /// ```
+    /// ```text
     /// AND(..., AND(x IS NOT NULL, 10 IS NOT NULL, x < 10), ...)
     /// AND(..., AND(FALSE, NULL, NULL), ...)
     /// AND(..., FALSE, ...)
@@ -60,7 +60,7 @@ pub(crate) trait ParquetStatsSkippingFilter {
     /// ```
     ///
     /// In the not all-null case, it would instead evaluate as:
-    /// ```
+    /// ```text
     /// AND(..., AND(x IS NOT NULL, 10 IS NOT NULL, x < 10), ...)
     /// AND(..., AND(TRUE, NULL, <result>), ...)
     /// ```
@@ -89,7 +89,7 @@ pub(crate) trait ParquetStatsSkippingFilter {
     }
 
     /// Helper method for [`apply_sql_where`], that evaluates `{a} {cmp} {b}` as
-    /// ```
+    /// ```text
     /// AND({a} IS NOT NULL, {b} IS NOT NULL, {a} {cmp} {b})
     /// ```
     ///
