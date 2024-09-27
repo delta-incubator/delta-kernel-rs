@@ -51,14 +51,6 @@ impl Scalar {
             Double(val) => Arc::new(Float64Array::from_value(*val, num_rows)),
             String(val) => Arc::new(StringArray::from(vec![val.clone(); num_rows])),
             Boolean(val) => Arc::new(BooleanArray::from(vec![*val; num_rows])),
-            // Integer(val) => Arc::new(Int32Array::new_scalar(*val).into_inner()),
-            // Long(val) => Arc::new(Int64Array::new_scalar(*val).into_inner()),
-            // Short(val) => Arc::new(Int16Array::new_scalar(*val).into_inner()),
-            // Byte(val) => Arc::new(Int8Array::new_scalar(*val).into_inner()),
-            // Float(val) => Arc::new(Float32Array::new_scalar(*val).into_inner()),
-            // Double(val) => Arc::new(Float64Array::new_scalar(*val).into_inner()),
-            // String(val) => Arc::new(StringArray::new_scalar(val).into_inner()),
-            // Boolean(val) => Arc::new(BooleanArray::new_scalar(*val).into_inner()),
             Timestamp(val) => {
                 Arc::new(TimestampMicrosecondArray::from_value(*val, num_rows).with_timezone("UTC"))
             }
@@ -347,6 +339,7 @@ pub(crate) fn evaluate_expression(
             if matches!(**left, MapAccess { .. }) {
                 // Only modify arrays for maps...
                 left_arr = left_arr.as_map().values().clone(); // Compare against values since we already filtered to only matching keys
+                dbg!(&left_arr);
                 right_arr = right_arr.slice(0, left_arr.len()); // Since we don't use a scalar array, modify the array to be of equal length
             }
 
@@ -471,7 +464,7 @@ mod tests {
     use arrow_array::{GenericStringArray, Int32Array};
     use arrow_buffer::ScalarBuffer;
     use arrow_schema::{DataType, Field, Fields, Schema};
-    use std::collections::HashMap;
+    use std::collections::{BTreeMap, HashMap};
     use std::ops::{Add, Div, Mul, Sub};
 
     fn setup_map_schema() -> Arc<Schema> {
@@ -485,7 +478,10 @@ mod tests {
         )]))
     }
 
-    fn setup_map_array(map: HashMap<String, Option<String>>) -> DeltaResult<Arc<MapArray>> {
+    fn setup_map_array(
+        map: BTreeMap<String, Option<String>>,
+        num_rows: usize,
+    ) -> DeltaResult<Arc<MapArray>> {
         let mut array_builder = MapBuilder::new(
             Some(MapFieldNames {
                 entry: MAP_ROOT_DEFAULT.to_string(),
@@ -496,13 +492,15 @@ mod tests {
         );
 
         for (k, v) in map {
-            array_builder.keys().append_value(k);
-            if let Some(v) = v {
-                array_builder.values().append_value(v);
-            } else {
-                array_builder.values().append_null();
+            for _ in 0..num_rows {
+                array_builder.keys().append_value(&k);
+                if let Some(ref v) = v {
+                    array_builder.values().append_value(v);
+                } else {
+                    array_builder.values().append_null();
+                }
+                array_builder.append(true)?;
             }
-            array_builder.append(true)?;
         }
 
         Ok(Arc::new(array_builder.finish()))
@@ -829,18 +827,18 @@ mod tests {
         let map_access = Expression::map(Expression::column("test_map"), Some("first_key"));
 
         let schema = setup_map_schema();
-        let map_values = HashMap::from_iter([
+        let map_values = BTreeMap::from([
             ("first_key".to_string(), Some("first".to_string())),
             ("second_key".to_string(), Some("second_value".to_string())),
         ]);
-        let array = setup_map_array(map_values)?;
-        let expected = HashMap::from_iter([("first_key".to_string(), Some("first".to_string()))]);
-        let expected_array = setup_map_array(expected)?;
+        let array = setup_map_array(map_values, 10)?;
+        let expected = BTreeMap::from([("first_key".to_string(), Some("first".to_string()))]);
+        let expected_array = setup_map_array(expected, 10)?;
 
         let batch = RecordBatch::try_new(schema.clone(), vec![array])?;
         let output = evaluate_expression(&map_access, &batch, None)?;
 
-        assert_eq!(output.len(), 1);
+        assert_eq!(output.len(), 10);
         assert_eq!(*output, *expected_array);
 
         Ok(())
@@ -856,11 +854,11 @@ mod tests {
         );
 
         let schema = setup_map_schema();
-        let map_values = HashMap::from_iter([
+        let map_values = BTreeMap::from([
             ("first_key".to_string(), Some("first".to_string())),
             ("second_key".to_string(), Some("second_value".to_string())),
         ]);
-        let array = setup_map_array(map_values)?;
+        let array = setup_map_array(map_values, 5)?;
 
         let batch = RecordBatch::try_new(schema.clone(), vec![array])?;
         let output = evaluate_expression(
@@ -868,9 +866,11 @@ mod tests {
             &batch,
             Some(&crate::schema::DataType::BOOLEAN),
         )?;
-        let expected = Arc::new(BooleanArray::from(vec![false, true]));
+        let expected = Arc::new(BooleanArray::from(vec![
+            false, false, false, false, false, true, true, true, true, true,
+        ]));
 
-        assert_eq!(output.len(), 2);
+        assert_eq!(output.len(), 10);
         assert_eq!(*output, *expected);
 
         Ok(())
