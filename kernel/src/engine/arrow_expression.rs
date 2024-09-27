@@ -464,7 +464,7 @@ mod tests {
     use arrow_array::{GenericStringArray, Int32Array};
     use arrow_buffer::ScalarBuffer;
     use arrow_schema::{DataType, Field, Fields, Schema};
-    use std::collections::{BTreeMap, HashMap};
+    use std::collections::BTreeMap;
     use std::ops::{Add, Div, Mul, Sub};
 
     fn setup_map_schema() -> Arc<Schema> {
