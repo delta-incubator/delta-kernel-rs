@@ -476,11 +476,7 @@ fn read_with_scan_data(
         };
         let read_results = engine
             .get_parquet_handler()
-            .read_parquet_files(
-                &[meta],
-                global_state.read_schema.clone(),
-                scan.predicate().clone(),
-            )
+            .read_parquet_files(&[meta], global_state.read_schema.clone(), None)
             .unwrap();
 
         for read_result in read_results {
@@ -518,7 +514,6 @@ fn read_with_scan_data(
     Ok(())
 }
 
-// TODO: Add some tests that read a table with no stats, to exercise parquet row group skipping.
 fn read_table_data(
     path: &str,
     select_cols: Option<&[&str]>,

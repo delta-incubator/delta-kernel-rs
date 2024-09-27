@@ -6,17 +6,12 @@ use url::Url;
 
 use crate::engine::arrow_data::ArrowEngineData;
 use crate::engine::arrow_utils::{generate_mask, get_requested_indices, reorder_struct_array};
-use crate::engine::parquet_row_group_skipping::ParquetRowGroupSkipping;
 use crate::schema::SchemaRef;
 use crate::{DeltaResult, Error, Expression, FileDataReadResultIterator, FileMeta, ParquetHandler};
 
 pub(crate) struct SyncParquetHandler;
 
-fn try_create_from_parquet(
-    schema: SchemaRef,
-    location: Url,
-    predicate: Option<&Expression>,
-) -> DeltaResult<ArrowEngineData> {
+fn try_create_from_parquet(schema: SchemaRef, location: Url) -> DeltaResult<ArrowEngineData> {
     let file = File::open(
         location
             .to_file_path()
@@ -29,9 +24,6 @@ fn try_create_from_parquet(
     if let Some(mask) = generate_mask(&schema, parquet_schema, builder.parquet_schema(), &indicies)
     {
         builder = builder.with_projection(mask);
-    }
-    if let Some(predicate) = predicate {
-        builder = builder.with_row_group_filter(predicate);
     }
     let mut reader = builder.build()?;
     let data = reader
@@ -54,8 +46,7 @@ impl ParquetHandler for SyncParquetHandler {
         }
         let locations: Vec<_> = files.iter().map(|file| file.location.clone()).collect();
         Ok(Box::new(locations.into_iter().map(move |location| {
-            try_create_from_parquet(schema.clone(), location, predicate.as_ref())
-                .map(|d| Box::new(d) as _)
+            try_create_from_parquet(schema.clone(), location).map(|d| Box::new(d) as _)
         })))
     }
 }
