@@ -12,7 +12,10 @@ pub mod arrow_expression;
 pub mod arrow_data;
 
 #[cfg(any(feature = "default-engine", feature = "sync-engine"))]
-pub mod arrow_footer_skipping;
+pub mod parquet_row_group_skipping;
+
+#[cfg(any(feature = "default-engine", feature = "sync-engine"))]
+pub mod parquet_stats_skipping;
 
 #[cfg(any(feature = "default-engine", feature = "sync-engine"))]
 pub(crate) mod arrow_get_data;
