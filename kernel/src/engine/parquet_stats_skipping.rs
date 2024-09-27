@@ -724,6 +724,30 @@ mod tests {
         let col = &Expression::column("x");
 
         for inverted in [false, true] {
+            // quick test for literal-literal comparisons
+            expect_eq!(
+                MinMaxTestFilter::new(MID.into(), MID.into()).apply_binary(
+                    Equal,
+                    &MID.into(),
+                    &MID.into(),
+                    inverted
+                ),
+                Some(!inverted),
+                "{MID} == {MID} (min: {MID}, max: {MID}, inverted: {inverted})"
+            );
+
+            // quick test for literal-column comparisons
+            expect_eq!(
+                MinMaxTestFilter::new(MID.into(), MID.into()).apply_binary(
+                    Equal,
+                    &MID.into(),
+                    col,
+                    inverted
+                ),
+                Some(!inverted),
+                "{MID} == {col} (min: {MID}, max: {MID}, inverted: {inverted})"
+            );
+
             expect_eq!(
                 MinMaxTestFilter::new(MID.into(), MID.into()).apply_binary(
                     Equal,
@@ -1151,6 +1175,16 @@ mod tests {
             AllNullTestFilter.apply_sql_where(&Expression::lt(col.clone(), val.clone())),
             Some(false),
             "WHERE {col} < {val}"
+        );
+        expect_eq!(
+            AllNullTestFilter.apply_expr(&Expression::lt(val.clone(), col.clone()), false),
+            None,
+            "{val} < {col}"
+        );
+        expect_eq!(
+            AllNullTestFilter.apply_sql_where(&Expression::lt(val.clone(), col.clone())),
+            Some(false),
+            "WHERE {val} < {col}"
         );
 
         // Constrast normal vs SQL WHERE semantics - comparison inside AND
