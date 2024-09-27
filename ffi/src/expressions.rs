@@ -1,11 +1,11 @@
 use std::ffi::c_void;
 
 use crate::{
-    handle::Handle, AllocateErrorFn, EngineIterator, ExternResult, IntoExternResult,
-    KernelStringSlice, ReferenceSet, TryFromStringSlice,
+    AllocateErrorFn, EngineIterator, ExternResult, IntoExternResult, KernelStringSlice,
+    ReferenceSet, TryFromStringSlice,
 };
 use delta_kernel::{
-    expressions::{BinaryOperator, Expression, Scalar, UnaryOperator, VariadicOperator},
+    expressions::{BinaryOperator, Expression, Scalar, UnaryOperator},
     DeltaResult,
 };
 
@@ -244,118 +244,4 @@ pub extern "C" fn visit_expression_literal_bool(
     value: bool,
 ) -> usize {
     wrap_expression(state, Expression::literal(value))
-}
-
-/// Kernel Expression to Engine Expression
-///
-#[repr(C)]
-pub struct EngineExpressionVisitor {
-    /// opaque state pointer
-    pub data: *mut c_void,
-    /// Creates a new field list, optionally reserving capacity up front
-    pub make_expr_list: extern "C" fn(data: *mut c_void, reserve: usize) -> usize,
-
-    /// Visit an `integer` belonging to the list identified by `sibling_list_id`.
-    pub visit_int: extern "C" fn(data: *mut c_void, value: i32) -> usize,
-    pub visit_long: extern "C" fn(data: *mut c_void, value: i64) -> usize,
-    pub visit_short: extern "C" fn(data: *mut c_void, value: i16) -> usize,
-    pub visit_byte: extern "C" fn(data: *mut c_void, value: i8) -> usize,
-    pub visit_float: extern "C" fn(data: *mut c_void, value: f32) -> usize,
-    pub visit_double: extern "C" fn(data: *mut c_void, value: f64) -> usize,
-    pub visit_bool: extern "C" fn(data: *mut c_void, value: bool) -> usize,
-    pub visit_string: extern "C" fn(data: *mut c_void, value: KernelStringSlice) -> usize,
-
-    pub visit_and: extern "C" fn(data: *mut c_void, len: usize) -> usize,
-    pub visit_or: extern "C" fn(data: *mut c_void, len: usize) -> usize,
-    pub visit_variadic_item:
-        extern "C" fn(data: *mut c_void, variadic_id: usize, sub_expr_id: usize),
-    pub visit_not: extern "C" fn(data: *mut c_void, inner_expr: usize) -> usize,
-    pub visit_is_null: extern "C" fn(data: *mut c_void, inner_expr: usize) -> usize,
-
-    pub visit_lt: extern "C" fn(data: *mut c_void, a: usize, b: usize) -> usize,
-    pub visit_le: extern "C" fn(data: *mut c_void, a: usize, b: usize) -> usize,
-    pub visit_gt: extern "C" fn(data: *mut c_void, a: usize, b: usize) -> usize,
-    pub visit_ge: extern "C" fn(data: *mut c_void, a: usize, b: usize) -> usize,
-    pub visit_eq: extern "C" fn(data: *mut c_void, a: usize, b: usize) -> usize,
-
-    pub visit_column: extern "C" fn(data: *mut c_void, name: KernelStringSlice) -> usize,
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn visit_expression(
-    expression: &Expression,
-    visitor: &mut EngineExpressionVisitor,
-) -> usize {
-    fn visit_variadic(
-        visitor: &mut EngineExpressionVisitor,
-        op: &VariadicOperator,
-        exprs: &Vec<Expression>,
-    ) -> usize {
-        let variadic_id = match op {
-            VariadicOperator::And => (visitor.visit_and)(visitor.data, exprs.len()),
-            VariadicOperator::Or => (visitor.visit_or)(visitor.data, exprs.len()),
-        };
-        for expr in exprs {
-            let expr_id = visit_expression(visitor, expr);
-            (visitor.visit_variadic_item)(visitor.data, variadic_id, expr_id)
-        }
-        variadic_id
-    }
-    fn visit_binary_op(
-        visitor: &mut EngineExpressionVisitor,
-        op: &BinaryOperator,
-        a: &Expression,
-        b: &Expression,
-    ) -> usize {
-        let a_id = visit_expression(visitor, a);
-        let b_id = visit_expression(visitor, b);
-        match op {
-            BinaryOperator::Plus => todo!(),
-            BinaryOperator::Minus => todo!(),
-            BinaryOperator::Multiply => todo!(),
-            BinaryOperator::Divide => todo!(),
-            BinaryOperator::LessThan => todo!(),
-            BinaryOperator::LessThanOrEqual => todo!(),
-            BinaryOperator::GreaterThan => todo!(),
-            BinaryOperator::GreaterThanOrEqual => todo!(),
-            BinaryOperator::Equal => todo!(),
-            BinaryOperator::NotEqual => todo!(),
-            BinaryOperator::Distinct => todo!(),
-            BinaryOperator::In => todo!(),
-            BinaryOperator::NotIn => todo!(),
-        }
-    }
-    fn visit_expression(visitor: &mut EngineExpressionVisitor, expression: &Expression) -> usize {
-        macro_rules! call {
-            ( $visitor_fn:ident $(, $extra_args:expr) *) => {
-                (visitor.$visitor_fn)(visitor.data $(, $extra_args) *)
-            };
-        }
-        match expression {
-            Expression::Literal(lit) => match lit {
-                Scalar::Integer(val) => call!(visit_int, *val),
-                Scalar::Long(val) => call!(visit_long, *val),
-                Scalar::Short(val) => call!(visit_short, *val),
-                Scalar::Byte(val) => call!(visit_byte, *val),
-                Scalar::Float(val) => call!(visit_float, *val),
-                Scalar::Double(val) => call!(visit_double, *val),
-                Scalar::String(val) => call!(visit_string, val.into()),
-                Scalar::Boolean(val) => call!(visit_bool, *val),
-                Scalar::Timestamp(val) => todo!(),
-                Scalar::TimestampNtz(_) => todo!(),
-                Scalar::Date(_) => todo!(),
-                Scalar::Binary(_) => todo!(),
-                Scalar::Decimal(_, _, _) => todo!(),
-                Scalar::Null(_) => todo!(),
-                Scalar::Struct(_) => todo!(),
-                Scalar::Array(_) => todo!(),
-            },
-            Expression::Column(name) => call!(visit_column, name.into()),
-            Expression::Struct(_) => todo!(),
-            Expression::BinaryOperation { op, left, right } => todo!(),
-            Expression::UnaryOperation { op, expr } => todo!(),
-            Expression::VariadicOperation { op, exprs } => visit_variadic(visitor, op, exprs),
-        }
-    }
-    visit_expression(visitor, expression)
 }
