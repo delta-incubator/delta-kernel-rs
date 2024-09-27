@@ -7,7 +7,6 @@ use arrow::{compute::filter_record_batch, record_batch::RecordBatch};
 use arrow_ord::sort::{lexsort_to_indices, SortColumn};
 use arrow_schema::Schema;
 use arrow_select::{concat::concat_batches, take::take};
-use itertools::Itertools;
 use paste::paste;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -174,7 +173,7 @@ async fn latest_snapshot_test(
                 Ok(record_batch)
             }
         })
-        .try_collect()?;
+        .collect::<DeltaResult<Vec<RecordBatch>>>()?;
 
     let expected = read_expected(&expected_path.expect("expect an expected dir")).await?;
 
