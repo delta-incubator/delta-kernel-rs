@@ -30,9 +30,9 @@ use handle::Handle;
 extern crate self as delta_kernel_ffi;
 
 pub mod engine_funcs;
-pub(crate) mod expressions;
-pub(crate) mod scan;
-pub(crate) mod schema;
+pub mod expressions;
+pub mod scan;
+pub mod schema;
 
 pub(crate) type NullableCvoid = Option<NonNull<c_void>>;
 
