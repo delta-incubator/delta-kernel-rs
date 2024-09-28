@@ -3,8 +3,8 @@ use std::sync::Arc;
 use crate::actions::visitors::TransactionVisitor;
 use crate::actions::{get_log_schema, TRANSACTION_NAME};
 use crate::snapshot::Snapshot;
-use crate::Engine;
 use crate::{actions::Transaction, DeltaResult};
+use crate::{Engine, Expression as Expr, ExpressionRef};
 
 pub use crate::actions::visitors::TransactionMap;
 pub struct TransactionScanner {
@@ -27,10 +27,17 @@ impl TransactionScanner {
         let mut visitor = TransactionVisitor::new(application_id.map(|s| s.to_owned()));
 
         // when all ids are requested then a full scan of the log to the latest checkpoint is required
-        let iter =
-            self.snapshot
-                .log_segment
-                .replay(engine, schema.clone(), schema.clone(), None)?;
+        lazy_static::lazy_static!(
+            static ref META_PREDICATE: Option<ExpressionRef> = Some(Arc::new(
+                !Expr::is_null(Expr::column("txn.appId")),
+            ));
+        );
+        let iter = self.snapshot.log_segment.replay(
+            engine,
+            schema.clone(),
+            schema.clone(),
+            META_PREDICATE.clone(),
+        )?;
 
         for maybe_data in iter {
             let (txns, _) = maybe_data?;

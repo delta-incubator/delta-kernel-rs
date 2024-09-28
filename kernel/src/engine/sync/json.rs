@@ -5,7 +5,7 @@ use std::{
 };
 
 use crate::{
-    schema::SchemaRef, utils::require, DeltaResult, EngineData, Error, Expression,
+    schema::SchemaRef, utils::require, DeltaResult, EngineData, Error, ExpressionRef,
     FileDataReadResultIterator, FileMeta, JsonHandler,
 };
 use arrow_array::{cast::AsArray, RecordBatch};
@@ -41,7 +41,7 @@ impl JsonHandler for SyncJsonHandler {
         &self,
         files: &[FileMeta],
         schema: SchemaRef,
-        predicate: Option<Expression>,
+        predicate: Option<ExpressionRef>,
     ) -> DeltaResult<FileDataReadResultIterator> {
         debug!("Reading json files: {files:#?} with predicate {predicate:#?}");
         if files.is_empty() {

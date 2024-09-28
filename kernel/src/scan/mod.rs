@@ -9,7 +9,7 @@ use url::Url;
 
 use crate::actions::deletion_vector::{split_vector, treemap_to_bools, DeletionVectorDescriptor};
 use crate::actions::{get_log_schema, ADD_NAME, REMOVE_NAME};
-use crate::expressions::{Expression, Scalar};
+use crate::expressions::{Expression, ExpressionRef, Scalar};
 use crate::features::ColumnMappingMode;
 use crate::scan::state::{DvInfo, Stats};
 use crate::schema::{DataType, Schema, SchemaRef, StructField, StructType};
@@ -27,7 +27,7 @@ pub mod state;
 pub struct ScanBuilder {
     snapshot: Arc<Snapshot>,
     schema: Option<SchemaRef>,
-    predicate: Option<Expression>,
+    predicate: Option<ExpressionRef>,
 }
 
 impl std::fmt::Debug for ScanBuilder {
@@ -74,18 +74,15 @@ impl ScanBuilder {
     ///
     /// Can be used to filter the rows in a scan. For example, using the predicate
     /// `x < 4` to return a subset of the rows in the scan which satisfy the filter.
-    pub fn with_predicate(mut self, predicate: Expression) -> Self {
-        self.predicate = Some(predicate);
-        self
+    pub fn with_predicate(self, predicate: Expression) -> Self {
+        self.with_predicate_opt(Some(predicate))
     }
 
     /// Optionally provide an [`Expression`] to filter rows. See [`ScanBuilder::with_predicate`] for
     /// details. If `predicate_opt` is `None`, this is a no-op.
-    pub fn with_predicate_opt(self, predicate_opt: Option<Expression>) -> Self {
-        match predicate_opt {
-            Some(predicate) => self.with_predicate(predicate),
-            None => self,
-        }
+    pub fn with_predicate_opt(mut self, predicate: Option<Expression>) -> Self {
+        self.predicate = predicate.map(Arc::new);
+        self
     }
 
     /// Build the [`Scan`].
@@ -153,7 +150,7 @@ pub struct Scan {
     snapshot: Arc<Snapshot>,
     logical_schema: SchemaRef,
     physical_schema: SchemaRef,
-    predicate: Option<Expression>,
+    predicate: Option<ExpressionRef>,
     all_fields: Vec<ColumnType>,
     have_partition_cols: bool,
 }
@@ -176,7 +173,7 @@ impl Scan {
     }
 
     /// Get the predicate [`Expression`] of the scan.
-    pub fn predicate(&self) -> &Option<Expression> {
+    pub fn predicate(&self) -> &Option<ExpressionRef> {
         &self.predicate
     }
 
@@ -467,7 +464,7 @@ fn transform_to_logical_internal(
             .get_expression_handler()
             .get_evaluator(
                 read_schema,
-                read_expression.clone(),
+                read_expression,
                 global_state.logical_schema.clone().into(),
             )
             .evaluate(data.as_ref())?;

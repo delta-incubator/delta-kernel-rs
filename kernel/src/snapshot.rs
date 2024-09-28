@@ -3,7 +3,6 @@
 //!
 
 use std::cmp::Ordering;
-use std::ops::Not;
 use std::sync::Arc;
 
 use itertools::Itertools;
@@ -18,7 +17,7 @@ use crate::scan::ScanBuilder;
 use crate::schema::{Schema, SchemaRef};
 use crate::utils::require;
 use crate::{DeltaResult, Engine, Error, FileMeta, FileSystemClient, Version};
-use crate::{EngineData, Expression};
+use crate::{EngineData, Expression, ExpressionRef};
 
 const LAST_CHECKPOINT_FILE_NAME: &str = "_last_checkpoint";
 
@@ -52,7 +51,7 @@ impl LogSegment {
         engine: &dyn Engine,
         commit_read_schema: SchemaRef,
         checkpoint_read_schema: SchemaRef,
-        meta_predicate: Option<Expression>,
+        meta_predicate: Option<ExpressionRef>,
     ) -> DeltaResult<impl Iterator<Item = DeltaResult<(Box<dyn EngineData>, bool)>> + Send> {
         let json_client = engine.get_json_handler();
         let commit_stream = json_client
@@ -81,12 +80,14 @@ impl LogSegment {
         let schema = get_log_schema().project(&[PROTOCOL_NAME, METADATA_NAME])?;
         // filter out log files that do not contain metadata or protocol information
         use Expression as Expr;
-        let meta_predicate = Some(Expr::or(
-            Expr::not(Expr::is_null(Expr::column("metaData.id"))),
-            Expr::not(Expr::is_null(Expr::column("protocol.minReaderVersion"))),
-        ));
+        lazy_static::lazy_static!(
+            static ref META_PREDICATE: Option<ExpressionRef> = Some(Arc::new(Expr::or(
+                !Expr::is_null(Expr::column("metaData.id")),
+                !Expr::is_null(Expr::column("protocol.minReaderVersion")),
+            )));
+        );
         // read the same protocol and metadata schema for both commits and checkpoints
-        let data_batches = self.replay(engine, schema.clone(), schema, meta_predicate)?;
+        let data_batches = self.replay(engine, schema.clone(), schema, META_PREDICATE.clone())?;
         let mut metadata_opt: Option<Metadata> = None;
         let mut protocol_opt: Option<Protocol> = None;
         for batch in data_batches {
