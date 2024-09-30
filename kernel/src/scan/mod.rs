@@ -276,7 +276,7 @@ impl Scan {
             .flatten_ok()
             .flatten_ok();
 
-        Ok(scan_files_iter
+        let result = scan_files_iter
             .map_ok(move |scan_file| -> DeltaResult<_> {
                 let file_path = self.snapshot.table_root.join(&scan_file.path)?;
                 let mut selection_vector = scan_file
@@ -295,8 +295,7 @@ impl Scan {
                 let gs = global_state.clone(); // Arc clone
                 Ok(read_result_iter
                     .into_iter()
-                    .map(move |read_result| -> DeltaResult<_> {
-                        let read_result = read_result?;
+                    .map_ok(move |read_result| -> DeltaResult<_> {
                         // to transform the physical data into the correct logical form
                         let logical = transform_to_logical_internal(
                             engine,
@@ -319,11 +318,13 @@ impl Scan {
                         };
                         selection_vector = rest;
                         Ok(result)
-                    }))
+                    })
+                    .flatten_ok())
             })
             .flatten_ok()
             .flatten_ok()
-            .flatten_ok())
+            .flatten_ok();
+        Ok(result)
     }
 }
 

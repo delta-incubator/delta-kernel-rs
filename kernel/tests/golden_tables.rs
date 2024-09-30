@@ -7,6 +7,7 @@ use arrow::{compute::filter_record_batch, record_batch::RecordBatch};
 use arrow_ord::sort::{lexsort_to_indices, SortColumn};
 use arrow_schema::Schema;
 use arrow_select::{concat::concat_batches, take::take};
+use itertools::Itertools;
 use paste::paste;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -158,8 +159,7 @@ async fn latest_snapshot_test(
     let scan = snapshot.into_scan_builder().build()?;
     let scan_res = scan.execute(&engine)?;
     let batches: Vec<RecordBatch> = scan_res
-        .map(|sr| -> DeltaResult<_> {
-            let sr = sr?;
+        .map_ok(|sr| -> DeltaResult<_> {
             let data = sr.raw_data?;
             let record_batch = to_arrow(data)?;
             if let Some(mut mask) = sr.mask {
@@ -173,7 +173,8 @@ async fn latest_snapshot_test(
                 Ok(record_batch)
             }
         })
-        .collect::<DeltaResult<Vec<RecordBatch>>>()?;
+        .flatten_ok()
+        .try_collect()?;
 
     let expected = read_expected(&expected_path.expect("expect an expected dir")).await?;
 
