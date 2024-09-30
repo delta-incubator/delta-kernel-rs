@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use crate::actions::visitors::TransactionVisitor;
 use crate::actions::{get_log_schema, TRANSACTION_NAME};
@@ -27,11 +27,11 @@ impl TransactionScanner {
         let mut visitor = TransactionVisitor::new(application_id.map(|s| s.to_owned()));
 
         // when all ids are requested then a full scan of the log to the latest checkpoint is required
-        lazy_static::lazy_static!(
-            static ref META_PREDICATE: Option<ExpressionRef> = Some(Arc::new(
+        static META_PREDICATE: LazyLock<Option<ExpressionRef>> = LazyLock::new(|| {
+            Some(Arc::new(
                 !Expr::is_null(Expr::column("txn.appId")),
-            ));
-        );
+            ))
+        });
         let iter = self.snapshot.log_segment.replay(
             engine,
             schema.clone(),

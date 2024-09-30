@@ -3,7 +3,7 @@
 //!
 
 use std::cmp::Ordering;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
@@ -80,12 +80,12 @@ impl LogSegment {
         let schema = get_log_schema().project(&[PROTOCOL_NAME, METADATA_NAME])?;
         // filter out log files that do not contain metadata or protocol information
         use Expression as Expr;
-        lazy_static::lazy_static!(
-            static ref META_PREDICATE: Option<ExpressionRef> = Some(Arc::new(Expr::or(
+        static META_PREDICATE: LazyLock<Option<ExpressionRef>> = LazyLock::new(|| {
+            Some(Arc::new(Expr::or(
                 !Expr::is_null(Expr::column("metaData.id")),
                 !Expr::is_null(Expr::column("protocol.minReaderVersion")),
-            )));
-        );
+            )))
+        });
         // read the same protocol and metadata schema for both commits and checkpoints
         let data_batches = self.replay(engine, schema.clone(), schema, META_PREDICATE.clone())?;
         let mut metadata_opt: Option<Metadata> = None;
