@@ -128,8 +128,7 @@ pub async fn assert_scan_data(engine: Arc<dyn Engine>, test_case: &TestCaseInfo)
     let mut schema = None;
     let batches: Vec<RecordBatch> = scan
         .execute(engine)?
-        .map(|res| -> DeltaResult<_> {
-            let res = res?;
+        .map_ok(|res| -> DeltaResult<_> {
             let data = res.raw_data?;
             let record_batch: RecordBatch = data
                 .into_any()
@@ -145,6 +144,7 @@ pub async fn assert_scan_data(engine: Arc<dyn Engine>, test_case: &TestCaseInfo)
                 Ok(record_batch)
             }
         })
+        .flatten_ok()
         .try_collect()?;
     let all_data = concat_batches(&schema.unwrap(), batches.iter()).map_err(Error::from)?;
     let all_data = sort_record_batch(all_data)?;
