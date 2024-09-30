@@ -1,8 +1,8 @@
-use std::ffi::c_void;
+use std::{ffi::c_void, io::Read, ops::Add, sync::Arc};
 
 use crate::{
     handle::Handle, AllocateErrorFn, EngineIterator, ExternResult, IntoExternResult,
-    KernelStringSlice, ReferenceSet, TryFromStringSlice,
+    KernelPredicate, KernelStringSlice, ReferenceSet, TryFromStringSlice,
 };
 use delta_kernel::{
     expressions::{BinaryOperator, Expression, Scalar, UnaryOperator, VariadicOperator},
@@ -246,6 +246,20 @@ pub extern "C" fn visit_expression_literal_bool(
     wrap_expression(state, Expression::literal(value))
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn get_kernel_expression() -> Handle<KernelPredicate> {
+    use Expression as Expr;
+    Arc::new(Expr::and_from(vec![
+        Expr::and_from(vec![
+            Expr::literal(Scalar::Integer(5)),
+            Expr::literal(Scalar::Integer(20)),
+        ]),
+        Expr::literal(Scalar::Integer(10)),
+        Expr::literal(Scalar::Integer(10)),
+    ]))
+    .into()
+}
+
 /// Kernel Expression to Engine Expression
 ///
 #[repr(C)]
@@ -262,9 +276,17 @@ pub struct EngineExpressionVisitor {
     pub visit_byte: extern "C" fn(data: *mut c_void, value: i8) -> usize,
     pub visit_float: extern "C" fn(data: *mut c_void, value: f32) -> usize,
     pub visit_double: extern "C" fn(data: *mut c_void, value: f64) -> usize,
-    pub visit_bool: extern "C" fn(data: *mut c_void, value: bool) -> usize,
     pub visit_string: extern "C" fn(data: *mut c_void, value: KernelStringSlice) -> usize,
-
+    pub visit_bool: extern "C" fn(data: *mut c_void, value: bool) -> usize,
+    pub visit_timestamp: extern "C" fn(data: *mut c_void, value: i64) -> usize,
+    pub visit_timestamp_ntz: extern "C" fn(data: *mut c_void, value: i64) -> usize,
+    pub visit_date: extern "C" fn(data: *mut c_void, value: i32) -> usize,
+    pub visit_binary: extern "C" fn(data: *mut c_void, buf: *const u8, len: usize) -> usize,
+    // Scalar::Binary(_) => todo!(), TODO: Figure out how to pass over binary data
+    // Scalar::Decimal(_, _, _) => todo!(),
+    // Scalar::Null(_) => todo!(),
+    // Scalar::Struct(_) => todo!(),
+    // Scalar::Array(_) => todo!(),
     pub visit_and: extern "C" fn(data: *mut c_void, len: usize) -> usize,
     pub visit_or: extern "C" fn(data: *mut c_void, len: usize) -> usize,
     pub visit_variadic_item:
@@ -277,13 +299,22 @@ pub struct EngineExpressionVisitor {
     pub visit_gt: extern "C" fn(data: *mut c_void, a: usize, b: usize) -> usize,
     pub visit_ge: extern "C" fn(data: *mut c_void, a: usize, b: usize) -> usize,
     pub visit_eq: extern "C" fn(data: *mut c_void, a: usize, b: usize) -> usize,
+    pub visit_ne: extern "C" fn(data: *mut c_void, a: usize, b: usize) -> usize,
+    pub visit_distinct: extern "C" fn(data: *mut c_void, a: usize, b: usize) -> usize,
+    pub visit_in: extern "C" fn(data: *mut c_void, a: usize, b: usize) -> usize,
+    pub visit_not_in: extern "C" fn(data: *mut c_void, a: usize, b: usize) -> usize,
+
+    pub visit_add: extern "C" fn(data: *mut c_void, a: usize, b: usize) -> usize,
+    pub visit_minus: extern "C" fn(data: *mut c_void, a: usize, b: usize) -> usize,
+    pub visit_multiply: extern "C" fn(data: *mut c_void, a: usize, b: usize) -> usize,
+    pub visit_divide: extern "C" fn(data: *mut c_void, a: usize, b: usize) -> usize,
 
     pub visit_column: extern "C" fn(data: *mut c_void, name: KernelStringSlice) -> usize,
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn visit_expression(
-    expression: &Expression,
+    expression: &Handle<KernelPredicate>, // TODO: This will likely be some kind of Handle<Expression>
     visitor: &mut EngineExpressionVisitor,
 ) -> usize {
     fn visit_variadic(
@@ -301,30 +332,6 @@ pub unsafe extern "C" fn visit_expression(
         }
         variadic_id
     }
-    fn visit_binary_op(
-        visitor: &mut EngineExpressionVisitor,
-        op: &BinaryOperator,
-        a: &Expression,
-        b: &Expression,
-    ) -> usize {
-        let a_id = visit_expression(visitor, a);
-        let b_id = visit_expression(visitor, b);
-        match op {
-            BinaryOperator::Plus => todo!(),
-            BinaryOperator::Minus => todo!(),
-            BinaryOperator::Multiply => todo!(),
-            BinaryOperator::Divide => todo!(),
-            BinaryOperator::LessThan => todo!(),
-            BinaryOperator::LessThanOrEqual => todo!(),
-            BinaryOperator::GreaterThan => todo!(),
-            BinaryOperator::GreaterThanOrEqual => todo!(),
-            BinaryOperator::Equal => todo!(),
-            BinaryOperator::NotEqual => todo!(),
-            BinaryOperator::Distinct => todo!(),
-            BinaryOperator::In => todo!(),
-            BinaryOperator::NotIn => todo!(),
-        }
-    }
     fn visit_expression(visitor: &mut EngineExpressionVisitor, expression: &Expression) -> usize {
         macro_rules! call {
             ( $visitor_fn:ident $(, $extra_args:expr) *) => {
@@ -341,10 +348,14 @@ pub unsafe extern "C" fn visit_expression(
                 Scalar::Double(val) => call!(visit_double, *val),
                 Scalar::String(val) => call!(visit_string, val.into()),
                 Scalar::Boolean(val) => call!(visit_bool, *val),
-                Scalar::Timestamp(val) => todo!(),
-                Scalar::TimestampNtz(_) => todo!(),
-                Scalar::Date(_) => todo!(),
-                Scalar::Binary(_) => todo!(),
+                Scalar::Timestamp(val) => call!(visit_timestamp, *val),
+                Scalar::TimestampNtz(val) => call!(visit_timestamp_ntz, *val),
+                Scalar::Date(val) => call!(visit_date, *val),
+                Scalar::Binary(buf) => {
+                    todo!()
+                    // let len = buf.len();
+                    // call!(visit_binary, buf as *const, buf.len());
+                }
                 Scalar::Decimal(_, _, _) => todo!(),
                 Scalar::Null(_) => todo!(),
                 Scalar::Struct(_) => todo!(),
@@ -352,10 +363,34 @@ pub unsafe extern "C" fn visit_expression(
             },
             Expression::Column(name) => call!(visit_column, name.into()),
             Expression::Struct(_) => todo!(),
-            Expression::BinaryOperation { op, left, right } => todo!(),
-            Expression::UnaryOperation { op, expr } => todo!(),
+            Expression::BinaryOperation { op, left, right } => {
+                let left_id = visit_expression(visitor, left);
+                let right_id = visit_expression(visitor, right);
+                match op {
+                    BinaryOperator::Plus => call!(visit_add, left_id, right_id),
+                    BinaryOperator::Minus => call!(visit_minus, left_id, right_id),
+                    BinaryOperator::Multiply => call!(visit_multiply, left_id, right_id),
+                    BinaryOperator::Divide => call!(visit_divide, left_id, right_id),
+                    BinaryOperator::LessThan => call!(visit_lt, left_id, right_id),
+                    BinaryOperator::LessThanOrEqual => call!(visit_le, left_id, right_id),
+                    BinaryOperator::GreaterThan => call!(visit_gt, left_id, right_id),
+                    BinaryOperator::GreaterThanOrEqual => call!(visit_ge, left_id, right_id),
+                    BinaryOperator::Equal => call!(visit_eq, left_id, right_id),
+                    BinaryOperator::NotEqual => call!(visit_ne, left_id, right_id),
+                    BinaryOperator::Distinct => call!(visit_distinct, left_id, right_id),
+                    BinaryOperator::In => call!(visit_in, left_id, right_id),
+                    BinaryOperator::NotIn => call!(visit_not_in, left_id, right_id),
+                }
+            }
+            Expression::UnaryOperation { op, expr } => {
+                let expr_id = visit_expression(visitor, expr);
+                match op {
+                    UnaryOperator::Not => call!(visit_not, expr_id),
+                    UnaryOperator::IsNull => call!(visit_is_null, expr_id),
+                }
+            }
             Expression::VariadicOperation { op, exprs } => visit_variadic(visitor, op, exprs),
         }
     }
-    visit_expression(visitor, expression)
+    visit_expression(visitor, expression.as_ref())
 }

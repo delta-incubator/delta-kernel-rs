@@ -11,7 +11,7 @@ use tracing::debug;
 use url::Url;
 
 use delta_kernel::snapshot::Snapshot;
-use delta_kernel::{DeltaResult, Engine, EngineData, Error, Table};
+use delta_kernel::{DeltaResult, Engine, EngineData, Error, Expression, Table};
 use delta_kernel_ffi_macros::handle_descriptor;
 
 // cbindgen doesn't understand our use of feature flags here, and by default it parses `mod handle`
@@ -691,6 +691,9 @@ pub unsafe extern "C" fn free_engine(engine: Handle<SharedExternEngine>) {
 
 #[handle_descriptor(target=Snapshot, mutable=false, sized=true)]
 pub struct SharedSnapshot;
+
+#[handle_descriptor(target=Expression, mutable=false, sized=true)]
+pub struct KernelPredicate;
 
 /// Get the latest snapshot from the specified table
 ///

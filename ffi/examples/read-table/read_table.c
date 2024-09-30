@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "arrow.h"
+#include "expression.h"
 #include "read_table.h"
 #include "schema.h"
 
@@ -105,7 +106,11 @@ void scan_row_callback(
 {
   (void)size; // not using this at the moment
   struct EngineContext* context = engine_context;
-  print_diag("Called back to read file: %.*s. (size: %" PRIu64 ", num records: ", (int)path.len, path.ptr, size);
+  print_diag(
+    "Called back to read file: %.*s. (size: %" PRIu64 ", num records: ",
+    (int)path.len,
+    path.ptr,
+    size);
   if (stats) {
     print_diag("%" PRId64 ")\n", stats->num_records);
   } else {
@@ -195,6 +200,8 @@ PartitionList* get_partition_list(SharedGlobalScanState* state)
 
 int main(int argc, char* argv[])
 {
+  test_kernel_expr();
+  return -1;
   if (argc < 2) {
     printf("Usage: %s table/path\n", argv[0]);
     return -1;
