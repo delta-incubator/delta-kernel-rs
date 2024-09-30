@@ -181,7 +181,7 @@ impl DataSkippingFilter {
         predicate: &Option<Expr>,
     ) -> Option<Self> {
         static PREDICATE_SCHEMA: LazyLock<DataType> = LazyLock::new(|| {
-            StructType::new(vec![StructField::new("predicate", DataType::BOOLEAN, true)]).into()
+            DataType::struct_type(vec![StructField::new("predicate", DataType::BOOLEAN, true)])
         });
         static STATS_EXPR: LazyLock<Expr> = LazyLock::new(|| Expr::column("add.stats"));
         static FILTER_EXPR: LazyLock<Expr> =
