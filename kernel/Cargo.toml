@@ -9,7 +9,7 @@ repository.workspace = true
 readme.workspace = true
 version.workspace = true
 # exclude golden tests + golden test data since they push us over 10MB crate size limit
-exclude = ["tests/golden_tables.rs", "tests/golden_data/" ]
+exclude = ["tests/golden_tables.rs", "tests/golden_data/"]
 
 [package.metadata.docs.rs]
 all-features = true
@@ -21,7 +21,6 @@ either = "1.13"
 fix-hidden-lifetime-bug = "0.2"
 indexmap = "2.5.0"
 itertools = "0.13"
-lazy_static = "1.5"
 roaring = "0.10.6"
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
@@ -68,44 +67,44 @@ walkdir = { workspace = true, optional = true }
 arrow-conversion = ["arrow-schema"]
 arrow-expression = ["arrow-arith", "arrow-array", "arrow-buffer", "arrow-ord", "arrow-schema"]
 cloud = [
-  "object_store/aws",
-  "object_store/azure",
-  "object_store/gcp",
-  "object_store/http",
-  "hdfs-native-object-store",
+    "object_store/aws",
+    "object_store/azure",
+    "object_store/gcp",
+    "object_store/http",
+    "hdfs-native-object-store",
 ]
 default = ["sync-engine"]
 default-engine = [
-  "arrow-conversion",
-  "arrow-expression",
-  "arrow-array",
-  "arrow-buffer",
-  "arrow-cast",
-  "arrow-json",
-  "arrow-schema",
-  "arrow-select",
-  "futures",
-  "object_store",
-  "parquet/async",
-  "parquet/object_store",
-  "reqwest",
-  "tokio",
+    "arrow-conversion",
+    "arrow-expression",
+    "arrow-array",
+    "arrow-buffer",
+    "arrow-cast",
+    "arrow-json",
+    "arrow-schema",
+    "arrow-select",
+    "futures",
+    "object_store",
+    "parquet/async",
+    "parquet/object_store",
+    "reqwest",
+    "tokio",
 ]
 
 developer-visibility = []
 sync-engine = [
-  "arrow-cast",
-  "arrow-conversion",
-  "arrow-expression",
-  "arrow-array",
-  "arrow-json",
-  "arrow-select",
-  "parquet",
+    "arrow-cast",
+    "arrow-conversion",
+    "arrow-expression",
+    "arrow-array",
+    "arrow-json",
+    "arrow-select",
+    "parquet",
 ]
 integration-test = [
-  "hdfs-native-object-store/integration-test",
-  "hdfs-native",
-  "walkdir",
+    "hdfs-native-object-store/integration-test",
+    "hdfs-native",
+    "walkdir",
 ]
 
 [build-dependencies]
@@ -120,6 +119,6 @@ tempfile = "3"
 tar = "0.4"
 zstd = "0.13"
 tracing-subscriber = { version = "0.3", default-features = false, features = [
-  "env-filter",
-  "fmt",
+    "env-filter",
+    "fmt",
 ] }
