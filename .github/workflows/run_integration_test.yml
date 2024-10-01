@@ -23,4 +23,5 @@ jobs:
           override: true
       - uses: Swatinem/rust-cache@v2
       - name: run integration tests
+        shell: bash
         run: pushd integration-tests && ./test-all-arrow-versions.sh
