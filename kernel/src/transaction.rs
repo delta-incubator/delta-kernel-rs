@@ -1,120 +1,82 @@
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
-use crate::actions::visitors::TransactionVisitor;
-use crate::actions::{get_log_schema, TRANSACTION_NAME};
+use crate::actions::get_log_schema;
+use crate::schema::{Schema, StructType};
 use crate::snapshot::Snapshot;
-use crate::Engine;
-use crate::{actions::Transaction, DeltaResult};
+use crate::{DataType, Expression};
+use crate::{DeltaResult, Engine, EngineData};
 
-pub use crate::actions::visitors::TransactionMap;
-pub struct TransactionScanner {
-    snapshot: Arc<Snapshot>,
+pub struct Transaction {
+    read_snapshot: Arc<Snapshot>,
+    commit_info: Option<CommitInfoData>,
 }
 
-impl TransactionScanner {
-    pub fn new(snapshot: Arc<Snapshot>) -> Self {
-        TransactionScanner { snapshot }
+pub struct CommitInfoData {
+    data: Box<dyn EngineData>,
+    schema: Schema,
+}
+
+impl std::fmt::Debug for Transaction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&format!(
+            "Transaction {{ read_snapshot version: {}, commit_info: {} }}",
+            self.read_snapshot.version(),
+            self.commit_info.is_some()
+        ))
     }
+}
 
-    /// Scan the entire log for all application ids but terminate early if a specific application id is provided
-    fn scan_application_transactions(
-        &self,
-        engine: &dyn Engine,
-        application_id: Option<&str>,
-    ) -> DeltaResult<TransactionMap> {
-        let schema = get_log_schema().project(&[TRANSACTION_NAME])?;
-
-        let mut visitor = TransactionVisitor::new(application_id.map(|s| s.to_owned()));
-
-        // when all ids are requested then a full scan of the log to the latest checkpoint is required
-        let iter =
-            self.snapshot
-                .log_segment
-                .replay(engine, schema.clone(), schema.clone(), None)?;
-
-        for maybe_data in iter {
-            let (txns, _) = maybe_data?;
-            txns.extract(schema.clone(), &mut visitor)?;
-            // if a specific id is requested and a transaction was found, then return
-            if application_id.is_some() && !visitor.transactions.is_empty() {
-                break;
-            }
+impl Transaction {
+    pub fn new(snapshot: impl Into<Arc<Snapshot>>) -> Self {
+        Transaction {
+            read_snapshot: snapshot.into(),
+            commit_info: None,
         }
-
-        Ok(visitor.transactions)
     }
 
-    /// Scan the Delta Log for the latest transaction entry of an application
-    pub fn application_transaction(
-        &self,
-        engine: &dyn Engine,
-        application_id: &str,
-    ) -> DeltaResult<Option<Transaction>> {
-        let mut transactions = self.scan_application_transactions(engine, Some(application_id))?;
-        Ok(transactions.remove(application_id))
+    pub fn commit(self, engine: &dyn Engine) -> DeltaResult<CommitResult> {
+        // lazy lock for the expression
+        static COMMIT_INFO_EXPR: LazyLock<Expression> =
+            LazyLock::new(|| Expression::column("commitInfo"));
+
+        // step one: construct the iterator of actions we want to commit
+        let action_schema = get_log_schema();
+
+        let actions = self.commit_info.into_iter().map(|commit_info| {
+            // commit info has arbitrary schema ex: {engineInfo: string, operation: string}
+            // we want to bundle it up and put it in the commit_info field of the actions.
+            let commit_info_evaluator = engine.get_expression_handler().get_evaluator(
+                commit_info.schema.into(),
+                COMMIT_INFO_EXPR.clone(), // TODO remove clone?
+                <StructType as Into<DataType>>::into(action_schema.clone()),
+            );
+            commit_info_evaluator.evaluate(commit_info.data.as_ref()).unwrap()
+        });
+
+        // step two: figure out the commit version and path to write
+        let commit_version = &self.read_snapshot.version() + 1;
+        let commit_file_name = format!("{:020}", commit_version) + ".json";
+        let commit_path = &self
+            .read_snapshot
+            .table_root
+            .join("_delta_log/")?
+            .join(&commit_file_name)?;
+
+        // step three: commit the actions as a json file in the log
+        let json_handler = engine.get_json_handler();
+
+        json_handler.write_json_file(commit_path, Box::new(actions), false)?;
+        Ok(CommitResult::Committed(commit_version))
     }
 
-    /// Scan the Delta Log to obtain the latest transaction for all applications
-    pub fn application_transactions(&self, engine: &dyn Engine) -> DeltaResult<TransactionMap> {
-        self.scan_application_transactions(engine, None)
+    /// Add commit info to the transaction. This is commit-wide metadata that is written as the
+    /// first action in the commit. Note it is required in order to commit. If the engine does not
+    /// require any commit info, pass an empty `EngineData`.
+    pub fn commit_info(&mut self, commit_info: Box<dyn EngineData>, schema: Schema) {
+        self.commit_info = Some(CommitInfoData { data: commit_info, schema });
     }
 }
 
-#[cfg(all(test, feature = "default-engine"))]
-mod tests {
-    use std::path::PathBuf;
-
-    use super::*;
-    use crate::engine::sync::SyncEngine;
-    use crate::Table;
-
-    fn get_latest_transactions(path: &str, app_id: &str) -> (TransactionMap, Option<Transaction>) {
-        let path = std::fs::canonicalize(PathBuf::from(path)).unwrap();
-        let url = url::Url::from_directory_path(path).unwrap();
-        let engine = SyncEngine::new();
-
-        let table = Table::new(url);
-        let snapshot = table.snapshot(&engine, None).unwrap();
-        let txn_scan = TransactionScanner::new(snapshot.into());
-
-        (
-            txn_scan.application_transactions(&engine).unwrap(),
-            txn_scan.application_transaction(&engine, app_id).unwrap(),
-        )
-    }
-
-    #[test]
-    fn test_txn() {
-        let (txns, txn) = get_latest_transactions("./tests/data/basic_partitioned/", "test");
-        assert!(txn.is_none());
-        assert_eq!(txns.len(), 0);
-
-        let (txns, txn) = get_latest_transactions("./tests/data/app-txn-no-checkpoint/", "my-app");
-        assert!(txn.is_some());
-        assert_eq!(txns.len(), 2);
-        assert_eq!(txns.get("my-app"), txn.as_ref());
-        assert_eq!(
-            txns.get("my-app2"),
-            Some(Transaction {
-                app_id: "my-app2".to_owned(),
-                version: 2,
-                last_updated: None
-            })
-            .as_ref()
-        );
-
-        let (txns, txn) = get_latest_transactions("./tests/data/app-txn-checkpoint/", "my-app");
-        assert!(txn.is_some());
-        assert_eq!(txns.len(), 2);
-        assert_eq!(txns.get("my-app"), txn.as_ref());
-        assert_eq!(
-            txns.get("my-app2"),
-            Some(Transaction {
-                app_id: "my-app2".to_owned(),
-                version: 2,
-                last_updated: None
-            })
-            .as_ref()
-        );
-    }
+pub enum CommitResult {
+    Committed(crate::Version),
 }
