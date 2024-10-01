@@ -17,11 +17,13 @@ is_version_lt() {
 
 test_arrow_version() {
   ARROW_VERSION="$1"
-  sed -i "s/\(arrow[^\"]*=[^\"]*\).*/\1\"=$ARROW_VERSION\"/" Cargo.toml
-  sed -i "s/\(parquet[^\"]*\).*/\1\"=$ARROW_VERSION\"/" Cargo.toml
+  echo "== Testing version $ARROW_VERSION =="
+  sed -i'' -e "s/\(arrow[^\"]*=[^\"]*\).*/\1\"=$ARROW_VERSION\"/" Cargo.toml
+  sed -i'' -e "s/\(parquet[^\"]*\).*/\1\"=$ARROW_VERSION\"/" Cargo.toml
   cargo clean
   rm -f Cargo.lock
   cargo update
+  cat Cargo.toml
   cargo run
 }
 
