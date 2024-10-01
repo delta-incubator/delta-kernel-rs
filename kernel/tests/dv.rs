@@ -1,11 +1,29 @@
 //! Read a small table with/without deletion vectors.
 //! Must run at the root of the crate
+use std::ops::Add;
 use std::path::PathBuf;
 
 use delta_kernel::engine::sync::SyncEngine;
-use delta_kernel::Table;
+use delta_kernel::scan::ScanResult;
+use delta_kernel::{DeltaResult, Table};
 
+use itertools::Itertools;
 use test_log::test;
+
+fn count_valid_rows(stream: impl Iterator<Item = DeltaResult<ScanResult>>) -> DeltaResult<usize> {
+    stream
+        .map_ok(|res| -> DeltaResult<_> {
+            let data = res.raw_data?;
+            let rows = data.length();
+            let valid_rows = match res.mask {
+                None => rows,
+                Some(ref mask) => (0..rows).filter(|i| mask[*i]).count(),
+            };
+            Ok(valid_rows)
+        })
+        .flatten_ok()
+        .fold_ok(0, Add::add)
+}
 
 #[test]
 fn dv_table() -> Result<(), Box<dyn std::error::Error>> {
@@ -18,17 +36,7 @@ fn dv_table() -> Result<(), Box<dyn std::error::Error>> {
     let scan = snapshot.into_scan_builder().build()?;
 
     let stream = scan.execute(&engine)?;
-    let mut total_rows = 0;
-    for res in stream {
-        let res = res?;
-        let data = res.raw_data?;
-        let rows = data.length();
-        for i in 0..rows {
-            if res.mask.as_ref().map_or(true, |mask| mask[i]) {
-                total_rows += 1;
-            }
-        }
-    }
+    let total_rows = count_valid_rows(stream)?;
     assert_eq!(total_rows, 8);
     Ok(())
 }
@@ -44,17 +52,7 @@ fn non_dv_table() -> Result<(), Box<dyn std::error::Error>> {
     let scan = snapshot.into_scan_builder().build()?;
 
     let stream = scan.execute(&engine)?;
-    let mut total_rows = 0;
-    for res in stream {
-        let res = res?;
-        let data = res.raw_data?;
-        let rows = data.length();
-        for i in 0..rows {
-            if res.mask.as_ref().map_or(true, |mask| mask[i]) {
-                total_rows += 1;
-            }
-        }
-    }
+    let total_rows = count_valid_rows(stream)?;
     assert_eq!(total_rows, 10);
     Ok(())
 }
