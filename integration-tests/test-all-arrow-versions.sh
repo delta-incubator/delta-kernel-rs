@@ -20,7 +20,7 @@ test_arrow_version() {
   sed -i "s/\(arrow[^\"]*=[^\"]*\).*/\1\"=$ARROW_VERSION\"/" Cargo.toml
   sed -i "s/\(parquet[^\"]*\).*/\1\"=$ARROW_VERSION\"/" Cargo.toml
   cargo clean
-  rm Cargo.lock
+  rm -f Cargo.lock
   cargo update
   cargo run
 }
