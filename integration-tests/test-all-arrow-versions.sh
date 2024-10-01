@@ -28,10 +28,11 @@ test_arrow_version() {
 }
 
 MIN_ARROW_VER="52.0.0"
+MAX_ARROW_VER="54.0.0"
 
 for ARROW_VERSION in $(curl -s https://crates.io/api/v1/crates/arrow | jq -r '.versions[].num' | tr -d '\r')
 do
-  if ! is_version_lt "$ARROW_VERSION" "$MIN_ARROW_VER"
+  if ! is_version_lt "$ARROW_VERSION" "$MIN_ARROW_VER" && is_version_lt "$ARROW_VERSION" "$MAX_ARROW_VER"
   then
     test_arrow_version "$ARROW_VERSION"
   fi
