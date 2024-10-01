@@ -6,6 +6,21 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#define DECL_BINOP(fun_name, op)                                                                   \
+  uintptr_t fun_name(void* data, uintptr_t a, uintptr_t b)                                         \
+  {                                                                                                \
+    return visit_binop(data, a, b, op);                                                            \
+  }
+#define DECL_SIMPLE_SCALAR(fun_name, enum_member, c_type)                                          \
+  uintptr_t fun_name(void* data, c_type val)                                                       \
+  {                                                                                                \
+    struct Literal* lit = malloc(sizeof(struct Literal));                                          \
+    lit->type = enum_member;                                                                       \
+    lit->value = (uintptr_t)val;                                                                   \
+    return put_handle(data, lit, Literal);                                                         \
+  }                                                                                                \
+  _Static_assert(                                                                                  \
+    sizeof(c_type) <= sizeof(uintptr_t), "The provided type is not a valid simple scalar")
 enum OpType
 {
   Add,
@@ -18,14 +33,28 @@ enum OpType
   GE,
   EQ,
   NE,
+  Distinct,
   In,
   NotIn,
 };
 enum LitType
 {
-  i32,
-  i16,
-  i8
+  Integer,
+  Long,
+  Short,
+  Byte,
+  Float,
+  Double,
+  String,
+  Boolean,
+  Timestamp,
+  TimestampNtz,
+  Date,
+  Binary,
+  Decimal,
+  Null,
+  Struct,
+  Array
 };
 struct Literal
 {
@@ -92,62 +121,31 @@ uintptr_t visit_binop(void* data, uintptr_t a, uintptr_t b, enum OpType op)
   binop->right = (struct Literal*)b;
   return put_handle(data, binop, BinOp);
 }
-uintptr_t visit_minus(void* data, uintptr_t a, uintptr_t b)
-{
-  return visit_binop(data, a, b, Add);
-}
-uintptr_t visit_add(void* data, uintptr_t a, uintptr_t b)
-{
-  return visit_binop(data, a, b, Add);
-}
-uintptr_t visit_div(void* data, uintptr_t a, uintptr_t b)
-{
-  return visit_binop(data, a, b, Div);
-}
-uintptr_t visit_mul(void* data, uintptr_t a, uintptr_t b)
-{
-  return visit_binop(data, a, b, Mul);
-}
-uintptr_t visit_le(void* data, uintptr_t a, uintptr_t b)
-{
-  return visit_binop(data, a, b, LE);
-}
-uintptr_t visit_lt(void* data, uintptr_t a, uintptr_t b)
-{
-  return visit_binop(data, a, b, LT);
-}
-uintptr_t visit_gt(void* data, uintptr_t a, uintptr_t b)
-{
-  return visit_binop(data, a, b, GT);
-}
-uintptr_t visit_ge(void* data, uintptr_t a, uintptr_t b)
-{
-  return visit_binop(data, a, b, GE);
-}
-uintptr_t visit_eq(void* data, uintptr_t a, uintptr_t b)
-{
-  return visit_binop(data, a, b, EQ);
-}
-uintptr_t visit_ne(void* data, uintptr_t a, uintptr_t b)
-{
-  return visit_binop(data, a, b, NE);
-}
-uintptr_t visit_in(void* data, uintptr_t a, uintptr_t b)
-{
-  return visit_binop(data, a, b, In);
-}
-uintptr_t visit_not_in(void* data, uintptr_t a, uintptr_t b)
-{
-  return visit_binop(data, a, b, NotIn);
-}
+DECL_BINOP(visit_add, Add)
+DECL_BINOP(visit_minus, Sub)
+DECL_BINOP(visit_multiply, Mul)
+DECL_BINOP(visit_divide, Div)
+DECL_BINOP(visit_lt, LT)
+DECL_BINOP(visit_le, LE)
+DECL_BINOP(visit_gt, GT)
+DECL_BINOP(visit_ge, GE)
+DECL_BINOP(visit_eq, EQ)
+DECL_BINOP(visit_ne, NE)
+DECL_BINOP(visit_distinct, Distinct)
+DECL_BINOP(visit_in, In)
+DECL_BINOP(visit_not_in, NotIn)
 
-uintptr_t visit_int(void* data, int32_t a)
-{
-  struct Literal* val = malloc(sizeof(struct Literal));
-  val->type = i32;
-  val->value = (uintptr_t)a;
-  return put_handle(data, val, Literal);
-}
+DECL_SIMPLE_SCALAR(visit_expr_int, Integer, int32_t);
+DECL_SIMPLE_SCALAR(visit_expr_long, Long, int64_t);
+DECL_SIMPLE_SCALAR(visit_expr_short, Long, int16_t);
+DECL_SIMPLE_SCALAR(visit_expr_byte, Byte, int8_t);
+DECL_SIMPLE_SCALAR(visit_expr_float, Float, float);
+DECL_SIMPLE_SCALAR(visit_expr_double, Double, double);
+DECL_SIMPLE_SCALAR(visit_expr_boolean, Boolean, _Bool);
+DECL_SIMPLE_SCALAR(visit_expr_timestamp, Timestamp, int64_t);
+DECL_SIMPLE_SCALAR(visit_expr_timestamp_ntz, TimestampNtz, int64_t);
+DECL_SIMPLE_SCALAR(visit_expr_date, Date, int64_t);
+
 uintptr_t visit_variadic(void* data, uintptr_t len, enum VariadicType op)
 {
   struct Variadic* var = malloc(sizeof(struct Variadic));
@@ -158,15 +156,6 @@ uintptr_t visit_variadic(void* data, uintptr_t len, enum VariadicType op)
   var->expr_list = expr_lst;
   return put_handle(data, var, Variadic);
 }
-uintptr_t visit_and(void* data, uintptr_t len)
-{
-  return visit_variadic(data, len, And);
-}
-uintptr_t visit_or(void* data, uintptr_t len)
-{
-  return visit_variadic(data, len, Or);
-}
-
 void visit_variadic_item(void* data, uintptr_t variadic_id, uintptr_t sub_expr_id)
 {
   struct ExpressionRef* sub_expr_ref = get_handle(data, sub_expr_id);
@@ -177,6 +166,14 @@ void visit_variadic_item(void* data, uintptr_t variadic_id, uintptr_t sub_expr_i
   struct Variadic* variadic = variadic_ref->ref;
   variadic->expr_list[variadic->len++] = *sub_expr_ref;
 }
+uintptr_t visit_and(void* data, uintptr_t len)
+{
+  return visit_variadic(data, len, And);
+}
+uintptr_t visit_or(void* data, uintptr_t len)
+{
+  return visit_variadic(data, len, Or);
+}
 
 // Print the schema of the snapshot
 struct ExpressionRef construct_predicate(KernelPredicate* predicate)
@@ -186,15 +183,15 @@ struct ExpressionRef construct_predicate(KernelPredicate* predicate)
   EngineExpressionVisitor visitor = {
     .data = &data,
     .make_expr_list = NULL,
-    .visit_int = visit_int,
-    .visit_long = NULL,
-    .visit_short = NULL,
-    .visit_byte = NULL,
-    .visit_float = NULL,
-    .visit_double = NULL,
-    .visit_bool = NULL,
-    .visit_timestamp = NULL,
-    .visit_timestamp_ntz = NULL,
+    .visit_int = visit_expr_int,
+    .visit_long = visit_expr_long,
+    .visit_short = visit_expr_short,
+    .visit_byte = visit_expr_byte,
+    .visit_float = visit_expr_float,
+    .visit_double = visit_expr_double,
+    .visit_bool = visit_expr_boolean,
+    .visit_timestamp = visit_expr_timestamp,
+    .visit_timestamp_ntz = visit_expr_timestamp_ntz,
     .visit_date = NULL,
     .visit_binary = NULL,
     .visit_decimal = NULL,
@@ -206,17 +203,17 @@ struct ExpressionRef construct_predicate(KernelPredicate* predicate)
     .visit_is_null = NULL,
     .visit_lt = visit_lt,
     .visit_le = visit_le,
-    .visit_gt = NULL,
-    .visit_ge = NULL,
-    .visit_eq = NULL,
-    .visit_ne = NULL,
-    .visit_distinct = NULL,
-    .visit_in = NULL,
-    .visit_not_in = NULL,
+    .visit_gt = visit_gt,
+    .visit_ge = visit_ge,
+    .visit_eq = visit_eq,
+    .visit_ne = visit_ne,
+    .visit_distinct = visit_distinct,
+    .visit_in = visit_in,
+    .visit_not_in = visit_not_in,
     .visit_add = visit_add,
     .visit_minus = visit_minus,
-    .visit_multiply = NULL,
-    .visit_divide = NULL,
+    .visit_multiply = visit_multiply,
+    .visit_divide = visit_divide,
     .visit_column = NULL,
     .visit_expr_struct = NULL,
     .visit_expr_struct_item = NULL,
@@ -288,6 +285,9 @@ void print_tree(struct ExpressionRef ref, int depth)
           printf("NotIn\n");
           break;
         }; break;
+        case Distinct:
+          printf("Distinct");
+          break;
       }
 
       struct ExpressionRef left = { .ref = op->left, .type = Literal };
@@ -317,17 +317,56 @@ void print_tree(struct ExpressionRef ref, int depth)
       struct Literal* lit = ref.ref;
       tab_helper(depth);
       switch (lit->type) {
-        case i32: {
-          printf("i32(");
-        } break;
-        case i16: {
-          printf("i16(");
-        } break;
-        case i8: {
-          printf("i8(");
-        } break;
+        case Integer:
+          printf("Integer");
+          break;
+        case Short:
+          printf("Short");
+          break;
+        case Byte:
+          printf("Byte");
+          break;
+        case Float:
+          printf("Float");
+          break;
+        case Double:
+          printf("Double");
+          break;
+        case String:
+          printf("String");
+          break;
+        case Boolean:
+          printf("Boolean");
+          break;
+        case Timestamp:
+          printf("Timestamp");
+          break;
+        case TimestampNtz:
+          printf("TimestampNtz");
+          break;
+        case Date:
+          printf("Date");
+          break;
+        case Binary:
+          printf("Binary");
+          break;
+        case Decimal:
+          printf("Decimal");
+          break;
+        case Null:
+          printf("Null");
+          break;
+        case Struct:
+          printf("Struct");
+          break;
+        case Array:
+          printf("Array");
+          break;
+        case Long:
+          printf("Long");
+          break;
       }
-      printf("%lld)\n", lit->value);
+      printf("(%lld)\n", lit->value);
     } break;
   }
 }
