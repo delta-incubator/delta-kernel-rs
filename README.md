@@ -54,7 +54,7 @@ include:
 | Feature flag  | Description   |
 | ------------- | ------------- |
 | `default-engine`    | Turn on the 'default' engine: async, arrow-based `Engine` implementation  |
-| `sync-engine`       | Turn on the 'sync' engine: synchronous, arrow-based `Engine` implementation |
+| `sync-engine`       | Turn on the 'sync' engine: synchronous, arrow-based `Engine` implementation. Only supports local storage! |
 | `arrow-conversion`  | Conversion utilities for arrow/kernel schema interoperation |
 | `arrow-expression`  | Expression system implementation for arrow |
 
