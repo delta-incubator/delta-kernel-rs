@@ -317,7 +317,6 @@ pub struct EngineExpressionVisitor {
     pub visit_column: extern "C" fn(data: *mut c_void, name: KernelStringSlice) -> usize,
 
     pub visit_expr_struct: extern "C" fn(data: *mut c_void, len: usize) -> usize,
-    pub visit_expr_struct_item: extern "C" fn(data: *mut c_void, struct_id: usize, expr_id: usize),
 }
 
 #[no_mangle]
@@ -329,7 +328,6 @@ pub unsafe extern "C" fn visit_expression(
         let expr_struct_id = (visitor.visit_expr_struct)(visitor.data, exprs.len());
         for expr in exprs {
             let expr_id = visit_expression(visitor, expr);
-            (visitor.visit_expr_struct_item)(visitor.data, expr_struct_id, expr_id)
         }
         expr_struct_id
     }

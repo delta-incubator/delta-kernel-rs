@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #define DECL_BINOP(fun_name, op)                                                                   \
   uintptr_t fun_name(void* data, uintptr_t a, uintptr_t b)                                         \
@@ -21,6 +22,11 @@
   }                                                                                                \
   _Static_assert(                                                                                  \
     sizeof(c_type) <= sizeof(uintptr_t), "The provided type is not a valid simple scalar")
+#define DECL_VARIADIC(fun_name, enum_member)                                                       \
+  uintptr_t fun_name(void* data, uintptr_t len)                                                    \
+  {                                                                                                \
+    return visit_variadic(data, len, enum_member);                                                 \
+  }
 enum OpType
 {
   Add,
@@ -71,13 +77,16 @@ struct BinOp
 enum VariadicType
 {
   And,
-  Or
+  Or,
+  StructConstructor
 };
 enum ExpressionType
 {
   BinOp,
   Variadic,
-  Literal
+  Literal,
+  BinaryLiteral,
+  DecimalLiteral
 };
 struct Variadic
 {
@@ -85,6 +94,17 @@ struct Variadic
   size_t len;
   size_t max_len;
   struct ExpressionRef* expr_list;
+};
+struct Binary
+{
+  uint8_t* buf;
+  uintptr_t len;
+};
+struct Decimal
+{
+  uint64_t value[2];
+  uint8_t precision;
+  uint8_t scale;
 };
 struct ExpressionRef
 {
@@ -144,7 +164,7 @@ DECL_SIMPLE_SCALAR(visit_expr_double, Double, double);
 DECL_SIMPLE_SCALAR(visit_expr_boolean, Boolean, _Bool);
 DECL_SIMPLE_SCALAR(visit_expr_timestamp, Timestamp, int64_t);
 DECL_SIMPLE_SCALAR(visit_expr_timestamp_ntz, TimestampNtz, int64_t);
-DECL_SIMPLE_SCALAR(visit_expr_date, Date, int64_t);
+DECL_SIMPLE_SCALAR(visit_expr_date, Date, int32_t);
 
 uintptr_t visit_variadic(void* data, uintptr_t len, enum VariadicType op)
 {
@@ -166,13 +186,31 @@ void visit_variadic_item(void* data, uintptr_t variadic_id, uintptr_t sub_expr_i
   struct Variadic* variadic = variadic_ref->ref;
   variadic->expr_list[variadic->len++] = *sub_expr_ref;
 }
-uintptr_t visit_and(void* data, uintptr_t len)
+DECL_VARIADIC(visit_and, And)
+DECL_VARIADIC(visit_or, Or)
+DECL_VARIADIC(visit_expr_struct, StructConstructor)
+
+uintptr_t visit_expr_binary(void* data, const uint8_t* buf, uintptr_t len)
 {
-  return visit_variadic(data, len, And);
+  struct Binary* bin = malloc(sizeof(struct Binary));
+  bin->buf = malloc(len);
+  memcpy(bin->buf, buf, len);
+  return put_handle(data, bin, BinaryLiteral);
 }
-uintptr_t visit_or(void* data, uintptr_t len)
+
+uintptr_t visit_expr_decimal(
+  void* data,
+  uint64_t value_ms,
+  uint64_t value_ls,
+  uint8_t precision,
+  uint8_t scale)
 {
-  return visit_variadic(data, len, Or);
+  struct Decimal* dec = malloc(sizeof(struct Decimal));
+  dec->value[0] = value_ms;
+  dec->value[1] = value_ls;
+  dec->precision = precision;
+  dec->scale = scale;
+  return put_handle(data, dec, DecimalLiteral);
 }
 
 // Print the schema of the snapshot
@@ -192,9 +230,9 @@ struct ExpressionRef construct_predicate(KernelPredicate* predicate)
     .visit_bool = visit_expr_boolean,
     .visit_timestamp = visit_expr_timestamp,
     .visit_timestamp_ntz = visit_expr_timestamp_ntz,
-    .visit_date = NULL,
-    .visit_binary = NULL,
-    .visit_decimal = NULL,
+    .visit_date = visit_expr_date,
+    .visit_binary = visit_expr_binary,
+    .visit_decimal = visit_expr_decimal,
     .visit_string = NULL,
     .visit_and = visit_and,
     .visit_or = visit_or,
@@ -215,8 +253,7 @@ struct ExpressionRef construct_predicate(KernelPredicate* predicate)
     .visit_multiply = visit_multiply,
     .visit_divide = visit_divide,
     .visit_column = NULL,
-    .visit_expr_struct = NULL,
-    .visit_expr_struct_item = NULL,
+    .visit_expr_struct = visit_expr_struct,
   };
   uintptr_t schema_list_id = visit_expression(&predicate, &visitor);
   return data.handles[schema_list_id];
@@ -301,12 +338,15 @@ void print_tree(struct ExpressionRef ref, int depth)
       tab_helper(depth);
       switch (var->op) {
         case And:
-          printf("AND (\n");
+          printf("AND\n");
           break;
         case Or:
-          printf("OR (\n");
+          printf("OR\n");
+          break;
+        case StructConstructor:
           break;
       }
+      printf("(");
       for (size_t i = 0; i < var->len; i++) {
         print_tree(var->expr_list[i], depth + 1);
       }
@@ -368,6 +408,9 @@ void print_tree(struct ExpressionRef ref, int depth)
       }
       printf("(%lld)\n", lit->value);
     } break;
+    case BinaryLiteral:
+    case DecimalLiteral:
+      break;
   }
 }
 
