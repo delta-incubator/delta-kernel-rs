@@ -1,0 +1,24 @@
+name: Run tests to ensure we can compile across arrow versions
+
+on: workflow_dispatch
+
+jobs:
+  arrow_integration_test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os:
+          - macOS-latest
+          - ubuntu-latest
+          - windows-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Install minimal stable rust
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: default
+          toolchain: stable
+          override: true
+      - uses: Swatinem/rust-cache@v2
+      - name: run tests
+        run: pushd integration-tests && ./test-all-arrow-versions.sh
