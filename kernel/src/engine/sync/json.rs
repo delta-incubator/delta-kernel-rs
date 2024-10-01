@@ -40,4 +40,13 @@ impl JsonHandler for SyncJsonHandler {
     ) -> DeltaResult<Box<dyn EngineData>> {
         arrow_parse_json(json_strings, output_schema)
     }
+
+    fn write_json_file<'a>(
+        &self,
+        _path: &Url,
+        _data: Box<dyn Iterator<Item = Box<dyn EngineData>> + Send + 'a>,
+        _overwrite: bool,
+    ) -> DeltaResult<()> {
+        unimplemented!()
+    }
 }

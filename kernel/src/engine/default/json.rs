@@ -88,6 +88,62 @@ impl<E: TaskExecutor> JsonHandler for DefaultJsonHandler<E> {
             self.readahead,
         )
     }
+
+    // note: for now we just buffer all the data and write it out all at once
+    fn write_json_file<'a>(
+        &self,
+        path: &url::Url,
+        data: Box<dyn Iterator<Item = Box<dyn EngineData>> + Send + 'a>,
+        _overwrite: bool,
+    ) -> DeltaResult<()> {
+        // Initialize schema and batches
+        let mut schema: Option<ArrowSchemaRef> = None;
+        let mut batches: Vec<RecordBatch> = Vec::new();
+
+        for chunk in data {
+            let arrow_data = ArrowEngineData::try_from_engine_data(chunk)?;
+            let record_batch = arrow_data.record_batch();
+
+            if schema.is_none() {
+                schema = Some(record_batch.schema());
+            }
+
+            println!("[Engine put_json] schema: {:#?}", record_batch.schema());
+            batches.push(record_batch.clone());
+        }
+
+        for batch in batches.iter() {
+            println!("===============================================================");
+            println!("[Engine put_json] batch: {:#?}", batch);
+            println!("[Engine put_json] schema: {:#?}", batch.schema());
+            println!("===============================================================");
+        }
+
+        // collect all batches
+        let batches: Vec<&RecordBatch> = batches.iter().collect();
+
+        // Write the concatenated batch to JSON
+        let mut writer = arrow_json::LineDelimitedWriter::new(Vec::new());
+        writer.write_batches(&batches)?;
+        writer.finish()?;
+
+        let buffer = writer.into_inner();
+
+        println!("[Engine put_json] commit path: {:?}", path.path());
+
+        // Put if absent
+        futures::executor::block_on(async {
+            self.store
+                .put_opts(
+                    &Path::from(path.path()),
+                    buffer.into(),
+                    object_store::PutMode::Create.into(),
+                )
+                .await
+        })?;
+
+        Ok(())
+    }
 }
 
 /// A [`FileOpener`] that opens a JSON file and yields a [`FileOpenFuture`]
