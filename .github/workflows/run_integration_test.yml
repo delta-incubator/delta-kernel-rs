@@ -6,8 +6,8 @@ jobs:
   arrow_integration_test:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
-    fail-fast: false
     strategy:
+      fail-fast: false
       matrix:
         os:
           - macOS-latest
