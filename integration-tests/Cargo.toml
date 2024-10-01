@@ -7,7 +7,7 @@ edition = "2021"
 
 [dependencies]
 arrow = "=52.0.0"
-delta_kernel = { path = "/tmp/delta-kernel-rs/kernel", features = ["arrow-conversion"] }
+delta_kernel = { path = "../kernel", features = ["arrow-conversion"] }
 
 [patch.'file:///tmp/delta-kernel-rs/kernel']
 arrow = "=52.0.0"
