@@ -282,8 +282,13 @@ pub struct EngineExpressionVisitor {
     pub visit_timestamp_ntz: extern "C" fn(data: *mut c_void, value: i64) -> usize,
     pub visit_date: extern "C" fn(data: *mut c_void, value: i32) -> usize,
     pub visit_binary: extern "C" fn(data: *mut c_void, buf: *const u8, len: usize) -> usize,
-    // Scalar::Binary(_) => todo!(), TODO: Figure out how to pass over binary data
-    // Scalar::Decimal(_, _, _) => todo!(),
+    pub visit_decimal: extern "C" fn(
+        data: *mut c_void,
+        value_ms: u64, // Most significant half of decimal value
+        value_ls: u64, // Least significant half of decimal value
+        precision: u8,
+        scale: u8,
+    ) -> usize,
     // Scalar::Null(_) => todo!(),
     // Scalar::Struct(_) => todo!(),
     // Scalar::Array(_) => todo!(),
@@ -310,6 +315,9 @@ pub struct EngineExpressionVisitor {
     pub visit_divide: extern "C" fn(data: *mut c_void, a: usize, b: usize) -> usize,
 
     pub visit_column: extern "C" fn(data: *mut c_void, name: KernelStringSlice) -> usize,
+
+    pub visit_expr_struct: extern "C" fn(data: *mut c_void, len: usize) -> usize,
+    pub visit_expr_struct_item: extern "C" fn(data: *mut c_void, struct_id: usize, expr_id: usize),
 }
 
 #[no_mangle]
@@ -317,6 +325,14 @@ pub unsafe extern "C" fn visit_expression(
     expression: &Handle<KernelPredicate>, // TODO: This will likely be some kind of Handle<Expression>
     visitor: &mut EngineExpressionVisitor,
 ) -> usize {
+    fn visit_expr_struct(visitor: &mut EngineExpressionVisitor, exprs: &Vec<Expression>) -> usize {
+        let expr_struct_id = (visitor.visit_expr_struct)(visitor.data, exprs.len());
+        for expr in exprs {
+            let expr_id = visit_expression(visitor, expr);
+            (visitor.visit_expr_struct_item)(visitor.data, expr_struct_id, expr_id)
+        }
+        expr_struct_id
+    }
     fn visit_variadic(
         visitor: &mut EngineExpressionVisitor,
         op: &VariadicOperator,
@@ -351,18 +367,18 @@ pub unsafe extern "C" fn visit_expression(
                 Scalar::Timestamp(val) => call!(visit_timestamp, *val),
                 Scalar::TimestampNtz(val) => call!(visit_timestamp_ntz, *val),
                 Scalar::Date(val) => call!(visit_date, *val),
-                Scalar::Binary(buf) => {
-                    todo!()
-                    // let len = buf.len();
-                    // call!(visit_binary, buf as *const, buf.len());
+                Scalar::Binary(buf) => call!(visit_binary, buf.as_ptr(), buf.len()),
+                Scalar::Decimal(value, precision, scale) => {
+                    let ms: u64 = (value >> 64) as u64;
+                    let ls: u64 = *value as u64;
+                    call!(visit_decimal, ms, ls, *precision, *scale)
                 }
-                Scalar::Decimal(_, _, _) => todo!(),
                 Scalar::Null(_) => todo!(),
                 Scalar::Struct(_) => todo!(),
                 Scalar::Array(_) => todo!(),
             },
             Expression::Column(name) => call!(visit_column, name.into()),
-            Expression::Struct(_) => todo!(),
+            Expression::Struct(exprs) => visit_expr_struct(visitor, exprs),
             Expression::BinaryOperation { op, left, right } => {
                 let left_id = visit_expression(visitor, left);
                 let right_id = visit_expression(visitor, right);

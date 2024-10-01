@@ -1,99 +1,180 @@
-#include "delta_kernel_ffi.h"
 #include "assert.h"
+#include "delta_kernel_ffi.h"
 #include "read_table.h"
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 
-enum OpType {
+enum OpType
+{
   Add,
-  Sub
+  Sub,
+  Div,
+  Mul,
+  LT,
+  LE,
+  GT,
+  GE,
+  EQ,
+  NE,
+  In,
+  NotIn,
 };
-enum LitType {
+enum LitType
+{
   i32,
   i16,
   i8
 };
-struct Literal {
+struct Literal
+{
   enum LitType type;
   int64_t value;
 };
-struct BinOp {
+struct BinOp
+{
   enum OpType op;
-  struct Literal *left;
-  struct Literal *right;
+  struct Literal* left;
+  struct Literal* right;
 };
 
-enum VariadicType {
+enum VariadicType
+{
   And,
   Or
 };
-enum ExpressionType {
+enum ExpressionType
+{
   BinOp,
   Variadic,
   Literal
 };
-struct Variadic {
+struct Variadic
+{
   enum VariadicType op;
   size_t len;
   size_t max_len;
-  struct ExpressionRef *expr_list;
+  struct ExpressionRef* expr_list;
 };
-struct ExpressionRef {
+struct ExpressionRef
+{
   void* ref;
   enum ExpressionType type;
 };
-struct Data {
+struct Data
+{
   size_t len;
   struct ExpressionRef handles[100];
 };
 
-size_t put_handle(void *data, void *ref, enum ExpressionType type) {
-    struct Data * data_ptr = (struct Data *) data;
-    struct ExpressionRef expr = {.ref= ref, .type = type};
-    data_ptr->handles[data_ptr->len] = expr;
-    return data_ptr->len++;
+size_t put_handle(void* data, void* ref, enum ExpressionType type)
+{
+  struct Data* data_ptr = (struct Data*)data;
+  struct ExpressionRef expr = { .ref = ref, .type = type };
+  data_ptr->handles[data_ptr->len] = expr;
+  return data_ptr->len++;
 }
-struct ExpressionRef *get_handle(void *data, size_t handle_index) {
-  struct Data * data_ptr = (struct Data *) data;
+struct ExpressionRef* get_handle(void* data, size_t handle_index)
+{
+  struct Data* data_ptr = (struct Data*)data;
   if (handle_index > data_ptr->len) {
     return NULL;
   }
   return &data_ptr->handles[handle_index];
 }
 
-uintptr_t visit_add(void *data, uintptr_t a, uintptr_t b) {
-    struct BinOp *op = malloc(sizeof(struct BinOp));
-    op->op = Add;
-    op->left = (struct Literal *) a;
-    op->right = (struct Literal *) b;
-    return put_handle(data, op, BinOp);
+uintptr_t visit_binop(void* data, uintptr_t a, uintptr_t b, enum OpType op)
+{
+  struct BinOp* binop = malloc(sizeof(struct BinOp));
+  binop->op = op;
+  binop->left = (struct Literal*)a;
+  binop->right = (struct Literal*)b;
+  return put_handle(data, binop, BinOp);
+}
+uintptr_t visit_minus(void* data, uintptr_t a, uintptr_t b)
+{
+  return visit_binop(data, a, b, Add);
+}
+uintptr_t visit_add(void* data, uintptr_t a, uintptr_t b)
+{
+  return visit_binop(data, a, b, Add);
+}
+uintptr_t visit_div(void* data, uintptr_t a, uintptr_t b)
+{
+  return visit_binop(data, a, b, Div);
+}
+uintptr_t visit_mul(void* data, uintptr_t a, uintptr_t b)
+{
+  return visit_binop(data, a, b, Mul);
+}
+uintptr_t visit_le(void* data, uintptr_t a, uintptr_t b)
+{
+  return visit_binop(data, a, b, LE);
+}
+uintptr_t visit_lt(void* data, uintptr_t a, uintptr_t b)
+{
+  return visit_binop(data, a, b, LT);
+}
+uintptr_t visit_gt(void* data, uintptr_t a, uintptr_t b)
+{
+  return visit_binop(data, a, b, GT);
+}
+uintptr_t visit_ge(void* data, uintptr_t a, uintptr_t b)
+{
+  return visit_binop(data, a, b, GE);
+}
+uintptr_t visit_eq(void* data, uintptr_t a, uintptr_t b)
+{
+  return visit_binop(data, a, b, EQ);
+}
+uintptr_t visit_ne(void* data, uintptr_t a, uintptr_t b)
+{
+  return visit_binop(data, a, b, NE);
+}
+uintptr_t visit_in(void* data, uintptr_t a, uintptr_t b)
+{
+  return visit_binop(data, a, b, In);
+}
+uintptr_t visit_not_in(void* data, uintptr_t a, uintptr_t b)
+{
+  return visit_binop(data, a, b, NotIn);
 }
 
-uintptr_t visit_int(void *data, int32_t a) {
-  struct Literal *val = malloc(sizeof(struct Literal));
+uintptr_t visit_int(void* data, int32_t a)
+{
+  struct Literal* val = malloc(sizeof(struct Literal));
   val->type = i32;
-  val->value = (uintptr_t) a;
+  val->value = (uintptr_t)a;
   return put_handle(data, val, Literal);
 }
-
-uintptr_t visit_and(void *data, uintptr_t len) {
-  struct Variadic* and = malloc(sizeof(struct Variadic));
+uintptr_t visit_variadic(void* data, uintptr_t len, enum VariadicType op)
+{
+  struct Variadic* var = malloc(sizeof(struct Variadic));
   struct ExpressionRef* expr_lst = malloc(sizeof(struct ExpressionRef) * len);
-  and->len = 0;
-  and->max_len = len;
-  and->expr_list = expr_lst;
-  return put_handle(data, and, Variadic);
+  var->op = op;
+  var->len = 0;
+  var->max_len = len;
+  var->expr_list = expr_lst;
+  return put_handle(data, var, Variadic);
+}
+uintptr_t visit_and(void* data, uintptr_t len)
+{
+  return visit_variadic(data, len, And);
+}
+uintptr_t visit_or(void* data, uintptr_t len)
+{
+  return visit_variadic(data, len, Or);
 }
 
-void visit_variadic_item(void *data, uintptr_t variadic_id, uintptr_t sub_expr_id) {
-  struct ExpressionRef *sub_expr_ref = get_handle(data, sub_expr_id);
-  struct ExpressionRef *variadic_ref = get_handle(data, variadic_id);
+void visit_variadic_item(void* data, uintptr_t variadic_id, uintptr_t sub_expr_id)
+{
+  struct ExpressionRef* sub_expr_ref = get_handle(data, sub_expr_id);
+  struct ExpressionRef* variadic_ref = get_handle(data, variadic_id);
   if (sub_expr_ref == NULL || variadic_ref == NULL) {
     abort();
   }
-  struct Variadic *variadic = variadic_ref->ref;
+  struct Variadic* variadic = variadic_ref->ref;
   variadic->expr_list[variadic->len++] = *sub_expr_ref;
 }
 
@@ -101,7 +182,7 @@ void visit_variadic_item(void *data, uintptr_t variadic_id, uintptr_t sub_expr_i
 struct ExpressionRef construct_predicate(KernelPredicate* predicate)
 {
   print_diag("Building schema\n");
-  struct Data data = {0};
+  struct Data data = { 0 };
   EngineExpressionVisitor visitor = {
     .data = &data,
     .make_expr_list = NULL,
@@ -112,14 +193,19 @@ struct ExpressionRef construct_predicate(KernelPredicate* predicate)
     .visit_float = NULL,
     .visit_double = NULL,
     .visit_bool = NULL,
+    .visit_timestamp = NULL,
+    .visit_timestamp_ntz = NULL,
+    .visit_date = NULL,
+    .visit_binary = NULL,
+    .visit_decimal = NULL,
     .visit_string = NULL,
     .visit_and = visit_and,
-    .visit_or = NULL,
+    .visit_or = visit_or,
     .visit_variadic_item = visit_variadic_item,
     .visit_not = NULL,
     .visit_is_null = NULL,
-    .visit_lt = NULL,
-    .visit_le = NULL,
+    .visit_lt = visit_lt,
+    .visit_le = visit_le,
     .visit_gt = NULL,
     .visit_ge = NULL,
     .visit_eq = NULL,
@@ -128,46 +214,90 @@ struct ExpressionRef construct_predicate(KernelPredicate* predicate)
     .visit_in = NULL,
     .visit_not_in = NULL,
     .visit_add = visit_add,
-    .visit_minus = NULL,
+    .visit_minus = visit_minus,
     .visit_multiply = NULL,
     .visit_divide = NULL,
     .visit_column = NULL,
+    .visit_expr_struct = NULL,
+    .visit_expr_struct_item = NULL,
   };
   uintptr_t schema_list_id = visit_expression(&predicate, &visitor);
   return data.handles[schema_list_id];
 }
 
-void tab_helper(int n) {
-  if (n == 0) return;
+void tab_helper(int n)
+{
+  if (n == 0)
+    return;
   printf("  ");
-  tab_helper(n-1);
+  tab_helper(n - 1);
 }
 
-void print_tree(struct ExpressionRef ref, int depth) {
+void print_tree(struct ExpressionRef ref, int depth)
+{
   switch (ref.type) {
     case BinOp: {
-      struct BinOp *op = ref.ref;
+      struct BinOp* op = ref.ref;
       tab_helper(depth);
-      switch(op->op) {
-        case Add:{
+      switch (op->op) {
+        case Add: {
           printf("ADD \n");
           break;
         }
         case Sub: {
           printf("SUB \n");
           break;
+        };
+        case Div: {
+          printf("DIV\n");
+          break;
+        };
+        case Mul: {
+          printf("MUL\n");
+          break;
+        };
+        case LT: {
+          printf("LT\n");
+          break;
+        };
+        case LE: {
+          printf("LE\n");
+          break;
         }
-        break;
+        case GT: {
+          printf("GT\n");
+          break;
+        };
+        case GE: {
+          printf("GE\n");
+          break;
+        };
+        case EQ: {
+          printf("EQ\n");
+          break;
+        };
+        case NE: {
+          printf("NE\n");
+          break;
+        };
+        case In: {
+          printf("In\n");
+          break;
+        };
+        case NotIn: {
+          printf("NotIn\n");
+          break;
+        }; break;
       }
 
-      struct ExpressionRef left = {.ref = op->left, .type = Literal};
-      struct ExpressionRef right = {.ref = op->right, .type = Literal};
-      print_tree(left, depth+1);
-      print_tree(right, depth+1);
+      struct ExpressionRef left = { .ref = op->left, .type = Literal };
+      struct ExpressionRef right = { .ref = op->right, .type = Literal };
+      print_tree(left, depth + 1);
+      print_tree(right, depth + 1);
       break;
     }
     case Variadic: {
-      struct Variadic *var = ref.ref;
+      struct Variadic* var = ref.ref;
       tab_helper(depth);
       switch (var->op) {
         case And:
@@ -177,37 +307,33 @@ void print_tree(struct ExpressionRef ref, int depth) {
           printf("OR (\n");
           break;
       }
-      for (size_t i = 0; i < var->len; i ++) {
-        print_tree(var->expr_list[i], depth +1);
+      for (size_t i = 0; i < var->len; i++) {
+        print_tree(var->expr_list[i], depth + 1);
       }
       tab_helper(depth);
       printf(")\n");
-    }
-    break;
+    } break;
     case Literal: {
-      struct Literal *lit = ref.ref;
+      struct Literal* lit = ref.ref;
       tab_helper(depth);
       switch (lit->type) {
         case i32: {
           printf("i32(");
-        }
-        break;
-        case i16:{
+        } break;
+        case i16: {
           printf("i16(");
-        }
-        break;
-        case i8:{
+        } break;
+        case i8: {
           printf("i8(");
-        }
-        break;
+        } break;
       }
       printf("%lld)\n", lit->value);
-      }
-    break;
-    }
+    } break;
   }
+}
 
-void test_kernel_expr() {
+void test_kernel_expr()
+{
   KernelPredicate* pred = get_kernel_expression();
   struct ExpressionRef ref = construct_predicate(pred);
   print_tree(ref, 0);
