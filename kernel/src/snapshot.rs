@@ -519,6 +519,16 @@ mod tests {
         }
         let data = bytes::Bytes::from("kernel-data");
 
+        let checkpoint_metadata = CheckpointMetadata {
+            version: 3,
+            size: 10,
+            parts: None,
+            size_in_bytes: None,
+            num_of_add_files: None,
+            checkpoint_schema: None,
+            checksum: None,
+        };
+
         // add log files to store
         tokio::runtime::Runtime::new()
             .expect("create tokio runtime")
@@ -538,6 +548,15 @@ mod tests {
                         .await
                         .expect("put log file in store");
                 }
+                let checkpoint_str =
+                    serde_json::to_string(&checkpoint_metadata).expect("Serialize checkpoint");
+                store
+                    .put(
+                        &Path::from("_delta_log/_last_checkpoint"),
+                        checkpoint_str.into(),
+                    )
+                    .await
+                    .expect("Write _last_checkpoint");
             });
 
         let client = ObjectStoreFileSystemClient::new(
@@ -546,15 +565,6 @@ mod tests {
             Arc::new(TokioBackgroundExecutor::new()),
         );
 
-        let checkpoint_metadata = CheckpointMetadata {
-            version: 3,
-            size: 10,
-            parts: None,
-            size_in_bytes: None,
-            num_of_add_files: None,
-            checkpoint_schema: None,
-            checksum: None,
-        };
         let url = Url::parse("memory:///_delta_log/").expect("valid url");
         let (commit_files, checkpoint_files) =
             list_log_files_with_checkpoint(&checkpoint_metadata, &client, &url).unwrap();
