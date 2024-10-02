@@ -159,8 +159,8 @@ async fn latest_snapshot_test(
     let scan = snapshot.into_scan_builder().build()?;
     let scan_res = scan.execute(&engine)?;
     let batches: Vec<RecordBatch> = scan_res
-        .map(|sr| {
-            sr.and_then(|sr| {
+        .map(|sr_res| {
+            sr_res.and_then(|sr| {
                 let data = sr.raw_data?;
                 let record_batch = to_arrow(data)?;
                 if let Some(mut mask) = sr.mask {

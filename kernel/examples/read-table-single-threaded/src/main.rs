@@ -116,7 +116,7 @@ fn try_main() -> DeltaResult<()> {
 
     let batches: Vec<RecordBatch> = scan
         .execute(engine.as_ref())?
-        .map(|sr_res| -> DeltaResult<RecordBatch> {
+        .map(|sr_res| {
             sr_res.and_then(|sr| {
                 let data = sr.raw_data?;
                 let record_batch: RecordBatch = data

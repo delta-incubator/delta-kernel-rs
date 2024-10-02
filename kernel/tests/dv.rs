@@ -14,7 +14,7 @@ fn count_total_scan_rows(
     stream: impl Iterator<Item = DeltaResult<ScanResult>>,
 ) -> DeltaResult<usize> {
     stream
-        .map(|sr_res| -> DeltaResult<_> {
+        .map(|sr_res| {
             sr_res.and_then(|sr| {
                 let data = sr.raw_data?;
                 let rows = data.length();

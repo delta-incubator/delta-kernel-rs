@@ -279,7 +279,7 @@ impl Scan {
                            // Iterator<DeltaResult<ScanFile>>
 
         let result = scan_files_iter
-            .map_and_then(move |scan_file| -> DeltaResult<_> {
+            .map_and_then(move |scan_file| {
                 let file_path = self.snapshot.table_root.join(&scan_file.path)?;
                 let mut selection_vector = scan_file
                     .dv_info
@@ -295,32 +295,30 @@ impl Scan {
                     None,
                 )?;
                 let gs = global_state.clone(); // Arc clone
-                Ok(
-                    read_result_iter.map_and_then(move |read_result| -> DeltaResult<_> {
-                        // to transform the physical data into the correct logical form
-                        let logical = transform_to_logical_internal(
-                            engine,
-                            read_result,
-                            &gs,
-                            &scan_file.partition_values,
-                            &self.all_fields,
-                            self.have_partition_cols,
-                        );
-                        let len = logical.as_ref().map_or(0, |res| res.length());
-                        // need to split the dv_mask. what's left in dv_mask covers this result, and rest
-                        // will cover the following results. we `take()` out of `selection_vector` to avoid
-                        // trying to return a captured variable. We're going to reassign `selection_vector`
-                        // to `rest` in a moment anyway
-                        let mut sv = selection_vector.take();
-                        let rest = split_vector(sv.as_mut(), len, None);
-                        let result = ScanResult {
-                            raw_data: logical,
-                            mask: sv,
-                        };
-                        selection_vector = rest;
-                        Ok(result)
-                    }),
-                )
+                Ok(read_result_iter.map_and_then(move |read_result| {
+                    // to transform the physical data into the correct logical form
+                    let logical = transform_to_logical_internal(
+                        engine,
+                        read_result,
+                        &gs,
+                        &scan_file.partition_values,
+                        &self.all_fields,
+                        self.have_partition_cols,
+                    );
+                    let len = logical.as_ref().map_or(0, |res| res.length());
+                    // need to split the dv_mask. what's left in dv_mask covers this result, and rest
+                    // will cover the following results. we `take()` out of `selection_vector` to avoid
+                    // trying to return a captured variable. We're going to reassign `selection_vector`
+                    // to `rest` in a moment anyway
+                    let mut sv = selection_vector.take();
+                    let rest = split_vector(sv.as_mut(), len, None);
+                    let result = ScanResult {
+                        raw_data: logical,
+                        mask: sv,
+                    };
+                    selection_vector = rest;
+                    Ok(result)
+                }))
             })
             .flatten_ok() // Iterator<DeltaResult<Iterator<DeltaResult<ScanResult>>>> to Iterator<DeltaResult<DeltaResult<ScanResult>>>
             .map_and_then(identity); // Iterator<DeltaResult<DeltaResult<ScanResult>>> to
