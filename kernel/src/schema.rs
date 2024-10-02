@@ -548,7 +548,10 @@ mod tests {
         }
         "#;
         let field: StructField = serde_json::from_str(data).unwrap();
-        assert!(matches!(field.data_type, DataType::INTEGER));
+        assert!(matches!(
+            field.data_type,
+            DataType::Primitive(PrimitiveType::Integer)
+        ));
 
         let data = r#"
         {

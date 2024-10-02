@@ -505,7 +505,7 @@ mod tests {
     fn test_arrays() {
         #[allow(deprecated)]
         let array = Scalar::Array(ArrayData {
-            tpe: ArrayType::new(DataType::INTEGER, false),
+            tpe: ArrayType::new(DataType::Primitive(PrimitiveType::Integer), false),
             elements: vec![Scalar::Integer(1), Scalar::Integer(2), Scalar::Integer(3)],
         });
 
