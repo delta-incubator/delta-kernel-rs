@@ -1,7 +1,7 @@
-use chrono::{DateTime, NaiveDate, NaiveDateTime, TimeZone, Utc};
 use std::cmp::Ordering;
 use std::fmt::{Display, Formatter};
-use std::sync::LazyLock;
+
+use chrono::{DateTime, NaiveDate, NaiveDateTime, TimeZone, Utc};
 
 use crate::schema::{ArrayType, DataType, PrimitiveType, StructField};
 use crate::utils::require;
@@ -296,8 +296,9 @@ impl PrimitiveType {
     pub fn parse_scalar(&self, raw: &str) -> Result<Scalar, Error> {
         use PrimitiveType::*;
 
-        static UNIX_EPOCH: LazyLock<DateTime<Utc>> =
-            LazyLock::new(|| DateTime::from_timestamp(0, 0).unwrap());
+        lazy_static::lazy_static! {
+            static ref UNIX_EPOCH: DateTime<Utc> = DateTime::from_timestamp(0, 0).unwrap();
+        }
 
         if raw.is_empty() {
             return Ok(Scalar::Null(self.data_type()));
