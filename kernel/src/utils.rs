@@ -8,7 +8,7 @@ macro_rules! require {
         }
     };
 }
-pub trait MapAndThen: Iterator {
+pub(super) trait MapAndThen: Iterator {
     fn map_and_then<F, T, U, E>(self, mut f: F) -> impl Iterator<Item = Result<U, E>>
     where
         Self: Iterator<Item = Result<T, E>> + Sized,

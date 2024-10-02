@@ -10,18 +10,23 @@ use delta_kernel::{DeltaResult, Table};
 use itertools::Itertools;
 use test_log::test;
 
-fn count_valid_rows(stream: impl Iterator<Item = DeltaResult<ScanResult>>) -> DeltaResult<usize> {
+fn count_total_scan_rows(
+    stream: impl Iterator<Item = DeltaResult<ScanResult>>,
+) -> DeltaResult<usize> {
     stream
-        .map_ok(|res| -> DeltaResult<_> {
-            let data = res.raw_data?;
-            let rows = data.length();
-            let valid_rows = match res.mask {
-                None => rows,
-                Some(ref mask) => (0..rows).filter(|i| mask[*i]).count(),
-            };
-            Ok(valid_rows)
+        .map(|res| -> DeltaResult<_> {
+            res.and_then(|res| {
+                let data = res.raw_data?;
+                let rows = data.length();
+                let valid_rows = res.mask.as_ref().map_or(rows, |mask| {
+                    // [`ScanResult`] states that the mask may be *shorter* than the number of
+                    // rows. Missing elements are considered true, so we include them in the count.
+                    let missing_elems = rows - mask.len();
+                    mask.iter().filter(|&&m| m).count() + missing_elems
+                });
+                Ok(valid_rows)
+            })
         })
-        .flatten_ok()
         .fold_ok(0, Add::add)
 }
 
@@ -36,7 +41,7 @@ fn dv_table() -> Result<(), Box<dyn std::error::Error>> {
     let scan = snapshot.into_scan_builder().build()?;
 
     let stream = scan.execute(&engine)?;
-    let total_rows = count_valid_rows(stream)?;
+    let total_rows = count_total_scan_rows(stream)?;
     assert_eq!(total_rows, 8);
     Ok(())
 }
@@ -52,7 +57,7 @@ fn non_dv_table() -> Result<(), Box<dyn std::error::Error>> {
     let scan = snapshot.into_scan_builder().build()?;
 
     let stream = scan.execute(&engine)?;
-    let total_rows = count_valid_rows(stream)?;
+    let total_rows = count_total_scan_rows(stream)?;
     assert_eq!(total_rows, 10);
     Ok(())
 }
