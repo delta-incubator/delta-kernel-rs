@@ -128,9 +128,9 @@ pub async fn assert_scan_data(engine: Arc<dyn Engine>, test_case: &TestCaseInfo)
     let mut schema = None;
     let batches: Vec<RecordBatch> = scan
         .execute(engine)?
-        .map(|res| -> DeltaResult<_> {
-            res.and_then(|res| {
-                let data = res.raw_data?;
+        .map(|sr_res| -> DeltaResult<_> {
+            sr_res.and_then(|sr| {
+                let data = sr.raw_data?;
                 let record_batch: RecordBatch = data
                     .into_any()
                     .downcast::<ArrowEngineData>()
@@ -139,7 +139,7 @@ pub async fn assert_scan_data(engine: Arc<dyn Engine>, test_case: &TestCaseInfo)
                 if schema.is_none() {
                     schema = Some(record_batch.schema());
                 }
-                if let Some(mask) = res.mask {
+                if let Some(mask) = sr.mask {
                     Ok(filter_record_batch(&record_batch, &mask.into())?)
                 } else {
                     Ok(record_batch)

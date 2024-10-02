@@ -14,15 +14,15 @@ fn count_total_scan_rows(
     stream: impl Iterator<Item = DeltaResult<ScanResult>>,
 ) -> DeltaResult<usize> {
     stream
-        .map(|res| -> DeltaResult<_> {
-            res.and_then(|res| {
-                let data = res.raw_data?;
+        .map(|sr_res| -> DeltaResult<_> {
+            sr_res.and_then(|sr| {
+                let data = sr.raw_data?;
                 let rows = data.length();
-                let valid_rows = res.mask.as_ref().map_or(rows, |mask| {
+                let valid_rows = sr.mask.as_ref().map_or(rows, |mask| {
                     // [`ScanResult`] states that the mask may be *shorter* than the number of
-                    // rows. Missing elements are considered true, so we include them in the count.
-                    let missing_elems = rows - mask.len();
-                    mask.iter().filter(|&&m| m).count() + missing_elems
+                    // rows. Missing rows are counted as true, so we add them in.
+                    let extra_rows = rows - mask.len();
+                    mask.iter().filter(|&&m| m).count() + extra_rows
                 });
                 Ok(valid_rows)
             })
