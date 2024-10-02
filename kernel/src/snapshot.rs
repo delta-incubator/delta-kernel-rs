@@ -366,7 +366,8 @@ fn list_log_files_with_checkpoint(
             checkpoint_metadata.version,
             max_checkpoint_version
         );
-        // we may need to drop some commits that are after the actual last checkpoint
+        // we (may) need to drop commits that are before the _actual_ last checkpoint (that
+        // is, commits between a stale _last_checkpoint and the _actual_ last checkpoint)
         commit_files.retain(|parsed_path| parsed_path.version > max_checkpoint_version);
     } else if checkpoint_files.len() != checkpoint_metadata.parts.unwrap_or(1) as usize {
         return Err(Error::Generic(format!(
