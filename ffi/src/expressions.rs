@@ -338,10 +338,11 @@ pub unsafe extern "C" fn visit_expression(
         op: &VariadicOperator,
         exprs: &Vec<Expression>,
     ) -> usize {
-        let variadic_id = match op {
-            VariadicOperator::And => (visitor.visit_and)(visitor.data, exprs.len()),
-            VariadicOperator::Or => (visitor.visit_or)(visitor.data, exprs.len()),
+        let visit_fn = match op {
+            VariadicOperator::And => &visitor.visit_and,
+            VariadicOperator::Or => &visitor.visit_or,
         };
+        let variadic_id = visit_fn(visitor.data, exprs.len());
         for expr in exprs {
             let expr_id = visit_expression(visitor, expr);
             (visitor.visit_variadic_item)(visitor.data, variadic_id, expr_id)
