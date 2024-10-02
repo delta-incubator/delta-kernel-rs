@@ -254,6 +254,7 @@ struct ExpressionRef construct_predicate(KernelPredicate* predicate)
     .visit_divide = visit_divide,
     .visit_column = NULL,
     .visit_expr_struct = visit_expr_struct,
+    .visit_expr_struct_item = visit_variadic_item, // treat expr struct like a variadic
   };
   uintptr_t schema_list_id = visit_expression(&predicate, &visitor);
   return data.handles[schema_list_id];
