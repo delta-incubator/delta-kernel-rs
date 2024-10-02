@@ -407,7 +407,7 @@ void print_tree(struct ExpressionRef ref, int depth)
           printf("Long");
           break;
       }
-      printf("(%ld)\n", lit->value);
+      printf("(%lld)\n", lit->value);
     } break;
     case BinaryLiteral:
     case DecimalLiteral:

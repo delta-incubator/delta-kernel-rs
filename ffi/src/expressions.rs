@@ -1,4 +1,4 @@
-use std::{ffi::c_void, io::Read, ops::Add, sync::Arc};
+use std::{ffi::c_void, sync::Arc};
 
 use crate::{
     handle::Handle, AllocateErrorFn, EngineIterator, ExternResult, IntoExternResult,
