@@ -330,6 +330,8 @@ fn list_log_files_with_checkpoint(
 
     let mut max_checkpoint_version = checkpoint_metadata.version;
     let mut checkpoint_files = vec![];
+    // We expect 10 commit files per checkpoint, so start with that size. We could adjust this based
+    // on config at some point
     let mut commit_files = Vec::with_capacity(10);
 
     for meta_res in fs_client.list_from(&start_from)? {
