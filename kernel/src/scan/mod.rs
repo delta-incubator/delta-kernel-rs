@@ -275,7 +275,8 @@ impl Scan {
                 state::visit_scan_files(data.as_ref(), &vec, scan_files, scan_data_callback)
                     .map(IntoIterator::into_iter)
             })
-            .flatten_ok();
+            .flatten_ok(); // Iterator<DeltaResult<Iterator<ScanFile>>> to
+                           // Iterator<DeltaResult<ScanFile>>
 
         let result = scan_files_iter
             .map_and_then(move |scan_file| -> DeltaResult<_> {
