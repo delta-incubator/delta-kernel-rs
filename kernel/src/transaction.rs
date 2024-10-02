@@ -1,4 +1,4 @@
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 
 use crate::actions::get_log_schema;
 use crate::expressions::Scalar;
@@ -42,36 +42,41 @@ impl Transaction {
         let actions = self.commit_info.into_iter().map(|commit_info| {
             // expression to select all the columns
             let commit_info_expr = Expression::Struct(vec![
-                //Expression::Literal(Scalar::Null(
-                //    action_schema
-                //        .project(&[crate::actions::ADD_NAME])
-                //        .unwrap()
-                //        .into(),
-                //)),
-                //Expression::Literal(Scalar::Null(
-                //    action_schema
-                //        .project(&[crate::actions::REMOVE_NAME])
-                //        .unwrap()
-                //        .into(),
-                //)),
-                //Expression::Literal(Scalar::Null(
-                //    action_schema
-                //        .project(&[crate::actions::METADATA_NAME])
-                //        .unwrap()
-                //        .into(),
-                //)),
-                //Expression::Literal(Scalar::Null(
-                //    action_schema
-                //        .project(&[crate::actions::PROTOCOL_NAME])
-                //        .unwrap()
-                //        .into(),
-                //)),
-                //Expression::Literal(Scalar::Null(
-                //    action_schema
-                //        .project(&[crate::actions::TRANSACTION_NAME])
-                //        .unwrap()
-                //        .into(),
-                //)),
+                Expression::Literal(Scalar::Null(
+                    action_schema
+                        .field(crate::actions::ADD_NAME)
+                        .unwrap()
+                        .data_type()
+                        .clone(),
+                )),
+                Expression::Literal(Scalar::Null(
+                    action_schema
+                        .field(crate::actions::REMOVE_NAME)
+                        .unwrap()
+                        .data_type()
+                        .clone(),
+                )),
+                Expression::Literal(Scalar::Null(
+                    action_schema
+                        .field(crate::actions::METADATA_NAME)
+                        .unwrap()
+                        .data_type()
+                        .clone(),
+                )),
+                Expression::Literal(Scalar::Null(
+                    action_schema
+                        .field(crate::actions::PROTOCOL_NAME)
+                        .unwrap()
+                        .data_type()
+                        .clone(),
+                )),
+                Expression::Literal(Scalar::Null(
+                    action_schema
+                        .field(crate::actions::TRANSACTION_NAME)
+                        .unwrap()
+                        .data_type()
+                        .clone(),
+                )),
                 Expression::Struct(
                     commit_info
                         .schema
