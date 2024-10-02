@@ -17,7 +17,7 @@ use delta_kernel::expressions::{BinaryOperator, Expression};
 use delta_kernel::scan::state::{visit_scan_files, DvInfo, Stats};
 use delta_kernel::scan::{transform_to_logical, Scan};
 use delta_kernel::schema::Schema;
-use delta_kernel::{DeltaResult, Engine, EngineData, FileMeta, Table};
+use delta_kernel::{Engine, EngineData, FileMeta, Table};
 use itertools::Itertools;
 use object_store::{memory::InMemory, path::Path, ObjectStore};
 use parquet::arrow::arrow_writer::ArrowWriter;
