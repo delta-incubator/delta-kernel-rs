@@ -1,8 +1,7 @@
 use std::sync::Arc;
 
-use arrow::array::{ArrayRef, BooleanArray, Int64Array, StringArray};
+use arrow::array::StringArray;
 use arrow::record_batch::RecordBatch;
-use arrow_schema::Field;
 use object_store::memory::InMemory;
 use object_store::path::Path;
 use object_store::ObjectStore;
@@ -12,7 +11,7 @@ use delta_kernel::engine::arrow_data::ArrowEngineData;
 use delta_kernel::engine::default::executor::tokio::TokioBackgroundExecutor;
 use delta_kernel::engine::default::DefaultEngine;
 use delta_kernel::schema::{DataType, SchemaRef, StructField, StructType};
-use delta_kernel::{DeltaResult, Engine, EngineData, Table};
+use delta_kernel::Table;
 
 // fixme use in macro below
 // const PROTOCOL_METADATA_TEMPLATE: &'static str = r#"{{"protocol":{{"minReaderVersion":3,"minWriterVersion":7,"readerFeatures":[],"writerFeatures":[]}}}}
@@ -64,48 +63,6 @@ async fn create_table(
     Ok(Table::new(table_path))
 }
 
-// FIXME delete/unify from default/parquet.rs
-fn get_metadata_schema() -> Arc<arrow_schema::Schema> {
-    let path_field = Field::new("path", arrow_schema::DataType::Utf8, false);
-    let size_field = Field::new("size", arrow_schema::DataType::Int64, false);
-    let partition_field = Field::new(
-        "partitionValues",
-        arrow_schema::DataType::Map(
-            Arc::new(Field::new(
-                "entries",
-                arrow_schema::DataType::Struct(
-                    vec![
-                        Field::new("keys", arrow_schema::DataType::Utf8, false),
-                        Field::new("values", arrow_schema::DataType::Utf8, true),
-                    ]
-                    .into(),
-                ),
-                false,
-            )),
-            false,
-        ),
-        false,
-    );
-    let data_change_field = Field::new("dataChange", arrow_schema::DataType::Boolean, false);
-    let modification_time_field =
-        Field::new("modificationTime", arrow_schema::DataType::Int64, false);
-
-    Arc::new(arrow_schema::Schema::new(vec![Field::new(
-        "add",
-        arrow_schema::DataType::Struct(
-            vec![
-                path_field.clone(),
-                size_field.clone(),
-                partition_field.clone(),
-                data_change_field.clone(),
-                modification_time_field.clone(),
-            ]
-            .into(),
-        ),
-        false,
-    )]))
-}
-
 #[tokio::test]
 async fn test_commit_info() -> Result<(), Box<dyn std::error::Error>> {
     // setup tracing
@@ -127,22 +84,34 @@ async fn test_commit_info() -> Result<(), Box<dyn std::error::Error>> {
         "",
     )
     .await?;
-    // println!(
-    //     "{:?}",
-    //     store
-    //         .get(&Path::from(
-    //             "/test_table/_delta_log/00000000000000000000.json"
-    //         ))
-    //         .await
-    // );
-    // append an arrow record batch (vec of record batches??)
     let mut txn = table.new_transaction(&engine)?;
+
+    use arrow_schema::Schema as ArrowSchema;
+    use arrow_schema::{DataType as ArrowDataType, Field};
+
+    // add commit info of the form {engineInfo: "default engine"}
+    let commit_info_schema = Arc::new(ArrowSchema::new(vec![Field::new(
+        "engineInfo",
+        ArrowDataType::Utf8,
+        true,
+    )]));
+    let commit_info_batch = RecordBatch::try_new(
+        commit_info_schema.clone(),
+        vec![Arc::new(StringArray::from(vec!["default engine"]))],
+    )?;
+    txn.commit_info(
+        Box::new(ArrowEngineData::new(commit_info_batch)),
+        commit_info_schema.try_into()?,
+    );
     txn.commit(&engine)?;
     let commit1 = store
         .get(&Path::from(
             "/test_table/_delta_log/00000000000000000001.json",
         ))
         .await?;
-    println!("commit1: {}", String::from_utf8(commit1.bytes().await?.to_vec())?);
+    assert_eq!(
+        String::from_utf8(commit1.bytes().await?.to_vec())?,
+        "{\"commitInfo\":{\"kernelVersion\":\"default engine\"}}\n"
+    );
     Ok(())
 }

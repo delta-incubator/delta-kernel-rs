@@ -1,6 +1,7 @@
 use std::sync::{Arc, LazyLock};
 
 use crate::actions::get_log_schema;
+use crate::expressions::Scalar;
 use crate::schema::{Schema, StructType};
 use crate::snapshot::Snapshot;
 use crate::{DataType, Expression};
@@ -35,22 +36,61 @@ impl Transaction {
     }
 
     pub fn commit(self, engine: &dyn Engine) -> DeltaResult<CommitResult> {
-        // lazy lock for the expression
-        static COMMIT_INFO_EXPR: LazyLock<Expression> =
-            LazyLock::new(|| Expression::column("commitInfo"));
-
         // step one: construct the iterator of actions we want to commit
         let action_schema = get_log_schema();
 
         let actions = self.commit_info.into_iter().map(|commit_info| {
+            // expression to select all the columns
+            let commit_info_expr = Expression::Struct(vec![
+                //Expression::Literal(Scalar::Null(
+                //    action_schema
+                //        .project(&[crate::actions::ADD_NAME])
+                //        .unwrap()
+                //        .into(),
+                //)),
+                //Expression::Literal(Scalar::Null(
+                //    action_schema
+                //        .project(&[crate::actions::REMOVE_NAME])
+                //        .unwrap()
+                //        .into(),
+                //)),
+                //Expression::Literal(Scalar::Null(
+                //    action_schema
+                //        .project(&[crate::actions::METADATA_NAME])
+                //        .unwrap()
+                //        .into(),
+                //)),
+                //Expression::Literal(Scalar::Null(
+                //    action_schema
+                //        .project(&[crate::actions::PROTOCOL_NAME])
+                //        .unwrap()
+                //        .into(),
+                //)),
+                //Expression::Literal(Scalar::Null(
+                //    action_schema
+                //        .project(&[crate::actions::TRANSACTION_NAME])
+                //        .unwrap()
+                //        .into(),
+                //)),
+                Expression::Struct(
+                    commit_info
+                        .schema
+                        .fields()
+                        .map(|f| Expression::column(f.name()))
+                        .collect(),
+                ),
+            ]);
+
             // commit info has arbitrary schema ex: {engineInfo: string, operation: string}
             // we want to bundle it up and put it in the commit_info field of the actions.
             let commit_info_evaluator = engine.get_expression_handler().get_evaluator(
                 commit_info.schema.into(),
-                COMMIT_INFO_EXPR.clone(), // TODO remove clone?
+                commit_info_expr,
                 <StructType as Into<DataType>>::into(action_schema.clone()),
             );
-            commit_info_evaluator.evaluate(commit_info.data.as_ref()).unwrap()
+            commit_info_evaluator
+                .evaluate(commit_info.data.as_ref())
+                .unwrap()
         });
 
         // step two: figure out the commit version and path to write
@@ -73,7 +113,10 @@ impl Transaction {
     /// first action in the commit. Note it is required in order to commit. If the engine does not
     /// require any commit info, pass an empty `EngineData`.
     pub fn commit_info(&mut self, commit_info: Box<dyn EngineData>, schema: Schema) {
-        self.commit_info = Some(CommitInfoData { data: commit_info, schema });
+        self.commit_info = Some(CommitInfoData {
+            data: commit_info,
+            schema,
+        });
     }
 }
 
