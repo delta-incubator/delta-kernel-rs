@@ -333,7 +333,7 @@ pub(crate) trait ParquetStatsSkippingFilter {
         let col = col_name_to_path(col);
         let as_boolean = |get: &dyn Fn(_, _, _) -> _| match get(self, &col, &DataType::BOOLEAN) {
             Some(Scalar::Boolean(value)) => Some(value),
-            Some(other) => {
+            Some(_) => {
                 info!("Ignoring non-boolean column {col}");
                 None
             }

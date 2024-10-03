@@ -62,7 +62,7 @@ impl<'a> RowGroupFilter<'a> {
     }
     fn decimal_from_bytes(bytes: Option<&[u8]>, p: u8, s: u8) -> Option<Scalar> {
         // WARNING: The bytes are stored in big-endian order; reverse and then 0-pad them.
-        let bytes = bytes.filter(|b| p <= 38 && b.len() <= 16)?;
+        let bytes = bytes.filter(|b| b.len() <= 16)?;
         let mut bytes = Vec::from(bytes);
         bytes.reverse();
         bytes.resize(16, 0u8);
@@ -95,6 +95,7 @@ impl<'a> ParquetStatsSkippingFilter for RowGroupFilter<'a> {
             (Float, Statistics::Float(s)) => s.min_opt()?.into(),
             (Float, _) => return None,
             (Double, Statistics::Double(s)) => s.min_opt()?.into(),
+            (Double, Statistics::Float(s)) => (*s.min_opt()? as f64).into(),
             (Double, _) => return None,
             (Boolean, Statistics::Boolean(s)) => s.min_opt()?.into(),
             (Boolean, _) => return None,
@@ -106,13 +107,10 @@ impl<'a> ParquetStatsSkippingFilter for RowGroupFilter<'a> {
             (Timestamp, Statistics::Int64(s)) => Scalar::Timestamp(*s.min_opt()?),
             (Timestamp, _) => return None, // TODO: Int96 timestamps
             (TimestampNtz, Statistics::Int64(s)) => Scalar::TimestampNtz(*s.min_opt()?),
-            (TimestampNtz, _) => return None, // TODO: Int96 timestamps
-            (Decimal(p, s), Statistics::Int32(i)) if *p <= 9 => {
-                Scalar::Decimal(*i.min_opt()? as i128, *p, *s)
-            }
-            (Decimal(p, s), Statistics::Int64(i)) if *p <= 18 => {
-                Scalar::Decimal(*i.min_opt()? as i128, *p, *s)
-            }
+            (TimestampNtz, Statistics::Int32(_)) => return None, // TODO: widen from DATE
+            (TimestampNtz, _) => return None,                    // TODO: Int96 timestamps
+            (Decimal(p, s), Statistics::Int32(i)) => Scalar::Decimal(*i.min_opt()? as i128, *p, *s),
+            (Decimal(p, s), Statistics::Int64(i)) => Scalar::Decimal(*i.min_opt()? as i128, *p, *s),
             (Decimal(p, s), Statistics::FixedLenByteArray(b)) => {
                 Self::decimal_from_bytes(b.min_bytes_opt(), *p, *s)?
             }
@@ -139,6 +137,7 @@ impl<'a> ParquetStatsSkippingFilter for RowGroupFilter<'a> {
             (Float, Statistics::Float(s)) => s.max_opt()?.into(),
             (Float, _) => return None,
             (Double, Statistics::Double(s)) => s.max_opt()?.into(),
+            (Double, Statistics::Float(s)) => (*s.max_opt()? as f64).into(),
             (Double, _) => return None,
             (Boolean, Statistics::Boolean(s)) => s.max_opt()?.into(),
             (Boolean, _) => return None,
@@ -150,13 +149,10 @@ impl<'a> ParquetStatsSkippingFilter for RowGroupFilter<'a> {
             (Timestamp, Statistics::Int64(s)) => Scalar::Timestamp(*s.max_opt()?),
             (Timestamp, _) => return None, // TODO: Int96 timestamps
             (TimestampNtz, Statistics::Int64(s)) => Scalar::TimestampNtz(*s.max_opt()?),
-            (TimestampNtz, _) => return None, // TODO: Int96 timestamps
-            (Decimal(p, s), Statistics::Int32(i)) if *p <= 9 => {
-                Scalar::Decimal(*i.max_opt()? as i128, *p, *s)
-            }
-            (Decimal(p, s), Statistics::Int64(i)) if *p <= 18 => {
-                Scalar::Decimal(*i.max_opt()? as i128, *p, *s)
-            }
+            (TimestampNtz, Statistics::Int32(_)) => return None, // TODO: widen from DATE
+            (TimestampNtz, _) => return None,                    // TODO: Int96 timestamps
+            (Decimal(p, s), Statistics::Int32(i)) => Scalar::Decimal(*i.max_opt()? as i128, *p, *s),
+            (Decimal(p, s), Statistics::Int64(i)) => Scalar::Decimal(*i.max_opt()? as i128, *p, *s),
             (Decimal(p, s), Statistics::FixedLenByteArray(b)) => {
                 Self::decimal_from_bytes(b.max_bytes_opt(), *p, *s)?
             }
