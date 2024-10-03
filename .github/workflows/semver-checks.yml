@@ -10,7 +10,10 @@ jobs:
   check_if_pr_breaks_semver:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
+        name: checkout full rep
+        with:
+          fetch-depth: 0
       - name: Install minimal stable
         uses: actions-rs/toolchain@v1
         with:
