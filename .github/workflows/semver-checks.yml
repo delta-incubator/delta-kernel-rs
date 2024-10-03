@@ -28,5 +28,6 @@ jobs:
       - name: Run check
         shell: bash
         run: |
-          cargo semver-checks  --baseline-rev ${{ github.event.pull_request.head.sha }}
+          git rev-parse HEAD
+          cargo semver-checks  --baseline-rev $(git rev-parse main)
 
