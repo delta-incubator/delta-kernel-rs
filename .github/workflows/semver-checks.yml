@@ -28,14 +28,14 @@ jobs:
       - name: Run check
         shell: bash
         run: |
-          cargo semver-checks --baseline-rev ${{ github.event.pull_request.base.sha }}
-      - name: On success
+          cargo semver-checks --all-features --baseline-rev ${{ github.event.pull_request.base.sha }}
+      - name: On Success
         if: success()
-        shell: bash
-        run: |
-          echo "semver check is okay"
-      - name: On success
+        uses: actions-ecosystem/action-add-labels@v1
+        with:
+          labels: breaking-change
+      - name: On Failure
         if: failure()
-        shell: bash
-        run: |
-          echo "semver check is NOT okay"
+        uses: actions-ecosystem/action-add-labels@v1
+        with:
+          labels: breaking-change
