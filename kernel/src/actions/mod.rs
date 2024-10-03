@@ -140,7 +140,6 @@ impl Protocol {
 #[derive(Debug, Clone, PartialEq, Eq, Schema)]
 pub struct CommitInfo {
     pub kernel_version: Option<String>,
-    // pub engine_info: HashMap<String, String>
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Schema)]
