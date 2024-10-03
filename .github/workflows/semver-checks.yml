@@ -9,6 +9,8 @@ env:
 jobs:
   check_if_pr_breaks_semver:
     runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write # needed for adding label
     steps:
       - uses: actions/checkout@v4
         name: checkout full rep
