@@ -274,8 +274,7 @@ impl Scan {
                 let scan_files = vec![];
                 state::visit_scan_files(data.as_ref(), &vec, scan_files, scan_data_callback)
             })
-            .flatten_ok(); // Iterator<DeltaResult<Vec<ScanFile>>> to
-                           // Iterator<DeltaResult<ScanFile>>
+            .flatten_ok(); // Iterator<DeltaResult<Vec<ScanFile>>> to Iterator<DeltaResult<ScanFile>>
 
         let result = scan_files_iter
             .map_and_then(move |scan_file| {
@@ -320,8 +319,7 @@ impl Scan {
                 }))
             })
             .flatten_ok() // Iterator<DeltaResult<Iterator<DeltaResult<ScanResult>>>> to Iterator<DeltaResult<DeltaResult<ScanResult>>>
-            .map_and_then(identity); // Iterator<DeltaResult<DeltaResult<ScanResult>>> to
-                                     // Iterator<DeltaResult<ScanResult>>
+            .map_and_then(identity); // Iterator<DeltaResult<DeltaResult<ScanResult>>> to Iterator<DeltaResult<ScanResult>>
         Ok(result)
     }
 }

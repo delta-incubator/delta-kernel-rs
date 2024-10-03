@@ -14,13 +14,14 @@ fn count_total_scan_rows(
     stream: impl Iterator<Item = DeltaResult<ScanResult>>,
 ) -> DeltaResult<usize> {
     stream
-        .map(|sr_res| {
-            let sr = sr_res?;
+        .map(|sr| {
+            let sr = sr?;
             let data = sr.raw_data?;
             // NOTE: The mask only suppresses rows for which it is both present and false.
-            let deleted_rows = sr.mask.as_ref().map_or(0, |mask| {
-                mask.iter().filter(|&&m| !m).count()
-            });
+            let deleted_rows = sr
+                .mask
+                .as_ref()
+                .map_or(0, |mask| mask.iter().filter(|&&m| !m).count());
             Ok(data.length() - deleted_rows)
         })
         .fold_ok(0, Add::add)

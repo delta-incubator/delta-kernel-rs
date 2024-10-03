@@ -399,8 +399,8 @@ fn read_with_execute(
     let result_schema: ArrowSchemaRef = Arc::new(scan.schema().as_ref().try_into()?);
     let scan_results = scan.execute(engine)?;
     let batches: Vec<RecordBatch> = scan_results
-        .map(|sr_res| -> DeltaResult<_> {
-            let sr = sr_res?;
+        .map(|sr| -> DeltaResult<_> {
+            let sr = sr?;
             let data = sr.raw_data?;
             let record_batch = to_arrow(data)?;
             if let Some(mut mask) = sr.mask {
