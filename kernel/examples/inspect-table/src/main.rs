@@ -2,9 +2,10 @@ use delta_kernel::actions::get_log_schema;
 use delta_kernel::actions::visitors::{
     AddVisitor, MetadataVisitor, ProtocolVisitor, RemoveVisitor,
 };
-use delta_kernel::client::default::executor::tokio::TokioBackgroundExecutor;
-use delta_kernel::client::default::DefaultEngineInterface;
+use delta_kernel::engine::default::executor::tokio::TokioBackgroundExecutor;
+use delta_kernel::engine::default::DefaultEngine;
 use delta_kernel::engine_data::{GetData, TypedGetData};
+use delta_kernel::scan::state::{DvInfo, Stats};
 use delta_kernel::scan::ScanBuilder;
 use delta_kernel::schema::{DataType, SchemaRef, StructField};
 use delta_kernel::{DataVisitor, DeltaResult, Table};
@@ -35,8 +36,8 @@ enum Commands {
     Metadata,
     /// Show the table's schema
     Schema,
-    /// Show all `Add` actions recorded on the table
-    Adds,
+    /// Show the meta-data that would be used to scan the table
+    ScanData,
     /// Show each action from the log-segments
     Actions {
         /// Show the log in forward order (default is to show it going backwards in time)
@@ -162,17 +163,44 @@ impl DataVisitor for LogVisitor {
     }
 }
 
+// This is the callback that will be called fo each valid scan row
+fn print_scan_file(
+    _: &mut (),
+    path: &str,
+    size: i64,
+    stats: Option<Stats>,
+    dv_info: DvInfo,
+    partition_values: HashMap<String, String>,
+) {
+    let num_record_str = if let Some(s) = stats {
+        format!("{}", s.num_records)
+    } else {
+        "[unknown]".to_string()
+    };
+    println!(
+        "Data to process:\n  \
+              Path:\t\t{path}\n  \
+              Size (bytes):\t{size}\n  \
+              Num Records:\t{num_record_str}\n  \
+              Has DV?:\t{}\n  \
+              Part Vals:\t{partition_values:?}",
+        dv_info.has_vector()
+    );
+}
+
 fn try_main() -> DeltaResult<()> {
     let cli = Cli::parse();
-    let url = url::Url::parse(&cli.path)?;
-    let engine_interface = DefaultEngineInterface::try_new(
-        &url,
+
+    // build a table and get the lastest snapshot from it
+    let table = Table::try_from_uri(&cli.path)?;
+
+    let engine = DefaultEngine::try_new(
+        table.location(),
         HashMap::<String, String>::new(),
         Arc::new(TokioBackgroundExecutor::new()),
     )?;
 
-    let table = Table::new(url);
-    let snapshot = table.snapshot(&engine_interface, None)?;
+    let snapshot = table.snapshot(&engine, None)?;
 
     match &cli.command {
         Commands::TableVersion => {
@@ -184,20 +212,23 @@ fn try_main() -> DeltaResult<()> {
         Commands::Schema => {
             println!("{:#?}", snapshot.schema());
         }
-        Commands::Adds => {
-            use delta_kernel::actions::Add;
-            let scan = ScanBuilder::new(snapshot).build();
-            let files: Vec<Add> = scan
-                .files(&engine_interface)
-                .unwrap()
-                .map(|r| r.unwrap())
-                .collect();
-            println!("{:#?}", files);
+        Commands::ScanData => {
+            let scan = ScanBuilder::new(snapshot).build()?;
+            let scan_data = scan.scan_data(&engine)?;
+            for res in scan_data {
+                let (data, vector) = res?;
+                delta_kernel::scan::state::visit_scan_files(
+                    data.as_ref(),
+                    &vector,
+                    (),
+                    print_scan_file,
+                )?;
+            }
         }
         Commands::Actions { forward } => {
             let log_schema = Arc::new(get_log_schema().clone());
             let actions = snapshot._log_segment().replay(
-                &engine_interface,
+                &engine,
                 log_schema.clone(),
                 log_schema.clone(),
                 None,
