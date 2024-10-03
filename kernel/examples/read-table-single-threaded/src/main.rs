@@ -93,7 +93,6 @@ fn try_main() -> DeltaResult<()> {
     let read_schema_opt = cli
         .columns
         .map(|cols| {
-            use itertools::Itertools;
             let table_schema = snapshot.schema();
             let selected_fields = cols
                 .iter()
@@ -116,27 +115,24 @@ fn try_main() -> DeltaResult<()> {
 
     let batches: Vec<RecordBatch> = scan
         .execute(engine.as_ref())?
-        .map(|sr_res| {
-            sr_res.and_then(|sr| {
-                let data = sr.raw_data?;
-                let record_batch: RecordBatch = data
-                    .into_any()
-                    .downcast::<ArrowEngineData>()
-                    .map_err(|_| {
-                        delta_kernel::Error::EngineDataType("ArrowEngineData".to_string())
-                    })?
-                    .into();
-                if let Some(mut mask) = sr.mask {
-                    let extra_rows = record_batch.num_rows() - mask.len();
-                    if extra_rows > 0 {
-                        // we need to extend the mask here in case it's too short
-                        mask.extend(std::iter::repeat(true).take(extra_rows));
-                    }
-                    Ok(filter_record_batch(&record_batch, &mask.into())?)
-                } else {
-                    Ok(record_batch)
+        .map(|sr_res| -> DeltaResult<_> {
+            let sr = sr_res?;
+            let data = sr.raw_data?;
+            let record_batch: RecordBatch = data
+                .into_any()
+                .downcast::<ArrowEngineData>()
+                .map_err(|_| delta_kernel::Error::EngineDataType("ArrowEngineData".to_string()))?
+                .into();
+            if let Some(mut mask) = sr.mask {
+                let extra_rows = record_batch.num_rows() - mask.len();
+                if extra_rows > 0 {
+                    // we need to extend the mask here in case it's too short
+                    mask.extend(std::iter::repeat(true).take(extra_rows));
                 }
-            })
+                Ok(filter_record_batch(&record_batch, &mask.into())?)
+            } else {
+                Ok(record_batch)
+            }
         })
         .try_collect()?;
     print_batches(&batches)?;

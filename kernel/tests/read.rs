@@ -17,7 +17,7 @@ use delta_kernel::expressions::{BinaryOperator, Expression};
 use delta_kernel::scan::state::{visit_scan_files, DvInfo, Stats};
 use delta_kernel::scan::{transform_to_logical, Scan};
 use delta_kernel::schema::Schema;
-use delta_kernel::{Engine, EngineData, FileMeta, Table};
+use delta_kernel::{DeltaResult, Engine, EngineData, FileMeta, Table};
 use itertools::Itertools;
 use object_store::{memory::InMemory, path::Path, ObjectStore};
 use parquet::arrow::arrow_writer::ArrowWriter;
@@ -399,21 +399,20 @@ fn read_with_execute(
     let result_schema: ArrowSchemaRef = Arc::new(scan.schema().as_ref().try_into()?);
     let scan_results = scan.execute(engine)?;
     let batches: Vec<RecordBatch> = scan_results
-        .map(|sr_res| {
-            sr_res.and_then(|sr| {
-                let data = sr.raw_data?;
-                let record_batch = to_arrow(data)?;
-                if let Some(mut mask) = sr.mask {
-                    let extra_rows = record_batch.num_rows() - mask.len();
-                    if extra_rows > 0 {
-                        // we need to extend the mask here in case it's too short
-                        mask.extend(std::iter::repeat(true).take(extra_rows));
-                    }
-                    Ok(filter_record_batch(&record_batch, &mask.into())?)
-                } else {
-                    Ok(record_batch)
+        .map(|sr_res| -> DeltaResult<_> {
+            let sr = sr_res?;
+            let data = sr.raw_data?;
+            let record_batch = to_arrow(data)?;
+            if let Some(mut mask) = sr.mask {
+                let extra_rows = record_batch.num_rows() - mask.len();
+                if extra_rows > 0 {
+                    // we need to extend the mask here in case it's too short
+                    mask.extend(std::iter::repeat(true).take(extra_rows));
                 }
-            })
+                Ok(filter_record_batch(&record_batch, &mask.into())?)
+            } else {
+                Ok(record_batch)
+            }
         })
         .try_collect()?;
 

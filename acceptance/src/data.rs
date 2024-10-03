@@ -128,23 +128,22 @@ pub async fn assert_scan_data(engine: Arc<dyn Engine>, test_case: &TestCaseInfo)
     let mut schema = None;
     let batches: Vec<RecordBatch> = scan
         .execute(engine)?
-        .map(|sr_res| {
-            sr_res.and_then(|sr| {
-                let data = sr.raw_data?;
-                let record_batch: RecordBatch = data
-                    .into_any()
-                    .downcast::<ArrowEngineData>()
-                    .unwrap()
-                    .into();
-                if schema.is_none() {
-                    schema = Some(record_batch.schema());
-                }
-                if let Some(mask) = sr.mask {
-                    Ok(filter_record_batch(&record_batch, &mask.into())?)
-                } else {
-                    Ok(record_batch)
-                }
-            })
+        .map(|sr_res| -> DeltaResult<_> {
+            let sr = sr_res?;
+            let data = sr.raw_data?;
+            let record_batch: RecordBatch = data
+                .into_any()
+                .downcast::<ArrowEngineData>()
+                .unwrap()
+                .into();
+            if schema.is_none() {
+                schema = Some(record_batch.schema());
+            }
+            if let Some(mask) = sr.mask {
+                Ok(filter_record_batch(&record_batch, &mask.into())?)
+            } else {
+                Ok(record_batch)
+            }
         })
         .try_collect()?;
     let all_data = concat_batches(&schema.unwrap(), batches.iter()).map_err(Error::from)?;

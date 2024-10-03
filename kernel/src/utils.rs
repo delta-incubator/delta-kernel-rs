@@ -8,6 +8,9 @@ macro_rules! require {
         }
     };
 }
+
+/// Applies `f` to every `Result::Ok` value, returning a `Result`. `Result::Err` values are
+/// unchanged. This is equivalent to calling `and_then(f)` for each result item in the iterator.
 pub(crate) trait MapAndThen: Iterator {
     fn map_and_then<F, T, U, E>(self, mut f: F) -> impl Iterator<Item = Result<U, E>>
     where

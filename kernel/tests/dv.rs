@@ -15,17 +15,16 @@ fn count_total_scan_rows(
 ) -> DeltaResult<usize> {
     stream
         .map(|sr_res| {
-            sr_res.and_then(|sr| {
-                let data = sr.raw_data?;
-                let rows = data.length();
-                let valid_rows = sr.mask.as_ref().map_or(rows, |mask| {
-                    // [`ScanResult`] states that the mask may be *shorter* than the number of
-                    // rows. Missing rows are counted as true, so we add them in.
-                    let extra_rows = rows - mask.len();
-                    mask.iter().filter(|&&m| m).count() + extra_rows
-                });
-                Ok(valid_rows)
-            })
+            let sr = sr_res?;
+            let data = sr.raw_data?;
+            let rows = data.length();
+            let valid_rows = sr.mask.as_ref().map_or(rows, |mask| {
+                // [`ScanResult`] states that the mask may be *shorter* than the number of
+                // rows. Missing rows are counted as true, so we add them in.
+                let extra_rows = rows - mask.len();
+                mask.iter().filter(|&&m| m).count() + extra_rows
+            });
+            Ok(valid_rows)
         })
         .fold_ok(0, Add::add)
 }

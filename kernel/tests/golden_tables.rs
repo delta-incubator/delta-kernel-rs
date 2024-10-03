@@ -159,21 +159,20 @@ async fn latest_snapshot_test(
     let scan = snapshot.into_scan_builder().build()?;
     let scan_res = scan.execute(&engine)?;
     let batches: Vec<RecordBatch> = scan_res
-        .map(|sr_res| {
-            sr_res.and_then(|sr| {
-                let data = sr.raw_data?;
-                let record_batch = to_arrow(data)?;
-                if let Some(mut mask) = sr.mask {
-                    let extra_rows = record_batch.num_rows() - mask.len();
-                    if extra_rows > 0 {
-                        // we need to extend the mask here in case it's too short
-                        mask.extend(std::iter::repeat(true).take(extra_rows));
-                    }
-                    Ok(filter_record_batch(&record_batch, &mask.into())?)
-                } else {
-                    Ok(record_batch)
+        .map(|sr_res| -> DeltaResult<_> {
+            let sr = sr_res?;
+            let data = sr.raw_data?;
+            let record_batch = to_arrow(data)?;
+            if let Some(mut mask) = sr.mask {
+                let extra_rows = record_batch.num_rows() - mask.len();
+                if extra_rows > 0 {
+                    // we need to extend the mask here in case it's too short
+                    mask.extend(std::iter::repeat(true).take(extra_rows));
                 }
-            })
+                Ok(filter_record_batch(&record_batch, &mask.into())?)
+            } else {
+                Ok(record_batch)
+            }
         })
         .try_collect()?;
 

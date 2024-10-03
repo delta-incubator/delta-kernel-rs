@@ -273,9 +273,8 @@ impl Scan {
             .map_and_then(|(data, vec)| {
                 let scan_files = vec![];
                 state::visit_scan_files(data.as_ref(), &vec, scan_files, scan_data_callback)
-                    .map(IntoIterator::into_iter)
             })
-            .flatten_ok(); // Iterator<DeltaResult<Iterator<ScanFile>>> to
+            .flatten_ok(); // Iterator<DeltaResult<Vec<ScanFile>>> to
                            // Iterator<DeltaResult<ScanFile>>
 
         let result = scan_files_iter
