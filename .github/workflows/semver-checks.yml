@@ -28,7 +28,7 @@ jobs:
       - name: Run check
         shell: bash
         run: |
-          cargo semver-checks ${{ github.event.pull_request.base.sha }}
+          cargo semver-checks --baseline-rev ${{ github.event.pull_request.base.sha }}
       - name: On success
         if: success()
         shell: bash
