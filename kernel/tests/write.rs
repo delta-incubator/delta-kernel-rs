@@ -111,7 +111,7 @@ async fn test_commit_info() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
     assert_eq!(
         String::from_utf8(commit1.bytes().await?.to_vec())?,
-        "{\"commitInfo\":{\"kernelVersion\":\"default engine\"}}\n"
+        "{\"commitInfo\":{\"kernelVersion\":\"v0.3.1\",\"engineInfo\":\"default engine\"}}\n"
     );
     Ok(())
 }
