@@ -162,6 +162,16 @@ fn test_get_stat_values() {
         None // Timestamp defaults to 96-bit, which doesn't get stats
     );
 
+    // CHEAT: Interpret the timestamp_ntz column as a normal timestamp
+    assert_eq!(
+        filter.get_min_stat_value(&ColumnPath::from("timestamp_ntz"), &DataType::TIMESTAMP),
+        Some(
+            PrimitiveType::Timestamp
+                .parse_scalar("1970-01-01 00:00:00.000000")
+                .unwrap()
+        )
+    );
+
     assert_eq!(
         filter.get_min_stat_value(&ColumnPath::from("timestamp_ntz"), &DataType::TIMESTAMP_NTZ),
         Some(
@@ -309,6 +319,16 @@ fn test_get_stat_values() {
     assert_eq!(
         filter.get_max_stat_value(&ColumnPath::from("timestamp"), &DataType::TIMESTAMP),
         None // Timestamp defaults to 96-bit, which doesn't get stats
+    );
+
+    // CHEAT: Interpret the timestamp_ntz column as a normal timestamp
+    assert_eq!(
+        filter.get_max_stat_value(&ColumnPath::from("timestamp_ntz"), &DataType::TIMESTAMP),
+        Some(
+            PrimitiveType::Timestamp
+                .parse_scalar("1970-01-01 04:00:00.000000")
+                .unwrap()
+        )
     );
 
     assert_eq!(
