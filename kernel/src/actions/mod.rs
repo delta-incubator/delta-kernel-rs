@@ -3,7 +3,10 @@
 
 pub mod deletion_vector;
 pub(crate) mod schemas;
+#[cfg(feature = "developer-visibility")]
 pub mod visitors;
+#[cfg(not(feature = "developer-visibility"))]
+pub(crate) mod visitors;
 
 use delta_kernel_derive::Schema;
 use serde::{Deserialize, Serialize};
