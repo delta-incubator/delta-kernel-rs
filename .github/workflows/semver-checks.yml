@@ -7,7 +7,7 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  check_pr:
+  check_if_pr_breaks_semver:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
@@ -17,13 +17,14 @@ jobs:
           profile: default
           toolchain: stable
           override: true
+      - uses: Swatinem/rust-cache@v2
       - name: Get main branch SHA and install cargo-semver-checks
         shell: bash
         run: |
           echo "main_sha=$(git rev-parse main)" >> "$GITHUB_ENV"
           cargo install cargo-semver-checks --locked
       - name: Run check
-        uses: Swatinem/rust-cache@v2
         shell: bash
         run: |
           cargo cargo semver-checks  --baseline-rev ${{ env.main_sha }}
+
