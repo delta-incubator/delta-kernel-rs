@@ -73,12 +73,14 @@ struct BinOp
   struct Literal* left;
   struct Literal* right;
 };
+struct Null;
 
 enum VariadicType
 {
   And,
   Or,
-  StructConstructor
+  StructConstructor,
+  ArrayData
 };
 enum ExpressionType
 {
@@ -86,7 +88,9 @@ enum ExpressionType
   Variadic,
   Literal,
   BinaryLiteral,
-  DecimalLiteral
+  DecimalLiteral,
+  StructLiteral,
+  NullLiteral
 };
 struct Variadic
 {
@@ -116,6 +120,13 @@ struct Data
   size_t len;
   struct ExpressionRef handles[100];
 };
+struct Struct
+{
+  KernelStringSlice* field_names;
+  struct ExpressionRef* expressions;
+  size_t len;
+  size_t max_len;
+};
 
 size_t put_handle(void* data, void* ref, enum ExpressionType type)
 {
@@ -136,9 +147,15 @@ struct ExpressionRef* get_handle(void* data, size_t handle_index)
 uintptr_t visit_binop(void* data, uintptr_t a, uintptr_t b, enum OpType op)
 {
   struct BinOp* binop = malloc(sizeof(struct BinOp));
+  struct ExpressionRef* left_handle = get_handle(data, a);
+  struct ExpressionRef* right_handle = get_handle(data, b);
+  assert(right_handle != NULL && left_handle != NULL);
+
+  struct Literal* left = left_handle->ref;
+  struct Literal* right = right_handle->ref;
   binop->op = op;
-  binop->left = (struct Literal*)a;
-  binop->right = (struct Literal*)b;
+  binop->left = left;
+  binop->right = right;
   return put_handle(data, binop, BinOp);
 }
 DECL_BINOP(visit_add, Add)
@@ -155,6 +172,20 @@ DECL_BINOP(visit_distinct, Distinct)
 DECL_BINOP(visit_in, In)
 DECL_BINOP(visit_not_in, NotIn)
 
+uintptr_t visit_expr_decimal(
+  void* data,
+  uint64_t value_ms,
+  uint64_t value_ls,
+  uint8_t precision,
+  uint8_t scale)
+{
+  struct Decimal* dec = malloc(sizeof(struct Decimal));
+  dec->value[0] = value_ms;
+  dec->value[1] = value_ls;
+  dec->precision = precision;
+  dec->scale = scale;
+  return put_handle(data, dec, DecimalLiteral);
+}
 DECL_SIMPLE_SCALAR(visit_expr_int, Integer, int32_t);
 DECL_SIMPLE_SCALAR(visit_expr_long, Long, int64_t);
 DECL_SIMPLE_SCALAR(visit_expr_short, Long, int16_t);
@@ -180,15 +211,16 @@ void visit_variadic_item(void* data, uintptr_t variadic_id, uintptr_t sub_expr_i
 {
   struct ExpressionRef* sub_expr_ref = get_handle(data, sub_expr_id);
   struct ExpressionRef* variadic_ref = get_handle(data, variadic_id);
-  if (sub_expr_ref == NULL || variadic_ref == NULL) {
-    abort();
-  }
+  assert(sub_expr_ref != NULL && variadic_ref != NULL);
+  assert(variadic_ref->type == Variadic);
+
   struct Variadic* variadic = variadic_ref->ref;
   variadic->expr_list[variadic->len++] = *sub_expr_ref;
 }
 DECL_VARIADIC(visit_and, And)
 DECL_VARIADIC(visit_or, Or)
-DECL_VARIADIC(visit_expr_struct, StructConstructor)
+DECL_VARIADIC(visit_struct_constructor, StructConstructor)
+DECL_VARIADIC(visit_expr_array, ArrayData)
 
 uintptr_t visit_expr_binary(void* data, const uint8_t* buf, uintptr_t len)
 {
@@ -198,19 +230,39 @@ uintptr_t visit_expr_binary(void* data, const uint8_t* buf, uintptr_t len)
   return put_handle(data, bin, BinaryLiteral);
 }
 
-uintptr_t visit_expr_decimal(
-  void* data,
-  uint64_t value_ms,
-  uint64_t value_ls,
-  uint8_t precision,
-  uint8_t scale)
+uintptr_t visit_expr_struct(void* data, uintptr_t len)
 {
-  struct Decimal* dec = malloc(sizeof(struct Decimal));
-  dec->value[0] = value_ms;
-  dec->value[1] = value_ls;
-  dec->precision = precision;
-  dec->scale = scale;
-  return put_handle(data, dec, DecimalLiteral);
+  struct Struct* struct_data = malloc(sizeof(struct Struct));
+  struct_data->len = 0;
+  struct_data->max_len = len;
+  struct_data->expressions = malloc(sizeof(struct ExpressionRef) * len);
+  struct_data->field_names = malloc(sizeof(KernelStringSlice) * len);
+  return put_handle(data, struct_data, StructLiteral);
+}
+
+void visit_expr_struct_field(
+  void* data,
+  uintptr_t struct_id,
+  KernelStringSlice field_name,
+  uintptr_t value_id)
+{
+  struct ExpressionRef* value = get_handle(data, value_id);
+  struct ExpressionRef* struct_handle = get_handle(data, struct_id);
+  assert(struct_handle != NULL && value != NULL);
+  assert(struct_handle->type == StructLiteral);
+
+  struct Struct* struct_ref = (struct Struct*)struct_handle->ref;
+  size_t len = struct_ref->len;
+  assert(len < struct_ref->max_len);
+
+  struct_ref->expressions[len] = *value;
+  struct_ref->field_names[len] = field_name;
+  struct_ref->len++;
+}
+
+uintptr_t visit_null(void* data)
+{
+  return put_handle(data, NULL, NullLiteral);
 }
 
 // Print the schema of the snapshot
@@ -218,44 +270,47 @@ struct ExpressionRef construct_predicate(KernelPredicate* predicate)
 {
   print_diag("Building schema\n");
   struct Data data = { 0 };
-  EngineExpressionVisitor visitor = {
-    .data = &data,
-    .make_expr_list = NULL,
-    .visit_int = visit_expr_int,
-    .visit_long = visit_expr_long,
-    .visit_short = visit_expr_short,
-    .visit_byte = visit_expr_byte,
-    .visit_float = visit_expr_float,
-    .visit_double = visit_expr_double,
-    .visit_bool = visit_expr_boolean,
-    .visit_timestamp = visit_expr_timestamp,
-    .visit_timestamp_ntz = visit_expr_timestamp_ntz,
-    .visit_date = visit_expr_date,
-    .visit_binary = visit_expr_binary,
-    .visit_decimal = visit_expr_decimal,
-    .visit_string = NULL,
-    .visit_and = visit_and,
-    .visit_or = visit_or,
-    .visit_variadic_item = visit_variadic_item,
-    .visit_not = NULL,
-    .visit_is_null = NULL,
-    .visit_lt = visit_lt,
-    .visit_le = visit_le,
-    .visit_gt = visit_gt,
-    .visit_ge = visit_ge,
-    .visit_eq = visit_eq,
-    .visit_ne = visit_ne,
-    .visit_distinct = visit_distinct,
-    .visit_in = visit_in,
-    .visit_not_in = visit_not_in,
-    .visit_add = visit_add,
-    .visit_minus = visit_minus,
-    .visit_multiply = visit_multiply,
-    .visit_divide = visit_divide,
-    .visit_column = NULL,
-    .visit_expr_struct = visit_expr_struct,
-    .visit_expr_struct_item = visit_variadic_item, // treat expr struct like a variadic
-  };
+  EngineExpressionVisitor visitor = { .data = &data,
+                                      .visit_int = visit_expr_int,
+                                      .visit_long = visit_expr_long,
+                                      .visit_short = visit_expr_short,
+                                      .visit_byte = visit_expr_byte,
+                                      .visit_float = visit_expr_float,
+                                      .visit_double = visit_expr_double,
+                                      .visit_bool = visit_expr_boolean,
+                                      .visit_timestamp = visit_expr_timestamp,
+                                      .visit_timestamp_ntz = visit_expr_timestamp_ntz,
+                                      .visit_date = visit_expr_date,
+                                      .visit_binary = visit_expr_binary,
+                                      .visit_decimal = visit_expr_decimal,
+                                      .visit_string = NULL,
+                                      .visit_and = visit_and,
+                                      .visit_or = visit_or,
+                                      .visit_variadic_item = visit_variadic_item,
+                                      .visit_not = NULL,
+                                      .visit_is_null = NULL,
+                                      .visit_lt = visit_lt,
+                                      .visit_le = visit_le,
+                                      .visit_gt = visit_gt,
+                                      .visit_ge = visit_ge,
+                                      .visit_eq = visit_eq,
+                                      .visit_ne = visit_ne,
+                                      .visit_distinct = visit_distinct,
+                                      .visit_in = visit_in,
+                                      .visit_not_in = visit_not_in,
+                                      .visit_add = visit_add,
+                                      .visit_minus = visit_minus,
+                                      .visit_multiply = visit_multiply,
+                                      .visit_divide = visit_divide,
+                                      .visit_column = NULL,
+                                      .visit_expr_struct = visit_struct_constructor,
+                                      .visit_expr_struct_item =
+                                        visit_variadic_item, // treating expr struct like a variadic
+                                      .visit_null = visit_null,
+                                      .visit_struct = visit_expr_struct,
+                                      .visit_struct_field = visit_expr_struct_field,
+                                      .visit_array = visit_expr_array,
+                                      .visit_array_item = visit_variadic_item };
   uintptr_t schema_list_id = visit_expression(&predicate, &visitor);
   return data.handles[schema_list_id];
 }
@@ -339,20 +394,21 @@ void print_tree(struct ExpressionRef ref, int depth)
       tab_helper(depth);
       switch (var->op) {
         case And:
-          printf("AND\n");
+          printf("And\n");
           break;
         case Or:
-          printf("OR\n");
+          printf("Or\n");
           break;
         case StructConstructor:
+          printf("StructConstructor\n");
+          break;
+        case ArrayData:
+          printf("ArrayData\n");
           break;
       }
-      printf("(");
       for (size_t i = 0; i < var->len; i++) {
         print_tree(var->expr_list[i], depth + 1);
       }
-      tab_helper(depth);
-      printf(")\n");
     } break;
     case Literal: {
       struct Literal* lit = ref.ref;
@@ -410,7 +466,25 @@ void print_tree(struct ExpressionRef ref, int depth)
       printf("(%lld)\n", lit->value);
     } break;
     case BinaryLiteral:
+      tab_helper(depth);
+      printf("BinaryLiteral\n");
     case DecimalLiteral:
+      tab_helper(depth);
+      printf("DecimalLiteral\n");
+      break;
+    case StructLiteral:
+      tab_helper(depth);
+      struct Struct* struct_data = ref.ref;
+      printf("Struct\n");
+      for (size_t i = 0; i < struct_data->len; i++) {
+        tab_helper(depth);
+        printf("Field: %s\n", struct_data->field_names[i].ptr);
+        print_tree(struct_data->expressions[i], depth + 1);
+      }
+      break;
+    case NullLiteral:
+      tab_helper(depth);
+      printf("Null\n");
       break;
   }
 }

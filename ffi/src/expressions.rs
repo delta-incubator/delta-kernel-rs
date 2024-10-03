@@ -5,7 +5,10 @@ use crate::{
     KernelPredicate, KernelStringSlice, ReferenceSet, TryFromStringSlice,
 };
 use delta_kernel::{
-    expressions::{BinaryOperator, Expression, Scalar, UnaryOperator, VariadicOperator},
+    expressions::{
+        ArrayData, BinaryOperator, Expression, Scalar, StructData, UnaryOperator, VariadicOperator,
+    },
+    schema::{ArrayType, DataType, PrimitiveType, StructField, StructType},
     DeltaResult,
 };
 
@@ -249,13 +252,35 @@ pub extern "C" fn visit_expression_literal_bool(
 #[no_mangle]
 pub unsafe extern "C" fn get_kernel_expression() -> Handle<KernelPredicate> {
     use Expression as Expr;
+
+    let array_type = ArrayType::new(
+        DataType::Primitive(delta_kernel::schema::PrimitiveType::Short),
+        false,
+    );
+    let array_data = ArrayData::new(array_type.clone(), vec![Scalar::Short(5), Scalar::Short(0)]);
+    let nested_fields = vec![
+        StructField::new("a", DataType::Primitive(PrimitiveType::Integer), false),
+        StructField::new("b", DataType::Array(Box::new(array_type)), false),
+    ];
+    let nested_values = vec![Scalar::Integer(500), Scalar::Array(array_data)];
+    let nested = StructData::try_new(nested_fields.clone(), nested_values).unwrap();
+    let nested_type = StructType::new(nested_fields);
+    let top = StructData::try_new(
+        vec![StructField::new(
+            "top",
+            DataType::Struct(Box::new(nested_type)),
+            true,
+        )],
+        vec![Scalar::Struct(nested)],
+    )
+    .unwrap();
     Arc::new(Expr::and_from(vec![
         Expr::and_from(vec![
             Expr::literal(Scalar::Integer(5)),
-            Expr::literal(Scalar::Integer(20)),
+            Expr::literal(Scalar::Long(20)),
         ]),
         Expr::literal(Scalar::Integer(10)),
-        Expr::literal(Scalar::Integer(10)),
+        Expr::literal(Scalar::Struct(top)),
     ]))
     .into()
 }
@@ -266,9 +291,6 @@ pub unsafe extern "C" fn get_kernel_expression() -> Handle<KernelPredicate> {
 pub struct EngineExpressionVisitor {
     /// opaque state pointer
     pub data: *mut c_void,
-    /// Creates a new field list, optionally reserving capacity up front
-    pub make_expr_list: extern "C" fn(data: *mut c_void, reserve: usize) -> usize,
-
     /// Visit an `integer` belonging to the list identified by `sibling_list_id`.
     pub visit_int: extern "C" fn(data: *mut c_void, value: i32) -> usize,
     pub visit_long: extern "C" fn(data: *mut c_void, value: i64) -> usize,
@@ -284,14 +306,12 @@ pub struct EngineExpressionVisitor {
     pub visit_binary: extern "C" fn(data: *mut c_void, buf: *const u8, len: usize) -> usize,
     pub visit_decimal: extern "C" fn(
         data: *mut c_void,
-        value_ms: u64, // Most significant half of decimal value
-        value_ls: u64, // Least significant half of decimal value
+        value_ms: u64, // Most significant 64 bits of decimal value
+        value_ls: u64, // Least significant 64 bits of decimal value
         precision: u8,
         scale: u8,
     ) -> usize,
-    // Scalar::Null(_) => todo!(),
-    // Scalar::Struct(_) => todo!(),
-    // Scalar::Array(_) => todo!(),
+
     pub visit_and: extern "C" fn(data: *mut c_void, len: usize) -> usize,
     pub visit_or: extern "C" fn(data: *mut c_void, len: usize) -> usize,
     pub visit_variadic_item:
@@ -318,6 +338,17 @@ pub struct EngineExpressionVisitor {
 
     pub visit_expr_struct: extern "C" fn(data: *mut c_void, len: usize) -> usize,
     pub visit_expr_struct_item: extern "C" fn(data: *mut c_void, struct_id: usize, expr_id: usize),
+
+    pub visit_struct: extern "C" fn(data: *mut c_void, num_fields: usize) -> usize,
+    pub visit_struct_field: extern "C" fn(
+        data: *mut c_void,
+        struct_id: usize,
+        field_name: KernelStringSlice,
+        field_value: usize,
+    ),
+    pub visit_null: extern "C" fn(data: *mut c_void) -> usize,
+    pub visit_array: extern "C" fn(data: *mut c_void, len: usize) -> usize,
+    pub visit_array_item: extern "C" fn(data: *mut c_void, array_id: usize, item_id: usize),
 }
 
 #[no_mangle]
@@ -325,11 +356,40 @@ pub unsafe extern "C" fn visit_expression(
     expression: &Handle<KernelPredicate>, // TODO: This will likely be some kind of Handle<Expression>
     visitor: &mut EngineExpressionVisitor,
 ) -> usize {
+    macro_rules! call {
+        ( $visitor:ident, $visitor_fn:ident $(, $extra_args:expr) *) => {
+            ($visitor.$visitor_fn)($visitor.data $(, $extra_args) *)
+        };
+    }
+    fn visit_array(visitor: &mut EngineExpressionVisitor, array: &ArrayData) -> usize {
+        #[allow(deprecated)]
+        let elements = array.array_elements();
+        let array_id = call!(visitor, visit_array, elements.len());
+        for scalar in elements {
+            let scalar_id = visit_scalar(visitor, scalar);
+            call!(visitor, visit_array_item, array_id, scalar_id);
+        }
+        array_id
+    }
+    fn visit_struct(visitor: &mut EngineExpressionVisitor, struct_data: &StructData) -> usize {
+        let struct_id = call!(visitor, visit_struct, struct_data.fields().len());
+        for (field, value) in struct_data.fields().iter().zip(struct_data.values()) {
+            let value_id = visit_scalar(visitor, value);
+            call!(
+                visitor,
+                visit_struct_field,
+                struct_id,
+                field.name().into(),
+                value_id
+            );
+        }
+        struct_id
+    }
     fn visit_expr_struct(visitor: &mut EngineExpressionVisitor, exprs: &Vec<Expression>) -> usize {
-        let expr_struct_id = (visitor.visit_expr_struct)(visitor.data, exprs.len());
+        let expr_struct_id = call!(visitor, visit_expr_struct, exprs.len());
         for expr in exprs {
             let expr_id = visit_expression(visitor, expr);
-            (visitor.visit_expr_struct_item)(visitor.data, expr_struct_id, expr_id)
+            call!(visitor, visit_expr_struct_item, expr_struct_id, expr_id)
         }
         expr_struct_id
     }
@@ -345,65 +405,65 @@ pub unsafe extern "C" fn visit_expression(
         let variadic_id = visit_fn(visitor.data, exprs.len());
         for expr in exprs {
             let expr_id = visit_expression(visitor, expr);
-            (visitor.visit_variadic_item)(visitor.data, variadic_id, expr_id)
+            call!(visitor, visit_variadic_item, variadic_id, expr_id)
         }
         variadic_id
     }
-    fn visit_expression(visitor: &mut EngineExpressionVisitor, expression: &Expression) -> usize {
-        macro_rules! call {
-            ( $visitor_fn:ident $(, $extra_args:expr) *) => {
-                (visitor.$visitor_fn)(visitor.data $(, $extra_args) *)
-            };
+    fn visit_scalar(visitor: &mut EngineExpressionVisitor, scalar: &Scalar) -> usize {
+        match scalar {
+            Scalar::Integer(val) => call!(visitor, visit_int, *val),
+            Scalar::Long(val) => call!(visitor, visit_long, *val),
+            Scalar::Short(val) => call!(visitor, visit_short, *val),
+            Scalar::Byte(val) => call!(visitor, visit_byte, *val),
+            Scalar::Float(val) => call!(visitor, visit_float, *val),
+            Scalar::Double(val) => call!(visitor, visit_double, *val),
+            Scalar::String(val) => call!(visitor, visit_string, val.into()),
+            Scalar::Boolean(val) => call!(visitor, visit_bool, *val),
+            Scalar::Timestamp(val) => call!(visitor, visit_timestamp, *val),
+            Scalar::TimestampNtz(val) => call!(visitor, visit_timestamp_ntz, *val),
+            Scalar::Date(val) => call!(visitor, visit_date, *val),
+            Scalar::Binary(buf) => call!(visitor, visit_binary, buf.as_ptr(), buf.len()),
+            Scalar::Decimal(value, precision, scale) => {
+                let ms: u64 = (value >> 64) as u64;
+                let ls: u64 = *value as u64;
+                call!(visitor, visit_decimal, ms, ls, *precision, *scale)
+            }
+            Scalar::Null(_) => call!(visitor, visit_null),
+            Scalar::Struct(struct_data) => visit_struct(visitor, struct_data),
+            Scalar::Array(array) => visit_array(visitor, array),
         }
+    }
+    fn visit_expression(visitor: &mut EngineExpressionVisitor, expression: &Expression) -> usize {
         match expression {
-            Expression::Literal(lit) => match lit {
-                Scalar::Integer(val) => call!(visit_int, *val),
-                Scalar::Long(val) => call!(visit_long, *val),
-                Scalar::Short(val) => call!(visit_short, *val),
-                Scalar::Byte(val) => call!(visit_byte, *val),
-                Scalar::Float(val) => call!(visit_float, *val),
-                Scalar::Double(val) => call!(visit_double, *val),
-                Scalar::String(val) => call!(visit_string, val.into()),
-                Scalar::Boolean(val) => call!(visit_bool, *val),
-                Scalar::Timestamp(val) => call!(visit_timestamp, *val),
-                Scalar::TimestampNtz(val) => call!(visit_timestamp_ntz, *val),
-                Scalar::Date(val) => call!(visit_date, *val),
-                Scalar::Binary(buf) => call!(visit_binary, buf.as_ptr(), buf.len()),
-                Scalar::Decimal(value, precision, scale) => {
-                    let ms: u64 = (value >> 64) as u64;
-                    let ls: u64 = *value as u64;
-                    call!(visit_decimal, ms, ls, *precision, *scale)
-                }
-                Scalar::Null(_) => todo!(),
-                Scalar::Struct(_) => todo!(),
-                Scalar::Array(_) => todo!(),
-            },
-            Expression::Column(name) => call!(visit_column, name.into()),
+            Expression::Literal(scalar) => visit_scalar(visitor, scalar),
+            Expression::Column(name) => call!(visitor, visit_column, name.into()),
             Expression::Struct(exprs) => visit_expr_struct(visitor, exprs),
             Expression::BinaryOperation { op, left, right } => {
                 let left_id = visit_expression(visitor, left);
                 let right_id = visit_expression(visitor, right);
                 match op {
-                    BinaryOperator::Plus => call!(visit_add, left_id, right_id),
-                    BinaryOperator::Minus => call!(visit_minus, left_id, right_id),
-                    BinaryOperator::Multiply => call!(visit_multiply, left_id, right_id),
-                    BinaryOperator::Divide => call!(visit_divide, left_id, right_id),
-                    BinaryOperator::LessThan => call!(visit_lt, left_id, right_id),
-                    BinaryOperator::LessThanOrEqual => call!(visit_le, left_id, right_id),
-                    BinaryOperator::GreaterThan => call!(visit_gt, left_id, right_id),
-                    BinaryOperator::GreaterThanOrEqual => call!(visit_ge, left_id, right_id),
-                    BinaryOperator::Equal => call!(visit_eq, left_id, right_id),
-                    BinaryOperator::NotEqual => call!(visit_ne, left_id, right_id),
-                    BinaryOperator::Distinct => call!(visit_distinct, left_id, right_id),
-                    BinaryOperator::In => call!(visit_in, left_id, right_id),
-                    BinaryOperator::NotIn => call!(visit_not_in, left_id, right_id),
+                    BinaryOperator::Plus => call!(visitor, visit_add, left_id, right_id),
+                    BinaryOperator::Minus => call!(visitor, visit_minus, left_id, right_id),
+                    BinaryOperator::Multiply => call!(visitor, visit_multiply, left_id, right_id),
+                    BinaryOperator::Divide => call!(visitor, visit_divide, left_id, right_id),
+                    BinaryOperator::LessThan => call!(visitor, visit_lt, left_id, right_id),
+                    BinaryOperator::LessThanOrEqual => call!(visitor, visit_le, left_id, right_id),
+                    BinaryOperator::GreaterThan => call!(visitor, visit_gt, left_id, right_id),
+                    BinaryOperator::GreaterThanOrEqual => {
+                        call!(visitor, visit_ge, left_id, right_id)
+                    }
+                    BinaryOperator::Equal => call!(visitor, visit_eq, left_id, right_id),
+                    BinaryOperator::NotEqual => call!(visitor, visit_ne, left_id, right_id),
+                    BinaryOperator::Distinct => call!(visitor, visit_distinct, left_id, right_id),
+                    BinaryOperator::In => call!(visitor, visit_in, left_id, right_id),
+                    BinaryOperator::NotIn => call!(visitor, visit_not_in, left_id, right_id),
                 }
             }
             Expression::UnaryOperation { op, expr } => {
                 let expr_id = visit_expression(visitor, expr);
                 match op {
-                    UnaryOperator::Not => call!(visit_not, expr_id),
-                    UnaryOperator::IsNull => call!(visit_is_null, expr_id),
+                    UnaryOperator::Not => call!(visitor, visit_not, expr_id),
+                    UnaryOperator::IsNull => call!(visitor, visit_is_null, expr_id),
                 }
             }
             Expression::VariadicOperation { op, exprs } => visit_variadic(visitor, op, exprs),
