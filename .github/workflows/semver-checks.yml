@@ -6,12 +6,13 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
+permissions:
+  issues: write
+  pull-requests: write
+
 jobs:
   check_if_pr_breaks_semver:
     runs-on: ubuntu-latest
-    permissions:
-      issues: write
-      pull-requests: write
     steps:
       - uses: actions/checkout@v4
         name: checkout full rep
