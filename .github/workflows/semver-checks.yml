@@ -1,0 +1,29 @@
+name: semver-checks
+
+on: [push, pull_request]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  check_pr:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Install minimal stable
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: default
+          toolchain: stable
+          override: true
+      - name: Get main branch SHA and install cargo-semver-checks
+        shell: bash
+        run: |
+          echo "main_sha=$(git rev-parse main)" >> "$GITHUB_ENV"
+          cargo install cargo-semver-checks --locked
+      - name: Run check
+        uses: Swatinem/rust-cache@v2
+        shell: bash
+        run: |
+          cargo cargo semver-checks  --baseline-rev ${{ env.main_sha }}
