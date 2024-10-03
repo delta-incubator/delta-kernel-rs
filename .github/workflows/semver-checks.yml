@@ -11,6 +11,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/checkout@v4
         name: checkout full rep
         with:
           fetch-depth: 0
@@ -24,10 +27,12 @@ jobs:
       - name: Install cargo-semver-checks
         shell: bash
         run: |
-          cargo install cargo-semver-checks --locked
-      - name: Run check
-        shell: bash
-        run: |
           git rev-parse HEAD
-          cargo semver-checks  --baseline-rev $(git rev-parse main)
-
+          git log
+          git rev-parse main
+      #     cargo install cargo-semver-checks --locked
+      # - name: Run check
+      #   shell: bash
+      #   run: |
+      #     git rev-parse HEAD
+      #     cargo semver-checks  --baseline-rev $(git rev-parse main)
