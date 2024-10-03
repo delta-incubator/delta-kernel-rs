@@ -17,14 +17,11 @@ fn count_total_scan_rows(
         .map(|sr_res| {
             let sr = sr_res?;
             let data = sr.raw_data?;
-            let rows = data.length();
-            let valid_rows = sr.mask.as_ref().map_or(rows, |mask| {
-                // [`ScanResult`] states that the mask may be *shorter* than the number of
-                // rows. Missing rows are counted as true, so we add them in.
-                let extra_rows = rows - mask.len();
-                mask.iter().filter(|&&m| m).count() + extra_rows
+            // NOTE: The mask only suppresses rows for which it is both present and false.
+            let deleted_rows = sr.mask.as_ref().map_or(0, |mask| {
+                mask.iter().filter(|&&m| !m).count()
             });
-            Ok(valid_rows)
+            Ok(data.length() - deleted_rows)
         })
         .fold_ok(0, Add::add)
 }
