@@ -1,23 +1,87 @@
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::ops::Not;
+use std::sync::{Arc, LazyLock};
 
 use tracing::debug;
 
 use crate::actions::visitors::SelectionVectorVisitor;
+use crate::actions::{get_log_schema, ADD_NAME};
 use crate::error::DeltaResult;
-use crate::expressions::{BinaryOperator, Expression as Expr, VariadicOperator};
+use crate::expressions::{BinaryOperator, Expression as Expr, UnaryOperator, VariadicOperator};
 use crate::schema::{DataType, SchemaRef, StructField, StructType};
-use crate::{EngineData, EngineInterface, ExpressionEvaluator, JsonHandler};
+use crate::{Engine, EngineData, ExpressionEvaluator, JsonHandler};
 
-/// Returns <op2> (if any) such that B <op2> A is equivalent to A <op> B.
-fn commute(op: &BinaryOperator) -> Option<BinaryOperator> {
-    use BinaryOperator::*;
-    match op {
-        GreaterThan => Some(LessThan),
-        GreaterThanOrEqual => Some(LessThanOrEqual),
-        LessThan => Some(GreaterThan),
-        LessThanOrEqual => Some(GreaterThanOrEqual),
-        Equal | NotEqual | Plus | Multiply => Some(op.clone()),
+/// Get the expression that checks if a col could be null, assuming tight_bounds = true. In this
+/// case a column can contain null if any value > 0 is in the nullCount. This is further complicated
+/// by the default for tightBounds being true, so we have to check if it's EITHER `null` OR `true`
+fn get_tight_null_expr(null_col: String) -> Expr {
+    Expr::and(
+        Expr::distinct(Expr::column("tightBounds"), Expr::literal(false)),
+        Expr::gt(Expr::column(null_col), Expr::literal(0i64)),
+    )
+}
+
+/// Get the expression that checks if a col could be null, assuming tight_bounds = false. In this
+/// case, we can only check if the WHOLE column is null, by checking if the number of records is
+/// equal to the null count, since all other values of nullCount must be ignored (except 0, which
+/// doesn't help us)
+fn get_wide_null_expr(null_col: String) -> Expr {
+    Expr::and(
+        Expr::eq(Expr::column("tightBounds"), Expr::literal(false)),
+        Expr::eq(Expr::column("numRecords"), Expr::column(null_col)),
+    )
+}
+
+/// Get the expression that checks if a col could NOT be null, assuming tight_bounds = true. In this
+/// case a column has a NOT NULL record if nullCount < numRecords. This is further complicated by
+/// the default for tightBounds being true, so we have to check if it's EITHER `null` OR `true`
+fn get_tight_not_null_expr(null_col: String) -> Expr {
+    Expr::and(
+        Expr::distinct(Expr::column("tightBounds"), Expr::literal(false)),
+        Expr::lt(Expr::column(null_col), Expr::column("numRecords")),
+    )
+}
+
+/// Get the expression that checks if a col could NOT be null, assuming tight_bounds = false. In
+/// this case, we can only check if the WHOLE column null, by checking if the nullCount ==
+/// numRecords. So by inverting that check and seeing if nullCount != numRecords, we can check if
+/// there is a possibility of a NOT null
+fn get_wide_not_null_expr(null_col: String) -> Expr {
+    Expr::and(
+        Expr::eq(Expr::column("tightBounds"), Expr::literal(false)),
+        Expr::ne(Expr::column("numRecords"), Expr::column(null_col)),
+    )
+}
+
+/// Use De Morgan's Laws to push a NOT expression down the tree
+fn as_inverted_data_skipping_predicate(expr: &Expr) -> Option<Expr> {
+    use Expr::*;
+    match expr {
+        UnaryOperation { op, expr } => match op {
+            UnaryOperator::Not => as_data_skipping_predicate(expr),
+            UnaryOperator::IsNull => {
+                // to check if a column could NOT have a null, we need two different checks, to see
+                // if the bounds are tight and then to actually do the check
+                if let Column(col) = expr.as_ref() {
+                    let null_col = format!("nullCount.{col}");
+                    Some(Expr::or(
+                        get_tight_not_null_expr(null_col.clone()),
+                        get_wide_not_null_expr(null_col),
+                    ))
+                } else {
+                    // can't check anything other than a col for null
+                    None
+                }
+            }
+        },
+        BinaryOperation { op, left, right } => {
+            let expr = Expr::binary(op.invert()?, left.as_ref().clone(), right.as_ref().clone());
+            as_data_skipping_predicate(&expr)
+        }
+        VariadicOperation { op, exprs } => {
+            let expr = Expr::variadic(op.invert(), exprs.iter().cloned().map(Expr::not));
+            as_data_skipping_predicate(&expr)
+        }
         _ => None,
     }
 }
@@ -25,68 +89,74 @@ fn commute(op: &BinaryOperator) -> Option<BinaryOperator> {
 /// Rewrites a predicate to a predicate that can be used to skip files based on their stats.
 /// Returns `None` if the predicate is not eligible for data skipping.
 ///
-/// We normalize each binary operation to a comparison between a column and a literal value
-/// and rewite that in terms of the min/max values of the column.
+/// We normalize each binary operation to a comparison between a column and a literal value and
+/// rewite that in terms of the min/max values of the column.
 /// For example, `1 < a` is rewritten as `minValues.a > 1`.
 ///
+/// For Unary `Not`, we push the Not down using De Morgan's Laws to invert everything below the Not.
+///
+/// Unary `IsNull` checks if the null counts indicate that the column could contain a null.
+///
 /// The variadic operations are rewritten as follows:
-/// - `AND` is rewritten as a conjunction of the rewritten operands where we just skip
-///   operands that are not eligible for data skipping.
-/// - `OR` is rewritten only if all operands are eligible for data skipping. Otherwise,
-///   the whole OR expression is dropped.
+/// - `AND` is rewritten as a conjunction of the rewritten operands where we just skip operands that
+///         are not eligible for data skipping.
+/// - `OR` is rewritten only if all operands are eligible for data skipping. Otherwise, the whole OR
+///        expression is dropped.
 fn as_data_skipping_predicate(expr: &Expr) -> Option<Expr> {
     use BinaryOperator::*;
     use Expr::*;
+    use UnaryOperator::*;
 
     match expr {
         BinaryOperation { op, left, right } => {
             let (op, col, val) = match (left.as_ref(), right.as_ref()) {
-                (Column(col), Literal(val)) => (op.clone(), col, val),
-                (Literal(val), Column(col)) => (commute(op)?, col, val),
+                (Column(col), Literal(val)) => (*op, col, val),
+                (Literal(val), Column(col)) => (op.commute()?, col, val),
                 _ => return None, // unsupported combination of operands
             };
             let stats_col = match op {
                 LessThan | LessThanOrEqual => "minValues",
                 GreaterThan | GreaterThanOrEqual => "maxValues",
                 Equal => {
-                    let exprs = [
+                    return as_data_skipping_predicate(&Expr::and(
                         Expr::le(Column(col.clone()), Literal(val.clone())),
                         Expr::le(Literal(val.clone()), Column(col.clone())),
-                    ];
-                    return as_data_skipping_predicate(&Expr::and_from(exprs));
+                    ));
                 }
                 NotEqual => {
-                    let exprs = [
+                    return Some(Expr::or(
                         Expr::gt(Column(format!("minValues.{}", col)), Literal(val.clone())),
                         Expr::lt(Column(format!("maxValues.{}", col)), Literal(val.clone())),
-                    ];
-                    return Some(Expr::or_from(exprs));
+                    ));
                 }
                 _ => return None, // unsupported operation
             };
             let col = format!("{}.{}", stats_col, col);
             Some(Expr::binary(op, Column(col), Literal(val.clone())))
         }
-        VariadicOperation {
-            op: op @ VariadicOperator::And,
-            exprs,
-        } => Some(VariadicOperation {
-            op: op.clone(),
-            exprs: exprs
-                .iter()
-                .filter_map(as_data_skipping_predicate)
-                .collect::<Vec<_>>(),
-        }),
-        VariadicOperation {
-            op: op @ VariadicOperator::Or,
-            exprs,
-        } => Some(VariadicOperation {
-            op: op.clone(),
-            exprs: exprs
-                .iter()
-                .map(as_data_skipping_predicate)
-                .collect::<Option<Vec<_>>>()?,
-        }),
+        // push down Not by inverting everything below it
+        UnaryOperation { op: Not, expr } => as_inverted_data_skipping_predicate(expr),
+        UnaryOperation { op: IsNull, expr } => {
+            // to check if a column could have a null, we need two different checks, to see if
+            // the bounds are tight and then to actually do the check
+            if let Column(col) = expr.as_ref() {
+                let null_col = format!("nullCount.{col}");
+                Some(Expr::or(
+                    get_tight_null_expr(null_col.clone()),
+                    get_wide_null_expr(null_col),
+                ))
+            } else {
+                // can't check anything other than a col for null
+                None
+            }
+        }
+        VariadicOperation { op, exprs } => {
+            let exprs = exprs.iter().map(as_data_skipping_predicate);
+            match op {
+                VariadicOperator::And => Some(Expr::and_from(exprs.flatten())),
+                VariadicOperator::Or => Some(Expr::or_from(exprs.collect::<Option<Vec<_>>>()?)),
+            }
+        }
         _ => None,
     }
 }
@@ -106,17 +176,16 @@ impl DataSkippingFilter {
     /// NOTE: None is equivalent to a trivial filter that always returns TRUE (= keeps all files),
     /// but using an Option lets the engine easily avoid the overhead of applying trivial filters.
     pub(crate) fn new(
-        table_client: &dyn EngineInterface,
+        engine: &dyn Engine,
         table_schema: &SchemaRef,
         predicate: &Option<Expr>,
     ) -> Option<Self> {
-        lazy_static::lazy_static!(
-            static ref PREDICATE_SCHEMA: DataType = StructType::new(vec![
-                StructField::new("predicate", DataType::BOOLEAN, true),
-            ]).into();
-            static ref STATS_EXPR: Expr = Expr::column("add.stats");
-            static ref FILTER_EXPR: Expr = Expr::column("predicate").distinct(Expr::literal(false));
-        );
+        static PREDICATE_SCHEMA: LazyLock<DataType> = LazyLock::new(|| {
+            DataType::struct_type(vec![StructField::new("predicate", DataType::BOOLEAN, true)])
+        });
+        static STATS_EXPR: LazyLock<Expr> = LazyLock::new(|| Expr::column("add.stats"));
+        static FILTER_EXPR: LazyLock<Expr> =
+            LazyLock::new(|| Expr::column("predicate").distinct(Expr::literal(false)));
 
         let predicate = match predicate {
             Some(predicate) => predicate,
@@ -139,6 +208,18 @@ impl DataSkippingFilter {
         }
 
         let stats_schema = Arc::new(StructType::new(vec![
+            StructField::new("numRecords", DataType::LONG, true),
+            StructField::new("tightBounds", DataType::BOOLEAN, true),
+            StructField::new(
+                "nullCount",
+                StructType::new(
+                    data_fields
+                        .iter()
+                        .map(|data_field| StructField::new(&data_field.name, DataType::LONG, true))
+                        .collect(),
+                ),
+                true,
+            ),
             StructField::new("minValues", StructType::new(data_fields.clone()), true),
             StructField::new("maxValues", StructType::new(data_fields), true),
         ]));
@@ -154,19 +235,20 @@ impl DataSkippingFilter {
         //
         // 3. The selection evaluator does DISTINCT(col(predicate), 'false') to produce true (= keep) when
         //    the predicate is true/null and false (= skip) when the predicate is false.
-        let select_stats_evaluator = table_client.get_expression_handler().get_evaluator(
-            stats_schema.clone(),
+        let select_stats_evaluator = engine.get_expression_handler().get_evaluator(
+            // safety: kernel is very broken if we don't have the schema for Add actions
+            get_log_schema().project(&[ADD_NAME]).unwrap(),
             STATS_EXPR.clone(),
             DataType::STRING,
         );
 
-        let skipping_evaluator = table_client.get_expression_handler().get_evaluator(
+        let skipping_evaluator = engine.get_expression_handler().get_evaluator(
             stats_schema.clone(),
             Expr::struct_expr([as_data_skipping_predicate(predicate)?]),
             PREDICATE_SCHEMA.clone(),
         );
 
-        let filter_evaluator = table_client.get_expression_handler().get_evaluator(
+        let filter_evaluator = engine.get_expression_handler().get_evaluator(
             stats_schema.clone(),
             FILTER_EXPR.clone(),
             DataType::BOOLEAN,
@@ -177,7 +259,7 @@ impl DataSkippingFilter {
             select_stats_evaluator,
             skipping_evaluator,
             filter_evaluator,
-            json_handler: table_client.get_json_handler(),
+            json_handler: engine.get_json_handler(),
         })
     }
 

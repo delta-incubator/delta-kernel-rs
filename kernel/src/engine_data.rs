@@ -80,7 +80,7 @@ macro_rules! impl_default_get {
         $(
             fn $name(&'a self, _row_index: usize, field_name: &str) -> DeltaResult<Option<$typ>> {
                 debug!("Asked for type {} on {field_name}, but using default error impl.", stringify!($typ));
-                Err(Error::UnexpectedColumnType(format!("{field_name} is not of type {}", stringify!($typ))))
+                Err(Error::UnexpectedColumnType(format!("{field_name} is not of type {}", stringify!($typ))).with_backtrace())
             }
         )*
     };
@@ -93,6 +93,27 @@ macro_rules! impl_default_get {
 /// `get_x` method for the type it holds.
 pub trait GetData<'a> {
     impl_default_get!(
+        (get_bool, bool),
+        (get_int, i32),
+        (get_long, i64),
+        (get_str, &'a str),
+        (get_list, ListItem<'a>),
+        (get_map, MapItem<'a>)
+    );
+}
+
+macro_rules! impl_null_get {
+    ( $(($name: ident, $typ: ty)), * ) => {
+        $(
+            fn $name(&'a self, _row_index: usize, _field_name: &str) -> DeltaResult<Option<$typ>> {
+                Ok(None)
+            }
+        )*
+    };
+}
+
+impl<'a> GetData<'a> for () {
+    impl_null_get!(
         (get_bool, bool),
         (get_int, i32),
         (get_long, i64),
@@ -206,7 +227,7 @@ pub trait DataVisitor {
 ///   }
 /// }
 /// ```
-pub trait EngineData: Send {
+pub trait EngineData: Send + Sync {
     /// Request that the data be visited for the passed schema. The contract of this method is that
     /// it will call back into the passed [`DataVisitor`]s `visit` method. The call to `visit` must
     /// include `GetData` items for each leaf of the schema, as well as the number of rows in this

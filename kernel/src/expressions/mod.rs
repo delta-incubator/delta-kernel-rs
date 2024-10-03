@@ -5,11 +5,12 @@ use std::fmt::{Display, Formatter};
 
 use itertools::Itertools;
 
-pub use self::scalars::Scalar;
+pub use self::scalars::{ArrayData, Scalar, StructData};
+use crate::DataType;
 
 mod scalars;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 /// A binary operator.
 pub enum BinaryOperator {
     /// Arithmetic Plus
@@ -34,12 +35,58 @@ pub enum BinaryOperator {
     NotEqual,
     /// Distinct
     Distinct,
+    /// IN
+    In,
+    /// NOT IN
+    NotIn,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+impl BinaryOperator {
+    /// Returns `<op2>` (if any) such that `B <op2> A` is equivalent to `A <op> B`.
+    pub(crate) fn commute(&self) -> Option<BinaryOperator> {
+        use BinaryOperator::*;
+        match self {
+            GreaterThan => Some(LessThan),
+            GreaterThanOrEqual => Some(LessThanOrEqual),
+            LessThan => Some(GreaterThan),
+            LessThanOrEqual => Some(GreaterThanOrEqual),
+            Equal | NotEqual | Plus | Multiply => Some(*self),
+            _ => None,
+        }
+    }
+
+    /// invert an operator. Returns Some<InvertedOp> if the operator supports inversion, None if it
+    /// cannot be inverted
+    pub(crate) fn invert(&self) -> Option<BinaryOperator> {
+        use BinaryOperator::*;
+        match self {
+            LessThan => Some(GreaterThanOrEqual),
+            LessThanOrEqual => Some(GreaterThan),
+            GreaterThan => Some(LessThanOrEqual),
+            GreaterThanOrEqual => Some(LessThan),
+            Equal => Some(NotEqual),
+            NotEqual => Some(Equal),
+            In => Some(NotIn),
+            NotIn => Some(In),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum VariadicOperator {
     And,
     Or,
+}
+
+impl VariadicOperator {
+    pub(crate) fn invert(&self) -> VariadicOperator {
+        use VariadicOperator::*;
+        match self {
+            And => Or,
+            Or => And,
+        }
+    }
 }
 
 impl Display for BinaryOperator {
@@ -57,13 +104,15 @@ impl Display for BinaryOperator {
             Self::NotEqual => write!(f, "!="),
             // TODO(roeap): AFAIK DISTINCT does not have a commonly used operator symbol
             // so ideally this would not be used as we use Display for rendering expressions
-            // in our code we take care of this, bot thers might now ...
+            // in our code we take care of this, but theirs might not ...
             Self::Distinct => write!(f, "DISTINCT"),
+            Self::In => write!(f, "IN"),
+            Self::NotIn => write!(f, "NOT IN"),
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 /// A unary operator.
 pub enum UnaryOperator {
     /// Unary Not
@@ -178,6 +227,10 @@ impl Expression {
     /// Create a new expression for a literal value
     pub fn literal(value: impl Into<Scalar>) -> Self {
         Self::Literal(value.into())
+    }
+
+    pub fn null_literal(data_type: DataType) -> Self {
+        Self::Literal(Scalar::Null(data_type))
     }
 
     /// Create a new struct expression

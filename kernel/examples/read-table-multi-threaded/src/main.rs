@@ -7,14 +7,15 @@ use std::thread;
 use arrow::compute::filter_record_batch;
 use arrow::record_batch::RecordBatch;
 use arrow::util::pretty::print_batches;
-use delta_kernel::client::arrow_data::ArrowEngineData;
-use delta_kernel::client::default::executor::tokio::TokioBackgroundExecutor;
-use delta_kernel::client::default::DefaultEngineInterface;
-use delta_kernel::client::sync::SyncEngineInterface;
-use delta_kernel::scan::state::{DvInfo, GlobalScanState};
-use delta_kernel::scan::{transform_to_logical, ScanBuilder};
+use delta_kernel::actions::deletion_vector::split_vector;
+use delta_kernel::engine::arrow_data::ArrowEngineData;
+use delta_kernel::engine::default::executor::tokio::TokioBackgroundExecutor;
+use delta_kernel::engine::default::DefaultEngine;
+use delta_kernel::engine::sync::SyncEngine;
+use delta_kernel::scan::state::{DvInfo, GlobalScanState, Stats};
+use delta_kernel::scan::transform_to_logical;
 use delta_kernel::schema::Schema;
-use delta_kernel::{DeltaResult, EngineData, EngineInterface, FileMeta, Table};
+use delta_kernel::{DeltaResult, Engine, EngineData, FileMeta, Table};
 
 use clap::{Parser, ValueEnum};
 use url::Url;
@@ -33,20 +34,34 @@ struct Cli {
     #[arg(short, long, default_value_t = 2, value_parser = 1..=2048)]
     thread_count: i64,
 
-    /// Which EngineInterface to use
-    #[arg(short, long, value_enum, default_value_t = Interface::Default)]
-    interface: Interface,
+    /// Which Engine to use
+    #[arg(short, long, value_enum, default_value_t = EngineType::Default)]
+    engine: EngineType,
 
     /// Comma separated list of columns to select
     #[arg(long, value_delimiter=',', num_args(0..))]
     columns: Option<Vec<String>>,
+
+    /// Region to specify to the cloud access store (only applies if using the default engine)
+    #[arg(long)]
+    region: Option<String>,
+
+    /// Specify that the table is "public" (i.e. no cloud credentials are needed). This is required
+    /// for things like s3 public buckets, otherwise the kernel will try and authenticate by talking
+    /// to the aws metadata server, which will fail unless you're on an ec2 instance.
+    #[arg(long)]
+    public: bool,
+
+    /// Limit to printing only LIMIT rows.
+    #[arg(short, long)]
+    limit: Option<usize>,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
-enum Interface {
-    /// Use the default, async engine interface
+enum EngineType {
+    /// Use the default, async engine
     Default,
-    /// Use the sync engine interface (local files only)
+    /// Use the sync engine (local files only)
     Sync,
 }
 
@@ -79,11 +94,22 @@ fn to_arrow(data: Box<dyn EngineData>) -> DeltaResult<RecordBatch> {
         .into())
 }
 
+// truncate a batch to the specified number of rows
+fn truncate_batch(batch: RecordBatch, rows: usize) -> RecordBatch {
+    let cols = batch
+        .columns()
+        .iter()
+        .map(|col| col.slice(0, rows))
+        .collect();
+    RecordBatch::try_new(batch.schema(), cols).unwrap()
+}
+
 // This is the callback that will be called fo each valid scan row
 fn send_scan_file(
     scan_tx: &mut spmc::Sender<ScanFile>,
     path: &str,
     size: i64,
+    _stats: Option<Stats>,
     dv_info: DvInfo,
     partition_values: HashMap<String, String>,
 ) {
@@ -98,23 +124,32 @@ fn send_scan_file(
 
 fn try_main() -> DeltaResult<()> {
     let cli = Cli::parse();
-    let url = url::Url::parse(&cli.path)?;
-
-    println!("Reading {url}");
-
-    // create the requested interface
-    let engine_interface: Arc<dyn EngineInterface> = match cli.interface {
-        Interface::Default => Arc::new(DefaultEngineInterface::try_new(
-            &url,
-            HashMap::<String, String>::new(),
-            Arc::new(TokioBackgroundExecutor::new()),
-        )?),
-        Interface::Sync => Arc::new(SyncEngineInterface::new()),
-    };
 
     // build a table and get the lastest snapshot from it
-    let table = Table::new(url.clone());
-    let snapshot = table.snapshot(engine_interface.as_ref(), None)?;
+    let table = Table::try_from_uri(&cli.path)?;
+    println!("Reading {}", table.location());
+
+    // create the requested engine
+    let engine: Arc<dyn Engine> = match cli.engine {
+        EngineType::Default => {
+            let mut options = if let Some(region) = cli.region {
+                HashMap::from([("region", region)])
+            } else {
+                HashMap::new()
+            };
+            if cli.public {
+                options.insert("skip_signature", "true".to_string());
+            }
+            Arc::new(DefaultEngine::try_new(
+                table.location(),
+                options,
+                Arc::new(TokioBackgroundExecutor::new()),
+            )?)
+        }
+        EngineType::Sync => Arc::new(SyncEngine::new()),
+    };
+
+    let snapshot = table.snapshot(engine.as_ref(), None)?;
 
     // process the columns requested and build a schema from them
     let read_schema_opt = cli
@@ -138,19 +173,20 @@ fn try_main() -> DeltaResult<()> {
         .transpose()?;
 
     // build a scan with the specified schema
-    let scan = ScanBuilder::new(snapshot)
+    let scan = snapshot
+        .into_scan_builder()
         .with_schema_opt(read_schema_opt)
-        .build();
+        .build()?;
 
     // this gives us an iterator of (our engine data, selection vector). our engine data is just
     // arrow data. The schema can be obtained by calling
     // [`delta_kernel::scan::scan_row_schema`]. Generally engines will not need to interact with
     // this data directly, and can just call [`visit_scan_files`] to get pre-parsed data back from
     // the kernel.
-    let scan_data = scan.scan_data(engine_interface.as_ref())?;
+    let scan_data = scan.scan_data(engine.as_ref())?;
 
     // get any global state associated with this scan
-    let global_state = scan.global_scan_state();
+    let global_state = Arc::new(scan.global_scan_state());
 
     // create the channels we'll use. record_batch_[t/r]x are used for the threads to send back the
     // processed RecordBatches to themain thread
@@ -163,13 +199,12 @@ fn try_main() -> DeltaResult<()> {
     let _handles: Vec<_> = (0..cli.thread_count)
         .map(|_| {
             // items that we need to send to the other thread
-            //let interface = cli.interface.clone();
             let scan_state = global_state.clone();
             let rb_tx = record_batch_tx.clone();
             let scan_file_rx = scan_file_rx.clone();
-            let interface = engine_interface.clone();
+            let engine = engine.clone();
             thread::spawn(move || {
-                do_work(interface, scan_state, rb_tx, scan_file_rx);
+                do_work(engine, scan_state, rb_tx, scan_file_rx);
             })
         })
         .collect();
@@ -182,7 +217,7 @@ fn try_main() -> DeltaResult<()> {
         let (data, vector) = res?;
         scan_file_tx = delta_kernel::scan::state::visit_scan_files(
             data.as_ref(),
-            vector,
+            &vector,
             scan_file_tx,
             send_scan_file,
         )?;
@@ -191,22 +226,41 @@ fn try_main() -> DeltaResult<()> {
     // have sent all scan files, drop this so threads will exit when there's no more work
     drop(scan_file_tx);
 
-    // simply gather up each batch and print them
-    let batches: Vec<_> = record_batch_rx.iter().collect();
+    let batches = if let Some(limit) = cli.limit {
+        // gather batches while we need
+        let mut batches = vec![];
+        let mut rows_so_far = 0;
+        for mut batch in record_batch_rx.iter() {
+            let batch_rows = batch.num_rows();
+            if rows_so_far < limit {
+                if rows_so_far + batch_rows > limit {
+                    // truncate this batch
+                    batch = truncate_batch(batch, limit - rows_so_far);
+                }
+                batches.push(batch);
+            }
+            rows_so_far += batch_rows;
+        }
+        println!("Printing first {limit} rows of {rows_so_far} total rows");
+        batches
+    } else {
+        // simply gather up all batches
+        record_batch_rx.iter().collect()
+    };
     print_batches(&batches)?;
     Ok(())
 }
 
 // this is the work each thread does
 fn do_work(
-    engine_interface: Arc<dyn EngineInterface>,
-    scan_state: GlobalScanState,
+    engine: Arc<dyn Engine>,
+    scan_state: Arc<GlobalScanState>,
     record_batch_tx: Sender<RecordBatch>,
     scan_file_rx: spmc::Receiver<ScanFile>,
 ) {
     // get the type for the function calls
-    let engine_interface: &dyn EngineInterface = engine_interface.as_ref();
-    let read_schema = Arc::new(scan_state.read_schema.clone());
+    let engine: &dyn Engine = engine.as_ref();
+    let read_schema = scan_state.read_schema.clone();
     // in a loop, try and get a ScanFile. Note that `recv` will return an `Err` when the other side
     // hangs up, which indicates there's no more data to process.
     while let Ok(scan_file) = scan_file_rx.recv() {
@@ -216,7 +270,7 @@ fn do_work(
         // get the selection vector (i.e. deletion vector)
         let mut selection_vector = scan_file
             .dv_info
-            .get_selection_vector(engine_interface, &root_url)
+            .get_selection_vector(engine, &root_url)
             .unwrap();
 
         // build the required metadata for our parquet handler to read this file
@@ -227,7 +281,7 @@ fn do_work(
             location,
         };
 
-        // this example uses the parquet_handler from the engine_client, but an engine could
+        // this example uses the parquet_handler from the engine, but an engine could
         // choose to use whatever method it might want to read a parquet file. The reader
         // could, for example, fill in the parition columns, or apply deletion vectors. Here
         // we assume a more naive parquet reader and fix the data up after the fact.
@@ -235,7 +289,7 @@ fn do_work(
         // in chunks where each thread reads one chunk. The engine would need to ensure
         // enough meta-data was passed to each thread to correctly apply the selection
         // vector
-        let read_results = engine_interface
+        let read_results = engine
             .get_parquet_handler()
             .read_parquet_files(&[meta], read_schema.clone(), None)
             .unwrap();
@@ -246,7 +300,7 @@ fn do_work(
 
             // ask the kernel to transform the physical data into the correct logical form
             let logical = transform_to_logical(
-                engine_interface,
+                engine,
                 read_result,
                 &scan_state,
                 &scan_file.partition_values,
@@ -257,7 +311,7 @@ fn do_work(
 
             // need to split the dv_mask. what's left in dv_mask covers this result, and rest
             // will cover the following results
-            let rest = selection_vector.as_mut().map(|mask| mask.split_off(len));
+            let rest = split_vector(selection_vector.as_mut(), len, Some(true));
             let batch = if let Some(mask) = selection_vector.clone() {
                 // apply the selection vector
                 filter_record_batch(&record_batch, &mask.into()).unwrap()

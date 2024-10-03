@@ -3,7 +3,7 @@
 use std::{
     backtrace::{Backtrace, BacktraceStatus},
     num::ParseIntError,
-    string::FromUtf8Error,
+    str::Utf8Error,
 };
 
 use crate::schema::DataType;
@@ -25,7 +25,7 @@ pub enum Error {
     },
 
     /// An error performing operations on arrow data
-    #[cfg(any(feature = "default-client", feature = "sync-client"))]
+    #[cfg(any(feature = "default-engine", feature = "sync-engine"))]
     #[error(transparent)]
     Arrow(arrow_schema::ArrowError),
 
@@ -52,6 +52,10 @@ pub enum Error {
     #[error(transparent)]
     IOError(std::io::Error),
 
+    /// An internal error that means kernel found an unexpected situation, which is likely a bug
+    #[error("Internal error {0}. This is a kernel bug, please report.")]
+    InternalError(String),
+
     /// An error enountered while working with parquet data
     #[cfg(feature = "parquet")]
     #[error("Arrow error: {0}")]
@@ -69,7 +73,7 @@ pub enum Error {
     #[error("Object store path error: {0}")]
     ObjectStorePath(#[from] object_store::path::Error),
 
-    #[cfg(feature = "default-client")]
+    #[cfg(feature = "default-engine")]
     #[error("Reqwest Error: {0}")]
     Reqwest(#[from] reqwest::Error),
 
@@ -101,7 +105,7 @@ pub enum Error {
     #[error("Invalid url: {0}")]
     InvalidUrl(#[from] url::ParseError),
 
-    /// serde enountered malformed json
+    /// serde encountered malformed json
     #[error(transparent)]
     MalformedJson(serde_json::Error),
 
@@ -127,11 +131,34 @@ pub enum Error {
 
     /// Could not convert to string from utf-8
     #[error("Could not convert to string from utf-8: {0}")]
-    Utf8Error(#[from] FromUtf8Error),
+    Utf8Error(#[from] Utf8Error),
 
     /// Could not parse an integer
     #[error("Could not parse int: {0}")]
     ParseIntError(#[from] ParseIntError),
+
+    #[error("Invalid column mapping mode: {0}")]
+    InvalidColumnMappingMode(String),
+
+    /// Asked for a table at an invalid location
+    #[error("Invalid table location: {0}.")]
+    InvalidTableLocation(String),
+
+    /// Precision or scale not compliant with delta specification
+    #[error("Invalid decimal: {0}")]
+    InvalidDecimal(String),
+
+    /// Inconsistent data passed to struct scalar
+    #[error("Invalid struct data: {0}")]
+    InvalidStructData(String),
+
+    /// Expressions did not parse or evaluate correctly
+    #[error("Invalid expression evaluation: {0}")]
+    InvalidExpressionEvaluation(String),
+
+    /// Unable to parse the name of a log path
+    #[error("Invalid log path: {0}")]
+    InvalidLogPath(String),
 }
 
 // Convenience constructors for Error types that take a String argument
@@ -165,6 +192,28 @@ impl Error {
     pub fn join_failure(msg: impl ToString) -> Self {
         Self::JoinFailure(msg.to_string())
     }
+    pub fn invalid_table_location(location: impl ToString) -> Self {
+        Self::InvalidTableLocation(location.to_string())
+    }
+    pub fn invalid_column_mapping_mode(mode: impl ToString) -> Self {
+        Self::InvalidColumnMappingMode(mode.to_string())
+    }
+    pub fn invalid_decimal(msg: impl ToString) -> Self {
+        Self::InvalidDecimal(msg.to_string())
+    }
+    pub fn invalid_struct_data(msg: impl ToString) -> Self {
+        Self::InvalidStructData(msg.to_string())
+    }
+    pub fn invalid_expression(msg: impl ToString) -> Self {
+        Self::InvalidExpressionEvaluation(msg.to_string())
+    }
+    pub(crate) fn invalid_log_path(msg: impl ToString) -> Self {
+        Self::InvalidLogPath(msg.to_string())
+    }
+
+    pub fn internal_error(msg: impl ToString) -> Self {
+        Self::InternalError(msg.to_string()).with_backtrace()
+    }
 
     // Capture a backtrace when the error is constructed.
     #[must_use]
@@ -197,7 +246,7 @@ from_with_backtrace!(
     (std::io::Error, IOError)
 );
 
-#[cfg(any(feature = "default-client", feature = "sync-client"))]
+#[cfg(any(feature = "default-engine", feature = "sync-engine"))]
 impl From<arrow_schema::ArrowError> for Error {
     fn from(value: arrow_schema::ArrowError) -> Self {
         Self::Arrow(value).with_backtrace()

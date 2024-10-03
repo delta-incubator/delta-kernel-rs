@@ -6,14 +6,15 @@ pub(crate) mod schemas;
 pub mod visitors;
 
 use delta_kernel_derive::Schema;
-use lazy_static::lazy_static;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::sync::LazyLock;
 use visitors::{AddVisitor, MetadataVisitor, ProtocolVisitor};
 
 use self::deletion_vector::DeletionVectorDescriptor;
 use crate::actions::schemas::GetStructField;
+use crate::features::{ReaderFeatures, WriterFeatures};
 use crate::{schema::StructType, DeltaResult, EngineData};
-
-use std::collections::HashMap;
 
 pub(crate) const ADD_NAME: &str = "add";
 pub(crate) const REMOVE_NAME: &str = "remove";
@@ -21,21 +22,19 @@ pub(crate) const METADATA_NAME: &str = "metaData";
 pub(crate) const PROTOCOL_NAME: &str = "protocol";
 pub(crate) const TRANSACTION_NAME: &str = "txn";
 
-lazy_static! {
-    static ref LOG_SCHEMA: StructType = StructType::new(
-        vec![
-            Option::<Add>::get_struct_field(ADD_NAME),
-            Option::<Remove>::get_struct_field(REMOVE_NAME),
-            Option::<Metadata>::get_struct_field(METADATA_NAME),
-            Option::<Protocol>::get_struct_field(PROTOCOL_NAME),
-            Option::<Transaction>::get_struct_field(TRANSACTION_NAME),
-            // We don't support the following actions yet
-            //Option<Cdc>::get_field(CDC_NAME),
-            //Option<CommitInfo>::get_field(COMMIT_INFO_NAME),
-            //Option<DomainMetadata>::get_field(DOMAIN_METADATA_NAME),
-        ]
-    );
-}
+static LOG_SCHEMA: LazyLock<StructType> = LazyLock::new(|| {
+    StructType::new(vec![
+        Option::<Add>::get_struct_field(ADD_NAME),
+        Option::<Remove>::get_struct_field(REMOVE_NAME),
+        Option::<Metadata>::get_struct_field(METADATA_NAME),
+        Option::<Protocol>::get_struct_field(PROTOCOL_NAME),
+        Option::<Transaction>::get_struct_field(TRANSACTION_NAME),
+        // We don't support the following actions yet
+        //Option<Cdc>::get_field(CDC_NAME),
+        //Option<CommitInfo>::get_field(COMMIT_INFO_NAME),
+        //Option<DomainMetadata>::get_field(DOMAIN_METADATA_NAME),
+    ])
+});
 
 #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
 #[cfg_attr(not(feature = "developer-visibility"), visibility::make(pub(crate)))]
@@ -47,7 +46,7 @@ fn get_log_schema() -> &'static StructType {
 pub struct Format {
     /// Name of the encoding for files in this table
     pub provider: String,
-    /// A map containingconfiguration options for the format
+    /// A map containing configuration options for the format
     pub options: HashMap<String, String>,
 }
 
@@ -92,7 +91,8 @@ impl Metadata {
     }
 }
 
-#[derive(Default, Debug, Clone, PartialEq, Eq, Schema)]
+#[derive(Default, Debug, Clone, PartialEq, Eq, Schema, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Protocol {
     /// The minimum version of the Delta read protocol that a client must implement
     /// in order to correctly read this table
@@ -102,9 +102,11 @@ pub struct Protocol {
     pub min_writer_version: i32,
     /// A collection of features that a client must implement in order to correctly
     /// read this table (exist only when minReaderVersion is set to 3)
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub reader_features: Option<Vec<String>>,
     /// A collection of features that a client must implement in order to correctly
     /// write this table (exist only when minWriterVersion is set to 7)
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub writer_features: Option<Vec<String>>,
 }
 
@@ -113,6 +115,18 @@ impl Protocol {
         let mut visitor = ProtocolVisitor::default();
         data.extract(get_log_schema().project(&[PROTOCOL_NAME])?, &mut visitor)?;
         Ok(visitor.protocol)
+    }
+
+    pub fn has_reader_feature(&self, feature: &ReaderFeatures) -> bool {
+        self.reader_features
+            .as_ref()
+            .is_some_and(|features| features.iter().any(|f| f == feature.as_ref()))
+    }
+
+    pub fn has_writer_feature(&self, feature: &WriterFeatures) -> bool {
+        self.writer_features
+            .as_ref()
+            .is_some_and(|features| features.iter().any(|f| f == feature.as_ref()))
     }
 }
 
@@ -125,7 +139,11 @@ pub struct Add {
     /// [RFC 2396 URI Generic Syntax]: https://www.ietf.org/rfc/rfc2396.txt
     pub path: String,
 
-    /// A map from partition column to value for this logical file.
+    /// A map from partition column to value for this logical file. This map can contain null in the
+    /// values meaning a partition is null. We drop those values from this map, due to the
+    /// `drop_null_container_values` annotation. This means an engine can assume that if a partition
+    /// is found in [`Metadata`] `partition_columns`, but not in this map, its value is null.
+    #[drop_null_container_values]
     pub partition_values: HashMap<String, String>,
 
     /// The size of this data file in bytes
@@ -277,6 +295,40 @@ mod tests {
                     MapType::new(DataType::STRING, DataType::STRING, false),
                     false,
                 ),
+            ]),
+            true,
+        )]));
+        assert_eq!(schema, expected);
+    }
+
+    #[test]
+    fn test_add_schema() {
+        let schema = get_log_schema()
+            .project(&["add"])
+            .expect("Couldn't get add field");
+
+        let expected = Arc::new(StructType::new(vec![StructField::new(
+            "add",
+            StructType::new(vec![
+                StructField::new("path", DataType::STRING, false),
+                StructField::new(
+                    "partitionValues",
+                    MapType::new(DataType::STRING, DataType::STRING, true),
+                    false,
+                ),
+                StructField::new("size", DataType::LONG, false),
+                StructField::new("modificationTime", DataType::LONG, false),
+                StructField::new("dataChange", DataType::BOOLEAN, false),
+                StructField::new("stats", DataType::STRING, true),
+                StructField::new(
+                    "tags",
+                    MapType::new(DataType::STRING, DataType::STRING, false),
+                    true,
+                ),
+                deletion_vector_field(),
+                StructField::new("baseRowId", DataType::LONG, true),
+                StructField::new("defaultRowCommitVersion", DataType::LONG, true),
+                StructField::new("clusteringProvider", DataType::STRING, true),
             ]),
             true,
         )]));

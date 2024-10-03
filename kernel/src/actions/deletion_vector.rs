@@ -4,10 +4,12 @@ use std::io::{Cursor, Read};
 use std::sync::Arc;
 
 use bytes::Bytes;
-use delta_kernel_derive::Schema;
 use roaring::RoaringTreemap;
 use url::Url;
 
+use delta_kernel_derive::Schema;
+
+use crate::utils::require;
 use crate::{DeltaResult, Error, FileSystemClient};
 
 #[derive(Debug, Clone, PartialEq, Eq, Schema)]
@@ -55,11 +57,10 @@ impl DeletionVectorDescriptor {
         match self.storage_type.as_str() {
             "u" => {
                 let path_len = self.path_or_inline_dv.len();
-                if path_len < 20 {
-                    return Err(Error::deletion_vector(
-                        "Invalid length {path_len}, must be >20",
-                    ));
-                }
+                require!(
+                    path_len >= 20,
+                    Error::deletion_vector("Invalid length {path_len}, must be >= 20",)
+                );
                 let prefix_len = path_len - 20;
                 let decoded = z85::decode(&self.path_or_inline_dv[prefix_len..])
                     .map_err(|_| Error::deletion_vector("Failed to decode DV uuid"))?;
@@ -101,10 +102,17 @@ impl DeletionVectorDescriptor {
     ) -> DeltaResult<RoaringTreemap> {
         match self.absolute_path(parent)? {
             None => {
-                let bytes = z85::decode(&self.path_or_inline_dv)
+                let byte_slice = z85::decode(&self.path_or_inline_dv)
                     .map_err(|_| Error::deletion_vector("Failed to decode DV"))?;
-                RoaringTreemap::deserialize_from(&bytes[12..])
-                    .map_err(|err| Error::DeletionVector(err.to_string()))
+                let magic = slice_to_u32(&byte_slice[0..4], Endian::Little)?;
+                match magic {
+                    1681511377 => RoaringTreemap::deserialize_from(&byte_slice[4..])
+                        .map_err(|err| Error::DeletionVector(err.to_string())),
+                    1681511376 => {
+                        todo!("Don't support native serialization in inline bitmaps yet");
+                    }
+                    _ => Err(Error::DeletionVector(format!("Invalid magic {magic}"))),
+                }
             }
             Some(path) => {
                 let offset = self.offset;
@@ -121,24 +129,26 @@ impl DeletionVectorDescriptor {
                     .read(&mut version_buf)
                     .map_err(|err| Error::DeletionVector(err.to_string()))?;
                 let version = u8::from_be_bytes(version_buf);
-                if version != 1 {
-                    return Err(Error::DeletionVector(format!("Invalid version: {version}")));
-                }
+                require!(
+                    version == 1,
+                    Error::DeletionVector(format!("Invalid version: {version}"))
+                );
 
                 if let Some(offset) = offset {
                     cursor.set_position(offset as u64);
                 }
                 let dv_size = read_u32(&mut cursor, Endian::Big)?;
-                if dv_size != size_in_bytes as u32 {
-                    return Err(Error::DeletionVector(format!(
+                require!(
+                    dv_size == size_in_bytes as u32,
+                    Error::DeletionVector(format!(
                         "DV size mismatch. Log indicates {size_in_bytes}, file says: {dv_size}"
-                    )));
-                }
+                    ))
+                );
                 let magic = read_u32(&mut cursor, Endian::Little)?;
-
-                if magic != 1681511377 {
-                    return Err(Error::DeletionVector(format!("Invalid magic: {magic}")));
-                }
+                require!(
+                    magic == 1681511377,
+                    Error::DeletionVector(format!("Invalid magic: {magic}"))
+                );
 
                 // get the Bytes back out and limit it to dv_size
                 let position = cursor.position();
@@ -156,6 +166,16 @@ impl DeletionVectorDescriptor {
             }
         }
     }
+
+    /// Materialize the row indexes of the deletion vector as a Vec<u64> in which each element
+    /// represents a row index that is deleted from the table.
+    pub fn row_indexes(
+        &self,
+        fs_client: Arc<dyn FileSystemClient>,
+        parent: &Url,
+    ) -> DeltaResult<Vec<u64>> {
+        Ok(self.read(fs_client, parent)?.into_iter().collect())
+    }
 }
 
 enum Endian {
@@ -172,6 +192,17 @@ fn read_u32(cursor: &mut Cursor<Bytes>, endian: Endian) -> DeltaResult<u32> {
     match endian {
         Endian::Big => Ok(u32::from_be_bytes(buf)),
         Endian::Little => Ok(u32::from_le_bytes(buf)),
+    }
+}
+
+/// decode a slice into a u32
+fn slice_to_u32(buf: &[u8], endian: Endian) -> DeltaResult<u32> {
+    let array = buf
+        .try_into()
+        .map_err(|_| Error::generic("Must have a 4 byte slice to decode to u32"))?;
+    match endian {
+        Endian::Big => Ok(u32::from_be_bytes(array)),
+        Endian::Little => Ok(u32::from_le_bytes(array)),
     }
 }
 
@@ -203,15 +234,40 @@ pub(crate) fn treemap_to_bools(treemap: RoaringTreemap) -> Vec<bool> {
     }
 }
 
+/// helper function to split an `Option<Vec<bool>>`. Because deletion vectors apply to a whole file,
+/// but parquet readers can chunk the file, there is a need to split the vector up.
+/// If the passed vector is Some(vector):
+///   - If `split_index < vector.len()`, split `vector` at `split_index`. The passed vector is
+///     modified in place, and the split off component is returned.
+///   - If `split_index` >= vector.len()` will return None. If `extend` is Some(b), the passed
+///     vector will be extended with `b` to have a length of `split_index`. If `extend` is `None`,
+///     do nothing and return `None`
+/// If the passed `vector` is `None`, do nothing and return None
+pub fn split_vector(
+    vector: Option<&mut Vec<bool>>,
+    split_index: usize,
+    extend: Option<bool>,
+) -> Option<Vec<bool>> {
+    match vector {
+        Some(vector) if split_index < vector.len() => Some(vector.split_off(split_index)),
+        Some(vector) if extend.is_some() => {
+            vector.extend(std::iter::repeat(extend.unwrap()).take(split_index - vector.len()));
+            None
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use roaring::RoaringTreemap;
     use std::path::PathBuf;
 
-    use super::*;
-    use crate::{client::sync::SyncEngineInterface, EngineInterface};
+    use roaring::RoaringTreemap;
+
+    use crate::{engine::sync::SyncEngine, Engine};
 
     use super::DeletionVectorDescriptor;
+    use super::*;
 
     fn dv_relative() -> DeletionVectorDescriptor {
         DeletionVectorDescriptor {
@@ -237,9 +293,10 @@ mod tests {
     fn dv_inline() -> DeletionVectorDescriptor {
         DeletionVectorDescriptor {
             storage_type: "i".to_string(),
-            path_or_inline_dv: "wi5b=000010000siXQKl0rr91000f55c8Xg0@@D72lkbi5=-{L".to_string(),
+            path_or_inline_dv: "^Bg9^0rr910000000000iXQKl0rr91000f55c8Xg0@@D72lkbi5=-{L"
+                .to_string(),
             offset: None,
-            size_in_bytes: 40,
+            size_in_bytes: 44,
             cardinality: 6,
         }
     }
@@ -284,12 +341,28 @@ mod tests {
     }
 
     #[test]
+    fn test_inline_read() {
+        let inline = dv_inline();
+        let sync_engine = SyncEngine::new();
+        let fs_client = sync_engine.get_file_system_client();
+        let parent = Url::parse("http://not.used").unwrap();
+        let tree_map = inline.read(fs_client, &parent).unwrap();
+        assert_eq!(tree_map.len(), 6);
+        for i in [3, 4, 7, 11, 18, 29] {
+            assert!(tree_map.contains(i));
+        }
+        for i in [1, 2, 8, 17, 55, 200] {
+            assert!(!tree_map.contains(i));
+        }
+    }
+
+    #[test]
     fn test_deletion_vector_read() {
         let path =
             std::fs::canonicalize(PathBuf::from("./tests/data/table-with-dv-small/")).unwrap();
         let parent = url::Url::from_directory_path(path).unwrap();
-        let sync_interface = SyncEngineInterface::new();
-        let fs_client = sync_interface.get_file_system_client();
+        let sync_engine = SyncEngine::new();
+        let fs_client = sync_engine.get_file_system_client();
 
         let example = dv_example();
         let tree_map = example.read(fs_client, &parent).unwrap();
@@ -320,5 +393,17 @@ mod tests {
         expected[4294967297] = false;
         expected[4294967300] = false;
         assert_eq!(bools, expected);
+    }
+
+    #[test]
+    fn test_dv_row_indexes() {
+        let example = dv_inline();
+        let sync_engine = SyncEngine::new();
+        let fs_client = sync_engine.get_file_system_client();
+        let parent = Url::parse("http://not.used").unwrap();
+        let row_idx = example.row_indexes(fs_client, &parent).unwrap();
+
+        assert_eq!(row_idx.len(), 6);
+        assert_eq!(&row_idx, &[3, 4, 7, 11, 18, 29]);
     }
 }

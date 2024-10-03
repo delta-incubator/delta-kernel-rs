@@ -4,15 +4,25 @@
 # default to generating c bindings
 language = "C"
 
+pragma_once = true
+
 # only applies to Cxx
 namespace = "ffi"
 
 [defines]
-"feature = default-client" = "DEFINE_DEFAULT_CLIENT"
+"feature = default-engine" = "DEFINE_DEFAULT_ENGINE"
+"feature = sync-engine" = "DEFINE_SYNC_ENGINE"
 
 [export.mangle]
 remove_underscores = true
 
 [parse]
+# Whether to parse dependent crates and include their types in the output
+# default: false
 parse_deps = true
-include = ["delta_kernel"]
+
+# An allow-list of crate names that are allowed to be parsed. If this is defined,
+# only crates found in this list will ever be parsed.
+#
+# default: there is no allow-list (NOTE: this is the opposite of [])
+include = ["delta_kernel", "arrow-data", "arrow-schema"]

@@ -2,21 +2,24 @@
 //!
 //! Delta-kernel-rs is an experimental [Delta](https://github.com/delta-io/delta/) implementation
 //! focused on interoperability with a wide range of query engines. It currently only supports
-//! reads. This library defines a number of interfaces which must be implemented to provide a
-//! working "delta reader". The are detailed below. There is a provided "default client" that
-//! implenents all these interfaces and can be used to ease integration work. See
-//! [`DefaultEngineInterface`](client/default/index.html) for more information.
+//! reads. This library defines a number of traits which must be implemented to provide a
+//! working "delta reader". They are detailed below. There is a provided "default engine" that
+//! implements all these traits and can be used to ease integration work. See
+//! [`DefaultEngine`](engine/default/index.html) for more information.
 //!
-//! A full `rust` example for reading table data using the default client can be found
-//! [here](https://github.com/delta-incubator/delta-kernel-rs/blob/main/kernel/examples/dump-table/src/main.rs)
+//! A full `rust` example for reading table data using the default engine can be found in the
+//! [read-table-single-threaded] example (and for a more complex multi-threaded reader see the
+//! [read-table-multi-threaded] example).
 //!
-//! # EngineInterface interfaces
+//! [read-table-single-threaded]: https://github.com/delta-incubator/delta-kernel-rs/tree/main/kernel/examples/read-table-single-threaded
+//! [read-table-multi-threaded]: https://github.com/delta-incubator/delta-kernel-rs/tree/main/kernel/examples/read-table-multi-threaded
 //!
-//! The [`EngineInterface`] interfaces allow connectors to bring their own implementation of functionality
-//! such as reading parquet files, listing files in a file system, parsing a JSON string etc.
+//! # Engine traits
 //!
-//! The [`EngineInterface`] trait exposes methods to get sub-clients which expose the core
-//! functionalities customizable by connectors.
+//! The [`Engine`] trait allow connectors to bring their own implementation of functionality such as
+//! reading parquet files, listing files in a file system, parsing a JSON string etc.  This trait
+//! exposes methods to get sub-engines which expose the core functionalities customizable by
+//! connectors.
 //!
 //! ## Expression handling
 //!
@@ -27,7 +30,7 @@
 //! ## File system interactions
 //!
 //! Delta Kernel needs to perform some basic operations against file systems like listing and reading files.
-//! These interactions are encapsulated in the [`FileSystemClient`] trait. Implementors must take take
+//! These interactions are encapsulated in the [`FileSystemClient`] trait. Implementors must take
 //! care that all assumptions on the behavior if the functions - like sorted results - are respected.
 //!
 //! ## Reading log and data files
@@ -59,12 +62,19 @@ pub mod actions;
 pub mod engine_data;
 pub mod error;
 pub mod expressions;
+pub mod features;
+
+#[cfg(feature = "developer-visibility")]
+pub mod path;
+#[cfg(not(feature = "developer-visibility"))]
 pub(crate) mod path;
+
 pub mod scan;
 pub mod schema;
 pub mod snapshot;
 pub mod table;
 pub mod transaction;
+pub(crate) mod utils;
 
 pub use engine_data::{DataVisitor, EngineData};
 pub use error::{DeltaResult, Error};
@@ -72,11 +82,11 @@ pub use expressions::Expression;
 pub use table::Table;
 
 #[cfg(any(
-    feature = "default-client",
-    feature = "sync-client",
+    feature = "default-engine",
+    feature = "sync-engine",
     feature = "arrow-conversion"
 ))]
-pub mod client;
+pub mod engine;
 
 /// Delta table version is 8 byte unsigned int
 pub type Version = u64;
@@ -102,10 +112,10 @@ pub struct FileMeta {
     pub size: usize,
 }
 
-/// Interface for implementing an Expression evaluator.
+/// Trait for implementing an Expression evaluator.
 ///
 /// It contains one Expression which can be evaluated on multiple ColumnarBatches.
-/// Connectors can implement this interface to optimize the evaluation using the
+/// Connectors can implement this trait to optimize the evaluation using the
 /// connector specific capabilities.
 pub trait ExpressionEvaluator: Send + Sync {
     /// Evaluate the expression on a given EngineData.
@@ -117,9 +127,9 @@ pub trait ExpressionEvaluator: Send + Sync {
 
 /// Provides expression evaluation capability to Delta Kernel.
 ///
-/// Delta Kernel can use this client to evaluate predicate on partition filters,
+/// Delta Kernel can use this handler to evaluate predicate on partition filters,
 /// fill up partition column values and any computation on data using Expressions.
-pub trait ExpressionHandler {
+pub trait ExpressionHandler: Send + Sync {
     /// Create an [`ExpressionEvaluator`] that can evaluate the given [`Expression`]
     /// on columnar batches with the given [`Schema`] to produce data of [`DataType`].
     ///
@@ -143,7 +153,7 @@ pub trait ExpressionHandler {
 ///
 /// Delta Kernel uses this client whenever it needs to access the underlying
 /// file system where the Delta table is present. Connector implementation of
-/// this interface can hide filesystem specific details from Delta Kernel.
+/// this trait can hide filesystem specific details from Delta Kernel.
 pub trait FileSystemClient: Send + Sync {
     /// List the paths in the same directory that are lexicographically greater or equal to
     /// (UTF-8 sorting) the given `path`. The result should also be sorted by the file name.
@@ -160,7 +170,7 @@ pub trait FileSystemClient: Send + Sync {
 /// Provides JSON handling functionality to Delta Kernel.
 ///
 /// Delta Kernel can use this client to parse JSON strings into Row or read content from JSON files.
-/// Connectors can leverage this interface to provide their best implementation of the JSON parsing
+/// Connectors can leverage this trait to provide their best implementation of the JSON parsing
 /// capability to Delta Kernel.
 pub trait JsonHandler: Send + Sync {
     /// Parse the given json strings and return the fields requested by output schema as columns in [`EngineData`].
@@ -183,13 +193,15 @@ pub trait JsonHandler: Send + Sync {
         &self,
         files: &[FileMeta],
         physical_schema: SchemaRef,
+        // TODO: This should really be an Option<Arc<Expression>>, because otherwise we have to
+        // clone the (potentially large) expression every time we call this function.
         predicate: Option<Expression>,
     ) -> DeltaResult<FileDataReadResultIterator>;
 }
 
 /// Provides Parquet file related functionalities to Delta Kernel.
 ///
-/// Connectors can leverage this interface to provide their own custom
+/// Connectors can leverage this trait to provide their own custom
 /// implementation of Parquet data file functionalities to Delta Kernel.
 pub trait ParquetHandler: Send + Sync {
     /// Read and parse the Parquet file at given locations and return the data as EngineData with
@@ -205,14 +217,18 @@ pub trait ParquetHandler: Send + Sync {
         &self,
         files: &[FileMeta],
         physical_schema: SchemaRef,
+        // TODO: This should really be an Option<Arc<Expression>>, because otherwise we have to
+        // clone the (potentially large) expression every time we call this function.
         predicate: Option<Expression>,
     ) -> DeltaResult<FileDataReadResultIterator>;
 }
 
-/// Interface encapsulating all clients needed by the Delta Kernel in order to read the Delta table.
+/// The `Engine` trait encapsulates all the functionality an engine or connector needs to provide
+/// to the Delta Kernel in order to read the Delta table.
 ///
-/// Connectors are expected to pass an implementation of this interface when reading a Delta table.
-pub trait EngineInterface: Send + Sync {
+/// Engines/Connectors are expected to pass an implementation of this trait when reading a Delta
+/// table.
+pub trait Engine: Send + Sync {
     /// Get the connector provided [`ExpressionHandler`].
     fn get_expression_handler(&self) -> Arc<dyn ExpressionHandler>;
 

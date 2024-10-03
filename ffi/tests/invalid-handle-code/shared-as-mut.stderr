@@ -1,0 +1,20 @@
+error[E0599]: the method `as_mut` exists for struct `Handle<SharedFoo>`, but its trait bounds were not satisfied
+  --> tests/invalid-handle-code/shared-as-mut.rs:12:15
+   |
+7  | pub struct SharedFoo;
+   | -------------------- doesn't satisfy `<SharedFoo as HandleDescriptor>::Mutable = True`
+...
+12 |     let r = h.as_mut();
+   |               ^^^^^^ method cannot be called on `Handle<SharedFoo>` due to unsatisfied trait bounds
+   |
+   = note: the following trait bounds were not satisfied:
+           `<SharedFoo as HandleDescriptor>::Mutable = True`
+
+error[E0271]: type mismatch resolving `<SharedFoo as HandleDescriptor>::Mutable == True`
+  --> tests/invalid-handle-code/shared-as-mut.rs:11:44
+   |
+11 |     let h: Handle<SharedFoo> = Box::new(s).into();
+   |                                            ^^^^ expected `True`, found `False`
+   |
+   = note: required for `Handle<SharedFoo>` to implement `From<Box<Foo>>`
+   = note: required for `Box<Foo>` to implement `Into<Handle<SharedFoo>>`

@@ -4,73 +4,129 @@ Delta-kernel-rs is an experimental [Delta][delta] implementation focused on
 interoperability with a wide range of query engines. It currently only supports
 reads.
 
-The Delta Kernel project is a Rust and C library for building Delta connectors that
-can read (and soon, write to) Delta tables without needing to understand the Delta
-[protocol details][delta-protocol]. This is the Rust/C equivalent of [Java Delta Kernel][java-kernel].
+The Delta Kernel project is a Rust and C library for building Delta connectors that can read (and
+soon, write) Delta tables without needing to understand the Delta [protocol
+details][delta-protocol]. This is the Rust/C equivalent of [Java Delta Kernel][java-kernel].
+
+## Crates
+
+Delta-kernel-rs is split into a few different crates:
+
+- kernel: The actual core kernel crate
+- acceptance: Acceptance tests that validate correctness  via the [Delta Acceptance Tests][dat]
+- derive-macros: A crate for our [derive-macros] to live in
+- ffi: Functionallity that enables delta-kernel-rs to be used from `C` or `C++` See the [ffi](ffi)
+  directory for more information.
 
 ## Building
+By default we build only the `kernel` and `acceptance` crates, which will also build `derive-macros`
+as a dependency.
 
-To get started, install Rust via [rustup], and [just] as a command runner - then clone the repository.
-Before running tests, we need to load reference data from the [Delta Acceptance Tests][dat] via:
-
-```sh
-just load-dat
-```
-
-Then we can build and run tests via
+To get started, install Rust via [rustup], clone the repository, and then run:
 
 ```sh
-cargo test --features acceptance,default-client
+cargo test --all-features
 ```
 
-or using just again:
+This will build the kernel, run all unit tests, fetch the [Delta Acceptance Tests][dat] data and run
+the acceptance tests against it.
 
-```sh
-just test
+In general, you will want to depend on `delta-kernel-rs` by adding it as a dependency to your
+`Cargo.toml`, (that is, for rust projects using cargo) for other projects please see the [FFI]
+module. The core kernel includes facilities for reading delta tables, but requires the consumer
+to implement the `Engine` trait in order to use the table-reading APIs. If there is no need to
+implement the consumer's own `Engine` trait, the kernel has a feature flag to enable a default,
+asynchronous `Engine` implementation built with [Arrow] and [Tokio].
+
+```toml
+# fewer dependencies, requires consumer to implement Engine trait.
+# allows consumers to implement their own in-memory format
+delta_kernel = "0.3"
+
+# or turn on the default engine, based on arrow
+delta_kernel = { version = "0.3", features = ["default-engine"] }
 ```
+
+### Feature flags
+There are more feature flags in addition to the `default-engine` flag shown above. Relevant flags
+include:
+
+| Feature flag  | Description   |
+| ------------- | ------------- |
+| `default-engine`    | Turn on the 'default' engine: async, arrow-based `Engine` implementation  |
+| `sync-engine`       | Turn on the 'sync' engine: synchronous, arrow-based `Engine` implementation. Only supports local storage! |
+| `arrow-conversion`  | Conversion utilities for arrow/kernel schema interoperation |
+| `arrow-expression`  | Expression system implementation for arrow |
+
+### Versions and Api Stability
+We intend to follow [Semantic Versioning](https://semver.org/). However, in the `0.x` line, the APIs
+are still unstable. We therefore may break APIs within minor releases (that is, `0.1` -> `0.2`), but
+we will not break APIs in patch releases (`0.1.0` -> `0.1.1`).
+
+## Documentation
+
+- [API Docs](https://docs.rs/delta_kernel/latest/delta_kernel/)
+- [arcitecture.md](doc/architecture.md) document describing the kernel architecture (currently wip)
+
+## Examples
+
+There are some example programs showing how `delta-kernel-rs` can be used to interact with delta
+tables. They live in the [`kernel/examples`](kernel/examples) directory.
 
 ## Development
 
-delta-kernel-rs is still under heavy development but follows conventions
-adopted by most Rust projects.
+delta-kernel-rs is still under heavy development but follows conventions adopted by most Rust
+projects.
 
-### Architecture
+### Concepts
 
-See [arcitecture.md](doc/architecture.md) document (currently wip)
+There are a few key concepts that will help in understanding kernel:
+
+1. The `Engine` trait encapsulates all the functionality and engine or connector needs to provide to
+   the Delta Kernel in order to read the Delta table.
+2. The `DefaultEngine` is our default implementation of the the above trait. It lives in
+   `engine/default`, and provides a reference implementation for all `Engine`
+   functionality. `DefaultEngine` uses [arrow](https://docs.rs/arrow/latest/arrow/) as its in-memory
+   data format.
+3. A `Scan` is the entrypoint for reading data from a table.
+
+### Design Principles
 
 Some design principles which should be considered:
 
-- async all the things, but ideally no runtime. Basically delta-core should
-  have async traits and implementations, but strive to avoid the need of a
-  runtime so that implementers can use tokio, smol, async-std, or whatever
-  might be needed. Essentially, we want to strive to design without actually
-  evaluating futures and leave that to the implementers on top of possible
-- No `DeltaTable`. The initial prototype intentionally exposes the concept of
-  immutable versions of tables through the snapshot API. This encourages users
-  to think about the Delta table state more accurately.
-- Consistently opinionated. In #delta-rs we have some object-oriented APIs and
-  some builder APIs. delta-kernel-rs uses builder-style APIs and that we should
-  adopt consistently through delta-core-rs
-- "Simple" set of default-features enabled to provide the basic functionality
-  with the least necessary amount of dependencies possible. Putting more
-  complex optimizations or APIs behind feature flags
-- API conventions to make it clear which operations involve I/O, e.g. fetch or
-  retrieve type verbiage in method signatures.
+- async should live only in the `Engine` implementation. The core kernel does not use async at
+  all. We do not wish to impose the need for an entire async runtime on an engine or connector. The
+  `DefaultEngine` _does_ use async quite heavily. It doesn't depend on a particular runtime however,
+  and implementations could provide an "executor" based on tokio, smol, async-std, or whatever might
+  be needed. Currently only a `tokio` based executor is provided.
+- Minimal `Table` API. The kernel intentionally exposes the concept of immutable versions of tables
+  through the snapshot API. This encourages users to think about the Delta table state more
+  accurately.
+- Prefer builder style APIs over object oriented ones.
+- "Simple" set of default-features enabled to provide the basic functionality with the least
+  necessary amount of dependencies possible. Putting more complex optimizations or APIs behind
+  feature flags
+- API conventions to make it clear which operations involve I/O, e.g. fetch or retrieve type
+  verbiage in method signatures.
 
 ### Tips
 
 - When developing, `rust-analyzer` is your friend. `rustup component add rust-analyzer`
-- When also developing in vscode its sometimes convenient to configure rust-anmalyzer
-  in `.vscode/settings.json`.
+- If using `emacs`, both [eglot](https://github.com/joaotavora/eglot) and
+  [lsp-mode](https://github.com/emacs-lsp/lsp-mode) provide excellent integration with
+  `rust-analyzer`. [rustic](https://github.com/brotzeit/rustic) is a nice mode as well.
+- When also developing in vscode its sometimes convenient to configure rust-analyzer in
+  `.vscode/settings.json`.
 
 ```json
 {
   "editor.formatOnSave": true,
-  "rust-analyzer.cargo.features": ["default-client", "acceptance"]
+  "rust-analyzer.cargo.features": ["default-engine", "acceptance"]
 }
 ```
 
 - The crate's documentation can be easily reviewed with: `cargo docs --open`
+- Code coverage is available on codecov via [cargo-llvm-cov]. See their docs for instructions to install/run locally.
 
 [delta]: https://delta.io
 [delta-protocol]: https://github.com/delta-io/delta/blob/master/PROTOCOL.md
@@ -79,4 +135,9 @@ Some design principles which should be considered:
 [rustup]: https://rustup.rs
 [architecture.md]: https://github.com/delta-incubator/delta-kernel-rs/tree/master/architecture.md
 [dat]: https://github.com/delta-incubator/dat
-[just]: https://github.com/casey/just
+[derive-macros]: https://doc.rust-lang.org/reference/procedural-macros.html
+[API Docs]: https://docs.rs/delta_kernel/latest/delta_kernel/
+[cargo-llvm-cov]: https://github.com/taiki-e/cargo-llvm-cov
+[FFI]: ffi/
+[Arrow]: https://arrow.apache.org/rust/arrow/index.html
+[Tokio]: https://tokio.rs/

@@ -8,6 +8,8 @@ use indexmap::IndexMap;
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 
+use crate::features::ColumnMappingMode;
+use crate::utils::require;
 use crate::{DeltaResult, Error};
 
 pub type Schema = StructType;
@@ -18,6 +20,12 @@ pub type SchemaRef = Arc<StructType>;
 pub enum MetadataValue {
     Number(i32),
     String(String),
+    Boolean(bool),
+    // The [PROTOCOL](https://github.com/delta-io/delta/blob/master/PROTOCOL.md#struct-field) states
+    // only that the metadata is "A JSON map containing information about this column.", so we can
+    // actually have any valid json here. `Other` is therefore a catchall for things we don't need
+    // to handle.
+    Other(serde_json::Value),
 }
 
 impl From<String> for MetadataValue {
@@ -35,6 +43,12 @@ impl From<&String> for MetadataValue {
 impl From<i32> for MetadataValue {
     fn from(value: i32) -> Self {
         Self::Number(value)
+    }
+}
+
+impl From<bool> for MetadataValue {
+    fn from(value: bool) -> Self {
+        Self::Boolean(value)
     }
 }
 
@@ -102,6 +116,34 @@ impl StructField {
 
     pub fn get_config_value(&self, key: &ColumnMetadataKey) -> Option<&MetadataValue> {
         self.metadata.get(key.as_ref())
+    }
+
+    /// Get the physical name for this field as it should be read from parquet, based on the
+    /// specified column mapping mode.
+    pub fn physical_name(&self, mapping_mode: ColumnMappingMode) -> DeltaResult<&str> {
+        let physical_name_key = ColumnMetadataKey::ColumnMappingPhysicalName.as_ref();
+        let name_mapped_name = self.metadata.get(physical_name_key);
+        match (mapping_mode, name_mapped_name) {
+            (ColumnMappingMode::None, _) => Ok(self.name.as_str()),
+            (ColumnMappingMode::Name, Some(MetadataValue::String(name))) => Ok(name),
+            (ColumnMappingMode::Name, invalid) => Err(Error::generic(format!(
+                "Missing or invalid {physical_name_key}: {invalid:?}"
+            ))),
+            (ColumnMappingMode::Id, _) => {
+                Err(Error::generic("Don't support id column mapping yet"))
+            }
+        }
+    }
+
+    /// Change the name of a field. The field will preserve its data type and nullability. Note that
+    /// this allocates a new field.
+    pub fn with_name(&self, new_name: impl Into<String>) -> Self {
+        StructField {
+            name: new_name.into(),
+            data_type: self.data_type().clone(),
+            nullable: self.nullable,
+            metadata: self.metadata.clone(),
+        }
     }
 
     #[inline]
@@ -261,7 +303,7 @@ pub struct MapType {
     pub key_type: DataType,
     /// The type of element used for the value of this map
     pub value_type: DataType,
-    /// Denoting whether this array can contain one or more null values
+    /// Denoting whether this map can contain one or more null values
     #[serde(default = "default_true")]
     pub value_contains_null: bool,
 }
@@ -289,6 +331,14 @@ impl MapType {
     #[inline]
     pub const fn value_contains_null(&self) -> bool {
         self.value_contains_null
+    }
+
+    /// Create a schema assuming the map is stored as a struct with the specified key and value field names
+    pub fn as_struct_schema(&self, key_name: String, val_name: String) -> Schema {
+        StructType::new(vec![
+            StructField::new(key_name, self.key_type.clone(), false),
+            StructField::new(val_name, self.value_type.clone(), self.value_contains_null),
+        ])
     }
 }
 
@@ -321,34 +371,31 @@ pub enum PrimitiveType {
     Timestamp,
     #[serde(rename = "timestamp_ntz")]
     TimestampNtz,
-    // TODO: timestamp without timezone
     #[serde(
         serialize_with = "serialize_decimal",
         deserialize_with = "deserialize_decimal",
         untagged
     )]
-    Decimal(u8, i8),
+    Decimal(u8, u8),
 }
 
 fn serialize_decimal<S: serde::Serializer>(
     precision: &u8,
-    scale: &i8,
+    scale: &u8,
     serializer: S,
 ) -> Result<S::Ok, S::Error> {
     serializer.serialize_str(&format!("decimal({},{})", precision, scale))
 }
 
-fn deserialize_decimal<'de, D>(deserializer: D) -> Result<(u8, i8), D::Error>
+fn deserialize_decimal<'de, D>(deserializer: D) -> Result<(u8, u8), D::Error>
 where
     D: serde::Deserializer<'de>,
 {
     let str_value = String::deserialize(deserializer)?;
-    if !str_value.starts_with("decimal(") || !str_value.ends_with(')') {
-        return Err(serde::de::Error::custom(format!(
-            "Invalid decimal: {}",
-            str_value
-        )));
-    }
+    require!(
+        str_value.starts_with("decimal(") && str_value.ends_with(')'),
+        serde::de::Error::custom(format!("Invalid decimal: {}", str_value))
+    );
 
     let mut parts = str_value[8..str_value.len() - 1].split(',');
     let precision = parts
@@ -359,11 +406,11 @@ where
         })?;
     let scale = parts
         .next()
-        .and_then(|part| part.trim().parse::<i8>().ok())
+        .and_then(|part| part.trim().parse::<u8>().ok())
         .ok_or_else(|| {
             serde::de::Error::custom(format!("Invalid scale in decimal: {}", str_value))
         })?;
-
+    PrimitiveType::check_decimal(precision, scale).map_err(serde::de::Error::custom)?;
     Ok((precision, scale))
 }
 
@@ -371,10 +418,10 @@ impl Display for PrimitiveType {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             PrimitiveType::String => write!(f, "string"),
-            PrimitiveType::Long => write!(f, "bigint"),
-            PrimitiveType::Integer => write!(f, "int"),
-            PrimitiveType::Short => write!(f, "smallint"),
-            PrimitiveType::Byte => write!(f, "tinyint"),
+            PrimitiveType::Long => write!(f, "long"),
+            PrimitiveType::Integer => write!(f, "integer"),
+            PrimitiveType::Short => write!(f, "short"),
+            PrimitiveType::Byte => write!(f, "byte"),
             PrimitiveType::Float => write!(f, "float"),
             PrimitiveType::Double => write!(f, "double"),
             PrimitiveType::Boolean => write!(f, "boolean"),
@@ -383,7 +430,7 @@ impl Display for PrimitiveType {
             PrimitiveType::Timestamp => write!(f, "timestamp"),
             PrimitiveType::TimestampNtz => write!(f, "timestamp_ntz"),
             PrimitiveType::Decimal(precision, scale) => {
-                write!(f, "decimal({}, {})", precision, scale)
+                write!(f, "decimal({},{})", precision, scale)
             }
         }
     }
@@ -422,6 +469,13 @@ impl From<ArrayType> for DataType {
     }
 }
 
+impl From<SchemaRef> for DataType {
+    fn from(schema: SchemaRef) -> Self {
+        Arc::unwrap_or_clone(schema).into()
+    }
+}
+
+/// cbindgen:ignore
 impl DataType {
     pub const STRING: Self = DataType::Primitive(PrimitiveType::String);
     pub const LONG: Self = DataType::Primitive(PrimitiveType::Long);
@@ -434,9 +488,34 @@ impl DataType {
     pub const BINARY: Self = DataType::Primitive(PrimitiveType::Binary);
     pub const DATE: Self = DataType::Primitive(PrimitiveType::Date);
     pub const TIMESTAMP: Self = DataType::Primitive(PrimitiveType::Timestamp);
+    pub const TIMESTAMP_NTZ: Self = DataType::Primitive(PrimitiveType::TimestampNtz);
 
-    pub fn decimal(precision: u8, scale: i8) -> Self {
-        DataType::Primitive(PrimitiveType::Decimal(precision, scale))
+    pub fn decimal(precision: u8, scale: u8) -> DeltaResult<Self> {
+        PrimitiveType::check_decimal(precision, scale)?;
+        Ok(DataType::Primitive(PrimitiveType::Decimal(
+            precision, scale,
+        )))
+    }
+
+    // This function assumes that the caller has already checked the precision and scale
+    // and that they are valid. Will panic if they are not.
+    pub fn decimal_unchecked(precision: u8, scale: u8) -> Self {
+        Self::decimal(precision, scale).unwrap()
+    }
+
+    pub fn struct_type(fields: Vec<StructField>) -> Self {
+        DataType::Struct(Box::new(StructType::new(fields)))
+    }
+
+    pub fn array_type(elements: ArrayType) -> Self {
+        DataType::Array(Box::new(elements))
+    }
+
+    pub fn as_primitive_opt(&self) -> Option<&PrimitiveType> {
+        match self {
+            DataType::Primitive(ptype) => Some(ptype),
+            _ => None,
+        }
     }
 }
 
@@ -476,10 +555,7 @@ mod tests {
         }
         "#;
         let field: StructField = serde_json::from_str(data).unwrap();
-        assert!(matches!(
-            field.data_type,
-            DataType::Primitive(PrimitiveType::Integer)
-        ));
+        assert!(matches!(field.data_type, DataType::INTEGER));
 
         let data = r#"
         {
@@ -618,5 +694,28 @@ mod tests {
         let file = std::fs::File::open("./tests/serde/checkpoint_schema.json").unwrap();
         let schema: Result<Schema, _> = serde_json::from_reader(file);
         assert!(schema.is_ok())
+    }
+
+    #[test]
+    fn test_invalid_decimal() {
+        let data = r#"
+        {
+            "name": "a",
+            "type": "decimal(39, 10)",
+            "nullable": false,
+            "metadata": {}
+        }
+        "#;
+        assert!(serde_json::from_str::<StructField>(data).is_err());
+
+        let data = r#"
+        {
+            "name": "a",
+            "type": "decimal(10, 39)",
+            "nullable": false,
+            "metadata": {}
+        }
+        "#;
+        assert!(serde_json::from_str::<StructField>(data).is_err());
     }
 }
