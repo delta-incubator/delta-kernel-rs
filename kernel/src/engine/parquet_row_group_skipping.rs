@@ -8,6 +8,9 @@ use parquet::file::statistics::Statistics;
 use parquet::schema::types::{ColumnDescPtr, ColumnPath};
 use std::collections::{HashMap, HashSet};
 
+#[cfg(test)]
+mod tests;
+
 /// An extension trait for [`ArrowReaderBuilder`] that injects row group skipping capability.
 pub(crate) trait ParquetRowGroupSkipping {
     /// Instructs the parquet reader to perform row group skipping, eliminating any row group whose
@@ -22,7 +25,8 @@ impl<T> ParquetRowGroupSkipping for ArrowReaderBuilder<T> {
             .iter()
             .enumerate()
             .filter_map(|(index, row_group)| {
-                RowGroupFilter::apply(predicate, row_group).then_some(index)
+                // If the group survives the filter, return Some(index) so filter_map keeps it.
+                RowGroupFilter::apply(row_group, predicate).then_some(index)
             })
             .collect();
         self.with_row_groups(indices)
@@ -38,20 +42,32 @@ struct RowGroupFilter<'a> {
 }
 
 impl<'a> RowGroupFilter<'a> {
-    /// Applies a filtering expression to a row group. Return value false means to skip it.
-    fn apply(filter: &Expression, row_group: &'a RowGroupMetaData) -> bool {
-        let field_indices = compute_field_indices(row_group.schema_descr().columns(), filter);
-        let result = Self {
+    /// Creates a new row group filter for the given row group and predicate.
+    fn new(row_group: &'a RowGroupMetaData, predicate: &Expression) -> Self {
+        Self {
             row_group,
-            field_indices,
+            field_indices: compute_field_indices(row_group.schema_descr().columns(), predicate),
         }
-        .apply_sql_where(filter);
+    }
+
+    /// Applies a filtering predicate to a row group. Return value false means to skip it.
+    fn apply(row_group: &'a RowGroupMetaData, predicate: &Expression) -> bool {
+        let result = RowGroupFilter::new(row_group, predicate).apply_sql_where(predicate);
         !matches!(result, Some(false))
     }
 
     fn get_stats(&self, col: &ColumnPath) -> Option<&Statistics> {
         let field_index = self.field_indices.get(col)?;
         self.row_group.column(*field_index).statistics()
+    }
+    fn decimal_from_bytes(bytes: Option<&[u8]>, p: u8, s: u8) -> Option<Scalar> {
+        // WARNING: The bytes are stored in big-endian order; reverse and then 0-pad them.
+        let bytes = bytes.filter(|b| p <= 38 && b.len() <= 16)?;
+        let mut bytes = Vec::from(bytes);
+        bytes.reverse();
+        bytes.resize(16, 0u8);
+        let bytes: [u8; 16] = bytes.try_into().ok()?;
+        Some(Scalar::Decimal(i128::from_le_bytes(bytes), p, s))
     }
 }
 
@@ -66,32 +82,41 @@ impl<'a> ParquetStatsSkippingFilter for RowGroupFilter<'a> {
         let value = match (data_type.as_primitive_opt()?, self.get_stats(col)?) {
             (String, Statistics::ByteArray(s)) => s.min_opt()?.as_utf8().ok()?.into(),
             (String, Statistics::FixedLenByteArray(s)) => s.min_opt()?.as_utf8().ok()?.into(),
-            (String, _) => None?,
+            (String, _) => return None,
             (Long, Statistics::Int64(s)) => s.min_opt()?.into(),
             (Long, Statistics::Int32(s)) => (*s.min_opt()? as i64).into(),
-            (Long, _) => None?,
+            (Long, _) => return None,
             (Integer, Statistics::Int32(s)) => s.min_opt()?.into(),
-            (Integer, _) => None?,
+            (Integer, _) => return None,
             (Short, Statistics::Int32(s)) => (*s.min_opt()? as i16).into(),
-            (Short, _) => None?,
+            (Short, _) => return None,
             (Byte, Statistics::Int32(s)) => (*s.min_opt()? as i8).into(),
-            (Byte, _) => None?,
+            (Byte, _) => return None,
             (Float, Statistics::Float(s)) => s.min_opt()?.into(),
-            (Float, _) => None?,
+            (Float, _) => return None,
             (Double, Statistics::Double(s)) => s.min_opt()?.into(),
-            (Double, _) => None?,
+            (Double, _) => return None,
             (Boolean, Statistics::Boolean(s)) => s.min_opt()?.into(),
-            (Boolean, _) => None?,
+            (Boolean, _) => return None,
             (Binary, Statistics::ByteArray(s)) => s.min_opt()?.data().into(),
             (Binary, Statistics::FixedLenByteArray(s)) => s.min_opt()?.data().into(),
-            (Binary, _) => None?,
+            (Binary, _) => return None,
             (Date, Statistics::Int32(s)) => Scalar::Date(*s.min_opt()?),
-            (Date, _) => None?,
+            (Date, _) => return None,
             (Timestamp, Statistics::Int64(s)) => Scalar::Timestamp(*s.min_opt()?),
-            (Timestamp, _) => None?, // TODO: Int96 timestamps
+            (Timestamp, _) => return None, // TODO: Int96 timestamps
             (TimestampNtz, Statistics::Int64(s)) => Scalar::TimestampNtz(*s.min_opt()?),
-            (TimestampNtz, _) => None?, // TODO: Int96 timestamps
-            (Decimal(..), _) => None?,  // TODO: Decimal (Int32, Int64, FixedLenByteArray)
+            (TimestampNtz, _) => return None, // TODO: Int96 timestamps
+            (Decimal(p, s), Statistics::Int32(i)) if *p <= 9 => {
+                Scalar::Decimal(*i.min_opt()? as i128, *p, *s)
+            }
+            (Decimal(p, s), Statistics::Int64(i)) if *p <= 18 => {
+                Scalar::Decimal(*i.min_opt()? as i128, *p, *s)
+            }
+            (Decimal(p, s), Statistics::FixedLenByteArray(b)) => {
+                Self::decimal_from_bytes(b.min_bytes_opt(), *p, *s)?
+            }
+            (Decimal(..), _) => return None,
         };
         Some(value)
     }
@@ -101,32 +126,41 @@ impl<'a> ParquetStatsSkippingFilter for RowGroupFilter<'a> {
         let value = match (data_type.as_primitive_opt()?, self.get_stats(col)?) {
             (String, Statistics::ByteArray(s)) => s.max_opt()?.as_utf8().ok()?.into(),
             (String, Statistics::FixedLenByteArray(s)) => s.max_opt()?.as_utf8().ok()?.into(),
-            (String, _) => None?,
+            (String, _) => return None,
             (Long, Statistics::Int64(s)) => s.max_opt()?.into(),
             (Long, Statistics::Int32(s)) => (*s.max_opt()? as i64).into(),
-            (Long, _) => None?,
+            (Long, _) => return None,
             (Integer, Statistics::Int32(s)) => s.max_opt()?.into(),
-            (Integer, _) => None?,
+            (Integer, _) => return None,
             (Short, Statistics::Int32(s)) => (*s.max_opt()? as i16).into(),
-            (Short, _) => None?,
+            (Short, _) => return None,
             (Byte, Statistics::Int32(s)) => (*s.max_opt()? as i8).into(),
-            (Byte, _) => None?,
+            (Byte, _) => return None,
             (Float, Statistics::Float(s)) => s.max_opt()?.into(),
-            (Float, _) => None?,
+            (Float, _) => return None,
             (Double, Statistics::Double(s)) => s.max_opt()?.into(),
-            (Double, _) => None?,
+            (Double, _) => return None,
             (Boolean, Statistics::Boolean(s)) => s.max_opt()?.into(),
-            (Boolean, _) => None?,
+            (Boolean, _) => return None,
             (Binary, Statistics::ByteArray(s)) => s.max_opt()?.data().into(),
             (Binary, Statistics::FixedLenByteArray(s)) => s.max_opt()?.data().into(),
-            (Binary, _) => None?,
+            (Binary, _) => return None,
             (Date, Statistics::Int32(s)) => Scalar::Date(*s.max_opt()?),
-            (Date, _) => None?,
+            (Date, _) => return None,
             (Timestamp, Statistics::Int64(s)) => Scalar::Timestamp(*s.max_opt()?),
-            (Timestamp, _) => None?, // TODO: Int96 timestamps
+            (Timestamp, _) => return None, // TODO: Int96 timestamps
             (TimestampNtz, Statistics::Int64(s)) => Scalar::TimestampNtz(*s.max_opt()?),
-            (TimestampNtz, _) => None?, // TODO: Int96 timestamps
-            (Decimal(..), _) => None?,  // TODO: Decimal (Int32, Int64, FixedLenByteArray)
+            (TimestampNtz, _) => return None, // TODO: Int96 timestamps
+            (Decimal(p, s), Statistics::Int32(i)) if *p <= 9 => {
+                Scalar::Decimal(*i.max_opt()? as i128, *p, *s)
+            }
+            (Decimal(p, s), Statistics::Int64(i)) if *p <= 18 => {
+                Scalar::Decimal(*i.max_opt()? as i128, *p, *s)
+            }
+            (Decimal(p, s), Statistics::FixedLenByteArray(b)) => {
+                Self::decimal_from_bytes(b.max_bytes_opt(), *p, *s)?
+            }
+            (Decimal(..), _) => return None,
         };
         Some(value)
     }
