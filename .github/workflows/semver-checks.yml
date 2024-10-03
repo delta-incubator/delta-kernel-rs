@@ -10,7 +10,8 @@ jobs:
   check_if_pr_breaks_semver:
     runs-on: ubuntu-latest
     permissions:
-      issues: write # needed for adding label
+      issues: write
+      pull-requests: write
     steps:
       - uses: actions/checkout@v4
         name: checkout full rep
