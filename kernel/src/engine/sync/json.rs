@@ -1,12 +1,8 @@
-use std::{
-    fs::File,
-    io::BufReader,
-};
+use std::{fs::File, io::BufReader};
 
 use crate::{
-    engine::arrow_utils::parse_json as arrow_parse_json,
-    schema::SchemaRef, DeltaResult, EngineData, Expression,
-    FileDataReadResultIterator, FileMeta, JsonHandler,
+    engine::arrow_utils::parse_json as arrow_parse_json, schema::SchemaRef, DeltaResult,
+    EngineData, Expression, FileDataReadResultIterator, FileMeta, JsonHandler,
 };
 use arrow_schema::SchemaRef as ArrowSchemaRef;
 

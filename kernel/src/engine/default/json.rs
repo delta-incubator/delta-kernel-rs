@@ -180,8 +180,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        engine::arrow_data::ArrowEngineData,
-        actions::get_log_schema, engine::default::executor::tokio::TokioBackgroundExecutor,
+        actions::get_log_schema, engine::arrow_data::ArrowEngineData,
+        engine::default::executor::tokio::TokioBackgroundExecutor,
     };
 
     fn string_array_to_engine_data(string_array: StringArray) -> Box<dyn EngineData> {
