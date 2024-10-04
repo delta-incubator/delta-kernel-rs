@@ -9,20 +9,4 @@ macro_rules! require {
     };
 }
 
-/// Applies `f` to every `Result::Ok` value, returning a `Result`. `Result::Err` values are
-/// unchanged. This is equivalent to applying `and_then(f)` to each result item in the iterator.
-pub(crate) trait MapAndThen: Iterator {
-    fn map_and_then<F, T, U, E>(self, mut f: F) -> impl Iterator<Item = Result<U, E>>
-    where
-        Self: Iterator<Item = Result<T, E>> + Sized,
-        F: FnMut(T) -> Result<U, E>,
-    {
-        // NOTE: FnMut is-a FnOnce, but using it that way consumes `f`. Fortunately,
-        // &mut FnMut is _also_ FnOnce, and using it that way does _not_ consume `f`.
-        self.map(move |result| result.and_then(&mut f))
-    }
-}
-
-impl<T: Iterator> MapAndThen for T {}
-
 pub(crate) use require;

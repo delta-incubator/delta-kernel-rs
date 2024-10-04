@@ -1,7 +1,6 @@
 //! Functionality to create and execute scans (reads) over data stored in a delta table
 
 use std::collections::HashMap;
-use std::convert::identity;
 use std::sync::Arc;
 
 use itertools::Itertools;
@@ -15,7 +14,6 @@ use crate::features::ColumnMappingMode;
 use crate::scan::state::{DvInfo, Stats};
 use crate::schema::{DataType, Schema, SchemaRef, StructField, StructType};
 use crate::snapshot::Snapshot;
-use crate::utils::MapAndThen;
 use crate::{DeltaResult, Engine, EngineData, Error, FileMeta};
 
 use self::log_replay::scan_action_iter;
@@ -270,14 +268,16 @@ impl Scan {
         let global_state = Arc::new(self.global_scan_state());
         let scan_data = self.scan_data(engine)?;
         let scan_files_iter = scan_data
-            .map_and_then(|(data, vec)| {
+            .map(|res| {
+                let (data, vec) = res?;
                 let scan_files = vec![];
                 state::visit_scan_files(data.as_ref(), &vec, scan_files, scan_data_callback)
             })
             .flatten_ok(); // Iterator<DeltaResult<Vec<ScanFile>>> to Iterator<DeltaResult<ScanFile>>
 
         let result = scan_files_iter
-            .map_and_then(move |scan_file| {
+            .map(move |scan_file| -> DeltaResult<_> {
+                let scan_file = scan_file?;
                 let file_path = self.snapshot.table_root.join(&scan_file.path)?;
                 let mut selection_vector = scan_file
                     .dv_info
@@ -293,7 +293,8 @@ impl Scan {
                     None,
                 )?;
                 let gs = global_state.clone(); // Arc clone
-                Ok(read_result_iter.map_and_then(move |read_result| {
+                Ok(read_result_iter.map(move |read_result| -> DeltaResult<_> {
+                    let read_result = read_result?;
                     // to transform the physical data into the correct logical form
                     let logical = transform_to_logical_internal(
                         engine,
@@ -319,7 +320,7 @@ impl Scan {
                 }))
             })
             .flatten_ok() // Iterator<DeltaResult<Iterator<DeltaResult<ScanResult>>>> to Iterator<DeltaResult<DeltaResult<ScanResult>>>
-            .map_and_then(identity); // Iterator<DeltaResult<DeltaResult<ScanResult>>> to Iterator<DeltaResult<ScanResult>>
+            .map(|x| x?); // Iterator<DeltaResult<DeltaResult<ScanResult>>> to Iterator<DeltaResult<ScanResult>>
         Ok(result)
     }
 }
