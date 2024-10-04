@@ -2,6 +2,7 @@
 use crate::engine::parquet_stats_skipping::{col_name_to_path, ParquetStatsSkippingFilter};
 use crate::expressions::{Expression, Scalar};
 use crate::schema::{DataType, PrimitiveType};
+use chrono::{DateTime, Days};
 use parquet::arrow::arrow_reader::ArrowReaderBuilder;
 use parquet::file::metadata::RowGroupMetaData;
 use parquet::file::statistics::Statistics;
@@ -60,14 +61,22 @@ impl<'a> RowGroupFilter<'a> {
         let field_index = self.field_indices.get(col)?;
         self.row_group.column(*field_index).statistics()
     }
+
     fn decimal_from_bytes(bytes: Option<&[u8]>, p: u8, s: u8) -> Option<Scalar> {
-        // WARNING: The bytes are stored in big-endian order; reverse and then 0-pad them.
+        // WARNING: The bytes are stored in big-endian order; reverse and then 0-pad to 16 bytes.
         let bytes = bytes.filter(|b| b.len() <= 16)?;
         let mut bytes = Vec::from(bytes);
         bytes.reverse();
         bytes.resize(16, 0u8);
         let bytes: [u8; 16] = bytes.try_into().ok()?;
         Some(Scalar::Decimal(i128::from_le_bytes(bytes), p, s))
+    }
+
+    fn timestamp_from_date(days: Option<&i32>) -> Option<Scalar> {
+        let days = u64::try_from(*days?).ok()?;
+        let timestamp = DateTime::UNIX_EPOCH.checked_add_days(Days::new(days))?;
+        let timestamp = timestamp.signed_duration_since(DateTime::UNIX_EPOCH);
+        Some(Scalar::TimestampNtz(timestamp.num_microseconds()?))
     }
 }
 
@@ -107,8 +116,8 @@ impl<'a> ParquetStatsSkippingFilter for RowGroupFilter<'a> {
             (Timestamp, Statistics::Int64(s)) => Scalar::Timestamp(*s.min_opt()?),
             (Timestamp, _) => return None, // TODO: Int96 timestamps
             (TimestampNtz, Statistics::Int64(s)) => Scalar::TimestampNtz(*s.min_opt()?),
-            (TimestampNtz, Statistics::Int32(_)) => return None, // TODO: widen from DATE
-            (TimestampNtz, _) => return None,                    // TODO: Int96 timestamps
+            (TimestampNtz, Statistics::Int32(s)) => Self::timestamp_from_date(s.min_opt())?,
+            (TimestampNtz, _) => return None, // TODO: Int96 timestamps
             (Decimal(p, s), Statistics::Int32(i)) => Scalar::Decimal(*i.min_opt()? as i128, *p, *s),
             (Decimal(p, s), Statistics::Int64(i)) => Scalar::Decimal(*i.min_opt()? as i128, *p, *s),
             (Decimal(p, s), Statistics::FixedLenByteArray(b)) => {
@@ -149,8 +158,8 @@ impl<'a> ParquetStatsSkippingFilter for RowGroupFilter<'a> {
             (Timestamp, Statistics::Int64(s)) => Scalar::Timestamp(*s.max_opt()?),
             (Timestamp, _) => return None, // TODO: Int96 timestamps
             (TimestampNtz, Statistics::Int64(s)) => Scalar::TimestampNtz(*s.max_opt()?),
-            (TimestampNtz, Statistics::Int32(_)) => return None, // TODO: widen from DATE
-            (TimestampNtz, _) => return None,                    // TODO: Int96 timestamps
+            (TimestampNtz, Statistics::Int32(s)) => Self::timestamp_from_date(s.max_opt())?,
+            (TimestampNtz, _) => return None, // TODO: Int96 timestamps
             (Decimal(p, s), Statistics::Int32(i)) => Scalar::Decimal(*i.max_opt()? as i128, *p, *s),
             (Decimal(p, s), Statistics::Int64(i)) => Scalar::Decimal(*i.max_opt()? as i128, *p, *s),
             (Decimal(p, s), Statistics::FixedLenByteArray(b)) => {
