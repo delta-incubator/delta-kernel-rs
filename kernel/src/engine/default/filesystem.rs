@@ -56,7 +56,6 @@ impl<E: TaskExecutor> FileSystemClient for ObjectStoreFileSystemClient<E> {
                 match meta {
                     Ok(meta) => {
                         let mut location = url.clone();
-                        println!("listed location: {:?}", meta.location);
                         location.set_path(&format!("/{}", meta.location.as_ref()));
                         sender
                             .send(Ok(FileMeta {
