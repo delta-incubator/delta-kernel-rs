@@ -96,7 +96,6 @@ impl<E: TaskExecutor> JsonHandler for DefaultJsonHandler<E> {
         data: Box<dyn Iterator<Item = Box<dyn EngineData>> + Send + 'a>,
         _overwrite: bool,
     ) -> DeltaResult<()> {
-        // Initialize schema and batches
         let mut schema: Option<ArrowSchemaRef> = None;
         let mut batches: Vec<RecordBatch> = Vec::new();
 
@@ -108,28 +107,18 @@ impl<E: TaskExecutor> JsonHandler for DefaultJsonHandler<E> {
                 schema = Some(record_batch.schema());
             }
 
-            println!("[Engine put_json] schema: {:#?}", record_batch.schema());
             batches.push(record_batch.clone());
-        }
-
-        for batch in batches.iter() {
-            println!("===============================================================");
-            println!("[Engine put_json] batch: {:#?}", batch);
-            println!("[Engine put_json] schema: {:#?}", batch.schema());
-            println!("===============================================================");
         }
 
         // collect all batches
         let batches: Vec<&RecordBatch> = batches.iter().collect();
 
-        // Write the concatenated batch to JSON
+        // write the batches to JSON
         let mut writer = arrow_json::LineDelimitedWriter::new(Vec::new());
         writer.write_batches(&batches)?;
         writer.finish()?;
 
         let buffer = writer.into_inner();
-
-        println!("[Engine put_json] commit path: {:?}", path.path());
 
         // Put if absent
         futures::executor::block_on(async {

@@ -78,7 +78,7 @@ impl Table {
         Snapshot::try_new(self.location.clone(), engine, version)
     }
 
-    /// Create a new write transaction builder for the table.
+    /// Create a new write transaction for this table.
     pub fn new_transaction(&self, engine: &dyn Engine) -> DeltaResult<Transaction> {
         let latest_snapshot = Snapshot::try_new(self.location.clone(), engine, None)?;
         Ok(Transaction::new(latest_snapshot))

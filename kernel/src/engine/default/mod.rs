@@ -53,7 +53,6 @@ impl<E: TaskExecutor> DefaultEngine<E> {
     {
         // table root is the path of the table in the ObjectStore
         let (store, table_root) = parse_url_opts(table_root, options)?;
-        println!("DEFAULT ENGINE INIT try_new table root: {:?}", table_root);
         let store = Arc::new(store);
         Ok(Self {
             file_system: Arc::new(ObjectStoreFileSystemClient::new(
@@ -79,7 +78,6 @@ impl<E: TaskExecutor> DefaultEngine<E> {
     /// - `table_root_path`: The root path of the table within storage.
     /// - `task_executor`: Used to spawn async IO tasks. See [executor::TaskExecutor].
     pub fn new(store: Arc<DynObjectStore>, table_root_path: Path, task_executor: Arc<E>) -> Self {
-        println!("DEFAULT ENGINE INIT new table root: {:?}", table_root_path);
         Self {
             file_system: Arc::new(ObjectStoreFileSystemClient::new(
                 store.clone(),
