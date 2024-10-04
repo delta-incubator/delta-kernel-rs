@@ -1,21 +1,24 @@
 //! Some utilities for working with arrow data types
 
-use std::{collections::HashSet, sync::Arc};
+use std::{collections::HashSet, io::BufReader, sync::Arc};
 
 use crate::{
+    engine::arrow_data::ArrowEngineData,
     schema::{DataType, PrimitiveType, Schema, SchemaRef, StructField, StructType},
     utils::require,
-    DeltaResult, Error,
+    DeltaResult, EngineData, Error,
 };
 
 use arrow_array::{
     cast::AsArray, new_null_array, Array as ArrowArray, GenericListArray, OffsetSizeTrait,
-    StructArray,
+    RecordBatch, StringArray, StructArray,
 };
+use arrow_json::ReaderBuilder;
 use arrow_schema::{
     DataType as ArrowDataType, Field as ArrowField, FieldRef as ArrowFieldRef, Fields,
     SchemaRef as ArrowSchemaRef,
 };
+use arrow_select::concat::concat_batches;
 use itertools::Itertools;
 use parquet::{arrow::ProjectionMask, schema::types::SchemaDescriptor};
 use tracing::debug;
@@ -755,6 +758,59 @@ fn reorder_list<O: OffsetSizeTrait>(
             "Nested reorder of list should have had struct child.",
         ))
     }
+}
+
+fn hack_parse(
+    stats_schema: &ArrowSchemaRef,
+    json_string: Option<&str>,
+) -> DeltaResult<RecordBatch> {
+    match json_string {
+        Some(s) => Ok(ReaderBuilder::new(stats_schema.clone())
+            .build(BufReader::new(s.as_bytes()))?
+            .next()
+            .transpose()?
+            .ok_or(Error::missing_data("Expected data"))?),
+        None => Ok(RecordBatch::try_new(
+            stats_schema.clone(),
+            stats_schema
+                .fields
+                .iter()
+                .map(|field| new_null_array(field.data_type(), 1))
+                .collect(),
+        )?),
+    }
+}
+
+/// Arrow lacks the functionality to json-parse a string column into a struct column -- even tho the
+/// JSON file reader does exactly the same thing. This function is a hack to work around that gap.
+pub(crate) fn parse_json(
+    json_strings: Box<dyn EngineData>,
+    output_schema: SchemaRef,
+) -> DeltaResult<Box<dyn EngineData>> {
+    let json_strings: RecordBatch = ArrowEngineData::try_from_engine_data(json_strings)?.into();
+    // TODO(nick): this is pretty terrible
+    let struct_array: StructArray = json_strings.into();
+    let json_strings = struct_array
+        .column(0)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .ok_or_else(|| {
+            Error::generic("Expected json_strings to be a StringArray, found something else")
+        })?;
+    let output_schema: ArrowSchemaRef = Arc::new(output_schema.as_ref().try_into()?);
+    if json_strings.is_empty() {
+        return Ok(Box::new(ArrowEngineData::new(RecordBatch::new_empty(
+            output_schema,
+        ))));
+    }
+    let output: Vec<_> = json_strings
+        .iter()
+        .map(|json_string| hack_parse(&output_schema, json_string))
+        .try_collect()?;
+    Ok(Box::new(ArrowEngineData::new(concat_batches(
+        &output_schema,
+        output.iter(),
+    )?)))
 }
 
 #[cfg(test)]
