@@ -695,6 +695,135 @@ fn predicate_on_number() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Verify that footer-based row group skipping works on a table with no Delta stats.
+///
+/// The table has a single data file, plus a three-part checkpoint where each part file contains
+/// exactly one log action. The P&M query meta-predicate can thus skip the part with the table's
+/// AddFile action. Additionally, the user query will skip the table's data file when a suitable
+/// predicate is given. With debug logging enabled, we see:
+///
+/// ```text
+/// with_row_group_filter(VariadicOperation {
+///     op: Or,
+///     exprs: [
+///         UnaryOperation {
+///             op: Not,
+///             expr: UnaryOperation {
+///                 op: IsNull,
+///                 expr: Column(
+///                     "metaData.id",
+///                 ),
+///             },
+///         },
+///         UnaryOperation {
+///             op: Not,
+///             expr: UnaryOperation {
+///                 op: IsNull,
+///                 expr: Column(
+///                     "protocol.minReaderVersion",
+///                 ),
+///             },
+///         },
+///     ],
+/// }) = [0])
+/// with_row_group_filter(VariadicOperation {
+///     op: Or,
+///     exprs: [
+///         UnaryOperation {
+///             op: Not,
+///             expr: UnaryOperation {
+///                 op: IsNull,
+///                 expr: Column(
+///                     "metaData.id",
+///                 ),
+///             },
+///         },
+///         UnaryOperation {
+///             op: Not,
+///             expr: UnaryOperation {
+///                 op: IsNull,
+///                 expr: Column(
+///                     "protocol.minReaderVersion",
+///                 ),
+///             },
+///         },
+///     ],
+/// }) = [])
+/// with_row_group_filter(VariadicOperation {
+///     op: Or,
+///     exprs: [
+///         UnaryOperation {
+///             op: Not,
+///             expr: UnaryOperation {
+///                 op: IsNull,
+///                 expr: Column(
+///                     "metaData.id",
+///                 ),
+///             },
+///         },
+///         UnaryOperation {
+///             op: Not,
+///             expr: UnaryOperation {
+///                 op: IsNull,
+///                 expr: Column(
+///                     "protocol.minReaderVersion",
+///                 ),
+///             },
+///         },
+///     ],
+/// }) = [0])
+/// with_row_group_filter(BinaryOperation {
+///     op: LessThan,
+///     left: Column(
+///         "numeric.ints.int32",
+///     ),
+///     right: Literal(
+///         Integer(
+///             1000,
+///         ),
+///     ),
+/// }) = [])
+/// ```
+#[test]
+fn parquet_predicate_pushdown() -> Result<(), Box<dyn std::error::Error>> {
+    let expected_none: Vec<_> = [
+        "+------+",
+        "| bool |",
+        "+------+",
+        "+------+",
+    ].iter().map(|s| s.to_string()).collect();
+    let expected_all: Vec<_> = [
+        "+-------+",
+        "| bool  |",
+        "+-------+",
+        "|       |",
+        "|       |",
+        "|       |",
+        "| false |",
+        "| true  |",
+        "+-------+",
+    ].iter().map(|s| s.to_string()).collect();
+    let cases = vec![
+        (
+            Expression::column("numeric.ints.int32").lt(Expression::literal(1000i32)),
+            expected_none,
+        ),
+        (
+            Expression::column("numeric.ints.int32").gt(Expression::literal(1000i32)),
+            expected_all,
+        ),
+    ];
+    for (expr, expected) in cases.into_iter() {
+        read_table_data(
+            "./tests/data/parquet_row_group_skipping",
+            Some(&["bool"]),
+            Some(expr),
+            expected,
+        )?;
+    }
+    Ok(())
+}
+
 #[test]
 fn predicate_on_number_not() -> Result<(), Box<dyn std::error::Error>> {
     let cases = vec![

@@ -8,6 +8,7 @@ use parquet::file::metadata::RowGroupMetaData;
 use parquet::file::statistics::Statistics;
 use parquet::schema::types::{ColumnDescPtr, ColumnPath};
 use std::collections::{HashMap, HashSet};
+use tracing::debug;
 
 #[cfg(test)]
 mod tests;
@@ -30,6 +31,7 @@ impl<T> ParquetRowGroupSkipping for ArrowReaderBuilder<T> {
                 RowGroupFilter::apply(row_group, predicate).then_some(index)
             })
             .collect();
+        debug!("with_row_group_filter({predicate:#?}) = {indices:?})");
         self.with_row_groups(indices)
     }
 }
