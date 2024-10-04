@@ -790,12 +790,10 @@ fn predicate_on_number() -> Result<(), Box<dyn std::error::Error>> {
 /// ```
 #[test]
 fn parquet_predicate_pushdown() -> Result<(), Box<dyn std::error::Error>> {
-    let expected_none: Vec<_> = [
-        "+------+",
-        "| bool |",
-        "+------+",
-        "+------+",
-    ].iter().map(|s| s.to_string()).collect();
+    let expected_none: Vec<_> = ["+------+", "| bool |", "+------+", "+------+"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
     let expected_all: Vec<_> = [
         "+-------+",
         "| bool  |",
@@ -806,7 +804,10 @@ fn parquet_predicate_pushdown() -> Result<(), Box<dyn std::error::Error>> {
         "| false |",
         "| true  |",
         "+-------+",
-    ].iter().map(|s| s.to_string()).collect();
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
     let cases = vec![
         (
             Expression::column("numeric.ints.int32").lt(Expression::literal(1000i32)),
