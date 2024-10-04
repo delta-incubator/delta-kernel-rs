@@ -30,7 +30,6 @@ jobs:
         run: |
           cargo install cargo-semver-checks --locked
       - name: Run check
-        continue-on-error: true # don't fail the whole check if this step fails
         shell: bash
         run: |
           cargo semver-checks --all-features --baseline-rev ${{ github.event.pull_request.base.sha }}
@@ -41,6 +40,6 @@ jobs:
           labels: breaking-change
       - name: On Success
         if: success()
-        uses: actions-ecosystem/action-add-labels@v1
-        with:
-          labels: breaking-change
+        shell: bash
+        run: |
+          echo "Checks succeed"
