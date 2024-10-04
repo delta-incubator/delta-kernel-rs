@@ -115,18 +115,14 @@ fn try_main() -> DeltaResult<()> {
 
     let mut batches = vec![];
     for res in scan.execute(engine.as_ref())?.into_iter() {
+        let mask = res.full_mask();
         let data = res.raw_data?;
         let record_batch: RecordBatch = data
             .into_any()
             .downcast::<ArrowEngineData>()
             .map_err(|_| delta_kernel::Error::EngineDataType("ArrowEngineData".to_string()))?
             .into();
-        let batch = if let Some(mut mask) = res.mask {
-            let extra_rows = record_batch.num_rows() - mask.len();
-            if extra_rows > 0 {
-                // we need to extend the mask here in case it's too short
-                mask.extend(std::iter::repeat(true).take(extra_rows));
-            }
+        let batch = if let Some(mask) = mask {
             filter_record_batch(&record_batch, &mask.into())?
         } else {
             record_batch

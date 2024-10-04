@@ -400,14 +400,10 @@ fn read_with_execute(
     let batches: Vec<RecordBatch> = scan_results
         .into_iter()
         .map(|sr| {
+            let mask = sr.full_mask();
             let data = sr.raw_data.unwrap();
             let record_batch = to_arrow(data).unwrap();
-            if let Some(mut mask) = sr.mask {
-                let extra_rows = record_batch.num_rows() - mask.len();
-                if extra_rows > 0 {
-                    // we need to extend the mask here in case it's too short
-                    mask.extend(std::iter::repeat(true).take(extra_rows));
-                }
+            if let Some(mask) = mask {
                 filter_record_batch(&record_batch, &mask.into()).unwrap()
             } else {
                 record_batch

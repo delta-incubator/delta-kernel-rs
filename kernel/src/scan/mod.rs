@@ -131,7 +131,20 @@ pub struct ScanResult {
     /// plan to call arrow's `filter_record_batch`, you _need_ to extend this vector to the full
     /// length of the batch or arrow will drop the extra rows
     // TODO(nick) this should be allocated by the engine
-    pub mask: Option<Vec<bool>>,
+    raw_mask: Option<Vec<bool>>,
+}
+
+impl ScanResult {
+    /// Returns the raw mask. This is dangerous to use because it may be shorter than expected.
+    pub fn raw_mask(&self) -> Option<&Vec<bool>> {
+        self.raw_mask.as_ref()
+    }
+    /// Extends the underlying mask to match the row count of the accompanying data.
+    pub fn full_mask(&self) -> Option<Vec<bool>> {
+        let mut mask = self.raw_mask.clone()?;
+        mask.resize(self.raw_data.as_ref().ok()?.length(), true);
+        Some(mask)
+    }
 }
 
 /// Scan uses this to set up what kinds of columns it is scanning. For `Selected` we just store the
@@ -308,7 +321,7 @@ impl Scan {
                     let rest = split_vector(sv.as_mut(), len, None);
                     let result = ScanResult {
                         raw_data: logical,
-                        mask: sv,
+                        raw_mask: sv,
                     };
                     selection_vector = rest;
                     Ok(result)
