@@ -17,7 +17,7 @@
   {                                                                                                \
     struct Literal* lit = malloc(sizeof(struct Literal));                                          \
     lit->type = enum_member;                                                                       \
-    lit->value = (uintptr_t)val;                                                                   \
+    lit->value.simple = (uintptr_t)val;                                                            \
     return put_handle(data, lit, Literal);                                                         \
   }                                                                                                \
   _Static_assert(                                                                                  \
@@ -62,11 +62,6 @@ enum LitType
   Struct,
   Array
 };
-struct Literal
-{
-  enum LitType type;
-  int64_t value;
-};
 struct BinOp
 {
   enum OpType op;
@@ -87,10 +82,6 @@ enum ExpressionType
   BinOp,
   Variadic,
   Literal,
-  BinaryLiteral,
-  DecimalLiteral,
-  StructLiteral,
-  NullLiteral
 };
 struct Variadic
 {
@@ -126,6 +117,27 @@ struct Struct
   struct ExpressionRef* expressions;
   size_t len;
   size_t max_len;
+};
+
+struct ArrayData
+{
+  size_t len;
+  size_t max_len;
+  struct ExpressionRef* expr_list;
+};
+
+struct Literal
+{
+  enum LitType type;
+  union LiteralValue
+  {
+    uint64_t simple;
+    struct KernelStringSlice string_data;
+    struct Struct struct_data;
+    struct ArrayData array_data;
+    struct Binary binary;
+    struct Decimal decimal;
+  } value;
 };
 
 size_t put_handle(void* data, void* ref, enum ExpressionType type)
@@ -179,12 +191,14 @@ uintptr_t visit_expr_decimal(
   uint8_t precision,
   uint8_t scale)
 {
-  struct Decimal* dec = malloc(sizeof(struct Decimal));
+  struct Literal* literal = malloc(sizeof(struct Literal));
+  literal->type = Decimal;
+  struct Decimal* dec = &literal->value.decimal;
   dec->value[0] = value_ms;
   dec->value[1] = value_ls;
   dec->precision = precision;
   dec->scale = scale;
-  return put_handle(data, dec, DecimalLiteral);
+  return put_handle(data, dec, Literal);
 }
 DECL_SIMPLE_SCALAR(visit_expr_int, Integer, int32_t);
 DECL_SIMPLE_SCALAR(visit_expr_long, Long, int64_t);
@@ -220,24 +234,49 @@ void visit_variadic_item(void* data, uintptr_t variadic_id, uintptr_t sub_expr_i
 DECL_VARIADIC(visit_and, And)
 DECL_VARIADIC(visit_or, Or)
 DECL_VARIADIC(visit_struct_constructor, StructConstructor)
-DECL_VARIADIC(visit_expr_array, ArrayData)
+
+void visit_array_item(void* data, uintptr_t variadic_id, uintptr_t sub_expr_id)
+{
+  struct ExpressionRef* sub_expr_handle = get_handle(data, sub_expr_id);
+  struct ExpressionRef* array_handle = get_handle(data, variadic_id);
+  assert(sub_expr_handle != NULL && array_handle != NULL);
+  assert(array_handle->type == Literal);
+  struct Literal* literal = array_handle->ref;
+  assert(literal->type == Array);
+  struct ArrayData* array = &literal->value.array_data;
+  array->expr_list[array->len++] = *sub_expr_handle;
+}
+uintptr_t visit_expr_array(void* data, uintptr_t len)
+{
+  struct Literal* literal = malloc(sizeof(struct Literal));
+  literal->type = Array;
+  struct ArrayData* arr = &(literal->value.array_data);
+  arr->len = 0;
+  arr->max_len = 0;
+  arr->expr_list = malloc(sizeof(struct ExpressionRef) * len);
+  return put_handle(data, literal, Literal);
+}
 
 uintptr_t visit_expr_binary(void* data, const uint8_t* buf, uintptr_t len)
 {
-  struct Binary* bin = malloc(sizeof(struct Binary));
+  struct Literal* literal = malloc(sizeof(struct Literal));
+  literal->type = Binary;
+  struct Binary* bin = &literal->value.binary;
   bin->buf = malloc(len);
   memcpy(bin->buf, buf, len);
-  return put_handle(data, bin, BinaryLiteral);
+  return put_handle(data, literal, Literal);
 }
 
 uintptr_t visit_expr_struct(void* data, uintptr_t len)
 {
-  struct Struct* struct_data = malloc(sizeof(struct Struct));
+  struct Literal* literal = malloc(sizeof(struct Literal));
+  literal->type = Struct;
+  struct Struct* struct_data = &literal->value.struct_data;
   struct_data->len = 0;
   struct_data->max_len = len;
   struct_data->expressions = malloc(sizeof(struct ExpressionRef) * len);
   struct_data->field_names = malloc(sizeof(KernelStringSlice) * len);
-  return put_handle(data, struct_data, StructLiteral);
+  return put_handle(data, literal, Literal);
 }
 
 void visit_expr_struct_field(
@@ -247,11 +286,13 @@ void visit_expr_struct_field(
   uintptr_t value_id)
 {
   struct ExpressionRef* value = get_handle(data, value_id);
-  struct ExpressionRef* struct_handle = get_handle(data, struct_id);
-  assert(struct_handle != NULL && value != NULL);
-  assert(struct_handle->type == StructLiteral);
+  struct ExpressionRef* literal_handle = get_handle(data, struct_id);
+  assert(literal_handle != NULL && value != NULL);
+  assert(literal_handle->type == Literal);
+  struct Literal* literal = literal_handle->ref;
+  assert(literal->type == Struct);
 
-  struct Struct* struct_ref = (struct Struct*)struct_handle->ref;
+  struct Struct* struct_ref = &literal->value.struct_data;
   size_t len = struct_ref->len;
   assert(len < struct_ref->max_len);
 
@@ -262,7 +303,9 @@ void visit_expr_struct_field(
 
 uintptr_t visit_null(void* data)
 {
-  return put_handle(data, NULL, NullLiteral);
+  struct Literal* literal = malloc(sizeof(struct Literal));
+  literal->type = Null;
+  return put_handle(data, literal, Literal);
 }
 
 // Print the schema of the snapshot
@@ -310,7 +353,7 @@ struct ExpressionRef construct_predicate(KernelPredicate* predicate)
                                       .visit_struct = visit_expr_struct,
                                       .visit_struct_field = visit_expr_struct_field,
                                       .visit_array = visit_expr_array,
-                                      .visit_array_item = visit_variadic_item };
+                                      .visit_array_item = visit_array_item };
   uintptr_t schema_list_id = visit_expression(&predicate, &visitor);
   return data.handles[schema_list_id];
 }
@@ -331,11 +374,11 @@ void print_tree(struct ExpressionRef ref, int depth)
       tab_helper(depth);
       switch (op->op) {
         case Add: {
-          printf("ADD \n");
+          printf("ADD\n");
           break;
         }
         case Sub: {
-          printf("SUB \n");
+          printf("SUB\n");
           break;
         };
         case Div: {
@@ -416,33 +459,46 @@ void print_tree(struct ExpressionRef ref, int depth)
       switch (lit->type) {
         case Integer:
           printf("Integer");
+          printf("(%lld)\n", lit->value.simple);
+          break;
+        case Long:
+          printf("Long");
+          printf("(%lld)\n", lit->value.simple);
           break;
         case Short:
           printf("Short");
+          printf("(%lld)\n", lit->value.simple);
           break;
         case Byte:
           printf("Byte");
+          printf("(%lld)\n", lit->value.simple);
           break;
         case Float:
           printf("Float");
+          printf("(%lld)\n", lit->value.simple);
           break;
         case Double:
           printf("Double");
+          printf("(%lld)\n", lit->value.simple);
           break;
         case String:
           printf("String");
           break;
         case Boolean:
           printf("Boolean");
+          printf("(%lld)\n", lit->value.simple);
           break;
         case Timestamp:
           printf("Timestamp");
+          printf("(%lld)\n", lit->value.simple);
           break;
         case TimestampNtz:
           printf("TimestampNtz");
+          printf("(%lld)\n", lit->value.simple);
           break;
         case Date:
           printf("Date");
+          printf("(%lld)\n", lit->value.simple);
           break;
         case Binary:
           printf("Binary");
@@ -454,38 +510,23 @@ void print_tree(struct ExpressionRef ref, int depth)
           printf("Null");
           break;
         case Struct:
-          printf("Struct");
+          printf("Struct\n");
+          struct Struct* struct_data = &lit->value.struct_data;
+          for (size_t i = 0; i < struct_data->len; i++) {
+            tab_helper(depth);
+            printf("Field: %s\n", struct_data->field_names[i].ptr);
+            print_tree(struct_data->expressions[i], depth + 1);
+          }
           break;
         case Array:
-          printf("Array");
-          break;
-        case Long:
-          printf("Long");
+          printf("Array\n");
+          struct ArrayData* array = &lit->value.array_data;
+          for (size_t i = 0; i < array->len; i++) {
+            print_tree(array->expr_list[i], depth + 1);
+          }
           break;
       }
-      printf("(%lld)\n", lit->value);
     } break;
-    case BinaryLiteral:
-      tab_helper(depth);
-      printf("BinaryLiteral\n");
-    case DecimalLiteral:
-      tab_helper(depth);
-      printf("DecimalLiteral\n");
-      break;
-    case StructLiteral:
-      tab_helper(depth);
-      struct Struct* struct_data = ref.ref;
-      printf("Struct\n");
-      for (size_t i = 0; i < struct_data->len; i++) {
-        tab_helper(depth);
-        printf("Field: %s\n", struct_data->field_names[i].ptr);
-        print_tree(struct_data->expressions[i], depth + 1);
-      }
-      break;
-    case NullLiteral:
-      tab_helper(depth);
-      printf("Null\n");
-      break;
   }
 }
 
