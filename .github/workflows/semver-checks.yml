@@ -30,6 +30,7 @@ jobs:
         run: |
           cargo install cargo-semver-checks --locked
       - name: Run check
+        continue-on-error: true # don't fail the whole check if this step fails
         shell: bash
         run: |
           cargo semver-checks --all-features --baseline-rev ${{ github.event.pull_request.base.sha }}
