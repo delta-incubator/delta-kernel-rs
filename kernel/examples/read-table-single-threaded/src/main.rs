@@ -123,7 +123,7 @@ fn try_main() -> DeltaResult<()> {
                 .downcast::<ArrowEngineData>()
                 .map_err(|_| delta_kernel::Error::EngineDataType("ArrowEngineData".to_string()))?
                 .into();
-            if let Some(mut mask) = sr.mask {
+            if let Some(mut mask) = scan_result.mask {
                 let extra_rows = record_batch.num_rows() - mask.len();
                 if extra_rows > 0 {
                     // we need to extend the mask here in case it's too short
