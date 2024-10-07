@@ -64,14 +64,18 @@ impl<'a> RowGroupFilter<'a> {
         self.row_group.column(*field_index).statistics()
     }
 
-    fn decimal_from_bytes(bytes: Option<&[u8]>, p: u8, s: u8) -> Option<Scalar> {
+    fn decimal_from_bytes(bytes: Option<&[u8]>, precision: u8, scale: u8) -> Option<Scalar> {
         // WARNING: The bytes are stored in big-endian order; reverse and then 0-pad to 16 bytes.
         let bytes = bytes.filter(|b| b.len() <= 16)?;
         let mut bytes = Vec::from(bytes);
         bytes.reverse();
         bytes.resize(16, 0u8);
         let bytes: [u8; 16] = bytes.try_into().ok()?;
-        Some(Scalar::Decimal(i128::from_le_bytes(bytes), p, s))
+        Some(Scalar::Decimal(
+            i128::from_le_bytes(bytes),
+            precision,
+            scale,
+        ))
     }
 
     fn timestamp_from_date(days: Option<&i32>) -> Option<Scalar> {
@@ -85,7 +89,7 @@ impl<'a> RowGroupFilter<'a> {
 impl<'a> ParquetStatsSkippingFilter for RowGroupFilter<'a> {
     // Extracts a stat value, converting from its physical type to the requested logical type.
     //
-    // NOTE: This code is highly redundant with [`get_min_stat_value`], but parquet
+    // NOTE: This code is highly redundant with [`get_max_stat_value`] below, but parquet
     // ValueStatistics<T> requires T to impl a private trait, so we can't factor out any kind of
     // helper method. And macros are hard enough to read that it's not worth defining one.
     fn get_min_stat_value(&self, col: &ColumnPath, data_type: &DataType) -> Option<Scalar> {
@@ -193,10 +197,10 @@ pub(crate) fn compute_field_indices(
 ) -> HashMap<ColumnPath, usize> {
     fn do_recurse(expression: &Expression, cols: &mut HashSet<ColumnPath>) {
         use Expression::*;
-        let mut recurse = |expr| do_recurse(expr, cols); // less arg passing below
+        let mut recurse = |expr| do_recurse(expr, cols); // simplifies the call sites below
         match expression {
             Literal(_) => {}
-            Column(name) => drop(cols.insert(col_name_to_path(name))),
+            Column(name) => cols.extend([col_name_to_path(name)]),
             Struct(fields) => fields.iter().for_each(recurse),
             UnaryOperation { expr, .. } => recurse(expr),
             BinaryOperation { left, right, .. } => [left, right].iter().for_each(|e| recurse(e)),

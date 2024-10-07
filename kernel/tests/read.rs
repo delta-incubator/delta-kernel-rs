@@ -790,11 +790,14 @@ fn predicate_on_number() -> Result<(), Box<dyn std::error::Error>> {
 /// ```
 #[test]
 fn parquet_predicate_pushdown() -> Result<(), Box<dyn std::error::Error>> {
-    let expected_none: Vec<_> = ["+------+", "| bool |", "+------+", "+------+"]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-    let expected_all: Vec<_> = [
+    #[rustfmt::skip] // keep it easy to read!
+    let expected_none = vec![
+        "+------+",
+        "| bool |",
+        "+------+",
+        "+------+",
+    ];
+    let expected_all = vec![
         "+-------+",
         "| bool  |",
         "+-------+",
@@ -804,10 +807,7 @@ fn parquet_predicate_pushdown() -> Result<(), Box<dyn std::error::Error>> {
         "| false |",
         "| true  |",
         "+-------+",
-    ]
-    .iter()
-    .map(|s| s.to_string())
-    .collect();
+    ];
     let cases = vec![
         (
             Expression::column("numeric.ints.int32").lt(Expression::literal(1000i32)),
@@ -819,7 +819,7 @@ fn parquet_predicate_pushdown() -> Result<(), Box<dyn std::error::Error>> {
         ),
     ];
     for (expr, expected) in cases.into_iter() {
-        read_table_data(
+        read_table_data_str(
             "./tests/data/parquet_row_group_skipping",
             Some(&["bool"]),
             Some(expr),
