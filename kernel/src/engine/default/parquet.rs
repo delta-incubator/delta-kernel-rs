@@ -280,7 +280,6 @@ mod tests {
             size: meta.size,
         }];
 
-        // TODO: add a test that uses predicate skipping?
         let handler = DefaultParquetHandler::new(store, Arc::new(TokioBackgroundExecutor::new()));
         let data: Vec<RecordBatch> = handler
             .read_parquet_files(files, Arc::new(physical_schema.try_into().unwrap()), None)

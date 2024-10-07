@@ -518,7 +518,6 @@ fn read_with_scan_data(
     Ok(())
 }
 
-// TODO: Add some tests that read a table with no stats, to exercise parquet row group skipping.
 fn read_table_data(
     path: &str,
     select_cols: Option<&[&str]>,
