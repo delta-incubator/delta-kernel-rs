@@ -1,6 +1,6 @@
 name: semver-checks
 
-on: [push, pull_request]
+on: [pull_request]
 
 env:
   CARGO_TERM_COLOR: always
@@ -10,7 +10,6 @@ jobs:
   check_if_pr_breaks_semver:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
       pull-requests: write
     steps:
       - uses: actions/checkout@v4
@@ -33,13 +32,10 @@ jobs:
         run: |
           cargo semver-checks --all-features --baseline-rev ${{ github.event.pull_request.base.sha }}
       - name: On Failure
-        if: always()
-        run: gh pr edit "$NUMBER" --add-label "$LABELS"
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GH_REPO: ${{ github.repository }}
-          NUMBER: ${{ github.event.issue.number }}
-          LABELS: breaking-change
+        if: failure()
+        uses: actions-ecosystem/action-add-labels@v1
+        with:
+          labels: breaking-change
       - name: On Success
         if: success()
         shell: bash
