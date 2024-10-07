@@ -7,12 +7,12 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define DECL_BINOP(fun_name, op)                                                                   \
+#define DEFINE_BINOP(fun_name, op)                                                                 \
   uintptr_t fun_name(void* data, uintptr_t a, uintptr_t b)                                         \
   {                                                                                                \
-    return visit_binop(data, a, b, op);                                                            \
+    return visit_expr_binop(data, a, b, op);                                                       \
   }
-#define DECL_SIMPLE_SCALAR(fun_name, enum_member, c_type)                                          \
+#define DEFINE_SIMPLE_SCALAR(fun_name, enum_member, c_type)                                        \
   uintptr_t fun_name(void* data, c_type val)                                                       \
   {                                                                                                \
     struct Literal* lit = malloc(sizeof(struct Literal));                                          \
@@ -22,15 +22,15 @@
   }                                                                                                \
   _Static_assert(                                                                                  \
     sizeof(c_type) <= sizeof(uintptr_t), "The provided type is not a valid simple scalar")
-#define DECL_VARIADIC(fun_name, enum_member)                                                       \
+#define DEFINE_VARIADIC(fun_name, enum_member)                                                     \
   uintptr_t fun_name(void* data, uintptr_t len)                                                    \
   {                                                                                                \
-    return visit_variadic(data, len, enum_member);                                                 \
+    return visit_expr_variadic(data, len, enum_member);                                            \
   }
-#define DECL_UNARY(fun_name, op)                                                                   \
+#define DEFINE_UNARY(fun_name, op)                                                                 \
   uintptr_t fun_name(void* data, uintptr_t sub_expr)                                               \
   {                                                                                                \
-    return visit_unary(data, sub_expr, op);                                                        \
+    return visit_expr_unary(data, sub_expr, op);                                                   \
   }
 enum OpType
 {
@@ -181,7 +181,7 @@ KernelStringSlice copy_kernel_string(KernelStringSlice string)
   return out;
 }
 
-uintptr_t visit_binop(void* data, uintptr_t a, uintptr_t b, enum OpType op)
+uintptr_t visit_expr_binop(void* data, uintptr_t a, uintptr_t b, enum OpType op)
 {
   struct BinOp* binop = malloc(sizeof(struct BinOp));
   struct ExpressionRef* left_handle = get_handle(data, a);
@@ -195,19 +195,19 @@ uintptr_t visit_binop(void* data, uintptr_t a, uintptr_t b, enum OpType op)
   binop->right = right;
   return put_handle(data, binop, BinOp);
 }
-DECL_BINOP(visit_add, Add)
-DECL_BINOP(visit_minus, Sub)
-DECL_BINOP(visit_multiply, Mul)
-DECL_BINOP(visit_divide, Div)
-DECL_BINOP(visit_lt, LT)
-DECL_BINOP(visit_le, LE)
-DECL_BINOP(visit_gt, GT)
-DECL_BINOP(visit_ge, GE)
-DECL_BINOP(visit_eq, EQ)
-DECL_BINOP(visit_ne, NE)
-DECL_BINOP(visit_distinct, Distinct)
-DECL_BINOP(visit_in, In)
-DECL_BINOP(visit_not_in, NotIn)
+DEFINE_BINOP(visit_expr_add, Add)
+DEFINE_BINOP(visit_expr_minus, Sub)
+DEFINE_BINOP(visit_expr_multiply, Mul)
+DEFINE_BINOP(visit_expr_divide, Div)
+DEFINE_BINOP(visit_expr_lt, LT)
+DEFINE_BINOP(visit_expr_le, LE)
+DEFINE_BINOP(visit_expr_gt, GT)
+DEFINE_BINOP(visit_expr_ge, GE)
+DEFINE_BINOP(visit_expr_eq, EQ)
+DEFINE_BINOP(visit_expr_ne, NE)
+DEFINE_BINOP(visit_expr_distinct, Distinct)
+DEFINE_BINOP(visit_expr_in, In)
+DEFINE_BINOP(visit_expr_not_in, NotIn)
 
 uintptr_t visit_expr_string(void* data, KernelStringSlice string)
 {
@@ -233,18 +233,18 @@ uintptr_t visit_expr_decimal(
   dec->scale = scale;
   return put_handle(data, dec, Literal);
 }
-DECL_SIMPLE_SCALAR(visit_expr_int, Integer, int32_t);
-DECL_SIMPLE_SCALAR(visit_expr_long, Long, int64_t);
-DECL_SIMPLE_SCALAR(visit_expr_short, Long, int16_t);
-DECL_SIMPLE_SCALAR(visit_expr_byte, Byte, int8_t);
-DECL_SIMPLE_SCALAR(visit_expr_float, Float, float);
-DECL_SIMPLE_SCALAR(visit_expr_double, Double, double);
-DECL_SIMPLE_SCALAR(visit_expr_boolean, Boolean, _Bool);
-DECL_SIMPLE_SCALAR(visit_expr_timestamp, Timestamp, int64_t);
-DECL_SIMPLE_SCALAR(visit_expr_timestamp_ntz, TimestampNtz, int64_t);
-DECL_SIMPLE_SCALAR(visit_expr_date, Date, int32_t);
+DEFINE_SIMPLE_SCALAR(visit_expr_int, Integer, int32_t);
+DEFINE_SIMPLE_SCALAR(visit_expr_long, Long, int64_t);
+DEFINE_SIMPLE_SCALAR(visit_expr_short, Long, int16_t);
+DEFINE_SIMPLE_SCALAR(visit_expr_byte, Byte, int8_t);
+DEFINE_SIMPLE_SCALAR(visit_expr_float, Float, float);
+DEFINE_SIMPLE_SCALAR(visit_expr_double, Double, double);
+DEFINE_SIMPLE_SCALAR(visit_expr_boolean, Boolean, _Bool);
+DEFINE_SIMPLE_SCALAR(visit_expr_timestamp, Timestamp, int64_t);
+DEFINE_SIMPLE_SCALAR(visit_expr_timestamp_ntz, TimestampNtz, int64_t);
+DEFINE_SIMPLE_SCALAR(visit_expr_date, Date, int32_t);
 
-uintptr_t visit_variadic(void* data, uintptr_t len, enum VariadicType op)
+uintptr_t visit_expr_variadic(void* data, uintptr_t len, enum VariadicType op)
 {
   struct Variadic* var = malloc(sizeof(struct Variadic));
   struct ExpressionRef* expr_lst = malloc(sizeof(struct ExpressionRef) * len);
@@ -254,7 +254,7 @@ uintptr_t visit_variadic(void* data, uintptr_t len, enum VariadicType op)
   var->expr_list = expr_lst;
   return put_handle(data, var, Variadic);
 }
-void visit_variadic_item(void* data, uintptr_t variadic_id, uintptr_t sub_expr_id)
+void visit_expr_variadic_item(void* data, uintptr_t variadic_id, uintptr_t sub_expr_id)
 {
   struct ExpressionRef* sub_expr_ref = get_handle(data, sub_expr_id);
   struct ExpressionRef* variadic_ref = get_handle(data, variadic_id);
@@ -264,11 +264,11 @@ void visit_variadic_item(void* data, uintptr_t variadic_id, uintptr_t sub_expr_i
   struct Variadic* variadic = variadic_ref->ref;
   variadic->expr_list[variadic->len++] = *sub_expr_ref;
 }
-DECL_VARIADIC(visit_and, And)
-DECL_VARIADIC(visit_or, Or)
-DECL_VARIADIC(visit_struct_constructor, StructConstructor)
+DEFINE_VARIADIC(visit_expr_and, And)
+DEFINE_VARIADIC(visit_expr_or, Or)
+DEFINE_VARIADIC(visit_expr_struct, StructConstructor)
 
-void visit_array_item(void* data, uintptr_t variadic_id, uintptr_t sub_expr_id)
+void visit_expr_array_item(void* data, uintptr_t variadic_id, uintptr_t sub_expr_id)
 {
   struct ExpressionRef* sub_expr_handle = get_handle(data, sub_expr_id);
   struct ExpressionRef* array_handle = get_handle(data, variadic_id);
@@ -300,7 +300,7 @@ uintptr_t visit_expr_binary(void* data, const uint8_t* buf, uintptr_t len)
   return put_handle(data, literal, Literal);
 }
 
-uintptr_t visit_expr_struct(void* data, uintptr_t len)
+uintptr_t visit_expr_struct_literal(void* data, uintptr_t len)
 {
   struct Literal* literal = malloc(sizeof(struct Literal));
   literal->type = Struct;
@@ -312,7 +312,7 @@ uintptr_t visit_expr_struct(void* data, uintptr_t len)
   return put_handle(data, literal, Literal);
 }
 
-void visit_expr_struct_field(
+void visit_expr_struct_literal_field(
   void* data,
   uintptr_t struct_id,
   KernelStringSlice field_name,
@@ -334,14 +334,14 @@ void visit_expr_struct_field(
   struct_ref->len++;
 }
 
-uintptr_t visit_null(void* data)
+uintptr_t visit_expr_null(void* data)
 {
   struct Literal* literal = malloc(sizeof(struct Literal));
   literal->type = Null;
   return put_handle(data, literal, Literal);
 }
 
-uintptr_t visit_unary(void* data, uintptr_t sub_expr_id, enum UnaryType type)
+uintptr_t visit_expr_unary(void* data, uintptr_t sub_expr_id, enum UnaryType type)
 {
   struct Unary* unary = malloc(sizeof(struct Unary));
   unary->type = type;
@@ -349,10 +349,10 @@ uintptr_t visit_unary(void* data, uintptr_t sub_expr_id, enum UnaryType type)
   unary->sub_expr = *sub_expr_handle;
   return put_handle(data, unary, Unary);
 }
-DECL_UNARY(visit_is_null, IsNull)
-DECL_UNARY(visit_not, Not)
+DEFINE_UNARY(visit_expr_is_null, IsNull)
+DEFINE_UNARY(visit_expr_not, Not)
 
-uintptr_t visit_column(void* data, KernelStringSlice string)
+uintptr_t visit_expr_column(void* data, KernelStringSlice string)
 {
   struct KernelStringSlice* heap_string = malloc(sizeof(KernelStringSlice));
   *heap_string = copy_kernel_string(string);
@@ -364,47 +364,48 @@ struct ExpressionRef construct_predicate(KernelPredicate* predicate)
 {
   print_diag("Building schema\n");
   struct Data data = { 0 };
-  EngineExpressionVisitor visitor = { .data = &data,
-                                      .visit_int = visit_expr_int,
-                                      .visit_long = visit_expr_long,
-                                      .visit_short = visit_expr_short,
-                                      .visit_byte = visit_expr_byte,
-                                      .visit_float = visit_expr_float,
-                                      .visit_double = visit_expr_double,
-                                      .visit_bool = visit_expr_boolean,
-                                      .visit_timestamp = visit_expr_timestamp,
-                                      .visit_timestamp_ntz = visit_expr_timestamp_ntz,
-                                      .visit_date = visit_expr_date,
-                                      .visit_binary = visit_expr_binary,
-                                      .visit_decimal = visit_expr_decimal,
-                                      .visit_string = visit_expr_string,
-                                      .visit_and = visit_and,
-                                      .visit_or = visit_or,
-                                      .visit_variadic_item = visit_variadic_item,
-                                      .visit_not = visit_not,
-                                      .visit_is_null = visit_is_null,
-                                      .visit_lt = visit_lt,
-                                      .visit_le = visit_le,
-                                      .visit_gt = visit_gt,
-                                      .visit_ge = visit_ge,
-                                      .visit_eq = visit_eq,
-                                      .visit_ne = visit_ne,
-                                      .visit_distinct = visit_distinct,
-                                      .visit_in = visit_in,
-                                      .visit_not_in = visit_not_in,
-                                      .visit_add = visit_add,
-                                      .visit_minus = visit_minus,
-                                      .visit_multiply = visit_multiply,
-                                      .visit_divide = visit_divide,
-                                      .visit_column = visit_column,
-                                      .visit_expr_struct = visit_struct_constructor,
-                                      .visit_expr_struct_item =
-                                        visit_variadic_item, // We treat expr struct as a variadic
-                                      .visit_null = visit_null,
-                                      .visit_struct = visit_expr_struct,
-                                      .visit_struct_field = visit_expr_struct_field,
-                                      .visit_array = visit_expr_array,
-                                      .visit_array_item = visit_array_item };
+  EngineExpressionVisitor visitor = {
+    .data = &data,
+    .visit_int = visit_expr_int,
+    .visit_long = visit_expr_long,
+    .visit_short = visit_expr_short,
+    .visit_byte = visit_expr_byte,
+    .visit_float = visit_expr_float,
+    .visit_double = visit_expr_double,
+    .visit_bool = visit_expr_boolean,
+    .visit_timestamp = visit_expr_timestamp,
+    .visit_timestamp_ntz = visit_expr_timestamp_ntz,
+    .visit_date = visit_expr_date,
+    .visit_binary = visit_expr_binary,
+    .visit_decimal = visit_expr_decimal,
+    .visit_string = visit_expr_string,
+    .visit_and = visit_expr_and,
+    .visit_or = visit_expr_or,
+    .visit_variadic_item = visit_expr_variadic_item,
+    .visit_not = visit_expr_not,
+    .visit_is_null = visit_expr_is_null,
+    .visit_lt = visit_expr_lt,
+    .visit_le = visit_expr_le,
+    .visit_gt = visit_expr_gt,
+    .visit_ge = visit_expr_ge,
+    .visit_eq = visit_expr_eq,
+    .visit_ne = visit_expr_ne,
+    .visit_distinct = visit_expr_distinct,
+    .visit_in = visit_expr_in,
+    .visit_not_in = visit_expr_not_in,
+    .visit_add = visit_expr_add,
+    .visit_minus = visit_expr_minus,
+    .visit_multiply = visit_expr_multiply,
+    .visit_divide = visit_expr_divide,
+    .visit_column = visit_expr_column,
+    .visit_struct = visit_expr_struct,
+    .visit_struct_item = visit_expr_variadic_item, // We treat expr struct as a variadic
+    .visit_null = visit_expr_null,
+    .visit_struct_literal = visit_expr_struct_literal,
+    .visit_struct_literal_field = visit_expr_struct_literal_field,
+    .visit_array = visit_expr_array,
+    .visit_array_item = visit_expr_array_item
+  };
   uintptr_t schema_list_id = visit_expression(&predicate, &visitor);
   return data.handles[schema_list_id];
 }
@@ -416,7 +417,62 @@ void tab_helper(int n)
   printf("  ");
   tab_helper(n - 1);
 }
-
+void free_expression(struct ExpressionRef ref)
+{
+  switch (ref.type) {
+    case BinOp: {
+      struct BinOp* op = ref.ref;
+      struct ExpressionRef left = { .ref = op->left, .type = Literal };
+      struct ExpressionRef right = { .ref = op->right, .type = Literal };
+      free_expression(left);
+      free_expression(right);
+      free(op);
+      break;
+    }
+    case Variadic: {
+      struct Variadic* var = ref.ref;
+      for (size_t i = 0; i < var->len; i++) {
+        free_expression(var->expr_list[i]);
+      }
+      free(var);
+    } break;
+    case Literal: {
+      struct Literal* lit = ref.ref;
+      switch (lit->type) {
+        case Struct:
+          printf("Struct\n");
+          struct Struct* struct_data = &lit->value.struct_data;
+          for (size_t i = 0; i < struct_data->len; i++) {
+            free((void*)struct_data->field_names[i].ptr);
+          }
+          break;
+        case Array:
+          printf("Array\n");
+          struct ArrayData* array = &lit->value.array_data;
+          for (size_t i = 0; i < array->len; i++) {
+            free_expression(array->expr_list[i]);
+          }
+          free(array->expr_list);
+          break;
+        default:
+          break;
+      }
+      free(lit);
+    } break;
+    case Unary: {
+      struct Unary* unary = ref.ref;
+      free_expression(unary->sub_expr);
+      free(unary);
+      break;
+    }
+    case Column: {
+      KernelStringSlice* string = ref.ref;
+      free((void*)string->ptr);
+      free(string);
+      break;
+    }
+  }
+}
 void print_tree(struct ExpressionRef ref, int depth)
 {
   switch (ref.type) {
@@ -604,4 +660,5 @@ void test_kernel_expr()
   KernelPredicate* pred = get_kernel_expression();
   struct ExpressionRef ref = construct_predicate(pred);
   print_tree(ref, 0);
+  free_expression(ref);
 }

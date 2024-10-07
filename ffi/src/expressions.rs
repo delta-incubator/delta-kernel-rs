@@ -336,11 +336,11 @@ pub struct EngineExpressionVisitor {
 
     pub visit_column: extern "C" fn(data: *mut c_void, name: KernelStringSlice) -> usize,
 
-    pub visit_expr_struct: extern "C" fn(data: *mut c_void, len: usize) -> usize,
-    pub visit_expr_struct_item: extern "C" fn(data: *mut c_void, struct_id: usize, expr_id: usize),
+    pub visit_struct: extern "C" fn(data: *mut c_void, len: usize) -> usize,
+    pub visit_struct_item: extern "C" fn(data: *mut c_void, struct_id: usize, expr_id: usize),
 
-    pub visit_struct: extern "C" fn(data: *mut c_void, num_fields: usize) -> usize,
-    pub visit_struct_field: extern "C" fn(
+    pub visit_struct_literal: extern "C" fn(data: *mut c_void, num_fields: usize) -> usize,
+    pub visit_struct_literal_field: extern "C" fn(
         data: *mut c_void,
         struct_id: usize,
         field_name: KernelStringSlice,
@@ -372,12 +372,12 @@ pub unsafe extern "C" fn visit_expression(
         array_id
     }
     fn visit_struct(visitor: &mut EngineExpressionVisitor, struct_data: &StructData) -> usize {
-        let struct_id = call!(visitor, visit_struct, struct_data.fields().len());
+        let struct_id = call!(visitor, visit_struct_literal, struct_data.fields().len());
         for (field, value) in struct_data.fields().iter().zip(struct_data.values()) {
             let value_id = visit_scalar(visitor, value);
             call!(
                 visitor,
-                visit_struct_field,
+                visit_struct_literal_field,
                 struct_id,
                 field.name().into(),
                 value_id
@@ -386,10 +386,10 @@ pub unsafe extern "C" fn visit_expression(
         struct_id
     }
     fn visit_expr_struct(visitor: &mut EngineExpressionVisitor, exprs: &Vec<Expression>) -> usize {
-        let expr_struct_id = call!(visitor, visit_expr_struct, exprs.len());
+        let expr_struct_id = call!(visitor, visit_struct, exprs.len());
         for expr in exprs {
             let expr_id = visit_expression(visitor, expr);
-            call!(visitor, visit_expr_struct_item, expr_struct_id, expr_id)
+            call!(visitor, visit_struct_item, expr_struct_id, expr_id)
         }
         expr_struct_id
     }
