@@ -139,7 +139,7 @@ pub async fn assert_scan_data(engine: Arc<dyn Engine>, test_case: &TestCaseInfo)
             if schema.is_none() {
                 schema = Some(record_batch.schema());
             }
-            if let Some(mask) = sr.mask {
+            if let Some(mask) = scan_result.mask {
                 Ok(filter_record_batch(&record_batch, &mask.into())?)
             } else {
                 Ok(record_batch)
