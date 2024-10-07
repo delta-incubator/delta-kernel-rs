@@ -1,4 +1,5 @@
 //! Expression handling based on arrow-rs compute kernels.
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use arrow_arith::boolean::{and_kleene, is_null, not, or_kleene};
@@ -19,17 +20,76 @@ use arrow_schema::{
 };
 use arrow_select::concat::concat;
 use itertools::Itertools;
+use parquet::arrow::arrow_reader::{ArrowPredicateFn, RowFilter};
+use parquet::arrow::ProjectionMask;
 
 use super::arrow_conversion::LIST_ARRAY_ROOT;
 use crate::engine::arrow_data::ArrowEngineData;
-use crate::engine::arrow_utils::ensure_data_types;
 use crate::engine::arrow_utils::prim_array_cmp;
+use crate::engine::arrow_utils::{ensure_data_types, generate_mask, get_requested_indices};
 use crate::error::{DeltaResult, Error};
 use crate::expressions::{BinaryOperator, Expression, Scalar, UnaryOperator, VariadicOperator};
 use crate::schema::{DataType, PrimitiveType, SchemaRef};
 use crate::{EngineData, ExpressionEvaluator, ExpressionHandler};
+use arrow_schema::SchemaRef as ArrowSchemaRef;
+use parquet::schema::types::SchemaDescriptor;
 
 // TODO leverage scalars / Datum
+
+pub fn expression_to_row_filter(
+    predicate: Expression,
+    requested_schema: &SchemaRef,
+    parquet_schema: &ArrowSchemaRef,
+    parquet_physical_schema: &SchemaDescriptor,
+) -> DeltaResult<RowFilter> {
+    let cols = get_columns_from_expression(&predicate);
+    let expr_schema = requested_schema.project(&cols)?;
+    let (indices, _) = get_requested_indices(&expr_schema, parquet_schema)?;
+    let projection_mask = generate_mask(
+        &expr_schema,
+        parquet_schema,
+        parquet_physical_schema,
+        &indices,
+    )
+    .unwrap_or(ProjectionMask::all());
+    let arrow_predicate = ArrowPredicateFn::new(projection_mask, move |batch| {
+        downcast_to_bool(
+            &evaluate_expression(&predicate, &batch, None)
+                .map_err(|err| ArrowError::ExternalError(Box::new(err)))?,
+        )
+        .map_err(|err| ArrowError::ExternalError(Box::new(err)))
+        .cloned()
+    });
+    Ok(RowFilter::new(vec![Box::new(arrow_predicate)]))
+}
+
+pub fn get_columns_from_expression(expr: &Expression) -> Vec<&str> {
+    fn get_columns_from_expression_impl<'a>(expr: &'a Expression, out: &mut HashSet<&'a str>) {
+        match expr {
+            Expression::Column(col_name) => {
+                let root_name = col_name.split('.').next().unwrap_or(col_name);
+                out.insert(root_name);
+            }
+            Expression::Struct(fields) => fields
+                .iter()
+                .for_each(|expr| get_columns_from_expression_impl(expr, out)),
+            Expression::BinaryOperation { op: _, left, right } => {
+                get_columns_from_expression_impl(left, out);
+                get_columns_from_expression_impl(right, out);
+            }
+            Expression::UnaryOperation { op: _, expr } => {
+                get_columns_from_expression_impl(expr, out)
+            }
+            Expression::VariadicOperation { op: _, exprs } => exprs
+                .iter()
+                .for_each(|expr| get_columns_from_expression_impl(expr, out)),
+            Expression::Literal(_) => (),
+        }
+    }
+    let mut out = HashSet::new();
+    get_columns_from_expression_impl(expr, &mut out);
+    out.into_iter().collect_vec()
+}
 
 fn downcast_to_bool(arr: &dyn Array) -> DeltaResult<&BooleanArray> {
     arr.as_any()
