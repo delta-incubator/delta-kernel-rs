@@ -159,11 +159,11 @@ async fn latest_snapshot_test(
     let scan = snapshot.into_scan_builder().build()?;
     let scan_res = scan.execute(&engine)?;
     let batches: Vec<RecordBatch> = scan_res
-        .map(|sr| -> DeltaResult<_> {
-            let sr = sr?;
-            let data = sr.raw_data?;
+        .map(|scan_result| -> DeltaResult<_> {
+            let scan_result = scan_result?;
+            let data = scan_result.raw_data?;
             let record_batch = to_arrow(data)?;
-            if let Some(mut mask) = sr.mask {
+            if let Some(mut mask) = scan_result.mask {
                 let extra_rows = record_batch.num_rows() - mask.len();
                 if extra_rows > 0 {
                     // we need to extend the mask here in case it's too short
