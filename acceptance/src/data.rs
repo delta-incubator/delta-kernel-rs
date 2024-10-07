@@ -128,9 +128,9 @@ pub async fn assert_scan_data(engine: Arc<dyn Engine>, test_case: &TestCaseInfo)
     let mut schema = None;
     let batches: Vec<RecordBatch> = scan
         .execute(engine)?
-        .map(|sr| -> DeltaResult<_> {
-            let sr = sr?;
-            let data = sr.raw_data?;
+        .map(|scan_result| -> DeltaResult<_> {
+            let scan_result = scan_result?;
+            let data = scan_result.raw_data?;
             let record_batch: RecordBatch = data
                 .into_any()
                 .downcast::<ArrowEngineData>()
