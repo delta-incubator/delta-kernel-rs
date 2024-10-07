@@ -769,8 +769,7 @@ pub(crate) fn parse_json(
     schema: SchemaRef,
 ) -> DeltaResult<Box<dyn EngineData>> {
     let json_strings: RecordBatch = ArrowEngineData::try_from_engine_data(json_strings)?.into();
-    let struct_array: StructArray = json_strings.into();
-    let json_strings = struct_array
+    let json_strings = json_strings
         .column(0)
         .as_any()
         .downcast_ref::<StringArray>()
