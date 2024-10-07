@@ -5,6 +5,7 @@ use std::ops::Range;
 use std::sync::Arc;
 use std::task::{ready, Poll};
 
+use arrow_array::RecordBatch;
 use arrow_json::ReaderBuilder;
 use arrow_schema::SchemaRef as ArrowSchemaRef;
 use bytes::{Buf, Bytes};
@@ -14,6 +15,7 @@ use object_store::{DynObjectStore, GetResultPayload};
 
 use super::executor::TaskExecutor;
 use super::file_stream::{FileOpenFuture, FileOpener, FileStream};
+use crate::engine::arrow_data::ArrowEngineData;
 use crate::engine::arrow_utils::parse_json as arrow_parse_json;
 use crate::schema::SchemaRef;
 use crate::{

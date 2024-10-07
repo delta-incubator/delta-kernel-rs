@@ -1,13 +1,14 @@
 use std::{fs::File, io::BufReader};
 
-use crate::{
-    engine::arrow_utils::parse_json as arrow_parse_json, schema::SchemaRef, DeltaResult,
-    EngineData, Expression, FileDataReadResultIterator, FileMeta, JsonHandler,
-};
 use arrow_schema::SchemaRef as ArrowSchemaRef;
+use url::Url;
 
 use super::read_files;
-use crate::engine::arrow_data::ArrowEngineData;
+use crate::{
+    engine::arrow_data::ArrowEngineData, engine::arrow_utils::parse_json as arrow_parse_json,
+    schema::SchemaRef, DeltaResult, EngineData, Expression, FileDataReadResultIterator, FileMeta,
+    JsonHandler,
+};
 
 pub(crate) struct SyncJsonHandler;
 

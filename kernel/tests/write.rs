@@ -2,9 +2,12 @@ use std::sync::Arc;
 
 use arrow::array::StringArray;
 use arrow::record_batch::RecordBatch;
+use arrow_schema::Schema as ArrowSchema;
+use arrow_schema::{DataType as ArrowDataType, Field};
 use object_store::memory::InMemory;
 use object_store::path::Path;
 use object_store::ObjectStore;
+use serde_json::{json, to_vec};
 use url::Url;
 
 use delta_kernel::engine::arrow_data::ArrowEngineData;
@@ -12,10 +15,6 @@ use delta_kernel::engine::default::executor::tokio::TokioBackgroundExecutor;
 use delta_kernel::engine::default::DefaultEngine;
 use delta_kernel::schema::{DataType, SchemaRef, StructField, StructType};
 use delta_kernel::Table;
-
-// fixme use in macro below
-// const PROTOCOL_METADATA_TEMPLATE: &'static str = r#"{{"protocol":{{"minReaderVersion":3,"minWriterVersion":7,"readerFeatures":[],"writerFeatures":[]}}}}
-// {{"metaData":{{"id":"{}","format":{{"provider":"parquet","options":{{}}}},"schemaString":"{}","partitionColumns":[],"configuration":{{}},"createdTime":1677811175819}}}}"#;
 
 // setup default engine with in-memory object store.
 fn setup(
@@ -44,21 +43,44 @@ fn setup(
 async fn create_table(
     store: Arc<dyn ObjectStore>,
     table_path: Url,
-    // fixme use this schema
-    _schema: SchemaRef,
-    schema_string: &str,
-    partition_columns: &str,
+    schema: SchemaRef,
+    partition_columns: &[&str],
 ) -> Result<Table, Box<dyn std::error::Error>> {
-    // put 0.json with protocol + metadata
     let table_id = "test_id";
-    let data = format!(
-        r#"{{"protocol":{{"minReaderVersion":3,"minWriterVersion":7,"readerFeatures":[],"writerFeatures":[]}}}}
-{{"metaData":{{"id":"{}","format":{{"provider":"parquet","options":{{}}}},"schemaString":"{}","partitionColumns":[{}],"configuration":{{}},"createdTime":1677811175819}}}}"#,
-        table_id, schema_string, partition_columns
-    ).into_bytes();
+    let schema = serde_json::to_string(&schema)?;
+
+    let protocol = json!({
+        "protocol": {
+            "minReaderVersion": 3,
+            "minWriterVersion": 7,
+            "readerFeatures": [],
+            "writerFeatures": []
+        }
+    });
+    let metadata = json!({
+        "metaData": {
+            "id": table_id,
+            "format": {
+                "provider": "parquet",
+                "options": {}
+            },
+            "schemaString": schema,
+            "partitionColumns": partition_columns,
+            "configuration": {},
+            "createdTime": 1677811175819u64
+        }
+    });
+
+    let data = [
+        to_vec(&protocol).unwrap(),
+        b"\n".to_vec(),
+        to_vec(&metadata).unwrap(),
+    ]
+    .concat();
+
+    // put 0.json with protocol + metadata
     let path = table_path.path();
     let path = format!("{path}_delta_log/00000000000000000000.json");
-    println!("putting to path: {}", path);
     store.put(&Path::from(path), data.into()).await?;
     Ok(Table::new(table_path))
 }
@@ -69,25 +91,17 @@ async fn test_commit_info() -> Result<(), Box<dyn std::error::Error>> {
     let _ = tracing_subscriber::fmt::try_init();
     // setup in-memory object store and default engine
     let (store, engine, table_location) = setup("test_table");
+
     // create a simple table: one int column named 'number'
     let schema = Arc::new(StructType::new(vec![StructField::new(
         "number",
         DataType::INTEGER,
         true,
     )]));
-    let schema_string = r#"{\"type\":\"struct\",\"fields\":[{\"name\":\"number\",\"type\":\"integer\",\"nullable\":true,\"metadata\":{}}]}"#;
-    let table = create_table(
-        store.clone(),
-        table_location,
-        schema.clone(),
-        schema_string,
-        "",
-    )
-    .await?;
-    let mut txn = table.new_transaction(&engine)?;
+    let table = create_table(store.clone(), table_location, schema, &[]).await?;
 
-    use arrow_schema::Schema as ArrowSchema;
-    use arrow_schema::{DataType as ArrowDataType, Field};
+    // create a transaction
+    let mut txn = table.new_transaction(&engine)?;
 
     // add commit info of the form {engineInfo: "default engine"}
     let commit_info_schema = Arc::new(ArrowSchema::new(vec![Field::new(
@@ -103,7 +117,10 @@ async fn test_commit_info() -> Result<(), Box<dyn std::error::Error>> {
         Box::new(ArrowEngineData::new(commit_info_batch)),
         commit_info_schema.try_into()?,
     );
+
+    // commit!
     txn.commit(&engine)?;
+
     let commit1 = store
         .get(&Path::from(
             "/test_table/_delta_log/00000000000000000001.json",
