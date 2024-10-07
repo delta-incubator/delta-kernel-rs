@@ -1,23 +1,28 @@
 //! Read a small table with/without deletion vectors.
 //! Must run at the root of the crate
+use std::ops::Add;
 use std::path::PathBuf;
 
 use delta_kernel::engine::sync::SyncEngine;
 use delta_kernel::scan::ScanResult;
-use delta_kernel::Table;
+use delta_kernel::{DeltaResult, Table};
 
+use itertools::Itertools;
 use test_log::test;
 
-fn count_total_rows(scan: Vec<ScanResult>) -> Result<usize, Box<dyn std::error::Error>> {
-    let mut total_rows = 0;
-    for sr in scan {
-        let deleted_rows = match sr.raw_mask() {
-            Some(raw_mask) => raw_mask.iter().filter(|&&m| !m).count(),
-            None => 0,
-        };
-        total_rows += sr.raw_data?.length() - deleted_rows;
-    }
-    Ok(total_rows)
+fn count_total_scan_rows(
+    scan_result_iter: impl Iterator<Item = DeltaResult<ScanResult>>,
+) -> DeltaResult<usize> {
+    scan_result_iter
+        .map(|scan_result| {
+            let scan_result = scan_result?;
+            // NOTE: The mask only suppresses rows for which it is both present and false.
+            let mask = scan_result.raw_mask();
+            let deleted_rows = mask.into_iter().flatten().filter(|&&m| !m).count();
+            let data = scan_result.raw_data?;
+            Ok(data.length() - deleted_rows)
+        })
+        .fold_ok(0, Add::add)
 }
 
 #[test]
@@ -30,7 +35,8 @@ fn dv_table() -> Result<(), Box<dyn std::error::Error>> {
     let snapshot = table.snapshot(&engine, None)?;
     let scan = snapshot.into_scan_builder().build()?;
 
-    let total_rows = count_total_rows(scan.execute(&engine)?)?;
+    let stream = scan.execute(&engine)?;
+    let total_rows = count_total_scan_rows(stream)?;
     assert_eq!(total_rows, 8);
     Ok(())
 }
@@ -44,7 +50,9 @@ fn non_dv_table() -> Result<(), Box<dyn std::error::Error>> {
     let table = Table::new(url);
     let snapshot = table.snapshot(&engine, None)?;
     let scan = snapshot.into_scan_builder().build()?;
-    let total_rows = count_total_rows(scan.execute(&engine)?)?;
+
+    let stream = scan.execute(&engine)?;
+    let total_rows = count_total_scan_rows(stream)?;
     assert_eq!(total_rows, 10);
     Ok(())
 }
