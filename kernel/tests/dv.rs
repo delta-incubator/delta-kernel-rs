@@ -11,14 +11,14 @@ use itertools::Itertools;
 use test_log::test;
 
 fn count_total_scan_rows(
-    stream: impl Iterator<Item = DeltaResult<ScanResult>>,
+    scan_result_iter: impl Iterator<Item = DeltaResult<ScanResult>>,
 ) -> DeltaResult<usize> {
-    stream
-        .map(|sr| {
-            let sr = sr?;
-            let data = sr.raw_data?;
+    scan_result_iter
+        .map(|scan_result| {
+            let scan_result = scan_result?;
+            let data = scan_result.raw_data?;
             // NOTE: The mask only suppresses rows for which it is both present and false.
-            let deleted_rows = sr
+            let deleted_rows = scan_result
                 .mask
                 .as_ref()
                 .map_or(0, |mask| mask.iter().filter(|&&m| !m).count());
