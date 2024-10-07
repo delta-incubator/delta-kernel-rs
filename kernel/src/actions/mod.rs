@@ -131,7 +131,6 @@ impl Protocol {
     }
 }
 
-
 #[derive(Debug, Clone, PartialEq, Eq, Schema)]
 pub struct CommitInfo {
     pub kernel_version: Option<String>,
