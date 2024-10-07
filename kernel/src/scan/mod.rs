@@ -232,7 +232,7 @@ impl Scan {
     /// present. See the documentation for [`ScanResult`] for more details. Generally
     /// connectors/engines will want to use [`Scan::scan_data`] so they can have more control over
     /// the execution of the scan.
-    // This calls [`Scan::files`] to get a set of `Add` actions for the scan, and then uses the
+    // This calls [`Scan::scan_data`] to get an iterator of `ScanData` actions for the scan, and then uses the
     // `engine`'s [`crate::ParquetHandler`] to read the actual table data.
     pub fn execute<'a>(
         &'a self,
@@ -273,7 +273,8 @@ impl Scan {
                 let scan_files = vec![];
                 state::visit_scan_files(data.as_ref(), &vec, scan_files, scan_data_callback)
             })
-            .flatten_ok(); // Iterator<DeltaResult<Vec<ScanFile>>> to Iterator<DeltaResult<ScanFile>>
+            // Iterator<DeltaResult<Vec<ScanFile>>> to Iterator<DeltaResult<ScanFile>>
+            .flatten_ok();
 
         let result = scan_files_iter
             .map(move |scan_file| -> DeltaResult<_> {
@@ -319,8 +320,10 @@ impl Scan {
                     Ok(result)
                 }))
             })
-            .flatten_ok() // Iterator<DeltaResult<Iterator<DeltaResult<ScanResult>>>> to Iterator<DeltaResult<DeltaResult<ScanResult>>>
-            .map(|x| x?); // Iterator<DeltaResult<DeltaResult<ScanResult>>> to Iterator<DeltaResult<ScanResult>>
+            // Iterator<DeltaResult<Iterator<DeltaResult<ScanResult>>>> to Iterator<DeltaResult<DeltaResult<ScanResult>>>
+            .flatten_ok()
+            // Iterator<DeltaResult<DeltaResult<ScanResult>>> to Iterator<DeltaResult<ScanResult>>
+            .map(|x| x?);
         Ok(result)
     }
 }
