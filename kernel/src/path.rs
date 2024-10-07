@@ -42,7 +42,9 @@ enum LogPathFileType {
 #[cfg_attr(not(feature = "developer-visibility"), visibility::make(pub(crate)))]
 struct ParsedLogPath<Location: AsUrl = FileMeta> {
     pub location: Location,
+    #[allow(unused)]
     pub filename: String,
+    #[allow(unused)]
     pub extension: String,
     pub version: Version,
     pub file_type: LogPathFileType,
@@ -73,6 +75,8 @@ impl AsUrl for FileMeta {
 
 impl<Location: AsUrl> ParsedLogPath<Location> {
     // NOTE: We can't actually impl TryFrom because Option<T> is a foreign struct even if T is local.
+    #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
+    #[cfg_attr(not(feature = "developer-visibility"), visibility::make(pub(crate)))]
     pub fn try_from(location: Location) -> DeltaResult<Option<ParsedLogPath<Location>>> {
         let url = location.as_url();
         let filename = url
@@ -144,10 +148,14 @@ impl<Location: AsUrl> ParsedLogPath<Location> {
         }))
     }
 
+    #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
+    #[cfg_attr(not(feature = "developer-visibility"), visibility::make(pub(crate)))]
     pub fn is_commit(&self) -> bool {
         matches!(self.file_type, LogPathFileType::Commit)
     }
 
+    #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
+    #[cfg_attr(not(feature = "developer-visibility"), visibility::make(pub(crate)))]
     pub fn is_checkpoint(&self) -> bool {
         // TODO: Include UuidCheckpoint once we actually support v2 checkpoints
         matches!(
@@ -156,6 +164,9 @@ impl<Location: AsUrl> ParsedLogPath<Location> {
         )
     }
 
+    #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
+    #[cfg_attr(not(feature = "developer-visibility"), visibility::make(pub(crate)))]
+    #[allow(dead_code)]
     pub fn is_unknown(&self) -> bool {
         // TODO: Stop treating UuidCheckpoint as unknown once we support v2 checkpoints
         matches!(
