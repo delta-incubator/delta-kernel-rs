@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::actions::visitors::TransactionVisitor;
-use crate::actions::{Transaction, get_log_schema, TRANSACTION_NAME};
+use crate::actions::{get_log_schema, Transaction, TRANSACTION_NAME};
 use crate::snapshot::Snapshot;
 use crate::{DeltaResult, Engine};
 

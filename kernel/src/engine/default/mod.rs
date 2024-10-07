@@ -45,7 +45,11 @@ impl<E: TaskExecutor> DefaultEngine<E> {
     /// - `table_root`: The URL of the table within storage.
     /// - `options`: key/value pairs of options to pass to the object store.
     /// - `task_executor`: Used to spawn async IO tasks. See [executor::TaskExecutor].
-    pub fn try_new<I, K, V>(table_root: &Url, options: I, task_executor: Arc<E>) -> DeltaResult<Self>
+    pub fn try_new<I, K, V>(
+        table_root: &Url,
+        options: I,
+        task_executor: Arc<E>,
+    ) -> DeltaResult<Self>
     where
         I: IntoIterator<Item = (K, V)>,
         K: AsRef<str>,
