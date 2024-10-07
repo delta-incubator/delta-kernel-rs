@@ -27,6 +27,11 @@
   {                                                                                                \
     return visit_variadic(data, len, enum_member);                                                 \
   }
+#define DECL_UNARY(fun_name, op)                                                                   \
+  uintptr_t fun_name(void* data, uintptr_t sub_expr)                                               \
+  {                                                                                                \
+    return visit_unary(data, sub_expr, op);                                                        \
+  }
 enum OpType
 {
   Add,
@@ -62,6 +67,19 @@ enum LitType
   Struct,
   Array
 };
+enum ExpressionType
+{
+  BinOp,
+  Variadic,
+  Literal,
+  Unary,
+  Column
+};
+struct ExpressionRef
+{
+  void* ref;
+  enum ExpressionType type;
+};
 struct BinOp
 {
   enum OpType op;
@@ -77,11 +95,10 @@ enum VariadicType
   StructConstructor,
   ArrayData
 };
-enum ExpressionType
+enum UnaryType
 {
-  BinOp,
-  Variadic,
-  Literal,
+  Not,
+  IsNull
 };
 struct Variadic
 {
@@ -90,7 +107,12 @@ struct Variadic
   size_t max_len;
   struct ExpressionRef* expr_list;
 };
-struct Binary
+struct Unary
+{
+  enum UnaryType type;
+  struct ExpressionRef sub_expr;
+};
+struct BinaryData
 {
   uint8_t* buf;
   uintptr_t len;
@@ -100,11 +122,6 @@ struct Decimal
   uint64_t value[2];
   uint8_t precision;
   uint8_t scale;
-};
-struct ExpressionRef
-{
-  void* ref;
-  enum ExpressionType type;
 };
 struct Data
 {
@@ -135,7 +152,7 @@ struct Literal
     struct KernelStringSlice string_data;
     struct Struct struct_data;
     struct ArrayData array_data;
-    struct Binary binary;
+    struct BinaryData binary;
     struct Decimal decimal;
   } value;
 };
@@ -154,6 +171,14 @@ struct ExpressionRef* get_handle(void* data, size_t handle_index)
     return NULL;
   }
   return &data_ptr->handles[handle_index];
+}
+KernelStringSlice copy_kernel_string(KernelStringSlice string)
+{
+  char* contents = malloc(string.len);
+  size_t len = strlcpy(contents, string.ptr, string.len);
+  assert(len == string.len);
+  KernelStringSlice out = { .len = len, .ptr = contents };
+  return out;
 }
 
 uintptr_t visit_binop(void* data, uintptr_t a, uintptr_t b, enum OpType op)
@@ -183,6 +208,14 @@ DECL_BINOP(visit_ne, NE)
 DECL_BINOP(visit_distinct, Distinct)
 DECL_BINOP(visit_in, In)
 DECL_BINOP(visit_not_in, NotIn)
+
+uintptr_t visit_expr_string(void* data, KernelStringSlice string)
+{
+  struct Literal* literal = malloc(sizeof(struct Literal));
+  literal->type = String;
+  literal->value.string_data = copy_kernel_string(string);
+  return put_handle(data, literal, Literal);
+}
 
 uintptr_t visit_expr_decimal(
   void* data,
@@ -261,7 +294,7 @@ uintptr_t visit_expr_binary(void* data, const uint8_t* buf, uintptr_t len)
 {
   struct Literal* literal = malloc(sizeof(struct Literal));
   literal->type = Binary;
-  struct Binary* bin = &literal->value.binary;
+  struct BinaryData* bin = &literal->value.binary;
   bin->buf = malloc(len);
   memcpy(bin->buf, buf, len);
   return put_handle(data, literal, Literal);
@@ -297,7 +330,7 @@ void visit_expr_struct_field(
   assert(len < struct_ref->max_len);
 
   struct_ref->expressions[len] = *value;
-  struct_ref->field_names[len] = field_name;
+  struct_ref->field_names[len] = copy_kernel_string(field_name);
   struct_ref->len++;
 }
 
@@ -306,6 +339,24 @@ uintptr_t visit_null(void* data)
   struct Literal* literal = malloc(sizeof(struct Literal));
   literal->type = Null;
   return put_handle(data, literal, Literal);
+}
+
+uintptr_t visit_unary(void* data, uintptr_t sub_expr_id, enum UnaryType type)
+{
+  struct Unary* unary = malloc(sizeof(struct Unary));
+  unary->type = type;
+  struct ExpressionRef* sub_expr_handle = get_handle(data, sub_expr_id);
+  unary->sub_expr = *sub_expr_handle;
+  return put_handle(data, unary, Unary);
+}
+DECL_UNARY(visit_is_null, IsNull)
+DECL_UNARY(visit_not, Not)
+
+uintptr_t visit_column(void* data, KernelStringSlice string)
+{
+  struct KernelStringSlice* heap_string = malloc(sizeof(KernelStringSlice));
+  *heap_string = copy_kernel_string(string);
+  return put_handle(data, heap_string, Column);
 }
 
 // Print the schema of the snapshot
@@ -326,12 +377,12 @@ struct ExpressionRef construct_predicate(KernelPredicate* predicate)
                                       .visit_date = visit_expr_date,
                                       .visit_binary = visit_expr_binary,
                                       .visit_decimal = visit_expr_decimal,
-                                      .visit_string = NULL,
+                                      .visit_string = visit_expr_string,
                                       .visit_and = visit_and,
                                       .visit_or = visit_or,
                                       .visit_variadic_item = visit_variadic_item,
-                                      .visit_not = NULL,
-                                      .visit_is_null = NULL,
+                                      .visit_not = visit_not,
+                                      .visit_is_null = visit_is_null,
                                       .visit_lt = visit_lt,
                                       .visit_le = visit_le,
                                       .visit_gt = visit_gt,
@@ -345,10 +396,10 @@ struct ExpressionRef construct_predicate(KernelPredicate* predicate)
                                       .visit_minus = visit_minus,
                                       .visit_multiply = visit_multiply,
                                       .visit_divide = visit_divide,
-                                      .visit_column = NULL,
+                                      .visit_column = visit_column,
                                       .visit_expr_struct = visit_struct_constructor,
                                       .visit_expr_struct_item =
-                                        visit_variadic_item, // treating expr struct like a variadic
+                                        visit_variadic_item, // We treat expr struct as a variadic
                                       .visit_null = visit_null,
                                       .visit_struct = visit_expr_struct,
                                       .visit_struct_field = visit_expr_struct_field,
@@ -422,7 +473,7 @@ void print_tree(struct ExpressionRef ref, int depth)
           break;
         }; break;
         case Distinct:
-          printf("Distinct");
+          printf("Distinct\n");
           break;
       }
 
@@ -527,6 +578,24 @@ void print_tree(struct ExpressionRef ref, int depth)
           break;
       }
     } break;
+    case Unary: {
+      tab_helper(depth);
+      struct Unary* unary = ref.ref;
+      switch (unary->type) {
+        case Not:
+          printf("Not\n");
+          break;
+        case IsNull:
+          printf("IsNull\n");
+          break;
+      }
+      print_tree(unary->sub_expr, depth + 1);
+    }
+    case Column:
+      tab_helper(depth);
+      KernelStringSlice* string = ref.ref;
+      printf("Column: %s", string->ptr);
+      break;
   }
 }
 
