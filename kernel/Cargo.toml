@@ -39,6 +39,7 @@ visibility = "0.1.1"
 
 # Used in default engine
 arrow-buffer = { workspace = true, optional = true }
+arrow-data = { workspace = true, optional = true }
 arrow-array = { workspace = true, optional = true, features = ["chrono-tz"] }
 arrow-select = { workspace = true, optional = true }
 arrow-arith = { workspace = true, optional = true }
@@ -78,6 +79,7 @@ default-engine = [
     "arrow-conversion",
     "arrow-expression",
     "arrow-array",
+    "arrow-data",
     "arrow-buffer",
     "arrow-cast",
     "arrow-json",
