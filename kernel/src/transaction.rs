@@ -1,120 +1,249 @@
 use std::sync::Arc;
 
-use crate::actions::visitors::TransactionVisitor;
-use crate::actions::{get_log_schema, TRANSACTION_NAME};
+use crate::actions::get_log_schema;
+use crate::schema::{Schema, SchemaRef, StructType};
 use crate::snapshot::Snapshot;
-use crate::Engine;
-use crate::{actions::Transaction, DeltaResult};
+use crate::{DataType, Expression};
+use crate::{DeltaResult, Engine, EngineData};
 
-pub use crate::actions::visitors::TransactionMap;
-pub struct TransactionScanner {
-    snapshot: Arc<Snapshot>,
+const KERNEL_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// A transaction represents an in-progress write to a table.
+pub struct Transaction {
+    read_snapshot: Arc<Snapshot>,
+    commit_info: Option<EngineCommitInfo>,
 }
 
-impl TransactionScanner {
-    pub fn new(snapshot: Arc<Snapshot>) -> Self {
-        TransactionScanner { snapshot }
+// Since the engine can include any commit info it likes, we unify the data/schema pair as a single
+// struct with Arc semantics.
+#[derive(Clone)]
+struct EngineCommitInfo {
+    data: Arc<dyn EngineData>,
+    schema: SchemaRef,
+}
+
+impl std::fmt::Debug for Transaction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&format!(
+            "Transaction {{ read_snapshot version: {}, commit_info: {} }}",
+            self.read_snapshot.version(),
+            self.commit_info.is_some()
+        ))
+    }
+}
+
+impl Transaction {
+    /// Create a new transaction from a snapshot. The snapshot will be used to read the current
+    /// state of the table (e.g. to read the current version).
+    ///
+    /// Instead of using this API, the more typical API is
+    /// [Table::new_transaction](crate::table::Table::new_transaction) to create a transaction from
+    /// a table automatically backed by the latest snapshot.
+    pub fn new(snapshot: impl Into<Arc<Snapshot>>) -> Self {
+        Transaction {
+            read_snapshot: snapshot.into(),
+            commit_info: None,
+        }
     }
 
-    /// Scan the entire log for all application ids but terminate early if a specific application id is provided
-    fn scan_application_transactions(
-        &self,
-        engine: &dyn Engine,
-        application_id: Option<&str>,
-    ) -> DeltaResult<TransactionMap> {
-        let schema = get_log_schema().project(&[TRANSACTION_NAME])?;
+    /// Consume the transaction and commit the in-progress write to the table.
+    pub fn commit(self, engine: &dyn Engine) -> DeltaResult<CommitResult> {
+        // step one: construct the iterator of actions we want to commit
+        // note: only support commit_info right now.
+        let (actions, _actions_schema) = generate_commit_info(engine, self.commit_info.clone())?;
 
-        let mut visitor = TransactionVisitor::new(application_id.map(|s| s.to_owned()));
+        // step two: set new commit version (current_version + 1) and path to write
+        let commit_version = &self.read_snapshot.version() + 1;
+        let commit_file_name = format!("{:020}", commit_version) + ".json";
+        let commit_path = &self
+            .read_snapshot
+            .table_root
+            .join("_delta_log/")?
+            .join(&commit_file_name)?;
 
-        // when all ids are requested then a full scan of the log to the latest checkpoint is required
-        let iter =
-            self.snapshot
-                .log_segment
-                .replay(engine, schema.clone(), schema.clone(), None)?;
+        // step three: commit the actions as a json file in the log
+        let json_handler = engine.get_json_handler();
+        match json_handler.write_json_file(commit_path, Box::new(actions), false) {
+            Ok(()) => Ok(CommitResult::Committed(commit_version)),
+            Err(crate::error::Error::ObjectStore(object_store::Error::AlreadyExists {
+                ..
+            })) => Ok(CommitResult::Conflict(self, commit_version)),
+            Err(e) => Err(e),
+        }
+    }
 
-        for maybe_data in iter {
-            let (txns, _) = maybe_data?;
-            txns.extract(schema.clone(), &mut visitor)?;
-            // if a specific id is requested and a transaction was found, then return
-            if application_id.is_some() && !visitor.transactions.is_empty() {
-                break;
-            }
+    /// Add commit info to the transaction. This is commit-wide metadata that is written as the
+    /// first action in the commit. Note it is required in order to commit. If the engine does not
+    /// require any commit info, pass an empty `EngineData`.
+    pub fn commit_info(&mut self, commit_info: Box<dyn EngineData>, schema: Schema) {
+        self.commit_info = Some(EngineCommitInfo {
+            data: commit_info.into(),
+            schema: schema.into(),
+        });
+    }
+}
+
+/// Result after committing a transaction. If 'committed', the version is the new version written
+/// to the log. If 'conflict', the transaction is returned so the caller can resolve the conflict
+/// (along with the version which conflicted).
+pub enum CommitResult {
+    /// The transaction was successfully committed at the version.
+    Committed(crate::Version),
+    /// The transaction conflicted with an existing version (at the version given).
+    Conflict(Transaction, crate::Version),
+}
+
+// given the engine's commit info (data and schema as [EngineCommitInfo]) we want to create both:
+// (1) the commitInfo action to commit (and append more actions to) and
+// (2) the schema for the actions to commit (this is determined by the engine's commit info schema)
+#[allow(clippy::type_complexity)]
+fn generate_commit_info(
+    engine: &'_ dyn Engine,
+    engine_commit_info: Option<EngineCommitInfo>,
+) -> DeltaResult<(
+    Box<dyn Iterator<Item = Box<dyn EngineData>> + Send + '_>,
+    SchemaRef,
+)> {
+    use crate::actions::{
+        ADD_NAME, COMMIT_INFO_NAME, METADATA_NAME, PROTOCOL_NAME, REMOVE_NAME, TRANSACTION_NAME,
+    };
+
+    // TODO: enforce single row commit info
+    // TODO: for now we always require commit info
+    let action_schema = Arc::new(engine_commit_info.as_ref().map_or(
+        get_log_schema().clone(),
+        |commit_info| {
+            let mut action_fields = get_log_schema().fields().collect::<Vec<_>>();
+            let commit_info_field = action_fields
+                .pop()
+                .expect("last field is commit_info in action schema");
+            let DataType::Struct(commit_info_schema) = commit_info_field.data_type() else {
+                unreachable!("commit_info_field is a struct");
+            };
+            let mut commit_info_fields = commit_info_schema.fields().collect::<Vec<_>>();
+            commit_info_fields.extend(commit_info.schema.fields());
+            let commit_info_schema =
+                StructType::new(commit_info_fields.into_iter().cloned().collect());
+            let mut action_fields = action_fields.into_iter().cloned().collect::<Vec<_>>();
+            action_fields.push(crate::schema::StructField::new(
+                COMMIT_INFO_NAME,
+                commit_info_schema,
+                true,
+            ));
+            StructType::new(action_fields)
+        },
+    ));
+
+    let action_schema_ref = Arc::clone(&action_schema);
+    let actions = engine_commit_info.into_iter().map(move |commit_info| {
+        let engine_commit_info_data = commit_info.data;
+        let engine_commit_info_schema = commit_info.schema;
+        let mut commit_info_expr = vec![Expression::literal(format!("v{}", KERNEL_VERSION))];
+        commit_info_expr.extend(
+            engine_commit_info_schema
+                .fields()
+                .map(|f| Expression::column(f.name()))
+                .collect::<Vec<_>>(),
+        );
+        // generate expression with null for all the fields except the commit_info field, and
+        // append the commit_info to the end.
+        let commit_info_expr_fields = [
+            ADD_NAME,
+            REMOVE_NAME,
+            METADATA_NAME,
+            PROTOCOL_NAME,
+            TRANSACTION_NAME,
+        ]
+        .iter()
+        .map(|name| {
+            Expression::null_literal(action_schema_ref.field(name).unwrap().data_type().clone())
+        })
+        .chain(std::iter::once(Expression::Struct(commit_info_expr)))
+        .collect::<Vec<_>>();
+        let commit_info_expr = Expression::Struct(commit_info_expr_fields);
+
+        // commit info has arbitrary schema ex: {engineInfo: string, operation: string}
+        // we want to bundle it up and put it in the commit_info field of the actions.
+        let commit_info_evaluator = engine.get_expression_handler().get_evaluator(
+            engine_commit_info_schema,
+            commit_info_expr,
+            action_schema_ref.clone().into(),
+        );
+
+        commit_info_evaluator
+            .evaluate(engine_commit_info_data.as_ref())
+            .unwrap()
+    });
+    Ok((Box::new(actions), action_schema))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::arrow_data::ArrowEngineData;
+    use arrow::array::{Int32Array, StringArray};
+    use arrow::record_batch::RecordBatch;
+
+    struct ExprEngine(Arc<dyn crate::ExpressionHandler>);
+
+    impl ExprEngine {
+        fn new() -> Self {
+            ExprEngine(Arc::new(
+                crate::engine::arrow_expression::ArrowExpressionHandler,
+            ))
+        }
+    }
+
+    impl Engine for ExprEngine {
+        fn get_expression_handler(&self) -> Arc<dyn crate::ExpressionHandler> {
+            self.0.clone()
         }
 
-        Ok(visitor.transactions)
+        fn get_json_handler(&self) -> Arc<dyn crate::JsonHandler> {
+            unimplemented!()
+        }
+
+        fn get_parquet_handler(&self) -> Arc<dyn crate::ParquetHandler> {
+            unimplemented!()
+        }
+
+        fn get_file_system_client(&self) -> Arc<dyn crate::FileSystemClient> {
+            unimplemented!()
+        }
     }
 
-    /// Scan the Delta Log for the latest transaction entry of an application
-    pub fn application_transaction(
-        &self,
-        engine: &dyn Engine,
-        application_id: &str,
-    ) -> DeltaResult<Option<Transaction>> {
-        let mut transactions = self.scan_application_transactions(engine, Some(application_id))?;
-        Ok(transactions.remove(application_id))
-    }
-
-    /// Scan the Delta Log to obtain the latest transaction for all applications
-    pub fn application_transactions(&self, engine: &dyn Engine) -> DeltaResult<TransactionMap> {
-        self.scan_application_transactions(engine, None)
-    }
-}
-
-#[cfg(all(test, feature = "default-engine"))]
-mod tests {
-    use std::path::PathBuf;
-
-    use super::*;
-    use crate::engine::sync::SyncEngine;
-    use crate::Table;
-
-    fn get_latest_transactions(path: &str, app_id: &str) -> (TransactionMap, Option<Transaction>) {
-        let path = std::fs::canonicalize(PathBuf::from(path)).unwrap();
-        let url = url::Url::from_directory_path(path).unwrap();
-        let engine = SyncEngine::new();
-
-        let table = Table::new(url);
-        let snapshot = table.snapshot(&engine, None).unwrap();
-        let txn_scan = TransactionScanner::new(snapshot.into());
-
-        (
-            txn_scan.application_transactions(&engine).unwrap(),
-            txn_scan.application_transaction(&engine, app_id).unwrap(),
-        )
-    }
-
+    // simple test for generating commit info
     #[test]
-    fn test_txn() {
-        let (txns, txn) = get_latest_transactions("./tests/data/basic_partitioned/", "test");
-        assert!(txn.is_none());
-        assert_eq!(txns.len(), 0);
-
-        let (txns, txn) = get_latest_transactions("./tests/data/app-txn-no-checkpoint/", "my-app");
-        assert!(txn.is_some());
-        assert_eq!(txns.len(), 2);
-        assert_eq!(txns.get("my-app"), txn.as_ref());
-        assert_eq!(
-            txns.get("my-app2"),
-            Some(Transaction {
-                app_id: "my-app2".to_owned(),
-                version: 2,
-                last_updated: None
-            })
-            .as_ref()
+    fn test_generate_commit_info() {
+        let engine = ExprEngine::new();
+        let schema = Arc::new(arrow_schema::Schema::new(vec![
+            arrow_schema::Field::new("engine_info", arrow_schema::DataType::Utf8, true),
+            arrow_schema::Field::new("operation", arrow_schema::DataType::Utf8, true),
+            arrow_schema::Field::new("int", arrow_schema::DataType::Int32, true),
+        ]));
+        let data = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(StringArray::from(vec!["test engine info"])),
+                Arc::new(StringArray::from(vec!["append"])),
+                Arc::new(Int32Array::from(vec![42])),
+            ],
         );
+        let engine_commit_info = EngineCommitInfo {
+            data: Arc::new(ArrowEngineData::new(data.unwrap())),
+            schema: Arc::new(schema.try_into().unwrap()),
+        };
+        let (actions, actions_schema) =
+            generate_commit_info(&engine, Some(engine_commit_info)).unwrap();
+        let actions: Vec<_> = actions.collect();
 
-        let (txns, txn) = get_latest_transactions("./tests/data/app-txn-checkpoint/", "my-app");
-        assert!(txn.is_some());
-        assert_eq!(txns.len(), 2);
-        assert_eq!(txns.get("my-app"), txn.as_ref());
-        assert_eq!(
-            txns.get("my-app2"),
-            Some(Transaction {
-                app_id: "my-app2".to_owned(),
-                version: 2,
-                last_updated: None
-            })
-            .as_ref()
-        );
+        // FIXME actual assertions
+        assert_eq!(actions_schema.fields().collect::<Vec<_>>().len(), 6);
+        let DataType::Struct(struct_type) = actions_schema.field("commitInfo").unwrap().data_type()
+        else {
+            unreachable!("commitInfo is a struct");
+        };
+        assert_eq!(struct_type.fields().collect::<Vec<_>>().len(), 4);
+        assert_eq!(actions.len(), 1);
     }
 }

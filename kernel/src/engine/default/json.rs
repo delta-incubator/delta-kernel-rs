@@ -5,6 +5,7 @@ use std::ops::Range;
 use std::sync::Arc;
 use std::task::{ready, Poll};
 
+use arrow_array::RecordBatch;
 use arrow_json::ReaderBuilder;
 use arrow_schema::SchemaRef as ArrowSchemaRef;
 use bytes::{Buf, Bytes};
@@ -14,6 +15,7 @@ use object_store::{DynObjectStore, GetResultPayload};
 
 use super::executor::TaskExecutor;
 use super::file_stream::{FileOpenFuture, FileOpener, FileStream};
+use crate::engine::arrow_data::ArrowEngineData;
 use crate::engine::arrow_utils::parse_json as arrow_parse_json;
 use crate::schema::SchemaRef;
 use crate::{
@@ -87,6 +89,51 @@ impl<E: TaskExecutor> JsonHandler for DefaultJsonHandler<E> {
             files,
             self.readahead,
         )
+    }
+
+    // note: for now we just buffer all the data and write it out all at once
+    fn write_json_file(
+        &self,
+        path: &url::Url,
+        data: Box<dyn Iterator<Item = Box<dyn EngineData>> + Send + '_>,
+        _overwrite: bool,
+    ) -> DeltaResult<()> {
+        let mut schema: Option<ArrowSchemaRef> = None;
+        let mut batches: Vec<RecordBatch> = Vec::new();
+
+        for chunk in data {
+            let arrow_data = ArrowEngineData::try_from_engine_data(chunk)?;
+            let record_batch = arrow_data.record_batch();
+
+            if schema.is_none() {
+                schema = Some(record_batch.schema());
+            }
+
+            batches.push(record_batch.clone());
+        }
+
+        // collect all batches
+        let batches: Vec<&RecordBatch> = batches.iter().collect();
+
+        // write the batches to JSON
+        let mut writer = arrow_json::LineDelimitedWriter::new(Vec::new());
+        writer.write_batches(&batches)?;
+        writer.finish()?;
+
+        let buffer = writer.into_inner();
+
+        // Put if absent
+        futures::executor::block_on(async {
+            self.store
+                .put_opts(
+                    &Path::from(path.path()),
+                    buffer.into(),
+                    object_store::PutMode::Create.into(),
+                )
+                .await
+        })?;
+
+        Ok(())
     }
 }
 
