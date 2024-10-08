@@ -66,8 +66,7 @@ impl Transaction {
         match json_handler.write_json_file(commit_path, Box::new(actions), false) {
             Ok(()) => Ok(CommitResult::Committed(commit_version)),
             Err(crate::error::Error::ObjectStore(object_store::Error::AlreadyExists {
-                path: _,
-                source: _,
+                ..
             })) => Ok(CommitResult::Conflict(self, commit_version)),
             Err(e) => Err(e),
         }
@@ -98,11 +97,11 @@ pub enum CommitResult {
 // (1) the commitInfo action to commit (and append more actions to) and
 // (2) the schema for the actions to commit (this is determined by the engine's commit info schema)
 #[allow(clippy::type_complexity)]
-fn generate_commit_info<'a>(
-    engine: &'a dyn Engine,
+fn generate_commit_info(
+    engine: &'_ dyn Engine,
     engine_commit_info: Option<EngineCommitInfo>,
 ) -> DeltaResult<(
-    Box<dyn Iterator<Item = Box<dyn EngineData>> + Send + 'a>,
+    Box<dyn Iterator<Item = Box<dyn EngineData>> + Send + '_>,
     SchemaRef,
 )> {
     use crate::actions::{
