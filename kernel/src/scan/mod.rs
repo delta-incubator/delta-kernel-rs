@@ -232,9 +232,12 @@ impl Scan {
     ) -> DeltaResult<impl Iterator<Item = DeltaResult<(Box<dyn EngineData>, bool)>> + Send> {
         let commit_read_schema = get_log_schema().project(&[ADD_NAME, REMOVE_NAME])?;
         let checkpoint_read_schema = get_log_schema().project(&[ADD_NAME])?;
-        self.snapshot
-            .log_segment
-            .replay(engine, commit_read_schema, checkpoint_read_schema, self.predicate.clone())
+        self.snapshot.log_segment.replay(
+            engine,
+            commit_read_schema,
+            checkpoint_read_schema,
+            self.predicate.clone(),
+        )
     }
 
     /// Get global state that is valid for the entire scan. This is somewhat expensive so should
