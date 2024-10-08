@@ -213,10 +213,10 @@ pub trait JsonHandler: Send + Sync {
     ///
     /// - `path` - URL to write the JSON file to
     /// - `data` - Iterator of EngineData to write to the JSON file. each row should be written as
-    /// a new JSON object appended to the file. (that is, the file is newline-delimeted JSON, and
-    /// each row is a JSON object on a single line)
+    ///   a new JSON object appended to the file. (that is, the file is newline-delimeted JSON, and
+    ///   each row is a JSON object on a single line)
     /// - `overwrite` - If true, overwrite the file if it exists. If false, the call must fail if
-    /// the file exists.
+    ///   the file exists.
     ///
     /// NOTE: the `overwrite` flag isn't used for the existing commit flow, but will be used in the
     /// future to write `_last_checkpoint` files.

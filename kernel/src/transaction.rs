@@ -98,6 +98,7 @@ pub enum CommitResult {
 // given the engine's commit info (data and schema as [EngineCommitInfo]) we want to create both:
 // (1) the commitInfo action to commit (and append more actions to) and
 // (2) the schema for the actions to commit (this is determined by the engine's commit info schema)
+#[allow(clippy::type_complexity)]
 fn generate_commit_info<'a>(
     engine: &'a dyn Engine,
     engine_commit_info: Option<EngineCommitInfo>,
@@ -124,10 +125,9 @@ fn generate_commit_info<'a>(
                 };
             commit_info_fields.extend(commit_info.schema.fields());
             let commit_info_schema =
-                StructType::new(commit_info_fields.into_iter().map(|f| f.clone()).collect());
+                StructType::new(commit_info_fields.into_iter().cloned().collect());
             let mut action_fields = action_fields
-                .into_iter()
-                .map(|f| f.clone())
+                .into_iter().cloned()
                 .collect::<Vec<_>>();
             action_fields.push(crate::schema::StructField::new(
                 COMMIT_INFO_NAME,
@@ -171,7 +171,7 @@ fn generate_commit_info<'a>(
         // commit info has arbitrary schema ex: {engineInfo: string, operation: string}
         // we want to bundle it up and put it in the commit_info field of the actions.
         let commit_info_evaluator = engine.get_expression_handler().get_evaluator(
-            engine_commit_info_schema.into(),
+            engine_commit_info_schema,
             commit_info_expr,
             action_schema_ref.clone().into(),
         );
