@@ -220,10 +220,10 @@ pub trait JsonHandler: Send + Sync {
     ///
     /// NOTE: the `overwrite` flag isn't used for the existing commit flow, but will be used in the
     /// future to write `_last_checkpoint` files.
-    fn write_json_file<'a>(
+    fn write_json_file(
         &self,
         path: &Url,
-        data: Box<dyn Iterator<Item = Box<dyn EngineData>> + Send + 'a>,
+        data: Box<dyn Iterator<Item = Box<dyn EngineData>> + Send + '_>,
         overwrite: bool,
     ) -> DeltaResult<()>;
 }

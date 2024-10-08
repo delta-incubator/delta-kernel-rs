@@ -92,10 +92,10 @@ impl<E: TaskExecutor> JsonHandler for DefaultJsonHandler<E> {
     }
 
     // note: for now we just buffer all the data and write it out all at once
-    fn write_json_file<'a>(
+    fn write_json_file(
         &self,
         path: &url::Url,
-        data: Box<dyn Iterator<Item = Box<dyn EngineData>> + Send + 'a>,
+        data: Box<dyn Iterator<Item = Box<dyn EngineData>> + Send + '_>,
         _overwrite: bool,
     ) -> DeltaResult<()> {
         let mut schema: Option<ArrowSchemaRef> = None;
