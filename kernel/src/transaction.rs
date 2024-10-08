@@ -177,3 +177,69 @@ fn generate_commit_info<'a>(
     });
     Ok((Box::new(actions), action_schema))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::arrow_data::ArrowEngineData;
+    use arrow::array::{Int32Array, StringArray};
+    use arrow::record_batch::RecordBatch;
+
+    struct ExprEngine(Arc<dyn crate::ExpressionHandler>);
+
+    impl ExprEngine {
+        fn new() -> Self {
+            ExprEngine(Arc::new(
+                crate::engine::arrow_expression::ArrowExpressionHandler,
+            ))
+        }
+    }
+
+    impl Engine for ExprEngine {
+        fn get_expression_handler(&self) -> Arc<dyn crate::ExpressionHandler> {
+            self.0.clone()
+        }
+
+        fn get_json_handler(&self) -> Arc<dyn crate::JsonHandler> {
+            unimplemented!()
+        }
+
+        fn get_parquet_handler(&self) -> Arc<dyn crate::ParquetHandler> {
+            unimplemented!()
+        }
+
+        fn get_file_system_client(&self) -> Arc<dyn crate::FileSystemClient> {
+            unimplemented!()
+        }
+    }
+
+    // simple test for generating commit info
+    #[test]
+    fn test_generate_commit_info() {
+        let engine = ExprEngine::new();
+        let schema = Arc::new(arrow_schema::Schema::new(vec![
+            arrow_schema::Field::new("engine_info", arrow_schema::DataType::Utf8, true),
+            arrow_schema::Field::new("operation", arrow_schema::DataType::Utf8, true),
+            arrow_schema::Field::new("int", arrow_schema::DataType::Int32, true),
+        ]));
+        let data = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(StringArray::from(vec!["test engine info"])),
+                Arc::new(StringArray::from(vec!["append"])),
+                Arc::new(Int32Array::from(vec![42])),
+            ],
+        );
+        let engine_commit_info = EngineCommitInfo {
+            data: Arc::new(ArrowEngineData::new(data.unwrap())),
+            schema: Arc::new(schema.try_into().unwrap()),
+        };
+        let (actions, actions_schema) =
+            generate_commit_info(&engine, Some(engine_commit_info)).unwrap();
+        let actions: Vec<_> = actions.collect();
+
+        // FIXME actual assertions
+        assert_eq!(actions_schema.fields().collect::<Vec<_>>().len(), 6);
+        assert_eq!(actions.len(), 1);
+    }
+}
