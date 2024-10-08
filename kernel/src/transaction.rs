@@ -240,6 +240,11 @@ mod tests {
 
         // FIXME actual assertions
         assert_eq!(actions_schema.fields().collect::<Vec<_>>().len(), 6);
+        let DataType::Struct(struct_type) = actions_schema.field("commitInfo").unwrap().data_type()
+        else {
+            unreachable!("commitInfo is a struct");
+        };
+        assert_eq!(struct_type.fields().collect::<Vec<_>>().len(), 4);
         assert_eq!(actions.len(), 1);
     }
 }
