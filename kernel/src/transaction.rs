@@ -126,9 +126,7 @@ fn generate_commit_info<'a>(
             commit_info_fields.extend(commit_info.schema.fields());
             let commit_info_schema =
                 StructType::new(commit_info_fields.into_iter().cloned().collect());
-            let mut action_fields = action_fields
-                .into_iter().cloned()
-                .collect::<Vec<_>>();
+            let mut action_fields = action_fields.into_iter().cloned().collect::<Vec<_>>();
             action_fields.push(crate::schema::StructField::new(
                 COMMIT_INFO_NAME,
                 commit_info_schema,
