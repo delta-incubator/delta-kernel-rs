@@ -501,9 +501,9 @@ fn apply_to_col(
                 )?;
                 Ok(Some(Arc::new(transformed_map)))
             } else {
-                return Err(make_arrow_error(
+                Err(make_arrow_error(
                     "Arrow map type wasn't a struct.".to_string(),
-                ));
+                ))
             }
         }
         _ => {
@@ -562,7 +562,7 @@ impl ExpressionEvaluator for DefaultExpressionEvaluator {
                 .ok_or(Error::unexpected_column_type("Expected a struct array"))?;
             match ensure_data_types(&self.output_type, sa.data_type()) {
                 Ok(_) => sa.into(),
-                Err(_) => apply_schema(sa, &self.output_type)?
+                Err(_) => apply_schema(sa, &self.output_type)?,
             }
         } else {
             let schema = ArrowSchema::new(vec![ArrowField::new("output", arrow_type, true)]);
