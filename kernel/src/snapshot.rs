@@ -635,6 +635,16 @@ mod tests {
         assert!(invalid.is_none())
     }
 
+    // NOTE: In addition to testing the meta-predicate for metadata replay, this test also verifies
+    // that the parquet reader properly infers nullcount = rowcount for missing columns. The two
+    // checkpoint part files that contain transaction app ids have truncated schemas that would
+    // otherwise fail skipping due to their missing nullcount stat:
+    //
+    // Row group 0:  count: 1  total(compressed): 111 B total(uncompressed):107 B
+    // --------------------------------------------------------------------------------
+    //              type    nulls  min / max
+    // txn.appId    BINARY  0      "3ae45b72-24e1-865a-a211-3..." / "3ae45b72-24e1-865a-a211-3..."
+    // txn.version  INT64   0      "4390" / "4390"
     #[test]
     fn test_replay_for_metadata() {
         let path = std::fs::canonicalize(PathBuf::from("./tests/data/parquet_row_group_skipping/"));
