@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use crate::actions::get_log_schema;
-use crate::expressions::Scalar;
 use crate::schema::{Schema, SchemaRef, StructType};
 use crate::snapshot::Snapshot;
 use crate::{DataType, Expression};
@@ -116,13 +115,13 @@ fn generate_commit_info<'a>(
         get_log_schema().clone(),
         |commit_info| {
             let mut action_fields = get_log_schema().fields().collect::<Vec<_>>();
-            let commit_info_field = action_fields.pop().unwrap();
-            let mut commit_info_fields =
-                if let DataType::Struct(commit_info_schema) = commit_info_field.data_type() {
-                    commit_info_schema.fields().collect::<Vec<_>>()
-                } else {
-                    unreachable!()
-                };
+            let commit_info_field = action_fields
+                .pop()
+                .expect("last field is commit_info in action schema");
+            let DataType::Struct(commit_info_schema) = commit_info_field.data_type() else {
+                unreachable!("commit_info_field is a struct");
+            };
+            let mut commit_info_fields = commit_info_schema.fields().collect::<Vec<_>>();
             commit_info_fields.extend(commit_info.schema.fields());
             let commit_info_schema =
                 StructType::new(commit_info_fields.into_iter().cloned().collect());
@@ -158,9 +157,7 @@ fn generate_commit_info<'a>(
         ]
         .iter()
         .map(|name| {
-            Expression::Literal(Scalar::Null(
-                action_schema_ref.field(name).unwrap().data_type().clone(),
-            ))
+            Expression::null_literal(action_schema_ref.field(name).unwrap().data_type().clone())
         })
         .chain(std::iter::once(Expression::Struct(commit_info_expr)))
         .collect::<Vec<_>>();
