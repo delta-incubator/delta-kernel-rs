@@ -179,8 +179,15 @@ impl<'a> ParquetStatsSkippingFilter for RowGroupFilter<'a> {
     // Parquet nullcount stats always have the same type (u64), so we can directly return the value
     // instead of wrapping it in a Scalar. We can safely cast it from u64 to i64, because the
     // nullcount can never be larger than the rowcount, and the parquet rowcount stat is i64.
+    //
+    // NOTE: Stats for any given column are optional, which may produce a NULL nullcount. But if
+    // the column itself is missing, then we know all values are implied to be NULL.
     fn get_nullcount_stat_value(&self, col: &ColumnPath) -> Option<i64> {
-        Some(self.get_stats(col)?.null_count_opt()? as i64)
+        let nullcount = match self.get_stats(col) {
+            Some(s) => s.null_count_opt()? as i64,
+            None => self.get_rowcount_stat_value(),
+        };
+        Some(nullcount)
     }
 
     fn get_rowcount_stat_value(&self) -> i64 {
@@ -200,7 +207,7 @@ pub(crate) fn compute_field_indices(
         let mut recurse = |expr| do_recurse(expr, cols); // simplifies the call sites below
         match expression {
             Literal(_) => {}
-            Column(name) => cols.extend([col_name_to_path(name)]),
+            Column(name) => cols.extend([col_name_to_path(name)]), // returns `()`, unlike `insert`
             Struct(fields) => fields.iter().for_each(recurse),
             UnaryOperation { expr, .. } => recurse(expr),
             BinaryOperation { left, right, .. } => [left, right].iter().for_each(|e| recurse(e)),

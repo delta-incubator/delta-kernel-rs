@@ -878,7 +878,7 @@ fn predicate_on_number_with_not_null() -> Result<(), Box<dyn std::error::Error>>
         "./tests/data/basic_partitioned",
         Some(&["a_float", "number"]),
         Some(Expression::and(
-            Expression::not(Expression::column("number").is_null()),
+            Expression::column("number").is_not_null(),
             Expression::column("number").lt(Expression::literal(3i64)),
         )),
         expected,
@@ -946,7 +946,7 @@ fn mixed_not_null() -> Result<(), Box<dyn std::error::Error>> {
     read_table_data_str(
         "./tests/data/mixed-nulls",
         Some(&["part", "n"]),
-        Some(Expression::not(Expression::column("n").is_null())),
+        Some(Expression::column("n").is_not_null()),
         expected,
     )?;
     Ok(())
