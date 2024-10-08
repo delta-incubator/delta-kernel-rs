@@ -50,8 +50,8 @@ impl TransactionScanner {
     ) -> DeltaResult<impl Iterator<Item = DeltaResult<(Box<dyn EngineData>, bool)>> + Send> {
         // This meta-predicate should be effective because all the app ids end up in a single
         // checkpoint part when patitioned by `add.path` like the Delta spec requires. There's no
-        // point filtering by a particular app id, even if we have one, because people usually query
-        // for app ids that exist.
+        // point filtering by a particular app id, even if we have one, because app ids are all in
+        // the a single checkpoint part having large min/max range (because they're usually uuids).
         let meta_predicate = Expr::column("txn.appId").is_not_null();
         self.snapshot
             .log_segment
