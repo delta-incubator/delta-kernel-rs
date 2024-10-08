@@ -23,7 +23,9 @@ impl TransactionScanner {
     ) -> DeltaResult<TransactionMap> {
         let schema = Self::get_txn_schema()?;
         let mut visitor = TransactionVisitor::new(application_id.map(|s| s.to_owned()));
-        for maybe_data in self.replay_for_app_ids(engine, schema.clone(), application_id)? {
+        // If a specific id is requested then we can terminate log replay early as soon as it was
+        // found. If all ids are requested then we are forced to replay the entire log.
+        for maybe_data in self.replay_for_app_ids(engine, schema.clone())? {
             let (txns, _) = maybe_data?;
             txns.extract(schema.clone(), &mut visitor)?;
             // if a specific id is requested and a transaction was found, then return
@@ -45,14 +47,12 @@ impl TransactionScanner {
         &self,
         engine: &dyn Engine,
         schema: SchemaRef,
-        application_id: Option<&str>,
     ) -> DeltaResult<impl Iterator<Item = DeltaResult<(Box<dyn EngineData>, bool)>> + Send> {
-        // when all ids are requested then a full scan of the log to the latest checkpoint is required
-        let app_id_col = Expr::column("txn.appId");
-        let meta_predicate = match application_id {
-            Some(id) => app_id_col.eq(Expr::literal(id)),
-            None => app_id_col.is_not_null(),
-        };
+        // This meta-predicate should be effective because all the app ids end up in a single
+        // checkpoint part when patitioned by `add.path` like the Delta spec requires. There's no
+        // point filtering by a particular app id, even if we have one, because people usually query
+        // for app ids that exist.
+        let meta_predicate = Expr::column("txn.appId").is_not_null();
         self.snapshot
             .log_segment
             .replay(engine, schema.clone(), schema, Some(meta_predicate))
@@ -146,33 +146,10 @@ mod tests {
 
         // The checkpoint has five parts, each containing one action. There are two app ids.
         let data: Vec<_> = txn
-            .replay_for_app_ids(&engine, txn_schema.clone(), None)
+            .replay_for_app_ids(&engine, txn_schema.clone())
             .unwrap()
             .try_collect()
             .unwrap();
         assert_eq!(data.len(), 2);
-
-        let data: Vec<_> = txn
-            .replay_for_app_ids(
-                &engine,
-                txn_schema.clone(),
-                Some("3ae45b72-24e1-865a-a211-34987ae02f2a"),
-            )
-            .unwrap()
-            .try_collect()
-            .unwrap();
-        assert_eq!(data.len(), 1);
-
-        // This one will not be found (missing character)
-        let data: Vec<_> = txn
-            .replay_for_app_ids(
-                &engine,
-                txn_schema,
-                Some("3ae45b72-24e1-865a-a211-34987ae02f2"),
-            )
-            .unwrap()
-            .try_collect()
-            .unwrap();
-        assert_eq!(data.len(), 0);
     }
 }
