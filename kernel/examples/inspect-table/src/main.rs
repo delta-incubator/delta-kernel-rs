@@ -77,11 +77,7 @@ impl Action {
 
 fn fields_in(field: &StructField) -> usize {
     if let DataType::Struct(ref inner) = field.data_type {
-        let mut count = 0;
-        for field in inner.fields() {
-            count += fields_in(field);
-        }
-        count
+        inner.fields().map(fields_in).sum()
     } else {
         1
     }
