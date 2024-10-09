@@ -435,6 +435,7 @@ void free_expression(struct ExpressionRef ref)
       for (size_t i = 0; i < var->len; i++) {
         free_expression(var->expr_list[i]);
       }
+      free(var->expr_list);
       free(var);
       break;
     };
@@ -444,8 +445,11 @@ void free_expression(struct ExpressionRef ref)
         case Struct: {
           struct Struct* struct_data = &lit->value.struct_data;
           for (size_t i = 0; i < struct_data->len; i++) {
+            free_expression(struct_data->expressions[i]);
             free((void*)struct_data->field_names[i].ptr);
           }
+          free(struct_data->expressions);
+          free(struct_data->field_names);
           break;
         }
         case Array: {
@@ -461,6 +465,11 @@ void free_expression(struct ExpressionRef ref)
           free((void*)string->ptr);
           break;
         }
+        case Binary: {
+          struct BinaryData* binary = &lit->value.binary;
+          free(binary->buf);
+          break;
+        }
         case Integer:
         case Long:
         case Short:
@@ -471,7 +480,6 @@ void free_expression(struct ExpressionRef ref)
         case Timestamp:
         case TimestampNtz:
         case Date:
-        case Binary:
         case Decimal:
         case Null:
           break;
@@ -683,4 +691,5 @@ void test_kernel_expr()
   struct ExpressionRef ref = construct_predicate(pred);
   print_tree(ref, 0);
   free_expression(ref);
+  free_kernel_predicate(pred);
 }

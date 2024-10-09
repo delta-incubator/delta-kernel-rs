@@ -249,6 +249,12 @@ pub extern "C" fn visit_expression_literal_bool(
     wrap_expression(state, Expression::literal(value))
 }
 
+/// Free the memory from the passed KernelPredicate
+#[no_mangle]
+pub unsafe extern "C" fn free_kernel_predicate(data: Handle<KernelPredicate>) {
+    data.drop_handle();
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn get_kernel_expression() -> Handle<KernelPredicate> {
     use Expression as Expr;
