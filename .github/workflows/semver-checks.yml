@@ -1,6 +1,6 @@
 name: semver-checks
 
-on: [pull_request]
+on: [pull_request_target]
 
 env:
   CARGO_TERM_COLOR: always
