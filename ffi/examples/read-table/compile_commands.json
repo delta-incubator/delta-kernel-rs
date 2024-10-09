@@ -1,0 +1,14 @@
+[
+{
+  "directory": "/Users/oussama.saoudi/delta-kernel-rs/ffi/examples/read-table/build",
+  "command": "/Library/Developer/CommandLineTools/usr/bin/cc -DDEFINE_DEFAULT_ENGINE -DPRINT_ARROW_DATA -I/Users/oussama.saoudi/delta-kernel-rs/ffi/examples/read-table/../../../target/ffi-headers -I/opt/homebrew/Cellar/apache-arrow-glib/17.0.0/include -I/opt/homebrew/Cellar/glib/2.82.1/include -I/opt/homebrew/Cellar/glib/2.82.1/include/glib-2.0 -I/opt/homebrew/Cellar/glib/2.82.1/lib/glib-2.0/include -I/opt/homebrew/opt/gettext/include -I/opt/homebrew/Cellar/pcre2/10.44/include -I/opt/homebrew/Cellar/apache-arrow/17.0.0_6/include -I/Library/Developer/CommandLineTools/SDKs/MacOSX14.sdk/usr/include/ffi  -arch arm64 -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX14.4.sdk -Wall -Wextra -Wpedantic -Werror -Wno-strict-prototypes -o CMakeFiles/read_table.dir/read_table.c.o -c /Users/oussama.saoudi/delta-kernel-rs/ffi/examples/read-table/read_table.c",
+  "file": "/Users/oussama.saoudi/delta-kernel-rs/ffi/examples/read-table/read_table.c",
+  "output": "CMakeFiles/read_table.dir/read_table.c.o"
+},
+{
+  "directory": "/Users/oussama.saoudi/delta-kernel-rs/ffi/examples/read-table/build",
+  "command": "/Library/Developer/CommandLineTools/usr/bin/cc -DDEFINE_DEFAULT_ENGINE -DPRINT_ARROW_DATA -I/Users/oussama.saoudi/delta-kernel-rs/ffi/examples/read-table/../../../target/ffi-headers -I/opt/homebrew/Cellar/apache-arrow-glib/17.0.0/include -I/opt/homebrew/Cellar/glib/2.82.1/include -I/opt/homebrew/Cellar/glib/2.82.1/include/glib-2.0 -I/opt/homebrew/Cellar/glib/2.82.1/lib/glib-2.0/include -I/opt/homebrew/opt/gettext/include -I/opt/homebrew/Cellar/pcre2/10.44/include -I/opt/homebrew/Cellar/apache-arrow/17.0.0_6/include -I/Library/Developer/CommandLineTools/SDKs/MacOSX14.sdk/usr/include/ffi  -arch arm64 -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX14.4.sdk -Wall -Wextra -Wpedantic -Werror -Wno-strict-prototypes -o CMakeFiles/read_table.dir/arrow.c.o -c /Users/oussama.saoudi/delta-kernel-rs/ffi/examples/read-table/arrow.c",
+  "file": "/Users/oussama.saoudi/delta-kernel-rs/ffi/examples/read-table/arrow.c",
+  "output": "CMakeFiles/read_table.dir/arrow.c.o"
+}
+]

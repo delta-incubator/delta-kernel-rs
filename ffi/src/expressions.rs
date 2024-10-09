@@ -1,4 +1,4 @@
-use std::{ffi::c_void, sync::Arc};
+use std::{ffi::c_void, ops::Not, sync::Arc};
 
 use crate::{
     handle::Handle, AllocateErrorFn, EngineIterator, ExternResult, IntoExternResult,
@@ -262,7 +262,7 @@ pub unsafe extern "C" fn get_kernel_expression() -> Handle<KernelPredicate> {
         StructField::new("a", DataType::Primitive(PrimitiveType::Integer), false),
         StructField::new("b", DataType::Array(Box::new(array_type)), false),
     ];
-    let nested_values = vec![Scalar::Integer(500), Scalar::Array(array_data)];
+    let nested_values = vec![Scalar::Integer(500), Scalar::Array(array_data.clone())];
     let nested = StructData::try_new(nested_fields.clone(), nested_values).unwrap();
     let nested_type = StructType::new(nested_fields);
     let top = StructData::try_new(
@@ -275,12 +275,97 @@ pub unsafe extern "C" fn get_kernel_expression() -> Handle<KernelPredicate> {
     )
     .unwrap();
     Arc::new(Expr::and_from(vec![
-        Expr::and_from(vec![
+        Expr::literal(Scalar::Byte(i8::MAX)),
+        Expr::literal(Scalar::Byte(i8::MIN)),
+        Expr::literal(Scalar::Float(f32::MAX)),
+        Expr::literal(Scalar::Float(f32::MIN)),
+        Expr::literal(Scalar::Double(f64::MAX)),
+        Expr::literal(Scalar::Double(f64::MIN)),
+        Expr::literal(Scalar::Integer(i32::MAX)),
+        Expr::literal(Scalar::Integer(i32::MIN)),
+        Expr::literal(Scalar::Long(i64::MAX)),
+        Expr::literal(Scalar::Long(i64::MIN)),
+        Expr::literal(Scalar::String("hello expressions".into())),
+        Expr::literal(Scalar::Boolean(true)),
+        Expr::literal(Scalar::Boolean(false)),
+        Expr::literal(Scalar::Timestamp(50)),
+        Expr::literal(Scalar::TimestampNtz(100)),
+        Expr::literal(Scalar::Date(32)),
+        Expr::literal(Scalar::Binary(b"0xdeadbeefcafe".to_vec())),
+        Expr::literal(Scalar::Decimal(1, 2, 3)),
+        Expr::literal(Scalar::Null(DataType::Primitive(PrimitiveType::Short))),
+        Expr::literal(Scalar::Struct(top)),
+        Expr::literal(Scalar::Array(array_data)),
+        Expr::binary(
+            BinaryOperator::In,
+            Expr::literal(Scalar::Integer(0)),
+            Expr::literal(Scalar::Long(0)),
+        ),
+        Expr::binary(
+            BinaryOperator::Plus,
+            Expr::literal(Scalar::Integer(0)),
+            Expr::literal(Scalar::Long(0)),
+        ),
+        Expr::binary(
+            BinaryOperator::Minus,
+            Expr::literal(Scalar::Integer(0)),
+            Expr::literal(Scalar::Long(0)),
+        ),
+        Expr::binary(
+            BinaryOperator::Equal,
+            Expr::literal(Scalar::Integer(0)),
+            Expr::literal(Scalar::Long(0)),
+        ),
+        Expr::binary(
+            BinaryOperator::NotEqual,
+            Expr::literal(Scalar::Integer(0)),
+            Expr::literal(Scalar::Long(0)),
+        ),
+        Expr::binary(
+            BinaryOperator::NotIn,
+            Expr::literal(Scalar::Integer(0)),
+            Expr::literal(Scalar::Long(0)),
+        ),
+        Expr::binary(
+            BinaryOperator::Divide,
+            Expr::literal(Scalar::Integer(0)),
+            Expr::literal(Scalar::Long(0)),
+        ),
+        Expr::binary(
+            BinaryOperator::Multiply,
+            Expr::literal(Scalar::Integer(0)),
+            Expr::literal(Scalar::Long(0)),
+        ),
+        Expr::binary(
+            BinaryOperator::LessThan,
+            Expr::literal(Scalar::Integer(0)),
+            Expr::literal(Scalar::Long(0)),
+        ),
+        Expr::binary(
+            BinaryOperator::LessThanOrEqual,
+            Expr::literal(Scalar::Integer(0)),
+            Expr::literal(Scalar::Long(0)),
+        ),
+        Expr::binary(
+            BinaryOperator::GreaterThan,
+            Expr::literal(Scalar::Integer(0)),
+            Expr::literal(Scalar::Long(0)),
+        ),
+        Expr::binary(
+            BinaryOperator::GreaterThanOrEqual,
+            Expr::literal(Scalar::Integer(0)),
+            Expr::literal(Scalar::Long(0)),
+        ),
+        Expr::binary(
+            BinaryOperator::Distinct,
+            Expr::literal(Scalar::Integer(0)),
+            Expr::literal(Scalar::Long(0)),
+        ),
+        Expr::struct_expr(vec![Expr::or_from(vec![
             Expr::literal(Scalar::Integer(5)),
             Expr::literal(Scalar::Long(20)),
-        ]),
-        Expr::literal(Scalar::Integer(10)),
-        Expr::literal(Scalar::Struct(top)),
+        ])]),
+        Expr::not(Expr::is_null(Expr::column("col"))),
     ]))
     .into()
 }
@@ -371,7 +456,10 @@ pub unsafe extern "C" fn visit_expression(
         }
         array_id
     }
-    fn visit_struct(visitor: &mut EngineExpressionVisitor, struct_data: &StructData) -> usize {
+    fn visit_struct_literal(
+        visitor: &mut EngineExpressionVisitor,
+        struct_data: &StructData,
+    ) -> usize {
         let struct_id = call!(visitor, visit_struct_literal, struct_data.fields().len());
         for (field, value) in struct_data.fields().iter().zip(struct_data.values()) {
             let value_id = visit_scalar(visitor, value);
@@ -385,7 +473,7 @@ pub unsafe extern "C" fn visit_expression(
         }
         struct_id
     }
-    fn visit_expr_struct(visitor: &mut EngineExpressionVisitor, exprs: &Vec<Expression>) -> usize {
+    fn visit_struct(visitor: &mut EngineExpressionVisitor, exprs: &Vec<Expression>) -> usize {
         let expr_struct_id = call!(visitor, visit_struct, exprs.len());
         for expr in exprs {
             let expr_id = visit_expression(visitor, expr);
@@ -429,7 +517,7 @@ pub unsafe extern "C" fn visit_expression(
                 call!(visitor, visit_decimal, ms, ls, *precision, *scale)
             }
             Scalar::Null(_) => call!(visitor, visit_null),
-            Scalar::Struct(struct_data) => visit_struct(visitor, struct_data),
+            Scalar::Struct(struct_data) => visit_struct_literal(visitor, struct_data),
             Scalar::Array(array) => visit_array(visitor, array),
         }
     }
@@ -437,7 +525,7 @@ pub unsafe extern "C" fn visit_expression(
         match expression {
             Expression::Literal(scalar) => visit_scalar(visitor, scalar),
             Expression::Column(name) => call!(visitor, visit_column, name.into()),
-            Expression::Struct(exprs) => visit_expr_struct(visitor, exprs),
+            Expression::Struct(exprs) => visit_struct(visitor, exprs),
             Expression::BinaryOperation { op, left, right } => {
                 let left_id = visit_expression(visitor, left);
                 let right_id = visit_expression(visitor, right);

@@ -174,10 +174,10 @@ struct ExpressionRef* get_handle(void* data, size_t handle_index)
 }
 KernelStringSlice copy_kernel_string(KernelStringSlice string)
 {
-  char* contents = malloc(string.len);
-  size_t len = strlcpy(contents, string.ptr, string.len);
-  assert(len == string.len);
-  KernelStringSlice out = { .len = len, .ptr = contents };
+  char* contents = malloc(string.len + 1);
+  strncpy(contents, string.ptr, string.len);
+  contents[string.len] = '\0';
+  KernelStringSlice out = { .len = string.len, .ptr = contents };
   return out;
 }
 
@@ -231,11 +231,11 @@ uintptr_t visit_expr_decimal(
   dec->value[1] = value_ls;
   dec->precision = precision;
   dec->scale = scale;
-  return put_handle(data, dec, Literal);
+  return put_handle(data, literal, Literal);
 }
 DEFINE_SIMPLE_SCALAR(visit_expr_int, Integer, int32_t);
 DEFINE_SIMPLE_SCALAR(visit_expr_long, Long, int64_t);
-DEFINE_SIMPLE_SCALAR(visit_expr_short, Long, int16_t);
+DEFINE_SIMPLE_SCALAR(visit_expr_short, Short, int16_t);
 DEFINE_SIMPLE_SCALAR(visit_expr_byte, Byte, int8_t);
 DEFINE_SIMPLE_SCALAR(visit_expr_float, Float, float);
 DEFINE_SIMPLE_SCALAR(visit_expr_double, Double, double);
@@ -356,6 +356,7 @@ uintptr_t visit_expr_column(void* data, KernelStringSlice string)
 {
   struct KernelStringSlice* heap_string = malloc(sizeof(KernelStringSlice));
   *heap_string = copy_kernel_string(string);
+  printf("Creating column with len %lu: %s\n", string.len, heap_string->ptr);
   return put_handle(data, heap_string, Column);
 }
 
@@ -410,12 +411,12 @@ struct ExpressionRef construct_predicate(KernelPredicate* predicate)
   return data.handles[schema_list_id];
 }
 
-void tab_helper(int n)
+void print_n_spaces(int n)
 {
   if (n == 0)
     return;
   printf("  ");
-  tab_helper(n - 1);
+  print_n_spaces(n - 1);
 }
 void free_expression(struct ExpressionRef ref)
 {
@@ -435,30 +436,49 @@ void free_expression(struct ExpressionRef ref)
         free_expression(var->expr_list[i]);
       }
       free(var);
-    } break;
+      break;
+    };
     case Literal: {
       struct Literal* lit = ref.ref;
       switch (lit->type) {
-        case Struct:
-          printf("Struct\n");
+        case Struct: {
           struct Struct* struct_data = &lit->value.struct_data;
           for (size_t i = 0; i < struct_data->len; i++) {
             free((void*)struct_data->field_names[i].ptr);
           }
           break;
-        case Array:
-          printf("Array\n");
+        }
+        case Array: {
           struct ArrayData* array = &lit->value.array_data;
           for (size_t i = 0; i < array->len; i++) {
             free_expression(array->expr_list[i]);
           }
           free(array->expr_list);
           break;
-        default:
+        }
+        case String: {
+          struct KernelStringSlice* string = &lit->value.string_data;
+          free((void*)string->ptr);
+          break;
+        }
+        case Integer:
+        case Long:
+        case Short:
+        case Byte:
+        case Float:
+        case Double:
+        case Boolean:
+        case Timestamp:
+        case TimestampNtz:
+        case Date:
+        case Binary:
+        case Decimal:
+        case Null:
           break;
       }
       free(lit);
-    } break;
+      break;
+    };
     case Unary: {
       struct Unary* unary = ref.ref;
       free_expression(unary->sub_expr);
@@ -478,7 +498,7 @@ void print_tree(struct ExpressionRef ref, int depth)
   switch (ref.type) {
     case BinOp: {
       struct BinOp* op = ref.ref;
-      tab_helper(depth);
+      print_n_spaces(depth);
       switch (op->op) {
         case Add: {
           printf("ADD\n");
@@ -541,7 +561,7 @@ void print_tree(struct ExpressionRef ref, int depth)
     }
     case Variadic: {
       struct Variadic* var = ref.ref;
-      tab_helper(depth);
+      print_n_spaces(depth);
       switch (var->op) {
         case And:
           printf("And\n");
@@ -562,7 +582,7 @@ void print_tree(struct ExpressionRef ref, int depth)
     } break;
     case Literal: {
       struct Literal* lit = ref.ref;
-      tab_helper(depth);
+      print_n_spaces(depth);
       switch (lit->type) {
         case Integer:
           printf("Integer");
@@ -588,9 +608,10 @@ void print_tree(struct ExpressionRef ref, int depth)
           printf("Double");
           printf("(%lld)\n", lit->value.simple);
           break;
-        case String:
-          printf("String");
+        case String: {
+          printf("String(%s)\n", lit->value.string_data.ptr);
           break;
+        }
         case Boolean:
           printf("Boolean");
           printf("(%lld)\n", lit->value.simple);
@@ -608,21 +629,21 @@ void print_tree(struct ExpressionRef ref, int depth)
           printf("(%lld)\n", lit->value.simple);
           break;
         case Binary:
-          printf("Binary");
+          printf("Binary\n");
           break;
         case Decimal:
-          printf("Decimal");
+          printf("Decimal\n");
           break;
         case Null:
-          printf("Null");
+          printf("Null\n");
           break;
         case Struct:
           printf("Struct\n");
           struct Struct* struct_data = &lit->value.struct_data;
           for (size_t i = 0; i < struct_data->len; i++) {
-            tab_helper(depth);
+            print_n_spaces(depth + 1);
             printf("Field: %s\n", struct_data->field_names[i].ptr);
-            print_tree(struct_data->expressions[i], depth + 1);
+            print_tree(struct_data->expressions[i], depth + 2);
           }
           break;
         case Array:
@@ -635,7 +656,7 @@ void print_tree(struct ExpressionRef ref, int depth)
       }
     } break;
     case Unary: {
-      tab_helper(depth);
+      print_n_spaces(depth);
       struct Unary* unary = ref.ref;
       switch (unary->type) {
         case Not:
@@ -646,11 +667,12 @@ void print_tree(struct ExpressionRef ref, int depth)
           break;
       }
       print_tree(unary->sub_expr, depth + 1);
+      break;
     }
     case Column:
-      tab_helper(depth);
+      print_n_spaces(depth);
       KernelStringSlice* string = ref.ref;
-      printf("Column: %s", string->ptr);
+      printf("Column(%s)\n", string->ptr);
       break;
   }
 }
