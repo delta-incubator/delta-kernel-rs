@@ -659,10 +659,11 @@ mod tests {
             .unwrap()
             .try_collect()
             .unwrap();
+
         // The checkpoint has five parts, each containing one action. The P&M come from first and
-        // third parts, respectively. The parquet reader skips the second part; it would also skip
-        // the last two parts, but the actual `read_metadata` will anyway skip them because it
-        // terminates the iteration immediately after finding both P&M.
+        // third parts, respectively. The parquet reader will skip the other three parts. Note that
+        // the actual `read_metadata` would anyway skip the last two parts because it terminates the
+        // iteration immediately after finding both P&M.
         assert_eq!(data.len(), 2);
     }
 
