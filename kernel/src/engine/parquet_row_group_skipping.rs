@@ -59,9 +59,11 @@ impl<'a> RowGroupFilter<'a> {
         !matches!(result, Some(false))
     }
 
-    fn get_stats(&self, col: &ColumnPath) -> Option<&Statistics> {
-        let field_index = self.field_indices.get(col)?;
-        self.row_group.column(*field_index).statistics()
+    /// Returns `None` if the column doesn't exist and `Some(None)` if the column has no stats.
+    fn get_stats(&self, col: &ColumnPath) -> Option<Option<&Statistics>> {
+        self.field_indices
+            .get(col)
+            .map(|&i| self.row_group.column(i).statistics())
     }
 
     fn decimal_from_bytes(bytes: Option<&[u8]>, precision: u8, scale: u8) -> Option<Scalar> {
@@ -94,7 +96,7 @@ impl<'a> ParquetStatsSkippingFilter for RowGroupFilter<'a> {
     // helper method. And macros are hard enough to read that it's not worth defining one.
     fn get_min_stat_value(&self, col: &ColumnPath, data_type: &DataType) -> Option<Scalar> {
         use PrimitiveType::*;
-        let value = match (data_type.as_primitive_opt()?, self.get_stats(col)?) {
+        let value = match (data_type.as_primitive_opt()?, self.get_stats(col)??) {
             (String, Statistics::ByteArray(s)) => s.min_opt()?.as_utf8().ok()?.into(),
             (String, Statistics::FixedLenByteArray(s)) => s.min_opt()?.as_utf8().ok()?.into(),
             (String, _) => return None,
@@ -136,7 +138,7 @@ impl<'a> ParquetStatsSkippingFilter for RowGroupFilter<'a> {
 
     fn get_max_stat_value(&self, col: &ColumnPath, data_type: &DataType) -> Option<Scalar> {
         use PrimitiveType::*;
-        let value = match (data_type.as_primitive_opt()?, self.get_stats(col)?) {
+        let value = match (data_type.as_primitive_opt()?, self.get_stats(col)??) {
             (String, Statistics::ByteArray(s)) => s.max_opt()?.as_utf8().ok()?.into(),
             (String, Statistics::FixedLenByteArray(s)) => s.max_opt()?.as_utf8().ok()?.into(),
             (String, _) => return None,
@@ -176,18 +178,31 @@ impl<'a> ParquetStatsSkippingFilter for RowGroupFilter<'a> {
         Some(value)
     }
 
-    // Parquet nullcount stats always have the same type (u64), so we can directly return the value
-    // instead of wrapping it in a Scalar. We can safely cast it from u64 to i64, because the
-    // nullcount can never be larger than the rowcount, and the parquet rowcount stat is i64.
-    //
-    // NOTE: Stats for any given column are optional, which may produce a NULL nullcount. But if
-    // the column itself is missing, then we know all values are implied to be NULL.
     fn get_nullcount_stat_value(&self, col: &ColumnPath) -> Option<i64> {
-        let nullcount = match self.get_stats(col) {
-            Some(s) => s.null_count_opt()? as i64,
-            None => self.get_rowcount_stat_value(),
+        // NOTE: Stats for any given column are optional, which may produce a NULL nullcount. But if
+        // the column itself is missing, then we know all values are implied to be NULL.
+        let Some(stats) = self.get_stats(col) else {
+            return Some(self.get_rowcount_stat_value());
         };
-        Some(nullcount)
+
+        // WARNING: [`Statistics::null_count_opt`] returns Some(0) when the underlying stat is
+        // missing, causing an IS NULL predicate to wrongly skip the file if it contains any NULL
+        // values. So we're forced to manually drill into the different variant arms for the stat.
+        let nullcount = match stats? {
+            Statistics::Boolean(s) => s.null_count_opt(),
+            Statistics::Int32(s) => s.null_count_opt(),
+            Statistics::Int64(s) => s.null_count_opt(),
+            Statistics::Int96(s) => s.null_count_opt(),
+            Statistics::Float(s) => s.null_count_opt(),
+            Statistics::Double(s) => s.null_count_opt(),
+            Statistics::ByteArray(s) => s.null_count_opt(),
+            Statistics::FixedLenByteArray(s) => s.null_count_opt(),
+        };
+
+        // Parquet nullcount stats are always u64, so we can directly return the value instead of
+        // wrapping it in a Scalar. We can safely cast it from u64 to i64 because the nullcount can
+        // never be larger than the rowcount and the parquet rowcount stat is i64.
+        Some(nullcount? as i64)
     }
 
     fn get_rowcount_stat_value(&self) -> i64 {
