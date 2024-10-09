@@ -46,13 +46,13 @@ jobs:
         if: failure()
         run: |
           echo "Checks failed"
-          echo "::set-output name=check_status::failure"
+          run: echo "check_status=failure" >> $GITHUB_STATE
       - name: On Success
         id: set_success
         if: success()
         run: |
           echo "Checks succeed"
-          echo "::set-output name=check_status::success"
+          run: echo "check_status=success" >> $GITHUB_STATE
     outputs:
       check_status: ${{ steps.set_failure.outputs.check_status || steps.set_success.outputs.check_status }}
   add_label_if_needed:
