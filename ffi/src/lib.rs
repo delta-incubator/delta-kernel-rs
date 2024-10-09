@@ -692,9 +692,6 @@ pub unsafe extern "C" fn free_engine(engine: Handle<SharedExternEngine>) {
 #[handle_descriptor(target=Snapshot, mutable=false, sized=true)]
 pub struct SharedSnapshot;
 
-#[handle_descriptor(target=Expression, mutable=false, sized=true)]
-pub struct KernelPredicate;
-
 /// Get the latest snapshot from the specified table
 ///
 /// # Safety

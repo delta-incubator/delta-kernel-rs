@@ -2,7 +2,7 @@ use std::{ffi::c_void, ops::Not, sync::Arc};
 
 use crate::{
     handle::Handle, AllocateErrorFn, EngineIterator, ExternResult, IntoExternResult,
-    KernelPredicate, KernelStringSlice, ReferenceSet, TryFromStringSlice,
+    KernelStringSlice, ReferenceSet, TryFromStringSlice,
 };
 use delta_kernel::{
     expressions::{
@@ -11,6 +11,7 @@ use delta_kernel::{
     schema::{ArrayType, DataType, PrimitiveType, StructField, StructType},
     DeltaResult,
 };
+use delta_kernel_ffi_macros::handle_descriptor;
 
 #[derive(Default)]
 pub struct KernelExpressionVisitorState {
@@ -249,12 +250,23 @@ pub extern "C" fn visit_expression_literal_bool(
     wrap_expression(state, Expression::literal(value))
 }
 
-/// Free the memory from the passed KernelPredicate
+#[handle_descriptor(target=Expression, mutable=false, sized=true)]
+pub struct KernelPredicate;
+
+/// Free the memory the passed KernelPredicate
+///
+/// # Safety
+/// Engine is responsible for passing a valid KernelPredicate
 #[no_mangle]
 pub unsafe extern "C" fn free_kernel_predicate(data: Handle<KernelPredicate>) {
     data.drop_handle();
 }
 
+/// Constructs a kernel expression that is passed back as a KernelPredicate handle
+///
+/// # Safety
+/// The caller is responsible for freeing the retured memory, either by calling
+/// [`free_kernel_predicate`], or [`Handle::drop_handle`]
 #[no_mangle]
 pub unsafe extern "C" fn get_kernel_expression() -> Handle<KernelPredicate> {
     use Expression as Expr;
