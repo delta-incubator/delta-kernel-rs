@@ -124,14 +124,35 @@ impl ScanBuilder {
 pub struct ScanResult {
     /// Raw engine data as read from the disk for a particular file included in the query
     pub raw_data: DeltaResult<Box<dyn EngineData>>,
-    /// If an item at mask\[i\] is true, the row at that row index is valid, otherwise if it is
-    /// false, the row at that row index is invalid and should be ignored. If the mask is *shorter*
-    /// than the number of rows returned, missing elements are considered `true`, i.e. included in
-    /// the query. If this is None, all rows are valid. NB: If you are using the default engine and
-    /// plan to call arrow's `filter_record_batch`, you _need_ to extend this vector to the full
-    /// length of the batch or arrow will drop the extra rows
+    /// Raw row mask.
     // TODO(nick) this should be allocated by the engine
-    pub mask: Option<Vec<bool>>,
+    raw_mask: Option<Vec<bool>>,
+}
+
+impl ScanResult {
+    /// Returns the raw row mask. If an item at `raw_mask()[i]` is true, row `i` is
+    /// valid. Otherwise, row `i` is invalid and should be ignored.
+    ///
+    /// The raw mask is dangerous to use because it may be shorter than expected. In particular, if
+    /// you are using the default engine and plan to call arrow's `filter_record_batch`, you _need_
+    /// to extend the mask to the full length of the batch or arrow will drop the extra
+    /// rows. Calling [`full_mask`] instead avoids this risk entirely, at the cost of a copy.
+    pub fn raw_mask(&self) -> Option<&Vec<bool>> {
+        self.raw_mask.as_ref()
+    }
+
+    /// Extends the underlying (raw) mask to match the row count of the accompanying data.
+    ///
+    /// If the raw mask is *shorter* than the number of rows returned, missing elements are
+    /// considered `true`, i.e. included in the query. If the mask is `None`, all rows are valid.
+    ///
+    /// NB: If you are using the default engine and plan to call arrow's `filter_record_batch`, you
+    /// _need_ to extend the mask to the full length of the batch or arrow will drop the extra rows.
+    pub fn full_mask(&self) -> Option<Vec<bool>> {
+        let mut mask = self.raw_mask.clone()?;
+        mask.resize(self.raw_data.as_ref().ok()?.length(), true);
+        Some(mask)
+    }
 }
 
 /// Scan uses this to set up what kinds of columns it is scanning. For `Selected` we just store the
@@ -196,22 +217,27 @@ impl Scan {
         &self,
         engine: &dyn Engine,
     ) -> DeltaResult<impl Iterator<Item = DeltaResult<ScanData>>> {
+        Ok(scan_action_iter(
+            engine,
+            self.replay_for_scan_data(engine)?,
+            &self.logical_schema,
+            &self.predicate,
+        ))
+    }
+
+    // Factored out to facilitate testing
+    fn replay_for_scan_data(
+        &self,
+        engine: &dyn Engine,
+    ) -> DeltaResult<impl Iterator<Item = DeltaResult<(Box<dyn EngineData>, bool)>> + Send> {
         let commit_read_schema = get_log_schema().project(&[ADD_NAME, REMOVE_NAME])?;
         let checkpoint_read_schema = get_log_schema().project(&[ADD_NAME])?;
-
-        let log_iter = self.snapshot.log_segment.replay(
+        self.snapshot.log_segment.replay(
             engine,
             commit_read_schema,
             checkpoint_read_schema,
             self.predicate.clone(),
-        )?;
-
-        Ok(scan_action_iter(
-            engine,
-            log_iter,
-            &self.logical_schema,
-            &self.predicate,
-        ))
+        )
     }
 
     /// Get global state that is valid for the entire scan. This is somewhat expensive so should
@@ -227,14 +253,17 @@ impl Scan {
     }
 
     /// Perform an "all in one" scan. This will use the provided `engine` to read and
-    /// process all the data for the query. Each [`ScanResult`] in the resultant vector encapsulates
+    /// process all the data for the query. Each [`ScanResult`] in the resultant iterator encapsulates
     /// the raw data and an optional boolean vector built from the deletion vector if it was
     /// present. See the documentation for [`ScanResult`] for more details. Generally
     /// connectors/engines will want to use [`Scan::scan_data`] so they can have more control over
     /// the execution of the scan.
-    // This calls [`Scan::files`] to get a set of `Add` actions for the scan, and then uses the
+    // This calls [`Scan::scan_data`] to get an iterator of `ScanData` actions for the scan, and then uses the
     // `engine`'s [`crate::ParquetHandler`] to read the actual table data.
-    pub fn execute(&self, engine: &dyn Engine) -> DeltaResult<Vec<ScanResult>> {
+    pub fn execute<'a>(
+        &'a self,
+        engine: &'a dyn Engine,
+    ) -> DeltaResult<impl Iterator<Item = DeltaResult<ScanResult>> + 'a> {
         struct ScanFile {
             path: String,
             size: i64,
@@ -264,15 +293,18 @@ impl Scan {
 
         let global_state = Arc::new(self.global_scan_state());
         let scan_data = self.scan_data(engine)?;
-        let mut scan_files = vec![];
-        for data in scan_data {
-            let (data, vec) = data?;
-            scan_files =
-                state::visit_scan_files(data.as_ref(), &vec, scan_files, scan_data_callback)?;
-        }
-        scan_files
-            .into_iter()
-            .map(|scan_file| -> DeltaResult<_> {
+        let scan_files_iter = scan_data
+            .map(|res| {
+                let (data, vec) = res?;
+                let scan_files = vec![];
+                state::visit_scan_files(data.as_ref(), &vec, scan_files, scan_data_callback)
+            })
+            // Iterator<DeltaResult<Vec<ScanFile>>> to Iterator<DeltaResult<ScanFile>>
+            .flatten_ok();
+
+        let result = scan_files_iter
+            .map(move |scan_file| -> DeltaResult<_> {
+                let scan_file = scan_file?;
                 let file_path = self.snapshot.table_root.join(&scan_file.path)?;
                 let mut selection_vector = scan_file
                     .dv_info
@@ -285,10 +317,10 @@ impl Scan {
                 let read_result_iter = engine.get_parquet_handler().read_parquet_files(
                     &[meta],
                     global_state.read_schema.clone(),
-                    None,
+                    self.predicate().clone(),
                 )?;
                 let gs = global_state.clone(); // Arc clone
-                Ok(read_result_iter.into_iter().map(move |read_result| {
+                Ok(read_result_iter.map(move |read_result| -> DeltaResult<_> {
                     let read_result = read_result?;
                     // to transform the physical data into the correct logical form
                     let logical = transform_to_logical_internal(
@@ -308,14 +340,17 @@ impl Scan {
                     let rest = split_vector(sv.as_mut(), len, None);
                     let result = ScanResult {
                         raw_data: logical,
-                        mask: sv,
+                        raw_mask: sv,
                     };
                     selection_vector = rest;
                     Ok(result)
                 }))
             })
+            // Iterator<DeltaResult<Iterator<DeltaResult<ScanResult>>>> to Iterator<DeltaResult<DeltaResult<ScanResult>>>
             .flatten_ok()
-            .try_collect()?
+            // Iterator<DeltaResult<DeltaResult<ScanResult>>> to Iterator<DeltaResult<ScanResult>>
+            .map(|x| x?);
+        Ok(result)
     }
 }
 
@@ -633,7 +668,7 @@ mod tests {
         let table = Table::new(url);
         let snapshot = table.snapshot(&engine, None).unwrap();
         let scan = snapshot.into_scan_builder().build().unwrap();
-        let files = scan.execute(&engine).unwrap();
+        let files: Vec<ScanResult> = scan.execute(&engine).unwrap().try_collect().unwrap();
 
         assert_eq!(files.len(), 1);
         let num_rows = files[0].raw_data.as_ref().unwrap().length();
@@ -682,6 +717,25 @@ mod tests {
             .unwrap();
             assert_eq!(value, *expected);
         }
+    }
+
+    #[test]
+    fn test_replay_for_scan_data() {
+        let path = std::fs::canonicalize(PathBuf::from("./tests/data/parquet_row_group_skipping/"));
+        let url = url::Url::from_directory_path(path.unwrap()).unwrap();
+        let engine = SyncEngine::new();
+
+        let table = Table::new(url);
+        let snapshot = table.snapshot(&engine, None).unwrap();
+        let scan = snapshot.into_scan_builder().build().unwrap();
+        let data: Vec<_> = scan
+            .replay_for_scan_data(&engine)
+            .unwrap()
+            .try_collect()
+            .unwrap();
+        // No predicate pushdown attempted, because at most one part of a multi-part checkpoint
+        // could be skipped when looking for adds/removes.
+        assert_eq!(data.len(), 5);
     }
 
     #[test_log::test]
