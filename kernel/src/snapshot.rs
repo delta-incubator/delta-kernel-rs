@@ -664,6 +664,8 @@ mod tests {
         // third parts, respectively. The parquet reader will skip the other three parts. Note that
         // the actual `read_metadata` would anyway skip the last two parts because it terminates the
         // iteration immediately after finding both P&M.
+        //
+        // NOTE: Each checkpoint part is a single-row file -- guaranteed to produce one row group.
         assert_eq!(data.len(), 2);
     }
 

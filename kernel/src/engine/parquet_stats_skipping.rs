@@ -113,10 +113,10 @@ pub(crate) trait ParquetStatsSkippingFilter {
         use UnaryOperator::IsNull;
         // Convert `a {cmp} b` to `AND(a IS NOT NULL, b IS NOT NULL, a {cmp} b)`,
         // and only evaluate the comparison if the null checks don't short circuit.
-        if matches!(self.apply_unary(IsNull, left, true), Some(false)) {
+        if let Some(false) = self.apply_unary(IsNull, left, true) {
             return Some(false);
         }
-        if matches!(self.apply_unary(IsNull, right, true), Some(false)) {
+        if let Some(false) = self.apply_unary(IsNull, right, true) {
             return Some(false);
         }
         self.apply_binary(op, left, right, false)

@@ -55,8 +55,7 @@ impl<'a> RowGroupFilter<'a> {
 
     /// Applies a filtering predicate to a row group. Return value false means to skip it.
     fn apply(row_group: &'a RowGroupMetaData, predicate: &Expression) -> bool {
-        let result = RowGroupFilter::new(row_group, predicate).apply_sql_where(predicate);
-        !matches!(result, Some(false))
+        RowGroupFilter::new(row_group, predicate).apply_sql_where(predicate) != Some(false)
     }
 
     /// Returns `None` if the column doesn't exist and `Some(None)` if the column has no stats.
@@ -187,7 +186,7 @@ impl<'a> ParquetStatsSkippingFilter for RowGroupFilter<'a> {
 
         // WARNING: [`Statistics::null_count_opt`] returns Some(0) when the underlying stat is
         // missing, causing an IS NULL predicate to wrongly skip the file if it contains any NULL
-        // values. So we're forced to manually drill into the different variant arms for the stat.
+        // values. Manually drill into each arm's [`ValueStatistics`] for the stat's true.
         let nullcount = match stats? {
             Statistics::Boolean(s) => s.null_count_opt(),
             Statistics::Int32(s) => s.null_count_opt(),
@@ -233,7 +232,8 @@ pub(crate) fn compute_field_indices(
     // Build up a set of requested column paths, then take each found path as the corresponding map
     // key (avoids unnecessary cloning).
     //
-    // NOTE: If a requested column was not available, it is silently ignored.
+    // NOTE: If a requested column was not available, it is silently ignored. These missing columns
+    // are implied all-null, so we will infer their min/max stats as NULL and nullcount == rowcount.
     let mut requested_columns = HashSet::new();
     do_recurse(expression, &mut requested_columns);
     fields

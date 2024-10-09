@@ -735,6 +735,8 @@ mod tests {
             .unwrap();
         // No predicate pushdown attempted, because at most one part of a multi-part checkpoint
         // could be skipped when looking for adds/removes.
+        //
+        // NOTE: Each checkpoint part is a single-row file -- guaranteed to produce one row group.
         assert_eq!(data.len(), 5);
     }
 
@@ -748,6 +750,8 @@ mod tests {
         let snapshot = Arc::new(table.snapshot(&engine, None).unwrap());
 
         // No predicate pushdown attempted, so the one data file should be returned.
+        //
+        // NOTE: The data file contains only five rows -- near guaranteed to produce one row group.
         let scan = snapshot.clone().scan_builder().build().unwrap();
         let data: Vec<_> = scan.execute(&engine).unwrap().try_collect().unwrap();
         assert_eq!(data.len(), 1);
