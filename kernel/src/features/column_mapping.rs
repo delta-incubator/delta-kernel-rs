@@ -17,9 +17,6 @@ pub enum ColumnMappingMode {
     Name,
 }
 
-// key to look in metadata.configuration for to get column mapping mode
-pub(crate) const COLUMN_MAPPING_MODE_KEY: &str = "delta.columnMapping.mode";
-
 impl TryFrom<&str> for ColumnMappingMode {
     type Error = Error;
 

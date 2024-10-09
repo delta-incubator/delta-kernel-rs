@@ -329,6 +329,7 @@ pub enum KernelError {
     InternalError,
     InvalidExpression,
     InvalidLogPath,
+    InvalidConfigurationError,
 }
 
 impl From<Error> for KernelError {
@@ -370,6 +371,7 @@ impl From<Error> for KernelError {
             Error::InvalidDecimal(_) => KernelError::InvalidDecimalError,
             Error::InvalidStructData(_) => KernelError::InvalidStructDataError,
             Error::InternalError(_) => KernelError::InternalError,
+            Error::InvalidConfiguration(_) => KernelError::InvalidConfigurationError,
             Error::Backtraced {
                 source,
                 backtrace: _,
