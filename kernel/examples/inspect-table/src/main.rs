@@ -98,7 +98,7 @@ fn main() {
             println!("{:#?}", files);
         }
         Commands::Actions { forward } => {
-            let action_types = vec![
+            let action_types = [
                 //ActionType::CommitInfo,
                 ActionType::Metadata,
                 ActionType::Protocol,
@@ -109,8 +109,7 @@ fn main() {
                 action_types
                     .iter()
                     .map(|a| a.schema_field())
-                    .cloned()
-                    .collect(),
+                    .cloned(),
             ));
 
             let batches = snapshot
