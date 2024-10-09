@@ -163,7 +163,7 @@ impl DataVisitor for LogVisitor {
     }
 }
 
-// This is the callback that will be called fo each valid scan row
+// This is the callback that will be called for each valid scan row
 fn print_scan_file(
     _: &mut (),
     path: &str,
