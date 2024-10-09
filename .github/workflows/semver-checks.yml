@@ -2,13 +2,12 @@ name: semver-checks
 
 # Trigger when a PR is opened or changed
 on:
-  # pull_request_target:
-  #   types:
-  #     - opened
-  #     - edited
-  #     - synchronize
-  #     - reopened
-  pull_request
+  pull_request_target:
+    types:
+      - opened
+      - edited
+      - synchronize
+      - reopened
 
 env:
   CARGO_TERM_COLOR: always
