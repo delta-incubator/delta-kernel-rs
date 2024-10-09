@@ -31,7 +31,7 @@ static LOG_SCHEMA: LazyLock<StructType> = LazyLock::new(|| {
         Option::<Remove>::get_struct_field(REMOVE_NAME),
         Option::<Metadata>::get_struct_field(METADATA_NAME),
         Option::<Protocol>::get_struct_field(PROTOCOL_NAME),
-        Option::<SetTransaction>::get_struct_field(TRANSACTION_NAME),
+        Option::<SetTransaction>::get_struct_field(SET_TRANSACTION_NAME),
         Option::<CommitInfo>::get_struct_field(COMMIT_INFO_NAME),
         // We don't support the following actions yet
         //Option::<Cdc>::get_struct_field(CDC_NAME),
