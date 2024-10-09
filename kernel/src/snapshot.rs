@@ -3,7 +3,6 @@
 //!
 
 use std::cmp::Ordering;
-use std::ops::Not;
 use std::sync::Arc;
 
 use itertools::Itertools;
@@ -43,7 +42,8 @@ impl LogSegment {
     /// `read_schema` is the schema to read the log files with. This can be used
     /// to project the log files to a subset of the columns.
     ///
-    /// `predicate` is an optional expression to filter the log files with.
+    /// `meta_predicate` is an optional expression to filter the log files with. It is _NOT_ the
+    /// query's predicate, but rather a predicate for filtering log files themselves.
     #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
     #[cfg_attr(not(feature = "developer-visibility"), visibility::make(pub(crate)))]
     fn replay(
@@ -51,18 +51,24 @@ impl LogSegment {
         engine: &dyn Engine,
         commit_read_schema: SchemaRef,
         checkpoint_read_schema: SchemaRef,
-        predicate: Option<Expression>,
+        meta_predicate: Option<Expression>,
     ) -> DeltaResult<impl Iterator<Item = DeltaResult<(Box<dyn EngineData>, bool)>> + Send> {
         let json_client = engine.get_json_handler();
-        // TODO change predicate to: predicate AND add.path not null and remove.path not null
         let commit_stream = json_client
-            .read_json_files(&self.commit_files, commit_read_schema, predicate.clone())?
+            .read_json_files(
+                &self.commit_files,
+                commit_read_schema,
+                meta_predicate.clone(),
+            )?
             .map_ok(|batch| (batch, true));
 
         let parquet_client = engine.get_parquet_handler();
-        // TODO change predicate to: predicate AND add.path not null
         let checkpoint_stream = parquet_client
-            .read_parquet_files(&self.checkpoint_files, checkpoint_read_schema, predicate)?
+            .read_parquet_files(
+                &self.checkpoint_files,
+                checkpoint_read_schema,
+                meta_predicate,
+            )?
             .map_ok(|batch| (batch, false));
 
         let batches = commit_stream.chain(checkpoint_stream);
@@ -71,15 +77,7 @@ impl LogSegment {
     }
 
     fn read_metadata(&self, engine: &dyn Engine) -> DeltaResult<Option<(Metadata, Protocol)>> {
-        let schema = get_log_schema().project(&[PROTOCOL_NAME, METADATA_NAME])?;
-        // filter out log files that do not contain metadata or protocol information
-        use Expression as Expr;
-        let filter = Some(Expr::or(
-            Expr::not(Expr::is_null(Expr::column("metaData.id"))),
-            Expr::not(Expr::is_null(Expr::column("protocol.minReaderVersion"))),
-        ));
-        // read the same protocol and metadata schema for both commits and checkpoints
-        let data_batches = self.replay(engine, schema.clone(), schema, filter)?;
+        let data_batches = self.replay_for_metadata(engine)?;
         let mut metadata_opt: Option<Metadata> = None;
         let mut protocol_opt: Option<Protocol> = None;
         for batch in data_batches {
@@ -101,6 +99,22 @@ impl LogSegment {
             (Some(_), None) => Err(Error::MissingProtocol),
             _ => Err(Error::MissingMetadataAndProtocol),
         }
+    }
+
+    // Factored out to facilitate testing
+    fn replay_for_metadata(
+        &self,
+        engine: &dyn Engine,
+    ) -> DeltaResult<impl Iterator<Item = DeltaResult<(Box<dyn EngineData>, bool)>> + Send> {
+        let schema = get_log_schema().project(&[PROTOCOL_NAME, METADATA_NAME])?;
+        // filter out log files that do not contain metadata or protocol information
+        use Expression as Expr;
+        let meta_predicate = Expr::or(
+            Expr::column("metaData.id").is_not_null(),
+            Expr::column("protocol.minReaderVersion").is_not_null(),
+        );
+        // read the same protocol and metadata schema for both commits and checkpoints
+        self.replay(engine, schema.clone(), schema, Some(meta_predicate))
     }
 }
 
@@ -167,6 +181,10 @@ impl Snapshot {
         // remove all files above requested version
         if let Some(version) = version {
             commit_files.retain(|log_path| log_path.version <= version);
+        }
+        // only keep commit files above the checkpoint we found
+        if let Some(checkpoint_file) = checkpoint_files.first() {
+            commit_files.retain(|log_path| checkpoint_file.version < log_path.version);
         }
 
         // get the effective version from chosen files
@@ -283,7 +301,7 @@ struct CheckpointMetadata {
     /// The number of actions that are stored in the checkpoint.
     pub(crate) size: i64,
     /// The number of fragments if the last checkpoint was written in multiple parts.
-    pub(crate) parts: Option<i32>,
+    pub(crate) parts: Option<usize>,
     /// The number of bytes of the checkpoint.
     pub(crate) size_in_bytes: Option<i64>,
     /// The number of AddFile actions in the checkpoint.
@@ -321,28 +339,66 @@ fn read_last_checkpoint(
 
 /// List all log files after a given checkpoint.
 fn list_log_files_with_checkpoint(
-    cp: &CheckpointMetadata,
+    checkpoint_metadata: &CheckpointMetadata,
     fs_client: &dyn FileSystemClient,
     log_root: &Url,
 ) -> DeltaResult<(Vec<ParsedLogPath>, Vec<ParsedLogPath>)> {
-    let version_prefix = format!("{:020}", cp.version);
+    let version_prefix = format!("{:020}", checkpoint_metadata.version);
     let start_from = log_root.join(&version_prefix)?;
 
-    let files: Vec<ParsedLogPath> = fs_client
-        .list_from(&start_from)?
-        .flat_map(|file| file.and_then(ParsedLogPath::try_from).transpose())
-        .try_collect()?;
-    let (mut commit_files, checkpoint_files): (Vec<_>, _) = files
-        .into_iter()
+    let mut max_checkpoint_version = checkpoint_metadata.version;
+    let mut checkpoint_files = vec![];
+    // We expect 10 commit files per checkpoint, so start with that size. We could adjust this based
+    // on config at some point
+    let mut commit_files = Vec::with_capacity(10);
+
+    for meta_res in fs_client.list_from(&start_from)? {
+        let meta = meta_res?;
+        let parsed_path = ParsedLogPath::try_from(meta)?;
         // TODO this filters out .crc files etc which start with "." - how do we want to use these kind of files?
-        .filter(|p| p.is_commit() || p.is_checkpoint())
-        .partition(ParsedLogPath::is_commit);
+        if let Some(parsed_path) = parsed_path {
+            if parsed_path.is_commit() {
+                commit_files.push(parsed_path);
+            } else if parsed_path.is_checkpoint() {
+                match parsed_path.version.cmp(&max_checkpoint_version) {
+                    Ordering::Greater => {
+                        max_checkpoint_version = parsed_path.version;
+                        checkpoint_files.clear();
+                        checkpoint_files.push(parsed_path);
+                    }
+                    Ordering::Equal => checkpoint_files.push(parsed_path),
+                    Ordering::Less => {}
+                }
+            }
+        }
+    }
+
+    if checkpoint_files.is_empty() {
+        // TODO: We could potentially recover here
+        return Err(Error::generic(
+            "Had a _last_checkpoint hint but didn't find any checkpoints",
+        ));
+    }
+
+    if max_checkpoint_version != checkpoint_metadata.version {
+        warn!(
+            "_last_checkpoint hint is out of date. _last_checkpoint version: {}. Using actual most recent: {}",
+            checkpoint_metadata.version,
+            max_checkpoint_version
+        );
+        // we (may) need to drop commits that are before the _actual_ last checkpoint (that
+        // is, commits between a stale _last_checkpoint and the _actual_ last checkpoint)
+        commit_files.retain(|parsed_path| parsed_path.version > max_checkpoint_version);
+    } else if checkpoint_files.len() != checkpoint_metadata.parts.unwrap_or(1) {
+        return Err(Error::Generic(format!(
+            "_last_checkpoint indicated that checkpoint should have {} parts, but it has {}",
+            checkpoint_metadata.parts.unwrap_or(1),
+            checkpoint_files.len()
+        )));
+    }
 
     // NOTE this will sort in reverse order
     commit_files.sort_unstable_by(|a, b| b.version.cmp(&a.version));
-
-    // TODO raise a proper error
-    assert_eq!(checkpoint_files.len(), cp.parts.unwrap_or(1) as usize);
 
     Ok((commit_files, checkpoint_files))
 }
@@ -407,6 +463,7 @@ mod tests {
     use crate::engine::default::filesystem::ObjectStoreFileSystemClient;
     use crate::engine::sync::SyncEngine;
     use crate::schema::StructType;
+    use crate::Table;
 
     #[test]
     fn test_snapshot_read_metadata() {
@@ -471,6 +528,72 @@ mod tests {
         assert!(cp.is_none())
     }
 
+    #[test]
+    fn test_read_log_with_out_of_date_last_checkpoint() {
+        let store = Arc::new(InMemory::new());
+
+        fn get_path(index: usize, suffix: &str) -> Path {
+            let path = format!("_delta_log/{index:020}.{suffix}");
+            Path::from(path.as_str())
+        }
+        let data = bytes::Bytes::from("kernel-data");
+
+        let checkpoint_metadata = CheckpointMetadata {
+            version: 3,
+            size: 10,
+            parts: None,
+            size_in_bytes: None,
+            num_of_add_files: None,
+            checkpoint_schema: None,
+            checksum: None,
+        };
+
+        // add log files to store
+        tokio::runtime::Runtime::new()
+            .expect("create tokio runtime")
+            .block_on(async {
+                for path in [
+                    get_path(0, "json"),
+                    get_path(1, "checkpoint.parquet"),
+                    get_path(2, "json"),
+                    get_path(3, "checkpoint.parquet"),
+                    get_path(4, "json"),
+                    get_path(5, "checkpoint.parquet"),
+                    get_path(6, "json"),
+                    get_path(7, "json"),
+                ] {
+                    store
+                        .put(&path, data.clone().into())
+                        .await
+                        .expect("put log file in store");
+                }
+                let checkpoint_str =
+                    serde_json::to_string(&checkpoint_metadata).expect("Serialize checkpoint");
+                store
+                    .put(
+                        &Path::from("_delta_log/_last_checkpoint"),
+                        checkpoint_str.into(),
+                    )
+                    .await
+                    .expect("Write _last_checkpoint");
+            });
+
+        let client = ObjectStoreFileSystemClient::new(
+            store,
+            Path::from("/"),
+            Arc::new(TokioBackgroundExecutor::new()),
+        );
+
+        let url = Url::parse("memory:///_delta_log/").expect("valid url");
+        let (commit_files, checkpoint_files) =
+            list_log_files_with_checkpoint(&checkpoint_metadata, &client, &url).unwrap();
+        assert_eq!(checkpoint_files.len(), 1);
+        assert_eq!(commit_files.len(), 2);
+        assert_eq!(checkpoint_files[0].version, 5);
+        assert_eq!(commit_files[0].version, 7);
+        assert_eq!(commit_files[1].version, 6);
+    }
+
     fn valid_last_checkpoint() -> Vec<u8> {
         r#"{"size":8,"size_in_bytes":21857,"version":1}"#.as_bytes().to_vec()
     }
@@ -510,6 +633,40 @@ mod tests {
         let invalid = read_last_checkpoint(&client, &url).expect("read last checkpoint");
         assert!(valid.is_some());
         assert!(invalid.is_none())
+    }
+
+    // NOTE: In addition to testing the meta-predicate for metadata replay, this test also verifies
+    // that the parquet reader properly infers nullcount = rowcount for missing columns. The two
+    // checkpoint part files that contain transaction app ids have truncated schemas that would
+    // otherwise fail skipping due to their missing nullcount stat:
+    //
+    // Row group 0:  count: 1  total(compressed): 111 B total(uncompressed):107 B
+    // --------------------------------------------------------------------------------
+    //              type    nulls  min / max
+    // txn.appId    BINARY  0      "3ae45b72-24e1-865a-a211-3..." / "3ae45b72-24e1-865a-a211-3..."
+    // txn.version  INT64   0      "4390" / "4390"
+    #[test]
+    fn test_replay_for_metadata() {
+        let path = std::fs::canonicalize(PathBuf::from("./tests/data/parquet_row_group_skipping/"));
+        let url = url::Url::from_directory_path(path.unwrap()).unwrap();
+        let engine = SyncEngine::new();
+
+        let table = Table::new(url);
+        let snapshot = table.snapshot(&engine, None).unwrap();
+        let data: Vec<_> = snapshot
+            .log_segment
+            .replay_for_metadata(&engine)
+            .unwrap()
+            .try_collect()
+            .unwrap();
+
+        // The checkpoint has five parts, each containing one action. The P&M come from first and
+        // third parts, respectively. The parquet reader will skip the other three parts. Note that
+        // the actual `read_metadata` would anyway skip the last two parts because it terminates the
+        // iteration immediately after finding both P&M.
+        //
+        // NOTE: Each checkpoint part is a single-row file -- guaranteed to produce one row group.
+        assert_eq!(data.len(), 2);
     }
 
     #[test_log::test]
