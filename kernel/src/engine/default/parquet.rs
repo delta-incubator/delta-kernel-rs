@@ -37,8 +37,8 @@ impl<E: TaskExecutor> DefaultParquetHandler<E> {
     /// Max number of batches to read ahead while executing [Self::read_parquet_files()].
     ///
     /// Defaults to 10.
-    pub fn with_readahead(mut self, readahead: usize) -> Self {
-        self.readahead = readahead + 1;
+    pub fn with_readahead_x(mut self, readahead: usize) -> Self {
+        self.readahead = readahead;
         self
     }
 }
