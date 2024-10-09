@@ -39,7 +39,7 @@ impl TransactionScanner {
 
     // Factored out to facilitate testing
     fn get_txn_schema() -> DeltaResult<SchemaRef> {
-        get_log_schema().project(&[TRANSACTION_NAME])
+        get_log_schema().project(&[SET_TRANSACTION_NAME])
     }
 
     // Factored out to facilitate testing

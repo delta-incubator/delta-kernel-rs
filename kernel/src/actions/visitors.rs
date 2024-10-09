@@ -328,7 +328,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        actions::{get_log_schema, ADD_NAME, TRANSACTION_NAME},
+        actions::{get_log_schema, ADD_NAME, SET_TRANSACTION_NAME},
         engine::arrow_data::ArrowEngineData,
         engine::sync::{json::SyncJsonHandler, SyncEngine},
         Engine, EngineData, JsonHandler,
@@ -484,7 +484,7 @@ mod tests {
             .parse_json(string_array_to_engine_data(json_strings), output_schema)
             .unwrap();
         let add_schema = get_log_schema()
-            .project(&[TRANSACTION_NAME])
+            .project(&[SET_TRANSACTION_NAME])
             .expect("Can't get txn schema");
         let mut txn_visitor = TransactionVisitor::default();
         batch.extract(add_schema, &mut txn_visitor).unwrap();
