@@ -22,7 +22,7 @@ pub(crate) const ADD_NAME: &str = "add";
 pub(crate) const REMOVE_NAME: &str = "remove";
 pub(crate) const METADATA_NAME: &str = "metaData";
 pub(crate) const PROTOCOL_NAME: &str = "protocol";
-pub(crate) const TRANSACTION_NAME: &str = "txn";
+pub(crate) const SET_TRANSACTION_NAME: &str = "txn";
 pub(crate) const COMMIT_INFO_NAME: &str = "commitInfo";
 
 static LOG_SCHEMA: LazyLock<StructType> = LazyLock::new(|| {
