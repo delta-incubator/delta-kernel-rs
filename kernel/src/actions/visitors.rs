@@ -14,11 +14,14 @@ use super::{
 };
 
 #[derive(Default)]
-pub(crate) struct MetadataVisitor {
+#[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
+#[cfg_attr(not(feature = "developer-visibility"), visibility::make(pub(crate)))]
+struct MetadataVisitor {
     pub(crate) metadata: Option<Metadata>,
 }
 
 impl MetadataVisitor {
+    #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
     fn visit_metadata<'a>(
         row_index: usize,
         id: String,
@@ -81,11 +84,14 @@ impl DataVisitor for SelectionVectorVisitor {
 }
 
 #[derive(Default)]
-pub(crate) struct ProtocolVisitor {
+#[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
+#[cfg_attr(not(feature = "developer-visibility"), visibility::make(pub(crate)))]
+struct ProtocolVisitor {
     pub(crate) protocol: Option<Protocol>,
 }
 
 impl ProtocolVisitor {
+    #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
     fn visit_protocol<'a>(
         row_index: usize,
         min_reader_version: i32,
@@ -120,12 +126,16 @@ impl DataVisitor for ProtocolVisitor {
 }
 
 #[derive(Default)]
-pub(crate) struct AddVisitor {
+#[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
+#[cfg_attr(not(feature = "developer-visibility"), visibility::make(pub(crate)))]
+struct AddVisitor {
     pub(crate) adds: Vec<Add>,
 }
 
 impl AddVisitor {
-    pub(crate) fn visit_add<'a>(
+    #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
+    #[cfg_attr(not(feature = "developer-visibility"), visibility::make(pub(crate)))]
+    fn visit_add<'a>(
         row_index: usize,
         path: String,
         getters: &[&'a dyn GetData<'a>],
@@ -175,12 +185,16 @@ impl DataVisitor for AddVisitor {
 }
 
 #[derive(Default)]
-pub(crate) struct RemoveVisitor {
+#[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
+#[cfg_attr(not(feature = "developer-visibility"), visibility::make(pub(crate)))]
+struct RemoveVisitor {
     pub(crate) removes: Vec<Remove>,
 }
 
 impl RemoveVisitor {
-    pub(crate) fn visit_remove<'a>(
+    #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
+    #[cfg_attr(not(feature = "developer-visibility"), visibility::make(pub(crate)))]
+    fn visit_remove<'a>(
         row_index: usize,
         path: String,
         getters: &[&'a dyn GetData<'a>],
@@ -242,6 +256,8 @@ pub type SetTransactionMap = HashMap<String, SetTransaction>;
 /// required.
 ///
 #[derive(Default, Debug)]
+#[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
+#[cfg_attr(not(feature = "developer-visibility"), visibility::make(pub(crate)))]
 pub(crate) struct SetTransactionVisitor {
     pub(crate) set_transactions: SetTransactionMap,
     pub(crate) application_id: Option<String>,
@@ -256,7 +272,9 @@ impl SetTransactionVisitor {
         }
     }
 
-    pub(crate) fn visit_txn<'a>(
+    #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
+    #[cfg_attr(not(feature = "developer-visibility"), visibility::make(pub(crate)))]
+    fn visit_txn<'a>(
         row_index: usize,
         app_id: String,
         getters: &[&'a dyn GetData<'a>],
