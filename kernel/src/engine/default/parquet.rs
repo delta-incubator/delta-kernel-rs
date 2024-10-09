@@ -38,7 +38,7 @@ impl<E: TaskExecutor> DefaultParquetHandler<E> {
     ///
     /// Defaults to 10.
     pub fn with_readahead(mut self, readahead: usize) -> Self {
-        self.readahead = readahead;
+        self.readahead = readahead + 1;
         self
     }
 }
