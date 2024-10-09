@@ -49,7 +49,7 @@ impl<'a> ListItem<'a> {
 /// a trait that an engine exposes to give access to a map
 pub trait EngineMap {
     /// Get the item with the specified key from the map at `row_index` in the raw data, and return it as an `Option<&'a str>`
-    fn get<'a>(&'a self, row_index: usize, key: &str) -> Option<&'a str>;
+    fn get(&self, row_index: usize, key: &str) -> Option<&str>;
     /// Materialize the entire map at `row_index` in the raw data into a `HashMap`
     fn materialize(&self, row_index: usize) -> HashMap<String, String>;
 }
@@ -187,9 +187,9 @@ impl<'a> TypedGetData<'a, HashMap<String, String>> for dyn GetData<'a> + '_ {
 /// [`DataVisitor::visit`] on the visitor passed to [`EngineData::extract`], engines do
 /// not need to worry about this trait.
 pub trait DataVisitor {
-    // // Receive some data from a call to `extract`. The data in [vals] should not be assumed to live
-    // // beyond the call to this funtion (i.e. it should be copied if needed)
-    // // The row_index parameter must be the index of the found row in the data batch being processed.
+    // Receive some data from a call to `extract`. The data in [vals] should not be assumed to live
+    // beyond the call to this function (i.e. it should be copied if needed)
+    // The row_index parameter must be the index of the found row in the data batch being processed.
     // fn visit(&mut self, row_index: usize, vals: &[Option<DataItem<'_>>]);
 
     /// The visitor is passed a slice of `GetDataItem` values, and a row count.

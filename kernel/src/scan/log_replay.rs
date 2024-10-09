@@ -28,7 +28,7 @@ struct AddRemoveVisitor {
     adds: Vec<(Add, usize)>,
     removes: Vec<Remove>,
     selection_vector: Option<Vec<bool>>,
-    // whether or not we are visiting commit json (=true) or checkpoint (=false)
+    // whether we are visiting commit json (=true) or checkpoint (=false)
     is_log_batch: bool,
 }
 
@@ -101,7 +101,7 @@ pub(crate) static SCAN_ROW_SCHEMA: LazyLock<Arc<StructType>> = LazyLock::new(|| 
             "fileConstantValues",
             StructType::new(vec![StructField::new(
                 "partitionValues",
-                MapType::new(DataType::STRING, DataType::STRING, false),
+                MapType::new(DataType::STRING, DataType::STRING, true),
                 true,
             )]),
             true,

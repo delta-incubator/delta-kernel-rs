@@ -1,13 +1,13 @@
 //! Expression handling based on arrow-rs compute kernels.
 use std::sync::Arc;
 
-use arrow_arith::boolean::{and_kleene, is_null, not, or_kleene};
+use arrow_arith::boolean::{and_kleene, is_not_null, is_null, not, or_kleene};
 use arrow_arith::numeric::{add, div, mul, sub};
 use arrow_array::cast::AsArray;
 use arrow_array::types::*;
 use arrow_array::{
     Array, ArrayRef, BinaryArray, BooleanArray, Date32Array, Datum, Decimal128Array, Float32Array,
-    Float64Array, Int16Array, Int32Array, Int64Array, Int8Array, ListArray, RecordBatch,
+    Float64Array, Int16Array, Int32Array, Int64Array, Int8Array, ListArray, MapArray, RecordBatch,
     StringArray, StructArray, TimestampMicrosecondArray,
 };
 use arrow_buffer::OffsetBuffer;
@@ -18,9 +18,10 @@ use arrow_schema::{
     Schema as ArrowSchema, TimeUnit,
 };
 use arrow_select::concat::concat;
+use arrow_select::filter::filter;
 use itertools::Itertools;
 
-use super::arrow_conversion::LIST_ARRAY_ROOT;
+use super::arrow_conversion::{LIST_ARRAY_ROOT, MAP_ROOT_DEFAULT};
 use crate::engine::arrow_data::ArrowEngineData;
 use crate::engine::arrow_utils::ensure_data_types;
 use crate::engine::arrow_utils::prim_array_cmp;
@@ -120,7 +121,16 @@ impl Scalar {
                         ArrowField::new(LIST_ARRAY_ROOT, t.element_type().try_into()?, true);
                     Arc::new(ListArray::new_null(Arc::new(field), num_rows))
                 }
-                DataType::Map { .. } => unimplemented!(),
+                DataType::Map(m) => {
+                    let field = ArrowField::new(MAP_ROOT_DEFAULT, m.key_type().try_into()?, true);
+                    Arc::new(MapArray::new(
+                        Arc::new(field),
+                        OffsetBuffer::new_empty(),
+                        StructArray::new_empty_fields(num_rows, None),
+                        None,
+                        false,
+                    ))
+                }
             },
         };
         Ok(arr)
@@ -175,14 +185,18 @@ fn column_as_struct<'a>(
     name: &str,
     column: &Option<&'a Arc<dyn Array>>,
 ) -> Result<&'a StructArray, ArrowError> {
-    column
-        .ok_or(ArrowError::SchemaError(format!("No such column: {}", name)))?
-        .as_any()
-        .downcast_ref::<StructArray>()
-        .ok_or(ArrowError::SchemaError(format!("{} is not a struct", name)))
+    let c = column.ok_or(ArrowError::SchemaError(format!("No such column: {}", name)))?;
+    if let arrow_schema::DataType::Map(..) = c.data_type() {
+        Ok(c.as_map_opt()
+            .ok_or(ArrowError::SchemaError(format!("{} is not a map", name)))?
+            .entries())
+    } else {
+        c.as_struct_opt()
+            .ok_or(ArrowError::SchemaError(format!("{} is not a struct", name)))
+    }
 }
 
-fn evaluate_expression(
+pub(crate) fn evaluate_expression(
     expression: &Expression,
     batch: &RecordBatch,
     result_type: Option<&DataType>,
@@ -230,10 +244,14 @@ fn evaluate_expression(
             "Data type is required to evaluate struct expressions",
         )),
         (UnaryOperation { op, expr }, _) => {
-            let arr = evaluate_expression(expr.as_ref(), batch, None)?;
+            let mut arr = evaluate_expression(expr.as_ref(), batch, None)?;
+            if matches!(**expr, MapAccess { .. }) {
+                arr = arr.as_map().values().clone();
+            }
             Ok(match op {
                 UnaryOperator::Not => Arc::new(not(downcast_to_bool(&arr)?)?),
                 UnaryOperator::IsNull => Arc::new(is_null(&arr)?),
+                UnaryOperator::NotNull => Arc::new(is_not_null(&arr)?),
             })
         }
         (
@@ -319,8 +337,14 @@ fn evaluate_expression(
                 .map_err(Error::generic_err)
         }
         (BinaryOperation { op, left, right }, _) => {
-            let left_arr = evaluate_expression(left.as_ref(), batch, None)?;
-            let right_arr = evaluate_expression(right.as_ref(), batch, None)?;
+            let mut left_arr = evaluate_expression(left.as_ref(), batch, None)?;
+            let mut right_arr = evaluate_expression(right.as_ref(), batch, None)?;
+
+            if matches!(**left, MapAccess { .. }) {
+                // Only modify arrays for maps...
+                left_arr = left_arr.as_map().values().clone(); // Compare against values since we already filtered to only matching keys
+                right_arr = right_arr.slice(0, left_arr.len()); // Since we don't use a scalar array, modify the array to be of equal length
+            }
 
             type Operation = fn(&dyn Datum, &dyn Datum) -> Result<Arc<dyn Array>, ArrowError>;
             let eval: Operation = match op {
@@ -362,6 +386,17 @@ fn evaluate_expression(
             Err(Error::Generic(format!(
                 "Variadic {expression:?} is expected to return boolean results, got {result_type:?}"
             )))
+        }
+        (MapAccess { source, key }, _) => {
+            let source = evaluate_expression(source, batch, None)?;
+            if let Some(key) = key {
+                let entries = source.as_map();
+                let key_array = StringArray::new_scalar(key); // Keys shouldn't ever be null by definition in arrow, but doing this second filter to be careful
+                let key_mask = eq(entries.keys(), &key_array)?;
+                filter(entries, &key_mask).map_err(Error::generic_err)
+            } else {
+                Ok(source)
+            }
         }
     }
 }
@@ -424,16 +459,59 @@ impl ExpressionEvaluator for DefaultExpressionEvaluator {
 
 #[cfg(test)]
 mod tests {
-    use std::ops::{Add, Div, Mul, Sub};
-
-    use arrow_array::{GenericStringArray, Int32Array};
-    use arrow_buffer::ScalarBuffer;
-    use arrow_schema::{DataType, Field, Fields, Schema};
-
     use super::*;
     use crate::expressions::*;
     use crate::schema::ArrayType;
     use crate::DataType as DeltaDataTypes;
+    use arrow_array::builder::{MapBuilder, MapFieldNames, StringBuilder};
+    use arrow_array::{GenericStringArray, Int32Array};
+    use arrow_buffer::ScalarBuffer;
+    use arrow_schema::{DataType, Field, Fields, Schema};
+    use std::collections::BTreeMap;
+    use std::ops::{Add, Div, Mul, Sub};
+
+    fn setup_map_schema() -> Arc<Schema> {
+        Arc::new(Schema::new(vec![Field::new_map(
+            "test_map",
+            MAP_ROOT_DEFAULT,
+            Field::new("keys", DataType::Utf8, false),
+            Field::new("values", DataType::Utf8, true),
+            false,
+            true,
+        )]))
+    }
+
+    fn setup_map_array(
+        map: BTreeMap<String, Option<String>>,
+        num_rows: usize,
+        nulls: usize,
+    ) -> DeltaResult<Arc<MapArray>> {
+        let mut array_builder = MapBuilder::new(
+            Some(MapFieldNames {
+                entry: MAP_ROOT_DEFAULT.to_string(),
+                ..Default::default()
+            }),
+            StringBuilder::new(),
+            StringBuilder::new(),
+        );
+
+        for (k, v) in map {
+            for _ in 0..num_rows {
+                array_builder.keys().append_value(&k);
+                if let Some(ref v) = v {
+                    array_builder.values().append_value(v);
+                } else {
+                    array_builder.values().append_null();
+                }
+                array_builder.append(true)?;
+            }
+        }
+        for _ in 0..nulls {
+            array_builder.append(false)?
+        }
+
+        Ok(Arc::new(array_builder.finish()))
+    }
 
     #[test]
     fn test_array_column() {
@@ -749,5 +827,107 @@ mod tests {
                 .unwrap();
         let expected = Arc::new(BooleanArray::from(vec![true, false]));
         assert_eq!(results.as_ref(), expected.as_ref());
+    }
+
+    #[test]
+    fn test_map_expression_access() -> DeltaResult<()> {
+        let map_access = Expression::map(Expression::column("test_map"), Some("first_key"));
+
+        let schema = setup_map_schema();
+        let map_values = BTreeMap::from([
+            ("first_key".to_string(), Some("first".to_string())),
+            ("second_key".to_string(), Some("second_value".to_string())),
+        ]);
+        let array = setup_map_array(map_values, 10, 0)?;
+        let expected = BTreeMap::from([("first_key".to_string(), Some("first".to_string()))]);
+        let expected_array = setup_map_array(expected, 10, 0)?;
+
+        let batch = RecordBatch::try_new(schema.clone(), vec![array])?;
+        let output = evaluate_expression(&map_access, &batch, None)?;
+
+        assert_eq!(output.len(), 10);
+        assert_eq!(*output, *expected_array);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_map_expression_eq() -> DeltaResult<()> {
+        let map_access = Expression::map(Expression::column("test_map"), None);
+        let predicate_expr = Expression::binary(
+            BinaryOperator::Equal,
+            map_access.clone(),
+            Expression::literal("second_value"),
+        );
+
+        let schema = setup_map_schema();
+        let map_values = BTreeMap::from([
+            ("first_key".to_string(), Some("first".to_string())),
+            ("second_key".to_string(), Some("second_value".to_string())),
+        ]);
+        let array = setup_map_array(map_values, 5, 0)?;
+
+        let batch = RecordBatch::try_new(schema.clone(), vec![array])?;
+        let output = evaluate_expression(
+            &predicate_expr,
+            &batch,
+            Some(&crate::schema::DataType::BOOLEAN),
+        )?;
+        let expected = Arc::new(BooleanArray::from(vec![
+            false, false, false, false, false, true, true, true, true, true,
+        ]));
+
+        assert_eq!(output.len(), 10);
+        assert_eq!(*output, *expected);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_map_unary() -> DeltaResult<()> {
+        let map_access = Expression::map(Expression::column("test_map"), None);
+        let predicate_expr = Expression::unary(UnaryOperator::IsNull, map_access.clone());
+
+        let schema = setup_map_schema();
+        let map_values = BTreeMap::from([
+            ("first_key".to_string(), Some("first".to_string())),
+            ("second_key".to_string(), Some("second_value".to_string())),
+        ]);
+        let array = setup_map_array(map_values, 1, 2)?;
+
+        let batch = RecordBatch::try_new(schema.clone(), vec![array])?;
+        let output = evaluate_expression(
+            &predicate_expr,
+            &batch,
+            Some(&crate::schema::DataType::BOOLEAN),
+        )?;
+        let expected = Arc::new(BooleanArray::from(vec![false; 2]));
+
+        assert_eq!(output.len(), 2);
+        assert_eq!(*output, *expected);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_map_unary_key() -> DeltaResult<()> {
+        let map_access = Expression::map(Expression::column("test_map"), Some("first_key"));
+        let unary_expr = Expression::unary(UnaryOperator::NotNull, map_access.clone());
+        let schema = setup_map_schema();
+        let map_values = BTreeMap::from([
+            ("first_key".to_string(), Some("second_value".to_string())),
+            ("second_key".to_string(), Some("second_value".to_string())),
+        ]);
+        let array = setup_map_array(map_values, 5, 0)?;
+
+        let batch = RecordBatch::try_new(schema.clone(), vec![array])?;
+        let output =
+            evaluate_expression(&unary_expr, &batch, Some(&crate::schema::DataType::BOOLEAN))?;
+        let expected = Arc::new(BooleanArray::from(vec![true; 5]));
+
+        assert_eq!(output.len(), 5);
+        assert_eq!(*output, *expected);
+
+        Ok(())
     }
 }

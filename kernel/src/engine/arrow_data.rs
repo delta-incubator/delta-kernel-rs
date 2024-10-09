@@ -121,7 +121,7 @@ where
 }
 
 impl EngineMap for MapArray {
-    fn get<'a>(&'a self, row_index: usize, key: &str) -> Option<&'a str> {
+    fn get(&self, row_index: usize, key: &str) -> Option<&str> {
         let offsets = self.offsets();
         let start_offset = offsets[row_index] as usize;
         let count = offsets[row_index + 1] as usize - start_offset;
