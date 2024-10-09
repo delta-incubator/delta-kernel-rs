@@ -1,6 +1,6 @@
 use delta_kernel::actions::get_log_schema;
 use delta_kernel::actions::visitors::{
-    AddVisitor, MetadataVisitor, ProtocolVisitor, RemoveVisitor,
+    AddVisitor, MetadataVisitor, ProtocolVisitor, RemoveVisitor, TransactionVisitor,
 };
 use delta_kernel::engine::default::executor::tokio::TokioBackgroundExecutor;
 use delta_kernel::engine::default::DefaultEngine;
@@ -62,6 +62,7 @@ enum Action {
     Protocol(delta_kernel::actions::Protocol, usize),
     Remove(delta_kernel::actions::Remove, usize),
     Add(delta_kernel::actions::Add, usize),
+    SetTransaction(delta_kernel::actions::Transaction, usize),
 }
 
 impl Action {
@@ -71,6 +72,7 @@ impl Action {
             Action::Protocol(_, row) => *row,
             Action::Remove(_, row) => *row,
             Action::Add(_, row) => *row,
+            Action::SetTransaction(_, row) => *row,
         }
     }
 }
@@ -89,6 +91,7 @@ struct LogVisitor {
     remove_offset: usize,
     protocol_offset: usize,
     metadata_offset: usize,
+    set_transaction_offset: usize,
     previous_rows_seen: usize,
 }
 
@@ -99,12 +102,14 @@ impl LogVisitor {
         let mut remove_offset = 0;
         let mut protocol_offset = 0;
         let mut metadata_offset = 0;
+        let mut set_transaction_offset = 0;
         for field in log_schema.fields() {
             match field.name().as_str() {
                 "add" => add_offset = offset,
                 "remove" => remove_offset = offset,
                 "protocol" => protocol_offset = offset,
                 "metaData" => metadata_offset = offset,
+                "txn" => set_transaction_offset = offset,
                 _ => {}
             }
             offset += fields_in(field);
@@ -115,6 +120,7 @@ impl LogVisitor {
             remove_offset,
             protocol_offset,
             metadata_offset,
+            set_transaction_offset,
             previous_rows_seen: 0,
         }
     }
@@ -149,6 +155,16 @@ impl DataVisitor for LogVisitor {
                         i,
                         min_reader_version,
                         &getters[self.protocol_offset..],
+                    )?,
+                    self.previous_rows_seen + i,
+                ));
+            }
+            if let Some(app_id) = getters[self.set_transaction_offset].get_opt(i, "txn.appId")? {
+                self.actions.push(Action::SetTransaction(
+                    TransactionVisitor::visit_txn(
+                        i,
+                        app_id,
+                        &getters[self.set_transaction_offset..],
                     )?,
                     self.previous_rows_seen + i,
                 ));
@@ -250,6 +266,7 @@ fn try_main() -> DeltaResult<()> {
                     Action::Protocol(p, row) => println!("\nAction {row}:\n{:#?}", p),
                     Action::Remove(r, row) => println!("\nAction {row}:\n{:#?}", r),
                     Action::Add(a, row) => println!("\nAction {row}:\n{:#?}", a),
+                    Action::SetTransaction(t, row) => println!("\nAction {row}:\n{:#?}", t),
                 }
             }
         }

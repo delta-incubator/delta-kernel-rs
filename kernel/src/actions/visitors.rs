@@ -255,7 +255,9 @@ pub type TransactionMap = HashMap<String, Transaction>;
 /// required.
 ///
 #[derive(Default, Debug)]
-pub(crate) struct TransactionVisitor {
+#[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
+#[cfg_attr(not(feature = "developer-visibility"), visibility::make(pub(crate)))]
+struct TransactionVisitor {
     pub(crate) transactions: TransactionMap,
     pub(crate) application_id: Option<String>,
 }
@@ -269,7 +271,9 @@ impl TransactionVisitor {
         }
     }
 
-    pub(crate) fn visit_txn<'a>(
+    #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
+    #[cfg_attr(not(feature = "developer-visibility"), visibility::make(pub(crate)))]
+    fn visit_txn<'a>(
         row_index: usize,
         app_id: String,
         getters: &[&'a dyn GetData<'a>],
