@@ -231,7 +231,7 @@ impl DataVisitor for RemoveVisitor {
     }
 }
 
-pub type TransactionMap = HashMap<String, SetTransaction>;
+pub type SetTransactionMap = HashMap<String, SetTransaction>;
 
 /// Extact application transaction actions from the log into a map
 ///
@@ -242,16 +242,16 @@ pub type TransactionMap = HashMap<String, SetTransaction>;
 /// required.
 ///
 #[derive(Default, Debug)]
-pub(crate) struct TransactionVisitor {
-    pub(crate) transactions: TransactionMap,
+pub(crate) struct SetTransactionVisitor {
+    pub(crate) set_transactions: SetTransactionMap,
     pub(crate) application_id: Option<String>,
 }
 
-impl TransactionVisitor {
+impl SetTransactionVisitor {
     /// Create a new visitor. When application_id is set then bookkeeping is only for that id only
     pub(crate) fn new(application_id: Option<String>) -> Self {
-        TransactionVisitor {
-            transactions: HashMap::default(),
+        SetTransactionVisitor {
+            set_transactions: HashMap::default(),
             application_id,
         }
     }
@@ -271,7 +271,7 @@ impl TransactionVisitor {
     }
 }
 
-impl DataVisitor for TransactionVisitor {
+impl DataVisitor for SetTransactionVisitor {
     fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<()> {
         // Assumes batches are visited in reverse order relative to the log
         for i in 0..row_count {
@@ -282,9 +282,9 @@ impl DataVisitor for TransactionVisitor {
                     .as_ref()
                     .is_some_and(|requested| !requested.eq(&app_id))
                 {
-                    let txn = TransactionVisitor::visit_txn(i, app_id, getters)?;
-                    if !self.transactions.contains_key(&txn.app_id) {
-                        self.transactions.insert(txn.app_id.clone(), txn);
+                    let txn = SetTransactionVisitor::visit_txn(i, app_id, getters)?;
+                    if !self.set_transactions.contains_key(&txn.app_id) {
+                        self.set_transactions.insert(txn.app_id.clone(), txn);
                     }
                 }
             }
@@ -486,9 +486,9 @@ mod tests {
         let add_schema = get_log_schema()
             .project(&[SET_TRANSACTION_NAME])
             .expect("Can't get txn schema");
-        let mut txn_visitor = TransactionVisitor::default();
+        let mut txn_visitor = SetTransactionVisitor::default();
         batch.extract(add_schema, &mut txn_visitor).unwrap();
-        let mut actual = txn_visitor.transactions;
+        let mut actual = txn_visitor.set_transactions;
         assert_eq!(
             actual.remove("myApp2"),
             Some(SetTransaction {
