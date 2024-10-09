@@ -48,13 +48,13 @@ jobs:
         if: ${{ steps.check.outcome == 'failure' }}
         run: |
           echo "Checks failed"
-          echo "check_status=failure" >> $GITHUB_STATE
+          echo "check_status=failure" >> $GITHUB_OUTPUT
       - name: On Success
         id: set_success
         if: ${{ steps.check.outcome == 'success' }}
         run: |
           echo "Checks succeed"
-          echo "check_status=success" >> $GITHUB_STATE
+          echo "check_status=success" >> $GITHUB_OUTPUT
     outputs:
       check_status: ${{ steps.set_failure.outputs.check_status || steps.set_success.outputs.check_status }}
   add_label_if_needed:
