@@ -9,7 +9,8 @@ use crate::{
 };
 
 use super::{
-    deletion_vector::DeletionVectorDescriptor, Add, Format, Metadata, Protocol, Remove, Transaction,
+    deletion_vector::DeletionVectorDescriptor, Add, Format, Metadata, Protocol, Remove,
+    SetTransaction,
 };
 
 #[derive(Default)]
@@ -230,7 +231,7 @@ impl DataVisitor for RemoveVisitor {
     }
 }
 
-pub type TransactionMap = HashMap<String, Transaction>;
+pub type TransactionMap = HashMap<String, SetTransaction>;
 
 /// Extact application transaction actions from the log into a map
 ///
@@ -259,10 +260,10 @@ impl TransactionVisitor {
         row_index: usize,
         app_id: String,
         getters: &[&'a dyn GetData<'a>],
-    ) -> DeltaResult<Transaction> {
+    ) -> DeltaResult<SetTransaction> {
         let version: i64 = getters[1].get(row_index, "txn.version")?;
         let last_updated: Option<i64> = getters[2].get_long(row_index, "txn.lastUpdated")?;
-        Ok(Transaction {
+        Ok(SetTransaction {
             app_id,
             version,
             last_updated,
@@ -490,7 +491,7 @@ mod tests {
         let mut actual = txn_visitor.transactions;
         assert_eq!(
             actual.remove("myApp2"),
-            Some(Transaction {
+            Some(SetTransaction {
                 app_id: "myApp2".to_string(),
                 version: 4,
                 last_updated: Some(1670892998177),
@@ -498,7 +499,7 @@ mod tests {
         );
         assert_eq!(
             actual.remove("myApp"),
-            Some(Transaction {
+            Some(SetTransaction {
                 app_id: "myApp".to_string(),
                 version: 3,
                 last_updated: None,

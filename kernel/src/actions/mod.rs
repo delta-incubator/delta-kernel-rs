@@ -13,7 +13,7 @@ use crate::features::{ReaderFeatures, WriterFeatures};
 use crate::{schema::StructType, DeltaResult, EngineData};
 
 pub mod deletion_vector;
-pub mod transaction;
+pub mod set_transaction;
 
 pub(crate) mod schemas;
 pub(crate) mod visitors;
@@ -31,7 +31,7 @@ static LOG_SCHEMA: LazyLock<StructType> = LazyLock::new(|| {
         Option::<Remove>::get_struct_field(REMOVE_NAME),
         Option::<Metadata>::get_struct_field(METADATA_NAME),
         Option::<Protocol>::get_struct_field(PROTOCOL_NAME),
-        Option::<Transaction>::get_struct_field(TRANSACTION_NAME),
+        Option::<SetTransaction>::get_struct_field(TRANSACTION_NAME),
         Option::<CommitInfo>::get_struct_field(COMMIT_INFO_NAME),
         // We don't support the following actions yet
         //Option::<Cdc>::get_struct_field(CDC_NAME),
@@ -245,7 +245,7 @@ impl Remove {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Schema)]
-pub struct Transaction {
+pub struct SetTransaction {
     /// A unique identifier for the application performing the transaction.
     pub app_id: String,
 

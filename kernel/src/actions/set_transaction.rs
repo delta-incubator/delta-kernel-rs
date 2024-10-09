@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::actions::visitors::TransactionVisitor;
-use crate::actions::{get_log_schema, Transaction, TRANSACTION_NAME};
+use crate::actions::{get_log_schema, SetTransaction, TRANSACTION_NAME};
 use crate::snapshot::Snapshot;
 use crate::{DeltaResult, Engine, EngineData, SchemaRef};
 
@@ -58,7 +58,7 @@ impl TransactionScanner {
         &self,
         engine: &dyn Engine,
         application_id: &str,
-    ) -> DeltaResult<Option<Transaction>> {
+    ) -> DeltaResult<Option<SetTransaction>> {
         let mut transactions = self.scan_application_transactions(engine, Some(application_id))?;
         Ok(transactions.remove(application_id))
     }
@@ -78,7 +78,10 @@ mod tests {
     use crate::Table;
     use itertools::Itertools;
 
-    fn get_latest_transactions(path: &str, app_id: &str) -> (TransactionMap, Option<Transaction>) {
+    fn get_latest_transactions(
+        path: &str,
+        app_id: &str,
+    ) -> (TransactionMap, Option<SetTransaction>) {
         let path = std::fs::canonicalize(PathBuf::from(path)).unwrap();
         let url = url::Url::from_directory_path(path).unwrap();
         let engine = SyncEngine::new();
@@ -105,7 +108,7 @@ mod tests {
         assert_eq!(txns.get("my-app"), txn.as_ref());
         assert_eq!(
             txns.get("my-app2"),
-            Some(Transaction {
+            Some(SetTransaction {
                 app_id: "my-app2".to_owned(),
                 version: 2,
                 last_updated: None
@@ -119,7 +122,7 @@ mod tests {
         assert_eq!(txns.get("my-app"), txn.as_ref());
         assert_eq!(
             txns.get("my-app2"),
-            Some(Transaction {
+            Some(SetTransaction {
                 app_id: "my-app2".to_owned(),
                 version: 2,
                 last_updated: None
