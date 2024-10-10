@@ -581,6 +581,7 @@ mod tests {
 
         let client = ObjectStoreFileSystemClient::new(
             store,
+            true, // is_local
             Path::from("/"),
             Arc::new(TokioBackgroundExecutor::new()),
         );
