@@ -70,18 +70,14 @@ impl ScanBuilder {
         }
     }
 
-    /// Predicates specified in this crate's [`Expression`] type.
+    /// Optionally provide an [`Expression`] to filter rows. For example, using the predicate `x <
+    /// 4` to return a subset of the rows in the scan which satisfy the filter. If `predicate_opt`
+    /// is `None`, this is a no-op.
     ///
-    /// Can be used to filter the rows in a scan. For example, using the predicate
-    /// `x < 4` to return a subset of the rows in the scan which satisfy the filter.
-    pub fn with_predicate(self, predicate: Expression) -> Self {
-        self.with_predicate_opt(Some(predicate))
-    }
-
-    /// Optionally provide an [`Expression`] to filter rows. See [`ScanBuilder::with_predicate`] for
-    /// details. If `predicate_opt` is `None`, this is a no-op.
-    pub fn with_predicate_opt(mut self, predicate: Option<Expression>) -> Self {
-        self.predicate = predicate.map(Arc::new);
+    /// NOTE: The filtering is best-effort and can produce false positives (rows that should should
+    /// have been filtered out but were kept).
+    pub fn with_predicate(mut self, predicate: impl Into<Option<Expression>>) -> Self {
+        self.predicate = predicate.into().map(Arc::new);
         self
     }
 

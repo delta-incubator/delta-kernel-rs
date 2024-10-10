@@ -545,7 +545,7 @@ fn read_table_data(
         let scan = snapshot
             .into_scan_builder()
             .with_schema_opt(read_schema)
-            .with_predicate_opt(predicate.clone())
+            .with_predicate(predicate.clone())
             .build()?;
 
         sort_lines!(expected);
