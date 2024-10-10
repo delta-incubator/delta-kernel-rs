@@ -4,7 +4,7 @@ use std::sync::Arc;
 use arrow_arith::boolean::{and_kleene, is_null, not, or_kleene};
 use arrow_arith::numeric::{add, div, mul, sub};
 use arrow_array::cast::AsArray;
-use arrow_array::types::*;
+use arrow_array::{types::*, MapArray};
 use arrow_array::{
     Array, ArrayRef, BinaryArray, BooleanArray, Date32Array, Datum, Decimal128Array, Float32Array,
     Float64Array, Int16Array, Int32Array, Int64Array, Int8Array, ListArray, RecordBatch,
@@ -21,6 +21,7 @@ use arrow_select::concat::concat;
 use itertools::Itertools;
 
 use super::arrow_conversion::LIST_ARRAY_ROOT;
+use super::arrow_utils::make_arrow_error;
 use crate::engine::arrow_data::ArrowEngineData;
 use crate::engine::arrow_utils::ensure_data_types;
 use crate::engine::arrow_utils::prim_array_cmp;
@@ -214,10 +215,9 @@ fn evaluate_expression(
             let output_fields: Vec<ArrowField> = output_cols
                 .iter()
                 .zip(schema.fields())
-                .map(|(array, input_field)| -> DeltaResult<_> {
-                    ensure_data_types(input_field.data_type(), array.data_type())?;
+                .map(|(array, output_field)| -> DeltaResult<_> {
                     Ok(ArrowField::new(
-                        input_field.name(),
+                        output_field.name(),
                         array.data_type().clone(),
                         array.is_nullable(),
                     ))
@@ -366,6 +366,153 @@ fn evaluate_expression(
     }
 }
 
+// return a RecordBatch where the names of fields in `sa` have been transformed to match those in
+// schema specified by `output_type`
+fn apply_schema(sa: &StructArray, output_type: &DataType) -> DeltaResult<RecordBatch> {
+    let applied = apply_to_col(sa.data_type(), sa, output_type)?.ok_or(Error::generic(
+        "apply_to_col at top-level should return something",
+    ))?;
+    let applied_sa = applied.as_struct_opt().ok_or(Error::generic(
+        "apply_to_col at top-level should return a struct array",
+    ))?;
+    Ok(applied_sa.into())
+}
+
+// make column `col` with type `arrow_type` look like `kernel_type`. For now this only handles name
+// transforms. if the actual data types don't match, this will return an error
+fn apply_to_col(
+    arrow_type: &ArrowDataType,
+    col: &dyn Array,
+    kernel_type: &DataType,
+) -> DeltaResult<Option<Arc<dyn Array>>> {
+    match (kernel_type, arrow_type) {
+        (DataType::Struct(kernel_fields), ArrowDataType::Struct(arrow_fields)) => {
+            if kernel_fields.fields.len() != arrow_fields.len() {
+                return Err(make_arrow_error(format!(
+                    "Kernel schema had {} fields, but data has {}",
+                    kernel_fields.fields.len(),
+                    arrow_fields.len()
+                )));
+            }
+            let sa = col.as_struct_opt().ok_or(make_arrow_error(
+                "Arrow claimed to be a struct but isn't a StructArray".to_string(),
+            ))?;
+            let (fields, sa_cols, sa_nulls) = sa.clone().into_parts();
+            let result_iter = fields
+                .into_iter()
+                .zip(sa_cols)
+                .zip(kernel_fields.fields())
+                .map(
+                |((sa_field, sa_col), kernel_field)| -> DeltaResult<(ArrowField, Arc<dyn Array>)> {
+                    let transformed_col =
+                        apply_to_col(sa_field.data_type(), &sa_col, kernel_field.data_type())?
+                            .unwrap_or(sa_col);
+                    let transformed_field = sa_field
+                        .as_ref()
+                        .clone()
+                        .with_name(kernel_field.name.clone())
+                        .with_data_type(transformed_col.data_type().clone());
+                    Ok((transformed_field, transformed_col))
+                },
+            );
+            let (transformed_fields, transformed_cols): (Vec<ArrowField>, Vec<Arc<dyn Array>>) =
+                result_iter.process_results(|iter| iter.unzip())?;
+            let transformed_array =
+                StructArray::try_new(transformed_fields.into(), transformed_cols, sa_nulls)?;
+            Ok(Some(Arc::new(transformed_array)))
+        }
+        (DataType::Array(inner_type), ArrowDataType::List(_arrow_list_type)) => {
+            // deconstruct the array, the rebuild the mapped version
+            let la = col.as_list_opt().ok_or(make_arrow_error(
+                "Arrow claimed to be a list but isn't a ListArray".to_string(),
+            ))?;
+            let (field, offset_buffer, values, nulls) = la.clone().into_parts();
+            let transformed_values =
+                apply_to_col(field.data_type(), &values, &inner_type.element_type)?
+                    .unwrap_or(values);
+            let transformed_field = Arc::new(
+                field
+                    .as_ref()
+                    .clone()
+                    .with_data_type(transformed_values.data_type().clone()),
+            );
+            let transformed_array =
+                ListArray::try_new(transformed_field, offset_buffer, transformed_values, nulls)?;
+            Ok(Some(Arc::new(transformed_array)))
+        }
+        (DataType::Map(kernel_map_type), ArrowDataType::Map(arrow_map_type, _)) => {
+            let ma = col.as_map_opt().ok_or(make_arrow_error(
+                "Arrow claimed to be a map but isn't a MapArray".to_string(),
+            ))?;
+            let (map_field, offset_buffer, map_struct_array, nulls, ordered) =
+                ma.clone().into_parts();
+            if let ArrowDataType::Struct(_) = arrow_map_type.data_type() {
+                let (fields, msa_cols, msa_nulls) = map_struct_array.clone().into_parts();
+                let mut fields = fields.into_iter();
+                let key_field = fields.next().ok_or(make_arrow_error(
+                    "Arrow map struct didn't have a key field".to_string(),
+                ))?;
+                let value_field = fields.next().ok_or(make_arrow_error(
+                    "Arrow map struct didn't have a value field".to_string(),
+                ))?;
+                if fields.next().is_some() {
+                    return Err(Error::generic("map fields had more than 2 members"));
+                }
+                let transformed_key = apply_to_col(
+                    key_field.data_type(),
+                    msa_cols[0].as_ref(),
+                    &kernel_map_type.key_type,
+                )?
+                .unwrap_or(msa_cols[0].clone());
+                let transformed_values = apply_to_col(
+                    value_field.data_type(),
+                    msa_cols[1].as_ref(),
+                    &kernel_map_type.value_type,
+                )?
+                .unwrap_or(msa_cols[1].clone());
+                let transformed_struct_fields = vec![
+                    key_field
+                        .as_ref()
+                        .clone()
+                        .with_data_type(transformed_key.data_type().clone()),
+                    value_field
+                        .as_ref()
+                        .clone()
+                        .with_data_type(transformed_values.data_type().clone()),
+                ];
+                let transformed_struct_cols = vec![transformed_key, transformed_values];
+                let transformed_map_struct_array = StructArray::try_new(
+                    transformed_struct_fields.into(),
+                    transformed_struct_cols,
+                    msa_nulls,
+                )?;
+                let transformed_map_field = Arc::new(
+                    map_field
+                        .as_ref()
+                        .clone()
+                        .with_data_type(transformed_map_struct_array.data_type().clone()),
+                );
+                let transformed_map = MapArray::try_new(
+                    transformed_map_field,
+                    offset_buffer,
+                    transformed_map_struct_array,
+                    nulls,
+                    ordered,
+                )?;
+                Ok(Some(Arc::new(transformed_map)))
+            } else {
+                Err(make_arrow_error(
+                    "Arrow map type wasn't a struct.".to_string(),
+                ))
+            }
+        }
+        _ => {
+            ensure_data_types(kernel_type, arrow_type)?;
+            Ok(None)
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct ArrowExpressionHandler;
 
@@ -410,10 +557,13 @@ impl ExpressionEvaluator for DefaultExpressionEvaluator {
         let array_ref = evaluate_expression(&self.expression, batch, Some(&self.output_type))?;
         let arrow_type: ArrowDataType = ArrowDataType::try_from(&self.output_type)?;
         let batch: RecordBatch = if let DataType::Struct(_) = self.output_type {
-            array_ref
+            let sa: &StructArray = array_ref
                 .as_struct_opt()
-                .ok_or(Error::unexpected_column_type("Expected a struct array"))?
-                .into()
+                .ok_or(Error::unexpected_column_type("Expected a struct array"))?;
+            match ensure_data_types(&self.output_type, sa.data_type()) {
+                Ok(_) => sa.into(),
+                Err(_) => apply_schema(sa, &self.output_type)?,
+            }
         } else {
             let schema = ArrowSchema::new(vec![ArrowField::new("output", arrow_type, true)]);
             RecordBatch::try_new(Arc::new(schema), vec![array_ref])?

@@ -58,8 +58,8 @@ pub(crate) use prim_array_cmp;
 /// returns a tuples of (mask_indicies: Vec<parquet_schema_index>, reorder_indicies:
 /// Vec<requested_index>). `mask_indicies` is used for generating the mask for reading from the
 
-fn make_arrow_error(s: String) -> Error {
-    Error::Arrow(arrow_schema::ArrowError::InvalidArgumentError(s))
+pub(crate) fn make_arrow_error(s: String) -> Error {
+    Error::Arrow(arrow_schema::ArrowError::InvalidArgumentError(s)).with_backtrace()
 }
 
 /// Capture the compatibility between two data-types, as passed to [`ensure_data_types`]
@@ -636,6 +636,7 @@ pub(crate) fn reorder_struct_array(
     input_data: StructArray,
     requested_ordering: &[ReorderIndex],
 ) -> DeltaResult<StructArray> {
+    debug!("Reordering {input_data:?} with ordering: {requested_ordering:?}");
     if !ordering_needs_transform(requested_ordering) {
         // indices is already sorted, meaning we requested in the order that the columns were
         // stored in the parquet
@@ -944,7 +945,6 @@ mod tests {
             ArrowField::new("s", ArrowDataType::Int32, true),
         ]));
         let res = get_requested_indices(&requested_schema, &parquet_schema);
-        println!("{res:#?}");
         assert!(res.is_err());
     }
 
