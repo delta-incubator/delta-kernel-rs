@@ -45,13 +45,12 @@ impl<E: TaskExecutor> DefaultEngine<E> {
     /// - `table_root`: The URL of the table within storage.
     /// - `options`: key/value pairs of options to pass to the object store.
     /// - `task_executor`: Used to spawn async IO tasks. See [executor::TaskExecutor].
-    pub fn try_new<I, K, V>(
+    pub fn try_new<K, V>(
         table_root: &Url,
-        options: I,
+        options: impl IntoIterator<Item = (K, V)>,
         task_executor: Arc<E>,
     ) -> DeltaResult<Self>
     where
-        I: IntoIterator<Item = (K, V)>,
         K: AsRef<str>,
         V: Into<String>,
     {
@@ -67,11 +66,11 @@ impl<E: TaskExecutor> DefaultEngine<E> {
     /// - `store`: The object store to use.
     /// - `table_root_path`: The root path of the table within storage.
     /// - `task_executor`: Used to spawn async IO tasks. See [executor::TaskExecutor].
-    pub fn new(store: Arc<DynObjectStore>, table_root_path: Path, task_executor: Arc<E>) -> Self {
+    pub fn new(store: Arc<DynObjectStore>, table_root: Path, task_executor: Arc<E>) -> Self {
         Self {
             file_system: Arc::new(ObjectStoreFileSystemClient::new(
                 store.clone(),
-                table_root_path,
+                table_root,
                 task_executor.clone(),
             )),
             json: Arc::new(DefaultJsonHandler::new(
