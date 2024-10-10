@@ -397,8 +397,8 @@ fn list_log_files_with_checkpoint(
         )));
     }
 
-    // NOTE this will sort in reverse order
-    commit_files.sort_unstable_by(|a, b| b.version.cmp(&a.version));
+    // We assume listing returned ordered, we want reverse order
+    let commit_files = commit_files.into_iter().rev().collect();
 
     Ok((commit_files, checkpoint_files))
 }
@@ -441,8 +441,9 @@ fn list_log_files(
     }
 
     commit_files.retain(|f| f.version as i64 > max_checkpoint_version);
-    // NOTE this will sort in reverse order
-    commit_files.sort_unstable_by(|a, b| b.version.cmp(&a.version));
+
+    // We assume listing returned ordered, we want reverse order
+    let commit_files = commit_files.into_iter().rev().collect();
 
     Ok((commit_files, checkpoint_files))
 }
