@@ -1,21 +1,26 @@
 //! Some utilities for working with arrow data types
 
-use std::{collections::HashSet, sync::Arc};
+use std::collections::HashSet;
+use std::io::{BufRead, BufReader};
+use std::sync::Arc;
 
 use crate::{
+    engine::arrow_data::ArrowEngineData,
     schema::{DataType, PrimitiveType, Schema, SchemaRef, StructField, StructType},
     utils::require,
-    DeltaResult, Error,
+    DeltaResult, EngineData, Error,
 };
 
 use arrow_array::{
     cast::AsArray, new_null_array, Array as ArrowArray, GenericListArray, OffsetSizeTrait,
-    StructArray,
+    RecordBatch, StringArray, StructArray,
 };
+use arrow_json::ReaderBuilder;
 use arrow_schema::{
     DataType as ArrowDataType, Field as ArrowField, FieldRef as ArrowFieldRef, Fields,
     SchemaRef as ArrowSchemaRef,
 };
+use arrow_select::concat::concat_batches;
 use itertools::Itertools;
 use parquet::{arrow::ProjectionMask, schema::types::SchemaDescriptor};
 use tracing::debug;
@@ -135,9 +140,9 @@ pub(crate) fn ensure_data_types(
         (DataType::Primitive(_), _) if arrow_type.is_primitive() => {
             check_cast_compat(kernel_type.try_into()?, arrow_type)
         }
-        (DataType::Primitive(PrimitiveType::Boolean), ArrowDataType::Boolean)
-        | (DataType::Primitive(PrimitiveType::String), ArrowDataType::Utf8)
-        | (DataType::Primitive(PrimitiveType::Binary), ArrowDataType::Binary) => {
+        (&DataType::BOOLEAN, ArrowDataType::Boolean)
+        | (&DataType::STRING, ArrowDataType::Utf8)
+        | (&DataType::BINARY, ArrowDataType::Binary) => {
             // strings, bools, and binary  aren't primitive in arrow
             Ok(DataTypeCompat::Identical)
         }
@@ -446,7 +451,7 @@ fn get_indices(
                     // we just want to transparently recurse into lists, need to transform the kernel
                     // list data type into a schema
                     if let DataType::Array(array_type) = requested_field.data_type() {
-                        let requested_schema = StructType::new(vec![StructField::new(
+                        let requested_schema = StructType::new([StructField::new(
                             list_field.name().clone(), // so we find it in the inner call
                             array_type.element_type.clone(),
                             array_type.contains_null,
@@ -757,6 +762,57 @@ fn reorder_list<O: OffsetSizeTrait>(
     }
 }
 
+/// Arrow lacks the functionality to json-parse a string column into a struct column -- even tho the
+/// JSON file reader does exactly the same thing. This function is a hack to work around that gap.
+pub(crate) fn parse_json(
+    json_strings: Box<dyn EngineData>,
+    schema: SchemaRef,
+) -> DeltaResult<Box<dyn EngineData>> {
+    let json_strings: RecordBatch = ArrowEngineData::try_from_engine_data(json_strings)?.into();
+    let json_strings = json_strings
+        .column(0)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .ok_or_else(|| {
+            Error::generic("Expected json_strings to be a StringArray, found something else")
+        })?;
+    let schema: ArrowSchemaRef = Arc::new(schema.as_ref().try_into()?);
+    let result = parse_json_impl(json_strings, schema)?;
+    Ok(Box::new(ArrowEngineData::new(result)))
+}
+
+// Raw arrow implementation of the json parsing. Separate from the public function for testing.
+//
+// NOTE: This code is really inefficient because arrow lacks the native capability to perform robust
+// StringArray -> StructArray JSON parsing. See https://github.com/apache/arrow-rs/issues/6522. If
+// that shortcoming gets fixed upstream, this method can simplify or hopefully even disappear.
+fn parse_json_impl(json_strings: &StringArray, schema: ArrowSchemaRef) -> DeltaResult<RecordBatch> {
+    if json_strings.is_empty() {
+        return Ok(RecordBatch::new_empty(schema));
+    }
+
+    // Use batch size of 1 to force one record per string input
+    let mut decoder = ReaderBuilder::new(schema.clone())
+        .with_batch_size(1)
+        .build_decoder()?;
+    let parse_one = |json_string: Option<&str>| -> DeltaResult<RecordBatch> {
+        let mut reader = BufReader::new(json_string.unwrap_or("{}").as_bytes());
+        let buf = reader.fill_buf()?;
+        let read = buf.len();
+        require!(
+            decoder.decode(buf)? == read,
+            Error::missing_data("Incomplete JSON string")
+        );
+        let Some(batch) = decoder.flush()? else {
+            return Err(Error::missing_data("Expected data"));
+        };
+        require!(batch.num_rows() == 1, Error::generic("Expected one row"));
+        Ok(batch)
+    };
+    let output: Vec<_> = json_strings.iter().map(parse_one).try_collect()?;
+    Ok(concat_batches(&schema, output.iter())?)
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -775,7 +831,7 @@ mod tests {
 
     use crate::schema::{ArrayType, DataType, MapType, StructField, StructType};
 
-    use super::{get_requested_indices, reorder_struct_array, ReorderIndex};
+    use super::*;
 
     fn nested_parquet_schema() -> ArrowSchemaRef {
         Arc::new(ArrowSchema::new(vec![
@@ -796,8 +852,55 @@ mod tests {
     }
 
     #[test]
+    fn test_json_parsing() {
+        let requested_schema = Arc::new(ArrowSchema::new(vec![
+            ArrowField::new("a", ArrowDataType::Int32, true),
+            ArrowField::new("b", ArrowDataType::Utf8, true),
+            ArrowField::new("c", ArrowDataType::Int32, true),
+        ]));
+        let input: Vec<&str> = vec![];
+        let result = parse_json_impl(&input.into(), requested_schema.clone()).unwrap();
+        assert_eq!(result.num_rows(), 0);
+
+        let input: Vec<Option<&str>> = vec![Some("")];
+        let result = parse_json_impl(&input.into(), requested_schema.clone());
+        result.expect_err("empty string");
+
+        let input: Vec<Option<&str>> = vec![Some(" \n\t")];
+        let result = parse_json_impl(&input.into(), requested_schema.clone());
+        result.expect_err("empty string");
+
+        let input: Vec<Option<&str>> = vec![Some(r#""a""#)];
+        let result = parse_json_impl(&input.into(), requested_schema.clone());
+        result.expect_err("invalid string");
+
+        let input: Vec<Option<&str>> = vec![Some(r#"{ "a": 1"#)];
+        let result = parse_json_impl(&input.into(), requested_schema.clone());
+        result.expect_err("incomplete object");
+
+        let input: Vec<Option<&str>> = vec![Some("{}{}")];
+        let result = parse_json_impl(&input.into(), requested_schema.clone());
+        result.expect_err("multiple objects (complete)");
+
+        let input: Vec<Option<&str>> = vec![Some(r#"{} { "a": 1"#)];
+        let result = parse_json_impl(&input.into(), requested_schema.clone());
+        result.expect_err("multiple objects (partial)");
+
+        let input: Vec<Option<&str>> = vec![Some(r#"{ "a": 1"#), Some(r#", "b"}"#)];
+        let result = parse_json_impl(&input.into(), requested_schema.clone());
+        result.expect_err("split object");
+
+        let input: Vec<Option<&str>> = vec![None, Some(r#"{"a": 1, "b": "2", "c": 3}"#), None];
+        let result = parse_json_impl(&input.into(), requested_schema.clone()).unwrap();
+        assert_eq!(result.num_rows(), 3);
+        assert_eq!(result.column(0).null_count(), 2);
+        assert_eq!(result.column(1).null_count(), 2);
+        assert_eq!(result.column(2).null_count(), 2);
+    }
+
+    #[test]
     fn simple_mask_indices() {
-        let requested_schema = Arc::new(StructType::new(vec![
+        let requested_schema = Arc::new(StructType::new([
             StructField::new("i", DataType::INTEGER, false),
             StructField::new("s", DataType::STRING, true),
             StructField::new("i2", DataType::INTEGER, true),
@@ -821,7 +924,7 @@ mod tests {
 
     #[test]
     fn ensure_data_types_fails_correctly() {
-        let requested_schema = Arc::new(StructType::new(vec![
+        let requested_schema = Arc::new(StructType::new([
             StructField::new("i", DataType::INTEGER, false),
             StructField::new("s", DataType::INTEGER, true),
         ]));
@@ -832,7 +935,7 @@ mod tests {
         let res = get_requested_indices(&requested_schema, &parquet_schema);
         assert!(res.is_err());
 
-        let requested_schema = Arc::new(StructType::new(vec![
+        let requested_schema = Arc::new(StructType::new([
             StructField::new("i", DataType::INTEGER, false),
             StructField::new("s", DataType::STRING, true),
         ]));
@@ -847,7 +950,7 @@ mod tests {
 
     #[test]
     fn mask_with_map() {
-        let requested_schema = Arc::new(StructType::new(vec![StructField::new(
+        let requested_schema = Arc::new(StructType::new([StructField::new(
             "map",
             DataType::Map(Box::new(MapType::new(
                 DataType::INTEGER,
@@ -874,7 +977,7 @@ mod tests {
 
     #[test]
     fn simple_reorder_indices() {
-        let requested_schema = Arc::new(StructType::new(vec![
+        let requested_schema = Arc::new(StructType::new([
             StructField::new("i", DataType::INTEGER, false),
             StructField::new("s", DataType::STRING, true),
             StructField::new("i2", DataType::INTEGER, true),
@@ -898,7 +1001,7 @@ mod tests {
 
     #[test]
     fn simple_nullable_field_missing() {
-        let requested_schema = Arc::new(StructType::new(vec![
+        let requested_schema = Arc::new(StructType::new([
             StructField::new("i", DataType::INTEGER, false),
             StructField::new("s", DataType::STRING, true),
             StructField::new("i2", DataType::INTEGER, true),
@@ -921,11 +1024,11 @@ mod tests {
 
     #[test]
     fn nested_indices() {
-        let requested_schema = Arc::new(StructType::new(vec![
+        let requested_schema = Arc::new(StructType::new([
             StructField::new("i", DataType::INTEGER, false),
             StructField::new(
                 "nested",
-                StructType::new(vec![
+                StructType::new([
                     StructField::new("int32", DataType::INTEGER, false),
                     StructField::new("string", DataType::STRING, false),
                 ]),
@@ -951,10 +1054,10 @@ mod tests {
 
     #[test]
     fn nested_indices_reorder() {
-        let requested_schema = Arc::new(StructType::new(vec![
+        let requested_schema = Arc::new(StructType::new([
             StructField::new(
                 "nested",
-                StructType::new(vec![
+                StructType::new([
                     StructField::new("string", DataType::STRING, false),
                     StructField::new("int32", DataType::INTEGER, false),
                 ]),
@@ -981,11 +1084,11 @@ mod tests {
 
     #[test]
     fn nested_indices_mask_inner() {
-        let requested_schema = Arc::new(StructType::new(vec![
+        let requested_schema = Arc::new(StructType::new([
             StructField::new("i", DataType::INTEGER, false),
             StructField::new(
                 "nested",
-                StructType::new(vec![StructField::new("int32", DataType::INTEGER, false)]),
+                StructType::new([StructField::new("int32", DataType::INTEGER, false)]),
                 false,
             ),
             StructField::new("j", DataType::INTEGER, false),
@@ -1005,7 +1108,7 @@ mod tests {
 
     #[test]
     fn simple_list_mask() {
-        let requested_schema = Arc::new(StructType::new(vec![
+        let requested_schema = Arc::new(StructType::new([
             StructField::new("i", DataType::INTEGER, false),
             StructField::new("list", ArrayType::new(DataType::INTEGER, false), false),
             StructField::new("j", DataType::INTEGER, false),
@@ -1037,7 +1140,7 @@ mod tests {
 
     #[test]
     fn list_skip_earlier_element() {
-        let requested_schema = Arc::new(StructType::new(vec![StructField::new(
+        let requested_schema = Arc::new(StructType::new([StructField::new(
             "list",
             ArrayType::new(DataType::INTEGER, false),
             false,
@@ -1064,12 +1167,12 @@ mod tests {
 
     #[test]
     fn nested_indices_list() {
-        let requested_schema = Arc::new(StructType::new(vec![
+        let requested_schema = Arc::new(StructType::new([
             StructField::new("i", DataType::INTEGER, false),
             StructField::new(
                 "list",
                 ArrayType::new(
-                    StructType::new(vec![
+                    StructType::new([
                         StructField::new("int32", DataType::INTEGER, false),
                         StructField::new("string", DataType::STRING, false),
                     ])
@@ -1116,7 +1219,7 @@ mod tests {
 
     #[test]
     fn nested_indices_unselected_list() {
-        let requested_schema = Arc::new(StructType::new(vec![
+        let requested_schema = Arc::new(StructType::new([
             StructField::new("i", DataType::INTEGER, false),
             StructField::new("j", DataType::INTEGER, false),
         ]));
@@ -1149,13 +1252,12 @@ mod tests {
 
     #[test]
     fn nested_indices_list_mask_inner() {
-        let requested_schema = Arc::new(StructType::new(vec![
+        let requested_schema = Arc::new(StructType::new([
             StructField::new("i", DataType::INTEGER, false),
             StructField::new(
                 "list",
                 ArrayType::new(
-                    StructType::new(vec![StructField::new("int32", DataType::INTEGER, false)])
-                        .into(),
+                    StructType::new([StructField::new("int32", DataType::INTEGER, false)]).into(),
                     false,
                 ),
                 false,
@@ -1195,12 +1297,12 @@ mod tests {
 
     #[test]
     fn nested_indices_list_mask_inner_reorder() {
-        let requested_schema = Arc::new(StructType::new(vec![
+        let requested_schema = Arc::new(StructType::new([
             StructField::new("i", DataType::INTEGER, false),
             StructField::new(
                 "list",
                 ArrayType::new(
-                    StructType::new(vec![
+                    StructType::new([
                         StructField::new("string", DataType::STRING, false),
                         StructField::new("int2", DataType::INTEGER, false),
                     ])
@@ -1248,11 +1350,11 @@ mod tests {
 
     #[test]
     fn skipped_struct() {
-        let requested_schema = Arc::new(StructType::new(vec![
+        let requested_schema = Arc::new(StructType::new([
             StructField::new("i", DataType::INTEGER, false),
             StructField::new(
                 "nested",
-                StructType::new(vec![
+                StructType::new([
                     StructField::new("int32", DataType::INTEGER, false),
                     StructField::new("string", DataType::STRING, false),
                 ]),
@@ -1426,7 +1528,7 @@ mod tests {
 
     #[test]
     fn no_matches() {
-        let requested_schema = Arc::new(StructType::new(vec![
+        let requested_schema = Arc::new(StructType::new([
             StructField::new("s", DataType::STRING, true),
             StructField::new("i2", DataType::INTEGER, true),
         ]));
@@ -1449,7 +1551,7 @@ mod tests {
 
     #[test]
     fn empty_requested_schema() {
-        let requested_schema = Arc::new(StructType::new(vec![]));
+        let requested_schema = Arc::new(StructType::new([]));
         let parquet_schema = Arc::new(ArrowSchema::new(vec![
             ArrowField::new("i", ArrowDataType::Int32, false),
             ArrowField::new("s", ArrowDataType::Utf8, true),

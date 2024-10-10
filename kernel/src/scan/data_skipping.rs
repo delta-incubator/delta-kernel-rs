@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use tracing::debug;
 
@@ -9,7 +9,7 @@ use crate::error::DeltaResult;
 use crate::expressions::{
     BinaryOperator, Expression as Expr, ExpressionRef, UnaryOperator, VariadicOperator,
 };
-use crate::schema::{DataType, PrimitiveType, SchemaRef, StructField, StructType};
+use crate::schema::{DataType, SchemaRef, StructField, StructType};
 use crate::{Engine, EngineData, ExpressionEvaluator, JsonHandler};
 
 /// Get the expression that checks if a col could be null, assuming tight_bounds = true. In this
@@ -179,15 +179,14 @@ impl DataSkippingFilter {
     pub(crate) fn new(
         engine: &dyn Engine,
         table_schema: &SchemaRef,
-        predicate: &Option<ExpressionRef>,
+        predicate: Option<ExpressionRef>,
     ) -> Option<Self> {
-        lazy_static::lazy_static!(
-            static ref PREDICATE_SCHEMA: DataType = StructType::new(vec![
-                StructField::new("predicate", DataType::BOOLEAN, true),
-            ]).into();
-            static ref STATS_EXPR: Expr = Expr::column("add.stats");
-            static ref FILTER_EXPR: Expr = Expr::column("predicate").distinct(Expr::literal(false));
-        );
+        static PREDICATE_SCHEMA: LazyLock<DataType> = LazyLock::new(|| {
+            DataType::struct_type([StructField::new("predicate", DataType::BOOLEAN, true)])
+        });
+        static STATS_EXPR: LazyLock<Expr> = LazyLock::new(|| Expr::column("add.stats"));
+        static FILTER_EXPR: LazyLock<Expr> =
+            LazyLock::new(|| Expr::column("predicate").distinct(Expr::literal(false)));
 
         let predicate = predicate.as_deref()?;
         debug!("Creating a data skipping filter for {}", &predicate);
@@ -205,28 +204,20 @@ impl DataSkippingFilter {
             return None;
         }
 
-        let stats_schema = Arc::new(StructType::new(vec![
-            StructField::new("numRecords", DataType::LONG, true),
-            StructField::new("tightBounds", DataType::BOOLEAN, true),
-            StructField::new(
-                "nullCount",
-                StructType::new(
-                    data_fields
-                        .iter()
-                        .map(|data_field| {
-                            StructField::new(
-                                &data_field.name,
-                                DataType::Primitive(PrimitiveType::Long),
-                                true,
-                            )
-                        })
-                        .collect(),
+        let stats_schema =
+            Arc::new(StructType::new([
+                StructField::new("numRecords", DataType::LONG, true),
+                StructField::new("tightBounds", DataType::BOOLEAN, true),
+                StructField::new(
+                    "nullCount",
+                    StructType::new(data_fields.iter().map(|data_field| {
+                        StructField::new(&data_field.name, DataType::LONG, true)
+                    })),
+                    true,
                 ),
-                true,
-            ),
-            StructField::new("minValues", StructType::new(data_fields.clone()), true),
-            StructField::new("maxValues", StructType::new(data_fields), true),
-        ]));
+                StructField::new("minValues", StructType::new(data_fields.clone()), true),
+                StructField::new("maxValues", StructType::new(data_fields), true),
+            ]));
 
         // Skipping happens in several steps:
         //
@@ -272,19 +263,23 @@ impl DataSkippingFilter {
     pub(crate) fn apply(&self, actions: &dyn EngineData) -> DeltaResult<Vec<bool>> {
         // retrieve and parse stats from actions data
         let stats = self.select_stats_evaluator.evaluate(actions)?;
+        assert_eq!(stats.length(), actions.length());
         let parsed_stats = self
             .json_handler
             .parse_json(stats, self.stats_schema.clone())?;
+        assert_eq!(parsed_stats.length(), actions.length());
 
         // evaluate the predicate on the parsed stats, then convert to selection vector
         let skipping_predicate = self.skipping_evaluator.evaluate(&*parsed_stats)?;
+        assert_eq!(skipping_predicate.length(), actions.length());
         let selection_vector = self
             .filter_evaluator
             .evaluate(skipping_predicate.as_ref())?;
+        assert_eq!(selection_vector.length(), actions.length());
 
         // visit the engine's selection vector to produce a Vec<bool>
         let mut visitor = SelectionVectorVisitor::default();
-        let schema = StructType::new(vec![StructField::new("output", DataType::BOOLEAN, false)]);
+        let schema = StructType::new([StructField::new("output", DataType::BOOLEAN, false)]);
         selection_vector
             .as_ref()
             .extract(Arc::new(schema), &mut visitor)?;

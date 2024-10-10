@@ -1,8 +1,8 @@
+use std::clone::Clone;
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use either::Either;
-use lazy_static::lazy_static;
 use tracing::debug;
 
 use super::data_skipping::DataSkippingFilter;
@@ -77,45 +77,45 @@ impl DataVisitor for AddRemoveVisitor {
     }
 }
 
-lazy_static! {
-    // NB: If you update this schema, ensure you update the comment describing it in the doc comment
-    // for `scan_row_schema` in scan/mod.rs! You'll also need to update ScanFileVisitor as the
-    // indexes will be off
-    pub(crate) static ref SCAN_ROW_SCHEMA: Arc<StructType> = Arc::new(StructType::new(vec!(
+// NB: If you update this schema, ensure you update the comment describing it in the doc comment
+// for `scan_row_schema` in scan/mod.rs! You'll also need to update ScanFileVisitor as the
+// indexes will be off
+pub(crate) static SCAN_ROW_SCHEMA: LazyLock<Arc<StructType>> = LazyLock::new(|| {
+    Arc::new(StructType::new([
         StructField::new("path", DataType::STRING, false),
         StructField::new("size", DataType::LONG, true),
         StructField::new("modificationTime", DataType::LONG, true),
         StructField::new("stats", DataType::STRING, true),
         StructField::new(
             "deletionVector",
-            StructType::new(vec![
+            StructType::new([
                 StructField::new("storageType", DataType::STRING, false),
                 StructField::new("pathOrInlineDv", DataType::STRING, false),
                 StructField::new("offset", DataType::INTEGER, true),
                 StructField::new("sizeInBytes", DataType::INTEGER, false),
                 StructField::new("cardinality", DataType::LONG, false),
             ]),
-            true
+            true,
         ),
         StructField::new(
             "fileConstantValues",
-            StructType::new(vec![StructField::new(
+            StructType::new([StructField::new(
                 "partitionValues",
                 MapType::new(DataType::STRING, DataType::STRING, false),
                 true,
             )]),
-            true
+            true,
         ),
-    )));
-    static ref SCAN_ROW_DATATYPE: DataType = SCAN_ROW_SCHEMA.as_ref().clone().into();
-}
+    ]))
+});
+static SCAN_ROW_DATATYPE: LazyLock<DataType> = LazyLock::new(|| SCAN_ROW_SCHEMA.clone().into());
 
 impl LogReplayScanner {
     /// Create a new [`LogReplayScanner`] instance
     fn new(
         engine: &dyn Engine,
         table_schema: &SchemaRef,
-        predicate: &Option<ExpressionRef>,
+        predicate: Option<ExpressionRef>,
     ) -> Self {
         Self {
             filter: DataSkippingFilter::new(engine, table_schema, predicate),
@@ -195,6 +195,7 @@ impl LogReplayScanner {
             None => vec![false; actions.length()],
         };
 
+        assert_eq!(selection_vector.len(), actions.length());
         let adds = self.setup_batch_process(filter_vector, actions, is_log_batch)?;
 
         for (add, index) in adds.into_iter() {
@@ -270,7 +271,7 @@ pub fn log_replay_iter(
     engine: &dyn Engine,
     action_iter: impl Iterator<Item = DeltaResult<(Box<dyn EngineData>, bool)>> + Send,
     table_schema: &SchemaRef,
-    predicate: &Option<ExpressionRef>,
+    predicate: Option<ExpressionRef>,
 ) -> impl Iterator<Item = DeltaResult<Add>> {
     let mut log_scanner = LogReplayScanner::new(engine, table_schema, predicate);
 
@@ -293,7 +294,7 @@ pub fn scan_action_iter(
     engine: &dyn Engine,
     action_iter: impl Iterator<Item = DeltaResult<(Box<dyn EngineData>, bool)>>,
     table_schema: &SchemaRef,
-    predicate: &Option<ExpressionRef>,
+    predicate: Option<ExpressionRef>,
 ) -> impl Iterator<Item = DeltaResult<ScanData>> {
     let mut log_scanner = LogReplayScanner::new(engine, table_schema, predicate);
     let expression_handler = engine.get_expression_handler();

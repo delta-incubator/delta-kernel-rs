@@ -13,6 +13,7 @@ use delta_kernel::schema::Schema;
 use delta_kernel::{DeltaResult, Engine, Table};
 
 use clap::{Parser, ValueEnum};
+use itertools::Itertools;
 
 /// An example program that dumps out the data of a delta table. Struct and Map types are not
 /// supported.
@@ -91,21 +92,17 @@ fn try_main() -> DeltaResult<()> {
 
     let read_schema_opt = cli
         .columns
-        .map(|cols| {
-            use itertools::Itertools;
+        .map(|cols| -> DeltaResult<_> {
             let table_schema = snapshot.schema();
-            let selected_fields = cols
-                .iter()
-                .map(|col| {
-                    table_schema
-                        .field(col)
-                        .cloned()
-                        .ok_or(delta_kernel::Error::Generic(format!(
-                            "Table has no such column: {col}"
-                        )))
-                })
-                .try_collect();
-            selected_fields.map(|selected_fields| Arc::new(Schema::new(selected_fields)))
+            let selected_fields = cols.iter().map(|col| {
+                table_schema
+                    .field(col)
+                    .cloned()
+                    .ok_or(delta_kernel::Error::Generic(format!(
+                        "Table has no such column: {col}"
+                    )))
+            });
+            Schema::try_new(selected_fields).map(Arc::new)
         })
         .transpose()?;
     let scan = snapshot
@@ -113,26 +110,24 @@ fn try_main() -> DeltaResult<()> {
         .with_schema_opt(read_schema_opt)
         .build()?;
 
-    let mut batches = vec![];
-    for res in scan.execute(engine.as_ref())?.into_iter() {
-        let data = res.raw_data?;
-        let record_batch: RecordBatch = data
-            .into_any()
-            .downcast::<ArrowEngineData>()
-            .map_err(|_| delta_kernel::Error::EngineDataType("ArrowEngineData".to_string()))?
-            .into();
-        let batch = if let Some(mut mask) = res.mask {
-            let extra_rows = record_batch.num_rows() - mask.len();
-            if extra_rows > 0 {
-                // we need to extend the mask here in case it's too short
-                mask.extend(std::iter::repeat(true).take(extra_rows));
+    let batches: Vec<RecordBatch> = scan
+        .execute(engine.as_ref())?
+        .map(|scan_result| -> DeltaResult<_> {
+            let scan_result = scan_result?;
+            let mask = scan_result.full_mask();
+            let data = scan_result.raw_data?;
+            let record_batch: RecordBatch = data
+                .into_any()
+                .downcast::<ArrowEngineData>()
+                .map_err(|_| delta_kernel::Error::EngineDataType("ArrowEngineData".to_string()))?
+                .into();
+            if let Some(mask) = mask {
+                Ok(filter_record_batch(&record_batch, &mask.into())?)
+            } else {
+                Ok(record_batch)
             }
-            filter_record_batch(&record_batch, &mask.into())?
-        } else {
-            record_batch
-        };
-        batches.push(batch);
-    }
+        })
+        .try_collect()?;
     print_batches(&batches)?;
     Ok(())
 }

@@ -1,7 +1,6 @@
+use chrono::{DateTime, NaiveDate, NaiveDateTime, TimeZone, Utc};
 use std::cmp::Ordering;
 use std::fmt::{Display, Formatter};
-
-use chrono::{DateTime, NaiveDate, NaiveDateTime, TimeZone, Utc};
 
 use crate::schema::{ArrayType, DataType, PrimitiveType, StructField};
 use crate::utils::require;
@@ -143,7 +142,7 @@ impl Scalar {
             Self::Decimal(_, precision, scale) => DataType::decimal_unchecked(*precision, *scale),
             Self::Null(data_type) => data_type.clone(),
             Self::Struct(data) => DataType::struct_type(data.fields.clone()),
-            Self::Array(data) => DataType::array_type(data.tpe.clone()),
+            Self::Array(data) => data.tpe.clone().into(),
         }
     }
 
@@ -346,10 +345,6 @@ impl PrimitiveType {
     pub fn parse_scalar(&self, raw: &str) -> Result<Scalar, Error> {
         use PrimitiveType::*;
 
-        lazy_static::lazy_static! {
-            static ref UNIX_EPOCH: DateTime<Utc> = DateTime::from_timestamp(0, 0).unwrap();
-        }
-
         if raw.is_empty() {
             return Ok(Scalar::Null(self.data_type()));
         }
@@ -379,7 +374,7 @@ impl PrimitiveType {
                     .and_hms_opt(0, 0, 0)
                     .ok_or(self.parse_error(raw))?;
                 let date = Utc.from_utc_datetime(&date);
-                let days = date.signed_duration_since(*UNIX_EPOCH).num_days() as i32;
+                let days = date.signed_duration_since(DateTime::UNIX_EPOCH).num_days() as i32;
                 Ok(Scalar::Date(days))
             }
             // NOTE: Timestamp and TimestampNtz are parsed in the same way, as microsecond since unix epoch.
@@ -391,7 +386,7 @@ impl PrimitiveType {
                     .map_err(|_| self.parse_error(raw))?;
                 let timestamp = Utc.from_utc_datetime(&timestamp);
                 let micros = timestamp
-                    .signed_duration_since(*UNIX_EPOCH)
+                    .signed_duration_since(DateTime::UNIX_EPOCH)
                     .num_microseconds()
                     .ok_or(self.parse_error(raw))?;
                 match self {
@@ -556,7 +551,7 @@ mod tests {
     fn test_arrays() {
         #[allow(deprecated)]
         let array = Scalar::Array(ArrayData {
-            tpe: ArrayType::new(DataType::Primitive(PrimitiveType::Integer), false),
+            tpe: ArrayType::new(DataType::INTEGER, false),
             elements: vec![Scalar::Integer(1), Scalar::Integer(2), Scalar::Integer(3)],
         });
 
