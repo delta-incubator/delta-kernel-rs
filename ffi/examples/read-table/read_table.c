@@ -6,6 +6,7 @@
 #include "expression.h"
 #include "read_table.h"
 #include "schema.h"
+#include "expression.h"
 
 // some diagnostic functions
 void print_diag(char* fmt, ...)
