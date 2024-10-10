@@ -397,6 +397,10 @@ fn list_log_files_with_checkpoint(
         )));
     }
 
+    debug_assert!(
+        commit_files.windows(2).all(|cfs| cfs[0].version <= cfs[1].version),
+        "fs_client.list_from() didn't return a sorted listing! {:?}", commit_files
+    );
     // We assume listing returned ordered, we want reverse order
     let commit_files = commit_files.into_iter().rev().collect();
 
@@ -442,6 +446,10 @@ fn list_log_files(
 
     commit_files.retain(|f| f.version as i64 > max_checkpoint_version);
 
+    debug_assert!(
+        commit_files.windows(2).all(|cfs| cfs[0].version <= cfs[1].version),
+        "fs_client.list_from() didn't return a sorted listing! {:?}", commit_files
+    );
     // We assume listing returned ordered, we want reverse order
     let commit_files = commit_files.into_iter().rev().collect();
 
