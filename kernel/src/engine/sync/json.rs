@@ -2,7 +2,7 @@ use std::{fs::File, io::BufReader};
 
 use crate::{
     engine::arrow_utils::parse_json as arrow_parse_json, schema::SchemaRef, DeltaResult,
-    EngineData, Expression, FileDataReadResultIterator, FileMeta, JsonHandler,
+    EngineData, ExpressionRef, FileDataReadResultIterator, FileMeta, JsonHandler,
 };
 use arrow_schema::SchemaRef as ArrowSchemaRef;
 
@@ -15,7 +15,7 @@ fn try_create_from_json(
     file: File,
     _schema: SchemaRef,
     arrow_schema: ArrowSchemaRef,
-    _predicate: Option<&Expression>,
+    _predicate: Option<ExpressionRef>,
 ) -> DeltaResult<impl Iterator<Item = DeltaResult<ArrowEngineData>>> {
     let json = arrow_json::ReaderBuilder::new(arrow_schema)
         .build(BufReader::new(file))?
@@ -28,7 +28,7 @@ impl JsonHandler for SyncJsonHandler {
         &self,
         files: &[FileMeta],
         schema: SchemaRef,
-        predicate: Option<Expression>,
+        predicate: Option<ExpressionRef>,
     ) -> DeltaResult<FileDataReadResultIterator> {
         read_files(files, schema, predicate, try_create_from_json)
     }
