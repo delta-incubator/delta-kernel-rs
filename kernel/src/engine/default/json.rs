@@ -101,7 +101,7 @@ impl<E: TaskExecutor> JsonHandler for DefaultJsonHandler<E> {
         for chunk in data.into_iter() {
             let arrow_data = ArrowEngineData::try_from_engine_data(chunk)?;
             let record_batch = arrow_data.record_batch();
-            writer.write(&record_batch)?;
+            writer.write(record_batch)?;
         }
 
         writer.finish()?;
