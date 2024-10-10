@@ -200,10 +200,10 @@ PartitionList* get_partition_list(SharedGlobalScanState* state)
 
 int main(int argc, char* argv[])
 {
-  test_kernel_expr();
+  // test_kernel_expr();
 
   if (argc < 2) {
-    printf("Usage: %s table/path\n", argv[0]);
+    printf("Usage: %s read_table table/path\n", argv[0]);
     return -1;
   }
 

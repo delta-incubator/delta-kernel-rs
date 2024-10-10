@@ -711,15 +711,25 @@ void print_tree(FILE* to, ExpressionRef ref, int depth)
 void read_expected_expression_tree(char* expected_buf)
 {
   FILE* data_file = fopen("expression_test_results.txt", "r");
-  int x = fread(expected_buf, sizeof(char), TEST_BUF_SIZE, data_file);
-  assert(x > 0);
+  if (NULL == data_file) {
+    abort();
+  }
+  if (NULL == fgets(expected_buf, TEST_BUF_SIZE - 1, data_file)) {
+    abort();
+  }
+  if (0 != fclose(data_file)) {
+    abort();
+  }
 }
 void get_expression_tree(ExpressionRef ref, char* out_buf, size_t buf_len)
 {
 
-  FILE* out_file = fmemopen(out_buf, buf_len, "w");
-  print_tree(out_file, ref, 0);
-  fclose(out_file);
+  FILE* buf_stream = fmemopen(out_buf, buf_len, "w");
+  if (NULL == buf_stream) {
+    abort();
+  }
+  print_tree(buf_stream, ref, 0);
+  fclose(buf_stream);
 }
 void test_kernel_expr()
 {
