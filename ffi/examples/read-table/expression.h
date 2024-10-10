@@ -376,7 +376,6 @@ uintptr_t visit_expr_column(void* data, KernelStringSlice string)
 // Print the schema of the snapshot
 ExpressionRef construct_predicate(SharedExpression* predicate)
 {
-  print_diag("Building schema\n");
   ExpressionBuilder data = { 0 };
   EngineExpressionVisitor visitor = {
     .data = &data,
@@ -612,7 +611,7 @@ void print_tree(FILE* to, ExpressionRef ref, int depth)
           break;
         case Long:
           fprintf(to, "Long");
-          fprintf(to, "(%lld)\n", lit->value.long_data);
+          fprintf(to, "(%lld)\n", (long long)lit->value.long_data);
           break;
         case Short:
           fprintf(to, "Short");
@@ -640,11 +639,11 @@ void print_tree(FILE* to, ExpressionRef ref, int depth)
           break;
         case Timestamp:
           fprintf(to, "Timestamp");
-          fprintf(to, "(%lld)\n", lit->value.long_data);
+          fprintf(to, "(%lld)\n", (long long)lit->value.long_data);
           break;
         case TimestampNtz:
           fprintf(to, "TimestampNtz");
-          fprintf(to, "(%lld)\n", lit->value.long_data);
+          fprintf(to, "(%lld)\n", (long long)lit->value.long_data);
           break;
         case Date:
           fprintf(to, "Date");
@@ -658,8 +657,8 @@ void print_tree(FILE* to, ExpressionRef ref, int depth)
           fprintf(
             to,
             "Decimal(%lld,%lld, %d, %d)\n",
-            dec->value[0],
-            dec->value[1],
+            (long long)dec->value[0],
+            (long long)dec->value[1],
             dec->scale,
             dec->precision);
           break;
