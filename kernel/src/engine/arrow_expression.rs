@@ -219,7 +219,7 @@ fn evaluate_expression(
                     Ok(ArrowField::new(
                         input_field.name(),
                         output_col.data_type().clone(),
-                        input_field.is_nullable(),
+                        output_col.is_nullable(),
                     ))
                 })
                 .try_collect()?;
