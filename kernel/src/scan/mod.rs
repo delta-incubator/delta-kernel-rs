@@ -217,22 +217,27 @@ impl Scan {
         &self,
         engine: &dyn Engine,
     ) -> DeltaResult<impl Iterator<Item = DeltaResult<ScanData>>> {
-        let commit_read_schema = get_log_schema().project(&[ADD_NAME, REMOVE_NAME])?;
-        let checkpoint_read_schema = get_log_schema().project(&[ADD_NAME])?;
-
-        let log_iter = self.snapshot.log_segment.replay(
-            engine,
-            commit_read_schema,
-            checkpoint_read_schema,
-            self.predicate.clone(),
-        )?;
-
         Ok(scan_action_iter(
             engine,
-            log_iter,
+            self.replay_for_scan_data(engine)?,
             &self.logical_schema,
             &self.predicate,
         ))
+    }
+
+    // Factored out to facilitate testing
+    fn replay_for_scan_data(
+        &self,
+        engine: &dyn Engine,
+    ) -> DeltaResult<impl Iterator<Item = DeltaResult<(Box<dyn EngineData>, bool)>> + Send> {
+        let commit_read_schema = get_log_schema().project(&[ADD_NAME, REMOVE_NAME])?;
+        let checkpoint_read_schema = get_log_schema().project(&[ADD_NAME])?;
+
+        // NOTE: We don't pass any meta-predicate because we expect no meaningful row group skipping
+        // when ~every checkpoint file will contain the adds and removes we are looking for.
+        self.snapshot
+            .log_segment
+            .replay(engine, commit_read_schema, checkpoint_read_schema, None)
     }
 
     /// Get global state that is valid for the entire scan. This is somewhat expensive so should
@@ -312,7 +317,7 @@ impl Scan {
                 let read_result_iter = engine.get_parquet_handler().read_parquet_files(
                     &[meta],
                     global_state.read_schema.clone(),
-                    None,
+                    self.predicate().clone(),
                 )?;
                 let gs = global_state.clone(); // Arc clone
                 Ok(read_result_iter.map(move |read_result| -> DeltaResult<_> {
@@ -785,6 +790,67 @@ mod tests {
             .unwrap();
             assert_eq!(value, *expected);
         }
+    }
+
+    #[test]
+    fn test_replay_for_scan_data() {
+        let path = std::fs::canonicalize(PathBuf::from("./tests/data/parquet_row_group_skipping/"));
+        let url = url::Url::from_directory_path(path.unwrap()).unwrap();
+        let engine = SyncEngine::new();
+
+        let table = Table::new(url);
+        let snapshot = table.snapshot(&engine, None).unwrap();
+        let scan = snapshot.into_scan_builder().build().unwrap();
+        let data: Vec<_> = scan
+            .replay_for_scan_data(&engine)
+            .unwrap()
+            .try_collect()
+            .unwrap();
+        // No predicate pushdown attempted, because at most one part of a multi-part checkpoint
+        // could be skipped when looking for adds/removes.
+        //
+        // NOTE: Each checkpoint part is a single-row file -- guaranteed to produce one row group.
+        assert_eq!(data.len(), 5);
+    }
+
+    #[test]
+    fn test_data_row_group_skipping() {
+        let path = std::fs::canonicalize(PathBuf::from("./tests/data/parquet_row_group_skipping/"));
+        let url = url::Url::from_directory_path(path.unwrap()).unwrap();
+        let engine = SyncEngine::new();
+
+        let table = Table::new(url);
+        let snapshot = Arc::new(table.snapshot(&engine, None).unwrap());
+
+        // No predicate pushdown attempted, so the one data file should be returned.
+        //
+        // NOTE: The data file contains only five rows -- near guaranteed to produce one row group.
+        let scan = snapshot.clone().scan_builder().build().unwrap();
+        let data: Vec<_> = scan.execute(&engine).unwrap().try_collect().unwrap();
+        assert_eq!(data.len(), 1);
+
+        // Ineffective predicate pushdown attempted, so the one data file should be returned.
+        let int_col = Expression::column("numeric.ints.int32");
+        let value = Expression::literal(1000i32);
+        let predicate = int_col.clone().gt(value.clone());
+        let scan = snapshot
+            .clone()
+            .scan_builder()
+            .with_predicate(predicate)
+            .build()
+            .unwrap();
+        let data: Vec<_> = scan.execute(&engine).unwrap().try_collect().unwrap();
+        assert_eq!(data.len(), 1);
+
+        // Effective predicate pushdown, so no data files should be returned.
+        let predicate = int_col.lt(value);
+        let scan = snapshot
+            .scan_builder()
+            .with_predicate(predicate)
+            .build()
+            .unwrap();
+        let data: Vec<_> = scan.execute(&engine).unwrap().try_collect().unwrap();
+        assert_eq!(data.len(), 0);
     }
 
     #[test_log::test]
