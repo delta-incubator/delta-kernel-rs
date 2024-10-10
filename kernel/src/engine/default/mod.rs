@@ -57,21 +57,7 @@ impl<E: TaskExecutor> DefaultEngine<E> {
     {
         // table root is the path of the table in the ObjectStore
         let (store, table_root) = parse_url_opts(table_root, options)?;
-        let store = Arc::new(store);
-        Ok(Self {
-            file_system: Arc::new(ObjectStoreFileSystemClient::new(
-                store.clone(),
-                table_root,
-                task_executor.clone(),
-            )),
-            json: Arc::new(DefaultJsonHandler::new(
-                store.clone(),
-                task_executor.clone(),
-            )),
-            parquet: Arc::new(DefaultParquetHandler::new(store.clone(), task_executor)),
-            store,
-            expression: Arc::new(ArrowExpressionHandler {}),
-        })
+        Ok(Self::new(Arc::new(store), table_root, task_executor))
     }
 
     /// Create a new [`DefaultEngine`] instance

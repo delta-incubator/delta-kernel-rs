@@ -38,10 +38,10 @@ impl Transaction {
     /// Create a new transaction from a snapshot. The snapshot will be used to read the current
     /// state of the table (e.g. to read the current version).
     ///
-    /// Instead of using this API, the more typical API is
+    /// Instead of using this API, the more typical (user-facing) API is
     /// [Table::new_transaction](crate::table::Table::new_transaction) to create a transaction from
     /// a table automatically backed by the latest snapshot.
-    pub fn new(snapshot: impl Into<Arc<Snapshot>>) -> Self {
+    pub(crate) fn new(snapshot: impl Into<Arc<Snapshot>>) -> Self {
         Transaction {
             read_snapshot: snapshot.into(),
             commit_info: None,
