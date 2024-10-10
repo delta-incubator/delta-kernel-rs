@@ -14,6 +14,7 @@
  *
  * Each expression is an "ExpressionRef", which tracks the type and pointer to the expression.
  */
+
 #define DEFINE_BINOP(fun_name, op)                                                                 \
   uintptr_t fun_name(void* data, uintptr_t a, uintptr_t b)                                         \
   {                                                                                                \
