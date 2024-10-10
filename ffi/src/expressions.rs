@@ -454,9 +454,25 @@ pub struct EngineExpressionVisitor {
     pub visit_array_item: extern "C" fn(data: *mut c_void, array_id: usize, item_id: usize),
 }
 
+/// The [`EngineExpressionVisitor`] defines a visitor system to allow engines to build their own
+/// representation of an expression from a particular expression within the kernel.
+///
+/// Visit operations where the engine allocates an expression must return an associated `id`, which is an integer
+/// identifier ([`usize`]). This identifier can be passed back to the engine to identify the expression.
+/// The [`EngineExpressionVisitor`] handles both simple and complex types.
+/// 1. For simple types, the engine is expected to allocate that data and return its identifier.
+/// 2. For complex types such as structs, arrays, and variadic expressions, there will be a call to
+/// construct the expression, and populate sub-expressions. For instance, [`visit_and`] recieves
+/// the expected number of sub-expressions and must return an identifier. The kernel will
+/// subsequently call [`visit_variadic_item`] with the identifier of the And expression, and the
+/// identifier for a sub-expression.
+///
+/// WARNING: The visitor MUST NOT retain internal references to string slices or binary data passed
+/// to visitor methods
+/// TODO: Add type information in struct field and null. This will likely involve using the schema visitor.
 #[no_mangle]
-pub unsafe extern "C" fn visit_expression(
-    expression: &Handle<KernelPredicate>, // TODO: This will likely be some kind of Handle<Expression>
+pub extern "C" fn visit_expression(
+    expression: &Handle<KernelPredicate>,
     visitor: &mut EngineExpressionVisitor,
 ) -> usize {
     macro_rules! call {
