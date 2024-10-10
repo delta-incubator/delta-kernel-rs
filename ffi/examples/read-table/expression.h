@@ -12,12 +12,12 @@
   {                                                                                                \
     return visit_expr_binop(data, a, b, op);                                                       \
   }
-#define DEFINE_SIMPLE_SCALAR(fun_name, enum_member, c_type)                                        \
+#define DEFINE_SIMPLE_SCALAR(fun_name, enum_member, c_type, literal_field)                         \
   uintptr_t fun_name(void* data, c_type val)                                                       \
   {                                                                                                \
     struct Literal* lit = malloc(sizeof(struct Literal));                                          \
     lit->type = enum_member;                                                                       \
-    lit->value.simple = (uintptr_t)val;                                                            \
+    lit->value.literal_field = val;                                                                \
     return put_handle(data, lit, Literal);                                                         \
   }                                                                                                \
   _Static_assert(                                                                                  \
@@ -148,7 +148,13 @@ struct Literal
   enum LitType type;
   union LiteralValue
   {
-    uint64_t simple;
+    int32_t integer_data;
+    int64_t long_data;
+    int16_t short_data;
+    int8_t byte_data;
+    float float_data;
+    double double_data;
+    bool boolean_data;
     struct KernelStringSlice string_data;
     struct Struct struct_data;
     struct ArrayData array_data;
@@ -233,16 +239,16 @@ uintptr_t visit_expr_decimal(
   dec->scale = scale;
   return put_handle(data, literal, Literal);
 }
-DEFINE_SIMPLE_SCALAR(visit_expr_int, Integer, int32_t);
-DEFINE_SIMPLE_SCALAR(visit_expr_long, Long, int64_t);
-DEFINE_SIMPLE_SCALAR(visit_expr_short, Short, int16_t);
-DEFINE_SIMPLE_SCALAR(visit_expr_byte, Byte, int8_t);
-DEFINE_SIMPLE_SCALAR(visit_expr_float, Float, float);
-DEFINE_SIMPLE_SCALAR(visit_expr_double, Double, double);
-DEFINE_SIMPLE_SCALAR(visit_expr_boolean, Boolean, _Bool);
-DEFINE_SIMPLE_SCALAR(visit_expr_timestamp, Timestamp, int64_t);
-DEFINE_SIMPLE_SCALAR(visit_expr_timestamp_ntz, TimestampNtz, int64_t);
-DEFINE_SIMPLE_SCALAR(visit_expr_date, Date, int32_t);
+DEFINE_SIMPLE_SCALAR(visit_expr_int, Integer, int32_t, integer_data);
+DEFINE_SIMPLE_SCALAR(visit_expr_long, Long, int64_t, long_data);
+DEFINE_SIMPLE_SCALAR(visit_expr_short, Short, int16_t, short_data);
+DEFINE_SIMPLE_SCALAR(visit_expr_byte, Byte, int8_t, byte_data);
+DEFINE_SIMPLE_SCALAR(visit_expr_float, Float, float, float_data);
+DEFINE_SIMPLE_SCALAR(visit_expr_double, Double, double, double_data);
+DEFINE_SIMPLE_SCALAR(visit_expr_boolean, Boolean, _Bool, boolean_data);
+DEFINE_SIMPLE_SCALAR(visit_expr_timestamp, Timestamp, int64_t, long_data);
+DEFINE_SIMPLE_SCALAR(visit_expr_timestamp_ntz, TimestampNtz, int64_t, long_data);
+DEFINE_SIMPLE_SCALAR(visit_expr_date, Date, int32_t, integer_data);
 
 uintptr_t visit_expr_variadic(void* data, uintptr_t len, enum VariadicType op)
 {
@@ -356,7 +362,6 @@ uintptr_t visit_expr_column(void* data, KernelStringSlice string)
 {
   struct KernelStringSlice* heap_string = malloc(sizeof(KernelStringSlice));
   *heap_string = copy_kernel_string(string);
-  printf("Creating column with len %lu: %s\n", string.len, heap_string->ptr);
   return put_handle(data, heap_string, Column);
 }
 
@@ -411,13 +416,6 @@ struct ExpressionRef construct_predicate(KernelPredicate* predicate)
   return data.handles[schema_list_id];
 }
 
-void print_n_spaces(int n)
-{
-  if (n == 0)
-    return;
-  printf("  ");
-  print_n_spaces(n - 1);
-}
 void free_expression(struct ExpressionRef ref)
 {
   switch (ref.type) {
@@ -501,195 +499,225 @@ void free_expression(struct ExpressionRef ref)
     }
   }
 }
-void print_tree(struct ExpressionRef ref, int depth)
+
+void print_n_spaces(FILE* to, int n)
+{
+  if (n == 0)
+    return;
+  fprintf(to, "  ");
+  print_n_spaces(to, n - 1);
+}
+void print_tree(FILE* to, struct ExpressionRef ref, int depth)
 {
   switch (ref.type) {
     case BinOp: {
       struct BinOp* op = ref.ref;
-      print_n_spaces(depth);
+      print_n_spaces(to, depth);
       switch (op->op) {
         case Add: {
-          printf("ADD\n");
+          fprintf(to, "ADD\n");
           break;
         }
         case Sub: {
-          printf("SUB\n");
+          fprintf(to, "SUB\n");
           break;
         };
         case Div: {
-          printf("DIV\n");
+          fprintf(to, "DIV\n");
           break;
         };
         case Mul: {
-          printf("MUL\n");
+          fprintf(to, "MUL\n");
           break;
         };
         case LT: {
-          printf("LT\n");
+          fprintf(to, "LT\n");
           break;
         };
         case LE: {
-          printf("LE\n");
+          fprintf(to, "LE\n");
           break;
         }
         case GT: {
-          printf("GT\n");
+          fprintf(to, "GT\n");
           break;
         };
         case GE: {
-          printf("GE\n");
+          fprintf(to, "GE\n");
           break;
         };
         case EQ: {
-          printf("EQ\n");
+          fprintf(to, "EQ\n");
           break;
         };
         case NE: {
-          printf("NE\n");
+          fprintf(to, "NE\n");
           break;
         };
         case In: {
-          printf("In\n");
+          fprintf(to, "In\n");
           break;
         };
         case NotIn: {
-          printf("NotIn\n");
+          fprintf(to, "NotIn\n");
           break;
         }; break;
         case Distinct:
-          printf("Distinct\n");
+          fprintf(to, "Distinct\n");
           break;
       }
 
       struct ExpressionRef left = { .ref = op->left, .type = Literal };
       struct ExpressionRef right = { .ref = op->right, .type = Literal };
-      print_tree(left, depth + 1);
-      print_tree(right, depth + 1);
+      print_tree(to, left, depth + 1);
+      print_tree(to, right, depth + 1);
       break;
     }
     case Variadic: {
       struct Variadic* var = ref.ref;
-      print_n_spaces(depth);
+      print_n_spaces(to, depth);
       switch (var->op) {
         case And:
-          printf("And\n");
+          fprintf(to, "And\n");
           break;
         case Or:
-          printf("Or\n");
+          fprintf(to, "Or\n");
           break;
         case StructConstructor:
-          printf("StructConstructor\n");
+          fprintf(to, "StructConstructor\n");
           break;
         case ArrayData:
-          printf("ArrayData\n");
+          fprintf(to, "ArrayData\n");
           break;
       }
       for (size_t i = 0; i < var->len; i++) {
-        print_tree(var->expr_list[i], depth + 1);
+        print_tree(to, var->expr_list[i], depth + 1);
       }
     } break;
     case Literal: {
       struct Literal* lit = ref.ref;
-      print_n_spaces(depth);
+      print_n_spaces(to, depth);
       switch (lit->type) {
         case Integer:
-          printf("Integer");
-          printf("(%lld)\n", lit->value.simple);
+          fprintf(to, "Integer");
+          fprintf(to, "(%d)\n", lit->value.integer_data);
           break;
         case Long:
-          printf("Long");
-          printf("(%lld)\n", lit->value.simple);
+          fprintf(to, "Long");
+          fprintf(to, "(%lld)\n", lit->value.long_data);
           break;
         case Short:
-          printf("Short");
-          printf("(%lld)\n", lit->value.simple);
+          fprintf(to, "Short");
+          fprintf(to, "(%hd)\n", lit->value.short_data);
           break;
         case Byte:
-          printf("Byte");
-          printf("(%lld)\n", lit->value.simple);
+          fprintf(to, "Byte");
+          fprintf(to, "(%hhd)\n", lit->value.byte_data);
           break;
         case Float:
-          printf("Float");
-          printf("(%lld)\n", lit->value.simple);
+          fprintf(to, "Float");
+          fprintf(to, "(%f)\n", (float)lit->value.float_data);
           break;
         case Double:
-          printf("Double");
-          printf("(%lld)\n", lit->value.simple);
+          fprintf(to, "Double");
+          fprintf(to, "(%f)\n", lit->value.double_data);
           break;
         case String: {
-          printf("String(%s)\n", lit->value.string_data.ptr);
+          fprintf(to, "String(%s)\n", lit->value.string_data.ptr);
           break;
         }
         case Boolean:
-          printf("Boolean");
-          printf("(%lld)\n", lit->value.simple);
+          fprintf(to, "Boolean");
+          fprintf(to, "(%d)\n", lit->value.boolean_data);
           break;
         case Timestamp:
-          printf("Timestamp");
-          printf("(%lld)\n", lit->value.simple);
+          fprintf(to, "Timestamp");
+          fprintf(to, "(%lld)\n", lit->value.long_data);
           break;
         case TimestampNtz:
-          printf("TimestampNtz");
-          printf("(%lld)\n", lit->value.simple);
+          fprintf(to, "TimestampNtz");
+          fprintf(to, "(%lld)\n", lit->value.long_data);
           break;
         case Date:
-          printf("Date");
-          printf("(%lld)\n", lit->value.simple);
+          fprintf(to, "Date");
+          fprintf(to, "(%d)\n", lit->value.integer_data);
           break;
         case Binary:
-          printf("Binary\n");
+          fprintf(to, "Binary\n");
           break;
-        case Decimal:
-          printf("Decimal\n");
+        case Decimal: {
+          struct Decimal* dec = &lit->value.decimal;
+          fprintf(
+            to,
+            "Decimal(%lld,%lld, %d, %d)\n",
+            dec->value[0],
+            dec->value[1],
+            dec->scale,
+            dec->precision);
           break;
+        }
         case Null:
-          printf("Null\n");
+          fprintf(to, "Null\n");
           break;
         case Struct:
-          printf("Struct\n");
+          fprintf(to, "Struct\n");
           struct Struct* struct_data = &lit->value.struct_data;
           for (size_t i = 0; i < struct_data->len; i++) {
-            print_n_spaces(depth + 1);
-            printf("Field: %s\n", struct_data->field_names[i].ptr);
-            print_tree(struct_data->expressions[i], depth + 2);
+            print_n_spaces(to, depth + 1);
+            fprintf(to, "Field: %s\n", struct_data->field_names[i].ptr);
+            print_tree(to, struct_data->expressions[i], depth + 2);
           }
           break;
         case Array:
-          printf("Array\n");
+          fprintf(to, "Array\n");
           struct ArrayData* array = &lit->value.array_data;
           for (size_t i = 0; i < array->len; i++) {
-            print_tree(array->expr_list[i], depth + 1);
+            print_tree(to, array->expr_list[i], depth + 1);
           }
           break;
       }
     } break;
     case Unary: {
-      print_n_spaces(depth);
+      print_n_spaces(to, depth);
       struct Unary* unary = ref.ref;
       switch (unary->type) {
         case Not:
-          printf("Not\n");
+          fprintf(to, "Not\n");
           break;
         case IsNull:
-          printf("IsNull\n");
+          fprintf(to, "IsNull\n");
           break;
       }
-      print_tree(unary->sub_expr, depth + 1);
+      print_tree(to, unary->sub_expr, depth + 1);
       break;
     }
     case Column:
-      print_n_spaces(depth);
+      print_n_spaces(to, depth);
       KernelStringSlice* string = ref.ref;
-      printf("Column(%s)\n", string->ptr);
+      fprintf(to, "Column(%s)\n", string->ptr);
       break;
   }
 }
+
+#define TEST_BUF_SIZE 4096
 
 void test_kernel_expr()
 {
   KernelPredicate* pred = get_kernel_expression();
   struct ExpressionRef ref = construct_predicate(pred);
-  print_tree(ref, 0);
+
+  char out_buf[TEST_BUF_SIZE] = { 0 };
+  char expected_buf[TEST_BUF_SIZE] = { 0 };
+  FILE* out_file = fmemopen(out_buf, sizeof(out_buf), "w");
+  FILE* expected_file = fopen("expression_test_results.txt", "r");
+  int x = fread(expected_buf, sizeof(char), TEST_BUF_SIZE, expected_file);
+  assert(x > 0);
+
+  print_tree(out_file, ref, 0);
+
+  for (int i = 0; i < TEST_BUF_SIZE; i++) {
+    assert(out_buf[i] == expected_buf[i]);
+  }
   free_expression(ref);
   free_kernel_predicate(pred);
 }

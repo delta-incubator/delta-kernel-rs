@@ -310,7 +310,7 @@ pub unsafe extern "C" fn get_kernel_expression() -> Handle<KernelPredicate> {
         Expr::literal(Scalar::TimestampNtz(100)),
         Expr::literal(Scalar::Date(32)),
         Expr::literal(Scalar::Binary(b"0xdeadbeefcafe".to_vec())),
-        Expr::literal(Scalar::Decimal(1, 2, 3)),
+        Expr::literal(Scalar::Decimal((1 << 64) + 1, 2, 3)), // Both the most and least significant u64 of value are 1
         Expr::literal(Scalar::Null(DataType::Primitive(PrimitiveType::Short))),
         Expr::literal(Scalar::Struct(top)),
         Expr::literal(Scalar::Array(array_data)),
@@ -462,16 +462,19 @@ pub struct EngineExpressionVisitor {
 /// The [`EngineExpressionVisitor`] handles both simple and complex types.
 /// 1. For simple types, the engine is expected to allocate that data and return its identifier.
 /// 2. For complex types such as structs, arrays, and variadic expressions, there will be a call to
-/// construct the expression, and populate sub-expressions. For instance, [`visit_and`] recieves
-/// the expected number of sub-expressions and must return an identifier. The kernel will
-/// subsequently call [`visit_variadic_item`] with the identifier of the And expression, and the
-/// identifier for a sub-expression.
+///     construct the expression, and populate sub-expressions. For instance, [`visit_and`] recieves
+///     the expected number of sub-expressions and must return an identifier. The kernel will
+///     subsequently call [`visit_variadic_item`] with the identifier of the And expression, and the
+///     identifier for a sub-expression.
 ///
 /// WARNING: The visitor MUST NOT retain internal references to string slices or binary data passed
 /// to visitor methods
 /// TODO: Add type information in struct field and null. This will likely involve using the schema visitor.
+///
+/// # Safety
+/// The caller must pass a valid KernelPredicate Handle to the expression field
 #[no_mangle]
-pub extern "C" fn visit_expression(
+pub unsafe extern "C" fn visit_expression(
     expression: &Handle<KernelPredicate>,
     visitor: &mut EngineExpressionVisitor,
 ) -> usize {
