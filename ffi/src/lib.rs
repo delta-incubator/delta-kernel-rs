@@ -30,7 +30,7 @@ use handle::Handle;
 extern crate self as delta_kernel_ffi;
 
 pub mod engine_funcs;
-pub mod expression;
+pub mod expressions;
 pub mod scan;
 pub mod schema;
 

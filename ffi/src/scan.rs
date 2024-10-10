@@ -13,7 +13,7 @@ use delta_kernel_ffi_macros::handle_descriptor;
 use tracing::debug;
 use url::Url;
 
-use crate::expression::{unwrap_kernel_expression, EnginePredicate, KernelExpressionVisitorState};
+use crate::expressions::{unwrap_kernel_expression, EnginePredicate, KernelExpressionVisitorState};
 use crate::{
     AllocateStringFn, ExclusiveEngineData, ExternEngine, ExternResult, IntoExternResult,
     KernelBoolSlice, KernelRowIndexArray, KernelStringSlice, NullableCvoid, SharedExternEngine,
