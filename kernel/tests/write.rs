@@ -130,6 +130,54 @@ async fn test_commit_info() -> Result<(), Box<dyn std::error::Error>> {
         String::from_utf8(commit1.bytes().await?.to_vec())?,
         "{\"commitInfo\":{\"kernelVersion\":\"v0.3.1\",\"engineInfo\":\"default engine\"}}\n"
     );
+
+    // empty commit info test
+    let mut txn = table.new_transaction(&engine)?;
+    let commit_info_schema = Arc::new(ArrowSchema::empty());
+    let commit_info_batch = RecordBatch::new_empty(commit_info_schema.clone());
+    txn.commit_info(
+        Box::new(ArrowEngineData::new(commit_info_batch)),
+        commit_info_schema.try_into()?,
+    );
+
+    // commit!
+    txn.commit(&engine)?;
+
+    let commit1 = store
+        .get(&Path::from(
+            "/test_table/_delta_log/00000000000000000002.json",
+        ))
+        .await?;
+    assert!(commit1.bytes().await?.is_empty());
+
+    // one null row commit info
+    let mut txn = table.new_transaction(&engine)?;
+    let commit_info_schema = Arc::new(ArrowSchema::new(vec![Field::new(
+        "some_column_name",
+        ArrowDataType::Utf8,
+        true,
+    )]));
+    let commit_info_batch = RecordBatch::try_new(
+        commit_info_schema.clone(),
+        vec![Arc::new(StringArray::new_null(1))],
+    )?;
+    txn.commit_info(
+        Box::new(ArrowEngineData::new(commit_info_batch)),
+        commit_info_schema.try_into()?,
+    );
+
+    // commit!
+    txn.commit(&engine)?;
+
+    let commit1 = store
+        .get(&Path::from(
+            "/test_table/_delta_log/00000000000000000003.json",
+        ))
+        .await?;
+    assert_eq!(
+        String::from_utf8(commit1.bytes().await?.to_vec())?,
+        "{\"commitInfo\":{\"kernelVersion\":\"v0.3.1\"}}\n"
+    );
     Ok(())
 }
 
