@@ -14,8 +14,8 @@ use arrow_buffer::OffsetBuffer;
 use arrow_ord::cmp::{distinct, eq, gt, gt_eq, lt, lt_eq, neq};
 use arrow_ord::comparison::in_list_utf8;
 use arrow_schema::{
-    ArrowError, DataType as ArrowDataType, Field as ArrowField, Fields, IntervalUnit,
-    Schema as ArrowSchema, TimeUnit,
+    ArrowError, DataType as ArrowDataType, Field as ArrowField, FieldRef as ArrowFieldRef, Fields,
+    IntervalUnit, Schema as ArrowSchema, TimeUnit,
 };
 use arrow_select::concat::concat;
 use itertools::Itertools;
@@ -27,7 +27,7 @@ use crate::engine::arrow_utils::ensure_data_types;
 use crate::engine::arrow_utils::prim_array_cmp;
 use crate::error::{DeltaResult, Error};
 use crate::expressions::{BinaryOperator, Expression, Scalar, UnaryOperator, VariadicOperator};
-use crate::schema::{DataType, PrimitiveType, SchemaRef};
+use crate::schema::{ArrayType, DataType, MapType, PrimitiveType, Schema, SchemaRef};
 use crate::{EngineData, ExpressionEvaluator, ExpressionHandler};
 
 // TODO leverage scalars / Datum
@@ -369,7 +369,7 @@ fn evaluate_expression(
 // return a RecordBatch where the names of fields in `sa` have been transformed to match those in
 // schema specified by `output_type`
 fn apply_schema(sa: &StructArray, output_type: &DataType) -> DeltaResult<RecordBatch> {
-    let applied = apply_to_col(sa.data_type(), sa, output_type)?.ok_or(Error::generic(
+    let applied = apply_schema_to(sa.data_type(), sa, output_type)?.ok_or(Error::generic(
         "apply_to_col at top-level should return something",
     ))?;
     let applied_sa = applied.as_struct_opt().ok_or(Error::generic(
@@ -378,133 +378,164 @@ fn apply_schema(sa: &StructArray, output_type: &DataType) -> DeltaResult<RecordB
     Ok(applied_sa.into())
 }
 
+fn apply_schema_to_struct(
+    sa: &StructArray,
+    arrow_fields: &Fields,
+    kernel_fields: &Schema,
+) -> DeltaResult<StructArray> {
+    if kernel_fields.fields.len() != arrow_fields.len() {
+        return Err(make_arrow_error(format!(
+            "Kernel schema had {} fields, but data has {}",
+            kernel_fields.fields.len(),
+            arrow_fields.len()
+        )));
+    }
+    let (fields, sa_cols, sa_nulls) = sa.clone().into_parts();
+    let result_iter = fields
+        .into_iter()
+        .zip(sa_cols)
+        .zip(kernel_fields.fields())
+        .map(
+            |((sa_field, sa_col), kernel_field)| -> DeltaResult<(ArrowField, Arc<dyn Array>)> {
+                let transformed_col =
+                    apply_schema_to(sa_field.data_type(), &sa_col, kernel_field.data_type())?
+                        .unwrap_or(sa_col);
+                let transformed_field = sa_field
+                    .as_ref()
+                    .clone()
+                    .with_name(kernel_field.name.clone())
+                    .with_data_type(transformed_col.data_type().clone());
+                Ok((transformed_field, transformed_col))
+            },
+        );
+    let (transformed_fields, transformed_cols): (Vec<ArrowField>, Vec<Arc<dyn Array>>) =
+        result_iter.process_results(|iter| iter.unzip())?;
+    Ok(StructArray::try_new(
+        transformed_fields.into(),
+        transformed_cols,
+        sa_nulls,
+    )?)
+}
+
+// deconstruct the array, the rebuild the mapped version
+fn apply_schema_to_list(la: &ListArray, target_inner_type: &ArrayType) -> DeltaResult<ListArray> {
+    let (field, offset_buffer, values, nulls) = la.clone().into_parts();
+    let transformed_values =
+        apply_schema_to(field.data_type(), &values, &target_inner_type.element_type)?
+            .unwrap_or(values);
+    let transformed_field = Arc::new(
+        field
+            .as_ref()
+            .clone()
+            .with_data_type(transformed_values.data_type().clone()),
+    );
+    Ok(ListArray::try_new(
+        transformed_field,
+        offset_buffer,
+        transformed_values,
+        nulls,
+    )?)
+}
+
+fn apply_schema_to_map(
+    ma: &MapArray,
+    kernel_map_type: &MapType,
+    arrow_map_type: &ArrowFieldRef,
+) -> DeltaResult<MapArray> {
+    let (map_field, offset_buffer, map_struct_array, nulls, ordered) = ma.clone().into_parts();
+    if let ArrowDataType::Struct(_) = arrow_map_type.data_type() {
+        let (fields, msa_cols, msa_nulls) = map_struct_array.clone().into_parts();
+        let mut fields = fields.into_iter();
+        let key_field = fields.next().ok_or(make_arrow_error(
+            "Arrow map struct didn't have a key field".to_string(),
+        ))?;
+        let value_field = fields.next().ok_or(make_arrow_error(
+            "Arrow map struct didn't have a value field".to_string(),
+        ))?;
+        if fields.next().is_some() {
+            return Err(Error::generic("map fields had more than 2 members"));
+        }
+        let transformed_key = apply_schema_to(
+            key_field.data_type(),
+            msa_cols[0].as_ref(),
+            &kernel_map_type.key_type,
+        )?
+        .unwrap_or(msa_cols[0].clone());
+        let transformed_values = apply_schema_to(
+            value_field.data_type(),
+            msa_cols[1].as_ref(),
+            &kernel_map_type.value_type,
+        )?
+        .unwrap_or(msa_cols[1].clone());
+        let transformed_struct_fields = vec![
+            key_field
+                .as_ref()
+                .clone()
+                .with_data_type(transformed_key.data_type().clone()),
+            value_field
+                .as_ref()
+                .clone()
+                .with_data_type(transformed_values.data_type().clone()),
+        ];
+        let transformed_struct_cols = vec![transformed_key, transformed_values];
+        let transformed_map_struct_array = StructArray::try_new(
+            transformed_struct_fields.into(),
+            transformed_struct_cols,
+            msa_nulls,
+        )?;
+        let transformed_map_field = Arc::new(
+            map_field
+                .as_ref()
+                .clone()
+                .with_data_type(transformed_map_struct_array.data_type().clone()),
+        );
+        Ok(MapArray::try_new(
+            transformed_map_field,
+            offset_buffer,
+            transformed_map_struct_array,
+            nulls,
+            ordered,
+        )?)
+    } else {
+        Err(make_arrow_error(
+            "Arrow map type wasn't a struct.".to_string(),
+        ))
+    }
+}
+
 // make column `col` with type `arrow_type` look like `kernel_type`. For now this only handles name
 // transforms. if the actual data types don't match, this will return an error
-fn apply_to_col(
+fn apply_schema_to(
     arrow_type: &ArrowDataType,
     col: &dyn Array,
     kernel_type: &DataType,
 ) -> DeltaResult<Option<Arc<dyn Array>>> {
     match (kernel_type, arrow_type) {
         (DataType::Struct(kernel_fields), ArrowDataType::Struct(arrow_fields)) => {
-            if kernel_fields.fields.len() != arrow_fields.len() {
-                return Err(make_arrow_error(format!(
-                    "Kernel schema had {} fields, but data has {}",
-                    kernel_fields.fields.len(),
-                    arrow_fields.len()
-                )));
-            }
-            let sa = col.as_struct_opt().ok_or(make_arrow_error(
-                "Arrow claimed to be a struct but isn't a StructArray".to_string(),
-            ))?;
-            let (fields, sa_cols, sa_nulls) = sa.clone().into_parts();
-            let result_iter = fields
-                .into_iter()
-                .zip(sa_cols)
-                .zip(kernel_fields.fields())
-                .map(
-                |((sa_field, sa_col), kernel_field)| -> DeltaResult<(ArrowField, Arc<dyn Array>)> {
-                    let transformed_col =
-                        apply_to_col(sa_field.data_type(), &sa_col, kernel_field.data_type())?
-                            .unwrap_or(sa_col);
-                    let transformed_field = sa_field
-                        .as_ref()
-                        .clone()
-                        .with_name(kernel_field.name.clone())
-                        .with_data_type(transformed_col.data_type().clone());
-                    Ok((transformed_field, transformed_col))
-                },
-            );
-            let (transformed_fields, transformed_cols): (Vec<ArrowField>, Vec<Arc<dyn Array>>) =
-                result_iter.process_results(|iter| iter.unzip())?;
-            let transformed_array =
-                StructArray::try_new(transformed_fields.into(), transformed_cols, sa_nulls)?;
-            Ok(Some(Arc::new(transformed_array)))
+            let sa = col.as_struct_opt().ok_or_else(|| {
+                make_arrow_error("Arrow claimed to be a struct but isn't a StructArray")
+            })?;
+            Ok(Some(Arc::new(apply_schema_to_struct(
+                sa,
+                arrow_fields,
+                kernel_fields,
+            )?)))
         }
         (DataType::Array(inner_type), ArrowDataType::List(_arrow_list_type)) => {
-            // deconstruct the array, the rebuild the mapped version
             let la = col.as_list_opt().ok_or(make_arrow_error(
                 "Arrow claimed to be a list but isn't a ListArray".to_string(),
             ))?;
-            let (field, offset_buffer, values, nulls) = la.clone().into_parts();
-            let transformed_values =
-                apply_to_col(field.data_type(), &values, &inner_type.element_type)?
-                    .unwrap_or(values);
-            let transformed_field = Arc::new(
-                field
-                    .as_ref()
-                    .clone()
-                    .with_data_type(transformed_values.data_type().clone()),
-            );
-            let transformed_array =
-                ListArray::try_new(transformed_field, offset_buffer, transformed_values, nulls)?;
-            Ok(Some(Arc::new(transformed_array)))
+            Ok(Some(Arc::new(apply_schema_to_list(la, inner_type)?)))
         }
         (DataType::Map(kernel_map_type), ArrowDataType::Map(arrow_map_type, _)) => {
             let ma = col.as_map_opt().ok_or(make_arrow_error(
                 "Arrow claimed to be a map but isn't a MapArray".to_string(),
             ))?;
-            let (map_field, offset_buffer, map_struct_array, nulls, ordered) =
-                ma.clone().into_parts();
-            if let ArrowDataType::Struct(_) = arrow_map_type.data_type() {
-                let (fields, msa_cols, msa_nulls) = map_struct_array.clone().into_parts();
-                let mut fields = fields.into_iter();
-                let key_field = fields.next().ok_or(make_arrow_error(
-                    "Arrow map struct didn't have a key field".to_string(),
-                ))?;
-                let value_field = fields.next().ok_or(make_arrow_error(
-                    "Arrow map struct didn't have a value field".to_string(),
-                ))?;
-                if fields.next().is_some() {
-                    return Err(Error::generic("map fields had more than 2 members"));
-                }
-                let transformed_key = apply_to_col(
-                    key_field.data_type(),
-                    msa_cols[0].as_ref(),
-                    &kernel_map_type.key_type,
-                )?
-                .unwrap_or(msa_cols[0].clone());
-                let transformed_values = apply_to_col(
-                    value_field.data_type(),
-                    msa_cols[1].as_ref(),
-                    &kernel_map_type.value_type,
-                )?
-                .unwrap_or(msa_cols[1].clone());
-                let transformed_struct_fields = vec![
-                    key_field
-                        .as_ref()
-                        .clone()
-                        .with_data_type(transformed_key.data_type().clone()),
-                    value_field
-                        .as_ref()
-                        .clone()
-                        .with_data_type(transformed_values.data_type().clone()),
-                ];
-                let transformed_struct_cols = vec![transformed_key, transformed_values];
-                let transformed_map_struct_array = StructArray::try_new(
-                    transformed_struct_fields.into(),
-                    transformed_struct_cols,
-                    msa_nulls,
-                )?;
-                let transformed_map_field = Arc::new(
-                    map_field
-                        .as_ref()
-                        .clone()
-                        .with_data_type(transformed_map_struct_array.data_type().clone()),
-                );
-                let transformed_map = MapArray::try_new(
-                    transformed_map_field,
-                    offset_buffer,
-                    transformed_map_struct_array,
-                    nulls,
-                    ordered,
-                )?;
-                Ok(Some(Arc::new(transformed_map)))
-            } else {
-                Err(make_arrow_error(
-                    "Arrow map type wasn't a struct.".to_string(),
-                ))
-            }
+            Ok(Some(Arc::new(apply_schema_to_map(
+                ma,
+                kernel_map_type,
+                arrow_map_type,
+            )?)))
         }
         _ => {
             ensure_data_types(kernel_type, arrow_type)?;
