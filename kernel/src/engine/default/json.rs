@@ -5,7 +5,6 @@ use std::ops::Range;
 use std::sync::Arc;
 use std::task::{ready, Poll};
 
-use arrow_array::RecordBatch;
 use arrow_json::ReaderBuilder;
 use arrow_schema::SchemaRef as ArrowSchemaRef;
 use bytes::{Buf, Bytes};
@@ -98,28 +97,14 @@ impl<E: TaskExecutor> JsonHandler for DefaultJsonHandler<E> {
         data: Box<dyn Iterator<Item = Box<dyn EngineData>> + Send + '_>,
         _overwrite: bool,
     ) -> DeltaResult<()> {
-        let mut schema: Option<ArrowSchemaRef> = None;
-        let mut batches: Vec<RecordBatch> = Vec::new();
-
-        for chunk in data {
+        let mut writer = arrow_json::LineDelimitedWriter::new(Vec::new());
+        for chunk in data.into_iter() {
             let arrow_data = ArrowEngineData::try_from_engine_data(chunk)?;
             let record_batch = arrow_data.record_batch();
-
-            if schema.is_none() {
-                schema = Some(record_batch.schema());
-            }
-
-            batches.push(record_batch.clone());
+            writer.write(&record_batch)?;
         }
 
-        // collect all batches
-        let batches: Vec<&RecordBatch> = batches.iter().collect();
-
-        // write the batches to JSON
-        let mut writer = arrow_json::LineDelimitedWriter::new(Vec::new());
-        writer.write_batches(&batches)?;
         writer.finish()?;
-
         let buffer = writer.into_inner();
 
         // Put if absent

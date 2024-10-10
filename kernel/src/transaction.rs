@@ -6,6 +6,8 @@ use crate::snapshot::Snapshot;
 use crate::{DataType, Expression};
 use crate::{DeltaResult, Engine, EngineData};
 
+use tracing::warn;
+
 const KERNEL_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// A transaction represents an in-progress write to a table.
@@ -50,7 +52,23 @@ impl Transaction {
     pub fn commit(self, engine: &dyn Engine) -> DeltaResult<CommitResult> {
         // step one: construct the iterator of actions we want to commit
         // note: only support commit_info right now.
-        let (actions, _actions_schema) = generate_commit_info(engine, self.commit_info.clone())?;
+        let (actions, _actions_schema): (
+            Box<dyn Iterator<Item = Box<dyn EngineData>> + Send>,
+            SchemaRef,
+        ) = match self.commit_info {
+            Some(ref engine_commit_info) => {
+                let (actions, schema) = generate_commit_info(engine, engine_commit_info)?;
+                (Box::new(std::iter::once(actions)), schema)
+            }
+            None => {
+                (
+                    // if there is no commit info, actions are empty iterator and schema is just our
+                    // known log schema.
+                    Box::new(std::iter::empty()),
+                    get_log_schema().clone().into(),
+                )
+            }
+        };
 
         // step two: set new commit version (current_version + 1) and path to write
         let commit_version = &self.read_snapshot.version() + 1;
@@ -96,85 +114,88 @@ pub enum CommitResult {
 // given the engine's commit info (data and schema as [EngineCommitInfo]) we want to create both:
 // (1) the commitInfo action to commit (and append more actions to) and
 // (2) the schema for the actions to commit (this is determined by the engine's commit info schema)
-#[allow(clippy::type_complexity)]
 fn generate_commit_info(
-    engine: &'_ dyn Engine,
-    engine_commit_info: Option<EngineCommitInfo>,
-) -> DeltaResult<(
-    Box<dyn Iterator<Item = Box<dyn EngineData>> + Send + '_>,
-    SchemaRef,
-)> {
+    engine: &dyn Engine,
+    engine_commit_info: &EngineCommitInfo,
+) -> DeltaResult<(Box<dyn EngineData>, SchemaRef)> {
     use crate::actions::{
         ADD_NAME, COMMIT_INFO_NAME, METADATA_NAME, PROTOCOL_NAME, REMOVE_NAME, TRANSACTION_NAME,
     };
 
     // TODO: enforce single row commit info
+    if engine_commit_info.data.length() != 1 {
+        warn!(
+            "Engine commit info should have exactly one row, found {}",
+            engine_commit_info.data.length()
+        );
+    }
     // TODO: for now we always require commit info
-    let action_schema = Arc::new(engine_commit_info.as_ref().map_or(
-        get_log_schema().clone(),
-        |commit_info| {
-            let mut action_fields = get_log_schema().fields().collect::<Vec<_>>();
-            let commit_info_field = action_fields
-                .pop()
-                .expect("last field is commit_info in action schema");
-            let DataType::Struct(commit_info_schema) = commit_info_field.data_type() else {
-                unreachable!("commit_info_field is a struct");
-            };
-            let mut commit_info_fields = commit_info_schema.fields().collect::<Vec<_>>();
-            commit_info_fields.extend(commit_info.schema.fields());
-            let commit_info_schema =
-                StructType::new(commit_info_fields.into_iter().cloned().collect());
-            let mut action_fields = action_fields.into_iter().cloned().collect::<Vec<_>>();
-            action_fields.push(crate::schema::StructField::new(
+    let mut action_fields = get_log_schema().fields().collect::<Vec<_>>();
+    let commit_info_field = action_fields
+        .pop()
+        .expect("last field is commit_info in action schema");
+    let DataType::Struct(commit_info_schema) = commit_info_field.data_type() else {
+        unreachable!("commit_info_field is a struct");
+    };
+    let commit_info_fields = commit_info_schema
+        .fields()
+        .chain(engine_commit_info.schema.fields())
+        .cloned()
+        .collect();
+    let commit_info_schema = StructType::new(commit_info_fields);
+    let action_fields =
+        action_fields
+            .into_iter()
+            .cloned()
+            .chain(std::iter::once(crate::schema::StructField::new(
                 COMMIT_INFO_NAME,
                 commit_info_schema,
                 true,
-            ));
-            StructType::new(action_fields)
-        },
-    ));
+            )));
+    let action_schema = StructType::new(action_fields.collect());
 
-    let action_schema_ref = Arc::clone(&action_schema);
-    let actions = engine_commit_info.into_iter().map(move |commit_info| {
-        let engine_commit_info_data = commit_info.data;
-        let engine_commit_info_schema = commit_info.schema;
-        let mut commit_info_expr = vec![Expression::literal(format!("v{}", KERNEL_VERSION))];
-        commit_info_expr.extend(
-            engine_commit_info_schema
+    let commit_info_expr = std::iter::once(Expression::literal(format!("v{}", KERNEL_VERSION)))
+        .chain(
+            engine_commit_info
+                .schema
                 .fields()
-                .map(|f| Expression::column(f.name()))
-                .collect::<Vec<_>>(),
-        );
-        // generate expression with null for all the fields except the commit_info field, and
-        // append the commit_info to the end.
-        let commit_info_expr_fields = [
-            ADD_NAME,
-            REMOVE_NAME,
-            METADATA_NAME,
-            PROTOCOL_NAME,
-            TRANSACTION_NAME,
-        ]
-        .iter()
-        .map(|name| {
-            Expression::null_literal(action_schema_ref.field(name).unwrap().data_type().clone())
-        })
-        .chain(std::iter::once(Expression::Struct(commit_info_expr)))
-        .collect::<Vec<_>>();
-        let commit_info_expr = Expression::Struct(commit_info_expr_fields);
+                .map(|f| Expression::column(f.name())),
+        )
+        .collect();
 
-        // commit info has arbitrary schema ex: {engineInfo: string, operation: string}
-        // we want to bundle it up and put it in the commit_info field of the actions.
-        let commit_info_evaluator = engine.get_expression_handler().get_evaluator(
-            engine_commit_info_schema,
-            commit_info_expr,
-            action_schema_ref.clone().into(),
-        );
+    // generate expression with null for all the fields except the commit_info field, and
+    // append the commit_info to the end.
+    let commit_info_expr_fields = [
+        ADD_NAME,
+        REMOVE_NAME,
+        METADATA_NAME,
+        PROTOCOL_NAME,
+        TRANSACTION_NAME,
+    ]
+    .iter()
+    .map(|name| {
+        Expression::null_literal(
+            action_schema
+                .field(name)
+                .expect("find field in action schema")
+                .data_type()
+                .clone(),
+        )
+    })
+    .chain(std::iter::once(Expression::Struct(commit_info_expr)))
+    .collect::<Vec<_>>();
+    let commit_info_expr = Expression::Struct(commit_info_expr_fields);
 
-        commit_info_evaluator
-            .evaluate(engine_commit_info_data.as_ref())
-            .unwrap()
-    });
-    Ok((Box::new(actions), action_schema))
+    // commit info has arbitrary schema ex: {engineInfo: string, operation: string}
+    // we want to bundle it up and put it in the commit_info field of the actions.
+    let commit_info_evaluator = engine.get_expression_handler().get_evaluator(
+        engine_commit_info.schema.clone(),
+        commit_info_expr,
+        action_schema.clone().into(),
+    );
+
+    let actions = commit_info_evaluator.evaluate(engine_commit_info.data.as_ref())?;
+    Ok((actions, action_schema.into()))
 }
 
 #[cfg(test)]
@@ -233,9 +254,7 @@ mod tests {
             data: Arc::new(ArrowEngineData::new(data.unwrap())),
             schema: Arc::new(schema.try_into().unwrap()),
         };
-        let (actions, actions_schema) =
-            generate_commit_info(&engine, Some(engine_commit_info)).unwrap();
-        let actions: Vec<_> = actions.collect();
+        let (actions, actions_schema) = generate_commit_info(&engine, &engine_commit_info).unwrap();
 
         // FIXME actual assertions
         assert_eq!(actions_schema.fields().collect::<Vec<_>>().len(), 6);
@@ -244,6 +263,6 @@ mod tests {
             unreachable!("commitInfo is a struct");
         };
         assert_eq!(struct_type.fields().collect::<Vec<_>>().len(), 4);
-        assert_eq!(actions.len(), 1);
+        assert_eq!(actions.length(), 1);
     }
 }
