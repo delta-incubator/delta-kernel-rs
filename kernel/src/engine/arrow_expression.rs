@@ -214,12 +214,12 @@ fn evaluate_expression(
             let output_fields: Vec<ArrowField> = output_cols
                 .iter()
                 .zip(schema.fields())
-                .map(|(array, input_field)| -> DeltaResult<_> {
-                    ensure_data_types(input_field.data_type(), array.data_type())?;
+                .map(|(output_col, input_field)| -> DeltaResult<_> {
+                    ensure_data_types(input_field.data_type(), output_col.data_type())?;
                     Ok(ArrowField::new(
                         input_field.name(),
-                        array.data_type().clone(),
-                        array.is_nullable(),
+                        output_col.data_type().clone(),
+                        input_field.is_nullable(),
                     ))
                 })
                 .try_collect()?;

@@ -129,7 +129,7 @@ fn generate_commit_info(
             engine_commit_info.data.length()
         );
     }
-    // TODO: for now we always require commit info
+
     let mut action_fields = get_log_schema().fields().collect::<Vec<_>>();
     let commit_info_field = action_fields
         .pop()
