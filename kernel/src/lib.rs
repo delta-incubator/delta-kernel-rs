@@ -199,15 +199,17 @@ pub trait JsonHandler: Send + Sync {
 
     /// Atomically (!) write a single JSON file. Each row of the input data represents an action
     /// in the delta log. this PUT must:
-    /// (1) serialize the data to newline-delimited json (each row is a json object)
+    /// (1) serialize the data to newline-delimited json (each row is a json object literal)
     /// (2) write the data to the object store atomically (i.e. if the file already exists, fail
     ///     unless the overwrite flag is set)
     ///
     /// The JSON data should be written as { "column1": "value1", "column2": "value2", ... }
     /// with each row on a new line.
     ///
-    /// Null columns should not be written to the JSON file. For example, if a row has columns
-    /// ["a", "b"] and the value of "b" is null, the JSON object should be written as { "a": "..." }
+    /// NOTE: Null columns should not be written to the JSON file. For example, if a row has columns
+    /// ["a", "b"] and the value of "b" is null, the JSON object should be written as
+    /// { "a": "..." }. Note that including nulls is technically valid JSON, but would bloat the
+    /// log, therefore we recommend omitting them.
     ///
     /// # Parameters
     ///
