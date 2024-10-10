@@ -1,13 +1,17 @@
-use std::ffi::c_void;
+use std::{ffi::c_void, ops::Not, sync::Arc};
 
 use crate::{
-    AllocateErrorFn, EngineIterator, ExternResult, IntoExternResult, KernelStringSlice,
-    ReferenceSet, TryFromStringSlice,
+    handle::Handle, AllocateErrorFn, EngineIterator, ExternResult, IntoExternResult,
+    KernelStringSlice, ReferenceSet, TryFromStringSlice,
 };
 use delta_kernel::{
-    expressions::{BinaryOperator, Expression, Scalar, UnaryOperator},
+    expressions::{
+        ArrayData, BinaryOperator, Expression, Scalar, StructData, UnaryOperator, VariadicOperator,
+    },
+    schema::{ArrayType, DataType, PrimitiveType, StructField, StructType},
     DeltaResult,
 };
+use delta_kernel_ffi_macros::handle_descriptor;
 
 #[derive(Default)]
 pub struct KernelExpressionVisitorState {
@@ -244,4 +248,418 @@ pub extern "C" fn visit_expression_literal_bool(
     value: bool,
 ) -> usize {
     wrap_expression(state, Expression::literal(value))
+}
+
+#[handle_descriptor(target=Expression, mutable=false, sized=true)]
+pub struct SharedExpression;
+
+/// Free the memory the passed SharedExpression
+///
+/// # Safety
+/// Engine is responsible for passing a valid SharedExpression
+#[no_mangle]
+pub unsafe extern "C" fn free_kernel_predicate(data: Handle<SharedExpression>) {
+    data.drop_handle();
+}
+
+/// Constructs a kernel expression that is passed back as a SharedExpression handle
+///
+/// # Safety
+/// The caller is responsible for freeing the retured memory, either by calling
+/// [`free_kernel_predicate`], or [`Handle::drop_handle`]
+#[no_mangle]
+pub unsafe extern "C" fn get_kernel_expression() -> Handle<SharedExpression> {
+    use Expression as Expr;
+
+    let array_type = ArrayType::new(
+        DataType::Primitive(delta_kernel::schema::PrimitiveType::Short),
+        false,
+    );
+    let array_data = ArrayData::new(array_type.clone(), vec![Scalar::Short(5), Scalar::Short(0)]);
+    let nested_fields = vec![
+        StructField::new("a", DataType::Primitive(PrimitiveType::Integer), false),
+        StructField::new("b", DataType::Array(Box::new(array_type)), false),
+    ];
+    let nested_values = vec![Scalar::Integer(500), Scalar::Array(array_data.clone())];
+    let nested = StructData::try_new(nested_fields.clone(), nested_values).unwrap();
+    let nested_type = StructType::new(nested_fields);
+    let top = StructData::try_new(
+        vec![StructField::new(
+            "top",
+            DataType::Struct(Box::new(nested_type)),
+            true,
+        )],
+        vec![Scalar::Struct(nested)],
+    )
+    .unwrap();
+    Arc::new(Expr::and_from(vec![
+        Expr::literal(Scalar::Byte(i8::MAX)),
+        Expr::literal(Scalar::Byte(i8::MIN)),
+        Expr::literal(Scalar::Float(f32::MAX)),
+        Expr::literal(Scalar::Float(f32::MIN)),
+        Expr::literal(Scalar::Double(f64::MAX)),
+        Expr::literal(Scalar::Double(f64::MIN)),
+        Expr::literal(Scalar::Integer(i32::MAX)),
+        Expr::literal(Scalar::Integer(i32::MIN)),
+        Expr::literal(Scalar::Long(i64::MAX)),
+        Expr::literal(Scalar::Long(i64::MIN)),
+        Expr::literal(Scalar::String("hello expressions".into())),
+        Expr::literal(Scalar::Boolean(true)),
+        Expr::literal(Scalar::Boolean(false)),
+        Expr::literal(Scalar::Timestamp(50)),
+        Expr::literal(Scalar::TimestampNtz(100)),
+        Expr::literal(Scalar::Date(32)),
+        Expr::literal(Scalar::Binary(b"0xdeadbeefcafe".to_vec())),
+        // Both the most and least significant u64 of the Decimal value will be 1
+        Expr::literal(Scalar::Decimal((1 << 64) + 1, 2, 3)),
+        Expr::literal(Scalar::Null(DataType::Primitive(PrimitiveType::Short))),
+        Expr::literal(Scalar::Struct(top)),
+        Expr::literal(Scalar::Array(array_data)),
+        Expr::binary(
+            BinaryOperator::In,
+            Expr::literal(Scalar::Integer(0)),
+            Expr::literal(Scalar::Long(0)),
+        ),
+        Expr::binary(
+            BinaryOperator::Plus,
+            Expr::literal(Scalar::Integer(0)),
+            Expr::literal(Scalar::Long(0)),
+        ),
+        Expr::binary(
+            BinaryOperator::Minus,
+            Expr::literal(Scalar::Integer(0)),
+            Expr::literal(Scalar::Long(0)),
+        ),
+        Expr::binary(
+            BinaryOperator::Equal,
+            Expr::literal(Scalar::Integer(0)),
+            Expr::literal(Scalar::Long(0)),
+        ),
+        Expr::binary(
+            BinaryOperator::NotEqual,
+            Expr::literal(Scalar::Integer(0)),
+            Expr::literal(Scalar::Long(0)),
+        ),
+        Expr::binary(
+            BinaryOperator::NotIn,
+            Expr::literal(Scalar::Integer(0)),
+            Expr::literal(Scalar::Long(0)),
+        ),
+        Expr::binary(
+            BinaryOperator::Divide,
+            Expr::literal(Scalar::Integer(0)),
+            Expr::literal(Scalar::Long(0)),
+        ),
+        Expr::binary(
+            BinaryOperator::Multiply,
+            Expr::literal(Scalar::Integer(0)),
+            Expr::literal(Scalar::Long(0)),
+        ),
+        Expr::binary(
+            BinaryOperator::LessThan,
+            Expr::literal(Scalar::Integer(0)),
+            Expr::literal(Scalar::Long(0)),
+        ),
+        Expr::binary(
+            BinaryOperator::LessThanOrEqual,
+            Expr::literal(Scalar::Integer(0)),
+            Expr::literal(Scalar::Long(0)),
+        ),
+        Expr::binary(
+            BinaryOperator::GreaterThan,
+            Expr::literal(Scalar::Integer(0)),
+            Expr::literal(Scalar::Long(0)),
+        ),
+        Expr::binary(
+            BinaryOperator::GreaterThanOrEqual,
+            Expr::literal(Scalar::Integer(0)),
+            Expr::literal(Scalar::Long(0)),
+        ),
+        Expr::binary(
+            BinaryOperator::Distinct,
+            Expr::literal(Scalar::Integer(0)),
+            Expr::literal(Scalar::Long(0)),
+        ),
+        Expr::struct_expr(vec![Expr::or_from(vec![
+            Expr::literal(Scalar::Integer(5)),
+            Expr::literal(Scalar::Long(20)),
+        ])]),
+        Expr::not(Expr::is_null(Expr::column("col"))),
+    ]))
+    .into()
+}
+
+/// The [`EngineExpressionVisitor`] defines a visitor system to allow engines to build their own
+/// representation of an expression from a particular expression within the kernel.
+///
+/// Visit operations where the engine allocates an expression must return an associated `id`, which is an integer
+/// identifier ([`usize`]). This identifier can be passed back to the engine to identify the expression.
+/// The [`EngineExpressionVisitor`] handles both simple and complex types.
+/// 1. For simple types, the engine is expected to allocate that data and return its identifier.
+/// 2. For complex types such as structs, arrays, and variadic expressions, there will be a call to
+///     construct the expression, and populate sub-expressions. For instance, [`visit_and`] recieves
+///     the expected number of sub-expressions and must return an identifier. The kernel will
+///     subsequently call [`visit_variadic_sub_expr`] with the identifier of the And expression, and the
+///     identifier for a sub-expression.
+///
+/// WARNING: The visitor MUST NOT retain internal references to string slices or binary data passed
+/// to visitor methods
+/// TODO: Add type information in struct field and null. This will likely involve using the schema visitor.
+#[repr(C)]
+pub struct EngineExpressionVisitor {
+    /// An opaque state pointer
+    pub data: *mut c_void,
+    /// Visit a 32bit `integer`
+    pub visit_int: extern "C" fn(data: *mut c_void, value: i32) -> usize,
+    /// Visit a 64bit `long`.
+    pub visit_long: extern "C" fn(data: *mut c_void, value: i64) -> usize,
+    /// Visit a 16bit `short`.
+    pub visit_short: extern "C" fn(data: *mut c_void, value: i16) -> usize,
+    /// Visit an 8bit `byte`.
+    pub visit_byte: extern "C" fn(data: *mut c_void, value: i8) -> usize,
+    /// Visit a 32bit `float`.
+    pub visit_float: extern "C" fn(data: *mut c_void, value: f32) -> usize,
+    /// Visit a 64bit `double`.
+    pub visit_double: extern "C" fn(data: *mut c_void, value: f64) -> usize,
+    /// Visit a `string`.
+    pub visit_string: extern "C" fn(data: *mut c_void, value: KernelStringSlice) -> usize,
+    /// Visit a `boolean`.
+    pub visit_bool: extern "C" fn(data: *mut c_void, value: bool) -> usize,
+    /// Visit a 64bit timestamp. The timestamp is microsecond precision and adjusted to UTC.
+    pub visit_timestamp: extern "C" fn(data: *mut c_void, value: i64) -> usize,
+    /// Visit a 64bit timestamp. The timestamp is microsecond precision with no timezone.
+    pub visit_timestamp_ntz: extern "C" fn(data: *mut c_void, value: i64) -> usize,
+    /// Visit a 32bit int date representing days since UNIX epoch 1970-01-01.
+    pub visit_date: extern "C" fn(data: *mut c_void, value: i32) -> usize,
+    /// Visit binary data at the `buffer` with length `len`.
+    pub visit_binary: extern "C" fn(data: *mut c_void, buffer: *const u8, len: usize) -> usize,
+    /// Visit a 128bit `decimal` value with the given precision and scale. The 128bit integer
+    /// is split into the most significant 64 bits in `value_ms`, and the least significant 64
+    /// bits in `value_ls`.
+    pub visit_decimal: extern "C" fn(
+        data: *mut c_void,
+        value_ms: u64, // Most significant 64 bits of decimal value
+        value_ls: u64, // Least significant 64 bits of decimal value
+        precision: u8,
+        scale: u8,
+    ) -> usize,
+    /// Visits a null value.
+    pub visit_null: extern "C" fn(data: *mut c_void) -> usize,
+    /// Visits an `and` expression which is made of a list of sub-expressions. This declares the
+    /// number of sub-expressions that the `and` expression will be made of. The visitor will populate
+    /// the list of expressions using the [`visit_variadic_sub_expr`] method.
+    pub visit_and: extern "C" fn(data: *mut c_void, len: usize) -> usize,
+    /// Visits an `or` expression which is made of a list of sub-expressions. This declares the
+    /// number of sub-expressions that the `or` expression will be made of. The visitor will populate
+    /// the list of expressions using the [`visit_variadic_sub_expr`] method.
+    pub visit_or: extern "C" fn(data: *mut c_void, len: usize) -> usize,
+    /// Visits a variadic sub-expression. This appends a sub-expression to a variadic expression
+    /// constructed in either [`visit_and`] or [`visit_or`]. The variadic expression is identified
+    /// by `variadic_id`, and the sub-expression is identified by `sub_expr_id`.
+    pub visit_variadic_sub_expr:
+        extern "C" fn(data: *mut c_void, variadic_id: usize, sub_expr_id: usize),
+    ///Visits a `not` expression, bulit using the sub-expression `inner_expr`.
+    pub visit_not: extern "C" fn(data: *mut c_void, inner_expr: usize) -> usize,
+    ///Visits an `is_null` expression, built using the sub-expression `inner_expr`.
+    pub visit_is_null: extern "C" fn(data: *mut c_void, inner_expr: usize) -> usize,
+    /// Visit the `less than` binary operation, which takes the left sub expression id `a` and the
+    /// right sub-expression id `b`.
+    pub visit_lt: extern "C" fn(data: *mut c_void, a: usize, b: usize) -> usize,
+    /// Visit the `less than or equal` binary operation, which takes the left sub expression id `a`
+    /// and the right sub-expression id `b`.
+    pub visit_le: extern "C" fn(data: *mut c_void, a: usize, b: usize) -> usize,
+    /// Visit the `greater than` binary operation, which takes the left sub expression id `a`
+    /// and the right sub-expression id `b`.
+    pub visit_gt: extern "C" fn(data: *mut c_void, a: usize, b: usize) -> usize,
+    /// Visit the `greater than or equal` binary operation, which takes the left sub expression id `a`
+    /// and the right sub-expression id `b`.
+    pub visit_ge: extern "C" fn(data: *mut c_void, a: usize, b: usize) -> usize,
+    /// Visit the `equal` binary operation, which takes the left sub expression id `a`
+    /// and the right sub-expression id `b`.
+    pub visit_eq: extern "C" fn(data: *mut c_void, a: usize, b: usize) -> usize,
+    /// Visit the `not equal` binary operation, which takes the left sub expression id `a`
+    /// and the right sub-expression id `b`.
+    pub visit_ne: extern "C" fn(data: *mut c_void, a: usize, b: usize) -> usize,
+    /// Visit the `distinct` binary operation, which takes the left sub expression id `a`
+    /// and the right sub-expression id `b`.
+    pub visit_distinct: extern "C" fn(data: *mut c_void, a: usize, b: usize) -> usize,
+    /// Visit the `in` binary operation, which takes the left sub expression id `a`
+    /// and the right sub-expression id `b`.
+    pub visit_in: extern "C" fn(data: *mut c_void, a: usize, b: usize) -> usize,
+    /// Visit the `not in` binary operation, which takes the left sub expression id `a`
+    /// and the right sub-expression id `b`.
+    pub visit_not_in: extern "C" fn(data: *mut c_void, a: usize, b: usize) -> usize,
+    /// Visit the `add` binary operation, which takes the left sub expression id `a`
+    /// and the right sub-expression id `b`.
+    pub visit_add: extern "C" fn(data: *mut c_void, a: usize, b: usize) -> usize,
+    /// Visit the `minus` binary operation, which takes the left sub expression id `a`
+    /// and the right sub-expression id `b`.
+    pub visit_minus: extern "C" fn(data: *mut c_void, a: usize, b: usize) -> usize,
+    /// Visit the `multiply` binary operation, which takes the left sub expression id `a`
+    /// and the right sub-expression id `b`.
+    pub visit_multiply: extern "C" fn(data: *mut c_void, a: usize, b: usize) -> usize,
+    /// Visit the `divide` binary operation, which takes the left sub expression id `a`
+    /// and the right sub-expression id `b`.
+    pub visit_divide: extern "C" fn(data: *mut c_void, a: usize, b: usize) -> usize,
+    /// Visit the `colmun` identified by the `name` string.
+    pub visit_column: extern "C" fn(data: *mut c_void, name: KernelStringSlice) -> usize,
+    /// Visit a `struct` which is constructed from an ordered list of expressions. This declares
+    /// the number of expressions that the struct will be made of. The visitor will populate the
+    /// list of expressions using the [`visit_struct_sub_expr`] method.
+    pub visit_struct: extern "C" fn(data: *mut c_void, len: usize) -> usize,
+    /// Visits a `struct` sub expression. This appends a sub-expression to a struct constructed by
+    /// [`visit_struct`]. The struct is identified by `struct_id`, and the sub-expression is identified
+    /// by `expr_id`.
+    pub visit_struct_sub_expr: extern "C" fn(data: *mut c_void, struct_id: usize, expr_id: usize),
+    /// Visit a struct literal which is made up of a list of field names and values. This declares
+    /// the number of fields that the struct will have. The visitor will populate the struct fields
+    /// using the [`visit_struct_literal_field`] method.
+    pub visit_struct_literal: extern "C" fn(data: *mut c_void, num_fields: usize) -> usize,
+    /// Visit a struct literal field. This adds a field to the struct declared by [`visit_struct_literal`].
+    /// The struct literal is identified by `struct_id`. The sub-expression is identified by `expr_id`.
+    pub visit_struct_literal_field: extern "C" fn(
+        data: *mut c_void,
+        struct_id: usize,
+        field_name: KernelStringSlice,
+        field_value: usize,
+    ),
+    /// Visit an `arary`, declaring the length `len`. The visitor will populate the array
+    /// elements using the [`visit_array_element`] method.
+    pub visit_array: extern "C" fn(data: *mut c_void, len: usize) -> usize,
+    /// Visit an array element. This adds the element to the array declared in [`visit_array`]. The
+    /// array is identified by `array_id`, and the element identified by `element_id`
+    pub visit_array_element: extern "C" fn(data: *mut c_void, array_id: usize, element_id: usize),
+}
+
+/// Visit the expression of the passed [`SharedExpression`] Handle using the provided `visitor`.
+/// See the documentation of [`EngineExpressionVisitor`] for a description of how this visitor
+/// works.
+///
+/// This method returns the id that the engine generated for the top level expression
+///
+/// # Safety
+///
+/// The caller must pass a valid SharedExpression Handle and expression visitor
+#[no_mangle]
+pub unsafe extern "C" fn visit_expression(
+    expression: &Handle<SharedExpression>,
+    visitor: &mut EngineExpressionVisitor,
+) -> usize {
+    macro_rules! call {
+        ( $visitor:ident, $visitor_fn:ident $(, $extra_args:expr) *) => {
+            ($visitor.$visitor_fn)($visitor.data $(, $extra_args) *)
+        };
+    }
+    fn visit_array(visitor: &mut EngineExpressionVisitor, array: &ArrayData) -> usize {
+        #[allow(deprecated)]
+        let elements = array.array_elements();
+        let array_id = call!(visitor, visit_array, elements.len());
+        for scalar in elements {
+            let scalar_id = visit_scalar(visitor, scalar);
+            call!(visitor, visit_array_element, array_id, scalar_id);
+        }
+        array_id
+    }
+    fn visit_struct_literal(
+        visitor: &mut EngineExpressionVisitor,
+        struct_data: &StructData,
+    ) -> usize {
+        let struct_id = call!(visitor, visit_struct_literal, struct_data.fields().len());
+        for (field, value) in struct_data.fields().iter().zip(struct_data.values()) {
+            let value_id = visit_scalar(visitor, value);
+            call!(
+                visitor,
+                visit_struct_literal_field,
+                struct_id,
+                field.name().into(),
+                value_id
+            );
+        }
+        struct_id
+    }
+    fn visit_struct(visitor: &mut EngineExpressionVisitor, exprs: &Vec<Expression>) -> usize {
+        let expr_struct_id = call!(visitor, visit_struct, exprs.len());
+        for expr in exprs {
+            let expr_id = visit_expression(visitor, expr);
+            call!(visitor, visit_struct_sub_expr, expr_struct_id, expr_id)
+        }
+        expr_struct_id
+    }
+    fn visit_variadic(
+        visitor: &mut EngineExpressionVisitor,
+        op: &VariadicOperator,
+        exprs: &Vec<Expression>,
+    ) -> usize {
+        let visit_fn = match op {
+            VariadicOperator::And => &visitor.visit_and,
+            VariadicOperator::Or => &visitor.visit_or,
+        };
+        let variadic_id = visit_fn(visitor.data, exprs.len());
+        for expr in exprs {
+            let expr_id = visit_expression(visitor, expr);
+            call!(visitor, visit_variadic_sub_expr, variadic_id, expr_id)
+        }
+        variadic_id
+    }
+    fn visit_scalar(visitor: &mut EngineExpressionVisitor, scalar: &Scalar) -> usize {
+        match scalar {
+            Scalar::Integer(val) => call!(visitor, visit_int, *val),
+            Scalar::Long(val) => call!(visitor, visit_long, *val),
+            Scalar::Short(val) => call!(visitor, visit_short, *val),
+            Scalar::Byte(val) => call!(visitor, visit_byte, *val),
+            Scalar::Float(val) => call!(visitor, visit_float, *val),
+            Scalar::Double(val) => call!(visitor, visit_double, *val),
+            Scalar::String(val) => call!(visitor, visit_string, val.into()),
+            Scalar::Boolean(val) => call!(visitor, visit_bool, *val),
+            Scalar::Timestamp(val) => call!(visitor, visit_timestamp, *val),
+            Scalar::TimestampNtz(val) => call!(visitor, visit_timestamp_ntz, *val),
+            Scalar::Date(val) => call!(visitor, visit_date, *val),
+            Scalar::Binary(buf) => call!(visitor, visit_binary, buf.as_ptr(), buf.len()),
+            Scalar::Decimal(value, precision, scale) => {
+                let ms: u64 = (value >> 64) as u64;
+                let ls: u64 = *value as u64;
+                call!(visitor, visit_decimal, ms, ls, *precision, *scale)
+            }
+            Scalar::Null(_) => call!(visitor, visit_null),
+            Scalar::Struct(struct_data) => visit_struct_literal(visitor, struct_data),
+            Scalar::Array(array) => visit_array(visitor, array),
+        }
+    }
+    fn visit_expression(visitor: &mut EngineExpressionVisitor, expression: &Expression) -> usize {
+        match expression {
+            Expression::Literal(scalar) => visit_scalar(visitor, scalar),
+            Expression::Column(name) => call!(visitor, visit_column, name.into()),
+            Expression::Struct(exprs) => visit_struct(visitor, exprs),
+            Expression::BinaryOperation { op, left, right } => {
+                let left_id = visit_expression(visitor, left);
+                let right_id = visit_expression(visitor, right);
+                match op {
+                    BinaryOperator::Plus => call!(visitor, visit_add, left_id, right_id),
+                    BinaryOperator::Minus => call!(visitor, visit_minus, left_id, right_id),
+                    BinaryOperator::Multiply => call!(visitor, visit_multiply, left_id, right_id),
+                    BinaryOperator::Divide => call!(visitor, visit_divide, left_id, right_id),
+                    BinaryOperator::LessThan => call!(visitor, visit_lt, left_id, right_id),
+                    BinaryOperator::LessThanOrEqual => call!(visitor, visit_le, left_id, right_id),
+                    BinaryOperator::GreaterThan => call!(visitor, visit_gt, left_id, right_id),
+                    BinaryOperator::GreaterThanOrEqual => {
+                        call!(visitor, visit_ge, left_id, right_id)
+                    }
+                    BinaryOperator::Equal => call!(visitor, visit_eq, left_id, right_id),
+                    BinaryOperator::NotEqual => call!(visitor, visit_ne, left_id, right_id),
+                    BinaryOperator::Distinct => call!(visitor, visit_distinct, left_id, right_id),
+                    BinaryOperator::In => call!(visitor, visit_in, left_id, right_id),
+                    BinaryOperator::NotIn => call!(visitor, visit_not_in, left_id, right_id),
+                }
+            }
+            Expression::UnaryOperation { op, expr } => {
+                let expr_id = visit_expression(visitor, expr);
+                match op {
+                    UnaryOperator::Not => call!(visitor, visit_not, expr_id),
+                    UnaryOperator::IsNull => call!(visitor, visit_is_null, expr_id),
+                }
+            }
+            Expression::VariadicOperation { op, exprs } => visit_variadic(visitor, op, exprs),
+        }
+    }
+    visit_expression(visitor, expression.as_ref())
 }
