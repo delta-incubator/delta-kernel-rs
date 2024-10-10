@@ -11,7 +11,7 @@ use tracing::debug;
 use url::Url;
 
 use delta_kernel::snapshot::Snapshot;
-use delta_kernel::{DeltaResult, Engine, EngineData, Error, Expression, Table};
+use delta_kernel::{DeltaResult, Engine, EngineData, Error, Table};
 use delta_kernel_ffi_macros::handle_descriptor;
 
 // cbindgen doesn't understand our use of feature flags here, and by default it parses `mod handle`
@@ -30,7 +30,7 @@ use handle::Handle;
 extern crate self as delta_kernel_ffi;
 
 pub mod engine_funcs;
-pub mod expressions;
+pub mod expression;
 pub mod scan;
 pub mod schema;
 

@@ -6,7 +6,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
+/**
+ * This module defines a very simple model of an expression, used only to be able to print the
+ * provided expression. It consists of an "ExpressionBuilder" which is our user data that gets
+ * passed into each visit_x call. This simply keeps track of all the expressions we are asked to
+ * allocate.
+ *
+ * Each expression is an "ExpressionRef", which tracks the type and pointer to the expression.
+ */
 #define DEFINE_BINOP(fun_name, op)                                                                 \
   uintptr_t fun_name(void* data, uintptr_t a, uintptr_t b)                                         \
   {                                                                                                \
@@ -75,11 +82,11 @@ enum ExpressionType
   Unary,
   Column
 };
-struct ExpressionRef
+typedef struct
 {
   void* ref;
   enum ExpressionType type;
-};
+} ExpressionRef;
 struct BinOp
 {
   enum OpType op;
@@ -105,12 +112,12 @@ struct Variadic
   enum VariadicType op;
   size_t len;
   size_t max_len;
-  struct ExpressionRef* expr_list;
+  ExpressionRef* expr_list;
 };
 struct Unary
 {
   enum UnaryType type;
-  struct ExpressionRef sub_expr;
+  ExpressionRef sub_expr;
 };
 struct BinaryData
 {
@@ -123,15 +130,15 @@ struct Decimal
   uint8_t precision;
   uint8_t scale;
 };
-struct Data
+typedef struct
 {
   size_t len;
-  struct ExpressionRef handles[100];
-};
+  ExpressionRef handles[100];
+} ExpressionBuilder;
 struct Struct
 {
   KernelStringSlice* field_names;
-  struct ExpressionRef* expressions;
+  ExpressionRef* expressions;
   size_t len;
   size_t max_len;
 };
@@ -140,7 +147,7 @@ struct ArrayData
 {
   size_t len;
   size_t max_len;
-  struct ExpressionRef* expr_list;
+  ExpressionRef* expr_list;
 };
 
 struct Literal
@@ -165,14 +172,14 @@ struct Literal
 
 size_t put_handle(void* data, void* ref, enum ExpressionType type)
 {
-  struct Data* data_ptr = (struct Data*)data;
-  struct ExpressionRef expr = { .ref = ref, .type = type };
+  ExpressionBuilder* data_ptr = (ExpressionBuilder*)data;
+  ExpressionRef expr = { .ref = ref, .type = type };
   data_ptr->handles[data_ptr->len] = expr;
   return data_ptr->len++;
 }
-struct ExpressionRef* get_handle(void* data, size_t handle_index)
+ExpressionRef* get_handle(void* data, size_t handle_index)
 {
-  struct Data* data_ptr = (struct Data*)data;
+  ExpressionBuilder* data_ptr = (ExpressionBuilder*)data;
   if (handle_index > data_ptr->len) {
     return NULL;
   }
@@ -190,8 +197,8 @@ KernelStringSlice copy_kernel_string(KernelStringSlice string)
 uintptr_t visit_expr_binop(void* data, uintptr_t a, uintptr_t b, enum OpType op)
 {
   struct BinOp* binop = malloc(sizeof(struct BinOp));
-  struct ExpressionRef* left_handle = get_handle(data, a);
-  struct ExpressionRef* right_handle = get_handle(data, b);
+  ExpressionRef* left_handle = get_handle(data, a);
+  ExpressionRef* right_handle = get_handle(data, b);
   assert(right_handle != NULL && left_handle != NULL);
 
   struct Literal* left = left_handle->ref;
@@ -253,17 +260,17 @@ DEFINE_SIMPLE_SCALAR(visit_expr_date, Date, int32_t, integer_data);
 uintptr_t visit_expr_variadic(void* data, uintptr_t len, enum VariadicType op)
 {
   struct Variadic* var = malloc(sizeof(struct Variadic));
-  struct ExpressionRef* expr_lst = malloc(sizeof(struct ExpressionRef) * len);
+  ExpressionRef* expr_lst = malloc(sizeof(ExpressionRef) * len);
   var->op = op;
   var->len = 0;
   var->max_len = len;
   var->expr_list = expr_lst;
   return put_handle(data, var, Variadic);
 }
-void visit_expr_variadic_item(void* data, uintptr_t variadic_id, uintptr_t sub_expr_id)
+void visit_expr_variadic_sub_expr(void* data, uintptr_t variadic_id, uintptr_t sub_expr_id)
 {
-  struct ExpressionRef* sub_expr_ref = get_handle(data, sub_expr_id);
-  struct ExpressionRef* variadic_ref = get_handle(data, variadic_id);
+  ExpressionRef* sub_expr_ref = get_handle(data, sub_expr_id);
+  ExpressionRef* variadic_ref = get_handle(data, variadic_id);
   assert(sub_expr_ref != NULL && variadic_ref != NULL);
   assert(variadic_ref->type == Variadic);
 
@@ -274,10 +281,10 @@ DEFINE_VARIADIC(visit_expr_and, And)
 DEFINE_VARIADIC(visit_expr_or, Or)
 DEFINE_VARIADIC(visit_expr_struct, StructConstructor)
 
-void visit_expr_array_item(void* data, uintptr_t variadic_id, uintptr_t sub_expr_id)
+void visit_expr_array_sub_expr(void* data, uintptr_t variadic_id, uintptr_t sub_expr_id)
 {
-  struct ExpressionRef* sub_expr_handle = get_handle(data, sub_expr_id);
-  struct ExpressionRef* array_handle = get_handle(data, variadic_id);
+  ExpressionRef* sub_expr_handle = get_handle(data, sub_expr_id);
+  ExpressionRef* array_handle = get_handle(data, variadic_id);
   assert(sub_expr_handle != NULL && array_handle != NULL);
   assert(array_handle->type == Literal);
   struct Literal* literal = array_handle->ref;
@@ -292,7 +299,7 @@ uintptr_t visit_expr_array(void* data, uintptr_t len)
   struct ArrayData* arr = &(literal->value.array_data);
   arr->len = 0;
   arr->max_len = 0;
-  arr->expr_list = malloc(sizeof(struct ExpressionRef) * len);
+  arr->expr_list = malloc(sizeof(ExpressionRef) * len);
   return put_handle(data, literal, Literal);
 }
 
@@ -313,7 +320,7 @@ uintptr_t visit_expr_struct_literal(void* data, uintptr_t len)
   struct Struct* struct_data = &literal->value.struct_data;
   struct_data->len = 0;
   struct_data->max_len = len;
-  struct_data->expressions = malloc(sizeof(struct ExpressionRef) * len);
+  struct_data->expressions = malloc(sizeof(ExpressionRef) * len);
   struct_data->field_names = malloc(sizeof(KernelStringSlice) * len);
   return put_handle(data, literal, Literal);
 }
@@ -324,8 +331,8 @@ void visit_expr_struct_literal_field(
   KernelStringSlice field_name,
   uintptr_t value_id)
 {
-  struct ExpressionRef* value = get_handle(data, value_id);
-  struct ExpressionRef* literal_handle = get_handle(data, struct_id);
+  ExpressionRef* value = get_handle(data, value_id);
+  ExpressionRef* literal_handle = get_handle(data, struct_id);
   assert(literal_handle != NULL && value != NULL);
   assert(literal_handle->type == Literal);
   struct Literal* literal = literal_handle->ref;
@@ -351,7 +358,7 @@ uintptr_t visit_expr_unary(void* data, uintptr_t sub_expr_id, enum UnaryType typ
 {
   struct Unary* unary = malloc(sizeof(struct Unary));
   unary->type = type;
-  struct ExpressionRef* sub_expr_handle = get_handle(data, sub_expr_id);
+  ExpressionRef* sub_expr_handle = get_handle(data, sub_expr_id);
   unary->sub_expr = *sub_expr_handle;
   return put_handle(data, unary, Unary);
 }
@@ -366,10 +373,10 @@ uintptr_t visit_expr_column(void* data, KernelStringSlice string)
 }
 
 // Print the schema of the snapshot
-struct ExpressionRef construct_predicate(KernelPredicate* predicate)
+ExpressionRef construct_predicate(SharedExpression* predicate)
 {
   print_diag("Building schema\n");
-  struct Data data = { 0 };
+  ExpressionBuilder data = { 0 };
   EngineExpressionVisitor visitor = {
     .data = &data,
     .visit_int = visit_expr_int,
@@ -387,7 +394,7 @@ struct ExpressionRef construct_predicate(KernelPredicate* predicate)
     .visit_string = visit_expr_string,
     .visit_and = visit_expr_and,
     .visit_or = visit_expr_or,
-    .visit_variadic_item = visit_expr_variadic_item,
+    .visit_variadic_sub_expr = visit_expr_variadic_sub_expr,
     .visit_not = visit_expr_not,
     .visit_is_null = visit_expr_is_null,
     .visit_lt = visit_expr_lt,
@@ -405,24 +412,24 @@ struct ExpressionRef construct_predicate(KernelPredicate* predicate)
     .visit_divide = visit_expr_divide,
     .visit_column = visit_expr_column,
     .visit_struct = visit_expr_struct,
-    .visit_struct_item = visit_expr_variadic_item, // We treat expr struct as a variadic
+    .visit_struct_sub_expr = visit_expr_variadic_sub_expr, // We treat expr struct as a variadic
     .visit_null = visit_expr_null,
     .visit_struct_literal = visit_expr_struct_literal,
     .visit_struct_literal_field = visit_expr_struct_literal_field,
     .visit_array = visit_expr_array,
-    .visit_array_item = visit_expr_array_item
+    .visit_array_element = visit_expr_array_sub_expr
   };
   uintptr_t schema_list_id = visit_expression(&predicate, &visitor);
   return data.handles[schema_list_id];
 }
 
-void free_expression(struct ExpressionRef ref)
+void free_expression(ExpressionRef ref)
 {
   switch (ref.type) {
     case BinOp: {
       struct BinOp* op = ref.ref;
-      struct ExpressionRef left = { .ref = op->left, .type = Literal };
-      struct ExpressionRef right = { .ref = op->right, .type = Literal };
+      ExpressionRef left = { .ref = op->left, .type = Literal };
+      ExpressionRef right = { .ref = op->right, .type = Literal };
       free_expression(left);
       free_expression(right);
       free(op);
@@ -507,7 +514,7 @@ void print_n_spaces(FILE* to, int n)
   fprintf(to, "  ");
   print_n_spaces(to, n - 1);
 }
-void print_tree(FILE* to, struct ExpressionRef ref, int depth)
+void print_tree(FILE* to, ExpressionRef ref, int depth)
 {
   switch (ref.type) {
     case BinOp: {
@@ -567,8 +574,8 @@ void print_tree(FILE* to, struct ExpressionRef ref, int depth)
           break;
       }
 
-      struct ExpressionRef left = { .ref = op->left, .type = Literal };
-      struct ExpressionRef right = { .ref = op->right, .type = Literal };
+      ExpressionRef left = { .ref = op->left, .type = Literal };
+      ExpressionRef right = { .ref = op->right, .type = Literal };
       print_tree(to, left, depth + 1);
       print_tree(to, right, depth + 1);
       break;
@@ -701,23 +708,34 @@ void print_tree(FILE* to, struct ExpressionRef ref, int depth)
 
 #define TEST_BUF_SIZE 4096
 
+void read_expected_expression_tree(char* expected_buf)
+{
+  FILE* data_file = fopen("expression_test_results.txt", "r");
+  int x = fread(expected_buf, sizeof(char), TEST_BUF_SIZE, data_file);
+  assert(x > 0);
+}
+void get_expression_tree(ExpressionRef ref, char* out_buf, size_t buf_len)
+{
+
+  FILE* out_file = fmemopen(out_buf, buf_len, "w");
+  print_tree(out_file, ref, 0);
+  fclose(out_file);
+}
 void test_kernel_expr()
 {
-  KernelPredicate* pred = get_kernel_expression();
-  struct ExpressionRef ref = construct_predicate(pred);
+  SharedExpression* pred = get_kernel_expression();
+  ExpressionRef ref = construct_predicate(pred);
 
   char out_buf[TEST_BUF_SIZE] = { 0 };
   char expected_buf[TEST_BUF_SIZE] = { 0 };
-  FILE* out_file = fmemopen(out_buf, sizeof(out_buf), "w");
-  FILE* expected_file = fopen("expression_test_results.txt", "r");
-  int x = fread(expected_buf, sizeof(char), TEST_BUF_SIZE, expected_file);
-  assert(x > 0);
 
-  print_tree(out_file, ref, 0);
+  read_expected_expression_tree(expected_buf);
+  get_expression_tree(ref, out_buf, TEST_BUF_SIZE);
 
   for (int i = 0; i < TEST_BUF_SIZE; i++) {
     assert(out_buf[i] == expected_buf[i]);
   }
+
   free_expression(ref);
   free_kernel_predicate(pred);
 }
