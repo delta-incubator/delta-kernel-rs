@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::actions::get_log_schema;
 use crate::path::ParsedLogPath;
-use crate::schema::{Schema, SchemaRef, StructType};
+use crate::schema::{Schema, SchemaRef};
 use crate::snapshot::Snapshot;
 use crate::{DataType, Expression};
 use crate::{DeltaResult, Engine, EngineData};
@@ -124,29 +124,23 @@ fn generate_commit_info(
         )));
     }
 
-    let mut action_fields = get_log_schema().fields().collect::<Vec<_>>();
-    let commit_info_field = action_fields
-        .pop()
-        .expect("last field is commit_info in action schema");
-    let DataType::Struct(commit_info_schema) = commit_info_field.data_type() else {
-        unreachable!("commit_info_field is a struct");
+    let mut action_schema = get_log_schema().clone();
+    let commit_info_field = action_schema
+        .fields
+        .get_mut(COMMIT_INFO_NAME)
+        .ok_or_else(|| crate::Error::missing_column(COMMIT_INFO_NAME))?;
+    let DataType::Struct(mut commit_info_data_type) = commit_info_field.data_type().clone() else {
+        return Err(crate::error::Error::internal_error(
+            "commit_info_field is a struct",
+        ));
     };
-    let commit_info_fields = commit_info_schema
-        .fields()
-        .chain(engine_commit_info.schema.fields())
-        .cloned()
-        .collect();
-    let commit_info_schema = StructType::new(commit_info_fields);
-    let action_fields =
-        action_fields
-            .into_iter()
-            .cloned()
-            .chain(std::iter::once(crate::schema::StructField::new(
-                COMMIT_INFO_NAME,
-                commit_info_schema,
-                true,
-            )));
-    let action_schema = StructType::new(action_fields.collect());
+    commit_info_data_type.fields.extend(
+        engine_commit_info
+            .schema
+            .fields()
+            .map(|f| (f.name.clone(), f.clone())),
+    );
+    commit_info_field.data_type = DataType::Struct(commit_info_data_type);
 
     let commit_info_expr = std::iter::once(Expression::literal(format!("v{}", KERNEL_VERSION)))
         .chain(
