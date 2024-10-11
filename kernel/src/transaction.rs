@@ -86,8 +86,19 @@ impl Transaction {
     }
 
     /// Add commit info to the transaction. This is commit-wide metadata that is written as the
-    /// first action in the commit. Note it is required in order to commit. If the engine does not
-    /// require any commit info, pass an empty `EngineData`.
+    /// first action in the commit.
+    ///
+    /// Note that there are two main pieces of information included in commit info: (1) custom
+    /// engine commit info (specified via this API) and (2) delta's own commit info which is
+    /// effectively appended to the engine-specific commit info.
+    ///
+    /// If the engine elects to omit commit info, it can do so in two ways:
+    /// 1. skip this API entirely - this will omit the commitInfo action from the commit (that is,
+    ///    it will prevent the kernel from writing delta-specific commitInfo). This precludes usage
+    ///    of table features which require commitInfo like in-commit timestamps.
+    /// 2. pass an empty commit_info data chunk - this will allow kernel to include delta-specific
+    ///    commit info, resulting in a commitInfo action in the log, just without any
+    ///    engine-specific additions.
     pub fn commit_info(&mut self, commit_info: Box<dyn EngineData>, schema: Schema) {
         self.commit_info = Some(EngineCommitInfo {
             data: commit_info.into(),
