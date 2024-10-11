@@ -445,11 +445,11 @@ fn make_data_type_physical(
                 }
                 DataType::Struct(struct_type) => {
                     // build up the mapped child fields
-                    let children = struct_type
+                    let children: Vec<StructField> = struct_type
                         .fields()
                         .map(|field| make_field_physical(field, column_mapping_mode))
                         .try_collect()?;
-                    Ok(DataType::Struct(Box::new(StructType::new(children))))
+                    Ok(DataType::struct_type(children))
                 }
                 _ => {
                     // types with no children don't change
