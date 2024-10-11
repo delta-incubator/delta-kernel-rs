@@ -186,10 +186,12 @@ impl ParsedLogPath<Url> {
     pub(crate) fn new_commit(
         table_root: &Url,
         version: Version,
-    ) -> DeltaResult<Option<ParsedLogPath<Url>>> {
+    ) -> DeltaResult<ParsedLogPath<Url>> {
         let filename = format!("{:020}.json", version);
         let location = table_root.join("_delta_log/")?.join(&filename)?;
-        Self::try_from(location)
+        let path = Self::try_from(location)?.expect("valid commit path");
+        assert!(path.is_commit());
+        Ok(path)
     }
 }
 
