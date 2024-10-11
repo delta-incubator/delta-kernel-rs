@@ -30,49 +30,49 @@ And
   Array
     Short(5)
     Short(0)
-  In
-    Integer(0)
-    Long(0)
-  ADD
-    Integer(0)
-    Long(0)
-  SUB
-    Integer(0)
-    Long(0)
-  EQ
-    Integer(0)
-    Long(0)
-  NE
-    Integer(0)
-    Long(0)
-  NotIn
-    Integer(0)
-    Long(0)
-  DIV
-    Integer(0)
-    Long(0)
-  MUL
-    Integer(0)
-    Long(0)
-  LT
-    Integer(0)
-    Long(0)
-  LE
-    Integer(0)
-    Long(0)
-  GT
-    Integer(0)
-    Long(0)
-  GE
-    Integer(0)
-    Long(0)
-  Distinct
-    Integer(0)
-    Long(0)
-  StructConstructor
+  StructExpression
     Or
       Integer(5)
       Long(20)
   Not
     IsNull
       Column(col)
+  In
+    Integer(0)
+    Long(0)
+  Add
+    Integer(0)
+    Long(0)
+  Minus
+    Integer(0)
+    Long(0)
+  Equal
+    Integer(0)
+    Long(0)
+  NotEqual
+    Integer(0)
+    Long(0)
+  NotIn
+    Integer(0)
+    Long(0)
+  Divide
+    Integer(0)
+    Long(0)
+  Multiply
+    Integer(0)
+    Long(0)
+  LessThan
+    Integer(0)
+    Long(0)
+  LessThanOrEqual
+    Integer(0)
+    Long(0)
+  GreaterThan
+    Integer(0)
+    Long(0)
+  GreaterThanOrEqual
+    Integer(0)
+    Long(0)
+  Distinct
+    Integer(0)
+    Long(0)
