@@ -329,6 +329,7 @@ pub enum KernelError {
     InternalError,
     InvalidExpression,
     InvalidLogPath,
+    InvalidCommitInfo,
 }
 
 impl From<Error> for KernelError {
@@ -376,6 +377,7 @@ impl From<Error> for KernelError {
             } => Self::from(*source),
             Error::InvalidExpressionEvaluation(_) => KernelError::InvalidExpression,
             Error::InvalidLogPath(_) => KernelError::InvalidLogPath,
+            Error::InvalidCommitInfo(_) => KernelError::InvalidCommitInfo,
         }
     }
 }
