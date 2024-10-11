@@ -276,23 +276,26 @@ pub unsafe extern "C" fn get_kernel_expression() -> Handle<SharedExpression> {
         false,
     );
     let array_data = ArrayData::new(array_type.clone(), vec![Scalar::Short(5), Scalar::Short(0)]);
+
     let nested_fields = vec![
         StructField::new("a", DataType::Primitive(PrimitiveType::Integer), false),
         StructField::new("b", DataType::Array(Box::new(array_type)), false),
     ];
     let nested_values = vec![Scalar::Integer(500), Scalar::Array(array_data.clone())];
-    let nested = StructData::try_new(nested_fields.clone(), nested_values).unwrap();
-    let nested_type = StructType::new(nested_fields);
-    let top = StructData::try_new(
+    let nested_struct = StructData::try_new(nested_fields.clone(), nested_values).unwrap();
+    let nested_struct_type = StructType::new(nested_fields);
+
+    let top_level_struct = StructData::try_new(
         vec![StructField::new(
             "top",
-            DataType::Struct(Box::new(nested_type)),
+            DataType::Struct(Box::new(nested_struct_type)),
             true,
         )],
-        vec![Scalar::Struct(nested)],
+        vec![Scalar::Struct(nested_struct)],
     )
     .unwrap();
-    Arc::new(Expr::and_from(vec![
+
+    let mut sub_exprs = vec![
         Expr::literal(Scalar::Byte(i8::MAX)),
         Expr::literal(Scalar::Byte(i8::MIN)),
         Expr::literal(Scalar::Float(f32::MAX)),
@@ -313,80 +316,41 @@ pub unsafe extern "C" fn get_kernel_expression() -> Handle<SharedExpression> {
         // Both the most and least significant u64 of the Decimal value will be 1
         Expr::literal(Scalar::Decimal((1 << 64) + 1, 2, 3)),
         Expr::literal(Scalar::Null(DataType::Primitive(PrimitiveType::Short))),
-        Expr::literal(Scalar::Struct(top)),
+        Expr::literal(Scalar::Struct(top_level_struct)),
         Expr::literal(Scalar::Array(array_data)),
-        Expr::binary(
-            BinaryOperator::In,
-            Expr::literal(Scalar::Integer(0)),
-            Expr::literal(Scalar::Long(0)),
-        ),
-        Expr::binary(
-            BinaryOperator::Plus,
-            Expr::literal(Scalar::Integer(0)),
-            Expr::literal(Scalar::Long(0)),
-        ),
-        Expr::binary(
-            BinaryOperator::Minus,
-            Expr::literal(Scalar::Integer(0)),
-            Expr::literal(Scalar::Long(0)),
-        ),
-        Expr::binary(
-            BinaryOperator::Equal,
-            Expr::literal(Scalar::Integer(0)),
-            Expr::literal(Scalar::Long(0)),
-        ),
-        Expr::binary(
-            BinaryOperator::NotEqual,
-            Expr::literal(Scalar::Integer(0)),
-            Expr::literal(Scalar::Long(0)),
-        ),
-        Expr::binary(
-            BinaryOperator::NotIn,
-            Expr::literal(Scalar::Integer(0)),
-            Expr::literal(Scalar::Long(0)),
-        ),
-        Expr::binary(
-            BinaryOperator::Divide,
-            Expr::literal(Scalar::Integer(0)),
-            Expr::literal(Scalar::Long(0)),
-        ),
-        Expr::binary(
-            BinaryOperator::Multiply,
-            Expr::literal(Scalar::Integer(0)),
-            Expr::literal(Scalar::Long(0)),
-        ),
-        Expr::binary(
-            BinaryOperator::LessThan,
-            Expr::literal(Scalar::Integer(0)),
-            Expr::literal(Scalar::Long(0)),
-        ),
-        Expr::binary(
-            BinaryOperator::LessThanOrEqual,
-            Expr::literal(Scalar::Integer(0)),
-            Expr::literal(Scalar::Long(0)),
-        ),
-        Expr::binary(
-            BinaryOperator::GreaterThan,
-            Expr::literal(Scalar::Integer(0)),
-            Expr::literal(Scalar::Long(0)),
-        ),
-        Expr::binary(
-            BinaryOperator::GreaterThanOrEqual,
-            Expr::literal(Scalar::Integer(0)),
-            Expr::literal(Scalar::Long(0)),
-        ),
-        Expr::binary(
-            BinaryOperator::Distinct,
-            Expr::literal(Scalar::Integer(0)),
-            Expr::literal(Scalar::Long(0)),
-        ),
         Expr::struct_expr(vec![Expr::or_from(vec![
             Expr::literal(Scalar::Integer(5)),
             Expr::literal(Scalar::Long(20)),
         ])]),
         Expr::not(Expr::is_null(Expr::column("col"))),
-    ]))
-    .into()
+    ];
+    sub_exprs.extend(
+        [
+            BinaryOperator::In,
+            BinaryOperator::Plus,
+            BinaryOperator::Minus,
+            BinaryOperator::Equal,
+            BinaryOperator::NotEqual,
+            BinaryOperator::NotIn,
+            BinaryOperator::Divide,
+            BinaryOperator::Multiply,
+            BinaryOperator::LessThan,
+            BinaryOperator::LessThanOrEqual,
+            BinaryOperator::GreaterThan,
+            BinaryOperator::GreaterThanOrEqual,
+            BinaryOperator::Distinct,
+        ]
+        .iter()
+        .map(|op| {
+            Expr::binary(
+                *op,
+                Expr::literal(Scalar::Integer(0)),
+                Expr::literal(Scalar::Long(0)),
+            )
+        }),
+    );
+
+    Arc::new(Expr::and_from(sub_exprs)).into()
 }
 
 /// The [`EngineExpressionVisitor`] defines a visitor system to allow engines to build their own
