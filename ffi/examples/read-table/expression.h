@@ -186,6 +186,12 @@ ExpressionItemList get_handle(void* data, size_t list_id)
   return data_ptr->lists[list_id];
 }
 
+// utility to turn a slice into a char*
+void* allocate_string(const KernelStringSlice slice)
+{
+  return strndup(slice.ptr, slice.len);
+}
+
 void visit_expr_binop(
   void* data,
   enum OpType op,
@@ -215,7 +221,7 @@ void visit_expr_string(void* data, KernelStringSlice string, uintptr_t sibling_l
 {
   struct Literal* literal = malloc(sizeof(struct Literal));
   literal->type = String;
-  literal->value.string_data = strndup(string.ptr, string.len);
+  literal->value.string_data = allocate_string(string);
   put_handle(data, literal, Literal, sibling_list_id);
 }
 
@@ -318,7 +324,7 @@ DEFINE_UNARY(visit_expr_not, Not)
 
 void visit_expr_column(void* data, KernelStringSlice string, uintptr_t sibling_id_list)
 {
-  char* column_name = strndup(string.ptr, string.len);
+  char* column_name = allocate_string(string);
   put_handle(data, column_name, Column, sibling_id_list);
 }
 

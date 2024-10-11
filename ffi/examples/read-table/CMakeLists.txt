@@ -56,7 +56,7 @@ else()
   target_compile_options(test_expr PRIVATE -Wall -Wextra -Wpedantic -Werror -Wno-strict-prototypes -g)
 endif()
 
-# Add the read_table test
+# Add the kernel expresion -> engine expression test
 include(CTest)
 set(TestRunner "../../../tests/test_expression_visitor/run_test.sh")
 set(ExpectedPath "../../../tests/test_expression_visitor/expected.txt")
