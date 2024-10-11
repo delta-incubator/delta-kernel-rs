@@ -41,7 +41,7 @@ if(PRINT_DATA)
   target_compile_definitions(read_table PUBLIC PRINT_ARROW_DATA)
 endif(PRINT_DATA)
 
-# Configuration for the `test_expr executable
+# Configuration for the `test_expr` executable
 add_executable(test_expr test_expr.c)
 target_compile_definitions(test_expr PUBLIC DEFINE_DEFAULT_ENGINE)
 target_include_directories(test_expr PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/../../../target/ffi-headers")
@@ -52,8 +52,7 @@ target_compile_options(test_expr PUBLIC)
 if(MSVC)
   target_compile_options(test_expr PRIVATE /W4 /WX)
 else()
-  # no-strict-prototypes because arrow headers have fn defs without prototypes
-  target_compile_options(test_expr PRIVATE -Wall -Wextra -Wpedantic -Werror -Wno-strict-prototypes -g)
+  target_compile_options(test_expr PRIVATE -Wall -Wextra -Wpedantic -Werror -Wno-strict-prototypes)
 endif()
 
 # Add the kernel expresion -> engine expression test

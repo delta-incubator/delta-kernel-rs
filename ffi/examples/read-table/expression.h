@@ -8,37 +8,18 @@
 /**
  * This module defines a very simple model of an expression, used only to be able to print the
  * provided expression. It consists of an "ExpressionBuilder" which is our user data that gets
- * passed into each visit_x call. This simply keeps track of all the expressions we are asked to
- * allocate.
+ * passed into each visit_x call. This simply keeps track of all the lists we are asked to allocate.
  *
- * Each expression is an "ExpressionItem", which tracks the type and pointer to the expression.
+ * Each item "ExpressionItem", which tracks the type and pointer to the expression.
+ *
+ * Each complex type is made of an "ExpressionItemList", which tracks its  length and an array of
+ * "ExpressionItems". The top level expression is in a length 1 "ExpressionItemList".
  */
 
-#define DEFINE_BINOP(fun_name, op)                                                                 \
-  void fun_name(void* data, uintptr_t child_list_id, uintptr_t sibling_list_id)                    \
-  {                                                                                                \
-    visit_expr_binop(data, op, child_list_id, sibling_list_id);                                    \
-  }
-#define DEFINE_SIMPLE_SCALAR(fun_name, enum_member, c_type, literal_field)                         \
-  void fun_name(void* data, c_type val, uintptr_t sibling_list_id)                                 \
-  {                                                                                                \
-    struct Literal* lit = malloc(sizeof(struct Literal));                                          \
-    lit->type = enum_member;                                                                       \
-    lit->value.literal_field = val;                                                                \
-    put_handle(data, lit, Literal, sibling_list_id);                                               \
-  }                                                                                                \
-  _Static_assert(                                                                                  \
-    sizeof(c_type) <= sizeof(uintptr_t), "The provided type is not a valid simple scalar")
-#define DEFINE_VARIADIC(fun_name, enum_member)                                                     \
-  void fun_name(void* data, uintptr_t child_list_id, uintptr_t sibling_list_id)                    \
-  {                                                                                                \
-    visit_expr_variadic(data, enum_member, child_list_id, sibling_list_id);                        \
-  }
-#define DEFINE_UNARY(fun_name, op)                                                                 \
-  void fun_name(void* data, uintptr_t child_list_id, uintptr_t sibling_list_id)                    \
-  {                                                                                                \
-    visit_expr_unary(data, op, child_list_id, sibling_list_id);                                    \
-  }
+/*************************************************************
+ * Data Types
+ ************************************************************/
+
 enum OpType
 {
   Add,
@@ -169,6 +150,10 @@ struct Literal
   } value;
 };
 
+/*************************************************************
+ * Utilitiy functions
+ ************************************************************/
+
 void put_handle(void* data, void* ref, enum ExpressionType type, size_t sibling_list_id)
 {
   ExpressionBuilder* data_ptr = (ExpressionBuilder*)data;
@@ -191,6 +176,15 @@ char* allocate_string(const KernelStringSlice slice)
   return strndup(slice.ptr, slice.len);
 }
 
+/*************************************************************
+ * Binary Operations
+ ************************************************************/
+
+#define DEFINE_BINOP(fun_name, op)                                                                 \
+  void fun_name(void* data, uintptr_t child_list_id, uintptr_t sibling_list_id)                    \
+  {                                                                                                \
+    visit_expr_binop(data, op, child_list_id, sibling_list_id);                                    \
+  }
 void visit_expr_binop(
   void* data,
   enum OpType op,
@@ -216,6 +210,31 @@ DEFINE_BINOP(visit_expr_distinct, Distinct)
 DEFINE_BINOP(visit_expr_in, In)
 DEFINE_BINOP(visit_expr_not_in, NotIn)
 
+/*************************************************************
+ * Literal Values
+ ************************************************************/
+
+#define DEFINE_SIMPLE_SCALAR(fun_name, enum_member, c_type, literal_field)                         \
+  void fun_name(void* data, c_type val, uintptr_t sibling_list_id)                                 \
+  {                                                                                                \
+    struct Literal* lit = malloc(sizeof(struct Literal));                                          \
+    lit->type = enum_member;                                                                       \
+    lit->value.literal_field = val;                                                                \
+    put_handle(data, lit, Literal, sibling_list_id);                                               \
+  }                                                                                                \
+  _Static_assert(                                                                                  \
+    sizeof(c_type) <= sizeof(uintptr_t), "The provided type is not a valid simple scalar")
+DEFINE_SIMPLE_SCALAR(visit_expr_int_literal, Integer, int32_t, integer_data);
+DEFINE_SIMPLE_SCALAR(visit_expr_long_literal, Long, int64_t, long_data);
+DEFINE_SIMPLE_SCALAR(visit_expr_short_literal, Short, int16_t, short_data);
+DEFINE_SIMPLE_SCALAR(visit_expr_byte_literal, Byte, int8_t, byte_data);
+DEFINE_SIMPLE_SCALAR(visit_expr_float_literal, Float, float, float_data);
+DEFINE_SIMPLE_SCALAR(visit_expr_double_literal, Double, double, double_data);
+DEFINE_SIMPLE_SCALAR(visit_expr_boolean_literal, Boolean, _Bool, boolean_data);
+DEFINE_SIMPLE_SCALAR(visit_expr_timestamp_literal, Timestamp, int64_t, long_data);
+DEFINE_SIMPLE_SCALAR(visit_expr_timestamp_ntz_literal, TimestampNtz, int64_t, long_data);
+DEFINE_SIMPLE_SCALAR(visit_expr_date_literal, Date, int32_t, integer_data);
+
 void visit_expr_string_literal(void* data, KernelStringSlice string, uintptr_t sibling_list_id)
 {
   struct Literal* literal = malloc(sizeof(struct Literal));
@@ -239,40 +258,6 @@ void visit_expr_decimal_literal(
   dec->value[1] = value_ls;
   dec->precision = precision;
   dec->scale = scale;
-  put_handle(data, literal, Literal, sibling_list_id);
-}
-DEFINE_SIMPLE_SCALAR(visit_expr_int_literal, Integer, int32_t, integer_data);
-DEFINE_SIMPLE_SCALAR(visit_expr_long_literal, Long, int64_t, long_data);
-DEFINE_SIMPLE_SCALAR(visit_expr_short_literal, Short, int16_t, short_data);
-DEFINE_SIMPLE_SCALAR(visit_expr_byte_literal, Byte, int8_t, byte_data);
-DEFINE_SIMPLE_SCALAR(visit_expr_float_literal, Float, float, float_data);
-DEFINE_SIMPLE_SCALAR(visit_expr_double_literal, Double, double, double_data);
-DEFINE_SIMPLE_SCALAR(visit_expr_boolean_literal, Boolean, _Bool, boolean_data);
-DEFINE_SIMPLE_SCALAR(visit_expr_timestamp_literal, Timestamp, int64_t, long_data);
-DEFINE_SIMPLE_SCALAR(visit_expr_timestamp_ntz_literal, TimestampNtz, int64_t, long_data);
-DEFINE_SIMPLE_SCALAR(visit_expr_date_literal, Date, int32_t, integer_data);
-
-void visit_expr_variadic(
-  void* data,
-  enum VariadicType op,
-  uintptr_t child_list_id,
-  uintptr_t sibling_list_id)
-{
-  struct Variadic* var = malloc(sizeof(struct Variadic));
-  var->op = op;
-  var->expr_list = get_handle(data, child_list_id);
-  put_handle(data, var, Variadic, sibling_list_id);
-}
-DEFINE_VARIADIC(visit_expr_and, And)
-DEFINE_VARIADIC(visit_expr_or, Or)
-DEFINE_VARIADIC(visit_expr_struct_expr, StructExpression)
-
-void visit_expr_array_literal(void* data, uintptr_t child_list_id, uintptr_t sibling_list_id)
-{
-  struct Literal* literal = malloc(sizeof(struct Literal));
-  literal->type = Array;
-  struct ArrayData* arr = &(literal->value.array_data);
-  arr->expr_list = get_handle(data, child_list_id);
   put_handle(data, literal, Literal, sibling_list_id);
 }
 
@@ -311,6 +296,49 @@ void visit_expr_null_literal(void* data, uintptr_t sibling_id_list)
   put_handle(data, literal, Literal, sibling_id_list);
 }
 
+/*************************************************************
+ * Variadic Expressions
+ ************************************************************/
+
+#define DEFINE_VARIADIC(fun_name, enum_member)                                                     \
+  void fun_name(void* data, uintptr_t child_list_id, uintptr_t sibling_list_id)                    \
+  {                                                                                                \
+    visit_expr_variadic(data, enum_member, child_list_id, sibling_list_id);                        \
+  }
+
+void visit_expr_variadic(
+  void* data,
+  enum VariadicType op,
+  uintptr_t child_list_id,
+  uintptr_t sibling_list_id)
+{
+  struct Variadic* var = malloc(sizeof(struct Variadic));
+  var->op = op;
+  var->expr_list = get_handle(data, child_list_id);
+  put_handle(data, var, Variadic, sibling_list_id);
+}
+DEFINE_VARIADIC(visit_expr_and, And)
+DEFINE_VARIADIC(visit_expr_or, Or)
+DEFINE_VARIADIC(visit_expr_struct_expr, StructExpression)
+
+void visit_expr_array_literal(void* data, uintptr_t child_list_id, uintptr_t sibling_list_id)
+{
+  struct Literal* literal = malloc(sizeof(struct Literal));
+  literal->type = Array;
+  struct ArrayData* arr = &(literal->value.array_data);
+  arr->expr_list = get_handle(data, child_list_id);
+  put_handle(data, literal, Literal, sibling_list_id);
+}
+
+/*************************************************************
+ * Unary Expressions
+ ************************************************************/
+#define DEFINE_UNARY(fun_name, op)                                                                 \
+  void fun_name(void* data, uintptr_t child_list_id, uintptr_t sibling_list_id)                    \
+  {                                                                                                \
+    visit_expr_unary(data, op, child_list_id, sibling_list_id);                                    \
+  }
+
 void visit_expr_unary(
   void* data,
   enum UnaryType type,
@@ -324,6 +352,10 @@ void visit_expr_unary(
 }
 DEFINE_UNARY(visit_expr_is_null, IsNull)
 DEFINE_UNARY(visit_expr_not, Not)
+
+/*************************************************************
+ * Column Expression
+ ************************************************************/
 
 void visit_expr_column(void* data, KernelStringSlice string, uintptr_t sibling_id_list)
 {
@@ -346,7 +378,6 @@ uintptr_t make_field_list(void* data, uintptr_t reserve)
 ExpressionItemList construct_predicate(SharedExpression* predicate)
 {
   ExpressionBuilder data = { 0 };
-  data.lists = malloc(sizeof(ExpressionItem) * 100);
   EngineExpressionVisitor visitor = {
     .data = &data,
     .make_field_list = make_field_list,
@@ -387,7 +418,9 @@ ExpressionItemList construct_predicate(SharedExpression* predicate)
     .visit_struct_expr = visit_expr_struct_expr,
   };
   uintptr_t top_level_id = visit_expression(&predicate, &visitor);
-  return data.lists[top_level_id];
+  ExpressionItemList top_level_expr = data.lists[top_level_id];
+  free(data.lists);
+  return top_level_expr;
 }
 
 void free_expression_item_list(ExpressionItemList list);

@@ -268,7 +268,7 @@ pub unsafe extern "C" fn free_kernel_predicate(data: Handle<SharedExpression>) {
 /// The caller is responsible for freeing the retured memory, either by calling
 /// [`free_kernel_predicate`], or [`Handle::drop_handle`]
 #[no_mangle]
-pub unsafe extern "C" fn get_kernel_expression() -> Handle<SharedExpression> {
+pub unsafe extern "C" fn get_testing_kernel_expression() -> Handle<SharedExpression> {
     use Expression as Expr;
 
     let array_type = ArrayType::new(
