@@ -1,15 +1,19 @@
 use std::iter;
+use std::mem;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::actions::get_log_commit_info_schema;
-use crate::actions::COMMIT_INFO_NAME;
+use crate::actions::{ADD_NAME, COMMIT_INFO_NAME};
 use crate::error::Error;
-use crate::expressions::{column_expr, Scalar, StructData};
+use crate::expressions::{column_expr, ColumnName, Scalar, StructData};
 use crate::path::ParsedLogPath;
-use crate::schema::{StructField, StructType};
+use crate::schema::{SchemaRef, StructField, StructType};
 use crate::snapshot::Snapshot;
 use crate::{DataType, DeltaResult, Engine, EngineData, Expression, Version};
+
+use itertools::chain;
+use url::Url;
 
 const KERNEL_VERSION: &str = env!("CARGO_PKG_VERSION");
 const UNKNOWN_OPERATION: &str = "UNKNOWN";
@@ -32,6 +36,14 @@ pub struct Transaction {
     read_snapshot: Arc<Snapshot>,
     operation: Option<String>,
     commit_info: Option<Arc<dyn EngineData>>,
+    write_metadata: Box<dyn Iterator<Item = Box<dyn EngineData>> + Send>,
+}
+
+/// Get the expected schema for [`write_metadata`].
+///
+/// [`write_metadata`]: crate::transaction::Transaction::write_metadata
+pub fn get_write_metadata_schema() -> &'static StructType {
+    &crate::actions::WRITE_METADATA_SCHEMA
 }
 
 impl std::fmt::Debug for Transaction {
@@ -56,6 +68,7 @@ impl Transaction {
             read_snapshot: snapshot.into(),
             operation: None,
             commit_info: None,
+            write_metadata: Box::new(std::iter::empty()),
         }
     }
 
@@ -74,6 +87,11 @@ impl Transaction {
             engine_commit_info.as_ref(),
         )?));
 
+        // TODO consider IntoIterator so we can have multiple write_metadata iterators (and return
+        // self in the conflict case for retries)
+        let adds = generate_adds(engine, self.write_metadata);
+        let actions = chain(actions, adds);
+
         // step two: set new commit version (current_version + 1) and path to write
         let commit_version = self.read_snapshot.version() + 1;
         let commit_path =
@@ -83,7 +101,8 @@ impl Transaction {
         let json_handler = engine.get_json_handler();
         match json_handler.write_json_file(&commit_path.location, Box::new(actions), false) {
             Ok(()) => Ok(CommitResult::Committed(commit_version)),
-            Err(Error::FileAlreadyExists(_)) => Ok(CommitResult::Conflict(self, commit_version)),
+            // FIXME
+            // Err(Error::FileAlreadyExists(_)) => Ok(CommitResult::Conflict(self, commit_version)),
             Err(e) => Err(e),
         }
     }
@@ -111,6 +130,108 @@ impl Transaction {
     pub fn with_commit_info(mut self, commit_info: Box<dyn EngineData>) -> Self {
         self.commit_info = Some(commit_info.into());
         self
+    }
+
+    // Generate the logical-to-physical transform expression for this transaction. At the moment,
+    // this is a transaction-wide expression.
+    fn generate_logical_to_physical(&self) -> Expression {
+        // for now, we just pass through all the columns except partition columns.
+        // note this is _incorrect_ if table config deems we need partition columns.
+        Expression::struct_from(self.read_snapshot.schema().fields().filter_map(|f| {
+            if self
+                .read_snapshot
+                .metadata()
+                .partition_columns
+                .contains(&f.name())
+            {
+                None
+            } else {
+                Some(Expression::Column(ColumnName::new(iter::once(f.name()))))
+            }
+        }))
+    }
+
+    /// Get the write context for this transaction. At the moment, this is constant for the whole
+    /// transaction.
+    pub fn write_context(&self) -> WriteContext {
+        let target_dir = self.read_snapshot.table_root();
+        let snapshot_schema = self.read_snapshot.schema();
+        let partition_cols = self.read_snapshot.metadata().partition_columns.clone();
+        let logical_to_physical = self.generate_logical_to_physical();
+        WriteContext::new(
+            target_dir.clone(),
+            Arc::new(snapshot_schema.clone()),
+            partition_cols,
+            logical_to_physical,
+        )
+    }
+
+    /// Add write metadata about files to include in the transaction. This API can be called
+    /// multiple times to add multiple iterators.
+    ///
+    /// TODO what is expected schema for the batches?
+    pub fn add_write_metadata(
+        &mut self,
+        data: Box<dyn Iterator<Item = Box<dyn EngineData>> + Send>,
+    ) {
+        let write_metadata = mem::replace(&mut self.write_metadata, Box::new(std::iter::empty()));
+        self.write_metadata = Box::new(chain(write_metadata, data));
+    }
+}
+
+// this does something similar to adding top-level 'commitInfo' named struct. we should unify.
+fn generate_adds(
+    engine: &dyn Engine,
+    write_metadata: Box<dyn Iterator<Item = Box<dyn EngineData>> + Send>,
+) -> Box<dyn Iterator<Item = Box<dyn EngineData>> + Send> {
+    let expression_handler = engine.get_expression_handler();
+    let write_metadata_schema = get_write_metadata_schema();
+    let log_schema: DataType = DataType::struct_type(vec![StructField::new(
+        ADD_NAME,
+        write_metadata_schema.clone(),
+        true,
+    )]);
+
+    Box::new(write_metadata.map(move |write_metadata_batch| {
+        let adds_expr = Expression::struct_from([Expression::struct_from(
+            write_metadata_schema
+                .fields()
+                .map(|f| Expression::Column(ColumnName::new(iter::once(f.name())))),
+        )]);
+        let adds_evaluator = expression_handler.get_evaluator(
+            write_metadata_schema.clone().into(),
+            adds_expr,
+            log_schema.clone(),
+        );
+        adds_evaluator
+            .evaluate(write_metadata_batch.as_ref())
+            .expect("fixme")
+    }))
+}
+/// WriteContext is data derived from a [`Transaction`] that can be provided to writers in order to
+/// write table data.
+///
+/// [`Transaction`]: struct.Transaction.html
+pub struct WriteContext {
+    pub target_dir: Url,
+    pub schema: SchemaRef,
+    pub partition_cols: Vec<String>,
+    pub logical_to_physical: Expression,
+}
+
+impl WriteContext {
+    fn new(
+        target_dir: Url,
+        schema: SchemaRef,
+        partition_cols: Vec<String>,
+        logical_to_physical: Expression,
+    ) -> Self {
+        WriteContext {
+            target_dir,
+            schema,
+            partition_cols,
+            logical_to_physical,
+        }
     }
 }
 

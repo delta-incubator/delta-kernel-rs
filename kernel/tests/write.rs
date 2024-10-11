@@ -14,7 +14,8 @@ use delta_kernel::engine::arrow_data::ArrowEngineData;
 use delta_kernel::engine::default::executor::tokio::TokioBackgroundExecutor;
 use delta_kernel::engine::default::DefaultEngine;
 use delta_kernel::schema::{DataType, SchemaRef, StructField, StructType};
-use delta_kernel::{Error as KernelError, Table};
+use delta_kernel::Error as KernelError;
+use delta_kernel::{DeltaResult, Engine, Table};
 
 // setup default engine with in-memory object store.
 fn setup(
@@ -85,21 +86,8 @@ async fn create_table(
     Ok(Table::new(table_path))
 }
 
-#[tokio::test]
-async fn test_commit_info() -> Result<(), Box<dyn std::error::Error>> {
-    // setup tracing
-    let _ = tracing_subscriber::fmt::try_init();
-    // setup in-memory object store and default engine
-    let (store, engine, table_location) = setup("test_table");
-
-    // create a simple table: one int column named 'number'
-    let schema = Arc::new(StructType::new(vec![StructField::new(
-        "number",
-        DataType::INTEGER,
-        true,
-    )]));
-    let table = create_table(store.clone(), table_location, schema, &[]).await?;
-
+// create commit info in arrow of the form {engineInfo: "default engine"}
+fn new_commit_info() -> DeltaResult<Box<ArrowEngineData>> {
     // create commit info of the form {engineCommitInfo: Map { "engineInfo": "default engine" } }
     let commit_info_schema = Arc::new(ArrowSchema::new(vec![Field::new(
         "engineCommitInfo",
@@ -136,11 +124,30 @@ async fn test_commit_info() -> Result<(), Box<dyn std::error::Error>> {
 
     let commit_info_batch =
         RecordBatch::try_new(commit_info_schema.clone(), vec![Arc::new(array)])?;
+    Ok(Box::new(ArrowEngineData::new(commit_info_batch)))
+}
+
+#[tokio::test]
+async fn test_commit_info() -> Result<(), Box<dyn std::error::Error>> {
+    // setup tracing
+    let _ = tracing_subscriber::fmt::try_init();
+    // setup in-memory object store and default engine
+    let (store, engine, table_location) = setup("test_table");
+
+    // create a simple table: one int column named 'number'
+    let schema = Arc::new(StructType::new(vec![StructField::new(
+        "number",
+        DataType::INTEGER,
+        true,
+    )]));
+    let table = create_table(store.clone(), table_location, schema, &[]).await?;
+
+    let commit_info = new_commit_info()?;
 
     // create a transaction
     let txn = table
         .new_transaction(&engine)?
-        .with_commit_info(Box::new(ArrowEngineData::new(commit_info_batch)));
+        .with_commit_info(commit_info);
 
     // commit!
     txn.commit(&engine)?;
@@ -249,5 +256,124 @@ async fn test_invalid_commit_info() -> Result<(), Box<dyn std::error::Error>> {
         txn.commit(&engine),
         Err(KernelError::InvalidCommitInfo(_))
     ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_append() -> Result<(), Box<dyn std::error::Error>> {
+    // setup tracing
+    let _ = tracing_subscriber::fmt::try_init();
+    // setup in-memory object store and default engine
+    let (store, engine, table_location) = setup("test_table");
+
+    // create a simple table: one int column named 'number'
+    let schema = Arc::new(StructType::new(vec![StructField::new(
+        "number",
+        DataType::INTEGER,
+        true,
+    )]));
+    let table = create_table(store.clone(), table_location, schema.clone(), &[]).await?;
+
+    let commit_info = new_commit_info()?;
+
+    let mut txn = table
+        .new_transaction(&engine)?
+        .with_commit_info(commit_info);
+
+    // create two new arrow record batches to append
+    let append_data = [[1, 2, 3], [4, 5, 6]].map(|data| -> DeltaResult<_> {
+        let data = RecordBatch::try_new(
+            Arc::new(schema.as_ref().try_into()?),
+            vec![Arc::new(arrow::array::Int32Array::from(data.to_vec()))],
+        )?;
+        Ok(Box::new(ArrowEngineData::new(data)))
+    });
+
+    // write data out by spawning async tasks to simulate executors
+    let engine = Arc::new(engine);
+    let write_context = Arc::new(txn.write_context());
+    let tasks = append_data.into_iter().map(|data| {
+        tokio::task::spawn({
+            let engine = Arc::clone(&engine);
+            let write_context = Arc::clone(&write_context);
+            async move {
+                let parquet_handler = &engine.parquet;
+                parquet_handler
+                    .write_parquet_file(
+                        &write_context.target_dir,
+                        data.expect("FIXME"),
+                        std::collections::HashMap::new(),
+                        true,
+                    )
+                    .await
+                    .expect("FIXME")
+            }
+        })
+    });
+
+    // FIXME this is collecting to vec
+    let write_metadata = futures::future::join_all(tasks)
+        .await
+        .into_iter()
+        .map(|r| r.unwrap());
+    txn.add_write_metadata(Box::new(write_metadata));
+
+    // commit!
+    txn.commit(engine.as_ref())?;
+
+    let commit1 = store
+        .get(&Path::from(
+            "/test_table/_delta_log/00000000000000000001.json",
+        ))
+        .await?;
+    let commit1 = String::from_utf8(commit1.bytes().await?.to_vec())?;
+    println!("{}", commit1);
+
+    test_read(
+        Box::new(ArrowEngineData::new(RecordBatch::try_new(
+            Arc::new(schema.as_ref().try_into()?),
+            vec![Arc::new(arrow::array::Int32Array::from(vec![
+                1, 2, 3, 4, 5, 6,
+            ]))],
+        )?)),
+        table,
+        engine.as_ref(),
+    )?;
+    Ok(())
+}
+
+fn test_read(
+    expected: Box<ArrowEngineData>,
+    table: Table,
+    engine: &impl Engine,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let snapshot = table.snapshot(engine, None)?;
+    let scan = snapshot.into_scan_builder().build()?;
+    let actual = scan.execute(engine)?;
+    let batches: Vec<RecordBatch> = actual
+        .into_iter()
+        .map(|res| {
+            let data = res.unwrap().raw_data.unwrap();
+            let record_batch: RecordBatch = data
+                .into_any()
+                .downcast::<ArrowEngineData>()
+                .unwrap()
+                .into();
+            record_batch
+        })
+        .collect();
+
+    let formatted = arrow::util::pretty::pretty_format_batches(&batches)
+        .unwrap()
+        .to_string();
+
+    let expected = arrow::util::pretty::pretty_format_batches(&[expected.record_batch().clone()])
+        .unwrap()
+        .to_string();
+
+    println!("expected:\n{expected}");
+    println!("got:\n{formatted}");
+    assert_eq!(formatted, expected);
+
     Ok(())
 }

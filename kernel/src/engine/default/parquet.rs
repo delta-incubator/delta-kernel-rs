@@ -3,21 +3,26 @@
 use std::ops::Range;
 use std::sync::Arc;
 
+use arrow_array::{BooleanArray, Int64Array, RecordBatch, StringArray};
 use futures::StreamExt;
 use object_store::path::Path;
 use object_store::DynObjectStore;
 use parquet::arrow::arrow_reader::{
     ArrowReaderMetadata, ArrowReaderOptions, ParquetRecordBatchReaderBuilder,
 };
+use parquet::arrow::arrow_writer::ArrowWriter;
 use parquet::arrow::async_reader::{ParquetObjectReader, ParquetRecordBatchStreamBuilder};
+use uuid::Uuid;
 
 use super::file_stream::{FileOpenFuture, FileOpener, FileStream};
+use crate::engine::arrow_data::ArrowEngineData;
 use crate::engine::arrow_utils::{generate_mask, get_requested_indices, reorder_struct_array};
 use crate::engine::default::executor::TaskExecutor;
 use crate::engine::parquet_row_group_skipping::ParquetRowGroupSkipping;
 use crate::schema::SchemaRef;
 use crate::{
-    DeltaResult, Error, ExpressionRef, FileDataReadResultIterator, FileMeta, ParquetHandler,
+    DeltaResult, EngineData, Error, ExpressionRef, FileDataReadResultIterator, FileMeta,
+    ParquetHandler,
 };
 
 #[derive(Debug)]
@@ -25,6 +30,19 @@ pub struct DefaultParquetHandler<E: TaskExecutor> {
     store: Arc<DynObjectStore>,
     task_executor: Arc<E>,
     readahead: usize,
+}
+
+// TODO: plumb through modification time
+#[derive(Debug)]
+pub struct ParquetMetadata {
+    pub path: String,
+    pub size: i64,
+}
+
+impl ParquetMetadata {
+    pub fn new(path: String, size: i64) -> Self {
+        Self { path, size }
+    }
 }
 
 impl<E: TaskExecutor> DefaultParquetHandler<E> {
@@ -42,6 +60,78 @@ impl<E: TaskExecutor> DefaultParquetHandler<E> {
     pub fn with_readahead(mut self, readahead: usize) -> Self {
         self.readahead = readahead;
         self
+    }
+
+    async fn write_parquet(
+        &self,
+        path: &url::Url,
+        data: Box<dyn EngineData>,
+    ) -> DeltaResult<ParquetMetadata> {
+        let batch: Box<_> = ArrowEngineData::try_from_engine_data(data)?;
+        let record_batch = batch.record_batch();
+
+        let mut buffer = vec![];
+        let mut writer = ArrowWriter::try_new(&mut buffer, record_batch.schema(), None)?;
+        writer.write(&record_batch)?;
+        writer.close()?; // writer must be closed to write footer
+
+        let size = buffer.len();
+        let name: String = Uuid::new_v4().to_string() + ".parquet";
+        // FIXME test with trailing '/' and omitting?
+        let path = path.join(&name)?;
+
+        self.store
+            .put(&Path::from(path.path()), buffer.into())
+            .await?;
+
+        Ok(ParquetMetadata::new(
+            path.to_string(),
+            size.try_into()
+                .map_err(|_| Error::generic("Failed to convert parquet metadata 'size' to i64"))?,
+        ))
+    }
+
+    pub async fn write_parquet_file(
+        &self,
+        path: &url::Url,
+        data: Box<dyn EngineData>,
+        partition_values: std::collections::HashMap<String, String>,
+        data_change: bool,
+    ) -> DeltaResult<Box<dyn EngineData>> {
+        let ParquetMetadata { path, size } = self.write_parquet(path, data).await?;
+        let modification_time = chrono::Utc::now().timestamp_millis(); // FIXME
+        let write_metadata_schema = crate::transaction::get_write_metadata_schema();
+
+        // create the record batch of the write metadata
+        let path = Arc::new(StringArray::from(vec![path.to_string()]));
+        use arrow_array::builder::StringBuilder;
+        let key_builder = StringBuilder::new();
+        let val_builder = StringBuilder::new();
+        let names = arrow_array::builder::MapFieldNames {
+            entry: "key_value".to_string(),
+            key: "key".to_string(),
+            value: "value".to_string(),
+        };
+        let mut builder =
+            arrow_array::builder::MapBuilder::new(Some(names), key_builder, val_builder);
+        if partition_values.is_empty() {
+            builder.append(true).unwrap();
+        } else {
+            for (k, v) in partition_values {
+                builder.keys().append_value(&k);
+                builder.values().append_value(&v);
+                builder.append(true).unwrap();
+            }
+        }
+        let partitions = Arc::new(builder.finish());
+        let size = Arc::new(Int64Array::from(vec![size]));
+        let data_change = Arc::new(BooleanArray::from(vec![data_change]));
+        let modification_time = Arc::new(Int64Array::from(vec![modification_time]));
+
+        Ok(Box::new(ArrowEngineData::new(RecordBatch::try_new(
+            Arc::new(write_metadata_schema.try_into()?),
+            vec![path, partitions, size, modification_time, data_change],
+        )?)))
     }
 }
 

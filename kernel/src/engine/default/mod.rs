@@ -33,7 +33,7 @@ pub struct DefaultEngine<E: TaskExecutor> {
     store: Arc<DynObjectStore>,
     file_system: Arc<ObjectStoreFileSystemClient<E>>,
     json: Arc<DefaultJsonHandler<E>>,
-    parquet: Arc<DefaultParquetHandler<E>>,
+    pub parquet: Arc<DefaultParquetHandler<E>>, // FIXME
     expression: Arc<ArrowExpressionHandler>,
 }
 
