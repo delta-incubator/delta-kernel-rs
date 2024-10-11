@@ -1,6 +1,5 @@
 #include "assert.h"
 #include "delta_kernel_ffi.h"
-#include "read_table.h"
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -187,7 +186,7 @@ ExpressionItemList get_handle(void* data, size_t list_id)
 }
 
 // utility to turn a slice into a char*
-void* allocate_string(const KernelStringSlice slice)
+char* allocate_string(const KernelStringSlice slice)
 {
   return strndup(slice.ptr, slice.len);
 }
