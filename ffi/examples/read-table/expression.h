@@ -268,7 +268,7 @@ void visit_expr_variadic(
 }
 DEFINE_VARIADIC(visit_expr_and, And)
 DEFINE_VARIADIC(visit_expr_or, Or)
-DEFINE_VARIADIC(visit_expr_struct, StructConstructor)
+DEFINE_VARIADIC(visit_expr_struct_expr, StructConstructor)
 
 void visit_expr_array(void* data, uintptr_t child_list_id, uintptr_t sibling_list_id)
 {
@@ -382,7 +382,7 @@ ExpressionItem construct_predicate(SharedExpression* predicate)
     .visit_multiply = visit_expr_multiply,
     .visit_divide = visit_expr_divide,
     .visit_column = visit_expr_column,
-    .visit_struct = visit_expr_struct,
+    .visit_struct_expr = visit_expr_struct_expr,
     .visit_null = visit_expr_null,
     .visit_struct_literal = visit_expr_struct_literal,
     .visit_array = visit_expr_array,

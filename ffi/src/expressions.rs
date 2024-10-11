@@ -512,7 +512,7 @@ pub struct EngineExpressionVisitor {
     /// Visit a `struct` which is constructed from an ordered list of expressions. This declares
     /// the number of expressions that the struct will be made of. The visitor will populate the
     /// list of expressions using the [`visit_struct_sub_expr`] method.
-    pub visit_struct:
+    pub visit_struct_expr:
         extern "C" fn(data: *mut c_void, child_list_id: usize, sibling_list_id: usize),
     /// Visit a struct literal which is made up of a list of field names and values. This declares
     /// the number of fields that the struct will have. The visitor will populate the struct fields
@@ -583,7 +583,7 @@ pub unsafe extern "C" fn visit_expression(
             sibling_list_id
         )
     }
-    fn visit_struct(
+    fn visit_struct_expr(
         visitor: &mut EngineExpressionVisitor,
         exprs: &Vec<Expression>,
         sibling_list_id: usize,
@@ -592,7 +592,7 @@ pub unsafe extern "C" fn visit_expression(
         for expr in exprs {
             visit_expression_impl(visitor, expr, child_list_id);
         }
-        call!(visitor, visit_struct, child_list_id, sibling_list_id)
+        call!(visitor, visit_struct_expr, child_list_id, sibling_list_id)
     }
     fn visit_variadic(
         visitor: &mut EngineExpressionVisitor,
@@ -663,7 +663,7 @@ pub unsafe extern "C" fn visit_expression(
         match expression {
             Expression::Literal(scalar) => visit_scalar(visitor, scalar, sibling_list_id),
             Expression::Column(name) => call!(visitor, visit_column, name.into(), sibling_list_id),
-            Expression::Struct(exprs) => visit_struct(visitor, exprs, sibling_list_id),
+            Expression::Struct(exprs) => visit_struct_expr(visitor, exprs, sibling_list_id),
             Expression::BinaryOperation { op, left, right } => {
                 let child_list_id = call!(visitor, make_field_list, 2);
                 visit_expression_impl(visitor, left, child_list_id);
