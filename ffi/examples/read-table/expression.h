@@ -14,12 +14,12 @@
  * Each expression is an "ExpressionItem", which tracks the type and pointer to the expression.
  */
 
-#define DEFINotEqual_BINOP(fun_name, op)                                                           \
+#define DEFINE_BINOP(fun_name, op)                                                                 \
   void fun_name(void* data, uintptr_t child_list_id, uintptr_t sibling_list_id)                    \
   {                                                                                                \
     visit_expr_binop(data, op, child_list_id, sibling_list_id);                                    \
   }
-#define DEFINotEqual_SIMPLessThanOrEqual_SCALAR(fun_name, enum_member, c_type, literal_field)      \
+#define DEFINE_SIMPLE_SCALAR(fun_name, enum_member, c_type, literal_field)                         \
   void fun_name(void* data, c_type val, uintptr_t sibling_list_id)                                 \
   {                                                                                                \
     struct Literal* lit = malloc(sizeof(struct Literal));                                          \
@@ -29,12 +29,12 @@
   }                                                                                                \
   _Static_assert(                                                                                  \
     sizeof(c_type) <= sizeof(uintptr_t), "The provided type is not a valid simple scalar")
-#define DEFINotEqual_VARIADIC(fun_name, enum_member)                                               \
+#define DEFINE_VARIADIC(fun_name, enum_member)                                                     \
   void fun_name(void* data, uintptr_t child_list_id, uintptr_t sibling_list_id)                    \
   {                                                                                                \
     visit_expr_variadic(data, enum_member, child_list_id, sibling_list_id);                        \
   }
-#define DEFINotEqual_UNARY(fun_name, op)                                                           \
+#define DEFINE_UNARY(fun_name, op)                                                                 \
   void fun_name(void* data, uintptr_t child_list_id, uintptr_t sibling_list_id)                    \
   {                                                                                                \
     visit_expr_unary(data, op, child_list_id, sibling_list_id);                                    \
@@ -202,19 +202,21 @@ void visit_expr_binop(
   binop->exprs = get_handle(data, child_id_list);
   put_handle(data, binop, BinOp, sibling_id_list);
 }
-DEFINotEqual_BINOP(visit_expr_add, Add) DEFINotEqual_BINOP(visit_expr_minus, Minus)
-  DEFINotEqual_BINOP(visit_expr_multiply, Multiply) DEFINotEqual_BINOP(visit_expr_divide, Divide)
-    DEFINotEqual_BINOP(visit_expr_lt, LessThan) DEFINotEqual_BINOP(visit_expr_le, LessThanOrEqual)
-      DEFINotEqual_BINOP(visit_expr_gt, GreaterThan)
-        DEFINotEqual_BINOP(visit_expr_ge, GreaterThaneOrEqual)
-          DEFINotEqual_BINOP(visit_expr_eq, Equal) DEFINotEqual_BINOP(visit_expr_ne, NotEqual)
-            DEFINotEqual_BINOP(visit_expr_distinct, Distinct) DEFINotEqual_BINOP(visit_expr_in, In)
-              DEFINotEqual_BINOP(visit_expr_not_in, NotIn)
+DEFINE_BINOP(visit_expr_add, Add)
+DEFINE_BINOP(visit_expr_minus, Minus)
+DEFINE_BINOP(visit_expr_multiply, Multiply)
+DEFINE_BINOP(visit_expr_divide, Divide)
+DEFINE_BINOP(visit_expr_lt, LessThan)
+DEFINE_BINOP(visit_expr_le, LessThanOrEqual)
+DEFINE_BINOP(visit_expr_gt, GreaterThan)
+DEFINE_BINOP(visit_expr_ge, GreaterThaneOrEqual)
+DEFINE_BINOP(visit_expr_eq, Equal)
+DEFINE_BINOP(visit_expr_ne, NotEqual)
+DEFINE_BINOP(visit_expr_distinct, Distinct)
+DEFINE_BINOP(visit_expr_in, In)
+DEFINE_BINOP(visit_expr_not_in, NotIn)
 
-                void visit_expr_string(
-                  void* data,
-                  KernelStringSlice string,
-                  uintptr_t sibling_list_id)
+void visit_expr_string_literal(void* data, KernelStringSlice string, uintptr_t sibling_list_id)
 {
   struct Literal* literal = malloc(sizeof(struct Literal));
   literal->type = String;
@@ -222,7 +224,7 @@ DEFINotEqual_BINOP(visit_expr_add, Add) DEFINotEqual_BINOP(visit_expr_minus, Min
   put_handle(data, literal, Literal, sibling_list_id);
 }
 
-void visit_expr_decimal(
+void visit_expr_decimal_literal(
   void* data,
   uint64_t value_ms,
   uint64_t value_ls,
@@ -239,16 +241,16 @@ void visit_expr_decimal(
   dec->scale = scale;
   put_handle(data, literal, Literal, sibling_list_id);
 }
-DEFINotEqual_SIMPLessThanOrEqual_SCALAR(visit_expr_int, Integer, int32_t, integer_data);
-DEFINotEqual_SIMPLessThanOrEqual_SCALAR(visit_expr_long, Long, int64_t, long_data);
-DEFINotEqual_SIMPLessThanOrEqual_SCALAR(visit_expr_short, Short, int16_t, short_data);
-DEFINotEqual_SIMPLessThanOrEqual_SCALAR(visit_expr_byte, Byte, int8_t, byte_data);
-DEFINotEqual_SIMPLessThanOrEqual_SCALAR(visit_expr_float, Float, float, float_data);
-DEFINotEqual_SIMPLessThanOrEqual_SCALAR(visit_expr_double, Double, double, double_data);
-DEFINotEqual_SIMPLessThanOrEqual_SCALAR(visit_expr_boolean, Boolean, _Bool, boolean_data);
-DEFINotEqual_SIMPLessThanOrEqual_SCALAR(visit_expr_timestamp, Timestamp, int64_t, long_data);
-DEFINotEqual_SIMPLessThanOrEqual_SCALAR(visit_expr_timestamp_ntz, TimestampNtz, int64_t, long_data);
-DEFINotEqual_SIMPLessThanOrEqual_SCALAR(visit_expr_date, Date, int32_t, integer_data);
+DEFINE_SIMPLE_SCALAR(visit_expr_int_literal, Integer, int32_t, integer_data);
+DEFINE_SIMPLE_SCALAR(visit_expr_long_literal, Long, int64_t, long_data);
+DEFINE_SIMPLE_SCALAR(visit_expr_short_literal, Short, int16_t, short_data);
+DEFINE_SIMPLE_SCALAR(visit_expr_byte_literal, Byte, int8_t, byte_data);
+DEFINE_SIMPLE_SCALAR(visit_expr_float_literal, Float, float, float_data);
+DEFINE_SIMPLE_SCALAR(visit_expr_double_literal, Double, double, double_data);
+DEFINE_SIMPLE_SCALAR(visit_expr_boolean_literal, Boolean, _Bool, boolean_data);
+DEFINE_SIMPLE_SCALAR(visit_expr_timestamp_literal, Timestamp, int64_t, long_data);
+DEFINE_SIMPLE_SCALAR(visit_expr_timestamp_ntz_literal, TimestampNtz, int64_t, long_data);
+DEFINE_SIMPLE_SCALAR(visit_expr_date_literal, Date, int32_t, integer_data);
 
 void visit_expr_variadic(
   void* data,
@@ -261,10 +263,11 @@ void visit_expr_variadic(
   var->expr_list = get_handle(data, child_list_id);
   put_handle(data, var, Variadic, sibling_list_id);
 }
-DEFINotEqual_VARIADIC(visit_expr_and, And) DEFINotEqual_VARIADIC(visit_expr_or, Or)
-  DEFINotEqual_VARIADIC(visit_expr_struct_expr, StructExpression)
+DEFINE_VARIADIC(visit_expr_and, And)
+DEFINE_VARIADIC(visit_expr_or, Or)
+DEFINE_VARIADIC(visit_expr_struct_expr, StructExpression)
 
-    void visit_expr_array(void* data, uintptr_t child_list_id, uintptr_t sibling_list_id)
+void visit_expr_array_literal(void* data, uintptr_t child_list_id, uintptr_t sibling_list_id)
 {
   struct Literal* literal = malloc(sizeof(struct Literal));
   literal->type = Array;
@@ -273,7 +276,11 @@ DEFINotEqual_VARIADIC(visit_expr_and, And) DEFINotEqual_VARIADIC(visit_expr_or, 
   put_handle(data, literal, Literal, sibling_list_id);
 }
 
-void visit_expr_binary(void* data, const uint8_t* buf, uintptr_t len, uintptr_t sibling_list_id)
+void visit_expr_binary_literal(
+  void* data,
+  const uint8_t* buf,
+  uintptr_t len,
+  uintptr_t sibling_list_id)
 {
   struct Literal* literal = malloc(sizeof(struct Literal));
   literal->type = Binary;
@@ -297,7 +304,7 @@ void visit_expr_struct_literal(
   put_handle(data, literal, Literal, sibling_list_id);
 }
 
-void visit_expr_null(void* data, uintptr_t sibling_id_list)
+void visit_expr_null_literal(void* data, uintptr_t sibling_id_list)
 {
   struct Literal* literal = malloc(sizeof(struct Literal));
   literal->type = Null;
@@ -315,9 +322,10 @@ void visit_expr_unary(
   unary->sub_expr = get_handle(data, child_list_id);
   put_handle(data, unary, Unary, sibling_list_id);
 }
-DEFINotEqual_UNARY(visit_expr_is_null, IsNull) DEFINotEqual_UNARY(visit_expr_not, Not)
+DEFINE_UNARY(visit_expr_is_null, IsNull)
+DEFINE_UNARY(visit_expr_not, Not)
 
-  void visit_expr_column(void* data, KernelStringSlice string, uintptr_t sibling_id_list)
+void visit_expr_column(void* data, KernelStringSlice string, uintptr_t sibling_id_list)
 {
   char* column_name = allocate_string(string);
   put_handle(data, column_name, Column, sibling_id_list);
@@ -342,19 +350,22 @@ ExpressionItemList construct_predicate(SharedExpression* predicate)
   EngineExpressionVisitor visitor = {
     .data = &data,
     .make_field_list = make_field_list,
-    .visit_int = visit_expr_int,
-    .visit_long = visit_expr_long,
-    .visit_short = visit_expr_short,
-    .visit_byte = visit_expr_byte,
-    .visit_float = visit_expr_float,
-    .visit_double = visit_expr_double,
-    .visit_bool = visit_expr_boolean,
-    .visit_timestamp = visit_expr_timestamp,
-    .visit_timestamp_ntz = visit_expr_timestamp_ntz,
-    .visit_date = visit_expr_date,
-    .visit_binary = visit_expr_binary,
-    .visit_decimal = visit_expr_decimal,
-    .visit_string = visit_expr_string,
+    .visit_int_literal = visit_expr_int_literal,
+    .visit_long_literal = visit_expr_long_literal,
+    .visit_short_literal = visit_expr_short_literal,
+    .visit_byte_literal = visit_expr_byte_literal,
+    .visit_float_literal = visit_expr_float_literal,
+    .visit_double_literal = visit_expr_double_literal,
+    .visit_bool_literal = visit_expr_boolean_literal,
+    .visit_timestamp_literal = visit_expr_timestamp_literal,
+    .visit_timestamp_ntz_literal = visit_expr_timestamp_ntz_literal,
+    .visit_date_literal = visit_expr_date_literal,
+    .visit_binary_literal = visit_expr_binary_literal,
+    .visit_null_literal = visit_expr_null_literal,
+    .visit_decimal_literal = visit_expr_decimal_literal,
+    .visit_string_literal = visit_expr_string_literal,
+    .visit_struct_literal = visit_expr_struct_literal,
+    .visit_array_literal = visit_expr_array_literal,
     .visit_and = visit_expr_and,
     .visit_or = visit_expr_or,
     .visit_not = visit_expr_not,
@@ -374,9 +385,6 @@ ExpressionItemList construct_predicate(SharedExpression* predicate)
     .visit_divide = visit_expr_divide,
     .visit_column = visit_expr_column,
     .visit_struct_expr = visit_expr_struct_expr,
-    .visit_null = visit_expr_null,
-    .visit_struct_literal = visit_expr_struct_literal,
-    .visit_array = visit_expr_array,
   };
   uintptr_t top_level_id = visit_expression(&predicate, &visitor);
   return data.lists[top_level_id];

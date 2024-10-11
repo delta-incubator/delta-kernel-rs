@@ -376,35 +376,37 @@ pub struct EngineExpressionVisitor {
     /// Creates a new expression list, optionally reserving capacity up front
     pub make_field_list: extern "C" fn(data: *mut c_void, reserve: usize) -> usize,
     /// Visit a 32bit `integer
-    pub visit_int: extern "C" fn(data: *mut c_void, value: i32, sibling_list_id: usize),
+    pub visit_int_literal: extern "C" fn(data: *mut c_void, value: i32, sibling_list_id: usize),
     /// Visit a 64bit `long`.
-    pub visit_long: extern "C" fn(data: *mut c_void, value: i64, sibling_list_id: usize),
+    pub visit_long_literal: extern "C" fn(data: *mut c_void, value: i64, sibling_list_id: usize),
     /// Visit a 16bit `short`.
-    pub visit_short: extern "C" fn(data: *mut c_void, value: i16, sibling_list_id: usize),
+    pub visit_short_literal: extern "C" fn(data: *mut c_void, value: i16, sibling_list_id: usize),
     /// Visit an 8bit `byte`.
-    pub visit_byte: extern "C" fn(data: *mut c_void, value: i8, sibling_list_id: usize),
+    pub visit_byte_literal: extern "C" fn(data: *mut c_void, value: i8, sibling_list_id: usize),
     /// Visit a 32bit `float`.
-    pub visit_float: extern "C" fn(data: *mut c_void, value: f32, sibling_list_id: usize),
+    pub visit_float_literal: extern "C" fn(data: *mut c_void, value: f32, sibling_list_id: usize),
     /// Visit a 64bit `double`.
-    pub visit_double: extern "C" fn(data: *mut c_void, value: f64, sibling_list_id: usize),
+    pub visit_double_literal: extern "C" fn(data: *mut c_void, value: f64, sibling_list_id: usize),
     /// Visit a `string`.
-    pub visit_string:
+    pub visit_string_literal:
         extern "C" fn(data: *mut c_void, value: KernelStringSlice, sibling_list_id: usize),
     /// Visit a `boolean`.
-    pub visit_bool: extern "C" fn(data: *mut c_void, value: bool, sibling_list_id: usize),
+    pub visit_bool_literal: extern "C" fn(data: *mut c_void, value: bool, sibling_list_id: usize),
     /// Visit a 64bit timestamp. The timestamp is microsecond precision and adjusted to UTC.
-    pub visit_timestamp: extern "C" fn(data: *mut c_void, value: i64, sibling_list_id: usize),
+    pub visit_timestamp_literal:
+        extern "C" fn(data: *mut c_void, value: i64, sibling_list_id: usize),
     /// Visit a 64bit timestamp. The timestamp is microsecond precision with no timezone.
-    pub visit_timestamp_ntz: extern "C" fn(data: *mut c_void, value: i64, sibling_list_id: usize),
+    pub visit_timestamp_ntz_literal:
+        extern "C" fn(data: *mut c_void, value: i64, sibling_list_id: usize),
     /// Visit a 32bit int date representing days since UNIX epoch 1970-01-01.
-    pub visit_date: extern "C" fn(data: *mut c_void, value: i32, sibling_list_id: usize),
+    pub visit_date_literal: extern "C" fn(data: *mut c_void, value: i32, sibling_list_id: usize),
     /// Visit binary data at the `buffer` with length `len`.
-    pub visit_binary:
+    pub visit_binary_literal:
         extern "C" fn(data: *mut c_void, buffer: *const u8, len: usize, sibling_list_id: usize),
     /// Visit a 128bit `decimal` value with the given precision and scale. The 128bit integer
     /// is split into the most significant 64 bits in `value_ms`, and the least significant 64
     /// bits in `value_ls`.
-    pub visit_decimal: extern "C" fn(
+    pub visit_decimal_literal: extern "C" fn(
         data: *mut c_void,
         value_ms: u64, // Most significant 64 bits of decimal value
         value_ls: u64, // Least significant 64 bits of decimal value
@@ -412,8 +414,21 @@ pub struct EngineExpressionVisitor {
         scale: u8,
         sibling_list_id: usize,
     ),
+    /// Visit a struct literal which is made up of a list of field names and values. This declares
+    /// the number of fields that the struct will have. The visitor will populate the struct fields
+    /// using the [`visit_struct_literal_field`] method.
+    pub visit_struct_literal: extern "C" fn(
+        data: *mut c_void,
+        child_field_list_value: usize,
+        child_value_list_id: usize,
+        sibling_list_id: usize,
+    ),
+    /// Visit an `arary`, declaring the length `len`. The visitor will populate the array
+    /// elements using the [`visit_array_element`] method.
+    pub visit_array_literal:
+        extern "C" fn(data: *mut c_void, child_list_id: usize, sibling_list_id: usize),
     /// Visits a null value.
-    pub visit_null: extern "C" fn(data: *mut c_void, sibling_list_id: usize),
+    pub visit_null_literal: extern "C" fn(data: *mut c_void, sibling_list_id: usize),
     /// Visits an `and` expression which is made of a list of sub-expressions. This declares the
     /// number of sub-expressions that the `and` expression will be made of. The visitor will populate
     /// the list of expressions using the [`visit_variadic_sub_expr`] method.
@@ -478,18 +493,6 @@ pub struct EngineExpressionVisitor {
     /// list of expressions using the [`visit_struct_sub_expr`] method.
     pub visit_struct_expr:
         extern "C" fn(data: *mut c_void, child_list_id: usize, sibling_list_id: usize),
-    /// Visit a struct literal which is made up of a list of field names and values. This declares
-    /// the number of fields that the struct will have. The visitor will populate the struct fields
-    /// using the [`visit_struct_literal_field`] method.
-    pub visit_struct_literal: extern "C" fn(
-        data: *mut c_void,
-        child_field_list_value: usize,
-        child_value_list_id: usize,
-        sibling_list_id: usize,
-    ),
-    /// Visit an `arary`, declaring the length `len`. The visitor will populate the array
-    /// elements using the [`visit_array_element`] method.
-    pub visit_array: extern "C" fn(data: *mut c_void, child_list_id: usize, sibling_list_id: usize),
 }
 
 /// Visit the expression of the passed [`SharedExpression`] Handle using the provided `visitor`.
@@ -522,7 +525,7 @@ pub unsafe extern "C" fn visit_expression(
         for scalar in elements {
             visit_scalar(visitor, scalar, child_list_id);
         }
-        call!(visitor, visit_array, child_list_id, sibling_list_id);
+        call!(visitor, visit_array_literal, child_list_id, sibling_list_id);
     }
     fn visit_struct_literal(
         visitor: &mut EngineExpressionVisitor,
@@ -581,20 +584,26 @@ pub unsafe extern "C" fn visit_expression(
         sibling_list_id: usize,
     ) {
         match scalar {
-            Scalar::Integer(val) => call!(visitor, visit_int, *val, sibling_list_id),
-            Scalar::Long(val) => call!(visitor, visit_long, *val, sibling_list_id),
-            Scalar::Short(val) => call!(visitor, visit_short, *val, sibling_list_id),
-            Scalar::Byte(val) => call!(visitor, visit_byte, *val, sibling_list_id),
-            Scalar::Float(val) => call!(visitor, visit_float, *val, sibling_list_id),
-            Scalar::Double(val) => call!(visitor, visit_double, *val, sibling_list_id),
-            Scalar::String(val) => call!(visitor, visit_string, val.into(), sibling_list_id),
-            Scalar::Boolean(val) => call!(visitor, visit_bool, *val, sibling_list_id),
-            Scalar::Timestamp(val) => call!(visitor, visit_timestamp, *val, sibling_list_id),
-            Scalar::TimestampNtz(val) => call!(visitor, visit_timestamp_ntz, *val, sibling_list_id),
-            Scalar::Date(val) => call!(visitor, visit_date, *val, sibling_list_id),
+            Scalar::Integer(val) => call!(visitor, visit_int_literal, *val, sibling_list_id),
+            Scalar::Long(val) => call!(visitor, visit_long_literal, *val, sibling_list_id),
+            Scalar::Short(val) => call!(visitor, visit_short_literal, *val, sibling_list_id),
+            Scalar::Byte(val) => call!(visitor, visit_byte_literal, *val, sibling_list_id),
+            Scalar::Float(val) => call!(visitor, visit_float_literal, *val, sibling_list_id),
+            Scalar::Double(val) => call!(visitor, visit_double_literal, *val, sibling_list_id),
+            Scalar::String(val) => {
+                call!(visitor, visit_string_literal, val.into(), sibling_list_id)
+            }
+            Scalar::Boolean(val) => call!(visitor, visit_bool_literal, *val, sibling_list_id),
+            Scalar::Timestamp(val) => {
+                call!(visitor, visit_timestamp_literal, *val, sibling_list_id)
+            }
+            Scalar::TimestampNtz(val) => {
+                call!(visitor, visit_timestamp_ntz_literal, *val, sibling_list_id)
+            }
+            Scalar::Date(val) => call!(visitor, visit_date_literal, *val, sibling_list_id),
             Scalar::Binary(buf) => call!(
                 visitor,
-                visit_binary,
+                visit_binary_literal,
                 buf.as_ptr(),
                 buf.len(),
                 sibling_list_id
@@ -604,7 +613,7 @@ pub unsafe extern "C" fn visit_expression(
                 let ls: u64 = *value as u64;
                 call!(
                     visitor,
-                    visit_decimal,
+                    visit_decimal_literal,
                     ms,
                     ls,
                     *precision,
@@ -612,7 +621,7 @@ pub unsafe extern "C" fn visit_expression(
                     sibling_list_id
                 )
             }
-            Scalar::Null(_) => call!(visitor, visit_null, sibling_list_id),
+            Scalar::Null(_) => call!(visitor, visit_null_literal, sibling_list_id),
             Scalar::Struct(struct_data) => {
                 visit_struct_literal(visitor, struct_data, sibling_list_id)
             }
