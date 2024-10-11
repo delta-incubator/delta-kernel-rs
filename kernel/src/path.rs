@@ -183,6 +183,7 @@ impl<Location: AsUrl> ParsedLogPath<Location> {
 }
 
 impl ParsedLogPath<Url> {
+    /// Create a new ParsedCommitPath<Url> for a new json commit file at the specified version
     pub(crate) fn new_commit(
         table_root: &Url,
         version: Version,
