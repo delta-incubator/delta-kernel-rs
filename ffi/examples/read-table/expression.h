@@ -162,7 +162,7 @@ struct Literal
     float float_data;
     double double_data;
     bool boolean_data;
-    struct KernelStringSlice string_data;
+    char* string_data;
     struct Struct struct_data;
     struct ArrayData array_data;
     struct BinaryData binary;
@@ -184,14 +184,6 @@ ExpressionItemList get_handle(void* data, size_t list_id)
     abort();
   }
   return data_ptr->lists[list_id];
-}
-KernelStringSlice copy_kernel_string(KernelStringSlice string)
-{
-  char* contents = malloc(string.len + 1);
-  strncpy(contents, string.ptr, string.len);
-  contents[string.len] = '\0';
-  KernelStringSlice out = { .len = string.len, .ptr = contents };
-  return out;
 }
 
 void visit_expr_binop(
@@ -223,7 +215,7 @@ void visit_expr_string(void* data, KernelStringSlice string, uintptr_t sibling_l
 {
   struct Literal* literal = malloc(sizeof(struct Literal));
   literal->type = String;
-  literal->value.string_data = copy_kernel_string(string);
+  literal->value.string_data = strndup(string.ptr, string.len);
   put_handle(data, literal, Literal, sibling_list_id);
 }
 
@@ -326,9 +318,8 @@ DEFINE_UNARY(visit_expr_not, Not)
 
 void visit_expr_column(void* data, KernelStringSlice string, uintptr_t sibling_id_list)
 {
-  struct KernelStringSlice* heap_string = malloc(sizeof(KernelStringSlice));
-  *heap_string = copy_kernel_string(string);
-  put_handle(data, heap_string, Column, sibling_id_list);
+  char* column_name = strndup(string.ptr, string.len);
+  put_handle(data, column_name, Column, sibling_id_list);
 }
 
 uintptr_t make_field_list(void* data, uintptr_t reserve)
@@ -343,8 +334,7 @@ uintptr_t make_field_list(void* data, uintptr_t reserve)
   return id;
 }
 
-// Print the schema of the snapshot
-ExpressionItem construct_predicate(SharedExpression* predicate)
+ExpressionItemList construct_predicate(SharedExpression* predicate)
 {
   ExpressionBuilder data = { 0 };
   data.lists = malloc(sizeof(ExpressionItem) * 100);
@@ -388,8 +378,7 @@ ExpressionItem construct_predicate(SharedExpression* predicate)
     .visit_array = visit_expr_array,
   };
   uintptr_t top_level_id = visit_expression(&predicate, &visitor);
-  ExpressionItem ret = data.lists[top_level_id].exprList[0];
-  return ret;
+  return data.lists[top_level_id];
 }
 
 void free_expression_item_list(ExpressionItemList list);
@@ -424,8 +413,7 @@ void free_expression_item(ExpressionItem ref)
           break;
         }
         case String: {
-          struct KernelStringSlice* string = &lit->value.string_data;
-          free((void*)string->ptr);
+          free(lit->value.string_data);
           break;
         }
         case Binary: {
@@ -457,9 +445,7 @@ void free_expression_item(ExpressionItem ref)
       break;
     }
     case Column: {
-      KernelStringSlice* string = ref.ref;
-      free((void*)string->ptr);
-      free(string);
+      free((void*)ref.ref);
       break;
     }
   }
@@ -595,7 +581,7 @@ void print_tree(ExpressionItem ref, int depth)
           printf("(%f)\n", lit->value.double_data);
           break;
         case String: {
-          printf("String(%s)\n", lit->value.string_data.ptr);
+          printf("String(%s)\n", lit->value.string_data);
           break;
         }
         case Boolean:
@@ -665,8 +651,8 @@ void print_tree(ExpressionItem ref, int depth)
     }
     case Column:
       print_n_spaces(depth);
-      KernelStringSlice* string = ref.ref;
-      printf("Column(%s)\n", string->ptr);
+      char* column_name = ref.ref;
+      printf("Column(%s)\n", column_name);
       break;
   }
 }
