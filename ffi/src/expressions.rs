@@ -409,30 +409,34 @@ pub unsafe extern "C" fn get_kernel_expression() -> Handle<SharedExpression> {
 pub struct EngineExpressionVisitor {
     /// An opaque state pointer
     pub data: *mut c_void,
-    /// Visit a 32bit `integer`
-    pub visit_int: extern "C" fn(data: *mut c_void, value: i32) -> usize,
+    /// Creates a new expression list, optionally reserving capacity up front
+    pub make_field_list: extern "C" fn(data: *mut c_void, reserve: usize) -> usize,
+    /// Visit a 32bit `integer
+    pub visit_int: extern "C" fn(data: *mut c_void, value: i32, sibling_list_id: usize),
     /// Visit a 64bit `long`.
-    pub visit_long: extern "C" fn(data: *mut c_void, value: i64) -> usize,
+    pub visit_long: extern "C" fn(data: *mut c_void, value: i64, sibling_list_id: usize),
     /// Visit a 16bit `short`.
-    pub visit_short: extern "C" fn(data: *mut c_void, value: i16) -> usize,
+    pub visit_short: extern "C" fn(data: *mut c_void, value: i16, sibling_list_id: usize),
     /// Visit an 8bit `byte`.
-    pub visit_byte: extern "C" fn(data: *mut c_void, value: i8) -> usize,
+    pub visit_byte: extern "C" fn(data: *mut c_void, value: i8, sibling_list_id: usize),
     /// Visit a 32bit `float`.
-    pub visit_float: extern "C" fn(data: *mut c_void, value: f32) -> usize,
+    pub visit_float: extern "C" fn(data: *mut c_void, value: f32, sibling_list_id: usize),
     /// Visit a 64bit `double`.
-    pub visit_double: extern "C" fn(data: *mut c_void, value: f64) -> usize,
+    pub visit_double: extern "C" fn(data: *mut c_void, value: f64, sibling_list_id: usize),
     /// Visit a `string`.
-    pub visit_string: extern "C" fn(data: *mut c_void, value: KernelStringSlice) -> usize,
+    pub visit_string:
+        extern "C" fn(data: *mut c_void, value: KernelStringSlice, sibling_list_id: usize),
     /// Visit a `boolean`.
-    pub visit_bool: extern "C" fn(data: *mut c_void, value: bool) -> usize,
+    pub visit_bool: extern "C" fn(data: *mut c_void, value: bool, sibling_list_id: usize),
     /// Visit a 64bit timestamp. The timestamp is microsecond precision and adjusted to UTC.
-    pub visit_timestamp: extern "C" fn(data: *mut c_void, value: i64) -> usize,
+    pub visit_timestamp: extern "C" fn(data: *mut c_void, value: i64, sibling_list_id: usize),
     /// Visit a 64bit timestamp. The timestamp is microsecond precision with no timezone.
-    pub visit_timestamp_ntz: extern "C" fn(data: *mut c_void, value: i64) -> usize,
+    pub visit_timestamp_ntz: extern "C" fn(data: *mut c_void, value: i64, sibling_list_id: usize),
     /// Visit a 32bit int date representing days since UNIX epoch 1970-01-01.
-    pub visit_date: extern "C" fn(data: *mut c_void, value: i32) -> usize,
+    pub visit_date: extern "C" fn(data: *mut c_void, value: i32, sibling_list_id: usize),
     /// Visit binary data at the `buffer` with length `len`.
-    pub visit_binary: extern "C" fn(data: *mut c_void, buffer: *const u8, len: usize) -> usize,
+    pub visit_binary:
+        extern "C" fn(data: *mut c_void, buffer: *const u8, len: usize, sibling_list_id: usize),
     /// Visit a 128bit `decimal` value with the given precision and scale. The 128bit integer
     /// is split into the most significant 64 bits in `value_ms`, and the least significant 64
     /// bits in `value_ls`.
@@ -442,93 +446,86 @@ pub struct EngineExpressionVisitor {
         value_ls: u64, // Least significant 64 bits of decimal value
         precision: u8,
         scale: u8,
-    ) -> usize,
+        sibling_list_id: usize,
+    ),
     /// Visits a null value.
-    pub visit_null: extern "C" fn(data: *mut c_void) -> usize,
+    pub visit_null: extern "C" fn(data: *mut c_void, sibling_list_id: usize),
     /// Visits an `and` expression which is made of a list of sub-expressions. This declares the
     /// number of sub-expressions that the `and` expression will be made of. The visitor will populate
     /// the list of expressions using the [`visit_variadic_sub_expr`] method.
-    pub visit_and: extern "C" fn(data: *mut c_void, len: usize) -> usize,
+    pub visit_and: extern "C" fn(data: *mut c_void, child_list_id: usize, sibling_list_id: usize),
     /// Visits an `or` expression which is made of a list of sub-expressions. This declares the
     /// number of sub-expressions that the `or` expression will be made of. The visitor will populate
     /// the list of expressions using the [`visit_variadic_sub_expr`] method.
-    pub visit_or: extern "C" fn(data: *mut c_void, len: usize) -> usize,
-    /// Visits a variadic sub-expression. This appends a sub-expression to a variadic expression
-    /// constructed in either [`visit_and`] or [`visit_or`]. The variadic expression is identified
-    /// by `variadic_id`, and the sub-expression is identified by `sub_expr_id`.
-    pub visit_variadic_sub_expr:
-        extern "C" fn(data: *mut c_void, variadic_id: usize, sub_expr_id: usize),
+    pub visit_or: extern "C" fn(data: *mut c_void, child_list_id: usize, sibling_list_id: usize),
     ///Visits a `not` expression, bulit using the sub-expression `inner_expr`.
-    pub visit_not: extern "C" fn(data: *mut c_void, inner_expr: usize) -> usize,
+    pub visit_not: extern "C" fn(data: *mut c_void, chilrd_list_id: usize, sibling_list_id: usize),
     ///Visits an `is_null` expression, built using the sub-expression `inner_expr`.
-    pub visit_is_null: extern "C" fn(data: *mut c_void, inner_expr: usize) -> usize,
+    pub visit_is_null:
+        extern "C" fn(data: *mut c_void, child_list_id: usize, sibling_list_id: usize),
     /// Visit the `less than` binary operation, which takes the left sub expression id `a` and the
     /// right sub-expression id `b`.
-    pub visit_lt: extern "C" fn(data: *mut c_void, a: usize, b: usize) -> usize,
+    pub visit_lt: extern "C" fn(data: *mut c_void, child_list_id: usize, sibling_list_id: usize),
     /// Visit the `less than or equal` binary operation, which takes the left sub expression id `a`
     /// and the right sub-expression id `b`.
-    pub visit_le: extern "C" fn(data: *mut c_void, a: usize, b: usize) -> usize,
+    pub visit_le: extern "C" fn(data: *mut c_void, child_list_id: usize, sibling_list_id: usize),
     /// Visit the `greater than` binary operation, which takes the left sub expression id `a`
     /// and the right sub-expression id `b`.
-    pub visit_gt: extern "C" fn(data: *mut c_void, a: usize, b: usize) -> usize,
+    pub visit_gt: extern "C" fn(data: *mut c_void, child_list_id: usize, sibling_list_id: usize),
     /// Visit the `greater than or equal` binary operation, which takes the left sub expression id `a`
     /// and the right sub-expression id `b`.
-    pub visit_ge: extern "C" fn(data: *mut c_void, a: usize, b: usize) -> usize,
+    pub visit_ge: extern "C" fn(data: *mut c_void, child_list_id: usize, sibling_list_id: usize),
     /// Visit the `equal` binary operation, which takes the left sub expression id `a`
     /// and the right sub-expression id `b`.
-    pub visit_eq: extern "C" fn(data: *mut c_void, a: usize, b: usize) -> usize,
+    pub visit_eq: extern "C" fn(data: *mut c_void, child_list_id: usize, sibling_list_id: usize),
     /// Visit the `not equal` binary operation, which takes the left sub expression id `a`
     /// and the right sub-expression id `b`.
-    pub visit_ne: extern "C" fn(data: *mut c_void, a: usize, b: usize) -> usize,
+    pub visit_ne: extern "C" fn(data: *mut c_void, child_list_id: usize, sibling_list_id: usize),
     /// Visit the `distinct` binary operation, which takes the left sub expression id `a`
     /// and the right sub-expression id `b`.
-    pub visit_distinct: extern "C" fn(data: *mut c_void, a: usize, b: usize) -> usize,
+    pub visit_distinct:
+        extern "C" fn(data: *mut c_void, child_list_id: usize, sibling_list_id: usize),
     /// Visit the `in` binary operation, which takes the left sub expression id `a`
     /// and the right sub-expression id `b`.
-    pub visit_in: extern "C" fn(data: *mut c_void, a: usize, b: usize) -> usize,
+    pub visit_in: extern "C" fn(data: *mut c_void, child_list_id: usize, sibling_list_id: usize),
     /// Visit the `not in` binary operation, which takes the left sub expression id `a`
     /// and the right sub-expression id `b`.
-    pub visit_not_in: extern "C" fn(data: *mut c_void, a: usize, b: usize) -> usize,
+    pub visit_not_in:
+        extern "C" fn(data: *mut c_void, child_list_id: usize, sibling_list_id: usize),
     /// Visit the `add` binary operation, which takes the left sub expression id `a`
     /// and the right sub-expression id `b`.
-    pub visit_add: extern "C" fn(data: *mut c_void, a: usize, b: usize) -> usize,
+    pub visit_add: extern "C" fn(data: *mut c_void, child_list_id: usize, sibling_list_id: usize),
     /// Visit the `minus` binary operation, which takes the left sub expression id `a`
     /// and the right sub-expression id `b`.
-    pub visit_minus: extern "C" fn(data: *mut c_void, a: usize, b: usize) -> usize,
+    pub visit_minus: extern "C" fn(data: *mut c_void, child_list_id: usize, sibling_list_id: usize),
     /// Visit the `multiply` binary operation, which takes the left sub expression id `a`
     /// and the right sub-expression id `b`.
-    pub visit_multiply: extern "C" fn(data: *mut c_void, a: usize, b: usize) -> usize,
+    pub visit_multiply:
+        extern "C" fn(data: *mut c_void, child_list_id: usize, sibling_list_id: usize),
     /// Visit the `divide` binary operation, which takes the left sub expression id `a`
     /// and the right sub-expression id `b`.
-    pub visit_divide: extern "C" fn(data: *mut c_void, a: usize, b: usize) -> usize,
+    pub visit_divide:
+        extern "C" fn(data: *mut c_void, child_list_id: usize, sibling_list_id: usize),
     /// Visit the `colmun` identified by the `name` string.
-    pub visit_column: extern "C" fn(data: *mut c_void, name: KernelStringSlice) -> usize,
+    pub visit_column:
+        extern "C" fn(data: *mut c_void, name: KernelStringSlice, sibling_list_id: usize),
     /// Visit a `struct` which is constructed from an ordered list of expressions. This declares
     /// the number of expressions that the struct will be made of. The visitor will populate the
     /// list of expressions using the [`visit_struct_sub_expr`] method.
-    pub visit_struct: extern "C" fn(data: *mut c_void, len: usize) -> usize,
-    /// Visits a `struct` sub expression. This appends a sub-expression to a struct constructed by
-    /// [`visit_struct`]. The struct is identified by `struct_id`, and the sub-expression is identified
-    /// by `expr_id`.
-    pub visit_struct_sub_expr: extern "C" fn(data: *mut c_void, struct_id: usize, expr_id: usize),
+    pub visit_struct:
+        extern "C" fn(data: *mut c_void, child_list_id: usize, sibling_list_id: usize),
     /// Visit a struct literal which is made up of a list of field names and values. This declares
     /// the number of fields that the struct will have. The visitor will populate the struct fields
     /// using the [`visit_struct_literal_field`] method.
-    pub visit_struct_literal: extern "C" fn(data: *mut c_void, num_fields: usize) -> usize,
-    /// Visit a struct literal field. This adds a field to the struct declared by [`visit_struct_literal`].
-    /// The struct literal is identified by `struct_id`. The sub-expression is identified by `expr_id`.
-    pub visit_struct_literal_field: extern "C" fn(
+    pub visit_struct_literal: extern "C" fn(
         data: *mut c_void,
-        struct_id: usize,
-        field_name: KernelStringSlice,
-        field_value: usize,
+        child_field_list_value: usize,
+        child_value_list_id: usize,
+        sibling_list_id: usize,
     ),
     /// Visit an `arary`, declaring the length `len`. The visitor will populate the array
     /// elements using the [`visit_array_element`] method.
-    pub visit_array: extern "C" fn(data: *mut c_void, len: usize) -> usize,
-    /// Visit an array element. This adds the element to the array declared in [`visit_array`]. The
-    /// array is identified by `array_id`, and the element identified by `element_id`
-    pub visit_array_element: extern "C" fn(data: *mut c_void, array_id: usize, element_id: usize),
+    pub visit_array: extern "C" fn(data: *mut c_void, child_list_id: usize, sibling_list_id: usize),
 }
 
 /// Visit the expression of the passed [`SharedExpression`] Handle using the provided `visitor`.
@@ -550,116 +547,159 @@ pub unsafe extern "C" fn visit_expression(
             ($visitor.$visitor_fn)($visitor.data $(, $extra_args) *)
         };
     }
-    fn visit_array(visitor: &mut EngineExpressionVisitor, array: &ArrayData) -> usize {
+    fn visit_array(
+        visitor: &mut EngineExpressionVisitor,
+        array: &ArrayData,
+        sibling_list_id: usize,
+    ) {
         #[allow(deprecated)]
         let elements = array.array_elements();
-        let array_id = call!(visitor, visit_array, elements.len());
+        let child_list_id = call!(visitor, make_field_list, elements.len());
         for scalar in elements {
-            let scalar_id = visit_scalar(visitor, scalar);
-            call!(visitor, visit_array_element, array_id, scalar_id);
+            visit_scalar(visitor, scalar, child_list_id);
         }
-        array_id
+        call!(visitor, visit_array, child_list_id, sibling_list_id);
     }
     fn visit_struct_literal(
         visitor: &mut EngineExpressionVisitor,
         struct_data: &StructData,
-    ) -> usize {
-        let struct_id = call!(visitor, visit_struct_literal, struct_data.fields().len());
+        sibling_list_id: usize,
+    ) {
+        let child_value_list_id = call!(visitor, make_field_list, struct_data.fields().len());
+        let child_field_list_id = call!(visitor, make_field_list, struct_data.fields().len());
         for (field, value) in struct_data.fields().iter().zip(struct_data.values()) {
-            let value_id = visit_scalar(visitor, value);
-            call!(
+            visit_scalar(
                 visitor,
-                visit_struct_literal_field,
-                struct_id,
-                field.name().into(),
-                value_id
+                &Scalar::String(field.name.clone()),
+                child_field_list_id,
             );
+            visit_scalar(visitor, value, child_value_list_id);
         }
-        struct_id
+        call!(
+            visitor,
+            visit_struct_literal,
+            child_field_list_id,
+            child_value_list_id,
+            sibling_list_id
+        )
     }
-    fn visit_struct(visitor: &mut EngineExpressionVisitor, exprs: &Vec<Expression>) -> usize {
-        let expr_struct_id = call!(visitor, visit_struct, exprs.len());
+    fn visit_struct(
+        visitor: &mut EngineExpressionVisitor,
+        exprs: &Vec<Expression>,
+        sibling_list_id: usize,
+    ) {
+        let child_list_id = call!(visitor, make_field_list, exprs.len());
         for expr in exprs {
-            let expr_id = visit_expression(visitor, expr);
-            call!(visitor, visit_struct_sub_expr, expr_struct_id, expr_id)
+            visit_expression_impl(visitor, expr, child_list_id);
         }
-        expr_struct_id
+        call!(visitor, visit_struct, child_list_id, sibling_list_id)
     }
     fn visit_variadic(
         visitor: &mut EngineExpressionVisitor,
         op: &VariadicOperator,
         exprs: &Vec<Expression>,
-    ) -> usize {
+        sibling_list_id: usize,
+    ) {
+        let child_list_id = call!(visitor, make_field_list, exprs.len());
+        for expr in exprs {
+            visit_expression_impl(visitor, expr, child_list_id);
+        }
+
         let visit_fn = match op {
             VariadicOperator::And => &visitor.visit_and,
             VariadicOperator::Or => &visitor.visit_or,
         };
-        let variadic_id = visit_fn(visitor.data, exprs.len());
-        for expr in exprs {
-            let expr_id = visit_expression(visitor, expr);
-            call!(visitor, visit_variadic_sub_expr, variadic_id, expr_id)
-        }
-        variadic_id
+        visit_fn(visitor.data, child_list_id, sibling_list_id);
     }
-    fn visit_scalar(visitor: &mut EngineExpressionVisitor, scalar: &Scalar) -> usize {
+    fn visit_scalar(
+        visitor: &mut EngineExpressionVisitor,
+        scalar: &Scalar,
+        sibling_list_id: usize,
+    ) {
         match scalar {
-            Scalar::Integer(val) => call!(visitor, visit_int, *val),
-            Scalar::Long(val) => call!(visitor, visit_long, *val),
-            Scalar::Short(val) => call!(visitor, visit_short, *val),
-            Scalar::Byte(val) => call!(visitor, visit_byte, *val),
-            Scalar::Float(val) => call!(visitor, visit_float, *val),
-            Scalar::Double(val) => call!(visitor, visit_double, *val),
-            Scalar::String(val) => call!(visitor, visit_string, val.into()),
-            Scalar::Boolean(val) => call!(visitor, visit_bool, *val),
-            Scalar::Timestamp(val) => call!(visitor, visit_timestamp, *val),
-            Scalar::TimestampNtz(val) => call!(visitor, visit_timestamp_ntz, *val),
-            Scalar::Date(val) => call!(visitor, visit_date, *val),
-            Scalar::Binary(buf) => call!(visitor, visit_binary, buf.as_ptr(), buf.len()),
+            Scalar::Integer(val) => call!(visitor, visit_int, *val, sibling_list_id),
+            Scalar::Long(val) => call!(visitor, visit_long, *val, sibling_list_id),
+            Scalar::Short(val) => call!(visitor, visit_short, *val, sibling_list_id),
+            Scalar::Byte(val) => call!(visitor, visit_byte, *val, sibling_list_id),
+            Scalar::Float(val) => call!(visitor, visit_float, *val, sibling_list_id),
+            Scalar::Double(val) => call!(visitor, visit_double, *val, sibling_list_id),
+            Scalar::String(val) => call!(visitor, visit_string, val.into(), sibling_list_id),
+            Scalar::Boolean(val) => call!(visitor, visit_bool, *val, sibling_list_id),
+            Scalar::Timestamp(val) => call!(visitor, visit_timestamp, *val, sibling_list_id),
+            Scalar::TimestampNtz(val) => call!(visitor, visit_timestamp_ntz, *val, sibling_list_id),
+            Scalar::Date(val) => call!(visitor, visit_date, *val, sibling_list_id),
+            Scalar::Binary(buf) => call!(
+                visitor,
+                visit_binary,
+                buf.as_ptr(),
+                buf.len(),
+                sibling_list_id
+            ),
             Scalar::Decimal(value, precision, scale) => {
                 let ms: u64 = (value >> 64) as u64;
                 let ls: u64 = *value as u64;
-                call!(visitor, visit_decimal, ms, ls, *precision, *scale)
+                call!(
+                    visitor,
+                    visit_decimal,
+                    ms,
+                    ls,
+                    *precision,
+                    *scale,
+                    sibling_list_id
+                )
             }
-            Scalar::Null(_) => call!(visitor, visit_null),
-            Scalar::Struct(struct_data) => visit_struct_literal(visitor, struct_data),
-            Scalar::Array(array) => visit_array(visitor, array),
+            Scalar::Null(_) => call!(visitor, visit_null, sibling_list_id),
+            Scalar::Struct(struct_data) => {
+                visit_struct_literal(visitor, struct_data, sibling_list_id)
+            }
+            Scalar::Array(array) => visit_array(visitor, array, sibling_list_id),
         }
     }
-    fn visit_expression(visitor: &mut EngineExpressionVisitor, expression: &Expression) -> usize {
+    fn visit_expression_impl(
+        visitor: &mut EngineExpressionVisitor,
+        expression: &Expression,
+        sibling_list_id: usize,
+    ) {
         match expression {
-            Expression::Literal(scalar) => visit_scalar(visitor, scalar),
-            Expression::Column(name) => call!(visitor, visit_column, name.into()),
-            Expression::Struct(exprs) => visit_struct(visitor, exprs),
+            Expression::Literal(scalar) => visit_scalar(visitor, scalar, sibling_list_id),
+            Expression::Column(name) => call!(visitor, visit_column, name.into(), sibling_list_id),
+            Expression::Struct(exprs) => visit_struct(visitor, exprs, sibling_list_id),
             Expression::BinaryOperation { op, left, right } => {
-                let left_id = visit_expression(visitor, left);
-                let right_id = visit_expression(visitor, right);
-                match op {
-                    BinaryOperator::Plus => call!(visitor, visit_add, left_id, right_id),
-                    BinaryOperator::Minus => call!(visitor, visit_minus, left_id, right_id),
-                    BinaryOperator::Multiply => call!(visitor, visit_multiply, left_id, right_id),
-                    BinaryOperator::Divide => call!(visitor, visit_divide, left_id, right_id),
-                    BinaryOperator::LessThan => call!(visitor, visit_lt, left_id, right_id),
-                    BinaryOperator::LessThanOrEqual => call!(visitor, visit_le, left_id, right_id),
-                    BinaryOperator::GreaterThan => call!(visitor, visit_gt, left_id, right_id),
-                    BinaryOperator::GreaterThanOrEqual => {
-                        call!(visitor, visit_ge, left_id, right_id)
-                    }
-                    BinaryOperator::Equal => call!(visitor, visit_eq, left_id, right_id),
-                    BinaryOperator::NotEqual => call!(visitor, visit_ne, left_id, right_id),
-                    BinaryOperator::Distinct => call!(visitor, visit_distinct, left_id, right_id),
-                    BinaryOperator::In => call!(visitor, visit_in, left_id, right_id),
-                    BinaryOperator::NotIn => call!(visitor, visit_not_in, left_id, right_id),
-                }
+                let child_list_id = call!(visitor, make_field_list, 2);
+                visit_expression_impl(visitor, left, child_list_id);
+                visit_expression_impl(visitor, right, child_list_id);
+                let op = match op {
+                    BinaryOperator::Plus => visitor.visit_add,
+                    BinaryOperator::Minus => visitor.visit_minus,
+                    BinaryOperator::Multiply => visitor.visit_multiply,
+                    BinaryOperator::Divide => visitor.visit_divide,
+                    BinaryOperator::LessThan => visitor.visit_lt,
+                    BinaryOperator::LessThanOrEqual => visitor.visit_le,
+                    BinaryOperator::GreaterThan => visitor.visit_gt,
+                    BinaryOperator::GreaterThanOrEqual => visitor.visit_ge,
+                    BinaryOperator::Equal => visitor.visit_eq,
+                    BinaryOperator::NotEqual => visitor.visit_ne,
+                    BinaryOperator::Distinct => visitor.visit_distinct,
+                    BinaryOperator::In => visitor.visit_in,
+                    BinaryOperator::NotIn => visitor.visit_not_in,
+                };
+                op(visitor.data, child_list_id, sibling_list_id);
             }
             Expression::UnaryOperation { op, expr } => {
-                let expr_id = visit_expression(visitor, expr);
-                match op {
-                    UnaryOperator::Not => call!(visitor, visit_not, expr_id),
-                    UnaryOperator::IsNull => call!(visitor, visit_is_null, expr_id),
-                }
+                let child_id_list = call!(visitor, make_field_list, 1);
+                visit_expression_impl(visitor, expr, child_id_list);
+                let op = match op {
+                    UnaryOperator::Not => visitor.visit_not,
+                    UnaryOperator::IsNull => visitor.visit_is_null,
+                };
+                op(visitor.data, child_id_list, sibling_list_id);
             }
-            Expression::VariadicOperation { op, exprs } => visit_variadic(visitor, op, exprs),
+            Expression::VariadicOperation { op, exprs } => {
+                visit_variadic(visitor, op, exprs, sibling_list_id)
+            }
         }
     }
-    visit_expression(visitor, expression.as_ref())
+    let top_level = call!(visitor, make_field_list, 1);
+    visit_expression_impl(visitor, expression.as_ref(), top_level);
+    top_level
 }

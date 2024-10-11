@@ -49,6 +49,13 @@ target_link_directories(test_expr PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/../../../t
 target_link_libraries(test_expr PUBLIC delta_kernel_ffi)
 target_compile_options(test_expr PUBLIC)
 
+if(MSVC)
+  target_compile_options(test_expr PRIVATE /W4 /WX)
+else()
+  # no-strict-prototypes because arrow headers have fn defs without prototypes
+  target_compile_options(test_expr PRIVATE -Wall -Wextra -Wpedantic -Werror -Wno-strict-prototypes -g)
+endif()
+
 # Add the read_table test
 include(CTest)
 set(TestRunner "../../../tests/test_expression_visitor/run_test.sh")
