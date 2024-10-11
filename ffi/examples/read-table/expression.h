@@ -507,155 +507,154 @@ void free_expression(ExpressionRef ref)
   }
 }
 
-void print_n_spaces(FILE* to, int n)
+void print_n_spaces(int n)
 {
   if (n == 0)
     return;
-  fprintf(to, "  ");
-  print_n_spaces(to, n - 1);
+  printf("  ");
+  print_n_spaces(n - 1);
 }
-void print_tree(FILE* to, ExpressionRef ref, int depth)
+void print_tree(ExpressionRef ref, int depth)
 {
   switch (ref.type) {
     case BinOp: {
       struct BinOp* op = ref.ref;
-      print_n_spaces(to, depth);
+      print_n_spaces(depth);
       switch (op->op) {
         case Add: {
-          fprintf(to, "ADD\n");
+          printf("ADD\n");
           break;
         }
         case Sub: {
-          fprintf(to, "SUB\n");
+          printf("SUB\n");
           break;
         };
         case Div: {
-          fprintf(to, "DIV\n");
+          printf("DIV\n");
           break;
         };
         case Mul: {
-          fprintf(to, "MUL\n");
+          printf("MUL\n");
           break;
         };
         case LT: {
-          fprintf(to, "LT\n");
+          printf("LT\n");
           break;
         };
         case LE: {
-          fprintf(to, "LE\n");
+          printf("LE\n");
           break;
         }
         case GT: {
-          fprintf(to, "GT\n");
+          printf("GT\n");
           break;
         };
         case GE: {
-          fprintf(to, "GE\n");
+          printf("GE\n");
           break;
         };
         case EQ: {
-          fprintf(to, "EQ\n");
+          printf("EQ\n");
           break;
         };
         case NE: {
-          fprintf(to, "NE\n");
+          printf("NE\n");
           break;
         };
         case In: {
-          fprintf(to, "In\n");
+          printf("In\n");
           break;
         };
         case NotIn: {
-          fprintf(to, "NotIn\n");
+          printf("NotIn\n");
           break;
         }; break;
         case Distinct:
-          fprintf(to, "Distinct\n");
+          printf("Distinct\n");
           break;
       }
 
       ExpressionRef left = { .ref = op->left, .type = Literal };
       ExpressionRef right = { .ref = op->right, .type = Literal };
-      print_tree(to, left, depth + 1);
-      print_tree(to, right, depth + 1);
+      print_tree(left, depth + 1);
+      print_tree(right, depth + 1);
       break;
     }
     case Variadic: {
       struct Variadic* var = ref.ref;
-      print_n_spaces(to, depth);
+      print_n_spaces(depth);
       switch (var->op) {
         case And:
-          fprintf(to, "And\n");
+          printf("And\n");
           break;
         case Or:
-          fprintf(to, "Or\n");
+          printf("Or\n");
           break;
         case StructConstructor:
-          fprintf(to, "StructConstructor\n");
+          printf("StructConstructor\n");
           break;
         case ArrayData:
-          fprintf(to, "ArrayData\n");
+          printf("ArrayData\n");
           break;
       }
       for (size_t i = 0; i < var->len; i++) {
-        print_tree(to, var->expr_list[i], depth + 1);
+        print_tree(var->expr_list[i], depth + 1);
       }
     } break;
     case Literal: {
       struct Literal* lit = ref.ref;
-      print_n_spaces(to, depth);
+      print_n_spaces(depth);
       switch (lit->type) {
         case Integer:
-          fprintf(to, "Integer");
-          fprintf(to, "(%d)\n", lit->value.integer_data);
+          printf("Integer");
+          printf("(%d)\n", lit->value.integer_data);
           break;
         case Long:
-          fprintf(to, "Long");
-          fprintf(to, "(%lld)\n", (long long)lit->value.long_data);
+          printf("Long");
+          printf("(%lld)\n", (long long)lit->value.long_data);
           break;
         case Short:
-          fprintf(to, "Short");
-          fprintf(to, "(%hd)\n", lit->value.short_data);
+          printf("Short");
+          printf("(%hd)\n", lit->value.short_data);
           break;
         case Byte:
-          fprintf(to, "Byte");
-          fprintf(to, "(%hhd)\n", lit->value.byte_data);
+          printf("Byte");
+          printf("(%hhd)\n", lit->value.byte_data);
           break;
         case Float:
-          fprintf(to, "Float");
-          fprintf(to, "(%f)\n", (float)lit->value.float_data);
+          printf("Float");
+          printf("(%f)\n", (float)lit->value.float_data);
           break;
         case Double:
-          fprintf(to, "Double");
-          fprintf(to, "(%f)\n", lit->value.double_data);
+          printf("Double");
+          printf("(%f)\n", lit->value.double_data);
           break;
         case String: {
-          fprintf(to, "String(%s)\n", lit->value.string_data.ptr);
+          printf("String(%s)\n", lit->value.string_data.ptr);
           break;
         }
         case Boolean:
-          fprintf(to, "Boolean");
-          fprintf(to, "(%d)\n", lit->value.boolean_data);
+          printf("Boolean");
+          printf("(%d)\n", lit->value.boolean_data);
           break;
         case Timestamp:
-          fprintf(to, "Timestamp");
-          fprintf(to, "(%lld)\n", (long long)lit->value.long_data);
+          printf("Timestamp");
+          printf("(%lld)\n", (long long)lit->value.long_data);
           break;
         case TimestampNtz:
-          fprintf(to, "TimestampNtz");
-          fprintf(to, "(%lld)\n", (long long)lit->value.long_data);
+          printf("TimestampNtz");
+          printf("(%lld)\n", (long long)lit->value.long_data);
           break;
         case Date:
-          fprintf(to, "Date");
-          fprintf(to, "(%d)\n", lit->value.integer_data);
+          printf("Date");
+          printf("(%d)\n", lit->value.integer_data);
           break;
         case Binary:
-          fprintf(to, "Binary\n");
+          printf("Binary\n");
           break;
         case Decimal: {
           struct Decimal* dec = &lit->value.decimal;
-          fprintf(
-            to,
+          printf(
             "Decimal(%lld,%lld, %d, %d)\n",
             (long long)dec->value[0],
             (long long)dec->value[1],
@@ -664,44 +663,44 @@ void print_tree(FILE* to, ExpressionRef ref, int depth)
           break;
         }
         case Null:
-          fprintf(to, "Null\n");
+          printf("Null\n");
           break;
         case Struct:
-          fprintf(to, "Struct\n");
+          printf("Struct\n");
           struct Struct* struct_data = &lit->value.struct_data;
           for (size_t i = 0; i < struct_data->len; i++) {
-            print_n_spaces(to, depth + 1);
-            fprintf(to, "Field: %s\n", struct_data->field_names[i].ptr);
-            print_tree(to, struct_data->expressions[i], depth + 2);
+            print_n_spaces(depth + 1);
+            printf("Field: %s\n", struct_data->field_names[i].ptr);
+            print_tree(struct_data->expressions[i], depth + 2);
           }
           break;
         case Array:
-          fprintf(to, "Array\n");
+          printf("Array\n");
           struct ArrayData* array = &lit->value.array_data;
           for (size_t i = 0; i < array->len; i++) {
-            print_tree(to, array->expr_list[i], depth + 1);
+            print_tree(array->expr_list[i], depth + 1);
           }
           break;
       }
     } break;
     case Unary: {
-      print_n_spaces(to, depth);
+      print_n_spaces(depth);
       struct Unary* unary = ref.ref;
       switch (unary->type) {
         case Not:
-          fprintf(to, "Not\n");
+          printf("Not\n");
           break;
         case IsNull:
-          fprintf(to, "IsNull\n");
+          printf("IsNull\n");
           break;
       }
-      print_tree(to, unary->sub_expr, depth + 1);
+      print_tree(unary->sub_expr, depth + 1);
       break;
     }
     case Column:
-      print_n_spaces(to, depth);
+      print_n_spaces(depth);
       KernelStringSlice* string = ref.ref;
-      fprintf(to, "Column(%s)\n", string->ptr);
+      printf("Column(%s)\n", string->ptr);
       break;
   }
 }

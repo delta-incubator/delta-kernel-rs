@@ -10,15 +10,7 @@ target_link_directories(read_table PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/../../../
 target_link_libraries(read_table PUBLIC delta_kernel_ffi)
 target_compile_options(read_table PUBLIC)
 
-# Configuration for the `test_expr executable
-add_executable(test_expr test_expr.c)
-target_compile_definitions(test_expr PUBLIC DEFINE_DEFAULT_ENGINE)
-target_include_directories(test_expr PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/../../../target/ffi-headers")
-target_link_directories(test_expr PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/../../../target/debug")
-target_link_libraries(test_expr PUBLIC delta_kernel_ffi)
-target_compile_options(test_expr PUBLIC)
-
-# Add the test
+# Add the read_table test
 include(CTest)
 set(TestRunner "../../../tests/read-table-testing/run_test.sh")
 set(DatPath "../../../../acceptance/tests/dat/out/reader_tests/generated")
@@ -48,3 +40,17 @@ if(PRINT_DATA)
   target_compile_options(read_table PUBLIC ${ARROW_GLIB_CFLAGS_OTHER})
   target_compile_definitions(read_table PUBLIC PRINT_ARROW_DATA)
 endif(PRINT_DATA)
+
+# Configuration for the `test_expr executable
+add_executable(test_expr test_expr.c)
+target_compile_definitions(test_expr PUBLIC DEFINE_DEFAULT_ENGINE)
+target_include_directories(test_expr PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/../../../target/ffi-headers")
+target_link_directories(test_expr PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/../../../target/debug")
+target_link_libraries(test_expr PUBLIC delta_kernel_ffi)
+target_compile_options(test_expr PUBLIC)
+
+# Add the read_table test
+include(CTest)
+set(TestRunner "../../../tests/test_expression_visitor/run_test.sh")
+set(ExpectedPath "../../../tests/test_expression_visitor/expected.txt")
+add_test(NAME test_expression_visitor COMMAND ./test_expr ${DatPath})
