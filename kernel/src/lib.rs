@@ -225,7 +225,7 @@ pub trait JsonHandler: Send + Sync {
     fn write_json_file(
         &self,
         path: &Url,
-        data: Box<dyn Iterator<Item = Box<dyn EngineData>> + Send + '_>,
+        data: Box<dyn Iterator<Item = Box<dyn EngineData>> + Send>,
         overwrite: bool,
     ) -> DeltaResult<()>;
 }

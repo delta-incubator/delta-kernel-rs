@@ -94,7 +94,7 @@ impl<E: TaskExecutor> JsonHandler for DefaultJsonHandler<E> {
     fn write_json_file(
         &self,
         path: &url::Url,
-        data: Box<dyn Iterator<Item = Box<dyn EngineData>> + Send + '_>,
+        data: Box<dyn Iterator<Item = Box<dyn EngineData>> + Send>,
         _overwrite: bool,
     ) -> DeltaResult<()> {
         let mut writer = arrow_json::LineDelimitedWriter::new(Vec::new());
