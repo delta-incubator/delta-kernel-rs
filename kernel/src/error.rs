@@ -159,6 +159,10 @@ pub enum Error {
     /// Unable to parse the name of a log path
     #[error("Invalid log path: {0}")]
     InvalidLogPath(String),
+
+    /// Invalid commit info passed to the transaction
+    #[error("Invalid commit info: {0}")]
+    InvalidCommitInfo(String),
 }
 
 // Convenience constructors for Error types that take a String argument

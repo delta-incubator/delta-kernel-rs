@@ -131,25 +131,6 @@ async fn test_commit_info() -> Result<(), Box<dyn std::error::Error>> {
         "{\"commitInfo\":{\"kernelVersion\":\"v0.3.1\",\"engineInfo\":\"default engine\"}}\n"
     );
 
-    // empty commit info test
-    let mut txn = table.new_transaction(&engine)?;
-    let commit_info_schema = Arc::new(ArrowSchema::empty());
-    let commit_info_batch = RecordBatch::new_empty(commit_info_schema.clone());
-    txn.commit_info(
-        Box::new(ArrowEngineData::new(commit_info_batch)),
-        commit_info_schema.try_into()?,
-    );
-
-    // commit!
-    txn.commit(&engine)?;
-
-    let commit1 = store
-        .get(&Path::from(
-            "/test_table/_delta_log/00000000000000000002.json",
-        ))
-        .await?;
-    assert!(commit1.bytes().await?.is_empty());
-
     // one null row commit info
     let mut txn = table.new_transaction(&engine)?;
     let commit_info_schema = Arc::new(ArrowSchema::new(vec![Field::new(
@@ -171,7 +152,7 @@ async fn test_commit_info() -> Result<(), Box<dyn std::error::Error>> {
 
     let commit1 = store
         .get(&Path::from(
-            "/test_table/_delta_log/00000000000000000003.json",
+            "/test_table/_delta_log/00000000000000000002.json",
         ))
         .await?;
     assert_eq!(
@@ -205,5 +186,64 @@ async fn test_empty_commit() -> Result<(), Box<dyn std::error::Error>> {
         ))
         .await?;
     assert!(commit1.bytes().await?.to_vec().is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_invalid_commit_info() -> Result<(), Box<dyn std::error::Error>> {
+    // setup tracing
+    let _ = tracing_subscriber::fmt::try_init();
+    // setup in-memory object store and default engine
+    let (store, engine, table_location) = setup("test_table");
+
+    // create a simple table: one int column named 'number'
+    let schema = Arc::new(StructType::new(vec![StructField::new(
+        "number",
+        DataType::INTEGER,
+        true,
+    )]));
+    let table = create_table(store.clone(), table_location, schema, &[]).await?;
+
+    // empty commit info test
+    let mut txn = table.new_transaction(&engine)?;
+    let commit_info_schema = Arc::new(ArrowSchema::empty());
+    let commit_info_batch = RecordBatch::new_empty(commit_info_schema.clone());
+    assert!(commit_info_batch.num_rows() == 0);
+    txn.commit_info(
+        Box::new(ArrowEngineData::new(commit_info_batch)),
+        commit_info_schema.try_into()?,
+    );
+
+    // commit!
+    assert!(matches!(
+        txn.commit(&engine),
+        Err(delta_kernel::Error::InvalidCommitInfo(_))
+    ));
+
+    // two-row commit info test
+    let mut txn = table.new_transaction(&engine)?;
+    let commit_info_schema = Arc::new(ArrowSchema::new(vec![Field::new(
+        "engineInfo",
+        ArrowDataType::Utf8,
+        true,
+    )]));
+    let commit_info_batch = RecordBatch::try_new(
+        commit_info_schema.clone(),
+        vec![Arc::new(StringArray::from(vec![
+            "row1: default engine",
+            "row2: default engine",
+        ]))],
+    )?;
+
+    txn.commit_info(
+        Box::new(ArrowEngineData::new(commit_info_batch)),
+        commit_info_schema.try_into()?,
+    );
+
+    // commit!
+    assert!(matches!(
+        txn.commit(&engine),
+        Err(delta_kernel::Error::InvalidCommitInfo(_))
+    ));
     Ok(())
 }

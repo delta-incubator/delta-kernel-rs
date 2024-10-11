@@ -7,8 +7,6 @@ use crate::snapshot::Snapshot;
 use crate::{DataType, Expression};
 use crate::{DeltaResult, Engine, EngineData};
 
-use tracing::warn;
-
 const KERNEL_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// A transaction represents an in-progress write to a table.
@@ -124,12 +122,11 @@ fn generate_commit_info(
         ADD_NAME, COMMIT_INFO_NAME, METADATA_NAME, PROTOCOL_NAME, REMOVE_NAME, TRANSACTION_NAME,
     };
 
-    // TODO: enforce single row commit info
     if engine_commit_info.data.length() != 1 {
-        warn!(
+        return Err(crate::error::Error::InvalidCommitInfo(format!(
             "Engine commit info should have exactly one row, found {}",
             engine_commit_info.data.length()
-        );
+        )));
     }
 
     let mut action_fields = get_log_schema().fields().collect::<Vec<_>>();
@@ -156,14 +153,16 @@ fn generate_commit_info(
             )));
     let action_schema = StructType::new(action_fields.collect());
 
+    // nullable = true
+    // println!("action_schema: {:#?}", action_schema);
+
     let commit_info_expr = std::iter::once(Expression::literal(format!("v{}", KERNEL_VERSION)))
         .chain(
             engine_commit_info
                 .schema
                 .fields()
                 .map(|f| Expression::column(f.name())),
-        )
-        .collect();
+        );
 
     // generate expression with null for all the fields except the commit_info field, and
     // append the commit_info to the end.
@@ -184,9 +183,8 @@ fn generate_commit_info(
                 .clone(),
         )
     })
-    .chain(std::iter::once(Expression::Struct(commit_info_expr)))
-    .collect::<Vec<_>>();
-    let commit_info_expr = Expression::Struct(commit_info_expr_fields);
+    .chain(std::iter::once(Expression::struct_expr(commit_info_expr)));
+    let commit_info_expr = Expression::struct_expr(commit_info_expr_fields);
 
     // commit info has arbitrary schema ex: {engineInfo: string, operation: string}
     // we want to bundle it up and put it in the commit_info field of the actions.
