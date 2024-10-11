@@ -13,7 +13,8 @@
  * Each item "ExpressionItem", which tracks the type and pointer to the expression.
  *
  * Each complex type is made of an "ExpressionItemList", which tracks its  length and an array of
- * "ExpressionItems". The top level expression is in a length 1 "ExpressionItemList".
+ * "ExpressionItems" that make up the complex type. The top level expression is in a length 1
+ * "ExpressionItemList".
  */
 
 /*************************************************************
@@ -72,7 +73,7 @@ typedef struct
 typedef struct
 {
   uint32_t len;
-  ExpressionItem* exprList;
+  ExpressionItem* list;
 } ExpressionItemList;
 struct BinOp
 {
@@ -96,7 +97,7 @@ enum UnaryType
 struct Variadic
 {
   enum VariadicType op;
-  ExpressionItemList expr_list;
+  ExpressionItemList exprs;
 };
 struct Unary
 {
@@ -127,7 +128,7 @@ struct Struct
 
 struct ArrayData
 {
-  ExpressionItemList expr_list;
+  ExpressionItemList exprs;
 };
 
 struct Literal
@@ -154,14 +155,14 @@ struct Literal
  * Utilitiy functions
  ************************************************************/
 
-void put_handle(void* data, void* ref, enum ExpressionType type, size_t sibling_list_id)
+void put_expr_item(void* data, void* ref, enum ExpressionType type, size_t sibling_list_id)
 {
   ExpressionBuilder* data_ptr = (ExpressionBuilder*)data;
   ExpressionItem expr = { .ref = ref, .type = type };
   ExpressionItemList* list = &data_ptr->lists[sibling_list_id];
-  list->exprList[list->len++] = expr;
+  list->list[list->len++] = expr;
 }
-ExpressionItemList get_handle(void* data, size_t list_id)
+ExpressionItemList get_expr_list(void* data, size_t list_id)
 {
   ExpressionBuilder* data_ptr = (ExpressionBuilder*)data;
   if (list_id > data_ptr->list_count) {
@@ -193,8 +194,8 @@ void visit_expr_binop(
 {
   struct BinOp* binop = malloc(sizeof(struct BinOp));
   binop->op = op;
-  binop->exprs = get_handle(data, child_id_list);
-  put_handle(data, binop, BinOp, sibling_id_list);
+  binop->exprs = get_expr_list(data, child_id_list);
+  put_expr_item(data, binop, BinOp, sibling_id_list);
 }
 DEFINE_BINOP(visit_expr_add, Add)
 DEFINE_BINOP(visit_expr_minus, Minus)
@@ -220,7 +221,7 @@ DEFINE_BINOP(visit_expr_not_in, NotIn)
     struct Literal* lit = malloc(sizeof(struct Literal));                                          \
     lit->type = enum_member;                                                                       \
     lit->value.literal_field = val;                                                                \
-    put_handle(data, lit, Literal, sibling_list_id);                                               \
+    put_expr_item(data, lit, Literal, sibling_list_id);                                            \
   }                                                                                                \
   _Static_assert(                                                                                  \
     sizeof(c_type) <= sizeof(uintptr_t), "The provided type is not a valid simple scalar")
@@ -240,7 +241,7 @@ void visit_expr_string_literal(void* data, KernelStringSlice string, uintptr_t s
   struct Literal* literal = malloc(sizeof(struct Literal));
   literal->type = String;
   literal->value.string_data = allocate_string(string);
-  put_handle(data, literal, Literal, sibling_list_id);
+  put_expr_item(data, literal, Literal, sibling_list_id);
 }
 
 void visit_expr_decimal_literal(
@@ -258,7 +259,7 @@ void visit_expr_decimal_literal(
   dec->value[1] = value_ls;
   dec->precision = precision;
   dec->scale = scale;
-  put_handle(data, literal, Literal, sibling_list_id);
+  put_expr_item(data, literal, Literal, sibling_list_id);
 }
 
 void visit_expr_binary_literal(
@@ -272,7 +273,7 @@ void visit_expr_binary_literal(
   struct BinaryData* bin = &literal->value.binary;
   bin->buf = malloc(len);
   memcpy(bin->buf, buf, len);
-  put_handle(data, literal, Literal, sibling_list_id);
+  put_expr_item(data, literal, Literal, sibling_list_id);
 }
 
 void visit_expr_struct_literal(
@@ -284,16 +285,16 @@ void visit_expr_struct_literal(
   struct Literal* literal = malloc(sizeof(struct Literal));
   literal->type = Struct;
   struct Struct* struct_data = &literal->value.struct_data;
-  struct_data->fields = get_handle(data, child_field_list_id);
-  struct_data->values = get_handle(data, child_value_list_id);
-  put_handle(data, literal, Literal, sibling_list_id);
+  struct_data->fields = get_expr_list(data, child_field_list_id);
+  struct_data->values = get_expr_list(data, child_value_list_id);
+  put_expr_item(data, literal, Literal, sibling_list_id);
 }
 
 void visit_expr_null_literal(void* data, uintptr_t sibling_id_list)
 {
   struct Literal* literal = malloc(sizeof(struct Literal));
   literal->type = Null;
-  put_handle(data, literal, Literal, sibling_id_list);
+  put_expr_item(data, literal, Literal, sibling_id_list);
 }
 
 /*************************************************************
@@ -314,8 +315,8 @@ void visit_expr_variadic(
 {
   struct Variadic* var = malloc(sizeof(struct Variadic));
   var->op = op;
-  var->expr_list = get_handle(data, child_list_id);
-  put_handle(data, var, Variadic, sibling_list_id);
+  var->exprs = get_expr_list(data, child_list_id);
+  put_expr_item(data, var, Variadic, sibling_list_id);
 }
 DEFINE_VARIADIC(visit_expr_and, And)
 DEFINE_VARIADIC(visit_expr_or, Or)
@@ -326,8 +327,8 @@ void visit_expr_array_literal(void* data, uintptr_t child_list_id, uintptr_t sib
   struct Literal* literal = malloc(sizeof(struct Literal));
   literal->type = Array;
   struct ArrayData* arr = &(literal->value.array_data);
-  arr->expr_list = get_handle(data, child_list_id);
-  put_handle(data, literal, Literal, sibling_list_id);
+  arr->exprs = get_expr_list(data, child_list_id);
+  put_expr_item(data, literal, Literal, sibling_list_id);
 }
 
 /*************************************************************
@@ -347,8 +348,8 @@ void visit_expr_unary(
 {
   struct Unary* unary = malloc(sizeof(struct Unary));
   unary->type = type;
-  unary->sub_expr = get_handle(data, child_list_id);
-  put_handle(data, unary, Unary, sibling_list_id);
+  unary->sub_expr = get_expr_list(data, child_list_id);
+  put_expr_item(data, unary, Unary, sibling_list_id);
 }
 DEFINE_UNARY(visit_expr_is_null, IsNull)
 DEFINE_UNARY(visit_expr_not, Not)
@@ -360,7 +361,7 @@ DEFINE_UNARY(visit_expr_not, Not)
 void visit_expr_column(void* data, KernelStringSlice string, uintptr_t sibling_id_list)
 {
   char* column_name = allocate_string(string);
-  put_handle(data, column_name, Column, sibling_id_list);
+  put_expr_item(data, column_name, Column, sibling_id_list);
 }
 
 uintptr_t make_field_list(void* data, uintptr_t reserve)
@@ -371,7 +372,7 @@ uintptr_t make_field_list(void* data, uintptr_t reserve)
   builder->lists = realloc(builder->lists, sizeof(ExpressionItemList) * builder->list_count);
   ExpressionItem* list = calloc(reserve, sizeof(ExpressionItem));
   builder->lists[id].len = 0;
-  builder->lists[id].exprList = list;
+  builder->lists[id].list = list;
   return id;
 }
 
@@ -423,20 +424,20 @@ ExpressionItemList construct_predicate(SharedExpression* predicate)
   return top_level_expr;
 }
 
-void free_expression_item_list(ExpressionItemList list);
+void free_expression_list(ExpressionItemList list);
 
 void free_expression_item(ExpressionItem ref)
 {
   switch (ref.type) {
     case BinOp: {
       struct BinOp* op = ref.ref;
-      free_expression_item_list(op->exprs);
+      free_expression_list(op->exprs);
       free(op);
       break;
     }
     case Variadic: {
       struct Variadic* var = ref.ref;
-      free_expression_item_list(var->expr_list);
+      free_expression_list(var->exprs);
       free(var);
       break;
     };
@@ -445,13 +446,13 @@ void free_expression_item(ExpressionItem ref)
       switch (lit->type) {
         case Struct: {
           struct Struct* struct_data = &lit->value.struct_data;
-          free_expression_item_list(struct_data->values);
-          free_expression_item_list(struct_data->fields);
+          free_expression_list(struct_data->values);
+          free_expression_list(struct_data->fields);
           break;
         }
         case Array: {
           struct ArrayData* array = &lit->value.array_data;
-          free_expression_item_list(array->expr_list);
+          free_expression_list(array->exprs);
           break;
         }
         case String: {
@@ -482,7 +483,7 @@ void free_expression_item(ExpressionItem ref)
     };
     case Unary: {
       struct Unary* unary = ref.ref;
-      free_expression_item_list(unary->sub_expr);
+      free_expression_list(unary->sub_expr);
       free(unary);
       break;
     }
@@ -493,12 +494,12 @@ void free_expression_item(ExpressionItem ref)
   }
 }
 
-void free_expression_item_list(ExpressionItemList list)
+void free_expression_list(ExpressionItemList list)
 {
   for (size_t i = 0; i < list.len; i++) {
-    free_expression_item(list.exprList[i]);
+    free_expression_item(list.list[i]);
   }
-  free(list.exprList);
+  free(list.list);
 }
 void print_n_spaces(int n)
 {
@@ -567,8 +568,8 @@ void print_tree(ExpressionItem ref, int depth)
           break;
       }
 
-      ExpressionItem left = op->exprs.exprList[0];
-      ExpressionItem right = op->exprs.exprList[1];
+      ExpressionItem left = op->exprs.list[0];
+      ExpressionItem right = op->exprs.list[1];
       print_tree(left, depth + 1);
       print_tree(right, depth + 1);
       break;
@@ -590,8 +591,8 @@ void print_tree(ExpressionItem ref, int depth)
           printf("ArrayData\n");
           break;
       }
-      for (size_t i = 0; i < var->expr_list.len; i++) {
-        print_tree(var->expr_list.exprList[i], depth + 1);
+      for (size_t i = 0; i < var->exprs.len; i++) {
+        print_tree(var->exprs.list[i], depth + 1);
       }
     } break;
     case Literal: {
@@ -665,20 +666,20 @@ void print_tree(ExpressionItem ref, int depth)
             print_n_spaces(depth + 1);
 
             // Extract field name from field
-            ExpressionItem item = struct_data->fields.exprList[i];
+            ExpressionItem item = struct_data->fields.list[i];
             assert(item.type == Literal);
             struct Literal* lit = item.ref;
             assert(lit->type == String);
 
             printf("Field: %s\n", lit->value.string_data);
-            print_tree(struct_data->values.exprList[i], depth + 2);
+            print_tree(struct_data->values.list[i], depth + 2);
           }
           break;
         case Array:
           printf("Array\n");
           struct ArrayData* array = &lit->value.array_data;
-          for (size_t i = 0; i < array->expr_list.len; i++) {
-            print_tree(array->expr_list.exprList[i], depth + 1);
+          for (size_t i = 0; i < array->exprs.len; i++) {
+            print_tree(array->exprs.list[i], depth + 1);
           }
           break;
       }
@@ -694,7 +695,7 @@ void print_tree(ExpressionItem ref, int depth)
           printf("IsNull\n");
           break;
       }
-      print_tree(unary->sub_expr.exprList[0], depth + 1);
+      print_tree(unary->sub_expr.list[0], depth + 1);
       break;
     }
     case Column:
