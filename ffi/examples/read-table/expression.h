@@ -416,13 +416,11 @@ void free_expression_item(ExpressionItem ref)
           struct Struct* struct_data = &lit->value.struct_data;
           free_expression_item_list(struct_data->values);
           free_expression_item_list(struct_data->fields);
-          free(struct_data);
           break;
         }
         case Array: {
           struct ArrayData* array = &lit->value.array_data;
           free_expression_item_list(array->expr_list);
-          free(array);
           break;
         }
         case String: {
