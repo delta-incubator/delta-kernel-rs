@@ -11,6 +11,7 @@ use bytes::{Buf, Bytes};
 use futures::{StreamExt, TryStreamExt};
 use object_store::path::Path;
 use object_store::{DynObjectStore, GetResultPayload};
+use url::Url;
 
 use super::executor::TaskExecutor;
 use super::file_stream::{FileOpenFuture, FileOpener, FileStream};
@@ -93,7 +94,7 @@ impl<E: TaskExecutor> JsonHandler for DefaultJsonHandler<E> {
     // note: for now we just buffer all the data and write it out all at once
     fn write_json_file(
         &self,
-        path: &url::Url,
+        path: &Url,
         data: Box<dyn Iterator<Item = Box<dyn EngineData>> + Send>,
         _overwrite: bool,
     ) -> DeltaResult<()> {
@@ -103,18 +104,15 @@ impl<E: TaskExecutor> JsonHandler for DefaultJsonHandler<E> {
             let record_batch = arrow_data.record_batch();
             writer.write(record_batch)?;
         }
-
         writer.finish()?;
         let buffer = writer.into_inner();
 
         // Put if absent
-        futures::executor::block_on(async {
-            self.store
-                .put_opts(
-                    &Path::from(path.path()),
-                    buffer.into(),
-                    object_store::PutMode::Create.into(),
-                )
+        let store = self.store.clone(); // cheap Arc
+        let path = Path::from(path.path());
+        self.task_executor.block_on(async move {
+            store
+                .put_opts(&path, buffer.into(), object_store::PutMode::Create.into())
                 .await
         })?;
 
