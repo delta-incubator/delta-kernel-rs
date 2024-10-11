@@ -191,7 +191,11 @@ impl ParsedLogPath<Url> {
         let filename = format!("{:020}.json", version);
         let location = table_root.join("_delta_log/")?.join(&filename)?;
         let path = Self::try_from(location)?.expect("valid commit path");
-        assert!(path.is_commit());
+        if !path.is_commit() {
+            return Err(Error::internal_error(
+                "ParsedLogPath::new_commit created a non-commit path",
+            ));
+        }
         Ok(path)
     }
 }
@@ -530,5 +534,16 @@ mod tests {
             .join("00000000000000000008.00000000000000000a15.compacted.json")
             .unwrap();
         ParsedLogPath::try_from(log_path).expect_err("non-numeric hi");
+    }
+
+    #[test]
+    fn test_new_commit() {
+        let table_log_dir = table_log_dir_url();
+        let log_path = ParsedLogPath::new_commit(&table_log_dir, 10).unwrap();
+        assert_eq!(log_path.version, 10);
+        assert!(log_path.is_commit());
+        assert_eq!(log_path.extension, "json");
+        assert!(matches!(log_path.file_type, LogPathFileType::Commit));
+        assert_eq!(log_path.filename, "00000000000000000010.json");
     }
 }
