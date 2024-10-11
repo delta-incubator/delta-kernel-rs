@@ -76,8 +76,10 @@ impl Transaction {
         let commit_path =
             ParsedLogPath::new_commit(self.read_snapshot.table_root(), commit_version)?
                 .expect("valid commit path");
-
-        assert!(commit_path.is_commit(), "commit_path should be a commit path");
+        assert!(
+            commit_path.is_commit(),
+            "commit_path should be a commit path"
+        );
 
         // step three: commit the actions as a json file in the log
         let json_handler = engine.get_json_handler();
