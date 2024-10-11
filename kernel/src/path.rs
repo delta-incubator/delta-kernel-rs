@@ -73,6 +73,12 @@ impl AsUrl for FileMeta {
     }
 }
 
+impl AsUrl for Url {
+    fn as_url(&self) -> &Url {
+        self
+    }
+}
+
 impl<Location: AsUrl> ParsedLogPath<Location> {
     // NOTE: We can't actually impl TryFrom because Option<T> is a foreign struct even if T is local.
     #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
@@ -176,18 +182,22 @@ impl<Location: AsUrl> ParsedLogPath<Location> {
     }
 }
 
+impl ParsedLogPath<Url> {
+    pub(crate) fn new_commit(
+        table_root: &Url,
+        version: Version,
+    ) -> DeltaResult<Option<ParsedLogPath<Url>>> {
+        let filename = format!("{:020}.json", version);
+        let location = table_root.join("_delta_log/")?.join(&filename)?;
+        Self::try_from(location)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
 
     use super::*;
-
-    // Easier to test directly with Url instead of FileMeta!
-    impl AsUrl for Url {
-        fn as_url(&self) -> &Url {
-            self
-        }
-    }
 
     fn table_log_dir_url() -> Url {
         let path = PathBuf::from("./tests/data/table-with-dv-small/_delta_log/");
