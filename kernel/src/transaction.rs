@@ -148,9 +148,6 @@ fn generate_commit_info(
             )));
     let action_schema = StructType::new(action_fields.collect());
 
-    // nullable = true
-    // println!("action_schema: {:#?}", action_schema);
-
     let commit_info_expr = std::iter::once(Expression::literal(format!("v{}", KERNEL_VERSION)))
         .chain(
             engine_commit_info
