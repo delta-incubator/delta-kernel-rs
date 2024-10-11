@@ -8,7 +8,7 @@ use std::sync::LazyLock;
 use visitors::{AddVisitor, MetadataVisitor, ProtocolVisitor};
 
 use self::deletion_vector::DeletionVectorDescriptor;
-use crate::actions::schemas::GetStructField;
+use crate::actions::schemas::{GetNullableContainerStructField, GetStructField};
 use crate::features::{ReaderFeatures, WriterFeatures};
 use crate::{schema::StructType, DeltaResult, EngineData};
 
@@ -36,6 +36,17 @@ static LOG_SCHEMA: LazyLock<StructType> = LazyLock::new(|| {
         // We don't support the following actions yet
         //Option::<Cdc>::get_struct_field(CDC_NAME),
         //Option::<DomainMetadata>::get_struct_field(DOMAIN_METADATA_NAME),
+    ])
+});
+
+// FIXME: should be a projection of LOG_SCHEMA?
+pub(crate) static WRITE_METADATA_SCHEMA: LazyLock<StructType> = LazyLock::new(|| {
+    StructType::new(vec![
+        <String>::get_struct_field("path"),
+        <HashMap<String, String>>::get_nullable_container_struct_field("partitionValues"),
+        <i64>::get_struct_field("size"),
+        <i64>::get_struct_field("modificationTime"),
+        <bool>::get_struct_field("dataChange"),
     ])
 });
 
@@ -409,5 +420,22 @@ mod tests {
             true,
         )]));
         assert_eq!(schema, expected);
+    }
+
+    #[test]
+    fn test_write_metadata_schema() {
+        let schema = get_write_metadata_schema();
+        let expected = StructType::new(vec![
+            StructField::new("path", DataType::STRING, false),
+            StructField::new(
+                "partitionValues",
+                MapType::new(DataType::STRING, DataType::STRING, true),
+                false,
+            ),
+            StructField::new("size", DataType::LONG, false),
+            StructField::new("modificationTime", DataType::LONG, false),
+            StructField::new("dataChange", DataType::BOOLEAN, false),
+        ]);
+        assert_eq!(schema, &expected);
     }
 }
