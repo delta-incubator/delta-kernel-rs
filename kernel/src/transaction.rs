@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use crate::actions::get_log_schema;
+use crate::path::ParsedLogPath;
 use crate::schema::{Schema, SchemaRef, StructType};
 use crate::snapshot::Snapshot;
 use crate::{DataType, Expression};
@@ -71,17 +72,16 @@ impl Transaction {
         };
 
         // step two: set new commit version (current_version + 1) and path to write
-        let commit_version = &self.read_snapshot.version() + 1;
-        let commit_file_name = format!("{:020}", commit_version) + ".json";
-        let commit_path = &self
-            .read_snapshot
-            .table_root
-            .join("_delta_log/")?
-            .join(&commit_file_name)?;
+        let commit_version = self.read_snapshot.version() + 1;
+        let commit_path =
+            ParsedLogPath::new_commit(self.read_snapshot.table_root(), commit_version)?
+                .expect("valid commit path");
+
+        assert!(commit_path.is_commit(), "commit_path should be a commit path");
 
         // step three: commit the actions as a json file in the log
         let json_handler = engine.get_json_handler();
-        match json_handler.write_json_file(commit_path, Box::new(actions), false) {
+        match json_handler.write_json_file(&commit_path.location, Box::new(actions), false) {
             Ok(()) => Ok(CommitResult::Committed(commit_version)),
             Err(crate::error::Error::ObjectStore(object_store::Error::AlreadyExists {
                 ..
