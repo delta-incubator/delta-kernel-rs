@@ -182,15 +182,15 @@ char* allocate_string(const KernelStringSlice slice)
  ************************************************************/
 
 #define DEFINE_BINOP(fun_name, op)                                                                 \
-  void fun_name(void* data, uintptr_t child_list_id, uintptr_t sibling_list_id)                    \
+  void fun_name(void* data, uintptr_t sibling_list_id, uintptr_t child_list_id)                    \
   {                                                                                                \
-    visit_expr_binop(data, op, child_list_id, sibling_list_id);                                    \
+    visit_expr_binop(data, sibling_list_id, op, child_list_id);                                    \
   }
 void visit_expr_binop(
   void* data,
+  uintptr_t sibling_id_list,
   enum OpType op,
-  uintptr_t child_id_list,
-  uintptr_t sibling_id_list)
+  uintptr_t child_id_list)
 {
   struct BinOp* binop = malloc(sizeof(struct BinOp));
   binop->op = op;
@@ -216,7 +216,7 @@ DEFINE_BINOP(visit_expr_not_in, NotIn)
  ************************************************************/
 
 #define DEFINE_SIMPLE_SCALAR(fun_name, enum_member, c_type, literal_field)                         \
-  void fun_name(void* data, c_type val, uintptr_t sibling_list_id)                                 \
+  void fun_name(void* data, uintptr_t sibling_list_id, c_type val)                                 \
   {                                                                                                \
     struct Literal* lit = malloc(sizeof(struct Literal));                                          \
     lit->type = enum_member;                                                                       \
@@ -236,7 +236,7 @@ DEFINE_SIMPLE_SCALAR(visit_expr_timestamp_literal, Timestamp, int64_t, long_data
 DEFINE_SIMPLE_SCALAR(visit_expr_timestamp_ntz_literal, TimestampNtz, int64_t, long_data);
 DEFINE_SIMPLE_SCALAR(visit_expr_date_literal, Date, int32_t, integer_data);
 
-void visit_expr_string_literal(void* data, KernelStringSlice string, uintptr_t sibling_list_id)
+void visit_expr_string_literal(void* data, uintptr_t sibling_list_id, KernelStringSlice string)
 {
   struct Literal* literal = malloc(sizeof(struct Literal));
   literal->type = String;
@@ -246,11 +246,11 @@ void visit_expr_string_literal(void* data, KernelStringSlice string, uintptr_t s
 
 void visit_expr_decimal_literal(
   void* data,
+  uintptr_t sibling_list_id,
   uint64_t value_ms,
   uint64_t value_ls,
   uint8_t precision,
-  uint8_t scale,
-  uintptr_t sibling_list_id)
+  uint8_t scale)
 {
   struct Literal* literal = malloc(sizeof(struct Literal));
   literal->type = Decimal;
@@ -264,9 +264,9 @@ void visit_expr_decimal_literal(
 
 void visit_expr_binary_literal(
   void* data,
+  uintptr_t sibling_list_id,
   const uint8_t* buf,
-  uintptr_t len,
-  uintptr_t sibling_list_id)
+  uintptr_t len)
 {
   struct Literal* literal = malloc(sizeof(struct Literal));
   literal->type = Binary;
@@ -278,9 +278,9 @@ void visit_expr_binary_literal(
 
 void visit_expr_struct_literal(
   void* data,
+  uintptr_t sibling_list_id,
   uintptr_t child_field_list_id,
-  uintptr_t child_value_list_id,
-  uintptr_t sibling_list_id)
+  uintptr_t child_value_list_id)
 {
   struct Literal* literal = malloc(sizeof(struct Literal));
   literal->type = Struct;
@@ -302,16 +302,16 @@ void visit_expr_null_literal(void* data, uintptr_t sibling_id_list)
  ************************************************************/
 
 #define DEFINE_VARIADIC(fun_name, enum_member)                                                     \
-  void fun_name(void* data, uintptr_t child_list_id, uintptr_t sibling_list_id)                    \
+  void fun_name(void* data, uintptr_t sibling_list_id, uintptr_t child_list_id)                    \
   {                                                                                                \
-    visit_expr_variadic(data, enum_member, child_list_id, sibling_list_id);                        \
+    visit_expr_variadic(data, sibling_list_id, enum_member, child_list_id);                        \
   }
 
 void visit_expr_variadic(
   void* data,
+  uintptr_t sibling_list_id,
   enum VariadicType op,
-  uintptr_t child_list_id,
-  uintptr_t sibling_list_id)
+  uintptr_t child_list_id)
 {
   struct Variadic* var = malloc(sizeof(struct Variadic));
   var->op = op;
@@ -322,7 +322,7 @@ DEFINE_VARIADIC(visit_expr_and, And)
 DEFINE_VARIADIC(visit_expr_or, Or)
 DEFINE_VARIADIC(visit_expr_struct_expr, StructExpression)
 
-void visit_expr_array_literal(void* data, uintptr_t child_list_id, uintptr_t sibling_list_id)
+void visit_expr_array_literal(void* data, uintptr_t sibling_list_id, uintptr_t child_list_id)
 {
   struct Literal* literal = malloc(sizeof(struct Literal));
   literal->type = Array;
@@ -335,16 +335,16 @@ void visit_expr_array_literal(void* data, uintptr_t child_list_id, uintptr_t sib
  * Unary Expressions
  ************************************************************/
 #define DEFINE_UNARY(fun_name, op)                                                                 \
-  void fun_name(void* data, uintptr_t child_list_id, uintptr_t sibling_list_id)                    \
+  void fun_name(void* data, uintptr_t sibling_list_id, uintptr_t child_list_id)                    \
   {                                                                                                \
-    visit_expr_unary(data, op, child_list_id, sibling_list_id);                                    \
+    visit_expr_unary(data, sibling_list_id, op, child_list_id);                                    \
   }
 
 void visit_expr_unary(
   void* data,
+  uintptr_t sibling_list_id,
   enum UnaryType type,
-  uintptr_t child_list_id,
-  uintptr_t sibling_list_id)
+  uintptr_t child_list_id)
 {
   struct Unary* unary = malloc(sizeof(struct Unary));
   unary->type = type;
@@ -358,7 +358,7 @@ DEFINE_UNARY(visit_expr_not, Not)
  * Column Expression
  ************************************************************/
 
-void visit_expr_column(void* data, KernelStringSlice string, uintptr_t sibling_id_list)
+void visit_expr_column(void* data, uintptr_t sibling_id_list, KernelStringSlice string)
 {
   char* column_name = allocate_string(string);
   put_expr_item(data, column_name, Column, sibling_id_list);
