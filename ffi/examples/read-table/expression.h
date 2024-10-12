@@ -10,7 +10,7 @@
  * provided expression. It consists of an "ExpressionBuilder" which is our user data that gets
  * passed into each visit_x call. This simply keeps track of all the lists we are asked to allocate.
  *
- * Each item "ExpressionItem", which tracks the type and pointer to the expression.
+ * Each "ExpressionItem" tracks the type and pointer to the expression.
  *
  * Each complex type is made of an "ExpressionItemList", which tracks its  length and an array of
  * "ExpressionItems" that make up the complex type. The top level expression is in a length 1
