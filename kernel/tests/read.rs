@@ -473,7 +473,11 @@ fn read_with_scan_data(
         };
         let read_results = engine
             .get_parquet_handler()
-            .read_parquet_files(&[meta], global_state.read_schema.clone(), None)
+            .read_parquet_files(
+                &[meta],
+                global_state.read_schema.clone(),
+                scan.predicate().clone(),
+            )
             .unwrap();
 
         for read_result in read_results {
@@ -535,8 +539,7 @@ fn read_table_data(
             let table_schema = snapshot.schema();
             let selected_fields = select_cols
                 .iter()
-                .map(|col| table_schema.field(col).cloned().unwrap())
-                .collect();
+                .map(|col| table_schema.field(col).cloned().unwrap());
             Arc::new(Schema::new(selected_fields))
         });
         let scan = snapshot
@@ -744,7 +747,7 @@ fn predicate_on_number_with_not_null() -> Result<(), Box<dyn std::error::Error>>
         "./tests/data/basic_partitioned",
         Some(&["a_float", "number"]),
         Some(Expression::and(
-            Expression::not(Expression::column("number").is_null()),
+            Expression::column("number").is_not_null(),
             Expression::column("number").lt(Expression::literal(3i64)),
         )),
         expected,
@@ -812,7 +815,7 @@ fn mixed_not_null() -> Result<(), Box<dyn std::error::Error>> {
     read_table_data_str(
         "./tests/data/mixed-nulls",
         Some(&["part", "n"]),
-        Some(Expression::not(Expression::column("n").is_null())),
+        Some(Expression::column("n").is_not_null()),
         expected,
     )?;
     Ok(())
