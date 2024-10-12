@@ -364,6 +364,10 @@ void visit_expr_column(void* data, KernelStringSlice string, uintptr_t sibling_i
   put_expr_item(data, column_name, Column, sibling_id_list);
 }
 
+/*************************************************************
+ * EngineExpressionVisitor Implementation
+ ************************************************************/
+
 uintptr_t make_field_list(void* data, uintptr_t reserve)
 {
   ExpressionBuilder* builder = data;
@@ -425,7 +429,6 @@ ExpressionItemList construct_predicate(SharedExpression* predicate)
 }
 
 void free_expression_list(ExpressionItemList list);
-
 void free_expression_item(ExpressionItem ref)
 {
   switch (ref.type) {
@@ -501,6 +504,11 @@ void free_expression_list(ExpressionItemList list)
   }
   free(list.list);
 }
+
+/*************************************************************
+ * Expression Printing
+ ************************************************************/
+
 void print_n_spaces(int n)
 {
   if (n == 0)

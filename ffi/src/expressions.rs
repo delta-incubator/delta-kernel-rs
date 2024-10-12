@@ -356,15 +356,27 @@ pub unsafe extern "C" fn get_testing_kernel_expression() -> Handle<SharedExpress
 /// The [`EngineExpressionVisitor`] defines a visitor system to allow engines to build their own
 /// representation of an expression from a particular expression within the kernel.
 ///
-/// Visit operations where the engine allocates an expression must return an associated `id`, which is an integer
-/// identifier ([`usize`]). This identifier can be passed back to the engine to identify the expression.
-/// The [`EngineExpressionVisitor`] handles both simple and complex types.
-/// 1. For simple types, the engine is expected to allocate that data and return its identifier.
-/// 2. For complex types such as structs, arrays, and variadic expressions, there will be a call to
-///     construct the expression, and populate sub-expressions. For instance, [`visit_and`] recieves
-///     the expected number of sub-expressions and must return an identifier. The kernel will
-///     subsequently call [`visit_variadic_sub_expr`] with the identifier of the And expression, and the
-///     identifier for a sub-expression.
+/// The model is list based. When the kernel needs a list, it will ask engine to allocate one of a
+/// particular size. Once allocated the engine returns an `id`, which can be any integer identifier
+/// ([`usize`]) the engine wants, and will be passed back to the engine to identify the list in the
+/// future.
+///
+/// Every expression the kernel visits belongs to some list of "sibling" elements. The schema
+/// itself is a list of schema elements, and every complex type (struct expression, array, variadic, etc)
+/// contains a list of "child" elements.
+///  1. Before visiting any complex expression type, the kernel asks the engine to allocate a list to
+///     hold its children
+///  2. When visiting any expression element, the kernel passes its parent's "child list" as the
+///     "sibling list" the element should be appended to:
+///      - For a struct literal, first visit each struct field and visit each value
+///      - For a struct expression, visit each sub expression.
+///      - For an array literal, visit each of the elements.
+///      - For a variadic `and` or `or` expression, visit each sub-expression.
+///      - For a binary operator expression, visit the left and right operands.
+///      - For a unary `is null` or `not` expression, visit the sub-expression.
+///  3. When visiting a complex expression, the kernel also passes the "child list" containing
+///     that element's (already-visited) children.
+///  4. The [`visit_expression`] method returns the id of the list of top-level columns
 ///
 /// WARNING: The visitor MUST NOT retain internal references to string slices or binary data passed
 /// to visitor methods
@@ -375,37 +387,41 @@ pub struct EngineExpressionVisitor {
     pub data: *mut c_void,
     /// Creates a new expression list, optionally reserving capacity up front
     pub make_field_list: extern "C" fn(data: *mut c_void, reserve: usize) -> usize,
-    /// Visit a 32bit `integer
+    /// Visit a 32bit `integer belonging to the list identified by `sibling_list_id`.
     pub visit_int_literal: extern "C" fn(data: *mut c_void, value: i32, sibling_list_id: usize),
-    /// Visit a 64bit `long`.
+    /// Visit a 64bit `long`  belonging to the list identified by `sibling_list_id`.
     pub visit_long_literal: extern "C" fn(data: *mut c_void, value: i64, sibling_list_id: usize),
-    /// Visit a 16bit `short`.
+    /// Visit a 16bit `short` belonging to the list identified by `sibling_list_id`.
     pub visit_short_literal: extern "C" fn(data: *mut c_void, value: i16, sibling_list_id: usize),
-    /// Visit an 8bit `byte`.
+    /// Visit an 8bit `byte` belonging to the list identified by `sibling_list_id`.
     pub visit_byte_literal: extern "C" fn(data: *mut c_void, value: i8, sibling_list_id: usize),
-    /// Visit a 32bit `float`.
+    /// Visit a 32bit `float` belonging to the list identified by `sibling_list_id`.
     pub visit_float_literal: extern "C" fn(data: *mut c_void, value: f32, sibling_list_id: usize),
-    /// Visit a 64bit `double`.
+    /// Visit a 64bit `double` belonging to the list identified by `sibling_list_id`.
     pub visit_double_literal: extern "C" fn(data: *mut c_void, value: f64, sibling_list_id: usize),
-    /// Visit a `string`.
+    /// Visit a `string` belonging to the list identified by `sibling_list_id`.
     pub visit_string_literal:
         extern "C" fn(data: *mut c_void, value: KernelStringSlice, sibling_list_id: usize),
-    /// Visit a `boolean`.
+    /// Visit a `boolean` belonging to the list identified by `sibling_list_id`.
     pub visit_bool_literal: extern "C" fn(data: *mut c_void, value: bool, sibling_list_id: usize),
-    /// Visit a 64bit timestamp. The timestamp is microsecond precision and adjusted to UTC.
+    /// Visit a 64bit timestamp belonging to the list identified by `sibling_list_id`.
+    /// The timestamp is microsecond precision and adjusted to UTC.
     pub visit_timestamp_literal:
         extern "C" fn(data: *mut c_void, value: i64, sibling_list_id: usize),
-    /// Visit a 64bit timestamp. The timestamp is microsecond precision with no timezone.
+    /// Visit a 64bit timestamp belonging to the list identified by `sibling_list_id`.
+    /// The timestamp is microsecond precision with no timezone.
     pub visit_timestamp_ntz_literal:
         extern "C" fn(data: *mut c_void, value: i64, sibling_list_id: usize),
-    /// Visit a 32bit int date representing days since UNIX epoch 1970-01-01.
+    /// Visit a 32bit intger `date` representing days since UNIX epoch 1970-01-01.  The `date` belongs
+    /// to the list identified by `sibling_list_id`.
     pub visit_date_literal: extern "C" fn(data: *mut c_void, value: i32, sibling_list_id: usize),
-    /// Visit binary data at the `buffer` with length `len`.
+    /// Visit binary data at the `buffer` with length `len` belonging to the list identified by
+    /// `sibling_list_id`.
     pub visit_binary_literal:
         extern "C" fn(data: *mut c_void, buffer: *const u8, len: usize, sibling_list_id: usize),
     /// Visit a 128bit `decimal` value with the given precision and scale. The 128bit integer
     /// is split into the most significant 64 bits in `value_ms`, and the least significant 64
-    /// bits in `value_ls`.
+    /// bits in `value_ls`. The `decimal` belongs to the list identified by `sibling_list_id`.
     pub visit_decimal_literal: extern "C" fn(
         data: *mut c_void,
         value_ms: u64, // Most significant 64 bits of decimal value
@@ -414,83 +430,84 @@ pub struct EngineExpressionVisitor {
         scale: u8,
         sibling_list_id: usize,
     ),
-    /// Visit a struct literal which is made up of a list of field names and values. This declares
-    /// the number of fields that the struct will have. The visitor will populate the struct fields
-    /// using the [`visit_struct_literal_field`] method.
+    /// Visit a struct literal belonging to the list identified by `sibling_list_id`.
+    /// The field names of the struct are in a list identified by `child_field_list_id`.
+    /// The values of the struct are in a list identified by `child_value_list_id`.
+    ///
+    /// TODO: Change `child_field_list_values` to take a list of `StructField`
     pub visit_struct_literal: extern "C" fn(
         data: *mut c_void,
         child_field_list_value: usize,
         child_value_list_id: usize,
         sibling_list_id: usize,
     ),
-    /// Visit an `arary`, declaring the length `len`. The visitor will populate the array
-    /// elements using the [`visit_array_element`] method.
+    /// Visit an array literal belonging to the list identified by `sibling_list_id`.
+    /// The values of the array are in a list identified by `child_list_id`.
     pub visit_array_literal:
         extern "C" fn(data: *mut c_void, child_list_id: usize, sibling_list_id: usize),
-    /// Visits a null value.
+    /// Visits a null value belonging to the list identified by `sibling_list_id.
     pub visit_null_literal: extern "C" fn(data: *mut c_void, sibling_list_id: usize),
-    /// Visits an `and` expression which is made of a list of sub-expressions. This declares the
-    /// number of sub-expressions that the `and` expression will be made of. The visitor will populate
-    /// the list of expressions using the [`visit_variadic_sub_expr`] method.
+    /// Visits an `and` expression belonging to the list identified by `sibling_list_id`.
+    /// The sub-expressions of the array are in a list identified by `child_list_id`
     pub visit_and: extern "C" fn(data: *mut c_void, child_list_id: usize, sibling_list_id: usize),
-    /// Visits an `or` expression which is made of a list of sub-expressions. This declares the
-    /// number of sub-expressions that the `or` expression will be made of. The visitor will populate
-    /// the list of expressions using the [`visit_variadic_sub_expr`] method.
+    /// Visits an `or` expression belonging to the list identified by `sibling_list_id`.
+    /// The sub-expressions of the array are in a list identified by `child_list_id`
     pub visit_or: extern "C" fn(data: *mut c_void, child_list_id: usize, sibling_list_id: usize),
-    ///Visits a `not` expression, bulit using the sub-expression `inner_expr`.
-    pub visit_not: extern "C" fn(data: *mut c_void, chilrd_list_id: usize, sibling_list_id: usize),
-    ///Visits an `is_null` expression, built using the sub-expression `inner_expr`.
+    /// Visits a `not` expression belonging to the list identified by `sibling_list_id`.
+    /// The sub-expression will be in a _one_ item list identified by `child_list_id`
+    pub visit_not: extern "C" fn(data: *mut c_void, child_list_id: usize, sibling_list_id: usize),
+    /// Visits a `is_null` expression belonging to the list identified by `sibling_list_id`.
+    /// The sub-expression will be in a _one_ item list identified by `child_list_id`
     pub visit_is_null:
         extern "C" fn(data: *mut c_void, child_list_id: usize, sibling_list_id: usize),
-    /// Visit the `less than` binary operation, which takes the left sub expression id `a` and the
-    /// right sub-expression id `b`.
+    /// Visits the `LessThan` binary operator belonging to the list identified by `sibling_list_id`.
+    /// The operands will be in a _two_ item list identified by `child_list_id`
     pub visit_lt: extern "C" fn(data: *mut c_void, child_list_id: usize, sibling_list_id: usize),
-    /// Visit the `less than or equal` binary operation, which takes the left sub expression id `a`
-    /// and the right sub-expression id `b`.
+    /// Visits the `LessThanOrEqual` binary operator belonging to the list identified by `sibling_list_id`.
+    /// The operands will be in a _two_ item list identified by `child_list_id`
     pub visit_le: extern "C" fn(data: *mut c_void, child_list_id: usize, sibling_list_id: usize),
-    /// Visit the `greater than` binary operation, which takes the left sub expression id `a`
-    /// and the right sub-expression id `b`.
+    /// Visits the `GreaterThan` binary operator belonging to the list identified by `sibling_list_id`.
+    /// The operands will be in a _two_ item list identified by `child_list_id`
     pub visit_gt: extern "C" fn(data: *mut c_void, child_list_id: usize, sibling_list_id: usize),
-    /// Visit the `greater than or equal` binary operation, which takes the left sub expression id `a`
-    /// and the right sub-expression id `b`.
+    /// Visits the `GreaterThanOrEqual` binary operator belonging to the list identified by `sibling_list_id`.
+    /// The operands will be in a _two_ item list identified by `child_list_id`
     pub visit_ge: extern "C" fn(data: *mut c_void, child_list_id: usize, sibling_list_id: usize),
-    /// Visit the `equal` binary operation, which takes the left sub expression id `a`
-    /// and the right sub-expression id `b`.
+    /// Visits the `Equal` binary operator belonging to the list identified by `sibling_list_id`.
+    /// The operands will be in a _two_ item list identified by `child_list_id`
     pub visit_eq: extern "C" fn(data: *mut c_void, child_list_id: usize, sibling_list_id: usize),
-    /// Visit the `not equal` binary operation, which takes the left sub expression id `a`
-    /// and the right sub-expression id `b`.
+    /// Visits the `NotEqual` binary operator belonging to the list identified by `sibling_list_id`.
+    /// The operands will be in a _two_ item list identified by `child_list_id`
     pub visit_ne: extern "C" fn(data: *mut c_void, child_list_id: usize, sibling_list_id: usize),
-    /// Visit the `distinct` binary operation, which takes the left sub expression id `a`
-    /// and the right sub-expression id `b`.
+    /// Visits the `Distinct` binary operator belonging to the list identified by `sibling_list_id`.
+    /// The operands will be in a _two_ item list identified by `child_list_id`
     pub visit_distinct:
         extern "C" fn(data: *mut c_void, child_list_id: usize, sibling_list_id: usize),
-    /// Visit the `in` binary operation, which takes the left sub expression id `a`
-    /// and the right sub-expression id `b`.
+    /// Visits the `In` binary operator belonging to the list identified by `sibling_list_id`.
+    /// The operands will be in a _two_ item list identified by `child_list_id`
     pub visit_in: extern "C" fn(data: *mut c_void, child_list_id: usize, sibling_list_id: usize),
-    /// Visit the `not in` binary operation, which takes the left sub expression id `a`
-    /// and the right sub-expression id `b`.
+    /// Visits the `NotIn` binary operator belonging to the list identified by `sibling_list_id`.
+    /// The operands will be in a _two_ item list identified by `child_list_id`
     pub visit_not_in:
         extern "C" fn(data: *mut c_void, child_list_id: usize, sibling_list_id: usize),
-    /// Visit the `add` binary operation, which takes the left sub expression id `a`
-    /// and the right sub-expression id `b`.
+    /// Visits the `Add` binary operator belonging to the list identified by `sibling_list_id`.
+    /// The operands will be in a _two_ item list identified by `child_list_id`
     pub visit_add: extern "C" fn(data: *mut c_void, child_list_id: usize, sibling_list_id: usize),
-    /// Visit the `minus` binary operation, which takes the left sub expression id `a`
-    /// and the right sub-expression id `b`.
+    /// Visits the `Minus` binary operator belonging to the list identified by `sibling_list_id`.
+    /// The operands will be in a _two_ item list identified by `child_list_id`
     pub visit_minus: extern "C" fn(data: *mut c_void, child_list_id: usize, sibling_list_id: usize),
-    /// Visit the `multiply` binary operation, which takes the left sub expression id `a`
-    /// and the right sub-expression id `b`.
+    /// Visits the `Multiply` binary operator belonging to the list identified by `sibling_list_id`.
+    /// The operands will be in a _two_ item list identified by `child_list_id`
     pub visit_multiply:
         extern "C" fn(data: *mut c_void, child_list_id: usize, sibling_list_id: usize),
-    /// Visit the `divide` binary operation, which takes the left sub expression id `a`
-    /// and the right sub-expression id `b`.
+    /// Visits the `Divide` binary operator belonging to the list identified by `sibling_list_id`.
+    /// The operands will be in a _two_ item list identified by `child_list_id`
     pub visit_divide:
         extern "C" fn(data: *mut c_void, child_list_id: usize, sibling_list_id: usize),
-    /// Visit the `colmun` identified by the `name` string.
+    /// Visits the `column` belonging to the list identified by `sibling_list_id`.
     pub visit_column:
         extern "C" fn(data: *mut c_void, name: KernelStringSlice, sibling_list_id: usize),
-    /// Visit a `struct` which is constructed from an ordered list of expressions. This declares
-    /// the number of expressions that the struct will be made of. The visitor will populate the
-    /// list of expressions using the [`visit_struct_sub_expr`] method.
+    /// Visits a `StructExpression` belonging to the list identified by `sibling_list_id`.
+    /// The sub-expressions of the `StructExpression` are in a list identified by `child_list_id`
     pub visit_struct_expr:
         extern "C" fn(data: *mut c_void, child_list_id: usize, sibling_list_id: usize),
 }
