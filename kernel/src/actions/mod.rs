@@ -422,4 +422,22 @@ mod tests {
         )]));
         assert_eq!(schema, expected);
     }
+
+    #[test]
+    fn test_commit_info_schema() {
+        let schema = get_log_schema()
+            .project(&["commitInfo"])
+            .expect("Couldn't get commitInfo field");
+
+        let expected = Arc::new(StructType::new(vec![StructField::new(
+            "commitInfo",
+            StructType::new(vec![StructField::new(
+                "kernelVersion",
+                DataType::STRING,
+                true,
+            )]),
+            true,
+        )]));
+        assert_eq!(schema, expected);
+    }
 }
