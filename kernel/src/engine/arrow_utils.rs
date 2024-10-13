@@ -15,7 +15,7 @@ use arrow_array::{
     cast::AsArray, new_null_array, Array as ArrowArray, GenericListArray, OffsetSizeTrait,
     RecordBatch, StringArray, StructArray,
 };
-use arrow_json::ReaderBuilder;
+use arrow_json::{LineDelimitedWriter, ReaderBuilder};
 use arrow_schema::{
     DataType as ArrowDataType, Field as ArrowField, FieldRef as ArrowFieldRef, Fields,
     SchemaRef as ArrowSchemaRef,
@@ -811,6 +811,22 @@ fn parse_json_impl(json_strings: &StringArray, schema: ArrowSchemaRef) -> DeltaR
     };
     let output: Vec<_> = json_strings.iter().map(parse_one).try_collect()?;
     Ok(concat_batches(&schema, output.iter())?)
+}
+
+/// write an arrow RecordBatch to a JSON string by appending to a buffer.
+///
+/// TODO: this should stream data to the JSON writer and output an iterator.
+pub(crate) fn write_json(
+    data: Box<dyn Iterator<Item = Box<dyn EngineData>> + Send>,
+) -> DeltaResult<Vec<u8>> {
+    let mut writer = LineDelimitedWriter::new(Vec::new());
+    for chunk in data.into_iter() {
+        let arrow_data = ArrowEngineData::try_from_engine_data(chunk)?;
+        let record_batch = arrow_data.record_batch();
+        writer.write(record_batch)?;
+    }
+    writer.finish()?;
+    Ok(writer.into_inner())
 }
 
 #[cfg(test)]
@@ -1620,5 +1636,25 @@ mod tests {
         assert!(!can_upcast_to_decimal(&Int32, 10u8, 1i8));
         assert!(!can_upcast_to_decimal(&Int64, 19u8, 0i8));
         assert!(!can_upcast_to_decimal(&Int64, 20u8, 1i8));
+    }
+
+    #[test]
+    fn test_write_json() -> DeltaResult<()> {
+        let schema = Arc::new(ArrowSchema::new(vec![ArrowField::new(
+            "string",
+            ArrowDataType::Utf8,
+            true,
+        )]));
+        let data = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(StringArray::from(vec!["string1", "string2"]))],
+        )?;
+        let data: Box<dyn EngineData> = Box::new(ArrowEngineData::new(data));
+        let json = write_json(Box::new(std::iter::once(data)))?;
+        assert_eq!(
+            json,
+            "{\"string\":\"string1\"}\n{\"string\":\"string2\"}\n".as_bytes()
+        );
+        Ok(())
     }
 }

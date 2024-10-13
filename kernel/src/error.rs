@@ -163,6 +163,10 @@ pub enum Error {
     /// Invalid commit info passed to the transaction
     #[error("Invalid commit info: {0}")]
     InvalidCommitInfo(String),
+
+    /// The file already exists at the path, prohibiting a non-overwrite write
+    #[error("File already exists: {0}")]
+    FileAlreadyExists(String),
 }
 
 // Convenience constructors for Error types that take a String argument

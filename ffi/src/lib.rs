@@ -330,6 +330,7 @@ pub enum KernelError {
     InvalidExpression,
     InvalidLogPath,
     InvalidCommitInfo,
+    FileAlreadyExists,
 }
 
 impl From<Error> for KernelError {
@@ -378,6 +379,7 @@ impl From<Error> for KernelError {
             Error::InvalidExpressionEvaluation(_) => KernelError::InvalidExpression,
             Error::InvalidLogPath(_) => KernelError::InvalidLogPath,
             Error::InvalidCommitInfo(_) => KernelError::InvalidCommitInfo,
+            Error::FileAlreadyExists(_) => KernelError::FileAlreadyExists,
         }
     }
 }

@@ -78,9 +78,9 @@ impl Transaction {
         let json_handler = engine.get_json_handler();
         match json_handler.write_json_file(&commit_path.location, Box::new(actions), false) {
             Ok(()) => Ok(CommitResult::Committed(commit_version)),
-            Err(crate::error::Error::ObjectStore(object_store::Error::AlreadyExists {
-                ..
-            })) => Ok(CommitResult::Conflict(self, commit_version)),
+            Err(crate::error::Error::FileAlreadyExists(_)) => {
+                Ok(CommitResult::Conflict(self, commit_version))
+            }
             Err(e) => Err(e),
         }
     }

@@ -1,11 +1,13 @@
-use std::{fs::File, io::BufReader};
+use std::{fs::File, io::BufReader, io::Write};
 
 use arrow_schema::SchemaRef as ArrowSchemaRef;
+use tempfile::NamedTempFile;
 use url::Url;
 
 use super::read_files;
 use crate::engine::arrow_data::ArrowEngineData;
 use crate::engine::arrow_utils::parse_json as arrow_parse_json;
+use crate::engine::arrow_utils::write_json;
 use crate::schema::SchemaRef;
 use crate::{
     DeltaResult, EngineData, Expression, FileDataReadResultIterator, FileMeta, JsonHandler,
@@ -43,12 +45,97 @@ impl JsonHandler for SyncJsonHandler {
         arrow_parse_json(json_strings, output_schema)
     }
 
+    // For sync writer we write data to a tmp file then atomically rename it to the final path.
+    // This is highly OS-dependent and for now relies on the atomicity of tempfile's
+    // `persist_noclobber`.
     fn write_json_file(
         &self,
-        _path: &Url,
-        _data: Box<dyn Iterator<Item = Box<dyn EngineData>> + Send>,
+        path: &Url,
+        data: Box<dyn Iterator<Item = Box<dyn EngineData>> + Send>,
         _overwrite: bool,
     ) -> DeltaResult<()> {
-        unimplemented!()
+        let path = path
+            .to_file_path()
+            .map_err(|_| crate::Error::generic("sync client can only read local files"))?;
+        let Some(parent) = path.parent() else {
+            return Err(crate::Error::generic(format!(
+                "no parent found for {:?}",
+                path
+            )));
+        };
+
+        // write data to tmp file
+        let mut tmp_file = NamedTempFile::new_in(parent)?;
+        let buf = write_json(data)?;
+        tmp_file.write_all(&buf)?;
+        tmp_file.flush()?;
+
+        // use 'persist_noclobber' to atomically rename tmp file to final path
+        tmp_file
+            .persist_noclobber(path.clone())
+            .map_err(|e| match e {
+                tempfile::PersistError { error, .. }
+                    if error.kind() == std::io::ErrorKind::AlreadyExists =>
+                {
+                    crate::Error::FileAlreadyExists(path.to_string_lossy().to_string())
+                }
+                e => crate::Error::IOError(e.into()),
+            })?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::sync::Arc;
+
+    use arrow_array::{RecordBatch, StringArray};
+    use arrow_schema::DataType as ArrowDataType;
+    use arrow_schema::Field;
+    use arrow_schema::Schema as ArrowSchema;
+    use serde_json::json;
+    use url::Url;
+
+    #[test]
+    fn test_write_json_file() -> DeltaResult<()> {
+        let test_dir = tempfile::tempdir().unwrap();
+        let path = test_dir.path().join("00000000000000000001.json");
+        let handler = SyncJsonHandler;
+
+        let schema = Arc::new(ArrowSchema::new(vec![Field::new(
+            "dog",
+            ArrowDataType::Utf8,
+            true,
+        )]));
+        let data = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(StringArray::from(vec!["remi", "wilson"]))],
+        )?;
+        let data: Box<dyn EngineData> = Box::new(ArrowEngineData::new(data));
+        let empty: Box<dyn EngineData> =
+            Box::new(ArrowEngineData::new(RecordBatch::new_empty(schema)));
+
+        let url = Url::from_file_path(path.clone()).unwrap();
+        handler
+            .write_json_file(&url, Box::new(std::iter::once(data)), false)
+            .expect("write json file");
+        assert!(matches!(
+            handler.write_json_file(&url, Box::new(std::iter::once(empty)), false),
+            Err(crate::Error::FileAlreadyExists(_))
+        ));
+
+        let file = std::fs::read_to_string(path)?;
+        let json: Vec<_> = serde_json::Deserializer::from_str(&file)
+            .into_iter::<serde_json::Value>()
+            .flatten()
+            .collect();
+        assert_eq!(
+            json,
+            vec![json!({"dog": "remi"}), json!({"dog": "wilson"}),]
+        );
+
+        Ok(())
     }
 }

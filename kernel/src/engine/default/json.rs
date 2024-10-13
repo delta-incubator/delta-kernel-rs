@@ -15,8 +15,8 @@ use url::Url;
 
 use super::executor::TaskExecutor;
 use super::file_stream::{FileOpenFuture, FileOpener, FileStream};
-use crate::engine::arrow_data::ArrowEngineData;
 use crate::engine::arrow_utils::parse_json as arrow_parse_json;
+use crate::engine::arrow_utils::write_json;
 use crate::schema::SchemaRef;
 use crate::{
     DeltaResult, EngineData, Error, Expression, FileDataReadResultIterator, FileMeta, JsonHandler,
@@ -98,24 +98,23 @@ impl<E: TaskExecutor> JsonHandler for DefaultJsonHandler<E> {
         data: Box<dyn Iterator<Item = Box<dyn EngineData>> + Send>,
         _overwrite: bool,
     ) -> DeltaResult<()> {
-        let mut writer = arrow_json::LineDelimitedWriter::new(Vec::new());
-        for chunk in data.into_iter() {
-            let arrow_data = ArrowEngineData::try_from_engine_data(chunk)?;
-            let record_batch = arrow_data.record_batch();
-            writer.write(record_batch)?;
-        }
-        writer.finish()?;
-        let buffer = writer.into_inner();
-
+        let buffer = write_json(data)?;
         // Put if absent
         let store = self.store.clone(); // cheap Arc
         let path = Path::from(path.path());
-        self.task_executor.block_on(async move {
-            store
-                .put_opts(&path, buffer.into(), object_store::PutMode::Create.into())
-                .await
-        })?;
-
+        let path2 = path.clone(); // FIXME gross
+        self.task_executor
+            .block_on(async move {
+                store
+                    .put_opts(&path, buffer.into(), object_store::PutMode::Create.into())
+                    .await
+            })
+            .map_err(|e| match e {
+                object_store::Error::AlreadyExists { .. } => {
+                    crate::error::Error::FileAlreadyExists(path2.to_string())
+                }
+                e => e.into(),
+            })?;
         Ok(())
     }
 }
