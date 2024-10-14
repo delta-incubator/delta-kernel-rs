@@ -40,37 +40,38 @@ pub struct DefaultEngine<E: TaskExecutor> {
 impl<E: TaskExecutor> DefaultEngine<E> {
     /// Create a new [`DefaultEngine`] instance
     ///
-    /// # Parameters
+    /// The `path` parameter is used to determine the type of storage used.
     ///
-    /// - `table_root`: The URL of the table within storage.
-    /// - `options`: key/value pairs of options to pass to the object store.
-    /// - `task_executor`: Used to spawn async IO tasks. See [executor::TaskExecutor].
-    pub fn try_new<K, V>(
-        table_root: &Url,
-        options: impl IntoIterator<Item = (K, V)>,
-        task_executor: Arc<E>,
-    ) -> DeltaResult<Self>
+    /// The `task_executor` is used to spawn async IO tasks. See [executor::TaskExecutor].
+    pub fn try_new<I, K, V>(path: &Url, options: I, task_executor: Arc<E>) -> DeltaResult<Self>
     where
+        I: IntoIterator<Item = (K, V)>,
         K: AsRef<str>,
         V: Into<String>,
     {
-        // table root is the path of the table in the ObjectStore
-        let (store, table_root) = parse_url_opts(table_root, options)?;
-        Ok(Self::new(Arc::new(store), table_root, task_executor))
+        let (store, prefix) = parse_url_opts(path, options)?;
+        let store = Arc::new(store);
+        Ok(Self {
+            file_system: Arc::new(ObjectStoreFileSystemClient::new(
+                store.clone(),
+                prefix,
+                task_executor.clone(),
+            )),
+            json: Arc::new(DefaultJsonHandler::new(
+                store.clone(),
+                task_executor.clone(),
+            )),
+            parquet: Arc::new(DefaultParquetHandler::new(store.clone(), task_executor)),
+            store,
+            expression: Arc::new(ArrowExpressionHandler {}),
+        })
     }
 
-    /// Create a new [`DefaultEngine`] instance
-    ///
-    /// # Parameters
-    ///
-    /// - `store`: The object store to use.
-    /// - `table_root_path`: The root path of the table within storage.
-    /// - `task_executor`: Used to spawn async IO tasks. See [executor::TaskExecutor].
-    pub fn new(store: Arc<DynObjectStore>, table_root: Path, task_executor: Arc<E>) -> Self {
+    pub fn new(store: Arc<DynObjectStore>, prefix: Path, task_executor: Arc<E>) -> Self {
         Self {
             file_system: Arc::new(ObjectStoreFileSystemClient::new(
                 store.clone(),
-                table_root,
+                prefix,
                 task_executor.clone(),
             )),
             json: Arc::new(DefaultJsonHandler::new(
