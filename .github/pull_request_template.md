@@ -40,5 +40,5 @@ If tests were not added, please describe why they were not added and/or why it w
 
 
 <!--
-This template was adapted from Apache Spark's pull request template: https://github.com/apache/spark
+Adapted from Apache Spark's pull request template: https://github.com/apache/spark
 -->
