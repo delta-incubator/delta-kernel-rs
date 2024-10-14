@@ -333,16 +333,14 @@ pub struct EngineExpressionVisitor {
     pub visit_decimal_literal: extern "C" fn(
         data: *mut c_void,
         sibling_list_id: usize,
-        value_ms: u64, // Most significant 64 bits of decimal value
-        value_ls: u64, // Least significant 64 bits of decimal value
+        value_ms: u64,
+        value_ls: u64,
         precision: u8,
         scale: u8,
     ),
     /// Visit a struct literal belonging to the list identified by `sibling_list_id`.
     /// The field names of the struct are in a list identified by `child_field_list_id`.
     /// The values of the struct are in a list identified by `child_value_list_id`.
-    ///
-    /// TODO: Change `child_field_list_values` to take a list of `StructField`
     pub visit_struct_literal: extern "C" fn(
         data: *mut c_void,
         sibling_list_id: usize,
