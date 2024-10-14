@@ -4,8 +4,7 @@ labels: enhancement
 body:
   - type: textarea
     attributes:
-      label: Is your feature request related to a problem or challenge?
-      description: Please describe what you are trying to do.
+      label: Please describe what you are trying to do.
       placeholder: >
         A clear and concise description of what the problem is, or what motivates the feature you are requesting
   - type: textarea
