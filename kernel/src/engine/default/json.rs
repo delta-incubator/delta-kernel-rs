@@ -111,7 +111,7 @@ impl<E: TaskExecutor> JsonHandler for DefaultJsonHandler<E> {
             })
             .map_err(|e| match e {
                 object_store::Error::AlreadyExists { .. } => {
-                    crate::error::Error::FileAlreadyExists(path2.to_string())
+                    Error::FileAlreadyExists(path2.to_string())
                 }
                 e => e.into(),
             })?;

@@ -14,7 +14,7 @@ use delta_kernel::engine::arrow_data::ArrowEngineData;
 use delta_kernel::engine::default::executor::tokio::TokioBackgroundExecutor;
 use delta_kernel::engine::default::DefaultEngine;
 use delta_kernel::schema::{DataType, SchemaRef, StructField, StructType};
-use delta_kernel::Table;
+use delta_kernel::{Error as KernelError, Table};
 
 // setup default engine with in-memory object store.
 fn setup(
@@ -217,7 +217,7 @@ async fn test_invalid_commit_info() -> Result<(), Box<dyn std::error::Error>> {
     // commit!
     assert!(matches!(
         txn.commit(&engine),
-        Err(delta_kernel::Error::InvalidCommitInfo(_))
+        Err(KernelError::InvalidCommitInfo(_))
     ));
 
     // two-row commit info test
@@ -243,7 +243,7 @@ async fn test_invalid_commit_info() -> Result<(), Box<dyn std::error::Error>> {
     // commit!
     assert!(matches!(
         txn.commit(&engine),
-        Err(delta_kernel::Error::InvalidCommitInfo(_))
+        Err(KernelError::InvalidCommitInfo(_))
     ));
     Ok(())
 }

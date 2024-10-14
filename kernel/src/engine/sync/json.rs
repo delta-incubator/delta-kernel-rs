@@ -10,7 +10,7 @@ use crate::engine::arrow_utils::parse_json as arrow_parse_json;
 use crate::engine::arrow_utils::write_json;
 use crate::schema::SchemaRef;
 use crate::{
-    DeltaResult, EngineData, Expression, FileDataReadResultIterator, FileMeta, JsonHandler,
+    DeltaResult, EngineData, Error, Expression, FileDataReadResultIterator, FileMeta, JsonHandler,
 };
 
 pub(crate) struct SyncJsonHandler;
@@ -77,9 +77,9 @@ impl JsonHandler for SyncJsonHandler {
                 tempfile::PersistError { error, .. }
                     if error.kind() == std::io::ErrorKind::AlreadyExists =>
                 {
-                    crate::Error::FileAlreadyExists(path.to_string_lossy().to_string())
+                    Error::FileAlreadyExists(path.to_string_lossy().to_string())
                 }
-                e => crate::Error::IOError(e.into()),
+                e => Error::IOError(e.into()),
             })?;
         Ok(())
     }
@@ -123,7 +123,7 @@ mod tests {
             .expect("write json file");
         assert!(matches!(
             handler.write_json_file(&url, Box::new(std::iter::once(empty)), false),
-            Err(crate::Error::FileAlreadyExists(_))
+            Err(Error::FileAlreadyExists(_))
         ));
 
         let file = std::fs::read_to_string(path)?;
