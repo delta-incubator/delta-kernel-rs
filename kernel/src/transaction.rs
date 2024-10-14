@@ -1,11 +1,14 @@
 use std::sync::Arc;
 
 use crate::actions::get_log_schema;
+use crate::actions::{
+    ADD_NAME, COMMIT_INFO_NAME, METADATA_NAME, PROTOCOL_NAME, REMOVE_NAME, SET_TRANSACTION_NAME,
+};
+use crate::error::Error;
 use crate::path::ParsedLogPath;
 use crate::schema::{Schema, SchemaRef};
 use crate::snapshot::Snapshot;
-use crate::{DataType, Expression};
-use crate::{DeltaResult, Engine, EngineData};
+use crate::{DataType, DeltaResult, Engine, EngineData, Expression, Version};
 
 const KERNEL_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -78,9 +81,7 @@ impl Transaction {
         let json_handler = engine.get_json_handler();
         match json_handler.write_json_file(&commit_path.location, Box::new(actions), false) {
             Ok(()) => Ok(CommitResult::Committed(commit_version)),
-            Err(crate::error::Error::FileAlreadyExists(_)) => {
-                Ok(CommitResult::Conflict(self, commit_version))
-            }
+            Err(Error::FileAlreadyExists(_)) => Ok(CommitResult::Conflict(self, commit_version)),
             Err(e) => Err(e),
         }
     }
@@ -112,9 +113,9 @@ impl Transaction {
 /// (along with the version which conflicted).
 pub enum CommitResult {
     /// The transaction was successfully committed at the version.
-    Committed(crate::Version),
+    Committed(Version),
     /// The transaction conflicted with an existing version (at the version given).
-    Conflict(Transaction, crate::Version),
+    Conflict(Transaction, Version),
 }
 
 // given the engine's commit info (data and schema as [EngineCommitInfo]) we want to create both:
@@ -124,12 +125,8 @@ fn generate_commit_info(
     engine: &dyn Engine,
     engine_commit_info: &EngineCommitInfo,
 ) -> DeltaResult<(Box<dyn EngineData>, SchemaRef)> {
-    use crate::actions::{
-        ADD_NAME, COMMIT_INFO_NAME, METADATA_NAME, PROTOCOL_NAME, REMOVE_NAME, SET_TRANSACTION_NAME,
-    };
-
     if engine_commit_info.data.length() != 1 {
-        return Err(crate::error::Error::InvalidCommitInfo(format!(
+        return Err(Error::InvalidCommitInfo(format!(
             "Engine commit info should have exactly one row, found {}",
             engine_commit_info.data.length()
         )));
@@ -139,11 +136,9 @@ fn generate_commit_info(
     let commit_info_field = action_schema
         .fields
         .get_mut(COMMIT_INFO_NAME)
-        .ok_or_else(|| crate::Error::missing_column(COMMIT_INFO_NAME))?;
+        .ok_or_else(|| Error::missing_column(COMMIT_INFO_NAME))?;
     let DataType::Struct(mut commit_info_data_type) = commit_info_field.data_type().clone() else {
-        return Err(crate::error::Error::internal_error(
-            "commit_info_field is a struct",
-        ));
+        return Err(Error::internal_error("commit_info_field is a struct"));
     };
     commit_info_data_type.fields.extend(
         engine_commit_info
@@ -198,34 +193,36 @@ fn generate_commit_info(
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use crate::engine::arrow_data::ArrowEngineData;
+    use crate::engine::arrow_expression::ArrowExpressionHandler;
+    use crate::{ExpressionHandler, FileSystemClient, JsonHandler, ParquetHandler};
+
     use arrow::array::{Int32Array, StringArray};
     use arrow::record_batch::RecordBatch;
 
-    struct ExprEngine(Arc<dyn crate::ExpressionHandler>);
+    struct ExprEngine(Arc<dyn ExpressionHandler>);
 
     impl ExprEngine {
         fn new() -> Self {
-            ExprEngine(Arc::new(
-                crate::engine::arrow_expression::ArrowExpressionHandler,
-            ))
+            ExprEngine(Arc::new(ArrowExpressionHandler))
         }
     }
 
     impl Engine for ExprEngine {
-        fn get_expression_handler(&self) -> Arc<dyn crate::ExpressionHandler> {
+        fn get_expression_handler(&self) -> Arc<dyn ExpressionHandler> {
             self.0.clone()
         }
 
-        fn get_json_handler(&self) -> Arc<dyn crate::JsonHandler> {
+        fn get_json_handler(&self) -> Arc<dyn JsonHandler> {
             unimplemented!()
         }
 
-        fn get_parquet_handler(&self) -> Arc<dyn crate::ParquetHandler> {
+        fn get_parquet_handler(&self) -> Arc<dyn ParquetHandler> {
             unimplemented!()
         }
 
-        fn get_file_system_client(&self) -> Arc<dyn crate::FileSystemClient> {
+        fn get_file_system_client(&self) -> Arc<dyn FileSystemClient> {
             unimplemented!()
         }
     }
