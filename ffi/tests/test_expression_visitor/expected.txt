@@ -15,7 +15,7 @@ And
   Timestamp(50)
   TimestampNtz(100)
   Date(32)
-  Binary
+  Binary(0000deadbeefcafe)
   Decimal(1,1, 3, 2)
   Null
   Struct

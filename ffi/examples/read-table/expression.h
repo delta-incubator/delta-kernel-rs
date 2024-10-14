@@ -64,6 +64,17 @@ enum ExpressionType
   Unary,
   Column
 };
+enum VariadicType
+{
+  And,
+  Or,
+  StructExpression,
+};
+enum UnaryType
+{
+  Not,
+  IsNull
+};
 typedef struct
 {
   void* ref;
@@ -82,18 +93,6 @@ struct BinOp
 };
 struct Null;
 
-enum VariadicType
-{
-  And,
-  Or,
-  StructExpression,
-  ArrayData
-};
-enum UnaryType
-{
-  Not,
-  IsNull
-};
 struct Variadic
 {
   enum VariadicType op;
@@ -125,12 +124,10 @@ struct Struct
   ExpressionItemList fields;
   ExpressionItemList values;
 };
-
 struct ArrayData
 {
   ExpressionItemList exprs;
 };
-
 struct Literal
 {
   enum LitType type;
@@ -272,6 +269,7 @@ void visit_expr_binary_literal(
   literal->type = Binary;
   struct BinaryData* bin = &literal->value.binary;
   bin->buf = malloc(len);
+  bin->len = len;
   memcpy(bin->buf, buf, len);
   put_expr_item(data, sibling_list_id, literal, Literal);
 }
@@ -595,9 +593,6 @@ void print_tree(ExpressionItem ref, int depth)
         case StructExpression:
           printf("StructExpression\n");
           break;
-        case ArrayData:
-          printf("ArrayData\n");
-          break;
       }
       for (size_t i = 0; i < var->exprs.len; i++) {
         print_tree(var->exprs.list[i], depth + 1);
@@ -651,9 +646,14 @@ void print_tree(ExpressionItem ref, int depth)
           printf("Date");
           printf("(%d)\n", lit->value.integer_data);
           break;
-        case Binary:
-          printf("Binary\n");
+        case Binary: {
+          printf("Binary(");
+          for (size_t i = 0; i < lit->value.binary.len; i++) {
+            printf("%02x", lit->value.binary.buf[i]);
+          }
+          printf(")\n");
           break;
+        }
         case Decimal: {
           struct Decimal* dec = &lit->value.decimal;
           printf(

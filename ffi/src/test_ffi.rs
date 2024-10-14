@@ -58,7 +58,7 @@ pub unsafe extern "C" fn get_testing_kernel_expression() -> Handle<SharedExpress
         Expr::literal(Scalar::Timestamp(50)),
         Expr::literal(Scalar::TimestampNtz(100)),
         Expr::literal(Scalar::Date(32)),
-        Expr::literal(Scalar::Binary(b"0xdeadbeefcafe".to_vec())),
+        Expr::literal(Scalar::Binary(0x0000deadbeefcafeu64.to_be_bytes().to_vec())),
         // Both the most and least significant u64 of the Decimal value will be 1
         Expr::literal(Scalar::Decimal((1 << 64) + 1, 2, 3)),
         Expr::literal(Scalar::Null(DataType::Primitive(PrimitiveType::Short))),
