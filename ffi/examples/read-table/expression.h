@@ -162,9 +162,7 @@ void put_expr_item(void* data, size_t sibling_list_id, void* ref, enum Expressio
 ExpressionItemList get_expr_list(void* data, size_t list_id)
 {
   ExpressionBuilder* data_ptr = (ExpressionBuilder*)data;
-  if (list_id > data_ptr->list_count) {
-    abort();
-  }
+  assert(list_id < data_ptr->list_count);
   return data_ptr->lists[list_id];
 }
 
