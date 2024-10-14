@@ -142,11 +142,6 @@ pub struct CommitInfo {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Schema)]
-pub struct CommitInfo {
-    pub kernel_version: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Schema)]
 pub struct Add {
     /// A relative path to a data file from the root of the table or an absolute path to a file
     /// that should be added to the table. The path is a URI as specified by

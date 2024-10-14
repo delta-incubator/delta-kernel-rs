@@ -125,7 +125,7 @@ fn generate_commit_info(
     engine_commit_info: &EngineCommitInfo,
 ) -> DeltaResult<(Box<dyn EngineData>, SchemaRef)> {
     use crate::actions::{
-        ADD_NAME, COMMIT_INFO_NAME, METADATA_NAME, PROTOCOL_NAME, REMOVE_NAME, TRANSACTION_NAME,
+        ADD_NAME, COMMIT_INFO_NAME, METADATA_NAME, PROTOCOL_NAME, REMOVE_NAME, SET_TRANSACTION_NAME,
     };
 
     if engine_commit_info.data.length() != 1 {
@@ -168,7 +168,7 @@ fn generate_commit_info(
         REMOVE_NAME,
         METADATA_NAME,
         PROTOCOL_NAME,
-        TRANSACTION_NAME,
+        SET_TRANSACTION_NAME,
     ]
     .iter()
     .map(|name| {
