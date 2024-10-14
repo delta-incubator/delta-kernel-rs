@@ -17,7 +17,7 @@ If possible, please consider writing useful notes for better and faster reviews 
 
 ### Why are the changes needed?
 <!--
-Please clarify why the changes are needed. For instance,
+Please clarify why the changes are needed. If this is already explained clearly in an issue, then this section is not needed.
   1. If you propose a new API or feature, clarify the use case for a new API or feature.
   2. If you fix a bug, you can clarify why it is a bug.
 -->
