@@ -169,14 +169,19 @@ impl StructField {
 
     pub fn make_physical(&self, mapping_mode: ColumnMappingMode) -> DeltaResult<Self> {
         match mapping_mode {
+            ColumnMappingMode::Id => {
+                return Err(Error::generic("Column ID mapping mode not supported"))
+            }
             ColumnMappingMode::None => return Ok(self.clone()),
             ColumnMappingMode::Name => {} // fall out
-            ColumnMappingMode::Id => return Err(Error::generic("Column ID mapping mode not supported")),
         }
 
         struct ApplyNameMapping;
         impl SchemaTransformer for ApplyNameMapping {
-            fn visit_field<'a>(&mut self, field: Cow<'a, StructField>) -> Option<Cow<'a, StructField>> {
+            fn visit_field<'a>(
+                &mut self,
+                field: Cow<'a, StructField>,
+            ) -> Option<Cow<'a, StructField>> {
                 let field = self.visit_field_impl(field)?;
                 match field.get_config_value(&ColumnMetadataKey::ColumnMappingPhysicalName) {
                     Some(MetadataValue::String(physical_name)) => {
@@ -858,16 +863,25 @@ mod tests {
             .get_config_value(&ColumnMetadataKey::ColumnMappingId)
             .unwrap();
         assert!(matches!(col_id, MetadataValue::Number(num) if *num == 4));
-        assert_eq!(field.physical_name(ColumnMappingMode::Name).unwrap(), "col-5f422f40-de70-45b2-88ab-1d5c90e94db1");
+        assert_eq!(
+            field.physical_name(ColumnMappingMode::Name).unwrap(),
+            "col-5f422f40-de70-45b2-88ab-1d5c90e94db1"
+        );
         let physical_field = field.make_physical(ColumnMappingMode::Name).unwrap();
-        assert_eq!(physical_field.name, "col-5f422f40-de70-45b2-88ab-1d5c90e94db1");
+        assert_eq!(
+            physical_field.name,
+            "col-5f422f40-de70-45b2-88ab-1d5c90e94db1"
+        );
         let DataType::Array(atype) = physical_field.data_type else {
             panic!("Expected an Array");
         };
         let DataType::Struct(stype) = atype.element_type else {
             panic!("Expected a Struct");
         };
-        assert_eq!(stype.fields.get_index(0).unwrap().1.name, "col-a7f4159c-53be-4cb0-b81a-f7e5240cfc49");
+        assert_eq!(
+            stype.fields.get_index(0).unwrap().1.name,
+            "col-a7f4159c-53be-4cb0-b81a-f7e5240cfc49"
+        );
     }
 
     #[test]
