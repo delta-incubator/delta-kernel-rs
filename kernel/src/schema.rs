@@ -1,5 +1,6 @@
 //! Definitions and functions to create and manipulate kernel schema
 
+use std::borrow::Cow;
 use std::fmt::Formatter;
 use std::sync::Arc;
 use std::{collections::HashMap, fmt::Display};
@@ -164,6 +165,30 @@ impl StructField {
     #[inline]
     pub const fn metadata(&self) -> &HashMap<String, MetadataValue> {
         &self.metadata
+    }
+
+    pub fn make_physical(&self, mapping_mode: ColumnMappingMode) -> DeltaResult<Self> {
+        match mapping_mode {
+            ColumnMappingMode::None => return Ok(self.clone()),
+            ColumnMappingMode::Name => {} // fall out
+            ColumnMappingMode::Id => return Err(Error::generic("Column ID mapping mode not supported")),
+        }
+
+        struct ApplyNameMapping;
+        impl SchemaTransformer for ApplyNameMapping {
+            fn visit_field<'a>(&mut self, field: Cow<'a, StructField>) -> Option<Cow<'a, StructField>> {
+                let field = self.visit_field_impl(field)?;
+                match field.get_config_value(&ColumnMetadataKey::ColumnMappingPhysicalName) {
+                    Some(MetadataValue::String(physical_name)) => {
+                        Some(Cow::Owned(field.with_name(physical_name)))
+                    }
+                    _ => Some(field),
+                }
+            }
+        }
+
+        let field = ApplyNameMapping.visit_field(Cow::Borrowed(self));
+        Ok(field.unwrap().into_owned())
     }
 }
 
@@ -453,6 +478,11 @@ pub enum DataType {
     Map(Box<MapType>),
 }
 
+impl From<PrimitiveType> for DataType {
+    fn from(ptype: PrimitiveType) -> Self {
+        DataType::Primitive(ptype)
+    }
+}
 impl From<MapType> for DataType {
     fn from(map_type: MapType) -> Self {
         DataType::Map(Box::new(map_type))
@@ -539,6 +569,154 @@ impl Display for DataType {
             }
             DataType::Map(m) => write!(f, "map<{}, {}>", m.key_type, m.value_type),
         }
+    }
+}
+
+/// Generic framework for describing recursive bottom-up schema transforms. Transformations return
+/// `Option<Cow>` with the following semantics:
+/// * `Some(Cow::Owned)` -- The schema element was transformed and should propagate to its parent.
+/// * `Some(Cow::Borrowed)` -- The schema element was not transformed.
+/// * `None` -- The schema element was filtered out and the parent should no longer reference it.
+///
+/// The main entry point is [`Self::visit`] tho [`Self::visit_struct`] also works if a
+/// [`StructType`] is already available.
+///
+/// The provided `visit_xxx` methods default to no-op, and implementations should selectively
+/// override specific `visit_xxx` methods as needed for the task at hand.
+///
+/// The provided `visit_xxx_impl` methods encapsulate the boilerplate work of actually traversing
+/// each datatype, which implementations can call as needed but will generally not need to override.
+pub trait SchemaTransformer {
+    /// Called for each primitive type encountered during the schema traversal.
+    fn visit_primitive<'a>(
+        &mut self,
+        ptype: Cow<'a, PrimitiveType>,
+    ) -> Option<Cow<'a, PrimitiveType>> {
+        Some(ptype)
+    }
+
+    /// Called for each struct encountered during the schema traversal. Implementations can call
+    /// [`Self::visit_struct_impl`] if they wish to recursively transform the struct's fields.
+    fn visit_struct<'a>(&mut self, stype: Cow<'a, StructType>) -> Option<Cow<'a, StructType>> {
+        self.visit_struct_impl(stype)
+    }
+
+    /// Called for each struct field encountered during the schema traversal. Implementations can
+    /// call [`Self::visit_field_impl`] if they wish to recursively transform the field's data type.
+    fn visit_field<'a>(&mut self, field: Cow<'a, StructField>) -> Option<Cow<'a, StructField>> {
+        self.visit_field_impl(field)
+    }
+
+    /// Called for each array encountered during the schema traversal. Implementations can call
+    /// [`Self::visit_array_impl`] if they wish to recursively transform the array's element type.
+    fn visit_array<'a>(&mut self, atype: Cow<'a, ArrayType>) -> Option<Cow<'a, ArrayType>> {
+        self.visit_array_impl(atype)
+    }
+
+    /// Called for each map encountered during the schema traversal. Implementations can call
+    /// [`Self::visit_map_impl`] if they wish to recursively transform the map's key and value
+    /// types.
+    fn visit_map<'a>(&mut self, mtype: Cow<'a, MapType>) -> Option<Cow<'a, MapType>> {
+        self.visit_map_impl(mtype)
+    }
+
+    /// General traversal entry point for a recursive traversal. Also invoked internally to dispatch
+    /// on nested data types encountered during the traversal.
+    fn visit<'a>(&mut self, data_type: Cow<'a, DataType>) -> Option<Cow<'a, DataType>> {
+        use Cow::*;
+        use DataType::*;
+
+        // quick boilerplate helper
+        macro_rules! visit {
+            ( $visitor_fn:ident, $arg:ident ) => {
+                match self.$visitor_fn(Borrowed($arg)) {
+                    Some(Borrowed(_)) => Some(data_type),
+                    Some(Owned(inner)) => Some(Owned(inner.into())),
+                    None => None,
+                }
+            };
+        }
+        match data_type.as_ref() {
+            Primitive(ptype) => visit!(visit_primitive, ptype),
+            Array(atype) => visit!(visit_array, atype),
+            Struct(stype) => visit!(visit_struct, stype),
+            Map(mtype) => visit!(visit_map, mtype),
+        }
+    }
+
+    /// Recursively visits a field's data type. If the data type changes, update the field to
+    /// reference it. Otherwise, no-op.
+    fn visit_field_impl<'a>(
+        &mut self,
+        field: Cow<'a, StructField>,
+    ) -> Option<Cow<'a, StructField>> {
+        use Cow::*;
+        let field = match self.visit(Borrowed(&field.data_type))? {
+            Borrowed(_) => field,
+            Owned(new_data_type) => Owned(StructField {
+                name: field.name.clone(),
+                data_type: new_data_type,
+                nullable: field.nullable,
+                metadata: field.metadata.clone(),
+            }),
+        };
+        Some(field)
+    }
+
+    /// Recursively visits a struct's fields. If one or more fields were changed or removed, update
+    /// the struct to reference all surviving fields. Otherwise, no-op.
+    fn visit_struct_impl<'a>(&mut self, stype: Cow<'a, StructType>) -> Option<Cow<'a, StructType>> {
+        use Cow::*;
+        let mut num_borrowed = 0;
+        let fields: Vec<_> = stype
+            .fields()
+            .filter_map(|field| self.visit_field(Borrowed(field)))
+            .inspect(|field| {
+                if matches!(field, Borrowed(_)) {
+                    num_borrowed += 1;
+                }
+            })
+            .collect();
+        let stype = if num_borrowed < stype.fields.len() {
+            // At least one field was changed or filtered out, so make a new struct
+            Owned(StructType::new(fields.into_iter().map(|f| f.into_owned())))
+        } else {
+            stype
+        };
+        Some(stype)
+    }
+
+    /// Recursively visits an array's element type. If the element type changes, update the array to
+    /// reference it. Otherwise, no-op.
+    fn visit_array_impl<'a>(&mut self, atype: Cow<'a, ArrayType>) -> Option<Cow<'a, ArrayType>> {
+        use Cow::*;
+        let atype = match self.visit(Borrowed(&atype.element_type))? {
+            Borrowed(_) => atype,
+            Owned(element_type) => Owned(ArrayType {
+                type_name: atype.type_name.clone(),
+                element_type,
+                contains_null: atype.contains_null,
+            }),
+        };
+        Some(atype)
+    }
+
+    /// Recursively visits a map's key and value types. If either one changes, update the map to
+    /// reference them. If either one is removed, remove the map as well. Otherwise, no-op.
+    fn visit_map_impl<'a>(&mut self, mtype: Cow<'a, MapType>) -> Option<Cow<'a, MapType>> {
+        use Cow::*;
+        let key_type = self.visit(Borrowed(&mtype.key_type))?;
+        let value_type = self.visit(Borrowed(&mtype.value_type))?;
+        let mtype = match (&key_type, &value_type) {
+            (Borrowed(_), Borrowed(_)) => mtype,
+            _ => Owned(MapType {
+                type_name: mtype.type_name.clone(),
+                key_type: key_type.into_owned(),
+                value_type: value_type.into_owned(),
+                value_contains_null: mtype.value_contains_null,
+            }),
+        };
+        Some(mtype)
     }
 }
 
@@ -680,12 +858,16 @@ mod tests {
             .get_config_value(&ColumnMetadataKey::ColumnMappingId)
             .unwrap();
         assert!(matches!(col_id, MetadataValue::Number(num) if *num == 4));
-        let physical_name = field
-            .get_config_value(&ColumnMetadataKey::ColumnMappingPhysicalName)
-            .unwrap();
-        assert!(
-            matches!(physical_name, MetadataValue::String(name) if *name == "col-5f422f40-de70-45b2-88ab-1d5c90e94db1")
-        );
+        assert_eq!(field.physical_name(ColumnMappingMode::Name).unwrap(), "col-5f422f40-de70-45b2-88ab-1d5c90e94db1");
+        let physical_field = field.make_physical(ColumnMappingMode::Name).unwrap();
+        assert_eq!(physical_field.name, "col-5f422f40-de70-45b2-88ab-1d5c90e94db1");
+        let DataType::Array(atype) = physical_field.data_type else {
+            panic!("Expected an Array");
+        };
+        let DataType::Struct(stype) = atype.element_type else {
+            panic!("Expected a Struct");
+        };
+        assert_eq!(stype.fields.get_index(0).unwrap().1.name, "col-a7f4159c-53be-4cb0-b81a-f7e5240cfc49");
     }
 
     #[test]
