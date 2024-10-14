@@ -108,7 +108,7 @@ jobs:
           cargo build
           popd
           pushd ffi
-          cargo b --features default-engine,sync-engine
+          cargo b --features default-engine,sync-engine,test_ffi
           popd
       - name: build and run test
         run: |
