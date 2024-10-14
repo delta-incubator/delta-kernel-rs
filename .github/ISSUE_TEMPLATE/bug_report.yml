@@ -25,4 +25,4 @@ body:
       placeholder: >
         Add any other context about the problem here.
 
-# Adapted from Apache Datafusion: https://github.com/apache/datafusion/
+# Adapted from Apache Datafusion's issue template: https://github.com/apache/datafusion/

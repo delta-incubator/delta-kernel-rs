@@ -23,4 +23,4 @@ body:
       placeholder: >
         Add any other context or screenshots about the feature request here.
 
-# Adapted from Apache Datafusion: https://github.com/apache/datafusion/
+# Adapted from Apache Datafusion's issue template: https://github.com/apache/datafusion/
