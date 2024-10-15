@@ -24,7 +24,7 @@ pub unsafe extern "C" fn get_testing_kernel_expression() -> Handle<SharedExpress
     let array_data = ArrayData::new(array_type.clone(), vec![Scalar::Short(5), Scalar::Short(0)]);
 
     let nested_fields = vec![
-        StructField::new("a", DataType::Primitive(PrimitiveType::Integer), false),
+        StructField::new("a", PrimitiveType::INT, false),
         StructField::new("b", DataType::Array(Box::new(array_type)), false),
     ];
     let nested_values = vec![Scalar::Integer(500), Scalar::Array(array_data.clone())];
@@ -61,7 +61,7 @@ pub unsafe extern "C" fn get_testing_kernel_expression() -> Handle<SharedExpress
         Expr::literal(Scalar::Binary(0x0000deadbeefcafeu64.to_be_bytes().to_vec())),
         // Both the most and least significant u64 of the Decimal value will be 1
         Expr::literal(Scalar::Decimal((1 << 64) + 1, 2, 3)),
-        Expr::literal(Scalar::Null(DataType::SHORT)),
+        Expr::null_literal(DataType::SHORT),
         Expr::literal(Scalar::Struct(top_level_struct)),
         Expr::literal(Scalar::Array(array_data)),
         Expr::struct_expr(vec![Expr::or_from(vec![
