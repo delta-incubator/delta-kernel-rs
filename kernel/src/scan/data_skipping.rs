@@ -73,6 +73,7 @@ fn as_inverted_data_skipping_predicate(expr: &Expr) -> Option<Expr> {
                     None
                 }
             }
+            UnaryOperator::IsNotNull => todo!(),
         },
         BinaryOperation { op, left, right } => {
             let expr = Expr::binary(op.invert()?, left.as_ref().clone(), right.as_ref().clone());

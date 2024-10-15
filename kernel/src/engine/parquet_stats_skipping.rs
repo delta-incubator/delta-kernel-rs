@@ -144,7 +144,8 @@ pub(crate) trait ParquetStatsSkippingFilter {
             UnaryOperation { op, expr } => self.apply_unary(*op, expr, inverted),
             Literal(value) => Self::apply_scalar(value, inverted),
             Column(col) => self.apply_column(col, inverted),
-            Struct(_) => None, // not supported
+            Struct(_) => None,        // not supported
+            MapAccess { .. } => None, // not supported
         }
     }
 
@@ -316,6 +317,18 @@ pub(crate) trait ParquetStatsSkippingFilter {
                         // IS NULL - skip if no-null
                         false => 0,
                     };
+                    let col = col_name_to_path(col);
+                    Some(self.get_nullcount_stat_value(&col)? != skip)
+                }
+
+                _ => {
+                    info!("Unsupported unary operation: {op:?}({expr:?})");
+                    None
+                }
+            },
+            UnaryOperator::IsNotNull => match expr {
+                Expression::Column(col) => {
+                    let skip = self.get_rowcount_stat_value();
                     let col = col_name_to_path(col);
                     Some(self.get_nullcount_stat_value(&col)? != skip)
                 }

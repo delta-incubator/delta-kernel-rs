@@ -226,6 +226,7 @@ pub(crate) fn compute_field_indices(
             UnaryOperation { expr, .. } => recurse(expr),
             BinaryOperation { left, right, .. } => [left, right].iter().for_each(|e| recurse(e)),
             VariadicOperation { exprs, .. } => exprs.iter().for_each(recurse),
+            MapAccess { source, .. } => recurse(source),
         }
     }
 
