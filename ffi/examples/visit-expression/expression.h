@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
 /**
  * This module defines a very simple model of an expression, used only to be able to print the
  * provided expression. It consists of an "ExpressionBuilder" which is our user data that gets
