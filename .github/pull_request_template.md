@@ -4,25 +4,21 @@ Thanks for sending a pull request!  Here are some tips for you:
   2. Ensure you have added or run the appropriate tests for your PR and run `cargo fmt`.
   3. If the PR is unfinished, add '[WIP]' in your PR title, e.g., '[WIP] Your PR title ...'.
   4. Be sure to keep the PR description updated to reflect all changes.
-  6. If possible, provide a concise example to reproduce the issue for a faster review.
 -->
 
 ### What changes are proposed in this pull request?
 <!--
-Please clarify what changes you are proposing. The purpose of this section is to outline the changes and how this PR fixes the issue.
--->
-
-
-### Why are the changes needed?
-<!--
-Please clarify why the changes are needed. If this is already explained clearly in an issue, then this section is not needed.
+Please clarify what changes you are proposing and why the changes are needed.
+The purpose of this section is to outline the changes, why they are needed, and how this PR fixes the issue.
+If the reason for the change is already explained clearly in an issue, then it does not need to be restated here.
   1. If you propose a new API or feature, clarify the use case for a new API or feature.
-  2. If you fix a bug, you can clarify why it is a bug.
+  2. If you fix a bug, you can clarify why it is a bug. If possible, provide a concise example to reproduce the issue for a faster review.
 -->
 
-
-### Does this PR effect any _public_ APIs?
 <!--
+Uncomment this section if there are any changes affecting public APIs:
+### Does this PR affect any _public_ APIs?
+
 If yes, please ensure the `breaking-changes` label gets added by CI, and describe why the changes are needed.
 
 Note that _new_ public APIs are not considered breaking.
