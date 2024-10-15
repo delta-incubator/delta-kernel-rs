@@ -4,10 +4,9 @@
 
 int main() {
   SharedExpression* pred = get_testing_kernel_expression();
-  ExpressionItemList list = construct_predicate(pred);
-  ExpressionItem ref = list.list[0];
-  print_tree(ref, 0);
-  free_expression_list(list);
+  ExpressionItemList expr = construct_predicate(pred);
+  print_expression(expr);
+  free_expression_list(expr);
   free_kernel_predicate(pred);
   return 0;
 }

@@ -6,13 +6,19 @@
  * This module defines a function `print_tree` to recursively print an ExpressionItem.
  */
 
+void print_tree_helper(ExpressionItem ref, int depth);
 void print_n_spaces(int n) {
   if (n == 0)
     return;
   printf("  ");
   print_n_spaces(n - 1);
 }
-void print_tree(ExpressionItem ref, int depth) {
+void print_expression_item_list(ExpressionItemList list, int depth) {
+  for (size_t i = 0; i < list.len; i++) {
+    print_tree_helper(list.list[i], depth);
+  }
+}
+void print_tree_helper(ExpressionItem ref, int depth) {
   switch (ref.type) {
     case BinOp: {
       struct BinOp* op = ref.ref;
@@ -70,11 +76,7 @@ void print_tree(ExpressionItem ref, int depth) {
           printf("Distinct\n");
           break;
       }
-
-      ExpressionItem left = op->exprs.list[0];
-      ExpressionItem right = op->exprs.list[1];
-      print_tree(left, depth + 1);
-      print_tree(right, depth + 1);
+      print_expression_item_list(op->exprs, depth + 1);
       break;
     }
     case Variadic: {
@@ -91,9 +93,7 @@ void print_tree(ExpressionItem ref, int depth) {
           printf("StructExpression\n");
           break;
       }
-      for (size_t i = 0; i < var->exprs.len; i++) {
-        print_tree(var->exprs.list[i], depth + 1);
-      }
+      print_expression_item_list(var->exprs, depth + 1);
     } break;
     case Literal: {
       struct Literal* lit = ref.ref;
@@ -176,15 +176,13 @@ void print_tree(ExpressionItem ref, int depth) {
             assert(lit->type == String);
 
             printf("Field: %s\n", lit->value.string_data);
-            print_tree(struct_data->values.list[i], depth + 2);
+            print_tree_helper(struct_data->values.list[i], depth + 2);
           }
           break;
         case Array:
           printf("Array\n");
           struct ArrayData* array = &lit->value.array_data;
-          for (size_t i = 0; i < array->exprs.len; i++) {
-            print_tree(array->exprs.list[i], depth + 1);
-          }
+          print_expression_item_list(array->exprs, depth + 1);
           break;
       }
     } break;
@@ -199,7 +197,8 @@ void print_tree(ExpressionItem ref, int depth) {
           printf("IsNull\n");
           break;
       }
-      print_tree(unary->sub_expr.list[0], depth + 1);
+
+      print_expression_item_list(unary->sub_expr, depth + 1);
       break;
     }
     case Column:
@@ -208,4 +207,8 @@ void print_tree(ExpressionItem ref, int depth) {
       printf("Column(%s)\n", column_name);
       break;
   }
+}
+
+void print_expression(ExpressionItemList expression) {
+  print_expression_item_list(expression, 0);
 }
