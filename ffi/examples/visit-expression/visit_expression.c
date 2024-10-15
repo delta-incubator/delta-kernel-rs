@@ -1,4 +1,3 @@
-
 #include "delta_kernel_ffi.h"
 #include "expression.h"
 #include "expression_print.h"

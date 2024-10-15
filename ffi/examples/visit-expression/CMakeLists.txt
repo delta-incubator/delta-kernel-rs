@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.12)
 project(visit_expressions)
 
-add_executable(visit_expression visit_expr.c)
+add_executable(visit_expression visit_expression.c)
 target_compile_definitions(visit_expression PUBLIC DEFINE_DEFAULT_ENGINE)
 target_include_directories(visit_expression PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/../../../target/ffi-headers")
 target_link_directories(visit_expression PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/../../../target/debug")
