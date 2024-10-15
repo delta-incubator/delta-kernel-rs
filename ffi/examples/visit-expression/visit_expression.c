@@ -1,6 +1,7 @@
 #include "delta_kernel_ffi.h"
 #include "expression.h"
 #include "expression_print.h"
+
 int main() {
   SharedExpression* pred = get_testing_kernel_expression();
   ExpressionItemList list = construct_predicate(pred);
