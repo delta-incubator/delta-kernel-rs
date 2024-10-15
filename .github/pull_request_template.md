@@ -34,8 +34,3 @@ Note that _new_ public APIs are not considered breaking.
 If tests were added, say they were added here. Please make sure to add some test cases that check the changes thoroughly including negative and positive cases if possible.
 If it was tested in a way different from regular unit tests, please clarify how you tested, ideally via a reproducible test documented in the PR description.
 -->
-
-
-<!--
-Adapted from Apache Spark's pull request template: https://github.com/apache/spark
--->
