@@ -5,7 +5,7 @@ use std::{ops::Not, sync::Arc};
 use crate::{expressions::SharedExpression, handle::Handle};
 use delta_kernel::{
     expressions::{ArrayData, BinaryOperator, Expression, Scalar, StructData},
-    schema::{ArrayType, DataType, PrimitiveType, StructField, StructType},
+    schema::{ArrayType, DataType, StructField, StructType},
 };
 
 /// Constructs a kernel expression that is passed back as a SharedExpression handle
@@ -24,10 +24,10 @@ pub unsafe extern "C" fn get_testing_kernel_expression() -> Handle<SharedExpress
     let array_data = ArrayData::new(array_type.clone(), vec![Scalar::Short(5), Scalar::Short(0)]);
 
     let nested_fields = vec![
-        StructField::new("a", PrimitiveType::INT, false),
+        StructField::new("a", DataType::INTEGER, false),
         StructField::new("b", DataType::Array(Box::new(array_type)), false),
     ];
-    let nested_values = vec![Scalar::Integer(500), Scalar::Array(array_data.clone())];
+    let nested_values = vec![Scalar::Integer(500), Scalar::array(array_data.clone())];
     let nested_struct = StructData::try_new(nested_fields.clone(), nested_values).unwrap();
     let nested_struct_type = StructType::new(nested_fields);
 
