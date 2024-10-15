@@ -20,7 +20,8 @@ pub struct ArrayData {
 }
 
 impl ArrayData {
-    pub fn new(tpe: ArrayType, elements: Vec<Scalar>) -> Self {
+    pub fn new(tpe: ArrayType, elements: impl IntoIterator<Item = impl Into<Scalar>>) -> Self {
+        let elements = elements.into_iter().map(Into::into).collect();
         Self { tpe, elements }
     }
     pub fn array_type(&self) -> &ArrayType {

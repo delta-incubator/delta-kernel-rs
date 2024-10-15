@@ -94,54 +94,45 @@ void print_tree_helper(ExpressionItem ref, int depth) {
           break;
       }
       print_expression_item_list(var->exprs, depth + 1);
-    } break;
+      break;
+    }
     case Literal: {
       struct Literal* lit = ref.ref;
       print_n_spaces(depth);
       switch (lit->type) {
         case Integer:
-          printf("Integer");
-          printf("(%d)\n", lit->value.integer_data);
+          printf("Integer(%d)\n", lit->value.integer_data);
           break;
         case Long:
-          printf("Long");
-          printf("(%lld)\n", (long long)lit->value.long_data);
+          printf("Long(%lld)\n", (long long)lit->value.long_data);
           break;
         case Short:
-          printf("Short");
-          printf("(%hd)\n", lit->value.short_data);
+          printf("Short(%hd)\n", lit->value.short_data);
           break;
         case Byte:
-          printf("Byte");
-          printf("(%hhd)\n", lit->value.byte_data);
+          printf("Byte(%hhd)\n", lit->value.byte_data);
           break;
         case Float:
-          printf("Float");
-          printf("(%f)\n", (float)lit->value.float_data);
+          printf("Float(%f)\n", (float)lit->value.float_data);
           break;
         case Double:
-          printf("Double");
-          printf("(%f)\n", lit->value.double_data);
+          printf("Double(%f)\n", lit->value.double_data);
           break;
         case String: {
           printf("String(%s)\n", lit->value.string_data);
           break;
         }
         case Boolean:
-          printf("Boolean");
-          printf("(%d)\n", lit->value.boolean_data);
+          printf("Boolean(%d)\n", lit->value.boolean_data);
           break;
         case Timestamp:
-          printf("Timestamp");
-          printf("(%lld)\n", (long long)lit->value.long_data);
+          printf("Timestamp(%lld)\n", (long long)lit->value.long_data);
           break;
         case TimestampNtz:
-          printf("TimestampNtz");
-          printf("(%lld)\n", (long long)lit->value.long_data);
+          printf("TimestampNtz(%lld)\n", (long long)lit->value.long_data);
           break;
         case Date:
-          printf("Date");
-          printf("(%d)\n", lit->value.integer_data);
+          printf("Date(%d)\n", lit->value.integer_data);
           break;
         case Binary: {
           printf("Binary(");
@@ -185,7 +176,8 @@ void print_tree_helper(ExpressionItem ref, int depth) {
           print_expression_item_list(array->exprs, depth + 1);
           break;
       }
-    } break;
+      break;
+    }
     case Unary: {
       print_n_spaces(depth);
       struct Unary* unary = ref.ref;

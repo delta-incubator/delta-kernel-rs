@@ -177,6 +177,8 @@ DEFINE_BINOP(visit_expr_distinct, Distinct)
 DEFINE_BINOP(visit_expr_in, In)
 DEFINE_BINOP(visit_expr_not_in, NotIn)
 
+#undef DEFINE_BINOP
+
 /*************************************************************
  * Literal Values
  ************************************************************/
@@ -200,6 +202,8 @@ DEFINE_SIMPLE_SCALAR(visit_expr_boolean_literal, Boolean, _Bool, boolean_data);
 DEFINE_SIMPLE_SCALAR(visit_expr_timestamp_literal, Timestamp, int64_t, long_data);
 DEFINE_SIMPLE_SCALAR(visit_expr_timestamp_ntz_literal, TimestampNtz, int64_t, long_data);
 DEFINE_SIMPLE_SCALAR(visit_expr_date_literal, Date, int32_t, integer_data);
+
+#undef DEFINE_SIMPLE_SCALAR
 
 void visit_expr_string_literal(void* data, uintptr_t sibling_list_id, KernelStringSlice string) {
   struct Literal* literal = malloc(sizeof(struct Literal));
@@ -277,6 +281,8 @@ DEFINE_VARIADIC(visit_expr_and, And)
 DEFINE_VARIADIC(visit_expr_or, Or)
 DEFINE_VARIADIC(visit_expr_struct_expr, StructExpression)
 
+#undef DEFINE_VARIADIC
+
 void visit_expr_array_literal(void* data, uintptr_t sibling_list_id, uintptr_t child_list_id) {
   struct Literal* literal = malloc(sizeof(struct Literal));
   literal->type = Array;
@@ -304,6 +310,8 @@ void visit_expr_unary(void* data,
 }
 DEFINE_UNARY(visit_expr_is_null, IsNull)
 DEFINE_UNARY(visit_expr_not, Not)
+
+#undef DEFINE_UNARY
 
 /*************************************************************
  * Column Expression
@@ -438,7 +446,7 @@ void free_expression_item(ExpressionItem ref) {
       break;
     }
     case Column: {
-      free((void*)ref.ref);
+      free(ref.ref);
       break;
     }
   }

@@ -1,256 +1,10 @@
+use crate::expressions::SharedExpression;
 use std::ffi::c_void;
 
-use crate::{
-    handle::Handle, AllocateErrorFn, EngineIterator, ExternResult, IntoExternResult,
-    KernelStringSlice, ReferenceSet, TryFromStringSlice,
+use crate::{handle::Handle, KernelStringSlice};
+use delta_kernel::expressions::{
+    ArrayData, BinaryOperator, Expression, Scalar, StructData, UnaryOperator, VariadicOperator,
 };
-use delta_kernel::{
-    expressions::{
-        ArrayData, BinaryOperator, Expression, Scalar, StructData, UnaryOperator, VariadicOperator,
-    },
-    DeltaResult,
-};
-use delta_kernel_ffi_macros::handle_descriptor;
-
-#[derive(Default)]
-pub struct KernelExpressionVisitorState {
-    // TODO: ReferenceSet<Box<dyn MetadataFilterFn>> instead?
-    inflight_expressions: ReferenceSet<Expression>,
-}
-impl KernelExpressionVisitorState {
-    pub fn new() -> Self {
-        Self {
-            inflight_expressions: Default::default(),
-        }
-    }
-}
-
-/// A predicate that can be used to skip data when scanning.
-///
-/// When invoking [`scan::scan`], The engine provides a pointer to the (engine's native) predicate,
-/// along with a visitor function that can be invoked to recursively visit the predicate. This
-/// engine state must be valid until the call to `scan::scan` returns. Inside that method, the
-/// kernel allocates visitor state, which becomes the second argument to the predicate visitor
-/// invocation along with the engine-provided predicate pointer. The visitor state is valid for the
-/// lifetime of the predicate visitor invocation. Thanks to this double indirection, engine and
-/// kernel each retain ownership of their respective objects, with no need to coordinate memory
-/// lifetimes with the other.
-#[repr(C)]
-pub struct EnginePredicate {
-    pub predicate: *mut c_void,
-    pub visitor:
-        extern "C" fn(predicate: *mut c_void, state: &mut KernelExpressionVisitorState) -> usize,
-}
-
-fn wrap_expression(state: &mut KernelExpressionVisitorState, expr: Expression) -> usize {
-    state.inflight_expressions.insert(expr)
-}
-
-pub fn unwrap_kernel_expression(
-    state: &mut KernelExpressionVisitorState,
-    exprid: usize,
-) -> Option<Expression> {
-    state.inflight_expressions.take(exprid)
-}
-
-fn visit_expression_binary(
-    state: &mut KernelExpressionVisitorState,
-    op: BinaryOperator,
-    a: usize,
-    b: usize,
-) -> usize {
-    let left = unwrap_kernel_expression(state, a).map(Box::new);
-    let right = unwrap_kernel_expression(state, b).map(Box::new);
-    match left.zip(right) {
-        Some((left, right)) => {
-            wrap_expression(state, Expression::BinaryOperation { op, left, right })
-        }
-        None => 0, // invalid child => invalid node
-    }
-}
-
-fn visit_expression_unary(
-    state: &mut KernelExpressionVisitorState,
-    op: UnaryOperator,
-    inner_expr: usize,
-) -> usize {
-    unwrap_kernel_expression(state, inner_expr).map_or(0, |expr| {
-        wrap_expression(state, Expression::unary(op, expr))
-    })
-}
-
-// The EngineIterator is not thread safe, not reentrant, not owned by callee, not freed by callee.
-#[no_mangle]
-pub extern "C" fn visit_expression_and(
-    state: &mut KernelExpressionVisitorState,
-    children: &mut EngineIterator,
-) -> usize {
-    let result = Expression::and_from(
-        children.flat_map(|child| unwrap_kernel_expression(state, child as usize)),
-    );
-    wrap_expression(state, result)
-}
-
-#[no_mangle]
-pub extern "C" fn visit_expression_lt(
-    state: &mut KernelExpressionVisitorState,
-    a: usize,
-    b: usize,
-) -> usize {
-    visit_expression_binary(state, BinaryOperator::LessThan, a, b)
-}
-
-#[no_mangle]
-pub extern "C" fn visit_expression_le(
-    state: &mut KernelExpressionVisitorState,
-    a: usize,
-    b: usize,
-) -> usize {
-    visit_expression_binary(state, BinaryOperator::LessThanOrEqual, a, b)
-}
-
-#[no_mangle]
-pub extern "C" fn visit_expression_gt(
-    state: &mut KernelExpressionVisitorState,
-    a: usize,
-    b: usize,
-) -> usize {
-    visit_expression_binary(state, BinaryOperator::GreaterThan, a, b)
-}
-
-#[no_mangle]
-pub extern "C" fn visit_expression_ge(
-    state: &mut KernelExpressionVisitorState,
-    a: usize,
-    b: usize,
-) -> usize {
-    visit_expression_binary(state, BinaryOperator::GreaterThanOrEqual, a, b)
-}
-
-#[no_mangle]
-pub extern "C" fn visit_expression_eq(
-    state: &mut KernelExpressionVisitorState,
-    a: usize,
-    b: usize,
-) -> usize {
-    visit_expression_binary(state, BinaryOperator::Equal, a, b)
-}
-
-/// # Safety
-/// The string slice must be valid
-#[no_mangle]
-pub unsafe extern "C" fn visit_expression_column(
-    state: &mut KernelExpressionVisitorState,
-    name: KernelStringSlice,
-    allocate_error: AllocateErrorFn,
-) -> ExternResult<usize> {
-    let name = unsafe { String::try_from_slice(&name) };
-    visit_expression_column_impl(state, name).into_extern_result(&allocate_error)
-}
-fn visit_expression_column_impl(
-    state: &mut KernelExpressionVisitorState,
-    name: DeltaResult<String>,
-) -> DeltaResult<usize> {
-    Ok(wrap_expression(state, Expression::Column(name?)))
-}
-
-#[no_mangle]
-pub extern "C" fn visit_expression_not(
-    state: &mut KernelExpressionVisitorState,
-    inner_expr: usize,
-) -> usize {
-    visit_expression_unary(state, UnaryOperator::Not, inner_expr)
-}
-
-#[no_mangle]
-pub extern "C" fn visit_expression_is_null(
-    state: &mut KernelExpressionVisitorState,
-    inner_expr: usize,
-) -> usize {
-    visit_expression_unary(state, UnaryOperator::IsNull, inner_expr)
-}
-
-/// # Safety
-/// The string slice must be valid
-#[no_mangle]
-pub unsafe extern "C" fn visit_expression_literal_string(
-    state: &mut KernelExpressionVisitorState,
-    value: KernelStringSlice,
-    allocate_error: AllocateErrorFn,
-) -> ExternResult<usize> {
-    let value = unsafe { String::try_from_slice(&value) };
-    visit_expression_literal_string_impl(state, value).into_extern_result(&allocate_error)
-}
-fn visit_expression_literal_string_impl(
-    state: &mut KernelExpressionVisitorState,
-    value: DeltaResult<String>,
-) -> DeltaResult<usize> {
-    Ok(wrap_expression(
-        state,
-        Expression::Literal(Scalar::from(value?)),
-    ))
-}
-
-// We need to get parse.expand working to be able to macro everything below, see issue #255
-
-#[no_mangle]
-pub extern "C" fn visit_expression_literal_int(
-    state: &mut KernelExpressionVisitorState,
-    value: i32,
-) -> usize {
-    wrap_expression(state, Expression::literal(value))
-}
-
-#[no_mangle]
-pub extern "C" fn visit_expression_literal_long(
-    state: &mut KernelExpressionVisitorState,
-    value: i64,
-) -> usize {
-    wrap_expression(state, Expression::literal(value))
-}
-
-#[no_mangle]
-pub extern "C" fn visit_expression_literal_short(
-    state: &mut KernelExpressionVisitorState,
-    value: i16,
-) -> usize {
-    wrap_expression(state, Expression::literal(value))
-}
-
-#[no_mangle]
-pub extern "C" fn visit_expression_literal_byte(
-    state: &mut KernelExpressionVisitorState,
-    value: i8,
-) -> usize {
-    wrap_expression(state, Expression::literal(value))
-}
-
-#[no_mangle]
-pub extern "C" fn visit_expression_literal_float(
-    state: &mut KernelExpressionVisitorState,
-    value: f32,
-) -> usize {
-    wrap_expression(state, Expression::literal(value))
-}
-
-#[no_mangle]
-pub extern "C" fn visit_expression_literal_double(
-    state: &mut KernelExpressionVisitorState,
-    value: f64,
-) -> usize {
-    wrap_expression(state, Expression::literal(value))
-}
-
-#[no_mangle]
-pub extern "C" fn visit_expression_literal_bool(
-    state: &mut KernelExpressionVisitorState,
-    value: bool,
-) -> usize {
-    wrap_expression(state, Expression::literal(value))
-}
-
-#[handle_descriptor(target=Expression, mutable=false, sized=true)]
-pub struct SharedExpression;
 
 /// Free the memory the passed SharedExpression
 ///
@@ -261,8 +15,12 @@ pub unsafe extern "C" fn free_kernel_predicate(data: Handle<SharedExpression>) {
     data.drop_handle();
 }
 
+type VisitLiteralFn<T> = extern "C" fn(data: *mut c_void, sibling_list_id: usize, value: T);
+type VisitBinaryOpFn =
+    extern "C" fn(data: *mut c_void, sibling_list_id: usize, child_list_id: usize);
+
 /// The [`EngineExpressionVisitor`] defines a visitor system to allow engines to build their own
-/// representation of an expression from a particular expression within the kernel.
+/// representation of a kernel expression.
 ///
 /// The model is list based. When the kernel needs a list, it will ask engine to allocate one of a
 /// particular size. Once allocated the engine returns an `id`, which can be any integer identifier
@@ -291,38 +49,35 @@ pub unsafe extern "C" fn free_kernel_predicate(data: Handle<SharedExpression>) {
 /// TODO: Add type information in struct field and null. This will likely involve using the schema visitor.
 #[repr(C)]
 pub struct EngineExpressionVisitor {
-    /// An opaque state pointer
+    /// An opaque engine state pointer
     pub data: *mut c_void,
     /// Creates a new expression list, optionally reserving capacity up front
     pub make_field_list: extern "C" fn(data: *mut c_void, reserve: usize) -> usize,
     /// Visit a 32bit `integer belonging to the list identified by `sibling_list_id`.
-    pub visit_int_literal: extern "C" fn(data: *mut c_void, sibling_list_id: usize, value: i32),
+    pub visit_int_literal: VisitLiteralFn<i32>,
     /// Visit a 64bit `long`  belonging to the list identified by `sibling_list_id`.
-    pub visit_long_literal: extern "C" fn(data: *mut c_void, sibling_list_id: usize, value: i64),
+    pub visit_long_literal: VisitLiteralFn<i64>,
     /// Visit a 16bit `short` belonging to the list identified by `sibling_list_id`.
-    pub visit_short_literal: extern "C" fn(data: *mut c_void, sibling_list_id: usize, value: i16),
+    pub visit_short_literal: VisitLiteralFn<i16>,
     /// Visit an 8bit `byte` belonging to the list identified by `sibling_list_id`.
-    pub visit_byte_literal: extern "C" fn(data: *mut c_void, sibling_list_id: usize, value: i8),
+    pub visit_byte_literal: VisitLiteralFn<i8>,
     /// Visit a 32bit `float` belonging to the list identified by `sibling_list_id`.
-    pub visit_float_literal: extern "C" fn(data: *mut c_void, sibling_list_id: usize, value: f32),
+    pub visit_float_literal: VisitLiteralFn<f32>,
     /// Visit a 64bit `double` belonging to the list identified by `sibling_list_id`.
-    pub visit_double_literal: extern "C" fn(data: *mut c_void, sibling_list_id: usize, value: f64),
+    pub visit_double_literal: VisitLiteralFn<f64>,
     /// Visit a `string` belonging to the list identified by `sibling_list_id`.
-    pub visit_string_literal:
-        extern "C" fn(data: *mut c_void, sibling_list_id: usize, value: KernelStringSlice),
+    pub visit_string_literal: VisitLiteralFn<KernelStringSlice>,
     /// Visit a `boolean` belonging to the list identified by `sibling_list_id`.
-    pub visit_bool_literal: extern "C" fn(data: *mut c_void, sibling_list_id: usize, value: bool),
+    pub visit_bool_literal: VisitLiteralFn<bool>,
     /// Visit a 64bit timestamp belonging to the list identified by `sibling_list_id`.
     /// The timestamp is microsecond precision and adjusted to UTC.
-    pub visit_timestamp_literal:
-        extern "C" fn(data: *mut c_void, sibling_list_id: usize, value: i64),
+    pub visit_timestamp_literal: VisitLiteralFn<i64>,
     /// Visit a 64bit timestamp belonging to the list identified by `sibling_list_id`.
     /// The timestamp is microsecond precision with no timezone.
-    pub visit_timestamp_ntz_literal:
-        extern "C" fn(data: *mut c_void, sibling_list_id: usize, value: i64),
+    pub visit_timestamp_ntz_literal: VisitLiteralFn<i64>,
     /// Visit a 32bit intger `date` representing days since UNIX epoch 1970-01-01.  The `date` belongs
     /// to the list identified by `sibling_list_id`.
-    pub visit_date_literal: extern "C" fn(data: *mut c_void, sibling_list_id: usize, value: i32),
+    pub visit_date_literal: VisitLiteralFn<i32>,
     /// Visit binary data at the `buffer` with length `len` belonging to the list identified by
     /// `sibling_list_id`.
     pub visit_binary_literal:
@@ -368,47 +123,43 @@ pub struct EngineExpressionVisitor {
         extern "C" fn(data: *mut c_void, sibling_list_id: usize, child_list_id: usize),
     /// Visits the `LessThan` binary operator belonging to the list identified by `sibling_list_id`.
     /// The operands will be in a _two_ item list identified by `child_list_id`
-    pub visit_lt: extern "C" fn(data: *mut c_void, sibling_list_id: usize, child_list_id: usize),
+    pub visit_lt: VisitBinaryOpFn,
     /// Visits the `LessThanOrEqual` binary operator belonging to the list identified by `sibling_list_id`.
     /// The operands will be in a _two_ item list identified by `child_list_id`
-    pub visit_le: extern "C" fn(data: *mut c_void, sibling_list_id: usize, child_list_id: usize),
+    pub visit_le: VisitBinaryOpFn,
     /// Visits the `GreaterThan` binary operator belonging to the list identified by `sibling_list_id`.
     /// The operands will be in a _two_ item list identified by `child_list_id`
-    pub visit_gt: extern "C" fn(data: *mut c_void, sibling_list_id: usize, child_list_id: usize),
+    pub visit_gt: VisitBinaryOpFn,
     /// Visits the `GreaterThanOrEqual` binary operator belonging to the list identified by `sibling_list_id`.
     /// The operands will be in a _two_ item list identified by `child_list_id`
-    pub visit_ge: extern "C" fn(data: *mut c_void, sibling_list_id: usize, child_list_id: usize),
+    pub visit_ge: VisitBinaryOpFn,
     /// Visits the `Equal` binary operator belonging to the list identified by `sibling_list_id`.
     /// The operands will be in a _two_ item list identified by `child_list_id`
-    pub visit_eq: extern "C" fn(data: *mut c_void, sibling_list_id: usize, child_list_id: usize),
+    pub visit_eq: VisitBinaryOpFn,
     /// Visits the `NotEqual` binary operator belonging to the list identified by `sibling_list_id`.
     /// The operands will be in a _two_ item list identified by `child_list_id`
-    pub visit_ne: extern "C" fn(data: *mut c_void, sibling_list_id: usize, child_list_id: usize),
+    pub visit_ne: VisitBinaryOpFn,
     /// Visits the `Distinct` binary operator belonging to the list identified by `sibling_list_id`.
     /// The operands will be in a _two_ item list identified by `child_list_id`
-    pub visit_distinct:
-        extern "C" fn(data: *mut c_void, sibling_list_id: usize, child_list_id: usize),
+    pub visit_distinct: VisitBinaryOpFn,
     /// Visits the `In` binary operator belonging to the list identified by `sibling_list_id`.
     /// The operands will be in a _two_ item list identified by `child_list_id`
-    pub visit_in: extern "C" fn(data: *mut c_void, sibling_list_id: usize, child_list_id: usize),
+    pub visit_in: VisitBinaryOpFn,
     /// Visits the `NotIn` binary operator belonging to the list identified by `sibling_list_id`.
     /// The operands will be in a _two_ item list identified by `child_list_id`
-    pub visit_not_in:
-        extern "C" fn(data: *mut c_void, sibling_list_id: usize, child_list_id: usize),
+    pub visit_not_in: VisitBinaryOpFn,
     /// Visits the `Add` binary operator belonging to the list identified by `sibling_list_id`.
     /// The operands will be in a _two_ item list identified by `child_list_id`
-    pub visit_add: extern "C" fn(data: *mut c_void, sibling_list_id: usize, child_list_id: usize),
+    pub visit_add: VisitBinaryOpFn,
     /// Visits the `Minus` binary operator belonging to the list identified by `sibling_list_id`.
     /// The operands will be in a _two_ item list identified by `child_list_id`
-    pub visit_minus: extern "C" fn(data: *mut c_void, sibling_list_id: usize, child_list_id: usize),
+    pub visit_minus: VisitBinaryOpFn,
     /// Visits the `Multiply` binary operator belonging to the list identified by `sibling_list_id`.
     /// The operands will be in a _two_ item list identified by `child_list_id`
-    pub visit_multiply:
-        extern "C" fn(data: *mut c_void, sibling_list_id: usize, child_list_id: usize),
+    pub visit_multiply: VisitBinaryOpFn,
     /// Visits the `Divide` binary operator belonging to the list identified by `sibling_list_id`.
     /// The operands will be in a _two_ item list identified by `child_list_id`
-    pub visit_divide:
-        extern "C" fn(data: *mut c_void, sibling_list_id: usize, child_list_id: usize),
+    pub visit_divide: VisitBinaryOpFn,
     /// Visits the `column` belonging to the list identified by `sibling_list_id`.
     pub visit_column:
         extern "C" fn(data: *mut c_void, sibling_list_id: usize, name: KernelStringSlice),
