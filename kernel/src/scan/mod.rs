@@ -12,7 +12,7 @@ use crate::actions::{get_log_schema, ADD_NAME, REMOVE_NAME};
 use crate::expressions::{Expression, Scalar};
 use crate::features::ColumnMappingMode;
 use crate::scan::state::{DvInfo, Stats};
-use crate::schema::{ArrayType, DataType, MapType, Schema, SchemaRef, StructField, StructType};
+use crate::schema::{DataType, Schema, SchemaRef, StructField, StructType};
 use crate::snapshot::Snapshot;
 use crate::{DeltaResult, Engine, EngineData, Error, FileMeta};
 
@@ -389,78 +389,6 @@ fn parse_partition_value(raw: Option<&String>, data_type: &DataType) -> DeltaRes
     }
 }
 
-/// Transform a logical field into the physical form. Currently just renames things for 'name'
-/// column mapping.
-fn make_field_physical(
-    logical_field: &StructField,
-    column_mapping_mode: ColumnMappingMode,
-) -> DeltaResult<StructField> {
-    match column_mapping_mode {
-        ColumnMappingMode::None => Ok(logical_field.clone()),
-        ColumnMappingMode::Name => {
-            let physical_name = logical_field.physical_name(column_mapping_mode)?;
-            let field_data_type = logical_field.data_type();
-            let mapped_data_type = make_data_type_physical(field_data_type, column_mapping_mode)?;
-            Ok(StructField {
-                name: physical_name.to_string(),
-                data_type: mapped_data_type,
-                nullable: logical_field.nullable,
-                metadata: logical_field.metadata.clone(),
-            })
-        }
-        ColumnMappingMode::Id => panic!("No id"),
-    }
-}
-
-/// Transform a DataType into the physical form. Currently just renames anything in a nested type
-/// for 'name' column mapping.
-fn make_data_type_physical(
-    logical_dt: &DataType,
-    column_mapping_mode: ColumnMappingMode,
-) -> DeltaResult<DataType> {
-    match column_mapping_mode {
-        ColumnMappingMode::None => Ok(logical_dt.clone()),
-        ColumnMappingMode::Name => {
-            // we don't need to rename at this level, just need to keep the recursion going
-            // because there might be structs below us
-            match logical_dt {
-                DataType::Array(array_type) => {
-                    let new_type =
-                        make_data_type_physical(&array_type.element_type, column_mapping_mode)?;
-                    Ok(DataType::Array(Box::new(ArrayType::new(
-                        new_type,
-                        array_type.contains_null,
-                    ))))
-                }
-                DataType::Map(map_type) => {
-                    let new_key_type =
-                        make_data_type_physical(&map_type.key_type, column_mapping_mode)?;
-                    let new_value_type =
-                        make_data_type_physical(&map_type.value_type, column_mapping_mode)?;
-                    Ok(DataType::Map(Box::new(MapType::new(
-                        new_key_type,
-                        new_value_type,
-                        map_type.value_contains_null,
-                    ))))
-                }
-                DataType::Struct(struct_type) => {
-                    // build up the mapped child fields
-                    let children: Vec<StructField> = struct_type
-                        .fields()
-                        .map(|field| make_field_physical(field, column_mapping_mode))
-                        .try_collect()?;
-                    Ok(DataType::struct_type(children))
-                }
-                _ => {
-                    // types with no children don't change
-                    Ok(logical_dt.clone())
-                }
-            }
-        }
-        ColumnMappingMode::Id => panic!("No id"),
-    }
-}
-
 /// Get the state needed to process a scan. In particular this returns a triple of
 /// (all_fields_in_query, fields_to_read_from_parquet, have_partition_cols) where:
 /// - all_fields_in_query - all fields in the query as [`ColumnType`] enums
@@ -490,7 +418,7 @@ fn get_state_info(
             } else {
                 // Add to read schema, store field so we can build a `Column` expression later
                 // if needed (i.e. if we have partition columns)
-                let physical_field = make_field_physical(logical_field, column_mapping_mode)?;
+                let physical_field = logical_field.make_physical(column_mapping_mode)?;
                 debug!("\n\n{logical_field:#?}\nAfter mapping: {physical_field:#?}\n\n");
                 let name = physical_field.name.clone();
                 read_fields.push(physical_field);
