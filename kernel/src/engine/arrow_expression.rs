@@ -943,6 +943,9 @@ mod tests {
         Ok(())
     }
 
+    // A test I left to show why some variadic expressions don't work here, the second operation
+    // drops the null leading to the mismatch in array lengths
+    #[allow(dead_code)]
     #[ignore]
     fn test_map_unary_key() -> DeltaResult<()> {
         let map_col = Expression::column("test_map");
