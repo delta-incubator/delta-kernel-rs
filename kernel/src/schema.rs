@@ -776,7 +776,7 @@ impl SchemaDepthChecker {
         if self.max_depth_seen < self.current_depth {
             self.max_depth_seen = self.current_depth;
             if self.depth_limit < self.current_depth {
-                tracing::warn!("Max schema depth {} exceeded by {:?}", self.depth_limit, arg);
+                tracing::warn!("Max schema depth {} exceeded by {arg:?}", self.depth_limit);
             }
         }
         if self.depth_limit < self.max_depth_seen {
