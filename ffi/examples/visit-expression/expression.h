@@ -1,3 +1,5 @@
+#pragma once
+
 #include "delta_kernel_ffi.h"
 #include <assert.h>
 #include <stddef.h>
@@ -21,8 +23,7 @@
  * Data Types
  ************************************************************/
 
-enum OpType
-{
+enum OpType {
   Add,
   Minus,
   Divide,
@@ -37,8 +38,7 @@ enum OpType
   In,
   NotIn,
 };
-enum LitType
-{
+enum LitType {
   Integer,
   Long,
   Short,
@@ -56,83 +56,59 @@ enum LitType
   Struct,
   Array
 };
-enum ExpressionType
-{
-  BinOp,
-  Variadic,
-  Literal,
-  Unary,
-  Column
-};
-enum VariadicType
-{
+enum ExpressionType { BinOp, Variadic, Literal, Unary, Column };
+enum VariadicType {
   And,
   Or,
   StructExpression,
 };
-enum UnaryType
-{
-  Not,
-  IsNull
-};
-typedef struct
-{
+enum UnaryType { Not, IsNull };
+typedef struct {
   void* ref;
   enum ExpressionType type;
 } ExpressionItem;
 
-typedef struct
-{
+typedef struct {
   uint32_t len;
   ExpressionItem* list;
 } ExpressionItemList;
-struct BinOp
-{
+struct BinOp {
   enum OpType op;
   ExpressionItemList exprs;
 };
 struct Null;
 
-struct Variadic
-{
+struct Variadic {
   enum VariadicType op;
   ExpressionItemList exprs;
 };
-struct Unary
-{
+struct Unary {
   enum UnaryType type;
   ExpressionItemList sub_expr;
 };
-struct BinaryData
-{
+struct BinaryData {
   uint8_t* buf;
   uintptr_t len;
 };
-struct Decimal
-{
+struct Decimal {
   uint64_t value[2];
   uint8_t precision;
   uint8_t scale;
 };
-typedef struct
-{
+typedef struct {
   size_t list_count;
   ExpressionItemList* lists;
 } ExpressionBuilder;
-struct Struct
-{
+struct Struct {
   ExpressionItemList fields;
   ExpressionItemList values;
 };
-struct ArrayData
-{
+struct ArrayData {
   ExpressionItemList exprs;
 };
-struct Literal
-{
+struct Literal {
   enum LitType type;
-  union LiteralValue
-  {
+  union LiteralValue {
     int32_t integer_data;
     int64_t long_data;
     int16_t short_data;
@@ -152,23 +128,20 @@ struct Literal
  * Utilitiy functions
  ************************************************************/
 
-void put_expr_item(void* data, size_t sibling_list_id, void* ref, enum ExpressionType type)
-{
+void put_expr_item(void* data, size_t sibling_list_id, void* ref, enum ExpressionType type) {
   ExpressionBuilder* data_ptr = (ExpressionBuilder*)data;
   ExpressionItem expr = { .ref = ref, .type = type };
   ExpressionItemList* list = &data_ptr->lists[sibling_list_id];
   list->list[list->len++] = expr;
 }
-ExpressionItemList get_expr_list(void* data, size_t list_id)
-{
+ExpressionItemList get_expr_list(void* data, size_t list_id) {
   ExpressionBuilder* data_ptr = (ExpressionBuilder*)data;
   assert(list_id < data_ptr->list_count);
   return data_ptr->lists[list_id];
 }
 
 // utility to turn a slice into a char*
-char* allocate_string(const KernelStringSlice slice)
-{
+char* allocate_string(const KernelStringSlice slice) {
   return strndup(slice.ptr, slice.len);
 }
 
@@ -177,16 +150,13 @@ char* allocate_string(const KernelStringSlice slice)
  ************************************************************/
 
 #define DEFINE_BINOP(fun_name, op)                                                                 \
-  void fun_name(void* data, uintptr_t sibling_list_id, uintptr_t child_list_id)                    \
-  {                                                                                                \
+  void fun_name(void* data, uintptr_t sibling_list_id, uintptr_t child_list_id) {                  \
     visit_expr_binop(data, sibling_list_id, op, child_list_id);                                    \
   }
-void visit_expr_binop(
-  void* data,
-  uintptr_t sibling_id_list,
-  enum OpType op,
-  uintptr_t child_id_list)
-{
+void visit_expr_binop(void* data,
+                      uintptr_t sibling_id_list,
+                      enum OpType op,
+                      uintptr_t child_id_list) {
   struct BinOp* binop = malloc(sizeof(struct BinOp));
   binop->op = op;
   binop->exprs = get_expr_list(data, child_id_list);
@@ -211,15 +181,14 @@ DEFINE_BINOP(visit_expr_not_in, NotIn)
  ************************************************************/
 
 #define DEFINE_SIMPLE_SCALAR(fun_name, enum_member, c_type, literal_field)                         \
-  void fun_name(void* data, uintptr_t sibling_list_id, c_type val)                                 \
-  {                                                                                                \
+  void fun_name(void* data, uintptr_t sibling_list_id, c_type val) {                               \
     struct Literal* lit = malloc(sizeof(struct Literal));                                          \
     lit->type = enum_member;                                                                       \
     lit->value.literal_field = val;                                                                \
     put_expr_item(data, sibling_list_id, lit, Literal);                                            \
   }                                                                                                \
-  _Static_assert(                                                                                  \
-    sizeof(c_type) <= sizeof(uintptr_t), "The provided type is not a valid simple scalar")
+  _Static_assert(sizeof(c_type) <= sizeof(uintptr_t),                                              \
+                 "The provided type is not a valid simple scalar")
 DEFINE_SIMPLE_SCALAR(visit_expr_int_literal, Integer, int32_t, integer_data);
 DEFINE_SIMPLE_SCALAR(visit_expr_long_literal, Long, int64_t, long_data);
 DEFINE_SIMPLE_SCALAR(visit_expr_short_literal, Short, int16_t, short_data);
@@ -231,22 +200,19 @@ DEFINE_SIMPLE_SCALAR(visit_expr_timestamp_literal, Timestamp, int64_t, long_data
 DEFINE_SIMPLE_SCALAR(visit_expr_timestamp_ntz_literal, TimestampNtz, int64_t, long_data);
 DEFINE_SIMPLE_SCALAR(visit_expr_date_literal, Date, int32_t, integer_data);
 
-void visit_expr_string_literal(void* data, uintptr_t sibling_list_id, KernelStringSlice string)
-{
+void visit_expr_string_literal(void* data, uintptr_t sibling_list_id, KernelStringSlice string) {
   struct Literal* literal = malloc(sizeof(struct Literal));
   literal->type = String;
   literal->value.string_data = allocate_string(string);
   put_expr_item(data, sibling_list_id, literal, Literal);
 }
 
-void visit_expr_decimal_literal(
-  void* data,
-  uintptr_t sibling_list_id,
-  uint64_t value_ms,
-  uint64_t value_ls,
-  uint8_t precision,
-  uint8_t scale)
-{
+void visit_expr_decimal_literal(void* data,
+                                uintptr_t sibling_list_id,
+                                uint64_t value_ms,
+                                uint64_t value_ls,
+                                uint8_t precision,
+                                uint8_t scale) {
   struct Literal* literal = malloc(sizeof(struct Literal));
   literal->type = Decimal;
   struct Decimal* dec = &literal->value.decimal;
@@ -257,12 +223,10 @@ void visit_expr_decimal_literal(
   put_expr_item(data, sibling_list_id, literal, Literal);
 }
 
-void visit_expr_binary_literal(
-  void* data,
-  uintptr_t sibling_list_id,
-  const uint8_t* buf,
-  uintptr_t len)
-{
+void visit_expr_binary_literal(void* data,
+                               uintptr_t sibling_list_id,
+                               const uint8_t* buf,
+                               uintptr_t len) {
   struct Literal* literal = malloc(sizeof(struct Literal));
   literal->type = Binary;
   struct BinaryData* bin = &literal->value.binary;
@@ -272,12 +236,10 @@ void visit_expr_binary_literal(
   put_expr_item(data, sibling_list_id, literal, Literal);
 }
 
-void visit_expr_struct_literal(
-  void* data,
-  uintptr_t sibling_list_id,
-  uintptr_t child_field_list_id,
-  uintptr_t child_value_list_id)
-{
+void visit_expr_struct_literal(void* data,
+                               uintptr_t sibling_list_id,
+                               uintptr_t child_field_list_id,
+                               uintptr_t child_value_list_id) {
   struct Literal* literal = malloc(sizeof(struct Literal));
   literal->type = Struct;
   struct Struct* struct_data = &literal->value.struct_data;
@@ -286,8 +248,7 @@ void visit_expr_struct_literal(
   put_expr_item(data, sibling_list_id, literal, Literal);
 }
 
-void visit_expr_null_literal(void* data, uintptr_t sibling_id_list)
-{
+void visit_expr_null_literal(void* data, uintptr_t sibling_id_list) {
   struct Literal* literal = malloc(sizeof(struct Literal));
   literal->type = Null;
   put_expr_item(data, sibling_id_list, literal, Literal);
@@ -298,17 +259,14 @@ void visit_expr_null_literal(void* data, uintptr_t sibling_id_list)
  ************************************************************/
 
 #define DEFINE_VARIADIC(fun_name, enum_member)                                                     \
-  void fun_name(void* data, uintptr_t sibling_list_id, uintptr_t child_list_id)                    \
-  {                                                                                                \
+  void fun_name(void* data, uintptr_t sibling_list_id, uintptr_t child_list_id) {                  \
     visit_expr_variadic(data, sibling_list_id, enum_member, child_list_id);                        \
   }
 
-void visit_expr_variadic(
-  void* data,
-  uintptr_t sibling_list_id,
-  enum VariadicType op,
-  uintptr_t child_list_id)
-{
+void visit_expr_variadic(void* data,
+                         uintptr_t sibling_list_id,
+                         enum VariadicType op,
+                         uintptr_t child_list_id) {
   struct Variadic* var = malloc(sizeof(struct Variadic));
   var->op = op;
   var->exprs = get_expr_list(data, child_list_id);
@@ -318,8 +276,7 @@ DEFINE_VARIADIC(visit_expr_and, And)
 DEFINE_VARIADIC(visit_expr_or, Or)
 DEFINE_VARIADIC(visit_expr_struct_expr, StructExpression)
 
-void visit_expr_array_literal(void* data, uintptr_t sibling_list_id, uintptr_t child_list_id)
-{
+void visit_expr_array_literal(void* data, uintptr_t sibling_list_id, uintptr_t child_list_id) {
   struct Literal* literal = malloc(sizeof(struct Literal));
   literal->type = Array;
   struct ArrayData* arr = &(literal->value.array_data);
@@ -331,17 +288,14 @@ void visit_expr_array_literal(void* data, uintptr_t sibling_list_id, uintptr_t c
  * Unary Expressions
  ************************************************************/
 #define DEFINE_UNARY(fun_name, op)                                                                 \
-  void fun_name(void* data, uintptr_t sibling_list_id, uintptr_t child_list_id)                    \
-  {                                                                                                \
+  void fun_name(void* data, uintptr_t sibling_list_id, uintptr_t child_list_id) {                  \
     visit_expr_unary(data, sibling_list_id, op, child_list_id);                                    \
   }
 
-void visit_expr_unary(
-  void* data,
-  uintptr_t sibling_list_id,
-  enum UnaryType type,
-  uintptr_t child_list_id)
-{
+void visit_expr_unary(void* data,
+                      uintptr_t sibling_list_id,
+                      enum UnaryType type,
+                      uintptr_t child_list_id) {
   struct Unary* unary = malloc(sizeof(struct Unary));
   unary->type = type;
   unary->sub_expr = get_expr_list(data, child_list_id);
@@ -354,8 +308,7 @@ DEFINE_UNARY(visit_expr_not, Not)
  * Column Expression
  ************************************************************/
 
-void visit_expr_column(void* data, uintptr_t sibling_id_list, KernelStringSlice string)
-{
+void visit_expr_column(void* data, uintptr_t sibling_id_list, KernelStringSlice string) {
   char* column_name = allocate_string(string);
   put_expr_item(data, sibling_id_list, column_name, Column);
 }
@@ -364,8 +317,7 @@ void visit_expr_column(void* data, uintptr_t sibling_id_list, KernelStringSlice 
  * EngineExpressionVisitor Implementation
  ************************************************************/
 
-uintptr_t make_field_list(void* data, uintptr_t reserve)
-{
+uintptr_t make_field_list(void* data, uintptr_t reserve) {
   ExpressionBuilder* builder = data;
   int id = builder->list_count;
   builder->list_count++;
@@ -376,8 +328,7 @@ uintptr_t make_field_list(void* data, uintptr_t reserve)
   return id;
 }
 
-ExpressionItemList construct_predicate(SharedExpression* predicate)
-{
+ExpressionItemList construct_predicate(SharedExpression* predicate) {
   ExpressionBuilder data = { 0 };
   EngineExpressionVisitor visitor = {
     .data = &data,
@@ -425,8 +376,7 @@ ExpressionItemList construct_predicate(SharedExpression* predicate)
 }
 
 void free_expression_list(ExpressionItemList list);
-void free_expression_item(ExpressionItem ref)
-{
+void free_expression_item(ExpressionItem ref) {
   switch (ref.type) {
     case BinOp: {
       struct BinOp* op = ref.ref;
@@ -493,221 +443,9 @@ void free_expression_item(ExpressionItem ref)
   }
 }
 
-void free_expression_list(ExpressionItemList list)
-{
+void free_expression_list(ExpressionItemList list) {
   for (size_t i = 0; i < list.len; i++) {
     free_expression_item(list.list[i]);
   }
   free(list.list);
-}
-
-/*************************************************************
- * Expression Printing
- ************************************************************/
-
-void print_n_spaces(int n)
-{
-  if (n == 0)
-    return;
-  printf("  ");
-  print_n_spaces(n - 1);
-}
-void print_tree(ExpressionItem ref, int depth)
-{
-  switch (ref.type) {
-    case BinOp: {
-      struct BinOp* op = ref.ref;
-      print_n_spaces(depth);
-      switch (op->op) {
-        case Add: {
-          printf("Add\n");
-          break;
-        }
-        case Minus: {
-          printf("Minus\n");
-          break;
-        };
-        case Divide: {
-          printf("Divide\n");
-          break;
-        };
-        case Multiply: {
-          printf("Multiply\n");
-          break;
-        };
-        case LessThan: {
-          printf("LessThan\n");
-          break;
-        };
-        case LessThanOrEqual: {
-          printf("LessThanOrEqual\n");
-          break;
-        }
-        case GreaterThan: {
-          printf("GreaterThan\n");
-          break;
-        };
-        case GreaterThaneOrEqual: {
-          printf("GreaterThanOrEqual\n");
-          break;
-        };
-        case Equal: {
-          printf("Equal\n");
-          break;
-        };
-        case NotEqual: {
-          printf("NotEqual\n");
-          break;
-        };
-        case In: {
-          printf("In\n");
-          break;
-        };
-        case NotIn: {
-          printf("NotIn\n");
-          break;
-        }; break;
-        case Distinct:
-          printf("Distinct\n");
-          break;
-      }
-
-      ExpressionItem left = op->exprs.list[0];
-      ExpressionItem right = op->exprs.list[1];
-      print_tree(left, depth + 1);
-      print_tree(right, depth + 1);
-      break;
-    }
-    case Variadic: {
-      struct Variadic* var = ref.ref;
-      print_n_spaces(depth);
-      switch (var->op) {
-        case And:
-          printf("And\n");
-          break;
-        case Or:
-          printf("Or\n");
-          break;
-        case StructExpression:
-          printf("StructExpression\n");
-          break;
-      }
-      for (size_t i = 0; i < var->exprs.len; i++) {
-        print_tree(var->exprs.list[i], depth + 1);
-      }
-    } break;
-    case Literal: {
-      struct Literal* lit = ref.ref;
-      print_n_spaces(depth);
-      switch (lit->type) {
-        case Integer:
-          printf("Integer");
-          printf("(%d)\n", lit->value.integer_data);
-          break;
-        case Long:
-          printf("Long");
-          printf("(%lld)\n", (long long)lit->value.long_data);
-          break;
-        case Short:
-          printf("Short");
-          printf("(%hd)\n", lit->value.short_data);
-          break;
-        case Byte:
-          printf("Byte");
-          printf("(%hhd)\n", lit->value.byte_data);
-          break;
-        case Float:
-          printf("Float");
-          printf("(%f)\n", (float)lit->value.float_data);
-          break;
-        case Double:
-          printf("Double");
-          printf("(%f)\n", lit->value.double_data);
-          break;
-        case String: {
-          printf("String(%s)\n", lit->value.string_data);
-          break;
-        }
-        case Boolean:
-          printf("Boolean");
-          printf("(%d)\n", lit->value.boolean_data);
-          break;
-        case Timestamp:
-          printf("Timestamp");
-          printf("(%lld)\n", (long long)lit->value.long_data);
-          break;
-        case TimestampNtz:
-          printf("TimestampNtz");
-          printf("(%lld)\n", (long long)lit->value.long_data);
-          break;
-        case Date:
-          printf("Date");
-          printf("(%d)\n", lit->value.integer_data);
-          break;
-        case Binary: {
-          printf("Binary(");
-          for (size_t i = 0; i < lit->value.binary.len; i++) {
-            printf("%02x", lit->value.binary.buf[i]);
-          }
-          printf(")\n");
-          break;
-        }
-        case Decimal: {
-          struct Decimal* dec = &lit->value.decimal;
-          printf(
-            "Decimal(%lld,%lld, %d, %d)\n",
-            (long long)dec->value[0],
-            (long long)dec->value[1],
-            dec->scale,
-            dec->precision);
-          break;
-        }
-        case Null:
-          printf("Null\n");
-          break;
-        case Struct:
-          printf("Struct\n");
-          struct Struct* struct_data = &lit->value.struct_data;
-          for (size_t i = 0; i < struct_data->values.len; i++) {
-            print_n_spaces(depth + 1);
-
-            // Extract field name from field
-            ExpressionItem item = struct_data->fields.list[i];
-            assert(item.type == Literal);
-            struct Literal* lit = item.ref;
-            assert(lit->type == String);
-
-            printf("Field: %s\n", lit->value.string_data);
-            print_tree(struct_data->values.list[i], depth + 2);
-          }
-          break;
-        case Array:
-          printf("Array\n");
-          struct ArrayData* array = &lit->value.array_data;
-          for (size_t i = 0; i < array->exprs.len; i++) {
-            print_tree(array->exprs.list[i], depth + 1);
-          }
-          break;
-      }
-    } break;
-    case Unary: {
-      print_n_spaces(depth);
-      struct Unary* unary = ref.ref;
-      switch (unary->type) {
-        case Not:
-          printf("Not\n");
-          break;
-        case IsNull:
-          printf("IsNull\n");
-          break;
-      }
-      print_tree(unary->sub_expr.list[0], depth + 1);
-      break;
-    }
-    case Column:
-      print_n_spaces(depth);
-      char* column_name = ref.ref;
-      printf("Column(%s)\n", column_name);
-      break;
-  }
 }

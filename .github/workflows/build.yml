@@ -108,11 +108,19 @@ jobs:
           cargo build
           popd
           pushd ffi
-          cargo b --features default-engine,sync-engine,test_ffi
+          cargo b --features default-engine,sync-engine,test-ffi
           popd
-      - name: build and run test
+      - name: build and run read-table test
         run: |
           pushd ffi/examples/read-table
+          mkdir build
+          pushd build
+          cmake ..
+          make
+          make test
+      - name: build and run visit-expression test
+        run: |
+          pushd ffi/examples/visit-expression
           mkdir build
           pushd build
           cmake ..

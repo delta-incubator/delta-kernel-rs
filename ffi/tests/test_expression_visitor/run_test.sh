@@ -3,7 +3,7 @@
 set -euxo pipefail
 
 OUT_FILE=$(mktemp)
-./test_expr | tee "$OUT_FILE"
+./visit_expression | tee "$OUT_FILE"
 diff -s "$OUT_FILE" "$1"
 DIFF_EXIT_CODE=$?
 echo "Diff exited with $DIFF_EXIT_CODE"
