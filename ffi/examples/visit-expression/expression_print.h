@@ -1,10 +1,9 @@
-
 #pragma once
-
 #include "expression.h"
-/*************************************************************
- * Expression Printing
- ************************************************************/
+
+/**
+ * This module defines a function `print_tree` to recursively print an ExpressionItem.
+ */
 
 void print_n_spaces(int n) {
   if (n == 0)
