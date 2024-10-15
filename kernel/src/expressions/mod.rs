@@ -134,6 +134,13 @@ pub enum Expression {
     Column(String),
     /// A struct computed from a Vec of expressions
     Struct(Vec<Expression>),
+    /// A unary operation.
+    UnaryOperation {
+        /// The operator.
+        op: UnaryOperator,
+        /// The expression.
+        expr: Box<Expression>,
+    },
     /// A binary operation.
     BinaryOperation {
         /// The operator.
@@ -142,13 +149,6 @@ pub enum Expression {
         left: Box<Expression>,
         /// The right-hand side of the operation.
         right: Box<Expression>,
-    },
-    /// A unary operation.
-    UnaryOperation {
-        /// The operator.
-        op: UnaryOperator,
-        /// The expression.
-        expr: Box<Expression>,
     },
     VariadicOperation {
         /// The operator.

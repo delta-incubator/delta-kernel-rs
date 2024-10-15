@@ -339,11 +339,7 @@ async fn stats() -> Result<(), Box<dyn std::error::Error>> {
         (NotEqual, 8, vec![&batch2, &batch1]),
     ];
     for (op, value, expected_batches) in test_cases {
-        let predicate = Expression::BinaryOperation {
-            op,
-            left: Box::new(Expression::column("id")),
-            right: Box::new(Expression::literal(value)),
-        };
+        let predicate = Expression::binary(op, Expression::column("id"), value);
         let scan = snapshot
             .clone()
             .scan_builder()
