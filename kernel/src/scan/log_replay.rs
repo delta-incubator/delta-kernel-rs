@@ -161,12 +161,12 @@ impl LogReplayScanner {
 
     fn get_add_transform_expr(&self) -> Expression {
         Expression::Struct(vec![
-            Expression::column("add.path"),
-            Expression::column("add.size"),
-            Expression::column("add.modificationTime"),
-            Expression::column("add.stats"),
-            Expression::column("add.deletionVector"),
-            Expression::Struct(vec![Expression::column("add.partitionValues")]),
+            Expression::split_column("add.path"),
+            Expression::split_column("add.size"),
+            Expression::split_column("add.modificationTime"),
+            Expression::split_column("add.stats"),
+            Expression::split_column("add.deletionVector"),
+            Expression::Struct(vec![Expression::split_column("add.partitionValues")]),
         ])
     }
 

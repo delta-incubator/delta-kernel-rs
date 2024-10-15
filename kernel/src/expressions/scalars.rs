@@ -555,7 +555,7 @@ mod tests {
             elements: vec![Scalar::Integer(1), Scalar::Integer(2), Scalar::Integer(3)],
         });
 
-        let column = Expression::column("item");
+        let column = Expression::simple_column("item");
         let array_op = Expression::binary(BinaryOperator::In, 10, array.clone());
         let array_not_op = Expression::binary(BinaryOperator::NotIn, 10, array);
         let column_op = Expression::binary(BinaryOperator::In, PI, column.clone());

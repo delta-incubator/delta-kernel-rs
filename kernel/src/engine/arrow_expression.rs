@@ -447,9 +447,10 @@ mod tests {
         let array = ListArray::new(field.clone(), offsets, Arc::new(values), None);
         let batch = RecordBatch::try_new(Arc::new(schema), vec![Arc::new(array.clone())]).unwrap();
 
-        let not_op = Expression::binary(BinaryOperator::NotIn, 5, Expression::column("item"));
+        let not_op =
+            Expression::binary(BinaryOperator::NotIn, 5, Expression::simple_column("item"));
 
-        let in_op = Expression::binary(BinaryOperator::NotIn, 5, Expression::column("item"));
+        let in_op = Expression::binary(BinaryOperator::NotIn, 5, Expression::simple_column("item"));
 
         let result = evaluate_expression(&not_op, &batch, None).unwrap();
         let expected = BooleanArray::from(vec![true, false, true]);
@@ -467,7 +468,7 @@ mod tests {
         let schema = Schema::new([field.clone()]);
         let batch = RecordBatch::try_new(Arc::new(schema), vec![Arc::new(values.clone())]).unwrap();
 
-        let in_op = Expression::binary(BinaryOperator::NotIn, 5, Expression::column("item"));
+        let in_op = Expression::binary(BinaryOperator::NotIn, 5, Expression::simple_column("item"));
 
         let in_result = evaluate_expression(&in_op, &batch, None);
 
@@ -512,8 +513,8 @@ mod tests {
 
         let in_op = Expression::binary(
             BinaryOperator::NotIn,
-            Expression::column("item"),
-            Expression::column("item"),
+            Expression::simple_column("item"),
+            Expression::simple_column("item"),
         );
 
         let in_result = evaluate_expression(&in_op, &batch, None);
@@ -537,10 +538,14 @@ mod tests {
         let array = ListArray::new(field.clone(), offsets, Arc::new(values), None);
         let batch = RecordBatch::try_new(Arc::new(schema), vec![Arc::new(array.clone())]).unwrap();
 
-        let str_not_op =
-            Expression::binary(BinaryOperator::NotIn, "bye", Expression::column("item"));
+        let str_not_op = Expression::binary(
+            BinaryOperator::NotIn,
+            "bye",
+            Expression::simple_column("item"),
+        );
 
-        let str_in_op = Expression::binary(BinaryOperator::In, "hi", Expression::column("item"));
+        let str_in_op =
+            Expression::binary(BinaryOperator::In, "hi", Expression::simple_column("item"));
 
         let result = evaluate_expression(&str_in_op, &batch, None).unwrap();
         let expected = BooleanArray::from(vec![true, true, true]);
@@ -557,7 +562,7 @@ mod tests {
         let values = Int32Array::from(vec![1, 2, 3]);
         let batch =
             RecordBatch::try_new(Arc::new(schema.clone()), vec![Arc::new(values.clone())]).unwrap();
-        let column = Expression::column("a");
+        let column = Expression::simple_column("a");
 
         let results = evaluate_expression(&column, &batch, None).unwrap();
         assert_eq!(results.as_ref(), &values);
@@ -578,7 +583,7 @@ mod tests {
             vec![Arc::new(struct_array.clone())],
         )
         .unwrap();
-        let column = Expression::column("b.a");
+        let column = Expression::split_column("b.a");
         let results = evaluate_expression(&column, &batch, None).unwrap();
         assert_eq!(results.as_ref(), &values);
     }
@@ -588,7 +593,7 @@ mod tests {
         let schema = Schema::new(vec![Field::new("a", DataType::Int32, false)]);
         let values = Int32Array::from(vec![1, 2, 3]);
         let batch = RecordBatch::try_new(Arc::new(schema.clone()), vec![Arc::new(values)]).unwrap();
-        let column = Expression::column("a");
+        let column = Expression::simple_column("a");
 
         let expression = column.clone().add(1);
         let results = evaluate_expression(&expression, &batch, None).unwrap();
@@ -624,8 +629,8 @@ mod tests {
             vec![Arc::new(values.clone()), Arc::new(values)],
         )
         .unwrap();
-        let column_a = Expression::column("a");
-        let column_b = Expression::column("b");
+        let column_a = Expression::simple_column("a");
+        let column_b = Expression::simple_column("b");
 
         let expression = column_a.clone().add(column_b.clone());
         let results = evaluate_expression(&expression, &batch, None).unwrap();
@@ -648,7 +653,7 @@ mod tests {
         let schema = Schema::new(vec![Field::new("a", DataType::Int32, false)]);
         let values = Int32Array::from(vec![1, 2, 3]);
         let batch = RecordBatch::try_new(Arc::new(schema.clone()), vec![Arc::new(values)]).unwrap();
-        let column = Expression::column("a");
+        let column = Expression::simple_column("a");
 
         let expression = column.clone().lt(2);
         let results = evaluate_expression(&expression, &batch, None).unwrap();
@@ -695,8 +700,8 @@ mod tests {
             ],
         )
         .unwrap();
-        let column_a = Expression::column("a");
-        let column_b = Expression::column("b");
+        let column_a = Expression::simple_column("a");
+        let column_b = Expression::simple_column("b");
 
         let expression = column_a.clone().and(column_b.clone());
         let results =

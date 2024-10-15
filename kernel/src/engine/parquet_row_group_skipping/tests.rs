@@ -39,21 +39,21 @@ fn test_get_stat_values() {
 
     // The expression doesn't matter -- it just needs to mention all the columns we care about.
     let columns = Expression::and_from(vec![
-        Expression::column("varlen.utf8"),
-        Expression::column("numeric.ints.int64"),
-        Expression::column("numeric.ints.int32"),
-        Expression::column("numeric.ints.int16"),
-        Expression::column("numeric.ints.int8"),
-        Expression::column("numeric.floats.float32"),
-        Expression::column("numeric.floats.float64"),
-        Expression::column("bool"),
-        Expression::column("varlen.binary"),
-        Expression::column("numeric.decimals.decimal32"),
-        Expression::column("numeric.decimals.decimal64"),
-        Expression::column("numeric.decimals.decimal128"),
-        Expression::column("chrono.date32"),
-        Expression::column("chrono.timestamp"),
-        Expression::column("chrono.timestamp_ntz"),
+        Expression::split_column("varlen.utf8"),
+        Expression::split_column("numeric.ints.int64"),
+        Expression::split_column("numeric.ints.int32"),
+        Expression::split_column("numeric.ints.int16"),
+        Expression::split_column("numeric.ints.int8"),
+        Expression::split_column("numeric.floats.float32"),
+        Expression::split_column("numeric.floats.float64"),
+        Expression::simple_column("bool"),
+        Expression::split_column("varlen.binary"),
+        Expression::split_column("numeric.decimals.decimal32"),
+        Expression::split_column("numeric.decimals.decimal64"),
+        Expression::split_column("numeric.decimals.decimal128"),
+        Expression::split_column("chrono.date32"),
+        Expression::split_column("chrono.timestamp"),
+        Expression::split_column("chrono.timestamp_ntz"),
     ]);
     let filter = RowGroupFilter::new(metadata.metadata().row_group(0), &columns);
 

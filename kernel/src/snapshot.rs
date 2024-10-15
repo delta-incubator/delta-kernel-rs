@@ -110,8 +110,8 @@ impl LogSegment {
         // filter out log files that do not contain metadata or protocol information
         use Expression as Expr;
         let meta_predicate = Expr::or(
-            Expr::column("metaData.id").is_not_null(),
-            Expr::column("protocol.minReaderVersion").is_not_null(),
+            Expr::split_column("metaData.id").is_not_null(),
+            Expr::split_column("protocol.minReaderVersion").is_not_null(),
         );
         // read the same protocol and metadata schema for both commits and checkpoints
         self.replay(engine, schema.clone(), schema, Some(meta_predicate))
