@@ -177,12 +177,12 @@ impl StructField {
         }
 
         struct ApplyNameMapping;
-        impl SchemaTransformer for ApplyNameMapping {
-            fn visit_field<'a>(
+        impl SchemaTransform for ApplyNameMapping {
+            fn transform_struct_field<'a>(
                 &mut self,
                 field: Cow<'a, StructField>,
             ) -> Option<Cow<'a, StructField>> {
-                let field = self.visit_field_impl(field)?;
+                let field = self.recurse_into_struct_field(field)?;
                 match field.get_config_value(&ColumnMetadataKey::ColumnMappingPhysicalName) {
                     Some(MetadataValue::String(physical_name)) => {
                         Some(Cow::Owned(field.with_name(physical_name)))
@@ -192,7 +192,7 @@ impl StructField {
             }
         }
 
-        let field = ApplyNameMapping.visit_field(Cow::Borrowed(self));
+        let field = ApplyNameMapping.transform_struct_field(Cow::Borrowed(self));
         Ok(field.unwrap().into_owned())
     }
 }
@@ -583,17 +583,19 @@ impl Display for DataType {
 /// * `Some(Cow::Borrowed)` -- The schema element was not transformed.
 /// * `None` -- The schema element was filtered out and the parent should no longer reference it.
 ///
-/// The main entry point is [`Self::visit`] tho [`Self::visit_struct`] also works if a
-/// [`StructType`] is already available.
+/// The transform can start from whatever schema element is available
+/// (e.g. [`Self::transform_struct`] to start with [`StructType`]), or it can start from the generic
+/// [`Self::transform`].
 ///
-/// The provided `visit_xxx` methods default to no-op, and implementations should selectively
-/// override specific `visit_xxx` methods as needed for the task at hand.
+/// The provided `transform_xxx` methods all default to no-op, and implementations should
+/// selectively override specific `transform_xxx` methods as needed for the task at hand.
 ///
-/// The provided `visit_xxx_impl` methods encapsulate the boilerplate work of actually traversing
-/// each datatype, which implementations can call as needed but will generally not need to override.
-pub trait SchemaTransformer {
-    /// Called for each primitive type encountered during the schema traversal.
-    fn visit_primitive<'a>(
+/// The provided `recurse_into_xxx` methods encapsulate the boilerplate work of recursing into the
+/// child schema elements of each schema element. Implementations can call these as needed but will
+/// generally not need to override them.
+pub trait SchemaTransform {
+    /// Called for each primitive encountered during the schema traversal.
+    fn transform_primitive<'a>(
         &mut self,
         ptype: Cow<'a, PrimitiveType>,
     ) -> Option<Cow<'a, PrimitiveType>> {
@@ -601,40 +603,44 @@ pub trait SchemaTransformer {
     }
 
     /// Called for each struct encountered during the schema traversal. Implementations can call
-    /// [`Self::visit_struct_impl`] if they wish to recursively transform the struct's fields.
-    fn visit_struct<'a>(&mut self, stype: Cow<'a, StructType>) -> Option<Cow<'a, StructType>> {
-        self.visit_struct_impl(stype)
+    /// [`Self::recurse_into_struct`] if they wish to recursively transform the struct's fields.
+    fn transform_struct<'a>(&mut self, stype: Cow<'a, StructType>) -> Option<Cow<'a, StructType>> {
+        self.recurse_into_struct(stype)
     }
 
     /// Called for each struct field encountered during the schema traversal. Implementations can
-    /// call [`Self::visit_field_impl`] if they wish to recursively transform the field's data type.
-    fn visit_field<'a>(&mut self, field: Cow<'a, StructField>) -> Option<Cow<'a, StructField>> {
-        self.visit_field_impl(field)
+    /// call [`Self::recurse_into_struct_field`] if they wish to recursively transform the field's
+    /// data type.
+    fn transform_struct_field<'a>(
+        &mut self,
+        field: Cow<'a, StructField>,
+    ) -> Option<Cow<'a, StructField>> {
+        self.recurse_into_struct_field(field)
     }
 
     /// Called for each array encountered during the schema traversal. Implementations can call
-    /// [`Self::visit_array_impl`] if they wish to recursively transform the array's element type.
-    fn visit_array<'a>(&mut self, atype: Cow<'a, ArrayType>) -> Option<Cow<'a, ArrayType>> {
-        self.visit_array_impl(atype)
+    /// [`Self::recurse_into_array`] if they wish to recursively transform the array's element type.
+    fn transform_array<'a>(&mut self, atype: Cow<'a, ArrayType>) -> Option<Cow<'a, ArrayType>> {
+        self.recurse_into_array(atype)
     }
 
     /// Called for each map encountered during the schema traversal. Implementations can call
-    /// [`Self::visit_map_impl`] if they wish to recursively transform the map's key and value
+    /// [`Self::recurse_into_map`] if they wish to recursively transform the map's key and/or value
     /// types.
-    fn visit_map<'a>(&mut self, mtype: Cow<'a, MapType>) -> Option<Cow<'a, MapType>> {
-        self.visit_map_impl(mtype)
+    fn transform_map<'a>(&mut self, mtype: Cow<'a, MapType>) -> Option<Cow<'a, MapType>> {
+        self.recurse_into_map(mtype)
     }
 
-    /// General traversal entry point for a recursive traversal. Also invoked internally to dispatch
-    /// on nested data types encountered during the traversal.
-    fn visit<'a>(&mut self, data_type: Cow<'a, DataType>) -> Option<Cow<'a, DataType>> {
+    /// General entry point for a recursive traversal over any data type. Also invoked internally to
+    /// dispatch on nested data types encountered during the traversal.
+    fn transform<'a>(&mut self, data_type: Cow<'a, DataType>) -> Option<Cow<'a, DataType>> {
         use Cow::*;
         use DataType::*;
 
         // quick boilerplate helper
-        macro_rules! visit {
-            ( $visitor_fn:ident, $arg:ident ) => {
-                match self.$visitor_fn(Borrowed($arg)) {
+        macro_rules! apply_transform {
+            ( $transform_fn:ident, $arg:ident ) => {
+                match self.$transform_fn(Borrowed($arg)) {
                     Some(Borrowed(_)) => Some(data_type),
                     Some(Owned(inner)) => Some(Owned(inner.into())),
                     None => None,
@@ -642,21 +648,21 @@ pub trait SchemaTransformer {
             };
         }
         match data_type.as_ref() {
-            Primitive(ptype) => visit!(visit_primitive, ptype),
-            Array(atype) => visit!(visit_array, atype),
-            Struct(stype) => visit!(visit_struct, stype),
-            Map(mtype) => visit!(visit_map, mtype),
+            Primitive(ptype) => apply_transform!(transform_primitive, ptype),
+            Array(atype) => apply_transform!(transform_array, atype),
+            Struct(stype) => apply_transform!(transform_struct, stype),
+            Map(mtype) => apply_transform!(transform_map, mtype),
         }
     }
 
-    /// Recursively visits a field's data type. If the data type changes, update the field to
-    /// reference it. Otherwise, no-op.
-    fn visit_field_impl<'a>(
+    /// Recursively transforms a struct field's data type. If the data type changes, update the
+    /// field to reference it. Otherwise, no-op.
+    fn recurse_into_struct_field<'a>(
         &mut self,
         field: Cow<'a, StructField>,
     ) -> Option<Cow<'a, StructField>> {
         use Cow::*;
-        let field = match self.visit(Borrowed(&field.data_type))? {
+        let field = match self.transform(Borrowed(&field.data_type))? {
             Borrowed(_) => field,
             Owned(new_data_type) => Owned(StructField {
                 name: field.name.clone(),
@@ -668,14 +674,17 @@ pub trait SchemaTransformer {
         Some(field)
     }
 
-    /// Recursively visits a struct's fields. If one or more fields were changed or removed, update
-    /// the struct to reference all surviving fields. Otherwise, no-op.
-    fn visit_struct_impl<'a>(&mut self, stype: Cow<'a, StructType>) -> Option<Cow<'a, StructType>> {
+    /// Recursively transforms a struct's fields. If one or more fields were changed or removed,
+    /// update the struct to reference all surviving fields. Otherwise, no-op.
+    fn recurse_into_struct<'a>(
+        &mut self,
+        stype: Cow<'a, StructType>,
+    ) -> Option<Cow<'a, StructType>> {
         use Cow::*;
         let mut num_borrowed = 0;
         let fields: Vec<_> = stype
             .fields()
-            .filter_map(|field| self.visit_field(Borrowed(field)))
+            .filter_map(|field| self.transform_struct_field(Borrowed(field)))
             .inspect(|field| {
                 if matches!(field, Borrowed(_)) {
                     num_borrowed += 1;
@@ -691,11 +700,11 @@ pub trait SchemaTransformer {
         Some(stype)
     }
 
-    /// Recursively visits an array's element type. If the element type changes, update the array to
-    /// reference it. Otherwise, no-op.
-    fn visit_array_impl<'a>(&mut self, atype: Cow<'a, ArrayType>) -> Option<Cow<'a, ArrayType>> {
+    /// Recursively transforms an array's element type. If the element type changes, update the
+    /// array to reference it. Otherwise, no-op.
+    fn recurse_into_array<'a>(&mut self, atype: Cow<'a, ArrayType>) -> Option<Cow<'a, ArrayType>> {
         use Cow::*;
-        let atype = match self.visit(Borrowed(&atype.element_type))? {
+        let atype = match self.transform(Borrowed(&atype.element_type))? {
             Borrowed(_) => atype,
             Owned(element_type) => Owned(ArrayType {
                 type_name: atype.type_name.clone(),
@@ -706,12 +715,12 @@ pub trait SchemaTransformer {
         Some(atype)
     }
 
-    /// Recursively visits a map's key and value types. If either one changes, update the map to
+    /// Recursively transforms a map's key and value types. If either one changes, update the map to
     /// reference them. If either one is removed, remove the map as well. Otherwise, no-op.
-    fn visit_map_impl<'a>(&mut self, mtype: Cow<'a, MapType>) -> Option<Cow<'a, MapType>> {
+    fn recurse_into_map<'a>(&mut self, mtype: Cow<'a, MapType>) -> Option<Cow<'a, MapType>> {
         use Cow::*;
-        let key_type = self.visit(Borrowed(&mtype.key_type))?;
-        let value_type = self.visit(Borrowed(&mtype.value_type))?;
+        let key_type = self.transform(Borrowed(&mtype.key_type))?;
+        let value_type = self.transform(Borrowed(&mtype.value_type))?;
         let mtype = match (&key_type, &value_type) {
             (Borrowed(_), Borrowed(_)) => mtype,
             _ => Owned(MapType {

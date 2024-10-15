@@ -9,7 +9,7 @@ use crate::actions::visitors::SelectionVectorVisitor;
 use crate::actions::{get_log_schema, ADD_NAME};
 use crate::error::DeltaResult;
 use crate::expressions::{BinaryOperator, Expression as Expr, UnaryOperator, VariadicOperator};
-use crate::schema::{DataType, SchemaRef, SchemaTransformer, StructField, StructType};
+use crate::schema::{DataType, PrimitiveType, SchemaRef, SchemaTransform, StructField, StructType};
 use crate::{Engine, EngineData, ExpressionEvaluator, JsonHandler};
 
 /// Get the expression that checks if a col could be null, assuming tight_bounds = true. In this
@@ -209,21 +209,18 @@ impl DataSkippingFilter {
         }
         let minmax_schema = StructType::new(data_fields);
 
-        // Convert a min/max stats schema into a nullcount schema (all LONG field types)
-        struct NullCountStatsTransformer;
-        impl SchemaTransformer for NullCountStatsTransformer {
-            fn visit_field<'a>(
+        // Convert a min/max stats schema into a nullcount schema (all leaf fields are LONG)
+        struct NullCountStatsTransform;
+        impl SchemaTransform for NullCountStatsTransform {
+            fn transform_primitive<'a>(
                 &mut self,
-                field: Cow<'a, StructField>,
-            ) -> Option<Cow<'a, StructField>> {
-                Some(Cow::Owned(StructField {
-                    data_type: DataType::LONG,
-                    ..field.into_owned()
-                }))
+                _ptype: Cow<'a, PrimitiveType>,
+            ) -> Option<Cow<'a, PrimitiveType>> {
+                Some(Cow::Owned(PrimitiveType::Long))
             }
         }
-        let nullcount_schema = NullCountStatsTransformer
-            .visit_struct(Cow::Borrowed(&minmax_schema))?
+        let nullcount_schema = NullCountStatsTransform
+            .transform_struct(Cow::Borrowed(&minmax_schema))?
             .into_owned();
         let stats_schema = Arc::new(StructType::new([
             StructField::new("numRecords", DataType::LONG, true),
