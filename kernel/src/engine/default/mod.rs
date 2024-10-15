@@ -40,21 +40,33 @@ pub struct DefaultEngine<E: TaskExecutor> {
 impl<E: TaskExecutor> DefaultEngine<E> {
     /// Create a new [`DefaultEngine`] instance
     ///
-    /// The `path` parameter is used to determine the type of storage used.
+    /// # Parameters
     ///
-    /// The `task_executor` is used to spawn async IO tasks. See [executor::TaskExecutor].
-    pub fn try_new<I, K, V>(path: &Url, options: I, task_executor: Arc<E>) -> DeltaResult<Self>
+    /// - `table_root`: The URL of the table within storage.
+    /// - `options`: key/value pairs of options to pass to the object store.
+    /// - `task_executor`: Used to spawn async IO tasks. See [executor::TaskExecutor].
+    pub fn try_new<K, V>(
+        table_root: &Url,
+        options: impl IntoIterator<Item = (K, V)>,
+        task_executor: Arc<E>,
+    ) -> DeltaResult<Self>
     where
-        I: IntoIterator<Item = (K, V)>,
         K: AsRef<str>,
         V: Into<String>,
     {
-        let (store, prefix) = parse_url_opts(path, options)?;
-        let store = Arc::new(store);
-        Ok(Self::new(store, prefix, task_executor))
+        // table root is the path of the table in the ObjectStore
+        let (store, table_root) = parse_url_opts(table_root, options)?;
+        Ok(Self::new(Arc::new(store), table_root, task_executor))
     }
 
-    pub fn new(store: Arc<DynObjectStore>, prefix: Path, task_executor: Arc<E>) -> Self {
+    /// Create a new [`DefaultEngine`] instance
+    ///
+    /// # Parameters
+    ///
+    /// - `store`: The object store to use.
+    /// - `table_root_path`: The root path of the table within storage.
+    /// - `task_executor`: Used to spawn async IO tasks. See [executor::TaskExecutor].
+    pub fn new(store: Arc<DynObjectStore>, table_root: Path, task_executor: Arc<E>) -> Self {
         // HACK to check if we're using a LocalFileSystem from ObjectStore. We need this because
         // local filesystem doesn't return a sorted list by default. Although the `object_store`
         // crate explicitly says it _does not_ return a sorted listing, in practice all the cloud
@@ -80,7 +92,7 @@ impl<E: TaskExecutor> DefaultEngine<E> {
             file_system: Arc::new(ObjectStoreFileSystemClient::new(
                 store.clone(),
                 !is_local,
-                prefix,
+                table_root,
                 task_executor.clone(),
             )),
             json: Arc::new(DefaultJsonHandler::new(
