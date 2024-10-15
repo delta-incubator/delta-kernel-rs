@@ -1,8 +1,6 @@
 cmake_minimum_required(VERSION 3.12)
 project(read_table)
 option(PRINT_DATA "Print out the table data. Requires arrow-glib" ON)
-
-# Configuration for the read_table executable
 add_executable(read_table read_table.c arrow.c)
 target_compile_definitions(read_table PUBLIC DEFINE_DEFAULT_ENGINE)
 target_include_directories(read_table PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/../../../target/ffi-headers")
@@ -10,7 +8,7 @@ target_link_directories(read_table PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/../../../
 target_link_libraries(read_table PUBLIC delta_kernel_ffi)
 target_compile_options(read_table PUBLIC)
 
-# Add the read_table test
+# Add the test
 include(CTest)
 set(TestRunner "../../../tests/read-table-testing/run_test.sh")
 set(DatPath "../../../../acceptance/tests/dat/out/reader_tests/generated")
@@ -40,4 +38,3 @@ if(PRINT_DATA)
   target_compile_options(read_table PUBLIC ${ARROW_GLIB_CFLAGS_OTHER})
   target_compile_definitions(read_table PUBLIC PRINT_ARROW_DATA)
 endif(PRINT_DATA)
-
