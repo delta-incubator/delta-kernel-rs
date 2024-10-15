@@ -18,6 +18,9 @@ pub unsafe extern "C" fn free_kernel_predicate(data: Handle<SharedExpression>) {
 type VisitLiteralFn<T> = extern "C" fn(data: *mut c_void, sibling_list_id: usize, value: T);
 type VisitBinaryOpFn =
     extern "C" fn(data: *mut c_void, sibling_list_id: usize, child_list_id: usize);
+type VisitVariadicFn =
+    extern "C" fn(data: *mut c_void, sibling_list_id: usize, child_list_id: usize);
+type VisitUnaryFn = extern "C" fn(data: *mut c_void, sibling_list_id: usize, child_list_id: usize);
 
 /// The [`EngineExpressionVisitor`] defines a visitor system to allow engines to build their own
 /// representation of a kernel expression.
@@ -110,17 +113,16 @@ pub struct EngineExpressionVisitor {
     pub visit_null_literal: extern "C" fn(data: *mut c_void, sibling_list_id: usize),
     /// Visits an `and` expression belonging to the list identified by `sibling_list_id`.
     /// The sub-expressions of the array are in a list identified by `child_list_id`
-    pub visit_and: extern "C" fn(data: *mut c_void, sibling_list_id: usize, child_list_id: usize),
+    pub visit_and: VisitVariadicFn,
     /// Visits an `or` expression belonging to the list identified by `sibling_list_id`.
     /// The sub-expressions of the array are in a list identified by `child_list_id`
-    pub visit_or: extern "C" fn(data: *mut c_void, sibling_list_id: usize, child_list_id: usize),
+    pub visit_or: VisitVariadicFn,
     /// Visits a `not` expression belonging to the list identified by `sibling_list_id`.
     /// The sub-expression will be in a _one_ item list identified by `child_list_id`
-    pub visit_not: extern "C" fn(data: *mut c_void, sibling_list_id: usize, child_list_id: usize),
+    pub visit_not: VisitUnaryFn,
     /// Visits a `is_null` expression belonging to the list identified by `sibling_list_id`.
     /// The sub-expression will be in a _one_ item list identified by `child_list_id`
-    pub visit_is_null:
-        extern "C" fn(data: *mut c_void, sibling_list_id: usize, child_list_id: usize),
+    pub visit_is_null: VisitUnaryFn,
     /// Visits the `LessThan` binary operator belonging to the list identified by `sibling_list_id`.
     /// The operands will be in a _two_ item list identified by `child_list_id`
     pub visit_lt: VisitBinaryOpFn,
