@@ -481,7 +481,7 @@ fn apply_schema_to_map(
             "Arrow map type wasn't a struct.".to_string(),
         ));
     };
-    if map_struct_array.len() != 2 {
+    if map_struct_array.columns().len() != 2 {
         return Err(Error::generic("Map struct did not have 2 members"));
     }
 
