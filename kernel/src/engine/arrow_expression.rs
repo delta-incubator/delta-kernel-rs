@@ -590,23 +590,23 @@ mod tests {
         let batch = RecordBatch::try_new(Arc::new(schema.clone()), vec![Arc::new(values)]).unwrap();
         let column = Expression::column("a");
 
-        let expression = column.clone().add(Expression::literal(1));
+        let expression = column.clone().add(1);
         let results = evaluate_expression(&expression, &batch, None).unwrap();
         let expected = Arc::new(Int32Array::from(vec![2, 3, 4]));
         assert_eq!(results.as_ref(), expected.as_ref());
 
-        let expression = column.clone().sub(Expression::literal(1));
+        let expression = column.clone().sub(1);
         let results = evaluate_expression(&expression, &batch, None).unwrap();
         let expected = Arc::new(Int32Array::from(vec![0, 1, 2]));
         assert_eq!(results.as_ref(), expected.as_ref());
 
-        let expression = column.clone().mul(Expression::literal(2));
+        let expression = column.clone().mul(2);
         let results = evaluate_expression(&expression, &batch, None).unwrap();
         let expected = Arc::new(Int32Array::from(vec![2, 4, 6]));
         assert_eq!(results.as_ref(), expected.as_ref());
 
         // TODO handle type casting
-        let expression = column.div(Expression::literal(1));
+        let expression = column.div(1);
         let results = evaluate_expression(&expression, &batch, None).unwrap();
         let expected = Arc::new(Int32Array::from(vec![1, 2, 3]));
         assert_eq!(results.as_ref(), expected.as_ref())
@@ -649,34 +649,33 @@ mod tests {
         let values = Int32Array::from(vec![1, 2, 3]);
         let batch = RecordBatch::try_new(Arc::new(schema.clone()), vec![Arc::new(values)]).unwrap();
         let column = Expression::column("a");
-        let lit = Expression::literal(2);
 
-        let expression = column.clone().lt(lit.clone());
+        let expression = column.clone().lt(2);
         let results = evaluate_expression(&expression, &batch, None).unwrap();
         let expected = Arc::new(BooleanArray::from(vec![true, false, false]));
         assert_eq!(results.as_ref(), expected.as_ref());
 
-        let expression = column.clone().lt_eq(lit.clone());
+        let expression = column.clone().lt_eq(2);
         let results = evaluate_expression(&expression, &batch, None).unwrap();
         let expected = Arc::new(BooleanArray::from(vec![true, true, false]));
         assert_eq!(results.as_ref(), expected.as_ref());
 
-        let expression = column.clone().gt(lit.clone());
+        let expression = column.clone().gt(2);
         let results = evaluate_expression(&expression, &batch, None).unwrap();
         let expected = Arc::new(BooleanArray::from(vec![false, false, true]));
         assert_eq!(results.as_ref(), expected.as_ref());
 
-        let expression = column.clone().gt_eq(lit.clone());
+        let expression = column.clone().gt_eq(2);
         let results = evaluate_expression(&expression, &batch, None).unwrap();
         let expected = Arc::new(BooleanArray::from(vec![false, true, true]));
         assert_eq!(results.as_ref(), expected.as_ref());
 
-        let expression = column.clone().eq(lit.clone());
+        let expression = column.clone().eq(2);
         let results = evaluate_expression(&expression, &batch, None).unwrap();
         let expected = Arc::new(BooleanArray::from(vec![false, true, false]));
         assert_eq!(results.as_ref(), expected.as_ref());
 
-        let expression = column.clone().ne(lit.clone());
+        let expression = column.clone().ne(2);
         let results = evaluate_expression(&expression, &batch, None).unwrap();
         let expected = Arc::new(BooleanArray::from(vec![true, false, true]));
         assert_eq!(results.as_ref(), expected.as_ref());
@@ -706,7 +705,7 @@ mod tests {
         let expected = Arc::new(BooleanArray::from(vec![false, false]));
         assert_eq!(results.as_ref(), expected.as_ref());
 
-        let expression = column_a.clone().and(Expression::literal(true));
+        let expression = column_a.clone().and(true);
         let results =
             evaluate_expression(&expression, &batch, Some(&crate::schema::DataType::BOOLEAN))
                 .unwrap();
@@ -720,7 +719,7 @@ mod tests {
         let expected = Arc::new(BooleanArray::from(vec![true, true]));
         assert_eq!(results.as_ref(), expected.as_ref());
 
-        let expression = column_a.clone().or(Expression::literal(false));
+        let expression = column_a.clone().or(false);
         let results =
             evaluate_expression(&expression, &batch, Some(&crate::schema::DataType::BOOLEAN))
                 .unwrap();
