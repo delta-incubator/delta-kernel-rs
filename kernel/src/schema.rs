@@ -341,11 +341,15 @@ pub struct MapType {
 }
 
 impl MapType {
-    pub fn new(key_type: DataType, value_type: DataType, value_contains_null: bool) -> Self {
+    pub fn new(
+        key_type: impl Into<DataType>,
+        value_type: impl Into<DataType>,
+        value_contains_null: bool,
+    ) -> Self {
         Self {
             type_name: "map".into(),
-            key_type,
-            value_type,
+            key_type: key_type.into(),
+            value_type: value_type.into(),
             value_contains_null,
         }
     }
@@ -734,6 +738,76 @@ pub trait SchemaTransform {
     }
 }
 
+/// A schema "transform" that doesn't actually change the schema at all. Instead, it measures the
+/// maximum depth of a schema, with a depth limit to prevent stack overflow. Useful for verifying
+/// that a schema has reasonable depth before attempting to work with it.
+pub struct SchemaDepthChecker {
+    depth_limit: usize,
+    max_depth_seen: usize,
+    current_depth: usize,
+    call_count: usize,
+}
+impl SchemaDepthChecker {
+    /// Depth-checks the given data type against a given depth limit. The return value is the
+    /// largest depth seen, which is capped at one more than the depth limit (indicating the
+    /// recursion was terminated).
+    pub fn check(data_type: &DataType, depth_limit: usize) -> usize {
+        Self::check_with_call_count(data_type, depth_limit).0
+    }
+
+    // Exposed for testing
+    fn check_with_call_count(data_type: &DataType, depth_limit: usize) -> (usize, usize) {
+        let mut checker = Self {
+            depth_limit,
+            max_depth_seen: 0,
+            current_depth: 0,
+            call_count: 0,
+        };
+        checker.transform(Cow::Borrowed(data_type));
+        (checker.max_depth_seen, checker.call_count)
+    }
+
+    // Triggers the requested recursion only doing so would not exceed the depth limit.
+    fn depth_limited<T: std::fmt::Debug>(
+        &mut self,
+        recurse: impl FnOnce(&mut Self, T) -> Option<T>,
+        arg: T,
+    ) -> Option<T> {
+        self.call_count += 1;
+        if self.max_depth_seen < self.current_depth {
+            self.max_depth_seen = self.current_depth;
+            if self.depth_limit < self.current_depth {
+                println!("Max depth {} exceeded by {:?}", self.depth_limit, arg);
+            }
+        }
+        if self.depth_limit < self.max_depth_seen {
+            return Some(arg); // back out the recursion, we're done
+        }
+
+        self.current_depth += 1;
+        let result = recurse(self, arg);
+        self.current_depth -= 1;
+        result
+    }
+}
+impl SchemaTransform for SchemaDepthChecker {
+    fn transform_struct<'a>(&mut self, stype: Cow<'a, StructType>) -> Option<Cow<'a, StructType>> {
+        self.depth_limited(Self::recurse_into_struct, stype)
+    }
+    fn transform_struct_field<'a>(
+        &mut self,
+        field: Cow<'a, StructField>,
+    ) -> Option<Cow<'a, StructField>> {
+        self.depth_limited(Self::recurse_into_struct_field, field)
+    }
+    fn transform_array<'a>(&mut self, atype: Cow<'a, ArrayType>) -> Option<Cow<'a, ArrayType>> {
+        self.depth_limited(Self::recurse_into_array, atype)
+    }
+    fn transform_map<'a>(&mut self, mtype: Cow<'a, MapType>) -> Option<Cow<'a, MapType>> {
+        self.depth_limited(Self::recurse_into_map, mtype)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -925,5 +999,97 @@ mod tests {
         }
         "#;
         assert!(serde_json::from_str::<StructField>(data).is_err());
+    }
+
+    #[test]
+    fn test_depth_checker() {
+        let schema = DataType::struct_type([
+            StructField::new(
+                "a",
+                ArrayType::new(
+                    DataType::struct_type([
+                        StructField::new("w", DataType::LONG, true),
+                        StructField::new("x", ArrayType::new(DataType::LONG, true), true),
+                        StructField::new(
+                            "y",
+                            MapType::new(DataType::LONG, DataType::STRING, true),
+                            true,
+                        ),
+                        StructField::new(
+                            "z",
+                            DataType::struct_type([
+                                StructField::new("n", DataType::LONG, true),
+                                StructField::new("m", DataType::STRING, true),
+                            ]),
+                            true,
+                        ),
+                    ]),
+                    true,
+                ),
+                true,
+            ),
+            StructField::new(
+                "b",
+                DataType::struct_type([
+                    StructField::new("o", ArrayType::new(DataType::LONG, true), true),
+                    StructField::new(
+                        "p",
+                        MapType::new(DataType::LONG, DataType::STRING, true),
+                        true,
+                    ),
+                    StructField::new(
+                        "q",
+                        DataType::struct_type([
+                            StructField::new(
+                                "s",
+                                DataType::struct_type([
+                                    StructField::new("u", DataType::LONG, true),
+                                    StructField::new("v", DataType::LONG, true),
+                                ]),
+                                true,
+                            ),
+                            StructField::new("t", DataType::LONG, true),
+                        ]),
+                        true,
+                    ),
+                    StructField::new("r", DataType::LONG, true),
+                ]),
+                true,
+            ),
+            StructField::new(
+                "c",
+                MapType::new(
+                    DataType::LONG,
+                    DataType::struct_type([
+                        StructField::new("f", DataType::LONG, true),
+                        StructField::new("g", DataType::STRING, true),
+                    ]),
+                    true,
+                ),
+                true,
+            ),
+        ]);
+
+        // Similer to SchemaDepthChecker::check, but also returns call count
+        let check_with_call_count =
+            |depth_limit| SchemaDepthChecker::check_with_call_count(&schema, depth_limit);
+
+        // Hit depth limit at "a" but still have to look at "b" "c" "d"
+        assert_eq!(check_with_call_count(1), (2, 5));
+        assert_eq!(check_with_call_count(2), (3, 6));
+
+        // Hit depth limit at "w" but still have to look at "x" "y" "z"
+        assert_eq!(check_with_call_count(3), (4, 10));
+        assert_eq!(check_with_call_count(4), (5, 11));
+
+        // Depth limit hit at "n" but still have to look at "m"
+        assert_eq!(check_with_call_count(5), (6, 15));
+
+        // Depth limit not hit until "u"
+        assert_eq!(check_with_call_count(6), (7, 28));
+
+        // Depth limit not hit (full traversal required)
+        assert_eq!(check_with_call_count(7), (7, 32));
+        assert_eq!(check_with_call_count(8), (7, 32));
     }
 }
