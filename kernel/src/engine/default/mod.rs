@@ -79,7 +79,7 @@ impl<E: TaskExecutor> DefaultEngine<E> {
         Self {
             file_system: Arc::new(ObjectStoreFileSystemClient::new(
                 store.clone(),
-                is_local,
+                !is_local,
                 prefix,
                 task_executor.clone(),
             )),

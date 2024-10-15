@@ -13,7 +13,7 @@ use crate::{DeltaResult, Error, FileMeta, FileSlice, FileSystemClient};
 #[derive(Debug)]
 pub struct ObjectStoreFileSystemClient<E: TaskExecutor> {
     inner: Arc<DynObjectStore>,
-    is_local: bool,
+    has_ordered_listing: bool,
     table_root: Path,
     task_executor: Arc<E>,
     readahead: usize,
@@ -22,13 +22,13 @@ pub struct ObjectStoreFileSystemClient<E: TaskExecutor> {
 impl<E: TaskExecutor> ObjectStoreFileSystemClient<E> {
     pub(crate) fn new(
         store: Arc<DynObjectStore>,
-        is_local: bool,
+        has_ordered_listing: bool,
         table_root: Path,
         task_executor: Arc<E>,
     ) -> Self {
         Self {
             inner: store,
-            is_local,
+            has_ordered_listing,
             table_root,
             task_executor,
             readahead: 10,
@@ -80,8 +80,8 @@ impl<E: TaskExecutor> FileSystemClient for ObjectStoreFileSystemClient<E> {
             }
         });
 
-        if self.is_local {
-            // LocalFileSystem doesn't return things in the order we require
+        if !self.has_ordered_listing {
+            // This FS doesn't return things in the order we require
             let mut fms: Vec<FileMeta> = receiver.into_iter().try_collect()?;
             fms.sort_unstable();
             Ok(Box::new(fms.into_iter().map(Ok)))
@@ -191,7 +191,7 @@ mod tests {
         let prefix = Path::from(url.path());
         let client = ObjectStoreFileSystemClient::new(
             store,
-            true,
+            false, // don't have ordered listing
             prefix,
             Arc::new(TokioBackgroundExecutor::new()),
         );

@@ -536,7 +536,7 @@ mod tests {
         let prefix = Path::from(url.path());
         let client = ObjectStoreFileSystemClient::new(
             store,
-            true,
+            false, // don't have ordered listing
             prefix,
             Arc::new(TokioBackgroundExecutor::new()),
         );
@@ -596,7 +596,7 @@ mod tests {
 
         let client = ObjectStoreFileSystemClient::new(
             store,
-            true, // is_local
+            false, // don't have ordered listing
             Path::from("/"),
             Arc::new(TokioBackgroundExecutor::new()),
         );
@@ -641,7 +641,7 @@ mod tests {
 
         let client = ObjectStoreFileSystemClient::new(
             store,
-            true,
+            false, // don't have ordered listing
             Path::from("/"),
             Arc::new(TokioBackgroundExecutor::new()),
         );
