@@ -12,7 +12,8 @@ Please clarify what changes you are proposing and why the changes are needed.
 The purpose of this section is to outline the changes, why they are needed, and how this PR fixes the issue.
 If the reason for the change is already explained clearly in an issue, then it does not need to be restated here.
   1. If you propose a new API or feature, clarify the use case for a new API or feature.
-  2. If you fix a bug, you can clarify why it is a bug. If possible, provide a concise example to reproduce the issue for a faster review.
+  2. If you fix a bug, you can clarify why it is a bug.
+  3. If possible, provide a concise example to reproduce the issue for a faster review.
 -->
 
 <!--
