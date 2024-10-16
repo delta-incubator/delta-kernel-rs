@@ -392,24 +392,23 @@ fn transform_field_and_col(
         .clone()
         .with_nullable(nullable)
         .with_data_type(transformed_col.data_type().clone());
-    let transformed_field = if let Some(name) = rename {
-        transformed_field.with_name(name)
-    } else {
-        transformed_field
+    let transformed_field = match rename {
+        Some(name) => transformed_field.with_name(name),
+        None => transformed_field,
     };
-    let transformed_field = if let Some(metadata) = metadata {
-        transformed_field.with_metadata(metadata)
-    } else {
-        transformed_field
+    let transformed_field = match metadata {
+        Some(metadata) => transformed_field.with_metadata(metadata),
+        None => transformed_field,
     };
     Ok((transformed_field, transformed_col))
 }
 
 // A helper that is a wrapper over `transform_field_and_col`. This will take apart the passed struct
-// and use that method to transform each column and then put the struct back together. target types
+// and use that method to transform each column and then put the struct back together. Target types
 // and names for each column should be passed in `target_types_and_names`. The number of elements in
 // the `target_types_and_names` iterator _must_ be the same as the number of columns in
-// `struct_array`.
+// `struct_array`. The transformation is ordinal. That is, the order of fields in `target_fields`
+// _must_ match the order of the columns in `struct_array`.
 fn transform_struct<'a>(
     struct_array: &StructArray,
     target_fields: impl Iterator<Item = &'a StructField>,
@@ -453,18 +452,7 @@ fn transform_struct<'a>(
 
 // Transform a struct array. The data is in `sa`, the current fields are in `arrow_fields`, and the
 // target fields are in `kernel_fields`.
-fn apply_schema_to_struct(
-    sa: &StructArray,
-    arrow_fields: &Fields,
-    kernel_fields: &Schema,
-) -> DeltaResult<StructArray> {
-    if kernel_fields.fields.len() != arrow_fields.len() {
-        return Err(make_arrow_error(format!(
-            "Kernel schema had {} fields, but data has {}",
-            kernel_fields.fields.len(),
-            arrow_fields.len()
-        )));
-    }
+fn apply_schema_to_struct(sa: &StructArray, kernel_fields: &Schema) -> DeltaResult<StructArray> {
     transform_struct(sa, kernel_fields.fields())
 }
 
@@ -496,13 +484,8 @@ fn apply_schema_to_map(
     let (map_field, offset_buffer, map_struct_array, nulls, ordered) = ma.clone().into_parts();
 
     let ArrowDataType::Struct(_) = arrow_map_type.data_type() else {
-        return Err(make_arrow_error(
-            "Arrow map type wasn't a struct.".to_string(),
-        ));
+        return Err(make_arrow_error("Arrow map type wasn't a struct."));
     };
-    if map_struct_array.columns().len() != 2 {
-        return Err(Error::generic("Map struct did not have 2 members"));
-    }
 
     let target_fields: Vec<StructField> = map_struct_array
         .fields()
@@ -547,19 +530,15 @@ fn apply_schema_to(
     kernel_type: &DataType,
 ) -> DeltaResult<Option<Arc<dyn Array>>> {
     match (kernel_type, arrow_type) {
-        (DataType::Struct(kernel_fields), ArrowDataType::Struct(arrow_fields)) => {
+        (DataType::Struct(kernel_fields), ArrowDataType::Struct(_)) => {
             let Some(sa) = col.as_struct_opt() else {
                 return Err(make_arrow_error(
                     "Arrow claimed to be a struct but isn't a StructArray",
                 ));
             };
-            Ok(Some(Arc::new(apply_schema_to_struct(
-                sa,
-                arrow_fields,
-                kernel_fields,
-            )?)))
+            Ok(Some(Arc::new(apply_schema_to_struct(sa, kernel_fields)?)))
         }
-        (DataType::Array(inner_type), ArrowDataType::List(_arrow_list_type)) => {
+        (DataType::Array(inner_type), ArrowDataType::List(_)) => {
             let Some(la) = col.as_list_opt() else {
                 return Err(make_arrow_error(
                     "Arrow claimed to be a list but isn't a ListArray",
