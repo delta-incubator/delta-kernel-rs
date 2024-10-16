@@ -367,7 +367,7 @@ fn evaluate_expression(
 // return a RecordBatch where the names of fields in `sa` have been transformed to match those in
 // schema specified by `output_type`
 fn apply_schema(sa: &StructArray, output_type: &DataType) -> DeltaResult<RecordBatch> {
-    let applied = apply_schema_to(sa, sa.data_type(), output_type)?
+    let applied = apply_schema_to(sa, output_type)?
         .ok_or_else(|| Error::generic("apply_to_col at top-level should return something"))?;
     let applied_sa = applied
         .as_struct_opt()
@@ -386,7 +386,7 @@ fn transform_field_and_col(
     metadata: Option<HashMap<String, String>>,
 ) -> DeltaResult<(ArrowField, Arc<dyn Array>)> {
     let transformed_col =
-        apply_schema_to(&arrow_col, arrow_field.data_type(), target_type)?.unwrap_or(arrow_col);
+        apply_schema_to(&arrow_col, target_type)?.unwrap_or(arrow_col);
     let transformed_field = arrow_field
         .as_ref()
         .clone()
@@ -526,10 +526,9 @@ fn apply_schema_to_map(
 // transforms. if the actual data types don't match, this will return an error
 fn apply_schema_to(
     col: &dyn Array,
-    arrow_type: &ArrowDataType,
     kernel_type: &DataType,
 ) -> DeltaResult<Option<Arc<dyn Array>>> {
-    match (kernel_type, arrow_type) {
+    match (kernel_type, col.data_type()) {
         (DataType::Struct(kernel_fields), ArrowDataType::Struct(_)) => {
             let Some(sa) = col.as_struct_opt() else {
                 return Err(make_arrow_error(
@@ -559,7 +558,7 @@ fn apply_schema_to(
             )?)))
         }
         _ => {
-            ensure_data_types(kernel_type, arrow_type, true)?;
+            ensure_data_types(kernel_type, col.data_type(), true)?;
             Ok(None)
         }
     }
