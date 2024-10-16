@@ -163,7 +163,11 @@ pub(crate) fn ensure_data_types(
         (DataType::Array(inner_type), ArrowDataType::List(arrow_list_type)) => {
             let kernel_array_type = &inner_type.element_type;
             let arrow_list_type = arrow_list_type.data_type();
-            ensure_data_types(kernel_array_type, arrow_list_type, check_nullability_and_metadata)
+            ensure_data_types(
+                kernel_array_type,
+                arrow_list_type,
+                check_nullability_and_metadata,
+            )
         }
         (DataType::Map(kernel_map_type), ArrowDataType::Map(arrow_map_type, _)) => {
             if let ArrowDataType::Struct(fields) = arrow_map_type.data_type() {

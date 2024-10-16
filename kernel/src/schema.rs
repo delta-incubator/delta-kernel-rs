@@ -181,9 +181,10 @@ impl StructField {
     /// Convert our metadata into a HashMap<String, String>. Note this copies all the data so can be
     /// expensive for large metadata
     pub fn metadata_as_string(&self) -> HashMap<String, String> {
-        HashMap::from_iter(self.metadata
-                           .iter()
-                           .map(|(key, val)| (key.clone(), val.as_string()))
+        HashMap::from_iter(
+            self.metadata
+                .iter()
+                .map(|(key, val)| (key.clone(), val.as_string())),
         )
     }
 
