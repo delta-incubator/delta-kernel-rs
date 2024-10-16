@@ -128,13 +128,20 @@ fn can_upcast_to_decimal(
 
 /// Ensure a kernel data type matches an arrow data type. This only ensures that the actual "type"
 /// is the same, but does so recursively into structs, and ensures lists and maps have the correct
-/// associated types as well. This returns an `Ok(DataTypeCompat)` if the types are compatible, and
+/// associated types as well.
+///
+/// If `check_nullability` is true, this will also return an error if it finds a struct field that
+/// differs in nullability between the kernel and arrow schema. If it is false, no checks on
+/// nullability are performed.
+///
+/// This returns an `Ok(DataTypeCompat)` if the types are compatible, and
 /// will indicate what kind of compatibility they have, or an error if the types do not match. If
 /// there is a `struct` type included, we only ensure that the named fields that the kernel is
 /// asking for exist, and that for those fields the types match. Un-selected fields are ignored.
 pub(crate) fn ensure_data_types(
     kernel_type: &DataType,
     arrow_type: &ArrowDataType,
+    check_nullability: bool,
 ) -> DeltaResult<DataTypeCompat> {
     match (kernel_type, arrow_type) {
         (DataType::Primitive(_), _) if arrow_type.is_primitive() => {
@@ -156,20 +163,28 @@ pub(crate) fn ensure_data_types(
         (DataType::Array(inner_type), ArrowDataType::List(arrow_list_type)) => {
             let kernel_array_type = &inner_type.element_type;
             let arrow_list_type = arrow_list_type.data_type();
-            ensure_data_types(kernel_array_type, arrow_list_type)
+            ensure_data_types(kernel_array_type, arrow_list_type, check_nullability)
         }
         (DataType::Map(kernel_map_type), ArrowDataType::Map(arrow_map_type, _)) => {
             if let ArrowDataType::Struct(fields) = arrow_map_type.data_type() {
                 let mut fields = fields.iter();
                 if let Some(key_type) = fields.next() {
-                    ensure_data_types(&kernel_map_type.key_type, key_type.data_type())?;
+                    ensure_data_types(
+                        &kernel_map_type.key_type,
+                        key_type.data_type(),
+                        check_nullability,
+                    )?;
                 } else {
                     return Err(make_arrow_error(
                         "Arrow map struct didn't have a key type".to_string(),
                     ));
                 }
                 if let Some(value_type) = fields.next() {
-                    ensure_data_types(&kernel_map_type.value_type, value_type.data_type())?;
+                    ensure_data_types(
+                        &kernel_map_type.value_type,
+                        value_type.data_type(),
+                        check_nullability,
+                    )?;
                 } else {
                     return Err(make_arrow_error(
                         "Arrow map struct didn't have a value type".to_string(),
@@ -195,7 +210,19 @@ pub(crate) fn ensure_data_types(
             let mut found_fields = 0;
             // ensure that for the fields that we found, the types match
             for (kernel_field, arrow_field) in mapped_fields.zip(arrow_fields) {
-                ensure_data_types(&kernel_field.data_type, arrow_field.data_type())?;
+                if check_nullability && kernel_field.nullable != arrow_field.is_nullable() {
+                    return Err(Error::Generic(format!(
+                        "Field {} has nullablily {} in kernel and {} in arrow",
+                        kernel_field.name,
+                        kernel_field.nullable,
+                        arrow_field.is_nullable()
+                    )));
+                }
+                ensure_data_types(
+                    &kernel_field.data_type,
+                    arrow_field.data_type(),
+                    check_nullability,
+                )?;
                 found_fields += 1;
             }
 
@@ -516,7 +543,7 @@ fn get_indices(
                     }
                 }
                 _ => {
-                    match ensure_data_types(&requested_field.data_type, field.data_type())? {
+                    match ensure_data_types(&requested_field.data_type, field.data_type(), false)? {
                         DataTypeCompat::Identical => {
                             reorder_indices.push(ReorderIndex::identity(index))
                         }

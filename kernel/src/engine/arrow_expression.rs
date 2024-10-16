@@ -27,7 +27,7 @@ use crate::engine::arrow_utils::ensure_data_types;
 use crate::engine::arrow_utils::prim_array_cmp;
 use crate::error::{DeltaResult, Error};
 use crate::expressions::{BinaryOperator, Expression, Scalar, UnaryOperator, VariadicOperator};
-use crate::schema::{ArrayType, DataType, MapType, PrimitiveType, Schema, SchemaRef};
+use crate::schema::{ArrayType, DataType, MapType, PrimitiveType, Schema, SchemaRef, StructField};
 use crate::{EngineData, ExpressionEvaluator, ExpressionHandler};
 
 // TODO leverage scalars / Datum
@@ -384,6 +384,7 @@ fn transform_field_and_col(
     arrow_field: &Arc<ArrowField>,
     arrow_col: Arc<dyn Array>,
     target_type: &DataType,
+    nullable: bool,
     rename: Option<&str>,
 ) -> DeltaResult<(ArrowField, Arc<dyn Array>)> {
     let transformed_col =
@@ -391,6 +392,7 @@ fn transform_field_and_col(
     let transformed_field = arrow_field
         .as_ref()
         .clone()
+        .with_nullable(nullable)
         .with_data_type(transformed_col.data_type().clone());
     let transformed_field = if let Some(name) = rename {
         transformed_field.with_name(name)
@@ -407,16 +409,22 @@ fn transform_field_and_col(
 // `struct_array`.
 fn transform_struct<'a>(
     struct_array: &StructArray,
-    target_types_and_names: impl Iterator<Item = (&'a DataType, Option<&'a str>)>,
+    target_fields: impl Iterator<Item = &'a StructField>,
 ) -> DeltaResult<StructArray> {
     let (arrow_fields, arrow_cols, nulls) = struct_array.clone().into_parts();
     let input_col_count = arrow_cols.len();
     let result_iter = arrow_fields
         .into_iter()
         .zip(arrow_cols)
-        .zip(target_types_and_names)
-        .map(|((sa_field, sa_col), (target_type, rename))| {
-            transform_field_and_col(sa_field, sa_col, target_type, rename)
+        .zip(target_fields)
+        .map(|((sa_field, sa_col), target_field)| {
+            transform_field_and_col(
+                sa_field,
+                sa_col,
+                target_field.data_type(),
+                target_field.nullable,
+                Some(target_field.name.as_str()),
+            )
         });
     let (transformed_fields, transformed_cols): (Vec<ArrowField>, Vec<Arc<dyn Array>>) =
         result_iter.process_results(|iter| iter.unzip())?;
@@ -447,19 +455,19 @@ fn apply_schema_to_struct(
             arrow_fields.len()
         )));
     }
-    transform_struct(
-        sa,
-        kernel_fields
-            .fields()
-            .map(|kernel_field| (kernel_field.data_type(), Some(kernel_field.name.as_str()))),
-    )
+    transform_struct(sa, kernel_fields.fields())
 }
 
 // deconstruct the array, then rebuild the mapped version
 fn apply_schema_to_list(la: &ListArray, target_inner_type: &ArrayType) -> DeltaResult<ListArray> {
     let (field, offset_buffer, values, nulls) = la.clone().into_parts();
-    let (transformed_field, transformed_values) =
-        transform_field_and_col(&field, values, &target_inner_type.element_type, None)?;
+    let (transformed_field, transformed_values) = transform_field_and_col(
+        &field,
+        values,
+        &target_inner_type.element_type,
+        target_inner_type.contains_null,
+        None,
+    )?;
     Ok(ListArray::try_new(
         Arc::new(transformed_field),
         offset_buffer,
@@ -485,17 +493,25 @@ fn apply_schema_to_map(
         return Err(Error::generic("Map struct did not have 2 members"));
     }
 
+    let target_fields: Vec<StructField> = map_struct_array
+        .fields()
+        .iter()
+        .zip([
+            (&kernel_map_type.key_type, false),
+            (
+                &kernel_map_type.value_type,
+                kernel_map_type.value_contains_null,
+            ),
+        ])
+        .map(|(arrow_field, (target_type, nullable))| {
+            StructField::new(arrow_field.name(), target_type.clone(), nullable)
+        })
+        .collect();
+
     // Arrow puts the key type/val as the first field/col and the value type/val as the second. So
     // we just transform like a 'normal' struct, but we know there are two fields/cols and we
     // specify the key/value types as the target type iterator.
-    let transformed_map_struct_array = transform_struct(
-        &map_struct_array,
-        [
-            (&kernel_map_type.key_type, None), // no renames needed
-            (&kernel_map_type.value_type, None),
-        ]
-        .into_iter(),
-    )?;
+    let transformed_map_struct_array = transform_struct(&map_struct_array, target_fields.iter())?;
 
     let transformed_map_field = Arc::new(
         map_field
@@ -553,7 +569,7 @@ fn apply_schema_to(
             )?)))
         }
         _ => {
-            ensure_data_types(kernel_type, arrow_type)?;
+            ensure_data_types(kernel_type, arrow_type, true)?;
             Ok(None)
         }
     }
@@ -606,7 +622,7 @@ impl ExpressionEvaluator for DefaultExpressionEvaluator {
             let sa: &StructArray = array_ref
                 .as_struct_opt()
                 .ok_or(Error::unexpected_column_type("Expected a struct array"))?;
-            match ensure_data_types(&self.output_type, sa.data_type()) {
+            match ensure_data_types(&self.output_type, sa.data_type(), true) {
                 Ok(_) => sa.into(),
                 Err(_) => apply_schema(sa, &self.output_type)?,
             }
