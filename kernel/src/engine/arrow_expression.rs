@@ -592,10 +592,14 @@ impl ExpressionEvaluator for DefaultExpressionEvaluator {
         //     )));
         // };
         let array_ref = evaluate_expression(&self.expression, batch, Some(&self.output_type))?;
-        let arrow_type: ArrowDataType = ArrowDataType::try_from(&self.output_type)?;
         let batch: RecordBatch = if let DataType::Struct(_) = self.output_type {
             apply_schema(&array_ref, &self.output_type)?
         } else {
+            let array_ref = match apply_schema_to(&array_ref, &self.output_type)? {
+                Some(transformed) => transformed,
+                None => array_ref, // Were a primitive type, we just validated
+            };
+            let arrow_type: ArrowDataType = ArrowDataType::try_from(&self.output_type)?;
             let schema = ArrowSchema::new(vec![ArrowField::new("output", arrow_type, true)]);
             RecordBatch::try_new(Arc::new(schema), vec![array_ref])?
         };
