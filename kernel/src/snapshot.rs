@@ -397,8 +397,15 @@ fn list_log_files_with_checkpoint(
         )));
     }
 
-    // NOTE this will sort in reverse order
-    commit_files.sort_unstable_by(|a, b| b.version.cmp(&a.version));
+    debug_assert!(
+        commit_files
+            .windows(2)
+            .all(|cfs| cfs[0].version <= cfs[1].version),
+        "fs_client.list_from() didn't return a sorted listing! {:?}",
+        commit_files
+    );
+    // We assume listing returned ordered, we want reverse order
+    let commit_files = commit_files.into_iter().rev().collect();
 
     Ok((commit_files, checkpoint_files))
 }
@@ -441,8 +448,16 @@ fn list_log_files(
     }
 
     commit_files.retain(|f| f.version as i64 > max_checkpoint_version);
-    // NOTE this will sort in reverse order
-    commit_files.sort_unstable_by(|a, b| b.version.cmp(&a.version));
+
+    debug_assert!(
+        commit_files
+            .windows(2)
+            .all(|cfs| cfs[0].version <= cfs[1].version),
+        "fs_client.list_from() didn't return a sorted listing! {:?}",
+        commit_files
+    );
+    // We assume listing returned ordered, we want reverse order
+    let commit_files = commit_files.into_iter().rev().collect();
 
     Ok((commit_files, checkpoint_files))
 }
@@ -521,6 +536,7 @@ mod tests {
         let prefix = Path::from(url.path());
         let client = ObjectStoreFileSystemClient::new(
             store,
+            false, // don't have ordered listing
             prefix,
             Arc::new(TokioBackgroundExecutor::new()),
         );
@@ -580,6 +596,7 @@ mod tests {
 
         let client = ObjectStoreFileSystemClient::new(
             store,
+            false, // don't have ordered listing
             Path::from("/"),
             Arc::new(TokioBackgroundExecutor::new()),
         );
@@ -624,6 +641,7 @@ mod tests {
 
         let client = ObjectStoreFileSystemClient::new(
             store,
+            false, // don't have ordered listing
             Path::from("/"),
             Arc::new(TokioBackgroundExecutor::new()),
         );
