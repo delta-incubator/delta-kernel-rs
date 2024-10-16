@@ -420,19 +420,13 @@ fn transform_struct<'a>(
         .zip(arrow_cols)
         .zip(target_fields)
         .map(|((sa_field, sa_col), target_field)| {
-            let new_metadata: HashMap<String, String> = HashMap::from_iter(
-                target_field
-                    .metadata
-                    .iter()
-                    .map(|(key, val)| (key.clone(), val.as_string())),
-            );
             transform_field_and_col(
                 sa_field,
                 sa_col,
                 target_field.data_type(),
                 target_field.nullable,
                 Some(target_field.name.as_str()),
-                Some(new_metadata),
+                Some(target_field.metadata_as_string()),
             )
         });
     let (transformed_fields, transformed_cols): (Vec<ArrowField>, Vec<Arc<dyn Array>>) =

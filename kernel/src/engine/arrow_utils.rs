@@ -130,9 +130,9 @@ fn can_upcast_to_decimal(
 /// is the same, but does so recursively into structs, and ensures lists and maps have the correct
 /// associated types as well.
 ///
-/// If `check_nullability` is true, this will also return an error if it finds a struct field that
-/// differs in nullability between the kernel and arrow schema. If it is false, no checks on
-/// nullability are performed.
+/// If `check_nullability_and_metadata` is true, this will also return an error if it finds a struct
+/// field that differs in nullability or metadata between the kernel and arrow schema. If it is
+/// false, no checks on nullability or metadata are performed.
 ///
 /// This returns an `Ok(DataTypeCompat)` if the types are compatible, and
 /// will indicate what kind of compatibility they have, or an error if the types do not match. If
@@ -141,7 +141,7 @@ fn can_upcast_to_decimal(
 pub(crate) fn ensure_data_types(
     kernel_type: &DataType,
     arrow_type: &ArrowDataType,
-    check_nullability: bool,
+    check_nullability_and_metadata: bool,
 ) -> DeltaResult<DataTypeCompat> {
     match (kernel_type, arrow_type) {
         (DataType::Primitive(_), _) if arrow_type.is_primitive() => {
@@ -163,7 +163,7 @@ pub(crate) fn ensure_data_types(
         (DataType::Array(inner_type), ArrowDataType::List(arrow_list_type)) => {
             let kernel_array_type = &inner_type.element_type;
             let arrow_list_type = arrow_list_type.data_type();
-            ensure_data_types(kernel_array_type, arrow_list_type, check_nullability)
+            ensure_data_types(kernel_array_type, arrow_list_type, check_nullability_and_metadata)
         }
         (DataType::Map(kernel_map_type), ArrowDataType::Map(arrow_map_type, _)) => {
             if let ArrowDataType::Struct(fields) = arrow_map_type.data_type() {
@@ -172,7 +172,7 @@ pub(crate) fn ensure_data_types(
                     ensure_data_types(
                         &kernel_map_type.key_type,
                         key_type.data_type(),
-                        check_nullability,
+                        check_nullability_and_metadata,
                     )?;
                 } else {
                     return Err(make_arrow_error(
@@ -183,7 +183,7 @@ pub(crate) fn ensure_data_types(
                     ensure_data_types(
                         &kernel_map_type.value_type,
                         value_type.data_type(),
-                        check_nullability,
+                        check_nullability_and_metadata,
                     )?;
                 } else {
                     return Err(make_arrow_error(
@@ -210,18 +210,28 @@ pub(crate) fn ensure_data_types(
             let mut found_fields = 0;
             // ensure that for the fields that we found, the types match
             for (kernel_field, arrow_field) in mapped_fields.zip(arrow_fields) {
-                if check_nullability && kernel_field.nullable != arrow_field.is_nullable() {
-                    return Err(Error::Generic(format!(
-                        "Field {} has nullablily {} in kernel and {} in arrow",
-                        kernel_field.name,
-                        kernel_field.nullable,
-                        arrow_field.is_nullable()
-                    )));
+                if check_nullability_and_metadata {
+                    if kernel_field.nullable != arrow_field.is_nullable() {
+                        return Err(Error::Generic(format!(
+                            "Field {} has nullablily {} in kernel and {} in arrow",
+                            kernel_field.name,
+                            kernel_field.nullable,
+                            arrow_field.is_nullable()
+                        )));
+                    }
+                    if &kernel_field.metadata_as_string() != arrow_field.metadata() {
+                        return Err(Error::Generic(format!(
+                            "Field {} has metadata {:?} in kernel and {:?} in arrow",
+                            kernel_field.name,
+                            kernel_field.metadata,
+                            arrow_field.metadata(),
+                        )));
+                    }
                 }
                 ensure_data_types(
                     &kernel_field.data_type,
                     arrow_field.data_type(),
-                    check_nullability,
+                    check_nullability_and_metadata,
                 )?;
                 found_fields += 1;
             }
