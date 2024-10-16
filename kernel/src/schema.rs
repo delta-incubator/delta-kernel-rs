@@ -53,6 +53,17 @@ impl From<bool> for MetadataValue {
     }
 }
 
+impl ToString for MetadataValue {
+    fn to_string(&self) -> String {
+        match self {
+            MetadataValue::Number(n) => format!("{}", n),
+            MetadataValue::String(ref s) => s.clone(),
+            MetadataValue::Boolean(b) => format!("{}", b),
+            MetadataValue::Other(_) => panic!("Can't to_string other rn"),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum ColumnMetadataKey {
     ColumnMappingId,

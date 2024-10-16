@@ -1,4 +1,5 @@
 //! Expression handling based on arrow-rs compute kernels.
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use arrow_arith::boolean::{and_kleene, is_null, not, or_kleene};
@@ -386,6 +387,7 @@ fn transform_field_and_col(
     target_type: &DataType,
     nullable: bool,
     rename: Option<&str>,
+    metadata: Option<HashMap<String, String>>,
 ) -> DeltaResult<(ArrowField, Arc<dyn Array>)> {
     let transformed_col =
         apply_schema_to(&arrow_col, arrow_field.data_type(), target_type)?.unwrap_or(arrow_col);
@@ -396,6 +398,11 @@ fn transform_field_and_col(
         .with_data_type(transformed_col.data_type().clone());
     let transformed_field = if let Some(name) = rename {
         transformed_field.with_name(name)
+    } else {
+        transformed_field
+    };
+    let transformed_field = if let Some(metadata) = metadata {
+        transformed_field.with_metadata(metadata)
     } else {
         transformed_field
     };
@@ -418,12 +425,18 @@ fn transform_struct<'a>(
         .zip(arrow_cols)
         .zip(target_fields)
         .map(|((sa_field, sa_col), target_field)| {
+            let new_metadata: HashMap::<String, String> = HashMap::from_iter(
+                target_field.metadata.iter().map(|(key, val)| {
+                    (key.clone(), val.to_string())
+                })
+            );
             transform_field_and_col(
                 sa_field,
                 sa_col,
                 target_field.data_type(),
                 target_field.nullable,
                 Some(target_field.name.as_str()),
+                Some(new_metadata),
             )
         });
     let (transformed_fields, transformed_cols): (Vec<ArrowField>, Vec<Arc<dyn Array>>) =
@@ -466,6 +479,7 @@ fn apply_schema_to_list(la: &ListArray, target_inner_type: &ArrayType) -> DeltaR
         values,
         &target_inner_type.element_type,
         target_inner_type.contains_null,
+        None,
         None,
     )?;
     Ok(ListArray::try_new(
