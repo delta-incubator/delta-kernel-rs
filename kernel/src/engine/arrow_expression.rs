@@ -147,6 +147,28 @@ impl ProvidesColumnByName for StructArray {
     }
 }
 
+fn extract_column<'a>(
+    mut parent: &dyn ProvidesColumnByName,
+    mut field_names: impl Iterator<Item = &'a str>,
+) -> DeltaResult<ArrayRef> {
+    let Some(mut field_name) = field_names.next() else {
+        return Err(ArrowError::SchemaError("Empty column path".to_string()))?;
+    };
+    loop {
+        let child = parent
+            .column_by_name(field_name)
+            .ok_or_else(|| ArrowError::SchemaError(format!("No such field: {field_name}")))?;
+        field_name = match field_names.next() {
+            Some(name) => name,
+            None => return Ok(child.clone()),
+        };
+        parent = child
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .ok_or_else(|| ArrowError::SchemaError(format!("Not a struct: {field_name}")))?;
+    }
+}
+
 fn evaluate_expression(
     expression: &Expression,
     batch: &RecordBatch,
@@ -156,31 +178,7 @@ fn evaluate_expression(
     use Expression::*;
     match (expression, result_type) {
         (Literal(scalar), _) => Ok(scalar.to_array(batch.num_rows())?),
-        (Column(name), _) => {
-            let mut field_names = name.split('.');
-            let Some(mut field_name) = field_names.next() else {
-                return Err(ArrowError::SchemaError("Empty column path".to_string()))?;
-            };
-            let mut parent: &dyn ProvidesColumnByName = batch;
-            loop {
-                let child = parent
-                    .column_by_name(field_name)
-                    .ok_or(ArrowError::SchemaError(format!(
-                        "No such field: {field_name}"
-                    )))?;
-                field_name = match field_names.next() {
-                    Some(name) => name,
-                    None => return Ok(child.clone()),
-                };
-                parent =
-                    child
-                        .as_any()
-                        .downcast_ref::<StructArray>()
-                        .ok_or(ArrowError::SchemaError(format!(
-                            "Not a struct: {field_name}"
-                        )))?;
-            }
-        }
+        (Column(name), _) => extract_column(batch, name.split('.')),
         (Struct(fields), Some(DataType::Struct(output_schema))) => {
             let columns = fields
                 .iter()
