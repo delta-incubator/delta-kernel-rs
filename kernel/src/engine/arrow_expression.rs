@@ -364,8 +364,9 @@ fn evaluate_expression(
     }
 }
 
-// return a RecordBatch where the names of fields in `sa` have been transformed to match those in
-// schema specified by `output_type`
+// Apply a schema to an array. The array _must_ be a `StructArray`. Returns a `RecordBatch where the
+// names of fields, nullable, and metadata in the struct have been transformed to match those in
+// schema specified by `schema`
 fn apply_schema(array: &dyn Array, schema: &DataType) -> DeltaResult<RecordBatch> {
     let DataType::Struct(struct_schema) = schema else {
         return Err(Error::generic(
