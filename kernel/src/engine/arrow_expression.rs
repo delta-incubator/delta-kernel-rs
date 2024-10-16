@@ -36,7 +36,7 @@ use crate::{EngineData, ExpressionEvaluator, ExpressionHandler};
 fn downcast_to_bool(arr: &dyn Array) -> DeltaResult<&BooleanArray> {
     arr.as_any()
         .downcast_ref::<BooleanArray>()
-        .ok_or(Error::generic("expected boolean array"))
+        .ok_or_else(|| Error::generic("expected boolean array"))
 }
 
 impl Scalar {
@@ -156,10 +156,7 @@ fn extract_column<'array, 'path>(
 ) -> Result<&'array Arc<dyn Array>, ArrowError> {
     let child = array
         .column_by_name(path_step)
-        .ok_or(ArrowError::SchemaError(format!(
-            "No such field: {}",
-            path_step,
-        )))?;
+        .ok_or_else(|| ArrowError::SchemaError(format!("No such field: {}", path_step,)))?;
     if let Some(next_path_step) = remaining_path_steps.next() {
         // This is not the last path step. Drill deeper.
         extract_column(
@@ -178,10 +175,10 @@ fn column_as_struct<'a>(
     column: &Option<&'a Arc<dyn Array>>,
 ) -> Result<&'a StructArray, ArrowError> {
     column
-        .ok_or(ArrowError::SchemaError(format!("No such column: {}", name)))?
+        .ok_or_else(|| ArrowError::SchemaError(format!("No such column: {}", name)))?
         .as_any()
         .downcast_ref::<StructArray>()
-        .ok_or(ArrowError::SchemaError(format!("{} is not a struct", name)))
+        .ok_or_else(|| ArrowError::SchemaError(format!("{} is not a struct", name)))
 }
 
 fn evaluate_expression(
@@ -203,7 +200,7 @@ fn evaluate_expression(
             } else {
                 batch
                     .column_by_name(name)
-                    .ok_or(Error::missing_column(name))
+                    .ok_or_else(|| Error::missing_column(name))
                     .cloned()
             }
         }
@@ -370,12 +367,11 @@ fn evaluate_expression(
 // return a RecordBatch where the names of fields in `sa` have been transformed to match those in
 // schema specified by `output_type`
 fn apply_schema(sa: &StructArray, output_type: &DataType) -> DeltaResult<RecordBatch> {
-    let applied = apply_schema_to(sa, sa.data_type(), output_type)?.ok_or(Error::generic(
-        "apply_to_col at top-level should return something",
-    ))?;
-    let applied_sa = applied.as_struct_opt().ok_or(Error::generic(
-        "apply_to_col at top-level should return a struct array",
-    ))?;
+    let applied = apply_schema_to(sa, sa.data_type(), output_type)?
+        .ok_or_else(|| Error::generic("apply_to_col at top-level should return something"))?;
+    let applied_sa = applied
+        .as_struct_opt()
+        .ok_or_else(|| Error::generic("apply_to_col at top-level should return a struct array"))?;
     Ok(applied_sa.into())
 }
 
@@ -620,7 +616,7 @@ impl ExpressionEvaluator for DefaultExpressionEvaluator {
         let batch = batch
             .as_any()
             .downcast_ref::<ArrowEngineData>()
-            .ok_or(Error::engine_data_type("ArrowEngineData"))?
+            .ok_or_else(|| Error::engine_data_type("ArrowEngineData"))?
             .record_batch();
         let _input_schema: ArrowSchema = self.input_schema.as_ref().try_into()?;
         // TODO: make sure we have matching schemas for validation
@@ -636,7 +632,7 @@ impl ExpressionEvaluator for DefaultExpressionEvaluator {
         let batch: RecordBatch = if let DataType::Struct(_) = self.output_type {
             let sa: &StructArray = array_ref
                 .as_struct_opt()
-                .ok_or(Error::unexpected_column_type("Expected a struct array"))?;
+                .ok_or_else(|| Error::unexpected_column_type("Expected a struct array"))?;
             match ensure_data_types(&self.output_type, sa.data_type(), true) {
                 Ok(_) => sa.into(),
                 Err(_) => apply_schema(sa, &self.output_type)?,
