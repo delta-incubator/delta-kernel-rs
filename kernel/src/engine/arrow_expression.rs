@@ -15,8 +15,8 @@ use arrow_buffer::OffsetBuffer;
 use arrow_ord::cmp::{distinct, eq, gt, gt_eq, lt, lt_eq, neq};
 use arrow_ord::comparison::in_list_utf8;
 use arrow_schema::{
-    ArrowError, DataType as ArrowDataType, Field as ArrowField, FieldRef as ArrowFieldRef, Fields,
-    IntervalUnit, Schema as ArrowSchema, TimeUnit,
+    ArrowError, DataType as ArrowDataType, Field as ArrowField, Fields, IntervalUnit,
+    Schema as ArrowSchema, TimeUnit,
 };
 use arrow_select::concat::concat;
 use itertools::Itertools;
@@ -366,13 +366,14 @@ fn evaluate_expression(
 
 // return a RecordBatch where the names of fields in `sa` have been transformed to match those in
 // schema specified by `output_type`
-fn apply_schema(sa: &StructArray, output_type: &DataType) -> DeltaResult<RecordBatch> {
-    let applied = apply_schema_to(sa, output_type)?
-        .ok_or_else(|| Error::generic("apply_to_col at top-level should return something"))?;
-    let applied_sa = applied
-        .as_struct_opt()
-        .ok_or_else(|| Error::generic("apply_to_col at top-level should return a struct array"))?;
-    Ok(applied_sa.into())
+fn apply_schema(array: &dyn Array, schema: &DataType) -> DeltaResult<RecordBatch> {
+    let DataType::Struct(struct_schema) = schema else {
+        return Err(Error::generic(
+            "apply_schema at top-level must be passed a struct schema",
+        ))?;
+    };
+    let applied = apply_schema_to_struct(array, struct_schema)?;
+    Ok(applied.into())
 }
 
 // helper to transform an arrow field+col into the specified target type. If `rename` is specified
@@ -385,8 +386,7 @@ fn transform_field_and_col(
     rename: Option<&str>,
     metadata: Option<HashMap<String, String>>,
 ) -> DeltaResult<(ArrowField, Arc<dyn Array>)> {
-    let transformed_col =
-        apply_schema_to(&arrow_col, target_type)?.unwrap_or(arrow_col);
+    let transformed_col = apply_schema_to(&arrow_col, target_type)?.unwrap_or(arrow_col);
     let transformed_field = arrow_field
         .as_ref()
         .clone()
@@ -452,12 +452,25 @@ fn transform_struct<'a>(
 
 // Transform a struct array. The data is in `sa`, the current fields are in `arrow_fields`, and the
 // target fields are in `kernel_fields`.
-fn apply_schema_to_struct(sa: &StructArray, kernel_fields: &Schema) -> DeltaResult<StructArray> {
+fn apply_schema_to_struct(array: &dyn Array, kernel_fields: &Schema) -> DeltaResult<StructArray> {
+    let Some(sa) = array.as_struct_opt() else {
+        return Err(make_arrow_error(
+            "Arrow claimed to be a struct but isn't a StructArray",
+        ));
+    };
     transform_struct(sa, kernel_fields.fields())
 }
 
 // deconstruct the array, then rebuild the mapped version
-fn apply_schema_to_list(la: &ListArray, target_inner_type: &ArrayType) -> DeltaResult<ListArray> {
+fn apply_schema_to_list(
+    array: &dyn Array,
+    target_inner_type: &ArrayType,
+) -> DeltaResult<ListArray> {
+    let Some(la) = array.as_list_opt() else {
+        return Err(make_arrow_error(
+            "Arrow claimed to be a list but isn't a ListArray",
+        ));
+    };
     let (field, offset_buffer, values, nulls) = la.clone().into_parts();
     let (transformed_field, transformed_values) = transform_field_and_col(
         &field,
@@ -476,11 +489,19 @@ fn apply_schema_to_list(la: &ListArray, target_inner_type: &ArrayType) -> DeltaR
 }
 
 // deconstruct a map, and rebuild it with the specified target kernel type
-fn apply_schema_to_map(
-    ma: &MapArray,
-    kernel_map_type: &MapType,
-    arrow_map_type: &ArrowFieldRef,
-) -> DeltaResult<MapArray> {
+fn apply_schema_to_map(array: &dyn Array, kernel_map_type: &MapType) -> DeltaResult<MapArray> {
+    let Some(ma) = array.as_map_opt() else {
+        return Err(make_arrow_error(
+            "Arrow claimed to be a map but isn't a MapArray",
+        ));
+    };
+
+    let ArrowDataType::Map(arrow_map_type, _) = array.data_type() else {
+        return Err(make_arrow_error(
+            "Arrow claimed to be a map but doesn't have map DataType",
+        ));
+    };
+
     let (map_field, offset_buffer, map_struct_array, nulls, ordered) = ma.clone().into_parts();
 
     let ArrowDataType::Struct(_) = arrow_map_type.data_type() else {
@@ -524,44 +545,15 @@ fn apply_schema_to_map(
 
 // make column `col` with type `arrow_type` look like `kernel_type`. For now this only handles name
 // transforms. if the actual data types don't match, this will return an error
-fn apply_schema_to(
-    col: &dyn Array,
-    kernel_type: &DataType,
-) -> DeltaResult<Option<Arc<dyn Array>>> {
-    match (kernel_type, col.data_type()) {
-        (DataType::Struct(kernel_fields), ArrowDataType::Struct(_)) => {
-            let Some(sa) = col.as_struct_opt() else {
-                return Err(make_arrow_error(
-                    "Arrow claimed to be a struct but isn't a StructArray",
-                ));
-            };
-            Ok(Some(Arc::new(apply_schema_to_struct(sa, kernel_fields)?)))
-        }
-        (DataType::Array(inner_type), ArrowDataType::List(_)) => {
-            let Some(la) = col.as_list_opt() else {
-                return Err(make_arrow_error(
-                    "Arrow claimed to be a list but isn't a ListArray",
-                ));
-            };
-            Ok(Some(Arc::new(apply_schema_to_list(la, inner_type)?)))
-        }
-        (DataType::Map(kernel_map_type), ArrowDataType::Map(arrow_map_type, _)) => {
-            let Some(ma) = col.as_map_opt() else {
-                return Err(make_arrow_error(
-                    "Arrow claimed to be a map but isn't a MapArray",
-                ));
-            };
-            Ok(Some(Arc::new(apply_schema_to_map(
-                ma,
-                kernel_map_type,
-                arrow_map_type,
-            )?)))
-        }
-        _ => {
-            ensure_data_types(kernel_type, col.data_type(), true)?;
-            Ok(None)
-        }
-    }
+fn apply_schema_to(array: &dyn Array, schema: &DataType) -> DeltaResult<Option<ArrayRef>> {
+    use DataType::*;
+    let array: ArrayRef = match schema {
+        Struct(stype) => Arc::new(apply_schema_to_struct(array, stype)?),
+        Array(atype) => Arc::new(apply_schema_to_list(array, atype)?),
+        Map(mtype) => Arc::new(apply_schema_to_map(array, mtype)?),
+        _ => return ensure_data_types(schema, array.data_type(), true).map(|_| None),
+    };
+    Ok(Some(array))
 }
 
 #[derive(Debug)]
@@ -608,13 +600,7 @@ impl ExpressionEvaluator for DefaultExpressionEvaluator {
         let array_ref = evaluate_expression(&self.expression, batch, Some(&self.output_type))?;
         let arrow_type: ArrowDataType = ArrowDataType::try_from(&self.output_type)?;
         let batch: RecordBatch = if let DataType::Struct(_) = self.output_type {
-            let sa: &StructArray = array_ref
-                .as_struct_opt()
-                .ok_or_else(|| Error::unexpected_column_type("Expected a struct array"))?;
-            match ensure_data_types(&self.output_type, sa.data_type(), true) {
-                Ok(_) => sa.into(),
-                Err(_) => apply_schema(sa, &self.output_type)?,
-            }
+            apply_schema(&array_ref, &self.output_type)?
         } else {
             let schema = ArrowSchema::new(vec![ArrowField::new("output", arrow_type, true)]);
             RecordBatch::try_new(Arc::new(schema), vec![array_ref])?
