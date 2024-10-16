@@ -29,6 +29,17 @@ pub enum MetadataValue {
     Other(serde_json::Value),
 }
 
+impl MetadataValue {
+    pub(crate) fn as_string(&self) -> String {
+        match self {
+            MetadataValue::Number(n) => format!("{}", n),
+            MetadataValue::String(ref s) => s.clone(),
+            MetadataValue::Boolean(b) => format!("{}", b),
+            MetadataValue::Other(_) => panic!("Can't to_string other rn"),
+        }
+    }
+}
+
 impl From<String> for MetadataValue {
     fn from(value: String) -> Self {
         Self::String(value)
@@ -50,17 +61,6 @@ impl From<i32> for MetadataValue {
 impl From<bool> for MetadataValue {
     fn from(value: bool) -> Self {
         Self::Boolean(value)
-    }
-}
-
-impl ToString for MetadataValue {
-    fn to_string(&self) -> String {
-        match self {
-            MetadataValue::Number(n) => format!("{}", n),
-            MetadataValue::String(ref s) => s.clone(),
-            MetadataValue::Boolean(b) => format!("{}", b),
-            MetadataValue::Other(_) => panic!("Can't to_string other rn"),
-        }
     }
 }
 
