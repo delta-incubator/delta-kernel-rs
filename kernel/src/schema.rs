@@ -29,6 +29,17 @@ pub enum MetadataValue {
     Other(serde_json::Value),
 }
 
+impl MetadataValue {
+    pub(crate) fn as_string(&self) -> String {
+        match self {
+            MetadataValue::Number(n) => format!("{}", n),
+            MetadataValue::String(ref s) => s.clone(),
+            MetadataValue::Boolean(b) => format!("{}", b),
+            MetadataValue::Other(_) => panic!("Can't to_string other rn"),
+        }
+    }
+}
+
 impl From<String> for MetadataValue {
     fn from(value: String) -> Self {
         Self::String(value)
@@ -165,6 +176,16 @@ impl StructField {
     #[inline]
     pub const fn metadata(&self) -> &HashMap<String, MetadataValue> {
         &self.metadata
+    }
+
+    /// Convert our metadata into a HashMap<String, String>. Note this copies all the data so can be
+    /// expensive for large metadata
+    pub fn metadata_as_string(&self) -> HashMap<String, String> {
+        HashMap::from_iter(
+            self.metadata
+                .iter()
+                .map(|(key, val)| (key.clone(), val.as_string())),
+        )
     }
 
     pub fn make_physical(&self, mapping_mode: ColumnMappingMode) -> DeltaResult<Self> {
