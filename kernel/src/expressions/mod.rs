@@ -234,7 +234,7 @@ impl Expression {
     }
 
     /// Create a new struct expression
-    pub fn struct_expr(exprs: impl IntoIterator<Item = Self>) -> Self {
+    pub fn struct_from(exprs: impl IntoIterator<Item = Self>) -> Self {
         Self::Struct(exprs.into_iter().collect())
     }
 
