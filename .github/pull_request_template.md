@@ -18,7 +18,7 @@ If the reason for the change is already explained clearly in an issue, then it d
 
 <!--
 Uncomment this section if there are any changes affecting public APIs:
-### Does this PR affect any _public_ APIs?
+### This PR affects the following public APIs
 
 If yes, please ensure the `breaking-changes` label gets added by CI, and describe why the changes are needed.
 
@@ -28,6 +28,6 @@ Note that _new_ public APIs are not considered breaking.
 
 ### How was this change tested?
 <!--
-If tests were added, say they were added here. Please make sure to add some test cases that check the changes thoroughly including negative and positive cases if possible.
+Please make sure to add test cases that check the changes thoroughly including negative and positive cases if possible.
 If it was tested in a way different from regular unit tests, please clarify how you tested, ideally via a reproducible test documented in the PR description.
 -->
