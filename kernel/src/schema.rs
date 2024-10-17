@@ -1,14 +1,15 @@
 //! Definitions and functions to create and manipulate kernel schema
 
 use std::borrow::Cow;
-use std::fmt::Formatter;
+use std::collections::{HashMap, HashSet};
+use std::fmt::{Display, Formatter};
 use std::sync::Arc;
-use std::{collections::HashMap, fmt::Display};
 
 use indexmap::IndexMap;
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 
+use crate::expressions::ColumnName;
 use crate::features::ColumnMappingMode;
 use crate::utils::require;
 use crate::{DeltaResult, Error};
@@ -754,6 +755,66 @@ pub trait SchemaTransform {
             }),
         };
         Some(mtype)
+    }
+}
+
+pub struct SchemaProjection {
+    requested_fields: HashSet<ColumnName>,
+    path: Vec<String>,
+}
+impl SchemaProjection {
+    /// Removes from `schema` all fields that are not requested. Requesting a non-leaf field
+    /// preserves everything inside it. Returns an error if any requested field is not found.
+    pub fn project(schema: &StructType, requested_fields: &[ColumnName]) -> DeltaResult<StructType> {
+        let (projected_schema, missing_fields) = Self::project_impl(schema, requested_fields);
+        match missing_fields.into_iter().next() {
+            Some(missing_field) => Err(Error::missing_column(missing_field)),
+            None => Ok(projected_schema.unwrap_or_else(|| StructType::new([] as [StructField; 0])))
+        }
+    }
+
+    /// Similar to [`project`], but requested fields that do not exist in the schema are silently
+    /// ignored instead of causing an error.
+    pub fn intersect(schema: &StructType, requested_fields: &[ColumnName]) -> Option<StructType> {
+        let (projected_schema, _) = Self::project_impl(schema, requested_fields);
+        projected_schema
+    }
+
+    fn project_impl(schema: &StructType, requested_fields: &[ColumnName]) -> (Option<StructType>, HashSet<ColumnName>) {
+        let mut project = SchemaProjection {
+            requested_fields: requested_fields.iter().cloned().collect(),
+            path: vec![],
+        };
+        let projected_schema = project.transform_struct(Cow::Borrowed(schema));
+        (projected_schema.map(|s| s.into_owned()), project.requested_fields)
+    }
+}
+impl SchemaTransform for SchemaProjection {
+    // Discard newly-empty structs.
+    fn transform_struct<'a>(
+        &mut self,
+        stype: Cow<'a, StructType>,
+    ) -> Option<Cow<'a, StructType>> {
+        let was_empty = stype.fields.is_empty();
+        self.recurse_into_struct(stype)
+            .filter(|stype| was_empty || !stype.fields.is_empty())
+    }
+
+    // Only keep requested fields. Track the path that leads to this field for proper matching.
+    fn transform_struct_field<'a>(
+        &mut self,
+        field: Cow<'a, StructField>,
+    ) -> Option<Cow<'a, StructField>> {
+        self.path.push(field.name.clone());
+        let result = if self.requested_fields.remove(self.path.as_slice()) {
+            Some(field) // always keep requested fields
+        } else if let DataType::Struct(_) = field.data_type() {
+            self.recurse_into_struct_field(field) // recurse deeper looking for requested fields
+        } else {
+            None // not requested
+        };
+        self.path.pop();
+        result
     }
 }
 

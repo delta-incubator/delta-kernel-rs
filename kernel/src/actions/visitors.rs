@@ -125,6 +125,7 @@ impl DataVisitor for ProtocolVisitor {
     }
 }
 
+#[allow(unused)]
 #[derive(Default)]
 #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
 #[cfg_attr(not(feature = "developer-visibility"), visibility::make(pub(crate)))]
@@ -184,6 +185,7 @@ impl DataVisitor for AddVisitor {
     }
 }
 
+#[allow(unused)]
 #[derive(Default)]
 #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
 #[cfg_attr(not(feature = "developer-visibility"), visibility::make(pub(crate)))]

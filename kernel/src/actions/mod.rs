@@ -8,7 +8,7 @@ use std::sync::LazyLock;
 use visitors::{AddVisitor, MetadataVisitor, ProtocolVisitor};
 
 use self::deletion_vector::DeletionVectorDescriptor;
-use crate::actions::schemas::GetStructField;
+use crate::actions::schemas::{GetStructField};
 use crate::features::{ReaderFeatures, WriterFeatures};
 use crate::schema::{SchemaRef, StructType};
 use crate::{DeltaResult, EngineData};
@@ -282,6 +282,7 @@ struct Remove {
 }
 
 impl Remove {
+    #[allow(unused)]
     pub(crate) fn dv_unique_id(&self) -> Option<String> {
         self.deletion_vector.as_ref().map(|dv| dv.unique_id())
     }

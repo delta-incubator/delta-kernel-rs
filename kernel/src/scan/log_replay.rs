@@ -6,12 +6,25 @@ use tracing::debug;
 
 use super::data_skipping::DataSkippingFilter;
 use super::ScanData;
-use crate::actions::{get_log_schema, ADD_NAME, REMOVE_NAME};
-use crate::actions::{visitors::AddVisitor, visitors::RemoveVisitor, Add, Remove};
+use crate::actions::{get_log_add_schema, get_log_schema};
 use crate::engine_data::{GetData, TypedGetData};
-use crate::expressions::{column_expr, Expression, ExpressionRef};
-use crate::schema::{DataType, MapType, SchemaRef, StructField, StructType};
-use crate::{DataVisitor, DeltaResult, Engine, EngineData, ExpressionHandler};
+use crate::expressions::{column_expr, column_name, ColumnName, Expression, ExpressionRef};
+use crate::scan::DeletionVectorDescriptor;
+use crate::schema::{DataType, MapType, SchemaProjection, SchemaRef, StructField, StructType};
+use crate::{DataVisitor, DeltaResult, Engine, Error, EngineData, ExpressionHandler};
+
+/// The subset of file action fields htat uniquely identifies it in the log, used for deduplication
+/// of adds and removes during log replay.
+#[derive(Debug, Hash, Eq, PartialEq)]
+struct FileActionKey {
+    path: String,
+    dv_unique_id: Option<String>,
+}
+impl FileActionKey {
+    fn new(path: String, dv_unique_id: Option<String>) -> Self {
+        Self { path, dv_unique_id }
+    }
+}
 
 struct LogReplayScanner {
     filter: Option<DataSkippingFilter>,
@@ -19,57 +32,74 @@ struct LogReplayScanner {
     /// A set of (data file path, dv_unique_id) pairs that have been seen thus
     /// far in the log. This is used to filter out files with Remove actions as
     /// well as duplicate entries in the log.
-    seen: HashSet<(String, Option<String>)>,
+    seen: HashSet<FileActionKey>,
 }
 
-#[derive(Default)]
-struct AddRemoveVisitor {
-    adds: Vec<(Add, usize)>,
-    removes: Vec<Remove>,
-    selection_vector: Option<Vec<bool>>,
-    // whether or not we are visiting commit json (=true) or checkpoint (=false)
+struct AddRemoveDedupVisitor<'seen> {
+    seen: &'seen mut HashSet<FileActionKey>,
+    selection_vector: Vec<bool>,
     is_log_batch: bool,
 }
+impl<'seen> AddRemoveDedupVisitor<'seen> {
+    fn filter_seen(&mut self, path: &str, dv_unique_id: Option<String>) -> bool {
+        // Note: each (add.path + add.dv_unique_id()) pair has a
+        // unique Add + Remove pair in the log. For example:
+        // https://github.com/delta-io/delta/blob/master/spark/src/test/resources/delta/table-with-dv-large/_delta_log/00000000000000000001.json
 
-const ADD_FIELD_COUNT: usize = 15;
-
-impl AddRemoveVisitor {
-    fn new(selection_vector: Option<Vec<bool>>, is_log_batch: bool) -> Self {
-        AddRemoveVisitor {
-            selection_vector,
-            is_log_batch,
-            ..Default::default()
+        let key = FileActionKey::new(path.into(), dv_unique_id);
+        if self.seen.contains(&key) {
+            debug!("Ignoring duplicate ({}, {:?}) in scan, is log {}", key.path, key.dv_unique_id, self.is_log_batch);
+            false
+        } else {
+            debug!("Including ({}, {:?}) in scan, is log {}", key.path, key.dv_unique_id, self.is_log_batch);
+            if self.is_log_batch {
+                // Remember file actions from this batch so we can ignore duplicates as we process
+                // batches from older commit and/or checkpoint files. We don't track checkpoint
+                // batches because they are already the oldest actions and never replace anything.
+                self.seen.insert(key);
+            }
+            true
         }
     }
-}
+    fn filter_row<'a>(&mut self, i: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<bool> {
+        // Add will have a path at index 0 if it is valid; otherwise, if it is a log batch, we
+        // may have a remove with a path at index 4.
+        let (path, getters, keep) = if let Some(path) = getters[0].get_opt(i, "add.path")? {
+            (path, &getters[1..4], true)
+        } else if !self.is_log_batch {
+            return Ok(false);
+        } else if let Some(path) = getters[4].get_opt(i, "remove.path")? {
+            (path, &getters[5..8], false)
+        } else {
+            return Ok(false);
+        };
 
-impl DataVisitor for AddRemoveVisitor {
+        let dv_unique_id = match getters[0].get_opt(i, "deletionVector.storageType")? {
+            Some(storage_type) => Some(DeletionVectorDescriptor::unique_id_from_parts(
+                storage_type,
+                getters[1].get(i, "deletionVector.pathOrInlineDv")?,
+                getters[2].get_opt(i, "deletionVector.offset")?,
+            )),
+            None => None,
+        };
+        // Process both adds and removes, but only keep the surviving adds
+        Ok(self.filter_seen(path, dv_unique_id) && keep)
+    }
+}
+impl<'seen> DataVisitor for AddRemoveDedupVisitor<'seen> {
+    // expected schema:
+    // 0 - add.path,
+    // 1 - add.deletionVector.storageType,
+    // 2 - add.deletionVector.pathOrInlineDv,
+    // 3 - add.deleteionVector.offset,
+    // 4 - remove.path,
+    // 5 - remove.deletionVector.storageType,
+    // 6 - remove.deletionVector.pathOrInlineDv,
+    // 7 - remove.deletionVector.offset
     fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<()> {
         for i in 0..row_count {
-            // Add will have a path at index 0 if it is valid
-            if let Some(path) = getters[0].get_opt(i, "add.path")? {
-                // Keep the file unless the selection vector is present and is false for this row
-                if !self
-                    .selection_vector
-                    .as_ref()
-                    .is_some_and(|selection| !selection[i])
-                {
-                    self.adds.push((
-                        AddVisitor::visit_add(i, path, &getters[..ADD_FIELD_COUNT])?,
-                        i,
-                    ))
-                }
-            }
-            // Remove will have a path at index 15 if it is valid
-            // TODO(nick): Should count the fields in Add to ensure we don't get this wrong if more
-            // are added
-            // TODO(zach): add a check for selection vector that we never skip a remove
-            else if self.is_log_batch {
-                if let Some(path) = getters[ADD_FIELD_COUNT].get_opt(i, "remove.path")? {
-                    let remove_getters = &getters[ADD_FIELD_COUNT..];
-                    self.removes
-                        .push(RemoveVisitor::visit_remove(i, path, remove_getters)?);
-                }
+            if self.selection_vector[i] {
+                self.selection_vector[i] = self.filter_row(i, getters)?;
             }
         }
         Ok(())
@@ -150,78 +180,62 @@ impl LogReplayScanner {
 
         // we start our selection vector based on what was filtered. we will add to this vector
         // below if a file has been removed
-        let mut selection_vector = match filter_vector {
+        let selection_vector = match filter_vector {
             Some(ref filter_vector) => filter_vector.clone(),
-            None => vec![false; actions.length()],
+            None => vec![true; actions.length()],
         };
 
         assert_eq!(selection_vector.len(), actions.length());
-        let adds = self.setup_batch_process(filter_vector, actions, is_log_batch)?;
+        static ADD_REMOVE_FIELDS: LazyLock<Vec<ColumnName>> = LazyLock::new(|| vec![
+            column_name!("add.path"),
+            column_name!("add.deletionVector.storageType"),
+            column_name!("add.deletionVector.pathOrInlineDv"),
+            column_name!("add.deletionVector.offset"),
+            column_name!("remove.path"),
+            column_name!("remove.deletionVector.storageType"),
+            column_name!("remove.deletionVector.pathOrInlineDv"),
+            column_name!("remove.deletionVector.offset"),
+        ]);
 
-        for (add, index) in adds.into_iter() {
-            // Note: each (add.path + add.dv_unique_id()) pair has a
-            // unique Add + Remove pair in the log. For example:
-            // https://github.com/delta-io/delta/blob/master/spark/src/test/resources/delta/table-with-dv-large/_delta_log/00000000000000000001.json
-            if !self.seen.contains(&(add.path.clone(), add.dv_unique_id())) {
-                debug!(
-                    "Including file in scan: ({}, {:?}), is log {is_log_batch}",
-                    add.path,
-                    add.dv_unique_id(),
-                );
-                if is_log_batch {
-                    // Remember file actions from this batch so we can ignore duplicates
-                    // as we process batches from older commit and/or checkpoint files. We
-                    // don't need to track checkpoint batches because they are already the
-                    // oldest actions and can never replace anything.
-                    self.seen.insert((add.path.clone(), add.dv_unique_id()));
-                }
-                selection_vector[index] = true;
-            } else {
-                debug!(
-                    "Filtering out Add due to it being removed {}, is log {is_log_batch}",
-                    add.path
-                );
-                // we may have a true here because the data-skipping predicate included the file
-                selection_vector[index] = false;
+        let schema_to_use: SchemaRef = if is_log_batch {
+            // NB: We _must_ pass these in the order `ADD_NAME, REMOVE_NAME` as the visitor assumes
+            // the Add action comes first. The [`project`] method honors this order, so this works
+            // as long as we keep this order here.
+            static SCHEMA: LazyLock<DeltaResult<SchemaRef>> = LazyLock::new(|| {
+                SchemaProjection::project(get_log_schema(), &ADD_REMOVE_FIELDS).map(Arc::new)
+            });
+            match LazyLock::force(&SCHEMA) {
+                Ok(schema) => schema.clone(),
+                Err(e) => return Err(Error::generic(e)),
             }
-        }
+        } else {
+            // All checkpoint actions are already reconciled and Remove actions in checkpoint files
+            // only serve as tombstones for vacuum jobs. So no need to load them here.
+            static SCHEMA: LazyLock<DeltaResult<SchemaRef>> = LazyLock::new(|| {
+                SchemaProjection::project(get_log_schema(), &ADD_REMOVE_FIELDS[..4]).map(Arc::new)
+            });
+            match LazyLock::force(&SCHEMA) {
+                Ok(schema) => schema.clone(),
+                Err(e) => return Err(Error::generic(e)),
+            }
+        };
+        debug!("Visiting scan data with schema {schema_to_use:#?}");
+        let mut visitor = AddRemoveDedupVisitor{
+            seen: &mut self.seen,
+            selection_vector,
+            is_log_batch};
+        actions.extract(schema_to_use, &mut visitor)?;
+        let selection_vector = visitor.selection_vector;
 
+        // TODO: Teach expression eval to respect the selection vector we just computed so carefully!
         let result = expression_handler
             .get_evaluator(
-                get_log_schema().project(&[ADD_NAME])?,
+                get_log_add_schema().clone(),
                 self.get_add_transform_expr(),
                 SCAN_ROW_DATATYPE.clone(),
             )
             .evaluate(actions)?;
         Ok((result, selection_vector))
-    }
-
-    // work shared between process_batch and process_scan_batch
-    fn setup_batch_process(
-        &mut self,
-        selection_vector: Option<Vec<bool>>,
-        actions: &dyn EngineData,
-        is_log_batch: bool,
-    ) -> DeltaResult<Vec<(Add, usize)>> {
-        let schema_to_use = if is_log_batch {
-            // NB: We _must_ pass these in the order `ADD_NAME, REMOVE_NAME` as the visitor assumes
-            // the Add action comes first. The [`project`] method honors this order, so this works
-            // as long as we keep this order here.
-            get_log_schema().project(&[ADD_NAME, REMOVE_NAME])?
-        } else {
-            // All checkpoint actions are already reconciled and Remove actions in checkpoint files
-            // only serve as tombstones for vacuum jobs. So no need to load them here.
-            get_log_schema().project(&[ADD_NAME])?
-        };
-        let mut visitor = AddRemoveVisitor::new(selection_vector, is_log_batch);
-        actions.extract(schema_to_use, &mut visitor)?;
-
-        for remove in visitor.removes.into_iter() {
-            let dv_id = remove.dv_unique_id();
-            self.seen.insert((remove.path, dv_id));
-        }
-
-        Ok(visitor.adds)
     }
 }
 

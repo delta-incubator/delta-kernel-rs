@@ -80,7 +80,11 @@ macro_rules! impl_default_get {
         $(
             fn $name(&'a self, _row_index: usize, field_name: &str) -> DeltaResult<Option<$typ>> {
                 debug!("Asked for type {} on {field_name}, but using default error impl.", stringify!($typ));
-                Err(Error::UnexpectedColumnType(format!("{field_name} is not of type {}", stringify!($typ))).with_backtrace())
+                Err(Error::UnexpectedColumnType(format!(
+                    "{field_name} is {}, not type {}",
+                    self.typename(),
+                    stringify!($typ)))
+                    .with_backtrace())
             }
         )*
     };
@@ -92,6 +96,9 @@ macro_rules! impl_default_get {
 /// for. Therefore, for each "data container" an Engine has, it is only necessary to implement the
 /// `get_x` method for the type it holds.
 pub trait GetData<'a> {
+    fn typename(&self) -> &'static str {
+        std::any::type_name::<Self>()
+    }
     impl_default_get!(
         (get_bool, bool),
         (get_int, i32),
