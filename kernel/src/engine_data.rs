@@ -49,7 +49,7 @@ impl<'a> ListItem<'a> {
 /// a trait that an engine exposes to give access to a map
 pub trait EngineMap {
     /// Get the item with the specified key from the map at `row_index` in the raw data, and return it as an `Option<&'a str>`
-    fn get<'a>(&'a self, row_index: usize, key: &str) -> Option<&'a str>;
+    fn get(&self, row_index: usize, key: &str) -> Option<&str>;
     /// Materialize the entire map at `row_index` in the raw data into a `HashMap`
     fn materialize(&self, row_index: usize) -> HashMap<String, String>;
 }

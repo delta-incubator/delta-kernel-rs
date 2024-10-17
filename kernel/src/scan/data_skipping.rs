@@ -74,6 +74,7 @@ fn as_inverted_data_skipping_predicate(expr: &Expr) -> Option<Expr> {
                     None
                 }
             }
+            UnaryOperator::IsNotNull => todo!(),
         },
         BinaryOperation { op, left, right } => {
             let expr = Expr::binary(op.invert()?, left.as_ref().clone(), right.as_ref().clone());
@@ -91,7 +92,7 @@ fn as_inverted_data_skipping_predicate(expr: &Expr) -> Option<Expr> {
 /// Returns `None` if the predicate is not eligible for data skipping.
 ///
 /// We normalize each binary operation to a comparison between a column and a literal value and
-/// rewite that in terms of the min/max values of the column.
+/// rewrite that in terms of the min/max values of the column.
 /// For example, `1 < a` is rewritten as `minValues.a > 1`.
 ///
 /// For Unary `Not`, we push the Not down using De Morgan's Laws to invert everything below the Not.

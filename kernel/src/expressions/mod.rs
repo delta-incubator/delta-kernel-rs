@@ -119,6 +119,7 @@ pub enum UnaryOperator {
     Not,
     /// Unary Is Null
     IsNull,
+    IsNotNull,
 }
 
 /// A SQL expression.
@@ -156,7 +157,10 @@ pub enum Expression {
         /// The expressions.
         exprs: Vec<Expression>,
     },
-    // TODO: support more expressions, such as IS IN, LIKE, etc.
+    MapAccess {
+        source: Box<Expression>,
+        key: Option<String>,
+    },
 }
 
 impl<T: Into<Scalar>> From<T> for Expression {
@@ -184,6 +188,7 @@ impl Display for Expression {
             Self::UnaryOperation { op, expr } => match op {
                 UnaryOperator::Not => write!(f, "NOT {}", expr),
                 UnaryOperator::IsNull => write!(f, "{} IS NULL", expr),
+                UnaryOperator::IsNotNull => write!(f, "{} IS NOT NULL", expr),
             },
             Self::VariadicOperation { op, exprs } => match op {
                 VariadicOperator::And => {
@@ -201,6 +206,13 @@ impl Display for Expression {
                     )
                 }
             },
+            Self::MapAccess { source, key } => {
+                write!(f, "{}", *source)?;
+                if let Some(key) = key {
+                    write!(f, "['{}']", key)?;
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -219,7 +231,7 @@ impl Expression {
         set
     }
 
-    /// Create an new expression for a column reference
+    /// Create a new expression for a column reference
     pub fn column(name: impl ToString) -> Self {
         Self::Column(name.to_string())
     }
@@ -263,6 +275,13 @@ impl Expression {
     pub fn variadic(op: VariadicOperator, exprs: impl IntoIterator<Item = Self>) -> Self {
         let exprs = exprs.into_iter().collect::<Vec<_>>();
         Self::VariadicOperation { op, exprs }
+    }
+
+    pub fn map(source: impl Into<Expression>, key: Option<&str>) -> Self {
+        Self::MapAccess {
+            source: Box::new(source.into()),
+            key: key.map(Into::into),
+        }
     }
 
     /// Creates a new expression AND(exprs...)
@@ -359,6 +378,9 @@ impl Expression {
                 }
                 Self::VariadicOperation { exprs, .. } => {
                     stack.extend(exprs.iter());
+                }
+                Self::MapAccess { source, .. } => {
+                    stack.push(source);
                 }
             }
             Some(expr)

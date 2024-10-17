@@ -12,9 +12,9 @@ use syn::{parse_macro_input, Data, DataStruct, DeriveInput, Fields, Meta, PathAr
 /// delta schema camelCase version).
 ///
 /// If a field sets `drop_null_container_values`, it means the underlying data can contain null in
-/// the values of the container (i.e. a `key` -> `null` in a `HashMap`). Therefore the schema should
+/// the values of the container (i.e. a `key` -> `null` in a `HashMap`). Therefore, the schema should
 /// mark the value field as nullable, but those mappings will be dropped when converting to an
-/// actual rust `HashMap`. Currently this can _only_ be set on `HashMap` fields.
+/// actual rust `HashMap`. Currently, this can _only_ be set on `HashMap` fields.
 #[proc_macro_derive(Schema, attributes(drop_null_container_values))]
 pub fn derive_schema(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
