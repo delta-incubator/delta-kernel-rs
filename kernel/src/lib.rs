@@ -73,6 +73,7 @@ pub mod scan;
 pub mod schema;
 pub mod snapshot;
 pub mod table;
+pub mod transaction;
 pub(crate) mod utils;
 
 pub use engine_data::{DataVisitor, EngineData};
@@ -196,6 +197,38 @@ pub trait JsonHandler: Send + Sync {
         // clone the (potentially large) expression every time we call this function.
         predicate: Option<Expression>,
     ) -> DeltaResult<FileDataReadResultIterator>;
+
+    /// Atomically (!) write a single JSON file. Each row of the input data represents an action
+    /// in the delta log. this PUT must:
+    /// (1) serialize the data to newline-delimited json (each row is a json object literal)
+    /// (2) write the data to the object store atomically (i.e. if the file already exists, fail
+    ///     unless the overwrite flag is set)
+    ///
+    /// The JSON data should be written as { "column1": "value1", "column2": "value2", ... }
+    /// with each row on a new line.
+    ///
+    /// NOTE: Null columns should not be written to the JSON file. For example, if a row has columns
+    /// ["a", "b"] and the value of "b" is null, the JSON object should be written as
+    /// { "a": "..." }. Note that including nulls is technically valid JSON, but would bloat the
+    /// log, therefore we recommend omitting them.
+    ///
+    /// # Parameters
+    ///
+    /// - `path` - URL to write the JSON file to
+    /// - `data` - Iterator of EngineData to write to the JSON file. each row should be written as
+    ///   a new JSON object appended to the file. (that is, the file is newline-delimeted JSON, and
+    ///   each row is a JSON object on a single line)
+    /// - `overwrite` - If true, overwrite the file if it exists. If false, the call must fail if
+    ///   the file exists.
+    ///
+    /// NOTE: the `overwrite` flag isn't used for the existing commit flow, but will be used in the
+    /// future to write `_last_checkpoint` files.
+    fn write_json_file(
+        &self,
+        path: &Url,
+        data: Box<dyn Iterator<Item = Box<dyn EngineData>> + Send>,
+        overwrite: bool,
+    ) -> DeltaResult<()>;
 }
 
 /// Provides Parquet file related functionalities to Delta Kernel.

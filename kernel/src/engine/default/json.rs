@@ -11,10 +11,12 @@ use bytes::{Buf, Bytes};
 use futures::{StreamExt, TryStreamExt};
 use object_store::path::Path;
 use object_store::{DynObjectStore, GetResultPayload};
+use url::Url;
 
 use super::executor::TaskExecutor;
 use super::file_stream::{FileOpenFuture, FileOpener, FileStream};
 use crate::engine::arrow_utils::parse_json as arrow_parse_json;
+use crate::engine::arrow_utils::write_json;
 use crate::schema::SchemaRef;
 use crate::{
     DeltaResult, EngineData, Error, Expression, FileDataReadResultIterator, FileMeta, JsonHandler,
@@ -87,6 +89,33 @@ impl<E: TaskExecutor> JsonHandler for DefaultJsonHandler<E> {
             files,
             self.readahead,
         )
+    }
+
+    // note: for now we just buffer all the data and write it out all at once
+    fn write_json_file(
+        &self,
+        path: &Url,
+        data: Box<dyn Iterator<Item = Box<dyn EngineData>> + Send>,
+        _overwrite: bool,
+    ) -> DeltaResult<()> {
+        let buffer = write_json(data)?;
+        // Put if absent
+        let store = self.store.clone(); // cheap Arc
+        let path = Path::from(path.path());
+        let path2 = path.clone(); // FIXME gross
+        self.task_executor
+            .block_on(async move {
+                store
+                    .put_opts(&path, buffer.into(), object_store::PutMode::Create.into())
+                    .await
+            })
+            .map_err(|e| match e {
+                object_store::Error::AlreadyExists { .. } => {
+                    Error::FileAlreadyExists(path2.to_string())
+                }
+                e => e.into(),
+            })?;
+        Ok(())
     }
 }
 
