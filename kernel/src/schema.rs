@@ -558,6 +558,9 @@ impl DataType {
             _ => None,
         }
     }
+    pub fn array(array_type: ArrayType) -> Self {
+        DataType::Array(Box::new(array_type))
+    }
 }
 
 impl Display for DataType {
