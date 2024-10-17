@@ -147,6 +147,21 @@ impl ProvidesColumnByName for StructArray {
     }
 }
 
+// Given a RecordBatch or StructArray, recursively probe for a nested column path and return the
+// corresponding column, or Err if the path is invalid. For example, given the following schema:
+// ```text
+// root: {
+//   a: int32,
+//   b: struct {
+//     c: int32,
+//     d: struct {
+//       e: int32,
+//       f: int64,
+//     },
+//   },
+// }
+// ```
+// The path ["b", "d", "f"] would retrieve the int64 column while ["a", "b"] would produce an error.
 fn extract_column<'a>(
     mut parent: &dyn ProvidesColumnByName,
     mut field_names: impl Iterator<Item = &'a str>,
@@ -178,6 +193,8 @@ fn evaluate_expression(
     use Expression::*;
     match (expression, result_type) {
         (Literal(scalar), _) => Ok(scalar.to_array(batch.num_rows())?),
+        // TODO properly handle nested columns
+        // https://github.com/delta-incubator/delta-kernel-rs/issues/86
         (Column(name), _) => extract_column(batch, name.split('.')),
         (Struct(fields), Some(DataType::Struct(output_schema))) => {
             let columns = fields
