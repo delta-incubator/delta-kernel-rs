@@ -52,7 +52,7 @@ impl SetTransactionScanner {
         // checkpoint part when patitioned by `add.path` like the Delta spec requires. There's no
         // point filtering by a particular app id, even if we have one, because app ids are all in
         // the a single checkpoint part having large min/max range (because they're usually uuids).
-        let meta_predicate = Expr::column("txn.appId").is_not_null();
+        let meta_predicate = Expr::split_column("txn.appId").is_not_null();
         self.snapshot
             .log_segment
             .replay(engine, schema.clone(), schema, Some(meta_predicate))

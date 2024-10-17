@@ -5,9 +5,11 @@ use std::fmt::{Display, Formatter};
 
 use itertools::Itertools;
 
+pub use self::column_name::ColumnName;
 pub use self::scalars::{ArrayData, Scalar, StructData};
 use crate::DataType;
 
+mod column_name;
 mod scalars;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -131,9 +133,16 @@ pub enum Expression {
     /// A literal value.
     Literal(Scalar),
     /// A column reference by name.
-    Column(String),
+    Column(ColumnName),
     /// A struct computed from a Vec of expressions
     Struct(Vec<Expression>),
+    /// A unary operation.
+    UnaryOperation {
+        /// The operator.
+        op: UnaryOperator,
+        /// The expression.
+        expr: Box<Expression>,
+    },
     /// A binary operation.
     BinaryOperation {
         /// The operator.
@@ -142,13 +151,6 @@ pub enum Expression {
         left: Box<Expression>,
         /// The right-hand side of the operation.
         right: Box<Expression>,
-    },
-    /// A unary operation.
-    UnaryOperation {
-        /// The operator.
-        op: UnaryOperator,
-        /// The expression.
-        expr: Box<Expression>,
     },
     VariadicOperation {
         /// The operator.
@@ -165,11 +167,17 @@ impl<T: Into<Scalar>> From<T> for Expression {
     }
 }
 
+impl From<ColumnName> for Expression {
+    fn from(value: ColumnName) -> Self {
+        Self::Column(value)
+    }
+}
+
 impl Display for Expression {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Literal(l) => write!(f, "{}", l),
-            Self::Column(name) => write!(f, "Column({})", name),
+            Self::Literal(l) => write!(f, "{l}"),
+            Self::Column(name) => write!(f, "Column({name})"),
             Self::Struct(exprs) => write!(
                 f,
                 "Struct({})",
@@ -179,11 +187,11 @@ impl Display for Expression {
                 op: BinaryOperator::Distinct,
                 left,
                 right,
-            } => write!(f, "DISTINCT({}, {})", left, right),
-            Self::BinaryOperation { op, left, right } => write!(f, "{} {} {}", left, op, right),
+            } => write!(f, "DISTINCT({left}, {right})"),
+            Self::BinaryOperation { op, left, right } => write!(f, "{left} {op} {right}"),
             Self::UnaryOperation { op, expr } => match op {
-                UnaryOperator::Not => write!(f, "NOT {}", expr),
-                UnaryOperator::IsNull => write!(f, "{} IS NULL", expr),
+                UnaryOperator::Not => write!(f, "NOT {expr}"),
+                UnaryOperator::IsNull => write!(f, "{expr} IS NULL"),
             },
             Self::VariadicOperation { op, exprs } => match op {
                 VariadicOperator::And => {
@@ -207,21 +215,28 @@ impl Display for Expression {
 
 impl Expression {
     /// Returns a set of columns referenced by this expression.
-    pub fn references(&self) -> HashSet<&str> {
+    pub fn references(&self) -> HashSet<&ColumnName> {
         let mut set = HashSet::new();
 
         for expr in self.walk() {
             if let Self::Column(name) = expr {
-                set.insert(name.as_str());
+                set.insert(name);
             }
         }
 
         set
     }
 
-    /// Create an new expression for a column reference
-    pub fn column(name: impl ToString) -> Self {
-        Self::Column(name.to_string())
+    /// Creates a new column reference, for a simple (not nested) column name.
+    /// See [`ColumnName::simple`] for details.
+    pub fn simple_column(name: impl Into<String>) -> Self {
+        ColumnName::simple(name).into()
+    }
+
+    /// Creates a new column reference, for a splittable nested column name.
+    /// See [`ColumnName::split`] for details.
+    pub fn split_column(name: impl AsRef<str>) -> Self {
+        ColumnName::split(name.as_ref()).into()
     }
 
     /// Create a new expression for a literal value
@@ -286,57 +301,57 @@ impl Expression {
     }
 
     /// Create a new expression `self == other`
-    pub fn eq(self, other: Self) -> Self {
+    pub fn eq(self, other: impl Into<Self>) -> Self {
         Self::binary(BinaryOperator::Equal, self, other)
     }
 
     /// Create a new expression `self != other`
-    pub fn ne(self, other: Self) -> Self {
+    pub fn ne(self, other: impl Into<Self>) -> Self {
         Self::binary(BinaryOperator::NotEqual, self, other)
     }
 
     /// Create a new expression `self <= other`
-    pub fn le(self, other: Self) -> Self {
+    pub fn le(self, other: impl Into<Self>) -> Self {
         Self::binary(BinaryOperator::LessThanOrEqual, self, other)
     }
 
     /// Create a new expression `self < other`
-    pub fn lt(self, other: Self) -> Self {
+    pub fn lt(self, other: impl Into<Self>) -> Self {
         Self::binary(BinaryOperator::LessThan, self, other)
     }
 
     /// Create a new expression `self >= other`
-    pub fn ge(self, other: Self) -> Self {
+    pub fn ge(self, other: impl Into<Self>) -> Self {
         Self::binary(BinaryOperator::GreaterThanOrEqual, self, other)
     }
 
     /// Create a new expression `self > other`
-    pub fn gt(self, other: Self) -> Self {
+    pub fn gt(self, other: impl Into<Self>) -> Self {
         Self::binary(BinaryOperator::GreaterThan, self, other)
     }
 
     /// Create a new expression `self >= other`
-    pub fn gt_eq(self, other: Self) -> Self {
+    pub fn gt_eq(self, other: impl Into<Self>) -> Self {
         Self::binary(BinaryOperator::GreaterThanOrEqual, self, other)
     }
 
     /// Create a new expression `self <= other`
-    pub fn lt_eq(self, other: Self) -> Self {
+    pub fn lt_eq(self, other: impl Into<Self>) -> Self {
         Self::binary(BinaryOperator::LessThanOrEqual, self, other)
     }
 
     /// Create a new expression `self AND other`
-    pub fn and(self, other: Self) -> Self {
-        Self::and_from([self, other])
+    pub fn and(self, other: impl Into<Self>) -> Self {
+        Self::and_from([self, other.into()])
     }
 
     /// Create a new expression `self OR other`
-    pub fn or(self, other: Self) -> Self {
-        Self::or_from([self, other])
+    pub fn or(self, other: impl Into<Self>) -> Self {
+        Self::or_from([self, other.into()])
     }
 
     /// Create a new expression `DISTINCT(self, other)`
-    pub fn distinct(self, other: Self) -> Self {
+    pub fn distinct(self, other: impl Into<Self>) -> Self {
         Self::binary(BinaryOperator::Distinct, self, other)
     }
 
@@ -374,34 +389,34 @@ impl std::ops::Not for Expression {
     }
 }
 
-impl std::ops::Add<Expression> for Expression {
+impl<R: Into<Expression>> std::ops::Add<R> for Expression {
     type Output = Self;
 
-    fn add(self, rhs: Expression) -> Self::Output {
+    fn add(self, rhs: R) -> Self::Output {
         Self::binary(BinaryOperator::Plus, self, rhs)
     }
 }
 
-impl std::ops::Sub<Expression> for Expression {
+impl<R: Into<Expression>> std::ops::Sub<R> for Expression {
     type Output = Self;
 
-    fn sub(self, rhs: Expression) -> Self {
+    fn sub(self, rhs: R) -> Self {
         Self::binary(BinaryOperator::Minus, self, rhs)
     }
 }
 
-impl std::ops::Mul<Expression> for Expression {
+impl<R: Into<Expression>> std::ops::Mul<R> for Expression {
     type Output = Self;
 
-    fn mul(self, rhs: Expression) -> Self {
+    fn mul(self, rhs: R) -> Self {
         Self::binary(BinaryOperator::Multiply, self, rhs)
     }
 }
 
-impl std::ops::Div<Expression> for Expression {
+impl<R: Into<Expression>> std::ops::Div<R> for Expression {
     type Output = Self;
 
-    fn div(self, rhs: Expression) -> Self {
+    fn div(self, rhs: R) -> Self {
         Self::binary(BinaryOperator::Divide, self, rhs)
     }
 }
@@ -412,41 +427,29 @@ mod tests {
 
     #[test]
     fn test_expression_format() {
-        let col_ref = Expr::column("x");
+        let col_ref = Expr::simple_column("x");
         let cases = [
             (col_ref.clone(), "Column(x)"),
-            (col_ref.clone().eq(Expr::literal(2)), "Column(x) = 2"),
+            (col_ref.clone().eq(2), "Column(x) = 2"),
+            ((col_ref.clone() - 4).lt(10), "Column(x) - 4 < 10"),
+            ((col_ref.clone() + 4) / 10 * 42, "Column(x) + 4 / 10 * 42"),
             (
-                (col_ref.clone() - Expr::literal(4)).lt(Expr::literal(10)),
-                "Column(x) - 4 < 10",
-            ),
-            (
-                (col_ref.clone() + Expr::literal(4)) / Expr::literal(10) * Expr::literal(42),
-                "Column(x) + 4 / 10 * 42",
-            ),
-            (
-                col_ref
-                    .clone()
-                    .gt_eq(Expr::literal(2))
-                    .and(col_ref.clone().lt_eq(Expr::literal(10))),
+                col_ref.clone().gt_eq(2).and(col_ref.clone().lt_eq(10)),
                 "AND(Column(x) >= 2, Column(x) <= 10)",
             ),
             (
                 Expr::and_from([
-                    col_ref.clone().gt_eq(Expr::literal(2)),
-                    col_ref.clone().lt_eq(Expr::literal(10)),
-                    col_ref.clone().lt_eq(Expr::literal(100)),
+                    col_ref.clone().gt_eq(2),
+                    col_ref.clone().lt_eq(10),
+                    col_ref.clone().lt_eq(100),
                 ]),
                 "AND(Column(x) >= 2, Column(x) <= 10, Column(x) <= 100)",
             ),
             (
-                col_ref
-                    .clone()
-                    .gt(Expr::literal(2))
-                    .or(col_ref.clone().lt(Expr::literal(10))),
+                col_ref.clone().gt(2).or(col_ref.clone().lt(10)),
                 "OR(Column(x) > 2, Column(x) < 10)",
             ),
-            (col_ref.eq(Expr::literal("foo")), "Column(x) = 'foo'"),
+            (col_ref.eq("foo"), "Column(x) = 'foo'"),
         ];
 
         for (expr, expected) in cases {
