@@ -131,21 +131,21 @@ impl Scalar {
 }
 
 fn wrap_comparison_result(arr: BooleanArray) -> ArrayRef {
-    Arc::new(arr) as Arc<dyn Array>
+    Arc::new(arr) as ArrayRef
 }
 
 trait ProvidesColumnByName {
-    fn column_by_name(&self, name: &str) -> Option<&Arc<dyn Array>>;
+    fn column_by_name(&self, name: &str) -> Option<&ArrayRef>;
 }
 
 impl ProvidesColumnByName for RecordBatch {
-    fn column_by_name(&self, name: &str) -> Option<&Arc<dyn Array>> {
+    fn column_by_name(&self, name: &str) -> Option<&ArrayRef> {
         self.column_by_name(name)
     }
 }
 
 impl ProvidesColumnByName for StructArray {
-    fn column_by_name(&self, name: &str) -> Option<&Arc<dyn Array>> {
+    fn column_by_name(&self, name: &str) -> Option<&ArrayRef> {
         self.column_by_name(name)
     }
 }
@@ -204,7 +204,7 @@ fn evaluate_expression(
                 .iter()
                 .zip(output_schema.fields())
                 .map(|(expr, field)| evaluate_expression(expr, batch, Some(field.data_type())));
-            let output_cols: Vec<Arc<dyn Array>> = columns.try_collect()?;
+            let output_cols: Vec<ArrayRef> = columns.try_collect()?;
             let output_fields: Vec<ArrowField> = output_cols
                 .iter()
                 .zip(output_schema.fields())
@@ -308,7 +308,7 @@ fn evaluate_expression(
             let left_arr = evaluate_expression(left.as_ref(), batch, None)?;
             let right_arr = evaluate_expression(right.as_ref(), batch, None)?;
 
-            type Operation = fn(&dyn Datum, &dyn Datum) -> Result<Arc<dyn Array>, ArrowError>;
+            type Operation = fn(&dyn Datum, &dyn Datum) -> Result<ArrayRef, ArrowError>;
             let eval: Operation = match op {
                 Plus => add,
                 Minus => sub,
@@ -369,11 +369,11 @@ fn apply_schema(array: &dyn Array, schema: &DataType) -> DeltaResult<RecordBatch
 // the field will be renamed to the contained `str`.
 fn transform_field_and_col(
     field_name: &str,
-    arrow_col: Arc<dyn Array>,
+    arrow_col: ArrayRef,
     target_type: &DataType,
     nullable: bool,
     metadata: Option<HashMap<String, String>>,
-) -> DeltaResult<(ArrowField, Arc<dyn Array>)> {
+) -> DeltaResult<(ArrowField, ArrayRef)> {
     let transformed_col = apply_schema_to(&arrow_col, target_type)?;
     let mut transformed_field = ArrowField::new(
         field_name,
@@ -411,7 +411,7 @@ fn transform_struct(
                 Some(target_field.metadata_with_string_values()),
             )
         });
-    let (transformed_fields, transformed_cols): (Vec<ArrowField>, Vec<Arc<dyn Array>>) =
+    let (transformed_fields, transformed_cols): (Vec<ArrowField>, Vec<ArrayRef>) =
         result_iter.process_results(|iter| iter.unzip())?;
     if transformed_cols.len() != input_col_count {
         return Err(Error::InternalError(format!(
