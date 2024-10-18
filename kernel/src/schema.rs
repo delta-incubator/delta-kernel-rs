@@ -32,10 +32,10 @@ pub enum MetadataValue {
 impl std::fmt::Display for MetadataValue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            MetadataValue::Number(n) => write!(f, "{}", n),
-            MetadataValue::String(s) => write!(f, "{}", s),
-            MetadataValue::Boolean(b) => write!(f, "{}", b),
-            MetadataValue::Other(v) => write!(f, "{}", v), // just write the json back
+            MetadataValue::Number(n) => write!(f, "{n}"),
+            MetadataValue::String(s) => write!(f, "{s}"),
+            MetadataValue::Boolean(b) => write!(f, "{b}"),
+            MetadataValue::Other(v) => write!(f, "{v}"), // just write the json back
         }
     }
 }

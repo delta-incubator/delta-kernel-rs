@@ -897,7 +897,7 @@ fn metadata_eq(
     }
     kernel_metadata
         .iter()
-        .all(|(key, value)| arrow_metadata.get(key).map_or(false, |v| *value == *v))
+        .all(|(key, value)| arrow_metadata.get(key).is_some_and(|v| *value == *v))
 }
 
 #[cfg(test)]

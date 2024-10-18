@@ -368,16 +368,15 @@ fn apply_schema(array: &dyn Array, schema: &DataType) -> DeltaResult<RecordBatch
 // helper to transform an arrow field+col into the specified target type. If `rename` is specified
 // the field will be renamed to the contained `str`.
 fn transform_field_and_col(
-    arrow_field: &Arc<ArrowField>,
+    field_name: &str,
     arrow_col: Arc<dyn Array>,
     target_type: &DataType,
     nullable: bool,
-    rename: Option<&str>,
     metadata: Option<HashMap<String, String>>,
 ) -> DeltaResult<(ArrowField, Arc<dyn Array>)> {
     let transformed_col = apply_schema_to(&arrow_col, target_type)?;
     let mut transformed_field = ArrowField::new(
-        rename.unwrap_or_else(|| arrow_field.name()),
+        field_name,
         transformed_col.data_type().clone(),
         nullable,
     );
@@ -397,20 +396,18 @@ fn transform_struct(
     struct_array: &StructArray,
     target_fields: impl Iterator<Item = impl Borrow<StructField>>,
 ) -> DeltaResult<StructArray> {
-    let (arrow_fields, arrow_cols, nulls) = struct_array.clone().into_parts();
+    let (_, arrow_cols, nulls) = struct_array.clone().into_parts();
     let input_col_count = arrow_cols.len();
-    let result_iter = arrow_fields
+    let result_iter = arrow_cols
         .into_iter()
-        .zip(arrow_cols)
         .zip(target_fields)
-        .map(|((sa_field, sa_col), target_field)| {
+        .map(|(sa_col, target_field)| {
             let target_field = target_field.borrow();
             transform_field_and_col(
-                sa_field,
+                target_field.name.as_str(),
                 sa_col,
                 target_field.data_type(),
                 target_field.nullable,
-                Some(target_field.name.as_str()),
                 Some(target_field.metadata_with_string_values()),
             )
         });
@@ -451,11 +448,10 @@ fn apply_schema_to_list(
     };
     let (field, offset_buffer, values, nulls) = la.clone().into_parts();
     let (transformed_field, transformed_values) = transform_field_and_col(
-        &field,
+        field.name().as_str(),
         values,
         &target_inner_type.element_type,
         target_inner_type.contains_null,
-        None,
         None,
     )?;
     Ok(ListArray::try_new(
@@ -473,30 +469,13 @@ fn apply_schema_to_map(array: &dyn Array, kernel_map_type: &MapType) -> DeltaRes
             "Arrow claimed to be a map but isn't a MapArray",
         ));
     };
-
-    let ArrowDataType::Map(arrow_map_type, _) = array.data_type() else {
-        return Err(make_arrow_error(
-            "Arrow claimed to be a map but doesn't have map DataType",
-        ));
-    };
-
     let (map_field, offset_buffer, map_struct_array, nulls, ordered) = ma.clone().into_parts();
-
-    let ArrowDataType::Struct(_) = arrow_map_type.data_type() else {
-        return Err(make_arrow_error("Arrow map type wasn't a struct."));
-    };
-
     let target_fields = map_struct_array
         .fields()
         .iter()
-        .zip([
-            (&kernel_map_type.key_type, false),
-            (
-                &kernel_map_type.value_type,
-                kernel_map_type.value_contains_null,
-            ),
-        ])
-        .map(|(arrow_field, (target_type, nullable))| {
+        .zip([&kernel_map_type.key_type, &kernel_map_type.value_type])
+        .zip([false, kernel_map_type.value_contains_null])
+        .map(|((arrow_field, target_type), nullable)| {
             StructField::new(arrow_field.name(), target_type.clone(), nullable)
         });
 
@@ -505,14 +484,12 @@ fn apply_schema_to_map(array: &dyn Array, kernel_map_type: &MapType) -> DeltaRes
     // specify the key/value types as the target type iterator.
     let transformed_map_struct_array = transform_struct(&map_struct_array, target_fields)?;
 
-    let transformed_map_field = Arc::new(
-        map_field
-            .as_ref()
-            .clone()
-            .with_data_type(transformed_map_struct_array.data_type().clone()),
-    );
+    let transformed_map_field = map_field
+        .as_ref()
+        .clone()
+        .with_data_type(transformed_map_struct_array.data_type().clone());
     Ok(MapArray::try_new(
-        transformed_map_field,
+        Arc::new(transformed_map_field),
         offset_buffer,
         transformed_map_struct_array,
         nulls,
