@@ -146,7 +146,8 @@ fn visit_expression_column_impl(
     state: &mut KernelExpressionVisitorState,
     name: DeltaResult<String>,
 ) -> DeltaResult<usize> {
-    Ok(wrap_expression(state, Expression::Column(name?)))
+    // TODO: We can't actually assume the column name is so easily splittable!
+    Ok(wrap_expression(state, Expression::split_column(name?)))
 }
 
 #[no_mangle]

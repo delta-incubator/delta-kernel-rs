@@ -111,8 +111,8 @@ impl LogSegment {
         use Expression as Expr;
         static META_PREDICATE: LazyLock<Option<ExpressionRef>> = LazyLock::new(|| {
             Some(Arc::new(Expr::or(
-                Expr::column("metaData.id").is_not_null(),
-                Expr::column("protocol.minReaderVersion").is_not_null(),
+                Expr::split_column("metaData.id").is_not_null(),
+                Expr::split_column("protocol.minReaderVersion").is_not_null(),
             )))
         });
         // read the same protocol and metadata schema for both commits and checkpoints

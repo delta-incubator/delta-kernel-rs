@@ -52,8 +52,11 @@ impl SetTransactionScanner {
         // checkpoint part when patitioned by `add.path` like the Delta spec requires. There's no
         // point filtering by a particular app id, even if we have one, because app ids are all in
         // the a single checkpoint part having large min/max range (because they're usually uuids).
-        static META_PREDICATE: LazyLock<Option<ExpressionRef>> =
-            LazyLock::new(|| Some(Arc::new(Expression::column("txn.appId").is_not_null())));
+        static META_PREDICATE: LazyLock<Option<ExpressionRef>> = LazyLock::new(|| {
+            Some(Arc::new(
+                Expression::split_column("txn.appId").is_not_null(),
+            ))
+        });
         self.snapshot
             .log_segment
             .replay(engine, schema.clone(), schema, META_PREDICATE.clone())
