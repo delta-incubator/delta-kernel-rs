@@ -126,6 +126,9 @@ fn assert_fields_match<'a>(
 }
 
 fn assert_cols_eq(actual: &dyn Array, expected: &dyn Array) {
+    // Our testing only exercises these nested types so far. In the future we may need to expand
+    // this to more types. Any `DataType` with a nested `Field` is a candidate for needing to be
+    // compared this way.
     match actual.data_type() {
         DataType::Struct(_) => {
             let actual_sa = actual.as_struct();
