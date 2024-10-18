@@ -106,20 +106,20 @@ fn sort_record_batch(batch: RecordBatch) -> DeltaResult<RecordBatch> {
 //  - nullability: parquet marks many things as nullable that we don't in our schema
 //  - metadata: because that diverges from the real data to the golden tabled data
 fn assert_fields_match<'a>(
-    schema: impl Iterator<Item = &'a FieldRef>,
-    golden: impl Iterator<Item = &'a FieldRef>,
+    actual: impl Iterator<Item = &'a FieldRef>,
+    expected: impl Iterator<Item = &'a FieldRef>,
 ) {
-    for (schema_field, golden_field) in schema.zip(golden) {
+    for (actual_field, expected_field) in actual.zip(expected) {
         assert!(
-            schema_field.name() == golden_field.name(),
+            actual_field.name() == expected_field.name(),
             "Field names don't match"
         );
         assert!(
-            schema_field.dict_id() == golden_field.dict_id(),
+            actual_field.dict_id() == expected_field.dict_id(),
             "Field dict_id doesn't match"
         );
         assert!(
-            schema_field.dict_is_ordered() == golden_field.dict_is_ordered(),
+            actual_field.dict_is_ordered() == expected_field.dict_is_ordered(),
             "Field dict_is_ordered doesn't match"
         );
     }
