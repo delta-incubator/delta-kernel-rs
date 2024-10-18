@@ -198,18 +198,9 @@ mod tests {
         url
     }
 
-    fn return_table_log_dir_url(path: &str) -> Url {
-        let path = PathBuf::from(path);
-        let path = std::fs::canonicalize(path).unwrap();
-        assert!(path.is_dir());
-        let url = url::Url::from_directory_path(path).unwrap();
-        assert!(url.path().ends_with('/'));
-        url
-    }
     #[test]
     fn test_invalid_version_and_part_lengths() {
-        let table_log_dir =
-            return_table_log_dir_url("./tests/data/multiple-checkpoint-faulty-1/_delta_log/");
+        let table_log_dir = table_log_dir_url();
 
         // Test cases for VERSION_LEN (20 digits)
         let test_cases = vec![
@@ -223,41 +214,71 @@ mod tests {
             let log_path = table_log_dir.join(file_name).unwrap();
             let result = ParsedLogPath::try_from(log_path);
             assert!(result.is_err(), "Expected an error for {}", error_msg);
-            assert!(matches!(result, Err(Error::InvalidLogPath(_))), "Expected InvalidLogPath error for {}", error_msg);
+            assert!(
+                matches!(result, Err(Error::InvalidLogPath(_))),
+                "Expected InvalidLogPath error for {}",
+                error_msg
+            );
         }
 
         // Test cases for MULTIPART_PART_LEN (10 digits)
         let test_cases = vec![
             // Error expected: Part number is 9 digits, but should be 10
-            ("00000000000000000010.checkpoint.000000001.0000000002.parquet", "short part number"),
+            (
+                "00000000000000000010.checkpoint.000000001.0000000002.parquet",
+                "short part number",
+            ),
             // Error expected: Part number is 11 digits, but should be 10
-            ("00000000000000000010.checkpoint.00000000001.0000000002.parquet", "long part number"),
+            (
+                "00000000000000000010.checkpoint.00000000001.0000000002.parquet",
+                "long part number",
+            ),
             // Error expected: Total parts is 9 digits, but should be 10
-            ("00000000000000000010.checkpoint.0000000001.000000002.parquet", "short total parts"),
+            (
+                "00000000000000000010.checkpoint.0000000001.000000002.parquet",
+                "short total parts",
+            ),
             // Error expected: Total parts is 11 digits, but should be 10
-            ("00000000000000000010.checkpoint.0000000001.00000000002.parquet", "long total parts"),
+            (
+                "00000000000000000010.checkpoint.0000000001.00000000002.parquet",
+                "long total parts",
+            ),
         ];
 
         for (file_name, error_msg) in test_cases {
             let log_path = table_log_dir.join(file_name).unwrap();
             let result = ParsedLogPath::try_from(log_path);
             assert!(result.is_err(), "Expected an error for {}", error_msg);
-            assert!(matches!(result, Err(Error::InvalidLogPath(_))), "Expected InvalidLogPath error for {}", error_msg);
+            assert!(
+                matches!(result, Err(Error::InvalidLogPath(_))),
+                "Expected InvalidLogPath error for {}",
+                error_msg
+            );
         }
 
         // Test cases for UUID_PART_LEN (36 characters)
         let test_cases = vec![
             // Error expected: UUID is 35 characters, but should be 36
-            ("00000000000000000010.checkpoint.3a0d65cd-4056-49b8-937b-95f9e3ee90.parquet", "short UUID"),
+            (
+                "00000000000000000010.checkpoint.3a0d65cd-4056-49b8-937b-95f9e3ee90.parquet",
+                "short UUID",
+            ),
             // Error expected: UUID is 37 characters, but should be 36
-            ("00000000000000000010.checkpoint.3a0d65cd-4056-49b8-937b-95f9e3ee90e5a.parquet", "long UUID"),
+            (
+                "00000000000000000010.checkpoint.3a0d65cd-4056-49b8-937b-95f9e3ee90e5a.parquet",
+                "long UUID",
+            ),
         ];
 
         for (file_name, error_msg) in test_cases {
             let log_path = table_log_dir.join(file_name).unwrap();
             let result = ParsedLogPath::try_from(log_path);
             assert!(result.is_err(), "Expected an error for {}", error_msg);
-            assert!(matches!(result, Err(Error::InvalidLogPath(_))), "Expected InvalidLogPath error for {}", error_msg);
+            assert!(
+                matches!(result, Err(Error::InvalidLogPath(_))),
+                "Expected InvalidLogPath error for {}",
+                error_msg
+            );
         }
     }
     fn test_unknown_invalid_patterns() {
@@ -583,42 +604,54 @@ mod tests {
     #[test]
     fn test_empty_filename() {
         let table_log_dir = table_log_dir_url();
-        
+
         // Test URL ending with a slash
         let log_path = table_log_dir.join("").unwrap();
         let result = ParsedLogPath::try_from(log_path);
         assert!(result.is_err(), "Expected an error for empty filename");
-        assert!(matches!(result, Err(Error::InvalidLogPath(_))), "Expected InvalidLogPath error for empty filename");
+        assert!(
+            matches!(result, Err(Error::InvalidLogPath(_))),
+            "Expected InvalidLogPath error for empty filename"
+        );
     }
 
     #[test]
     fn test_ok_none_and_unknown_cases() {
-        let table_log_dir = return_table_log_dir_url("./tests/data/multiple-checkpoint-faulty-1/_delta_log/");
+        let table_log_dir = table_log_dir_url();
 
         // Test cases for non-numeric version (should return Ok(None))
-        let test_cases = vec![
-            "_last_checkpoint",
-            "abc.json",
-            "version_001.json",
-        ];
+        let test_cases = vec!["_last_checkpoint", "abc.json", "version_001.json"];
 
         for file_name in test_cases {
             let log_path = table_log_dir.join(file_name).unwrap();
             let result = ParsedLogPath::try_from(log_path);
-            assert!(matches!(result, Ok(None)), "Expected Ok(None) for non-numeric version: {}", file_name);
+            assert!(
+                matches!(result, Ok(None)),
+                "Expected Ok(None) for non-numeric version: {}",
+                file_name
+            );
         }
 
         // Test case for missing file extension (should return Ok(None))
         let log_path = table_log_dir.join("00000000000000000010").unwrap();
         let result = ParsedLogPath::try_from(log_path);
-        assert!(matches!(result, Ok(None)), "Expected Ok(None) for missing file extension");
+        assert!(
+            matches!(result, Ok(None)),
+            "Expected Ok(None) for missing file extension"
+        );
 
         // Test case for empty extension (should return Ok(Some) with Unknown file type)
         let log_path = table_log_dir.join("00000000000000000011.").unwrap();
         let result = ParsedLogPath::try_from(log_path);
-        assert!(matches!(result, Ok(Some(_))), "Expected Ok(Some) for empty extension");
+        assert!(
+            matches!(result, Ok(Some(_))),
+            "Expected Ok(Some) for empty extension"
+        );
         if let Ok(Some(parsed)) = result {
-            assert!(parsed.is_unknown(), "Expected Unknown file type for empty extension");
+            assert!(
+                parsed.is_unknown(),
+                "Expected Unknown file type for empty extension"
+            );
         }
     }
 }
