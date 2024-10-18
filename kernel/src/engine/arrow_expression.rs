@@ -367,23 +367,17 @@ fn apply_schema(array: &dyn Array, schema: &DataType) -> DeltaResult<RecordBatch
 
 // helper to transform an arrow field+col into the specified target type. If `rename` is specified
 // the field will be renamed to the contained `str`.
-fn transform_field_and_col(
+fn new_field_with_metadata(
     field_name: &str,
-    arrow_col: ArrayRef,
-    target_type: &DataType,
+    data_type: &ArrowDataType,
     nullable: bool,
     metadata: Option<HashMap<String, String>>,
-) -> DeltaResult<(ArrowField, ArrayRef)> {
-    let transformed_col = apply_schema_to(&arrow_col, target_type)?;
-    let mut transformed_field = ArrowField::new(
-        field_name,
-        transformed_col.data_type().clone(),
-        nullable,
-    );
+) -> ArrowField {
+    let mut field = ArrowField::new(field_name, data_type.clone(), nullable);
     if let Some(metadata) = metadata {
-        transformed_field.set_metadata(metadata);
+        field.set_metadata(metadata);
     };
-    Ok((transformed_field, transformed_col))
+    field
 }
 
 // A helper that is a wrapper over `transform_field_and_col`. This will take apart the passed struct
@@ -398,19 +392,21 @@ fn transform_struct(
 ) -> DeltaResult<StructArray> {
     let (_, arrow_cols, nulls) = struct_array.clone().into_parts();
     let input_col_count = arrow_cols.len();
-    let result_iter = arrow_cols
-        .into_iter()
-        .zip(target_fields)
-        .map(|(sa_col, target_field)| {
-            let target_field = target_field.borrow();
-            transform_field_and_col(
-                target_field.name.as_str(),
-                sa_col,
-                target_field.data_type(),
-                target_field.nullable,
-                Some(target_field.metadata_with_string_values()),
-            )
-        });
+    let result_iter =
+        arrow_cols
+            .into_iter()
+            .zip(target_fields)
+            .map(|(sa_col, target_field)| -> DeltaResult<_> {
+                let target_field = target_field.borrow();
+                let transformed_col = apply_schema_to(&sa_col, target_field.data_type())?;
+                let transformed_field = new_field_with_metadata(
+                    target_field.name.as_str(),
+                    transformed_col.data_type(),
+                    target_field.nullable,
+                    Some(target_field.metadata_with_string_values()),
+                );
+                Ok((transformed_field, transformed_col))
+            });
     let (transformed_fields, transformed_cols): (Vec<ArrowField>, Vec<ArrayRef>) =
         result_iter.process_results(|iter| iter.unzip())?;
     if transformed_cols.len() != input_col_count {
@@ -447,13 +443,14 @@ fn apply_schema_to_list(
         ));
     };
     let (field, offset_buffer, values, nulls) = la.clone().into_parts();
-    let (transformed_field, transformed_values) = transform_field_and_col(
-        field.name().as_str(),
-        values,
-        &target_inner_type.element_type,
+
+    let transformed_values = apply_schema_to(&values, &target_inner_type.element_type)?;
+    let transformed_field = new_field_with_metadata(
+        field.name(),
+        transformed_values.data_type(),
         target_inner_type.contains_null,
         None,
-    )?;
+    );
     Ok(ListArray::try_new(
         Arc::new(transformed_field),
         offset_buffer,
