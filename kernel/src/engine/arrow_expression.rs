@@ -358,7 +358,7 @@ fn apply_schema(array: &dyn Array, schema: &DataType) -> DeltaResult<RecordBatch
     let DataType::Struct(struct_schema) = schema else {
         return Err(Error::generic(
             "apply_schema at top-level must be passed a struct schema",
-        ))?;
+        ));
     };
     let applied = apply_schema_to_struct(array, struct_schema)?;
     Ok(applied.into())
@@ -374,19 +374,16 @@ fn transform_field_and_col(
     rename: Option<&str>,
     metadata: Option<HashMap<String, String>>,
 ) -> DeltaResult<(ArrowField, Arc<dyn Array>)> {
+    // try and apply the schema to the column. errors are propagated. if `apply_schema_to` returns
+    // `Ok(None)`, no transform is needed, so we just assign `transformed_col` to `arrow_col`.
     let transformed_col = apply_schema_to(&arrow_col, target_type)?.unwrap_or(arrow_col);
-    let transformed_field = arrow_field
-        .as_ref()
-        .clone()
-        .with_nullable(nullable)
-        .with_data_type(transformed_col.data_type().clone());
-    let transformed_field = match rename {
-        Some(name) => transformed_field.with_name(name),
-        None => transformed_field,
-    };
-    let transformed_field = match metadata {
-        Some(metadata) => transformed_field.with_metadata(metadata),
-        None => transformed_field,
+    let mut transformed_field = ArrowField::new(
+        rename.unwrap_or_else(|| arrow_field.name()),
+        transformed_col.data_type().clone(),
+        nullable,
+    );
+    if let Some(metadata) = metadata {
+        transformed_field.set_metadata(metadata);
     };
     Ok((transformed_field, transformed_col))
 }
