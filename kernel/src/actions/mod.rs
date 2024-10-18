@@ -139,6 +139,7 @@ impl Protocol {
 #[derive(Debug, Clone, PartialEq, Eq, Schema)]
 #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
 #[cfg_attr(not(feature = "developer-visibility"), visibility::make(pub(crate)))]
+// TODO need to have a way to always write some fields but not always read them
 struct CommitInfo {
     /// The time this logical file was created, as milliseconds since the epoch.
     /// TODO should this be a Timestamp?
@@ -153,7 +154,8 @@ struct CommitInfo {
     pub(crate) kernel_version: Option<String>,
     /// A place for the engine to store additional metadata associated with this commit encoded as
     /// a map of strings.
-    pub(crate) engine_commit_info: HashMap<String, String>,
+    /// TODO need to have a way to always write this but not always read it
+    pub(crate) engine_commit_info: Option<HashMap<String, String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Schema)]
@@ -446,14 +448,14 @@ mod tests {
                 StructField::new("operation", DataType::STRING, false),
                 StructField::new(
                     "operationParameters",
-                    MapType::new(DataType::STRING, DataType::STRING, true),
+                    MapType::new(DataType::STRING, DataType::STRING, false),
                     false,
                 ),
                 StructField::new("kernelVersion", DataType::STRING, true),
                 StructField::new(
                     "engineCommitInfo",
-                    MapType::new(DataType::STRING, DataType::STRING, true),
-                    false,
+                    MapType::new(DataType::STRING, DataType::STRING, false),
+                    true,
                 ),
             ]),
             true,
