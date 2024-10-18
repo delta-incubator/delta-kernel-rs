@@ -137,8 +137,25 @@ impl Protocol {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Schema)]
-pub struct CommitInfo {
-    pub kernel_version: Option<String>,
+#[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
+#[cfg_attr(not(feature = "developer-visibility"), visibility::make(pub(crate)))]
+// TODO need to have a way to always write some fields but not always read them
+struct CommitInfo {
+    /// The time this logical file was created, as milliseconds since the epoch.
+    /// TODO should this be a Timestamp?
+    pub(crate) timestamp: i64,
+    /// An arbitrary string that identifies the operation associated with this commit. This is
+    /// specified by the engine.
+    pub(crate) operation: String,
+    /// Map of arbitrary string key-value pairs that provide additional information about the
+    /// operation. This is specified by the engine. For now this is always empty.
+    pub(crate) operation_parameters: HashMap<String, String>,
+    /// The version of the delta_kernel crate used to write this commit.
+    pub(crate) kernel_version: Option<String>,
+    /// A place for the engine to store additional metadata associated with this commit encoded as
+    /// a map of strings.
+    /// TODO need to have a way to always write this but not always read it
+    pub(crate) engine_commit_info: Option<HashMap<String, String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Schema)]
@@ -412,6 +429,34 @@ mod tests {
                 StructField::new("appId", DataType::STRING, false),
                 StructField::new("version", DataType::LONG, false),
                 StructField::new("lastUpdated", DataType::LONG, true),
+            ]),
+            true,
+        )]));
+        assert_eq!(schema, expected);
+    }
+
+    #[test]
+    fn test_commit_info_schema() {
+        let schema = get_log_schema()
+            .project(&["commitInfo"])
+            .expect("Couldn't get commitInfo field");
+
+        let expected = Arc::new(StructType::new(vec![StructField::new(
+            "commitInfo",
+            StructType::new(vec![
+                StructField::new("timestamp", DataType::LONG, false),
+                StructField::new("operation", DataType::STRING, false),
+                StructField::new(
+                    "operationParameters",
+                    MapType::new(DataType::STRING, DataType::STRING, false),
+                    false,
+                ),
+                StructField::new("kernelVersion", DataType::STRING, true),
+                StructField::new(
+                    "engineCommitInfo",
+                    MapType::new(DataType::STRING, DataType::STRING, false),
+                    true,
+                ),
             ]),
             true,
         )]));
