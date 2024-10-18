@@ -7,7 +7,7 @@ use std::sync::Arc;
 use crate::schema::MetadataValue;
 use crate::{
     engine::arrow_data::ArrowEngineData,
-    schema::{DataType, PrimitiveType, Schema, SchemaRef, StructField, StructType},
+    schema::{DataType, Schema, SchemaRef, StructField, StructType},
     utils::require,
     DeltaResult, EngineData, Error,
 };
@@ -127,6 +127,30 @@ fn can_upcast_to_decimal(
         && target_precision - source_precision >= (target_scale - source_scale) as u8
 }
 
+/// check if two fields have the same nullability and metadata
+fn test_nullability_and_metadata(
+    kernel_field: &StructField,
+    arrow_field: &ArrowField,
+) -> DeltaResult<()> {
+    if kernel_field.nullable != arrow_field.is_nullable() {
+        return Err(Error::Generic(format!(
+            "Field {} has nullablily {} in kernel and {} in arrow",
+            kernel_field.name,
+            kernel_field.nullable,
+            arrow_field.is_nullable()
+        )));
+    }
+    if !metadata_eq(&kernel_field.metadata, arrow_field.metadata()) {
+        return Err(Error::Generic(format!(
+            "Field {} has metadata {:?} in kernel and {:?} in arrow",
+            kernel_field.name,
+            kernel_field.metadata,
+            arrow_field.metadata(),
+        )));
+    }
+    Ok(())
+}
+
 /// Ensure a kernel data type matches an arrow data type. This only ensures that the actual "type"
 /// is the same, but does so recursively into structs, and ensures lists and maps have the correct
 /// associated types as well.
@@ -154,16 +178,18 @@ pub(crate) fn ensure_data_types(
             // strings, bools, and binary  aren't primitive in arrow
             Ok(DataTypeCompat::Identical)
         }
-        (
-            DataType::Primitive(PrimitiveType::Decimal(kernel_prec, kernel_scale)),
-            ArrowDataType::Decimal128(arrow_prec, arrow_scale),
-        ) if arrow_prec == kernel_prec && *arrow_scale == *kernel_scale as i8 => {
-            // decimal isn't primitive in arrow. cast above is okay as we limit range
-            Ok(DataTypeCompat::Identical)
-        }
-        (DataType::Array(inner_type), ArrowDataType::List(arrow_list_type)) => {
+        (DataType::Array(inner_type), ArrowDataType::List(arrow_list_field)) => {
+            if check_nullability_and_metadata
+                && inner_type.contains_null != arrow_list_field.is_nullable()
+            {
+                return Err(Error::Generic(format!(
+                    "Kernel list has contains_null {} and arrow has {}",
+                    inner_type.contains_null,
+                    arrow_list_field.is_nullable(),
+                )));
+            }
             let kernel_array_type = &inner_type.element_type;
-            let arrow_list_type = arrow_list_type.data_type();
+            let arrow_list_type = arrow_list_field.data_type();
             ensure_data_types(
                 kernel_array_type,
                 arrow_list_type,
@@ -185,6 +211,15 @@ pub(crate) fn ensure_data_types(
                     ));
                 }
                 if let Some(value_type) = fields.next() {
+                    if check_nullability_and_metadata
+                        && kernel_map_type.value_contains_null != value_type.is_nullable()
+                    {
+                        return Err(Error::Generic(format!(
+                            "Kernel map has contains_null {} and arrow has {}",
+                            kernel_map_type.value_contains_null,
+                            value_type.is_nullable(),
+                        )));
+                    }
                     ensure_data_types(
                         &kernel_map_type.value_type,
                         value_type.data_type(),
@@ -216,22 +251,7 @@ pub(crate) fn ensure_data_types(
             // ensure that for the fields that we found, the types match
             for (kernel_field, arrow_field) in mapped_fields.zip(arrow_fields) {
                 if check_nullability_and_metadata {
-                    if kernel_field.nullable != arrow_field.is_nullable() {
-                        return Err(Error::Generic(format!(
-                            "Field {} has nullablily {} in kernel and {} in arrow",
-                            kernel_field.name,
-                            kernel_field.nullable,
-                            arrow_field.is_nullable()
-                        )));
-                    }
-                    if !metadata_eq(&kernel_field.metadata, arrow_field.metadata()) {
-                        return Err(Error::Generic(format!(
-                            "Field {} has metadata {:?} in kernel and {:?} in arrow",
-                            kernel_field.name,
-                            kernel_field.metadata,
-                            arrow_field.metadata(),
-                        )));
-                    }
+                    test_nullability_and_metadata(kernel_field, arrow_field)?;
                 }
                 ensure_data_types(
                     &kernel_field.data_type,
@@ -1682,5 +1702,150 @@ mod tests {
         assert!(!can_upcast_to_decimal(&Int32, 10u8, 1i8));
         assert!(!can_upcast_to_decimal(&Int64, 19u8, 0i8));
         assert!(!can_upcast_to_decimal(&Int64, 20u8, 1i8));
+    }
+
+    #[test]
+    fn ensure_decimals() {
+        assert!(ensure_data_types(
+            &DataType::decimal_unchecked(5, 2),
+            &ArrowDataType::Decimal128(5, 2),
+            false
+        )
+        .is_ok());
+        assert!(ensure_data_types(
+            &DataType::decimal_unchecked(5, 2),
+            &ArrowDataType::Decimal128(5, 3),
+            false
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn ensure_map() {
+        let arrow_field = ArrowField::new_map(
+            "map",
+            "entries",
+            ArrowField::new("key", ArrowDataType::Int64, false),
+            ArrowField::new("val", ArrowDataType::Utf8, true),
+            false,
+            false,
+        );
+        assert!(ensure_data_types(
+            &DataType::Map(Box::new(MapType::new(
+                DataType::LONG,
+                DataType::STRING,
+                true
+            ))),
+            arrow_field.data_type(),
+            false
+        )
+        .is_ok());
+
+        assert!(ensure_data_types(
+            &DataType::Map(Box::new(MapType::new(
+                DataType::LONG,
+                DataType::STRING,
+                false
+            ))),
+            arrow_field.data_type(),
+            true
+        )
+        .is_err());
+
+        assert!(ensure_data_types(
+            &DataType::Map(Box::new(MapType::new(DataType::LONG, DataType::LONG, true))),
+            arrow_field.data_type(),
+            false
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn ensure_list() {
+        assert!(ensure_data_types(
+            &DataType::Array(Box::new(ArrayType::new(DataType::LONG, true))),
+            &ArrowDataType::new_list(ArrowDataType::Int64, true),
+            false
+        )
+        .is_ok());
+        assert!(ensure_data_types(
+            &DataType::Array(Box::new(ArrayType::new(DataType::STRING, true))),
+            &ArrowDataType::new_list(ArrowDataType::Int64, true),
+            false
+        )
+        .is_err());
+        assert!(ensure_data_types(
+            &DataType::Array(Box::new(ArrayType::new(DataType::LONG, true))),
+            &ArrowDataType::new_list(ArrowDataType::Int64, false),
+            true
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn ensure_struct() {
+        let schema = DataType::struct_type([StructField::new(
+            "a",
+            ArrayType::new(
+                DataType::struct_type([
+                    StructField::new("w", DataType::LONG, true),
+                    StructField::new("x", ArrayType::new(DataType::LONG, true), true),
+                    StructField::new(
+                        "y",
+                        MapType::new(DataType::LONG, DataType::STRING, true),
+                        true,
+                    ),
+                    StructField::new(
+                        "z",
+                        DataType::struct_type([
+                            StructField::new("n", DataType::LONG, true),
+                            StructField::new("m", DataType::STRING, true),
+                        ]),
+                        true,
+                    ),
+                ]),
+                true,
+            ),
+            true,
+        )]);
+        let arrow_struct: ArrowDataType = (&schema).try_into().unwrap();
+        assert!(ensure_data_types(&schema, &arrow_struct, true).is_ok());
+
+        let kernel_simple = DataType::struct_type([
+            StructField::new("w", DataType::LONG, true),
+            StructField::new("x", DataType::LONG, true),
+        ]);
+
+        let arrow_simple_ok = ArrowField::new_struct(
+            "arrow_struct",
+            Fields::from(vec![
+                ArrowField::new("w", ArrowDataType::Int64, true),
+                ArrowField::new("x", ArrowDataType::Int64, true),
+            ]),
+            true,
+        );
+        assert!(ensure_data_types(&kernel_simple, arrow_simple_ok.data_type(), true).is_ok());
+
+        let arrow_missing_simple = ArrowField::new_struct(
+            "arrow_struct",
+            Fields::from(vec![ArrowField::new("w", ArrowDataType::Int64, true)]),
+            true,
+        );
+        assert!(ensure_data_types(&kernel_simple, arrow_missing_simple.data_type(), true).is_err());
+
+        let arrow_nullable_mismatch_simple = ArrowField::new_struct(
+            "arrow_struct",
+            Fields::from(vec![
+                ArrowField::new("w", ArrowDataType::Int64, false),
+                ArrowField::new("x", ArrowDataType::Int64, true),
+            ]),
+            true,
+        );
+        assert!(ensure_data_types(
+            &kernel_simple,
+            arrow_nullable_mismatch_simple.data_type(),
+            true
+        )
+        .is_err());
     }
 }

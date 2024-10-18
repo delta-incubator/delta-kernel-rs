@@ -1111,4 +1111,25 @@ mod tests {
         assert_eq!(check_with_call_count(7), (7, 32));
         assert_eq!(check_with_call_count(8), (7, 32));
     }
+
+    #[test]
+    fn test_metadata_value_to_string() {
+        assert_eq!(MetadataValue::Number(0).to_string(), "0");
+        assert_eq!(
+            MetadataValue::String("hello".to_string()).to_string(),
+            "hello"
+        );
+        assert_eq!(MetadataValue::Boolean(true).to_string(), "true");
+        assert_eq!(MetadataValue::Boolean(false).to_string(), "false");
+        let object_json = serde_json::json!({ "an": "object" });
+        assert_eq!(
+            MetadataValue::Other(object_json).to_string(),
+            "{\"an\":\"object\"}"
+        );
+        let array_json = serde_json::json!(["an", "array"]);
+        assert_eq!(
+            MetadataValue::Other(array_json).to_string(),
+            "[\"an\",\"array\"]"
+        );
+    }
 }
