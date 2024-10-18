@@ -1,9 +1,10 @@
 //! Some utilities for working with arrow data types
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader};
 use std::sync::Arc;
 
+use crate::schema::MetadataValue;
 use crate::{
     engine::arrow_data::ArrowEngineData,
     schema::{DataType, PrimitiveType, Schema, SchemaRef, StructField, StructType},
@@ -58,8 +59,8 @@ pub(crate) use prim_array_cmp;
 /// returns a tuples of (mask_indicies: Vec<parquet_schema_index>, reorder_indicies:
 /// Vec<requested_index>). `mask_indicies` is used for generating the mask for reading from the
 
-fn make_arrow_error(s: String) -> Error {
-    Error::Arrow(arrow_schema::ArrowError::InvalidArgumentError(s))
+pub(crate) fn make_arrow_error(s: impl Into<String>) -> Error {
+    Error::Arrow(arrow_schema::ArrowError::InvalidArgumentError(s.into())).with_backtrace()
 }
 
 /// Capture the compatibility between two data-types, as passed to [`ensure_data_types`]
@@ -128,13 +129,20 @@ fn can_upcast_to_decimal(
 
 /// Ensure a kernel data type matches an arrow data type. This only ensures that the actual "type"
 /// is the same, but does so recursively into structs, and ensures lists and maps have the correct
-/// associated types as well. This returns an `Ok(DataTypeCompat)` if the types are compatible, and
+/// associated types as well.
+///
+/// If `check_nullability_and_metadata` is true, this will also return an error if it finds a struct
+/// field that differs in nullability or metadata between the kernel and arrow schema. If it is
+/// false, no checks on nullability or metadata are performed.
+///
+/// This returns an `Ok(DataTypeCompat)` if the types are compatible, and
 /// will indicate what kind of compatibility they have, or an error if the types do not match. If
 /// there is a `struct` type included, we only ensure that the named fields that the kernel is
 /// asking for exist, and that for those fields the types match. Un-selected fields are ignored.
 pub(crate) fn ensure_data_types(
     kernel_type: &DataType,
     arrow_type: &ArrowDataType,
+    check_nullability_and_metadata: bool,
 ) -> DeltaResult<DataTypeCompat> {
     match (kernel_type, arrow_type) {
         (DataType::Primitive(_), _) if arrow_type.is_primitive() => {
@@ -156,20 +164,32 @@ pub(crate) fn ensure_data_types(
         (DataType::Array(inner_type), ArrowDataType::List(arrow_list_type)) => {
             let kernel_array_type = &inner_type.element_type;
             let arrow_list_type = arrow_list_type.data_type();
-            ensure_data_types(kernel_array_type, arrow_list_type)
+            ensure_data_types(
+                kernel_array_type,
+                arrow_list_type,
+                check_nullability_and_metadata,
+            )
         }
         (DataType::Map(kernel_map_type), ArrowDataType::Map(arrow_map_type, _)) => {
             if let ArrowDataType::Struct(fields) = arrow_map_type.data_type() {
                 let mut fields = fields.iter();
                 if let Some(key_type) = fields.next() {
-                    ensure_data_types(&kernel_map_type.key_type, key_type.data_type())?;
+                    ensure_data_types(
+                        &kernel_map_type.key_type,
+                        key_type.data_type(),
+                        check_nullability_and_metadata,
+                    )?;
                 } else {
                     return Err(make_arrow_error(
                         "Arrow map struct didn't have a key type".to_string(),
                     ));
                 }
                 if let Some(value_type) = fields.next() {
-                    ensure_data_types(&kernel_map_type.value_type, value_type.data_type())?;
+                    ensure_data_types(
+                        &kernel_map_type.value_type,
+                        value_type.data_type(),
+                        check_nullability_and_metadata,
+                    )?;
                 } else {
                     return Err(make_arrow_error(
                         "Arrow map struct didn't have a value type".to_string(),
@@ -195,7 +215,29 @@ pub(crate) fn ensure_data_types(
             let mut found_fields = 0;
             // ensure that for the fields that we found, the types match
             for (kernel_field, arrow_field) in mapped_fields.zip(arrow_fields) {
-                ensure_data_types(&kernel_field.data_type, arrow_field.data_type())?;
+                if check_nullability_and_metadata {
+                    if kernel_field.nullable != arrow_field.is_nullable() {
+                        return Err(Error::Generic(format!(
+                            "Field {} has nullablily {} in kernel and {} in arrow",
+                            kernel_field.name,
+                            kernel_field.nullable,
+                            arrow_field.is_nullable()
+                        )));
+                    }
+                    if !metadata_eq(&kernel_field.metadata, arrow_field.metadata()) {
+                        return Err(Error::Generic(format!(
+                            "Field {} has metadata {:?} in kernel and {:?} in arrow",
+                            kernel_field.name,
+                            kernel_field.metadata,
+                            arrow_field.metadata(),
+                        )));
+                    }
+                }
+                ensure_data_types(
+                    &kernel_field.data_type,
+                    arrow_field.data_type(),
+                    check_nullability_and_metadata,
+                )?;
                 found_fields += 1;
             }
 
@@ -516,7 +558,11 @@ fn get_indices(
                     }
                 }
                 _ => {
-                    match ensure_data_types(&requested_field.data_type, field.data_type())? {
+                    // we don't care about matching on nullability or metadata here so pass `false`
+                    // as the final argument. These can differ between the delta schema and the
+                    // parquet schema without causing issues in reading the data. We fix them up in
+                    // expression evaluation later.
+                    match ensure_data_types(&requested_field.data_type, field.data_type(), false)? {
                         DataTypeCompat::Identical => {
                             reorder_indices.push(ReorderIndex::identity(index))
                         }
@@ -636,6 +682,7 @@ pub(crate) fn reorder_struct_array(
     input_data: StructArray,
     requested_ordering: &[ReorderIndex],
 ) -> DeltaResult<StructArray> {
+    debug!("Reordering {input_data:?} with ordering: {requested_ordering:?}");
     if !ordering_needs_transform(requested_ordering) {
         // indices is already sorted, meaning we requested in the order that the columns were
         // stored in the parquet
@@ -813,6 +860,26 @@ fn parse_json_impl(json_strings: &StringArray, schema: ArrowSchemaRef) -> DeltaR
     Ok(concat_batches(&schema, output.iter())?)
 }
 
+impl PartialEq<String> for MetadataValue {
+    fn eq(&self, other: &String) -> bool {
+        self.to_string().eq(other)
+    }
+}
+
+// allow for comparing our metadata maps to arrow ones. We can't implement PartialEq because both
+// are HashMaps which aren't defined in this crate
+fn metadata_eq(
+    kernel_metadata: &HashMap<String, MetadataValue>,
+    arrow_metadata: &HashMap<String, String>,
+) -> bool {
+    if kernel_metadata.len() != arrow_metadata.len() {
+        return false;
+    }
+    kernel_metadata
+        .iter()
+        .all(|(key, value)| arrow_metadata.get(key).map_or(false, |v| *value == *v))
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -944,7 +1011,6 @@ mod tests {
             ArrowField::new("s", ArrowDataType::Int32, true),
         ]));
         let res = get_requested_indices(&requested_schema, &parquet_schema);
-        println!("{res:#?}");
         assert!(res.is_err());
     }
 

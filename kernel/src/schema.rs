@@ -29,6 +29,17 @@ pub enum MetadataValue {
     Other(serde_json::Value),
 }
 
+impl std::fmt::Display for MetadataValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MetadataValue::Number(n) => write!(f, "{}", n),
+            MetadataValue::String(s) => write!(f, "{}", s),
+            MetadataValue::Boolean(b) => write!(f, "{}", b),
+            MetadataValue::Other(v) => write!(f, "{}", v), // just write the json back
+        }
+    }
+}
+
 impl From<String> for MetadataValue {
     fn from(value: String) -> Self {
         Self::String(value)
@@ -165,6 +176,15 @@ impl StructField {
     #[inline]
     pub const fn metadata(&self) -> &HashMap<String, MetadataValue> {
         &self.metadata
+    }
+
+    /// Convert our metadata into a HashMap<String, String>. Note this copies all the data so can be
+    /// expensive for large metadata
+    pub fn metadata_with_string_values(&self) -> HashMap<String, String> {
+        self.metadata
+            .iter()
+            .map(|(key, val)| (key.clone(), val.to_string()))
+            .collect()
     }
 
     pub fn make_physical(&self, mapping_mode: ColumnMappingMode) -> DeltaResult<Self> {
