@@ -1,7 +1,6 @@
+use chrono::{DateTime, NaiveDate, NaiveDateTime, TimeZone, Utc};
 use std::cmp::Ordering;
 use std::fmt::{Display, Formatter};
-
-use chrono::{DateTime, NaiveDate, NaiveDateTime, TimeZone, Utc};
 
 use crate::schema::{ArrayType, DataType, PrimitiveType, StructField};
 use crate::utils::require;
@@ -68,7 +67,7 @@ impl StructData {
             require!(
                 f.is_nullable() || !a.is_null(),
                 Error::invalid_struct_data(format!(
-                    "Value for non-nullable field {:?} cannto be null, got {}",
+                    "Value for non-nullable field {:?} cannot be null, got {}",
                     f.name(),
                     a
                 ))
@@ -143,7 +142,7 @@ impl Scalar {
             Self::Decimal(_, precision, scale) => DataType::decimal_unchecked(*precision, *scale),
             Self::Null(data_type) => data_type.clone(),
             Self::Struct(data) => DataType::struct_type(data.fields.clone()),
-            Self::Array(data) => DataType::array_type(data.tpe.clone()),
+            Self::Array(data) => data.tpe.clone().into(),
         }
     }
 
@@ -214,6 +213,44 @@ impl Display for Scalar {
     }
 }
 
+impl PartialOrd for Scalar {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        use Scalar::*;
+        match (self, other) {
+            // NOTE: We intentionally do two match arms for each variant to avoid a catch-all, so
+            // that new variants trigger compilation failures instead of being silently ignored.
+            (Integer(a), Integer(b)) => a.partial_cmp(b),
+            (Integer(_), _) => None,
+            (Long(a), Long(b)) => a.partial_cmp(b),
+            (Long(_), _) => None,
+            (Short(a), Short(b)) => a.partial_cmp(b),
+            (Short(_), _) => None,
+            (Byte(a), Byte(b)) => a.partial_cmp(b),
+            (Byte(_), _) => None,
+            (Float(a), Float(b)) => a.partial_cmp(b),
+            (Float(_), _) => None,
+            (Double(a), Double(b)) => a.partial_cmp(b),
+            (Double(_), _) => None,
+            (String(a), String(b)) => a.partial_cmp(b),
+            (String(_), _) => None,
+            (Boolean(a), Boolean(b)) => a.partial_cmp(b),
+            (Boolean(_), _) => None,
+            (Timestamp(a), Timestamp(b)) => a.partial_cmp(b),
+            (Timestamp(_), _) => None,
+            (TimestampNtz(a), TimestampNtz(b)) => a.partial_cmp(b),
+            (TimestampNtz(_), _) => None,
+            (Date(a), Date(b)) => a.partial_cmp(b),
+            (Date(_), _) => None,
+            (Binary(a), Binary(b)) => a.partial_cmp(b),
+            (Binary(_), _) => None,
+            (Decimal(_, _, _), _) => None, // TODO: Support Decimal
+            (Null(_), _) => None,          // NOTE: NULL values are incomparable by definition
+            (Struct(_), _) => None,        // TODO: Support Struct?
+            (Array(_), _) => None,         // TODO: Support Array?
+        }
+    }
+}
+
 impl From<i8> for Scalar {
     fn from(i: i8) -> Self {
         Self::Byte(i)
@@ -268,6 +305,18 @@ impl From<String> for Scalar {
     }
 }
 
+impl<T: Into<Scalar> + Copy> From<&T> for Scalar {
+    fn from(t: &T) -> Self {
+        (*t).into()
+    }
+}
+
+impl From<&[u8]> for Scalar {
+    fn from(b: &[u8]) -> Self {
+        Self::Binary(b.into())
+    }
+}
+
 // TODO: add more From impls
 
 impl PrimitiveType {
@@ -295,10 +344,6 @@ impl PrimitiveType {
 
     pub fn parse_scalar(&self, raw: &str) -> Result<Scalar, Error> {
         use PrimitiveType::*;
-
-        lazy_static::lazy_static! {
-            static ref UNIX_EPOCH: DateTime<Utc> = DateTime::from_timestamp(0, 0).unwrap();
-        }
 
         if raw.is_empty() {
             return Ok(Scalar::Null(self.data_type()));
@@ -329,7 +374,7 @@ impl PrimitiveType {
                     .and_hms_opt(0, 0, 0)
                     .ok_or(self.parse_error(raw))?;
                 let date = Utc.from_utc_datetime(&date);
-                let days = date.signed_duration_since(*UNIX_EPOCH).num_days() as i32;
+                let days = date.signed_duration_since(DateTime::UNIX_EPOCH).num_days() as i32;
                 Ok(Scalar::Date(days))
             }
             // NOTE: Timestamp and TimestampNtz are parsed in the same way, as microsecond since unix epoch.
@@ -341,7 +386,7 @@ impl PrimitiveType {
                     .map_err(|_| self.parse_error(raw))?;
                 let timestamp = Utc.from_utc_datetime(&timestamp);
                 let micros = timestamp
-                    .signed_duration_since(*UNIX_EPOCH)
+                    .signed_duration_since(DateTime::UNIX_EPOCH)
                     .num_microseconds()
                     .ok_or(self.parse_error(raw))?;
                 match self {
@@ -506,7 +551,7 @@ mod tests {
     fn test_arrays() {
         #[allow(deprecated)]
         let array = Scalar::Array(ArrayData {
-            tpe: ArrayType::new(DataType::Primitive(PrimitiveType::Integer), false),
+            tpe: ArrayType::new(DataType::INTEGER, false),
             elements: vec![Scalar::Integer(1), Scalar::Integer(2), Scalar::Integer(3)],
         });
 

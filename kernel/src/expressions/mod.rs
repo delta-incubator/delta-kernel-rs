@@ -6,10 +6,11 @@ use std::fmt::{Display, Formatter};
 use itertools::Itertools;
 
 pub use self::scalars::{ArrayData, Scalar, StructData};
+use crate::DataType;
 
 mod scalars;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 /// A binary operator.
 pub enum BinaryOperator {
     /// Arithmetic Plus
@@ -49,7 +50,7 @@ impl BinaryOperator {
             GreaterThanOrEqual => Some(LessThanOrEqual),
             LessThan => Some(GreaterThan),
             LessThanOrEqual => Some(GreaterThanOrEqual),
-            Equal | NotEqual | Plus | Multiply => Some(self.clone()),
+            Equal | NotEqual | Plus | Multiply => Some(*self),
             _ => None,
         }
     }
@@ -72,7 +73,7 @@ impl BinaryOperator {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum VariadicOperator {
     And,
     Or,
@@ -111,7 +112,7 @@ impl Display for BinaryOperator {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 /// A unary operator.
 pub enum UnaryOperator {
     /// Unary Not
@@ -228,6 +229,10 @@ impl Expression {
         Self::Literal(value.into())
     }
 
+    pub fn null_literal(data_type: DataType) -> Self {
+        Self::Literal(Scalar::Null(data_type))
+    }
+
     /// Create a new struct expression
     pub fn struct_expr(exprs: impl IntoIterator<Item = Self>) -> Self {
         Self::Struct(exprs.into_iter().collect())
@@ -273,6 +278,11 @@ impl Expression {
     /// Create a new expression `self IS NULL`
     pub fn is_null(self) -> Self {
         Self::unary(UnaryOperator::IsNull, self)
+    }
+
+    /// Create a new expression `self IS NOT NULL`
+    pub fn is_not_null(self) -> Self {
+        !Self::is_null(self)
     }
 
     /// Create a new expression `self == other`

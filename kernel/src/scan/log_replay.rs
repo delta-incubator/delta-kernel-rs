@@ -1,8 +1,7 @@
+use std::clone::Clone;
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
-use either::Either;
-use lazy_static::lazy_static;
 use tracing::debug;
 
 use super::data_skipping::DataSkippingFilter;
@@ -77,38 +76,38 @@ impl DataVisitor for AddRemoveVisitor {
     }
 }
 
-lazy_static! {
-    // NB: If you update this schema, ensure you update the comment describing it in the doc comment
-    // for `scan_row_schema` in scan/mod.rs! You'll also need to update ScanFileVisitor as the
-    // indexes will be off
-    pub(crate) static ref SCAN_ROW_SCHEMA: Arc<StructType> = Arc::new(StructType::new(vec!(
+// NB: If you update this schema, ensure you update the comment describing it in the doc comment
+// for `scan_row_schema` in scan/mod.rs! You'll also need to update ScanFileVisitor as the
+// indexes will be off
+pub(crate) static SCAN_ROW_SCHEMA: LazyLock<Arc<StructType>> = LazyLock::new(|| {
+    Arc::new(StructType::new([
         StructField::new("path", DataType::STRING, false),
         StructField::new("size", DataType::LONG, true),
         StructField::new("modificationTime", DataType::LONG, true),
         StructField::new("stats", DataType::STRING, true),
         StructField::new(
             "deletionVector",
-            StructType::new(vec![
+            StructType::new([
                 StructField::new("storageType", DataType::STRING, false),
                 StructField::new("pathOrInlineDv", DataType::STRING, false),
                 StructField::new("offset", DataType::INTEGER, true),
                 StructField::new("sizeInBytes", DataType::INTEGER, false),
                 StructField::new("cardinality", DataType::LONG, false),
             ]),
-            true
+            true,
         ),
         StructField::new(
             "fileConstantValues",
-            StructType::new(vec![StructField::new(
+            StructType::new([StructField::new(
                 "partitionValues",
                 MapType::new(DataType::STRING, DataType::STRING, false),
                 true,
             )]),
-            true
+            true,
         ),
-    )));
-    static ref SCAN_ROW_DATATYPE: DataType = SCAN_ROW_SCHEMA.as_ref().clone().into();
-}
+    ]))
+});
+static SCAN_ROW_DATATYPE: LazyLock<DataType> = LazyLock::new(|| SCAN_ROW_SCHEMA.clone().into());
 
 impl LogReplayScanner {
     /// Create a new [`LogReplayScanner`] instance
@@ -117,46 +116,6 @@ impl LogReplayScanner {
             filter: DataSkippingFilter::new(engine, table_schema, predicate),
             seen: Default::default(),
         }
-    }
-
-    /// Extract Add actions from a single batch. This will filter out rows that
-    /// don't match the predicate and Add actions that have corresponding Remove
-    /// actions in the log.
-    fn process_batch(
-        &mut self,
-        actions: &dyn EngineData,
-        is_log_batch: bool,
-    ) -> DeltaResult<Vec<Add>> {
-        // apply data skipping to get back a selection vector for actions that passed skipping
-        // note: None implies all files passed data skipping.
-        let selection_vector = self
-            .filter
-            .as_ref()
-            .map(|filter| filter.apply(actions))
-            .transpose()?;
-
-        let adds = self.setup_batch_process(selection_vector, actions, is_log_batch)?;
-
-        adds.into_iter()
-            .filter_map(|(add, _)| {
-                // Note: each (add.path + add.dv_unique_id()) pair has a
-                // unique Add + Remove pair in the log. For example:
-                // https://github.com/delta-io/delta/blob/master/spark/src/test/resources/delta/table-with-dv-large/_delta_log/00000000000000000001.json
-                if !self.seen.contains(&(add.path.clone(), add.dv_unique_id())) {
-                    debug!("Found file: {}, is log {}", &add.path, is_log_batch);
-                    if is_log_batch {
-                        // Remember file actions from this batch so we can ignore duplicates
-                        // as we process batches from older commit and/or checkpoint files. We
-                        // don't need to track checkpoint batches because they are already the
-                        // oldest actions and can never replace anything.
-                        self.seen.insert((add.path.clone(), add.dv_unique_id()));
-                    }
-                    Some(Ok(add))
-                } else {
-                    None
-                }
-            })
-            .collect()
     }
 
     fn get_add_transform_expr(&self) -> Expression {
@@ -191,6 +150,7 @@ impl LogReplayScanner {
             None => vec![false; actions.length()],
         };
 
+        assert_eq!(selection_vector.len(), actions.length());
         let adds = self.setup_batch_process(filter_vector, actions, is_log_batch)?;
 
         for (add, index) in adds.into_iter() {
@@ -258,27 +218,6 @@ impl LogReplayScanner {
 
         Ok(visitor.adds)
     }
-}
-
-/// Given an iterator of (engine_data, bool) tuples and a predicate, returns an iterator of `Adds`.
-/// The boolean flag indicates whether the record batch is a log or checkpoint batch.
-pub fn log_replay_iter(
-    engine: &dyn Engine,
-    action_iter: impl Iterator<Item = DeltaResult<(Box<dyn EngineData>, bool)>> + Send,
-    table_schema: &SchemaRef,
-    predicate: &Option<Expression>,
-) -> impl Iterator<Item = DeltaResult<Add>> {
-    let mut log_scanner = LogReplayScanner::new(engine, table_schema, predicate);
-
-    action_iter.flat_map(move |actions| match actions {
-        Ok((batch, is_log_batch)) => {
-            match log_scanner.process_batch(batch.as_ref(), is_log_batch) {
-                Ok(adds) => Either::Left(adds.into_iter().map(Ok)),
-                Err(err) => Either::Right(std::iter::once(Err(err))),
-            }
-        }
-        Err(err) => Either::Right(std::iter::once(Err(err))),
-    })
 }
 
 /// Given an iterator of (engine_data, bool) tuples and a predicate, returns an iterator of

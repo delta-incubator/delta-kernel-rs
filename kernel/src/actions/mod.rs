@@ -1,15 +1,10 @@
 //! Provides parsing and manipulation of the various actions defined in the [Delta
 //! specification](https://github.com/delta-io/delta/blob/master/PROTOCOL.md)
 
-pub mod deletion_vector;
-pub(crate) mod schemas;
-pub(crate) mod visitors;
-
-use std::collections::HashMap;
-
 use delta_kernel_derive::Schema;
-use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::sync::LazyLock;
 use visitors::{AddVisitor, MetadataVisitor, ProtocolVisitor};
 
 use self::deletion_vector::DeletionVectorDescriptor;
@@ -17,29 +12,39 @@ use crate::actions::schemas::GetStructField;
 use crate::features::{ReaderFeatures, WriterFeatures};
 use crate::{schema::StructType, DeltaResult, EngineData};
 
+pub mod deletion_vector;
+pub mod set_transaction;
+
+pub(crate) mod schemas;
+#[cfg(feature = "developer-visibility")]
+pub mod visitors;
+#[cfg(not(feature = "developer-visibility"))]
+pub(crate) mod visitors;
+
 pub(crate) const ADD_NAME: &str = "add";
 pub(crate) const REMOVE_NAME: &str = "remove";
 pub(crate) const METADATA_NAME: &str = "metaData";
 pub(crate) const PROTOCOL_NAME: &str = "protocol";
-pub(crate) const TRANSACTION_NAME: &str = "txn";
+pub(crate) const SET_TRANSACTION_NAME: &str = "txn";
+pub(crate) const COMMIT_INFO_NAME: &str = "commitInfo";
 
-lazy_static! {
-    static ref LOG_SCHEMA: StructType = StructType::new(
-        vec![
-            Option::<Add>::get_struct_field(ADD_NAME),
-            Option::<Remove>::get_struct_field(REMOVE_NAME),
-            Option::<Metadata>::get_struct_field(METADATA_NAME),
-            Option::<Protocol>::get_struct_field(PROTOCOL_NAME),
-            Option::<Transaction>::get_struct_field(TRANSACTION_NAME),
-            // We don't support the following actions yet
-            //Option<Cdc>::get_field(CDC_NAME),
-            //Option<CommitInfo>::get_field(COMMIT_INFO_NAME),
-            //Option<DomainMetadata>::get_field(DOMAIN_METADATA_NAME),
-        ]
-    );
-}
+static LOG_SCHEMA: LazyLock<StructType> = LazyLock::new(|| {
+    StructType::new([
+        Option::<Add>::get_struct_field(ADD_NAME),
+        Option::<Remove>::get_struct_field(REMOVE_NAME),
+        Option::<Metadata>::get_struct_field(METADATA_NAME),
+        Option::<Protocol>::get_struct_field(PROTOCOL_NAME),
+        Option::<SetTransaction>::get_struct_field(SET_TRANSACTION_NAME),
+        Option::<CommitInfo>::get_struct_field(COMMIT_INFO_NAME),
+        // We don't support the following actions yet
+        //Option::<Cdc>::get_struct_field(CDC_NAME),
+        //Option::<DomainMetadata>::get_struct_field(DOMAIN_METADATA_NAME),
+    ])
+});
 
-pub(crate) fn get_log_schema() -> &'static StructType {
+#[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
+#[cfg_attr(not(feature = "developer-visibility"), visibility::make(pub(crate)))]
+fn get_log_schema() -> &'static StructType {
     &LOG_SCHEMA
 }
 
@@ -132,6 +137,11 @@ impl Protocol {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Schema)]
+pub struct CommitInfo {
+    pub kernel_version: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Schema)]
 pub struct Add {
     /// A relative path to a data file from the root of the table or an absolute path to a file
     /// that should be added to the table. The path is a URI as specified by
@@ -194,7 +204,9 @@ impl Add {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Schema)]
-pub(crate) struct Remove {
+#[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
+#[cfg_attr(not(feature = "developer-visibility"), visibility::make(pub(crate)))]
+struct Remove {
     /// A relative path to a data file from the root of the table or an absolute path to a file
     /// that should be added to the table. The path is a URI as specified by
     /// [RFC 2396 URI Generic Syntax], which needs to be decoded to get the data file path.
@@ -240,7 +252,7 @@ impl Remove {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Schema)]
-pub struct Transaction {
+pub struct SetTransaction {
     /// A unique identifier for the application performing the transaction.
     pub app_id: String,
 
@@ -264,15 +276,15 @@ mod tests {
             .project(&["metaData"])
             .expect("Couldn't get metaData field");
 
-        let expected = Arc::new(StructType::new(vec![StructField::new(
+        let expected = Arc::new(StructType::new([StructField::new(
             "metaData",
-            StructType::new(vec![
+            StructType::new([
                 StructField::new("id", DataType::STRING, false),
                 StructField::new("name", DataType::STRING, true),
                 StructField::new("description", DataType::STRING, true),
                 StructField::new(
                     "format",
-                    StructType::new(vec![
+                    StructType::new([
                         StructField::new("provider", DataType::STRING, false),
                         StructField::new(
                             "options",
@@ -306,9 +318,9 @@ mod tests {
             .project(&["add"])
             .expect("Couldn't get add field");
 
-        let expected = Arc::new(StructType::new(vec![StructField::new(
+        let expected = Arc::new(StructType::new([StructField::new(
             "add",
-            StructType::new(vec![
+            StructType::new([
                 StructField::new("path", DataType::STRING, false),
                 StructField::new(
                     "partitionValues",
@@ -353,13 +365,13 @@ mod tests {
     fn deletion_vector_field() -> StructField {
         StructField::new(
             "deletionVector",
-            DataType::Struct(Box::new(StructType::new(vec![
+            DataType::struct_type([
                 StructField::new("storageType", DataType::STRING, false),
                 StructField::new("pathOrInlineDv", DataType::STRING, false),
                 StructField::new("offset", DataType::INTEGER, true),
                 StructField::new("sizeInBytes", DataType::INTEGER, false),
                 StructField::new("cardinality", DataType::LONG, false),
-            ]))),
+            ]),
             true,
         )
     }
@@ -369,9 +381,9 @@ mod tests {
         let schema = get_log_schema()
             .project(&["remove"])
             .expect("Couldn't get remove field");
-        let expected = Arc::new(StructType::new(vec![StructField::new(
+        let expected = Arc::new(StructType::new([StructField::new(
             "remove",
-            StructType::new(vec![
+            StructType::new([
                 StructField::new("path", DataType::STRING, false),
                 StructField::new("deletionTimestamp", DataType::LONG, true),
                 StructField::new("dataChange", DataType::BOOLEAN, false),
@@ -394,9 +406,9 @@ mod tests {
             .project(&["txn"])
             .expect("Couldn't get transaction field");
 
-        let expected = Arc::new(StructType::new(vec![StructField::new(
+        let expected = Arc::new(StructType::new([StructField::new(
             "txn",
-            StructType::new(vec![
+            StructType::new([
                 StructField::new("appId", DataType::STRING, false),
                 StructField::new("version", DataType::LONG, false),
                 StructField::new("lastUpdated", DataType::LONG, true),

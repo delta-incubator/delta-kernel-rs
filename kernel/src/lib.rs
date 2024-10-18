@@ -73,7 +73,6 @@ pub mod scan;
 pub mod schema;
 pub mod snapshot;
 pub mod table;
-pub mod transaction;
 pub(crate) mod utils;
 
 pub use engine_data::{DataVisitor, EngineData};
@@ -193,6 +192,8 @@ pub trait JsonHandler: Send + Sync {
         &self,
         files: &[FileMeta],
         physical_schema: SchemaRef,
+        // TODO: This should really be an Option<Arc<Expression>>, because otherwise we have to
+        // clone the (potentially large) expression every time we call this function.
         predicate: Option<Expression>,
     ) -> DeltaResult<FileDataReadResultIterator>;
 }
@@ -215,6 +216,8 @@ pub trait ParquetHandler: Send + Sync {
         &self,
         files: &[FileMeta],
         physical_schema: SchemaRef,
+        // TODO: This should really be an Option<Arc<Expression>>, because otherwise we have to
+        // clone the (potentially large) expression every time we call this function.
         predicate: Option<Expression>,
     ) -> DeltaResult<FileDataReadResultIterator>;
 }

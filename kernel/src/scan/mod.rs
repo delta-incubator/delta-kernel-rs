@@ -119,19 +119,46 @@ impl ScanBuilder {
 /// A vector of this type is returned from calling [`Scan::execute`]. Each [`ScanResult`] contains
 /// the raw [`EngineData`] as read by the engines [`crate::ParquetHandler`], and a boolean
 /// mask. Rows can be dropped from a scan due to deletion vectors, so we communicate back both
-/// EngineData and information regarding whether a row should be included or not See the docs below
-/// for [`ScanResult::mask`] for details on the mask.
+/// EngineData and information regarding whether a row should be included or not (via an internal
+/// mask). See the docs below for [`ScanResult::full_mask`] for details on the mask.
 pub struct ScanResult {
-    /// Raw engine data as read from the disk for a particular file included in the query
+    /// Raw engine data as read from the disk for a particular file included in the query. Note
+    /// that this data may include data that should be filtered out based on the mask given by
+    /// [`full_mask`].
+    ///
+    /// [`full_mask`]: #method.full_mask
     pub raw_data: DeltaResult<Box<dyn EngineData>>,
-    /// If an item at mask\[i\] is true, the row at that row index is valid, otherwise if it is
-    /// false, the row at that row index is invalid and should be ignored. If the mask is *shorter*
-    /// than the number of rows returned, missing elements are considered `true`, i.e. included in
-    /// the query. If this is None, all rows are valid. NB: If you are using the default engine and
-    /// plan to call arrow's `filter_record_batch`, you _need_ to extend this vector to the full
-    /// length of the batch or arrow will drop the extra rows
+    /// Raw row mask.
     // TODO(nick) this should be allocated by the engine
-    pub mask: Option<Vec<bool>>,
+    raw_mask: Option<Vec<bool>>,
+}
+
+impl ScanResult {
+    /// Returns the raw row mask. If an item at `raw_mask()[i]` is true, row `i` is
+    /// valid. Otherwise, row `i` is invalid and should be ignored.
+    ///
+    /// The raw mask is dangerous to use because it may be shorter than expected. In particular, if
+    /// you are using the default engine and plan to call arrow's `filter_record_batch`, you _need_
+    /// to extend the mask to the full length of the batch or arrow will drop the extra
+    /// rows. Calling [`full_mask`] instead avoids this risk entirely, at the cost of a copy.
+    ///
+    /// [`full_mask`]: #method.full_mask
+    pub fn raw_mask(&self) -> Option<&Vec<bool>> {
+        self.raw_mask.as_ref()
+    }
+
+    /// Extends the underlying (raw) mask to match the row count of the accompanying data.
+    ///
+    /// If the raw mask is *shorter* than the number of rows returned, missing elements are
+    /// considered `true`, i.e. included in the query. If the mask is `None`, all rows are valid.
+    ///
+    /// NB: If you are using the default engine and plan to call arrow's `filter_record_batch`, you
+    /// _need_ to extend the mask to the full length of the batch or arrow will drop the extra rows.
+    pub fn full_mask(&self) -> Option<Vec<bool>> {
+        let mut mask = self.raw_mask.clone()?;
+        mask.resize(self.raw_data.as_ref().ok()?.length(), true);
+        Some(mask)
+    }
 }
 
 /// Scan uses this to set up what kinds of columns it is scanning. For `Selected` we just store the
@@ -196,22 +223,27 @@ impl Scan {
         &self,
         engine: &dyn Engine,
     ) -> DeltaResult<impl Iterator<Item = DeltaResult<ScanData>>> {
-        let commit_read_schema = get_log_schema().project(&[ADD_NAME, REMOVE_NAME])?;
-        let checkpoint_read_schema = get_log_schema().project(&[ADD_NAME])?;
-
-        let log_iter = self.snapshot.log_segment.replay(
-            engine,
-            commit_read_schema,
-            checkpoint_read_schema,
-            self.predicate.clone(),
-        )?;
-
         Ok(scan_action_iter(
             engine,
-            log_iter,
+            self.replay_for_scan_data(engine)?,
             &self.logical_schema,
             &self.predicate,
         ))
+    }
+
+    // Factored out to facilitate testing
+    fn replay_for_scan_data(
+        &self,
+        engine: &dyn Engine,
+    ) -> DeltaResult<impl Iterator<Item = DeltaResult<(Box<dyn EngineData>, bool)>> + Send> {
+        let commit_read_schema = get_log_schema().project(&[ADD_NAME, REMOVE_NAME])?;
+        let checkpoint_read_schema = get_log_schema().project(&[ADD_NAME])?;
+
+        // NOTE: We don't pass any meta-predicate because we expect no meaningful row group skipping
+        // when ~every checkpoint file will contain the adds and removes we are looking for.
+        self.snapshot
+            .log_segment
+            .replay(engine, commit_read_schema, checkpoint_read_schema, None)
     }
 
     /// Get global state that is valid for the entire scan. This is somewhat expensive so should
@@ -227,14 +259,17 @@ impl Scan {
     }
 
     /// Perform an "all in one" scan. This will use the provided `engine` to read and
-    /// process all the data for the query. Each [`ScanResult`] in the resultant vector encapsulates
+    /// process all the data for the query. Each [`ScanResult`] in the resultant iterator encapsulates
     /// the raw data and an optional boolean vector built from the deletion vector if it was
     /// present. See the documentation for [`ScanResult`] for more details. Generally
     /// connectors/engines will want to use [`Scan::scan_data`] so they can have more control over
     /// the execution of the scan.
-    // This calls [`Scan::files`] to get a set of `Add` actions for the scan, and then uses the
+    // This calls [`Scan::scan_data`] to get an iterator of `ScanData` actions for the scan, and then uses the
     // `engine`'s [`crate::ParquetHandler`] to read the actual table data.
-    pub fn execute(&self, engine: &dyn Engine) -> DeltaResult<Vec<ScanResult>> {
+    pub fn execute<'a>(
+        &'a self,
+        engine: &'a dyn Engine,
+    ) -> DeltaResult<impl Iterator<Item = DeltaResult<ScanResult>> + 'a> {
         struct ScanFile {
             path: String,
             size: i64,
@@ -264,15 +299,18 @@ impl Scan {
 
         let global_state = Arc::new(self.global_scan_state());
         let scan_data = self.scan_data(engine)?;
-        let mut scan_files = vec![];
-        for data in scan_data {
-            let (data, vec) = data?;
-            scan_files =
-                state::visit_scan_files(data.as_ref(), &vec, scan_files, scan_data_callback)?;
-        }
-        scan_files
-            .into_iter()
-            .map(|scan_file| -> DeltaResult<_> {
+        let scan_files_iter = scan_data
+            .map(|res| {
+                let (data, vec) = res?;
+                let scan_files = vec![];
+                state::visit_scan_files(data.as_ref(), &vec, scan_files, scan_data_callback)
+            })
+            // Iterator<DeltaResult<Vec<ScanFile>>> to Iterator<DeltaResult<ScanFile>>
+            .flatten_ok();
+
+        let result = scan_files_iter
+            .map(move |scan_file| -> DeltaResult<_> {
+                let scan_file = scan_file?;
                 let file_path = self.snapshot.table_root.join(&scan_file.path)?;
                 let mut selection_vector = scan_file
                     .dv_info
@@ -285,10 +323,10 @@ impl Scan {
                 let read_result_iter = engine.get_parquet_handler().read_parquet_files(
                     &[meta],
                     global_state.read_schema.clone(),
-                    None,
+                    self.predicate().clone(),
                 )?;
                 let gs = global_state.clone(); // Arc clone
-                Ok(read_result_iter.into_iter().map(move |read_result| {
+                Ok(read_result_iter.map(move |read_result| -> DeltaResult<_> {
                     let read_result = read_result?;
                     // to transform the physical data into the correct logical form
                     let logical = transform_to_logical_internal(
@@ -308,14 +346,17 @@ impl Scan {
                     let rest = split_vector(sv.as_mut(), len, None);
                     let result = ScanResult {
                         raw_data: logical,
-                        mask: sv,
+                        raw_mask: sv,
                     };
                     selection_vector = rest;
                     Ok(result)
                 }))
             })
+            // Iterator<DeltaResult<Iterator<DeltaResult<ScanResult>>>> to Iterator<DeltaResult<DeltaResult<ScanResult>>>
             .flatten_ok()
-            .try_collect()?
+            // Iterator<DeltaResult<DeltaResult<ScanResult>>> to Iterator<DeltaResult<ScanResult>>
+            .map(|x| x?);
+        Ok(result)
     }
 }
 
@@ -345,13 +386,11 @@ pub fn scan_row_schema() -> Schema {
 }
 
 fn parse_partition_value(raw: Option<&String>, data_type: &DataType) -> DeltaResult<Scalar> {
-    match raw {
-        Some(v) => match data_type {
-            DataType::Primitive(primitive) => primitive.parse_scalar(v),
-            _ => Err(Error::generic(format!(
-                "Unexpected partition column type: {data_type:?}"
-            ))),
-        },
+    match (raw, data_type.as_primitive_opt()) {
+        (Some(v), Some(primitive)) => primitive.parse_scalar(v),
+        (Some(_), None) => Err(Error::generic(format!(
+            "Unexpected partition column type: {data_type:?}"
+        ))),
         _ => Ok(Scalar::Null(data_type.clone())),
     }
 }
@@ -385,10 +424,10 @@ fn get_state_info(
             } else {
                 // Add to read schema, store field so we can build a `Column` expression later
                 // if needed (i.e. if we have partition columns)
-                let physical_name = logical_field.physical_name(column_mapping_mode)?;
-                let physical_field = logical_field.with_name(physical_name);
+                let physical_field = logical_field.make_physical(column_mapping_mode)?;
+                let physical_name = physical_field.name.clone();
                 read_fields.push(physical_field);
-                Ok(ColumnType::Selected(physical_name.to_string()))
+                Ok(ColumnType::Selected(physical_name))
             }
         })
         .try_collect()?;
@@ -548,7 +587,7 @@ pub(crate) mod test_utils {
     ) {
         let engine = SyncEngine::new();
         // doesn't matter here
-        let table_schema = Arc::new(StructType::new(vec![StructField::new(
+        let table_schema = Arc::new(StructType::new([StructField::new(
             "foo",
             crate::schema::DataType::STRING,
             false,
@@ -635,7 +674,7 @@ mod tests {
         let table = Table::new(url);
         let snapshot = table.snapshot(&engine, None).unwrap();
         let scan = snapshot.into_scan_builder().build().unwrap();
-        let files = scan.execute(&engine).unwrap();
+        let files: Vec<ScanResult> = scan.execute(&engine).unwrap().try_collect().unwrap();
 
         assert_eq!(files.len(), 1);
         let num_rows = files[0].raw_data.as_ref().unwrap().length();
@@ -684,6 +723,67 @@ mod tests {
             .unwrap();
             assert_eq!(value, *expected);
         }
+    }
+
+    #[test]
+    fn test_replay_for_scan_data() {
+        let path = std::fs::canonicalize(PathBuf::from("./tests/data/parquet_row_group_skipping/"));
+        let url = url::Url::from_directory_path(path.unwrap()).unwrap();
+        let engine = SyncEngine::new();
+
+        let table = Table::new(url);
+        let snapshot = table.snapshot(&engine, None).unwrap();
+        let scan = snapshot.into_scan_builder().build().unwrap();
+        let data: Vec<_> = scan
+            .replay_for_scan_data(&engine)
+            .unwrap()
+            .try_collect()
+            .unwrap();
+        // No predicate pushdown attempted, because at most one part of a multi-part checkpoint
+        // could be skipped when looking for adds/removes.
+        //
+        // NOTE: Each checkpoint part is a single-row file -- guaranteed to produce one row group.
+        assert_eq!(data.len(), 5);
+    }
+
+    #[test]
+    fn test_data_row_group_skipping() {
+        let path = std::fs::canonicalize(PathBuf::from("./tests/data/parquet_row_group_skipping/"));
+        let url = url::Url::from_directory_path(path.unwrap()).unwrap();
+        let engine = SyncEngine::new();
+
+        let table = Table::new(url);
+        let snapshot = Arc::new(table.snapshot(&engine, None).unwrap());
+
+        // No predicate pushdown attempted, so the one data file should be returned.
+        //
+        // NOTE: The data file contains only five rows -- near guaranteed to produce one row group.
+        let scan = snapshot.clone().scan_builder().build().unwrap();
+        let data: Vec<_> = scan.execute(&engine).unwrap().try_collect().unwrap();
+        assert_eq!(data.len(), 1);
+
+        // Ineffective predicate pushdown attempted, so the one data file should be returned.
+        let int_col = Expression::column("numeric.ints.int32");
+        let value = Expression::literal(1000i32);
+        let predicate = int_col.clone().gt(value.clone());
+        let scan = snapshot
+            .clone()
+            .scan_builder()
+            .with_predicate(predicate)
+            .build()
+            .unwrap();
+        let data: Vec<_> = scan.execute(&engine).unwrap().try_collect().unwrap();
+        assert_eq!(data.len(), 1);
+
+        // Effective predicate pushdown, so no data files should be returned.
+        let predicate = int_col.lt(value);
+        let scan = snapshot
+            .scan_builder()
+            .with_predicate(predicate)
+            .build()
+            .unwrap();
+        let data: Vec<_> = scan.execute(&engine).unwrap().try_collect().unwrap();
+        assert_eq!(data.len(), 0);
     }
 
     #[test_log::test]
