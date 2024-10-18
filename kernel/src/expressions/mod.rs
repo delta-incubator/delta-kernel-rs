@@ -123,6 +123,8 @@ pub enum UnaryOperator {
     IsNull,
 }
 
+pub type ExpressionRef = std::sync::Arc<Expression>;
+
 /// A SQL expression.
 ///
 /// These expressions do not track or validate data types, other than the type
@@ -249,7 +251,7 @@ impl Expression {
     }
 
     /// Create a new struct expression
-    pub fn struct_expr(exprs: impl IntoIterator<Item = Self>) -> Self {
+    pub fn struct_from(exprs: impl IntoIterator<Item = Self>) -> Self {
         Self::Struct(exprs.into_iter().collect())
     }
 
