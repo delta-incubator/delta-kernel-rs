@@ -520,8 +520,8 @@ fn apply_schema_to_map(array: &dyn Array, kernel_map_type: &MapType) -> DeltaRes
     )?)
 }
 
-// make column `col` with type `arrow_type` look like `kernel_type`. For now this only handles name
-// transforms. if the actual data types don't match, this will return an error
+// apply `schema` to `array`. This handles renaming, and adjusting nullability and metadata. if the
+// actual data types don't match, this will return an error
 fn apply_schema_to(array: &ArrayRef, schema: &DataType) -> DeltaResult<ArrayRef> {
     use DataType::*;
     let array: ArrayRef = match schema {
