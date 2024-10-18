@@ -590,4 +590,35 @@ mod tests {
         assert!(result.is_err(), "Expected an error for empty filename");
         assert!(matches!(result, Err(Error::InvalidLogPath(_))), "Expected InvalidLogPath error for empty filename");
     }
+
+    #[test]
+    fn test_ok_none_and_unknown_cases() {
+        let table_log_dir = return_table_log_dir_url("./tests/data/multiple-checkpoint-faulty-1/_delta_log/");
+
+        // Test cases for non-numeric version (should return Ok(None))
+        let test_cases = vec![
+            "_last_checkpoint",
+            "abc.json",
+            "version_001.json",
+        ];
+
+        for file_name in test_cases {
+            let log_path = table_log_dir.join(file_name).unwrap();
+            let result = ParsedLogPath::try_from(log_path);
+            assert!(matches!(result, Ok(None)), "Expected Ok(None) for non-numeric version: {}", file_name);
+        }
+
+        // Test case for missing file extension (should return Ok(None))
+        let log_path = table_log_dir.join("00000000000000000010").unwrap();
+        let result = ParsedLogPath::try_from(log_path);
+        assert!(matches!(result, Ok(None)), "Expected Ok(None) for missing file extension");
+
+        // Test case for empty extension (should return Ok(Some) with Unknown file type)
+        let log_path = table_log_dir.join("00000000000000000011.").unwrap();
+        let result = ParsedLogPath::try_from(log_path);
+        assert!(matches!(result, Ok(Some(_))), "Expected Ok(Some) for empty extension");
+        if let Ok(Some(parsed)) = result {
+            assert!(parsed.is_unknown(), "Expected Unknown file type for empty extension");
+        }
+    }
 }
