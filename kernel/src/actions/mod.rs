@@ -5,7 +5,7 @@ use delta_kernel_derive::Schema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::LazyLock;
-use visitors::{AddVisitor, MetadataVisitor, ProtocolVisitor};
+use visitors::{MetadataVisitor, ProtocolVisitor};
 
 use self::deletion_vector::DeletionVectorDescriptor;
 use crate::actions::schemas::GetStructField;
@@ -49,11 +49,13 @@ fn get_log_schema() -> &'static StructType {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Schema)]
-pub struct Format {
+#[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
+#[cfg_attr(not(feature = "developer-visibility"), visibility::make(pub(crate)))]
+struct Format {
     /// Name of the encoding for files in this table
-    pub provider: String,
+    pub(crate) provider: String,
     /// A map containing configuration options for the format
-    pub options: HashMap<String, String>,
+    pub(crate) options: HashMap<String, String>,
 }
 
 impl Default for Format {
@@ -66,40 +68,48 @@ impl Default for Format {
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Schema)]
-pub struct Metadata {
+#[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
+#[cfg_attr(not(feature = "developer-visibility"), visibility::make(pub(crate)))]
+struct Metadata {
     /// Unique identifier for this table
-    pub id: String,
+    pub(crate) id: String,
     /// User-provided identifier for this table
-    pub name: Option<String>,
+    pub(crate) name: Option<String>,
     /// User-provided description for this table
-    pub description: Option<String>,
+    pub(crate) description: Option<String>,
     /// Specification of the encoding for the files stored in the table
-    pub format: Format,
+    pub(crate) format: Format,
     /// Schema of the table
-    pub schema_string: String,
+    pub(crate) schema_string: String,
     /// Column names by which the data should be partitioned
-    pub partition_columns: Vec<String>,
+    pub(crate) partition_columns: Vec<String>,
     /// The time when this metadata action is created, in milliseconds since the Unix epoch
-    pub created_time: Option<i64>,
+    pub(crate) created_time: Option<i64>,
     /// Configuration options for the metadata action
-    pub configuration: HashMap<String, String>,
+    pub(crate) configuration: HashMap<String, String>,
 }
 
 impl Metadata {
-    pub fn try_new_from_data(data: &dyn EngineData) -> DeltaResult<Option<Metadata>> {
+    pub(crate) fn try_new_from_data(data: &dyn EngineData) -> DeltaResult<Option<Metadata>> {
         let mut visitor = MetadataVisitor::default();
         data.extract(get_log_schema().project(&[METADATA_NAME])?, &mut visitor)?;
         Ok(visitor.metadata)
     }
 
-    pub fn schema(&self) -> DeltaResult<StructType> {
+    pub(crate) fn schema(&self) -> DeltaResult<StructType> {
         Ok(serde_json::from_str(&self.schema_string)?)
+    }
+
+    pub fn configuration(&self) -> &HashMap<String, String> {
+        &self.configuration
     }
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Eq, Schema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Protocol {
+#[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
+#[cfg_attr(not(feature = "developer-visibility"), visibility::make(pub(crate)))]
+struct Protocol {
     /// The minimum version of the Delta read protocol that a client must implement
     /// in order to correctly read this table
     pub min_reader_version: i32,
@@ -109,15 +119,15 @@ pub struct Protocol {
     /// A collection of features that a client must implement in order to correctly
     /// read this table (exist only when minReaderVersion is set to 3)
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub reader_features: Option<Vec<String>>,
+    pub(crate) reader_features: Option<Vec<String>>,
     /// A collection of features that a client must implement in order to correctly
     /// write this table (exist only when minWriterVersion is set to 7)
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub writer_features: Option<Vec<String>>,
+    pub(crate) writer_features: Option<Vec<String>>,
 }
 
 impl Protocol {
-    pub fn try_new_from_data(data: &dyn EngineData) -> DeltaResult<Option<Protocol>> {
+    pub(crate) fn try_new_from_data(data: &dyn EngineData) -> DeltaResult<Option<Protocol>> {
         let mut visitor = ProtocolVisitor::default();
         data.extract(get_log_schema().project(&[PROTOCOL_NAME])?, &mut visitor)?;
         Ok(visitor.protocol)
@@ -137,68 +147,65 @@ impl Protocol {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Schema)]
-pub struct CommitInfo {
-    pub kernel_version: Option<String>,
+#[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
+#[cfg_attr(not(feature = "developer-visibility"), visibility::make(pub(crate)))]
+struct CommitInfo {
+    pub(crate) kernel_version: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Schema)]
-pub struct Add {
+#[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
+#[cfg_attr(not(feature = "developer-visibility"), visibility::make(pub(crate)))]
+struct Add {
     /// A relative path to a data file from the root of the table or an absolute path to a file
     /// that should be added to the table. The path is a URI as specified by
     /// [RFC 2396 URI Generic Syntax], which needs to be decoded to get the data file path.
     ///
     /// [RFC 2396 URI Generic Syntax]: https://www.ietf.org/rfc/rfc2396.txt
-    pub path: String,
+    pub(crate) path: String,
 
     /// A map from partition column to value for this logical file. This map can contain null in the
     /// values meaning a partition is null. We drop those values from this map, due to the
     /// `drop_null_container_values` annotation. This means an engine can assume that if a partition
     /// is found in [`Metadata`] `partition_columns`, but not in this map, its value is null.
     #[drop_null_container_values]
-    pub partition_values: HashMap<String, String>,
+    pub(crate) partition_values: HashMap<String, String>,
 
     /// The size of this data file in bytes
-    pub size: i64,
+    pub(crate) size: i64,
 
     /// The time this logical file was created, as milliseconds since the epoch.
-    pub modification_time: i64,
+    pub(crate) modification_time: i64,
 
     /// When `false` the logical file must already be present in the table or the records
     /// in the added file must be contained in one or more remove actions in the same version.
-    pub data_change: bool,
+    pub(crate) data_change: bool,
 
     /// Contains [statistics] (e.g., count, min/max values for columns) about the data in this logical file.
     ///
     /// [statistics]: https://github.com/delta-io/delta/blob/master/PROTOCOL.md#Per-file-Statistics
-    pub stats: Option<String>,
+    pub(crate) stats: Option<String>,
 
     /// Map containing metadata about this logical file.
-    pub tags: Option<HashMap<String, String>>,
+    pub(crate) tags: Option<HashMap<String, String>>,
 
     /// Information about deletion vector (DV) associated with this add action
-    pub deletion_vector: Option<DeletionVectorDescriptor>,
+    pub(crate) deletion_vector: Option<DeletionVectorDescriptor>,
 
     /// Default generated Row ID of the first row in the file. The default generated Row IDs
     /// of the other rows in the file can be reconstructed by adding the physical index of the
     /// row within the file to the base Row ID
-    pub base_row_id: Option<i64>,
+    pub(crate) base_row_id: Option<i64>,
 
     /// First commit version in which an add action with the same path was committed to the table.
-    pub default_row_commit_version: Option<i64>,
+    pub(crate) default_row_commit_version: Option<i64>,
 
     /// The name of the clustering implementation
-    pub clustering_provider: Option<String>,
+    pub(crate) clustering_provider: Option<String>,
 }
 
 impl Add {
-    /// Since we always want to parse multiple adds from data, we return a `Vec<Add>`
-    pub fn parse_from_data(data: &dyn EngineData) -> DeltaResult<Vec<Add>> {
-        let mut visitor = AddVisitor::default();
-        data.extract(get_log_schema().project(&[ADD_NAME])?, &mut visitor)?;
-        Ok(visitor.adds)
-    }
-
-    pub fn dv_unique_id(&self) -> Option<String> {
+    pub(crate) fn dv_unique_id(&self) -> Option<String> {
         self.deletion_vector.as_ref().map(|dv| dv.unique_id())
     }
 }
@@ -252,15 +259,17 @@ impl Remove {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Schema)]
-pub struct SetTransaction {
+#[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
+#[cfg_attr(not(feature = "developer-visibility"), visibility::make(pub(crate)))]
+struct SetTransaction {
     /// A unique identifier for the application performing the transaction.
-    pub app_id: String,
+    pub(crate) app_id: String,
 
     /// An application-specific numeric identifier for this transaction.
-    pub version: i64,
+    pub(crate) version: i64,
 
     /// The time when this transaction action was created in milliseconds since the Unix epoch.
-    pub last_updated: Option<i64>,
+    pub(crate) last_updated: Option<i64>,
 }
 
 #[cfg(test)]
