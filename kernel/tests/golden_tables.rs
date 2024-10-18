@@ -150,8 +150,22 @@ fn assert_cols_eq(actual: &dyn Array, expected: &dyn Array) {
 }
 
 fn assert_eq(actual: &StructArray, expected: &StructArray) {
-    assert_fields_match(actual.fields().iter(), expected.fields().iter());
-    for (actual_col, expected_col) in actual.columns().iter().zip(expected.columns()) {
+    let actual_fields = actual.fields();
+    let expected_fields = expected.fields();
+    assert_eq!(
+        actual_fields.len(),
+        expected_fields.len(),
+        "Number of fields differed"
+    );
+    assert_fields_match(actual_fields.iter(), expected_fields.iter());
+    let actual_cols = actual.columns();
+    let expected_cols = expected.columns();
+    assert_eq!(
+        actual_cols.len(),
+        expected_cols.len(),
+        "Number of columns differed"
+    );
+    for (actual_col, expected_col) in actual_cols.iter().zip(expected_cols) {
         assert_cols_eq(actual_col, expected_col);
     }
 }

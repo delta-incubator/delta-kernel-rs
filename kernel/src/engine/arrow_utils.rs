@@ -1,9 +1,10 @@
 //! Some utilities for working with arrow data types
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader};
 use std::sync::Arc;
 
+use crate::schema::MetadataValue;
 use crate::{
     engine::arrow_data::ArrowEngineData,
     schema::{DataType, PrimitiveType, Schema, SchemaRef, StructField, StructType},
@@ -223,7 +224,7 @@ pub(crate) fn ensure_data_types(
                             arrow_field.is_nullable()
                         )));
                     }
-                    if &kernel_field.metadata_as_string() != arrow_field.metadata() {
+                    if !metadata_eq(&kernel_field.metadata, arrow_field.metadata()) {
                         return Err(Error::Generic(format!(
                             "Field {} has metadata {:?} in kernel and {:?} in arrow",
                             kernel_field.name,
@@ -853,6 +854,26 @@ fn parse_json_impl(json_strings: &StringArray, schema: ArrowSchemaRef) -> DeltaR
     };
     let output: Vec<_> = json_strings.iter().map(parse_one).try_collect()?;
     Ok(concat_batches(&schema, output.iter())?)
+}
+
+impl PartialEq<String> for MetadataValue {
+    fn eq(&self, other: &String) -> bool {
+        self.to_string().eq(other)
+    }
+}
+
+// allow for comparing our metadata maps to arrow ones. We can't implement PartialEq because both
+// are HashMaps which aren't defined in this crate
+fn metadata_eq(
+    kernel_metadata: &HashMap<String, MetadataValue>,
+    arrow_metadata: &HashMap<String, String>,
+) -> bool {
+    if kernel_metadata.len() != arrow_metadata.len() {
+        return false;
+    }
+    kernel_metadata
+        .iter()
+        .all(|(key, value)| arrow_metadata.get(key).map_or(false, |v| *value == *v))
 }
 
 #[cfg(test)]

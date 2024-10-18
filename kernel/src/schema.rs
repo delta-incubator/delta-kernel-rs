@@ -29,13 +29,13 @@ pub enum MetadataValue {
     Other(serde_json::Value),
 }
 
-impl MetadataValue {
-    pub(crate) fn as_string(&self) -> String {
+impl std::fmt::Display for MetadataValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            MetadataValue::Number(n) => format!("{}", n),
-            MetadataValue::String(ref s) => s.clone(),
-            MetadataValue::Boolean(b) => format!("{}", b),
-            MetadataValue::Other(_) => panic!("Can't to_string other rn"),
+            MetadataValue::Number(n) => write!(f, "{}", n),
+            MetadataValue::String(s) => write!(f, "{}", s),
+            MetadataValue::Boolean(b) => write!(f, "{}", b),
+            MetadataValue::Other(v) => write!(f, "{}", v), // just write the json back
         }
     }
 }
@@ -180,12 +180,11 @@ impl StructField {
 
     /// Convert our metadata into a HashMap<String, String>. Note this copies all the data so can be
     /// expensive for large metadata
-    pub fn metadata_as_string(&self) -> HashMap<String, String> {
-        HashMap::from_iter(
-            self.metadata
-                .iter()
-                .map(|(key, val)| (key.clone(), val.as_string())),
-        )
+    pub fn metadata_with_string_values(&self) -> HashMap<String, String> {
+        self.metadata
+            .iter()
+            .map(|(key, val)| (key.clone(), val.to_string()))
+            .collect()
     }
 
     pub fn make_physical(&self, mapping_mode: ColumnMappingMode) -> DeltaResult<Self> {

@@ -1,4 +1,5 @@
 //! Expression handling based on arrow-rs compute kernels.
+use std::borrow::Borrow;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -374,9 +375,7 @@ fn transform_field_and_col(
     rename: Option<&str>,
     metadata: Option<HashMap<String, String>>,
 ) -> DeltaResult<(ArrowField, Arc<dyn Array>)> {
-    // try and apply the schema to the column. errors are propagated. if `apply_schema_to` returns
-    // `Ok(None)`, no transform is needed, so we just assign `transformed_col` to `arrow_col`.
-    let transformed_col = apply_schema_to(&arrow_col, target_type)?.unwrap_or(arrow_col);
+    let transformed_col = apply_schema_to(&arrow_col, target_type)?;
     let mut transformed_field = ArrowField::new(
         rename.unwrap_or_else(|| arrow_field.name()),
         transformed_col.data_type().clone(),
@@ -394,9 +393,9 @@ fn transform_field_and_col(
 // the `target_types_and_names` iterator _must_ be the same as the number of columns in
 // `struct_array`. The transformation is ordinal. That is, the order of fields in `target_fields`
 // _must_ match the order of the columns in `struct_array`.
-fn transform_struct<'a>(
+fn transform_struct(
     struct_array: &StructArray,
-    target_fields: impl Iterator<Item = &'a StructField>,
+    target_fields: impl Iterator<Item = impl Borrow<StructField>>,
 ) -> DeltaResult<StructArray> {
     let (arrow_fields, arrow_cols, nulls) = struct_array.clone().into_parts();
     let input_col_count = arrow_cols.len();
@@ -405,13 +404,14 @@ fn transform_struct<'a>(
         .zip(arrow_cols)
         .zip(target_fields)
         .map(|((sa_field, sa_col), target_field)| {
+            let target_field = target_field.borrow();
             transform_field_and_col(
                 sa_field,
                 sa_col,
                 target_field.data_type(),
                 target_field.nullable,
                 Some(target_field.name.as_str()),
-                Some(target_field.metadata_as_string()),
+                Some(target_field.metadata_with_string_values()),
             )
         });
     let (transformed_fields, transformed_cols): (Vec<ArrowField>, Vec<Arc<dyn Array>>) =
@@ -429,8 +429,7 @@ fn transform_struct<'a>(
     )?)
 }
 
-// Transform a struct array. The data is in `sa`, the current fields are in `arrow_fields`, and the
-// target fields are in `kernel_fields`.
+// Transform a struct array. The data is in `array`, and the target fields are in `kernel_fields`.
 fn apply_schema_to_struct(array: &dyn Array, kernel_fields: &Schema) -> DeltaResult<StructArray> {
     let Some(sa) = array.as_struct_opt() else {
         return Err(make_arrow_error(
@@ -487,7 +486,7 @@ fn apply_schema_to_map(array: &dyn Array, kernel_map_type: &MapType) -> DeltaRes
         return Err(make_arrow_error("Arrow map type wasn't a struct."));
     };
 
-    let target_fields: Vec<StructField> = map_struct_array
+    let target_fields = map_struct_array
         .fields()
         .iter()
         .zip([
@@ -499,13 +498,12 @@ fn apply_schema_to_map(array: &dyn Array, kernel_map_type: &MapType) -> DeltaRes
         ])
         .map(|(arrow_field, (target_type, nullable))| {
             StructField::new(arrow_field.name(), target_type.clone(), nullable)
-        })
-        .collect();
+        });
 
     // Arrow puts the key type/val as the first field/col and the value type/val as the second. So
     // we just transform like a 'normal' struct, but we know there are two fields/cols and we
     // specify the key/value types as the target type iterator.
-    let transformed_map_struct_array = transform_struct(&map_struct_array, target_fields.iter())?;
+    let transformed_map_struct_array = transform_struct(&map_struct_array, target_fields)?;
 
     let transformed_map_field = Arc::new(
         map_field
@@ -524,15 +522,18 @@ fn apply_schema_to_map(array: &dyn Array, kernel_map_type: &MapType) -> DeltaRes
 
 // make column `col` with type `arrow_type` look like `kernel_type`. For now this only handles name
 // transforms. if the actual data types don't match, this will return an error
-fn apply_schema_to(array: &dyn Array, schema: &DataType) -> DeltaResult<Option<ArrayRef>> {
+fn apply_schema_to(array: &ArrayRef, schema: &DataType) -> DeltaResult<ArrayRef> {
     use DataType::*;
     let array: ArrayRef = match schema {
         Struct(stype) => Arc::new(apply_schema_to_struct(array, stype)?),
         Array(atype) => Arc::new(apply_schema_to_list(array, atype)?),
         Map(mtype) => Arc::new(apply_schema_to_map(array, mtype)?),
-        _ => return ensure_data_types(schema, array.data_type(), true).map(|_| None),
+        _ => {
+            ensure_data_types(schema, array.data_type(), true)?;
+            array.clone()
+        }
     };
-    Ok(Some(array))
+    Ok(array)
 }
 
 #[derive(Debug)]
@@ -580,10 +581,7 @@ impl ExpressionEvaluator for DefaultExpressionEvaluator {
         let batch: RecordBatch = if let DataType::Struct(_) = self.output_type {
             apply_schema(&array_ref, &self.output_type)?
         } else {
-            let array_ref = match apply_schema_to(&array_ref, &self.output_type)? {
-                Some(transformed) => transformed,
-                None => array_ref, // Were a primitive type, we just validated
-            };
+            let array_ref = apply_schema_to(&array_ref, &self.output_type)?;
             let arrow_type: ArrowDataType = ArrowDataType::try_from(&self.output_type)?;
             let schema = ArrowSchema::new(vec![ArrowField::new("output", arrow_type, true)]);
             RecordBatch::try_new(Arc::new(schema), vec![array_ref])?
