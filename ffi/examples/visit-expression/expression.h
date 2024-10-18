@@ -126,7 +126,7 @@ struct Literal {
 };
 
 /*************************************************************
- * Utilitiy functions
+ * Utility functions
  ************************************************************/
 
 void put_expr_item(void* data, size_t sibling_list_id, void* ref, enum ExpressionType type) {
