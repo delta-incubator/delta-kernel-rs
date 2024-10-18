@@ -137,7 +137,7 @@ fn scan_impl(
         let exprid = (predicate.visitor)(predicate.predicate, &mut visitor_state);
         let predicate = unwrap_kernel_expression(&mut visitor_state, exprid);
         debug!("Got predicate: {:#?}", predicate);
-        scan_builder = scan_builder.with_predicate(predicate);
+        scan_builder = scan_builder.with_predicate(predicate.map(Arc::new));
     }
     Ok(Arc::new(scan_builder.build()?).into())
 }

@@ -70,14 +70,14 @@ impl ScanBuilder {
         }
     }
 
-    /// Optionally provide an [`Expression`] to filter rows. For example, using the predicate `x <
+    /// Optionally provide an expression to filter rows. For example, using the predicate `x <
     /// 4` to return a subset of the rows in the scan which satisfy the filter. If `predicate_opt`
     /// is `None`, this is a no-op.
     ///
     /// NOTE: The filtering is best-effort and can produce false positives (rows that should should
     /// have been filtered out but were kept).
-    pub fn with_predicate(mut self, predicate: impl Into<Option<Expression>>) -> Self {
-        self.predicate = predicate.into().map(Arc::new);
+    pub fn with_predicate(mut self, predicate: impl Into<Option<ExpressionRef>>) -> Self {
+        self.predicate = predicate.into();
         self
     }
 
@@ -758,7 +758,7 @@ mod tests {
         // Ineffective predicate pushdown attempted, so the one data file should be returned.
         let int_col = Expression::column("numeric.ints.int32");
         let value = Expression::literal(1000i32);
-        let predicate = int_col.clone().gt(value.clone());
+        let predicate = Arc::new(int_col.clone().gt(value.clone()));
         let scan = snapshot
             .clone()
             .scan_builder()
@@ -769,7 +769,7 @@ mod tests {
         assert_eq!(data.len(), 1);
 
         // Effective predicate pushdown, so no data files should be returned.
-        let predicate = int_col.lt(value);
+        let predicate = Arc::new(int_col.lt(value));
         let scan = snapshot
             .scan_builder()
             .with_predicate(predicate)
