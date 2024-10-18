@@ -137,8 +137,23 @@ impl Protocol {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Schema)]
-pub struct CommitInfo {
-    pub kernel_version: Option<String>,
+#[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
+#[cfg_attr(not(feature = "developer-visibility"), visibility::make(pub(crate)))]
+struct CommitInfo {
+    /// The time this logical file was created, as milliseconds since the epoch.
+    /// TODO should this be a Timestamp?
+    pub(crate) timestamp: i64,
+    /// An arbitrary string that identifies the operation associated with this commit. This is
+    /// specified by the engine.
+    pub(crate) operation: String,
+    /// Map of arbitrary string key-value pairs that provide additional information about the
+    /// operation. This is specified by the engine. For now this is always empty.
+    pub(crate) operation_parameters: HashMap<String, String>,
+    /// The version of the delta_kernel crate used to write this commit.
+    pub(crate) kernel_version: Option<String>,
+    /// A place for the engine to store additional metadata associated with this commit encoded as
+    /// a map of strings.
+    pub(crate) engine_commit_info: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Schema)]
@@ -426,11 +441,21 @@ mod tests {
 
         let expected = Arc::new(StructType::new(vec![StructField::new(
             "commitInfo",
-            StructType::new(vec![StructField::new(
-                "kernelVersion",
-                DataType::STRING,
-                true,
-            )]),
+            StructType::new(vec![
+                StructField::new("timestamp", DataType::LONG, false),
+                StructField::new("operation", DataType::STRING, false),
+                StructField::new(
+                    "operationParameters",
+                    MapType::new(DataType::STRING, DataType::STRING, true),
+                    false,
+                ),
+                StructField::new("kernelVersion", DataType::STRING, true),
+                StructField::new(
+                    "engineCommitInfo",
+                    MapType::new(DataType::STRING, DataType::STRING, true),
+                    false,
+                ),
+            ]),
             true,
         )]));
         assert_eq!(schema, expected);

@@ -1,29 +1,21 @@
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::actions::get_log_schema;
-use crate::actions::{
-    ADD_NAME, COMMIT_INFO_NAME, METADATA_NAME, PROTOCOL_NAME, REMOVE_NAME, SET_TRANSACTION_NAME,
-};
 use crate::error::Error;
 use crate::path::ParsedLogPath;
-use crate::schema::{Schema, SchemaRef};
+use crate::schema::{MapType, StructField, StructType};
 use crate::snapshot::Snapshot;
 use crate::{DataType, DeltaResult, Engine, EngineData, Expression, Version};
 
 const KERNEL_VERSION: &str = env!("CARGO_PKG_VERSION");
+const UNKNOWN_OPERATION: &str = "UNKNOWN";
 
 /// A transaction represents an in-progress write to a table.
 pub struct Transaction {
     read_snapshot: Arc<Snapshot>,
-    commit_info: Option<EngineCommitInfo>,
-}
-
-// Since the engine can include any commit info it likes, we unify the data/schema pair as a single
-// struct with Arc semantics.
-#[derive(Clone)]
-struct EngineCommitInfo {
-    data: Arc<dyn EngineData>,
-    schema: SchemaRef,
+    operation: Option<String>,
+    commit_info: Option<Box<dyn EngineData>>,
 }
 
 impl std::fmt::Debug for Transaction {
@@ -46,6 +38,7 @@ impl Transaction {
     pub(crate) fn new(snapshot: impl Into<Arc<Snapshot>>) -> Self {
         Transaction {
             read_snapshot: snapshot.into(),
+            operation: None,
             commit_info: None,
         }
     }
@@ -54,21 +47,15 @@ impl Transaction {
     pub fn commit(self, engine: &dyn Engine) -> DeltaResult<CommitResult> {
         // step one: construct the iterator of actions we want to commit
         // note: only support commit_info right now.
-        let (actions, _actions_schema): (
-            Box<dyn Iterator<Item = Box<dyn EngineData>> + Send>,
-            SchemaRef,
-        ) = match self.commit_info {
-            Some(ref engine_commit_info) => {
-                let (actions, schema) = generate_commit_info(engine, engine_commit_info)?;
-                (Box::new(std::iter::once(actions)), schema)
+        let actions: Box<dyn Iterator<Item = Box<dyn EngineData>> + Send> = match self.commit_info {
+            Some(engine_commit_info) => {
+                let actions =
+                    generate_commit_info(engine, self.operation.as_deref(), engine_commit_info)?;
+                Box::new(std::iter::once(actions))
             }
             None => {
-                (
-                    // if there is no commit info, actions are empty iterator and schema is just our
-                    // known log schema.
-                    Box::new(std::iter::empty()),
-                    get_log_schema().clone().into(),
-                )
+                // if there is no commit info, actions start empty
+                Box::new(std::iter::empty())
             }
         };
 
@@ -81,13 +68,23 @@ impl Transaction {
         let json_handler = engine.get_json_handler();
         match json_handler.write_json_file(&commit_path.location, Box::new(actions), false) {
             Ok(()) => Ok(CommitResult::Committed(commit_version)),
-            Err(Error::FileAlreadyExists(_)) => Ok(CommitResult::Conflict(self, commit_version)),
+            Err(Error::FileAlreadyExists(_)) => Err(Error::generic("fixme")), // Ok(CommitResult::Conflict(self, commit_version)),
             Err(e) => Err(e),
         }
     }
 
+    /// Set the operation that this transaction is performing. This string will be persisted in the
+    /// commitInfo action in the log. <- TODO include this bit?
+    pub fn operation(&mut self, operation: String) {
+        self.operation = Some(operation);
+    }
+
+    /// WARNING: This is an unstable API and will likely change in the future.
+    ///
     /// Add commit info to the transaction. This is commit-wide metadata that is written as the
-    /// first action in the commit.
+    /// first action in the commit. The engine data passed here must have exactly one row, and we
+    /// only read one column: `engineCommitInfo` which must be a map<string, string> encoding the
+    /// metadata.
     ///
     /// Note that there are two main pieces of information included in commit info: (1) custom
     /// engine commit info (specified via this API) and (2) delta's own commit info which is
@@ -97,14 +94,11 @@ impl Transaction {
     /// 1. skip this API entirely - this will omit the commitInfo action from the commit (that is,
     ///    it will prevent the kernel from writing delta-specific commitInfo). This precludes usage
     ///    of table features which require commitInfo like in-commit timestamps.
-    /// 2. pass an empty commit_info data chunk - this will allow kernel to include delta-specific
-    ///    commit info, resulting in a commitInfo action in the log, just without any
-    ///    engine-specific additions.
-    pub fn commit_info(&mut self, commit_info: Box<dyn EngineData>, schema: Schema) {
-        self.commit_info = Some(EngineCommitInfo {
-            data: commit_info.into(),
-            schema: schema.into(),
-        });
+    /// 2. pass a commit_info data chunk with one row of `engineCommitInfo` with an empty map. This
+    ///    allows kernel to include delta-specific commit info, resulting in a commitInfo action in
+    ///    the log, just without any engine-specific additions.
+    pub fn commit_info(&mut self, commit_info: Box<dyn EngineData>) {
+        self.commit_info = Some(commit_info);
     }
 }
 
@@ -118,76 +112,54 @@ pub enum CommitResult {
     Conflict(Transaction, Version),
 }
 
-// given the engine's commit info (data and schema as [EngineCommitInfo]) we want to create both:
-// (1) the commitInfo action to commit (and append more actions to) and
-// (2) the schema for the actions to commit (this is determined by the engine's commit info schema)
+// given the engine's commit info we want to create commitInfo action to commit (and append more actions to)
 fn generate_commit_info(
     engine: &dyn Engine,
-    engine_commit_info: &EngineCommitInfo,
-) -> DeltaResult<(Box<dyn EngineData>, SchemaRef)> {
-    if engine_commit_info.data.length() != 1 {
+    operation: Option<&str>,
+    engine_commit_info: Box<dyn EngineData>,
+) -> DeltaResult<Box<dyn EngineData>> {
+    if engine_commit_info.length() != 1 {
         return Err(Error::InvalidCommitInfo(format!(
             "Engine commit info should have exactly one row, found {}",
-            engine_commit_info.data.length()
+            engine_commit_info.length()
         )));
     }
 
-    let mut action_schema = get_log_schema().clone();
-    let commit_info_field = action_schema
-        .fields
-        .get_mut(COMMIT_INFO_NAME)
-        .ok_or_else(|| Error::missing_column(COMMIT_INFO_NAME))?;
-    let DataType::Struct(mut commit_info_data_type) = commit_info_field.data_type().clone() else {
-        return Err(Error::internal_error("commit_info_field is a struct"));
-    };
-    commit_info_data_type.fields.extend(
-        engine_commit_info
-            .schema
-            .fields()
-            .map(|f| (f.name.clone(), f.clone())),
-    );
-    commit_info_field.data_type = DataType::Struct(commit_info_data_type);
+    let commit_info_exprs = [
+        // FIXME we should take a timestamp closer to commit time?
+        Expression::literal(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("time went backwards..?")
+                .as_millis() as i64, // FIXME safe cast
+        ),
+        Expression::literal(operation.unwrap_or(UNKNOWN_OPERATION)),
+        // Expression::struct_expr([Expression::null_literal(DataType::LONG)]),
+        Expression::null_literal(DataType::Map(Box::new(MapType::new(
+            DataType::STRING,
+            DataType::STRING,
+            true,
+        )))),
+        Expression::literal(format!("v{}", KERNEL_VERSION)),
+        Expression::column("engineCommitInfo"),
+    ];
+    let commit_info_expr = Expression::struct_expr([Expression::struct_expr(commit_info_exprs)]);
+    // TODO probably just create a static
+    let commit_info_schema = get_log_schema().project_as_struct(&["commitInfo"])?;
 
-    let commit_info_expr = std::iter::once(Expression::literal(format!("v{}", KERNEL_VERSION)))
-        .chain(
-            engine_commit_info
-                .schema
-                .fields()
-                .map(|f| Expression::column(f.name())),
-        );
+    let engine_commit_info_schema = StructType::new(vec![StructField::new(
+        "engineCommitInfo",
+        MapType::new(DataType::STRING, DataType::STRING, true),
+        false,
+    )]);
 
-    // generate expression with null for all the fields except the commit_info field, and
-    // append the commit_info to the end.
-    let commit_info_expr_fields = [
-        ADD_NAME,
-        REMOVE_NAME,
-        METADATA_NAME,
-        PROTOCOL_NAME,
-        SET_TRANSACTION_NAME,
-    ]
-    .iter()
-    .map(|name| {
-        Expression::null_literal(
-            action_schema
-                .field(name)
-                .expect("find field in action schema")
-                .data_type()
-                .clone(),
-        )
-    })
-    .chain(std::iter::once(Expression::struct_expr(commit_info_expr)));
-    let commit_info_expr = Expression::struct_expr(commit_info_expr_fields);
-
-    // commit info has arbitrary schema ex: {engineInfo: string, operation: string}
-    // we want to bundle it up and put it in the commit_info field of the actions.
     let commit_info_evaluator = engine.get_expression_handler().get_evaluator(
-        engine_commit_info.schema.clone(),
+        engine_commit_info_schema.into(),
         commit_info_expr,
-        action_schema.clone().into(),
+        commit_info_schema.into(),
     );
 
-    let actions = commit_info_evaluator.evaluate(engine_commit_info.data.as_ref())?;
-    Ok((actions, action_schema.into()))
+    commit_info_evaluator.evaluate(engine_commit_info.as_ref())
 }
 
 #[cfg(test)]
@@ -198,8 +170,9 @@ mod tests {
     use crate::engine::arrow_expression::ArrowExpressionHandler;
     use crate::{ExpressionHandler, FileSystemClient, JsonHandler, ParquetHandler};
 
-    use arrow::array::{Int32Array, StringArray};
     use arrow::record_batch::RecordBatch;
+    use arrow_schema::Schema as ArrowSchema;
+    use arrow_schema::{DataType as ArrowDataType, Field};
 
     struct ExprEngine(Arc<dyn ExpressionHandler>);
 
@@ -229,34 +202,52 @@ mod tests {
 
     // simple test for generating commit info
     #[test]
-    fn test_generate_commit_info() {
+    fn test_generate_commit_info() -> DeltaResult<()> {
         let engine = ExprEngine::new();
-        let schema = Arc::new(arrow_schema::Schema::new(vec![
-            arrow_schema::Field::new("engine_info", arrow_schema::DataType::Utf8, true),
-            arrow_schema::Field::new("operation", arrow_schema::DataType::Utf8, true),
-            arrow_schema::Field::new("int", arrow_schema::DataType::Int32, true),
-        ]));
-        let data = RecordBatch::try_new(
-            schema.clone(),
-            vec![
-                Arc::new(StringArray::from(vec!["test engine info"])),
-                Arc::new(StringArray::from(vec!["append"])),
-                Arc::new(Int32Array::from(vec![42])),
-            ],
-        );
-        let engine_commit_info = EngineCommitInfo {
-            data: Arc::new(ArrowEngineData::new(data.unwrap())),
-            schema: Arc::new(schema.try_into().unwrap()),
-        };
-        let (actions, actions_schema) = generate_commit_info(&engine, &engine_commit_info).unwrap();
+        let engine_commit_info_schema = Arc::new(ArrowSchema::new(vec![Field::new(
+            "engineCommitInfo",
+            ArrowDataType::Map(
+                Arc::new(Field::new(
+                    "entries",
+                    ArrowDataType::Struct(
+                        vec![
+                            Field::new("key", ArrowDataType::Utf8, false),
+                            Field::new("value", ArrowDataType::Utf8, true),
+                        ]
+                        .into(),
+                    ),
+                    false,
+                )),
+                false,
+            ),
+            false,
+        )]));
 
-        // FIXME actual assertions
-        assert_eq!(actions_schema.fields().collect::<Vec<_>>().len(), 6);
-        let DataType::Struct(struct_type) = actions_schema.field("commitInfo").unwrap().data_type()
-        else {
-            unreachable!("commitInfo is a struct");
+        use arrow_array::builder::StringBuilder;
+        let key_builder = StringBuilder::new();
+        let val_builder = StringBuilder::new();
+        let names = arrow_array::builder::MapFieldNames {
+            entry: "entries".to_string(),
+            key: "key".to_string(),
+            value: "value".to_string(),
         };
-        assert_eq!(struct_type.fields().collect::<Vec<_>>().len(), 4);
-        assert_eq!(actions.length(), 1);
+        let mut builder =
+            arrow_array::builder::MapBuilder::new(Some(names), key_builder, val_builder);
+        builder.keys().append_value("engineInfo");
+        builder.values().append_value("default engine");
+        builder.append(true).unwrap();
+        let array = builder.finish();
+
+        let commit_info_batch =
+            RecordBatch::try_new(engine_commit_info_schema, vec![Arc::new(array)])?;
+
+        let actions = generate_commit_info(
+            &engine,
+            Some("test operation"),
+            Box::new(ArrowEngineData::new(commit_info_batch)),
+        )?;
+
+        // TODO test it lol: more test cases, assert
+        Ok(())
     }
 }

@@ -26,7 +26,7 @@ use crate::engine::arrow_utils::ensure_data_types;
 use crate::engine::arrow_utils::prim_array_cmp;
 use crate::error::{DeltaResult, Error};
 use crate::expressions::{BinaryOperator, Expression, Scalar, UnaryOperator, VariadicOperator};
-use crate::schema::{DataType, PrimitiveType, SchemaRef};
+use crate::schema::{DataType, MapType, PrimitiveType, SchemaRef};
 use crate::{EngineData, ExpressionEvaluator, ExpressionHandler};
 
 // TODO leverage scalars / Datum
@@ -120,7 +120,33 @@ impl Scalar {
                         ArrowField::new(LIST_ARRAY_ROOT, t.element_type().try_into()?, true);
                     Arc::new(ListArray::new_null(Arc::new(field), num_rows))
                 }
-                DataType::Map { .. } => unimplemented!(),
+                DataType::Map(t) => {
+                    let MapType {
+                        key_type,
+                        value_type,
+                        .. // FIXME should use value_contains_null
+                    } = t.as_ref();
+                    if key_type != &DataType::STRING && value_type != &DataType::STRING {
+                        return Err(Error::generic("Only string key/values are supported"));
+                    }
+                    use arrow_array::builder::StringBuilder;
+                    let key_builder = StringBuilder::new();
+                    let val_builder = StringBuilder::new();
+                    let names = arrow_array::builder::MapFieldNames {
+                        entry: "entries".to_string(),
+                        key: "key".to_string(),
+                        value: "value".to_string(),
+                    };
+                    let mut builder = arrow_array::builder::MapBuilder::new(
+                        Some(names),
+                        key_builder,
+                        val_builder,
+                    );
+                    (0..num_rows).for_each(|_| {
+                        builder.append(true).unwrap();
+                    });
+                    Arc::new(builder.finish())
+                }
             },
         };
         Ok(arr)
