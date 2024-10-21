@@ -76,22 +76,22 @@ This means you can force kernel to rely on the specific arrow version that your 
 as long as it falls in that range. You can see the range in the `Cargo.toml` in the same folder as
 this `README.md`.
 
-For example, although arrow 53.1.0 has been released, you can force kernel to compile on 53.0.0 by
+For example, although arrow 53.1.0 has been released, you can force kernel to compile on 53.0 by
 putting the following in your project's `Cargo.toml`:
 
 ```toml
 [patch.crates-io]
-arrow = "53.0.0"
-arrow-arith = "53.0.0"
-arrow-array = "53.0.0"
-arrow-buffer = "53.0.0"
-arrow-cast = "53.0.0"
-arrow-data = "53.0.0"
-arrow-ord = "53.0.0"
-arrow-json = "53.0.0"
-arrow-select = "53.0.0"
-arrow-schema = "53.0.0"
-parquet = "53.0.0"
+arrow = "53.0"
+arrow-arith = "53.0"
+arrow-array = "53.0"
+arrow-buffer = "53.0"
+arrow-cast = "53.0"
+arrow-data = "53.0"
+arrow-ord = "53.0"
+arrow-json = "53.0"
+arrow-select = "53.0"
+arrow-schema = "53.0"
+parquet = "53.0"
 ```
 
 Note that unfortunatly patching in `cargo` requires that _exactly one_ version matches your
