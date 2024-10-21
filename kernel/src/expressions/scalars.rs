@@ -463,7 +463,7 @@ impl PrimitiveType {
 mod tests {
     use std::f32::consts::PI;
 
-    use crate::expressions::BinaryOperator;
+    use crate::expressions::{simple_column, BinaryOperator};
     use crate::Expression;
 
     use super::*;
@@ -555,7 +555,7 @@ mod tests {
             elements: vec![Scalar::Integer(1), Scalar::Integer(2), Scalar::Integer(3)],
         });
 
-        let column = Expression::simple_column("item");
+        let column = simple_column!("item");
         let array_op = Expression::binary(BinaryOperator::In, 10, array.clone());
         let array_not_op = Expression::binary(BinaryOperator::NotIn, 10, array);
         let column_op = Expression::binary(BinaryOperator::In, PI, column.clone());

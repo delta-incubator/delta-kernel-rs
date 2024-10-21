@@ -5,7 +5,10 @@ use std::fmt::{Display, Formatter};
 
 use itertools::Itertools;
 
-pub use self::column_name::ColumnName;
+pub use self::column_name::{
+    joined_column, joined_column_name, nested_column, nested_column_name, simple_column,
+    simple_column_name, ColumnName,
+};
 pub use self::scalars::{ArrayData, Scalar, StructData};
 use crate::DataType;
 
@@ -229,18 +232,6 @@ impl Expression {
         set
     }
 
-    /// Creates a new column reference, for a simple (not nested) column name.
-    /// See [`ColumnName::simple`] for details.
-    pub fn simple_column(name: impl Into<String>) -> Self {
-        ColumnName::simple(name).into()
-    }
-
-    /// Creates a new column reference, for a splittable nested column name.
-    /// See [`ColumnName::split`] for details.
-    pub fn split_column(name: impl AsRef<str>) -> Self {
-        ColumnName::split(name.as_ref()).into()
-    }
-
     /// Create a new expression for a literal value
     pub fn literal(value: impl Into<Scalar>) -> Self {
         Self::Literal(value.into())
@@ -425,11 +416,11 @@ impl<R: Into<Expression>> std::ops::Div<R> for Expression {
 
 #[cfg(test)]
 mod tests {
-    use super::Expression as Expr;
+    use super::{simple_column, Expression as Expr};
 
     #[test]
     fn test_expression_format() {
-        let col_ref = Expr::simple_column("x");
+        let col_ref = simple_column!("x");
         let cases = [
             (col_ref.clone(), "Column(x)"),
             (col_ref.clone().eq(2), "Column(x) = 2"),

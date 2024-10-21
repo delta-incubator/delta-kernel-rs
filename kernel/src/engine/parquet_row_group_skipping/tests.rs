@@ -1,4 +1,5 @@
 use super::*;
+use crate::expressions::{nested_column, simple_column};
 use crate::Expression;
 use parquet::arrow::arrow_reader::ArrowReaderMetadata;
 use std::fs::File;
@@ -39,21 +40,21 @@ fn test_get_stat_values() {
 
     // The expression doesn't matter -- it just needs to mention all the columns we care about.
     let columns = Expression::and_from(vec![
-        Expression::split_column("varlen.utf8"),
-        Expression::split_column("numeric.ints.int64"),
-        Expression::split_column("numeric.ints.int32"),
-        Expression::split_column("numeric.ints.int16"),
-        Expression::split_column("numeric.ints.int8"),
-        Expression::split_column("numeric.floats.float32"),
-        Expression::split_column("numeric.floats.float64"),
-        Expression::simple_column("bool"),
-        Expression::split_column("varlen.binary"),
-        Expression::split_column("numeric.decimals.decimal32"),
-        Expression::split_column("numeric.decimals.decimal64"),
-        Expression::split_column("numeric.decimals.decimal128"),
-        Expression::split_column("chrono.date32"),
-        Expression::split_column("chrono.timestamp"),
-        Expression::split_column("chrono.timestamp_ntz"),
+        nested_column!("varlen.utf8"),
+        nested_column!("numeric.ints.int64"),
+        nested_column!("numeric.ints.int32"),
+        nested_column!("numeric.ints.int16"),
+        nested_column!("numeric.ints.int8"),
+        nested_column!("numeric.floats.float32"),
+        nested_column!("numeric.floats.float64"),
+        simple_column!("bool"),
+        nested_column!("varlen.binary"),
+        nested_column!("numeric.decimals.decimal32"),
+        nested_column!("numeric.decimals.decimal64"),
+        nested_column!("numeric.decimals.decimal128"),
+        nested_column!("chrono.date32"),
+        nested_column!("chrono.timestamp"),
+        nested_column!("chrono.timestamp_ntz"),
     ]);
     let filter = RowGroupFilter::new(metadata.metadata().row_group(0), &columns);
 

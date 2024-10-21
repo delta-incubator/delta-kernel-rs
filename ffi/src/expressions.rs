@@ -5,7 +5,7 @@ use crate::{
     ReferenceSet, TryFromStringSlice,
 };
 use delta_kernel::{
-    expressions::{BinaryOperator, Expression, UnaryOperator},
+    expressions::{BinaryOperator, ColumnName, Expression, UnaryOperator},
     DeltaResult,
 };
 
@@ -146,8 +146,9 @@ fn visit_expression_column_impl(
     state: &mut KernelExpressionVisitorState,
     name: DeltaResult<String>,
 ) -> DeltaResult<usize> {
-    // TODO: We can't actually assume the column name is so easily splittable!
-    Ok(wrap_expression(state, Expression::split_column(name?)))
+    // TODO: FIXME: This is incorrect if any field name in the column path contains a period.
+    let name = ColumnName::new(name?.split('.')).into();
+    Ok(wrap_expression(state, name))
 }
 
 #[no_mangle]

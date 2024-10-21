@@ -420,7 +420,8 @@ fn get_state_info(
                 let physical_field = logical_field.make_physical(column_mapping_mode)?;
                 let physical_name = physical_field.name.clone();
                 read_fields.push(physical_field);
-                Ok(ColumnType::Selected(ColumnName::simple(physical_name)))
+                // TODO: Support nested columns!
+                Ok(ColumnType::Selected(ColumnName::new([physical_name])))
             }
         })
         .try_collect()?;
@@ -613,6 +614,7 @@ mod tests {
     use std::path::PathBuf;
 
     use crate::engine::sync::SyncEngine;
+    use crate::expressions::nested_column;
     use crate::schema::PrimitiveType;
     use crate::Table;
 
@@ -756,7 +758,7 @@ mod tests {
         assert_eq!(data.len(), 1);
 
         // Ineffective predicate pushdown attempted, so the one data file should be returned.
-        let int_col = Expression::split_column("numeric.ints.int32");
+        let int_col = nested_column!("numeric.ints.int32");
         let value = Expression::literal(1000i32);
         let predicate = Arc::new(int_col.clone().gt(value.clone()));
         let scan = snapshot
