@@ -23,6 +23,9 @@ pub(crate) mod arrow_get_data;
 #[cfg(any(feature = "default-engine", feature = "sync-engine"))]
 pub(crate) mod arrow_utils;
 
+#[cfg(any(feature = "default-engine", feature = "sync-engine"))]
+pub(crate) mod ensure_data_types;
+
 #[cfg(feature = "default-engine")]
 pub mod default;
 
