@@ -20,7 +20,9 @@ use arrow_schema::{
 use arrow_select::concat::concat;
 use itertools::Itertools;
 
-use super::arrow_conversion::LIST_ARRAY_ROOT;
+use super::arrow_conversion::{
+    LIST_ARRAY_ROOT, MAP_KEY_DEFAULT, MAP_ROOT_DEFAULT, MAP_VALUE_DEFAULT,
+};
 use crate::engine::arrow_data::ArrowEngineData;
 use crate::engine::arrow_utils::ensure_data_types;
 use crate::engine::arrow_utils::prim_array_cmp;
@@ -126,25 +128,25 @@ impl Scalar {
                         value_type,
                         .. // FIXME should use value_contains_null
                     } = t.as_ref();
-                    if key_type != &DataType::STRING && value_type != &DataType::STRING {
+                    if key_type != &DataType::STRING || value_type != &DataType::STRING {
                         return Err(Error::generic("Only string key/values are supported"));
                     }
                     use arrow_array::builder::StringBuilder;
                     let key_builder = StringBuilder::new();
                     let val_builder = StringBuilder::new();
                     let names = arrow_array::builder::MapFieldNames {
-                        entry: "entries".to_string(),
-                        key: "key".to_string(),
-                        value: "value".to_string(),
+                        entry: MAP_ROOT_DEFAULT.to_string(),
+                        key: MAP_KEY_DEFAULT.to_string(),
+                        value: MAP_VALUE_DEFAULT.to_string(),
                     };
                     let mut builder = arrow_array::builder::MapBuilder::new(
                         Some(names),
                         key_builder,
                         val_builder,
                     );
-                    (0..num_rows).for_each(|_| {
-                        builder.append(true).unwrap();
-                    });
+                    std::iter::repeat_with(|| builder.append(true))
+                        .take(num_rows)
+                        .collect::<Result<(), _>>()?;
                     Arc::new(builder.finish())
                 }
             },
@@ -459,7 +461,7 @@ mod tests {
     use super::*;
     use crate::expressions::*;
     use crate::schema::ArrayType;
-    use crate::DataType as DeltaDataTypes;
+    use crate::DataType as DeltaDataType;
 
     #[test]
     fn test_array_column() {
@@ -526,7 +528,7 @@ mod tests {
             BinaryOperator::NotIn,
             Expression::literal(5),
             Expression::literal(Scalar::Array(ArrayData::new(
-                ArrayType::new(DeltaDataTypes::INTEGER, false),
+                ArrayType::new(DeltaDataType::INTEGER, false),
                 vec![Scalar::Integer(1), Scalar::Integer(2)],
             ))),
         );
@@ -775,5 +777,44 @@ mod tests {
                 .unwrap();
         let expected = Arc::new(BooleanArray::from(vec![true, false]));
         assert_eq!(results.as_ref(), expected.as_ref());
+    }
+
+    #[test]
+    fn test_null_map() {
+        let schema = Schema::new(vec![Field::new("to_become_map", DataType::Int64, false)]);
+        let batch = RecordBatch::try_new(
+            Arc::new(schema.clone()),
+            vec![Arc::new(Int64Array::from(vec![0, 1]))],
+        )
+        .unwrap();
+        let expr = Expression::null_literal(DeltaDataType::Map(Box::new(MapType::new(
+            DeltaDataType::STRING,
+            DeltaDataType::STRING,
+            true,
+        ))));
+        let output_schema = crate::schema::DataType::Map(Box::new(MapType::new(
+            DeltaDataType::STRING,
+            DeltaDataType::STRING,
+            true,
+        )));
+        let results = evaluate_expression(&expr, &batch, Some(&output_schema)).unwrap();
+        let keys = results.as_map().keys();
+        let values = results.as_map().values();
+        assert_eq!(keys.as_ref(), &StringArray::new_null(0));
+        assert_eq!(values.as_ref(), &StringArray::new_null(0));
+
+        // also check we only support string keys and values
+        let expr = Expression::null_literal(DeltaDataType::Map(Box::new(MapType::new(
+            DeltaDataType::STRING,
+            DeltaDataType::INTEGER,
+            true,
+        ))));
+        evaluate_expression(&expr, &batch, Some(&output_schema)).unwrap_err();
+        let expr = Expression::null_literal(DeltaDataType::Map(Box::new(MapType::new(
+            DeltaDataType::INTEGER,
+            DeltaDataType::STRING,
+            true,
+        ))));
+        evaluate_expression(&expr, &batch, Some(&output_schema)).unwrap_err();
     }
 }

@@ -1,3 +1,4 @@
+use std::iter;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -15,7 +16,7 @@ const UNKNOWN_OPERATION: &str = "UNKNOWN";
 pub struct Transaction {
     read_snapshot: Arc<Snapshot>,
     operation: Option<String>,
-    commit_info: Option<Box<dyn EngineData>>,
+    commit_info: Option<Arc<dyn EngineData>>,
 }
 
 impl std::fmt::Debug for Transaction {
@@ -46,18 +47,16 @@ impl Transaction {
     /// Consume the transaction and commit the in-progress write to the table.
     pub fn commit(self, engine: &dyn Engine) -> DeltaResult<CommitResult> {
         // step one: construct the iterator of actions we want to commit
-        // note: only support commit_info right now.
-        let actions: Box<dyn Iterator<Item = Box<dyn EngineData>> + Send> = match self.commit_info {
-            Some(engine_commit_info) => {
-                let actions =
-                    generate_commit_info(engine, self.operation.as_deref(), engine_commit_info)?;
-                Box::new(std::iter::once(actions))
-            }
-            None => {
-                // if there is no commit info, actions start empty
-                Box::new(std::iter::empty())
-            }
-        };
+        // note: only support commit_info right now (and it's required)
+        let engine_commit_info = self
+            .commit_info
+            .clone()
+            .ok_or_else(|| Error::MissingCommitInfo)?;
+        let actions = Box::new(iter::once(generate_commit_info(
+            engine,
+            self.operation.as_deref(),
+            engine_commit_info,
+        )?));
 
         // step two: set new commit version (current_version + 1) and path to write
         let commit_version = self.read_snapshot.version() + 1;
@@ -68,13 +67,13 @@ impl Transaction {
         let json_handler = engine.get_json_handler();
         match json_handler.write_json_file(&commit_path.location, Box::new(actions), false) {
             Ok(()) => Ok(CommitResult::Committed(commit_version)),
-            Err(Error::FileAlreadyExists(_)) => Err(Error::generic("fixme")), // Ok(CommitResult::Conflict(self, commit_version)),
+            Err(Error::FileAlreadyExists(_)) => Ok(CommitResult::Conflict(self, commit_version)),
             Err(e) => Err(e),
         }
     }
 
     /// Set the operation that this transaction is performing. This string will be persisted in the
-    /// commitInfo action in the log. <- TODO include this bit?
+    /// commit and visible to anyone who describes the table history.
     pub fn operation(&mut self, operation: String) {
         self.operation = Some(operation);
     }
@@ -86,25 +85,23 @@ impl Transaction {
     /// only read one column: `engineCommitInfo` which must be a map<string, string> encoding the
     /// metadata.
     ///
-    /// Note that there are two main pieces of information included in commit info: (1) custom
-    /// engine commit info (specified via this API) and (2) delta's own commit info which is
-    /// effectively appended to the engine-specific commit info.
-    ///
-    /// If the engine elects to omit commit info, it can do so in two ways:
-    /// 1. skip this API entirely - this will omit the commitInfo action from the commit (that is,
-    ///    it will prevent the kernel from writing delta-specific commitInfo). This precludes usage
-    ///    of table features which require commitInfo like in-commit timestamps.
-    /// 2. pass a commit_info data chunk with one row of `engineCommitInfo` with an empty map. This
-    ///    allows kernel to include delta-specific commit info, resulting in a commitInfo action in
-    ///    the log, just without any engine-specific additions.
+    /// The engine is required to provide commit info before committing the transaction. If the
+    /// engine would like to omit engine-specific commit info, it can do so by passing pass a
+    /// commit_info engine data chunk with one row and one column of:
+    /// 1. `engineCommitInfo` column with an empty Map<string, string>
+    /// 2. `engineCommitInfo` null column of type Map<string, string>
+    /// 3. a column that has a name other than `engineCommitInfo`; Delta can detect that the column
+    ///    is missing and substitute a null literal in its place. The type of that column doesn't
+    ///    matter, Delta will ignore it.
     pub fn commit_info(&mut self, commit_info: Box<dyn EngineData>) {
-        self.commit_info = Some(commit_info);
+        self.commit_info = Some(commit_info.into());
     }
 }
 
 /// Result after committing a transaction. If 'committed', the version is the new version written
 /// to the log. If 'conflict', the transaction is returned so the caller can resolve the conflict
 /// (along with the version which conflicted).
+#[derive(Debug)]
 pub enum CommitResult {
     /// The transaction was successfully committed at the version.
     Committed(Version),
@@ -116,7 +113,7 @@ pub enum CommitResult {
 fn generate_commit_info(
     engine: &dyn Engine,
     operation: Option<&str>,
-    engine_commit_info: Box<dyn EngineData>,
+    engine_commit_info: Arc<dyn EngineData>,
 ) -> DeltaResult<Box<dyn EngineData>> {
     if engine_commit_info.length() != 1 {
         return Err(Error::InvalidCommitInfo(format!(
@@ -134,7 +131,6 @@ fn generate_commit_info(
                 .as_millis() as i64, // FIXME safe cast
         ),
         Expression::literal(operation.unwrap_or(UNKNOWN_OPERATION)),
-        // Expression::struct_expr([Expression::null_literal(DataType::LONG)]),
         Expression::null_literal(DataType::Map(Box::new(MapType::new(
             DataType::STRING,
             DataType::STRING,
@@ -244,10 +240,15 @@ mod tests {
         let actions = generate_commit_info(
             &engine,
             Some("test operation"),
-            Box::new(ArrowEngineData::new(commit_info_batch)),
+            Arc::new(ArrowEngineData::new(commit_info_batch)),
         )?;
 
-        // TODO test it lol: more test cases, assert
+        assert_eq!(actions.length(), 1);
+        let record_batch: RecordBatch = actions
+            .into_any()
+            .downcast::<ArrowEngineData>()
+            .unwrap()
+            .into();
         Ok(())
     }
 }

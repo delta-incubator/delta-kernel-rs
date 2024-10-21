@@ -219,15 +219,11 @@ async fn test_empty_commit() -> Result<(), Box<dyn std::error::Error>> {
     )]));
     let table = create_table(store.clone(), table_location, schema, &[]).await?;
 
-    // create a transaction and commit
-    table.new_transaction(&engine)?.commit(&engine)?;
+    assert!(matches!(
+        table.new_transaction(&engine)?.commit(&engine).unwrap_err(),
+        KernelError::MissingCommitInfo
+    ));
 
-    let commit1 = store
-        .get(&Path::from(
-            "/test_table/_delta_log/00000000000000000001.json",
-        ))
-        .await?;
-    assert!(commit1.bytes().await?.to_vec().is_empty());
     Ok(())
 }
 
