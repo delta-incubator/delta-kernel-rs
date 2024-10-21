@@ -483,7 +483,7 @@ fn apply_schema_to_map(array: &dyn Array, kernel_map_type: &MapType) -> DeltaRes
     let transformed_map_field = ArrowField::new(
         map_field.name().clone(),
         transformed_map_struct_array.data_type().clone(),
-        map_field.nullable(),
+        map_field.is_nullable(),
     );
     Ok(MapArray::try_new(
         Arc::new(transformed_map_field),

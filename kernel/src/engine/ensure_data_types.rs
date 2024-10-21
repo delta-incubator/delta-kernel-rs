@@ -1,6 +1,6 @@
 //! Helpers to ensure that kernel data types match arrow data types
 
-use std::collections::{HashMap, HashSet};
+use std::{collections::{HashMap, HashSet}, ops::Deref};
 
 use arrow_schema::{DataType as ArrowDataType, Field as ArrowField};
 use itertools::Itertools;
@@ -77,42 +77,26 @@ impl EnsureDataTypes {
                 )
             }
             (DataType::Map(kernel_map_type), ArrowDataType::Map(arrow_map_type, _)) => {
-                if let ArrowDataType::Struct(fields) = arrow_map_type.data_type() {
-                    let mut fields = fields.iter();
-                    if let Some(key_type) = fields.next() {
-                        self.ensure_data_types(
-                            &kernel_map_type.key_type,
-                            key_type.data_type(),
-                        )?;
-                    } else {
-                        return Err(make_arrow_error(
-                            "Arrow map struct didn't have a key type",
-                        ));
-                    }
-                    if let Some(value_type) = fields.next() {
-                        self.ensure_nullability(
-                            "Map",
-                            kernel_map_type.value_contains_null,
-                            value_type.is_nullable(),
-                        )?;
-                        self.ensure_data_types(
-                            &kernel_map_type.value_type,
-                            value_type.data_type(),
-                        )?;
-                    } else {
-                        return Err(make_arrow_error(
-                            "Arrow map struct didn't have a value type".to_string(),
-                        ));
-                    }
-                    if fields.next().is_some() {
-                        return Err(Error::generic("map fields had more than 2 members"));
-                    }
-                    Ok(DataTypeCompat::Nested)
-                } else {
-                    Err(make_arrow_error(
-                        "Arrow map type wasn't a struct.".to_string(),
-                    ))
-                }
+                let ArrowDataType::Struct(fields) = arrow_map_type.data_type() else {
+                    return Err(make_arrow_error("Arrow map type wasn't a struct."));
+                };
+                let [key_type, value_type] = fields.deref() else {
+                    return Err(make_arrow_error("Arrow map type didn't have expected key/value fields"));
+                };
+                self.ensure_data_types(
+                    &kernel_map_type.key_type,
+                    key_type.data_type(),
+                )?;
+                self.ensure_nullability(
+                    "Map",
+                    kernel_map_type.value_contains_null,
+                    value_type.is_nullable(),
+                )?;
+                self.ensure_data_types(
+                    &kernel_map_type.value_type,
+                    value_type.data_type(),
+                )?;
+                Ok(DataTypeCompat::Nested)
             }
             (DataType::Struct(kernel_fields), ArrowDataType::Struct(arrow_fields)) => {
                 // build a list of kernel fields that matches the order of the arrow fields
