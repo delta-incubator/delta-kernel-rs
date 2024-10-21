@@ -59,10 +59,10 @@ impl EnsureDataTypes {
             (DataType::Primitive(_), _) if arrow_type.is_primitive() => {
                 check_cast_compat(kernel_type.try_into()?, arrow_type)
             }
+            // strings, bools, and binary  aren't primitive in arrow
             (&DataType::BOOLEAN, ArrowDataType::Boolean)
                 | (&DataType::STRING, ArrowDataType::Utf8)
                 | (&DataType::BINARY, ArrowDataType::Binary) => {
-                    // strings, bools, and binary  aren't primitive in arrow
                     Ok(DataTypeCompat::Identical)
                 }
             (DataType::Array(inner_type), ArrowDataType::List(arrow_list_field)) => {
@@ -71,11 +71,9 @@ impl EnsureDataTypes {
                     inner_type.contains_null,
                     arrow_list_field.is_nullable(),
                 )?;
-                let kernel_array_type = &inner_type.element_type;
-                let arrow_list_type = arrow_list_field.data_type();
                 self.ensure_data_types(
-                    kernel_array_type,
-                    arrow_list_type,
+                    &inner_type.element_type,
+                    arrow_list_field.data_type(),
                 )
             }
             (DataType::Map(kernel_map_type), ArrowDataType::Map(arrow_map_type, _)) => {
@@ -88,7 +86,7 @@ impl EnsureDataTypes {
                         )?;
                     } else {
                         return Err(make_arrow_error(
-                            "Arrow map struct didn't have a key type".to_string(),
+                            "Arrow map struct didn't have a key type",
                         ));
                     }
                     if let Some(value_type) = fields.next() {
@@ -127,10 +125,9 @@ impl EnsureDataTypes {
                 // ensure that for the fields that we found, the types match
                 for (kernel_field, arrow_field) in mapped_fields.zip(arrow_fields) {
                     self.ensure_nullability_and_metadata(kernel_field, arrow_field)?;
-                    ensure_data_types(
+                    self.ensure_data_types(
                         &kernel_field.data_type,
                         arrow_field.data_type(),
-                        self.check_nullability_and_metadata,
                     )?;
                     found_fields += 1;
                 }

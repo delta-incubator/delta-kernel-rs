@@ -480,10 +480,11 @@ fn apply_schema_to_map(array: &dyn Array, kernel_map_type: &MapType) -> DeltaRes
     // specify the key/value types as the target type iterator.
     let transformed_map_struct_array = transform_struct(&map_struct_array, target_fields)?;
 
-    let transformed_map_field = map_field
-        .as_ref()
-        .clone()
-        .with_data_type(transformed_map_struct_array.data_type().clone());
+    let transformed_map_field = ArrowField::new(
+        map_field.name().clone(),
+        transformed_map_struct_array.data_type().clone(),
+        map_field.nullable(),
+    );
     Ok(MapArray::try_new(
         Arc::new(transformed_map_field),
         offset_buffer,
