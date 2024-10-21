@@ -14,7 +14,6 @@ pub mod default;
 #[cfg(feature = "sync-engine")]
 pub mod sync;
 
-
 macro_rules! declare_modules {
     ( $(($vis:vis, $module:ident)),*) => {
         $(
