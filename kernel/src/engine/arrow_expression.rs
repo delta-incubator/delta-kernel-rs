@@ -131,7 +131,7 @@ impl Scalar {
 }
 
 fn wrap_comparison_result(arr: BooleanArray) -> ArrayRef {
-    Arc::new(arr) as ArrayRef
+    Arc::new(arr) as _
 }
 
 trait ProvidesColumnByName {
@@ -400,7 +400,7 @@ fn transform_struct(
                 let target_field = target_field.borrow();
                 let transformed_col = apply_schema_to(&sa_col, target_field.data_type())?;
                 let transformed_field = new_field_with_metadata(
-                    target_field.name.as_str(),
+                    &target_field.name,
                     transformed_col.data_type(),
                     target_field.nullable,
                     Some(target_field.metadata_with_string_values()),
@@ -445,11 +445,10 @@ fn apply_schema_to_list(
     let (field, offset_buffer, values, nulls) = la.clone().into_parts();
 
     let transformed_values = apply_schema_to(&values, &target_inner_type.element_type)?;
-    let transformed_field = new_field_with_metadata(
+    let transformed_field = ArrowField::new(
         field.name(),
-        transformed_values.data_type(),
+        transformed_values.data_type().clone(),
         target_inner_type.contains_null,
-        None,
     );
     Ok(ListArray::try_new(
         Arc::new(transformed_field),
