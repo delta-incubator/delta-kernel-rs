@@ -8,84 +8,40 @@ use crate::actions::visitors::SelectionVectorVisitor;
 use crate::actions::{get_log_schema, ADD_NAME};
 use crate::error::DeltaResult;
 use crate::expressions::{
-    BinaryOperator, Expression as Expr, ExpressionRef, UnaryOperator, VariadicOperator,
+    BinaryOperator, Expression as Expr, ExpressionRef, Scalar, UnaryOperator, VariadicOperator,
 };
 use crate::schema::{DataType, PrimitiveType, SchemaRef, SchemaTransform, StructField, StructType};
 use crate::{Engine, EngineData, ExpressionEvaluator, JsonHandler};
 
-/// Get the expression that checks if a col could be null, assuming tight_bounds = true. In this
-/// case a column can contain null if any value > 0 is in the nullCount. This is further complicated
-/// by the default for tightBounds being true, so we have to check if it's EITHER `null` OR `true`
-fn get_tight_null_expr(null_col: String) -> Expr {
+/// Get the expression that checks IS [NOT] NULL for a column with tight bounds. A column may
+/// satisfy IS NULL if `nullCount != 0`, and may satisfy IS NOT NULL if `nullCount !=
+/// numRecords`. Note that a the bounds are tight unless `tightBounds` is neither TRUE nor NULL.
+fn get_tight_is_null_expr(null_col: String, inverted: bool) -> Expr {
+    let sentinel_value = if inverted {
+        Expr::column("numRecords")
+    } else {
+        Expr::literal(0i64)
+    };
     Expr::and(
         Expr::distinct(Expr::column("tightBounds"), false),
-        Expr::gt(Expr::column(null_col), 0i64),
+        Expr::ne(Expr::column(null_col), sentinel_value),
     )
 }
 
 /// Get the expression that checks if a col could be null, assuming tight_bounds = false. In this
-/// case, we can only check if the WHOLE column is null, by checking if the number of records is
-/// equal to the null count, since all other values of nullCount must be ignored (except 0, which
-/// doesn't help us)
-fn get_wide_null_expr(null_col: String) -> Expr {
+/// case, we can only check whether the WHOLE column is null or not, by checking if the number of
+/// records is equal to the null count. Any other values of nullCount must be ignored (except 0,
+/// which doesn't help us).
+fn get_wide_is_null_expr(null_col: String, inverted: bool) -> Expr {
+    let op = if inverted {
+        BinaryOperator::NotEqual
+    } else {
+        BinaryOperator::Equal
+    };
     Expr::and(
         Expr::eq(Expr::column("tightBounds"), false),
-        Expr::eq(Expr::column("numRecords"), Expr::column(null_col)),
+        Expr::binary(op, Expr::column("numRecords"), Expr::column(null_col)),
     )
-}
-
-/// Get the expression that checks if a col could NOT be null, assuming tight_bounds = true. In this
-/// case a column has a NOT NULL record if nullCount < numRecords. This is further complicated by
-/// the default for tightBounds being true, so we have to check if it's EITHER `null` OR `true`
-fn get_tight_not_null_expr(null_col: String) -> Expr {
-    Expr::and(
-        Expr::distinct(Expr::column("tightBounds"), false),
-        Expr::lt(Expr::column(null_col), Expr::column("numRecords")),
-    )
-}
-
-/// Get the expression that checks if a col could NOT be null, assuming tight_bounds = false. In
-/// this case, we can only check if the WHOLE column null, by checking if the nullCount ==
-/// numRecords. So by inverting that check and seeing if nullCount != numRecords, we can check if
-/// there is a possibility of a NOT null
-fn get_wide_not_null_expr(null_col: String) -> Expr {
-    Expr::and(
-        Expr::eq(Expr::column("tightBounds"), false),
-        Expr::ne(Expr::column("numRecords"), Expr::column(null_col)),
-    )
-}
-
-/// Use De Morgan's Laws to push a NOT expression down the tree
-fn as_inverted_data_skipping_predicate(expr: &Expr) -> Option<Expr> {
-    use Expr::*;
-    match expr {
-        UnaryOperation { op, expr } => match op {
-            UnaryOperator::Not => as_data_skipping_predicate(expr),
-            UnaryOperator::IsNull => {
-                // to check if a column could NOT have a null, we need two different checks, to see
-                // if the bounds are tight and then to actually do the check
-                if let Column(col) = expr.as_ref() {
-                    let null_col = format!("nullCount.{col}");
-                    Some(Expr::or(
-                        get_tight_not_null_expr(null_col.clone()),
-                        get_wide_not_null_expr(null_col),
-                    ))
-                } else {
-                    // can't check anything other than a col for null
-                    None
-                }
-            }
-        },
-        BinaryOperation { op, left, right } => {
-            let expr = Expr::binary(op.invert()?, left.as_ref().clone(), right.as_ref().clone());
-            as_data_skipping_predicate(&expr)
-        }
-        VariadicOperation { op, exprs } => {
-            let expr = Expr::variadic(op.invert(), exprs.iter().cloned().map(|e| !e));
-            as_data_skipping_predicate(&expr)
-        }
-        _ => None,
-    }
 }
 
 /// Rewrites a predicate to a predicate that can be used to skip files based on their stats.
@@ -104,62 +60,89 @@ fn as_inverted_data_skipping_predicate(expr: &Expr) -> Option<Expr> {
 ///         are not eligible for data skipping.
 /// - `OR` is rewritten only if all operands are eligible for data skipping. Otherwise, the whole OR
 ///        expression is dropped.
-fn as_data_skipping_predicate(expr: &Expr) -> Option<Expr> {
+fn as_data_skipping_predicate(expr: &Expr, inverted: bool) -> Option<Expr> {
     use BinaryOperator::*;
     use Expr::*;
     use UnaryOperator::*;
 
     match expr {
+        Literal(Scalar::Boolean(value)) => Some(Expr::literal(*value != inverted)),
+        Literal(_) => None, // Non-boolean literals unsupported
+        // The expression <col> is equivalent to <col> != FALSE. Resembling NotEqual case below.
+        Column(col) => Some(Expr::or(
+            Expr::ne(Column(format!("minValues.{}", col)), inverted),
+            Expr::ne(Column(format!("maxValues.{}", col)), inverted),
+        )),
+        // push down Not by inverting everything below it
+        UnaryOperation { op: Not, expr } => as_data_skipping_predicate(expr, !inverted),
+        UnaryOperation { op: IsNull, expr } => {
+            // to check if a column could have a null, we need two different checks, to see if
+            // the bounds are tight and then to actually do the check
+            let Column(col) = expr.as_ref() else {
+                return None;
+            };
+            let null_col = format!("nullCount.{col}");
+            Some(Expr::or(
+                get_tight_is_null_expr(null_col.clone(), inverted),
+                get_wide_is_null_expr(null_col, inverted),
+            ))
+        }
         BinaryOperation { op, left, right } => {
+            // Reduce the number of cases by forcing column on left and literal on right.
             let (op, col, val) = match (left.as_ref(), right.as_ref()) {
                 (Column(col), Literal(val)) => (*op, col, val),
                 (Literal(val), Column(col)) => (op.commute()?, col, val),
                 _ => return None, // unsupported combination of operands
             };
+
+            // Min/Max stats don't allow us to push inversion down into the comparison. Instead, we
+            // invert the comparison itself when needed and compute normally after that.
+            let op = match inverted {
+                true => op.invert()?,
+                false => op,
+            };
+
             let stats_col = match op {
                 LessThan | LessThanOrEqual => "minValues",
                 GreaterThan | GreaterThanOrEqual => "maxValues",
+                // Column could compare equal if its min/max values bracket the literal.
                 Equal => {
-                    return as_data_skipping_predicate(&Expr::and(
-                        Expr::le(Column(col.clone()), Literal(val.clone())),
-                        Expr::le(Literal(val.clone()), Column(col.clone())),
-                    ));
+                    return Some(Expr::and(
+                        Expr::le(Column(format!("minValues.{}", col)), val.clone()),
+                        Expr::ge(Column(format!("maxValues.{}", col)), val.clone()),
+                    ))
                 }
+                // Column could compare not-equal if min and/or max value differs from the literal.
                 NotEqual => {
                     return Some(Expr::or(
-                        Expr::gt(Column(format!("minValues.{}", col)), val.clone()),
-                        Expr::lt(Column(format!("maxValues.{}", col)), val.clone()),
-                    ));
+                        Expr::ne(Column(format!("minValues.{}", col)), val.clone()),
+                        Expr::ne(Column(format!("maxValues.{}", col)), val.clone()),
+                    ))
                 }
                 _ => return None, // unsupported operation
             };
-            let col = format!("{}.{}", stats_col, col);
-            Some(Expr::binary(op, Column(col), val.clone()))
-        }
-        // push down Not by inverting everything below it
-        UnaryOperation { op: Not, expr } => as_inverted_data_skipping_predicate(expr),
-        UnaryOperation { op: IsNull, expr } => {
-            // to check if a column could have a null, we need two different checks, to see if
-            // the bounds are tight and then to actually do the check
-            if let Column(col) = expr.as_ref() {
-                let null_col = format!("nullCount.{col}");
-                Some(Expr::or(
-                    get_tight_null_expr(null_col.clone()),
-                    get_wide_null_expr(null_col),
-                ))
-            } else {
-                // can't check anything other than a col for null
-                None
-            }
+            Some(Expr::binary(
+                op,
+                Column(format!("{}.{}", stats_col, col)),
+                val.clone(),
+            ))
         }
         VariadicOperation { op, exprs } => {
-            let exprs = exprs.iter().map(as_data_skipping_predicate);
-            match op {
-                VariadicOperator::And => Some(Expr::and_from(exprs.flatten())),
-                VariadicOperator::Or => Some(Expr::or_from(exprs.collect::<Option<Vec<_>>>()?)),
-            }
+            // Invert the operator (here) and also invert its arguments (below).
+            let op = match inverted {
+                true => op.invert(),
+                false => *op,
+            };
+            let exprs = exprs
+                .iter()
+                .map(|e| as_data_skipping_predicate(e, inverted));
+            let exprs: Vec<_> = match op {
+                VariadicOperator::And => exprs.flatten().collect(),
+                VariadicOperator::Or => exprs.collect::<Option<_>>()?,
+            };
+            Some(Expr::variadic(op, exprs))
         }
-        _ => None,
+        Struct(_) => None, // Unsupported
     }
 }
 
@@ -247,7 +230,7 @@ impl DataSkippingFilter {
 
         let skipping_evaluator = engine.get_expression_handler().get_evaluator(
             stats_schema.clone(),
-            Expr::struct_from([as_data_skipping_predicate(predicate)?]),
+            Expr::struct_from([as_data_skipping_predicate(predicate, false)?]),
             PREDICATE_SCHEMA.clone(),
         );
 
@@ -363,21 +346,21 @@ mod tests {
             (
                 column.clone().ne(lit_int.clone()),
                 Expr::or_from([
-                    Expr::gt(min_col.clone(), lit_int.clone()),
-                    Expr::lt(max_col.clone(), lit_int.clone()),
+                    Expr::ne(min_col.clone(), lit_int.clone()),
+                    Expr::ne(max_col.clone(), lit_int.clone()),
                 ]),
             ),
             (
                 lit_int.clone().ne(column.clone()),
                 Expr::or_from([
-                    Expr::gt(min_col.clone(), lit_int.clone()),
-                    Expr::lt(max_col.clone(), lit_int.clone()),
+                    Expr::ne(min_col.clone(), lit_int.clone()),
+                    Expr::ne(max_col.clone(), lit_int.clone()),
                 ]),
             ),
         ];
 
         for (input, expected) in cases {
-            let rewritten = as_data_skipping_predicate(&input).unwrap();
+            let rewritten = as_data_skipping_predicate(&input, false).unwrap();
             assert_eq!(rewritten, expected)
         }
     }
