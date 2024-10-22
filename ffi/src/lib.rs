@@ -331,6 +331,7 @@ pub enum KernelError {
     InvalidLogPath,
     InvalidCommitInfo,
     FileAlreadyExists,
+    MissingCommitInfo,
 }
 
 impl From<Error> for KernelError {
@@ -380,6 +381,7 @@ impl From<Error> for KernelError {
             Error::InvalidLogPath(_) => KernelError::InvalidLogPath,
             Error::InvalidCommitInfo(_) => KernelError::InvalidCommitInfo,
             Error::FileAlreadyExists(_) => KernelError::FileAlreadyExists,
+            Error::MissingCommitInfo => KernelError::MissingCommitInfo,
         }
     }
 }
