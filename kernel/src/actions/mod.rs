@@ -142,10 +142,8 @@ struct OperationParameters {}
 #[derive(Debug, Clone, PartialEq, Eq, Schema)]
 #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
 #[cfg_attr(not(feature = "developer-visibility"), visibility::make(pub(crate)))]
-// TODO need to have a way to always write some fields but not always read them
 struct CommitInfo {
     /// The time this logical file was created, as milliseconds since the epoch.
-    /// TODO should this be a Timestamp?
     pub(crate) timestamp: i64,
     /// An arbitrary string that identifies the operation associated with this commit. This is
     /// specified by the engine.
@@ -157,11 +155,12 @@ struct CommitInfo {
     /// string-string map, we spoof the operation_parameters with an empty struct so it serializes
     /// the same as an empty map (as `{}`).
     operation_parameters: OperationParameters,
-    /// The version of the delta_kernel crate used to write this commit.
+    /// The version of the delta_kernel crate used to write this commit. The kernel will always
+    /// write this field, but it is optional since many tables will not have this field (i.e. any
+    /// tables not written by kernel).
     pub(crate) kernel_version: Option<String>,
     /// A place for the engine to store additional metadata associated with this commit encoded as
     /// a map of strings.
-    /// TODO need to have a way to always write this but not always read it
     pub(crate) engine_commit_info: Option<HashMap<String, String>>,
 }
 
