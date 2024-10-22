@@ -10,7 +10,8 @@ use crate::engine::arrow_utils::parse_json as arrow_parse_json;
 use crate::engine::arrow_utils::write_json;
 use crate::schema::SchemaRef;
 use crate::{
-    DeltaResult, EngineData, Error, ExpressionRef, FileDataReadResultIterator, FileMeta, JsonHandler,
+    DeltaResult, EngineData, Error, ExpressionRef, FileDataReadResultIterator, FileMeta,
+    JsonHandler,
 };
 
 pub(crate) struct SyncJsonHandler;
