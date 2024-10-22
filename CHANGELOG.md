@@ -18,7 +18,7 @@
 8. make `scan::execute` return a lazy iterator [\#340]
 9. filesystem client now always returns a sorted list [\#344]
 10. schema and expression FFI moved to their own `mod delta_kernel_ffi::schema` and `mod delta_kernel_ffi::expressions` [\#360]
-11. Parquet and JSON readers in `Engine` trait now take `Arc<Expression>` instead of `Expression` [\#364]
+11. Parquet and JSON readers in `Engine` trait now take `Arc<Expression>` (aliased to `ExpressionRef`) instead of `Expression` [\#364]
 12. `StructType::new(..)` now takes an `impl IntoIterator<Item = StructField>` instead of `Vec<StructField>` [\#385]
 13. `DataType::struct_type(..)` now takes an `impl IntoIterator<Item = StructField>` instead of `Vec<StructField>` [\#385]
 14. removed `DataType::array_type(..)` API: there is already an `impl From<ArrayType> for DataType` [\#385]
