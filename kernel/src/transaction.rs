@@ -133,7 +133,10 @@ fn generate_commit_info(
         // FIXME we should take a timestamp closer to commit time?
         Expression::literal(timestamp),
         Expression::literal(operation.unwrap_or(UNKNOWN_OPERATION)),
-        Expression::literal(Scalar::Struct(StructData::try_new(vec![], vec![])?)),
+        Expression::literal(Scalar::Struct(StructData::try_new(
+            vec![StructField::new("operation_parameters", DataType::INTEGER, true)],
+            vec![Scalar::Null(DataType::INTEGER)],
+        )?)),
         Expression::literal(format!("v{}", KERNEL_VERSION)),
         Expression::column("engineCommitInfo"),
     ];

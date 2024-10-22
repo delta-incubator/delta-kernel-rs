@@ -74,6 +74,8 @@ impl Scalar {
                     .iter()
                     .map(ArrowField::try_from)
                     .try_collect()?;
+                println!("doing try new fields: {:#?}", fields);
+                println!("doing try new arrays: {:#?}", arrays);
                 Arc::new(StructArray::try_new(fields, arrays, None)?)
             }
             Array(data) => {
@@ -205,6 +207,7 @@ fn evaluate_expression(
                 .zip(output_schema.fields())
                 .map(|(expr, field)| evaluate_expression(expr, batch, Some(field.data_type())));
             let output_cols: Vec<ArrayRef> = columns.try_collect()?;
+            println!("output columns: {:#?}", output_cols);
             let output_fields: Vec<ArrowField> = output_cols
                 .iter()
                 .zip(output_schema.fields())

@@ -137,24 +137,26 @@ impl Protocol {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Schema)]
-struct OperationParameters {}
+struct OperationParameters {
+    operation_parameters: Option<i64>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Schema)]
 #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
 #[cfg_attr(not(feature = "developer-visibility"), visibility::make(pub(crate)))]
 struct CommitInfo {
     /// The time this logical file was created, as milliseconds since the epoch.
-    pub(crate) timestamp: i64,
+    pub(crate) timestamp: Option<i64>,
     /// An arbitrary string that identifies the operation associated with this commit. This is
     /// specified by the engine.
-    pub(crate) operation: String,
+    pub(crate) operation: Option<String>,
     /// Map of arbitrary string key-value pairs that provide additional information about the
     /// operation. This is specified by the engine.
     ///
     /// For now this is always empty; and since we don't have the ability to construct an empty
     /// string-string map, we spoof the operation_parameters with an empty struct so it serializes
     /// the same as an empty map (as `{}`).
-    operation_parameters: OperationParameters,
+    operation_parameters: Option<OperationParameters>,
     /// The version of the delta_kernel crate used to write this commit. The kernel will always
     /// write this field, but it is optional since many tables will not have this field (i.e. any
     /// tables not written by kernel).
@@ -450,9 +452,17 @@ mod tests {
         let expected = Arc::new(StructType::new(vec![StructField::new(
             "commitInfo",
             StructType::new(vec![
-                StructField::new("timestamp", DataType::LONG, false),
-                StructField::new("operation", DataType::STRING, false),
-                StructField::new("operationParameters", StructType::new([]), false),
+                StructField::new("timestamp", DataType::LONG, true),
+                StructField::new("operation", DataType::STRING, true),
+                StructField::new(
+                    "operationParameters",
+                    StructType::new([StructField::new(
+                        "operationParameters",
+                        DataType::LONG,
+                        true,
+                    )]),
+                    true,
+                ),
                 StructField::new("kernelVersion", DataType::STRING, true),
                 StructField::new(
                     "engineCommitInfo",
