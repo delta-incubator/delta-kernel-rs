@@ -50,8 +50,8 @@
     rust_2021_compatibility
 )]
 
-use std::ops::Range;
 use std::sync::Arc;
+use std::{cmp::Ordering, ops::Range};
 
 use bytes::Bytes;
 use url::Url;
@@ -73,12 +73,11 @@ pub mod scan;
 pub mod schema;
 pub mod snapshot;
 pub mod table;
-pub mod transaction;
 pub(crate) mod utils;
 
 pub use engine_data::{DataVisitor, EngineData};
 pub use error::{DeltaResult, Error};
-pub use expressions::Expression;
+pub use expressions::{Expression, ExpressionRef};
 pub use table::Table;
 
 #[cfg(any(
@@ -110,6 +109,18 @@ pub struct FileMeta {
     pub last_modified: i64,
     /// The size in bytes of the object
     pub size: usize,
+}
+
+impl Ord for FileMeta {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.location.cmp(&other.location)
+    }
+}
+
+impl PartialOrd for FileMeta {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 /// Trait for implementing an Expression evaluator.
@@ -193,9 +204,7 @@ pub trait JsonHandler: Send + Sync {
         &self,
         files: &[FileMeta],
         physical_schema: SchemaRef,
-        // TODO: This should really be an Option<Arc<Expression>>, because otherwise we have to
-        // clone the (potentially large) expression every time we call this function.
-        predicate: Option<Expression>,
+        predicate: Option<ExpressionRef>,
     ) -> DeltaResult<FileDataReadResultIterator>;
 }
 
@@ -217,9 +226,7 @@ pub trait ParquetHandler: Send + Sync {
         &self,
         files: &[FileMeta],
         physical_schema: SchemaRef,
-        // TODO: This should really be an Option<Arc<Expression>>, because otherwise we have to
-        // clone the (potentially large) expression every time we call this function.
-        predicate: Option<Expression>,
+        predicate: Option<ExpressionRef>,
     ) -> DeltaResult<FileDataReadResultIterator>;
 }
 

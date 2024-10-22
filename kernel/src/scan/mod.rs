@@ -9,7 +9,7 @@ use url::Url;
 
 use crate::actions::deletion_vector::{split_vector, treemap_to_bools, DeletionVectorDescriptor};
 use crate::actions::{get_log_schema, ADD_NAME, REMOVE_NAME};
-use crate::expressions::{Expression, Scalar};
+use crate::expressions::{Expression, ExpressionRef, Scalar};
 use crate::features::ColumnMappingMode;
 use crate::scan::state::{DvInfo, Stats};
 use crate::schema::{DataType, Schema, SchemaRef, StructField, StructType};
@@ -27,7 +27,7 @@ pub mod state;
 pub struct ScanBuilder {
     snapshot: Arc<Snapshot>,
     schema: Option<SchemaRef>,
-    predicate: Option<Expression>,
+    predicate: Option<ExpressionRef>,
 }
 
 impl std::fmt::Debug for ScanBuilder {
@@ -70,22 +70,15 @@ impl ScanBuilder {
         }
     }
 
-    /// Predicates specified in this crate's [`Expression`] type.
+    /// Optionally provide an expression to filter rows. For example, using the predicate `x <
+    /// 4` to return a subset of the rows in the scan which satisfy the filter. If `predicate_opt`
+    /// is `None`, this is a no-op.
     ///
-    /// Can be used to filter the rows in a scan. For example, using the predicate
-    /// `x < 4` to return a subset of the rows in the scan which satisfy the filter.
-    pub fn with_predicate(mut self, predicate: Expression) -> Self {
-        self.predicate = Some(predicate);
+    /// NOTE: The filtering is best-effort and can produce false positives (rows that should should
+    /// have been filtered out but were kept).
+    pub fn with_predicate(mut self, predicate: impl Into<Option<ExpressionRef>>) -> Self {
+        self.predicate = predicate.into();
         self
-    }
-
-    /// Optionally provide an [`Expression`] to filter rows. See [`ScanBuilder::with_predicate`] for
-    /// details. If `predicate_opt` is `None`, this is a no-op.
-    pub fn with_predicate_opt(self, predicate_opt: Option<Expression>) -> Self {
-        match predicate_opt {
-            Some(predicate) => self.with_predicate(predicate),
-            None => self,
-        }
     }
 
     /// Build the [`Scan`].
@@ -119,10 +112,14 @@ impl ScanBuilder {
 /// A vector of this type is returned from calling [`Scan::execute`]. Each [`ScanResult`] contains
 /// the raw [`EngineData`] as read by the engines [`crate::ParquetHandler`], and a boolean
 /// mask. Rows can be dropped from a scan due to deletion vectors, so we communicate back both
-/// EngineData and information regarding whether a row should be included or not See the docs below
-/// for [`ScanResult::mask`] for details on the mask.
+/// EngineData and information regarding whether a row should be included or not (via an internal
+/// mask). See the docs below for [`ScanResult::full_mask`] for details on the mask.
 pub struct ScanResult {
-    /// Raw engine data as read from the disk for a particular file included in the query
+    /// Raw engine data as read from the disk for a particular file included in the query. Note
+    /// that this data may include data that should be filtered out based on the mask given by
+    /// [`full_mask`].
+    ///
+    /// [`full_mask`]: #method.full_mask
     pub raw_data: DeltaResult<Box<dyn EngineData>>,
     /// Raw row mask.
     // TODO(nick) this should be allocated by the engine
@@ -137,6 +134,8 @@ impl ScanResult {
     /// you are using the default engine and plan to call arrow's `filter_record_batch`, you _need_
     /// to extend the mask to the full length of the batch or arrow will drop the extra
     /// rows. Calling [`full_mask`] instead avoids this risk entirely, at the cost of a copy.
+    ///
+    /// [`full_mask`]: #method.full_mask
     pub fn raw_mask(&self) -> Option<&Vec<bool>> {
         self.raw_mask.as_ref()
     }
@@ -174,7 +173,7 @@ pub struct Scan {
     snapshot: Arc<Snapshot>,
     logical_schema: SchemaRef,
     physical_schema: SchemaRef,
-    predicate: Option<Expression>,
+    predicate: Option<ExpressionRef>,
     all_fields: Vec<ColumnType>,
     have_partition_cols: bool,
 }
@@ -197,8 +196,8 @@ impl Scan {
     }
 
     /// Get the predicate [`Expression`] of the scan.
-    pub fn predicate(&self) -> &Option<Expression> {
-        &self.predicate
+    pub fn predicate(&self) -> Option<ExpressionRef> {
+        self.predicate.clone()
     }
 
     /// Get an iterator of [`EngineData`]s that should be included in scan for a query. This handles
@@ -221,7 +220,7 @@ impl Scan {
             engine,
             self.replay_for_scan_data(engine)?,
             &self.logical_schema,
-            &self.predicate,
+            self.predicate(),
         ))
     }
 
@@ -317,7 +316,7 @@ impl Scan {
                 let read_result_iter = engine.get_parquet_handler().read_parquet_files(
                     &[meta],
                     global_state.read_schema.clone(),
-                    self.predicate().clone(),
+                    self.predicate(),
                 )?;
                 let gs = global_state.clone(); // Arc clone
                 Ok(read_result_iter.map(move |read_result| -> DeltaResult<_> {
@@ -418,10 +417,11 @@ fn get_state_info(
             } else {
                 // Add to read schema, store field so we can build a `Column` expression later
                 // if needed (i.e. if we have partition columns)
-                let physical_name = logical_field.physical_name(column_mapping_mode)?;
-                let physical_field = logical_field.with_name(physical_name);
+                let physical_field = logical_field.make_physical(column_mapping_mode)?;
+                debug!("\n\n{logical_field:#?}\nAfter mapping: {physical_field:#?}\n\n");
+                let physical_name = physical_field.name.clone();
                 read_fields.push(physical_field);
-                Ok(ColumnType::Selected(physical_name.to_string()))
+                Ok(ColumnType::Selected(physical_name))
             }
         })
         .try_collect()?;
@@ -490,7 +490,7 @@ fn transform_to_logical_internal(
                         partition_values.get(name),
                         field.data_type(),
                     )?;
-                    Ok::<Expression, Error>(Expression::Literal(value_expression))
+                    Ok::<Expression, Error>(value_expression.into())
                 }
                 ColumnType::Selected(field_name) => Ok(Expression::column(field_name)),
             })
@@ -500,7 +500,7 @@ fn transform_to_logical_internal(
             .get_expression_handler()
             .get_evaluator(
                 read_schema,
-                read_expression.clone(),
+                read_expression,
                 global_state.logical_schema.clone().into(),
             )
             .evaluate(data.as_ref())?;
@@ -590,7 +590,7 @@ pub(crate) mod test_utils {
             &engine,
             batch.into_iter().map(|batch| Ok((batch as _, true))),
             &table_schema,
-            &None,
+            None,
         );
         let mut batch_count = 0;
         for res in iter {
@@ -759,7 +759,7 @@ mod tests {
         // Ineffective predicate pushdown attempted, so the one data file should be returned.
         let int_col = Expression::column("numeric.ints.int32");
         let value = Expression::literal(1000i32);
-        let predicate = int_col.clone().gt(value.clone());
+        let predicate = Arc::new(int_col.clone().gt(value.clone()));
         let scan = snapshot
             .clone()
             .scan_builder()
@@ -770,7 +770,7 @@ mod tests {
         assert_eq!(data.len(), 1);
 
         // Effective predicate pushdown, so no data files should be returned.
-        let predicate = int_col.lt(value);
+        let predicate = Arc::new(int_col.lt(value));
         let scan = snapshot
             .scan_builder()
             .with_predicate(predicate)

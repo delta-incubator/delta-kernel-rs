@@ -63,6 +63,49 @@ We intend to follow [Semantic Versioning](https://semver.org/). However, in the 
 are still unstable. We therefore may break APIs within minor releases (that is, `0.1` -> `0.2`), but
 we will not break APIs in patch releases (`0.1.0` -> `0.1.1`).
 
+## Arrow versioning
+If you enable the `default-engine` or `sync-engine` features, you get an implemenation of the
+`Engine` trait that uses [Arrow] as its data format.
+
+The [`arrow crate`](https://docs.rs/arrow/latest/arrow/) tends to release new major versions rather
+quickly. To enable engines that already integrate arrow to also integrate kernel and not force them
+to track a specific version of arrow that kernel depends on, we take as broad dependecy on arrow
+versions as we can.
+
+This means you can force kernel to rely on the specific arrow version that your engine already uses,
+as long as it falls in that range. You can see the range in the `Cargo.toml` in the same folder as
+this `README.md`.
+
+For example, although arrow 53.1.0 has been released, you can force kernel to compile on 53.0 by
+putting the following in your project's `Cargo.toml`:
+
+```toml
+[patch.crates-io]
+arrow = "53.0"
+arrow-arith = "53.0"
+arrow-array = "53.0"
+arrow-buffer = "53.0"
+arrow-cast = "53.0"
+arrow-data = "53.0"
+arrow-ord = "53.0"
+arrow-json = "53.0"
+arrow-select = "53.0"
+arrow-schema = "53.0"
+parquet = "53.0"
+```
+
+Note that unfortunatly patching in `cargo` requires that _exactly one_ version matches your
+specification. If only arrow "53.0.0" had been released the above will work, but if "53.0.1" where
+to be released, the specification will break and you will need to provide a more restrictive
+specification like `"=53.0.0"`.
+
+### Object Store
+You may also need to patch the `object_store` version used if the version of `parquet` you depend on
+depends on a different version of `object_store`. This can be done by including `object_store` in
+the patch list with the required version. You can find this out by checking the `parquet` [docs.rs
+page](https://docs.rs/parquet/52.2.0/parquet/index.html), switching to the version you want to use,
+and then checking what version of `object_store` it depends on.
+
 ## Documentation
 
 - [API Docs](https://docs.rs/delta_kernel/latest/delta_kernel/)
