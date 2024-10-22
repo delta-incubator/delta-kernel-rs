@@ -202,7 +202,7 @@ fn evaluate_expression(
         (Struct(fields), Some(DataType::Struct(output_schema))) => {
             let columns = fields
                 .iter()
-                .zip(schema.fields())
+                .zip(output_schema.fields())
                 .map(|(expr, field)| evaluate_expression(expr, batch, Some(field.data_type())));
             let output_cols: Vec<ArrayRef> = columns.try_collect()?;
             let output_fields: Vec<ArrowField> = output_cols
@@ -210,9 +210,9 @@ fn evaluate_expression(
                 .zip(output_schema.fields())
                 .map(|(output_col, output_field)| -> DeltaResult<_> {
                     Ok(ArrowField::new(
-                        input_field.name(),
-                        array.data_type().clone(),
-                        array.is_nullable(),
+                        output_field.name(),
+                        output_col.data_type().clone(),
+                        output_col.is_nullable(),
                     ))
                 })
                 .try_collect()?;

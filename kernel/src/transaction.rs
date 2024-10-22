@@ -133,14 +133,11 @@ fn generate_commit_info(
         // FIXME we should take a timestamp closer to commit time?
         Expression::literal(timestamp),
         Expression::literal(operation.unwrap_or(UNKNOWN_OPERATION)),
-        Expression::literal(Scalar::Struct(StructData::try_new(
-            vec![StructField::new("idk", DataType::INTEGER, true)],
-            vec![Scalar::Null(DataType::INTEGER)],
-        )?)),
+        Expression::literal(Scalar::Struct(StructData::try_new(vec![], vec![])?)),
         Expression::literal(format!("v{}", KERNEL_VERSION)),
         Expression::column("engineCommitInfo"),
     ];
-    let commit_info_expr = Expression::struct_expr([Expression::struct_expr(commit_info_exprs)]);
+    let commit_info_expr = Expression::struct_from([Expression::struct_from(commit_info_exprs)]);
     // TODO probably just create a static
     let commit_info_schema = get_log_schema().project_as_struct(&["commitInfo"])?;
 
