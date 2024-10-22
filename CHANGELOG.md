@@ -44,6 +44,7 @@
 - added semver testing to CI [\#369], [\#383], [\#384]
 - new `SchemaTransform` trait and usage in column mapping and data skipping [\#395] and [\#398]
 - arrow expression evaluation improvements [\#401]
+- replace panics with `to_compiler_error` in macros [\#409]
 
 **Fixed bugs:**
 
@@ -83,6 +84,7 @@
 [\#399]: https://github.com/delta-incubator/delta-kernel-rs/pull/399
 [\#401]: https://github.com/delta-incubator/delta-kernel-rs/pull/401
 [\#402]: https://github.com/delta-incubator/delta-kernel-rs/pull/402
+[\#409]: https://github.com/delta-incubator/delta-kernel-rs/pull/409
 [\#413]: https://github.com/delta-incubator/delta-kernel-rs/pull/413
 
 
