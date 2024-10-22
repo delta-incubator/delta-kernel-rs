@@ -137,6 +137,9 @@ impl Protocol {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Schema)]
+struct OperationParameters {}
+
+#[derive(Debug, Clone, PartialEq, Eq, Schema)]
 #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
 #[cfg_attr(not(feature = "developer-visibility"), visibility::make(pub(crate)))]
 // TODO need to have a way to always write some fields but not always read them
@@ -148,8 +151,12 @@ struct CommitInfo {
     /// specified by the engine.
     pub(crate) operation: String,
     /// Map of arbitrary string key-value pairs that provide additional information about the
-    /// operation. This is specified by the engine. For now this is always empty.
-    pub(crate) operation_parameters: HashMap<String, String>,
+    /// operation. This is specified by the engine.
+    ///
+    /// For now this is always empty; and since we don't have the ability to construct an empty
+    /// string-string map, we spoof the operation_parameters with an empty struct so it serializes
+    /// the same as an empty map (as `{}`).
+    operation_parameters: OperationParameters,
     /// The version of the delta_kernel crate used to write this commit.
     pub(crate) kernel_version: Option<String>,
     /// A place for the engine to store additional metadata associated with this commit encoded as
@@ -446,11 +453,7 @@ mod tests {
             StructType::new(vec![
                 StructField::new("timestamp", DataType::LONG, false),
                 StructField::new("operation", DataType::STRING, false),
-                StructField::new(
-                    "operationParameters",
-                    MapType::new(DataType::STRING, DataType::STRING, false),
-                    false,
-                ),
+                StructField::new("operationParameters", StructType::new([]), false),
                 StructField::new("kernelVersion", DataType::STRING, true),
                 StructField::new(
                     "engineCommitInfo",

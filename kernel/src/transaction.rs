@@ -4,6 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::actions::get_log_schema;
 use crate::error::Error;
+use crate::expressions::{Scalar, StructData};
 use crate::path::ParsedLogPath;
 use crate::schema::{MapType, StructField, StructType};
 use crate::snapshot::Snapshot;
@@ -122,20 +123,20 @@ fn generate_commit_info(
         )));
     }
 
+    let timestamp: i64 = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time went backwards..?")
+        .as_millis()
+        .try_into()
+        .map_err(|_| Error::generic("milliseconds since unix_epoch exceeded i64 size"))?;
     let commit_info_exprs = [
         // FIXME we should take a timestamp closer to commit time?
-        Expression::literal(
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("time went backwards..?")
-                .as_millis() as i64, // FIXME safe cast
-        ),
+        Expression::literal(timestamp),
         Expression::literal(operation.unwrap_or(UNKNOWN_OPERATION)),
-        Expression::null_literal(DataType::Map(Box::new(MapType::new(
-            DataType::STRING,
-            DataType::STRING,
-            true,
-        )))),
+        Expression::literal(Scalar::Struct(StructData::try_new(
+            vec![StructField::new("idk", DataType::INTEGER, true)],
+            vec![Scalar::Null(DataType::INTEGER)],
+        )?)),
         Expression::literal(format!("v{}", KERNEL_VERSION)),
         Expression::column("engineCommitInfo"),
     ];
