@@ -1,5 +1,90 @@
 # Changelog
 
+## [v0.4.0](https://github.com/delta-incubator/delta-kernel-rs/tree/v0.4.0/) (2024-10-22)
+
+[Full Changelog](https://github.com/delta-incubator/delta-kernel-rs/compare/v0.3.1...v0.4.0)
+
+**API Changes**
+
+*Breaking*
+
+1. `pub ScanResult.mask` field made private and only accessible as `ScanResult.raw_mask()` method [\#374]
+2. `ReaderFeatures` enum changes
+3. `WriterFeatures` enum changes
+4. `Error` enum changes
+5. Module moved: `mod delta_kernel::transaction` -> `mod delta_kernel::actions::set_transaction` [\#386]
+6. apply a schema to fix column names [\#331]
+7. change `default-feature` to be none [\#339]
+8. make `scan::execute` return a lazy iterator [\#340]
+9. filesystem client now always returns a sorted list [\#344]
+10. schema and expression FFI moved to their own `mod delta_kernel_ffi::schema` and `mod delta_kernel_ffi::expressions` [\#360]
+11. Parquet and JSON readers in `Engine` trait now take `Arc<Expression>` instead of `Expression` [\#364]
+12. `StructType::new(..)` now takes an `impl IntoIterator<Item = StructField>` instead of `Vec<StructField>` [\#385]
+13. `DataType::struct_type(..)` now takes an `impl IntoIterator<Item = StructField>` instead of `Vec<StructField>` [\#385]
+14. removed `DataType::array_type(..)` API: there is already an `impl From<ArrayType> for DataType` [\#385]
+15. `Expression::struct_expr(..)` renamed to `Expression::struct_from(..)` [\#399]
+16. Lots of expressions take `impl Into<Self>` or `impl Into<Expression>` instead of just `Self`/`Expression` now [\#399]
+17. Remove `log_replay_iter` and `process_batch` APIs in `scan::log_replay` [\#402]
+
+*Additions*
+
+1. remove feature flag requirement for `impl GetData` on `()` [\#334]
+2. new `full_mask()` method on `ScanResult` [\#374]
+3. `StructType::try_new(fields: impl IntoIterator<Item = StructField>)` [\#385]
+4. `DataType::try_struct_type(fields: impl IntoIterator<Item = StructField>)` [\#385]
+
+**Implemented enhancements:**
+
+- support reading tables with type widening in default engine [\#335]
+- add predicate to protocol and metadata log replay for pushdown [\#336] and [\#343]
+- support annotation (macro) for nullable values in a container (for `#[derive(Schema)]`) [\#342]
+- new `ParsedLogPath` type for better log path parsing [\#347]
+- Implemented row group skipping for default engine parquet readers and new utility trait for stats-based skipping logic [\#357], [\#362], [\#381]
+- Depend on wider arrow versions and add arrow integration testing [\#366] and [\#413]
+- Added semver testing to CI [\#369], [\#383], [\#384]
+- New `SchemaTransform` trait and usage in column mapping and data skipping [\#395] and [\#398]
+- Arrow expression evaluation improvements [\#401]
+
+**Fixed bugs:**
+
+- add `arrow-buffer` to `arrow-expression` feature [\#332]
+- fix bug with out-of-date last checkpoint [\#354]
+- fixed broken sync engine json parsing and harmonized sync/async json parsing [\#373]
+
+[\#331]: https://github.com/delta-incubator/delta-kernel-rs/pull/331
+[\#332]: https://github.com/delta-incubator/delta-kernel-rs/pull/332
+[\#334]: https://github.com/delta-incubator/delta-kernel-rs/pull/334
+[\#335]: https://github.com/delta-incubator/delta-kernel-rs/pull/335
+[\#336]: https://github.com/delta-incubator/delta-kernel-rs/pull/336
+[\#337]: https://github.com/delta-incubator/delta-kernel-rs/pull/337
+[\#339]: https://github.com/delta-incubator/delta-kernel-rs/pull/339
+[\#340]: https://github.com/delta-incubator/delta-kernel-rs/pull/340
+[\#342]: https://github.com/delta-incubator/delta-kernel-rs/pull/342
+[\#343]: https://github.com/delta-incubator/delta-kernel-rs/pull/343
+[\#344]: https://github.com/delta-incubator/delta-kernel-rs/pull/344
+[\#347]: https://github.com/delta-incubator/delta-kernel-rs/pull/347
+[\#354]: https://github.com/delta-incubator/delta-kernel-rs/pull/354
+[\#357]: https://github.com/delta-incubator/delta-kernel-rs/pull/357
+[\#360]: https://github.com/delta-incubator/delta-kernel-rs/pull/360
+[\#362]: https://github.com/delta-incubator/delta-kernel-rs/pull/362
+[\#364]: https://github.com/delta-incubator/delta-kernel-rs/pull/364
+[\#366]: https://github.com/delta-incubator/delta-kernel-rs/pull/366
+[\#369]: https://github.com/delta-incubator/delta-kernel-rs/pull/369
+[\#373]: https://github.com/delta-incubator/delta-kernel-rs/pull/373
+[\#374]: https://github.com/delta-incubator/delta-kernel-rs/pull/374
+[\#381]: https://github.com/delta-incubator/delta-kernel-rs/pull/381
+[\#383]: https://github.com/delta-incubator/delta-kernel-rs/pull/383
+[\#384]: https://github.com/delta-incubator/delta-kernel-rs/pull/384
+[\#385]: https://github.com/delta-incubator/delta-kernel-rs/pull/385
+[\#386]: https://github.com/delta-incubator/delta-kernel-rs/pull/386
+[\#395]: https://github.com/delta-incubator/delta-kernel-rs/pull/395
+[\#398]: https://github.com/delta-incubator/delta-kernel-rs/pull/398
+[\#399]: https://github.com/delta-incubator/delta-kernel-rs/pull/399
+[\#401]: https://github.com/delta-incubator/delta-kernel-rs/pull/401
+[\#402]: https://github.com/delta-incubator/delta-kernel-rs/pull/402
+[\#413]: https://github.com/delta-incubator/delta-kernel-rs/pull/413
+
+
 ## [v0.3.1](https://github.com/delta-incubator/delta-kernel-rs/tree/v0.3.1/) (2024-09-10)
 
 [Full Changelog](https://github.com/delta-incubator/delta-kernel-rs/compare/v0.3.0...v0.3.1)
