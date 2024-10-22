@@ -109,7 +109,7 @@ fn gen_schema_fields(data: &Data) -> TokenStream {
                     quote_spanned! { field.span() => #(#type_path_quoted),* get_struct_field(stringify!(#name))}
                 }
             }
-            _ => Error::new(field.span(), "Can't handle type: {field.ty:?}").to_compile_error()
+            _ => Error::new(field.span(), format!("Can't handle type: {:?}", field.ty)).to_compile_error()
         }
     });
     quote! { #(#schema_fields),* }
