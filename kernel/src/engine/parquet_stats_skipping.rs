@@ -203,6 +203,8 @@ pub(crate) trait ParquetStatsSkippingFilter {
         use BinaryOperator::*;
         use Expression::{Column, Literal};
 
+        // TODO: Handle Distinct (before inverting, after commuting)?
+
         // Min/Max stats don't allow us to push inversion down into the comparison. Instead, we
         // invert the comparison itself when needed and compute normally after that.
         let op = match inverted {

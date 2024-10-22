@@ -50,8 +50,8 @@ impl BinaryOperator {
             GreaterThanOrEqual => Some(LessThanOrEqual),
             LessThan => Some(GreaterThan),
             LessThanOrEqual => Some(GreaterThanOrEqual),
-            Equal | NotEqual | Plus | Multiply => Some(*self),
-            _ => None,
+            Equal | NotEqual | Distinct | Plus | Multiply => Some(*self),
+            In | NotIn | Minus | Divide => None, // not commutative
         }
     }
 
@@ -68,7 +68,8 @@ impl BinaryOperator {
             NotEqual => Some(Equal),
             In => Some(NotIn),
             NotIn => Some(In),
-            _ => None,
+            Distinct => None, // TODO: Define NotDistinct variant?
+            Plus | Minus | Multiply | Divide => None, // Not boolean
         }
     }
 }
