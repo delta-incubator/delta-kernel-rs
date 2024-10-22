@@ -98,7 +98,10 @@ fn gen_schema_fields(data: &Data) -> TokenStream {
                 if have_schema_null {
                     if let Some(first_ident) = type_path.path.segments.first().map(|seg| &seg.ident) {
                         if first_ident != "HashMap" {
-                           return Error::new(first_ident.span(), "Can only use drop_null_container_values on HashMap fields, not {first_ident:?}").to_compile_error()
+                           return Error::new(
+                                first_ident.span(),
+                                format!("Can only use drop_null_container_values on HashMap fields, not {first_ident}")
+                            ).to_compile_error()
                         }
                     }
                     quote_spanned! { field.span() => #(#type_path_quoted),* get_nullable_container_struct_field(stringify!(#name))}
