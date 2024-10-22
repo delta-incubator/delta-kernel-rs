@@ -14,114 +14,6 @@ use crate::expressions::{
 use crate::schema::{DataType, PrimitiveType, SchemaRef, SchemaTransform, StructField, StructType};
 use crate::{Engine, EngineData, ExpressionEvaluator, JsonHandler};
 
-/// Get the expression that checks IS [NOT] NULL for a column with tight bounds. A column may
-/// satisfy IS NULL if `nullCount != 0`, and may satisfy IS NOT NULL if `nullCount !=
-/// numRecords`. Note that a the bounds are tight unless `tightBounds` is neither TRUE nor NULL.
-fn get_tight_is_null_expr(null_col: String, inverted: bool) -> Expr {
-    let sentinel_value = if inverted {
-        Expr::column("numRecords")
-    } else {
-        Expr::literal(0i64)
-    };
-    Expr::and(
-        Expr::distinct(Expr::column("tightBounds"), false),
-        Expr::ne(Expr::column(null_col), sentinel_value),
-    )
-}
-
-/// Get the expression that checks if a col could be null, assuming tight_bounds = false. In this
-/// case, we can only check whether the WHOLE column is null or not, by checking if the number of
-/// records is equal to the null count. Any other values of nullCount must be ignored (except 0,
-/// which doesn't help us).
-fn get_wide_is_null_expr(null_col: String, inverted: bool) -> Expr {
-    let op = if inverted {
-        BinaryOperator::NotEqual
-    } else {
-        BinaryOperator::Equal
-    };
-    Expr::and(
-        Expr::eq(Expr::column("tightBounds"), false),
-        Expr::binary(op, Expr::column("numRecords"), Expr::column(null_col)),
-    )
-}
-
-fn apply_is_null(col: &str, inverted: bool) -> Option<Expr> {
-    // to check if a column could have a null, we need two different checks, to see if
-    // the bounds are tight and then to actually do the check
-    let null_col = format!("nullCount.{col}");
-    Some(Expr::or(
-        get_tight_is_null_expr(null_col.clone(), inverted),
-        get_wide_is_null_expr(null_col, inverted),
-    ))
-}
-
-fn apply_eq(col: &str, val: &Scalar, inverted: bool) -> Option<Expr> {
-    use Expr::Column;
-    if inverted {
-        // Column could compare not-equal if min and/or max value differs from the literal.
-        Some(Expr::or(
-            Expr::ne(Column(format!("minValues.{}", col)), val.clone()),
-            Expr::ne(Column(format!("maxValues.{}", col)), val.clone()),
-        ))
-    } else {
-        // Column could compare equal if its min/max values bracket the literal.
-        Some(Expr::and(
-            Expr::le(Column(format!("minValues.{}", col)), val.clone()),
-            Expr::ge(Column(format!("maxValues.{}", col)), val.clone()),
-        ))
-    }
-}
-
-fn apply_binary(op: BinaryOperator, col: &str, val: &Scalar, inverted: bool) -> Option<Expr> {
-    use BinaryOperator::*;
-
-    // Some operators can handle inversion directly (or are not supportd), but the comparisons need
-    // special handling below.
-    let (op, stats_col) = match (op, inverted) {
-        (Equal, _) => return apply_eq(col, val, inverted),
-        (NotEqual, _) => return apply_eq(col, val, !inverted),
-        (Distinct, _) => return apply_distinct(col, val, inverted),
-        (LessThan, false) | (GreaterThanOrEqual, true) => (LessThan, "minValues"),
-        (LessThanOrEqual, false) | (GreaterThan, true) => (LessThanOrEqual, "minValues"),
-        (GreaterThan, false) | (LessThanOrEqual, true) => (GreaterThan, "maxValues"),
-        (GreaterThanOrEqual, false) | (LessThan, true) => (GreaterThanOrEqual, "maxValues"),
-        (Plus | Minus | Multiply | Divide, _) => return None, // unsupported operation
-        (In | NotIn, _) => return None,                       // TODO?
-    };
-
-    Some(Expr::binary(
-        op,
-        Expr::Column(format!("{}.{}", stats_col, col)),
-        val.clone(),
-    ))
-}
-
-fn apply_distinct(col: &str, val: &Scalar, inverted: bool) -> Option<Expr> {
-    if let Scalar::Null(_) = val {
-        // DISTINCT(<col>, NULL) is the same as <col> IS NOT NULL
-        apply_is_null(col, !inverted)
-    } else if inverted {
-        // NOT DISTINCT(<col>, <val>) is the same as <col> = <val>
-        apply_eq(col, val, false)
-    } else {
-        // DISTINCT(<col>, <val>) is AND(<col> IS NOT NULL, <col> != <val>)
-        let args = [apply_is_null(col, true), apply_eq(col, val, true)];
-        finish_variadic(VariadicOperator::And, args)
-    }
-}
-
-fn finish_variadic(
-    op: VariadicOperator,
-    exprs: impl IntoIterator<Item = Option<Expr>>,
-) -> Option<Expr> {
-    let exprs = exprs.into_iter();
-    let exprs: Vec<_> = match op {
-        VariadicOperator::And => exprs.flatten().collect(),
-        VariadicOperator::Or => exprs.collect::<Option<_>>()?,
-    };
-    Some(Expr::variadic(op, exprs))
-}
-
 /// Rewrites a predicate to a predicate that can be used to skip files based on their stats.
 /// Returns `None` if the predicate is not eligible for data skipping.
 ///
@@ -139,42 +31,7 @@ fn finish_variadic(
 /// - `OR` is rewritten only if all operands are eligible for data skipping. Otherwise, the whole OR
 ///        expression is dropped.
 fn as_data_skipping_predicate(expr: &Expr, inverted: bool) -> Option<Expr> {
-    use Expr::*;
-    use UnaryOperator::*;
-
-    match expr {
-        Literal(Scalar::Boolean(value)) => Some(Expr::literal(*value != inverted)),
-        Literal(_) => None, // Non-boolean literals unsupported
-        // The expression <col> is equivalent to <col> != FALSE. Resembling NotEqual case below.
-        Column(col) => apply_eq(col, &Scalar::from(inverted), true),
-        // push down Not by inverting everything below it
-        UnaryOperation { op: Not, expr } => as_data_skipping_predicate(expr, !inverted),
-        UnaryOperation { op: IsNull, expr } => match expr.as_ref() {
-            Column(col) => apply_is_null(col, inverted),
-            _ => None,
-        },
-        BinaryOperation { op, left, right } => {
-            // Reduce the number of cases by forcing column on left and literal on right.
-            let (op, col, val) = match (left.as_ref(), right.as_ref()) {
-                (Column(col), Literal(val)) => (*op, col, val),
-                (Literal(val), Column(col)) => (op.commute()?, col, val),
-                _ => return None, // unsupported combination of operands
-            };
-            apply_binary(op, col, val, inverted)
-        }
-        VariadicOperation { op, exprs } => {
-            // Invert the operator (here) and also invert its arguments (below).
-            let op = match inverted {
-                true => op.invert(),
-                false => *op,
-            };
-            let exprs = exprs
-                .iter()
-                .map(|e| as_data_skipping_predicate(e, inverted));
-            finish_variadic(op, exprs)
-        }
-        Struct(_) => None, // Unsupported
-    }
+    DataSkippingPredicateCreator.eval_expr(expr, inverted)
 }
 
 pub(crate) struct DataSkippingFilter {
@@ -580,66 +437,6 @@ trait StatsColumnProvider {
         let max = self.get_max_stat(col, &val.data_type())?;
         self.eval_partial_cmp(max, val, ord, inverted)
     }
-
-    fn eval_lt(&self, col: &str, val: &Scalar) -> Option<Self::BoolOutput> {
-        // Given `col < val`:
-        // Skip if `val` is not greater than _all_ values in [min, max], implies
-        // Skip if `val <= min AND val <= max` implies
-        // Skip if `val <= min` implies
-        // Keep if `NOT(val <= min)` implies
-        // Keep if `val > min` implies
-        // Keep if `min < val`
-        self.partial_cmp_min_stat(col, val, Ordering::Less, false)
-    }
-
-    fn eval_le(&self, col: &str, val: &Scalar) -> Option<Self::BoolOutput> {
-        // Given `col <= val`:
-        // Skip if `val` is less than _all_ values in [min, max], implies
-        // Skip if `val < min AND val < max` implies
-        // Skip if `val < min` implies
-        // Keep if `NOT(val < min)` implies
-        // Keep if `NOT(min > val)`
-        self.partial_cmp_min_stat(col, val, Ordering::Greater, true)
-    }
-
-    fn eval_gt(&self, col: &str, val: &Scalar) -> Option<Self::BoolOutput> {
-        // Given `col > val`:
-        // Skip if `val` is not less than _all_ values in [min, max], implies
-        // Skip if `val >= min AND val >= max` implies
-        // Skip if `val >= max` implies
-        // Keep if `NOT(val >= max)` implies
-        // Keep if `NOT(max <= val)` implies
-        // Keep if `max > val`
-        self.partial_cmp_max_stat(col, val, Ordering::Greater, false)
-    }
-
-    fn eval_ge(&self, col: &str, val: &Scalar) -> Option<Self::BoolOutput> {
-        // Given `col >= val`:
-        // Skip if `val is greater than _every_ value in [min, max], implies
-        // Skip if `val > min AND val > max` implies
-        // Skip if `val > max` implies
-        // Keep if `NOT(val > max)` implies
-        // Keep if `NOT(max < val)`
-        self.partial_cmp_max_stat(col, val, Ordering::Less, true)
-    }
-
-    fn start_eval_eq(&self, col: &str, val: &Scalar, inverted: bool) -> (VariadicOperator, [Option<Self::BoolOutput>; 2]) {
-        if inverted {
-            // Column could compare not-equal if min or max value differs from the literal.
-            let exprs = [
-                self.partial_cmp_min_stat(col, val, Ordering::Equal, true),
-                self.partial_cmp_max_stat(col, val, Ordering::Equal, true),
-            ];
-            (VariadicOperator::Or, exprs)
-        } else {
-            // Column could compare equal if its min/max values bracket the literal.
-            let exprs = [
-                self.partial_cmp_min_stat(col, val, Ordering::Greater, true),
-                self.partial_cmp_min_stat(col, val, Ordering::Less, true),
-            ];
-            (VariadicOperator::And, exprs)
-        }
-    }
 }
 
 #[allow(unused)]
@@ -678,15 +475,13 @@ impl StatsColumnProvider for ParquetStatsSkippingPredicateEvaluator {
     }
 
 }
-impl PredicateEvaluator for ParquetStatsSkippingPredicateEvaluator {
-    type Output = bool;
-
+impl DataSkippingPredicateEvaluator for ParquetStatsSkippingPredicateEvaluator {
 
     fn eval_scalar(&self, val: &Scalar, inverted: bool) -> Option<bool> {
         DefaultPredicateEvaluator::eval_scalar(val, inverted)
     }
 
-    fn eval_is_null(&self, col: &str, inverted: bool) -> Option<Self::Output> {
+    fn eval_is_null(&self, col: &str, inverted: bool) -> Option<bool> {
         let sentinel = match inverted {
             // IS NOT NULL - skip if all-null
             true => self.get_rowcount_stat()?,
@@ -694,27 +489,6 @@ impl PredicateEvaluator for ParquetStatsSkippingPredicateEvaluator {
             false => 0,
         };
         Some(self.get_nullcount_stat(col)? != sentinel)
-    }
-
-    fn eval_lt(&self, col: &str, val: &Scalar) -> Option<bool> {
-        StatsColumnProvider::eval_lt(self, col, val)
-    }
-
-    fn eval_le(&self, col: &str, val: &Scalar) -> Option<bool> {
-        StatsColumnProvider::eval_le(self, col, val)
-    }
-
-    fn eval_gt(&self, col: &str, val: &Scalar) -> Option<bool> {
-        StatsColumnProvider::eval_gt(self, col, val)
-    }
-
-    fn eval_ge(&self, col: &str, val: &Scalar) -> Option<bool> {
-        StatsColumnProvider::eval_ge(self, col, val)
-    }
-
-    fn eval_eq(&self, col: &str, val: &Scalar, inverted: bool) -> Option<bool> {
-        let (op, exprs) = self.start_eval_eq(col, val, inverted);
-        self.finish_eval_variadic(op, exprs, false)
     }
 
     fn eval_binary_scalars(&self, op: BinaryOperator, left: &Scalar, right: &Scalar, inverted: bool) -> Option<bool> {
@@ -806,9 +580,101 @@ impl StatsColumnProvider for DataSkippingPredicateCreator {
     }
 }
 
-impl PredicateEvaluator for DataSkippingPredicateCreator {
-    type Output = Expr;
+trait DataSkippingPredicateEvaluator : StatsColumnProvider {
 
+    fn eval_scalar(&self, val: &Scalar, inverted: bool) -> Option<Self::BoolOutput>;
+
+    fn eval_is_null(&self, col: &str, inverted: bool) -> Option<Self::BoolOutput>;
+
+    fn eval_binary_scalars(&self, op: BinaryOperator, left: &Scalar, right: &Scalar, inverted: bool) -> Option<Self::BoolOutput>;
+
+    fn finish_eval_variadic(&self, op: VariadicOperator, exprs: impl IntoIterator<Item = Option<Self::BoolOutput>>, inverted: bool) -> Option<Self::BoolOutput>;
+
+}
+
+impl<T: DataSkippingPredicateEvaluator> PredicateEvaluator for T {
+    type Output = T::BoolOutput;
+
+    fn eval_scalar(&self, val: &Scalar, inverted: bool) -> Option<Self::Output> {
+        DataSkippingPredicateEvaluator::eval_scalar(self, val, inverted)
+    }
+
+    fn eval_is_null(&self, col: &str, inverted: bool) -> Option<Self::Output> {
+        DataSkippingPredicateEvaluator::eval_is_null(self, col, inverted)
+    }
+
+    fn eval_lt(&self, col: &str, val: &Scalar) -> Option<Self::Output> {
+        // Given `col < val`:
+        // Skip if `val` is not greater than _all_ values in [min, max], implies
+        // Skip if `val <= min AND val <= max` implies
+        // Skip if `val <= min` implies
+        // Keep if `NOT(val <= min)` implies
+        // Keep if `val > min` implies
+        // Keep if `min < val`
+        self.partial_cmp_min_stat(col, val, Ordering::Less, false)
+    }
+
+    fn eval_le(&self, col: &str, val: &Scalar) -> Option<Self::Output> {
+        // Given `col <= val`:
+        // Skip if `val` is less than _all_ values in [min, max], implies
+        // Skip if `val < min AND val < max` implies
+        // Skip if `val < min` implies
+        // Keep if `NOT(val < min)` implies
+        // Keep if `NOT(min > val)`
+        self.partial_cmp_min_stat(col, val, Ordering::Greater, true)
+    }
+
+    fn eval_gt(&self, col: &str, val: &Scalar) -> Option<Self::Output> {
+        // Given `col > val`:
+        // Skip if `val` is not less than _all_ values in [min, max], implies
+        // Skip if `val >= min AND val >= max` implies
+        // Skip if `val >= max` implies
+        // Keep if `NOT(val >= max)` implies
+        // Keep if `NOT(max <= val)` implies
+        // Keep if `max > val`
+        self.partial_cmp_max_stat(col, val, Ordering::Greater, false)
+    }
+
+    fn eval_ge(&self, col: &str, val: &Scalar) -> Option<Self::Output> {
+        // Given `col >= val`:
+        // Skip if `val is greater than _every_ value in [min, max], implies
+        // Skip if `val > min AND val > max` implies
+        // Skip if `val > max` implies
+        // Keep if `NOT(val > max)` implies
+        // Keep if `NOT(max < val)`
+        self.partial_cmp_max_stat(col, val, Ordering::Less, true)
+    }
+
+    fn eval_eq(&self, col: &str, val: &Scalar, inverted: bool) -> Option<Self::Output> {
+        let (op, exprs) = if inverted {
+            // Column could compare not-equal if min or max value differs from the literal.
+            let exprs = [
+                self.partial_cmp_min_stat(col, val, Ordering::Equal, true),
+                self.partial_cmp_max_stat(col, val, Ordering::Equal, true),
+            ];
+            (VariadicOperator::Or, exprs)
+        } else {
+            // Column could compare equal if its min/max values bracket the literal.
+            let exprs = [
+                self.partial_cmp_min_stat(col, val, Ordering::Greater, true),
+                self.partial_cmp_max_stat(col, val, Ordering::Less, true),
+            ];
+            (VariadicOperator::And, exprs)
+        };
+        self.finish_eval_variadic(op, exprs, false)
+    }
+
+    fn eval_binary_scalars(&self, op: BinaryOperator, left: &Scalar, right: &Scalar, inverted: bool) -> Option<Self::Output> {
+        DataSkippingPredicateEvaluator::eval_binary_scalars(self, op, left, right, inverted)
+    }
+
+    fn finish_eval_variadic(&self, op: VariadicOperator, exprs: impl IntoIterator<Item = Option<Self::Output>>, inverted: bool) -> Option<Self::Output> {
+        DataSkippingPredicateEvaluator::finish_eval_variadic(self, op, exprs, inverted)
+    }
+
+}
+
+impl DataSkippingPredicateEvaluator for DataSkippingPredicateCreator {
     fn eval_scalar(&self, val: &Scalar, inverted: bool) -> Option<Expr> {
         DefaultPredicateEvaluator::eval_scalar(val, inverted).map(Expr::literal)
     }
@@ -821,27 +687,6 @@ impl PredicateEvaluator for DataSkippingPredicateCreator {
             Self::get_tight_is_null_expr(nullcount.clone(), inverted),
             Self::get_wide_is_null_expr(nullcount, inverted),
         ))
-    }
-
-    fn eval_lt(&self, col: &str, val: &Scalar) -> Option<Expr> {
-        StatsColumnProvider::eval_lt(self, col, val)
-    }
-
-    fn eval_le(&self, col: &str, val: &Scalar) -> Option<Expr> {
-        StatsColumnProvider::eval_le(self, col, val)
-    }
-
-    fn eval_gt(&self, col: &str, val: &Scalar) -> Option<Expr> {
-        StatsColumnProvider::eval_gt(self, col, val)
-    }
-
-    fn eval_ge(&self, col: &str, val: &Scalar) -> Option<Expr> {
-        StatsColumnProvider::eval_ge(self, col, val)
-    }
-
-    fn eval_eq(&self, col: &str, val: &Scalar, inverted: bool) -> Option<Expr> {
-        let (op, exprs) = self.start_eval_eq(col, val, inverted);
-        self.finish_eval_variadic(op, exprs, false)
     }
 
     fn eval_binary_scalars(&self, op: BinaryOperator, left: &Scalar, right: &Scalar, inverted: bool) -> Option<Expr> {
@@ -937,7 +782,7 @@ mod tests {
 
         for (input, expected) in cases {
             let rewritten = as_data_skipping_predicate(&input, false).unwrap();
-            assert_eq!(rewritten, expected)
+            assert_eq!(rewritten, expected, "input was {input}")
         }
     }
 }

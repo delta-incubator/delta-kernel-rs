@@ -343,7 +343,7 @@ async fn stats() -> Result<(), Box<dyn std::error::Error>> {
         let scan = snapshot
             .clone()
             .scan_builder()
-            .with_predicate(Arc::new(predicate))
+            .with_predicate(Arc::new(predicate.clone()))
             .build()?;
 
         let expected_files = expected_batches.len();
@@ -355,7 +355,7 @@ async fn stats() -> Result<(), Box<dyn std::error::Error>> {
             files_scanned += 1;
             assert_eq!(into_record_batch(raw_data), expected.clone());
         }
-        assert_eq!(expected_files, files_scanned);
+        assert_eq!(expected_files, files_scanned, "{predicate:?}");
     }
     Ok(())
 }
