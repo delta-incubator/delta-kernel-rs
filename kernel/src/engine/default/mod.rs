@@ -40,38 +40,59 @@ pub struct DefaultEngine<E: TaskExecutor> {
 impl<E: TaskExecutor> DefaultEngine<E> {
     /// Create a new [`DefaultEngine`] instance
     ///
-    /// The `path` parameter is used to determine the type of storage used.
+    /// # Parameters
     ///
-    /// The `task_executor` is used to spawn async IO tasks. See [executor::TaskExecutor].
-    pub fn try_new<I, K, V>(path: &Url, options: I, task_executor: Arc<E>) -> DeltaResult<Self>
+    /// - `table_root`: The URL of the table within storage.
+    /// - `options`: key/value pairs of options to pass to the object store.
+    /// - `task_executor`: Used to spawn async IO tasks. See [executor::TaskExecutor].
+    pub fn try_new<K, V>(
+        table_root: &Url,
+        options: impl IntoIterator<Item = (K, V)>,
+        task_executor: Arc<E>,
+    ) -> DeltaResult<Self>
     where
-        I: IntoIterator<Item = (K, V)>,
         K: AsRef<str>,
         V: Into<String>,
     {
-        let (store, prefix) = parse_url_opts(path, options)?;
-        let store = Arc::new(store);
-        Ok(Self {
-            file_system: Arc::new(ObjectStoreFileSystemClient::new(
-                store.clone(),
-                prefix,
-                task_executor.clone(),
-            )),
-            json: Arc::new(DefaultJsonHandler::new(
-                store.clone(),
-                task_executor.clone(),
-            )),
-            parquet: Arc::new(DefaultParquetHandler::new(store.clone(), task_executor)),
-            store,
-            expression: Arc::new(ArrowExpressionHandler {}),
-        })
+        // table root is the path of the table in the ObjectStore
+        let (store, table_root) = parse_url_opts(table_root, options)?;
+        Ok(Self::new(Arc::new(store), table_root, task_executor))
     }
 
-    pub fn new(store: Arc<DynObjectStore>, prefix: Path, task_executor: Arc<E>) -> Self {
+    /// Create a new [`DefaultEngine`] instance
+    ///
+    /// # Parameters
+    ///
+    /// - `store`: The object store to use.
+    /// - `table_root_path`: The root path of the table within storage.
+    /// - `task_executor`: Used to spawn async IO tasks. See [executor::TaskExecutor].
+    pub fn new(store: Arc<DynObjectStore>, table_root: Path, task_executor: Arc<E>) -> Self {
+        // HACK to check if we're using a LocalFileSystem from ObjectStore. We need this because
+        // local filesystem doesn't return a sorted list by default. Although the `object_store`
+        // crate explicitly says it _does not_ return a sorted listing, in practice all the cloud
+        // implementations actually do:
+        // - AWS:
+        //   [`ListObjectsV2`](https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectsV2.html)
+        //   states: "For general purpose buckets, ListObjectsV2 returns objects in lexicographical
+        //   order based on their key names." (Directory buckets are out of scope for now)
+        // - Azure: Docs state
+        //   [here](https://learn.microsoft.com/en-us/rest/api/storageservices/enumerating-blob-resources):
+        //   "A listing operation returns an XML response that contains all or part of the requested
+        //   list. The operation returns entities in alphabetical order."
+        // - GCP: The [main](https://cloud.google.com/storage/docs/xml-api/get-bucket-list) doc
+        //   doesn't indicate order, but [this
+        //   page](https://cloud.google.com/storage/docs/xml-api/get-bucket-list) does say: "This page
+        //   shows you how to list the [objects](https://cloud.google.com/storage/docs/objects) stored
+        //   in your Cloud Storage buckets, which are ordered in the list lexicographically by name."
+        // So we just need to know if we're local and then if so, we sort the returned file list in
+        // `filesystem.rs`
+        let store_str = format!("{}", store);
+        let is_local = store_str.starts_with("LocalFileSystem");
         Self {
             file_system: Arc::new(ObjectStoreFileSystemClient::new(
                 store.clone(),
-                prefix,
+                !is_local,
+                table_root,
                 task_executor.clone(),
             )),
             json: Arc::new(DefaultJsonHandler::new(

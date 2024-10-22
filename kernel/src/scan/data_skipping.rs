@@ -1,5 +1,5 @@
+use std::borrow::Cow;
 use std::collections::HashSet;
-use std::ops::Not;
 use std::sync::{Arc, LazyLock};
 
 use tracing::debug;
@@ -7,8 +7,10 @@ use tracing::debug;
 use crate::actions::visitors::SelectionVectorVisitor;
 use crate::actions::{get_log_schema, ADD_NAME};
 use crate::error::DeltaResult;
-use crate::expressions::{BinaryOperator, Expression as Expr, UnaryOperator, VariadicOperator};
-use crate::schema::{DataType, SchemaRef, StructField, StructType};
+use crate::expressions::{
+    BinaryOperator, Expression as Expr, ExpressionRef, UnaryOperator, VariadicOperator,
+};
+use crate::schema::{DataType, PrimitiveType, SchemaRef, SchemaTransform, StructField, StructType};
 use crate::{Engine, EngineData, ExpressionEvaluator, JsonHandler};
 
 /// Get the expression that checks if a col could be null, assuming tight_bounds = true. In this
@@ -16,8 +18,8 @@ use crate::{Engine, EngineData, ExpressionEvaluator, JsonHandler};
 /// by the default for tightBounds being true, so we have to check if it's EITHER `null` OR `true`
 fn get_tight_null_expr(null_col: String) -> Expr {
     Expr::and(
-        Expr::distinct(Expr::column("tightBounds"), Expr::literal(false)),
-        Expr::gt(Expr::column(null_col), Expr::literal(0i64)),
+        Expr::distinct(Expr::column("tightBounds"), false),
+        Expr::gt(Expr::column(null_col), 0i64),
     )
 }
 
@@ -27,7 +29,7 @@ fn get_tight_null_expr(null_col: String) -> Expr {
 /// doesn't help us)
 fn get_wide_null_expr(null_col: String) -> Expr {
     Expr::and(
-        Expr::eq(Expr::column("tightBounds"), Expr::literal(false)),
+        Expr::eq(Expr::column("tightBounds"), false),
         Expr::eq(Expr::column("numRecords"), Expr::column(null_col)),
     )
 }
@@ -37,7 +39,7 @@ fn get_wide_null_expr(null_col: String) -> Expr {
 /// the default for tightBounds being true, so we have to check if it's EITHER `null` OR `true`
 fn get_tight_not_null_expr(null_col: String) -> Expr {
     Expr::and(
-        Expr::distinct(Expr::column("tightBounds"), Expr::literal(false)),
+        Expr::distinct(Expr::column("tightBounds"), false),
         Expr::lt(Expr::column(null_col), Expr::column("numRecords")),
     )
 }
@@ -48,7 +50,7 @@ fn get_tight_not_null_expr(null_col: String) -> Expr {
 /// there is a possibility of a NOT null
 fn get_wide_not_null_expr(null_col: String) -> Expr {
     Expr::and(
-        Expr::eq(Expr::column("tightBounds"), Expr::literal(false)),
+        Expr::eq(Expr::column("tightBounds"), false),
         Expr::ne(Expr::column("numRecords"), Expr::column(null_col)),
     )
 }
@@ -79,7 +81,7 @@ fn as_inverted_data_skipping_predicate(expr: &Expr) -> Option<Expr> {
             as_data_skipping_predicate(&expr)
         }
         VariadicOperation { op, exprs } => {
-            let expr = Expr::variadic(op.invert(), exprs.iter().cloned().map(Expr::not));
+            let expr = Expr::variadic(op.invert(), exprs.iter().cloned().map(|e| !e));
             as_data_skipping_predicate(&expr)
         }
         _ => None,
@@ -125,14 +127,14 @@ fn as_data_skipping_predicate(expr: &Expr) -> Option<Expr> {
                 }
                 NotEqual => {
                     return Some(Expr::or(
-                        Expr::gt(Column(format!("minValues.{}", col)), Literal(val.clone())),
-                        Expr::lt(Column(format!("maxValues.{}", col)), Literal(val.clone())),
+                        Expr::gt(Column(format!("minValues.{}", col)), val.clone()),
+                        Expr::lt(Column(format!("maxValues.{}", col)), val.clone()),
                     ));
                 }
                 _ => return None, // unsupported operation
             };
             let col = format!("{}.{}", stats_col, col);
-            Some(Expr::binary(op, Column(col), Literal(val.clone())))
+            Some(Expr::binary(op, Column(col), val.clone()))
         }
         // push down Not by inverting everything below it
         UnaryOperation { op: Not, expr } => as_inverted_data_skipping_predicate(expr),
@@ -178,20 +180,16 @@ impl DataSkippingFilter {
     pub(crate) fn new(
         engine: &dyn Engine,
         table_schema: &SchemaRef,
-        predicate: &Option<Expr>,
+        predicate: Option<ExpressionRef>,
     ) -> Option<Self> {
         static PREDICATE_SCHEMA: LazyLock<DataType> = LazyLock::new(|| {
             DataType::struct_type([StructField::new("predicate", DataType::BOOLEAN, true)])
         });
         static STATS_EXPR: LazyLock<Expr> = LazyLock::new(|| Expr::column("add.stats"));
         static FILTER_EXPR: LazyLock<Expr> =
-            LazyLock::new(|| Expr::column("predicate").distinct(Expr::literal(false)));
+            LazyLock::new(|| Expr::column("predicate").distinct(false));
 
-        let predicate = match predicate {
-            Some(predicate) => predicate,
-            None => return None,
-        };
-
+        let predicate = predicate.as_deref()?;
         debug!("Creating a data skipping filter for {}", &predicate);
         let field_names: HashSet<_> = predicate.references();
 
@@ -206,21 +204,28 @@ impl DataSkippingFilter {
             // The predicate didn't reference any eligible stats columns, so skip it.
             return None;
         }
+        let minmax_schema = StructType::new(data_fields);
 
-        let stats_schema =
-            Arc::new(StructType::new([
-                StructField::new("numRecords", DataType::LONG, true),
-                StructField::new("tightBounds", DataType::BOOLEAN, true),
-                StructField::new(
-                    "nullCount",
-                    StructType::new(data_fields.iter().map(|data_field| {
-                        StructField::new(&data_field.name, DataType::LONG, true)
-                    })),
-                    true,
-                ),
-                StructField::new("minValues", StructType::new(data_fields.clone()), true),
-                StructField::new("maxValues", StructType::new(data_fields), true),
-            ]));
+        // Convert a min/max stats schema into a nullcount schema (all leaf fields are LONG)
+        struct NullCountStatsTransform;
+        impl SchemaTransform for NullCountStatsTransform {
+            fn transform_primitive<'a>(
+                &mut self,
+                _ptype: Cow<'a, PrimitiveType>,
+            ) -> Option<Cow<'a, PrimitiveType>> {
+                Some(Cow::Owned(PrimitiveType::Long))
+            }
+        }
+        let nullcount_schema = NullCountStatsTransform
+            .transform_struct(Cow::Borrowed(&minmax_schema))?
+            .into_owned();
+        let stats_schema = Arc::new(StructType::new([
+            StructField::new("numRecords", DataType::LONG, true),
+            StructField::new("tightBounds", DataType::BOOLEAN, true),
+            StructField::new("nullCount", nullcount_schema, true),
+            StructField::new("minValues", minmax_schema.clone(), true),
+            StructField::new("maxValues", minmax_schema, true),
+        ]));
 
         // Skipping happens in several steps:
         //
@@ -242,7 +247,7 @@ impl DataSkippingFilter {
 
         let skipping_evaluator = engine.get_expression_handler().get_evaluator(
             stats_schema.clone(),
-            Expr::struct_expr([as_data_skipping_predicate(predicate)?]),
+            Expr::struct_from([as_data_skipping_predicate(predicate)?]),
             PREDICATE_SCHEMA.clone(),
         );
 
