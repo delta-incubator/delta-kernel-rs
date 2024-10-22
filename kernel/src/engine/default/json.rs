@@ -19,7 +19,8 @@ use crate::engine::arrow_utils::parse_json as arrow_parse_json;
 use crate::engine::arrow_utils::write_json;
 use crate::schema::SchemaRef;
 use crate::{
-    DeltaResult, EngineData, Error, Expression, FileDataReadResultIterator, FileMeta, JsonHandler,
+    DeltaResult, EngineData, Error, ExpressionRef, FileDataReadResultIterator, FileMeta,
+    JsonHandler,
 };
 
 #[derive(Debug)]
@@ -74,7 +75,7 @@ impl<E: TaskExecutor> JsonHandler for DefaultJsonHandler<E> {
         &self,
         files: &[FileMeta],
         physical_schema: SchemaRef,
-        _predicate: Option<Expression>,
+        _predicate: Option<ExpressionRef>,
     ) -> DeltaResult<FileDataReadResultIterator> {
         if files.is_empty() {
             return Ok(Box::new(std::iter::empty()));
