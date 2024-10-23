@@ -147,6 +147,7 @@ pub(crate) trait ParquetStatsSkippingFilter {
     /// If the result was FALSE, it forces both inner and outer AND to FALSE, as desired. If the
     /// result was TRUE or NULL, then it does not contribute to data skipping but also does not
     /// block it if other legs of the AND evaluate to FALSE.
+    // TODO: If these are generally useful, we may want to move them into PredicateEvaluator?
     fn eval_sql_where(&self, filter: &Expr) -> Option<bool>;
     fn eval_binary_nullsafe(&self, op: BinaryOperator, left: &Expr, right: &Expr) -> Option<bool>;
 }
