@@ -419,7 +419,7 @@ mod tests {
                     Error::Arrow(arrow_schema::ArrowError::SchemaError(_))
                 ) =>
             {
-                ()
+                
             }
             _ => panic!("expected arrow schema error error, got {:?}", e),
         });
@@ -453,7 +453,7 @@ mod tests {
                     Error::Arrow(arrow_schema::ArrowError::InvalidArgumentError(_))
                 ) =>
             {
-                ()
+                
             }
             _ => panic!("expected arrow invalid arg error, got {:?}", e),
         });
