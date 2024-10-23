@@ -662,9 +662,8 @@ fn parse_json_impl(json_strings: &StringArray, schema: ArrowSchemaRef) -> DeltaR
     Ok(concat_batches(&schema, output.iter())?)
 }
 
-/// write an arrow RecordBatch to a JSON string by appending to a buffer.
-///
-/// TODO (zach): this should stream data to the JSON writer and output an iterator.
+/// serialize an arrow RecordBatch to a JSON string by appending to a buffer.
+// TODO (zach): this should stream data to the JSON writer and output an iterator.
 pub(crate) fn to_json_bytes(
     data: impl Iterator<Item = Box<dyn EngineData>> + Send,
 ) -> DeltaResult<Vec<u8>> {
