@@ -64,7 +64,7 @@ pub unsafe extern "C" fn get_testing_kernel_expression() -> Handle<SharedExpress
         Expr::null_literal(DataType::SHORT),
         Expr::literal(Scalar::Struct(top_level_struct)),
         Expr::literal(Scalar::Array(array_data)),
-        Expr::struct_expr(vec![Expr::or_from(vec![
+        Expr::struct_from(vec![Expr::or_from(vec![
             Expr::literal(Scalar::Integer(5)),
             Expr::literal(Scalar::Long(20)),
         ])]),
