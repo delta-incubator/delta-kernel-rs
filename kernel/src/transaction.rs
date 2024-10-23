@@ -102,9 +102,8 @@ impl Transaction {
     ///
     /// The engine is required to provide commit info before committing the transaction. If the
     /// engine would like to omit engine-specific commit info, it can do so by passing pass a
-    /// commit_info engine data chunk with one row and one column of:
-    /// 1. `engineCommitInfo` column with an empty Map<string, string>
-    /// 2. `engineCommitInfo` null column of type Map<string, string>
+    /// commit_info engine data chunk with one row and one column of type `Map<string, string>`
+    /// that can either be `null` or contain an empty map.
     ///
     /// Any other columns in the data chunk are ignored.
     pub fn commit_info(&mut self, commit_info: Box<dyn EngineData>) {

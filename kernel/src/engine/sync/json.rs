@@ -7,7 +7,7 @@ use url::Url;
 use super::read_files;
 use crate::engine::arrow_data::ArrowEngineData;
 use crate::engine::arrow_utils::parse_json as arrow_parse_json;
-use crate::engine::arrow_utils::write_json;
+use crate::engine::arrow_utils::to_json_bytes;
 use crate::schema::SchemaRef;
 use crate::{
     DeltaResult, EngineData, Error, ExpressionRef, FileDataReadResultIterator, FileMeta,
@@ -67,7 +67,7 @@ impl JsonHandler for SyncJsonHandler {
 
         // write data to tmp file
         let mut tmp_file = NamedTempFile::new_in(parent)?;
-        let buf = write_json(data)?;
+        let buf = to_json_bytes(data)?;
         tmp_file.write_all(&buf)?;
         tmp_file.flush()?;
 

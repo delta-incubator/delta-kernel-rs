@@ -16,7 +16,7 @@ use url::Url;
 use super::executor::TaskExecutor;
 use super::file_stream::{FileOpenFuture, FileOpener, FileStream};
 use crate::engine::arrow_utils::parse_json as arrow_parse_json;
-use crate::engine::arrow_utils::write_json;
+use crate::engine::arrow_utils::to_json_bytes;
 use crate::schema::SchemaRef;
 use crate::{
     DeltaResult, EngineData, Error, ExpressionRef, FileDataReadResultIterator, FileMeta,
@@ -99,7 +99,7 @@ impl<E: TaskExecutor> JsonHandler for DefaultJsonHandler<E> {
         data: Box<dyn Iterator<Item = Box<dyn EngineData>> + Send>,
         _overwrite: bool,
     ) -> DeltaResult<()> {
-        let buffer = write_json(data)?;
+        let buffer = to_json_bytes(data)?;
         // Put if absent
         let store = self.store.clone(); // cheap Arc
         let path = Path::from(path.path());
