@@ -9,7 +9,7 @@ use super::ScanData;
 use crate::actions::{get_log_schema, ADD_NAME, REMOVE_NAME};
 use crate::actions::{visitors::AddVisitor, visitors::RemoveVisitor, Add, Remove};
 use crate::engine_data::{GetData, TypedGetData};
-use crate::expressions::{nested_column, Expression, ExpressionRef};
+use crate::expressions::{column_expr, Expression, ExpressionRef};
 use crate::schema::{DataType, MapType, SchemaRef, StructField, StructType};
 use crate::{DataVisitor, DeltaResult, Engine, EngineData, ExpressionHandler};
 
@@ -125,12 +125,12 @@ impl LogReplayScanner {
 
     fn get_add_transform_expr(&self) -> Expression {
         Expression::Struct(vec![
-            nested_column!("add.path"),
-            nested_column!("add.size"),
-            nested_column!("add.modificationTime"),
-            nested_column!("add.stats"),
-            nested_column!("add.deletionVector"),
-            Expression::Struct(vec![nested_column!("add.partitionValues")]),
+            column_expr!("add.path"),
+            column_expr!("add.size"),
+            column_expr!("add.modificationTime"),
+            column_expr!("add.stats"),
+            column_expr!("add.deletionVector"),
+            Expression::Struct(vec![column_expr!("add.partitionValues")]),
         ])
     }
 

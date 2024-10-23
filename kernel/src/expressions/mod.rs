@@ -5,14 +5,13 @@ use std::fmt::{Display, Formatter};
 
 use itertools::Itertools;
 
-pub use self::column_name::{
-    joined_column, joined_column_name, nested_column, nested_column_name, simple_column,
-    simple_column_name, ColumnName,
+pub use self::column_names::{
+    column_expr, column_name, joined_column_expr, joined_column_name, ColumnName,
 };
 pub use self::scalars::{ArrayData, Scalar, StructData};
 use crate::DataType;
 
-mod column_name;
+mod column_names;
 mod scalars;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -416,11 +415,11 @@ impl<R: Into<Expression>> std::ops::Div<R> for Expression {
 
 #[cfg(test)]
 mod tests {
-    use super::{simple_column, Expression as Expr};
+    use super::{column_expr, Expression as Expr};
 
     #[test]
     fn test_expression_format() {
-        let col_ref = simple_column!("x");
+        let col_ref = column_expr!("x");
         let cases = [
             (col_ref.clone(), "Column(x)"),
             (col_ref.clone().eq(2), "Column(x) = 2"),

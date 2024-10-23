@@ -106,64 +106,48 @@ impl Hash for ColumnName {
     }
 }
 
-/// Creates a simple (non-nested) column name.
+/// Creates a nested column name whose field names are all simple column names (containing only
+/// alphanumeric characters and underscores), delimited by dots. This macro is provided as a
+/// convenience for the common case where the caller knows the column name contains only simple
+/// field names and that splitting by periods is safe:
 ///
-/// To avoid accidental misuse, the argument must be a string literal and must not contain any
-/// dots. Thus, the following invocations would both fail to compile:
+/// ```
+/// # use delta_kernel::expressions::{column_name, ColumnName};
+/// assert_eq!(column_name!("a.b.c"), ColumnName::new(["a", "b", "c"]));
+/// ```
+///
+/// To avoid accidental misuse, the argument must be a string literal, so the compiler can validate
+/// the safety conditions. Thus, the following uses would fail to compile:
 ///
 /// ```fail_compile
-/// # use delta_kernel::expressions::simple_column_name;
-/// let s = "a";
-/// let name = simple_column_name!(s); // not a string literal
+/// # use delta_kernel::expressions::column_name;
+/// let s = "a.b";
+/// let name = column_name!(s); // not a string literal
 /// ```
 ///
 /// ```fail_compile
 /// # use delta_kernel::expressions::simple_column_name;
-/// let name = simple_column_name!("a.b"); // contains dots
+/// let name = simple_column_name!("a b"); // non-alphanumeric character
 /// ```
-///
-/// NOTE: `simple_column_name!("a.b.c")` produces a non-nested column whose name happens to contain
-/// two period characters. To interpret the column name as nested with field names "a", "b" and "c",
-/// use [`nested_column_name!`] instead.
 // NOTE: Macros are only public if exported, which defines them at the root of the crate. But we
 // don't want it there. So, we export a hidden macro and pub use it here where we actually want it.
 #[macro_export]
 #[doc(hidden)]
-macro_rules! __simple_column_name {
+macro_rules! __column_name {
     ( $($name:tt)* ) => {
-        $crate::expressions::ColumnName::new(delta_kernel_derive::parse_simple_column_name!($($name)*))
+        $crate::expressions::ColumnName::new(delta_kernel_derive::parse_column_name!($($name)*))
     };
 }
 #[doc(inline)]
-pub use __simple_column_name as simple_column_name;
-
-/// Creates a nested column name whose field names are all simple column names. This macro is
-/// provided as a convenience for the common case where the caller knows the column contains only
-/// simple field names and that splitting by periods is safe.
-///
-/// To avoid accidental misuse, the argument must be a string literal. Thus, the following
-/// invocation would fail to compile:
-///
-/// ```fail_compile
-/// # use delta_kernel::expressions::nested_column_name;
-/// let s = "a.b";
-/// let name = nested_column_name!(s);
-/// ```
-///
-/// NOTE: `nested_column_name!("a.b.c")` produces a path with field names "a", "b", and "c".
-#[macro_export]
-#[doc(hidden)]
-macro_rules! __nested_column_name {
-    ( $($name:tt)* ) => {
-        $crate::expressions::ColumnName::new(delta_kernel_derive::parse_nested_column_name!($($name)*))
-    };
-}
-#[doc(inline)]
-pub use __nested_column_name as nested_column_name;
+pub use __column_name as column_name;
 
 /// Joins two column names together, when one or both inputs might be literal strings representing
-/// simple (non-nested) column names. For example, the invocation `joined_column_name!("a", "b")` is
-/// equivalent to `ColumnName::join(simple_column_name!("a"), simple_column_name!("b"))`
+/// simple (non-nested) column names. For example:
+///
+/// ```
+/// # use delta_kernel::expressions::{column_name, joined_column_name};
+/// assert_eq!(joined_column_name!("a.b", "c"), column_name!("a.b").join(&column_name!("c")))
+/// ```
 ///
 /// To avoid accidental misuse, at least one argument must be a string literal. Thus, the following
 /// invocation would fail to compile:
@@ -173,21 +157,17 @@ pub use __nested_column_name as nested_column_name;
 /// let s = "s";
 /// let name = joined_column_name!(s, s);
 /// ```
-///
-/// NOTE: `joined_column_name!("a.b", "c")` produces a path with field names "a.b" and "c". If
-/// either argument is a nested path delimited by periods, it should be split first and the result
-/// passed to `joined_column_name!`, e.g. `joined_column_name!(nested_column_name!("a.b"), "c")`.
 #[macro_export]
 #[doc(hidden)]
 macro_rules! __joined_column_name {
     ( $left:literal, $right:literal ) => {
-        $crate::__simple_column_name!($left).join(&$crate::__simple_column_name!($right))
+        $crate::__column_name!($left).join(&$crate::__column_name!($right))
     };
     ( $left:literal, $right:expr ) => {
-        $crate::__simple_column_name!($left).join(&$right)
+        $crate::__column_name!($left).join(&$right)
     };
     ( $left:expr, $right:literal) => {
-        $left.join(&$crate::__simple_column_name!($right))
+        $left.join(&$crate::__column_name!($right))
     };
     ( $($other:tt)* ) => {
         compile_error!("joined_column_name!() requires at least one string literal input")
@@ -198,72 +178,46 @@ pub use __joined_column_name as joined_column_name;
 
 #[macro_export]
 #[doc(hidden)]
-macro_rules! __simple_column_expr {
+macro_rules! __column_expr {
     ( $($name:tt)* ) => {
-        $crate::expressions::Expression::from($crate::expressions::simple_column_name!($($name)*))
+        $crate::expressions::Expression::from($crate::__column_name!($($name)*))
     };
 }
 #[doc(inline)]
-pub use __simple_column_expr as simple_column;
-
-#[macro_export]
-#[doc(hidden)]
-macro_rules! __nested_column_expr {
-    ( $($name:tt)* ) => {
-        $crate::expressions::Expression::from($crate::expressions::nested_column_name!($($name)*))
-    };
-}
-#[doc(inline)]
-pub use __nested_column_expr as nested_column;
+pub use __column_expr as column_expr;
 
 #[macro_export]
 #[doc(hidden)]
 macro_rules! __joined_column_expr {
     ( $($name:tt)* ) => {
-        $crate::expressions::Expression::from($crate::expressions::joined_column_name!($($name)*))
+        $crate::expressions::Expression::from($crate::__joined_column_name!($($name)*))
     };
 }
 #[doc(inline)]
-pub use __joined_column_expr as joined_column;
+pub use __joined_column_expr as joined_column_expr;
 
 #[cfg(test)]
 mod test {
     use super::*;
-    use delta_kernel_derive::{parse_nested_column_name, parse_simple_column_name};
+    use delta_kernel_derive::parse_column_name;
 
     #[test]
     fn test_parse_column_name_macros() {
-        assert_eq!(parse_simple_column_name!("a"), ["a"]);
+        assert_eq!(parse_column_name!("a"), ["a"]);
 
-        assert_eq!(parse_nested_column_name!("a"), ["a"]);
-        assert_eq!(parse_nested_column_name!("a.b"), ["a", "b"]);
-        assert_eq!(parse_nested_column_name!("a.b.c"), ["a", "b", "c"]);
+        assert_eq!(parse_column_name!("a"), ["a"]);
+        assert_eq!(parse_column_name!("a.b"), ["a", "b"]);
+        assert_eq!(parse_column_name!("a.b.c"), ["a", "b", "c"]);
     }
 
     #[test]
     fn test_column_name_macros() {
-        let simple = simple_column_name!("x");
-        let nested = nested_column_name!("x.y");
+        let simple = column_name!("x");
+        let nested = column_name!("x.y");
 
-        // fails to compile (argument is not a literal string, or contains illegal characters)
-        //simple_column_name!("a.b");
-        //simple_column_name!("a b");
-        //simple_column_name!(simple);
-        //simple_column_name!(simple.clone());
-
-        assert_eq!(simple_column_name!("a"), ColumnName::new(["a"]));
-
-        // fails to compile (argument is not a literal string, or contains illegal characters)
-        //nested_column_name!("a b.c d");
-        //nested_column_name!(simple);
-        //nested_column_name!(simple.clone());
-
-        assert_eq!(nested_column_name!("a"), ColumnName::new(["a"])); // Silly, but legal.
-        assert_eq!(nested_column_name!("a.b"), ColumnName::new(["a", "b"]));
-        assert_eq!(
-            nested_column_name!("a.b.c"),
-            ColumnName::new(["a", "b", "c"])
-        );
+        assert_eq!(column_name!("a"), ColumnName::new(["a"]));
+        assert_eq!(column_name!("a.b"), ColumnName::new(["a", "b"]));
+        assert_eq!(column_name!("a.b.c"), ColumnName::new(["a", "b", "c"]));
 
         assert_eq!(joined_column_name!("a", "b"), ColumnName::new(["a", "b"]));
         assert_eq!(joined_column_name!("a", "b"), ColumnName::new(["a", "b"]));
@@ -285,19 +239,12 @@ mod test {
             joined_column_name!("a", &nested),
             ColumnName::new(["a", "x.y"])
         );
-
-        // fails to compile (none of the arguments is a literal, or one of the literals contains illegal characters)
-        //joined_column_name!(simple, simple);
-        //joined_column_name!(simple.clone(), simple.clone());
-        //joined_column_name!("a.b", "c");
-        //joined_column_name!("a", "b.c");
-        //joined_column_name!("a.b", "c.d");
     }
 
     #[test]
     fn test_column_name_methods() {
-        let simple = simple_column_name!("x");
-        let nested = nested_column_name!("x.y");
+        let simple = column_name!("x");
+        let nested = column_name!("x.y");
 
         // path()
         assert_eq!(simple.path(), "x");
@@ -317,6 +264,6 @@ mod test {
 
         // impl FromIterator<ColumnName>
         let name: ColumnName = [nested, simple].into_iter().collect();
-        assert_eq!(name, nested_column_name!("x.y.x"));
+        assert_eq!(name, column_name!("x.y.x"));
     }
 }

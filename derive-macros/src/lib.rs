@@ -5,41 +5,24 @@ use syn::{
     parse_macro_input, Data, DataStruct, DeriveInput, Error, Fields, Meta, PathArguments, Type,
 };
 
-fn parse_column_name(
-    input: proc_macro::TokenStream,
-    allow_dots: bool,
-    transform: impl FnOnce(syn::LitStr) -> TokenStream,
-) -> proc_macro::TokenStream {
-    let is_valid = |c: char| c.is_ascii_alphanumeric() || c == '_' || (allow_dots && c == '.');
+/// Parses a dot-delimited column name into an array of field names. See
+/// [`delta_kernel::expressions::column_name::column_name`] macro for details.
+#[proc_macro]
+pub fn parse_column_name(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
+    let is_valid = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '.';
     let err = match syn::parse(input) {
         Ok(syn::Lit::Str(name)) => match name.value().chars().find(|c| !is_valid(*c)) {
-            None => return transform(name).into(),
             Some(bad_char) => Error::new(name.span(), format!("Invalid character: {bad_char:?}")),
+            _ => {
+                let path = name.value();
+                let path = path.split('.').map(proc_macro2::Literal::string);
+                return quote_spanned! { name.span() => [#(#path),*] }.into();
+            }
         },
         Ok(lit) => Error::new(lit.span(), "Expected a string literal"),
         Err(err) => err,
     };
     err.into_compile_error().into()
-}
-
-/// Parses a simple column name into a single-element array of field names. See
-/// [`delta_kernel::expressions::column_name::simple_column_name`] for details.
-#[proc_macro]
-pub fn parse_simple_column_name(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
-    parse_column_name(input, false, |name| {
-        quote_spanned! { name.span() => [#name] }
-    })
-}
-
-/// Parses a nested column name into an array of simple field names. See
-/// [`delta_kernel::expressions::column_name::nested_column_name`] for details.
-#[proc_macro]
-pub fn parse_nested_column_name(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
-    parse_column_name(input, true, |name| {
-        let path = name.value();
-        let path = path.split('.').map(proc_macro2::Literal::string);
-        quote_spanned! { name.span() => [#(#path),*] }
-    })
 }
 
 /// Derive a `delta_kernel::schemas::ToDataType` implementation for the annotated struct. The actual
