@@ -105,7 +105,8 @@ impl Transaction {
     /// commit_info engine data chunk with one row and one column of:
     /// 1. `engineCommitInfo` column with an empty Map<string, string>
     /// 2. `engineCommitInfo` null column of type Map<string, string>
-    /// any other columns in the data chunk are ignored.
+    ///
+    /// Any other columns in the data chunk are ignored.
     pub fn commit_info(&mut self, commit_info: Box<dyn EngineData>) {
         self.commit_info = Some(commit_info.into());
     }
@@ -243,7 +244,7 @@ mod tests {
 
         let buf = Vec::new();
         let mut writer = LineDelimitedWriter::new(buf);
-        writer.write_batches(&vec![&record_batch]).unwrap();
+        writer.write_batches(&[&record_batch]).unwrap();
         writer.finish().unwrap();
         let buf = writer.into_inner();
 
