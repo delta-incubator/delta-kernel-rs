@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::actions::get_log_commit_info_schema;
+use crate::actions::COMMIT_INFO_NAME;
 use crate::error::Error;
 use crate::expressions::{Scalar, StructData};
 use crate::path::ParsedLogPath;
@@ -19,7 +20,7 @@ const UNKNOWN_OPERATION: &str = "UNKNOWN";
 ///
 /// # Examples
 ///
-/// ```rust,no_run
+/// ```rust,ignore
 /// // create a transaction
 /// let mut txn = table.new_transaction(&engine)?;
 /// // stage table changes (right now only commit info)
@@ -147,9 +148,11 @@ fn generate_commit_info(
         // TODO(zach): we should probably take a timestamp closer to actual commit time?
         Expression::literal(timestamp),
         Expression::literal(operation.unwrap_or(UNKNOWN_OPERATION)),
+        // HACK (part 1/2): since we don't have proper map support, we create a literal struct with
+        // one null field to create data that serializes as "operationParameters": {}
         Expression::literal(Scalar::Struct(StructData::try_new(
             vec![StructField::new(
-                "operation_parameters",
+                "operation_parameter_int",
                 DataType::INTEGER,
                 true,
             )],
@@ -166,10 +169,33 @@ fn generate_commit_info(
         false,
     )]);
 
+    // HACK (part 2/2): we need to modify the commit info schema to match the expression above (a
+    // struct with a single null int field).
+    let mut commit_info_schema = get_log_commit_info_schema().as_ref().clone();
+    let commit_info_field = commit_info_schema
+        .fields
+        .get_mut(COMMIT_INFO_NAME)
+        .ok_or_else(|| Error::missing_column(COMMIT_INFO_NAME))?;
+    let DataType::Struct(mut commit_info_data_type) = commit_info_field.data_type().clone() else {
+        return Err(Error::internal_error(
+            "commit_info_field should be a struct",
+        ));
+    };
+    commit_info_data_type
+        .fields
+        .get_mut("operationParameters")
+        .unwrap()
+        .data_type = DataType::Struct(Box::new(StructType::new(vec![StructField::new(
+        "hack_operation_parameter_int",
+        DataType::INTEGER,
+        true,
+    )])));
+    commit_info_field.data_type = DataType::Struct(commit_info_data_type);
+
     let commit_info_evaluator = engine.get_expression_handler().get_evaluator(
         engine_commit_info_schema.into(),
         commit_info_expr,
-        get_log_commit_info_schema().clone().into(),
+        commit_info_schema.into(),
     );
 
     commit_info_evaluator.evaluate(engine_commit_info.as_ref())

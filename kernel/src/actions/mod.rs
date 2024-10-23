@@ -146,11 +146,6 @@ impl Protocol {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Schema)]
-struct OperationParameters {
-    operation_parameters: Option<i64>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Schema)]
 #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
 #[cfg_attr(not(feature = "developer-visibility"), visibility::make(pub(crate)))]
 struct CommitInfo {
@@ -160,12 +155,8 @@ struct CommitInfo {
     /// specified by the engine.
     pub(crate) operation: Option<String>,
     /// Map of arbitrary string key-value pairs that provide additional information about the
-    /// operation. This is specified by the engine.
-    ///
-    /// For now this is always empty; and since we don't have the ability to construct an empty
-    /// string-string map, we spoof the operation_parameters with an empty struct so it serializes
-    /// the same as an empty map (as `{}`).
-    operation_parameters: Option<OperationParameters>,
+    /// operation. This is specified by the engine. For now this is always empty on write.
+    pub(crate) operation_parameters: Option<HashMap<String, String>>,
     /// The version of the delta_kernel crate used to write this commit. The kernel will always
     /// write this field, but it is optional since many tables will not have this field (i.e. any
     /// tables not written by kernel).
@@ -465,11 +456,7 @@ mod tests {
                 StructField::new("operation", DataType::STRING, true),
                 StructField::new(
                     "operationParameters",
-                    StructType::new([StructField::new(
-                        "operationParameters",
-                        DataType::LONG,
-                        true,
-                    )]),
+                    MapType::new(DataType::STRING, DataType::STRING, false),
                     true,
                 ),
                 StructField::new("kernelVersion", DataType::STRING, true),
