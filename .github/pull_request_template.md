@@ -7,7 +7,7 @@ Thanks for sending a pull request!  Here are some tips for you:
   5. Be sure to keep the PR description updated to reflect all changes.
 -->
 
-### What changes are proposed in this pull request?
+## What changes are proposed in this pull request?
 <!--
 Please clarify what changes you are proposing and why the changes are needed.
 The purpose of this section is to outline the changes, why they are needed, and how this PR fixes the issue.
@@ -26,7 +26,7 @@ Note that _new_ public APIs are not considered breaking.
 -->
 
 
-### How was this change tested?
+## How was this change tested?
 <!--
 Please make sure to add test cases that check the changes thoroughly including negative and positive cases if possible.
 If it was tested in a way different from regular unit tests, please clarify how you tested, ideally via a reproducible test documented in the PR description.
