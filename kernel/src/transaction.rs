@@ -171,8 +171,8 @@ fn generate_commit_info(
 
     // HACK (part 2/2): we need to modify the commit info schema to match the expression above (a
     // struct with a single null int field).
-    let mut commit_info_schema = get_log_commit_info_schema().as_ref().clone();
-    let commit_info_field = commit_info_schema
+    let mut commit_info_empty_struct_schema = get_log_commit_info_schema().as_ref().clone();
+    let commit_info_field = commit_info_empty_struct_schema
         .fields
         .get_mut(COMMIT_INFO_NAME)
         .ok_or_else(|| Error::missing_column(COMMIT_INFO_NAME))?;
@@ -195,7 +195,7 @@ fn generate_commit_info(
     let commit_info_evaluator = engine.get_expression_handler().get_evaluator(
         engine_commit_info_schema.into(),
         commit_info_expr,
-        commit_info_schema.into(),
+        commit_info_empty_struct_schema.into(),
     );
 
     commit_info_evaluator.evaluate(engine_commit_info.as_ref())
