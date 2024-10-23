@@ -103,7 +103,7 @@ async fn test_commit_info() -> Result<(), Box<dyn std::error::Error>> {
     // create a transaction
     let mut txn = table.new_transaction(&engine)?;
 
-    // add commit info of the form {engineInfo: "default engine"}
+    // add commit info of the form {engineCommitInfo: Map { "engineInfo": "default engine" } }
     let commit_info_schema = Arc::new(ArrowSchema::new(vec![Field::new(
         "engineCommitInfo",
         ArrowDataType::Map(
@@ -170,39 +170,8 @@ async fn test_commit_info() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     assert_eq!(parsed_commit, expected_commit);
-
-    //// one null row commit info
-    //let mut txn = table.new_transaction(&engine)?;
-    //let commit_info_schema = Arc::new(ArrowSchema::new(vec![Field::new(
-    //    "some_column_name",
-    //    ArrowDataType::Utf8,
-    //    true,
-    //)]));
-    //let commit_info_batch = RecordBatch::try_new(
-    //    commit_info_schema.clone(),
-    //    vec![Arc::new(StringArray::new_null(1))],
-    //)?;
-    //txn.commit_info(Box::new(ArrowEngineData::new(commit_info_batch)));
-    //
-    //// commit!
-    //txn.commit(&engine)?;
-    //
-    //let commit1 = store
-    //    .get(&Path::from(
-    //        "/test_table/_delta_log/00000000000000000002.json",
-    //    ))
-    //    .await?;
-    //assert_eq!(
-    //    String::from_utf8(commit1.bytes().await?.to_vec())?,
-    //    "{\"commitInfo\":{\"kernelVersion\":\"v0.3.1\"}}\n"
-    //);
     Ok(())
 }
-
-// need to test various invalid commit infos
-// 1. missing engineCommitInfo
-// 2. invalid engineCommitInfo type
-// 3. other columns that could override (like operation)
 
 #[tokio::test]
 async fn test_empty_commit() -> Result<(), Box<dyn std::error::Error>> {

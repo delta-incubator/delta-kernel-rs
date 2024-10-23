@@ -103,7 +103,7 @@ impl<E: TaskExecutor> JsonHandler for DefaultJsonHandler<E> {
         // Put if absent
         let store = self.store.clone(); // cheap Arc
         let path = Path::from(path.path());
-        let path2 = path.clone(); // FIXME gross
+        let path_str = path.to_string();
         self.task_executor
             .block_on(async move {
                 store
@@ -111,9 +111,7 @@ impl<E: TaskExecutor> JsonHandler for DefaultJsonHandler<E> {
                     .await
             })
             .map_err(|e| match e {
-                object_store::Error::AlreadyExists { .. } => {
-                    Error::FileAlreadyExists(path2.to_string())
-                }
+                object_store::Error::AlreadyExists { .. } => Error::FileAlreadyExists(path_str),
                 e => e.into(),
             })?;
         Ok(())

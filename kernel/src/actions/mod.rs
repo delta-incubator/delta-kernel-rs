@@ -10,6 +10,7 @@ use visitors::{AddVisitor, MetadataVisitor, ProtocolVisitor};
 use self::deletion_vector::DeletionVectorDescriptor;
 use crate::actions::schemas::GetStructField;
 use crate::features::{ReaderFeatures, WriterFeatures};
+use crate::SchemaRef;
 use crate::{schema::StructType, DeltaResult, EngineData};
 
 pub mod deletion_vector;
@@ -42,10 +43,18 @@ static LOG_SCHEMA: LazyLock<StructType> = LazyLock::new(|| {
     ])
 });
 
+static LOG_COMMIT_INFO_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
+    StructType::new([Option::<CommitInfo>::get_struct_field(COMMIT_INFO_NAME)]).into()
+});
+
 #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
 #[cfg_attr(not(feature = "developer-visibility"), visibility::make(pub(crate)))]
 fn get_log_schema() -> &'static StructType {
     &LOG_SCHEMA
+}
+
+pub(crate) fn get_log_commit_info_schema() -> &'static SchemaRef {
+    &LOG_COMMIT_INFO_SCHEMA
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Schema)]
