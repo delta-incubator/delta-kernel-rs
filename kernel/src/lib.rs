@@ -63,6 +63,7 @@ pub mod engine_data;
 pub mod error;
 pub mod expressions;
 pub mod features;
+pub(crate) mod predicates;
 
 #[cfg(feature = "developer-visibility")]
 pub mod path;
