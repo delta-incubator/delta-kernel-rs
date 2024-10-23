@@ -1,4 +1,4 @@
-use proc_macro2::{Ident, TokenStream};
+use proc_macro2::{Ident, Span, TokenStream};
 use quote::{quote, quote_spanned};
 use syn::spanned::Spanned;
 use syn::{
@@ -102,7 +102,13 @@ fn gen_schema_fields(data: &Data) -> TokenStream {
             fields: Fields::Named(fields),
             ..
         }) => &fields.named,
-        _ => panic!("this derive macro only works on structs with named fields"),
+        _ => {
+            return Error::new(
+                Span::call_site(),
+                "this derive macro only works on structs with named fields",
+            )
+            .to_compile_error()
+        }
     };
 
     let schema_fields = fields.iter().map(|field| {
@@ -123,13 +129,16 @@ fn gen_schema_fields(data: &Data) -> TokenStream {
                     match &segment.arguments {
                         PathArguments::None => quote! { #segment_ident :: },
                         PathArguments::AngleBracketed(angle_args) => quote! { #segment_ident::#angle_args :: },
-                        _ => panic!("Can only handle <> type path args"),
+                        _ => Error::new(segment.arguments.span(), "Can only handle <> type path args").to_compile_error()
                     }
                 });
                 if have_schema_null {
                     if let Some(first_ident) = type_path.path.segments.first().map(|seg| &seg.ident) {
                         if first_ident != "HashMap" {
-                            panic!("Can only use drop_null_container_values on HashMap fields, not {first_ident:?}");
+                           return Error::new(
+                                first_ident.span(),
+                                format!("Can only use drop_null_container_values on HashMap fields, not {first_ident}")
+                            ).to_compile_error()
                         }
                     }
                     quote_spanned! { field.span() => #(#type_path_quoted),* get_nullable_container_struct_field(stringify!(#name))}
@@ -137,9 +146,7 @@ fn gen_schema_fields(data: &Data) -> TokenStream {
                     quote_spanned! { field.span() => #(#type_path_quoted),* get_struct_field(stringify!(#name))}
                 }
             }
-            _ => {
-                panic!("Can't handle type: {:?}", field.ty);
-            }
+            _ => Error::new(field.span(), format!("Can't handle type: {:?}", field.ty)).to_compile_error()
         }
     });
     quote! { #(#schema_fields),* }
