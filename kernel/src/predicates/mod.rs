@@ -9,23 +9,106 @@ use tracing::debug;
 /// Evaluates a predicate expression tree against column names that resolve as scalars. Useful for
 /// testing/debugging but also serves as a reference implementation that documents the expression
 /// semantics that kernel relies on for data skipping.
+///
+/// # Inverted expression semantics
+///
+/// Because inversion(`NOT` operator) has special semantics and can often be optimized away by
+/// pushing it down, most methods take an `inverted` flag. That allows operations like
+/// [`UnaryOperator::Not`] to simply evaluate their operand with a flipped `inverted` flag,
+///
+/// # NULL and error semantics
+///
+/// Literal NULL values almost always produce cascading changes in the predicate's structure, so we
+/// represent them by `Option::None` rather than `Scalar::Null`. This allows e.g. `<A> < NULL` to be
+/// rewritten as `NULL`, or `AND(<A>, NULL, <B>)` to be rewritten as `AND(<A>, <B>)`.
+///
+/// With the exception of `IS [NOT] NULL`, all operations produce NULL output if any input is
+/// `NULL`. Any resolution failures also produce NULL (such as missing columns or type mismatch
+/// between a column and the scalar it is compared against).
+///
+/// For safety reasons, this evaluator only accepts expressions of the form `<col> IS [NOT]
+/// NULL`. This is because stats-based skipping is only well-defined for that restricted case --
+/// there is no easy way to distinguish whether NULL was due to missing stats vs. an operation that
+/// produced NULL for other reasons.
+///
+/// NOTE: The error-handling semantics of this trait's scalar-based predicate evaluation may differ
+/// from those of the engine's expression evaluation, because kernel expressions don't include the
+/// necessary type information to reliably detect all type errors.
 pub(crate) trait PredicateEvaluator {
     type Output;
 
+    /// A (possibly inverted) boolean scalar value, e.g. `[NOT] <value>`.
     fn eval_scalar(&self, val: &Scalar, inverted: bool) -> Option<Self::Output>;
 
+    /// A (possibly inverted) NULL check, e.g. `<expr> IS [NOT] NULL`.
+    fn eval_is_null(&self, col: &str, inverted: bool) -> Option<Self::Output>;
+
+    /// A less-than comparison, e.g. `<col> < <value>`.
+    ///
+    /// NOTE: Caller is responsible to commute and/or invert the operation if needed,
+    /// e.g. `NOT(<value> < <col>` becomes `<col> <= <value>`.
+    fn eval_lt(&self, col: &str, val: &Scalar) -> Option<Self::Output>;
+
+    /// A less-than-or-equal comparison, e.g. `<col> <= <value>`
+    ///
+    /// NOTE: Caller is responsible to commute and/or invert the operation if needed,
+    /// e.g. `NOT(<value> <= <col>` becomes `<col> > <value>`.
+    fn eval_le(&self, col: &str, val: &Scalar) -> Option<Self::Output>;
+
+    /// A greater-than comparison, e.g. `<col> > <value>`
+    ///
+    /// NOTE: Caller is responsible to commute and/or invert the operation if needed,
+    /// e.g. `NOT(<value> > <col>` becomes `<col> >= <value>`.
+    fn eval_gt(&self, col: &str, val: &Scalar) -> Option<Self::Output>;
+
+    /// A greater-than-or-equal comparison, e.g. `<col> >= <value>`
+    ///
+    /// NOTE: Caller is responsible to commute and/or invert the operation if needed,
+    /// e.g. `NOT(<value> >= <col>` becomes `<col> > <value>`.
+    fn eval_ge(&self, col: &str, val: &Scalar) -> Option<Self::Output>;
+
+    /// A (possibly inverted) equality comparison, e.g. `<col> = <value>` or `<col> != <value>`.
+    ///
+    /// NOTE: Caller is responsible to commute the operation if needed, e.g. `<value> != <col>`
+    /// becomes `<col> != <value>`.
+    fn eval_eq(&self, col: &str, val: &Scalar, inverted: bool) -> Option<Self::Output>;
+
+    /// A (possibly inverted) binary comparison between two scalars, e.g. `<value> != <value>`.
+    fn eval_binary_scalars(
+        &self,
+        op: BinaryOperator,
+        left: &Scalar,
+        right: &Scalar,
+        inverted: bool,
+    ) -> Option<Self::Output>;
+
+    /// Completes evaluation of a variadic expression.
+    ///
+    /// AND and OR are implemented by first evaluating its inputs (always the same, provided by
+    /// [`eval_variadic`]), and then assembling the results back into a variadic expression in some
+    /// implementation-defined way (this method).
+    fn finish_eval_variadic(
+        &self,
+        op: VariadicOperator,
+        exprs: impl IntoIterator<Item = Option<Self::Output>>,
+        inverted: bool,
+    ) -> Option<Self::Output>;
+
+    // ==================== PROVIDED METHODS ====================
+
+    /// A (possibly inverted) boolean column access, e.g. `[NOT] <col>`.
     fn eval_column(&self, col: &str, inverted: bool) -> Option<Self::Output> {
         // The expression <col> is equivalent to <col> != FALSE, and the expression NOT <col> is
         // equivalent to <col> != TRUE.
         self.eval_eq(col, &Scalar::from(inverted), true)
     }
 
+    /// Inverts a (possibly already inverted) expression, e.g. `[NOT] NOT <expr>`.
     fn eval_not(&self, expr: &Expr, inverted: bool) -> Option<Self::Output> {
         self.eval_expr(expr, !inverted)
     }
 
-    fn eval_is_null(&self, col: &str, inverted: bool) -> Option<Self::Output>;
-
+    /// Dispatches a (possibly inverted) unary expression to each operator's specific implementation.
     fn eval_unary(&self, op: UnaryOperator, expr: &Expr, inverted: bool) -> Option<Self::Output> {
         match op {
             UnaryOperator::Not => self.eval_not(expr, inverted),
@@ -40,38 +123,33 @@ pub(crate) trait PredicateEvaluator {
         }
     }
 
-    fn eval_lt(&self, col: &str, val: &Scalar) -> Option<Self::Output>;
-
-    fn eval_le(&self, col: &str, val: &Scalar) -> Option<Self::Output>;
-
-    fn eval_gt(&self, col: &str, val: &Scalar) -> Option<Self::Output>;
-
-    fn eval_ge(&self, col: &str, val: &Scalar) -> Option<Self::Output>;
-
-    fn eval_eq(&self, col: &str, val: &Scalar, inverted: bool) -> Option<Self::Output>;
-
+    /// A (possibly inverted) DISTINCT test, e.g. `[NOT] DISTINCT(<col>, false)`. DISTINCT can be
+    /// seen as one of three different operations, depending on the input:
+    ///
+    /// 1. [NOT] DISTINCT(<col>, NULL) is equivalent to `[NOT] (<col> IS NOT NULL)`
+    /// 2. NOT DISTINCT(<col>, <value>) is equivalent to `<col> = <value>`
+    /// 3. DISTINCT(<col>, <value>) is equivalent to `AND(<col> IS NOT NULL, <col> != <value>)`
     fn eval_distinct(&self, col: &str, val: &Scalar, inverted: bool) -> Option<Self::Output> {
         if let Scalar::Null(_) = val {
-            // DISTINCT(<col>, NULL) is the same as <col> IS NOT NULL
             self.eval_is_null(col, !inverted)
         } else if inverted {
-            // NOT DISTINCT(<col>, <val>) is the same as <col> = <val>
             self.eval_eq(col, val, false)
         } else {
-            // DISTINCT(<col>, <val>) is AND(<col> IS NOT NULL, <col> != <val>)
             let args = [self.eval_is_null(col, true), self.eval_eq(col, val, true)];
             self.finish_eval_variadic(VariadicOperator::And, args, false)
         }
     }
 
-    fn eval_binary_scalars(
-        &self,
-        op: BinaryOperator,
-        left: &Scalar,
-        right: &Scalar,
-        inverted: bool,
-    ) -> Option<Self::Output>;
+    /// A (possibly inverted) IN-list check, e.g. `<col> [NOT] IN <array-value>`.
+    ///
+    /// Unsupported by default, but implementations can override it if they wish.
+    fn eval_in(&self, _col: &str, _val: &Scalar, _inverted: bool) -> Option<Self::Output> {
+        None // TODO?
+    }
 
+    /// Dispatches a (possibly inverted) binary expression to each operator's specific implementation.
+    ///
+    /// NOTE: Only binary operators that produce boolean outputs are supported.
     fn eval_binary(
         &self,
         op: BinaryOperator,
@@ -94,7 +172,7 @@ pub(crate) trait PredicateEvaluator {
             }
         };
         match (op, inverted) {
-            (Plus | Minus | Multiply | Divide, _) => None, // Unsupported
+            (Plus | Minus | Multiply | Divide, _) => None, // Unsupported - not boolean output
             (LessThan, false) | (GreaterThanOrEqual, true) => self.eval_lt(col, val),
             (LessThanOrEqual, false) | (GreaterThan, true) => self.eval_le(col, val),
             (GreaterThan, false) | (LessThanOrEqual, true) => self.eval_gt(col, val),
@@ -102,17 +180,12 @@ pub(crate) trait PredicateEvaluator {
             (Equal, _) => self.eval_eq(col, val, inverted),
             (NotEqual, _) => self.eval_eq(col, val, !inverted),
             (Distinct, _) => self.eval_distinct(col, val, inverted),
-            (In | NotIn, _) => None, // TODO?
+            (In, _) => self.eval_in(col, val, inverted),
+            (NotIn, _) => self.eval_in(col, val, !inverted),
         }
     }
 
-    fn finish_eval_variadic(
-        &self,
-        op: VariadicOperator,
-        exprs: impl IntoIterator<Item = Option<Self::Output>>,
-        inverted: bool,
-    ) -> Option<Self::Output>;
-
+    /// Dispatches a variadic operation, leveraging each implementation's [`finish_eval_variadic`].
     fn eval_variadic(
         &self,
         op: VariadicOperator,
@@ -125,6 +198,9 @@ pub(crate) trait PredicateEvaluator {
         self.finish_eval_variadic(op, exprs, inverted)
     }
 
+    /// Dispatches an expression to the specific implementation for each expression variant.
+    ///
+    /// NOTE: [`Expression::Struct`] is not supported and always evaluates to `None`.
     fn eval_expr(&self, expr: &Expr, inverted: bool) -> Option<Self::Output> {
         use Expr::*;
         match expr {
