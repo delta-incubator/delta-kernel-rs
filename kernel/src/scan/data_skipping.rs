@@ -8,7 +8,7 @@ use crate::actions::visitors::SelectionVectorVisitor;
 use crate::actions::{get_log_schema, ADD_NAME};
 use crate::error::DeltaResult;
 use crate::expressions::{
-    joined_column, nested_column, simple_column, simple_column_name, BinaryOperator, ColumnName,
+    joined_column, nested_column, simple_column, simple_column_name, BinaryOperator,
     Expression as Expr, ExpressionRef, UnaryOperator, VariadicOperator,
 };
 use crate::schema::{DataType, PrimitiveType, SchemaRef, SchemaTransform, StructField, StructType};
@@ -66,7 +66,7 @@ fn as_inverted_data_skipping_predicate(expr: &Expr) -> Option<Expr> {
                 // to check if a column could NOT have a null, we need two different checks, to see
                 // if the bounds are tight and then to actually do the check
                 if let Column(col) = expr.as_ref() {
-                    let null_col = joined_column!("nullCount", col.clone());
+                    let null_col = joined_column!("nullCount", col);
                     Some(Expr::or(
                         get_tight_not_null_expr(null_col.clone()),
                         get_wide_not_null_expr(null_col),
@@ -128,14 +128,13 @@ fn as_data_skipping_predicate(expr: &Expr) -> Option<Expr> {
                 }
                 NotEqual => {
                     return Some(Expr::or(
-                        Expr::gt(joined_column!("minValues", col.clone()), val.clone()),
-                        Expr::lt(joined_column!("maxValues", col.clone()), val.clone()),
+                        Expr::gt(joined_column!("minValues", col), val.clone()),
+                        Expr::lt(joined_column!("maxValues", col), val.clone()),
                     ));
                 }
                 _ => return None, // unsupported operation
             };
-            let col = ColumnName::join(stats_col, col.clone());
-            Some(Expr::binary(op, col, val.clone()))
+            Some(Expr::binary(op, stats_col.join(col), val.clone()))
         }
         // push down Not by inverting everything below it
         UnaryOperation { op: Not, expr } => as_inverted_data_skipping_predicate(expr),
@@ -143,7 +142,7 @@ fn as_data_skipping_predicate(expr: &Expr) -> Option<Expr> {
             // to check if a column could have a null, we need two different checks, to see if
             // the bounds are tight and then to actually do the check
             if let Column(col) = expr.as_ref() {
-                let null_col = joined_column!("nullCount", col.clone());
+                let null_col = joined_column!("nullCount", col);
                 Some(Expr::or(
                     get_tight_null_expr(null_col.clone()),
                     get_wide_null_expr(null_col),

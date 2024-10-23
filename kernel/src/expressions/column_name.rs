@@ -18,9 +18,21 @@ impl ColumnName {
         Self { path }
     }
 
-    /// Joins two column names, concatenating their fields into a single nested column path.
-    pub fn join(left: ColumnName, right: ColumnName) -> ColumnName {
-        [left, right].into_iter().collect()
+    /// Joins this column with another, concatenating their fields into a single nested column path.
+    ///
+    /// NOTE: This is a convenience method that copies two arguments without consuming them. If more
+    /// arguments are needed, or if performance is a concern, it is recommended to use
+    /// [`FromIterator for ColumnName`](#impl-FromIterator<ColumnName>-for-ColumnName) instead:
+    ///
+    /// ```
+    /// # use delta_kernel::expressions::ColumnName;
+    /// let x = ColumnName::new(["a", "b"]);
+    /// let y = ColumnName::new(["c", "d"]);
+    /// let joined: ColumnName = [x, y].into_iter().collect();
+    /// assert_eq!(joined, ColumnName::new(["a", "b", "c", "d"]));
+    /// ```
+    pub fn join(&self, right: &ColumnName) -> ColumnName {
+        [self.clone(), right.clone()].into_iter().collect()
     }
 
     /// The path of field names for this column name
@@ -169,16 +181,13 @@ pub use __nested_column_name as nested_column_name;
 #[doc(hidden)]
 macro_rules! __joined_column_name {
     ( $left:literal, $right:literal ) => {
-        $crate::expressions::ColumnName::join(
-            $crate::__simple_column_name!($left),
-            $crate::__simple_column_name!($right),
-        )
+        $crate::__simple_column_name!($left).join(&$crate::__simple_column_name!($right))
     };
     ( $left:literal, $right:expr ) => {
-        $crate::expressions::ColumnName::join($crate::__simple_column_name!($left), $right)
+        $crate::__simple_column_name!($left).join(&$right)
     };
     ( $left:expr, $right:literal) => {
-        $crate::expressions::ColumnName::join($left, $crate::__simple_column_name!($right))
+        $left.join(&$crate::__simple_column_name!($right))
     };
     ( $($other:tt)* ) => {
         compile_error!("joined_column_name!() requires at least one string literal input")
@@ -260,20 +269,20 @@ mod test {
         assert_eq!(joined_column_name!("a", "b"), ColumnName::new(["a", "b"]));
 
         assert_eq!(
-            joined_column_name!(simple.clone(), "b"),
+            joined_column_name!(simple, "b"),
             ColumnName::new(["x", "b"])
         );
         assert_eq!(
-            joined_column_name!(nested.clone(), "b"),
+            joined_column_name!(nested, "b"),
             ColumnName::new(["x.y", "b"])
         );
 
         assert_eq!(
-            joined_column_name!("a", simple.clone()),
+            joined_column_name!("a", &simple),
             ColumnName::new(["a", "x"])
         );
         assert_eq!(
-            joined_column_name!("a", nested.clone()),
+            joined_column_name!("a", &nested),
             ColumnName::new(["a", "x.y"])
         );
 
