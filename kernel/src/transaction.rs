@@ -5,7 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::actions::get_log_commit_info_schema;
 use crate::actions::COMMIT_INFO_NAME;
 use crate::error::Error;
-use crate::expressions::{Scalar, StructData};
+use crate::expressions::{column_expr, column_name, Scalar, StructData};
 use crate::path::ParsedLogPath;
 use crate::schema::{MapType, StructField, StructType};
 use crate::snapshot::Snapshot;
@@ -152,14 +152,14 @@ fn generate_commit_info(
         // one null field to create data that serializes as "operationParameters": {}
         Expression::literal(Scalar::Struct(StructData::try_new(
             vec![StructField::new(
-                "operation_parameter_int",
+                column_name!("operation_parameter_int").into_inner(),
                 DataType::INTEGER,
                 true,
             )],
             vec![Scalar::Null(DataType::INTEGER)],
         )?)),
         Expression::literal(format!("v{}", KERNEL_VERSION)),
-        Expression::column("engineCommitInfo"),
+        column_expr!("engineCommitInfo"),
     ];
     let commit_info_expr = Expression::struct_from([Expression::struct_from(commit_info_exprs)]);
 
@@ -186,7 +186,7 @@ fn generate_commit_info(
         .get_mut("operationParameters")
         .unwrap()
         .data_type = DataType::Struct(Box::new(StructType::new(vec![StructField::new(
-        "hack_operation_parameter_int",
+        column_name!("hack_operation_parameter_int").into_inner(),
         DataType::INTEGER,
         true,
     )])));
