@@ -54,24 +54,6 @@ impl BinaryOperator {
             In | NotIn | Minus | Divide => None, // not commutative
         }
     }
-
-    /// invert an operator. Returns Some<InvertedOp> if the operator supports inversion, None if it
-    /// cannot be inverted
-    pub(crate) fn invert(&self) -> Option<BinaryOperator> {
-        use BinaryOperator::*;
-        match self {
-            LessThan => Some(GreaterThanOrEqual),
-            LessThanOrEqual => Some(GreaterThan),
-            GreaterThan => Some(LessThanOrEqual),
-            GreaterThanOrEqual => Some(LessThan),
-            Equal => Some(NotEqual),
-            NotEqual => Some(Equal),
-            In => Some(NotIn),
-            NotIn => Some(In),
-            Distinct => None, // TODO: Define NotDistinct variant?
-            Plus | Minus | Multiply | Divide => None, // Not boolean
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

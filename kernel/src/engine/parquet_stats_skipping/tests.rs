@@ -1,23 +1,24 @@
 use super::*;
-use crate::expressions::{ArrayData, StructData};
+use crate::expressions::{ArrayData, Expression, StructData};
+use crate::predicates::PredicateEvaluator;
 use crate::schema::ArrayType;
 use crate::DataType;
 
 struct UnimplementedTestFilter;
-impl ParquetStatsSkippingFilter for UnimplementedTestFilter {
-    fn get_min_stat_value(&self, _col: &ColumnPath, _data_type: &DataType) -> Option<Scalar> {
+impl ParquetStatsProvider for UnimplementedTestFilter {
+    fn get_parquet_min_stat(&self, _col: &str, _data_type: &DataType) -> Option<Scalar> {
         unimplemented!()
     }
 
-    fn get_max_stat_value(&self, _col: &ColumnPath, _data_type: &DataType) -> Option<Scalar> {
+    fn get_parquet_max_stat(&self, _col: &str, _data_type: &DataType) -> Option<Scalar> {
         unimplemented!()
     }
 
-    fn get_nullcount_stat_value(&self, _col: &ColumnPath) -> Option<i64> {
+    fn get_parquet_nullcount_stat(&self, _col: &str) -> Option<i64> {
         unimplemented!()
     }
 
-    fn get_rowcount_stat_value(&self) -> i64 {
+    fn get_parquet_rowcount_stat(&self) -> i64 {
         unimplemented!()
     }
 }
@@ -66,22 +67,22 @@ impl JunctionTest {
             .collect();
 
         expect_eq!(
-            filter.apply_variadic(And, &inputs, false),
+            filter.eval_variadic(And, &inputs, false),
             self.expect_and,
             "AND({inputs:?})"
         );
         expect_eq!(
-            filter.apply_variadic(Or, &inputs, false),
+            filter.eval_variadic(Or, &inputs, false),
             self.expect_or,
             "OR({inputs:?})"
         );
         expect_eq!(
-            filter.apply_variadic(And, &inputs, true),
+            filter.eval_variadic(And, &inputs, true),
             self.expect_and.map(|val| !val),
             "NOT(AND({inputs:?}))"
         );
         expect_eq!(
-            filter.apply_variadic(Or, &inputs, true),
+            filter.eval_variadic(Or, &inputs, true),
             self.expect_or.map(|val| !val),
             "NOT(OR({inputs:?}))"
         );
@@ -199,7 +200,9 @@ fn test_binary_scalars() {
         GreaterThan,
         GreaterThanOrEqual,
     ];
-    let compare = UnimplementedTestFilter::apply_binary_scalars;
+    let compare = |op, a, b| {
+        PredicateEvaluator::eval_binary_scalars(&UnimplementedTestFilter, op, a, b, false)
+    };
     for (i, a) in smaller_values.iter().enumerate() {
         for b in smaller_values.iter().skip(i + 1) {
             for op in binary_ops {
@@ -312,20 +315,20 @@ impl MinMaxTestFilter {
             .cloned()
     }
 }
-impl ParquetStatsSkippingFilter for MinMaxTestFilter {
-    fn get_min_stat_value(&self, _col: &ColumnPath, data_type: &DataType) -> Option<Scalar> {
+impl ParquetStatsProvider for MinMaxTestFilter {
+    fn get_parquet_min_stat(&self, _col: &str, data_type: &DataType) -> Option<Scalar> {
         Self::get_stat_value(&self.min, data_type)
     }
 
-    fn get_max_stat_value(&self, _col: &ColumnPath, data_type: &DataType) -> Option<Scalar> {
+    fn get_parquet_max_stat(&self, _col: &str, data_type: &DataType) -> Option<Scalar> {
         Self::get_stat_value(&self.max, data_type)
     }
 
-    fn get_nullcount_stat_value(&self, _col: &ColumnPath) -> Option<i64> {
+    fn get_parquet_nullcount_stat(&self, _col: &str) -> Option<i64> {
         unimplemented!()
     }
 
-    fn get_rowcount_stat_value(&self) -> i64 {
+    fn get_parquet_rowcount_stat(&self) -> i64 {
         unimplemented!()
     }
 }
@@ -342,7 +345,7 @@ fn test_binary_eq_ne() {
     for inverted in [false, true] {
         // negative test -- mismatched column type
         expect_eq!(
-            MinMaxTestFilter::new(MID.into(), MID.into()).apply_binary(
+            MinMaxTestFilter::new(MID.into(), MID.into()).eval_binary(
                 Equal,
                 col,
                 &Expression::literal("10"),
@@ -354,7 +357,7 @@ fn test_binary_eq_ne() {
 
         // quick test for literal-literal comparisons
         expect_eq!(
-            MinMaxTestFilter::new(MID.into(), MID.into()).apply_binary(
+            MinMaxTestFilter::new(MID.into(), MID.into()).eval_binary(
                 Equal,
                 &MID.into(),
                 &MID.into(),
@@ -366,7 +369,7 @@ fn test_binary_eq_ne() {
 
         // quick test for literal-column comparisons
         expect_eq!(
-            MinMaxTestFilter::new(MID.into(), MID.into()).apply_binary(
+            MinMaxTestFilter::new(MID.into(), MID.into()).eval_binary(
                 Equal,
                 &MID.into(),
                 col,
@@ -377,7 +380,7 @@ fn test_binary_eq_ne() {
         );
 
         expect_eq!(
-            MinMaxTestFilter::new(MID.into(), MID.into()).apply_binary(
+            MinMaxTestFilter::new(MID.into(), MID.into()).eval_binary(
                 Equal,
                 col,
                 &MID.into(),
@@ -388,7 +391,7 @@ fn test_binary_eq_ne() {
         );
 
         expect_eq!(
-            MinMaxTestFilter::new(LO.into(), HI.into()).apply_binary(
+            MinMaxTestFilter::new(LO.into(), HI.into()).eval_binary(
                 Equal,
                 col,
                 &MID.into(),
@@ -399,7 +402,7 @@ fn test_binary_eq_ne() {
         );
 
         expect_eq!(
-            MinMaxTestFilter::new(LO.into(), MID.into()).apply_binary(
+            MinMaxTestFilter::new(LO.into(), MID.into()).eval_binary(
                 Equal,
                 col,
                 &HI.into(),
@@ -410,7 +413,7 @@ fn test_binary_eq_ne() {
         );
 
         expect_eq!(
-            MinMaxTestFilter::new(MID.into(), HI.into()).apply_binary(
+            MinMaxTestFilter::new(MID.into(), HI.into()).eval_binary(
                 Equal,
                 col,
                 &LO.into(),
@@ -422,7 +425,7 @@ fn test_binary_eq_ne() {
 
         // negative test -- mismatched column type
         expect_eq!(
-            MinMaxTestFilter::new(MID.into(), MID.into()).apply_binary(
+            MinMaxTestFilter::new(MID.into(), MID.into()).eval_binary(
                 NotEqual,
                 col,
                 &Expression::literal("10"),
@@ -433,7 +436,7 @@ fn test_binary_eq_ne() {
         );
 
         expect_eq!(
-            MinMaxTestFilter::new(MID.into(), MID.into()).apply_binary(
+            MinMaxTestFilter::new(MID.into(), MID.into()).eval_binary(
                 NotEqual,
                 col,
                 &MID.into(),
@@ -444,7 +447,7 @@ fn test_binary_eq_ne() {
         );
 
         expect_eq!(
-            MinMaxTestFilter::new(LO.into(), HI.into()).apply_binary(
+            MinMaxTestFilter::new(LO.into(), HI.into()).eval_binary(
                 NotEqual,
                 col,
                 &MID.into(),
@@ -455,7 +458,7 @@ fn test_binary_eq_ne() {
         );
 
         expect_eq!(
-            MinMaxTestFilter::new(LO.into(), MID.into()).apply_binary(
+            MinMaxTestFilter::new(LO.into(), MID.into()).eval_binary(
                 NotEqual,
                 col,
                 &HI.into(),
@@ -466,7 +469,7 @@ fn test_binary_eq_ne() {
         );
 
         expect_eq!(
-            MinMaxTestFilter::new(MID.into(), HI.into()).apply_binary(
+            MinMaxTestFilter::new(MID.into(), HI.into()).eval_binary(
                 NotEqual,
                 col,
                 &LO.into(),
@@ -489,7 +492,7 @@ fn test_binary_lt_ge() {
 
     for inverted in [false, true] {
         expect_eq!(
-            MinMaxTestFilter::new(MID.into(), MID.into()).apply_binary(
+            MinMaxTestFilter::new(MID.into(), MID.into()).eval_binary(
                 LessThan,
                 col,
                 &MID.into(),
@@ -500,7 +503,7 @@ fn test_binary_lt_ge() {
         );
 
         expect_eq!(
-            MinMaxTestFilter::new(LO.into(), HI.into()).apply_binary(
+            MinMaxTestFilter::new(LO.into(), HI.into()).eval_binary(
                 LessThan,
                 col,
                 &MID.into(),
@@ -511,7 +514,7 @@ fn test_binary_lt_ge() {
         );
 
         expect_eq!(
-            MinMaxTestFilter::new(LO.into(), MID.into()).apply_binary(
+            MinMaxTestFilter::new(LO.into(), MID.into()).eval_binary(
                 LessThan,
                 col,
                 &HI.into(),
@@ -522,7 +525,7 @@ fn test_binary_lt_ge() {
         );
 
         expect_eq!(
-            MinMaxTestFilter::new(MID.into(), HI.into()).apply_binary(
+            MinMaxTestFilter::new(MID.into(), HI.into()).eval_binary(
                 LessThan,
                 col,
                 &LO.into(),
@@ -533,7 +536,7 @@ fn test_binary_lt_ge() {
         );
 
         expect_eq!(
-            MinMaxTestFilter::new(MID.into(), MID.into()).apply_binary(
+            MinMaxTestFilter::new(MID.into(), MID.into()).eval_binary(
                 GreaterThanOrEqual,
                 col,
                 &MID.into(),
@@ -544,7 +547,7 @@ fn test_binary_lt_ge() {
         );
 
         expect_eq!(
-            MinMaxTestFilter::new(LO.into(), HI.into()).apply_binary(
+            MinMaxTestFilter::new(LO.into(), HI.into()).eval_binary(
                 GreaterThanOrEqual,
                 col,
                 &MID.into(),
@@ -555,7 +558,7 @@ fn test_binary_lt_ge() {
         );
 
         expect_eq!(
-            MinMaxTestFilter::new(LO.into(), MID.into()).apply_binary(
+            MinMaxTestFilter::new(LO.into(), MID.into()).eval_binary(
                 GreaterThanOrEqual,
                 col,
                 &HI.into(),
@@ -566,7 +569,7 @@ fn test_binary_lt_ge() {
         );
 
         expect_eq!(
-            MinMaxTestFilter::new(MID.into(), HI.into()).apply_binary(
+            MinMaxTestFilter::new(MID.into(), HI.into()).eval_binary(
                 GreaterThanOrEqual,
                 col,
                 &LO.into(),
@@ -590,7 +593,7 @@ fn test_binary_le_gt() {
     for inverted in [false, true] {
         // negative test -- mismatched column type
         expect_eq!(
-            MinMaxTestFilter::new(MID.into(), MID.into()).apply_binary(
+            MinMaxTestFilter::new(MID.into(), MID.into()).eval_binary(
                 LessThanOrEqual,
                 col,
                 &Expression::literal("10"),
@@ -601,7 +604,7 @@ fn test_binary_le_gt() {
         );
 
         expect_eq!(
-            MinMaxTestFilter::new(MID.into(), MID.into()).apply_binary(
+            MinMaxTestFilter::new(MID.into(), MID.into()).eval_binary(
                 LessThanOrEqual,
                 col,
                 &MID.into(),
@@ -612,7 +615,7 @@ fn test_binary_le_gt() {
         );
 
         expect_eq!(
-            MinMaxTestFilter::new(LO.into(), HI.into()).apply_binary(
+            MinMaxTestFilter::new(LO.into(), HI.into()).eval_binary(
                 LessThanOrEqual,
                 col,
                 &MID.into(),
@@ -623,7 +626,7 @@ fn test_binary_le_gt() {
         );
 
         expect_eq!(
-            MinMaxTestFilter::new(LO.into(), MID.into()).apply_binary(
+            MinMaxTestFilter::new(LO.into(), MID.into()).eval_binary(
                 LessThanOrEqual,
                 col,
                 &HI.into(),
@@ -634,7 +637,7 @@ fn test_binary_le_gt() {
         );
 
         expect_eq!(
-            MinMaxTestFilter::new(MID.into(), HI.into()).apply_binary(
+            MinMaxTestFilter::new(MID.into(), HI.into()).eval_binary(
                 LessThanOrEqual,
                 col,
                 &LO.into(),
@@ -646,7 +649,7 @@ fn test_binary_le_gt() {
 
         // negative test -- mismatched column type
         expect_eq!(
-            MinMaxTestFilter::new(MID.into(), MID.into()).apply_binary(
+            MinMaxTestFilter::new(MID.into(), MID.into()).eval_binary(
                 GreaterThan,
                 col,
                 &Expression::literal("10"),
@@ -657,7 +660,7 @@ fn test_binary_le_gt() {
         );
 
         expect_eq!(
-            MinMaxTestFilter::new(MID.into(), MID.into()).apply_binary(
+            MinMaxTestFilter::new(MID.into(), MID.into()).eval_binary(
                 GreaterThan,
                 col,
                 &MID.into(),
@@ -668,7 +671,7 @@ fn test_binary_le_gt() {
         );
 
         expect_eq!(
-            MinMaxTestFilter::new(LO.into(), HI.into()).apply_binary(
+            MinMaxTestFilter::new(LO.into(), HI.into()).eval_binary(
                 GreaterThan,
                 col,
                 &MID.into(),
@@ -679,7 +682,7 @@ fn test_binary_le_gt() {
         );
 
         expect_eq!(
-            MinMaxTestFilter::new(LO.into(), MID.into()).apply_binary(
+            MinMaxTestFilter::new(LO.into(), MID.into()).eval_binary(
                 GreaterThan,
                 col,
                 &HI.into(),
@@ -690,7 +693,7 @@ fn test_binary_le_gt() {
         );
 
         expect_eq!(
-            MinMaxTestFilter::new(MID.into(), HI.into()).apply_binary(
+            MinMaxTestFilter::new(MID.into(), HI.into()).eval_binary(
                 GreaterThan,
                 col,
                 &LO.into(),
@@ -714,20 +717,20 @@ impl NullCountTestFilter {
         }
     }
 }
-impl ParquetStatsSkippingFilter for NullCountTestFilter {
-    fn get_min_stat_value(&self, _col: &ColumnPath, _data_type: &DataType) -> Option<Scalar> {
+impl ParquetStatsProvider for NullCountTestFilter {
+    fn get_parquet_min_stat(&self, _col: &str, _data_type: &DataType) -> Option<Scalar> {
         unimplemented!()
     }
 
-    fn get_max_stat_value(&self, _col: &ColumnPath, _data_type: &DataType) -> Option<Scalar> {
+    fn get_parquet_max_stat(&self, _col: &str, _data_type: &DataType) -> Option<Scalar> {
         unimplemented!()
     }
 
-    fn get_nullcount_stat_value(&self, _col: &ColumnPath) -> Option<i64> {
+    fn get_parquet_nullcount_stat(&self, _col: &str) -> Option<i64> {
         self.nullcount
     }
 
-    fn get_rowcount_stat_value(&self) -> i64 {
+    fn get_parquet_rowcount_stat(&self) -> i64 {
         self.rowcount
     }
 }
@@ -739,25 +742,25 @@ fn test_not_null() {
     let col = &Expression::column("x");
     for inverted in [false, true] {
         expect_eq!(
-            NullCountTestFilter::new(None, 10).apply_unary(IsNull, col, inverted),
+            NullCountTestFilter::new(None, 10).eval_unary(IsNull, col, inverted),
             None,
             "{col} IS NULL (nullcount: None, rowcount: 10, inverted: {inverted})"
         );
 
         expect_eq!(
-            NullCountTestFilter::new(Some(0), 10).apply_unary(IsNull, col, inverted),
+            NullCountTestFilter::new(Some(0), 10).eval_unary(IsNull, col, inverted),
             Some(inverted),
             "{col} IS NULL (nullcount: 0, rowcount: 10, inverted: {inverted})"
         );
 
         expect_eq!(
-            NullCountTestFilter::new(Some(5), 10).apply_unary(IsNull, col, inverted),
+            NullCountTestFilter::new(Some(5), 10).eval_unary(IsNull, col, inverted),
             Some(true),
             "{col} IS NULL (nullcount: 5, rowcount: 10, inverted: {inverted})"
         );
 
         expect_eq!(
-            NullCountTestFilter::new(Some(10), 10).apply_unary(IsNull, col, inverted),
+            NullCountTestFilter::new(Some(10), 10).eval_unary(IsNull, col, inverted),
             Some(!inverted),
             "{col} IS NULL (nullcount: 10, rowcount: 10, inverted: {inverted})"
         );
@@ -771,17 +774,17 @@ fn test_bool_col() {
     const FALSE: Scalar = Boolean(false);
     for inverted in [false, true] {
         expect_eq!(
-            MinMaxTestFilter::new(TRUE.into(), TRUE.into()).apply_column("x", inverted),
+            MinMaxTestFilter::new(TRUE.into(), TRUE.into()).eval_column("x", inverted),
             Some(!inverted),
             "x as boolean (min: TRUE, max: TRUE, inverted: {inverted})"
         );
         expect_eq!(
-            MinMaxTestFilter::new(FALSE.into(), TRUE.into()).apply_column("x", inverted),
+            MinMaxTestFilter::new(FALSE.into(), TRUE.into()).eval_column("x", inverted),
             Some(true),
             "x as boolean (min: FALSE, max: TRUE, inverted: {inverted})"
         );
         expect_eq!(
-            MinMaxTestFilter::new(FALSE.into(), FALSE.into()).apply_column("x", inverted),
+            MinMaxTestFilter::new(FALSE.into(), FALSE.into()).eval_column("x", inverted),
             Some(inverted),
             "x as boolean (min: FALSE, max: FALSE, inverted: {inverted})"
         );
@@ -789,20 +792,20 @@ fn test_bool_col() {
 }
 
 struct AllNullTestFilter;
-impl ParquetStatsSkippingFilter for AllNullTestFilter {
-    fn get_min_stat_value(&self, _col: &ColumnPath, _data_type: &DataType) -> Option<Scalar> {
+impl ParquetStatsProvider for AllNullTestFilter {
+    fn get_parquet_min_stat(&self, _col: &str, _data_type: &DataType) -> Option<Scalar> {
         None
     }
 
-    fn get_max_stat_value(&self, _col: &ColumnPath, _data_type: &DataType) -> Option<Scalar> {
+    fn get_parquet_max_stat(&self, _col: &str, _data_type: &DataType) -> Option<Scalar> {
         None
     }
 
-    fn get_nullcount_stat_value(&self, _col: &ColumnPath) -> Option<i64> {
-        Some(self.get_rowcount_stat_value())
+    fn get_parquet_nullcount_stat(&self, _col: &str) -> Option<i64> {
+        Some(self.get_parquet_rowcount_stat())
     }
 
-    fn get_rowcount_stat_value(&self) -> i64 {
+    fn get_parquet_rowcount_stat(&self) -> i64 {
         10
     }
 }
@@ -816,44 +819,44 @@ fn test_sql_where() {
     const TRUE: Expression = Expression::Literal(Scalar::Boolean(true));
 
     // Basic sanity checks
-    expect_eq!(AllNullTestFilter.apply_sql_where(val), None, "WHERE {val}");
-    expect_eq!(AllNullTestFilter.apply_sql_where(col), None, "WHERE {col}");
+    expect_eq!(AllNullTestFilter.eval_sql_where(val), None, "WHERE {val}");
+    expect_eq!(AllNullTestFilter.eval_sql_where(col), None, "WHERE {col}");
     expect_eq!(
-        AllNullTestFilter.apply_sql_where(&Expression::is_null(col.clone())),
+        AllNullTestFilter.eval_sql_where(&Expression::is_null(col.clone())),
         Some(true), // No injected NULL checks
         "WHERE {col} IS NULL"
     );
     expect_eq!(
-        AllNullTestFilter.apply_sql_where(&Expression::lt(TRUE, FALSE)),
+        AllNullTestFilter.eval_sql_where(&Expression::lt(TRUE, FALSE)),
         Some(false), // Injected NULL checks don't short circuit when inputs are NOT NULL
         "WHERE {TRUE} < {FALSE}"
     );
 
     // Constrast normal vs SQL WHERE semantics - comparison
     expect_eq!(
-        AllNullTestFilter.apply_expr(&Expression::lt(col.clone(), val.clone()), false),
+        AllNullTestFilter.eval_expr(&Expression::lt(col.clone(), val.clone()), false),
         None,
         "{col} < {val}"
     );
     expect_eq!(
-        AllNullTestFilter.apply_sql_where(&Expression::lt(col.clone(), val.clone())),
+        AllNullTestFilter.eval_sql_where(&Expression::lt(col.clone(), val.clone())),
         Some(false),
         "WHERE {col} < {val}"
     );
     expect_eq!(
-        AllNullTestFilter.apply_expr(&Expression::lt(val.clone(), col.clone()), false),
+        AllNullTestFilter.eval_expr(&Expression::lt(val.clone(), col.clone()), false),
         None,
         "{val} < {col}"
     );
     expect_eq!(
-        AllNullTestFilter.apply_sql_where(&Expression::lt(val.clone(), col.clone())),
+        AllNullTestFilter.eval_sql_where(&Expression::lt(val.clone(), col.clone())),
         Some(false),
         "WHERE {val} < {col}"
     );
 
     // Constrast normal vs SQL WHERE semantics - comparison inside AND
     expect_eq!(
-        AllNullTestFilter.apply_expr(
+        AllNullTestFilter.eval_expr(
             &Expression::and(NULL, Expression::lt(col.clone(), val.clone())),
             false
         ),
@@ -861,7 +864,7 @@ fn test_sql_where() {
         "{NULL} AND {col} < {val}"
     );
     expect_eq!(
-        AllNullTestFilter.apply_sql_where(&Expression::and(
+        AllNullTestFilter.eval_sql_where(&Expression::and(
             NULL,
             Expression::lt(col.clone(), val.clone()),
         )),
@@ -870,7 +873,7 @@ fn test_sql_where() {
     );
 
     expect_eq!(
-        AllNullTestFilter.apply_expr(
+        AllNullTestFilter.eval_expr(
             &Expression::and(TRUE, Expression::lt(col.clone(), val.clone())),
             false
         ),
@@ -878,7 +881,7 @@ fn test_sql_where() {
         "{TRUE} AND {col} < {val}"
     );
     expect_eq!(
-        AllNullTestFilter.apply_sql_where(&Expression::and(
+        AllNullTestFilter.eval_sql_where(&Expression::and(
             TRUE,
             Expression::lt(col.clone(), val.clone()),
         )),
@@ -888,7 +891,7 @@ fn test_sql_where() {
 
     // Contrast normal vs. SQL WHERE semantics - comparison inside AND inside AND
     expect_eq!(
-        AllNullTestFilter.apply_expr(
+        AllNullTestFilter.eval_expr(
             &Expression::and(
                 TRUE,
                 Expression::and(NULL, Expression::lt(col.clone(), val.clone())),
@@ -899,7 +902,7 @@ fn test_sql_where() {
         "{TRUE} AND ({NULL} AND {col} < {val})"
     );
     expect_eq!(
-        AllNullTestFilter.apply_sql_where(&Expression::and(
+        AllNullTestFilter.eval_sql_where(&Expression::and(
             TRUE,
             Expression::and(NULL, Expression::lt(col.clone(), val.clone())),
         )),
@@ -909,7 +912,7 @@ fn test_sql_where() {
 
     // Semantics are the same for comparison inside OR inside AND
     expect_eq!(
-        AllNullTestFilter.apply_expr(
+        AllNullTestFilter.eval_expr(
             &Expression::or(
                 FALSE,
                 Expression::and(NULL, Expression::lt(col.clone(), val.clone())),
@@ -920,7 +923,7 @@ fn test_sql_where() {
         "{FALSE} OR ({NULL} AND {col} < {val})"
     );
     expect_eq!(
-        AllNullTestFilter.apply_sql_where(&Expression::or(
+        AllNullTestFilter.eval_sql_where(&Expression::or(
             FALSE,
             Expression::and(NULL, Expression::lt(col.clone(), val.clone())),
         )),
