@@ -1,6 +1,6 @@
 # Changelog
 
-## [v0.4.0](https://github.com/delta-incubator/delta-kernel-rs/tree/v0.4.0/) (2024-10-22)
+## [v0.4.0](https://github.com/delta-incubator/delta-kernel-rs/tree/v0.4.0/) (2024-10-23)
 
 [Full Changelog](https://github.com/delta-incubator/delta-kernel-rs/compare/v0.3.1...v0.4.0)
 
@@ -13,17 +13,16 @@
 3. new `WriterFeatures` enum variant: `TypeWidening` and `TypeWideningPreview` [\#335]
 4. new `Error` enum variant: `InvalidLogPath` when kernel is unable to parse the name of a log path [\#347]
 5. Module moved: `mod delta_kernel::transaction` -> `mod delta_kernel::actions::set_transaction` [\#386]
-6. output of arrow expression evaluation now applies/validates output schema in default arrow expression handler [\#331]
-7. change `default-feature` to be none (removed `sync-engine` by default. If downstream users relied on this, turn on `sync-engine` feature or specific arrow-related feature flags to pull in the pieces needed) [\#339]
-8. `Scan`'s `execute(..)` method now returns a lazy iterator instead of materializing a `Vec<ScanResult>`. You can trivially migrate to the new API (and force eager materialization by using `.collect()` or the like on the returned iterator) [\#340]
-9. schema and expression FFI moved to their own `mod delta_kernel_ffi::schema` and `mod delta_kernel_ffi::expressions` [\#360]
-10. Parquet and JSON readers in `Engine` trait now take `Arc<Expression>` (aliased to `ExpressionRef`) instead of `Expression` [\#364]
-11. `StructType::new(..)` now takes an `impl IntoIterator<Item = StructField>` instead of `Vec<StructField>` [\#385]
-12. `DataType::struct_type(..)` now takes an `impl IntoIterator<Item = StructField>` instead of `Vec<StructField>` [\#385]
-13. removed `DataType::array_type(..)` API: there is already an `impl From<ArrayType> for DataType` [\#385]
-14. `Expression::struct_expr(..)` renamed to `Expression::struct_from(..)` [\#399]
-15. lots of expressions take `impl Into<Self>` or `impl Into<Expression>` instead of just `Self`/`Expression` now [\#399]
-16. remove `log_replay_iter` and `process_batch` APIs in `scan::log_replay` [\#402]
+6. change `default-feature` to be none (removed `sync-engine` by default. If downstream users relied on this, turn on `sync-engine` feature or specific arrow-related feature flags to pull in the pieces needed) [\#339]
+7. `Scan`'s `execute(..)` method now returns a lazy iterator instead of materializing a `Vec<ScanResult>`. You can trivially migrate to the new API (and force eager materialization by using `.collect()` or the like on the returned iterator) [\#340]
+8. schema and expression FFI moved to their own `mod delta_kernel_ffi::schema` and `mod delta_kernel_ffi::expressions` [\#360]
+9. Parquet and JSON readers in `Engine` trait now take `Arc<Expression>` (aliased to `ExpressionRef`) instead of `Expression` [\#364]
+10. `StructType::new(..)` now takes an `impl IntoIterator<Item = StructField>` instead of `Vec<StructField>` [\#385]
+11. `DataType::struct_type(..)` now takes an `impl IntoIterator<Item = StructField>` instead of `Vec<StructField>` [\#385]
+12. removed `DataType::array_type(..)` API: there is already an `impl From<ArrayType> for DataType` [\#385]
+13. `Expression::struct_expr(..)` renamed to `Expression::struct_from(..)` [\#399]
+14. lots of expressions take `impl Into<Self>` or `impl Into<Expression>` instead of just `Self`/`Expression` now [\#399]
+15. remove `log_replay_iter` and `process_batch` APIs in `scan::log_replay` [\#402]
 
 *Additions*
 
@@ -48,6 +47,7 @@
 
 **Fixed bugs:**
 
+- output of arrow expression evaluation now applies/validates output schema in default arrow expression handler [\#331]
 - add `arrow-buffer` to `arrow-expression` feature [\#332]
 - fix bug with out-of-date last checkpoint [\#354]
 - fixed broken sync engine json parsing and harmonized sync/async json parsing [\#373]
