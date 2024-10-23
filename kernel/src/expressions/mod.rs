@@ -187,22 +187,14 @@ impl Display for Expression {
                 UnaryOperator::Not => write!(f, "NOT {}", expr),
                 UnaryOperator::IsNull => write!(f, "{} IS NULL", expr),
             },
-            Self::VariadicOperation { op, exprs } => match op {
-                VariadicOperator::And => {
-                    write!(
-                        f,
-                        "AND({})",
-                        &exprs.iter().map(|e| format!("{e}")).join(", ")
-                    )
-                }
-                VariadicOperator::Or => {
-                    write!(
-                        f,
-                        "OR({})",
-                        &exprs.iter().map(|e| format!("{e}")).join(", ")
-                    )
-                }
-            },
+            Self::VariadicOperation { op, exprs } => {
+                let exprs = &exprs.iter().map(|e| format!("{e}")).join(", ");
+                let op = match op {
+                    VariadicOperator::And => "AND",
+                    VariadicOperator::Or => "OR",
+                };
+                write!(f, "{op}({exprs})")
+            }
         }
     }
 }
@@ -343,23 +335,24 @@ impl Expression {
     }
 
     fn walk(&self) -> impl Iterator<Item = &Self> + '_ {
+        use Expression::*;
         let mut stack = vec![self];
         std::iter::from_fn(move || {
             let expr = stack.pop()?;
             match expr {
-                Self::Literal(_) => {}
-                Self::Column { .. } => {}
-                Self::Struct(exprs) => {
+                Literal(_) => {}
+                Column { .. } => {}
+                Struct(exprs) => {
                     stack.extend(exprs.iter());
                 }
-                Self::BinaryOperation { left, right, .. } => {
+                UnaryOperation { expr, .. } => {
+                    stack.push(expr);
+                }
+                BinaryOperation { left, right, .. } => {
                     stack.push(left);
                     stack.push(right);
                 }
-                Self::UnaryOperation { expr, .. } => {
-                    stack.push(expr);
-                }
-                Self::VariadicOperation { exprs, .. } => {
+                VariadicOperation { exprs, .. } => {
                     stack.extend(exprs.iter());
                 }
             }
