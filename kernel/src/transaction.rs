@@ -413,6 +413,14 @@ mod tests {
         )
         .map_err(|e| match e {
             Error::Arrow(arrow_schema::ArrowError::SchemaError(_)) => (),
+            Error::Backtraced { source, .. }
+                if matches!(
+                    &*source,
+                    Error::Arrow(arrow_schema::ArrowError::SchemaError(_))
+                ) =>
+            {
+                ()
+            }
             _ => panic!("expected arrow schema error error, got {:?}", e),
         });
 
@@ -439,6 +447,14 @@ mod tests {
         )
         .map_err(|e| match e {
             Error::Arrow(arrow_schema::ArrowError::InvalidArgumentError(_)) => (),
+            Error::Backtraced { source, .. }
+                if matches!(
+                    &*source,
+                    Error::Arrow(arrow_schema::ArrowError::InvalidArgumentError(_))
+                ) =>
+            {
+                ()
+            }
             _ => panic!("expected arrow invalid arg error, got {:?}", e),
         });
 
