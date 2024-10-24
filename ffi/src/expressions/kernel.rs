@@ -317,7 +317,9 @@ pub unsafe extern "C" fn visit_expression(
             Expression::Literal(scalar) => {
                 visit_expression_scalar(visitor, scalar, sibling_list_id)
             }
-            Expression::Column(name) => call!(visitor, visit_column, sibling_list_id, name.into()),
+            Expression::Column(name) => {
+                call!(visitor, visit_column, sibling_list_id, name.as_str().into())
+            }
             Expression::Struct(exprs) => {
                 visit_expression_struct_expr(visitor, exprs, sibling_list_id)
             }

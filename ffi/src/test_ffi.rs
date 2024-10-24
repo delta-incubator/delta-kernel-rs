@@ -4,7 +4,7 @@ use std::{ops::Not, sync::Arc};
 
 use crate::{expressions::SharedExpression, handle::Handle};
 use delta_kernel::{
-    expressions::{ArrayData, BinaryOperator, Expression, Scalar, StructData},
+    expressions::{column_expr, ArrayData, BinaryOperator, Expression, Scalar, StructData},
     schema::{ArrayType, DataType, StructField, StructType},
 };
 
@@ -69,7 +69,7 @@ pub unsafe extern "C" fn get_testing_kernel_expression() -> Handle<SharedExpress
             Scalar::Integer(5).into(),
             Scalar::Long(20).into(),
         ])]),
-        Expr::not(Expr::is_null(Expr::column("col"))),
+        Expr::not(Expr::is_null(column_expr!("col").into())),
     ];
     sub_exprs.extend(
         [
