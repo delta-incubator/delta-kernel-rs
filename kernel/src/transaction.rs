@@ -66,12 +66,12 @@ impl Transaction {
         // note: only support commit_info right now (and it's required)
         let engine_commit_info = self
             .commit_info
-            .clone()
+            .as_ref()
             .ok_or_else(|| Error::MissingCommitInfo)?;
         let actions = Box::new(iter::once(generate_commit_info(
             engine,
             self.operation.as_deref(),
-            engine_commit_info,
+            engine_commit_info.as_ref(),
         )?));
 
         // step two: set new commit version (current_version + 1) and path to write
@@ -129,7 +129,7 @@ pub enum CommitResult {
 fn generate_commit_info(
     engine: &dyn Engine,
     operation: Option<&str>,
-    engine_commit_info: Arc<dyn EngineData>,
+    engine_commit_info: &dyn EngineData,
 ) -> DeltaResult<Box<dyn EngineData>> {
     if engine_commit_info.length() != 1 {
         return Err(Error::InvalidCommitInfo(format!(
@@ -198,7 +198,7 @@ fn generate_commit_info(
         commit_info_empty_struct_schema.into(),
     );
 
-    commit_info_evaluator.evaluate(engine_commit_info.as_ref())
+    commit_info_evaluator.evaluate(engine_commit_info)
 }
 
 #[cfg(test)]
@@ -311,7 +311,7 @@ mod tests {
         let actions = generate_commit_info(
             &engine,
             Some("test operation"),
-            Arc::new(ArrowEngineData::new(commit_info_batch)),
+            &ArrowEngineData::new(commit_info_batch),
         )?;
 
         let expected = serde_json::json!({
@@ -371,7 +371,7 @@ mod tests {
         let actions = generate_commit_info(
             &engine,
             Some("test operation"),
-            Arc::new(ArrowEngineData::new(commit_info_batch)),
+            &ArrowEngineData::new(commit_info_batch),
         )?;
 
         let expected = serde_json::json!({
@@ -409,7 +409,7 @@ mod tests {
         let _ = generate_commit_info(
             &engine,
             Some("test operation"),
-            Arc::new(ArrowEngineData::new(commit_info_batch)),
+            &ArrowEngineData::new(commit_info_batch),
         )
         .map_err(|e| match e {
             Error::Arrow(arrow_schema::ArrowError::SchemaError(_)) => (),
@@ -440,7 +440,7 @@ mod tests {
         let _ = generate_commit_info(
             &engine,
             Some("test operation"),
-            Arc::new(ArrowEngineData::new(commit_info_batch)),
+            &ArrowEngineData::new(commit_info_batch),
         )
         .map_err(|e| match e {
             Error::Arrow(arrow_schema::ArrowError::InvalidArgumentError(_)) => (),
@@ -533,7 +533,7 @@ mod tests {
             let actions = generate_commit_info(
                 &engine,
                 Some("test operation"),
-                Arc::new(ArrowEngineData::new(commit_info_batch)),
+                &ArrowEngineData::new(commit_info_batch),
             )?;
 
             assert_empty_commit_info(actions, is_null)?;
