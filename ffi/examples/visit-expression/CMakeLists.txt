@@ -8,11 +8,7 @@ target_link_directories(visit_expression PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/../
 target_link_libraries(visit_expression PUBLIC delta_kernel_ffi)
 target_compile_options(visit_expression PUBLIC)
 
-if(MSVC)
-  target_compile_options(visit_expression PRIVATE /W4 /WX)
-else()
-  target_compile_options(visit_expression PRIVATE -Wall -Wextra -Wpedantic -Werror -Wno-strict-prototypes)
-endif()
+target_compile_options(visit_expression PRIVATE -Wall -Wextra -Wpedantic -Werror -Wno-strict-prototypes)
 
 # Add the kernel expresion -> engine expression test
 include(CTest)
