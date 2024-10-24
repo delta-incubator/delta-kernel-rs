@@ -8,7 +8,9 @@ use delta_kernel::{
     schema::{ArrayType, DataType, StructField, StructType},
 };
 
-/// Constructs a kernel expression that is passed back as a SharedExpression handle
+/// Constructs a kernel expression that is passed back as a SharedExpression handle. The expected
+/// output expression can be found in `ffi/tests/test_expression_visitor/expected.txt` as a printed
+/// tree.
 ///
 /// # Safety
 /// The caller is responsible for freeing the retured memory, either by calling

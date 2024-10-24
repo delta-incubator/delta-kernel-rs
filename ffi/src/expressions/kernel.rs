@@ -50,14 +50,16 @@ type VisitUnaryFn = extern "C" fn(data: *mut c_void, sibling_list_id: usize, chi
 ///
 /// WARNING: The visitor MUST NOT retain internal references to string slices or binary data passed
 /// to visitor methods
-/// TODO: Add type information in struct field and null. This will likely involve using the schema visitor.
+/// TODO: Visit type information in struct field and null. This will likely involve using the schema
+/// visitor. Note that struct literals are currently in flux, and may change significantly. Here is the relevant
+/// issue: https://github.com/delta-incubator/delta-kernel-rs/issues/412
 #[repr(C)]
 pub struct EngineExpressionVisitor {
     /// An opaque engine state pointer
     pub data: *mut c_void,
     /// Creates a new expression list, optionally reserving capacity up front
     pub make_field_list: extern "C" fn(data: *mut c_void, reserve: usize) -> usize,
-    /// Visit a 32bit `integer belonging to the list identified by `sibling_list_id`.
+    /// Visit a 32bit `integer` belonging to the list identified by `sibling_list_id`.
     pub visit_int_literal: VisitLiteralFn<i32>,
     /// Visit a 64bit `long`  belonging to the list identified by `sibling_list_id`.
     pub visit_long_literal: VisitLiteralFn<i64>,

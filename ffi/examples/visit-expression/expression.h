@@ -68,7 +68,6 @@ typedef struct {
   void* ref;
   enum ExpressionType type;
 } ExpressionItem;
-
 typedef struct {
   uint32_t len;
   ExpressionItem* list;
@@ -77,8 +76,6 @@ struct BinOp {
   enum OpType op;
   ExpressionItemList exprs;
 };
-struct Null;
-
 struct Variadic {
   enum VariadicType op;
   ExpressionItemList exprs;
@@ -317,8 +314,8 @@ DEFINE_UNARY(visit_expr_not, Not)
  * Column Expression
  ************************************************************/
 
-void visit_expr_column(void* data, uintptr_t sibling_id_list, KernelStringSlice string) {
-  char* column_name = allocate_string(string);
+void visit_expr_column(void* data, uintptr_t sibling_id_list, KernelStringSlice col_name) {
+  char* column_name = allocate_string(col_name);
   put_expr_item(data, sibling_id_list, column_name, Column);
 }
 
