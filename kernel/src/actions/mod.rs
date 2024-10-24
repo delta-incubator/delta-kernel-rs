@@ -159,9 +159,11 @@ impl Protocol {
 #[cfg_attr(not(feature = "developer-visibility"), visibility::make(pub(crate)))]
 struct CommitInfo {
     /// The time this logical file was created, as milliseconds since the epoch.
+    /// Read: optional, write: required (that is, kernel always writes).
+    /// If in-commit timestamps are enabled, this is always required.
     pub(crate) timestamp: Option<i64>,
     /// An arbitrary string that identifies the operation associated with this commit. This is
-    /// specified by the engine.
+    /// specified by the engine. Read: optional, write: required (that is, kernel alwarys writes).
     pub(crate) operation: Option<String>,
     /// Map of arbitrary string key-value pairs that provide additional information about the
     /// operation. This is specified by the engine. For now this is always empty on write.

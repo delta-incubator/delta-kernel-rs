@@ -190,7 +190,8 @@ impl ParsedLogPath<Url> {
     ) -> DeltaResult<ParsedLogPath<Url>> {
         let filename = format!("{:020}.json", version);
         let location = table_root.join("_delta_log/")?.join(&filename)?;
-        let path = Self::try_from(location)?.expect("valid commit path");
+        let path = Self::try_from(location)?
+            .ok_or_else(|| Error::internal_error("attempted to create invalid commit path"))?;
         if !path.is_commit() {
             return Err(Error::internal_error(
                 "ParsedLogPath::new_commit created a non-commit path",
