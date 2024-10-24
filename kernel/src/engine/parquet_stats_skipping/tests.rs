@@ -98,7 +98,7 @@ fn test_junctions() {
     const NULL: Option<bool> = None;
     let test_cases = &[
         // Every combo of 0, 1 and 2 inputs
-        test_case(&[], TRUE, FALSE),
+        test_case(&[] as &[Option<bool>], TRUE, FALSE),
         test_case(&[TRUE], TRUE, TRUE),
         test_case(&[FALSE], FALSE, FALSE),
         test_case(&[NULL], NULL, NULL),

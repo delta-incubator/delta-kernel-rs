@@ -20,22 +20,9 @@ macro_rules! expect_eq {
     };
 }
 
-struct UnimplementedColumnResolver;
-impl ResolveColumnAsScalar for UnimplementedColumnResolver {
-    fn resolve_column(&self, _col: &str) -> Option<Scalar> {
-        unimplemented!()
-    }
-}
-
 impl ResolveColumnAsScalar for Scalar {
     fn resolve_column(&self, _col: &str) -> Option<Scalar> {
         Some(self.clone())
-    }
-}
-
-impl ResolveColumnAsScalar for HashMap<&'static str, Scalar> {
-    fn resolve_column(&self, col: &str) -> Option<Scalar> {
-        self.get(col).cloned()
     }
 }
 

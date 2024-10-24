@@ -17,6 +17,9 @@ use crate::predicates::{
 use crate::schema::{DataType, PrimitiveType, SchemaRef, SchemaTransform, StructField, StructType};
 use crate::{Engine, EngineData, ExpressionEvaluator, JsonHandler};
 
+#[cfg(test)]
+mod tests;
+
 /// Rewrites a predicate to a predicate that can be used to skip files based on their stats.
 /// Returns `None` if the predicate is not eligible for data skipping.
 ///
@@ -178,39 +181,6 @@ impl DataSkippingFilter {
 
 struct DataSkippingPredicateCreator;
 
-impl DataSkippingPredicateCreator {
-    /// Get the expression that checks IS [NOT] NULL for a column with tight bounds. A column may
-    /// satisfy IS NULL if `nullCount != 0`, and may satisfy IS NOT NULL if `nullCount !=
-    /// numRecords`. Note that a the bounds are tight unless `tightBounds` is neither TRUE nor NULL.
-    fn get_tight_is_null_expr(nullcount_col: Expr, inverted: bool) -> Expr {
-        let sentinel_value = if inverted {
-            Expr::column("numRecords")
-        } else {
-            Expr::literal(0i64)
-        };
-        Expr::and(
-            Expr::distinct(Expr::column("tightBounds"), false),
-            Expr::ne(nullcount_col, sentinel_value),
-        )
-    }
-
-    /// Get the expression that checks if a col could be null, assuming tight_bounds = false. In this
-    /// case, we can only check whether the WHOLE column is null or not, by checking if the number of
-    /// records is equal to the null count. Any other values of nullCount must be ignored (except 0,
-    /// which doesn't help us).
-    fn get_wide_is_null_expr(nullcount_col: Expr, inverted: bool) -> Expr {
-        let op = if inverted {
-            BinaryOperator::NotEqual
-        } else {
-            BinaryOperator::Equal
-        };
-        Expr::and(
-            Expr::eq(Expr::column("tightBounds"), false),
-            Expr::binary(op, Expr::column("numRecords"), nullcount_col),
-        )
-    }
-}
-
 impl DataSkippingPredicateEvaluator for DataSkippingPredicateCreator {
     type Output = Expr;
     type TypedStat = Expr;
@@ -236,7 +206,7 @@ impl DataSkippingPredicateEvaluator for DataSkippingPredicateCreator {
 
     /// Retrieves the row count of a column (parquet footers always include this stat).
     fn get_rowcount_stat(&self) -> Option<Expr> {
-        let col = "minValues";
+        let col = "numRecords";
         Some(Expr::column(col))
     }
 
@@ -263,13 +233,11 @@ impl DataSkippingPredicateEvaluator for DataSkippingPredicateCreator {
     }
 
     fn eval_is_null(&self, col: &str, inverted: bool) -> Option<Expr> {
-        // to check if a column could have a null, we need two different checks, to see if
-        // the bounds are tight and then to actually do the check
-        let nullcount = self.get_nullcount_stat(col)?;
-        Some(Expr::or(
-            Self::get_tight_is_null_expr(nullcount.clone(), inverted),
-            Self::get_wide_is_null_expr(nullcount, inverted),
-        ))
+        let safe_to_skip = match inverted {
+            true => self.get_rowcount_stat()?, // all-null
+            false => Expr::literal(0i64),      // no-null
+        };
+        Some(Expr::ne(self.get_nullcount_stat(col)?, safe_to_skip))
     }
 
     fn eval_binary_scalars(
@@ -292,92 +260,13 @@ impl DataSkippingPredicateEvaluator for DataSkippingPredicateCreator {
         if inverted {
             op = op.invert();
         }
+        // NOTE: By flattening, AND can produce TRUE where NULL would otherwise be expected. But
+        // this is for data skipping, which only cares about FALSE. So we accept and keep it simple.
         let exprs = exprs.into_iter();
         let exprs: Vec<_> = match op {
             VariadicOperator::And => exprs.flatten().collect(),
             VariadicOperator::Or => exprs.collect::<Option<_>>()?,
         };
         Some(Expr::variadic(op, exprs))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_rewrite_basic_comparison() {
-        let column = Expr::column("a");
-        let lit_int = Expr::literal(1_i32);
-        let min_col = Expr::column("minValues.a");
-        let max_col = Expr::column("maxValues.a");
-
-        let cases = [
-            (
-                column.clone().lt(lit_int.clone()),
-                Expr::lt(min_col.clone(), lit_int.clone()),
-            ),
-            (
-                lit_int.clone().lt(column.clone()),
-                Expr::gt(max_col.clone(), lit_int.clone()),
-            ),
-            (
-                column.clone().gt(lit_int.clone()),
-                Expr::gt(max_col.clone(), lit_int.clone()),
-            ),
-            (
-                lit_int.clone().gt(column.clone()),
-                Expr::lt(min_col.clone(), lit_int.clone()),
-            ),
-            (
-                column.clone().lt_eq(lit_int.clone()),
-                Expr::le(min_col.clone(), lit_int.clone()),
-            ),
-            (
-                lit_int.clone().lt_eq(column.clone()),
-                Expr::ge(max_col.clone(), lit_int.clone()),
-            ),
-            (
-                column.clone().gt_eq(lit_int.clone()),
-                Expr::ge(max_col.clone(), lit_int.clone()),
-            ),
-            (
-                lit_int.clone().gt_eq(column.clone()),
-                Expr::le(min_col.clone(), lit_int.clone()),
-            ),
-            (
-                column.clone().eq(lit_int.clone()),
-                Expr::and_from([
-                    Expr::le(min_col.clone(), lit_int.clone()),
-                    Expr::ge(max_col.clone(), lit_int.clone()),
-                ]),
-            ),
-            (
-                lit_int.clone().eq(column.clone()),
-                Expr::and_from([
-                    Expr::le(min_col.clone(), lit_int.clone()),
-                    Expr::ge(max_col.clone(), lit_int.clone()),
-                ]),
-            ),
-            (
-                column.clone().ne(lit_int.clone()),
-                Expr::or_from([
-                    Expr::ne(min_col.clone(), lit_int.clone()),
-                    Expr::ne(max_col.clone(), lit_int.clone()),
-                ]),
-            ),
-            (
-                lit_int.clone().ne(column.clone()),
-                Expr::or_from([
-                    Expr::ne(min_col.clone(), lit_int.clone()),
-                    Expr::ne(max_col.clone(), lit_int.clone()),
-                ]),
-            ),
-        ];
-
-        for (input, expected) in cases {
-            let rewritten = as_data_skipping_predicate(&input, false).unwrap();
-            assert_eq!(rewritten, expected, "input was {input}")
-        }
     }
 }

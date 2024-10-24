@@ -311,6 +311,25 @@ impl PredicateEvaluatorDefaults {
 pub(crate) trait ResolveColumnAsScalar {
     fn resolve_column(&self, col: &str) -> Option<Scalar>;
 }
+
+// Some tests do not actually require column resolution
+#[cfg(test)]
+pub(crate) struct UnimplementedColumnResolver;
+#[cfg(test)]
+impl ResolveColumnAsScalar for UnimplementedColumnResolver {
+    fn resolve_column(&self, _col: &str) -> Option<Scalar> {
+        unimplemented!()
+    }
+}
+
+// In testing, it is convenient to just build a hashmap of scalar values.
+#[cfg(test)]
+impl ResolveColumnAsScalar for std::collections::HashMap<&'static str, Scalar> {
+    fn resolve_column(&self, col: &str) -> Option<Scalar> {
+        self.get(col).cloned()
+    }
+}
+
 /// A predicate evaluator that directly evaluates the predicate to produce an `Option<bool>`
 /// result. Column resolution is handled by an embedded [`ResolveColumnAsScalar`] instance.
 pub(crate) struct DefaultPredicateEvaluator {
@@ -412,8 +431,8 @@ impl PredicateEvaluator for DefaultPredicateEvaluator {
 /// The types involved in these operations are parameterized and implementation-specific. For
 /// example, [`crate::engine::parquet_stats_skipping::ParquetStatsProvider`] directly evaluates data
 /// skipping expressions and returnss boolean results, while
-/// [`crate::data_skipping::DataSkippingPredicateCreator`] instead converts the input predicate to a
-/// data skipping predicate that can be evaluated directly later.
+/// [`crate::scan::data_skipping::DataSkippingPredicateCreator`] instead converts the input
+/// predicate to a data skipping predicate that can be evaluated directly later.
 pub(crate) trait DataSkippingPredicateEvaluator {
     /// The output type produced by this expression evaluator
     type Output;
@@ -437,7 +456,13 @@ pub(crate) trait DataSkippingPredicateEvaluator {
     /// See [`PredicateEvaluator::eval_scalar`]
     fn eval_scalar(&self, val: &Scalar, inverted: bool) -> Option<Self::Output>;
 
-    /// See [`PredicateEvaluator::eval_is_null`]
+    /// For IS NULL (IS NOT NULL), we can only skip the file if all-null (no-null). Any other
+    /// nullcount always forces us to keep the file.
+    ///
+    /// NOTE: When deletion vectors are enabled, they could produce a file that is logically
+    /// all-null or logically no-null, even tho the physical stats indicate a mix of null and
+    /// non-null values. They cannot invalidate a file's physical all-null or non-null status,
+    /// however, so the worst that can happen is we unknowingly fail to skip a file.
     fn eval_is_null(&self, col: &str, inverted: bool) -> Option<Self::Output>;
 
     /// See [`PredicateEvaluator::eval_binary_scalars`]

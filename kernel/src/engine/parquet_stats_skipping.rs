@@ -62,13 +62,11 @@ impl<T: ParquetStatsProvider> DataSkippingPredicateEvaluator for T {
     }
 
     fn eval_is_null(&self, col: &str, inverted: bool) -> Option<bool> {
-        let sentinel = match inverted {
-            // IS NOT NULL - skip if all-null
-            true => self.get_rowcount_stat()?,
-            // IS NULL - skip if no-null
-            false => 0,
+        let safe_to_skip = match inverted {
+            true => self.get_rowcount_stat()?, // all-null
+            false => 0i64,                     // no-null
         };
-        Some(self.get_nullcount_stat(col)? != sentinel)
+        Some(self.get_nullcount_stat(col)? != safe_to_skip)
     }
 
     fn eval_binary_scalars(
