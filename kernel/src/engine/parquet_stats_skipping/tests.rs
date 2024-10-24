@@ -1,5 +1,5 @@
 use super::*;
-use crate::expressions::{ArrayData, StructData};
+use crate::expressions::{column_expr, ArrayData, StructData};
 use crate::schema::ArrayType;
 use crate::DataType;
 
@@ -337,7 +337,7 @@ fn test_binary_eq_ne() {
     const LO: Scalar = Scalar::Long(1);
     const MID: Scalar = Scalar::Long(10);
     const HI: Scalar = Scalar::Long(100);
-    let col = &Expression::column("x");
+    let col = &column_expr!("x");
 
     for inverted in [false, true] {
         // negative test -- mismatched column type
@@ -485,7 +485,7 @@ fn test_binary_lt_ge() {
     const LO: Scalar = Scalar::Long(1);
     const MID: Scalar = Scalar::Long(10);
     const HI: Scalar = Scalar::Long(100);
-    let col = &Expression::column("x");
+    let col = &column_expr!("x");
 
     for inverted in [false, true] {
         expect_eq!(
@@ -585,7 +585,7 @@ fn test_binary_le_gt() {
     const LO: Scalar = Scalar::Long(1);
     const MID: Scalar = Scalar::Long(10);
     const HI: Scalar = Scalar::Long(100);
-    let col = &Expression::column("x");
+    let col = &column_expr!("x");
 
     for inverted in [false, true] {
         // negative test -- mismatched column type
@@ -736,7 +736,7 @@ impl ParquetStatsSkippingFilter for NullCountTestFilter {
 fn test_not_null() {
     use UnaryOperator::IsNull;
 
-    let col = &Expression::column("x");
+    let col = &column_expr!("x");
     for inverted in [false, true] {
         expect_eq!(
             NullCountTestFilter::new(None, 10).apply_unary(IsNull, col, inverted),
@@ -809,7 +809,7 @@ impl ParquetStatsSkippingFilter for AllNullTestFilter {
 
 #[test]
 fn test_sql_where() {
-    let col = &Expression::column("x");
+    let col = &column_expr!("x");
     let val = &Expression::literal(1);
     const NULL: Expression = Expression::Literal(Scalar::Null(DataType::BOOLEAN));
     const FALSE: Expression = Expression::Literal(Scalar::Boolean(false));
@@ -854,34 +854,34 @@ fn test_sql_where() {
     // Constrast normal vs SQL WHERE semantics - comparison inside AND
     expect_eq!(
         AllNullTestFilter.apply_expr(
-            &Expression::and_from([NULL, Expression::lt(col.clone(), val.clone()),]),
+            &Expression::and(NULL, Expression::lt(col.clone(), val.clone())),
             false
         ),
         None,
         "{NULL} AND {col} < {val}"
     );
     expect_eq!(
-        AllNullTestFilter.apply_sql_where(&Expression::and_from([
+        AllNullTestFilter.apply_sql_where(&Expression::and(
             NULL,
             Expression::lt(col.clone(), val.clone()),
-        ])),
+        )),
         Some(false),
         "WHERE {NULL} AND {col} < {val}"
     );
 
     expect_eq!(
         AllNullTestFilter.apply_expr(
-            &Expression::and_from([TRUE, Expression::lt(col.clone(), val.clone()),]),
+            &Expression::and(TRUE, Expression::lt(col.clone(), val.clone())),
             false
         ),
         None, // NULL (from the NULL check) is stronger than TRUE
         "{TRUE} AND {col} < {val}"
     );
     expect_eq!(
-        AllNullTestFilter.apply_sql_where(&Expression::and_from([
+        AllNullTestFilter.apply_sql_where(&Expression::and(
             TRUE,
             Expression::lt(col.clone(), val.clone()),
-        ])),
+        )),
         Some(false), // FALSE (from the NULL check) is stronger than TRUE
         "WHERE {TRUE} AND {col} < {val}"
     );
@@ -889,20 +889,20 @@ fn test_sql_where() {
     // Contrast normal vs. SQL WHERE semantics - comparison inside AND inside AND
     expect_eq!(
         AllNullTestFilter.apply_expr(
-            &Expression::and_from([
+            &Expression::and(
                 TRUE,
-                Expression::and_from([NULL, Expression::lt(col.clone(), val.clone()),]),
-            ]),
+                Expression::and(NULL, Expression::lt(col.clone(), val.clone())),
+            ),
             false,
         ),
         None,
         "{TRUE} AND ({NULL} AND {col} < {val})"
     );
     expect_eq!(
-        AllNullTestFilter.apply_sql_where(&Expression::and_from([
+        AllNullTestFilter.apply_sql_where(&Expression::and(
             TRUE,
-            Expression::and_from([NULL, Expression::lt(col.clone(), val.clone()),]),
-        ])),
+            Expression::and(NULL, Expression::lt(col.clone(), val.clone())),
+        )),
         Some(false),
         "WHERE {TRUE} AND ({NULL} AND {col} < {val})"
     );
@@ -910,20 +910,20 @@ fn test_sql_where() {
     // Semantics are the same for comparison inside OR inside AND
     expect_eq!(
         AllNullTestFilter.apply_expr(
-            &Expression::or_from([
+            &Expression::or(
                 FALSE,
-                Expression::and_from([NULL, Expression::lt(col.clone(), val.clone()),]),
-            ]),
+                Expression::and(NULL, Expression::lt(col.clone(), val.clone())),
+            ),
             false,
         ),
         None,
         "{FALSE} OR ({NULL} AND {col} < {val})"
     );
     expect_eq!(
-        AllNullTestFilter.apply_sql_where(&Expression::or_from([
+        AllNullTestFilter.apply_sql_where(&Expression::or(
             FALSE,
-            Expression::and_from([NULL, Expression::lt(col.clone(), val.clone()),]),
-        ])),
+            Expression::and(NULL, Expression::lt(col.clone(), val.clone())),
+        )),
         None,
         "WHERE {FALSE} OR ({NULL} AND {col} < {val})"
     );

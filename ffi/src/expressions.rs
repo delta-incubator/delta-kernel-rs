@@ -5,7 +5,7 @@ use crate::{
     ReferenceSet, TryFromStringSlice,
 };
 use delta_kernel::{
-    expressions::{BinaryOperator, Expression, Scalar, UnaryOperator},
+    expressions::{BinaryOperator, ColumnName, Expression, UnaryOperator},
     DeltaResult,
 };
 
@@ -56,12 +56,10 @@ fn visit_expression_binary(
     a: usize,
     b: usize,
 ) -> usize {
-    let left = unwrap_kernel_expression(state, a).map(Box::new);
-    let right = unwrap_kernel_expression(state, b).map(Box::new);
+    let left = unwrap_kernel_expression(state, a);
+    let right = unwrap_kernel_expression(state, b);
     match left.zip(right) {
-        Some((left, right)) => {
-            wrap_expression(state, Expression::BinaryOperation { op, left, right })
-        }
+        Some((left, right)) => wrap_expression(state, Expression::binary(op, left, right)),
         None => 0, // invalid child => invalid node
     }
 }
@@ -148,7 +146,9 @@ fn visit_expression_column_impl(
     state: &mut KernelExpressionVisitorState,
     name: DeltaResult<String>,
 ) -> DeltaResult<usize> {
-    Ok(wrap_expression(state, Expression::Column(name?)))
+    // TODO: FIXME: This is incorrect if any field name in the column path contains a period.
+    let name = ColumnName::new(name?.split('.')).into();
+    Ok(wrap_expression(state, name))
 }
 
 #[no_mangle]
@@ -182,10 +182,7 @@ fn visit_expression_literal_string_impl(
     state: &mut KernelExpressionVisitorState,
     value: DeltaResult<String>,
 ) -> DeltaResult<usize> {
-    Ok(wrap_expression(
-        state,
-        Expression::Literal(Scalar::from(value?)),
-    ))
+    Ok(wrap_expression(state, Expression::literal(value?)))
 }
 
 // We need to get parse.expand working to be able to macro everything below, see issue #255

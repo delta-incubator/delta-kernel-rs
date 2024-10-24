@@ -3,7 +3,7 @@
 //!
 
 use std::cmp::Ordering;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
@@ -11,13 +11,14 @@ use tracing::{debug, warn};
 use url::Url;
 
 use crate::actions::{get_log_schema, Metadata, Protocol, METADATA_NAME, PROTOCOL_NAME};
+use crate::expressions::column_expr;
 use crate::features::{ColumnMappingMode, COLUMN_MAPPING_MODE_KEY};
 use crate::path::ParsedLogPath;
 use crate::scan::ScanBuilder;
 use crate::schema::{Schema, SchemaRef};
 use crate::utils::require;
 use crate::{DeltaResult, Engine, Error, FileMeta, FileSystemClient, Version};
-use crate::{EngineData, Expression};
+use crate::{EngineData, Expression, ExpressionRef};
 
 const LAST_CHECKPOINT_FILE_NAME: &str = "_last_checkpoint";
 
@@ -51,7 +52,7 @@ impl LogSegment {
         engine: &dyn Engine,
         commit_read_schema: SchemaRef,
         checkpoint_read_schema: SchemaRef,
-        meta_predicate: Option<Expression>,
+        meta_predicate: Option<ExpressionRef>,
     ) -> DeltaResult<impl Iterator<Item = DeltaResult<(Box<dyn EngineData>, bool)>> + Send> {
         let json_client = engine.get_json_handler();
         let commit_stream = json_client
@@ -109,12 +110,14 @@ impl LogSegment {
         let schema = get_log_schema().project(&[PROTOCOL_NAME, METADATA_NAME])?;
         // filter out log files that do not contain metadata or protocol information
         use Expression as Expr;
-        let meta_predicate = Expr::or(
-            Expr::column("metaData.id").is_not_null(),
-            Expr::column("protocol.minReaderVersion").is_not_null(),
-        );
+        static META_PREDICATE: LazyLock<Option<ExpressionRef>> = LazyLock::new(|| {
+            Some(Arc::new(Expr::or(
+                column_expr!("metaData.id").is_not_null(),
+                column_expr!("protocol.minReaderVersion").is_not_null(),
+            )))
+        });
         // read the same protocol and metadata schema for both commits and checkpoints
-        self.replay(engine, schema.clone(), schema, Some(meta_predicate))
+        self.replay(engine, schema.clone(), schema, META_PREDICATE.clone())
     }
 }
 
@@ -397,8 +400,15 @@ fn list_log_files_with_checkpoint(
         )));
     }
 
-    // NOTE this will sort in reverse order
-    commit_files.sort_unstable_by(|a, b| b.version.cmp(&a.version));
+    debug_assert!(
+        commit_files
+            .windows(2)
+            .all(|cfs| cfs[0].version <= cfs[1].version),
+        "fs_client.list_from() didn't return a sorted listing! {:?}",
+        commit_files
+    );
+    // We assume listing returned ordered, we want reverse order
+    let commit_files = commit_files.into_iter().rev().collect();
 
     Ok((commit_files, checkpoint_files))
 }
@@ -441,8 +451,16 @@ fn list_log_files(
     }
 
     commit_files.retain(|f| f.version as i64 > max_checkpoint_version);
-    // NOTE this will sort in reverse order
-    commit_files.sort_unstable_by(|a, b| b.version.cmp(&a.version));
+
+    debug_assert!(
+        commit_files
+            .windows(2)
+            .all(|cfs| cfs[0].version <= cfs[1].version),
+        "fs_client.list_from() didn't return a sorted listing! {:?}",
+        commit_files
+    );
+    // We assume listing returned ordered, we want reverse order
+    let commit_files = commit_files.into_iter().rev().collect();
 
     Ok((commit_files, checkpoint_files))
 }
@@ -521,6 +539,7 @@ mod tests {
         let prefix = Path::from(url.path());
         let client = ObjectStoreFileSystemClient::new(
             store,
+            false, // don't have ordered listing
             prefix,
             Arc::new(TokioBackgroundExecutor::new()),
         );
@@ -580,6 +599,7 @@ mod tests {
 
         let client = ObjectStoreFileSystemClient::new(
             store,
+            false, // don't have ordered listing
             Path::from("/"),
             Arc::new(TokioBackgroundExecutor::new()),
         );
@@ -624,6 +644,7 @@ mod tests {
 
         let client = ObjectStoreFileSystemClient::new(
             store,
+            false, // don't have ordered listing
             Path::from("/"),
             Arc::new(TokioBackgroundExecutor::new()),
         );

@@ -1,10 +1,12 @@
 //! Expression handling based on arrow-rs compute kernels.
+use std::borrow::Borrow;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use arrow_arith::boolean::{and_kleene, is_null, not, or_kleene};
 use arrow_arith::numeric::{add, div, mul, sub};
 use arrow_array::cast::AsArray;
-use arrow_array::types::*;
+use arrow_array::{types::*, MapArray};
 use arrow_array::{
     Array, ArrayRef, BinaryArray, BooleanArray, Date32Array, Datum, Decimal128Array, Float32Array,
     Float64Array, Int16Array, Int32Array, Int64Array, Int8Array, ListArray, RecordBatch,
@@ -21,12 +23,13 @@ use arrow_select::concat::concat;
 use itertools::Itertools;
 
 use super::arrow_conversion::LIST_ARRAY_ROOT;
+use super::arrow_utils::make_arrow_error;
 use crate::engine::arrow_data::ArrowEngineData;
-use crate::engine::arrow_utils::ensure_data_types;
 use crate::engine::arrow_utils::prim_array_cmp;
+use crate::engine::ensure_data_types::ensure_data_types;
 use crate::error::{DeltaResult, Error};
 use crate::expressions::{BinaryOperator, Expression, Scalar, UnaryOperator, VariadicOperator};
-use crate::schema::{DataType, PrimitiveType, SchemaRef};
+use crate::schema::{ArrayType, DataType, MapType, PrimitiveType, Schema, SchemaRef, StructField};
 use crate::{EngineData, ExpressionEvaluator, ExpressionHandler};
 
 // TODO leverage scalars / Datum
@@ -34,7 +37,7 @@ use crate::{EngineData, ExpressionEvaluator, ExpressionHandler};
 fn downcast_to_bool(arr: &dyn Array) -> DeltaResult<&BooleanArray> {
     arr.as_any()
         .downcast_ref::<BooleanArray>()
-        .ok_or(Error::generic("expected boolean array"))
+        .ok_or_else(|| Error::generic("expected boolean array"))
 }
 
 impl Scalar {
@@ -128,58 +131,60 @@ impl Scalar {
 }
 
 fn wrap_comparison_result(arr: BooleanArray) -> ArrayRef {
-    Arc::new(arr) as Arc<dyn Array>
+    Arc::new(arr) as _
 }
 
 trait ProvidesColumnByName {
-    fn column_by_name(&self, name: &str) -> Option<&Arc<dyn Array>>;
+    fn column_by_name(&self, name: &str) -> Option<&ArrayRef>;
 }
 
 impl ProvidesColumnByName for RecordBatch {
-    fn column_by_name(&self, name: &str) -> Option<&Arc<dyn Array>> {
+    fn column_by_name(&self, name: &str) -> Option<&ArrayRef> {
         self.column_by_name(name)
     }
 }
 
 impl ProvidesColumnByName for StructArray {
-    fn column_by_name(&self, name: &str) -> Option<&Arc<dyn Array>> {
+    fn column_by_name(&self, name: &str) -> Option<&ArrayRef> {
         self.column_by_name(name)
     }
 }
 
-fn extract_column<'array, 'path>(
-    array: &'array dyn ProvidesColumnByName,
-    path_step: &str,
-    remaining_path_steps: &mut impl Iterator<Item = &'path str>,
-) -> Result<&'array Arc<dyn Array>, ArrowError> {
-    let child = array
-        .column_by_name(path_step)
-        .ok_or(ArrowError::SchemaError(format!(
-            "No such field: {}",
-            path_step,
-        )))?;
-    if let Some(next_path_step) = remaining_path_steps.next() {
-        // This is not the last path step. Drill deeper.
-        extract_column(
-            column_as_struct(path_step, &Some(child))?,
-            next_path_step,
-            remaining_path_steps,
-        )
-    } else {
-        // Last path step. Return it.
-        Ok(child)
+// Given a RecordBatch or StructArray, recursively probe for a nested column path and return the
+// corresponding column, or Err if the path is invalid. For example, given the following schema:
+// ```text
+// root: {
+//   a: int32,
+//   b: struct {
+//     c: int32,
+//     d: struct {
+//       e: int32,
+//       f: int64,
+//     },
+//   },
+// }
+// ```
+// The path ["b", "d", "f"] would retrieve the int64 column while ["a", "b"] would produce an error.
+fn extract_column<'a>(
+    mut parent: &dyn ProvidesColumnByName,
+    mut field_names: impl Iterator<Item = &'a str>,
+) -> DeltaResult<ArrayRef> {
+    let Some(mut field_name) = field_names.next() else {
+        return Err(ArrowError::SchemaError("Empty column path".to_string()))?;
+    };
+    loop {
+        let child = parent
+            .column_by_name(field_name)
+            .ok_or_else(|| ArrowError::SchemaError(format!("No such field: {field_name}")))?;
+        field_name = match field_names.next() {
+            Some(name) => name,
+            None => return Ok(child.clone()),
+        };
+        parent = child
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .ok_or_else(|| ArrowError::SchemaError(format!("Not a struct: {field_name}")))?;
     }
-}
-
-fn column_as_struct<'a>(
-    name: &str,
-    column: &Option<&'a Arc<dyn Array>>,
-) -> Result<&'a StructArray, ArrowError> {
-    column
-        .ok_or(ArrowError::SchemaError(format!("No such column: {}", name)))?
-        .as_any()
-        .downcast_ref::<StructArray>()
-        .ok_or(ArrowError::SchemaError(format!("{} is not a struct", name)))
 }
 
 fn evaluate_expression(
@@ -191,35 +196,23 @@ fn evaluate_expression(
     use Expression::*;
     match (expression, result_type) {
         (Literal(scalar), _) => Ok(scalar.to_array(batch.num_rows())?),
-        (Column(name), _) => {
-            // TODO properly handle nested columns
-            // https://github.com/delta-incubator/delta-kernel-rs/issues/86
-            if name.contains('.') {
-                let mut path = name.split('.');
-                // Safety: we know that the first path step exists, because we checked for '.'
-                Ok(extract_column(batch, path.next().unwrap(), &mut path).cloned()?)
-            } else {
-                batch
-                    .column_by_name(name)
-                    .ok_or(Error::missing_column(name))
-                    .cloned()
-            }
-        }
-        (Struct(fields), Some(DataType::Struct(schema))) => {
+        // TODO properly handle nested columns
+        // https://github.com/delta-incubator/delta-kernel-rs/issues/86
+        (Column(name), _) => extract_column(batch, name.split('.')),
+        (Struct(fields), Some(DataType::Struct(output_schema))) => {
             let columns = fields
                 .iter()
-                .zip(schema.fields())
+                .zip(output_schema.fields())
                 .map(|(expr, field)| evaluate_expression(expr, batch, Some(field.data_type())));
-            let output_cols: Vec<Arc<dyn Array>> = columns.try_collect()?;
+            let output_cols: Vec<ArrayRef> = columns.try_collect()?;
             let output_fields: Vec<ArrowField> = output_cols
                 .iter()
-                .zip(schema.fields())
-                .map(|(array, input_field)| -> DeltaResult<_> {
-                    ensure_data_types(input_field.data_type(), array.data_type())?;
+                .zip(output_schema.fields())
+                .map(|(output_col, output_field)| -> DeltaResult<_> {
                     Ok(ArrowField::new(
-                        input_field.name(),
-                        array.data_type().clone(),
-                        array.is_nullable(),
+                        output_field.name(),
+                        output_col.data_type().clone(),
+                        output_col.is_nullable(),
                     ))
                 })
                 .try_collect()?;
@@ -244,22 +237,15 @@ fn evaluate_expression(
             },
             _,
         ) => match (left.as_ref(), right.as_ref()) {
-            (Literal(_), Column(c)) => {
-                let list_type = batch.column_by_name(c).map(|c| c.data_type());
-                if !matches!(
-                    list_type,
-                    Some(ArrowDataType::List(_)) | Some(ArrowDataType::FixedSizeList(_, _))
-                ) {
-                    return Err(Error::InvalidExpressionEvaluation(format!(
-                        "Right side column: {c} is not a list or a fixed size list"
-                    )));
-                }
+            (Literal(_), Column(_)) => {
                 let left_arr = evaluate_expression(left.as_ref(), batch, None)?;
                 let right_arr = evaluate_expression(right.as_ref(), batch, None)?;
                 if let Some(string_arr) = left_arr.as_string_opt::<i32>() {
-                    return in_list_utf8(string_arr, right_arr.as_list::<i32>())
-                        .map(wrap_comparison_result)
-                        .map_err(Error::generic_err);
+                    if let Some(right_arr) = right_arr.as_list_opt::<i32>() {
+                        return in_list_utf8(string_arr, right_arr)
+                            .map(wrap_comparison_result)
+                            .map_err(Error::generic_err);
+                    }
                 }
                 prim_array_cmp! {
                     left_arr, right_arr,
@@ -322,7 +308,7 @@ fn evaluate_expression(
             let left_arr = evaluate_expression(left.as_ref(), batch, None)?;
             let right_arr = evaluate_expression(right.as_ref(), batch, None)?;
 
-            type Operation = fn(&dyn Datum, &dyn Datum) -> Result<Arc<dyn Array>, ArrowError>;
+            type Operation = fn(&dyn Datum, &dyn Datum) -> Result<ArrayRef, ArrowError>;
             let eval: Operation = match op {
                 Plus => add,
                 Minus => sub,
@@ -366,6 +352,164 @@ fn evaluate_expression(
     }
 }
 
+// Apply a schema to an array. The array _must_ be a `StructArray`. Returns a `RecordBatch where the
+// names of fields, nullable, and metadata in the struct have been transformed to match those in
+// schema specified by `schema`
+fn apply_schema(array: &dyn Array, schema: &DataType) -> DeltaResult<RecordBatch> {
+    let DataType::Struct(struct_schema) = schema else {
+        return Err(Error::generic(
+            "apply_schema at top-level must be passed a struct schema",
+        ));
+    };
+    let applied = apply_schema_to_struct(array, struct_schema)?;
+    Ok(applied.into())
+}
+
+// helper to transform an arrow field+col into the specified target type. If `rename` is specified
+// the field will be renamed to the contained `str`.
+fn new_field_with_metadata(
+    field_name: &str,
+    data_type: &ArrowDataType,
+    nullable: bool,
+    metadata: Option<HashMap<String, String>>,
+) -> ArrowField {
+    let mut field = ArrowField::new(field_name, data_type.clone(), nullable);
+    if let Some(metadata) = metadata {
+        field.set_metadata(metadata);
+    };
+    field
+}
+
+// A helper that is a wrapper over `transform_field_and_col`. This will take apart the passed struct
+// and use that method to transform each column and then put the struct back together. Target types
+// and names for each column should be passed in `target_types_and_names`. The number of elements in
+// the `target_types_and_names` iterator _must_ be the same as the number of columns in
+// `struct_array`. The transformation is ordinal. That is, the order of fields in `target_fields`
+// _must_ match the order of the columns in `struct_array`.
+fn transform_struct(
+    struct_array: &StructArray,
+    target_fields: impl Iterator<Item = impl Borrow<StructField>>,
+) -> DeltaResult<StructArray> {
+    let (_, arrow_cols, nulls) = struct_array.clone().into_parts();
+    let input_col_count = arrow_cols.len();
+    let result_iter =
+        arrow_cols
+            .into_iter()
+            .zip(target_fields)
+            .map(|(sa_col, target_field)| -> DeltaResult<_> {
+                let target_field = target_field.borrow();
+                let transformed_col = apply_schema_to(&sa_col, target_field.data_type())?;
+                let transformed_field = new_field_with_metadata(
+                    &target_field.name,
+                    transformed_col.data_type(),
+                    target_field.nullable,
+                    Some(target_field.metadata_with_string_values()),
+                );
+                Ok((transformed_field, transformed_col))
+            });
+    let (transformed_fields, transformed_cols): (Vec<ArrowField>, Vec<ArrayRef>) =
+        result_iter.process_results(|iter| iter.unzip())?;
+    if transformed_cols.len() != input_col_count {
+        return Err(Error::InternalError(format!(
+            "Passed struct had {input_col_count} columns, but transformed column has {}",
+            transformed_cols.len()
+        )));
+    }
+    Ok(StructArray::try_new(
+        transformed_fields.into(),
+        transformed_cols,
+        nulls,
+    )?)
+}
+
+// Transform a struct array. The data is in `array`, and the target fields are in `kernel_fields`.
+fn apply_schema_to_struct(array: &dyn Array, kernel_fields: &Schema) -> DeltaResult<StructArray> {
+    let Some(sa) = array.as_struct_opt() else {
+        return Err(make_arrow_error(
+            "Arrow claimed to be a struct but isn't a StructArray",
+        ));
+    };
+    transform_struct(sa, kernel_fields.fields())
+}
+
+// deconstruct the array, then rebuild the mapped version
+fn apply_schema_to_list(
+    array: &dyn Array,
+    target_inner_type: &ArrayType,
+) -> DeltaResult<ListArray> {
+    let Some(la) = array.as_list_opt() else {
+        return Err(make_arrow_error(
+            "Arrow claimed to be a list but isn't a ListArray",
+        ));
+    };
+    let (field, offset_buffer, values, nulls) = la.clone().into_parts();
+
+    let transformed_values = apply_schema_to(&values, &target_inner_type.element_type)?;
+    let transformed_field = ArrowField::new(
+        field.name(),
+        transformed_values.data_type().clone(),
+        target_inner_type.contains_null,
+    );
+    Ok(ListArray::try_new(
+        Arc::new(transformed_field),
+        offset_buffer,
+        transformed_values,
+        nulls,
+    )?)
+}
+
+// deconstruct a map, and rebuild it with the specified target kernel type
+fn apply_schema_to_map(array: &dyn Array, kernel_map_type: &MapType) -> DeltaResult<MapArray> {
+    let Some(ma) = array.as_map_opt() else {
+        return Err(make_arrow_error(
+            "Arrow claimed to be a map but isn't a MapArray",
+        ));
+    };
+    let (map_field, offset_buffer, map_struct_array, nulls, ordered) = ma.clone().into_parts();
+    let target_fields = map_struct_array
+        .fields()
+        .iter()
+        .zip([&kernel_map_type.key_type, &kernel_map_type.value_type])
+        .zip([false, kernel_map_type.value_contains_null])
+        .map(|((arrow_field, target_type), nullable)| {
+            StructField::new(arrow_field.name(), target_type.clone(), nullable)
+        });
+
+    // Arrow puts the key type/val as the first field/col and the value type/val as the second. So
+    // we just transform like a 'normal' struct, but we know there are two fields/cols and we
+    // specify the key/value types as the target type iterator.
+    let transformed_map_struct_array = transform_struct(&map_struct_array, target_fields)?;
+
+    let transformed_map_field = ArrowField::new(
+        map_field.name().clone(),
+        transformed_map_struct_array.data_type().clone(),
+        map_field.is_nullable(),
+    );
+    Ok(MapArray::try_new(
+        Arc::new(transformed_map_field),
+        offset_buffer,
+        transformed_map_struct_array,
+        nulls,
+        ordered,
+    )?)
+}
+
+// apply `schema` to `array`. This handles renaming, and adjusting nullability and metadata. if the
+// actual data types don't match, this will return an error
+fn apply_schema_to(array: &ArrayRef, schema: &DataType) -> DeltaResult<ArrayRef> {
+    use DataType::*;
+    let array: ArrayRef = match schema {
+        Struct(stype) => Arc::new(apply_schema_to_struct(array, stype)?),
+        Array(atype) => Arc::new(apply_schema_to_list(array, atype)?),
+        Map(mtype) => Arc::new(apply_schema_to_map(array, mtype)?),
+        _ => {
+            ensure_data_types(schema, array.data_type(), true)?;
+            array.clone()
+        }
+    };
+    Ok(array)
+}
+
 #[derive(Debug)]
 pub struct ArrowExpressionHandler;
 
@@ -396,7 +540,7 @@ impl ExpressionEvaluator for DefaultExpressionEvaluator {
         let batch = batch
             .as_any()
             .downcast_ref::<ArrowEngineData>()
-            .ok_or(Error::engine_data_type("ArrowEngineData"))?
+            .ok_or_else(|| Error::engine_data_type("ArrowEngineData"))?
             .record_batch();
         let _input_schema: ArrowSchema = self.input_schema.as_ref().try_into()?;
         // TODO: make sure we have matching schemas for validation
@@ -408,13 +552,11 @@ impl ExpressionEvaluator for DefaultExpressionEvaluator {
         //     )));
         // };
         let array_ref = evaluate_expression(&self.expression, batch, Some(&self.output_type))?;
-        let arrow_type: ArrowDataType = ArrowDataType::try_from(&self.output_type)?;
         let batch: RecordBatch = if let DataType::Struct(_) = self.output_type {
-            array_ref
-                .as_struct_opt()
-                .ok_or(Error::unexpected_column_type("Expected a struct array"))?
-                .into()
+            apply_schema(&array_ref, &self.output_type)?
         } else {
+            let array_ref = apply_schema_to(&array_ref, &self.output_type)?;
+            let arrow_type: ArrowDataType = ArrowDataType::try_from(&self.output_type)?;
             let schema = ArrowSchema::new(vec![ArrowField::new("output", arrow_type, true)]);
             RecordBatch::try_new(Arc::new(schema), vec![array_ref])?
         };
@@ -447,24 +589,16 @@ mod tests {
         let array = ListArray::new(field.clone(), offsets, Arc::new(values), None);
         let batch = RecordBatch::try_new(Arc::new(schema), vec![Arc::new(array.clone())]).unwrap();
 
-        let not_op = Expression::binary(
-            BinaryOperator::NotIn,
-            Expression::literal(5),
-            Expression::column("item"),
-        );
+        let not_op = Expression::binary(BinaryOperator::NotIn, 5, column_expr!("item"));
 
-        let in_op = Expression::binary(
-            BinaryOperator::NotIn,
-            Expression::literal(5),
-            Expression::column("item"),
-        );
+        let in_op = Expression::binary(BinaryOperator::In, 5, column_expr!("item"));
 
         let result = evaluate_expression(&not_op, &batch, None).unwrap();
         let expected = BooleanArray::from(vec![true, false, true]);
         assert_eq!(result.as_ref(), &expected);
 
         let in_result = evaluate_expression(&in_op, &batch, None).unwrap();
-        let in_expected = BooleanArray::from(vec![true, false, true]);
+        let in_expected = BooleanArray::from(vec![false, true, false]);
         assert_eq!(in_result.as_ref(), &in_expected);
     }
 
@@ -475,19 +609,15 @@ mod tests {
         let schema = Schema::new([field.clone()]);
         let batch = RecordBatch::try_new(Arc::new(schema), vec![Arc::new(values.clone())]).unwrap();
 
-        let in_op = Expression::binary(
-            BinaryOperator::NotIn,
-            Expression::literal(5),
-            Expression::column("item"),
-        );
+        let in_op = Expression::binary(BinaryOperator::NotIn, 5, column_expr!("item"));
 
         let in_result = evaluate_expression(&in_op, &batch, None);
 
         assert!(in_result.is_err());
         assert_eq!(
             in_result.unwrap_err().to_string(),
-            "Invalid expression evaluation: Right side column: item is not a list or a fixed size list".to_string()
-        )
+            "Invalid expression evaluation: Cannot cast to list array: Int32"
+        );
     }
 
     #[test]
@@ -498,11 +628,11 @@ mod tests {
 
         let in_op = Expression::binary(
             BinaryOperator::NotIn,
-            Expression::literal(5),
-            Expression::literal(Scalar::Array(ArrayData::new(
+            5,
+            Scalar::Array(ArrayData::new(
                 ArrayType::new(DeltaDataTypes::INTEGER, false),
                 vec![Scalar::Integer(1), Scalar::Integer(2)],
-            ))),
+            )),
         );
 
         let in_result = evaluate_expression(&in_op, &batch, None).unwrap();
@@ -524,8 +654,8 @@ mod tests {
 
         let in_op = Expression::binary(
             BinaryOperator::NotIn,
-            Expression::column("item"),
-            Expression::column("item"),
+            column_expr!("item"),
+            column_expr!("item"),
         );
 
         let in_result = evaluate_expression(&in_op, &batch, None);
@@ -549,17 +679,9 @@ mod tests {
         let array = ListArray::new(field.clone(), offsets, Arc::new(values), None);
         let batch = RecordBatch::try_new(Arc::new(schema), vec![Arc::new(array.clone())]).unwrap();
 
-        let str_not_op = Expression::binary(
-            BinaryOperator::NotIn,
-            Expression::literal("bye"),
-            Expression::column("item"),
-        );
+        let str_not_op = Expression::binary(BinaryOperator::NotIn, "bye", column_expr!("item"));
 
-        let str_in_op = Expression::binary(
-            BinaryOperator::In,
-            Expression::literal("hi"),
-            Expression::column("item"),
-        );
+        let str_in_op = Expression::binary(BinaryOperator::In, "hi", column_expr!("item"));
 
         let result = evaluate_expression(&str_in_op, &batch, None).unwrap();
         let expected = BooleanArray::from(vec![true, true, true]);
@@ -576,7 +698,7 @@ mod tests {
         let values = Int32Array::from(vec![1, 2, 3]);
         let batch =
             RecordBatch::try_new(Arc::new(schema.clone()), vec![Arc::new(values.clone())]).unwrap();
-        let column = Expression::column("a");
+        let column = column_expr!("a");
 
         let results = evaluate_expression(&column, &batch, None).unwrap();
         assert_eq!(results.as_ref(), &values);
@@ -597,7 +719,7 @@ mod tests {
             vec![Arc::new(struct_array.clone())],
         )
         .unwrap();
-        let column = Expression::column("b.a");
+        let column = column_expr!("b.a");
         let results = evaluate_expression(&column, &batch, None).unwrap();
         assert_eq!(results.as_ref(), &values);
     }
@@ -607,25 +729,25 @@ mod tests {
         let schema = Schema::new(vec![Field::new("a", DataType::Int32, false)]);
         let values = Int32Array::from(vec![1, 2, 3]);
         let batch = RecordBatch::try_new(Arc::new(schema.clone()), vec![Arc::new(values)]).unwrap();
-        let column = Expression::column("a");
+        let column = column_expr!("a");
 
-        let expression = Box::new(column.clone().add(Expression::Literal(Scalar::Integer(1))));
+        let expression = column.clone().add(1);
         let results = evaluate_expression(&expression, &batch, None).unwrap();
         let expected = Arc::new(Int32Array::from(vec![2, 3, 4]));
         assert_eq!(results.as_ref(), expected.as_ref());
 
-        let expression = Box::new(column.clone().sub(Expression::Literal(Scalar::Integer(1))));
+        let expression = column.clone().sub(1);
         let results = evaluate_expression(&expression, &batch, None).unwrap();
         let expected = Arc::new(Int32Array::from(vec![0, 1, 2]));
         assert_eq!(results.as_ref(), expected.as_ref());
 
-        let expression = Box::new(column.clone().mul(Expression::Literal(Scalar::Integer(2))));
+        let expression = column.clone().mul(2);
         let results = evaluate_expression(&expression, &batch, None).unwrap();
         let expected = Arc::new(Int32Array::from(vec![2, 4, 6]));
         assert_eq!(results.as_ref(), expected.as_ref());
 
         // TODO handle type casting
-        let expression = Box::new(column.div(Expression::Literal(Scalar::Integer(1))));
+        let expression = column.div(1);
         let results = evaluate_expression(&expression, &batch, None).unwrap();
         let expected = Arc::new(Int32Array::from(vec![1, 2, 3]));
         assert_eq!(results.as_ref(), expected.as_ref())
@@ -643,20 +765,20 @@ mod tests {
             vec![Arc::new(values.clone()), Arc::new(values)],
         )
         .unwrap();
-        let column_a = Expression::column("a");
-        let column_b = Expression::column("b");
+        let column_a = column_expr!("a");
+        let column_b = column_expr!("b");
 
-        let expression = Box::new(column_a.clone().add(column_b.clone()));
+        let expression = column_a.clone().add(column_b.clone());
         let results = evaluate_expression(&expression, &batch, None).unwrap();
         let expected = Arc::new(Int32Array::from(vec![2, 4, 6]));
         assert_eq!(results.as_ref(), expected.as_ref());
 
-        let expression = Box::new(column_a.clone().sub(column_b.clone()));
+        let expression = column_a.clone().sub(column_b.clone());
         let results = evaluate_expression(&expression, &batch, None).unwrap();
         let expected = Arc::new(Int32Array::from(vec![0, 0, 0]));
         assert_eq!(results.as_ref(), expected.as_ref());
 
-        let expression = Box::new(column_a.clone().mul(column_b));
+        let expression = column_a.clone().mul(column_b);
         let results = evaluate_expression(&expression, &batch, None).unwrap();
         let expected = Arc::new(Int32Array::from(vec![1, 4, 9]));
         assert_eq!(results.as_ref(), expected.as_ref());
@@ -667,35 +789,34 @@ mod tests {
         let schema = Schema::new(vec![Field::new("a", DataType::Int32, false)]);
         let values = Int32Array::from(vec![1, 2, 3]);
         let batch = RecordBatch::try_new(Arc::new(schema.clone()), vec![Arc::new(values)]).unwrap();
-        let column = Expression::column("a");
-        let lit = Expression::Literal(Scalar::Integer(2));
+        let column = column_expr!("a");
 
-        let expression = Box::new(column.clone().lt(lit.clone()));
+        let expression = column.clone().lt(2);
         let results = evaluate_expression(&expression, &batch, None).unwrap();
         let expected = Arc::new(BooleanArray::from(vec![true, false, false]));
         assert_eq!(results.as_ref(), expected.as_ref());
 
-        let expression = Box::new(column.clone().lt_eq(lit.clone()));
+        let expression = column.clone().lt_eq(2);
         let results = evaluate_expression(&expression, &batch, None).unwrap();
         let expected = Arc::new(BooleanArray::from(vec![true, true, false]));
         assert_eq!(results.as_ref(), expected.as_ref());
 
-        let expression = Box::new(column.clone().gt(lit.clone()));
+        let expression = column.clone().gt(2);
         let results = evaluate_expression(&expression, &batch, None).unwrap();
         let expected = Arc::new(BooleanArray::from(vec![false, false, true]));
         assert_eq!(results.as_ref(), expected.as_ref());
 
-        let expression = Box::new(column.clone().gt_eq(lit.clone()));
+        let expression = column.clone().gt_eq(2);
         let results = evaluate_expression(&expression, &batch, None).unwrap();
         let expected = Arc::new(BooleanArray::from(vec![false, true, true]));
         assert_eq!(results.as_ref(), expected.as_ref());
 
-        let expression = Box::new(column.clone().eq(lit.clone()));
+        let expression = column.clone().eq(2);
         let results = evaluate_expression(&expression, &batch, None).unwrap();
         let expected = Arc::new(BooleanArray::from(vec![false, true, false]));
         assert_eq!(results.as_ref(), expected.as_ref());
 
-        let expression = Box::new(column.clone().ne(lit.clone()));
+        let expression = column.clone().ne(2);
         let results = evaluate_expression(&expression, &batch, None).unwrap();
         let expected = Arc::new(BooleanArray::from(vec![true, false, true]));
         assert_eq!(results.as_ref(), expected.as_ref());
@@ -715,35 +836,31 @@ mod tests {
             ],
         )
         .unwrap();
-        let column_a = Expression::column("a");
-        let column_b = Expression::column("b");
+        let column_a = column_expr!("a");
+        let column_b = column_expr!("b");
 
-        let expression = Box::new(column_a.clone().and(column_b.clone()));
+        let expression = column_a.clone().and(column_b.clone());
         let results =
             evaluate_expression(&expression, &batch, Some(&crate::schema::DataType::BOOLEAN))
                 .unwrap();
         let expected = Arc::new(BooleanArray::from(vec![false, false]));
         assert_eq!(results.as_ref(), expected.as_ref());
 
-        let expression = Box::new(column_a.clone().and(Expression::literal(true)));
+        let expression = column_a.clone().and(true);
         let results =
             evaluate_expression(&expression, &batch, Some(&crate::schema::DataType::BOOLEAN))
                 .unwrap();
         let expected = Arc::new(BooleanArray::from(vec![true, false]));
         assert_eq!(results.as_ref(), expected.as_ref());
 
-        let expression = Box::new(column_a.clone().or(column_b));
+        let expression = column_a.clone().or(column_b);
         let results =
             evaluate_expression(&expression, &batch, Some(&crate::schema::DataType::BOOLEAN))
                 .unwrap();
         let expected = Arc::new(BooleanArray::from(vec![true, true]));
         assert_eq!(results.as_ref(), expected.as_ref());
 
-        let expression = Box::new(
-            column_a
-                .clone()
-                .or(Expression::literal(Scalar::Boolean(false))),
-        );
+        let expression = column_a.clone().or(false);
         let results =
             evaluate_expression(&expression, &batch, Some(&crate::schema::DataType::BOOLEAN))
                 .unwrap();

@@ -59,7 +59,7 @@ impl DeletionVectorDescriptor {
                 let path_len = self.path_or_inline_dv.len();
                 require!(
                     path_len >= 20,
-                    Error::deletion_vector("Invalid length {path_len}, must be >= 20",)
+                    Error::deletion_vector("Invalid length {path_len}, must be >= 20")
                 );
                 let prefix_len = path_len - 20;
                 let decoded = z85::decode(&self.path_or_inline_dv[prefix_len..])
@@ -167,7 +167,7 @@ impl DeletionVectorDescriptor {
         }
     }
 
-    /// Materialize the row indexes of the deletion vector as a Vec<u64> in which each element
+    /// Materialize the row indexes of the deletion vector as a `Vec<u64>` in which each element
     /// represents a row index that is deleted from the table.
     pub fn row_indexes(
         &self,
