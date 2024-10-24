@@ -12,8 +12,7 @@ use crate::expressions::{
     BinaryOperator, Expression as Expr, ExpressionRef, Scalar, VariadicOperator,
 };
 use crate::predicates::{
-    DataSkippingPredicateEvaluator, DataSkippingStatsProvider, PredicateEvaluator,
-    PredicateEvaluatorDefaults,
+    DataSkippingPredicateEvaluator, PredicateEvaluator, PredicateEvaluatorDefaults,
 };
 use crate::schema::{DataType, PrimitiveType, SchemaRef, SchemaTransform, StructField, StructType};
 use crate::{Engine, EngineData, ExpressionEvaluator, JsonHandler};
@@ -177,10 +176,8 @@ impl DataSkippingFilter {
     }
 }
 
-#[allow(unused)]
 struct DataSkippingPredicateCreator;
 
-#[allow(unused)]
 impl DataSkippingPredicateCreator {
     /// Get the expression that checks IS [NOT] NULL for a column with tight bounds. A column may
     /// satisfy IS NULL if `nullCount != 0`, and may satisfy IS NOT NULL if `nullCount !=
@@ -214,10 +211,10 @@ impl DataSkippingPredicateCreator {
     }
 }
 
-impl DataSkippingStatsProvider for DataSkippingPredicateCreator {
-    type TypedOutput = Expr;
-    type IntOutput = Expr;
-    type BoolOutput = Expr;
+impl DataSkippingPredicateEvaluator for DataSkippingPredicateCreator {
+    type Output = Expr;
+    type TypedStat = Expr;
+    type IntStat = Expr;
 
     /// Retrieves the minimum value of a column, if it exists and has the requested type.
     fn get_min_stat(&self, col: &str, _data_type: &DataType) -> Option<Expr> {
@@ -260,9 +257,7 @@ impl DataSkippingStatsProvider for DataSkippingPredicateCreator {
         };
         Some(Expr::binary(op, col, val.clone()))
     }
-}
 
-impl DataSkippingPredicateEvaluator for DataSkippingPredicateCreator {
     fn eval_scalar(&self, val: &Scalar, inverted: bool) -> Option<Expr> {
         PredicateEvaluatorDefaults::eval_scalar(val, inverted).map(Expr::literal)
     }

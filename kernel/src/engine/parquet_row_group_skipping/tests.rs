@@ -1,5 +1,5 @@
 use super::*;
-use crate::predicates::DataSkippingStatsProvider as _;
+use crate::predicates::DataSkippingPredicateEvaluator as _;
 use crate::Expression;
 use parquet::arrow::arrow_reader::ArrowReaderMetadata;
 use std::fs::File;

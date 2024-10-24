@@ -4,6 +4,8 @@ use crate::predicates::PredicateEvaluator;
 use crate::schema::ArrayType;
 use crate::DataType;
 
+use std::collections::HashMap;
+
 macro_rules! expect_eq {
     ( $expr: expr, $expect: expr, $fmt: literal ) => {
         let expect = ($expect);
@@ -28,6 +30,12 @@ impl ResolveColumnAsScalar for UnimplementedColumnResolver {
 impl ResolveColumnAsScalar for Scalar {
     fn resolve_column(&self, _col: &str) -> Option<Scalar> {
         Some(self.clone())
+    }
+}
+
+impl ResolveColumnAsScalar for HashMap<&'static str, Scalar> {
+    fn resolve_column(&self, col: &str) -> Option<Scalar> {
+        self.get(col).cloned()
     }
 }
 
@@ -266,6 +274,27 @@ fn test_eval_binary_scalars() {
     }
 }
 
+// NOTE: We're testing routing here -- the actual comparisons are already validated by test_eval_binary_scalars.
+#[test]
+fn test_eval_binary_columns() {
+    let columns = HashMap::from_iter(vec![("x", Scalar::from(1)), ("y", Scalar::from(10))]);
+    let filter = DefaultPredicateEvaluator::from(columns);
+    let x = Expression::column("x");
+    let y = Expression::column("y");
+    for inverted in [true, false] {
+        assert_eq!(
+            filter.eval_binary(BinaryOperator::Equal, &x, &y, inverted),
+            Some(inverted),
+            "x = y (inverted: {inverted})"
+        );
+        assert_eq!(
+            filter.eval_binary(BinaryOperator::Equal, &x, &x, inverted),
+            Some(!inverted),
+            "x = x (inverted: {inverted})"
+        );
+    }
+}
+
 #[test]
 fn test_eval_variadic() {
     let test_cases: Vec<(&[_], _, _)> = vec![
@@ -298,7 +327,7 @@ fn test_eval_variadic() {
             })
             .collect();
         for inverted in [true, false] {
-            let invert_if_needed = |v: &Option<_>| v.clone().map(|v| v != inverted);
+            let invert_if_needed = |v: &Option<_>| v.map(|v| v != inverted);
             expect_eq!(
                 filter.eval_variadic(VariadicOperator::And, &inputs, inverted),
                 invert_if_needed(expect_and),

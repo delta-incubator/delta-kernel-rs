@@ -3,8 +3,7 @@ use crate::expressions::{
     BinaryOperator, Expression as Expr, Scalar, UnaryOperator, VariadicOperator,
 };
 use crate::predicates::{
-    DataSkippingPredicateEvaluator, DataSkippingStatsProvider, PredicateEvaluator,
-    PredicateEvaluatorDefaults,
+    DataSkippingPredicateEvaluator, PredicateEvaluator, PredicateEvaluatorDefaults,
 };
 use crate::schema::DataType;
 use std::cmp::Ordering;
@@ -25,11 +24,12 @@ pub(crate) trait ParquetStatsProvider {
     fn get_parquet_rowcount_stat(&self) -> i64;
 }
 
-/// Blanket implementation that converts a [`ParquetStatsProvider`] into a [`DataSkippingStatsProvider`].
-impl<T: ParquetStatsProvider> DataSkippingStatsProvider for T {
-    type TypedOutput = Scalar;
-    type IntOutput = i64;
-    type BoolOutput = bool;
+/// Blanket implementation that converts a [`ParquetStatsProvider`] into a
+/// [`DataSkippingPredicateEvaluator`].
+impl<T: ParquetStatsProvider> DataSkippingPredicateEvaluator for T {
+    type Output = bool;
+    type TypedStat = Scalar;
+    type IntStat = i64;
 
     fn get_min_stat(&self, col: &str, data_type: &DataType) -> Option<Scalar> {
         self.get_parquet_min_stat(col, data_type)
@@ -56,11 +56,7 @@ impl<T: ParquetStatsProvider> DataSkippingStatsProvider for T {
     ) -> Option<bool> {
         PredicateEvaluatorDefaults::partial_cmp_scalars(ord, &col, val, inverted)
     }
-}
 
-/// Blanket implementation that converts a [`ParquetStatsProvider`] into a
-/// [`DataSkippingPredicateEvaluator`].
-impl<T: ParquetStatsProvider> DataSkippingPredicateEvaluator for T {
     fn eval_scalar(&self, val: &Scalar, inverted: bool) -> Option<bool> {
         PredicateEvaluatorDefaults::eval_scalar(val, inverted)
     }
@@ -152,7 +148,7 @@ pub(crate) trait ParquetStatsSkippingFilter {
     fn eval_binary_nullsafe(&self, op: BinaryOperator, left: &Expr, right: &Expr) -> Option<bool>;
 }
 
-impl<T: DataSkippingPredicateEvaluator<BoolOutput = bool>> ParquetStatsSkippingFilter for T {
+impl<T: DataSkippingPredicateEvaluator<Output = bool>> ParquetStatsSkippingFilter for T {
     fn eval_sql_where(&self, filter: &Expr) -> Option<bool> {
         use Expr::*;
         use VariadicOperator::And;
