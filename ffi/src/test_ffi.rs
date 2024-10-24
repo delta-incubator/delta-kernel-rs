@@ -26,7 +26,7 @@ pub unsafe extern "C" fn get_testing_kernel_expression() -> Handle<SharedExpress
 
     let nested_fields = vec![
         StructField::new("a", DataType::INTEGER, false),
-        StructField::new("b", DataType::array(array_type), false),
+        StructField::new("b", array_type, false),
     ];
     let nested_values = vec![Scalar::Integer(500), Scalar::Array(array_data.clone())];
     let nested_struct = StructData::try_new(nested_fields.clone(), nested_values).unwrap();
@@ -53,21 +53,21 @@ pub unsafe extern "C" fn get_testing_kernel_expression() -> Handle<SharedExpress
         Expr::literal(i32::MIN),
         Expr::literal(i64::MAX),
         Expr::literal(i64::MIN),
-        Expr::literal(Scalar::String("hello expressions".into())),
+        Expr::literal("hello expressions"),
         Expr::literal(true),
         Expr::literal(false),
-        Expr::literal(Scalar::Timestamp(50)),
-        Expr::literal(Scalar::TimestampNtz(100)),
-        Expr::literal(Scalar::Date(32)),
-        Expr::literal(Scalar::Binary(0x0000deadbeefcafeu64.to_be_bytes().to_vec())),
+        Scalar::Timestamp(50).into(),
+        Scalar::TimestampNtz(100).into(),
+        Scalar::Date(32).into(),
+        Scalar::Binary(0x0000deadbeefcafeu64.to_be_bytes().to_vec()).into(),
         // Both the most and least significant u64 of the Decimal value will be 1
-        Expr::literal(Scalar::Decimal((1 << 64) + 1, 2, 3)),
+        Scalar::Decimal((1 << 64) + 1, 2, 3).into(),
         Expr::null_literal(DataType::SHORT),
-        Expr::literal(Scalar::Struct(top_level_struct)),
-        Expr::literal(Scalar::Array(array_data)),
+        Scalar::Struct(top_level_struct).into(),
+        Scalar::Array(array_data).into(),
         Expr::struct_from(vec![Expr::or_from(vec![
-            Expr::literal(Scalar::Integer(5)),
-            Expr::literal(Scalar::Long(20)),
+            Scalar::Integer(5).into(),
+            Scalar::Long(20).into(),
         ])]),
         Expr::not(Expr::is_null(Expr::column("col"))),
     ];
@@ -88,13 +88,7 @@ pub unsafe extern "C" fn get_testing_kernel_expression() -> Handle<SharedExpress
             BinaryOperator::Distinct,
         ]
         .iter()
-        .map(|op| {
-            Expr::binary(
-                *op,
-                Expr::literal(Scalar::Integer(0)),
-                Expr::literal(Scalar::Long(0)),
-            )
-        }),
+        .map(|op| Expr::binary(*op, Scalar::Integer(0), Scalar::Long(0))),
     );
 
     Arc::new(Expr::and_from(sub_exprs)).into()
