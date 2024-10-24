@@ -9,8 +9,7 @@ use delta_kernel::{
 };
 
 /// Constructs a kernel expression that is passed back as a SharedExpression handle. The expected
-/// output expression can be found in `ffi/tests/test_expression_visitor/expected.txt` as a printed
-/// tree.
+/// output expression can be found in `ffi/tests/test_expression_visitor/expected.txt`.
 ///
 /// # Safety
 /// The caller is responsible for freeing the retured memory, either by calling
