@@ -214,10 +214,11 @@ pub unsafe extern "C" fn visit_expression(
         let child_value_list_id = call!(visitor, make_field_list, struct_data.fields().len());
         let child_field_list_id = call!(visitor, make_field_list, struct_data.fields().len());
         for (field, value) in struct_data.fields().iter().zip(struct_data.values()) {
-            visit_expression_scalar(
+            call!(
                 visitor,
-                &Scalar::String(field.name.clone()),
+                visit_string_literal,
                 child_field_list_id,
+                field.name().into()
             );
             visit_expression_scalar(visitor, value, child_value_list_id);
         }
@@ -231,7 +232,7 @@ pub unsafe extern "C" fn visit_expression(
     }
     fn visit_expression_struct_expr(
         visitor: &mut EngineExpressionVisitor,
-        exprs: &Vec<Expression>,
+        exprs: &[Expression],
         sibling_list_id: usize,
     ) {
         let child_list_id = call!(visitor, make_field_list, exprs.len());
@@ -243,7 +244,7 @@ pub unsafe extern "C" fn visit_expression(
     fn visit_expression_variadic(
         visitor: &mut EngineExpressionVisitor,
         op: &VariadicOperator,
-        exprs: &Vec<Expression>,
+        exprs: &[Expression],
         sibling_list_id: usize,
     ) {
         let child_list_id = call!(visitor, make_field_list, exprs.len());
