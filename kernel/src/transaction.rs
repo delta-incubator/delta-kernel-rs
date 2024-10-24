@@ -184,7 +184,7 @@ fn generate_commit_info(
     commit_info_data_type
         .fields
         .get_mut("operationParameters")
-        .unwrap()
+        .ok_or_else(|| Error::missing_column("operationParameters"))?
         .data_type = DataType::Struct(Box::new(StructType::new(vec![StructField::new(
         column_name!("hack_operation_parameter_int").into_inner(),
         DataType::INTEGER,
