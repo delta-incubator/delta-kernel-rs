@@ -3,8 +3,8 @@ use crate::expressions::{
     BinaryOperator, Expression as Expr, Scalar, UnaryOperator, VariadicOperator,
 };
 use crate::predicates::{
-    DataSkippingPredicateEvaluator, DataSkippingStatsProvider, DefaultPredicateEvaluator,
-    PredicateEvaluator,
+    DataSkippingPredicateEvaluator, DataSkippingStatsProvider, PredicateEvaluator,
+    PredicateEvaluatorDefaults,
 };
 use crate::schema::DataType;
 use std::cmp::Ordering;
@@ -49,12 +49,12 @@ impl<T: ParquetStatsProvider> DataSkippingStatsProvider for T {
 
     fn eval_partial_cmp(
         &self,
+        ord: Ordering,
         col: Scalar,
         val: &Scalar,
-        ord: Ordering,
         inverted: bool,
     ) -> Option<bool> {
-        DefaultPredicateEvaluator::partial_cmp_scalars(&col, val, ord, inverted)
+        PredicateEvaluatorDefaults::partial_cmp_scalars(ord, &col, val, inverted)
     }
 }
 
@@ -62,7 +62,7 @@ impl<T: ParquetStatsProvider> DataSkippingStatsProvider for T {
 /// [`DataSkippingPredicateEvaluator`].
 impl<T: ParquetStatsProvider> DataSkippingPredicateEvaluator for T {
     fn eval_scalar(&self, val: &Scalar, inverted: bool) -> Option<bool> {
-        DefaultPredicateEvaluator::eval_scalar(val, inverted)
+        PredicateEvaluatorDefaults::eval_scalar(val, inverted)
     }
 
     fn eval_is_null(&self, col: &str, inverted: bool) -> Option<bool> {
@@ -82,7 +82,7 @@ impl<T: ParquetStatsProvider> DataSkippingPredicateEvaluator for T {
         right: &Scalar,
         inverted: bool,
     ) -> Option<bool> {
-        DefaultPredicateEvaluator::eval_binary_scalars(op, left, right, inverted)
+        PredicateEvaluatorDefaults::eval_binary_scalars(op, left, right, inverted)
     }
 
     fn finish_eval_variadic(
@@ -91,7 +91,7 @@ impl<T: ParquetStatsProvider> DataSkippingPredicateEvaluator for T {
         exprs: impl IntoIterator<Item = Option<bool>>,
         inverted: bool,
     ) -> Option<bool> {
-        DefaultPredicateEvaluator::finish_eval_variadic(op, exprs, inverted)
+        PredicateEvaluatorDefaults::finish_eval_variadic(op, exprs, inverted)
     }
 }
 

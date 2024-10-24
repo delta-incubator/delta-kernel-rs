@@ -12,8 +12,8 @@ use crate::expressions::{
     BinaryOperator, Expression as Expr, ExpressionRef, Scalar, VariadicOperator,
 };
 use crate::predicates::{
-    DataSkippingPredicateEvaluator, DataSkippingStatsProvider, DefaultPredicateEvaluator,
-    PredicateEvaluator,
+    DataSkippingPredicateEvaluator, DataSkippingStatsProvider, PredicateEvaluator,
+    PredicateEvaluatorDefaults,
 };
 use crate::schema::{DataType, PrimitiveType, SchemaRef, SchemaTransform, StructField, StructType};
 use crate::{Engine, EngineData, ExpressionEvaluator, JsonHandler};
@@ -245,9 +245,9 @@ impl DataSkippingStatsProvider for DataSkippingPredicateCreator {
 
     fn eval_partial_cmp(
         &self,
+        ord: Ordering,
         col: Expr,
         val: &Scalar,
-        ord: Ordering,
         inverted: bool,
     ) -> Option<Expr> {
         let op = match (ord, inverted) {
@@ -264,7 +264,7 @@ impl DataSkippingStatsProvider for DataSkippingPredicateCreator {
 
 impl DataSkippingPredicateEvaluator for DataSkippingPredicateCreator {
     fn eval_scalar(&self, val: &Scalar, inverted: bool) -> Option<Expr> {
-        DefaultPredicateEvaluator::eval_scalar(val, inverted).map(Expr::literal)
+        PredicateEvaluatorDefaults::eval_scalar(val, inverted).map(Expr::literal)
     }
 
     fn eval_is_null(&self, col: &str, inverted: bool) -> Option<Expr> {
@@ -284,7 +284,8 @@ impl DataSkippingPredicateEvaluator for DataSkippingPredicateCreator {
         right: &Scalar,
         inverted: bool,
     ) -> Option<Expr> {
-        DefaultPredicateEvaluator::eval_binary_scalars(op, left, right, inverted).map(Expr::literal)
+        PredicateEvaluatorDefaults::eval_binary_scalars(op, left, right, inverted)
+            .map(Expr::literal)
     }
 
     fn finish_eval_variadic(

@@ -6,6 +6,9 @@ use crate::schema::DataType;
 use std::cmp::Ordering;
 use tracing::debug;
 
+#[cfg(test)]
+mod tests;
+
 /// Evaluates a predicate expression tree against column names that resolve as scalars. Useful for
 /// testing/debugging but also serves as a reference implementation that documents the expression
 /// semantics that kernel relies on for data skipping.
@@ -124,19 +127,19 @@ pub(crate) trait PredicateEvaluator {
     }
 
     /// A (possibly inverted) DISTINCT test, e.g. `[NOT] DISTINCT(<col>, false)`. DISTINCT can be
-    /// seen as one of three different operations, depending on the input:
+    /// seen as one of two operations, depending on the input:
     ///
-    /// 1. [NOT] DISTINCT(<col>, NULL) is equivalent to `[NOT] (<col> IS NOT NULL)`
-    /// 2. NOT DISTINCT(<col>, <value>) is equivalent to `<col> = <value>`
-    /// 3. DISTINCT(<col>, <value>) is equivalent to `AND(<col> IS NOT NULL, <col> != <value>)`
+    /// 1. DISTINCT(<col>, NULL) is equivalent to `<col> IS NOT NULL`
+    /// 2. DISTINCT(<col>, <value>) is equivalent to `OR(<col> IS NULL, <col> != <value>)`
     fn eval_distinct(&self, col: &str, val: &Scalar, inverted: bool) -> Option<Self::Output> {
         if let Scalar::Null(_) = val {
             self.eval_is_null(col, !inverted)
-        } else if inverted {
-            self.eval_eq(col, val, false)
         } else {
-            let args = [self.eval_is_null(col, true), self.eval_eq(col, val, true)];
-            self.finish_eval_variadic(VariadicOperator::And, args, false)
+            let args = [
+                self.eval_is_null(col, inverted),
+                self.eval_eq(col, val, !inverted),
+            ];
+            self.finish_eval_variadic(VariadicOperator::Or, args, inverted)
         }
     }
 
@@ -214,28 +217,24 @@ pub(crate) trait PredicateEvaluator {
     }
 }
 
-/// Directly evaluates predicates, resolving columns directly as scalars.
-pub(crate) struct DefaultPredicateEvaluator;
-impl DefaultPredicateEvaluator {
-    pub(crate) fn resolve_column(&self, _col: &str) -> Option<Scalar> {
-        todo!()
-    }
-
-    pub(crate) fn partial_cmp_scalars(
-        a: &Scalar,
-        b: &Scalar,
-        ord: Ordering,
-        inverted: bool,
-    ) -> Option<bool> {
-        let result = a.partial_cmp(b)? == ord;
-        Some(result != inverted)
-    }
-
+pub(crate) struct PredicateEvaluatorDefaults;
+impl PredicateEvaluatorDefaults {
     pub(crate) fn eval_scalar(val: &Scalar, inverted: bool) -> Option<bool> {
         match val {
             Scalar::Boolean(val) => Some(*val != inverted),
             _ => None,
         }
+    }
+
+    pub(crate) fn partial_cmp_scalars(
+        ord: Ordering,
+        a: &Scalar,
+        b: &Scalar,
+        inverted: bool,
+    ) -> Option<bool> {
+        let cmp = a.partial_cmp(b)?;
+        let matched = cmp == ord;
+        Some(matched != inverted)
     }
 
     pub(crate) fn eval_binary_scalars(
@@ -246,12 +245,12 @@ impl DefaultPredicateEvaluator {
     ) -> Option<bool> {
         use BinaryOperator::*;
         match op {
-            Equal => Self::partial_cmp_scalars(left, right, Ordering::Equal, inverted),
-            NotEqual => Self::partial_cmp_scalars(left, right, Ordering::Equal, !inverted),
-            LessThan => Self::partial_cmp_scalars(left, right, Ordering::Less, inverted),
-            LessThanOrEqual => Self::partial_cmp_scalars(left, right, Ordering::Greater, !inverted),
-            GreaterThan => Self::partial_cmp_scalars(left, right, Ordering::Greater, inverted),
-            GreaterThanOrEqual => Self::partial_cmp_scalars(left, right, Ordering::Less, !inverted),
+            Equal => Self::partial_cmp_scalars(Ordering::Equal, left, right, inverted),
+            NotEqual => Self::partial_cmp_scalars(Ordering::Equal, left, right, !inverted),
+            LessThan => Self::partial_cmp_scalars(Ordering::Less, left, right, inverted),
+            LessThanOrEqual => Self::partial_cmp_scalars(Ordering::Greater, left, right, !inverted),
+            GreaterThan => Self::partial_cmp_scalars(Ordering::Greater, left, right, inverted),
+            GreaterThanOrEqual => Self::partial_cmp_scalars(Ordering::Less, left, right, !inverted),
             _ => {
                 debug!("Unsupported binary operator: {left:?} {op:?} {right:?}");
                 None
@@ -286,61 +285,63 @@ impl DefaultPredicateEvaluator {
         }
     }
 }
+
+/// Resolves columns as scalars, as a building block for [`DefaultPredicateEvaluator`].
+pub(crate) trait ResolveColumnAsScalar {
+    fn resolve_column(&self, col: &str) -> Option<Scalar>;
+}
+/// A predicate evaluator that directly evaluates the predicate to produce an `Option<bool>`
+/// result. Column resolution is handled by an embedded [`ResolveColumnAsScalar`] instance.
+pub(crate) struct DefaultPredicateEvaluator {
+    resolver: Box<dyn ResolveColumnAsScalar>,
+}
+impl DefaultPredicateEvaluator {
+    fn resolve_column(&self, col: &str) -> Option<Scalar> {
+        self.resolver.resolve_column(col)
+    }
+}
+impl<T: ResolveColumnAsScalar + 'static> From<T> for DefaultPredicateEvaluator {
+    fn from(resolver: T) -> Self {
+        Self {
+            resolver: Box::new(resolver),
+        }
+    }
+}
 impl PredicateEvaluator for DefaultPredicateEvaluator {
     type Output = bool;
 
     fn eval_scalar(&self, val: &Scalar, inverted: bool) -> Option<bool> {
-        Self::eval_scalar(val, inverted)
+        PredicateEvaluatorDefaults::eval_scalar(val, inverted)
     }
 
     fn eval_is_null(&self, col: &str, inverted: bool) -> Option<bool> {
-        let is_null = matches!(self.resolve_column(col)?, Scalar::Null(_));
-        Some(is_null != inverted)
+        let col = self.resolve_column(col)?;
+        Some(matches!(col, Scalar::Null(_)) != inverted)
     }
 
     fn eval_lt(&self, col: &str, val: &Scalar) -> Option<bool> {
-        self.eval_binary_scalars(
-            BinaryOperator::LessThan,
-            &self.resolve_column(col)?,
-            val,
-            false,
-        )
+        let col = self.resolve_column(col)?;
+        self.eval_binary_scalars(BinaryOperator::LessThan, &col, val, false)
     }
 
     fn eval_le(&self, col: &str, val: &Scalar) -> Option<bool> {
-        self.eval_binary_scalars(
-            BinaryOperator::LessThanOrEqual,
-            &self.resolve_column(col)?,
-            val,
-            false,
-        )
+        let col = self.resolve_column(col)?;
+        self.eval_binary_scalars(BinaryOperator::LessThanOrEqual, &col, val, false)
     }
 
     fn eval_gt(&self, col: &str, val: &Scalar) -> Option<bool> {
-        self.eval_binary_scalars(
-            BinaryOperator::GreaterThan,
-            &self.resolve_column(col)?,
-            val,
-            false,
-        )
+        let col = self.resolve_column(col)?;
+        self.eval_binary_scalars(BinaryOperator::GreaterThan, &col, val, false)
     }
 
     fn eval_ge(&self, col: &str, val: &Scalar) -> Option<bool> {
-        self.eval_binary_scalars(
-            BinaryOperator::GreaterThanOrEqual,
-            &self.resolve_column(col)?,
-            val,
-            false,
-        )
+        let col = self.resolve_column(col)?;
+        self.eval_binary_scalars(BinaryOperator::GreaterThanOrEqual, &col, val, false)
     }
 
     fn eval_eq(&self, col: &str, val: &Scalar, inverted: bool) -> Option<bool> {
-        self.eval_binary_scalars(
-            BinaryOperator::Equal,
-            &self.resolve_column(col)?,
-            val,
-            inverted,
-        )
+        let col = self.resolve_column(col)?;
+        self.eval_binary_scalars(BinaryOperator::Equal, &col, val, inverted)
     }
 
     fn eval_binary_scalars(
@@ -349,8 +350,8 @@ impl PredicateEvaluator for DefaultPredicateEvaluator {
         left: &Scalar,
         right: &Scalar,
         inverted: bool,
-    ) -> Option<bool> {
-        Self::eval_binary_scalars(op, left, right, inverted)
+    ) -> Option<Self::Output> {
+        PredicateEvaluatorDefaults::eval_binary_scalars(op, left, right, inverted)
     }
 
     fn finish_eval_variadic(
@@ -359,7 +360,7 @@ impl PredicateEvaluator for DefaultPredicateEvaluator {
         exprs: impl IntoIterator<Item = Option<bool>>,
         inverted: bool,
     ) -> Option<bool> {
-        Self::finish_eval_variadic(op, exprs, inverted)
+        PredicateEvaluatorDefaults::finish_eval_variadic(op, exprs, inverted)
     }
 }
 
@@ -382,9 +383,9 @@ pub(crate) trait DataSkippingStatsProvider {
 
     fn eval_partial_cmp(
         &self,
+        ord: Ordering,
         col: Self::TypedOutput,
         val: &Scalar,
-        ord: Ordering,
         inverted: bool,
     ) -> Option<Self::BoolOutput>;
 
@@ -398,7 +399,7 @@ pub(crate) trait DataSkippingStatsProvider {
         inverted: bool,
     ) -> Option<Self::BoolOutput> {
         let min = self.get_min_stat(col, &val.data_type())?;
-        self.eval_partial_cmp(min, val, ord, inverted)
+        self.eval_partial_cmp(ord, min, val, inverted)
     }
 
     /// Performs a partial comparison against a column max-stat. See [`partial_cmp_scalars`] for
@@ -411,7 +412,7 @@ pub(crate) trait DataSkippingStatsProvider {
         inverted: bool,
     ) -> Option<Self::BoolOutput> {
         let max = self.get_max_stat(col, &val.data_type())?;
-        self.eval_partial_cmp(max, val, ord, inverted)
+        self.eval_partial_cmp(ord, max, val, inverted)
     }
 }
 
