@@ -105,52 +105,49 @@ fn test_eval_binary_comparisons() {
 
 #[test]
 fn test_eval_variadic() {
-    // NOTE: The data skipping logic can produce TRUE instead of NULL in some cases. This is
-    // harmless, because data skipping only cares about FALSE (NULL and TRUE are treated the same).
     let test_cases = &[
-        // Every combo of 0, 1 and 2 inputs
-        (&[] as &[Option<bool>], TRUE, FALSE, FALSE, TRUE),
-        (&[TRUE], TRUE, TRUE, FALSE, FALSE),
-        (&[FALSE], FALSE, FALSE, TRUE, TRUE),
-        (&[NULL], TRUE, NULL, NULL, TRUE), // NULL -> TRUE
-        (&[TRUE, TRUE], TRUE, TRUE, FALSE, FALSE),
-        (&[TRUE, FALSE], FALSE, TRUE, TRUE, FALSE),
-        (&[TRUE, NULL], TRUE, NULL, NULL, FALSE), // NULL -> TRUE
-        (&[FALSE, TRUE], FALSE, TRUE, TRUE, FALSE),
-        (&[FALSE, FALSE], FALSE, FALSE, TRUE, TRUE),
-        (&[FALSE, NULL], FALSE, NULL, NULL, TRUE), // NULL -> TRUE
-        (&[NULL, TRUE], TRUE, NULL, NULL, FALSE),  // NULL -> TRUE
-        (&[NULL, FALSE], FALSE, NULL, NULL, TRUE), // NULL -> TRUE
-        (&[NULL, NULL], TRUE, NULL, NULL, TRUE),   // NULL -> TRUE
+        (&[]as &[Option<bool>], TRUE, FALSE),
+        (&[TRUE], TRUE, TRUE),
+        (&[FALSE], FALSE, FALSE),
+        (&[NULL], NULL, NULL),
+        (&[TRUE, TRUE], TRUE, TRUE),
+        (&[TRUE, FALSE], FALSE, TRUE),
+        (&[TRUE, NULL], NULL, TRUE),
+        (&[FALSE, TRUE], FALSE, TRUE),
+        (&[FALSE, FALSE], FALSE, FALSE),
+        (&[FALSE, NULL], FALSE, NULL),
+        (&[NULL, TRUE], NULL, TRUE),
+        (&[NULL, FALSE], FALSE, NULL),
+        (&[NULL, NULL], NULL, NULL),
         // Every combo of 1:2
-        (&[TRUE, FALSE, FALSE], FALSE, TRUE, TRUE, FALSE),
-        (&[FALSE, TRUE, FALSE], FALSE, TRUE, TRUE, FALSE),
-        (&[FALSE, FALSE, TRUE], FALSE, TRUE, TRUE, FALSE),
-        (&[TRUE, NULL, NULL], TRUE, NULL, NULL, FALSE), // NULL -> TRUE
-        (&[NULL, TRUE, NULL], TRUE, NULL, NULL, FALSE), // NULL -> TRUE
-        (&[NULL, NULL, TRUE], TRUE, NULL, NULL, FALSE), // NULL -> TRUE
-        (&[FALSE, TRUE, TRUE], FALSE, TRUE, TRUE, FALSE),
-        (&[TRUE, FALSE, TRUE], FALSE, TRUE, TRUE, FALSE),
-        (&[TRUE, TRUE, FALSE], FALSE, TRUE, TRUE, FALSE),
-        (&[FALSE, NULL, NULL], FALSE, NULL, NULL, TRUE), // NULL -> TRUE
-        (&[NULL, FALSE, NULL], FALSE, NULL, NULL, TRUE), // NULL -> TRUE
-        (&[NULL, NULL, FALSE], FALSE, NULL, NULL, TRUE), // NULL -> TRUE
-        (&[NULL, TRUE, TRUE], TRUE, NULL, NULL, FALSE),  // NULL -> TRUE
-        (&[TRUE, NULL, TRUE], TRUE, NULL, NULL, FALSE),  // NULL -> TRUE
-        (&[TRUE, TRUE, NULL], TRUE, NULL, NULL, FALSE),  // NULL -> TRUE
-        (&[NULL, FALSE, FALSE], FALSE, NULL, NULL, TRUE), // NULL -> TRUE
-        (&[FALSE, NULL, FALSE], FALSE, NULL, NULL, TRUE), // NULL -> TRUE
-        (&[FALSE, FALSE, NULL], FALSE, NULL, NULL, TRUE), // NULL -> TRUE
+        (&[TRUE, FALSE, FALSE], FALSE, TRUE),
+        (&[FALSE, TRUE, FALSE], FALSE, TRUE),
+        (&[FALSE, FALSE, TRUE], FALSE, TRUE),
+        (&[TRUE, NULL, NULL], NULL, TRUE),
+        (&[NULL, TRUE, NULL], NULL, TRUE),
+        (&[NULL, NULL, TRUE], NULL, TRUE),
+        (&[FALSE, TRUE, TRUE], FALSE, TRUE),
+        (&[TRUE, FALSE, TRUE], FALSE, TRUE),
+        (&[TRUE, TRUE, FALSE], FALSE, TRUE),
+        (&[FALSE, NULL, NULL], FALSE, NULL),
+        (&[NULL, FALSE, NULL], FALSE, NULL),
+        (&[NULL, NULL, FALSE], FALSE, NULL),
+        (&[NULL, TRUE, TRUE], NULL, TRUE),
+        (&[TRUE, NULL, TRUE], NULL, TRUE),
+        (&[TRUE, TRUE, NULL], NULL, TRUE),
+        (&[NULL, FALSE, FALSE], FALSE, NULL),
+        (&[FALSE, NULL, FALSE], FALSE, NULL),
+        (&[FALSE, FALSE, NULL], FALSE, NULL),
         // Every unique ordering of 3
-        (&[TRUE, FALSE, NULL], FALSE, NULL, NULL, FALSE),
-        (&[TRUE, NULL, FALSE], FALSE, NULL, NULL, FALSE),
-        (&[FALSE, TRUE, NULL], FALSE, NULL, NULL, FALSE),
-        (&[FALSE, NULL, TRUE], FALSE, NULL, NULL, FALSE),
-        (&[NULL, TRUE, FALSE], FALSE, NULL, NULL, FALSE),
-        (&[NULL, FALSE, TRUE], FALSE, NULL, NULL, FALSE),
+        (&[TRUE, FALSE, NULL], FALSE, TRUE),
+        (&[TRUE, NULL, FALSE], FALSE, TRUE),
+        (&[FALSE, TRUE, NULL], FALSE, TRUE),
+        (&[FALSE, NULL, TRUE], FALSE, TRUE),
+        (&[NULL, TRUE, FALSE], FALSE, TRUE),
+        (&[NULL, FALSE, TRUE], FALSE, TRUE),
     ];
     let filter = DefaultPredicateEvaluator::from(UnimplementedColumnResolver);
-    for (inputs, expect_and, expect_or, expect_not_and, expect_not_or) in test_cases {
+    for (inputs, expect_and, expect_or) in test_cases {
         let inputs: Vec<_> = inputs
             .iter()
             .map(|val| match val {
@@ -160,34 +157,34 @@ fn test_eval_variadic() {
             .collect();
 
         let expr = Expr::and_from(inputs.clone());
-        let pred = as_data_skipping_predicate(&expr, false);
+        let pred = as_data_skipping_predicate(&expr, false).unwrap();
         expect_eq!(
-            pred.and_then(|p| filter.eval_expr(&p, false)),
+            filter.eval_expr(&pred, false),
             *expect_and,
             "AND({inputs:?})"
         );
 
         let expr = Expr::or_from(inputs.clone());
-        let pred = as_data_skipping_predicate(&expr, false);
+        let pred = as_data_skipping_predicate(&expr, false).unwrap();
         expect_eq!(
-            pred.and_then(|p| filter.eval_expr(&p, false)),
+            filter.eval_expr(&pred, false),
             *expect_or,
             "OR({inputs:?})"
         );
 
         let expr = Expr::and_from(inputs.clone());
-        let pred = as_data_skipping_predicate(&expr, true);
+        let pred = as_data_skipping_predicate(&expr, true).unwrap();
         expect_eq!(
-            pred.and_then(|p| filter.eval_expr(&p, false)),
-            *expect_not_and,
+            filter.eval_expr(&pred, false),
+            expect_and.map(|val| !val),
             "NOT AND({inputs:?})"
         );
 
         let expr = Expr::or_from(inputs.clone());
-        let pred = as_data_skipping_predicate(&expr, true);
+        let pred = as_data_skipping_predicate(&expr, true).unwrap();
         expect_eq!(
-            pred.and_then(|p| filter.eval_expr(&p, false)),
-            *expect_not_or,
+            filter.eval_expr(&pred, false),
+            expect_or.map(|val| !val),
             "NOT OR({inputs:?})"
         );
     }
