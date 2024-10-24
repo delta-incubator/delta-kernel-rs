@@ -1,3 +1,4 @@
+//! Defines [`EngineExpressionVisitor`]. This is a visitor  that can be used to convert the kernel's [`Expression`] to an engine's expression format.
 use crate::expressions::SharedExpression;
 use std::ffi::c_void;
 
@@ -190,7 +191,7 @@ pub unsafe extern "C" fn visit_expression(
             ($visitor.$visitor_fn)($visitor.data $(, $extra_args) *)
         };
     }
-    fn visit_array(
+    fn visit_expression_array(
         visitor: &mut EngineExpressionVisitor,
         array: &ArrayData,
         sibling_list_id: usize,
@@ -199,11 +200,11 @@ pub unsafe extern "C" fn visit_expression(
         let elements = array.array_elements();
         let child_list_id = call!(visitor, make_field_list, elements.len());
         for scalar in elements {
-            visit_scalar(visitor, scalar, child_list_id);
+            visit_expression_scalar(visitor, scalar, child_list_id);
         }
         call!(visitor, visit_array_literal, sibling_list_id, child_list_id);
     }
-    fn visit_struct_literal(
+    fn visit_expression_struct_literal(
         visitor: &mut EngineExpressionVisitor,
         struct_data: &StructData,
         sibling_list_id: usize,
@@ -211,12 +212,12 @@ pub unsafe extern "C" fn visit_expression(
         let child_value_list_id = call!(visitor, make_field_list, struct_data.fields().len());
         let child_field_list_id = call!(visitor, make_field_list, struct_data.fields().len());
         for (field, value) in struct_data.fields().iter().zip(struct_data.values()) {
-            visit_scalar(
+            visit_expression_scalar(
                 visitor,
                 &Scalar::String(field.name.clone()),
                 child_field_list_id,
             );
-            visit_scalar(visitor, value, child_value_list_id);
+            visit_expression_scalar(visitor, value, child_value_list_id);
         }
         call!(
             visitor,
@@ -226,7 +227,7 @@ pub unsafe extern "C" fn visit_expression(
             child_value_list_id
         )
     }
-    fn visit_struct_expr(
+    fn visit_expression_struct_expr(
         visitor: &mut EngineExpressionVisitor,
         exprs: &Vec<Expression>,
         sibling_list_id: usize,
@@ -237,7 +238,7 @@ pub unsafe extern "C" fn visit_expression(
         }
         call!(visitor, visit_struct_expr, sibling_list_id, child_list_id)
     }
-    fn visit_variadic(
+    fn visit_expression_variadic(
         visitor: &mut EngineExpressionVisitor,
         op: &VariadicOperator,
         exprs: &Vec<Expression>,
@@ -254,7 +255,7 @@ pub unsafe extern "C" fn visit_expression(
         };
         visit_fn(visitor.data, sibling_list_id, child_list_id);
     }
-    fn visit_scalar(
+    fn visit_expression_scalar(
         visitor: &mut EngineExpressionVisitor,
         scalar: &Scalar,
         sibling_list_id: usize,
@@ -299,9 +300,9 @@ pub unsafe extern "C" fn visit_expression(
             }
             Scalar::Null(_) => call!(visitor, visit_null_literal, sibling_list_id),
             Scalar::Struct(struct_data) => {
-                visit_struct_literal(visitor, struct_data, sibling_list_id)
+                visit_expression_struct_literal(visitor, struct_data, sibling_list_id)
             }
-            Scalar::Array(array) => visit_array(visitor, array, sibling_list_id),
+            Scalar::Array(array) => visit_expression_array(visitor, array, sibling_list_id),
         }
     }
     fn visit_expression_impl(
@@ -310,9 +311,13 @@ pub unsafe extern "C" fn visit_expression(
         sibling_list_id: usize,
     ) {
         match expression {
-            Expression::Literal(scalar) => visit_scalar(visitor, scalar, sibling_list_id),
+            Expression::Literal(scalar) => {
+                visit_expression_scalar(visitor, scalar, sibling_list_id)
+            }
             Expression::Column(name) => call!(visitor, visit_column, sibling_list_id, name.into()),
-            Expression::Struct(exprs) => visit_struct_expr(visitor, exprs, sibling_list_id),
+            Expression::Struct(exprs) => {
+                visit_expression_struct_expr(visitor, exprs, sibling_list_id)
+            }
             Expression::BinaryOperation { op, left, right } => {
                 let child_list_id = call!(visitor, make_field_list, 2);
                 visit_expression_impl(visitor, left, child_list_id);
@@ -344,7 +349,7 @@ pub unsafe extern "C" fn visit_expression(
                 op(visitor.data, sibling_list_id, child_id_list);
             }
             Expression::VariadicOperation { op, exprs } => {
-                visit_variadic(visitor, op, exprs, sibling_list_id)
+                visit_expression_variadic(visitor, op, exprs, sibling_list_id)
             }
         }
     }
