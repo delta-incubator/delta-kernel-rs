@@ -532,6 +532,7 @@ fn read_table_data(
         let table = Table::new(url.clone());
         let snapshot = table.snapshot(engine, None)?;
 
+        // TODO: Support selecting nested columns
         let read_schema = select_cols.map(|select_cols| {
             let table_schema = snapshot.schema();
             let selected_fields = select_cols
@@ -1069,4 +1070,34 @@ fn type_widening_decimal() -> Result<(), Box<dyn std::error::Error>> {
         "long_decimal",
     ]);
     read_table_data_str("./tests/data/type-widening/", select_cols, None, expected)
+}
+
+// Just testing that nesting works at all -- other tests validate the actual expressions
+#[test]
+fn nested_column_predicates() -> Result<(), Box<dyn std::error::Error>> {
+    // Ineffective skipping first
+    let expected = vec![
+        "+-------------------------------------------------------------------------------------------+",
+        "| chrono                                                                                    |",
+        "+-------------------------------------------------------------------------------------------+",
+        "| {date32: 1971-01-01, timestamp: 1970-02-01T08:00:00Z, timestamp_ntz: 1970-01-02T00:00:00} |",
+        "| {date32: 1971-01-02, timestamp: 1970-02-01T09:00:00Z, timestamp_ntz: 1970-01-02T00:01:00} |",
+        "| {date32: 1971-01-03, timestamp: 1970-02-01T10:00:00Z, timestamp_ntz: 1970-01-02T00:02:00} |",
+        "| {date32: 1971-01-04, timestamp: 1970-02-01T11:00:00Z, timestamp_ntz: 1970-01-02T00:03:00} |",
+        "| {date32: 1971-01-05, timestamp: 1970-02-01T12:00:00Z, timestamp_ntz: 1970-01-02T00:04:00} |",
+        "+-------------------------------------------------------------------------------------------+",
+    ];
+    let columns = &["chrono"];
+    let predicate = Expression::literal(10).lt(column_expr!("numeric.ints.int32"));
+    read_table_data_str("./tests/data/nested_data_skipping/", Some(columns), Some(predicate), expected)?;
+
+    // Effective skipping, if nested columns are handled properly.
+    let expected = vec![
+        "+--------+",
+        "| chrono |",
+        "+--------+",
+        "+--------+",
+    ];
+    let predicate = Expression::literal(10).gt(column_expr!("numeric.ints.int32"));
+    read_table_data_str("./tests/data/nested_data_skipping/", Some(columns), Some(predicate), expected)
 }

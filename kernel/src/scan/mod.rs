@@ -782,6 +782,46 @@ mod tests {
         assert_eq!(data.len(), 0);
     }
 
+    #[test]
+    fn test_nested_data_skipping() {
+        let path = std::fs::canonicalize(PathBuf::from("./tests/data/nested_data_skipping/"));
+        let url = url::Url::from_directory_path(path.unwrap()).unwrap();
+        let engine = SyncEngine::new();
+
+        let table = Table::new(url);
+        let snapshot = Arc::new(table.snapshot(&engine, None).unwrap());
+
+        // No predicate pushdown attempted, so the one data file should be returned.
+        //
+        // NOTE: The data file contains only five rows -- near guaranteed to produce one row group.
+        let scan = snapshot.clone().scan_builder().build().unwrap();
+        let data: Vec<_> = scan.execute(&engine).unwrap().try_collect().unwrap();
+        assert_eq!(data.len(), 1);
+
+        // Ineffective predicate pushdown attempted, so the one data file should be returned.
+        let int_col = column_expr!("numeric.ints.int32");
+        let value = Expression::literal(1000i32);
+        let predicate = Arc::new(int_col.clone().gt(value.clone()));
+        let scan = snapshot
+            .clone()
+            .scan_builder()
+            .with_predicate(predicate)
+            .build()
+            .unwrap();
+        let data: Vec<_> = scan.execute(&engine).unwrap().try_collect().unwrap();
+        assert_eq!(data.len(), 1);
+
+        // Effective predicate pushdown, so no data files should be returned.
+        let predicate = Arc::new(int_col.lt(value));
+        let scan = snapshot
+            .scan_builder()
+            .with_predicate(predicate)
+            .build()
+            .unwrap();
+        let data: Vec<_> = scan.execute(&engine).unwrap().try_collect().unwrap();
+        assert_eq!(data.len(), 0);
+    }
+
     #[test_log::test]
     fn test_scan_with_checkpoint() -> DeltaResult<()> {
         let path = std::fs::canonicalize(PathBuf::from(
