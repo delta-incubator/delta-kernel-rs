@@ -1,4 +1,5 @@
-//! Defines [`EngineExpressionVisitor`]. This is a visitor  that can be used to convert the kernel's [`Expression`] to an engine's expression format.
+//! Defines [`EngineExpressionVisitor`]. This is a visitor that can be used to convert the kernel's
+//! [`Expression`] to an engine's expression format.
 use crate::expressions::SharedExpression;
 use std::ffi::c_void;
 

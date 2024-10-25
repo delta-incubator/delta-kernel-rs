@@ -31,6 +31,4 @@ if(LINUX)
     --leak-check=full
     --errors-for-leak-kinds=definite
     --show-leak-kinds=definite ./visit_expression)
-elseif(MACOSX)
-  add_test(NAME test_expression_visitor_leaks COMMAND leaks --atExit -- ./visit_expression)
 endif()

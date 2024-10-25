@@ -69,7 +69,7 @@ pub unsafe extern "C" fn get_testing_kernel_expression() -> Handle<SharedExpress
             Scalar::Integer(5).into(),
             Scalar::Long(20).into(),
         ])]),
-        Expr::not(Expr::is_null(column_expr!("col").into())),
+        Expr::not(Expr::is_null(column_expr!("col"))),
     ];
     sub_exprs.extend(
         [
