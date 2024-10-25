@@ -1094,10 +1094,10 @@ fn nested_column_predicates() -> Result<(), Box<dyn std::error::Error>> {
     // Effective skipping, if nested columns are handled properly.
     let expected = vec![
         "+--------+",
-        "| chrono |",
+        "| chronoa |",
         "+--------+",
         "+--------+",
     ];
-    let predicate = Expression::literal(10).gt(column_expr!("numeric.ints.int32"));
+    let predicate = Expression::literal(10).gt(column_expr!("foo"));
     read_table_data_str("./tests/data/nested_data_skipping/", Some(columns), Some(predicate), expected)
 }

@@ -190,7 +190,7 @@ impl DataSkippingFilter {
             LazyLock::new(|| column_expr!("predicate").distinct(false));
 
         let predicate = predicate.as_deref()?;
-        debug!("Creating a data skipping filter for {}", &predicate);
+        println!("Creating a data skipping filter for {}", &predicate);
         let field_names: HashSet<_> = predicate.references();
 
         // Build the stats read schema by extracting the column names referenced by the predicate,
@@ -202,6 +202,7 @@ impl DataSkippingFilter {
             .collect();
         if data_fields.is_empty() {
             // The predicate didn't reference any eligible stats columns, so skip it.
+            println!("No eligible stats columns");
             return None;
         }
         let minmax_schema = StructType::new(data_fields);
@@ -245,9 +246,11 @@ impl DataSkippingFilter {
             DataType::STRING,
         );
 
+        let pred = as_data_skipping_predicate(predicate)?;
+        println!("data skipping predicate: {pred:?}");
         let skipping_evaluator = engine.get_expression_handler().get_evaluator(
             stats_schema.clone(),
-            Expr::struct_from([as_data_skipping_predicate(predicate)?]),
+            Expr::struct_from([pred]),
             PREDICATE_SCHEMA.clone(),
         );
 

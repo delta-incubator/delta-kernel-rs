@@ -799,7 +799,7 @@ mod tests {
         assert_eq!(data.len(), 1);
 
         // Ineffective predicate pushdown attempted, so the one data file should be returned.
-        let int_col = column_expr!("numeric.ints.int32");
+        let int_col = column_expr!("foo");
         let value = Expression::literal(1000i32);
         let predicate = Arc::new(int_col.clone().gt(value.clone()));
         let scan = snapshot
