@@ -100,10 +100,7 @@ async fn test_commit_info() -> Result<(), Box<dyn std::error::Error>> {
     )]));
     let table = create_table(store.clone(), table_location, schema, &[]).await?;
 
-    // create a transaction
-    let mut txn = table.new_transaction(&engine)?;
-
-    // add commit info of the form {engineCommitInfo: Map { "engineInfo": "default engine" } }
+    // create commit info of the form {engineCommitInfo: Map { "engineInfo": "default engine" } }
     let commit_info_schema = Arc::new(ArrowSchema::new(vec![Field::new(
         "engineCommitInfo",
         ArrowDataType::Map(
@@ -139,7 +136,11 @@ async fn test_commit_info() -> Result<(), Box<dyn std::error::Error>> {
 
     let commit_info_batch =
         RecordBatch::try_new(commit_info_schema.clone(), vec![Arc::new(array)])?;
-    txn.commit_info(Box::new(ArrowEngineData::new(commit_info_batch)));
+
+    // create a transaction
+    let txn = table
+        .new_transaction(&engine)?
+        .with_commit_info(Box::new(ArrowEngineData::new(commit_info_batch)));
 
     // commit!
     txn.commit(&engine)?;
@@ -212,11 +213,12 @@ async fn test_invalid_commit_info() -> Result<(), Box<dyn std::error::Error>> {
     let table = create_table(store.clone(), table_location, schema, &[]).await?;
 
     // empty commit info test
-    let mut txn = table.new_transaction(&engine)?;
     let commit_info_schema = Arc::new(ArrowSchema::empty());
     let commit_info_batch = RecordBatch::new_empty(commit_info_schema.clone());
     assert!(commit_info_batch.num_rows() == 0);
-    txn.commit_info(Box::new(ArrowEngineData::new(commit_info_batch)));
+    let txn = table
+        .new_transaction(&engine)?
+        .with_commit_info(Box::new(ArrowEngineData::new(commit_info_batch)));
 
     // commit!
     assert!(matches!(
@@ -225,7 +227,6 @@ async fn test_invalid_commit_info() -> Result<(), Box<dyn std::error::Error>> {
     ));
 
     // two-row commit info test
-    let mut txn = table.new_transaction(&engine)?;
     let commit_info_schema = Arc::new(ArrowSchema::new(vec![Field::new(
         "engineInfo",
         ArrowDataType::Utf8,
@@ -239,7 +240,9 @@ async fn test_invalid_commit_info() -> Result<(), Box<dyn std::error::Error>> {
         ]))],
     )?;
 
-    txn.commit_info(Box::new(ArrowEngineData::new(commit_info_batch)));
+    let txn = table
+        .new_transaction(&engine)?
+        .with_commit_info(Box::new(ArrowEngineData::new(commit_info_batch)));
 
     // commit!
     assert!(matches!(

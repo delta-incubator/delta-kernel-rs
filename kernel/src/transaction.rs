@@ -90,8 +90,9 @@ impl Transaction {
 
     /// Set the operation that this transaction is performing. This string will be persisted in the
     /// commit and visible to anyone who describes the table history.
-    pub fn operation(&mut self, operation: String) {
+    pub fn with_operation(mut self, operation: String) -> Self {
         self.operation = Some(operation);
+        self
     }
 
     /// WARNING: This is an unstable API and will likely change in the future.
@@ -107,8 +108,9 @@ impl Transaction {
     /// that can either be `null` or contain an empty map.
     ///
     /// Any other columns in the data chunk are ignored.
-    pub fn commit_info(&mut self, commit_info: Box<dyn EngineData>) {
+    pub fn with_commit_info(mut self, commit_info: Box<dyn EngineData>) -> Self {
         self.commit_info = Some(commit_info.into());
+        self
     }
 }
 
