@@ -1,0 +1,5 @@
+error: Can only use drop_null_container_values on HashMap fields, not String
+  --> tests/macros/schema_with_invalid_attribute_target.rs:10:21
+   |
+10 |     some_long_name: String,
+   |                     ^^^^^^

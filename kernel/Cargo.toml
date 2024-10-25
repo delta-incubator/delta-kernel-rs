@@ -8,8 +8,10 @@ license.workspace = true
 repository.workspace = true
 readme.workspace = true
 version.workspace = true
-# exclude golden tests + golden test data since they push us over 10MB crate size limit
-exclude = ["tests/golden_tables.rs", "tests/golden_data/" ]
+# exclude 
+# - golden tests + golden test data since they push us over 10MB crate size limit
+# - macro tests as those are run via unittests
+exclude = ["tests/golden_tables.rs", "tests/golden_data/", "tests/macros/"]
 
 [package.metadata.docs.rs]
 all-features = true
@@ -121,3 +123,5 @@ tracing-subscriber = { version = "0.3", default-features = false, features = [
   "env-filter",
   "fmt",
 ] }
+trybuild = "1.0.25"
+syn = { version = "2.0", features = ["extra-traits"] }

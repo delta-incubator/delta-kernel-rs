@@ -1,0 +1,7 @@
+error: this derive macro only works on structs with named fields
+ --> tests/macros/schema_empty_struct.rs:7:10
+  |
+7 | #[derive(Schema)]
+  |          ^^^^^^
+  |
+  = note: this error originates in the derive macro `Schema` (in Nightly builds, run with -Z macro-backtrace for more info)

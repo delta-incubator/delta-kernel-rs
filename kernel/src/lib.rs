@@ -248,3 +248,20 @@ pub trait Engine: Send + Sync {
     /// Get the connector provided [`ParquetHandler`].
     fn get_parquet_handler(&self) -> Arc<dyn ParquetHandler>;
 }
+
+#[cfg(test)]
+mod tests {
+
+    #[test]
+    fn test_derive_macros() {
+        use trybuild;
+
+        let t = trybuild::TestCases::new();
+        t.pass("tests/macros/schema_on_struct.rs");
+        t.pass("tests/macros/schema_with_attributed_field.rs");
+        t.pass("tests/macros/schema_with_angle_bracketed_path.rs");
+        t.compile_fail("tests/macros/schema_empty_struct.rs");
+        t.compile_fail("tests/macros/schema_with_invalid_attribute_target.rs");
+        t.compile_fail("tests/macros/schema_with_invalid_field_type.rs");
+    }
+}

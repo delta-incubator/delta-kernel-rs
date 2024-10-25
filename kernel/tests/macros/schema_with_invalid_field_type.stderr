@@ -1,0 +1,5 @@
+error: Can't handle type: Type::Macro { mac: Macro { path: Path { leading_colon: None, segments: [PathSegment { ident: Ident { ident: "Token", span: #0 bytes(162..167) }, arguments: PathArguments::None }] }, bang_token: Not, delimiter: MacroDelimiter::Bracket(Bracket), tokens: TokenStream [Ident { ident: "struct", span: #0 bytes(169..175) }] } }
+  --> tests/macros/schema_with_invalid_field_type.rs:10:5
+   |
+10 |     token: Token![struct],
+   |     ^^^^^
