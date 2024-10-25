@@ -23,7 +23,6 @@ include(CTest)
 set(ExprTestRunner "../../../tests/test-expression-visitor/run_test.sh")
 set(ExprExpectedPath "../../../tests/test-expression-visitor/expected.txt")
 add_test(NAME test_expression_visitor COMMAND ${ExprTestRunner} ${ExprExpectedPath})
-
 if(LINUX)
   add_test(NAME test_expression_visitor_leaks COMMAND valgrind
     --error-exitcode=1
