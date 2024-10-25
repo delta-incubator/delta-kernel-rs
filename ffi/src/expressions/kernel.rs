@@ -61,38 +61,38 @@ pub struct EngineExpressionVisitor {
     /// Creates a new expression list, optionally reserving capacity up front
     pub make_field_list: extern "C" fn(data: *mut c_void, reserve: usize) -> usize,
     /// Visit a 32bit `integer` belonging to the list identified by `sibling_list_id`.
-    pub visit_int_literal: VisitLiteralFn<i32>,
+    pub visit_literal_int: VisitLiteralFn<i32>,
     /// Visit a 64bit `long`  belonging to the list identified by `sibling_list_id`.
-    pub visit_long_literal: VisitLiteralFn<i64>,
+    pub visit_literal_long: VisitLiteralFn<i64>,
     /// Visit a 16bit `short` belonging to the list identified by `sibling_list_id`.
-    pub visit_short_literal: VisitLiteralFn<i16>,
+    pub visit_literal_short: VisitLiteralFn<i16>,
     /// Visit an 8bit `byte` belonging to the list identified by `sibling_list_id`.
-    pub visit_byte_literal: VisitLiteralFn<i8>,
+    pub visit_literal_byte: VisitLiteralFn<i8>,
     /// Visit a 32bit `float` belonging to the list identified by `sibling_list_id`.
-    pub visit_float_literal: VisitLiteralFn<f32>,
+    pub visit_literal_float: VisitLiteralFn<f32>,
     /// Visit a 64bit `double` belonging to the list identified by `sibling_list_id`.
-    pub visit_double_literal: VisitLiteralFn<f64>,
+    pub visit_literal_double: VisitLiteralFn<f64>,
     /// Visit a `string` belonging to the list identified by `sibling_list_id`.
-    pub visit_string_literal: VisitLiteralFn<KernelStringSlice>,
+    pub visit_literal_string: VisitLiteralFn<KernelStringSlice>,
     /// Visit a `boolean` belonging to the list identified by `sibling_list_id`.
-    pub visit_bool_literal: VisitLiteralFn<bool>,
+    pub visit_literal_bool: VisitLiteralFn<bool>,
     /// Visit a 64bit timestamp belonging to the list identified by `sibling_list_id`.
     /// The timestamp is microsecond precision and adjusted to UTC.
-    pub visit_timestamp_literal: VisitLiteralFn<i64>,
+    pub visit_literal_timestamp: VisitLiteralFn<i64>,
     /// Visit a 64bit timestamp belonging to the list identified by `sibling_list_id`.
     /// The timestamp is microsecond precision with no timezone.
-    pub visit_timestamp_ntz_literal: VisitLiteralFn<i64>,
+    pub visit_literal_timestamp_ntz: VisitLiteralFn<i64>,
     /// Visit a 32bit intger `date` representing days since UNIX epoch 1970-01-01.  The `date` belongs
     /// to the list identified by `sibling_list_id`.
-    pub visit_date_literal: VisitLiteralFn<i32>,
+    pub visit_literal_date: VisitLiteralFn<i32>,
     /// Visit binary data at the `buffer` with length `len` belonging to the list identified by
     /// `sibling_list_id`.
-    pub visit_binary_literal:
+    pub visit_literal_binary:
         extern "C" fn(data: *mut c_void, sibling_list_id: usize, buffer: *const u8, len: usize),
     /// Visit a 128bit `decimal` value with the given precision and scale. The 128bit integer
     /// is split into the most significant 64 bits in `value_ms`, and the least significant 64
     /// bits in `value_ls`. The `decimal` belongs to the list identified by `sibling_list_id`.
-    pub visit_decimal_literal: extern "C" fn(
+    pub visit_literal_decimal: extern "C" fn(
         data: *mut c_void,
         sibling_list_id: usize,
         value_ms: u64,
@@ -103,7 +103,7 @@ pub struct EngineExpressionVisitor {
     /// Visit a struct literal belonging to the list identified by `sibling_list_id`.
     /// The field names of the struct are in a list identified by `child_field_list_id`.
     /// The values of the struct are in a list identified by `child_value_list_id`.
-    pub visit_struct_literal: extern "C" fn(
+    pub visit_literal_struct: extern "C" fn(
         data: *mut c_void,
         sibling_list_id: usize,
         child_field_list_value: usize,
@@ -111,10 +111,10 @@ pub struct EngineExpressionVisitor {
     ),
     /// Visit an array literal belonging to the list identified by `sibling_list_id`.
     /// The values of the array are in a list identified by `child_list_id`.
-    pub visit_array_literal:
+    pub visit_literal_array:
         extern "C" fn(data: *mut c_void, sibling_list_id: usize, child_list_id: usize),
     /// Visits a null value belonging to the list identified by `sibling_list_id.
-    pub visit_null_literal: extern "C" fn(data: *mut c_void, sibling_list_id: usize),
+    pub visit_literal_null: extern "C" fn(data: *mut c_void, sibling_list_id: usize),
     /// Visits an `and` expression belonging to the list identified by `sibling_list_id`.
     /// The sub-expressions of the array are in a list identified by `child_list_id`
     pub visit_and: VisitVariadicFn,
@@ -205,7 +205,7 @@ pub unsafe extern "C" fn visit_expression(
         for scalar in elements {
             visit_expression_scalar(visitor, scalar, child_list_id);
         }
-        call!(visitor, visit_array_literal, sibling_list_id, child_list_id);
+        call!(visitor, visit_literal_array, sibling_list_id, child_list_id);
     }
     fn visit_expression_struct_literal(
         visitor: &mut EngineExpressionVisitor,
@@ -217,7 +217,7 @@ pub unsafe extern "C" fn visit_expression(
         for (field, value) in struct_data.fields().iter().zip(struct_data.values()) {
             call!(
                 visitor,
-                visit_string_literal,
+                visit_literal_string,
                 child_field_list_id,
                 field.name().into()
             );
@@ -225,7 +225,7 @@ pub unsafe extern "C" fn visit_expression(
         }
         call!(
             visitor,
-            visit_struct_literal,
+            visit_literal_struct,
             sibling_list_id,
             child_field_list_id,
             child_value_list_id
@@ -265,26 +265,28 @@ pub unsafe extern "C" fn visit_expression(
         sibling_list_id: usize,
     ) {
         match scalar {
-            Scalar::Integer(val) => call!(visitor, visit_int_literal, sibling_list_id, *val),
-            Scalar::Long(val) => call!(visitor, visit_long_literal, sibling_list_id, *val),
-            Scalar::Short(val) => call!(visitor, visit_short_literal, sibling_list_id, *val),
-            Scalar::Byte(val) => call!(visitor, visit_byte_literal, sibling_list_id, *val),
-            Scalar::Float(val) => call!(visitor, visit_float_literal, sibling_list_id, *val),
-            Scalar::Double(val) => call!(visitor, visit_double_literal, sibling_list_id, *val),
-            Scalar::String(val) => {
-                call!(visitor, visit_string_literal, sibling_list_id, val.into())
+            Scalar::Integer(val) => call!(visitor, visit_literal_int, sibling_list_id, *val),
+            Scalar::Long(val) => call!(visitor, visit_literal_long, sibling_list_id, *val),
+            Scalar::Short(val) => call!(visitor, visit_literal_short, sibling_list_id, *val),
+            Scalar::Byte(val) => call!(visitor, visit_literal_byte, sibling_list_id, *val),
+            Scalar::Float(val) => call!(visitor, visit_literal_float, sibling_list_id, *val),
+            Scalar::Double(val) => {
+                call!(visitor, visit_literal_double, sibling_list_id, *val)
             }
-            Scalar::Boolean(val) => call!(visitor, visit_bool_literal, sibling_list_id, *val),
+            Scalar::String(val) => {
+                call!(visitor, visit_literal_string, sibling_list_id, val.into())
+            }
+            Scalar::Boolean(val) => call!(visitor, visit_literal_bool, sibling_list_id, *val),
             Scalar::Timestamp(val) => {
-                call!(visitor, visit_timestamp_literal, sibling_list_id, *val)
+                call!(visitor, visit_literal_timestamp, sibling_list_id, *val)
             }
             Scalar::TimestampNtz(val) => {
-                call!(visitor, visit_timestamp_ntz_literal, sibling_list_id, *val)
+                call!(visitor, visit_literal_timestamp_ntz, sibling_list_id, *val)
             }
-            Scalar::Date(val) => call!(visitor, visit_date_literal, sibling_list_id, *val),
+            Scalar::Date(val) => call!(visitor, visit_literal_date, sibling_list_id, *val),
             Scalar::Binary(buf) => call!(
                 visitor,
-                visit_binary_literal,
+                visit_literal_binary,
                 sibling_list_id,
                 buf.as_ptr(),
                 buf.len()
@@ -294,7 +296,7 @@ pub unsafe extern "C" fn visit_expression(
                 let ls: u64 = *value as u64;
                 call!(
                     visitor,
-                    visit_decimal_literal,
+                    visit_literal_decimal,
                     sibling_list_id,
                     ms,
                     ls,
@@ -302,7 +304,7 @@ pub unsafe extern "C" fn visit_expression(
                     *scale
                 )
             }
-            Scalar::Null(_) => call!(visitor, visit_null_literal, sibling_list_id),
+            Scalar::Null(_) => call!(visitor, visit_literal_null, sibling_list_id),
             Scalar::Struct(struct_data) => {
                 visit_expression_struct_literal(visitor, struct_data, sibling_list_id)
             }
