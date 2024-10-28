@@ -34,7 +34,13 @@ impl Table {
     /// `/local/paths`, and even `../relative/paths`.
     pub fn try_from_uri(uri: impl AsRef<str>) -> DeltaResult<Self> {
         let uri = uri.as_ref();
-        let uri_type: UriType = resolve_uri_type(uri)?;
+        let uri_type = if !uri.ends_with("/") {
+            let uri = format!("{}/", uri);
+            resolve_uri_type(uri)?
+        } else {
+            resolve_uri_type(uri)?
+        };
+
         let url = match uri_type {
             UriType::LocalPath(path) => {
                 if !path.exists() {
