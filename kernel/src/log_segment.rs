@@ -66,6 +66,7 @@ impl LogSegment {
         Ok(batches)
     }
 
+    // Get the most up-to-date Protocol and Metadata actions
     pub(crate) fn read_metadata(&self, engine: &dyn Engine) -> DeltaResult<(Metadata, Protocol)> {
         let data_batches = self.replay_for_metadata(engine)?;
         let mut metadata_opt: Option<Metadata> = None;
@@ -91,7 +92,7 @@ impl LogSegment {
         }
     }
 
-    // Factored out to facilitate testing
+    // Replay the commit log, projecting rows to only contain Protocol and Metadata action columns.
     fn replay_for_metadata(
         &self,
         engine: &dyn Engine,
