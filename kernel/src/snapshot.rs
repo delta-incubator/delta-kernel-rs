@@ -44,7 +44,7 @@ impl Drop for Snapshot {
 impl std::fmt::Debug for Snapshot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Snapshot")
-            .field("path", &self.log_segment.log_root())
+            .field("path", &self.log_segment.log_root.as_str())
             .field("version", &self.version)
             .field("metadata", &self.metadata)
             .finish()
@@ -102,17 +102,17 @@ impl Snapshot {
             );
         }
 
-        let log_segment = LogSegment::new(
-            log_url,
-            commit_files
+        let log_segment = LogSegment {
+            log_root: log_url,
+            commit_files: commit_files
                 .into_iter()
                 .map(|log_path| log_path.location)
                 .collect(),
-            checkpoint_files
+            checkpoint_files: checkpoint_files
                 .into_iter()
                 .map(|log_path| log_path.location)
                 .collect(),
-        );
+        };
 
         Self::try_new_from_log_segment(table_root, log_segment, version_eff, engine)
     }
@@ -377,7 +377,6 @@ mod tests {
     use crate::engine::default::filesystem::ObjectStoreFileSystemClient;
     use crate::engine::sync::SyncEngine;
     use crate::schema::StructType;
-    use crate::Table;
 
     #[test]
     fn test_snapshot_read_metadata() {
@@ -550,49 +549,6 @@ mod tests {
         let invalid = read_last_checkpoint(&client, &url).expect("read last checkpoint");
         assert!(valid.is_some());
         assert!(invalid.is_none())
-    }
-
-    // NOTE: In addition to testing the meta-predicate for metadata replay, this test also verifies
-    // that the parquet reader properly infers nullcount = rowcount for missing columns. The two
-    // checkpoint part files that contain transaction app ids have truncated schemas that would
-    // otherwise fail skipping due to their missing nullcount stat:
-    //
-    // Row group 0:  count: 1  total(compressed): 111 B total(uncompressed):107 B
-    // --------------------------------------------------------------------------------
-    //              type    nulls  min / max
-    // txn.appId    BINARY  0      "3ae45b72-24e1-865a-a211-3..." / "3ae45b72-24e1-865a-a211-3..."
-    // txn.version  INT64   0      "4390" / "4390"
-    #[test]
-    fn test_replay_for_metadata() {
-        let path = std::fs::canonicalize(PathBuf::from("./tests/data/parquet_row_group_skipping/"));
-        let url = url::Url::from_directory_path(path.unwrap()).unwrap();
-        let engine = SyncEngine::new();
-
-        let table = Table::new(url);
-        let snapshot = table.snapshot(&engine, None).unwrap();
-        let data: Vec<_> = snapshot
-            .log_segment
-            .replay_for_metadata(&engine)
-            .unwrap()
-            .try_collect()
-            .unwrap();
-
-        // The checkpoint has five parts, each containing one action:
-        // 1. txn (physically missing P&M columns)
-        // 2. metaData
-        // 3. protocol
-        // 4. add
-        // 5. txn (physically missing P&M columns)
-        //
-        // The parquet reader should skip parts 1, 3, and 5. Note that the actual `read_metadata`
-        // always skips parts 4 and 5 because it terminates the iteration after finding both P&M.
-        //
-        // NOTE: Each checkpoint part is a single-row file -- guaranteed to produce one row group.
-        //
-        // WARNING: https://github.com/delta-incubator/delta-kernel-rs/issues/434 -- We currently
-        // read parts 1 and 5 (4 in all instead of 2) because row group skipping is disabled for
-        // missing columns, but can still skip part 3 because has valid nullcount stats for P&M.
-        assert_eq!(data.len(), 4);
     }
 
     #[test_log::test]

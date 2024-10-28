@@ -15,28 +15,14 @@ use itertools::Itertools;
 #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
 #[cfg_attr(not(feature = "developer-visibility"), visibility::make(pub(crate)))]
 pub(crate) struct LogSegment {
-    log_root: Url,
+    pub log_root: Url,
     /// Reverse order sorted commit files in the log segment
-    commit_files: Vec<FileMeta>,
+    pub commit_files: Vec<FileMeta>,
     /// checkpoint files in the log segment.
-    checkpoint_files: Vec<FileMeta>,
+    pub checkpoint_files: Vec<FileMeta>,
 }
 
 impl LogSegment {
-    pub(crate) fn new(
-        log_root: Url,
-        commit_files: Vec<FileMeta>,
-        checkpoint_files: Vec<FileMeta>,
-    ) -> Self {
-        LogSegment {
-            log_root,
-            commit_files,
-            checkpoint_files,
-        }
-    }
-    pub(crate) fn log_root(&self) -> &Url {
-        &self.log_root
-    }
     /// Read a stream of log data from this log segment.
     ///
     /// The log files will be read from most recent to oldest.
@@ -106,7 +92,7 @@ impl LogSegment {
     }
 
     // Factored out to facilitate testing
-    pub(crate) fn replay_for_metadata(
+    fn replay_for_metadata(
         &self,
         engine: &dyn Engine,
     ) -> DeltaResult<impl Iterator<Item = DeltaResult<(Box<dyn EngineData>, bool)>> + Send> {
@@ -121,5 +107,57 @@ impl LogSegment {
         });
         // read the same protocol and metadata schema for both commits and checkpoints
         self.replay(engine, schema.clone(), schema, META_PREDICATE.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use itertools::Itertools;
+
+    use crate::{engine::sync::SyncEngine, Table};
+
+    // NOTE: In addition to testing the meta-predicate for metadata replay, this test also verifies
+    // that the parquet reader properly infers nullcount = rowcount for missing columns. The two
+    // checkpoint part files that contain transaction app ids have truncated schemas that would
+    // otherwise fail skipping due to their missing nullcount stat:
+    //
+    // Row group 0:  count: 1  total(compressed): 111 B total(uncompressed):107 B
+    // --------------------------------------------------------------------------------
+    //              type    nulls  min / max
+    // txn.appId    BINARY  0      "3ae45b72-24e1-865a-a211-3..." / "3ae45b72-24e1-865a-a211-3..."
+    // txn.version  INT64   0      "4390" / "4390"
+    #[test]
+    fn test_replay_for_metadata() {
+        let path = std::fs::canonicalize(PathBuf::from("./tests/data/parquet_row_group_skipping/"));
+        let url = url::Url::from_directory_path(path.unwrap()).unwrap();
+        let engine = SyncEngine::new();
+
+        let table = Table::new(url);
+        let snapshot = table.snapshot(&engine, None).unwrap();
+        let data: Vec<_> = snapshot
+            .log_segment
+            .replay_for_metadata(&engine)
+            .unwrap()
+            .try_collect()
+            .unwrap();
+
+        // The checkpoint has five parts, each containing one action:
+        // 1. txn (physically missing P&M columns)
+        // 2. metaData
+        // 3. protocol
+        // 4. add
+        // 5. txn (physically missing P&M columns)
+        //
+        // The parquet reader should skip parts 1, 3, and 5. Note that the actual `read_metadata`
+        // always skips parts 4 and 5 because it terminates the iteration after finding both P&M.
+        //
+        // NOTE: Each checkpoint part is a single-row file -- guaranteed to produce one row group.
+        //
+        // WARNING: https://github.com/delta-incubator/delta-kernel-rs/issues/434 -- We currently
+        // read parts 1 and 5 (4 in all instead of 2) because row group skipping is disabled for
+        // missing columns, but can still skip part 3 because has valid nullcount stats for P&M.
+        assert_eq!(data.len(), 4);
     }
 }
