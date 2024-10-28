@@ -1,4 +1,5 @@
-//! Represents a segment of a delta log
+//! Represents a segment of a delta log. [`LogSegment`] wraps a set of  checkpoint and commit
+//! files.
 
 use crate::expressions::column_expr;
 use std::sync::{Arc, LazyLock};
@@ -36,7 +37,7 @@ impl LogSegment {
     /// query's predicate, but rather a predicate for filtering log files themselves.
     #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
     #[cfg_attr(not(feature = "developer-visibility"), visibility::make(pub(crate)))]
-    pub fn replay(
+    pub(crate) fn replay(
         &self,
         engine: &dyn Engine,
         commit_read_schema: SchemaRef,
