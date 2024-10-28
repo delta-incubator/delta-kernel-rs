@@ -1100,7 +1100,7 @@ fn predicate_references_invalid_missing_column() -> Result<(), Box<dyn std::erro
         "| {date32: 1971-01-05, timestamp: 1970-02-01T12:00:00Z, timestamp_ntz: 1970-01-02T00:04:00} |",
         "+-------------------------------------------------------------------------------------------+",
     ];
-    let predicate = column_expr!("missing").lt(10i64);
+    let predicate = Expression::column("missing").lt(10i64);
     read_table_data_str(
         "./tests/data/parquet_row_group_skipping/",
         Some(columns),
@@ -1121,7 +1121,7 @@ fn predicate_references_invalid_missing_column() -> Result<(), Box<dyn std::erro
         "| {date32: 1971-01-05, timestamp: 1970-02-01T12:00:00Z, timestamp_ntz: 1970-01-02T00:04:00} |",
         "+-------------------------------------------------------------------------------------------+",
     ];
-    let predicate = column_expr!("invalid").lt(10);
+    let predicate = Expression::column("invalid").lt(10);
     read_table_data_str(
         "./tests/data/parquet_row_group_skipping/",
         Some(columns),

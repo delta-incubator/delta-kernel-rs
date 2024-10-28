@@ -794,7 +794,7 @@ mod tests {
         //
         // WARNING: https://github.com/delta-incubator/delta-kernel-rs/issues/434 - This
         // optimization is currently disabled, so the one data file is still returned.
-        let predicate = Arc::new(column_expr!("missing").lt(1000i64));
+        let predicate = Arc::new(Expression::column("missing").lt(1000i64));
         let scan = snapshot
             .clone()
             .scan_builder()
@@ -807,7 +807,7 @@ mod tests {
         // Predicate over a logically missing column, so the one data file should be returned.
         //
         // TODO: This should ideally trigger an error instead?
-        let predicate = Arc::new(column_expr!("numeric.ints.invalid").lt(1000));
+        let predicate = Arc::new(Expression::column("numeric.ints.invalid").lt(1000));
         let scan = snapshot
             .scan_builder()
             .with_predicate(predicate)
