@@ -1098,7 +1098,12 @@ fn predicate_references_invalid_missing_column() -> Result<(), Box<dyn std::erro
         "+-------------------------------------------------------------------------------------------+",
     ];
     let predicate = column_expr!("missing").lt(10i64);
-    read_table_data_str("./tests/data/parquet_row_group_skipping/", Some(columns), Some(predicate), expected)?;
+    read_table_data_str(
+        "./tests/data/parquet_row_group_skipping/",
+        Some(columns),
+        Some(predicate),
+        expected,
+    )?;
 
     // Attempted skipping over an invalid (logically missing) column. Ideally this should throw a
     // query error, but at a minimum it should not cause incorrect data skipping.
@@ -1114,6 +1119,11 @@ fn predicate_references_invalid_missing_column() -> Result<(), Box<dyn std::erro
         "+-------------------------------------------------------------------------------------------+",
     ];
     let predicate = column_expr!("invalid").lt(10);
-    read_table_data_str("./tests/data/parquet_row_group_skipping/", Some(columns), Some(predicate), expected)?;
+    read_table_data_str(
+        "./tests/data/parquet_row_group_skipping/",
+        Some(columns),
+        Some(predicate),
+        expected,
+    )?;
     Ok(())
 }
