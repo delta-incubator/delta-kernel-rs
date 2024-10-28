@@ -173,4 +173,15 @@ mod tests {
         #[cfg(not(windows))]
         resolve_uri_type("file://foo/bar").expect_err("file://foo/bar should not have parsed");
     }
+
+    #[test]
+    fn try_from_uri_without_trailing_slash() {
+        let location = "s3://foo/__unitystorage/catalogs/cid/tables/tid";
+        let table = Table::try_from_uri(location).unwrap();
+
+        assert_eq!(
+            table.location.join("_delta_log/").unwrap().as_str(),
+            "s3://foo/__unitystorage/catalogs/cid/tables/tid/_delta_log/"
+        );
+    }
 }
