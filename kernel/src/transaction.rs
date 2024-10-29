@@ -142,7 +142,7 @@ impl Transaction {
                 .read_snapshot
                 .metadata()
                 .partition_columns
-                .contains(&f.name())
+                .contains(f.name())
             {
                 None
             } else {

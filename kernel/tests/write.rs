@@ -4,9 +4,11 @@ use arrow::array::StringArray;
 use arrow::record_batch::RecordBatch;
 use arrow_schema::Schema as ArrowSchema;
 use arrow_schema::{DataType as ArrowDataType, Field};
+use itertools::Itertools;
 use object_store::memory::InMemory;
 use object_store::path::Path;
 use object_store::ObjectStore;
+use serde_json::Deserializer;
 use serde_json::{json, to_vec};
 use url::Url;
 
@@ -312,10 +314,30 @@ async fn test_append() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     // FIXME this is collecting to vec
+    //let write_metadata: Vec<RecordBatch> = futures::future::join_all(tasks)
+    //    .await
+    //    .into_iter()
+    //    .map(|data| {
+    //        let data = data.unwrap();
+    //        data.into_any()
+    //            .downcast::<ArrowEngineData>()
+    //            .unwrap()
+    //            .into()
+    //    })
+    //    .collect();
+
+    //txn.add_write_metadata(Box::new(
+    //    write_metadata
+    //        .into_iter()
+    //        .map(|data| Box::new(ArrowEngineData::new(data))),
+    //));
+
     let write_metadata = futures::future::join_all(tasks)
         .await
         .into_iter()
-        .map(|r| r.unwrap());
+        .map(|data| {
+            data.unwrap()
+        });
     txn.add_write_metadata(Box::new(write_metadata));
 
     // commit!
@@ -326,8 +348,74 @@ async fn test_append() -> Result<(), Box<dyn std::error::Error>> {
             "/test_table/_delta_log/00000000000000000001.json",
         ))
         .await?;
-    let commit1 = String::from_utf8(commit1.bytes().await?.to_vec())?;
-    println!("{}", commit1);
+
+    let mut parsed_commits: Vec<_> = Deserializer::from_slice(&commit1.bytes().await?)
+        .into_iter::<serde_json::Value>()
+        .try_collect()?;
+
+    // FIXME
+    *parsed_commits[0]
+        .get_mut("commitInfo")
+        .unwrap()
+        .get_mut("timestamp")
+        .unwrap() = serde_json::Value::Number(0.into());
+    *parsed_commits[1]
+        .get_mut("add")
+        .unwrap()
+        .get_mut("modificationTime")
+        .unwrap() = serde_json::Value::Number(0.into());
+    *parsed_commits[1]
+        .get_mut("add")
+        .unwrap()
+        .get_mut("path")
+        .unwrap() = serde_json::Value::String("first.parquet".to_string());
+    *parsed_commits[2]
+        .get_mut("add")
+        .unwrap()
+        .get_mut("modificationTime")
+        .unwrap() = serde_json::Value::Number(0.into());
+    *parsed_commits[2]
+        .get_mut("add")
+        .unwrap()
+        .get_mut("path")
+        .unwrap() = serde_json::Value::String("second.parquet".to_string());
+
+    let expected_commit = vec![
+        json!({
+            "commitInfo": {
+                "timestamp": 0,
+                "operation": "UNKNOWN",
+                "kernelVersion": format!("v{}", env!("CARGO_PKG_VERSION")),
+                "operationParameters": {},
+                "engineCommitInfo": {
+                    "engineInfo": "default engine"
+                }
+            }
+        }),
+        json!({
+            "add": {
+                "path": "first.parquet",
+                "partitionValues": {},
+                "size": 483,
+                "modificationTime": 0,
+                "dataChange": true
+            }
+        }),
+        json!({
+            "add": {
+                "path": "second.parquet",
+                "partitionValues": {},
+                "size": 483,
+                "modificationTime": 0,
+                "dataChange": true
+            }
+        }),
+    ];
+
+    println!("actual:\n{parsed_commits:#?}");
+    println!("expected:\n{expected_commit:#?}");
+
+    assert_eq!(parsed_commits, expected_commit);
 
     test_read(
         Box::new(ArrowEngineData::new(RecordBatch::try_new(
@@ -371,8 +459,8 @@ fn test_read(
         .unwrap()
         .to_string();
 
+    println!("actual:\n{formatted}");
     println!("expected:\n{expected}");
-    println!("got:\n{formatted}");
     assert_eq!(formatted, expected);
 
     Ok(())

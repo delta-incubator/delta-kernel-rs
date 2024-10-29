@@ -32,16 +32,16 @@ pub struct DefaultParquetHandler<E: TaskExecutor> {
     readahead: usize,
 }
 
-// TODO: plumb through modification time
 #[derive(Debug)]
 pub struct ParquetMetadata {
     pub path: String,
     pub size: i64,
+    pub modification_time: i64,
 }
 
 impl ParquetMetadata {
-    pub fn new(path: String, size: i64) -> Self {
-        Self { path, size }
+    pub fn new(path: String, size: i64, modification_time: i64) -> Self {
+        Self { path, size, modification_time }
     }
 }
 
@@ -72,7 +72,7 @@ impl<E: TaskExecutor> DefaultParquetHandler<E> {
 
         let mut buffer = vec![];
         let mut writer = ArrowWriter::try_new(&mut buffer, record_batch.schema(), None)?;
-        writer.write(&record_batch)?;
+        writer.write(record_batch)?;
         writer.close()?; // writer must be closed to write footer
 
         let size = buffer.len();
@@ -84,10 +84,21 @@ impl<E: TaskExecutor> DefaultParquetHandler<E> {
             .put(&Path::from(path.path()), buffer.into())
             .await?;
 
+        let metadata = self.store.head(&Path::from(path.path())).await?;
+        let modification_time = metadata.last_modified.timestamp();
+        if size != metadata.size {
+            return Err(Error::generic(format!(
+                "Size mismatch after writing parquet file: expected {}, got {}",
+                size, metadata.size
+            )));
+        }
+
         Ok(ParquetMetadata::new(
             path.to_string(),
+            // this means max size we can write is i64::MAX (~8EB)
             size.try_into()
                 .map_err(|_| Error::generic("Failed to convert parquet metadata 'size' to i64"))?,
+            modification_time,
         ))
     }
 
@@ -98,8 +109,7 @@ impl<E: TaskExecutor> DefaultParquetHandler<E> {
         partition_values: std::collections::HashMap<String, String>,
         data_change: bool,
     ) -> DeltaResult<Box<dyn EngineData>> {
-        let ParquetMetadata { path, size } = self.write_parquet(path, data).await?;
-        let modification_time = chrono::Utc::now().timestamp_millis(); // FIXME
+        let ParquetMetadata { path, size, modification_time } = self.write_parquet(path, data).await?;
         let write_metadata_schema = crate::transaction::get_write_metadata_schema();
 
         // create the record batch of the write metadata
