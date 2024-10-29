@@ -89,7 +89,6 @@ impl Transaction {
     /// will include the failed transaction in case of a conflict so the user can retry.
     pub fn commit(self, engine: &dyn Engine) -> DeltaResult<CommitResult> {
         // step one: construct the iterator of actions we want to commit
-        // note: only support commit_info right now (and it's required)
         let engine_commit_info = self
             .commit_info
             .as_ref()
@@ -98,10 +97,7 @@ impl Transaction {
             engine,
             self.operation.as_deref(),
             engine_commit_info.as_ref(),
-        )?));
-
-        // TODO consider IntoIterator so we can have multiple write_metadata iterators (and return
-        // self in the conflict case for retries)
+        )));
         let adds = generate_adds(engine, self.write_metadata.iter().map(|a| a.as_ref()));
         let actions = chain(actions, adds);
 
@@ -144,8 +140,8 @@ impl Transaction {
         self
     }
 
-    // Generate the logical-to-physical transform expression for this transaction. At the moment,
-    // this is a transaction-wide expression.
+    // Generate the logical-to-physical transform expression which must be evaluated on every data
+    // chunk before writing. At the moment, this is a transaction-wide expression.
     fn generate_logical_to_physical(&self) -> Expression {
         // for now, we just pass through all the columns except partition columns.
         // note this is _incorrect_ if table config deems we need partition columns.
@@ -195,7 +191,7 @@ impl Transaction {
 fn generate_adds<'a>(
     engine: &dyn Engine,
     write_metadata: impl Iterator<Item = &'a dyn EngineData> + Send + 'a,
-) -> Box<dyn Iterator<Item = Box<dyn EngineData>> + Send + 'a> {
+) -> Box<dyn Iterator<Item = DeltaResult<Box<dyn EngineData>>> + Send + 'a> {
     let expression_handler = engine.get_expression_handler();
     let write_metadata_schema = get_write_metadata_schema();
     let log_schema = get_log_add_schema();
@@ -211,9 +207,7 @@ fn generate_adds<'a>(
             adds_expr,
             log_schema.clone().into(),
         );
-        adds_evaluator
-            .evaluate(write_metadata_batch)
-            .expect("fixme")
+        adds_evaluator.evaluate(write_metadata_batch)
     }))
 }
 
