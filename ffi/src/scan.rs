@@ -10,7 +10,7 @@ use delta_kernel::schema::Schema;
 use delta_kernel::snapshot::Snapshot;
 use delta_kernel::{DeltaResult, EngineData, Error};
 use delta_kernel_ffi_macros::handle_descriptor;
-use tracing::debug;
+use tracing::{debug, warn};
 use url::Url;
 
 use crate::expressions::engine::{
@@ -358,10 +358,17 @@ pub unsafe extern "C" fn get_from_map(
     key: KernelStringSlice,
     allocate_fn: AllocateStringFn,
 ) -> NullableCvoid {
-    // TODO: Return ExternResult to caller instead of panicking?
-    let string_key = unsafe { String::try_from_slice(&key) };
+    // TODO: Return ExternResult to caller instead of None?
+    let string_key = unsafe { TryFromStringSlice::try_from_slice(&key) };
+    let string_key = match string_key {
+        Ok(string_key) => string_key,
+        Err(err) => {
+            warn!("Invalid map key: {err}");
+            return None;
+        }
+    };
     map.values
-        .get(&string_key.unwrap())
+        .get(string_key)
         .and_then(|v| allocate_fn(v.into()))
 }
 
@@ -469,6 +476,8 @@ pub unsafe extern "C" fn visit_scan_data(
         engine_context,
         callback,
     };
-    // TODO: return ExternResult to caller instead of panicking?
-    visit_scan_files(data, selection_vec, context_wrapper, rust_callback).unwrap();
+    // TODO: return ExternResult to caller instead of ignoring it?
+    if let Err(e) = visit_scan_files(data, selection_vec, context_wrapper, rust_callback) {
+        warn!("Error visiting scan data: {e}");
+    }
 }

@@ -7,7 +7,7 @@ use std::default::Default;
 use std::os::raw::{c_char, c_void};
 use std::ptr::NonNull;
 use std::sync::Arc;
-use tracing::debug;
+use tracing::{debug, warn};
 use url::Url;
 
 use delta_kernel::snapshot::Snapshot;
@@ -105,21 +105,34 @@ impl<T: AsRef<[u8]>> From<T> for KernelStringSlice {
     }
 }
 
-trait TryFromStringSlice: Sized {
-    unsafe fn try_from_slice(slice: &KernelStringSlice) -> DeltaResult<Self>;
+trait TryFromStringSlice<'a>: Sized {
+    unsafe fn try_from_slice(slice: &'a KernelStringSlice) -> DeltaResult<Self>;
 }
 
-impl TryFromStringSlice for String {
-    /// Converts a slice into a `String`. The slice remains valid after this call.
+impl<'a> TryFromStringSlice<'a> for String {
+    /// Converts a kernel string slice into a `String`.
     ///
     /// # Safety
     ///
     /// The slice must be a valid (non-null) pointer, and must point to the indicated number of
     /// valid utf8 bytes.
-    unsafe fn try_from_slice(slice: &KernelStringSlice) -> DeltaResult<String> {
-        let slice = unsafe { std::slice::from_raw_parts(slice.ptr.cast(), slice.len) };
-        let slice = std::str::from_utf8(slice)?;
+    unsafe fn try_from_slice(slice: &'a KernelStringSlice) -> DeltaResult<Self> {
+        let slice: &str = unsafe { TryFromStringSlice::try_from_slice(slice)? };
         Ok(slice.into())
+    }
+}
+
+impl<'a> TryFromStringSlice<'a> for &'a str {
+    /// Converts a kernel string slice into a borrowed `str`. The result does not outlive the kernel
+    /// string slice it came from.
+    ///
+    /// # Safety
+    ///
+    /// The slice must be a valid (non-null) pointer, and must point to the indicated number of
+    /// valid utf8 bytes.
+    unsafe fn try_from_slice(slice: &'a KernelStringSlice) -> DeltaResult<Self> {
+        let slice = unsafe { std::slice::from_raw_parts(slice.ptr.cast(), slice.len) };
+        Ok(std::str::from_utf8(slice)?)
     }
 }
 
@@ -535,7 +548,7 @@ impl ExternEngine for ExternEngineVtable {
 ///
 /// Caller is responsible for passing a valid path pointer.
 unsafe fn unwrap_and_parse_path_as_url(path: KernelStringSlice) -> DeltaResult<Url> {
-    let path = unsafe { String::try_from_slice(&path) }?;
+    let path: &str = unsafe { TryFromStringSlice::try_from_slice(&path) }?;
     let table = Table::try_from_uri(path)?;
     Ok(table.location().clone())
 }
@@ -599,7 +612,21 @@ pub unsafe extern "C" fn set_builder_option(
     let key = unsafe { String::try_from_slice(&key) };
     let value = unsafe { String::try_from_slice(&value) };
     // TODO: Return ExternalError if key or value is invalid? (builder has an error allocator)
-    builder.set_option(key.unwrap(), value.unwrap());
+    let key = match key {
+        Ok(key) => key,
+        Err(err) => {
+            warn!("Ignoring invalid option key: {err}");
+            return;
+        }
+    };
+    let value = match value {
+        Ok(value) => value,
+        Err(err) => {
+            warn!("Ignoring invalid option value: {err}");
+            return;
+        }
+    };
+    builder.set_option(key, value);
 }
 
 /// Consume the builder and return a `default` engine. After calling, the passed pointer is _no
