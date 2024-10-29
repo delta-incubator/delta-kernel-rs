@@ -1,9 +1,11 @@
+use std::collections::HashMap;
 use std::iter;
 use std::mem;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::actions::get_log_commit_info_schema;
+use crate::actions::schemas::{GetNullableContainerStructField, GetStructField};
 use crate::actions::{ADD_NAME, COMMIT_INFO_NAME};
 use crate::error::Error;
 use crate::expressions::{column_expr, ColumnName, Scalar, StructData};
@@ -17,6 +19,25 @@ use url::Url;
 
 const KERNEL_VERSION: &str = env!("CARGO_PKG_VERSION");
 const UNKNOWN_OPERATION: &str = "UNKNOWN";
+
+// FIXME: should be a projection of LOG_SCHEMA?
+pub(crate) static WRITE_METADATA_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
+    StructType::new(vec![
+        <String>::get_struct_field("path"),
+        <HashMap<String, String>>::get_nullable_container_struct_field("partitionValues"),
+        <i64>::get_struct_field("size"),
+        <i64>::get_struct_field("modificationTime"),
+        <bool>::get_struct_field("dataChange"),
+    ])
+    .into()
+});
+
+/// Get the expected schema for [`write_metadata`].
+///
+/// [`write_metadata`]: crate::transaction::Transaction::write_metadata
+pub fn get_write_metadata_schema() -> &'static SchemaRef {
+    &WRITE_METADATA_SCHEMA
+}
 
 /// A transaction represents an in-progress write to a table. After creating a transaction, changes
 /// to the table may be staged via the transaction methods before calling `commit` to commit the
@@ -37,13 +58,6 @@ pub struct Transaction {
     operation: Option<String>,
     commit_info: Option<Arc<dyn EngineData>>,
     write_metadata: Box<dyn Iterator<Item = Box<dyn EngineData>> + Send>,
-}
-
-/// Get the expected schema for [`write_metadata`].
-///
-/// [`write_metadata`]: crate::transaction::Transaction::write_metadata
-pub fn get_write_metadata_schema() -> &'static StructType {
-    &crate::actions::WRITE_METADATA_SCHEMA
 }
 
 impl std::fmt::Debug for Transaction {
@@ -199,7 +213,7 @@ fn generate_adds(
                 .map(|f| Expression::Column(ColumnName::new(iter::once(f.name())))),
         )]);
         let adds_evaluator = expression_handler.get_evaluator(
-            write_metadata_schema.clone().into(),
+            write_metadata_schema.clone(),
             adds_expr,
             log_schema.clone(),
         );
@@ -329,6 +343,7 @@ mod tests {
 
     use crate::engine::arrow_data::ArrowEngineData;
     use crate::engine::arrow_expression::ArrowExpressionHandler;
+    use crate::schema::MapType;
     use crate::{ExpressionHandler, FileSystemClient, JsonHandler, ParquetHandler};
 
     use arrow::json::writer::LineDelimitedWriter;
@@ -661,5 +676,22 @@ mod tests {
             assert_empty_commit_info(actions, is_null)?;
         }
         Ok(())
+    }
+
+    #[test]
+    fn test_write_metadata_schema() {
+        let schema = get_write_metadata_schema();
+        let expected = StructType::new(vec![
+            StructField::new("path", DataType::STRING, false),
+            StructField::new(
+                "partitionValues",
+                MapType::new(DataType::STRING, DataType::STRING, true),
+                false,
+            ),
+            StructField::new("size", DataType::LONG, false),
+            StructField::new("modificationTime", DataType::LONG, false),
+            StructField::new("dataChange", DataType::BOOLEAN, false),
+        ]);
+        assert_eq!(*schema, expected.into());
     }
 }

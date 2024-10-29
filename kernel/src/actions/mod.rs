@@ -8,7 +8,7 @@ use std::sync::LazyLock;
 use visitors::{AddVisitor, MetadataVisitor, ProtocolVisitor};
 
 use self::deletion_vector::DeletionVectorDescriptor;
-use crate::actions::schemas::{GetNullableContainerStructField, GetStructField};
+use crate::actions::schemas::GetStructField;
 use crate::features::{ReaderFeatures, WriterFeatures};
 use crate::schema::{SchemaRef, StructType};
 use crate::{DeltaResult, EngineData};
@@ -65,17 +65,6 @@ fn get_log_add_schema() -> &'static SchemaRef {
 pub(crate) fn get_log_commit_info_schema() -> &'static SchemaRef {
     &LOG_COMMIT_INFO_SCHEMA
 }
-
-// FIXME: should be a projection of LOG_SCHEMA?
-pub(crate) static WRITE_METADATA_SCHEMA: LazyLock<StructType> = LazyLock::new(|| {
-    StructType::new(vec![
-        <String>::get_struct_field("path"),
-        <HashMap<String, String>>::get_nullable_container_struct_field("partitionValues"),
-        <i64>::get_struct_field("size"),
-        <i64>::get_struct_field("modificationTime"),
-        <bool>::get_struct_field("dataChange"),
-    ])
-});
 
 #[derive(Debug, Clone, PartialEq, Eq, Schema)]
 pub struct Format {
@@ -316,7 +305,6 @@ mod tests {
 
     use super::*;
     use crate::schema::{ArrayType, DataType, MapType, StructField};
-    use crate::transaction::get_write_metadata_schema;
 
     #[test]
     fn test_metadata_schema() {
@@ -492,22 +480,5 @@ mod tests {
             true,
         )]));
         assert_eq!(schema, expected);
-    }
-
-    #[test]
-    fn test_write_metadata_schema() {
-        let schema = get_write_metadata_schema();
-        let expected = StructType::new(vec![
-            StructField::new("path", DataType::STRING, false),
-            StructField::new(
-                "partitionValues",
-                MapType::new(DataType::STRING, DataType::STRING, true),
-                false,
-            ),
-            StructField::new("size", DataType::LONG, false),
-            StructField::new("modificationTime", DataType::LONG, false),
-            StructField::new("dataChange", DataType::BOOLEAN, false),
-        ]);
-        assert_eq!(schema, &expected);
     }
 }

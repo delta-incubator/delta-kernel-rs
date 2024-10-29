@@ -147,7 +147,7 @@ impl<E: TaskExecutor> DefaultParquetHandler<E> {
         let modification_time = Arc::new(Int64Array::from(vec![modification_time]));
 
         Ok(Box::new(ArrowEngineData::new(RecordBatch::try_new(
-            Arc::new(write_metadata_schema.try_into()?),
+            Arc::new(write_metadata_schema.as_ref().try_into()?),
             vec![path, partitions, size, modification_time, data_change],
         )?)))
     }

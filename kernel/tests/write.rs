@@ -30,6 +30,11 @@ fn setup(
     let table_root_path = Path::from(format!("/{table_name}"));
     let url = Url::parse(&format!("memory:///{}/", table_root_path)).unwrap();
     let storage = Arc::new(InMemory::new());
+    // uncomment for persisting to local filesystem
+    // use object_store::local::LocalFileSystem;
+    // let table_root_path = Path::from(format!("users/zach.schuermann/Desktop/kernel_tests/{table_name}"));
+    // let url = Url::parse(&format!("file:///users/zach.schuermann/Desktop/kernel_tests/{}/", table_root_path)).unwrap();
+    // let storage = Arc::new(LocalFileSystem::new());
     (
         storage.clone(),
         DefaultEngine::new(
@@ -534,25 +539,6 @@ async fn test_append_partitioned() -> Result<(), Box<dyn std::error::Error>> {
                 }
             })
         });
-
-    // FIXME this is collecting to vec
-    //let write_metadata: Vec<RecordBatch> = futures::future::join_all(tasks)
-    //    .await
-    //    .into_iter()
-    //    .map(|data| {
-    //        let data = data.unwrap();
-    //        data.into_any()
-    //            .downcast::<ArrowEngineData>()
-    //            .unwrap()
-    //            .into()
-    //    })
-    //    .collect();
-
-    //txn.add_write_metadata(Box::new(
-    //    write_metadata
-    //        .into_iter()
-    //        .map(|data| Box::new(ArrowEngineData::new(data))),
-    //));
 
     let write_metadata = futures::future::join_all(tasks)
         .await
