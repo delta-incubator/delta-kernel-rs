@@ -275,12 +275,8 @@ pub unsafe extern "C" fn visit_expression(
                 call!(visitor, visit_literal_double, sibling_list_id, *val)
             }
             Scalar::String(val) => {
-                call!(
-                    visitor,
-                    visit_literal_string,
-                    sibling_list_id,
-                    kernel_string_slice!(val)
-                )
+                let val = kernel_string_slice!(val);
+                call!(visitor, visit_literal_string, sibling_list_id, val)
             }
             Scalar::Boolean(val) => call!(visitor, visit_literal_bool, sibling_list_id, *val),
             Scalar::Timestamp(val) => {
@@ -328,12 +324,8 @@ pub unsafe extern "C" fn visit_expression(
             }
             Expression::Column(name) => {
                 let name = name.as_str();
-                call!(
-                    visitor,
-                    visit_column,
-                    sibling_list_id,
-                    kernel_string_slice!(name)
-                )
+                let name = kernel_string_slice!(name);
+                call!(visitor, visit_column, sibling_list_id, name)
             }
             Expression::Struct(exprs) => {
                 visit_expression_struct_expr(visitor, exprs, sibling_list_id)

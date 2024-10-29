@@ -93,7 +93,7 @@ impl KernelStringSlice {
     ///
     /// Caller affirms that the source will outlive the new slice created from it. The compiler
     /// cannot help as raw pointers do not have lifetimes that the compiler verify.
-    unsafe pub(crate) fn new_unsafe(source: impl AsRef<str>) -> Self {
+    pub(crate) unsafe fn new_unsafe(source: impl AsRef<str>) -> Self {
         let source = source.as_ref().as_bytes();
         Self {
             ptr: source.as_ptr().cast(),
@@ -105,14 +105,17 @@ impl KernelStringSlice {
 /// Creates a new [`KernelStringSlice`] from a source object (which must be an identifier, to ensure
 /// it is not immediately dropped). This is the safest way to create a kernel string slice.
 macro_rules! kernel_string_slice {
-    ( $source:ident ) => {
+    ( $source:ident ) => {{
         // Safety: A named source cannot immediately go out of scope. Any dangerous situations will
         // arise from the _use_ of this string slice, not from its creation.
-        #[allow(unused_unsafe)]
-        unsafe {
-            $crate::KernelStringSlice::new_unsafe($source)
+        //
+        // NOTE: the `do_it` wrapper avoids an "unnecessary `unsafe` block clippy warning, since
+        // annotating an expression with #[allow(unused_unsafe)] is not stable rust.
+        fn do_it(s: impl AsRef<str>) -> $crate::KernelStringSlice {
+            unsafe { $crate::KernelStringSlice::new_unsafe(s) }
         }
-    };
+        do_it($source)
+    }};
 }
 pub(crate) use kernel_string_slice;
 
