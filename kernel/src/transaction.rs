@@ -1,12 +1,11 @@
 use std::collections::HashMap;
 use std::iter;
-use std::mem;
 use std::sync::{Arc, LazyLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::actions::get_log_commit_info_schema;
 use crate::actions::schemas::{GetNullableContainerStructField, GetStructField};
-use crate::actions::{ADD_NAME, COMMIT_INFO_NAME};
+use crate::actions::COMMIT_INFO_NAME;
+use crate::actions::{get_log_add_schema, get_log_commit_info_schema};
 use crate::error::Error;
 use crate::expressions::{column_expr, ColumnName, Scalar, StructData};
 use crate::path::ParsedLogPath;
@@ -57,7 +56,7 @@ pub struct Transaction {
     read_snapshot: Arc<Snapshot>,
     operation: Option<String>,
     commit_info: Option<Arc<dyn EngineData>>,
-    write_metadata: Box<dyn Iterator<Item = Box<dyn EngineData>> + Send>,
+    write_metadata: Vec<Box<dyn EngineData>>,
 }
 
 impl std::fmt::Debug for Transaction {
@@ -82,7 +81,7 @@ impl Transaction {
             read_snapshot: snapshot.into(),
             operation: None,
             commit_info: None,
-            write_metadata: Box::new(std::iter::empty()),
+            write_metadata: vec![],
         }
     }
 
@@ -103,7 +102,7 @@ impl Transaction {
 
         // TODO consider IntoIterator so we can have multiple write_metadata iterators (and return
         // self in the conflict case for retries)
-        let adds = generate_adds(engine, self.write_metadata);
+        let adds = generate_adds(engine, self.write_metadata.iter().map(|a| a.as_ref()));
         let actions = chain(actions, adds);
 
         // step two: set new commit version (current_version + 1) and path to write
@@ -115,8 +114,7 @@ impl Transaction {
         let json_handler = engine.get_json_handler();
         match json_handler.write_json_file(&commit_path.location, Box::new(actions), false) {
             Ok(()) => Ok(CommitResult::Committed(commit_version)),
-            // FIXME
-            // Err(Error::FileAlreadyExists(_)) => Ok(CommitResult::Conflict(self, commit_version)),
+            Err(Error::FileAlreadyExists(_)) => Ok(CommitResult::Conflict(self, commit_version)),
             Err(e) => Err(e),
         }
     }
@@ -167,6 +165,9 @@ impl Transaction {
 
     /// Get the write context for this transaction. At the moment, this is constant for the whole
     /// transaction.
+    // Note: after we introduce metadata updates (modify table schema, etc.), we need to make sure
+    // that engines cannot call this method after a metadata change, since the write context could
+    // have invalid metadata.
     pub fn write_context(&self) -> WriteContext {
         let target_dir = self.read_snapshot.table_root();
         let snapshot_schema = self.read_snapshot.schema();
@@ -181,30 +182,23 @@ impl Transaction {
     }
 
     /// Add write metadata about files to include in the transaction. This API can be called
-    /// multiple times to add multiple iterators.
+    /// multiple times to add multiple batches.
     ///
-    /// TODO what is expected schema for the batches?
-    pub fn add_write_metadata(
-        &mut self,
-        data: Box<dyn Iterator<Item = Box<dyn EngineData>> + Send>,
-    ) {
-        let write_metadata = mem::replace(&mut self.write_metadata, Box::new(std::iter::empty()));
-        self.write_metadata = Box::new(chain(write_metadata, data));
+    /// The expected schema for the write metadata is given by [`get_write_metadata_schema`].
+    pub fn add_write_metadata(&mut self, data: Box<dyn EngineData>) {
+        self.write_metadata.push(data);
     }
 }
 
-// this does something similar to adding top-level 'commitInfo' named struct. we should unify.
-fn generate_adds(
+// convert write_metadata into add actions using an expression to transform the data in a single
+// pass
+fn generate_adds<'a>(
     engine: &dyn Engine,
-    write_metadata: Box<dyn Iterator<Item = Box<dyn EngineData>> + Send>,
-) -> Box<dyn Iterator<Item = Box<dyn EngineData>> + Send> {
+    write_metadata: impl Iterator<Item = &'a dyn EngineData> + Send + 'a,
+) -> Box<dyn Iterator<Item = Box<dyn EngineData>> + Send + 'a> {
     let expression_handler = engine.get_expression_handler();
     let write_metadata_schema = get_write_metadata_schema();
-    let log_schema: DataType = DataType::struct_type(vec![StructField::new(
-        ADD_NAME,
-        write_metadata_schema.clone(),
-        true,
-    )]);
+    let log_schema = get_log_add_schema();
 
     Box::new(write_metadata.map(move |write_metadata_batch| {
         let adds_expr = Expression::struct_from([Expression::struct_from(
@@ -215,22 +209,23 @@ fn generate_adds(
         let adds_evaluator = expression_handler.get_evaluator(
             write_metadata_schema.clone(),
             adds_expr,
-            log_schema.clone(),
+            log_schema.clone().into(),
         );
         adds_evaluator
-            .evaluate(write_metadata_batch.as_ref())
+            .evaluate(write_metadata_batch)
             .expect("fixme")
     }))
 }
+
 /// WriteContext is data derived from a [`Transaction`] that can be provided to writers in order to
 /// write table data.
 ///
 /// [`Transaction`]: struct.Transaction.html
 pub struct WriteContext {
-    pub target_dir: Url,
-    pub schema: SchemaRef,
-    pub partition_cols: Vec<String>,
-    pub logical_to_physical: Expression,
+    target_dir: Url,
+    schema: SchemaRef,
+    partition_cols: Vec<String>,
+    logical_to_physical: Expression,
 }
 
 impl WriteContext {
@@ -246,6 +241,22 @@ impl WriteContext {
             partition_cols,
             logical_to_physical,
         }
+    }
+
+    pub fn target_dir(&self) -> &Url {
+        &self.target_dir
+    }
+
+    pub fn schema(&self) -> &SchemaRef {
+        &self.schema
+    }
+
+    pub fn partition_cols(&self) -> &[String] {
+        &self.partition_cols
+    }
+
+    pub fn logical_to_physical(&self) -> &Expression {
+        &self.logical_to_physical
     }
 }
 

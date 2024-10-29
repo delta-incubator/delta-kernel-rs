@@ -343,7 +343,7 @@ async fn test_append() -> Result<(), Box<dyn std::error::Error>> {
                 let parquet_handler = &engine.parquet;
                 parquet_handler
                     .write_parquet_file(
-                        &write_context.target_dir,
+                        write_context.target_dir(),
                         data.expect("FIXME"),
                         std::collections::HashMap::new(),
                         true,
@@ -377,7 +377,10 @@ async fn test_append() -> Result<(), Box<dyn std::error::Error>> {
         .await
         .into_iter()
         .map(|data| data.unwrap());
-    txn.add_write_metadata(Box::new(write_metadata));
+
+    for meta in write_metadata {
+        txn.add_write_metadata(meta);
+    }
 
     // commit!
     txn.commit(engine.as_ref())?;
@@ -526,7 +529,7 @@ async fn test_append_partitioned() -> Result<(), Box<dyn std::error::Error>> {
                     let parquet_handler = &engine.parquet;
                     parquet_handler
                         .write_parquet_file(
-                            &write_context.target_dir,
+                            write_context.target_dir(),
                             data.expect("FIXME"),
                             std::collections::HashMap::from([(
                                 partition_col.to_string(),
@@ -544,7 +547,10 @@ async fn test_append_partitioned() -> Result<(), Box<dyn std::error::Error>> {
         .await
         .into_iter()
         .map(|data| data.unwrap());
-    txn.add_write_metadata(Box::new(write_metadata));
+
+    for meta in write_metadata {
+        txn.add_write_metadata(meta);
+    }
 
     // commit!
     txn.commit(engine.as_ref())?;

@@ -52,7 +52,7 @@ impl JsonHandler for SyncJsonHandler {
     fn write_json_file(
         &self,
         path: &Url,
-        data: Box<dyn Iterator<Item = Box<dyn EngineData>> + Send>,
+        data: Box<dyn Iterator<Item = Box<dyn EngineData>> + Send + '_>,
         _overwrite: bool,
     ) -> DeltaResult<()> {
         let path = path
