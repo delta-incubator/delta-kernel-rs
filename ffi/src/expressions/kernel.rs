@@ -3,7 +3,7 @@
 use crate::expressions::SharedExpression;
 use std::ffi::c_void;
 
-use crate::{handle::Handle, KernelStringSlice};
+use crate::{handle::Handle, IntoKernelStringSlice, KernelStringSlice};
 use delta_kernel::expressions::{
     ArrayData, BinaryOperator, Expression, Scalar, StructData, UnaryOperator, VariadicOperator,
 };
@@ -219,7 +219,7 @@ pub unsafe extern "C" fn visit_expression(
                 visitor,
                 visit_literal_string,
                 child_field_list_id,
-                field.name().into()
+                IntoKernelStringSlice::from(field.name()).into()
             );
             visit_expression_scalar(visitor, value, child_value_list_id);
         }
@@ -274,6 +274,7 @@ pub unsafe extern "C" fn visit_expression(
                 call!(visitor, visit_literal_double, sibling_list_id, *val)
             }
             Scalar::String(val) => {
+                let val = IntoKernelStringSlice::from(val);
                 call!(visitor, visit_literal_string, sibling_list_id, val.into())
             }
             Scalar::Boolean(val) => call!(visitor, visit_literal_bool, sibling_list_id, *val),
@@ -321,7 +322,8 @@ pub unsafe extern "C" fn visit_expression(
                 visit_expression_scalar(visitor, scalar, sibling_list_id)
             }
             Expression::Column(name) => {
-                call!(visitor, visit_column, sibling_list_id, name.as_str().into())
+                let name = IntoKernelStringSlice::from(name.as_str());
+                call!(visitor, visit_column, sibling_list_id, name.into())
             }
             Expression::Struct(exprs) => {
                 visit_expression_struct_expr(visitor, exprs, sibling_list_id)

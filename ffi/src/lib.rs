@@ -73,35 +73,81 @@ impl Iterator for EngineIterator {
 /// Intentionally not Copy, Clone, Send, nor Sync.
 ///
 /// Whoever instantiates the struct must ensure it does not outlive the data it points to. The
-/// compiler cannot help us here, because raw pointers don't have lifetimes. To reduce the risk of
-/// accidental misuse, it is recommended to only instantiate this struct as a function arg, by
-/// converting a string slice `Into` a `KernelStringSlice`. That way, the borrowed reference at call
-/// site protects the `KernelStringSlice` until the function returns. Meanwhile, the callee should
-/// assume that the slice is only valid until the function returns, and must not retain any
-/// references to the slice or its data that could outlive the function call.
-///
-/// ```
-/// # use delta_kernel_ffi::KernelStringSlice;
-/// fn wants_slice(slice: KernelStringSlice) { }
-/// let msg = String::from("hello");
-/// wants_slice(msg.into());
-/// ```
+/// compiler cannot help us here, because raw pointers don't have lifetimes. Meanwhile, the callee
+/// must assume that the slice is only valid until the function returns, and must not retain any
+/// references to the slice or its data that might outlive the function call.
 #[repr(C)]
 pub struct KernelStringSlice {
     ptr: *const c_char,
     len: usize,
 }
 
+/// It is not safe to create a kernel string slice directly from a reference, because the compiler
+/// has no way to track lifetimes on the resulting raw pointers. We can't "just" add an explicit
+/// lifetime to the `KernelStringSlice` itself, because that struct has to cross the FFI boundary
+/// where lifetimes mean nothing. To help the compiler out, we define `IntoKernelStringSlice` whose
+/// explicit lifetime matches that of its input, and all kernel rust code that passes string slices
+/// across the FFI boundary converts it `Into` a `KernelStringSlice` as a function argument. That
+/// way, the compiler can prove the `KernelStringSlice` remains valid until the function returns.
+///
+/// For example, this is the intended (safe) usage:
+///
+/// ```
+/// # use delta_kernel_ffi::{IntoKernelStringSlice, KernelStringSlice};
+/// fn wants_slice(slice: KernelStringSlice) { }
+/// let msg = String::from("hello");
+/// wants_slice(IntoKernelStringSlice::from(&msg).into());
+/// ```
+///
+/// While the compiler would correctly reject this unsafe usage that would immediately drop the
+/// unnamed temporary string before the slice could be used:
+///
+/// ```fail_compile
+/// # use delta_kernel_ffi::{IntoKernelStringSlice, KernelStringSlice};
+/// fn wants_slice(slice: KernelStringSlice) { }
+/// wants_slice(IntoKernelStringSlice::from(&String::from("hello")).into());
+/// ```
+///
+/// Without the extra layer of indirection, the compiler could not detect the problem.
+pub(crate) struct IntoKernelStringSlice<'a> {
+    inner: KernelStringSlice,
+    _lifetime: std::marker::PhantomData<&'a ()>,
+}
+
 // We can construct a `KernelStringSlice` from anything that acts like a Rust string slice. The user
 // of this trait is still responsible to ensure the result doesn't outlive the input data tho --
 // especially if it crosses an FFI boundary to or from external code.
-impl<T: AsRef<[u8]>> From<T> for KernelStringSlice {
-    fn from(s: T) -> Self {
-        let s = s.as_ref();
-        KernelStringSlice {
-            ptr: s.as_ptr().cast(),
-            len: s.len(),
+impl<'a> From<&'a [u8]> for IntoKernelStringSlice<'a> {
+    fn from(s: &'a [u8]) -> Self {
+        Self {
+            inner: KernelStringSlice {
+                ptr: s.as_ptr().cast(),
+                len: s.len(),
+            },
+            _lifetime: std::marker::PhantomData,
         }
+    }
+}
+impl<'a> From<&'a str> for IntoKernelStringSlice<'a> {
+    fn from(s: &'a str) -> Self {
+        IntoKernelStringSlice::from(s.as_bytes())
+    }
+}
+impl<'a> From<&'a String> for IntoKernelStringSlice<'a> {
+    fn from(s: &'a String) -> Self {
+        IntoKernelStringSlice::from(s.as_bytes())
+    }
+}
+// We intentionally do not implement `From` because the intended idiom is:
+// ```
+// let slice = IntoKernelStringSlice::from(...);
+// function_wanting_a_slice(slice.into());
+// ```
+// Even `Into` allows usages other than the known-safe one, but `From` would allow even more.
+#[allow(clippy::from_over_into)]
+impl<'a> Into<KernelStringSlice> for IntoKernelStringSlice<'a> {
+    fn into(self) -> KernelStringSlice {
+        self.inner
     }
 }
 
@@ -490,7 +536,8 @@ impl<T> IntoExternResult<T> for DeltaResult<T> {
             Ok(ok) => ExternResult::Ok(ok),
             Err(err) => {
                 let msg = format!("{}", err);
-                let err = unsafe { alloc.allocate_error(err.into(), msg.as_str().into()) };
+                let msg = IntoKernelStringSlice::from(msg.as_bytes());
+                let err = unsafe { alloc.allocate_error(err.into(), msg.into()) };
                 ExternResult::Err(err)
             }
         }
@@ -782,7 +829,8 @@ pub unsafe extern "C" fn snapshot_table_root(
     allocate_fn: AllocateStringFn,
 ) -> NullableCvoid {
     let snapshot = unsafe { snapshot.as_ref() };
-    allocate_fn(snapshot.table_root().to_string().as_str().into())
+    let table_root = snapshot.table_root().to_string();
+    allocate_fn(IntoKernelStringSlice::from(&table_root).into())
 }
 
 type StringIter = dyn Iterator<Item = String> + Send;
@@ -810,7 +858,7 @@ fn string_slice_next_impl(
 ) -> bool {
     let data = unsafe { data.as_mut() };
     if let Some(data) = data.next() {
-        (engine_visitor)(engine_context, data.as_str().into());
+        (engine_visitor)(engine_context, IntoKernelStringSlice::from(&data).into());
         true
     } else {
         false
