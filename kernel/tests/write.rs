@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use arrow::array::StringArray;
+use arrow::array::{Int32Array, StringArray};
 use arrow::record_batch::RecordBatch;
 use arrow_schema::Schema as ArrowSchema;
 use arrow_schema::{DataType as ArrowDataType, Field};
@@ -261,6 +261,42 @@ async fn test_invalid_commit_info() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+fn test_read(
+    expected: &ArrowEngineData,
+    table: &Table,
+    engine: &impl Engine,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let snapshot = table.snapshot(engine, None)?;
+    let scan = snapshot.into_scan_builder().build()?;
+    let actual = scan.execute(engine)?;
+    let batches: Vec<RecordBatch> = actual
+        .into_iter()
+        .map(|res| {
+            let data = res.unwrap().raw_data.unwrap();
+            let record_batch: RecordBatch = data
+                .into_any()
+                .downcast::<ArrowEngineData>()
+                .unwrap()
+                .into();
+            record_batch
+        })
+        .collect();
+
+    let formatted = arrow::util::pretty::pretty_format_batches(&batches)
+        .unwrap()
+        .to_string();
+
+    let expected = arrow::util::pretty::pretty_format_batches(&[expected.record_batch().clone()])
+        .unwrap()
+        .to_string();
+
+    println!("actual:\n{formatted}");
+    println!("expected:\n{expected}");
+    assert_eq!(formatted, expected);
+
+    Ok(())
+}
+
 #[tokio::test]
 async fn test_append() -> Result<(), Box<dyn std::error::Error>> {
     // setup tracing
@@ -428,38 +464,193 @@ async fn test_append() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn test_read(
-    expected: &ArrowEngineData,
-    table: &Table,
-    engine: &impl Engine,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let snapshot = table.snapshot(engine, None)?;
-    let scan = snapshot.into_scan_builder().build()?;
-    let actual = scan.execute(engine)?;
-    let batches: Vec<RecordBatch> = actual
+#[tokio::test]
+async fn test_append_partitioned() -> Result<(), Box<dyn std::error::Error>> {
+    // setup tracing
+    let _ = tracing_subscriber::fmt::try_init();
+    // setup in-memory object store and default engine
+    let (store, engine, table_location) = setup("test_table");
+    let partition_col = "partition";
+
+    // create a simple partitioned table: one int column named 'number', partitioned by string
+    // column named 'partition'
+    let table_schema = Arc::new(StructType::new(vec![
+        StructField::new("number", DataType::INTEGER, true),
+        StructField::new("partition", DataType::STRING, true),
+    ]));
+    let data_schema = Arc::new(StructType::new(vec![StructField::new(
+        "number",
+        DataType::INTEGER,
+        true,
+    )]));
+    let table = create_table(
+        store.clone(),
+        table_location,
+        table_schema.clone(),
+        &[partition_col],
+    )
+    .await?;
+
+    let commit_info = new_commit_info()?;
+
+    let mut txn = table
+        .new_transaction(&engine)?
+        .with_commit_info(commit_info);
+
+    // create two new arrow record batches to append
+    let append_data = [[1, 2, 3], [4, 5, 6]].map(|data| -> DeltaResult<_> {
+        let data = RecordBatch::try_new(
+            Arc::new(data_schema.as_ref().try_into()?),
+            vec![Arc::new(arrow::array::Int32Array::from(data.to_vec()))],
+        )?;
+        Ok(Box::new(ArrowEngineData::new(data)))
+    });
+    let partition_vals = vec!["a", "b"];
+
+    // write data out by spawning async tasks to simulate executors
+    let engine = Arc::new(engine);
+    let write_context = Arc::new(txn.write_context());
+    let tasks = append_data
         .into_iter()
-        .map(|res| {
-            let data = res.unwrap().raw_data.unwrap();
-            let record_batch: RecordBatch = data
-                .into_any()
-                .downcast::<ArrowEngineData>()
-                .unwrap()
-                .into();
-            record_batch
-        })
-        .collect();
+        .zip(partition_vals)
+        .map(|(data, partition_val)| {
+            tokio::task::spawn({
+                let engine = Arc::clone(&engine);
+                let write_context = Arc::clone(&write_context);
+                async move {
+                    let parquet_handler = &engine.parquet;
+                    parquet_handler
+                        .write_parquet_file(
+                            &write_context.target_dir,
+                            data.expect("FIXME"),
+                            std::collections::HashMap::from([(
+                                partition_col.to_string(),
+                                partition_val.to_string(),
+                            )]),
+                            true,
+                        )
+                        .await
+                        .expect("FIXME")
+                }
+            })
+        });
 
-    let formatted = arrow::util::pretty::pretty_format_batches(&batches)
+    // FIXME this is collecting to vec
+    //let write_metadata: Vec<RecordBatch> = futures::future::join_all(tasks)
+    //    .await
+    //    .into_iter()
+    //    .map(|data| {
+    //        let data = data.unwrap();
+    //        data.into_any()
+    //            .downcast::<ArrowEngineData>()
+    //            .unwrap()
+    //            .into()
+    //    })
+    //    .collect();
+
+    //txn.add_write_metadata(Box::new(
+    //    write_metadata
+    //        .into_iter()
+    //        .map(|data| Box::new(ArrowEngineData::new(data))),
+    //));
+
+    let write_metadata = futures::future::join_all(tasks)
+        .await
+        .into_iter()
+        .map(|data| data.unwrap());
+    txn.add_write_metadata(Box::new(write_metadata));
+
+    // commit!
+    txn.commit(engine.as_ref())?;
+
+    let commit1 = store
+        .get(&Path::from(
+            "/test_table/_delta_log/00000000000000000001.json",
+        ))
+        .await?;
+
+    let mut parsed_commits: Vec<_> = Deserializer::from_slice(&commit1.bytes().await?)
+        .into_iter::<serde_json::Value>()
+        .try_collect()?;
+
+    // FIXME
+    *parsed_commits[0]
+        .get_mut("commitInfo")
         .unwrap()
-        .to_string();
-
-    let expected = arrow::util::pretty::pretty_format_batches(&[expected.record_batch().clone()])
+        .get_mut("timestamp")
+        .unwrap() = serde_json::Value::Number(0.into());
+    *parsed_commits[1]
+        .get_mut("add")
         .unwrap()
-        .to_string();
+        .get_mut("modificationTime")
+        .unwrap() = serde_json::Value::Number(0.into());
+    *parsed_commits[1]
+        .get_mut("add")
+        .unwrap()
+        .get_mut("path")
+        .unwrap() = serde_json::Value::String("first.parquet".to_string());
+    *parsed_commits[2]
+        .get_mut("add")
+        .unwrap()
+        .get_mut("modificationTime")
+        .unwrap() = serde_json::Value::Number(0.into());
+    *parsed_commits[2]
+        .get_mut("add")
+        .unwrap()
+        .get_mut("path")
+        .unwrap() = serde_json::Value::String("second.parquet".to_string());
 
-    println!("actual:\n{formatted}");
-    println!("expected:\n{expected}");
-    assert_eq!(formatted, expected);
+    let expected_commit = vec![
+        json!({
+            "commitInfo": {
+                "timestamp": 0,
+                "operation": "UNKNOWN",
+                "kernelVersion": format!("v{}", env!("CARGO_PKG_VERSION")),
+                "operationParameters": {},
+                "engineCommitInfo": {
+                    "engineInfo": "default engine"
+                }
+            }
+        }),
+        json!({
+            "add": {
+                "path": "first.parquet",
+                "partitionValues": {
+                    "partition": "a"
+                },
+                "size": 483,
+                "modificationTime": 0,
+                "dataChange": true
+            }
+        }),
+        json!({
+            "add": {
+                "path": "second.parquet",
+                "partitionValues": {
+                    "partition": "b"
+                },
+                "size": 483,
+                "modificationTime": 0,
+                "dataChange": true
+            }
+        }),
+    ];
 
+    println!("actual:\n{parsed_commits:#?}");
+    println!("expected:\n{expected_commit:#?}");
+
+    assert_eq!(parsed_commits, expected_commit);
+
+    test_read(
+        &ArrowEngineData::new(RecordBatch::try_new(
+            Arc::new(table_schema.as_ref().try_into()?),
+            vec![
+                Arc::new(Int32Array::from(vec![1, 2, 3, 4, 5, 6])),
+                Arc::new(StringArray::from(vec!["a", "a", "a", "b", "b", "b"])),
+            ],
+        )?),
+        &table,
+        engine.as_ref(),
+    )?;
     Ok(())
 }
