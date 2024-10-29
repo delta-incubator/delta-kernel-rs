@@ -335,9 +335,7 @@ async fn test_append() -> Result<(), Box<dyn std::error::Error>> {
     let write_metadata = futures::future::join_all(tasks)
         .await
         .into_iter()
-        .map(|data| {
-            data.unwrap()
-        });
+        .map(|data| data.unwrap());
     txn.add_write_metadata(Box::new(write_metadata));
 
     // commit!
@@ -418,21 +416,21 @@ async fn test_append() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(parsed_commits, expected_commit);
 
     test_read(
-        Box::new(ArrowEngineData::new(RecordBatch::try_new(
+        &ArrowEngineData::new(RecordBatch::try_new(
             Arc::new(schema.as_ref().try_into()?),
             vec![Arc::new(arrow::array::Int32Array::from(vec![
                 1, 2, 3, 4, 5, 6,
             ]))],
-        )?)),
-        table,
+        )?),
+        &table,
         engine.as_ref(),
     )?;
     Ok(())
 }
 
 fn test_read(
-    expected: Box<ArrowEngineData>,
-    table: Table,
+    expected: &ArrowEngineData,
+    table: &Table,
     engine: &impl Engine,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let snapshot = table.snapshot(engine, None)?;

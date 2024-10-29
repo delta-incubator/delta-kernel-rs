@@ -41,7 +41,11 @@ pub struct ParquetMetadata {
 
 impl ParquetMetadata {
     pub fn new(path: String, size: i64, modification_time: i64) -> Self {
-        Self { path, size, modification_time }
+        Self {
+            path,
+            size,
+            modification_time,
+        }
     }
 }
 
@@ -109,7 +113,11 @@ impl<E: TaskExecutor> DefaultParquetHandler<E> {
         partition_values: std::collections::HashMap<String, String>,
         data_change: bool,
     ) -> DeltaResult<Box<dyn EngineData>> {
-        let ParquetMetadata { path, size, modification_time } = self.write_parquet(path, data).await?;
+        let ParquetMetadata {
+            path,
+            size,
+            modification_time,
+        } = self.write_parquet(path, data).await?;
         let write_metadata_schema = crate::transaction::get_write_metadata_schema();
 
         // create the record batch of the write metadata
