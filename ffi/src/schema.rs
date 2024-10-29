@@ -1,6 +1,6 @@
 use std::os::raw::c_void;
 
-use crate::{handle::Handle, IntoKernelStringSlice, KernelStringSlice, SharedSnapshot};
+use crate::{handle::Handle, kernel_string_slice, KernelStringSlice, SharedSnapshot};
 use delta_kernel::schema::{ArrayType, DataType, MapType, PrimitiveType, StructType};
 /// The `EngineSchemaVisitor` defines a visitor system to allow engines to build their own
 /// representation of a schema from a particular schema within kernel.
@@ -173,7 +173,7 @@ pub unsafe extern "C" fn visit_schema(
                 (visitor.$visitor_fn)(
                     visitor.data,
                     sibling_list_id,
-                    IntoKernelStringSlice::from(name).into()
+                    kernel_string_slice!(name)
                     $(, $extra_args) *
                 )
             };

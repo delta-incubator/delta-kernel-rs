@@ -3,7 +3,7 @@
 use crate::expressions::SharedExpression;
 use std::ffi::c_void;
 
-use crate::{handle::Handle, IntoKernelStringSlice, KernelStringSlice};
+use crate::{handle::Handle, kernel_string_slice, KernelStringSlice};
 use delta_kernel::expressions::{
     ArrayData, BinaryOperator, Expression, Scalar, StructData, UnaryOperator, VariadicOperator,
 };
@@ -215,11 +215,12 @@ pub unsafe extern "C" fn visit_expression(
         let child_value_list_id = call!(visitor, make_field_list, struct_data.fields().len());
         let child_field_list_id = call!(visitor, make_field_list, struct_data.fields().len());
         for (field, value) in struct_data.fields().iter().zip(struct_data.values()) {
+            let field_name = field.name();
             call!(
                 visitor,
                 visit_literal_string,
                 child_field_list_id,
-                IntoKernelStringSlice::from(field.name()).into()
+                kernel_string_slice!(field_name)
             );
             visit_expression_scalar(visitor, value, child_value_list_id);
         }
@@ -274,8 +275,12 @@ pub unsafe extern "C" fn visit_expression(
                 call!(visitor, visit_literal_double, sibling_list_id, *val)
             }
             Scalar::String(val) => {
-                let val = IntoKernelStringSlice::from(val);
-                call!(visitor, visit_literal_string, sibling_list_id, val.into())
+                call!(
+                    visitor,
+                    visit_literal_string,
+                    sibling_list_id,
+                    kernel_string_slice!(val)
+                )
             }
             Scalar::Boolean(val) => call!(visitor, visit_literal_bool, sibling_list_id, *val),
             Scalar::Timestamp(val) => {
@@ -322,8 +327,13 @@ pub unsafe extern "C" fn visit_expression(
                 visit_expression_scalar(visitor, scalar, sibling_list_id)
             }
             Expression::Column(name) => {
-                let name = IntoKernelStringSlice::from(name.as_str());
-                call!(visitor, visit_column, sibling_list_id, name.into())
+                let name = name.as_str();
+                call!(
+                    visitor,
+                    visit_column,
+                    sibling_list_id,
+                    kernel_string_slice!(name)
+                )
             }
             Expression::Struct(exprs) => {
                 visit_expression_struct_expr(visitor, exprs, sibling_list_id)
