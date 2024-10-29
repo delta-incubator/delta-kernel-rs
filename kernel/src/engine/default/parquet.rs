@@ -32,20 +32,16 @@ pub struct DefaultParquetHandler<E: TaskExecutor> {
     readahead: usize,
 }
 
+/// Metadata of a parquet file, currently just includes the file metadata but will expand to
+/// include file statistics and other metadata in the future.
 #[derive(Debug)]
 pub struct ParquetMetadata {
-    pub path: String,
-    pub size: i64,
-    pub modification_time: i64,
+    file_meta: FileMeta,
 }
 
 impl ParquetMetadata {
-    pub fn new(path: String, size: i64, modification_time: i64) -> Self {
-        Self {
-            path,
-            size,
-            modification_time,
-        }
+    pub fn new(file_meta: FileMeta) -> Self {
+        Self { file_meta }
     }
 }
 
@@ -97,13 +93,8 @@ impl<E: TaskExecutor> DefaultParquetHandler<E> {
             )));
         }
 
-        Ok(ParquetMetadata::new(
-            path.to_string(),
-            // this means max size we can write is i64::MAX (~8EB)
-            size.try_into()
-                .map_err(|_| Error::generic("Failed to convert parquet metadata 'size' to i64"))?,
-            modification_time,
-        ))
+        let file_meta = FileMeta::new(path, modification_time, size);
+        Ok(ParquetMetadata::new(file_meta))
     }
 
     pub async fn write_parquet_file(
@@ -113,15 +104,16 @@ impl<E: TaskExecutor> DefaultParquetHandler<E> {
         partition_values: std::collections::HashMap<String, String>,
         data_change: bool,
     ) -> DeltaResult<Box<dyn EngineData>> {
-        let ParquetMetadata {
-            path,
+        let ParquetMetadata { file_meta } = self.write_parquet(path, data).await?;
+        let FileMeta {
+            location,
+            last_modified,
             size,
-            modification_time,
-        } = self.write_parquet(path, data).await?;
+        } = file_meta;
         let write_metadata_schema = crate::transaction::get_write_metadata_schema();
 
         // create the record batch of the write metadata
-        let path = Arc::new(StringArray::from(vec![path.to_string()]));
+        let path = Arc::new(StringArray::from(vec![location.to_string()]));
         use arrow_array::builder::StringBuilder;
         let key_builder = StringBuilder::new();
         let val_builder = StringBuilder::new();
@@ -142,9 +134,13 @@ impl<E: TaskExecutor> DefaultParquetHandler<E> {
             }
         }
         let partitions = Arc::new(builder.finish());
+        // this means max size we can write is i64::MAX (~8EB)
+        let size: i64 = size
+            .try_into()
+            .map_err(|_| Error::generic("Failed to convert parquet metadata 'size' to i64"))?;
         let size = Arc::new(Int64Array::from(vec![size]));
         let data_change = Arc::new(BooleanArray::from(vec![data_change]));
-        let modification_time = Arc::new(Int64Array::from(vec![modification_time]));
+        let modification_time = Arc::new(Int64Array::from(vec![last_modified]));
 
         Ok(Box::new(ArrowEngineData::new(RecordBatch::try_new(
             Arc::new(write_metadata_schema.as_ref().try_into()?),

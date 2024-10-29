@@ -124,6 +124,17 @@ impl PartialOrd for FileMeta {
     }
 }
 
+impl FileMeta {
+    /// Create a new instance of `FileMeta`
+    pub fn new(location: Url, last_modified: i64, size: usize) -> Self {
+        Self {
+            location,
+            last_modified,
+            size,
+        }
+    }
+}
+
 /// Trait for implementing an Expression evaluator.
 ///
 /// It contains one Expression which can be evaluated on multiple ColumnarBatches.
