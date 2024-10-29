@@ -340,8 +340,8 @@ async fn test_append() -> Result<(), Box<dyn std::error::Error>> {
             let engine = Arc::clone(&engine);
             let write_context = Arc::clone(&write_context);
             async move {
-                let parquet_handler = &engine.parquet;
-                parquet_handler
+                engine
+                    .get_parquet_handler()
                     .write_parquet_file(
                         write_context.target_dir(),
                         data.expect("FIXME"),
@@ -526,8 +526,8 @@ async fn test_append_partitioned() -> Result<(), Box<dyn std::error::Error>> {
                 let engine = Arc::clone(&engine);
                 let write_context = Arc::clone(&write_context);
                 async move {
-                    let parquet_handler = &engine.parquet;
-                    parquet_handler
+                    engine
+                        .get_parquet_handler()
                         .write_parquet_file(
                             write_context.target_dir(),
                             data.expect("FIXME"),

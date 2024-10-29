@@ -33,7 +33,7 @@ pub struct DefaultEngine<E: TaskExecutor> {
     store: Arc<DynObjectStore>,
     file_system: Arc<ObjectStoreFileSystemClient<E>>,
     json: Arc<DefaultJsonHandler<E>>,
-    pub parquet: Arc<DefaultParquetHandler<E>>, // FIXME
+    parquet: Arc<DefaultParquetHandler<E>>,
     expression: Arc<ArrowExpressionHandler>,
 }
 
@@ -107,6 +107,10 @@ impl<E: TaskExecutor> DefaultEngine<E> {
 
     pub fn get_object_store_for_url(&self, _url: &Url) -> Option<Arc<DynObjectStore>> {
         Some(self.store.clone())
+    }
+
+    pub fn get_parquet_handler(&self) -> Arc<DefaultParquetHandler<E>> {
+        self.parquet.clone()
     }
 }
 
