@@ -231,6 +231,15 @@ impl Expression {
         set
     }
 
+    /// Create a new column name expression from input satisfying `FromIterator for ColumnName`.
+    pub fn column<A, T>(field_names: T) -> Expression
+    where
+        T: IntoIterator<Item = A>,
+        ColumnName: FromIterator<A>,
+    {
+        ColumnName::new(field_names).into()
+    }
+
     /// Create a new expression for a literal value
     pub fn literal(value: impl Into<Scalar>) -> Self {
         Self::Literal(value.into())
