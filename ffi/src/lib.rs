@@ -75,7 +75,15 @@ impl Iterator for EngineIterator {
 /// Whoever instantiates the struct must ensure it does not outlive the data it points to. The
 /// compiler cannot help us here, because raw pointers don't have lifetimes. A good rule of thumb is
 /// to always use the [`kernel_string_slice`] macro to create string slices, and to avoid returning
-/// a string slice from a code block or function (since the move risks over-extending its lifetime).
+/// a string slice from a code block or function (since the move risks over-extending its lifetime):
+///
+/// ```ignore
+/// # // Ignored because this code is pub(crate) and doc tests cannot compile it
+/// let dangling_slice = {
+///     let tmp = String::from("tmp");
+///     kernel_string_slice!(tmp)
+/// }
+/// ```
 ///
 /// Meanwhile, the callee must assume that the slice is only valid until the function returns, and
 /// must not retain any references to the slice or its data that might outlive the function call.
@@ -96,8 +104,9 @@ impl KernelStringSlice {
     /// verify. Thus, e.g., the following incorrect code would compile and leave `s` dangling,
     /// because the unnamed string arg is dropped as soon as the statement finishes executing.
     ///
-    /// ```
-    /// let s = KernelStringSlice::new_unsafe(String::new("bad").as_str());
+    /// ```ignore
+    /// # // Ignored because this code is pub(crate) and doc tests cannot compile it
+    /// let s = KernelStringSlice::new_unsafe(String::from("bad").as_str());
     /// ```
     pub(crate) unsafe fn new_unsafe(source: &str) -> Self {
         let source = source.as_bytes();
