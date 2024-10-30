@@ -12,8 +12,8 @@ if(MSVC)
   target_compile_options(read_table PRIVATE /W4 /WX)
 else()
   # no-strict-prototypes because arrow headers have fn defs without prototypes
-  target_compile_options(read_table PRIVATE -Wall -Wextra -Wpedantic -Werror -Wno-strict-prototypes -g -fsanitize=address)
-  target_link_options(read_table PRIVATE -g -fsanitize=address)
+  target_compile_options(visit_expression PRIVATE -Wall -Wextra -Wpedantic -Werror -Wno-strict-prototypes -g -fsanitize=address)
+  target_link_options(visit_expression PRIVATE -g -fsanitize=address)
 endif()
 
 # Add the kernel expresion -> engine expression test
