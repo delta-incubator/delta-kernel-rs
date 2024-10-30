@@ -11,7 +11,7 @@ use url::Url;
 
 use crate::actions::{Metadata, Protocol};
 use crate::features::{ColumnMappingMode, COLUMN_MAPPING_MODE_KEY};
-use crate::log_segment::LogSegment;
+use crate::log_segment::{self, LogSegment, LogSegmentBuilder};
 use crate::path::ParsedLogPath;
 use crate::scan::ScanBuilder;
 use crate::schema::Schema;
@@ -67,53 +67,16 @@ impl Snapshot {
         let fs_client = engine.get_file_system_client();
         let log_url = table_root.join("_delta_log/").unwrap();
 
-        // List relevant files from log
-        let (mut commit_files, checkpoint_files) =
-            match (read_last_checkpoint(fs_client.as_ref(), &log_url)?, version) {
-                (Some(cp), None) => {
-                    list_log_files_with_checkpoint(&cp, fs_client.as_ref(), &log_url)?
-                }
-                (Some(cp), Some(version)) if cp.version >= version => {
-                    list_log_files_with_checkpoint(&cp, fs_client.as_ref(), &log_url)?
-                }
-                _ => list_log_files(fs_client.as_ref(), &log_url)?,
-            };
-
-        // remove all files above requested version
+        let mut builder = LogSegmentBuilder::new(fs_client.clone(), &table_root);
         if let Some(version) = version {
-            commit_files.retain(|log_path| log_path.version <= version);
+            builder = builder.with_version(version);
         }
-        // only keep commit files above the checkpoint we found
-        if let Some(checkpoint_file) = checkpoint_files.first() {
-            commit_files.retain(|log_path| checkpoint_file.version < log_path.version);
+        if let Some(checkpoint) = read_last_checkpoint(fs_client.as_ref(), &log_url)? {
+            builder = builder.with_checkpoint(checkpoint);
         }
+        let log_segment = builder.build()?;
 
-        // get the effective version from chosen files
-        let version_eff = commit_files
-            .first()
-            .or(checkpoint_files.first())
-            .ok_or(Error::MissingVersion)? // TODO: A more descriptive error
-            .version;
-
-        if let Some(v) = version {
-            require!(
-                version_eff == v,
-                Error::MissingVersion // TODO more descriptive error
-            );
-        }
-
-        let log_segment = LogSegment {
-            log_root: log_url,
-            commit_files: commit_files
-                .into_iter()
-                .map(|log_path| log_path.location)
-                .collect(),
-            checkpoint_files: checkpoint_files
-                .into_iter()
-                .map(|log_path| log_path.location)
-                .collect(),
-        };
-
+        let version_eff = log_segment.version;
         Self::try_new_from_log_segment(table_root, log_segment, version_eff, engine)
     }
 

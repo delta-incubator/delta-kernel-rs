@@ -1,7 +1,14 @@
 //! Represents a segment of a delta log. [`LogSegment`] wraps a set of  checkpoint and commit
 //! files.
 
-use std::sync::{Arc, LazyLock};
+use crate::{
+    path::ParsedLogPath, snapshot::CheckpointMetadata, utils::require, FileSystemClient, Version,
+};
+use std::{
+    cmp::Ordering,
+    sync::{Arc, LazyLock},
+};
+use tracing::warn;
 use url::Url;
 
 use crate::{
@@ -14,6 +21,7 @@ use itertools::Itertools;
 #[derive(Debug)]
 #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
 pub(crate) struct LogSegment {
+    pub version: Version,
     pub log_root: Url,
     /// Reverse order sorted commit files in the log segment
     pub commit_files: Vec<FileMeta>,
@@ -104,6 +112,197 @@ impl LogSegment {
         });
         // read the same protocol and metadata schema for both commits and checkpoints
         self.replay(engine, schema.clone(), schema, META_PREDICATE.clone())
+    }
+}
+
+pub struct LogSegmentBuilder<'a> {
+    fs_client: Arc<dyn FileSystemClient>,
+    log_root: &'a Url,
+    checkpoint: Option<CheckpointMetadata>,
+    version: Option<Version>,
+    no_checkpoint: bool,
+}
+impl<'a> LogSegmentBuilder<'a> {
+    pub fn new(fs_client: Arc<dyn FileSystemClient>, log_root: &'a Url) -> Self {
+        LogSegmentBuilder {
+            fs_client,
+            log_root,
+            checkpoint: None,
+            version: None,
+            no_checkpoint: false,
+        }
+    }
+
+    pub fn with_checkpoint(mut self, checkpoint: CheckpointMetadata) -> Self {
+        let _ = self.checkpoint.insert(checkpoint);
+        self
+    }
+    pub fn with_version(mut self, version: Version) -> Self {
+        let _ = self.version.insert(version);
+        self
+    }
+    pub fn with_no_checkpoint(mut self) -> Self {
+        self.no_checkpoint = true;
+        self
+    }
+    pub fn build(self) -> DeltaResult<LogSegment> {
+        let Self {
+            fs_client,
+            log_root,
+            checkpoint,
+            version,
+            no_checkpoint,
+        } = self;
+        let log_url = log_root.join("_delta_log/").unwrap();
+        let (mut commit_files, checkpoint_files) = match (checkpoint, version) {
+            (Some(cp), None) => {
+                Self::list_log_files_with_checkpoint(&cp, fs_client.as_ref(), &log_url)?
+            }
+            (Some(cp), Some(version)) if cp.version >= version => {
+                Self::list_log_files_with_checkpoint(&cp, fs_client.as_ref(), &log_url)?
+            }
+            _ => Self::list_log_files(fs_client.as_ref(), &log_url)?,
+        };
+
+        // remove all files above requested version
+        if let Some(version) = version {
+            commit_files.retain(|log_path| log_path.version <= version);
+        }
+        // only keep commit files above the checkpoint we found
+        if let Some(checkpoint_file) = checkpoint_files.first() {
+            commit_files.retain(|log_path| checkpoint_file.version < log_path.version);
+        }
+
+        // get the effective version from chosen files
+        let version_eff = commit_files
+            .first()
+            .or(checkpoint_files.first())
+            .ok_or(Error::MissingVersion)? // TODO: A more descriptive error
+            .version;
+
+        if let Some(v) = version {
+            require!(
+                version_eff == v,
+                Error::MissingVersion // TODO more descriptive error
+            );
+        }
+
+        Ok(LogSegment {
+            version: version_eff,
+            log_root: log_url,
+            commit_files: commit_files
+                .into_iter()
+                .map(|log_path| log_path.location)
+                .collect(),
+            checkpoint_files: checkpoint_files
+                .into_iter()
+                .map(|log_path| log_path.location)
+                .collect(),
+        })
+    }
+    pub fn list_log_files_from_version(
+        fs_client: &dyn FileSystemClient,
+        log_root: &Url,
+        version: Option<Version>,
+    ) -> DeltaResult<(Vec<ParsedLogPath>, Vec<ParsedLogPath>, i64)> {
+        let begin_version = version.unwrap_or(0);
+        let version_prefix = format!("{:020}", begin_version);
+        let start_from = log_root.join(&version_prefix)?;
+
+        let mut max_checkpoint_version = version.map_or(-1, |x| x as i64);
+        let mut checkpoint_files = vec![];
+        // We expect 10 commit files per checkpoint, so start with that size. We could adjust this based
+        // on config at some point
+        let mut commit_files = Vec::with_capacity(10);
+
+        for meta_res in fs_client.list_from(&start_from)? {
+            let meta = meta_res?;
+            let parsed_path = ParsedLogPath::try_from(meta)?;
+            // TODO this filters out .crc files etc which start with "." - how do we want to use these kind of files?
+            if let Some(parsed_path) = parsed_path {
+                if parsed_path.is_commit() {
+                    commit_files.push(parsed_path);
+                } else if parsed_path.is_checkpoint() {
+                    let path_version = parsed_path.version as i64;
+                    match path_version.cmp(&max_checkpoint_version) {
+                        Ordering::Greater => {
+                            max_checkpoint_version = path_version;
+                            checkpoint_files.clear();
+                            checkpoint_files.push(parsed_path);
+                        }
+                        Ordering::Equal => checkpoint_files.push(parsed_path),
+                        Ordering::Less => {}
+                    }
+                }
+            }
+        }
+
+        debug_assert!(
+            commit_files
+                .windows(2)
+                .all(|cfs| cfs[0].version <= cfs[1].version),
+            "fs_client.list_from() didn't return a sorted listing! {:?}",
+            commit_files
+        );
+
+        // We assume listing returned ordered, we want reverse order
+        let commit_files = commit_files.into_iter().rev().collect();
+
+        Ok((commit_files, checkpoint_files, max_checkpoint_version))
+    }
+
+    /// List all log files after a given checkpoint.
+    pub fn list_log_files_with_checkpoint(
+        checkpoint_metadata: &CheckpointMetadata,
+        fs_client: &dyn FileSystemClient,
+        log_root: &Url,
+    ) -> DeltaResult<(Vec<ParsedLogPath>, Vec<ParsedLogPath>)> {
+        let (mut commit_files, checkpoint_files, max_checkpoint_version) =
+            Self::list_log_files_from_version(
+                fs_client,
+                log_root,
+                Some(checkpoint_metadata.version),
+            )?;
+
+        if checkpoint_files.is_empty() {
+            // TODO: We could potentially recover here
+            return Err(Error::generic(
+                "Had a _last_checkpoint hint but didn't find any checkpoints",
+            ));
+        }
+
+        if max_checkpoint_version != checkpoint_metadata.version as i64 {
+            warn!(
+            "_last_checkpoint hint is out of date. _last_checkpoint version: {}. Using actual most recent: {}",
+            checkpoint_metadata.version,
+            max_checkpoint_version
+        );
+            // we (may) need to drop commits that are before the _actual_ last checkpoint (that
+            // is, commits between a stale _last_checkpoint and the _actual_ last checkpoint)
+            commit_files.retain(|parsed_path| parsed_path.version as i64 > max_checkpoint_version);
+        } else if checkpoint_files.len() != checkpoint_metadata.parts.unwrap_or(1) {
+            return Err(Error::Generic(format!(
+                "_last_checkpoint indicated that checkpoint should have {} parts, but it has {}",
+                checkpoint_metadata.parts.unwrap_or(1),
+                checkpoint_files.len()
+            )));
+        }
+        Ok((commit_files, checkpoint_files))
+    }
+
+    /// List relevant log files.
+    ///
+    /// Relevant files are the max checkpoint found and all subsequent commits.
+    pub fn list_log_files(
+        fs_client: &dyn FileSystemClient,
+        log_root: &Url,
+    ) -> DeltaResult<(Vec<ParsedLogPath>, Vec<ParsedLogPath>)> {
+        let (mut commit_files, checkpoint_files, max_checkpoint_version) =
+            Self::list_log_files_from_version(fs_client, log_root, None)?;
+
+        commit_files.retain(|f| f.version as i64 > max_checkpoint_version);
+
+        Ok((commit_files, checkpoint_files))
     }
 }
 
