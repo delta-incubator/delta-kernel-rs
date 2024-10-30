@@ -69,7 +69,7 @@ impl Snapshot {
 
         let mut builder = LogSegmentBuilder::new(fs_client.clone(), &table_root);
         if let Some(version) = version {
-            builder = builder.with_version(version);
+            builder = builder.with_end_version(version);
         }
         if let Some(checkpoint) = read_last_checkpoint(fs_client.as_ref(), &log_url)? {
             builder = builder.with_checkpoint(checkpoint);

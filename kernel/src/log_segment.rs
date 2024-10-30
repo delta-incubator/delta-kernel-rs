@@ -119,7 +119,8 @@ pub struct LogSegmentBuilder<'a> {
     fs_client: Arc<dyn FileSystemClient>,
     log_root: &'a Url,
     checkpoint: Option<CheckpointMetadata>,
-    version: Option<Version>,
+    start_version: Option<Version>,
+    end_version: Option<Version>,
     no_checkpoint: bool,
 }
 impl<'a> LogSegmentBuilder<'a> {
@@ -128,7 +129,8 @@ impl<'a> LogSegmentBuilder<'a> {
             fs_client,
             log_root,
             checkpoint: None,
-            version: None,
+            start_version: None,
+            end_version: None,
             no_checkpoint: false,
         }
     }
@@ -137,11 +139,16 @@ impl<'a> LogSegmentBuilder<'a> {
         let _ = self.checkpoint.insert(checkpoint);
         self
     }
-    pub fn with_version(mut self, version: Version) -> Self {
-        let _ = self.version.insert(version);
+
+    pub fn with_start_version(mut self, version: Version) -> Self {
+        let _ = self.start_version.insert(version);
         self
     }
-    pub fn with_no_checkpoint(mut self) -> Self {
+    pub fn with_end_version(mut self, version: Version) -> Self {
+        let _ = self.end_version.insert(version);
+        self
+    }
+    pub fn set_omit_checkpoints(mut self) -> Self {
         self.no_checkpoint = true;
         self
     }
@@ -150,11 +157,12 @@ impl<'a> LogSegmentBuilder<'a> {
             fs_client,
             log_root,
             checkpoint,
-            version,
+            start_version,
+            end_version,
             no_checkpoint,
         } = self;
         let log_url = log_root.join("_delta_log/").unwrap();
-        let (mut commit_files, checkpoint_files) = match (checkpoint, version) {
+        let (mut commit_files, checkpoint_files) = match (checkpoint, end_version) {
             (Some(cp), None) => {
                 Self::list_log_files_with_checkpoint(&cp, fs_client.as_ref(), &log_url)?
             }
@@ -164,15 +172,6 @@ impl<'a> LogSegmentBuilder<'a> {
             _ => Self::list_log_files(fs_client.as_ref(), &log_url)?,
         };
 
-        // remove all files above requested version
-        if let Some(version) = version {
-            commit_files.retain(|log_path| log_path.version <= version);
-        }
-        // only keep commit files above the checkpoint we found
-        if let Some(checkpoint_file) = checkpoint_files.first() {
-            commit_files.retain(|log_path| checkpoint_file.version < log_path.version);
-        }
-
         // get the effective version from chosen files
         let version_eff = commit_files
             .first()
@@ -180,11 +179,22 @@ impl<'a> LogSegmentBuilder<'a> {
             .ok_or(Error::MissingVersion)? // TODO: A more descriptive error
             .version;
 
-        if let Some(v) = version {
+        // remove all files above requested version
+        if let Some(end_version) = end_version {
             require!(
-                version_eff == v,
+                version_eff == end_version,
                 Error::MissingVersion // TODO more descriptive error
             );
+            commit_files.retain(|log_path| log_path.version <= end_version);
+        }
+        if let Some(start_version) = start_version {
+            commit_files.retain(|log_path| log_path.version >= start_version);
+        }
+        // only keep commit files above the checkpoint we found
+        if no_checkpoint {
+            commit_files.clear();
+        } else if let Some(checkpoint_file) = checkpoint_files.first() {
+            commit_files.retain(|log_path| checkpoint_file.version < log_path.version);
         }
 
         Ok(LogSegment {
