@@ -157,6 +157,7 @@ impl Display for FancyColumnName {
                 f.write_char('[')?;
                 for c in s.chars() {
                     match c {
+                        '[' => f.write_str("[[")?,
                         ']' => f.write_str("]]")?,
                         _ => f.write_char(c)?,
                     }
@@ -224,6 +225,11 @@ fn column_name_from_str(s: &str) -> DeltaResult<ColumnName> {
         let mut name = String::new();
         while let Some(c) = chars.next() {
             match c {
+                '[' => match chars.next() {
+                    Some('[') => name.push('['), // escaped delimiter (keep going)
+                    _ => return Err(Error::generic(
+                        "Unescaped '[' delimiter inside escaped field name")),
+                },
                 ']' => match chars.next() {
                     Some(']') => name.push(']'), // escaped delimiter (keep going)
                     Some('.') => return Ok((name, false)),
@@ -237,7 +243,7 @@ fn column_name_from_str(s: &str) -> DeltaResult<ColumnName> {
                 _ => name.push(c),
             }
         }
-        Err(Error::generic("Unterminated escape sequence in field name"))
+        Err(Error::generic("Escaped field name lacks a closing ']' delimiter"))
     }
 
     // Ambiguous case: The empty string `""`could reasonably parse as either `ColumnName::new([""])`
@@ -464,7 +470,14 @@ mod test {
             ("[a].b", Some(ColumnName::new(["a", "b"]))),
             ("[a].[b]", Some(ColumnName::new(["a", "b"]))),
             ("[a].[b].[c]", Some(ColumnName::new(["a", "b", "c"]))),
-            ("[a[].[b]]]", Some(ColumnName::new(["a[", "b]"]))),
+            ("[a[].[b]]]", None),
+            ("[a[[].[b]]", None),
+            ("[a[].[b]]]", None),
+            ("[a[[].[b]]", None),
+            ("[a[[].[b]]]", Some(ColumnName::new(["a[", "b]"]))),
+            ("[a.[b]].c]", None),
+            ("[a.[[b].c]", None),
+            ("[a.[[b]].c]", Some(ColumnName::new(["a.[b].c"]))),
             ("a[.b]]", None),
         ];
         for (input, expected_output) in cases {
@@ -510,7 +523,7 @@ mod test {
             ("a.b", ColumnName::new(["a", "b"])),
             ("a.b.c", ColumnName::new(["a", "b", "c"])),
             ("a.[b.c].d", ColumnName::new(["a", "b.c", "d"])),
-            ("[a[].[b]]]", ColumnName::new(["a[", "b]"])),
+            ("[a[[].[b]]]", ColumnName::new(["a[", "b]"])),
         ];
         for (expected_output, input) in cases {
             let output = FancyColumnName(input.clone()).to_string();
