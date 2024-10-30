@@ -19,7 +19,6 @@ use url::Url;
 const KERNEL_VERSION: &str = env!("CARGO_PKG_VERSION");
 const UNKNOWN_OPERATION: &str = "UNKNOWN";
 
-// FIXME: should be a projection of LOG_SCHEMA?
 pub(crate) static WRITE_METADATA_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
     StructType::new(vec![
         <String>::get_struct_field("path"),
