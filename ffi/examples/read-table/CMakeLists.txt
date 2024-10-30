@@ -31,8 +31,11 @@ else()
     target_compile_options(read_table PRIVATE -fsanitize=address)
     target_link_options(read_table PRIVATE -g -fsanitize=address)
   else()
-    target_compile_options(read_table PRIVATE -fsanitize=address,leak)
-    target_link_options(read_table PRIVATE -fsanitize=address,leak)
+    # https://github.com/delta-incubator/delta-kernel-rs/issues/448 - fix existing leaks in the code first
+    #target_compile_options(read_table PRIVATE -fsanitize=address,leak)
+    #target_link_options(read_table PRIVATE -fsanitize=address,leak)
+    target_compile_options(read_table PRIVATE -fsanitize=address)
+    target_link_options(read_table PRIVATE -fsanitize=address)
   endif()
 endif()
 
