@@ -75,7 +75,7 @@ impl Iterator for EngineIterator {
 /// Whoever instantiates the struct must ensure it does not outlive the data it points to. The
 /// compiler cannot help us here, because raw pointers don't have lifetimes. A good rule of thumb is
 /// to always use the [`kernel_string_slice`] macro to create string slices, and to avoid returning
-/// a string slice from a code block or function.
+/// a string slice from a code block or function (since the move risks over-extending its lifetime).
 ///
 /// Meanwhile, the callee must assume that the slice is only valid until the function returns, and
 /// must not retain any references to the slice or its data that might outlive the function call.
@@ -91,10 +91,16 @@ impl KernelStringSlice {
     ///
     /// # Safety
     ///
-    /// Caller affirms that the source will outlive the new slice created from it. The compiler
-    /// cannot help as raw pointers do not have lifetimes that the compiler verify.
-    pub(crate) unsafe fn new_unsafe(source: impl AsRef<str>) -> Self {
-        let source = source.as_ref().as_bytes();
+    /// Caller affirms that the source will outlive the statement that creates this slice. The
+    /// compiler cannot help as raw pointers do not have lifetimes that the compiler can
+    /// verify. Thus, e.g., the following incorrect code would compile and leave `s` dangling,
+    /// because the unnamed string arg is dropped as soon as the statement finishes executing.
+    ///
+    /// ```
+    /// let s = KernelStringSlice::new_unsafe(String::new("bad").as_str());
+    /// ```
+    pub(crate) unsafe fn new_unsafe(source: &str) -> Self {
+        let source = source.as_bytes();
         Self {
             ptr: source.as_ptr().cast(),
             len: source.len(),
@@ -102,19 +108,24 @@ impl KernelStringSlice {
     }
 }
 
-/// Creates a new [`KernelStringSlice`] from a source object (which must be an identifier, to ensure
-/// it is not immediately dropped). This is the safest way to create a kernel string slice.
+/// Creates a new [`KernelStringSlice`] from a string reference (which must be an identifier, to
+/// ensure it is not immediately dropped). This is the safest way to create a kernel string slice.
+///
+/// NOTE: It is still possible to misuse the resulting kernel string slice in unsafe ways, such as
+/// returning it from the function or code block that owns the string reference.
 macro_rules! kernel_string_slice {
     ( $source:ident ) => {{
-        // Safety: A named source cannot immediately go out of scope. Any dangerous situations will
-        // arise from the _use_ of this string slice, not from its creation.
+        // Safety: A named source cannot immediately go out of scope, so the resulting slice must
+        // remain valid at least that long. Any dangerous situations will arise from the subsequent
+        // misuse of this string slice, not from its creation.
         //
-        // NOTE: the `do_it` wrapper avoids an "unnecessary `unsafe` block clippy warning, since
-        // annotating an expression with #[allow(unused_unsafe)] is not stable rust.
-        fn do_it(s: impl AsRef<str>) -> $crate::KernelStringSlice {
+        // NOTE: The `do_it` wrapper avoids an "unnecessary `unsafe` block" clippy warning in case
+        // the invocation site of this macro is already in an `unsafe` block. We can't just disable
+        // the warning with #[allow(unused_unsafe)] because expression annotation is unstable rust.
+        fn do_it(s: &str) -> $crate::KernelStringSlice {
             unsafe { $crate::KernelStringSlice::new_unsafe(s) }
         }
-        do_it($source)
+        do_it(&$source)
     }};
 }
 pub(crate) use kernel_string_slice;
@@ -131,7 +142,7 @@ impl<'a> TryFromStringSlice<'a> for String {
     /// The slice must be a valid (non-null) pointer, and must point to the indicated number of
     /// valid utf8 bytes.
     unsafe fn try_from_slice(slice: &'a KernelStringSlice) -> DeltaResult<Self> {
-        let slice: &str = unsafe { TryFromStringSlice::try_from_slice(slice)? };
+        let slice: &str = unsafe { TryFromStringSlice::try_from_slice(slice) }?;
         Ok(slice.into())
     }
 }
