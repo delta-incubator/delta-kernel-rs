@@ -227,8 +227,11 @@ fn column_name_from_str(s: &str) -> DeltaResult<ColumnName> {
             match c {
                 '[' => match chars.next() {
                     Some('[') => name.push('['), // escaped delimiter (keep going)
-                    _ => return Err(Error::generic(
-                        "Unescaped '[' delimiter inside escaped field name")),
+                    _ => {
+                        return Err(Error::generic(
+                            "Unescaped '[' delimiter inside escaped field name",
+                        ))
+                    }
                 },
                 ']' => match chars.next() {
                     Some(']') => name.push(']'), // escaped delimiter (keep going)
@@ -243,7 +246,9 @@ fn column_name_from_str(s: &str) -> DeltaResult<ColumnName> {
                 _ => name.push(c),
             }
         }
-        Err(Error::generic("Escaped field name lacks a closing ']' delimiter"))
+        Err(Error::generic(
+            "Escaped field name lacks a closing ']' delimiter",
+        ))
     }
 
     // Ambiguous case: The empty string `""`could reasonably parse as either `ColumnName::new([""])`
