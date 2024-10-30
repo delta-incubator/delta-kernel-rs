@@ -7,7 +7,7 @@ use std::default::Default;
 use std::os::raw::{c_char, c_void};
 use std::ptr::NonNull;
 use std::sync::Arc;
-use tracing::{debug, warn};
+use tracing::debug;
 use url::Url;
 
 use delta_kernel::snapshot::Snapshot;
@@ -646,21 +646,7 @@ pub unsafe extern "C" fn set_builder_option(
     let key = unsafe { String::try_from_slice(&key) };
     let value = unsafe { String::try_from_slice(&value) };
     // TODO: Return ExternalError if key or value is invalid? (builder has an error allocator)
-    let key = match key {
-        Ok(key) => key,
-        Err(err) => {
-            warn!("Ignoring invalid option key: {err}");
-            return;
-        }
-    };
-    let value = match value {
-        Ok(value) => value,
-        Err(err) => {
-            warn!("Ignoring invalid option value: {err}");
-            return;
-        }
-    };
-    builder.set_option(key, value);
+    builder.set_option(key.unwrap(), value.unwrap());
 }
 
 /// Consume the builder and return a `default` engine. After calling, the passed pointer is _no
