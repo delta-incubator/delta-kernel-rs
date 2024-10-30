@@ -12,15 +12,8 @@ if(MSVC)
   target_compile_options(read_table PRIVATE /W4 /WX)
 else()
   # no-strict-prototypes because arrow headers have fn defs without prototypes
-  target_compile_options(read_table PRIVATE -Wall -Wextra -Wpedantic -Werror -Wno-strict-prototypes -g)
-  if(APPLE)
-    # leak detector not supported for some reason (even tho https://clang.llvm.org/docs/LeakSanitizer.html says otherwise)
-    target_compile_options(read_table PRIVATE -fsanitize=address)
-    target_link_options(read_table PRIVATE -g -fsanitize=address)
-  else()
-    target_compile_options(read_table PRIVATE -fsanitize=address,leak)
-    target_link_options(read_table PRIVATE -fsanitize=address,leak)
-  endif()
+  target_compile_options(read_table PRIVATE -Wall -Wextra -Wpedantic -Werror -Wno-strict-prototypes -g -fsanitize=address)
+  target_link_options(read_table PRIVATE -g -fsanitize=address)
 endif()
 
 # Add the kernel expresion -> engine expression test
