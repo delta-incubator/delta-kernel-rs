@@ -195,6 +195,10 @@ PartitionList* get_partition_list(SharedGlobalScanState* state)
 
 int main(int argc, char* argv[])
 {
+  // intentional leak
+  char* leaked =  malloc(10);
+  *leaked = 0;
+
   if (argc < 2) {
     printf("Usage: %s table/path\n", argv[0]);
     return -1;
