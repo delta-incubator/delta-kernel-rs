@@ -1,7 +1,10 @@
+use crate::{DeltaResult, Error};
+
 use std::borrow::Borrow;
 use std::fmt::{Display, Formatter};
 use std::hash::{Hash, Hasher};
 use std::ops::Deref;
+
 /// A (possibly nested) column name.
 #[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord)]
 pub struct ColumnName {
@@ -26,12 +29,6 @@ impl ColumnName {
     /// would return the equivalent of `ColumnName::new(["\"a", "b\"", "c"])` (three fields).
     pub fn from_naive_str_split(name: impl AsRef<str>) -> Self {
         Self::new(name.as_ref().split('.'))
-    }
-
-    /// Naively converts a column name into a string by joining its fields with dots. This is a
-    /// potentially lossy conversion if any field name contains a dot or other special characters.
-    pub fn to_string_lossy(&self) -> String {
-        self.path.join(".")
     }
 
     /// Joins this column with another, concatenating their fields into a single nested column path.
@@ -88,13 +85,6 @@ impl IntoIterator for ColumnName {
     }
 }
 
-impl Display for ColumnName {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        // TODO: Handle non-simple field names better?
-        f.write_str(&self.to_string_lossy())
-    }
-}
-
 impl Deref for ColumnName {
     type Target = [String];
 
@@ -128,18 +118,34 @@ impl Hash for ColumnName {
     }
 }
 
-/// A wrapper for `ColumnName` that pretty-prints the column name with fields delimited by periods
-/// and enclosed in square brackets, e.g. `column_name!("a.b.c")` would print as `"[a].[b].[c]"`.
-// TODO: Marked as test-only for now, as a demonstration. Should this be Display for ColumnName, so
-// `ColumnName::new(["a", "b.c", "d"])` would print as `"a.[b.c].d"` instead of merely `"a.b.c.d"`?
-#[cfg(test)]
-struct FancyColumnName(ColumnName);
-
-#[cfg(test)]
-impl Display for FancyColumnName {
+/// Formats the column name as a string, with fields delimited by periods. Fields containing special
+/// characters are escaped by square brackets:
+///
+/// ```
+/// # use delta_kernel::expressions::ColumnName;
+/// assert_eq!(ColumnName::new(["a", "b.c", "d"]).to_string(), "a.[b.c].d");
+/// ```
+///
+/// Square brackets inside escaped field names are themselves escaped by doubling:
+///
+/// ```
+/// # use delta_kernel::expressions::ColumnName;
+/// assert_eq!(ColumnName::new(["a", "b.[c].d", "e"]).to_string(), "a.[b.[[c]].d].e");
+/// ```
+///
+/// The string representation is lossless, and can be parsed back into a `ColumnName` using
+/// [`FromStr`]:
+///
+/// ```
+/// # use delta_kernel::expressions::ColumnName;
+/// let colname = ColumnName::new(["a", "b.c", "d"]);
+/// let parsed: ColumnName = colname.to_string().parse().unwrap();
+/// assert_eq!(colname, parsed);
+/// ```
+impl Display for ColumnName {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let mut delim = None;
-        for s in self.0.iter() {
+        for s in self.iter() {
             use std::fmt::Write as _;
 
             // Only emit the period delimiter after the first iteration
@@ -172,106 +178,111 @@ impl Display for FancyColumnName {
     }
 }
 
-#[cfg(test)]
-use crate::error::{DeltaResult, Error};
-
 /// Parses a column name from a string. Field names are separated by dots. Field names enclosed in
 /// square brackets may contain arbitrary characters, including periods and spaces. To include a
-/// literal square bracket in a field name, escape it by doubling it, e.g. `"[foo[[bar]]baz]"` would
-/// parse as a single field named `foo[bar]baz`.
-// TODO: Marked as test-only for now, as a demonstration. Should we officially support it?
-#[cfg(test)]
+/// literal square bracket in a field name, escape it by doubling it, e.g.:
+///
+/// ```
+/// # use delta_kernel::expressions::ColumnName;
+/// assert_eq!(ColumnName::new(["a", "b.[c].d", "e"]).to_string(), "a.[b.[[c]].d].e");
+/// ```
+///
+/// NOTE: Unlike the conversion from `ColumnName` to `String` and back, a conversion from `String`
+/// to `ColumnName` and back may not produce an identical string in case the original string
+/// included unnecessary field escapes, e.g.
+///
+/// ```
+/// # use delta_kernel::expressions::ColumnName;
+/// let parsed: ColumnName = "[a].[b.[[c]].d].[e]".parse().unwrap();
+/// assert_eq!(parsed.to_string(), "a.[b.[[c]].d].e");
+/// ```
 impl std::str::FromStr for ColumnName {
     type Err = Error;
 
     fn from_str(s: &str) -> DeltaResult<Self> {
-        column_name_from_str(s)
+        // Ambiguous case: The empty string `""`could reasonably parse as either `ColumnName::new([""])`
+        // or `ColumnName::new([])`. However, `ColumnName::new([""]).to_string()` is `"[]"` and
+        // `ColumnName::new([]).to_string()` is `""`, so we choose the latter because it produces a
+        // lossless round trip from `ColumnName` to  `String` and back.
+        let mut chars = s.chars().peekable();
+        if chars.peek().is_none() {
+            return Ok(ColumnName::new(&[] as &[String]));
+        }
+
+        let mut path = vec![];
+        loop {
+            let (field_name, done) = if chars.next_if_eq(&'[').is_none() {
+                parse_simple(&mut chars)?
+            } else {
+                parse_escaped(&mut chars)?
+            };
+            path.push(field_name);
+            if done {
+                return Ok(ColumnName::new(path));
+            }
+        }
     }
 }
 
-/// See `impl FromStr for ColumnName`.
-#[cfg(test)]
-fn column_name_from_str(s: &str) -> DeltaResult<ColumnName> {
-    type Chars<'a> = std::iter::Peekable<std::str::Chars<'a>>;
+type Chars<'a> = std::iter::Peekable<std::str::Chars<'a>>;
 
-    fn parse_simple(chars: &mut Chars<'_>) -> DeltaResult<(String, bool)> {
-        let mut name = String::new();
-        let mut allow_digits = false; // first character cannot be a digit
-        for c in chars {
-            match c {
-                '.' => return Ok((name, false)),
-                '_' | 'a'..='z' | 'A'..='Z' => name.push(c),
-                '0'..='9' => {
-                    if allow_digits {
-                        name.push(c);
-                    } else {
-                        return Err(Error::generic(format!(
-                            "Unescaped field name cannot start with a digit '{c}'"
-                        )));
-                    }
-                }
-                _ => {
+/// Helper for `impl FromStr for ColumnName`.
+fn parse_simple(chars: &mut Chars<'_>) -> DeltaResult<(String, bool)> {
+    let mut name = String::new();
+    let mut allow_digits = false; // first character cannot be a digit
+    for c in chars {
+        match c {
+            '.' => return Ok((name, false)),
+            '_' | 'a'..='z' | 'A'..='Z' => name.push(c),
+            '0'..='9' => {
+                if allow_digits {
+                    name.push(c);
+                } else {
                     return Err(Error::generic(format!(
-                        "Invalid character '{c}' in unescaped field name"
+                        "Unescaped field name cannot start with a digit '{c}'"
+                    )));
+                }
+            }
+            _ => {
+                return Err(Error::generic(format!(
+                    "Invalid character '{c}' in unescaped field name"
+                )))
+            }
+        };
+        allow_digits = true;
+    }
+    Ok((name, true)) // EOF
+}
+
+/// Helper `impl FromStr for ColumnName`.
+fn parse_escaped(chars: &mut Chars<'_>) -> DeltaResult<(String, bool)> {
+    let mut name = String::new();
+    while let Some(c) = chars.next() {
+        match c {
+            '[' => match chars.next() {
+                Some('[') => name.push('['), // escaped delimiter (keep going)
+                _ => {
+                    return Err(Error::generic(
+                        "Unescaped '[' delimiter inside escaped field name",
+                    ))
+                }
+            },
+            ']' => match chars.next() {
+                Some(']') => name.push(']'), // escaped delimiter (keep going)
+                Some('.') => return Ok((name, false)),
+                Some(c) => {
+                    return Err(Error::generic(format!(
+                        "Invalid character '{c}' after field name"
                     )))
                 }
-            };
-            allow_digits = true;
-        }
-        Ok((name, true)) // EOF
-    }
-
-    fn parse_escaped(chars: &mut Chars<'_>) -> DeltaResult<(String, bool)> {
-        let mut name = String::new();
-        while let Some(c) = chars.next() {
-            match c {
-                '[' => match chars.next() {
-                    Some('[') => name.push('['), // escaped delimiter (keep going)
-                    _ => {
-                        return Err(Error::generic(
-                            "Unescaped '[' delimiter inside escaped field name",
-                        ))
-                    }
-                },
-                ']' => match chars.next() {
-                    Some(']') => name.push(']'), // escaped delimiter (keep going)
-                    Some('.') => return Ok((name, false)),
-                    Some(c) => {
-                        return Err(Error::generic(format!(
-                            "Invalid character '{c}' after field name"
-                        )))
-                    }
-                    None => return Ok((name, true)), // EOF
-                },
-                _ => name.push(c),
-            }
-        }
-        Err(Error::generic(
-            "Escaped field name lacks a closing ']' delimiter",
-        ))
-    }
-
-    // Ambiguous case: The empty string `""`could reasonably parse as either `ColumnName::new([""])`
-    // or `ColumnName::new([])`. However, `ColumnName::new([""]).to_string()` is `"[]"` and
-    // `ColumnName::new([]).to_string()` is `""`, so we choose the latter because it produces a
-    // lossless round trip from `ColumnName` to  `String` and back.
-    let mut chars = s.chars().peekable();
-    if chars.peek().is_none() {
-        return Ok(ColumnName::new(&[] as &[String]));
-    }
-
-    let mut path = vec![];
-    loop {
-        let (field_name, done) = if chars.next_if_eq(&'[').is_none() {
-            parse_simple(&mut chars)?
-        } else {
-            parse_escaped(&mut chars)?
-        };
-        path.push(field_name);
-        if done {
-            return Ok(ColumnName::new(path));
+                None => return Ok((name, true)), // EOF
+            },
+            _ => name.push(c),
         }
     }
+    Err(Error::generic(
+        "Escaped field name lacks a closing ']' delimiter",
+    ))
 }
 
 /// Creates a nested column name whose field names are all simple column names (containing only
@@ -496,20 +507,6 @@ mod test {
     }
 
     #[test]
-    fn test_to_string_lossy() {
-        let cases = [
-            ("", ColumnName::new(&[] as &[String])), // ambiguous case!
-            ("a.b.c", ColumnName::new(["a", "b", "c"])),
-            ("a.b_c.d", ColumnName::new(["a", "b_c", "d"])),
-            ("a.b c.d", ColumnName::new(["a", "b c", "d"])),
-            ("a.b.c.d", ColumnName::new(["a", "b.c", "d"])),
-        ];
-        for (expected_output, input) in cases {
-            assert_eq!(input.to_string_lossy(), expected_output);
-        }
-    }
-
-    #[test]
     fn test_column_name_to_string() {
         let cases = [
             ("", ColumnName::new(&[] as &[String])), // the ambiguous case!
@@ -531,7 +528,7 @@ mod test {
             ("[a[[].[b]]]", ColumnName::new(["a[", "b]"])),
         ];
         for (expected_output, input) in cases {
-            let output = FancyColumnName(input.clone()).to_string();
+            let output = input.to_string();
             assert_eq!(output, expected_output);
 
             let parsed: ColumnName = output.parse().expect(&output);
