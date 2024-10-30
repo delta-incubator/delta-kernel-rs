@@ -177,8 +177,8 @@ use crate::error::{DeltaResult, Error};
 
 /// Parses a column name from a string. Field names are separated by dots. Field names enclosed in
 /// square brackets may contain arbitrary characters, including periods and spaces. To include a
-/// literal square bracket in a field name, escape it by doubling it, e.g. `"[foo]]bar]"` would
-/// parse as `foo]bar`.
+/// literal square bracket in a field name, escape it by doubling it, e.g. `"[foo[[bar]]baz]"` would
+/// parse as a single field named `foo[bar]baz`.
 // TODO: Marked as test-only for now, as a demonstration. Should we officially support it?
 #[cfg(test)]
 impl std::str::FromStr for ColumnName {
