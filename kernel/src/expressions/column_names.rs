@@ -9,11 +9,10 @@ pub struct ColumnName {
 }
 
 impl ColumnName {
-    /// Constructs a new column name from an iterator of field names. The field names are joined
-    /// together to make a single path.
-    pub fn new<A, T>(iter: T) -> Self
+    /// Creates a new column name from input satisfying `FromIterator for ColumnName`. The provided
+    /// field names are concatenated into a single path.
+    pub fn new<A>(iter: impl IntoIterator<Item = A>) -> Self
     where
-        T: IntoIterator<Item = A>,
         Self: FromIterator<A>,
     {
         iter.into_iter().collect()
@@ -150,7 +149,9 @@ impl Display for FancyColumnName {
                 delim = Some('.');
             }
 
-            if s.is_empty() || s.contains(|c: char| !c.is_ascii_alphanumeric() && c != '_') {
+            let digit_char = |c: char| c.is_ascii_digit();
+            let illegal_char = |c: char| !c.is_ascii_alphanumeric() && c != '_';
+            if s.is_empty() || s.starts_with(digit_char) || s.contains(illegal_char) {
                 // Special situation detected. For safety, surround the field name with brackets
                 // (with proper escaping if the field name itself contains brackets).
                 f.write_char('[')?;
@@ -197,9 +198,17 @@ fn column_name_from_str(s: &str) -> DeltaResult<ColumnName> {
         let mut allow_digits = false; // first character cannot be a digit
         for c in chars {
             match c {
-                '_' | 'a'..='z' | 'A'..='Z' => name.push(c),
-                '0'..='9' if allow_digits => name.push(c),
                 '.' => return Ok((name, false)),
+                '_' | 'a'..='z' | 'A'..='Z' => name.push(c),
+                '0'..='9' => {
+                    if allow_digits {
+                        name.push(c);
+                    } else {
+                        return Err(Error::generic(format!(
+                            "Unescaped field name cannot start with a digit '{c}'"
+                        )));
+                    }
+                }
                 _ => {
                     return Err(Error::generic(format!(
                         "Invalid character '{c}' in unescaped field name"
@@ -411,7 +420,7 @@ mod test {
         assert_eq!(name, nested);
 
         // impl FromIterator<ColumnName>
-        let name: ColumnName = [nested.clone(), simple.clone()].into_iter().collect();
+        let name: ColumnName = [&nested, &simple].into_iter().cloned().collect();
         assert_eq!(name, column_name!("x.y.x"));
 
         // ColumnName::new
@@ -433,6 +442,7 @@ mod test {
             ("", Some(ColumnName::new(&[] as &[String]))), // the ambiguous case!
             (".", Some(ColumnName::new(["", ""]))),
             (" ", None),
+            ("0", None),
             (".a", Some(ColumnName::new(["", "a"]))),
             ("a.", Some(ColumnName::new(["a", ""]))),
             ("a..b", Some(ColumnName::new(["a", "", "b"]))),
@@ -442,8 +452,10 @@ mod test {
             ("[a]b", None),
             ("[a][b]", None),
             ("a", Some(ColumnName::new(["a"]))),
+            ("a0", Some(ColumnName::new(["a0"]))),
             ("[a]", Some(ColumnName::new(["a"]))),
             ("[ ]", Some(ColumnName::new([" "]))),
+            ("[0]", Some(ColumnName::new(["0"]))),
             ("[.]", Some(ColumnName::new(["."]))),
             ("[.].[.]", Some(ColumnName::new([".", "."]))),
             ("[ ].[ ]", Some(ColumnName::new([" ", " "]))),
@@ -488,8 +500,10 @@ mod test {
             ("a.[]", ColumnName::new(["a", ""])),
             ("a.[].b", ColumnName::new(["a", "", "b"])),
             ("a", ColumnName::new(["a"])),
+            ("a0", ColumnName::new(["a0"])),
             ("[a ]", ColumnName::new(["a "])),
             ("[ ]", ColumnName::new([" "])),
+            ("[0]", ColumnName::new(["0"])),
             ("[.]", ColumnName::new(["."])),
             ("[.].[.]", ColumnName::new([".", "."])),
             ("[ ].[ ]", ColumnName::new([" ", " "])),
@@ -504,6 +518,18 @@ mod test {
 
             let parsed: ColumnName = output.parse().expect(&output);
             assert_eq!(parsed, input);
+        }
+
+        // Ensure unnecessary escaping is tolerated
+        let cases = [
+            ("[a]", "a", ColumnName::new(["a"])),
+            ("[a0]", "a0", ColumnName::new(["a0"])),
+            ("[a].[b]", "a.b", ColumnName::new(["a", "b"])),
+        ];
+        for (input, expected_output, expected_parsed) in cases {
+            let parsed: ColumnName = input.parse().unwrap();
+            assert_eq!(parsed, expected_parsed);
+            assert_eq!(parsed.to_string(), expected_output);
         }
     }
 }

@@ -323,12 +323,7 @@ pub unsafe extern "C" fn visit_expression(
             Expression::Column(name) => {
                 // TODO: Support nested columns properly!
                 let name = name.to_string_lossy();
-                call!(
-                    visitor,
-                    visit_column,
-                    sibling_list_id,
-                    name.into()
-                )
+                call!(visitor, visit_column, sibling_list_id, name.into())
             }
             Expression::Struct(exprs) => {
                 visit_expression_struct_expr(visitor, exprs, sibling_list_id)

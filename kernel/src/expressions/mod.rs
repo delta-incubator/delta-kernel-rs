@@ -232,9 +232,8 @@ impl Expression {
     }
 
     /// Create a new column name expression from input satisfying `FromIterator for ColumnName`.
-    pub fn column<A, T>(field_names: T) -> Expression
+    pub fn column<A>(field_names: impl IntoIterator<Item = A>) -> Expression
     where
-        T: IntoIterator<Item = A>,
         ColumnName: FromIterator<A>,
     {
         ColumnName::new(field_names).into()
