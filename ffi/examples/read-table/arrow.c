@@ -89,24 +89,30 @@ static GArrowRecordBatch* add_partition_columns(
 
     if (error != NULL) {
       printf("Giving up on column %s\n", col);
+      g_error_free(error);
       g_object_unref(builder);
       error = NULL;
       continue;
     }
 
-    GArrowArray* ret = garrow_array_builder_finish((GArrowArrayBuilder*)builder, &error);
+    GArrowArray* partition_col = garrow_array_builder_finish((GArrowArrayBuilder*)builder, &error);
     if (report_g_error("Can't build string array for parition column", error)) {
       printf("Giving up on column %s\n", col);
+      g_error_free(error);
       g_object_unref(builder);
       error = NULL;
       continue;
     }
     g_object_unref(builder);
 
-    GArrowField* field = garrow_field_new(col, (GArrowDataType*)garrow_string_data_type_new());
+    GArrowDataType* string_data_type = (GArrowDataType*)garrow_string_data_type_new();
+    GArrowField* field = garrow_field_new(col, string_data_type);
     GArrowRecordBatch* old_batch = cur_record_batch;
-    cur_record_batch = garrow_record_batch_add_column(old_batch, pos, field, ret, &error);
+    cur_record_batch = garrow_record_batch_add_column(old_batch, pos, field, partition_col, &error);
     g_object_unref(old_batch);
+    g_object_unref(partition_col);
+    g_object_unref(string_data_type);
+    g_object_unref(field);
     if (cur_record_batch == NULL) {
       if (error != NULL) {
         printf("Could not add column at %u: %s\n", pos, error->message);
@@ -270,8 +276,12 @@ void print_arrow_context(ArrowContext* context)
           .col_idx = c,
         };
         g_list_foreach(remaining, (GFunc)extract_col, &remaining_data);
+        GArrowArray* prev_data = data;
         data = garrow_array_concatenate(data, remaining_data.list, &error);
+        g_object_unref(prev_data);
+        g_list_free_full(g_steal_pointer(&remaining_data.list), g_object_unref);
         if (report_g_error("Can't concat array data", error)) {
+          g_error_free(error);
           return;
         }
       }

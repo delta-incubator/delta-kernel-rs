@@ -196,7 +196,7 @@ PartitionList* get_partition_list(SharedGlobalScanState* state)
 
 void free_partition_list(PartitionList* list) {
   for (int i = 0; i < list->len; i++) {
-    free(list->cols+i);
+    free(list->cols[i]);
   }
   free(list->cols);
   free(list);
