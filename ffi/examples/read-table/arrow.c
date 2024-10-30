@@ -126,6 +126,7 @@ static void add_batch_to_context(
 {
   GArrowSchema* schema = get_schema(&arrow_data->schema);
   GArrowRecordBatch* record_batch = get_record_batch(&arrow_data->array, schema);
+  g_object_unref(schema);
   if (context->cur_filter != NULL) {
     GArrowRecordBatch* unfiltered = record_batch;
     record_batch = garrow_record_batch_filter(unfiltered, context->cur_filter, NULL, NULL);
@@ -193,6 +194,7 @@ static void visit_read_data(void* vcontext, ExclusiveEngineData* data)
   ArrowFFIData* arrow_data = arrow_res.ok;
   add_batch_to_context(
     context->arrow_context, arrow_data, context->partition_cols, context->partition_values);
+  free(arrow_data); // just frees the struct, the data and schema are freed/owned by add_batch_to_context
 }
 
 // We call this for each file we get called back to read in read_table.c::visit_callback
@@ -211,6 +213,7 @@ void c_read_parquet_file(
   };
   ExternResultHandleExclusiveFileReadResultIterator read_res =
     read_parquet_file(context->engine, &meta, context->read_schema);
+  free(full_path);
   if (read_res.tag != OkHandleExclusiveFileReadResultIterator) {
     printf("Couldn't read data\n");
     return;
