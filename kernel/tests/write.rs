@@ -270,6 +270,29 @@ async fn test_invalid_commit_info() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+// set the value at .-separated `path` in `values` to `new_value` at `index`
+fn set_value(
+    mut value: &mut serde_json::Value,
+    path: &str,
+    new_value: serde_json::Value,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let parts: Vec<_> = path.split('.').collect();
+
+    for name in parts.iter().take(parts.len() - 1) {
+        value = value
+            .get_mut(*name)
+            .ok_or_else(|| format!("key '{name}' not found"))?;
+    }
+
+    let last_key = parts.last().ok_or("empty path")?;
+    value
+        .as_object_mut()
+        .ok_or("expected a JSON object")?
+        .insert(last_key.to_string(), new_value);
+
+    Ok(())
+}
+
 #[tokio::test]
 async fn test_append() -> Result<(), Box<dyn std::error::Error>> {
     // setup tracing
@@ -344,32 +367,11 @@ async fn test_append() -> Result<(), Box<dyn std::error::Error>> {
         .into_iter::<serde_json::Value>()
         .try_collect()?;
 
-    // FIXME
-    *parsed_commits[0]
-        .get_mut("commitInfo")
-        .unwrap()
-        .get_mut("timestamp")
-        .unwrap() = serde_json::Value::Number(0.into());
-    *parsed_commits[1]
-        .get_mut("add")
-        .unwrap()
-        .get_mut("modificationTime")
-        .unwrap() = serde_json::Value::Number(0.into());
-    *parsed_commits[1]
-        .get_mut("add")
-        .unwrap()
-        .get_mut("path")
-        .unwrap() = serde_json::Value::String("first.parquet".to_string());
-    *parsed_commits[2]
-        .get_mut("add")
-        .unwrap()
-        .get_mut("modificationTime")
-        .unwrap() = serde_json::Value::Number(0.into());
-    *parsed_commits[2]
-        .get_mut("add")
-        .unwrap()
-        .get_mut("path")
-        .unwrap() = serde_json::Value::String("second.parquet".to_string());
+    set_value(&mut parsed_commits[0], "commitInfo.timestamp", json!(0))?;
+    set_value(&mut parsed_commits[1], "add.modificationTime", json!(0))?;
+    set_value(&mut parsed_commits[1], "add.path", json!("first.parquet"))?;
+    set_value(&mut parsed_commits[2], "add.modificationTime", json!(0))?;
+    set_value(&mut parsed_commits[2], "add.path", json!("second.parquet"))?;
 
     let expected_commit = vec![
         json!({
@@ -514,32 +516,11 @@ async fn test_append_partitioned() -> Result<(), Box<dyn std::error::Error>> {
         .into_iter::<serde_json::Value>()
         .try_collect()?;
 
-    // FIXME
-    *parsed_commits[0]
-        .get_mut("commitInfo")
-        .unwrap()
-        .get_mut("timestamp")
-        .unwrap() = serde_json::Value::Number(0.into());
-    *parsed_commits[1]
-        .get_mut("add")
-        .unwrap()
-        .get_mut("modificationTime")
-        .unwrap() = serde_json::Value::Number(0.into());
-    *parsed_commits[1]
-        .get_mut("add")
-        .unwrap()
-        .get_mut("path")
-        .unwrap() = serde_json::Value::String("first.parquet".to_string());
-    *parsed_commits[2]
-        .get_mut("add")
-        .unwrap()
-        .get_mut("modificationTime")
-        .unwrap() = serde_json::Value::Number(0.into());
-    *parsed_commits[2]
-        .get_mut("add")
-        .unwrap()
-        .get_mut("path")
-        .unwrap() = serde_json::Value::String("second.parquet".to_string());
+    set_value(&mut parsed_commits[0], "commitInfo.timestamp", json!(0))?;
+    set_value(&mut parsed_commits[1], "add.modificationTime", json!(0))?;
+    set_value(&mut parsed_commits[1], "add.path", json!("first.parquet"))?;
+    set_value(&mut parsed_commits[2], "add.modificationTime", json!(0))?;
+    set_value(&mut parsed_commits[2], "add.path", json!("second.parquet"))?;
 
     let expected_commit = vec![
         json!({
