@@ -126,12 +126,54 @@ impl PartialOrd for FileMeta {
     }
 }
 
-/// Extension trait that makes it easier to work with traits objects that implement [`Any`]. In
-/// particular, given some `trait T: Any`, it allows upcasting `T` to `Any`, which in turn allows
-/// downcasting the result to a concrete type.
+/// Extension trait that makes it easier to work with traits objects that implement [`Any`],
+/// implemented automatically for any type that satisfies `Any`, `Send`, and `Sync`. In particular,
+/// given some `trait T: Any + Send + Sync`, it allows upcasting `T` to `dyn Any + Send + Sync`,
+/// which in turn allows downcasting the result to a concrete type. For example:
 ///
-/// The trait is implemented automatically for any type that satisfies `Any`, `Send`, and
-/// `Sync`. The latter two are needed to satisfy the requirements for [`Arc::downcast`].
+/// ```
+/// # use delta_kernel::AsAny;
+/// # use std::any::Any;
+/// # use std::sync::Arc;
+/// trait Foo : AsAny {}
+/// struct Bar;
+/// impl Foo for Bar {}
+///
+/// let f: Arc<dyn Foo> = Arc::new(Bar);
+/// let a: Arc<dyn Any + Send + Sync> = f.as_any();
+/// let b: Arc<Bar> = a.downcast().unwrap();
+/// ```
+///
+/// In contrast, very similer code that relies only on `Any` would fail to compile:
+///
+/// ```fail_compile
+/// # use std::any::Any;
+/// # use std::sync::Arc;
+/// trait Foo: Any + Send + Sync {}
+///
+/// struct Bar;
+/// impl Foo for Bar {}
+///
+/// let f: Arc<dyn Foo> = Arc::new(Bar);
+/// let b: Arc<Bar> = f.downcast().unwrap(); // `Arc::downcast` method not found
+/// ```
+///
+/// As would this:
+///
+/// ```fail_compile
+/// # use std::any::Any;
+/// # use std::sync::Arc;
+/// trait Foo: Any + Send + Sync {}
+///
+/// struct Bar;
+/// impl Foo for Bar {}
+///
+/// let f: Arc<dyn Foo> = Arc::new(Bar);
+/// let a: Arc<dyn Any + Send + Sync> = f; // trait upcasting coercion is not stable rust
+/// let f: Arc<Bar> = a.downcast().unwrap();
+/// ```
+///
+/// NOTE: `AsAny` inherits the `Send + Sync` constraint from [`Arc::downcast`].
 pub trait AsAny: Any + Send + Sync {
     /// Obtains a `dyn Any` reference to the object:
     ///
