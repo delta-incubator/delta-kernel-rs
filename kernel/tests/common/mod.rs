@@ -1,5 +1,10 @@
-use crate::ArrowEngineData;
+use arrow::compute::filter_record_batch;
 use arrow::record_batch::RecordBatch;
+use arrow::util::pretty::pretty_format_batches;
+use itertools::Itertools;
+
+use crate::ArrowEngineData;
+use delta_kernel::scan::Scan;
 use delta_kernel::{DeltaResult, Engine, EngineData, Table};
 
 pub(crate) fn to_arrow(data: Box<dyn EngineData>) -> DeltaResult<RecordBatch> {
@@ -10,7 +15,6 @@ pub(crate) fn to_arrow(data: Box<dyn EngineData>) -> DeltaResult<RecordBatch> {
         .into())
 }
 
-// going to unify across read/write
 pub(crate) fn test_read(
     expected: &ArrowEngineData,
     table: &Table,
@@ -18,25 +22,10 @@ pub(crate) fn test_read(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let snapshot = table.snapshot(engine, None)?;
     let scan = snapshot.into_scan_builder().build()?;
-    let actual = scan.execute(engine)?;
-    let batches: Vec<RecordBatch> = actual
-        .into_iter()
-        .map(|res| {
-            let data = res.unwrap().raw_data.unwrap();
-            let record_batch: RecordBatch = data
-                .into_any()
-                .downcast::<ArrowEngineData>()
-                .unwrap()
-                .into();
-            record_batch
-        })
-        .collect();
+    let batches = read_scan(&scan, engine)?;
+    let formatted = pretty_format_batches(&batches).unwrap().to_string();
 
-    let formatted = arrow::util::pretty::pretty_format_batches(&batches)
-        .unwrap()
-        .to_string();
-
-    let expected = arrow::util::pretty::pretty_format_batches(&[expected.record_batch().clone()])
+    let expected = pretty_format_batches(&[expected.record_batch().clone()])
         .unwrap()
         .to_string();
 
@@ -45,4 +34,21 @@ pub(crate) fn test_read(
     assert_eq!(formatted, expected);
 
     Ok(())
+}
+
+pub(crate) fn read_scan(scan: &Scan, engine: &dyn Engine) -> DeltaResult<Vec<RecordBatch>> {
+    let scan_results = scan.execute(engine)?;
+    scan_results
+        .map(|scan_result| -> DeltaResult<_> {
+            let scan_result = scan_result?;
+            let mask = scan_result.full_mask();
+            let data = scan_result.raw_data?;
+            let record_batch = to_arrow(data)?;
+            if let Some(mask) = mask {
+                Ok(filter_record_batch(&record_batch, &mask.into())?)
+            } else {
+                Ok(record_batch)
+            }
+        })
+        .try_collect()
 }
