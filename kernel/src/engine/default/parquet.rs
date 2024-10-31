@@ -37,22 +37,22 @@ pub struct DefaultParquetHandler<E: TaskExecutor> {
 /// Metadata of a parquet file, currently just includes the file metadata but will expand to
 /// include file statistics and other metadata in the future.
 #[derive(Debug)]
-pub struct ParquetMetadata {
+pub struct ParquetWriteMetadata {
     file_meta: FileMeta,
 }
 
-impl ParquetMetadata {
+impl ParquetWriteMetadata {
     pub fn new(file_meta: FileMeta) -> Self {
         Self { file_meta }
     }
 
     // convert ParquetMetadata into a record batch which matches the 'write_metadata' schema
-    fn create_write_metadata(
+    fn as_record_batch(
         &self,
         partition_values: HashMap<String, String>,
         data_change: bool,
     ) -> DeltaResult<Box<dyn EngineData>> {
-        let ParquetMetadata { file_meta } = self;
+        let ParquetWriteMetadata { file_meta } = self;
         let FileMeta {
             location,
             last_modified,
@@ -120,7 +120,7 @@ impl<E: TaskExecutor> DefaultParquetHandler<E> {
         &self,
         path: &url::Url,
         data: Box<dyn EngineData>,
-    ) -> DeltaResult<ParquetMetadata> {
+    ) -> DeltaResult<ParquetWriteMetadata> {
         let batch: Box<_> = ArrowEngineData::try_from_engine_data(data)?;
         let record_batch = batch.record_batch();
 
@@ -148,7 +148,7 @@ impl<E: TaskExecutor> DefaultParquetHandler<E> {
         }
 
         let file_meta = FileMeta::new(path, modification_time, size);
-        Ok(ParquetMetadata::new(file_meta))
+        Ok(ParquetWriteMetadata::new(file_meta))
     }
 
     /// Write `data` to `path`/<uuid>.parquet as parquet using ArrowWriter and return the parquet
@@ -164,8 +164,7 @@ impl<E: TaskExecutor> DefaultParquetHandler<E> {
         data_change: bool,
     ) -> DeltaResult<Box<dyn EngineData>> {
         let parquet_metadata = self.write_parquet(path, data).await?;
-        let write_metadata =
-            parquet_metadata.create_write_metadata(partition_values, data_change)?;
+        let write_metadata = parquet_metadata.as_record_batch(partition_values, data_change)?;
         Ok(write_metadata)
     }
 }

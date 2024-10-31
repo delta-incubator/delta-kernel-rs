@@ -92,13 +92,13 @@ impl Transaction {
             .commit_info
             .as_ref()
             .ok_or_else(|| Error::MissingCommitInfo)?;
-        let actions = Box::new(iter::once(generate_commit_info(
+        let commit_info = generate_commit_info(
             engine,
             self.operation.as_deref(),
             engine_commit_info.as_ref(),
-        )));
+        );
         let adds = generate_adds(engine, self.write_metadata.iter().map(|a| a.as_ref()));
-        let actions = chain(actions, adds);
+        let actions = chain(iter::once(commit_info), adds);
 
         // step two: set new commit version (current_version + 1) and path to write
         let commit_version = self.read_snapshot.version() + 1;
@@ -153,7 +153,8 @@ impl Transaction {
             {
                 None
             } else {
-                Some(Expression::Column(ColumnName::new(iter::once(f.name()))))
+                let col_name = ColumnName::new([f.name()]);
+                Some(col_name.into())
             }
         }))
     }
@@ -163,7 +164,7 @@ impl Transaction {
     // Note: after we introduce metadata updates (modify table schema, etc.), we need to make sure
     // that engines cannot call this method after a metadata change, since the write context could
     // have invalid metadata.
-    pub fn write_context(&self) -> WriteContext {
+    pub fn get_write_context(&self) -> WriteContext {
         let target_dir = self.read_snapshot.table_root();
         let snapshot_schema = self.read_snapshot.schema();
         let partition_cols = self.read_snapshot.metadata().partition_columns.clone();
@@ -179,9 +180,9 @@ impl Transaction {
     /// Add write metadata about files to include in the transaction. This API can be called
     /// multiple times to add multiple batches.
     ///
-    /// The expected schema for the write metadata is given by [`get_write_metadata_schema`].
-    pub fn add_write_metadata(&mut self, data: Box<dyn EngineData>) {
-        self.write_metadata.push(data);
+    /// The expected schema for `write_metadata` is given by [`get_write_metadata_schema`].
+    pub fn add_write_metadata(&mut self, write_metadata: Box<dyn EngineData>) {
+        self.write_metadata.push(write_metadata);
     }
 }
 
@@ -190,16 +191,16 @@ impl Transaction {
 fn generate_adds<'a>(
     engine: &dyn Engine,
     write_metadata: impl Iterator<Item = &'a dyn EngineData> + Send + 'a,
-) -> Box<dyn Iterator<Item = DeltaResult<Box<dyn EngineData>>> + Send + 'a> {
+) -> impl Iterator<Item = DeltaResult<Box<dyn EngineData>>> + Send + 'a {
     let expression_handler = engine.get_expression_handler();
     let write_metadata_schema = get_write_metadata_schema();
     let log_schema = get_log_add_schema();
 
-    Box::new(write_metadata.map(move |write_metadata_batch| {
+    write_metadata.map(move |write_metadata_batch| {
         let adds_expr = Expression::struct_from([Expression::struct_from(
             write_metadata_schema
                 .fields()
-                .map(|f| Expression::Column(ColumnName::new(iter::once(f.name())))),
+                .map(|f| ColumnName::new([f.name()]).into()),
         )]);
         let adds_evaluator = expression_handler.get_evaluator(
             write_metadata_schema.clone(),
@@ -207,7 +208,7 @@ fn generate_adds<'a>(
             log_schema.clone().into(),
         );
         adds_evaluator.evaluate(write_metadata_batch)
-    }))
+    })
 }
 
 /// WriteContext is data derived from a [`Transaction`] that can be provided to writers in order to

@@ -5,6 +5,7 @@ use arrow::record_batch::RecordBatch;
 use arrow_schema::Schema as ArrowSchema;
 use arrow_schema::{DataType as ArrowDataType, Field};
 use itertools::Itertools;
+use object_store::local::LocalFileSystem;
 use object_store::memory::InMemory;
 use object_store::path::Path;
 use object_store::ObjectStore;
@@ -17,33 +18,36 @@ use delta_kernel::engine::default::executor::tokio::TokioBackgroundExecutor;
 use delta_kernel::engine::default::DefaultEngine;
 use delta_kernel::schema::{DataType, SchemaRef, StructField, StructType};
 use delta_kernel::Error as KernelError;
-use delta_kernel::{DeltaResult, Engine, Table};
+use delta_kernel::{DeltaResult, Table};
 
-// setup default engine with in-memory object store.
+mod common;
+use common::test_read;
+
+// setup default engine with in-memory (=true) or local fs (=false) object store.
 fn setup(
     table_name: &str,
+    in_memory: bool,
 ) -> (
     Arc<dyn ObjectStore>,
     DefaultEngine<TokioBackgroundExecutor>,
     Url,
 ) {
-    let table_root_path = Path::from(format!("/{table_name}"));
-    let url = Url::parse(&format!("memory:///{}/", table_root_path)).unwrap();
-    let storage = Arc::new(InMemory::new());
-    // uncomment for persisting to local filesystem
-    // use object_store::local::LocalFileSystem;
-    // let table_root_path = Path::from(format!("users/zach.schuermann/Desktop/kernel_tests/{table_name}"));
-    // let url = Url::parse(&format!("file:///users/zach.schuermann/Desktop/kernel_tests/{}/", table_root_path)).unwrap();
-    // let storage = Arc::new(LocalFileSystem::new());
-    (
-        storage.clone(),
-        DefaultEngine::new(
-            storage,
-            table_root_path,
-            Arc::new(TokioBackgroundExecutor::new()),
-        ),
-        url,
-    )
+    let (storage, base_path, base_url): (Arc<dyn ObjectStore>, &str, &str) = if in_memory {
+        (Arc::new(InMemory::new()), "/", "memory:///")
+    } else {
+        (
+            Arc::new(LocalFileSystem::new()),
+            "./kernel_write_tests/",
+            "file://",
+        )
+    };
+
+    let table_root_path = Path::from(format!("{base_path}{table_name}"));
+    let url = Url::parse(&format!("{base_url}{table_root_path}/")).unwrap();
+    let executor = Arc::new(TokioBackgroundExecutor::new());
+    let engine = DefaultEngine::new(Arc::clone(&storage), table_root_path, executor);
+
+    (storage, engine, url)
 }
 
 // we provide this table creation function since we only do appends to existing tables for now.
@@ -139,7 +143,7 @@ async fn test_commit_info() -> Result<(), Box<dyn std::error::Error>> {
     // setup tracing
     let _ = tracing_subscriber::fmt::try_init();
     // setup in-memory object store and default engine
-    let (store, engine, table_location) = setup("test_table");
+    let (store, engine, table_location) = setup("test_table", true);
 
     // create a simple table: one int column named 'number'
     let schema = Arc::new(StructType::new(vec![StructField::new(
@@ -193,7 +197,7 @@ async fn test_empty_commit() -> Result<(), Box<dyn std::error::Error>> {
     // setup tracing
     let _ = tracing_subscriber::fmt::try_init();
     // setup in-memory object store and default engine
-    let (store, engine, table_location) = setup("test_table");
+    let (store, engine, table_location) = setup("test_table", true);
 
     // create a simple table: one int column named 'number'
     let schema = Arc::new(StructType::new(vec![StructField::new(
@@ -216,7 +220,7 @@ async fn test_invalid_commit_info() -> Result<(), Box<dyn std::error::Error>> {
     // setup tracing
     let _ = tracing_subscriber::fmt::try_init();
     // setup in-memory object store and default engine
-    let (store, engine, table_location) = setup("test_table");
+    let (store, engine, table_location) = setup("test_table", true);
 
     // create a simple table: one int column named 'number'
     let schema = Arc::new(StructType::new(vec![StructField::new(
@@ -266,48 +270,12 @@ async fn test_invalid_commit_info() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn test_read(
-    expected: &ArrowEngineData,
-    table: &Table,
-    engine: &impl Engine,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let snapshot = table.snapshot(engine, None)?;
-    let scan = snapshot.into_scan_builder().build()?;
-    let actual = scan.execute(engine)?;
-    let batches: Vec<RecordBatch> = actual
-        .into_iter()
-        .map(|res| {
-            let data = res.unwrap().raw_data.unwrap();
-            let record_batch: RecordBatch = data
-                .into_any()
-                .downcast::<ArrowEngineData>()
-                .unwrap()
-                .into();
-            record_batch
-        })
-        .collect();
-
-    let formatted = arrow::util::pretty::pretty_format_batches(&batches)
-        .unwrap()
-        .to_string();
-
-    let expected = arrow::util::pretty::pretty_format_batches(&[expected.record_batch().clone()])
-        .unwrap()
-        .to_string();
-
-    println!("actual:\n{formatted}");
-    println!("expected:\n{expected}");
-    assert_eq!(formatted, expected);
-
-    Ok(())
-}
-
 #[tokio::test]
 async fn test_append() -> Result<(), Box<dyn std::error::Error>> {
     // setup tracing
     let _ = tracing_subscriber::fmt::try_init();
     // setup in-memory object store and default engine
-    let (store, engine, table_location) = setup("test_table");
+    let (store, engine, table_location) = setup("test_table", true);
 
     // create a simple table: one int column named 'number'
     let schema = Arc::new(StructType::new(vec![StructField::new(
@@ -334,7 +302,7 @@ async fn test_append() -> Result<(), Box<dyn std::error::Error>> {
 
     // write data out by spawning async tasks to simulate executors
     let engine = Arc::new(engine);
-    let write_context = Arc::new(txn.write_context());
+    let write_context = Arc::new(txn.get_write_context());
     let tasks = append_data.into_iter().map(|data| {
         tokio::task::spawn({
             let engine = Arc::clone(&engine);
@@ -353,25 +321,6 @@ async fn test_append() -> Result<(), Box<dyn std::error::Error>> {
             }
         })
     });
-
-    // FIXME this is collecting to vec
-    //let write_metadata: Vec<RecordBatch> = futures::future::join_all(tasks)
-    //    .await
-    //    .into_iter()
-    //    .map(|data| {
-    //        let data = data.unwrap();
-    //        data.into_any()
-    //            .downcast::<ArrowEngineData>()
-    //            .unwrap()
-    //            .into()
-    //    })
-    //    .collect();
-
-    //txn.add_write_metadata(Box::new(
-    //    write_metadata
-    //        .into_iter()
-    //        .map(|data| Box::new(ArrowEngineData::new(data))),
-    //));
 
     let write_metadata = futures::future::join_all(tasks)
         .await
@@ -477,7 +426,7 @@ async fn test_append_partitioned() -> Result<(), Box<dyn std::error::Error>> {
     // setup tracing
     let _ = tracing_subscriber::fmt::try_init();
     // setup in-memory object store and default engine
-    let (store, engine, table_location) = setup("test_table");
+    let (store, engine, table_location) = setup("test_table", true);
     let partition_col = "partition";
 
     // create a simple partitioned table: one int column named 'number', partitioned by string
@@ -517,7 +466,7 @@ async fn test_append_partitioned() -> Result<(), Box<dyn std::error::Error>> {
 
     // write data out by spawning async tasks to simulate executors
     let engine = Arc::new(engine);
-    let write_context = Arc::new(txn.write_context());
+    let write_context = Arc::new(txn.get_write_context());
     let tasks = append_data
         .into_iter()
         .zip(partition_vals)
