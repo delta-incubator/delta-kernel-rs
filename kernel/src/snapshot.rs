@@ -12,10 +12,11 @@ use url::Url;
 
 use crate::actions::{get_log_schema, Metadata, Protocol, METADATA_NAME, PROTOCOL_NAME};
 use crate::expressions::column_expr;
-use crate::features::{ColumnMappingMode, COLUMN_MAPPING_MODE_KEY};
 use crate::path::ParsedLogPath;
 use crate::scan::ScanBuilder;
 use crate::schema::{Schema, SchemaRef};
+use crate::table_features::ColumnMappingMode;
+use crate::table_properties::TableProperties;
 use crate::utils::require;
 use crate::{DeltaResult, Engine, Error, FileMeta, FileSystemClient, Version};
 use crate::{EngineData, Expression, ExpressionRef};
@@ -134,7 +135,7 @@ pub struct Snapshot {
     metadata: Metadata,
     protocol: Protocol,
     schema: Schema,
-    pub(crate) column_mapping_mode: ColumnMappingMode,
+    table_properties: TableProperties,
 }
 
 impl Drop for Snapshot {
@@ -230,10 +231,12 @@ impl Snapshot {
             .read_metadata(engine)?
             .ok_or(Error::MissingMetadata)?;
         let schema = metadata.schema()?;
-        let column_mapping_mode = match metadata.configuration.get(COLUMN_MAPPING_MODE_KEY) {
-            Some(mode) if protocol.min_reader_version >= 2 => mode.as_str().try_into(),
-            _ => Ok(ColumnMappingMode::None),
-        }?;
+        // FIXME
+        // let column_mapping_mode = match metadata.configuration.get(COLUMN_MAPPING_MODE_KEY) {
+        //     Some(mode) if protocol.min_reader_version >= 2 => mode.as_str().try_into(),
+        //     _ => Ok(ColumnMappingMode::None),
+        // }?;
+        let table_properties = metadata.get_table_properties()?;
         Ok(Self {
             table_root: location,
             log_segment,
@@ -241,7 +244,7 @@ impl Snapshot {
             metadata,
             protocol,
             schema,
-            column_mapping_mode,
+            table_properties,
         })
     }
 
@@ -278,8 +281,8 @@ impl Snapshot {
     /// Get the [column mapping
     /// mode](https://github.com/delta-io/delta/blob/master/PROTOCOL.md#column-mapping) at this
     /// `Snapshot`s version.
-    pub fn column_mapping_mode(&self) -> ColumnMappingMode {
-        self.column_mapping_mode
+    pub fn table_properties(&self) -> &TableProperties {
+        &self.table_properties
     }
 
     /// Create a [`ScanBuilder`] for an `Arc<Snapshot>`.

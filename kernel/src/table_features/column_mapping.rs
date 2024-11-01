@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::{DeltaResult, Error};
 
 /// Modes of column mapping a table can be in
-#[derive(Serialize, Deserialize, Debug, Copy, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum ColumnMappingMode {
     /// No column mapping is applied
@@ -16,9 +16,6 @@ pub enum ColumnMappingMode {
     /// Columns are mapped to a physical name
     Name,
 }
-
-// key to look in metadata.configuration for to get column mapping mode
-pub(crate) const COLUMN_MAPPING_MODE_KEY: &str = "delta.columnMapping.mode";
 
 impl TryFrom<&str> for ColumnMappingMode {
     type Error = Error;

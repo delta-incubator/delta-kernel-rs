@@ -9,7 +9,8 @@ use visitors::{AddVisitor, MetadataVisitor, ProtocolVisitor};
 
 use self::deletion_vector::DeletionVectorDescriptor;
 use crate::actions::schemas::GetStructField;
-use crate::features::{ReaderFeatures, WriterFeatures};
+use crate::table_properties::TableProperties;
+use crate::table_features::{ReaderFeatures, WriterFeatures};
 use crate::schema::{SchemaRef, StructType};
 use crate::{DeltaResult, EngineData};
 
@@ -99,7 +100,7 @@ pub struct Metadata {
     pub partition_columns: Vec<String>,
     /// The time when this metadata action is created, in milliseconds since the Unix epoch
     pub created_time: Option<i64>,
-    /// Configuration options for the metadata action
+    /// Configuration options for the metadata action. These are parsed into `TableProperties`.
     pub configuration: HashMap<String, String>,
 }
 
@@ -112,6 +113,10 @@ impl Metadata {
 
     pub fn schema(&self) -> DeltaResult<StructType> {
         Ok(serde_json::from_str(&self.schema_string)?)
+    }
+
+    pub fn get_table_properties(&self) -> DeltaResult<TableProperties> {
+        todo!()
     }
 }
 
