@@ -172,6 +172,16 @@ impl<'a> LogSegmentBuilder<'a> {
             _ => Self::list_log_files(fs_client.as_ref(), &log_url)?,
         };
 
+        // remove all files above requested version
+        if let Some(end_version) = end_version {
+            commit_files.retain(|log_path| log_path.version <= end_version);
+        }
+
+        // only keep commit files above the checkpoint we found
+        if let Some(checkpoint_file) = checkpoint_files.first() {
+            commit_files.retain(|log_path| checkpoint_file.version < log_path.version);
+        }
+
         // get the effective version from chosen files
         let version_eff = commit_files
             .first()
@@ -179,22 +189,11 @@ impl<'a> LogSegmentBuilder<'a> {
             .ok_or(Error::MissingVersion)? // TODO: A more descriptive error
             .version;
 
-        // remove all files above requested version
         if let Some(end_version) = end_version {
             require!(
                 version_eff == end_version,
                 Error::MissingVersion // TODO more descriptive error
             );
-            commit_files.retain(|log_path| log_path.version <= end_version);
-        }
-        if let Some(start_version) = start_version {
-            commit_files.retain(|log_path| log_path.version >= start_version);
-        }
-        // only keep commit files above the checkpoint we found
-        if no_checkpoint {
-            commit_files.clear();
-        } else if let Some(checkpoint_file) = checkpoint_files.first() {
-            commit_files.retain(|log_path| checkpoint_file.version < log_path.version);
         }
 
         Ok(LogSegment {
@@ -318,11 +317,23 @@ impl<'a> LogSegmentBuilder<'a> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::{path::PathBuf, sync::Arc};
 
     use itertools::Itertools;
+    use object_store::{memory::InMemory, path::Path, ObjectStore};
+    use url::Url;
 
-    use crate::{engine::sync::SyncEngine, Table};
+    use crate::{
+        engine::{
+            default::{
+                executor::tokio::TokioBackgroundExecutor, filesystem::ObjectStoreFileSystemClient,
+            },
+            sync::SyncEngine,
+        },
+        log_segment::LogSegmentBuilder,
+        snapshot::CheckpointMetadata,
+        Table,
+    };
 
     // NOTE: In addition to testing the meta-predicate for metadata replay, this test also verifies
     // that the parquet reader properly infers nullcount = rowcount for missing columns. The two
@@ -365,5 +376,73 @@ mod tests {
         // read parts 1 and 5 (4 in all instead of 2) because row group skipping is disabled for
         // missing columns, but can still skip part 3 because has valid nullcount stats for P&M.
         assert_eq!(data.len(), 4);
+    }
+
+    #[test]
+    fn test_read_log_with_out_of_date_last_checkpoint() {
+        let store = Arc::new(InMemory::new());
+
+        fn get_path(index: usize, suffix: &str) -> Path {
+            let path = format!("_delta_log/{index:020}.{suffix}");
+            Path::from(path.as_str())
+        }
+        let data = bytes::Bytes::from("kernel-data");
+
+        let checkpoint_metadata = CheckpointMetadata {
+            version: 3,
+            size: 10,
+            parts: None,
+            size_in_bytes: None,
+            num_of_add_files: None,
+            checkpoint_schema: None,
+            checksum: None,
+        };
+
+        // add log files to store
+        tokio::runtime::Runtime::new()
+            .expect("create tokio runtime")
+            .block_on(async {
+                for path in [
+                    get_path(0, "json"),
+                    get_path(1, "checkpoint.parquet"),
+                    get_path(2, "json"),
+                    get_path(3, "checkpoint.parquet"),
+                    get_path(4, "json"),
+                    get_path(5, "checkpoint.parquet"),
+                    get_path(6, "json"),
+                    get_path(7, "json"),
+                ] {
+                    store
+                        .put(&path, data.clone().into())
+                        .await
+                        .expect("put log file in store");
+                }
+                let checkpoint_str =
+                    serde_json::to_string(&checkpoint_metadata).expect("Serialize checkpoint");
+                store
+                    .put(
+                        &Path::from("_delta_log/_last_checkpoint"),
+                        checkpoint_str.into(),
+                    )
+                    .await
+                    .expect("Write _last_checkpoint");
+            });
+
+        let client = ObjectStoreFileSystemClient::new(
+            store,
+            false, // don't have ordered listing
+            Path::from("/"),
+            Arc::new(TokioBackgroundExecutor::new()),
+        );
+
+        let url = Url::parse("memory:///_delta_log/").expect("valid url");
+        let (commit_files, checkpoint_files) =
+            LogSegmentBuilder::list_log_files_with_checkpoint(&checkpoint_metadata, &client, &url)
+                .unwrap();
+        assert_eq!(checkpoint_files.len(), 1);
+        assert_eq!(commit_files.len(), 2);
+        assert_eq!(checkpoint_files[0].version, 5);
+        assert_eq!(commit_files[0].version, 7);
+        assert_eq!(commit_files[1].version, 6);
     }
 }

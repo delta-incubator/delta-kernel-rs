@@ -211,6 +211,7 @@ mod tests {
     use crate::engine::default::executor::tokio::TokioBackgroundExecutor;
     use crate::engine::default::filesystem::ObjectStoreFileSystemClient;
     use crate::engine::sync::SyncEngine;
+    use crate::path::ParsedLogPath;
     use crate::schema::StructType;
 
     #[test]
@@ -275,73 +276,6 @@ mod tests {
         );
         let cp = read_last_checkpoint(&client, &url).unwrap();
         assert!(cp.is_none())
-    }
-
-    #[test]
-    fn test_read_log_with_out_of_date_last_checkpoint() {
-        let store = Arc::new(InMemory::new());
-
-        fn get_path(index: usize, suffix: &str) -> Path {
-            let path = format!("_delta_log/{index:020}.{suffix}");
-            Path::from(path.as_str())
-        }
-        let data = bytes::Bytes::from("kernel-data");
-
-        let checkpoint_metadata = CheckpointMetadata {
-            version: 3,
-            size: 10,
-            parts: None,
-            size_in_bytes: None,
-            num_of_add_files: None,
-            checkpoint_schema: None,
-            checksum: None,
-        };
-
-        // add log files to store
-        tokio::runtime::Runtime::new()
-            .expect("create tokio runtime")
-            .block_on(async {
-                for path in [
-                    get_path(0, "json"),
-                    get_path(1, "checkpoint.parquet"),
-                    get_path(2, "json"),
-                    get_path(3, "checkpoint.parquet"),
-                    get_path(4, "json"),
-                    get_path(5, "checkpoint.parquet"),
-                    get_path(6, "json"),
-                    get_path(7, "json"),
-                ] {
-                    store
-                        .put(&path, data.clone().into())
-                        .await
-                        .expect("put log file in store");
-                }
-                let checkpoint_str =
-                    serde_json::to_string(&checkpoint_metadata).expect("Serialize checkpoint");
-                store
-                    .put(
-                        &Path::from("_delta_log/_last_checkpoint"),
-                        checkpoint_str.into(),
-                    )
-                    .await
-                    .expect("Write _last_checkpoint");
-            });
-
-        let client = ObjectStoreFileSystemClient::new(
-            store,
-            false, // don't have ordered listing
-            Path::from("/"),
-            Arc::new(TokioBackgroundExecutor::new()),
-        );
-
-        let url = Url::parse("memory:///_delta_log/").expect("valid url");
-        let (commit_files, checkpoint_files) =
-            list_log_files_with_checkpoint(&checkpoint_metadata, &client, &url).unwrap();
-        assert_eq!(checkpoint_files.len(), 1);
-        assert_eq!(commit_files.len(), 2);
-        assert_eq!(checkpoint_files[0].version, 5);
-        assert_eq!(commit_files[0].version, 7);
-        assert_eq!(commit_files[1].version, 6);
     }
 
     fn valid_last_checkpoint() -> Vec<u8> {
