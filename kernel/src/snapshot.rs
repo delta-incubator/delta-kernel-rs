@@ -10,7 +10,7 @@ use url::Url;
 use crate::actions::{Metadata, Protocol};
 use crate::features::{ColumnMappingMode, COLUMN_MAPPING_MODE_KEY};
 use crate::log_segment::{LogSegment, LogSegmentBuilder};
-use crate::scan::ScanBuilder;
+use crate::scan::{ScanBuilder, Scannable};
 use crate::schema::Schema;
 use crate::{DeltaResult, Engine, Error, FileSystemClient, Version};
 
@@ -135,12 +135,12 @@ impl Snapshot {
 
     /// Create a [`ScanBuilder`] for an `Arc<Snapshot>`.
     pub fn scan_builder(self: Arc<Self>) -> ScanBuilder {
-        ScanBuilder::new(self)
+        ScanBuilder::new(self as Arc<dyn Scannable>)
     }
 
     /// Consume this `Snapshot` to create a [`ScanBuilder`]
     pub fn into_scan_builder(self) -> ScanBuilder {
-        ScanBuilder::new(self)
+        ScanBuilder::new(Arc::new(self) as Arc<dyn Scannable>)
     }
 }
 

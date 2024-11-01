@@ -1,22 +1,27 @@
 //! In-memory representation of a change data feed table.
 
+use std::sync::Arc;
+
 use url::Url;
 
 use crate::{
+    features::ColumnMappingMode,
     log_segment::{LogSegment, LogSegmentBuilder},
     path::AsUrl,
+    scan::{ScanBuilder, Scannable},
     schema::Schema,
     snapshot::Snapshot,
     DeltaResult, Engine, Error, Version,
 };
 
-static CDF_ENABLE_FLAG: &'static str = "delta.enableChangeDataFeed";
+static CDF_ENABLE_FLAG: &str = "delta.enableChangeDataFeed";
 
 #[derive(Debug)]
 pub struct TableChanges {
     snapshot: Snapshot,
     cdf_range: LogSegment,
     schema: Schema,
+    column_mapping_mode: ColumnMappingMode,
 }
 
 impl TableChanges {
@@ -59,6 +64,10 @@ impl TableChanges {
             schema: schema.clone(),
             snapshot: start_snapshot,
             cdf_range: log_segment,
+            column_mapping_mode: end_snapshot.column_mapping_mode,
         })
+    }
+    pub fn into_scan_builder(self) -> ScanBuilder {
+        ScanBuilder::new(Arc::new(self) as Arc<dyn Scannable>)
     }
 }
