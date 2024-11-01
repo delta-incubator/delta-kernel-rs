@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use arrow::array::{Int32Array, StringArray};
@@ -327,31 +328,24 @@ async fn test_append() -> Result<(), Box<dyn std::error::Error>> {
     let engine = Arc::new(engine);
     let write_context = Arc::new(txn.get_write_context());
     let tasks = append_data.into_iter().map(|data| {
-        tokio::task::spawn({
-            let engine = Arc::clone(&engine);
-            let write_context = Arc::clone(&write_context);
-            async move {
-                engine
-                    .get_parquet_handler()
-                    .write_parquet_file(
-                        write_context.target_dir(),
-                        data.expect("FIXME"),
-                        std::collections::HashMap::new(),
-                        true,
-                    )
-                    .await
-                    .expect("FIXME")
-            }
+        // arc clones
+        let engine = engine.clone();
+        let write_context = write_context.clone();
+        tokio::task::spawn(async move {
+            engine
+                .write_parquet(
+                    data.as_ref().unwrap(),
+                    write_context.as_ref(),
+                    HashMap::new(),
+                    true,
+                )
+                .await
         })
     });
 
-    let write_metadata = futures::future::join_all(tasks)
-        .await
-        .into_iter()
-        .map(|data| data.unwrap());
-
+    let write_metadata = futures::future::join_all(tasks).await.into_iter().flatten();
     for meta in write_metadata {
-        txn.add_write_metadata(meta);
+        txn.add_write_metadata(meta?);
     }
 
     // commit!
@@ -473,34 +467,24 @@ async fn test_append_partitioned() -> Result<(), Box<dyn std::error::Error>> {
         .into_iter()
         .zip(partition_vals)
         .map(|(data, partition_val)| {
-            tokio::task::spawn({
-                let engine = Arc::clone(&engine);
-                let write_context = Arc::clone(&write_context);
-                async move {
-                    engine
-                        .get_parquet_handler()
-                        .write_parquet_file(
-                            write_context.target_dir(),
-                            data.expect("FIXME"),
-                            std::collections::HashMap::from([(
-                                partition_col.to_string(),
-                                partition_val.to_string(),
-                            )]),
-                            true,
-                        )
-                        .await
-                        .expect("FIXME")
-                }
+            // arc clones
+            let engine = engine.clone();
+            let write_context = write_context.clone();
+            tokio::task::spawn(async move {
+                engine
+                    .write_parquet(
+                        data.as_ref().unwrap(),
+                        write_context.as_ref(),
+                        HashMap::from([(partition_col.to_string(), partition_val.to_string())]),
+                        true,
+                    )
+                    .await
             })
         });
 
-    let write_metadata = futures::future::join_all(tasks)
-        .await
-        .into_iter()
-        .map(|data| data.unwrap());
-
+    let write_metadata = futures::future::join_all(tasks).await.into_iter().flatten();
     for meta in write_metadata {
-        txn.add_write_metadata(meta);
+        txn.add_write_metadata(meta?);
     }
 
     // commit!
@@ -574,5 +558,68 @@ async fn test_append_partitioned() -> Result<(), Box<dyn std::error::Error>> {
         &table,
         engine.as_ref(),
     )?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_append_invalid_schema() -> Result<(), Box<dyn std::error::Error>> {
+    // setup tracing
+    let _ = tracing_subscriber::fmt::try_init();
+    // setup in-memory object store and default engine
+    let (store, engine, table_location) = setup("test_table", true);
+
+    // create a simple table: one int column named 'number'
+    let table_schema = Arc::new(StructType::new(vec![StructField::new(
+        "number",
+        DataType::INTEGER,
+        true,
+    )]));
+    // incompatible data schema: one string column named 'string'
+    let data_schema = Arc::new(StructType::new(vec![StructField::new(
+        "string",
+        DataType::STRING,
+        true,
+    )]));
+    let table = create_table(store.clone(), table_location, table_schema.clone(), &[]).await?;
+
+    let commit_info = new_commit_info()?;
+
+    let txn = table
+        .new_transaction(&engine)?
+        .with_commit_info(commit_info);
+
+    // create two new arrow record batches to append
+    let append_data = [["a", "b"], ["c", "d"]].map(|data| -> DeltaResult<_> {
+        let data = RecordBatch::try_new(
+            Arc::new(data_schema.as_ref().try_into()?),
+            vec![Arc::new(arrow::array::StringArray::from(data.to_vec()))],
+        )?;
+        Ok(Box::new(ArrowEngineData::new(data)))
+    });
+
+    // write data out by spawning async tasks to simulate executors
+    let engine = Arc::new(engine);
+    let write_context = Arc::new(txn.get_write_context());
+    let tasks = append_data.into_iter().map(|data| {
+        // arc clones
+        let engine = engine.clone();
+        let write_context = write_context.clone();
+        tokio::task::spawn(async move {
+            engine
+                .write_parquet(
+                    data.as_ref().unwrap(),
+                    write_context.as_ref(),
+                    HashMap::new(),
+                    true,
+                )
+                .await
+        })
+    });
+
+    let mut write_metadata = futures::future::join_all(tasks).await.into_iter().flatten();
+    assert!(write_metadata.all(|res| matches!(
+        res,
+        Err(KernelError::Arrow(arrow_schema::ArrowError::SchemaError(_)))
+    )));
     Ok(())
 }

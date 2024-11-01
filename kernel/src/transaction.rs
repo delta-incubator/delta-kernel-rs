@@ -167,12 +167,10 @@ impl Transaction {
     pub fn get_write_context(&self) -> WriteContext {
         let target_dir = self.read_snapshot.table_root();
         let snapshot_schema = self.read_snapshot.schema();
-        let partition_cols = self.read_snapshot.metadata().partition_columns.clone();
         let logical_to_physical = self.generate_logical_to_physical();
         WriteContext::new(
             target_dir.clone(),
             Arc::new(snapshot_schema.clone()),
-            partition_cols,
             logical_to_physical,
         )
     }
@@ -218,7 +216,6 @@ fn generate_adds<'a>(
 pub struct WriteContext {
     target_dir: Url,
     schema: SchemaRef,
-    partition_cols: Vec<String>,
     logical_to_physical: Expression,
 }
 
@@ -226,13 +223,11 @@ impl WriteContext {
     fn new(
         target_dir: Url,
         schema: SchemaRef,
-        partition_cols: Vec<String>,
         logical_to_physical: Expression,
     ) -> Self {
         WriteContext {
             target_dir,
             schema,
-            partition_cols,
             logical_to_physical,
         }
     }
@@ -243,10 +238,6 @@ impl WriteContext {
 
     pub fn schema(&self) -> &SchemaRef {
         &self.schema
-    }
-
-    pub fn partition_cols(&self) -> &[String] {
-        &self.partition_cols
     }
 
     pub fn logical_to_physical(&self) -> &Expression {

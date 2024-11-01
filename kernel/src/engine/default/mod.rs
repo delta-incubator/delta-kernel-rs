@@ -7,6 +7,7 @@
 //! the [executor] module.
 
 use std::sync::Arc;
+use std::collections::HashMap;
 
 use self::storage::parse_url_opts;
 use object_store::{path::Path, DynObjectStore};
@@ -16,9 +17,13 @@ use self::executor::TaskExecutor;
 use self::filesystem::ObjectStoreFileSystemClient;
 use self::json::DefaultJsonHandler;
 use self::parquet::DefaultParquetHandler;
+use super::arrow_data::ArrowEngineData;
 use super::arrow_expression::ArrowExpressionHandler;
+use crate::schema::Schema;
+use crate::transaction::WriteContext;
 use crate::{
-    DeltaResult, Engine, ExpressionHandler, FileSystemClient, JsonHandler, ParquetHandler,
+    DeltaResult, Engine, EngineData, ExpressionHandler, FileSystemClient, JsonHandler,
+    ParquetHandler,
 };
 
 pub mod executor;
@@ -109,8 +114,30 @@ impl<E: TaskExecutor> DefaultEngine<E> {
         Some(self.store.clone())
     }
 
-    pub fn get_parquet_handler(&self) -> Arc<DefaultParquetHandler<E>> {
-        self.parquet.clone()
+    pub async fn write_parquet(
+        &self,
+        data: &ArrowEngineData,
+        write_context: &WriteContext,
+        partition_values: HashMap<String, String>,
+        data_change: bool,
+    ) -> DeltaResult<Box<dyn EngineData>> {
+        let transform = write_context.logical_to_physical();
+        let input_schema: Schema = data.record_batch().schema().try_into()?;
+        let output_schema = write_context.schema();
+        let logical_to_physical_expr = self.get_expression_handler().get_evaluator(
+            input_schema.into(),
+            transform.clone(),
+            output_schema.clone().into(),
+        );
+        let physical_data = logical_to_physical_expr.evaluate(data)?;
+        self.parquet
+            .write_parquet_file(
+                write_context.target_dir(),
+                physical_data,
+                partition_values,
+                data_change
+            )
+            .await
     }
 }
 
