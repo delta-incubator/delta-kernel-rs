@@ -2,7 +2,6 @@
 //! has schema etc.)
 //!
 
-use std::cmp::Ordering;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -11,11 +10,9 @@ use url::Url;
 
 use crate::actions::{Metadata, Protocol};
 use crate::features::{ColumnMappingMode, COLUMN_MAPPING_MODE_KEY};
-use crate::log_segment::{self, LogSegment, LogSegmentBuilder};
-use crate::path::ParsedLogPath;
+use crate::log_segment::{LogSegment, LogSegmentBuilder};
 use crate::scan::ScanBuilder;
 use crate::schema::Schema;
-use crate::utils::require;
 use crate::{DeltaResult, Engine, Error, FileSystemClient, Version};
 
 const LAST_CHECKPOINT_FILE_NAME: &str = "_last_checkpoint";
@@ -197,131 +194,6 @@ fn read_last_checkpoint(
         Err(Error::FileNotFound(_)) => Ok(None),
         Err(err) => Err(err),
     }
-}
-
-/// List all log files after a given checkpoint.
-fn list_log_files_with_checkpoint(
-    checkpoint_metadata: &CheckpointMetadata,
-    fs_client: &dyn FileSystemClient,
-    log_root: &Url,
-) -> DeltaResult<(Vec<ParsedLogPath>, Vec<ParsedLogPath>)> {
-    let version_prefix = format!("{:020}", checkpoint_metadata.version);
-    let start_from = log_root.join(&version_prefix)?;
-
-    let mut max_checkpoint_version = checkpoint_metadata.version;
-    let mut checkpoint_files = vec![];
-    // We expect 10 commit files per checkpoint, so start with that size. We could adjust this based
-    // on config at some point
-    let mut commit_files = Vec::with_capacity(10);
-
-    for meta_res in fs_client.list_from(&start_from)? {
-        let meta = meta_res?;
-        let parsed_path = ParsedLogPath::try_from(meta)?;
-        // TODO this filters out .crc files etc which start with "." - how do we want to use these kind of files?
-        if let Some(parsed_path) = parsed_path {
-            if parsed_path.is_commit() {
-                commit_files.push(parsed_path);
-            } else if parsed_path.is_checkpoint() {
-                match parsed_path.version.cmp(&max_checkpoint_version) {
-                    Ordering::Greater => {
-                        max_checkpoint_version = parsed_path.version;
-                        checkpoint_files.clear();
-                        checkpoint_files.push(parsed_path);
-                    }
-                    Ordering::Equal => checkpoint_files.push(parsed_path),
-                    Ordering::Less => {}
-                }
-            }
-        }
-    }
-
-    if checkpoint_files.is_empty() {
-        // TODO: We could potentially recover here
-        return Err(Error::generic(
-            "Had a _last_checkpoint hint but didn't find any checkpoints",
-        ));
-    }
-
-    if max_checkpoint_version != checkpoint_metadata.version {
-        warn!(
-            "_last_checkpoint hint is out of date. _last_checkpoint version: {}. Using actual most recent: {}",
-            checkpoint_metadata.version,
-            max_checkpoint_version
-        );
-        // we (may) need to drop commits that are before the _actual_ last checkpoint (that
-        // is, commits between a stale _last_checkpoint and the _actual_ last checkpoint)
-        commit_files.retain(|parsed_path| parsed_path.version > max_checkpoint_version);
-    } else if checkpoint_files.len() != checkpoint_metadata.parts.unwrap_or(1) {
-        return Err(Error::Generic(format!(
-            "_last_checkpoint indicated that checkpoint should have {} parts, but it has {}",
-            checkpoint_metadata.parts.unwrap_or(1),
-            checkpoint_files.len()
-        )));
-    }
-
-    debug_assert!(
-        commit_files
-            .windows(2)
-            .all(|cfs| cfs[0].version <= cfs[1].version),
-        "fs_client.list_from() didn't return a sorted listing! {:?}",
-        commit_files
-    );
-    // We assume listing returned ordered, we want reverse order
-    let commit_files = commit_files.into_iter().rev().collect();
-
-    Ok((commit_files, checkpoint_files))
-}
-
-/// List relevant log files.
-///
-/// Relevant files are the max checkpoint found and all subsequent commits.
-fn list_log_files(
-    fs_client: &dyn FileSystemClient,
-    log_root: &Url,
-) -> DeltaResult<(Vec<ParsedLogPath>, Vec<ParsedLogPath>)> {
-    let version_prefix = format!("{:020}", 0);
-    let start_from = log_root.join(&version_prefix)?;
-
-    let mut max_checkpoint_version = -1_i64;
-    let mut commit_files = Vec::new();
-    let mut checkpoint_files = Vec::with_capacity(10);
-
-    let log_paths = fs_client
-        .list_from(&start_from)?
-        .flat_map(|file| file.and_then(ParsedLogPath::try_from).transpose());
-    for log_path in log_paths {
-        let log_path = log_path?;
-        if log_path.is_checkpoint() {
-            let version = log_path.version as i64;
-            match version.cmp(&max_checkpoint_version) {
-                Ordering::Greater => {
-                    max_checkpoint_version = version;
-                    checkpoint_files.clear();
-                    checkpoint_files.push(log_path);
-                }
-                Ordering::Equal => {
-                    checkpoint_files.push(log_path);
-                }
-                _ => {}
-            }
-        } else if log_path.is_commit() {
-            commit_files.push(log_path);
-        }
-    }
-
-    commit_files.retain(|f| f.version as i64 > max_checkpoint_version);
-
-    debug_assert!(
-        commit_files
-            .windows(2)
-            .all(|cfs| cfs[0].version <= cfs[1].version),
-        "fs_client.list_from() didn't return a sorted listing! {:?}",
-        commit_files
-    );
-    // We assume listing returned ordered, we want reverse order
-    let commit_files = commit_files.into_iter().rev().collect();
-
-    Ok((commit_files, checkpoint_files))
 }
 
 #[cfg(test)]
