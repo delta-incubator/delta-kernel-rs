@@ -220,11 +220,7 @@ pub struct WriteContext {
 }
 
 impl WriteContext {
-    fn new(
-        target_dir: Url,
-        schema: SchemaRef,
-        logical_to_physical: Expression,
-    ) -> Self {
+    fn new(target_dir: Url, schema: SchemaRef, logical_to_physical: Expression) -> Self {
         WriteContext {
             target_dir,
             schema,

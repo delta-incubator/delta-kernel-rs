@@ -6,8 +6,8 @@
 //! a separate thread pool, provided by the [`TaskExecutor`] trait. Read more in
 //! the [executor] module.
 
-use std::sync::Arc;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use self::storage::parse_url_opts;
 use object_store::{path::Path, DynObjectStore};
@@ -135,7 +135,7 @@ impl<E: TaskExecutor> DefaultEngine<E> {
                 write_context.target_dir(),
                 physical_data,
                 partition_values,
-                data_change
+                data_change,
             )
             .await
     }
