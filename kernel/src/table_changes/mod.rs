@@ -53,7 +53,7 @@ impl TableChanges {
         let mut builder = LogSegmentBuilder::new(fs_client, &table_root);
         builder = builder.with_start_version(start_version);
         if let Some(end_version) = end_version {
-            builder = builder.with_start_version(end_version);
+            builder = builder.with_end_version(end_version);
         }
         let log_segment = builder.build()?;
 
