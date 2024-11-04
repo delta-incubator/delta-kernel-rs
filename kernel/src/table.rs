@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use url::Url;
 
 use crate::snapshot::Snapshot;
+use crate::table_changes::TableChanges;
 use crate::transaction::Transaction;
 use crate::{DeltaResult, Engine, Error, Version};
 
@@ -76,6 +77,15 @@ impl Table {
     /// If no version is supplied, a snapshot for the latest version will be created.
     pub fn snapshot(&self, engine: &dyn Engine, version: Option<Version>) -> DeltaResult<Snapshot> {
         Snapshot::try_new(self.location.clone(), engine, version)
+    }
+
+    pub fn table_changes(
+        &self,
+        engine: &dyn Engine,
+        start_version: Version,
+        end_version: Option<Version>,
+    ) -> DeltaResult<TableChanges> {
+        TableChanges::try_new(self.location().clone(), engine, start_version, end_version)
     }
 
     /// Create a new write transaction for this table.

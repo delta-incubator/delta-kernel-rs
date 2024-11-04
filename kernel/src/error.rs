@@ -6,7 +6,7 @@ use std::{
     str::Utf8Error,
 };
 
-use crate::schema::DataType;
+use crate::{schema::DataType, Version};
 
 /// A [`std::result::Result`] that has the kernel [`Error`] as the error variant
 pub type DeltaResult<T, E = Error> = std::result::Result<T, E>;
@@ -171,6 +171,9 @@ pub enum Error {
     /// The file already exists at the path, prohibiting a non-overwrite write
     #[error("File already exists: {0}")]
     FileAlreadyExists(String),
+
+    #[error("Change data feed is disabled in range: {0} to {}", _1.map_or("end".into(), |ver| ver.to_string()))]
+    TableChangesDisabled(Version, Option<Version>),
 }
 
 // Convenience constructors for Error types that take a String argument
