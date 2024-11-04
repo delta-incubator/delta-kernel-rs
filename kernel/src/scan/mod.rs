@@ -8,14 +8,12 @@ use tracing::debug;
 use url::Url;
 
 use crate::actions::deletion_vector::{split_vector, treemap_to_bools, DeletionVectorDescriptor};
-use crate::actions::{get_log_add_schema, get_log_schema, Metadata, ADD_NAME, REMOVE_NAME};
+use crate::actions::{get_log_add_schema, get_log_schema, ADD_NAME, REMOVE_NAME};
 use crate::expressions::{ColumnName, Expression, ExpressionRef, Scalar};
 use crate::features::ColumnMappingMode;
-use crate::log_segment::LogSegment;
 use crate::scan::state::{DvInfo, Stats};
 use crate::schema::{DataType, Schema, SchemaRef, StructField, StructType};
 use crate::snapshot::Snapshot;
-use crate::table_changes::TableChanges;
 use crate::{DeltaResult, Engine, EngineData, Error, FileMeta};
 
 use self::log_replay::scan_action_iter;
@@ -25,59 +23,9 @@ mod data_skipping;
 pub mod log_replay;
 pub mod state;
 
-pub trait Scannable {
-    fn schema(&self) -> SchemaRef;
-    fn metadata(&self) -> &Metadata;
-    fn column_mapping_mode(&self) -> &ColumnMappingMode;
-    fn log_segment(&self) -> &LogSegment;
-    fn table_root(&self) -> &Url;
-}
-impl Scannable for Snapshot {
-    fn schema(&self) -> SchemaRef {
-        todo!()
-    }
-
-    fn metadata(&self) -> &Metadata {
-        todo!()
-    }
-
-    fn column_mapping_mode(&self) -> &ColumnMappingMode {
-        todo!()
-    }
-
-    fn log_segment(&self) -> &LogSegment {
-        todo!()
-    }
-
-    fn table_root(&self) -> &Url {
-        todo!()
-    }
-}
-impl Scannable for TableChanges {
-    fn schema(&self) -> SchemaRef {
-        todo!()
-    }
-
-    fn metadata(&self) -> &Metadata {
-        todo!()
-    }
-
-    fn column_mapping_mode(&self) -> &ColumnMappingMode {
-        todo!()
-    }
-
-    fn log_segment(&self) -> &LogSegment {
-        todo!()
-    }
-
-    fn table_root(&self) -> &Url {
-        todo!()
-    }
-}
-
 /// Builder to scan a snapshot of a table.
 pub struct ScanBuilder {
-    snapshot: Arc<dyn Scannable>,
+    snapshot: Arc<Snapshot>,
     schema: Option<SchemaRef>,
     predicate: Option<ExpressionRef>,
 }
@@ -93,7 +41,7 @@ impl std::fmt::Debug for ScanBuilder {
 
 impl ScanBuilder {
     /// Create a new [`ScanBuilder`] instance.
-    pub fn new(snapshot: impl Into<Arc<dyn Scannable>>) -> Self {
+    pub fn new(snapshot: impl Into<Arc<Snapshot>>) -> Self {
         Self {
             snapshot: snapshot.into(),
             schema: None,
@@ -147,7 +95,7 @@ impl ScanBuilder {
         let (all_fields, read_fields, have_partition_cols) = get_state_info(
             logical_schema.as_ref(),
             &self.snapshot.metadata().partition_columns,
-            *self.snapshot.column_mapping_mode(),
+            self.snapshot.column_mapping_mode,
         )?;
         let physical_schema = Arc::new(StructType::new(read_fields));
         Ok(Scan {
@@ -222,7 +170,7 @@ pub type ScanData = (Box<dyn EngineData>, Vec<bool>);
 /// The result of building a scan over a table. This can be used to get the actual data from
 /// scanning the table.
 pub struct Scan {
-    snapshot: Arc<dyn Scannable>,
+    snapshot: Arc<Snapshot>,
     logical_schema: SchemaRef,
     physical_schema: SchemaRef,
     predicate: Option<ExpressionRef>,
@@ -287,7 +235,7 @@ impl Scan {
         // NOTE: We don't pass any meta-predicate because we expect no meaningful row group skipping
         // when ~every checkpoint file will contain the adds and removes we are looking for.
         self.snapshot
-            .log_segment()
+            .log_segment
             .replay(engine, commit_read_schema, checkpoint_read_schema, None)
     }
 
@@ -295,11 +243,11 @@ impl Scan {
     /// only be called once per scan.
     pub fn global_scan_state(&self) -> GlobalScanState {
         GlobalScanState {
-            table_root: self.snapshot.table_root().to_string(),
+            table_root: self.snapshot.table_root.to_string(),
             partition_columns: self.snapshot.metadata().partition_columns.clone(),
             logical_schema: self.logical_schema.clone(),
             read_schema: self.physical_schema.clone(),
-            column_mapping_mode: *self.snapshot.column_mapping_mode(),
+            column_mapping_mode: self.snapshot.column_mapping_mode,
         }
     }
 
@@ -356,10 +304,10 @@ impl Scan {
         let result = scan_files_iter
             .map(move |scan_file| -> DeltaResult<_> {
                 let scan_file = scan_file?;
-                let file_path = self.snapshot.table_root().join(&scan_file.path)?;
+                let file_path = self.snapshot.table_root.join(&scan_file.path)?;
                 let mut selection_vector = scan_file
                     .dv_info
-                    .get_selection_vector(engine, self.snapshot.table_root())?;
+                    .get_selection_vector(engine, &self.snapshot.table_root)?;
                 let meta = FileMeta {
                     last_modified: 0,
                     size: scan_file.size as usize,
