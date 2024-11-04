@@ -123,7 +123,7 @@ pub struct ScanResult {
     pub raw_data: DeltaResult<Box<dyn EngineData>>,
     /// Raw row mask.
     // TODO(nick) this should be allocated by the engine
-    raw_mask: Option<Vec<bool>>,
+    pub raw_mask: Option<Vec<bool>>,
 }
 
 impl ScanResult {
@@ -394,7 +394,7 @@ fn parse_partition_value(raw: Option<&String>, data_type: &DataType) -> DeltaRes
 /// - fields_to_read_from_parquet - Which fields should be read from the raw parquet files. This takes
 ///   into account column mapping
 /// - have_partition_cols - boolean indicating if we have partition columns in this query
-fn get_state_info(
+pub fn get_state_info(
     logical_schema: &Schema,
     partition_columns: &[String],
     column_mapping_mode: ColumnMappingMode,
@@ -463,7 +463,7 @@ pub fn transform_to_logical(
 
 // We have this function because `execute` can save `all_fields` and `have_partition_cols` in the
 // scan, and then reuse them for each batch transform
-fn transform_to_logical_internal(
+pub fn transform_to_logical_internal(
     engine: &dyn Engine,
     data: Box<dyn EngineData>,
     global_state: &GlobalScanState,

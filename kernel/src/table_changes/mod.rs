@@ -1,5 +1,6 @@
 //! In-memory representation of a change data feed table.
 
+use table_changes_scan::TableChangesScan;
 use url::Url;
 
 use crate::{
@@ -12,17 +13,20 @@ use crate::{
     DeltaResult, Engine, Error, Version,
 };
 
+pub mod table_changes_scan;
+
 static CDF_ENABLE_FLAG: &str = "delta.enableChangeDataFeed";
 
 #[derive(Debug)]
 pub struct TableChanges {
-    snapshot: Snapshot,
-    cdf_range: LogSegment,
-    schema: Schema,
-    version: Version,
-    metadata: Metadata,
-    protocol: Protocol,
+    pub snapshot: Snapshot,
+    pub log_segment: LogSegment,
+    pub schema: Schema,
+    pub version: Version,
+    pub metadata: Metadata,
+    pub protocol: Protocol,
     pub(crate) column_mapping_mode: ColumnMappingMode,
+    pub table_root: Url,
 }
 
 impl TableChanges {
@@ -55,12 +59,16 @@ impl TableChanges {
 
         Ok(TableChanges {
             snapshot: start_snapshot,
-            cdf_range: log_segment,
+            log_segment,
             schema: end_snapshot.schema().clone(),
             column_mapping_mode: end_snapshot.column_mapping_mode,
             version: end_snapshot.version(),
             protocol: end_snapshot.protocol().clone(),
             metadata: end_snapshot.metadata().clone(),
+            table_root,
         })
+    }
+    pub fn into_scan_builder(self) -> TableChangesScan {
+        todo!()
     }
 }
