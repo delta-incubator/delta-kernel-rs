@@ -1,0 +1,17 @@
+[package]
+name = "change_data"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+arrow-array = { workspace = true }
+arrow-schema = { workspace = true }
+clap = { version = "4.5", features = ["derive"] }
+delta_kernel = { path = "../../../kernel", features = [
+  "cloud",
+  "default-engine",
+  "developer-visibility",
+] }
+env_logger = "0.11.3"
+url = "2"

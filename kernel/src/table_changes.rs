@@ -11,7 +11,7 @@ use crate::{
     scan::{ScanBuilder, Scannable},
     schema::Schema,
     snapshot::Snapshot,
-    DeltaResult, Engine, Error, Version,
+    DeltaResult, Engine, Version,
 };
 
 static CDF_ENABLE_FLAG: &str = "delta.enableChangeDataFeed";
@@ -32,37 +32,16 @@ impl TableChanges {
         end_version: Option<Version>,
     ) -> DeltaResult<Self> {
         let fs_client = engine.get_file_system_client();
-        let start_snapshot =
-            Snapshot::try_new(table_root.as_url().clone(), engine, Some(start_version))?;
-
-        // Get the end snapshot to fetch schema
-        let end_snapshot = Snapshot::try_new(table_root.as_url().clone(), engine, end_version)?;
-        let schema = end_snapshot.schema();
-
+        let snapshot = Snapshot::try_new(table_root.as_url().clone(), engine, Some(start_version))?;
         let mut builder = LogSegmentBuilder::new(fs_client, &table_root);
         builder = builder.with_start_version(start_version);
         if let Some(end_version) = end_version {
             builder = builder.with_start_version(end_version);
         }
-        builder = builder.set_omit_checkpoints();
         let log_segment = builder.build()?;
 
-        match (
-            start_snapshot.metadata().configuration.get(CDF_ENABLE_FLAG),
-            end_snapshot.metadata().configuration.get(CDF_ENABLE_FLAG),
-        ) {
-            (Some(start_flag), Some(end_flag)) if start_flag == "true" && end_flag == "true" => {}
-            _ => {
-                return Err(Error::InvalidChangeDataFeedRange(
-                    start_version,
-                    end_version,
-                ))
-            }
-        }
-
         Ok(TableChanges {
-            schema: schema.clone(),
-            snapshot: start_snapshot,
+            snapshot,
             cdf_range: log_segment,
             column_mapping_mode: end_snapshot.column_mapping_mode,
         })
