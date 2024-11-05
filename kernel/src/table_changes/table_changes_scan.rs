@@ -1,13 +1,17 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    iter,
+    sync::Arc,
+};
 
 use itertools::Itertools;
 use tracing::debug;
 
 use crate::{
-    actions::{
-        deletion_vector::split_vector, get_log_add_schema, get_log_schema, ADD_NAME, REMOVE_NAME,
-    },
+    actions::{deletion_vector::split_vector, get_log_schema, ADD_NAME, REMOVE_NAME},
+    expressions,
     scan::{
+        data_skipping::DataSkippingFilter,
         get_state_info,
         log_replay::scan_action_iter,
         state::{self, DvInfo, GlobalScanState, Stats},
@@ -17,7 +21,7 @@ use crate::{
     DeltaResult, Engine, EngineData, ExpressionRef, FileMeta,
 };
 
-use super::TableChanges;
+use super::{replay_scanner::TableChangesLogReplayScanner, TableChanges, TableChangesScanData};
 
 /// Builder to scan a snapshot of a table.
 pub struct TableChangesScanBuilder {
@@ -104,6 +108,76 @@ pub struct TableChangesScan {
     have_partition_cols: bool,
 }
 
+/// Given an iterator of (engine_data, bool) tuples and a predicate, returns an iterator of
+/// `(engine_data, selection_vec)`. Each row that is selected in the returned `engine_data` _must_
+/// be processed to complete the scan. Non-selected rows _must_ be ignored. The boolean flag
+/// indicates whether the record batch is a log or checkpoint batch.
+pub fn table_changes_action_iter(
+    engine: &dyn Engine,
+    commit_iter: impl Iterator<
+        Item = DeltaResult<Box<dyn Iterator<Item = DeltaResult<Box<dyn EngineData>>> + Send>>,
+    >,
+    table_schema: &SchemaRef,
+    predicate: Option<ExpressionRef>,
+) -> DeltaResult<impl Iterator<Item = DeltaResult<TableChangesScanData>>> {
+    let filter = DataSkippingFilter::new(engine, table_schema, predicate);
+    let expression_handler = engine.get_expression_handler();
+    println!("commit iter len: {}", commit_iter.try_len().unwrap());
+    let result = commit_iter
+        .map(move |action_iter| -> DeltaResult<_> {
+            let action_iter = action_iter?;
+            let expression_handler = expression_handler.clone();
+            let mut log_scanner = TableChangesLogReplayScanner::new(filter.clone());
+
+            // Find CDC, get commitInfo, and perform metadata scan
+            let mut batches = vec![];
+            for action_res in action_iter {
+                println!("Action res iter ");
+                let batch = action_res?;
+                // TODO: Make this metadata iterator
+                // log_scanner.process_scan_batch(expression_handler.as_ref(), batch.as_ref())?;
+                batches.push(batch);
+            }
+
+            // File metadata output scan
+            let x: Vec<ScanData> = batches
+                .into_iter()
+                .map(|batch| {
+                    println!("Action res iter ");
+                    log_scanner.process_scan_batch(expression_handler.as_ref(), batch.as_ref())
+                })
+                .try_collect()?;
+            let remove_dvs = Arc::new(log_scanner.remove_dvs);
+            let y = x.into_iter().map(move |(a, b)| {
+                let remove_dvs = remove_dvs.clone();
+                (a, b, remove_dvs)
+            });
+            Ok(y)
+        })
+        .flatten_ok();
+    Ok(result)
+    // todo!()
+    // action_iter
+    //     .map(move |action_res| {
+    //         action_res.and_then(|(batch, is_log_batch)| {
+    //             log_scanner.process_scan_batch(
+    //                 expression_handler.as_ref(),
+    //                 batch.as_ref(),
+    //                 is_log_batch,
+    //             )
+    //         })
+    //     })
+    //     .filter(|action_res| {
+    //         match action_res {
+    //             Ok((_, sel_vec)) => {
+    //                 // don't bother returning it if everything is filtered out
+    //                 sel_vec.contains(&true)
+    //             }
+    //             Err(_) => true, // just pass through errors
+    //         }
+    //     })
+}
+
 impl TableChangesScan {
     /// Get a shared reference to the [`Schema`] of the scan.
     ///
@@ -132,31 +206,31 @@ impl TableChangesScan {
     pub fn scan_data(
         &self,
         engine: &dyn Engine,
-    ) -> DeltaResult<impl Iterator<Item = DeltaResult<ScanData>>> {
-        Ok(scan_action_iter(
+    ) -> DeltaResult<impl Iterator<Item = DeltaResult<TableChangesScanData>>> {
+        table_changes_action_iter(
             engine,
             self.replay_for_scan_data(engine)?,
             &self.logical_schema,
             self.predicate(),
-        ))
+        )
     }
 
     // Factored out to facilitate testing
     fn replay_for_scan_data(
         &self,
         engine: &dyn Engine,
-    ) -> DeltaResult<impl Iterator<Item = DeltaResult<(Box<dyn EngineData>, bool)>> + Send> {
+    ) -> DeltaResult<
+        impl Iterator<
+            Item = DeltaResult<Box<dyn Iterator<Item = DeltaResult<Box<dyn EngineData>>> + Send>>,
+        >,
+    > {
         let commit_read_schema = get_log_schema().project(&[ADD_NAME, REMOVE_NAME])?;
-        let checkpoint_read_schema = get_log_add_schema().clone();
 
         // NOTE: We don't pass any meta-predicate because we expect no meaningful row group skipping
         // when ~every checkpoint file will contain the adds and removes we are looking for.
-        self.table_changes.log_segment.replay(
-            engine,
-            commit_read_schema,
-            checkpoint_read_schema,
-            None,
-        )
+        self.table_changes
+            .log_segment
+            .replay_commits(engine, commit_read_schema, None)
     }
 
     /// Get global state that is valid for the entire scan. This is somewhat expensive so should
@@ -214,7 +288,7 @@ impl TableChangesScan {
         let scan_data = self.scan_data(engine)?;
         let scan_files_iter = scan_data
             .map(|res| {
-                let (data, vec) = res?;
+                let (data, vec, _) = res?;
                 let scan_files = vec![];
                 state::visit_scan_files(data.as_ref(), &vec, scan_files, scan_data_callback)
             })

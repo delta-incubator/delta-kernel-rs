@@ -1,6 +1,8 @@
 //! In-memory representation of a change data feed table.
 
-use table_changes_scan::TableChangesScan;
+use std::{collections::HashMap, sync::Arc};
+
+use table_changes_scan::TableChangesScanBuilder;
 use url::Url;
 
 use crate::{
@@ -10,10 +12,14 @@ use crate::{
     path::AsUrl,
     schema::Schema,
     snapshot::Snapshot,
-    DeltaResult, Engine, Error, Version,
+    DeltaResult, Engine, EngineData, Error, Version,
 };
 
+mod metadata_scanner;
+mod replay_scanner;
 pub mod table_changes_scan;
+
+pub type TableChangesScanData = (Box<dyn EngineData>, Vec<bool>, Arc<HashMap<String, String>>);
 
 static CDF_ENABLE_FLAG: &str = "delta.enableChangeDataFeed";
 
@@ -49,12 +55,16 @@ impl TableChanges {
             return Err(Error::TableChangesDisabled(start_version, end_version));
         }
 
+        // Get a log segment for the CDF range
         let fs_client = engine.get_file_system_client();
         let mut builder = LogSegmentBuilder::new(fs_client, &table_root);
         builder = builder.with_start_version(start_version);
         if let Some(end_version) = end_version {
             builder = builder.with_end_version(end_version);
         }
+        builder = builder
+            .with_no_checkpoint_files()
+            .with_in_order_commit_files();
         let log_segment = builder.build()?;
 
         Ok(TableChanges {
@@ -68,7 +78,7 @@ impl TableChanges {
             table_root,
         })
     }
-    pub fn into_scan_builder(self) -> TableChangesScan {
-        todo!()
+    pub fn into_scan_builder(self) -> TableChangesScanBuilder {
+        TableChangesScanBuilder::new(self)
     }
 }

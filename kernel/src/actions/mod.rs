@@ -28,6 +28,7 @@ pub(crate) const METADATA_NAME: &str = "metaData";
 pub(crate) const PROTOCOL_NAME: &str = "protocol";
 pub(crate) const SET_TRANSACTION_NAME: &str = "txn";
 pub(crate) const COMMIT_INFO_NAME: &str = "commitInfo";
+pub(crate) const CDC_NAME: &str = "cdc";
 
 static LOG_ADD_SCHEMA: LazyLock<SchemaRef> =
     LazyLock::new(|| StructType::new([Option::<Add>::get_struct_field(ADD_NAME)]).into());
