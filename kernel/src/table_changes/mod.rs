@@ -1,9 +1,12 @@
 //! In-memory representation of a change data feed table.
 
-use std::{
-    collections::HashMap,
-    sync::{Arc, LazyLock},
-};
+use std::{collections::HashMap, sync::Arc};
+<<<<<<< HEAD
+=======
+
+use table_changes_scan::TableChangesScanBuilder;
+use url::Url;
+>>>>>>> 4d81c52 (Basic iteration for CDF)
 
 use crate::{
     actions::{Metadata, Protocol},
@@ -11,27 +14,39 @@ use crate::{
     log_segment::{LogSegment, LogSegmentBuilder},
     path::AsUrl,
     scan::{get_state_info, state::DvInfo, ColumnType},
-    schema::{DataType, Schema, SchemaRef, StructField, StructType},
+    schema::{Schema, SchemaRef, StructType},
     snapshot::Snapshot,
+<<<<<<< HEAD
     DeltaResult, Engine, EngineData, Error, ExpressionRef, Version,
+=======
+    DeltaResult, Engine, EngineData, Error, Version,
+>>>>>>> 4d81c52 (Basic iteration for CDF)
 };
 use url::Url;
 
+<<<<<<< HEAD
 pub type TableChangesScanData = (Box<dyn EngineData>, Vec<bool>, Arc<HashMap<String, DvInfo>>);
+=======
+mod metadata_scanner;
+mod replay_scanner;
+pub mod table_changes_scan;
+>>>>>>> 4d81c52 (Basic iteration for CDF)
+
+pub type TableChangesScanData = (Box<dyn EngineData>, Vec<bool>, Arc<HashMap<String, String>>);
 
 static CDF_ENABLE_FLAG: &str = "delta.enableChangeDataFeed";
 
 #[derive(Debug)]
 pub struct TableChanges {
+    pub snapshot: Snapshot,
     #[allow(unused)]
-    pub log_segment: LogSegment,
+    pub(crate) log_segment: LogSegment,
     pub schema: Schema,
     pub version: Version,
     pub metadata: Metadata,
     pub protocol: Protocol,
-    pub column_mapping_mode: ColumnMappingMode,
+    pub(crate) column_mapping_mode: ColumnMappingMode,
     pub table_root: Url,
-    pub output_schema: Schema,
 }
 
 impl TableChanges {
@@ -56,7 +71,7 @@ impl TableChanges {
 
         // Get a log segment for the CDF range
         let fs_client = engine.get_file_system_client();
-        let mut builder = LogSegmentBuilder::new(fs_client.as_ref(), &table_root);
+        let mut builder = LogSegmentBuilder::new(fs_client, &table_root);
         builder = builder.with_start_version(start_version);
         if let Some(end_version) = end_version {
             builder = builder.with_end_version(end_version);
@@ -66,8 +81,8 @@ impl TableChanges {
             .with_in_order_commit_files();
         let log_segment = builder.build()?;
 
-        let output_schema = Self::get_output_schema(end_snapshot.schema());
         Ok(TableChanges {
+            snapshot: start_snapshot,
             log_segment,
             schema: end_snapshot.schema().clone(),
             column_mapping_mode: end_snapshot.column_mapping_mode,
@@ -75,19 +90,7 @@ impl TableChanges {
             protocol: end_snapshot.protocol().clone(),
             metadata: end_snapshot.metadata().clone(),
             table_root,
-            output_schema,
         })
-    }
-
-    fn get_output_schema(schema: &Schema) -> Schema {
-        let cdf_fields = [
-            StructField::new("_commit_version", DataType::LONG, false),
-            StructField::new("_commit_timestamp", DataType::TIMESTAMP, false),
-            StructField::new("_change_type", DataType::STRING, false),
-        ];
-        let fields = schema.fields().cloned();
-        let fields = fields.chain(cdf_fields);
-        StructType::new(fields)
     }
     pub fn into_scan_builder(self) -> TableChangesScanBuilder {
         TableChangesScanBuilder::new(self)
