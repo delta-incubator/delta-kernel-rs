@@ -169,6 +169,7 @@ mod protocol {
     pub(crate) struct UnvalidatedProtocol(Protocol);
 
     impl UnvalidatedProtocol {
+        #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
         pub(crate) fn validate(self) -> DeltaResult<Protocol> {
             let protocol = self.0;
             require!(
@@ -540,5 +541,54 @@ mod tests {
             true,
         )]));
         assert_eq!(schema, expected);
+    }
+
+    #[test]
+    fn test_validate_protocol() {
+        let invalid_protocols = [
+            Protocol {
+                min_reader_version: 3,
+                min_writer_version: 7,
+                reader_features: None,
+                writer_features: Some(vec![]),
+            },
+            Protocol {
+                min_reader_version: 3,
+                min_writer_version: 7,
+                reader_features: Some(vec![]),
+                writer_features: None,
+            },
+            Protocol {
+                min_reader_version: 3,
+                min_writer_version: 7,
+                reader_features: None,
+                writer_features: None,
+            },
+            Protocol {
+                min_reader_version: 4,
+                min_writer_version: 7,
+                reader_features: Some(vec![]),
+                writer_features: Some(vec![]),
+            },
+        ];
+        for invalid_protocol in invalid_protocols {
+            let unvalidated = UnvalidatedProtocol::from(invalid_protocol);
+            assert!(matches!(
+                unvalidated.validate(),
+                Err(Error::InvalidProtocol(_)),
+            ));
+        }
+    }
+
+    #[test]
+    fn test_v2_checkpoint_unsupported() {
+        let unsupported = Protocol {
+            min_reader_version: 3,
+            min_writer_version: 7,
+            reader_features: Some(vec![ReaderFeatures::V2Checkpoint.to_string()]),
+            writer_features: Some(vec![ReaderFeatures::V2Checkpoint.to_string()]),
+        };
+        let unvalidated = UnvalidatedProtocol::from(unsupported);
+        assert!(matches!(unvalidated.validate(), Err(Error::Unsupported(_))));
     }
 }

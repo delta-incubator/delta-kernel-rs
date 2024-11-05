@@ -155,7 +155,8 @@ impl DataVisitor for LogVisitor {
                         i,
                         min_reader_version,
                         &getters[self.protocol_offset..],
-                    )?,
+                    )?
+                    .validate()?,
                     self.previous_rows_seen + i,
                 ));
             }
