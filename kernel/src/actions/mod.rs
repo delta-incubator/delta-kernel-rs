@@ -9,9 +9,10 @@ use visitors::{AddVisitor, MetadataVisitor, ProtocolVisitor};
 
 use self::deletion_vector::DeletionVectorDescriptor;
 use crate::actions::schemas::GetStructField;
-use crate::features::{ReaderFeatures, WriterFeatures};
 use crate::schema::{SchemaRef, StructType};
-use crate::{DeltaResult, EngineData};
+use crate::table_features::{ReaderFeatures, WriterFeatures};
+use crate::utils::require;
+use crate::{DeltaResult, EngineData, Error};
 
 pub mod deletion_vector;
 pub mod set_transaction;
@@ -21,6 +22,9 @@ pub(crate) mod schemas;
 pub mod visitors;
 #[cfg(not(feature = "developer-visibility"))]
 pub(crate) mod visitors;
+
+pub(crate) const KERNEL_READER_VERSION: i32 = 3;
+pub(crate) const KERNEL_WRITER_VERSION: i32 = 7;
 
 pub(crate) const ADD_NAME: &str = "add";
 pub(crate) const REMOVE_NAME: &str = "remove";
@@ -138,7 +142,35 @@ impl Protocol {
     pub fn try_new_from_data(data: &dyn EngineData) -> DeltaResult<Option<Protocol>> {
         let mut visitor = ProtocolVisitor::default();
         data.extract(get_log_schema().project(&[PROTOCOL_NAME])?, &mut visitor)?;
-        Ok(visitor.protocol)
+        visitor
+            .protocol
+            .map(|protocol| {
+                require!(protocol.min_reader_version <= KERNEL_READER_VERSION,
+                    Error::invalid_protocol(format!(
+                      "Minimum reader version exceeds kernel reader version {KERNEL_READER_VERSION}"))
+                );
+                require!(protocol.min_writer_version <= KERNEL_WRITER_VERSION,
+                    Error::invalid_protocol(format!(
+                      "Minimum writer version exceeds kernel writer version {KERNEL_WRITER_VERSION}"))
+                );
+                if protocol.min_reader_version == 3 {
+                    require!(protocol.reader_features.is_some(),
+                        Error::invalid_protocol(format!(
+                          "Reader features must be present when minimum reader version = 3"))
+                    );
+                }
+                if protocol.min_writer_version == 7 {
+                    require!(protocol.writer_features.is_some(),
+                        Error::invalid_protocol(format!(
+                          "Writer features must be present when minimum writer version = 7"))
+                    );
+                }
+                require!(!protocol.has_reader_feature(&ReaderFeatures::V2Checkpoint),
+                    Error::unsupported("V2 Checkpoint reader feature is not yet supported")
+                );
+                Ok(protocol)
+            })
+            .transpose()
     }
 
     pub fn has_reader_feature(&self, feature: &ReaderFeatures) -> bool {
