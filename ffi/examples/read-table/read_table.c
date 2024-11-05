@@ -55,7 +55,7 @@ void print_selection_vector(const char* indent, const KernelBoolSlice* selection
 void print_partition_info(struct EngineContext* context, const CStringMap* partition_values)
 {
 #ifdef VERBOSE
-  for (int i = 0; i < context->partition_cols->len; i++) {
+  for (uintptr_t i = 0; i < context->partition_cols->len; i++) {
     char* col = context->partition_cols->cols[i];
     KernelStringSlice key = { col, strlen(col) };
     char* partition_val = get_from_map(partition_values, key, allocate_string);
@@ -82,6 +82,18 @@ EngineError* allocate_error(KernelError etype, const KernelStringSlice msg)
   error->msg = charmsg;
   return (EngineError*)error;
 }
+
+#ifdef WIN32 // windows doesn't have strndup
+char *strndup(const char *s, size_t n) {
+  size_t len = strnlen(s, n);
+  char *p = malloc(len + 1);
+  if (p) {
+    memcpy(p, s, len);
+    p[len] = '\0';
+  }
+  return p;
+}
+#endif
 
 // utility to turn a slice into a char*
 void* allocate_string(const KernelStringSlice slice)
@@ -168,7 +180,7 @@ void visit_partition(void* context, const KernelStringSlice partition)
 PartitionList* get_partition_list(SharedGlobalScanState* state)
 {
   print_diag("Building list of partition columns\n");
-  int count = get_partition_column_count(state);
+  uintptr_t count = get_partition_column_count(state);
   PartitionList* list = malloc(sizeof(PartitionList));
   // We set the `len` to 0 here and use it to track how many items we've added to the list
   list->len = 0;
@@ -187,7 +199,7 @@ PartitionList* get_partition_list(SharedGlobalScanState* state)
   }
   if (list->len > 0) {
     print_diag("Partition columns are:\n");
-    for (int i = 0; i < list->len; i++) {
+    for (uintptr_t i = 0; i < list->len; i++) {
       print_diag("  - %s\n", list->cols[i]);
     }
   } else {
@@ -195,6 +207,14 @@ PartitionList* get_partition_list(SharedGlobalScanState* state)
   }
   free_string_slice_data(part_iter);
   return list;
+}
+
+void free_partition_list(PartitionList* list) {
+  for (uintptr_t i = 0; i < list->len; i++) {
+    free(list->cols[i]);
+  }
+  free(list->cols);
+  free(list);
 }
 
 int main(int argc, char* argv[])
