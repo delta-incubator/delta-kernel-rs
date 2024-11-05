@@ -16,6 +16,7 @@ $ cd build
 $ cmake ..
 $ make
 $ ./read_table [path/to/table]
+```
 
 ## Windows
 
