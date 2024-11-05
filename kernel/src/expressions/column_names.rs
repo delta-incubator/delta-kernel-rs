@@ -2,9 +2,12 @@ use std::borrow::Borrow;
 use std::fmt::{Display, Formatter};
 use std::hash::{Hash, Hasher};
 use std::ops::Deref;
+
+use serde::Deserialize;
+
 /// A (possibly nested) column name.
 // TODO: Track name as a path rather than a single string
-#[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord)]
+#[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Deserialize)]
 pub struct ColumnName {
     path: String,
 }

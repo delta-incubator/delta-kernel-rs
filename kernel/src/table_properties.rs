@@ -9,81 +9,69 @@
 //! is not append-only, and writers are allowed to change, remove, and rearrange data. However,
 //! writers must know that the table property delta.appendOnly should be checked before writing the
 //! table.
-//
-// Delete me?
-// Delta table properties are use to configure the table. They are defined in the 'Metadata' action
-// under 'configuration' map. Every table must have at exactly one Protocol and one Metadata action.
-// Only the most recent is used in the case of multiple P/M actions present in a log segment.
-//
-// ex: "configuration":{"delta.enableDeletionVectors":"true"}
-// parsed into a map of DeltaTableProperty
-// = DeltaTableProperty::EnableDeletionVectors -> true
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use serde::Deserialize;
-use serde::de::{self, Deserializer};
 
-use crate::error::Error;
+use crate::expressions::ColumnName;
 use crate::table_features::ColumnMappingMode;
+use crate::DeltaResult;
+
+mod deserialize;
+use deserialize::*;
 
 /// Default num index cols
 pub const DEFAULT_NUM_INDEX_COLS: i32 = 32;
 
-// #[derive(Debug)]
-// struct BoundedInt(i32);
-//
-// impl<'de> Deserialize<'de> for BoundedInt {
-//     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-//     where
-//         D: Deserializer<'de>,
-//     {
-//         let val = i32::deserialize(deserializer)?;
-//         if val >= 1 && val <= 10 {
-//             Ok(BoundedInt(val))
-//         } else {
-//             Err(de::Error::custom(format!(
-//                 "Value {} is out of bounds (1-10)",
-//                 val
-//             )))
-//         }
-//     }
-// }
-
-/// Delta table properties
+/// Delta table properties. These are parsed from the 'configuration' map in the most recent
+/// 'Metadata' action of a table.
 #[derive(Deserialize, Debug, Clone, Eq, PartialEq)]
 pub struct TableProperties {
     /// true for this Delta table to be append-only. If append-only,
     /// existing records cannot be deleted, and existing values cannot be updated.
     #[serde(rename = "delta.appendOnly")]
-    pub append_only: Option<bool>,
+    #[serde(deserialize_with = "deserialize_bool")]
+    #[serde(default)]
+    pub append_only: bool,
 
     /// true for Delta Lake to automatically optimize the layout of the files for this Delta table.
     #[serde(rename = "delta.autoOptimize.autoCompact")]
-    pub auto_compact: Option<bool>,
+    #[serde(deserialize_with = "deserialize_bool")]
+    #[serde(default)]
+    pub auto_compact: bool,
 
     /// true for Delta Lake to automatically optimize the layout of the files for this Delta table
     /// during writes.
     #[serde(rename = "delta.autoOptimize.optimizeWrite")]
-    pub optimize_write: Option<bool>,
+    #[serde(deserialize_with = "deserialize_bool")]
+    #[serde(default)]
+    pub optimize_write: bool,
 
     /// Interval (expressed as number of commits) after which a new checkpoint should be created.
     /// E.g. if checkpoint interval = 10, then a checkpoint should be written every 10 commits.
     #[serde(rename = "delta.checkpointInterval")]
-    pub checkpoint_interval: Option<u64>,
+    #[serde(deserialize_with = "deserialize_pos_int")]
+    #[serde(default = "default_checkpoint_interval")]
+    pub checkpoint_interval: u64,
 
     /// true for Delta Lake to write file statistics in checkpoints in JSON format for the stats column.
     #[serde(rename = "delta.checkpoint.writeStatsAsJson")]
-    pub checkpoint_write_stats_as_json: Option<bool>,
+    #[serde(deserialize_with = "deserialize_bool")]
+    #[serde(default)]
+    pub checkpoint_write_stats_as_json: bool,
 
     /// true for Delta Lake to write file statistics to checkpoints in struct format for the
     /// stats_parsed column and to write partition values as a struct for partitionValues_parsed.
     #[serde(rename = "delta.checkpoint.writeStatsAsStruct")]
-    pub checkpoint_write_stats_as_struct: Option<bool>,
+    #[serde(deserialize_with = "deserialize_bool")]
+    #[serde(default)]
+    pub checkpoint_write_stats_as_struct: bool,
 
     /// Whether column mapping is enabled for Delta table columns and the corresponding
     /// Parquet columns that use different names.
-    #[serde(rename = "delta.columnMapping.mode")]
+    #[serde(rename = "delta.columnMapping.mode", default)]
     pub column_mapping_mode: ColumnMappingMode,
 
     /// The number of columns for Delta Lake to collect statistics about for data skipping.
@@ -92,14 +80,16 @@ pub struct TableProperties {
     /// of the Delta table. Specifically, it changes the behavior of future statistics collection
     /// (such as during appends and optimizations) as well as data skipping (such as ignoring column
     /// statistics beyond this number, even when such statistics exist).
-    #[serde(rename = "delta.dataSkippingNumIndexedCols")]
-    pub data_skipping_num_indexed_cols: Option<i64>,
+    #[serde(rename = "delta.dataSkippingNumIndexedCols", default, flatten)]
+    pub data_skipping_num_indexed_cols: Option<DataSkippingNumIndexedCols>,
 
     /// A comma-separated list of column names on which Delta Lake collects statistics to enhance
     /// data skipping functionality. This property takes precedence over
     /// [DataSkippingNumIndexedCols](DeltaConfigKey::DataSkippingNumIndexedCols).
     #[serde(rename = "delta.dataSkippingStatsColumns")]
-    pub data_skipping_stats_columns: Option<u64>,
+    #[serde(deserialize_with = "deserialize_column_names")]
+    #[serde(default)]
+    pub data_skipping_stats_columns: Vec<ColumnName>,
 
     /// The shortest duration for Delta Lake to keep logically deleted data files before deleting
     /// them physically. This is to prevent failures in stale readers after compactions or partition
@@ -114,21 +104,28 @@ pub struct TableProperties {
     ///   read old files.
     #[serde(rename = "delta.deletedFileRetentionDuration")]
     #[serde(deserialize_with = "deserialize_interval")]
+    #[serde(default)]
     pub deleted_file_retention_duration: Option<Duration>,
 
     /// true to enable change data feed.
     #[serde(rename = "delta.enableChangeDataFeed")]
-    pub enable_change_data_feed: Option<bool>,
+    #[serde(deserialize_with = "deserialize_bool")]
+    #[serde(default)]
+    pub enable_change_data_feed: bool,
 
     /// true to enable deletion vectors and predictive I/O for updates.
     #[serde(rename = "delta.enableDeletionVectors")]
-    pub enable_deletion_vectors: Option<bool>,
+    #[serde(deserialize_with = "deserialize_bool")]
+    #[serde(default)]
+    pub enable_deletion_vectors: bool,
 
-    /// The degree to which a transaction must be isolated from modifications made by concurrent transactions.
+    /// The degree to which a transaction must be isolated from modifications made by concurrent
+    /// transactions.
     ///
     /// Valid values are `Serializable` and `WriteSerializable`.
     #[serde(rename = "delta.isolationLevel")]
-    pub isolation_level: Option<IsolationLevel>,
+    #[serde(default)]
+    pub isolation_level: IsolationLevel,
 
     /// How long the history for a Delta table is kept.
     ///
@@ -139,31 +136,36 @@ pub struct TableProperties {
     /// size increases.
     #[serde(rename = "delta.logRetentionDuration")]
     #[serde(deserialize_with = "deserialize_interval")]
+    #[serde(default)]
     pub log_retention_duration: Option<Duration>,
 
-    /// TODO I could not find this property in the documentation, but was defined here and makes sense..?
+    /// TODO docs
     #[serde(rename = "delta.enableExpiredLogCleanup")]
-    pub enable_expired_log_cleanup: Option<bool>,
+    #[serde(default)]
+    pub enable_expired_log_cleanup: bool,
 
-    /// The minimum required protocol reader version for a reader that allows to read from this Delta table.
-    #[serde(rename = "delta.minReaderVersion")]
-    pub min_reader_version: Option<u8>,
+    // /// The minimum required protocol reader version for a reader that allows to read from this Delta table.
+    // #[serde(rename = "delta.minReaderVersion")]
+    // pub min_reader_version: Option<u8>,
 
-    /// The minimum required protocol writer version for a writer that allows to write to this Delta table.
-    #[serde(rename = "delta.minWriterVersion")]
-    pub min_writer_version: Option<u8>,
-
+    // /// The minimum required protocol writer version for a writer that allows to write to this Delta table.
+    // #[serde(rename = "delta.minWriterVersion")]
+    // pub min_writer_version: Option<u8>,
+    //
     /// true for Delta to generate a random prefix for a file path instead of partition information.
     ///
     /// For example, this may improve Amazon S3 performance when Delta Lake needs to send very high
     /// volumes of Amazon S3 calls to better partition across S3 servers.
     #[serde(rename = "delta.randomizeFilePrefixes")]
-    pub randomize_file_prefixes: Option<bool>,
+    #[serde(deserialize_with = "deserialize_bool")]
+    #[serde(default)]
+    pub randomize_file_prefixes: bool,
 
     /// When delta.randomizeFilePrefixes is set to true, the number of characters that Delta
     /// generates for random prefixes.
     #[serde(rename = "delta.randomPrefixLength")]
-    pub random_prefix_length: Option<bool>,
+    #[serde(default)]
+    pub random_prefix_length: Option<u32>,
 
     /// The shortest duration within which new snapshots will retain transaction identifiers (for
     /// example, SetTransactions). When a new snapshot sees a transaction identifier older than or
@@ -171,21 +173,66 @@ pub struct TableProperties {
     /// ignores it. The SetTransaction identifier is used when making the writes idempotent.
     #[serde(rename = "delta.setTransactionRetentionDuration")]
     #[serde(deserialize_with = "deserialize_interval")]
+    #[serde(default)]
     pub set_transaction_retention_duration: Option<Duration>,
 
     /// The target file size in bytes or higher units for file tuning. For example, 104857600
     /// (bytes) or 100mb.
+    ///
+    /// TODO: kernel doesn't govern file writes? should we pass this through just with a note that
+    /// we don't pay attention to it? Scenario: engine calls
+    /// snapshot.table_properties().target_file_size in order to know how big _it_ should write
+    /// parquet files.
     #[serde(rename = "delta.targetFileSize")]
+    #[serde(default)]
     pub target_file_size: Option<u64>,
 
     /// The target file size in bytes or higher units for file tuning. For example, 104857600
     /// (bytes) or 100mb.
+    ///
+    /// See TODO above
     #[serde(rename = "delta.tuneFileSizesForRewrites")]
+    #[serde(default)]
     pub tune_file_sizes_for_rewrites: Option<bool>,
 
     /// 'classic' for classic Delta Lake checkpoints. 'v2' for v2 checkpoints.
     #[serde(rename = "delta.checkpointPolicy")]
-    pub checkpoint_policy: Option<CheckpointPolicy>,
+    #[serde(default)]
+    pub checkpoint_policy: CheckpointPolicy,
+}
+
+impl TableProperties {
+    pub(crate) fn new(config_map: &HashMap<String, String>) -> DeltaResult<Self> {
+        let deserializer = StringMapDeserializer::new(config_map);
+        // FIXME error
+        TableProperties::deserialize(deserializer).map_err(|e| crate::Error::Generic(e.to_string()))
+    }
+}
+
+fn default_checkpoint_interval() -> u64 {
+    10
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Deserialize)]
+#[serde(try_from = "String")]
+pub enum DataSkippingNumIndexedCols {
+    AllColumns,
+    NumColumns(u64),
+}
+
+impl TryFrom<String> for DataSkippingNumIndexedCols {
+    type Error = String;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        let num: i64 = value
+            .parse()
+            .map_err(|_| format!("couldn't parse {value} as i64"))?; // FIXME
+        match num {
+            -1 => Ok(DataSkippingNumIndexedCols::AllColumns),
+            x if x > -1 => Ok(DataSkippingNumIndexedCols::NumColumns(x as u64)),
+            _ => Err(format!("Invalid value: {}", value)),
+        }
+    }
 }
 
 // /// Delta configuration error
@@ -338,59 +385,6 @@ impl Default for CheckpointPolicy {
     }
 }
 
-const SECONDS_PER_MINUTE: u64 = 60;
-const SECONDS_PER_HOUR: u64 = 60 * SECONDS_PER_MINUTE;
-const SECONDS_PER_DAY: u64 = 24 * SECONDS_PER_HOUR;
-const SECONDS_PER_WEEK: u64 = 7 * SECONDS_PER_DAY;
-
-fn deserialize_interval<'de, D>(deserializer: D) -> Result<Option<Duration>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let opt = Option::<String>::deserialize(deserializer)?;
-    match opt {
-        Some(s) => parse_interval(&s).map(Some).map_err(de::Error::custom),
-        None => Ok(None),
-    }
-}
-
-fn parse_interval(value: &str) -> Result<Duration, String> {
-    let not_an_interval = || format!("'{value}' is not an interval");
-
-    if !value.starts_with("interval ") {
-        return Err(not_an_interval());
-    }
-    let mut it = value.split_whitespace();
-    let _ = it.next(); // skip "interval"
-    let number = parse_int(it.next().ok_or_else(not_an_interval)?)?;
-    if number < 0 {
-        return Err(format!("interval '{value}' cannot be negative"));
-    }
-    let number = number as u64;
-
-    let duration = match it.next().ok_or_else(not_an_interval)? {
-        "nanosecond" | "nanoseconds" => Duration::from_nanos(number),
-        "microsecond" | "microseconds" => Duration::from_micros(number),
-        "millisecond" | "milliseconds" => Duration::from_millis(number),
-        "second" | "seconds" => Duration::from_secs(number),
-        "minute" | "minutes" => Duration::from_secs(number * SECONDS_PER_MINUTE),
-        "hour" | "hours" => Duration::from_secs(number * SECONDS_PER_HOUR),
-        "day" | "days" => Duration::from_secs(number * SECONDS_PER_DAY),
-        "week" | "weeks" => Duration::from_secs(number * SECONDS_PER_WEEK),
-        unit => {
-            return Err(format!("Unknown unit '{unit}'"));
-        }
-    };
-
-    Ok(duration)
-}
-
-fn parse_int(value: &str) -> Result<i64, String> {
-    value
-        .parse()
-        .map_err(|e| format!("Cannot parse '{value}' as integer: {e}"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -413,8 +407,10 @@ mod tests {
     }
 
     #[test]
-    fn zach() {
-
+    fn fail_known_keys() {
+        let properties = HashMap::from([("delta.appendOnly".to_string(), "wack".to_string())]);
+        let de = StringMapDeserializer::new(&properties);
+        assert!(TableProperties::deserialize(de).is_err());
     }
 
     // #[test]
@@ -733,4 +729,35 @@ mod tests {
     //     assert_eq!(config.num_indexed_cols(), 32);
     //     assert_eq!(config.enable_expired_log_cleanup(), true);
     // }
+
+    #[test]
+    fn it_works() {
+        let properties = HashMap::from([("delta.appendOnly".to_string(), "true".to_string())]);
+        let de = StringMapDeserializer::new(&properties);
+        let actual = TableProperties::deserialize(de).unwrap();
+        let expected = TableProperties {
+            append_only: true,
+            optimize_write: false,
+            auto_compact: false,
+            checkpoint_interval: 10,
+            checkpoint_write_stats_as_json: false,
+            checkpoint_write_stats_as_struct: false,
+            column_mapping_mode: ColumnMappingMode::None,
+            data_skipping_num_indexed_cols: None,
+            data_skipping_stats_columns: vec![],
+            deleted_file_retention_duration: None,
+            enable_change_data_feed: false,
+            enable_deletion_vectors: false,
+            isolation_level: IsolationLevel::Serializable,
+            log_retention_duration: None,
+            enable_expired_log_cleanup: false,
+            randomize_file_prefixes: false,
+            random_prefix_length: None,
+            set_transaction_retention_duration: None,
+            target_file_size: None,
+            tune_file_sizes_for_rewrites: None,
+            checkpoint_policy: CheckpointPolicy::Classic,
+        };
+        assert_eq!(actual, expected);
+    }
 }

@@ -9,9 +9,9 @@ use visitors::{AddVisitor, MetadataVisitor, ProtocolVisitor};
 
 use self::deletion_vector::DeletionVectorDescriptor;
 use crate::actions::schemas::GetStructField;
-use crate::table_properties::TableProperties;
-use crate::table_features::{ReaderFeatures, WriterFeatures};
 use crate::schema::{SchemaRef, StructType};
+use crate::table_features::{ReaderFeatures, WriterFeatures};
+use crate::table_properties::TableProperties;
 use crate::{DeltaResult, EngineData};
 
 pub mod deletion_vector;
@@ -115,8 +115,9 @@ impl Metadata {
         Ok(serde_json::from_str(&self.schema_string)?)
     }
 
+    /// Parse the metadata configuration HashMap<String, String> into a TableProperties struct.
     pub fn get_table_properties(&self) -> DeltaResult<TableProperties> {
-        todo!()
+        TableProperties::new(&self.configuration)
     }
 }
 

@@ -15,7 +15,6 @@ use crate::expressions::column_expr;
 use crate::path::ParsedLogPath;
 use crate::scan::ScanBuilder;
 use crate::schema::{Schema, SchemaRef};
-use crate::table_features::ColumnMappingMode;
 use crate::table_properties::TableProperties;
 use crate::utils::require;
 use crate::{DeltaResult, Engine, Error, FileMeta, FileSystemClient, Version};

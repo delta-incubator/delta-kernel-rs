@@ -73,8 +73,8 @@ pub mod scan;
 pub mod schema;
 pub mod snapshot;
 pub mod table;
-pub mod transaction;
 pub mod table_properties;
+pub mod transaction;
 pub(crate) mod utils;
 
 pub use delta_kernel_derive;
