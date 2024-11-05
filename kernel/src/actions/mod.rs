@@ -13,6 +13,7 @@ use crate::schema::{SchemaRef, StructType};
 use crate::table_features::{ReaderFeatures, WriterFeatures};
 use crate::utils::require;
 use crate::{DeltaResult, EngineData, Error};
+use protocol::UnvalidatedProtocol;
 
 pub mod deletion_vector;
 pub mod set_transaction;
@@ -144,32 +145,7 @@ impl Protocol {
         data.extract(get_log_schema().project(&[PROTOCOL_NAME])?, &mut visitor)?;
         visitor
             .protocol
-            .map(|protocol| {
-                require!(protocol.min_reader_version <= KERNEL_READER_VERSION,
-                    Error::invalid_protocol(format!(
-                      "Minimum reader version exceeds kernel reader version {KERNEL_READER_VERSION}"))
-                );
-                require!(protocol.min_writer_version <= KERNEL_WRITER_VERSION,
-                    Error::invalid_protocol(format!(
-                      "Minimum writer version exceeds kernel writer version {KERNEL_WRITER_VERSION}"))
-                );
-                if protocol.min_reader_version == 3 {
-                    require!(protocol.reader_features.is_some(),
-                        Error::invalid_protocol(
-                          "Reader features must be present when minimum reader version = 3")
-                    );
-                }
-                if protocol.min_writer_version == 7 {
-                    require!(protocol.writer_features.is_some(),
-                        Error::invalid_protocol(
-                          "Writer features must be present when minimum writer version = 7")
-                    );
-                }
-                require!(!protocol.has_reader_feature(&ReaderFeatures::V2Checkpoint),
-                    Error::unsupported("V2 Checkpoint reader feature is not yet supported")
-                );
-                Ok(protocol)
-            })
+            .map(UnvalidatedProtocol::validate)
             .transpose()
     }
 
@@ -183,6 +159,58 @@ impl Protocol {
         self.writer_features
             .as_ref()
             .is_some_and(|features| features.iter().any(|f| f == feature.as_ref()))
+    }
+}
+
+mod protocol {
+    use super::*;
+
+    #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
+    pub(crate) struct UnvalidatedProtocol(Protocol);
+
+    impl UnvalidatedProtocol {
+        pub(crate) fn validate(self) -> DeltaResult<Protocol> {
+            let protocol = self.0;
+            require!(
+                protocol.min_reader_version <= KERNEL_READER_VERSION,
+                Error::invalid_protocol(format!(
+                    "Minimum reader version exceeds kernel reader version {KERNEL_READER_VERSION}"
+                ))
+            );
+            require!(
+                protocol.min_writer_version <= KERNEL_WRITER_VERSION,
+                Error::invalid_protocol(format!(
+                    "Minimum writer version exceeds kernel writer version {KERNEL_WRITER_VERSION}"
+                ))
+            );
+            if protocol.min_reader_version == 3 {
+                require!(
+                    protocol.reader_features.is_some(),
+                    Error::invalid_protocol(
+                        "Reader features must be present when minimum reader version = 3"
+                    )
+                );
+            }
+            if protocol.min_writer_version == 7 {
+                require!(
+                    protocol.writer_features.is_some(),
+                    Error::invalid_protocol(
+                        "Writer features must be present when minimum writer version = 7"
+                    )
+                );
+            }
+            require!(
+                !protocol.has_reader_feature(&ReaderFeatures::V2Checkpoint),
+                Error::unsupported("V2 Checkpoint reader feature is not yet supported")
+            );
+            Ok(protocol)
+        }
+    }
+
+    impl From<Protocol> for UnvalidatedProtocol {
+        fn from(value: Protocol) -> Self {
+            Self(value)
+        }
     }
 }
 

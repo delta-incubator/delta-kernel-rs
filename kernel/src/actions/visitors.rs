@@ -3,10 +3,9 @@
 
 use std::collections::HashMap;
 
-use crate::{
-    engine_data::{GetData, TypedGetData},
-    DataVisitor, DeltaResult,
-};
+use crate::actions::protocol::UnvalidatedProtocol;
+use crate::engine_data::{GetData, TypedGetData};
+use crate::{DataVisitor, DeltaResult};
 
 use super::{
     deletion_vector::DeletionVectorDescriptor, Add, Format, Metadata, Protocol, Remove,
@@ -87,7 +86,7 @@ impl DataVisitor for SelectionVectorVisitor {
 #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
 #[cfg_attr(not(feature = "developer-visibility"), visibility::make(pub(crate)))]
 struct ProtocolVisitor {
-    pub(crate) protocol: Option<Protocol>,
+    pub(crate) protocol: Option<UnvalidatedProtocol>,
 }
 
 impl ProtocolVisitor {
@@ -96,19 +95,21 @@ impl ProtocolVisitor {
         row_index: usize,
         min_reader_version: i32,
         getters: &[&'a dyn GetData<'a>],
-    ) -> DeltaResult<Protocol> {
+    ) -> DeltaResult<UnvalidatedProtocol> {
         let min_writer_version: i32 = getters[1].get(row_index, "protocol.min_writer_version")?;
         let reader_features: Option<Vec<_>> =
             getters[2].get_opt(row_index, "protocol.reader_features")?;
         let writer_features: Option<Vec<_>> =
             getters[3].get_opt(row_index, "protocol.writer_features")?;
 
-        Ok(Protocol {
+        let protocol = Protocol {
             min_reader_version,
             min_writer_version,
             reader_features,
             writer_features,
-        })
+        };
+
+        Ok(protocol.into())
     }
 }
 
