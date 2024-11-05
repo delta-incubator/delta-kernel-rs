@@ -231,7 +231,7 @@ impl Snapshot {
             .ok_or(Error::MissingMetadata)?;
         let schema = metadata.schema()?;
         let column_mapping_mode = match metadata.configuration.get(COLUMN_MAPPING_MODE_KEY) {
-            Some(mode) if protocol.min_reader_version >= 2 => mode.as_str().try_into(),
+            Some(mode) if protocol.min_reader_version() >= 2 => mode.as_str().try_into(),
             _ => Ok(ColumnMappingMode::None),
         }?;
         Ok(Self {
@@ -492,12 +492,13 @@ mod tests {
         let engine = SyncEngine::new();
         let snapshot = Snapshot::try_new(url, &engine, Some(1)).unwrap();
 
-        let expected = Protocol {
-            min_reader_version: 3,
-            min_writer_version: 7,
-            reader_features: Some(vec!["deletionVectors".into()]),
-            writer_features: Some(vec!["deletionVectors".into()]),
-        };
+        let expected = Protocol::new(
+            3,
+            7,
+            Some(vec!["deletionVectors".into()]),
+            Some(vec!["deletionVectors".into()]),
+        )
+        .unwrap();
         assert_eq!(snapshot.protocol(), &expected);
 
         let schema_string = r#"{"type":"struct","fields":[{"name":"value","type":"integer","nullable":true,"metadata":{}}]}"#;
@@ -514,12 +515,13 @@ mod tests {
         let engine = SyncEngine::new();
         let snapshot = Snapshot::try_new(url, &engine, None).unwrap();
 
-        let expected = Protocol {
-            min_reader_version: 3,
-            min_writer_version: 7,
-            reader_features: Some(vec!["deletionVectors".into()]),
-            writer_features: Some(vec!["deletionVectors".into()]),
-        };
+        let expected = Protocol::new(
+            3,
+            7,
+            Some(vec!["deletionVectors".into()]),
+            Some(vec!["deletionVectors".into()]),
+        )
+        .unwrap();
         assert_eq!(snapshot.protocol(), &expected);
 
         let schema_string = r#"{"type":"struct","fields":[{"name":"value","type":"integer","nullable":true,"metadata":{}}]}"#;

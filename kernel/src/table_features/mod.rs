@@ -1,3 +1,6 @@
+use std::collections::HashSet;
+use std::sync::LazyLock;
+
 use serde::{Deserialize, Serialize};
 
 pub use column_mapping::ColumnMappingMode;
@@ -23,6 +26,7 @@ mod column_mapping;
     StrumDisplay,
     AsRefStr,
     VariantNames,
+    Hash,
 )]
 #[strum(serialize_all = "camelCase")]
 #[serde(rename_all = "camelCase")]
@@ -63,6 +67,7 @@ pub enum ReaderFeatures {
     StrumDisplay,
     AsRefStr,
     VariantNames,
+    Hash,
 )]
 #[strum(serialize_all = "camelCase")]
 #[serde(rename_all = "camelCase")]
@@ -106,6 +111,24 @@ pub enum WriterFeatures {
     /// protocol checks during VACUUM operations
     VacuumProtocolCheck,
 }
+
+// we support everything except V2 checkpoints
+pub(crate) static SUPPORTED_READER_FEATURES: LazyLock<HashSet<ReaderFeatures>> =
+    LazyLock::new(|| {
+        HashSet::from([
+            ReaderFeatures::ColumnMapping,
+            ReaderFeatures::DeletionVectors,
+            ReaderFeatures::TimestampWithoutTimezone,
+            ReaderFeatures::TypeWidening,
+            ReaderFeatures::TypeWideningPreview,
+            ReaderFeatures::VacuumProtocolCheck,
+        ])
+    });
+
+// write support wip
+#[allow(unused)]
+pub(crate) static SUPPORTED_WRITER_FEATURES: LazyLock<HashSet<WriterFeatures>> =
+    LazyLock::new(|| HashSet::from([]));
 
 #[cfg(test)]
 mod tests {

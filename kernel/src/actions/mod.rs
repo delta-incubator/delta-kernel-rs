@@ -1,19 +1,19 @@
 //! Provides parsing and manipulation of the various actions defined in the [Delta
 //! specification](https://github.com/delta-io/delta/blob/master/PROTOCOL.md)
 
-use delta_kernel_derive::Schema;
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
-use visitors::{AddVisitor, MetadataVisitor, ProtocolVisitor};
 
 use self::deletion_vector::DeletionVectorDescriptor;
 use crate::actions::schemas::GetStructField;
 use crate::schema::{SchemaRef, StructType};
-use crate::table_features::{ReaderFeatures, WriterFeatures};
+use crate::table_features::{ReaderFeatures, WriterFeatures, SUPPORTED_READER_FEATURES};
 use crate::utils::require;
 use crate::{DeltaResult, EngineData, Error};
-use protocol::UnvalidatedProtocol;
+use visitors::{AddVisitor, MetadataVisitor, ProtocolVisitor};
+
+use delta_kernel_derive::Schema;
+use serde::{Deserialize, Serialize};
 
 pub mod deletion_vector;
 pub mod set_transaction;
@@ -25,6 +25,7 @@ pub mod visitors;
 pub(crate) mod visitors;
 
 pub(crate) const KERNEL_READER_VERSION: i32 = 3;
+#[allow(unused)]
 pub(crate) const KERNEL_WRITER_VERSION: i32 = 7;
 
 pub(crate) const ADD_NAME: &str = "add";
@@ -125,28 +126,63 @@ impl Metadata {
 pub struct Protocol {
     /// The minimum version of the Delta read protocol that a client must implement
     /// in order to correctly read this table
-    pub min_reader_version: i32,
+    min_reader_version: i32,
     /// The minimum version of the Delta write protocol that a client must implement
     /// in order to correctly write this table
-    pub min_writer_version: i32,
+    min_writer_version: i32,
     /// A collection of features that a client must implement in order to correctly
     /// read this table (exist only when minReaderVersion is set to 3)
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub reader_features: Option<Vec<String>>,
+    reader_features: Option<Vec<String>>,
     /// A collection of features that a client must implement in order to correctly
     /// write this table (exist only when minWriterVersion is set to 7)
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub writer_features: Option<Vec<String>>,
+    writer_features: Option<Vec<String>>,
 }
 
 impl Protocol {
+    pub fn new(
+        min_reader_version: i32,
+        min_writer_version: i32,
+        reader_features: Option<Vec<String>>,
+        writer_features: Option<Vec<String>>,
+    ) -> DeltaResult<Self> {
+        if min_reader_version == 3 {
+            require!(
+                reader_features.is_some(),
+                Error::invalid_protocol(
+                    "Reader features must be present when minimum reader version = 3"
+                )
+            );
+        }
+        if min_writer_version == 7 {
+            require!(
+                writer_features.is_some(),
+                Error::invalid_protocol(
+                    "Writer features must be present when minimum writer version = 7"
+                )
+            );
+        }
+        Ok(Protocol {
+            min_reader_version,
+            min_writer_version,
+            reader_features,
+            writer_features,
+        })
+    }
+
     pub fn try_new_from_data(data: &dyn EngineData) -> DeltaResult<Option<Protocol>> {
         let mut visitor = ProtocolVisitor::default();
         data.extract(get_log_schema().project(&[PROTOCOL_NAME])?, &mut visitor)?;
-        visitor
-            .protocol
-            .map(UnvalidatedProtocol::validate)
-            .transpose()
+        Ok(visitor.protocol)
+    }
+
+    pub fn min_reader_version(&self) -> i32 {
+        self.min_reader_version
+    }
+
+    pub fn min_writer_version(&self) -> i32 {
+        self.min_writer_version
     }
 
     pub fn has_reader_feature(&self, feature: &ReaderFeatures) -> bool {
@@ -160,58 +196,35 @@ impl Protocol {
             .as_ref()
             .is_some_and(|features| features.iter().any(|f| f == feature.as_ref()))
     }
-}
 
-mod protocol {
-    use super::*;
-
-    #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
-    pub(crate) struct UnvalidatedProtocol(Protocol);
-
-    impl UnvalidatedProtocol {
-        #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
-        pub(crate) fn validate(self) -> DeltaResult<Protocol> {
-            let protocol = self.0;
-            require!(
-                protocol.min_reader_version <= KERNEL_READER_VERSION,
-                Error::invalid_protocol(format!(
-                    "Minimum reader version exceeds kernel reader version {KERNEL_READER_VERSION}"
-                ))
-            );
-            require!(
-                protocol.min_writer_version <= KERNEL_WRITER_VERSION,
-                Error::invalid_protocol(format!(
-                    "Minimum writer version exceeds kernel writer version {KERNEL_WRITER_VERSION}"
-                ))
-            );
-            if protocol.min_reader_version == 3 {
-                require!(
-                    protocol.reader_features.is_some(),
-                    Error::invalid_protocol(
-                        "Reader features must be present when minimum reader version = 3"
-                    )
-                );
+    /// Check if reading a table with this protocol is supported. That is: does the kernel support
+    /// the specified protocol reader version and all enabled reader features?
+    // TODO: should this return result so we can say _why_ it isn't supported?
+    pub fn is_read_supported(&self) -> bool {
+        if self.min_reader_version > KERNEL_READER_VERSION {
+            return false;
+        }
+        match &self.reader_features {
+            // check that all reader features are subset of supported
+            Some(reader_features) if self.min_reader_version == 3 => {
+                let parsed_features: Result<HashSet<_>, _> = reader_features
+                    .iter()
+                    .map(|s| s.parse::<ReaderFeatures>())
+                    .collect();
+                match parsed_features {
+                    Ok(features) => features.is_subset(&SUPPORTED_READER_FEATURES),
+                    Err(_) => false,
+                }
             }
-            if protocol.min_writer_version == 7 {
-                require!(
-                    protocol.writer_features.is_some(),
-                    Error::invalid_protocol(
-                        "Writer features must be present when minimum writer version = 7"
-                    )
-                );
-            }
-            require!(
-                !protocol.has_reader_feature(&ReaderFeatures::V2Checkpoint),
-                Error::unsupported("V2 Checkpoint reader feature is not yet supported")
-            );
-            Ok(protocol)
+            None if self.min_reader_version == 1 || self.min_reader_version == 2 => true,
+            _ => false,
         }
     }
 
-    impl From<Protocol> for UnvalidatedProtocol {
-        fn from(value: Protocol) -> Self {
-            Self(value)
-        }
+    /// Check if writing to a table with this protocol is supported. That is: does the kernel
+    /// support the specified protocol writer version and all enabled writer features?
+    pub fn is_write_supported(&self) -> bool {
+        false
     }
 }
 
@@ -564,17 +577,21 @@ mod tests {
                 reader_features: None,
                 writer_features: None,
             },
-            Protocol {
-                min_reader_version: 4,
-                min_writer_version: 7,
-                reader_features: Some(vec![]),
-                writer_features: Some(vec![]),
-            },
         ];
-        for invalid_protocol in invalid_protocols {
-            let unvalidated = UnvalidatedProtocol::from(invalid_protocol);
+        for Protocol {
+            min_reader_version,
+            min_writer_version,
+            reader_features,
+            writer_features,
+        } in invalid_protocols
+        {
             assert!(matches!(
-                unvalidated.validate(),
+                Protocol::new(
+                    min_reader_version,
+                    min_writer_version,
+                    reader_features,
+                    writer_features
+                ),
                 Err(Error::InvalidProtocol(_)),
             ));
         }
@@ -582,13 +599,22 @@ mod tests {
 
     #[test]
     fn test_v2_checkpoint_unsupported() {
-        let unsupported = Protocol {
-            min_reader_version: 3,
-            min_writer_version: 7,
-            reader_features: Some(vec![ReaderFeatures::V2Checkpoint.to_string()]),
-            writer_features: Some(vec![ReaderFeatures::V2Checkpoint.to_string()]),
-        };
-        let unvalidated = UnvalidatedProtocol::from(unsupported);
-        assert!(matches!(unvalidated.validate(), Err(Error::Unsupported(_))));
+        let protocol = Protocol::new(
+            3,
+            7,
+            Some(vec![ReaderFeatures::V2Checkpoint.to_string()]),
+            Some(vec![ReaderFeatures::V2Checkpoint.to_string()]),
+        )
+        .unwrap();
+        assert_eq!(protocol.is_read_supported(), false);
+
+        let protocol = Protocol::new(
+            4,
+            7,
+            Some(vec![ReaderFeatures::V2Checkpoint.to_string()]),
+            Some(vec![ReaderFeatures::V2Checkpoint.to_string()]),
+        )
+        .unwrap();
+        assert_eq!(protocol.is_read_supported(), false);
     }
 }
