@@ -155,14 +155,14 @@ impl Protocol {
                 );
                 if protocol.min_reader_version == 3 {
                     require!(protocol.reader_features.is_some(),
-                        Error::invalid_protocol(format!(
-                          "Reader features must be present when minimum reader version = 3"))
+                        Error::invalid_protocol(
+                          "Reader features must be present when minimum reader version = 3")
                     );
                 }
                 if protocol.min_writer_version == 7 {
                     require!(protocol.writer_features.is_some(),
-                        Error::invalid_protocol(format!(
-                          "Writer features must be present when minimum writer version = 7"))
+                        Error::invalid_protocol(
+                          "Writer features must be present when minimum writer version = 7")
                     );
                 }
                 require!(!protocol.has_reader_feature(&ReaderFeatures::V2Checkpoint),

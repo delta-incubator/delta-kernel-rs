@@ -12,10 +12,10 @@ use url::Url;
 
 use crate::actions::{get_log_schema, Metadata, Protocol, METADATA_NAME, PROTOCOL_NAME};
 use crate::expressions::column_expr;
-use crate::table_features::{ColumnMappingMode, COLUMN_MAPPING_MODE_KEY};
 use crate::path::ParsedLogPath;
 use crate::scan::ScanBuilder;
 use crate::schema::{Schema, SchemaRef};
+use crate::table_features::{ColumnMappingMode, COLUMN_MAPPING_MODE_KEY};
 use crate::utils::require;
 use crate::{DeltaResult, Engine, Error, FileMeta, FileSystemClient, Version};
 use crate::{EngineData, Expression, ExpressionRef};
