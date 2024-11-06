@@ -14,7 +14,6 @@ use itertools::Itertools;
 
 #[derive(Debug)]
 #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
-#[cfg_attr(not(feature = "developer-visibility"), visibility::make(pub(crate)))]
 pub(crate) struct LogSegment {
     pub log_root: Url,
     /// Reverse order sorted commit files in the log segment
@@ -62,16 +61,14 @@ impl LogSegment {
             )?
             .map_ok(|batch| (batch, false));
 
-        let batches = commit_stream.chain(checkpoint_stream);
-
-        Ok(batches)
+        Ok(commit_stream.chain(checkpoint_stream))
     }
 
     // Get the most up-to-date Protocol and Metadata actions
     pub(crate) fn read_metadata(&self, engine: &dyn Engine) -> DeltaResult<(Metadata, Protocol)> {
         let data_batches = self.replay_for_metadata(engine)?;
-        let mut metadata_opt: Option<Metadata> = None;
-        let mut protocol_opt: Option<Protocol> = None;
+        let mut metadata_opt = None;
+        let mut protocol_opt = None;
         for batch in data_batches {
             let (batch, _) = batch?;
             if metadata_opt.is_none() {
@@ -80,15 +77,13 @@ impl LogSegment {
             if protocol_opt.is_none() {
                 protocol_opt = crate::actions::Protocol::try_new_from_data(batch.as_ref())?;
             }
-            if metadata_opt.is_some() && protocol_opt.is_some() {
-                // we've found both, we can stop
-                break;
+            if let (Some(m), Some(p)) = (metadata_opt, protocol_opt) {
+                return Ok((m, p))
             }
         }
         match (metadata_opt, protocol_opt) {
-            (Some(m), Some(p)) => Ok((m, p)),
-            (None, Some(_)) => Err(Error::MissingMetadata),
-            (Some(_), None) => Err(Error::MissingProtocol),
+            (_, Some(_)) => Err(Error::MissingMetadata),
+            (Some(_), _) => Err(Error::MissingProtocol),
             _ => Err(Error::MissingMetadataAndProtocol),
         }
     }
