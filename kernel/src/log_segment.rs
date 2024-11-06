@@ -70,23 +70,6 @@ impl LogSegment {
         Ok(commit_stream.chain(checkpoint_stream))
     }
 
-    pub(crate) fn replay_commits(
-        &self,
-        engine: &dyn Engine,
-        commit_read_schema: SchemaRef,
-        meta_predicate: Option<ExpressionRef>,
-    ) -> DeltaResult<
-        impl Iterator<
-            Item = DeltaResult<Box<dyn Iterator<Item = DeltaResult<Box<dyn EngineData>>> + Send>>,
-        >,
-    > {
-        let json_client = engine.get_json_handler();
-        let commit_files = self.commit_files.clone();
-        let commit_stream = commit_files.into_iter().map(move |file| {
-            json_client.read_json_files(&[file], commit_read_schema.clone(), meta_predicate.clone())
-        });
-        Ok(commit_stream)
-    }
     // Get the most up-to-date Protocol and Metadata actions
     pub(crate) fn read_metadata(&self, engine: &dyn Engine) -> DeltaResult<(Metadata, Protocol)> {
         let data_batches = self.replay_for_metadata(engine)?;
@@ -196,6 +179,7 @@ impl<'a> LogSegmentBuilder<'a> {
             _ => Self::list_log_files(fs_client.as_ref(), &log_url)?,
         };
 
+        // We assume listing returned ordered. If `in_order_commit_files` is false, we want reverse order.
         if !in_order_commit_files {
             // We assume listing returned ordered, we want reverse order
             commit_files.reverse();
@@ -292,9 +276,6 @@ impl<'a> LogSegmentBuilder<'a> {
             "fs_client.list_from() didn't return a sorted listing! {:?}",
             commit_files
         );
-
-        // We assume listing returned ordered, we want reverse order
-        let commit_files = commit_files.into_iter().rev().collect();
 
         Ok((commit_files, checkpoint_files, max_checkpoint_version))
     }
