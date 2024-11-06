@@ -1,7 +1,6 @@
 //! Represents a segment of a delta log. [`LogSegment`] wraps a set of  checkpoint and commit
 //! files.
 
-use crate::expressions::column_expr;
 use std::sync::{Arc, LazyLock};
 use url::Url;
 
@@ -77,14 +76,16 @@ impl LogSegment {
             if protocol_opt.is_none() {
                 protocol_opt = Protocol::try_new_from_data(batch.as_ref())?;
             }
-            if let (Some(m), Some(p)) = (metadata_opt, protocol_opt) {
-                return Ok((m, p))
+            if metadata_opt.is_some() && protocol_opt.is_some() {
+                // we've found both, we can stop
+                break;
             }
         }
         match (metadata_opt, protocol_opt) {
-            (_, Some(_)) => Err(Error::MissingMetadata),
-            (Some(_), _) => Err(Error::MissingProtocol),
-            _ => Err(Error::MissingMetadataAndProtocol),
+            (Some(m), Some(p)) => Ok((m, p)),
+            (None, Some(_)) => Err(Error::MissingMetadata),
+            (Some(_), None) => Err(Error::MissingProtocol),
+            (None, None) => Err(Error::MissingMetadataAndProtocol),
         }
     }
 
