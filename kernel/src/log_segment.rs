@@ -70,6 +70,23 @@ impl LogSegment {
         Ok(commit_stream.chain(checkpoint_stream))
     }
 
+    pub(crate) fn replay_commits(
+        &self,
+        engine: &dyn Engine,
+        commit_read_schema: SchemaRef,
+        meta_predicate: Option<ExpressionRef>,
+    ) -> DeltaResult<
+        impl Iterator<
+            Item = DeltaResult<Box<dyn Iterator<Item = DeltaResult<Box<dyn EngineData>>> + Send>>,
+        >,
+    > {
+        let json_client = engine.get_json_handler();
+        let commit_files = self.commit_files.clone();
+        let commit_stream = commit_files.into_iter().map(move |file| {
+            json_client.read_json_files(&[file], commit_read_schema.clone(), meta_predicate.clone())
+        });
+        Ok(commit_stream)
+    }
     // Get the most up-to-date Protocol and Metadata actions
     pub(crate) fn read_metadata(&self, engine: &dyn Engine) -> DeltaResult<(Metadata, Protocol)> {
         let data_batches = self.replay_for_metadata(engine)?;
@@ -121,7 +138,8 @@ pub struct LogSegmentBuilder<'a> {
     checkpoint: Option<CheckpointMetadata>,
     start_version: Option<Version>,
     end_version: Option<Version>,
-    no_checkpoint: bool,
+    no_checkpoint_files: bool,
+    in_order_commit_files: bool,
 }
 impl<'a> LogSegmentBuilder<'a> {
     pub fn new(fs_client: Arc<dyn FileSystemClient>, log_root: &'a Url) -> Self {
@@ -131,7 +149,8 @@ impl<'a> LogSegmentBuilder<'a> {
             checkpoint: None,
             start_version: None,
             end_version: None,
-            no_checkpoint: false,
+            no_checkpoint_files: false,
+            in_order_commit_files: false,
         }
     }
 
@@ -148,8 +167,12 @@ impl<'a> LogSegmentBuilder<'a> {
         let _ = self.end_version.insert(version);
         self
     }
-    pub fn set_omit_checkpoints(mut self) -> Self {
-        self.no_checkpoint = true;
+    pub fn with_no_checkpoint_files(mut self) -> Self {
+        self.no_checkpoint_files = true;
+        self
+    }
+    pub fn with_in_order_commit_files(mut self) -> Self {
+        self.in_order_commit_files = true;
         self
     }
     pub fn build(self) -> DeltaResult<LogSegment> {
@@ -159,10 +182,11 @@ impl<'a> LogSegmentBuilder<'a> {
             checkpoint,
             start_version,
             end_version,
-            no_checkpoint,
+            no_checkpoint_files,
+            in_order_commit_files,
         } = self;
         let log_url = log_root.join("_delta_log/").unwrap();
-        let (mut commit_files, checkpoint_files) = match (checkpoint, end_version) {
+        let (mut commit_files, mut checkpoint_files) = match (checkpoint, end_version) {
             (Some(cp), None) => {
                 Self::list_log_files_with_checkpoint(&cp, fs_client.as_ref(), &log_url)?
             }
@@ -172,14 +196,29 @@ impl<'a> LogSegmentBuilder<'a> {
             _ => Self::list_log_files(fs_client.as_ref(), &log_url)?,
         };
 
+        if !in_order_commit_files {
+            // We assume listing returned ordered, we want reverse order
+            commit_files.reverse();
+        }
+
         // remove all files above requested version
         if let Some(end_version) = end_version {
             commit_files.retain(|log_path| log_path.version <= end_version);
         }
 
+        // Remove checkpoint files
+        if no_checkpoint_files {
+            checkpoint_files.clear();
+        }
+
         // only keep commit files above the checkpoint we found
         if let Some(checkpoint_file) = checkpoint_files.first() {
             commit_files.retain(|log_path| checkpoint_file.version < log_path.version);
+        }
+
+        // only keep commit files above the checkpoint we found
+        if let Some(start_version) = start_version {
+            commit_files.retain(|log_path| start_version <= log_path.version);
         }
 
         // get the effective version from chosen files
@@ -436,12 +475,17 @@ mod tests {
         );
 
         let url = Url::parse("memory:///_delta_log/").expect("valid url");
-        let (commit_files, checkpoint_files) =
+        let (mut commit_files, checkpoint_files) =
             LogSegmentBuilder::list_log_files_with_checkpoint(&checkpoint_metadata, &client, &url)
                 .unwrap();
+
+        // Make the most recent commit the first in iterator
+        commit_files.reverse();
+
         assert_eq!(checkpoint_files.len(), 1);
         assert_eq!(commit_files.len(), 2);
         assert_eq!(checkpoint_files[0].version, 5);
+        println!("commitfiles: {:?}", commit_files);
         assert_eq!(commit_files[0].version, 7);
         assert_eq!(commit_files[1].version, 6);
     }
