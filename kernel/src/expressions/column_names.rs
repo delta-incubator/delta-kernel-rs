@@ -3,6 +3,7 @@ use crate::{DeltaResult, Error};
 use std::borrow::Borrow;
 use std::fmt::{Display, Formatter};
 use std::hash::{Hash, Hasher};
+use std::iter::Peekable;
 use std::ops::Deref;
 
 /// A (possibly nested) column name.
@@ -119,18 +120,18 @@ impl Hash for ColumnName {
 }
 
 /// Formats the column name as a string, with fields delimited by periods. Fields containing special
-/// characters are escaped by square brackets:
+/// characters are escaped by backtick symbols:
 ///
 /// ```
 /// # use delta_kernel::expressions::ColumnName;
-/// assert_eq!(ColumnName::new(["a", "b.c", "d"]).to_string(), "a.[b.c].d");
+/// assert_eq!(ColumnName::new(["a", "b.c", "d"]).to_string(), "a.`b.c`.d");
 /// ```
 ///
-/// Square brackets inside escaped field names are themselves escaped by doubling:
+/// Backticks inside escaped field names are themselves escaped by doubling:
 ///
 /// ```
 /// # use delta_kernel::expressions::ColumnName;
-/// assert_eq!(ColumnName::new(["a", "b.[c].d", "e"]).to_string(), "a.[b.[[c]].d].e");
+/// assert_eq!(ColumnName::new(["a", "b.`c`.d", "e"]).to_string(), "a.`b.``c``.d`.e");
 /// ```
 ///
 /// The string representation is lossless, and can be parsed back into a `ColumnName` using
@@ -156,19 +157,18 @@ impl Display for ColumnName {
             }
 
             let digit_char = |c: char| c.is_ascii_digit();
-            let illegal_char = |c: char| !c.is_ascii_alphanumeric() && c != '_';
-            if s.is_empty() || s.starts_with(digit_char) || s.contains(illegal_char) {
-                // Special situation detected. For safety, surround the field name with brackets
-                // (with proper escaping if the field name itself contains brackets).
-                f.write_char('[')?;
+            let special_char = |c: char| !c.is_ascii_alphanumeric() && c != '_';
+            if s.is_empty() || s.starts_with(digit_char) || s.contains(special_char) {
+                // Special situation detected. For safety, surround the field name with backticks
+                // (with proper escaping if the field name itself contains backticks).
+                f.write_char('`')?;
                 for c in s.chars() {
                     match c {
-                        '[' => f.write_str("[[")?,
-                        ']' => f.write_str("]]")?,
+                        '`' => f.write_str("``")?,
                         _ => f.write_char(c)?,
                     }
                 }
-                f.write_char(']')?;
+                f.write_char('`')?;
             } else {
                 // The fild name contains no special characters, so emit it as-is.
                 f.write_str(s)?;
@@ -178,23 +178,27 @@ impl Display for ColumnName {
     }
 }
 
-/// Parses a column name from a string. Field names are separated by dots. Field names enclosed in
-/// square brackets may contain arbitrary characters, including periods and spaces. To include a
-/// literal square bracket in a field name, escape it by doubling it, e.g.:
+fn drop_leading_whitespace(iter: &mut Peekable<impl Iterator<Item = char>>) {
+    while let Some(_) = iter.next_if(|c| c.is_whitespace()) {}
+}
+
+/// Parses a column name from a string. Field names are separated by dots. Whitespace between fields
+/// is ignored. Field names enclosed in backticks may contain arbitrary characters, including
+/// periods and spaces. To include a literal backtick in a field name, escape it by doubling, e.g.:
 ///
 /// ```
 /// # use delta_kernel::expressions::ColumnName;
-/// assert_eq!(ColumnName::new(["a", "b.[c].d", "e"]).to_string(), "a.[b.[[c]].d].e");
+/// assert_eq!(ColumnName::new(["a", "b.`c`.d", "e"]).to_string(), "a.`b.``c``.d`.e");
 /// ```
 ///
 /// NOTE: Unlike the conversion from `ColumnName` to `String` and back, a conversion from `String`
-/// to `ColumnName` and back may not produce an identical string in case the original string
-/// included unnecessary field escapes, e.g.
+/// to `ColumnName` and back may not exactly match the original string, if the latter included
+/// whitespace or unnecessary field escapes, e.g.:
 ///
 /// ```
 /// # use delta_kernel::expressions::ColumnName;
-/// let parsed: ColumnName = "[a].[b.[[c]].d].[e]".parse().unwrap();
-/// assert_eq!(parsed.to_string(), "a.[b.[[c]].d].e");
+/// let parsed: ColumnName = " `a` . `b.``c``.d` . `e` ".parse().unwrap();
+/// assert_eq!(parsed.to_string(), "a.`b.``c``.d`.e");
 /// ```
 impl std::str::FromStr for ColumnName {
     type Err = Error;
@@ -205,13 +209,15 @@ impl std::str::FromStr for ColumnName {
         // `ColumnName::new([]).to_string()` is `""`, so we choose the latter because it produces a
         // lossless round trip from `ColumnName` to  `String` and back.
         let mut chars = s.chars().peekable();
+        drop_leading_whitespace(&mut chars);
         if chars.peek().is_none() {
             return Ok(ColumnName::new(&[] as &[String]));
         }
 
         let mut path = vec![];
         loop {
-            let (field_name, done) = if chars.next_if_eq(&'[').is_none() {
+            drop_leading_whitespace(&mut chars);
+            let (field_name, done) = if chars.next_if_eq(&'`').is_none() {
                 parse_simple(&mut chars)?
             } else {
                 parse_escaped(&mut chars)?
@@ -224,16 +230,25 @@ impl std::str::FromStr for ColumnName {
     }
 }
 
-type Chars<'a> = std::iter::Peekable<std::str::Chars<'a>>;
+type Chars<'a> = Peekable<std::str::Chars<'a>>;
 
 /// Helper for `impl FromStr for ColumnName`. Returns the parsed field name and a boolean value that
 /// indicates whether parsing reached EOF.
 fn parse_simple(chars: &mut Chars<'_>) -> DeltaResult<(String, bool)> {
     let mut name = String::new();
     let mut allow_digits = false; // first character cannot be a digit
+    let mut field_finished = false;
     for c in chars {
         match c {
             '.' => return Ok((name, false)),
+            c if c.is_whitespace() => {
+                field_finished = true;
+            }
+            c if field_finished => {
+                return Err(Error::generic(format!(
+                    "Expected dot after field name, got '{c}'"
+                )))
+            }
             '_' | 'a'..='z' | 'A'..='Z' => name.push(c),
             '0'..='9' => {
                 if allow_digits {
@@ -244,7 +259,7 @@ fn parse_simple(chars: &mut Chars<'_>) -> DeltaResult<(String, bool)> {
                     )));
                 }
             }
-            _ => {
+            c => {
                 return Err(Error::generic(format!(
                     "Invalid character '{c}' in unescaped field name"
                 )))
@@ -255,36 +270,36 @@ fn parse_simple(chars: &mut Chars<'_>) -> DeltaResult<(String, bool)> {
     Ok((name, true)) // EOF
 }
 
-/// Helper `impl FromStr for ColumnName`. Returns the parsed field name and a boolean value that
-/// indicates whether parsing reached EOF.
+/// Helper `impl FromStr for ColumnName` for parsing complex field names escaped with backticks,
+/// e.g. "`ab``c``d`". Returns the parsed field name and a boolean value where true indicates this
+/// was the last field name (i.e. parsing is complete).
 fn parse_escaped(chars: &mut Chars<'_>) -> DeltaResult<(String, bool)> {
     let mut name = String::new();
     while let Some(c) = chars.next() {
         match c {
-            '[' => match chars.next() {
-                Some('[') => name.push('['), // escaped delimiter (keep going)
-                _ => {
-                    return Err(Error::generic(
-                        "Unescaped '[' delimiter inside escaped field name",
-                    ))
+            '`' => match chars.next() {
+                Some('`') => name.push('`'), // escaped delimiter (field continues)
+                mut other => {
+                    // The field is done. Drop leading whitespace before a potential dot. Our caller
+                    // will handle any whitespace after that dot.
+                    while other.is_some_and(char::is_whitespace) {
+                        other = chars.next();
+                    }
+                    match other {
+                        None => return Ok((name, true)), // no more fields
+                        Some('.') => return Ok((name, false)), // another field follows
+                        Some(other) => return Err(Error::generic(format!(
+                            "Invalid character '{other}' after escaped field name",
+                        ))),
+                    }
                 }
-            },
-            ']' => match chars.next() {
-                Some(']') => name.push(']'), // escaped delimiter (keep going)
-                Some('.') => return Ok((name, false)),
-                Some(c) => {
-                    return Err(Error::generic(format!(
-                        "Invalid character '{c}' after field name"
-                    )))
-                }
-                None => return Ok((name, true)), // EOF
             },
             _ => name.push(c),
         }
     }
-    Err(Error::generic(
-        "Escaped field name lacks a closing ']' delimiter",
-    ))
+    Err(Error::generic(format!(
+        "Escaped field name starting with '{name}' lacks a closing '`' delimiter",
+    )))
 }
 
 /// Creates a nested column name whose field names are all simple column names (containing only
@@ -465,43 +480,48 @@ mod test {
         let cases = [
             ("", Some(ColumnName::new(&[] as &[String]))), // the ambiguous case!
             (".", Some(ColumnName::new(["", ""]))),
-            (" ", None),
+            ("  .  ", Some(ColumnName::new(["", ""]))),
+            (" ", Some(ColumnName::new(&[] as &[String]))),
             ("0", None),
             (".a", Some(ColumnName::new(["", "a"]))),
             ("a.", Some(ColumnName::new(["a", ""]))),
+            ("  a  .  ", Some(ColumnName::new(["a", ""]))),
             ("a..b", Some(ColumnName::new(["a", "", "b"]))),
-            ("[a", None),
-            ("a]", None),
-            ("a[b]", None),
-            ("[a]b", None),
-            ("[a][b]", None),
+            ("`a", None),
+            ("a`", None),
+            ("a`b`", None),
+            ("`a`b", None),
+            ("`a``b`", Some(ColumnName::new(["a`b"]))),
+            ("  `a``b`  ", Some(ColumnName::new(["a`b"]))),
+            ("`a`` b`", Some(ColumnName::new(["a` b"]))),
             ("a", Some(ColumnName::new(["a"]))),
             ("a0", Some(ColumnName::new(["a0"]))),
-            ("[a]", Some(ColumnName::new(["a"]))),
-            ("[ ]", Some(ColumnName::new([" "]))),
-            ("[0]", Some(ColumnName::new(["0"]))),
-            ("[.]", Some(ColumnName::new(["."]))),
-            ("[.].[.]", Some(ColumnName::new([".", "."]))),
-            ("[ ].[ ]", Some(ColumnName::new([" ", " "]))),
+            ("`a`", Some(ColumnName::new(["a"]))),
+            ("  `a`  ", Some(ColumnName::new(["a"]))),
+            ("` `", Some(ColumnName::new([" "]))),
+            ("  ` `  ", Some(ColumnName::new([" "]))),
+            ("`0`", Some(ColumnName::new(["0"]))),
+            ("`.`", Some(ColumnName::new(["."]))),
+            ("`.`.`.`", Some(ColumnName::new([".", "."]))),
+            ("` `.` `", Some(ColumnName::new([" ", " "]))),
             ("a.b", Some(ColumnName::new(["a", "b"]))),
-            ("a.[b]", Some(ColumnName::new(["a", "b"]))),
-            ("[a].b", Some(ColumnName::new(["a", "b"]))),
-            ("[a].[b]", Some(ColumnName::new(["a", "b"]))),
-            ("[a].[b].[c]", Some(ColumnName::new(["a", "b", "c"]))),
-            ("[a[].[b]]]", None),
-            ("[a[[].[b]]", None),
-            ("[a[].[b]]]", None),
-            ("[a[[].[b]]", None),
-            ("[a[[].[b]]]", Some(ColumnName::new(["a[", "b]"]))),
-            ("[a.[b]].c]", None),
-            ("[a.[[b].c]", None),
-            ("[a.[[b]].c]", Some(ColumnName::new(["a.[b].c"]))),
-            ("a[.b]]", None),
+            ("a b", None),
+            ("a.`b`", Some(ColumnName::new(["a", "b"]))),
+            ("`a`.b", Some(ColumnName::new(["a", "b"]))),
+            ("`a`.`b`", Some(ColumnName::new(["a", "b"]))),
+            ("`a`.`b`.`c`", Some(ColumnName::new(["a", "b", "c"]))),
+            ("`a``.`b```", None),
+            ("`a```.`b``", None),
+            ("`a```.`b```", Some(ColumnName::new(["a`", "b`"]))),
+            ("`a.`b``.c`", None),
+            ("`a.``b`.c`", None),
+            ("`a.``b``.c`", Some(ColumnName::new(["a.`b`.c"]))),
+            ("a`.b``", None),
         ];
         for (input, expected_output) in cases {
             let output: DeltaResult<ColumnName> = input.parse();
             match (&output, &expected_output) {
-                (Ok(output), Some(expected_output)) => assert_eq!(output, expected_output),
+                (Ok(output), Some(expected_output)) => assert_eq!(output, expected_output, "from {input}"),
                 (Err(_), None) => {}
                 _ => panic!("Expected {input} to parse as {expected_output:?}, got {output:?}"),
             }
@@ -512,22 +532,22 @@ mod test {
     fn test_column_name_to_string() {
         let cases = [
             ("", ColumnName::new(&[] as &[String])), // the ambiguous case!
-            ("[].[]", ColumnName::new(["", ""])),
-            ("[].a", ColumnName::new(["", "a"])),
-            ("a.[]", ColumnName::new(["a", ""])),
-            ("a.[].b", ColumnName::new(["a", "", "b"])),
+            ("``.``", ColumnName::new(["", ""])),
+            ("``.a", ColumnName::new(["", "a"])),
+            ("a.``", ColumnName::new(["a", ""])),
+            ("a.``.b", ColumnName::new(["a", "", "b"])),
             ("a", ColumnName::new(["a"])),
             ("a0", ColumnName::new(["a0"])),
-            ("[a ]", ColumnName::new(["a "])),
-            ("[ ]", ColumnName::new([" "])),
-            ("[0]", ColumnName::new(["0"])),
-            ("[.]", ColumnName::new(["."])),
-            ("[.].[.]", ColumnName::new([".", "."])),
-            ("[ ].[ ]", ColumnName::new([" ", " "])),
+            ("`a `", ColumnName::new(["a "])),
+            ("` `", ColumnName::new([" "])),
+            ("`0`", ColumnName::new(["0"])),
+            ("`.`", ColumnName::new(["."])),
+            ("`.`.`.`", ColumnName::new([".", "."])),
+            ("` `.` `", ColumnName::new([" ", " "])),
             ("a.b", ColumnName::new(["a", "b"])),
             ("a.b.c", ColumnName::new(["a", "b", "c"])),
-            ("a.[b.c].d", ColumnName::new(["a", "b.c", "d"])),
-            ("[a[[].[b]]]", ColumnName::new(["a[", "b]"])),
+            ("a.`b.c`.d", ColumnName::new(["a", "b.c", "d"])),
+            ("`a```.`b```", ColumnName::new(["a`", "b`"])),
         ];
         for (expected_output, input) in cases {
             let output = input.to_string();
@@ -537,11 +557,11 @@ mod test {
             assert_eq!(parsed, input);
         }
 
-        // Ensure unnecessary escaping is tolerated
+        // Ensure unnecessary escaping and whitespace is tolerated
         let cases = [
-            ("[a]", "a", ColumnName::new(["a"])),
-            ("[a0]", "a0", ColumnName::new(["a0"])),
-            ("[a].[b]", "a.b", ColumnName::new(["a", "b"])),
+            ("  `a`  ", "a", ColumnName::new(["a"])),
+            ("  `a0`  ", "a0", ColumnName::new(["a0"])),
+            ("  `a`  .  `b`  ", "a.b", ColumnName::new(["a", "b"])),
         ];
         for (input, expected_output, expected_parsed) in cases {
             let parsed: ColumnName = input.parse().unwrap();
