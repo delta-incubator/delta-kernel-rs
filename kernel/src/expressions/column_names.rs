@@ -226,7 +226,8 @@ impl std::str::FromStr for ColumnName {
 
 type Chars<'a> = std::iter::Peekable<std::str::Chars<'a>>;
 
-/// Helper for `impl FromStr for ColumnName`.
+/// Helper for `impl FromStr for ColumnName`. Returns the parsed field name and a boolean value that
+/// indicates whether parsing reached EOF.
 fn parse_simple(chars: &mut Chars<'_>) -> DeltaResult<(String, bool)> {
     let mut name = String::new();
     let mut allow_digits = false; // first character cannot be a digit
@@ -254,7 +255,8 @@ fn parse_simple(chars: &mut Chars<'_>) -> DeltaResult<(String, bool)> {
     Ok((name, true)) // EOF
 }
 
-/// Helper `impl FromStr for ColumnName`.
+/// Helper `impl FromStr for ColumnName`. Returns the parsed field name and a boolean value that
+/// indicates whether parsing reached EOF.
 fn parse_escaped(chars: &mut Chars<'_>) -> DeltaResult<(String, bool)> {
     let mut name = String::new();
     while let Some(c) = chars.next() {
