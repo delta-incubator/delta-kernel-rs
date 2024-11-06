@@ -495,7 +495,7 @@ fn transform_to_logical_internal(
                     parse_partition_value(partition_values.get(name), field.data_type())?;
                 Ok::<Expression, Error>(value_expression.into())
             }
-            ColumnType::Selected(field_name) => Ok(field_name.clone().into()),
+            ColumnType::Selected(field_name) => Ok(ColumnName::new([field_name]).into()),
         })
         .try_collect()?;
     let read_expression = Expression::Struct(all_fields);
