@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 use url::Url;
 
-use crate::actions::{Metadata, Protocol};
+use crate::actions::{get_log_schema, Metadata, Protocol, METADATA_NAME, PROTOCOL_NAME};
 use crate::features::{ColumnMappingMode, COLUMN_MAPPING_MODE_KEY};
 use crate::log_segment::LogSegment;
 use crate::path::ParsedLogPath;
@@ -19,6 +19,106 @@ use crate::utils::require;
 use crate::{DeltaResult, Engine, Error, FileSystemClient, Version};
 
 const LAST_CHECKPOINT_FILE_NAME: &str = "_last_checkpoint";
+
+#[derive(Debug)]
+#[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
+#[cfg_attr(not(feature = "developer-visibility"), visibility::make(pub(crate)))]
+struct LogSegment {
+    log_root: Url,
+    /// Reverse order sorted commit files in the log segment
+    pub(crate) commit_files: Vec<FileMeta>,
+    /// checkpoint files in the log segment.
+    pub(crate) checkpoint_files: Vec<FileMeta>,
+}
+
+impl LogSegment {
+    /// Read a stream of log data from this log segment.
+    ///
+    /// The log files will be read from most recent to oldest.
+    /// The boolean flags indicates whether the data was read from
+    /// a commit file (true) or a checkpoint file (false).
+    ///
+    /// `read_schema` is the schema to read the log files with. This can be used
+    /// to project the log files to a subset of the columns.
+    ///
+    /// `meta_predicate` is an optional expression to filter the log files with. It is _NOT_ the
+    /// query's predicate, but rather a predicate for filtering log files themselves.
+    #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
+    #[cfg_attr(not(feature = "developer-visibility"), visibility::make(pub(crate)))]
+    fn replay(
+        &self,
+        engine: &dyn Engine,
+        commit_read_schema: SchemaRef,
+        checkpoint_read_schema: SchemaRef,
+        meta_predicate: Option<ExpressionRef>,
+    ) -> DeltaResult<impl Iterator<Item = DeltaResult<(Box<dyn EngineData>, bool)>> + Send> {
+        let json_client = engine.get_json_handler();
+        let commit_stream = json_client
+            .read_json_files(
+                &self.commit_files,
+                commit_read_schema,
+                meta_predicate.clone(),
+            )?
+            .map_ok(|batch| (batch, true));
+
+        let parquet_client = engine.get_parquet_handler();
+        let checkpoint_stream = parquet_client
+            .read_parquet_files(
+                &self.checkpoint_files,
+                checkpoint_read_schema,
+                meta_predicate,
+            )?
+            .map_ok(|batch| (batch, false));
+
+        let batches = commit_stream.chain(checkpoint_stream);
+
+        Ok(batches)
+    }
+
+    fn read_metadata(&self, engine: &dyn Engine) -> DeltaResult<Option<(Metadata, Protocol)>> {
+        let data_batches = self.replay_for_metadata(engine)?;
+        let mut metadata_opt: Option<Metadata> = None;
+        let mut protocol_opt: Option<Protocol> = None;
+        for batch in data_batches {
+            let (batch, _) = batch?;
+            if metadata_opt.is_none() {
+                metadata_opt = crate::actions::Metadata::try_new_from_data(batch.as_ref())?;
+            }
+            if protocol_opt.is_none() {
+                protocol_opt = crate::actions::Protocol::try_new_from_data(batch.as_ref())?;
+            }
+            if metadata_opt.is_some() && protocol_opt.is_some() {
+                // we've found both, we can stop
+                break;
+            }
+        }
+        match (metadata_opt, protocol_opt) {
+            (Some(m), Some(p)) => Ok(Some((m, p))),
+            (None, Some(_)) => Err(Error::MissingMetadata),
+            (Some(_), None) => Err(Error::MissingProtocol),
+            _ => Err(Error::MissingMetadataAndProtocol),
+        }
+    }
+
+    // Factored out to facilitate testing
+    fn replay_for_metadata(
+        &self,
+        engine: &dyn Engine,
+    ) -> DeltaResult<impl Iterator<Item = DeltaResult<(Box<dyn EngineData>, bool)>> + Send> {
+        let schema = get_log_schema().project(&[PROTOCOL_NAME, METADATA_NAME])?;
+        // filter out log files that do not contain metadata or protocol information
+        use Expression as Expr;
+        static META_PREDICATE: LazyLock<Option<ExpressionRef>> = LazyLock::new(|| {
+            Some(Arc::new(Expr::or(
+                Expr::column([METADATA_NAME, "id"]).is_not_null(),
+                Expr::column([PROTOCOL_NAME, "minReaderVersion"]).is_not_null(),
+            )))
+        });
+        // read the same protocol and metadata schema for both commits and checkpoints
+        self.replay(engine, schema.clone(), schema, META_PREDICATE.clone())
+    }
+}
+
 // TODO expose methods for accessing the files of a table (with file pruning).
 /// In-memory representation of a specific snapshot of a Delta table. While a `DeltaTable` exists
 /// throughout time, `Snapshot`s represent a view of a table at a specific point in time; they
