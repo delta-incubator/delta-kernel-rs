@@ -480,20 +480,16 @@ fn transform_to_logical_internal(
         .iter()
         .map(|field| match field {
             ColumnType::Partition(field_idx) => {
-                let field = global_state
-                    .logical_schema
-                    .fields
-                    .get_index(*field_idx)
-                    .ok_or_else(|| {
-                        Error::generic(
-                            "logical schema did not contain expected field, can't transform data",
-                        )
-                    })?
-                    .1;
+                let field = global_state.logical_schema.fields.get_index(*field_idx);
+                let Some((_, field)) = field else {
+                    return Err(Error::generic(
+                        "logical schema did not contain expected field, can't transform data",
+                    ));
+                };
                 let name = field.physical_name(global_state.column_mapping_mode)?;
                 let value_expression =
                     parse_partition_value(partition_values.get(name), field.data_type())?;
-                Ok::<Expression, Error>(value_expression.into())
+                Ok(value_expression.into())
             }
             ColumnType::Selected(field_name) => Ok(ColumnName::new([field_name]).into()),
         })
