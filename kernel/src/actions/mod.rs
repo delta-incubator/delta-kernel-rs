@@ -606,7 +606,7 @@ mod tests {
             Some(vec![ReaderFeatures::V2Checkpoint.to_string()]),
         )
         .unwrap();
-        assert_eq!(protocol.is_read_supported(), false);
+        assert!(!protocol.is_read_supported());
 
         let protocol = Protocol::new(
             4,
@@ -615,6 +615,6 @@ mod tests {
             Some(vec![ReaderFeatures::V2Checkpoint.to_string()]),
         )
         .unwrap();
-        assert_eq!(protocol.is_read_supported(), false);
+        assert!(!protocol.is_read_supported());
     }
 }
