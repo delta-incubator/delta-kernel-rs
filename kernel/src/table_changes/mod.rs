@@ -10,6 +10,7 @@ use crate::{
     features::ColumnMappingMode,
     log_segment::{LogSegment, LogSegmentBuilder},
     path::AsUrl,
+    scan::state::DvInfo,
     schema::Schema,
     snapshot::Snapshot,
     DeltaResult, Engine, EngineData, Error, Version,
@@ -17,9 +18,10 @@ use crate::{
 
 mod metadata_scanner;
 mod replay_scanner;
+mod state;
 pub mod table_changes_scan;
 
-pub type TableChangesScanData = (Box<dyn EngineData>, Vec<bool>, Arc<HashMap<String, String>>);
+pub type TableChangesScanData = (Box<dyn EngineData>, Vec<bool>, Arc<HashMap<String, DvInfo>>);
 
 static CDF_ENABLE_FLAG: &str = "delta.enableChangeDataFeed";
 

@@ -18,7 +18,7 @@ fn into_record_batch(engine_data: DeltaResult<Box<dyn EngineData>>) -> DeltaResu
 }
 fn main() -> DeltaResult<()> {
     let uri =
-        "/Users/oussama.saoudi/delta-kernel-rs/kernel/examples/change_data/deltalog-getChanges";
+        "/Users/oussama.saoudi/delta-kernel-rs/kernel/examples/change_data/table-with-dv-small";
     // build a table and get the lastest snapshot from it
     let table = Table::try_from_uri(uri)?;
 
@@ -31,8 +31,9 @@ fn main() -> DeltaResult<()> {
     let table_changes = table.table_changes(&engine, 0, None)?;
     let x = table_changes.into_scan_builder().build()?;
     let vec: Vec<ScanResult> = x.execute(&engine)?.try_collect()?;
+    println!("Vec len: {:?}", vec.len());
     for res in vec {
-        println!("{:?}", into_record_batch(res.raw_data)?)
+        // println!("{:?}", into_record_batch(res.raw_data)?)
     }
 
     Ok(())

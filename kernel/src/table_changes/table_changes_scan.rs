@@ -8,7 +8,7 @@ use itertools::Itertools;
 use tracing::debug;
 
 use crate::{
-    actions::{deletion_vector::split_vector, get_log_schema, ADD_NAME, REMOVE_NAME},
+    actions::{deletion_vector::split_vector, get_log_schema, Add, Remove, ADD_NAME, REMOVE_NAME},
     expressions,
     scan::{
         data_skipping::DataSkippingFilter,
@@ -18,6 +18,7 @@ use crate::{
         transform_to_logical_internal, ColumnType, ScanData, ScanResult,
     },
     schema::{SchemaRef, StructType},
+    table_changes::replay_scanner::AddRemoveCdcVisitor,
     DeltaResult, Engine, EngineData, ExpressionRef, FileMeta,
 };
 
@@ -257,6 +258,10 @@ impl TableChangesScan {
         &'a self,
         engine: &'a dyn Engine,
     ) -> DeltaResult<impl Iterator<Item = DeltaResult<ScanResult>> + 'a> {
+        struct ScanFileContext {
+            pub files: Vec<ScanFile>,
+            pub remove_dv: Arc<HashMap<String, DvInfo>>,
+        }
         struct ScanFile {
             path: String,
             size: i64,
@@ -264,14 +269,14 @@ impl TableChangesScan {
             partition_values: HashMap<String, String>,
         }
         fn scan_data_callback(
-            batches: &mut Vec<ScanFile>,
+            context: &mut ScanFileContext,
             path: &str,
             size: i64,
             _: Option<Stats>,
             dv_info: DvInfo,
             partition_values: HashMap<String, String>,
         ) {
-            batches.push(ScanFile {
+            context.files.push(ScanFile {
                 path: path.to_string(),
                 size,
                 dv_info,
@@ -283,21 +288,39 @@ impl TableChangesScan {
             "Executing scan with logical schema {:#?} and physical schema {:#?}",
             self.logical_schema, self.physical_schema
         );
+        // enum ScanFile {
+        //     Add { add: Add, remove_dv: Option<DvInfo> },
+        //     Remove(Remove),
+        // }
+        debug!(
+            "Executing scan with logical schema {:#?} and physical schema {:#?}",
+            self.logical_schema, self.physical_schema
+        );
 
         let global_state = Arc::new(self.global_scan_state());
         let scan_data = self.scan_data(engine)?;
-        let scan_files_iter = scan_data
-            .map(|res| {
-                let (data, vec, _) = res?;
-                let scan_files = vec![];
-                state::visit_scan_files(data.as_ref(), &vec, scan_files, scan_data_callback)
+        let scan_files_iter: Vec<_> = scan_data
+            .map(|res| -> DeltaResult<_> {
+                let (data, vec, remove_dv) = res?;
+                let context = ScanFileContext {
+                    files: vec![],
+                    remove_dv,
+                };
+                let context =
+                    state::visit_scan_files(data.as_ref(), &vec, context, scan_data_callback)?;
+                Ok(context
+                    .files
+                    .into_iter()
+                    .map(move |x| (x, context.remove_dv.clone())))
             })
-            // Iterator<DeltaResult<Vec<ScanFile>>> to Iterator<DeltaResult<ScanFile>>
-            .flatten_ok();
+            .flatten_ok()
+            .collect_vec();
 
         let result = scan_files_iter
-            .map(move |scan_file| -> DeltaResult<_> {
-                let scan_file = scan_file?;
+            .into_iter()
+            .map(move |scan_res| -> DeltaResult<_> {
+                let (scan_file, remove_dvs) = scan_res?;
+                println!("Remove dvs: {:?}", remove_dvs);
                 let file_path = self.table_changes.table_root.join(&scan_file.path)?;
                 let mut selection_vector = scan_file
                     .dv_info

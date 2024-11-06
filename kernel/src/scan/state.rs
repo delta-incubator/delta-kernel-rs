@@ -12,6 +12,7 @@ use crate::{
     schema::SchemaRef,
     DataVisitor, DeltaResult, Engine, EngineData, Error,
 };
+use roaring::RoaringTreemap;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
@@ -28,7 +29,7 @@ pub struct GlobalScanState {
 }
 
 /// this struct can be used by an engine to materialize a selection vector
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct DvInfo {
     pub(crate) deletion_vector: Option<DeletionVectorDescriptor>,
 }
@@ -51,19 +52,43 @@ impl DvInfo {
         self.deletion_vector.is_some()
     }
 
-    pub fn get_selection_vector(
+    pub fn as_dv_tree_map(
         &self,
         engine: &dyn Engine,
         table_root: &url::Url,
-    ) -> DeltaResult<Option<Vec<bool>>> {
-        let dv_treemap = self
-            .deletion_vector
+    ) -> DeltaResult<Option<RoaringTreemap>> {
+        self.deletion_vector
             .as_ref()
             .map(|dv_descriptor| {
                 let fs_client = engine.get_file_system_client();
                 dv_descriptor.read(fs_client, table_root)
             })
-            .transpose()?;
+            .transpose()
+    }
+
+    pub fn get_diff_selection_vector(
+        &self,
+        other: &DvInfo,
+        engine: &dyn Engine,
+        table_root: &url::Url,
+    ) -> DeltaResult<Option<Vec<bool>>> {
+        if let (Some(self_tm), Some(other_tm)) = (
+            self.as_dv_tree_map(engine, table_root)?,
+            other.as_dv_tree_map(engine, table_root)?,
+        ) {
+            let diff = self_tm - other_tm;
+            Ok(Some(treemap_to_bools(diff)))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn get_selection_vector(
+        &self,
+        engine: &dyn Engine,
+        table_root: &url::Url,
+    ) -> DeltaResult<Option<Vec<bool>>> {
+        let dv_treemap = self.as_dv_tree_map(engine, table_root)?;
         Ok(dv_treemap.map(treemap_to_bools))
     }
 

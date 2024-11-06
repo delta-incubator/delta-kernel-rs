@@ -3,12 +3,14 @@ use std::sync::Arc;
 
 use tracing::debug;
 
+use crate::actions::deletion_vector::DeletionVectorDescriptor;
 use crate::actions::visitors::{AddVisitor, RemoveVisitor};
 use crate::actions::{get_log_schema, Add, Remove, ADD_NAME, REMOVE_NAME};
 use crate::engine_data::{GetData, TypedGetData};
 use crate::expressions::{column_expr, Expression};
 use crate::scan::data_skipping::DataSkippingFilter;
 use crate::scan::log_replay::SCAN_ROW_DATATYPE;
+use crate::scan::state::DvInfo;
 use crate::scan::ScanData;
 use crate::{DataVisitor, DeltaResult, EngineData, ExpressionHandler};
 
@@ -65,7 +67,7 @@ impl DataVisitor for AddRemoveCdcVisitor {
 
 pub(crate) struct TableChangesLogReplayScanner {
     filter: Option<DataSkippingFilter>,
-    pub remove_dvs: HashMap<String, String>,
+    pub remove_dvs: HashMap<String, DvInfo>,
 }
 
 impl TableChangesLogReplayScanner {
@@ -114,7 +116,6 @@ impl TableChangesLogReplayScanner {
             removes,
             selection_vector: _,
         } = self.setup_batch_process(filter_vector, actions)?;
-
         for (add, index) in adds.into_iter() {
             // Note: each (add.path + add.dv_unique_id()) pair has a
             // unique Add + Remove pair in the log. For example:
@@ -127,16 +128,18 @@ impl TableChangesLogReplayScanner {
             );
         }
         for (remove, index) in removes.into_iter() {
-            let dv_id = remove.dv_unique_id();
-            if let Some(dv_id) = dv_id {
-                self.remove_dvs.insert(remove.path.clone(), dv_id);
-            }
-            selection_vector[index] = true;
             debug!(
                 "Including file in scan: ({}, {:?})",
                 remove.path,
                 remove.dv_unique_id(),
             );
+            if let Some(dv) = remove.deletion_vector {
+                let dv_info = DvInfo {
+                    deletion_vector: Some(dv),
+                };
+                self.remove_dvs.insert(remove.path.clone(), dv_info);
+            }
+            selection_vector[index] = true;
         }
 
         let result = expression_handler
