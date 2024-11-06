@@ -179,7 +179,7 @@ impl Display for ColumnName {
 }
 
 fn drop_leading_whitespace(iter: &mut Peekable<impl Iterator<Item = char>>) {
-    while let Some(_) = iter.next_if(|c| c.is_whitespace()) {}
+    while iter.next_if(|c| c.is_whitespace()).is_some() {}
 }
 
 /// Parses a column name from a string. Field names are separated by dots. Whitespace between fields
@@ -246,7 +246,7 @@ fn parse_simple(chars: &mut Chars<'_>) -> DeltaResult<(String, bool)> {
             }
             c if field_finished => {
                 return Err(Error::generic(format!(
-                    "Expected dot after field name, got '{c}'"
+                    "Invalid character '{c}' after field name"
                 )))
             }
             '_' | 'a'..='z' | 'A'..='Z' => name.push(c),
@@ -278,19 +278,20 @@ fn parse_escaped(chars: &mut Chars<'_>) -> DeltaResult<(String, bool)> {
     while let Some(c) = chars.next() {
         match c {
             '`' => match chars.next() {
-                Some('`') => name.push('`'), // escaped delimiter (field continues)
+                Some('`') => name.push('`'), // escaped delimiter (keep going)
                 mut other => {
-                    // The field is done. Drop leading whitespace before a potential dot. Our caller
-                    // will handle any whitespace after that dot.
+                    // End of field. Drop leading whitespace before a potential dot.
                     while other.is_some_and(char::is_whitespace) {
                         other = chars.next();
                     }
                     match other {
-                        None => return Ok((name, true)), // no more fields
+                        None => return Ok((name, true)),       // no more fields
                         Some('.') => return Ok((name, false)), // another field follows
-                        Some(other) => return Err(Error::generic(format!(
-                            "Invalid character '{other}' after escaped field name",
-                        ))),
+                        Some(other) => {
+                            return Err(Error::generic(format!(
+                                "Invalid character '{other}' after escaped field name",
+                            )))
+                        }
                     }
                 }
             },
@@ -521,7 +522,9 @@ mod test {
         for (input, expected_output) in cases {
             let output: DeltaResult<ColumnName> = input.parse();
             match (&output, &expected_output) {
-                (Ok(output), Some(expected_output)) => assert_eq!(output, expected_output, "from {input}"),
+                (Ok(output), Some(expected_output)) => {
+                    assert_eq!(output, expected_output, "from {input}")
+                }
                 (Err(_), None) => {}
                 _ => panic!("Expected {input} to parse as {expected_output:?}, got {output:?}"),
             }
