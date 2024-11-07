@@ -19,7 +19,7 @@ use crate::{DeltaResult, Engine, EngineData, Error, FileMeta};
 use self::log_replay::scan_action_iter;
 use self::state::GlobalScanState;
 
-pub mod data_skipping;
+mod data_skipping;
 pub mod log_replay;
 pub mod state;
 
@@ -123,7 +123,7 @@ pub struct ScanResult {
     pub raw_data: DeltaResult<Box<dyn EngineData>>,
     /// Raw row mask.
     // TODO(nick) this should be allocated by the engine
-    pub raw_mask: Option<Vec<bool>>,
+    raw_mask: Option<Vec<bool>>,
 }
 
 impl ScanResult {
@@ -440,7 +440,7 @@ pub fn selection_vector(
 
 /// Transform the raw data read from parquet into the correct logical form, based on the provided
 /// global scan state and partition values
-pub fn transform_to_logical(
+fn transform_to_logical(
     engine: &dyn Engine,
     data: Box<dyn EngineData>,
     global_state: &GlobalScanState,
