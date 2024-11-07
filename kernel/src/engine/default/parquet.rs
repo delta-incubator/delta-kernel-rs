@@ -364,9 +364,11 @@ impl FileOpener for PresignedUrlOpener {
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
+    use arrow_array::array::Array;
     use arrow_array::RecordBatch;
-    use object_store::{local::LocalFileSystem, ObjectStore};
+    use object_store::{local::LocalFileSystem, memory::InMemory, ObjectStore};
     use url::Url;
 
     use crate::engine::arrow_data::ArrowEngineData;
@@ -472,5 +474,70 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_write_parquet() {}
+    async fn test_write_parquet() {
+        let store = Arc::new(InMemory::new());
+        let parquet_handler =
+            DefaultParquetHandler::new(store.clone(), Arc::new(TokioBackgroundExecutor::new()));
+
+        let data = Box::new(ArrowEngineData::new(
+            RecordBatch::try_from_iter(vec![(
+                "a",
+                Arc::new(Int64Array::from(vec![1, 2, 3])) as Arc<dyn Array>,
+            )])
+            .unwrap(),
+        ));
+
+        let write_metadata = parquet_handler
+            .write_parquet(&Url::parse("memory:///data/").unwrap(), data)
+            .await
+            .unwrap();
+
+        let DataFileMetadata {
+            file_meta:
+                ref parquet_file @ FileMeta {
+                    ref location,
+                    last_modified,
+                    size,
+                },
+        } = write_metadata;
+        let expected_location = Url::parse("memory:///data/").unwrap();
+        let expected_size = 497;
+
+        // check that last_modified is within 10s of now
+        let now: i64 = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis()
+            .try_into()
+            .unwrap();
+
+        let filename = location.path().split('/').last().unwrap();
+        assert_eq!(&expected_location.join(filename).unwrap(), location);
+        assert_eq!(expected_size, size);
+        assert!(now - last_modified < 10_000);
+
+        // check we can read back
+        let path = Path::from(location.path());
+        let meta = store.head(&path).await.unwrap();
+        let reader = ParquetObjectReader::new(store.clone(), meta.clone());
+        let physical_schema = ParquetRecordBatchStreamBuilder::new(reader)
+            .await
+            .unwrap()
+            .schema()
+            .clone();
+
+        let data: Vec<RecordBatch> = parquet_handler
+            .read_parquet_files(
+                &[parquet_file.clone()],
+                Arc::new(physical_schema.try_into().unwrap()),
+                None,
+            )
+            .unwrap()
+            .map(into_record_batch)
+            .try_collect()
+            .unwrap();
+
+        assert_eq!(data.len(), 1);
+        assert_eq!(data[0].num_rows(), 3);
+    }
 }
