@@ -37,11 +37,11 @@ pub struct DefaultParquetHandler<E: TaskExecutor> {
 /// Metadata of a parquet file, currently just includes the file metadata but will expand to
 /// include file statistics and other metadata in the future.
 #[derive(Debug)]
-pub struct ParquetWriteMetadata {
+pub struct DataFileMetadata {
     file_meta: FileMeta,
 }
 
-impl ParquetWriteMetadata {
+impl DataFileMetadata {
     pub fn new(file_meta: FileMeta) -> Self {
         Self { file_meta }
     }
@@ -49,15 +49,17 @@ impl ParquetWriteMetadata {
     // convert ParquetMetadata into a record batch which matches the 'write_metadata' schema
     fn as_record_batch(
         &self,
-        partition_values: HashMap<String, String>,
+        partition_values: &HashMap<String, String>,
         data_change: bool,
     ) -> DeltaResult<Box<dyn EngineData>> {
-        let ParquetWriteMetadata { file_meta } = self;
-        let FileMeta {
-            location,
-            last_modified,
-            size,
-        } = file_meta;
+        let DataFileMetadata {
+            file_meta:
+                FileMeta {
+                    location,
+                    last_modified,
+                    size,
+                },
+        } = self;
         let write_metadata_schema = crate::transaction::get_write_metadata_schema();
 
         // create the record batch of the write metadata
@@ -70,15 +72,11 @@ impl ParquetWriteMetadata {
             value: "value".to_string(),
         };
         let mut builder = MapBuilder::new(Some(names), key_builder, val_builder);
-        if partition_values.is_empty() {
-            builder.append(true).unwrap();
-        } else {
-            for (k, v) in partition_values {
-                builder.keys().append_value(&k);
-                builder.values().append_value(&v);
-                builder.append(true).unwrap();
-            }
+        for (k, v) in partition_values {
+            builder.keys().append_value(&k);
+            builder.values().append_value(&v);
         }
+        builder.append(true).unwrap();
         let partitions = Arc::new(builder.finish());
         // this means max size we can write is i64::MAX (~8EB)
         let size: i64 = (*size)
@@ -120,7 +118,7 @@ impl<E: TaskExecutor> DefaultParquetHandler<E> {
         &self,
         path: &url::Url,
         data: Box<dyn EngineData>,
-    ) -> DeltaResult<ParquetWriteMetadata> {
+    ) -> DeltaResult<DataFileMetadata> {
         let batch: Box<_> = ArrowEngineData::try_from_engine_data(data)?;
         let record_batch = batch.record_batch();
 
@@ -148,7 +146,7 @@ impl<E: TaskExecutor> DefaultParquetHandler<E> {
         }
 
         let file_meta = FileMeta::new(path, modification_time, size);
-        Ok(ParquetWriteMetadata::new(file_meta))
+        Ok(DataFileMetadata::new(file_meta))
     }
 
     /// Write `data` to `path`/<uuid>.parquet as parquet using ArrowWriter and return the parquet
@@ -164,7 +162,7 @@ impl<E: TaskExecutor> DefaultParquetHandler<E> {
         data_change: bool,
     ) -> DeltaResult<Box<dyn EngineData>> {
         let parquet_metadata = self.write_parquet(path, data).await?;
-        let write_metadata = parquet_metadata.as_record_batch(partition_values, data_change)?;
+        let write_metadata = parquet_metadata.as_record_batch(&partition_values, data_change)?;
         Ok(write_metadata)
     }
 }
@@ -369,6 +367,7 @@ mod tests {
 
     use arrow_array::RecordBatch;
     use object_store::{local::LocalFileSystem, ObjectStore};
+    use url::Url;
 
     use crate::engine::arrow_data::ArrowEngineData;
     use crate::engine::default::executor::tokio::TokioBackgroundExecutor;
@@ -423,7 +422,59 @@ mod tests {
     }
 
     #[test]
-    fn test_into_write_metadata() {}
+    fn test_as_record_batch() {
+        let location = Url::parse("file:///test_url").unwrap();
+        let size = 1_000_000;
+        let last_modified = 10000000000;
+        let file_metadata = FileMeta::new(location.clone(), last_modified, size as usize);
+        let data_file_metadata = DataFileMetadata::new(file_metadata);
+        let partition_values = HashMap::from([
+            ("partition1".to_string(), "a".to_string()),
+            ("partition2".to_string(), "b".to_string()),
+        ]);
+        let data_change = true;
+        let actual = data_file_metadata
+            .as_record_batch(&partition_values, data_change)
+            .unwrap();
+        let actual = ArrowEngineData::try_from_engine_data(actual).unwrap();
+
+        let schema = Arc::new(
+            crate::transaction::get_write_metadata_schema()
+                .as_ref()
+                .try_into()
+                .unwrap(),
+        );
+        let key_builder = StringBuilder::new();
+        let val_builder = StringBuilder::new();
+        let mut partition_values_builder = MapBuilder::new(
+            Some(MapFieldNames {
+                entry: "key_value".to_string(),
+                key: "key".to_string(),
+                value: "value".to_string(),
+            }),
+            key_builder,
+            val_builder,
+        );
+        partition_values_builder.keys().append_value("partition1");
+        partition_values_builder.values().append_value("a");
+        partition_values_builder.keys().append_value("partition2");
+        partition_values_builder.values().append_value("b");
+        partition_values_builder.append(true).unwrap();
+        let partition_values = partition_values_builder.finish();
+        let expected = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec![location.to_string()])),
+                Arc::new(partition_values),
+                Arc::new(Int64Array::from(vec![size])),
+                Arc::new(Int64Array::from(vec![last_modified])),
+                Arc::new(BooleanArray::from(vec![data_change])),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(actual.record_batch(), &expected);
+    }
 
     #[tokio::test]
     async fn test_write_parquet() {}
