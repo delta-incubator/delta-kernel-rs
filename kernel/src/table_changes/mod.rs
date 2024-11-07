@@ -79,7 +79,7 @@ impl TableChanges {
     }
 }
 
-/// Builder to scan a snapshot of a table.
+/// Builder to read the `TableChanges` of a table.
 pub struct TableChangesScanBuilder {
     table_changes: Arc<TableChanges>,
     schema: Option<SchemaRef>,
@@ -87,7 +87,7 @@ pub struct TableChangesScanBuilder {
 }
 
 impl TableChangesScanBuilder {
-    /// Create a new [`ScanBuilder`] instance.
+    /// Create a new [`TableChangesScanBuilder`] instance.
     pub fn new(table_changes: impl Into<Arc<TableChanges>>) -> Self {
         Self {
             table_changes: table_changes.into(),
@@ -102,7 +102,7 @@ impl TableChangesScanBuilder {
     /// two columns by using the schema `[a, b]`.
     ///
     /// [`Schema`]: crate::schema::Schema
-    /// [`Snapshot`]: crate::snapshot::Snapshot
+    /// [`TableChanges`]: crate::table_changes:TableChanges:
     pub fn with_schema(mut self, schema: SchemaRef) -> Self {
         self.schema = Some(schema);
         self
