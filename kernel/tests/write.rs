@@ -271,26 +271,41 @@ async fn test_invalid_commit_info() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-// set the value at .-separated `path` in `values` to `new_value` at `index`
+// check that the timestamps in commit_info and add actions are within 10s of SystemTime::now()
+fn check_action_timestamps<'a>(
+    parsed_commits: impl Iterator<Item = &'a serde_json::Value>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // check that timestamps are within 10s of SystemTime::now()
+    let now: i64 = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_millis()
+        .try_into()
+        .unwrap();
+
+    parsed_commits.for_each(|commit| {
+        if let Some(commit_info_ts) = &commit.pointer("/commitInfo/timestamp") {
+            assert!(now - commit_info_ts.as_i64().unwrap() < 10_000);
+        }
+        if let Some(add_ts) = &commit.pointer("/add/modificationTime") {
+            assert!(now - add_ts.as_i64().unwrap() < 10_000);
+        }
+    });
+
+    Ok(())
+}
+
+// update `value` at (.-separated) `path` to `new_value`
 fn set_value(
-    mut value: &mut serde_json::Value,
+    value: &mut serde_json::Value,
     path: &str,
     new_value: serde_json::Value,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let parts: Vec<_> = path.split('.').collect();
-
-    for name in parts.iter().take(parts.len() - 1) {
-        value = value
-            .get_mut(*name)
-            .ok_or_else(|| format!("key '{name}' not found"))?;
-    }
-
-    let last_key = parts.last().ok_or("empty path")?;
-    value
-        .as_object_mut()
-        .ok_or("expected a JSON object")?
-        .insert(last_key.to_string(), new_value);
-
+    let mut path_string = path.replace(".", "/");
+    path_string.insert_str(0, "/");
+    let v = value
+        .pointer_mut(&path_string)
+        .ok_or_else(|| format!("key '{path}' not found"))?;
+    *v = new_value;
     Ok(())
 }
 
@@ -361,6 +376,12 @@ async fn test_append() -> Result<(), Box<dyn std::error::Error>> {
         .into_iter::<serde_json::Value>()
         .try_collect()?;
 
+    // check that the timestamps in commit_info and add actions are within 10s of SystemTime::now()
+    // before we clear them for comparison
+    check_action_timestamps(parsed_commits.iter())?;
+
+    // set timestamps to 0 and paths to known string values for comparison
+    // (otherwise timestamps are non-deterministic and paths are random UUIDs)
     set_value(&mut parsed_commits[0], "commitInfo.timestamp", json!(0))?;
     set_value(&mut parsed_commits[1], "add.modificationTime", json!(0))?;
     set_value(&mut parsed_commits[1], "add.path", json!("first.parquet"))?;
@@ -398,9 +419,6 @@ async fn test_append() -> Result<(), Box<dyn std::error::Error>> {
             }
         }),
     ];
-
-    println!("actual:\n{parsed_commits:#?}");
-    println!("expected:\n{expected_commit:#?}");
 
     assert_eq!(parsed_commits, expected_commit);
 
@@ -500,6 +518,12 @@ async fn test_append_partitioned() -> Result<(), Box<dyn std::error::Error>> {
         .into_iter::<serde_json::Value>()
         .try_collect()?;
 
+    // check that the timestamps in commit_info and add actions are within 10s of SystemTime::now()
+    // before we clear them for comparison
+    check_action_timestamps(parsed_commits.iter())?;
+
+    // set timestamps to 0 and paths to known string values for comparison
+    // (otherwise timestamps are non-deterministic and paths are random UUIDs)
     set_value(&mut parsed_commits[0], "commitInfo.timestamp", json!(0))?;
     set_value(&mut parsed_commits[1], "add.modificationTime", json!(0))?;
     set_value(&mut parsed_commits[1], "add.path", json!("first.parquet"))?;
@@ -541,9 +565,6 @@ async fn test_append_partitioned() -> Result<(), Box<dyn std::error::Error>> {
             }
         }),
     ];
-
-    println!("actual:\n{parsed_commits:#?}");
-    println!("expected:\n{expected_commit:#?}");
 
     assert_eq!(parsed_commits, expected_commit);
 

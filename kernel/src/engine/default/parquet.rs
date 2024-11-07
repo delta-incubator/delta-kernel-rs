@@ -137,7 +137,7 @@ impl<E: TaskExecutor> DefaultParquetHandler<E> {
             .await?;
 
         let metadata = self.store.head(&Path::from(path.path())).await?;
-        let modification_time = metadata.last_modified.timestamp();
+        let modification_time = metadata.last_modified.timestamp_millis();
         if size != metadata.size {
             return Err(Error::generic(format!(
                 "Size mismatch after writing parquet file: expected {}, got {}",
@@ -428,10 +428,7 @@ mod tests {
         let last_modified = 10000000000;
         let file_metadata = FileMeta::new(location.clone(), last_modified, size as usize);
         let data_file_metadata = DataFileMetadata::new(file_metadata);
-        let partition_values = HashMap::from([
-            ("partition1".to_string(), "a".to_string()),
-            ("partition2".to_string(), "b".to_string()),
-        ]);
+        let partition_values = HashMap::from([("partition1".to_string(), "a".to_string())]);
         let data_change = true;
         let actual = data_file_metadata
             .as_record_batch(&partition_values, data_change)
@@ -457,8 +454,6 @@ mod tests {
         );
         partition_values_builder.keys().append_value("partition1");
         partition_values_builder.values().append_value("a");
-        partition_values_builder.keys().append_value("partition2");
-        partition_values_builder.values().append_value("b");
         partition_values_builder.append(true).unwrap();
         let partition_values = partition_values_builder.finish();
         let expected = RecordBatch::try_new(

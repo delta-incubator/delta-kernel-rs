@@ -106,7 +106,7 @@ pub type FileDataReadResultIterator =
 pub struct FileMeta {
     /// The fully qualified path to the object
     pub location: Url,
-    /// The last modified time
+    /// The last modified time as milliseconds since unix epoch
     pub last_modified: i64,
     /// The size in bytes of the object
     pub size: usize,
