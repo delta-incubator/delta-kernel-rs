@@ -1,24 +1,17 @@
-use std::{
-    collections::{HashMap, HashSet},
-    iter,
-    sync::Arc,
-};
+use std::{collections::HashMap, sync::Arc};
 
 use itertools::Itertools;
 use tracing::debug;
 
 use crate::{
-    actions::{deletion_vector::split_vector, get_log_schema, Add, Remove, ADD_NAME, REMOVE_NAME},
-    expressions,
+    actions::{deletion_vector::split_vector, get_log_schema, ADD_NAME, REMOVE_NAME},
     scan::{
         data_skipping::DataSkippingFilter,
         get_state_info,
-        log_replay::scan_action_iter,
         state::{self, DvInfo, GlobalScanState, Stats},
         transform_to_logical_internal, ColumnType, ScanData, ScanResult,
     },
     schema::{SchemaRef, StructType},
-    table_changes::replay_scanner::AddRemoveCdcVisitor,
     DeltaResult, Engine, EngineData, ExpressionRef, FileMeta,
 };
 
@@ -30,9 +23,8 @@ pub struct TableChangesScanBuilder {
     schema: Option<SchemaRef>,
     predicate: Option<ExpressionRef>,
 }
-
 impl TableChangesScanBuilder {
-    /// Create a new [`ScanBuilder`] instance.
+    /// Create a new [`TableChangesScanBuilder`] instance.
     pub fn new(table_changes: impl Into<Arc<TableChanges>>) -> Self {
         Self {
             table_changes: table_changes.into(),
@@ -41,20 +33,20 @@ impl TableChangesScanBuilder {
         }
     }
 
-    /// Provide [`Schema`] for columns to select from the [`Snapshot`].
+    /// Provide [`Schema`] for columns to select from the [`TableChanges`].
     ///
     /// A table with columns `[a, b, c]` could have a scan which reads only the first
     /// two columns by using the schema `[a, b]`.
     ///
     /// [`Schema`]: crate::schema::Schema
-    /// [`Snapshot`]: crate::snapshot::Snapshot
+    /// [`TableChanges`]: crate::table_changes:TableChanges:
     pub fn with_schema(mut self, schema: SchemaRef) -> Self {
         self.schema = Some(schema);
         self
     }
 
-    /// Optionally provide a [`SchemaRef`] for columns to select from the [`Snapshot`]. See
-    /// [`ScanBuilder::with_schema`] for details. If `schema_opt` is `None` this is a no-op.
+    /// Optionally provide a [`SchemaRef`] for columns to select from the [`TableChanges`]. See
+    /// [`TableChangesScanBuilder::with_schema`] for details. If `schema_opt` is `None` this is a no-op.
     pub fn with_schema_opt(self, schema_opt: Option<SchemaRef>) -> Self {
         match schema_opt {
             Some(schema) => self.with_schema(schema),
@@ -73,11 +65,11 @@ impl TableChangesScanBuilder {
         self
     }
 
-    /// Build the [`Scan`].
+    /// Build the [`TableChangesScan`].
     ///
     /// This does not scan the table at this point, but does do some work to ensure that the
     /// provided schema make sense, and to prepare some metadata that the scan will need.  The
-    /// [`Scan`] type itself can be used to fetch the files and associated metadata required to
+    /// [`TableChangesScan`] type itself can be used to fetch the files and associated metadata required to
     /// perform actual data reads.
     pub fn build(self) -> DeltaResult<TableChangesScan> {
         // if no schema is provided, use snapshot's entire schema (e.g. SELECT *)
@@ -100,6 +92,7 @@ impl TableChangesScanBuilder {
         })
     }
 }
+
 pub struct TableChangesScan {
     table_changes: Arc<TableChanges>,
     logical_schema: SchemaRef,
