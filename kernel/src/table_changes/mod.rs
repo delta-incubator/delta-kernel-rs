@@ -41,19 +41,15 @@ impl TableChanges {
         let start_snapshot =
             Snapshot::try_new(table_root.as_url().clone(), engine, Some(start_version))?;
         let end_snapshot = Snapshot::try_new(table_root.as_url().clone(), engine, end_version)?;
-        println!("Start snapshot: {:?}", start_snapshot);
-        println!("End snapshot: {:?}", end_snapshot);
 
         let start_flag = start_snapshot.metadata().configuration.get(CDF_ENABLE_FLAG);
         let end_flag = end_snapshot.metadata().configuration.get(CDF_ENABLE_FLAG);
 
         // Verify CDF is enabled at the beginning and end of the interval
-        let is_valid_flag = |flag_res: Option<&String>| flag_res.is_some_and(|val| val == "true");
-        if !is_valid_flag(start_flag) || !is_valid_flag(end_flag) {
+        let is_cdf_enabled = |flag_res: Option<&String>| flag_res.is_some_and(|val| val == "true");
+        if !is_cdf_enabled(start_flag) || !is_cdf_enabled(end_flag) {
             return Err(Error::TableChangesDisabled(start_version, end_version));
         }
-
-        println!("Validated flags");
 
         // Get a log segment for the CDF range
         let fs_client = engine.get_file_system_client();
@@ -67,7 +63,6 @@ impl TableChanges {
             .with_in_order_commit_files();
         let log_segment = builder.build()?;
 
-        println!("Built log segment");
         Ok(TableChanges {
             snapshot: start_snapshot,
             log_segment,
@@ -175,17 +170,32 @@ pub struct TableChangesScan {
 
 #[cfg(test)]
 mod tests {
+    use crate::Error;
     use crate::{engine::sync::SyncEngine, Table};
 
     #[test]
-    fn get_valid_cdf_ranges() {
+    fn get_cdf_ranges() {
         let path = "./tests/data/table-with-cdf";
         let engine = Box::new(SyncEngine::new());
         let table = Table::try_from_uri(path).unwrap();
-        let start_version = 0;
-        let end_version = Some(1);
-        table
-            .table_changes(engine.as_ref(), start_version, end_version)
-            .unwrap();
+
+        let valid_ranges = [(0, Some(1)), (0, Some(0)), (1, Some(1))];
+        for (start_version, end_version) in valid_ranges {
+            assert!(table
+                .table_changes(engine.as_ref(), start_version, end_version)
+                .is_ok())
+        }
+
+        let invalid_ranges = [
+            (0, None),
+            (0, Some(2)),
+            (1, Some(2)),
+            (2, None),
+            (2, Some(2)),
+        ];
+        for (start_version, end_version) in invalid_ranges {
+            let res = table.table_changes(engine.as_ref(), start_version, end_version);
+            assert!(matches!(res, Err(Error::TableChangesDisabled(_, _))))
+        }
     }
 }
