@@ -34,8 +34,8 @@ pub struct DefaultParquetHandler<E: TaskExecutor> {
     readahead: usize,
 }
 
-/// Metadata of a parquet file, currently just includes the file metadata but will expand to
-/// include file statistics and other metadata in the future.
+/// Metadata of a data file (typically a parquet file), currently just includes the file metadata
+/// but will expand to include file statistics and other metadata in the future.
 #[derive(Debug)]
 pub struct DataFileMetadata {
     file_meta: FileMeta,
@@ -46,7 +46,7 @@ impl DataFileMetadata {
         Self { file_meta }
     }
 
-    // convert ParquetMetadata into a record batch which matches the 'write_metadata' schema
+    // convert DataFileMetadata into a record batch which matches the 'write_metadata' schema
     fn as_record_batch(
         &self,
         partition_values: &HashMap<String, String>,
