@@ -167,7 +167,7 @@ impl<'a> LogSegmentBuilder<'a> {
     /// Optionally set the end version of the [`LogSegment`]. This ensures that all commit files
     /// and checkpoints are below the end version.
     pub(crate) fn with_end_version(mut self, version: Version) -> Self {
-        let _ = self.end_version.insert(version);
+        self.end_version = Some(version);
         self
     }
     /// Optionally specify that the [`LogSegment`] will not have any checkpoint files. It will only
