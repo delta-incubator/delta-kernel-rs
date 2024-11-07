@@ -440,7 +440,7 @@ pub fn selection_vector(
 
 /// Transform the raw data read from parquet into the correct logical form, based on the provided
 /// global scan state and partition values
-fn transform_to_logical(
+pub fn transform_to_logical(
     engine: &dyn Engine,
     data: Box<dyn EngineData>,
     global_state: &GlobalScanState,
