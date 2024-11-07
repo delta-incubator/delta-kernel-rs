@@ -73,8 +73,8 @@ impl DataFileMetadata {
         };
         let mut builder = MapBuilder::new(Some(names), key_builder, val_builder);
         for (k, v) in partition_values {
-            builder.keys().append_value(&k);
-            builder.values().append_value(&v);
+            builder.keys().append_value(k);
+            builder.values().append_value(v);
         }
         builder.append(true).unwrap();
         let partitions = Arc::new(builder.finish());
