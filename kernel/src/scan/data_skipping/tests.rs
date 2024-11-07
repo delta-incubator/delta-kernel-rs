@@ -1,5 +1,6 @@
 use super::*;
 
+use crate::expressions::column_name;
 use crate::predicates::{DefaultPredicateEvaluator, UnimplementedColumnResolver};
 use std::collections::HashMap;
 
@@ -23,17 +24,17 @@ macro_rules! expect_eq {
 
 #[test]
 fn test_eval_is_null() {
-    let col = &Expr::column("x");
+    let col = &column_expr!("x");
     let expressions = [Expr::is_null(col.clone()), !Expr::is_null(col.clone())];
 
     let do_test = |nullcount: i64, expected: &[Option<bool>]| {
         let resolver = HashMap::from_iter([
-            ("numRecords", Scalar::from(2i64)),
-            ("nullCount.x", Scalar::from(nullcount)),
+            (column_name!("numRecords"), Scalar::from(2i64)),
+            (column_name!("nullCount.x"), Scalar::from(nullcount)),
         ]);
         let filter = DefaultPredicateEvaluator::from(resolver);
         for (expr, expect) in expressions.iter().zip(expected) {
-            let pred = as_data_skipping_predicate(&expr, false).unwrap();
+            let pred = as_data_skipping_predicate(expr, false).unwrap();
             expect_eq!(
                 filter.eval_expr(&pred, false),
                 *expect,
@@ -54,7 +55,7 @@ fn test_eval_is_null() {
 
 #[test]
 fn test_eval_binary_comparisons() {
-    let col = &Expr::column("x");
+    let col = &column_expr!("x");
     let five = &Scalar::from(5);
     let ten = &Scalar::from(10);
     let fifteen = &Scalar::from(15);
@@ -70,8 +71,10 @@ fn test_eval_binary_comparisons() {
     ];
 
     let do_test = |min: &Scalar, max: &Scalar, expected: &[Option<bool>]| {
-        let resolver =
-            HashMap::from_iter([("minValues.x", min.clone()), ("maxValues.x", max.clone())]);
+        let resolver = HashMap::from_iter([
+            (column_name!("minValues.x"), min.clone()),
+            (column_name!("maxValues.x"), max.clone()),
+        ]);
         let filter = DefaultPredicateEvaluator::from(resolver);
         for (expr, expect) in expressions.iter().zip(expected.iter()) {
             let pred = as_data_skipping_predicate(expr, false).unwrap();
@@ -106,7 +109,7 @@ fn test_eval_binary_comparisons() {
 #[test]
 fn test_eval_variadic() {
     let test_cases = &[
-        (&[]as &[Option<bool>], TRUE, FALSE),
+        (&[] as &[Option<bool>], TRUE, FALSE),
         (&[TRUE], TRUE, TRUE),
         (&[FALSE], FALSE, FALSE),
         (&[NULL], NULL, NULL),
@@ -166,11 +169,7 @@ fn test_eval_variadic() {
 
         let expr = Expr::or_from(inputs.clone());
         let pred = as_data_skipping_predicate(&expr, false).unwrap();
-        expect_eq!(
-            filter.eval_expr(&pred, false),
-            *expect_or,
-            "OR({inputs:?})"
-        );
+        expect_eq!(filter.eval_expr(&pred, false), *expect_or, "OR({inputs:?})");
 
         let expr = Expr::and_from(inputs.clone());
         let pred = as_data_skipping_predicate(&expr, true).unwrap();
@@ -195,7 +194,7 @@ fn test_eval_variadic() {
 // literals, tight bounds, and nullcount/rowcount stats here.
 #[test]
 fn test_eval_distinct() {
-    let col = &Expr::column("x");
+    let col = &column_expr!("x");
     let five = &Scalar::from(5);
     let ten = &Scalar::from(10);
     let fifteen = &Scalar::from(15);
@@ -210,14 +209,14 @@ fn test_eval_distinct() {
 
     let do_test = |min: &Scalar, max: &Scalar, nullcount: i64, expected: &[Option<bool>]| {
         let resolver = HashMap::from_iter([
-            ("numRecords", Scalar::from(2i64)),
-            ("nullCount.x", Scalar::from(nullcount)),
-            ("minValues.x", min.clone()),
-            ("maxValues.x", max.clone()),
+            (column_name!("numRecords"), Scalar::from(2i64)),
+            (column_name!("nullCount.x"), Scalar::from(nullcount)),
+            (column_name!("minValues.x"), min.clone()),
+            (column_name!("maxValues.x"), max.clone()),
         ]);
         let filter = DefaultPredicateEvaluator::from(resolver);
         for (expr, expect) in expressions.iter().zip(expected) {
-            let pred = as_data_skipping_predicate(&expr, false).unwrap();
+            let pred = as_data_skipping_predicate(expr, false).unwrap();
             expect_eq!(
                 filter.eval_expr(&pred, false),
                 *expect,

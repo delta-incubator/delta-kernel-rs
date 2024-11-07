@@ -8,8 +8,8 @@ use tracing::debug;
 use url::Url;
 
 use crate::actions::deletion_vector::{split_vector, treemap_to_bools, DeletionVectorDescriptor};
-use crate::actions::{get_log_schema, ADD_NAME, REMOVE_NAME};
-use crate::expressions::{Expression, ExpressionRef, Scalar};
+use crate::actions::{get_log_add_schema, get_log_schema, ADD_NAME, REMOVE_NAME};
+use crate::expressions::{ColumnName, Expression, ExpressionRef, Scalar};
 use crate::features::ColumnMappingMode;
 use crate::scan::state::{DvInfo, Stats};
 use crate::schema::{DataType, Schema, SchemaRef, StructField, StructType};
@@ -154,10 +154,10 @@ impl ScanResult {
     }
 }
 
-/// Scan uses this to set up what kinds of columns it is scanning. For `Selected` we just store the
-/// name of the column, as that's all that's needed during the actual query. For `Partition` we
-/// store an index into the logical schema for this query since later we need the data type as well
-/// to materialize the partition column.
+/// Scan uses this to set up what kinds of top-level columns it is scanning. For `Selected` we just
+/// store the name of the column, as that's all that's needed during the actual query. For
+/// `Partition` we store an index into the logical schema for this query since later we need the
+/// data type as well to materialize the partition column.
 pub enum ColumnType {
     // A column, selected from the data, as is
     Selected(String),
@@ -230,7 +230,7 @@ impl Scan {
         engine: &dyn Engine,
     ) -> DeltaResult<impl Iterator<Item = DeltaResult<(Box<dyn EngineData>, bool)>> + Send> {
         let commit_read_schema = get_log_schema().project(&[ADD_NAME, REMOVE_NAME])?;
-        let checkpoint_read_schema = get_log_schema().project(&[ADD_NAME])?;
+        let checkpoint_read_schema = get_log_add_schema().clone();
 
         // NOTE: We don't pass any meta-predicate because we expect no meaningful row group skipping
         // when ~every checkpoint file will contain the adds and removes we are looking for.
@@ -418,6 +418,7 @@ fn get_state_info(
                 // Add to read schema, store field so we can build a `Column` expression later
                 // if needed (i.e. if we have partition columns)
                 let physical_field = logical_field.make_physical(column_mapping_mode)?;
+                debug!("\n\n{logical_field:#?}\nAfter mapping: {physical_field:#?}\n\n");
                 let physical_name = physical_field.name.clone();
                 read_fields.push(physical_field);
                 Ok(ColumnType::Selected(physical_name))
@@ -491,7 +492,7 @@ fn transform_to_logical_internal(
                     )?;
                     Ok::<Expression, Error>(value_expression.into())
                 }
-                ColumnType::Selected(field_name) => Ok(Expression::column(field_name)),
+                ColumnType::Selected(field_name) => Ok(ColumnName::new([field_name]).into()),
             })
             .try_collect()?;
         let read_expression = Expression::Struct(all_fields);
@@ -547,7 +548,7 @@ pub(crate) mod test_utils {
             r#"{"metaData":{"id":"testId","format":{"provider":"parquet","options":{}},"schemaString":"{\"type\":\"struct\",\"fields\":[{\"name\":\"value\",\"type\":\"integer\",\"nullable\":true,\"metadata\":{}}]}","partitionColumns":[],"configuration":{"delta.enableDeletionVectors":"true","delta.columnMapping.mode":"none"},"createdTime":1677811175819}}"#,
         ]
         .into();
-        let output_schema = Arc::new(get_log_schema().clone());
+        let output_schema = get_log_schema().clone();
         let parsed = handler
             .parse_json(string_array_to_engine_data(json_strings), output_schema)
             .unwrap();
@@ -564,7 +565,7 @@ pub(crate) mod test_utils {
             r#"{"metaData":{"id":"testId","format":{"provider":"parquet","options":{}},"schemaString":"{\"type\":\"struct\",\"fields\":[{\"name\":\"value\",\"type\":\"integer\",\"nullable\":true,\"metadata\":{}}]}","partitionColumns":[],"configuration":{"delta.enableDeletionVectors":"true","delta.columnMapping.mode":"none"},"createdTime":1677811175819}}"#,
         ]
         .into();
-        let output_schema = Arc::new(get_log_schema().clone());
+        let output_schema = get_log_schema().clone();
         let parsed = handler
             .parse_json(string_array_to_engine_data(json_strings), output_schema)
             .unwrap();
@@ -613,6 +614,7 @@ mod tests {
     use std::path::PathBuf;
 
     use crate::engine::sync::SyncEngine;
+    use crate::expressions::column_expr;
     use crate::schema::PrimitiveType;
     use crate::Table;
 
@@ -756,7 +758,7 @@ mod tests {
         assert_eq!(data.len(), 1);
 
         // Ineffective predicate pushdown attempted, so the one data file should be returned.
-        let int_col = Expression::column("numeric.ints.int32");
+        let int_col = column_expr!("numeric.ints.int32");
         let value = Expression::literal(1000i32);
         let predicate = Arc::new(int_col.clone().gt(value.clone()));
         let scan = snapshot
@@ -777,6 +779,43 @@ mod tests {
             .unwrap();
         let data: Vec<_> = scan.execute(&engine).unwrap().try_collect().unwrap();
         assert_eq!(data.len(), 0);
+    }
+
+    #[test]
+    fn test_missing_column_row_group_skipping() {
+        let path = std::fs::canonicalize(PathBuf::from("./tests/data/parquet_row_group_skipping/"));
+        let url = url::Url::from_directory_path(path.unwrap()).unwrap();
+        let engine = SyncEngine::new();
+
+        let table = Table::new(url);
+        let snapshot = Arc::new(table.snapshot(&engine, None).unwrap());
+
+        // Predicate over a logically valid but physically missing column. No data files should be
+        // returned because the column is inferred to be all-null.
+        //
+        // WARNING: https://github.com/delta-incubator/delta-kernel-rs/issues/434 - This
+        // optimization is currently disabled, so the one data file is still returned.
+        let predicate = Arc::new(column_expr!("missing").lt(1000i64));
+        let scan = snapshot
+            .clone()
+            .scan_builder()
+            .with_predicate(predicate)
+            .build()
+            .unwrap();
+        let data: Vec<_> = scan.execute(&engine).unwrap().try_collect().unwrap();
+        assert_eq!(data.len(), 1);
+
+        // Predicate over a logically missing column, so the one data file should be returned.
+        //
+        // TODO: This should ideally trigger an error instead?
+        let predicate = Arc::new(column_expr!("numeric.ints.invalid").lt(1000));
+        let scan = snapshot
+            .scan_builder()
+            .with_predicate(predicate)
+            .build()
+            .unwrap();
+        let data: Vec<_> = scan.execute(&engine).unwrap().try_collect().unwrap();
+        assert_eq!(data.len(), 1);
     }
 
     #[test_log::test]

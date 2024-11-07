@@ -5,11 +5,12 @@ use std::sync::{Arc, LazyLock};
 
 use tracing::debug;
 
+use crate::actions::get_log_add_schema;
 use crate::actions::visitors::SelectionVectorVisitor;
-use crate::actions::{get_log_schema, ADD_NAME};
 use crate::error::DeltaResult;
 use crate::expressions::{
-    BinaryOperator, Expression as Expr, ExpressionRef, Scalar, VariadicOperator,
+    column_expr, joined_column_expr, BinaryOperator, ColumnName, Expression as Expr, ExpressionRef,
+    Scalar, VariadicOperator,
 };
 use crate::predicates::{
     DataSkippingPredicateEvaluator, PredicateEvaluator, PredicateEvaluatorDefaults,
@@ -62,9 +63,9 @@ impl DataSkippingFilter {
         static PREDICATE_SCHEMA: LazyLock<DataType> = LazyLock::new(|| {
             DataType::struct_type([StructField::new("predicate", DataType::BOOLEAN, true)])
         });
-        static STATS_EXPR: LazyLock<Expr> = LazyLock::new(|| Expr::column("add.stats"));
+        static STATS_EXPR: LazyLock<Expr> = LazyLock::new(|| column_expr!("add.stats"));
         static FILTER_EXPR: LazyLock<Expr> =
-            LazyLock::new(|| Expr::column("predicate").distinct(false));
+            LazyLock::new(|| column_expr!("predicate").distinct(false));
 
         let predicate = predicate.as_deref()?;
         debug!("Creating a data skipping filter for {}", &predicate);
@@ -72,9 +73,11 @@ impl DataSkippingFilter {
 
         // Build the stats read schema by extracting the column names referenced by the predicate,
         // extracting the corresponding field from the table schema, and inserting that field.
+        //
+        // TODO: Support nested column names!
         let data_fields: Vec<_> = table_schema
             .fields()
-            .filter(|field| field_names.contains(&field.name.as_str()))
+            .filter(|field| field_names.contains([field.name.clone()].as_slice()))
             .cloned()
             .collect();
         if data_fields.is_empty() {
@@ -117,7 +120,7 @@ impl DataSkippingFilter {
         //    the predicate is true/null and false (= skip) when the predicate is false.
         let select_stats_evaluator = engine.get_expression_handler().get_evaluator(
             // safety: kernel is very broken if we don't have the schema for Add actions
-            get_log_schema().project(&[ADD_NAME]).unwrap(),
+            get_log_add_schema().clone(),
             STATS_EXPR.clone(),
             DataType::STRING,
         );
@@ -187,27 +190,23 @@ impl DataSkippingPredicateEvaluator for DataSkippingPredicateCreator {
     type IntStat = Expr;
 
     /// Retrieves the minimum value of a column, if it exists and has the requested type.
-    fn get_min_stat(&self, col: &str, _data_type: &DataType) -> Option<Expr> {
-        let col = format!("minValues.{}", col);
-        Some(Expr::column(col))
+    fn get_min_stat(&self, col: &ColumnName, _data_type: &DataType) -> Option<Expr> {
+        Some(joined_column_expr!("minValues", col))
     }
 
     /// Retrieves the maximum value of a column, if it exists and has the requested type.
-    fn get_max_stat(&self, col: &str, _data_type: &DataType) -> Option<Expr> {
-        let col = format!("maxValues.{}", col);
-        Some(Expr::column(col))
+    fn get_max_stat(&self, col: &ColumnName, _data_type: &DataType) -> Option<Expr> {
+        Some(joined_column_expr!("maxValues", col))
     }
 
     /// Retrieves the null count of a column, if it exists.
-    fn get_nullcount_stat(&self, col: &str) -> Option<Expr> {
-        let col = format!("nullCount.{}", col);
-        Some(Expr::column(col))
+    fn get_nullcount_stat(&self, col: &ColumnName) -> Option<Expr> {
+        Some(joined_column_expr!("nullCount", col))
     }
 
     /// Retrieves the row count of a column (parquet footers always include this stat).
     fn get_rowcount_stat(&self) -> Option<Expr> {
-        let col = "numRecords";
-        Some(Expr::column(col))
+        Some(column_expr!("numRecords"))
     }
 
     fn eval_partial_cmp(
@@ -232,7 +231,7 @@ impl DataSkippingPredicateEvaluator for DataSkippingPredicateCreator {
         PredicateEvaluatorDefaults::eval_scalar(val, inverted).map(Expr::literal)
     }
 
-    fn eval_is_null(&self, col: &str, inverted: bool) -> Option<Expr> {
+    fn eval_is_null(&self, col: &ColumnName, inverted: bool) -> Option<Expr> {
         let safe_to_skip = match inverted {
             true => self.get_rowcount_stat()?, // all-null
             false => Expr::literal(0i64),      // no-null
@@ -267,14 +266,17 @@ impl DataSkippingPredicateEvaluator for DataSkippingPredicateCreator {
         // FALSE would otherwise be expected. So, we filter out all nulls except the first,
         // observing that one NULL is enough to produce the correct behavior during predicate eval.
         let mut have_null = false;
-        let exprs: Vec<_> = exprs.into_iter().flat_map(|e| match e {
-            Some(expr) => Some(expr),
-            None if have_null => None,
-            None => {
-                have_null = true;
-                Some(Expr::null_literal(DataType::BOOLEAN))
-            }
-        }).collect();
+        let exprs: Vec<_> = exprs
+            .into_iter()
+            .flat_map(|e| match e {
+                Some(expr) => Some(expr),
+                None if have_null => None,
+                None => {
+                    have_null = true;
+                    Some(Expr::null_literal(DataType::BOOLEAN))
+                }
+            })
+            .collect();
         Some(Expr::variadic(op, exprs))
     }
 }

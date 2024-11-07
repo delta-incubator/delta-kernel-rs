@@ -2,7 +2,7 @@
 use crate::engine::parquet_stats_skipping::{
     ParquetStatsProvider, ParquetStatsSkippingFilter as _,
 };
-use crate::expressions::{Expression, Scalar};
+use crate::expressions::{ColumnName, Expression, Scalar};
 use crate::schema::{DataType, PrimitiveType};
 use chrono::{DateTime, Days};
 use parquet::arrow::arrow_reader::ArrowReaderBuilder;
@@ -43,7 +43,7 @@ impl<T> ParquetRowGroupSkipping for ArrowReaderBuilder<T> {
 /// corresponding field index, for O(1) stats lookups.
 struct RowGroupFilter<'a> {
     row_group: &'a RowGroupMetaData,
-    field_indices: HashMap<String, usize>,
+    field_indices: HashMap<ColumnName, usize>,
 }
 
 impl<'a> RowGroupFilter<'a> {
@@ -61,7 +61,7 @@ impl<'a> RowGroupFilter<'a> {
     }
 
     /// Returns `None` if the column doesn't exist and `Some(None)` if the column has no stats.
-    fn get_stats(&self, col: &str) -> Option<Option<&Statistics>> {
+    fn get_stats(&self, col: &ColumnName) -> Option<Option<&Statistics>> {
         self.field_indices
             .get(col)
             .map(|&i| self.row_group.column(i).statistics())
@@ -95,7 +95,7 @@ impl<'a> ParquetStatsProvider for RowGroupFilter<'a> {
     // NOTE: This code is highly redundant with [`get_max_stat_value`] below, but parquet
     // ValueStatistics<T> requires T to impl a private trait, so we can't factor out any kind of
     // helper method. And macros are hard enough to read that it's not worth defining one.
-    fn get_parquet_min_stat(&self, col: &str, data_type: &DataType) -> Option<Scalar> {
+    fn get_parquet_min_stat(&self, col: &ColumnName, data_type: &DataType) -> Option<Scalar> {
         use PrimitiveType::*;
         let value = match (data_type.as_primitive_opt()?, self.get_stats(col)??) {
             (String, Statistics::ByteArray(s)) => s.min_opt()?.as_utf8().ok()?.into(),
@@ -137,7 +137,7 @@ impl<'a> ParquetStatsProvider for RowGroupFilter<'a> {
         Some(value)
     }
 
-    fn get_parquet_max_stat(&self, col: &str, data_type: &DataType) -> Option<Scalar> {
+    fn get_parquet_max_stat(&self, col: &ColumnName, data_type: &DataType) -> Option<Scalar> {
         use PrimitiveType::*;
         let value = match (data_type.as_primitive_opt()?, self.get_stats(col)??) {
             (String, Statistics::ByteArray(s)) => s.max_opt()?.as_utf8().ok()?.into(),
@@ -179,11 +179,17 @@ impl<'a> ParquetStatsProvider for RowGroupFilter<'a> {
         Some(value)
     }
 
-    fn get_parquet_nullcount_stat(&self, col: &str) -> Option<i64> {
+    fn get_parquet_nullcount_stat(&self, col: &ColumnName) -> Option<i64> {
         // NOTE: Stats for any given column are optional, which may produce a NULL nullcount. But if
         // the column itself is missing, then we know all values are implied to be NULL.
+        //
         let Some(stats) = self.get_stats(col) else {
-            return Some(self.get_parquet_rowcount_stat());
+            // WARNING: This optimization is only sound if the caller has verified that the column
+            // actually exists in the table's logical schema, and that any necessary logical to
+            // physical name mapping has been performed. Because we currently lack both the
+            // validation and the name mapping support, we must disable this optimization for the
+            // time being. See https://github.com/delta-incubator/delta-kernel-rs/issues/434.
+            return Some(self.get_parquet_rowcount_stat()).filter(|_| false);
         };
 
         // WARNING: [`Statistics::null_count_opt`] returns Some(0) when the underlying stat is
@@ -217,13 +223,13 @@ impl<'a> ParquetStatsProvider for RowGroupFilter<'a> {
 pub(crate) fn compute_field_indices(
     fields: &[ColumnDescPtr],
     expression: &Expression,
-) -> HashMap<String, usize> {
-    fn do_recurse(expression: &Expression, cols: &mut HashSet<String>) {
+) -> HashMap<ColumnName, usize> {
+    fn do_recurse(expression: &Expression, cols: &mut HashSet<ColumnName>) {
         use Expression::*;
         let mut recurse = |expr| do_recurse(expr, cols); // simplifies the call sites below
         match expression {
             Literal(_) => {}
-            Column(name) => cols.extend([name.to_string()]), // returns `()`, unlike `insert`
+            Column(name) => cols.extend([name.clone()]), // returns `()`, unlike `insert`
             Struct(fields) => fields.iter().for_each(recurse),
             UnaryOperation { expr, .. } => recurse(expr),
             BinaryOperation { left, right, .. } => [left, right].iter().for_each(|e| recurse(e)),
@@ -241,6 +247,10 @@ pub(crate) fn compute_field_indices(
     fields
         .iter()
         .enumerate()
-        .filter_map(|(i, f)| requested_columns.take(&f.path().string()).map(|p| (p, i)))
+        .filter_map(|(i, f)| {
+            requested_columns
+                .take(f.path().parts())
+                .map(|path| (path, i))
+        })
         .collect()
 }

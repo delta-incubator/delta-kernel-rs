@@ -159,6 +159,18 @@ pub enum Error {
     /// Unable to parse the name of a log path
     #[error("Invalid log path: {0}")]
     InvalidLogPath(String),
+
+    /// Invalid commit info passed to the transaction
+    #[error("Invalid commit info: {0}")]
+    InvalidCommitInfo(String),
+
+    /// Commit info was not passed to the transaction
+    #[error("Missing commit info")]
+    MissingCommitInfo,
+
+    /// The file already exists at the path, prohibiting a non-overwrite write
+    #[error("File already exists: {0}")]
+    FileAlreadyExists(String),
 }
 
 // Convenience constructors for Error types that take a String argument
@@ -175,7 +187,7 @@ impl Error {
         Self::FileNotFound(path.to_string())
     }
     pub fn missing_column(name: impl ToString) -> Self {
-        Self::MissingColumn(name.to_string())
+        Self::MissingColumn(name.to_string()).with_backtrace()
     }
     pub fn unexpected_column_type(name: impl ToString) -> Self {
         Self::UnexpectedColumnType(name.to_string())

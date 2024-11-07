@@ -1,6 +1,6 @@
 //! An implementation of data skipping that leverages parquet stats from the file footer.
 use crate::expressions::{
-    BinaryOperator, Expression as Expr, Scalar, UnaryOperator, VariadicOperator,
+    BinaryOperator, ColumnName, Expression as Expr, Scalar, UnaryOperator, VariadicOperator,
 };
 use crate::predicates::{
     DataSkippingPredicateEvaluator, PredicateEvaluator, PredicateEvaluatorDefaults,
@@ -15,11 +15,11 @@ mod tests;
 /// [`DataSkippingStatsProvider`]. From there, we can automatically derive a
 /// [`DataSkippingPredicateEvaluator`].
 pub(crate) trait ParquetStatsProvider {
-    fn get_parquet_min_stat(&self, _col: &str, _data_type: &DataType) -> Option<Scalar>;
+    fn get_parquet_min_stat(&self, _col: &ColumnName, _data_type: &DataType) -> Option<Scalar>;
 
-    fn get_parquet_max_stat(&self, _col: &str, _data_type: &DataType) -> Option<Scalar>;
+    fn get_parquet_max_stat(&self, _col: &ColumnName, _data_type: &DataType) -> Option<Scalar>;
 
-    fn get_parquet_nullcount_stat(&self, _col: &str) -> Option<i64>;
+    fn get_parquet_nullcount_stat(&self, _col: &ColumnName) -> Option<i64>;
 
     fn get_parquet_rowcount_stat(&self) -> i64;
 }
@@ -31,15 +31,15 @@ impl<T: ParquetStatsProvider> DataSkippingPredicateEvaluator for T {
     type TypedStat = Scalar;
     type IntStat = i64;
 
-    fn get_min_stat(&self, col: &str, data_type: &DataType) -> Option<Scalar> {
+    fn get_min_stat(&self, col: &ColumnName, data_type: &DataType) -> Option<Scalar> {
         self.get_parquet_min_stat(col, data_type)
     }
 
-    fn get_max_stat(&self, col: &str, data_type: &DataType) -> Option<Scalar> {
+    fn get_max_stat(&self, col: &ColumnName, data_type: &DataType) -> Option<Scalar> {
         self.get_parquet_max_stat(col, data_type)
     }
 
-    fn get_nullcount_stat(&self, col: &str) -> Option<i64> {
+    fn get_nullcount_stat(&self, col: &ColumnName) -> Option<i64> {
         self.get_parquet_nullcount_stat(col)
     }
 
@@ -61,7 +61,7 @@ impl<T: ParquetStatsProvider> DataSkippingPredicateEvaluator for T {
         PredicateEvaluatorDefaults::eval_scalar(val, inverted)
     }
 
-    fn eval_is_null(&self, col: &str, inverted: bool) -> Option<bool> {
+    fn eval_is_null(&self, col: &ColumnName, inverted: bool) -> Option<bool> {
         let safe_to_skip = match inverted {
             true => self.get_rowcount_stat()?, // all-null
             false => 0i64,                     // no-null

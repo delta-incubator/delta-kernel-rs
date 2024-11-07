@@ -20,8 +20,9 @@ pub struct ArrayData {
 }
 
 impl ArrayData {
-    #[cfg(test)]
-    pub(crate) fn new(tpe: ArrayType, elements: Vec<Scalar>) -> Self {
+    #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
+    pub fn new(tpe: ArrayType, elements: impl IntoIterator<Item = impl Into<Scalar>>) -> Self {
+        let elements = elements.into_iter().map(Into::into).collect();
         Self { tpe, elements }
     }
     pub fn array_type(&self) -> &ArrayType {
@@ -463,7 +464,7 @@ impl PrimitiveType {
 mod tests {
     use std::f32::consts::PI;
 
-    use crate::expressions::BinaryOperator;
+    use crate::expressions::{column_expr, BinaryOperator};
     use crate::Expression;
 
     use super::*;
@@ -555,7 +556,7 @@ mod tests {
             elements: vec![Scalar::Integer(1), Scalar::Integer(2), Scalar::Integer(3)],
         });
 
-        let column = Expression::column("item");
+        let column = column_expr!("item");
         let array_op = Expression::binary(BinaryOperator::In, 10, array.clone());
         let array_not_op = Expression::binary(BinaryOperator::NotIn, 10, array);
         let column_op = Expression::binary(BinaryOperator::In, PI, column.clone());

@@ -1,5 +1,7 @@
 use super::*;
-use crate::expressions::{ArrayData, Expression, StructData, UnaryOperator};
+use crate::expressions::{
+    column_expr, column_name, ArrayData, Expression, StructData, UnaryOperator,
+};
 use crate::predicates::PredicateEvaluator;
 use crate::schema::ArrayType;
 use crate::DataType;
@@ -21,7 +23,7 @@ macro_rules! expect_eq {
 }
 
 impl ResolveColumnAsScalar for Scalar {
-    fn resolve_column(&self, _col: &str) -> Option<Scalar> {
+    fn resolve_column(&self, _col: &ColumnName) -> Option<Scalar> {
         Some(self.clone())
     }
 }
@@ -73,7 +75,7 @@ fn test_default_partial_cmp_scalars() {
         Struct(StructData::try_new(vec![], vec![]).unwrap()),
         Array(ArrayData::new(
             ArrayType::new(DataType::LONG, false),
-            vec![],
+            &[] as &[i64],
         )),
     ];
     let larger_values = &[
@@ -94,7 +96,7 @@ fn test_default_partial_cmp_scalars() {
         Struct(StructData::try_new(vec![], vec![]).unwrap()),
         Array(ArrayData::new(
             ArrayType::new(DataType::LONG, false),
-            vec![],
+            &[] as &[i64],
         )),
     ];
 
@@ -264,10 +266,13 @@ fn test_eval_binary_scalars() {
 // NOTE: We're testing routing here -- the actual comparisons are already validated by test_eval_binary_scalars.
 #[test]
 fn test_eval_binary_columns() {
-    let columns = HashMap::from_iter(vec![("x", Scalar::from(1)), ("y", Scalar::from(10))]);
+    let columns = HashMap::from_iter(vec![
+        (column_name!("x"), Scalar::from(1)),
+        (column_name!("y"), Scalar::from(10)),
+    ]);
     let filter = DefaultPredicateEvaluator::from(columns);
-    let x = Expression::column("x");
-    let y = Expression::column("y");
+    let x = column_expr!("x");
+    let y = column_expr!("y");
     for inverted in [true, false] {
         assert_eq!(
             filter.eval_binary(BinaryOperator::Equal, &x, &y, inverted),
@@ -337,7 +342,7 @@ fn test_eval_column() {
         (Scalar::Null(DataType::BOOLEAN), None),
         (Scalar::from(1), None),
     ];
-    let col = "x";
+    let col = &column_name!("x");
     for (input, expect) in &test_cases {
         let filter = DefaultPredicateEvaluator::from(input.clone());
         for inverted in [true, false] {
@@ -373,7 +378,7 @@ fn test_eval_not() {
 
 #[test]
 fn test_eval_is_null() {
-    let expr = Expression::column("x");
+    let expr = column_expr!("x");
     let filter = DefaultPredicateEvaluator::from(Scalar::from(1));
     expect_eq!(
         filter.eval_unary(UnaryOperator::IsNull, &expr, true),
@@ -405,7 +410,7 @@ fn test_eval_distinct() {
     let two = &Scalar::from(2);
     let null = &Scalar::Null(DataType::INTEGER);
     let filter = DefaultPredicateEvaluator::from(one.clone());
-    let col = "x";
+    let col = &column_name!("x");
     expect_eq!(
         filter.eval_distinct(col, one, true),
         Some(true),
@@ -464,7 +469,7 @@ fn test_eval_distinct() {
 // test_eval_binary_scalars.
 #[test]
 fn eval_binary() {
-    let col = Expression::column("x");
+    let col = column_expr!("x");
     let val = Expression::literal(10);
     let filter = DefaultPredicateEvaluator::from(Scalar::from(1));
 

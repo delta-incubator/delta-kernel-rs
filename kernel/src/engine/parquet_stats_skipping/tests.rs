@@ -1,5 +1,5 @@
 use super::*;
-use crate::expressions::Expression as Expr;
+use crate::expressions::{column_expr, Expression as Expr};
 use crate::predicates::PredicateEvaluator;
 use crate::DataType;
 
@@ -23,15 +23,15 @@ macro_rules! expect_eq {
 
 struct UnimplementedTestFilter;
 impl ParquetStatsProvider for UnimplementedTestFilter {
-    fn get_parquet_min_stat(&self, _col: &str, _data_type: &DataType) -> Option<Scalar> {
+    fn get_parquet_min_stat(&self, _col: &ColumnName, _data_type: &DataType) -> Option<Scalar> {
         unimplemented!()
     }
 
-    fn get_parquet_max_stat(&self, _col: &str, _data_type: &DataType) -> Option<Scalar> {
+    fn get_parquet_max_stat(&self, _col: &ColumnName, _data_type: &DataType) -> Option<Scalar> {
         unimplemented!()
     }
 
-    fn get_parquet_nullcount_stat(&self, _col: &str) -> Option<i64> {
+    fn get_parquet_nullcount_stat(&self, _col: &ColumnName) -> Option<i64> {
         unimplemented!()
     }
 
@@ -137,15 +137,15 @@ impl MinMaxTestFilter {
     }
 }
 impl ParquetStatsProvider for MinMaxTestFilter {
-    fn get_parquet_min_stat(&self, _col: &str, data_type: &DataType) -> Option<Scalar> {
+    fn get_parquet_min_stat(&self, _col: &ColumnName, data_type: &DataType) -> Option<Scalar> {
         Self::get_stat_value(&self.min, data_type)
     }
 
-    fn get_parquet_max_stat(&self, _col: &str, data_type: &DataType) -> Option<Scalar> {
+    fn get_parquet_max_stat(&self, _col: &ColumnName, data_type: &DataType) -> Option<Scalar> {
         Self::get_stat_value(&self.max, data_type)
     }
 
-    fn get_parquet_nullcount_stat(&self, _col: &str) -> Option<i64> {
+    fn get_parquet_nullcount_stat(&self, _col: &ColumnName) -> Option<i64> {
         unimplemented!()
     }
 
@@ -157,7 +157,7 @@ impl ParquetStatsProvider for MinMaxTestFilter {
 
 #[test]
 fn test_eval_binary_comparisons() {
-    let col = &Expr::column("x");
+    let col = &column_expr!("x");
     let five = &Scalar::from(5);
     let ten = &Scalar::from(10);
     let fifteen = &Scalar::from(15);
@@ -176,7 +176,7 @@ fn test_eval_binary_comparisons() {
         let filter = MinMaxTestFilter::new(Some(min.clone()), Some(max.clone()));
         for (expr, expect) in expressions.iter().zip(expected.iter()) {
             expect_eq!(
-                filter.eval_expr(&expr, false),
+                filter.eval_expr(expr, false),
                 *expect,
                 "{expr:#?} with [{min}..{max}]"
             );
@@ -216,15 +216,15 @@ impl NullCountTestFilter {
     }
 }
 impl ParquetStatsProvider for NullCountTestFilter {
-    fn get_parquet_min_stat(&self, _col: &str, _data_type: &DataType) -> Option<Scalar> {
+    fn get_parquet_min_stat(&self, _col: &ColumnName, _data_type: &DataType) -> Option<Scalar> {
         unimplemented!()
     }
 
-    fn get_parquet_max_stat(&self, _col: &str, _data_type: &DataType) -> Option<Scalar> {
+    fn get_parquet_max_stat(&self, _col: &ColumnName, _data_type: &DataType) -> Option<Scalar> {
         unimplemented!()
     }
 
-    fn get_parquet_nullcount_stat(&self, _col: &str) -> Option<i64> {
+    fn get_parquet_nullcount_stat(&self, _col: &ColumnName) -> Option<i64> {
         self.nullcount
     }
 
@@ -235,7 +235,7 @@ impl ParquetStatsProvider for NullCountTestFilter {
 
 #[test]
 fn test_eval_is_null() {
-    let col = &Expr::column("x");
+    let col = &column_expr!("x");
     let expressions = [Expr::is_null(col.clone()), !Expr::is_null(col.clone())];
 
     let do_test = |nullcount: i64, expected: &[Option<bool>]| {
@@ -261,15 +261,15 @@ fn test_eval_is_null() {
 
 struct AllNullTestFilter;
 impl ParquetStatsProvider for AllNullTestFilter {
-    fn get_parquet_min_stat(&self, _col: &str, _data_type: &DataType) -> Option<Scalar> {
+    fn get_parquet_min_stat(&self, _col: &ColumnName, _data_type: &DataType) -> Option<Scalar> {
         None
     }
 
-    fn get_parquet_max_stat(&self, _col: &str, _data_type: &DataType) -> Option<Scalar> {
+    fn get_parquet_max_stat(&self, _col: &ColumnName, _data_type: &DataType) -> Option<Scalar> {
         None
     }
 
-    fn get_parquet_nullcount_stat(&self, _col: &str) -> Option<i64> {
+    fn get_parquet_nullcount_stat(&self, _col: &ColumnName) -> Option<i64> {
         Some(self.get_parquet_rowcount_stat())
     }
 
@@ -280,7 +280,7 @@ impl ParquetStatsProvider for AllNullTestFilter {
 
 #[test]
 fn test_sql_where() {
-    let col = &Expr::column("x");
+    let col = &column_expr!("x");
     let val = &Expr::literal(1);
     const NULL: Expr = Expr::Literal(Scalar::Null(DataType::BOOLEAN));
     const FALSE: Expr = Expr::Literal(Scalar::Boolean(false));

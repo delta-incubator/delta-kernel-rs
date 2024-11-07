@@ -9,7 +9,7 @@ use super::ScanData;
 use crate::actions::{get_log_schema, ADD_NAME, REMOVE_NAME};
 use crate::actions::{visitors::AddVisitor, visitors::RemoveVisitor, Add, Remove};
 use crate::engine_data::{GetData, TypedGetData};
-use crate::expressions::{Expression, ExpressionRef};
+use crate::expressions::{column_expr, Expression, ExpressionRef};
 use crate::schema::{DataType, MapType, SchemaRef, StructField, StructType};
 use crate::{DataVisitor, DeltaResult, Engine, EngineData, ExpressionHandler};
 
@@ -80,19 +80,20 @@ impl DataVisitor for AddRemoveVisitor {
 // for `scan_row_schema` in scan/mod.rs! You'll also need to update ScanFileVisitor as the
 // indexes will be off
 pub(crate) static SCAN_ROW_SCHEMA: LazyLock<Arc<StructType>> = LazyLock::new(|| {
+    // Note that fields projected out of a nullable struct must be nullable
     Arc::new(StructType::new([
-        StructField::new("path", DataType::STRING, false),
+        StructField::new("path", DataType::STRING, true),
         StructField::new("size", DataType::LONG, true),
         StructField::new("modificationTime", DataType::LONG, true),
         StructField::new("stats", DataType::STRING, true),
         StructField::new(
             "deletionVector",
             StructType::new([
-                StructField::new("storageType", DataType::STRING, false),
-                StructField::new("pathOrInlineDv", DataType::STRING, false),
+                StructField::new("storageType", DataType::STRING, true),
+                StructField::new("pathOrInlineDv", DataType::STRING, true),
                 StructField::new("offset", DataType::INTEGER, true),
-                StructField::new("sizeInBytes", DataType::INTEGER, false),
-                StructField::new("cardinality", DataType::LONG, false),
+                StructField::new("sizeInBytes", DataType::INTEGER, true),
+                StructField::new("cardinality", DataType::LONG, true),
             ]),
             true,
         ),
@@ -100,7 +101,7 @@ pub(crate) static SCAN_ROW_SCHEMA: LazyLock<Arc<StructType>> = LazyLock::new(|| 
             "fileConstantValues",
             StructType::new([StructField::new(
                 "partitionValues",
-                MapType::new(DataType::STRING, DataType::STRING, false),
+                MapType::new(DataType::STRING, DataType::STRING, true),
                 true,
             )]),
             true,
@@ -124,12 +125,12 @@ impl LogReplayScanner {
 
     fn get_add_transform_expr(&self) -> Expression {
         Expression::Struct(vec![
-            Expression::column("add.path"),
-            Expression::column("add.size"),
-            Expression::column("add.modificationTime"),
-            Expression::column("add.stats"),
-            Expression::column("add.deletionVector"),
-            Expression::Struct(vec![Expression::column("add.partitionValues")]),
+            column_expr!("add.path"),
+            column_expr!("add.size"),
+            column_expr!("add.modificationTime"),
+            column_expr!("add.stats"),
+            column_expr!("add.deletionVector"),
+            Expression::Struct(vec![column_expr!("add.partitionValues")]),
         ])
     }
 
