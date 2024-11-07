@@ -1,12 +1,6 @@
 //! In-memory representation of a change data feed table.
 
 use std::{collections::HashMap, sync::Arc};
-<<<<<<< HEAD
-=======
-
-use table_changes_scan::TableChangesScanBuilder;
-use url::Url;
->>>>>>> 4d81c52 (Basic iteration for CDF)
 
 use crate::{
     actions::{Metadata, Protocol},
@@ -16,23 +10,14 @@ use crate::{
     scan::{get_state_info, state::DvInfo, ColumnType},
     schema::{Schema, SchemaRef, StructType},
     snapshot::Snapshot,
-<<<<<<< HEAD
     DeltaResult, Engine, EngineData, Error, ExpressionRef, Version,
-=======
-    DeltaResult, Engine, EngineData, Error, Version,
->>>>>>> 4d81c52 (Basic iteration for CDF)
 };
 use url::Url;
 
-<<<<<<< HEAD
 pub type TableChangesScanData = (Box<dyn EngineData>, Vec<bool>, Arc<HashMap<String, DvInfo>>);
-=======
 mod metadata_scanner;
 mod replay_scanner;
 pub mod table_changes_scan;
->>>>>>> 4d81c52 (Basic iteration for CDF)
-
-pub type TableChangesScanData = (Box<dyn EngineData>, Vec<bool>, Arc<HashMap<String, String>>);
 
 static CDF_ENABLE_FLAG: &str = "delta.enableChangeDataFeed";
 
