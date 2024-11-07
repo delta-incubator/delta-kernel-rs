@@ -41,6 +41,8 @@ impl TableChanges {
         let start_snapshot =
             Snapshot::try_new(table_root.as_url().clone(), engine, Some(start_version))?;
         let end_snapshot = Snapshot::try_new(table_root.as_url().clone(), engine, end_version)?;
+        println!("Start snapshot: {:?}", start_snapshot);
+        println!("End snapshot: {:?}", end_snapshot);
 
         let start_flag = start_snapshot.metadata().configuration.get(CDF_ENABLE_FLAG);
         let end_flag = end_snapshot.metadata().configuration.get(CDF_ENABLE_FLAG);
@@ -50,6 +52,8 @@ impl TableChanges {
         if !is_valid_flag(start_flag) || !is_valid_flag(end_flag) {
             return Err(Error::TableChangesDisabled(start_version, end_version));
         }
+
+        println!("Validated flags");
 
         // Get a log segment for the CDF range
         let fs_client = engine.get_file_system_client();
@@ -63,6 +67,7 @@ impl TableChanges {
             .with_in_order_commit_files();
         let log_segment = builder.build()?;
 
+        println!("Built log segment");
         Ok(TableChanges {
             snapshot: start_snapshot,
             log_segment,
@@ -166,4 +171,21 @@ pub struct TableChangesScan {
     predicate: Option<ExpressionRef>,
     all_fields: Vec<ColumnType>,
     have_partition_cols: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{engine::sync::SyncEngine, Table};
+
+    #[test]
+    fn get_valid_cdf_ranges() {
+        let path = "./tests/data/table-with-cdf";
+        let engine = Box::new(SyncEngine::new());
+        let table = Table::try_from_uri(path).unwrap();
+        let start_version = 0;
+        let end_version = Some(1);
+        table
+            .table_changes(engine.as_ref(), start_version, end_version)
+            .unwrap();
+    }
 }
