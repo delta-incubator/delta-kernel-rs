@@ -148,10 +148,9 @@ pub(crate) trait ParquetStatsSkippingFilter {
 
 impl<T: DataSkippingPredicateEvaluator<Output = bool>> ParquetStatsSkippingFilter for T {
     fn eval_sql_where(&self, filter: &Expr) -> Option<bool> {
-        use Expr::*;
-        use VariadicOperator::And;
+        use Expr::{BinaryOperation, VariadicOperation};
         match filter {
-            VariadicOperation { op: And, exprs } => {
+            VariadicOperation { op: VariadicOperator::And, exprs } => {
                 let exprs: Vec<_> = exprs
                     .iter()
                     .map(|expr| self.eval_sql_where(expr))
@@ -160,7 +159,7 @@ impl<T: DataSkippingPredicateEvaluator<Output = bool>> ParquetStatsSkippingFilte
                         None => Expr::null_literal(DataType::BOOLEAN),
                     })
                     .collect();
-                self.eval_variadic(And, &exprs, false)
+                self.eval_variadic(VariadicOperator::And, &exprs, false)
             }
             BinaryOperation { op, left, right } => self.eval_binary_nullsafe(*op, left, right),
             _ => self.eval_expr(filter, false),

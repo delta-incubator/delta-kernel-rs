@@ -22,8 +22,8 @@ mod tests;
 /// # NULL and error semantics
 ///
 /// Literal NULL values almost always produce cascading changes in the predicate's structure, so we
-/// represent them by `Option::None` rather than `Scalar::Null`. This allows e.g. `<A> < NULL` to be
-/// rewritten as `NULL`, or `AND(<A>, NULL, <B>)` to be rewritten as `AND(<A>, <B>)`.
+/// represent them by `Option::None` rather than `Scalar::Null`. This allows e.g. `A < NULL` to be
+/// rewritten as `NULL`, or `AND(NULL, FALSE)` to be rewritten as `FALSE`.
 ///
 /// With the exception of `IS [NOT] NULL`, all operations produce NULL output if any input is
 /// `NULL`. Any resolution failures also produce NULL (such as missing columns or type mismatch
@@ -181,9 +181,9 @@ pub(crate) trait PredicateEvaluator {
         // perform column-column comparisons, because we cannot infer the logical type to use.
         let (op, col, val) = match (left, right) {
             (Column(a), Column(b)) => return self.eval_binary_columns(op, a, b, inverted),
-            (Column(col), Literal(val)) => (op, col, val),
-            (Literal(val), Column(col)) => (op.commute()?, col, val),
             (Literal(a), Literal(b)) => return self.eval_binary_scalars(op, a, b, inverted),
+            (Literal(val), Column(col)) => (op.commute()?, col, val),
+            (Column(col), Literal(val)) => (op, col, val),
             _ => {
                 debug!("Unsupported binary operand(s): {left:?} {op:?} {right:?}");
                 return None;
@@ -467,7 +467,7 @@ pub(crate) trait DataSkippingPredicateEvaluator {
     /// NOTE: When deletion vectors are enabled, they could produce a file that is logically
     /// all-null or logically no-null, even tho the physical stats indicate a mix of null and
     /// non-null values. They cannot invalidate a file's physical all-null or non-null status,
-    /// however, so the worst that can happen is we unknowingly fail to skip a file.
+    /// however, so the worst that can happen is we fail to skip an unnecessary file.
     fn eval_is_null(&self, col: &ColumnName, inverted: bool) -> Option<Self::Output>;
 
     /// See [`PredicateEvaluator::eval_binary_scalars`]

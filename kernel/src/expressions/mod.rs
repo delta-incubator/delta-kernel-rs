@@ -338,19 +338,13 @@ impl Expression {
             match expr {
                 Literal(_) => {}
                 Column { .. } => {}
-                Struct(exprs) => {
-                    stack.extend(exprs.iter());
-                }
-                UnaryOperation { expr, .. } => {
-                    stack.push(expr);
-                }
+                Struct(exprs) => stack.extend(exprs),
+                UnaryOperation { expr, .. } => stack.push(expr),
                 BinaryOperation { left, right, .. } => {
                     stack.push(left);
                     stack.push(right);
                 }
-                VariadicOperation { exprs, .. } => {
-                    stack.extend(exprs.iter());
-                }
+                VariadicOperation { exprs, .. } => stack.extend(exprs),
             }
             Some(expr)
         })

@@ -190,8 +190,8 @@ fn test_eval_variadic() {
 }
 
 // DISTINCT is actually quite complex internally. It indirectly exercises IS [NOT] NULL and
-// AND/OR. We already validated min/max comparisons, so we're mostly worried about NULL vs. non-NULL
-// literals, tight bounds, and nullcount/rowcount stats here.
+// AND/OR. A different test validates min/max comparisons, so here we're mostly worried about NULL
+// vs. non-NULL literals and nullcount/rowcount stats.
 #[test]
 fn test_eval_distinct() {
     let col = &column_expr!("x");

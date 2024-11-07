@@ -261,20 +261,19 @@ impl DataSkippingPredicateEvaluator for DataSkippingPredicateCreator {
         }
         // NOTE: We can potentially see a LOT of NULL inputs in a big WHERE clause with lots of
         // unsupported data skipping operations. We can't "just" flatten them all away for AND,
-        // because could produce TRUE where NULL would otherwise be expected. Similarly, we don't
-        // want to "just" try_collect inputs for OR, because that can cause OR to produce NULL where
-        // FALSE would otherwise be expected. So, we filter out all nulls except the first,
+        // because that could produce TRUE where NULL would otherwise be expected. Similarly, we
+        // don't want to "just" try_collect inputs for OR, because that can cause OR to produce NULL
+        // where FALSE would otherwise be expected. So, we filter out all nulls except the first,
         // observing that one NULL is enough to produce the correct behavior during predicate eval.
-        let mut have_null = false;
+        let mut keep_null = true;
         let exprs: Vec<_> = exprs
             .into_iter()
             .flat_map(|e| match e {
                 Some(expr) => Some(expr),
-                None if have_null => None,
-                None => {
-                    have_null = true;
-                    Some(Expr::null_literal(DataType::BOOLEAN))
-                }
+                None => keep_null.then(|| {
+                    keep_null = false;
+                    Expr::null_literal(DataType::BOOLEAN)
+                }),
             })
             .collect();
         Some(Expr::variadic(op, exprs))
