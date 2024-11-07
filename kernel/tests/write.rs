@@ -301,7 +301,7 @@ fn set_value(
     new_value: serde_json::Value,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut path_string = path.replace(".", "/");
-    path_string.insert_str(0, "/");
+    path_string.insert(0, '/');
     let v = value
         .pointer_mut(&path_string)
         .ok_or_else(|| format!("key '{path}' not found"))?;
@@ -638,9 +638,15 @@ async fn test_append_invalid_schema() -> Result<(), Box<dyn std::error::Error>> 
     });
 
     let mut write_metadata = futures::future::join_all(tasks).await.into_iter().flatten();
-    assert!(write_metadata.all(|res| matches!(
-        res,
-        Err(KernelError::Arrow(arrow_schema::ArrowError::SchemaError(_)))
-    )));
+    assert!(write_metadata.all(|res| match res {
+        Err(KernelError::Arrow(arrow_schema::ArrowError::SchemaError(_))) => true,
+        Err(KernelError::Backtraced { source, .. })
+            if matches!(
+                &*source,
+                KernelError::Arrow(arrow_schema::ArrowError::SchemaError(_))
+            ) =>
+            true,
+        _ => false,
+    }));
     Ok(())
 }
