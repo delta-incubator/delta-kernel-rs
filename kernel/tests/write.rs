@@ -275,7 +275,6 @@ async fn test_invalid_commit_info() -> Result<(), Box<dyn std::error::Error>> {
 fn check_action_timestamps<'a>(
     parsed_commits: impl Iterator<Item = &'a serde_json::Value>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // check that timestamps are within 10s of SystemTime::now()
     let now: i64 = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_millis()
@@ -284,10 +283,10 @@ fn check_action_timestamps<'a>(
 
     parsed_commits.for_each(|commit| {
         if let Some(commit_info_ts) = &commit.pointer("/commitInfo/timestamp") {
-            assert!(now - commit_info_ts.as_i64().unwrap() < 10_000);
+            assert!((now - commit_info_ts.as_i64().unwrap()).abs() < 10_000);
         }
         if let Some(add_ts) = &commit.pointer("/add/modificationTime") {
-            assert!(now - add_ts.as_i64().unwrap() < 10_000);
+            assert!((now - add_ts.as_i64().unwrap()).abs() < 10_000);
         }
     });
 
