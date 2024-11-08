@@ -7,7 +7,7 @@ use crate::actions::schemas::{GetNullableContainerStructField, GetStructField};
 use crate::actions::COMMIT_INFO_NAME;
 use crate::actions::{get_log_add_schema, get_log_commit_info_schema};
 use crate::error::Error;
-use crate::expressions::{column_expr, ColumnName, Scalar, StructData};
+use crate::expressions::{column_expr, Scalar, StructData};
 use crate::path::ParsedLogPath;
 use crate::schema::{SchemaRef, StructField, StructType};
 use crate::snapshot::Snapshot;
