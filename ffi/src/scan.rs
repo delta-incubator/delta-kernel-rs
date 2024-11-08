@@ -13,11 +13,13 @@ use delta_kernel_ffi_macros::handle_descriptor;
 use tracing::debug;
 use url::Url;
 
-use crate::expressions::{unwrap_kernel_expression, EnginePredicate, KernelExpressionVisitorState};
+use crate::expressions::engine::{
+    unwrap_kernel_expression, EnginePredicate, KernelExpressionVisitorState,
+};
 use crate::{
-    AllocateStringFn, ExclusiveEngineData, ExternEngine, ExternResult, IntoExternResult,
-    KernelBoolSlice, KernelRowIndexArray, KernelStringSlice, NullableCvoid, SharedExternEngine,
-    SharedSnapshot, StringIter, StringSliceIterator, TryFromStringSlice,
+    kernel_string_slice, AllocateStringFn, ExclusiveEngineData, ExternEngine, ExternResult,
+    IntoExternResult, KernelBoolSlice, KernelRowIndexArray, KernelStringSlice, NullableCvoid,
+    SharedExternEngine, SharedSnapshot, StringIter, StringSliceIterator, TryFromStringSlice,
 };
 
 use super::handle::Handle;
@@ -64,9 +66,10 @@ pub struct ArrowFFIData {
     pub schema: arrow_schema::ffi::FFI_ArrowSchema,
 }
 
+// TODO: This should use a callback to avoid having to have the engine free the struct
 /// Get an [`ArrowFFIData`] to allow binding to the arrow [C Data
 /// Interface](https://arrow.apache.org/docs/format/CDataInterface.html). This includes the data and
-/// the schema.
+/// the schema. If this function returns an `Ok` variant the _engine_ must free the returned struct.
 ///
 /// # Safety
 /// data_handle must be a valid ExclusiveEngineData as read by the
@@ -113,7 +116,9 @@ pub unsafe extern "C" fn free_scan(scan: Handle<SharedScan>) {
     scan.drop_handle();
 }
 
-/// Get a [`Scan`] over the table specified by the passed snapshot.
+/// Get a [`Scan`] over the table specified by the passed snapshot. It is the responsibility of the
+/// _engine_ to free this scan when complete by calling [`free_scan`].
+///
 /// # Safety
 ///
 /// Caller is responsible for passing a valid snapshot pointer, and engine pointer
@@ -269,6 +274,10 @@ fn kernel_scan_data_init_impl(
     Ok(Arc::new(data).into())
 }
 
+/// Call the provided `engine_visitor` on the next scan data item. The visitor will be provided with
+/// a selection vector and engine data. It is the responsibility of the _engine_ to free these when
+/// it is finished by calling [`free_bool_slice`] and [`free_engine_data`] respectively.
+///
 /// # Safety
 ///
 /// The iterator must be valid (returned by [kernel_scan_data_init]) and not yet freed by
@@ -357,10 +366,10 @@ pub unsafe extern "C" fn get_from_map(
     allocate_fn: AllocateStringFn,
 ) -> NullableCvoid {
     // TODO: Return ExternResult to caller instead of panicking?
-    let string_key = unsafe { String::try_from_slice(&key) };
+    let string_key = unsafe { TryFromStringSlice::try_from_slice(&key) };
     map.values
-        .get(&string_key.unwrap())
-        .and_then(|v| allocate_fn(v.into()))
+        .get(string_key.unwrap())
+        .and_then(|v| allocate_fn(kernel_string_slice!(v)))
 }
 
 /// Get a selection vector out of a [`DvInfo`] struct
@@ -435,7 +444,7 @@ fn rust_callback(
     });
     (context.callback)(
         context.engine_context,
-        path.into(),
+        kernel_string_slice!(path),
         size,
         stats.as_ref(),
         &dv_info,

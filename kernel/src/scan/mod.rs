@@ -154,13 +154,13 @@ impl ScanResult {
     }
 }
 
-/// Scan uses this to set up what kinds of columns it is scanning. For `Selected` we just store the
-/// name of the column, as that's all that's needed during the actual query. For `Partition` we
-/// store an index into the logical schema for this query since later we need the data type as well
-/// to materialize the partition column.
+/// Scan uses this to set up what kinds of top-level columns it is scanning. For `Selected` we just
+/// store the name of the column, as that's all that's needed during the actual query. For
+/// `Partition` we store an index into the logical schema for this query since later we need the
+/// data type as well to materialize the partition column.
 pub enum ColumnType {
     // A column, selected from the data, as is
-    Selected(ColumnName),
+    Selected(String),
     // A partition column that needs to be added back in
     Partition(usize),
 }
@@ -421,8 +421,7 @@ fn get_state_info(
                 debug!("\n\n{logical_field:#?}\nAfter mapping: {physical_field:#?}\n\n");
                 let physical_name = physical_field.name.clone();
                 read_fields.push(physical_field);
-                // TODO: Support nested columns!
-                Ok(ColumnType::Selected(ColumnName::new([physical_name])))
+                Ok(ColumnType::Selected(physical_name))
             }
         })
         .try_collect()?;
@@ -493,7 +492,7 @@ fn transform_to_logical_internal(
                     )?;
                     Ok::<Expression, Error>(value_expression.into())
                 }
-                ColumnType::Selected(field_name) => Ok(field_name.clone().into()),
+                ColumnType::Selected(field_name) => Ok(ColumnName::new([field_name]).into()),
             })
             .try_collect()?;
         let read_expression = Expression::Struct(all_fields);
@@ -780,6 +779,43 @@ mod tests {
             .unwrap();
         let data: Vec<_> = scan.execute(&engine).unwrap().try_collect().unwrap();
         assert_eq!(data.len(), 0);
+    }
+
+    #[test]
+    fn test_missing_column_row_group_skipping() {
+        let path = std::fs::canonicalize(PathBuf::from("./tests/data/parquet_row_group_skipping/"));
+        let url = url::Url::from_directory_path(path.unwrap()).unwrap();
+        let engine = SyncEngine::new();
+
+        let table = Table::new(url);
+        let snapshot = Arc::new(table.snapshot(&engine, None).unwrap());
+
+        // Predicate over a logically valid but physically missing column. No data files should be
+        // returned because the column is inferred to be all-null.
+        //
+        // WARNING: https://github.com/delta-incubator/delta-kernel-rs/issues/434 - This
+        // optimization is currently disabled, so the one data file is still returned.
+        let predicate = Arc::new(column_expr!("missing").lt(1000i64));
+        let scan = snapshot
+            .clone()
+            .scan_builder()
+            .with_predicate(predicate)
+            .build()
+            .unwrap();
+        let data: Vec<_> = scan.execute(&engine).unwrap().try_collect().unwrap();
+        assert_eq!(data.len(), 1);
+
+        // Predicate over a logically missing column, so the one data file should be returned.
+        //
+        // TODO: This should ideally trigger an error instead?
+        let predicate = Arc::new(column_expr!("numeric.ints.invalid").lt(1000));
+        let scan = snapshot
+            .scan_builder()
+            .with_predicate(predicate)
+            .build()
+            .unwrap();
+        let data: Vec<_> = scan.execute(&engine).unwrap().try_collect().unwrap();
+        assert_eq!(data.len(), 1);
     }
 
     #[test_log::test]
