@@ -1,15 +1,14 @@
 //! Represents a segment of a delta log. [`LogSegment`] wraps a set of  checkpoint and commit
 //! files.
 
-use std::sync::{Arc, LazyLock};
-use url::Url;
-
 use crate::{
     actions::{get_log_schema, Metadata, Protocol, METADATA_NAME, PROTOCOL_NAME},
     schema::SchemaRef,
-    DeltaResult, Engine, EngineData, Error, ExpressionRef, FileMeta,
+    DeltaResult, Engine, EngineData, Error, Expression, ExpressionRef, FileMeta,
 };
 use itertools::Itertools;
+use std::sync::{Arc, LazyLock};
+use url::Url;
 
 #[derive(Debug)]
 #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
@@ -94,11 +93,10 @@ impl LogSegment {
     ) -> DeltaResult<impl Iterator<Item = DeltaResult<(Box<dyn EngineData>, bool)>> + Send> {
         let schema = get_log_schema().project(&[PROTOCOL_NAME, METADATA_NAME])?;
         // filter out log files that do not contain metadata or protocol information
-        use crate::Expression as Expr;
         static META_PREDICATE: LazyLock<Option<ExpressionRef>> = LazyLock::new(|| {
-            Some(Arc::new(Expr::or(
-                Expr::column([METADATA_NAME, "id"]).is_not_null(),
-                Expr::column([PROTOCOL_NAME, "minReaderVersion"]).is_not_null(),
+            Some(Arc::new(Expression::or(
+                Expression::column([METADATA_NAME, "id"]).is_not_null(),
+                Expression::column([PROTOCOL_NAME, "minReaderVersion"]).is_not_null(),
             )))
         });
         // read the same protocol and metadata schema for both commits and checkpoints
