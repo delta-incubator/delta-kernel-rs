@@ -51,9 +51,7 @@ where
 {
     let s: String = Deserialize::deserialize(deserializer)?;
     Ok(Some(
-        s.split(',')
-            .map(|name: &str| ColumnName::new([name]))
-            .collect(),
+        ColumnName::parse_column_name_list(&s).map_err(de::Error::custom)?,
     ))
 }
 
