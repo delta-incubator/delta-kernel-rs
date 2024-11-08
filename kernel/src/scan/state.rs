@@ -28,7 +28,7 @@ pub struct GlobalScanState {
 }
 
 /// this struct can be used by an engine to materialize a selection vector
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DvInfo {
     pub(crate) deletion_vector: Option<DeletionVectorDescriptor>,
 }
