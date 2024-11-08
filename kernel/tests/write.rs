@@ -308,6 +308,8 @@ fn set_value(
     Ok(())
 }
 
+// list all the files at `path` and check that all parquet files have the same size, and return
+// that size
 async fn get_and_check_all_parquet_sizes(store: Arc<dyn ObjectStore>, path: &str) -> u64 {
     use futures::stream::StreamExt;
     let files: Vec<_> = store
@@ -317,7 +319,7 @@ async fn get_and_check_all_parquet_sizes(store: Arc<dyn ObjectStore>, path: &str
     let parquet_files = files
         .into_iter()
         .filter(|f| match f {
-            Ok(f) => f.location.extension() == Some("parquet".as_ref()),
+            Ok(f) => f.location.extension() == Some("parquet"),
             Err(_) => false,
         })
         .collect::<Vec<_>>();
