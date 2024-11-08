@@ -2,9 +2,15 @@
 //! files.
 
 use crate::{
+    actions::{get_log_schema, Metadata, Protocol, METADATA_NAME, PROTOCOL_NAME},
+    schema::SchemaRef,
+    DeltaResult, Engine, EngineData, Error, ExpressionRef, FileMeta,
+};
+use crate::{
     path::ParsedLogPath, snapshot::CheckpointMetadata, utils::require, Expression,
     FileSystemClient, Version,
 };
+use itertools::Itertools;
 use std::{
     cmp::Ordering,
     sync::{Arc, LazyLock},
@@ -12,22 +18,15 @@ use std::{
 use tracing::warn;
 use url::Url;
 
-use crate::{
-    actions::{get_log_schema, Metadata, Protocol, METADATA_NAME, PROTOCOL_NAME},
-    schema::SchemaRef,
-    DeltaResult, Engine, EngineData, Error, ExpressionRef, FileMeta,
-};
-use itertools::Itertools;
-
 #[derive(Debug)]
 #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
 pub(crate) struct LogSegment {
-    pub(crate) end_version: Version,
-    pub(crate) log_root: Url,
-    /// Reverse order sorted commit files in the log segment
-    pub(crate) commit_files: Vec<FileMeta>,
-    /// checkpoint files in the log segment.
-    pub(crate) checkpoint_files: Vec<FileMeta>,
+    pub end_version: Version,
+    pub log_root: Url,
+    /// Commit files in the log segment
+    pub commit_files: Vec<FileMeta>,
+    /// Checkpoint files in the log segment.
+    pub checkpoint_files: Vec<FileMeta>,
 }
 
 impl LogSegment {
@@ -135,31 +134,43 @@ impl<'a> LogSegmentBuilder<'a> {
             in_order_commit_files: false,
         }
     }
-
+    /// Optionally provide a checkpoint hint that results from reading the `last_checkpoint` file.
     pub(crate) fn with_checkpoint(mut self, checkpoint: CheckpointMetadata) -> Self {
         let _ = self.checkpoint.insert(checkpoint);
         self
     }
 
+    /// Optionally set the start version of the [`LogSegment`]. This ensures that all commit files
+    /// are above this version.
     #[allow(unused)]
     pub(crate) fn with_start_version(mut self, version: Version) -> Self {
         let _ = self.start_version.insert(version);
         self
     }
+    /// Optionally set the end version of the [`LogSegment`]. This ensures that all commit files
+    /// and checkpoints are below the end version.
     pub(crate) fn with_end_version(mut self, version: Version) -> Self {
         let _ = self.end_version.insert(version);
         self
     }
+    /// Optionally specify that the [`LogSegment`] will not have any checkpoint files. It will only
+    /// be made up of commit files.
     #[allow(unused)]
     pub(crate) fn with_no_checkpoint_files(mut self) -> Self {
         self.no_checkpoint_files = true;
         self
     }
+
+    /// Optionally specify that the commits in the [`LogSegment`] will be in order. By default, the
+    /// [`LogSegment`] will reverse the order of commit files, with the latest commit coming first.
     #[allow(unused)]
     pub(crate) fn with_in_order_commit_files(mut self) -> Self {
         self.in_order_commit_files = true;
         self
     }
+    /// Build the [`LogSegment`]
+    ///
+    /// This fetches checkpoint and commit files using the `fs_client`.
     pub(crate) fn build(self) -> DeltaResult<LogSegment> {
         let Self {
             fs_client,
