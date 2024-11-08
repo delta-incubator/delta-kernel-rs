@@ -1,6 +1,5 @@
 //! In-memory representation of snapshots of tables (snapshot is a table at given point in time, it
 //! has schema etc.)
-//!
 
 use std::cmp::Ordering;
 use std::sync::{Arc, LazyLock};
@@ -11,7 +10,6 @@ use tracing::{debug, warn};
 use url::Url;
 
 use crate::actions::{get_log_schema, Metadata, Protocol, METADATA_NAME, PROTOCOL_NAME};
-use crate::expressions::column_expr;
 use crate::path::ParsedLogPath;
 use crate::scan::ScanBuilder;
 use crate::schema::{Schema, SchemaRef};
@@ -112,8 +110,8 @@ impl LogSegment {
         use Expression as Expr;
         static META_PREDICATE: LazyLock<Option<ExpressionRef>> = LazyLock::new(|| {
             Some(Arc::new(Expr::or(
-                column_expr!("metaData.id").is_not_null(),
-                column_expr!("protocol.minReaderVersion").is_not_null(),
+                Expr::column([METADATA_NAME, "id"]).is_not_null(),
+                Expr::column([PROTOCOL_NAME, "minReaderVersion"]).is_not_null(),
             )))
         });
         // read the same protocol and metadata schema for both commits and checkpoints

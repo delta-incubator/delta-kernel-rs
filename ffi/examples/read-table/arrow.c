@@ -61,7 +61,7 @@ static GArrowRecordBatch* add_partition_columns(
   gint64 cols = garrow_record_batch_get_n_columns(record_batch);
   GArrowRecordBatch* cur_record_batch = record_batch;
   GError* error = NULL;
-  for (int i = 0; i < partition_cols->len; i++) {
+  for (uintptr_t i = 0; i < partition_cols->len; i++) {
     char* col = partition_cols->cols[i];
     guint pos = cols + i;
     KernelStringSlice key = { col, strlen(col) };
@@ -89,24 +89,30 @@ static GArrowRecordBatch* add_partition_columns(
 
     if (error != NULL) {
       printf("Giving up on column %s\n", col);
+      g_error_free(error);
       g_object_unref(builder);
       error = NULL;
       continue;
     }
 
-    GArrowArray* ret = garrow_array_builder_finish((GArrowArrayBuilder*)builder, &error);
+    GArrowArray* partition_col = garrow_array_builder_finish((GArrowArrayBuilder*)builder, &error);
     if (report_g_error("Can't build string array for parition column", error)) {
       printf("Giving up on column %s\n", col);
+      g_error_free(error);
       g_object_unref(builder);
       error = NULL;
       continue;
     }
     g_object_unref(builder);
 
-    GArrowField* field = garrow_field_new(col, (GArrowDataType*)garrow_string_data_type_new());
+    GArrowDataType* string_data_type = (GArrowDataType*)garrow_string_data_type_new();
+    GArrowField* field = garrow_field_new(col, string_data_type);
     GArrowRecordBatch* old_batch = cur_record_batch;
-    cur_record_batch = garrow_record_batch_add_column(old_batch, pos, field, ret, &error);
+    cur_record_batch = garrow_record_batch_add_column(old_batch, pos, field, partition_col, &error);
     g_object_unref(old_batch);
+    g_object_unref(partition_col);
+    g_object_unref(string_data_type);
+    g_object_unref(field);
     if (cur_record_batch == NULL) {
       if (error != NULL) {
         printf("Could not add column at %u: %s\n", pos, error->message);
@@ -126,6 +132,7 @@ static void add_batch_to_context(
 {
   GArrowSchema* schema = get_schema(&arrow_data->schema);
   GArrowRecordBatch* record_batch = get_record_batch(&arrow_data->array, schema);
+  g_object_unref(schema);
   if (context->cur_filter != NULL) {
     GArrowRecordBatch* unfiltered = record_batch;
     record_batch = garrow_record_batch_filter(unfiltered, context->cur_filter, NULL, NULL);
@@ -193,6 +200,7 @@ static void visit_read_data(void* vcontext, ExclusiveEngineData* data)
   ArrowFFIData* arrow_data = arrow_res.ok;
   add_batch_to_context(
     context->arrow_context, arrow_data, context->partition_cols, context->partition_values);
+  free(arrow_data); // just frees the struct, the data and schema are freed/owned by add_batch_to_context
 }
 
 // We call this for each file we get called back to read in read_table.c::visit_callback
@@ -211,8 +219,10 @@ void c_read_parquet_file(
   };
   ExternResultHandleExclusiveFileReadResultIterator read_res =
     read_parquet_file(context->engine, &meta, context->read_schema);
+  free(full_path);
   if (read_res.tag != OkHandleExclusiveFileReadResultIterator) {
-    printf("Couldn't read data\n");
+    print_error("Couldn't read data.", (Error*) read_res.err);
+    free_error((Error*)read_res.err);
     return;
   }
   if (selection_vector.len > 0) {
@@ -267,8 +277,12 @@ void print_arrow_context(ArrowContext* context)
           .col_idx = c,
         };
         g_list_foreach(remaining, (GFunc)extract_col, &remaining_data);
+        GArrowArray* prev_data = data;
         data = garrow_array_concatenate(data, remaining_data.list, &error);
+        g_object_unref(prev_data);
+        g_list_free_full(g_steal_pointer(&remaining_data.list), g_object_unref);
         if (report_g_error("Can't concat array data", error)) {
+          g_error_free(error);
           return;
         }
       }
