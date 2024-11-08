@@ -143,13 +143,13 @@ impl Transaction {
     fn generate_logical_to_physical(&self) -> Expression {
         // for now, we just pass through all the columns except partition columns.
         // note this is _incorrect_ if table config deems we need partition columns.
-        let partition_columns = self.read_snapshot.metadata().partition_columns.clone();
+        let partition_columns = &self.read_snapshot.metadata().partition_columns;
         let fields = self.read_snapshot.schema().fields();
         let fields = fields.filter_map(|f| {
             if partition_columns.contains(f.name()) {
                 None
             } else {
-                Some(ColumnName::new([f.name()]).into())
+                Some(Expression::column([f.name()]))
             }
         });
         Expression::struct_from(fields)
@@ -194,7 +194,7 @@ fn generate_adds<'a>(
         let adds_expr = Expression::struct_from([Expression::struct_from(
             write_metadata_schema
                 .fields()
-                .map(|f| ColumnName::new([f.name()]).into()),
+                .map(|f| Expression::column([f.name()])),
         )]);
         let adds_evaluator = expression_handler.get_evaluator(
             write_metadata_schema.clone(),
