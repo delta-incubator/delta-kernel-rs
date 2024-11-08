@@ -128,8 +128,14 @@ impl<E: TaskExecutor> DefaultParquetHandler<E> {
         writer.close()?; // writer must be closed to write footer
 
         let size = buffer.len();
-        let name: String = Uuid::new_v4().to_string() + ".parquet";
-        // FIXME test with trailing '/' and omitting?
+        let name: String = format!("{}.parquet", Uuid::new_v4());
+        // fail if path does not end with a trailing slash
+        if !path.path().ends_with('/') {
+            return Err(Error::generic(format!(
+                "Path must end with a trailing slash: {}",
+                path
+            )));
+        }
         let path = path.join(&name)?;
 
         self.store
@@ -162,8 +168,7 @@ impl<E: TaskExecutor> DefaultParquetHandler<E> {
         data_change: bool,
     ) -> DeltaResult<Box<dyn EngineData>> {
         let parquet_metadata = self.write_parquet(path, data).await?;
-        let write_metadata = parquet_metadata.as_record_batch(&partition_values, data_change)?;
-        Ok(write_metadata)
+        parquet_metadata.as_record_batch(&partition_values, data_change)
     }
 }
 
@@ -539,5 +544,25 @@ mod tests {
 
         assert_eq!(data.len(), 1);
         assert_eq!(data[0].num_rows(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_disallow_non_trailing_slash() {
+        let store = Arc::new(InMemory::new());
+        let parquet_handler =
+            DefaultParquetHandler::new(store.clone(), Arc::new(TokioBackgroundExecutor::new()));
+
+        let data = Box::new(ArrowEngineData::new(
+            RecordBatch::try_from_iter(vec![(
+                "a",
+                Arc::new(Int64Array::from(vec![1, 2, 3])) as Arc<dyn Array>,
+            )])
+            .unwrap(),
+        ));
+
+        assert!(parquet_handler
+            .write_parquet(&Url::parse("memory:///data").unwrap(), data)
+            .await
+            .is_err());
     }
 }

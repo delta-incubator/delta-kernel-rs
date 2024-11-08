@@ -20,14 +20,13 @@ const KERNEL_VERSION: &str = env!("CARGO_PKG_VERSION");
 const UNKNOWN_OPERATION: &str = "UNKNOWN";
 
 pub(crate) static WRITE_METADATA_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
-    StructType::new(vec![
+    Arc::new(StructType::new(vec![
         <String>::get_struct_field("path"),
         <HashMap<String, String>>::get_nullable_container_struct_field("partitionValues"),
         <i64>::get_struct_field("size"),
         <i64>::get_struct_field("modificationTime"),
         <bool>::get_struct_field("dataChange"),
-    ])
-    .into()
+    ]))
 });
 
 /// Get the expected schema for [`write_metadata`].
@@ -144,19 +143,16 @@ impl Transaction {
     fn generate_logical_to_physical(&self) -> Expression {
         // for now, we just pass through all the columns except partition columns.
         // note this is _incorrect_ if table config deems we need partition columns.
-        Expression::struct_from(self.read_snapshot.schema().fields().filter_map(|f| {
-            if self
-                .read_snapshot
-                .metadata()
-                .partition_columns
-                .contains(f.name())
-            {
+        let partition_columns = self.read_snapshot.metadata().partition_columns.clone();
+        let fields = self.read_snapshot.schema().fields();
+        let fields = fields.filter_map(|f| {
+            if partition_columns.contains(f.name()) {
                 None
             } else {
-                let col_name = ColumnName::new([f.name()]);
-                Some(col_name.into())
+                Some(ColumnName::new([f.name()]).into())
             }
-        }))
+        });
+        Expression::struct_from(fields)
     }
 
     /// Get the write context for this transaction. At the moment, this is constant for the whole
