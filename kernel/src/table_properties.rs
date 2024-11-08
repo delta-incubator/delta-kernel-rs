@@ -13,11 +13,12 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use serde::de::{self, value::MapDeserializer};
 use serde::Deserialize;
 
 use crate::expressions::ColumnName;
 use crate::table_features::ColumnMappingMode;
-use crate::DeltaResult;
+use crate::{DeltaResult, Error};
 
 mod deserialize;
 use deserialize::*;
@@ -136,14 +137,6 @@ pub struct TableProperties {
     #[serde(deserialize_with = "deserialize_bool")]
     pub enable_expired_log_cleanup: Option<bool>,
 
-    // /// The minimum required protocol reader version for a reader that allows to read from this Delta table.
-    // #[serde(rename = "delta.minReaderVersion")]
-    // pub min_reader_version: Option<u8>,
-
-    // /// The minimum required protocol writer version for a writer that allows to write to this Delta table.
-    // #[serde(rename = "delta.minWriterVersion")]
-    // pub min_writer_version: Option<u8>,
-    //
     /// true for Delta to generate a random prefix for a file path instead of partition information.
     ///
     /// For example, this may improve Amazon S3 performance when Delta Lake needs to send very high
@@ -168,19 +161,12 @@ pub struct TableProperties {
 
     /// The target file size in bytes or higher units for file tuning. For example, 104857600
     /// (bytes) or 100mb.
-    ///
-    /// TODO: kernel doesn't govern file writes? should we pass this through just with a note that
-    /// we don't pay attention to it? Scenario: engine calls
-    /// snapshot.table_properties().target_file_size in order to know how big _it_ should write
-    /// parquet files.
     #[serde(rename = "delta.targetFileSize")]
     #[serde(deserialize_with = "deserialize_pos_int")]
     pub target_file_size: Option<u64>,
 
     /// The target file size in bytes or higher units for file tuning. For example, 104857600
     /// (bytes) or 100mb.
-    ///
-    /// See TODO above
     #[serde(rename = "delta.tuneFileSizesForRewrites")]
     #[serde(deserialize_with = "deserialize_bool")]
     pub tune_file_sizes_for_rewrites: Option<bool>,
@@ -190,17 +176,20 @@ pub struct TableProperties {
     #[serde(deserialize_with = "deserialize_option")]
     pub checkpoint_policy: Option<CheckpointPolicy>,
 
-    /// TODO
+    /// whether to enable row tracking during writes.
     #[serde(rename = "delta.enableRowTracking")]
     #[serde(deserialize_with = "deserialize_bool")]
     pub enable_row_tracking: Option<bool>,
+
+    /// any unrecognized properties are passed through and ignored by the parser
+    #[serde(flatten)]
+    pub unknown_properties: HashMap<String, String>,
 }
 
 impl TableProperties {
-    pub(crate) fn new(config_map: &HashMap<String, String>) -> DeltaResult<Self> {
-        let deserializer = StringMapDeserializer::new(config_map);
-        // FIXME error
-        TableProperties::deserialize(deserializer).map_err(|e| crate::Error::Generic(e.to_string()))
+    pub(crate) fn new(config_map: HashMap<String, String>) -> DeltaResult<Self> {
+        let deserializer = MapDeserializer::<_, de::value::Error>::new(config_map.into_iter());
+        TableProperties::deserialize(deserializer).map_err(|e| Error::invalid_table_properties(e))
     }
 
     pub(crate) fn get_column_mapping_mode(&self) -> ColumnMappingMode {
@@ -216,16 +205,23 @@ pub enum DataSkippingNumIndexedCols {
 }
 
 impl TryFrom<String> for DataSkippingNumIndexedCols {
-    type Error = String;
+    type Error = Error;
 
     fn try_from(value: String) -> Result<Self, Self::Error> {
-        let num: i64 = value
-            .parse()
-            .map_err(|_| format!("couldn't parse {value} as i64"))?; // FIXME
+        let num: i64 = value.parse().map_err(|_| {
+            Error::invalid_table_properties(
+                "couldn't parse DataSkippingNumIndexedCols to an integer",
+            )
+        })?;
         match num {
             -1 => Ok(DataSkippingNumIndexedCols::AllColumns),
-            x if x > -1 => Ok(DataSkippingNumIndexedCols::NumColumns(x as u64)),
-            _ => Err(format!("Invalid value: {}", value)),
+            x => Ok(DataSkippingNumIndexedCols::NumColumns(
+                x.try_into().map_err(|_| {
+                    Error::invalid_table_properties(
+                        "couldn't parse DataSkippingNumIndexedCols to positive integer",
+                    )
+                })?,
+            )),
         }
     }
 }
@@ -286,7 +282,7 @@ mod tests {
     #[test]
     fn fail_known_keys() {
         let properties = HashMap::from([("delta.appendOnly".to_string(), "wack".to_string())]);
-        let de = StringMapDeserializer::new(&properties);
+        let de = MapDeserializer::<_, de::value::Error>::new(properties.clone().into_iter());
         assert!(TableProperties::deserialize(de).is_err());
     }
 
@@ -294,16 +290,19 @@ mod tests {
     fn allow_unknown_keys() {
         let properties =
             HashMap::from([("some_random_unknown_key".to_string(), "test".to_string())]);
-        let de = StringMapDeserializer::new(&properties);
+        let de = MapDeserializer::<_, de::value::Error>::new(properties.clone().into_iter());
         let actual = TableProperties::deserialize(de).unwrap();
-        let expected = TableProperties::default();
+        let expected = TableProperties {
+            unknown_properties: properties,
+            ..Default::default()
+        };
         assert_eq!(actual, expected);
     }
 
     #[test]
     fn test_empty_table_properties() {
-        let map = HashMap::new();
-        let de = StringMapDeserializer::new(&map);
+        let map: HashMap<String, String> = HashMap::new();
+        let de = MapDeserializer::<_, de::value::Error>::new(map.into_iter());
         let actual = TableProperties::deserialize(de).unwrap();
         let default_table_properties = TableProperties::default();
         assert_eq!(actual, default_table_properties);
@@ -338,11 +337,11 @@ mod tests {
             ("delta.checkpointPolicy", "v2"),
             ("delta.enableRowTracking", "true"),
         ];
-        let properties = properties
+        let properties: HashMap<_, _> = properties
             .into_iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
-        let de = StringMapDeserializer::new(&properties);
+        let de = MapDeserializer::<_, de::value::Error>::new(properties.clone().into_iter());
         let actual = TableProperties::deserialize(de).unwrap();
         let expected = TableProperties {
             append_only: Some(true),
@@ -367,6 +366,7 @@ mod tests {
             tune_file_sizes_for_rewrites: Some(true),
             checkpoint_policy: Some(CheckpointPolicy::V2),
             enable_row_tracking: Some(true),
+            unknown_properties: HashMap::new(),
         };
         assert_eq!(actual, expected);
     }

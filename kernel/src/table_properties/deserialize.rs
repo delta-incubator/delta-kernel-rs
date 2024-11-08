@@ -1,77 +1,14 @@
 use crate::expressions::ColumnName;
 
-use std::collections::HashMap;
 use std::time::Duration;
 
-use serde::de::{self, DeserializeSeed, Deserializer, MapAccess, Visitor};
+use serde::de::{self, Deserializer};
 use serde::Deserialize;
 
 const SECONDS_PER_MINUTE: u64 = 60;
 const SECONDS_PER_HOUR: u64 = 60 * SECONDS_PER_MINUTE;
 const SECONDS_PER_DAY: u64 = 24 * SECONDS_PER_HOUR;
 const SECONDS_PER_WEEK: u64 = 7 * SECONDS_PER_DAY;
-
-pub(crate) struct StringMapDeserializer<'de> {
-    iter: std::collections::hash_map::Iter<'de, String, String>,
-}
-
-impl<'de> StringMapDeserializer<'de> {
-    pub(crate) fn new(map: &'de HashMap<String, String>) -> Self {
-        StringMapDeserializer { iter: map.iter() }
-    }
-}
-
-impl<'de> Deserializer<'de> for StringMapDeserializer<'de> {
-    type Error = de::value::Error;
-
-    fn deserialize_any<V>(self, visitor: V) -> Result<V::Value, Self::Error>
-    where
-        V: Visitor<'de>,
-    {
-        visitor.visit_map(HashMapMapAccess {
-            iter: self.iter,
-            value: None,
-        })
-    }
-
-    serde::forward_to_deserialize_any! {
-        bool i8 i16 i32 i64 u8 u16 u32 u64 f32 f64 char str string bytes
-        byte_buf option unit unit_struct newtype_struct seq tuple tuple_struct
-        map struct enum identifier ignored_any
-    }
-}
-
-struct HashMapMapAccess<'de> {
-    iter: std::collections::hash_map::Iter<'de, String, String>,
-    value: Option<&'de String>,
-}
-
-impl<'de> MapAccess<'de> for HashMapMapAccess<'de> {
-    type Error = de::value::Error;
-
-    fn next_key_seed<K>(&mut self, seed: K) -> Result<Option<K::Value>, Self::Error>
-    where
-        K: DeserializeSeed<'de>,
-    {
-        match self.iter.next() {
-            Some((key, value)) => {
-                self.value = Some(value);
-                let de = de::value::StrDeserializer::new(key);
-                seed.deserialize(de).map(Some)
-            }
-            None => Ok(None),
-        }
-    }
-
-    fn next_value_seed<V>(&mut self, seed: V) -> Result<V::Value, Self::Error>
-    where
-        V: DeserializeSeed<'de>,
-    {
-        let value = self.value.take().unwrap(); // FIXME
-        let de = de::value::StrDeserializer::new(value);
-        seed.deserialize(de)
-    }
-}
 
 pub(crate) fn deserialize_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
 where

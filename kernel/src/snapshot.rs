@@ -230,12 +230,7 @@ impl Snapshot {
             .read_metadata(engine)?
             .ok_or(Error::MissingMetadata)?;
         let schema = metadata.schema()?;
-        // FIXME
-        // let column_mapping_mode = match metadata.configuration.get(COLUMN_MAPPING_MODE_KEY) {
-        //     Some(mode) if protocol.min_reader_version >= 2 => mode.as_str().try_into(),
-        //     _ => Ok(ColumnMappingMode::None),
-        // }?;
-        let table_properties = metadata.get_table_properties()?;
+        let table_properties = metadata.parse_table_properties()?;
         Ok(Self {
             table_root: location,
             log_segment,
