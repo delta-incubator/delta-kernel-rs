@@ -41,8 +41,8 @@ impl LogSegment {
         checkpoint_read_schema: SchemaRef,
         meta_predicate: Option<ExpressionRef>,
     ) -> DeltaResult<impl Iterator<Item = DeltaResult<(Box<dyn EngineData>, bool)>> + Send> {
-        let json_client = engine.get_json_handler();
-        let commit_stream = json_client
+        let commit_stream = engine
+            .get_json_handler()
             .read_json_files(
                 &self.commit_files,
                 commit_read_schema,
@@ -50,8 +50,8 @@ impl LogSegment {
             )?
             .map_ok(|batch| (batch, true));
 
-        let parquet_client = engine.get_parquet_handler();
-        let checkpoint_stream = parquet_client
+        let checkpoint_stream = engine
+            .get_parquet_handler()
             .read_parquet_files(
                 &self.checkpoint_files,
                 checkpoint_read_schema,
@@ -65,8 +65,7 @@ impl LogSegment {
     // Get the most up-to-date Protocol and Metadata actions
     pub(crate) fn read_metadata(&self, engine: &dyn Engine) -> DeltaResult<(Metadata, Protocol)> {
         let data_batches = self.replay_for_metadata(engine)?;
-        let mut metadata_opt = None;
-        let mut protocol_opt = None;
+        let (mut metadata_opt, mut protocol_opt) = (None, None);
         for batch in data_batches {
             let (batch, _) = batch?;
             if metadata_opt.is_none() {
