@@ -1,6 +1,7 @@
 //! In-memory representation of a Delta table, which acts as an immutable root entity for reading
 //! the different versions
 
+use std::borrow::Cow;
 use std::path::PathBuf;
 
 use url::Url;
@@ -34,13 +35,7 @@ impl Table {
     /// `/local/paths`, and even `../relative/paths`.
     pub fn try_from_uri(uri: impl AsRef<str>) -> DeltaResult<Self> {
         let uri = uri.as_ref();
-        let uri_type = if !uri.ends_with("/") {
-            let uri = format!("{}/", uri);
-            resolve_uri_type(uri)?
-        } else {
-            resolve_uri_type(uri)?
-        };
-
+        let uri_type = resolve_uri_type(uri)?;
         let url = match uri_type {
             UriType::LocalPath(path) => {
                 if !path.exists() {
@@ -102,7 +97,12 @@ enum UriType {
 /// Will return an error if the path is not valid.
 fn resolve_uri_type(table_uri: impl AsRef<str>) -> DeltaResult<UriType> {
     let table_uri = table_uri.as_ref();
-    if let Ok(url) = Url::parse(table_uri) {
+    let table_uri = if table_uri.ends_with('/') {
+        Cow::Borrowed(table_uri)
+    } else {
+        Cow::Owned(format!("{table_uri}/"))
+    };
+    if let Ok(url) = Url::parse(&table_uri) {
         let scheme = url.scheme().to_string();
         if url.scheme() == "file" {
             Ok(UriType::LocalPath(
@@ -112,12 +112,12 @@ fn resolve_uri_type(table_uri: impl AsRef<str>) -> DeltaResult<UriType> {
         } else if scheme.len() == 1 {
             // NOTE this check is required to support absolute windows paths which may properly
             // parse as url we assume here that a single character scheme is a windows drive letter
-            Ok(UriType::LocalPath(PathBuf::from(table_uri)))
+            Ok(UriType::LocalPath(PathBuf::from(table_uri.as_ref())))
         } else {
             Ok(UriType::Url(url))
         }
     } else {
-        Ok(UriType::LocalPath(table_uri.into()))
+        Ok(UriType::LocalPath(PathBuf::from(table_uri.as_ref())))
     }
 }
 
