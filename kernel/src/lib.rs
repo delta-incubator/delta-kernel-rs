@@ -233,6 +233,10 @@ pub trait AsAny: Any + Send + Sync {
     /// let b: Box<Bar> = a.downcast().unwrap();
     /// ```
     fn into_any(self: Box<Self>) -> Box<dyn Any + Send + Sync>;
+
+    /// Convenient wrapper for [`std::any::type_name`], since [`Any`] does not provide it and
+    /// [`Any::type_id`] is useless as a debugging aid (its `Debug` is just a mess of hex digits).
+    fn type_name(&self) -> &'static str;
 }
 
 // Blanket implementation for all eligible types
@@ -245,6 +249,9 @@ impl<T: Any + Send + Sync> AsAny for T {
     }
     fn into_any(self: Box<Self>) -> Box<dyn Any + Send + Sync> {
         self
+    }
+    fn type_name(&self) -> &'static str {
+        std::any::type_name::<Self>()
     }
 }
 
