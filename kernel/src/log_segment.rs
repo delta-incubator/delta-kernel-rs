@@ -22,7 +22,6 @@ use itertools::Itertools;
 #[derive(Debug)]
 #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
 pub(crate) struct LogSegment {
-    pub(crate) start_version: Version,
     pub(crate) end_version: Version,
     pub(crate) log_root: Url,
     /// Reverse order sorted commit files in the log segment
@@ -147,25 +146,20 @@ impl<'a> LogSegmentBuilder<'a> {
         let _ = self.start_version.insert(version);
         self
     }
-
-    #[allow(unused)]
     pub(crate) fn with_end_version(mut self, version: Version) -> Self {
         let _ = self.end_version.insert(version);
         self
     }
-
     #[allow(unused)]
     pub(crate) fn with_no_checkpoint_files(mut self) -> Self {
         self.no_checkpoint_files = true;
         self
     }
-
     #[allow(unused)]
     pub(crate) fn with_in_order_commit_files(mut self) -> Self {
         self.in_order_commit_files = true;
         self
     }
-
     pub(crate) fn build(self) -> DeltaResult<LogSegment> {
         let Self {
             fs_client,
@@ -187,39 +181,31 @@ impl<'a> LogSegmentBuilder<'a> {
             _ => Self::list_log_files(fs_client.as_ref(), &log_url)?,
         };
 
-        // We assume listing returned ordered. If `in_order_commit_files` is false, we want reverse order.
-        if !in_order_commit_files {
-            // We assume listing returned ordered, we want reverse order
-            commit_files.reverse();
-        }
-
-        // remove all files above requested version
-        if let Some(end_version) = end_version {
-            commit_files.retain(|log_path| log_path.version <= end_version);
-        }
-
         // Remove checkpoint files
         if no_checkpoint_files {
             checkpoint_files.clear();
         }
 
-        // only keep commit files above the checkpoint we found
+        // Commit file versions must satisfy the following:
+        // - Must be greater than the start version
+        // - Must be greater than the most recent checkpoint version if it exists
+        // - Must be less than or equal to the specified end version.
+        if let Some(end_version) = end_version {
+            commit_files.retain(|log_path| log_path.version <= end_version);
+        }
         if let Some(checkpoint_file) = checkpoint_files.first() {
             commit_files.retain(|log_path| checkpoint_file.version < log_path.version);
         }
-
-        // only keep commit files above the checkpoint we found
         if let Some(start_version) = start_version {
             commit_files.retain(|log_path| start_version <= log_path.version);
         }
 
         // get the effective version from chosen files
         let version_eff = commit_files
-            .first()
+            .last()
             .or(checkpoint_files.first())
             .ok_or(Error::MissingVersion)? // TODO: A more descriptive error
             .version;
-
         if let Some(end_version) = end_version {
             require!(
                 version_eff == end_version,
@@ -227,8 +213,13 @@ impl<'a> LogSegmentBuilder<'a> {
             );
         }
 
+        // We assume listing returned ordered. If `in_order_commit_files` is false, we want reverse order.
+        if !in_order_commit_files {
+            // We assume listing returned ordered, we want reverse order
+            commit_files.reverse();
+        }
+
         Ok(LogSegment {
-            start_version: start_version.unwrap_or(0),
             end_version: version_eff,
             log_root: log_url,
             commit_files: commit_files
@@ -343,7 +334,6 @@ impl<'a> LogSegmentBuilder<'a> {
         Ok((commit_files, checkpoint_files))
     }
 }
-
 #[cfg(test)]
 mod tests {
     use std::{path::PathBuf, sync::Arc};
