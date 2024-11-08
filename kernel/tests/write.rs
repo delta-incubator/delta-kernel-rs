@@ -312,10 +312,7 @@ fn set_value(
 // that size
 async fn get_and_check_all_parquet_sizes(store: Arc<dyn ObjectStore>, path: &str) -> u64 {
     use futures::stream::StreamExt;
-    let files: Vec<_> = store
-        .list(Some(&Path::from(path)))
-        .collect()
-        .await;
+    let files: Vec<_> = store.list(Some(&Path::from(path))).collect().await;
     let parquet_files = files
         .into_iter()
         .filter(|f| match f {
@@ -393,7 +390,6 @@ async fn test_append() -> Result<(), Box<dyn std::error::Error>> {
             "/test_table/_delta_log/00000000000000000001.json",
         ))
         .await?;
-
 
     let mut parsed_commits: Vec<_> = Deserializer::from_slice(&commit1.bytes().await?)
         .into_iter::<serde_json::Value>()
