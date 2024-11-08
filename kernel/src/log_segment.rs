@@ -2,7 +2,8 @@
 //! files.
 
 use crate::{
-    path::ParsedLogPath, snapshot::CheckpointMetadata, utils::require, FileSystemClient, Version,
+    path::ParsedLogPath, snapshot::CheckpointMetadata, utils::require, Expression,
+    FileSystemClient, Version,
 };
 use std::{
     cmp::Ordering,
@@ -21,12 +22,13 @@ use itertools::Itertools;
 #[derive(Debug)]
 #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
 pub(crate) struct LogSegment {
-    pub version: Version,
-    pub log_root: Url,
+    pub(crate) start_version: Version,
+    pub(crate) end_version: Version,
+    pub(crate) log_root: Url,
     /// Reverse order sorted commit files in the log segment
-    pub commit_files: Vec<FileMeta>,
+    pub(crate) commit_files: Vec<FileMeta>,
     /// checkpoint files in the log segment.
-    pub checkpoint_files: Vec<FileMeta>,
+    pub(crate) checkpoint_files: Vec<FileMeta>,
 }
 
 impl LogSegment {
@@ -49,8 +51,8 @@ impl LogSegment {
         checkpoint_read_schema: SchemaRef,
         meta_predicate: Option<ExpressionRef>,
     ) -> DeltaResult<impl Iterator<Item = DeltaResult<(Box<dyn EngineData>, bool)>> + Send> {
-        let json_client = engine.get_json_handler();
-        let commit_stream = json_client
+        let commit_stream = engine
+            .get_json_handler()
             .read_json_files(
                 &self.commit_files,
                 commit_read_schema,
@@ -58,8 +60,8 @@ impl LogSegment {
             )?
             .map_ok(|batch| (batch, true));
 
-        let parquet_client = engine.get_parquet_handler();
-        let checkpoint_stream = parquet_client
+        let checkpoint_stream = engine
+            .get_parquet_handler()
             .read_parquet_files(
                 &self.checkpoint_files,
                 checkpoint_read_schema,
@@ -73,8 +75,7 @@ impl LogSegment {
     // Get the most up-to-date Protocol and Metadata actions
     pub(crate) fn read_metadata(&self, engine: &dyn Engine) -> DeltaResult<(Metadata, Protocol)> {
         let data_batches = self.replay_for_metadata(engine)?;
-        let mut metadata_opt = None;
-        let mut protocol_opt = None;
+        let (mut metadata_opt, mut protocol_opt) = (None, None);
         for batch in data_batches {
             let (batch, _) = batch?;
             if metadata_opt.is_none() {
@@ -103,11 +104,10 @@ impl LogSegment {
     ) -> DeltaResult<impl Iterator<Item = DeltaResult<(Box<dyn EngineData>, bool)>> + Send> {
         let schema = get_log_schema().project(&[PROTOCOL_NAME, METADATA_NAME])?;
         // filter out log files that do not contain metadata or protocol information
-        use crate::Expression as Expr;
         static META_PREDICATE: LazyLock<Option<ExpressionRef>> = LazyLock::new(|| {
-            Some(Arc::new(Expr::or(
-                Expr::column([METADATA_NAME, "id"]).is_not_null(),
-                Expr::column([PROTOCOL_NAME, "minReaderVersion"]).is_not_null(),
+            Some(Arc::new(Expression::or(
+                Expression::column([METADATA_NAME, "id"]).is_not_null(),
+                Expression::column([PROTOCOL_NAME, "minReaderVersion"]).is_not_null(),
             )))
         });
         // read the same protocol and metadata schema for both commits and checkpoints
@@ -115,7 +115,7 @@ impl LogSegment {
     }
 }
 
-pub struct LogSegmentBuilder<'a> {
+pub(crate) struct LogSegmentBuilder<'a> {
     fs_client: Arc<dyn FileSystemClient>,
     log_root: &'a Url,
     checkpoint: Option<CheckpointMetadata>,
@@ -125,7 +125,7 @@ pub struct LogSegmentBuilder<'a> {
     in_order_commit_files: bool,
 }
 impl<'a> LogSegmentBuilder<'a> {
-    pub fn new(fs_client: Arc<dyn FileSystemClient>, log_root: &'a Url) -> Self {
+    pub(crate) fn new(fs_client: Arc<dyn FileSystemClient>, log_root: &'a Url) -> Self {
         LogSegmentBuilder {
             fs_client,
             log_root,
@@ -137,28 +137,36 @@ impl<'a> LogSegmentBuilder<'a> {
         }
     }
 
-    pub fn with_checkpoint(mut self, checkpoint: CheckpointMetadata) -> Self {
+    pub(crate) fn with_checkpoint(mut self, checkpoint: CheckpointMetadata) -> Self {
         let _ = self.checkpoint.insert(checkpoint);
         self
     }
 
-    pub fn with_start_version(mut self, version: Version) -> Self {
+    #[allow(unused)]
+    pub(crate) fn with_start_version(mut self, version: Version) -> Self {
         let _ = self.start_version.insert(version);
         self
     }
-    pub fn with_end_version(mut self, version: Version) -> Self {
+
+    #[allow(unused)]
+    pub(crate) fn with_end_version(mut self, version: Version) -> Self {
         let _ = self.end_version.insert(version);
         self
     }
-    pub fn with_no_checkpoint_files(mut self) -> Self {
+
+    #[allow(unused)]
+    pub(crate) fn with_no_checkpoint_files(mut self) -> Self {
         self.no_checkpoint_files = true;
         self
     }
-    pub fn with_in_order_commit_files(mut self) -> Self {
+
+    #[allow(unused)]
+    pub(crate) fn with_in_order_commit_files(mut self) -> Self {
         self.in_order_commit_files = true;
         self
     }
-    pub fn build(self) -> DeltaResult<LogSegment> {
+
+    pub(crate) fn build(self) -> DeltaResult<LogSegment> {
         let Self {
             fs_client,
             log_root,
@@ -220,7 +228,8 @@ impl<'a> LogSegmentBuilder<'a> {
         }
 
         Ok(LogSegment {
-            version: version_eff,
+            start_version: start_version.unwrap_or(0),
+            end_version: version_eff,
             log_root: log_url,
             commit_files: commit_files
                 .into_iter()
@@ -232,7 +241,7 @@ impl<'a> LogSegmentBuilder<'a> {
                 .collect(),
         })
     }
-    pub fn list_log_files_from_version(
+    pub(crate) fn list_log_files_from_version(
         fs_client: &dyn FileSystemClient,
         log_root: &Url,
         version: Option<Version>,
@@ -281,7 +290,7 @@ impl<'a> LogSegmentBuilder<'a> {
     }
 
     /// List all log files after a given checkpoint.
-    pub fn list_log_files_with_checkpoint(
+    pub(crate) fn list_log_files_with_checkpoint(
         checkpoint_metadata: &CheckpointMetadata,
         fs_client: &dyn FileSystemClient,
         log_root: &Url,
@@ -322,7 +331,7 @@ impl<'a> LogSegmentBuilder<'a> {
     /// List relevant log files.
     ///
     /// Relevant files are the max checkpoint found and all subsequent commits.
-    pub fn list_log_files(
+    pub(crate) fn list_log_files(
         fs_client: &dyn FileSystemClient,
         log_root: &Url,
     ) -> DeltaResult<(Vec<ParsedLogPath>, Vec<ParsedLogPath>)> {

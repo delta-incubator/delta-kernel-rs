@@ -2,9 +2,8 @@
 //! has schema etc.)
 //!
 
-use std::sync::Arc;
-
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use tracing::{debug, warn};
 use url::Url;
 
@@ -25,7 +24,6 @@ const LAST_CHECKPOINT_FILE_NAME: &str = "_last_checkpoint";
 pub struct Snapshot {
     pub(crate) table_root: Url,
     pub(crate) log_segment: LogSegment,
-    version: Version,
     metadata: Metadata,
     protocol: Protocol,
     schema: Schema,
@@ -42,7 +40,7 @@ impl std::fmt::Debug for Snapshot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Snapshot")
             .field("path", &self.log_segment.log_root.as_str())
-            .field("version", &self.version)
+            .field("version", &self.version())
             .field("metadata", &self.metadata)
             .finish()
     }
@@ -73,15 +71,13 @@ impl Snapshot {
         }
         let log_segment = builder.build()?;
 
-        let version_eff = log_segment.version;
-        Self::try_new_from_log_segment(table_root, log_segment, version_eff, engine)
+        Self::try_new_from_log_segment(table_root, log_segment, engine)
     }
 
     /// Create a new [`Snapshot`] instance.
     pub(crate) fn try_new_from_log_segment(
         location: Url,
         log_segment: LogSegment,
-        version: Version,
         engine: &dyn Engine,
     ) -> DeltaResult<Self> {
         let (metadata, protocol) = log_segment.read_metadata(engine)?;
@@ -93,7 +89,6 @@ impl Snapshot {
         Ok(Self {
             table_root: location,
             log_segment,
-            version,
             metadata,
             protocol,
             schema,
@@ -113,7 +108,7 @@ impl Snapshot {
 
     /// Version of this `Snapshot` in the table.
     pub fn version(&self) -> Version {
-        self.version
+        self.log_segment.end_version
     }
 
     /// Table [`Schema`] at this `Snapshot`s version.
