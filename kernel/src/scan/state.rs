@@ -34,7 +34,7 @@ pub struct DvInfo {
 }
 
 /// Give engines an easy way to consume stats
-#[derive(Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Stats {
     /// For any file where the deletion vector is not present (see [`DvInfo::has_vector`]), the
