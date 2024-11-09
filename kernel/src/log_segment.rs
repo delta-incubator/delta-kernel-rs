@@ -298,7 +298,7 @@ impl<'a> LogSegmentBuilder<'a> {
         fs_client: &dyn FileSystemClient,
         log_root: &Url,
     ) -> DeltaResult<(Vec<ParsedLogPath>, Vec<ParsedLogPath>)> {
-        let (mut commit_files, checkpoint_files, max_checkpoint_version) =
+        let (commit_files, checkpoint_files, max_checkpoint_version) =
             Self::list_log_files_from_version(
                 fs_client,
                 log_root,
@@ -314,13 +314,10 @@ impl<'a> LogSegmentBuilder<'a> {
 
         if max_checkpoint_version != checkpoint_metadata.version as i64 {
             warn!(
-            "_last_checkpoint hint is out of date. _last_checkpoint version: {}. Using actual most recent: {}",
-            checkpoint_metadata.version,
-            max_checkpoint_version
-        );
-            // we (may) need to drop commits that are before the _actual_ last checkpoint (that
-            // is, commits between a stale _last_checkpoint and the _actual_ last checkpoint)
-            commit_files.retain(|parsed_path| parsed_path.version as i64 > max_checkpoint_version);
+                "_last_checkpoint hint is out of date. _last_checkpoint version: {}. Using actual most recent: {}",
+                checkpoint_metadata.version,
+                max_checkpoint_version
+            );
         } else if checkpoint_files.len() != checkpoint_metadata.parts.unwrap_or(1) {
             return Err(Error::Generic(format!(
                 "_last_checkpoint indicated that checkpoint should have {} parts, but it has {}",
@@ -455,8 +452,13 @@ mod tests {
         let (mut commit_files, checkpoint_files) =
             LogSegmentBuilder::list_log_files_with_checkpoint(&checkpoint_metadata, &client, &url)
                 .unwrap();
+
         // Make the most recent commit the first in iterator
         commit_files.reverse();
+        let max_checkpoint_version = checkpoint_files.last().unwrap().version;
+        // we (may) need to drop commits that are before the _actual_ last checkpoint (that
+        // is, commits between a stale _last_checkpoint and the _actual_ last checkpoint)
+        commit_files.retain(|parsed_path| parsed_path.version > max_checkpoint_version);
 
         assert_eq!(checkpoint_files.len(), 1);
         println!("checkpoint: {:?}", checkpoint_files);
