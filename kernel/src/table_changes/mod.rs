@@ -20,14 +20,13 @@ static CDF_ENABLE_FLAG: &str = "delta.enableChangeDataFeed";
 
 #[derive(Debug)]
 pub struct TableChanges {
-    pub snapshot: Snapshot,
     #[allow(unused)]
-    pub(crate) log_segment: LogSegment,
+    pub log_segment: LogSegment,
     pub schema: Schema,
     pub version: Version,
     pub metadata: Metadata,
     pub protocol: Protocol,
-    pub(crate) column_mapping_mode: ColumnMappingMode,
+    pub column_mapping_mode: ColumnMappingMode,
     pub table_root: Url,
 }
 
@@ -64,7 +63,6 @@ impl TableChanges {
         let log_segment = builder.build()?;
 
         Ok(TableChanges {
-            snapshot: start_snapshot,
             log_segment,
             schema: end_snapshot.schema().clone(),
             column_mapping_mode: end_snapshot.column_mapping_mode,
