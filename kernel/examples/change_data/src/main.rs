@@ -1,11 +1,6 @@
-use std::{collections::HashMap, sync::Arc};
-
 use arrow_array::RecordBatch;
 use delta_kernel::{
-    engine::{
-        arrow_data::ArrowEngineData,
-        default::{executor::tokio::TokioBackgroundExecutor, DefaultEngine},
-    },
+    engine::{arrow_data::ArrowEngineData, sync::SyncEngine},
     scan::ScanResult,
     DeltaResult, EngineData, Table,
 };
@@ -22,11 +17,7 @@ fn main() -> DeltaResult<()> {
     // build a table and get the lastest snapshot from it
     let table = Table::try_from_uri(uri)?;
 
-    let engine = DefaultEngine::try_new(
-        table.location(),
-        HashMap::<String, String>::new(),
-        Arc::new(TokioBackgroundExecutor::new()),
-    )?;
+    let engine = SyncEngine::new();
 
     let table_changes = table.table_changes(&engine, 0, None)?;
     let x = table_changes.into_scan_builder().build()?;

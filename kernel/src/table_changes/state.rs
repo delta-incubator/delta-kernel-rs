@@ -1,18 +1,29 @@
 //! This module encapsulates the state of a scan
 
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    sync::{Arc, LazyLock},
+};
 
 use crate::{
-    actions::visitors::visit_deletion_vector_at,
+    actions::{
+        schemas::GetStructField, visitors::visit_deletion_vector_at, Add, Remove, ADD_NAME,
+        REMOVE_NAME,
+    },
     engine_data::{GetData, TypedGetData},
     features::ColumnMappingMode,
     scan::{
         log_replay::{self, SCAN_ROW_SCHEMA},
         state::{DvInfo, Stats},
     },
-    schema::SchemaRef,
-    DataVisitor, DeltaResult, EngineData, Error,
+    schema::{DataType, MapType, Schema, SchemaRef, StructField, StructType},
+    DataVisitor, DeltaResult, EngineData,
 };
+use crate::{
+    engine::arrow_data::ArrowEngineData,
+    expressions::{column_expr, Expression},
+};
+use arrow_array::RecordBatch;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
@@ -25,15 +36,22 @@ pub(crate) struct GlobalScanState {
     pub read_schema: SchemaRef,
     pub column_mapping_mode: ColumnMappingMode,
 }
+#[derive(Debug)]
+pub(crate) enum ScanFile {
+    Add {
+        path: String,
+        stats: Option<Stats>,
+        dv_info: DvInfo,
+        partition_values: HashMap<String, String>,
+    },
+    Remove {
+        path: String,
+        dv_info: DvInfo,
+        partition_values: HashMap<String, String>,
+    },
+}
 
-pub(crate) type ScanCallback<T> = fn(
-    context: &mut T,
-    path: &str,
-    size: i64,
-    stats: Option<Stats>,
-    dv_info: DvInfo,
-    partition_values: HashMap<String, String>,
-);
+pub(crate) type ScanCallback<T> = fn(context: &mut T, scan_file: ScanFile);
 
 /// Request that the kernel call a callback on each valid file that needs to be read for the
 /// scan.
@@ -74,7 +92,13 @@ pub(crate) fn visit_scan_files<T>(
         selection_vector,
         context,
     };
-    data.extract(log_replay::SCAN_ROW_SCHEMA.clone(), &mut visitor)?;
+
+    let record_batch: &RecordBatch = data
+        .as_any()
+        .downcast_ref::<ArrowEngineData>()
+        .unwrap()
+        .record_batch();
+    data.extract(TABLE_CHANGES_SCAN_ROW_SCHEMA.clone(), &mut visitor)?;
     Ok(visitor.context)
 }
 
@@ -92,10 +116,10 @@ impl<T> DataVisitor for ScanFileVisitor<'_, T> {
                 // skip skipped rows
                 continue;
             }
+
             // Since path column is required, use it to detect presence of an Add action
-            if let Some(path) = getters[0].get_opt(row_index, "scanFile.path")? {
-                let size = getters[1].get(row_index, "scanFile.size")?;
-                let stats: Option<String> = getters[3].get_opt(row_index, "scanFile.stats")?;
+            if let Some(path) = getters[0].get_opt(row_index, "scanFile.add.path")? {
+                let stats: Option<String> = getters[3].get_opt(row_index, "scanFile.add.stats")?;
                 let stats: Option<Stats> =
                     stats.and_then(|json| match serde_json::from_str(json.as_str()) {
                         Ok(stats) => Some(stats),
@@ -105,23 +129,160 @@ impl<T> DataVisitor for ScanFileVisitor<'_, T> {
                         }
                     });
 
-                let dv_index = SCAN_ROW_SCHEMA
-                    .index_of("deletionVector")
-                    .ok_or_else(|| Error::missing_column("deletionVector"))?;
+                let dv_index = 4;
                 let deletion_vector = visit_deletion_vector_at(row_index, &getters[dv_index..])?;
                 let dv_info = DvInfo { deletion_vector };
                 let partition_values =
-                    getters[9].get(row_index, "scanFile.fileConstantValues.partitionValues")?;
-                (self.callback)(
-                    &mut self.context,
+                    getters[9].get(row_index, "scanFile.add.fileConstantValues.partitionValues")?;
+                let scan_file = ScanFile::Add {
                     path,
-                    size,
                     stats,
                     dv_info,
                     partition_values,
-                )
+                };
+                (self.callback)(&mut self.context, scan_file)
+            } else if let Some(path) = getters[10].get_opt(row_index, "scanFile.remove.path")? {
+                let dv_index = 12;
+                let deletion_vector = visit_deletion_vector_at(row_index, &getters[dv_index..])?;
+                let dv_info = DvInfo { deletion_vector };
+                let partition_values = getters[17].get(
+                    row_index,
+                    "scanFile.remove.fileConstantValues.partitionValues",
+                )?;
+                let scan_file = ScanFile::Remove {
+                    path,
+                    dv_info,
+                    partition_values,
+                };
+                (self.callback)(&mut self.context, scan_file)
+            } else {
+                println!("Did not find anything in row");
             }
         }
         Ok(())
     }
 }
+
+/// Get the schema that scan rows (from [`TableChanges::scan_data`]) will be returned with.
+///
+/// It is:
+/// ```ignored
+/// {
+///    path: string,
+///    size: long,
+///    modificationTime: long,
+///    stats: string,
+///    deletionVector: {
+///      storageType: string,
+///      pathOrInlineDv: string,
+///      offset: int,
+///      sizeInBytes: int,
+///      cardinality: long,
+///    },
+///    fileConstantValues: {
+///      partitionValues: map<string, string>
+///    }
+/// }
+/// ```
+pub(crate) fn scan_row_schema() -> Schema {
+    TABLE_CHANGES_SCAN_ROW_SCHEMA.as_ref().clone()
+}
+
+// TODO: Should unify with ADD SCAN_ROW_SCHEMA
+static TABLE_CHANGES_LOG_ADD_SCHEMA: LazyLock<StructField> = LazyLock::new(|| {
+    StructField::new(
+        "add",
+        StructType::new([
+            StructField::new("path", DataType::STRING, true),
+            StructField::new("size", DataType::LONG, true),
+            StructField::new("modificationTime", DataType::LONG, true),
+            StructField::new("stats", DataType::STRING, true),
+            StructField::new(
+                "deletionVector",
+                StructType::new([
+                    StructField::new("storageType", DataType::STRING, true),
+                    StructField::new("pathOrInlineDv", DataType::STRING, true),
+                    StructField::new("offset", DataType::INTEGER, true),
+                    StructField::new("sizeInBytes", DataType::INTEGER, true),
+                    StructField::new("cardinality", DataType::LONG, true),
+                ]),
+                true,
+            ),
+            StructField::new(
+                "fileConstantValues",
+                StructType::new([StructField::new(
+                    "partitionValues",
+                    MapType::new(DataType::STRING, DataType::STRING, true),
+                    true,
+                )]),
+                true,
+            ),
+        ]),
+        true,
+    )
+});
+
+static TABLE_CHANGES_LOG_REMOVE_SCHEMA: LazyLock<StructField> = LazyLock::new(|| {
+    StructField::new(
+        "remove",
+        StructType::new([
+            StructField::new("path", DataType::STRING, true),
+            StructField::new("size", DataType::LONG, true),
+            StructField::new(
+                "deletionVector",
+                StructType::new([
+                    StructField::new("storageType", DataType::STRING, true),
+                    StructField::new("pathOrInlineDv", DataType::STRING, true),
+                    StructField::new("offset", DataType::INTEGER, true),
+                    StructField::new("sizeInBytes", DataType::INTEGER, true),
+                    StructField::new("cardinality", DataType::LONG, true),
+                ]),
+                true,
+            ),
+            StructField::new(
+                "fileConstantValues",
+                StructType::new([StructField::new(
+                    "partitionValues",
+                    MapType::new(DataType::STRING, DataType::STRING, true),
+                    true,
+                )]),
+                true,
+            ),
+        ]),
+        true,
+    )
+});
+
+// NB: If you update this schema, ensure you update the comment describing it in the doc comment
+// for `scan_row_schema` in table_changes/mod.rs! You'll also need to update ScanFileVisitor as the
+// indexes will be off
+pub(crate) static TABLE_CHANGES_SCAN_ROW_SCHEMA: LazyLock<Arc<StructType>> = LazyLock::new(|| {
+    // Note that fields projected out of a nullable struct must be nullable
+    Arc::new(StructType::new([
+        // TODO: Look at log add schema, then project_as_struct, and use it to construct a schema
+        TABLE_CHANGES_LOG_ADD_SCHEMA.clone(),
+        TABLE_CHANGES_LOG_REMOVE_SCHEMA.clone(),
+    ]))
+});
+
+pub(crate) static TABLE_CHANGES_SCAN_ROW_EXPR: LazyLock<Arc<Expression>> = LazyLock::new(|| {
+    Arc::new(Expression::struct_from([
+        Expression::struct_from([
+            column_expr!("add.path"),
+            column_expr!("add.size"),
+            column_expr!("add.modificationTime"),
+            column_expr!("add.stats"),
+            column_expr!("add.deletionVector"),
+            Expression::struct_from([column_expr!("add.partitionValues")]),
+        ]),
+        Expression::struct_from([
+            column_expr!("remove.path"),
+            column_expr!("remove.size"),
+            column_expr!("remove.deletionVector"),
+            Expression::struct_from([column_expr!("remove.partitionValues")]),
+        ]),
+    ]))
+});
+
+pub(crate) static SCAN_ROW_DATATYPE: LazyLock<DataType> =
+    LazyLock::new(|| SCAN_ROW_SCHEMA.clone().into());
