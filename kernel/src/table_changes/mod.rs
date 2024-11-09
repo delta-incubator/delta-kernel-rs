@@ -16,6 +16,7 @@ use table_changes_scan::TableChangesScanBuilder;
 use url::Url;
 
 pub type TableChangesScanData = (Box<dyn EngineData>, Vec<bool>, Arc<HashMap<String, DvInfo>>);
+mod data_read;
 mod metadata_scanner;
 mod replay_scanner;
 mod state;

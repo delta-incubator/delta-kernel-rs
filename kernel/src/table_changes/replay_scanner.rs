@@ -2,19 +2,16 @@ use std::collections::{HashMap, HashSet};
 
 use crate::actions::visitors::{AddVisitor, RemoveVisitor};
 use crate::actions::{get_log_schema, Add, Remove, ADD_NAME, REMOVE_NAME};
-use crate::engine::arrow_data::ArrowEngineData;
 use crate::engine_data::{GetData, TypedGetData};
-use crate::expressions::{column_expr, Expression};
+use crate::expressions::Expression;
 use crate::scan::data_skipping::DataSkippingFilter;
 use crate::scan::state::DvInfo;
 use crate::scan::ScanData;
 use crate::table_changes::state::TABLE_CHANGES_SCAN_ROW_SCHEMA;
 use crate::{DataVisitor, DeltaResult, EngineData, ExpressionHandler};
-use arrow_array::RecordBatch;
 use tracing::debug;
 
 use super::state::TABLE_CHANGES_SCAN_ROW_EXPR;
-use super::TableChangesScanData;
 
 #[derive(Default)]
 pub(crate) struct AddRemoveCdcVisitor {
@@ -135,13 +132,6 @@ impl TableChangesLogReplayScanner {
             selection_vector[index] = true;
         }
 
-        // Downcast actions to arrow_engine data, then print out record batches
-        // let record_batch: &RecordBatch = actions
-        //     .as_any()
-        //     .downcast_ref::<ArrowEngineData>()
-        //     .unwrap()
-        //     .record_batch();
-        // println!("\n\n\n==============================================================================================\nRecord batch: {:?}", record_batch);
         let result = expression_handler
             .get_evaluator(
                 get_log_schema().clone(),
@@ -149,14 +139,6 @@ impl TableChangesLogReplayScanner {
                 TABLE_CHANGES_SCAN_ROW_SCHEMA.clone().into(),
             )
             .evaluate(actions)?;
-        // let record_batch: &RecordBatch = result
-        //     .as_any()
-        //     .downcast_ref::<ArrowEngineData>()
-        //     .unwrap()
-        //     .record_batch();
-        // println!("\n\n\n~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\nOutput batch: {:?}", record_batch);
-        // println!("**************************************************************************************************************");
-        println!("evaluation successful...");
         Ok((result, selection_vector))
     }
 

@@ -1,4 +1,4 @@
-use std::{collections::HashMap, iter, sync::Arc};
+use std::{collections::HashMap, sync::Arc};
 
 use itertools::Itertools;
 use tracing::debug;
@@ -7,12 +7,15 @@ use crate::{
     actions::{deletion_vector::split_vector, get_log_schema, ADD_NAME, REMOVE_NAME},
     scan::{
         data_skipping::DataSkippingFilter,
-        get_state_info, log_replay,
-        state::{DvInfo, GlobalScanState, Stats},
-        transform_to_logical_internal, ColumnType, ScanData, ScanResult,
+        get_state_info,
+        state::{DvInfo, GlobalScanState},
+        ColumnType, ScanData, ScanResult,
     },
-    schema::{Schema, SchemaRef, StructType},
-    table_changes::state::{self, ScanFile},
+    schema::{SchemaRef, StructType},
+    table_changes::{
+        data_read::transform_to_logical_internal,
+        state::{self, ScanFile},
+    },
     DeltaResult, Engine, EngineData, ExpressionRef, FileMeta,
 };
 
@@ -265,7 +268,6 @@ impl TableChangesScan {
                 // println!("Going to visit");
                 let context =
                     state::visit_scan_files(data.as_ref(), &vec, context, scan_data_callback)?;
-                println!("ScanFile: {:?}", context);
                 Ok(context
                     .files
                     .into_iter()
@@ -277,51 +279,58 @@ impl TableChangesScan {
         let result = scan_files_iter
             .into_iter()
             .map(move |scan_res| -> DeltaResult<_> {
-                let scan_file = scan_res?;
-                println!("scan file: {:?}", scan_file);
+                let (scan_file, _dv_map) = scan_res?;
+                let ScanFile {
+                    tpe,
+                    path,
+                    dv_info,
+                    partition_values,
+                    size,
+                } = scan_file;
                 // let (scan_file, remove_dvs) = scan_res?;
-                // println!("Remove dvs: {:?}", remove_dvs);
-                // let file_path = self.table_changes.table_root.join(&scan_file.path)?;
-                // let mut selection_vector = scan_file
-                //     .dv_info
-                //     .get_selection_vector(engine, &self.table_changes.table_root)?;
-                // let meta = FileMeta {
-                //     last_modified: 0,
-                //     size: scan_file.size as usize,
-                //     location: file_path,
-                // };
-                // let read_result_iter = engine.get_parquet_handler().read_parquet_files(
-                //     &[meta],
-                //     global_state.read_schema.clone(),
-                //     self.predicate(),
-                // )?;
-                // let gs = global_state.clone(); // Arc clone
-                // Ok(read_result_iter.map(move |read_result| -> DeltaResult<_> {
-                //     let read_result = read_result?;
-                //     // to transform the physical data into the correct logical form
-                //     let logical = transform_to_logical_internal(
-                //         engine,
-                //         read_result,
-                //         &gs,
-                //         &scan_file.partition_values,
-                //         &self.all_fields,
-                //         self.have_partition_cols,
-                //     );
-                //     let len = logical.as_ref().map_or(0, |res| res.length());
-                //     // need to split the dv_mask. what's left in dv_mask covers this result, and rest
-                //     // will cover the following results. we `take()` out of `selection_vector` to avoid
-                //     // trying to return a captured variable. We're going to reassign `selection_vector`
-                //     // to `rest` in a moment anyway
-                //     let mut sv = selection_vector.take();
-                //     let rest = split_vector(sv.as_mut(), len, None);
-                //     let result = ScanResult {
-                //         raw_data: logical,
-                //         raw_mask: sv,
-                //     };
-                //     selection_vector = rest;
-                //     Ok(result)
-                // }))
-                Ok(iter::empty())
+                println!("Add path : {:?}", path);
+                let file_path = self.table_changes.table_root.join(&path)?;
+                let mut selection_vector =
+                    dv_info.get_selection_vector(engine, &self.table_changes.table_root)?;
+                let meta = FileMeta {
+                    last_modified: 0,
+                    size: size as usize,
+                    location: file_path,
+                };
+                let read_result_iter = engine.get_parquet_handler().read_parquet_files(
+                    &[meta],
+                    global_state.read_schema.clone(),
+                    self.predicate(),
+                )?;
+
+                // Arc clone
+                let gs = global_state.clone();
+
+                Ok(read_result_iter.map(move |read_result| -> DeltaResult<_> {
+                    let read_result = read_result?;
+                    // to transform the physical data into the correct logical form
+                    let logical = transform_to_logical_internal(
+                        engine,
+                        read_result,
+                        &gs,
+                        &partition_values,
+                        &self.all_fields,
+                        self.have_partition_cols,
+                    );
+                    let len = logical.as_ref().map_or(0, |res| res.length());
+                    // need to split the dv_mask. what's left in dv_mask covers this result, and rest
+                    // will cover the following results. we `take()` out of `selection_vector` to avoid
+                    // trying to return a captured variable. We're going to reassign `selection_vector`
+                    // to `rest` in a moment anyway
+                    let mut sv = selection_vector.take();
+                    let rest = split_vector(sv.as_mut(), len, None);
+                    let result = ScanResult {
+                        raw_data: logical,
+                        raw_mask: sv,
+                    };
+                    selection_vector = rest;
+                    Ok(result)
+                }))
             })
             // Iterator<DeltaResult<Iterator<DeltaResult<ScanResult>>>> to Iterator<DeltaResult<DeltaResult<ScanResult>>>
             .flatten_ok()

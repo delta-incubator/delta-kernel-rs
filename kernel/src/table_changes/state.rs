@@ -5,25 +5,18 @@ use std::{
     sync::{Arc, LazyLock},
 };
 
+use crate::expressions::{column_expr, Expression};
 use crate::{
-    actions::{
-        schemas::GetStructField, visitors::visit_deletion_vector_at, Add, Remove, ADD_NAME,
-        REMOVE_NAME,
-    },
+    actions::visitors::visit_deletion_vector_at,
     engine_data::{GetData, TypedGetData},
     features::ColumnMappingMode,
     scan::{
-        log_replay::{self, SCAN_ROW_SCHEMA},
+        log_replay::SCAN_ROW_SCHEMA,
         state::{DvInfo, Stats},
     },
     schema::{DataType, MapType, Schema, SchemaRef, StructField, StructType},
     DataVisitor, DeltaResult, EngineData,
 };
-use crate::{
-    engine::arrow_data::ArrowEngineData,
-    expressions::{column_expr, Expression},
-};
-use arrow_array::RecordBatch;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
@@ -36,19 +29,19 @@ pub(crate) struct GlobalScanState {
     pub read_schema: SchemaRef,
     pub column_mapping_mode: ColumnMappingMode,
 }
+
 #[derive(Debug)]
-pub(crate) enum ScanFile {
-    Add {
-        path: String,
-        stats: Option<Stats>,
-        dv_info: DvInfo,
-        partition_values: HashMap<String, String>,
-    },
-    Remove {
-        path: String,
-        dv_info: DvInfo,
-        partition_values: HashMap<String, String>,
-    },
+pub(crate) enum ScanFileType {
+    Add { stats: Option<Stats> },
+    Remove,
+}
+#[derive(Debug)]
+pub(crate) struct ScanFile {
+    pub tpe: ScanFileType,
+    pub path: String,
+    pub size: i64,
+    pub dv_info: DvInfo,
+    pub partition_values: HashMap<String, String>,
 }
 
 pub(crate) type ScanCallback<T> = fn(context: &mut T, scan_file: ScanFile);
@@ -93,11 +86,6 @@ pub(crate) fn visit_scan_files<T>(
         context,
     };
 
-    let record_batch: &RecordBatch = data
-        .as_any()
-        .downcast_ref::<ArrowEngineData>()
-        .unwrap()
-        .record_batch();
     data.extract(TABLE_CHANGES_SCAN_ROW_SCHEMA.clone(), &mut visitor)?;
     Ok(visitor.context)
 }
@@ -119,6 +107,7 @@ impl<T> DataVisitor for ScanFileVisitor<'_, T> {
 
             // Since path column is required, use it to detect presence of an Add action
             if let Some(path) = getters[0].get_opt(row_index, "scanFile.add.path")? {
+                let size = getters[1].get(row_index, "scanFile.add.size")?;
                 let stats: Option<String> = getters[3].get_opt(row_index, "scanFile.add.stats")?;
                 let stats: Option<Stats> =
                     stats.and_then(|json| match serde_json::from_str(json.as_str()) {
@@ -128,20 +117,21 @@ impl<T> DataVisitor for ScanFileVisitor<'_, T> {
                             None
                         }
                     });
-
                 let dv_index = 4;
                 let deletion_vector = visit_deletion_vector_at(row_index, &getters[dv_index..])?;
                 let dv_info = DvInfo { deletion_vector };
                 let partition_values =
                     getters[9].get(row_index, "scanFile.add.fileConstantValues.partitionValues")?;
-                let scan_file = ScanFile::Add {
+                let scan_file = ScanFile {
+                    tpe: ScanFileType::Add { stats },
                     path,
-                    stats,
+                    size,
                     dv_info,
                     partition_values,
                 };
                 (self.callback)(&mut self.context, scan_file)
             } else if let Some(path) = getters[10].get_opt(row_index, "scanFile.remove.path")? {
+                let size = getters[11].get(row_index, "scanFile.add.size")?;
                 let dv_index = 12;
                 let deletion_vector = visit_deletion_vector_at(row_index, &getters[dv_index..])?;
                 let dv_info = DvInfo { deletion_vector };
@@ -149,8 +139,10 @@ impl<T> DataVisitor for ScanFileVisitor<'_, T> {
                     row_index,
                     "scanFile.remove.fileConstantValues.partitionValues",
                 )?;
-                let scan_file = ScanFile::Remove {
+                let scan_file = ScanFile {
+                    tpe: ScanFileType::Remove,
                     path,
+                    size,
                     dv_info,
                     partition_values,
                 };
