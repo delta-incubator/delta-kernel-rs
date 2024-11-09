@@ -195,7 +195,6 @@ impl<'a> LogSegmentBuilder<'a> {
             }
         };
 
-        // Remove checkpoint files
         if no_checkpoint_files {
             checkpoint_files.clear();
         }
@@ -204,14 +203,14 @@ impl<'a> LogSegmentBuilder<'a> {
         // - Be greater than the start version
         // - Be greater than the most recent checkpoint version if it exists
         // - Be less than or equal to the end version.
-        if let Some(end_version) = end_version {
-            commit_files.retain(|log_path| log_path.version <= end_version);
+        if let Some(start_version) = start_version {
+            commit_files.retain(|log_path| start_version <= log_path.version);
         }
         if let Some(checkpoint_file) = checkpoint_files.first() {
             commit_files.retain(|log_path| checkpoint_file.version < log_path.version);
         }
-        if let Some(start_version) = start_version {
-            commit_files.retain(|log_path| start_version <= log_path.version);
+        if let Some(end_version) = end_version {
+            commit_files.retain(|log_path| log_path.version <= end_version);
         }
 
         // get the effective version from chosen files
@@ -229,7 +228,6 @@ impl<'a> LogSegmentBuilder<'a> {
 
         // We assume listing returned ordered. If `in_order_commit_files` is false, we want reverse order.
         if !in_order_commit_files {
-            // We assume listing returned ordered, we want reverse order
             commit_files.reverse();
         }
 
