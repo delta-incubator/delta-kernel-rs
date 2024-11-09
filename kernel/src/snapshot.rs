@@ -62,7 +62,7 @@ impl Snapshot {
         let fs_client = engine.get_file_system_client();
         let log_url = table_root.join("_delta_log/").unwrap();
 
-        let mut builder = LogSegmentBuilder::new(fs_client.clone(), &table_root);
+        let mut builder = LogSegmentBuilder::new(fs_client.as_ref(), &table_root);
         if let Some(version) = version {
             builder = builder.with_end_version(version);
         }

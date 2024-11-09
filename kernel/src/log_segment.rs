@@ -114,7 +114,7 @@ impl LogSegment {
 }
 
 pub(crate) struct LogSegmentBuilder<'a> {
-    fs_client: Arc<dyn FileSystemClient>,
+    fs_client: &'a dyn FileSystemClient,
     log_root: &'a Url,
     checkpoint: Option<CheckpointMetadata>,
     start_version: Option<Version>,
@@ -123,7 +123,7 @@ pub(crate) struct LogSegmentBuilder<'a> {
     in_order_commit_files: bool,
 }
 impl<'a> LogSegmentBuilder<'a> {
-    pub(crate) fn new(fs_client: Arc<dyn FileSystemClient>, log_root: &'a Url) -> Self {
+    pub(crate) fn new(fs_client: &'a dyn FileSystemClient, log_root: &'a Url) -> Self {
         LogSegmentBuilder {
             fs_client,
             log_root,
@@ -183,13 +183,16 @@ impl<'a> LogSegmentBuilder<'a> {
         } = self;
         let log_url = log_root.join("_delta_log/").unwrap();
         let (mut commit_files, mut checkpoint_files) = match (checkpoint, end_version) {
-            (Some(cp), None) => {
-                Self::list_log_files_with_checkpoint(&cp, fs_client.as_ref(), &log_url)?
-            }
+            (Some(cp), None) => Self::list_log_files_with_checkpoint(&cp, fs_client, &log_url)?,
             (Some(cp), Some(version)) if cp.version >= version => {
-                Self::list_log_files_with_checkpoint(&cp, fs_client.as_ref(), &log_url)?
+                Self::list_log_files_with_checkpoint(&cp, fs_client, &log_url)?
             }
-            _ => Self::list_log_files(fs_client.as_ref(), &log_url)?,
+            _ => {
+                let (commit_files, checkpoint_files, _) =
+                    Self::list_log_files_from_version(fs_client, &log_url, None)?;
+
+                (commit_files, checkpoint_files)
+            }
         };
 
         // Remove checkpoint files
@@ -198,9 +201,9 @@ impl<'a> LogSegmentBuilder<'a> {
         }
 
         // Commit file versions must satisfy the following:
-        // - Must be greater than the start version
-        // - Must be greater than the most recent checkpoint version if it exists
-        // - Must be less than or equal to the specified end version.
+        // - Be greater than the start version
+        // - Be greater than the most recent checkpoint version if it exists
+        // - Be less than or equal to the end version.
         if let Some(end_version) = end_version {
             commit_files.retain(|log_path| log_path.version <= end_version);
         }
@@ -329,21 +332,6 @@ impl<'a> LogSegmentBuilder<'a> {
         }
         Ok((commit_files, checkpoint_files))
     }
-
-    /// List relevant log files.
-    ///
-    /// Relevant files are the max checkpoint found and all subsequent commits.
-    pub(crate) fn list_log_files(
-        fs_client: &dyn FileSystemClient,
-        log_root: &Url,
-    ) -> DeltaResult<(Vec<ParsedLogPath>, Vec<ParsedLogPath>)> {
-        let (mut commit_files, checkpoint_files, max_checkpoint_version) =
-            Self::list_log_files_from_version(fs_client, log_root, None)?;
-
-        commit_files.retain(|f| f.version as i64 > max_checkpoint_version);
-
-        Ok((commit_files, checkpoint_files))
-    }
 }
 #[cfg(test)]
 mod tests {
@@ -469,11 +457,12 @@ mod tests {
         let (mut commit_files, checkpoint_files) =
             LogSegmentBuilder::list_log_files_with_checkpoint(&checkpoint_metadata, &client, &url)
                 .unwrap();
-
         // Make the most recent commit the first in iterator
         commit_files.reverse();
 
         assert_eq!(checkpoint_files.len(), 1);
+        println!("checkpoint: {:?}", checkpoint_files);
+        println!("commits: {:?}", commit_files);
         assert_eq!(commit_files.len(), 2);
         assert_eq!(checkpoint_files[0].version, 5);
         println!("commitfiles: {:?}", commit_files);
