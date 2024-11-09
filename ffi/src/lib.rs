@@ -934,7 +934,7 @@ mod tests {
 
     #[test]
     fn engine_builder() {
-        let path = "/tmp";
+        let path = "s3://doesntmatter/foo";
         let path = kernel_string_slice!(path);
         let builder = unsafe { ok_or_panic(get_engine_builder(path, allocate_err)) };
         // TODO: When miri supports epoll_wait
@@ -945,6 +945,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "sync-engine")]
     fn sync_engine() {
         let engine = unsafe { get_sync_engine(allocate_err) };
         let engine = ok_or_panic(engine);

@@ -141,7 +141,7 @@ jobs:
       - name: Test with Miri
         run: |
           pushd ffi
-          cargo miri test --features sync-engine
+          MIRIFLAGS=-Zmiri-disable-isolation cargo miri test --features sync-engine
 
   coverage:
     runs-on: ubuntu-latest
