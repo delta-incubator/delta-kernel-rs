@@ -145,13 +145,9 @@ impl Transaction {
         // note this is _incorrect_ if table config deems we need partition columns.
         let partition_columns = &self.read_snapshot.metadata().partition_columns;
         let fields = self.read_snapshot.schema().fields();
-        let fields = fields.filter_map(|f| {
-            if partition_columns.contains(f.name()) {
-                None
-            } else {
-                Some(Expression::column([f.name()]))
-            }
-        });
+        let fields = fields
+            .filter(|f| !partition_columns.contains(f.name()))
+            .map(|f| Expression::column([f.name()]));
         Expression::struct_from(fields)
     }
 
