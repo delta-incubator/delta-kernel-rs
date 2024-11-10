@@ -70,23 +70,6 @@ impl LogSegment {
         Ok(commit_stream.chain(checkpoint_stream))
     }
 
-    pub(crate) fn replay_commits(
-        &self,
-        engine: &dyn Engine,
-        commit_read_schema: SchemaRef,
-        meta_predicate: Option<ExpressionRef>,
-    ) -> DeltaResult<
-        impl Iterator<
-            Item = DeltaResult<Box<dyn Iterator<Item = DeltaResult<Box<dyn EngineData>>> + Send>>,
-        >,
-    > {
-        let json_client = engine.get_json_handler();
-        let commit_files = self.commit_files.clone();
-        let commit_stream = commit_files.into_iter().map(move |file| {
-            json_client.read_json_files(&[file], commit_read_schema.clone(), meta_predicate.clone())
-        });
-        Ok(commit_stream)
-    }
     // Get the most up-to-date Protocol and Metadata actions
     pub(crate) fn read_metadata(&self, engine: &dyn Engine) -> DeltaResult<(Metadata, Protocol)> {
         let data_batches = self.replay_for_metadata(engine)?;
