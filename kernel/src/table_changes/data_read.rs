@@ -1,29 +1,28 @@
 use itertools::Itertools;
 
 use crate::{
-    expressions::ColumnName,
+    expressions::{ColumnName, Scalar},
     features::ColumnMappingMode,
-    scan::{parse_partition_value, state::GlobalScanState, ColumnType},
+    scan::{parse_partition_value, ColumnType},
     DeltaResult, Engine, EngineData, Error, Expression,
 };
+
+use super::TableChangesGlobalScanState;
 
 // We have this function because `execute` can save `all_fields` and `have_partition_cols` in the
 // scan, and then reuse them for each batch transform
 pub(crate) fn transform_to_logical_internal(
     engine: &dyn Engine,
     data: Box<dyn EngineData>,
-    global_state: &GlobalScanState,
+    global_state: &TableChangesGlobalScanState,
     partition_values: &std::collections::HashMap<String, String>,
     all_fields: &[ColumnType],
     have_partition_cols: bool,
 ) -> DeltaResult<Box<dyn EngineData>> {
     let read_schema = global_state.read_schema.clone();
     println!("Read schemA: {:?}", read_schema);
-    if !have_partition_cols && global_state.column_mapping_mode == ColumnMappingMode::None {
-        return Ok(data);
-    }
     // need to add back partition cols and/or fix-up mapped columns
-    let all_fields = all_fields
+    let mut all_fields: Vec<Expression> = all_fields
         .iter()
         .map(|field| match field {
             ColumnType::Partition(field_idx) => {
@@ -41,13 +40,19 @@ pub(crate) fn transform_to_logical_internal(
             ColumnType::Selected(field_name) => Ok(ColumnName::new([field_name]).into()),
         })
         .try_collect()?;
+    all_fields.extend([
+        Expression::literal(42i64),
+        Scalar::Timestamp(50).into(),
+        "insert".into(),
+    ]);
     let read_expression = Expression::Struct(all_fields);
+    println!("Final schema: {:?}", global_state.output_schema);
     let result = engine
         .get_expression_handler()
         .get_evaluator(
             read_schema,
             read_expression,
-            global_state.logical_schema.clone().into(),
+            global_state.output_schema.clone().into(),
         )
         .evaluate(data.as_ref())?;
     Ok(result)

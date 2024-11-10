@@ -1,9 +1,6 @@
 //! In-memory representation of a change data feed table.
 
-use std::{
-    collections::HashMap,
-    sync::{Arc, LazyLock},
-};
+use std::{collections::HashMap, sync::Arc};
 
 use crate::{
     actions::{Metadata, Protocol},
@@ -15,7 +12,14 @@ use crate::{
     snapshot::Snapshot,
     DeltaResult, Engine, EngineData, Error, ExpressionRef, Version,
 };
+use serde::{Deserialize, Serialize};
+use table_changes_scan::TableChangesScan;
 use url::Url;
+
+mod data_read;
+mod replay_scanner;
+mod state;
+pub mod table_changes_scan;
 
 pub type TableChangesScanData = (Box<dyn EngineData>, Vec<bool>, Arc<HashMap<String, DvInfo>>);
 
@@ -171,16 +175,15 @@ impl TableChangesScanBuilder {
     }
 }
 
-/// The result of building a [`TableChanges`] scan over a table. This can be used to get a change
-/// data feed from the table
-#[allow(unused)]
-pub struct TableChangesScan {
-    table_changes: Arc<TableChanges>,
-    logical_schema: SchemaRef,
-    physical_schema: SchemaRef,
-    predicate: Option<ExpressionRef>,
-    all_fields: Vec<ColumnType>,
-    have_partition_cols: bool,
+/// State that doesn't change between scans
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TableChangesGlobalScanState {
+    pub table_root: String,
+    pub partition_columns: Vec<String>,
+    pub logical_schema: SchemaRef,
+    pub read_schema: SchemaRef,
+    pub column_mapping_mode: ColumnMappingMode,
+    pub output_schema: SchemaRef,
 }
 
 #[cfg(test)]

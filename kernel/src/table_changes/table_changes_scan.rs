@@ -19,7 +19,10 @@ use crate::{
     DeltaResult, Engine, EngineData, ExpressionRef, FileMeta,
 };
 
-use super::{replay_scanner::TableChangesLogReplayScanner, TableChanges, TableChangesScanData};
+use super::{
+    replay_scanner::TableChangesLogReplayScanner, TableChanges, TableChangesGlobalScanState,
+    TableChangesScanData,
+};
 
 /// Builder to scan a snapshot of a table.
 pub struct TableChangesScanBuilder {
@@ -98,12 +101,12 @@ impl TableChangesScanBuilder {
 }
 
 pub struct TableChangesScan {
-    table_changes: Arc<TableChanges>,
-    logical_schema: SchemaRef,
-    physical_schema: SchemaRef,
-    predicate: Option<ExpressionRef>,
-    all_fields: Vec<ColumnType>,
-    have_partition_cols: bool,
+    pub table_changes: Arc<TableChanges>,
+    pub logical_schema: SchemaRef,
+    pub physical_schema: SchemaRef,
+    pub predicate: Option<ExpressionRef>,
+    pub all_fields: Vec<ColumnType>,
+    pub have_partition_cols: bool,
 }
 
 /// Given an iterator of (engine_data, bool) tuples and a predicate, returns an iterator of
@@ -212,13 +215,15 @@ impl TableChangesScan {
 
     /// Get global state that is valid for the entire scan. This is somewhat expensive so should
     /// only be called once per scan.
-    pub fn global_scan_state(&self) -> GlobalScanState {
-        GlobalScanState {
+    pub(crate) fn global_scan_state(&self) -> TableChangesGlobalScanState {
+        TableChangesGlobalScanState {
             table_root: self.table_changes.table_root.to_string(),
             partition_columns: self.table_changes.metadata.partition_columns.clone(),
             logical_schema: self.logical_schema.clone(),
             read_schema: self.physical_schema.clone(),
             column_mapping_mode: self.table_changes.column_mapping_mode,
+            // TODO: Arc output_schema earlier
+            output_schema: self.table_changes.output_schema.clone().into(),
         }
     }
 
