@@ -59,7 +59,7 @@ impl TableChanges {
 
         // Get a log segment for the CDF range
         let fs_client = engine.get_file_system_client();
-        let mut builder = LogSegmentBuilder::new(fs_client, &table_root);
+        let mut builder = LogSegmentBuilder::new(fs_client.as_ref(), &table_root);
         builder = builder.with_start_version(start_version);
         if let Some(end_version) = end_version {
             builder = builder.with_end_version(end_version);
