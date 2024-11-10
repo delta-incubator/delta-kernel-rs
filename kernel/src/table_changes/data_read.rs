@@ -1,23 +1,27 @@
 use itertools::Itertools;
 
 use crate::{
-    expressions::{ColumnName, Scalar},
+    expressions::{column_expr, ColumnName, Scalar},
     features::ColumnMappingMode,
     scan::{parse_partition_value, ColumnType},
     DeltaResult, Engine, EngineData, Error, Expression,
 };
 
-use super::TableChangesGlobalScanState;
+use super::{state::ScanFileType, TableChangesGlobalScanState};
 
 // We have this function because `execute` can save `all_fields` and `have_partition_cols` in the
 // scan, and then reuse them for each batch transform
+#[allow(clippy::too_many_arguments)] // TEMPORARY
 pub(crate) fn transform_to_logical_internal(
     engine: &dyn Engine,
     data: Box<dyn EngineData>,
     global_state: &TableChangesGlobalScanState,
     partition_values: &std::collections::HashMap<String, String>,
     all_fields: &[ColumnType],
-    have_partition_cols: bool,
+    _have_partition_cols: bool,
+    commit_version: Option<i64>,
+    timestamp: Option<i64>,
+    tpe: ScanFileType,
 ) -> DeltaResult<Box<dyn EngineData>> {
     let read_schema = global_state.read_schema.clone();
     println!("Read schemA: {:?}", read_schema);
@@ -40,13 +44,35 @@ pub(crate) fn transform_to_logical_internal(
             ColumnType::Selected(field_name) => Ok(ColumnName::new([field_name]).into()),
         })
         .try_collect()?;
-    all_fields.extend([
-        Expression::literal(42i64),
-        Scalar::Timestamp(50).into(),
-        "insert".into(),
-    ]);
+
+    // TODO make commit_version non-optional
+    let commit_version = commit_version.unwrap_or(42);
+    let timestamp = timestamp.unwrap_or(42);
+    match tpe {
+        ScanFileType::Cdc => {
+            all_fields.extend([
+                column_expr!("_commit_version"),
+                column_expr!("_commit_timestamp"),
+                column_expr!("_change_type"),
+            ]);
+        }
+        ScanFileType::Add => {
+            all_fields.extend([
+                Expression::literal(commit_version),
+                Scalar::Timestamp(timestamp).into(),
+                "insert".into(),
+            ]);
+        }
+
+        ScanFileType::Remove => {
+            all_fields.extend([
+                Expression::literal(commit_version),
+                Scalar::Timestamp(timestamp).into(),
+                "remove".into(),
+            ]);
+        }
+    };
     let read_expression = Expression::Struct(all_fields);
-    println!("Final schema: {:?}", global_state.output_schema);
     let result = engine
         .get_expression_handler()
         .get_evaluator(

@@ -9,7 +9,7 @@ use crate::{
 };
 
 use super::{
-    deletion_vector::DeletionVectorDescriptor, Add, Format, Metadata, Protocol, Remove,
+    deletion_vector::DeletionVectorDescriptor, Add, Cdc, Format, Metadata, Protocol, Remove,
     SetTransaction,
 };
 
@@ -305,6 +305,48 @@ impl DataVisitor for SetTransactionVisitor {
                         self.set_transactions.insert(txn.app_id.clone(), txn);
                     }
                 }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+#[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
+#[cfg_attr(not(feature = "developer-visibility"), visibility::make(pub(crate)))]
+struct CdcVisitor {
+    pub(crate) cdcs: Vec<Cdc>,
+}
+
+impl CdcVisitor {
+    #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
+    #[cfg_attr(not(feature = "developer-visibility"), visibility::make(pub(crate)))]
+    fn visit_cdc<'a>(
+        row_index: usize,
+        path: String,
+        getters: &[&'a dyn GetData<'a>],
+    ) -> DeltaResult<Cdc> {
+        let partition_values: HashMap<_, _> = getters[1].get(row_index, "cdc.partitionValues")?;
+        let size: i64 = getters[2].get(row_index, "cdc.size")?;
+        let data_change: bool = getters[4].get(row_index, "cdc.dataChange")?;
+
+        // TODO(oussama) extract tags if we ever need them at getters[6]
+        Ok(Cdc {
+            path,
+            partition_values,
+            size,
+            data_change,
+            tags: None,
+        })
+    }
+}
+
+impl DataVisitor for CdcVisitor {
+    fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<()> {
+        for i in 0..row_count {
+            // Since path column is required, use it to detect presence of an Add action
+            if let Some(path) = getters[0].get_opt(i, "cdc.path")? {
+                self.cdcs.push(Self::visit_cdc(i, path, getters)?);
             }
         }
         Ok(())

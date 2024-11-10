@@ -17,3 +17,4 @@ delta_kernel = { path = "../../../kernel", features = [
 env_logger = "0.11.3"
 url = "2"
 itertools = "0.13"
+arrow = { workspace = true, features = ["prettyprint"] }

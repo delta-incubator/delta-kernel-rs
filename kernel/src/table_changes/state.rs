@@ -5,7 +5,6 @@ use std::{
     sync::{Arc, LazyLock},
 };
 
-use crate::expressions::{column_expr, Expression};
 use crate::{
     actions::visitors::visit_deletion_vector_at,
     engine_data::{GetData, TypedGetData},
@@ -16,6 +15,10 @@ use crate::{
     },
     schema::{DataType, MapType, Schema, SchemaRef, StructField, StructType},
     DataVisitor, DeltaResult, EngineData,
+};
+use crate::{
+    expressions::{column_expr, Expression},
+    Version,
 };
 use serde::{Deserialize, Serialize};
 use tracing::warn;
@@ -30,10 +33,11 @@ pub(crate) struct GlobalScanState {
     pub column_mapping_mode: ColumnMappingMode,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) enum ScanFileType {
-    Add { stats: Option<Stats> },
+    Add,
     Remove,
+    Cdc,
 }
 #[derive(Debug)]
 pub(crate) struct ScanFile {
@@ -42,6 +46,8 @@ pub(crate) struct ScanFile {
     pub size: i64,
     pub dv_info: DvInfo,
     pub partition_values: HashMap<String, String>,
+    pub commit_version: Option<i64>,
+    pub timestamp: Option<i64>,
 }
 
 pub(crate) type ScanCallback<T> = fn(context: &mut T, scan_file: ScanFile);
@@ -104,30 +110,25 @@ impl<T> DataVisitor for ScanFileVisitor<'_, T> {
                 // skip skipped rows
                 continue;
             }
+            let timestamp = getters[21].get_long(row_index, "scanFile.timestamp")?;
+            let commit_version = getters[22].get_long(row_index, "scanFile.commit_version")?;
 
             // Since path column is required, use it to detect presence of an Add action
             if let Some(path) = getters[0].get_opt(row_index, "scanFile.add.path")? {
                 let size = getters[1].get(row_index, "scanFile.add.size")?;
-                let stats: Option<String> = getters[3].get_opt(row_index, "scanFile.add.stats")?;
-                let stats: Option<Stats> =
-                    stats.and_then(|json| match serde_json::from_str(json.as_str()) {
-                        Ok(stats) => Some(stats),
-                        Err(e) => {
-                            warn!("Invalid stats string in Add file {json}: {}", e);
-                            None
-                        }
-                    });
                 let dv_index = 4;
                 let deletion_vector = visit_deletion_vector_at(row_index, &getters[dv_index..])?;
                 let dv_info = DvInfo { deletion_vector };
                 let partition_values =
                     getters[9].get(row_index, "scanFile.add.fileConstantValues.partitionValues")?;
                 let scan_file = ScanFile {
-                    tpe: ScanFileType::Add { stats },
+                    tpe: ScanFileType::Add,
                     path,
                     size,
                     dv_info,
                     partition_values,
+                    commit_version,
+                    timestamp,
                 };
                 (self.callback)(&mut self.context, scan_file)
             } else if let Some(path) = getters[10].get_opt(row_index, "scanFile.remove.path")? {
@@ -145,10 +146,31 @@ impl<T> DataVisitor for ScanFileVisitor<'_, T> {
                     size,
                     dv_info,
                     partition_values,
+                    commit_version,
+                    timestamp,
                 };
                 (self.callback)(&mut self.context, scan_file)
+            } else if let Some(path) = getters[18].get_opt(row_index, "scanFile.cdc.path")? {
+                let size = getters[19].get(row_index, "scanFile.add.size")?;
+                let partition_values = getters[20].get(
+                    row_index,
+                    "scanFile.remove.fileConstantValues.partitionValues",
+                )?;
+                let scan_file = ScanFile {
+                    tpe: ScanFileType::Cdc,
+                    path,
+                    size,
+                    dv_info: DvInfo {
+                        deletion_vector: None,
+                    },
+                    partition_values,
+                    commit_version,
+                    timestamp,
+                };
+
+                (self.callback)(&mut self.context, scan_file)
             } else {
-                println!("Did not find anything in row");
+                println!("Didn't find anything");
             }
         }
         Ok(())
@@ -245,6 +267,32 @@ static TABLE_CHANGES_LOG_REMOVE_SCHEMA: LazyLock<StructField> = LazyLock::new(||
     )
 });
 
+static TABLE_CHANGES_LOG_CDC_SCHEMA: LazyLock<StructField> = LazyLock::new(|| {
+    StructField::new(
+        "cdc",
+        StructType::new([
+            StructField::new("path", DataType::STRING, true),
+            StructField::new("size", DataType::LONG, true),
+            StructField::new(
+                "fileConstantValues",
+                StructType::new([StructField::new(
+                    "partitionValues",
+                    MapType::new(DataType::STRING, DataType::STRING, true),
+                    true,
+                )]),
+                true,
+            ),
+        ]),
+        true,
+    )
+});
+
+static TABLE_CHANGES_TIMESTAMP: LazyLock<StructField> =
+    LazyLock::new(|| StructField::new("timestamp", DataType::LONG, true));
+
+static TABLE_CHANGES_COMMIT_VERSION: LazyLock<StructField> =
+    LazyLock::new(|| StructField::new("commit_version", DataType::LONG, true));
+
 // NB: If you update this schema, ensure you update the comment describing it in the doc comment
 // for `scan_row_schema` in table_changes/mod.rs! You'll also need to update ScanFileVisitor as the
 // indexes will be off
@@ -254,25 +302,9 @@ pub(crate) static TABLE_CHANGES_SCAN_ROW_SCHEMA: LazyLock<Arc<StructType>> = Laz
         // TODO: Look at log add schema, then project_as_struct, and use it to construct a schema
         TABLE_CHANGES_LOG_ADD_SCHEMA.clone(),
         TABLE_CHANGES_LOG_REMOVE_SCHEMA.clone(),
-    ]))
-});
-
-pub(crate) static TABLE_CHANGES_SCAN_ROW_EXPR: LazyLock<Arc<Expression>> = LazyLock::new(|| {
-    Arc::new(Expression::struct_from([
-        Expression::struct_from([
-            column_expr!("add.path"),
-            column_expr!("add.size"),
-            column_expr!("add.modificationTime"),
-            column_expr!("add.stats"),
-            column_expr!("add.deletionVector"),
-            Expression::struct_from([column_expr!("add.partitionValues")]),
-        ]),
-        Expression::struct_from([
-            column_expr!("remove.path"),
-            column_expr!("remove.size"),
-            column_expr!("remove.deletionVector"),
-            Expression::struct_from([column_expr!("remove.partitionValues")]),
-        ]),
+        TABLE_CHANGES_LOG_CDC_SCHEMA.clone(),
+        TABLE_CHANGES_TIMESTAMP.clone(),
+        TABLE_CHANGES_COMMIT_VERSION.clone(),
     ]))
 });
 

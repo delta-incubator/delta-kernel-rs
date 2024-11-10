@@ -4,7 +4,10 @@ use itertools::Itertools;
 use tracing::debug;
 
 use crate::{
-    actions::{deletion_vector::split_vector, get_log_schema, ADD_NAME, REMOVE_NAME},
+    actions::{
+        deletion_vector::split_vector, get_log_schema, ADD_NAME, CDC_NAME, COMMIT_INFO_NAME,
+        REMOVE_NAME,
+    },
     scan::{
         data_skipping::DataSkippingFilter,
         get_state_info,
@@ -14,6 +17,7 @@ use crate::{
     schema::{SchemaRef, StructType},
     table_changes::{
         data_read::transform_to_logical_internal,
+        replay_scanner::TableChangesMetadataScanner,
         state::{self, ScanFile},
     },
     DeltaResult, Engine, EngineData, ExpressionRef, FileMeta,
@@ -123,22 +127,22 @@ pub fn table_changes_action_iter(
 ) -> DeltaResult<impl Iterator<Item = DeltaResult<TableChangesScanData>>> {
     let filter = DataSkippingFilter::new(engine, table_schema, predicate);
     let expression_handler = engine.get_expression_handler();
-    println!("commit iter len: {}", commit_iter.try_len().unwrap());
     let result = commit_iter
         .map(move |action_iter| -> DeltaResult<_> {
             let action_iter = action_iter?;
             let expression_handler = expression_handler.clone();
-            let mut log_scanner = TableChangesLogReplayScanner::new(filter.clone());
+            let mut metadata_scanner = TableChangesMetadataScanner::new(filter.clone());
 
             // Find CDC, get commitInfo, and perform metadata scan
             let mut batches = vec![];
             for action_res in action_iter {
                 let batch = action_res?;
                 // TODO: Make this metadata iterator
-                // log_scanner.process_scan_batch(expression_handler.as_ref(), batch.as_ref())?;
+                metadata_scanner.process_scan_batch(batch.as_ref())?;
                 batches.push(batch);
             }
 
+            let mut log_scanner = metadata_scanner.into_replay_scanner();
             // File metadata output scan
             let x: Vec<ScanData> = batches
                 .into_iter()
@@ -151,7 +155,6 @@ pub fn table_changes_action_iter(
                 let remove_dvs = remove_dvs.clone();
                 (a, b, remove_dvs)
             });
-            println!("Finished iter");
             Ok(y)
         })
         .flatten_ok();
@@ -204,7 +207,8 @@ impl TableChangesScan {
             Item = DeltaResult<Box<dyn Iterator<Item = DeltaResult<Box<dyn EngineData>>> + Send>>,
         >,
     > {
-        let commit_read_schema = get_log_schema().project(&[ADD_NAME, REMOVE_NAME])?;
+        let commit_read_schema =
+            get_log_schema().project(&[ADD_NAME, CDC_NAME, REMOVE_NAME, COMMIT_INFO_NAME])?;
 
         // NOTE: We don't pass any meta-predicate because we expect no meaningful row group skipping
         // when ~every checkpoint file will contain the adds and removes we are looking for.
@@ -270,9 +274,10 @@ impl TableChangesScan {
                     files: vec![],
                     remove_dv,
                 };
-                // println!("Going to visit");
+
                 let context =
                     state::visit_scan_files(data.as_ref(), &vec, context, scan_data_callback)?;
+
                 Ok(context
                     .files
                     .into_iter()
@@ -285,15 +290,16 @@ impl TableChangesScan {
             .into_iter()
             .map(move |scan_res| -> DeltaResult<_> {
                 let (scan_file, _dv_map) = scan_res?;
+
                 let ScanFile {
                     tpe,
                     path,
                     dv_info,
                     partition_values,
                     size,
+                    commit_version,
+                    timestamp,
                 } = scan_file;
-                // let (scan_file, remove_dvs) = scan_res?;
-                println!("Add path : {:?}", path);
                 let file_path = self.table_changes.table_root.join(&path)?;
                 let mut selection_vector =
                     dv_info.get_selection_vector(engine, &self.table_changes.table_root)?;
@@ -321,6 +327,9 @@ impl TableChangesScan {
                         &partition_values,
                         &self.all_fields,
                         self.have_partition_cols,
+                        commit_version,
+                        timestamp,
+                        tpe.clone(),
                     );
                     let len = logical.as_ref().map_or(0, |res| res.length());
                     // need to split the dv_mask. what's left in dv_mask covers this result, and rest

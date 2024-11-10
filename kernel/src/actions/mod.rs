@@ -40,8 +40,8 @@ static LOG_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
         Option::<Protocol>::get_struct_field(PROTOCOL_NAME),
         Option::<SetTransaction>::get_struct_field(SET_TRANSACTION_NAME),
         Option::<CommitInfo>::get_struct_field(COMMIT_INFO_NAME),
+        Option::<Cdc>::get_struct_field(CDC_NAME),
         // We don't support the following actions yet
-        //Option::<Cdc>::get_struct_field(CDC_NAME),
         //Option::<DomainMetadata>::get_struct_field(DOMAIN_METADATA_NAME),
     ])
     .into()
@@ -298,6 +298,36 @@ pub struct SetTransaction {
 
     /// The time when this transaction action was created in milliseconds since the Unix epoch.
     pub last_updated: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Schema)]
+pub struct Cdc {
+    /// A relative path to a change data file from the root of the table or an absolute path to a
+    /// change data file that should be added to the table. The path is a URI as specified by
+    /// [RFC 2396 URI Generic Syntax], which needs to be decoded to get the file path.
+    ///
+    /// [RFC 2396 URI Generic Syntax]: https://www.ietf.org/rfc/rfc2396.txt
+    pub path: String,
+
+    /// A map from partition column to value for this logical file. This map can contain null in the
+    /// values meaning a partition is null. We drop those values from this map, due to the
+    /// `drop_null_container_values` annotation. This means an engine can assume that if a partition
+    /// is found in [`Metadata`] `partition_columns`, but not in this map, its value is null.
+    #[drop_null_container_values]
+    pub partition_values: HashMap<String, String>,
+
+    /// The size of this cdc file in bytes
+    pub size: i64,
+
+    /// When `false` the logical file must already be present in the table or the records
+    /// in the added file must be contained in one or more remove actions in the same version.
+    ///
+    /// Should always be set to false for `cdc` actions because they *do not* change the underlying
+    /// data of the table
+    pub data_change: bool,
+
+    /// Map containing metadata about this logical file.
+    pub tags: Option<HashMap<String, String>>,
 }
 
 #[cfg(test)]

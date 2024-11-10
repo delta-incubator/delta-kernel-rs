@@ -1,3 +1,4 @@
+use arrow::util::pretty::print_batches;
 use arrow_array::RecordBatch;
 use delta_kernel::{
     engine::{arrow_data::ArrowEngineData, sync::SyncEngine},
@@ -24,7 +25,7 @@ fn main() -> DeltaResult<()> {
     let vec: Vec<ScanResult> = x.execute(&engine)?.try_collect()?;
     println!("Vec len: {:?}", vec.len());
     for res in vec {
-        println!("{:?}", into_record_batch(res.raw_data)?)
+        print_batches(&[into_record_batch(res.raw_data)?])?;
     }
 
     Ok(())

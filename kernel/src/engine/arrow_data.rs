@@ -9,6 +9,7 @@ use arrow_array::{Array, GenericListArray, MapArray, OffsetSizeTrait, RecordBatc
 use arrow_schema::{ArrowError, DataType as ArrowDataType};
 use tracing::{debug, warn};
 
+use core::panic;
 use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -318,6 +319,7 @@ fn get_error_for_types(
     match expected_type {
         Ok(expected_type) => {
             if expected_type == *arrow_data_type {
+                panic!();
                 Error::UnexpectedColumnType(format!(
                     "On {field_name}: Don't know how to extract something of type {data_type}",
                 ))
