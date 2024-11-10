@@ -30,7 +30,8 @@ pub struct TableChanges {
     #[allow(unused)]
     pub log_segment: LogSegment,
     pub schema: Schema,
-    pub version: Version,
+    pub start_version: Version,
+    pub end_version: Version,
     pub metadata: Metadata,
     pub protocol: Protocol,
     pub column_mapping_mode: ColumnMappingMode,
@@ -71,11 +72,13 @@ impl TableChanges {
         let log_segment = builder.build()?;
 
         let output_schema = Self::get_output_schema(end_snapshot.schema());
+
         Ok(TableChanges {
             log_segment,
             schema: end_snapshot.schema().clone(),
             column_mapping_mode: end_snapshot.column_mapping_mode,
-            version: end_snapshot.version(),
+            start_version,
+            end_version: end_snapshot.version(),
             protocol: end_snapshot.protocol().clone(),
             metadata: end_snapshot.metadata().clone(),
             table_root,
@@ -199,9 +202,13 @@ mod tests {
 
         let valid_ranges = [(0, Some(1)), (0, Some(0)), (1, Some(1))];
         for (start_version, end_version) in valid_ranges {
-            assert!(table
+            let table_changes = table
                 .table_changes(engine.as_ref(), start_version, end_version)
-                .is_ok())
+                .unwrap();
+            assert_eq!(table_changes.start_version, start_version);
+            if let Some(end_version) = end_version {
+                assert_eq!(table_changes.end_version, end_version);
+            }
         }
 
         let invalid_ranges = [
