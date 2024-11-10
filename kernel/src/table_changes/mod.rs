@@ -1,6 +1,9 @@
 //! In-memory representation of a change data feed table.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    sync::{Arc, LazyLock},
+};
 
 use crate::{
     actions::{Metadata, Protocol},
@@ -8,7 +11,7 @@ use crate::{
     log_segment::{LogSegment, LogSegmentBuilder},
     path::AsUrl,
     scan::{get_state_info, state::DvInfo, ColumnType},
-    schema::{Schema, SchemaRef, StructType},
+    schema::{DataType, Schema, SchemaRef, StructField, StructType},
     snapshot::Snapshot,
     DeltaResult, Engine, EngineData, Error, ExpressionRef, Version,
 };
@@ -28,6 +31,7 @@ pub struct TableChanges {
     pub protocol: Protocol,
     pub column_mapping_mode: ColumnMappingMode,
     pub table_root: Url,
+    pub output_schema: Schema,
 }
 
 impl TableChanges {
@@ -62,6 +66,7 @@ impl TableChanges {
             .with_in_order_commit_files();
         let log_segment = builder.build()?;
 
+        let output_schema = Self::get_output_schema(end_snapshot.schema());
         Ok(TableChanges {
             log_segment,
             schema: end_snapshot.schema().clone(),
@@ -70,7 +75,19 @@ impl TableChanges {
             protocol: end_snapshot.protocol().clone(),
             metadata: end_snapshot.metadata().clone(),
             table_root,
+            output_schema,
         })
+    }
+
+    fn get_output_schema(schema: &Schema) -> Schema {
+        let cdf_fields = [
+            StructField::new("_commit_version", DataType::LONG, false),
+            StructField::new("_commit_timestamp", DataType::TIMESTAMP, false),
+            StructField::new("_change_type", DataType::STRING, false),
+        ];
+        let fields = schema.fields().cloned();
+        let fields = fields.chain(cdf_fields);
+        StructType::new(fields)
     }
     pub fn into_scan_builder(self) -> TableChangesScanBuilder {
         TableChangesScanBuilder::new(self)
