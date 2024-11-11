@@ -104,8 +104,8 @@ impl Snapshot {
 
         let log_segment = LogSegment {
             log_root: log_url,
-            commit_files: commit_files.into_iter().collect(),
-            checkpoint_files: checkpoint_files.into_iter().collect(),
+            commit_files,
+            checkpoint_files,
         };
 
         Self::try_new_from_log_segment(table_root, log_segment, version_eff, engine)

@@ -15,9 +15,9 @@ use url::Url;
 pub(crate) struct LogSegment {
     pub log_root: Url,
     /// Reverse order sorted commit files in the log segment
-    pub commit_files: Vec<ParsedLogPath<FileMeta>>,
+    pub commit_files: Vec<ParsedLogPath>,
     /// checkpoint files in the log segment.
-    pub checkpoint_files: Vec<ParsedLogPath<FileMeta>>,
+    pub checkpoint_files: Vec<ParsedLogPath>,
 }
 
 impl LogSegment {
