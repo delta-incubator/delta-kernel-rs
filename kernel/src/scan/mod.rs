@@ -154,13 +154,13 @@ impl ScanResult {
     }
 }
 
-/// Scan uses this to set up what kinds of columns it is scanning. For `Selected` we just store the
-/// name of the column, as that's all that's needed during the actual query. For `Partition` we
-/// store an index into the logical schema for this query since later we need the data type as well
-/// to materialize the partition column.
+/// Scan uses this to set up what kinds of top-level columns it is scanning. For `Selected` we just
+/// store the name of the column, as that's all that's needed during the actual query. For
+/// `Partition` we store an index into the logical schema for this query since later we need the
+/// data type as well to materialize the partition column.
 pub enum ColumnType {
     // A column, selected from the data, as is
-    Selected(ColumnName),
+    Selected(String),
     // A partition column that needs to be added back in
     Partition(usize),
 }
@@ -421,8 +421,7 @@ fn get_state_info(
                 debug!("\n\n{logical_field:#?}\nAfter mapping: {physical_field:#?}\n\n");
                 let physical_name = physical_field.name.clone();
                 read_fields.push(physical_field);
-                // TODO: Support nested columns!
-                Ok(ColumnType::Selected(ColumnName::new([physical_name])))
+                Ok(ColumnType::Selected(physical_name))
             }
         })
         .try_collect()?;
@@ -473,42 +472,38 @@ fn transform_to_logical_internal(
     have_partition_cols: bool,
 ) -> DeltaResult<Box<dyn EngineData>> {
     let read_schema = global_state.read_schema.clone();
-    if have_partition_cols || global_state.column_mapping_mode != ColumnMappingMode::None {
-        // need to add back partition cols and/or fix-up mapped columns
-        let all_fields = all_fields
-            .iter()
-            .map(|field| match field {
-                ColumnType::Partition(field_idx) => {
-                    let field = global_state
-                        .logical_schema
-                        .fields
-                        .get_index(*field_idx)
-                        .ok_or_else(|| {
-                            Error::generic("logical schema did not contain expected field, can't transform data")
-                        })?.1;
-                    let name = field.physical_name(global_state.column_mapping_mode)?;
-                    let value_expression = parse_partition_value(
-                        partition_values.get(name),
-                        field.data_type(),
-                    )?;
-                    Ok::<Expression, Error>(value_expression.into())
-                }
-                ColumnType::Selected(field_name) => Ok(field_name.clone().into()),
-            })
-            .try_collect()?;
-        let read_expression = Expression::Struct(all_fields);
-        let result = engine
-            .get_expression_handler()
-            .get_evaluator(
-                read_schema,
-                read_expression,
-                global_state.logical_schema.clone().into(),
-            )
-            .evaluate(data.as_ref())?;
-        Ok(result)
-    } else {
-        Ok(data)
+    if !have_partition_cols && global_state.column_mapping_mode == ColumnMappingMode::None {
+        return Ok(data);
     }
+    // need to add back partition cols and/or fix-up mapped columns
+    let all_fields = all_fields
+        .iter()
+        .map(|field| match field {
+            ColumnType::Partition(field_idx) => {
+                let field = global_state.logical_schema.fields.get_index(*field_idx);
+                let Some((_, field)) = field else {
+                    return Err(Error::generic(
+                        "logical schema did not contain expected field, can't transform data",
+                    ));
+                };
+                let name = field.physical_name(global_state.column_mapping_mode)?;
+                let value_expression =
+                    parse_partition_value(partition_values.get(name), field.data_type())?;
+                Ok(value_expression.into())
+            }
+            ColumnType::Selected(field_name) => Ok(ColumnName::new([field_name]).into()),
+        })
+        .try_collect()?;
+    let read_expression = Expression::Struct(all_fields);
+    let result = engine
+        .get_expression_handler()
+        .get_evaluator(
+            read_schema,
+            read_expression,
+            global_state.logical_schema.clone().into(),
+        )
+        .evaluate(data.as_ref())?;
+    Ok(result)
 }
 
 // some utils that are used in file_stream.rs and state.rs tests
