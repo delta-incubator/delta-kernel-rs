@@ -2,16 +2,10 @@ use arrow::{compute::filter_record_batch, util::pretty::print_batches};
 use arrow_array::RecordBatch;
 use delta_kernel::{
     engine::{arrow_data::ArrowEngineData, sync::SyncEngine},
-    scan::ScanResult,
-    DeltaResult, EngineData, Table,
+    DeltaResult, Table,
 };
 use itertools::Itertools;
 
-fn into_record_batch(engine_data: DeltaResult<Box<dyn EngineData>>) -> DeltaResult<RecordBatch> {
-    engine_data
-        .and_then(ArrowEngineData::try_from_engine_data)
-        .map(Into::into)
-}
 fn main() -> DeltaResult<()> {
     let uri =
         "/Users/oussama.saoudi/delta-kernel-rs/kernel/examples/change_data/table-with-dv-small";

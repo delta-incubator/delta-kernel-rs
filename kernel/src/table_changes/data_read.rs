@@ -2,7 +2,6 @@ use itertools::Itertools;
 
 use crate::{
     expressions::{column_expr, ColumnName, Scalar},
-    features::ColumnMappingMode,
     scan::{parse_partition_value, ColumnType},
     DeltaResult, Engine, EngineData, Error, Expression,
 };

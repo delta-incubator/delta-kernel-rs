@@ -5,11 +5,11 @@ use crate::actions::{
     get_log_schema, Add, Cdc, Remove, ADD_NAME, CDC_NAME, COMMIT_INFO_NAME, REMOVE_NAME,
 };
 use crate::engine_data::{GetData, TypedGetData};
-use crate::expressions::{column_expr, Expression, Scalar};
+use crate::expressions::{column_expr, Expression};
 use crate::scan::data_skipping::DataSkippingFilter;
 use crate::scan::state::DvInfo;
 use crate::scan::ScanData;
-use crate::table_changes::state::TABLE_CHANGES_SCAN_ROW_SCHEMA;
+use crate::table_changes::state::scan_row_schema;
 use crate::{DataVisitor, DeltaResult, EngineData, ExpressionHandler};
 use tracing::debug;
 
@@ -316,7 +316,7 @@ impl TableChangesLogReplayScanner {
             .get_evaluator(
                 get_log_schema().clone(),
                 self.get_add_transform_expr(self.timestamp, self.commit_version),
-                TABLE_CHANGES_SCAN_ROW_SCHEMA.clone().into(),
+                scan_row_schema().into(),
             )
             .evaluate(actions)?;
 

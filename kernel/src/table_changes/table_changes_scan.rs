@@ -1,4 +1,4 @@
-use std::{collections::HashMap, iter, sync::Arc};
+use std::{collections::HashMap, sync::Arc};
 
 use itertools::{Either, Itertools};
 use tracing::debug;
@@ -9,10 +9,8 @@ use crate::{
         get_log_schema, ADD_NAME, CDC_NAME, COMMIT_INFO_NAME, REMOVE_NAME,
     },
     scan::{
-        data_skipping::DataSkippingFilter,
-        get_state_info,
-        state::{DvInfo, GlobalScanState},
-        ColumnType, ScanData, ScanResult,
+        data_skipping::DataSkippingFilter, get_state_info, state::DvInfo, ColumnType, ScanData,
+        ScanResult,
     },
     schema::{SchemaRef, StructType},
     table_changes::{
@@ -23,10 +21,7 @@ use crate::{
     DeltaResult, Engine, EngineData, ExpressionRef, FileMeta,
 };
 
-use super::{
-    replay_scanner::TableChangesLogReplayScanner, TableChanges, TableChangesGlobalScanState,
-    TableChangesScanData,
-};
+use super::{TableChanges, TableChangesGlobalScanState, TableChangesScanData};
 
 /// Builder to scan a snapshot of a table.
 pub struct TableChangesScanBuilder {
@@ -221,27 +216,30 @@ impl TableChangesScan {
         let commit_read_schema =
             get_log_schema().project(&[ADD_NAME, CDC_NAME, REMOVE_NAME, COMMIT_INFO_NAME])?;
 
-        // NOTE: We don't pass any meta-predicate because we expect no meaningful row group skipping
-        // when ~every checkpoint file will contain the adds and removes we are looking for.
-        // self.table_changes
-        //     .log_segment
-        //     .replay_commits(engine, commit_read_schema, None)
         let json_client = engine.get_json_handler();
-        let commit_version_iter = self.table_changes.start_version..=self.table_changes.end_version;
-        let commit_files = self.table_changes.log_segment.commit_files.clone();
-        let commit_stream =
-            commit_files
-                .into_iter()
-                .zip(commit_version_iter)
-                .map(move |(file, version)| {
-                    let timestamp = file.last_modified;
-                    (
-                        json_client.read_json_files(&[file], commit_read_schema.clone(), None),
-                        timestamp,
-                        version as i64,
-                    )
-                });
-        Ok(commit_stream)
+
+        // Collect so we don't return reference to self
+        let commits = self
+            .table_changes
+            .log_segment
+            .commit_files
+            .iter()
+            .map(move |log_path| {
+                let file = log_path.location.clone();
+                let version = log_path.version as i64;
+                (file, version)
+            })
+            .collect_vec();
+
+        let result = commits.into_iter().map(move |(file, version)| {
+            let timestamp = file.last_modified;
+            // NOTE: We don't pass any meta-predicate because we expect no meaningful row group skipping
+            // when ~every checkpoint file will contain the adds and removes we are looking for.
+            let commit = json_client.read_json_files(&[file], commit_read_schema.clone(), None);
+
+            (commit, timestamp, version)
+        });
+        Ok(result)
     }
 
     /// Get global state that is valid for the entire scan. This is somewhat expensive so should

@@ -9,19 +9,11 @@ use crate::{
     actions::visitors::visit_deletion_vector_at,
     engine_data::{GetData, TypedGetData},
     features::ColumnMappingMode,
-    scan::{
-        log_replay::SCAN_ROW_SCHEMA,
-        state::{DvInfo, Stats},
-    },
+    scan::state::DvInfo,
     schema::{DataType, MapType, Schema, SchemaRef, StructField, StructType},
     DataVisitor, DeltaResult, EngineData,
 };
-use crate::{
-    expressions::{column_expr, Expression},
-    Version,
-};
 use serde::{Deserialize, Serialize};
-use tracing::warn;
 
 /// State that doesn't change between scans
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -92,7 +84,7 @@ pub(crate) fn visit_scan_files<T>(
         context,
     };
 
-    data.extract(TABLE_CHANGES_SCAN_ROW_SCHEMA.clone(), &mut visitor)?;
+    data.extract(scan_row_schema().into(), &mut visitor)?;
     Ok(visitor.context)
 }
 
@@ -307,6 +299,3 @@ pub(crate) static TABLE_CHANGES_SCAN_ROW_SCHEMA: LazyLock<Arc<StructType>> = Laz
         TABLE_CHANGES_COMMIT_VERSION.clone(),
     ]))
 });
-
-pub(crate) static SCAN_ROW_DATATYPE: LazyLock<DataType> =
-    LazyLock::new(|| SCAN_ROW_SCHEMA.clone().into());

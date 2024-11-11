@@ -5,9 +5,9 @@ use std::{collections::HashMap, sync::Arc};
 use crate::{
     actions::{Metadata, Protocol},
     features::ColumnMappingMode,
-    log_segment::{self, LogSegment, LogSegmentBuilder},
+    log_segment::{LogSegment, LogSegmentBuilder},
     path::AsUrl,
-    scan::{get_state_info, state::DvInfo, ColumnType},
+    scan::{get_state_info, state::DvInfo},
     schema::{DataType, Schema, SchemaRef, StructField, StructType},
     snapshot::Snapshot,
     DeltaResult, Engine, EngineData, Error, ExpressionRef, Version,
