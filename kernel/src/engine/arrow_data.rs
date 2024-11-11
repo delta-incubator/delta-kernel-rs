@@ -1,7 +1,7 @@
 use crate::engine_data::{EngineData, EngineList, EngineMap, GetData};
 use crate::expressions::ColumnName;
 use crate::utils::require;
-use crate::{DataVisitor, DeltaResult, Error};
+use crate::{RowVisitor, DeltaResult, Error};
 
 use arrow_array::cast::AsArray;
 use arrow_array::types::{Int32Type, Int64Type};
@@ -38,15 +38,18 @@ impl ArrowEngineData {
 }
 
 impl EngineData for ArrowEngineData {
-    fn select(&self, leaf_columns: &[ColumnName], visitor: &mut dyn DataVisitor) -> DeltaResult<()> {
-        debug!("Selecting columns: {:?}", leaf_columns);
+    fn visit_rows(&self, leaf_columns: &[ColumnName], visitor: &mut dyn RowVisitor) -> DeltaResult<()> {
+        // Collect the set of all leaf columns we want to extract, along with their parents, for
+        // efficient depth-first extraction. If the list contains any non-leaf, duplicate, or
+        // missing column references, the extracted column list will be too short (error out below).
         let mut mask = HashSet::new();
         for column in leaf_columns {
             for i in 0..column.len() {
                 mask.insert(&column[..i+1]);
             }
         }
-        debug!("Selected column mask: {mask:#?}");
+        println!("Column mask for selected columns {leaf_columns:?} is {mask:#?}");
+
         let mut getters = vec![];
         self.extract_columns(&mut getters, &mask)?;
         if getters.len() != leaf_columns.len() {
@@ -200,12 +203,12 @@ impl ArrowEngineData {
         data: &'a dyn ProvidesColumnsAndFields,
     ) -> DeltaResult<()> {
         for (column, field) in data.columns().iter().zip(data.fields()) {
-            let field_name = field.name();
-            path.push(field_name.clone());
+            path.push(field.name().to_string());
+            let col_name = ColumnName::new(path.iter());
             if column_mask.contains(&path[..]) {
-                Self::extract_column(getters, path, column_mask, field_name, column)?;
+                Self::extract_column(getters, path, column_mask, col_name, column)?;
             } else {
-                debug!("Skipping unmasked path {path:?}");
+                println!("Skipping unmasked path {col_name}");
             }
             path.pop();
         }
@@ -216,12 +219,12 @@ impl ArrowEngineData {
         out_col_array: &mut Vec<&dyn GetData<'a>>,
         path: &mut Vec<String>,
         column_mask: &HashSet<&[String]>,
-        field_name: &str,
+        field_name: ColumnName,
         col: &'a dyn Array,
     ) -> DeltaResult<()> {
         match col.data_type() {
             &ArrowDataType::Null => {
-                debug!("Pushing a null array for {field_name}");
+                println!("Pushing a null array for {field_name}");
                 out_col_array.push(&());
             }
             &ArrowDataType::Struct(_) => {
@@ -235,24 +238,24 @@ impl ArrowEngineData {
                 )?;
             }
             &ArrowDataType::Boolean => {
-                debug!("Pushing boolean array for {field_name}");
+                println!("Pushing boolean array for {field_name}");
                 out_col_array.push(col.as_boolean());
             }
             &ArrowDataType::Utf8 => {
-                debug!("Pushing string array for {field_name}");
+                println!("Pushing string array for {field_name}");
                 out_col_array.push(col.as_string());
             }
             &ArrowDataType::Int32 => {
-                debug!("Pushing int32 array for {field_name}");
+                println!("Pushing int32 array for {field_name}");
                 out_col_array.push(col.as_primitive::<Int32Type>());
             }
             &ArrowDataType::Int64 => {
-                debug!("Pushing int64 array for {field_name}");
+                println!("Pushing int64 array for {field_name}");
                 out_col_array.push(col.as_primitive::<Int64Type>());
             }
             ArrowDataType::List(arrow_field) => match arrow_field.data_type() {
                 ArrowDataType::Utf8 => {
-                    debug!("Pushing list for {field_name}");
+                    println!("Pushing list for {field_name}");
                     let list: &GenericListArray<i32> = col.as_list();
                     out_col_array.push(list);
                 }
@@ -264,7 +267,7 @@ impl ArrowEngineData {
             }
             ArrowDataType::LargeList(arrow_field) => match arrow_field.data_type() {
                 ArrowDataType::Utf8 => {
-                    debug!("Pushing large list for {field_name}");
+                    println!("Pushing large list for {field_name}");
                     let list: &GenericListArray<i64> = col.as_list();
                     out_col_array.push(list);
                 }
@@ -292,7 +295,7 @@ impl ArrowEngineData {
                             "On {field_name}: Expect map field struct to have two fields"
                         ))
                     );
-                    debug!("Pushing map for {field_name}");
+                    println!("Pushing map for {field_name}");
                     out_col_array.push(col.as_map());
                 } else {
                     return Err(Error::UnexpectedColumnType(format!(

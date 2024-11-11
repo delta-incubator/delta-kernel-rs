@@ -1,7 +1,8 @@
 //! Traits that engines need to implement in order to pass data between themselves and kernel.
 
-use crate::{schema::SchemaRef, DeltaResult, Error};
+use crate::{DeltaResult, Error};
 use crate::expressions::ColumnName;
+use crate::schema::StructField;
 
 use tracing::debug;
 
@@ -81,25 +82,18 @@ macro_rules! impl_default_get {
         $(
             fn $name(&'a self, _row_index: usize, field_name: &str) -> DeltaResult<Option<$typ>> {
                 debug!("Asked for type {} on {field_name}, but using default error impl.", stringify!($typ));
-                Err(Error::UnexpectedColumnType(format!(
-                    "{field_name} is {}, not type {}",
-                    self.typename(),
-                    stringify!($typ)))
-                    .with_backtrace())
+                Err(Error::UnexpectedColumnType(format!("{field_name} is not of type {}", stringify!($typ))).with_backtrace())
             }
         )*
     };
 }
 
-/// When calling back into a [`DataVisitor`], the engine needs to provide a slice of items that
+/// When calling back into a [`RowVisitor`], the engine needs to provide a slice of items that
 /// implement this trait. This allows type_safe extraction from the raw data by the kernel. By
 /// default all these methods will return an `Error` that an incorrect type has been asked
 /// for. Therefore, for each "data container" an Engine has, it is only necessary to implement the
 /// `get_x` method for the type it holds.
 pub trait GetData<'a> {
-    fn typename(&self) -> &'static str {
-        std::any::type_name::<Self>()
-    }
     impl_default_get!(
         (get_bool, bool),
         (get_int, i32),
@@ -191,16 +185,20 @@ impl<'a> TypedGetData<'a, HashMap<String, String>> for dyn GetData<'a> + '_ {
     }
 }
 
-/// A `DataVisitor` can be called back to visit extracted data. Aside from calling
-/// [`DataVisitor::visit`] on the visitor passed to [`EngineData::extract`], engines do
+/// A `RowVisitor` can be called back to visit extracted data. Aside from calling
+/// [`RowVisitor::visit`] on the visitor passed to [`EngineData::extract`], engines do
 /// not need to worry about this trait.
-pub trait DataVisitor {
+pub trait RowVisitor {
+    /// The schema of leaf columns this visitor expects to access; the `visit` call will receive one
+    /// getter for each selected column, in the requested order.
+    fn selected_leaf_fields(&self) -> &'static [StructField];
+
     /// Have the visitor visit the data. This will be called on a visitor passed to
-    /// [`EngineData::extract`]. For each leaf in the schema that was passed to `extract` a "getter"
-    /// of type [`GetData`] will be present. This can be used to actually get at the data for each
-    /// row. You can `use` the `TypedGetData` trait if you want to have a way to extract typed data
-    /// that will fail if the "getter" is for an unexpected type.  The data in `getters` should not
-    /// be assumed to live beyond the call to this funtion (i.e. it should be copied if needed)
+    /// [`EngineData::visit_rows`]. For each leaf in the schema that was passed to `extract` a
+    /// "getter" of type [`GetData`] will be present. This can be used to actually get at the data
+    /// for each row. You can `use` the `TypedGetData` trait if you want to have a way to extract
+    /// typed data that will fail if the "getter" is for an unexpected type.  The data in `getters`
+    /// does not outlive the call to this funtion (i.e. it should be copied if needed)
     fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<()>;
 }
 
@@ -209,7 +207,7 @@ pub trait DataVisitor {
 /// ```rust
 /// # use std::any::Any;
 /// # use delta_kernel::DeltaResult;
-/// # use delta_kernel::engine_data::{DataVisitor, EngineData, GetData};
+/// # use delta_kernel::engine_data::{RowVisitor, EngineData, GetData};
 /// # use delta_kernel::expressions::ColumnName;
 /// # use delta_kernel::schema::SchemaRef;
 /// struct MyDataType; // Whatever the engine wants here
@@ -223,7 +221,7 @@ pub trait DataVisitor {
 /// impl EngineData for MyDataType {
 ///   fn as_any(&self) -> &dyn Any { self }
 ///   fn into_any(self: Box<Self>) -> Box<dyn Any> { self }
-///   fn select(&self, leaf_columns: &[ColumnName], visitor: &mut dyn DataVisitor) -> DeltaResult<()> {
+///   fn visit_rows(&self, leaf_columns: &[ColumnName], visitor: &mut dyn RowVisitor) -> DeltaResult<()> {
 ///     let getters = self.do_extraction(); // do the extraction
 ///     visitor.visit(self.length(), &getters); // call the visitor back with the getters
 ///     Ok(())
@@ -235,20 +233,10 @@ pub trait DataVisitor {
 /// }
 /// ```
 pub trait EngineData: Send + Sync {
-    /// Request that the data be visited for the passed schema. The contract of this method is that
-    /// it will call back into the passed [`DataVisitor`]s `visit` method. The call to `visit` must
-    /// include `GetData` items for each leaf of the schema, as well as the number of rows in this
-    /// data.
-    fn extract(&self, schema: SchemaRef, visitor: &mut dyn DataVisitor) -> DeltaResult<()> {
-        let field_names = schema.leaf_field_names();
-        let tmp: Vec<_> = field_names.iter().map(ToString::to_string).collect();
-        println!("Selecting {}", tmp.join(", "));
-        self.select(&field_names, visitor)
-    }
-
-    /// Selects a subset of leaf columns in this data, passing a `GetData` item for each requested
-    /// column to the visitor's `visit` method (along with the number of rows of data to be visited).
-    fn select(&self, leaf_columns: &[ColumnName], visitor: &mut dyn DataVisitor) -> DeltaResult<()>;
+    /// Visits a subset of leaf columns in each row of this data, passing a `GetData` item for each
+    /// requested column to the visitor's `visit` method (along with the number of rows of data to
+    /// be visited).
+    fn visit_rows(&self, column_names: &[ColumnName], visitor: &mut dyn RowVisitor) -> DeltaResult<()>;
 
     /// Return the number of items (rows) in blob
     fn length(&self) -> usize;

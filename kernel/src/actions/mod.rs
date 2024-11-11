@@ -22,15 +22,22 @@ pub mod visitors;
 #[cfg(not(feature = "developer-visibility"))]
 pub(crate) mod visitors;
 
+#[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
 pub(crate) const ADD_NAME: &str = "add";
+#[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
 pub(crate) const REMOVE_NAME: &str = "remove";
+#[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
 pub(crate) const METADATA_NAME: &str = "metaData";
+#[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
 pub(crate) const PROTOCOL_NAME: &str = "protocol";
+#[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
 pub(crate) const SET_TRANSACTION_NAME: &str = "txn";
+#[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
 pub(crate) const COMMIT_INFO_NAME: &str = "commitInfo";
 
 static LOG_ADD_SCHEMA: LazyLock<SchemaRef> =
     LazyLock::new(|| StructType::new([Option::<Add>::get_struct_field(ADD_NAME)]).into());
+
 static LOG_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
     StructType::new([
         Option::<Add>::get_struct_field(ADD_NAME),
@@ -106,7 +113,7 @@ pub struct Metadata {
 impl Metadata {
     pub fn try_new_from_data(data: &dyn EngineData) -> DeltaResult<Option<Metadata>> {
         let mut visitor = MetadataVisitor::default();
-        data.extract(get_log_schema().project(&[METADATA_NAME])?, &mut visitor)?;
+        data.visit_rows(&MetadataVisitor::names_and_fields().0, &mut visitor)?;
         Ok(visitor.metadata)
     }
 
@@ -137,7 +144,7 @@ pub struct Protocol {
 impl Protocol {
     pub fn try_new_from_data(data: &dyn EngineData) -> DeltaResult<Option<Protocol>> {
         let mut visitor = ProtocolVisitor::default();
-        data.extract(get_log_schema().project(&[PROTOCOL_NAME])?, &mut visitor)?;
+        data.visit_rows(&ProtocolVisitor::names_and_fields().0, &mut visitor)?;
         Ok(visitor.protocol)
     }
 
@@ -228,9 +235,11 @@ pub struct Add {
 
 impl Add {
     /// Since we always want to parse multiple adds from data, we return a `Vec<Add>`
-    pub fn parse_from_data(data: &dyn EngineData) -> DeltaResult<Vec<Add>> {
+    #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
+    #[allow(unused)]
+    fn parse_from_data(data: &dyn EngineData) -> DeltaResult<Vec<Add>> {
         let mut visitor = AddVisitor::default();
-        data.extract(get_log_add_schema().clone(), &mut visitor)?;
+        data.visit_rows(&AddVisitor::names_and_fields().0, &mut visitor)?;
         Ok(visitor.adds)
     }
 

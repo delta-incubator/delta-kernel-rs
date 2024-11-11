@@ -77,7 +77,7 @@ pub mod transaction;
 pub(crate) mod utils;
 
 pub use delta_kernel_derive;
-pub use engine_data::{DataVisitor, EngineData};
+pub use engine_data::{RowVisitor, EngineData};
 pub use error::{DeltaResult, Error};
 pub use expressions::{Expression, ExpressionRef};
 pub use table::Table;

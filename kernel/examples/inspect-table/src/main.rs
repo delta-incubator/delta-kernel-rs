@@ -1,18 +1,19 @@
-use delta_kernel::actions::get_log_schema;
+use delta_kernel::actions::{get_log_schema, REMOVE_NAME, PROTOCOL_NAME, METADATA_NAME, SET_TRANSACTION_NAME};
 use delta_kernel::actions::visitors::{
     AddVisitor, MetadataVisitor, ProtocolVisitor, RemoveVisitor, SetTransactionVisitor,
 };
 use delta_kernel::engine::default::executor::tokio::TokioBackgroundExecutor;
 use delta_kernel::engine::default::DefaultEngine;
 use delta_kernel::engine_data::{GetData, TypedGetData};
+use delta_kernel::expressions::ColumnName;
 use delta_kernel::scan::state::{DvInfo, Stats};
 use delta_kernel::scan::ScanBuilder;
-use delta_kernel::schema::{DataType, SchemaRef, StructField};
-use delta_kernel::{DataVisitor, DeltaResult, Table};
+use delta_kernel::schema::{StructField};
+use delta_kernel::{RowVisitor, DeltaResult, Table};
 
 use std::collections::HashMap;
 use std::process::ExitCode;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use clap::{Parser, Subcommand};
 
@@ -77,14 +78,6 @@ impl Action {
     }
 }
 
-fn fields_in(field: &StructField) -> usize {
-    if let DataType::Struct(ref inner) = field.data_type {
-        inner.fields().map(fields_in).sum()
-    } else {
-        1
-    }
-}
-
 struct LogVisitor {
     actions: Vec<Action>,
     add_offset: usize,
@@ -95,25 +88,21 @@ struct LogVisitor {
     previous_rows_seen: usize,
 }
 
+static NAMES_AND_FIELDS: LazyLock<(Vec<ColumnName>, Vec<StructField>)> = LazyLock::new(|| {
+    get_log_schema().leaf_fields(None)
+});
+
 impl LogVisitor {
-    fn new(log_schema: &SchemaRef) -> LogVisitor {
-        let mut offset = 0;
-        let mut add_offset = 0;
-        let mut remove_offset = 0;
-        let mut protocol_offset = 0;
-        let mut metadata_offset = 0;
-        let mut set_transaction_offset = 0;
-        for field in log_schema.fields() {
-            match field.name().as_str() {
-                "add" => add_offset = offset,
-                "remove" => remove_offset = offset,
-                "protocol" => protocol_offset = offset,
-                "metaData" => metadata_offset = offset,
-                "txn" => set_transaction_offset = offset,
-                _ => {}
-            }
-            offset += fields_in(field);
-        }
+    fn new() -> LogVisitor {
+        let mut names = NAMES_AND_FIELDS.0.iter();
+        let mut next_offset = |prev_offset, name| {
+            prev_offset + names.position(|n| n[0] == name).unwrap()
+        };
+        let add_offset = 0;
+        let remove_offset = next_offset(add_offset, REMOVE_NAME);
+        let protocol_offset = next_offset(remove_offset, PROTOCOL_NAME);
+        let metadata_offset = next_offset(protocol_offset, METADATA_NAME);
+        let set_transaction_offset = next_offset(metadata_offset, SET_TRANSACTION_NAME);
         LogVisitor {
             actions: vec![],
             add_offset,
@@ -126,7 +115,10 @@ impl LogVisitor {
     }
 }
 
-impl DataVisitor for LogVisitor {
+impl RowVisitor for LogVisitor {
+    fn selected_leaf_fields(&self) -> &'static [StructField] {
+        &NAMES_AND_FIELDS.1
+    }
     fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<()> {
         for i in 0..row_count {
             if let Some(path) = getters[self.add_offset].get_opt(i, "add.path")? {
@@ -246,9 +238,9 @@ fn try_main() -> DeltaResult<()> {
                 None,
             )?;
 
-            let mut visitor = LogVisitor::new(log_schema);
+            let mut visitor = LogVisitor::new();
             for action in actions {
-                action?.0.extract(log_schema.clone(), &mut visitor)?;
+                action?.0.visit_rows(&NAMES_AND_FIELDS.0, &mut visitor)?;
             }
 
             if *forward {

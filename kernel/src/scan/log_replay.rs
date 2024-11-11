@@ -6,14 +6,14 @@ use tracing::debug;
 
 use super::data_skipping::DataSkippingFilter;
 use super::ScanData;
-use crate::actions::{get_log_add_schema, get_log_schema};
+use crate::actions::{get_log_add_schema};
 use crate::engine_data::{GetData, TypedGetData};
 use crate::expressions::{column_expr, column_name, ColumnName, Expression, ExpressionRef};
 use crate::scan::DeletionVectorDescriptor;
-use crate::schema::{DataType, MapType, SchemaProjection, SchemaRef, StructField, StructType};
-use crate::{DataVisitor, DeltaResult, Engine, Error, EngineData, ExpressionHandler};
+use crate::schema::{DataType, MapType, SchemaRef, StructField, StructType};
+use crate::{RowVisitor, DeltaResult, Engine, EngineData, ExpressionHandler};
 
-/// The subset of file action fields htat uniquely identifies it in the log, used for deduplication
+/// The subset of file action fields that uniquely identifies it in the log, used for deduplication
 /// of adds and removes during log replay.
 #[derive(Debug, Hash, Eq, PartialEq)]
 struct FileActionKey {
@@ -61,6 +61,36 @@ impl<'seen> AddRemoveDedupVisitor<'seen> {
             true
         }
     }
+
+    /// Returns the list of leaf columns the visitor accesses.
+    fn columns_to_select(&self) -> &'static [ColumnName] {
+        // WARNING: Must keep this list in sync with the `filter_row` method below. In particular,
+        // the `add` columns must come before the `remove` columns, in the same relative order.
+        static ADD_REMOVE_LEAF_COLUMNS: LazyLock<Vec<ColumnName>> = LazyLock::new(|| vec![
+            column_name!("add.path"),
+            column_name!("add.deletionVector.storageType"),
+            column_name!("add.deletionVector.pathOrInlineDv"),
+            column_name!("add.deletionVector.offset"),
+            column_name!("remove.path"),
+            column_name!("remove.deletionVector.storageType"),
+            column_name!("remove.deletionVector.pathOrInlineDv"),
+            column_name!("remove.deletionVector.offset"),
+        ]);
+
+        let columns_to_select = if self.is_log_batch {
+            &ADD_REMOVE_LEAF_COLUMNS[..]
+        } else {
+            // All checkpoint actions are already reconciled and Remove actions in checkpoint files
+            // only serve as tombstones for vacuum jobs. So we only need to examine the adds here.
+            &ADD_REMOVE_LEAF_COLUMNS[..4]
+        };
+        debug!(
+            "Visiting scan data with schema {:?}",
+            columns_to_select.iter().map(ToString::to_string).collect::<Vec<_>>(),
+        );
+        columns_to_select
+    }
+
     fn filter_row<'a>(&mut self, i: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<bool> {
         // Add will have a path at index 0 if it is valid; otherwise, if it is a log batch, we
         // may have a remove with a path at index 4.
@@ -86,8 +116,25 @@ impl<'seen> AddRemoveDedupVisitor<'seen> {
         Ok(self.filter_seen(path, dv_unique_id) && keep)
     }
 }
-impl<'seen> DataVisitor for AddRemoveDedupVisitor<'seen> {
-    // expected schema:
+impl<'seen> RowVisitor for AddRemoveDedupVisitor<'seen> {
+    fn selected_leaf_fields(&self) -> &'static [StructField] {
+        static FIELDS: LazyLock<Vec<StructField>> = LazyLock::new(|| {
+            let nullable_string = StructField::new("", DataType::STRING, true);
+            let nullable_int = StructField::new("", DataType::INTEGER, true);
+            vec![
+                nullable_string.with_name("add.path"),
+                nullable_string.with_name("add.deletionVector.storageType"),
+                nullable_string.with_name("add.deletionVector.pathOrInlineDv"),
+                nullable_int.with_name("add.deletionVector.offset"),
+                nullable_string.with_name("remove.path"),
+                nullable_string.with_name("remove.deletionVector.storageType"),
+                nullable_string.with_name("remove.deletionVector.pathOrInlineDv"),
+                nullable_int.with_name("remove.deletionVector.offset"),
+            ]
+        });
+        &FIELDS
+    }
+    // Expected schema:
     // 0 - add.path,
     // 1 - add.deletionVector.storageType,
     // 2 - add.deletionVector.pathOrInlineDv,
@@ -96,6 +143,8 @@ impl<'seen> DataVisitor for AddRemoveDedupVisitor<'seen> {
     // 5 - remove.deletionVector.storageType,
     // 6 - remove.deletionVector.pathOrInlineDv,
     // 7 - remove.deletionVector.offset
+    //
+    // WARNING: This needs to stay in sync with `LogReplayScanner::process_scan_batch` below.
     fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<()> {
         for i in 0..row_count {
             if self.selection_vector[i] {
@@ -138,6 +187,11 @@ pub(crate) static SCAN_ROW_SCHEMA: LazyLock<Arc<StructType>> = LazyLock::new(|| 
         ),
     ]))
 });
+
+pub(crate) static SCAN_ROW_NAMES_AND_FIELDS: LazyLock<(Vec<ColumnName>, Vec<StructField>)> = LazyLock::new(|| {
+    SCAN_ROW_SCHEMA.leaf_fields(None)
+});
+
 static SCAN_ROW_DATATYPE: LazyLock<DataType> = LazyLock::new(|| SCAN_ROW_SCHEMA.clone().into());
 
 impl LogReplayScanner {
@@ -186,45 +240,13 @@ impl LogReplayScanner {
         };
 
         assert_eq!(selection_vector.len(), actions.length());
-        static ADD_REMOVE_FIELDS: LazyLock<Vec<ColumnName>> = LazyLock::new(|| vec![
-            column_name!("add.path"),
-            column_name!("add.deletionVector.storageType"),
-            column_name!("add.deletionVector.pathOrInlineDv"),
-            column_name!("add.deletionVector.offset"),
-            column_name!("remove.path"),
-            column_name!("remove.deletionVector.storageType"),
-            column_name!("remove.deletionVector.pathOrInlineDv"),
-            column_name!("remove.deletionVector.offset"),
-        ]);
 
-        let schema_to_use: SchemaRef = if is_log_batch {
-            // NB: We _must_ pass these in the order `ADD_NAME, REMOVE_NAME` as the visitor assumes
-            // the Add action comes first. The [`project`] method honors this order, so this works
-            // as long as we keep this order here.
-            static SCHEMA: LazyLock<DeltaResult<SchemaRef>> = LazyLock::new(|| {
-                SchemaProjection::project(get_log_schema(), &ADD_REMOVE_FIELDS).map(Arc::new)
-            });
-            match LazyLock::force(&SCHEMA) {
-                Ok(schema) => schema.clone(),
-                Err(e) => return Err(Error::generic(e)),
-            }
-        } else {
-            // All checkpoint actions are already reconciled and Remove actions in checkpoint files
-            // only serve as tombstones for vacuum jobs. So no need to load them here.
-            static SCHEMA: LazyLock<DeltaResult<SchemaRef>> = LazyLock::new(|| {
-                SchemaProjection::project(get_log_schema(), &ADD_REMOVE_FIELDS[..4]).map(Arc::new)
-            });
-            match LazyLock::force(&SCHEMA) {
-                Ok(schema) => schema.clone(),
-                Err(e) => return Err(Error::generic(e)),
-            }
-        };
-        debug!("Visiting scan data with schema {schema_to_use:#?}");
         let mut visitor = AddRemoveDedupVisitor{
             seen: &mut self.seen,
             selection_vector,
             is_log_batch};
-        actions.extract(schema_to_use, &mut visitor)?;
+        let columns_to_select = visitor.columns_to_select();
+        actions.visit_rows(columns_to_select, &mut visitor)?;
         let selection_vector = visitor.selection_vector;
 
         // TODO: Teach expression eval to respect the selection vector we just computed so carefully!

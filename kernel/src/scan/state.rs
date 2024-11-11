@@ -9,8 +9,8 @@ use crate::{
     },
     engine_data::{GetData, TypedGetData},
     features::ColumnMappingMode,
-    schema::SchemaRef,
-    DataVisitor, DeltaResult, Engine, EngineData, Error,
+    schema::{StructField, SchemaRef},
+    RowVisitor, DeltaResult, Engine, EngineData, Error,
 };
 use serde::{Deserialize, Serialize};
 use tracing::warn;
@@ -131,7 +131,7 @@ pub fn visit_scan_files<T>(
         selection_vector,
         context,
     };
-    data.extract(super::log_replay::SCAN_ROW_SCHEMA.clone(), &mut visitor)?;
+    data.visit_rows(&super::log_replay::SCAN_ROW_NAMES_AND_FIELDS.0, &mut visitor)?;
     Ok(visitor.context)
 }
 
@@ -141,8 +141,11 @@ struct ScanFileVisitor<'a, T> {
     selection_vector: &'a [bool],
     context: T,
 }
-
-impl<T> DataVisitor for ScanFileVisitor<'_, T> {
+impl<T> RowVisitor for ScanFileVisitor<'_, T> {
+    fn selected_leaf_fields(&self) -> &'static [StructField] {
+        println!("selected_leaf_fields: {:?}", &super::log_replay::SCAN_ROW_NAMES_AND_FIELDS.1);
+        &super::log_replay::SCAN_ROW_NAMES_AND_FIELDS.1
+    }
     fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<()> {
         for row_index in 0..row_count {
             if !self.selection_vector[row_index] {

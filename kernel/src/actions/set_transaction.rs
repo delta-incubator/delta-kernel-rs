@@ -27,7 +27,7 @@ impl SetTransactionScanner {
         // found. If all ids are requested then we are forced to replay the entire log.
         for maybe_data in self.replay_for_app_ids(engine, schema.clone())? {
             let (txns, _) = maybe_data?;
-            txns.extract(schema.clone(), &mut visitor)?;
+            txns.visit_rows(&SetTransactionVisitor::names_and_fields().0, &mut visitor)?;
             // if a specific id is requested and a transaction was found, then return
             if application_id.is_some() && !visitor.set_transactions.is_empty() {
                 break;

@@ -11,6 +11,7 @@ pub(crate) trait ToSchema {
 pub(crate) trait ToDataType {
     fn to_data_type() -> DataType;
 }
+
 impl<T: ToSchema> ToDataType for T {
     fn to_data_type() -> DataType {
         T::to_schema().into()
