@@ -2,6 +2,7 @@
 //! specification](https://github.com/delta-io/delta/blob/master/PROTOCOL.md)
 
 use std::collections::{HashMap, HashSet};
+use std::str::FromStr;
 use std::sync::LazyLock;
 
 use self::deletion_vector::DeletionVectorDescriptor;
@@ -141,11 +142,11 @@ pub struct Protocol {
 }
 
 impl Protocol {
-    pub fn new(
+    pub fn try_new(
         min_reader_version: i32,
         min_writer_version: i32,
-        reader_features: Option<Vec<String>>,
-        writer_features: Option<Vec<String>>,
+        reader_features: Option<impl IntoIterator<Item = impl Into<String>>>,
+        writer_features: Option<impl IntoIterator<Item = impl Into<String>>>,
     ) -> DeltaResult<Self> {
         if min_reader_version == 3 {
             require!(
@@ -163,6 +164,8 @@ impl Protocol {
                 )
             );
         }
+        let reader_features = reader_features.map(|f| f.into_iter().map(Into::into).collect());
+        let writer_features = writer_features.map(|f| f.into_iter().map(Into::into).collect());
         Ok(Protocol {
             min_reader_version,
             min_writer_version,
@@ -198,34 +201,64 @@ impl Protocol {
     }
 
     /// Check if reading a table with this protocol is supported. That is: does the kernel support
-    /// the specified protocol reader version and all enabled reader features?
-    // TODO: should this return result so we can say _why_ it isn't supported?
-    pub fn is_read_supported(&self) -> bool {
-        if self.min_reader_version > KERNEL_READER_VERSION {
-            return false;
-        }
+    /// the specified protocol reader version and all enabled reader features? If yes, returns unit
+    /// type, otherwise will return an error.
+    pub fn check_read_supported(&self) -> DeltaResult<()> {
         match &self.reader_features {
-            // check that all reader features are subset of supported
+            // if min_reader_version = 3 and all reader features are subset of supported => OK
             Some(reader_features) if self.min_reader_version == 3 => {
-                let parsed_features: Result<HashSet<_>, _> = reader_features
-                    .iter()
-                    .map(|s| s.parse::<ReaderFeatures>())
-                    .collect();
-                match parsed_features {
-                    Ok(features) => features.is_subset(&SUPPORTED_READER_FEATURES),
-                    Err(_) => false,
-                }
+                check_supported_features(reader_features, &SUPPORTED_READER_FEATURES)
             }
-            None if self.min_reader_version == 1 || self.min_reader_version == 2 => true,
-            _ => false,
+            // if min_reader_version = 3 and no reader features => ERROR
+            // note this is caught by the protocol parsing.
+            None if self.min_reader_version == 3 => unreachable!(),
+            // if min_reader_version = 1,2 and there are no reader features => OK
+            None if self.min_reader_version == 1 || self.min_reader_version == 2 => Ok(()),
+            // if min_reader_version = 1,2 and there are reader features => ERROR
+            // note this is caught by the protocol parsing.
+            Some(_) if self.min_reader_version == 1 || self.min_reader_version == 2 => {
+                unreachable!()
+            }
+            // any other min_reader_version is not supported
+            _ => Err(Error::unsupported(format!(
+                "Unsupported minimum reader version {}",
+                self.min_reader_version
+            ))),
         }
     }
 
     /// Check if writing to a table with this protocol is supported. That is: does the kernel
     /// support the specified protocol writer version and all enabled writer features?
-    pub fn is_write_supported(&self) -> bool {
-        false
+    pub fn check_write_supported(&self) -> DeltaResult<()> {
+        Err(Error::unsupported(
+            "Writing to Delta tables is not supported yet",
+        ))
     }
+}
+
+fn check_supported_features<'a, T>(
+    table_features: &[String],
+    supported_features: &HashSet<T>,
+) -> DeltaResult<()>
+where
+    <T as FromStr>::Err: std::fmt::Display,
+    T: std::fmt::Debug + FromStr + std::hash::Hash + std::cmp::Eq,
+{
+    let parsed_features: Result<HashSet<T>, Error> = table_features
+        .iter()
+        .map(String::as_str)
+        .map(T::from_str)
+        .map(|f| f.map_err(|e| Error::unsupported(e.to_string())))
+        .collect();
+    parsed_features?
+        .is_subset(&supported_features)
+        .then_some(())
+        .ok_or_else(|| {
+            Error::unsupported(format!(
+                "Table features {:?} are not supported. Supported features are {:?}",
+                table_features, supported_features
+            ))
+        })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Schema)]
@@ -586,7 +619,7 @@ mod tests {
         } in invalid_protocols
         {
             assert!(matches!(
-                Protocol::new(
+                Protocol::try_new(
                     min_reader_version,
                     min_writer_version,
                     reader_features,
@@ -599,22 +632,22 @@ mod tests {
 
     #[test]
     fn test_v2_checkpoint_unsupported() {
-        let protocol = Protocol::new(
+        let protocol = Protocol::try_new(
             3,
             7,
-            Some(vec![ReaderFeatures::V2Checkpoint.to_string()]),
-            Some(vec![ReaderFeatures::V2Checkpoint.to_string()]),
+            Some([ReaderFeatures::V2Checkpoint.to_string()]),
+            Some([ReaderFeatures::V2Checkpoint.to_string()]),
         )
         .unwrap();
-        assert!(!protocol.is_read_supported());
+        assert!(protocol.check_read_supported().is_err());
 
-        let protocol = Protocol::new(
+        let protocol = Protocol::try_new(
             4,
             7,
-            Some(vec![ReaderFeatures::V2Checkpoint.to_string()]),
-            Some(vec![ReaderFeatures::V2Checkpoint.to_string()]),
+            Some([ReaderFeatures::V2Checkpoint.to_string()]),
+            Some([ReaderFeatures::V2Checkpoint.to_string()]),
         )
         .unwrap();
-        assert!(!protocol.is_read_supported());
+        assert!(protocol.check_read_supported().is_err());
     }
 }

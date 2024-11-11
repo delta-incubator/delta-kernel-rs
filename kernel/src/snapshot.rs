@@ -492,13 +492,8 @@ mod tests {
         let engine = SyncEngine::new();
         let snapshot = Snapshot::try_new(url, &engine, Some(1)).unwrap();
 
-        let expected = Protocol::new(
-            3,
-            7,
-            Some(vec!["deletionVectors".into()]),
-            Some(vec!["deletionVectors".into()]),
-        )
-        .unwrap();
+        let expected =
+            Protocol::try_new(3, 7, Some(["deletionVectors"]), Some(["deletionVectors"])).unwrap();
         assert_eq!(snapshot.protocol(), &expected);
 
         let schema_string = r#"{"type":"struct","fields":[{"name":"value","type":"integer","nullable":true,"metadata":{}}]}"#;
@@ -515,13 +510,8 @@ mod tests {
         let engine = SyncEngine::new();
         let snapshot = Snapshot::try_new(url, &engine, None).unwrap();
 
-        let expected = Protocol::new(
-            3,
-            7,
-            Some(vec!["deletionVectors".into()]),
-            Some(vec!["deletionVectors".into()]),
-        )
-        .unwrap();
+        let expected =
+            Protocol::try_new(3, 7, Some(["deletionVectors"]), Some(["deletionVectors"])).unwrap();
         assert_eq!(snapshot.protocol(), &expected);
 
         let schema_string = r#"{"type":"struct","fields":[{"name":"value","type":"integer","nullable":true,"metadata":{}}]}"#;
