@@ -1,17 +1,16 @@
 use crate::engine_data::{EngineData, EngineList, EngineMap, GetData};
-use crate::schema::{DataType, Schema, SchemaRef, StructField};
+use crate::expressions::ColumnName;
 use crate::utils::require;
 use crate::{DataVisitor, DeltaResult, Error};
 
 use arrow_array::cast::AsArray;
 use arrow_array::types::{Int32Type, Int64Type};
-use arrow_array::{Array, GenericListArray, MapArray, OffsetSizeTrait, RecordBatch, StructArray};
-use arrow_schema::{ArrowError, DataType as ArrowDataType};
-use tracing::{debug, warn};
+use arrow_array::{Array, ArrayRef, GenericListArray, MapArray, OffsetSizeTrait, RecordBatch, StructArray};
+use arrow_schema::{FieldRef, DataType as ArrowDataType};
+use tracing::{debug};
 
 use std::any::Any;
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet};
 
 /// ArrowEngineData holds an Arrow RecordBatch, implements `EngineData` so the kernel can extract from it.
 pub struct ArrowEngineData {
@@ -39,10 +38,26 @@ impl ArrowEngineData {
 }
 
 impl EngineData for ArrowEngineData {
-    fn extract(&self, schema: SchemaRef, visitor: &mut dyn DataVisitor) -> DeltaResult<()> {
-        let mut col_array = vec![];
-        self.extract_columns(&mut col_array, &schema)?;
-        visitor.visit(self.length(), &col_array)
+    fn select(&self, leaf_columns: &[ColumnName], visitor: &mut dyn DataVisitor) -> DeltaResult<()> {
+        debug!("Selecting columns: {:?}", leaf_columns);
+        let mut mask = HashSet::new();
+        for column in leaf_columns {
+            for i in 0..column.len() {
+                mask.insert(&column[..i+1]);
+            }
+        }
+        debug!("Selected column mask: {mask:#?}");
+        let mut getters = vec![];
+        self.extract_columns(&mut getters, &mask)?;
+        if getters.len() != leaf_columns.len() {
+            return Err(Error::MissingColumn(
+                format!(
+                    "Expected {} leaf columns, but only found {}",
+                    leaf_columns.len(), getters.len()
+                )
+            ));
+        }
+        visitor.visit(self.length(), &getters)
     }
 
     fn length(&self) -> usize {
@@ -76,24 +91,31 @@ impl From<Box<ArrowEngineData>> for RecordBatch {
     }
 }
 
-/// This is a trait that allows us to query something by column name and get out an Arrow
-/// `Array`. Both `RecordBatch` and `StructArray` can do this. By having our `extract_*` functions
-/// just take anything that implements this trait we can use the same function to drill into
-/// either. This is useful because when we're recursing into data we start with a RecordBatch, but
-/// if we encounter a Struct column, it will be a `StructArray`.
-trait ProvidesColumnByName {
-    fn column_by_name(&self, name: &str) -> Option<&Arc<dyn Array>>;
+/// This is a trait that allows us to enumerate a set of Arrow `Array` and `Field` pairs, in schema
+/// order. Both `RecordBatch` and `StructArray` can do this. By having our `extract_*` functions
+/// just take anything that implements this trait we can use the same function to drill into either
+/// one. This is useful because when we're recursing into data we start with a `RecordBatch`, but if
+/// we encounter a Struct column, it will be a `StructArray`.
+trait ProvidesColumnsAndFields {
+    fn columns(&self) -> &[ArrayRef];
+    fn fields(&self) -> &[FieldRef];
 }
 
-impl ProvidesColumnByName for RecordBatch {
-    fn column_by_name(&self, name: &str) -> Option<&Arc<dyn Array>> {
-        self.column_by_name(name)
+impl ProvidesColumnsAndFields for RecordBatch {
+    fn columns(&self) -> &[ArrayRef] {
+        self.columns()
+    }
+    fn fields(&self) -> &[FieldRef] {
+        self.schema_ref().fields()
     }
 }
 
-impl ProvidesColumnByName for StructArray {
-    fn column_by_name(&self, name: &str) -> Option<&Arc<dyn Array>> {
-        self.column_by_name(name)
+impl ProvidesColumnsAndFields for StructArray {
+    fn columns(&self) -> &[ArrayRef] {
+        self.columns()
+    }
+    fn fields(&self) -> &[FieldRef] {
+        self.fields()
     }
 }
 
@@ -165,118 +187,101 @@ impl ArrowEngineData {
     /// * `schema` - the schema to extract getters for
     pub fn extract_columns<'a>(
         &'a self,
-        out_col_array: &mut Vec<&dyn GetData<'a>>,
-        schema: &Schema,
+        getters: &mut Vec<&dyn GetData<'a>>,
+        column_mask: &HashSet<&[String]>,
     ) -> DeltaResult<()> {
-        debug!("Extracting column getters for {:#?}", schema);
-        ArrowEngineData::extract_columns_from_array(out_col_array, schema, Some(&self.data))
+        Self::extract_columns_from_array(getters, &mut vec![], column_mask, &self.data)
     }
 
     fn extract_columns_from_array<'a>(
-        out_col_array: &mut Vec<&dyn GetData<'a>>,
-        schema: &Schema,
-        array: Option<&'a dyn ProvidesColumnByName>,
+        getters: &mut Vec<&dyn GetData<'a>>,
+        path: &mut Vec<String>,
+        column_mask: &HashSet<&[String]>,
+        data: &'a dyn ProvidesColumnsAndFields,
     ) -> DeltaResult<()> {
-        for field in schema.fields() {
-            let col = array
-                .and_then(|a| a.column_by_name(&field.name))
-                .filter(|a| *a.data_type() != ArrowDataType::Null);
-            // Note: if col is None we have either:
-            //   a) encountered a column that is all nulls or,
-            //   b) recursed into a optional struct that was null. In this case, array.is_none() is
-            //      true and we don't need to check field nullability, because we assume all fields
-            //      of a nullable struct can be null
-            // So below if the field is allowed to be null, OR array.is_none() we push that,
-            // otherwise we error out.
-            if let Some(col) = col {
-                Self::extract_column(out_col_array, field, col)?;
-            } else if array.is_none() || field.is_nullable() {
-                if let DataType::Struct(inner_struct) = field.data_type() {
-                    Self::extract_columns_from_array(out_col_array, inner_struct.as_ref(), None)?;
-                } else {
-                    debug!("Pushing a null field for {}", field.name);
-                    out_col_array.push(&());
-                }
+        for (column, field) in data.columns().iter().zip(data.fields()) {
+            let field_name = field.name();
+            path.push(field_name.clone());
+            if column_mask.contains(&path[..]) {
+                Self::extract_column(getters, path, column_mask, field_name, column)?;
             } else {
-                return Err(Error::MissingData(format!(
-                    "Found required field {}, but it's null",
-                    field.name
-                )));
+                debug!("Skipping unmasked path {path:?}");
             }
+            path.pop();
         }
         Ok(())
     }
 
     fn extract_column<'a>(
         out_col_array: &mut Vec<&dyn GetData<'a>>,
-        field: &StructField,
+        path: &mut Vec<String>,
+        column_mask: &HashSet<&[String]>,
+        field_name: &str,
         col: &'a dyn Array,
     ) -> DeltaResult<()> {
-        match (col.data_type(), &field.data_type) {
-            (&ArrowDataType::Struct(_), DataType::Struct(fields)) => {
+        match col.data_type() {
+            &ArrowDataType::Null => {
+                debug!("Pushing a null array for {field_name}");
+                out_col_array.push(&());
+            }
+            &ArrowDataType::Struct(_) => {
                 // both structs, so recurse into col
                 let struct_array = col.as_struct();
                 ArrowEngineData::extract_columns_from_array(
                     out_col_array,
-                    fields,
-                    Some(struct_array),
+                    path,
+                    column_mask,
+                    struct_array,
                 )?;
             }
-            (&ArrowDataType::Boolean, &DataType::BOOLEAN) => {
-                debug!("Pushing boolean array for {}", field.name);
+            &ArrowDataType::Boolean => {
+                debug!("Pushing boolean array for {field_name}");
                 out_col_array.push(col.as_boolean());
             }
-            (&ArrowDataType::Utf8, &DataType::STRING) => {
-                debug!("Pushing string array for {}", field.name);
+            &ArrowDataType::Utf8 => {
+                debug!("Pushing string array for {field_name}");
                 out_col_array.push(col.as_string());
             }
-            (&ArrowDataType::Int32, &DataType::INTEGER) => {
-                debug!("Pushing int32 array for {}", field.name);
+            &ArrowDataType::Int32 => {
+                debug!("Pushing int32 array for {field_name}");
                 out_col_array.push(col.as_primitive::<Int32Type>());
             }
-            (&ArrowDataType::Int64, &DataType::LONG) => {
-                debug!("Pushing int64 array for {}", field.name);
+            &ArrowDataType::Int64 => {
+                debug!("Pushing int64 array for {field_name}");
                 out_col_array.push(col.as_primitive::<Int64Type>());
             }
-            (ArrowDataType::List(arrow_field), DataType::Array(_array_type)) => {
-                match arrow_field.data_type() {
-                    ArrowDataType::Utf8 => {
-                        debug!("Pushing list for {}", field.name);
-                        let list: &GenericListArray<i32> = col.as_list();
-                        out_col_array.push(list);
-                    }
-                    _ => {
-                        return Err(Error::UnexpectedColumnType(format!(
-                            "On {}: Only support lists that contain strings",
-                            field.name()
-                        )))
-                    }
+            ArrowDataType::List(arrow_field) => match arrow_field.data_type() {
+                ArrowDataType::Utf8 => {
+                    debug!("Pushing list for {field_name}");
+                    let list: &GenericListArray<i32> = col.as_list();
+                    out_col_array.push(list);
+                }
+                _ => {
+                    return Err(Error::UnexpectedColumnType(format!(
+                        "On {field_name}: Only support lists that contain strings"
+                    )))
                 }
             }
-            (ArrowDataType::LargeList(arrow_field), DataType::Array(_array_type)) => {
-                match arrow_field.data_type() {
-                    ArrowDataType::Utf8 => {
-                        debug!("Pushing large list for {}", field.name);
-                        let list: &GenericListArray<i64> = col.as_list();
-                        out_col_array.push(list);
-                    }
-                    _ => {
-                        return Err(Error::UnexpectedColumnType(format!(
-                            "On {}: Only support lists that contain strings",
-                            field.name()
-                        )))
-                    }
+            ArrowDataType::LargeList(arrow_field) => match arrow_field.data_type() {
+                ArrowDataType::Utf8 => {
+                    debug!("Pushing large list for {field_name}");
+                    let list: &GenericListArray<i64> = col.as_list();
+                    out_col_array.push(list);
+                }
+                _ => {
+                    return Err(Error::UnexpectedColumnType(format!(
+                        "On {field_name}: Only support lists that contain strings"
+                    )))
                 }
             }
-            (&ArrowDataType::Map(ref map_field, _sorted_keys), &DataType::Map(_)) => {
+            &ArrowDataType::Map(ref map_field, _sorted_keys) => {
                 if let ArrowDataType::Struct(fields) = map_field.data_type() {
                     let mut fcount = 0;
                     for field in fields {
                         require!(
                             field.data_type() == &ArrowDataType::Utf8,
                             Error::UnexpectedColumnType(format!(
-                                "On {}: Only support maps of String->String",
-                                field.name()
+                                "On {field_name}: Only support maps of String->String"
                             ))
                         );
                         fcount += 1;
@@ -284,52 +289,24 @@ impl ArrowEngineData {
                     require!(
                         fcount == 2,
                         Error::UnexpectedColumnType(format!(
-                            "On {}: Expect map field struct to have two fields",
-                            field.name()
+                            "On {field_name}: Expect map field struct to have two fields"
                         ))
                     );
-                    debug!("Pushing map for {}", field.name);
+                    debug!("Pushing map for {field_name}");
                     out_col_array.push(col.as_map());
                 } else {
                     return Err(Error::UnexpectedColumnType(format!(
-                        "On {}: Expect arrow maps to have struct field in DataType",
-                        field.name()
+                        "On {field_name}: Expect arrow maps to have struct field in DataType"
                     )));
                 }
             }
-            (arrow_data_type, data_type) => {
-                warn!(
-                    "Can't extract {}. Arrow Type: {arrow_data_type}\n Kernel Type: {data_type}",
-                    field.name
-                );
-                return Err(get_error_for_types(data_type, arrow_data_type, &field.name));
+            arrow_data_type => {
+                return Err(Error::UnexpectedColumnType(format!(
+                    "On {field_name}: Can't extract columns of type {arrow_data_type}"
+                )));
             }
         }
         Ok(())
-    }
-}
-
-fn get_error_for_types(
-    data_type: &DataType,
-    arrow_data_type: &ArrowDataType,
-    field_name: &str,
-) -> Error {
-    let expected_type: Result<ArrowDataType, ArrowError> = data_type.try_into();
-    match expected_type {
-        Ok(expected_type) => {
-            if expected_type == *arrow_data_type {
-                Error::UnexpectedColumnType(format!(
-                    "On {field_name}: Don't know how to extract something of type {data_type}",
-                ))
-            } else {
-                Error::UnexpectedColumnType(format!(
-                    "Type mismatch on {field_name}: expected {data_type}, got {arrow_data_type}",
-                ))
-            }
-        }
-        Err(e) => Error::UnexpectedColumnType(format!(
-            "On {field_name}: Unsupported data type {data_type}: {e}",
-        )),
     }
 }
 
@@ -376,19 +353,22 @@ mod tests {
     }
 
     #[test]
-    fn test_nullable_struct() -> DeltaResult<()> {
+    fn test_protocol_extract() -> DeltaResult<()> {
         let engine = SyncEngine::new();
         let handler = engine.get_json_handler();
         let json_strings: StringArray = vec![
-            r#"{"metaData":{"id":"aff5cb91-8cd9-4195-aef9-446908507302","format":{"provider":"parquet","options":{}},"schemaString":"{\"type\":\"struct\",\"fields\":[{\"name\":\"c1\",\"type\":\"integer\",\"nullable\":true,\"metadata\":{}},{\"name\":\"c2\",\"type\":\"string\",\"nullable\":true,\"metadata\":{}},{\"name\":\"c3\",\"type\":\"integer\",\"nullable\":true,\"metadata\":{}}]}","partitionColumns":["c1","c2"],"configuration":{},"createdTime":1670892997849}}"#,
+            r#"{"protocol": {"minReaderVersion": 3, "minWriterVersion": 7, "readerFeatures": ["rw1"], "writerFeatures": ["rw1", "w2"]}}"#,
         ]
         .into();
-        let output_schema = get_log_schema().project(&["metaData"])?;
+        let output_schema = get_log_schema().project(&["protocol"])?;
         let parsed = handler
             .parse_json(string_array_to_engine_data(json_strings), output_schema)
             .unwrap();
-        let protocol = Protocol::try_new_from_data(parsed.as_ref())?;
-        assert!(protocol.is_none());
+        let protocol = Protocol::try_new_from_data(parsed.as_ref())?.unwrap();
+        assert_eq!(protocol.min_reader_version, 3);
+        assert_eq!(protocol.min_writer_version, 7);
+        assert_eq!(protocol.reader_features, Some(vec!["rw1".into()]));
+        assert_eq!(protocol.writer_features, Some(vec!["rw1".into(), "w2".into()]));
         Ok(())
     }
 }

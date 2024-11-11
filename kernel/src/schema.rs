@@ -274,6 +274,16 @@ impl StructType {
     pub fn fields(&self) -> impl Iterator<Item = &StructField> {
         self.fields.values()
     }
+
+    /// Extracts the names of all leaf fields, in schema order
+    ///
+    /// NOTE: This method only traverses through `StructType` fields; `MapType` and `ArrayType`
+    /// fields are considered leaves even if they contain `StructType` entries/elements.
+    pub fn leaf_field_names(&self) -> Vec<ColumnName> {
+        let mut field_names = LeafFieldNames::default();
+        let _ = field_names.transform_struct(Cow::Borrowed(self));
+        field_names.names
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -806,7 +816,7 @@ impl SchemaTransform for SchemaProjection {
         field: Cow<'a, StructField>,
     ) -> Option<Cow<'a, StructField>> {
         self.path.push(field.name.clone());
-        let result = if self.requested_fields.remove(self.path.as_slice()) {
+        let result = if self.requested_fields.remove(&self.path[..]) {
             Some(field) // always keep requested fields
         } else if let DataType::Struct(_) = field.data_type() {
             self.recurse_into_struct_field(field) // recurse deeper looking for requested fields
@@ -815,6 +825,28 @@ impl SchemaTransform for SchemaProjection {
         };
         self.path.pop();
         result
+    }
+}
+
+#[derive(Default)]
+struct LeafFieldNames {
+    path: Vec<String>,
+    names: Vec<ColumnName>,
+}
+
+impl SchemaTransform for LeafFieldNames {
+    fn transform_struct_field<'a>(
+        &mut self,
+        field: Cow<'a, StructField>,
+    ) -> Option<Cow<'a, StructField>> {
+        self.path.push(field.name.clone());
+        if matches!(field.data_type, DataType::Struct(_)) {
+            let _ = self.recurse_into_struct_field(field);
+        } else {
+            self.names.push(ColumnName::new(&self.path));
+        }
+        self.path.pop();
+        None
     }
 }
 

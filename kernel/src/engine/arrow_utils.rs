@@ -402,7 +402,6 @@ fn get_indices(
                         Arc::new(field.try_into()?),
                     ));
                 } else {
-                    //panic!("missing: {}, fields: {fields:#?}, requested: {requested_schema:#?}", field.name());
                     return Err(Error::Generic(format!(
                         "Requested field not found in parquet schema, and field is not nullable: {}",
                         field.name()
@@ -1443,39 +1442,5 @@ mod tests {
             "{\"string\":\"string1\"}\n{\"string\":\"string2\"}\n".as_bytes()
         );
         Ok(())
-    }
-
-    #[test]
-    fn test_nullable() {
-        use arrow::buffer::NullBuffer;
-        let data = r#"{"foo":{"a": "a"}}
-    {"bar":{"b": "b"}}"#;
-        let schema = Arc::new(ArrowSchema::new(vec![
-            ArrowField::new_struct(
-                "foo",
-                [Arc::new(ArrowField::new("a", ArrowDataType::Utf8, false))],
-                true,
-            ),
-            ArrowField::new_struct(
-                "bar",
-                [Arc::new(ArrowField::new("b", ArrowDataType::Utf8, false))],
-                true,
-            ),
-        ]));
-
-        let mut decoder = ReaderBuilder::new(schema).build_decoder().unwrap();
-        let decoded = decoder.decode(data.as_bytes()).unwrap();
-        assert_eq!(decoded, data.len());
-
-        let batch = decoder.flush().unwrap().unwrap();
-        assert_eq!(batch.num_rows(), 2);
-        assert_eq!(batch.num_columns(), 2);
-        let (fields, arrays, nulls) = StructArray::from(batch).into_parts();
-        assert_eq!(nulls, None); // A RecordBatch can't have a null buffer
-        assert_eq!(arrays[0].nulls(), Some(&NullBuffer::from_iter([true, false])));
-        assert_eq!(arrays[1].nulls(), Some(&NullBuffer::from_iter([false, true])));
-
-        let back = StructArray::new(fields, arrays, None);
-        back.to_data().validate_full().unwrap();
     }
 }

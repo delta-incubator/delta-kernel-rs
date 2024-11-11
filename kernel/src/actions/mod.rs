@@ -8,7 +8,7 @@ use std::sync::LazyLock;
 use visitors::{AddVisitor, MetadataVisitor, ProtocolVisitor};
 
 use self::deletion_vector::DeletionVectorDescriptor;
-use crate::actions::schemas::{GetStructField};
+use crate::actions::schemas::GetStructField;
 use crate::features::{ReaderFeatures, WriterFeatures};
 use crate::schema::{SchemaRef, StructType};
 use crate::{DeltaResult, EngineData};

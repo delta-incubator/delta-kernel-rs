@@ -91,7 +91,7 @@ impl<'seen> DataVisitor for AddRemoveDedupVisitor<'seen> {
     // 0 - add.path,
     // 1 - add.deletionVector.storageType,
     // 2 - add.deletionVector.pathOrInlineDv,
-    // 3 - add.deleteionVector.offset,
+    // 3 - add.deletionVector.offset,
     // 4 - remove.path,
     // 5 - remove.deletionVector.storageType,
     // 6 - remove.deletionVector.pathOrInlineDv,

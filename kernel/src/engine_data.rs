@@ -1,6 +1,7 @@
 //! Traits that engines need to implement in order to pass data between themselves and kernel.
 
 use crate::{schema::SchemaRef, DeltaResult, Error};
+use crate::expressions::ColumnName;
 
 use tracing::debug;
 
@@ -209,6 +210,7 @@ pub trait DataVisitor {
 /// # use std::any::Any;
 /// # use delta_kernel::DeltaResult;
 /// # use delta_kernel::engine_data::{DataVisitor, EngineData, GetData};
+/// # use delta_kernel::expressions::ColumnName;
 /// # use delta_kernel::schema::SchemaRef;
 /// struct MyDataType; // Whatever the engine wants here
 /// impl MyDataType {
@@ -221,10 +223,9 @@ pub trait DataVisitor {
 /// impl EngineData for MyDataType {
 ///   fn as_any(&self) -> &dyn Any { self }
 ///   fn into_any(self: Box<Self>) -> Box<dyn Any> { self }
-///   fn extract(&self, schema: SchemaRef, visitor: &mut dyn DataVisitor) -> DeltaResult<()> {
+///   fn select(&self, leaf_columns: &[ColumnName], visitor: &mut dyn DataVisitor) -> DeltaResult<()> {
 ///     let getters = self.do_extraction(); // do the extraction
-///     let row_count = self.length();
-///     visitor.visit(row_count, &getters); // call the visitor back with the getters
+///     visitor.visit(self.length(), &getters); // call the visitor back with the getters
 ///     Ok(())
 ///   }
 ///   fn length(&self) -> usize {
@@ -238,7 +239,16 @@ pub trait EngineData: Send + Sync {
     /// it will call back into the passed [`DataVisitor`]s `visit` method. The call to `visit` must
     /// include `GetData` items for each leaf of the schema, as well as the number of rows in this
     /// data.
-    fn extract(&self, schema: SchemaRef, visitor: &mut dyn DataVisitor) -> DeltaResult<()>;
+    fn extract(&self, schema: SchemaRef, visitor: &mut dyn DataVisitor) -> DeltaResult<()> {
+        let field_names = schema.leaf_field_names();
+        let tmp: Vec<_> = field_names.iter().map(ToString::to_string).collect();
+        println!("Selecting {}", tmp.join(", "));
+        self.select(&field_names, visitor)
+    }
+
+    /// Selects a subset of leaf columns in this data, passing a `GetData` item for each requested
+    /// column to the visitor's `visit` method (along with the number of rows of data to be visited).
+    fn select(&self, leaf_columns: &[ColumnName], visitor: &mut dyn DataVisitor) -> DeltaResult<()>;
 
     /// Return the number of items (rows) in blob
     fn length(&self) -> usize;
