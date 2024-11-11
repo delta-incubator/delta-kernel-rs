@@ -281,10 +281,6 @@ impl TableChangesScan {
             "Executing scan with logical schema {:#?} and physical schema {:#?}",
             self.logical_schema, self.physical_schema
         );
-        // enum ScanFile {
-        //     Add { add: Add, remove_dv: Option<DvInfo> },
-        //     Remove(Remove),
-        // }
         debug!(
             "Executing scan with logical schema {:#?} and physical schema {:#?}",
             self.logical_schema, self.physical_schema
@@ -338,12 +334,8 @@ impl TableChangesScan {
                         let rm_dv = rm_dv
                             .as_dv_tree_map(engine, &self.table_changes.table_root)?
                             .unwrap_or(Default::default());
-                        println!("add_dv {:?}", treemap_to_bools(add_dv.clone()));
-                        println!("remove_dv {:?}", treemap_to_bools(rm_dv.clone()));
                         let added = &rm_dv - &add_dv;
-                        println!("added {:?}", added);
                         let added = treemap_to_bools(added);
-                        println!("added {:?}", added);
 
                         let y = self.generate_output_rows(
                             engine,
@@ -358,7 +350,6 @@ impl TableChangesScan {
                         )?;
                         let removed = add_dv - rm_dv;
                         let removed = treemap_to_bools(removed);
-                        println!("removed {:?}", removed);
 
                         let x = self.generate_output_rows(
                             engine,
