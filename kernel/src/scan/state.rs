@@ -29,13 +29,13 @@ pub struct GlobalScanState {
 }
 
 /// this struct can be used by an engine to materialize a selection vector
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DvInfo {
     pub(crate) deletion_vector: Option<DeletionVectorDescriptor>,
 }
 
 /// Give engines an easy way to consume stats
-#[derive(Deserialize, Debug)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Stats {
     /// For any file where the deletion vector is not present (see [`DvInfo::has_vector`]), the
