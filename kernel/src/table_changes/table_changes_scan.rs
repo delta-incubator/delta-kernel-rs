@@ -120,7 +120,11 @@ pub struct TableChangesScan {
 pub fn table_changes_action_iter(
     engine: &dyn Engine,
     commit_iter: impl Iterator<
-        Item = DeltaResult<Box<dyn Iterator<Item = DeltaResult<Box<dyn EngineData>>> + Send>>,
+        Item = (
+            DeltaResult<Box<dyn Iterator<Item = DeltaResult<Box<dyn EngineData>>> + Send>>,
+            i64,
+            i64,
+        ),
     >,
     table_schema: &SchemaRef,
     predicate: Option<ExpressionRef>,
@@ -128,35 +132,38 @@ pub fn table_changes_action_iter(
     let filter = DataSkippingFilter::new(engine, table_schema, predicate);
     let expression_handler = engine.get_expression_handler();
     let result = commit_iter
-        .map(move |action_iter| -> DeltaResult<_> {
-            let action_iter = action_iter?;
-            let expression_handler = expression_handler.clone();
-            let mut metadata_scanner = TableChangesMetadataScanner::new(filter.clone());
+        .map(
+            move |(action_iter, timestamp, commit_version)| -> DeltaResult<_> {
+                let action_iter = action_iter?;
+                let expression_handler = expression_handler.clone();
+                let mut metadata_scanner =
+                    TableChangesMetadataScanner::new(filter.clone(), timestamp, commit_version);
 
-            // Find CDC, get commitInfo, and perform metadata scan
-            let mut batches = vec![];
-            for action_res in action_iter {
-                let batch = action_res?;
-                // TODO: Make this metadata iterator
-                metadata_scanner.process_scan_batch(batch.as_ref())?;
-                batches.push(batch);
-            }
+                // Find CDC, get commitInfo, and perform metadata scan
+                let mut batches = vec![];
+                for action_res in action_iter {
+                    let batch = action_res?;
+                    // TODO: Make this metadata iterator
+                    metadata_scanner.process_scan_batch(batch.as_ref())?;
+                    batches.push(batch);
+                }
 
-            let mut log_scanner = metadata_scanner.into_replay_scanner();
-            // File metadata output scan
-            let x: Vec<ScanData> = batches
-                .into_iter()
-                .map(|batch| {
-                    log_scanner.process_scan_batch(expression_handler.as_ref(), batch.as_ref())
-                })
-                .try_collect()?;
-            let remove_dvs = Arc::new(log_scanner.remove_dvs);
-            let y = x.into_iter().map(move |(a, b)| {
-                let remove_dvs = remove_dvs.clone();
-                (a, b, remove_dvs)
-            });
-            Ok(y)
-        })
+                let mut log_scanner = metadata_scanner.into_replay_scanner();
+                // File metadata output scan
+                let x: Vec<ScanData> = batches
+                    .into_iter()
+                    .map(|batch| {
+                        log_scanner.process_scan_batch(expression_handler.as_ref(), batch.as_ref())
+                    })
+                    .try_collect()?;
+                let remove_dvs = Arc::new(log_scanner.remove_dvs);
+                let y = x.into_iter().map(move |(a, b)| {
+                    let remove_dvs = remove_dvs.clone();
+                    (a, b, remove_dvs)
+                });
+                Ok(y)
+            },
+        )
         .flatten_ok();
     Ok(result)
 }
@@ -204,7 +211,11 @@ impl TableChangesScan {
         engine: &dyn Engine,
     ) -> DeltaResult<
         impl Iterator<
-            Item = DeltaResult<Box<dyn Iterator<Item = DeltaResult<Box<dyn EngineData>>> + Send>>,
+            Item = (
+                DeltaResult<Box<dyn Iterator<Item = DeltaResult<Box<dyn EngineData>>> + Send>>,
+                i64,
+                i64,
+            ),
         >,
     > {
         let commit_read_schema =
@@ -212,9 +223,25 @@ impl TableChangesScan {
 
         // NOTE: We don't pass any meta-predicate because we expect no meaningful row group skipping
         // when ~every checkpoint file will contain the adds and removes we are looking for.
-        self.table_changes
-            .log_segment
-            .replay_commits(engine, commit_read_schema, None)
+        // self.table_changes
+        //     .log_segment
+        //     .replay_commits(engine, commit_read_schema, None)
+        let json_client = engine.get_json_handler();
+        let commit_version_iter = self.table_changes.start_version..=self.table_changes.end_version;
+        let commit_files = self.table_changes.log_segment.commit_files.clone();
+        let commit_stream =
+            commit_files
+                .into_iter()
+                .zip(commit_version_iter)
+                .map(move |(file, version)| {
+                    let timestamp = file.last_modified;
+                    (
+                        json_client.read_json_files(&[file], commit_read_schema.clone(), None),
+                        timestamp,
+                        version as i64,
+                    )
+                });
+        Ok(commit_stream)
     }
 
     /// Get global state that is valid for the entire scan. This is somewhat expensive so should
@@ -291,6 +318,7 @@ impl TableChangesScan {
             .map(move |scan_res| -> DeltaResult<_> {
                 let (scan_file, _dv_map) = scan_res?;
 
+                println!("\n\nscan file: {:?}", scan_file);
                 let ScanFile {
                     tpe,
                     path,

@@ -46,8 +46,8 @@ pub(crate) struct ScanFile {
     pub size: i64,
     pub dv_info: DvInfo,
     pub partition_values: HashMap<String, String>,
-    pub commit_version: Option<i64>,
-    pub timestamp: Option<i64>,
+    pub commit_version: i64,
+    pub timestamp: i64,
 }
 
 pub(crate) type ScanCallback<T> = fn(context: &mut T, scan_file: ScanFile);
@@ -110,8 +110,8 @@ impl<T> DataVisitor for ScanFileVisitor<'_, T> {
                 // skip skipped rows
                 continue;
             }
-            let timestamp = getters[21].get_long(row_index, "scanFile.timestamp")?;
-            let commit_version = getters[22].get_long(row_index, "scanFile.commit_version")?;
+            let timestamp = getters[21].get(row_index, "scanFile.timestamp")?;
+            let commit_version = getters[22].get(row_index, "scanFile.commit_version")?;
 
             // Since path column is required, use it to detect presence of an Add action
             if let Some(path) = getters[0].get_opt(row_index, "scanFile.add.path")? {

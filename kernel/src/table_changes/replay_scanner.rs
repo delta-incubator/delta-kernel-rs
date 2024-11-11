@@ -4,13 +4,11 @@ use crate::actions::visitors::{AddVisitor, CdcVisitor, RemoveVisitor};
 use crate::actions::{
     get_log_schema, Add, Cdc, Remove, ADD_NAME, CDC_NAME, COMMIT_INFO_NAME, REMOVE_NAME,
 };
-use crate::engine::arrow_data::ArrowEngineData;
 use crate::engine_data::{GetData, TypedGetData};
 use crate::expressions::{column_expr, Expression, Scalar};
 use crate::scan::data_skipping::DataSkippingFilter;
 use crate::scan::state::DvInfo;
 use crate::scan::ScanData;
-use crate::schema::DataType;
 use crate::table_changes::state::TABLE_CHANGES_SCAN_ROW_SCHEMA;
 use crate::{DataVisitor, DeltaResult, EngineData, ExpressionHandler};
 use tracing::debug;
@@ -136,17 +134,21 @@ pub(crate) struct TableChangesMetadataScanner {
     filter: Option<DataSkippingFilter>,
     pub add_files: HashSet<String>,
     pub has_cdcs: bool,
-    pub timestamp: Option<i64>,
-    pub commit_version: Option<u64>,
+    pub timestamp: i64,
+    pub commit_version: i64,
 }
 impl TableChangesMetadataScanner {
-    pub(crate) fn new(filter: Option<DataSkippingFilter>) -> Self {
+    pub(crate) fn new(
+        filter: Option<DataSkippingFilter>,
+        timestamp: i64,
+        commit_version: i64,
+    ) -> Self {
         TableChangesMetadataScanner {
             filter,
             add_files: Default::default(),
             has_cdcs: false,
-            timestamp: None,
-            commit_version: None,
+            timestamp,
+            commit_version,
         }
     }
     pub(crate) fn process_scan_batch(&mut self, actions: &dyn EngineData) -> DeltaResult<()> {
@@ -172,7 +174,8 @@ impl TableChangesMetadataScanner {
             cdcs,
             selection_vector: _,
         } = self.setup_batch_process(filter_vector, actions)?;
-        if self.timestamp.is_none() {
+        // If a timestamp from `CommitInfo` action is found, use that
+        if let Some(timestamp) = timestamp {
             self.timestamp = timestamp;
         }
         self.has_cdcs = self.has_cdcs || !cdcs.is_empty();
@@ -209,7 +212,7 @@ impl TableChangesMetadataScanner {
             add_files: self.add_files,
             has_cdcs: self.has_cdcs,
             timestamp: self.timestamp,
-            commit_version: None,
+            commit_version: self.commit_version,
         }
     }
 }
@@ -219,25 +222,12 @@ pub(crate) struct TableChangesLogReplayScanner {
     pub remove_dvs: HashMap<String, DvInfo>,
     pub add_files: HashSet<String>,
     pub has_cdcs: bool,
-    pub timestamp: Option<i64>,
-    pub commit_version: Option<u64>,
+    pub timestamp: i64,
+    pub commit_version: i64,
 }
 
 impl TableChangesLogReplayScanner {
-    fn get_add_transform_expr(
-        &self,
-        timestamp: Option<i64>,
-        commit_number: Option<u64>,
-    ) -> Expression {
-        // TODO: Use file metadata timestamp if not available
-        let timestamp = match timestamp {
-            Some(ts) => Scalar::Long(ts),
-            None => Scalar::Null(DataType::LONG),
-        };
-        let commit_number = match commit_number {
-            Some(num) => (num as i64).into(),
-            None => Scalar::Null(DataType::LONG),
-        };
+    fn get_add_transform_expr(&self, timestamp: i64, commit_number: i64) -> Expression {
         Expression::struct_from([
             Expression::struct_from([
                 column_expr!("add.path"),

@@ -19,12 +19,11 @@ pub(crate) fn transform_to_logical_internal(
     partition_values: &std::collections::HashMap<String, String>,
     all_fields: &[ColumnType],
     _have_partition_cols: bool,
-    commit_version: Option<i64>,
-    timestamp: Option<i64>,
+    commit_version: i64,
+    timestamp: i64,
     tpe: ScanFileType,
 ) -> DeltaResult<Box<dyn EngineData>> {
     let read_schema = global_state.read_schema.clone();
-    println!("Read schemA: {:?}", read_schema);
     // need to add back partition cols and/or fix-up mapped columns
     let mut all_fields: Vec<Expression> = all_fields
         .iter()
@@ -45,9 +44,12 @@ pub(crate) fn transform_to_logical_internal(
         })
         .try_collect()?;
 
-    // TODO make commit_version non-optional
-    let commit_version = commit_version.unwrap_or(42);
-    let timestamp = timestamp.unwrap_or(42);
+    // Both in-commit timestamps and file metadata are in milliseconds
+    //
+    // See:
+    // [`FileMeta`]
+    // [In-Commit Timestamps] : https://github.com/delta-io/delta/blob/master/PROTOCOL.md#writer-requirements-for-in-commit-timestampsa
+    let timestamp = Scalar::timestamp_from_millis(timestamp)?;
     match tpe {
         ScanFileType::Cdc => {
             all_fields.extend([
@@ -57,9 +59,10 @@ pub(crate) fn transform_to_logical_internal(
             ]);
         }
         ScanFileType::Add => {
+            println!("Timestamp: {:?}", timestamp);
             all_fields.extend([
                 Expression::literal(commit_version),
-                Scalar::Timestamp(timestamp).into(),
+                timestamp.into(),
                 "insert".into(),
             ]);
         }
@@ -67,7 +70,7 @@ pub(crate) fn transform_to_logical_internal(
         ScanFileType::Remove => {
             all_fields.extend([
                 Expression::literal(commit_version),
-                Scalar::Timestamp(timestamp).into(),
+                timestamp.into(),
                 "remove".into(),
             ]);
         }
