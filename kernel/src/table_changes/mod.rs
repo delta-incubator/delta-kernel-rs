@@ -5,14 +5,17 @@ use std::{collections::HashMap, sync::Arc};
 use crate::{
     actions::{Metadata, Protocol},
     features::ColumnMappingMode,
-    log_segment::{self, LogSegment, LogSegmentBuilder},
+    log_segment::{LogSegment, LogSegmentBuilder},
     path::AsUrl,
-    scan::{get_state_info, state::DvInfo, ColumnType},
-    schema::{DataType, Schema, SchemaRef, StructField, StructType},
+    scan::state::DvInfo,
+    schema::{DataType, Schema, StructField, StructType},
     snapshot::Snapshot,
-    DeltaResult, Engine, EngineData, Error, ExpressionRef, Version,
+    DeltaResult, Engine, EngineData, Error, Version,
 };
+use table_changes_scan::TableChangesScanBuilder;
 use url::Url;
+
+pub mod table_changes_scan;
 
 pub type TableChangesScanData = (Box<dyn EngineData>, Vec<bool>, Arc<HashMap<String, DvInfo>>);
 
@@ -21,7 +24,7 @@ static CDF_ENABLE_FLAG: &str = "delta.enableChangeDataFeed";
 #[derive(Debug)]
 pub struct TableChanges {
     #[allow(unused)]
-    pub log_segment: LogSegment,
+    pub(crate) log_segment: LogSegment,
     pub schema: Schema,
     pub start_version: Version,
     pub end_version: Version,
@@ -29,7 +32,6 @@ pub struct TableChanges {
     pub protocol: Protocol,
     pub column_mapping_mode: ColumnMappingMode,
     pub table_root: Url,
-    pub output_schema: Schema,
 }
 
 impl TableChanges {
@@ -63,22 +65,21 @@ impl TableChanges {
         }
         let log_segment = builder.build()?;
 
-        let output_schema = Self::get_output_schema(end_snapshot.schema());
+        let schema = Self::transform_logical_schema(end_snapshot.schema());
 
         Ok(TableChanges {
             log_segment,
-            schema: end_snapshot.schema().clone(),
+            schema,
             column_mapping_mode: end_snapshot.column_mapping_mode,
             start_version,
             end_version: end_snapshot.version(),
             protocol: end_snapshot.protocol().clone(),
             metadata: end_snapshot.metadata().clone(),
             table_root,
-            output_schema,
         })
     }
 
-    fn get_output_schema(schema: &Schema) -> Schema {
+    fn transform_logical_schema(schema: &Schema) -> Schema {
         let cdf_fields = [
             StructField::new("_commit_version", DataType::LONG, false),
             StructField::new("_commit_timestamp", DataType::TIMESTAMP, false),
@@ -91,95 +92,6 @@ impl TableChanges {
     pub fn into_scan_builder(self) -> TableChangesScanBuilder {
         TableChangesScanBuilder::new(self)
     }
-}
-
-/// Builder to read the `TableChanges` of a table.
-pub struct TableChangesScanBuilder {
-    table_changes: Arc<TableChanges>,
-    schema: Option<SchemaRef>,
-    predicate: Option<ExpressionRef>,
-}
-
-impl TableChangesScanBuilder {
-    /// Create a new [`TableChangesScanBuilder`] instance.
-    pub fn new(table_changes: impl Into<Arc<TableChanges>>) -> Self {
-        Self {
-            table_changes: table_changes.into(),
-            schema: None,
-            predicate: None,
-        }
-    }
-
-    /// Provide [`Schema`] for columns to select from the [`TableChanges`].
-    ///
-    /// A table with columns `[a, b, c]` could have a scan which reads only the first
-    /// two columns by using the schema `[a, b]`.
-    ///
-    /// [`Schema`]: crate::schema::Schema
-    /// [`TableChanges`]: crate::table_changes:TableChanges:
-    pub fn with_schema(mut self, schema: SchemaRef) -> Self {
-        self.schema = Some(schema);
-        self
-    }
-
-    /// Optionally provide a [`SchemaRef`] for columns to select from the [`TableChanges`]. See
-    /// [`TableChangesScanBuilder::with_schema`] for details. If `schema_opt` is `None` this is a no-op.
-    pub fn with_schema_opt(self, schema_opt: Option<SchemaRef>) -> Self {
-        match schema_opt {
-            Some(schema) => self.with_schema(schema),
-            None => self,
-        }
-    }
-
-    /// Optionally provide an expression to filter rows. For example, using the predicate `x <
-    /// 4` to return a subset of the rows in the scan which satisfy the filter. If `predicate_opt`
-    /// is `None`, this is a no-op.
-    ///
-    /// NOTE: The filtering is best-effort and can produce false positives (rows that should should
-    /// have been filtered out but were kept).
-    pub fn with_predicate(mut self, predicate: impl Into<Option<ExpressionRef>>) -> Self {
-        self.predicate = predicate.into();
-        self
-    }
-
-    /// Build the [`TableChangesScan`].
-    ///
-    /// This does not scan the table at this point, but does do some work to ensure that the
-    /// provided schema make sense, and to prepare some metadata that the scan will need.  The
-    /// [`TableChangesScan`] type itself can be used to fetch the files and associated metadata required to
-    /// perform actual data reads.
-    pub fn build(self) -> DeltaResult<TableChangesScan> {
-        // if no schema is provided, use snapshot's entire schema (e.g. SELECT *)
-        let logical_schema = self
-            .schema
-            .unwrap_or_else(|| self.table_changes.schema.clone().into());
-        let (all_fields, read_fields, have_partition_cols) = get_state_info(
-            logical_schema.as_ref(),
-            &self.table_changes.metadata.partition_columns,
-            self.table_changes.column_mapping_mode,
-        )?;
-        let physical_schema = Arc::new(StructType::new(read_fields));
-        Ok(TableChangesScan {
-            table_changes: self.table_changes,
-            logical_schema,
-            physical_schema,
-            predicate: self.predicate,
-            all_fields,
-            have_partition_cols,
-        })
-    }
-}
-
-/// The result of building a [`TableChanges`] scan over a table. This can be used to get a change
-/// data feed from the table
-#[allow(unused)]
-pub struct TableChangesScan {
-    table_changes: Arc<TableChanges>,
-    logical_schema: SchemaRef,
-    physical_schema: SchemaRef,
-    predicate: Option<ExpressionRef>,
-    all_fields: Vec<ColumnType>,
-    have_partition_cols: bool,
 }
 
 #[cfg(test)]
