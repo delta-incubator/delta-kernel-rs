@@ -79,14 +79,6 @@ impl AsUrl for Url {
     }
 }
 
-impl std::ops::Deref for ParsedLogPath {
-    type Target = Url;
-
-    fn deref(&self) -> &Self::Target {
-        self.location.as_url()
-    }
-}
-
 impl<Location: AsUrl> ParsedLogPath<Location> {
     // NOTE: We can't actually impl TryFrom because Option<T> is a foreign struct even if T is local.
     #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
