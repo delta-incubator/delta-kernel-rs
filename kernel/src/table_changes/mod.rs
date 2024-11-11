@@ -7,13 +7,13 @@ use crate::{
     features::ColumnMappingMode,
     log_segment::{LogSegment, LogSegmentBuilder},
     path::AsUrl,
-    scan::{get_state_info, state::DvInfo},
+    scan::state::DvInfo,
     schema::{DataType, Schema, SchemaRef, StructField, StructType},
     snapshot::Snapshot,
-    DeltaResult, Engine, EngineData, Error, ExpressionRef, Version,
+    DeltaResult, Engine, EngineData, Error, Version,
 };
 use serde::{Deserialize, Serialize};
-use table_changes_scan::{TableChangesScan, TableChangesScanBuilder};
+use table_changes_scan::TableChangesScanBuilder;
 use url::Url;
 
 mod data_read;

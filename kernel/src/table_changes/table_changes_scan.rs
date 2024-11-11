@@ -329,10 +329,10 @@ impl TableChangesScan {
                             location: file_path,
                         };
                         let add_dv = dv_info
-                            .as_dv_tree_map(engine, &self.table_changes.table_root)?
+                            .get_treemap(engine, &self.table_changes.table_root)?
                             .unwrap_or(Default::default());
                         let rm_dv = rm_dv
-                            .as_dv_tree_map(engine, &self.table_changes.table_root)?
+                            .get_treemap(engine, &self.table_changes.table_root)?
                             .unwrap_or(Default::default());
                         let added = &rm_dv - &add_dv;
                         let added = treemap_to_bools(added);

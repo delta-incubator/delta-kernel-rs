@@ -52,7 +52,7 @@ impl DvInfo {
         self.deletion_vector.is_some()
     }
 
-    pub fn as_dv_tree_map(
+    pub fn get_treemap(
         &self,
         engine: &dyn Engine,
         table_root: &url::Url,
@@ -71,7 +71,7 @@ impl DvInfo {
         engine: &dyn Engine,
         table_root: &url::Url,
     ) -> DeltaResult<Option<Vec<bool>>> {
-        let dv_treemap = self.as_dv_tree_map(engine, table_root)?;
+        let dv_treemap = self.get_treemap(engine, table_root)?;
         Ok(dv_treemap.map(treemap_to_bools))
     }
 
