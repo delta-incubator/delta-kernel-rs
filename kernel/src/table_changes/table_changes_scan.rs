@@ -1,12 +1,12 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, iter, sync::Arc};
 
-use itertools::Itertools;
+use itertools::{Either, Itertools};
 use tracing::debug;
 
 use crate::{
     actions::{
-        deletion_vector::split_vector, get_log_schema, ADD_NAME, CDC_NAME, COMMIT_INFO_NAME,
-        REMOVE_NAME,
+        deletion_vector::{split_vector, treemap_to_bools},
+        get_log_schema, ADD_NAME, CDC_NAME, COMMIT_INFO_NAME, REMOVE_NAME,
     },
     scan::{
         data_skipping::DataSkippingFilter,
@@ -18,7 +18,7 @@ use crate::{
     table_changes::{
         data_read::transform_to_logical_internal,
         replay_scanner::TableChangesMetadataScanner,
-        state::{self, ScanFile},
+        state::{self, ScanFile, ScanFileType},
     },
     DeltaResult, Engine, EngineData, ExpressionRef, FileMeta,
 };
@@ -316,9 +316,7 @@ impl TableChangesScan {
         let result = scan_files_iter
             .into_iter()
             .map(move |scan_res| -> DeltaResult<_> {
-                let (scan_file, _dv_map) = scan_res?;
-
-                println!("\n\nscan file: {:?}", scan_file);
+                let (scan_file, dv_map) = scan_res?;
                 let ScanFile {
                     tpe,
                     path,
@@ -329,55 +327,133 @@ impl TableChangesScan {
                     timestamp,
                 } = scan_file;
                 let file_path = self.table_changes.table_root.join(&path)?;
-                let mut selection_vector =
-                    dv_info.get_selection_vector(engine, &self.table_changes.table_root)?;
-                let meta = FileMeta {
-                    last_modified: 0,
-                    size: size as usize,
-                    location: file_path,
-                };
-                let read_result_iter = engine.get_parquet_handler().read_parquet_files(
-                    &[meta],
-                    global_state.read_schema.clone(),
-                    self.predicate(),
-                )?;
+                match (&tpe, dv_map.get(&path)) {
+                    (state::ScanFileType::Add, Some(rm_dv)) => {
+                        let meta = FileMeta {
+                            last_modified: 0,
+                            size: size as usize,
+                            location: file_path,
+                        };
+                        let add_dv = dv_info
+                            .as_dv_tree_map(engine, &self.table_changes.table_root)?
+                            .unwrap_or(Default::default());
+                        let rm_dv = rm_dv
+                            .as_dv_tree_map(engine, &self.table_changes.table_root)?
+                            .unwrap_or(Default::default());
+                        println!("add_dv {:?}", treemap_to_bools(add_dv.clone()));
+                        println!("remove_dv {:?}", treemap_to_bools(rm_dv.clone()));
+                        let added = &rm_dv - &add_dv;
+                        println!("added {:?}", added);
+                        let added = treemap_to_bools(added);
+                        println!("added {:?}", added);
 
-                // Arc clone
-                let gs = global_state.clone();
+                        let y = self.generate_output_rows(
+                            engine,
+                            meta.clone(),
+                            global_state.clone(),
+                            partition_values.clone(),
+                            commit_version,
+                            timestamp,
+                            ScanFileType::Add,
+                            Some(added),
+                            Some(false),
+                        )?;
+                        let removed = add_dv - rm_dv;
+                        let removed = treemap_to_bools(removed);
+                        println!("removed {:?}", removed);
 
-                Ok(read_result_iter.map(move |read_result| -> DeltaResult<_> {
-                    let read_result = read_result?;
-                    // to transform the physical data into the correct logical form
-                    let logical = transform_to_logical_internal(
-                        engine,
-                        read_result,
-                        &gs,
-                        &partition_values,
-                        &self.all_fields,
-                        self.have_partition_cols,
-                        commit_version,
-                        timestamp,
-                        tpe.clone(),
-                    );
-                    let len = logical.as_ref().map_or(0, |res| res.length());
-                    // need to split the dv_mask. what's left in dv_mask covers this result, and rest
-                    // will cover the following results. we `take()` out of `selection_vector` to avoid
-                    // trying to return a captured variable. We're going to reassign `selection_vector`
-                    // to `rest` in a moment anyway
-                    let mut sv = selection_vector.take();
-                    let rest = split_vector(sv.as_mut(), len, None);
-                    let result = ScanResult {
-                        raw_data: logical,
-                        raw_mask: sv,
-                    };
-                    selection_vector = rest;
-                    Ok(result)
-                }))
+                        let x = self.generate_output_rows(
+                            engine,
+                            meta,
+                            global_state.clone(),
+                            partition_values.clone(),
+                            commit_version,
+                            timestamp,
+                            ScanFileType::Remove,
+                            Some(removed),
+                            Some(false),
+                        )?;
+
+                        Ok(Either::Left(x.chain(y)))
+                    }
+                    _ => {
+                        let selection_vector =
+                            dv_info.get_selection_vector(engine, &self.table_changes.table_root)?;
+                        let meta = FileMeta {
+                            last_modified: 0,
+                            size: size as usize,
+                            location: file_path,
+                        };
+                        Ok(Either::Right(self.generate_output_rows(
+                            engine,
+                            meta,
+                            global_state.clone(),
+                            partition_values,
+                            commit_version,
+                            timestamp,
+                            tpe,
+                            selection_vector,
+                            None,
+                        )?))
+                    }
+                }
             })
-            // Iterator<DeltaResult<Iterator<DeltaResult<ScanResult>>>> to Iterator<DeltaResult<DeltaResult<ScanResult>>>
+            // // Iterator<DeltaResult<Iterator<DeltaResult<ScanResult>>>> to Iterator<DeltaResult<DeltaResult<ScanResult>>>
             .flatten_ok()
-            // Iterator<DeltaResult<DeltaResult<ScanResult>>> to Iterator<DeltaResult<ScanResult>>
+            // // Iterator<DeltaResult<DeltaResult<ScanResult>>> to Iterator<DeltaResult<ScanResult>>
             .map(|x| x?);
         Ok(result)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn generate_output_rows<'a>(
+        &'a self,
+        engine: &'a dyn Engine,
+        meta: FileMeta,
+        global_state: Arc<TableChangesGlobalScanState>,
+        partition_values: HashMap<String, String>,
+        commit_version: i64,
+        timestamp: i64,
+        tpe: state::ScanFileType,
+        mut selection_vector: Option<Vec<bool>>,
+        extend: Option<bool>,
+    ) -> DeltaResult<impl Iterator<Item = DeltaResult<ScanResult>> + 'a> {
+        let read_result_iter = engine.get_parquet_handler().read_parquet_files(
+            &[meta],
+            global_state.read_schema.clone(),
+            self.predicate(),
+        )?;
+
+        // Arc clone
+        let gs = global_state.clone();
+
+        Ok(read_result_iter.map(move |read_result| -> DeltaResult<_> {
+            let read_result = read_result?;
+            // to transform the physical data into the correct logical form
+            let logical = transform_to_logical_internal(
+                engine,
+                read_result,
+                &gs,
+                &partition_values,
+                &self.all_fields,
+                self.have_partition_cols,
+                commit_version,
+                timestamp,
+                tpe.clone(),
+            );
+            let len = logical.as_ref().map_or(0, |res| res.length());
+            // need to split the dv_mask. what's left in dv_mask covers this result, and rest
+            // will cover the following results. we `take()` out of `selection_vector` to avoid
+            // trying to return a captured variable. We're going to reassign `selection_vector`
+            // to `rest` in a moment anyway
+            let mut sv = selection_vector.take();
+            let rest = split_vector(sv.as_mut(), len, extend);
+            let result = ScanResult {
+                raw_data: logical,
+                raw_mask: sv,
+            };
+            selection_vector = rest;
+            Ok(result)
+        }))
     }
 }

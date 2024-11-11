@@ -59,7 +59,6 @@ pub(crate) fn transform_to_logical_internal(
             ]);
         }
         ScanFileType::Add => {
-            println!("Timestamp: {:?}", timestamp);
             all_fields.extend([
                 Expression::literal(commit_version),
                 timestamp.into(),
