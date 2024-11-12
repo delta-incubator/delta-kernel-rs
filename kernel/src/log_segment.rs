@@ -1,20 +1,18 @@
 //! Represents a segment of a delta log. [`LogSegment`] wraps a set of  checkpoint and commit
 //! files.
 
+use crate::actions::{get_log_schema, Metadata, Protocol, METADATA_NAME, PROTOCOL_NAME};
+use crate::path::ParsedLogPath;
+use crate::schema::SchemaRef;
+use crate::snapshot::CheckpointMetadata;
+use crate::utils::require;
 use crate::{
-    actions::{get_log_schema, Metadata, Protocol, METADATA_NAME, PROTOCOL_NAME},
-    schema::SchemaRef,
-    DeltaResult, Engine, EngineData, Error, ExpressionRef, FileMeta,
-};
-use crate::{
-    path::ParsedLogPath, snapshot::CheckpointMetadata, utils::require, Expression,
-    FileSystemClient, Version,
+    DeltaResult, Engine, EngineData, Error, Expression, ExpressionRef, FileMeta, FileSystemClient,
+    Version,
 };
 use itertools::Itertools;
-use std::{
-    cmp::Ordering,
-    sync::{Arc, LazyLock},
-};
+use std::cmp::Ordering;
+use std::sync::{Arc, LazyLock};
 use tracing::warn;
 use url::Url;
 
@@ -148,7 +146,7 @@ impl<'a> LogSegmentBuilder<'a> {
     }
 
     /// Optionally set the start version of the [`LogSegment`]. This ensures that all commit files
-    /// are above this version.
+    /// are above this version. Checkpoint files will be omitted if this is specified.
     #[allow(unused)]
     pub(crate) fn with_start_version(mut self, version: Version) -> Self {
         self.start_version = Some(version);
@@ -180,7 +178,7 @@ impl<'a> LogSegmentBuilder<'a> {
             reversed_commit_files,
         } = self;
         let log_root = table_root.join("_delta_log/").unwrap();
-        let (mut commit_files, checkpoint_files) = match (checkpoint, end_version) {
+        let (mut commit_files, mut checkpoint_files) = match (checkpoint, end_version) {
             (Some(cp), None) => Self::list_log_files_with_checkpoint(&cp, fs_client, &log_root)?,
             (Some(cp), Some(version)) if cp.version >= version => {
                 Self::list_log_files_with_checkpoint(&cp, fs_client, &log_root)?
@@ -198,13 +196,11 @@ impl<'a> LogSegmentBuilder<'a> {
         // - Be greater than the most recent checkpoint version if it exists
         // - Be less than or equal to the end version.
         if let Some(start_version) = start_version {
+            checkpoint_files.clear();
             commit_files.retain(|log_path| start_version <= log_path.version);
         }
         if let Some(checkpoint_file) = checkpoint_files.first() {
-            commit_files.retain(|log_path| {
-                checkpoint_file.version < log_path.version
-                    || start_version.is_some_and(|start_version| start_version >= log_path.version)
-            });
+            commit_files.retain(|log_path| checkpoint_file.version < log_path.version);
         }
         if let Some(end_version) = end_version {
             commit_files.retain(|log_path| log_path.version <= end_version);
