@@ -139,15 +139,15 @@ impl<'a> LogSegmentBuilder<'a> {
         self
     }
 
-    /// Optionally set the start version of the [`LogSegment`]. This ensures that all commit files
+    /// Optionally set the start version (inclusive) of the [`LogSegment`]. This ensures that all commit files
     /// are above this version. Checkpoint files will be omitted if this is specified.
     #[allow(unused)]
     pub(crate) fn with_start_version(mut self, version: Version) -> Self {
         self.start_version = Some(version);
         self
     }
-    /// Optionally set the end version of the [`LogSegment`]. This ensures that all commit files
-    /// and checkpoints are below the end version.
+    /// Optionally set the end version (inclusive) of the [`LogSegment`]. This ensures that all commit files
+    /// and checkpoints are at or below the end version.
     pub(crate) fn with_end_version(mut self, version: Version) -> Self {
         self.end_version = Some(version);
         self
@@ -191,7 +191,7 @@ impl<'a> LogSegmentBuilder<'a> {
         // - Be less than or equal to the end version.
         if let Some(start_version) = start_version {
             checkpoint_files.clear();
-            commit_files.retain(|log_path| start_version <= log_path.version);
+            commit_files.retain(|log_path| log_path.version >= start_version);
         }
         if let Some(checkpoint_file) = checkpoint_files.first() {
             commit_files.retain(|log_path| checkpoint_file.version < log_path.version);
