@@ -208,7 +208,7 @@ impl<'a> LogSegmentBuilder<'a> {
         }
 
         // Commit file versions must satisfy the following:
-        // - Be greater than the start version
+        // - Be greater than or equal to the start version
         // - Be greater than the most recent checkpoint version if it exists
         // - Be less than or equal to the end version.
         if let Some(start_version) = start_version {

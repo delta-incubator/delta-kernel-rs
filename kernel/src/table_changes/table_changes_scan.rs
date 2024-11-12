@@ -4,25 +4,25 @@ use itertools::{Either, Itertools};
 use tracing::debug;
 
 use crate::{
-    actions::{
-        deletion_vector::{split_vector, treemap_to_bools},
-        get_log_schema, ADD_NAME, CDC_NAME, COMMIT_INFO_NAME, REMOVE_NAME,
-    },
+    actions::deletion_vector::{split_vector, treemap_to_bools},
+    expressions::Scalar,
     scan::{
-        data_skipping::DataSkippingFilter,
-        get_state_info,
         state::{DvInfo, GlobalScanState},
-        ColumnType, ScanData, ScanResult,
+        ColumnType, ScanResult,
     },
     schema::{SchemaRef, StructType},
     table_changes::state::{ScanFile, ScanFileType},
-    DeltaResult, Engine, EngineData, ExpressionRef, FileMeta,
+    DeltaResult, Engine, Expression, ExpressionRef, FileMeta,
 };
 
 use super::{
-    data_read::transform_to_logical_internal, replay_scanner::TableChangesMetadataScanner, state,
-    TableChanges, TableChangesScanData,
+    data_read::transform_to_logical_internal,
+    replay_scanner::{replay_for_scan_data, table_changes_action_iter},
+    state, TableChanges, TableChangesScanData,
 };
+use crate::expressions::column_expr;
+
+static CDF_GENERATED_COLUMNS: [&str; 3] = ["_commit_version", "_commit_timestamp", "_change_type"];
 
 /// The result of building a [`TableChanges`] scan over a table. This can be used to get a change
 /// data feed from the table
@@ -33,6 +33,7 @@ pub struct TableChangesScan {
     physical_schema: SchemaRef,
     predicate: Option<ExpressionRef>,
     all_fields: Vec<ColumnType>,
+    generated_columns: Vec<String>,
     have_partition_cols: bool,
 }
 /// Builder to read the `TableChanges` of a table.
@@ -84,6 +85,13 @@ impl TableChangesScanBuilder {
         self
     }
 
+    fn logical_schema(&self) -> Arc<StructType> {
+        match &self.schema {
+            Some(schema) => schema.clone(),
+            None => self.table_changes.schema.clone().into(),
+        }
+    }
+
     /// Build the [`TableChangesScan`].
     ///
     /// This does not scan the table at this point, but does do some work to ensure that the
@@ -92,79 +100,54 @@ impl TableChangesScanBuilder {
     /// perform actual data reads.
     pub fn build(self) -> DeltaResult<TableChangesScan> {
         // if no schema is provided, use snapshot's entire schema (e.g. SELECT *)
-        let logical_schema = self
-            .schema
-            .unwrap_or_else(|| self.table_changes.schema.clone().into());
-        let (all_fields, read_fields, have_partition_cols) = get_state_info(
-            logical_schema.as_ref(),
-            &self.table_changes.metadata.partition_columns,
-            self.table_changes.column_mapping_mode,
-        )?;
+        let logical_schema = self.logical_schema();
+        let mut have_partition_cols = false;
+        let mut read_fields = Vec::with_capacity(logical_schema.fields.len());
+
+        // Loop over all selected fields and note if they are columns that will be read from the
+        // parquet file ([`ColumnType::Selected`]) or if they are partition columns and will need to
+        // be filled in by evaluating an expression ([`ColumnType::Partition`])
+        let column_types = logical_schema
+            .fields()
+            .enumerate()
+            .map(|(index, logical_field)| -> DeltaResult<_> {
+                if self
+                    .table_changes
+                    .metadata
+                    .partition_columns
+                    .contains(logical_field.name())
+                {
+                    // Store the index into the schema for this field. When we turn it into an
+                    // expression in the inner loop, we will index into the schema and get the name and
+                    // data type, which we need to properly materialize the column.
+                    have_partition_cols = true;
+                    Ok(ColumnType::Partition(index))
+                } else if CDF_GENERATED_COLUMNS.contains(&logical_field.name().as_str()) {
+                    Ok(ColumnType::InsertedColumn(index))
+                } else {
+                    // Add to read schema, store field so we can build a `Column` expression later
+                    // if needed (i.e. if we have partition columns)
+                    let physical_field =
+                        logical_field.make_physical(self.table_changes.column_mapping_mode)?;
+                    debug!("\n\n{logical_field:#?}\nAfter mapping: {physical_field:#?}\n\n");
+                    let physical_name = physical_field.name.clone();
+                    read_fields.push(physical_field);
+                    Ok(ColumnType::Selected(physical_name))
+                }
+            })
+            .try_collect()?;
+        let generated_columns = vec![];
         let physical_schema = Arc::new(StructType::new(read_fields));
         Ok(TableChangesScan {
             table_changes: self.table_changes,
             logical_schema,
             physical_schema,
             predicate: self.predicate,
-            all_fields,
+            all_fields: column_types,
+            generated_columns,
             have_partition_cols,
         })
     }
-}
-
-/// Given an iterator of (engine_data, bool) tuples and a predicate, returns an iterator of
-/// `(engine_data, selection_vec)`. Each row that is selected in the returned `engine_data` _must_
-/// be processed to complete the scan. Non-selected rows _must_ be ignored. The boolean flag
-/// indicates whether the record batch is a log or checkpoint batch.
-pub fn table_changes_action_iter(
-    engine: &dyn Engine,
-    commit_iter: impl Iterator<
-        Item = (
-            DeltaResult<Box<dyn Iterator<Item = DeltaResult<Box<dyn EngineData>>> + Send>>,
-            i64,
-            i64,
-        ),
-    >,
-    table_schema: &SchemaRef,
-    predicate: Option<ExpressionRef>,
-) -> DeltaResult<impl Iterator<Item = DeltaResult<TableChangesScanData>>> {
-    let filter = DataSkippingFilter::new(engine, table_schema, predicate);
-    let expression_handler = engine.get_expression_handler();
-    let result = commit_iter
-        .map(
-            move |(action_iter, timestamp, commit_version)| -> DeltaResult<_> {
-                let action_iter = action_iter?;
-                let expression_handler = expression_handler.clone();
-                let mut metadata_scanner =
-                    TableChangesMetadataScanner::new(filter.clone(), timestamp, commit_version);
-
-                // Find CDC, get commitInfo, and perform metadata scan
-                let mut batches = vec![];
-                for action_res in action_iter {
-                    let batch = action_res?;
-                    // TODO: Make this metadata iterator
-                    metadata_scanner.process_scan_batch(batch.as_ref())?;
-                    batches.push(batch);
-                }
-
-                let mut log_scanner = metadata_scanner.into_replay_scanner();
-                // File metadata output scan
-                let x: Vec<ScanData> = batches
-                    .into_iter()
-                    .map(|batch| {
-                        log_scanner.process_scan_batch(expression_handler.as_ref(), batch.as_ref())
-                    })
-                    .try_collect()?;
-                let remove_dvs = Arc::new(log_scanner.remove_dvs);
-                let y = x.into_iter().map(move |(a, b)| {
-                    let remove_dvs = remove_dvs.clone();
-                    (a, b, remove_dvs)
-                });
-                Ok(y)
-            },
-        )
-        .flatten_ok();
-    Ok(result)
 }
 
 impl TableChangesScan {
@@ -198,52 +181,10 @@ impl TableChangesScan {
     ) -> DeltaResult<impl Iterator<Item = DeltaResult<TableChangesScanData>>> {
         table_changes_action_iter(
             engine,
-            self.replay_for_scan_data(engine)?,
+            replay_for_scan_data(engine, &self.table_changes.log_segment.commit_files)?,
             &self.logical_schema,
             self.predicate(),
         )
-    }
-
-    // Factored out to facilitate testing
-    fn replay_for_scan_data(
-        &self,
-        engine: &dyn Engine,
-    ) -> DeltaResult<
-        impl Iterator<
-            Item = (
-                DeltaResult<Box<dyn Iterator<Item = DeltaResult<Box<dyn EngineData>>> + Send>>,
-                i64,
-                i64,
-            ),
-        >,
-    > {
-        let commit_read_schema =
-            get_log_schema().project(&[ADD_NAME, CDC_NAME, REMOVE_NAME, COMMIT_INFO_NAME])?;
-
-        let json_client = engine.get_json_handler();
-
-        // Collect so we don't return reference to self
-        let commits = self
-            .table_changes
-            .log_segment
-            .commit_files
-            .iter()
-            .map(move |log_path| {
-                let file = log_path.location.clone();
-                let version = log_path.version as i64;
-                (file, version)
-            })
-            .collect_vec();
-
-        let result = commits.into_iter().map(move |(file, version)| {
-            let timestamp = file.last_modified;
-            // NOTE: We don't pass any meta-predicate because we expect no meaningful row group skipping
-            // when ~every checkpoint file will contain the adds and removes we are looking for.
-            let commit = json_client.read_json_files(&[file], commit_read_schema.clone(), None);
-
-            (commit, timestamp, version)
-        });
-        Ok(result)
     }
 
     /// Get global state that is valid for the entire scan. This is somewhat expensive so should
@@ -420,6 +361,36 @@ impl TableChangesScan {
 
         Ok(read_result_iter.map(move |read_result| -> DeltaResult<_> {
             let read_result = read_result?;
+
+            // Both in-commit timestamps and file metadata are in milliseconds
+            //
+            // See:
+            // [`FileMeta`]
+            // [In-Commit Timestamps] : https://github.com/delta-io/delta/blob/master/PROTOCOL.md#writer-requirements-for-in-commit-timestampsa
+            let timestamp = Scalar::timestamp_from_millis(timestamp)?;
+            let expressions = match tpe {
+                ScanFileType::Cdc => [
+                    column_expr!("_commit_version"),
+                    column_expr!("_commit_timestamp"),
+                    column_expr!("_change_type"),
+                ],
+                ScanFileType::Add => [
+                    Expression::literal(commit_version),
+                    timestamp.into(),
+                    "insert".into(),
+                ],
+
+                ScanFileType::Remove => [
+                    Expression::literal(commit_version),
+                    timestamp.into(),
+                    "remove".into(),
+                ],
+            };
+            let generated_columns: HashMap<String, Expression> = CDF_GENERATED_COLUMNS
+                .iter()
+                .map(ToString::to_string)
+                .zip(expressions)
+                .collect();
             // to transform the physical data into the correct logical form
             let logical = transform_to_logical_internal(
                 engine,
@@ -428,9 +399,7 @@ impl TableChangesScan {
                 &partition_values,
                 &self.all_fields,
                 self.have_partition_cols,
-                commit_version,
-                timestamp,
-                tpe.clone(),
+                generated_columns,
             );
             let len = logical.as_ref().map_or(0, |res| res.length());
             // need to split the dv_mask. what's left in dv_mask covers this result, and rest

@@ -21,7 +21,6 @@ fn main() -> DeltaResult<()> {
         .map(|scan_result| -> DeltaResult<_> {
             let scan_result = scan_result?;
             let mask = scan_result.full_mask();
-            println!("Mask: mask: {:?}", mask);
             let data = scan_result.raw_data?;
             let record_batch: RecordBatch = data
                 .into_any()
@@ -29,10 +28,7 @@ fn main() -> DeltaResult<()> {
                 .map_err(|_| delta_kernel::Error::EngineDataType("ArrowEngineData".to_string()))?
                 .into();
             if let Some(mask) = mask {
-                let len = record_batch.num_rows();
-                let new = filter_record_batch(&record_batch, &mask.into())?;
-                println!("went from {len} to {}", new.num_rows());
-                Ok(new)
+                Ok(filter_record_batch(&record_batch, &mask.into())?)
             } else {
                 Ok(record_batch)
             }

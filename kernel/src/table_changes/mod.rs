@@ -34,6 +34,7 @@ pub struct TableChanges {
     pub protocol: Protocol,
     pub column_mapping_mode: ColumnMappingMode,
     pub table_root: Url,
+    pub output_schema: Schema,
 }
 
 impl TableChanges {
@@ -67,17 +68,18 @@ impl TableChanges {
         }
         let log_segment = builder.build()?;
 
-        let schema = Self::transform_logical_schema(end_snapshot.schema());
+        let output_schema = Self::transform_logical_schema(end_snapshot.schema());
 
         Ok(TableChanges {
             log_segment,
-            schema,
+            schema: output_schema.clone(),
             column_mapping_mode: end_snapshot.column_mapping_mode,
             start_version,
             end_version: end_snapshot.version(),
             protocol: end_snapshot.protocol().clone(),
             metadata: end_snapshot.metadata().clone(),
             table_root,
+            output_schema,
         })
     }
 
@@ -87,9 +89,7 @@ impl TableChanges {
             StructField::new("_commit_timestamp", DataType::TIMESTAMP, false),
             StructField::new("_change_type", DataType::STRING, false),
         ];
-        let fields = schema.fields().cloned().chain(cdf_fields);
-        let fields = fields;
-        StructType::new(fields)
+        StructType::new(schema.fields().cloned().chain(cdf_fields))
     }
     pub fn into_scan_builder(self) -> TableChangesScanBuilder {
         TableChangesScanBuilder::new(self)

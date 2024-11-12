@@ -163,6 +163,8 @@ pub enum ColumnType {
     Selected(String),
     // A partition column that needs to be added back in
     Partition(usize),
+    // A column inserted into the schema that is generated using [`Expression`]
+    InsertedColumn(usize),
 }
 
 pub type ScanData = (Box<dyn EngineData>, Vec<bool>);
@@ -492,6 +494,7 @@ pub fn transform_to_logical_internal(
                 Ok(value_expression.into())
             }
             ColumnType::Selected(field_name) => Ok(ColumnName::new([field_name]).into()),
+            ColumnType::InsertedColumn(_) => unimplemented!(),
         })
         .try_collect()?;
     let read_expression = Expression::Struct(all_fields);

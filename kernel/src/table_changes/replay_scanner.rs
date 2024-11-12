@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use crate::actions::visitors::{AddVisitor, CdcVisitor, RemoveVisitor};
 use crate::actions::{
@@ -6,12 +7,17 @@ use crate::actions::{
 };
 use crate::engine_data::{GetData, TypedGetData};
 use crate::expressions::{column_expr, Expression};
+use crate::path::ParsedLogPath;
 use crate::scan::data_skipping::DataSkippingFilter;
 use crate::scan::state::DvInfo;
 use crate::scan::ScanData;
+use crate::schema::SchemaRef;
 use crate::table_changes::state::scan_row_schema;
-use crate::{DataVisitor, DeltaResult, EngineData, ExpressionHandler};
+use crate::{DataVisitor, DeltaResult, Engine, EngineData, ExpressionHandler, ExpressionRef};
+use itertools::Itertools;
 use tracing::debug;
+
+use super::TableChangesScanData;
 
 #[derive(Default)]
 pub(crate) struct AddRemoveCdcVisitor {
@@ -31,6 +37,99 @@ impl AddRemoveCdcVisitor {
             ..Default::default()
         }
     }
+}
+
+pub(crate) fn replay_for_scan_data(
+    engine: &dyn Engine,
+    commit_files: &Vec<ParsedLogPath>,
+) -> DeltaResult<
+    impl Iterator<
+        Item = (
+            DeltaResult<Box<dyn Iterator<Item = DeltaResult<Box<dyn EngineData>>> + Send>>,
+            i64,
+            i64,
+        ),
+    >,
+> {
+    let commit_read_schema =
+        get_log_schema().project(&[ADD_NAME, CDC_NAME, REMOVE_NAME, COMMIT_INFO_NAME])?;
+
+    let json_client = engine.get_json_handler();
+
+    // Collect so we don't return reference to self
+    let commits = commit_files
+        .iter()
+        .map(move |log_path| {
+            let file = log_path.location.clone();
+            let version = log_path.version as i64;
+            (file, version)
+        })
+        .collect_vec();
+
+    let result = commits.into_iter().map(move |(file, version)| {
+        let timestamp = file.last_modified;
+        // NOTE: We don't pass any meta-predicate because we expect no meaningful row group skipping
+        // when ~every checkpoint file will contain the adds and removes we are looking for.
+        let commit = json_client.read_json_files(&[file], commit_read_schema.clone(), None);
+
+        (commit, timestamp, version)
+    });
+    Ok(result)
+}
+
+/// Given an iterator of (engine_data, bool) tuples and a predicate, returns an iterator of
+/// `(engine_data, selection_vec)`. Each row that is selected in the returned `engine_data` _must_
+/// be processed to complete the scan. Non-selected rows _must_ be ignored. The boolean flag
+/// indicates whether the record batch is a log or checkpoint batch.
+pub(crate) fn table_changes_action_iter(
+    engine: &dyn Engine,
+    commit_iter: impl Iterator<
+        Item = (
+            DeltaResult<Box<dyn Iterator<Item = DeltaResult<Box<dyn EngineData>>> + Send>>,
+            i64,
+            i64,
+        ),
+    >,
+    table_schema: &SchemaRef,
+    predicate: Option<ExpressionRef>,
+) -> DeltaResult<impl Iterator<Item = DeltaResult<TableChangesScanData>>> {
+    let filter = DataSkippingFilter::new(engine, table_schema, predicate);
+    let expression_handler = engine.get_expression_handler();
+    let result = commit_iter
+        .map(
+            move |(action_iter, timestamp, commit_version)| -> DeltaResult<_> {
+                let action_iter = action_iter?;
+                let expression_handler = expression_handler.clone();
+                let mut metadata_scanner =
+                    TableChangesMetadataScanner::new(filter.clone(), timestamp, commit_version);
+
+                // Find CDC, get commitInfo, and perform metadata scan
+                let mut batches = vec![];
+                for action_res in action_iter {
+                    let batch = action_res?;
+                    // TODO: Make this metadata iterator
+                    metadata_scanner.process_scan_batch(batch.as_ref())?;
+                    batches.push(batch);
+                }
+
+                let mut log_scanner = metadata_scanner.into_replay_scanner();
+                // File metadata output scan
+                let x: Vec<ScanData> = batches
+                    .into_iter()
+                    .map(|batch| {
+                        log_scanner.process_scan_batch(expression_handler.as_ref(), batch.as_ref())
+                    })
+                    .try_collect()?;
+                let remove_dvs = Arc::new(log_scanner.remove_dvs);
+                let y = x.into_iter().map(move |(a, b)| {
+                    let remove_dvs = remove_dvs.clone();
+                    (a, b, remove_dvs)
+                });
+                Ok(y)
+            },
+        )
+        .flatten_ok();
+    Ok(result)
 }
 
 impl DataVisitor for AddRemoveCdcVisitor {
@@ -311,7 +410,6 @@ impl TableChangesLogReplayScanner {
             selection_vector[index] = true;
         }
 
-        println!("About to evaluate");
         let result = expression_handler
             .get_evaluator(
                 get_log_schema().clone(),
@@ -320,7 +418,6 @@ impl TableChangesLogReplayScanner {
             )
             .evaluate(actions)?;
 
-        println!("Done evaluating");
         Ok((result, selection_vector))
     }
 
