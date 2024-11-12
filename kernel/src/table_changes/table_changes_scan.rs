@@ -15,9 +15,8 @@ use crate::{
 };
 
 use super::{
-    data_read::transform_to_logical_internal,
-    replay_scanner::{replay_for_scan_data, table_changes_action_iter},
-    state, TableChanges, TableChangesScanData, CDF_GENERATED_COLUMNS,
+    data_read::transform_to_logical_internal, replay_scanner::table_changes_action_iter, state,
+    TableChanges, TableChangesScanData, CDF_GENERATED_COLUMNS,
 };
 
 /// The result of building a [`TableChanges`] scan over a table. This can be used to get a change
@@ -175,12 +174,8 @@ impl TableChangesScan {
         &self,
         engine: &dyn Engine,
     ) -> DeltaResult<impl Iterator<Item = DeltaResult<TableChangesScanData>>> {
-        table_changes_action_iter(
-            engine,
-            replay_for_scan_data(engine, &self.table_changes.log_segment.commit_files)?,
-            &self.logical_schema,
-            self.predicate(),
-        )
+        let commit_files = self.table_changes.log_segment.commit_files.clone();
+        table_changes_action_iter(engine, commit_files, &self.logical_schema, self.predicate())
     }
 
     /// Get global state that is valid for the entire scan. This is somewhat expensive so should

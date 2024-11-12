@@ -39,95 +39,64 @@ impl AddRemoveCdcVisitor {
     }
 }
 
-pub(crate) fn replay_for_scan_data(
-    engine: &dyn Engine,
-    commit_files: &Vec<ParsedLogPath>,
-) -> DeltaResult<
-    impl Iterator<
-        Item = (
-            DeltaResult<Box<dyn Iterator<Item = DeltaResult<Box<dyn EngineData>>> + Send>>,
-            i64,
-            i64,
-        ),
-    >,
-> {
-    let commit_read_schema =
-        get_log_schema().project(&[ADD_NAME, CDC_NAME, REMOVE_NAME, COMMIT_INFO_NAME])?;
-
-    let json_client = engine.get_json_handler();
-
-    // Collect so we don't return reference to self
-    let commits = commit_files
-        .iter()
-        .map(move |log_path| {
-            let file = log_path.location.clone();
-            let version = log_path.version as i64;
-            (file, version)
-        })
-        .collect_vec();
-
-    let result = commits.into_iter().map(move |(file, version)| {
-        let timestamp = file.last_modified;
-        // NOTE: We don't pass any meta-predicate because we expect no meaningful row group skipping
-        // when ~every checkpoint file will contain the adds and removes we are looking for.
-        let commit = json_client.read_json_files(&[file], commit_read_schema.clone(), None);
-
-        (commit, timestamp, version)
-    });
-    Ok(result)
-}
-
 /// Given an iterator of (engine_data, bool) tuples and a predicate, returns an iterator of
 /// `(engine_data, selection_vec)`. Each row that is selected in the returned `engine_data` _must_
 /// be processed to complete the scan. Non-selected rows _must_ be ignored. The boolean flag
 /// indicates whether the record batch is a log or checkpoint batch.
 pub(crate) fn table_changes_action_iter(
     engine: &dyn Engine,
-    commit_iter: impl Iterator<
-        Item = (
-            DeltaResult<Box<dyn Iterator<Item = DeltaResult<Box<dyn EngineData>>> + Send>>,
-            i64,
-            i64,
-        ),
-    >,
+    commit_files: impl IntoIterator<Item = ParsedLogPath>,
     table_schema: &SchemaRef,
     predicate: Option<ExpressionRef>,
 ) -> DeltaResult<impl Iterator<Item = DeltaResult<TableChangesScanData>>> {
+    let commit_read_schema =
+        get_log_schema().project(&[ADD_NAME, CDC_NAME, REMOVE_NAME, COMMIT_INFO_NAME])?;
+
+    let json_client = engine.get_json_handler();
+
     let filter = DataSkippingFilter::new(engine, table_schema, predicate);
     let expression_handler = engine.get_expression_handler();
-    let result = commit_iter
-        .map(
-            move |(action_iter, timestamp, commit_version)| -> DeltaResult<_> {
-                let action_iter = action_iter?;
-                let expression_handler = expression_handler.clone();
-                let mut metadata_scanner =
-                    TableChangesMetadataScanner::new(filter.clone(), timestamp, commit_version);
+    let result = commit_files
+        .into_iter()
+        .map(move |commit_path| -> DeltaResult<_> {
+            let timestamp = commit_path.location.last_modified;
+            let commit_version = commit_path.version as i64;
+            let action_iter = json_client.read_json_files(
+                &[commit_path.location.clone()],
+                commit_read_schema.clone(),
+                None,
+            )?;
+            let expression_handler = expression_handler.clone();
+            let mut metadata_scanner =
+                TableChangesMetadataScanner::new(filter.clone(), timestamp, commit_version);
 
-                // Find CDC, get commitInfo, and perform metadata scan
-                let mut batches = vec![];
-                for action_res in action_iter {
-                    let batch = action_res?;
-                    // TODO: Make this metadata iterator
-                    metadata_scanner.process_scan_batch(batch.as_ref())?;
-                    batches.push(batch);
-                }
+            // Find CDC, get commitInfo, and perform metadata scan
+            for action_batch in action_iter {
+                metadata_scanner.process_scan_batch(action_batch?.as_ref())?;
+            }
 
-                let mut log_scanner = metadata_scanner.into_replay_scanner();
-                // File metadata output scan
-                let x: Vec<ScanData> = batches
-                    .into_iter()
-                    .map(|batch| {
-                        log_scanner.process_scan_batch(expression_handler.as_ref(), batch.as_ref())
-                    })
-                    .try_collect()?;
-                let remove_dvs = Arc::new(log_scanner.remove_dvs);
-                let y = x.into_iter().map(move |(a, b)| {
-                    let remove_dvs = remove_dvs.clone();
-                    (a, b, remove_dvs)
-                });
-                Ok(y)
-            },
-        )
+            let action_iter = json_client.read_json_files(
+                &[commit_path.location.clone()],
+                commit_read_schema.clone(),
+                None,
+            )?;
+
+            let mut log_scanner = metadata_scanner.into_replay_scanner();
+            // File metadata output scan
+            let x: Vec<ScanData> = action_iter
+                .into_iter()
+                .map(|action_batch| {
+                    log_scanner
+                        .process_scan_batch(expression_handler.as_ref(), action_batch?.as_ref())
+                })
+                .try_collect()?;
+            let remove_dvs = Arc::new(log_scanner.remove_dvs);
+            let y = x.into_iter().map(move |(a, b)| {
+                let remove_dvs = remove_dvs.clone();
+                (a, b, remove_dvs)
+            });
+            Ok(y)
+        })
         .flatten_ok();
     Ok(result)
 }
