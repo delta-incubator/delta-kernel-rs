@@ -2,11 +2,11 @@ use itertools::Itertools;
 
 use crate::{
     expressions::{column_expr, ColumnName, Scalar},
-    scan::{parse_partition_value, ColumnType},
+    scan::{parse_partition_value, state::GlobalScanState, ColumnType},
     DeltaResult, Engine, EngineData, Error, Expression,
 };
 
-use super::{state::ScanFileType, TableChangesGlobalScanState};
+use super::state::ScanFileType;
 
 // We have this function because `execute` can save `all_fields` and `have_partition_cols` in the
 // scan, and then reuse them for each batch transform
@@ -14,7 +14,7 @@ use super::{state::ScanFileType, TableChangesGlobalScanState};
 pub(crate) fn transform_to_logical_internal(
     engine: &dyn Engine,
     data: Box<dyn EngineData>,
-    global_state: &TableChangesGlobalScanState,
+    global_state: &GlobalScanState,
     partition_values: &std::collections::HashMap<String, String>,
     all_fields: &[ColumnType],
     _have_partition_cols: bool,
@@ -79,7 +79,7 @@ pub(crate) fn transform_to_logical_internal(
         .get_evaluator(
             read_schema,
             read_expression,
-            global_state.output_schema.clone().into(),
+            global_state.logical_schema.clone().into(),
         )
         .evaluate(data.as_ref())?;
     Ok(result)

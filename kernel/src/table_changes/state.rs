@@ -8,22 +8,10 @@ use std::{
 use crate::{
     actions::visitors::visit_deletion_vector_at,
     engine_data::{GetData, TypedGetData},
-    features::ColumnMappingMode,
     scan::state::DvInfo,
-    schema::{DataType, MapType, Schema, SchemaRef, StructField, StructType},
+    schema::{DataType, MapType, Schema, StructField, StructType},
     DataVisitor, DeltaResult, EngineData,
 };
-use serde::{Deserialize, Serialize};
-
-/// State that doesn't change between scans
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub(crate) struct GlobalScanState {
-    pub table_root: String,
-    pub partition_columns: Vec<String>,
-    pub logical_schema: SchemaRef,
-    pub read_schema: SchemaRef,
-    pub column_mapping_mode: ColumnMappingMode,
-}
 
 #[derive(Debug, Clone)]
 pub(crate) enum ScanFileType {

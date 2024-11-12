@@ -8,14 +8,12 @@ use crate::{
     log_segment::{LogSegment, LogSegmentBuilder},
     path::AsUrl,
     scan::state::DvInfo,
-    schema::{DataType, Schema, SchemaRef, StructField, StructType},
+    schema::{DataType, Schema, StructField, StructType},
     snapshot::Snapshot,
     DeltaResult, Engine, EngineData, Error, Version,
 };
-use serde::{Deserialize, Serialize};
 use table_changes_scan::TableChangesScanBuilder;
 use url::Url;
-
 mod data_read;
 mod replay_scanner;
 mod state;
@@ -28,7 +26,7 @@ static CDF_ENABLE_FLAG: &str = "delta.enableChangeDataFeed";
 #[derive(Debug)]
 pub struct TableChanges {
     #[allow(unused)]
-    pub log_segment: LogSegment,
+    pub(crate) log_segment: LogSegment,
     pub schema: Schema,
     pub start_version: Version,
     pub end_version: Version,
@@ -36,7 +34,6 @@ pub struct TableChanges {
     pub protocol: Protocol,
     pub column_mapping_mode: ColumnMappingMode,
     pub table_root: Url,
-    pub output_schema: Schema,
 }
 
 impl TableChanges {
@@ -70,22 +67,21 @@ impl TableChanges {
         }
         let log_segment = builder.build()?;
 
-        let output_schema = Self::get_output_schema(end_snapshot.schema());
+        let schema = Self::transform_logical_schema(end_snapshot.schema());
 
         Ok(TableChanges {
             log_segment,
-            schema: end_snapshot.schema().clone(),
+            schema,
             column_mapping_mode: end_snapshot.column_mapping_mode,
             start_version,
             end_version: end_snapshot.version(),
             protocol: end_snapshot.protocol().clone(),
             metadata: end_snapshot.metadata().clone(),
             table_root,
-            output_schema,
         })
     }
 
-    fn get_output_schema(schema: &Schema) -> Schema {
+    fn transform_logical_schema(schema: &Schema) -> Schema {
         let cdf_fields = [
             StructField::new("_commit_version", DataType::LONG, false),
             StructField::new("_commit_timestamp", DataType::TIMESTAMP, false),
@@ -98,17 +94,6 @@ impl TableChanges {
     pub fn into_scan_builder(self) -> TableChangesScanBuilder {
         TableChangesScanBuilder::new(self)
     }
-}
-
-/// State that doesn't change between scans
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct TableChangesGlobalScanState {
-    pub table_root: String,
-    pub partition_columns: Vec<String>,
-    pub logical_schema: SchemaRef,
-    pub read_schema: SchemaRef,
-    pub column_mapping_mode: ColumnMappingMode,
-    pub output_schema: SchemaRef,
 }
 
 #[cfg(test)]
