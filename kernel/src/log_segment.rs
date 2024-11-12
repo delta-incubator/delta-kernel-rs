@@ -55,7 +55,7 @@ impl LogSegment {
                 &self
                     .commit_files
                     .iter()
-                    .map(|x| x.location.clone())
+                    .map(|f| f.location.clone())
                     .collect::<Vec<FileMeta>>(),
                 commit_read_schema,
                 meta_predicate.clone(),
@@ -68,7 +68,7 @@ impl LogSegment {
                 &self
                     .checkpoint_files
                     .iter()
-                    .map(|x| x.location.clone())
+                    .map(|f| f.location.clone())
                     .collect::<Vec<FileMeta>>(),
                 checkpoint_read_schema,
                 meta_predicate,
@@ -191,12 +191,7 @@ impl<'a> LogSegmentBuilder<'a> {
         } = self;
         let log_root = table_root.join("_delta_log/").unwrap();
         let (mut commit_files, mut checkpoint_files) = match (checkpoint, end_version) {
-            (Some(cp), None) => {
-                println!("List log files with checkpoint");
-                let x = Self::list_log_files_with_checkpoint(&cp, fs_client, &log_root)?;
-                println!("x: {:?}", x);
-                x
-            }
+            (Some(cp), None) => Self::list_log_files_with_checkpoint(&cp, fs_client, &log_root)?,
             (Some(cp), Some(version)) if cp.version >= version => {
                 Self::list_log_files_with_checkpoint(&cp, fs_client, &log_root)?
             }
