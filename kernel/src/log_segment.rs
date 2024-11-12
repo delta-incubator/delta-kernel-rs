@@ -15,6 +15,18 @@ use std::sync::{Arc, LazyLock};
 use tracing::warn;
 use url::Url;
 
+/// A [`LogSegment`] represents a contiguous section of the log and is made up of checkpoint files
+/// and commit files. It is built with [`LogSegmentBuilder`], and guarantees the following:
+///     1. Commit file versions will be less than or equal to `end_version` if specified.
+///     2. Commit file versions will be greater than or equal to `start_version` if specified.
+///     3. Commit file versions will be greater than the most recent checkpoint's version.
+///
+/// [`LogSegment`] is used in both  [`Snapshot`] and in [`TableChanges`] to hold commit files and
+/// checkpoint files.
+/// - For a Snapshot at version `n`: Its LogSegment is made up of zero or one checkpoint, and all
+///   commits between the checkpoint and the end version `n`.
+/// - For a TableChanges between versions `a` and `b`: Its LogSegment is made up of zero
+/// checkpoints and all commits between versions `a` and `b`
 #[derive(Debug)]
 #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
 pub(crate) struct LogSegment {
@@ -120,6 +132,7 @@ pub(crate) struct LogSegmentBuilder<'a> {
     start_version: Option<Version>,
     end_version: Option<Version>,
     reversed_commit_files: bool,
+    omit_checkpoint_files: bool,
 }
 impl<'a> LogSegmentBuilder<'a> {
     pub(crate) fn new(fs_client: &'a dyn FileSystemClient, table_root: &'a Url) -> Self {
@@ -130,6 +143,7 @@ impl<'a> LogSegmentBuilder<'a> {
             start_version: None,
             end_version: None,
             reversed_commit_files: false,
+            omit_checkpoint_files: false,
         }
     }
     /// Optionally provide a checkpoint hint that results from reading the `last_checkpoint` file.
@@ -139,7 +153,7 @@ impl<'a> LogSegmentBuilder<'a> {
     }
 
     /// Optionally set the start version of the [`LogSegment`]. This ensures that all commit files
-    /// are at this version or above it. Checkpoint files will be omitted if `start_version` is specified.
+    /// are at this version or above it.
     #[allow(unused)]
     pub(crate) fn with_start_version(mut self, version: Version) -> Self {
         self.start_version = Some(version);
@@ -149,6 +163,14 @@ impl<'a> LogSegmentBuilder<'a> {
     /// and checkpoints are at or below the end version.
     pub(crate) fn with_end_version(mut self, version: Version) -> Self {
         self.end_version = Some(version);
+        self
+    }
+
+    /// Optionally specify that the [`LogSegment`] will not have any checkpoint files. It will only
+    /// be made up of commit files.
+    #[allow(unused)]
+    pub(crate) fn omit_checkpoint_files(mut self) -> Self {
+        self.omit_checkpoint_files = true;
         self
     }
     /// Optionally specify that the commits in the [`LogSegment`] will be in order. By default, the
@@ -169,6 +191,7 @@ impl<'a> LogSegmentBuilder<'a> {
             start_version,
             end_version,
             reversed_commit_files,
+            omit_checkpoint_files,
         } = self;
         let log_root = table_root.join("_delta_log/").unwrap();
         let (mut commit_files, mut checkpoint_files) = match (checkpoint, end_version) {
@@ -184,12 +207,15 @@ impl<'a> LogSegmentBuilder<'a> {
             }
         };
 
+        if omit_checkpoint_files {
+            checkpoint_files.clear();
+        }
+
         // Commit file versions must satisfy the following:
-        // - Be greater than the start version
+        // - Be greater than or equal to the start version
         // - Be greater than the most recent checkpoint version if it exists
         // - Be less than or equal to the end version.
         if let Some(start_version) = start_version {
-            checkpoint_files.clear();
             commit_files.retain(|log_path| log_path.version >= start_version);
         }
         if let Some(checkpoint_file) = checkpoint_files.first() {
