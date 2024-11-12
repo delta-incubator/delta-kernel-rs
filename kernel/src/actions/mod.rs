@@ -203,11 +203,11 @@ impl Protocol {
     /// Check if reading a table with this protocol is supported. That is: does the kernel support
     /// the specified protocol reader version and all enabled reader features? If yes, returns unit
     /// type, otherwise will return an error.
-    pub fn check_read_supported(&self) -> DeltaResult<()> {
+    pub fn ensure_read_supported(&self) -> DeltaResult<()> {
         match &self.reader_features {
             // if min_reader_version = 3 and all reader features are subset of supported => OK
             Some(reader_features) if self.min_reader_version == 3 => {
-                check_supported_features(reader_features, &SUPPORTED_READER_FEATURES)
+                ensure_supported_features(reader_features, &SUPPORTED_READER_FEATURES)
             }
             // if min_reader_version = 3 and no reader features => ERROR
             // note this is caught by the protocol parsing.
@@ -229,14 +229,14 @@ impl Protocol {
 
     /// Check if writing to a table with this protocol is supported. That is: does the kernel
     /// support the specified protocol writer version and all enabled writer features?
-    pub fn check_write_supported(&self) -> DeltaResult<()> {
+    pub fn ensure_write_supported(&self) -> DeltaResult<()> {
         match &self.writer_features {
             // if min_reader_version = 3 and min_writer_version = 7 and all writer features are
             // supported => OK
             Some(writer_features)
                 if self.min_reader_version == 3 && self.min_writer_version == 7 =>
             {
-                check_supported_features(writer_features, &SUPPORTED_WRITER_FEATURES)
+                ensure_supported_features(writer_features, &SUPPORTED_WRITER_FEATURES)
             }
             // otherwise not supported
             _ => Err(Error::unsupported(
@@ -247,7 +247,7 @@ impl Protocol {
 }
 
 // given unparsed table_features, parse and check if they are subset of supported_features
-fn check_supported_features<T>(
+fn ensure_supported_features<T>(
     table_features: &[String],
     supported_features: &HashSet<T>,
 ) -> DeltaResult<()>
@@ -262,7 +262,7 @@ where
         .map(|f| f.map_err(|e| Error::unsupported(e.to_string())))
         .collect::<Result<_, Error>>()?;
     parsed_features
-        .is_subset(&supported_features)
+        .is_subset(supported_features)
         .then_some(())
         .ok_or_else(|| {
             let unsupported = parsed_features
@@ -654,7 +654,7 @@ mod tests {
             Some([ReaderFeatures::V2Checkpoint.to_string()]),
         )
         .unwrap();
-        assert!(protocol.check_read_supported().is_err());
+        assert!(protocol.ensure_read_supported().is_err());
 
         let protocol = Protocol::try_new(
             4,
@@ -663,6 +663,6 @@ mod tests {
             Some([ReaderFeatures::V2Checkpoint.to_string()]),
         )
         .unwrap();
-        assert!(protocol.check_read_supported().is_err());
+        assert!(protocol.ensure_read_supported().is_err());
     }
 }

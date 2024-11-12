@@ -10,11 +10,11 @@ use tracing::{debug, warn};
 use url::Url;
 
 use crate::actions::{Metadata, Protocol};
-use crate::table_features::{ColumnMappingMode, COLUMN_MAPPING_MODE_KEY};
 use crate::log_segment::LogSegment;
 use crate::path::ParsedLogPath;
 use crate::scan::ScanBuilder;
 use crate::schema::Schema;
+use crate::table_features::{ColumnMappingMode, COLUMN_MAPPING_MODE_KEY};
 use crate::utils::require;
 use crate::{DeltaResult, Engine, Error, FileSystemClient, Version};
 
