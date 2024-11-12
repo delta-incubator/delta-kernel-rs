@@ -210,17 +210,21 @@ impl Protocol {
                 ensure_supported_features(reader_features, &SUPPORTED_READER_FEATURES)
             }
             // if min_reader_version = 3 and no reader features => ERROR
-            // note this is caught by the protocol parsing.
-            None if self.min_reader_version == 3 => unreachable!(),
+            // NOTE this is caught by the protocol parsing.
+            None if self.min_reader_version == 3 => Err(Error::internal_error(
+                "Reader features must be present when minimum reader version = 3",
+            )),
             // if min_reader_version = 1,2 and there are no reader features => OK
             None if self.min_reader_version == 1 || self.min_reader_version == 2 => Ok(()),
             // if min_reader_version = 1,2 and there are reader features => ERROR
-            // note this is caught by the protocol parsing.
+            // NOTE this is caught by the protocol parsing.
             Some(_) if self.min_reader_version == 1 || self.min_reader_version == 2 => {
-                unreachable!()
+                Err(Error::internal_error(
+                    "Reader features must not be present when minimum reader version = 1 or 2",
+                ))
             }
             // any other min_reader_version is not supported
-            _ => Err(Error::unsupported(format!(
+            _ => Err(Error::Unsupported(format!(
                 "Unsupported minimum reader version {}",
                 self.min_reader_version
             ))),
@@ -246,7 +250,7 @@ impl Protocol {
     }
 }
 
-// given unparsed table_features, parse and check if they are subset of supported_features
+// given unparsed `table_features`, parse and check if they are subset of `supported_features`
 fn ensure_supported_features<T>(
     table_features: &[String],
     supported_features: &HashSet<T>,
@@ -257,8 +261,7 @@ where
 {
     let parsed_features: HashSet<T> = table_features
         .iter()
-        .map(String::as_str)
-        .map(T::from_str)
+        .map(|s| T::from_str(s))
         .map(|f| f.map_err(|e| Error::unsupported(e.to_string())))
         .collect::<Result<_, Error>>()?;
     parsed_features
@@ -267,11 +270,11 @@ where
         .ok_or_else(|| {
             let unsupported = parsed_features
                 .difference(supported_features)
-                .map(|f| format!("{:?}", f))
                 .collect::<Vec<_>>();
-            Error::unsupported(format!(
-                "Unknown table features: [{:?}]. Supported features are {:?}",
-                unsupported, supported_features
+            let supported = supported_features.iter().collect::<Vec<_>>();
+            Error::Unsupported(format!(
+                "Unknown table features {:?}. Supported table features are {:?}",
+                unsupported, supported
             ))
         })
 }
@@ -664,5 +667,102 @@ mod tests {
         )
         .unwrap();
         assert!(protocol.ensure_read_supported().is_err());
+    }
+
+    #[test]
+    fn test_ensure_read_supported() {
+        let protocol = Protocol {
+            min_reader_version: 3,
+            min_writer_version: 7,
+            reader_features: Some(vec![]),
+            writer_features: Some(vec![]),
+        };
+        assert!(protocol.ensure_read_supported().is_ok());
+
+        let empty_features: [String; 0] = [];
+        let protocol = Protocol::try_new(
+            3,
+            7,
+            Some([ReaderFeatures::V2Checkpoint.to_string()]),
+            Some(&empty_features),
+        )
+        .unwrap();
+        assert!(protocol.ensure_read_supported().is_err());
+
+        let protocol = Protocol::try_new(
+            3,
+            7,
+            Some(&empty_features),
+            Some([WriterFeatures::V2Checkpoint.to_string()]),
+        )
+        .unwrap();
+        assert!(protocol.ensure_read_supported().is_ok());
+
+        let protocol = Protocol::try_new(
+            3,
+            7,
+            Some([ReaderFeatures::V2Checkpoint.to_string()]),
+            Some([WriterFeatures::V2Checkpoint.to_string()]),
+        )
+        .unwrap();
+        assert!(protocol.ensure_read_supported().is_err());
+
+        let protocol = Protocol {
+            min_reader_version: 1,
+            min_writer_version: 7,
+            reader_features: None,
+            writer_features: None,
+        };
+        assert!(protocol.ensure_read_supported().is_ok());
+
+        let protocol = Protocol {
+            min_reader_version: 2,
+            min_writer_version: 7,
+            reader_features: None,
+            writer_features: None,
+        };
+        assert!(protocol.ensure_read_supported().is_ok());
+    }
+
+    #[test]
+    fn test_ensure_write_supported() {
+        let protocol = Protocol {
+            min_reader_version: 3,
+            min_writer_version: 7,
+            reader_features: Some(vec![]),
+            writer_features: Some(vec![]),
+        };
+        assert!(protocol.ensure_write_supported().is_ok());
+
+        let protocol = Protocol {
+            min_reader_version: 3,
+            min_writer_version: 7,
+            reader_features: Some(vec![ReaderFeatures::DeletionVectors.to_string()]),
+            writer_features: Some(vec![WriterFeatures::DeletionVectors.to_string()]),
+        };
+        assert!(protocol.ensure_write_supported().is_err());
+    }
+
+    #[test]
+    fn test_ensure_supported_features() {
+        let supported_features = [
+            ReaderFeatures::ColumnMapping,
+            ReaderFeatures::DeletionVectors,
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let table_features = vec![ReaderFeatures::ColumnMapping.to_string()];
+        ensure_supported_features(&table_features, &supported_features).unwrap();
+
+        // test unknown features
+        let table_features = vec![ReaderFeatures::ColumnMapping.to_string(), "idk".to_string()];
+        let error = ensure_supported_features(&table_features, &supported_features).unwrap_err();
+        match error {
+            Error::Unsupported(e) => assert_eq!(e,
+                "Unknown table features [\"idk\"]. Supported table features are [\"columnMapping\", \"deletionVectors\"]"
+            ),
+            _ => panic!("Expected unsupported error"),
+        }
     }
 }
