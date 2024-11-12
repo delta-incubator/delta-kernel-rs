@@ -7,8 +7,7 @@ use crate::schema::SchemaRef;
 use crate::snapshot::CheckpointMetadata;
 use crate::utils::require;
 use crate::{
-    DeltaResult, Engine, EngineData, Error, Expression, ExpressionRef, FileMeta, FileSystemClient,
-    Version,
+    DeltaResult, Engine, EngineData, Error, Expression, ExpressionRef, FileSystemClient, Version,
 };
 use itertools::Itertools;
 use std::cmp::Ordering;
@@ -140,7 +139,7 @@ impl<'a> LogSegmentBuilder<'a> {
     }
 
     /// Optionally set the start version of the [`LogSegment`]. This ensures that all commit files
-    /// are above this version. Checkpoint files will be omitted if this is specified.
+    /// are at or above this version. Checkpoint files will be omitted if `start_version` is specified.
     #[allow(unused)]
     pub(crate) fn with_start_version(mut self, version: Version) -> Self {
         self.start_version = Some(version);
