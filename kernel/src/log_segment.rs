@@ -121,13 +121,13 @@ impl LogSegment {
     }
 }
 
+/// Builder for [`LogSegment`] from from `start_version` to `end_version` inclusive
 pub(crate) struct LogSegmentBuilder<'a> {
     fs_client: &'a dyn FileSystemClient,
     table_root: &'a Url,
     checkpoint: Option<CheckpointMetadata>,
     start_version: Option<Version>,
     end_version: Option<Version>,
-    omit_checkpoint_files: bool,
     reversed_commit_files: bool,
 }
 impl<'a> LogSegmentBuilder<'a> {
@@ -138,7 +138,6 @@ impl<'a> LogSegmentBuilder<'a> {
             checkpoint: None,
             start_version: None,
             end_version: None,
-            omit_checkpoint_files: false,
             reversed_commit_files: false,
         }
     }
@@ -161,14 +160,6 @@ impl<'a> LogSegmentBuilder<'a> {
         self.end_version = Some(version);
         self
     }
-    /// Optionally specify that the [`LogSegment`] will not have any checkpoint files. It will only
-    /// be made up of commit files.
-    #[allow(unused)]
-    pub(crate) fn omit_checkpoint_files(mut self) -> Self {
-        self.omit_checkpoint_files = true;
-        self
-    }
-
     /// Optionally specify that the commits in the [`LogSegment`] will be in order. By default, the
     /// [`LogSegment`] will reverse the order of commit files, with the latest commit coming first.
     #[allow(unused)]
@@ -186,11 +177,10 @@ impl<'a> LogSegmentBuilder<'a> {
             checkpoint,
             start_version,
             end_version,
-            omit_checkpoint_files,
             reversed_commit_files,
         } = self;
         let log_root = table_root.join("_delta_log/").unwrap();
-        let (mut commit_files, mut checkpoint_files) = match (checkpoint, end_version) {
+        let (mut commit_files, checkpoint_files) = match (checkpoint, end_version) {
             (Some(cp), None) => Self::list_log_files_with_checkpoint(&cp, fs_client, &log_root)?,
             (Some(cp), Some(version)) if cp.version >= version => {
                 Self::list_log_files_with_checkpoint(&cp, fs_client, &log_root)?
@@ -203,10 +193,6 @@ impl<'a> LogSegmentBuilder<'a> {
             }
         };
 
-        if omit_checkpoint_files {
-            checkpoint_files.clear();
-        }
-
         // Commit file versions must satisfy the following:
         // - Be greater than the start version
         // - Be greater than the most recent checkpoint version if it exists
@@ -215,7 +201,10 @@ impl<'a> LogSegmentBuilder<'a> {
             commit_files.retain(|log_path| start_version <= log_path.version);
         }
         if let Some(checkpoint_file) = checkpoint_files.first() {
-            commit_files.retain(|log_path| checkpoint_file.version < log_path.version);
+            commit_files.retain(|log_path| {
+                checkpoint_file.version < log_path.version
+                    || start_version.is_some_and(|start_version| start_version >= log_path.version)
+            });
         }
         if let Some(end_version) = end_version {
             commit_files.retain(|log_path| log_path.version <= end_version);
