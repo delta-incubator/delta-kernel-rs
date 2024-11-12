@@ -1,12 +1,14 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use itertools::Itertools;
 
 use crate::{
-    expressions::ColumnName,
+    expressions::{column_expr, ColumnName, Scalar},
     scan::{parse_partition_value, state::GlobalScanState, ColumnType},
     DeltaResult, Engine, EngineData, Error, Expression,
 };
+
+use super::{state::ScanFileType, CDF_GENERATED_COLUMNS};
 
 // We have this function because `execute` can save `all_fields` and `have_partition_cols` in the
 // scan, and then reuse them for each batch transform
@@ -18,7 +20,7 @@ pub(crate) fn transform_to_logical_internal(
     partition_values: &std::collections::HashMap<String, String>,
     all_fields: &[ColumnType],
     _have_partition_cols: bool,
-    mut generated_columns: HashMap<String, Expression>,
+    generated_columns: &HashMap<String, Expression>,
 ) -> DeltaResult<Box<dyn EngineData>> {
     let read_schema = global_state.read_schema.clone();
     // need to add back partition cols and/or fix-up mapped columns
@@ -45,12 +47,12 @@ pub(crate) fn transform_to_logical_internal(
                         "logical schema did not contain expected field, can't transform data",
                     ));
                 };
-                let Some(expr) = generated_columns.remove(field.name()) else {
+                let Some(expr) = generated_columns.get(field.name()) else {
                     return Err(Error::generic(
-                        "logical schema did not contain expected field, can't transform data",
+                        "Got unexpected inserted field , can't transform data",
                     ));
                 };
-                Ok(expr)
+                Ok(expr.clone())
             }
         })
         .try_collect()?;
@@ -64,4 +66,43 @@ pub(crate) fn transform_to_logical_internal(
         )
         .evaluate(data.as_ref())?;
     Ok(result)
+}
+
+pub(crate) fn get_generated_columns(
+    timestamp: i64,
+    tpe: ScanFileType,
+    commit_version: i64,
+) -> Result<Arc<HashMap<String, Expression>>, crate::Error> {
+    // Both in-commit timestamps and file metadata are in milliseconds
+    //
+    // See:
+    // [`FileMeta`]
+    // [In-Commit Timestamps] : https://github.com/delta-io/delta/blob/master/PROTOCOL.md#writer-requirements-for-in-commit-timestampsa
+    let timestamp = Scalar::timestamp_from_millis(timestamp)?;
+    let expressions = match tpe {
+        ScanFileType::Cdc => [
+            column_expr!("_commit_version"),
+            column_expr!("_commit_timestamp"),
+            column_expr!("_change_type"),
+        ],
+        ScanFileType::Add => [
+            Expression::literal(commit_version),
+            timestamp.into(),
+            "insert".into(),
+        ],
+
+        ScanFileType::Remove => [
+            Expression::literal(commit_version),
+            timestamp.into(),
+            "remove".into(),
+        ],
+    };
+    let generated_columns: Arc<HashMap<String, Expression>> = Arc::new(
+        CDF_GENERATED_COLUMNS
+            .iter()
+            .map(ToString::to_string)
+            .zip(expressions)
+            .collect(),
+    );
+    Ok(generated_columns)
 }

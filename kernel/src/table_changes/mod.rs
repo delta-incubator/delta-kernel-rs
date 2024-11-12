@@ -21,6 +21,7 @@ pub mod table_changes_scan;
 
 pub type TableChangesScanData = (Box<dyn EngineData>, Vec<bool>, Arc<HashMap<String, DvInfo>>);
 
+static CDF_GENERATED_COLUMNS: [&str; 3] = ["_commit_version", "_commit_timestamp", "_change_type"];
 static CDF_ENABLE_FLAG: &str = "delta.enableChangeDataFeed";
 
 #[derive(Debug)]

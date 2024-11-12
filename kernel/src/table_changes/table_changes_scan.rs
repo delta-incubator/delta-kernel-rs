@@ -5,24 +5,20 @@ use tracing::debug;
 
 use crate::{
     actions::deletion_vector::{split_vector, treemap_to_bools},
-    expressions::Scalar,
     scan::{
         state::{DvInfo, GlobalScanState},
         ColumnType, ScanResult,
     },
     schema::{SchemaRef, StructType},
-    table_changes::state::{ScanFile, ScanFileType},
+    table_changes::{data_read::get_generated_columns, state::ScanFile},
     DeltaResult, Engine, Expression, ExpressionRef, FileMeta,
 };
 
 use super::{
     data_read::transform_to_logical_internal,
     replay_scanner::{replay_for_scan_data, table_changes_action_iter},
-    state, TableChanges, TableChangesScanData,
+    state, TableChanges, TableChangesScanData, CDF_GENERATED_COLUMNS,
 };
-use crate::expressions::column_expr;
-
-static CDF_GENERATED_COLUMNS: [&str; 3] = ["_commit_version", "_commit_timestamp", "_change_type"];
 
 /// The result of building a [`TableChanges`] scan over a table. This can be used to get a change
 /// data feed from the table
@@ -264,68 +260,61 @@ impl TableChangesScan {
                     timestamp,
                 } = scan_file;
                 let file_path = self.table_changes.table_root.join(&path)?;
+                let file = FileMeta {
+                    last_modified: 0,
+                    size: size as usize,
+                    location: file_path,
+                };
                 match (&tpe, dv_map.get(&path)) {
                     (state::ScanFileType::Add, Some(rm_dv)) => {
-                        let meta = FileMeta {
-                            last_modified: 0,
-                            size: size as usize,
-                            location: file_path,
-                        };
+                        let generated_columns =
+                            get_generated_columns(timestamp, tpe, commit_version)?;
+
                         let add_dv = dv_info
                             .get_treemap(engine, &self.table_changes.table_root)?
                             .unwrap_or(Default::default());
                         let rm_dv = rm_dv
                             .get_treemap(engine, &self.table_changes.table_root)?
                             .unwrap_or(Default::default());
-                        let added = &rm_dv - &add_dv;
-                        let added = treemap_to_bools(added);
 
-                        let y = self.generate_output_rows(
+                        let added = treemap_to_bools(&rm_dv - &add_dv);
+                        let added_rows = self.generate_output_rows(
                             engine,
-                            meta.clone(),
+                            file.clone(),
                             global_state.clone(),
                             partition_values.clone(),
-                            commit_version,
-                            timestamp,
-                            ScanFileType::Add,
                             Some(added),
                             Some(false),
+                            generated_columns.clone(),
                         )?;
-                        let removed = add_dv - rm_dv;
-                        let removed = treemap_to_bools(removed);
 
-                        let x = self.generate_output_rows(
+                        let removed = treemap_to_bools(add_dv - rm_dv);
+                        let removed_rows = self.generate_output_rows(
                             engine,
-                            meta,
+                            file,
                             global_state.clone(),
                             partition_values.clone(),
-                            commit_version,
-                            timestamp,
-                            ScanFileType::Remove,
                             Some(removed),
                             Some(false),
+                            generated_columns.clone(),
                         )?;
 
-                        Ok(Either::Left(x.chain(y)))
+                        Ok(Either::Left(added_rows.chain(removed_rows)))
                     }
                     _ => {
                         let selection_vector =
                             dv_info.get_selection_vector(engine, &self.table_changes.table_root)?;
-                        let meta = FileMeta {
-                            last_modified: 0,
-                            size: size as usize,
-                            location: file_path,
-                        };
+
+                        let generated_columns =
+                            get_generated_columns(timestamp, tpe, commit_version)?;
                         Ok(Either::Right(self.generate_output_rows(
                             engine,
-                            meta,
+                            file,
                             global_state.clone(),
                             partition_values,
-                            commit_version,
-                            timestamp,
-                            tpe,
                             selection_vector,
                             None,
+                            generated_columns,
                         )?))
                     }
                 }
@@ -344,11 +333,9 @@ impl TableChangesScan {
         meta: FileMeta,
         global_state: Arc<GlobalScanState>,
         partition_values: HashMap<String, String>,
-        commit_version: i64,
-        timestamp: i64,
-        tpe: state::ScanFileType,
         mut selection_vector: Option<Vec<bool>>,
         extend: Option<bool>,
+        generated_columns: Arc<HashMap<String, Expression>>,
     ) -> DeltaResult<impl Iterator<Item = DeltaResult<ScanResult>> + 'a> {
         let read_result_iter = engine.get_parquet_handler().read_parquet_files(
             &[meta],
@@ -361,36 +348,6 @@ impl TableChangesScan {
 
         Ok(read_result_iter.map(move |read_result| -> DeltaResult<_> {
             let read_result = read_result?;
-
-            // Both in-commit timestamps and file metadata are in milliseconds
-            //
-            // See:
-            // [`FileMeta`]
-            // [In-Commit Timestamps] : https://github.com/delta-io/delta/blob/master/PROTOCOL.md#writer-requirements-for-in-commit-timestampsa
-            let timestamp = Scalar::timestamp_from_millis(timestamp)?;
-            let expressions = match tpe {
-                ScanFileType::Cdc => [
-                    column_expr!("_commit_version"),
-                    column_expr!("_commit_timestamp"),
-                    column_expr!("_change_type"),
-                ],
-                ScanFileType::Add => [
-                    Expression::literal(commit_version),
-                    timestamp.into(),
-                    "insert".into(),
-                ],
-
-                ScanFileType::Remove => [
-                    Expression::literal(commit_version),
-                    timestamp.into(),
-                    "remove".into(),
-                ],
-            };
-            let generated_columns: HashMap<String, Expression> = CDF_GENERATED_COLUMNS
-                .iter()
-                .map(ToString::to_string)
-                .zip(expressions)
-                .collect();
             // to transform the physical data into the correct logical form
             let logical = transform_to_logical_internal(
                 engine,
@@ -399,7 +356,7 @@ impl TableChangesScan {
                 &partition_values,
                 &self.all_fields,
                 self.have_partition_cols,
-                generated_columns,
+                generated_columns.as_ref(),
             );
             let len = logical.as_ref().map_or(0, |res| res.length());
             // need to split the dv_mask. what's left in dv_mask covers this result, and rest

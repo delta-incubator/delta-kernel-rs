@@ -163,7 +163,7 @@ pub enum ColumnType {
     Selected(String),
     // A partition column that needs to be added back in
     Partition(usize),
-    // A column inserted into the schema that is generated using [`Expression`]
+    // A column a that is generated using [`Expression`]
     InsertedColumn(usize),
 }
 
