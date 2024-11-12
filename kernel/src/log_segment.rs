@@ -139,7 +139,7 @@ impl<'a> LogSegmentBuilder<'a> {
     }
 
     /// Optionally set the start version of the [`LogSegment`]. This ensures that all commit files
-    /// are at or above this version. Checkpoint files will be omitted if `start_version` is specified.
+    /// are at this version or above it. Checkpoint files will be omitted if `start_version` is specified.
     #[allow(unused)]
     pub(crate) fn with_start_version(mut self, version: Version) -> Self {
         self.start_version = Some(version);
