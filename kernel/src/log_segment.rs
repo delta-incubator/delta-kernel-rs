@@ -47,30 +47,24 @@ impl LogSegment {
         checkpoint_read_schema: SchemaRef,
         meta_predicate: Option<ExpressionRef>,
     ) -> DeltaResult<impl Iterator<Item = DeltaResult<(Box<dyn EngineData>, bool)>> + Send> {
+        let commit_files: Vec<_> = self
+            .commit_files
+            .iter()
+            .map(|f| f.location.clone())
+            .collect();
         let commit_stream = engine
             .get_json_handler()
-            .read_json_files(
-                &self
-                    .commit_files
-                    .iter()
-                    .map(|f| f.location.clone())
-                    .collect::<Vec<FileMeta>>(),
-                commit_read_schema,
-                meta_predicate.clone(),
-            )?
+            .read_json_files(&commit_files, commit_read_schema, meta_predicate.clone())?
             .map_ok(|batch| (batch, true));
 
+        let checkpoint_files: Vec<_> = self
+            .checkpoint_files
+            .iter()
+            .map(|f| f.location.clone())
+            .collect();
         let checkpoint_stream = engine
             .get_parquet_handler()
-            .read_parquet_files(
-                &self
-                    .checkpoint_files
-                    .iter()
-                    .map(|f| f.location.clone())
-                    .collect::<Vec<FileMeta>>(),
-                checkpoint_read_schema,
-                meta_predicate,
-            )?
+            .read_parquet_files(&checkpoint_files, checkpoint_read_schema, meta_predicate)?
             .map_ok(|batch| (batch, false));
 
         Ok(commit_stream.chain(checkpoint_stream))
