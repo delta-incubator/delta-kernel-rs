@@ -337,8 +337,7 @@ mod private {
         type Raw = T;
 
         fn into_handle_ptr(val: Box<T>) -> NonNull<T> {
-            let raw = Box::into_raw(val);
-            NonNull::new(raw).expect("into_raw should be non-null") // into_raw guarantees non-null
+            Box::leak(val).into()
         }
         unsafe fn as_ref<'a>(ptr: *const T) -> &'a T {
             &*ptr
@@ -367,7 +366,9 @@ mod private {
 
         fn into_handle_ptr(val: Arc<T>) -> NonNull<T> {
             let ptr = Arc::into_raw(val);
-            NonNull::new(ptr as *mut T).expect("into_raw should be non-null")
+            // Note: casting ptr as `*mut T` is needed for NonNull, and actually Arc::into_raw
+            // _does_ create a mutable pointer (via `Arc::as_ptr`), so this is an 'okay' cast.
+            unsafe { NonNull::new_unchecked(ptr as *mut T) } // into_raw guarantees non-null
         }
         unsafe fn as_ref<'a>(ptr: *const T) -> &'a T {
             &*ptr
@@ -399,8 +400,7 @@ mod private {
 
         fn into_handle_ptr(val: Box<T>) -> NonNull<Box<T>> {
             // Double-boxing needed in order to obtain a thin pointer
-            let raw = Box::into_raw(Box::new(val));
-            NonNull::new(raw).expect("into_raw should be non-null") // into_raw guarantees non-null
+            Box::leak(Box::new(val)).into()
         }
         unsafe fn as_ref<'a>(ptr: *const Box<T>) -> &'a T {
             let boxed = unsafe { &*ptr };
@@ -433,8 +433,7 @@ mod private {
 
         fn into_handle_ptr(val: Arc<T>) -> NonNull<Arc<T>> {
             // Double-boxing needed in order to obtain a thin pointer
-            let raw = Box::into_raw(Box::new(val));
-            NonNull::new(raw).expect("into_raw should be non-null") // into_raw guarantees non-null
+            Box::leak(Box::new(val)).into()
         }
         unsafe fn as_ref<'a>(ptr: *const Arc<T>) -> &'a T {
             let arc = unsafe { &*ptr };
