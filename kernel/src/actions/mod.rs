@@ -2,13 +2,17 @@
 //! specification](https://github.com/delta-io/delta/blob/master/PROTOCOL.md)
 
 use std::collections::{HashMap, HashSet};
+use std::fmt::{Debug, Display};
+use std::hash::Hash;
 use std::str::FromStr;
 use std::sync::LazyLock;
 
 use self::deletion_vector::DeletionVectorDescriptor;
 use crate::actions::schemas::GetStructField;
 use crate::schema::{SchemaRef, StructType};
-use crate::table_features::{ReaderFeatures, WriterFeatures, SUPPORTED_READER_FEATURES};
+use crate::table_features::{
+    ReaderFeatures, WriterFeatures, SUPPORTED_READER_FEATURES, SUPPORTED_WRITER_FEATURES,
+};
 use crate::utils::require;
 use crate::{DeltaResult, EngineData, Error};
 use visitors::{AddVisitor, MetadataVisitor, ProtocolVisitor};
@@ -24,10 +28,6 @@ pub(crate) mod schemas;
 pub mod visitors;
 #[cfg(not(feature = "developer-visibility"))]
 pub(crate) mod visitors;
-
-pub(crate) const KERNEL_READER_VERSION: i32 = 3;
-#[allow(unused)]
-pub(crate) const KERNEL_WRITER_VERSION: i32 = 7;
 
 pub(crate) const ADD_NAME: &str = "add";
 pub(crate) const REMOVE_NAME: &str = "remove";
@@ -230,33 +230,48 @@ impl Protocol {
     /// Check if writing to a table with this protocol is supported. That is: does the kernel
     /// support the specified protocol writer version and all enabled writer features?
     pub fn check_write_supported(&self) -> DeltaResult<()> {
-        Err(Error::unsupported(
-            "Writing to Delta tables is not supported yet",
-        ))
+        match &self.writer_features {
+            // if min_reader_version = 3 and min_writer_version = 7 and all writer features are
+            // supported => OK
+            Some(writer_features)
+                if self.min_reader_version == 3 && self.min_writer_version == 7 =>
+            {
+                check_supported_features(writer_features, &SUPPORTED_WRITER_FEATURES)
+            }
+            // otherwise not supported
+            _ => Err(Error::unsupported(
+                "Only tables with min reader version 3 and min writer version 7 with no table features are supported."
+            )),
+        }
     }
 }
 
-fn check_supported_features<'a, T>(
+// given unparsed table_features, parse and check if they are subset of supported_features
+fn check_supported_features<T>(
     table_features: &[String],
     supported_features: &HashSet<T>,
 ) -> DeltaResult<()>
 where
-    <T as FromStr>::Err: std::fmt::Display,
-    T: std::fmt::Debug + FromStr + std::hash::Hash + std::cmp::Eq,
+    <T as FromStr>::Err: Display,
+    T: Debug + FromStr + Hash + Eq,
 {
-    let parsed_features: Result<HashSet<T>, Error> = table_features
+    let parsed_features: HashSet<T> = table_features
         .iter()
         .map(String::as_str)
         .map(T::from_str)
         .map(|f| f.map_err(|e| Error::unsupported(e.to_string())))
-        .collect();
-    parsed_features?
+        .collect::<Result<_, Error>>()?;
+    parsed_features
         .is_subset(&supported_features)
         .then_some(())
         .ok_or_else(|| {
+            let unsupported = parsed_features
+                .difference(supported_features)
+                .map(|f| format!("{:?}", f))
+                .collect::<Vec<_>>();
             Error::unsupported(format!(
-                "Table features {:?} are not supported. Supported features are {:?}",
-                table_features, supported_features
+                "Unknown table features: [{:?}]. Supported features are {:?}",
+                unsupported, supported_features
             ))
         })
 }
