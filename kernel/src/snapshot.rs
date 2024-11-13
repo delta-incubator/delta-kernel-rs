@@ -325,9 +325,9 @@ mod tests {
         let engine = SyncEngine::new();
         let snapshot = Snapshot::try_new(location, &engine, None).unwrap();
 
-        assert_eq!(snapshot.log_segment.checkpoint_files.len(), 1);
+        assert_eq!(snapshot.log_segment.checkpoint_parts.len(), 1);
         assert_eq!(
-            ParsedLogPath::try_from(snapshot.log_segment.checkpoint_files[0].location.clone())
+            ParsedLogPath::try_from(snapshot.log_segment.checkpoint_parts[0].location.clone())
                 .unwrap()
                 .unwrap()
                 .version,

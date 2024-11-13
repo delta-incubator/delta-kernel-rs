@@ -467,7 +467,6 @@ mod tests {
         let table_root = Url::parse("memory:///").expect("valid url");
 
         let log_segment = LogSegmentBuilder::new(&client, &table_root)
-            .with_commit_files_sorted_ascending()
             .with_start_checkpoint(checkpoint_metadata)
             .build()
             .unwrap();
