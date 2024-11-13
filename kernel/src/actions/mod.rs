@@ -770,9 +770,12 @@ mod tests {
         let table_features = vec![ReaderFeatures::ColumnMapping.to_string(), "idk".to_string()];
         let error = ensure_supported_features(&table_features, &supported_features).unwrap_err();
         match error {
-            Error::Unsupported(e) => assert_eq!(e,
+            Error::Unsupported(e) if e ==
                 "Unknown ReaderFeatures [\"idk\"]. Supported ReaderFeatures are [ColumnMapping, DeletionVectors]"
-            ),
+            => {},
+            Error::Unsupported(e) if e ==
+                "Unknown ReaderFeatures [\"idk\"]. Supported ReaderFeatures are [DeletionVectors, ColumnMapping]"
+            => {},
             _ => panic!("Expected unsupported error"),
         }
     }
