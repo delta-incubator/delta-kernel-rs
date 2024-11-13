@@ -582,7 +582,7 @@ mod tests {
         assert_eq!(versions, expected_versions);
     }
     #[test]
-    fn test_commit_ordering() {
+    fn test_log_segment_commit_versions() {
         let (client, table_root) = build_log_with_paths_and_checkpoint(
             &[
                 get_path(0, "json"),
@@ -599,6 +599,10 @@ mod tests {
             ],
             None,
         );
+
+        // --------------------------------------------------------------------------------
+        // |                    Specify start version and end version                     |
+        // --------------------------------------------------------------------------------
         let log_segment = LogSegmentBuilder::new(client.as_ref(), &table_root)
             .with_end_version(5)
             .with_start_version(2)
@@ -615,6 +619,25 @@ mod tests {
         // Commits between 2 and 5 (inclusive) should be returned
         let versions = commit_files.into_iter().map(|x| x.version).collect_vec();
         let expected_versions = (2..=5).collect_vec();
+        assert_eq!(versions, expected_versions);
+
+        // --------------------------------------------------------------------------------
+        // |                    Specify no start or end version                           |
+        // --------------------------------------------------------------------------------
+        let log_segment = LogSegmentBuilder::new(client.as_ref(), &table_root)
+            .with_omit_checkpoint_parts()
+            .with_commit_files_sorted_ascending()
+            .build()
+            .unwrap();
+        let (commit_files, checkpoint_parts) =
+            (log_segment.commit_files, log_segment.checkpoint_parts);
+
+        // Checkpoints should be omitted
+        assert_eq!(checkpoint_parts.len(), 0);
+
+        // Commits between 2 and 7 (inclusive) should be returned
+        let versions = commit_files.into_iter().map(|x| x.version).collect_vec();
+        let expected_versions = (0..=7).collect_vec();
         assert_eq!(versions, expected_versions);
     }
 
