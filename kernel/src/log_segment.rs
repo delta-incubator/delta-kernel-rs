@@ -18,7 +18,7 @@ use url::Url;
 /// A [`LogSegment`] represents a contiguous section of the log and is made up of checkpoint files
 /// and commit files. It is built with [`LogSegmentBuilder`], and guarantees the following:
 ///     1. Commit/checkpoint file versions will be less than or equal to `end_version` if specified.
-///     2. Commit/checkpoint file versions will be greater than or equal to `start_version` if specified.
+///     2. Commit file versions will be greater than or equal to `start_version` if specified.
 ///     3. If checkpoint(s) is/are present in the range, only commits with versions greater than the most
 ///        recent checkpoint version are retained. Checkpoints can be omitted (and this rule skipped)
 ///        whenever the `LogSegment` is created. See [`LogSegmentBuilder::with_omit_checkpoint_parts`].
@@ -133,6 +133,9 @@ pub(crate) struct LogSegmentBuilder<'a> {
     start_checkpoint: Option<CheckpointMetadata>,
     start_version: Option<Version>,
     end_version: Option<Version>,
+    /// When `commit_files_sorted_ascending` is set to `true`, the commit files are sorted in
+    /// ascending order. Otherwise if it is set to `false`, the commit files are sorted in
+    /// descending order. This is set to `false` by default.
     commit_files_sorted_ascending: bool,
     omit_checkpoint_parts: bool,
 }
@@ -181,8 +184,8 @@ impl<'a> LogSegmentBuilder<'a> {
         self.omit_checkpoint_parts = true;
         self
     }
-    /// Optionally specify that the commits in the [`LogSegment`] will be in order. By default, the
-    /// [`LogSegment`] will reverse the order of commit files, with the latest commit coming first.
+    /// Optionally specify that the commits in the [`LogSegment`] will be sorted by version in ascending
+    /// order. By default, commits are sorted in descending order of versions.
     #[allow(unused)]
     pub(crate) fn with_commit_files_sorted_ascending(mut self) -> Self {
         self.commit_files_sorted_ascending = true;
@@ -205,19 +208,17 @@ impl<'a> LogSegmentBuilder<'a> {
             omit_checkpoint_parts,
         } = self;
         let log_root = table_root.join("_delta_log/").unwrap();
-        let (mut sorted_commit_files, mut sorted_checkpoint_parts) =
-            match (start_checkpoint, end_version) {
-                (Some(cp), None) => {
-                    Self::list_log_files_with_checkpoint(&cp, fs_client, &log_root)?
-                }
-                (Some(cp), Some(version)) if cp.version <= version => {
-                    Self::list_log_files_with_checkpoint(&cp, fs_client, &log_root)?
-                }
-                _ => Self::list_log_files_from_version(fs_client, &log_root, None)?,
-            };
+        let (mut sorted_commit_files, mut checkpoint_parts) = match (start_checkpoint, end_version)
+        {
+            (Some(cp), None) => Self::list_log_files_with_checkpoint(&cp, fs_client, &log_root)?,
+            (Some(cp), Some(version)) if cp.version <= version => {
+                Self::list_log_files_with_checkpoint(&cp, fs_client, &log_root)?
+            }
+            _ => Self::list_log_files_from_version(fs_client, &log_root, None)?,
+        };
 
         if omit_checkpoint_parts {
-            sorted_checkpoint_parts.clear();
+            checkpoint_parts.clear();
         }
 
         // Commit file versions must satisfy the following:
@@ -227,7 +228,7 @@ impl<'a> LogSegmentBuilder<'a> {
         if let Some(start_version) = start_version {
             sorted_commit_files.retain(|log_path| log_path.version >= start_version);
         }
-        if let Some(checkpoint_file) = sorted_checkpoint_parts.first() {
+        if let Some(checkpoint_file) = checkpoint_parts.first() {
             sorted_commit_files.retain(|log_path| checkpoint_file.version < log_path.version);
         }
         if let Some(end_version) = end_version {
@@ -237,7 +238,7 @@ impl<'a> LogSegmentBuilder<'a> {
         // get the effective version from chosen files
         let version_eff = sorted_commit_files
             .last()
-            .or(sorted_checkpoint_parts.first())
+            .or(checkpoint_parts.first())
             .ok_or(Error::MissingVersion)? // TODO: A more descriptive error
             .version;
         if let Some(end_version) = end_version {
@@ -257,9 +258,10 @@ impl<'a> LogSegmentBuilder<'a> {
             end_version: version_eff,
             log_root,
             commit_files: sorted_commit_files,
-            checkpoint_parts: sorted_checkpoint_parts,
+            checkpoint_parts,
         })
     }
+
     pub(crate) fn list_log_files_from_version(
         fs_client: &dyn FileSystemClient,
         log_root: &Url,
