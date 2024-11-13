@@ -157,7 +157,6 @@ impl LogSegmentBuilder {
         self.start_checkpoint = Some(start_checkpoint);
         self
     }
-
     /// Optionally provide a checkpoint metadata to start the log segment. See [`LogSegmentBuilder::with_start_checkpoint`]
     /// for details. If `start_checkpoint` is `None`, this is a no-op.
     ///
@@ -170,7 +169,6 @@ impl LogSegmentBuilder {
         self.start_checkpoint = start_checkpoint;
         self
     }
-
     /// Provide a `start_version` (inclusive) of the [`LogSegment`] that ensures that all commit files
     /// are at this version or above it.
     ///
@@ -188,7 +186,6 @@ impl LogSegmentBuilder {
         self.start_version = version;
         self
     }
-
     /// Provide an `end_version` (inclusive) of the [`LogSegment`]. This ensures that all commit and
     /// checkpoint files are at or below the end version.
     #[allow(unused)]
@@ -196,14 +193,12 @@ impl LogSegmentBuilder {
         self.end_version = Some(version);
         self
     }
-
     /// Optionally provide an `end_version` (inclusive) of the [`LogSegment`]. See [`LogSegmentBuilder::with_end_version`]
     /// for details. If `end_version` is `None`, this is a no-op.
     pub(crate) fn with_end_version_opt(mut self, version: Option<Version>) -> Self {
         self.end_version = version;
         self
     }
-
     /// Specify that the [`LogSegment`] will not have any checkpoint files. It will only be made
     /// up of commit files.
     #[allow(unused)]
@@ -243,7 +238,7 @@ impl LogSegmentBuilder {
             (Some(cp), Some(version)) if cp.version <= version => {
                 list_log_files_with_checkpoint(&cp, fs_client, &log_root)?
             }
-            _ => list_log_files_from_version(fs_client, &log_root, None)?,
+            _ => list_log_files_with_version(fs_client, &log_root, None)?,
         };
 
         if omit_checkpoint_files {
@@ -300,7 +295,12 @@ impl LogSegmentBuilder {
     }
 }
 
-fn list_log_files_from_version(
+/// List all commit and checkpoint files with versions above the provided `version`. If successful, this returns
+/// a tuple `(sorted_commit_files_paths, checkpoint_parts): (Vec<ParsedLogPath>, Vec<ParsedLogPath>)`.
+/// The commit files are guaranteed to be sorted in ascending order by version. The elements of
+/// `checkpoint_parts` are all the parts of the same checkpoint. Checkpoint parts share the same
+/// version.
+fn list_log_files_with_version(
     fs_client: &dyn FileSystemClient,
     log_root: &Url,
     version: Option<Version>,
@@ -354,14 +354,15 @@ fn list_log_files_from_version(
     Ok((commit_files, checkpoint_parts))
 }
 
-/// List all log files after a given checkpoint.
+/// List all commit and checkpoint files after the provided checkpoint.
+/// See [`list_log_files_with_version`] for details on the return type.
 fn list_log_files_with_checkpoint(
     checkpoint_metadata: &CheckpointMetadata,
     fs_client: &dyn FileSystemClient,
     log_root: &Url,
 ) -> DeltaResult<(Vec<ParsedLogPath>, Vec<ParsedLogPath>)> {
     let (commit_files, checkpoint_parts) =
-        list_log_files_from_version(fs_client, log_root, Some(checkpoint_metadata.version))?;
+        list_log_files_with_version(fs_client, log_root, Some(checkpoint_metadata.version))?;
 
     let Some(latest_checkpoint) = checkpoint_parts.last() else {
         // TODO: We could potentially recover here
