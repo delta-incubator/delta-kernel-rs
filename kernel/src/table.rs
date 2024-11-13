@@ -117,7 +117,7 @@ fn resolve_uri_type(table_uri: impl AsRef<str>) -> DeltaResult<UriType> {
             Ok(UriType::Url(url))
         }
     } else {
-        Ok(UriType::LocalPath(PathBuf::from(table_uri.as_ref())))
+        Ok(UriType::LocalPath(table_uri.deref().into()))
     }
 }
 
