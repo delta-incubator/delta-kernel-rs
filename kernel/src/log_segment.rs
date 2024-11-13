@@ -180,7 +180,7 @@ impl<'a> LogSegmentBuilder<'a> {
     /// Optionally specify that the [`LogSegment`] will not have any checkpoint files. It will only
     /// be made up of commit files.
     #[allow(unused)]
-    pub(crate) fn omit_checkpoint_parts(mut self) -> Self {
+    pub(crate) fn with_omit_checkpoint_parts(mut self) -> Self {
         self.omit_checkpoint_parts = true;
         self
     }
@@ -233,6 +233,14 @@ impl<'a> LogSegmentBuilder<'a> {
         }
         if let Some(end_version) = end_version {
             sorted_commit_files.retain(|log_path| log_path.version <= end_version);
+        }
+        let ordered_commits = sorted_commit_files
+            .windows(2)
+            .all(|cfs| cfs[0].version + 1 == cfs[1].version);
+        if !ordered_commits {
+            return Err(Error::generic(
+                "Expected filesystem client to return ordered contiguous commits",
+            ));
         }
 
         // get the effective version from chosen files
@@ -364,7 +372,7 @@ mod tests {
     use crate::engine::sync::SyncEngine;
     use crate::log_segment::LogSegmentBuilder;
     use crate::snapshot::CheckpointMetadata;
-    use crate::Table;
+    use crate::{FileSystemClient, Table};
 
     // NOTE: In addition to testing the meta-predicate for metadata replay, this test also verifies
     // that the parquet reader properly infers nullcount = rowcount for missing columns. The two
@@ -409,54 +417,42 @@ mod tests {
         assert_eq!(data.len(), 4);
     }
 
-    #[test]
-    fn test_read_log_with_out_of_date_last_checkpoint() {
+    fn get_path(index: usize, suffix: &str) -> Path {
+        let path = format!("_delta_log/{index:020}.{suffix}");
+        Path::from(path.as_str())
+    }
+
+    // Utility method to build a log using a list of logzpaths and an optional checkpoint hint. The
+    // CheckpointMetadata is written to `_delta_log/_last_checkpoint`.
+    fn build_log_with_paths_and_checkpoint(
+        paths: &[Path],
+        checkpoint_metadata: Option<&CheckpointMetadata>,
+    ) -> (Box<dyn FileSystemClient>, Url) {
         let store = Arc::new(InMemory::new());
 
-        fn get_path(index: usize, suffix: &str) -> Path {
-            let path = format!("_delta_log/{index:020}.{suffix}");
-            Path::from(path.as_str())
-        }
         let data = bytes::Bytes::from("kernel-data");
-
-        let checkpoint_metadata = CheckpointMetadata {
-            version: 3,
-            size: 10,
-            parts: None,
-            size_in_bytes: None,
-            num_of_add_files: None,
-            checkpoint_schema: None,
-            checksum: None,
-        };
 
         // add log files to store
         tokio::runtime::Runtime::new()
             .expect("create tokio runtime")
             .block_on(async {
-                for path in [
-                    get_path(0, "json"),
-                    get_path(1, "checkpoint.parquet"),
-                    get_path(2, "json"),
-                    get_path(3, "checkpoint.parquet"),
-                    get_path(4, "json"),
-                    get_path(5, "checkpoint.parquet"),
-                    get_path(6, "json"),
-                    get_path(7, "json"),
-                ] {
+                for path in paths {
                     store
-                        .put(&path, data.clone().into())
+                        .put(path, data.clone().into())
                         .await
                         .expect("put log file in store");
                 }
-                let checkpoint_str =
-                    serde_json::to_string(&checkpoint_metadata).expect("Serialize checkpoint");
-                store
-                    .put(
-                        &Path::from("_delta_log/_last_checkpoint"),
-                        checkpoint_str.into(),
-                    )
-                    .await
-                    .expect("Write _last_checkpoint");
+                if let Some(checkpoint_metadata) = checkpoint_metadata {
+                    let checkpoint_str =
+                        serde_json::to_string(checkpoint_metadata).expect("Serialize checkpoint");
+                    store
+                        .put(
+                            &Path::from("_delta_log/_last_checkpoint"),
+                            checkpoint_str.into(),
+                        )
+                        .await
+                        .expect("Write _last_checkpoint");
+                }
             });
 
         let client = ObjectStoreFileSystemClient::new(
@@ -467,8 +463,36 @@ mod tests {
         );
 
         let table_root = Url::parse("memory:///").expect("valid url");
+        (Box::new(client), table_root)
+    }
 
-        let log_segment = LogSegmentBuilder::new(&client, &table_root)
+    #[test]
+    fn test_read_log_with_out_of_date_last_checkpoint() {
+        let checkpoint_metadata = CheckpointMetadata {
+            version: 3,
+            size: 10,
+            parts: None,
+            size_in_bytes: None,
+            num_of_add_files: None,
+            checkpoint_schema: None,
+            checksum: None,
+        };
+
+        let (client, table_root) = build_log_with_paths_and_checkpoint(
+            &[
+                get_path(0, "json"),
+                get_path(1, "checkpoint.parquet"),
+                get_path(2, "json"),
+                get_path(3, "checkpoint.parquet"),
+                get_path(4, "json"),
+                get_path(5, "checkpoint.parquet"),
+                get_path(6, "json"),
+                get_path(7, "json"),
+            ],
+            Some(&checkpoint_metadata),
+        );
+
+        let log_segment = LogSegmentBuilder::new(client.as_ref(), &table_root)
             .with_start_checkpoint(checkpoint_metadata)
             .build()
             .unwrap();
@@ -480,5 +504,158 @@ mod tests {
         assert_eq!(checkpoint_parts[0].version, 5);
         assert_eq!(commit_files[0].version, 7);
         assert_eq!(commit_files[1].version, 6);
+    }
+    #[test]
+    fn test_read_log_with_correct_last_checkpoint() {
+        let checkpoint_metadata = CheckpointMetadata {
+            version: 5,
+            size: 10,
+            parts: None,
+            size_in_bytes: None,
+            num_of_add_files: None,
+            checkpoint_schema: None,
+            checksum: None,
+        };
+
+        let (client, table_root) = build_log_with_paths_and_checkpoint(
+            &[
+                get_path(0, "json"),
+                get_path(1, "checkpoint.parquet"),
+                get_path(1, "json"),
+                get_path(2, "json"),
+                get_path(3, "checkpoint.parquet"),
+                get_path(3, "json"),
+                get_path(4, "json"),
+                get_path(5, "checkpoint.parquet"),
+                get_path(5, "json"),
+                get_path(6, "json"),
+                get_path(7, "json"),
+            ],
+            Some(&checkpoint_metadata),
+        );
+
+        let log_segment = LogSegmentBuilder::new(client.as_ref(), &table_root)
+            .with_start_checkpoint(checkpoint_metadata)
+            .build()
+            .unwrap();
+        let (commit_files, checkpoint_parts) =
+            (log_segment.commit_files, log_segment.checkpoint_parts);
+
+        assert_eq!(checkpoint_parts.len(), 1);
+        assert_eq!(commit_files.len(), 2);
+        assert_eq!(checkpoint_parts[0].version, 5);
+        assert_eq!(commit_files[0].version, 7);
+        assert_eq!(commit_files[1].version, 6);
+    }
+
+    #[test]
+    fn test_builder_omit_checkpoints() {
+        let (client, table_root) = build_log_with_paths_and_checkpoint(
+            &[
+                get_path(0, "json"),
+                get_path(1, "json"),
+                get_path(1, "checkpoint.parquet"),
+                get_path(2, "json"),
+                get_path(3, "json"),
+                get_path(3, "checkpoint.parquet"),
+                get_path(4, "json"),
+                get_path(5, "json"),
+                get_path(5, "checkpoint.parquet"),
+                get_path(6, "json"),
+                get_path(7, "json"),
+            ],
+            None,
+        );
+        let log_segment = LogSegmentBuilder::new(client.as_ref(), &table_root)
+            .with_omit_checkpoint_parts()
+            .build()
+            .unwrap();
+        let (commit_files, checkpoint_parts) =
+            (log_segment.commit_files, log_segment.checkpoint_parts);
+
+        // Checkpoints should be omitted
+        assert_eq!(checkpoint_parts.len(), 0);
+
+        // All commit files should still be there
+        let versions = commit_files.into_iter().map(|x| x.version).collect_vec();
+        let expected_versions = (0..=7).rev().collect_vec();
+        assert_eq!(versions, expected_versions);
+    }
+    #[test]
+    fn test_commit_ordering() {
+        let (client, table_root) = build_log_with_paths_and_checkpoint(
+            &[
+                get_path(0, "json"),
+                get_path(1, "json"),
+                get_path(1, "checkpoint.parquet"),
+                get_path(2, "json"),
+                get_path(3, "json"),
+                get_path(3, "checkpoint.parquet"),
+                get_path(4, "json"),
+                get_path(5, "json"),
+                get_path(5, "checkpoint.parquet"),
+                get_path(6, "json"),
+                get_path(7, "json"),
+            ],
+            None,
+        );
+        let log_segment = LogSegmentBuilder::new(client.as_ref(), &table_root)
+            .with_end_version(5)
+            .with_start_version(2)
+            .with_omit_checkpoint_parts()
+            .with_commit_files_sorted_ascending()
+            .build()
+            .unwrap();
+        let (commit_files, checkpoint_parts) =
+            (log_segment.commit_files, log_segment.checkpoint_parts);
+
+        // Checkpoints should be omitted
+        assert_eq!(checkpoint_parts.len(), 0);
+
+        // Commits between 2 and 5 (inclusive) should be returned
+        let versions = commit_files.into_iter().map(|x| x.version).collect_vec();
+        let expected_versions = (2..=5).collect_vec();
+        assert_eq!(versions, expected_versions);
+    }
+
+    #[test]
+    fn test_non_contiguous_log() {
+        let (client, table_root) =
+            build_log_with_paths_and_checkpoint(&[get_path(0, "json"), get_path(2, "json")], None);
+        let log_segment_res = LogSegmentBuilder::new(client.as_ref(), &table_root).build();
+        assert!(log_segment_res.is_err());
+    }
+
+    #[test]
+    fn test_start_version_and_checkpoint() {
+        let checkpoint_metadata = CheckpointMetadata {
+            version: 3,
+            size: 10,
+            parts: None,
+            size_in_bytes: None,
+            num_of_add_files: None,
+            checkpoint_schema: None,
+            checksum: None,
+        };
+
+        let (client, table_root) = build_log_with_paths_and_checkpoint(
+            &[
+                get_path(0, "json"),
+                get_path(1, "checkpoint.parquet"),
+                get_path(2, "json"),
+                get_path(3, "checkpoint.parquet"),
+                get_path(4, "json"),
+                get_path(5, "checkpoint.parquet"),
+                get_path(6, "json"),
+                get_path(7, "json"),
+            ],
+            Some(&checkpoint_metadata),
+        );
+
+        let log_segment_res = LogSegmentBuilder::new(client.as_ref(), &table_root)
+            .with_start_checkpoint(checkpoint_metadata)
+            .with_start_version(5)
+            .build();
+        assert!(log_segment_res.is_err());
     }
 }
