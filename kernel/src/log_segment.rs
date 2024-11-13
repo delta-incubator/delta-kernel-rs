@@ -399,6 +399,7 @@ mod tests {
     use crate::log_segment::LogSegmentBuilder;
     use crate::snapshot::CheckpointMetadata;
     use crate::{FileSystemClient, Table};
+    use test_utils::delta_path_for_version;
 
     // NOTE: In addition to testing the meta-predicate for metadata replay, this test also verifies
     // that the parquet reader properly infers nullcount = rowcount for missing columns. The two
@@ -441,11 +442,6 @@ mod tests {
         // read parts 1 and 5 (4 in all instead of 2) because row group skipping is disabled for
         // missing columns, but can still skip part 3 because has valid nullcount stats for P&M.
         assert_eq!(data.len(), 4);
-    }
-
-    fn get_path(index: usize, suffix: &str) -> Path {
-        let path = format!("_delta_log/{index:020}.{suffix}");
-        Path::from(path.as_str())
     }
 
     // Utility method to build a log using a list of logzpaths and an optional checkpoint hint. The
@@ -506,14 +502,14 @@ mod tests {
 
         let (client, table_root) = build_log_with_paths_and_checkpoint(
             &[
-                get_path(0, "json"),
-                get_path(1, "checkpoint.parquet"),
-                get_path(2, "json"),
-                get_path(3, "checkpoint.parquet"),
-                get_path(4, "json"),
-                get_path(5, "checkpoint.parquet"),
-                get_path(6, "json"),
-                get_path(7, "json"),
+                delta_path_for_version(0, "json"),
+                delta_path_for_version(1, "checkpoint.parquet"),
+                delta_path_for_version(2, "json"),
+                delta_path_for_version(3, "checkpoint.parquet"),
+                delta_path_for_version(4, "json"),
+                delta_path_for_version(5, "checkpoint.parquet"),
+                delta_path_for_version(6, "json"),
+                delta_path_for_version(7, "json"),
             ],
             Some(&checkpoint_metadata),
         );
@@ -545,17 +541,17 @@ mod tests {
 
         let (client, table_root) = build_log_with_paths_and_checkpoint(
             &[
-                get_path(0, "json"),
-                get_path(1, "checkpoint.parquet"),
-                get_path(1, "json"),
-                get_path(2, "json"),
-                get_path(3, "checkpoint.parquet"),
-                get_path(3, "json"),
-                get_path(4, "json"),
-                get_path(5, "checkpoint.parquet"),
-                get_path(5, "json"),
-                get_path(6, "json"),
-                get_path(7, "json"),
+                delta_path_for_version(0, "json"),
+                delta_path_for_version(1, "checkpoint.parquet"),
+                delta_path_for_version(1, "json"),
+                delta_path_for_version(2, "json"),
+                delta_path_for_version(3, "checkpoint.parquet"),
+                delta_path_for_version(3, "json"),
+                delta_path_for_version(4, "json"),
+                delta_path_for_version(5, "checkpoint.parquet"),
+                delta_path_for_version(5, "json"),
+                delta_path_for_version(6, "json"),
+                delta_path_for_version(7, "json"),
             ],
             Some(&checkpoint_metadata),
         );
@@ -578,17 +574,17 @@ mod tests {
     fn test_builder_omit_checkpoints() {
         let (client, table_root) = build_log_with_paths_and_checkpoint(
             &[
-                get_path(0, "json"),
-                get_path(1, "json"),
-                get_path(1, "checkpoint.parquet"),
-                get_path(2, "json"),
-                get_path(3, "json"),
-                get_path(3, "checkpoint.parquet"),
-                get_path(4, "json"),
-                get_path(5, "json"),
-                get_path(5, "checkpoint.parquet"),
-                get_path(6, "json"),
-                get_path(7, "json"),
+                delta_path_for_version(0, "json"),
+                delta_path_for_version(1, "json"),
+                delta_path_for_version(1, "checkpoint.parquet"),
+                delta_path_for_version(2, "json"),
+                delta_path_for_version(3, "json"),
+                delta_path_for_version(3, "checkpoint.parquet"),
+                delta_path_for_version(4, "json"),
+                delta_path_for_version(5, "json"),
+                delta_path_for_version(5, "checkpoint.parquet"),
+                delta_path_for_version(6, "json"),
+                delta_path_for_version(7, "json"),
             ],
             None,
         );
@@ -611,17 +607,17 @@ mod tests {
     fn test_log_segment_commit_versions() {
         let (client, table_root) = build_log_with_paths_and_checkpoint(
             &[
-                get_path(0, "json"),
-                get_path(1, "json"),
-                get_path(1, "checkpoint.parquet"),
-                get_path(2, "json"),
-                get_path(3, "json"),
-                get_path(3, "checkpoint.parquet"),
-                get_path(4, "json"),
-                get_path(5, "json"),
-                get_path(5, "checkpoint.parquet"),
-                get_path(6, "json"),
-                get_path(7, "json"),
+                delta_path_for_version(0, "json"),
+                delta_path_for_version(1, "json"),
+                delta_path_for_version(1, "checkpoint.parquet"),
+                delta_path_for_version(2, "json"),
+                delta_path_for_version(3, "json"),
+                delta_path_for_version(3, "checkpoint.parquet"),
+                delta_path_for_version(4, "json"),
+                delta_path_for_version(5, "json"),
+                delta_path_for_version(5, "checkpoint.parquet"),
+                delta_path_for_version(6, "json"),
+                delta_path_for_version(7, "json"),
             ],
             None,
         );
@@ -670,8 +666,13 @@ mod tests {
     #[test]
     fn test_non_contiguous_log() {
         // Commit with version 1 is missing
-        let (client, table_root) =
-            build_log_with_paths_and_checkpoint(&[get_path(0, "json"), get_path(2, "json")], None);
+        let (client, table_root) = build_log_with_paths_and_checkpoint(
+            &[
+                delta_path_for_version(0, "json"),
+                delta_path_for_version(2, "json"),
+            ],
+            None,
+        );
         let log_segment_res = LogSegmentBuilder::new().build(client.as_ref(), &table_root);
         assert!(log_segment_res.is_err());
     }
@@ -690,14 +691,14 @@ mod tests {
 
         let (client, table_root) = build_log_with_paths_and_checkpoint(
             &[
-                get_path(0, "json"),
-                get_path(1, "checkpoint.parquet"),
-                get_path(2, "json"),
-                get_path(3, "checkpoint.parquet"),
-                get_path(4, "json"),
-                get_path(5, "checkpoint.parquet"),
-                get_path(6, "json"),
-                get_path(7, "json"),
+                delta_path_for_version(0, "json"),
+                delta_path_for_version(1, "checkpoint.parquet"),
+                delta_path_for_version(2, "json"),
+                delta_path_for_version(3, "checkpoint.parquet"),
+                delta_path_for_version(4, "json"),
+                delta_path_for_version(5, "checkpoint.parquet"),
+                delta_path_for_version(6, "json"),
+                delta_path_for_version(7, "json"),
             ],
             Some(&checkpoint_metadata),
         );
