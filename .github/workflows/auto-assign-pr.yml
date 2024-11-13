@@ -1,4 +1,5 @@
-name: Auto assign every PR to its author when opened
+# Auto assign every PR to its author when opened
+name: Auto-assign PR
 
 on:
   pull_request:
