@@ -17,15 +17,14 @@ use delta_kernel::expressions::{column_expr, BinaryOperator, Expression};
 use delta_kernel::scan::state::{visit_scan_files, DvInfo, Stats};
 use delta_kernel::scan::{transform_to_logical, Scan};
 use delta_kernel::schema::Schema;
-use delta_kernel::{DeltaResult, Engine, EngineData, FileMeta, Table};
-use itertools::Itertools;
+use delta_kernel::{Engine, EngineData, FileMeta, Table};
 use object_store::{memory::InMemory, path::Path, ObjectStore};
 use parquet::arrow::arrow_writer::ArrowWriter;
 use parquet::file::properties::WriterProperties;
 use url::Url;
 
 mod common;
-use common::to_arrow;
+use common::{read_scan, to_arrow};
 
 const PARQUET_FILE1: &str = "part-00000-a72b1fb3-f2df-41fe-a8f0-e65b746382dd-c000.snappy.parquet";
 const PARQUET_FILE2: &str = "part-00001-c506e79a-0bf8-4e2b-a42b-9731b2e490ae-c000.snappy.parquet";
@@ -393,20 +392,7 @@ fn read_with_execute(
     expected: &[String],
 ) -> Result<(), Box<dyn std::error::Error>> {
     let result_schema: ArrowSchemaRef = Arc::new(scan.schema().as_ref().try_into()?);
-    let scan_results = scan.execute(engine)?;
-    let batches: Vec<RecordBatch> = scan_results
-        .map(|scan_result| -> DeltaResult<_> {
-            let scan_result = scan_result?;
-            let mask = scan_result.full_mask();
-            let data = scan_result.raw_data?;
-            let record_batch = to_arrow(data)?;
-            if let Some(mask) = mask {
-                Ok(filter_record_batch(&record_batch, &mask.into())?)
-            } else {
-                Ok(record_batch)
-            }
-        })
-        .try_collect()?;
+    let batches = read_scan(scan, engine)?;
 
     if expected.is_empty() {
         assert_eq!(batches.len(), 0);
@@ -478,7 +464,7 @@ fn read_with_scan_data(
 
         for read_result in read_results {
             let read_result = read_result.unwrap();
-            let len = read_result.length();
+            let len = read_result.len();
 
             // ask the kernel to transform the physical data into the correct logical form
             let logical = transform_to_logical(
@@ -1069,4 +1055,61 @@ fn type_widening_decimal() -> Result<(), Box<dyn std::error::Error>> {
         "long_decimal",
     ]);
     read_table_data_str("./tests/data/type-widening/", select_cols, None, expected)
+}
+
+// Verify that predicates over invalid/missing columns do not cause skipping.
+#[test]
+fn predicate_references_invalid_missing_column() -> Result<(), Box<dyn std::error::Error>> {
+    // Attempted skipping over a logically valid but physically missing column. We should be able to
+    // skip the data file because the missing column is inferred to be all-null.
+    //
+    // WARNING: https://github.com/delta-incubator/delta-kernel-rs/issues/434 -- currently disabled.
+    //
+    //let expected = vec![
+    //    "+--------+",
+    //    "| chrono |",
+    //    "+--------+",
+    //    "+--------+",
+    //];
+    let columns = &["chrono"];
+    let expected = vec![
+        "+-------------------------------------------------------------------------------------------+",
+        "| chrono                                                                                    |",
+        "+-------------------------------------------------------------------------------------------+",
+        "| {date32: 1971-01-01, timestamp: 1970-02-01T08:00:00Z, timestamp_ntz: 1970-01-02T00:00:00} |",
+        "| {date32: 1971-01-02, timestamp: 1970-02-01T09:00:00Z, timestamp_ntz: 1970-01-02T00:01:00} |",
+        "| {date32: 1971-01-03, timestamp: 1970-02-01T10:00:00Z, timestamp_ntz: 1970-01-02T00:02:00} |",
+        "| {date32: 1971-01-04, timestamp: 1970-02-01T11:00:00Z, timestamp_ntz: 1970-01-02T00:03:00} |",
+        "| {date32: 1971-01-05, timestamp: 1970-02-01T12:00:00Z, timestamp_ntz: 1970-01-02T00:04:00} |",
+        "+-------------------------------------------------------------------------------------------+",
+    ];
+    let predicate = column_expr!("missing").lt(10i64);
+    read_table_data_str(
+        "./tests/data/parquet_row_group_skipping/",
+        Some(columns),
+        Some(predicate),
+        expected,
+    )?;
+
+    // Attempted skipping over an invalid (logically missing) column. Ideally this should throw a
+    // query error, but at a minimum it should not cause incorrect data skipping.
+    let expected = vec![
+        "+-------------------------------------------------------------------------------------------+",
+        "| chrono                                                                                    |",
+        "+-------------------------------------------------------------------------------------------+",
+        "| {date32: 1971-01-01, timestamp: 1970-02-01T08:00:00Z, timestamp_ntz: 1970-01-02T00:00:00} |",
+        "| {date32: 1971-01-02, timestamp: 1970-02-01T09:00:00Z, timestamp_ntz: 1970-01-02T00:01:00} |",
+        "| {date32: 1971-01-03, timestamp: 1970-02-01T10:00:00Z, timestamp_ntz: 1970-01-02T00:02:00} |",
+        "| {date32: 1971-01-04, timestamp: 1970-02-01T11:00:00Z, timestamp_ntz: 1970-01-02T00:03:00} |",
+        "| {date32: 1971-01-05, timestamp: 1970-02-01T12:00:00Z, timestamp_ntz: 1970-01-02T00:04:00} |",
+        "+-------------------------------------------------------------------------------------------+",
+    ];
+    let predicate = column_expr!("invalid").lt(10);
+    read_table_data_str(
+        "./tests/data/parquet_row_group_skipping/",
+        Some(columns),
+        Some(predicate),
+        expected,
+    )?;
+    Ok(())
 }

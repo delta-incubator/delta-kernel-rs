@@ -149,18 +149,18 @@ impl ScanResult {
     /// _need_ to extend the mask to the full length of the batch or arrow will drop the extra rows.
     pub fn full_mask(&self) -> Option<Vec<bool>> {
         let mut mask = self.raw_mask.clone()?;
-        mask.resize(self.raw_data.as_ref().ok()?.length(), true);
+        mask.resize(self.raw_data.as_ref().ok()?.len(), true);
         Some(mask)
     }
 }
 
-/// Scan uses this to set up what kinds of columns it is scanning. For `Selected` we just store the
-/// name of the column, as that's all that's needed during the actual query. For `Partition` we
-/// store an index into the logical schema for this query since later we need the data type as well
-/// to materialize the partition column.
+/// Scan uses this to set up what kinds of top-level columns it is scanning. For `Selected` we just
+/// store the name of the column, as that's all that's needed during the actual query. For
+/// `Partition` we store an index into the logical schema for this query since later we need the
+/// data type as well to materialize the partition column.
 pub enum ColumnType {
     // A column, selected from the data, as is
-    Selected(ColumnName),
+    Selected(String),
     // A partition column that needs to be added back in
     Partition(usize),
 }
@@ -330,7 +330,7 @@ impl Scan {
                         &self.all_fields,
                         self.have_partition_cols,
                     );
-                    let len = logical.as_ref().map_or(0, |res| res.length());
+                    let len = logical.as_ref().map_or(0, |res| res.len());
                     // need to split the dv_mask. what's left in dv_mask covers this result, and rest
                     // will cover the following results. we `take()` out of `selection_vector` to avoid
                     // trying to return a captured variable. We're going to reassign `selection_vector`
@@ -421,8 +421,7 @@ fn get_state_info(
                 debug!("\n\n{logical_field:#?}\nAfter mapping: {physical_field:#?}\n\n");
                 let physical_name = physical_field.name.clone();
                 read_fields.push(physical_field);
-                // TODO: Support nested columns!
-                Ok(ColumnType::Selected(ColumnName::new([physical_name])))
+                Ok(ColumnType::Selected(physical_name))
             }
         })
         .try_collect()?;
@@ -473,42 +472,38 @@ fn transform_to_logical_internal(
     have_partition_cols: bool,
 ) -> DeltaResult<Box<dyn EngineData>> {
     let read_schema = global_state.read_schema.clone();
-    if have_partition_cols || global_state.column_mapping_mode != ColumnMappingMode::None {
-        // need to add back partition cols and/or fix-up mapped columns
-        let all_fields = all_fields
-            .iter()
-            .map(|field| match field {
-                ColumnType::Partition(field_idx) => {
-                    let field = global_state
-                        .logical_schema
-                        .fields
-                        .get_index(*field_idx)
-                        .ok_or_else(|| {
-                            Error::generic("logical schema did not contain expected field, can't transform data")
-                        })?.1;
-                    let name = field.physical_name(global_state.column_mapping_mode)?;
-                    let value_expression = parse_partition_value(
-                        partition_values.get(name),
-                        field.data_type(),
-                    )?;
-                    Ok::<Expression, Error>(value_expression.into())
-                }
-                ColumnType::Selected(field_name) => Ok(field_name.clone().into()),
-            })
-            .try_collect()?;
-        let read_expression = Expression::Struct(all_fields);
-        let result = engine
-            .get_expression_handler()
-            .get_evaluator(
-                read_schema,
-                read_expression,
-                global_state.logical_schema.clone().into(),
-            )
-            .evaluate(data.as_ref())?;
-        Ok(result)
-    } else {
-        Ok(data)
+    if !have_partition_cols && global_state.column_mapping_mode == ColumnMappingMode::None {
+        return Ok(data);
     }
+    // need to add back partition cols and/or fix-up mapped columns
+    let all_fields = all_fields
+        .iter()
+        .map(|field| match field {
+            ColumnType::Partition(field_idx) => {
+                let field = global_state.logical_schema.fields.get_index(*field_idx);
+                let Some((_, field)) = field else {
+                    return Err(Error::generic(
+                        "logical schema did not contain expected field, can't transform data",
+                    ));
+                };
+                let name = field.physical_name(global_state.column_mapping_mode)?;
+                let value_expression =
+                    parse_partition_value(partition_values.get(name), field.data_type())?;
+                Ok(value_expression.into())
+            }
+            ColumnType::Selected(field_name) => Ok(ColumnName::new([field_name]).into()),
+        })
+        .try_collect()?;
+    let read_expression = Expression::Struct(all_fields);
+    let result = engine
+        .get_expression_handler()
+        .get_evaluator(
+            read_schema,
+            read_expression,
+            global_state.logical_schema.clone().into(),
+        )
+        .evaluate(data.as_ref())?;
+    Ok(result)
 }
 
 // some utils that are used in file_stream.rs and state.rs tests
@@ -673,7 +668,7 @@ mod tests {
         let files: Vec<ScanResult> = scan.execute(&engine).unwrap().try_collect().unwrap();
 
         assert_eq!(files.len(), 1);
-        let num_rows = files[0].raw_data.as_ref().unwrap().length();
+        let num_rows = files[0].raw_data.as_ref().unwrap().len();
         assert_eq!(num_rows, 10)
     }
 
@@ -780,6 +775,43 @@ mod tests {
             .unwrap();
         let data: Vec<_> = scan.execute(&engine).unwrap().try_collect().unwrap();
         assert_eq!(data.len(), 0);
+    }
+
+    #[test]
+    fn test_missing_column_row_group_skipping() {
+        let path = std::fs::canonicalize(PathBuf::from("./tests/data/parquet_row_group_skipping/"));
+        let url = url::Url::from_directory_path(path.unwrap()).unwrap();
+        let engine = SyncEngine::new();
+
+        let table = Table::new(url);
+        let snapshot = Arc::new(table.snapshot(&engine, None).unwrap());
+
+        // Predicate over a logically valid but physically missing column. No data files should be
+        // returned because the column is inferred to be all-null.
+        //
+        // WARNING: https://github.com/delta-incubator/delta-kernel-rs/issues/434 - This
+        // optimization is currently disabled, so the one data file is still returned.
+        let predicate = Arc::new(column_expr!("missing").lt(1000i64));
+        let scan = snapshot
+            .clone()
+            .scan_builder()
+            .with_predicate(predicate)
+            .build()
+            .unwrap();
+        let data: Vec<_> = scan.execute(&engine).unwrap().try_collect().unwrap();
+        assert_eq!(data.len(), 1);
+
+        // Predicate over a logically missing column, so the one data file should be returned.
+        //
+        // TODO: This should ideally trigger an error instead?
+        let predicate = Arc::new(column_expr!("numeric.ints.invalid").lt(1000));
+        let scan = snapshot
+            .scan_builder()
+            .with_predicate(predicate)
+            .build()
+            .unwrap();
+        let data: Vec<_> = scan.execute(&engine).unwrap().try_collect().unwrap();
+        assert_eq!(data.len(), 1);
     }
 
     #[test_log::test]
