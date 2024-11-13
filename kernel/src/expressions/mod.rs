@@ -249,8 +249,8 @@ impl Expression {
     }
 
     /// Create a new struct expression
-    pub fn struct_from(exprs: impl IntoIterator<Item = impl Into<Self>>) -> Self {
-        Self::Struct(exprs.into_iter().map(Into::into).collect())
+    pub fn struct_from(exprs: impl IntoIterator<Item = Self>) -> Self {
+        Self::Struct(exprs.into_iter().collect())
     }
 
     /// Creates a new unary expression OP expr

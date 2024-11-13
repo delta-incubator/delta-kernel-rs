@@ -6,11 +6,11 @@ use tracing::debug;
 
 use super::data_skipping::DataSkippingFilter;
 use super::ScanData;
-use crate::actions::get_log_add_schema;
-use crate::engine_data::{GetData, TypedGetData};
-use crate::expressions::{column_expr, column_name, ColumnName, Expression, ExpressionRef};
-use crate::scan::DeletionVectorDescriptor;
-use crate::schema::{DataType, MapType, SchemaRef, StructField, StructType};
+use crate::actions::{get_log_schema, Add, Remove, ADD_NAME};
+use crate::actions::visitors::{AddVisitor, RemoveVisitor};
+use crate::engine_data::{GetData, RowVisitorBase, TypedGetData};
+use crate::expressions::{column_expr, ColumnName, Expression, ExpressionRef};
+use crate::schema::{ColumnNamesAndTypes, DataType, MapType, SchemaRef, StructField, StructType};
 use crate::{DeltaResult, Engine, EngineData, ExpressionHandler, RowVisitor};
 
 /// The subset of file action fields that uniquely identifies it in the log, used for deduplication
@@ -21,7 +21,8 @@ struct FileActionKey {
     dv_unique_id: Option<String>,
 }
 impl FileActionKey {
-    fn new(path: String, dv_unique_id: Option<String>) -> Self {
+    fn new(path: impl Into<String>, dv_unique_id: Option<String>) -> Self {
+        let path = path.into();
         Self { path, dv_unique_id }
     }
 }
@@ -35,135 +36,72 @@ struct LogReplayScanner {
     seen: HashSet<FileActionKey>,
 }
 
-struct AddRemoveDedupVisitor<'seen> {
-    seen: &'seen mut HashSet<FileActionKey>,
-    selection_vector: Vec<bool>,
+#[derive(Default)]
+struct AddRemoveVisitor {
+    adds: Vec<(Add, usize)>,
+    removes: Vec<Remove>,
+    selection_vector: Option<Vec<bool>>,
+    // whether or not we are visiting commit json (=true) or checkpoint (=false)
     is_log_batch: bool,
 }
-impl<'seen> AddRemoveDedupVisitor<'seen> {
-    fn filter_seen(&mut self, path: &str, dv_unique_id: Option<String>) -> bool {
-        // Note: each (add.path + add.dv_unique_id()) pair has a
-        // unique Add + Remove pair in the log. For example:
-        // https://github.com/delta-io/delta/blob/master/spark/src/test/resources/delta/table-with-dv-large/_delta_log/00000000000000000001.json
 
-        let key = FileActionKey::new(path.into(), dv_unique_id);
-        if self.seen.contains(&key) {
-            debug!(
-                "Ignoring duplicate ({}, {:?}) in scan, is log {}",
-                key.path, key.dv_unique_id, self.is_log_batch
-            );
-            false
-        } else {
-            debug!(
-                "Including ({}, {:?}) in scan, is log {}",
-                key.path, key.dv_unique_id, self.is_log_batch
-            );
-            if self.is_log_batch {
-                // Remember file actions from this batch so we can ignore duplicates as we process
-                // batches from older commit and/or checkpoint files. We don't track checkpoint
-                // batches because they are already the oldest actions and never replace anything.
-                self.seen.insert(key);
-            }
-            true
+const ADD_FIELD_COUNT: usize = 15;
+
+impl AddRemoveVisitor {
+    fn new(selection_vector: Option<Vec<bool>>, is_log_batch: bool) -> Self {
+        AddRemoveVisitor {
+            selection_vector,
+            is_log_batch,
+            ..Default::default()
         }
-    }
-
-    /// Returns the list of leaf columns the visitor accesses.
-    fn columns_to_select(&self) -> &'static [ColumnName] {
-        // WARNING: Must keep this list in sync with the `filter_row` method below. In particular,
-        // the `add` columns must come before the `remove` columns, in the same relative order.
-        static ADD_REMOVE_LEAF_COLUMNS: LazyLock<Vec<ColumnName>> = LazyLock::new(|| {
-            vec![
-                column_name!("add.path"),
-                column_name!("add.deletionVector.storageType"),
-                column_name!("add.deletionVector.pathOrInlineDv"),
-                column_name!("add.deletionVector.offset"),
-                column_name!("remove.path"),
-                column_name!("remove.deletionVector.storageType"),
-                column_name!("remove.deletionVector.pathOrInlineDv"),
-                column_name!("remove.deletionVector.offset"),
-            ]
-        });
-
-        let columns_to_select = if self.is_log_batch {
-            &ADD_REMOVE_LEAF_COLUMNS[..]
-        } else {
-            // All checkpoint actions are already reconciled and Remove actions in checkpoint files
-            // only serve as tombstones for vacuum jobs. So we only need to examine the adds here.
-            &ADD_REMOVE_LEAF_COLUMNS[..4]
-        };
-        debug!(
-            "Visiting scan data with schema {:?}",
-            columns_to_select
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>(),
-        );
-        columns_to_select
-    }
-
-    fn filter_row<'a>(&mut self, i: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<bool> {
-        // Add will have a path at index 0 if it is valid; otherwise, if it is a log batch, we
-        // may have a remove with a path at index 4.
-        let (path, getters, keep) = if let Some(path) = getters[0].get_opt(i, "add.path")? {
-            (path, &getters[1..4], true)
-        } else if !self.is_log_batch {
-            return Ok(false);
-        } else if let Some(path) = getters[4].get_opt(i, "remove.path")? {
-            (path, &getters[5..8], false)
-        } else {
-            return Ok(false);
-        };
-
-        let dv_unique_id = match getters[0].get_opt(i, "deletionVector.storageType")? {
-            Some(storage_type) => Some(DeletionVectorDescriptor::unique_id_from_parts(
-                storage_type,
-                getters[1].get(i, "deletionVector.pathOrInlineDv")?,
-                getters[2].get_opt(i, "deletionVector.offset")?,
-            )),
-            None => None,
-        };
-        // Process both adds and removes, but only keep the surviving adds
-        Ok(self.filter_seen(path, dv_unique_id) && keep)
     }
 }
-impl<'seen> RowVisitor for AddRemoveDedupVisitor<'seen> {
-    fn selected_leaf_fields(&self) -> &'static [StructField] {
-        static FIELDS: LazyLock<Vec<StructField>> = LazyLock::new(|| {
-            let nullable_string = StructField::new("", DataType::STRING, true);
-            let nullable_int = StructField::new("", DataType::INTEGER, true);
-            vec![
-                nullable_string.with_name("add.path"),
-                nullable_string.with_name("add.deletionVector.storageType"),
-                nullable_string.with_name("add.deletionVector.pathOrInlineDv"),
-                nullable_int.with_name("add.deletionVector.offset"),
-                nullable_string.with_name("remove.path"),
-                nullable_string.with_name("remove.deletionVector.storageType"),
-                nullable_string.with_name("remove.deletionVector.pathOrInlineDv"),
-                nullable_int.with_name("remove.deletionVector.offset"),
-            ]
+
+impl RowVisitorBase for AddRemoveVisitor {
+    fn selected_column_names_and_types(&self) -> (&'static [ColumnName], &'static [DataType]) {
+        // NOTE: THe visitor assumes adds always come first, with removes optionally afterward
+        static ALL_NAMES_AND_TYPES: LazyLock<ColumnNamesAndTypes> = LazyLock::new(|| {
+            let (add_names, add_fields) = AddVisitor::names_and_types();
+            let (remove_names, remove_fields) = RemoveVisitor::names_and_types();
+            let names = add_names.iter().chain(remove_names).cloned().collect();
+            let fields = add_fields.iter().chain(remove_fields).cloned().collect();
+            (names, fields).into()
         });
         if self.is_log_batch {
-            &FIELDS[..]
+            ALL_NAMES_AND_TYPES.as_ref()
         } else {
-            &FIELDS[..4]
+            // All checkpoint actions are already reconciled and Remove actions in checkpoint files
+            // only serve as tombstones for vacuum jobs. So no need to load them here.
+            AddVisitor::names_and_types()
         }
     }
-    // Expected schema:
-    // 0 - add.path,
-    // 1 - add.deletionVector.storageType,
-    // 2 - add.deletionVector.pathOrInlineDv,
-    // 3 - add.deletionVector.offset,
-    // 4 - remove.path,
-    // 5 - remove.deletionVector.storageType,
-    // 6 - remove.deletionVector.pathOrInlineDv,
-    // 7 - remove.deletionVector.offset
-    //
-    // WARNING: This needs to stay in sync with `LogReplayScanner::process_scan_batch` below.
+
     fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<()> {
         for i in 0..row_count {
-            if self.selection_vector[i] {
-                self.selection_vector[i] = self.filter_row(i, getters)?;
+            // Add will have a path at index 0 if it is valid
+            if let Some(path) = getters[0].get_opt(i, "add.path")? {
+                // Keep the file unless the selection vector is present and is false for this row
+                if !self
+                    .selection_vector
+                    .as_ref()
+                    .is_some_and(|selection| !selection[i])
+                {
+                    self.adds.push((
+                        AddVisitor::visit_add(i, path, &getters[..ADD_FIELD_COUNT])?,
+                        i,
+                    ))
+                }
+            }
+            // Remove will have a path at index 15 if it is valid
+            // TODO(nick): Should count the fields in Add to ensure we don't get this wrong if more
+            // are added
+            // TODO(zach): add a check for selection vector that we never skip a remove
+            else if self.is_log_batch {
+                if let Some(path) = getters[ADD_FIELD_COUNT].get_opt(i, "remove.path")? {
+                    let remove_getters = &getters[ADD_FIELD_COUNT..];
+                    self.removes
+                        .push(RemoveVisitor::visit_remove(i, path, remove_getters)?);
+                }
             }
         }
         Ok(())
@@ -202,9 +140,6 @@ pub(crate) static SCAN_ROW_SCHEMA: LazyLock<Arc<StructType>> = LazyLock::new(|| 
         ),
     ]))
 });
-
-pub(crate) static SCAN_ROW_NAMES_AND_FIELDS: LazyLock<(Vec<ColumnName>, Vec<StructField>)> =
-    LazyLock::new(|| SCAN_ROW_SCHEMA.leaf_fields(None));
 
 static SCAN_ROW_DATATYPE: LazyLock<DataType> = LazyLock::new(|| SCAN_ROW_SCHEMA.clone().into());
 
@@ -248,31 +183,69 @@ impl LogReplayScanner {
 
         // we start our selection vector based on what was filtered. we will add to this vector
         // below if a file has been removed
-        let selection_vector = match filter_vector {
+        let mut selection_vector = match filter_vector {
             Some(ref filter_vector) => filter_vector.clone(),
-            None => vec![true; actions.len()],
+            None => vec![false; actions.len()],
         };
 
         assert_eq!(selection_vector.len(), actions.len());
+        let adds = self.setup_batch_process(filter_vector, actions, is_log_batch)?;
 
-        let mut visitor = AddRemoveDedupVisitor {
-            seen: &mut self.seen,
-            selection_vector,
-            is_log_batch,
-        };
-        let columns_to_select = visitor.columns_to_select();
-        actions.visit_rows(columns_to_select, &mut visitor)?;
-        let selection_vector = visitor.selection_vector;
+        for (add, index) in adds.into_iter() {
+            // Note: each (add.path + add.dv_unique_id()) pair has a
+            // unique Add + Remove pair in the log. For example:
+            // https://github.com/delta-io/delta/blob/master/spark/src/test/resources/delta/table-with-dv-large/_delta_log/00000000000000000001.json
+            let key = FileActionKey::new(&add.path, add.dv_unique_id());
+            if !self.seen.contains(&key) {
+                debug!(
+                    "Including file in scan: ({}, {:?}), is log {is_log_batch}",
+                    add.path,
+                    add.dv_unique_id(),
+                );
+                if is_log_batch {
+                    // Remember file actions from this batch so we can ignore duplicates
+                    // as we process batches from older commit and/or checkpoint files. We
+                    // don't need to track checkpoint batches because they are already the
+                    // oldest actions and can never replace anything.
+                    self.seen.insert(key);
+                }
+                selection_vector[index] = true;
+            } else {
+                debug!(
+                    "Filtering out Add due to it being removed {}, is log {is_log_batch}",
+                    add.path
+                );
+                // we may have a true here because the data-skipping predicate included the file
+                selection_vector[index] = false;
+            }
+        }
 
-        // TODO: Teach expression eval to respect the selection vector we just computed so carefully!
         let result = expression_handler
             .get_evaluator(
-                get_log_add_schema().clone(),
+                get_log_schema().project(&[ADD_NAME])?,
                 self.get_add_transform_expr(),
                 SCAN_ROW_DATATYPE.clone(),
             )
             .evaluate(actions)?;
         Ok((result, selection_vector))
+    }
+
+    // work shared between process_batch and process_scan_batch
+    fn setup_batch_process(
+        &mut self,
+        selection_vector: Option<Vec<bool>>,
+        actions: &dyn EngineData,
+        is_log_batch: bool,
+    ) -> DeltaResult<Vec<(Add, usize)>> {
+        let mut visitor = AddRemoveVisitor::new(selection_vector, is_log_batch);
+        visitor.visit_rows_of(actions)?;
+
+        for remove in visitor.removes.into_iter() {
+            let dv_id = remove.dv_unique_id();
+            self.seen.insert(FileActionKey::new(remove.path, dv_id));
+        }
+
+        Ok(visitor.adds)
     }
 }
 

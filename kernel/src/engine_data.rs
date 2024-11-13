@@ -1,7 +1,7 @@
 //! Traits that engines need to implement in order to pass data between themselves and kernel.
 
 use crate::expressions::ColumnName;
-use crate::schema::StructField;
+use crate::schema::DataType;
 use crate::{DeltaResult, Error};
 
 use tracing::debug;
@@ -188,18 +188,36 @@ impl<'a> TypedGetData<'a, HashMap<String, String>> for dyn GetData<'a> + '_ {
 /// A `RowVisitor` can be called back to visit extracted data. Aside from calling
 /// [`RowVisitor::visit`] on the visitor passed to [`EngineData::extract`], engines do
 /// not need to worry about this trait.
-pub trait RowVisitor {
-    /// The schema of leaf columns this visitor expects to access; the `visit` call will receive one
-    /// getter for each selected column, in the requested order.
-    fn selected_leaf_fields(&self) -> &'static [StructField];
+pub trait RowVisitorBase {
+    /// The names and types of leaf fields this visitor accesses. The `EngineData` being visited
+    /// validates these types when extracting column getters, and [`RowVisitor::visit`] will receive
+    /// one getter for each selected field, in the requested order. The column names are used by
+    /// [`RowVisitor::visit_rows`] to select fields from a "typical" `EngineData`; callers whose
+    /// engine data has different column names can manually invoke [`EngineData::visit_rows`].
+    fn selected_column_names_and_types(&self) -> (&'static [ColumnName], &'static [DataType]);
 
     /// Have the visitor visit the data. This will be called on a visitor passed to
     /// [`EngineData::visit_rows`]. For each leaf in the schema that was passed to `extract` a
     /// "getter" of type [`GetData`] will be present. This can be used to actually get at the data
     /// for each row. You can `use` the `TypedGetData` trait if you want to have a way to extract
     /// typed data that will fail if the "getter" is for an unexpected type.  The data in `getters`
-    /// does not outlive the call to this funtion (i.e. it should be copied if needed)
+    /// does not outlive the call to this funtion (i.e. it should be copied if needed).
     fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<()>;
+}
+
+/// Helper trait that simplifies use of [`RowVisitor`] interface, implemented automatically for all
+/// types that implement [`RowVisitor`].
+pub trait RowVisitor: RowVisitorBase {
+    /// Visit the rows of an [`EngineData`], selecting the leaf column names given by
+    /// [`selected_column_names_and_types`]. This is a thin wrapper around
+    /// [`EngineData::visit_rows`] which in turn will eventually invoke [`RowVisitor::visit`].
+    fn visit_rows_of(&mut self, data: &dyn EngineData) -> DeltaResult<()>;
+}
+
+impl<T: RowVisitorBase> RowVisitor for T {
+    fn visit_rows_of(&mut self, data: &dyn EngineData) -> DeltaResult<()> {
+        data.visit_rows(self.selected_column_names_and_types().0, self)
+    }
 }
 
 /// Any type that an engine wants to return as "data" needs to implement this trait. The bulk of the

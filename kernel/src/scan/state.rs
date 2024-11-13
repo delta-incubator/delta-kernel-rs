@@ -1,15 +1,17 @@
 //! This module encapsulates the state of a scan
 
 use std::collections::HashMap;
+use std::sync::LazyLock;
 
+use crate::expressions::ColumnName;
 use crate::{
     actions::{
         deletion_vector::{treemap_to_bools, DeletionVectorDescriptor},
         visitors::visit_deletion_vector_at,
     },
-    engine_data::{GetData, TypedGetData},
+    engine_data::{GetData, RowVisitorBase, TypedGetData as _},
     features::ColumnMappingMode,
-    schema::{SchemaRef, StructField},
+    schema::{ColumnNamesAndTypes, SchemaRef, DataType},
     DeltaResult, Engine, EngineData, Error, RowVisitor,
 };
 use serde::{Deserialize, Serialize};
@@ -131,10 +133,7 @@ pub fn visit_scan_files<T>(
         selection_vector,
         context,
     };
-    data.visit_rows(
-        &super::log_replay::SCAN_ROW_NAMES_AND_FIELDS.0,
-        &mut visitor,
-    )?;
+    visitor.visit_rows_of(data)?;
     Ok(visitor.context)
 }
 
@@ -144,9 +143,11 @@ struct ScanFileVisitor<'a, T> {
     selection_vector: &'a [bool],
     context: T,
 }
-impl<T> RowVisitor for ScanFileVisitor<'_, T> {
-    fn selected_leaf_fields(&self) -> &'static [StructField] {
-        &super::log_replay::SCAN_ROW_NAMES_AND_FIELDS.1
+impl<T> RowVisitorBase for ScanFileVisitor<'_, T> {
+    fn selected_column_names_and_types(&self) -> (&'static [ColumnName], &'static [DataType]) {
+        static NAMES_AND_TYPES: LazyLock<ColumnNamesAndTypes> =
+            LazyLock::new(|| SCAN_ROW_SCHEMA.leaves(None));
+        NAMES_AND_TYPES.as_ref()
     }
     fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<()> {
         for row_index in 0..row_count {

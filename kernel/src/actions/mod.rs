@@ -5,13 +5,13 @@ use delta_kernel_derive::Schema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::LazyLock;
-use visitors::{AddVisitor, MetadataVisitor, ProtocolVisitor};
+use visitors::{MetadataVisitor, ProtocolVisitor};
 
 use self::deletion_vector::DeletionVectorDescriptor;
 use crate::actions::schemas::GetStructField;
 use crate::features::{ReaderFeatures, WriterFeatures};
 use crate::schema::{SchemaRef, StructType};
-use crate::{DeltaResult, EngineData};
+use crate::{DeltaResult, EngineData, RowVisitor as _};
 
 pub mod deletion_vector;
 pub mod set_transaction;
@@ -113,7 +113,7 @@ pub struct Metadata {
 impl Metadata {
     pub fn try_new_from_data(data: &dyn EngineData) -> DeltaResult<Option<Metadata>> {
         let mut visitor = MetadataVisitor::default();
-        data.visit_rows(&MetadataVisitor::names_and_fields().0, &mut visitor)?;
+        visitor.visit_rows_of(data)?;
         Ok(visitor.metadata)
     }
 
@@ -144,7 +144,7 @@ pub struct Protocol {
 impl Protocol {
     pub fn try_new_from_data(data: &dyn EngineData) -> DeltaResult<Option<Protocol>> {
         let mut visitor = ProtocolVisitor::default();
-        data.visit_rows(&ProtocolVisitor::names_and_fields().0, &mut visitor)?;
+        visitor.visit_rows_of(data)?;
         Ok(visitor.protocol)
     }
 
@@ -234,15 +234,6 @@ pub struct Add {
 }
 
 impl Add {
-    /// Since we always want to parse multiple adds from data, we return a `Vec<Add>`
-    #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
-    #[allow(unused)]
-    fn parse_from_data(data: &dyn EngineData) -> DeltaResult<Vec<Add>> {
-        let mut visitor = AddVisitor::default();
-        data.visit_rows(&AddVisitor::names_and_fields().0, &mut visitor)?;
-        Ok(visitor.adds)
-    }
-
     pub fn dv_unique_id(&self) -> Option<String> {
         self.deletion_vector.as_ref().map(|dv| dv.unique_id())
     }
@@ -291,7 +282,6 @@ struct Remove {
 }
 
 impl Remove {
-    #[allow(unused)]
     pub(crate) fn dv_unique_id(&self) -> Option<String> {
         self.deletion_vector.as_ref().map(|dv| dv.unique_id())
     }

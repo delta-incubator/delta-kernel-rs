@@ -275,20 +275,39 @@ impl StructType {
         self.fields.values()
     }
 
-    /// Extracts all leaf fields, in schema order. The name of each leaf field is the full column
-    /// path by which the field was reached.
+    /// Extracts the name and type of all leaf columns, in schema order.
     ///
     /// NOTE: This method only traverses through `StructType` fields; `MapType` and `ArrayType`
     /// fields are considered leaves even if they contain `StructType` entries/elements.
-    pub fn leaf_fields<'s>(
+    #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
+    pub(crate) fn leaves<'s>(
         &self,
         own_name: impl Into<Option<&'s str>>,
-    ) -> (Vec<ColumnName>, Vec<StructField>) {
-        let mut fields = LeafFields::new(own_name.into());
-        let _ = fields.transform_struct(Cow::Borrowed(self));
-        (fields.names, fields.fields)
+    ) -> ColumnNamesAndTypes {
+        let mut leaves = SchemaLeaves::new(own_name.into());
+        let _ = leaves.transform_struct(Cow::Borrowed(self));
+        (leaves.names, leaves.types).into()
     }
 }
+
+
+/// Helper for RowVisitor implementations
+#[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
+#[derive(Clone, Default)]
+pub(crate) struct ColumnNamesAndTypes(Vec<ColumnName>, Vec<DataType>);
+impl ColumnNamesAndTypes {
+    #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
+    pub(crate) fn as_ref(&self) -> (&[ColumnName], &[DataType]) {
+        (&self.0, &self.1)
+    }
+}
+
+impl From<(Vec<ColumnName>, Vec<DataType>)> for ColumnNamesAndTypes {
+    fn from((names, fields): (Vec<ColumnName>, Vec<DataType>)) -> Self {
+        ColumnNamesAndTypes(names, fields)
+    }
+}
+
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -772,22 +791,22 @@ pub trait SchemaTransform {
     }
 }
 
-struct LeafFields {
+struct SchemaLeaves {
     path: Vec<String>,
     names: Vec<ColumnName>,
-    fields: Vec<StructField>,
+    types: Vec<DataType>,
 }
-impl LeafFields {
+impl SchemaLeaves {
     fn new(own_name: Option<&str>) -> Self {
         Self {
             path: own_name.into_iter().map(|s| s.to_string()).collect(),
             names: vec![],
-            fields: vec![],
+            types: vec![],
         }
     }
 }
 
-impl SchemaTransform for LeafFields {
+impl SchemaTransform for SchemaLeaves {
     fn transform_struct_field<'a>(
         &mut self,
         field: Cow<'a, StructField>,
@@ -796,9 +815,8 @@ impl SchemaTransform for LeafFields {
         if matches!(field.data_type, DataType::Struct(_)) {
             let _ = self.recurse_into_struct_field(field);
         } else {
-            let name = ColumnName::new(&self.path);
-            self.fields.push(field.with_name(name.to_string()));
-            self.names.push(name);
+            self.names.push(ColumnName::new(&self.path));
+            self.types.push(field.data_type.clone());
         }
         self.path.pop();
         None

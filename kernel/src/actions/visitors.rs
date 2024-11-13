@@ -4,17 +4,14 @@
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
-use crate::{
-    actions::schemas::ToSchema as _,
-    actions::{ADD_NAME, METADATA_NAME, PROTOCOL_NAME, REMOVE_NAME, SET_TRANSACTION_NAME},
-    engine_data::{GetData, TypedGetData},
-    expressions::ColumnName,
-    schema::{DataType, StructField},
-    DeltaResult, RowVisitor,
-};
+use crate::engine_data::{GetData, TypedGetData, RowVisitorBase};
+use crate::expressions::{column_name, ColumnName};
+use crate::schema::{ColumnNamesAndTypes, DataType};
+use crate::{DeltaResult};
 
 use super::deletion_vector::DeletionVectorDescriptor;
-use super::{Add, Format, Metadata, Protocol, Remove, SetTransaction};
+use super::schemas::ToSchema as _;
+use super::{Add, Format, Metadata, Protocol, Remove, SetTransaction, ADD_NAME, METADATA_NAME, PROTOCOL_NAME, REMOVE_NAME, SET_TRANSACTION_NAME};
 
 #[derive(Default)]
 #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
@@ -56,18 +53,15 @@ impl MetadataVisitor {
             configuration,
         })
     }
-
-    pub(crate) fn names_and_fields() -> &'static (Vec<ColumnName>, Vec<StructField>) {
-        static NAMES_AND_FIELDS: LazyLock<(Vec<ColumnName>, Vec<StructField>)> =
-            LazyLock::new(|| Metadata::to_schema().leaf_fields(METADATA_NAME));
-        &NAMES_AND_FIELDS
-    }
 }
 
-impl RowVisitor for MetadataVisitor {
-    fn selected_leaf_fields(&self) -> &'static [StructField] {
-        &Self::names_and_fields().1
+impl RowVisitorBase for MetadataVisitor {
+    fn selected_column_names_and_types(&self) -> (&'static [ColumnName], &'static [DataType]) {
+        static NAMES_AND_TYPES: LazyLock<ColumnNamesAndTypes> =
+            LazyLock::new(|| Metadata::to_schema().leaves(METADATA_NAME));
+        NAMES_AND_TYPES.as_ref()
     }
+
     fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<()> {
         for i in 0..row_count {
             // Since id column is required, use it to detect presence of a metadata action
@@ -85,14 +79,13 @@ pub(crate) struct SelectionVectorVisitor {
     pub(crate) selection_vector: Vec<bool>,
 }
 
-impl RowVisitor for SelectionVectorVisitor {
-    /// A single non-nullable BOOL column
-    fn selected_leaf_fields(&self) -> &'static [StructField] {
-        static FIELDS: LazyLock<Vec<StructField>> = LazyLock::new(|| {
-            let field = StructField::new("selectionVector", DataType::BOOLEAN, false);
-            vec![field]
+/// A single non-nullable BOOL column
+impl RowVisitorBase for SelectionVectorVisitor {
+    fn selected_column_names_and_types(&self) -> (&'static [ColumnName], &'static [DataType]) {
+        static NAMES_AND_TYPES: LazyLock<ColumnNamesAndTypes> = LazyLock::new(|| {
+            (vec![column_name!("output")], vec![DataType::BOOLEAN]).into()
         });
-        &FIELDS
+        NAMES_AND_TYPES.as_ref()
     }
     fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<()> {
         for i in 0..row_count {
@@ -130,17 +123,13 @@ impl ProtocolVisitor {
             writer_features,
         })
     }
-
-    pub(crate) fn names_and_fields() -> &'static (Vec<ColumnName>, Vec<StructField>) {
-        static NAMES_AND_FIELDS: LazyLock<(Vec<ColumnName>, Vec<StructField>)> =
-            LazyLock::new(|| Protocol::to_schema().leaf_fields(PROTOCOL_NAME));
-        &NAMES_AND_FIELDS
-    }
 }
 
-impl RowVisitor for ProtocolVisitor {
-    fn selected_leaf_fields(&self) -> &'static [StructField] {
-        &Self::names_and_fields().1
+impl RowVisitorBase for ProtocolVisitor {
+    fn selected_column_names_and_types(&self) -> (&'static [ColumnName], &'static [DataType]) {
+        static NAMES_AND_TYPES: LazyLock<ColumnNamesAndTypes> =
+            LazyLock::new(|| Protocol::to_schema().leaves(PROTOCOL_NAME));
+        NAMES_AND_TYPES.as_ref()
     }
     fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<()> {
         for i in 0..row_count {
@@ -154,7 +143,6 @@ impl RowVisitor for ProtocolVisitor {
     }
 }
 
-#[allow(unused)]
 #[derive(Default)]
 #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
 #[cfg_attr(not(feature = "developer-visibility"), visibility::make(pub(crate)))]
@@ -200,17 +188,16 @@ impl AddVisitor {
             clustering_provider,
         })
     }
-
-    pub(crate) fn names_and_fields() -> &'static (Vec<ColumnName>, Vec<StructField>) {
-        static NAMES_AND_FIELDS: LazyLock<(Vec<ColumnName>, Vec<StructField>)> =
-            LazyLock::new(|| Add::to_schema().leaf_fields(ADD_NAME));
-        &NAMES_AND_FIELDS
+    pub(crate) fn names_and_types() -> (&'static [ColumnName], &'static [DataType]) {
+        static NAMES_AND_TYPES: LazyLock<ColumnNamesAndTypes> =
+            LazyLock::new(|| Add::to_schema().leaves(ADD_NAME));
+        NAMES_AND_TYPES.as_ref()
     }
 }
 
-impl RowVisitor for AddVisitor {
-    fn selected_leaf_fields(&self) -> &'static [StructField] {
-        &Self::names_and_fields().1
+impl RowVisitorBase for AddVisitor {
+    fn selected_column_names_and_types(&self) -> (&'static [ColumnName], &'static [DataType]) {
+        Self::names_and_types()
     }
     fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<()> {
         for i in 0..row_count {
@@ -270,17 +257,16 @@ impl RemoveVisitor {
             default_row_commit_version,
         })
     }
-
-    pub(crate) fn names_and_fields() -> &'static (Vec<ColumnName>, Vec<StructField>) {
-        static NAMES_AND_FIELDS: LazyLock<(Vec<ColumnName>, Vec<StructField>)> =
-            LazyLock::new(|| Remove::to_schema().leaf_fields(REMOVE_NAME));
-        &NAMES_AND_FIELDS
+    pub(crate) fn names_and_types() -> (&'static [ColumnName], &'static [DataType]) {
+        static NAMES_AND_TYPES: LazyLock<ColumnNamesAndTypes> =
+            LazyLock::new(|| Remove::to_schema().leaves(REMOVE_NAME));
+        NAMES_AND_TYPES.as_ref()
     }
 }
 
-impl RowVisitor for RemoveVisitor {
-    fn selected_leaf_fields(&self) -> &'static [StructField] {
-        &Self::names_and_fields().1
+impl RowVisitorBase for RemoveVisitor {
+    fn selected_column_names_and_types(&self) -> (&'static [ColumnName], &'static [DataType]) {
+        Self::names_and_types()
     }
     fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<()> {
         for i in 0..row_count {
@@ -336,18 +322,15 @@ impl SetTransactionVisitor {
             last_updated,
         })
     }
-
-    pub(crate) fn names_and_fields() -> &'static (Vec<ColumnName>, Vec<StructField>) {
-        static NAMES_AND_FIELDS: LazyLock<(Vec<ColumnName>, Vec<StructField>)> =
-            LazyLock::new(|| SetTransaction::to_schema().leaf_fields(SET_TRANSACTION_NAME));
-        &NAMES_AND_FIELDS
-    }
 }
 
-impl RowVisitor for SetTransactionVisitor {
-    fn selected_leaf_fields(&self) -> &'static [StructField] {
-        &Self::names_and_fields().1
+impl RowVisitorBase for SetTransactionVisitor {
+    fn selected_column_names_and_types(&self) -> (&'static [ColumnName], &'static [DataType]) {
+        static NAMES_AND_TYPES: LazyLock<ColumnNamesAndTypes> =
+            LazyLock::new(|| SetTransaction::to_schema().leaves(SET_TRANSACTION_NAME));
+        NAMES_AND_TYPES.as_ref()
     }
+
     fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<()> {
         // Assumes batches are visited in reverse order relative to the log
         for i in 0..row_count {
@@ -407,7 +390,7 @@ mod tests {
         actions::get_log_schema,
         engine::arrow_data::ArrowEngineData,
         engine::sync::{json::SyncJsonHandler, SyncEngine},
-        Engine, EngineData, JsonHandler,
+        Engine, EngineData, JsonHandler, RowVisitor as _,
     };
 
     // TODO(nick): Merge all copies of this into one "test utils" thing
@@ -496,8 +479,7 @@ mod tests {
             .parse_json(string_array_to_engine_data(json_strings), output_schema)
             .unwrap();
         let mut add_visitor = AddVisitor::default();
-        batch
-            .visit_rows(&AddVisitor::names_and_fields().0, &mut add_visitor)
+        add_visitor.visit_rows_of(batch.as_ref())
             .unwrap();
         let add1 = Add {
             path: "c1=4/c2=c/part-00003-f525f459-34f9-46f5-82d6-d42121d883fd.c000.snappy.parquet".into(),
@@ -559,11 +541,7 @@ mod tests {
             .parse_json(string_array_to_engine_data(json_strings), output_schema)
             .unwrap();
         let mut txn_visitor = SetTransactionVisitor::default();
-        batch
-            .visit_rows(
-                &SetTransactionVisitor::names_and_fields().0,
-                &mut txn_visitor,
-            )
+        txn_visitor.visit_rows_of(batch.as_ref())
             .unwrap();
         let mut actual = txn_visitor.set_transactions;
         assert_eq!(

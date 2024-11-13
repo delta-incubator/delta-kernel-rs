@@ -12,7 +12,7 @@ use crate::expressions::{
     ExpressionRef, UnaryOperator, VariadicOperator,
 };
 use crate::schema::{DataType, PrimitiveType, SchemaRef, SchemaTransform, StructField, StructType};
-use crate::{Engine, EngineData, ExpressionEvaluator, JsonHandler};
+use crate::{Engine, EngineData, ExpressionEvaluator, JsonHandler, RowVisitor as _};
 
 /// Get the expression that checks if a col could be null, assuming tight_bounds = true. In this
 /// case a column can contain null if any value > 0 is in the nullCount. This is further complicated
@@ -289,9 +289,7 @@ impl DataSkippingFilter {
 
         // visit the engine's selection vector to produce a Vec<bool>
         let mut visitor = SelectionVectorVisitor::default();
-        selection_vector
-            .as_ref()
-            .visit_rows(&[column_name!("output")], &mut visitor)?;
+        visitor.visit_rows_of(selection_vector.as_ref())?;
         Ok(visitor.selection_vector)
 
         // TODO(zach): add some debug info about data skipping that occurred

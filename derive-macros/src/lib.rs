@@ -48,7 +48,9 @@ pub fn derive_schema(input: proc_macro::TokenStream) -> proc_macro::TokenStream 
         impl crate::actions::schemas::ToSchema for #struct_ident {
             fn to_schema() -> crate::schema::StructType {
                 use crate::actions::schemas::{ToDataType, GetStructField, GetNullableContainerStructField};
-                crate::schema::StructType::new([#schema_fields])
+                crate::schema::StructType::new([
+                    #schema_fields
+                ])
             }
         }
     };

@@ -6,12 +6,12 @@ use delta_kernel::actions::{
 };
 use delta_kernel::engine::default::executor::tokio::TokioBackgroundExecutor;
 use delta_kernel::engine::default::DefaultEngine;
-use delta_kernel::engine_data::{GetData, TypedGetData};
+use delta_kernel::engine_data::{RowVisitorBase, GetData, TypedGetData};
 use delta_kernel::expressions::ColumnName;
 use delta_kernel::scan::state::{DvInfo, Stats};
 use delta_kernel::scan::ScanBuilder;
-use delta_kernel::schema::StructField;
-use delta_kernel::{DeltaResult, RowVisitor, Table};
+use delta_kernel::schema::{ColumnNamesAndTypes, DataType};
+use delta_kernel::{DeltaResult, RowVisitor as _, Table};
 
 use std::collections::HashMap;
 use std::process::ExitCode;
@@ -90,12 +90,9 @@ struct LogVisitor {
     previous_rows_seen: usize,
 }
 
-static NAMES_AND_FIELDS: LazyLock<(Vec<ColumnName>, Vec<StructField>)> =
-    LazyLock::new(|| get_log_schema().leaf_fields(None));
-
 impl LogVisitor {
     fn new() -> LogVisitor {
-        let mut names = NAMES_AND_FIELDS.0.iter();
+        let mut names = NAMES_AND_TYPES.as_ref().0.iter();
         let mut next_offset =
             |prev_offset, name| prev_offset + names.position(|n| n[0] == name).unwrap();
         let add_offset = 0;
@@ -114,10 +111,12 @@ impl LogVisitor {
         }
     }
 }
+static NAMES_AND_TYPES: LazyLock<ColumnNamesAndTypes> =
+    LazyLock::new(|| get_log_schema().leaves(None));
 
-impl RowVisitor for LogVisitor {
-    fn selected_leaf_fields(&self) -> &'static [StructField] {
-        &NAMES_AND_FIELDS.1
+impl RowVisitorBase for LogVisitor {
+    fn selected_column_names_and_types(&self) -> (&'static [ColumnName], &'static [DataType]) {
+        NAMES_AND_TYPES.as_ref()
     }
     fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<()> {
         for i in 0..row_count {
@@ -240,7 +239,7 @@ fn try_main() -> DeltaResult<()> {
 
             let mut visitor = LogVisitor::new();
             for action in actions {
-                action?.0.visit_rows(&NAMES_AND_FIELDS.0, &mut visitor)?;
+                visitor.visit_rows_of(action?.0.as_ref())?;
             }
 
             if *forward {

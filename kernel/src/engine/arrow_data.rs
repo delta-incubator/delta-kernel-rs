@@ -1,6 +1,6 @@
 use crate::engine_data::{EngineData, EngineList, EngineMap, GetData};
 use crate::expressions::ColumnName;
-use crate::schema::{DataType, StructField};
+use crate::schema::{DataType};
 use crate::{RowVisitor, DeltaResult, Error};
 
 use arrow_array::cast::AsArray;
@@ -150,11 +150,11 @@ impl EngineData for ArrowEngineData {
 
     fn visit_rows(&self, leaf_columns: &[ColumnName], visitor: &mut dyn RowVisitor) -> DeltaResult<()> {
         // Make sure the caller passed the correct number of column names
-        let leaf_fields = visitor.selected_leaf_fields();
-        if leaf_fields.len() != leaf_columns.len() {
+        let leaf_types = visitor.selected_column_names_and_types().1;
+        if leaf_types.len() != leaf_columns.len() {
             return Err(Error::MissingColumn(format!(
                 "Visitor expected {} column names, but caller passed {}",
-                leaf_fields.len(), leaf_columns.len()
+                leaf_types.len(), leaf_columns.len()
             )).with_backtrace());
         }
 
@@ -170,7 +170,7 @@ impl EngineData for ArrowEngineData {
         debug!("Column mask for selected columns {leaf_columns:?} is {mask:#?}");
 
         let mut getters = vec![];
-        Self::extract_columns(&mut vec![], &mut getters, leaf_fields, &mask, &self.data)?;
+        Self::extract_columns(&mut vec![], &mut getters, leaf_types, &mask, &self.data)?;
         if getters.len() != leaf_columns.len() {
             return Err(Error::MissingColumn(
                 format!(
@@ -187,7 +187,7 @@ impl ArrowEngineData {
     fn extract_columns<'a>(
         path: &mut Vec<String>,
         getters: &mut Vec<&'a dyn GetData<'a>>,
-        leaf_fields: &[StructField],
+        leaf_types: &[DataType],
         column_mask: &HashSet<&[String]>,
         data: &'a dyn ProvidesColumnsAndFields,
     ) -> DeltaResult<()> {
@@ -199,7 +199,7 @@ impl ArrowEngineData {
                     Self::extract_columns(
                         path,
                         getters,
-                        leaf_fields,
+                        leaf_types,
                         column_mask,
                         struct_array,
                     )?;
@@ -207,7 +207,7 @@ impl ArrowEngineData {
                     debug!("Pushing a null array for {}", ColumnName::new(path.iter()));
                     getters.push(&());
                 } else {
-                    let data_type = &leaf_fields[getters.len()].data_type();
+                    let data_type = &leaf_types[getters.len()];
                     let getter = Self::extract_leaf_column(path, data_type, column)?;
                     getters.push(getter);
                 }
