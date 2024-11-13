@@ -262,9 +262,7 @@ impl LogSegmentBuilder {
             .windows(2)
             .all(|cfs| cfs[0].version + 1 == cfs[1].version);
         if !ordered_commits {
-            return Err(Error::generic(
-                "Expected filesystem client to return ordered contiguous commits",
-            ));
+            return Err(Error::generic("Expected ordered contiguous commit files"));
         }
 
         // get the effective version from chosen files
