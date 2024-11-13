@@ -148,7 +148,7 @@ impl LogSegmentBuilder {
             omit_checkpoint_files: false,
         }
     }
-    /// Provide checkpoint metadata to start the log segment from (e.g. from reading the `last_checkpoint` file).
+    /// Provide a checkpoint metadata to start the log segment from (e.g. from reading the `last_checkpoint` file).
     ///
     /// Note: Either `start_version` or `start_checkpoint` may be specified.  Attempting to build a [`LogSegment`]
     /// with both will result in an error.
@@ -158,7 +158,7 @@ impl LogSegmentBuilder {
         self
     }
 
-    /// Provide checkpoint metadata to start the log segment. See [`LogSegmentBuilder::with_start_checkpoint`]
+    /// Optionally provide a checkpoint metadata to start the log segment. See [`LogSegmentBuilder::with_start_checkpoint`]
     /// for details. If `start_checkpoint` is `None`, this is a no-op.
     ///
     /// Note: Either `start_version` or `start_checkpoint` may be specified.  Attempting to build a [`LogSegment`]
@@ -181,7 +181,7 @@ impl LogSegmentBuilder {
         self.start_version = Some(version);
         self
     }
-    /// Optionally provide the `start_version` of the [`LogSegment`]. See [`LogSegmentBuilder::with_start_version`]
+    /// Optionally provide a `start_version` of the [`LogSegment`]. See [`LogSegmentBuilder::with_start_version`]
     /// for details. If `start_version` is `None`, this is a no-op.
     #[allow(unused)]
     pub(crate) fn with_start_version_opt(mut self, version: Option<Version>) -> Self {
@@ -197,7 +197,7 @@ impl LogSegmentBuilder {
         self
     }
 
-    /// Optionally set the end version (inclusive) of the [`LogSegment`]. See [`LogSegmentBuilder::with_end_version`]
+    /// Optionally provide an `end_version` (inclusive) of the [`LogSegment`]. See [`LogSegmentBuilder::with_end_version`]
     /// for details. If `end_version` is `None`, this is a no-op.
     pub(crate) fn with_end_version_opt(mut self, version: Option<Version>) -> Self {
         self.end_version = version;
