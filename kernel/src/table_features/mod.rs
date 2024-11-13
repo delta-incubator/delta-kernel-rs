@@ -112,6 +112,18 @@ pub enum WriterFeatures {
     VacuumProtocolCheck,
 }
 
+impl From<ReaderFeatures> for String {
+    fn from(feature: ReaderFeatures) -> Self {
+        feature.to_string()
+    }
+}
+
+impl From<WriterFeatures> for String {
+    fn from(feature: WriterFeatures) -> Self {
+        feature.to_string()
+    }
+}
+
 // we support everything except V2 checkpoints
 pub(crate) static SUPPORTED_READER_FEATURES: LazyLock<HashSet<ReaderFeatures>> =
     LazyLock::new(|| {

@@ -665,8 +665,8 @@ mod tests {
         let protocol = Protocol::try_new(
             3,
             7,
-            Some([ReaderFeatures::V2Checkpoint.to_string()]),
-            Some([ReaderFeatures::V2Checkpoint.to_string()]),
+            Some([ReaderFeatures::V2Checkpoint]),
+            Some([ReaderFeatures::V2Checkpoint]),
         )
         .unwrap();
         assert!(protocol.ensure_read_supported().is_err());
@@ -674,8 +674,8 @@ mod tests {
         let protocol = Protocol::try_new(
             4,
             7,
-            Some([ReaderFeatures::V2Checkpoint.to_string()]),
-            Some([ReaderFeatures::V2Checkpoint.to_string()]),
+            Some([ReaderFeatures::V2Checkpoint]),
+            Some([ReaderFeatures::V2Checkpoint]),
         )
         .unwrap();
         assert!(protocol.ensure_read_supported().is_err());
@@ -695,7 +695,7 @@ mod tests {
         let protocol = Protocol::try_new(
             3,
             7,
-            Some([ReaderFeatures::V2Checkpoint.to_string()]),
+            Some([ReaderFeatures::V2Checkpoint]),
             Some(&empty_features),
         )
         .unwrap();
@@ -705,7 +705,7 @@ mod tests {
             3,
             7,
             Some(&empty_features),
-            Some([WriterFeatures::V2Checkpoint.to_string()]),
+            Some([WriterFeatures::V2Checkpoint]),
         )
         .unwrap();
         assert!(protocol.ensure_read_supported().is_ok());
@@ -713,8 +713,8 @@ mod tests {
         let protocol = Protocol::try_new(
             3,
             7,
-            Some([ReaderFeatures::V2Checkpoint.to_string()]),
-            Some([WriterFeatures::V2Checkpoint.to_string()]),
+            Some([ReaderFeatures::V2Checkpoint]),
+            Some([WriterFeatures::V2Checkpoint]),
         )
         .unwrap();
         assert!(protocol.ensure_read_supported().is_err());
@@ -746,12 +746,13 @@ mod tests {
         };
         assert!(protocol.ensure_write_supported().is_ok());
 
-        let protocol = Protocol {
-            min_reader_version: 3,
-            min_writer_version: 7,
-            reader_features: Some(vec![ReaderFeatures::DeletionVectors.to_string()]),
-            writer_features: Some(vec![WriterFeatures::DeletionVectors.to_string()]),
-        };
+        let protocol = Protocol::try_new(
+            3,
+            7,
+            Some([ReaderFeatures::DeletionVectors]),
+            Some([WriterFeatures::DeletionVectors]),
+        )
+        .unwrap();
         assert!(protocol.ensure_write_supported().is_err());
     }
 
