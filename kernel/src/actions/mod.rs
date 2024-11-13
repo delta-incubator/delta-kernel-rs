@@ -142,6 +142,8 @@ pub struct Protocol {
 }
 
 impl Protocol {
+    /// Try to create a new Protocol instance from reader/writer versions and table features. This
+    /// can fail if the protocol is invalid.
     pub fn try_new(
         min_reader_version: i32,
         min_writer_version: i32,
