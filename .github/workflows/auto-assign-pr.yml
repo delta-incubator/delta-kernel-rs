@@ -2,7 +2,7 @@
 name: Auto-assign PR
 
 on:
-  pull_request_target:
+  pull_request:
     types: [ opened, reopened ]
 
 permissions:
