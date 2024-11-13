@@ -62,14 +62,10 @@ impl Snapshot {
         let fs_client = engine.get_file_system_client();
         let log_url = table_root.join("_delta_log/").unwrap();
 
-        let mut builder = LogSegmentBuilder::new(fs_client.as_ref(), &table_root);
-        if let Some(version) = version {
-            builder = builder.with_end_version(version);
-        }
-        if let Some(checkpoint) = read_last_checkpoint(fs_client.as_ref(), &log_url)? {
-            builder = builder.with_start_checkpoint(checkpoint);
-        }
-        let log_segment = builder.build()?;
+        let log_segment = LogSegmentBuilder::new()
+            .with_end_version_opt(version)
+            .with_start_checkpoint_opt(read_last_checkpoint(fs_client.as_ref(), &log_url)?)
+            .build(fs_client.as_ref(), &table_root)?;
 
         Self::try_new_from_log_segment(table_root, log_segment, engine)
     }
