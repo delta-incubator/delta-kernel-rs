@@ -17,9 +17,11 @@ use url::Url;
 
 /// A [`LogSegment`] represents a contiguous section of the log and is made up of checkpoint files
 /// and commit files. It is built with [`LogSegmentBuilder`], and guarantees the following:
-///     1. Commit file versions will be less than or equal to `end_version` if specified.
-///     2. Commit file versions will be greater than or equal to `start_version` if specified.
-///     3. Commit file versions will be greater than the most recent checkpoint's version.
+///     1. Commit/checkpoint file versions will be less than or equal to `end_version` if specified.
+///     2. Commit/checkpoint file versions will be greater than or equal to `start_version` if specified.
+///     3. If checkpoint(s) is/are present in the range, only commits with versions greater than the most 
+///        recent checkpoint version are retained. Checkpoints can be omitted (and this rule skipped)
+///        whenever the `LogSegment` is created. See [`LogSegmentBuilder::with_omit_checkpoint_files`].
 ///
 /// [`LogSegment`] is used in both  [`Snapshot`] and in [`TableChanges`] to hold commit files and
 /// checkpoint files.
@@ -128,7 +130,7 @@ impl LogSegment {
 pub(crate) struct LogSegmentBuilder<'a> {
     fs_client: &'a dyn FileSystemClient,
     table_root: &'a Url,
-    checkpoint: Option<CheckpointMetadata>,
+    start_checkpoint: Option<CheckpointMetadata>,
     start_version: Option<Version>,
     end_version: Option<Version>,
     reversed_commit_files: bool,
@@ -146,8 +148,8 @@ impl<'a> LogSegmentBuilder<'a> {
             omit_checkpoint_files: false,
         }
     }
-    /// Optionally provide a checkpoint hint that results from reading the `last_checkpoint` file.
-    pub(crate) fn with_checkpoint(mut self, checkpoint: CheckpointMetadata) -> Self {
+    /// Optionally provide checkpoint metadata to start the log segment from (e.g. from reading the `last_checkpoint` file).
+    pub(crate) fn with_start_checkpoint(mut self, checkpoint: CheckpointMetadata) -> Self {
         self.checkpoint = Some(checkpoint);
         self
     }
@@ -267,13 +269,12 @@ impl<'a> LogSegmentBuilder<'a> {
 
         for meta_res in fs_client.list_from(&start_from)? {
             let meta = meta_res?;
-            let parsed_path = ParsedLogPath::try_from(meta)?;
             // TODO this filters out .crc files etc which start with "." - how do we want to use these kind of files?
-            if let Some(parsed_path) = parsed_path {
+            if let Some(parsed_path) = ParsedLogPath::try_from(meta)? {
                 if parsed_path.is_commit() {
                     commit_files.push(parsed_path);
                 } else if parsed_path.is_checkpoint() {
-                    let path_version = parsed_path.version as i64;
+                    let path_version = parsed_path.version.try_into()?;
                     match path_version.cmp(&max_checkpoint_version) {
                         Ordering::Greater => {
                             max_checkpoint_version = path_version;
@@ -465,11 +466,8 @@ mod tests {
             (log_segment.commit_files, log_segment.checkpoint_files);
 
         assert_eq!(checkpoint_files.len(), 1);
-        println!("checkpoint: {:?}", checkpoint_files);
-        println!("commits: {:?}", commit_files);
         assert_eq!(commit_files.len(), 2);
         assert_eq!(checkpoint_files[0].version, 5);
-        println!("commitfiles: {:?}", commit_files);
         assert_eq!(commit_files[0].version, 7);
         assert_eq!(commit_files[1].version, 6);
     }

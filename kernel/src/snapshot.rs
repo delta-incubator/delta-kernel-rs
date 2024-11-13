@@ -207,7 +207,6 @@ mod tests {
     use crate::engine::default::executor::tokio::TokioBackgroundExecutor;
     use crate::engine::default::filesystem::ObjectStoreFileSystemClient;
     use crate::engine::sync::SyncEngine;
-    use crate::path::ParsedLogPath;
     use crate::schema::StructType;
 
     #[test]
