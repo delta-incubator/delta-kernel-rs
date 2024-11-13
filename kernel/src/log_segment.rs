@@ -21,9 +21,9 @@ use url::Url;
 ///     2. Commit file versions will be greater than or equal to `start_version` if specified.
 ///     3. If checkpoint(s) is/are present in the range, only commits with versions greater than the most
 ///        recent checkpoint version are retained. Checkpoints can be omitted (and this rule skipped)
-///        whenever the `LogSegment` is created. See [`LogSegmentBuilder::with_omit_checkpoint_parts`].
+///        whenever the `LogSegment` is created. See [`LogSegmentBuilder::with_omit_checkpoint_files`].
 ///
-/// [`LogSegment`] is used in both  [`Snapshot`] and in [`TableChanges`] to hold commit files and
+/// [`LogSegment`] is used in both  [`Snapshot`] and in `TableChanges` to hold commit files and
 /// checkpoint files.
 /// - For a Snapshot at version `n`: Its LogSegment is made up of zero or one checkpoint, and all
 ///   commits between the checkpoint and the end version `n`.
@@ -135,7 +135,7 @@ pub(crate) struct LogSegmentBuilder {
     /// ascending order. Otherwise if it is set to `false`, the commit files are sorted in
     /// descending order. This is set to `false` by default.
     sort_commit_files_ascending: bool,
-    omit_checkpoint_parts: bool,
+    omit_checkpoint_files: bool,
 }
 impl LogSegmentBuilder {
     pub(crate) fn new() -> Self {
@@ -144,7 +144,7 @@ impl LogSegmentBuilder {
             start_version: None,
             end_version: None,
             sort_commit_files_ascending: false,
-            omit_checkpoint_parts: false,
+            omit_checkpoint_files: false,
         }
     }
     /// Provide checkpoint metadata to start the log segment from (e.g. from reading the `last_checkpoint` file).
@@ -206,8 +206,8 @@ impl LogSegmentBuilder {
     /// Specify that the [`LogSegment`] will not have any checkpoint files. It will only be made
     /// up of commit files.
     #[allow(unused)]
-    pub(crate) fn with_omit_checkpoint_parts(mut self) -> Self {
-        self.omit_checkpoint_parts = true;
+    pub(crate) fn with_omit_checkpoint_files(mut self) -> Self {
+        self.omit_checkpoint_files = true;
         self
     }
     /// Specify that the commits in the [`LogSegment`] will be sorted by version in ascending
@@ -233,7 +233,7 @@ impl LogSegmentBuilder {
             start_version,
             end_version,
             sort_commit_files_ascending,
-            omit_checkpoint_parts,
+            omit_checkpoint_files,
         } = self;
         let log_root = table_root.join("_delta_log/").unwrap();
         let (mut sorted_commit_files, mut checkpoint_parts) = match (start_checkpoint, end_version)
@@ -245,7 +245,7 @@ impl LogSegmentBuilder {
             _ => list_log_files_from_version(fs_client, &log_root, None)?,
         };
 
-        if omit_checkpoint_parts {
+        if omit_checkpoint_files {
             checkpoint_parts.clear();
         }
 
@@ -593,7 +593,7 @@ mod tests {
             None,
         );
         let log_segment = LogSegmentBuilder::new()
-            .with_omit_checkpoint_parts()
+            .with_omit_checkpoint_files()
             .build(client.as_ref(), &table_root)
             .unwrap();
         let (commit_files, checkpoint_parts) =
@@ -632,7 +632,7 @@ mod tests {
         let log_segment = LogSegmentBuilder::new()
             .with_end_version(5)
             .with_start_version(2)
-            .with_omit_checkpoint_parts()
+            .with_omit_checkpoint_files()
             .with_sort_commit_files_ascending()
             .build(client.as_ref(), &table_root)
             .unwrap();
@@ -651,7 +651,7 @@ mod tests {
         // |                    Specify no start or end version                           |
         // --------------------------------------------------------------------------------
         let log_segment = LogSegmentBuilder::new()
-            .with_omit_checkpoint_parts()
+            .with_omit_checkpoint_files()
             .with_sort_commit_files_ascending()
             .build(client.as_ref(), &table_root)
             .unwrap();
