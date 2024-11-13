@@ -21,7 +21,7 @@ use url::Url;
 ///     2. Commit/checkpoint file versions will be greater than or equal to `start_version` if specified.
 ///     3. If checkpoint(s) is/are present in the range, only commits with versions greater than the most
 ///        recent checkpoint version are retained. Checkpoints can be omitted (and this rule skipped)
-///        whenever the `LogSegment` is created. See [`LogSegmentBuilder::with_omit_checkpoint_files`].
+///        whenever the `LogSegment` is created. See [`LogSegmentBuilder::with_omit_checkpoint_parts`].
 ///
 /// [`LogSegment`] is used in both  [`Snapshot`] and in [`TableChanges`] to hold commit files and
 /// checkpoint files.
@@ -37,7 +37,7 @@ pub(crate) struct LogSegment {
     /// Commit files in the log segment
     pub commit_files: Vec<ParsedLogPath>,
     /// Checkpoint files in the log segment.
-    pub checkpoint_files: Vec<ParsedLogPath>,
+    pub checkpoint_parts: Vec<ParsedLogPath>,
 }
 
 impl LogSegment {
@@ -70,14 +70,14 @@ impl LogSegment {
             .read_json_files(&commit_files, commit_read_schema, meta_predicate.clone())?
             .map_ok(|batch| (batch, true));
 
-        let checkpoint_files: Vec<_> = self
-            .checkpoint_files
+        let checkpoint_parts: Vec<_> = self
+            .checkpoint_parts
             .iter()
             .map(|f| f.location.clone())
             .collect();
         let checkpoint_stream = engine
             .get_parquet_handler()
-            .read_parquet_files(&checkpoint_files, checkpoint_read_schema, meta_predicate)?
+            .read_parquet_files(&checkpoint_parts, checkpoint_read_schema, meta_predicate)?
             .map_ok(|batch| (batch, false));
 
         Ok(commit_stream.chain(checkpoint_stream))
@@ -134,7 +134,7 @@ pub(crate) struct LogSegmentBuilder<'a> {
     start_version: Option<Version>,
     end_version: Option<Version>,
     commit_files_sorted_ascending: bool,
-    omit_checkpoint_files: bool,
+    omit_checkpoint_parts: bool,
 }
 impl<'a> LogSegmentBuilder<'a> {
     pub(crate) fn new(fs_client: &'a dyn FileSystemClient, table_root: &'a Url) -> Self {
@@ -145,7 +145,7 @@ impl<'a> LogSegmentBuilder<'a> {
             start_version: None,
             end_version: None,
             commit_files_sorted_ascending: false,
-            omit_checkpoint_files: false,
+            omit_checkpoint_parts: false,
         }
     }
     /// Optionally provide checkpoint metadata to start the log segment from (e.g. from reading the `last_checkpoint` file).
@@ -177,8 +177,8 @@ impl<'a> LogSegmentBuilder<'a> {
     /// Optionally specify that the [`LogSegment`] will not have any checkpoint files. It will only
     /// be made up of commit files.
     #[allow(unused)]
-    pub(crate) fn omit_checkpoint_files(mut self) -> Self {
-        self.omit_checkpoint_files = true;
+    pub(crate) fn omit_checkpoint_parts(mut self) -> Self {
+        self.omit_checkpoint_parts = true;
         self
     }
     /// Optionally specify that the commits in the [`LogSegment`] will be in order. By default, the
@@ -202,10 +202,10 @@ impl<'a> LogSegmentBuilder<'a> {
             start_version,
             end_version,
             commit_files_sorted_ascending,
-            omit_checkpoint_files,
+            omit_checkpoint_parts,
         } = self;
         let log_root = table_root.join("_delta_log/").unwrap();
-        let (mut sorted_commit_files, mut sorted_checkpoint_files) =
+        let (mut sorted_commit_files, mut sorted_checkpoint_parts) =
             match (start_checkpoint, end_version) {
                 (Some(cp), None) => {
                     Self::list_log_files_with_checkpoint(&cp, fs_client, &log_root)?
@@ -216,8 +216,8 @@ impl<'a> LogSegmentBuilder<'a> {
                 _ => Self::list_log_files_from_version(fs_client, &log_root, None)?,
             };
 
-        if omit_checkpoint_files {
-            sorted_checkpoint_files.clear();
+        if omit_checkpoint_parts {
+            sorted_checkpoint_parts.clear();
         }
 
         // Commit file versions must satisfy the following:
@@ -227,7 +227,7 @@ impl<'a> LogSegmentBuilder<'a> {
         if let Some(start_version) = start_version {
             sorted_commit_files.retain(|log_path| log_path.version >= start_version);
         }
-        if let Some(checkpoint_file) = sorted_checkpoint_files.first() {
+        if let Some(checkpoint_file) = sorted_checkpoint_parts.first() {
             sorted_commit_files.retain(|log_path| checkpoint_file.version < log_path.version);
         }
         if let Some(end_version) = end_version {
@@ -237,7 +237,7 @@ impl<'a> LogSegmentBuilder<'a> {
         // get the effective version from chosen files
         let version_eff = sorted_commit_files
             .last()
-            .or(sorted_checkpoint_files.first())
+            .or(sorted_checkpoint_parts.first())
             .ok_or(Error::MissingVersion)? // TODO: A more descriptive error
             .version;
         if let Some(end_version) = end_version {
@@ -257,7 +257,7 @@ impl<'a> LogSegmentBuilder<'a> {
             end_version: version_eff,
             log_root,
             commit_files: sorted_commit_files,
-            checkpoint_files: sorted_checkpoint_files,
+            checkpoint_parts: sorted_checkpoint_parts,
         })
     }
     pub(crate) fn list_log_files_from_version(
@@ -270,7 +270,7 @@ impl<'a> LogSegmentBuilder<'a> {
         let start_from = log_root.join(&version_prefix)?;
 
         let mut max_checkpoint_version = version;
-        let mut checkpoint_files = vec![];
+        let mut checkpoint_parts = vec![];
         // We expect 10 commit files per checkpoint, so start with that size. We could adjust this based
         // on config at some point
         let mut commit_files = Vec::with_capacity(10);
@@ -287,16 +287,16 @@ impl<'a> LogSegmentBuilder<'a> {
                 let path_version = parsed_path.version;
                 match max_checkpoint_version {
                     None => {
-                        checkpoint_files.push(parsed_path);
+                        checkpoint_parts.push(parsed_path);
                         max_checkpoint_version = Some(path_version);
                     }
                     Some(checkpoint_version) => match path_version.cmp(&checkpoint_version) {
                         Ordering::Greater => {
                             max_checkpoint_version = Some(path_version);
-                            checkpoint_files.clear();
-                            checkpoint_files.push(parsed_path);
+                            checkpoint_parts.clear();
+                            checkpoint_parts.push(parsed_path);
                         }
-                        Ordering::Equal => checkpoint_files.push(parsed_path),
+                        Ordering::Equal => checkpoint_parts.push(parsed_path),
                         Ordering::Less => {}
                     },
                 }
@@ -311,7 +311,7 @@ impl<'a> LogSegmentBuilder<'a> {
             commit_files
         );
 
-        Ok((commit_files, checkpoint_files))
+        Ok((commit_files, checkpoint_parts))
     }
 
     /// List all log files after a given checkpoint.
@@ -320,13 +320,13 @@ impl<'a> LogSegmentBuilder<'a> {
         fs_client: &dyn FileSystemClient,
         log_root: &Url,
     ) -> DeltaResult<(Vec<ParsedLogPath>, Vec<ParsedLogPath>)> {
-        let (commit_files, checkpoint_files) = Self::list_log_files_from_version(
+        let (commit_files, checkpoint_parts) = Self::list_log_files_from_version(
             fs_client,
             log_root,
             Some(checkpoint_metadata.version),
         )?;
 
-        let Some(latest_checkpoint) = checkpoint_files.last() else {
+        let Some(latest_checkpoint) = checkpoint_parts.last() else {
             // TODO: We could potentially recover here
             return Err(Error::generic(
                 "Had a _last_checkpoint hint but didn't find any checkpoints",
@@ -339,14 +339,14 @@ impl<'a> LogSegmentBuilder<'a> {
                 checkpoint_metadata.version,
                 latest_checkpoint.version
             );
-        } else if checkpoint_files.len() != checkpoint_metadata.parts.unwrap_or(1) {
+        } else if checkpoint_parts.len() != checkpoint_metadata.parts.unwrap_or(1) {
             return Err(Error::Generic(format!(
                 "_last_checkpoint indicated that checkpoint should have {} parts, but it has {}",
                 checkpoint_metadata.parts.unwrap_or(1),
-                checkpoint_files.len()
+                checkpoint_parts.len()
             )));
         }
-        Ok((commit_files, checkpoint_files))
+        Ok((commit_files, checkpoint_parts))
     }
 }
 #[cfg(test)]
@@ -471,12 +471,12 @@ mod tests {
             .with_start_checkpoint(checkpoint_metadata)
             .build()
             .unwrap();
-        let (commit_files, checkpoint_files) =
-            (log_segment.commit_files, log_segment.checkpoint_files);
+        let (commit_files, checkpoint_parts) =
+            (log_segment.commit_files, log_segment.checkpoint_parts);
 
-        assert_eq!(checkpoint_files.len(), 1);
+        assert_eq!(checkpoint_parts.len(), 1);
         assert_eq!(commit_files.len(), 2);
-        assert_eq!(checkpoint_files[0].version, 5);
+        assert_eq!(checkpoint_parts[0].version, 5);
         assert_eq!(commit_files[0].version, 7);
         assert_eq!(commit_files[1].version, 6);
     }
