@@ -29,6 +29,8 @@ use url::Url;
 ///   commits between the checkpoint and the end version `n`.
 /// - For a TableChanges between versions `a` and `b`: Its LogSegment is made up of zero
 /// checkpoints and all commits between versions `a` and `b`
+///
+/// [`Snapshot`]: crate::snapshot::Snapshot
 #[derive(Debug)]
 #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
 pub(crate) struct LogSegment {
