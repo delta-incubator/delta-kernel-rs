@@ -2,20 +2,14 @@
 name: Auto-assign PR
 
 on:
-  pull_request:
-    types: [opened]
+  pull_request_target:
+    types: [ opened ]
 
 permissions:
-  pull-request: write
+  pull-requests: write
 
 jobs:
-  auto-assign:
+  assign-author:
     runs-on: ubuntu-latest
-    concurrency:
-      # Only run one at a time for each user.
-      group: ${{ github.actor }}-issue-assign
     steps:
-      - uses: actions-ecosystem/action-add-assignees@v1
-        with:
-          github_token: ${{ secrets.github_token }}
-          assignees: ${{ github.actor }}
+      - uses: toshimaru/auto-author-assign@v2.1.1
