@@ -669,6 +669,7 @@ mod tests {
 
     #[test]
     fn test_non_contiguous_log() {
+        // Commit with version 1 is missing
         let (client, table_root) =
             build_log_with_paths_and_checkpoint(&[get_path(0, "json"), get_path(2, "json")], None);
         let log_segment_res = LogSegmentBuilder::new().build(client.as_ref(), &table_root);
