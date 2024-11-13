@@ -1,6 +1,7 @@
 //! Provides parsing and manipulation of the various actions defined in the [Delta
 //! specification](https://github.com/delta-io/delta/blob/master/PROTOCOL.md)
 
+use std::any::type_name;
 use std::collections::{HashMap, HashSet};
 use std::fmt::{Debug, Display};
 use std::hash::Hash;
@@ -124,6 +125,8 @@ impl Metadata {
 
 #[derive(Default, Debug, Clone, PartialEq, Eq, Schema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+// TODO move to another module so that we disallow constructing this struct without using the
+// try_new function.
 pub struct Protocol {
     /// The minimum version of the Delta read protocol that a client must implement
     /// in order to correctly read this table
@@ -261,10 +264,20 @@ where
     <T as FromStr>::Err: Display,
     T: Debug + FromStr + Hash + Eq,
 {
+    let error = |unsupported, unsupported_or_unknown| {
+        let supported = supported_features.iter().collect::<Vec<_>>();
+        let features_type = type_name::<T>()
+            .rsplit("::")
+            .next()
+            .unwrap_or("table features");
+        Error::Unsupported(format!(
+            "{} {} {:?}. Supported {} are {:?}",
+            unsupported_or_unknown, features_type, unsupported, features_type, supported
+        ))
+    };
     let parsed_features: HashSet<T> = table_features
         .iter()
-        .map(|s| T::from_str(s))
-        .map(|f| f.map_err(|e| Error::unsupported(e.to_string())))
+        .map(|s| T::from_str(s).map_err(|_| error(vec![s.to_string()], "Unknown")))
         .collect::<Result<_, Error>>()?;
     parsed_features
         .is_subset(supported_features)
@@ -272,12 +285,9 @@ where
         .ok_or_else(|| {
             let unsupported = parsed_features
                 .difference(supported_features)
+                .map(|f| format!("{:?}", f))
                 .collect::<Vec<_>>();
-            let supported = supported_features.iter().collect::<Vec<_>>();
-            Error::Unsupported(format!(
-                "Unknown table features {:?}. Supported table features are {:?}",
-                unsupported, supported
-            ))
+            error(unsupported, "Unsupported")
         })
 }
 
@@ -751,8 +761,7 @@ mod tests {
             ReaderFeatures::ColumnMapping,
             ReaderFeatures::DeletionVectors,
         ]
-        .iter()
-        .map(|s| s.to_string())
+        .into_iter()
         .collect();
         let table_features = vec![ReaderFeatures::ColumnMapping.to_string()];
         ensure_supported_features(&table_features, &supported_features).unwrap();
@@ -762,7 +771,7 @@ mod tests {
         let error = ensure_supported_features(&table_features, &supported_features).unwrap_err();
         match error {
             Error::Unsupported(e) => assert_eq!(e,
-                "Unknown table features [\"idk\"]. Supported table features are [\"columnMapping\", \"deletionVectors\"]"
+                "Unknown ReaderFeatures [\"idk\"]. Supported ReaderFeatures are [ColumnMapping, DeletionVectors]"
             ),
             _ => panic!("Expected unsupported error"),
         }
