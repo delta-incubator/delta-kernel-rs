@@ -2,6 +2,7 @@
 //! the different versions
 
 use std::borrow::Cow;
+use std::ops::Deref;
 use std::path::PathBuf;
 
 use url::Url;
