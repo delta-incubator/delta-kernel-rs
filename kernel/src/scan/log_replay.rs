@@ -6,12 +6,13 @@ use tracing::debug;
 
 use super::data_skipping::DataSkippingFilter;
 use super::ScanData;
-use crate::actions::{get_log_schema, Add, Remove, ADD_NAME};
 use crate::actions::visitors::{AddVisitor, RemoveVisitor};
+use crate::actions::{get_log_schema, Add, Remove, ADD_NAME};
 use crate::engine_data::{GetData, RowVisitorBase, TypedGetData};
 use crate::expressions::{column_expr, ColumnName, Expression, ExpressionRef};
 use crate::schema::{ColumnNamesAndTypes, DataType, MapType, SchemaRef, StructField, StructType};
-use crate::{DeltaResult, Engine, EngineData, ExpressionHandler, RowVisitor};
+use crate::utils::require;
+use crate::{DeltaResult, Engine, EngineData, Error, ExpressionHandler, RowVisitor};
 
 /// The subset of file action fields that uniquely identifies it in the log, used for deduplication
 /// of adds and removes during log replay.
@@ -77,6 +78,14 @@ impl RowVisitorBase for AddRemoveVisitor {
     }
 
     fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<()> {
+        let expected_getters = if self.is_log_batch { 29 } else { 15 };
+        require!(
+            getters.len() == expected_getters,
+            Error::InternalError(format!(
+                "Wrong number of AddRemoveVisitor getters: {}",
+                getters.len()
+            ))
+        );
         for i in 0..row_count {
             // Add will have a path at index 0 if it is valid
             if let Some(path) = getters[0].get_opt(i, "add.path")? {

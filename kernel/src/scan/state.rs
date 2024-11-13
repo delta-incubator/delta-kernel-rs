@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::sync::LazyLock;
 
 use crate::expressions::ColumnName;
+use crate::utils::require;
 use crate::{
     actions::{
         deletion_vector::{treemap_to_bools, DeletionVectorDescriptor},
@@ -11,7 +12,7 @@ use crate::{
     },
     engine_data::{GetData, RowVisitorBase, TypedGetData as _},
     features::ColumnMappingMode,
-    schema::{ColumnNamesAndTypes, SchemaRef, DataType},
+    schema::{ColumnNamesAndTypes, DataType, SchemaRef},
     DeltaResult, Engine, EngineData, Error, RowVisitor,
 };
 use serde::{Deserialize, Serialize};
@@ -150,6 +151,13 @@ impl<T> RowVisitorBase for ScanFileVisitor<'_, T> {
         NAMES_AND_TYPES.as_ref()
     }
     fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<()> {
+        require!(
+            getters.len() == 10,
+            Error::InternalError(format!(
+                "Wrong number of ScanFileVisitor getters: {}",
+                getters.len()
+            ))
+        );
         for row_index in 0..row_count {
             if !self.selection_vector[row_index] {
                 // skip skipped rows

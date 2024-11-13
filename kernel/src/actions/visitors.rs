@@ -4,14 +4,18 @@
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
-use crate::engine_data::{GetData, TypedGetData, RowVisitorBase};
+use crate::engine_data::{GetData, RowVisitorBase, TypedGetData};
 use crate::expressions::{column_name, ColumnName};
 use crate::schema::{ColumnNamesAndTypes, DataType};
-use crate::{DeltaResult};
+use crate::utils::require;
+use crate::{DeltaResult, Error};
 
 use super::deletion_vector::DeletionVectorDescriptor;
 use super::schemas::ToSchema as _;
-use super::{Add, Format, Metadata, Protocol, Remove, SetTransaction, ADD_NAME, METADATA_NAME, PROTOCOL_NAME, REMOVE_NAME, SET_TRANSACTION_NAME};
+use super::{
+    Add, Format, Metadata, Protocol, Remove, SetTransaction, ADD_NAME, METADATA_NAME,
+    PROTOCOL_NAME, REMOVE_NAME, SET_TRANSACTION_NAME,
+};
 
 #[derive(Default)]
 #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
@@ -27,6 +31,13 @@ impl MetadataVisitor {
         id: String,
         getters: &[&'a dyn GetData<'a>],
     ) -> DeltaResult<Metadata> {
+        require!(
+            getters.len() == 9,
+            Error::InternalError(format!(
+                "Wrong number of MetadataVisitor getters: {}",
+                getters.len()
+            ))
+        );
         let name: Option<String> = getters[1].get_opt(row_index, "metadata.name")?;
         let description: Option<String> = getters[2].get_opt(row_index, "metadata.description")?;
         // get format out of primitives
@@ -82,12 +93,18 @@ pub(crate) struct SelectionVectorVisitor {
 /// A single non-nullable BOOL column
 impl RowVisitorBase for SelectionVectorVisitor {
     fn selected_column_names_and_types(&self) -> (&'static [ColumnName], &'static [DataType]) {
-        static NAMES_AND_TYPES: LazyLock<ColumnNamesAndTypes> = LazyLock::new(|| {
-            (vec![column_name!("output")], vec![DataType::BOOLEAN]).into()
-        });
+        static NAMES_AND_TYPES: LazyLock<ColumnNamesAndTypes> =
+            LazyLock::new(|| (vec![column_name!("output")], vec![DataType::BOOLEAN]).into());
         NAMES_AND_TYPES.as_ref()
     }
     fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<()> {
+        require!(
+            getters.len() == 1,
+            Error::InternalError(format!(
+                "Wrong number of SelectionVectorVisitor getters: {}",
+                getters.len()
+            ))
+        );
         for i in 0..row_count {
             self.selection_vector
                 .push(getters[0].get(i, "selectionvector.output")?);
@@ -110,6 +127,13 @@ impl ProtocolVisitor {
         min_reader_version: i32,
         getters: &[&'a dyn GetData<'a>],
     ) -> DeltaResult<Protocol> {
+        require!(
+            getters.len() == 4,
+            Error::InternalError(format!(
+                "Wrong number of ProtocolVisitor getters: {}",
+                getters.len()
+            ))
+        );
         let min_writer_version: i32 = getters[1].get(row_index, "protocol.min_writer_version")?;
         let reader_features: Option<Vec<_>> =
             getters[2].get_opt(row_index, "protocol.reader_features")?;
@@ -158,6 +182,13 @@ impl AddVisitor {
         path: String,
         getters: &[&'a dyn GetData<'a>],
     ) -> DeltaResult<Add> {
+        require!(
+            getters.len() == 15,
+            Error::InternalError(format!(
+                "Wrong number of AddVisitor getters: {}",
+                getters.len()
+            ))
+        );
         let partition_values: HashMap<_, _> = getters[1].get(row_index, "add.partitionValues")?;
         let size: i64 = getters[2].get(row_index, "add.size")?;
         let modification_time: i64 = getters[3].get(row_index, "add.modificationTime")?;
@@ -226,6 +257,13 @@ impl RemoveVisitor {
         path: String,
         getters: &[&'a dyn GetData<'a>],
     ) -> DeltaResult<Remove> {
+        require!(
+            getters.len() == 14,
+            Error::InternalError(format!(
+                "Wrong number of RemoveVisitor getters: {}",
+                getters.len()
+            ))
+        );
         let deletion_timestamp: Option<i64> =
             getters[1].get_opt(row_index, "remove.deletionTimestamp")?;
         let data_change: bool = getters[2].get(row_index, "remove.dataChange")?;
@@ -314,6 +352,13 @@ impl SetTransactionVisitor {
         app_id: String,
         getters: &[&'a dyn GetData<'a>],
     ) -> DeltaResult<SetTransaction> {
+        require!(
+            getters.len() == 3,
+            Error::InternalError(format!(
+                "Wrong number of SetTransactionVisitor getters: {}",
+                getters.len()
+            ))
+        );
         let version: i64 = getters[1].get(row_index, "txn.version")?;
         let last_updated: Option<i64> = getters[2].get_opt(row_index, "txn.lastUpdated")?;
         Ok(SetTransaction {
@@ -479,8 +524,7 @@ mod tests {
             .parse_json(string_array_to_engine_data(json_strings), output_schema)
             .unwrap();
         let mut add_visitor = AddVisitor::default();
-        add_visitor.visit_rows_of(batch.as_ref())
-            .unwrap();
+        add_visitor.visit_rows_of(batch.as_ref()).unwrap();
         let add1 = Add {
             path: "c1=4/c2=c/part-00003-f525f459-34f9-46f5-82d6-d42121d883fd.c000.snappy.parquet".into(),
             partition_values: HashMap::from([
@@ -541,8 +585,7 @@ mod tests {
             .parse_json(string_array_to_engine_data(json_strings), output_schema)
             .unwrap();
         let mut txn_visitor = SetTransactionVisitor::default();
-        txn_visitor.visit_rows_of(batch.as_ref())
-            .unwrap();
+        txn_visitor.visit_rows_of(batch.as_ref()).unwrap();
         let mut actual = txn_visitor.set_transactions;
         assert_eq!(
             actual.remove("myApp2"),

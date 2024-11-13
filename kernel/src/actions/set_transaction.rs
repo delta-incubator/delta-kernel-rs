@@ -3,7 +3,9 @@ use std::sync::{Arc, LazyLock};
 use crate::actions::visitors::SetTransactionVisitor;
 use crate::actions::{get_log_schema, SetTransaction, SET_TRANSACTION_NAME};
 use crate::snapshot::Snapshot;
-use crate::{DeltaResult, Engine, EngineData, Expression as Expr, ExpressionRef, RowVisitor as _, SchemaRef};
+use crate::{
+    DeltaResult, Engine, EngineData, Expression as Expr, ExpressionRef, RowVisitor as _, SchemaRef,
+};
 
 pub use crate::actions::visitors::SetTransactionMap;
 pub struct SetTransactionScanner {

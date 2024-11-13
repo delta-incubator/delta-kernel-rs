@@ -2,16 +2,17 @@ use delta_kernel::actions::visitors::{
     AddVisitor, MetadataVisitor, ProtocolVisitor, RemoveVisitor, SetTransactionVisitor,
 };
 use delta_kernel::actions::{
-    get_log_schema, METADATA_NAME, PROTOCOL_NAME, REMOVE_NAME, SET_TRANSACTION_NAME,
+    get_log_schema, COMMIT_INFO_NAME, METADATA_NAME, PROTOCOL_NAME, REMOVE_NAME,
+    SET_TRANSACTION_NAME,
 };
 use delta_kernel::engine::default::executor::tokio::TokioBackgroundExecutor;
 use delta_kernel::engine::default::DefaultEngine;
-use delta_kernel::engine_data::{RowVisitorBase, GetData, TypedGetData};
+use delta_kernel::engine_data::{GetData, RowVisitorBase, TypedGetData};
 use delta_kernel::expressions::ColumnName;
 use delta_kernel::scan::state::{DvInfo, Stats};
 use delta_kernel::scan::ScanBuilder;
 use delta_kernel::schema::{ColumnNamesAndTypes, DataType};
-use delta_kernel::{DeltaResult, RowVisitor as _, Table};
+use delta_kernel::{DeltaResult, Error, RowVisitor as _, Table};
 
 use std::collections::HashMap;
 use std::process::ExitCode;
@@ -87,19 +88,26 @@ struct LogVisitor {
     protocol_offset: usize,
     metadata_offset: usize,
     set_transaction_offset: usize,
+    commit_info_offset: usize,
     previous_rows_seen: usize,
 }
 
 impl LogVisitor {
     fn new() -> LogVisitor {
+        // NOTE: Each `position` call consumes the first item of the searched-for batch. So we have
+        // to add one to each `prev_offset`. But the first call starts from actual first, so we
+        // manually skip the first entry to make the first call behavior match the other calls.
         let mut names = NAMES_AND_TYPES.as_ref().0.iter();
+        names.next();
+
         let mut next_offset =
-            |prev_offset, name| prev_offset + names.position(|n| n[0] == name).unwrap();
+            |prev_offset, name| prev_offset + 1 + names.position(|n| n[0] == name).unwrap();
         let add_offset = 0;
         let remove_offset = next_offset(add_offset, REMOVE_NAME);
-        let protocol_offset = next_offset(remove_offset, PROTOCOL_NAME);
-        let metadata_offset = next_offset(protocol_offset, METADATA_NAME);
-        let set_transaction_offset = next_offset(metadata_offset, SET_TRANSACTION_NAME);
+        let metadata_offset = next_offset(remove_offset, METADATA_NAME);
+        let protocol_offset = next_offset(metadata_offset, PROTOCOL_NAME);
+        let set_transaction_offset = next_offset(protocol_offset, SET_TRANSACTION_NAME);
+        let commit_info_offset = next_offset(set_transaction_offset, COMMIT_INFO_NAME);
         LogVisitor {
             actions: vec![],
             add_offset,
@@ -107,6 +115,7 @@ impl LogVisitor {
             protocol_offset,
             metadata_offset,
             set_transaction_offset,
+            commit_info_offset,
             previous_rows_seen: 0,
         }
     }
@@ -119,46 +128,60 @@ impl RowVisitorBase for LogVisitor {
         NAMES_AND_TYPES.as_ref()
     }
     fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<()> {
+        if getters.len() != 50 {
+            return Err(Error::InternalError(format!(
+                "Wrong number of LogVisitor getters: {}",
+                getters.len()
+            )));
+        }
         for i in 0..row_count {
             if let Some(path) = getters[self.add_offset].get_opt(i, "add.path")? {
                 self.actions.push(Action::Add(
-                    AddVisitor::visit_add(i, path, &getters[self.add_offset..])?,
+                    AddVisitor::visit_add(i, path, &getters[self.add_offset..self.remove_offset])?,
                     self.previous_rows_seen + i,
                 ));
-            }
-            if let Some(path) = getters[self.remove_offset].get_opt(i, "remove.path")? {
+            } else if let Some(path) = getters[self.remove_offset].get_opt(i, "remove.path")? {
                 self.actions.push(Action::Remove(
-                    RemoveVisitor::visit_remove(i, path, &getters[self.remove_offset..])?,
+                    RemoveVisitor::visit_remove(
+                        i,
+                        path,
+                        &getters[self.remove_offset..self.metadata_offset],
+                    )?,
                     self.previous_rows_seen + i,
                 ));
-            }
-            if let Some(id) = getters[self.metadata_offset].get_opt(i, "metadata.id")? {
+            } else if let Some(id) = getters[self.metadata_offset].get_opt(i, "metadata.id")? {
                 self.actions.push(Action::Metadata(
-                    MetadataVisitor::visit_metadata(i, id, &getters[self.metadata_offset..])?,
+                    MetadataVisitor::visit_metadata(
+                        i,
+                        id,
+                        &getters[self.metadata_offset..self.protocol_offset],
+                    )?,
                     self.previous_rows_seen + i,
                 ));
-            }
-            if let Some(min_reader_version) =
+            } else if let Some(min_reader_version) =
                 getters[self.protocol_offset].get_opt(i, "protocol.min_reader_version")?
             {
                 self.actions.push(Action::Protocol(
                     ProtocolVisitor::visit_protocol(
                         i,
                         min_reader_version,
-                        &getters[self.protocol_offset..],
+                        &getters[self.protocol_offset..self.set_transaction_offset],
                     )?,
                     self.previous_rows_seen + i,
                 ));
-            }
-            if let Some(app_id) = getters[self.set_transaction_offset].get_opt(i, "txn.appId")? {
+            } else if let Some(app_id) =
+                getters[self.set_transaction_offset].get_opt(i, "txn.appId")?
+            {
                 self.actions.push(Action::SetTransaction(
                     SetTransactionVisitor::visit_txn(
                         i,
                         app_id,
-                        &getters[self.set_transaction_offset..],
+                        &getters[self.set_transaction_offset..self.commit_info_offset],
                     )?,
                     self.previous_rows_seen + i,
                 ));
+            } else {
+                // TODO: Add CommitInfo support (tricky because all fields are optional)
             }
         }
         self.previous_rows_seen += row_count;

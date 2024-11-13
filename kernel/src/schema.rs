@@ -280,16 +280,12 @@ impl StructType {
     /// NOTE: This method only traverses through `StructType` fields; `MapType` and `ArrayType`
     /// fields are considered leaves even if they contain `StructType` entries/elements.
     #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
-    pub(crate) fn leaves<'s>(
-        &self,
-        own_name: impl Into<Option<&'s str>>,
-    ) -> ColumnNamesAndTypes {
+    pub(crate) fn leaves<'s>(&self, own_name: impl Into<Option<&'s str>>) -> ColumnNamesAndTypes {
         let mut leaves = SchemaLeaves::new(own_name.into());
         let _ = leaves.transform_struct(Cow::Borrowed(self));
         (leaves.names, leaves.types).into()
     }
 }
-
 
 /// Helper for RowVisitor implementations
 #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
@@ -307,7 +303,6 @@ impl From<(Vec<ColumnName>, Vec<DataType>)> for ColumnNamesAndTypes {
         ColumnNamesAndTypes(names, fields)
     }
 }
-
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
