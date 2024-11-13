@@ -62,13 +62,12 @@ impl Snapshot {
         let fs_client = engine.get_file_system_client();
         let log_url = table_root.join("_delta_log/").unwrap();
 
-        let mut builder =
-            LogSegmentBuilder::new(fs_client.as_ref(), &table_root).with_reversed_commit_files();
+        let mut builder = LogSegmentBuilder::new(fs_client.as_ref(), &table_root);
         if let Some(version) = version {
             builder = builder.with_end_version(version);
         }
         if let Some(checkpoint) = read_last_checkpoint(fs_client.as_ref(), &log_url)? {
-            builder = builder.with_checkpoint(checkpoint);
+            builder = builder.with_start_checkpoint(checkpoint);
         }
         let log_segment = builder.build()?;
 
@@ -207,6 +206,7 @@ mod tests {
     use crate::engine::default::executor::tokio::TokioBackgroundExecutor;
     use crate::engine::default::filesystem::ObjectStoreFileSystemClient;
     use crate::engine::sync::SyncEngine;
+    use crate::path::ParsedLogPath;
     use crate::schema::StructType;
 
     #[test]
