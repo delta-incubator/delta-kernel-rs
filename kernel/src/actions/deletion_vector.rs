@@ -48,7 +48,11 @@ impl DeletionVectorDescriptor {
     pub fn unique_id(&self) -> String {
         Self::unique_id_from_parts(&self.storage_type, &self.path_or_inline_dv, self.offset)
     }
-    pub(crate) fn unique_id_from_parts(storage_type: &str, path_or_inline_dv: &str, offset: Option<i32>) -> String {
+    pub(crate) fn unique_id_from_parts(
+        storage_type: &str,
+        path_or_inline_dv: &str,
+        offset: Option<i32>,
+    ) -> String {
         match offset {
             Some(offset) => format!("{storage_type}{path_or_inline_dv}@{offset}"),
             None => format!("{storage_type}{path_or_inline_dv}"),

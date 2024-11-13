@@ -1,8 +1,8 @@
 //! Traits that engines need to implement in order to pass data between themselves and kernel.
 
-use crate::{DeltaResult, Error};
 use crate::expressions::ColumnName;
 use crate::schema::StructField;
+use crate::{DeltaResult, Error};
 
 use tracing::debug;
 
@@ -236,7 +236,11 @@ pub trait EngineData: Send + Sync {
     /// Visits a subset of leaf columns in each row of this data, passing a `GetData` item for each
     /// requested column to the visitor's `visit` method (along with the number of rows of data to
     /// be visited).
-    fn visit_rows(&self, column_names: &[ColumnName], visitor: &mut dyn RowVisitor) -> DeltaResult<()>;
+    fn visit_rows(
+        &self,
+        column_names: &[ColumnName],
+        visitor: &mut dyn RowVisitor,
+    ) -> DeltaResult<()>;
 
     /// Return the number of items (rows) in blob
     fn length(&self) -> usize;

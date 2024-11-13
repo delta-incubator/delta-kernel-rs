@@ -280,7 +280,10 @@ impl StructType {
     ///
     /// NOTE: This method only traverses through `StructType` fields; `MapType` and `ArrayType`
     /// fields are considered leaves even if they contain `StructType` entries/elements.
-    pub fn leaf_fields<'s>(&self, own_name: impl Into<Option<&'s str>>) -> (Vec<ColumnName>, Vec<StructField>) {
+    pub fn leaf_fields<'s>(
+        &self,
+        own_name: impl Into<Option<&'s str>>,
+    ) -> (Vec<ColumnName>, Vec<StructField>) {
         let mut fields = LeafFields::new(own_name.into());
         let _ = fields.transform_struct(Cow::Borrowed(self));
         (fields.names, fields.fields)

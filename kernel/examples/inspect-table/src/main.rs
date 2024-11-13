@@ -1,6 +1,8 @@
-use delta_kernel::actions::{get_log_schema, REMOVE_NAME, PROTOCOL_NAME, METADATA_NAME, SET_TRANSACTION_NAME};
 use delta_kernel::actions::visitors::{
     AddVisitor, MetadataVisitor, ProtocolVisitor, RemoveVisitor, SetTransactionVisitor,
+};
+use delta_kernel::actions::{
+    get_log_schema, METADATA_NAME, PROTOCOL_NAME, REMOVE_NAME, SET_TRANSACTION_NAME,
 };
 use delta_kernel::engine::default::executor::tokio::TokioBackgroundExecutor;
 use delta_kernel::engine::default::DefaultEngine;
@@ -8,8 +10,8 @@ use delta_kernel::engine_data::{GetData, TypedGetData};
 use delta_kernel::expressions::ColumnName;
 use delta_kernel::scan::state::{DvInfo, Stats};
 use delta_kernel::scan::ScanBuilder;
-use delta_kernel::schema::{StructField};
-use delta_kernel::{RowVisitor, DeltaResult, Table};
+use delta_kernel::schema::StructField;
+use delta_kernel::{DeltaResult, RowVisitor, Table};
 
 use std::collections::HashMap;
 use std::process::ExitCode;
@@ -88,16 +90,14 @@ struct LogVisitor {
     previous_rows_seen: usize,
 }
 
-static NAMES_AND_FIELDS: LazyLock<(Vec<ColumnName>, Vec<StructField>)> = LazyLock::new(|| {
-    get_log_schema().leaf_fields(None)
-});
+static NAMES_AND_FIELDS: LazyLock<(Vec<ColumnName>, Vec<StructField>)> =
+    LazyLock::new(|| get_log_schema().leaf_fields(None));
 
 impl LogVisitor {
     fn new() -> LogVisitor {
         let mut names = NAMES_AND_FIELDS.0.iter();
-        let mut next_offset = |prev_offset, name| {
-            prev_offset + names.position(|n| n[0] == name).unwrap()
-        };
+        let mut next_offset =
+            |prev_offset, name| prev_offset + names.position(|n| n[0] == name).unwrap();
         let add_offset = 0;
         let remove_offset = next_offset(add_offset, REMOVE_NAME);
         let protocol_offset = next_offset(remove_offset, PROTOCOL_NAME);

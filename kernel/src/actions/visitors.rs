@@ -6,11 +6,11 @@ use std::sync::LazyLock;
 
 use crate::{
     actions::schemas::ToSchema as _,
-    actions::{ADD_NAME, REMOVE_NAME, METADATA_NAME, PROTOCOL_NAME, SET_TRANSACTION_NAME},
-    expressions::ColumnName,
+    actions::{ADD_NAME, METADATA_NAME, PROTOCOL_NAME, REMOVE_NAME, SET_TRANSACTION_NAME},
     engine_data::{GetData, TypedGetData},
+    expressions::ColumnName,
     schema::{DataType, StructField},
-    RowVisitor, DeltaResult,
+    DeltaResult, RowVisitor,
 };
 
 use super::deletion_vector::DeletionVectorDescriptor;
@@ -58,9 +58,8 @@ impl MetadataVisitor {
     }
 
     pub(crate) fn names_and_fields() -> &'static (Vec<ColumnName>, Vec<StructField>) {
-        static NAMES_AND_FIELDS: LazyLock<(Vec<ColumnName>, Vec<StructField>)> = LazyLock::new(|| {
-            Metadata::to_schema().leaf_fields(METADATA_NAME)
-        });
+        static NAMES_AND_FIELDS: LazyLock<(Vec<ColumnName>, Vec<StructField>)> =
+            LazyLock::new(|| Metadata::to_schema().leaf_fields(METADATA_NAME));
         &NAMES_AND_FIELDS
     }
 }
@@ -89,15 +88,16 @@ pub(crate) struct SelectionVectorVisitor {
 impl RowVisitor for SelectionVectorVisitor {
     /// A single non-nullable BOOL column
     fn selected_leaf_fields(&self) -> &'static [StructField] {
-        static FIELDS: LazyLock<Vec<StructField>> = LazyLock::new(|| vec![
-            StructField::new("selectionvector", DataType::BOOLEAN, false),
-        ]);
+        static FIELDS: LazyLock<Vec<StructField>> = LazyLock::new(|| {
+            let field = StructField::new("selectionVector", DataType::BOOLEAN, false);
+            vec![field]
+        });
         &FIELDS
     }
     fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<()> {
-        let fields = self.selected_leaf_fields();
         for i in 0..row_count {
-            self.selection_vector.push(getters[0].get(i, &fields[0].name)?);
+            self.selection_vector
+                .push(getters[0].get(i, "selectionvector.output")?);
         }
         Ok(())
     }
@@ -132,9 +132,8 @@ impl ProtocolVisitor {
     }
 
     pub(crate) fn names_and_fields() -> &'static (Vec<ColumnName>, Vec<StructField>) {
-        static NAMES_AND_FIELDS: LazyLock<(Vec<ColumnName>, Vec<StructField>)> = LazyLock::new(|| {
-            Protocol::to_schema().leaf_fields(PROTOCOL_NAME)
-        });
+        static NAMES_AND_FIELDS: LazyLock<(Vec<ColumnName>, Vec<StructField>)> =
+            LazyLock::new(|| Protocol::to_schema().leaf_fields(PROTOCOL_NAME));
         &NAMES_AND_FIELDS
     }
 }
@@ -203,9 +202,8 @@ impl AddVisitor {
     }
 
     pub(crate) fn names_and_fields() -> &'static (Vec<ColumnName>, Vec<StructField>) {
-        static NAMES_AND_FIELDS: LazyLock<(Vec<ColumnName>, Vec<StructField>)> = LazyLock::new(|| {
-            Add::to_schema().leaf_fields(ADD_NAME)
-        });
+        static NAMES_AND_FIELDS: LazyLock<(Vec<ColumnName>, Vec<StructField>)> =
+            LazyLock::new(|| Add::to_schema().leaf_fields(ADD_NAME));
         &NAMES_AND_FIELDS
     }
 }
@@ -274,9 +272,8 @@ impl RemoveVisitor {
     }
 
     pub(crate) fn names_and_fields() -> &'static (Vec<ColumnName>, Vec<StructField>) {
-        static NAMES_AND_FIELDS: LazyLock<(Vec<ColumnName>, Vec<StructField>)> = LazyLock::new(|| {
-            Remove::to_schema().leaf_fields(REMOVE_NAME)
-        });
+        static NAMES_AND_FIELDS: LazyLock<(Vec<ColumnName>, Vec<StructField>)> =
+            LazyLock::new(|| Remove::to_schema().leaf_fields(REMOVE_NAME));
         &NAMES_AND_FIELDS
     }
 }
@@ -332,7 +329,7 @@ impl SetTransactionVisitor {
         getters: &[&'a dyn GetData<'a>],
     ) -> DeltaResult<SetTransaction> {
         let version: i64 = getters[1].get(row_index, "txn.version")?;
-        let last_updated: Option<i64> = getters[2].get_long(row_index, "txn.lastUpdated")?;
+        let last_updated: Option<i64> = getters[2].get_opt(row_index, "txn.lastUpdated")?;
         Ok(SetTransaction {
             app_id,
             version,
@@ -341,9 +338,8 @@ impl SetTransactionVisitor {
     }
 
     pub(crate) fn names_and_fields() -> &'static (Vec<ColumnName>, Vec<StructField>) {
-        static NAMES_AND_FIELDS: LazyLock<(Vec<ColumnName>, Vec<StructField>)> = LazyLock::new(|| {
-            SetTransaction::to_schema().leaf_fields(SET_TRANSACTION_NAME)
-        });
+        static NAMES_AND_FIELDS: LazyLock<(Vec<ColumnName>, Vec<StructField>)> =
+            LazyLock::new(|| SetTransaction::to_schema().leaf_fields(SET_TRANSACTION_NAME));
         &NAMES_AND_FIELDS
     }
 }
@@ -408,7 +404,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        actions::{get_log_schema},
+        actions::get_log_schema,
         engine::arrow_data::ArrowEngineData,
         engine::sync::{json::SyncJsonHandler, SyncEngine},
         Engine, EngineData, JsonHandler,
@@ -500,7 +496,9 @@ mod tests {
             .parse_json(string_array_to_engine_data(json_strings), output_schema)
             .unwrap();
         let mut add_visitor = AddVisitor::default();
-        batch.visit_rows(&AddVisitor::names_and_fields().0, &mut add_visitor).unwrap();
+        batch
+            .visit_rows(&AddVisitor::names_and_fields().0, &mut add_visitor)
+            .unwrap();
         let add1 = Add {
             path: "c1=4/c2=c/part-00003-f525f459-34f9-46f5-82d6-d42121d883fd.c000.snappy.parquet".into(),
             partition_values: HashMap::from([
@@ -561,7 +559,12 @@ mod tests {
             .parse_json(string_array_to_engine_data(json_strings), output_schema)
             .unwrap();
         let mut txn_visitor = SetTransactionVisitor::default();
-        batch.visit_rows(&SetTransactionVisitor::names_and_fields().0, &mut txn_visitor).unwrap();
+        batch
+            .visit_rows(
+                &SetTransactionVisitor::names_and_fields().0,
+                &mut txn_visitor,
+            )
+            .unwrap();
         let mut actual = txn_visitor.set_transactions;
         assert_eq!(
             actual.remove("myApp2"),

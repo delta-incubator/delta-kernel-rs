@@ -6,12 +6,12 @@ use tracing::debug;
 
 use super::data_skipping::DataSkippingFilter;
 use super::ScanData;
-use crate::actions::{get_log_add_schema};
+use crate::actions::get_log_add_schema;
 use crate::engine_data::{GetData, TypedGetData};
 use crate::expressions::{column_expr, column_name, ColumnName, Expression, ExpressionRef};
 use crate::scan::DeletionVectorDescriptor;
 use crate::schema::{DataType, MapType, SchemaRef, StructField, StructType};
-use crate::{RowVisitor, DeltaResult, Engine, EngineData, ExpressionHandler};
+use crate::{DeltaResult, Engine, EngineData, ExpressionHandler, RowVisitor};
 
 /// The subset of file action fields that uniquely identifies it in the log, used for deduplication
 /// of adds and removes during log replay.
@@ -48,10 +48,16 @@ impl<'seen> AddRemoveDedupVisitor<'seen> {
 
         let key = FileActionKey::new(path.into(), dv_unique_id);
         if self.seen.contains(&key) {
-            debug!("Ignoring duplicate ({}, {:?}) in scan, is log {}", key.path, key.dv_unique_id, self.is_log_batch);
+            debug!(
+                "Ignoring duplicate ({}, {:?}) in scan, is log {}",
+                key.path, key.dv_unique_id, self.is_log_batch
+            );
             false
         } else {
-            debug!("Including ({}, {:?}) in scan, is log {}", key.path, key.dv_unique_id, self.is_log_batch);
+            debug!(
+                "Including ({}, {:?}) in scan, is log {}",
+                key.path, key.dv_unique_id, self.is_log_batch
+            );
             if self.is_log_batch {
                 // Remember file actions from this batch so we can ignore duplicates as we process
                 // batches from older commit and/or checkpoint files. We don't track checkpoint
@@ -66,16 +72,18 @@ impl<'seen> AddRemoveDedupVisitor<'seen> {
     fn columns_to_select(&self) -> &'static [ColumnName] {
         // WARNING: Must keep this list in sync with the `filter_row` method below. In particular,
         // the `add` columns must come before the `remove` columns, in the same relative order.
-        static ADD_REMOVE_LEAF_COLUMNS: LazyLock<Vec<ColumnName>> = LazyLock::new(|| vec![
-            column_name!("add.path"),
-            column_name!("add.deletionVector.storageType"),
-            column_name!("add.deletionVector.pathOrInlineDv"),
-            column_name!("add.deletionVector.offset"),
-            column_name!("remove.path"),
-            column_name!("remove.deletionVector.storageType"),
-            column_name!("remove.deletionVector.pathOrInlineDv"),
-            column_name!("remove.deletionVector.offset"),
-        ]);
+        static ADD_REMOVE_LEAF_COLUMNS: LazyLock<Vec<ColumnName>> = LazyLock::new(|| {
+            vec![
+                column_name!("add.path"),
+                column_name!("add.deletionVector.storageType"),
+                column_name!("add.deletionVector.pathOrInlineDv"),
+                column_name!("add.deletionVector.offset"),
+                column_name!("remove.path"),
+                column_name!("remove.deletionVector.storageType"),
+                column_name!("remove.deletionVector.pathOrInlineDv"),
+                column_name!("remove.deletionVector.offset"),
+            ]
+        });
 
         let columns_to_select = if self.is_log_batch {
             &ADD_REMOVE_LEAF_COLUMNS[..]
@@ -86,7 +94,10 @@ impl<'seen> AddRemoveDedupVisitor<'seen> {
         };
         debug!(
             "Visiting scan data with schema {:?}",
-            columns_to_select.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            columns_to_select
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
         );
         columns_to_select
     }
@@ -132,7 +143,11 @@ impl<'seen> RowVisitor for AddRemoveDedupVisitor<'seen> {
                 nullable_int.with_name("remove.deletionVector.offset"),
             ]
         });
-        &FIELDS
+        if self.is_log_batch {
+            &FIELDS[..]
+        } else {
+            &FIELDS[..4]
+        }
     }
     // Expected schema:
     // 0 - add.path,
@@ -188,9 +203,8 @@ pub(crate) static SCAN_ROW_SCHEMA: LazyLock<Arc<StructType>> = LazyLock::new(|| 
     ]))
 });
 
-pub(crate) static SCAN_ROW_NAMES_AND_FIELDS: LazyLock<(Vec<ColumnName>, Vec<StructField>)> = LazyLock::new(|| {
-    SCAN_ROW_SCHEMA.leaf_fields(None)
-});
+pub(crate) static SCAN_ROW_NAMES_AND_FIELDS: LazyLock<(Vec<ColumnName>, Vec<StructField>)> =
+    LazyLock::new(|| SCAN_ROW_SCHEMA.leaf_fields(None));
 
 static SCAN_ROW_DATATYPE: LazyLock<DataType> = LazyLock::new(|| SCAN_ROW_SCHEMA.clone().into());
 
@@ -241,10 +255,11 @@ impl LogReplayScanner {
 
         assert_eq!(selection_vector.len(), actions.length());
 
-        let mut visitor = AddRemoveDedupVisitor{
+        let mut visitor = AddRemoveDedupVisitor {
             seen: &mut self.seen,
             selection_vector,
-            is_log_batch};
+            is_log_batch,
+        };
         let columns_to_select = visitor.columns_to_select();
         actions.visit_rows(columns_to_select, &mut visitor)?;
         let selection_vector = visitor.selection_vector;
