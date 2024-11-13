@@ -159,10 +159,11 @@ impl TableChangesScan {
     }
 
     /// Get an iterator of [`EngineData`]s that should be included in scan for a query. This handles
-    /// log-replay, reconciling Add and Remove actions, and applying data skipping (if
+    /// log-replay, reconciling Add, Remove, and CDC actions, and applying data skipping (if
     /// possible). Each item in the returned iterator is a tuple of:
     /// - `Box<dyn EngineData>`: Data in engine format, where each row represents a file to be
-    ///   scanned. The schema for each row can be obtained by calling [`scan_row_schema`].
+    ///   scanned. The schema for each row can be obtained by calling [`scan_row_schema`]. The rows
+    ///   are guaranteed to belong to the same commit.
     /// - `Vec<bool>`: A selection vector. If a row is at index `i` and this vector is `false` at
     ///   index `i`, then that row should *not* be processed (i.e. it is filtered out). If the vector
     ///   is `true` at index `i` the row *should* be processed. If the selector vector is *shorter*
@@ -170,6 +171,10 @@ impl TableChangesScan {
     ///   the query. NB: If you are using the default engine and plan to call arrow's
     ///   `filter_record_batch`, you _need_ to extend this vector to the full length of the batch or
     ///   arrow will drop the extra rows.
+    /// - `Arc<HashMap<String, DvInfo>>`: A map from file path to the deletion vector belonging to a
+    ///   remove action. It is guaranteed that there is an add action with the same path present in
+    ///   the same commit. This is used to resolve the additions and removals when deletion vectors
+    ///   are enabled.
     pub fn scan_data(
         &self,
         engine: &dyn Engine,

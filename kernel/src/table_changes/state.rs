@@ -5,6 +5,7 @@ use std::{
     sync::{Arc, LazyLock},
 };
 
+use crate::expressions::{column_expr, Expression};
 use crate::{
     actions::visitors::visit_deletion_vector_at,
     engine_data::{GetData, TypedGetData},
@@ -162,24 +163,89 @@ impl<T> DataVisitor for ScanFileVisitor<'_, T> {
 /// It is:
 /// ```ignored
 /// {
-///    path: string,
-///    size: long,
-///    modificationTime: long,
-///    stats: string,
-///    deletionVector: {
-///      storageType: string,
-///      pathOrInlineDv: string,
-///      offset: int,
-///      sizeInBytes: int,
-///      cardinality: long,
-///    },
-///    fileConstantValues: {
-///      partitionValues: map<string, string>
-///    }
+///   add: {
+///     path: string,
+///     size: long,
+///     modificationTime: long,
+///     stats: string,
+///     deletionVector: {
+///       storageType: string,
+///       pathOrInlineDv: string,
+///       offset: int,
+///       sizeInBytes: int,
+///       cardinality: long,
+///     },
+///     fileConstantValues: {
+///       partitionValues: map<string, string>
+///     }
+///   }
+///   remove: {
+///     path: string,
+///     size: long,
+///     modificationTime: long,
+///     deletionVector: {
+///       storageType: string,
+///       pathOrInlineDv: string,
+///       offset: int,
+///       sizeInBytes: int,
+///       cardinality: long,
+///     },
+///     fileConstantValues: {
+///       partitionValues: map<string, string>
+///     },
+///   }
+///   cdc: {
+///     path: string,
+///     size: long,
+///     fileConstantValues: {
+///       partitionValues: map<string, string>
+///     }
+///   }
+///   commit_timestamp: long,
+///   commit_version: long
+///
 /// }
 /// ```
 pub(crate) fn scan_row_schema() -> Schema {
     TABLE_CHANGES_SCAN_ROW_SCHEMA.as_ref().clone()
+}
+pub(crate) static TABLE_CHANGES_SCAN_ROW_SCHEMA: LazyLock<Arc<StructType>> = LazyLock::new(|| {
+    // Note that fields projected out of a nullable struct must be nullable
+    Arc::new(StructType::new([
+        TABLE_CHANGES_LOG_ADD_SCHEMA.clone(),
+        TABLE_CHANGES_LOG_REMOVE_SCHEMA.clone(),
+        TABLE_CHANGES_LOG_CDC_SCHEMA.clone(),
+        TABLE_CHANGES_TIMESTAMP.clone(),
+        TABLE_CHANGES_COMMIT_VERSION.clone(),
+    ]))
+});
+
+/// Expression to convert an action with `log_schema` into one with
+/// `TABLE_CHANGES_SCAN_ROW_SCHEMA`. This is the expression used to create `TableChangesScanData`.
+pub(crate) fn transform_to_scan_row_expression(timestamp: i64, commit_number: i64) -> Expression {
+    Expression::struct_from([
+        Expression::struct_from([
+            column_expr!("add.path"),
+            column_expr!("add.size"),
+            column_expr!("add.modificationTime"),
+            column_expr!("add.stats"),
+            column_expr!("add.deletionVector"),
+            Expression::struct_from([column_expr!("add.partitionValues")]),
+        ]),
+        Expression::struct_from([
+            column_expr!("remove.path"),
+            column_expr!("remove.size"),
+            column_expr!("remove.deletionVector"),
+            Expression::struct_from([column_expr!("remove.partitionValues")]),
+        ]),
+        Expression::struct_from([
+            column_expr!("cdc.path"),
+            column_expr!("cdc.size"),
+            Expression::struct_from([column_expr!("cdc.partitionValues")]),
+        ]),
+        timestamp.into(),
+        commit_number.into(),
+    ])
 }
 
 // TODO: Should unify with ADD SCAN_ROW_SCHEMA
@@ -272,18 +338,3 @@ static TABLE_CHANGES_TIMESTAMP: LazyLock<StructField> =
 
 static TABLE_CHANGES_COMMIT_VERSION: LazyLock<StructField> =
     LazyLock::new(|| StructField::new("commit_version", DataType::LONG, true));
-
-// NB: If you update this schema, ensure you update the comment describing it in the doc comment
-// for `scan_row_schema` in table_changes/mod.rs! You'll also need to update ScanFileVisitor as the
-// indexes will be off
-pub(crate) static TABLE_CHANGES_SCAN_ROW_SCHEMA: LazyLock<Arc<StructType>> = LazyLock::new(|| {
-    // Note that fields projected out of a nullable struct must be nullable
-    Arc::new(StructType::new([
-        // TODO: Look at log add schema, then project_as_struct, and use it to construct a schema
-        TABLE_CHANGES_LOG_ADD_SCHEMA.clone(),
-        TABLE_CHANGES_LOG_REMOVE_SCHEMA.clone(),
-        TABLE_CHANGES_LOG_CDC_SCHEMA.clone(),
-        TABLE_CHANGES_TIMESTAMP.clone(),
-        TABLE_CHANGES_COMMIT_VERSION.clone(),
-    ]))
-});

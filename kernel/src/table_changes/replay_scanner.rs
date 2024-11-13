@@ -7,13 +7,12 @@ use crate::actions::{
     get_log_schema, Add, Cdc, Remove, ADD_NAME, CDC_NAME, COMMIT_INFO_NAME, REMOVE_NAME,
 };
 use crate::engine_data::{GetData, TypedGetData};
-use crate::expressions::{column_expr, Expression};
 use crate::path::ParsedLogPath;
 use crate::scan::data_skipping::DataSkippingFilter;
 use crate::scan::state::DvInfo;
 use crate::scan::ScanData;
 use crate::schema::SchemaRef;
-use crate::table_changes::state::scan_row_schema;
+use crate::table_changes::state::{scan_row_schema, transform_to_scan_row_expression};
 use crate::{
     DataVisitor, DeltaResult, Engine, EngineData, Error, ExpressionHandler, ExpressionRef,
 };
@@ -21,31 +20,10 @@ use itertools::Itertools;
 use tracing::debug;
 
 use super::TableChangesScanData;
-
-#[derive(Default)]
-pub(crate) struct AddRemoveCdcVisitor {
-    pub adds: Vec<(Add, usize)>,
-    pub removes: Vec<(Remove, usize)>,
-    pub cdcs: Vec<(Cdc, usize)>,
-    selection_vector: Option<Vec<bool>>,
-}
-
-const ADD_FIELD_COUNT: usize = 15;
-const CDC_FIELD_COUNT: usize = 5;
-
-impl AddRemoveCdcVisitor {
-    pub(crate) fn new(selection_vector: Option<Vec<bool>>) -> Self {
-        AddRemoveCdcVisitor {
-            selection_vector,
-            ..Default::default()
-        }
-    }
-}
-
-/// Given an iterator of (engine_data, bool) tuples and a predicate, returns an iterator of
-/// `(engine_data, selection_vec)`. Each row that is selected in the returned `engine_data` _must_
-/// be processed to complete the scan. Non-selected rows _must_ be ignored. The boolean flag
-/// indicates whether the record batch is a log or checkpoint batch.
+/// Given an iterator of ParsedLogPath and a predicate, returns an iterator of
+/// [`TableChangesScanData`] = `(engine_data, selection_vec, remove_deletion_vectors)`.
+/// Each row that is selected in the returned `engine_data` _must_ be processed to
+/// complete the scan. Non-selected rows _must_ be ignored.
 pub(crate) fn table_changes_action_iter(
     engine: &dyn Engine,
     commit_files: impl IntoIterator<Item = ParsedLogPath>,
@@ -54,22 +32,23 @@ pub(crate) fn table_changes_action_iter(
 ) -> DeltaResult<impl Iterator<Item = DeltaResult<TableChangesScanData>>> {
     let commit_read_schema =
         get_log_schema().project(&[ADD_NAME, CDC_NAME, REMOVE_NAME, COMMIT_INFO_NAME])?;
-
     let json_client = engine.get_json_handler();
-
     let filter = DataSkippingFilter::new(engine, table_schema, predicate);
     let expression_handler = engine.get_expression_handler();
+
     let result = commit_files
         .into_iter()
         .map(move |commit_path| -> DeltaResult<_> {
+            let expression_handler = expression_handler.clone();
             let timestamp = commit_path.location.last_modified;
             let commit_version = commit_path.version as i64;
+
             let action_iter = json_client.read_json_files(
                 &[commit_path.location.clone()],
                 commit_read_schema.clone(),
                 None,
             )?;
-            let expression_handler = expression_handler.clone();
+
             let metadata_scanner = TableChangesMetadataScanner::new(
                 filter.clone(),
                 timestamp,
@@ -78,6 +57,7 @@ pub(crate) fn table_changes_action_iter(
             );
             let metadata_scanner = metadata_scanner.run()?;
 
+            // Get another action iterator for the second pass through the actions
             let action_iter = json_client.read_json_files(
                 &[commit_path.location.clone()],
                 commit_read_schema.clone(),
@@ -90,103 +70,6 @@ pub(crate) fn table_changes_action_iter(
         })
         .flatten_ok();
     Ok(result)
-}
-
-impl DataVisitor for AddRemoveCdcVisitor {
-    fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<()> {
-        for i in 0..row_count {
-            if self
-                .selection_vector
-                .as_ref()
-                .is_some_and(|selection| !selection[i])
-            {
-                continue;
-            }
-
-            static CDC_FIELD_END: usize = ADD_FIELD_COUNT + CDC_FIELD_COUNT;
-            // Add will have a path at index 0 if it is valid
-            if let Some(path) = getters[0].get_opt(i, "add.path")? {
-                // Keep the file unless the selection vector is present and is false for this row
-                self.adds.push((
-                    AddVisitor::visit_add(i, path, &getters[..ADD_FIELD_COUNT])?,
-                    i,
-                ))
-            } else if let Some(path) = getters[ADD_FIELD_COUNT].get_opt(i, "cdc.path")? {
-                self.cdcs.push((
-                    CdcVisitor::visit_cdc(i, path, &getters[ADD_FIELD_COUNT..CDC_FIELD_END])?,
-                    i,
-                ))
-            }
-            // Remove will have a path at index 15 if it is valid
-            // TODO(nick): Should count the fields in Add to ensure we don't get this wrong if more
-            // are added
-            // TODO(zach): add a check for selection vector that we never skip a remove
-            else if let Some(path) = getters[CDC_FIELD_END].get_opt(i, "remove.path")? {
-                let remove_getters = &getters[CDC_FIELD_END..];
-                self.removes
-                    .push((RemoveVisitor::visit_remove(i, path, remove_getters)?, i));
-            }
-        }
-        Ok(())
-    }
-}
-
-#[derive(Default)]
-pub(crate) struct MetadataVisitor {
-    pub adds: Vec<Add>,
-    pub cdcs: Vec<Cdc>,
-    pub timestamp: Option<i64>,
-    selection_vector: Option<Vec<bool>>,
-}
-impl MetadataVisitor {
-    pub(crate) fn new(selection_vector: Option<Vec<bool>>) -> Self {
-        MetadataVisitor {
-            selection_vector,
-            ..Default::default()
-        }
-    }
-}
-
-impl DataVisitor for MetadataVisitor {
-    fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<()> {
-        for i in 0..row_count {
-            static CDC_FIELD_END: usize = ADD_FIELD_COUNT + CDC_FIELD_COUNT;
-            // Add will have a path at index 0 if it is valid
-            if let Some(path) = getters[0].get_opt(i, "add.path")? {
-                // Keep the file unless the selection vector is present and is false for this row
-                if !self
-                    .selection_vector
-                    .as_ref()
-                    .is_some_and(|selection| !selection[i])
-                {
-                    self.adds
-                        .push(AddVisitor::visit_add(i, path, &getters[..ADD_FIELD_COUNT])?)
-                }
-            } else if let Some(path) = getters[ADD_FIELD_COUNT].get_opt(i, "cdc.path")? {
-                if !self
-                    .selection_vector
-                    .as_ref()
-                    .is_some_and(|selection| !selection[i])
-                {
-                    self.cdcs.push(CdcVisitor::visit_cdc(
-                        i,
-                        path,
-                        &getters[ADD_FIELD_COUNT..CDC_FIELD_END],
-                    )?)
-                }
-            }
-            // Remove will have a path at index 15 if it is valid
-            // TODO(nick): Should count the fields in Add to ensure we don't get this wrong if more
-            // are added
-            // TODO(zach): add a check for selection vector that we never skip a remove
-            else if let Some(timestamp) =
-                getters[CDC_FIELD_END].get_long(i, "commitInfo.timestamp")?
-            {
-                self.timestamp = Some(timestamp);
-            }
-        }
-        Ok(())
-    }
 }
 
 trait PhaseStatus {}
@@ -332,32 +215,6 @@ struct TableChangesLogReplayScanner<I: Iterator<Item = DeltaResult<Box<dyn Engin
 }
 
 impl<I: Iterator<Item = DeltaResult<Box<dyn EngineData>>>> TableChangesLogReplayScanner<I> {
-    fn get_add_transform_expr(&self, timestamp: i64, commit_number: i64) -> Expression {
-        Expression::struct_from([
-            Expression::struct_from([
-                column_expr!("add.path"),
-                column_expr!("add.size"),
-                column_expr!("add.modificationTime"),
-                column_expr!("add.stats"),
-                column_expr!("add.deletionVector"),
-                Expression::struct_from([column_expr!("add.partitionValues")]),
-            ]),
-            Expression::struct_from([
-                column_expr!("remove.path"),
-                column_expr!("remove.size"),
-                column_expr!("remove.deletionVector"),
-                Expression::struct_from([column_expr!("remove.partitionValues")]),
-            ]),
-            Expression::struct_from([
-                column_expr!("cdc.path"),
-                column_expr!("cdc.size"),
-                Expression::struct_from([column_expr!("cdc.partitionValues")]),
-            ]),
-            timestamp.into(),
-            commit_number.into(),
-        ])
-    }
-
     pub(crate) fn into_scan_files(
         mut self,
     ) -> DeltaResult<impl Iterator<Item = TableChangesScanData>> {
@@ -374,11 +231,10 @@ impl<I: Iterator<Item = DeltaResult<Box<dyn EngineData>>>> TableChangesLogReplay
             .try_collect()?;
 
         let remove_dvs = Arc::new(self.remove_dvs);
-        let y = data.into_iter().map(move |(a, b)| {
+        Ok(data.into_iter().map(move |(a, b)| {
             let remove_dvs = remove_dvs.clone();
             (a, b, remove_dvs)
-        });
-        Ok(y)
+        }))
     }
 
     fn process_scan_batch(
@@ -442,7 +298,7 @@ impl<I: Iterator<Item = DeltaResult<Box<dyn EngineData>>>> TableChangesLogReplay
         let result = expression_handler
             .get_evaluator(
                 get_log_schema().clone(),
-                self.get_add_transform_expr(self.timestamp, self.commit_version),
+                transform_to_scan_row_expression(self.timestamp, self.commit_version),
                 scan_row_schema().into(),
             )
             .evaluate(actions)?;
@@ -465,5 +321,110 @@ impl<I: Iterator<Item = DeltaResult<Box<dyn EngineData>>>> TableChangesLogReplay
         actions.extract(schema_to_use, &mut visitor)?;
 
         Ok(visitor)
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct AddRemoveCdcVisitor {
+    pub adds: Vec<(Add, usize)>,
+    pub removes: Vec<(Remove, usize)>,
+    pub cdcs: Vec<(Cdc, usize)>,
+    selection_vector: Option<Vec<bool>>,
+}
+
+const ADD_FIELD_COUNT: usize = 15;
+const CDC_FIELD_COUNT: usize = 5;
+
+impl AddRemoveCdcVisitor {
+    pub(crate) fn new(selection_vector: Option<Vec<bool>>) -> Self {
+        AddRemoveCdcVisitor {
+            selection_vector,
+            ..Default::default()
+        }
+    }
+}
+
+impl DataVisitor for AddRemoveCdcVisitor {
+    fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<()> {
+        for i in 0..row_count {
+            if self
+                .selection_vector
+                .as_ref()
+                .is_some_and(|selection| !selection[i])
+            {
+                continue;
+            }
+
+            static CDC_FIELD_END: usize = ADD_FIELD_COUNT + CDC_FIELD_COUNT;
+            if let Some(path) = getters[0].get_opt(i, "add.path")? {
+                // Keep the file unless the selection vector is present and is false for this row
+                self.adds.push((
+                    AddVisitor::visit_add(i, path, &getters[..ADD_FIELD_COUNT])?,
+                    i,
+                ))
+            } else if let Some(path) = getters[ADD_FIELD_COUNT].get_opt(i, "cdc.path")? {
+                self.cdcs.push((
+                    CdcVisitor::visit_cdc(i, path, &getters[ADD_FIELD_COUNT..CDC_FIELD_END])?,
+                    i,
+                ))
+            } else if let Some(path) = getters[CDC_FIELD_END].get_opt(i, "remove.path")? {
+                let remove_getters = &getters[CDC_FIELD_END..];
+                self.removes
+                    .push((RemoveVisitor::visit_remove(i, path, remove_getters)?, i));
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct MetadataVisitor {
+    pub adds: Vec<Add>,
+    pub cdcs: Vec<Cdc>,
+    pub timestamp: Option<i64>,
+    selection_vector: Option<Vec<bool>>,
+}
+impl MetadataVisitor {
+    pub(crate) fn new(selection_vector: Option<Vec<bool>>) -> Self {
+        MetadataVisitor {
+            selection_vector,
+            ..Default::default()
+        }
+    }
+}
+
+impl DataVisitor for MetadataVisitor {
+    fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<()> {
+        for i in 0..row_count {
+            static CDC_FIELD_END: usize = ADD_FIELD_COUNT + CDC_FIELD_COUNT;
+            if let Some(path) = getters[0].get_opt(i, "add.path")? {
+                // Keep the file unless the selection vector is present and is false for this row
+                if !self
+                    .selection_vector
+                    .as_ref()
+                    .is_some_and(|selection| !selection[i])
+                {
+                    self.adds
+                        .push(AddVisitor::visit_add(i, path, &getters[..ADD_FIELD_COUNT])?)
+                }
+            } else if let Some(path) = getters[ADD_FIELD_COUNT].get_opt(i, "cdc.path")? {
+                if !self
+                    .selection_vector
+                    .as_ref()
+                    .is_some_and(|selection| !selection[i])
+                {
+                    self.cdcs.push(CdcVisitor::visit_cdc(
+                        i,
+                        path,
+                        &getters[ADD_FIELD_COUNT..CDC_FIELD_END],
+                    )?)
+                }
+            } else if let Some(timestamp) =
+                getters[CDC_FIELD_END].get_long(i, "commitInfo.timestamp")?
+            {
+                self.timestamp = Some(timestamp);
+            }
+        }
+        Ok(())
     }
 }
