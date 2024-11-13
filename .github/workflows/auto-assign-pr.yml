@@ -1,0 +1,17 @@
+name: Auto assign every PR to its author when opened
+
+on:
+  pull_request:
+    types: [opened]
+
+jobs:
+  auto-assign:
+    runs-on: ubuntu-latest
+    concurrency:
+      # Only run one at a time for each user.
+      group: ${{ github.actor }}-issue-assign
+    steps:
+      - uses: actions-ecosystem/action-add-assignees@v1
+        with:
+          github_token: ${{ secrets.github_token }}
+          assignees: ${{ github.actor }}
