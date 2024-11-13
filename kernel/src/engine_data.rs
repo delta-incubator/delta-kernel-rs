@@ -223,12 +223,11 @@ pub trait RowVisitor {
 ///   fn into_any(self: Box<Self>) -> Box<dyn Any> { self }
 ///   fn visit_rows(&self, leaf_columns: &[ColumnName], visitor: &mut dyn RowVisitor) -> DeltaResult<()> {
 ///     let getters = self.do_extraction(); // do the extraction
-///     visitor.visit(self.length(), &getters); // call the visitor back with the getters
+///     visitor.visit(self.len(), &getters); // call the visitor back with the getters
 ///     Ok(())
 ///   }
-///   fn length(&self) -> usize {
-///     let len = 0; // actually get the len here
-///     len
+///   fn len(&self) -> usize {
+///     todo!() // actually get the len here
 ///   }
 /// }
 /// ```
@@ -243,7 +242,11 @@ pub trait EngineData: Send + Sync {
     ) -> DeltaResult<()>;
 
     /// Return the number of items (rows) in blob
-    fn length(&self) -> usize;
+    fn len(&self) -> usize;
+
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 
     // TODO(nick) implement this and below here in the trait when it doesn't cause a compiler error
     fn as_any(&self) -> &dyn Any;

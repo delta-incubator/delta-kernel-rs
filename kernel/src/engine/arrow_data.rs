@@ -136,7 +136,7 @@ impl ProvidesColumnsAndFields for StructArray {
 }
 
 impl EngineData for ArrowEngineData {
-    fn length(&self) -> usize {
+    fn len(&self) -> usize {
         self.data.num_rows()
     }
 
@@ -179,7 +179,7 @@ impl EngineData for ArrowEngineData {
                 )
             ));
         }
-        visitor.visit(self.length(), &getters)
+        visitor.visit(self.len(), &getters)
     }
 }
 

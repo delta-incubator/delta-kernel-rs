@@ -143,7 +143,7 @@ impl Transaction {
     fn generate_logical_to_physical(&self) -> Expression {
         // for now, we just pass through all the columns except partition columns.
         // note this is _incorrect_ if table config deems we need partition columns.
-        let partition_columns = self.read_snapshot.metadata().partition_columns.clone();
+        let partition_columns = &self.read_snapshot.metadata().partition_columns;
         let fields = self.read_snapshot.schema().fields();
         let fields = fields
             .filter(|f| !partition_columns.contains(f.name()))
@@ -252,10 +252,10 @@ fn generate_commit_info(
     operation: Option<&str>,
     engine_commit_info: &dyn EngineData,
 ) -> DeltaResult<Box<dyn EngineData>> {
-    if engine_commit_info.length() != 1 {
+    if engine_commit_info.len() != 1 {
         return Err(Error::InvalidCommitInfo(format!(
             "Engine commit info should have exactly one row, found {}",
-            engine_commit_info.length()
+            engine_commit_info.len()
         )));
     }
 
@@ -447,7 +447,7 @@ mod tests {
             }
         });
 
-        assert_eq!(actions.length(), 1);
+        assert_eq!(actions.len(), 1);
         let result = as_json_and_scrub_timestamp(actions);
         assert_eq!(result, expected);
 
@@ -507,7 +507,7 @@ mod tests {
             }
         });
 
-        assert_eq!(actions.length(), 1);
+        assert_eq!(actions.len(), 1);
         let result = as_json_and_scrub_timestamp(actions);
         assert_eq!(result, expected);
 
@@ -580,7 +580,7 @@ mod tests {
         data: Box<dyn EngineData>,
         write_engine_commit_info: bool,
     ) -> DeltaResult<()> {
-        assert_eq!(data.length(), 1);
+        assert_eq!(data.len(), 1);
         let expected = if write_engine_commit_info {
             serde_json::json!({
                 "commitInfo": {
