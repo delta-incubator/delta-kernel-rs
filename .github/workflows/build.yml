@@ -34,7 +34,7 @@ jobs:
           override: true
       - uses: Swatinem/rust-cache@v2
       - name: build docs
-        run: cargo docs
+        run: cargo doc
   build:
     runs-on: ${{ matrix.os }}
     strategy:
