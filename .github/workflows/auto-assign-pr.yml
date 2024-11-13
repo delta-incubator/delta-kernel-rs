@@ -4,6 +4,9 @@ on:
   pull_request:
     types: [opened]
 
+permissions:
+  pull-request: write
+
 jobs:
   auto-assign:
     runs-on: ubuntu-latest
