@@ -82,14 +82,20 @@ pub fn generate_simple_batch() -> Result<RecordBatch, ArrowError> {
     ])
 }
 
+/// get an ObjectStore path for a delta file, based on the version
+pub fn delta_path_for_version(version: u64, suffix: &str) -> Path {
+    let path = format!("_delta_log/{version:020}.{suffix}");
+    Path::from(path.as_str())
+}
+
 /// put a commit file into the specified object store.
 pub async fn add_commit(
     store: &dyn ObjectStore,
     version: u64,
     data: String,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let filename = format!("_delta_log/{:0>20}.json", version);
-    store.put(&Path::from(filename), data.into()).await?;
+    let path = delta_path_for_version(version, "json");
+    store.put(&path, data.into()).await?;
     Ok(())
 }
 
