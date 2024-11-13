@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::marker::PhantomData;
 use std::sync::Arc;
 
 use crate::actions::visitors::{AddVisitor, CdcVisitor, RemoveVisitor};
@@ -13,7 +14,9 @@ use crate::scan::state::DvInfo;
 use crate::scan::ScanData;
 use crate::schema::SchemaRef;
 use crate::table_changes::state::scan_row_schema;
-use crate::{DataVisitor, DeltaResult, Engine, EngineData, ExpressionHandler, ExpressionRef};
+use crate::{
+    DataVisitor, DeltaResult, Engine, EngineData, Error, ExpressionHandler, ExpressionRef,
+};
 use itertools::Itertools;
 use tracing::debug;
 
@@ -67,13 +70,13 @@ pub(crate) fn table_changes_action_iter(
                 None,
             )?;
             let expression_handler = expression_handler.clone();
-            let mut metadata_scanner =
-                TableChangesMetadataScanner::new(filter.clone(), timestamp, commit_version);
-
-            // Find CDC, get commitInfo, and perform metadata scan
-            for action_batch in action_iter {
-                metadata_scanner.process_scan_batch(action_batch?.as_ref())?;
-            }
+            let metadata_scanner = TableChangesMetadataScanner::new(
+                filter.clone(),
+                timestamp,
+                commit_version,
+                action_iter,
+            );
+            let metadata_scanner = metadata_scanner.run()?;
 
             let action_iter = json_client.read_json_files(
                 &[commit_path.location.clone()],
@@ -81,21 +84,9 @@ pub(crate) fn table_changes_action_iter(
                 None,
             )?;
 
-            let mut log_scanner = metadata_scanner.into_replay_scanner();
+            let log_scanner = metadata_scanner.into_replay_scanner(action_iter, expression_handler);
             // File metadata output scan
-            let x: Vec<ScanData> = action_iter
-                .into_iter()
-                .map(|action_batch| {
-                    log_scanner
-                        .process_scan_batch(expression_handler.as_ref(), action_batch?.as_ref())
-                })
-                .try_collect()?;
-            let remove_dvs = Arc::new(log_scanner.remove_dvs);
-            let y = x.into_iter().map(move |(a, b)| {
-                let remove_dvs = remove_dvs.clone();
-                (a, b, remove_dvs)
-            });
-            Ok(y)
+            log_scanner.into_scan_files()
         })
         .flatten_ok();
     Ok(result)
@@ -198,18 +189,32 @@ impl DataVisitor for MetadataVisitor {
     }
 }
 
-pub(crate) struct TableChangesMetadataScanner {
+trait PhaseStatus {}
+struct Uninitialized;
+struct Initialized;
+impl PhaseStatus for Uninitialized {}
+impl PhaseStatus for Initialized {}
+
+struct TableChangesMetadataScanner<
+    I: Iterator<Item = DeltaResult<Box<dyn EngineData>>>,
+    S: PhaseStatus,
+> {
+    action_iter: Option<I>,
     filter: Option<DataSkippingFilter>,
     pub add_files: HashSet<String>,
     pub has_cdcs: bool,
     pub timestamp: i64,
     pub commit_version: i64,
+    _phase: PhantomData<S>,
 }
-impl TableChangesMetadataScanner {
+impl<I: Iterator<Item = DeltaResult<Box<dyn EngineData>>>>
+    TableChangesMetadataScanner<I, Uninitialized>
+{
     pub(crate) fn new(
         filter: Option<DataSkippingFilter>,
         timestamp: i64,
         commit_version: i64,
+        action_iter: I,
     ) -> Self {
         TableChangesMetadataScanner {
             filter,
@@ -217,9 +222,29 @@ impl TableChangesMetadataScanner {
             has_cdcs: false,
             timestamp,
             commit_version,
+            action_iter: Some(action_iter),
+            _phase: Default::default(),
         }
     }
-    pub(crate) fn process_scan_batch(&mut self, actions: &dyn EngineData) -> DeltaResult<()> {
+    pub(crate) fn run(mut self) -> DeltaResult<TableChangesMetadataScanner<I, Initialized>> {
+        let Some(action_iter) = self.action_iter.take() else {
+            return Err(Error::generic("Log replay failed"));
+        };
+        // Find CDC, get commitInfo, and perform metadata scan
+        for action_batch in action_iter.into_iter() {
+            self.process_scan_batch(action_batch?.as_ref())?;
+        }
+        Ok(TableChangesMetadataScanner {
+            _phase: Default::default(),
+            action_iter: None,
+            filter: self.filter,
+            add_files: self.add_files,
+            has_cdcs: self.has_cdcs,
+            timestamp: self.timestamp,
+            commit_version: self.commit_version,
+        })
+    }
+    fn process_scan_batch(&mut self, actions: &dyn EngineData) -> DeltaResult<()> {
         // apply data skipping to get back a selection vector for actions that passed skipping
         // note: None implies all files passed data skipping.
         let filter_vector = self
@@ -271,9 +296,17 @@ impl TableChangesMetadataScanner {
 
         Ok(visitor)
     }
+}
 
+impl<I: Iterator<Item = DeltaResult<Box<dyn EngineData>>>>
+    TableChangesMetadataScanner<I, Initialized>
+{
     /// Create a new [`LogReplayScanner`] instance
-    pub(crate) fn into_replay_scanner(self) -> TableChangesLogReplayScanner {
+    pub(crate) fn into_replay_scanner(
+        self,
+        action_iter: I,
+        expression_handler: Arc<dyn ExpressionHandler>,
+    ) -> TableChangesLogReplayScanner<I> {
         TableChangesLogReplayScanner {
             filter: self.filter,
             remove_dvs: Default::default(),
@@ -281,20 +314,24 @@ impl TableChangesMetadataScanner {
             has_cdcs: self.has_cdcs,
             timestamp: self.timestamp,
             commit_version: self.commit_version,
+            expression_handler,
+            action_iter: Some(action_iter),
         }
     }
 }
 
-pub(crate) struct TableChangesLogReplayScanner {
+struct TableChangesLogReplayScanner<I: Iterator<Item = DeltaResult<Box<dyn EngineData>>>> {
     filter: Option<DataSkippingFilter>,
-    pub remove_dvs: HashMap<String, DvInfo>,
-    pub add_files: HashSet<String>,
-    pub has_cdcs: bool,
-    pub timestamp: i64,
-    pub commit_version: i64,
+    action_iter: Option<I>,
+    remove_dvs: HashMap<String, DvInfo>,
+    add_files: HashSet<String>,
+    has_cdcs: bool,
+    timestamp: i64,
+    commit_version: i64,
+    expression_handler: Arc<dyn ExpressionHandler>,
 }
 
-impl TableChangesLogReplayScanner {
+impl<I: Iterator<Item = DeltaResult<Box<dyn EngineData>>>> TableChangesLogReplayScanner<I> {
     fn get_add_transform_expr(&self, timestamp: i64, commit_number: i64) -> Expression {
         Expression::struct_from([
             Expression::struct_from([
@@ -321,7 +358,30 @@ impl TableChangesLogReplayScanner {
         ])
     }
 
-    pub(crate) fn process_scan_batch(
+    pub(crate) fn into_scan_files(
+        mut self,
+    ) -> DeltaResult<impl Iterator<Item = TableChangesScanData>> {
+        let Some(action_iter) = self.action_iter.take() else {
+            return Err(Error::generic("Log replay failed"));
+        };
+
+        let expression_handler = self.expression_handler.clone();
+        let data: Vec<_> = action_iter
+            .into_iter()
+            .map(|action_batch| {
+                self.process_scan_batch(expression_handler.as_ref(), action_batch?.as_ref())
+            })
+            .try_collect()?;
+
+        let remove_dvs = Arc::new(self.remove_dvs);
+        let y = data.into_iter().map(move |(a, b)| {
+            let remove_dvs = remove_dvs.clone();
+            (a, b, remove_dvs)
+        });
+        Ok(y)
+    }
+
+    fn process_scan_batch(
         &mut self,
         expression_handler: &dyn ExpressionHandler,
         actions: &dyn EngineData,
