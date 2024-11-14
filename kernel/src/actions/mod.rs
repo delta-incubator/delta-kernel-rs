@@ -179,29 +179,43 @@ impl Protocol {
         })
     }
 
+    /// Create a new Protocol by visiting the EngineData and extracting the first protocol row into
+    /// a Protocol instance. If no protocol row is found, returns Ok(None).
     pub fn try_new_from_data(data: &dyn EngineData) -> DeltaResult<Option<Protocol>> {
         let mut visitor = ProtocolVisitor::default();
         data.extract(get_log_schema().project(&[PROTOCOL_NAME])?, &mut visitor)?;
         Ok(visitor.protocol)
     }
 
+    /// Get the minimum reader version for the protocol
     pub fn min_reader_version(&self) -> i32 {
         self.min_reader_version
     }
 
+    /// Get the minimum writer version for the protocol
     pub fn min_writer_version(&self) -> i32 {
         self.min_writer_version
     }
 
+    /// Get the reader features for the protocol
+    pub fn reader_features(&self) -> Option<&[String]> {
+        self.reader_features.as_deref()
+    }
+
+    /// Get the writer features for the protocol
+    pub fn writer_features(&self) -> Option<&[String]> {
+        self.writer_features.as_deref()
+    }
+
+    /// Check if the protocol has a specific reader feature
     pub fn has_reader_feature(&self, feature: &ReaderFeatures) -> bool {
-        self.reader_features
-            .as_ref()
+        self.reader_features()
             .is_some_and(|features| features.iter().any(|f| f == feature.as_ref()))
     }
 
+    /// Check if the protocol has a specific writer feature
     pub fn has_writer_feature(&self, feature: &WriterFeatures) -> bool {
-        self.writer_features
-            .as_ref()
+        self.writer_features()
             .is_some_and(|features| features.iter().any(|f| f == feature.as_ref()))
     }
 
