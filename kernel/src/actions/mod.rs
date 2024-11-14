@@ -187,12 +187,12 @@ impl Protocol {
         Ok(visitor.protocol)
     }
 
-    /// Get the minimum reader version for the protocol
+    /// This protocol's minimum reader version
     pub fn min_reader_version(&self) -> i32 {
         self.min_reader_version
     }
 
-    /// Get the minimum writer version for the protocol
+    /// This protocol's minimum writer version
     pub fn min_writer_version(&self) -> i32 {
         self.min_writer_version
     }
@@ -207,13 +207,13 @@ impl Protocol {
         self.writer_features.as_deref()
     }
 
-    /// Check if the protocol has a specific reader feature
+    /// True if this protocol has the requested reader feature
     pub fn has_reader_feature(&self, feature: &ReaderFeatures) -> bool {
         self.reader_features()
             .is_some_and(|features| features.iter().any(|f| f == feature.as_ref()))
     }
 
-    /// Check if the protocol has a specific writer feature
+    /// True if this protocol has the requested writer feature
     pub fn has_writer_feature(&self, feature: &WriterFeatures) -> bool {
         self.writer_features()
             .is_some_and(|features| features.iter().any(|f| f == feature.as_ref()))
