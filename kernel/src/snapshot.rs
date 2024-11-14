@@ -63,8 +63,8 @@ impl Snapshot {
         let log_url = table_root.join("_delta_log/").unwrap();
 
         let log_segment = LogSegmentBuilder::new()
-            .with_end_version_opt(version)
-            .with_start_checkpoint_opt(read_last_checkpoint(fs_client.as_ref(), &log_url)?)
+            .with_end_version(version)
+            .with_start_checkpoint(read_last_checkpoint(fs_client.as_ref(), &log_url)?)
             .build(fs_client.as_ref(), &table_root)?;
 
         Self::try_new_from_log_segment(table_root, log_segment, engine)
