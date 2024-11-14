@@ -129,6 +129,7 @@ impl LogSegment {
 }
 
 /// Builder for [`LogSegment`] from from `start_version` to `end_version` inclusive
+#[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
 pub(crate) struct LogSegmentBuilder {
     start_checkpoint: Option<CheckpointMetadata>,
     start_version: Option<Version>,
