@@ -234,11 +234,14 @@ impl LogSegmentBuilder {
             omit_checkpoint_files,
         } = self;
         let log_root = table_root.join("_delta_log/").unwrap();
-        let (mut sorted_commit_files, mut checkpoint_parts) = match (start_checkpoint, end_version)
+        let (mut sorted_commit_files, mut checkpoint_parts) = match (start_checkpoint, start_version, end_version)
         {
-            (Some(cp), None) => list_log_files_with_checkpoint(&cp, fs_client, &log_root)?,
-            (Some(cp), Some(version)) if cp.version <= version => {
+            (Some(cp), None, None) => list_log_files_with_checkpoint(&cp, fs_client, &log_root)?,
+            (Some(cp), None, Some(end_version)) if cp.version <= end_version => {
                 list_log_files_with_checkpoint(&cp, fs_client, &log_root)?
+            }
+            (None, Some(start_version), _) => {
+                list_log_files_with_version(fs_client, &log_root, Some(start_version))?,
             }
             _ => list_log_files_with_version(fs_client, &log_root, None)?,
         };
