@@ -214,15 +214,18 @@ impl LogSegmentBuilder {
         let (mut sorted_commit_files, mut checkpoint_parts) =
             match (start_checkpoint, start_version, end_version) {
                 (Some(cp), None, None) => {
-                    list_log_files_with_checkpoint(&cp, fs_client, &log_root)?
+                    list_log_files_with_checkpoint(&cp, fs_client, &log_root, end_version)?
                 }
                 (Some(cp), None, Some(end_version)) if cp.version <= end_version => {
-                    list_log_files_with_checkpoint(&cp, fs_client, &log_root)?
+                    list_log_files_with_checkpoint(&cp, fs_client, &log_root, Some(end_version))?
                 }
-                (None, Some(start_version), _) => {
-                    list_log_files_with_version(fs_client, &log_root, Some(start_version))?
-                }
-                _ => list_log_files_with_version(fs_client, &log_root, None)?,
+                (None, Some(start_version), _) => list_log_files_with_version(
+                    fs_client,
+                    &log_root,
+                    Some(start_version),
+                    end_version,
+                )?,
+                _ => list_log_files_with_version(fs_client, &log_root, None, end_version)?,
             };
 
         if without_checkpoint_files {
@@ -236,11 +239,11 @@ impl LogSegmentBuilder {
         if let Some(start_version) = start_version {
             sorted_commit_files.retain(|log_path| log_path.version >= start_version);
         }
-        if let Some(checkpoint_file) = checkpoint_parts.first() {
-            sorted_commit_files.retain(|log_path| checkpoint_file.version < log_path.version);
-        }
         if let Some(end_version) = end_version {
             sorted_commit_files.retain(|log_path| log_path.version <= end_version);
+        }
+        if let Some(checkpoint_file) = checkpoint_parts.first() {
+            sorted_commit_files.retain(|log_path| checkpoint_file.version < log_path.version);
         }
 
         // After (possibly) omitting checkpoint files and filtering commits, we should have commits that are
@@ -261,7 +264,10 @@ impl LogSegmentBuilder {
         if let Some(end_version) = end_version {
             require!(
                 version_eff == end_version,
-                Error::MissingVersion // TODO more descriptive error
+                Error::generic(format!(
+                    "version effective not the same as end_version {}, {}",
+                    version_eff, end_version
+                )) // TODO more descriptive error
             );
         }
 
@@ -289,6 +295,7 @@ fn list_log_files_with_version(
     fs_client: &dyn FileSystemClient,
     log_root: &Url,
     version: Option<Version>,
+    end_version: Option<Version>,
 ) -> DeltaResult<(Vec<ParsedLogPath>, Vec<ParsedLogPath>)> {
     let begin_version = version.unwrap_or(0);
     let version_prefix = format!("{:020}", begin_version);
@@ -310,6 +317,9 @@ fn list_log_files_with_version(
             commit_files.push(parsed_path);
         } else if parsed_path.is_checkpoint() {
             let path_version = parsed_path.version;
+            if end_version.is_some_and(|end_version| path_version > end_version) {
+                continue;
+            }
             match max_checkpoint_version {
                 None => {
                     checkpoint_parts.push(parsed_path);
@@ -345,9 +355,14 @@ fn list_log_files_with_checkpoint(
     checkpoint_metadata: &CheckpointMetadata,
     fs_client: &dyn FileSystemClient,
     log_root: &Url,
+    end_version: Option<Version>,
 ) -> DeltaResult<(Vec<ParsedLogPath>, Vec<ParsedLogPath>)> {
-    let (commit_files, checkpoint_parts) =
-        list_log_files_with_version(fs_client, log_root, Some(checkpoint_metadata.version))?;
+    let (commit_files, checkpoint_parts) = list_log_files_with_version(
+        fs_client,
+        log_root,
+        Some(checkpoint_metadata.version),
+        end_version,
+    )?;
 
     let Some(latest_checkpoint) = checkpoint_parts.last() else {
         // TODO: We could potentially recover here
@@ -718,5 +733,42 @@ mod tests {
             .with_start_version(5)
             .build(client.as_ref(), &table_root);
         assert!(log_segment_res.is_err());
+    }
+
+    #[test]
+    fn test_build_with_start_checkpoint_and_end_version() {
+        let checkpoint_metadata = CheckpointMetadata {
+            version: 3,
+            size: 10,
+            parts: None,
+            size_in_bytes: None,
+            num_of_add_files: None,
+            checkpoint_schema: None,
+            checksum: None,
+        };
+
+        let (client, table_root) = build_log_with_paths_and_checkpoint(
+            &[
+                delta_path_for_version(0, "json"),
+                delta_path_for_version(1, "checkpoint.parquet"),
+                delta_path_for_version(2, "json"),
+                delta_path_for_version(3, "checkpoint.parquet"),
+                delta_path_for_version(4, "json"),
+                delta_path_for_version(5, "checkpoint.parquet"),
+                delta_path_for_version(6, "json"),
+                delta_path_for_version(7, "json"),
+            ],
+            Some(&checkpoint_metadata),
+        );
+
+        let log_segment = LogSegmentBuilder::new()
+            .with_start_checkpoint(checkpoint_metadata)
+            .with_end_version(4)
+            .build(client.as_ref(), &table_root)
+            .unwrap();
+        assert_eq!(log_segment.checkpoint_parts.len(), 1);
+        assert_eq!(log_segment.checkpoint_parts[0].version, 3);
+        assert_eq!(log_segment.commit_files.len(), 1);
+        assert_eq!(log_segment.commit_files[0].version, 4);
     }
 }
