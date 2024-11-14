@@ -10,11 +10,11 @@ use tracing::{debug, warn};
 use url::Url;
 
 use crate::actions::{Metadata, Protocol};
-use crate::features::{ColumnMappingMode, COLUMN_MAPPING_MODE_KEY};
 use crate::log_segment::LogSegment;
 use crate::path::ParsedLogPath;
 use crate::scan::ScanBuilder;
 use crate::schema::Schema;
+use crate::table_features::{ColumnMappingMode, COLUMN_MAPPING_MODE_KEY};
 use crate::utils::require;
 use crate::{DeltaResult, Engine, Error, FileSystemClient, Version};
 
@@ -24,7 +24,6 @@ const LAST_CHECKPOINT_FILE_NAME: &str = "_last_checkpoint";
 /// throughout time, `Snapshot`s represent a view of a table at a specific point in time; they
 /// have a defined schema (which may change over time for any given table), specific version, and
 /// frozen log segment.
-
 pub struct Snapshot {
     pub(crate) table_root: Url,
     pub(crate) log_segment: LogSegment,
@@ -121,7 +120,7 @@ impl Snapshot {
         let (metadata, protocol) = log_segment.read_metadata(engine)?;
         let schema = metadata.schema()?;
         let column_mapping_mode = match metadata.configuration.get(COLUMN_MAPPING_MODE_KEY) {
-            Some(mode) if protocol.min_reader_version >= 2 => mode.as_str().try_into(),
+            Some(mode) if protocol.min_reader_version() >= 2 => mode.as_str().try_into(),
             _ => Ok(ColumnMappingMode::None),
         }?;
         Ok(Self {
@@ -366,6 +365,7 @@ mod tests {
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::ObjectStore;
+    use test_utils::delta_path_for_version;
 
     use crate::engine::default::executor::tokio::TokioBackgroundExecutor;
     use crate::engine::default::filesystem::ObjectStoreFileSystemClient;
@@ -381,12 +381,8 @@ mod tests {
         let engine = SyncEngine::new();
         let snapshot = Snapshot::try_new(url, &engine, Some(1)).unwrap();
 
-        let expected = Protocol {
-            min_reader_version: 3,
-            min_writer_version: 7,
-            reader_features: Some(vec!["deletionVectors".into()]),
-            writer_features: Some(vec!["deletionVectors".into()]),
-        };
+        let expected =
+            Protocol::try_new(3, 7, Some(["deletionVectors"]), Some(["deletionVectors"])).unwrap();
         assert_eq!(snapshot.protocol(), &expected);
 
         let schema_string = r#"{"type":"struct","fields":[{"name":"value","type":"integer","nullable":true,"metadata":{}}]}"#;
@@ -403,12 +399,8 @@ mod tests {
         let engine = SyncEngine::new();
         let snapshot = Snapshot::try_new(url, &engine, None).unwrap();
 
-        let expected = Protocol {
-            min_reader_version: 3,
-            min_writer_version: 7,
-            reader_features: Some(vec!["deletionVectors".into()]),
-            writer_features: Some(vec!["deletionVectors".into()]),
-        };
+        let expected =
+            Protocol::try_new(3, 7, Some(["deletionVectors"]), Some(["deletionVectors"])).unwrap();
         assert_eq!(snapshot.protocol(), &expected);
 
         let schema_string = r#"{"type":"struct","fields":[{"name":"value","type":"integer","nullable":true,"metadata":{}}]}"#;
@@ -440,10 +432,6 @@ mod tests {
     fn test_read_log_with_out_of_date_last_checkpoint() {
         let store = Arc::new(InMemory::new());
 
-        fn get_path(index: usize, suffix: &str) -> Path {
-            let path = format!("_delta_log/{index:020}.{suffix}");
-            Path::from(path.as_str())
-        }
         let data = bytes::Bytes::from("kernel-data");
 
         let checkpoint_metadata = CheckpointMetadata {
@@ -461,14 +449,14 @@ mod tests {
             .expect("create tokio runtime")
             .block_on(async {
                 for path in [
-                    get_path(0, "json"),
-                    get_path(1, "checkpoint.parquet"),
-                    get_path(2, "json"),
-                    get_path(3, "checkpoint.parquet"),
-                    get_path(4, "json"),
-                    get_path(5, "checkpoint.parquet"),
-                    get_path(6, "json"),
-                    get_path(7, "json"),
+                    delta_path_for_version(0, "json"),
+                    delta_path_for_version(1, "checkpoint.parquet"),
+                    delta_path_for_version(2, "json"),
+                    delta_path_for_version(3, "checkpoint.parquet"),
+                    delta_path_for_version(4, "json"),
+                    delta_path_for_version(5, "checkpoint.parquet"),
+                    delta_path_for_version(6, "json"),
+                    delta_path_for_version(7, "json"),
                 ] {
                     store
                         .put(&path, data.clone().into())

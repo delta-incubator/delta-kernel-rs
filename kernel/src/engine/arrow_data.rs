@@ -9,7 +9,6 @@ use arrow_array::{Array, ArrayRef, GenericListArray, MapArray, OffsetSizeTrait, 
 use arrow_schema::{FieldRef, DataType as ArrowDataType};
 use tracing::{debug};
 
-use std::any::Any;
 use std::collections::{HashMap, HashSet};
 
 /// ArrowEngineData holds an Arrow RecordBatch, implements `EngineData` so the kernel can extract from it.
@@ -138,14 +137,6 @@ impl ProvidesColumnsAndFields for StructArray {
 impl EngineData for ArrowEngineData {
     fn len(&self) -> usize {
         self.data.num_rows()
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn into_any(self: Box<Self>) -> Box<dyn Any> {
-        self
     }
 
     fn visit_rows(&self, leaf_columns: &[ColumnName], visitor: &mut dyn RowVisitor) -> DeltaResult<()> {
@@ -330,10 +321,10 @@ mod tests {
             .parse_json(string_array_to_engine_data(json_strings), output_schema)
             .unwrap();
         let protocol = Protocol::try_new_from_data(parsed.as_ref())?.unwrap();
-        assert_eq!(protocol.min_reader_version, 3);
-        assert_eq!(protocol.min_writer_version, 7);
-        assert_eq!(protocol.reader_features, Some(vec!["rw1".into()]));
-        assert_eq!(protocol.writer_features, Some(vec!["rw1".into(), "w2".into()]));
+        assert_eq!(protocol.min_reader_version(), 3);
+        assert_eq!(protocol.min_writer_version(), 7);
+        assert_eq!(protocol.reader_features(), Some(vec!["rw1".into()].as_slice()));
+        assert_eq!(protocol.writer_features(), Some(vec!["rw1".into(), "w2".into()].as_slice()));
         Ok(())
     }
 }

@@ -2,11 +2,10 @@
 
 use crate::expressions::ColumnName;
 use crate::schema::DataType;
-use crate::{DeltaResult, Error};
+use crate::{AsAny, DeltaResult, Error};
 
 use tracing::debug;
 
-use std::any::Any;
 use std::collections::HashMap;
 
 /// a trait that an engine exposes to give access to a list
@@ -227,7 +226,6 @@ impl<T: RowVisitorBase> RowVisitor for T {
 /// # use delta_kernel::DeltaResult;
 /// # use delta_kernel::engine_data::{RowVisitor, EngineData, GetData};
 /// # use delta_kernel::expressions::ColumnName;
-/// # use delta_kernel::schema::SchemaRef;
 /// struct MyDataType; // Whatever the engine wants here
 /// impl MyDataType {
 ///   fn do_extraction<'a>(&self) -> Vec<&'a dyn GetData<'a>> {
@@ -237,8 +235,6 @@ impl<T: RowVisitorBase> RowVisitor for T {
 /// }
 ///
 /// impl EngineData for MyDataType {
-///   fn as_any(&self) -> &dyn Any { self }
-///   fn into_any(self: Box<Self>) -> Box<dyn Any> { self }
 ///   fn visit_rows(&self, leaf_columns: &[ColumnName], visitor: &mut dyn RowVisitor) -> DeltaResult<()> {
 ///     let getters = self.do_extraction(); // do the extraction
 ///     visitor.visit(self.len(), &getters); // call the visitor back with the getters
@@ -249,7 +245,7 @@ impl<T: RowVisitorBase> RowVisitor for T {
 ///   }
 /// }
 /// ```
-pub trait EngineData: Send + Sync {
+pub trait EngineData: AsAny {
     /// Visits a subset of leaf columns in each row of this data, passing a `GetData` item for each
     /// requested column to the visitor's `visit` method (along with the number of rows of data to
     /// be visited).
@@ -265,9 +261,4 @@ pub trait EngineData: Send + Sync {
     fn is_empty(&self) -> bool {
         self.len() == 0
     }
-
-    // TODO(nick) implement this and below here in the trait when it doesn't cause a compiler error
-    fn as_any(&self) -> &dyn Any;
-
-    fn into_any(self: Box<Self>) -> Box<dyn Any>;
 }

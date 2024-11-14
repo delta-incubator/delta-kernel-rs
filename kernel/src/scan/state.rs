@@ -11,8 +11,8 @@ use crate::{
         visitors::visit_deletion_vector_at,
     },
     engine_data::{GetData, RowVisitorBase, TypedGetData as _},
-    features::ColumnMappingMode,
     schema::{ColumnNamesAndTypes, DataType, SchemaRef},
+    table_features::ColumnMappingMode,
     DeltaResult, Engine, EngineData, Error, RowVisitor,
 };
 use serde::{Deserialize, Serialize};
