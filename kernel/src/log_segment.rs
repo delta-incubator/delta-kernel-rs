@@ -16,12 +16,12 @@ use tracing::warn;
 use url::Url;
 
 /// A [`LogSegment`] represents a contiguous section of the log and is made up of checkpoint files
-/// and commit files. It is built with [`LogSegmentBuilder`], and guarantees the following:
+/// and commit files. It is built with `LogSegmentBuilder`, and guarantees the following:
 ///     1. Commit/checkpoint file versions will be less than or equal to `end_version` if specified.
 ///     2. Commit file versions will be greater than or equal to `start_version` if specified.
 ///     3. If checkpoint(s) is/are present in the range, only commits with versions greater than the most
 ///        recent checkpoint version are retained. Checkpoints can be omitted (and this rule skipped)
-///        whenever the `LogSegment` is created. See [`LogSegmentBuilder::with_omit_checkpoint_files`].
+///        whenever the `LogSegment` is created. See `LogSegmentBuilder::with_omit_checkpoint_files`.
 ///
 /// [`LogSegment`] is used in both  [`Snapshot`] and in `TableChanges` to hold commit files and
 /// checkpoint files.
@@ -129,7 +129,7 @@ impl LogSegment {
 }
 
 /// Builder for [`LogSegment`] from from `start_version` to `end_version` inclusive
-#[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
+///
 pub(crate) struct LogSegmentBuilder {
     start_checkpoint: Option<CheckpointMetadata>,
     start_version: Option<Version>,
@@ -140,9 +140,8 @@ pub(crate) struct LogSegmentBuilder {
     sort_commit_files_ascending: bool,
     omit_checkpoint_files: bool,
 }
-
 impl LogSegmentBuilder {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         LogSegmentBuilder {
             start_checkpoint: None,
             start_version: None,
@@ -156,7 +155,7 @@ impl LogSegmentBuilder {
     /// Note: Either `start_version` or `start_checkpoint` may be specified.  Attempting to build a [`LogSegment`]
     /// with both will result in an error.
     #[allow(unused)]
-    pub fn with_start_checkpoint(mut self, start_checkpoint: CheckpointMetadata) -> Self {
+    pub(crate) fn with_start_checkpoint(mut self, start_checkpoint: CheckpointMetadata) -> Self {
         self.start_checkpoint = Some(start_checkpoint);
         self
     }
@@ -165,7 +164,7 @@ impl LogSegmentBuilder {
     ///
     /// Note: Either `start_version` or `start_checkpoint` may be specified.  Attempting to build a [`LogSegment`]
     /// with both will result in an error.
-    pub fn with_start_checkpoint_opt(
+    pub(crate) fn with_start_checkpoint_opt(
         mut self,
         start_checkpoint: Option<CheckpointMetadata>,
     ) -> Self {
@@ -178,48 +177,48 @@ impl LogSegmentBuilder {
     /// Note: Either `start_version` or `start_checkpoint` may be specified.  Attempting to build a [`LogSegment`]
     /// with both will result in an error.
     #[allow(unused)]
-    pub fn with_start_version(mut self, version: Version) -> Self {
+    pub(crate) fn with_start_version(mut self, version: Version) -> Self {
         self.start_version = Some(version);
         self
     }
     /// Optionally provide a `start_version` of the [`LogSegment`]. See [`LogSegmentBuilder::with_start_version`]
     /// for details. If `start_version` is `None`, this is a no-op.
     #[allow(unused)]
-    pub fn with_start_version_opt(mut self, version: Option<Version>) -> Self {
+    pub(crate) fn with_start_version_opt(mut self, version: Option<Version>) -> Self {
         self.start_version = version;
         self
     }
     /// Provide an `end_version` (inclusive) of the [`LogSegment`]. This ensures that all commit and
     /// checkpoint files are at or below the end version.
     #[allow(unused)]
-    pub fn with_end_version(mut self, version: Version) -> Self {
+    pub(crate) fn with_end_version(mut self, version: Version) -> Self {
         self.end_version = Some(version);
         self
     }
     /// Optionally provide an `end_version` (inclusive) of the [`LogSegment`]. See [`LogSegmentBuilder::with_end_version`]
     /// for details. If `end_version` is `None`, this is a no-op.
-    pub fn with_end_version_opt(mut self, version: Option<Version>) -> Self {
+    pub(crate) fn with_end_version_opt(mut self, version: Option<Version>) -> Self {
         self.end_version = version;
         self
     }
     /// Specify that the [`LogSegment`] will not have any checkpoint files. It will only be made
     /// up of commit files.
     #[allow(unused)]
-    pub fn with_omit_checkpoint_files(mut self) -> Self {
+    pub(crate) fn with_omit_checkpoint_files(mut self) -> Self {
         self.omit_checkpoint_files = true;
         self
     }
     /// Specify that the commits in the [`LogSegment`] will be sorted by version in ascending
     /// order. By default, commits are sorted by version in descending order.
     #[allow(unused)]
-    pub fn with_sort_commit_files_ascending(mut self) -> Self {
+    pub(crate) fn with_sort_commit_files_ascending(mut self) -> Self {
         self.sort_commit_files_ascending = true;
         self
     }
     /// Build the [`LogSegment`]
     ///
     /// This fetches checkpoint and commit files using the `fs_client`.
-    pub fn build(
+    pub(crate) fn build(
         self,
         fs_client: &dyn FileSystemClient,
         table_root: &Url,
@@ -306,12 +305,6 @@ impl LogSegmentBuilder {
             commit_files: sorted_commit_files,
             checkpoint_parts,
         })
-    }
-}
-
-impl Default for LogSegmentBuilder {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
