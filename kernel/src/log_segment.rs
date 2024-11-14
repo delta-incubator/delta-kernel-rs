@@ -140,8 +140,9 @@ pub(crate) struct LogSegmentBuilder {
     sort_commit_files_ascending: bool,
     omit_checkpoint_files: bool,
 }
+
 impl LogSegmentBuilder {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         LogSegmentBuilder {
             start_checkpoint: None,
             start_version: None,
@@ -155,7 +156,7 @@ impl LogSegmentBuilder {
     /// Note: Either `start_version` or `start_checkpoint` may be specified.  Attempting to build a [`LogSegment`]
     /// with both will result in an error.
     #[allow(unused)]
-    pub(crate) fn with_start_checkpoint(mut self, start_checkpoint: CheckpointMetadata) -> Self {
+    pub fn with_start_checkpoint(mut self, start_checkpoint: CheckpointMetadata) -> Self {
         self.start_checkpoint = Some(start_checkpoint);
         self
     }
@@ -164,7 +165,7 @@ impl LogSegmentBuilder {
     ///
     /// Note: Either `start_version` or `start_checkpoint` may be specified.  Attempting to build a [`LogSegment`]
     /// with both will result in an error.
-    pub(crate) fn with_start_checkpoint_opt(
+    pub fn with_start_checkpoint_opt(
         mut self,
         start_checkpoint: Option<CheckpointMetadata>,
     ) -> Self {
@@ -177,48 +178,48 @@ impl LogSegmentBuilder {
     /// Note: Either `start_version` or `start_checkpoint` may be specified.  Attempting to build a [`LogSegment`]
     /// with both will result in an error.
     #[allow(unused)]
-    pub(crate) fn with_start_version(mut self, version: Version) -> Self {
+    pub fn with_start_version(mut self, version: Version) -> Self {
         self.start_version = Some(version);
         self
     }
     /// Optionally provide a `start_version` of the [`LogSegment`]. See [`LogSegmentBuilder::with_start_version`]
     /// for details. If `start_version` is `None`, this is a no-op.
     #[allow(unused)]
-    pub(crate) fn with_start_version_opt(mut self, version: Option<Version>) -> Self {
+    pub fn with_start_version_opt(mut self, version: Option<Version>) -> Self {
         self.start_version = version;
         self
     }
     /// Provide an `end_version` (inclusive) of the [`LogSegment`]. This ensures that all commit and
     /// checkpoint files are at or below the end version.
     #[allow(unused)]
-    pub(crate) fn with_end_version(mut self, version: Version) -> Self {
+    pub fn with_end_version(mut self, version: Version) -> Self {
         self.end_version = Some(version);
         self
     }
     /// Optionally provide an `end_version` (inclusive) of the [`LogSegment`]. See [`LogSegmentBuilder::with_end_version`]
     /// for details. If `end_version` is `None`, this is a no-op.
-    pub(crate) fn with_end_version_opt(mut self, version: Option<Version>) -> Self {
+    pub fn with_end_version_opt(mut self, version: Option<Version>) -> Self {
         self.end_version = version;
         self
     }
     /// Specify that the [`LogSegment`] will not have any checkpoint files. It will only be made
     /// up of commit files.
     #[allow(unused)]
-    pub(crate) fn with_omit_checkpoint_files(mut self) -> Self {
+    pub fn with_omit_checkpoint_files(mut self) -> Self {
         self.omit_checkpoint_files = true;
         self
     }
     /// Specify that the commits in the [`LogSegment`] will be sorted by version in ascending
     /// order. By default, commits are sorted by version in descending order.
     #[allow(unused)]
-    pub(crate) fn with_sort_commit_files_ascending(mut self) -> Self {
+    pub fn with_sort_commit_files_ascending(mut self) -> Self {
         self.sort_commit_files_ascending = true;
         self
     }
     /// Build the [`LogSegment`]
     ///
     /// This fetches checkpoint and commit files using the `fs_client`.
-    pub(crate) fn build(
+    pub fn build(
         self,
         fs_client: &dyn FileSystemClient,
         table_root: &Url,
@@ -305,6 +306,12 @@ impl LogSegmentBuilder {
             commit_files: sorted_commit_files,
             checkpoint_parts,
         })
+    }
+}
+
+impl Default for LogSegmentBuilder {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
