@@ -167,10 +167,10 @@ impl RowVisitorBase for ProtocolVisitor {
     }
 }
 
+#[allow(unused)]
 #[derive(Default)]
 #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
-#[cfg_attr(not(feature = "developer-visibility"), visibility::make(pub(crate)))]
-struct AddVisitor {
+pub(crate) struct AddVisitor {
     pub(crate) adds: Vec<Add>,
 }
 
@@ -219,16 +219,13 @@ impl AddVisitor {
             clustering_provider,
         })
     }
-    pub(crate) fn names_and_types() -> (&'static [ColumnName], &'static [DataType]) {
-        static NAMES_AND_TYPES: LazyLock<ColumnNamesAndTypes> =
-            LazyLock::new(|| Add::to_schema().leaves(ADD_NAME));
-        NAMES_AND_TYPES.as_ref()
-    }
 }
 
 impl RowVisitorBase for AddVisitor {
     fn selected_column_names_and_types(&self) -> (&'static [ColumnName], &'static [DataType]) {
-        Self::names_and_types()
+        static NAMES_AND_TYPES: LazyLock<ColumnNamesAndTypes> =
+            LazyLock::new(|| Add::to_schema().leaves(ADD_NAME));
+        NAMES_AND_TYPES.as_ref()
     }
     fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<()> {
         for i in 0..row_count {
@@ -244,15 +241,13 @@ impl RowVisitorBase for AddVisitor {
 #[allow(unused)]
 #[derive(Default)]
 #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
-#[cfg_attr(not(feature = "developer-visibility"), visibility::make(pub(crate)))]
-struct RemoveVisitor {
+pub(crate) struct RemoveVisitor {
     pub(crate) removes: Vec<Remove>,
 }
 
 impl RemoveVisitor {
     #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
-    #[cfg_attr(not(feature = "developer-visibility"), visibility::make(pub(crate)))]
-    fn visit_remove<'a>(
+    pub(crate) fn visit_remove<'a>(
         row_index: usize,
         path: String,
         getters: &[&'a dyn GetData<'a>],
