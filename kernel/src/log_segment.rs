@@ -19,16 +19,14 @@ use url::Url;
 /// A [`LogSegment`] represents a contiguous section of the log and is made up of checkpoint files
 /// and commit files. It is built with either [`LogSegment::for_table_changes`], or
 /// [`LogSegment::for_snapshot`], and guarantees the following:
-///     1. Commit/checkpoint file versions will be less than or equal to `end_version`.
-///     2. Commit file versions will not have any gaps between them.
-///     3. If checkpoint(s) is/are present in the range, only commits with versions greater than the most
-///        recent checkpoint version are retained.
+///     1. Commit file versions will not have any gaps between them.
+///     2. If checkpoint(s) is/are present in the range, only commits with versions greater than the most
+///        recent checkpoint version are retained. There will not be a gap between the checkpoint
+///        version and the first commit version.
 ///
 /// [`LogSegment`] is used in both  [`Snapshot`] and in `TableChanges` to hold commit files and
 /// checkpoint files.
-/// - For a Snapshot at version `n`: This is created using [`LogSegment::for_snapshot`]. Its LogSegment is
-///   made up of zero or one checkpoint, and all   commits between the checkpoint up to and including the
-///   end version `n`.
+///
 /// [`Snapshot`]: crate::snapshot::Snapshot
 #[derive(Debug)]
 #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
@@ -90,6 +88,13 @@ impl LogSegment {
         })
     }
 
+    /// Constructs a [`LogSegment`] to be used for [`Snapshot`]. For a Snapshot at version `n`:
+    /// Its LogSegment is made up of zero or one checkpoint, and all commits between the checkpoint up
+    /// to and including the end version `n`.
+    ///
+    /// This may leverage a `checkpoint_hint` that is read from `_delta_log/_last_checkpoint`.
+    /// [`Snapshot`]: crate::snapshot::Snapshot
+    #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
     pub(crate) fn for_snapshot(
         fs_client: &dyn FileSystemClient,
         table_root: &Url,
@@ -125,9 +130,10 @@ impl LogSegment {
 
     /// Constructs a [`LogSegment`] to be used for `TableChanges`. For a TableChanges between versions
     /// `start_version` and `end_version`: Its LogSegment is made up of zero checkpoints and all commits
-    /// between versions `start_version` and `end_version` (inclusive). If no `end_version` is specified
-    /// it will be the most recent version by default.
+    /// between versions `start_version` (inclusive) and `end_version` (inclusive). If no `end_version`
+    /// is specified it will be the most recent version by default.
     #[allow(unused)]
+    #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
     pub(crate) fn for_table_changes(
         fs_client: &dyn FileSystemClient,
         table_root: &Url,
