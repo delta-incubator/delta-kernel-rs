@@ -14,12 +14,12 @@ fn main() -> DeltaResult<()> {
     let engine = SyncEngine::new();
 
     let table_changes = table.table_changes(&engine, 0, None)?;
-    let schema = table_changes
-        .schema
-        .project(&["value", "_commit_timestamp", "_change_type"])?;
+    //let schema = table_changes
+    //    .schema
+    //    .project(&["value", "_commit_timestamp", "_change_type"])?;
     let x = table_changes
         .into_scan_builder()
-        .with_schema(schema)
+        //.with_schema(schema)
         .build()?;
     let batches: Vec<RecordBatch> = x
         .execute(&engine)?
