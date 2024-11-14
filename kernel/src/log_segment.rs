@@ -11,38 +11,154 @@ use crate::{
 };
 use itertools::Itertools;
 use std::cmp::Ordering;
+use std::convert::identity;
 use std::sync::{Arc, LazyLock};
 use tracing::warn;
 use url::Url;
 
 /// A [`LogSegment`] represents a contiguous section of the log and is made up of checkpoint files
-/// and commit files. It is built with `LogSegmentBuilder`, and guarantees the following:
-///     1. Commit/checkpoint file versions will be less than or equal to `end_version` if specified.
-///     2. Commit file versions will be greater than or equal to `start_version` if specified.
+/// and commit files. It is built with either [`LogSegment::for_table_changes`], or
+/// [`LogSegment::for_snapshot`], and guarantees the following:
+///     1. Commit/checkpoint file versions will be less than or equal to `end_version`.
+///     2. Commit file versions will not have any gaps between them.
 ///     3. If checkpoint(s) is/are present in the range, only commits with versions greater than the most
-///        recent checkpoint version are retained. Checkpoints can be omitted (and this rule skipped)
-///        whenever the `LogSegment` is created. See `LogSegmentBuilder::without_checkpoint_files`.
+///        recent checkpoint version are retained.
 ///
 /// [`LogSegment`] is used in both  [`Snapshot`] and in `TableChanges` to hold commit files and
 /// checkpoint files.
-/// - For a Snapshot at version `n`: Its LogSegment is made up of zero or one checkpoint, and all
-///   commits between the checkpoint and the end version `n`.
-/// - For a TableChanges between versions `a` and `b`: Its LogSegment is made up of zero
-/// checkpoints and all commits between versions `a` and `b` (inclusive)
-///
+/// - For a Snapshot at version `n`: This is created using [`LogSegment::for_snapshot`]. Its LogSegment is
+///   made up of zero or one checkpoint, and all   commits between the checkpoint up to and including the
+///   end version `n`.
 /// [`Snapshot`]: crate::snapshot::Snapshot
 #[derive(Debug)]
 #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
 pub(crate) struct LogSegment {
     pub end_version: Version,
     pub log_root: Url,
-    /// Sorted commit files in the log segment (see builder for sorting)
+    /// Sorted commit files in the log segment
     pub commit_files: Vec<ParsedLogPath>,
     /// Checkpoint files in the log segment.
     pub checkpoint_parts: Vec<ParsedLogPath>,
 }
 
 impl LogSegment {
+    fn try_new(
+        sorted_commit_files: Vec<ParsedLogPath>,
+        checkpoint_parts: Vec<ParsedLogPath>,
+        log_root: Url,
+        expected_end_version: Option<Version>,
+    ) -> DeltaResult<Self> {
+        // We should require that commits that are contiguous. In other words, there must be no gap between commit versions.
+        // There must also be no gap between a checkpoint and the first commit version.
+        require!(
+            sorted_commit_files
+                .windows(2)
+                .all(|cfs| cfs[0].version + 1 == cfs[1].version),
+            Error::generic(format!(
+                "Expected ordered contiguous commit files {:?}",
+                sorted_commit_files
+            ))
+        );
+        if let (Some(checkpoint_file), Some(commit_file)) =
+            (checkpoint_parts.first(), sorted_commit_files.first())
+        {
+            require!(checkpoint_file.version + 1 == commit_file.version,
+            Error::generic(format!("Expected commit file version {} to be next version to checkpoint file version {}", commit_file.version, checkpoint_file.version )))
+        }
+
+        // Get the effective version from chosen files
+        let version_eff = sorted_commit_files
+            .last()
+            .or(checkpoint_parts.first())
+            .ok_or(Error::MissingVersion)? // TODO: A more descriptive error
+            .version;
+        if let Some(end_version) = expected_end_version {
+            require!(
+                version_eff == end_version,
+                Error::generic(format!(
+                    "version effective not the same as end_version {}, {}",
+                    version_eff, end_version
+                ))
+            );
+        }
+
+        Ok(LogSegment {
+            end_version: version_eff,
+            log_root,
+            commit_files: sorted_commit_files,
+            checkpoint_parts,
+        })
+    }
+
+    pub(crate) fn for_snapshot(
+        fs_client: &dyn FileSystemClient,
+        table_root: &Url,
+        checkpoint_hint: impl Into<Option<CheckpointMetadata>>,
+        time_travel_version: impl Into<Option<Version>>,
+    ) -> DeltaResult<Self> {
+        let time_travel_version = time_travel_version.into();
+        let log_root = table_root.join("_delta_log/").unwrap();
+
+        let (mut sorted_commit_files, checkpoint_parts) =
+            match (checkpoint_hint.into(), time_travel_version) {
+                (Some(cp), None) => {
+                    list_log_files_with_checkpoint(&cp, fs_client, &log_root, None)?
+                }
+                (Some(cp), Some(end_version)) if cp.version <= end_version => {
+                    list_log_files_with_checkpoint(&cp, fs_client, &log_root, Some(end_version))?
+                }
+                _ => list_log_files_with_version(fs_client, &log_root, None, time_travel_version)?,
+            };
+
+        // Commit file versions must be greater than the most recent checkpoint version if it exists
+        if let Some(checkpoint_file) = checkpoint_parts.first() {
+            sorted_commit_files.retain(|log_path| checkpoint_file.version < log_path.version);
+        }
+
+        LogSegment::try_new(
+            sorted_commit_files,
+            checkpoint_parts,
+            log_root,
+            time_travel_version,
+        )
+    }
+
+    /// Constructs a [`LogSegment`] to be used for `TableChanges`. For a TableChanges between versions
+    /// `start_version` and `end_version`: Its LogSegment is made up of zero checkpoints and all commits
+    /// between versions `start_version` and `end_version` (inclusive). If no `end_version` is specified
+    /// it will be the most recent version by default.
+    #[allow(unused)]
+    pub(crate) fn for_table_changes(
+        fs_client: &dyn FileSystemClient,
+        table_root: &Url,
+        start_version: Version,
+        end_version: impl Into<Option<Version>>,
+    ) -> DeltaResult<Self> {
+        let log_root = table_root.join("_delta_log/").unwrap();
+
+        let end_version = end_version.into();
+        if let (start_version, Some(end_version)) = (start_version, end_version) {
+            if start_version > end_version {
+                return Err(Error::generic("Failed to build LogSegment: `start_version` cannot be greater than end_version"));
+            }
+        }
+
+        let sorted_commit_files: Vec<_> =
+            get_parsed_log_files_iter(fs_client, &log_root, start_version, end_version)?
+                .filter_ok(|x| x.is_commit())
+                .try_collect()?;
+
+        require!(
+            sorted_commit_files
+                .first()
+                .is_some_and(|first_commit| first_commit.version == start_version),
+            Error::generic(format!(
+                "Expected the first commit to have version {}",
+                start_version
+            ))
+        );
+        LogSegment::try_new(sorted_commit_files, vec![], log_root, end_version)
+    }
     /// Read a stream of log data from this log segment.
     ///
     /// The log files will be read from most recent to oldest.
@@ -62,9 +178,12 @@ impl LogSegment {
         checkpoint_read_schema: SchemaRef,
         meta_predicate: Option<ExpressionRef>,
     ) -> DeltaResult<impl Iterator<Item = DeltaResult<(Box<dyn EngineData>, bool)>> + Send> {
+        // `replay` expects commit files to be sorted in descending order, so we reverse the sorted
+        // commit files
         let commit_files: Vec<_> = self
             .commit_files
             .iter()
+            .rev()
             .map(|f| f.location.clone())
             .collect();
         let commit_stream = engine
@@ -128,198 +247,62 @@ impl LogSegment {
     }
 }
 
-/// Builder for [`LogSegment`] from from `start_version` to `end_version` inclusive
-#[derive(Default)]
-pub(crate) struct LogSegmentBuilder {
-    start_checkpoint: Option<CheckpointMetadata>,
-    start_version: Option<Version>,
-    end_version: Option<Version>,
-    /// When `sort_commit_files_ascending` is set to `true`, the commit files are sorted in
-    /// ascending order. Otherwise if it is set to `false`, the commit files are sorted in
-    /// descending order. This is set to `false` by default.
-    sort_commit_files_ascending: bool,
-    without_checkpoint_files: bool,
+/// Returns a fallible iterator of [`ParsedLogPath`] that are between the provided `start_version` (inclusive)
+/// and `end_version` (inclusive). If `start_version` is not specified, the files will begin from
+/// version number 0. If `end_version` is not specified, files up to the most recent version will be
+/// included.
+///
+/// Note: this calls [`FileSystemClient::list_from`] to get the list of log files.
+fn get_parsed_log_files_iter(
+    fs_client: &dyn FileSystemClient,
+    log_root: &Url,
+    start_version: impl Into<Option<Version>>,
+    end_version: impl Into<Option<Version>>,
+) -> DeltaResult<impl Iterator<Item = DeltaResult<ParsedLogPath>>> {
+    let start_version = start_version.into().unwrap_or(0);
+    let end_version = end_version.into();
+
+    let version_prefix = format!("{:020}", start_version);
+    let start_from = log_root.join(&version_prefix)?;
+
+    // Check that the provided version is less than or equal to the end version if it exists
+    let lte_end_version = move |version: u64| {
+        end_version.is_none() || end_version.is_some_and(|end_version| version <= end_version)
+    };
+
+    Ok(fs_client
+        .list_from(&start_from)?
+        .map(|meta| ParsedLogPath::try_from(meta?))
+        // TODO this filters out .crc files etc which start with "." - how do we want to use these kind of files?
+        .filter_map_ok(identity)
+        .take_while(move |x| match x {
+            Ok(x) => lte_end_version(x.version),
+            _ => false,
+        }))
 }
-impl LogSegmentBuilder {
-    pub(crate) fn new() -> Self {
-        Self::default()
-    }
-    /// Provide a checkpoint metadata to start the log segment from (e.g. from reading the `last_checkpoint` file).
-    ///
-    /// Note: Either `start_version` or `start_checkpoint` may be specified.  Attempting to build a [`LogSegment`]
-    /// with both will result in an error.
-    #[allow(unused)]
-    pub(crate) fn with_start_checkpoint(
-        mut self,
-        start_checkpoint: impl Into<Option<CheckpointMetadata>>,
-    ) -> Self {
-        self.start_checkpoint = start_checkpoint.into();
-        self
-    }
-    /// Provide a `start_version` (inclusive) of the [`LogSegment`] that ensures that all commit files
-    /// are at this version or above it.
-    ///
-    /// Note: Either `start_version` or `start_checkpoint` may be specified.  Attempting to build a [`LogSegment`]
-    /// with both will result in an error.
-    #[allow(unused)]
-    pub(crate) fn with_start_version(mut self, version: impl Into<Option<Version>>) -> Self {
-        self.start_version = version.into();
-        self
-    }
-    /// Provide an `end_version` (inclusive) of the [`LogSegment`]. This ensures that all commit and
-    /// checkpoint files are at or below the end version.
-    #[allow(unused)]
-    pub(crate) fn with_end_version(mut self, version: impl Into<Option<Version>>) -> Self {
-        self.end_version = version.into();
-        self
-    }
-    /// Specify that the [`LogSegment`] will not have any checkpoint files. It will only be made
-    /// up of commit files.
-    #[allow(unused)]
-    pub(crate) fn without_checkpoint_files(mut self) -> Self {
-        self.without_checkpoint_files = true;
-        self
-    }
-    /// Specify that the commits in the [`LogSegment`] will be sorted by version in ascending
-    /// order. By default, commits are sorted by version in descending order.
-    #[allow(unused)]
-    pub(crate) fn with_sort_commit_files_ascending(mut self) -> Self {
-        self.sort_commit_files_ascending = true;
-        self
-    }
-    /// Build the [`LogSegment`]
-    ///
-    /// This fetches checkpoint and commit files using the `fs_client`.
-    pub(crate) fn build(
-        self,
-        fs_client: &dyn FileSystemClient,
-        table_root: &Url,
-    ) -> DeltaResult<LogSegment> {
-        if self.start_version.is_some() && self.start_checkpoint.is_some() {
-            return Err(Error::generic("Failed to build LogSegment: Cannot specify both start_version and start_checkpoint"));
-        }
-        if let (Some(start_version), Some(end_version)) = (self.start_version, self.end_version) {
-            if start_version > end_version {
-                return Err(Error::generic("Failed to build LogSegment: `start_version` cannot be greater than end_version"));
-            }
-        }
-        let Self {
-            start_checkpoint,
-            start_version,
-            end_version,
-            sort_commit_files_ascending,
-            without_checkpoint_files,
-        } = self;
-        let log_root = table_root.join("_delta_log/").unwrap();
-        let (mut sorted_commit_files, mut checkpoint_parts) =
-            match (start_checkpoint, start_version, end_version) {
-                (Some(cp), None, None) => {
-                    list_log_files_with_checkpoint(&cp, fs_client, &log_root, end_version)?
-                }
-                (Some(cp), None, Some(end_version)) if cp.version <= end_version => {
-                    list_log_files_with_checkpoint(&cp, fs_client, &log_root, Some(end_version))?
-                }
-                (None, Some(start_version), _) => list_log_files_with_version(
-                    fs_client,
-                    &log_root,
-                    Some(start_version),
-                    end_version,
-                )?,
-                _ => list_log_files_with_version(fs_client, &log_root, None, end_version)?,
-            };
-
-        if without_checkpoint_files {
-            checkpoint_parts.clear();
-        }
-
-        // Commit file versions must satisfy the following:
-        // - Be greater than or equal to the start version
-        // - Be greater than the most recent checkpoint version if it exists
-        // - Be less than or equal to the end version.
-        if let Some(start_version) = start_version {
-            sorted_commit_files.retain(|log_path| log_path.version >= start_version);
-        }
-        if let Some(end_version) = end_version {
-            sorted_commit_files.retain(|log_path| log_path.version <= end_version);
-        }
-        if let Some(checkpoint_file) = checkpoint_parts.first() {
-            sorted_commit_files.retain(|log_path| checkpoint_file.version < log_path.version);
-        }
-
-        // After (possibly) omitting checkpoint files and filtering commits, we should have commits that are
-        // contiguous. In other words, there must be no gap between commit versions.
-        let ordered_commits = sorted_commit_files
-            .windows(2)
-            .all(|cfs| cfs[0].version + 1 == cfs[1].version);
-        if !ordered_commits {
-            return Err(Error::generic("Expected ordered contiguous commit files"));
-        }
-
-        // get the effective version from chosen files
-        let version_eff = sorted_commit_files
-            .last()
-            .or(checkpoint_parts.first())
-            .ok_or(Error::MissingVersion)? // TODO: A more descriptive error
-            .version;
-        if let Some(end_version) = end_version {
-            require!(
-                version_eff == end_version,
-                Error::generic(format!(
-                    "version effective not the same as end_version {}, {}",
-                    version_eff, end_version
-                )) // TODO more descriptive error
-            );
-        }
-
-        // We assume commit files are sorted in ascending order. If `sort_commit_files_ascending`
-        // is false, reverse to make it descending.
-        if !sort_commit_files_ascending {
-            sorted_commit_files.reverse();
-        }
-
-        Ok(LogSegment {
-            end_version: version_eff,
-            log_root,
-            commit_files: sorted_commit_files,
-            checkpoint_parts,
-        })
-    }
-}
-
-/// List all commit and checkpoint files with versions above the provided `version`. If successful, this returns
-/// a tuple `(sorted_commit_files_paths, checkpoint_parts): (Vec<ParsedLogPath>, Vec<ParsedLogPath>)`.
-/// The commit files are guaranteed to be sorted in ascending order by version. The elements of
-/// `checkpoint_parts` are all the parts of the same checkpoint. Checkpoint parts share the same
-/// version.
+/// List all commit and checkpoint files with versions above the provided `start_version` (inclusive).
+/// If successful, this returns a tuple `(sorted_commit_files_paths, checkpoint_parts)` of type
+/// `(Vec<ParsedLogPath>, Vec<ParsedLogPath>)`. The commit files are guaranteed to be sorted in
+/// ascending order by version. The elements of `checkpoint_parts` are all the parts of the same
+/// checkpoint. Checkpoint parts share the same version.
 fn list_log_files_with_version(
     fs_client: &dyn FileSystemClient,
     log_root: &Url,
-    version: Option<Version>,
+    start_version: Option<Version>,
     end_version: Option<Version>,
 ) -> DeltaResult<(Vec<ParsedLogPath>, Vec<ParsedLogPath>)> {
-    let begin_version = version.unwrap_or(0);
-    let version_prefix = format!("{:020}", begin_version);
-    let start_from = log_root.join(&version_prefix)?;
-
-    let mut max_checkpoint_version = version;
+    let mut max_checkpoint_version = start_version;
     let mut checkpoint_parts = vec![];
     // We expect 10 commit files per checkpoint, so start with that size. We could adjust this based
     // on config at some point
     let mut commit_files = Vec::with_capacity(10);
 
-    for meta_res in fs_client.list_from(&start_from)? {
-        let meta = meta_res?;
-        // TODO this filters out .crc files etc which start with "." - how do we want to use these kind of files?
-        let Some(parsed_path) = ParsedLogPath::try_from(meta)? else {
-            continue;
-        };
+    for parsed_path in get_parsed_log_files_iter(fs_client, log_root, start_version, end_version)? {
+        let parsed_path = parsed_path?;
         if parsed_path.is_commit() {
             commit_files.push(parsed_path);
         } else if parsed_path.is_checkpoint() {
             let path_version = parsed_path.version;
-            if end_version.is_some_and(|end_version| path_version > end_version) {
-                continue;
-            }
             match max_checkpoint_version {
                 None => {
                     checkpoint_parts.push(parsed_path);
@@ -338,18 +321,11 @@ fn list_log_files_with_version(
         }
     }
 
-    debug_assert!(
-        commit_files
-            .windows(2)
-            .all(|cfs| cfs[0].version <= cfs[1].version),
-        "fs_client.list_from() didn't return a sorted listing! {:?}",
-        commit_files
-    );
-
     Ok((commit_files, checkpoint_parts))
 }
 
-/// List all commit and checkpoint files after the provided checkpoint.
+/// List all commit and checkpoint files after the provided checkpoint. It is guaranteed that all
+/// the returned [`ParsedLogPath`]s will have a version less than or equal to the `end_version`.
 /// See [`list_log_files_with_version`] for details on the return type.
 fn list_log_files_with_checkpoint(
     checkpoint_metadata: &CheckpointMetadata,
@@ -398,7 +374,7 @@ mod tests {
     use crate::engine::default::executor::tokio::TokioBackgroundExecutor;
     use crate::engine::default::filesystem::ObjectStoreFileSystemClient;
     use crate::engine::sync::SyncEngine;
-    use crate::log_segment::LogSegmentBuilder;
+    use crate::log_segment::LogSegment;
     use crate::snapshot::CheckpointMetadata;
     use crate::{FileSystemClient, Table};
     use test_utils::delta_path_for_version;
@@ -516,18 +492,17 @@ mod tests {
             Some(&checkpoint_metadata),
         );
 
-        let log_segment = LogSegmentBuilder::new()
-            .with_start_checkpoint(checkpoint_metadata)
-            .build(client.as_ref(), &table_root)
-            .unwrap();
+        let log_segment =
+            LogSegment::for_snapshot(client.as_ref(), &table_root, checkpoint_metadata, None)
+                .unwrap();
         let (commit_files, checkpoint_parts) =
             (log_segment.commit_files, log_segment.checkpoint_parts);
 
         assert_eq!(checkpoint_parts.len(), 1);
         assert_eq!(commit_files.len(), 2);
         assert_eq!(checkpoint_parts[0].version, 5);
-        assert_eq!(commit_files[0].version, 7);
-        assert_eq!(commit_files[1].version, 6);
+        assert_eq!(commit_files[0].version, 6);
+        assert_eq!(commit_files[1].version, 7);
     }
     #[test]
     fn test_read_log_with_correct_last_checkpoint() {
@@ -558,22 +533,21 @@ mod tests {
             Some(&checkpoint_metadata),
         );
 
-        let log_segment = LogSegmentBuilder::new()
-            .with_start_checkpoint(checkpoint_metadata)
-            .build(client.as_ref(), &table_root)
-            .unwrap();
+        let log_segment =
+            LogSegment::for_snapshot(client.as_ref(), &table_root, checkpoint_metadata, None)
+                .unwrap();
         let (commit_files, checkpoint_parts) =
             (log_segment.commit_files, log_segment.checkpoint_parts);
 
         assert_eq!(checkpoint_parts.len(), 1);
         assert_eq!(commit_files.len(), 2);
         assert_eq!(checkpoint_parts[0].version, 5);
-        assert_eq!(commit_files[0].version, 7);
-        assert_eq!(commit_files[1].version, 6);
+        assert_eq!(commit_files[0].version, 6);
+        assert_eq!(commit_files[1].version, 7);
     }
 
     #[test]
-    fn test_builder_witouth_checkpoints() {
+    fn test_snapshot_without_checkpoints() {
         let (client, table_root) = build_log_with_paths_and_checkpoint(
             &[
                 delta_path_for_version(0, "json"),
@@ -590,20 +564,60 @@ mod tests {
             ],
             None,
         );
-        let log_segment = LogSegmentBuilder::new()
-            .without_checkpoint_files()
-            .build(client.as_ref(), &table_root)
-            .unwrap();
+
+        let log_segment =
+            LogSegment::for_snapshot(client.as_ref(), &table_root, None, None).unwrap();
         let (commit_files, checkpoint_parts) =
             (log_segment.commit_files, log_segment.checkpoint_parts);
 
-        // Checkpoints should be omitted
-        assert_eq!(checkpoint_parts.len(), 0);
+        assert_eq!(checkpoint_parts.len(), 1);
+        assert_eq!(checkpoint_parts[0].version, 5);
 
         // All commit files should still be there
         let versions = commit_files.into_iter().map(|x| x.version).collect_vec();
-        let expected_versions = (0..=7).rev().collect_vec();
+        let expected_versions = vec![6, 7];
         assert_eq!(versions, expected_versions);
+    }
+
+    #[test]
+    fn test_builder_with_checkpoint_greater_than_time_travel() {
+        let checkpoint_metadata = CheckpointMetadata {
+            version: 5,
+            size: 10,
+            parts: None,
+            size_in_bytes: None,
+            num_of_add_files: None,
+            checkpoint_schema: None,
+            checksum: None,
+        };
+        let (client, table_root) = build_log_with_paths_and_checkpoint(
+            &[
+                delta_path_for_version(0, "json"),
+                delta_path_for_version(1, "json"),
+                delta_path_for_version(1, "checkpoint.parquet"),
+                delta_path_for_version(2, "json"),
+                delta_path_for_version(3, "json"),
+                delta_path_for_version(3, "checkpoint.parquet"),
+                delta_path_for_version(4, "json"),
+                delta_path_for_version(5, "json"),
+                delta_path_for_version(5, "checkpoint.parquet"),
+                delta_path_for_version(6, "json"),
+                delta_path_for_version(7, "json"),
+            ],
+            None,
+        );
+
+        let log_segment =
+            LogSegment::for_snapshot(client.as_ref(), &table_root, checkpoint_metadata, Some(4))
+                .unwrap();
+        let (commit_files, checkpoint_parts) =
+            (log_segment.commit_files, log_segment.checkpoint_parts);
+
+        assert_eq!(checkpoint_parts.len(), 1);
+        assert_eq!(checkpoint_parts[0].version, 3);
+
+        assert_eq!(commit_files.len(), 1);
+        assert_eq!(commit_files[0].version, 4);
     }
     #[test]
     fn test_log_segment_commit_versions() {
@@ -627,13 +641,9 @@ mod tests {
         // --------------------------------------------------------------------------------
         // |                    Specify start version and end version                     |
         // --------------------------------------------------------------------------------
-        let log_segment = LogSegmentBuilder::new()
-            .with_end_version(5)
-            .with_start_version(2)
-            .without_checkpoint_files()
-            .with_sort_commit_files_ascending()
-            .build(client.as_ref(), &table_root)
-            .unwrap();
+
+        let log_segment =
+            LogSegment::for_table_changes(client.as_ref(), &table_root, 2, 5).unwrap();
         let (commit_files, checkpoint_parts) =
             (log_segment.commit_files, log_segment.checkpoint_parts);
 
@@ -646,13 +656,25 @@ mod tests {
         assert_eq!(versions, expected_versions);
 
         // --------------------------------------------------------------------------------
+        // |                    Start version and end version are the same                |
+        // --------------------------------------------------------------------------------
+        let log_segment =
+            LogSegment::for_table_changes(client.as_ref(), &table_root, 0, Some(0)).unwrap();
+
+        let (commit_files, checkpoint_parts) =
+            (log_segment.commit_files, log_segment.checkpoint_parts);
+        // Checkpoints should be omitted
+        assert_eq!(checkpoint_parts.len(), 0);
+
+        // There should only be commit version 0
+        assert_eq!(commit_files.len(), 1);
+        assert_eq!(commit_files[0].version, 0);
+
+        // --------------------------------------------------------------------------------
         // |                    Specify no start or end version                           |
         // --------------------------------------------------------------------------------
-        let log_segment = LogSegmentBuilder::new()
-            .without_checkpoint_files()
-            .with_sort_commit_files_ascending()
-            .build(client.as_ref(), &table_root)
-            .unwrap();
+        let log_segment =
+            LogSegment::for_table_changes(client.as_ref(), &table_root, 0, None).unwrap();
         let (commit_files, checkpoint_parts) =
             (log_segment.commit_files, log_segment.checkpoint_parts);
 
@@ -675,7 +697,14 @@ mod tests {
             ],
             None,
         );
-        let log_segment_res = LogSegmentBuilder::new().build(client.as_ref(), &table_root);
+        let log_segment_res = LogSegment::for_table_changes(client.as_ref(), &table_root, 0, None);
+        assert!(log_segment_res.is_err());
+
+        let log_segment_res = LogSegment::for_table_changes(client.as_ref(), &table_root, 1, None);
+        assert!(log_segment_res.is_err());
+
+        let log_segment_res =
+            LogSegment::for_table_changes(client.as_ref(), &table_root, 0, Some(1));
         assert!(log_segment_res.is_err());
     }
 
@@ -689,49 +718,8 @@ mod tests {
             ],
             None,
         );
-        let log_segment_res = LogSegmentBuilder::new()
-            .with_start_version(1)
-            .with_end_version(0)
-            .build(client.as_ref(), &table_root);
-        assert!(log_segment_res.is_err());
-
-        let log_segment_res = LogSegmentBuilder::new()
-            .with_start_version(0)
-            .with_end_version(0)
-            .build(client.as_ref(), &table_root);
-        assert!(log_segment_res.is_ok());
-    }
-
-    #[test]
-    fn test_build_with_start_version_and_checkpoint_fails() {
-        let checkpoint_metadata = CheckpointMetadata {
-            version: 3,
-            size: 10,
-            parts: None,
-            size_in_bytes: None,
-            num_of_add_files: None,
-            checkpoint_schema: None,
-            checksum: None,
-        };
-
-        let (client, table_root) = build_log_with_paths_and_checkpoint(
-            &[
-                delta_path_for_version(0, "json"),
-                delta_path_for_version(1, "checkpoint.parquet"),
-                delta_path_for_version(2, "json"),
-                delta_path_for_version(3, "checkpoint.parquet"),
-                delta_path_for_version(4, "json"),
-                delta_path_for_version(5, "checkpoint.parquet"),
-                delta_path_for_version(6, "json"),
-                delta_path_for_version(7, "json"),
-            ],
-            Some(&checkpoint_metadata),
-        );
-
-        let log_segment_res = LogSegmentBuilder::new()
-            .with_start_checkpoint(checkpoint_metadata)
-            .with_start_version(5)
-            .build(client.as_ref(), &table_root);
+        let log_segment_res =
+            LogSegment::for_table_changes(client.as_ref(), &table_root, 1, Some(0));
         assert!(log_segment_res.is_err());
     }
 
@@ -761,12 +749,10 @@ mod tests {
             Some(&checkpoint_metadata),
         );
 
-        let log_segment = LogSegmentBuilder::new()
-            .with_start_checkpoint(checkpoint_metadata)
-            .with_end_version(4)
-            .build(client.as_ref(), &table_root)
-            .unwrap();
-        assert_eq!(log_segment.checkpoint_parts.len(), 1);
+        let log_segment =
+            LogSegment::for_snapshot(client.as_ref(), &table_root, checkpoint_metadata, Some(4))
+                .unwrap();
+
         assert_eq!(log_segment.checkpoint_parts[0].version, 3);
         assert_eq!(log_segment.commit_files.len(), 1);
         assert_eq!(log_segment.commit_files[0].version, 4);

@@ -9,7 +9,7 @@ use url::Url;
 
 use crate::actions::{Metadata, Protocol};
 use crate::features::{ColumnMappingMode, COLUMN_MAPPING_MODE_KEY};
-use crate::log_segment::{LogSegment, LogSegmentBuilder};
+use crate::log_segment::LogSegment;
 use crate::scan::ScanBuilder;
 use crate::schema::Schema;
 use crate::{DeltaResult, Engine, Error, FileSystemClient, Version};
@@ -62,10 +62,9 @@ impl Snapshot {
         let fs_client = engine.get_file_system_client();
         let log_url = table_root.join("_delta_log/").unwrap();
 
-        let log_segment = LogSegmentBuilder::new()
-            .with_end_version(version)
-            .with_start_checkpoint(read_last_checkpoint(fs_client.as_ref(), &log_url)?)
-            .build(fs_client.as_ref(), &table_root)?;
+        let checkpoint_hint = read_last_checkpoint(fs_client.as_ref(), &log_url)?;
+        let log_segment =
+            LogSegment::for_snapshot(fs_client.as_ref(), &table_root, checkpoint_hint, version)?;
 
         Self::try_new_from_log_segment(table_root, log_segment, engine)
     }
