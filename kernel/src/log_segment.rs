@@ -129,7 +129,6 @@ impl LogSegment {
 }
 
 /// Builder for [`LogSegment`] from from `start_version` to `end_version` inclusive
-#[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
 pub(crate) struct LogSegmentBuilder {
     start_checkpoint: Option<CheckpointMetadata>,
     start_version: Option<Version>,
@@ -226,6 +225,11 @@ impl LogSegmentBuilder {
         if self.start_version.is_some() && self.start_checkpoint.is_some() {
             return Err(Error::generic("Failed to build LogSegment: Cannot specify both start_version and start_checkpoint"));
         }
+        if let (Some(start_version), Some(end_version)) = (self.start_version, self.end_version) {
+            if start_version > end_version {
+                return Err(Error::generic("Failed to build LogSegment: `start_version` cannot be greater than end_version"));
+            }
+        }
         let Self {
             start_checkpoint,
             start_version,
@@ -234,17 +238,19 @@ impl LogSegmentBuilder {
             omit_checkpoint_files,
         } = self;
         let log_root = table_root.join("_delta_log/").unwrap();
-        let (mut sorted_commit_files, mut checkpoint_parts) = match (start_checkpoint, start_version, end_version)
-        {
-            (Some(cp), None, None) => list_log_files_with_checkpoint(&cp, fs_client, &log_root)?,
-            (Some(cp), None, Some(end_version)) if cp.version <= end_version => {
-                list_log_files_with_checkpoint(&cp, fs_client, &log_root)?
-            }
-            (None, Some(start_version), _) => {
-                list_log_files_with_version(fs_client, &log_root, Some(start_version))?,
-            }
-            _ => list_log_files_with_version(fs_client, &log_root, None)?,
-        };
+        let (mut sorted_commit_files, mut checkpoint_parts) =
+            match (start_checkpoint, start_version, end_version) {
+                (Some(cp), None, None) => {
+                    list_log_files_with_checkpoint(&cp, fs_client, &log_root)?
+                }
+                (Some(cp), None, Some(end_version)) if cp.version <= end_version => {
+                    list_log_files_with_checkpoint(&cp, fs_client, &log_root)?
+                }
+                (None, Some(start_version), _) => {
+                    list_log_files_with_version(fs_client, &log_root, Some(start_version))?
+                }
+                _ => list_log_files_with_version(fs_client, &log_root, None)?,
+            };
 
         if omit_checkpoint_files {
             checkpoint_parts.clear();
@@ -263,6 +269,9 @@ impl LogSegmentBuilder {
         if let Some(end_version) = end_version {
             sorted_commit_files.retain(|log_path| log_path.version <= end_version);
         }
+
+        // After (possibly) omitting checkpoint files and filtering commits, we should have commits that are
+        // contiguous. In other words, there must be no gap between commit versions.
         let ordered_commits = sorted_commit_files
             .windows(2)
             .all(|cfs| cfs[0].version + 1 == cfs[1].version);
@@ -680,6 +689,29 @@ mod tests {
         );
         let log_segment_res = LogSegmentBuilder::new().build(client.as_ref(), &table_root);
         assert!(log_segment_res.is_err());
+    }
+
+    #[test]
+    fn test_larger_start_version_is_fail() {
+        // Commit with version 1 is missing
+        let (client, table_root) = build_log_with_paths_and_checkpoint(
+            &[
+                delta_path_for_version(0, "json"),
+                delta_path_for_version(1, "json"),
+            ],
+            None,
+        );
+        let log_segment_res = LogSegmentBuilder::new()
+            .with_start_version(1)
+            .with_end_version(0)
+            .build(client.as_ref(), &table_root);
+        assert!(log_segment_res.is_err());
+
+        let log_segment_res = LogSegmentBuilder::new()
+            .with_start_version(0)
+            .with_end_version(0)
+            .build(client.as_ref(), &table_root);
+        assert!(log_segment_res.is_ok());
     }
 
     #[test]
