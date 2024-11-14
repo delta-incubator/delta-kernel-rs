@@ -97,6 +97,7 @@ impl<'seen> AddRemoveDedupVisitor<'seen> {
 }
 impl<'seen> RowVisitorBase for AddRemoveDedupVisitor<'seen> {
     fn selected_column_names_and_types(&self) -> (&'static [ColumnName], &'static [DataType]) {
+        // NOTE: THe visitor assumes adds always come first, with removes optionally afterward
         static NAMES_AND_TYPES: LazyLock<ColumnNamesAndTypes> = LazyLock::new(|| {
             const STRING: DataType = DataType::STRING;
             const INTEGER: DataType = DataType::INTEGER;
