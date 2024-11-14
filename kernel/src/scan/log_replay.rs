@@ -73,7 +73,7 @@ impl<'seen> AddRemoveDedupVisitor<'seen> {
     fn filter_row<'a>(&mut self, i: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<bool> {
         // Add will have a path at index 0 if it is valid; otherwise, if it is a log batch, we
         // may have a remove with a path at index 4.
-        let (path, getters, keep) = if let Some(path) = getters[0].get_opt(i, "add.path")? {
+        let (path, getters, is_add) = if let Some(path) = getters[0].get_opt(i, "add.path")? {
             (path, &getters[1..4], true)
         } else if !self.is_log_batch {
             return Ok(false);
@@ -91,14 +91,15 @@ impl<'seen> AddRemoveDedupVisitor<'seen> {
             )),
             None => None,
         };
-        // Process both adds and removes, but only keep the surviving adds
-        Ok(self.filter_seen(path, dv_unique_id) && keep)
+        // Process both adds and removes, but only return surviving adds
+        Ok(self.filter_seen(path, dv_unique_id) && is_add)
     }
 }
 impl<'seen> RowVisitorBase for AddRemoveDedupVisitor<'seen> {
     fn selected_column_names_and_types(&self) -> (&'static [ColumnName], &'static [DataType]) {
         static NAMES_AND_TYPES: LazyLock<ColumnNamesAndTypes> = LazyLock::new(|| {
-            use DataType::{INTEGER, STRING};
+            const STRING: DataType = DataType::STRING;
+            const INTEGER: DataType = DataType::INTEGER;
             let types_and_names = vec![
                 (STRING, column_name!("add.path")),
                 (STRING, column_name!("add.deletionVector.storageType")),
