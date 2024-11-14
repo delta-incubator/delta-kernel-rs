@@ -7,7 +7,7 @@ use crate::actions::schemas::{GetNullableContainerStructField, GetStructField};
 use crate::actions::COMMIT_INFO_NAME;
 use crate::actions::{get_log_add_schema, get_log_commit_info_schema};
 use crate::error::Error;
-use crate::expressions::{column_expr, ColumnName, Scalar, StructData};
+use crate::expressions::{column_expr, Scalar, StructData};
 use crate::path::ParsedLogPath;
 use crate::schema::{SchemaRef, StructField, StructType};
 use crate::snapshot::Snapshot;
@@ -29,9 +29,9 @@ pub(crate) static WRITE_METADATA_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| 
     ]))
 });
 
-/// Get the expected schema for [`write_metadata`].
+/// Get the expected schema for engine data passed to [`add_write_metadata`].
 ///
-/// [`write_metadata`]: crate::transaction::Transaction::write_metadata
+/// [`add_write_metadata`]: crate::transaction::Transaction::add_write_metadata
 pub fn get_write_metadata_schema() -> &'static SchemaRef {
     &WRITE_METADATA_SCHEMA
 }
@@ -143,15 +143,11 @@ impl Transaction {
     fn generate_logical_to_physical(&self) -> Expression {
         // for now, we just pass through all the columns except partition columns.
         // note this is _incorrect_ if table config deems we need partition columns.
-        let partition_columns = self.read_snapshot.metadata().partition_columns.clone();
+        let partition_columns = &self.read_snapshot.metadata().partition_columns;
         let fields = self.read_snapshot.schema().fields();
-        let fields = fields.filter_map(|f| {
-            if partition_columns.contains(f.name()) {
-                None
-            } else {
-                Some(ColumnName::new([f.name()]).into())
-            }
-        });
+        let fields = fields
+            .filter(|f| !partition_columns.contains(f.name()))
+            .map(|f| Expression::column([f.name()]));
         Expression::struct_from(fields)
     }
 
@@ -194,7 +190,7 @@ fn generate_adds<'a>(
         let adds_expr = Expression::struct_from([Expression::struct_from(
             write_metadata_schema
                 .fields()
-                .map(|f| ColumnName::new([f.name()]).into()),
+                .map(|f| Expression::column([f.name()])),
         )]);
         let adds_evaluator = expression_handler.get_evaluator(
             write_metadata_schema.clone(),
@@ -256,10 +252,10 @@ fn generate_commit_info(
     operation: Option<&str>,
     engine_commit_info: &dyn EngineData,
 ) -> DeltaResult<Box<dyn EngineData>> {
-    if engine_commit_info.length() != 1 {
+    if engine_commit_info.len() != 1 {
         return Err(Error::InvalidCommitInfo(format!(
             "Engine commit info should have exactly one row, found {}",
-            engine_commit_info.length()
+            engine_commit_info.len()
         )));
     }
 
@@ -451,7 +447,7 @@ mod tests {
             }
         });
 
-        assert_eq!(actions.length(), 1);
+        assert_eq!(actions.len(), 1);
         let result = as_json_and_scrub_timestamp(actions);
         assert_eq!(result, expected);
 
@@ -511,7 +507,7 @@ mod tests {
             }
         });
 
-        assert_eq!(actions.length(), 1);
+        assert_eq!(actions.len(), 1);
         let result = as_json_and_scrub_timestamp(actions);
         assert_eq!(result, expected);
 
@@ -584,7 +580,7 @@ mod tests {
         data: Box<dyn EngineData>,
         write_engine_commit_info: bool,
     ) -> DeltaResult<()> {
-        assert_eq!(data.length(), 1);
+        assert_eq!(data.len(), 1);
         let expected = if write_engine_commit_info {
             serde_json::json!({
                 "commitInfo": {
