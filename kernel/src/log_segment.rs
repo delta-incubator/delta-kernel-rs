@@ -446,7 +446,7 @@ mod tests {
         assert_eq!(data.len(), 4);
     }
 
-    // Utility method to build a log using a list of logzpaths and an optional checkpoint hint. The
+    // Utility method to build a log using a list of log paths and an optional checkpoint hint. The
     // CheckpointMetadata is written to `_delta_log/_last_checkpoint`.
     fn build_log_with_paths_and_checkpoint(
         paths: &[Path],
