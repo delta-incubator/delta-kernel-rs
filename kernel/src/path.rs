@@ -244,15 +244,16 @@ mod tests {
         let log_path = table_log_dir.join("00000000000000000011.").unwrap();
         let result = ParsedLogPath::try_from(log_path);
         assert!(
-            matches!(result, Ok(Some(_))),
-            "Expected Ok(Some) for empty extension"
+            matches!(
+                result,
+                Ok(Some(ParsedLogPath {
+                    file_type: LogPathFileType::Unknown,
+                    ..
+                }))
+            ),
+            "Expected Unknown file type, got {:?}",
+            result
         );
-        if let Ok(Some(parsed)) = result {
-            assert!(
-                parsed.is_unknown(),
-                "Expected Unknown file type for empty extension"
-            );
-        }
 
         // ignored - version fails to parse
         let log_path = table_log_dir.join("abc.json").unwrap();
@@ -418,12 +419,8 @@ mod tests {
             .unwrap();
         let result = ParsedLogPath::try_from(log_path);
         assert!(
-            result.is_err(),
-            "Expected an error for UUID with exactly 35 characters"
-        );
-        assert!(
             matches!(result, Err(Error::InvalidLogPath(_))),
-            "Expected InvalidLogPath error for boundary UUID length"
+            "Expected an error for UUID with exactly 35 characters"
         );
     }
 
