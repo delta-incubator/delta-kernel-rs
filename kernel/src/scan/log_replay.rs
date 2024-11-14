@@ -12,7 +12,7 @@ use crate::expressions::{column_expr, column_name, ColumnName, Expression, Expre
 use crate::scan::DeletionVectorDescriptor;
 use crate::schema::{ColumnNamesAndTypes, DataType, MapType, SchemaRef, StructField, StructType};
 use crate::utils::require;
-use crate::{DeltaResult, Engine, EngineData, Error, ExpressionHandler, RowVisitor as _};
+use crate::{DeltaResult, Engine, EngineData, Error, ExpressionEvaluator, RowVisitor as _};
 
 /// The subset of file action fields that uniquely identifies it in the log, used for deduplication
 /// of adds and removes during log replay.
@@ -43,7 +43,7 @@ struct AddRemoveDedupVisitor<'seen> {
     is_log_batch: bool,
 }
 impl<'seen> AddRemoveDedupVisitor<'seen> {
-    fn filter_seen(&mut self, path: &str, dv_unique_id: Option<String>) -> bool {
+    fn already_seen(&mut self, path: &str, dv_unique_id: Option<String>) -> bool {
         // Note: each (add.path + add.dv_unique_id()) pair has a
         // unique Add + Remove pair in the log. For example:
         // https://github.com/delta-io/delta/blob/master/spark/src/test/resources/delta/table-with-dv-large/_delta_log/00000000000000000001.json
@@ -54,7 +54,7 @@ impl<'seen> AddRemoveDedupVisitor<'seen> {
                 "Ignoring duplicate ({}, {:?}) in scan, is log {}",
                 key.path, key.dv_unique_id, self.is_log_batch
             );
-            false
+            true
         } else {
             debug!(
                 "Including ({}, {:?}) in scan, is log {}",
@@ -66,7 +66,7 @@ impl<'seen> AddRemoveDedupVisitor<'seen> {
                 // batches because they are already the oldest actions and never replace anything.
                 self.seen.insert(key);
             }
-            true
+            false
         }
     }
 
@@ -91,8 +91,9 @@ impl<'seen> AddRemoveDedupVisitor<'seen> {
             )),
             None => None,
         };
-        // Process both adds and removes, but only return surviving adds
-        Ok(self.filter_seen(path, dv_unique_id) && is_add)
+
+        // Process both adds and removes, but only return not already-seen adds
+        Ok(!self.already_seen(path, dv_unique_id) && is_add)
     }
 }
 impl<'seen> RowVisitorBase for AddRemoveDedupVisitor<'seen> {
@@ -133,6 +134,8 @@ impl<'seen> RowVisitorBase for AddRemoveDedupVisitor<'seen> {
                 getters.len()
             ))
         );
+
+        // TODO(zach): Add a check that the selection vector never tries to skip a remove?
         for i in 0..row_count {
             if self.selection_vector[i] {
                 self.selection_vector[i] = self.filter_row(i, getters)?;
@@ -144,38 +147,41 @@ impl<'seen> RowVisitorBase for AddRemoveDedupVisitor<'seen> {
 
 // NB: If you update this schema, ensure you update the comment describing it in the doc comment
 // for `scan_row_schema` in scan/mod.rs! You'll also need to update ScanFileVisitor as the
-// indexes will be off
+// indexes will be off, and `get_add_transform_expr` below to match it.
 pub(crate) static SCAN_ROW_SCHEMA: LazyLock<Arc<StructType>> = LazyLock::new(|| {
     // Note that fields projected out of a nullable struct must be nullable
+    let partition_values = MapType::new(DataType::STRING, DataType::STRING, true);
+    let file_constant_values =
+        StructType::new([StructField::new("partitionValues", partition_values, true)]);
+    let deletion_vector = StructType::new([
+        StructField::new("storageType", DataType::STRING, true),
+        StructField::new("pathOrInlineDv", DataType::STRING, true),
+        StructField::new("offset", DataType::INTEGER, true),
+        StructField::new("sizeInBytes", DataType::INTEGER, true),
+        StructField::new("cardinality", DataType::LONG, true),
+    ]);
     Arc::new(StructType::new([
         StructField::new("path", DataType::STRING, true),
         StructField::new("size", DataType::LONG, true),
         StructField::new("modificationTime", DataType::LONG, true),
         StructField::new("stats", DataType::STRING, true),
-        StructField::new(
-            "deletionVector",
-            StructType::new([
-                StructField::new("storageType", DataType::STRING, true),
-                StructField::new("pathOrInlineDv", DataType::STRING, true),
-                StructField::new("offset", DataType::INTEGER, true),
-                StructField::new("sizeInBytes", DataType::INTEGER, true),
-                StructField::new("cardinality", DataType::LONG, true),
-            ]),
-            true,
-        ),
-        StructField::new(
-            "fileConstantValues",
-            StructType::new([StructField::new(
-                "partitionValues",
-                MapType::new(DataType::STRING, DataType::STRING, true),
-                true,
-            )]),
-            true,
-        ),
+        StructField::new("deletionVector", deletion_vector, true),
+        StructField::new("fileConstantValues", file_constant_values, true),
     ]))
 });
 
 static SCAN_ROW_DATATYPE: LazyLock<DataType> = LazyLock::new(|| SCAN_ROW_SCHEMA.clone().into());
+
+fn get_add_transform_expr() -> Expression {
+    Expression::Struct(vec![
+        column_expr!("add.path"),
+        column_expr!("add.size"),
+        column_expr!("add.modificationTime"),
+        column_expr!("add.stats"),
+        column_expr!("add.deletionVector"),
+        Expression::Struct(vec![column_expr!("add.partitionValues")]),
+    ])
+}
 
 impl LogReplayScanner {
     /// Create a new [`LogReplayScanner`] instance
@@ -190,38 +196,18 @@ impl LogReplayScanner {
         }
     }
 
-    fn get_add_transform_expr(&self) -> Expression {
-        Expression::Struct(vec![
-            column_expr!("add.path"),
-            column_expr!("add.size"),
-            column_expr!("add.modificationTime"),
-            column_expr!("add.stats"),
-            column_expr!("add.deletionVector"),
-            Expression::Struct(vec![column_expr!("add.partitionValues")]),
-        ])
-    }
-
     fn process_scan_batch(
         &mut self,
-        expression_handler: &dyn ExpressionHandler,
+        expression: &dyn ExpressionEvaluator,
         actions: &dyn EngineData,
         is_log_batch: bool,
     ) -> DeltaResult<ScanData> {
-        // apply data skipping to get back a selection vector for actions that passed skipping
-        // note: None implies all files passed data skipping.
-        let filter_vector = self
-            .filter
-            .as_ref()
-            .map(|filter| filter.apply(actions))
-            .transpose()?;
-
-        // we start our selection vector based on what was filtered. we will add to this vector
-        // below if a file has been removed
-        let selection_vector = match filter_vector {
-            Some(ref filter_vector) => filter_vector.clone(),
+        // Apply data skipping to get back a selection vector for actions that passed skipping. We
+        // will update the vector below as log replay identifies duplicates that should be ignored.
+        let selection_vector = match &self.filter {
+            Some(filter) => filter.apply(actions)?,
             None => vec![true; actions.len()],
         };
-
         assert_eq!(selection_vector.len(), actions.len());
 
         let mut visitor = AddRemoveDedupVisitor {
@@ -230,16 +216,10 @@ impl LogReplayScanner {
             is_log_batch,
         };
         visitor.visit_rows_of(actions)?;
-        let selection_vector = visitor.selection_vector;
 
         // TODO: Teach expression eval to respect the selection vector we just computed so carefully!
-        let result = expression_handler
-            .get_evaluator(
-                get_log_add_schema().clone(),
-                self.get_add_transform_expr(),
-                SCAN_ROW_DATATYPE.clone(),
-            )
-            .evaluate(actions)?;
+        let selection_vector = visitor.selection_vector;
+        let result = expression.evaluate(actions)?;
         Ok((result, selection_vector))
     }
 }
@@ -255,26 +235,17 @@ pub fn scan_action_iter(
     predicate: Option<ExpressionRef>,
 ) -> impl Iterator<Item = DeltaResult<ScanData>> {
     let mut log_scanner = LogReplayScanner::new(engine, table_schema, predicate);
-    let expression_handler = engine.get_expression_handler();
+    let expression = engine.get_expression_handler().get_evaluator(
+        get_log_add_schema().clone(),
+        get_add_transform_expr(),
+        SCAN_ROW_DATATYPE.clone(),
+    );
     action_iter
         .map(move |action_res| {
-            action_res.and_then(|(batch, is_log_batch)| {
-                log_scanner.process_scan_batch(
-                    expression_handler.as_ref(),
-                    batch.as_ref(),
-                    is_log_batch,
-                )
-            })
+            let (batch, is_log_batch) = action_res?;
+            log_scanner.process_scan_batch(expression.as_ref(), batch.as_ref(), is_log_batch)
         })
-        .filter(|action_res| {
-            match action_res {
-                Ok((_, sel_vec)) => {
-                    // don't bother returning it if everything is filtered out
-                    sel_vec.contains(&true)
-                }
-                Err(_) => true, // just pass through errors
-            }
-        })
+        .filter(|res| res.as_ref().map_or(true, |(_, sv)| sv.contains(&true)))
 }
 
 #[cfg(test)]
