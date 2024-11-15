@@ -79,9 +79,7 @@ impl LogSegment {
         let version_eff = ascending_commit_files
             .last()
             .or(checkpoint_parts.first())
-            .ok_or(Error::generic(
-                "Failed to build log segment: No commit or checkpoitn files provided.",
-            ))?
+            .ok_or(Error::generic("No files in log segment"))?
             .version;
         if let Some(end_version) = end_version {
             require!(
