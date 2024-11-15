@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, iter::once, sync::Arc};
 
 use itertools::{Either, Itertools};
 use tracing::debug;
@@ -9,8 +9,11 @@ use crate::{
         state::{DvInfo, GlobalScanState},
         ColumnType, ScanResult,
     },
-    schema::{SchemaRef, StructType},
-    table_changes::{data_read::get_generated_columns, state::ScanFile},
+    schema::{DataType, SchemaRef, StructField, StructType},
+    table_changes::{
+        data_read::get_generated_columns,
+        state::{ScanFile, ScanFileType},
+    },
     DeltaResult, Engine, Expression, ExpressionRef, FileMeta,
 };
 
@@ -179,7 +182,7 @@ impl TableChangesScan {
         &self,
         engine: &dyn Engine,
     ) -> DeltaResult<impl Iterator<Item = DeltaResult<TableChangesScanData>>> {
-        let commit_files = self.table_changes.log_segment.commit_files.clone();
+        let commit_files = self.table_changes.log_segment.sorted_commit_files.clone();
         table_changes_action_iter(engine, commit_files, &self.logical_schema, self.predicate())
     }
 
@@ -286,6 +289,7 @@ impl TableChangesScan {
                             Some(added),
                             Some(false),
                             generated_columns.clone(),
+                            self.global_scan_state().read_schema.clone(),
                         )?;
 
                         let removed = treemap_to_bools(add_dv - rm_dv);
@@ -297,9 +301,37 @@ impl TableChangesScan {
                             Some(removed),
                             Some(false),
                             generated_columns.clone(),
+                            self.global_scan_state().read_schema.clone(),
                         )?;
 
                         Ok(Either::Left(added_rows.chain(removed_rows)))
+                    }
+                    (ScanFileType::Cdc, _) => {
+                        let selection_vector =
+                            dv_info.get_selection_vector(engine, &self.table_changes.table_root)?;
+
+                        let generated_columns =
+                            get_generated_columns(timestamp, tpe, commit_version)?;
+
+                        let fields = self
+                            .global_scan_state()
+                            .read_schema
+                            .fields()
+                            .cloned()
+                            .collect_vec();
+                        let read_schema = StructType::new(fields.into_iter().chain(once(
+                            StructField::new("_change_type", DataType::STRING, false),
+                        )));
+                        Ok(Either::Right(self.generate_output_rows(
+                            engine,
+                            file,
+                            global_state.clone(),
+                            partition_values,
+                            selection_vector,
+                            None,
+                            generated_columns,
+                            read_schema.into(),
+                        )?))
                     }
                     _ => {
                         let selection_vector =
@@ -315,6 +347,7 @@ impl TableChangesScan {
                             selection_vector,
                             None,
                             generated_columns,
+                            self.global_scan_state().read_schema.clone(),
                         )?))
                     }
                 }
@@ -336,10 +369,11 @@ impl TableChangesScan {
         mut selection_vector: Option<Vec<bool>>,
         extend: Option<bool>,
         generated_columns: Arc<HashMap<String, Expression>>,
+        read_schema: Arc<StructType>,
     ) -> DeltaResult<impl Iterator<Item = DeltaResult<ScanResult>> + 'a> {
         let read_result_iter = engine.get_parquet_handler().read_parquet_files(
             &[meta],
-            global_state.read_schema.clone(),
+            read_schema.clone(),
             self.predicate(),
         )?;
 
@@ -357,8 +391,9 @@ impl TableChangesScan {
                 &self.all_fields,
                 self.have_partition_cols,
                 generated_columns.as_ref(),
+                read_schema.clone(),
             );
-            let len = logical.as_ref().map_or(0, |res| res.length());
+            let len = logical.as_ref().map_or(0, |res| res.len());
             // need to split the dv_mask. what's left in dv_mask covers this result, and rest
             // will cover the following results. we `take()` out of `selection_vector` to avoid
             // trying to return a captured variable. We're going to reassign `selection_vector`

@@ -140,10 +140,10 @@ impl<I: Iterator<Item = DeltaResult<Box<dyn EngineData>>>>
         // below if a file has been removed
         let selection_vector = match filter_vector {
             Some(ref filter_vector) => filter_vector.clone(),
-            None => vec![false; actions.length()],
+            None => vec![false; actions.len()],
         };
 
-        assert_eq!(selection_vector.len(), actions.length());
+        assert_eq!(selection_vector.len(), actions.len());
         let MetadataVisitor {
             timestamp,
             adds,
@@ -254,10 +254,10 @@ impl<I: Iterator<Item = DeltaResult<Box<dyn EngineData>>>> TableChangesLogReplay
         // below if a file has been removed
         let mut selection_vector = match filter_vector {
             Some(ref filter_vector) => filter_vector.clone(),
-            None => vec![false; actions.length()],
+            None => vec![false; actions.len()],
         };
 
-        assert_eq!(selection_vector.len(), actions.length());
+        assert_eq!(selection_vector.len(), actions.len());
         let AddRemoveCdcVisitor {
             adds,
             removes,

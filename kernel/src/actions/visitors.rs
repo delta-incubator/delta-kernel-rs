@@ -326,15 +326,15 @@ impl CdcVisitor {
     ) -> DeltaResult<Cdc> {
         let partition_values: HashMap<_, _> = getters[1].get(row_index, "cdc.partitionValues")?;
         let size: i64 = getters[2].get(row_index, "cdc.size")?;
-        let data_change: bool = getters[4].get(row_index, "cdc.dataChange")?;
+        let data_change: bool = getters[3].get(row_index, "cdc.dataChange")?;
+        let tags: Option<HashMap<String, String>> = getters[4].get_opt(row_index, "cdc.tags")?;
 
-        // TODO(oussama) extract tags if we ever need them at getters[6]
         Ok(Cdc {
             path,
             partition_values,
             size,
             data_change,
-            tags: None,
+            tags,
         })
     }
 }

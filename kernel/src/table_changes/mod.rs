@@ -4,12 +4,12 @@ use std::{collections::HashMap, sync::Arc};
 
 use crate::{
     actions::{Metadata, Protocol},
-    features::ColumnMappingMode,
-    log_segment::{LogSegment, LogSegmentBuilder},
+    log_segment::LogSegment,
     path::AsUrl,
     scan::state::DvInfo,
     schema::{DataType, Schema, StructField, StructType},
     snapshot::Snapshot,
+    table_features::ColumnMappingMode,
     DeltaResult, Engine, EngineData, Error, Version,
 };
 use table_changes_scan::TableChangesScanBuilder;
@@ -60,14 +60,12 @@ impl TableChanges {
 
         // Get a log segment for the CDF range
         let fs_client = engine.get_file_system_client();
-        let mut builder = LogSegmentBuilder::new(fs_client.as_ref(), &table_root);
-        builder = builder
-            .with_start_version(start_version)
-            .omit_checkpoint_files();
-        if let Some(end_version) = end_version {
-            builder = builder.with_end_version(end_version);
-        }
-        let log_segment = builder.build()?;
+        let log_segment = LogSegment::for_table_changes(
+            fs_client.as_ref(),
+            &table_root,
+            start_version,
+            end_version,
+        )?;
 
         let output_schema = Self::transform_logical_schema(end_snapshot.schema());
 

@@ -7,16 +7,13 @@ use delta_kernel::{
 use itertools::Itertools;
 
 fn main() -> DeltaResult<()> {
-    let uri = "./table-with-dv-small";
+    let uri = "./cdf_test_oussama";
     // build a table and get the lastest snapshot from it
     let table = Table::try_from_uri(uri)?;
 
     let engine = SyncEngine::new();
 
-    let table_changes = table.table_changes(&engine, 0, None)?;
-    //let schema = table_changes
-    //    .schema
-    //    .project(&["value", "_commit_timestamp", "_change_type"])?;
+    let table_changes = table.table_changes(&engine, 9, Some(12))?;
     let x = table_changes
         .into_scan_builder()
         //.with_schema(schema)
