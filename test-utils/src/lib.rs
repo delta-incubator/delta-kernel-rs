@@ -89,9 +89,9 @@ pub fn delta_path_for_version(version: u64, suffix: &str) -> Path {
 }
 
 // get an ObjectStore path for a checkpoint file, based on version, part number, and total number of parts
-pub fn delta_path_for_checkpoint_part(version: u64, part_number: u64, total_parts: u64) -> Path {
+pub fn delta_path_for_multipart_checkpoint(version: u64, part_num: u64, num_parts: u64) -> Path {
     let path =
-        format!("_delta_log/{version:020}.checkpoint.{part_number:010}.{total_parts:010}.parquet");
+        format!("_delta_log/{version:020}.checkpoint.{part_num:010}.{num_parts:010}.parquet");
     Path::from(path.as_str())
 }
 /// put a commit file into the specified object store.

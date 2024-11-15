@@ -399,7 +399,7 @@ mod tests {
     use crate::log_segment::LogSegment;
     use crate::snapshot::CheckpointMetadata;
     use crate::{FileSystemClient, Table};
-    use test_utils::{delta_path_for_checkpoint_part, delta_path_for_version};
+    use test_utils::{delta_path_for_multipart_checkpoint, delta_path_for_version};
 
     // NOTE: In addition to testing the meta-predicate for metadata replay, this test also verifies
     // that the parquet reader properly infers nullcount = rowcount for missing columns. The two
@@ -547,9 +547,9 @@ mod tests {
                 delta_path_for_version(3, "checkpoint.parquet"),
                 delta_path_for_version(3, "json"),
                 delta_path_for_version(4, "json"),
-                delta_path_for_checkpoint_part(5, 1, 3),
-                delta_path_for_checkpoint_part(5, 2, 3),
-                delta_path_for_checkpoint_part(5, 3, 3),
+                delta_path_for_multipart_checkpoint(5, 1, 3),
+                delta_path_for_multipart_checkpoint(5, 2, 3),
+                delta_path_for_multipart_checkpoint(5, 3, 3),
                 delta_path_for_version(5, "json"),
                 delta_path_for_version(6, "json"),
                 delta_path_for_version(7, "json"),
@@ -591,9 +591,9 @@ mod tests {
                 delta_path_for_version(3, "checkpoint.parquet"),
                 delta_path_for_version(3, "json"),
                 delta_path_for_version(4, "json"),
-                delta_path_for_checkpoint_part(5, 1, 3),
+                delta_path_for_multipart_checkpoint(5, 1, 3),
                 // Part 2 is missing!
-                delta_path_for_checkpoint_part(5, 3, 3),
+                delta_path_for_multipart_checkpoint(5, 3, 3),
                 delta_path_for_version(5, "json"),
                 delta_path_for_version(6, "json"),
                 delta_path_for_version(7, "json"),
@@ -626,8 +626,8 @@ mod tests {
                 delta_path_for_version(3, "checkpoint.parquet"),
                 delta_path_for_version(3, "json"),
                 delta_path_for_version(4, "json"),
-                delta_path_for_checkpoint_part(5, 1, 2),
-                delta_path_for_checkpoint_part(5, 2, 2),
+                delta_path_for_multipart_checkpoint(5, 1, 2),
+                delta_path_for_multipart_checkpoint(5, 2, 2),
                 delta_path_for_version(5, "json"),
                 delta_path_for_version(6, "json"),
                 delta_path_for_version(7, "json"),
@@ -655,9 +655,9 @@ mod tests {
                 delta_path_for_version(3, "checkpoint.parquet"),
                 delta_path_for_version(3, "json"),
                 delta_path_for_version(4, "json"),
-                delta_path_for_checkpoint_part(5, 1, 3),
+                delta_path_for_multipart_checkpoint(5, 1, 3),
                 // Part 2 is missing!
-                delta_path_for_checkpoint_part(5, 3, 3),
+                delta_path_for_multipart_checkpoint(5, 3, 3),
                 delta_path_for_version(5, "json"),
                 delta_path_for_version(6, "json"),
                 delta_path_for_version(7, "json"),
