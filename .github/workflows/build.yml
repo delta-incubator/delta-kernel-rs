@@ -20,6 +20,21 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: format
         run: cargo fmt -- --check
+  docs:
+    runs-on: ubuntu-latest
+    env:
+      RUSTDOCFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@v3
+      - name: Install minimal stable
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: default
+          toolchain: stable
+          override: true
+      - uses: Swatinem/rust-cache@v2
+      - name: build docs
+        run: cargo doc
   build:
     runs-on: ${{ matrix.os }}
     strategy:
@@ -127,6 +142,21 @@ jobs:
           cmake ..
           make
           make test
+
+  miri:
+    name: "Miri"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Miri
+        run: |
+          rustup toolchain install nightly --component miri
+          rustup override set nightly
+          cargo miri setup
+      - name: Test with Miri
+        run: |
+          pushd ffi
+          MIRIFLAGS=-Zmiri-disable-isolation cargo miri test --features sync-engine
 
   coverage:
     runs-on: ubuntu-latest
