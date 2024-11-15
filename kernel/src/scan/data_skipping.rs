@@ -101,7 +101,6 @@ impl DataSkippingFilter {
             .into_owned();
         let stats_schema = Arc::new(StructType::new([
             StructField::new("numRecords", DataType::LONG, true),
-            StructField::new("tightBounds", DataType::BOOLEAN, true),
             StructField::new("nullCount", nullcount_schema, true),
             StructField::new("minValues", minmax_schema.clone(), true),
             StructField::new("maxValues", minmax_schema, true),

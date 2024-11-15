@@ -157,22 +157,21 @@ impl ParquetStatsProvider for MinMaxTestFilter {
 
 #[test]
 fn test_eval_binary_comparisons() {
-    let col = &column_expr!("x");
-    let five = &Scalar::from(5);
-    let ten = &Scalar::from(10);
-    let fifteen = &Scalar::from(15);
-    let null = &Scalar::Null(DataType::INTEGER);
+    const FIVE: Scalar = Scalar::Integer(5);
+    const TEN: Scalar = Scalar::Integer(10);
+    const FIFTEEN: Scalar = Scalar::Integer(15);
+    const NULL_VAL: Scalar = Scalar::Null(DataType::INTEGER);
 
     let expressions = [
-        Expr::lt(col.clone(), ten.clone()),
-        Expr::le(col.clone(), ten.clone()),
-        Expr::eq(col.clone(), ten.clone()),
-        Expr::ne(col.clone(), ten.clone()),
-        Expr::gt(col.clone(), ten.clone()),
-        Expr::ge(col.clone(), ten.clone()),
+        Expr::lt(column_expr!("x"), 10),
+        Expr::le(column_expr!("x"), 10),
+        Expr::eq(column_expr!("x"), 10),
+        Expr::ne(column_expr!("x"), 10),
+        Expr::gt(column_expr!("x"), 10),
+        Expr::ge(column_expr!("x"), 10),
     ];
 
-    let do_test = |min: &Scalar, max: &Scalar, expected: &[Option<bool>]| {
+    let do_test = |min: Scalar, max: Scalar, expected: &[Option<bool>]| {
         let filter = MinMaxTestFilter::new(Some(min.clone()), Some(max.clone()));
         for (expr, expect) in expressions.iter().zip(expected.iter()) {
             expect_eq!(
@@ -184,23 +183,23 @@ fn test_eval_binary_comparisons() {
     };
 
     // value < min = max (15..15 = 10, 15..15 <= 10, etc)
-    do_test(fifteen, fifteen, &[FALSE, FALSE, FALSE, TRUE, TRUE, TRUE]);
+    do_test(FIFTEEN, FIFTEEN, &[FALSE, FALSE, FALSE, TRUE, TRUE, TRUE]);
 
     // min = max = value (10..10 = 10, 10..10 <= 10, etc)
     //
     // NOTE: missing min or max stat produces NULL output if the expression needed it.
-    do_test(ten, ten, &[FALSE, TRUE, TRUE, FALSE, FALSE, TRUE]);
-    do_test(null, ten, &[NULL, NULL, NULL, NULL, FALSE, TRUE]);
-    do_test(ten, null, &[FALSE, TRUE, NULL, NULL, NULL, NULL]);
+    do_test(TEN, TEN, &[FALSE, TRUE, TRUE, FALSE, FALSE, TRUE]);
+    do_test(NULL_VAL, TEN, &[NULL, NULL, NULL, NULL, FALSE, TRUE]);
+    do_test(TEN, NULL_VAL, &[FALSE, TRUE, NULL, NULL, NULL, NULL]);
 
     // min = max < value (5..5 = 10, 5..5 <= 10, etc)
-    do_test(five, five, &[TRUE, TRUE, FALSE, TRUE, FALSE, FALSE]);
+    do_test(FIVE, FIVE, &[TRUE, TRUE, FALSE, TRUE, FALSE, FALSE]);
 
     // value = min < max (5..15 = 10, 5..15 <= 10, etc)
-    do_test(ten, fifteen, &[FALSE, TRUE, TRUE, TRUE, TRUE, TRUE]);
+    do_test(TEN, FIFTEEN, &[FALSE, TRUE, TRUE, TRUE, TRUE, TRUE]);
 
     // min < value < max (5..15 = 10, 5..15 <= 10, etc)
-    do_test(five, fifteen, &[TRUE, TRUE, TRUE, TRUE, TRUE, TRUE]);
+    do_test(FIVE, FIFTEEN, &[TRUE, TRUE, TRUE, TRUE, TRUE, TRUE]);
 }
 
 struct NullCountTestFilter {
@@ -235,8 +234,10 @@ impl ParquetStatsProvider for NullCountTestFilter {
 
 #[test]
 fn test_eval_is_null() {
-    let col = &column_expr!("x");
-    let expressions = [Expr::is_null(col.clone()), !Expr::is_null(col.clone())];
+    let expressions = [
+        Expr::is_null(column_expr!("x")),
+        !Expr::is_null(column_expr!("x"))
+    ];
 
     let do_test = |nullcount: i64, expected: &[Option<bool>]| {
         let filter = NullCountTestFilter::new(Some(nullcount), 2);
@@ -281,13 +282,13 @@ impl ParquetStatsProvider for AllNullTestFilter {
 #[test]
 fn test_sql_where() {
     let col = &column_expr!("x");
-    let val = &Expr::literal(1);
+    const VAL: Expr = Expr::Literal(Scalar::Integer(1));
     const NULL: Expr = Expr::Literal(Scalar::Null(DataType::BOOLEAN));
     const FALSE: Expr = Expr::Literal(Scalar::Boolean(false));
     const TRUE: Expr = Expr::Literal(Scalar::Boolean(true));
 
     // Basic sanity checks
-    expect_eq!(AllNullTestFilter.eval_sql_where(val), None, "WHERE {val}");
+    expect_eq!(AllNullTestFilter.eval_sql_where(&VAL), None, "WHERE {VAL}");
     expect_eq!(AllNullTestFilter.eval_sql_where(col), None, "WHERE {col}");
     expect_eq!(
         AllNullTestFilter.eval_sql_where(&Expr::is_null(col.clone())),
@@ -302,59 +303,59 @@ fn test_sql_where() {
 
     // Constrast normal vs SQL WHERE semantics - comparison
     expect_eq!(
-        AllNullTestFilter.eval_expr(&Expr::lt(col.clone(), val.clone()), false),
+        AllNullTestFilter.eval_expr(&Expr::lt(col.clone(), VAL), false),
         None,
-        "{col} < {val}"
+        "{col} < {VAL}"
     );
     expect_eq!(
-        AllNullTestFilter.eval_sql_where(&Expr::lt(col.clone(), val.clone())),
+        AllNullTestFilter.eval_sql_where(&Expr::lt(col.clone(), VAL)),
         Some(false),
-        "WHERE {col} < {val}"
+        "WHERE {col} < {VAL}"
     );
     expect_eq!(
-        AllNullTestFilter.eval_expr(&Expr::lt(val.clone(), col.clone()), false),
+        AllNullTestFilter.eval_expr(&Expr::lt(VAL, col.clone()), false),
         None,
-        "{val} < {col}"
+        "{VAL} < {col}"
     );
     expect_eq!(
-        AllNullTestFilter.eval_sql_where(&Expr::lt(val.clone(), col.clone())),
+        AllNullTestFilter.eval_sql_where(&Expr::lt(VAL, col.clone())),
         Some(false),
-        "WHERE {val} < {col}"
+        "WHERE {VAL} < {col}"
     );
 
     // Constrast normal vs SQL WHERE semantics - comparison inside AND
     expect_eq!(
         AllNullTestFilter.eval_expr(
-            &Expr::and(NULL, Expr::lt(col.clone(), val.clone())),
+            &Expr::and(NULL, Expr::lt(col.clone(), VAL)),
             false
         ),
         None,
-        "{NULL} AND {col} < {val}"
+        "{NULL} AND {col} < {VAL}"
     );
     expect_eq!(
         AllNullTestFilter.eval_sql_where(&Expr::and(
             NULL,
-            Expr::lt(col.clone(), val.clone()),
+            Expr::lt(col.clone(), VAL),
         )),
         Some(false),
-        "WHERE {NULL} AND {col} < {val}"
+        "WHERE {NULL} AND {col} < {VAL}"
     );
 
     expect_eq!(
         AllNullTestFilter.eval_expr(
-            &Expr::and(TRUE, Expr::lt(col.clone(), val.clone())),
+            &Expr::and(TRUE, Expr::lt(col.clone(), VAL)),
             false
         ),
         None, // NULL (from the NULL check) is stronger than TRUE
-        "{TRUE} AND {col} < {val}"
+        "{TRUE} AND {col} < {VAL}"
     );
     expect_eq!(
         AllNullTestFilter.eval_sql_where(&Expr::and(
             TRUE,
-            Expr::lt(col.clone(), val.clone()),
+            Expr::lt(col.clone(), VAL),
         )),
         Some(false), // FALSE (from the NULL check) is stronger than TRUE
-        "WHERE {TRUE} AND {col} < {val}"
+        "WHERE {TRUE} AND {col} < {VAL}"
     );
 
     // Contrast normal vs. SQL WHERE semantics - comparison inside AND inside AND
@@ -362,20 +363,20 @@ fn test_sql_where() {
         AllNullTestFilter.eval_expr(
             &Expr::and(
                 TRUE,
-                Expr::and(NULL, Expr::lt(col.clone(), val.clone())),
+                Expr::and(NULL, Expr::lt(col.clone(), VAL)),
             ),
             false,
         ),
         None,
-        "{TRUE} AND ({NULL} AND {col} < {val})"
+        "{TRUE} AND ({NULL} AND {col} < {VAL})"
     );
     expect_eq!(
         AllNullTestFilter.eval_sql_where(&Expr::and(
             TRUE,
-            Expr::and(NULL, Expr::lt(col.clone(), val.clone())),
+            Expr::and(NULL, Expr::lt(col.clone(), VAL)),
         )),
         Some(false),
-        "WHERE {TRUE} AND ({NULL} AND {col} < {val})"
+        "WHERE {TRUE} AND ({NULL} AND {col} < {VAL})"
     );
 
     // Semantics are the same for comparison inside OR inside AND
@@ -383,19 +384,19 @@ fn test_sql_where() {
         AllNullTestFilter.eval_expr(
             &Expr::or(
                 FALSE,
-                Expr::and(NULL, Expr::lt(col.clone(), val.clone())),
+                Expr::and(NULL, Expr::lt(col.clone(), VAL)),
             ),
             false,
         ),
         None,
-        "{FALSE} OR ({NULL} AND {col} < {val})"
+        "{FALSE} OR ({NULL} AND {col} < {VAL})"
     );
     expect_eq!(
         AllNullTestFilter.eval_sql_where(&Expr::or(
             FALSE,
-            Expr::and(NULL, Expr::lt(col.clone(), val.clone())),
+            Expr::and(NULL, Expr::lt(col.clone(), VAL)),
         )),
         None,
-        "WHERE {FALSE} OR ({NULL} AND {col} < {val})"
+        "WHERE {FALSE} OR ({NULL} AND {col} < {VAL})"
     );
 }

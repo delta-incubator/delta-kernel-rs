@@ -15,7 +15,7 @@ mod tests;
 ///
 /// # Inverted expression semantics
 ///
-/// Because inversion(`NOT` operator) has special semantics and can often be optimized away by
+/// Because inversion (`NOT` operator) has special semantics and can often be optimized away by
 /// pushing it down, most methods take an `inverted` flag. That allows operations like
 /// [`UnaryOperator::Not`] to simply evaluate their operand with a flipped `inverted` flag,
 ///
@@ -25,14 +25,15 @@ mod tests;
 /// represent them by `Option::None` rather than `Scalar::Null`. This allows e.g. `A < NULL` to be
 /// rewritten as `NULL`, or `AND(NULL, FALSE)` to be rewritten as `FALSE`.
 ///
-/// With the exception of `IS [NOT] NULL`, all operations produce NULL output if any input is
-/// `NULL`. Any resolution failures also produce NULL (such as missing columns or type mismatch
-/// between a column and the scalar it is compared against).
+/// Almost all operations produce NULL output if any input is `NULL`. Any resolution failures also
+/// produce NULL (such as missing columns or type mismatch between a column and the scalar it is
+/// compared against). NULL-checking operations like `IS [NOT] NULL` and `DISTINCT` are special, and
+/// rely on nullcount stats for their work (NULL/missing nullcount stats makes them output NULL).
 ///
-/// For safety reasons, this evaluator only accepts expressions of the form `<col> IS [NOT]
-/// NULL`. This is because stats-based skipping is only well-defined for that restricted case --
-/// there is no easy way to distinguish whether NULL was due to missing stats vs. an operation that
-/// produced NULL for other reasons.
+/// For safety reasons, NULL-checking operations only accept literal and column inputs where
+/// stats-based skipping is well-defined. If an arbitrary data skipping expression evaluates to
+/// NULL, there is no way to tell whether the original expression really evaluated to NULL (safe to
+/// use), or the data skipping version evaluated to NULL due to missing stats (very unsafe to use).
 ///
 /// NOTE: The error-handling semantics of this trait's scalar-based predicate evaluation may differ
 /// from those of the engine's expression evaluation, because kernel expressions don't include the
@@ -49,25 +50,25 @@ pub(crate) trait PredicateEvaluator {
     /// A less-than comparison, e.g. `<col> < <value>`.
     ///
     /// NOTE: Caller is responsible to commute and/or invert the operation if needed,
-    /// e.g. `NOT(<value> < <col>` becomes `<col> <= <value>`.
+    /// e.g. `NOT(<value> < <col>)` becomes `<col> <= <value>`.
     fn eval_lt(&self, col: &ColumnName, val: &Scalar) -> Option<Self::Output>;
 
     /// A less-than-or-equal comparison, e.g. `<col> <= <value>`
     ///
     /// NOTE: Caller is responsible to commute and/or invert the operation if needed,
-    /// e.g. `NOT(<value> <= <col>` becomes `<col> > <value>`.
+    /// e.g. `NOT(<value> <= <col>)` becomes `<col> < <value>`.
     fn eval_le(&self, col: &ColumnName, val: &Scalar) -> Option<Self::Output>;
 
     /// A greater-than comparison, e.g. `<col> > <value>`
     ///
     /// NOTE: Caller is responsible to commute and/or invert the operation if needed,
-    /// e.g. `NOT(<value> > <col>` becomes `<col> >= <value>`.
+    /// e.g. `NOT(<value> > <col>)` becomes `<col> >= <value>`.
     fn eval_gt(&self, col: &ColumnName, val: &Scalar) -> Option<Self::Output>;
 
     /// A greater-than-or-equal comparison, e.g. `<col> >= <value>`
     ///
     /// NOTE: Caller is responsible to commute and/or invert the operation if needed,
-    /// e.g. `NOT(<value> >= <col>` becomes `<col> > <value>`.
+    /// e.g. `NOT(<value> >= <col>)` becomes `<col> > <value>`.
     fn eval_ge(&self, col: &ColumnName, val: &Scalar) -> Option<Self::Output>;
 
     /// A (possibly inverted) equality comparison, e.g. `<col> = <value>` or `<col> != <value>`.
@@ -115,15 +116,10 @@ pub(crate) trait PredicateEvaluator {
         self.eval_eq(col, &Scalar::from(inverted), true)
     }
 
-    /// Inverts a (possibly already inverted) expression, e.g. `[NOT] NOT <expr>`.
-    fn eval_not(&self, expr: &Expr, inverted: bool) -> Option<Self::Output> {
-        self.eval_expr(expr, !inverted)
-    }
-
     /// Dispatches a (possibly inverted) unary expression to each operator's specific implementation.
     fn eval_unary(&self, op: UnaryOperator, expr: &Expr, inverted: bool) -> Option<Self::Output> {
         match op {
-            UnaryOperator::Not => self.eval_not(expr, inverted),
+            UnaryOperator::Not => self.eval_expr(expr, !inverted),
             UnaryOperator::IsNull => {
                 // Data skipping only supports IS [NOT] NULL over columns (not expressions)
                 let Expr::Column(col) = expr else {
@@ -210,8 +206,6 @@ pub(crate) trait PredicateEvaluator {
         exprs: &[Expr],
         inverted: bool,
     ) -> Option<Self::Output> {
-        // Evaluate the input expressions, inverting each as needed and tracking whether we've seen
-        // any NULL result. Stop immediately (short circuit) if we see a dominant value.
         let exprs = exprs.iter().map(|expr| self.eval_expr(expr, inverted));
         self.finish_eval_variadic(op, exprs, inverted)
     }
@@ -340,12 +334,10 @@ impl ResolveColumnAsScalar for std::collections::HashMap<ColumnName, Scalar> {
 pub(crate) struct DefaultPredicateEvaluator {
     resolver: Box<dyn ResolveColumnAsScalar>,
 }
-
-impl std::ops::Deref for DefaultPredicateEvaluator {
-    type Target = dyn ResolveColumnAsScalar;
-
-    fn deref(&self) -> &Self::Target {
-        self.resolver.as_ref()
+impl DefaultPredicateEvaluator {
+    // Convenient thin wrapper
+    fn resolve_column(&self, col: &ColumnName) -> Option<Scalar> {
+        self.resolver.resolve_column(col)
     }
 }
 
