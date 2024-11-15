@@ -59,12 +59,12 @@ impl Snapshot {
         version: Option<Version>,
     ) -> DeltaResult<Self> {
         let fs_client = engine.get_file_system_client();
-        let log_url = table_root.join("_delta_log/")?;
+        let log_root = table_root.join("_delta_log/")?;
 
-        let checkpoint_hint = read_last_checkpoint(fs_client.as_ref(), &log_url)?;
+        let checkpoint_hint = read_last_checkpoint(fs_client.as_ref(), &log_root)?;
 
         let log_segment =
-            LogSegment::for_snapshot(fs_client.as_ref(), log_url, checkpoint_hint, version)?;
+            LogSegment::for_snapshot(fs_client.as_ref(), log_root, checkpoint_hint, version)?;
 
         Self::try_new_from_log_segment(table_root, log_segment, engine)
     }
