@@ -308,11 +308,11 @@ fn list_log_files_with_version(
     start_version: Option<Version>,
     end_version: Option<Version>,
 ) -> DeltaResult<(Vec<ParsedLogPath>, Vec<ParsedLogPath>)> {
-    let mut max_checkpoint_version = start_version;
-    let mut checkpoint_parts = vec![];
     // We expect 10 commit files per checkpoint, so start with that size. We could adjust this based
     // on config at some point
     let mut commit_files = Vec::with_capacity(10);
+    let mut checkpoint_parts = vec![];
+    let mut max_checkpoint_version = start_version;
 
     for parsed_path in list_log_files(fs_client, log_root, start_version, end_version)? {
         let parsed_path = parsed_path?;
