@@ -16,16 +16,15 @@ use std::sync::{Arc, LazyLock};
 use tracing::warn;
 use url::Url;
 
-/// A [`LogSegment`] represents a contiguous section of the log and is made up of checkpoint files
-/// and commit files. It is built with either [`LogSegment::for_table_changes`], or
-/// [`LogSegment::for_snapshot`], and guarantees the following:
+/// A [`LogSegment`] represents a contiguous section of the log and is made of checkpoint files
+/// and commit files. , and guarantees the following:
 ///     1. Commit file versions will not have any gaps between them.
 ///     2. If checkpoint(s) is/are present in the range, only commits with versions greater than the most
 ///        recent checkpoint version are retained. There will not be a gap between the checkpoint
 ///        version and the first commit version.
 ///
-/// [`LogSegment`] is used in both  [`Snapshot`] and in `TableChanges` to hold commit files and
-/// checkpoint files.
+/// [`LogSegment`] is used in [`Snapshot`] when built with [`LogSegment::for_snapshot`], and
+/// and in `TableChanges` when built with [`LogSegment::for_table_changes`].
 ///
 /// [`Snapshot`]: crate::snapshot::Snapshot
 #[derive(Debug)]
@@ -47,7 +46,6 @@ impl LogSegment {
         expected_end_version: Option<Version>,
     ) -> DeltaResult<Self> {
         // We require that commits that are contiguous. In other words, there must be no gap between commit versions.
-        // There must also be no gap between a checkpoint and the first commit version.
         require!(
             sorted_commit_files
                 .windows(2)
@@ -57,6 +55,9 @@ impl LogSegment {
                 sorted_commit_files
             ))
         );
+
+        // There must be no gap between a checkpoint and the first commit version. Note that
+        // that all checkpoint parts share the same version.
         if let (Some(checkpoint_file), Some(commit_file)) =
             (checkpoint_parts.first(), sorted_commit_files.first())
         {
@@ -89,11 +90,13 @@ impl LogSegment {
     }
 
     /// Constructs a [`LogSegment`] to be used for Snapshot. For a Snapshot at version `n`:
-    /// Its LogSegment is made up of zero or one checkpoint, and all commits between the checkpoint up
-    /// to and including the end version `n`. Note that a checkpoint may be made up of multiple
-    /// parts.
+    /// Its LogSegment is made of zero or one checkpoint, and all commits between the checkpoint up
+    /// to and including the end version `n`. Note that a checkpoint may be made of multiple
+    /// parts. All these parts will have the same checkpoint version.
     ///
-    /// This may leverage a `checkpoint_hint` that is read from `_delta_log/_last_checkpoint`.
+    /// The options for constructing a LogSegment for Snapshot are as follows:
+    /// - `checkpoint_hint`: a `CheckpointMetadata` to start the log segment from (e.g. from reading the `last_checkpoint` file).
+    /// - `time_travel_version`: The version of the log that the Snapshot will be at.
     #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
     pub(crate) fn for_snapshot(
         fs_client: &dyn FileSystemClient,
@@ -129,7 +132,7 @@ impl LogSegment {
     }
 
     /// Constructs a [`LogSegment`] to be used for `TableChanges`. For a TableChanges between versions
-    /// `start_version` and `end_version`: Its LogSegment is made up of zero checkpoints and all commits
+    /// `start_version` and `end_version`: Its LogSegment is made of zero checkpoints and all commits
     /// between versions `start_version` (inclusive) and `end_version` (inclusive). If no `end_version`
     /// is specified it will be the most recent version by default.
     #[allow(unused)]
@@ -632,7 +635,7 @@ mod tests {
     #[test]
     fn build_snapshot_with_missing_checkpoint_part_no_hint() {
         // TODO(Oussam): Hande checkpoints correctly so that this test passes
-        // Part 2 of 3 is missing from checkpoint 5. The Snapshot should be made up of checkpoint
+        // Part 2 of 3 is missing from checkpoint 5. The Snapshot should be made of checkpoint
         // number 3 and commit files 4 to 7.
         let (client, table_root) = build_log_with_paths_and_checkpoint(
             &[
