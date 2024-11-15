@@ -128,10 +128,8 @@ fn build_snapshot_with_out_of_date_last_checkpoint() {
 
     let log_segment =
         LogSegment::for_snapshot(client.as_ref(), log_root, checkpoint_metadata, None).unwrap();
-    let (commit_files, checkpoint_parts) = (
-        log_segment.sorted_commit_files,
-        log_segment.checkpoint_parts,
-    );
+    let commit_files = log_segment.sorted_commit_files;
+    let checkpoint_parts = log_segment.checkpoint_parts;
 
     assert_eq!(checkpoint_parts.len(), 1);
     assert_eq!(commit_files.len(), 2);
@@ -172,10 +170,8 @@ fn build_snapshot_with_correct_last_multipart_checkpoint() {
 
     let log_segment =
         LogSegment::for_snapshot(client.as_ref(), log_root, checkpoint_metadata, None).unwrap();
-    let (commit_files, checkpoint_parts) = (
-        log_segment.sorted_commit_files,
-        log_segment.checkpoint_parts,
-    );
+    let commit_files = log_segment.sorted_commit_files;
+    let checkpoint_parts = log_segment.checkpoint_parts;
 
     assert_eq!(checkpoint_parts.len(), 3);
     assert_eq!(commit_files.len(), 2);
@@ -281,10 +277,8 @@ fn build_snapshot_with_missing_checkpoint_part_no_hint() {
 
     let log_segment = LogSegment::for_snapshot(client.as_ref(), log_root, None, None).unwrap();
 
-    let (commit_files, checkpoint_parts) = (
-        log_segment.sorted_commit_files,
-        log_segment.checkpoint_parts,
-    );
+    let commit_files = log_segment.sorted_commit_files;
+    let checkpoint_parts = log_segment.checkpoint_parts;
 
     assert_eq!(checkpoint_parts.len(), 1);
     assert_eq!(checkpoint_parts[0].version, 3);
@@ -318,10 +312,8 @@ fn build_snapshot_without_checkpoints() {
     // --------------------------------------------------------------------------------
     let log_segment =
         LogSegment::for_snapshot(client.as_ref(), log_root.clone(), None, None).unwrap();
-    let (commit_files, checkpoint_parts) = (
-        log_segment.sorted_commit_files,
-        log_segment.checkpoint_parts,
-    );
+    let commit_files = log_segment.sorted_commit_files;
+    let checkpoint_parts = log_segment.checkpoint_parts;
 
     assert_eq!(checkpoint_parts.len(), 1);
     assert_eq!(checkpoint_parts[0].version, 5);
@@ -335,10 +327,8 @@ fn build_snapshot_without_checkpoints() {
     // |                       Specify  only end version                              |
     // --------------------------------------------------------------------------------
     let log_segment = LogSegment::for_snapshot(client.as_ref(), log_root, None, Some(2)).unwrap();
-    let (commit_files, checkpoint_parts) = (
-        log_segment.sorted_commit_files,
-        log_segment.checkpoint_parts,
-    );
+    let commit_files = log_segment.sorted_commit_files;
+    let checkpoint_parts = log_segment.checkpoint_parts;
 
     assert_eq!(checkpoint_parts.len(), 1);
     assert_eq!(checkpoint_parts[0].version, 1);
@@ -379,10 +369,8 @@ fn build_snapshot_with_checkpoint_greater_than_time_travel_version() {
 
     let log_segment =
         LogSegment::for_snapshot(client.as_ref(), log_root, checkpoint_metadata, Some(4)).unwrap();
-    let (commit_files, checkpoint_parts) = (
-        log_segment.sorted_commit_files,
-        log_segment.checkpoint_parts,
-    );
+    let commit_files = log_segment.sorted_commit_files;
+    let checkpoint_parts = log_segment.checkpoint_parts;
 
     assert_eq!(checkpoint_parts.len(), 1);
     assert_eq!(checkpoint_parts[0].version, 3);
@@ -449,10 +437,8 @@ fn build_table_changes_with_commit_versions() {
 
     let log_segment =
         LogSegment::for_table_changes(client.as_ref(), log_root.clone(), 2, 5).unwrap();
-    let (commit_files, checkpoint_parts) = (
-        log_segment.sorted_commit_files,
-        log_segment.checkpoint_parts,
-    );
+    let commit_files = log_segment.sorted_commit_files;
+    let checkpoint_parts = log_segment.checkpoint_parts;
 
     // Checkpoints should be omitted
     assert_eq!(checkpoint_parts.len(), 0);
@@ -468,10 +454,8 @@ fn build_table_changes_with_commit_versions() {
     let log_segment =
         LogSegment::for_table_changes(client.as_ref(), log_root.clone(), 0, Some(0)).unwrap();
 
-    let (commit_files, checkpoint_parts) = (
-        log_segment.sorted_commit_files,
-        log_segment.checkpoint_parts,
-    );
+    let commit_files = log_segment.sorted_commit_files;
+    let checkpoint_parts = log_segment.checkpoint_parts;
     // Checkpoints should be omitted
     assert_eq!(checkpoint_parts.len(), 0);
 
@@ -483,10 +467,8 @@ fn build_table_changes_with_commit_versions() {
     // |                    Specify no start or end version                           |
     // --------------------------------------------------------------------------------
     let log_segment = LogSegment::for_table_changes(client.as_ref(), log_root, 0, None).unwrap();
-    let (commit_files, checkpoint_parts) = (
-        log_segment.sorted_commit_files,
-        log_segment.checkpoint_parts,
-    );
+    let commit_files = log_segment.sorted_commit_files;
+    let checkpoint_parts = log_segment.checkpoint_parts;
 
     // Checkpoints should be omitted
     assert_eq!(checkpoint_parts.len(), 0);

@@ -363,8 +363,7 @@ fn list_log_files_with_checkpoint(
             checkpoint_metadata.version,
             latest_checkpoint.version
         );
-    }
-    if checkpoint_parts.len() != checkpoint_metadata.parts.unwrap_or(1) {
+    } else if checkpoint_parts.len() != checkpoint_metadata.parts.unwrap_or(1) {
         return Err(Error::Generic(format!(
             "_last_checkpoint indicated that checkpoint should have {} parts, but it has {}",
             checkpoint_metadata.parts.unwrap_or(1),
