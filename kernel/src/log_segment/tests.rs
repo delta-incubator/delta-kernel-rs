@@ -56,7 +56,7 @@ fn test_replay_for_metadata() {
 }
 
 // get an ObjectStore path for a checkpoint file, based on version, part number, and total number of parts
-pub fn delta_path_for_multipart_checkpoint(version: u64, part_num: u32, num_parts: u32) -> Path {
+fn delta_path_for_multipart_checkpoint(version: u64, part_num: u32, num_parts: u32) -> Path {
     let path =
         format!("_delta_log/{version:020}.checkpoint.{part_num:010}.{num_parts:010}.parquet");
     Path::from(path.as_str())
