@@ -307,9 +307,7 @@ fn build_snapshot_without_checkpoints() {
         None,
     );
 
-    // --------------------------------------------------------------------------------
-    // |                 Specify no checkpoint or end version                         |
-    // --------------------------------------------------------------------------------
+    ///////// Specify no checkpoint or end version /////////
     let log_segment =
         LogSegment::for_snapshot(client.as_ref(), log_root.clone(), None, None).unwrap();
     let commit_files = log_segment.ascending_commit_files;
@@ -323,9 +321,7 @@ fn build_snapshot_without_checkpoints() {
     let expected_versions = vec![6, 7];
     assert_eq!(versions, expected_versions);
 
-    // --------------------------------------------------------------------------------
-    // |                       Specify  only end version                              |
-    // --------------------------------------------------------------------------------
+    ///////// Specify  only end version /////////
     let log_segment = LogSegment::for_snapshot(client.as_ref(), log_root, None, Some(2)).unwrap();
     let commit_files = log_segment.ascending_commit_files;
     let checkpoint_parts = log_segment.checkpoint_parts;
