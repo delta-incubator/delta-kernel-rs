@@ -17,7 +17,7 @@ use tracing::warn;
 use url::Url;
 
 /// A [`LogSegment`] represents a contiguous section of the log and is made of checkpoint files
-/// and commit files. , and guarantees the following:
+/// and commit files and guarantees the following:
 ///     1. Commit file versions will not have any gaps between them.
 ///     2. If checkpoint(s) is/are present in the range, only commits with versions greater than the most
 ///        recent checkpoint version are retained. There will not be a gap between the checkpoint
@@ -32,8 +32,8 @@ use url::Url;
 pub(crate) struct LogSegment {
     pub end_version: Version,
     pub log_root: Url,
-    /// Sorted commit files in the log segment
-    pub commit_files: Vec<ParsedLogPath>,
+    /// Sorted commit files in the log segment (ascending)
+    pub sorted_commit_files: Vec<ParsedLogPath>,
     /// Checkpoint files in the log segment.
     pub checkpoint_parts: Vec<ParsedLogPath>,
 }
@@ -143,9 +143,9 @@ impl LogSegment {
         let log_root = table_root.join("_delta_log/").unwrap();
 
         let end_version = end_version.into();
-        if let (start_version, Some(end_version)) = (start_version, end_version) {
+        if let Some(end_version) = end_version {
             if start_version > end_version {
-                return Err(Error::generic("Failed to build LogSegment: `start_version` cannot be greater than end_version"));
+                return Err(Error::generic("Failed to build LogSegment: start_version cannot be greater than end_version"));
             }
         }
 
@@ -275,7 +275,7 @@ impl LogSegment {
 /// the most recent version will be included.
 ///
 /// Note: this calls [`FileSystemClient::list_from`] to get the list of log files.
-fn parsed_log_files_iter(
+fn list_log_files(
     fs_client: &dyn FileSystemClient,
     log_root: &Url,
     start_version: impl Into<Option<Version>>,
