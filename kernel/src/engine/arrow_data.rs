@@ -9,7 +9,6 @@ use arrow_array::{Array, GenericListArray, MapArray, OffsetSizeTrait, RecordBatc
 use arrow_schema::{ArrowError, DataType as ArrowDataType};
 use tracing::{debug, warn};
 
-use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -42,19 +41,11 @@ impl EngineData for ArrowEngineData {
     fn extract(&self, schema: SchemaRef, visitor: &mut dyn DataVisitor) -> DeltaResult<()> {
         let mut col_array = vec![];
         self.extract_columns(&mut col_array, &schema)?;
-        visitor.visit(self.length(), &col_array)
+        visitor.visit(self.len(), &col_array)
     }
 
-    fn length(&self) -> usize {
+    fn len(&self) -> usize {
         self.data.num_rows()
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn into_any(self: Box<Self>) -> Box<dyn Any> {
-        self
     }
 }
 

@@ -10,10 +10,10 @@ use url::Url;
 use crate::actions::deletion_vector::{split_vector, treemap_to_bools, DeletionVectorDescriptor};
 use crate::actions::{get_log_add_schema, get_log_schema, ADD_NAME, REMOVE_NAME};
 use crate::expressions::{ColumnName, Expression, ExpressionRef, Scalar};
-use crate::features::ColumnMappingMode;
 use crate::scan::state::{DvInfo, Stats};
 use crate::schema::{DataType, Schema, SchemaRef, StructField, StructType};
 use crate::snapshot::Snapshot;
+use crate::table_features::ColumnMappingMode;
 use crate::{DeltaResult, Engine, EngineData, Error, FileMeta};
 
 use self::log_replay::scan_action_iter;
@@ -98,6 +98,10 @@ impl ScanBuilder {
             self.snapshot.column_mapping_mode,
         )?;
         let physical_schema = Arc::new(StructType::new(read_fields));
+
+        // important! before a read/write to the table we must check it is supported
+        self.snapshot.protocol().ensure_read_supported()?;
+
         Ok(Scan {
             snapshot: self.snapshot,
             logical_schema,
@@ -149,7 +153,7 @@ impl ScanResult {
     /// _need_ to extend the mask to the full length of the batch or arrow will drop the extra rows.
     pub fn full_mask(&self) -> Option<Vec<bool>> {
         let mut mask = self.raw_mask.clone()?;
-        mask.resize(self.raw_data.as_ref().ok()?.length(), true);
+        mask.resize(self.raw_data.as_ref().ok()?.len(), true);
         Some(mask)
     }
 }
@@ -332,7 +336,7 @@ impl Scan {
                         &self.all_fields,
                         self.have_partition_cols,
                     );
-                    let len = logical.as_ref().map_or(0, |res| res.length());
+                    let len = logical.as_ref().map_or(0, |res| res.len());
                     // need to split the dv_mask. what's left in dv_mask covers this result, and rest
                     // will cover the following results. we `take()` out of `selection_vector` to avoid
                     // trying to return a captured variable. We're going to reassign `selection_vector`
@@ -671,7 +675,7 @@ mod tests {
         let files: Vec<ScanResult> = scan.execute(&engine).unwrap().try_collect().unwrap();
 
         assert_eq!(files.len(), 1);
-        let num_rows = files[0].raw_data.as_ref().unwrap().length();
+        let num_rows = files[0].raw_data.as_ref().unwrap().len();
         assert_eq!(num_rows, 10)
     }
 

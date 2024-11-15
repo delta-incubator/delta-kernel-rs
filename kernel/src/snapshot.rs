@@ -8,10 +8,10 @@ use tracing::{debug, warn};
 use url::Url;
 
 use crate::actions::{Metadata, Protocol};
-use crate::features::{ColumnMappingMode, COLUMN_MAPPING_MODE_KEY};
-use crate::log_segment::{LogSegment, LogSegmentBuilder};
+use crate::log_segment::LogSegment;
 use crate::scan::ScanBuilder;
 use crate::schema::Schema;
+use crate::table_features::{ColumnMappingMode, COLUMN_MAPPING_MODE_KEY};
 use crate::{DeltaResult, Engine, Error, FileSystemClient, Version};
 
 const LAST_CHECKPOINT_FILE_NAME: &str = "_last_checkpoint";
@@ -20,7 +20,6 @@ const LAST_CHECKPOINT_FILE_NAME: &str = "_last_checkpoint";
 /// throughout time, `Snapshot`s represent a view of a table at a specific point in time; they
 /// have a defined schema (which may change over time for any given table), specific version, and
 /// frozen log segment.
-
 pub struct Snapshot {
     pub(crate) table_root: Url,
     pub(crate) log_segment: LogSegment,
@@ -62,15 +61,9 @@ impl Snapshot {
         let fs_client = engine.get_file_system_client();
         let log_url = table_root.join("_delta_log/").unwrap();
 
-        let mut builder =
-            LogSegmentBuilder::new(fs_client.as_ref(), &table_root).with_reversed_commit_files();
-        if let Some(version) = version {
-            builder = builder.with_end_version(version);
-        }
-        if let Some(checkpoint) = read_last_checkpoint(fs_client.as_ref(), &log_url)? {
-            builder = builder.with_checkpoint(checkpoint);
-        }
-        let log_segment = builder.build()?;
+        let checkpoint_hint = read_last_checkpoint(fs_client.as_ref(), &log_url)?;
+        let log_segment =
+            LogSegment::for_snapshot(fs_client.as_ref(), &table_root, checkpoint_hint, version)?;
 
         Self::try_new_from_log_segment(table_root, log_segment, engine)
     }
@@ -84,7 +77,7 @@ impl Snapshot {
         let (metadata, protocol) = log_segment.read_metadata(engine)?;
         let schema = metadata.schema()?;
         let column_mapping_mode = match metadata.configuration.get(COLUMN_MAPPING_MODE_KEY) {
-            Some(mode) if protocol.min_reader_version >= 2 => mode.as_str().try_into(),
+            Some(mode) if protocol.min_reader_version() >= 2 => mode.as_str().try_into(),
             _ => Ok(ColumnMappingMode::None),
         }?;
         Ok(Self {
@@ -219,12 +212,8 @@ mod tests {
         let engine = SyncEngine::new();
         let snapshot = Snapshot::try_new(url, &engine, Some(1)).unwrap();
 
-        let expected = Protocol {
-            min_reader_version: 3,
-            min_writer_version: 7,
-            reader_features: Some(vec!["deletionVectors".into()]),
-            writer_features: Some(vec!["deletionVectors".into()]),
-        };
+        let expected =
+            Protocol::try_new(3, 7, Some(["deletionVectors"]), Some(["deletionVectors"])).unwrap();
         assert_eq!(snapshot.protocol(), &expected);
 
         let schema_string = r#"{"type":"struct","fields":[{"name":"value","type":"integer","nullable":true,"metadata":{}}]}"#;
@@ -241,12 +230,8 @@ mod tests {
         let engine = SyncEngine::new();
         let snapshot = Snapshot::try_new(url, &engine, None).unwrap();
 
-        let expected = Protocol {
-            min_reader_version: 3,
-            min_writer_version: 7,
-            reader_features: Some(vec!["deletionVectors".into()]),
-            writer_features: Some(vec!["deletionVectors".into()]),
-        };
+        let expected =
+            Protocol::try_new(3, 7, Some(["deletionVectors"]), Some(["deletionVectors"])).unwrap();
         assert_eq!(snapshot.protocol(), &expected);
 
         let schema_string = r#"{"type":"struct","fields":[{"name":"value","type":"integer","nullable":true,"metadata":{}}]}"#;
@@ -326,17 +311,17 @@ mod tests {
         let engine = SyncEngine::new();
         let snapshot = Snapshot::try_new(location, &engine, None).unwrap();
 
-        assert_eq!(snapshot.log_segment.checkpoint_files.len(), 1);
+        assert_eq!(snapshot.log_segment.checkpoint_parts.len(), 1);
         assert_eq!(
-            ParsedLogPath::try_from(snapshot.log_segment.checkpoint_files[0].location.clone())
+            ParsedLogPath::try_from(snapshot.log_segment.checkpoint_parts[0].location.clone())
                 .unwrap()
                 .unwrap()
                 .version,
             2,
         );
-        assert_eq!(snapshot.log_segment.commit_files.len(), 1);
+        assert_eq!(snapshot.log_segment.sorted_commit_files.len(), 1);
         assert_eq!(
-            ParsedLogPath::try_from(snapshot.log_segment.commit_files[0].location.clone())
+            ParsedLogPath::try_from(snapshot.log_segment.sorted_commit_files[0].location.clone())
                 .unwrap()
                 .unwrap()
                 .version,

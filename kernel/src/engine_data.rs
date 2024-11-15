@@ -1,10 +1,9 @@
 //! Traits that engines need to implement in order to pass data between themselves and kernel.
 
-use crate::{schema::SchemaRef, DeltaResult, Error};
+use crate::{schema::SchemaRef, AsAny, DeltaResult, Error};
 
 use tracing::debug;
 
-use std::any::Any;
 use std::collections::HashMap;
 
 /// a trait that an engine exposes to give access to a list
@@ -212,21 +211,17 @@ pub trait DataVisitor {
 /// }
 ///
 /// impl EngineData for MyDataType {
-///   fn as_any(&self) -> &dyn Any { self }
-///   fn into_any(self: Box<Self>) -> Box<dyn Any> { self }
 ///   fn extract(&self, schema: SchemaRef, visitor: &mut dyn DataVisitor) -> DeltaResult<()> {
 ///     let getters = self.do_extraction(); // do the extraction
-///     let row_count = self.length();
-///     visitor.visit(row_count, &getters); // call the visitor back with the getters
+///     visitor.visit(self.len(), &getters); // call the visitor back with the getters
 ///     Ok(())
 ///   }
-///   fn length(&self) -> usize {
-///     let len = 0; // actually get the len here
-///     len
+///   fn len(&self) -> usize {
+///     todo!() // actually get the len here
 ///   }
 /// }
 /// ```
-pub trait EngineData: Send + Sync {
+pub trait EngineData: AsAny {
     /// Request that the data be visited for the passed schema. The contract of this method is that
     /// it will call back into the passed [`DataVisitor`]s `visit` method. The call to `visit` must
     /// include `GetData` items for each leaf of the schema, as well as the number of rows in this
@@ -234,10 +229,9 @@ pub trait EngineData: Send + Sync {
     fn extract(&self, schema: SchemaRef, visitor: &mut dyn DataVisitor) -> DeltaResult<()>;
 
     /// Return the number of items (rows) in blob
-    fn length(&self) -> usize;
+    fn len(&self) -> usize;
 
-    // TODO(nick) implement this and below here in the trait when it doesn't cause a compiler error
-    fn as_any(&self) -> &dyn Any;
-
-    fn into_any(self: Box<Self>) -> Box<dyn Any>;
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
