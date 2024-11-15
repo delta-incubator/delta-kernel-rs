@@ -319,9 +319,9 @@ mod tests {
                 .version,
             2,
         );
-        assert_eq!(snapshot.log_segment.commit_files.len(), 1);
+        assert_eq!(snapshot.log_segment.sorted_commit_files.len(), 1);
         assert_eq!(
-            ParsedLogPath::try_from(snapshot.log_segment.commit_files[0].location.clone())
+            ParsedLogPath::try_from(snapshot.log_segment.sorted_commit_files[0].location.clone())
                 .unwrap()
                 .unwrap()
                 .version,
