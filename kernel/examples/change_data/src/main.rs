@@ -1,23 +1,31 @@
 use arrow::{compute::filter_record_batch, util::pretty::print_batches};
 use arrow_array::RecordBatch;
+use clap::Parser;
 use delta_kernel::{
     engine::{arrow_data::ArrowEngineData, sync::SyncEngine},
     DeltaResult, Table,
 };
 use itertools::Itertools;
 
+#[derive(Parser)]
+#[command(author, version, about, long_about = None)]
+#[command(propagate_version = true)]
+struct Cli {
+    /// Path to the table to inspect
+    path: String,
+
+    start_version: u64,
+
+    end_version: Option<u64>,
+}
+
 fn main() -> DeltaResult<()> {
-    let uri = "./cdf_test_oussama";
-    // build a table and get the lastest snapshot from it
-    let table = Table::try_from_uri(uri)?;
-
+    let cli = Cli::parse();
+    let table = Table::try_from_uri(cli.path)?;
     let engine = SyncEngine::new();
+    let table_changes = table.table_changes(&engine, cli.start_version, cli.end_version)?;
 
-    let table_changes = table.table_changes(&engine, 9, Some(12))?;
-    let x = table_changes
-        .into_scan_builder()
-        //.with_schema(schema)
-        .build()?;
+    let x = table_changes.into_scan_builder().build()?;
     let batches: Vec<RecordBatch> = x
         .execute(&engine)?
         .map(|scan_result| -> DeltaResult<_> {

@@ -21,7 +21,7 @@ pub mod table_changes_scan;
 
 pub type TableChangesScanData = (Box<dyn EngineData>, Vec<bool>, Arc<HashMap<String, DvInfo>>);
 
-static CDF_GENERATED_COLUMNS: [&str; 3] = ["_commit_version", "_commit_timestamp", "_change_type"];
+static CDF_GENERATED_COLUMNS: [&str; 3] = ["_change_type", "_commit_version", "_commit_timestamp"];
 static CDF_ENABLE_FLAG: &str = "delta.enableChangeDataFeed";
 
 #[derive(Debug)]
@@ -84,9 +84,9 @@ impl TableChanges {
 
     fn transform_logical_schema(schema: &Schema) -> Schema {
         let cdf_fields = [
+            StructField::new("_change_type", DataType::STRING, false),
             StructField::new("_commit_version", DataType::LONG, false),
             StructField::new("_commit_timestamp", DataType::TIMESTAMP, false),
-            StructField::new("_change_type", DataType::STRING, false),
         ];
         StructType::new(schema.fields().cloned().chain(cdf_fields))
     }

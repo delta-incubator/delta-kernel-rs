@@ -3,7 +3,6 @@ use std::{collections::HashMap, sync::Arc};
 use itertools::Itertools;
 
 use crate::{
-    engine::arrow_data::ArrowEngineData,
     expressions::{column_expr, ColumnName, Scalar},
     scan::{parse_partition_value, state::GlobalScanState, ColumnType},
     schema::StructType,
@@ -25,10 +24,6 @@ pub(crate) fn transform_to_logical_internal(
     generated_columns: &HashMap<String, Expression>,
     read_schema: Arc<StructType>,
 ) -> DeltaResult<Box<dyn EngineData>> {
-    println!(
-        "About to transform. generated columns: {:?}",
-        generated_columns
-    );
     // need to add back partition cols and/or fix-up mapped columns
     let all_fields: Vec<Expression> = all_fields
         .iter()
@@ -64,12 +59,6 @@ pub(crate) fn transform_to_logical_internal(
         .try_collect()?;
     let read_expression = Expression::Struct(all_fields);
 
-    let record_batch = data
-        .any_ref()
-        .downcast_ref::<ArrowEngineData>()
-        .unwrap()
-        .record_batch();
-    println!("record batch: {:?}", record_batch.schema());
     let result = engine
         .get_expression_handler()
         .get_evaluator(
@@ -94,20 +83,20 @@ pub(crate) fn get_generated_columns(
     let timestamp = Scalar::timestamp_from_millis(timestamp)?;
     let expressions = match tpe {
         ScanFileType::Cdc => [
+            column_expr!("_change_type"),
             Expression::literal(commit_version),
             timestamp.into(),
-            column_expr!("_change_type"),
         ],
         ScanFileType::Add => [
+            "insert".into(),
             Expression::literal(commit_version),
             timestamp.into(),
-            "insert".into(),
         ],
 
         ScanFileType::Remove => [
+            "delete".into(),
             Expression::literal(commit_version),
             timestamp.into(),
-            "remove".into(),
         ],
     };
     let generated_columns: Arc<HashMap<String, Expression>> = Arc::new(
