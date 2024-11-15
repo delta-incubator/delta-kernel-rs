@@ -93,8 +93,6 @@ impl LogSegment {
     /// to and including the end version `n`.
     ///
     /// This may leverage a `checkpoint_hint` that is read from `_delta_log/_last_checkpoint`.
-    ///
-    ///
     #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
     pub(crate) fn for_snapshot(
         fs_client: &dyn FileSystemClient,
