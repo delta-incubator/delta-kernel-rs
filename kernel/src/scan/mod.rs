@@ -19,7 +19,7 @@ use crate::{DeltaResult, Engine, EngineData, Error, FileMeta};
 use self::log_replay::scan_action_iter;
 use self::state::GlobalScanState;
 
-mod data_skipping;
+pub mod data_skipping;
 pub mod log_replay;
 pub mod state;
 
@@ -127,7 +127,7 @@ pub struct ScanResult {
     pub raw_data: DeltaResult<Box<dyn EngineData>>,
     /// Raw row mask.
     // TODO(nick) this should be allocated by the engine
-    raw_mask: Option<Vec<bool>>,
+    pub raw_mask: Option<Vec<bool>>,
 }
 
 impl ScanResult {
@@ -167,6 +167,8 @@ pub enum ColumnType {
     Selected(String),
     // A partition column that needs to be added back in
     Partition(usize),
+    // A column a that is generated using [`Expression`]
+    InsertedColumn(usize),
 }
 
 pub type ScanData = (Box<dyn EngineData>, Vec<bool>);
@@ -382,7 +384,7 @@ pub fn scan_row_schema() -> Schema {
     log_replay::SCAN_ROW_SCHEMA.as_ref().clone()
 }
 
-fn parse_partition_value(raw: Option<&String>, data_type: &DataType) -> DeltaResult<Scalar> {
+pub fn parse_partition_value(raw: Option<&String>, data_type: &DataType) -> DeltaResult<Scalar> {
     match (raw, data_type.as_primitive_opt()) {
         (Some(v), Some(primitive)) => primitive.parse_scalar(v),
         (Some(_), None) => Err(Error::generic(format!(
@@ -398,7 +400,7 @@ fn parse_partition_value(raw: Option<&String>, data_type: &DataType) -> DeltaRes
 /// - fields_to_read_from_parquet - Which fields should be read from the raw parquet files. This takes
 ///   into account column mapping
 /// - have_partition_cols - boolean indicating if we have partition columns in this query
-fn get_state_info(
+pub fn get_state_info(
     logical_schema: &Schema,
     partition_columns: &[String],
     column_mapping_mode: ColumnMappingMode,
@@ -467,7 +469,7 @@ pub fn transform_to_logical(
 
 // We have this function because `execute` can save `all_fields` and `have_partition_cols` in the
 // scan, and then reuse them for each batch transform
-fn transform_to_logical_internal(
+pub fn transform_to_logical_internal(
     engine: &dyn Engine,
     data: Box<dyn EngineData>,
     global_state: &GlobalScanState,
@@ -496,6 +498,7 @@ fn transform_to_logical_internal(
                 Ok(value_expression.into())
             }
             ColumnType::Selected(field_name) => Ok(ColumnName::new([field_name]).into()),
+            ColumnType::InsertedColumn(_) => unimplemented!(),
         })
         .try_collect()?;
     let read_expression = Expression::Struct(all_fields);

@@ -79,6 +79,7 @@ pub mod scan;
 pub mod schema;
 pub mod snapshot;
 pub mod table;
+pub mod table_changes;
 pub mod transaction;
 pub(crate) mod utils;
 

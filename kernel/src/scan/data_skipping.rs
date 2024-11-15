@@ -163,6 +163,7 @@ fn as_data_skipping_predicate(expr: &Expr) -> Option<Expr> {
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct DataSkippingFilter {
     stats_schema: SchemaRef,
     select_stats_evaluator: Arc<dyn ExpressionEvaluator>,

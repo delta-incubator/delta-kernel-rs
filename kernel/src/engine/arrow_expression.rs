@@ -215,9 +215,15 @@ fn evaluate_expression(
             let result = StructArray::try_new(output_fields.into(), output_cols, None)?;
             Ok(Arc::new(result))
         }
-        (Struct(_), _) => Err(Error::generic(
-            "Data type is required to evaluate struct expressions",
-        )),
+        (Struct(_), _) => {
+            println!(
+                "struct: {:?}, \n result type: {:?}",
+                expression, result_type
+            );
+            Err(Error::generic(
+                "Data type is required to evaluate struct expressions",
+            ))
+        }
         (UnaryOperation { op, expr }, _) => {
             let arr = evaluate_expression(expr.as_ref(), batch, None)?;
             Ok(match op {
