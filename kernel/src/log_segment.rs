@@ -383,7 +383,7 @@ mod tests {
     use crate::log_segment::LogSegment;
     use crate::snapshot::CheckpointMetadata;
     use crate::{FileSystemClient, Table};
-    use test_utils::delta_path_for_version;
+    use test_utils::{delta_path_for_checkpoint_part, delta_path_for_version};
 
     // NOTE: In addition to testing the meta-predicate for metadata replay, this test also verifies
     // that the parquet reader properly infers nullcount = rowcount for missing columns. The two
@@ -511,7 +511,51 @@ mod tests {
         assert_eq!(commit_files[1].version, 7);
     }
     #[test]
-    fn test_read_log_with_correct_last_checkpoint() {
+    fn test_read_log_with_correct_last_multipart_checkpoint() {
+        let checkpoint_metadata = CheckpointMetadata {
+            version: 5,
+            size: 10,
+            parts: Some(3),
+            size_in_bytes: None,
+            num_of_add_files: None,
+            checkpoint_schema: None,
+            checksum: None,
+        };
+
+        let (client, table_root) = build_log_with_paths_and_checkpoint(
+            &[
+                delta_path_for_version(0, "json"),
+                delta_path_for_version(1, "checkpoint.parquet"),
+                delta_path_for_version(1, "json"),
+                delta_path_for_version(2, "json"),
+                delta_path_for_version(3, "checkpoint.parquet"),
+                delta_path_for_version(3, "json"),
+                delta_path_for_version(4, "json"),
+                delta_path_for_checkpoint_part(5, 1, 3),
+                delta_path_for_checkpoint_part(5, 2, 3),
+                delta_path_for_checkpoint_part(5, 3, 3),
+                delta_path_for_version(5, "json"),
+                delta_path_for_version(6, "json"),
+                delta_path_for_version(7, "json"),
+            ],
+            Some(&checkpoint_metadata),
+        );
+
+        let log_segment =
+            LogSegment::for_snapshot(client.as_ref(), &table_root, checkpoint_metadata, None)
+                .unwrap();
+        let (commit_files, checkpoint_parts) =
+            (log_segment.commit_files, log_segment.checkpoint_parts);
+
+        assert_eq!(checkpoint_parts.len(), 3);
+        assert_eq!(commit_files.len(), 2);
+        assert_eq!(checkpoint_parts[0].version, 5);
+        assert_eq!(commit_files[0].version, 6);
+        assert_eq!(commit_files[1].version, 7);
+    }
+
+    #[test]
+    fn test_read_log_with_missing_checkpoint_part_from_hint() {
         let checkpoint_metadata = CheckpointMetadata {
             version: 5,
             size: 10,
@@ -531,7 +575,9 @@ mod tests {
                 delta_path_for_version(3, "checkpoint.parquet"),
                 delta_path_for_version(3, "json"),
                 delta_path_for_version(4, "json"),
-                delta_path_for_version(5, "checkpoint.parquet"),
+                delta_path_for_checkpoint_part(5, 1, 3),
+                // Part 2 is missing!
+                delta_path_for_checkpoint_part(5, 3, 3),
                 delta_path_for_version(5, "json"),
                 delta_path_for_version(6, "json"),
                 delta_path_for_version(7, "json"),
@@ -540,16 +586,47 @@ mod tests {
         );
 
         let log_segment =
-            LogSegment::for_snapshot(client.as_ref(), &table_root, checkpoint_metadata, None)
-                .unwrap();
+            LogSegment::for_snapshot(client.as_ref(), &table_root, checkpoint_metadata, None);
+        assert!(log_segment.is_err())
+    }
+
+    #[ignore]
+    #[test]
+    fn test_read_log_with_missing_checkpoint_part_no_hint() {
+        // TODO(Oussam): Hande checkpoints correctly so that this test passes
+        // Part 2 of 3 is missing from checkpoint 5. The Snapshot should be made up of checkpoint
+        // number 3 and commit files 4 to 7.
+        let (client, table_root) = build_log_with_paths_and_checkpoint(
+            &[
+                delta_path_for_version(0, "json"),
+                delta_path_for_version(1, "checkpoint.parquet"),
+                delta_path_for_version(1, "json"),
+                delta_path_for_version(2, "json"),
+                delta_path_for_version(3, "checkpoint.parquet"),
+                delta_path_for_version(3, "json"),
+                delta_path_for_version(4, "json"),
+                delta_path_for_checkpoint_part(5, 1, 3),
+                // Part 2 is missing!
+                delta_path_for_checkpoint_part(5, 3, 3),
+                delta_path_for_version(5, "json"),
+                delta_path_for_version(6, "json"),
+                delta_path_for_version(7, "json"),
+            ],
+            None,
+        );
+
+        let log_segment =
+            LogSegment::for_snapshot(client.as_ref(), &table_root, None, None).unwrap();
+
         let (commit_files, checkpoint_parts) =
             (log_segment.commit_files, log_segment.checkpoint_parts);
 
         assert_eq!(checkpoint_parts.len(), 1);
-        assert_eq!(commit_files.len(), 2);
-        assert_eq!(checkpoint_parts[0].version, 5);
-        assert_eq!(commit_files[0].version, 6);
-        assert_eq!(commit_files[1].version, 7);
+        assert_eq!(checkpoint_parts[0].version, 3);
+
+        let versions = commit_files.into_iter().map(|x| x.version).collect_vec();
+        let expected_versions = vec![4, 5, 6, 7];
+        assert_eq!(versions, expected_versions);
     }
 
     #[test]
@@ -571,6 +648,9 @@ mod tests {
             None,
         );
 
+        // --------------------------------------------------------------------------------
+        // |                 Specify no checkpoint or end version                         |
+        // --------------------------------------------------------------------------------
         let log_segment =
             LogSegment::for_snapshot(client.as_ref(), &table_root, None, None).unwrap();
         let (commit_files, checkpoint_parts) =
@@ -583,10 +663,26 @@ mod tests {
         let versions = commit_files.into_iter().map(|x| x.version).collect_vec();
         let expected_versions = vec![6, 7];
         assert_eq!(versions, expected_versions);
+
+        // --------------------------------------------------------------------------------
+        // |                       Specify  only end version                              |
+        // --------------------------------------------------------------------------------
+        let log_segment =
+            LogSegment::for_snapshot(client.as_ref(), &table_root, None, Some(2)).unwrap();
+        let (commit_files, checkpoint_parts) =
+            (log_segment.commit_files, log_segment.checkpoint_parts);
+
+        assert_eq!(checkpoint_parts.len(), 1);
+        assert_eq!(checkpoint_parts[0].version, 1);
+
+        // All commit files should still be there
+        let versions = commit_files.into_iter().map(|x| x.version).collect_vec();
+        let expected_versions = vec![2];
+        assert_eq!(versions, expected_versions);
     }
 
     #[test]
-    fn test_builder_with_checkpoint_greater_than_time_travel() {
+    fn build_snapshot_with_checkpoint_greater_than_time_travel_version() {
         let checkpoint_metadata = CheckpointMetadata {
             version: 5,
             size: 10,
@@ -625,8 +721,43 @@ mod tests {
         assert_eq!(commit_files.len(), 1);
         assert_eq!(commit_files[0].version, 4);
     }
+
     #[test]
-    fn test_log_segment_commit_versions() {
+    fn build_snapshot_with_start_checkpoint_and_time_travel_version() {
+        let checkpoint_metadata = CheckpointMetadata {
+            version: 3,
+            size: 10,
+            parts: None,
+            size_in_bytes: None,
+            num_of_add_files: None,
+            checkpoint_schema: None,
+            checksum: None,
+        };
+
+        let (client, table_root) = build_log_with_paths_and_checkpoint(
+            &[
+                delta_path_for_version(0, "json"),
+                delta_path_for_version(1, "checkpoint.parquet"),
+                delta_path_for_version(2, "json"),
+                delta_path_for_version(3, "checkpoint.parquet"),
+                delta_path_for_version(4, "json"),
+                delta_path_for_version(5, "checkpoint.parquet"),
+                delta_path_for_version(6, "json"),
+                delta_path_for_version(7, "json"),
+            ],
+            Some(&checkpoint_metadata),
+        );
+
+        let log_segment =
+            LogSegment::for_snapshot(client.as_ref(), &table_root, checkpoint_metadata, Some(4))
+                .unwrap();
+
+        assert_eq!(log_segment.checkpoint_parts[0].version, 3);
+        assert_eq!(log_segment.commit_files.len(), 1);
+        assert_eq!(log_segment.commit_files[0].version, 4);
+    }
+    #[test]
+    fn build_table_changes_with_commit_versions() {
         let (client, table_root) = build_log_with_paths_and_checkpoint(
             &[
                 delta_path_for_version(0, "json"),
@@ -715,7 +846,7 @@ mod tests {
     }
 
     #[test]
-    fn test_larger_start_version_is_fail() {
+    fn table_changes_fails_with_larger_start_version_than_end() {
         // Commit with version 1 is missing
         let (client, table_root) = build_log_with_paths_and_checkpoint(
             &[
@@ -727,40 +858,5 @@ mod tests {
         let log_segment_res =
             LogSegment::for_table_changes(client.as_ref(), &table_root, 1, Some(0));
         assert!(log_segment_res.is_err());
-    }
-
-    #[test]
-    fn test_build_with_start_checkpoint_and_end_version() {
-        let checkpoint_metadata = CheckpointMetadata {
-            version: 3,
-            size: 10,
-            parts: None,
-            size_in_bytes: None,
-            num_of_add_files: None,
-            checkpoint_schema: None,
-            checksum: None,
-        };
-
-        let (client, table_root) = build_log_with_paths_and_checkpoint(
-            &[
-                delta_path_for_version(0, "json"),
-                delta_path_for_version(1, "checkpoint.parquet"),
-                delta_path_for_version(2, "json"),
-                delta_path_for_version(3, "checkpoint.parquet"),
-                delta_path_for_version(4, "json"),
-                delta_path_for_version(5, "checkpoint.parquet"),
-                delta_path_for_version(6, "json"),
-                delta_path_for_version(7, "json"),
-            ],
-            Some(&checkpoint_metadata),
-        );
-
-        let log_segment =
-            LogSegment::for_snapshot(client.as_ref(), &table_root, checkpoint_metadata, Some(4))
-                .unwrap();
-
-        assert_eq!(log_segment.checkpoint_parts[0].version, 3);
-        assert_eq!(log_segment.commit_files.len(), 1);
-        assert_eq!(log_segment.commit_files[0].version, 4);
     }
 }
