@@ -115,7 +115,6 @@ impl LogSegment {
 
         let log_segment = LogSegment::try_new(sorted_commit_files, checkpoint_parts, log_root)?;
 
-        // Check that the effective version is the same as the time_travel_version we specified
         if let Some(time_travel_version) = time_travel_version {
             require!(
                 log_segment.end_version == time_travel_version,
@@ -170,7 +169,6 @@ impl LogSegment {
         );
         let log_segment = LogSegment::try_new(sorted_commit_files, vec![], log_root)?;
 
-        // Check that the effective version is the same as the time_travel_version we specified
         if let Some(end_version) = end_version {
             require!(
                 log_segment.end_version == end_version,
@@ -372,10 +370,10 @@ fn list_log_files_with_checkpoint(
     };
     if latest_checkpoint.version != checkpoint_metadata.version {
         warn!(
-                "_last_checkpoint hint is out of date. _last_checkpoint version: {}. Using actual most recent: {}",
-                checkpoint_metadata.version,
-                latest_checkpoint.version
-            );
+            "_last_checkpoint hint is out of date. _last_checkpoint version: {}. Using actual most recent: {}",
+            checkpoint_metadata.version,
+            latest_checkpoint.version
+        );
     }
     if checkpoint_parts.len() != checkpoint_metadata.parts.unwrap_or(1) {
         return Err(Error::Generic(format!(
