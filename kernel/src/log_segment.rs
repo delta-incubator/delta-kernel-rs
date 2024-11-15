@@ -98,7 +98,7 @@ impl LogSegment {
         })
     }
 
-    /// Constructs a [`LogSegment`] to be used for Snapshot. For a Snapshot at version `n`:
+    /// Constructs a [`LogSegment`] to be used for [`Snapshot`]. For a `Snapshot` at version `n`:
     /// Its LogSegment is made of zero or one checkpoint, and all commits between the checkpoint up
     /// to and including the end version `n`. Note that a checkpoint may be made of multiple
     /// parts. All these parts will have the same checkpoint version.
@@ -106,6 +106,8 @@ impl LogSegment {
     /// The options for constructing a LogSegment for Snapshot are as follows:
     /// - `checkpoint_hint`: a `CheckpointMetadata` to start the log segment from (e.g. from reading the `last_checkpoint` file).
     /// - `time_travel_version`: The version of the log that the Snapshot will be at.
+    ///
+    /// [`Snapshot`]: crate::snapshot::Snapshot
     #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
     pub(crate) fn for_snapshot(
         fs_client: &dyn FileSystemClient,
