@@ -43,7 +43,6 @@ impl LogSegment {
         sorted_commit_files: Vec<ParsedLogPath>,
         checkpoint_parts: Vec<ParsedLogPath>,
         log_root: Url,
-        expected_end_version: Option<Version>,
     ) -> DeltaResult<Self> {
         // We require that commits that are contiguous. In other words, there must be no gap between commit versions.
         require!(
@@ -71,15 +70,6 @@ impl LogSegment {
             .or(checkpoint_parts.first())
             .ok_or(Error::MissingVersion)? // TODO: A more descriptive error
             .version;
-        if let Some(end_version) = expected_end_version {
-            require!(
-                version_eff == end_version,
-                Error::generic(format!(
-                    "version effective not the same as end_version {}, {}",
-                    version_eff, end_version
-                ))
-            );
-        }
 
         Ok(LogSegment {
             end_version: version_eff,
@@ -123,12 +113,20 @@ impl LogSegment {
             sorted_commit_files.retain(|log_path| checkpoint_file.version < log_path.version);
         }
 
-        LogSegment::try_new(
-            sorted_commit_files,
-            checkpoint_parts,
-            log_root,
-            time_travel_version,
-        )
+        let log_segment = LogSegment::try_new(sorted_commit_files, checkpoint_parts, log_root)?;
+
+        // Check that the effective version is the same as the time_travel_version we specified
+        if let Some(time_travel_version) = time_travel_version {
+            require!(
+                log_segment.end_version == time_travel_version,
+                Error::generic(format!(
+                    "LogSegment end version {} not the same as the specified time_travel_version {}",
+                    log_segment.end_version, time_travel_version
+                ))
+            );
+        }
+
+        Ok(log_segment)
     }
 
     /// Constructs a [`LogSegment`] to be used for `TableChanges`. For a TableChanges between versions
@@ -170,7 +168,20 @@ impl LogSegment {
                 start_version
             ))
         );
-        LogSegment::try_new(sorted_commit_files, vec![], log_root, end_version)
+        let log_segment = LogSegment::try_new(sorted_commit_files, vec![], log_root)?;
+
+        // Check that the effective version is the same as the time_travel_version we specified
+        if let Some(end_version) = end_version {
+            require!(
+                log_segment.end_version == end_version,
+                Error::generic(format!(
+                    "LogSegment end version {} not the same as specified end version {}",
+                    log_segment.end_version, end_version
+                ))
+            );
+        }
+
+        Ok(log_segment)
     }
     /// Read a stream of log data from this log segment.
     ///
