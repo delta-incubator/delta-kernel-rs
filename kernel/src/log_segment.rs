@@ -88,12 +88,13 @@ impl LogSegment {
         })
     }
 
-    /// Constructs a [`LogSegment`] to be used for [`Snapshot`]. For a Snapshot at version `n`:
+    /// Constructs a [`LogSegment`] to be used for Snapshot. For a Snapshot at version `n`:
     /// Its LogSegment is made up of zero or one checkpoint, and all commits between the checkpoint up
     /// to and including the end version `n`.
     ///
     /// This may leverage a `checkpoint_hint` that is read from `_delta_log/_last_checkpoint`.
-    /// [`Snapshot`]: crate::snapshot::Snapshot
+    ///
+    ///
     #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
     pub(crate) fn for_snapshot(
         fs_client: &dyn FileSystemClient,
@@ -352,14 +353,14 @@ fn list_log_files_with_checkpoint(
             "Had a _last_checkpoint hint but didn't find any checkpoints",
         ));
     };
-
     if latest_checkpoint.version != checkpoint_metadata.version {
         warn!(
                 "_last_checkpoint hint is out of date. _last_checkpoint version: {}. Using actual most recent: {}",
                 checkpoint_metadata.version,
                 latest_checkpoint.version
             );
-    } else if checkpoint_parts.len() != checkpoint_metadata.parts.unwrap_or(1) {
+    }
+    if checkpoint_parts.len() != checkpoint_metadata.parts.unwrap_or(1) {
         return Err(Error::Generic(format!(
             "_last_checkpoint indicated that checkpoint should have {} parts, but it has {}",
             checkpoint_metadata.parts.unwrap_or(1),
@@ -473,7 +474,7 @@ mod tests {
     }
 
     #[test]
-    fn test_read_log_with_out_of_date_last_checkpoint() {
+    fn build_snapshot_with_out_of_date_last_checkpoint() {
         let checkpoint_metadata = CheckpointMetadata {
             version: 3,
             size: 10,
@@ -511,7 +512,7 @@ mod tests {
         assert_eq!(commit_files[1].version, 7);
     }
     #[test]
-    fn test_read_log_with_correct_last_multipart_checkpoint() {
+    fn build_snapshot_with_correct_last_multipart_checkpoint() {
         let checkpoint_metadata = CheckpointMetadata {
             version: 5,
             size: 10,
@@ -555,11 +556,11 @@ mod tests {
     }
 
     #[test]
-    fn test_read_log_with_missing_checkpoint_part_from_hint() {
+    fn build_snapshot_with_missing_checkpoint_part_from_hint_fails() {
         let checkpoint_metadata = CheckpointMetadata {
             version: 5,
             size: 10,
-            parts: None,
+            parts: Some(3),
             size_in_bytes: None,
             num_of_add_files: None,
             checkpoint_schema: None,
@@ -589,10 +590,44 @@ mod tests {
             LogSegment::for_snapshot(client.as_ref(), &table_root, checkpoint_metadata, None);
         assert!(log_segment.is_err())
     }
+    #[test]
+    fn build_snapshot_with_bad_checkpoint_hint_fails() {
+        let checkpoint_metadata = CheckpointMetadata {
+            version: 5,
+            size: 10,
+            parts: Some(1),
+            size_in_bytes: None,
+            num_of_add_files: None,
+            checkpoint_schema: None,
+            checksum: None,
+        };
+
+        let (client, table_root) = build_log_with_paths_and_checkpoint(
+            &[
+                delta_path_for_version(0, "json"),
+                delta_path_for_version(1, "checkpoint.parquet"),
+                delta_path_for_version(1, "json"),
+                delta_path_for_version(2, "json"),
+                delta_path_for_version(3, "checkpoint.parquet"),
+                delta_path_for_version(3, "json"),
+                delta_path_for_version(4, "json"),
+                delta_path_for_checkpoint_part(5, 1, 2),
+                delta_path_for_checkpoint_part(5, 2, 2),
+                delta_path_for_version(5, "json"),
+                delta_path_for_version(6, "json"),
+                delta_path_for_version(7, "json"),
+            ],
+            Some(&checkpoint_metadata),
+        );
+
+        let log_segment =
+            LogSegment::for_snapshot(client.as_ref(), &table_root, checkpoint_metadata, None);
+        assert!(log_segment.is_err())
+    }
 
     #[ignore]
     #[test]
-    fn test_read_log_with_missing_checkpoint_part_no_hint() {
+    fn build_snapshot_with_missing_checkpoint_part_no_hint() {
         // TODO(Oussam): Hande checkpoints correctly so that this test passes
         // Part 2 of 3 is missing from checkpoint 5. The Snapshot should be made up of checkpoint
         // number 3 and commit files 4 to 7.
@@ -630,7 +665,7 @@ mod tests {
     }
 
     #[test]
-    fn test_snapshot_without_checkpoints() {
+    fn build_snapshot_without_checkpoints() {
         let (client, table_root) = build_log_with_paths_and_checkpoint(
             &[
                 delta_path_for_version(0, "json"),
@@ -834,6 +869,7 @@ mod tests {
             ],
             None,
         );
+
         let log_segment_res = LogSegment::for_table_changes(client.as_ref(), &table_root, 0, None);
         assert!(log_segment_res.is_err());
 
