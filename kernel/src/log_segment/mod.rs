@@ -38,43 +38,50 @@ pub(crate) struct LogSegment {
     pub end_version: Version,
     pub log_root: Url,
     /// Sorted commit files in the log segment (ascending)
-    pub sorted_commit_files: Vec<ParsedLogPath>,
+    pub ascending_commit_files: Vec<ParsedLogPath>,
     /// Checkpoint files in the log segment.
     pub checkpoint_parts: Vec<ParsedLogPath>,
 }
 
 impl LogSegment {
     fn try_new(
-        sorted_commit_files: Vec<ParsedLogPath>,
+        ascending_commit_files: Vec<ParsedLogPath>,
         checkpoint_parts: Vec<ParsedLogPath>,
         log_root: Url,
         end_version: Option<Version>,
     ) -> DeltaResult<Self> {
         // We require that commits that are contiguous. In other words, there must be no gap between commit versions.
         require!(
-            sorted_commit_files
+            ascending_commit_files
                 .windows(2)
                 .all(|cfs| cfs[0].version + 1 == cfs[1].version),
             Error::generic(format!(
                 "Expected ordered contiguous commit files {:?}",
-                sorted_commit_files
+                ascending_commit_files
             ))
         );
 
         // There must be no gap between a checkpoint and the first commit version. Note that
         // that all checkpoint parts share the same version.
         if let (Some(checkpoint_file), Some(commit_file)) =
-            (checkpoint_parts.first(), sorted_commit_files.first())
+            (checkpoint_parts.first(), ascending_commit_files.first())
         {
-            require!(checkpoint_file.version + 1 == commit_file.version,
-            Error::generic(format!("Expected commit file version {} to be next version to checkpoint file version {}", commit_file.version, checkpoint_file.version )))
+            require!(
+                checkpoint_file.version + 1 == commit_file.version,
+                Error::generic(format!(
+                    "Gap between checkpoint version {} and next commit {}",
+                    commit_file.version, checkpoint_file.version
+                ))
+            )
         }
 
         // Get the effective version from chosen files
-        let version_eff = sorted_commit_files
+        let version_eff = ascending_commit_files
             .last()
             .or(checkpoint_parts.first())
-            .ok_or(Error::MissingVersion)? // TODO: A more descriptive error
+            .ok_or(Error::generic(
+                "Failed to build log segment: No commit or checkpoitn files provided.",
+            ))?
             .version;
         if let Some(end_version) = end_version {
             require!(
@@ -88,7 +95,7 @@ impl LogSegment {
         Ok(LogSegment {
             end_version: version_eff,
             log_root,
-            sorted_commit_files,
+            ascending_commit_files,
             checkpoint_parts,
         })
     }
@@ -110,7 +117,7 @@ impl LogSegment {
     ) -> DeltaResult<Self> {
         let time_travel_version = time_travel_version.into();
 
-        let (mut sorted_commit_files, checkpoint_parts) =
+        let (mut ascending_commit_files, checkpoint_parts) =
             match (checkpoint_hint.into(), time_travel_version) {
                 (Some(cp), None) => {
                     list_log_files_with_checkpoint(&cp, fs_client, &log_root, None)?
@@ -123,11 +130,11 @@ impl LogSegment {
 
         // Commit file versions must be greater than the most recent checkpoint version if it exists
         if let Some(checkpoint_file) = checkpoint_parts.first() {
-            sorted_commit_files.retain(|log_path| checkpoint_file.version < log_path.version);
+            ascending_commit_files.retain(|log_path| checkpoint_file.version < log_path.version);
         }
 
         LogSegment::try_new(
-            sorted_commit_files,
+            ascending_commit_files,
             checkpoint_parts,
             log_root,
             time_travel_version,
@@ -155,7 +162,7 @@ impl LogSegment {
             }
         }
 
-        let sorted_commit_files: Vec<_> =
+        let ascending_commit_files: Vec<_> =
             list_log_files(fs_client, &log_root, start_version, end_version)?
                 .filter_ok(|x| x.is_commit())
                 .try_collect()?;
@@ -165,7 +172,7 @@ impl LogSegment {
         // - [`LogSegment::try_new`] also checks that there are no gaps between commits.
         // If all three are satisfied, this implies that all the desired commits are present.
         require!(
-            sorted_commit_files
+            ascending_commit_files
                 .first()
                 .is_some_and(|first_commit| first_commit.version == start_version),
             Error::generic(format!(
@@ -173,7 +180,7 @@ impl LogSegment {
                 start_version
             ))
         );
-        LogSegment::try_new(sorted_commit_files, vec![], log_root, end_version)
+        LogSegment::try_new(ascending_commit_files, vec![], log_root, end_version)
     }
     /// Read a stream of log data from this log segment.
     ///
@@ -197,7 +204,7 @@ impl LogSegment {
         // `replay` expects commit files to be sorted in descending order, so we reverse the sorted
         // commit files
         let commit_files: Vec<_> = self
-            .sorted_commit_files
+            .ascending_commit_files
             .iter()
             .rev()
             .map(|f| f.location.clone())
@@ -277,7 +284,6 @@ fn list_log_files(
 ) -> DeltaResult<impl Iterator<Item = DeltaResult<ParsedLogPath>>> {
     let start_version = start_version.into().unwrap_or(0);
     let end_version = end_version.into();
-
     let version_prefix = format!("{:020}", start_version);
     let start_from = log_root.join(&version_prefix)?;
 
@@ -287,12 +293,12 @@ fn list_log_files(
         // TODO this filters out .crc files etc which start with "." - how do we want to use these kind of files?
         .filter_map_ok(identity)
         .take_while(move |path_res| match path_res {
-            Ok(path) => end_version.is_none_or(|end_version| path.version <= end_version),
+            Ok(path) => !end_version.is_some_and(|end_version| end_version < path.version),
             Err(_) => true,
         }))
 }
 /// List all commit and checkpoint files with versions above the provided `start_version` (inclusive).
-/// If successful, this returns a tuple `(sorted_commit_files_paths, checkpoint_parts)` of type
+/// If successful, this returns a tuple `(ascending_commit_files, checkpoint_parts)` of type
 /// `(Vec<ParsedLogPath>, Vec<ParsedLogPath>)`. The commit files are guaranteed to be sorted in
 /// ascending order by version. The elements of `checkpoint_parts` are all the parts of the same
 /// checkpoint. Checkpoint parts share the same version.
