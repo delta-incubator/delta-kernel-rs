@@ -8,8 +8,8 @@ use crate::{
         visitors::visit_deletion_vector_at,
     },
     engine_data::{GetData, TypedGetData},
-    features::ColumnMappingMode,
     schema::SchemaRef,
+    table_features::ColumnMappingMode,
     DataVisitor, DeltaResult, Engine, EngineData, Error,
 };
 use serde::{Deserialize, Serialize};
@@ -28,13 +28,13 @@ pub struct GlobalScanState {
 }
 
 /// this struct can be used by an engine to materialize a selection vector
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DvInfo {
     pub(crate) deletion_vector: Option<DeletionVectorDescriptor>,
 }
 
 /// Give engines an easy way to consume stats
-#[derive(Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Stats {
     /// For any file where the deletion vector is not present (see [`DvInfo::has_vector`]), the
