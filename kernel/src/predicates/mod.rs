@@ -98,8 +98,8 @@ pub(crate) trait PredicateEvaluator {
     /// Completes evaluation of a (possibly inverted) variadic expression.
     ///
     /// AND and OR are implemented by first evaluating its (possibly inverted) inputs. This part is
-    /// always the same, provided by [`eval_variadic`]). The results are then assembled back into a
-    /// variadic expression, in some implementation-defined way (this method).
+    /// always the same, provided by [`eval_variadic`]). The results are then combined to become the
+    /// expression's output in some implementation-defined way (this method).
     fn finish_eval_variadic(
         &self,
         op: VariadicOperator,
@@ -331,19 +331,18 @@ impl ResolveColumnAsScalar for std::collections::HashMap<ColumnName, Scalar> {
 
 /// A predicate evaluator that directly evaluates the predicate to produce an `Option<bool>`
 /// result. Column resolution is handled by an embedded [`ResolveColumnAsScalar`] instance.
-pub(crate) struct DefaultPredicateEvaluator {
-    resolver: Box<dyn ResolveColumnAsScalar>,
+pub(crate) struct DefaultPredicateEvaluator<R: ResolveColumnAsScalar> {
+    resolver: R,
 }
-impl DefaultPredicateEvaluator {
+impl<R: ResolveColumnAsScalar> DefaultPredicateEvaluator<R> {
     // Convenient thin wrapper
     fn resolve_column(&self, col: &ColumnName) -> Option<Scalar> {
         self.resolver.resolve_column(col)
     }
 }
 
-impl<T: ResolveColumnAsScalar + 'static> From<T> for DefaultPredicateEvaluator {
-    fn from(resolver: T) -> Self {
-        let resolver = Box::new(resolver);
+impl<R: ResolveColumnAsScalar + 'static> From<R> for DefaultPredicateEvaluator<R> {
+    fn from(resolver: R) -> Self {
         Self { resolver }
     }
 }
@@ -351,7 +350,7 @@ impl<T: ResolveColumnAsScalar + 'static> From<T> for DefaultPredicateEvaluator {
 /// A "normal" predicate evaluator. It takes expressions as input, uses a [`ResolveColumnAsScalar`]
 /// to convert column references to scalars, and evaluates the resulting constant expression to
 /// produce a boolean output.
-impl PredicateEvaluator for DefaultPredicateEvaluator {
+impl<R: ResolveColumnAsScalar> PredicateEvaluator for DefaultPredicateEvaluator<R> {
     type Output = bool;
 
     fn eval_scalar(&self, val: &Scalar, inverted: bool) -> Option<bool> {
