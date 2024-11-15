@@ -151,7 +151,7 @@ impl LogSegment {
         }
 
         let sorted_commit_files: Vec<_> =
-            get_parsed_log_files_iter(fs_client, &log_root, start_version, end_version)?
+            parsed_log_files_iter(fs_client, &log_root, start_version, end_version)?
                 .filter_ok(|x| x.is_commit())
                 .try_collect()?;
 
@@ -260,7 +260,7 @@ impl LogSegment {
 /// included.
 ///
 /// Note: this calls [`FileSystemClient::list_from`] to get the list of log files.
-fn get_parsed_log_files_iter(
+fn parsed_log_files_iter(
     fs_client: &dyn FileSystemClient,
     log_root: &Url,
     start_version: impl Into<Option<Version>>,
@@ -304,7 +304,7 @@ fn list_log_files_with_version(
     // on config at some point
     let mut commit_files = Vec::with_capacity(10);
 
-    for parsed_path in get_parsed_log_files_iter(fs_client, log_root, start_version, end_version)? {
+    for parsed_path in parsed_log_files_iter(fs_client, log_root, start_version, end_version)? {
         let parsed_path = parsed_path?;
         if parsed_path.is_commit() {
             commit_files.push(parsed_path);
