@@ -25,7 +25,7 @@ mod tests;
 ///     2. If checkpoint(s) is/are present in the range, only commits with versions greater than the most
 ///        recent checkpoint version are retained. There will not be a gap between the checkpoint
 ///        version and the first commit version.
-///     3. All checkpoint_parts in belong to the same checkpoint version, and must form a complete
+///     3. All checkpoint_parts must belong to the same checkpoint version, and must form a complete
 ///        version. Multi-part checkpoints must have all their parts.
 ///
 /// [`LogSegment`] is used in [`Snapshot`] when built with [`LogSegment::for_snapshot`], and
@@ -104,12 +104,11 @@ impl LogSegment {
     #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
     pub(crate) fn for_snapshot(
         fs_client: &dyn FileSystemClient,
-        table_root: &Url,
+        log_root: Url,
         checkpoint_hint: impl Into<Option<CheckpointMetadata>>,
         time_travel_version: impl Into<Option<Version>>,
     ) -> DeltaResult<Self> {
         let time_travel_version = time_travel_version.into();
-        let log_root = table_root.join("_delta_log/")?;
 
         let (mut sorted_commit_files, checkpoint_parts) =
             match (checkpoint_hint.into(), time_travel_version) {
@@ -143,12 +142,10 @@ impl LogSegment {
     #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
     pub(crate) fn for_table_changes(
         fs_client: &dyn FileSystemClient,
-        table_root: &Url,
+        log_root: Url,
         start_version: Version,
         end_version: impl Into<Option<Version>>,
     ) -> DeltaResult<Self> {
-        let log_root = table_root.join("_delta_log/")?;
-
         let end_version = end_version.into();
         if let Some(end_version) = end_version {
             if start_version > end_version {

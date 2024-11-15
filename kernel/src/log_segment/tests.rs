@@ -96,7 +96,8 @@ fn build_log_with_paths_and_checkpoint(
     );
 
     let table_root = Url::parse("memory:///").expect("valid url");
-    (Box::new(client), table_root)
+    let log_root = table_root.join("_delta_log/").unwrap();
+    (Box::new(client), log_root)
 }
 
 #[test]
@@ -111,7 +112,7 @@ fn build_snapshot_with_out_of_date_last_checkpoint() {
         checksum: None,
     };
 
-    let (client, table_root) = build_log_with_paths_and_checkpoint(
+    let (client, log_root) = build_log_with_paths_and_checkpoint(
         &[
             delta_path_for_version(0, "json"),
             delta_path_for_version(1, "checkpoint.parquet"),
@@ -126,7 +127,7 @@ fn build_snapshot_with_out_of_date_last_checkpoint() {
     );
 
     let log_segment =
-        LogSegment::for_snapshot(client.as_ref(), &table_root, checkpoint_metadata, None).unwrap();
+        LogSegment::for_snapshot(client.as_ref(), log_root, checkpoint_metadata, None).unwrap();
     let (commit_files, checkpoint_parts) = (
         log_segment.sorted_commit_files,
         log_segment.checkpoint_parts,
@@ -150,7 +151,7 @@ fn build_snapshot_with_correct_last_multipart_checkpoint() {
         checksum: None,
     };
 
-    let (client, table_root) = build_log_with_paths_and_checkpoint(
+    let (client, log_root) = build_log_with_paths_and_checkpoint(
         &[
             delta_path_for_version(0, "json"),
             delta_path_for_version(1, "checkpoint.parquet"),
@@ -170,7 +171,7 @@ fn build_snapshot_with_correct_last_multipart_checkpoint() {
     );
 
     let log_segment =
-        LogSegment::for_snapshot(client.as_ref(), &table_root, checkpoint_metadata, None).unwrap();
+        LogSegment::for_snapshot(client.as_ref(), log_root, checkpoint_metadata, None).unwrap();
     let (commit_files, checkpoint_parts) = (
         log_segment.sorted_commit_files,
         log_segment.checkpoint_parts,
@@ -195,7 +196,7 @@ fn build_snapshot_with_missing_checkpoint_part_from_hint_fails() {
         checksum: None,
     };
 
-    let (client, table_root) = build_log_with_paths_and_checkpoint(
+    let (client, log_root) = build_log_with_paths_and_checkpoint(
         &[
             delta_path_for_version(0, "json"),
             delta_path_for_version(1, "checkpoint.parquet"),
@@ -215,7 +216,7 @@ fn build_snapshot_with_missing_checkpoint_part_from_hint_fails() {
     );
 
     let log_segment =
-        LogSegment::for_snapshot(client.as_ref(), &table_root, checkpoint_metadata, None);
+        LogSegment::for_snapshot(client.as_ref(), log_root, checkpoint_metadata, None);
     assert!(log_segment.is_err())
 }
 #[test]
@@ -230,7 +231,7 @@ fn build_snapshot_with_bad_checkpoint_hint_fails() {
         checksum: None,
     };
 
-    let (client, table_root) = build_log_with_paths_and_checkpoint(
+    let (client, log_root) = build_log_with_paths_and_checkpoint(
         &[
             delta_path_for_version(0, "json"),
             delta_path_for_version(1, "checkpoint.parquet"),
@@ -249,7 +250,7 @@ fn build_snapshot_with_bad_checkpoint_hint_fails() {
     );
 
     let log_segment =
-        LogSegment::for_snapshot(client.as_ref(), &table_root, checkpoint_metadata, None);
+        LogSegment::for_snapshot(client.as_ref(), log_root, checkpoint_metadata, None);
     assert!(log_segment.is_err())
 }
 
@@ -259,7 +260,7 @@ fn build_snapshot_with_missing_checkpoint_part_no_hint() {
     // TODO(Oussam): Hande checkpoints correctly so that this test passes
     // Part 2 of 3 is missing from checkpoint 5. The Snapshot should be made of checkpoint
     // number 3 and commit files 4 to 7.
-    let (client, table_root) = build_log_with_paths_and_checkpoint(
+    let (client, log_root) = build_log_with_paths_and_checkpoint(
         &[
             delta_path_for_version(0, "json"),
             delta_path_for_version(1, "checkpoint.parquet"),
@@ -278,7 +279,7 @@ fn build_snapshot_with_missing_checkpoint_part_no_hint() {
         None,
     );
 
-    let log_segment = LogSegment::for_snapshot(client.as_ref(), &table_root, None, None).unwrap();
+    let log_segment = LogSegment::for_snapshot(client.as_ref(), log_root, None, None).unwrap();
 
     let (commit_files, checkpoint_parts) = (
         log_segment.sorted_commit_files,
@@ -295,7 +296,7 @@ fn build_snapshot_with_missing_checkpoint_part_no_hint() {
 
 #[test]
 fn build_snapshot_without_checkpoints() {
-    let (client, table_root) = build_log_with_paths_and_checkpoint(
+    let (client, log_root) = build_log_with_paths_and_checkpoint(
         &[
             delta_path_for_version(0, "json"),
             delta_path_for_version(1, "json"),
@@ -315,7 +316,8 @@ fn build_snapshot_without_checkpoints() {
     // --------------------------------------------------------------------------------
     // |                 Specify no checkpoint or end version                         |
     // --------------------------------------------------------------------------------
-    let log_segment = LogSegment::for_snapshot(client.as_ref(), &table_root, None, None).unwrap();
+    let log_segment =
+        LogSegment::for_snapshot(client.as_ref(), log_root.clone(), None, None).unwrap();
     let (commit_files, checkpoint_parts) = (
         log_segment.sorted_commit_files,
         log_segment.checkpoint_parts,
@@ -332,8 +334,7 @@ fn build_snapshot_without_checkpoints() {
     // --------------------------------------------------------------------------------
     // |                       Specify  only end version                              |
     // --------------------------------------------------------------------------------
-    let log_segment =
-        LogSegment::for_snapshot(client.as_ref(), &table_root, None, Some(2)).unwrap();
+    let log_segment = LogSegment::for_snapshot(client.as_ref(), log_root, None, Some(2)).unwrap();
     let (commit_files, checkpoint_parts) = (
         log_segment.sorted_commit_files,
         log_segment.checkpoint_parts,
@@ -359,7 +360,7 @@ fn build_snapshot_with_checkpoint_greater_than_time_travel_version() {
         checkpoint_schema: None,
         checksum: None,
     };
-    let (client, table_root) = build_log_with_paths_and_checkpoint(
+    let (client, log_root) = build_log_with_paths_and_checkpoint(
         &[
             delta_path_for_version(0, "json"),
             delta_path_for_version(1, "json"),
@@ -377,8 +378,7 @@ fn build_snapshot_with_checkpoint_greater_than_time_travel_version() {
     );
 
     let log_segment =
-        LogSegment::for_snapshot(client.as_ref(), &table_root, checkpoint_metadata, Some(4))
-            .unwrap();
+        LogSegment::for_snapshot(client.as_ref(), log_root, checkpoint_metadata, Some(4)).unwrap();
     let (commit_files, checkpoint_parts) = (
         log_segment.sorted_commit_files,
         log_segment.checkpoint_parts,
@@ -403,7 +403,7 @@ fn build_snapshot_with_start_checkpoint_and_time_travel_version() {
         checksum: None,
     };
 
-    let (client, table_root) = build_log_with_paths_and_checkpoint(
+    let (client, log_root) = build_log_with_paths_and_checkpoint(
         &[
             delta_path_for_version(0, "json"),
             delta_path_for_version(1, "checkpoint.parquet"),
@@ -418,8 +418,7 @@ fn build_snapshot_with_start_checkpoint_and_time_travel_version() {
     );
 
     let log_segment =
-        LogSegment::for_snapshot(client.as_ref(), &table_root, checkpoint_metadata, Some(4))
-            .unwrap();
+        LogSegment::for_snapshot(client.as_ref(), log_root, checkpoint_metadata, Some(4)).unwrap();
 
     assert_eq!(log_segment.checkpoint_parts[0].version, 3);
     assert_eq!(log_segment.sorted_commit_files.len(), 1);
@@ -427,7 +426,7 @@ fn build_snapshot_with_start_checkpoint_and_time_travel_version() {
 }
 #[test]
 fn build_table_changes_with_commit_versions() {
-    let (client, table_root) = build_log_with_paths_and_checkpoint(
+    let (client, log_root) = build_log_with_paths_and_checkpoint(
         &[
             delta_path_for_version(0, "json"),
             delta_path_for_version(1, "json"),
@@ -448,7 +447,8 @@ fn build_table_changes_with_commit_versions() {
     // |                    Specify start version and end version                     |
     // --------------------------------------------------------------------------------
 
-    let log_segment = LogSegment::for_table_changes(client.as_ref(), &table_root, 2, 5).unwrap();
+    let log_segment =
+        LogSegment::for_table_changes(client.as_ref(), log_root.clone(), 2, 5).unwrap();
     let (commit_files, checkpoint_parts) = (
         log_segment.sorted_commit_files,
         log_segment.checkpoint_parts,
@@ -466,7 +466,7 @@ fn build_table_changes_with_commit_versions() {
     // |                    Start version and end version are the same                |
     // --------------------------------------------------------------------------------
     let log_segment =
-        LogSegment::for_table_changes(client.as_ref(), &table_root, 0, Some(0)).unwrap();
+        LogSegment::for_table_changes(client.as_ref(), log_root.clone(), 0, Some(0)).unwrap();
 
     let (commit_files, checkpoint_parts) = (
         log_segment.sorted_commit_files,
@@ -482,7 +482,7 @@ fn build_table_changes_with_commit_versions() {
     // --------------------------------------------------------------------------------
     // |                    Specify no start or end version                           |
     // --------------------------------------------------------------------------------
-    let log_segment = LogSegment::for_table_changes(client.as_ref(), &table_root, 0, None).unwrap();
+    let log_segment = LogSegment::for_table_changes(client.as_ref(), log_root, 0, None).unwrap();
     let (commit_files, checkpoint_parts) = (
         log_segment.sorted_commit_files,
         log_segment.checkpoint_parts,
@@ -500,7 +500,7 @@ fn build_table_changes_with_commit_versions() {
 #[test]
 fn test_non_contiguous_log() {
     // Commit with version 1 is missing
-    let (client, table_root) = build_log_with_paths_and_checkpoint(
+    let (client, log_root) = build_log_with_paths_and_checkpoint(
         &[
             delta_path_for_version(0, "json"),
             delta_path_for_version(2, "json"),
@@ -508,26 +508,26 @@ fn test_non_contiguous_log() {
         None,
     );
 
-    let log_segment_res = LogSegment::for_table_changes(client.as_ref(), &table_root, 0, None);
+    let log_segment_res = LogSegment::for_table_changes(client.as_ref(), log_root.clone(), 0, None);
     assert!(log_segment_res.is_err());
 
-    let log_segment_res = LogSegment::for_table_changes(client.as_ref(), &table_root, 1, None);
+    let log_segment_res = LogSegment::for_table_changes(client.as_ref(), log_root.clone(), 1, None);
     assert!(log_segment_res.is_err());
 
-    let log_segment_res = LogSegment::for_table_changes(client.as_ref(), &table_root, 0, Some(1));
+    let log_segment_res = LogSegment::for_table_changes(client.as_ref(), log_root, 0, Some(1));
     assert!(log_segment_res.is_err());
 }
 
 #[test]
 fn table_changes_fails_with_larger_start_version_than_end() {
     // Commit with version 1 is missing
-    let (client, table_root) = build_log_with_paths_and_checkpoint(
+    let (client, log_root) = build_log_with_paths_and_checkpoint(
         &[
             delta_path_for_version(0, "json"),
             delta_path_for_version(1, "json"),
         ],
         None,
     );
-    let log_segment_res = LogSegment::for_table_changes(client.as_ref(), &table_root, 1, Some(0));
+    let log_segment_res = LogSegment::for_table_changes(client.as_ref(), log_root, 1, Some(0));
     assert!(log_segment_res.is_err());
 }
