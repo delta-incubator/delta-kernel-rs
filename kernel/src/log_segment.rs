@@ -154,6 +154,10 @@ impl LogSegment {
                 .filter_ok(|x| x.is_commit())
                 .try_collect()?;
 
+        // - Here check that the start version is correct.
+        // - [`LogSegment::try_new`] will verify that the `end_version` is correct if present.
+        // - [`LogSegment::try_new`] also checks that there are no gaps between commits.
+        // If all three are satisfied, this implies that all the desired commits are present.
         require!(
             sorted_commit_files
                 .first()
