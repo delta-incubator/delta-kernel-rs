@@ -365,10 +365,10 @@ mod private {
         type Raw = T;
 
         fn into_handle_ptr(val: Arc<T>) -> NonNull<T> {
-            let ptr = Arc::into_raw(val);
-            // Note: casting ptr as `*mut T` is needed for NonNull, and actually Arc::into_raw
-            // _does_ create a mutable pointer (via `Arc::as_ptr`), so this is an 'okay' cast.
-            unsafe { NonNull::new_unchecked(ptr as *mut T) } // into_raw guarantees non-null
+            // Note: casting ptr as mut is needed for NonNull, and actually Arc::into_raw _does_
+            // create a mutable pointer (via `Arc::as_ptr`), so this is an 'okay' cast.
+            let ptr = Arc::into_raw(val).cast_mut();
+            unsafe { NonNull::new_unchecked(ptr) } // into_raw guarantees non-null
         }
         unsafe fn as_ref<'a>(ptr: *const T) -> &'a T {
             &*ptr
