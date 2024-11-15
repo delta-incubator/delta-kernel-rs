@@ -253,7 +253,7 @@ fn build_snapshot_with_bad_checkpoint_hint_fails() {
 #[ignore]
 #[test]
 fn build_snapshot_with_missing_checkpoint_part_no_hint() {
-    // TODO(Oussam): Hande checkpoints correctly so that this test passes
+    // TODO(Oussama): Handel checkpoints correctly so that this test passes
     // Part 2 of 3 is missing from checkpoint 5. The Snapshot should be made of checkpoint
     // number 3 and commit files 4 to 7.
     let (client, log_root) = build_log_with_paths_and_checkpoint(

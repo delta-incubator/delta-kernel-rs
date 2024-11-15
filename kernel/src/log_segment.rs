@@ -70,7 +70,7 @@ impl LogSegment {
                 checkpoint_file.version + 1 == commit_file.version,
                 Error::generic(format!(
                     "Gap between checkpoint version {} and next commit {}",
-                    commit_file.version, checkpoint_file.version
+                    checkpoint_file.version, commit_file.version,
                 ))
             )
         }
