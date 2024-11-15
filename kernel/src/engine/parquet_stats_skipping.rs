@@ -15,12 +15,19 @@ mod tests;
 /// [`DataSkippingStatsProvider`]. From there, we can automatically derive a
 /// [`DataSkippingPredicateEvaluator`].
 pub(crate) trait ParquetStatsProvider {
+    /// The min-value stat for this column, if the column exists in this file, has the expected
+    /// type, and the parquet footer provides stats for it.
     fn get_parquet_min_stat(&self, _col: &ColumnName, _data_type: &DataType) -> Option<Scalar>;
 
+    /// The max-value stat for this column, if the column exists in this file, has the expected
+    /// type, and the parquet footer provides stats for it.
     fn get_parquet_max_stat(&self, _col: &ColumnName, _data_type: &DataType) -> Option<Scalar>;
 
+    /// The nullcount stat for this column, if the column exists in this file, has the expected
+    /// type, and the parquet footer provides stats for it.
     fn get_parquet_nullcount_stat(&self, _col: &ColumnName) -> Option<i64>;
 
+    /// The rowcount stat for this row group. It is always available in the parquet footer.
     fn get_parquet_rowcount_stat(&self) -> i64;
 }
 
