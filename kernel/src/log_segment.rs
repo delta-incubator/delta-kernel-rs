@@ -46,7 +46,7 @@ impl LogSegment {
         log_root: Url,
         expected_end_version: Option<Version>,
     ) -> DeltaResult<Self> {
-        // We should require that commits that are contiguous. In other words, there must be no gap between commit versions.
+        // We require that commits that are contiguous. In other words, there must be no gap between commit versions.
         // There must also be no gap between a checkpoint and the first commit version.
         require!(
             sorted_commit_files
@@ -90,7 +90,8 @@ impl LogSegment {
 
     /// Constructs a [`LogSegment`] to be used for Snapshot. For a Snapshot at version `n`:
     /// Its LogSegment is made up of zero or one checkpoint, and all commits between the checkpoint up
-    /// to and including the end version `n`.
+    /// to and including the end version `n`. Note that a checkpoint may be made up of multiple
+    /// parts.
     ///
     /// This may leverage a `checkpoint_hint` that is read from `_delta_log/_last_checkpoint`.
     #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
@@ -253,9 +254,9 @@ impl LogSegment {
 }
 
 /// Returns a fallible iterator of [`ParsedLogPath`] that are between the provided `start_version` (inclusive)
-/// and `end_version` (inclusive). If `start_version` is not specified, the files will begin from
-/// version number 0. If `end_version` is not specified, files up to the most recent version will be
-/// included.
+/// and `end_version` (inclusive). [`ParsedLogPath`] may be a commit or a checkpoint.  If `start_version` is
+/// not specified, the files will begin from version number 0. If `end_version` is not specified, files up to
+/// the most recent version will be included.
 ///
 /// Note: this calls [`FileSystemClient::list_from`] to get the list of log files.
 fn parsed_log_files_iter(
@@ -282,7 +283,7 @@ fn parsed_log_files_iter(
         .filter_map_ok(identity)
         .take_while(move |x| match x {
             Ok(x) => lte_end_version(x.version),
-            _ => false,
+            Err(_) => true,
         }))
 }
 /// List all commit and checkpoint files with versions above the provided `start_version` (inclusive).
