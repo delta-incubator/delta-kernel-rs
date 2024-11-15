@@ -10,7 +10,7 @@ use crate::engine::sync::SyncEngine;
 use crate::log_segment::LogSegment;
 use crate::snapshot::CheckpointMetadata;
 use crate::{FileSystemClient, Table};
-use test_utils::{delta_path_for_multipart_checkpoint, delta_path_for_version};
+use test_utils::delta_path_for_version;
 
 // NOTE: In addition to testing the meta-predicate for metadata replay, this test also verifies
 // that the parquet reader properly infers nullcount = rowcount for missing columns. The two
@@ -53,6 +53,13 @@ fn test_replay_for_metadata() {
     // read parts 1 and 5 (4 in all instead of 2) because row group skipping is disabled for
     // missing columns, but can still skip part 3 because has valid nullcount stats for P&M.
     assert_eq!(data.len(), 4);
+}
+
+// get an ObjectStore path for a checkpoint file, based on version, part number, and total number of parts
+pub fn delta_path_for_multipart_checkpoint(version: u64, part_num: u32, num_parts: u32) -> Path {
+    let path =
+        format!("_delta_log/{version:020}.checkpoint.{part_num:010}.{num_parts:010}.parquet");
+    Path::from(path.as_str())
 }
 
 // Utility method to build a log using a list of log paths and an optional checkpoint hint. The
@@ -253,7 +260,8 @@ fn build_snapshot_with_bad_checkpoint_hint_fails() {
 #[ignore]
 #[test]
 fn build_snapshot_with_missing_checkpoint_part_no_hint() {
-    // TODO(Oussama): Handel checkpoints correctly so that this test passes
+    // TODO: Handle checkpoints correctly so that this test passes: https://github.com/delta-incubator/delta-kernel-rs/issues/497
+
     // Part 2 of 3 is missing from checkpoint 5. The Snapshot should be made of checkpoint
     // number 3 and commit files 4 to 7.
     let (client, log_root) = build_log_with_paths_and_checkpoint(
@@ -427,9 +435,7 @@ fn build_table_changes_with_commit_versions() {
         None,
     );
 
-    // --------------------------------------------------------------------------------
-    // |                    Specify start version and end version                     |
-    // --------------------------------------------------------------------------------
+    ///////// Specify start version and end version /////////
 
     let log_segment =
         LogSegment::for_table_changes(client.as_ref(), log_root.clone(), 2, 5).unwrap();
@@ -444,9 +450,7 @@ fn build_table_changes_with_commit_versions() {
     let expected_versions = (2..=5).collect_vec();
     assert_eq!(versions, expected_versions);
 
-    // --------------------------------------------------------------------------------
-    // |                    Start version and end version are the same                |
-    // --------------------------------------------------------------------------------
+    ///////// Start version and end version are the same /////////
     let log_segment =
         LogSegment::for_table_changes(client.as_ref(), log_root.clone(), 0, Some(0)).unwrap();
 
@@ -459,9 +463,7 @@ fn build_table_changes_with_commit_versions() {
     assert_eq!(commit_files.len(), 1);
     assert_eq!(commit_files[0].version, 0);
 
-    // --------------------------------------------------------------------------------
-    // |                    Specify no start or end version                           |
-    // --------------------------------------------------------------------------------
+    ///////// Specify no start or end version /////////
     let log_segment = LogSegment::for_table_changes(client.as_ref(), log_root, 0, None).unwrap();
     let commit_files = log_segment.ascending_commit_files;
     let checkpoint_parts = log_segment.checkpoint_parts;
