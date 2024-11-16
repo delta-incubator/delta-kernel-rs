@@ -707,8 +707,11 @@ pub unsafe extern "C" fn get_sync_engine(
     get_sync_engine_impl(allocate_error).into_extern_result(&allocate_error)
 }
 
-#[cfg(any(feature = "default-engine", feature="sync-engine"))]
-fn engine_to_handle(engine: Arc<dyn Engine>, allocate_error: AllocateErrorFn) -> Handle<SharedExternEngine> {
+#[cfg(any(feature = "default-engine", feature = "sync-engine"))]
+fn engine_to_handle(
+    engine: Arc<dyn Engine>,
+    allocate_error: AllocateErrorFn,
+) -> Handle<SharedExternEngine> {
     let engine: Arc<dyn ExternEngine> = Arc::new(ExternEngineVtable {
         engine,
         allocate_error,
@@ -951,7 +954,9 @@ mod tests {
     #[test]
     fn engine_builder() {
         let engine = get_default_engine();
-        unsafe { free_engine(engine); }
+        unsafe {
+            free_engine(engine);
+        }
     }
 
     #[tokio::test]
@@ -960,10 +965,9 @@ mod tests {
         add_commit(
             storage.as_ref(),
             0,
-            actions_to_string(vec![
-                TestAction::Metadata,
-            ]),
-        ).await?;
+            actions_to_string(vec![TestAction::Metadata]),
+        )
+        .await?;
         let engine = DefaultEngine::new(
             storage.clone(),
             Path::from("/"),
@@ -971,7 +975,8 @@ mod tests {
         );
         let engine = engine_to_handle(Arc::new(engine), allocate_err);
         let path = "memory:///";
-        let snapshot = unsafe { ok_or_panic(snapshot(kernel_string_slice!(path), engine.clone_ptr())) };
+        let snapshot =
+            unsafe { ok_or_panic(snapshot(kernel_string_slice!(path), engine.clone_ptr())) };
         let version = unsafe { version(snapshot.clone_ptr()) };
         assert_eq!(version, 0);
         unsafe { free_snapshot(snapshot) }

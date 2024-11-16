@@ -170,9 +170,8 @@ mod private {
         /// without consuming it. This creates a "new" handle just by cloning the underlying
         /// pointer. This is unsafe! Do not use outside testing code!
         #[cfg(test)]
-        pub unsafe fn clone_ptr(&self) -> Self {
-            let ptr = self.ptr.clone();
-            Handle { ptr }
+        pub fn clone_ptr(&self) -> Self {
+            Handle { ptr: self.ptr }
         }
     }
 
