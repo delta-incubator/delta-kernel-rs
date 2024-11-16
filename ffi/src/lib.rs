@@ -920,6 +920,20 @@ mod tests {
         Box::leak(boxed)
     }
 
+    #[no_mangle]
+    extern "C" fn allocate_str(kernel_str: KernelStringSlice) -> NullableCvoid {
+        let s: &str = unsafe { TryFromStringSlice::try_from_slice(&kernel_str).unwrap() };
+        let b = Box::new(s.to_string());
+        let p = Box::leak(b) as *mut String as *mut c_void;
+        let ptr = unsafe { NonNull::new_unchecked(p) };
+        Some(ptr)
+    }
+
+    // helper to recover a string from the above
+    fn recover_string(ptr: NonNull<c_void>) -> String {
+        unsafe { *Box::from_raw(ptr.as_ptr() as *mut String) }
+    }
+
     fn ok_or_panic<T>(result: ExternResult<T>) -> T {
         match result {
             ExternResult::Ok(t) => t,
@@ -975,10 +989,18 @@ mod tests {
         );
         let engine = engine_to_handle(Arc::new(engine), allocate_err);
         let path = "memory:///";
+
         let snapshot =
             unsafe { ok_or_panic(snapshot(kernel_string_slice!(path), engine.clone_ptr())) };
+
         let version = unsafe { version(snapshot.clone_ptr()) };
         assert_eq!(version, 0);
+
+        let table_root = unsafe { snapshot_table_root(snapshot.clone_ptr(), allocate_str) };
+        assert!(table_root.is_some());
+        let s = recover_string(table_root.unwrap());
+        assert_eq!(&s, path);
+
         unsafe { free_snapshot(snapshot) }
         unsafe { free_engine(engine) }
         Ok(())
