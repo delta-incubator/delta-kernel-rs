@@ -65,6 +65,7 @@ pub mod error;
 pub mod expressions;
 pub(crate) mod predicates;
 pub mod table_features;
+pub mod grouping_iterator;
 
 #[cfg(feature = "developer-visibility")]
 pub mod path;
