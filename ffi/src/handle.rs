@@ -165,6 +165,15 @@ mod private {
         pub unsafe fn drop_handle(self) {
             drop(self.into_inner())
         }
+
+        /// In testing code we want to simulate what c code can do where a pointer can be used
+        /// without consuming it. This creates a "new" handle just by cloning the underlying
+        /// pointer. This is unsafe! Do not use outside testing code!
+        #[cfg(test)]
+        pub unsafe fn clone_ptr(&self) -> Self {
+            let ptr = self.ptr.clone();
+            Handle { ptr }
+        }
     }
 
     // [`Handle`] operations applicable only to mutable handles, with implementations forwarded to

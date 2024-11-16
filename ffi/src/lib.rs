@@ -971,8 +971,8 @@ mod tests {
         );
         let engine = engine_to_handle(Arc::new(engine), allocate_err);
         let path = "memory:///";
-        let snapshot = unsafe { ok_or_panic(snapshot(kernel_string_slice!(path), Handle::clone_handle(&engine))) };
-        let version = unsafe { version(Handle::clone_handle(&snapshot)) };
+        let snapshot = unsafe { ok_or_panic(snapshot(kernel_string_slice!(path), engine.clone_ptr())) };
+        let version = unsafe { version(snapshot.clone_ptr()) };
         assert_eq!(version, 0);
         unsafe { free_snapshot(snapshot) }
         unsafe { free_engine(engine) }
