@@ -9,7 +9,6 @@ use arrow_array::{Array, GenericListArray, MapArray, OffsetSizeTrait, RecordBatc
 use arrow_schema::{ArrowError, DataType as ArrowDataType};
 use tracing::{debug, warn};
 
-use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -47,14 +46,6 @@ impl EngineData for ArrowEngineData {
 
     fn len(&self) -> usize {
         self.data.num_rows()
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn into_any(self: Box<Self>) -> Box<dyn Any> {
-        self
     }
 }
 
@@ -389,6 +380,29 @@ mod tests {
             .unwrap();
         let protocol = Protocol::try_new_from_data(parsed.as_ref())?;
         assert!(protocol.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn test_protocol_extract() -> DeltaResult<()> {
+        let engine = SyncEngine::new();
+        let handler = engine.get_json_handler();
+        let json_strings: StringArray = vec![
+            r#"{"protocol": {"minReaderVersion": 3, "minWriterVersion": 7, "readerFeatures": ["rw1"], "writerFeatures": ["rw1", "w2"]}}"#,
+        ]
+        .into();
+        let output_schema = get_log_schema().project(&["protocol"])?;
+        let parsed = handler
+            .parse_json(string_array_to_engine_data(json_strings), output_schema)
+            .unwrap();
+        let protocol = Protocol::try_new_from_data(parsed.as_ref())?.unwrap();
+        assert_eq!(protocol.min_reader_version(), 3);
+        assert_eq!(protocol.min_writer_version(), 7);
+        assert_eq!(protocol.reader_features(), Some(["rw1".into()].as_slice()));
+        assert_eq!(
+            protocol.writer_features(),
+            Some(["rw1".into(), "w2".into()].as_slice())
+        );
         Ok(())
     }
 }

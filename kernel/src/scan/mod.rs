@@ -98,6 +98,10 @@ impl ScanBuilder {
             self.snapshot.table_properties().get_column_mapping_mode(),
         )?;
         let physical_schema = Arc::new(StructType::new(read_fields));
+
+        // important! before a read/write to the table we must check it is supported
+        self.snapshot.protocol().ensure_read_supported()?;
+
         Ok(Scan {
             snapshot: self.snapshot,
             logical_schema,

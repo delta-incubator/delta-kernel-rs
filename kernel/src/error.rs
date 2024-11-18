@@ -117,6 +117,10 @@ pub enum Error {
     #[error("No protocol found in delta log.")]
     MissingProtocol,
 
+    /// Invalid protocol action was read from the log
+    #[error("Invalid protocol action in the delta log: {0}")]
+    InvalidProtocol(String),
+
     /// Neither metadata nor protocol could be found in the delta log
     #[error("No table metadata or protocol found in delta log.")]
     MissingMetadataAndProtocol,
@@ -175,6 +179,10 @@ pub enum Error {
     /// The `metadata` actions's `configuration` field was unable to parse into `TableProperties`
     #[error("Invalid table properties: {0}")]
     InvalidTableProperties(String),
+
+    /// Some functionality is currently unsupported
+    #[error("Unsupported: {0}")]
+    Unsupported(String),
 }
 
 // Convenience constructors for Error types that take a String argument
@@ -232,6 +240,14 @@ impl Error {
 
     pub fn internal_error(msg: impl ToString) -> Self {
         Self::InternalError(msg.to_string()).with_backtrace()
+    }
+
+    pub fn invalid_protocol(msg: impl ToString) -> Self {
+        Self::InvalidProtocol(msg.to_string())
+    }
+
+    pub fn unsupported(msg: impl ToString) -> Self {
+        Self::Unsupported(msg.to_string())
     }
 
     // Capture a backtrace when the error is constructed.
