@@ -189,8 +189,13 @@ pub struct TableProperties {
 }
 
 impl TableProperties {
-    pub(crate) fn new(config_map: HashMap<String, String>) -> DeltaResult<Self> {
-        let deserializer = MapDeserializer::<_, de::value::Error>::new(config_map.into_iter());
+    pub(crate) fn new<'a, I>(items: I) -> DeltaResult<Self>
+    where
+        I: Iterator<Item = (&'a String, &'a String)> + 'a,
+    {
+        let deserializer = MapDeserializer::<_, de::value::Error>::new(
+            items.map(|(k, v)| (k.as_str(), v.as_str())),
+        );
         TableProperties::deserialize(deserializer).map_err(|e| Error::invalid_table_properties(e))
     }
 

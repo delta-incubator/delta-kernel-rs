@@ -125,7 +125,7 @@ impl Metadata {
 
     /// Parse the metadata configuration HashMap<String, String> into a TableProperties struct.
     pub fn parse_table_properties(&self) -> DeltaResult<TableProperties> {
-        TableProperties::new(self.configuration.clone())
+        TableProperties::new(self.configuration.iter())
     }
 }
 
