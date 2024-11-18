@@ -6,7 +6,7 @@ use std::{
     str::Utf8Error,
 };
 
-use crate::schema::DataType;
+use crate::{schema::DataType, Version};
 
 /// A [`std::result::Result`] that has the kernel [`Error`] as the error variant
 pub type DeltaResult<T, E = Error> = std::result::Result<T, E>;
@@ -179,6 +179,9 @@ pub enum Error {
     /// Some functionality is currently unsupported
     #[error("Unsupported: {0}")]
     Unsupported(String),
+
+    #[error("Table changes disabled as of version {0}")]
+    TableChangesDisabled(Version),
 }
 
 // Convenience constructors for Error types that take a String argument
@@ -241,6 +244,9 @@ impl Error {
 
     pub fn unsupported(msg: impl ToString) -> Self {
         Self::Unsupported(msg.to_string())
+    }
+    pub fn table_changes_disabled(version: impl Into<Version>) -> Self {
+        Self::TableChangesDisabled(version.into())
     }
 
     // Capture a backtrace when the error is constructed.
