@@ -6,10 +6,8 @@ use std::hash::{Hash, Hasher};
 use std::iter::Peekable;
 use std::ops::Deref;
 
-use serde::Deserialize;
-
 /// A (possibly nested) column name.
-#[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Deserialize)]
+#[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord)]
 pub struct ColumnName {
     path: Vec<String>,
 }
