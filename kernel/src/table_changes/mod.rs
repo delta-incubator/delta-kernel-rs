@@ -109,8 +109,9 @@ impl TableChanges {
 
 #[cfg(test)]
 mod tests {
+    use crate::engine::sync::SyncEngine;
     use crate::Error;
-    use crate::{engine::sync::SyncEngine, Table};
+    use crate::Table;
 
     #[test]
     fn test_enable_cdf_flag() {
