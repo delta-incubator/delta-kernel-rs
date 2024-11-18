@@ -70,6 +70,8 @@ impl TableChanges {
     /// Note that this does not check that change data feed is enabled for every commit in the
     /// range. It also does not check that the schema remains the same for the entire range.
     ///
+    /// Note that this does not check that change data feed is enabled for every commit in the
+    /// range. It also does not check that the schema remains the same for the entire range.
     /// # Parameters
     /// - `table_root`: url pointing at the table root (where `_delta_log` folder is located)
     /// - `engine`: Implementation of [`Engine`] apis.
