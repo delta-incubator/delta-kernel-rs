@@ -18,7 +18,9 @@ use crate::{DeltaResult, Engine, Error, Version};
 ///   this is retrieved from the [`CommitInfo`] action. Otherwise, the timestamp is the same as the
 ///   commit file's modification timestamp.
 ///
-/// For more details, see the Protocol sections for [Add CDC File](https://github.com/delta-io/delta/blob/master/PROTOCOL.md#add-cdc-file) and [`ChangeDataFiles`](https://github.com/delta-io/delta/blob/master/PROTOCOL.md#add-cdc-file).
+/// For more details, see the following sections of the protocol:
+/// - [Add CDC File](https://github.com/delta-io/delta/blob/master/PROTOCOL.md#add-cdc-file)
+/// - [Change Data Files](https://github.com/delta-io/delta/blob/master/PROTOCOL.md#change-data-files).
 ///
 /// [`CommitInfo`]: crate::actions::CommitInfo
 #[derive(Debug)]
