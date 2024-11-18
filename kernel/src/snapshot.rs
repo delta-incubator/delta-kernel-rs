@@ -161,9 +161,7 @@ impl Snapshot {
         &self.protocol
     }
 
-    /// Get the [column mapping
-    /// mode](https://github.com/delta-io/delta/blob/master/PROTOCOL.md#column-mapping) at this
-    /// `Snapshot`s version.
+    /// Get the [`TableProperties`] for this [`Snapshot`].
     pub fn table_properties(&self) -> &TableProperties {
         &self.table_properties
     }

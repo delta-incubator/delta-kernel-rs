@@ -31,8 +31,10 @@ pub const DEFAULT_NUM_INDEX_COLS: i32 = 32;
 #[derive(Deserialize, Debug, Clone, Eq, PartialEq, Default)]
 #[serde(default)]
 pub struct TableProperties {
-    /// true for this Delta table to be append-only. If append-only,
-    /// existing records cannot be deleted, and existing values cannot be updated.
+    /// true for this Delta table to be append-only. If append-only, existing records cannot be
+    /// deleted, and existing values cannot be updated. See [append-only tables] in the protocol.
+    ///
+    /// [append-only tables]: https://github.com/delta-io/delta/blob/master/PROTOCOL.md#append-only-tables
     #[serde(rename = "delta.appendOnly")]
     #[serde(deserialize_with = "deserialize_bool")]
     pub append_only: Option<bool>,

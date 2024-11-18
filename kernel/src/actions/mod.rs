@@ -100,7 +100,7 @@ pub struct Metadata {
     pub partition_columns: Vec<String>,
     /// The time when this metadata action is created, in milliseconds since the Unix epoch
     pub created_time: Option<i64>,
-    /// Configuration options for the metadata action. These are parsed into `TableProperties`.
+    /// Configuration options for the metadata action. These are parsed into [`TableProperties`].
     pub configuration: HashMap<String, String>,
 }
 
