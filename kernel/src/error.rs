@@ -6,7 +6,8 @@ use std::{
     str::Utf8Error,
 };
 
-use crate::{schema::DataType, Version};
+use crate::schema::DataType;
+use crate::Version;
 
 /// A [`std::result::Result`] that has the kernel [`Error`] as the error variant
 pub type DeltaResult<T, E = Error> = std::result::Result<T, E>;
