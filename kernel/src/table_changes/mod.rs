@@ -32,10 +32,13 @@ pub struct TableChanges {
 }
 
 impl TableChanges {
-    /// Creates a new [`TableChanges`] instance for the given version range. This function fails if
-    /// the change data feed table feature is disabled in either the start or end versions. However
-    /// it does not verify that change data feed is enabled for the entire range.
+    /// Creates a new [`TableChanges`] instance for the given version range. This function checks
+    /// these two properties:
+    /// - The change data feed table feature must be enabled in both the start or end versions.
+    /// - The schema at the start and end versions are the same.
     ///
+    /// Note that this does not check that change data feed is enabled for every commit in the
+    /// range. It also does not check that the schema remains the same for the entire range.
     /// # Parameters
     /// - `table_root`: url pointing at the table root (where `_delta_log` folder is located)
     /// - `engine`: Implementation of [`Engine`] apis.
