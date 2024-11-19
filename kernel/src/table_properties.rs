@@ -198,10 +198,6 @@ impl TableProperties {
         );
         TableProperties::deserialize(deserializer).map_err(|e| Error::invalid_table_properties(e))
     }
-
-    pub(crate) fn get_column_mapping_mode(&self) -> ColumnMappingMode {
-        self.column_mapping_mode.unwrap_or(ColumnMappingMode::None)
-    }
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Deserialize)]
@@ -344,10 +340,7 @@ mod tests {
             ("delta.checkpointPolicy", "v2"),
             ("delta.enableRowTracking", "true"),
         ];
-        let properties: HashMap<_, _> = properties
-            .into_iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect();
+        let properties: HashMap<_, _> = properties.into_iter().collect();
         let de = MapDeserializer::<_, de::value::Error>::new(properties.clone().into_iter());
         let actual = TableProperties::deserialize(de).unwrap();
         let expected = TableProperties {

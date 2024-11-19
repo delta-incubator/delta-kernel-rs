@@ -11,6 +11,7 @@ use crate::log_segment::LogSegment;
 use crate::scan::ScanBuilder;
 use crate::schema::Schema;
 use crate::table_properties::TableProperties;
+use crate::table_features::{ColumnMappingMode, column_mapping_mode};
 use crate::{DeltaResult, Engine, Error, FileSystemClient, Version};
 
 const LAST_CHECKPOINT_FILE_NAME: &str = "_last_checkpoint";
@@ -26,6 +27,7 @@ pub struct Snapshot {
     protocol: Protocol,
     schema: Schema,
     table_properties: TableProperties,
+    pub(crate) column_mapping_mode: ColumnMappingMode,
 }
 
 impl Drop for Snapshot {
@@ -77,6 +79,8 @@ impl Snapshot {
         let (metadata, protocol) = log_segment.read_metadata(engine)?;
         let schema = metadata.schema()?;
         let table_properties = metadata.parse_table_properties()?;
+        let column_mapping_mode = column_mapping_mode(&protocol, &table_properties);
+        println!("column_mapping_mode: {:?}", column_mapping_mode);
         Ok(Self {
             table_root: location,
             log_segment,
@@ -84,6 +88,7 @@ impl Snapshot {
             protocol,
             schema,
             table_properties,
+            column_mapping_mode
         })
     }
 
