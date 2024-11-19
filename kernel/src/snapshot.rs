@@ -10,8 +10,8 @@ use crate::actions::{Metadata, Protocol};
 use crate::log_segment::LogSegment;
 use crate::scan::ScanBuilder;
 use crate::schema::Schema;
+use crate::table_features::{column_mapping_mode, ColumnMappingMode};
 use crate::table_properties::TableProperties;
-use crate::table_features::{ColumnMappingMode, column_mapping_mode};
 use crate::{DeltaResult, Engine, Error, FileSystemClient, Version};
 
 const LAST_CHECKPOINT_FILE_NAME: &str = "_last_checkpoint";
@@ -87,7 +87,7 @@ impl Snapshot {
             protocol,
             schema,
             table_properties,
-            column_mapping_mode
+            column_mapping_mode,
         })
     }
 

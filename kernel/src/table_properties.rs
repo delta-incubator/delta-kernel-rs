@@ -21,8 +21,8 @@ use crate::table_features::ColumnMappingMode;
 use crate::{DeltaResult, Error};
 
 mod deserialize;
-use deserialize::*;
 pub use deserialize::ParseIntervalError;
+use deserialize::*;
 
 /// Default num index cols
 pub const DEFAULT_NUM_INDEX_COLS: i32 = 32;
@@ -86,7 +86,7 @@ pub struct TableProperties {
 
     /// A comma-separated list of column names on which Delta Lake collects statistics to enhance
     /// data skipping functionality. This property takes precedence over
-    /// [DataSkippingNumIndexedCols](DeltaConfigKey::DataSkippingNumIndexedCols).
+    /// `delta.dataSkippingNumIndexedCols`.
     #[serde(rename = "delta.dataSkippingStatsColumns")]
     #[serde(deserialize_with = "deserialize_column_names")]
     pub data_skipping_stats_columns: Option<Vec<ColumnName>>,
@@ -197,7 +197,7 @@ impl TableProperties {
         let deserializer = MapDeserializer::<_, de::value::Error>::new(
             items.map(|(k, v)| (k.as_str(), v.as_str())),
         );
-        TableProperties::deserialize(deserializer).map_err(|e| Error::invalid_table_properties(e))
+        TableProperties::deserialize(deserializer).map_err(Error::invalid_table_properties)
     }
 }
 

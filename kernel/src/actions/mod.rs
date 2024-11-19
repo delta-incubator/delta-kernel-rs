@@ -14,9 +14,9 @@ use crate::schema::{SchemaRef, StructType};
 use crate::table_features::{
     ReaderFeatures, WriterFeatures, SUPPORTED_READER_FEATURES, SUPPORTED_WRITER_FEATURES,
 };
+use crate::table_properties::TableProperties;
 use crate::utils::require;
 use crate::{DeltaResult, EngineData, Error};
-use crate::table_properties::TableProperties;
 use visitors::{AddVisitor, MetadataVisitor, ProtocolVisitor};
 
 use delta_kernel_derive::Schema;

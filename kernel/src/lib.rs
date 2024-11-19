@@ -63,11 +63,11 @@ pub mod actions;
 pub mod engine_data;
 pub mod error;
 pub mod expressions;
-pub mod table_features;
 pub mod scan;
 pub mod schema;
 pub mod snapshot;
 pub mod table;
+pub mod table_features;
 pub mod table_properties;
 pub mod transaction;
 
