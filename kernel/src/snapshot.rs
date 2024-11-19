@@ -80,7 +80,6 @@ impl Snapshot {
         let schema = metadata.schema()?;
         let table_properties = metadata.parse_table_properties()?;
         let column_mapping_mode = column_mapping_mode(&protocol, &table_properties);
-        println!("column_mapping_mode: {:?}", column_mapping_mode);
         Ok(Self {
             table_root: location,
             log_segment,

@@ -7,6 +7,7 @@ use std::{
 };
 
 use crate::schema::DataType;
+use crate::table_properties::ParseIntervalError;
 
 /// A [`std::result::Result`] that has the kernel [`Error`] as the error variant
 pub type DeltaResult<T, E = Error> = std::result::Result<T, E>;
@@ -183,6 +184,10 @@ pub enum Error {
     /// Some functionality is currently unsupported
     #[error("Unsupported: {0}")]
     Unsupported(String),
+
+    /// Parsing error when attempting to deserizlize an interval
+    #[error(transparent)]
+    ParseIntervalError(#[from] ParseIntervalError),
 }
 
 // Convenience constructors for Error types that take a String argument

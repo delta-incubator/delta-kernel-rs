@@ -22,6 +22,7 @@ use crate::{DeltaResult, Error};
 
 mod deserialize;
 use deserialize::*;
+pub use deserialize::ParseIntervalError;
 
 /// Default num index cols
 pub const DEFAULT_NUM_INDEX_COLS: i32 = 32;
