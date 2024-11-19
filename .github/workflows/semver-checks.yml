@@ -8,6 +8,8 @@ on:
       - edited
       - synchronize
       - reopened
+    paths-ignore:
+      - 'CHANGELOG.md'
 
 env:
   CARGO_TERM_COLOR: always
