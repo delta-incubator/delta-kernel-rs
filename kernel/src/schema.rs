@@ -9,7 +9,8 @@ use indexmap::IndexMap;
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 
-use crate::table_features::ColumnMappingMode;
+// re-export because many call sites that use schemas do not necessarily use expressions
+pub(crate) use crate::expressions::ColumnName;
 use crate::utils::require;
 use crate::{DeltaResult, Error};
 
@@ -91,6 +92,11 @@ impl AsRef<str> for ColumnMetadataKey {
     }
 }
 
+pub enum ColumnMapping {
+    None,
+    Name(ColumnName),
+}
+
 #[derive(Debug, Serialize, Deserialize, PartialEq, Clone, Eq)]
 pub struct StructField {
     /// Name of this (possibly nested) column
@@ -130,20 +136,18 @@ impl StructField {
         self.metadata.get(key.as_ref())
     }
 
-    /// Get the physical name for this field as it should be read from parquet, based on the
-    /// specified column mapping mode.
-    pub fn physical_name(&self, mapping_mode: ColumnMappingMode) -> DeltaResult<&str> {
-        let physical_name_key = ColumnMetadataKey::ColumnMappingPhysicalName.as_ref();
-        let name_mapped_name = self.metadata.get(physical_name_key);
-        match (mapping_mode, name_mapped_name) {
-            (ColumnMappingMode::None, _) => Ok(self.name.as_str()),
-            (ColumnMappingMode::Name, Some(MetadataValue::String(name))) => Ok(name),
-            (ColumnMappingMode::Name, invalid) => Err(Error::generic(format!(
-                "Missing or invalid {physical_name_key}: {invalid:?}"
-            ))),
-            (ColumnMappingMode::Id, _) => {
-                Err(Error::generic("Don't support id column mapping yet"))
-            }
+    /// Get the physical name for this field as it should be read from parquet.
+    ///
+    /// NOTE: Caller affirms that the schema was already validated by
+    /// [`crate::table_features::column_mapping::validate_column_mapping_schema`], to ensure that
+    /// annotations are always and only present when column mapping mode is enabled.
+    pub fn physical_name(&self) -> &str {
+        match self
+            .metadata
+            .get(ColumnMetadataKey::ColumnMappingPhysicalName.as_ref())
+        {
+            Some(MetadataValue::String(physical_name)) => physical_name,
+            _ => &self.name,
         }
     }
 
@@ -187,32 +191,27 @@ impl StructField {
             .collect()
     }
 
-    pub fn make_physical(&self, mapping_mode: ColumnMappingMode) -> DeltaResult<Self> {
-        use ColumnMappingMode::*;
-        match mapping_mode {
-            Id => return Err(Error::generic("Column ID mapping mode not supported")),
-            None => return Ok(self.clone()),
-            Name => {} // fall out
-        }
-
-        struct ApplyNameMapping;
-        impl SchemaTransform for ApplyNameMapping {
+    /// Applies physical name mappings to this field
+    ///
+    /// NOTE: Caller affirms that the schema was already validated by
+    /// [`crate::table_features::column_mapping::validate_column_mapping_schema`], to ensure that
+    /// annotations are always and only present when column mapping mode is enabled.
+    pub fn make_physical(&self) -> Self {
+        struct MakePhysical;
+        impl SchemaTransform for MakePhysical {
             fn transform_struct_field<'a>(
                 &mut self,
-                field: Cow<'a, StructField>,
+                field: &'a StructField,
             ) -> Option<Cow<'a, StructField>> {
                 let field = self.recurse_into_struct_field(field)?;
-                match field.get_config_value(&ColumnMetadataKey::ColumnMappingPhysicalName) {
-                    Some(MetadataValue::String(physical_name)) => {
-                        Some(Cow::Owned(field.with_name(physical_name)))
-                    }
-                    _ => Some(field),
-                }
+                Some(Cow::Owned(field.with_name(field.physical_name())))
             }
         }
-
-        let field = ApplyNameMapping.transform_struct_field(Cow::Borrowed(self));
-        Ok(field.unwrap().into_owned())
+        // NOTE: unwrap is safe because the transformer is incapable of returning None
+        MakePhysical
+            .transform_struct_field(self)
+            .unwrap()
+            .into_owned()
     }
 }
 
@@ -620,14 +619,14 @@ pub trait SchemaTransform {
     /// Called for each primitive encountered during the schema traversal.
     fn transform_primitive<'a>(
         &mut self,
-        ptype: Cow<'a, PrimitiveType>,
+        ptype: &'a PrimitiveType,
     ) -> Option<Cow<'a, PrimitiveType>> {
-        Some(ptype)
+        Some(Cow::Borrowed(ptype))
     }
 
     /// Called for each struct encountered during the schema traversal. Implementations can call
     /// [`Self::recurse_into_struct`] if they wish to recursively transform the struct's fields.
-    fn transform_struct<'a>(&mut self, stype: Cow<'a, StructType>) -> Option<Cow<'a, StructType>> {
+    fn transform_struct<'a>(&mut self, stype: &'a StructType) -> Option<Cow<'a, StructType>> {
         self.recurse_into_struct(stype)
     }
 
@@ -636,41 +635,59 @@ pub trait SchemaTransform {
     /// data type.
     fn transform_struct_field<'a>(
         &mut self,
-        field: Cow<'a, StructField>,
+        field: &'a StructField,
     ) -> Option<Cow<'a, StructField>> {
         self.recurse_into_struct_field(field)
     }
 
     /// Called for each array encountered during the schema traversal. Implementations can call
     /// [`Self::recurse_into_array`] if they wish to recursively transform the array's element type.
-    fn transform_array<'a>(&mut self, atype: Cow<'a, ArrayType>) -> Option<Cow<'a, ArrayType>> {
+    fn transform_array<'a>(&mut self, atype: &'a ArrayType) -> Option<Cow<'a, ArrayType>> {
         self.recurse_into_array(atype)
+    }
+
+    /// Called for each arraye element encountered during the schema traversal. Implementations can
+    /// call [`Self::transform`] if they wish to recursively transform the array element type.
+    fn transform_array_element<'a>(&mut self, etype: &'a DataType) -> Option<Cow<'a, DataType>> {
+        self.transform(etype)
     }
 
     /// Called for each map encountered during the schema traversal. Implementations can call
     /// [`Self::recurse_into_map`] if they wish to recursively transform the map's key and/or value
     /// types.
-    fn transform_map<'a>(&mut self, mtype: Cow<'a, MapType>) -> Option<Cow<'a, MapType>> {
+    fn transform_map<'a>(&mut self, mtype: &'a MapType) -> Option<Cow<'a, MapType>> {
         self.recurse_into_map(mtype)
+    }
+
+    /// Called for each map key encountered during the schema traversal. Implementations can call
+    /// [`Self::transform`] if they wish to recursively transform the map key type.
+    fn transform_map_key<'a>(&mut self, etype: &'a DataType) -> Option<Cow<'a, DataType>> {
+        self.transform(etype)
+    }
+
+    /// Called for each map value encountered during the schema traversal. Implementations can call
+    /// [`Self::transform`] if they wish to recursively transform the map value type.
+    fn transform_map_value<'a>(&mut self, etype: &'a DataType) -> Option<Cow<'a, DataType>> {
+        self.transform(etype)
     }
 
     /// General entry point for a recursive traversal over any data type. Also invoked internally to
     /// dispatch on nested data types encountered during the traversal.
-    fn transform<'a>(&mut self, data_type: Cow<'a, DataType>) -> Option<Cow<'a, DataType>> {
+    fn transform<'a>(&mut self, data_type: &'a DataType) -> Option<Cow<'a, DataType>> {
         use Cow::*;
         use DataType::*;
 
         // quick boilerplate helper
         macro_rules! apply_transform {
             ( $transform_fn:ident, $arg:ident ) => {
-                match self.$transform_fn(Borrowed($arg)) {
-                    Some(Borrowed(_)) => Some(data_type),
+                match self.$transform_fn($arg) {
+                    Some(Borrowed(_)) => Some(Borrowed(data_type)),
                     Some(Owned(inner)) => Some(Owned(inner.into())),
                     None => None,
                 }
             };
         }
-        match data_type.as_ref() {
+        match data_type {
             Primitive(ptype) => apply_transform!(transform_primitive, ptype),
             Array(atype) => apply_transform!(transform_array, atype),
             Struct(stype) => apply_transform!(transform_struct, stype),
@@ -682,11 +699,11 @@ pub trait SchemaTransform {
     /// field to reference it. Otherwise, no-op.
     fn recurse_into_struct_field<'a>(
         &mut self,
-        field: Cow<'a, StructField>,
+        field: &'a StructField,
     ) -> Option<Cow<'a, StructField>> {
         use Cow::*;
-        let field = match self.transform(Borrowed(&field.data_type))? {
-            Borrowed(_) => field,
+        let field = match self.transform(&field.data_type)? {
+            Borrowed(_) => Borrowed(field),
             Owned(new_data_type) => Owned(StructField {
                 name: field.name.clone(),
                 data_type: new_data_type,
@@ -699,36 +716,37 @@ pub trait SchemaTransform {
 
     /// Recursively transforms a struct's fields. If one or more fields were changed or removed,
     /// update the struct to reference all surviving fields. Otherwise, no-op.
-    fn recurse_into_struct<'a>(
-        &mut self,
-        stype: Cow<'a, StructType>,
-    ) -> Option<Cow<'a, StructType>> {
+    fn recurse_into_struct<'a>(&mut self, stype: &'a StructType) -> Option<Cow<'a, StructType>> {
         use Cow::*;
         let mut num_borrowed = 0;
         let fields: Vec<_> = stype
             .fields()
-            .filter_map(|field| self.transform_struct_field(Borrowed(field)))
+            .filter_map(|field| self.transform_struct_field(field))
             .inspect(|field| {
                 if matches!(field, Borrowed(_)) {
                     num_borrowed += 1;
                 }
             })
             .collect();
-        let stype = if num_borrowed < stype.fields.len() {
+
+        if fields.is_empty() {
+            None
+        } else if num_borrowed < stype.fields.len() {
             // At least one field was changed or filtered out, so make a new struct
-            Owned(StructType::new(fields.into_iter().map(|f| f.into_owned())))
+            Some(Owned(StructType::new(
+                fields.into_iter().map(|f| f.into_owned()),
+            )))
         } else {
-            stype
-        };
-        Some(stype)
+            Some(Borrowed(stype))
+        }
     }
 
     /// Recursively transforms an array's element type. If the element type changes, update the
     /// array to reference it. Otherwise, no-op.
-    fn recurse_into_array<'a>(&mut self, atype: Cow<'a, ArrayType>) -> Option<Cow<'a, ArrayType>> {
+    fn recurse_into_array<'a>(&mut self, atype: &'a ArrayType) -> Option<Cow<'a, ArrayType>> {
         use Cow::*;
-        let atype = match self.transform(Borrowed(&atype.element_type))? {
-            Borrowed(_) => atype,
+        let atype = match self.transform_array_element(&atype.element_type)? {
+            Borrowed(_) => Borrowed(atype),
             Owned(element_type) => Owned(ArrayType {
                 type_name: atype.type_name.clone(),
                 element_type,
@@ -740,12 +758,12 @@ pub trait SchemaTransform {
 
     /// Recursively transforms a map's key and value types. If either one changes, update the map to
     /// reference them. If either one is removed, remove the map as well. Otherwise, no-op.
-    fn recurse_into_map<'a>(&mut self, mtype: Cow<'a, MapType>) -> Option<Cow<'a, MapType>> {
+    fn recurse_into_map<'a>(&mut self, mtype: &'a MapType) -> Option<Cow<'a, MapType>> {
         use Cow::*;
-        let key_type = self.transform(Borrowed(&mtype.key_type))?;
-        let value_type = self.transform(Borrowed(&mtype.value_type))?;
+        let key_type = self.transform_map_key(&mtype.key_type)?;
+        let value_type = self.transform_map_value(&mtype.value_type)?;
         let mtype = match (&key_type, &value_type) {
-            (Borrowed(_), Borrowed(_)) => mtype,
+            (Borrowed(_), Borrowed(_)) => Borrowed(mtype),
             _ => Owned(MapType {
                 type_name: mtype.type_name.clone(),
                 key_type: key_type.into_owned(),
@@ -782,16 +800,16 @@ impl SchemaDepthChecker {
             current_depth: 0,
             call_count: 0,
         };
-        checker.transform(Cow::Borrowed(data_type));
+        checker.transform(data_type);
         (checker.max_depth_seen, checker.call_count)
     }
 
     // Triggers the requested recursion only doing so would not exceed the depth limit.
-    fn depth_limited<T: std::fmt::Debug>(
+    fn depth_limited<'a, T: Clone + std::fmt::Debug>(
         &mut self,
-        recurse: impl FnOnce(&mut Self, T) -> Option<T>,
-        arg: T,
-    ) -> Option<T> {
+        recurse: impl FnOnce(&mut Self, &'a T) -> Option<Cow<'a, T>>,
+        arg: &'a T,
+    ) -> Option<Cow<'a, T>> {
         self.call_count += 1;
         if self.max_depth_seen < self.current_depth {
             self.max_depth_seen = self.current_depth;
@@ -800,7 +818,7 @@ impl SchemaDepthChecker {
             }
         }
         if self.depth_limit < self.max_depth_seen {
-            return Some(arg); // back out the recursion, we're done
+            return Some(Cow::Borrowed(arg)); // back out the recursion, we're done
         }
 
         self.current_depth += 1;
@@ -810,19 +828,19 @@ impl SchemaDepthChecker {
     }
 }
 impl SchemaTransform for SchemaDepthChecker {
-    fn transform_struct<'a>(&mut self, stype: Cow<'a, StructType>) -> Option<Cow<'a, StructType>> {
+    fn transform_struct<'a>(&mut self, stype: &'a StructType) -> Option<Cow<'a, StructType>> {
         self.depth_limited(Self::recurse_into_struct, stype)
     }
     fn transform_struct_field<'a>(
         &mut self,
-        field: Cow<'a, StructField>,
+        field: &'a StructField,
     ) -> Option<Cow<'a, StructField>> {
         self.depth_limited(Self::recurse_into_struct_field, field)
     }
-    fn transform_array<'a>(&mut self, atype: Cow<'a, ArrayType>) -> Option<Cow<'a, ArrayType>> {
+    fn transform_array<'a>(&mut self, atype: &'a ArrayType) -> Option<Cow<'a, ArrayType>> {
         self.depth_limited(Self::recurse_into_array, atype)
     }
-    fn transform_map<'a>(&mut self, mtype: Cow<'a, MapType>) -> Option<Cow<'a, MapType>> {
+    fn transform_map<'a>(&mut self, mtype: &'a MapType) -> Option<Cow<'a, MapType>> {
         self.depth_limited(Self::recurse_into_map, mtype)
     }
 }
@@ -966,10 +984,10 @@ mod tests {
             .unwrap();
         assert!(matches!(col_id, MetadataValue::Number(num) if *num == 4));
         assert_eq!(
-            field.physical_name(ColumnMappingMode::Name).unwrap(),
+            field.physical_name(),
             "col-5f422f40-de70-45b2-88ab-1d5c90e94db1"
         );
-        let physical_field = field.make_physical(ColumnMappingMode::Name).unwrap();
+        let physical_field = field.make_physical();
         assert_eq!(
             physical_field.name,
             "col-5f422f40-de70-45b2-88ab-1d5c90e94db1"

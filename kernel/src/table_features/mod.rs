@@ -3,8 +3,8 @@ use std::sync::LazyLock;
 
 use serde::{Deserialize, Serialize};
 
+pub(crate) use column_mapping::get_validated_column_mapping_schema;
 pub use column_mapping::ColumnMappingMode;
-pub(crate) use column_mapping::COLUMN_MAPPING_MODE_KEY;
 use strum::{AsRefStr, Display as StrumDisplay, EnumString, VariantNames};
 
 mod column_mapping;

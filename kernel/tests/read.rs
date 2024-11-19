@@ -417,7 +417,7 @@ fn read_with_scan_data(
             .read_parquet_files(
                 &[meta],
                 global_state.read_schema.clone(),
-                scan.predicate().clone(),
+                scan.physical_predicate().clone(),
             )
             .unwrap();
 
@@ -484,6 +484,7 @@ fn read_table_data(
                 .map(|col| table_schema.field(col).cloned().unwrap());
             Arc::new(Schema::new(selected_fields))
         });
+        println!("Read {url:?} with schema {read_schema:#?} and predicate {predicate:#?}");
         let scan = snapshot
             .into_scan_builder()
             .with_schema_opt(read_schema)
@@ -851,6 +852,10 @@ fn invalid_skips_none_predicates() -> Result<(), Box<dyn std::error::Error>> {
     let empty_struct = Expression::struct_from(vec![]);
     let cases = vec![
         (Expression::literal(false), table_for_numbers(vec![])),
+        (
+            Expression::and(column_expr!("number"), false),
+            table_for_numbers(vec![]),
+        ),
         (
             Expression::literal(true),
             table_for_numbers(vec![1, 2, 3, 4, 5, 6]),
