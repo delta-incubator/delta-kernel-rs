@@ -28,7 +28,7 @@ fn dat_exists() -> bool {
 
 fn download_dat_files() -> Vec<u8> {
     let tarball_url = format!(
-        "https://github.com/delta-incubator/dat/releases/download/v{version}/deltalake-dat-v{version}.tar.gz",
+        "https://github.com/delta-io/dat/releases/download/v{version}/deltalake-dat-v{version}.tar.gz",
         version = VERSION
     );
 

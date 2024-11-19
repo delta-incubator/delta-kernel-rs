@@ -176,8 +176,8 @@ Some design principles which should be considered:
 [delta-github]: https://github.com/delta-io/delta
 [java-kernel]: https://github.com/delta-io/delta/tree/master/kernel
 [rustup]: https://rustup.rs
-[architecture.md]: https://github.com/delta-incubator/delta-kernel-rs/tree/master/architecture.md
-[dat]: https://github.com/delta-incubator/dat
+[architecture.md]: https://github.com/delta-io/delta-kernel-rs/tree/master/architecture.md
+[dat]: https://github.com/delta-io/dat
 [derive-macros]: https://doc.rust-lang.org/reference/procedural-macros.html
 [API Docs]: https://docs.rs/delta_kernel/latest/delta_kernel/
 [cargo-llvm-cov]: https://github.com/taiki-e/cargo-llvm-cov
