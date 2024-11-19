@@ -1,7 +1,5 @@
 # Changelog
 
-test change revert me
-
 ## [v0.4.1](https://github.com/delta-incubator/delta-kernel-rs/tree/v0.4.1/) (2024-10-28)
 
 [Full Changelog](https://github.com/delta-incubator/delta-kernel-rs/compare/v0.4.0...v0.4.1)
