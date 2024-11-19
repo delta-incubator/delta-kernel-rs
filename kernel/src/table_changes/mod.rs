@@ -1,13 +1,22 @@
 //! Provides an API to read the table's change data feed between two versions.
+use std::sync::LazyLock;
 
 use url::Url;
 
 use crate::log_segment::LogSegment;
 use crate::path::AsUrl;
-use crate::schema::Schema;
+use crate::schema::{DataType, Schema, StructField, StructType};
 use crate::snapshot::Snapshot;
 use crate::table_features::ColumnMappingMode;
 use crate::{DeltaResult, Engine, Error, Version};
+
+static CDF_FIELDS: LazyLock<[StructField; 3]> = LazyLock::new(|| {
+    [
+        StructField::new("_change_type", DataType::STRING, false),
+        StructField::new("_commit_version", DataType::LONG, false),
+        StructField::new("_commit_timestamp", DataType::TIMESTAMP, false),
+    ]
+});
 
 /// Represents a call to read the Change Data Feed between two versions of a table. The schema of
 /// `TableChanges` will be the schema of the table with three additional columns:
@@ -29,6 +38,7 @@ pub struct TableChanges {
     table_root: Url,
     end_snapshot: Snapshot,
     start_version: Version,
+    schema: Schema,
 }
 
 impl TableChanges {
@@ -84,11 +94,20 @@ impl TableChanges {
             end_version,
         )?;
 
+        let schema = StructType::new(
+            end_snapshot
+                .schema()
+                .fields()
+                .cloned()
+                .chain(CDF_FIELDS.clone()),
+        );
+
         Ok(TableChanges {
             table_root,
             end_snapshot,
             log_segment,
             start_version,
+            schema,
         })
     }
     pub fn start_version(&self) -> Version {
@@ -102,7 +121,7 @@ impl TableChanges {
     /// The logical schema of the change data feed. For details on the shape of the schema, see
     /// [`TableChanges`].
     pub fn schema(&self) -> &Schema {
-        self.end_snapshot.schema()
+        &self.schema
     }
     pub fn table_root(&self) -> &Url {
         &self.table_root
@@ -120,8 +139,12 @@ impl TableChanges {
 #[cfg(test)]
 mod tests {
     use crate::engine::sync::SyncEngine;
+    use crate::schema::DataType;
+    use crate::schema::StructField;
+    use crate::table_changes::CDF_FIELDS;
     use crate::Error;
     use crate::Table;
+    use itertools::assert_equal;
 
     #[test]
     fn test_enable_cdf_flag() {
@@ -153,5 +176,21 @@ mod tests {
         // A field in the schema goes from being nullable to non-nullable
         let table_changes_res = table.table_changes(engine.as_ref(), 3, 4);
         assert!(matches!(table_changes_res, Err(Error::Generic(_))));
+    }
+
+    #[test]
+    fn test_table_changes_has_cdf_schema() {
+        let path = "./tests/data/table-with-cdf";
+        let engine = Box::new(SyncEngine::new());
+        let table = Table::try_from_uri(path).unwrap();
+        let expected_schema = [
+            StructField::new("part", DataType::INTEGER, true),
+            StructField::new("id", DataType::INTEGER, true),
+        ]
+        .into_iter()
+        .chain(CDF_FIELDS.clone());
+
+        let table_changes = table.table_changes(engine.as_ref(), 0, 0).unwrap();
+        assert_equal(expected_schema, table_changes.schema().fields().cloned());
     }
 }
