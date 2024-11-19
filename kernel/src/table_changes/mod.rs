@@ -12,7 +12,7 @@ use crate::{DeltaResult, Engine, Error, Version};
 /// Represents a call to read the Change Data Feed between two versions of a table. The schema of
 /// `TableChanges` will be the schema of the table with three additional columns:
 /// - `_change_type`: String representing the type of change that for that commit. This may be one
-///   of `delete`, `insert`, `update_preimage`, or `update_postimage`
+///   of `delete`, `insert`, `update_preimage`, or `update_postimage`.
 /// - `_commit_version`: Long representing the commit the change occurred in.
 /// - `_commit_timestamp`: Time at which the commit occurred. If In-commit timestamps is enabled,
 ///   this is retrieved from the [`CommitInfo`] action. Otherwise, the timestamp is the same as the
@@ -39,6 +39,7 @@ impl TableChanges {
     ///
     /// Note that this does not check that change data feed is enabled for every commit in the
     /// range. It also does not check that the schema remains the same for the entire range.
+    ///
     /// # Parameters
     /// - `table_root`: url pointing at the table root (where `_delta_log` folder is located)
     /// - `engine`: Implementation of [`Engine`] apis.
@@ -69,6 +70,11 @@ impl TableChanges {
         } else if !is_cdf_enabled(&end_snapshot) {
             return Err(Error::table_changes_disabled(end_snapshot.version()));
         }
+        if start_snapshot.schema() != end_snapshot.schema() {
+            return Err(Error::generic(
+                "Failed to build TableChanges: Start and end version schemas are different.",
+            ));
+        }
 
         let log_root = table_root.join("_delta_log/")?;
         let log_segment = LogSegment::for_table_changes(
@@ -85,12 +91,11 @@ impl TableChanges {
             start_version,
         })
     }
-
     pub fn start_version(&self) -> Version {
         self.start_version
     }
     /// The end version of the `TableChanges`. If no end_version was specified in
-    /// [`TableChanges::try_new`], this is the newest version as of the call to `try_new`.
+    /// [`TableChanges::try_new`], this returns the newest version as of the call to `try_new`.
     pub fn end_version(&self) -> Version {
         self.log_segment.end_version
     }
@@ -124,27 +129,29 @@ mod tests {
         let engine = Box::new(SyncEngine::new());
         let table = Table::try_from_uri(path).unwrap();
 
-        let valid_ranges = [(0, Some(1)), (0, Some(0)), (1, Some(1))];
+        let valid_ranges = [(0, 1), (0, 0), (1, 1)];
         for (start_version, end_version) in valid_ranges {
             let table_changes = table
                 .table_changes(engine.as_ref(), start_version, end_version)
                 .unwrap();
             assert_eq!(table_changes.start_version, start_version);
-            if let Some(end_version) = end_version {
-                assert_eq!(table_changes.end_version(), end_version);
-            }
+            assert_eq!(table_changes.end_version(), end_version);
         }
 
-        let invalid_ranges = [
-            (0, None),
-            (0, Some(2)),
-            (1, Some(2)),
-            (2, None),
-            (2, Some(2)),
-        ];
+        let invalid_ranges = [(0, Some(2)), (1, Some(2)), (2, Some(2))];
         for (start_version, end_version) in invalid_ranges {
             let res = table.table_changes(engine.as_ref(), start_version, end_version);
             assert!(matches!(res, Err(Error::TableChangesDisabled(_))))
         }
+    }
+    #[test]
+    fn test_schema_evolution_fails() {
+        let path = "./tests/data/table-with-cdf";
+        let engine = Box::new(SyncEngine::new());
+        let table = Table::try_from_uri(path).unwrap();
+
+        // A field in the schema goes from being nullable to non-nullable
+        let table_changes_res = table.table_changes(engine.as_ref(), 3, 4);
+        assert!(matches!(table_changes_res, Err(Error::Generic(_))));
     }
 }
