@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use crate::engine_data::{GetData, TypedGetData};
 use crate::{DataVisitor, DeltaResult};
 
+use super::Cdc;
 use super::{
     deletion_vector::DeletionVectorDescriptor, Add, Format, Metadata, Protocol, Remove,
     SetTransaction,
@@ -237,6 +238,48 @@ impl DataVisitor for RemoveVisitor {
             if let Some(path) = getters[0].get_opt(i, "remove.path")? {
                 self.removes.push(Self::visit_remove(i, path, getters)?);
                 break;
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+#[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
+#[cfg_attr(not(feature = "developer-visibility"), visibility::make(pub(crate)))]
+struct CdcVisitor {
+    pub(crate) cdcs: Vec<Cdc>,
+}
+
+impl CdcVisitor {
+    #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
+    #[cfg_attr(not(feature = "developer-visibility"), visibility::make(pub(crate)))]
+    fn visit_cdc<'a>(
+        row_index: usize,
+        path: String,
+        getters: &[&'a dyn GetData<'a>],
+    ) -> DeltaResult<Cdc> {
+        let partition_values: HashMap<_, _> = getters[1].get(row_index, "cdc.partitionValues")?;
+        let size: i64 = getters[2].get(row_index, "cdc.size")?;
+        let data_change: bool = getters[3].get(row_index, "cdc.dataChange")?;
+        let tags: Option<HashMap<String, String>> = getters[4].get_opt(row_index, "cdc.tags")?;
+
+        Ok(Cdc {
+            path,
+            partition_values,
+            size,
+            data_change,
+            tags,
+        })
+    }
+}
+
+impl DataVisitor for CdcVisitor {
+    fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<()> {
+        for i in 0..row_count {
+            // Since path column is required, use it to detect presence of an Add action
+            if let Some(path) = getters[0].get_opt(i, "cdc.path")? {
+                self.cdcs.push(Self::visit_cdc(i, path, getters)?);
             }
         }
         Ok(())
