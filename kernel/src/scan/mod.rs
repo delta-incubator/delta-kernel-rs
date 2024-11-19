@@ -101,15 +101,6 @@ impl ScanBuilder {
             &self.snapshot.metadata().partition_columns,
         )?;
 
-        // If we have a predicate, verify the columns it references and apply column mapping. First,
-        // get the set of references; use that to filter the schema to only the columns of interest
-        // (and verify that all referenced columns exist); then use the resulting logical/physical
-        // mappings to rewrite the expression with physical column names.
-        //
-        // NOTE: It is possible the predicate doesn't reference any schema; in that case it must
-        // consist entirely of literal expressions. We can't just evaluate it directly, because data
-        // skipping has specific rules about what kinds of expressions it supports. So just
-        // propagate the empty schema and let the skipping machinery deal with it.
         let physical_predicate = match self.predicate {
             Some(predicate) => Self::build_physical_predicate(predicate, &logical_schema)?,
             None => PhysicalPredicate::None,
@@ -125,6 +116,13 @@ impl ScanBuilder {
         })
     }
 
+    // If we have a predicate, verify the columns it references and apply column mapping. First, get
+    // the set of references; use that to filter the schema to only the columns of interest (and
+    // verify that all referenced columns exist); then use the resulting logical/physical mappings
+    // to rewrite the expression with physical column names.
+    //
+    // NOTE: It is possible the predicate resolves to FALSE even ignoring column references,
+    // e.g. `col > 10 AND FALSE`. Such predicates can statically skip the whole query.
     fn build_physical_predicate(
         predicate: ExpressionRef,
         logical_schema: &Schema,
@@ -173,7 +171,7 @@ enum PhysicalPredicate {
     None,
 }
 
-// Evaluates a static data skipping predicate, ignoring any column references, and return true if
+// Evaluates a static data skipping predicate, ignoring any column references, and returns true if
 // the predicate allows to statically skip all files. Since this is direct evaluation (not an
 // expression rewrite), we use a dummy `ParquetStatsProvider` that provides no stats.
 fn can_statically_skip_all_files(predicate: &Expression) -> bool {

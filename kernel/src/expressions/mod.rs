@@ -522,9 +522,9 @@ pub trait ExpressionTransform {
         Some(u)
     }
 
-    /// Recursively transforms a binary expression's children. Returns `None` if both children were
-    /// removed, `Some(Cow::Owned)` if at least one child was changed or removed, and
-    /// `Some(Cow::Borrowed)` otherwise.
+    /// Recursively transforms a binary expression's children. Returns `None` if at least one child
+    /// was removed, `Some(Cow::Owned)` if at least one child changed, and `Some(Cow::Borrowed)`
+    /// otherwise.
     fn recurse_into_binary<'a>(
         &mut self,
         b: &'a BinaryExpression,

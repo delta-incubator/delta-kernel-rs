@@ -92,11 +92,6 @@ impl AsRef<str> for ColumnMetadataKey {
     }
 }
 
-pub enum ColumnMapping {
-    None,
-    Name(ColumnName),
-}
-
 #[derive(Debug, Serialize, Deserialize, PartialEq, Clone, Eq)]
 pub struct StructField {
     /// Name of this (possibly nested) column
