@@ -387,9 +387,11 @@ mod tests {
 
     use super::*;
     use crate::{
-        actions::{get_log_add_schema, get_log_schema, SET_TRANSACTION_NAME},
-        engine::arrow_data::ArrowEngineData,
-        engine::sync::{json::SyncJsonHandler, SyncEngine},
+        actions::{get_log_add_schema, get_log_schema, CDC_NAME, SET_TRANSACTION_NAME},
+        engine::{
+            arrow_data::ArrowEngineData,
+            sync::{json::SyncJsonHandler, SyncEngine},
+        },
         Engine, EngineData, JsonHandler,
     };
 
@@ -408,7 +410,8 @@ mod tests {
             r#"{"add":{"path":"part-00000-fae5310a-a37d-4e51-827b-c3d5516560ca-c000.snappy.parquet","partitionValues":{},"size":635,"modificationTime":1677811178336,"dataChange":true,"stats":"{\"numRecords\":10,\"minValues\":{\"value\":0},\"maxValues\":{\"value\":9},\"nullCount\":{\"value\":0},\"tightBounds\":true}","tags":{"INSERTION_TIME":"1677811178336000","MIN_INSERTION_TIME":"1677811178336000","MAX_INSERTION_TIME":"1677811178336000","OPTIMIZE_TARGET_SIZE":"268435456"}}}"#,
             r#"{"commitInfo":{"timestamp":1677811178585,"operation":"WRITE","operationParameters":{"mode":"ErrorIfExists","partitionBy":"[]"},"isolationLevel":"WriteSerializable","isBlindAppend":true,"operationMetrics":{"numFiles":"1","numOutputRows":"10","numOutputBytes":"635"},"engineInfo":"Databricks-Runtime/<unknown>","txnId":"a6a94671-55ef-450e-9546-b8465b9147de"}}"#,
             r#"{"protocol":{"minReaderVersion":3,"minWriterVersion":7,"readerFeatures":["deletionVectors"],"writerFeatures":["deletionVectors"]}}"#,
-            r#"{"metaData":{"id":"testId","format":{"provider":"parquet","options":{}},"schemaString":"{\"type\":\"struct\",\"fields\":[{\"name\":\"value\",\"type\":\"integer\",\"nullable\":true,\"metadata\":{}}]}","partitionColumns":[],"configuration":{"delta.enableDeletionVectors":"true","delta.columnMapping.mode":"none"},"createdTime":1677811175819}}"#,
+            r#"{"metaData":{"id":"testId","format":{"provider":"parquet","options":{}},"schemaString":"{\"type\":\"struct\",\"fields\":[{\"name\":\"value\",\"type\":\"integer\",\"nullable\":true,\"metadata\":{}}]}","partitionColumns":[],"configuration":{"delta.enableDeletionVectors":"true","delta.columnMapping.mode":"none", "delta.enableChangeDataFeed":"true"},"createdTime":1677811175819}}"#,
+            r#"{"cdc":{"path":"_change_data/age=21/cdc-00000-93f7fceb-281a-446a-b221-07b88132d203.c000.snappy.parquet","partitionValues":{"age":"21"},"size":1033,"dataChange":false}}"#
         ]
         .into();
         let output_schema = get_log_schema().clone();
@@ -433,6 +436,25 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_cdc() -> DeltaResult<()> {
+        let data = action_batch();
+        let mut visitor = CdcVisitor::default();
+        data.extract(get_log_schema().project(&[CDC_NAME])?, &mut visitor)?;
+        let expected = Cdc {
+            path: "_change_data/age=21/cdc-00000-93f7fceb-281a-446a-b221-07b88132d203.c000.snappy.parquet".into(),
+            partition_values: HashMap::from([
+                ("age".to_string(), "21".to_string()),
+            ]),
+            size: 1033,
+            data_change: false,
+            tags: None
+        };
+
+        assert_eq!(&visitor.cdcs, &[expected]);
+        Ok(())
+    }
+
+    #[test]
     fn test_parse_metadata() -> DeltaResult<()> {
         let data = action_batch();
         let parsed = Metadata::try_new_from_data(data.as_ref())?.unwrap();
@@ -443,6 +465,7 @@ mod tests {
                 "true".to_string(),
             ),
             ("delta.columnMapping.mode".to_string(), "none".to_string()),
+            ("delta.enableChangeDataFeed".to_string(), "true".to_string()),
         ]);
         let expected = Metadata {
             id: "testId".into(),
