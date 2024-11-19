@@ -70,8 +70,6 @@ impl TableChanges {
     /// Note that this does not check that change data feed is enabled for every commit in the
     /// range. It also does not check that the schema remains the same for the entire range.
     ///
-    /// Note that this does not check that change data feed is enabled for every commit in the
-    /// range. It also does not check that the schema remains the same for the entire range.
     /// # Parameters
     /// - `table_root`: url pointing at the table root (where `_delta_log` folder is located)
     /// - `engine`: Implementation of [`Engine`] apis.
@@ -116,6 +114,11 @@ impl TableChanges {
             return Err(Error::generic(format!(
                 "Failed to build TableChanges: Start and end version schemas are different. Found start version schema {:?} and end version schema {:?}", start_snapshot.schema(), end_snapshot.schema(),
             )));
+        }
+        if start_snapshot.schema() != end_snapshot.schema() {
+            return Err(Error::generic(
+                "Failed to build TableChanges: Start and end version schemas are different.",
+            ));
         }
 
         let log_root = table_root.join("_delta_log/")?;
