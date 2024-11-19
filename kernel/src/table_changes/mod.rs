@@ -19,7 +19,7 @@ static CDF_FIELDS: LazyLock<[StructField; 3]> = LazyLock::new(|| {
 });
 
 /// Represents a call to read the Change Data Feed (CDF) between two versions of a table. The schema of
-/// `TableChanges` will be the schema of the table at the end verios with three additional columns:
+/// `TableChanges` will be the schema of the table at the end version with three additional columns:
 /// - `_change_type`: String representing the type of change that for that commit. This may be one
 ///   of `delete`, `insert`, `update_preimage`, or `update_postimage`.
 /// - `_commit_version`: Long representing the commit the change occurred in.
@@ -179,9 +179,17 @@ impl TableChanges {
 #[cfg(test)]
 mod tests {
     use crate::engine::sync::SyncEngine;
+<<<<<<< HEAD
     use crate::schema::{DataType, StructField};
     use crate::table_changes::CDF_FIELDS;
     use crate::{Error, Table};
+=======
+    use crate::schema::DataType;
+    use crate::schema::StructField;
+    use crate::table_changes::CDF_FIELDS;
+    use crate::Error;
+    use crate::Table;
+>>>>>>> 073ae49 (Add table changes schema)
     use itertools::assert_equal;
 
     #[test]
@@ -220,6 +228,22 @@ mod tests {
 
     #[test]
     fn table_changes_has_cdf_schema() {
+        let path = "./tests/data/table-with-cdf";
+        let engine = Box::new(SyncEngine::new());
+        let table = Table::try_from_uri(path).unwrap();
+        let expected_schema = [
+            StructField::new("part", DataType::INTEGER, true),
+            StructField::new("id", DataType::INTEGER, true),
+        ]
+        .into_iter()
+        .chain(CDF_FIELDS.clone());
+
+        let table_changes = table.table_changes(engine.as_ref(), 0, 0).unwrap();
+        assert_equal(expected_schema, table_changes.schema().fields().cloned());
+    }
+
+    #[test]
+    fn test_table_changes_has_cdf_schema() {
         let path = "./tests/data/table-with-cdf";
         let engine = Box::new(SyncEngine::new());
         let table = Table::try_from_uri(path).unwrap();
