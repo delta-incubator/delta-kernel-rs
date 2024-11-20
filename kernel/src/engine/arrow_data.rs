@@ -323,8 +323,11 @@ mod tests {
         let protocol = Protocol::try_new_from_data(parsed.as_ref())?.unwrap();
         assert_eq!(protocol.min_reader_version(), 3);
         assert_eq!(protocol.min_writer_version(), 7);
-        assert_eq!(protocol.reader_features(), Some(vec!["rw1".into()].as_slice()));
-        assert_eq!(protocol.writer_features(), Some(vec!["rw1".into(), "w2".into()].as_slice()));
+        assert_eq!(protocol.reader_features(), Some(["rw1".into()].as_slice()));
+        assert_eq!(
+            protocol.writer_features(),
+            Some(["rw1".into(), "w2".into()].as_slice())
+        );
         Ok(())
     }
 }
