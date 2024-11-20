@@ -138,6 +138,8 @@ impl ScanBuilder {
         };
         let schema_opt = get_referenced_fields.transform_struct(logical_schema);
         if let Some(missing_column) = get_referenced_fields.references.into_iter().next() {
+            // A column referenced by the predicate was not found+taken during the schema traversal.
+            //
             // NOTE: It's a pretty serious engine bug if we got this far with a query whose WHERE
             // clause has invalid column references. Data skipping is best-effort and the predicate
             // anyway needs to be evaluated against every row of data -- which is impossible if the
@@ -147,7 +149,8 @@ impl ScanBuilder {
             )));
         }
         let Some(schema) = schema_opt else {
-            // We couldn't statically skip all files, so this predicate is useless
+            // The predicate doesn't statically skip all files, and it doesn't reference any columns
+            // that could dynamically change its behavior, so it's useless for data skipping.
             return Ok(PhysicalPredicate::None);
         };
         let mut apply_mappings = ApplyColumnMappings {
@@ -202,18 +205,15 @@ fn can_statically_skip_all_files(predicate: &Expression) -> bool {
 // Build the stats read schema filtering the table schema to keep only skipping-eligible
 // leaf fields that the skipping expression actually references. Also extract physical name
 // mappings so we can access the correct physical stats column for each logical column.
-struct GetReferencedFields<'r> {
-    references: HashSet<&'r ColumnName>,
+struct GetReferencedFields<'a> {
+    references: HashSet<&'a ColumnName>,
     column_mappings: HashMap<ColumnName, ColumnName>,
     logical_path: Vec<String>,
     physical_path: Vec<String>,
 }
-impl SchemaTransform for GetReferencedFields<'_> {
+impl<'a> SchemaTransform<'a> for GetReferencedFields<'a> {
     // Capture the path mapping for this leaf field
-    fn transform_primitive<'a>(
-        &mut self,
-        ptype: &'a PrimitiveType,
-    ) -> Option<Cow<'a, PrimitiveType>> {
+    fn transform_primitive(&mut self, ptype: &'a PrimitiveType) -> Option<Cow<'a, PrimitiveType>> {
         // Record the physical name mappings for all referenced leaf columns
         self.references
             .remove(self.logical_path.as_slice())
@@ -227,17 +227,14 @@ impl SchemaTransform for GetReferencedFields<'_> {
     }
 
     // array and map fields are not eligible for data skipping, so filter them out.
-    fn transform_array<'a>(&mut self, _: &'a ArrayType) -> Option<Cow<'a, ArrayType>> {
+    fn transform_array(&mut self, _: &'a ArrayType) -> Option<Cow<'a, ArrayType>> {
         None
     }
-    fn transform_map<'a>(&mut self, _: &'a MapType) -> Option<Cow<'a, MapType>> {
+    fn transform_map(&mut self, _: &'a MapType) -> Option<Cow<'a, MapType>> {
         None
     }
 
-    fn transform_struct_field<'a>(
-        &mut self,
-        field: &'a StructField,
-    ) -> Option<Cow<'a, StructField>> {
+    fn transform_struct_field(&mut self, field: &'a StructField) -> Option<Cow<'a, StructField>> {
         let physical_name = field.physical_name();
         self.logical_path.push(field.name.clone());
         self.physical_path.push(physical_name.to_string());
@@ -251,8 +248,10 @@ impl SchemaTransform for GetReferencedFields<'_> {
 struct ApplyColumnMappings {
     column_mappings: HashMap<ColumnName, ColumnName>,
 }
-impl ExpressionTransform for ApplyColumnMappings {
-    fn transform_column<'a>(&mut self, name: &'a ColumnName) -> Option<Cow<'a, ColumnName>> {
+impl<'a> ExpressionTransform<'a> for ApplyColumnMappings {
+    // NOTE: We already verified all column references. But if the map probe ever did fail, the
+    // transform would just delete any expression(s) that reference the invalid column.
+    fn transform_column(&mut self, name: &'a ColumnName) -> Option<Cow<'a, ColumnName>> {
         self.column_mappings
             .get(name)
             .map(|physical_name| Cow::Owned(physical_name.clone()))
@@ -370,6 +369,7 @@ impl Scan {
         &self,
         engine: &dyn Engine,
     ) -> DeltaResult<impl Iterator<Item = DeltaResult<ScanData>>> {
+        // NOTE: This is a cheap arc clone
         let physical_predicate = match self.physical_predicate.clone() {
             PhysicalPredicate::StaticSkipAll => return Ok(None.into_iter().flatten()),
             PhysicalPredicate::Some(predicate, schema) => Some((predicate, schema)),

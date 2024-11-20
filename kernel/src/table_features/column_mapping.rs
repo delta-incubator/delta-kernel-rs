@@ -98,86 +98,95 @@ pub(crate) fn validate_column_mapping_schema(
     }
 }
 
-struct ValidateColumnMappings {
+struct ValidateColumnMappings<'a> {
     mode: ColumnMappingMode,
-    path: Vec<String>,
+    path: Vec<&'a str>,
     err: Option<Error>,
 }
-impl ValidateColumnMappings {
-    fn transform_inner_type<'a>(
+
+impl<'a> ValidateColumnMappings<'a> {
+    fn transform_inner_type(
         &mut self,
         data_type: &'a DataType,
-        name: &str,
+        name: &'a str,
     ) -> Option<Cow<'a, DataType>> {
         if self.err.is_none() {
-            self.path.push(name.to_string());
+            self.path.push(name);
             let _ = self.transform(data_type);
             self.path.pop();
         }
         None
     }
     fn check_annotations(&mut self, field: &StructField) {
+        // The iterator yields `&&str` but `ColumnName::new` needs `&str`
+        let column_name = || ColumnName::new(self.path.iter().copied());
         let annotation = "delta.columnMapping.physicalName";
         match (self.mode, field.metadata.get(annotation)) {
-            // Both Id and Name modes require a physical name; None mode requires no physical name.
-            (ColumnMappingMode::Name | ColumnMappingMode::Id, Some(MetadataValue::String(_))) => {}
+            // Both Id and Name modes require a physical name annotation; None mode forbids it.
             (ColumnMappingMode::None, None) => {}
-            (ColumnMappingMode::None, Some(_)) => {
+            (ColumnMappingMode::Name | ColumnMappingMode::Id, Some(MetadataValue::String(_))) => {}
+            (ColumnMappingMode::Name | ColumnMappingMode::Id, Some(_)) => {
                 self.err = Some(Error::invalid_column_mapping_mode(format!(
-                    "Column mapping is not enabled but field '{}' is annotated with {}",
-                    ColumnName::new(&self.path),
-                    annotation
+                    "The {annotation} annotation on field '{}' must be a string",
+                    column_name()
                 )));
             }
-            (ColumnMappingMode::Name | ColumnMappingMode::Id, _) => {
+            (ColumnMappingMode::None, Some(_)) => {
                 self.err = Some(Error::invalid_column_mapping_mode(format!(
-                    "Column mapping is enabled but field '{}' lacks the string annotation {}",
-                    ColumnName::new(&self.path),
-                    annotation
+                    "Column mapping is not enabled but field '{annotation}' is annotated with {}",
+                    column_name()
+                )));
+            }
+            (ColumnMappingMode::Name | ColumnMappingMode::Id, None) => {
+                self.err = Some(Error::invalid_column_mapping_mode(format!(
+                    "Column mapping is enabled but field '{}' lacks the {annotation} annotation",
+                    column_name()
                 )));
             }
         }
 
         let annotation = "delta.columnMapping.id";
         match (self.mode, field.metadata.get(annotation)) {
-            // Both Id and Name modes require a field ID; None mode requires no field id.
-            (ColumnMappingMode::Name | ColumnMappingMode::Id, Some(MetadataValue::Number(_))) => {}
+            // Both Id and Name modes require a field ID annotation; None mode forbids it.
             (ColumnMappingMode::None, None) => {}
-            (ColumnMappingMode::None, Some(_)) => {
+            (ColumnMappingMode::Name | ColumnMappingMode::Id, Some(MetadataValue::Number(_))) => {}
+            (ColumnMappingMode::Name | ColumnMappingMode::Id, Some(_)) => {
                 self.err = Some(Error::invalid_column_mapping_mode(format!(
-                    "Column mapping is not enabled but field '{}' is annotated with {}",
-                    ColumnName::new(&self.path),
-                    annotation
+                    "The {annotation} annotation on field '{}' must be a number",
+                    column_name()
                 )));
             }
-            (ColumnMappingMode::Name | ColumnMappingMode::Id, _) => {
+            (ColumnMappingMode::None, Some(_)) => {
                 self.err = Some(Error::invalid_column_mapping_mode(format!(
-                    "Column mapping is enabled but field '{}' lacks the numeric annotation {}",
-                    ColumnName::new(&self.path),
-                    annotation
+                    "Column mapping is not enabled but field '{}' is annotated with {annotation}",
+                    column_name()
+                )));
+            }
+            (ColumnMappingMode::Name | ColumnMappingMode::Id, None) => {
+                self.err = Some(Error::invalid_column_mapping_mode(format!(
+                    "Column mapping is enabled but field '{}' lacks the {annotation} annotation",
+                    column_name()
                 )));
             }
         }
     }
 }
-impl SchemaTransform for ValidateColumnMappings {
+
+impl<'a> SchemaTransform<'a> for ValidateColumnMappings<'a> {
     // Override array element and map key/value for better error messages
-    fn transform_array_element<'a>(&mut self, etype: &'a DataType) -> Option<Cow<'a, DataType>> {
+    fn transform_array_element(&mut self, etype: &'a DataType) -> Option<Cow<'a, DataType>> {
         self.transform_inner_type(etype, "<array element>")
     }
-    fn transform_map_key<'a>(&mut self, ktype: &'a DataType) -> Option<Cow<'a, DataType>> {
+    fn transform_map_key(&mut self, ktype: &'a DataType) -> Option<Cow<'a, DataType>> {
         self.transform_inner_type(ktype, "<map key>")
     }
-    fn transform_map_value<'a>(&mut self, vtype: &'a DataType) -> Option<Cow<'a, DataType>> {
+    fn transform_map_value(&mut self, vtype: &'a DataType) -> Option<Cow<'a, DataType>> {
         self.transform_inner_type(vtype, "<map value>")
     }
 
-    fn transform_struct_field<'a>(
-        &mut self,
-        field: &'a StructField,
-    ) -> Option<Cow<'a, StructField>> {
+    fn transform_struct_field(&mut self, field: &'a StructField) -> Option<Cow<'a, StructField>> {
         if self.err.is_none() {
-            self.path.push(field.name.clone());
+            self.path.push(&field.name);
             self.check_annotations(field);
             let _ = self.recurse_into_struct_field(field);
             self.path.pop();

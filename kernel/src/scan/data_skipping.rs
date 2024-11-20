@@ -70,8 +70,8 @@ impl DataSkippingFilter {
 
         // Convert a min/max stats schema into a nullcount schema (all leaf fields are LONG)
         struct NullCountStatsTransform;
-        impl SchemaTransform for NullCountStatsTransform {
-            fn transform_primitive<'a>(
+        impl<'a> SchemaTransform<'a> for NullCountStatsTransform {
+            fn transform_primitive(
                 &mut self,
                 _ptype: &'a PrimitiveType,
             ) -> Option<Cow<'a, PrimitiveType>> {

@@ -397,20 +397,20 @@ impl Expression {
 /// The provided `recurse_into_xxx` methods encapsulate the boilerplate work of recursing into the
 /// children of each expression variant. Implementations can call these as needed but will generally
 /// not need to override them.
-pub trait ExpressionTransform {
+pub trait ExpressionTransform<'a> {
     /// Called for each literal encountered during the expression traversal.
-    fn transform_literal<'a>(&mut self, value: &'a Scalar) -> Option<Cow<'a, Scalar>> {
+    fn transform_literal(&mut self, value: &'a Scalar) -> Option<Cow<'a, Scalar>> {
         Some(Cow::Borrowed(value))
     }
 
     /// Called for each column reference encountered during the expression traversal.
-    fn transform_column<'a>(&mut self, name: &'a ColumnName) -> Option<Cow<'a, ColumnName>> {
+    fn transform_column(&mut self, name: &'a ColumnName) -> Option<Cow<'a, ColumnName>> {
         Some(Cow::Borrowed(name))
     }
 
     /// Called for each [`StructExpression`] encountered during the traversal. Implementations can
     /// call [`Self::recurse_into_struct`] if they wish to recursively transform child expressions.
-    fn transform_struct<'a>(
+    fn transform_struct(
         &mut self,
         fields: &'a Vec<Expression>,
     ) -> Option<Cow<'a, Vec<Expression>>> {
@@ -419,16 +419,13 @@ pub trait ExpressionTransform {
 
     /// Called for each [`UnaryExpression`] encountered during the traversal. Implementations can
     /// call [`Self::recurse_into_unary`] if they wish to recursively transform the child.
-    fn transform_unary<'a>(
-        &mut self,
-        expr: &'a UnaryExpression,
-    ) -> Option<Cow<'a, UnaryExpression>> {
+    fn transform_unary(&mut self, expr: &'a UnaryExpression) -> Option<Cow<'a, UnaryExpression>> {
         self.recurse_into_unary(expr)
     }
 
     /// Called for each [`BinaryExpression`] encountered during the traversal. Implementations can
     /// call [`Self::recurse_into_binary`] if they wish to recursively transform the children.
-    fn transform_binary<'a>(
+    fn transform_binary(
         &mut self,
         expr: &'a BinaryExpression,
     ) -> Option<Cow<'a, BinaryExpression>> {
@@ -437,7 +434,7 @@ pub trait ExpressionTransform {
 
     /// Called for each [`VariadicExpression`] encountered during the traversal. Implementations can
     /// call [`Self::recurse_into_variadic`] if they wish to recursively transform the children.
-    fn transform_variadic<'a>(
+    fn transform_variadic(
         &mut self,
         expr: &'a VariadicExpression,
     ) -> Option<Cow<'a, VariadicExpression>> {
@@ -447,32 +444,32 @@ pub trait ExpressionTransform {
     /// General entry point for transforming an expression. This method will dispatch to the
     /// specific transform for each expression variant. Also invoked internally in order to recurse
     /// on the child(ren) of non-leaf variants.
-    fn transform<'a>(&mut self, expr: &'a Expression) -> Option<Cow<'a, Expression>> {
+    fn transform(&mut self, expr: &'a Expression) -> Option<Cow<'a, Expression>> {
         use Cow::*;
         let expr = match expr {
             Expression::Literal(s) => match self.transform_literal(s)? {
-                Borrowed(_) => Borrowed(expr),
                 Owned(s) => Owned(Expression::Literal(s)),
+                Borrowed(_) => Borrowed(expr),
             },
             Expression::Column(c) => match self.transform_column(c)? {
-                Borrowed(_) => Borrowed(expr),
                 Owned(c) => Owned(Expression::Column(c)),
+                Borrowed(_) => Borrowed(expr),
             },
             Expression::Struct(s) => match self.transform_struct(s)? {
-                Borrowed(_) => Borrowed(expr),
                 Owned(s) => Owned(Expression::Struct(s)),
+                Borrowed(_) => Borrowed(expr),
             },
             Expression::Unary(u) => match self.transform_unary(u)? {
-                Borrowed(_) => Borrowed(expr),
                 Owned(u) => Owned(Expression::Unary(u)),
+                Borrowed(_) => Borrowed(expr),
             },
             Expression::Binary(b) => match self.transform_binary(b)? {
-                Borrowed(_) => Borrowed(expr),
                 Owned(b) => Owned(Expression::Binary(b)),
+                Borrowed(_) => Borrowed(expr),
             },
             Expression::Variadic(v) => match self.transform_variadic(v)? {
-                Borrowed(_) => Borrowed(expr),
                 Owned(v) => Owned(Expression::Variadic(v)),
+                Borrowed(_) => Borrowed(expr),
             },
         };
         Some(expr)
@@ -481,7 +478,7 @@ pub trait ExpressionTransform {
     /// Recursively transforms a struct's child expressions. Returns `None` if all children were
     /// removed, `Some(Cow::Owned)` if at least one child was changed or removed, and
     /// `Some(Cow::Borrowed)` otherwise.
-    fn recurse_into_struct<'a>(
+    fn recurse_into_struct(
         &mut self,
         fields: &'a Vec<Expression>,
     ) -> Option<Cow<'a, Vec<Expression>>> {
@@ -497,12 +494,11 @@ pub trait ExpressionTransform {
             .collect();
 
         if new_fields.is_empty() {
-            None // all children filtered out
+            None // all fields filtered out
         } else if num_borrowed < fields.len() {
-            // At least one child was changed or filtered out, so make a new struct
-            Some(Cow::Owned(
-                new_fields.into_iter().map(|f| f.into_owned()).collect(),
-            ))
+            // At least one field was changed or filtered out, so make a new field list
+            let fields = new_fields.into_iter().map(|f| f.into_owned()).collect();
+            Some(Cow::Owned(fields))
         } else {
             Some(Cow::Borrowed(fields))
         }
@@ -510,14 +506,11 @@ pub trait ExpressionTransform {
 
     /// Recursively transforms a unary expression's child. Returns `None` if the child was removed,
     /// `Some(Cow::Owned)` if the child was changed, and `Some(Cow::Borrowed)` otherwise.
-    fn recurse_into_unary<'a>(
-        &mut self,
-        u: &'a UnaryExpression,
-    ) -> Option<Cow<'a, UnaryExpression>> {
+    fn recurse_into_unary(&mut self, u: &'a UnaryExpression) -> Option<Cow<'a, UnaryExpression>> {
         use Cow::*;
         let u = match self.transform(&u.expr)? {
-            Borrowed(_) => Borrowed(u),
             Owned(expr) => Owned(UnaryExpression::new(u.op, expr)),
+            Borrowed(_) => Borrowed(u),
         };
         Some(u)
     }
@@ -525,7 +518,7 @@ pub trait ExpressionTransform {
     /// Recursively transforms a binary expression's children. Returns `None` if at least one child
     /// was removed, `Some(Cow::Owned)` if at least one child changed, and `Some(Cow::Borrowed)`
     /// otherwise.
-    fn recurse_into_binary<'a>(
+    fn recurse_into_binary(
         &mut self,
         b: &'a BinaryExpression,
     ) -> Option<Cow<'a, BinaryExpression>> {
@@ -546,14 +539,14 @@ pub trait ExpressionTransform {
     /// Recursively transforms a variadic expression's children. Returns `None` if all children were
     /// removed, `Some(Cow::Owned)` if at least one child was changed or removed, and
     /// `Some(Cow::Borrowed)` otherwise.
-    fn recurse_into_variadic<'a>(
+    fn recurse_into_variadic(
         &mut self,
         v: &'a VariadicExpression,
     ) -> Option<Cow<'a, VariadicExpression>> {
         use Cow::*;
         let v = match self.recurse_into_struct(&v.exprs)? {
-            Borrowed(_) => Borrowed(v),
             Owned(exprs) => Owned(VariadicExpression::new(v.op, exprs)),
+            Borrowed(_) => Borrowed(v),
         };
         Some(v)
     }

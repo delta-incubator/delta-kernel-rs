@@ -193,8 +193,8 @@ impl StructField {
     /// annotations are always and only present when column mapping mode is enabled.
     pub fn make_physical(&self) -> Self {
         struct MakePhysical;
-        impl SchemaTransform for MakePhysical {
-            fn transform_struct_field<'a>(
+        impl<'a> SchemaTransform<'a> for MakePhysical {
+            fn transform_struct_field(
                 &mut self,
                 field: &'a StructField,
             ) -> Option<Cow<'a, StructField>> {
@@ -610,65 +610,59 @@ impl Display for DataType {
 /// The provided `recurse_into_xxx` methods encapsulate the boilerplate work of recursing into the
 /// child schema elements of each schema element. Implementations can call these as needed but will
 /// generally not need to override them.
-pub trait SchemaTransform {
+pub trait SchemaTransform<'a> {
     /// Called for each primitive encountered during the schema traversal.
-    fn transform_primitive<'a>(
-        &mut self,
-        ptype: &'a PrimitiveType,
-    ) -> Option<Cow<'a, PrimitiveType>> {
+    fn transform_primitive(&mut self, ptype: &'a PrimitiveType) -> Option<Cow<'a, PrimitiveType>> {
         Some(Cow::Borrowed(ptype))
     }
 
     /// Called for each struct encountered during the schema traversal. Implementations can call
     /// [`Self::recurse_into_struct`] if they wish to recursively transform the struct's fields.
-    fn transform_struct<'a>(&mut self, stype: &'a StructType) -> Option<Cow<'a, StructType>> {
+    fn transform_struct(&mut self, stype: &'a StructType) -> Option<Cow<'a, StructType>> {
         self.recurse_into_struct(stype)
     }
 
     /// Called for each struct field encountered during the schema traversal. Implementations can
     /// call [`Self::recurse_into_struct_field`] if they wish to recursively transform the field's
     /// data type.
-    fn transform_struct_field<'a>(
-        &mut self,
-        field: &'a StructField,
-    ) -> Option<Cow<'a, StructField>> {
+    fn transform_struct_field(&mut self, field: &'a StructField) -> Option<Cow<'a, StructField>> {
         self.recurse_into_struct_field(field)
     }
 
     /// Called for each array encountered during the schema traversal. Implementations can call
     /// [`Self::recurse_into_array`] if they wish to recursively transform the array's element type.
-    fn transform_array<'a>(&mut self, atype: &'a ArrayType) -> Option<Cow<'a, ArrayType>> {
+    fn transform_array(&mut self, atype: &'a ArrayType) -> Option<Cow<'a, ArrayType>> {
         self.recurse_into_array(atype)
     }
 
     /// Called for each arraye element encountered during the schema traversal. Implementations can
     /// call [`Self::transform`] if they wish to recursively transform the array element type.
-    fn transform_array_element<'a>(&mut self, etype: &'a DataType) -> Option<Cow<'a, DataType>> {
+    fn transform_array_element(&mut self, etype: &'a DataType) -> Option<Cow<'a, DataType>> {
         self.transform(etype)
     }
 
     /// Called for each map encountered during the schema traversal. Implementations can call
     /// [`Self::recurse_into_map`] if they wish to recursively transform the map's key and/or value
     /// types.
-    fn transform_map<'a>(&mut self, mtype: &'a MapType) -> Option<Cow<'a, MapType>> {
+    fn transform_map(&mut self, mtype: &'a MapType) -> Option<Cow<'a, MapType>> {
         self.recurse_into_map(mtype)
     }
 
     /// Called for each map key encountered during the schema traversal. Implementations can call
     /// [`Self::transform`] if they wish to recursively transform the map key type.
-    fn transform_map_key<'a>(&mut self, etype: &'a DataType) -> Option<Cow<'a, DataType>> {
+    fn transform_map_key(&mut self, etype: &'a DataType) -> Option<Cow<'a, DataType>> {
         self.transform(etype)
     }
 
     /// Called for each map value encountered during the schema traversal. Implementations can call
     /// [`Self::transform`] if they wish to recursively transform the map value type.
-    fn transform_map_value<'a>(&mut self, etype: &'a DataType) -> Option<Cow<'a, DataType>> {
+    fn transform_map_value(&mut self, etype: &'a DataType) -> Option<Cow<'a, DataType>> {
         self.transform(etype)
     }
 
     /// General entry point for a recursive traversal over any data type. Also invoked internally to
     /// dispatch on nested data types encountered during the traversal.
-    fn transform<'a>(&mut self, data_type: &'a DataType) -> Option<Cow<'a, DataType>> {
+    fn transform(&mut self, data_type: &'a DataType) -> Option<Cow<'a, DataType>> {
         use Cow::*;
         use DataType::*;
 
@@ -692,7 +686,7 @@ pub trait SchemaTransform {
 
     /// Recursively transforms a struct field's data type. If the data type changes, update the
     /// field to reference it. Otherwise, no-op.
-    fn recurse_into_struct_field<'a>(
+    fn recurse_into_struct_field(
         &mut self,
         field: &'a StructField,
     ) -> Option<Cow<'a, StructField>> {
@@ -711,7 +705,7 @@ pub trait SchemaTransform {
 
     /// Recursively transforms a struct's fields. If one or more fields were changed or removed,
     /// update the struct to reference all surviving fields. Otherwise, no-op.
-    fn recurse_into_struct<'a>(&mut self, stype: &'a StructType) -> Option<Cow<'a, StructType>> {
+    fn recurse_into_struct(&mut self, stype: &'a StructType) -> Option<Cow<'a, StructType>> {
         use Cow::*;
         let mut num_borrowed = 0;
         let fields: Vec<_> = stype
@@ -738,7 +732,7 @@ pub trait SchemaTransform {
 
     /// Recursively transforms an array's element type. If the element type changes, update the
     /// array to reference it. Otherwise, no-op.
-    fn recurse_into_array<'a>(&mut self, atype: &'a ArrayType) -> Option<Cow<'a, ArrayType>> {
+    fn recurse_into_array(&mut self, atype: &'a ArrayType) -> Option<Cow<'a, ArrayType>> {
         use Cow::*;
         let atype = match self.transform_array_element(&atype.element_type)? {
             Borrowed(_) => Borrowed(atype),
@@ -753,7 +747,7 @@ pub trait SchemaTransform {
 
     /// Recursively transforms a map's key and value types. If either one changes, update the map to
     /// reference them. If either one is removed, remove the map as well. Otherwise, no-op.
-    fn recurse_into_map<'a>(&mut self, mtype: &'a MapType) -> Option<Cow<'a, MapType>> {
+    fn recurse_into_map(&mut self, mtype: &'a MapType) -> Option<Cow<'a, MapType>> {
         use Cow::*;
         let key_type = self.transform_map_key(&mtype.key_type)?;
         let value_type = self.transform_map_value(&mtype.value_type)?;
@@ -822,20 +816,17 @@ impl SchemaDepthChecker {
         result
     }
 }
-impl SchemaTransform for SchemaDepthChecker {
-    fn transform_struct<'a>(&mut self, stype: &'a StructType) -> Option<Cow<'a, StructType>> {
+impl<'a> SchemaTransform<'a> for SchemaDepthChecker {
+    fn transform_struct(&mut self, stype: &'a StructType) -> Option<Cow<'a, StructType>> {
         self.depth_limited(Self::recurse_into_struct, stype)
     }
-    fn transform_struct_field<'a>(
-        &mut self,
-        field: &'a StructField,
-    ) -> Option<Cow<'a, StructField>> {
+    fn transform_struct_field(&mut self, field: &'a StructField) -> Option<Cow<'a, StructField>> {
         self.depth_limited(Self::recurse_into_struct_field, field)
     }
-    fn transform_array<'a>(&mut self, atype: &'a ArrayType) -> Option<Cow<'a, ArrayType>> {
+    fn transform_array(&mut self, atype: &'a ArrayType) -> Option<Cow<'a, ArrayType>> {
         self.depth_limited(Self::recurse_into_array, atype)
     }
-    fn transform_map<'a>(&mut self, mtype: &'a MapType) -> Option<Cow<'a, MapType>> {
+    fn transform_map(&mut self, mtype: &'a MapType) -> Option<Cow<'a, MapType>> {
         self.depth_limited(Self::recurse_into_map, mtype)
     }
 }
