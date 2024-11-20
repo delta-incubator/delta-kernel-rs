@@ -60,7 +60,7 @@ impl AddRemoveVisitor {
 
 impl RowVisitor for AddRemoveVisitor {
     fn selected_column_names_and_types(&self) -> (&'static [ColumnName], &'static [DataType]) {
-        // NOTE: THe visitor assumes adds always come first, with removes optionally afterward
+        // NOTE: The visitor assumes adds always come first, with removes optionally afterward
         static ALL_NAMES_AND_TYPES: LazyLock<ColumnNamesAndTypes> = LazyLock::new(|| {
             let (add_names, add_fields) = AddVisitor::names_and_types();
             let (remove_names, remove_fields) = RemoveVisitor::names_and_types();

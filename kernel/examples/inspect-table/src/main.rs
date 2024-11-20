@@ -81,6 +81,9 @@ impl Action {
     }
 }
 
+static NAMES_AND_TYPES: LazyLock<ColumnNamesAndTypes> =
+    LazyLock::new(|| get_log_schema().leaves(None));
+
 struct LogVisitor {
     actions: Vec<Action>,
     add_offset: usize,
@@ -120,8 +123,6 @@ impl LogVisitor {
         }
     }
 }
-static NAMES_AND_TYPES: LazyLock<ColumnNamesAndTypes> =
-    LazyLock::new(|| get_log_schema().leaves(None));
 
 impl RowVisitor for LogVisitor {
     fn selected_column_names_and_types(&self) -> (&'static [ColumnName], &'static [DataType]) {
