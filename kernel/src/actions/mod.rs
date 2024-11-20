@@ -440,7 +440,9 @@ impl Remove {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Schema)]
-pub struct Cdc {
+#[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
+#[cfg_attr(not(feature = "developer-visibility"), visibility::make(pub(crate)))]
+struct Cdc {
     /// A relative path to a change data file from the root of the table or an absolute path to a
     /// change data file that should be added to the table. The path is a URI as specified by
     /// [RFC 2396 URI Generic Syntax], which needs to be decoded to get the file path.
