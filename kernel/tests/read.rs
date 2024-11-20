@@ -1085,6 +1085,7 @@ fn predicate_references_invalid_missing_column() -> Result<(), Box<dyn std::erro
         Some(columns),
         Some(predicate),
         expected,
-    ).expect_err("unknown column");
+    )
+    .expect_err("unknown column");
     Ok(())
 }

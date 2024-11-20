@@ -76,10 +76,7 @@ pub fn get_validated_column_mapping_schema(
     Ok((schema, column_mapping_mode))
 }
 
-pub fn validate_column_mapping_schema(
-    schema: &Schema,
-    mode: ColumnMappingMode,
-) -> DeltaResult<()> {
+pub fn validate_column_mapping_schema(schema: &Schema, mode: ColumnMappingMode) -> DeltaResult<()> {
     if mode == ColumnMappingMode::Id {
         // TODO: Support column mapping ID mode
         return Err(Error::unsupported("Column mapping ID mode not supported"));
