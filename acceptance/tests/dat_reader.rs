@@ -12,11 +12,6 @@ fn reader_test(path: &Path) -> datatest_stable::Result<()> {
         path.parent().unwrap().to_str().unwrap()
     );
 
-    // TODO(zach): skip iceberg_compat_v1 test until DAT is fixed
-    if path.ends_with("iceberg_compat_v1/test_case_info.json") {
-        return Ok(());
-    }
-
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?
