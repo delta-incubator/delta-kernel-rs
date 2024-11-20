@@ -135,5 +135,48 @@ mod tests {
         
         assert!(iter.next().is_none());
     }
+
+    #[test]
+    /// Tests that VersionGroupingIterator correctly handles multiple sequential versions
+    /// 
+    /// This test verifies several critical aspects of version grouping:
+    /// 1. The iterator can process multiple commit files with different versions
+    /// 2. Files are grouped correctly by their version numbers
+    /// 3. The groups are returned in sequential version order (1, 2, 3)
+    /// 4. Each group contains exactly one file when there is one file per version
+    /// 5. The files in each group are correctly identified as commit files
+    /// 6. The iterator is exhausted after processing all versions
+    /// 
+    /// This test is important because it validates the core functionality of streaming
+    /// version-based grouping when processing a Delta table's log directory. The sequential
+    /// version ordering is especially critical since the Delta protocol relies on processing
+    /// log files in version order to reconstruct table state.
+    ///
+    /// Example Delta Log Directory:
+    /// ```text
+    /// _delta_log/
+    ///   00000000000000000001.json        -> Group 1: [00000000000000000001.json]
+    ///   00000000000000000002.json        -> Group 2: [00000000000000000002.json]
+    ///   00000000000000000003.json        -> Group 3: [00000000000000000003.json]
+    /// ```
+    /// 
+    /// The test verifies that the iterator yields three groups, each containing
+    /// exactly one commit file, in version order 1->2->3.
+    fn test_multiple_versions() {
+        let paths = vec![
+            create_log_path(1, "commit"),
+            create_log_path(2, "commit"),
+            create_log_path(3, "commit"),
+        ];
+        let mut iter: VersionGroupingIterator<Url> = VersionGroupingIterator::from(paths.into_iter());
+        
+        for expected_version in 1..=3 {
+            let group = iter.next().expect("Should have a group");
+            assert_eq!(group.version, expected_version);
+            assert_eq!(group.files.len(), 1);
+            assert!(group.files[0].is_commit());
+        }
+        assert!(iter.next().is_none());
+    }
 }
 
