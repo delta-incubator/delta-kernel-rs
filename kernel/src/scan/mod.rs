@@ -962,17 +962,13 @@ mod tests {
         let data: Vec<_> = scan.execute(&engine).unwrap().try_collect().unwrap();
         assert_eq!(data.len(), 1);
 
-        // Predicate over a logically missing column, so the one data file should be returned.
-        //
-        // TODO: This should ideally trigger an error instead?
+        // Predicate over a logically missing column fails the scan
         let predicate = Arc::new(column_expr!("numeric.ints.invalid").lt(1000));
-        let scan = snapshot
+        snapshot
             .scan_builder()
             .with_predicate(predicate)
             .build()
-            .unwrap();
-        let data: Vec<_> = scan.execute(&engine).unwrap().try_collect().unwrap();
-        assert_eq!(data.len(), 1);
+            .expect_err("unknown column");
     }
 
     #[test_log::test]

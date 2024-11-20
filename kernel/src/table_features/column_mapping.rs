@@ -63,7 +63,7 @@ impl AsRef<str> for ColumnMappingMode {
 /// Extract the schema and column mapping mode from the metadata. When column mapping mode is
 /// enabled, verify that each field in the schema is annotated with a physical name and field_id;
 /// when not enabled, verify that no fields are annotated.
-pub(crate) fn get_validated_column_mapping_schema(
+pub fn get_validated_column_mapping_schema(
     metadata: &Metadata,
     protocol: &Protocol,
 ) -> DeltaResult<(Schema, ColumnMappingMode)> {
@@ -76,7 +76,7 @@ pub(crate) fn get_validated_column_mapping_schema(
     Ok((schema, column_mapping_mode))
 }
 
-pub(crate) fn validate_column_mapping_schema(
+pub fn validate_column_mapping_schema(
     schema: &Schema,
     mode: ColumnMappingMode,
 ) -> DeltaResult<()> {

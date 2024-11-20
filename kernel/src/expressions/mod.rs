@@ -408,8 +408,9 @@ pub trait ExpressionTransform<'a> {
         Some(Cow::Borrowed(name))
     }
 
-    /// Called for each [`StructExpression`] encountered during the traversal. Implementations can
-    /// call [`Self::recurse_into_struct`] if they wish to recursively transform child expressions.
+    /// Called for the expression list of each [`Expression::Struct`] encountered during the
+    /// traversal. Implementations can call [`Self::recurse_into_struct`] if they wish to
+    /// recursively transform child expressions.
     fn transform_struct(
         &mut self,
         fields: &'a Vec<Expression>,

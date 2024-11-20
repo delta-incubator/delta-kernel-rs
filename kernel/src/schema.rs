@@ -134,7 +134,7 @@ impl StructField {
     /// Get the physical name for this field as it should be read from parquet.
     ///
     /// NOTE: Caller affirms that the schema was already validated by
-    /// [`crate::table_features::column_mapping::validate_column_mapping_schema`], to ensure that
+    /// [`crate::table_features::validate_column_mapping_schema`], to ensure that
     /// annotations are always and only present when column mapping mode is enabled.
     pub fn physical_name(&self) -> &str {
         match self
@@ -189,7 +189,7 @@ impl StructField {
     /// Applies physical name mappings to this field
     ///
     /// NOTE: Caller affirms that the schema was already validated by
-    /// [`crate::table_features::column_mapping::validate_column_mapping_schema`], to ensure that
+    /// [`crate::table_features::validate_column_mapping_schema`], to ensure that
     /// annotations are always and only present when column mapping mode is enabled.
     pub fn make_physical(&self) -> Self {
         struct MakePhysical;
