@@ -24,7 +24,11 @@ use serde::{Deserialize, Serialize};
 pub mod deletion_vector;
 pub mod set_transaction;
 
+#[cfg(feature = "developer-visibility")]
+pub mod schemas;
+#[cfg(not(feature = "developer-visibility"))]
 pub(crate) mod schemas;
+
 #[cfg(feature = "developer-visibility")]
 pub mod visitors;
 #[cfg(not(feature = "developer-visibility"))]

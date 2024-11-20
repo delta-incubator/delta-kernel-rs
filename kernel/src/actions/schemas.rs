@@ -4,6 +4,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::schema::{ArrayType, DataType, MapType, StructField};
 
+#[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
 pub(crate) trait ToDataType {
     fn to_data_type() -> DataType;
 }
@@ -62,10 +63,12 @@ impl<K: ToDataType, V: ToDataType> ToNullableContainerType for HashMap<K, V> {
     }
 }
 
+#[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
 pub(crate) trait GetStructField {
     fn get_struct_field(name: impl Into<String>) -> StructField;
 }
 
+#[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
 pub(crate) trait GetNullableContainerStructField {
     fn get_nullable_container_struct_field(name: impl Into<String>) -> StructField;
 }

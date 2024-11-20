@@ -50,7 +50,10 @@
     rust_2021_compatibility
 )]
 
+extern crate self as delta_kernel;
+
 use std::any::Any;
+
 use std::sync::Arc;
 use std::{cmp::Ordering, ops::Range};
 
@@ -414,4 +417,71 @@ pub trait Engine: AsAny {
 
     /// Get the connector provided [`ParquetHandler`].
     fn get_parquet_handler(&self) -> Arc<dyn ParquetHandler>;
+}
+
+#[cfg(doctest)]
+mod doc_tests {
+
+    /// ```
+    /// # use delta_kernel_derive::Schema;
+    /// #[derive(Schema)]
+    /// pub struct WithFields {
+    ///     some_name: String,
+    /// }
+    /// ```
+    #[cfg(doctest)]
+    pub struct MacroTestStructWithField;
+
+    /// ```compile_fail
+    /// # use delta_kernel_derive::Schema;
+    /// #[derive(Schema)]
+    /// pub struct NoFields;
+    /// ```
+    #[cfg(doctest)]
+    pub struct MacroTestStructWithoutField;
+
+    /// ```
+    /// # use delta_kernel_derive::Schema;
+    /// # use std::collections::HashMap;
+    /// #[derive(Schema)]
+    /// pub struct WithAngleBracketPath {
+    ///     map_field: HashMap<String, String>,
+    /// }
+    /// ```
+    #[cfg(doctest)]
+    pub struct MacroTestStructWithAngleBracketedPathField;
+
+    /// ```
+    /// # use delta_kernel_derive::Schema;
+    /// # use std::collections::HashMap;
+    /// #[derive(Schema)]
+    /// pub struct WithAttributedField {
+    ///     #[drop_null_container_values]
+    ///     map_field: HashMap<String, String>,
+    /// }
+    /// ```
+    #[cfg(doctest)]
+    pub struct MacroTestStructWithAttributedField;
+
+    /// ```compile_fail
+    /// # use delta_kernel_derive::Schema;
+    /// #[derive(Schema)]
+    /// pub struct WithInvalidAttributeTarget {
+    ///     #[drop_null_container_values]
+    ///     some_name: String,
+    /// }
+    /// ```
+    #[cfg(doctest)]
+    pub struct MacroTestStructWithInvalidAttributeTarget;
+
+    /// ```compile_fail
+    /// # use delta_kernel_derive::Schema;
+    /// # use syn::Token;
+    /// #[derive(Schema)]
+    /// pub struct WithInvalidFieldType {
+    ///     token: Token![struct],
+    /// }
+    /// ```
+    #[cfg(doctest)]
+    pub struct MacroTestStructWithInvalidFieldType;
 }
