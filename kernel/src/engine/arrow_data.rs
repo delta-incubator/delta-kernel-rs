@@ -1,7 +1,7 @@
-use crate::engine_data::{EngineData, EngineList, EngineMap, GetData};
+use crate::engine_data::{EngineData, EngineList, EngineMap, GetData, RowVisitor};
 use crate::expressions::ColumnName;
 use crate::schema::{DataType};
-use crate::{RowVisitor, DeltaResult, Error};
+use crate::{DeltaResult, Error};
 
 use arrow_array::cast::AsArray;
 use arrow_array::types::{Int32Type, Int64Type};

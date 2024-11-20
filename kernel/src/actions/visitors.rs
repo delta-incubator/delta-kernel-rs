@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
-use crate::engine_data::{GetData, RowVisitorBase, TypedGetData};
+use crate::engine_data::{GetData, RowVisitor, TypedGetData as _};
 use crate::expressions::{column_name, ColumnName};
 use crate::schema::{ColumnNamesAndTypes, DataType};
 use crate::utils::require;
@@ -66,7 +66,7 @@ impl MetadataVisitor {
     }
 }
 
-impl RowVisitorBase for MetadataVisitor {
+impl RowVisitor for MetadataVisitor {
     fn selected_column_names_and_types(&self) -> (&'static [ColumnName], &'static [DataType]) {
         static NAMES_AND_TYPES: LazyLock<ColumnNamesAndTypes> =
             LazyLock::new(|| Metadata::to_schema().leaves(METADATA_NAME));
@@ -91,7 +91,7 @@ pub(crate) struct SelectionVectorVisitor {
 }
 
 /// A single non-nullable BOOL column
-impl RowVisitorBase for SelectionVectorVisitor {
+impl RowVisitor for SelectionVectorVisitor {
     fn selected_column_names_and_types(&self) -> (&'static [ColumnName], &'static [DataType]) {
         static NAMES_AND_TYPES: LazyLock<ColumnNamesAndTypes> =
             LazyLock::new(|| (vec![column_name!("output")], vec![DataType::BOOLEAN]).into());
@@ -149,7 +149,7 @@ impl ProtocolVisitor {
     }
 }
 
-impl RowVisitorBase for ProtocolVisitor {
+impl RowVisitor for ProtocolVisitor {
     fn selected_column_names_and_types(&self) -> (&'static [ColumnName], &'static [DataType]) {
         static NAMES_AND_TYPES: LazyLock<ColumnNamesAndTypes> =
             LazyLock::new(|| Protocol::to_schema().leaves(PROTOCOL_NAME));
@@ -226,7 +226,7 @@ impl AddVisitor {
     }
 }
 
-impl RowVisitorBase for AddVisitor {
+impl RowVisitor for AddVisitor {
     fn selected_column_names_and_types(&self) -> (&'static [ColumnName], &'static [DataType]) {
         Self::names_and_types()
     }
@@ -302,7 +302,7 @@ impl RemoveVisitor {
     }
 }
 
-impl RowVisitorBase for RemoveVisitor {
+impl RowVisitor for RemoveVisitor {
     fn selected_column_names_and_types(&self) -> (&'static [ColumnName], &'static [DataType]) {
         Self::names_and_types()
     }
@@ -369,7 +369,7 @@ impl SetTransactionVisitor {
     }
 }
 
-impl RowVisitorBase for SetTransactionVisitor {
+impl RowVisitor for SetTransactionVisitor {
     fn selected_column_names_and_types(&self) -> (&'static [ColumnName], &'static [DataType]) {
         static NAMES_AND_TYPES: LazyLock<ColumnNamesAndTypes> =
             LazyLock::new(|| SetTransaction::to_schema().leaves(SET_TRANSACTION_NAME));
@@ -435,7 +435,7 @@ mod tests {
         actions::get_log_schema,
         engine::arrow_data::ArrowEngineData,
         engine::sync::{json::SyncJsonHandler, SyncEngine},
-        Engine, EngineData, JsonHandler, RowVisitor as _,
+        Engine, EngineData, JsonHandler,
     };
 
     // TODO(nick): Merge all copies of this into one "test utils" thing

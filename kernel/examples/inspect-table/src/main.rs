@@ -7,12 +7,12 @@ use delta_kernel::actions::{
 };
 use delta_kernel::engine::default::executor::tokio::TokioBackgroundExecutor;
 use delta_kernel::engine::default::DefaultEngine;
-use delta_kernel::engine_data::{GetData, RowVisitorBase, TypedGetData};
+use delta_kernel::engine_data::{GetData, RowVisitor, TypedGetData as _};
 use delta_kernel::expressions::ColumnName;
 use delta_kernel::scan::state::{DvInfo, Stats};
 use delta_kernel::scan::ScanBuilder;
 use delta_kernel::schema::{ColumnNamesAndTypes, DataType};
-use delta_kernel::{DeltaResult, Error, RowVisitor as _, Table};
+use delta_kernel::{DeltaResult, Error, Table};
 
 use std::collections::HashMap;
 use std::process::ExitCode;
@@ -123,7 +123,7 @@ impl LogVisitor {
 static NAMES_AND_TYPES: LazyLock<ColumnNamesAndTypes> =
     LazyLock::new(|| get_log_schema().leaves(None));
 
-impl RowVisitorBase for LogVisitor {
+impl RowVisitor for LogVisitor {
     fn selected_column_names_and_types(&self) -> (&'static [ColumnName], &'static [DataType]) {
         NAMES_AND_TYPES.as_ref()
     }

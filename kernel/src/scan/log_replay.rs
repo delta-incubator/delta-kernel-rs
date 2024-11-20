@@ -8,11 +8,11 @@ use super::data_skipping::DataSkippingFilter;
 use super::ScanData;
 use crate::actions::visitors::{AddVisitor, RemoveVisitor};
 use crate::actions::{get_log_schema, Add, Remove, ADD_NAME};
-use crate::engine_data::{GetData, RowVisitorBase, TypedGetData};
+use crate::engine_data::{GetData, RowVisitor, TypedGetData as _};
 use crate::expressions::{column_expr, ColumnName, Expression, ExpressionRef};
 use crate::schema::{ColumnNamesAndTypes, DataType, MapType, SchemaRef, StructField, StructType};
 use crate::utils::require;
-use crate::{DeltaResult, Engine, EngineData, Error, ExpressionHandler, RowVisitor};
+use crate::{DeltaResult, Engine, EngineData, Error, ExpressionHandler};
 
 /// The subset of file action fields that uniquely identifies it in the log, used for deduplication
 /// of adds and removes during log replay.
@@ -58,7 +58,7 @@ impl AddRemoveVisitor {
     }
 }
 
-impl RowVisitorBase for AddRemoveVisitor {
+impl RowVisitor for AddRemoveVisitor {
     fn selected_column_names_and_types(&self) -> (&'static [ColumnName], &'static [DataType]) {
         // NOTE: THe visitor assumes adds always come first, with removes optionally afterward
         static ALL_NAMES_AND_TYPES: LazyLock<ColumnNamesAndTypes> = LazyLock::new(|| {
