@@ -37,18 +37,23 @@ struct LogReplayScanner {
     seen: HashSet<FileActionKey>,
 }
 
+/// A visitor that deduplicates a stream of add and remove actions. Log replay visits actions
+/// newest-first, so once we've seen a file action for a given (path, dvId) pair, we should ignore
+/// all subsequent (older) actions for that same (path, dvId) pair.
 struct AddRemoveDedupVisitor<'seen> {
     seen: &'seen mut HashSet<FileActionKey>,
     selection_vector: Vec<bool>,
     is_log_batch: bool,
 }
+
 impl<'seen> AddRemoveDedupVisitor<'seen> {
-    fn already_seen(&mut self, path: &str, dv_unique_id: Option<String>) -> bool {
+    /// Checks if log replay already processed this logical file (in which case the current action
+    /// should be ignored). If not already seen, register it so we can recognize future duplicates.
+    fn already_seen(&mut self, key: FileActionKey) -> bool {
         // Note: each (add.path + add.dv_unique_id()) pair has a
         // unique Add + Remove pair in the log. For example:
         // https://github.com/delta-io/delta/blob/master/spark/src/test/resources/delta/table-with-dv-large/_delta_log/00000000000000000001.json
 
-        let key = FileActionKey::new(path, dv_unique_id);
         if self.seen.contains(&key) {
             debug!(
                 "Ignoring duplicate ({}, {:?}) in scan, is log {}",
@@ -70,10 +75,12 @@ impl<'seen> AddRemoveDedupVisitor<'seen> {
         }
     }
 
+    /// True if this row contains an Add action that should survive log replay. Skip it if the row
+    /// is not an Add action, or the file has already been seen previously.
     fn filter_row<'a>(&mut self, i: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<bool> {
         // Add will have a path at index 0 if it is valid; otherwise, if it is a log batch, we
         // may have a remove with a path at index 4.
-        let (path, getters, is_add) = if let Some(path) = getters[0].get_opt(i, "add.path")? {
+        let (path, getters, is_add) = if let Some(path) = getters[0].get_str(i, "add.path")? {
             (path, &getters[1..4], true)
         } else if !self.is_log_batch {
             return Ok(false);
@@ -93,9 +100,11 @@ impl<'seen> AddRemoveDedupVisitor<'seen> {
         };
 
         // Process both adds and removes, but only return not already-seen adds
-        Ok(!self.already_seen(path, dv_unique_id) && is_add)
+        let file_key = FileActionKey::new(path, dv_unique_id);
+        Ok(!self.already_seen(file_key) && is_add)
     }
 }
+
 impl<'seen> RowVisitorBase for AddRemoveDedupVisitor<'seen> {
     fn selected_column_names_and_types(&self) -> (&'static [ColumnName], &'static [DataType]) {
         // NOTE: THe visitor assumes adds always come first, with removes optionally afterward
