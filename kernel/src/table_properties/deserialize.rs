@@ -4,6 +4,7 @@
 //! directly instead of a `BoolConfig` type that we implement `Deserialize` for.
 
 use crate::expressions::ColumnName;
+use crate::utils::require;
 
 use std::time::Duration;
 
@@ -25,23 +26,20 @@ where
 }
 
 /// Deserialize a string representing a positive integer into an `Option<u64>`.
-pub(crate) fn deserialize_pos_int<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
-where
-    D: Deserializer<'de>,
-{
+pub(crate) fn deserialize_pos_int<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<i64>, D::Error> {
     let s: String = Deserialize::deserialize(deserializer)?;
-    let n: u64 = s.parse().map_err(de::Error::custom)?;
-    if n == 0 {
-        return Err(de::Error::custom("expected a positive integer"));
-    }
+    // parse to i64 (then check n > 0) since java doesn't even allow u64
+    let n: i64 = s.parse().map_err(de::Error::custom)?;
+    require!(n > 0, de::Error::custom("expected a positive integer"));
     Ok(Some(n))
 }
 
 /// Deserialize a string representing a boolean into an `Option<bool>`.
-pub(crate) fn deserialize_bool<'de, D>(deserializer: D) -> Result<Option<bool>, D::Error>
-where
-    D: Deserializer<'de>,
-{
+pub(crate) fn deserialize_bool<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<bool>, D::Error> {
     let s: String = Deserialize::deserialize(deserializer)?;
     match s.as_str() {
         "true" => Ok(Some(true)),
@@ -51,23 +49,18 @@ where
 }
 
 /// Deserialize a comma-separated list of column names into an `Option<Vec<ColumnName>>`.
-pub(crate) fn deserialize_column_names<'de, D>(
+pub(crate) fn deserialize_column_names<'de, D: Deserializer<'de>>(
     deserializer: D,
-) -> Result<Option<Vec<ColumnName>>, D::Error>
-where
-    D: Deserializer<'de>,
-{
+) -> Result<Option<Vec<ColumnName>>, D::Error> {
     let s: String = Deserialize::deserialize(deserializer)?;
-    Ok(Some(
-        ColumnName::parse_column_name_list(&s).map_err(de::Error::custom)?,
-    ))
+    let column_names = ColumnName::parse_column_name_list(&s).map_err(de::Error::custom)?;
+    Ok(Some(column_names))
 }
 
 /// Deserialize an interval string of the form "interval 5 days" into an `Option<Duration>`.
-pub(crate) fn deserialize_interval<'de, D>(deserializer: D) -> Result<Option<Duration>, D::Error>
-where
-    D: Deserializer<'de>,
-{
+pub(crate) fn deserialize_interval<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Duration>, D::Error> {
     let s = String::deserialize(deserializer)?;
     parse_interval(&s).map(Some).map_err(de::Error::custom)
 }
@@ -115,12 +108,13 @@ fn parse_interval(value: &str) -> Result<Duration, ParseIntervalError> {
         .map_err(|_| ParseIntervalError::ParseIntError(number.into()))?;
 
     // TODO(zach): spark allows negative intervals, but we don't
-    if number < 0 {
-        return Err(ParseIntervalError::NegativeInterval(value.to_string()));
-    }
-    let number: u64 = number
-        .try_into()
-        .expect("interval is non-negative and was i64, so it fits in u64");
+    require!(
+        number >= 0,
+        ParseIntervalError::NegativeInterval(value.to_string())
+    );
+
+    // convert to u64 since Duration expects it
+    let number = number as u64; // non-negative i64 => always safe
 
     let duration = match it
         .next()
@@ -134,7 +128,7 @@ fn parse_interval(value: &str) -> Result<Duration, ParseIntervalError> {
         "hour" | "hours" => Duration::from_secs(number * SECONDS_PER_HOUR),
         "day" | "days" => Duration::from_secs(number * SECONDS_PER_DAY),
         "week" | "weeks" => Duration::from_secs(number * SECONDS_PER_WEEK),
-        unit @ "month" | unit @ "months" => {
+        unit @ ("month" | "months") => {
             return Err(ParseIntervalError::UnsupportedInterval(unit.to_string()));
         }
         unit => {

@@ -55,7 +55,7 @@ pub struct TableProperties {
     /// E.g. if checkpoint interval = 10, then a checkpoint should be written every 10 commits.
     #[serde(rename = "delta.checkpointInterval")]
     #[serde(deserialize_with = "deserialize_pos_int")]
-    pub checkpoint_interval: Option<u64>,
+    pub checkpoint_interval: Option<i64>,
 
     /// true for Delta Lake to write file statistics in checkpoints in JSON format for the stats column.
     #[serde(rename = "delta.checkpoint.writeStatsAsJson")]
@@ -152,7 +152,7 @@ pub struct TableProperties {
     /// generates for random prefixes.
     #[serde(rename = "delta.randomPrefixLength")]
     #[serde(deserialize_with = "deserialize_pos_int")]
-    pub random_prefix_length: Option<u64>,
+    pub random_prefix_length: Option<i64>,
 
     /// The shortest duration within which new snapshots will retain transaction identifiers (for
     /// example, SetTransactions). When a new snapshot sees a transaction identifier older than or
@@ -166,7 +166,7 @@ pub struct TableProperties {
     /// (bytes) or 100mb.
     #[serde(rename = "delta.targetFileSize")]
     #[serde(deserialize_with = "deserialize_pos_int")]
-    pub target_file_size: Option<u64>,
+    pub target_file_size: Option<i64>,
 
     /// The target file size in bytes or higher units for file tuning. For example, 104857600
     /// (bytes) or 100mb.
@@ -231,7 +231,7 @@ impl TryFrom<String> for DataSkippingNumIndexedCols {
 }
 
 /// The isolation level applied during transaction
-#[derive(Deserialize, Debug, Copy, Clone, PartialEq, Eq)]
+#[derive(Deserialize, Debug, Default, Copy, Clone, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum IsolationLevel {
     /// The strongest isolation level. It ensures that committed write operations
@@ -239,6 +239,7 @@ pub enum IsolationLevel {
     /// exists a serial sequence of executing them one-at-a-time that generates
     /// the same outcome as that seen in the table. For the write operations,
     /// the serial sequence is exactly the same as that seen in the table’s history.
+    #[default]
     Serializable,
 
     /// A weaker isolation level than Serializable. It ensures only that the write
@@ -254,27 +255,15 @@ pub enum IsolationLevel {
     SnapshotIsolation,
 }
 
-// Delta-Spark default isolation level is Serializable
-impl Default for IsolationLevel {
-    fn default() -> Self {
-        Self::Serializable
-    }
-}
-
 /// The checkpoint policy applied when writing checkpoints
-#[derive(Deserialize, Debug, Clone, PartialEq, Eq)]
+#[derive(Deserialize, Debug, Default, Clone, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum CheckpointPolicy {
     /// classic Delta Lake checkpoints
+    #[default]
     Classic,
     /// v2 checkpoints
     V2,
-}
-
-impl Default for CheckpointPolicy {
-    fn default() -> Self {
-        Self::Classic
-    }
 }
 
 #[cfg(test)]
