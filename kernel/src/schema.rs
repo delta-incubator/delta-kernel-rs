@@ -275,7 +275,9 @@ impl StructType {
         self.fields.values()
     }
 
-    /// Extracts the name and type of all leaf columns, in schema order.
+    /// Extracts the name and type of all leaf columns, in schema order. Caller should pass Some
+    /// `own_name` if this schema is embedded in a larger struct (e.g. `add.*`) and None if the
+    /// schema is a top-level result (e.g. `*`).
     ///
     /// NOTE: This method only traverses through `StructType` fields; `MapType` and `ArrayType`
     /// fields are considered leaves even if they contain `StructType` entries/elements.
