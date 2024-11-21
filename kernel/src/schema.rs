@@ -738,7 +738,7 @@ pub trait SchemaTransform {
             .fields()
             .filter_map(|field| self.transform_struct_field(Borrowed(field)))
             .inspect(|field| {
-                if matches!(field, Borrowed(_)) {
+                if let Borrowed(_) = field {
                     num_borrowed += 1;
                 }
             })
@@ -807,7 +807,7 @@ impl SchemaTransform for SchemaLeaves {
         field: Cow<'a, StructField>,
     ) -> Option<Cow<'a, StructField>> {
         self.path.push(field.name.clone());
-        if matches!(field.data_type, DataType::Struct(_)) {
+        if let DataType::Struct(_) = field.data_type {
             let _ = self.recurse_into_struct_field(field);
         } else {
             self.names.push(ColumnName::new(&self.path));
