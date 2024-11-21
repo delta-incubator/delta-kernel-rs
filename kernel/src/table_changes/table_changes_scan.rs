@@ -268,12 +268,6 @@ impl TableChangesScan {
                     size: size as usize,
                     location: file_path,
                 };
-                println!(
-                    "for version: {}, tpe: {:?}, and dv : {:?}",
-                    commit_version,
-                    tpe,
-                    dv_map.get(&path),
-                );
                 match (&tpe, dv_map.get(&path)) {
                     (state::ScanFileType::Add, Some(rm_dv)) => {
                         let generated_columns = get_generated_columns(
@@ -290,7 +284,6 @@ impl TableChangesScan {
                             .unwrap_or(Default::default());
 
                         let added = treemap_to_bools(&rm_dv - &add_dv);
-                        println!("added: {:?}", added);
                         let added_rows = self.generate_output_rows(
                             engine,
                             file.clone(),
@@ -303,7 +296,6 @@ impl TableChangesScan {
                         )?;
 
                         let removed = treemap_to_bools(add_dv - rm_dv);
-                        println!("removed : {:?}", removed);
                         let generated_columns = get_generated_columns(
                             timestamp,
                             state::ScanFileType::Remove,
