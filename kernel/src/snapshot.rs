@@ -67,6 +67,7 @@ impl Snapshot {
         let log_segment =
             LogSegment::for_snapshot(fs_client.as_ref(), log_root, checkpoint_hint, version)?;
 
+        // try_new_from_log_segment will ensure the protocol is supported
         Self::try_new_from_log_segment(table_root, log_segment, engine)
     }
 
@@ -77,6 +78,10 @@ impl Snapshot {
         engine: &dyn Engine,
     ) -> DeltaResult<Self> {
         let (metadata, protocol) = log_segment.read_metadata(engine)?;
+
+        // important! before a read/write to the table we must check it is supported
+        protocol.ensure_read_supported()?;
+
         let schema = metadata.schema()?;
         let table_properties = metadata.parse_table_properties()?;
         let column_mapping_mode = column_mapping_mode(&protocol, &table_properties);
