@@ -129,12 +129,12 @@ impl Snapshot {
     }
 
     /// Create a [`ScanBuilder`] for an `Arc<Snapshot>`.
-    pub fn scan_builder(self: Arc<Self>) -> ScanBuilder {
+    pub fn scan_builder(self: Arc<Self>) -> ScanBuilder<Snapshot> {
         ScanBuilder::new(self)
     }
 
     /// Consume this `Snapshot` to create a [`ScanBuilder`]
-    pub fn into_scan_builder(self) -> ScanBuilder {
+    pub fn into_scan_builder(self) -> ScanBuilder<Snapshot> {
         ScanBuilder::new(self)
     }
 }

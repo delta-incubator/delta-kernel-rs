@@ -23,7 +23,7 @@ mod data_skipping;
 pub mod log_replay;
 pub mod state;
 
-trait Scannable {}
+pub trait Scannable {}
 impl Scannable for Snapshot {}
 
 /// Builder to scan a snapshot of a table.
@@ -33,7 +33,7 @@ pub struct ScanBuilder<T: Scannable> {
     predicate: Option<ExpressionRef>,
 }
 
-impl std::fmt::Debug for ScanBuilder {
+impl<T: Scannable> std::fmt::Debug for ScanBuilder<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
         f.debug_struct("ScanBuilder")
             .field("schema", &self.schema)
