@@ -1,6 +1,7 @@
 //! Provides an API to read the table's change data feed between two versions.
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 
+use scan::TableChangesScanBuilder;
 use url::Url;
 
 use crate::log_segment::LogSegment;
@@ -9,6 +10,8 @@ use crate::schema::{DataType, Schema, StructField, StructType};
 use crate::snapshot::Snapshot;
 use crate::table_features::ColumnMappingMode;
 use crate::{DeltaResult, Engine, Error, Version};
+
+pub mod scan;
 
 static CDF_FIELDS: LazyLock<[StructField; 3]> = LazyLock::new(|| {
     [
@@ -174,22 +177,24 @@ impl TableChanges {
     pub(crate) fn column_mapping_mode(&self) -> &ColumnMappingMode {
         &self.end_snapshot.column_mapping_mode
     }
+
+    /// Create a [`TableChangesScanBuilder`] for an `Arc<TableChanges>`.
+    pub fn scan_builder(self: Arc<Self>) -> TableChangesScanBuilder {
+        TableChangesScanBuilder::new(self)
+    }
+
+    /// Consume this `TableChanges` to create a [`TableChangesScanBuilder`]
+    pub fn into_scan_builder(self) -> TableChangesScanBuilder {
+        TableChangesScanBuilder::new(self)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use crate::engine::sync::SyncEngine;
-<<<<<<< HEAD
     use crate::schema::{DataType, StructField};
     use crate::table_changes::CDF_FIELDS;
     use crate::{Error, Table};
-=======
-    use crate::schema::DataType;
-    use crate::schema::StructField;
-    use crate::table_changes::CDF_FIELDS;
-    use crate::Error;
-    use crate::Table;
->>>>>>> 073ae49 (Add table changes schema)
     use itertools::assert_equal;
 
     #[test]
