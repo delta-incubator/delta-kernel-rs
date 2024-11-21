@@ -23,9 +23,12 @@ mod data_skipping;
 pub mod log_replay;
 pub mod state;
 
+trait Scannable {}
+impl Scannable for Snapshot {}
+
 /// Builder to scan a snapshot of a table.
-pub struct ScanBuilder {
-    snapshot: Arc<Snapshot>,
+pub struct ScanBuilder<T: Scannable> {
+    scannable: Arc<T>,
     schema: Option<SchemaRef>,
     predicate: Option<ExpressionRef>,
 }
@@ -39,11 +42,11 @@ impl std::fmt::Debug for ScanBuilder {
     }
 }
 
-impl ScanBuilder {
+impl<T: Scannable> ScanBuilder<T> {
     /// Create a new [`ScanBuilder`] instance.
-    pub fn new(snapshot: impl Into<Arc<Snapshot>>) -> Self {
+    pub fn new(scannable: impl Into<Arc<T>>) -> Self {
         Self {
-            snapshot: snapshot.into(),
+            scannable: scannable.into(),
             schema: None,
             predicate: None,
         }
@@ -80,7 +83,9 @@ impl ScanBuilder {
         self.predicate = predicate.into();
         self
     }
+}
 
+impl ScanBuilder<Snapshot> {
     /// Build the [`Scan`].
     ///
     /// This does not scan the table at this point, but does do some work to ensure that the
@@ -91,19 +96,19 @@ impl ScanBuilder {
         // if no schema is provided, use snapshot's entire schema (e.g. SELECT *)
         let logical_schema = self
             .schema
-            .unwrap_or_else(|| self.snapshot.schema().clone().into());
+            .unwrap_or_else(|| self.scannable.schema().clone().into());
         let (all_fields, read_fields, have_partition_cols) = get_state_info(
             logical_schema.as_ref(),
-            &self.snapshot.metadata().partition_columns,
-            self.snapshot.column_mapping_mode,
+            &self.scannable.metadata().partition_columns,
+            self.scannable.column_mapping_mode,
         )?;
         let physical_schema = Arc::new(StructType::new(read_fields));
 
         // important! before a read/write to the table we must check it is supported
-        self.snapshot.protocol().ensure_read_supported()?;
+        self.scannable.protocol().ensure_read_supported()?;
 
         Ok(Scan {
-            snapshot: self.snapshot,
+            snapshot: self.scannable,
             logical_schema,
             physical_schema,
             predicate: self.predicate,
