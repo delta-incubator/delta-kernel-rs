@@ -116,9 +116,9 @@ impl TableChanges {
             )));
         }
         if start_snapshot.schema() != end_snapshot.schema() {
-            return Err(Error::generic(
-                "Failed to build TableChanges: Start and end version schemas are different.",
-            ));
+            return Err(Error::generic(format!(
+                "Failed to build TableChanges: Start and end version schemas are different. Found start version schema {:?} and end version schema {:?}", start_snapshot.schema(), end_snapshot.schema(),
+            )));
         }
 
         let log_root = table_root.join("_delta_log/")?;
