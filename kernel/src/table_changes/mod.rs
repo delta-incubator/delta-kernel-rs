@@ -18,8 +18,8 @@ static CDF_FIELDS: LazyLock<[StructField; 3]> = LazyLock::new(|| {
     ]
 });
 
-/// Represents a call to read the Change Data Feed between two versions of a table. The schema of
-/// `TableChanges` will be the schema of the table with three additional columns:
+/// Represents a call to read the Change Data Feed (CDF) between two versions of a table. The schema of
+/// `TableChanges` will be the schema of the table at the end verios with three additional columns:
 /// - `_change_type`: String representing the type of change that for that commit. This may be one
 ///   of `delete`, `insert`, `update_preimage`, or `update_postimage`.
 /// - `_commit_version`: Long representing the commit the change occurred in.
@@ -27,11 +27,31 @@ static CDF_FIELDS: LazyLock<[StructField; 3]> = LazyLock::new(|| {
 ///   this is retrieved from the [`CommitInfo`] action. Otherwise, the timestamp is the same as the
 ///   commit file's modification timestamp.
 ///
+/// Three properties must hold for the entire CDF range:
+/// - Reading must be supported for every commit in the range. This is determined using [`Protocol::ensure_read_supported`]
+/// - Change Data Feed must be enabled for the entire range with the `delta.enableChangeDataFeed`
+///   table property set to 'true'.
+/// - The schema for each commit must be compatible with the end schema. This means that all the
+///   same fields and their nullability are the same. Schema compatiblity will be expanded in the
+///   future to allow compatible schemas that are not the exact same. See issue [#523](https://github.com/delta-io/delta-kernel-rs/issues/523)
+///
+///  # Examples
+///  Get `TableChanges` for versions 0 to 1 (inclusive)
+///  ```rust
+///  # use delta_kernel::engine::sync::SyncEngine;
+///  # use delta_kernel::{Table, Error};
+///  # let engine = Box::new(SyncEngine::new());
+///  # let path = "./tests/data/table-with-cdf";
+///  let table = Table::try_from_uri(path).unwrap();
+///  let table_changes = table.table_changes(engine.as_ref(), 0, 1)?;
+///  # Ok::<(), Error>(())
+///  ````
 /// For more details, see the following sections of the protocol:
 /// - [Add CDC File](https://github.com/delta-io/delta/blob/master/PROTOCOL.md#add-cdc-file)
 /// - [Change Data Files](https://github.com/delta-io/delta/blob/master/PROTOCOL.md#change-data-files).
 ///
 /// [`CommitInfo`]: crate::actions::CommitInfo
+/// [`Protocol`]: crate::actions::Protocol
 #[derive(Debug)]
 pub struct TableChanges {
     pub log_segment: LogSegment,
@@ -64,14 +84,14 @@ impl TableChanges {
     ) -> DeltaResult<Self> {
         // Both snapshots ensure that reading is supported at the start and end version using
         // [`Protocol::ensure_read_supported`]. Note that we must still verify that reading is
-        // supported for every intermediary protocol actions
+        // supported for every protocol action in the CDF range.
         // [`Protocol`]: crate::actions::Protocol
         let start_snapshot =
             Snapshot::try_new(table_root.as_url().clone(), engine, Some(start_version))?;
         let end_snapshot = Snapshot::try_new(table_root.as_url().clone(), engine, end_version)?;
 
-        // Verify CDF is enabled at the beginning and end of the interval. We must still check every
-        // intermediary metadata action in the range.
+        // Verify CDF is enabled at the beginning and end of the interval to fail early. We must
+        // still check that CDF is enabled for every metadata action in the CDF range.
         let is_cdf_enabled = |snapshot: &Snapshot| {
             static ENABLE_CDF_FLAG: &str = "delta.enableChangeDataFeed";
             snapshot
@@ -86,6 +106,8 @@ impl TableChanges {
             return Err(Error::change_data_feed_unsupported(end_snapshot.version()));
         }
 
+        // Verify that the start and end schemas are compatible. We must still check schema
+        // compatibility for each schema update in the CDF range.
         if start_snapshot.schema() != end_snapshot.schema() {
             return Err(Error::generic(format!(
                 "Failed to build TableChanges: Start and end version schemas are different. Found start version schema {:?} and end version schema {:?}", start_snapshot.schema(), end_snapshot.schema(),
@@ -150,11 +172,9 @@ impl TableChanges {
 #[cfg(test)]
 mod tests {
     use crate::engine::sync::SyncEngine;
-    use crate::schema::DataType;
-    use crate::schema::StructField;
+    use crate::schema::{DataType, StructField};
     use crate::table_changes::CDF_FIELDS;
-    use crate::Error;
-    use crate::Table;
+    use crate::{Error, Table};
     use itertools::assert_equal;
 
     #[test]
