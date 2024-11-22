@@ -33,7 +33,8 @@ static CDF_FIELDS: LazyLock<[StructField; 3]> = LazyLock::new(|| {
 ///   table property set to 'true'.
 /// - The schema for each commit must be compatible with the end schema. This means that all the
 ///   same fields and their nullability are the same. Schema compatibility will be expanded in the
-///   future to allow compatible schemas that are not the exact same. See issue [#523](https://github.com/delta-io/delta-kernel-rs/issues/523)
+///   future to allow compatible schemas that are not the exact same.
+///   See issue [#523](https://github.com/delta-io/delta-kernel-rs/issues/523)
 ///
 /// [`CommitInfo`]: crate::actions::CommitInfo
 /// [`ensure_read_supported`]: crate::actions::Protocol::ensure_read_supported
@@ -106,6 +107,9 @@ impl TableChanges {
 
         // Verify that the start and end schemas are compatible. We must still check schema
         // compatibility for each schema update in the CDF range.
+        // Note: Schema compatibility check will be changed in the future to be more flexible.
+        // See issue [#523](https://github.com/delta-io/delta-kernel-rs/issues/523)
+
         if start_snapshot.schema() != end_snapshot.schema() {
             return Err(Error::generic(format!(
                 "Failed to build TableChanges: Start and end version schemas are different. Found start version schema {:?} and end version schema {:?}", start_snapshot.schema(), end_snapshot.schema(),
