@@ -283,9 +283,9 @@ impl StructType {
     /// fields are considered leaves even if they contain `StructType` entries/elements.
     #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
     pub(crate) fn leaves<'s>(&self, own_name: impl Into<Option<&'s str>>) -> ColumnNamesAndTypes {
-        let mut leaves = SchemaLeaves::new(own_name.into());
-        let _ = leaves.transform_struct(Cow::Borrowed(self));
-        (leaves.names, leaves.types).into()
+        let mut get_leaves = GetSchemaLeaves::new(own_name.into());
+        let _ = get_leaves.transform_struct(Cow::Borrowed(self));
+        (get_leaves.names, get_leaves.types).into()
     }
 }
 
@@ -788,12 +788,12 @@ pub trait SchemaTransform {
     }
 }
 
-struct SchemaLeaves {
+struct GetSchemaLeaves {
     path: Vec<String>,
     names: Vec<ColumnName>,
     types: Vec<DataType>,
 }
-impl SchemaLeaves {
+impl GetSchemaLeaves {
     fn new(own_name: Option<&str>) -> Self {
         Self {
             path: own_name.into_iter().map(|s| s.to_string()).collect(),
@@ -803,7 +803,7 @@ impl SchemaLeaves {
     }
 }
 
-impl SchemaTransform for SchemaLeaves {
+impl SchemaTransform for GetSchemaLeaves {
     fn transform_struct_field<'a>(
         &mut self,
         field: Cow<'a, StructField>,

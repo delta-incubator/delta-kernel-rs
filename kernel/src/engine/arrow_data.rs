@@ -245,11 +245,11 @@ impl ArrowEngineData {
             }
             DataType::Array(_) => {
                 debug!("Pushing list for {}", ColumnName::new(path));
-                col_as_list().ok_or("string array")
+                col_as_list().ok_or("array<string>")
             }
             DataType::Map(_) => {
                 debug!("Pushing map for {}", ColumnName::new(path));
-                col_as_map().ok_or("string-string map")
+                col_as_map().ok_or("map<string, string>")
             }
             data_type => {
                 return Err(Error::UnexpectedColumnType(format!(
