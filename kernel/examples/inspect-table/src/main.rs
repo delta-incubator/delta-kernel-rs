@@ -79,19 +79,19 @@ fn fields_in(field: &StructField) -> usize {
 
 struct LogVisitor {
     actions: Vec<(Action, usize)>,
-    offsets: HashMap<&'static str, (usize, usize)>,
+    offsets: HashMap<String, (usize, usize)>,
     previous_rows_seen: usize,
 }
 
 impl LogVisitor {
-    fn new(log_schema: &'static SchemaRef) -> LogVisitor {
+    fn new(log_schema: &SchemaRef) -> LogVisitor {
         // Grab the start offset for each top-level column name, then compute the end offset by
         // skipping the rest of the leaves for that column.
         let mut start = 0;
         let mut offsets = HashMap::new();
         for field in log_schema.fields() {
             let end = start + fields_in(field);
-            offsets.insert(field.name.as_str(), (start, end));
+            offsets.insert(field.name.clone(), (start, end));
             start = end;
         }
         LogVisitor {
@@ -110,12 +110,12 @@ impl DataVisitor for LogVisitor {
                 getters.len()
             )));
         }
-        let (add_start, add_end) = self.offsets[&ADD_NAME];
-        let (remove_start, remove_end) = self.offsets[&REMOVE_NAME];
-        let (metadata_start, metadata_end) = self.offsets[&METADATA_NAME];
-        let (protocol_start, protocol_end) = self.offsets[&PROTOCOL_NAME];
-        let (txn_start, txn_end) = self.offsets[&SET_TRANSACTION_NAME];
-        let (cdc_start, cdc_end) = self.offsets[&CDC_NAME];
+        let (add_start, add_end) = self.offsets[ADD_NAME];
+        let (remove_start, remove_end) = self.offsets[REMOVE_NAME];
+        let (metadata_start, metadata_end) = self.offsets[METADATA_NAME];
+        let (protocol_start, protocol_end) = self.offsets[PROTOCOL_NAME];
+        let (txn_start, txn_end) = self.offsets[SET_TRANSACTION_NAME];
+        let (cdc_start, cdc_end) = self.offsets[CDC_NAME];
         for i in 0..row_count {
             let action = if let Some(path) = getters[add_start].get_opt(i, "add.path")? {
                 let add = AddVisitor::visit_add(i, path, &getters[add_start..add_end])?;
