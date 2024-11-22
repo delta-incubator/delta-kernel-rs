@@ -45,10 +45,10 @@ pub fn derive_schema(input: proc_macro::TokenStream) -> proc_macro::TokenStream 
     let schema_fields = gen_schema_fields(&input.data);
     let output = quote! {
         #[automatically_derived]
-        impl crate::actions::schemas::ToDataType for #struct_ident {
-            fn to_data_type() -> crate::schema::DataType {
-                use crate::actions::schemas::{ToDataType, GetStructField, GetNullableContainerStructField};
-                crate::schema::DataType::struct_type([
+        impl delta_kernel::actions::schemas::ToDataType for #struct_ident {
+            fn to_data_type() -> delta_kernel::schema::DataType {
+                use delta_kernel::actions::schemas::{ToDataType, GetStructField, GetNullableContainerStructField};
+                delta_kernel::schema::DataType::struct_type([
                     #schema_fields
                 ])
             }
@@ -124,9 +124,9 @@ fn gen_schema_fields(data: &Data) -> TokenStream {
                             ).to_compile_error()
                         }
                     }
-                    quote_spanned! { field.span() => #(#type_path_quoted),* get_nullable_container_struct_field(stringify!(#name))}
+                    quote_spanned! { field.span() => #(#type_path_quoted)* get_nullable_container_struct_field(stringify!(#name))}
                 } else {
-                    quote_spanned! { field.span() => #(#type_path_quoted),* get_struct_field(stringify!(#name))}
+                    quote_spanned! { field.span() => #(#type_path_quoted)* get_struct_field(stringify!(#name))}
                 }
             }
             _ => Error::new(field.span(), format!("Can't handle type: {:?}", field.ty)).to_compile_error()

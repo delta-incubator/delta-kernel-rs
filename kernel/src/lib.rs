@@ -50,7 +50,12 @@
     rust_2021_compatibility
 )]
 
+/// This allows the derive macro to refer to types in this crate using full crate name, instead of using `crate::`,
+/// which seem to be the only way to to test the macro generated code and macro compile failures
+extern crate self as delta_kernel;
+
 use std::any::Any;
+
 use std::sync::Arc;
 use std::{cmp::Ordering, ops::Range};
 
@@ -415,4 +420,48 @@ pub trait Engine: AsAny {
 
     /// Get the connector provided [`ParquetHandler`].
     fn get_parquet_handler(&self) -> Arc<dyn ParquetHandler>;
+}
+
+#[cfg(doctest)]
+mod doc_tests {
+
+    /// ```
+    /// # use delta_kernel_derive::Schema;
+    /// #[derive(Schema)]
+    /// pub struct WithFields {
+    ///     some_name: String,
+    /// }
+    /// ```
+    #[cfg(doctest)]
+    pub struct MacroTestStructWithField;
+
+    /// ```compile_fail
+    /// # use delta_kernel_derive::Schema;
+    /// #[derive(Schema)]
+    /// pub struct NoFields;
+    /// ```
+    #[cfg(doctest)]
+    pub struct MacroTestStructWithoutField;
+
+    /// ```compile_fail
+    /// # use delta_kernel_derive::Schema;
+    /// #[derive(Schema)]
+    /// pub struct WithInvalidAttributeTarget {
+    ///     #[drop_null_container_values]
+    ///     some_name: String,
+    /// }
+    /// ```
+    #[cfg(doctest)]
+    pub struct MacroTestStructWithInvalidAttributeTarget;
+
+    /// ```compile_fail
+    /// # use delta_kernel_derive::Schema;
+    /// # use syn::Token;
+    /// #[derive(Schema)]
+    /// pub struct WithInvalidFieldType {
+    ///     token: Token![struct],
+    /// }
+    /// ```
+    #[cfg(doctest)]
+    pub struct MacroTestStructWithInvalidFieldType;
 }
