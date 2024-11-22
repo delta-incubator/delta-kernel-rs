@@ -131,21 +131,22 @@ impl ScanBuilder {
             return Ok(PhysicalPredicate::StaticSkipAll);
         }
         let mut get_referenced_fields = GetReferencedFields {
-            references: predicate.references(),
+            unresolved_references: predicate.references(),
             column_mappings: HashMap::new(),
             logical_path: vec![],
             physical_path: vec![],
         };
         let schema_opt = get_referenced_fields.transform_struct(logical_schema);
-        if let Some(missing_column) = get_referenced_fields.references.into_iter().next() {
-            // A column referenced by the predicate was not found+taken during the schema traversal.
+        let mut unresolved = get_referenced_fields.unresolved_references.into_iter();
+        if let Some(unresolved) = unresolved.next() {
+            // Schema traversal failed to resolve at least one column referenced by the predicate.
             //
             // NOTE: It's a pretty serious engine bug if we got this far with a query whose WHERE
             // clause has invalid column references. Data skipping is best-effort and the predicate
             // anyway needs to be evaluated against every row of data -- which is impossible if the
             // columns are missing/invalid. Just blow up instead of trying to handle it gracefully.
             return Err(Error::missing_column(format!(
-                "Predicate references unknown column: {missing_column}"
+                "Predicate references unknown column: {unresolved}"
             )));
         }
         let Some(schema) = schema_opt else {
@@ -206,7 +207,7 @@ fn can_statically_skip_all_files(predicate: &Expression) -> bool {
 // leaf fields that the skipping expression actually references. Also extract physical name
 // mappings so we can access the correct physical stats column for each logical column.
 struct GetReferencedFields<'a> {
-    references: HashSet<&'a ColumnName>,
+    unresolved_references: HashSet<&'a ColumnName>,
     column_mappings: HashMap<ColumnName, ColumnName>,
     logical_path: Vec<String>,
     physical_path: Vec<String>,
@@ -215,7 +216,7 @@ impl<'a> SchemaTransform<'a> for GetReferencedFields<'a> {
     // Capture the path mapping for this leaf field
     fn transform_primitive(&mut self, ptype: &'a PrimitiveType) -> Option<Cow<'a, PrimitiveType>> {
         // Record the physical name mappings for all referenced leaf columns
-        self.references
+        self.unresolved_references
             .remove(self.logical_path.as_slice())
             .then(|| {
                 self.column_mappings.insert(
@@ -552,18 +553,17 @@ fn parse_partition_value(raw: Option<&String>, data_type: &DataType) -> DeltaRes
     }
 }
 
+/// All the state needed to process a scan.
 struct StateInfo {
+    /// All fields referenced by the query.
     all_fields: Vec<ColumnType>,
+    /// The physical (parquet) read schema to use.
     read_fields: Vec<StructField>,
+    /// True if this query references any partition columns.
     have_partition_cols: bool,
 }
 
-/// Get the state needed to process a scan. In particular this returns a triple of
-/// (all_fields_in_query, fields_to_read_from_parquet, have_partition_cols) where:
-/// - all_fields_in_query - all fields in the query as [`ColumnType`] enums
-/// - fields_to_read_from_parquet - Which fields should be read from the raw parquet files. This takes
-///   into account column mapping
-/// - have_partition_cols - boolean indicating if we have partition columns in this query
+/// Get the state needed to process a scan, see [`StateInfo`] for details.
 fn get_state_info(logical_schema: &Schema, partition_columns: &[String]) -> DeltaResult<StateInfo> {
     let mut have_partition_cols = false;
     let mut read_fields = Vec::with_capacity(logical_schema.fields.len());

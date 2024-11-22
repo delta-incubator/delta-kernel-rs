@@ -635,7 +635,7 @@ pub trait SchemaTransform<'a> {
         self.recurse_into_array(atype)
     }
 
-    /// Called for each arraye element encountered during the schema traversal. Implementations can
+    /// Called for each array element encountered during the schema traversal. Implementations can
     /// call [`Self::transform`] if they wish to recursively transform the array element type.
     fn transform_array_element(&mut self, etype: &'a DataType) -> Option<Cow<'a, DataType>> {
         self.transform(etype)
