@@ -50,7 +50,7 @@ impl Snapshot {
     ///
     /// # Parameters
     ///
-    /// - `location`: url pointing at the table root (where `_delta_log` folder is located)
+    /// - `table_root`: url pointing at the table root (where `_delta_log` folder is located)
     /// - `engine`: Implementation of [`Engine`] apis.
     /// - `version`: target version of the [`Snapshot`]
     pub fn try_new(
@@ -66,6 +66,7 @@ impl Snapshot {
         let log_segment =
             LogSegment::for_snapshot(fs_client.as_ref(), log_root, checkpoint_hint, version)?;
 
+        // try_new_from_log_segment will ensure the protocol is supported
         Self::try_new_from_log_segment(table_root, log_segment, engine)
     }
 
@@ -77,7 +78,7 @@ impl Snapshot {
     ) -> DeltaResult<Self> {
         let (metadata, protocol) = log_segment.read_metadata(engine)?;
 
-        // important! before reading the table we must check it is supported
+        // important! before a read/write to the table we must check it is supported
         protocol.ensure_read_supported()?;
 
         // validate column mapping mode as well -- make sure all fields are correctly (un)annotated
