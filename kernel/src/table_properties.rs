@@ -24,9 +24,6 @@ mod deserialize;
 pub use deserialize::ParseIntervalError;
 use deserialize::*;
 
-/// Default num index cols
-pub const DEFAULT_NUM_INDEX_COLS: i32 = 32;
-
 /// Delta table properties. These are parsed from the 'configuration' map in the most recent
 /// 'Metadata' action of a table.
 #[derive(Deserialize, Debug, Clone, Eq, PartialEq, Default)]
