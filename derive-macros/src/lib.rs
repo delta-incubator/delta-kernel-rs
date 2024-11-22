@@ -124,9 +124,9 @@ fn gen_schema_fields(data: &Data) -> TokenStream {
                             ).to_compile_error()
                         }
                     }
-                    quote_spanned! { field.span() => #(#type_path_quoted),* get_nullable_container_struct_field(stringify!(#name))}
+                    quote_spanned! { field.span() => #(#type_path_quoted)* get_nullable_container_struct_field(stringify!(#name))}
                 } else {
-                    quote_spanned! { field.span() => #(#type_path_quoted),* get_struct_field(stringify!(#name))}
+                    quote_spanned! { field.span() => #(#type_path_quoted)* get_struct_field(stringify!(#name))}
                 }
             }
             _ => Error::new(field.span(), format!("Can't handle type: {:?}", field.ty)).to_compile_error()

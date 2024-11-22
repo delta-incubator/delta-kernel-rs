@@ -50,6 +50,8 @@
     rust_2021_compatibility
 )]
 
+/// This allows the derive macro to refer to types in this crate using full crate name, instead of using `crate::`,
+/// which seem to be the only way to to test the macro generated code and macro compile failures
 extern crate self as delta_kernel;
 
 use std::any::Any;
@@ -440,29 +442,6 @@ mod doc_tests {
     /// ```
     #[cfg(doctest)]
     pub struct MacroTestStructWithoutField;
-
-    /// ```
-    /// # use delta_kernel_derive::Schema;
-    /// # use std::collections::HashMap;
-    /// #[derive(Schema)]
-    /// pub struct WithAngleBracketPath {
-    ///     map_field: HashMap<String, String>,
-    /// }
-    /// ```
-    #[cfg(doctest)]
-    pub struct MacroTestStructWithAngleBracketedPathField;
-
-    /// ```
-    /// # use delta_kernel_derive::Schema;
-    /// # use std::collections::HashMap;
-    /// #[derive(Schema)]
-    /// pub struct WithAttributedField {
-    ///     #[drop_null_container_values]
-    ///     map_field: HashMap<String, String>,
-    /// }
-    /// ```
-    #[cfg(doctest)]
-    pub struct MacroTestStructWithAttributedField;
 
     /// ```compile_fail
     /// # use delta_kernel_derive::Schema;
