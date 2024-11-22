@@ -1,15 +1,14 @@
 //! Code to handle column mapping, including modes and schema transforms
-use std::str::FromStr;
-
-use serde::{Deserialize, Serialize};
-
 use super::ReaderFeatures;
 use crate::actions::Protocol;
 use crate::table_properties::TableProperties;
-use crate::{DeltaResult, Error};
+
+use serde::{Deserialize, Serialize};
+use strum::EnumString;
 
 /// Modes of column mapping a table can be in
-#[derive(Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, EnumString, Serialize, Deserialize, Copy, Clone, PartialEq, Eq)]
+#[strum(serialize_all = "camelCase")]
 #[serde(rename_all = "camelCase")]
 pub enum ColumnMappingMode {
     /// No column mapping is applied
@@ -17,6 +16,7 @@ pub enum ColumnMappingMode {
     /// Columns are mapped by their field_id in parquet
     Id,
     /// Columns are mapped to a physical name
+    #[default]
     Name,
 }
 
@@ -37,43 +37,6 @@ pub(crate) fn column_mapping_mode(
     }
 }
 
-impl TryFrom<&str> for ColumnMappingMode {
-    type Error = Error;
-
-    fn try_from(s: &str) -> DeltaResult<Self> {
-        match s.to_ascii_lowercase().as_str() {
-            "none" => Ok(Self::None),
-            "id" => Ok(Self::Id),
-            "name" => Ok(Self::Name),
-            _ => Err(Error::invalid_column_mapping_mode(s)),
-        }
-    }
-}
-
-impl FromStr for ColumnMappingMode {
-    type Err = Error;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        s.try_into()
-    }
-}
-
-impl Default for ColumnMappingMode {
-    fn default() -> Self {
-        Self::None
-    }
-}
-
-impl AsRef<str> for ColumnMappingMode {
-    fn as_ref(&self) -> &str {
-        match self {
-            Self::None => "none",
-            Self::Id => "id",
-            Self::Name => "name",
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -85,7 +48,7 @@ mod tests {
             [("delta.columnMapping.mode".to_string(), "id".to_string())]
                 .into_iter()
                 .collect();
-        let table_properties = TableProperties::new(table_properties.iter()).unwrap();
+        let table_properties = TableProperties::from(table_properties.iter());
 
         let protocol = Protocol::try_new(2, 5, None::<Vec<String>>, None::<Vec<String>>).unwrap();
         assert_eq!(

@@ -2,67 +2,131 @@
 //! us to relatively simply implement the functionality described in the protocol and expose
 //! 'simple' types to the user in the [`TableProperties`] struct. E.g. we can expose a `bool`
 //! directly instead of a `BoolConfig` type that we implement `Deserialize` for.
-
-use crate::expressions::ColumnName;
-use crate::utils::require;
-
 use std::time::Duration;
 
-use serde::de::{self, Deserializer};
-use serde::Deserialize;
+use super::*;
+use crate::expressions::ColumnName;
+use crate::table_features::ColumnMappingMode;
+use crate::utils::require;
 
 const SECONDS_PER_MINUTE: u64 = 60;
 const SECONDS_PER_HOUR: u64 = 60 * SECONDS_PER_MINUTE;
 const SECONDS_PER_DAY: u64 = 24 * SECONDS_PER_HOUR;
 const SECONDS_PER_WEEK: u64 = 7 * SECONDS_PER_DAY;
 
-/// Transparently pass through the option deserialization to the inner type.
-pub(crate) fn deserialize_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+impl<K, V, I> From<I> for TableProperties
 where
-    D: Deserializer<'de>,
-    T: Deserialize<'de>,
+    I: IntoIterator<Item = (K, V)>,
+    K: AsRef<str>,
+    V: AsRef<str>,
 {
-    T::deserialize(deserializer).map(Some)
-}
-
-/// Deserialize a string representing a positive integer into an `Option<u64>`.
-pub(crate) fn deserialize_pos_int<'de, D: Deserializer<'de>>(
-    deserializer: D,
-) -> Result<Option<i64>, D::Error> {
-    let s: String = Deserialize::deserialize(deserializer)?;
-    // parse to i64 (then check n > 0) since java doesn't even allow u64
-    let n: i64 = s.parse().map_err(de::Error::custom)?;
-    require!(n > 0, de::Error::custom("expected a positive integer"));
-    Ok(Some(n))
-}
-
-/// Deserialize a string representing a boolean into an `Option<bool>`.
-pub(crate) fn deserialize_bool<'de, D: Deserializer<'de>>(
-    deserializer: D,
-) -> Result<Option<bool>, D::Error> {
-    let s: String = Deserialize::deserialize(deserializer)?;
-    match s.as_str() {
-        "true" => Ok(Some(true)),
-        "false" => Ok(Some(false)),
-        _ => Err(de::Error::unknown_variant(&s, &["true", "false"])),
+    fn from(unparsed: I) -> Self {
+        let mut props = TableProperties::default();
+        for (k, v) in unparsed {
+            let parsed =
+                match k.as_ref() {
+                    "delta.appendOnly" => {
+                        parse_bool(v.as_ref()).map(|val| props.append_only = Some(val))
+                    }
+                    "delta.autoOptimize.autoCompact" => {
+                        parse_bool(v.as_ref()).map(|val| props.auto_compact = Some(val))
+                    }
+                    "delta.autoOptimize.optimizeWrite" => {
+                        parse_bool(v.as_ref()).map(|val| props.optimize_write = Some(val))
+                    }
+                    "delta.checkpointInterval" => parse_positive_int(v.as_ref())
+                        .map(|val| props.checkpoint_interval = Some(val)),
+                    "delta.checkpoint.writeStatsAsJson" => parse_bool(v.as_ref())
+                        .map(|val| props.checkpoint_write_stats_as_json = Some(val)),
+                    "delta.checkpoint.writeStatsAsStruct" => parse_bool(v.as_ref())
+                        .map(|val| props.checkpoint_write_stats_as_struct = Some(val)),
+                    "delta.columnMapping.mode" => ColumnMappingMode::try_from(v.as_ref())
+                        .map(|val| props.column_mapping_mode = Some(val))
+                        .ok(),
+                    "delta.dataSkippingNumIndexedCols" => {
+                        DataSkippingNumIndexedCols::try_from(v.as_ref())
+                            .map(|val| props.data_skipping_num_indexed_cols = Some(val))
+                            .ok()
+                    }
+                    "delta.dataSkippingStatsColumns" => parse_column_names(v.as_ref())
+                        .map(|val| props.data_skipping_stats_columns = Some(val)),
+                    "delta.deletedFileRetentionDuration" => parse_interval(v.as_ref())
+                        .map(|val| props.deleted_file_retention_duration = Some(val)),
+                    "delta.enableChangeDataFeed" => {
+                        parse_bool(v.as_ref()).map(|val| props.enable_change_data_feed = Some(val))
+                    }
+                    "delta.enableDeletionVectors" => {
+                        parse_bool(v.as_ref()).map(|val| props.enable_deletion_vectors = Some(val))
+                    }
+                    "delta.isolationLevel" => IsolationLevel::try_from(v.as_ref())
+                        .map(|val| props.isolation_level = Some(val))
+                        .ok(),
+                    "delta.logRetentionDuration" => parse_interval(v.as_ref())
+                        .map(|val| props.log_retention_duration = Some(val)),
+                    "delta.enableExpiredLogCleanup" => parse_bool(v.as_ref())
+                        .map(|val| props.enable_expired_log_cleanup = Some(val)),
+                    "delta.randomizeFilePrefixes" => {
+                        parse_bool(v.as_ref()).map(|val| props.randomize_file_prefixes = Some(val))
+                    }
+                    "delta.randomPrefixLength" => parse_positive_int(v.as_ref())
+                        .map(|val| props.random_prefix_length = Some(val)),
+                    "delta.setTransactionRetentionDuration" => parse_interval(v.as_ref())
+                        .map(|val| props.set_transaction_retention_duration = Some(val)),
+                    "delta.targetFileSize" => {
+                        parse_positive_int(v.as_ref()).map(|val| props.target_file_size = Some(val))
+                    }
+                    "delta.tuneFileSizesForRewrites" => parse_bool(v.as_ref())
+                        .map(|val| props.tune_file_sizes_for_rewrites = Some(val)),
+                    "delta.checkpointPolicy" => CheckpointPolicy::try_from(v.as_ref())
+                        .map(|val| props.checkpoint_policy = Some(val))
+                        .ok(),
+                    "delta.enableRowTracking" => {
+                        parse_bool(v.as_ref()).map(|val| props.enable_row_tracking = Some(val))
+                    }
+                    _ => None,
+                };
+            if parsed.is_none() {
+                props
+                    .unknown_properties
+                    .insert(k.as_ref().to_string(), v.as_ref().to_string());
+            }
+        }
+        props
     }
 }
 
-/// Deserialize a comma-separated list of column names into an `Option<Vec<ColumnName>>`.
-pub(crate) fn deserialize_column_names<'de, D: Deserializer<'de>>(
-    deserializer: D,
-) -> Result<Option<Vec<ColumnName>>, D::Error> {
-    let s: String = Deserialize::deserialize(deserializer)?;
-    let column_names = ColumnName::parse_column_name_list(&s).map_err(de::Error::custom)?;
-    Ok(Some(column_names))
+/// Deserialize a string representing a positive integer into an `Option<u64>`. Returns `Some` if
+/// successfully parses, and `None` otherwise.
+pub(crate) fn parse_positive_int(s: &str) -> Option<i64> {
+    // parse to i64 (then check n > 0) since java doesn't even allow u64
+    let n: i64 = s.parse().ok()?;
+    if n > 0 {
+        Some(n)
+    } else {
+        None
+    }
+}
+
+/// Deserialize a string representing a boolean into an `Option<bool>`. Returns `Some` if
+/// successfully parses, and `None` otherwise.
+pub(crate) fn parse_bool(s: &str) -> Option<bool> {
+    match s {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    }
+}
+
+/// Deserialize a comma-separated list of column names into an `Option<Vec<ColumnName>>`. Returns
+/// `Some` if successfully parses, and `None` otherwise.
+pub(crate) fn parse_column_names(s: &str) -> Option<Vec<ColumnName>> {
+    ColumnName::parse_column_name_list(&s).ok()
 }
 
 /// Deserialize an interval string of the form "interval 5 days" into an `Option<Duration>`.
-pub(crate) fn deserialize_interval<'de, D: Deserializer<'de>>(
-    deserializer: D,
-) -> Result<Option<Duration>, D::Error> {
-    let s = String::deserialize(deserializer)?;
-    parse_interval(&s).map(Some).map_err(de::Error::custom)
+/// Returns `Some` if successfully parses, and `None` otherwise.
+pub(crate) fn parse_interval(s: &str) -> Option<Duration> {
+    parse_interval_impl(s).ok()
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -95,7 +159,7 @@ pub enum ParseIntervalError {
 /// https://github.com/delta-io/delta-rs/blob/d4f18b3ae9d616e771b5d0e0fa498d0086fd91eb/crates/core/src/table/config.rs#L474
 ///
 /// See issue delta-kernel-rs/#507 for details: https://github.com/delta-io/delta-kernel-rs/issues/507
-fn parse_interval(value: &str) -> Result<Duration, ParseIntervalError> {
+fn parse_interval_impl(value: &str) -> Result<Duration, ParseIntervalError> {
     let mut it = value.split_whitespace();
     if it.next() != Some("interval") {
         return Err(ParseIntervalError::NotAnInterval(value.to_string()));
@@ -229,22 +293,22 @@ mod tests {
     #[test]
     fn test_invalid_parse_interval() {
         assert_eq!(
-            parse_interval("whatever").err().unwrap().to_string(),
+            parse_interval_impl("whatever").err().unwrap().to_string(),
             "'whatever' is not an interval".to_string()
         );
 
         assert_eq!(
-            parse_interval("interval").err().unwrap().to_string(),
+            parse_interval_impl("interval").err().unwrap().to_string(),
             "'interval' is not an interval".to_string()
         );
 
         assert_eq!(
-            parse_interval("interval 2").err().unwrap().to_string(),
+            parse_interval_impl("interval 2").err().unwrap().to_string(),
             "'interval 2' is not an interval".to_string()
         );
 
         assert_eq!(
-            parse_interval("interval 2 months")
+            parse_interval_impl("interval 2 months")
                 .err()
                 .unwrap()
                 .to_string(),
@@ -252,7 +316,7 @@ mod tests {
         );
 
         assert_eq!(
-            parse_interval("interval 2 years")
+            parse_interval_impl("interval 2 years")
                 .err()
                 .unwrap()
                 .to_string(),
@@ -260,7 +324,7 @@ mod tests {
         );
 
         assert_eq!(
-            parse_interval("interval two years")
+            parse_interval_impl("interval two years")
                 .err()
                 .unwrap()
                 .to_string(),
@@ -268,7 +332,7 @@ mod tests {
         );
 
         assert_eq!(
-            parse_interval("interval -25 hours")
+            parse_interval_impl("interval -25 hours")
                 .err()
                 .unwrap()
                 .to_string(),

@@ -83,7 +83,7 @@ impl Snapshot {
         protocol.ensure_read_supported()?;
 
         let schema = metadata.schema()?;
-        let table_properties = metadata.parse_table_properties()?;
+        let table_properties = metadata.parse_table_properties();
         let column_mapping_mode = column_mapping_mode(&protocol, &table_properties);
         Ok(Self {
             table_root: location,
