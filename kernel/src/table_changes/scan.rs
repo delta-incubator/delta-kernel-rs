@@ -178,6 +178,7 @@ mod tests {
         let table_changes = table.table_changes(engine.as_ref(), 0, 1).unwrap();
 
         let scan = table_changes.into_scan_builder().build().unwrap();
+        // Note that this table is not partitioned. `part` is a regular field
         assert_eq!(
             scan.all_fields,
             vec![
