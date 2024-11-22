@@ -114,47 +114,36 @@ impl DataVisitor for LogVisitor {
         let (remove_start, remove_end) = self.offsets[&REMOVE_NAME];
         let (metadata_start, metadata_end) = self.offsets[&METADATA_NAME];
         let (protocol_start, protocol_end) = self.offsets[&PROTOCOL_NAME];
-        let (set_transaction_start, set_transaction_end) = self.offsets[&SET_TRANSACTION_NAME];
+        let (txn_start, txn_end) = self.offsets[&SET_TRANSACTION_NAME];
         let (cdc_start, cdc_end) = self.offsets[&CDC_NAME];
         for i in 0..row_count {
             let action = if let Some(path) = getters[add_start].get_opt(i, "add.path")? {
-                Action::Add(AddVisitor::visit_add(
-                    i,
-                    path,
-                    &getters[add_start..add_end],
-                )?)
+                let add = AddVisitor::visit_add(i, path, &getters[add_start..add_end])?;
+                Action::Add(add)
             } else if let Some(path) = getters[remove_start].get_opt(i, "remove.path")? {
-                Action::Remove(RemoveVisitor::visit_remove(
-                    i,
-                    path,
-                    &getters[remove_start..remove_end],
-                )?)
+                let remove =
+                    RemoveVisitor::visit_remove(i, path, &getters[remove_start..remove_end])?;
+                Action::Remove(remove)
             } else if let Some(id) = getters[metadata_start].get_opt(i, "metadata.id")? {
-                Action::Metadata(MetadataVisitor::visit_metadata(
-                    i,
-                    id,
-                    &getters[metadata_start..metadata_end],
-                )?)
+                let metadata =
+                    MetadataVisitor::visit_metadata(i, id, &getters[metadata_start..metadata_end])?;
+                Action::Metadata(metadata)
             } else if let Some(min_reader_version) =
                 getters[protocol_start].get_opt(i, "protocol.min_reader_version")?
             {
-                Action::Protocol(ProtocolVisitor::visit_protocol(
+                let protocol = ProtocolVisitor::visit_protocol(
                     i,
                     min_reader_version,
                     &getters[protocol_start..protocol_end],
-                )?)
-            } else if let Some(app_id) = getters[set_transaction_start].get_opt(i, "txn.appId")? {
-                Action::SetTransaction(SetTransactionVisitor::visit_txn(
-                    i,
-                    app_id,
-                    &getters[set_transaction_start..set_transaction_end],
-                )?)
+                )?;
+                Action::Protocol(protocol)
+            } else if let Some(app_id) = getters[txn_start].get_opt(i, "txn.appId")? {
+                let txn =
+                    SetTransactionVisitor::visit_txn(i, app_id, &getters[txn_start..txn_end])?;
+                Action::SetTransaction(txn)
             } else if let Some(path) = getters[cdc_start].get_opt(i, "cdc.path")? {
-                Action::Cdc(CdcVisitor::visit_cdc(
-                    i,
-                    path,
-                    &getters[cdc_start..cdc_end],
-                )?)
+                let cdc = CdcVisitor::visit_cdc(i, path, &getters[cdc_start..cdc_end])?;
+                Action::Cdc(cdc)
             } else {
                 // TODO: Add CommitInfo support (tricky because all fields are optional)
                 continue;
