@@ -15,8 +15,8 @@ use crate::table_features::{
     ReaderFeatures, WriterFeatures, SUPPORTED_READER_FEATURES, SUPPORTED_WRITER_FEATURES,
 };
 use crate::utils::require;
-use crate::{DeltaResult, EngineData, Error};
-use visitors::{AddVisitor, MetadataVisitor, ProtocolVisitor};
+use crate::{DeltaResult, EngineData, Error, RowVisitor as _};
+use visitors::{MetadataVisitor, ProtocolVisitor};
 
 use delta_kernel_derive::Schema;
 use serde::{Deserialize, Serialize};
@@ -30,16 +30,24 @@ pub mod visitors;
 #[cfg(not(feature = "developer-visibility"))]
 pub(crate) mod visitors;
 
+#[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
 pub(crate) const ADD_NAME: &str = "add";
+#[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
 pub(crate) const REMOVE_NAME: &str = "remove";
+#[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
 pub(crate) const METADATA_NAME: &str = "metaData";
+#[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
 pub(crate) const PROTOCOL_NAME: &str = "protocol";
+#[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
 pub(crate) const SET_TRANSACTION_NAME: &str = "txn";
+#[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
 pub(crate) const COMMIT_INFO_NAME: &str = "commitInfo";
+#[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
 pub(crate) const CDC_NAME: &str = "cdc";
 
 static LOG_ADD_SCHEMA: LazyLock<SchemaRef> =
     LazyLock::new(|| StructType::new([Option::<Add>::get_struct_field(ADD_NAME)]).into());
+
 static LOG_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
     StructType::new([
         Option::<Add>::get_struct_field(ADD_NAME),
@@ -115,7 +123,7 @@ pub struct Metadata {
 impl Metadata {
     pub fn try_new_from_data(data: &dyn EngineData) -> DeltaResult<Option<Metadata>> {
         let mut visitor = MetadataVisitor::default();
-        data.extract(get_log_schema().project(&[METADATA_NAME])?, &mut visitor)?;
+        visitor.visit_rows_of(data)?;
         Ok(visitor.metadata)
     }
 
@@ -184,7 +192,7 @@ impl Protocol {
     /// a Protocol instance. If no protocol row is found, returns Ok(None).
     pub fn try_new_from_data(data: &dyn EngineData) -> DeltaResult<Option<Protocol>> {
         let mut visitor = ProtocolVisitor::default();
-        data.extract(get_log_schema().project(&[PROTOCOL_NAME])?, &mut visitor)?;
+        visitor.visit_rows_of(data)?;
         Ok(visitor.protocol)
     }
 
@@ -379,13 +387,6 @@ pub struct Add {
 }
 
 impl Add {
-    /// Since we always want to parse multiple adds from data, we return a `Vec<Add>`
-    pub fn parse_from_data(data: &dyn EngineData) -> DeltaResult<Vec<Add>> {
-        let mut visitor = AddVisitor::default();
-        data.extract(get_log_add_schema().clone(), &mut visitor)?;
-        Ok(visitor.adds)
-    }
-
     pub fn dv_unique_id(&self) -> Option<String> {
         self.deletion_vector.as_ref().map(|dv| dv.unique_id())
     }

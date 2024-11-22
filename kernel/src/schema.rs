@@ -1,9 +1,9 @@
 //! Definitions and functions to create and manipulate kernel schema
 
 use std::borrow::Cow;
-use std::fmt::Formatter;
+use std::collections::HashMap;
+use std::fmt::{Display, Formatter};
 use std::sync::Arc;
-use std::{collections::HashMap, fmt::Display};
 
 use indexmap::IndexMap;
 use itertools::Itertools;
@@ -266,6 +266,36 @@ impl StructType {
 
     pub fn fields(&self) -> impl Iterator<Item = &StructField> {
         self.fields.values()
+    }
+
+    /// Extracts the name and type of all leaf columns, in schema order. Caller should pass Some
+    /// `own_name` if this schema is embedded in a larger struct (e.g. `add.*`) and None if the
+    /// schema is a top-level result (e.g. `*`).
+    ///
+    /// NOTE: This method only traverses through `StructType` fields; `MapType` and `ArrayType`
+    /// fields are considered leaves even if they contain `StructType` entries/elements.
+    #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
+    pub(crate) fn leaves<'s>(&self, own_name: impl Into<Option<&'s str>>) -> ColumnNamesAndTypes {
+        let mut get_leaves = GetSchemaLeaves::new(own_name.into());
+        let _ = get_leaves.transform_struct(self);
+        (get_leaves.names, get_leaves.types).into()
+    }
+}
+
+/// Helper for RowVisitor implementations
+#[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
+#[derive(Clone, Default)]
+pub(crate) struct ColumnNamesAndTypes(Vec<ColumnName>, Vec<DataType>);
+impl ColumnNamesAndTypes {
+    #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
+    pub(crate) fn as_ref(&self) -> (&[ColumnName], &[DataType]) {
+        (&self.0, &self.1)
+    }
+}
+
+impl From<(Vec<ColumnName>, Vec<DataType>)> for ColumnNamesAndTypes {
+    fn from((names, fields): (Vec<ColumnName>, Vec<DataType>)) -> Self {
+        ColumnNamesAndTypes(names, fields)
     }
 }
 
@@ -712,7 +742,7 @@ pub trait SchemaTransform<'a> {
             .fields()
             .filter_map(|field| self.transform_struct_field(field))
             .inspect(|field| {
-                if matches!(field, Borrowed(_)) {
+                if let Borrowed(_) = field {
                     num_borrowed += 1;
                 }
             })
@@ -761,6 +791,35 @@ pub trait SchemaTransform<'a> {
             }),
         };
         Some(mtype)
+    }
+}
+
+struct GetSchemaLeaves {
+    path: Vec<String>,
+    names: Vec<ColumnName>,
+    types: Vec<DataType>,
+}
+impl GetSchemaLeaves {
+    fn new(own_name: Option<&str>) -> Self {
+        Self {
+            path: own_name.into_iter().map(|s| s.to_string()).collect(),
+            names: vec![],
+            types: vec![],
+        }
+    }
+}
+
+impl<'a> SchemaTransform<'a> for GetSchemaLeaves {
+    fn transform_struct_field(&mut self, field: &StructField) -> Option<Cow<'a, StructField>> {
+        self.path.push(field.name.clone());
+        if let DataType::Struct(_) = field.data_type {
+            let _ = self.recurse_into_struct_field(field);
+        } else {
+            self.names.push(ColumnName::new(&self.path));
+            self.types.push(field.data_type.clone());
+        }
+        self.path.pop();
+        None
     }
 }
 

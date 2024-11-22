@@ -15,7 +15,7 @@ use crate::predicates::{
     DataSkippingPredicateEvaluator, PredicateEvaluator, PredicateEvaluatorDefaults,
 };
 use crate::schema::{DataType, PrimitiveType, SchemaRef, SchemaTransform, StructField, StructType};
-use crate::{Engine, EngineData, ExpressionEvaluator, JsonHandler};
+use crate::{Engine, EngineData, ExpressionEvaluator, JsonHandler, RowVisitor as _};
 
 #[cfg(test)]
 mod tests;
@@ -149,10 +149,7 @@ impl DataSkippingFilter {
 
         // visit the engine's selection vector to produce a Vec<bool>
         let mut visitor = SelectionVectorVisitor::default();
-        let schema = StructType::new([StructField::new("output", DataType::BOOLEAN, false)]);
-        selection_vector
-            .as_ref()
-            .extract(Arc::new(schema), &mut visitor)?;
+        visitor.visit_rows_of(selection_vector.as_ref())?;
         Ok(visitor.selection_vector)
 
         // TODO(zach): add some debug info about data skipping that occurred
