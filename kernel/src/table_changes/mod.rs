@@ -32,7 +32,7 @@ static CDF_FIELDS: LazyLock<[StructField; 3]> = LazyLock::new(|| {
 /// - Change Data Feed must be enabled for the entire range with the `delta.enableChangeDataFeed`
 ///   table property set to 'true'.
 /// - The schema for each commit must be compatible with the end schema. This means that all the
-///   same fields and their nullability are the same. Schema compatiblity will be expanded in the
+///   same fields and their nullability are the same. Schema compatibility will be expanded in the
 ///   future to allow compatible schemas that are not the exact same. See issue [#523](https://github.com/delta-io/delta-kernel-rs/issues/523)
 ///
 ///  # Examples
@@ -179,7 +179,7 @@ mod tests {
 
     #[test]
     fn table_changes_checks_enable_cdf_flag() {
-        // Table with CDF enabled, then disabled at 2 and enabled at 3
+        // Table with CDF enabled, then disabled at version 2 and enabled at version 3
         let path = "./tests/data/table-with-cdf";
         let engine = Box::new(SyncEngine::new());
         let table = Table::try_from_uri(path).unwrap();
