@@ -77,7 +77,7 @@ impl<'seen> AddRemoveDedupVisitor<'seen> {
 
     /// True if this row contains an Add action that should survive log replay. Skip it if the row
     /// is not an Add action, or the file has already been seen previously.
-    fn is_add_to_keep<'a>(&mut self, i: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<bool> {
+    fn is_valid_add<'a>(&mut self, i: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<bool> {
         // Add will have a path at index 0 if it is valid; otherwise, if it is a log batch, we
         // may have a remove with a path at index 4.
         let (path, getters, is_add) = if let Some(path) = getters[0].get_str(i, "add.path")? {
@@ -147,7 +147,7 @@ impl<'seen> RowVisitor for AddRemoveDedupVisitor<'seen> {
         // TODO(zach): Add a check that the selection vector never tries to skip a remove?
         for i in 0..row_count {
             if self.selection_vector[i] {
-                self.selection_vector[i] = self.is_add_to_keep(i, getters)?;
+                self.selection_vector[i] = self.is_valid_add(i, getters)?;
             }
         }
         Ok(())
