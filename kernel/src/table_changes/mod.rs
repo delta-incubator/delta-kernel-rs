@@ -112,12 +112,6 @@ impl TableChanges {
         // compatibility for each schema update in the CDF range.
         // Note: Schema compatibility check will be changed in the future to be more flexible.
         // See issue [#523](https://github.com/delta-io/delta-kernel-rs/issues/523)
-
-        if start_snapshot.schema() != end_snapshot.schema() {
-            return Err(Error::generic(format!(
-                "Failed to build TableChanges: Start and end version schemas are different. Found start version schema {:?} and end version schema {:?}", start_snapshot.schema(), end_snapshot.schema(),
-            )));
-        }
         if start_snapshot.schema() != end_snapshot.schema() {
             return Err(Error::generic(format!(
                 "Failed to build TableChanges: Start and end version schemas are different. Found start version schema {:?} and end version schema {:?}", start_snapshot.schema(), end_snapshot.schema(),
