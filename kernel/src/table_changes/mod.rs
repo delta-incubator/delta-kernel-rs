@@ -82,7 +82,7 @@ impl TableChanges {
         end_version: Option<Version>,
     ) -> DeltaResult<Self> {
         // Both snapshots ensure that reading is supported at the start and end version using
-        // Protocol::ensure_read_supported`. Note that we must still verify that reading is
+        // `ensure_read_supported`. Note that we must still verify that reading is
         // supported for every protocol action in the CDF range.
         let start_snapshot =
             Snapshot::try_new(table_root.as_url().clone(), engine, Some(start_version))?;
