@@ -789,7 +789,7 @@ mod tests {
         //    * GT
         //    * OR
         //      * AND
-        //        * NOT     >LIMIT<
+        //        * NOT
         //  * NE
         //    * AND
         assert_eq!(check_with_call_count(4), (4, 14));
