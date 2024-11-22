@@ -37,9 +37,10 @@ struct LogReplayScanner {
     seen: HashSet<FileActionKey>,
 }
 
-/// A visitor that deduplicates a stream of add and remove actions. Log replay visits actions
-/// newest-first, so once we've seen a file action for a given (path, dvId) pair, we should ignore
-/// all subsequent (older) actions for that same (path, dvId) pair.
+/// A visitor that deduplicates a stream of add and remove actions into a stream of valid adds. Log
+/// replay visits actions newest-first, so once we've seen a file action for a given (path, dvId)
+/// pair, we should ignore all subsequent (older) actions for that same (path, dvId) pair. If the
+/// first action for a given file is a remove, then that file does not show up in the result at all.
 struct AddRemoveDedupVisitor<'seen> {
     seen: &'seen mut HashSet<FileActionKey>,
     selection_vector: Vec<bool>,
