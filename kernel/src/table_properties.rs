@@ -25,7 +25,7 @@ pub use deserialize::ParseIntervalError;
 /// Delta table properties. These are parsed from the 'configuration' map in the most recent
 /// 'Metadata' action of a table.
 ///
-/// Reference: https://github.com/delta-io/delta/blob/master/spark/src/main/scala/org/apache/spark/sql/delta/DeltaConfig.scala
+/// Reference: <https://github.com/delta-io/delta/blob/master/spark/src/main/scala/org/apache/spark/sql/delta/DeltaConfig.scala>
 #[derive(Debug, Clone, Eq, PartialEq, Default)]
 pub struct TableProperties {
     /// true for this Delta table to be append-only. If append-only, existing records cannot be

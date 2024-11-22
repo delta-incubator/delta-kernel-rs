@@ -177,10 +177,6 @@ pub enum Error {
     #[error("File already exists: {0}")]
     FileAlreadyExists(String),
 
-    /// The `metadata` actions's `configuration` field was unable to parse into `TableProperties`
-    #[error("Invalid table properties: {0}")]
-    InvalidTableProperties(String),
-
     /// Some functionality is currently unsupported
     #[error("Unsupported: {0}")]
     Unsupported(String),
@@ -238,9 +234,6 @@ impl Error {
     }
     pub(crate) fn invalid_log_path(msg: impl ToString) -> Self {
         Self::InvalidLogPath(msg.to_string())
-    }
-    pub(crate) fn invalid_table_properties(msg: impl ToString) -> Self {
-        Self::InvalidTableProperties(msg.to_string())
     }
 
     pub fn internal_error(msg: impl ToString) -> Self {

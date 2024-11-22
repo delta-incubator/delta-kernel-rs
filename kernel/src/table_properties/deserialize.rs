@@ -120,7 +120,7 @@ pub(crate) fn parse_bool(s: &str) -> Option<bool> {
 /// Deserialize a comma-separated list of column names into an `Option<Vec<ColumnName>>`. Returns
 /// `Some` if successfully parses, and `None` otherwise.
 pub(crate) fn parse_column_names(s: &str) -> Option<Vec<ColumnName>> {
-    ColumnName::parse_column_name_list(&s).ok()
+    ColumnName::parse_column_name_list(s).ok()
 }
 
 /// Deserialize an interval string of the form "interval 5 days" into an `Option<Duration>`.

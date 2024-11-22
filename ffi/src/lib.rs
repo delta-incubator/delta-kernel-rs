@@ -382,7 +382,6 @@ pub enum KernelError {
     InvalidCommitInfo,
     FileAlreadyExists,
     MissingCommitInfo,
-    InvalidTableProperties,
     UnsupportedError,
     ParseIntervalError,
 }
@@ -436,7 +435,6 @@ impl From<Error> for KernelError {
             Error::InvalidCommitInfo(_) => KernelError::InvalidCommitInfo,
             Error::FileAlreadyExists(_) => KernelError::FileAlreadyExists,
             Error::MissingCommitInfo => KernelError::MissingCommitInfo,
-            Error::InvalidTableProperties(_) => KernelError::InvalidTableProperties,
             Error::Unsupported(_) => KernelError::UnsupportedError,
             Error::ParseIntervalError(_) => KernelError::ParseIntervalError,
         }
