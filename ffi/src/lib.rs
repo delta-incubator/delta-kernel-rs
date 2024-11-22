@@ -384,6 +384,7 @@ pub enum KernelError {
     MissingCommitInfo,
     UnsupportedError,
     ParseIntervalError,
+    ChangeDataFeedUnsupported,
 }
 
 impl From<Error> for KernelError {
@@ -437,6 +438,7 @@ impl From<Error> for KernelError {
             Error::MissingCommitInfo => KernelError::MissingCommitInfo,
             Error::Unsupported(_) => KernelError::UnsupportedError,
             Error::ParseIntervalError(_) => KernelError::ParseIntervalError,
+            Error::ChangeDataFeedUnsupported(_) => KernelError::ChangeDataFeedUnsupported,
         }
     }
 }

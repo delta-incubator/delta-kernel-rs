@@ -67,6 +67,7 @@ pub mod scan;
 pub mod schema;
 pub mod snapshot;
 pub mod table;
+pub mod table_changes;
 pub mod table_features;
 pub mod table_properties;
 pub mod transaction;
@@ -85,7 +86,7 @@ pub mod log_segment;
 pub(crate) mod log_segment;
 
 pub use delta_kernel_derive;
-pub use engine_data::{DataVisitor, EngineData};
+pub use engine_data::{EngineData, RowVisitor};
 pub use error::{DeltaResult, Error};
 pub use expressions::{Expression, ExpressionRef};
 pub use table::Table;
