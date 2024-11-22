@@ -54,7 +54,7 @@ static CDF_FIELDS: LazyLock<[StructField; 3]> = LazyLock::new(|| {
 /// [`Protocol`]: crate::actions::Protocol
 #[derive(Debug)]
 pub struct TableChanges {
-    pub log_segment: LogSegment,
+    pub(crate) log_segment: LogSegment,
     table_root: Url,
     end_snapshot: Snapshot,
     start_version: Version,
