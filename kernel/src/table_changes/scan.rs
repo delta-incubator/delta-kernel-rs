@@ -21,7 +21,42 @@ pub struct TableChangesScan {
     have_partition_cols: bool,
 }
 
-/// Builder to read the `TableChanges` of a table.
+/// This builder constructs a [`TableChangesScan`] that can be used to read the [`TableChanges`]
+/// of a table. [`TableChangesScanBuilder`] allows you to specify a schema to project the columns
+/// or specify a predicate to filter rows in the Change Data Feed. Note that predicates over Change
+/// Data Feed columns `_change_type`, `_commit_version`, and `_commit_timestamp` are not currently
+/// allowed. See issue [#525](https://github.com/delta-io/delta-kernel-rs/issues/525).
+///
+/// #Examples
+/// Construct a [`TableChangesScan`] from `table_changes` with a given schema and predicate
+/// ```rust
+/// # use std::sync::Arc;
+/// # use delta_kernel::engine::sync::SyncEngine;
+/// # use delta_kernel::expressions::{column_expr, Scalar};
+/// # use delta_kernel::scan::ColumnType;
+/// # use delta_kernel::schema::{DataType, StructField, StructType};
+/// # use delta_kernel::{Expression, Table};
+/// # let path = "./tests/data/table-with-cdf";
+/// # let engine = Box::new(SyncEngine::new());
+/// # let table = Table::try_from_uri(path).unwrap();
+/// # let table_changes = table.table_changes(engine.as_ref(), 0, 1).unwrap();
+/// let schema = table_changes
+///     .schema()
+///     .project(&["id", "_commit_version"])
+///     .unwrap();
+/// let predicate = Arc::new(Expression::gt(column_expr!("id"), Scalar::from(10)));
+/// let scan = table_changes
+///     .into_scan_builder()
+///     .with_schema(schema)
+///     .with_predicate(predicate.clone())
+///     .build();
+/// ```
+///
+/// Note: There is a lot of shared functionality between [`TableChangesScanBuilder`] and
+/// [`ScanBuilder`].
+///
+/// [`ScanBuilder`]: crate::scan::ScanBuilder
+#[derive(Debug)]
 pub struct TableChangesScanBuilder {
     table_changes: Arc<TableChanges>,
     schema: Option<SchemaRef>,
@@ -51,11 +86,9 @@ impl TableChangesScanBuilder {
 
     /// Optionally provide a [`SchemaRef`] for columns to select from the [`TableChanges`]. See
     /// [`TableChangesScanBuilder::with_schema`] for details. If `schema_opt` is `None` this is a no-op.
-    pub fn with_schema_opt(self, schema_opt: Option<SchemaRef>) -> Self {
-        match schema_opt {
-            Some(schema) => self.with_schema(schema),
-            None => self,
-        }
+    pub fn with_schema_opt(mut self, schema_opt: Option<SchemaRef>) -> Self {
+        self.schema = schema_opt;
+        self
     }
 
     /// Optionally provide an expression to filter rows. For example, using the predicate `x <
@@ -76,10 +109,10 @@ impl TableChangesScanBuilder {
     /// [`TableChangesScan`] type itself can be used to fetch the files and associated metadata required to
     /// perform actual data reads.
     pub fn build(self) -> DeltaResult<TableChangesScan> {
-        // if no schema is provided, use snapshot's entire schema (e.g. SELECT *)
+        // if no schema is provided, use `TableChanges`'s entire (logical) schema (e.g. SELECT *)
         let logical_schema = self
             .schema
-            .unwrap_or(self.table_changes.schema.clone().into());
+            .unwrap_or_else(|| self.table_changes.schema.clone().into());
         let mut have_partition_cols = false;
         let mut read_fields = Vec::with_capacity(logical_schema.fields.len());
 
