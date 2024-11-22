@@ -240,20 +240,4 @@ mod tests {
         let table_changes = table.table_changes(engine.as_ref(), 0, 0).unwrap();
         assert_equal(expected_schema, table_changes.schema().fields().cloned());
     }
-
-    #[test]
-    fn test_table_changes_has_cdf_schema() {
-        let path = "./tests/data/table-with-cdf";
-        let engine = Box::new(SyncEngine::new());
-        let table = Table::try_from_uri(path).unwrap();
-        let expected_schema = [
-            StructField::new("part", DataType::INTEGER, true),
-            StructField::new("id", DataType::INTEGER, true),
-        ]
-        .into_iter()
-        .chain(CDF_FIELDS.clone());
-
-        let table_changes = table.table_changes(engine.as_ref(), 0, 0).unwrap();
-        assert_equal(expected_schema, table_changes.schema().fields().cloned());
-    }
 }
