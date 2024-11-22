@@ -27,6 +27,10 @@ pub struct TableChangesScan {
 /// Data Feed columns `_change_type`, `_commit_version`, and `_commit_timestamp` are not currently
 /// allowed. See issue [#525](https://github.com/delta-io/delta-kernel-rs/issues/525).
 ///
+/// Note: There is a lot of shared functionality between [`TableChangesScanBuilder`] and
+/// [`ScanBuilder`].
+///
+/// [`ScanBuilder`]: crate::scan::ScanBuilder
 /// #Examples
 /// Construct a [`TableChangesScan`] from `table_changes` with a given schema and predicate
 /// ```rust
@@ -49,11 +53,6 @@ pub struct TableChangesScan {
 ///     .with_predicate(predicate.clone())
 ///     .build();
 /// ```
-///
-/// Note: There is a lot of shared functionality between [`TableChangesScanBuilder`] and
-/// [`ScanBuilder`].
-///
-/// [`ScanBuilder`]: crate::scan::ScanBuilder
 #[derive(Debug)]
 pub struct TableChangesScanBuilder {
     table_changes: Arc<TableChanges>,
