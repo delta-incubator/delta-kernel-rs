@@ -1,8 +1,8 @@
 use delta_kernel::actions::visitors::{
-    AddVisitor, MetadataVisitor, ProtocolVisitor, RemoveVisitor, SetTransactionVisitor,
+    AddVisitor, CdcVisitor, MetadataVisitor, ProtocolVisitor, RemoveVisitor, SetTransactionVisitor,
 };
 use delta_kernel::actions::{
-    get_log_schema, COMMIT_INFO_NAME, METADATA_NAME, PROTOCOL_NAME, REMOVE_NAME,
+    get_log_schema, ADD_NAME, CDC_NAME, METADATA_NAME, PROTOCOL_NAME, REMOVE_NAME,
     SET_TRANSACTION_NAME,
 };
 use delta_kernel::engine::default::executor::tokio::TokioBackgroundExecutor;
@@ -44,9 +44,9 @@ enum Commands {
     ScanData,
     /// Show each action from the log-segments
     Actions {
-        /// Show the log in forward order (default is to show it going backwards in time)
+        /// Show the log in reverse order (default is log replay order -- newest first)
         #[arg(short, long)]
-        forward: bool,
+        oldest_first: bool,
     },
 }
 
@@ -62,63 +62,39 @@ fn main() -> ExitCode {
 }
 
 enum Action {
-    Metadata(delta_kernel::actions::Metadata, usize),
-    Protocol(delta_kernel::actions::Protocol, usize),
-    Remove(delta_kernel::actions::Remove, usize),
-    Add(delta_kernel::actions::Add, usize),
-    SetTransaction(delta_kernel::actions::SetTransaction, usize),
-}
-
-impl Action {
-    fn row(&self) -> usize {
-        match self {
-            Action::Metadata(_, row) => *row,
-            Action::Protocol(_, row) => *row,
-            Action::Remove(_, row) => *row,
-            Action::Add(_, row) => *row,
-            Action::SetTransaction(_, row) => *row,
-        }
-    }
+    Metadata(delta_kernel::actions::Metadata),
+    Protocol(delta_kernel::actions::Protocol),
+    Remove(delta_kernel::actions::Remove),
+    Add(delta_kernel::actions::Add),
+    SetTransaction(delta_kernel::actions::SetTransaction),
+    Cdc(delta_kernel::actions::Cdc),
 }
 
 static NAMES_AND_TYPES: LazyLock<ColumnNamesAndTypes> =
     LazyLock::new(|| get_log_schema().leaves(None));
 
 struct LogVisitor {
-    actions: Vec<Action>,
-    add_offset: usize,
-    remove_offset: usize,
-    protocol_offset: usize,
-    metadata_offset: usize,
-    set_transaction_offset: usize,
-    commit_info_offset: usize,
+    actions: Vec<(Action, usize)>,
+    offsets: HashMap<String, (usize, usize)>,
     previous_rows_seen: usize,
 }
 
 impl LogVisitor {
     fn new() -> LogVisitor {
-        // NOTE: Each `position` call consumes the first item of the searched-for batch. So we have
-        // to add one to each `prev_offset`. But the first call starts from actual first, so we
-        // manually skip the first entry to make the first call behavior match the other calls.
-        let mut names = NAMES_AND_TYPES.as_ref().0.iter();
-        names.next();
-
-        let mut next_offset =
-            |prev_offset, name| prev_offset + 1 + names.position(|n| n[0] == name).unwrap();
-        let add_offset = 0;
-        let remove_offset = next_offset(add_offset, REMOVE_NAME);
-        let metadata_offset = next_offset(remove_offset, METADATA_NAME);
-        let protocol_offset = next_offset(metadata_offset, PROTOCOL_NAME);
-        let set_transaction_offset = next_offset(protocol_offset, SET_TRANSACTION_NAME);
-        let commit_info_offset = next_offset(set_transaction_offset, COMMIT_INFO_NAME);
+        // Grab the start offset for each top-level column name, then compute the end offset by
+        // skipping the rest of the leaves for that column.
+        let mut offsets = HashMap::new();
+        let mut it = NAMES_AND_TYPES.as_ref().0.iter().enumerate().peekable();
+        while let Some((start, col)) = it.next() {
+            let mut end = start + 1;
+            while it.next_if(|(_, other)| col[0] == other[0]).is_some() {
+                end += 1;
+            }
+            offsets.insert(col[0].clone(), (start, end));
+        }
         LogVisitor {
             actions: vec![],
-            add_offset,
-            remove_offset,
-            protocol_offset,
-            metadata_offset,
-            set_transaction_offset,
-            commit_info_offset,
+            offsets,
             previous_rows_seen: 0,
         }
     }
@@ -129,61 +105,51 @@ impl RowVisitor for LogVisitor {
         NAMES_AND_TYPES.as_ref()
     }
     fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<()> {
-        if getters.len() != 50 {
+        if getters.len() != 55 {
             return Err(Error::InternalError(format!(
                 "Wrong number of LogVisitor getters: {}",
                 getters.len()
             )));
         }
+        let (add_start, add_end) = self.offsets[ADD_NAME];
+        let (remove_start, remove_end) = self.offsets[REMOVE_NAME];
+        let (metadata_start, metadata_end) = self.offsets[METADATA_NAME];
+        let (protocol_start, protocol_end) = self.offsets[PROTOCOL_NAME];
+        let (txn_start, txn_end) = self.offsets[SET_TRANSACTION_NAME];
+        let (cdc_start, cdc_end) = self.offsets[CDC_NAME];
         for i in 0..row_count {
-            if let Some(path) = getters[self.add_offset].get_opt(i, "add.path")? {
-                self.actions.push(Action::Add(
-                    AddVisitor::visit_add(i, path, &getters[self.add_offset..self.remove_offset])?,
-                    self.previous_rows_seen + i,
-                ));
-            } else if let Some(path) = getters[self.remove_offset].get_opt(i, "remove.path")? {
-                self.actions.push(Action::Remove(
-                    RemoveVisitor::visit_remove(
-                        i,
-                        path,
-                        &getters[self.remove_offset..self.metadata_offset],
-                    )?,
-                    self.previous_rows_seen + i,
-                ));
-            } else if let Some(id) = getters[self.metadata_offset].get_opt(i, "metadata.id")? {
-                self.actions.push(Action::Metadata(
-                    MetadataVisitor::visit_metadata(
-                        i,
-                        id,
-                        &getters[self.metadata_offset..self.protocol_offset],
-                    )?,
-                    self.previous_rows_seen + i,
-                ));
+            let action = if let Some(path) = getters[add_start].get_opt(i, "add.path")? {
+                let add = AddVisitor::visit_add(i, path, &getters[add_start..add_end])?;
+                Action::Add(add)
+            } else if let Some(path) = getters[remove_start].get_opt(i, "remove.path")? {
+                let remove =
+                    RemoveVisitor::visit_remove(i, path, &getters[remove_start..remove_end])?;
+                Action::Remove(remove)
+            } else if let Some(id) = getters[metadata_start].get_opt(i, "metadata.id")? {
+                let metadata =
+                    MetadataVisitor::visit_metadata(i, id, &getters[metadata_start..metadata_end])?;
+                Action::Metadata(metadata)
             } else if let Some(min_reader_version) =
-                getters[self.protocol_offset].get_opt(i, "protocol.min_reader_version")?
+                getters[protocol_start].get_opt(i, "protocol.min_reader_version")?
             {
-                self.actions.push(Action::Protocol(
-                    ProtocolVisitor::visit_protocol(
-                        i,
-                        min_reader_version,
-                        &getters[self.protocol_offset..self.set_transaction_offset],
-                    )?,
-                    self.previous_rows_seen + i,
-                ));
-            } else if let Some(app_id) =
-                getters[self.set_transaction_offset].get_opt(i, "txn.appId")?
-            {
-                self.actions.push(Action::SetTransaction(
-                    SetTransactionVisitor::visit_txn(
-                        i,
-                        app_id,
-                        &getters[self.set_transaction_offset..self.commit_info_offset],
-                    )?,
-                    self.previous_rows_seen + i,
-                ));
+                let protocol = ProtocolVisitor::visit_protocol(
+                    i,
+                    min_reader_version,
+                    &getters[protocol_start..protocol_end],
+                )?;
+                Action::Protocol(protocol)
+            } else if let Some(app_id) = getters[txn_start].get_opt(i, "txn.appId")? {
+                let txn =
+                    SetTransactionVisitor::visit_txn(i, app_id, &getters[txn_start..txn_end])?;
+                Action::SetTransaction(txn)
+            } else if let Some(path) = getters[cdc_start].get_opt(i, "cdc.path")? {
+                let cdc = CdcVisitor::visit_cdc(i, path, &getters[cdc_start..cdc_end])?;
+                Action::Cdc(cdc)
             } else {
                 // TODO: Add CommitInfo support (tricky because all fields are optional)
-            }
+                continue;
+            };
+            self.actions.push((action, self.previous_rows_seen + i));
         }
         self.previous_rows_seen += row_count;
         Ok(())
@@ -229,7 +195,7 @@ fn try_main() -> DeltaResult<()> {
 
     let snapshot = table.snapshot(&engine, None)?;
 
-    match &cli.command {
+    match cli.command {
         Commands::TableVersion => {
             println!("Latest table version: {}", snapshot.version());
         }
@@ -252,7 +218,7 @@ fn try_main() -> DeltaResult<()> {
                 )?;
             }
         }
-        Commands::Actions { forward } => {
+        Commands::Actions { oldest_first } => {
             let log_schema = get_log_schema();
             let actions = snapshot._log_segment().replay(
                 &engine,
@@ -266,22 +232,17 @@ fn try_main() -> DeltaResult<()> {
                 visitor.visit_rows_of(action?.0.as_ref())?;
             }
 
-            if *forward {
-                visitor
-                    .actions
-                    .sort_by(|a, b| a.row().partial_cmp(&b.row()).unwrap());
-            } else {
-                visitor
-                    .actions
-                    .sort_by(|a, b| b.row().partial_cmp(&a.row()).unwrap());
+            if oldest_first {
+                visitor.actions.reverse();
             }
-            for action in visitor.actions.iter() {
+            for (action, row) in visitor.actions.iter() {
                 match action {
-                    Action::Metadata(md, row) => println!("\nAction {row}:\n{:#?}", md),
-                    Action::Protocol(p, row) => println!("\nAction {row}:\n{:#?}", p),
-                    Action::Remove(r, row) => println!("\nAction {row}:\n{:#?}", r),
-                    Action::Add(a, row) => println!("\nAction {row}:\n{:#?}", a),
-                    Action::SetTransaction(t, row) => println!("\nAction {row}:\n{:#?}", t),
+                    Action::Metadata(md) => println!("\nAction {row}:\n{:#?}", md),
+                    Action::Protocol(p) => println!("\nAction {row}:\n{:#?}", p),
+                    Action::Remove(r) => println!("\nAction {row}:\n{:#?}", r),
+                    Action::Add(a) => println!("\nAction {row}:\n{:#?}", a),
+                    Action::SetTransaction(t) => println!("\nAction {row}:\n{:#?}", t),
+                    Action::Cdc(c) => println!("\nAction {row}:\n{:#?}", c),
                 }
             }
         }

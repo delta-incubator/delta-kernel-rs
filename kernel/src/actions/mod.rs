@@ -42,6 +42,7 @@ pub(crate) const PROTOCOL_NAME: &str = "protocol";
 pub(crate) const SET_TRANSACTION_NAME: &str = "txn";
 #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
 pub(crate) const COMMIT_INFO_NAME: &str = "commitInfo";
+#[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
 pub(crate) const CDC_NAME: &str = "cdc";
 
 static LOG_ADD_SCHEMA: LazyLock<SchemaRef> =
