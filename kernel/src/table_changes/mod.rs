@@ -28,13 +28,15 @@ static CDF_FIELDS: LazyLock<[StructField; 3]> = LazyLock::new(|| {
 ///   commit file's modification timestamp.
 ///
 /// Three properties must hold for the entire CDF range:
-/// - Reading must be supported for every commit in the range. This is determined using [`Protocol::ensure_read_supported`]
+/// - Reading must be supported for every commit in the range. This is determined using [`ensure_read_supported`]
 /// - Change Data Feed must be enabled for the entire range with the `delta.enableChangeDataFeed`
 ///   table property set to 'true'.
 /// - The schema for each commit must be compatible with the end schema. This means that all the
 ///   same fields and their nullability are the same. Schema compatibility will be expanded in the
 ///   future to allow compatible schemas that are not the exact same. See issue [#523](https://github.com/delta-io/delta-kernel-rs/issues/523)
 ///
+/// [`CommitInfo`]: crate::actions::CommitInfo
+/// [`ensure_read_supported`]: crate::actions::Protocol::ensure_read_supported
 ///  # Examples
 ///  Get `TableChanges` for versions 0 to 1 (inclusive)
 ///  ```rust
@@ -49,9 +51,6 @@ static CDF_FIELDS: LazyLock<[StructField; 3]> = LazyLock::new(|| {
 /// For more details, see the following sections of the protocol:
 /// - [Add CDC File](https://github.com/delta-io/delta/blob/master/PROTOCOL.md#add-cdc-file)
 /// - [Change Data Files](https://github.com/delta-io/delta/blob/master/PROTOCOL.md#change-data-files).
-///
-/// [`CommitInfo`]: crate::actions::CommitInfo
-/// [`Protocol`]: crate::actions::Protocol
 #[derive(Debug)]
 pub struct TableChanges {
     pub(crate) log_segment: LogSegment,
@@ -83,9 +82,8 @@ impl TableChanges {
         end_version: Option<Version>,
     ) -> DeltaResult<Self> {
         // Both snapshots ensure that reading is supported at the start and end version using
-        // [`Protocol::ensure_read_supported`]. Note that we must still verify that reading is
+        // Protocol::ensure_read_supported`. Note that we must still verify that reading is
         // supported for every protocol action in the CDF range.
-        // [`Protocol`]: crate::actions::Protocol
         let start_snapshot =
             Snapshot::try_new(table_root.as_url().clone(), engine, Some(start_version))?;
         let end_snapshot = Snapshot::try_new(table_root.as_url().clone(), engine, end_version)?;
