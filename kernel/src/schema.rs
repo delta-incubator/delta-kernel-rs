@@ -275,15 +275,17 @@ impl StructType {
         self.fields.values()
     }
 
-    /// Extracts the name and type of all leaf columns, in schema order.
+    /// Extracts the name and type of all leaf columns, in schema order. Caller should pass Some
+    /// `own_name` if this schema is embedded in a larger struct (e.g. `add.*`) and None if the
+    /// schema is a top-level result (e.g. `*`).
     ///
     /// NOTE: This method only traverses through `StructType` fields; `MapType` and `ArrayType`
     /// fields are considered leaves even if they contain `StructType` entries/elements.
     #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
     pub(crate) fn leaves<'s>(&self, own_name: impl Into<Option<&'s str>>) -> ColumnNamesAndTypes {
-        let mut leaves = SchemaLeaves::new(own_name.into());
-        let _ = leaves.transform_struct(Cow::Borrowed(self));
-        (leaves.names, leaves.types).into()
+        let mut get_leaves = GetSchemaLeaves::new(own_name.into());
+        let _ = get_leaves.transform_struct(Cow::Borrowed(self));
+        (get_leaves.names, get_leaves.types).into()
     }
 }
 
@@ -738,7 +740,7 @@ pub trait SchemaTransform {
             .fields()
             .filter_map(|field| self.transform_struct_field(Borrowed(field)))
             .inspect(|field| {
-                if matches!(field, Borrowed(_)) {
+                if let Borrowed(_) = field {
                     num_borrowed += 1;
                 }
             })
@@ -786,12 +788,12 @@ pub trait SchemaTransform {
     }
 }
 
-struct SchemaLeaves {
+struct GetSchemaLeaves {
     path: Vec<String>,
     names: Vec<ColumnName>,
     types: Vec<DataType>,
 }
-impl SchemaLeaves {
+impl GetSchemaLeaves {
     fn new(own_name: Option<&str>) -> Self {
         Self {
             path: own_name.into_iter().map(|s| s.to_string()).collect(),
@@ -801,13 +803,13 @@ impl SchemaLeaves {
     }
 }
 
-impl SchemaTransform for SchemaLeaves {
+impl SchemaTransform for GetSchemaLeaves {
     fn transform_struct_field<'a>(
         &mut self,
         field: Cow<'a, StructField>,
     ) -> Option<Cow<'a, StructField>> {
         self.path.push(field.name.clone());
-        if matches!(field.data_type, DataType::Struct(_)) {
+        if let DataType::Struct(_) = field.data_type {
             let _ = self.recurse_into_struct_field(field);
         } else {
             self.names.push(ColumnName::new(&self.path));

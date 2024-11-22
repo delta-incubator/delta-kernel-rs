@@ -1,7 +1,7 @@
-use crate::engine_data::{EngineData, EngineList, EngineMap, GetData};
+use crate::engine_data::{EngineData, EngineList, EngineMap, GetData, RowVisitor};
 use crate::expressions::ColumnName;
 use crate::schema::{DataType};
-use crate::{RowVisitor, DeltaResult, Error};
+use crate::{DeltaResult, Error};
 
 use arrow_array::cast::AsArray;
 use arrow_array::types::{Int32Type, Int64Type};
@@ -245,11 +245,11 @@ impl ArrowEngineData {
             }
             DataType::Array(_) => {
                 debug!("Pushing list for {}", ColumnName::new(path));
-                col_as_list().ok_or("string array")
+                col_as_list().ok_or("array<string>")
             }
             DataType::Map(_) => {
                 debug!("Pushing map for {}", ColumnName::new(path));
-                col_as_map().ok_or("string-string map")
+                col_as_map().ok_or("map<string, string>")
             }
             data_type => {
                 return Err(Error::UnexpectedColumnType(format!(
@@ -323,8 +323,11 @@ mod tests {
         let protocol = Protocol::try_new_from_data(parsed.as_ref())?.unwrap();
         assert_eq!(protocol.min_reader_version(), 3);
         assert_eq!(protocol.min_writer_version(), 7);
-        assert_eq!(protocol.reader_features(), Some(vec!["rw1".into()].as_slice()));
-        assert_eq!(protocol.writer_features(), Some(vec!["rw1".into(), "w2".into()].as_slice()));
+        assert_eq!(protocol.reader_features(), Some(["rw1".into()].as_slice()));
+        assert_eq!(
+            protocol.writer_features(),
+            Some(["rw1".into(), "w2".into()].as_slice())
+        );
         Ok(())
     }
 }

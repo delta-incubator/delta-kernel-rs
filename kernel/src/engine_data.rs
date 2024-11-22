@@ -185,14 +185,14 @@ impl<'a> TypedGetData<'a, HashMap<String, String>> for dyn GetData<'a> + '_ {
 }
 
 /// A `RowVisitor` can be called back to visit extracted data. Aside from calling
-/// [`RowVisitorBase::visit`] on the visitor passed to [`EngineData::visit_rows`], engines do
+/// [`RowVisitor::visit`] on the visitor passed to [`EngineData::visit_rows`], engines do
 /// not need to worry about this trait.
-pub trait RowVisitorBase {
+pub trait RowVisitor {
     /// The names and types of leaf fields this visitor accesses. The `EngineData` being visited
-    /// validates these types when extracting column getters, and [`RowVisitorBase::visit`] will
-    /// receive one getter for each selected field, in the requested order. The column names are
-    /// used by [`RowVisitor::visit_rows_of`] to select fields from a "typical" `EngineData`; callers
-    /// whose engine data has different column names can manually invoke [`EngineData::visit_rows`].
+    /// validates these types when extracting column getters, and [`RowVisitor::visit`] will receive
+    /// one getter for each selected field, in the requested order. The column names are used by
+    /// [`RowVisitor::visit_rows_of`] to select fields from a "typical" `EngineData`; callers whose
+    /// engine data has different column names can manually invoke [`EngineData::visit_rows`].
     fn selected_column_names_and_types(&self) -> (&'static [ColumnName], &'static [DataType]);
 
     /// Have the visitor visit the data. This will be called on a visitor passed to
@@ -202,19 +202,14 @@ pub trait RowVisitorBase {
     /// typed data that will fail if the "getter" is for an unexpected type.  The data in `getters`
     /// does not outlive the call to this funtion (i.e. it should be copied if needed).
     fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<()>;
-}
 
-/// Helper trait that simplifies use of [`RowVisitor`] interface, implemented automatically for all
-/// types that implement [`RowVisitor`].
-pub trait RowVisitor: RowVisitorBase {
     /// Visit the rows of an [`EngineData`], selecting the leaf column names given by
-    /// [`RowVisitorBase::selected_column_names_and_types`]. This is a thin wrapper around
-    /// [`EngineData::visit_rows`] which in turn will eventually invoke [`RowVisitorBase::visit`].
-    fn visit_rows_of(&mut self, data: &dyn EngineData) -> DeltaResult<()>;
-}
-
-impl<T: RowVisitorBase> RowVisitor for T {
-    fn visit_rows_of(&mut self, data: &dyn EngineData) -> DeltaResult<()> {
+    /// [`RowVisitor::selected_column_names_and_types`]. This is a thin wrapper around
+    /// [`EngineData::visit_rows`] which in turn will eventually invoke [`RowVisitor::visit`].
+    fn visit_rows_of(&mut self, data: &dyn EngineData) -> DeltaResult<()>
+    where
+        Self: Sized,
+    {
         data.visit_rows(self.selected_column_names_and_types().0, self)
     }
 }

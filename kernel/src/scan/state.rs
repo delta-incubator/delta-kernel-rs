@@ -10,10 +10,10 @@ use crate::{
         deletion_vector::{treemap_to_bools, DeletionVectorDescriptor},
         visitors::visit_deletion_vector_at,
     },
-    engine_data::{GetData, RowVisitorBase, TypedGetData as _},
+    engine_data::{GetData, RowVisitor, TypedGetData as _},
     schema::{ColumnNamesAndTypes, DataType, SchemaRef},
     table_features::ColumnMappingMode,
-    DeltaResult, Engine, EngineData, Error, RowVisitor,
+    DeltaResult, Engine, EngineData, Error,
 };
 use serde::{Deserialize, Serialize};
 use tracing::warn;
@@ -144,7 +144,7 @@ struct ScanFileVisitor<'a, T> {
     selection_vector: &'a [bool],
     context: T,
 }
-impl<T> RowVisitorBase for ScanFileVisitor<'_, T> {
+impl<T> RowVisitor for ScanFileVisitor<'_, T> {
     fn selected_column_names_and_types(&self) -> (&'static [ColumnName], &'static [DataType]) {
         static NAMES_AND_TYPES: LazyLock<ColumnNamesAndTypes> =
             LazyLock::new(|| SCAN_ROW_SCHEMA.leaves(None));
