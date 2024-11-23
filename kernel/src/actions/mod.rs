@@ -133,8 +133,8 @@ impl Metadata {
     }
 
     /// Parse the metadata configuration HashMap<String, String> into a TableProperties struct.
-    /// Note that this method doesn't return a result since any items that fail to parse are
-    /// propagated through to the `TableProperties.unknown_properties` field.
+    /// Note that parsing is infallible -- any items that fail to parse are simply propagated
+    /// through to the `TableProperties.unknown_properties` field.
     pub fn parse_table_properties(&self) -> TableProperties {
         TableProperties::from(self.configuration.iter())
     }

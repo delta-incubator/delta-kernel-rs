@@ -17,82 +17,65 @@ const SECONDS_PER_WEEK: u64 = 7 * SECONDS_PER_DAY;
 impl<K, V, I> From<I> for TableProperties
 where
     I: IntoIterator<Item = (K, V)>,
-    K: AsRef<str>,
-    V: AsRef<str>,
+    K: AsRef<str> + Into<String>,
+    V: AsRef<str> + Into<String>,
 {
     fn from(unparsed: I) -> Self {
         let mut props = TableProperties::default();
-        for (k, v) in unparsed {
-            let parsed =
-                match k.as_ref() {
-                    "delta.appendOnly" => {
-                        parse_bool(v.as_ref()).map(|val| props.append_only = Some(val))
-                    }
-                    "delta.autoOptimize.autoCompact" => {
-                        parse_bool(v.as_ref()).map(|val| props.auto_compact = Some(val))
-                    }
-                    "delta.autoOptimize.optimizeWrite" => {
-                        parse_bool(v.as_ref()).map(|val| props.optimize_write = Some(val))
-                    }
-                    "delta.checkpointInterval" => parse_positive_int(v.as_ref())
-                        .map(|val| props.checkpoint_interval = Some(val)),
-                    "delta.checkpoint.writeStatsAsJson" => parse_bool(v.as_ref())
-                        .map(|val| props.checkpoint_write_stats_as_json = Some(val)),
-                    "delta.checkpoint.writeStatsAsStruct" => parse_bool(v.as_ref())
-                        .map(|val| props.checkpoint_write_stats_as_struct = Some(val)),
-                    "delta.columnMapping.mode" => ColumnMappingMode::try_from(v.as_ref())
-                        .map(|val| props.column_mapping_mode = Some(val))
-                        .ok(),
-                    "delta.dataSkippingNumIndexedCols" => {
-                        DataSkippingNumIndexedCols::try_from(v.as_ref())
-                            .map(|val| props.data_skipping_num_indexed_cols = Some(val))
-                            .ok()
-                    }
-                    "delta.dataSkippingStatsColumns" => parse_column_names(v.as_ref())
-                        .map(|val| props.data_skipping_stats_columns = Some(val)),
-                    "delta.deletedFileRetentionDuration" => parse_interval(v.as_ref())
-                        .map(|val| props.deleted_file_retention_duration = Some(val)),
-                    "delta.enableChangeDataFeed" => {
-                        parse_bool(v.as_ref()).map(|val| props.enable_change_data_feed = Some(val))
-                    }
-                    "delta.enableDeletionVectors" => {
-                        parse_bool(v.as_ref()).map(|val| props.enable_deletion_vectors = Some(val))
-                    }
-                    "delta.isolationLevel" => IsolationLevel::try_from(v.as_ref())
-                        .map(|val| props.isolation_level = Some(val))
-                        .ok(),
-                    "delta.logRetentionDuration" => parse_interval(v.as_ref())
-                        .map(|val| props.log_retention_duration = Some(val)),
-                    "delta.enableExpiredLogCleanup" => parse_bool(v.as_ref())
-                        .map(|val| props.enable_expired_log_cleanup = Some(val)),
-                    "delta.randomizeFilePrefixes" => {
-                        parse_bool(v.as_ref()).map(|val| props.randomize_file_prefixes = Some(val))
-                    }
-                    "delta.randomPrefixLength" => parse_positive_int(v.as_ref())
-                        .map(|val| props.random_prefix_length = Some(val)),
-                    "delta.setTransactionRetentionDuration" => parse_interval(v.as_ref())
-                        .map(|val| props.set_transaction_retention_duration = Some(val)),
-                    "delta.targetFileSize" => {
-                        parse_positive_int(v.as_ref()).map(|val| props.target_file_size = Some(val))
-                    }
-                    "delta.tuneFileSizesForRewrites" => parse_bool(v.as_ref())
-                        .map(|val| props.tune_file_sizes_for_rewrites = Some(val)),
-                    "delta.checkpointPolicy" => CheckpointPolicy::try_from(v.as_ref())
-                        .map(|val| props.checkpoint_policy = Some(val))
-                        .ok(),
-                    "delta.enableRowTracking" => {
-                        parse_bool(v.as_ref()).map(|val| props.enable_row_tracking = Some(val))
-                    }
-                    _ => None,
-                };
-            if parsed.is_none() {
-                props
-                    .unknown_properties
-                    .insert(k.as_ref().to_string(), v.as_ref().to_string());
-            }
-        }
+        let unparsed = unparsed.into_iter().filter(|(k, v)| {
+            // Only keep elements that fail to parse
+            try_parse(&mut props, k.as_ref(), v.as_ref()).is_none()
+        });
+        props.unknown_properties = unparsed.map(|(k, v)| (k.into(), v.into())).collect();
         props
     }
+}
+
+// attempt to parse a key-value pair into a `TableProperties` struct. Returns Some(()) if the key
+// was successfully parsed, and None otherwise.
+fn try_parse(props: &mut TableProperties, k: &str, v: &str) -> Option<()> {
+    match k {
+        "delta.appendOnly" => props.append_only = Some(parse_bool(v)?),
+        "delta.autoOptimize.autoCompact" => props.auto_compact = Some(parse_bool(v)?),
+        "delta.autoOptimize.optimizeWrite" => props.optimize_write = Some(parse_bool(v)?),
+        "delta.checkpointInterval" => props.checkpoint_interval = Some(parse_positive_int(v)?),
+        "delta.checkpoint.writeStatsAsJson" => {
+            props.checkpoint_write_stats_as_json = Some(parse_bool(v)?)
+        }
+        "delta.checkpoint.writeStatsAsStruct" => {
+            props.checkpoint_write_stats_as_struct = Some(parse_bool(v)?)
+        }
+        "delta.columnMapping.mode" => {
+            props.column_mapping_mode = ColumnMappingMode::try_from(v).ok()
+        }
+        "delta.dataSkippingNumIndexedCols" => {
+            props.data_skipping_num_indexed_cols = DataSkippingNumIndexedCols::try_from(v).ok()
+        }
+        "delta.dataSkippingStatsColumns" => {
+            props.data_skipping_stats_columns = Some(parse_column_names(v)?)
+        }
+        "delta.deletedFileRetentionDuration" => {
+            props.deleted_file_retention_duration = Some(parse_interval(v)?)
+        }
+        "delta.enableChangeDataFeed" => props.enable_change_data_feed = Some(parse_bool(v)?),
+        "delta.enableDeletionVectors" => props.enable_deletion_vectors = Some(parse_bool(v)?),
+        "delta.isolationLevel" => props.isolation_level = IsolationLevel::try_from(v).ok(),
+        "delta.logRetentionDuration" => props.log_retention_duration = Some(parse_interval(v)?),
+        "delta.enableExpiredLogCleanup" => props.enable_expired_log_cleanup = Some(parse_bool(v)?),
+        "delta.randomizeFilePrefixes" => props.randomize_file_prefixes = Some(parse_bool(v)?),
+        "delta.randomPrefixLength" => props.random_prefix_length = Some(parse_positive_int(v)?),
+        "delta.setTransactionRetentionDuration" => {
+            props.set_transaction_retention_duration = Some(parse_interval(v)?)
+        }
+        "delta.targetFileSize" => props.target_file_size = Some(parse_positive_int(v)?),
+        "delta.tuneFileSizesForRewrites" => {
+            props.tune_file_sizes_for_rewrites = Some(parse_bool(v)?)
+        }
+        "delta.checkpointPolicy" => props.checkpoint_policy = CheckpointPolicy::try_from(v).ok(),
+        "delta.enableRowTracking" => props.enable_row_tracking = Some(parse_bool(v)?),
+        _ => return None,
+    }
+    Some(())
 }
 
 /// Deserialize a string representing a positive integer into an `Option<u64>`. Returns `Some` if
@@ -100,11 +83,7 @@ where
 pub(crate) fn parse_positive_int(s: &str) -> Option<i64> {
     // parse to i64 (then check n > 0) since java doesn't even allow u64
     let n: i64 = s.parse().ok()?;
-    if n > 0 {
-        Some(n)
-    } else {
-        None
-    }
+    (n > 0).then_some(n)
 }
 
 /// Deserialize a string representing a boolean into an `Option<bool>`. Returns `Some` if

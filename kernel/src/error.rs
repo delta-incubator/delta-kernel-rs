@@ -182,7 +182,7 @@ pub enum Error {
     #[error("Unsupported: {0}")]
     Unsupported(String),
 
-    /// Parsing error when attempting to deserizlize an interval
+    /// Parsing error when attempting to deserialize an interval
     #[error(transparent)]
     ParseIntervalError(#[from] ParseIntervalError),
 

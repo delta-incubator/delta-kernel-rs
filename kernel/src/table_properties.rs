@@ -222,7 +222,7 @@ mod tests {
 
     #[test]
     fn allow_unknown_keys() {
-        let properties = [("some_random_unknown_key".to_string(), "test".to_string())];
+        let properties = [("unknown_properties".to_string(), "two words".to_string())];
         let actual = TableProperties::from(properties.clone().into_iter());
         let expected = TableProperties {
             unknown_properties: HashMap::from(properties),
