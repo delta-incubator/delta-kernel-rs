@@ -190,7 +190,6 @@ fn parse_interval_impl(value: &str) -> Result<Duration, ParseIntervalError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::expressions::column_name;
 
     #[test]
     fn test_parse_bool() {
