@@ -116,11 +116,11 @@ fn gen_schema_fields(data: &Data) -> TokenStream {
                     }
                 });
                 if have_schema_null {
-                    if let Some(first_ident) = type_path.path.segments.first().map(|seg| &seg.ident) {
-                        if first_ident != "HashMap" {
+                    if let Some(last_ident) = type_path.path.segments.last().map(|seg| &seg.ident) {
+                        if last_ident != "HashMap" {
                            return Error::new(
-                                first_ident.span(),
-                                format!("Can only use drop_null_container_values on HashMap fields, not {first_ident}")
+                                last_ident.span(),
+                                format!("Can only use drop_null_container_values on HashMap fields, not {last_ident}")
                             ).to_compile_error()
                         }
                     }

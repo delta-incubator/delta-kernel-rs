@@ -50,8 +50,11 @@
     rust_2021_compatibility
 )]
 
-/// This allows the derive macro to refer to types in this crate using full crate name, instead of using `crate::`,
-/// which seem to be the only way to to test the macro generated code and macro compile failures
+/// This `extern crate` declaration allows the macro to reliably refer to
+/// `delta_kernel::schema::DataType` no matter which crate invokes it. Without that, `delta_kernel`
+/// cannot invoke the macro because `delta_kernel` is an unknown crate identifier (you have to use
+/// `crate` instead). We could make the macro use `crate::schema::DataType` instead, but then the
+/// macro is useless outside the `delta_kernel` crate.
 extern crate self as delta_kernel;
 
 use std::any::Any;
@@ -464,4 +467,16 @@ mod doc_tests {
     /// ```
     #[cfg(doctest)]
     pub struct MacroTestStructWithInvalidFieldType;
+
+    /// ```
+    /// # use delta_kernel_derive::Schema;
+    /// # use std::collections::HashMap;
+    /// #[derive(Schema)]
+    /// pub struct WithMultiPartType {
+    ///     #[drop_null_container_values]
+    ///     some_name: std::collections::HashMap<String, String>,
+    /// }
+    /// ```
+    #[cfg(doctest)]
+    pub struct MacroTestStructWithMultiPartType;
 }
