@@ -194,6 +194,7 @@ impl<'a> Phase1Visitor<'a> {
     fn schema() -> DeltaResult<Arc<StructType>> {
         get_log_schema().project(&[
             ADD_NAME,
+            REMOVE_NAME,
             CDC_NAME,
             COMMIT_INFO_NAME,
             METADATA_NAME,
@@ -240,11 +241,11 @@ impl<'a> RowVisitor for Phase1Visitor<'a> {
         row_count: usize,
         getters: &[&'b dyn crate::engine_data::GetData<'b>],
     ) -> DeltaResult<()> {
-        let expected_getters = 8;
+        let expected_getters = 12;
         require!(
             getters.len() == expected_getters,
             Error::InternalError(format!(
-                "Wrong number of AddRemoveDedupVisitor getters: {}",
+                "Wrong number of Phase1Visitor getters: {}",
                 getters.len()
             ))
         );
@@ -263,6 +264,11 @@ impl<'a> RowVisitor for Phase1Visitor<'a> {
                         .insert(path.to_string(), DvInfo { deletion_vector });
                 } else if getters[5].get_str(i, "cdc.path")?.is_some() {
                     self.scanner.has_cdc_action = true;
+
+                    // This commit has a cdc file, so add and remove actions no longer need to be
+                    // processed
+                    self.add_set.clear();
+                    self.scanner.remove_dvs.clear();
                 }
             }
             if let Some(timestamp) = getters[6].get_long(i, "commitInfo.timestamp")? {
@@ -361,23 +367,110 @@ impl<'a> RowVisitor for Phase2Visitor<'a> {
 #[cfg(test)]
 mod tests {
 
-    use crate::actions::get_log_add_schema;
-    use crate::engine::sync::SyncEngine;
+    use crate::engine::arrow_expression::ArrowExpressionHandler;
+    use crate::engine::default::executor::tokio::TokioBackgroundExecutor;
+    use crate::engine::default::filesystem::ObjectStoreFileSystemClient;
+    use crate::schema::{DataType, StructField, StructType};
+    use arrow_array::RecordBatch;
+    use itertools::Itertools;
+    use object_store::local::LocalFileSystem;
+    use object_store::{memory::InMemory, path::Path, ObjectStore};
+    use serde::Serialize;
+    use std::collections::HashMap;
+    use std::path::Path as FsPath;
+    use std::sync::Arc;
+    use tempfile::TempDir;
+    use tokio::runtime::Runtime;
+    use url::Url;
+
+    use super::{get_add_transform_expr, LogReplayScanner};
+    use crate::actions::{get_log_add_schema, Add, Cdc, CommitInfo, Metadata, Protocol, Remove};
+    use crate::engine::sync::{json, parquet, SyncEngine};
     use crate::log_segment::LogSegment;
     use crate::path::ParsedLogPath;
     use crate::scan::log_replay::SCAN_ROW_DATATYPE;
-    use crate::{scan, DeltaResult, Engine, Version};
+    use crate::{AsAny, DeltaResult, Engine, FileSystemClient, Version};
+    use test_utils::delta_path_for_version;
 
-    use super::{get_add_transform_expr, LogReplayScanner};
+    #[derive(Serialize)]
+    #[serde(untagged)]
+    enum Action {
+        Add(Add),
+        Remove(Remove),
+        Cdc(Cdc),
+        Metadata(Metadata),
+        Protocol(Protocol),
+        CommitInfo(CommitInfo),
+    }
+    struct MockTable {
+        commit_num: u64,
+        store: Arc<LocalFileSystem>,
+        runtime: Runtime,
+        dir: TempDir,
+    }
+
+    impl MockTable {
+        pub(crate) fn new() -> Self {
+            let runtime = tokio::runtime::Runtime::new().expect("create tokio runtime");
+
+            let dir = tempfile::tempdir().unwrap();
+            let store = Arc::new(LocalFileSystem::new_with_prefix(dir.path()).unwrap());
+            Self {
+                commit_num: 0,
+                store,
+                runtime,
+                dir,
+            }
+        }
+        pub(crate) fn commit(&mut self, actions: &[Action]) {
+            let data = actions
+                .iter()
+                .map(|action| serde_json::to_string(&action).unwrap())
+                .join("\n");
+
+            let path = delta_path_for_version(self.commit_num, "json");
+            self.commit_num += 1;
+            // add log files to store
+            self.runtime.block_on(async {
+                self.store
+                    .put(&path, data.into())
+                    .await
+                    .expect("put log file in store");
+            });
+        }
+        pub(crate) fn table_root(&self) -> &FsPath {
+            self.dir.path()
+        }
+    }
+    fn get_init_commit() -> Vec<Action> {
+        let schema = StructType::new([
+            StructField::new("id", DataType::LONG, true),
+            StructField::new("value", DataType::STRING, true),
+        ]);
+        let schema_string = serde_json::to_string(&schema).unwrap();
+        vec![
+            Action::Metadata(Metadata {
+                schema_string,
+                configuration: HashMap::from([
+                    ("enableChangeDataFeed".to_string(), "true".to_string()),
+                    ("enableDeletionVectors".to_string(), "true".to_string()),
+                ]),
+                ..Default::default()
+            }),
+            Action::Protocol(
+                Protocol::try_new(3, 7, Some(["deletionVectors"]), Some(["deletionVectors"]))
+                    .unwrap(),
+            ),
+        ]
+    }
 
     fn get_segment(
         engine: &dyn Engine,
-        path: &str,
+        path: &FsPath,
         start_version: Version,
         end_version: impl Into<Option<Version>>,
     ) -> DeltaResult<Vec<ParsedLogPath>> {
         let table_root = url::Url::from_directory_path(path).unwrap();
-
         let log_root = table_root.join("_delta_log/")?;
         let log_segment = LogSegment::for_table_changes(
             engine.get_file_system_client().as_ref(),
@@ -405,12 +498,27 @@ mod tests {
     #[test]
     fn simple_log_replay() {
         let engine = SyncEngine::new();
-        let path = "./tests/data/table-with-cdf";
-        let mut commits = get_segment(&engine, path, 0, None).unwrap().into_iter();
+        let mut mock_table = MockTable::new();
+        mock_table.commit(&get_init_commit());
+
+        let commits = get_segment(&engine, mock_table.table_root(), 0, None).unwrap();
+        println!("Commits: {:?}", commits);
+        let mut commits = commits.into_iter();
 
         let mut scanner = get_commit_log_scanner(&engine, commits.next().unwrap());
         scanner.phase_1().unwrap();
         assert!(!scanner.has_cdc_action);
         assert!(scanner.remove_dvs.is_empty());
+        //let iter: Vec<_> = scanner
+        //    .into_scan_batches()
+        //    .unwrap()
+        //    .map(|x| -> DeltaResult<_> {
+        //        let x = x?;
+        //        let y: Box<RecordBatch> = x.0.into_any().downcast().unwrap();
+        //        Ok((y, x.1, x.2))
+        //    })
+        //    .try_collect()
+        //    .unwrap();
+        //println!("Iter: {:?}", iter);
     }
 }
