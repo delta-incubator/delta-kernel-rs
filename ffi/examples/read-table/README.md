@@ -15,6 +15,14 @@ $ cargo build -p delta_kernel_ffi [--release] [--features default-engine]
 $ cargo build [--release] [--features default-engine]
 ```
 
+There are two configurations that can currently be configured in cmake:
+```bash
+# turn on VERBOSE mode (default is off) - print more diagnostics
+$ cmake -DVERBOSE=yes ..
+# turn off PRINT_DATA (default is on) - see below
+$ cmake -DPRINT_DATA=no ..
+```
+
 ## Linux / MacOS
 
 Most likely something like this should work:
