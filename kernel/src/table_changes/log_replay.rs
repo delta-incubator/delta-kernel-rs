@@ -22,7 +22,11 @@ use crate::{
 };
 use itertools::Itertools;
 
-type TableChangesScanData = (Box<dyn EngineData>, Vec<bool>, Arc<HashMap<String, DvInfo>>);
+struct TableChangesScanData {
+    data: Box<dyn EngineData>,
+    selection_vector: Vec<bool>,
+    remove_dv: Option<Arc<HashMap<String, DvInfo>>>,
+}
 
 /// Given an iterator of ParsedLogPath and a predicate, returns an iterator of
 /// [`TableChangesScanData`] = `(engine_data, selection_vec, remove_deletion_vectors)`.
@@ -52,7 +56,7 @@ pub(crate) fn table_changes_action_iter(
                 filter.clone(),
                 expression_evaluator.clone(),
             );
-            scanner.phase_1()?;
+            scanner.visit_commit()?;
             scanner.resolve_dvs();
             scanner.into_scan_batches()
         })
@@ -103,7 +107,7 @@ impl LogReplayScanner {
             add_paths: Default::default(),
         }
     }
-    fn phase_1(&mut self) -> DeltaResult<()> {
+    fn visit_commit(&mut self) -> DeltaResult<()> {
         let schema = Phase1Visitor::schema()?;
         let action_iter =
             self.json_client
@@ -182,8 +186,12 @@ impl LogReplayScanner {
             let mut visitor = Phase2Visitor::new(&remove_dvs, selection_vector, has_cdc_action);
             visitor.visit_rows_of(actions.as_ref())?;
 
-            let result = expression_evaluator.evaluate(actions.as_ref())?;
-            Ok((result, visitor.selection_vector, remove_dvs.clone()))
+            let data = expression_evaluator.evaluate(actions.as_ref())?;
+            Ok(TableChangesScanData {
+                data,
+                selection_vector: visitor.selection_vector,
+                remove_dv: Some(remove_dvs.clone()),
+            })
         });
         Ok(result)
     }
@@ -231,6 +239,8 @@ impl<'a> RowVisitor for Phase1Visitor<'a> {
                 (STRING, column_name!("remove.deletionVector.storageType")),
                 (STRING, column_name!("remove.deletionVector.pathOrInlineDv")),
                 (INTEGER, column_name!("remove.deletionVector.offset")),
+                (INTEGER, column_name!("remove.deletionVector.sizeInBytes")),
+                (LONG, column_name!("remove.deletionVector.cardinality")),
                 (STRING, column_name!("cdc.path")),
                 (LONG, column_name!("commitInfo.timestamp")),
                 (STRING, column_name!("metaData.schemaString")),
@@ -250,7 +260,7 @@ impl<'a> RowVisitor for Phase1Visitor<'a> {
         row_count: usize,
         getters: &[&'b dyn crate::engine_data::GetData<'b>],
     ) -> DeltaResult<()> {
-        let expected_getters = 12;
+        let expected_getters = 14;
         require!(
             getters.len() == expected_getters,
             Error::InternalError(format!(
@@ -269,25 +279,25 @@ impl<'a> RowVisitor for Phase1Visitor<'a> {
                 self.scanner.add_paths.insert(path.to_string());
             } else if let Some(path) = getters[1].get_str(i, "remove.path")? {
                 println!("Found remove path");
-                let deletion_vector = visit_deletion_vector_at(i, &getters[2..=4])?;
+                let deletion_vector = visit_deletion_vector_at(i, &getters[2..=6])?;
                 self.scanner
                     .remove_dvs
                     .insert(path.to_string(), DvInfo { deletion_vector });
-            } else if getters[5].get_str(i, "cdc.path")?.is_some() {
+            } else if getters[7].get_str(i, "cdc.path")?.is_some() {
                 println!("Found cdc path");
                 self.scanner.has_cdc_action = true;
-            } else if let Some(timestamp) = getters[6].get_long(i, "commitInfo.timestamp")? {
+            } else if let Some(timestamp) = getters[8].get_long(i, "commitInfo.timestamp")? {
                 println!("Found timestamp");
                 self.scanner.timestamp = timestamp;
-            } else if let Some(schema) = getters[7].get_str(i, "metaData.schemaString")? {
+            } else if let Some(schema) = getters[9].get_str(i, "metaData.schemaString")? {
                 println!("Found metadata");
                 // TODO: Validate that the schema is as expected
             } else if let Some(min_reader_version) =
-                getters[8].get_int(i, "protocol.min_reader_version")?
+                getters[10].get_int(i, "protocol.min_reader_version")?
             {
                 println!("Found protocol");
                 let protocol =
-                    ProtocolVisitor::visit_protocol(i, min_reader_version, &getters[8..=11])?;
+                    ProtocolVisitor::visit_protocol(i, min_reader_version, &getters[10..=13])?;
                 protocol.ensure_read_supported()?;
             } else {
                 println!("Didn't find anything")
@@ -375,6 +385,7 @@ impl<'a> RowVisitor for Phase2Visitor<'a> {
 #[cfg(test)]
 mod tests {
 
+    use crate::actions::deletion_vector::DeletionVectorDescriptor;
     use crate::scan::state::DvInfo;
     use crate::schema::{DataType, StructField, StructType};
     use itertools::Itertools;
@@ -387,7 +398,7 @@ mod tests {
     use tempfile::TempDir;
     use tokio::runtime::Runtime;
 
-    use super::{get_add_transform_expr, LogReplayScanner};
+    use super::{get_add_transform_expr, LogReplayScanner, TableChangesScanData};
     use crate::actions::{get_log_add_schema, Add, Cdc, CommitInfo, Metadata, Protocol, Remove};
     use crate::engine::sync::SyncEngine;
     use crate::log_segment::LogSegment;
@@ -537,6 +548,12 @@ mod tests {
             expression_evaluator.clone(),
         )
     }
+    fn result_to_sv(iter: impl Iterator<Item = DeltaResult<TableChangesScanData>>) -> Vec<bool> {
+        iter.map(|scan_data| -> DeltaResult<_> { Ok(scan_data?.selection_vector) })
+            .flatten_ok()
+            .try_collect()
+            .unwrap()
+    }
 
     #[test]
     fn metadata_protocol() {
@@ -550,22 +567,17 @@ mod tests {
 
         let mut scanner = get_commit_log_scanner(&engine, commits.next().unwrap());
 
-        scanner.phase_1().unwrap();
+        scanner.visit_commit().unwrap();
         assert!(!scanner.has_cdc_action);
         assert!(scanner.remove_dvs.is_empty());
         assert!(scanner.add_paths.is_empty());
 
         scanner.resolve_dvs();
 
-        let x: Vec<_> = scanner
-            .into_scan_batches()
-            .unwrap()
-            .map(|x| -> DeltaResult<_> { Ok(x?.1) })
-            .flatten_ok()
-            .try_collect()
-            .unwrap();
-
-        assert_eq!(x, &[false, false]);
+        assert_eq!(
+            result_to_sv(scanner.into_scan_batches().unwrap()),
+            &[false, false]
+        );
     }
 
     #[test]
@@ -593,7 +605,8 @@ mod tests {
         let commit = commits.nth(1).unwrap();
         let mut scanner = get_commit_log_scanner(&engine, commit);
 
-        scanner.phase_1().unwrap();
+        scanner.visit_commit().unwrap();
+        assert!(!scanner.has_cdc_action);
         assert_eq!(
             scanner.add_paths,
             HashSet::from(["fake_path_1".to_string()])
@@ -609,16 +622,154 @@ mod tests {
         );
 
         scanner.resolve_dvs();
-        assert!(!scanner.has_cdc_action);
         assert_eq!(scanner.remove_dvs, HashMap::new());
 
-        let x: Vec<_> = scanner
-            .into_scan_batches()
+        assert_eq!(
+            result_to_sv(scanner.into_scan_batches().unwrap()),
+            &[true, true]
+        );
+    }
+
+    #[test]
+    fn table_changes_cdc() {
+        let engine = SyncEngine::new();
+        let mut mock_table = MockTable::new();
+        mock_table.commit(&get_init_commit());
+        mock_table.commit(&[
+            Add {
+                path: "fake_path_1".into(),
+                ..Default::default()
+            }
+            .into(),
+            Remove {
+                path: "fake_path_2".into(),
+                ..Default::default()
+            }
+            .into(),
+            Cdc {
+                path: "fake_path_3".into(),
+                ..Default::default()
+            }
+            .into(),
+        ]);
+
+        let mut commits = get_segment(&engine, mock_table.table_root(), 0, None)
             .unwrap()
-            .map(|x| -> DeltaResult<_> { Ok(x?.1) })
-            .flatten_ok()
-            .try_collect()
-            .unwrap();
-        assert_eq!(x, &[true, true]);
+            .into_iter();
+
+        let commit = commits.nth(1).unwrap();
+        let mut scanner = get_commit_log_scanner(&engine, commit);
+
+        scanner.visit_commit().unwrap();
+        assert!(scanner.has_cdc_action);
+        assert_eq!(
+            scanner.add_paths,
+            HashSet::from(["fake_path_1".to_string()])
+        );
+        assert_eq!(
+            scanner.remove_dvs,
+            HashMap::from([(
+                "fake_path_2".to_string(),
+                DvInfo {
+                    deletion_vector: None
+                }
+            )])
+        );
+
+        scanner.resolve_dvs();
+        assert_eq!(scanner.remove_dvs, HashMap::new());
+
+        assert_eq!(
+            result_to_sv(scanner.into_scan_batches().unwrap()),
+            &[false, false, true]
+        );
+    }
+
+    #[test]
+    fn table_changes_dv() {
+        let engine = SyncEngine::new();
+        let mut mock_table = MockTable::new();
+        mock_table.commit(&get_init_commit());
+
+        let deletion_vector1 = DeletionVectorDescriptor {
+            storage_type: "u".to_string(),
+            path_or_inline_dv: "vBn[lx{q8@P<9BNH/isA".to_string(),
+            offset: Some(1),
+            size_in_bytes: 36,
+            cardinality: 2,
+        };
+        let deletion_vector2 = DeletionVectorDescriptor {
+            storage_type: "u".to_string(),
+            path_or_inline_dv: "U5OWRz5k%CFT.Td}yCPW".to_string(),
+            offset: Some(1),
+            size_in_bytes: 38,
+            cardinality: 3,
+        };
+        mock_table.commit(&[
+            Add {
+                path: "fake_path_1".into(),
+                ..Default::default()
+            }
+            .into(),
+            Remove {
+                path: "fake_path_1".into(),
+                deletion_vector: Some(deletion_vector1.clone()),
+                ..Default::default()
+            }
+            .into(),
+            Remove {
+                path: "fake_path_2".into(),
+                deletion_vector: Some(deletion_vector2.clone()),
+                ..Default::default()
+            }
+            .into(),
+        ]);
+
+        let mut commits = get_segment(&engine, mock_table.table_root(), 0, None)
+            .unwrap()
+            .into_iter();
+
+        let commit = commits.nth(1).unwrap();
+        let mut scanner = get_commit_log_scanner(&engine, commit);
+
+        scanner.visit_commit().unwrap();
+        assert!(!scanner.has_cdc_action);
+        assert_eq!(
+            scanner.add_paths,
+            HashSet::from(["fake_path_1".to_string()])
+        );
+        assert_eq!(
+            scanner.remove_dvs,
+            HashMap::from([
+                (
+                    "fake_path_1".to_string(),
+                    DvInfo {
+                        deletion_vector: Some(deletion_vector1.clone())
+                    }
+                ),
+                (
+                    "fake_path_2".to_string(),
+                    DvInfo {
+                        deletion_vector: Some(deletion_vector2.clone())
+                    }
+                )
+            ])
+        );
+
+        scanner.resolve_dvs();
+        assert_eq!(
+            scanner.remove_dvs,
+            HashMap::from([(
+                "fake_path_1".to_string(),
+                DvInfo {
+                    deletion_vector: Some(deletion_vector1.clone())
+                }
+            )])
+        );
+
+        assert_eq!(
+            result_to_sv(scanner.into_scan_batches().unwrap()),
+            &[true, false, true]
+        );
     }
 }
