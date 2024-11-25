@@ -48,6 +48,7 @@ pub enum KernelError {
     FileAlreadyExists,
     MissingCommitInfo,
     UnsupportedError,
+    ParseIntervalError,
     ChangeDataFeedUnsupported,
 }
 
@@ -101,6 +102,7 @@ impl From<Error> for KernelError {
             Error::FileAlreadyExists(_) => KernelError::FileAlreadyExists,
             Error::MissingCommitInfo => KernelError::MissingCommitInfo,
             Error::Unsupported(_) => KernelError::UnsupportedError,
+            Error::ParseIntervalError(_) => KernelError::ParseIntervalError,
             Error::ChangeDataFeedUnsupported(_) => KernelError::ChangeDataFeedUnsupported,
         }
     }
