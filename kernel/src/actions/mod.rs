@@ -85,6 +85,7 @@ pub(crate) fn get_log_commit_info_schema() -> &'static SchemaRef {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Schema)]
+#[cfg_attr(test, derive(Serialize), serde(rename_all = "camelCase"))]
 pub struct Format {
     /// Name of the encoding for files in this table
     pub provider: String,
@@ -102,6 +103,7 @@ impl Default for Format {
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Schema)]
+#[cfg_attr(test, derive(Serialize), serde(rename_all = "camelCase"))]
 pub struct Metadata {
     /// Unique identifier for this table
     pub id: String,
@@ -325,6 +327,7 @@ where
 #[derive(Debug, Clone, PartialEq, Eq, Schema)]
 #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
 #[cfg_attr(not(feature = "developer-visibility"), visibility::make(pub(crate)))]
+#[cfg_attr(test, derive(Serialize), serde(rename_all = "camelCase"))]
 struct CommitInfo {
     /// The time this logical file was created, as milliseconds since the epoch.
     /// Read: optional, write: required (that is, kernel always writes).
@@ -346,6 +349,7 @@ struct CommitInfo {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Schema)]
+#[cfg_attr(test, derive(Serialize), serde(rename_all = "camelCase"))]
 pub struct Add {
     /// A relative path to a data file from the root of the table or an absolute path to a file
     /// that should be added to the table. The path is a URI as specified by
@@ -403,6 +407,7 @@ impl Add {
 #[derive(Debug, Clone, PartialEq, Eq, Schema)]
 #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
 #[cfg_attr(not(feature = "developer-visibility"), visibility::make(pub(crate)))]
+#[cfg_attr(test, derive(Serialize), serde(rename_all = "camelCase"))]
 struct Remove {
     /// A relative path to a data file from the root of the table or an absolute path to a file
     /// that should be added to the table. The path is a URI as specified by
@@ -445,6 +450,7 @@ struct Remove {
 #[derive(Debug, Clone, PartialEq, Eq, Schema)]
 #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
 #[cfg_attr(not(feature = "developer-visibility"), visibility::make(pub(crate)))]
+#[cfg_attr(test, derive(Serialize), serde(rename_all = "camelCase"))]
 struct Cdc {
     /// A relative path to a change data file from the root of the table or an absolute path to a
     /// change data file that should be added to the table. The path is a URI as specified by
