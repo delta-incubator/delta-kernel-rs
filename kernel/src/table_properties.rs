@@ -11,6 +11,7 @@
 //! table.
 
 use std::collections::HashMap;
+use std::num::NonZero;
 use std::time::Duration;
 
 use crate::expressions::ColumnName;
@@ -43,7 +44,7 @@ pub struct TableProperties {
 
     /// Interval (expressed as number of commits) after which a new checkpoint should be created.
     /// E.g. if checkpoint interval = 10, then a checkpoint should be written every 10 commits.
-    pub checkpoint_interval: Option<i64>,
+    pub checkpoint_interval: Option<NonZero<u64>>,
 
     /// true for Delta Lake to write file statistics in checkpoints in JSON format for the stats column.
     pub checkpoint_write_stats_as_json: Option<bool>,
@@ -114,7 +115,7 @@ pub struct TableProperties {
 
     /// When delta.randomizeFilePrefixes is set to true, the number of characters that Delta
     /// generates for random prefixes.
-    pub random_prefix_length: Option<i64>,
+    pub random_prefix_length: Option<NonZero<u64>>,
 
     /// The shortest duration within which new snapshots will retain transaction identifiers (for
     /// example, SetTransactions). When a new snapshot sees a transaction identifier older than or
@@ -124,7 +125,7 @@ pub struct TableProperties {
 
     /// The target file size in bytes or higher units for file tuning. For example, 104857600
     /// (bytes) or 100mb.
-    pub target_file_size: Option<i64>,
+    pub target_file_size: Option<NonZero<u64>>,
 
     /// The target file size in bytes or higher units for file tuning. For example, 104857600
     /// (bytes) or 100mb.
@@ -273,7 +274,7 @@ mod tests {
             append_only: Some(true),
             optimize_write: Some(true),
             auto_compact: Some(true),
-            checkpoint_interval: Some(101),
+            checkpoint_interval: Some(NonZero::new(101).unwrap()),
             checkpoint_write_stats_as_json: Some(true),
             checkpoint_write_stats_as_struct: Some(true),
             column_mapping_mode: Some(ColumnMappingMode::Id),
@@ -286,9 +287,9 @@ mod tests {
             log_retention_duration: Some(Duration::new(2, 0)),
             enable_expired_log_cleanup: Some(true),
             randomize_file_prefixes: Some(true),
-            random_prefix_length: Some(1001),
+            random_prefix_length: Some(NonZero::new(1001).unwrap()),
             set_transaction_retention_duration: Some(Duration::new(60, 0)),
-            target_file_size: Some(1_000_000_000),
+            target_file_size: Some(NonZero::new(1_000_000_000).unwrap()),
             tune_file_sizes_for_rewrites: Some(true),
             checkpoint_policy: Some(CheckpointPolicy::V2),
             enable_row_tracking: Some(true),

@@ -2,12 +2,15 @@
 //! us to relatively simply implement the functionality described in the protocol and expose
 //! 'simple' types to the user in the [`TableProperties`] struct. E.g. we can expose a `bool`
 //! directly instead of a `BoolConfig` type that we implement `Deserialize` for.
+use std::num::NonZero;
 use std::time::Duration;
 
 use super::*;
 use crate::expressions::ColumnName;
 use crate::table_features::ColumnMappingMode;
 use crate::utils::require;
+
+use tracing::warn;
 
 const SECONDS_PER_MINUTE: u64 = 60;
 const SECONDS_PER_HOUR: u64 = 60 * SECONDS_PER_MINUTE;
@@ -80,10 +83,10 @@ fn try_parse(props: &mut TableProperties, k: &str, v: &str) -> Option<()> {
 
 /// Deserialize a string representing a positive integer into an `Option<u64>`. Returns `Some` if
 /// successfully parses, and `None` otherwise.
-pub(crate) fn parse_positive_int(s: &str) -> Option<i64> {
+pub(crate) fn parse_positive_int(s: &str) -> Option<NonZero<u64>> {
     // parse to i64 (then check n > 0) since java doesn't even allow u64
     let n: i64 = s.parse().ok()?;
-    (n > 0).then_some(n)
+    NonZero::new(n.try_into().ok()?)
 }
 
 /// Deserialize a string representing a boolean into an `Option<bool>`. Returns `Some` if
@@ -99,7 +102,9 @@ pub(crate) fn parse_bool(s: &str) -> Option<bool> {
 /// Deserialize a comma-separated list of column names into an `Option<Vec<ColumnName>>`. Returns
 /// `Some` if successfully parses, and `None` otherwise.
 pub(crate) fn parse_column_names(s: &str) -> Option<Vec<ColumnName>> {
-    ColumnName::parse_column_name_list(s).ok()
+    ColumnName::parse_column_name_list(s)
+        .map_err(|e| warn!("column name list failed to parse: {e}"))
+        .ok()
 }
 
 /// Deserialize an interval string of the form "interval 5 days" into an `Option<Duration>`.
@@ -185,6 +190,33 @@ fn parse_interval_impl(value: &str) -> Result<Duration, ParseIntervalError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::expressions::column_name;
+
+    #[test]
+    fn test_parse_column_names() {
+        assert_eq!(
+            parse_column_names("`col 1`, col.a2,col3").unwrap(),
+            vec![
+                ColumnName::new(["col 1"]),
+                column_name!("col.a2"),
+                column_name!("col3")
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_bool() {
+        assert_eq!(parse_bool("true").unwrap(), true);
+        assert_eq!(parse_bool("false").unwrap(), false);
+        assert_eq!(parse_bool("whatever"), None);
+    }
+
+    #[test]
+    fn test_parse_positive_int() {
+        assert_eq!(parse_positive_int("123").unwrap().get(), 123);
+        assert_eq!(parse_positive_int("0"), None);
+        assert_eq!(parse_positive_int("-123"), None);
+    }
 
     #[test]
     fn test_parse_interval() {
