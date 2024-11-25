@@ -33,7 +33,7 @@ extern crate self as delta_kernel_ffi;
 pub mod engine_data;
 pub mod engine_funcs;
 pub mod error;
-pub use error::*;
+use error::{AllocateError, AllocateErrorFn, ExternResult, IntoExternResult};
 pub mod expressions;
 pub mod scan;
 pub mod schema;
@@ -711,6 +711,7 @@ impl<T> Default for ReferenceSet<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::{EngineError, KernelError};
 
     #[no_mangle]
     extern "C" fn allocate_err(etype: KernelError, _: KernelStringSlice) -> *mut EngineError {

@@ -130,7 +130,6 @@ pub enum ExternResult<T> {
 pub type AllocateErrorFn =
     extern "C" fn(etype: KernelError, msg: KernelStringSlice) -> *mut EngineError;
 
-// NOTE: We can't "just" impl From<DeltaResult<T>> because we require an error allocator.
 impl<T> ExternResult<T> {
     pub fn is_ok(&self) -> bool {
         match self {
@@ -191,6 +190,7 @@ pub(crate) trait IntoExternResult<T> {
     unsafe fn into_extern_result(self, alloc: &dyn AllocateError) -> ExternResult<T>;
 }
 
+// NOTE: We can't "just" impl From<DeltaResult<T>> because we require an error allocator.
 impl<T> IntoExternResult<T> for DeltaResult<T> {
     unsafe fn into_extern_result(self, alloc: &dyn AllocateError) -> ExternResult<T> {
         match self {
