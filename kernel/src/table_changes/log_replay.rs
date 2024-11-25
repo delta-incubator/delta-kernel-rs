@@ -7,6 +7,7 @@ use crate::actions::{
     get_log_add_schema, get_log_schema, ADD_NAME, CDC_NAME, COMMIT_INFO_NAME, METADATA_NAME,
     PROTOCOL_NAME, REMOVE_NAME,
 };
+use crate::engine::arrow_data::ArrowEngineData;
 use crate::expressions::column_name;
 use crate::expressions::{column_expr, Expression};
 use crate::path::ParsedLogPath;
@@ -52,6 +53,7 @@ pub(crate) fn table_changes_action_iter(
                 expression_evaluator.clone(),
             );
             scanner.phase_1()?;
+            scanner.resolve_dvs();
             scanner.into_scan_batches()
         })
         .flatten_ok()
@@ -80,6 +82,7 @@ struct LogReplayScanner {
     timestamp: i64,
     filter: Option<DataSkippingFilter>,
     expression_evaluator: Arc<dyn ExpressionEvaluator>,
+    add_paths: HashSet<String>,
 }
 
 impl LogReplayScanner {
@@ -97,6 +100,7 @@ impl LogReplayScanner {
             has_cdc_action: Default::default(),
             remove_dvs: Default::default(),
             expression_evaluator,
+            add_paths: Default::default(),
         }
     }
     fn phase_1(&mut self) -> DeltaResult<()> {
@@ -105,10 +109,12 @@ impl LogReplayScanner {
             self.json_client
                 .read_json_files(&[self.commit_file.location.clone()], schema, None)?;
 
-        let mut add_set: HashSet<String> = Default::default();
-
         for actions in action_iter {
             let actions = actions?;
+
+            //let actions_arrow: &ArrowEngineData =
+            //    actions.as_ref().any_ref().downcast_ref().unwrap();
+            //println!("actions: {:?}", actions_arrow.record_batch());
             // apply data skipping to get back a selection vector for actions that passed skipping
             // note: None implies all files passed data skipping.
             let filter_vector = self
@@ -121,14 +127,22 @@ impl LogReplayScanner {
             // below if a file has been removed
             let selection_vector = match filter_vector {
                 Some(ref filter_vector) => filter_vector.clone(),
-                None => vec![false; actions.len()],
+                None => vec![true; actions.len()],
             };
-            let mut visitor = Phase1Visitor::new(self, selection_vector, &mut add_set);
+            let mut visitor = Phase1Visitor::new(self, selection_vector);
             visitor.visit_rows_of(actions.as_ref())?;
         }
-        self.remove_dvs
-            .retain(|rm_path, _| add_set.contains(rm_path));
         Ok(())
+    }
+
+    fn resolve_dvs(&mut self) {
+        if self.has_cdc_action {
+            self.remove_dvs.clear();
+        } else {
+            self.remove_dvs
+                .retain(|rm_path, _| self.add_paths.contains(rm_path));
+        }
+        self.add_paths.clear()
     }
 
     fn into_scan_batches(
@@ -142,6 +156,7 @@ impl LogReplayScanner {
             timestamp: _,
             filter,
             expression_evaluator,
+            add_paths: _,
         } = self;
         let remove_dvs = Arc::new(remove_dvs);
 
@@ -162,7 +177,7 @@ impl LogReplayScanner {
             // below if a file has been removed
             let selection_vector = match filter_vector {
                 Some(ref filter_vector) => filter_vector.clone(),
-                None => vec![false; actions.len()],
+                None => vec![true; actions.len()],
             };
             let mut visitor = Phase2Visitor::new(&remove_dvs, selection_vector, has_cdc_action);
             visitor.visit_rows_of(actions.as_ref())?;
@@ -177,18 +192,12 @@ impl LogReplayScanner {
 struct Phase1Visitor<'a> {
     scanner: &'a mut LogReplayScanner,
     selection_vector: Vec<bool>,
-    add_set: &'a mut HashSet<String>,
 }
 impl<'a> Phase1Visitor<'a> {
-    fn new(
-        scanner: &'a mut LogReplayScanner,
-        selection_vector: Vec<bool>,
-        add_set: &'a mut HashSet<String>,
-    ) -> Self {
+    fn new(scanner: &'a mut LogReplayScanner, selection_vector: Vec<bool>) -> Self {
         Phase1Visitor {
             scanner,
             selection_vector,
-            add_set,
         }
     }
     fn schema() -> DeltaResult<Arc<StructType>> {
@@ -252,35 +261,36 @@ impl<'a> RowVisitor for Phase1Visitor<'a> {
 
         for i in 0..row_count {
             if !self.selection_vector[i] {
+                println!("skipping");
                 continue;
             }
-            if !self.scanner.has_cdc_action {
-                if let Some(path) = getters[0].get_str(i, "add.path")? {
-                    self.add_set.insert(path.to_string());
-                } else if let Some(path) = getters[1].get_str(i, "remove.path")? {
-                    let deletion_vector = visit_deletion_vector_at(i, &getters[5..8])?;
-                    self.scanner
-                        .remove_dvs
-                        .insert(path.to_string(), DvInfo { deletion_vector });
-                } else if getters[5].get_str(i, "cdc.path")?.is_some() {
-                    self.scanner.has_cdc_action = true;
-
-                    // This commit has a cdc file, so add and remove actions no longer need to be
-                    // processed
-                    self.add_set.clear();
-                    self.scanner.remove_dvs.clear();
-                }
-            }
-            if let Some(timestamp) = getters[6].get_long(i, "commitInfo.timestamp")? {
+            if let Some(path) = getters[0].get_str(i, "add.path")? {
+                println!("Found add path");
+                self.scanner.add_paths.insert(path.to_string());
+            } else if let Some(path) = getters[1].get_str(i, "remove.path")? {
+                println!("Found remove path");
+                let deletion_vector = visit_deletion_vector_at(i, &getters[2..=4])?;
+                self.scanner
+                    .remove_dvs
+                    .insert(path.to_string(), DvInfo { deletion_vector });
+            } else if getters[5].get_str(i, "cdc.path")?.is_some() {
+                println!("Found cdc path");
+                self.scanner.has_cdc_action = true;
+            } else if let Some(timestamp) = getters[6].get_long(i, "commitInfo.timestamp")? {
+                println!("Found timestamp");
                 self.scanner.timestamp = timestamp;
             } else if let Some(schema) = getters[7].get_str(i, "metaData.schemaString")? {
+                println!("Found metadata");
                 // TODO: Validate that the schema is as expected
             } else if let Some(min_reader_version) =
                 getters[8].get_int(i, "protocol.min_reader_version")?
             {
+                println!("Found protocol");
                 let protocol =
-                    ProtocolVisitor::visit_protocol(i, min_reader_version, &getters[4..8])?;
+                    ProtocolVisitor::visit_protocol(i, min_reader_version, &getters[8..=11])?;
                 protocol.ensure_read_supported()?;
+            } else {
+                println!("Didn't find anything")
             }
         }
         Ok(())
@@ -320,8 +330,6 @@ impl<'a> RowVisitor for Phase2Visitor<'a> {
         // NOTE: The order of the names and types is based on [`Phase2Visitor::schema`]
         static NAMES_AND_TYPES: LazyLock<ColumnNamesAndTypes> = LazyLock::new(|| {
             const STRING: DataType = DataType::STRING;
-            const INTEGER: DataType = DataType::INTEGER;
-            const LONG: DataType = DataType::LONG;
             let types_and_names = vec![
                 (STRING, column_name!("add.path")),
                 (STRING, column_name!("remove.path")),
@@ -338,7 +346,7 @@ impl<'a> RowVisitor for Phase2Visitor<'a> {
         row_count: usize,
         getters: &[&'b dyn crate::engine_data::GetData<'b>],
     ) -> DeltaResult<()> {
-        let expected_getters = 8;
+        let expected_getters = 3;
         require!(
             getters.len() == expected_getters,
             Error::InternalError(format!(
@@ -367,41 +375,75 @@ impl<'a> RowVisitor for Phase2Visitor<'a> {
 #[cfg(test)]
 mod tests {
 
-    use crate::engine::arrow_expression::ArrowExpressionHandler;
-    use crate::engine::default::executor::tokio::TokioBackgroundExecutor;
-    use crate::engine::default::filesystem::ObjectStoreFileSystemClient;
+    use crate::scan::state::DvInfo;
     use crate::schema::{DataType, StructField, StructType};
-    use arrow_array::RecordBatch;
     use itertools::Itertools;
     use object_store::local::LocalFileSystem;
-    use object_store::{memory::InMemory, path::Path, ObjectStore};
+    use object_store::ObjectStore;
     use serde::Serialize;
-    use std::collections::HashMap;
-    use std::path::Path as FsPath;
+    use std::collections::{HashMap, HashSet};
+    use std::path::Path;
     use std::sync::Arc;
     use tempfile::TempDir;
     use tokio::runtime::Runtime;
-    use url::Url;
 
     use super::{get_add_transform_expr, LogReplayScanner};
     use crate::actions::{get_log_add_schema, Add, Cdc, CommitInfo, Metadata, Protocol, Remove};
-    use crate::engine::sync::{json, parquet, SyncEngine};
+    use crate::engine::sync::SyncEngine;
     use crate::log_segment::LogSegment;
     use crate::path::ParsedLogPath;
     use crate::scan::log_replay::SCAN_ROW_DATATYPE;
-    use crate::{AsAny, DeltaResult, Engine, FileSystemClient, Version};
+    use crate::{DeltaResult, Engine, Version};
     use test_utils::delta_path_for_version;
 
     #[derive(Serialize)]
-    #[serde(untagged)]
+    #[allow(unused)]
     enum Action {
+        #[serde(rename = "add")]
         Add(Add),
+        #[serde(rename = "remove")]
         Remove(Remove),
+        #[serde(rename = "cdc")]
         Cdc(Cdc),
+        #[serde(rename = "metaData")]
         Metadata(Metadata),
+        #[serde(rename = "protocol")]
         Protocol(Protocol),
+        #[serde(rename = "commitInfo")]
         CommitInfo(CommitInfo),
     }
+
+    impl From<Add> for Action {
+        fn from(value: Add) -> Self {
+            Self::Add(value)
+        }
+    }
+    impl From<Remove> for Action {
+        fn from(value: Remove) -> Self {
+            Self::Remove(value)
+        }
+    }
+    impl From<Cdc> for Action {
+        fn from(value: Cdc) -> Self {
+            Self::Cdc(value)
+        }
+    }
+    impl From<Metadata> for Action {
+        fn from(value: Metadata) -> Self {
+            Self::Metadata(value)
+        }
+    }
+    impl From<Protocol> for Action {
+        fn from(value: Protocol) -> Self {
+            Self::Protocol(value)
+        }
+    }
+    impl From<CommitInfo> for Action {
+        fn from(value: CommitInfo) -> Self {
+            Self::CommitInfo(value)
+        }
+    }
+
     struct MockTable {
         commit_num: u64,
         store: Arc<LocalFileSystem>,
@@ -427,6 +469,7 @@ mod tests {
                 .iter()
                 .map(|action| serde_json::to_string(&action).unwrap())
                 .join("\n");
+            println!("Writing data: {}", data);
 
             let path = delta_path_for_version(self.commit_num, "json");
             self.commit_num += 1;
@@ -438,7 +481,7 @@ mod tests {
                     .expect("put log file in store");
             });
         }
-        pub(crate) fn table_root(&self) -> &FsPath {
+        pub(crate) fn table_root(&self) -> &Path {
             self.dir.path()
         }
     }
@@ -449,24 +492,24 @@ mod tests {
         ]);
         let schema_string = serde_json::to_string(&schema).unwrap();
         vec![
-            Action::Metadata(Metadata {
+            Metadata {
                 schema_string,
                 configuration: HashMap::from([
                     ("enableChangeDataFeed".to_string(), "true".to_string()),
                     ("enableDeletionVectors".to_string(), "true".to_string()),
                 ]),
                 ..Default::default()
-            }),
-            Action::Protocol(
-                Protocol::try_new(3, 7, Some(["deletionVectors"]), Some(["deletionVectors"]))
-                    .unwrap(),
-            ),
+            }
+            .into(),
+            Protocol::try_new(3, 7, Some(["deletionVectors"]), Some(["deletionVectors"]))
+                .unwrap()
+                .into(),
         ]
     }
 
     fn get_segment(
         engine: &dyn Engine,
-        path: &FsPath,
+        path: &Path,
         start_version: Version,
         end_version: impl Into<Option<Version>>,
     ) -> DeltaResult<Vec<ParsedLogPath>> {
@@ -496,29 +539,86 @@ mod tests {
     }
 
     #[test]
-    fn simple_log_replay() {
+    fn metadata_protocol() {
         let engine = SyncEngine::new();
         let mut mock_table = MockTable::new();
         mock_table.commit(&get_init_commit());
 
-        let commits = get_segment(&engine, mock_table.table_root(), 0, None).unwrap();
-        println!("Commits: {:?}", commits);
-        let mut commits = commits.into_iter();
+        let mut commits = get_segment(&engine, mock_table.table_root(), 0, None)
+            .unwrap()
+            .into_iter();
 
         let mut scanner = get_commit_log_scanner(&engine, commits.next().unwrap());
+
         scanner.phase_1().unwrap();
         assert!(!scanner.has_cdc_action);
         assert!(scanner.remove_dvs.is_empty());
-        //let iter: Vec<_> = scanner
-        //    .into_scan_batches()
-        //    .unwrap()
-        //    .map(|x| -> DeltaResult<_> {
-        //        let x = x?;
-        //        let y: Box<RecordBatch> = x.0.into_any().downcast().unwrap();
-        //        Ok((y, x.1, x.2))
-        //    })
-        //    .try_collect()
-        //    .unwrap();
-        //println!("Iter: {:?}", iter);
+        assert!(scanner.add_paths.is_empty());
+
+        scanner.resolve_dvs();
+
+        let x: Vec<_> = scanner
+            .into_scan_batches()
+            .unwrap()
+            .map(|x| -> DeltaResult<_> { Ok(x?.1) })
+            .flatten_ok()
+            .try_collect()
+            .unwrap();
+
+        assert_eq!(x, &[false, false]);
+    }
+
+    #[test]
+    fn table_changes_add_remove() {
+        let engine = SyncEngine::new();
+        let mut mock_table = MockTable::new();
+        mock_table.commit(&get_init_commit());
+        mock_table.commit(&[
+            Add {
+                path: "fake_path_1".into(),
+                ..Default::default()
+            }
+            .into(),
+            Remove {
+                path: "fake_path_2".into(),
+                ..Default::default()
+            }
+            .into(),
+        ]);
+
+        let mut commits = get_segment(&engine, mock_table.table_root(), 0, None)
+            .unwrap()
+            .into_iter();
+
+        let commit = commits.nth(1).unwrap();
+        let mut scanner = get_commit_log_scanner(&engine, commit);
+
+        scanner.phase_1().unwrap();
+        assert_eq!(
+            scanner.add_paths,
+            HashSet::from(["fake_path_1".to_string()])
+        );
+        assert_eq!(
+            scanner.remove_dvs,
+            HashMap::from([(
+                "fake_path_2".to_string(),
+                DvInfo {
+                    deletion_vector: None
+                }
+            )])
+        );
+
+        scanner.resolve_dvs();
+        assert!(!scanner.has_cdc_action);
+        assert_eq!(scanner.remove_dvs, HashMap::new());
+
+        let x: Vec<_> = scanner
+            .into_scan_batches()
+            .unwrap()
+            .map(|x| -> DeltaResult<_> { Ok(x?.1) })
+            .flatten_ok()
+            .try_collect()
+            .unwrap();
+        assert_eq!(x, &[true, true]);
     }
 }
