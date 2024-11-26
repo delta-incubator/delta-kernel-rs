@@ -191,6 +191,12 @@ void tracing_callback(struct Event event) {
   free(message);
 }
 
+void log_line_callback(KernelStringSlice line) {
+  char* message = allocate_string(line);
+  printf("%s", message);
+  free(message);
+}
+
 int main(int argc, char* argv[])
 {
   if (argc < 2) {
@@ -200,6 +206,8 @@ int main(int argc, char* argv[])
 
 #ifdef VERBOSE
   enable_event_tracing(tracing_callback, TRACE);
+  // we could also do something like this if we want less control over formatting
+  // enable_formatted_log_line_tracing(log_line_callback, TRACE, FULL, true, true, false, false);
 #else
   enable_event_tracing(tracing_callback, INFO);
 #endif
