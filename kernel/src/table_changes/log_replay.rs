@@ -1,13 +1,11 @@
 use std::collections::{HashMap, HashSet};
-use std::iter::{empty, once};
 use std::sync::{Arc, LazyLock};
 
 use crate::actions::visitors::{visit_deletion_vector_at, ProtocolVisitor};
 use crate::actions::{
-    get_log_add_schema, get_log_schema, Metadata, Protocol, ADD_NAME, CDC_NAME, COMMIT_INFO_NAME,
+    get_log_add_schema, get_log_schema, Protocol, ADD_NAME, CDC_NAME, COMMIT_INFO_NAME,
     METADATA_NAME, PROTOCOL_NAME, REMOVE_NAME,
 };
-use crate::engine::arrow_data::ArrowEngineData;
 use crate::engine_data::TypedGetData;
 use crate::expressions::column_name;
 use crate::expressions::{column_expr, Expression};
@@ -19,12 +17,12 @@ use crate::schema::{ArrayType, ColumnNamesAndTypes, DataType, MapType, SchemaRef
 use crate::table_properties::TableProperties;
 use crate::utils::require;
 use crate::{
-    table_properties, DeltaResult, Engine, EngineData, Error, ExpressionEvaluator, ExpressionRef,
-    JsonHandler, RowVisitor,
+    DeltaResult, Engine, EngineData, Error, ExpressionEvaluator, ExpressionRef, JsonHandler,
+    RowVisitor,
 };
 use itertools::Itertools;
 
-struct TableChangesScanData {
+pub struct TableChangesScanData {
     data: Box<dyn EngineData>,
     selection_vector: Vec<bool>,
     remove_dv: Option<Arc<HashMap<String, DvInfo>>>,
@@ -37,12 +35,11 @@ struct TableChangesScanData {
 pub(crate) fn table_changes_action_iter(
     engine: &dyn Engine,
     commit_files: impl IntoIterator<Item = ParsedLogPath>,
-    table_schema: &SchemaRef,
+    table_schema: SchemaRef,
     predicate: Option<ExpressionRef>,
-    schema: SchemaRef,
 ) -> DeltaResult<impl Iterator<Item = DeltaResult<TableChangesScanData>>> {
     let json_handler = engine.get_json_handler();
-    let filter = DataSkippingFilter::new(engine, table_schema, predicate);
+    let filter = DataSkippingFilter::new(engine, &table_schema, predicate);
 
     let expression_evaluator = engine.get_expression_handler().get_evaluator(
         get_log_add_schema().clone(),
@@ -58,9 +55,9 @@ pub(crate) fn table_changes_action_iter(
                 json_handler.clone(),
                 filter.clone(),
                 expression_evaluator.clone(),
-                schema.clone(),
+                table_schema.clone(),
             );
-            scanner.visit_commit()?;
+            scanner.prepare_phase()?;
             scanner.resolve_dvs();
             scanner.into_scan_batches()
         })
@@ -114,8 +111,8 @@ impl LogReplayScanner {
             schema,
         }
     }
-    fn visit_commit(&mut self) -> DeltaResult<()> {
-        let schema = Phase1Visitor::schema()?;
+    fn prepare_phase(&mut self) -> DeltaResult<()> {
+        let schema = PreparePhaseVisitor::schema()?;
         let action_iter = self.json_handler.read_json_files(
             &[self.commit_file.location.clone()],
             schema,
@@ -138,7 +135,7 @@ impl LogReplayScanner {
                 Some(filter_vector) => filter_vector,
                 None => vec![true; actions.len()],
             };
-            let mut visitor = Phase1Visitor::new(self, selection_vector);
+            let mut visitor = PreparePhaseVisitor::new(self, selection_vector);
             visitor.visit_rows_of(actions.as_ref())?;
             if let Some(protocol) = visitor.protocol {
                 protocol.ensure_read_supported()?;
@@ -147,7 +144,7 @@ impl LogReplayScanner {
                 let schema: StructType = serde_json::from_str(&schema)?;
                 require!(
                     self.schema.as_ref() == &schema,
-                    Error::generic("Got unexpected schma")
+                    Error::change_data_feed_incompatible_schema(&self.schema, &schema)
                 );
 
                 let table_properties = TableProperties::from(configuration);
@@ -186,7 +183,7 @@ impl LogReplayScanner {
         } = self;
         let remove_dvs = Arc::new(remove_dvs);
 
-        let schema = Phase2Visitor::schema()?;
+        let schema = FileActionSelectionVisitor::schema()?;
         let action_iter =
             json_handler.read_json_files(&[commit_file.location.clone()], schema, None)?;
 
@@ -205,7 +202,8 @@ impl LogReplayScanner {
                 Some(filter_vector) => filter_vector,
                 None => vec![true; actions.len()],
             };
-            let mut visitor = Phase2Visitor::new(&remove_dvs, selection_vector, has_cdc_action);
+            let mut visitor =
+                FileActionSelectionVisitor::new(&remove_dvs, selection_vector, has_cdc_action);
             visitor.visit_rows_of(actions.as_ref())?;
 
             let data = expression_evaluator.evaluate(actions.as_ref())?;
@@ -219,15 +217,15 @@ impl LogReplayScanner {
     }
 }
 
-struct Phase1Visitor<'a> {
+struct PreparePhaseVisitor<'a> {
     scanner: &'a mut LogReplayScanner,
     selection_vector: Vec<bool>,
     protocol: Option<Protocol>,
     metadata_info: Option<(String, HashMap<String, String>)>,
 }
-impl<'a> Phase1Visitor<'a> {
+impl<'a> PreparePhaseVisitor<'a> {
     fn new(scanner: &'a mut LogReplayScanner, selection_vector: Vec<bool>) -> Self {
-        Phase1Visitor {
+        PreparePhaseVisitor {
             scanner,
             selection_vector,
             protocol: None,
@@ -246,14 +244,14 @@ impl<'a> Phase1Visitor<'a> {
     }
 }
 
-impl<'a> RowVisitor for Phase1Visitor<'a> {
+impl<'a> RowVisitor for PreparePhaseVisitor<'a> {
     fn selected_column_names_and_types(
         &self,
     ) -> (
         &'static [crate::expressions::ColumnName],
         &'static [crate::schema::DataType],
     ) {
-        // NOTE: The order of the names and types is based on [`Phase1Visitor::schema`]
+        // NOTE: The order of the names and types is based on [`PreparePhaseVisitor::schema`]
         static NAMES_AND_TYPES: LazyLock<ColumnNamesAndTypes> = LazyLock::new(|| {
             const STRING: DataType = DataType::STRING;
             const INTEGER: DataType = DataType::INTEGER;
@@ -292,7 +290,7 @@ impl<'a> RowVisitor for Phase1Visitor<'a> {
         require!(
             getters.len() == expected_getters,
             Error::InternalError(format!(
-                "Wrong number of Phase1Visitor getters: {}",
+                "Wrong number of PreparePhaseVisitor getters: {}",
                 getters.len()
             ))
         );
@@ -333,19 +331,19 @@ impl<'a> RowVisitor for Phase1Visitor<'a> {
     }
 }
 
-struct Phase2Visitor<'a> {
+struct FileActionSelectionVisitor<'a> {
     selection_vector: Vec<bool>,
     has_cdc_action: bool,
     remove_dvs: &'a HashMap<String, DvInfo>,
 }
 
-impl<'a> Phase2Visitor<'a> {
+impl<'a> FileActionSelectionVisitor<'a> {
     fn new(
         remove_dvs: &'a HashMap<String, DvInfo>,
         selection_vector: Vec<bool>,
         has_cdc_action: bool,
     ) -> Self {
-        Phase2Visitor {
+        FileActionSelectionVisitor {
             selection_vector,
             has_cdc_action,
             remove_dvs,
@@ -356,14 +354,14 @@ impl<'a> Phase2Visitor<'a> {
     }
 }
 
-impl<'a> RowVisitor for Phase2Visitor<'a> {
+impl<'a> RowVisitor for FileActionSelectionVisitor<'a> {
     fn selected_column_names_and_types(
         &self,
     ) -> (
         &'static [crate::expressions::ColumnName],
         &'static [crate::schema::DataType],
     ) {
-        // NOTE: The order of the names and types is based on [`Phase2Visitor::schema`]
+        // NOTE: The order of the names and types is based on [`FileActionSelectionVisitor::schema`]
         static NAMES_AND_TYPES: LazyLock<ColumnNamesAndTypes> = LazyLock::new(|| {
             const STRING: DataType = DataType::STRING;
             let types_and_names = vec![
@@ -592,7 +590,7 @@ mod tests {
 
         let mut scanner = get_commit_log_scanner(&engine, commits.next().unwrap());
 
-        scanner.visit_commit().unwrap();
+        scanner.prepare_phase().unwrap();
         assert!(!scanner.has_cdc_action);
         assert!(scanner.remove_dvs.is_empty());
         assert!(scanner.add_paths.is_empty());
@@ -628,7 +626,7 @@ mod tests {
         let mut scanner = get_commit_log_scanner(&engine, commits.next().unwrap());
 
         assert!(matches!(
-            scanner.visit_commit(),
+            scanner.prepare_phase(),
             Err(Error::ChangeDataFeedUnsupported(_))
         ));
     }
@@ -660,7 +658,10 @@ mod tests {
 
         let mut scanner = get_commit_log_scanner(&engine, commits.next().unwrap());
 
-        assert!(scanner.visit_commit().is_err());
+        assert!(matches!(
+            scanner.prepare_phase(),
+            Err(Error::ChangeDataFeedIncompatibleSchema(_, _))
+        ));
     }
 
     #[tokio::test]
@@ -689,7 +690,7 @@ mod tests {
         let commit = commits.next().unwrap();
         let mut scanner = get_commit_log_scanner(&engine, commit);
 
-        scanner.visit_commit().unwrap();
+        scanner.prepare_phase().unwrap();
         assert!(!scanner.has_cdc_action);
         assert_eq!(
             scanner.add_paths,
@@ -745,7 +746,7 @@ mod tests {
         let commit = commits.next().unwrap();
         let mut scanner = get_commit_log_scanner(&engine, commit);
 
-        scanner.visit_commit().unwrap();
+        scanner.prepare_phase().unwrap();
         assert!(scanner.has_cdc_action);
         assert_eq!(
             scanner.add_paths,
@@ -818,7 +819,7 @@ mod tests {
         let commit = commits.next().unwrap();
         let mut scanner = get_commit_log_scanner(&engine, commit);
 
-        scanner.visit_commit().unwrap();
+        scanner.prepare_phase().unwrap();
         assert!(!scanner.has_cdc_action);
         assert_eq!(
             scanner.add_paths,
@@ -894,6 +895,6 @@ mod tests {
         let commit = commits.next().unwrap();
         let mut scanner = get_commit_log_scanner(&engine, commit);
 
-        assert!(scanner.visit_commit().is_err());
+        assert!(scanner.prepare_phase().is_err());
     }
 }
