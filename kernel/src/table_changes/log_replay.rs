@@ -124,12 +124,10 @@ impl LogReplayScanner {
             // Apply data skipping to get back a selection vector for actions that passed skipping.
             // We start our selection vector based on what was filtered. We will add to this vector
             // below if a file has been removed. Note: None implies all files passed data skipping.
-            let selection_vector = self
-                .filter
-                .as_ref()
-                .map(|filter| filter.apply(actions.as_ref()))
-                .transpose()?
-                .unwrap_or_else(|| vec![true; actions.len()]);
+            let selection_vector = match &self.filter {
+                Some(filter) => filter.apply(actions.as_ref())?,
+                None => vec![true; actions.len()],
+            };
 
             let mut visitor = PreparePhaseVisitor::new(self, selection_vector, &mut add_paths);
             visitor.visit_rows_of(actions.as_ref())?;
@@ -181,17 +179,14 @@ impl LogReplayScanner {
 
         let result = action_iter.map(move |actions| -> DeltaResult<_> {
             let actions = actions?;
-            // apply data skipping to get back a selection vector for actions that passed skipping
-            // note: None implies all files passed data skipping.
 
             // Apply data skipping to get back a selection vector for actions that passed skipping.
             // We start our selection vector based on what was filtered. We will add to this vector
             // below if a file has been removed. Note: None implies all files passed data skipping.
-            let selection_vector = filter
-                .as_ref()
-                .map(|filter| filter.apply(actions.as_ref()))
-                .transpose()?
-                .unwrap_or_else(|| vec![true; actions.len()]);
+            let selection_vector = match &filter {
+                Some(filter) => filter.apply(actions.as_ref())?,
+                None => vec![true; actions.len()],
+            };
 
             let mut visitor =
                 FileActionSelectionVisitor::new(&remove_dvs, selection_vector, has_cdc_action);
