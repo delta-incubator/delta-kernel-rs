@@ -48,7 +48,7 @@ impl<L: AsUrl> Iterator for VersionGroupingIterator<L> {
 
     fn next(&mut self) -> Option<VersionGroup<L>> {
         while let Some(logpath) = self.files.next() {
-            let version: u64 = logpath.version;
+            let version = logpath.version;
             let mut files = vec![logpath];
             // this is where we look ahead for the next file and check if it has the same version
             // if it does, we add it to the current group
@@ -108,7 +108,6 @@ mod tests {
         ParsedLogPath::try_from(url).unwrap().unwrap()
     }
 
-    #[test]
     /// Tests the basic functionality of VersionGroupingIterator with a single commit file
     /// 
     /// This test verifies that:
