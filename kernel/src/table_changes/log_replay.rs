@@ -8,13 +8,14 @@ use crate::actions::{
     METADATA_NAME, PROTOCOL_NAME, REMOVE_NAME,
 };
 use crate::engine::arrow_data::ArrowEngineData;
+use crate::engine_data::TypedGetData;
 use crate::expressions::column_name;
 use crate::expressions::{column_expr, Expression};
 use crate::path::ParsedLogPath;
 use crate::scan::data_skipping::DataSkippingFilter;
 use crate::scan::log_replay::SCAN_ROW_DATATYPE;
 use crate::scan::state::DvInfo;
-use crate::schema::{ArrayType, ColumnNamesAndTypes, DataType, SchemaRef, StructType};
+use crate::schema::{ArrayType, ColumnNamesAndTypes, DataType, MapType, SchemaRef, StructType};
 use crate::utils::require;
 use crate::{
     DeltaResult, Engine, EngineData, Error, ExpressionEvaluator, ExpressionRef, JsonHandler,
@@ -39,7 +40,7 @@ pub(crate) fn table_changes_action_iter(
     predicate: Option<ExpressionRef>,
     schema: SchemaRef,
 ) -> DeltaResult<impl Iterator<Item = DeltaResult<TableChangesScanData>>> {
-    let json_client = engine.get_json_handler();
+    let json_handler = engine.get_json_handler();
     let filter = DataSkippingFilter::new(engine, table_schema, predicate);
 
     let expression_evaluator = engine.get_expression_handler().get_evaluator(
@@ -53,7 +54,7 @@ pub(crate) fn table_changes_action_iter(
         .map(move |commit_file| -> DeltaResult<_> {
             let mut scanner = LogReplayScanner::new(
                 commit_file,
-                json_client.clone(),
+                json_handler.clone(),
                 filter.clone(),
                 expression_evaluator.clone(),
                 schema.clone(),
@@ -84,7 +85,7 @@ struct LogReplayScanner {
     // is an add action with the same path in this commit
     remove_dvs: HashMap<String, DvInfo>,
     commit_file: ParsedLogPath,
-    json_client: Arc<dyn JsonHandler>,
+    json_handler: Arc<dyn JsonHandler>,
     timestamp: i64,
     filter: Option<DataSkippingFilter>,
     expression_evaluator: Arc<dyn ExpressionEvaluator>,
@@ -95,7 +96,7 @@ struct LogReplayScanner {
 impl LogReplayScanner {
     fn new(
         commit_file: ParsedLogPath,
-        json_client: Arc<dyn JsonHandler>,
+        json_handler: Arc<dyn JsonHandler>,
         filter: Option<DataSkippingFilter>,
         expression_evaluator: Arc<dyn ExpressionEvaluator>,
         schema: SchemaRef,
@@ -103,7 +104,7 @@ impl LogReplayScanner {
         Self {
             timestamp: commit_file.location.last_modified,
             commit_file,
-            json_client,
+            json_handler,
             filter,
             has_cdc_action: Default::default(),
             remove_dvs: Default::default(),
@@ -114,9 +115,11 @@ impl LogReplayScanner {
     }
     fn visit_commit(&mut self) -> DeltaResult<()> {
         let schema = Phase1Visitor::schema()?;
-        let action_iter =
-            self.json_client
-                .read_json_files(&[self.commit_file.location.clone()], schema, None)?;
+        let action_iter = self.json_handler.read_json_files(
+            &[self.commit_file.location.clone()],
+            schema,
+            None,
+        )?;
 
         for actions in action_iter {
             let actions = actions?;
@@ -131,7 +134,7 @@ impl LogReplayScanner {
             // We start our selection vector based on what was filtered. We will add to this vector
             // below if a file has been removed. Note: None implies all files passed data skipping.
             let selection_vector = match filter_vector {
-                Some(ref filter_vector) => filter_vector.clone(),
+                Some(filter_vector) => filter_vector,
                 None => vec![true; actions.len()],
             };
             let mut visitor = Phase1Visitor::new(self, selection_vector);
@@ -140,6 +143,7 @@ impl LogReplayScanner {
                 protocol.ensure_read_supported()?;
             }
             if let Some(schema) = visitor.schema {
+                let schema: StructType = serde_json::from_str(&schema)?;
                 require!(
                     self.schema.as_ref() == &schema,
                     Error::generic("Got unexpected schma")
@@ -166,7 +170,7 @@ impl LogReplayScanner {
             has_cdc_action,
             remove_dvs,
             commit_file,
-            json_client,
+            json_handler,
             timestamp: _,
             filter,
             expression_evaluator,
@@ -177,7 +181,7 @@ impl LogReplayScanner {
 
         let schema = Phase2Visitor::schema()?;
         let action_iter =
-            json_client.read_json_files(&[commit_file.location.clone()], schema, None)?;
+            json_handler.read_json_files(&[commit_file.location.clone()], schema, None)?;
 
         let result = action_iter.map(move |actions| -> DeltaResult<_> {
             let actions = actions?;
@@ -191,7 +195,7 @@ impl LogReplayScanner {
             // we start our selection vector based on what was filtered. we will add to this vector
             // below if a file has been removed
             let selection_vector = match filter_vector {
-                Some(ref filter_vector) => filter_vector.clone(),
+                Some(filter_vector) => filter_vector,
                 None => vec![true; actions.len()],
             };
             let mut visitor = Phase2Visitor::new(&remove_dvs, selection_vector, has_cdc_action);
@@ -212,7 +216,8 @@ struct Phase1Visitor<'a> {
     scanner: &'a mut LogReplayScanner,
     selection_vector: Vec<bool>,
     protocol: Option<Protocol>,
-    schema: Option<StructType>,
+    schema: Option<String>,
+    configuration: Option<HashMap<String, String>>,
 }
 impl<'a> Phase1Visitor<'a> {
     fn new(scanner: &'a mut LogReplayScanner, selection_vector: Vec<bool>) -> Self {
@@ -221,6 +226,7 @@ impl<'a> Phase1Visitor<'a> {
             selection_vector,
             protocol: None,
             schema: None,
+            configuration: None,
         }
     }
     fn schema() -> DeltaResult<Arc<StructType>> {
@@ -248,6 +254,7 @@ impl<'a> RowVisitor for Phase1Visitor<'a> {
             const INTEGER: DataType = DataType::INTEGER;
             const LONG: DataType = DataType::LONG;
             let string_list: DataType = ArrayType::new(STRING, false).into();
+            let string_string_map = MapType::new(STRING, STRING, false).into();
             let types_and_names = vec![
                 (STRING, column_name!("add.path")),
                 (STRING, column_name!("remove.path")),
@@ -259,6 +266,7 @@ impl<'a> RowVisitor for Phase1Visitor<'a> {
                 (STRING, column_name!("cdc.path")),
                 (LONG, column_name!("commitInfo.timestamp")),
                 (STRING, column_name!("metaData.schemaString")),
+                (string_string_map, column_name!("metaData.configuration")),
                 (INTEGER, column_name!("protocol.minReaderVersion")),
                 (INTEGER, column_name!("protocol.minWriterVersion")),
                 (string_list.clone(), column_name!("protocol.readerFeatures")),
@@ -275,7 +283,7 @@ impl<'a> RowVisitor for Phase1Visitor<'a> {
         row_count: usize,
         getters: &[&'b dyn crate::engine_data::GetData<'b>],
     ) -> DeltaResult<()> {
-        let expected_getters = 14;
+        let expected_getters = 15;
         require!(
             getters.len() == expected_getters,
             Error::InternalError(format!(
@@ -300,12 +308,18 @@ impl<'a> RowVisitor for Phase1Visitor<'a> {
             } else if let Some(timestamp) = getters[8].get_long(i, "commitInfo.timestamp")? {
                 self.scanner.timestamp = timestamp;
             } else if let Some(schema) = getters[9].get_str(i, "metaData.schemaString")? {
-                self.schema = Some(serde_json::from_str(schema)?);
+                self.schema = Some(schema.to_string());
+                let configuration_map_opt: Option<HashMap<_, _>> =
+                    getters[10].get_opt(i, "metadata.configuration")?;
+
+                // A null configuration here means that we found an empty configuration. This is
+                // different from not finding any metadata action, where self.configuration = None
+                self.configuration = Some(configuration_map_opt.unwrap_or_else(HashMap::new));
             } else if let Some(min_reader_version) =
-                getters[10].get_int(i, "protocol.min_reader_version")?
+                getters[11].get_int(i, "protocol.min_reader_version")?
             {
                 let protocol =
-                    ProtocolVisitor::visit_protocol(i, min_reader_version, &getters[10..=13])?;
+                    ProtocolVisitor::visit_protocol(i, min_reader_version, &getters[11..=14])?;
                 self.protocol = Some(protocol);
             }
         }
