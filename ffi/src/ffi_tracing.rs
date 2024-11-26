@@ -41,31 +41,13 @@ impl From<Level> for LevelFilter {
     }
 }
 
+
 /// An `Event` can generally be thought of a "log message". It contains all the relevant bits such
 /// that an engine can generate a log message in its format
 #[repr(C)]
 pub struct Event {
     message: KernelStringSlice,
     level: Level,
-}
-
-impl TryFrom<&TracingEvent<'_>> for Event {
-    type Error = Error;
-
-    fn try_from(event: &TracingEvent<'_>) -> DeltaResult<Self> {
-        let metadata = event.metadata();
-        let level = metadata.level().into();
-        let mut message_visitor = MessageFieldVisitor { message: None };
-        event.record(&mut message_visitor);
-        let msg = message_visitor.message.ok_or_else(||
-            Error::missing_data("message field")
-        )?;
-        let msg = kernel_string_slice!(msg);
-        Ok(Self {
-            message: msg,
-            level,
-        })
-    }
 }
 
 pub type TracingEventFn = extern "C" fn(event: Event);
@@ -109,8 +91,21 @@ where
     S: Subscriber + for<'a> LookupSpan<'a>,
 {
     fn on_event(&self, event: &TracingEvent<'_>, _context: Context<'_, S>) {
-        if let Ok(event) = event.try_into() {
-            // ignore if event doesn't have a "message" field
+        // it would be tempting to `impl TryFrom` to convert the `TracingEvent` into an `Event`, but
+        // we want to use a KernelStringSlice, so we need the extracted string to live long enough
+        // for the callback which won't happen if we convert inside a `try_from` call
+        let metadata = event.metadata();
+        let level = metadata.level().into();
+        let mut message_visitor = MessageFieldVisitor { message: None };
+        event.record(&mut message_visitor);
+        if let Some(message) = message_visitor.message {
+            // we ignore events without a message
+            //println!("Message here {msg}");
+            let msg = kernel_string_slice!(message);
+            let event = Event {
+                message: msg,
+                level,
+            };
             (self.callback)(event);
         }
     }

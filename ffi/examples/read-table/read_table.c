@@ -1,6 +1,7 @@
 #include <inttypes.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/time.h>
 
 #include "arrow.h"
 #include "read_table.h"
@@ -150,12 +151,33 @@ void free_partition_list(PartitionList* list) {
   free(list);
 }
 
+static const char *LEVEL_STRING[] = {
+  "ERROR", "WARN", "INFO", "DEBUG", "TRACE"
+};
+
+void tracing_callback(struct Event event) {
+  struct timeval tv;
+  char buffer[32];
+  gettimeofday(&tv, NULL);
+  struct tm *tm_info = gmtime(&tv.tv_sec);
+  strftime(buffer, 26, "%Y-%m-%dT%H:%M:%S", tm_info);
+  char* message = allocate_string(event.message);
+  printf("%s.%06ldZ [Kernel %s]: %s\n", buffer, tv.tv_usec, LEVEL_STRING[event.level], message);
+  free(message);
+}
+
 int main(int argc, char* argv[])
 {
   if (argc < 2) {
     printf("Usage: %s table/path\n", argv[0]);
     return -1;
   }
+
+#ifdef VERBOSE
+  enable_event_tracing(tracing_callback, TRACE);
+#else
+  enable_event_tracing(tracing_callback, INFO);
+#endif
 
   char* table_path = argv[1];
   printf("Reading table at %s\n", table_path);
