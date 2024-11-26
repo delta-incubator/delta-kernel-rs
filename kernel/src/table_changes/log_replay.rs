@@ -22,6 +22,7 @@ use crate::{
 };
 use itertools::Itertools;
 
+#[allow(unused)]
 pub struct TableChangesScanData {
     data: Box<dyn EngineData>,
     selection_vector: Vec<bool>,
@@ -58,11 +59,10 @@ pub(crate) fn table_changes_action_iter(
                 table_schema.clone(),
             );
             scanner.prepare_phase()?;
-            scanner.resolve_dvs();
             scanner.into_scan_batches()
         })
         .flatten_ok()
-        .map(|res| res?);
+        .map(|x| x?);
     Ok(result)
 }
 
@@ -87,7 +87,6 @@ struct LogReplayScanner {
     timestamp: i64,
     filter: Option<DataSkippingFilter>,
     expression_evaluator: Arc<dyn ExpressionEvaluator>,
-    add_paths: HashSet<String>,
     schema: SchemaRef,
 }
 
@@ -107,7 +106,6 @@ impl LogReplayScanner {
             has_cdc_action: Default::default(),
             remove_dvs: Default::default(),
             expression_evaluator,
-            add_paths: Default::default(),
             schema,
         }
     }
@@ -119,6 +117,7 @@ impl LogReplayScanner {
             None,
         )?;
 
+        let mut add_paths = HashSet::new();
         for actions in action_iter {
             let actions = actions?;
 
@@ -132,7 +131,7 @@ impl LogReplayScanner {
                 .transpose()?
                 .unwrap_or_else(|| vec![true; actions.len()]);
 
-            let mut visitor = PreparePhaseVisitor::new(self, selection_vector);
+            let mut visitor = PreparePhaseVisitor::new(self, selection_vector, &mut add_paths);
             visitor.visit_rows_of(actions.as_ref())?;
             if let Some(protocol) = visitor.protocol {
                 protocol.ensure_read_supported()?;
@@ -150,18 +149,15 @@ impl LogReplayScanner {
                     Error::change_data_feed_unsupported(self.commit_file.version)
                 )
             }
+
+            if self.has_cdc_action {
+                self.remove_dvs.clear();
+            } else {
+                self.remove_dvs
+                    .retain(|rm_path, _| add_paths.contains(rm_path));
+            }
         }
         Ok(())
-    }
-
-    fn resolve_dvs(&mut self) {
-        if self.has_cdc_action {
-            self.remove_dvs.clear();
-        } else {
-            self.remove_dvs
-                .retain(|rm_path, _| self.add_paths.contains(rm_path));
-        }
-        self.add_paths.clear()
     }
 
     fn into_scan_batches(
@@ -175,7 +171,6 @@ impl LogReplayScanner {
             timestamp: _,
             filter,
             expression_evaluator,
-            add_paths: _,
             schema: _,
         } = self;
         let remove_dvs = Arc::new(remove_dvs);
@@ -218,14 +213,20 @@ struct PreparePhaseVisitor<'a> {
     selection_vector: Vec<bool>,
     protocol: Option<Protocol>,
     metadata_info: Option<(String, HashMap<String, String>)>,
+    add_paths: &'a mut HashSet<String>,
 }
 impl<'a> PreparePhaseVisitor<'a> {
-    fn new(scanner: &'a mut LogReplayScanner, selection_vector: Vec<bool>) -> Self {
+    fn new(
+        scanner: &'a mut LogReplayScanner,
+        selection_vector: Vec<bool>,
+        add_paths: &'a mut HashSet<String>,
+    ) -> Self {
         PreparePhaseVisitor {
             scanner,
             selection_vector,
             protocol: None,
             metadata_info: None,
+            add_paths,
         }
     }
     fn schema() -> DeltaResult<Arc<StructType>> {
@@ -296,7 +297,7 @@ impl<'a> RowVisitor for PreparePhaseVisitor<'a> {
                 continue;
             }
             if let Some(path) = getters[0].get_str(i, "add.path")? {
-                self.scanner.add_paths.insert(path.to_string());
+                self.add_paths.insert(path.to_string());
             } else if let Some(path) = getters[1].get_str(i, "remove.path")? {
                 let deletion_vector = visit_deletion_vector_at(i, &getters[2..=6])?;
                 self.scanner
@@ -412,7 +413,7 @@ mod tests {
     use object_store::local::LocalFileSystem;
     use object_store::ObjectStore;
     use serde::Serialize;
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashMap;
     use std::path::Path;
     use std::sync::Arc;
     use tempfile::TempDir;
@@ -427,7 +428,6 @@ mod tests {
     use test_utils::delta_path_for_version;
 
     #[derive(Serialize)]
-    #[allow(unused)]
     enum Action {
         #[serde(rename = "add")]
         Add(Add),
@@ -589,9 +589,6 @@ mod tests {
         scanner.prepare_phase().unwrap();
         assert!(!scanner.has_cdc_action);
         assert!(scanner.remove_dvs.is_empty());
-        assert!(scanner.add_paths.is_empty());
-
-        scanner.resolve_dvs();
 
         assert_eq!(
             result_to_sv(scanner.into_scan_batches().unwrap()),
@@ -688,21 +685,6 @@ mod tests {
 
         scanner.prepare_phase().unwrap();
         assert!(!scanner.has_cdc_action);
-        assert_eq!(
-            scanner.add_paths,
-            HashSet::from(["fake_path_1".to_string()])
-        );
-        assert_eq!(
-            scanner.remove_dvs,
-            HashMap::from([(
-                "fake_path_2".to_string(),
-                DvInfo {
-                    deletion_vector: None
-                }
-            )])
-        );
-
-        scanner.resolve_dvs();
         assert_eq!(scanner.remove_dvs, HashMap::new());
 
         assert_eq!(
@@ -744,21 +726,6 @@ mod tests {
 
         scanner.prepare_phase().unwrap();
         assert!(scanner.has_cdc_action);
-        assert_eq!(
-            scanner.add_paths,
-            HashSet::from(["fake_path_1".to_string()])
-        );
-        assert_eq!(
-            scanner.remove_dvs,
-            HashMap::from([(
-                "fake_path_2".to_string(),
-                DvInfo {
-                    deletion_vector: None
-                }
-            )])
-        );
-
-        scanner.resolve_dvs();
         assert_eq!(scanner.remove_dvs, HashMap::new());
 
         assert_eq!(
@@ -817,29 +784,6 @@ mod tests {
 
         scanner.prepare_phase().unwrap();
         assert!(!scanner.has_cdc_action);
-        assert_eq!(
-            scanner.add_paths,
-            HashSet::from(["fake_path_1".to_string()])
-        );
-        assert_eq!(
-            scanner.remove_dvs,
-            HashMap::from([
-                (
-                    "fake_path_1".to_string(),
-                    DvInfo {
-                        deletion_vector: Some(deletion_vector1.clone())
-                    }
-                ),
-                (
-                    "fake_path_2".to_string(),
-                    DvInfo {
-                        deletion_vector: Some(deletion_vector2.clone())
-                    }
-                )
-            ])
-        );
-
-        scanner.resolve_dvs();
         assert_eq!(
             scanner.remove_dvs,
             HashMap::from([(
