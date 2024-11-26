@@ -1,6 +1,3 @@
-//! Defines [`LogReplayScanner`] used by [`TableChangesScan`] to process commit files and extract
-//! the metadata needed to generate the Change Data Feed.
-
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock};
 
