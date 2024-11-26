@@ -553,7 +553,7 @@ mod tests {
         )
     }
     fn result_to_sv(iter: impl Iterator<Item = DeltaResult<TableChangesScanData>>) -> Vec<bool> {
-        iter.map(|scan_data| -> DeltaResult<_> { Ok(scan_data?.selection_vector) })
+        iter.map_ok(|scan_data| scan_data.selection_vector.into_iter())
             .flatten_ok()
             .try_collect()
             .unwrap()
