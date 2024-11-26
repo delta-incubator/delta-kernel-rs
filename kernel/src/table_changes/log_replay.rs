@@ -4,8 +4,8 @@ use std::sync::{Arc, LazyLock};
 
 use crate::actions::visitors::{visit_deletion_vector_at, ProtocolVisitor};
 use crate::actions::{
-    get_log_add_schema, get_log_schema, ADD_NAME, CDC_NAME, COMMIT_INFO_NAME, METADATA_NAME,
-    PROTOCOL_NAME, REMOVE_NAME,
+    get_log_add_schema, get_log_schema, Metadata, Protocol, ADD_NAME, CDC_NAME, COMMIT_INFO_NAME,
+    METADATA_NAME, PROTOCOL_NAME, REMOVE_NAME,
 };
 use crate::engine::arrow_data::ArrowEngineData;
 use crate::expressions::column_name;
@@ -135,6 +135,12 @@ impl LogReplayScanner {
             };
             let mut visitor = Phase1Visitor::new(self, selection_vector);
             visitor.visit_rows_of(actions.as_ref())?;
+            if let Some(protocol) = visitor.protocol {
+                protocol.ensure_read_supported()?;
+            }
+            if let Some(schema) = visitor.schema {
+                // TODO: Ensure schema is compatible
+            }
         }
         Ok(())
     }
@@ -200,12 +206,16 @@ impl LogReplayScanner {
 struct Phase1Visitor<'a> {
     scanner: &'a mut LogReplayScanner,
     selection_vector: Vec<bool>,
+    protocol: Option<Protocol>,
+    schema: Option<String>,
 }
 impl<'a> Phase1Visitor<'a> {
     fn new(scanner: &'a mut LogReplayScanner, selection_vector: Vec<bool>) -> Self {
         Phase1Visitor {
             scanner,
             selection_vector,
+            protocol: None,
+            schema: None,
         }
     }
     fn schema() -> DeltaResult<Arc<StructType>> {
@@ -271,36 +281,28 @@ impl<'a> RowVisitor for Phase1Visitor<'a> {
 
         for i in 0..row_count {
             if !self.selection_vector[i] {
-                println!("skipping");
                 continue;
             }
             if let Some(path) = getters[0].get_str(i, "add.path")? {
-                println!("Found add path");
                 self.scanner.add_paths.insert(path.to_string());
             } else if let Some(path) = getters[1].get_str(i, "remove.path")? {
-                println!("Found remove path");
                 let deletion_vector = visit_deletion_vector_at(i, &getters[2..=6])?;
                 self.scanner
                     .remove_dvs
                     .insert(path.to_string(), DvInfo { deletion_vector });
             } else if getters[7].get_str(i, "cdc.path")?.is_some() {
-                println!("Found cdc path");
                 self.scanner.has_cdc_action = true;
             } else if let Some(timestamp) = getters[8].get_long(i, "commitInfo.timestamp")? {
-                println!("Found timestamp");
                 self.scanner.timestamp = timestamp;
             } else if let Some(schema) = getters[9].get_str(i, "metaData.schemaString")? {
-                println!("Found metadata");
+                self.schema = Some(schema.to_string());
                 // TODO: Validate that the schema is as expected
             } else if let Some(min_reader_version) =
                 getters[10].get_int(i, "protocol.min_reader_version")?
             {
-                println!("Found protocol");
                 let protocol =
                     ProtocolVisitor::visit_protocol(i, min_reader_version, &getters[10..=13])?;
-                protocol.ensure_read_supported()?;
-            } else {
-                println!("Didn't find anything")
+                self.protocol = Some(protocol);
             }
         }
         Ok(())
@@ -689,7 +691,6 @@ mod tests {
     fn table_changes_dv() {
         let engine = SyncEngine::new();
         let mut mock_table = MockTable::new();
-        mock_table.commit(&get_init_commit());
 
         let deletion_vector1 = DeletionVectorDescriptor {
             storage_type: "u".to_string(),
@@ -729,7 +730,7 @@ mod tests {
             .unwrap()
             .into_iter();
 
-        let commit = commits.nth(1).unwrap();
+        let commit = commits.next().unwrap();
         let mut scanner = get_commit_log_scanner(&engine, commit);
 
         scanner.visit_commit().unwrap();
@@ -771,5 +772,41 @@ mod tests {
             result_to_sv(scanner.into_scan_batches().unwrap()),
             &[true, false, true]
         );
+    }
+    #[test]
+    fn table_changes_protocol() {
+        let engine = SyncEngine::new();
+        let mut mock_table = MockTable::new();
+
+        let protocol = Protocol::try_new(
+            3,
+            1,
+            ["fake_feature".to_string()].into(),
+            ["fake_feature".to_string()].into(),
+        )
+        .unwrap();
+
+        mock_table.commit(&[
+            Add {
+                path: "fake_path_1".into(),
+                ..Default::default()
+            }
+            .into(),
+            Remove {
+                path: "fake_path_2".into(),
+                ..Default::default()
+            }
+            .into(),
+            protocol.into(),
+        ]);
+
+        let mut commits = get_segment(&engine, mock_table.table_root(), 0, None)
+            .unwrap()
+            .into_iter();
+
+        let commit = commits.next().unwrap();
+        let mut scanner = get_commit_log_scanner(&engine, commit);
+
+        assert!(scanner.visit_commit().is_err());
     }
 }
