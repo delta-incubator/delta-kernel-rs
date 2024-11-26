@@ -50,7 +50,7 @@ struct AddRemoveDedupVisitor<'seen> {
 impl<'seen> AddRemoveDedupVisitor<'seen> {
     /// Checks if log replay already processed this logical file (in which case the current action
     /// should be ignored). If not already seen, register it so we can recognize future duplicates.
-    fn already_seen(&mut self, key: FileActionKey) -> bool {
+    fn check_and_record_seen(&mut self, key: FileActionKey) -> bool {
         // Note: each (add.path + add.dv_unique_id()) pair has a
         // unique Add + Remove pair in the log. For example:
         // https://github.com/delta-io/delta/blob/master/spark/src/test/resources/delta/table-with-dv-large/_delta_log/00000000000000000001.json
@@ -79,9 +79,10 @@ impl<'seen> AddRemoveDedupVisitor<'seen> {
     /// True if this row contains an Add action that should survive log replay. Skip it if the row
     /// is not an Add action, or the file has already been seen previously.
     fn is_valid_add<'a>(&mut self, i: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<bool> {
-        // Add will have a path at index 0 if it is valid; otherwise, if it is a log batch, we
-        // may have a remove with a path at index 4.
-        let (path, getters, is_add) = if let Some(path) = getters[0].get_str(i, "add.path")? {
+        // Add will have a path at index 0 if it is valid; otherwise, if it is a log batch, we may
+        // have a remove with a path at index 4. In either case, extract the three dv getters at
+        // indexes that immediately follow a valid path index.
+        let (path, dv_getters, is_add) = if let Some(path) = getters[0].get_str(i, "add.path")? {
             (path, &getters[1..4], true)
         } else if !self.is_log_batch {
             return Ok(false);
@@ -91,24 +92,24 @@ impl<'seen> AddRemoveDedupVisitor<'seen> {
             return Ok(false);
         };
 
-        let dv_unique_id = match getters[0].get_opt(i, "deletionVector.storageType")? {
+        let dv_unique_id = match dv_getters[0].get_opt(i, "deletionVector.storageType")? {
             Some(storage_type) => Some(DeletionVectorDescriptor::unique_id_from_parts(
                 storage_type,
-                getters[1].get(i, "deletionVector.pathOrInlineDv")?,
-                getters[2].get_opt(i, "deletionVector.offset")?,
+                dv_getters[1].get(i, "deletionVector.pathOrInlineDv")?,
+                dv_getters[2].get_opt(i, "deletionVector.offset")?,
             )),
             None => None,
         };
 
         // Process both adds and removes, but only return not already-seen adds
         let file_key = FileActionKey::new(path, dv_unique_id);
-        Ok(!self.already_seen(file_key) && is_add)
+        Ok(!self.check_and_record_seen(file_key) && is_add)
     }
 }
 
 impl<'seen> RowVisitor for AddRemoveDedupVisitor<'seen> {
     fn selected_column_names_and_types(&self) -> (&'static [ColumnName], &'static [DataType]) {
-        // NOTE: THe visitor assumes adds always come first, with removes optionally afterward
+        // NOTE: The visitor assumes a schema with adds first and removes optionally afterward.
         static NAMES_AND_TYPES: LazyLock<ColumnNamesAndTypes> = LazyLock::new(|| {
             const STRING: DataType = DataType::STRING;
             const INTEGER: DataType = DataType::INTEGER;
@@ -145,7 +146,6 @@ impl<'seen> RowVisitor for AddRemoveDedupVisitor<'seen> {
             ))
         );
 
-        // TODO(zach): Add a check that the selection vector never tries to skip a remove?
         for i in 0..row_count {
             if self.selection_vector[i] {
                 self.selection_vector[i] = self.is_valid_add(i, getters)?;
@@ -157,7 +157,7 @@ impl<'seen> RowVisitor for AddRemoveDedupVisitor<'seen> {
 
 // NB: If you update this schema, ensure you update the comment describing it in the doc comment
 // for `scan_row_schema` in scan/mod.rs! You'll also need to update ScanFileVisitor as the
-// indexes will be off, and `get_add_transform_expr` below to match it.
+// indexes will be off, and [`get_add_transform_expr`] below to match it.
 pub(crate) static SCAN_ROW_SCHEMA: LazyLock<Arc<StructType>> = LazyLock::new(|| {
     // Note that fields projected out of a nullable struct must be nullable
     let partition_values = MapType::new(DataType::STRING, DataType::STRING, true);
@@ -245,7 +245,7 @@ pub fn scan_action_iter(
     predicate: Option<ExpressionRef>,
 ) -> impl Iterator<Item = DeltaResult<ScanData>> {
     let mut log_scanner = LogReplayScanner::new(engine, table_schema, predicate);
-    let expression = engine.get_expression_handler().get_evaluator(
+    let add_transform = engine.get_expression_handler().get_evaluator(
         get_log_add_schema().clone(),
         get_add_transform_expr(),
         SCAN_ROW_DATATYPE.clone(),
@@ -253,7 +253,7 @@ pub fn scan_action_iter(
     action_iter
         .map(move |action_res| {
             let (batch, is_log_batch) = action_res?;
-            log_scanner.process_scan_batch(expression.as_ref(), batch.as_ref(), is_log_batch)
+            log_scanner.process_scan_batch(add_transform.as_ref(), batch.as_ref(), is_log_batch)
         })
         .filter(|res| res.as_ref().map_or(true, |(_, sv)| sv.contains(&true)))
 }
