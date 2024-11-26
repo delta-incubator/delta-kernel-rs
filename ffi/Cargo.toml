@@ -15,6 +15,7 @@ crate-type = ["lib", "cdylib", "staticlib"]
 
 [dependencies]
 tracing = "0.1"
+tracing-subscriber = { version = "0.3", optional = false } # TODO Make optional
 url = "2"
 delta_kernel = { path = "../kernel", default-features = false, features = [
   "developer-visibility",
