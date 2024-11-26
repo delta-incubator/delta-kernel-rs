@@ -41,10 +41,7 @@ pub(crate) fn column_mapping_mode(
 
 /// When column mapping mode is enabled, verify that each field in the schema is annotated with a
 /// physical name and field_id; when not enabled, verify that no fields are annotated.
-pub(crate) fn validate_schema_column_mapping(
-    schema: &Schema,
-    mode: ColumnMappingMode,
-) -> DeltaResult<()> {
+pub fn validate_schema_column_mapping(schema: &Schema, mode: ColumnMappingMode) -> DeltaResult<()> {
     if mode == ColumnMappingMode::Id {
         // TODO: Support column mapping ID mode
         return Err(Error::unsupported("Column mapping ID mode not supported"));
