@@ -98,7 +98,7 @@ pub enum LogLineFormat {
     /// applications, where automated analysis and compact storage of logs is less of a priority
     /// than readability and visual appeal.
     /// Example:
-    /// ```
+    /// ```ignore
     ///   2022-02-15T18:44:24.535324Z  INFO fmt_pretty: preparing to shave yaks, number_of_yaks: 3
     ///   at examples/examples/fmt-pretty.rs:16 on main
     /// ```

@@ -169,10 +169,10 @@ void tracing_callback(struct Event event) {
   char* message = allocate_string(event.message);
   char* level_color = event.level < 3 ? RED : BLUE;
   printf(
-    "%s%s.%06ldZ%s [%sKernel %s%s]: %s\n",
+    "%s%s.%06dZ%s [%sKernel %s%s]: %s\n",
     DIM,
     buffer,
-    tv.tv_usec,
+    (int)tv.tv_usec, // safe, microseconds are in int range
     RESET,
     level_color,
     LEVEL_STRING[event.level],
