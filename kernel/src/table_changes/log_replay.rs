@@ -16,10 +16,11 @@ use crate::scan::data_skipping::DataSkippingFilter;
 use crate::scan::log_replay::SCAN_ROW_DATATYPE;
 use crate::scan::state::DvInfo;
 use crate::schema::{ArrayType, ColumnNamesAndTypes, DataType, MapType, SchemaRef, StructType};
+use crate::table_properties::TableProperties;
 use crate::utils::require;
 use crate::{
-    DeltaResult, Engine, EngineData, Error, ExpressionEvaluator, ExpressionRef, JsonHandler,
-    RowVisitor,
+    table_properties, DeltaResult, Engine, EngineData, Error, ExpressionEvaluator, ExpressionRef,
+    JsonHandler, RowVisitor,
 };
 use itertools::Itertools;
 
@@ -142,12 +143,18 @@ impl LogReplayScanner {
             if let Some(protocol) = visitor.protocol {
                 protocol.ensure_read_supported()?;
             }
-            if let Some(schema) = visitor.schema {
+            if let Some((schema, configuration)) = visitor.metadata_info {
                 let schema: StructType = serde_json::from_str(&schema)?;
                 require!(
                     self.schema.as_ref() == &schema,
                     Error::generic("Got unexpected schma")
                 );
+
+                let table_properties = TableProperties::from(configuration);
+                require!(
+                    table_properties.enable_change_data_feed.unwrap_or(false),
+                    Error::change_data_feed_unsupported(self.commit_file.version)
+                )
             }
         }
         Ok(())
@@ -216,8 +223,7 @@ struct Phase1Visitor<'a> {
     scanner: &'a mut LogReplayScanner,
     selection_vector: Vec<bool>,
     protocol: Option<Protocol>,
-    schema: Option<String>,
-    configuration: Option<HashMap<String, String>>,
+    metadata_info: Option<(String, HashMap<String, String>)>,
 }
 impl<'a> Phase1Visitor<'a> {
     fn new(scanner: &'a mut LogReplayScanner, selection_vector: Vec<bool>) -> Self {
@@ -225,8 +231,7 @@ impl<'a> Phase1Visitor<'a> {
             scanner,
             selection_vector,
             protocol: None,
-            schema: None,
-            configuration: None,
+            metadata_info: None,
         }
     }
     fn schema() -> DeltaResult<Arc<StructType>> {
@@ -308,13 +313,14 @@ impl<'a> RowVisitor for Phase1Visitor<'a> {
             } else if let Some(timestamp) = getters[8].get_long(i, "commitInfo.timestamp")? {
                 self.scanner.timestamp = timestamp;
             } else if let Some(schema) = getters[9].get_str(i, "metaData.schemaString")? {
-                self.schema = Some(schema.to_string());
                 let configuration_map_opt: Option<HashMap<_, _>> =
                     getters[10].get_opt(i, "metadata.configuration")?;
 
                 // A null configuration here means that we found an empty configuration. This is
                 // different from not finding any metadata action, where self.configuration = None
-                self.configuration = Some(configuration_map_opt.unwrap_or_else(HashMap::new));
+                let configuration = configuration_map_opt.unwrap_or_else(HashMap::new);
+
+                self.metadata_info = Some((schema.to_string(), configuration));
             } else if let Some(min_reader_version) =
                 getters[11].get_int(i, "protocol.min_reader_version")?
             {
@@ -407,7 +413,7 @@ mod tests {
 
     use crate::actions::deletion_vector::DeletionVectorDescriptor;
     use crate::scan::state::DvInfo;
-    use crate::schema::{self, DataType, StructField, StructType};
+    use crate::schema::{DataType, StructField, StructType};
     use itertools::Itertools;
     use object_store::local::LocalFileSystem;
     use object_store::ObjectStore;
@@ -418,14 +424,12 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{get_add_transform_expr, LogReplayScanner, TableChangesScanData};
-    use crate::actions::{
-        get_log_add_schema, get_log_schema, Add, Cdc, CommitInfo, Metadata, Protocol, Remove,
-    };
+    use crate::actions::{get_log_add_schema, Add, Cdc, CommitInfo, Metadata, Protocol, Remove};
     use crate::engine::sync::SyncEngine;
     use crate::log_segment::LogSegment;
     use crate::path::ParsedLogPath;
     use crate::scan::log_replay::SCAN_ROW_DATATYPE;
-    use crate::{DeltaResult, Engine, Version};
+    use crate::{DeltaResult, Engine, Error, Version};
     use test_utils::delta_path_for_version;
 
     #[derive(Serialize)]
@@ -567,8 +571,11 @@ mod tests {
                 Metadata {
                     schema_string,
                     configuration: HashMap::from([
-                        ("enableChangeDataFeed".to_string(), "true".to_string()),
-                        ("enableDeletionVectors".to_string(), "true".to_string()),
+                        ("delta.enableChangeDataFeed".to_string(), "true".to_string()),
+                        (
+                            "delta.enableDeletionVectors".to_string(),
+                            "true".to_string(),
+                        ),
                     ]),
                     ..Default::default()
                 }
@@ -597,6 +604,34 @@ mod tests {
             &[false, false]
         );
     }
+    #[tokio::test]
+    async fn configuration_fails() {
+        let engine = SyncEngine::new();
+        let mut mock_table = MockTable::new();
+        let schema_string = serde_json::to_string(&get_schema()).unwrap();
+        mock_table
+            .commit(&[Metadata {
+                schema_string,
+                configuration: HashMap::from([(
+                    "delta.enableDeletionVectors".to_string(),
+                    "true".to_string(),
+                )]),
+                ..Default::default()
+            }
+            .into()])
+            .await;
+
+        let mut commits = get_segment(&engine, mock_table.table_root(), 0, None)
+            .unwrap()
+            .into_iter();
+
+        let mut scanner = get_commit_log_scanner(&engine, commits.next().unwrap());
+
+        assert!(matches!(
+            scanner.visit_commit(),
+            Err(Error::ChangeDataFeedUnsupported(_))
+        ));
+    }
 
     #[tokio::test]
     async fn incompatible_schema() {
@@ -608,8 +643,11 @@ mod tests {
             .commit(&[Metadata {
                 schema_string,
                 configuration: HashMap::from([
-                    ("enableChangeDataFeed".to_string(), "true".to_string()),
-                    ("enableDeletionVectors".to_string(), "true".to_string()),
+                    ("delta.enableChangeDataFeed".to_string(), "true".to_string()),
+                    (
+                        "delta.enableDeletionVectors".to_string(),
+                        "true".to_string(),
+                    ),
                 ]),
                 ..Default::default()
             }
