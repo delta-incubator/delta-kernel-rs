@@ -897,4 +897,60 @@ mod tests {
 
         assert!(scanner.prepare_phase().is_err());
     }
+    #[tokio::test]
+    async fn table_changes_in_commit_timestamp() {
+        let engine = SyncEngine::new();
+        let mut mock_table = MockTable::new();
+
+        let timestamp = 123456;
+        mock_table
+            .commit(&[
+                Add {
+                    path: "fake_path_1".into(),
+                    ..Default::default()
+                }
+                .into(),
+                CommitInfo {
+                    timestamp: Some(timestamp),
+                    ..Default::default()
+                }
+                .into(),
+            ])
+            .await;
+
+        let mut commits = get_segment(&engine, mock_table.table_root(), 0, None)
+            .unwrap()
+            .into_iter();
+
+        let commit = commits.next().unwrap();
+        let mut scanner = get_commit_log_scanner(&engine, commit);
+
+        scanner.prepare_phase().unwrap();
+        assert_eq!(scanner.timestamp, timestamp);
+    }
+
+    #[tokio::test]
+    async fn table_changes_file_meta_timestamp() {
+        let engine = SyncEngine::new();
+        let mut mock_table = MockTable::new();
+
+        mock_table
+            .commit(&[Add {
+                path: "fake_path_1".into(),
+                ..Default::default()
+            }
+            .into()])
+            .await;
+
+        let mut commits = get_segment(&engine, mock_table.table_root(), 0, None)
+            .unwrap()
+            .into_iter();
+
+        let commit = commits.next().unwrap();
+        let file_meta_ts = commit.location.last_modified;
+        let mut scanner = get_commit_log_scanner(&engine, commit);
+
+        scanner.prepare_phase().unwrap();
+        assert_eq!(scanner.timestamp, file_meta_ts);
+    }
 }
