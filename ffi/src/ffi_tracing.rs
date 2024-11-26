@@ -12,6 +12,8 @@ use tracing_subscriber::{filter::LevelFilter, layer::Context, registry::LookupSp
 
 use crate::{kernel_string_slice, KernelStringSlice};
 
+/// Definitions of level verbosity. Verbose Levels are "greater than" less verbose ones. So
+/// Level::ERROR is the lowest, and Level::TRACE the highest.
 #[repr(C)]
 pub enum Level {
     ERROR,
@@ -87,9 +89,9 @@ pub enum LogLineFormat {
     /// `2022-02-15T18:40:14.289898Z  INFO fmt: preparing to shave yaks number_of_yaks=3`
     FULL,
     /// A variant of the FULL formatter, optimized for short line lengths. Fields from the context
-    /// are appended to the fields of the formatted event, and targets are not shown; the verbosity
-    /// level is abbreviated to a single character.
+    /// are appended to the fields of the formatted event, and targets are not shown.
     /// Example:
+    /// `2022-02-17T19:51:05.809287Z  INFO fmt_compact: preparing to shave yaks number_of_yaks=3`
     COMPACT,
     /// Emits excessively pretty, multi-line logs, optimized for human readability. This is
     /// primarily intended to be used in local development and debugging, or for command-line
