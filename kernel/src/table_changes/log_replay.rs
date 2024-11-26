@@ -495,7 +495,6 @@ mod tests {
                 .iter()
                 .map(|action| serde_json::to_string(&action).unwrap())
                 .join("\n");
-            println!("Writing data: {}", data);
 
             let path = delta_path_for_version(self.commit_num, "json");
             self.commit_num += 1;
