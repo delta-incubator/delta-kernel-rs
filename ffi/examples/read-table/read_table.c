@@ -155,6 +155,11 @@ static const char *LEVEL_STRING[] = {
   "ERROR", "WARN", "INFO", "DEBUG", "TRACE"
 };
 
+#define RED   "\x1b[31m"
+#define BLUE  "\x1b[34m"
+#define DIM   "\x1b[2m"
+#define RESET "\x1b[0m"
+
 void tracing_callback(struct Event event) {
   struct timeval tv;
   char buffer[32];
@@ -162,7 +167,27 @@ void tracing_callback(struct Event event) {
   struct tm *tm_info = gmtime(&tv.tv_sec);
   strftime(buffer, 26, "%Y-%m-%dT%H:%M:%S", tm_info);
   char* message = allocate_string(event.message);
-  printf("%s.%06ldZ [Kernel %s]: %s\n", buffer, tv.tv_usec, LEVEL_STRING[event.level], message);
+  char* level_color = event.level < 3 ? RED : BLUE;
+  printf(
+    "%s%s.%06ldZ%s [%sKernel %s%s]: %s\n",
+    DIM,
+    buffer,
+    tv.tv_usec,
+    RESET,
+    level_color,
+    LEVEL_STRING[event.level],
+    RESET,
+    message);
+  if (event.file.ptr) {
+    char* file = allocate_string(event.file);
+    printf(
+      "  %sat%s %s:%i\n",
+      DIM,
+      RESET,
+      file,
+      event.line);
+    free(file);
+  }
   free(message);
 }
 

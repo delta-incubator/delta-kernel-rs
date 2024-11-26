@@ -2,7 +2,6 @@
 
 use core::fmt;
 
-use delta_kernel::{DeltaResult, Error};
 use tracing::{field::{Field as TracingField, Visit}, Event as TracingEvent, Subscriber};
 use tracing_subscriber::{filter::LevelFilter, layer::Context, registry::LookupSpan, Layer};
 
@@ -46,8 +45,16 @@ impl From<Level> for LevelFilter {
 /// that an engine can generate a log message in its format
 #[repr(C)]
 pub struct Event {
+    /// The log message associated with the event
     message: KernelStringSlice,
+    /// Level that the event was emitted at
     level: Level,
+    /// A string that specifies in what part of the system the event occurred
+    target: KernelStringSlice,
+    /// source file line number where the event occurred, or 0 (zero) if unknown
+    line: u32,
+    /// file where the event occurred. If unknown the slice `ptr` will be null and the len will be 0
+    file: KernelStringSlice,
 }
 
 pub type TracingEventFn = extern "C" fn(event: Event);
@@ -100,11 +107,24 @@ where
         event.record(&mut message_visitor);
         if let Some(message) = message_visitor.message {
             // we ignore events without a message
-            //println!("Message here {msg}");
             let msg = kernel_string_slice!(message);
+            let target = metadata.target();
+            let target = kernel_string_slice!(target);
+            let file = match metadata.file() {
+                Some(file) => kernel_string_slice!(file),
+                None => {
+                    KernelStringSlice {
+                        ptr: std::ptr::null(),
+                        len: 0,
+                    }
+                }
+            };
             let event = Event {
                 message: msg,
                 level,
+                target,
+                line: metadata.line().unwrap_or(0),
+                file,
             };
             (self.callback)(event);
         }
