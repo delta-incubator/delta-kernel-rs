@@ -30,9 +30,9 @@ pub struct TableChangesScanData {
 }
 
 /// Given an iterator of ParsedLogPath and a predicate, returns an iterator of
-/// [`TableChangesScanData`] = `(engine_data, selection_vec, remove_deletion_vectors)`.
-/// Each row that is selected in the returned `engine_data` _must_ be processed to
-/// complete the scan. Non-selected rows _must_ be ignored.
+/// [`TableChangesScanData`]  Each row that is selected in the returned
+/// `engine_data` _must_ be processed to complete the scan. Non-selected rows
+/// _must_ be ignored.
 pub(crate) fn table_changes_action_iter(
     engine: &dyn Engine,
     commit_files: impl IntoIterator<Item = ParsedLogPath>,
@@ -66,6 +66,10 @@ pub(crate) fn table_changes_action_iter(
     Ok(result)
 }
 
+// Gets the expression for generating the engine data in [`TableChangesScanData`].
+//
+// TODO: This expression is temporary. In the future it will also select `cdc` and `remove` actions
+// fields.
 fn get_add_transform_expr() -> Expression {
     Expression::Struct(vec![
         column_expr!("add.path"),
@@ -77,6 +81,29 @@ fn get_add_transform_expr() -> Expression {
     ])
 }
 
+/// Processes a single commit file from the log to generate an iterator of [`TableChangesScanData`].
+/// The scanner operates in two phases that _must_ be performed in the following order:
+/// 1. Prepare phase [`LogReplayScanner::prepare_phase`]: This performs one iteration over every
+///    action in the commit. In this phase, we do the following:
+///     - Find the timestamp from a `CommitInfo` action if it exists. These are generated when
+///       In-commit timestamps is enabled.
+///     - Ensure that reading is supported on any protocol updates
+///     - Ensure that Change Data Feed is enabled for any metadata update. See  [`TableProperties`]
+///     - Ensure that any schema update is compatible with the provided `schema`. Currently, schema
+///       compatibility is checked through schema equality. This will be expanded in the future to
+///       allow limited schema evolution.
+///     - Determine if there exists any `cdc` actions.
+///     - Constructs the remove deletion vector map from paths belonging to `remove` actions to the
+///       action's corresponding [`DvInfo`]. This map will be filtered to only contain paths that
+///       exists in another `add` action _within the same commit_. This corresponds to `remove_dv`
+///       in [`TableChangesScanData`].
+/// 2. Scan file generation phase [`LogReplayScanner::into_scan_batches`]: This performs another
+///    iteration over every action in the commit, and generates [`TableChangesScanData`]. It does
+///    so by transforming the actions using [`get_add_transform_expr`], and generating selection
+///    vectors with the following rules:
+///     - If a `cdc` action was found in the prepare phase, only `cdc` actions are selected
+///     - Otherwise, select `add` and `remove` actions. Note that only `remove` actions that do not
+///       share a path with an `add` action are selected.
 struct LogReplayScanner {
     has_cdc_action: bool,
     // A map from path to the deletion vector from the remove action. It is guaranteed that there
@@ -131,6 +158,7 @@ impl LogReplayScanner {
 
             let mut visitor = PreparePhaseVisitor::new(self, selection_vector, &mut add_paths);
             visitor.visit_rows_of(actions.as_ref())?;
+
             if let Some(protocol) = visitor.protocol {
                 protocol.ensure_read_supported()?;
             }
@@ -147,13 +175,16 @@ impl LogReplayScanner {
                     Error::change_data_feed_unsupported(self.commit_file.version)
                 )
             }
+        }
 
-            if self.has_cdc_action {
-                self.remove_dvs.clear();
-            } else {
-                self.remove_dvs
-                    .retain(|rm_path, _| add_paths.contains(rm_path));
-            }
+        // We resolve the remove deletion vector map after visiting the entire commit.
+        if self.has_cdc_action {
+            self.remove_dvs.clear();
+        } else {
+            // The only (path, deletion_vector) pairs we must track are ones whose path is the
+            // same as an `add` action.
+            self.remove_dvs
+                .retain(|rm_path, _| add_paths.contains(rm_path));
         }
         Ok(())
     }
@@ -203,6 +234,8 @@ impl LogReplayScanner {
     }
 }
 
+// This is a visitor used in the prepare phase of [`LogReplayScanner`]. See
+// [`LogReplayScanner::prepare_phase`] for details usage.
 struct PreparePhaseVisitor<'a> {
     scanner: &'a mut LogReplayScanner,
     selection_vector: Vec<bool>,
@@ -323,6 +356,8 @@ impl<'a> RowVisitor for PreparePhaseVisitor<'a> {
     }
 }
 
+// This visitor generates selection vectors based on the rules specified in [`LogReplayScanner`].
+// See [`LogReplayScanner::into_scan_batches`] for usage.
 struct FileActionSelectionVisitor<'a> {
     selection_vector: Vec<bool>,
     has_cdc_action: bool,
@@ -652,7 +687,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn table_changes_add_remove() {
+    async fn add_remove() {
         let engine = SyncEngine::new();
         let mut mock_table = MockTable::new();
         mock_table
@@ -688,7 +723,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn table_changes_cdc() {
+    async fn cdc_selection() {
         let engine = SyncEngine::new();
         let mut mock_table = MockTable::new();
         mock_table
@@ -729,7 +764,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn table_changes_dv() {
+    async fn dv() {
         let engine = SyncEngine::new();
         let mut mock_table = MockTable::new();
 
@@ -794,7 +829,7 @@ mod tests {
         );
     }
     #[tokio::test]
-    async fn table_changes_protocol() {
+    async fn failing_protocol() {
         let engine = SyncEngine::new();
         let mut mock_table = MockTable::new();
 
@@ -832,7 +867,7 @@ mod tests {
         assert!(scanner.prepare_phase().is_err());
     }
     #[tokio::test]
-    async fn table_changes_in_commit_timestamp() {
+    async fn in_commit_timestamp() {
         let engine = SyncEngine::new();
         let mut mock_table = MockTable::new();
 
@@ -864,7 +899,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn table_changes_file_meta_timestamp() {
+    async fn file_meta_timestamp() {
         let engine = SyncEngine::new();
         let mut mock_table = MockTable::new();
 
