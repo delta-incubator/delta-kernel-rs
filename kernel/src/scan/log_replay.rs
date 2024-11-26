@@ -208,7 +208,7 @@ impl LogReplayScanner {
 
     fn process_scan_batch(
         &mut self,
-        expression: &dyn ExpressionEvaluator,
+        add_transform: &dyn ExpressionEvaluator,
         actions: &dyn EngineData,
         is_log_batch: bool,
     ) -> DeltaResult<ScanData> {
@@ -229,7 +229,7 @@ impl LogReplayScanner {
 
         // TODO: Teach expression eval to respect the selection vector we just computed so carefully!
         let selection_vector = visitor.selection_vector;
-        let result = expression.evaluate(actions)?;
+        let result = add_transform.evaluate(actions)?;
         Ok((result, selection_vector))
     }
 }
