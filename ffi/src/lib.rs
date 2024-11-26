@@ -39,7 +39,7 @@ pub mod scan;
 pub mod schema;
 #[cfg(feature = "test-ffi")]
 pub mod test_ffi;
-// todo: feature flag
+#[cfg(feature = "tracing")]
 pub mod ffi_tracing;
 
 pub(crate) type NullableCvoid = Option<NonNull<c_void>>;
