@@ -398,7 +398,6 @@ mod tests {
     use std::path::Path;
     use std::sync::Arc;
     use tempfile::TempDir;
-    use tokio::runtime::Runtime;
 
     use super::{get_add_transform_expr, LogReplayScanner, TableChangesScanData};
     use crate::actions::{get_log_add_schema, Add, Cdc, CommitInfo, Metadata, Protocol, Remove};
@@ -460,24 +459,20 @@ mod tests {
     struct MockTable {
         commit_num: u64,
         store: Arc<LocalFileSystem>,
-        runtime: Runtime,
         dir: TempDir,
     }
 
     impl MockTable {
         pub(crate) fn new() -> Self {
-            let runtime = tokio::runtime::Runtime::new().expect("create tokio runtime");
-
             let dir = tempfile::tempdir().unwrap();
             let store = Arc::new(LocalFileSystem::new_with_prefix(dir.path()).unwrap());
             Self {
                 commit_num: 0,
                 store,
-                runtime,
                 dir,
             }
         }
-        pub(crate) fn commit(&mut self, actions: &[Action]) {
+        pub(crate) async fn commit(&mut self, actions: &[Action]) {
             let data = actions
                 .iter()
                 .map(|action| serde_json::to_string(&action).unwrap())
@@ -487,12 +482,11 @@ mod tests {
             let path = delta_path_for_version(self.commit_num, "json");
             self.commit_num += 1;
             // add log files to store
-            self.runtime.block_on(async {
-                self.store
-                    .put(&path, data.into())
-                    .await
-                    .expect("put log file in store");
-            });
+
+            self.store
+                .put(&path, data.into())
+                .await
+                .expect("put log file in store");
         }
         pub(crate) fn table_root(&self) -> &Path {
             self.dir.path()
@@ -557,11 +551,11 @@ mod tests {
             .unwrap()
     }
 
-    #[test]
-    fn metadata_protocol() {
+    #[tokio::test]
+    async fn metadata_protocol() {
         let engine = SyncEngine::new();
         let mut mock_table = MockTable::new();
-        mock_table.commit(&get_init_commit());
+        mock_table.commit(&get_init_commit()).await;
 
         let mut commits = get_segment(&engine, mock_table.table_root(), 0, None)
             .unwrap()
@@ -582,29 +576,30 @@ mod tests {
         );
     }
 
-    #[test]
-    fn table_changes_add_remove() {
+    #[tokio::test]
+    async fn table_changes_add_remove() {
         let engine = SyncEngine::new();
         let mut mock_table = MockTable::new();
-        mock_table.commit(&get_init_commit());
-        mock_table.commit(&[
-            Add {
-                path: "fake_path_1".into(),
-                ..Default::default()
-            }
-            .into(),
-            Remove {
-                path: "fake_path_2".into(),
-                ..Default::default()
-            }
-            .into(),
-        ]);
+        mock_table
+            .commit(&[
+                Add {
+                    path: "fake_path_1".into(),
+                    ..Default::default()
+                }
+                .into(),
+                Remove {
+                    path: "fake_path_2".into(),
+                    ..Default::default()
+                }
+                .into(),
+            ])
+            .await;
 
         let mut commits = get_segment(&engine, mock_table.table_root(), 0, None)
             .unwrap()
             .into_iter();
 
-        let commit = commits.nth(1).unwrap();
+        let commit = commits.next().unwrap();
         let mut scanner = get_commit_log_scanner(&engine, commit);
 
         scanner.visit_commit().unwrap();
@@ -632,28 +627,30 @@ mod tests {
         );
     }
 
-    #[test]
-    fn table_changes_cdc() {
+    #[tokio::test]
+    async fn table_changes_cdc() {
         let engine = SyncEngine::new();
         let mut mock_table = MockTable::new();
-        mock_table.commit(&get_init_commit());
-        mock_table.commit(&[
-            Add {
-                path: "fake_path_1".into(),
-                ..Default::default()
-            }
-            .into(),
-            Remove {
-                path: "fake_path_2".into(),
-                ..Default::default()
-            }
-            .into(),
-            Cdc {
-                path: "fake_path_3".into(),
-                ..Default::default()
-            }
-            .into(),
-        ]);
+        mock_table.commit(&get_init_commit()).await;
+        mock_table
+            .commit(&[
+                Add {
+                    path: "fake_path_1".into(),
+                    ..Default::default()
+                }
+                .into(),
+                Remove {
+                    path: "fake_path_2".into(),
+                    ..Default::default()
+                }
+                .into(),
+                Cdc {
+                    path: "fake_path_3".into(),
+                    ..Default::default()
+                }
+                .into(),
+            ])
+            .await;
 
         let mut commits = get_segment(&engine, mock_table.table_root(), 0, None)
             .unwrap()
@@ -687,8 +684,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn table_changes_dv() {
+    #[tokio::test]
+    async fn table_changes_dv() {
         let engine = SyncEngine::new();
         let mut mock_table = MockTable::new();
 
@@ -706,25 +703,27 @@ mod tests {
             size_in_bytes: 38,
             cardinality: 3,
         };
-        mock_table.commit(&[
-            Add {
-                path: "fake_path_1".into(),
-                ..Default::default()
-            }
-            .into(),
-            Remove {
-                path: "fake_path_1".into(),
-                deletion_vector: Some(deletion_vector1.clone()),
-                ..Default::default()
-            }
-            .into(),
-            Remove {
-                path: "fake_path_2".into(),
-                deletion_vector: Some(deletion_vector2.clone()),
-                ..Default::default()
-            }
-            .into(),
-        ]);
+        mock_table
+            .commit(&[
+                Add {
+                    path: "fake_path_1".into(),
+                    ..Default::default()
+                }
+                .into(),
+                Remove {
+                    path: "fake_path_1".into(),
+                    deletion_vector: Some(deletion_vector1.clone()),
+                    ..Default::default()
+                }
+                .into(),
+                Remove {
+                    path: "fake_path_2".into(),
+                    deletion_vector: Some(deletion_vector2.clone()),
+                    ..Default::default()
+                }
+                .into(),
+            ])
+            .await;
 
         let mut commits = get_segment(&engine, mock_table.table_root(), 0, None)
             .unwrap()
@@ -773,8 +772,8 @@ mod tests {
             &[true, false, true]
         );
     }
-    #[test]
-    fn table_changes_protocol() {
+    #[tokio::test]
+    async fn table_changes_protocol() {
         let engine = SyncEngine::new();
         let mut mock_table = MockTable::new();
 
@@ -786,19 +785,21 @@ mod tests {
         )
         .unwrap();
 
-        mock_table.commit(&[
-            Add {
-                path: "fake_path_1".into(),
-                ..Default::default()
-            }
-            .into(),
-            Remove {
-                path: "fake_path_2".into(),
-                ..Default::default()
-            }
-            .into(),
-            protocol.into(),
-        ]);
+        mock_table
+            .commit(&[
+                Add {
+                    path: "fake_path_1".into(),
+                    ..Default::default()
+                }
+                .into(),
+                Remove {
+                    path: "fake_path_2".into(),
+                    ..Default::default()
+                }
+                .into(),
+                protocol.into(),
+            ])
+            .await;
 
         let mut commits = get_segment(&engine, mock_table.table_root(), 0, None)
             .unwrap()
