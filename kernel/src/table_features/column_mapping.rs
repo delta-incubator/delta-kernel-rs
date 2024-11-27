@@ -171,6 +171,7 @@ mod tests {
                 .into_iter()
                 .collect();
         let table_properties = TableProperties::from(table_properties.iter());
+        let empty_table_properties = TableProperties::from([] as [(String, String); 0]);
 
         let protocol = Protocol::try_new(2, 5, None::<Vec<String>>, None::<Vec<String>>).unwrap();
         assert_eq!(
@@ -181,21 +182,56 @@ mod tests {
         let empty_features = Some::<[String; 0]>([]);
         let protocol =
             Protocol::try_new(3, 7, empty_features.clone(), empty_features.clone()).unwrap();
+
+        column_mapping_mode(&protocol, &table_properties)
+            .expect_err("table property set but feature not supported");
+
         assert_eq!(
-            column_mapping_mode(&protocol, &table_properties).unwrap(),
+            column_mapping_mode(&protocol, &empty_table_properties).unwrap(),
             ColumnMappingMode::None
         );
 
         let protocol = Protocol::try_new(
             3,
             7,
+            Some([ReaderFeatures::ColumnMapping]),
+            empty_features.clone(),
+        )
+        .unwrap();
+        assert_eq!(
+            column_mapping_mode(&protocol, &table_properties).unwrap(),
+            ColumnMappingMode::Id
+        );
+
+        let protocol = Protocol::try_new(
+            3,
+            7,
             Some([ReaderFeatures::DeletionVectors]),
+            empty_features.clone(),
+        )
+        .unwrap();
+
+        column_mapping_mode(&protocol, &table_properties)
+            .expect_err("table property set but feature not supported");
+
+        assert_eq!(
+            column_mapping_mode(&protocol, &empty_table_properties).unwrap(),
+            ColumnMappingMode::None
+        );
+
+        let protocol = Protocol::try_new(
+            3,
+            7,
+            Some([
+                ReaderFeatures::DeletionVectors,
+                ReaderFeatures::ColumnMapping,
+            ]),
             empty_features,
         )
         .unwrap();
         assert_eq!(
             column_mapping_mode(&protocol, &table_properties).unwrap(),
-            ColumnMappingMode::None
+            ColumnMappingMode::Id
         );
     }
 }
