@@ -20,40 +20,48 @@ pub struct VersionGroup<L: AsUrl = FileMeta> {
     files: Vec<ParsedLogPath<L>>,
 }
 
-// check if the given version of the snapshot contains checkpoint
+// check if the given version of the snapshot contains checkpoint file
 impl<L: AsUrl> VersionGroup<L> {
     pub fn contains_checkpoint(&self) -> bool {
         self.files.iter().any(|f| f.is_checkpoint())
     }
 }
-
-// Files are implementation of an Iterator that yields ParsedLogPath
-// So it can be any type that implements Iterator<Item = ParsedLogPath<L>>
-// Hence their size is not known at compile time, so we use a Box<dyn Iterator<Item = ParsedLogPath<L>>>
-pub struct VersionGroupingIterator<L: AsUrl = FileMeta> {
-    files: Peekable<Box<dyn Iterator<Item = ParsedLogPath<L>>>>,
+// VersionGroupingIterator takes two type parameters:
+// I: The concrete iterator type that yields ParsedLogPath<L>
+// L: The type implementing AsUrl that represents the underlying file location
+// This allows for flexible iteration over log files while maintaining type safety
+pub struct VersionGroupingIterator<I, L> 
+where 
+    L: AsUrl,
+    I: Iterator<Item = ParsedLogPath<L>>,
+{
+    files: Peekable<I>,
 }
 
 // We use a type conversion to allow the caller to pass any iterator that yields ParsedLogPath
 // This gives an advantage to group files by version in a streaming fashion if we can assume that 
 // the input iterator is already sorted by version, like an S3 listing of delta log files.
-impl<T, L> From<T> for VersionGroupingIterator<L>
+impl<I, L> From<I> for VersionGroupingIterator<I,L>
 where
-    L: AsUrl + 'static,
-    T: Iterator<Item = ParsedLogPath<L>> + 'static,
+    L: AsUrl,
+    I: Iterator<Item = ParsedLogPath<L>>,
 {
-    fn from(value: T) -> Self {
-        let files: Box<dyn Iterator<Item = ParsedLogPath<L>>> = Box::new(value);
+    fn from(value: I) -> Self {
+        let files  = value;
         VersionGroupingIterator { files: files.peekable() }
     }
 }
 
 // By assuming that the input iterator is already sorted by version, we can group the files by version in a streaming fashion
 // This assuming is very important, if the input is not sorted by version, the grouping will not be correct
-impl<L: AsUrl> Iterator for VersionGroupingIterator<L> {
+impl<I, L> Iterator for VersionGroupingIterator<I, L> 
+where 
+    L: AsUrl, 
+    I: Iterator<Item = ParsedLogPath<L>>,
+{
     type Item = VersionGroup<L>;
 
-    fn next(&mut self) -> Option<VersionGroup<L>> {
+    fn next(&mut self) -> Option<Self::Item> {
         while let Some(logpath) = self.files.next() {
             let version = logpath.version;
             let mut files = vec![logpath];
