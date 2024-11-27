@@ -28,18 +28,17 @@ pub enum ColumnMappingMode {
 pub(crate) fn column_mapping_mode(
     protocol: &Protocol,
     table_properties: &TableProperties,
-) -> DeltaResult<ColumnMappingMode> {
+) -> ColumnMappingMode {
     match (
         table_properties.column_mapping_mode,
         protocol.min_reader_version(),
     ) {
-        // NOTE: The table property is optional even when the feature is supported
-        (None, _) => Ok(ColumnMappingMode::None),
-        (Some(mode), 2) => Ok(mode),
-        (Some(mode), 3) if protocol.has_reader_feature(&ReaderFeatures::ColumnMapping) => Ok(mode),
-        (Some(_), _) => Err(Error::invalid_column_mapping_mode(
-            "Table does not support column mapping mode, but the table property is set",
-        )),
+        // NOTE: The table property is optional even when the feature is supported, and should be
+        // ignored when the feature is not supported. For details see
+        // https://github.com/delta-io/delta/blob/master/PROTOCOL.md#column-mapping
+        (Some(mode), 2) => mode,
+        (Some(mode), 3) if protocol.has_reader_feature(&ReaderFeatures::ColumnMapping) => mode,
+        _ => ColumnMappingMode::None,
     }
 }
 
@@ -174,20 +173,28 @@ mod tests {
         let empty_table_properties = TableProperties::from([] as [(String, String); 0]);
 
         let protocol = Protocol::try_new(2, 5, None::<Vec<String>>, None::<Vec<String>>).unwrap();
+
         assert_eq!(
-            column_mapping_mode(&protocol, &table_properties).unwrap(),
+            column_mapping_mode(&protocol, &table_properties),
             ColumnMappingMode::Id
+        );
+
+        assert_eq!(
+            column_mapping_mode(&protocol, &empty_table_properties),
+            ColumnMappingMode::None
         );
 
         let empty_features = Some::<[String; 0]>([]);
         let protocol =
             Protocol::try_new(3, 7, empty_features.clone(), empty_features.clone()).unwrap();
 
-        column_mapping_mode(&protocol, &table_properties)
-            .expect_err("table property set but feature not supported");
+        assert_eq!(
+            column_mapping_mode(&protocol, &table_properties),
+            ColumnMappingMode::None
+        );
 
         assert_eq!(
-            column_mapping_mode(&protocol, &empty_table_properties).unwrap(),
+            column_mapping_mode(&protocol, &empty_table_properties),
             ColumnMappingMode::None
         );
 
@@ -198,9 +205,15 @@ mod tests {
             empty_features.clone(),
         )
         .unwrap();
+
         assert_eq!(
-            column_mapping_mode(&protocol, &table_properties).unwrap(),
+            column_mapping_mode(&protocol, &table_properties),
             ColumnMappingMode::Id
+        );
+
+        assert_eq!(
+            column_mapping_mode(&protocol, &empty_table_properties),
+            ColumnMappingMode::None
         );
 
         let protocol = Protocol::try_new(
@@ -211,11 +224,13 @@ mod tests {
         )
         .unwrap();
 
-        column_mapping_mode(&protocol, &table_properties)
-            .expect_err("table property set but feature not supported");
+        assert_eq!(
+            column_mapping_mode(&protocol, &table_properties),
+            ColumnMappingMode::None
+        );
 
         assert_eq!(
-            column_mapping_mode(&protocol, &empty_table_properties).unwrap(),
+            column_mapping_mode(&protocol, &empty_table_properties),
             ColumnMappingMode::None
         );
 
@@ -229,9 +244,15 @@ mod tests {
             empty_features,
         )
         .unwrap();
+
         assert_eq!(
-            column_mapping_mode(&protocol, &table_properties).unwrap(),
+            column_mapping_mode(&protocol, &table_properties),
             ColumnMappingMode::Id
+        );
+
+        assert_eq!(
+            column_mapping_mode(&protocol, &empty_table_properties),
+            ColumnMappingMode::None
         );
     }
 }
