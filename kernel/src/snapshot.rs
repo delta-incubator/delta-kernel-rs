@@ -85,9 +85,9 @@ impl Snapshot {
         protocol.ensure_read_supported()?;
 
         // validate column mapping mode -- all schema fields should be correctly (un)annotated
-        let schema = metadata.schema()?;
+        let schema = metadata.parse_schema()?;
         let table_properties = metadata.parse_table_properties();
-        let column_mapping_mode = column_mapping_mode(&protocol, &table_properties);
+        let column_mapping_mode = column_mapping_mode(&protocol, &table_properties)?;
         validate_schema_column_mapping(&schema, column_mapping_mode)?;
 
         Ok(Self {
