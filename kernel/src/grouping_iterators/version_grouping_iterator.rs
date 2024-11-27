@@ -20,6 +20,13 @@ pub struct VersionGroup<L: AsUrl = FileMeta> {
     files: Vec<ParsedLogPath<L>>,
 }
 
+// check if the given version of the snapshot contains checkpoint
+impl<L: AsUrl> VersionGroup<L> {
+    pub fn contains_checkpoint(&self) -> bool {
+        self.files.iter().any(|f| f.is_checkpoint())
+    }
+}
+
 // Files are implementation of an Iterator that yields ParsedLogPath
 // So it can be any type that implements Iterator<Item = ParsedLogPath<L>>
 // Hence their size is not known at compile time, so we use a Box<dyn Iterator<Item = ParsedLogPath<L>>>
