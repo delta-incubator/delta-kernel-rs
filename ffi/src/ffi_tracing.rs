@@ -72,6 +72,9 @@ pub type TracingEventFn = extern "C" fn(event: Event);
 /// [`Event`] based tracing gives an engine maximal flexibility in formatting event log
 /// lines. Kernel can also format events for the engine. If this is desired call
 /// [`enable_log_line_tracing`] instead of this method.
+///
+/// # Safety
+/// Caller must pass a valid function pointer for the callback
 #[no_mangle]
 pub unsafe extern "C" fn enable_event_tracing(callback: TracingEventFn, max_level: Level) {
     setup_event_subscriber(callback, max_level);
@@ -117,6 +120,7 @@ pub enum LogLineFormat {
 /// - include timestamps
 /// - include level
 /// - include target
+///
 /// `max_level` specifies that only logs `<=` to the specified level should be reported.  More
 /// verbose Levels are "greater than" less verbose ones. So Level::ERROR is the lowest, and
 /// Level::TRACE the highest.
@@ -126,6 +130,9 @@ pub enum LogLineFormat {
 /// Log line based tracing is simple for an engine as it can just log the passed string, but does
 /// not provide flexibility for an engine to format events. If the engine wants to use a specific
 /// format for events it should call [`enable_event_tracing`] instead of this function.
+///
+/// # Safety
+/// Caller must pass a valid function pointer for the callback
 #[no_mangle]
 pub unsafe extern "C" fn enable_log_line_tracing(callback: TracingLogLineFn, max_level: Level) {
     setup_log_line_subscriber(
@@ -147,6 +154,9 @@ pub unsafe extern "C" fn enable_log_line_tracing(callback: TracingLogLineFn, max
 /// - `with_time`: should the formatter include a timestamp in the log message
 /// - `with_level`: should the formatter include the level in the log message
 /// - `with_target`: should the formatter include what part of the system the event occurred
+///
+/// # Safety
+/// Caller must pass a valid function pointer for the callback
 #[no_mangle]
 pub unsafe extern "C" fn enable_formatted_log_line_tracing(
     callback: TracingLogLineFn,
@@ -349,6 +359,91 @@ fn setup_log_line_subscriber(
         }
         LogLineFormat::JSON => {
             setup_subscriber!(json);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tracing::info;
+    use tracing_subscriber::fmt::time::FormatTime;
+
+    use crate::TryFromStringSlice;
+
+    use super::*;
+
+    static MESSAGES: Mutex<Option<Vec<String>>> = Mutex::new(None);
+
+    extern "C" fn record_callback(line: KernelStringSlice) {
+        let s: &str = unsafe { TryFromStringSlice::try_from_slice(&line).unwrap() };
+        let s = s.to_string();
+        let mut lock = MESSAGES.lock().unwrap();
+        if let Some(ref mut msgs) = *lock {
+            msgs.push(s);
+        }
+    }
+
+    fn setup_messages() {
+        *MESSAGES.lock().unwrap() = Some(vec![]);
+    }
+
+    // get the string that we should ensure is in log messages for the time. If current time seconds
+    // is >= 50, return None because the minute might roll over before we actually log which would
+    // invalidate this check
+    fn get_time_test_str() -> Option<String> {
+        #[derive(Default)]
+        struct W {
+            s: String,
+        }
+        impl fmt::Write for W {
+            fn write_str(&mut self, s: &str) -> fmt::Result {
+                self.s.push_str(s);
+                Ok(())
+            }
+        }
+
+        let mut w = W::default();
+        let mut writer = tracing_subscriber::fmt::format::Writer::new(&mut w);
+        let now = tracing_subscriber::fmt::time::SystemTime;
+        now.format_time(&mut writer).unwrap();
+        let tstr = w.s;
+        if tstr.len() < 19 {
+            return None;
+        }
+        let secs: u32 = tstr[17..19].parse().expect("Failed to parse secs");
+        if secs >= 50 {
+            // risk of roll-over, don't check
+            return None;
+        }
+        // Trim to just hours and minutes
+        Some(tstr[..19].to_string())
+    }
+
+    #[test]
+    fn info_logs_with_log_line_tracing() {
+        setup_messages();
+        unsafe {
+            enable_log_line_tracing(record_callback, Level::TRACE);
+        }
+        let lines = ["Testing 1\n", "Another line\n"];
+        let test_time_str = get_time_test_str();
+        for line in lines {
+            // remove final newline which will be added back by logging
+            info!("{}", &line[..(line.len() - 1)]);
+        }
+        let lock = MESSAGES.lock().unwrap();
+        if let Some(ref msgs) = *lock {
+            assert_eq!(msgs.len(), lines.len());
+            for (got, expect) in msgs.iter().zip(lines) {
+                assert!(got.ends_with(expect));
+                assert!(got.contains("INFO"));
+                assert!(got.contains("delta_kernel_ffi::ffi_tracing::tests"));
+                if let Some(ref tstr) = test_time_str {
+                    assert!(got.contains(tstr));
+                }
+            }
+        } else {
+            panic!("Messages wasn't Some");
         }
     }
 }
