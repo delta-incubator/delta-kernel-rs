@@ -14,18 +14,16 @@
 3. FFI: removed (hazardous) `impl From` for `KernelStringSlize` and added `unsafe` constructor
    instead [\#441]
 4. Moved `LogSegment` into its own module (`log_segment::LogSegment`) [\#438]
-5. `DvInfo` now implements `Clone`, `PartialEq`, and `Eq` [\#468]
-6. `Stats` now implements `Debug`, `Clone`, `PartialEq`, and `Eq` [\#468]
-7. Renamed `EngineData::length` as `EngineData::len` [\#471]
-8. New `AsAny` trait: `AsAny: Any + Send + Sync` required bound on all engine traits [\#450]
-9. Rename `mod features` to `mod table_features` [\#454]
-10. LogSegment fields renamed: `commit_files` -> `ascending_commit_files` and `checkpoint_files` ->
+5. Renamed `EngineData::length` as `EngineData::len` [\#471]
+6. New `AsAny` trait: `AsAny: Any + Send + Sync` required bound on all engine traits [\#450]
+7. Rename `mod features` to `mod table_features` [\#454]
+8. LogSegment fields renamed: `commit_files` -> `ascending_commit_files` and `checkpoint_files` ->
     `checkpoint_parts` [\#495]
-11. Added minimum-supported rust version: currenly rust 1.80 [\#504]
-12. Improved row visitor API: renamed `EngineData::extract` as `EngineData::visit_rows`, and
+9. Added minimum-supported rust version: currenly rust 1.80 [\#504]
+10. Improved row visitor API: renamed `EngineData::extract` as `EngineData::visit_rows`, and
     `DataVisitor` trait renamed as `RowVisitor` [\#481]
-13. FFI: New `mod engine_data` and `mod error` (moved `Error` to `error::Error`) [\#537]
-14. new error types: `InvalidProtocol`, `InvalidCommitInfo`, `MissingCommitInfo`,
+11. FFI: New `mod engine_data` and `mod error` (moved `Error` to `error::Error`) [\#537]
+12. new error types: `InvalidProtocol`, `InvalidCommitInfo`, `MissingCommitInfo`,
     `FileAlreadyExists`, `Unsupported`, `ParseIntervalError`, `ChangeDataFeedUnsupported`
 
 *Additions*
@@ -44,11 +42,13 @@
 7. Added support for parsing comma-separated column name lists:
    `ColumnName::parse_column_name_list()` [\#458]
 9. New `VacuumProtocolCheck` table feature [\#454]
-10. Added `Cdc` action support [\#506]
-11. (early CDF read support) New `TableChanges` type to read CDF from a table between versions
+10. `DvInfo` now implements `Clone`, `PartialEq`, and `Eq` [\#468]
+11. `Stats` now implements `Debug`, `Clone`, `PartialEq`, and `Eq` [\#468]
+12. Added `Cdc` action support [\#506]
+13. (early CDF read support) New `TableChanges` type to read CDF from a table between versions
     [\#505]
-12. (early CDF read support) Builder for scans on `TableChanges` [\#521]
-13. New `TableProperties` struct which can parse tables' `metadata.configuration` [\#453] [\#536]
+14. (early CDF read support) Builder for scans on `TableChanges` [\#521]
+15. New `TableProperties` struct which can parse tables' `metadata.configuration` [\#453] [\#536]
 
 **Implemented enhancements:**
 - FFI examples now use AddressSanitizer [\#447]
