@@ -3,6 +3,7 @@
 use std::sync::{Arc, Mutex};
 use std::{fmt, io};
 
+use delta_kernel::{DeltaResult, Error};
 use tracing::{
     field::{Field as TracingField, Visit},
     Event as TracingEvent, Subscriber,
@@ -69,15 +70,22 @@ pub type TracingEventFn = extern "C" fn(event: Event);
 /// that only events `<=` to the specified level should be reported.  More verbose Levels are "greater
 /// than" less verbose ones. So Level::ERROR is the lowest, and Level::TRACE the highest.
 ///
-/// [`Event`] based tracing gives an engine maximal flexibility in formatting event log
+/// Note that setting up such a call back can only be done ONCE. Calling any of
+/// `enable_event_tracing`, `enable_log_line_tracing`, or `enable_formatted_log_line_tracing` more
+/// than once is a no-op.
+///
+/// Returns `true` if the callback was setup successfully, false on failure (i.e. if called a second
+/// time)
+///
+/// [`event`] based tracing gives an engine maximal flexibility in formatting event log
 /// lines. Kernel can also format events for the engine. If this is desired call
 /// [`enable_log_line_tracing`] instead of this method.
 ///
 /// # Safety
 /// Caller must pass a valid function pointer for the callback
 #[no_mangle]
-pub unsafe extern "C" fn enable_event_tracing(callback: TracingEventFn, max_level: Level) {
-    setup_event_subscriber(callback, max_level);
+pub unsafe extern "C" fn enable_event_tracing(callback: TracingEventFn, max_level: Level) -> bool {
+    setup_event_subscriber(callback, max_level).is_ok()
 }
 
 pub type TracingLogLineFn = extern "C" fn(line: KernelStringSlice);
@@ -127,6 +135,13 @@ pub enum LogLineFormat {
 ///
 /// Log lines passed to the callback will already have a newline at the end.
 ///
+/// Note that setting up such a call back can only be done ONCE. Calling any of
+/// `enable_event_tracing`, `enable_log_line_tracing`, or `enable_formatted_log_line_tracing` more
+/// than once is a no-op.
+///
+/// Returns `true` if the callback was setup successfully, false on failure (i.e. if called a second
+/// time)
+///
 /// Log line based tracing is simple for an engine as it can just log the passed string, but does
 /// not provide flexibility for an engine to format events. If the engine wants to use a specific
 /// format for events it should call [`enable_event_tracing`] instead of this function.
@@ -134,7 +149,10 @@ pub enum LogLineFormat {
 /// # Safety
 /// Caller must pass a valid function pointer for the callback
 #[no_mangle]
-pub unsafe extern "C" fn enable_log_line_tracing(callback: TracingLogLineFn, max_level: Level) {
+pub unsafe extern "C" fn enable_log_line_tracing(
+    callback: TracingLogLineFn,
+    max_level: Level,
+) -> bool {
     setup_log_line_subscriber(
         callback,
         max_level,
@@ -143,12 +161,22 @@ pub unsafe extern "C" fn enable_log_line_tracing(callback: TracingLogLineFn, max
         true,
         true,
         true,
-    );
+    )
+    .is_ok()
 }
 
 /// Enable getting called back with log lines in the kernel. This variant allows specifying
 /// formatting options for the log lines. See [`enable_log_line_tracing`] for general info on
-/// getting called back for log lines. Options that can be set here:
+/// getting called back for log lines.
+///
+/// Note that setting up such a call back can only be done ONCE. Calling any of
+/// `enable_event_tracing`, `enable_log_line_tracing`, or `enable_formatted_log_line_tracing` more
+/// than once is a no-op.
+///
+/// Returns `true` if the callback was setup successfully, false on failure (i.e. if called a second
+/// time)
+///
+/// Options that can be set:
 /// - `format`: see [`LogLineFormat`]
 /// - `ansi`: should the formatter use ansi escapes for color
 /// - `with_time`: should the formatter include a timestamp in the log message
@@ -166,7 +194,7 @@ pub unsafe extern "C" fn enable_formatted_log_line_tracing(
     with_time: bool,
     with_level: bool,
     with_target: bool,
-) {
+) -> bool {
     setup_log_line_subscriber(
         callback,
         max_level,
@@ -175,10 +203,17 @@ pub unsafe extern "C" fn enable_formatted_log_line_tracing(
         with_time,
         with_level,
         with_target,
-    );
+    )
+    .is_ok()
 }
 
 // utility code below for setting up the tracing subscriber for events
+
+pub fn set_global_default(dispatch: tracing_core::Dispatch) -> DeltaResult<()> {
+    tracing_core::dispatcher::set_global_default(dispatch).map_err(|_| {
+        Error::generic("Unable to set global default subscriber. Trying to set more than once?")
+    })
+}
 
 struct MessageFieldVisitor {
     message: Option<String>,
@@ -238,12 +273,17 @@ where
     }
 }
 
-fn setup_event_subscriber(callback: TracingEventFn, max_level: Level) {
+fn get_event_dispatcher(callback: TracingEventFn, max_level: Level) -> tracing_core::Dispatch {
     use tracing_subscriber::{layer::SubscriberExt, registry::Registry};
     let filter: LevelFilter = max_level.into();
     let event_layer = EventLayer { callback }.with_filter(filter);
     let subscriber = Registry::default().with(event_layer);
-    tracing::subscriber::set_global_default(subscriber).expect("Failed to set global subscriber");
+    tracing_core::Dispatch::new(subscriber)
+}
+
+fn setup_event_subscriber(callback: TracingEventFn, max_level: Level) -> DeltaResult<()> {
+    let dispatch = get_event_dispatcher(callback, max_level);
+    set_global_default(dispatch)
 }
 
 // utility code below for setting up the tracing subscriber for log lines
@@ -294,7 +334,7 @@ impl<'a> MakeWriter<'a> for BufferedMessageWriter {
     }
 }
 
-fn setup_log_line_subscriber(
+fn get_log_line_dispatch(
     callback: TracingLogLineFn,
     max_level: Level,
     format: LogLineFormat,
@@ -302,7 +342,7 @@ fn setup_log_line_subscriber(
     with_time: bool,
     with_level: bool,
     with_target: bool,
-) {
+) -> tracing_core::Dispatch {
     use tracing_subscriber::{layer::SubscriberExt, registry::Registry};
     let buffer = Arc::new(Mutex::new(vec![]));
     let writer = BufferedMessageWriter {
@@ -325,14 +365,16 @@ fn setup_log_line_subscriber(
         ( $format_fn:ident ) => {
             if with_time {
                 let fmt_layer = fmt_layer.$format_fn().with_filter(filter);
-                let subscriber = Registry::default().with(fmt_layer).with(tracking_layer);
-                tracing::subscriber::set_global_default(subscriber)
-                    .expect("Failed to set global subscriber");
+                let subscriber = Registry::default()
+                    .with(fmt_layer)
+                    .with(tracking_layer.with_filter(filter));
+                tracing_core::Dispatch::new(subscriber)
             } else {
                 let fmt_layer = fmt_layer.without_time().$format_fn().with_filter(filter);
-                let subscriber = Registry::default().with(fmt_layer).with(tracking_layer);
-                tracing::subscriber::set_global_default(subscriber)
-                    .expect("Failed to set global subscriber");
+                let subscriber = Registry::default()
+                    .with(fmt_layer)
+                    .with(tracking_layer.with_filter(filter));
+                tracing_core::Dispatch::new(subscriber)
             }
         };
     }
@@ -341,30 +383,54 @@ fn setup_log_line_subscriber(
             // can't use macro as there's no `full()` function, it's just the default
             if with_time {
                 let fmt_layer = fmt_layer.with_filter(filter);
-                let subscriber = Registry::default().with(fmt_layer).with(tracking_layer);
-                tracing::subscriber::set_global_default(subscriber)
-                    .expect("Failed to set global subscriber");
+                let subscriber = Registry::default()
+                    .with(fmt_layer)
+                    .with(tracking_layer.with_filter(filter));
+                tracing_core::Dispatch::new(subscriber)
             } else {
                 let fmt_layer = fmt_layer.without_time().with_filter(filter);
-                let subscriber = Registry::default().with(fmt_layer).with(tracking_layer);
-                tracing::subscriber::set_global_default(subscriber)
-                    .expect("Failed to set global subscriber");
+                let subscriber = Registry::default()
+                    .with(fmt_layer)
+                    .with(tracking_layer.with_filter(filter));
+                tracing_core::Dispatch::new(subscriber)
             }
         }
         LogLineFormat::COMPACT => {
-            setup_subscriber!(compact);
+            setup_subscriber!(compact)
         }
         LogLineFormat::PRETTY => {
-            setup_subscriber!(pretty);
+            setup_subscriber!(pretty)
         }
         LogLineFormat::JSON => {
-            setup_subscriber!(json);
+            setup_subscriber!(json)
         }
     }
+}
+fn setup_log_line_subscriber(
+    callback: TracingLogLineFn,
+    max_level: Level,
+    format: LogLineFormat,
+    ansi: bool,
+    with_time: bool,
+    with_level: bool,
+    with_target: bool,
+) -> DeltaResult<()> {
+    let dispatch = get_log_line_dispatch(
+        callback,
+        max_level,
+        format,
+        ansi,
+        with_time,
+        with_level,
+        with_target,
+    );
+    set_global_default(dispatch)
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::LazyLock;
+
     use tracing::info;
     use tracing_subscriber::fmt::time::FormatTime;
 
@@ -372,6 +438,9 @@ mod tests {
 
     use super::*;
 
+    // Because we have to access a global messages buffer, we have to force tests to run one at a
+    // time
+    static TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
     static MESSAGES: Mutex<Option<Vec<String>>> = Mutex::new(None);
 
     extern "C" fn record_callback(line: KernelStringSlice) {
@@ -419,11 +488,15 @@ mod tests {
         Some(tstr[..19].to_string())
     }
 
+    // IMPORTANT: This is the only test that should call the actual `extern "C"` function, as we can
+    // only call it once to set the global subscriber. Other tests ALL need to use
+    // `get_X_dispatcher` and set it locally using `with_default`
     #[test]
     fn info_logs_with_log_line_tracing() {
+        let _lock = TEST_LOCK.lock().unwrap();
         setup_messages();
         unsafe {
-            enable_log_line_tracing(record_callback, Level::TRACE);
+            enable_log_line_tracing(record_callback, Level::INFO);
         }
         let lines = ["Testing 1\n", "Another line\n"];
         let test_time_str = get_time_test_str();
@@ -445,5 +518,42 @@ mod tests {
         } else {
             panic!("Messages wasn't Some");
         }
+    }
+
+    #[test]
+    fn info_logs_with_formatted_log_line_tracing() {
+        let _lock = TEST_LOCK.lock().unwrap();
+        setup_messages();
+        let dispatch = get_log_line_dispatch(
+            record_callback,
+            Level::INFO,
+            LogLineFormat::COMPACT,
+            false,
+            true,
+            false,
+            false,
+        );
+        tracing_core::dispatcher::with_default(&dispatch, || {
+            let lines = ["Testing 1\n", "Another line\n"];
+            let test_time_str = get_time_test_str();
+            for line in lines {
+                // remove final newline which will be added back by logging
+                info!("{}", &line[..(line.len() - 1)]);
+            }
+            let lock = MESSAGES.lock().unwrap();
+            if let Some(ref msgs) = *lock {
+                assert_eq!(msgs.len(), lines.len());
+                for (got, expect) in msgs.iter().zip(lines) {
+                    assert!(got.ends_with(expect));
+                    assert!(!got.contains("INFO"));
+                    assert!(!got.contains("delta_kernel_ffi::ffi_tracing::tests"));
+                    if let Some(ref tstr) = test_time_str {
+                        assert!(got.contains(tstr));
+                    }
+                }
+            } else {
+                panic!("Messages wasn't Some");
+            }
+        })
     }
 }
