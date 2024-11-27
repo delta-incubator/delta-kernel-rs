@@ -1,7 +1,7 @@
-use crate::path::ParsedLogPath;
-use std::iter::Peekable;
 use crate::path::AsUrl;
+use crate::path::ParsedLogPath;
 use crate::FileMeta;
+use std::iter::Peekable;
 
 // type to group the delta log files by version
 // example delta log files and their grouping by version:
@@ -30,8 +30,8 @@ impl<L: AsUrl> VersionGroup<L> {
 // I: The concrete iterator type that yields ParsedLogPath<L>
 // L: The type implementing AsUrl that represents the underlying file location
 // This allows for flexible iteration over log files while maintaining type safety
-pub struct VersionGroupingIterator<I, L> 
-where 
+pub struct VersionGroupingIterator<I, L>
+where
     L: AsUrl,
     I: Iterator<Item = ParsedLogPath<L>>,
 {
@@ -39,24 +39,26 @@ where
 }
 
 // We use a type conversion to allow the caller to pass any iterator that yields ParsedLogPath
-// This gives an advantage to group files by version in a streaming fashion if we can assume that 
+// This gives an advantage to group files by version in a streaming fashion if we can assume that
 // the input iterator is already sorted by version, like an S3 listing of delta log files.
-impl<I, L> From<I> for VersionGroupingIterator<I,L>
+impl<I, L> From<I> for VersionGroupingIterator<I, L>
 where
     L: AsUrl,
     I: Iterator<Item = ParsedLogPath<L>>,
 {
     fn from(value: I) -> Self {
-        let files  = value;
-        VersionGroupingIterator { files: files.peekable() }
+        let files = value;
+        VersionGroupingIterator {
+            files: files.peekable(),
+        }
     }
 }
 
 // By assuming that the input iterator is already sorted by version, we can group the files by version in a streaming fashion
 // This assuming is very important, if the input is not sorted by version, the grouping will not be correct
-impl<I, L> Iterator for VersionGroupingIterator<I, L> 
-where 
-    L: AsUrl, 
+impl<I, L> Iterator for VersionGroupingIterator<I, L>
+where
+    L: AsUrl,
     I: Iterator<Item = ParsedLogPath<L>>,
 {
     type Item = VersionGroup<L>;
@@ -78,7 +80,6 @@ where
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -86,7 +87,7 @@ mod tests {
     use url::Url;
     /// Returns a URL pointing to the test data directory containing Delta table log files.
     /// The path is relative to the project root and points to a small test Delta table.
-    /// 
+    ///
     /// # Returns
     /// A URL object representing the canonicalized path to the test Delta log directory
     fn table_log_dir_url() -> Url {
@@ -96,7 +97,7 @@ mod tests {
     }
 
     /// Creates a ParsedLogPath for testing by constructing a Delta log file path with the given version and type.
-    /// 
+    ///
     /// # Arguments
     /// * `version` - The version number to use in the filename (will be zero-padded to 20 digits)
     /// * `file_type` - The type of log file to create. Valid options are:
@@ -124,21 +125,21 @@ mod tests {
     }
 
     /// Tests the basic functionality of VersionGroupingIterator with a single commit file
-    /// 
+    ///
     /// This test verifies that:
     /// 1. The iterator correctly processes a single commit file
     /// 2. The version group contains the expected version number (1)
     /// 3. The group contains exactly one file
     /// 4. The file is correctly identified as a commit file
     /// 5. After consuming the single group, the iterator is exhausted
-    /// 
+    ///
     /// This represents the simplest possible case for the iterator - a single file
     /// that needs to be grouped by version.
     #[test]
     fn test_single_commit() {
         let paths = vec![create_log_path(1, "commit")];
-        let mut iter: VersionGroupingIterator<Url> = VersionGroupingIterator::from(paths.into_iter());
-        
+        let mut iter = VersionGroupingIterator::from(paths.into_iter());
+
         if let Some(group) = iter.next() {
             assert_eq!(group.version, 1);
             assert_eq!(group.files.len(), 1);
@@ -146,13 +147,13 @@ mod tests {
         } else {
             panic!("Expected a group");
         }
-        
+
         assert!(iter.next().is_none());
     }
 
     #[test]
     /// Tests that VersionGroupingIterator correctly handles multiple sequential versions
-    /// 
+    ///
     /// This test verifies several critical aspects of version grouping:
     /// 1. The iterator can process multiple commit files with different versions
     /// 2. Files are grouped correctly by their version numbers
@@ -160,7 +161,7 @@ mod tests {
     /// 4. Each group contains exactly one file when there is one file per version
     /// 5. The files in each group are correctly identified as commit files
     /// 6. The iterator is exhausted after processing all versions
-    /// 
+    ///
     /// This test is important because it validates the core functionality of streaming
     /// version-based grouping when processing a Delta table's log directory. The sequential
     /// version ordering is especially critical since the Delta protocol relies on processing
@@ -173,7 +174,7 @@ mod tests {
     ///   00000000000000000002.json        -> Group 2: [00000000000000000002.json]
     ///   00000000000000000003.json        -> Group 3: [00000000000000000003.json]
     /// ```
-    /// 
+    ///
     /// The test verifies that the iterator yields three groups, each containing
     /// exactly one commit file, in version order 1->2->3.
     fn test_multiple_versions() {
@@ -182,8 +183,8 @@ mod tests {
             create_log_path(2, "commit"),
             create_log_path(3, "commit"),
         ];
-        let mut iter: VersionGroupingIterator<Url> = VersionGroupingIterator::from(paths.into_iter());
-        
+        let mut iter = VersionGroupingIterator::from(paths.into_iter());
+
         for expected_version in 1..=3 {
             let group = iter.next().expect("Should have a group");
             assert_eq!(group.version, expected_version);
@@ -193,10 +194,9 @@ mod tests {
         assert!(iter.next().is_none());
     }
 
-
     #[test]
     /// Tests that VersionGroupingIterator correctly groups a commit file with its checkpoint file
-    /// 
+    ///
     /// This test verifies that:
     /// 1. Files with the same version are grouped together
     /// 2. Both commit and checkpoint files are included in the group
@@ -222,20 +222,20 @@ mod tests {
             create_log_path(1, "commit"),
             create_log_path(1, "checkpoint"),
         ];
-        let mut iter: VersionGroupingIterator<Url> = VersionGroupingIterator::from(paths.into_iter());
-        
+        let mut iter = VersionGroupingIterator::from(paths.into_iter());
+
         let group = iter.next().expect("Should have a group");
         assert_eq!(group.version, 1);
         assert_eq!(group.files.len(), 2);
         assert!(group.files.iter().any(|f| f.is_commit()));
         assert!(group.files.iter().any(|f| f.is_checkpoint()));
-        
+
         assert!(iter.next().is_none());
     }
 
     #[test]
     /// Tests that VersionGroupingIterator correctly handles multi-part checkpoint files
-    /// 
+    ///
     /// This test verifies that:
     /// 1. All files with the same version are grouped together
     /// 2. The group includes both parts of a multi-part checkpoint
@@ -265,25 +265,24 @@ mod tests {
             create_log_path(1, "multipart1"),
             create_log_path(1, "multipart2"),
         ];
-        let mut iter: VersionGroupingIterator<Url> = VersionGroupingIterator::from(paths.into_iter());
-        
+        let mut iter = VersionGroupingIterator::from(paths.into_iter());
+
         let group = iter.next().expect("Should have a group");
         assert_eq!(group.version, 1);
         assert_eq!(group.files.len(), 3);
-        
-        let (commits, checkpoints): (Vec<_>, Vec<_>) = group.files
-            .iter()
-            .partition(|f| f.is_commit());
-        
+
+        let (commits, checkpoints): (Vec<_>, Vec<_>) =
+            group.files.iter().partition(|f| f.is_commit());
+
         assert_eq!(commits.len(), 1, "Should have one commit");
         assert_eq!(checkpoints.len(), 2, "Should have two checkpoint parts");
-        
+
         assert!(iter.next().is_none());
     }
 
     #[test]
     /// Tests that VersionGroupingIterator correctly handles a mix of versions and file types
-    /// 
+    ///
     /// This test verifies that:
     /// 1. Files are correctly grouped by version number
     /// 2. Each group contains the right number and types of files
@@ -340,8 +339,7 @@ mod tests {
             create_log_path(2, "checkpoint"),
             create_log_path(3, "commit"),
         ];
-        let mut iter: VersionGroupingIterator<Url> = VersionGroupingIterator::from(paths.into_iter());
-        
+        let mut iter = VersionGroupingIterator::from(paths.into_iter());
         // Version 1 group
         let group = iter.next().expect("Should have version 1");
         assert_eq!(group.version, 1);
@@ -356,7 +354,7 @@ mod tests {
             2,
             "Should have two checkpoint parts"
         );
-        
+
         // Version 2 group
         let group = iter.next().expect("Should have version 2");
         assert_eq!(group.version, 2);
@@ -371,13 +369,13 @@ mod tests {
             1,
             "Should have one checkpoint"
         );
-        
+
         // Version 3 group
         let group = iter.next().expect("Should have version 3");
         assert_eq!(group.version, 3);
         assert_eq!(group.files.len(), 1);
         assert!(group.files[0].is_commit(), "Should be a commit file");
-        
+
         assert!(iter.next().is_none());
     }
 
@@ -385,9 +383,45 @@ mod tests {
     fn test_empty_iterator() {
         // Test that an empty input iterator returns no groups
         let paths: Vec<ParsedLogPath<Url>> = vec![];
-        let mut iter: VersionGroupingIterator<Url> = VersionGroupingIterator::from(paths.into_iter());
+        let mut iter = VersionGroupingIterator::from(paths.into_iter());
         // Verify that next() returns None when there are no items
         assert!(iter.next().is_none());
+    }
+
+    // Tests that the iterator correctly detects checkpoint files
+    // In the example data, the version 1 has no checkpoint file, while the version 2 has a checkpoint file
+    // In the test we verify that the iterator correctly identifies the checkpoint file in the version 2 group
+    #[test]
+    fn test_multiple_versions_checkpoint_detection() {
+        // Create test data:
+        // Version 1: Only commit file
+        // Version 2: Commit + checkpoint
+        let paths = vec![
+            create_log_path(1, "commit"),     // Version 1
+            create_log_path(2, "commit"),     // Version 2
+            create_log_path(2, "checkpoint"), // Version 2
+        ];
+
+        let mut iter = VersionGroupingIterator::from(paths.into_iter());
+
+        // Check Version 1
+        let group1 = iter.next().expect("Should have version 1");
+        assert_eq!(group1.version, 1);
+        assert!(
+            !group1.contains_checkpoint(),
+            "Version 1 should not have checkpoint"
+        );
+
+        // Check Version 2
+        let group2 = iter.next().expect("Should have version 2");
+        assert_eq!(group2.version, 2);
+        assert!(
+            group2.contains_checkpoint(),
+            "Version 2 should have checkpoint"
+        );
+
+        // Verify iterator is exhausted
+        assert!(iter.next().is_none(), "Should not have more versions");
     }
     // We expect the caller to sort the input before passing it to the iterator
     // hence the test is not needed, if uncommented and run, it will fail
@@ -399,8 +433,8 @@ mod tests {
     //         create_log_path(1, "checkpoint"),
     //         create_log_path(2, "checkpoint"),
     //     ];
-    //     let mut iter: VersionGroupingIterator<Url> = VersionGroupingIterator::from(paths.into_iter());
-        
+    //     let mut iter = VersionGroupingIterator::from(paths.into_iter());
+
     //     // Should still group by version regardless of input order
     //     for version in 1..=2 {
     //         let group = iter.next().expect("Should have a group");
@@ -409,8 +443,7 @@ mod tests {
     //         assert!(group.files.iter().any(|f| f.is_commit()));
     //         assert!(group.files.iter().any(|f| f.is_checkpoint()));
     //     }
-        
+
     //     assert!(iter.next().is_none());
     // }
 }
-
