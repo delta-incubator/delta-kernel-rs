@@ -51,8 +51,8 @@ pub(crate) type ScanCallback<T> = fn(context: &mut T, scan_file: ScanFile);
 /// ## Example
 /// ```ignore
 /// let mut context = [my context];
-/// for res in scan_data { // scan data from scan.get_scan_data()
-///     let (data, vector) = res?;
+/// for res in table_changes_scan_data { // scan data from table_changes_scan.scan_data()
+///     let (data, vec, remove_dv) = res?;
 ///     context = delta_kernel::scan::state::visit_scan_files(
 ///        data.as_ref(),
 ///        vector,
