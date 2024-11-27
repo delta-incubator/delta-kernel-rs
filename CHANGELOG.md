@@ -25,7 +25,8 @@
 12. Improved row visitor API: renamed `EngineData::extract` as `EngineData::visit_rows`, and
     `DataVisitor` trait renamed as `RowVisitor` [\#481]
 13. FFI: New `mod engine_data` and `mod error` (moved `Error` to `error::Error`) [\#537]
-14. new error types (TODO)
+14. new error types: `InvalidProtocol`, `InvalidCommitInfo`, `MissingCommitInfo`,
+    `FileAlreadyExists`, `Unsupported`, `ParseIntervalError`, `ChangeDataFeedUnsupported`
 
 *Additions*
 
