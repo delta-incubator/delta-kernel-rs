@@ -33,8 +33,8 @@ pub(crate) fn column_mapping_mode(
         table_properties.column_mapping_mode,
         protocol.min_reader_version(),
     ) {
-        // NOTE: The table property is optional even when the feature is supported, and should be
-        // ignored when the feature is not supported. For details see
+        // NOTE: The table property is optional even when the feature is supported, and is allowed
+        // (but should be ignored) even when the feature is not supported. For details see
         // https://github.com/delta-io/delta/blob/master/PROTOCOL.md#column-mapping
         (Some(mode), 2) => mode,
         (Some(mode), 3) if protocol.has_reader_feature(&ReaderFeatures::ColumnMapping) => mode,
