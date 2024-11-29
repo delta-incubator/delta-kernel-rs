@@ -3,6 +3,7 @@
 //! [`ScanFileVisitor`]. The visitor may read from a log with the schema [`scan_row_schema`].
 //! You can convert a log to this schema using the [`transform_to_scan_row_expression`].
 
+use itertools::Itertools;
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
 
@@ -13,6 +14,30 @@ use crate::scan::state::DvInfo;
 use crate::schema::{ColumnNamesAndTypes, DataType, MapType, SchemaRef, StructField, StructType};
 use crate::utils::require;
 use crate::{DeltaResult, EngineData, Error, RowVisitor};
+
+use super::log_replay::TableChangesScanData;
+
+#[allow(unused)]
+pub(crate) fn scan_data_to_scan_file(
+    scan_data: impl Iterator<Item = DeltaResult<TableChangesScanData>>,
+) -> impl Iterator<Item = DeltaResult<(ScanFile, Option<Arc<HashMap<String, DvInfo>>>)>> {
+    scan_data
+        .map(|scan_data| -> DeltaResult<_> {
+            let scan_data = scan_data?;
+            let callback: ScanCallback<Vec<ScanFile>> =
+                |context, scan_file| context.push(scan_file);
+            let result = visit_scan_files(
+                scan_data.data.as_ref(),
+                &scan_data.selection_vector,
+                vec![],
+                callback,
+            )?
+            .into_iter()
+            .map(move |scan_file| (scan_file, scan_data.remove_dv.clone()));
+            Ok(result)
+        })
+        .flatten_ok()
+}
 
 // The type of action associated with a [`ScanFile`]
 #[allow(unused)]
