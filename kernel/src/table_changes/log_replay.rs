@@ -10,26 +10,24 @@ use crate::actions::{
     METADATA_NAME, PROTOCOL_NAME, REMOVE_NAME,
 };
 use crate::engine_data::TypedGetData;
-use crate::expressions::column_name;
-use crate::expressions::{column_expr, Expression};
+use crate::expressions::{column_expr, column_name, Expression};
 use crate::path::ParsedLogPath;
 use crate::scan::data_skipping::DataSkippingFilter;
-use crate::scan::log_replay::SCAN_ROW_DATATYPE;
+use crate::scan::scan_row_schema;
 use crate::scan::state::DvInfo;
 use crate::schema::{ArrayType, ColumnNamesAndTypes, DataType, MapType, SchemaRef, StructType};
 use crate::table_properties::TableProperties;
 use crate::utils::require;
 use crate::{
-    DeltaResult, Engine, EngineData, Error, ExpressionEvaluator, ExpressionRef, JsonHandler,
+    DeltaResult, Engine, EngineData, Error, ExpressionHandler, ExpressionRef, JsonHandler,
     RowVisitor,
 };
 use itertools::Itertools;
 
-#[allow(unused)]
 pub struct TableChangesScanData {
-    data: Box<dyn EngineData>,
-    selection_vector: Vec<bool>,
-    remove_dv: Option<Arc<HashMap<String, DvInfo>>>,
+    pub data: Box<dyn EngineData>,
+    pub selection_vector: Vec<bool>,
+    pub remove_dv: Option<Arc<HashMap<String, DvInfo>>>,
 }
 
 /// Given an iterator of ParsedLogPath and a predicate, returns an iterator of
@@ -45,12 +43,7 @@ pub(crate) fn table_changes_action_iter(
     let json_handler = engine.get_json_handler();
     let filter = DataSkippingFilter::new(engine, &table_schema, predicate);
 
-    let expression_evaluator = engine.get_expression_handler().get_evaluator(
-        get_log_add_schema().clone(),
-        get_add_transform_expr(),
-        SCAN_ROW_DATATYPE.clone(),
-    );
-
+    let expression_handler = engine.get_expression_handler();
     let result = commit_files
         .into_iter()
         .map(move |commit_file| -> DeltaResult<_> {
@@ -58,7 +51,7 @@ pub(crate) fn table_changes_action_iter(
                 commit_file,
                 json_handler.clone(),
                 filter.clone(),
-                expression_evaluator.clone(),
+                expression_handler.clone(),
                 table_schema.clone(),
             );
             scanner.prepare_phase()?;
@@ -127,7 +120,7 @@ struct LogReplayScanner {
     schema: SchemaRef,
     json_handler: Arc<dyn JsonHandler>,
     filter: Option<DataSkippingFilter>,
-    expression_evaluator: Arc<dyn ExpressionEvaluator>,
+    expression_handler: Arc<dyn ExpressionHandler>,
 }
 
 impl LogReplayScanner {
@@ -135,7 +128,7 @@ impl LogReplayScanner {
         commit_file: ParsedLogPath,
         json_handler: Arc<dyn JsonHandler>,
         filter: Option<DataSkippingFilter>,
-        expression_evaluator: Arc<dyn ExpressionEvaluator>,
+        expression_handler: Arc<dyn ExpressionHandler>,
         schema: SchemaRef,
     ) -> Self {
         Self {
@@ -145,7 +138,7 @@ impl LogReplayScanner {
             filter,
             has_cdc_action: Default::default(),
             remove_dvs: Default::default(),
-            expression_evaluator,
+            expression_handler,
             schema,
         }
     }
@@ -212,7 +205,7 @@ impl LogReplayScanner {
             json_handler,
             timestamp: _,
             filter,
-            expression_evaluator,
+            expression_handler,
             schema: _,
         } = self;
         let remove_dvs = Arc::new(remove_dvs);
@@ -236,7 +229,13 @@ impl LogReplayScanner {
                 FileActionSelectionVisitor::new(&remove_dvs, selection_vector, has_cdc_action);
             visitor.visit_rows_of(actions.as_ref())?;
 
-            let data = expression_evaluator.evaluate(actions.as_ref())?;
+            let data = expression_handler
+                .get_evaluator(
+                    get_log_add_schema().clone(),
+                    get_add_transform_expr(),
+                    scan_row_schema().into(),
+                )
+                .evaluate(actions.as_ref())?;
             Ok(TableChangesScanData {
                 data,
                 selection_vector: visitor.selection_vector,
@@ -449,21 +448,20 @@ impl<'a> RowVisitor for FileActionSelectionVisitor<'a> {
 #[cfg(test)]
 mod tests {
 
+    use super::{LogReplayScanner, TableChangesScanData};
     use crate::actions::deletion_vector::DeletionVectorDescriptor;
-    use crate::scan::state::DvInfo;
-    use crate::schema::{DataType, StructField, StructType};
-    use itertools::Itertools;
-    use std::collections::HashMap;
-    use std::path::Path;
-
-    use super::{get_add_transform_expr, LogReplayScanner, TableChangesScanData};
-    use crate::actions::{get_log_add_schema, Add, Cdc, CommitInfo, Metadata, Protocol, Remove};
+    use crate::actions::{Add, Cdc, CommitInfo, Metadata, Protocol, Remove};
     use crate::engine::sync::SyncEngine;
     use crate::log_segment::LogSegment;
     use crate::path::ParsedLogPath;
-    use crate::scan::log_replay::SCAN_ROW_DATATYPE;
+    use crate::scan::state::DvInfo;
+    use crate::schema::{DataType, StructField, StructType};
     use crate::utils::test_utils::MockTable;
     use crate::{DeltaResult, Engine, Error, Version};
+
+    use itertools::Itertools;
+    use std::collections::HashMap;
+    use std::path::Path;
 
     fn get_schema() -> StructType {
         StructType::new([
@@ -490,16 +488,12 @@ mod tests {
     }
 
     fn get_commit_log_scanner(engine: &dyn Engine, commit: ParsedLogPath) -> LogReplayScanner {
-        let expression_evaluator = engine.get_expression_handler().get_evaluator(
-            get_log_add_schema().clone(),
-            get_add_transform_expr(),
-            SCAN_ROW_DATATYPE.clone(),
-        );
+        let expression_handler = engine.get_expression_handler();
         LogReplayScanner::new(
             commit,
             engine.get_json_handler(),
             None,
-            expression_evaluator.clone(),
+            expression_handler.clone(),
             get_schema().into(),
         )
     }
