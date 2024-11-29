@@ -1,9 +1,10 @@
+use std::iter;
 use std::sync::Arc;
 
 use itertools::Itertools;
 use tracing::debug;
 
-use crate::scan::ColumnType;
+use crate::scan::{ColumnType, ScanResult};
 use crate::schema::{SchemaRef, StructType};
 use crate::{DeltaResult, Engine, ExpressionRef};
 
@@ -180,6 +181,13 @@ impl TableChangesScan {
             self.table_schema.clone(),
             self.predicate.clone(),
         )
+    }
+    pub fn execute(
+        &self,
+        engine: Arc<dyn Engine>,
+    ) -> DeltaResult<impl Iterator<Item = DeltaResult<ScanResult>>> {
+        let scan_data = self.scan_data(engine.as_ref())?;
+        Ok(iter::empty())
     }
 }
 
