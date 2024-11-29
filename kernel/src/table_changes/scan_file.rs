@@ -23,21 +23,21 @@ pub(crate) enum ScanFileType {
 }
 
 /// Represents all the metadata needed to read a Change Data Feed. It has the following fields:
-/// * `tpe`: The type of action this file belongs to. This may be one of add, remove, or cdc.
-/// * `path`: a `&str` which is the path to the file
-/// * `size`: an `i64` which is the size of the file
-/// * `dv_info`: a [`DvInfo`] struct, which allows getting the selection vector for this file
-/// * `partition_values`: a `HashMap<String, String>` which are partition values
-/// * `commit_version`: the commit version that this action was performed in
-/// * `timestamp`: the timestamp of the commit that this action was performed in
 #[derive(Debug)]
 pub(crate) struct ScanFile {
+    /// The type of action this file belongs to. This may be one of add, remove, or cdc.
     pub tpe: ScanFileType,
+    /// a `&str` which is the path to the file
     pub path: String,
+    /// an `i64` which is the size of the file
     pub size: i64,
+    /// a [`DvInfo`] struct, which allows getting the selection vector for this file
     pub dv_info: DvInfo,
+    /// a `HashMap<String, String>` which are partition values
     pub partition_values: HashMap<String, String>,
+    /// the commit version that this action was performed in
     pub commit_version: u64,
+    /// the timestamp of the commit that this action was performed in
     pub timestamp: i64,
 }
 
