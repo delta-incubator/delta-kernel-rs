@@ -9,6 +9,7 @@ use crate::schema::{SchemaRef, StructType};
 use crate::{DeltaResult, Engine, ExpressionRef};
 
 use super::log_replay::{table_changes_action_iter, TableChangesScanData};
+use super::scan_file::scan_data_to_scan_file;
 use super::{TableChanges, CDF_FIELDS};
 
 /// The result of building a [`TableChanges`] scan over a table. This can be used to get a change
@@ -187,6 +188,116 @@ impl TableChangesScan {
         engine: Arc<dyn Engine>,
     ) -> DeltaResult<impl Iterator<Item = DeltaResult<ScanResult>>> {
         let scan_data = self.scan_data(engine.as_ref())?;
+        let scan_files = scan_data_to_scan_file(scan_data);
+
+        let result = scan_files
+            .into_iter()
+            .map(move |scan_res| -> DeltaResult<_> {
+                let (scan_file, dv_map) = scan_res?;
+                let ScanFile {
+                    tpe,
+                    path,
+                    dv_info,
+                    partition_values,
+                    size,
+                    commit_version,
+                    timestamp,
+                } = scan_file;
+                let file_path = self.table_changes.table_root.join(&path)?;
+                let file = FileMeta {
+                    last_modified: 0,
+                    size: size as usize,
+                    location: file_path,
+                };
+                match (&tpe, dv_map.get(&path)) {
+                    (state::ScanFileType::Add, Some(rm_dv)) => {
+                        let generated_columns =
+                            get_generated_columns(timestamp, tpe, commit_version)?;
+
+                        let add_dv = dv_info
+                            .get_treemap(engine, &self.table_changes.table_root)?
+                            .unwrap_or(Default::default());
+                        let rm_dv = rm_dv
+                            .get_treemap(engine, &self.table_changes.table_root)?
+                            .unwrap_or(Default::default());
+
+                        let added = treemap_to_bools(&rm_dv - &add_dv);
+                        let added_rows = self.generate_output_rows(
+                            engine,
+                            file.clone(),
+                            global_state.clone(),
+                            partition_values.clone(),
+                            Some(added),
+                            Some(false),
+                            generated_columns.clone(),
+                            self.global_scan_state().read_schema.clone(),
+                        )?;
+
+                        let removed = treemap_to_bools(add_dv - rm_dv);
+                        let removed_rows = self.generate_output_rows(
+                            engine,
+                            file,
+                            global_state.clone(),
+                            partition_values.clone(),
+                            Some(removed),
+                            Some(false),
+                            generated_columns.clone(),
+                            self.global_scan_state().read_schema.clone(),
+                        )?;
+
+                        Ok(Either::Left(added_rows.chain(removed_rows)))
+                    }
+                    (ScanFileType::Cdc, _) => {
+                        let selection_vector =
+                            dv_info.get_selection_vector(engine, &self.table_changes.table_root)?;
+
+                        let generated_columns =
+                            get_generated_columns(timestamp, tpe, commit_version)?;
+
+                        let fields = self
+                            .global_scan_state()
+                            .read_schema
+                            .fields()
+                            .cloned()
+                            .collect_vec();
+                        let read_schema = StructType::new(fields.into_iter().chain(once(
+                            StructField::new("_change_type", DataType::STRING, false),
+                        )));
+                        Ok(Either::Right(self.generate_output_rows(
+                            engine,
+                            file,
+                            global_state.clone(),
+                            partition_values,
+                            selection_vector,
+                            None,
+                            generated_columns,
+                            read_schema.into(),
+                        )?))
+                    }
+                    _ => {
+                        let selection_vector =
+                            dv_info.get_selection_vector(engine, &self.table_changes.table_root)?;
+
+                        let generated_columns =
+                            get_generated_columns(timestamp, tpe, commit_version)?;
+                        Ok(Either::Right(self.generate_output_rows(
+                            engine,
+                            file,
+                            global_state.clone(),
+                            partition_values,
+                            selection_vector,
+                            None,
+                            generated_columns,
+                            self.global_scan_state().read_schema.clone(),
+                        )?))
+                    }
+                }
+            })
+            // // Iterator<DeltaResult<Iterator<DeltaResult<ScanResult>>>> to Iterator<DeltaResult<DeltaResult<ScanResult>>>
+            .flatten_ok()
+            // // Iterator<DeltaResult<DeltaResult<ScanResult>>> to Iterator<DeltaResult<ScanResult>>
+            .map(|x| x?);
+        Ok(result)
         Ok(iter::empty())
     }
 }
