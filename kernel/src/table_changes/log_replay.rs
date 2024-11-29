@@ -453,13 +453,8 @@ mod tests {
     use crate::scan::state::DvInfo;
     use crate::schema::{DataType, StructField, StructType};
     use itertools::Itertools;
-    use object_store::local::LocalFileSystem;
-    use object_store::ObjectStore;
-    use serde::Serialize;
     use std::collections::HashMap;
     use std::path::Path;
-    use std::sync::Arc;
-    use tempfile::TempDir;
 
     use super::{get_add_transform_expr, LogReplayScanner, TableChangesScanData};
     use crate::actions::{get_log_add_schema, Add, Cdc, CommitInfo, Metadata, Protocol, Remove};
@@ -467,91 +462,9 @@ mod tests {
     use crate::log_segment::LogSegment;
     use crate::path::ParsedLogPath;
     use crate::scan::log_replay::SCAN_ROW_DATATYPE;
+    use crate::utils::test_utils::MockTable;
     use crate::{DeltaResult, Engine, Error, Version};
-    use test_utils::delta_path_for_version;
 
-    #[derive(Serialize)]
-    enum Action {
-        #[serde(rename = "add")]
-        Add(Add),
-        #[serde(rename = "remove")]
-        Remove(Remove),
-        #[serde(rename = "cdc")]
-        Cdc(Cdc),
-        #[serde(rename = "metaData")]
-        Metadata(Metadata),
-        #[serde(rename = "protocol")]
-        Protocol(Protocol),
-        #[serde(rename = "commitInfo")]
-        CommitInfo(CommitInfo),
-    }
-
-    impl From<Add> for Action {
-        fn from(value: Add) -> Self {
-            Self::Add(value)
-        }
-    }
-    impl From<Remove> for Action {
-        fn from(value: Remove) -> Self {
-            Self::Remove(value)
-        }
-    }
-    impl From<Cdc> for Action {
-        fn from(value: Cdc) -> Self {
-            Self::Cdc(value)
-        }
-    }
-    impl From<Metadata> for Action {
-        fn from(value: Metadata) -> Self {
-            Self::Metadata(value)
-        }
-    }
-    impl From<Protocol> for Action {
-        fn from(value: Protocol) -> Self {
-            Self::Protocol(value)
-        }
-    }
-    impl From<CommitInfo> for Action {
-        fn from(value: CommitInfo) -> Self {
-            Self::CommitInfo(value)
-        }
-    }
-
-    struct MockTable {
-        commit_num: u64,
-        store: Arc<LocalFileSystem>,
-        dir: TempDir,
-    }
-
-    impl MockTable {
-        pub(crate) fn new() -> Self {
-            let dir = tempfile::tempdir().unwrap();
-            let store = Arc::new(LocalFileSystem::new_with_prefix(dir.path()).unwrap());
-            Self {
-                commit_num: 0,
-                store,
-                dir,
-            }
-        }
-        pub(crate) async fn commit(&mut self, actions: &[Action]) {
-            let data = actions
-                .iter()
-                .map(|action| serde_json::to_string(&action).unwrap())
-                .join("\n");
-
-            let path = delta_path_for_version(self.commit_num, "json");
-            self.commit_num += 1;
-            // add log files to store
-
-            self.store
-                .put(&path, data.into())
-                .await
-                .expect("put log file in store");
-        }
-        pub(crate) fn table_root(&self) -> &Path {
-            self.dir.path()
-        }
-    }
     fn get_schema() -> StructType {
         StructType::new([
             StructField::new("id", DataType::LONG, true),
