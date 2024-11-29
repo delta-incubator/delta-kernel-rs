@@ -15,6 +15,7 @@ use crate::utils::require;
 use crate::{DeltaResult, EngineData, Error, RowVisitor};
 
 // The type of action associated with a [`ScanFile`]
+#[allow(unused)]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum ScanFileType {
     Add,
@@ -23,6 +24,7 @@ pub(crate) enum ScanFileType {
 }
 
 /// Represents all the metadata needed to read a Change Data Feed. It has the following fields:
+#[allow(unused)]
 #[derive(Debug, PartialEq)]
 pub(crate) struct ScanFile {
     /// The type of action this file belongs to. This may be one of add, remove, or cdc.
@@ -67,6 +69,7 @@ pub(crate) type ScanCallback<T> = fn(context: &mut T, scan_file: ScanFile);
 ///     )?;
 /// }
 /// ```
+#[allow(unused)]
 pub(crate) fn visit_scan_files<T>(
     data: &dyn EngineData,
     selection_vector: &[bool],
@@ -84,6 +87,7 @@ pub(crate) fn visit_scan_files<T>(
 }
 
 // add some visitor magic for engines
+#[allow(unused)]
 struct ScanFileVisitor<'a, T> {
     callback: ScanCallback<T>,
     selection_vector: &'a [bool],
@@ -255,6 +259,7 @@ pub(crate) fn scan_row_schema() -> SchemaRef {
 
 /// Expression to convert an action with `log_schema` into one with
 /// `TABLE_CHANGES_SCAN_ROW_SCHEMA`. This is the expression used to create `TableChangesScanData`.
+#[allow(unused)]
 pub(crate) fn transform_to_scan_row_expression(timestamp: i64, commit_number: i64) -> Expression {
     Expression::struct_from([
         Expression::struct_from([
@@ -360,7 +365,7 @@ mod tests {
         let timestamp = 1234_i64;
         let commit_version = 42_u64;
 
-        let scan_file: Vec<_> = actions
+        let scan_files: Vec<_> = actions
             .map_ok(|actions| {
                 engine
                     .get_expression_handler()
