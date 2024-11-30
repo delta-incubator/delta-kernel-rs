@@ -50,7 +50,7 @@ pub(crate) enum ScanFileType {
 
 /// Represents all the metadata needed to read a Change Data Feed. It has the following fields:
 #[allow(unused)]
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub(crate) struct ScanFile {
     /// The type of action this file belongs to. This may be one of add, remove, or cdc.
     pub tpe: ScanFileType,
