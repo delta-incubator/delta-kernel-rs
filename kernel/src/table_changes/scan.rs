@@ -1,21 +1,16 @@
-use std::collections::HashMap;
-use std::iter::{self, empty, once};
 use std::sync::Arc;
 
 use itertools::Itertools;
-use serde::{Deserialize, Serialize};
 use tracing::debug;
 
-use crate::scan::state::DvInfo;
 use crate::scan::{ColumnType, ScanResult};
 use crate::schema::{SchemaRef, StructType};
-use crate::table_changes::scan_file::ScanFileType;
 use crate::table_features::ColumnMappingMode;
-use crate::{DeltaResult, Engine, Error, ExpressionRef};
+use crate::{DeltaResult, Engine, ExpressionRef};
 
-use super::data_read::{resolve_scan_file_dv, DataReader};
+use super::data_read::{resolve_scan_file_dv, ScanFileReader};
 use super::log_replay::{table_changes_action_iter, TableChangesScanData};
-use super::scan_file::{scan_data_to_scan_file, ScanFile};
+use super::scan_file::scan_data_to_scan_file;
 use super::{TableChanges, CDF_FIELDS};
 
 /// The result of building a [`TableChanges`] scan over a table. This can be used to get a change
@@ -239,7 +234,7 @@ impl TableChangesScan {
                 let (scan_file, selection_vector) = x?;
                 let engine = engine.clone();
                 let reader =
-                    DataReader::new(global_scan_state.clone(), scan_file, selection_vector);
+                    ScanFileReader::new(global_scan_state.clone(), scan_file, selection_vector);
                 reader.into_data(engine.as_ref())
             })
             .flatten_ok()
