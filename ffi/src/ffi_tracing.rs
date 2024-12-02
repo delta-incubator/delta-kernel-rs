@@ -16,12 +16,20 @@ use crate::{kernel_string_slice, KernelStringSlice};
 /// Definitions of level verbosity. Verbose Levels are "greater than" less verbose ones. So
 /// Level::ERROR is the lowest, and Level::TRACE the highest.
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub enum Level {
-    ERROR,
-    WARN,
-    INFO,
-    DEBUG,
-    TRACE,
+    ERROR = 0,
+    WARN = 1,
+    INFO = 2,
+    DEBUG = 3,
+    TRACE = 4,
+}
+
+impl Level {
+    fn is_valid(value: u32) -> bool {
+        static VALID_VALUES: &[u32] = &[0, 1, 2, 3, 4];
+        VALID_VALUES.contains(&value)
+    }
 }
 
 impl From<&tracing::Level> for Level {
@@ -282,6 +290,10 @@ fn get_event_dispatcher(callback: TracingEventFn, max_level: Level) -> tracing_c
 }
 
 fn setup_event_subscriber(callback: TracingEventFn, max_level: Level) -> DeltaResult<()> {
+    let level_int = max_level as u32;
+    if !Level::is_valid(level_int) {
+        return Err(Error::generic("max_level out of range"));
+    }
     let dispatch = get_event_dispatcher(callback, max_level);
     set_global_default(dispatch)
 }
@@ -406,6 +418,7 @@ fn get_log_line_dispatch(
         }
     }
 }
+
 fn setup_log_line_subscriber(
     callback: TracingLogLineFn,
     max_level: Level,
@@ -415,6 +428,10 @@ fn setup_log_line_subscriber(
     with_level: bool,
     with_target: bool,
 ) -> DeltaResult<()> {
+    let level_int = max_level as u32;
+    if !Level::is_valid(level_int) {
+        return Err(Error::generic("max_level out of range"));
+    }
     let dispatch = get_log_line_dispatch(
         callback,
         max_level,
