@@ -166,10 +166,9 @@ void tracing_callback(struct Event event) {
   gettimeofday(&tv, NULL);
   struct tm *tm_info = gmtime(&tv.tv_sec);
   strftime(buffer, 26, "%Y-%m-%dT%H:%M:%S", tm_info);
-  char* message = allocate_string(event.message);
   char* level_color = event.level < 3 ? RED : BLUE;
   printf(
-    "%s%s.%06dZ%s [%sKernel %s%s]: %s\n",
+    "%s%s.%06dZ%s [%sKernel %s%s] %s%.*s%s: %.*s\n",
     DIM,
     buffer,
     (int)tv.tv_usec, // safe, microseconds are in int range
@@ -177,24 +176,25 @@ void tracing_callback(struct Event event) {
     level_color,
     LEVEL_STRING[event.level],
     RESET,
-    message);
+    DIM,
+    (int)event.target.len,
+    event.target.ptr,
+    RESET,
+    (int)event.message.len,
+    event.message.ptr);
   if (event.file.ptr) {
-    char* file = allocate_string(event.file);
     printf(
-      "  %sat%s %s:%i\n",
+      "  %sat%s %.*s:%i\n",
       DIM,
       RESET,
-      file,
+      (int)event.file.len,
+      event.file.ptr,
       event.line);
-    free(file);
   }
-  free(message);
 }
 
 void log_line_callback(KernelStringSlice line) {
-  char* message = allocate_string(line);
-  printf("%s", message);
-  free(message);
+  printf("%.*s", (int)line.len, line.ptr);
 }
 
 int main(int argc, char* argv[])
