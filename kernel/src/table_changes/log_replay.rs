@@ -84,17 +84,25 @@ fn get_add_transform_expr() -> Expression {
 /// 1. Prepare phase [`prepare_table_changes`]: This performs one iteration over every
 ///    action in the commit. In this phase, we do the following:
 ///     - Find the timestamp from a `CommitInfo` action if it exists. These are generated when
-///       In-commit timestamps is enabled.
-///     - Ensure that reading is supported on any protocol updates
+///       In-commit timestamps is enabled. This must be done in the first phase because the second
+///       phase lazily transforms engine data with an extra timestamp column. Thus, the timestamp
+///       must be known ahead of time.
+///     - Determine if there exist any `cdc` actions. We determine this in the first phase because
+///       the selection vectors for actions are lazily constructed in phase 2. We must know ahead
+///       of time whether to filter out add/remove actions.
+///     - Constructs the remove deletion vector map from paths belonging to `remove` actions to the
+///       action's corresponding [`DvInfo`]. This map will be filtered to only contain paths that
+///       exists in another `add` action _within the same commit_. We store the result in  `remove_dv`.
+///       Deletion vector resolution affects whether a remove action is selected in the second
+///       phase, so we must perform it ahead of time in phase 1.
+///     - Ensure that reading is supported on any protocol updates.
 ///     - Ensure that Change Data Feed is enabled for any metadata update. See  [`TableProperties`]
 ///     - Ensure that any schema update is compatible with the provided `schema`. Currently, schema
 ///       compatibility is checked through schema equality. This will be expanded in the future to
 ///       allow limited schema evolution.
-///     - Determine if there exist any `cdc` actions.
-///     - Constructs the remove deletion vector map from paths belonging to `remove` actions to the
-///       action's corresponding [`DvInfo`]. This map will be filtered to only contain paths that
-///       exists in another `add` action _within the same commit_. This corresponds to `remove_dv`
-///       in [`TableChangesScanData`].
+///
+/// Note: We check the protocol, change data feed enablement, and schema compatibility in phase 1
+/// in order to detect errors and fail early.
 /// 2. Scan file generation phase [`LogReplayScanner::into_scan_batches`]: This performs another
 ///    iteration over every action in the commit, and generates [`TableChangesScanData`]. It does
 ///    so by transforming the actions using [`get_add_transform_expr`], and generating selection
