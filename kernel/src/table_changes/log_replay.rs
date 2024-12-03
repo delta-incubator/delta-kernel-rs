@@ -48,6 +48,7 @@ pub(crate) fn table_changes_action_iter(
     table_schema: SchemaRef,
     predicate: Option<ExpressionRef>,
 ) -> DeltaResult<impl Iterator<Item = DeltaResult<TableChangesScanData>>> {
+    let filter = DataSkippingFilter::new(engine.as_ref(), &table_schema, predicate).map(Arc::new);
     let result = commit_files
         .into_iter()
         .map(move |commit_file| -> DeltaResult<_> {
@@ -55,7 +56,7 @@ pub(crate) fn table_changes_action_iter(
                 commit_file,
                 engine.as_ref(),
                 &table_schema,
-                predicate.clone(),
+                filter.clone(),
             )?;
             scanner.into_scan_batches(engine.clone())
         }) //Iterator<DeltaResult<Iterator<DeltaResult<TableChangesScanData>>>>
@@ -131,7 +132,7 @@ struct LogReplayScanner {
     #[allow(unused)]
     timestamp: i64,
     // The data skipping filter for filtering log actions
-    filter: Option<DataSkippingFilter>,
+    filter: Option<Arc<DataSkippingFilter>>,
 }
 
 impl LogReplayScanner {
@@ -139,9 +140,8 @@ impl LogReplayScanner {
         commit_file: ParsedLogPath,
         engine: &dyn Engine,
         table_schema: &SchemaRef,
-        physical_predicate: Option<ExpressionRef>,
+        filter: Option<Arc<DataSkippingFilter>>,
     ) -> DeltaResult<Self> {
-        let filter = DataSkippingFilter::new(engine, table_schema, physical_predicate);
         let visitor_schema = PreparePhaseVisitor::schema()?;
         let action_iter = engine.get_json_handler().read_json_files(
             &[commit_file.location.clone()],
