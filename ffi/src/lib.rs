@@ -121,6 +121,14 @@ impl KernelStringSlice {
             len: source.len(),
         }
     }
+
+    /// Create a new empty `KernelStringSlice`. `len` will be 0, and `ptr` will be `null`.
+    pub(crate) fn empty() -> Self {
+        Self {
+            ptr: std::ptr::null(),
+            len: 0,
+        }
+    }
 }
 
 /// Creates a new [`KernelStringSlice`] from a string reference (which must be an identifier, to

@@ -165,10 +165,10 @@ pub unsafe extern "C" fn enable_log_line_tracing(
         callback,
         max_level,
         LogLineFormat::FULL,
-        true,
-        true,
-        true,
-        true,
+        true, /* ansi color on */
+        true, /* time included */
+        true, /* level included */
+        true, /* target included */
     )
     .is_ok()
 }
@@ -254,27 +254,19 @@ where
         // we want to use a KernelStringSlice, so we need the extracted string to live long enough
         // for the callback which won't happen if we convert inside a `try_from` call
         let metadata = event.metadata();
-        let level = metadata.level().into();
+        let target = metadata.target();
         let mut message_visitor = MessageFieldVisitor { message: None };
         event.record(&mut message_visitor);
         if let Some(message) = message_visitor.message {
             // we ignore events without a message
-            let msg = kernel_string_slice!(message);
-            let target = metadata.target();
-            let target = kernel_string_slice!(target);
-            let file = match metadata.file() {
-                Some(file) => kernel_string_slice!(file),
-                None => KernelStringSlice {
-                    ptr: std::ptr::null(),
-                    len: 0,
-                },
-            };
             let event = Event {
-                message: msg,
-                level,
-                target,
+                message: kernel_string_slice!(message),
+                level: metadata.level().into(),
+                target: kernel_string_slice!(target),
                 line: metadata.line().unwrap_or(0),
-                file,
+                file: metadata
+                    .file()
+                    .map_or(KernelStringSlice::empty(), |f| kernel_string_slice!(f)),
             };
             (self.callback)(event);
         }
@@ -312,11 +304,19 @@ where
     S: Subscriber + for<'a> LookupSpan<'a>,
 {
     fn on_event(&self, _: &TracingEvent<'_>, _context: Context<'_, S>) {
-        let mut buf = self.buf.lock().unwrap();
-        let output = String::from_utf8_lossy(&buf);
-        let message = kernel_string_slice!(output);
-        (self.callback)(message);
-        buf.clear();
+        match self.buf.lock() {
+            Ok(mut buf) => {
+                let output = String::from_utf8_lossy(&buf);
+                let message = kernel_string_slice!(output);
+                (self.callback)(message);
+                buf.clear();
+            }
+            Err(_) => {
+                let message = "INTERNAL KERNEL ERROR: Could not lock message buffer.";
+                let message = kernel_string_slice!(message);
+                (self.callback)(message);
+            }
+        }
     }
 }
 
@@ -327,7 +327,9 @@ struct BufferedMessageWriter {
 
 impl io::Write for BufferedMessageWriter {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.current_buffer.lock().unwrap().extend_from_slice(buf);
+        self.current_buffer.lock().map_err(|_| {
+            io::Error::new(io::ErrorKind::Other, "Could not lock buffer")
+        })?.extend_from_slice(buf);
         Ok(buf.len())
     }
 
