@@ -377,8 +377,8 @@ fn get_log_line_dispatch(
     // This repeats some code, but avoids some insane generic wrangling if we try to abstract the
     // type of `fmt_layer` over the formatter
     macro_rules! setup_subscriber {
-        ($($transform:ident($($arg:ident)?)).*) => {{
-            let fmt_layer = fmt_layer$(.$transform($($arg)?))*.with_filter(filter);
+        ($($transform:ident()).*) => {{
+            let fmt_layer = fmt_layer$(.$transform())*.with_filter(filter);
             let subscriber = Registry::default()
                 .with(fmt_layer)
                 .with(tracking_layer.with_filter(filter));
