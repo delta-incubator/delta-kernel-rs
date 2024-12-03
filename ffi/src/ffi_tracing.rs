@@ -376,48 +376,26 @@ fn get_log_line_dispatch(
     // This repeats some code, but avoids some insane generic wrangling if we try to abstract the
     // type of `fmt_layer` over the formatter
     macro_rules! setup_subscriber {
-        ( $format_fn:ident ) => {
-            if with_time {
-                let fmt_layer = fmt_layer.$format_fn().with_filter(filter);
-                let subscriber = Registry::default()
-                    .with(fmt_layer)
-                    .with(tracking_layer.with_filter(filter));
-                tracing_core::Dispatch::new(subscriber)
-            } else {
-                let fmt_layer = fmt_layer.without_time().$format_fn().with_filter(filter);
-                let subscriber = Registry::default()
-                    .with(fmt_layer)
-                    .with(tracking_layer.with_filter(filter));
-                tracing_core::Dispatch::new(subscriber)
-            }
-        };
+        ($($transform:ident($($arg:ident)?)).+) => {{
+            let fmt_layer = fmt_layer$(.$transform($($arg)?))+.with_filter(filter);
+            let subscriber = Registry::default()
+                .with(fmt_layer)
+                .with(tracking_layer.with_filter(filter));
+            tracing_core::Dispatch::new(subscriber)
+        }};
     }
-    match format {
-        LogLineFormat::FULL => {
-            // can't use macro as there's no `full()` function, it's just the default
-            if with_time {
-                let fmt_layer = fmt_layer.with_filter(filter);
-                let subscriber = Registry::default()
-                    .with(fmt_layer)
-                    .with(tracking_layer.with_filter(filter));
-                tracing_core::Dispatch::new(subscriber)
-            } else {
-                let fmt_layer = fmt_layer.without_time().with_filter(filter);
-                let subscriber = Registry::default()
-                    .with(fmt_layer)
-                    .with(tracking_layer.with_filter(filter));
-                tracing_core::Dispatch::new(subscriber)
-            }
-        }
-        LogLineFormat::COMPACT => {
-            setup_subscriber!(compact)
-        }
-        LogLineFormat::PRETTY => {
-            setup_subscriber!(pretty)
-        }
-        LogLineFormat::JSON => {
-            setup_subscriber!(json)
-        }
+    use LogLineFormat::*;
+    match (format, with_time) {
+        // NOTE: There is no `full()` method (it's the default), so just call `with_ansi`
+        // a second time instead (as a no-op) to keep the macro happy.
+        (FULL, true) =>  setup_subscriber!(with_ansi(ansi)),
+        (FULL, false) =>  setup_subscriber!(without_time()),
+        (COMPACT, true) => setup_subscriber!(compact()),
+        (COMPACT, false) => setup_subscriber!(compact().without_time()),
+        (PRETTY, true) => setup_subscriber!(pretty()),
+        (PRETTY, false) => setup_subscriber!(pretty().without_time()),
+        (JSON, true) => setup_subscriber!(json()),
+        (JSON, false) => setup_subscriber!(json().without_time()),
     }
 }
 
