@@ -270,7 +270,7 @@ struct PreparePhaseVisitor<'a> {
     add_paths: &'a mut HashSet<String>,
     remove_dvs: &'a mut HashMap<String, DvInfo>,
 }
-impl<'a> PreparePhaseVisitor<'a> {
+impl PreparePhaseVisitor<'_> {
     fn schema() -> DeltaResult<Arc<StructType>> {
         get_log_schema().project(&[
             ADD_NAME,
@@ -378,7 +378,7 @@ impl<'a> FileActionSelectionVisitor<'a> {
     }
 }
 
-impl<'a> RowVisitor for FileActionSelectionVisitor<'a> {
+impl RowVisitor for FileActionSelectionVisitor<'_> {
     fn selected_column_names_and_types(&self) -> (&'static [ColumnName], &'static [DataType]) {
         // Note: The order of the names and types is based on [`FileActionSelectionVisitor::schema`]
         static NAMES_AND_TYPES: LazyLock<ColumnNamesAndTypes> = LazyLock::new(|| {
