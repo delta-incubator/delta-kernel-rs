@@ -10,7 +10,7 @@ use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 
 // re-export because many call sites that use schemas do not necessarily use expressions
-pub(crate) use crate::expressions::ColumnName;
+pub(crate) use crate::expressions::{column_name, ColumnName};
 use crate::utils::require;
 use crate::{DeltaResult, Error};
 
@@ -134,8 +134,8 @@ impl StructField {
     /// Get the physical name for this field as it should be read from parquet.
     ///
     /// NOTE: Caller affirms that the schema was already validated by
-    /// [`crate::table_features::validate_column_mapping_schema`], to ensure that
-    /// annotations are always and only present when column mapping mode is enabled.
+    /// [`crate::table_features::validate_schema_column_mapping`], to ensure that annotations are
+    /// always and only present when column mapping mode is enabled.
     pub fn physical_name(&self) -> &str {
         match self
             .metadata
@@ -189,8 +189,8 @@ impl StructField {
     /// Applies physical name mappings to this field
     ///
     /// NOTE: Caller affirms that the schema was already validated by
-    /// [`crate::table_features::validate_column_mapping_schema`], to ensure that
-    /// annotations are always and only present when column mapping mode is enabled.
+    /// [`crate::table_features::validate_schema_column_mapping`], to ensure that annotations are
+    /// always and only present when column mapping mode is enabled.
     pub fn make_physical(&self) -> Self {
         struct MakePhysical;
         impl<'a> SchemaTransform<'a> for MakePhysical {
@@ -865,14 +865,12 @@ impl SchemaDepthChecker {
                 tracing::warn!("Max schema depth {} exceeded by {arg:?}", self.depth_limit);
             }
         }
-        if self.depth_limit < self.max_depth_seen {
-            return Some(Cow::Borrowed(arg)); // back out the recursion, we're done
+        if self.max_depth_seen <= self.depth_limit {
+            self.current_depth += 1;
+            let _ = recurse(self, arg);
+            self.current_depth -= 1;
         }
-
-        self.current_depth += 1;
-        let result = recurse(self, arg);
-        self.current_depth -= 1;
-        result
+        None
     }
 }
 impl<'a> SchemaTransform<'a> for SchemaDepthChecker {

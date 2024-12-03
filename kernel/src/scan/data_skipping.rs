@@ -106,10 +106,9 @@ impl DataSkippingFilter {
             DataType::STRING,
         );
 
-        let predicate = as_data_skipping_predicate(&predicate, false)?;
         let skipping_evaluator = engine.get_expression_handler().get_evaluator(
             stats_schema.clone(),
-            Expr::struct_from([predicate]),
+            Expr::struct_from([as_data_skipping_predicate(&predicate, false)?]),
             PREDICATE_SCHEMA.clone(),
         );
 

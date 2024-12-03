@@ -1,6 +1,5 @@
 //! In-memory representation of snapshots of tables (snapshot is a table at given point in time, it
 //! has schema etc.)
-//!
 
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -11,7 +10,10 @@ use crate::actions::{Metadata, Protocol};
 use crate::log_segment::LogSegment;
 use crate::scan::ScanBuilder;
 use crate::schema::Schema;
-use crate::table_features::{get_validated_column_mapping_schema, ColumnMappingMode};
+use crate::table_features::{
+    column_mapping_mode, validate_schema_column_mapping, ColumnMappingMode,
+};
+use crate::table_properties::TableProperties;
 use crate::{DeltaResult, Engine, Error, FileSystemClient, Version};
 
 const LAST_CHECKPOINT_FILE_NAME: &str = "_last_checkpoint";
@@ -26,6 +28,7 @@ pub struct Snapshot {
     metadata: Metadata,
     protocol: Protocol,
     schema: Schema,
+    table_properties: TableProperties,
     pub(crate) column_mapping_mode: ColumnMappingMode,
 }
 
@@ -81,15 +84,19 @@ impl Snapshot {
         // important! before a read/write to the table we must check it is supported
         protocol.ensure_read_supported()?;
 
-        // validate column mapping mode as well -- make sure all fields are correctly (un)annotated
-        let (schema, column_mapping_mode) =
-            get_validated_column_mapping_schema(&metadata, &protocol)?;
+        // validate column mapping mode -- all schema fields should be correctly (un)annotated
+        let schema = metadata.parse_schema()?;
+        let table_properties = metadata.parse_table_properties();
+        let column_mapping_mode = column_mapping_mode(&protocol, &table_properties);
+        validate_schema_column_mapping(&schema, column_mapping_mode)?;
+
         Ok(Self {
             table_root: location,
             log_segment,
             metadata,
             protocol,
             schema,
+            table_properties,
             column_mapping_mode,
         })
     }
@@ -122,6 +129,11 @@ impl Snapshot {
     /// Table [`Protocol`] at this `Snapshot`s version.
     pub fn protocol(&self) -> &Protocol {
         &self.protocol
+    }
+
+    /// Get the [`TableProperties`] for this [`Snapshot`].
+    pub fn table_properties(&self) -> &TableProperties {
+        &self.table_properties
     }
 
     /// Get the [column mapping

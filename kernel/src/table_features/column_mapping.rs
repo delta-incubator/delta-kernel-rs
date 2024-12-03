@@ -1,15 +1,18 @@
 //! Code to handle column mapping, including modes and schema transforms
-use std::borrow::Cow;
-use std::str::FromStr;
-
-use serde::{Deserialize, Serialize};
-
-use crate::actions::{Metadata, Protocol};
+use super::ReaderFeatures;
+use crate::actions::Protocol;
 use crate::schema::{ColumnName, DataType, MetadataValue, Schema, SchemaTransform, StructField};
+use crate::table_properties::TableProperties;
 use crate::{DeltaResult, Error};
 
+use std::borrow::Cow;
+
+use serde::{Deserialize, Serialize};
+use strum::EnumString;
+
 /// Modes of column mapping a table can be in
-#[derive(Serialize, Deserialize, Debug, Copy, Clone, PartialEq)]
+#[derive(Debug, Default, EnumString, Serialize, Deserialize, Copy, Clone, PartialEq, Eq)]
+#[strum(serialize_all = "camelCase")]
 #[serde(rename_all = "camelCase")]
 pub enum ColumnMappingMode {
     /// No column mapping is applied
@@ -17,66 +20,31 @@ pub enum ColumnMappingMode {
     /// Columns are mapped by their field_id in parquet
     Id,
     /// Columns are mapped to a physical name
+    #[default]
     Name,
 }
 
-// key to look in metadata.configuration for to get column mapping mode
-pub(crate) const COLUMN_MAPPING_MODE_KEY: &str = "delta.columnMapping.mode";
-
-impl TryFrom<&str> for ColumnMappingMode {
-    type Error = Error;
-
-    fn try_from(s: &str) -> DeltaResult<Self> {
-        match s.to_ascii_lowercase().as_str() {
-            "none" => Ok(Self::None),
-            "id" => Ok(Self::Id),
-            "name" => Ok(Self::Name),
-            _ => Err(Error::invalid_column_mapping_mode(s)),
-        }
-    }
-}
-
-impl FromStr for ColumnMappingMode {
-    type Err = Error;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        s.try_into()
-    }
-}
-
-impl Default for ColumnMappingMode {
-    fn default() -> Self {
-        Self::None
-    }
-}
-
-impl AsRef<str> for ColumnMappingMode {
-    fn as_ref(&self) -> &str {
-        match self {
-            Self::None => "none",
-            Self::Id => "id",
-            Self::Name => "name",
-        }
-    }
-}
-
-/// Extract the schema and column mapping mode from the metadata. When column mapping mode is
-/// enabled, verify that each field in the schema is annotated with a physical name and field_id;
-/// when not enabled, verify that no fields are annotated.
-pub fn get_validated_column_mapping_schema(
-    metadata: &Metadata,
+/// Determine the column mapping mode for a table based on the [`Protocol`] and [`TableProperties`]
+pub(crate) fn column_mapping_mode(
     protocol: &Protocol,
-) -> DeltaResult<(Schema, ColumnMappingMode)> {
-    let column_mapping_mode = match metadata.configuration.get(COLUMN_MAPPING_MODE_KEY) {
-        Some(mode) if protocol.min_reader_version() >= 2 => mode.as_str().try_into()?,
+    table_properties: &TableProperties,
+) -> ColumnMappingMode {
+    match (
+        table_properties.column_mapping_mode,
+        protocol.min_reader_version(),
+    ) {
+        // NOTE: The table property is optional even when the feature is supported, and is allowed
+        // (but should be ignored) even when the feature is not supported. For details see
+        // https://github.com/delta-io/delta/blob/master/PROTOCOL.md#column-mapping
+        (Some(mode), 2) => mode,
+        (Some(mode), 3) if protocol.has_reader_feature(&ReaderFeatures::ColumnMapping) => mode,
         _ => ColumnMappingMode::None,
-    };
-    let schema = metadata.schema()?;
-    validate_column_mapping_schema(&schema, column_mapping_mode)?;
-    Ok((schema, column_mapping_mode))
+    }
 }
 
-pub fn validate_column_mapping_schema(schema: &Schema, mode: ColumnMappingMode) -> DeltaResult<()> {
+/// When column mapping mode is enabled, verify that each field in the schema is annotated with a
+/// physical name and field_id; when not enabled, verify that no fields are annotated.
+pub fn validate_schema_column_mapping(schema: &Schema, mode: ColumnMappingMode) -> DeltaResult<()> {
     if mode == ColumnMappingMode::Id {
         // TODO: Support column mapping ID mode
         return Err(Error::unsupported("Column mapping ID mode not supported"));
@@ -88,10 +56,9 @@ pub fn validate_column_mapping_schema(schema: &Schema, mode: ColumnMappingMode) 
         err: None,
     };
     let _ = validator.transform_struct(schema);
-    if let Some(err) = validator.err {
-        Err(err)
-    } else {
-        Ok(())
+    match validator.err {
+        Some(err) => Err(err),
+        None => Ok(()),
     }
 }
 
@@ -128,15 +95,15 @@ impl<'a> ValidateColumnMappings<'a> {
                     column_name()
                 )));
             }
-            (ColumnMappingMode::None, Some(_)) => {
-                self.err = Some(Error::invalid_column_mapping_mode(format!(
-                    "Column mapping is not enabled but field '{annotation}' is annotated with {}",
-                    column_name()
-                )));
-            }
             (ColumnMappingMode::Name | ColumnMappingMode::Id, None) => {
                 self.err = Some(Error::invalid_column_mapping_mode(format!(
                     "Column mapping is enabled but field '{}' lacks the {annotation} annotation",
+                    column_name()
+                )));
+            }
+            (ColumnMappingMode::None, Some(_)) => {
+                self.err = Some(Error::invalid_column_mapping_mode(format!(
+                    "Column mapping is not enabled but field '{annotation}' is annotated with {}",
                     column_name()
                 )));
             }
@@ -153,15 +120,15 @@ impl<'a> ValidateColumnMappings<'a> {
                     column_name()
                 )));
             }
-            (ColumnMappingMode::None, Some(_)) => {
-                self.err = Some(Error::invalid_column_mapping_mode(format!(
-                    "Column mapping is not enabled but field '{}' is annotated with {annotation}",
-                    column_name()
-                )));
-            }
             (ColumnMappingMode::Name | ColumnMappingMode::Id, None) => {
                 self.err = Some(Error::invalid_column_mapping_mode(format!(
                     "Column mapping is enabled but field '{}' lacks the {annotation} annotation",
+                    column_name()
+                )));
+            }
+            (ColumnMappingMode::None, Some(_)) => {
+                self.err = Some(Error::invalid_column_mapping_mode(format!(
+                    "Column mapping is not enabled but field '{}' is annotated with {annotation}",
                     column_name()
                 )));
             }
@@ -180,7 +147,6 @@ impl<'a> SchemaTransform<'a> for ValidateColumnMappings<'a> {
     fn transform_map_value(&mut self, vtype: &'a DataType) -> Option<Cow<'a, DataType>> {
         self.transform_inner_type(vtype, "<map value>")
     }
-
     fn transform_struct_field(&mut self, field: &'a StructField) -> Option<Cow<'a, StructField>> {
         if self.err.is_none() {
             self.path.push(&field.name);
@@ -189,5 +155,209 @@ impl<'a> SchemaTransform<'a> for ValidateColumnMappings<'a> {
             self.path.pop();
         }
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::schema::StructType;
+    use std::collections::HashMap;
+
+    #[test]
+    fn test_column_mapping_mode() {
+        let table_properties: HashMap<_, _> =
+            [("delta.columnMapping.mode".to_string(), "id".to_string())]
+                .into_iter()
+                .collect();
+        let table_properties = TableProperties::from(table_properties.iter());
+        let empty_table_properties = TableProperties::from([] as [(String, String); 0]);
+
+        let protocol = Protocol::try_new(2, 5, None::<Vec<String>>, None::<Vec<String>>).unwrap();
+
+        assert_eq!(
+            column_mapping_mode(&protocol, &table_properties),
+            ColumnMappingMode::Id
+        );
+
+        assert_eq!(
+            column_mapping_mode(&protocol, &empty_table_properties),
+            ColumnMappingMode::None
+        );
+
+        let empty_features = Some::<[String; 0]>([]);
+        let protocol =
+            Protocol::try_new(3, 7, empty_features.clone(), empty_features.clone()).unwrap();
+
+        assert_eq!(
+            column_mapping_mode(&protocol, &table_properties),
+            ColumnMappingMode::None
+        );
+
+        assert_eq!(
+            column_mapping_mode(&protocol, &empty_table_properties),
+            ColumnMappingMode::None
+        );
+
+        let protocol = Protocol::try_new(
+            3,
+            7,
+            Some([ReaderFeatures::ColumnMapping]),
+            empty_features.clone(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            column_mapping_mode(&protocol, &table_properties),
+            ColumnMappingMode::Id
+        );
+
+        assert_eq!(
+            column_mapping_mode(&protocol, &empty_table_properties),
+            ColumnMappingMode::None
+        );
+
+        let protocol = Protocol::try_new(
+            3,
+            7,
+            Some([ReaderFeatures::DeletionVectors]),
+            empty_features.clone(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            column_mapping_mode(&protocol, &table_properties),
+            ColumnMappingMode::None
+        );
+
+        assert_eq!(
+            column_mapping_mode(&protocol, &empty_table_properties),
+            ColumnMappingMode::None
+        );
+
+        let protocol = Protocol::try_new(
+            3,
+            7,
+            Some([
+                ReaderFeatures::DeletionVectors,
+                ReaderFeatures::ColumnMapping,
+            ]),
+            empty_features,
+        )
+        .unwrap();
+
+        assert_eq!(
+            column_mapping_mode(&protocol, &table_properties),
+            ColumnMappingMode::Id
+        );
+
+        assert_eq!(
+            column_mapping_mode(&protocol, &empty_table_properties),
+            ColumnMappingMode::None
+        );
+    }
+
+    // Creates optional schema field annotations for column mapping id and physical name, as a string.
+    fn create_annotations<'a>(
+        id: impl Into<Option<&'a str>>,
+        name: impl Into<Option<&'a str>>,
+    ) -> String {
+        let mut annotations = vec![];
+        if let Some(id) = id.into() {
+            annotations.push(format!("\"delta.columnMapping.id\": {id}"));
+        }
+        if let Some(name) = name.into() {
+            annotations.push(format!("\"delta.columnMapping.physicalName\": {name}"));
+        }
+        annotations.join(", ")
+    }
+
+    // Creates a generic schema with optional field annotations for column mapping id and physical name.
+    fn create_schema<'a>(
+        inner_id: impl Into<Option<&'a str>>,
+        inner_name: impl Into<Option<&'a str>>,
+        outer_id: impl Into<Option<&'a str>>,
+        outer_name: impl Into<Option<&'a str>>,
+    ) -> StructType {
+        let schema = format!(
+            r#"
+        {{
+            "name": "e",
+            "type": {{
+                "type": "array",
+                "elementType": {{
+                    "type": "struct",
+                    "fields": [
+                        {{
+                            "name": "d",
+                            "type": "integer",
+                            "nullable": false,
+                            "metadata": {{ {} }}
+                        }}
+                    ]
+                }},
+                "containsNull": true
+            }},
+            "nullable": true,
+            "metadata": {{ {} }}
+        }}
+        "#,
+            create_annotations(inner_id, inner_name),
+            create_annotations(outer_id, outer_name)
+        );
+        println!("{}", schema);
+        StructType::new([serde_json::from_str(&schema).unwrap()])
+    }
+
+    #[test]
+    fn test_column_mapping_enabled() {
+        let schema = create_schema("5", "\"col-a7f4159c\"", "4", "\"col-5f422f40\"");
+        validate_schema_column_mapping(&schema, ColumnMappingMode::Name).unwrap();
+        validate_schema_column_mapping(&schema, ColumnMappingMode::Id).expect_err("not supported");
+
+        // missing annotation
+        let schema = create_schema(None, "\"col-a7f4159c\"", "4", "\"col-5f422f40\"");
+        validate_schema_column_mapping(&schema, ColumnMappingMode::Name)
+            .expect_err("missing field id");
+        let schema = create_schema("5", None, "4", "\"col-5f422f40\"");
+        validate_schema_column_mapping(&schema, ColumnMappingMode::Name)
+            .expect_err("missing field name");
+        let schema = create_schema("5", "\"col-a7f4159c\"", None, "\"col-5f422f40\"");
+        validate_schema_column_mapping(&schema, ColumnMappingMode::Name)
+            .expect_err("missing field id");
+        let schema = create_schema("5", "\"col-a7f4159c\"", "4", None);
+        validate_schema_column_mapping(&schema, ColumnMappingMode::Name)
+            .expect_err("missing field name");
+
+        // wrong-type field id annotation (string instead of int)
+        let schema = create_schema("\"5\"", "\"col-a7f4159c\"", "4", "\"col-5f422f40\"");
+        validate_schema_column_mapping(&schema, ColumnMappingMode::Name)
+            .expect_err("invalid field id");
+        let schema = create_schema("5", "\"col-a7f4159c\"", "\"4\"", "\"col-5f422f40\"");
+        validate_schema_column_mapping(&schema, ColumnMappingMode::Name)
+            .expect_err("invalid field id");
+
+        // wrong-type field name annotation (int instead of string)
+        let schema = create_schema("5", "555", "4", "\"col-5f422f40\"");
+        validate_schema_column_mapping(&schema, ColumnMappingMode::Name)
+            .expect_err("invalid field name");
+        let schema = create_schema("5", "\"col-a7f4159c\"", "4", "444");
+        validate_schema_column_mapping(&schema, ColumnMappingMode::Name)
+            .expect_err("invalid field name");
+    }
+
+    #[test]
+    fn test_column_mapping_disabled() {
+        let schema = create_schema(None, None, None, None);
+        validate_schema_column_mapping(&schema, ColumnMappingMode::None).unwrap();
+
+        let schema = create_schema("5", None, None, None);
+        validate_schema_column_mapping(&schema, ColumnMappingMode::None).expect_err("field id");
+        let schema = create_schema(None, "\"col-a7f4159c\"", None, None);
+        validate_schema_column_mapping(&schema, ColumnMappingMode::None).expect_err("field name");
+        let schema = create_schema(None, None, "4", None);
+        validate_schema_column_mapping(&schema, ColumnMappingMode::None).expect_err("field id");
+        let schema = create_schema(None, None, None, "\"col-5f422f40\"");
+        validate_schema_column_mapping(&schema, ColumnMappingMode::None).expect_err("field name");
     }
 }

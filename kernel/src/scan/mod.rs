@@ -308,6 +308,7 @@ impl ScanResult {
 /// store the name of the column, as that's all that's needed during the actual query. For
 /// `Partition` we store an index into the logical schema for this query since later we need the
 /// data type as well to materialize the partition column.
+#[derive(PartialEq, Debug)]
 pub enum ColumnType {
     // A column, selected from the data, as is
     Selected(String),
@@ -419,10 +420,10 @@ impl Scan {
     /// the execution of the scan.
     // This calls [`Scan::scan_data`] to get an iterator of `ScanData` actions for the scan, and then uses the
     // `engine`'s [`crate::ParquetHandler`] to read the actual table data.
-    pub fn execute<'a>(
-        &'a self,
-        engine: &'a dyn Engine,
-    ) -> DeltaResult<impl Iterator<Item = DeltaResult<ScanResult>> + 'a> {
+    pub fn execute(
+        &self,
+        engine: Arc<dyn Engine>,
+    ) -> DeltaResult<impl Iterator<Item = DeltaResult<ScanResult>> + '_> {
         struct ScanFile {
             path: String,
             size: i64,
@@ -451,7 +452,7 @@ impl Scan {
         );
 
         let global_state = Arc::new(self.global_scan_state());
-        let scan_data = self.scan_data(engine)?;
+        let scan_data = self.scan_data(engine.as_ref())?;
         let scan_files_iter = scan_data
             .map(|res| {
                 let (data, vec) = res?;
@@ -467,7 +468,7 @@ impl Scan {
                 let file_path = self.snapshot.table_root.join(&scan_file.path)?;
                 let mut selection_vector = scan_file
                     .dv_info
-                    .get_selection_vector(engine, &self.snapshot.table_root)?;
+                    .get_selection_vector(engine.as_ref(), &self.snapshot.table_root)?;
                 let meta = FileMeta {
                     last_modified: 0,
                     size: scan_file.size as usize,
@@ -483,14 +484,17 @@ impl Scan {
                     global_state.read_schema.clone(),
                     self.physical_predicate(),
                 )?;
-                let gs = global_state.clone(); // Arc clone
+
+                // Arc clones
+                let engine = engine.clone();
+                let global_state = global_state.clone();
                 Ok(read_result_iter.map(move |read_result| -> DeltaResult<_> {
                     let read_result = read_result?;
                     // to transform the physical data into the correct logical form
                     let logical = transform_to_logical_internal(
-                        engine,
+                        engine.as_ref(),
                         read_result,
-                        &gs,
+                        &global_state,
                         &scan_file.partition_values,
                         &self.all_fields,
                         self.have_partition_cols,
@@ -660,7 +664,6 @@ fn transform_to_logical_internal(
                     parse_partition_value(partition_values.get(name), field.data_type())?;
                 Ok(value_expression.into())
             }
-            // TODO: Support nested columns!
             ColumnType::Selected(field_name) => Ok(ColumnName::new([field_name]).into()),
         })
         .try_collect()?;
@@ -821,12 +824,12 @@ mod tests {
         let path =
             std::fs::canonicalize(PathBuf::from("./tests/data/table-without-dv-small/")).unwrap();
         let url = url::Url::from_directory_path(path).unwrap();
-        let engine = SyncEngine::new();
+        let engine = Arc::new(SyncEngine::new());
 
         let table = Table::new(url);
-        let snapshot = table.snapshot(&engine, None).unwrap();
+        let snapshot = table.snapshot(engine.as_ref(), None).unwrap();
         let scan = snapshot.into_scan_builder().build().unwrap();
-        let files: Vec<ScanResult> = scan.execute(&engine).unwrap().try_collect().unwrap();
+        let files: Vec<ScanResult> = scan.execute(engine).unwrap().try_collect().unwrap();
 
         assert_eq!(files.len(), 1);
         let num_rows = files[0].raw_data.as_ref().unwrap().len();
@@ -902,16 +905,16 @@ mod tests {
     fn test_data_row_group_skipping() {
         let path = std::fs::canonicalize(PathBuf::from("./tests/data/parquet_row_group_skipping/"));
         let url = url::Url::from_directory_path(path.unwrap()).unwrap();
-        let engine = SyncEngine::new();
+        let engine = Arc::new(SyncEngine::new());
 
         let table = Table::new(url);
-        let snapshot = Arc::new(table.snapshot(&engine, None).unwrap());
+        let snapshot = Arc::new(table.snapshot(engine.as_ref(), None).unwrap());
 
         // No predicate pushdown attempted, so the one data file should be returned.
         //
         // NOTE: The data file contains only five rows -- near guaranteed to produce one row group.
         let scan = snapshot.clone().scan_builder().build().unwrap();
-        let data: Vec<_> = scan.execute(&engine).unwrap().try_collect().unwrap();
+        let data: Vec<_> = scan.execute(engine.clone()).unwrap().try_collect().unwrap();
         assert_eq!(data.len(), 1);
 
         // Ineffective predicate pushdown attempted, so the one data file should be returned.
@@ -924,7 +927,7 @@ mod tests {
             .with_predicate(predicate)
             .build()
             .unwrap();
-        let data: Vec<_> = scan.execute(&engine).unwrap().try_collect().unwrap();
+        let data: Vec<_> = scan.execute(engine.clone()).unwrap().try_collect().unwrap();
         assert_eq!(data.len(), 1);
 
         // Effective predicate pushdown, so no data files should be returned.
@@ -934,7 +937,7 @@ mod tests {
             .with_predicate(predicate)
             .build()
             .unwrap();
-        let data: Vec<_> = scan.execute(&engine).unwrap().try_collect().unwrap();
+        let data: Vec<_> = scan.execute(engine).unwrap().try_collect().unwrap();
         assert_eq!(data.len(), 0);
     }
 
@@ -942,10 +945,10 @@ mod tests {
     fn test_missing_column_row_group_skipping() {
         let path = std::fs::canonicalize(PathBuf::from("./tests/data/parquet_row_group_skipping/"));
         let url = url::Url::from_directory_path(path.unwrap()).unwrap();
-        let engine = SyncEngine::new();
+        let engine = Arc::new(SyncEngine::new());
 
         let table = Table::new(url);
-        let snapshot = Arc::new(table.snapshot(&engine, None).unwrap());
+        let snapshot = Arc::new(table.snapshot(engine.as_ref(), None).unwrap());
 
         // Predicate over a logically valid but physically missing column. No data files should be
         // returned because the column is inferred to be all-null.
@@ -959,7 +962,7 @@ mod tests {
             .with_predicate(predicate)
             .build()
             .unwrap();
-        let data: Vec<_> = scan.execute(&engine).unwrap().try_collect().unwrap();
+        let data: Vec<_> = scan.execute(engine.clone()).unwrap().try_collect().unwrap();
         assert_eq!(data.len(), 1);
 
         // Predicate over a logically missing column fails the scan

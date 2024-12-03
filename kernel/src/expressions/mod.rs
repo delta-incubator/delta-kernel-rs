@@ -593,9 +593,90 @@ impl<R: Into<Expression>> std::ops::Div<R> for Expression {
     }
 }
 
+/// An expression "transform" that doesn't actually change the expression at all. Instead, it
+/// measures the maximum depth of a expression, with a depth limit to prevent stack overflow. Useful
+/// for verifying that a expression has reasonable depth before attempting to work with it.
+pub struct ExpressionDepthChecker {
+    depth_limit: usize,
+    max_depth_seen: usize,
+    current_depth: usize,
+    call_count: usize,
+}
+impl ExpressionDepthChecker {
+    /// Depth-checks the given expression against a given depth limit. The return value is the
+    /// largest depth seen, which is capped at one more than the depth limit (indicating the
+    /// recursion was terminated).
+    pub fn check(expr: &Expression, depth_limit: usize) -> usize {
+        Self::check_with_call_count(expr, depth_limit).0
+    }
+
+    // Exposed for testing
+    fn check_with_call_count(expr: &Expression, depth_limit: usize) -> (usize, usize) {
+        let mut checker = Self {
+            depth_limit,
+            max_depth_seen: 0,
+            current_depth: 0,
+            call_count: 0,
+        };
+        checker.transform(expr);
+        (checker.max_depth_seen, checker.call_count)
+    }
+
+    // Triggers the requested recursion only doing so would not exceed the depth limit.
+    fn depth_limited<'a, T: Clone + std::fmt::Debug>(
+        &mut self,
+        recurse: impl FnOnce(&mut Self, &'a T) -> Option<Cow<'a, T>>,
+        arg: &'a T,
+    ) -> Option<Cow<'a, T>> {
+        self.call_count += 1;
+        if self.max_depth_seen < self.current_depth {
+            self.max_depth_seen = self.current_depth;
+            if self.depth_limit < self.current_depth {
+                tracing::warn!(
+                    "Max expression depth {} exceeded by {arg:?}",
+                    self.depth_limit
+                );
+            }
+        }
+        if self.max_depth_seen <= self.depth_limit {
+            self.current_depth += 1;
+            let _ = recurse(self, arg);
+            self.current_depth -= 1;
+        }
+        None
+    }
+}
+impl<'a> ExpressionTransform<'a> for ExpressionDepthChecker {
+    fn transform_struct(
+        &mut self,
+        fields: &'a Vec<Expression>,
+    ) -> Option<Cow<'a, Vec<Expression>>> {
+        self.depth_limited(Self::recurse_into_struct, fields)
+    }
+
+    fn transform_unary(&mut self, expr: &'a UnaryExpression) -> Option<Cow<'a, UnaryExpression>> {
+        self.depth_limited(Self::recurse_into_unary, expr)
+    }
+
+    fn transform_binary(
+        &mut self,
+        expr: &'a BinaryExpression,
+    ) -> Option<Cow<'a, BinaryExpression>> {
+        self.depth_limited(Self::recurse_into_binary, expr)
+    }
+
+    fn transform_variadic(
+        &mut self,
+        expr: &'a VariadicExpression,
+    ) -> Option<Cow<'a, VariadicExpression>> {
+        self.depth_limited(Self::recurse_into_variadic, expr)
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{column_expr, Expression as Expr};
+    use super::{column_expr, Expression as Expr, ExpressionDepthChecker};
+    use std::ops::Not;
 
     #[test]
     fn test_expression_format() {
@@ -628,5 +709,90 @@ mod tests {
             let result = format!("{}", expr);
             assert_eq!(result, expected);
         }
+    }
+
+    #[test]
+    fn test_depth_checker() {
+        let expr = Expr::and_from([
+            Expr::struct_from([
+                Expr::and_from([
+                    Expr::lt(Expr::literal(10), column_expr!("x")),
+                    Expr::or_from([Expr::literal(true), column_expr!("b")]),
+                ]),
+                Expr::literal(true),
+                Expr::not(Expr::literal(true)),
+            ]),
+            Expr::and_from([
+                Expr::not(column_expr!("b")),
+                Expr::gt(Expr::literal(10), column_expr!("x")),
+                Expr::or_from([
+                    Expr::and_from([Expr::not(Expr::literal(true)), Expr::literal(10)]),
+                    Expr::literal(10),
+                ]),
+                Expr::literal(true),
+            ]),
+            Expr::ne(
+                Expr::literal(true),
+                Expr::and_from([Expr::literal(true), column_expr!("b")]),
+            ),
+        ]);
+
+        // Similer to ExpressionDepthChecker::check, but also returns call count
+        let check_with_call_count =
+            |depth_limit| ExpressionDepthChecker::check_with_call_count(&expr, depth_limit);
+
+        // NOTE: The checker ignores leaf nodes!
+
+        // AND
+        //  * STRUCT
+        //    * AND     >LIMIT<
+        //    * NOT
+        //  * AND
+        //  * NE
+        assert_eq!(check_with_call_count(1), (2, 6));
+
+        // AND
+        //  * STRUCT
+        //    * AND
+        //      * LT     >LIMIT<
+        //      * OR
+        //    * NOT
+        //  * AND
+        //  * NE
+        assert_eq!(check_with_call_count(2), (3, 8));
+
+        // AND
+        //  * STRUCT
+        //    * AND
+        //      * LT
+        //      * OR
+        //    * NOT
+        //  * AND
+        //    * NOT
+        //    * GT
+        //    * OR
+        //      * AND
+        //        * NOT     >LIMIT<
+        //  * NE
+        assert_eq!(check_with_call_count(3), (4, 13));
+
+        // Depth limit not hit (full traversal required)
+
+        // AND
+        //  * STRUCT
+        //    * AND
+        //      * LT
+        //      * OR
+        //    * NOT
+        //  * AND
+        //    * NOT
+        //    * GT
+        //    * OR
+        //      * AND
+        //        * NOT
+        //  * NE
+        //    * AND
+        assert_eq!(check_with_call_count(4), (4, 14));
+        assert_eq!(check_with_call_count(5), (4, 14));
     }
 }
