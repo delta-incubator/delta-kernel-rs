@@ -377,8 +377,8 @@ fn get_log_line_dispatch(
     // This repeats some code, but avoids some insane generic wrangling if we try to abstract the
     // type of `fmt_layer` over the formatter
     macro_rules! setup_subscriber {
-        ($($transform:ident($($arg:ident)?)).+) => {{
-            let fmt_layer = fmt_layer$(.$transform($($arg)?))+.with_filter(filter);
+        ($($transform:ident($($arg:ident)?)).*) => {{
+            let fmt_layer = fmt_layer$(.$transform($($arg)?))*.with_filter(filter);
             let subscriber = Registry::default()
                 .with(fmt_layer)
                 .with(tracking_layer.with_filter(filter));
@@ -387,9 +387,7 @@ fn get_log_line_dispatch(
     }
     use LogLineFormat::*;
     match (format, with_time) {
-        // NOTE: There is no `full()` method (it's the default), so just call `with_ansi`
-        // a second time instead (as a no-op) to keep the macro happy.
-        (FULL, true) => setup_subscriber!(with_ansi(ansi)),
+        (FULL, true) => setup_subscriber!(),
         (FULL, false) => setup_subscriber!(without_time()),
         (COMPACT, true) => setup_subscriber!(compact()),
         (COMPACT, false) => setup_subscriber!(compact().without_time()),
