@@ -327,9 +327,10 @@ struct BufferedMessageWriter {
 
 impl io::Write for BufferedMessageWriter {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.current_buffer.lock().map_err(|_| {
-            io::Error::new(io::ErrorKind::Other, "Could not lock buffer")
-        })?.extend_from_slice(buf);
+        self.current_buffer
+            .lock()
+            .map_err(|_| io::Error::new(io::ErrorKind::Other, "Could not lock buffer"))?
+            .extend_from_slice(buf);
         Ok(buf.len())
     }
 
@@ -388,8 +389,8 @@ fn get_log_line_dispatch(
     match (format, with_time) {
         // NOTE: There is no `full()` method (it's the default), so just call `with_ansi`
         // a second time instead (as a no-op) to keep the macro happy.
-        (FULL, true) =>  setup_subscriber!(with_ansi(ansi)),
-        (FULL, false) =>  setup_subscriber!(without_time()),
+        (FULL, true) => setup_subscriber!(with_ansi(ansi)),
+        (FULL, false) => setup_subscriber!(without_time()),
         (COMPACT, true) => setup_subscriber!(compact()),
         (COMPACT, false) => setup_subscriber!(compact().without_time()),
         (PRETTY, true) => setup_subscriber!(pretty()),
