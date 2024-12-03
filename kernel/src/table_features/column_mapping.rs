@@ -95,15 +95,15 @@ impl<'a> ValidateColumnMappings<'a> {
                     column_name()
                 )));
             }
-            (ColumnMappingMode::None, Some(_)) => {
-                self.err = Some(Error::invalid_column_mapping_mode(format!(
-                    "Column mapping is not enabled but field '{annotation}' is annotated with {}",
-                    column_name()
-                )));
-            }
             (ColumnMappingMode::Name | ColumnMappingMode::Id, None) => {
                 self.err = Some(Error::invalid_column_mapping_mode(format!(
                     "Column mapping is enabled but field '{}' lacks the {annotation} annotation",
+                    column_name()
+                )));
+            }
+            (ColumnMappingMode::None, Some(_)) => {
+                self.err = Some(Error::invalid_column_mapping_mode(format!(
+                    "Column mapping is not enabled but field '{annotation}' is annotated with {}",
                     column_name()
                 )));
             }
@@ -120,15 +120,15 @@ impl<'a> ValidateColumnMappings<'a> {
                     column_name()
                 )));
             }
-            (ColumnMappingMode::None, Some(_)) => {
-                self.err = Some(Error::invalid_column_mapping_mode(format!(
-                    "Column mapping is not enabled but field '{}' is annotated with {annotation}",
-                    column_name()
-                )));
-            }
             (ColumnMappingMode::Name | ColumnMappingMode::Id, None) => {
                 self.err = Some(Error::invalid_column_mapping_mode(format!(
                     "Column mapping is enabled but field '{}' lacks the {annotation} annotation",
+                    column_name()
+                )));
+            }
+            (ColumnMappingMode::None, Some(_)) => {
+                self.err = Some(Error::invalid_column_mapping_mode(format!(
+                    "Column mapping is not enabled but field '{}' is annotated with {annotation}",
                     column_name()
                 )));
             }
@@ -161,6 +161,7 @@ impl<'a> SchemaTransform<'a> for ValidateColumnMappings<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::schema::StructType;
     use std::collections::HashMap;
 
     #[test]
@@ -254,5 +255,90 @@ mod tests {
             column_mapping_mode(&protocol, &empty_table_properties),
             ColumnMappingMode::None
         );
+    }
+
+    // Creates optional schema field annotations for column mapping id and physical name, as a string.
+    fn create_annotations<'a>(id: impl Into<Option<&'a str>>, name: impl Into<Option<&'a str>>) -> String {
+        let mut annotations = vec![];
+        if let Some(id) = id.into() {
+            annotations.push(format!("\"delta.columnMapping.id\": {id}"));
+        }
+        if let Some(name) = name.into() {
+            annotations.push(format!("\"delta.columnMapping.physicalName\": {name}"));
+        }
+        annotations.join(", ")
+    }
+
+    // Creates a generic schema with optional field annotations for column mapping id and physical name.
+    fn create_schema<'a>(inner_id: impl Into<Option<&'a str>>, inner_name: impl Into<Option<&'a str>>, outer_id: impl Into<Option<&'a str>>, outer_name: impl Into<Option<&'a str>>) -> StructType {
+
+        let schema = format!(r#"
+        {{
+            "name": "e",
+            "type": {{
+                "type": "array",
+                "elementType": {{
+                    "type": "struct",
+                    "fields": [
+                        {{
+                            "name": "d",
+                            "type": "integer",
+                            "nullable": false,
+                            "metadata": {{ {} }}
+                        }}
+                    ]
+                }},
+                "containsNull": true
+            }},
+            "nullable": true,
+            "metadata": {{ {} }}
+        }}
+        "#, create_annotations(inner_id, inner_name), create_annotations(outer_id, outer_name));
+        println!("{}", schema);
+        StructType::new([serde_json::from_str(&schema).unwrap()])
+    }
+
+    #[test]
+    fn test_column_mapping_enabled() {
+        let schema = create_schema("5", "\"col-a7f4159c\"", "4", "\"col-5f422f40\"");
+        validate_schema_column_mapping(&schema, ColumnMappingMode::Name).unwrap();
+        validate_schema_column_mapping(&schema, ColumnMappingMode::Id).expect_err("not supported");
+
+        // missing annotation
+        let schema = create_schema(None, "\"col-a7f4159c\"", "4", "\"col-5f422f40\"");
+        validate_schema_column_mapping(&schema, ColumnMappingMode::Name).expect_err("missing field id");
+        let schema = create_schema("5", None, "4", "\"col-5f422f40\"");
+        validate_schema_column_mapping(&schema, ColumnMappingMode::Name).expect_err("missing field name");
+        let schema = create_schema("5", "\"col-a7f4159c\"", None, "\"col-5f422f40\"");
+        validate_schema_column_mapping(&schema, ColumnMappingMode::Name).expect_err("missing field id");
+        let schema = create_schema("5", "\"col-a7f4159c\"", "4", None);
+        validate_schema_column_mapping(&schema, ColumnMappingMode::Name).expect_err("missing field name");
+
+        // wrong-type field id annotation (string instead of int)
+        let schema = create_schema("\"5\"", "\"col-a7f4159c\"", "4", "\"col-5f422f40\"");
+        validate_schema_column_mapping(&schema, ColumnMappingMode::Name).expect_err("invalid field id");
+        let schema = create_schema("5", "\"col-a7f4159c\"", "\"4\"", "\"col-5f422f40\"");
+        validate_schema_column_mapping(&schema, ColumnMappingMode::Name).expect_err("invalid field id");
+
+        // wrong-type field name annotation (int instead of string)
+        let schema = create_schema("5", "555", "4", "\"col-5f422f40\"");
+        validate_schema_column_mapping(&schema, ColumnMappingMode::Name).expect_err("invalid field name");
+        let schema = create_schema("5", "\"col-a7f4159c\"", "4", "444");
+        validate_schema_column_mapping(&schema, ColumnMappingMode::Name).expect_err("invalid field name");
+    }
+
+    #[test]
+    fn test_column_mapping_disabled() {
+        let schema = create_schema(None, None, None, None);
+        validate_schema_column_mapping(&schema, ColumnMappingMode::None).unwrap();
+
+        let schema = create_schema("5", None, None, None);
+        validate_schema_column_mapping(&schema, ColumnMappingMode::None).expect_err("field id");
+        let schema = create_schema(None, "\"col-a7f4159c\"", None, None);
+        validate_schema_column_mapping(&schema, ColumnMappingMode::None).expect_err("field name");
+        let schema = create_schema(None, None, "4", None);
+        validate_schema_column_mapping(&schema, ColumnMappingMode::None).expect_err("field id");
+        let schema = create_schema(None, None, None, "\"col-5f422f40\"");
+        validate_schema_column_mapping(&schema, ColumnMappingMode::None).expect_err("field name");
     }
 }

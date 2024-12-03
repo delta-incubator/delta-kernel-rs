@@ -188,9 +188,9 @@ impl StructField {
 
     /// Applies physical name mappings to this field
     ///
-    /// NOTE: Caller affirms that the schema was alreasdy validated by
-    /// [`crate::table_features::validate_schema_column_mapping`], to ensure that
-    /// annotations are always and only present when column mapping mode is enabled.
+    /// NOTE: Caller affirms that the schema was already validated by
+    /// [`crate::table_features::validate_schema_column_mapping`], to ensure that annotations are
+    /// always and only present when column mapping mode is enabled.
     pub fn make_physical(&self) -> Self {
         struct MakePhysical;
         impl<'a> SchemaTransform<'a> for MakePhysical {
