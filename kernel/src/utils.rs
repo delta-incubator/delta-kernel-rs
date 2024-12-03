@@ -70,8 +70,8 @@ pub(crate) mod test_utils {
         }
     }
 
-    // A mock table that writes commits to a local temporary delta log. This can be used to
-    // construct a delta log used for testing.
+    /// A mock table that writes commits to a local temporary delta log. This can be used to
+    /// construct a delta log used for testing.
     pub(crate) struct LocalMockTable {
         commit_num: u64,
         store: Arc<LocalFileSystem>,
@@ -88,8 +88,10 @@ pub(crate) mod test_utils {
                 dir,
             }
         }
-        pub(crate) async fn commit(&mut self, actions: impl Iterator<Item = Action>) {
+        /// Writes all `actions` to a new commit in the log
+        pub(crate) async fn commit(&mut self, actions: impl IntoIterator<Item = Action>) {
             let data = actions
+                .into_iter()
                 .map(|action| serde_json::to_string(&action).unwrap())
                 .join("\n");
 
@@ -101,6 +103,7 @@ pub(crate) mod test_utils {
                 .await
                 .expect("put log file in store");
         }
+        /// Get the path to the root of the table.
         pub(crate) fn table_root(&self) -> &Path {
             self.dir.path()
         }

@@ -27,8 +27,7 @@ mod tests;
 /// Scan data for a Change Data Feed query. This holds metadata that is needed to read data rows.
 #[allow(unused)]
 pub(crate) struct TableChangesScanData {
-    /// Engine data with the schema defined in [`scan_row_schema`]. Each row is a transformed
-    /// action from the delta log.
+    /// Engine data with the schema defined in [`scan_row_schema`]
     ///
     /// Note: The schema of the engine data will be updated in the future columns used by
     /// Change Data Feed.
@@ -45,7 +44,7 @@ pub(crate) struct TableChangesScanData {
 /// _must_ be ignored.
 pub(crate) fn table_changes_action_iter(
     engine: Arc<dyn Engine>,
-    commit_files: impl Iterator<Item = ParsedLogPath>,
+    commit_files: impl IntoIterator<Item = ParsedLogPath>,
     table_schema: SchemaRef,
     predicate: Option<ExpressionRef>,
 ) -> DeltaResult<impl Iterator<Item = DeltaResult<TableChangesScanData>>> {
@@ -59,13 +58,9 @@ pub(crate) fn table_changes_action_iter(
                 predicate.clone(),
             )?;
             scanner.into_scan_batches(engine.clone())
-        })
-        // Iterator<DeltaResult<Iterator<DeltaResult<TableChangesScanData>>>> to
-        // Iterator<DeltaResult<DeltaResult<TableChangesScanData>>>
-        .flatten_ok()
-        // Iterator<DeltaResult<DeltaResult<TableChangesScanData>>> to
-        // Iterator<DeltaResult<TableChangesScanData>>
-        .map(|x| x?);
+        }) //Iterator<DeltaResult<Iterator<DeltaResult<TableChangesScanData>>>>
+        .flatten_ok() // Iterator<DeltaResult<DeltaResult<TableChangesScanData>>>
+        .map(|x| x?); // Iterator<DeltaResult<TableChangesScanData>>
     Ok(result)
 }
 
@@ -147,7 +142,7 @@ impl LogReplayScanner {
         )?;
 
         let mut remove_dvs = HashMap::default();
-        let mut add_paths = HashSet::new();
+        let mut add_paths = HashSet::default();
         let mut has_cdc_action = false;
         let mut timestamp = commit_file.location.last_modified;
         for actions in action_iter {

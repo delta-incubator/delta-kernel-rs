@@ -24,9 +24,6 @@ pub struct TableChangesScan {
     // The physical schema. This schema omits partition columns and columns generated for Change
     // Data Feed
     physical_schema: SchemaRef,
-    // The schema of the table at the `end_version`. This schema is used to validate schema
-    // compatibility in the CDF range
-    table_schema: SchemaRef,
     // The predicate to filter the data
     predicate: Option<ExpressionRef>,
     // The [`ColumnType`] of all the fields in the `logical_schema`
@@ -161,7 +158,6 @@ impl TableChangesScanBuilder {
                 }
             })
             .try_collect()?;
-        let table_schema = self.table_changes.end_snapshot.schema().clone().into();
         Ok(TableChangesScan {
             table_changes: self.table_changes,
             logical_schema,
@@ -169,7 +165,6 @@ impl TableChangesScanBuilder {
             all_fields,
             have_partition_cols,
             physical_schema: StructType::new(read_fields).into(),
-            table_schema,
         })
     }
 }
@@ -185,12 +180,8 @@ impl TableChangesScan {
             .log_segment
             .ascending_commit_files
             .clone();
-        table_changes_action_iter(
-            engine,
-            commits.into_iter(),
-            self.table_schema.clone(),
-            self.predicate.clone(),
-        )
+        let schema = self.table_changes.end_snapshot.schema().clone().into();
+        table_changes_action_iter(engine, commits, schema, self.predicate.clone())
     }
 }
 
