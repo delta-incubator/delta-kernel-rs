@@ -160,13 +160,15 @@ impl LogReplayScanner {
                 None => vec![true; actions.len()],
             };
 
-            let mut visitor = PreparePhaseVisitor::new(
+            let mut visitor = PreparePhaseVisitor {
                 selection_vector,
-                &mut add_paths,
-                &mut remove_dvs,
-                &mut has_cdc_action,
-                &mut timestamp,
-            );
+                add_paths: &mut add_paths,
+                remove_dvs: &mut remove_dvs,
+                has_cdc_action: &mut has_cdc_action,
+                timestamp: &mut timestamp,
+                protocol: None,
+                metadata_info: None,
+            };
             visitor.visit_rows_of(actions.as_ref())?;
 
             if let Some(protocol) = visitor.protocol {
@@ -269,23 +271,6 @@ struct PreparePhaseVisitor<'a> {
     remove_dvs: &'a mut HashMap<String, DvInfo>,
 }
 impl<'a> PreparePhaseVisitor<'a> {
-    fn new(
-        selection_vector: Vec<bool>,
-        add_paths: &'a mut HashSet<String>,
-        remove_dvs: &'a mut HashMap<String, DvInfo>,
-        has_cdc_action: &'a mut bool,
-        timestamp: &'a mut i64,
-    ) -> Self {
-        PreparePhaseVisitor {
-            selection_vector,
-            protocol: None,
-            metadata_info: None,
-            timestamp,
-            add_paths,
-            has_cdc_action,
-            remove_dvs,
-        }
-    }
     fn schema() -> DeltaResult<Arc<StructType>> {
         get_log_schema().project(&[
             ADD_NAME,
