@@ -291,7 +291,7 @@ impl PreparePhaseVisitor<'_> {
     }
 }
 
-impl<'a> RowVisitor for PreparePhaseVisitor<'a> {
+impl RowVisitor for PreparePhaseVisitor<'_> {
     fn selected_column_names_and_types(&self) -> (&'static [ColumnName], &'static [DataType]) {
         // NOTE: The order of the names and types is based on [`PreparePhaseVisitor::schema`]
         static NAMES_AND_TYPES: LazyLock<ColumnNamesAndTypes> = LazyLock::new(|| {
