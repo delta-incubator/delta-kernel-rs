@@ -2,10 +2,11 @@
 //!
 //! Delta-kernel-rs is an experimental [Delta](https://github.com/delta-io/delta/) implementation
 //! focused on interoperability with a wide range of query engines. It supports reads and
-//! (experimental) writes. This library defines a number of traits which must be implemented to
-//! provide a working delta implementation. They are detailed below. There is a provided "default
-//! engine" that implements all these traits and can be used to ease integration work. See
-//! [`DefaultEngine`](engine/default/index.html) for more information.
+//! (experimental) writes (only blind appends in the write path currently). This library defines a
+//! number of traits which must be implemented to provide a working delta implementation. They are
+//! detailed below. There is a provided "default engine" that implements all these traits and can
+//! be used to ease integration work. See [`DefaultEngine`](engine/default/index.html) for more
+//! information.
 //!
 //! A full `rust` example for reading table data using the default engine can be found in the
 //! [read-table-single-threaded] example (and for a more complex multi-threaded reader see the
