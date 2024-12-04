@@ -161,8 +161,9 @@ impl LogReplayScanner {
             // Consider a scenario with a pair of add/remove actions with the same path. The add
             // action has file statistics, while the remove action does not (stats is optional for
             // remove). The DataSkippingFilter may skip the add action, and the remove action will
-            // appear as if it is unpaired. Instead, we wait until deletion vectors are resolved so
-            // that we can skip both actions in the pair.
+            // remain. The data file will be read for the remove action, which is unnecessary because
+            // all of the rows will be filtered by the predicate. Instead, we wait until deletion
+            // vectors are resolved so that we can skip both actions in the pair.
             let mut visitor = PreparePhaseVisitor {
                 add_paths: &mut add_paths,
                 remove_dvs: &mut remove_dvs,
@@ -289,11 +290,14 @@ impl<'a> RowVisitor for PreparePhaseVisitor<'a> {
             const STRING: DataType = DataType::STRING;
             const INTEGER: DataType = DataType::INTEGER;
             const LONG: DataType = DataType::LONG;
+            const BOOLEAN: DataType = DataType::BOOLEAN;
             let string_list: DataType = ArrayType::new(STRING, false).into();
             let string_string_map = MapType::new(STRING, STRING, false).into();
             let types_and_names = vec![
                 (STRING, column_name!("add.path")),
+                (BOOLEAN, column_name!("add.dataChange")),
                 (STRING, column_name!("remove.path")),
+                (BOOLEAN, column_name!("remove.dataChange")),
                 (STRING, column_name!("remove.deletionVector.storageType")),
                 (STRING, column_name!("remove.deletionVector.pathOrInlineDv")),
                 (INTEGER, column_name!("remove.deletionVector.offset")),
@@ -316,7 +320,7 @@ impl<'a> RowVisitor for PreparePhaseVisitor<'a> {
 
     fn visit<'b>(&mut self, row_count: usize, getters: &[&'b dyn GetData<'b>]) -> DeltaResult<()> {
         require!(
-            getters.len() == 15,
+            getters.len() == 17,
             Error::InternalError(format!(
                 "Wrong number of PreparePhaseVisitor getters: {}",
                 getters.len()
@@ -324,24 +328,30 @@ impl<'a> RowVisitor for PreparePhaseVisitor<'a> {
         );
         for i in 0..row_count {
             if let Some(path) = getters[0].get_str(i, "add.path")? {
-                self.add_paths.insert(path.to_string());
-            } else if let Some(path) = getters[1].get_str(i, "remove.path")? {
-                let deletion_vector = visit_deletion_vector_at(i, &getters[2..=6])?;
-                self.remove_dvs
-                    .insert(path.to_string(), DvInfo { deletion_vector });
-            } else if getters[7].get_str(i, "cdc.path")?.is_some() {
+                let data_change: bool = getters[1].get(i, "add.dataChange")?;
+                if data_change {
+                    self.add_paths.insert(path.to_string());
+                }
+            } else if let Some(path) = getters[2].get_str(i, "remove.path")? {
+                let data_change: bool = getters[3].get(i, "remove.dataChange")?;
+                if data_change {
+                    let deletion_vector = visit_deletion_vector_at(i, &getters[4..=8])?;
+                    self.remove_dvs
+                        .insert(path.to_string(), DvInfo { deletion_vector });
+                }
+            } else if getters[9].get_str(i, "cdc.path")?.is_some() {
                 *self.has_cdc_action = true;
-            } else if let Some(timestamp) = getters[8].get_long(i, "commitInfo.timestamp")? {
+            } else if let Some(timestamp) = getters[10].get_long(i, "commitInfo.timestamp")? {
                 *self.timestamp = timestamp;
-            } else if let Some(schema) = getters[9].get_str(i, "metaData.schemaString")? {
-                let configuration_map_opt = getters[10].get_opt(i, "metadata.configuration")?;
+            } else if let Some(schema) = getters[11].get_str(i, "metaData.schemaString")? {
+                let configuration_map_opt = getters[12].get_opt(i, "metadata.configuration")?;
                 let configuration = configuration_map_opt.unwrap_or_else(HashMap::new);
                 self.metadata_info = Some((schema.to_string(), configuration));
             } else if let Some(min_reader_version) =
-                getters[11].get_int(i, "protocol.min_reader_version")?
+                getters[13].get_int(i, "protocol.min_reader_version")?
             {
                 let protocol =
-                    ProtocolVisitor::visit_protocol(i, min_reader_version, &getters[11..=14])?;
+                    ProtocolVisitor::visit_protocol(i, min_reader_version, &getters[13..=16])?;
                 self.protocol = Some(protocol);
             }
         }
@@ -379,9 +389,12 @@ impl RowVisitor for FileActionSelectionVisitor<'_> {
         // Note: The order of the names and types is based on [`FileActionSelectionVisitor::schema`]
         static NAMES_AND_TYPES: LazyLock<ColumnNamesAndTypes> = LazyLock::new(|| {
             const STRING: DataType = DataType::STRING;
+            const BOOLEAN: DataType = DataType::BOOLEAN;
             let types_and_names = vec![
                 (STRING, column_name!("add.path")),
+                (BOOLEAN, column_name!("add.dataChange")),
                 (STRING, column_name!("remove.path")),
+                (BOOLEAN, column_name!("remove.dataChange")),
                 (STRING, column_name!("cdc.path")),
             ];
             let (types, names) = types_and_names.into_iter().unzip();
@@ -392,7 +405,7 @@ impl RowVisitor for FileActionSelectionVisitor<'_> {
 
     fn visit<'b>(&mut self, row_count: usize, getters: &[&'b dyn GetData<'b>]) -> DeltaResult<()> {
         require!(
-            getters.len() == 3,
+            getters.len() == 5,
             Error::InternalError(format!(
                 "Wrong number of AddRemoveDedupVisitor getters: {}",
                 getters.len()
@@ -404,12 +417,14 @@ impl RowVisitor for FileActionSelectionVisitor<'_> {
                 continue;
             }
             if getters[0].get_str(i, "add.path")?.is_some() {
-                self.selection_vector[i] = !self.has_cdc_action;
-            } else if let Some(path) = getters[1].get_str(i, "remove.path")? {
+                let data_change: bool = getters[1].get(i, "add.dataChange")?;
+                self.selection_vector[i] = data_change && !self.has_cdc_action;
+            } else if let Some(path) = getters[2].get_str(i, "remove.path")? {
+                let data_change: bool = getters[3].get(i, "remove.dataChange")?;
                 self.selection_vector[i] =
-                    !self.has_cdc_action && !self.remove_dvs.contains_key(path)
+                    data_change && !self.has_cdc_action && !self.remove_dvs.contains_key(path)
             } else {
-                self.selection_vector[i] = getters[2].get_str(i, "cdc.path")?.is_some()
+                self.selection_vector[i] = getters[4].get_str(i, "cdc.path")?.is_some()
             };
         }
         Ok(())

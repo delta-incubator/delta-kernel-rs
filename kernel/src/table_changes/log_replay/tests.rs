@@ -166,11 +166,13 @@ async fn add_remove() {
         .commit([
             Add {
                 path: "fake_path_1".into(),
+                data_change: true,
                 ..Default::default()
             }
             .into(),
             Remove {
                 path: "fake_path_2".into(),
+                data_change: true,
                 ..Default::default()
             }
             .into(),
@@ -197,6 +199,64 @@ async fn add_remove() {
 }
 
 #[tokio::test]
+async fn filter_data_change() {
+    let engine = Arc::new(SyncEngine::new());
+    let mut mock_table = LocalMockTable::new();
+    mock_table
+        .commit([
+            Remove {
+                path: "fake_path_1".into(),
+                data_change: false,
+                ..Default::default()
+            }
+            .into(),
+            Remove {
+                path: "fake_path_2".into(),
+                data_change: false,
+                ..Default::default()
+            }
+            .into(),
+            Remove {
+                path: "fake_path_3".into(),
+                data_change: false,
+                ..Default::default()
+            }
+            .into(),
+            Remove {
+                path: "fake_path_4".into(),
+                data_change: false,
+                ..Default::default()
+            }
+            .into(),
+            Add {
+                path: "fake_path_5".into(),
+                data_change: false,
+                ..Default::default()
+            }
+            .into(),
+        ])
+        .await;
+
+    let mut commits = get_segment(engine.as_ref(), mock_table.table_root(), 0, None)
+        .unwrap()
+        .into_iter();
+
+    let scanner = LogReplayScanner::prepare_table_changes(
+        commits.next().unwrap(),
+        engine.as_ref(),
+        &get_schema().into(),
+    )
+    .unwrap();
+    assert!(!scanner.has_cdc_action);
+    assert_eq!(scanner.remove_dvs, HashMap::new());
+
+    assert_eq!(
+        result_to_sv(scanner.into_scan_batches(engine, None).unwrap()),
+        &[false; 5]
+    );
+}
+
+#[tokio::test]
 async fn cdc_selection() {
     let engine = Arc::new(SyncEngine::new());
     let mut mock_table = LocalMockTable::new();
@@ -204,16 +264,19 @@ async fn cdc_selection() {
         .commit([
             Add {
                 path: "fake_path_1".into(),
+                data_change: true,
                 ..Default::default()
             }
             .into(),
             Remove {
                 path: "fake_path_2".into(),
+                data_change: true,
                 ..Default::default()
             }
             .into(),
             Cdc {
                 path: "fake_path_3".into(),
+                data_change: true,
                 ..Default::default()
             }
             .into(),
@@ -262,17 +325,20 @@ async fn dv() {
         .commit([
             Add {
                 path: "fake_path_1".into(),
+                data_change: true,
                 ..Default::default()
             }
             .into(),
             Remove {
                 path: "fake_path_1".into(),
+                data_change: true,
                 deletion_vector: Some(deletion_vector1.clone()),
                 ..Default::default()
             }
             .into(),
             Remove {
                 path: "fake_path_2".into(),
+                data_change: true,
                 deletion_vector: Some(deletion_vector2.clone()),
                 ..Default::default()
             }
@@ -323,11 +389,13 @@ async fn failing_protocol() {
         .commit([
             Add {
                 path: "fake_path_1".into(),
+                data_change: true,
                 ..Default::default()
             }
             .into(),
             Remove {
                 path: "fake_path_2".into(),
+                data_change: true,
                 ..Default::default()
             }
             .into(),
@@ -357,6 +425,7 @@ async fn in_commit_timestamp() {
         .commit([
             Add {
                 path: "fake_path_1".into(),
+                data_change: true,
                 ..Default::default()
             }
             .into(),
@@ -389,6 +458,7 @@ async fn file_meta_timestamp() {
     mock_table
         .commit([Add {
             path: "fake_path_1".into(),
+            data_change: true,
             ..Default::default()
         }
         .into()])
