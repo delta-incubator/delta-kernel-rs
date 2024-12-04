@@ -214,12 +214,12 @@ fn check_cdf_table_properties(table_properties: &TableProperties) -> DeltaResult
 //  Because only deletion vectors are supported, reader version 2 will not be allowed. That is
 //  because version 2 requires that column mapping is enabled. Reader versions 1 and 3 are allowed.
 fn ensure_cdf_read_supported(protocol: &Protocol) -> DeltaResult<()> {
-    static SUPPORTED_READER_FEATURES: LazyLock<HashSet<ReaderFeatures>> =
+    static CDF_SUPPORTED_READER_FEATURES: LazyLock<HashSet<ReaderFeatures>> =
         LazyLock::new(|| HashSet::from([ReaderFeatures::DeletionVectors]));
     match &protocol.reader_features() {
         // if min_reader_version = 3 and all reader features are subset of supported => OK
         Some(reader_features) if protocol.min_reader_version() == 3 => {
-            ensure_supported_features(reader_features, &SUPPORTED_READER_FEATURES)
+            ensure_supported_features(reader_features, &CDF_SUPPORTED_READER_FEATURES)
         }
         // if min_reader_version = 3 and no reader features => ERROR
         // NOTE this is caught by the protocol parsing.

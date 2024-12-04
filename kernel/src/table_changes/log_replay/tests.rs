@@ -1,6 +1,6 @@
 use super::TableChangesScanData;
 use crate::actions::deletion_vector::DeletionVectorDescriptor;
-use crate::actions::{Add, Cdc, CommitInfo, Metadata, Protocol, Remove};
+use crate::actions::{Add, Cdc, Metadata, Protocol, Remove};
 use crate::engine::sync::SyncEngine;
 use crate::log_segment::LogSegment;
 use crate::path::ParsedLogPath;
