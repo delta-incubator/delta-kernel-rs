@@ -477,40 +477,6 @@ async fn failing_protocol() {
 
     assert!(res.is_err());
 }
-#[tokio::test]
-async fn in_commit_timestamp() {
-    let engine = Arc::new(SyncEngine::new());
-    let mut mock_table = LocalMockTable::new();
-
-    let timestamp = 123456;
-    mock_table
-        .commit([
-            Add {
-                path: "fake_path_1".into(),
-                data_change: true,
-                ..Default::default()
-            }
-            .into(),
-            CommitInfo {
-                timestamp: Some(timestamp),
-                ..Default::default()
-            }
-            .into(),
-        ])
-        .await;
-
-    let mut commits = get_segment(engine.as_ref(), mock_table.table_root(), 0, None)
-        .unwrap()
-        .into_iter();
-
-    let scanner = LogReplayScanner::prepare_table_changes(
-        commits.next().unwrap(),
-        engine.as_ref(),
-        &get_schema().into(),
-    )
-    .unwrap();
-    assert_eq!(scanner.timestamp, timestamp);
-}
 
 #[tokio::test]
 async fn file_meta_timestamp() {

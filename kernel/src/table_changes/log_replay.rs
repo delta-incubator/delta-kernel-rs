@@ -6,8 +6,8 @@ use std::sync::{Arc, LazyLock};
 
 use crate::actions::visitors::{visit_deletion_vector_at, ProtocolVisitor};
 use crate::actions::{
-    get_log_add_schema, get_log_schema, Protocol, ADD_NAME, CDC_NAME, COMMIT_INFO_NAME,
-    METADATA_NAME, PROTOCOL_NAME, REMOVE_NAME,
+    get_log_add_schema, get_log_schema, Protocol, ADD_NAME, CDC_NAME, METADATA_NAME, PROTOCOL_NAME,
+    REMOVE_NAME,
 };
 use crate::engine_data::{GetData, TypedGetData};
 use crate::expressions::{column_expr, column_name, ColumnName, Expression};
@@ -84,10 +84,6 @@ fn get_add_transform_expr() -> Expression {
 /// The scanner operates in two phases that _must_ be performed in the following order:
 /// 1. Prepare phase [`prepare_table_changes`]: This performs one iteration over every
 ///    action in the commit. In this phase, we do the following:
-///     - Find the timestamp from a `CommitInfo` action if it exists. These are generated when
-///       In-commit timestamps is enabled. This must be done in the first phase because the second
-///       phase lazily transforms engine data with an extra timestamp column. Thus, the timestamp
-///       must be known ahead of time.
 ///     - Determine if there exist any `cdc` actions. We determine this in the first phase because
 ///       the selection vectors for actions are lazily constructed in phase 2. We must know ahead
 ///       of time whether to filter out add/remove actions.
@@ -104,6 +100,10 @@ fn get_add_transform_expr() -> Expression {
 ///
 /// Note: We check the protocol, change data feed enablement, and schema compatibility in phase 1
 /// in order to detect errors and fail early.
+/// TODO: When the kernel supports in-commit timestamps, we will also have to inspect CommitInfo
+/// actions to find the timestamp. These are generated when incommit timestamps is enabled.
+/// This must be done in the first phase because the second phase lazily transforms engine data with
+/// an extra timestamp column. Thus, the timestamp must be known ahead of time.
 /// 2. Scan file generation phase [`LogReplayScanner::into_scan_batches`]: This performs another
 ///    iteration over every action in the commit, and generates [`TableChangesScanData`]. It does
 ///    so by transforming the actions using [`get_add_transform_expr`], and generating selection
@@ -151,7 +151,6 @@ impl LogReplayScanner {
         let mut remove_dvs = HashMap::default();
         let mut add_paths = HashSet::default();
         let mut has_cdc_action = false;
-        let mut timestamp = commit_file.location.last_modified;
         for actions in action_iter {
             let actions = actions?;
 
@@ -168,7 +167,6 @@ impl LogReplayScanner {
                 add_paths: &mut add_paths,
                 remove_dvs: &mut remove_dvs,
                 has_cdc_action: &mut has_cdc_action,
-                timestamp: &mut timestamp,
                 protocol: None,
                 metadata_info: None,
             };
@@ -201,7 +199,7 @@ impl LogReplayScanner {
             remove_dvs.retain(|rm_path, _| add_paths.contains(rm_path));
         }
         Ok(LogReplayScanner {
-            timestamp,
+            timestamp: commit_file.location.last_modified,
             commit_file,
             has_cdc_action,
             remove_dvs,
@@ -267,7 +265,6 @@ impl LogReplayScanner {
 struct PreparePhaseVisitor<'a> {
     protocol: Option<Protocol>,
     metadata_info: Option<(String, HashMap<String, String>)>,
-    timestamp: &'a mut i64,
     has_cdc_action: &'a mut bool,
     add_paths: &'a mut HashSet<String>,
     remove_dvs: &'a mut HashMap<String, DvInfo>,
@@ -278,7 +275,6 @@ impl PreparePhaseVisitor<'_> {
             ADD_NAME,
             REMOVE_NAME,
             CDC_NAME,
-            COMMIT_INFO_NAME,
             METADATA_NAME,
             PROTOCOL_NAME,
         ])
@@ -306,7 +302,6 @@ impl<'a> RowVisitor for PreparePhaseVisitor<'a> {
                 (INTEGER, column_name!("remove.deletionVector.sizeInBytes")),
                 (LONG, column_name!("remove.deletionVector.cardinality")),
                 (STRING, column_name!("cdc.path")),
-                (LONG, column_name!("commitInfo.timestamp")),
                 (STRING, column_name!("metaData.schemaString")),
                 (string_string_map, column_name!("metaData.configuration")),
                 (INTEGER, column_name!("protocol.minReaderVersion")),
@@ -322,7 +317,7 @@ impl<'a> RowVisitor for PreparePhaseVisitor<'a> {
 
     fn visit<'b>(&mut self, row_count: usize, getters: &[&'b dyn GetData<'b>]) -> DeltaResult<()> {
         require!(
-            getters.len() == 17,
+            getters.len() == 16,
             Error::InternalError(format!(
                 "Wrong number of PreparePhaseVisitor getters: {}",
                 getters.len()
@@ -343,17 +338,15 @@ impl<'a> RowVisitor for PreparePhaseVisitor<'a> {
                 }
             } else if getters[9].get_str(i, "cdc.path")?.is_some() {
                 *self.has_cdc_action = true;
-            } else if let Some(timestamp) = getters[10].get_long(i, "commitInfo.timestamp")? {
-                *self.timestamp = timestamp;
-            } else if let Some(schema) = getters[11].get_str(i, "metaData.schemaString")? {
-                let configuration_map_opt = getters[12].get_opt(i, "metadata.configuration")?;
+            } else if let Some(schema) = getters[10].get_str(i, "metaData.schemaString")? {
+                let configuration_map_opt = getters[11].get_opt(i, "metadata.configuration")?;
                 let configuration = configuration_map_opt.unwrap_or_else(HashMap::new);
                 self.metadata_info = Some((schema.to_string(), configuration));
             } else if let Some(min_reader_version) =
-                getters[13].get_int(i, "protocol.min_reader_version")?
+                getters[12].get_int(i, "protocol.min_reader_version")?
             {
                 let protocol =
-                    ProtocolVisitor::visit_protocol(i, min_reader_version, &getters[13..=16])?;
+                    ProtocolVisitor::visit_protocol(i, min_reader_version, &getters[12..=15])?;
                 self.protocol = Some(protocol);
             }
         }
