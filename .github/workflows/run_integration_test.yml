@@ -14,16 +14,22 @@ jobs:
           - os: ubuntu-latest
           - os: windows-latest
             skip: ${{ github.event_name == 'pull_request' }} # skip running windows tests on every PR since they are slow
-    if: ${{ !matrix.skip }}
     steps:
+      - name: Skip job for pull requests on Windows
+        if: ${{ matrix.skip }}
+        run: echo "Skipping job for pull requests on Windows."
       - uses: actions/checkout@v3
+        if: ${{ !matrix.skip }}
       - name: Install minimal stable rust
+        if: ${{ !matrix.skip }}
         uses: actions-rs/toolchain@v1
         with:
           profile: default
           toolchain: stable
           override: true
       - uses: Swatinem/rust-cache@v2
-      - name: run integration tests
+        if: ${{ !matrix.skip }}
+      - name: Run integration tests
+        if: ${{ !matrix.skip }}
         shell: bash
         run: pushd integration-tests && ./test-all-arrow-versions.sh
