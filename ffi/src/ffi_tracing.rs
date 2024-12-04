@@ -26,9 +26,9 @@ pub enum Level {
 }
 
 impl Level {
-    fn is_valid(value: u32) -> bool {
+    fn is_valid(self) -> bool {
         static VALID_VALUES: &[u32] = &[0, 1, 2, 3, 4];
-        VALID_VALUES.contains(&value)
+        VALID_VALUES.contains(&(self as u32))
     }
 }
 
@@ -259,14 +259,13 @@ where
         event.record(&mut message_visitor);
         if let Some(message) = message_visitor.message {
             // we ignore events without a message
+            let file = metadata.file().unwrap_or("");
             let event = Event {
                 message: kernel_string_slice!(message),
                 level: metadata.level().into(),
                 target: kernel_string_slice!(target),
                 line: metadata.line().unwrap_or(0),
-                file: metadata
-                    .file()
-                    .map_or(KernelStringSlice::empty(), |f| kernel_string_slice!(f)),
+                file: kernel_string_slice!(file),
             };
             (self.callback)(event);
         }
@@ -282,8 +281,7 @@ fn get_event_dispatcher(callback: TracingEventFn, max_level: Level) -> tracing_c
 }
 
 fn setup_event_subscriber(callback: TracingEventFn, max_level: Level) -> DeltaResult<()> {
-    let level_int = max_level as u32;
-    if !Level::is_valid(level_int) {
+    if !max_level.is_valid() {
         return Err(Error::generic("max_level out of range"));
     }
     let dispatch = get_event_dispatcher(callback, max_level);
@@ -407,8 +405,7 @@ fn setup_log_line_subscriber(
     with_level: bool,
     with_target: bool,
 ) -> DeltaResult<()> {
-    let level_int = max_level as u32;
-    if !Level::is_valid(level_int) {
+    if !max_level.is_valid() {
         return Err(Error::generic("max_level out of range"));
     }
     let dispatch = get_log_line_dispatch(

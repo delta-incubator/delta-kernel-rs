@@ -155,6 +155,7 @@ static const char *LEVEL_STRING[] = {
   "ERROR", "WARN", "INFO", "DEBUG", "TRACE"
 };
 
+// define some ansi color escapes so we can have nice colored output in our logs
 #define RED   "\x1b[31m"
 #define BLUE  "\x1b[34m"
 #define DIM   "\x1b[2m"
