@@ -106,10 +106,15 @@ impl TableChanges {
         // we support CDF with those features enabled.
         //
         // Note: We must still check that each metadata and protocol action in the CDF range.
-        ensure_cdf_read_supported(start_snapshot.protocol())?;
-        check_cdf_table_properties(start_snapshot.table_properties(), start_snapshot.version())?;
-        ensure_cdf_read_supported(end_snapshot.protocol())?;
-        check_cdf_table_properties(end_snapshot.table_properties(), end_snapshot.version())?;
+        let check_snapshot = |snapshot: &Snapshot| -> DeltaResult<()> {
+            ensure_cdf_read_supported(snapshot.protocol())?;
+            check_cdf_table_properties(snapshot.table_properties())?;
+            Ok(())
+        };
+        check_snapshot(&start_snapshot)
+            .map_err(|_| Error::change_data_feed_unsupported(end_snapshot.version()))?;
+        check_snapshot(&end_snapshot)
+            .map_err(|_| Error::change_data_feed_unsupported(end_snapshot.version()))?;
 
         // Verify that the start and end schemas are compatible. We must still check schema
         // compatibility for each schema update in the CDF range.
@@ -186,20 +191,17 @@ impl TableChanges {
 /// Performing change data feed on  tables with column mapping is currently disallowed.
 /// This will be less restrictive in the future. Because column mapping is disallowed, we also
 /// check that column mapping is disabled, or the column mapping mode is `None`.
-fn check_cdf_table_properties(
-    table_properties: &TableProperties,
-    version: Version,
-) -> DeltaResult<()> {
+fn check_cdf_table_properties(table_properties: &TableProperties) -> DeltaResult<()> {
     require!(
         table_properties.enable_change_data_feed.unwrap_or(false),
-        Error::change_data_feed_unsupported(version)
+        Error::unsupported("Change data feed is not enabled")
     );
     require!(
         matches!(
             table_properties.column_mapping_mode,
             None | Some(ColumnMappingMode::None)
         ),
-        Error::generic("Change data feed not supported when column mapping is enabled")
+        Error::unsupported("Change data feed not supported when column mapping is enabled")
     );
     Ok(())
 }

@@ -175,7 +175,8 @@ impl LogReplayScanner {
             visitor.visit_rows_of(actions.as_ref())?;
 
             if let Some(protocol) = visitor.protocol {
-                ensure_cdf_read_supported(&protocol)?;
+                ensure_cdf_read_supported(&protocol)
+                    .map_err(|_| Error::change_data_feed_unsupported(commit_file.version))?;
             }
             if let Some((schema, configuration)) = visitor.metadata_info {
                 let schema: StructType = serde_json::from_str(&schema)?;
@@ -187,7 +188,8 @@ impl LogReplayScanner {
                     Error::change_data_feed_incompatible_schema(table_schema, &schema)
                 );
                 let table_properties = TableProperties::from(configuration);
-                check_cdf_table_properties(&table_properties, commit_file.version)?;
+                check_cdf_table_properties(&table_properties)
+                    .map_err(|_| Error::change_data_feed_unsupported(commit_file.version))?;
             }
         }
         // We resolve the remove deletion vector map after visiting the entire commit.

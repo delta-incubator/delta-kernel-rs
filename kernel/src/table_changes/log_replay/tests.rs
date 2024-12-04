@@ -61,6 +61,7 @@ async fn metadata_protocol() {
                         "delta.enableDeletionVectors".to_string(),
                         "true".to_string(),
                     ),
+                    ("dela.columnMapping.mode".to_string(), "none".to_string()),
                 ]),
                 ..Default::default()
             }
@@ -90,7 +91,7 @@ async fn metadata_protocol() {
     );
 }
 #[tokio::test]
-async fn configuration_fails() {
+async fn cdf_not_enabled() {
     let engine = Arc::new(SyncEngine::new());
     let mut mock_table = LocalMockTable::new();
     let schema_string = serde_json::to_string(&get_schema()).unwrap();
@@ -101,6 +102,67 @@ async fn configuration_fails() {
                 "delta.enableDeletionVectors".to_string(),
                 "true".to_string(),
             )]),
+            ..Default::default()
+        }
+        .into()])
+        .await;
+
+    let mut commits = get_segment(engine.as_ref(), mock_table.table_root(), 0, None)
+        .unwrap()
+        .into_iter();
+
+    let res = LogReplayScanner::prepare_table_changes(
+        commits.next().unwrap(),
+        engine.as_ref(),
+        &get_schema().into(),
+    );
+
+    assert!(matches!(res, Err(Error::ChangeDataFeedUnsupported(_))));
+}
+#[tokio::test]
+async fn unsupported_reader_feature() {
+    let engine = Arc::new(SyncEngine::new());
+    let mut mock_table = LocalMockTable::new();
+    mock_table
+        .commit([Protocol::try_new(
+            3,
+            7,
+            Some(["deletionVectors", "columnMapping"]),
+            Some([""; 0]),
+        )
+        .unwrap()
+        .into()])
+        .await;
+
+    let mut commits = get_segment(engine.as_ref(), mock_table.table_root(), 0, None)
+        .unwrap()
+        .into_iter();
+
+    let res = LogReplayScanner::prepare_table_changes(
+        commits.next().unwrap(),
+        engine.as_ref(),
+        &get_schema().into(),
+    );
+    println!("Res: {:?}", res.err());
+
+    //assert!(matches!(res, Err(Error::ChangeDataFeedUnsupported(_))));
+}
+#[tokio::test]
+async fn column_mapping_should_fail() {
+    let engine = Arc::new(SyncEngine::new());
+    let mut mock_table = LocalMockTable::new();
+    let schema_string = serde_json::to_string(&get_schema()).unwrap();
+    mock_table
+        .commit([Metadata {
+            schema_string,
+            configuration: HashMap::from([
+                (
+                    "delta.enableDeletionVectors".to_string(),
+                    "true".to_string(),
+                ),
+                ("delta.enableChangeDataFeed".to_string(), "true".to_string()),
+                ("delta.columnMapping.mode".to_string(), "id".to_string()),
+            ]),
             ..Default::default()
         }
         .into()])
