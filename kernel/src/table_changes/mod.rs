@@ -1,13 +1,18 @@
 //! Provides an API to read the table's change data feed between two versions.
+use std::collections::HashSet;
 use std::sync::{Arc, LazyLock};
 
 use scan::TableChangesScanBuilder;
 use url::Url;
 
+use crate::actions::{ensure_supported_features, Protocol};
 use crate::log_segment::LogSegment;
 use crate::path::AsUrl;
 use crate::schema::{DataType, Schema, StructField, StructType};
 use crate::snapshot::Snapshot;
+use crate::table_features::{ColumnMappingMode, ReaderFeatures};
+use crate::table_properties::TableProperties;
+use crate::utils::require;
 use crate::{DeltaResult, Engine, Error, Version};
 
 mod log_replay;
@@ -66,8 +71,9 @@ pub struct TableChanges {
 
 impl TableChanges {
     /// Creates a new [`TableChanges`] instance for the given version range. This function checks
-    /// these two properties:
+    /// these properties:
     /// - The change data feed table feature must be enabled in both the start or end versions.
+    /// - Only the deletion vector reader feature is enabled for the table.
     /// - The schema at the start and end versions are the same.
     ///
     /// Note that this does not check that change data feed is enabled for every commit in the
@@ -92,19 +98,18 @@ impl TableChanges {
             Snapshot::try_new(table_root.as_url().clone(), engine, Some(start_version))?;
         let end_snapshot = Snapshot::try_new(table_root.as_url().clone(), engine, end_version)?;
 
-        // Verify CDF is enabled at the beginning and end of the interval to fail early. We must
-        // still check that CDF is enabled for every metadata action in the CDF range.
-        let is_cdf_enabled = |snapshot: &Snapshot| {
-            snapshot
-                .table_properties()
-                .enable_change_data_feed
-                .unwrap_or(false)
-        };
-        if !is_cdf_enabled(&start_snapshot) {
-            return Err(Error::change_data_feed_unsupported(start_version));
-        } else if !is_cdf_enabled(&end_snapshot) {
-            return Err(Error::change_data_feed_unsupported(end_snapshot.version()));
-        }
+        // Verify CDF is enabled at the beginning and end of the interval using
+        // [`check_cdf_table_properties`] to fail early. This also ensures that column mapping is
+        // disabled.
+        //
+        // We also check the [`Protocol`] using [`ensure_cdf_read_supported`] to verify that
+        // we support CDF with those features enabled.
+        //
+        // Note: We must still check that each metadata and protocol action in the CDF range.
+        ensure_cdf_read_supported(start_snapshot.protocol())?;
+        check_cdf_table_properties(start_snapshot.table_properties(), start_snapshot.version())?;
+        ensure_cdf_read_supported(end_snapshot.protocol())?;
+        check_cdf_table_properties(end_snapshot.table_properties(), end_snapshot.version())?;
 
         // Verify that the start and end schemas are compatible. We must still check schema
         // compatibility for each schema update in the CDF range.
@@ -173,6 +178,66 @@ impl TableChanges {
     /// Consume this `TableChanges` to create a [`TableChangesScanBuilder`]
     pub fn into_scan_builder(self) -> TableChangesScanBuilder {
         TableChangesScanBuilder::new(self)
+    }
+}
+
+/// Ensures that change data feed is enabled in `table_properties`.
+///
+/// Performing change data feed on  tables with column mapping is currently disallowed.
+/// This will be less restrictive in the future. Because column mapping is disallowed, we also
+/// check that column mapping is disabled, or the column mapping mode is `None`.
+fn check_cdf_table_properties(
+    table_properties: &TableProperties,
+    version: Version,
+) -> DeltaResult<()> {
+    require!(
+        table_properties.enable_change_data_feed.unwrap_or(false),
+        Error::change_data_feed_unsupported(version)
+    );
+    require!(
+        matches!(
+            table_properties.column_mapping_mode,
+            None | Some(ColumnMappingMode::None)
+        ),
+        Error::generic("Change data feed not supported when column mapping is enabled")
+    );
+    Ok(())
+}
+
+/// Ensures that Change Data Feed is supported for a table with this [`Protocol`] .
+//
+//  Currently the only read feature allowed is deletion vectors. This will be expanded in the
+//  future to support more delta table features.
+//
+//  Because only deletion vectors are supported, reader version 2 will not be allowed. That is
+//  because version 2 requires that column mapping is enabled. Reader versions 1 and 3 are allowed.
+fn ensure_cdf_read_supported(protocol: &Protocol) -> DeltaResult<()> {
+    static SUPPORTED_READER_FEATURES: LazyLock<HashSet<ReaderFeatures>> =
+        LazyLock::new(|| HashSet::from([ReaderFeatures::DeletionVectors]));
+    match &protocol.reader_features() {
+        // if min_reader_version = 3 and all reader features are subset of supported => OK
+        Some(reader_features) if protocol.min_reader_version() == 3 => {
+            ensure_supported_features(reader_features, &SUPPORTED_READER_FEATURES)
+        }
+        // if min_reader_version = 3 and no reader features => ERROR
+        // NOTE this is caught by the protocol parsing.
+        None if protocol.min_reader_version() == 3 => Err(Error::internal_error(
+            "Reader features must be present when minimum reader version = 3",
+        )),
+        // if min_reader_version = 1 and there are no reader features => OK
+        None if protocol.min_reader_version() == 1 => Ok(()),
+        // if min_reader_version = 1,2 and there are reader features => ERROR
+        // NOTE this is caught by the protocol parsing.
+        Some(_) if protocol.min_reader_version() == 1 || protocol.min_reader_version() == 2 => {
+            Err(Error::internal_error(
+                "Reader features must not be present when minimum reader version = 1 or 2",
+            ))
+        }
+        // any other min_reader_version is not supported
+        _ => Err(Error::Unsupported(format!(
+            "Unsupported minimum reader version {}",
+            protocol.min_reader_version()
+        ))),
     }
 }
 

@@ -79,14 +79,13 @@ async fn metadata_protocol() {
         commits.next().unwrap(),
         engine.as_ref(),
         &get_schema().into(),
-        None,
     )
     .unwrap();
     assert!(!scanner.has_cdc_action);
     assert!(scanner.remove_dvs.is_empty());
 
     assert_eq!(
-        result_to_sv(scanner.into_scan_batches(engine.clone()).unwrap()),
+        result_to_sv(scanner.into_scan_batches(engine.clone(), None).unwrap()),
         &[false, false]
     );
 }
@@ -115,7 +114,6 @@ async fn configuration_fails() {
         commits.next().unwrap(),
         engine.as_ref(),
         &get_schema().into(),
-        None,
     );
 
     assert!(matches!(res, Err(Error::ChangeDataFeedUnsupported(_))));
@@ -152,7 +150,6 @@ async fn incompatible_schema() {
         commits.next().unwrap(),
         engine.as_ref(),
         &get_schema().into(),
-        None,
     );
 
     assert!(matches!(
@@ -188,14 +185,13 @@ async fn add_remove() {
         commits.next().unwrap(),
         engine.as_ref(),
         &get_schema().into(),
-        None,
     )
     .unwrap();
     assert!(!scanner.has_cdc_action);
     assert_eq!(scanner.remove_dvs, HashMap::new());
 
     assert_eq!(
-        result_to_sv(scanner.into_scan_batches(engine).unwrap()),
+        result_to_sv(scanner.into_scan_batches(engine, None).unwrap()),
         &[true, true]
     );
 }
@@ -232,14 +228,13 @@ async fn cdc_selection() {
         commits.next().unwrap(),
         engine.as_ref(),
         &get_schema().into(),
-        None,
     )
     .unwrap();
     assert!(scanner.has_cdc_action);
     assert_eq!(scanner.remove_dvs, HashMap::new());
 
     assert_eq!(
-        result_to_sv(scanner.into_scan_batches(engine).unwrap()),
+        result_to_sv(scanner.into_scan_batches(engine, None).unwrap()),
         &[false, false, true]
     );
 }
@@ -293,7 +288,6 @@ async fn dv() {
         commits.next().unwrap(),
         engine.as_ref(),
         &get_schema().into(),
-        None,
     )
     .unwrap();
     assert!(!scanner.has_cdc_action);
@@ -308,7 +302,7 @@ async fn dv() {
     );
 
     assert_eq!(
-        result_to_sv(scanner.into_scan_batches(engine).unwrap()),
+        result_to_sv(scanner.into_scan_batches(engine, None).unwrap()),
         &[true, false, true]
     );
 }
@@ -349,7 +343,6 @@ async fn failing_protocol() {
         commits.next().unwrap(),
         engine.as_ref(),
         &get_schema().into(),
-        None,
     );
 
     assert!(res.is_err());
@@ -383,7 +376,6 @@ async fn in_commit_timestamp() {
         commits.next().unwrap(),
         engine.as_ref(),
         &get_schema().into(),
-        None,
     )
     .unwrap();
     assert_eq!(scanner.timestamp, timestamp);
@@ -408,12 +400,8 @@ async fn file_meta_timestamp() {
 
     let commit = commits.next().unwrap();
     let file_meta_ts = commit.location.last_modified;
-    let scanner = LogReplayScanner::prepare_table_changes(
-        commit,
-        engine.as_ref(),
-        &get_schema().into(),
-        None,
-    )
-    .unwrap();
+    let scanner =
+        LogReplayScanner::prepare_table_changes(commit, engine.as_ref(), &get_schema().into())
+            .unwrap();
     assert_eq!(scanner.timestamp, file_meta_ts);
 }

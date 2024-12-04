@@ -16,6 +16,7 @@ use crate::scan::data_skipping::DataSkippingFilter;
 use crate::scan::scan_row_schema;
 use crate::scan::state::DvInfo;
 use crate::schema::{ArrayType, ColumnNamesAndTypes, DataType, MapType, SchemaRef, StructType};
+use crate::table_changes::{check_cdf_table_properties, ensure_cdf_read_supported};
 use crate::table_properties::TableProperties;
 use crate::utils::require;
 use crate::{DeltaResult, Engine, EngineData, Error, ExpressionRef, RowVisitor};
@@ -56,9 +57,8 @@ pub(crate) fn table_changes_action_iter(
                 commit_file,
                 engine.as_ref(),
                 &table_schema,
-                filter.clone(),
             )?;
-            scanner.into_scan_batches(engine.clone())
+            scanner.into_scan_batches(engine.clone(), filter.clone())
         }) //Iterator<DeltaResult<Iterator<DeltaResult<TableChangesScanData>>>>
         .flatten_ok() // Iterator<DeltaResult<DeltaResult<TableChangesScanData>>>
         .map(|x| x?); // Iterator<DeltaResult<TableChangesScanData>>
@@ -131,16 +131,15 @@ struct LogReplayScanner {
     // [`TableChangesScanData`]
     #[allow(unused)]
     timestamp: i64,
-    // The data skipping filter for filtering log actions
-    filter: Option<Arc<DataSkippingFilter>>,
 }
 
 impl LogReplayScanner {
+    /// Constructs a LogReplayScanner, performing the Prepare phase detailed in [`LogReplayScanner`].
+    /// This iterates over each action in the commit.
     fn prepare_table_changes(
         commit_file: ParsedLogPath,
         engine: &dyn Engine,
         table_schema: &SchemaRef,
-        filter: Option<Arc<DataSkippingFilter>>,
     ) -> DeltaResult<Self> {
         let visitor_schema = PreparePhaseVisitor::schema()?;
         let action_iter = engine.get_json_handler().read_json_files(
@@ -155,13 +154,16 @@ impl LogReplayScanner {
         let mut timestamp = commit_file.location.last_modified;
         for actions in action_iter {
             let actions = actions?;
-            let selection_vector = match &filter {
-                Some(filter) => filter.apply(actions.as_ref())?,
-                None => vec![true; actions.len()],
-            };
 
+            // Note: We do not use a [`DataSkippingFilter`] because we need to visit all add and
+            // remove actions for deletion vector resolution to be correct.
+            //
+            // Consider a scenario with a pair of add/remove actions with the same path. The add
+            // action has file statistics, while the remove action does not (stats is optional for
+            // remove). The DataSkippingFilter may skip the add action, and the remove action will
+            // appear as if it is unpaired. Instead, we wait until deletion vectors are resolved so
+            // that we can skip both actions in the pair.
             let mut visitor = PreparePhaseVisitor {
-                selection_vector,
                 add_paths: &mut add_paths,
                 remove_dvs: &mut remove_dvs,
                 has_cdc_action: &mut has_cdc_action,
@@ -172,7 +174,7 @@ impl LogReplayScanner {
             visitor.visit_rows_of(actions.as_ref())?;
 
             if let Some(protocol) = visitor.protocol {
-                protocol.ensure_read_supported()?;
+                ensure_cdf_read_supported(&protocol)?;
             }
             if let Some((schema, configuration)) = visitor.metadata_info {
                 let schema: StructType = serde_json::from_str(&schema)?;
@@ -184,10 +186,7 @@ impl LogReplayScanner {
                     Error::change_data_feed_incompatible_schema(table_schema, &schema)
                 );
                 let table_properties = TableProperties::from(configuration);
-                require!(
-                    table_properties.enable_change_data_feed.unwrap_or(false),
-                    Error::change_data_feed_unsupported(commit_file.version)
-                )
+                check_cdf_table_properties(&table_properties, commit_file.version)?;
             }
         }
         // We resolve the remove deletion vector map after visiting the entire commit.
@@ -203,12 +202,14 @@ impl LogReplayScanner {
             commit_file,
             has_cdc_action,
             remove_dvs,
-            filter,
         })
     }
+    /// Generates an iterator of [`TableChangesScanData`] that iterates over each action of the
+    /// commit. This performs phase 2 of [`LogReplayScanner`].
     fn into_scan_batches(
         self,
         engine: Arc<dyn Engine>,
+        filter: Option<Arc<DataSkippingFilter>>,
     ) -> DeltaResult<impl Iterator<Item = DeltaResult<TableChangesScanData>>> {
         let Self {
             has_cdc_action,
@@ -216,7 +217,6 @@ impl LogReplayScanner {
             commit_file,
             // TODO: Add the timestamp as a column with an expression
             timestamp: _,
-            filter,
         } = self;
         let remove_dvs = Arc::new(remove_dvs);
 
@@ -262,7 +262,6 @@ impl LogReplayScanner {
 // This is a visitor used in the prepare phase of [`LogReplayScanner`]. See
 // [`LogReplayScanner::prepare_table_changes`] for details usage.
 struct PreparePhaseVisitor<'a> {
-    selection_vector: Vec<bool>,
     protocol: Option<Protocol>,
     metadata_info: Option<(String, HashMap<String, String>)>,
     timestamp: &'a mut i64,
@@ -324,9 +323,6 @@ impl<'a> RowVisitor for PreparePhaseVisitor<'a> {
             ))
         );
         for i in 0..row_count {
-            if !self.selection_vector[i] {
-                continue;
-            }
             if let Some(path) = getters[0].get_str(i, "add.path")? {
                 self.add_paths.insert(path.to_string());
             } else if let Some(path) = getters[1].get_str(i, "remove.path")? {

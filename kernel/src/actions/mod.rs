@@ -289,7 +289,7 @@ impl Protocol {
 }
 
 // given unparsed `table_features`, parse and check if they are subset of `supported_features`
-fn ensure_supported_features<T>(
+pub(crate) fn ensure_supported_features<T>(
     table_features: &[String],
     supported_features: &HashSet<T>,
 ) -> DeltaResult<()>
