@@ -100,10 +100,13 @@ fn get_add_transform_expr() -> Expression {
 ///
 /// Note: We check the protocol, change data feed enablement, and schema compatibility in phase 1
 /// in order to detect errors and fail early.
+///
 /// TODO: When the kernel supports in-commit timestamps, we will also have to inspect CommitInfo
 /// actions to find the timestamp. These are generated when incommit timestamps is enabled.
 /// This must be done in the first phase because the second phase lazily transforms engine data with
 /// an extra timestamp column. Thus, the timestamp must be known ahead of time.
+/// See https://github.com/delta-io/delta-kernel-rs/issues/559
+///
 /// 2. Scan file generation phase [`LogReplayScanner::into_scan_batches`]: This performs another
 ///    iteration over every action in the commit, and generates [`TableChangesScanData`]. It does
 ///    so by transforming the actions using [`get_add_transform_expr`], and generating selection

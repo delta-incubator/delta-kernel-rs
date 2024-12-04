@@ -119,6 +119,7 @@ async fn cdf_not_enabled() {
 
     assert!(matches!(res, Err(Error::ChangeDataFeedUnsupported(_))));
 }
+
 #[tokio::test]
 async fn unsupported_reader_feature() {
     let engine = Arc::new(SyncEngine::new());
