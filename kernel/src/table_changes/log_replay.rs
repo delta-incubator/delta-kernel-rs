@@ -101,6 +101,10 @@ fn get_add_transform_expr() -> Expression {
 /// Note: We check the protocol, change data feed enablement, and schema compatibility in phase 1
 /// in order to detect errors and fail early.
 ///
+/// Note: We do collect deletion vectors regardless of whether it is enabled in [`TableProperties`]
+/// as specified in the Delta Protocol.
+/// See https://github.com/delta-io/delta/blob/master/PROTOCOL.md#deletion-vectors
+///
 /// TODO: When the kernel supports in-commit timestamps, we will also have to inspect CommitInfo
 /// actions to find the timestamp. These are generated when incommit timestamps is enabled.
 /// This must be done in the first phase because the second phase lazily transforms engine data with

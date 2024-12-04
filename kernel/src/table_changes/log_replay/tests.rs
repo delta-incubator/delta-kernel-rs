@@ -291,6 +291,14 @@ async fn filter_data_change() {
                 ..Default::default()
             }
             .into(),
+            // Add action that has same path as remove
+            Add {
+                path: "fake_path_1".into(),
+                data_change: false,
+                ..Default::default()
+            }
+            .into(),
+            // Add action with unique path
             Add {
                 path: "fake_path_5".into(),
                 data_change: false,
@@ -315,7 +323,7 @@ async fn filter_data_change() {
 
     assert_eq!(
         result_to_sv(scanner.into_scan_batches(engine, None).unwrap()),
-        &[false; 5]
+        &[false; 6]
     );
 }
 
