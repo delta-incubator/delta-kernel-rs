@@ -103,6 +103,9 @@ fn get_add_transform_expr() -> Expression {
 ///
 /// Note: We do collect deletion vectors regardless of whether it is enabled in [`TableProperties`]
 /// as specified in the Delta Protocol.
+/// > Readers must read the table considering the existence of DVs, even when the
+/// > `delta.enableDeletionVectors` table property is not set.
+///
 /// See https://github.com/delta-io/delta/blob/master/PROTOCOL.md#deletion-vectors
 ///
 /// TODO: When the kernel supports in-commit timestamps, we will also have to inspect CommitInfo
