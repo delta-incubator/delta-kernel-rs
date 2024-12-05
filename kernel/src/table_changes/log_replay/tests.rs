@@ -192,9 +192,40 @@ async fn column_mapping_should_fail() {
 
 // Note: This should be removed once type widening support is added for CDF
 #[tokio::test]
-async fn type_widening_the_schema_fails() {
-    let engine = Arc::new(SyncEngine::new());
-    let mut mock_table = LocalMockTable::new();
+async fn incompatible_schemas_fail() {
+    async fn assert_incompatible_schema(schema: StructType) {
+        let engine = Arc::new(SyncEngine::new());
+        let mut mock_table = LocalMockTable::new();
+
+        let schema_string = serde_json::to_string(&schema).unwrap();
+        mock_table
+            .commit([Metadata {
+                schema_string,
+                configuration: HashMap::from([(
+                    "delta.enableChangeDataFeed".to_string(),
+                    "true".to_string(),
+                )]),
+                ..Default::default()
+            }
+            .into()])
+            .await;
+
+        let mut commits = get_segment(engine.as_ref(), mock_table.table_root(), 0, None)
+            .unwrap()
+            .into_iter();
+
+        // We get the CDF schema from `get_schema()`
+        let res = LogReplayScanner::try_new(
+            commits.next().unwrap(),
+            engine.as_ref(),
+            &get_schema().into(),
+        );
+
+        assert!(matches!(
+            res,
+            Err(Error::ChangeDataFeedIncompatibleSchema(_, _))
+        ));
+    }
 
     // The CDF schema has fields: `id: int` and `value: string`.
     // This commit has schema with fields: `id: long` and `value: string`.
@@ -202,40 +233,15 @@ async fn type_widening_the_schema_fails() {
         StructField::new("id", DataType::LONG, true),
         StructField::new("value", DataType::STRING, true),
     ]);
-    let schema_string = serde_json::to_string(&schema).unwrap();
-    mock_table
-        .commit([Metadata {
-            schema_string,
-            configuration: HashMap::from([(
-                "delta.enableChangeDataFeed".to_string(),
-                "true".to_string(),
-            )]),
-            ..Default::default()
-        }
-        .into()])
-        .await;
+    assert_incompatible_schema(schema).await;
 
-    let mut commits = get_segment(engine.as_ref(), mock_table.table_root(), 0, None)
-        .unwrap()
-        .into_iter();
-
-    // We get the CDF schema from `get_schema()`
-    let res = LogReplayScanner::try_new(
-        commits.next().unwrap(),
-        engine.as_ref(),
-        &get_schema().into(),
-    );
-
-    assert!(matches!(
-        res,
-        Err(Error::ChangeDataFeedIncompatibleSchema(_, _))
-    ));
-}
-
-#[tokio::test]
-async fn disabling_nullability_fails() {
-    let engine = Arc::new(SyncEngine::new());
-    let mut mock_table = LocalMockTable::new();
+    // The CDF schema has fields: `id: int` and `value: string`.
+    // This commit has schema with fields: `id: long` and `value: string`.
+    let schema = StructType::new([
+        StructField::new("id", DataType::LONG, true),
+        StructField::new("value", DataType::STRING, true),
+    ]);
+    assert_incompatible_schema(schema).await;
 
     // The CDF schema has fields: nullable `id`  and nullable `value`.
     // This commit has schema with fields: non-nullable `id` and nullable `value: string`.
@@ -243,40 +249,7 @@ async fn disabling_nullability_fails() {
         StructField::new("id", DataType::LONG, false),
         StructField::new("value", DataType::STRING, true),
     ]);
-    let schema_string = serde_json::to_string(&schema).unwrap();
-    mock_table
-        .commit([Metadata {
-            schema_string,
-            configuration: HashMap::from([(
-                "delta.enableChangeDataFeed".to_string(),
-                "true".to_string(),
-            )]),
-            ..Default::default()
-        }
-        .into()])
-        .await;
-
-    let mut commits = get_segment(engine.as_ref(), mock_table.table_root(), 0, None)
-        .unwrap()
-        .into_iter();
-
-    // We get the CDF schema from `get_schema()`
-    let res = LogReplayScanner::try_new(
-        commits.next().unwrap(),
-        engine.as_ref(),
-        &get_schema().into(),
-    );
-
-    assert!(matches!(
-        res,
-        Err(Error::ChangeDataFeedIncompatibleSchema(_, _))
-    ));
-}
-
-#[tokio::test]
-async fn type_changed_in_schema() {
-    let engine = Arc::new(SyncEngine::new());
-    let mut mock_table = LocalMockTable::new();
+    assert_incompatible_schema(schema).await;
 
     // The CDF schema has fields: `id` with type `int`, `value` with type string.
     // This commit has schema with fields:`id` with type `string`, value with type string.
@@ -284,71 +257,12 @@ async fn type_changed_in_schema() {
         StructField::new("id", DataType::STRING, true),
         StructField::new("value", DataType::STRING, true),
     ]);
-    let schema_string = serde_json::to_string(&schema).unwrap();
-    mock_table
-        .commit([Metadata {
-            schema_string,
-            configuration: HashMap::from([(
-                "delta.enableChangeDataFeed".to_string(),
-                "true".to_string(),
-            )]),
-            ..Default::default()
-        }
-        .into()])
-        .await;
-
-    let mut commits = get_segment(engine.as_ref(), mock_table.table_root(), 0, None)
-        .unwrap()
-        .into_iter();
-
-    // We get the CDF schema from `get_schema()`
-    let res = LogReplayScanner::try_new(
-        commits.next().unwrap(),
-        engine.as_ref(),
-        &get_schema().into(),
-    );
-
-    assert!(matches!(
-        res,
-        Err(Error::ChangeDataFeedIncompatibleSchema(_, _))
-    ));
-}
-#[tokio::test]
-async fn column_removed_from_schema() {
-    let engine = Arc::new(SyncEngine::new());
-    let mut mock_table = LocalMockTable::new();
+    assert_incompatible_schema(schema).await;
 
     // The CDF schema has fields: `id`  and `value`.
     // This commit has schema with fields: `id`
-    let schema = get_schema().project(&["id"]).unwrap();
-    let schema_string = serde_json::to_string(&schema).unwrap();
-    mock_table
-        .commit([Metadata {
-            schema_string,
-            configuration: HashMap::from([(
-                "delta.enableChangeDataFeed".to_string(),
-                "true".to_string(),
-            )]),
-            ..Default::default()
-        }
-        .into()])
-        .await;
-
-    let mut commits = get_segment(engine.as_ref(), mock_table.table_root(), 0, None)
-        .unwrap()
-        .into_iter();
-
-    // We get the CDF schema from `get_schema()`
-    let res = LogReplayScanner::try_new(
-        commits.next().unwrap(),
-        engine.as_ref(),
-        &get_schema().into(),
-    );
-
-    assert!(matches!(
-        res,
-        Err(Error::ChangeDataFeedIncompatibleSchema(_, _))
-    ));
+    let schema = get_schema().project_as_struct(&["id"]).unwrap();
+    assert_incompatible_schema(schema).await;
 }
 
 #[tokio::test]
