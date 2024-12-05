@@ -270,8 +270,11 @@ impl TableChangesScan {
                 };
                 match (&tpe, dv_map.get(&path)) {
                     (state::ScanFileType::Add, Some(rm_dv)) => {
-                        let generated_columns =
-                            get_generated_columns(timestamp, tpe, commit_version)?;
+                        let generated_columns = get_generated_columns(
+                            timestamp,
+                            state::ScanFileType::Add,
+                            commit_version,
+                        )?;
 
                         let add_sv = treemap_to_bools(
                             dv_info
