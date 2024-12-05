@@ -1,12 +1,12 @@
 # delta-kernel-rs
 
-Delta-kernel-rs is an experimental [Delta][delta] implementation focused on
-interoperability with a wide range of query engines. It currently only supports
-reads.
+Delta-kernel-rs is an experimental [Delta][delta] implementation focused on interoperability with a
+wide range of query engines. It currently supports reads and (experimental) writes. Only blind
+appends are currently supported in the write path.
 
-The Delta Kernel project is a Rust and C library for building Delta connectors that can read (and
-soon, write) Delta tables without needing to understand the Delta [protocol
-details][delta-protocol]. This is the Rust/C equivalent of [Java Delta Kernel][java-kernel].
+The Delta Kernel project is a Rust and C library for building Delta connectors that can read and
+write Delta tables without needing to understand the Delta [protocol details][delta-protocol]. This
+is the Rust/C equivalent of [Java Delta Kernel][java-kernel].
 
 ## Crates
 
@@ -33,18 +33,20 @@ the acceptance tests against it.
 
 In general, you will want to depend on `delta-kernel-rs` by adding it as a dependency to your
 `Cargo.toml`, (that is, for rust projects using cargo) for other projects please see the [FFI]
-module. The core kernel includes facilities for reading delta tables, but requires the consumer
-to implement the `Engine` trait in order to use the table-reading APIs. If there is no need to
-implement the consumer's own `Engine` trait, the kernel has a feature flag to enable a default,
-asynchronous `Engine` implementation built with [Arrow] and [Tokio].
+module. The core kernel includes facilities for reading and writing delta tables, and allows the
+consumer to implement their own `Engine` trait in order to build engine-specific implementations of
+the various `Engine` APIs that the kernel relies on (e.g. implement an engine-specific
+`read_json_files()` using the native engine JSON reader). If there is no need to implement the
+consumer's own `Engine` trait, the kernel has a feature flag to enable a default, asynchronous
+`Engine` implementation built with [Arrow] and [Tokio].
 
 ```toml
 # fewer dependencies, requires consumer to implement Engine trait.
 # allows consumers to implement their own in-memory format
-delta_kernel = "0.4"
+delta_kernel = "0.5"
 
 # or turn on the default engine, based on arrow
-delta_kernel = { version = "0.4", features = ["default-engine"] }
+delta_kernel = { version = "0.5", features = ["default-engine"] }
 ```
 
 ### Feature flags
@@ -126,12 +128,13 @@ projects.
 There are a few key concepts that will help in understanding kernel:
 
 1. The `Engine` trait encapsulates all the functionality and engine or connector needs to provide to
-   the Delta Kernel in order to read the Delta table.
+   the Delta Kernel in order to read/write the Delta table.
 2. The `DefaultEngine` is our default implementation of the the above trait. It lives in
    `engine/default`, and provides a reference implementation for all `Engine`
    functionality. `DefaultEngine` uses [arrow](https://docs.rs/arrow/latest/arrow/) as its in-memory
    data format.
 3. A `Scan` is the entrypoint for reading data from a table.
+4. A `Transaction` is the entrypoint for writing data to a table.
 
 ### Design Principles
 
@@ -176,7 +179,7 @@ Some design principles which should be considered:
 [delta-github]: https://github.com/delta-io/delta
 [java-kernel]: https://github.com/delta-io/delta/tree/master/kernel
 [rustup]: https://rustup.rs
-[architecture.md]: https://github.com/delta-incubator/delta-kernel-rs/tree/master/architecture.md
+[architecture.md]: https://github.com/delta-io/delta-kernel-rs/tree/master/architecture.md
 [dat]: https://github.com/delta-incubator/dat
 [derive-macros]: https://doc.rust-lang.org/reference/procedural-macros.html
 [API Docs]: https://docs.rs/delta_kernel/latest/delta_kernel/

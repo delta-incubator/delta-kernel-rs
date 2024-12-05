@@ -10,6 +10,7 @@ readme.workspace = true
 version.workspace = true
 # exclude golden tests + golden test data since they push us over 10MB crate size limit
 exclude = ["tests/golden_tables.rs", "tests/golden_data/" ]
+rust-version.workspace = true
 
 [package.metadata.docs.rs]
 all-features = true
@@ -31,7 +32,7 @@ uuid = "1.10.0"
 z85 = "3.0.5"
 
 # bring in our derive macros
-delta_kernel_derive = { path = "../derive-macros", version = "0.4.0" }
+delta_kernel_derive = { path = "../derive-macros", version = "0.5.0" }
 
 # used for developer-visibility
 visibility = "0.1.1"

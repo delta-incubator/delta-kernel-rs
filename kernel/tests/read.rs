@@ -13,7 +13,7 @@ use delta_kernel::engine::default::DefaultEngine;
 use delta_kernel::expressions::{column_expr, BinaryOperator, Expression};
 use delta_kernel::scan::state::{visit_scan_files, DvInfo, Stats};
 use delta_kernel::scan::{transform_to_logical, Scan};
-use delta_kernel::schema::Schema;
+use delta_kernel::schema::{DataType, Schema};
 use delta_kernel::{Engine, FileMeta, Table};
 use object_store::{memory::InMemory, path::Path, ObjectStore};
 use test_utils::{
@@ -56,20 +56,20 @@ async fn single_commit_two_add_files() -> Result<(), Box<dyn std::error::Error>>
         .await?;
 
     let location = Url::parse("memory:///")?;
-    let engine = DefaultEngine::new(
+    let engine = Arc::new(DefaultEngine::new(
         storage.clone(),
         Path::from("/"),
         Arc::new(TokioBackgroundExecutor::new()),
-    );
+    ));
 
     let table = Table::new(location);
     let expected_data = vec![batch.clone(), batch];
 
-    let snapshot = table.snapshot(&engine, None)?;
+    let snapshot = table.snapshot(engine.as_ref(), None)?;
     let scan = snapshot.into_scan_builder().build()?;
 
     let mut files = 0;
-    let stream = scan.execute(&engine)?.zip(expected_data);
+    let stream = scan.execute(engine)?.zip(expected_data);
 
     for (data, expected) in stream {
         let raw_data = data?.raw_data?;
@@ -126,7 +126,7 @@ async fn two_commits() -> Result<(), Box<dyn std::error::Error>> {
     let scan = snapshot.into_scan_builder().build()?;
 
     let mut files = 0;
-    let stream = scan.execute(&engine)?.zip(expected_data);
+    let stream = scan.execute(Arc::new(engine))?.zip(expected_data);
 
     for (data, expected) in stream {
         let raw_data = data?.raw_data?;
@@ -183,7 +183,7 @@ async fn remove_action() -> Result<(), Box<dyn std::error::Error>> {
     let snapshot = table.snapshot(&engine, None)?;
     let scan = snapshot.into_scan_builder().build()?;
 
-    let stream = scan.execute(&engine)?.zip(expected_data);
+    let stream = scan.execute(Arc::new(engine))?.zip(expected_data);
 
     let mut files = 0;
     for (data, expected) in stream {
@@ -247,14 +247,14 @@ async fn stats() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     let location = Url::parse("memory:///").unwrap();
-    let engine = DefaultEngine::new(
+    let engine = Arc::new(DefaultEngine::new(
         storage.clone(),
         Path::from(""),
         Arc::new(TokioBackgroundExecutor::new()),
-    );
+    ));
 
     let table = Table::new(location);
-    let snapshot = Arc::new(table.snapshot(&engine, None)?);
+    let snapshot = Arc::new(table.snapshot(engine.as_ref(), None)?);
 
     // The first file has id between 1 and 3; the second has id between 5 and 7. For each operator,
     // we validate the boundary values where we expect the set of matched files to change.
@@ -289,11 +289,11 @@ async fn stats() -> Result<(), Box<dyn std::error::Error>> {
         (GreaterThanOrEqual, 7, vec![&batch2]),
         (GreaterThanOrEqual, 8, vec![]),
         (NotEqual, 0, vec![&batch2, &batch1]),
-        (NotEqual, 1, vec![&batch2]),
-        (NotEqual, 3, vec![&batch2]),
+        (NotEqual, 1, vec![&batch2, &batch1]),
+        (NotEqual, 3, vec![&batch2, &batch1]),
         (NotEqual, 4, vec![&batch2, &batch1]),
-        (NotEqual, 5, vec![&batch1]),
-        (NotEqual, 7, vec![&batch1]),
+        (NotEqual, 5, vec![&batch2, &batch1]),
+        (NotEqual, 7, vec![&batch2, &batch1]),
         (NotEqual, 8, vec![&batch2, &batch1]),
     ];
     for (op, value, expected_batches) in test_cases {
@@ -301,19 +301,19 @@ async fn stats() -> Result<(), Box<dyn std::error::Error>> {
         let scan = snapshot
             .clone()
             .scan_builder()
-            .with_predicate(Arc::new(predicate))
+            .with_predicate(Arc::new(predicate.clone()))
             .build()?;
 
         let expected_files = expected_batches.len();
         let mut files_scanned = 0;
-        let stream = scan.execute(&engine)?.zip(expected_batches);
+        let stream = scan.execute(engine.clone())?.zip(expected_batches);
 
         for (batch, expected) in stream {
             let raw_data = batch?.raw_data?;
             files_scanned += 1;
             assert_eq!(into_record_batch(raw_data), expected.clone());
         }
-        assert_eq!(expected_files, files_scanned);
+        assert_eq!(expected_files, files_scanned, "{predicate:?}");
     }
     Ok(())
 }
@@ -346,7 +346,7 @@ macro_rules! assert_batches_sorted_eq {
 }
 
 fn read_with_execute(
-    engine: &dyn Engine,
+    engine: Arc<dyn Engine>,
     scan: &Scan,
     expected: &[String],
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -472,10 +472,10 @@ fn read_table_data(
     )?;
     let sync_engine = delta_kernel::engine::sync::SyncEngine::new();
 
-    let engines: &[&dyn Engine] = &[&sync_engine, &default_engine];
-    for &engine in engines {
+    let engines: Vec<Arc<dyn Engine>> = vec![Arc::new(sync_engine), Arc::new(default_engine)];
+    for engine in engines {
         let table = Table::new(url.clone());
-        let snapshot = table.snapshot(engine, None)?;
+        let snapshot = table.snapshot(engine.as_ref(), None)?;
 
         let read_schema = select_cols.map(|select_cols| {
             let table_schema = snapshot.schema();
@@ -491,8 +491,8 @@ fn read_table_data(
             .build()?;
 
         sort_lines!(expected);
+        read_with_scan_data(table.location(), engine.as_ref(), &scan, &expected)?;
         read_with_execute(engine, &scan, &expected)?;
-        read_with_scan_data(table.location(), engine, &scan, &expected)?;
     }
     Ok(())
 }
@@ -850,28 +850,39 @@ fn not_and_or_predicates() -> Result<(), Box<dyn std::error::Error>> {
 fn invalid_skips_none_predicates() -> Result<(), Box<dyn std::error::Error>> {
     let empty_struct = Expression::struct_from(vec![]);
     let cases = vec![
+        (Expression::literal(false), table_for_numbers(vec![])),
+        (
+            Expression::literal(true),
+            table_for_numbers(vec![1, 2, 3, 4, 5, 6]),
+        ),
         (
             Expression::literal(3i64),
             table_for_numbers(vec![1, 2, 3, 4, 5, 6]),
         ),
         (
             column_expr!("number").distinct(3i64),
+            table_for_numbers(vec![1, 2, 4, 5, 6]),
+        ),
+        (
+            column_expr!("number").distinct(Expression::null_literal(DataType::LONG)),
             table_for_numbers(vec![1, 2, 3, 4, 5, 6]),
+        ),
+        (
+            Expression::not(column_expr!("number").distinct(3i64)),
+            table_for_numbers(vec![3]),
+        ),
+        (
+            Expression::not(
+                column_expr!("number").distinct(Expression::null_literal(DataType::LONG)),
+            ),
+            table_for_numbers(vec![]),
         ),
         (
             column_expr!("number").gt(empty_struct.clone()),
             table_for_numbers(vec![1, 2, 3, 4, 5, 6]),
         ),
         (
-            column_expr!("number").and(empty_struct.clone().is_null()),
-            table_for_numbers(vec![1, 2, 3, 4, 5, 6]),
-        ),
-        (
             Expression::not(column_expr!("number").gt(empty_struct.clone())),
-            table_for_numbers(vec![1, 2, 3, 4, 5, 6]),
-        ),
-        (
-            Expression::not(column_expr!("number").and(empty_struct.clone().is_null())),
             table_for_numbers(vec![1, 2, 3, 4, 5, 6]),
         ),
     ];
@@ -1022,7 +1033,7 @@ fn predicate_references_invalid_missing_column() -> Result<(), Box<dyn std::erro
     // Attempted skipping over a logically valid but physically missing column. We should be able to
     // skip the data file because the missing column is inferred to be all-null.
     //
-    // WARNING: https://github.com/delta-incubator/delta-kernel-rs/issues/434 -- currently disabled.
+    // WARNING: https://github.com/delta-io/delta-kernel-rs/issues/434 -- currently disabled.
     //
     //let expected = vec![
     //    "+--------+",

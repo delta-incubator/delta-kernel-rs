@@ -2,13 +2,18 @@
 //! [`crate::engine_data::EngineData`] types.
 
 use std::collections::HashMap;
+use std::sync::LazyLock;
 
-use crate::engine_data::{GetData, TypedGetData};
-use crate::{DataVisitor, DeltaResult};
+use crate::engine_data::{GetData, RowVisitor, TypedGetData as _};
+use crate::schema::{column_name, ColumnName, ColumnNamesAndTypes, DataType};
+use crate::utils::require;
+use crate::{DeltaResult, Error};
 
+use super::deletion_vector::DeletionVectorDescriptor;
+use super::schemas::ToSchema as _;
 use super::{
-    deletion_vector::DeletionVectorDescriptor, Add, Format, Metadata, Protocol, Remove,
-    SetTransaction,
+    Add, Cdc, Format, Metadata, Protocol, Remove, SetTransaction, ADD_NAME, CDC_NAME,
+    METADATA_NAME, PROTOCOL_NAME, REMOVE_NAME, SET_TRANSACTION_NAME,
 };
 
 #[derive(Default)]
@@ -25,6 +30,13 @@ impl MetadataVisitor {
         id: String,
         getters: &[&'a dyn GetData<'a>],
     ) -> DeltaResult<Metadata> {
+        require!(
+            getters.len() == 9,
+            Error::InternalError(format!(
+                "Wrong number of MetadataVisitor getters: {}",
+                getters.len()
+            ))
+        );
         let name: Option<String> = getters[1].get_opt(row_index, "metadata.name")?;
         let description: Option<String> = getters[2].get_opt(row_index, "metadata.description")?;
         // get format out of primitives
@@ -53,7 +65,13 @@ impl MetadataVisitor {
     }
 }
 
-impl DataVisitor for MetadataVisitor {
+impl RowVisitor for MetadataVisitor {
+    fn selected_column_names_and_types(&self) -> (&'static [ColumnName], &'static [DataType]) {
+        static NAMES_AND_TYPES: LazyLock<ColumnNamesAndTypes> =
+            LazyLock::new(|| Metadata::to_schema().leaves(METADATA_NAME));
+        NAMES_AND_TYPES.as_ref()
+    }
+
     fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<()> {
         for i in 0..row_count {
             // Since id column is required, use it to detect presence of a metadata action
@@ -71,11 +89,24 @@ pub(crate) struct SelectionVectorVisitor {
     pub(crate) selection_vector: Vec<bool>,
 }
 
-impl DataVisitor for SelectionVectorVisitor {
+/// A single non-nullable BOOL column
+impl RowVisitor for SelectionVectorVisitor {
+    fn selected_column_names_and_types(&self) -> (&'static [ColumnName], &'static [DataType]) {
+        static NAMES_AND_TYPES: LazyLock<ColumnNamesAndTypes> =
+            LazyLock::new(|| (vec![column_name!("output")], vec![DataType::BOOLEAN]).into());
+        NAMES_AND_TYPES.as_ref()
+    }
     fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<()> {
+        require!(
+            getters.len() == 1,
+            Error::InternalError(format!(
+                "Wrong number of SelectionVectorVisitor getters: {}",
+                getters.len()
+            ))
+        );
         for i in 0..row_count {
             self.selection_vector
-                .push(getters[0].get(i, "selectionvector.output")?)
+                .push(getters[0].get(i, "selectionvector.output")?);
         }
         Ok(())
     }
@@ -95,6 +126,13 @@ impl ProtocolVisitor {
         min_reader_version: i32,
         getters: &[&'a dyn GetData<'a>],
     ) -> DeltaResult<Protocol> {
+        require!(
+            getters.len() == 4,
+            Error::InternalError(format!(
+                "Wrong number of ProtocolVisitor getters: {}",
+                getters.len()
+            ))
+        );
         let min_writer_version: i32 = getters[1].get(row_index, "protocol.min_writer_version")?;
         let reader_features: Option<Vec<_>> =
             getters[2].get_opt(row_index, "protocol.reader_features")?;
@@ -110,7 +148,12 @@ impl ProtocolVisitor {
     }
 }
 
-impl DataVisitor for ProtocolVisitor {
+impl RowVisitor for ProtocolVisitor {
+    fn selected_column_names_and_types(&self) -> (&'static [ColumnName], &'static [DataType]) {
+        static NAMES_AND_TYPES: LazyLock<ColumnNamesAndTypes> =
+            LazyLock::new(|| Protocol::to_schema().leaves(PROTOCOL_NAME));
+        NAMES_AND_TYPES.as_ref()
+    }
     fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<()> {
         for i in 0..row_count {
             // Since minReaderVersion column is required, use it to detect presence of a Protocol action
@@ -123,10 +166,10 @@ impl DataVisitor for ProtocolVisitor {
     }
 }
 
+#[allow(unused)]
 #[derive(Default)]
 #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
-#[cfg_attr(not(feature = "developer-visibility"), visibility::make(pub(crate)))]
-struct AddVisitor {
+pub(crate) struct AddVisitor {
     pub(crate) adds: Vec<Add>,
 }
 
@@ -138,6 +181,13 @@ impl AddVisitor {
         path: String,
         getters: &[&'a dyn GetData<'a>],
     ) -> DeltaResult<Add> {
+        require!(
+            getters.len() == 15,
+            Error::InternalError(format!(
+                "Wrong number of AddVisitor getters: {}",
+                getters.len()
+            ))
+        );
         let partition_values: HashMap<_, _> = getters[1].get(row_index, "add.partitionValues")?;
         let size: i64 = getters[2].get(row_index, "add.size")?;
         let modification_time: i64 = getters[3].get(row_index, "add.modificationTime")?;
@@ -168,9 +218,17 @@ impl AddVisitor {
             clustering_provider,
         })
     }
+    pub(crate) fn names_and_types() -> (&'static [ColumnName], &'static [DataType]) {
+        static NAMES_AND_TYPES: LazyLock<ColumnNamesAndTypes> =
+            LazyLock::new(|| Add::to_schema().leaves(ADD_NAME));
+        NAMES_AND_TYPES.as_ref()
+    }
 }
 
-impl DataVisitor for AddVisitor {
+impl RowVisitor for AddVisitor {
+    fn selected_column_names_and_types(&self) -> (&'static [ColumnName], &'static [DataType]) {
+        Self::names_and_types()
+    }
     fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<()> {
         for i in 0..row_count {
             // Since path column is required, use it to detect presence of an Add action
@@ -182,21 +240,27 @@ impl DataVisitor for AddVisitor {
     }
 }
 
+#[allow(unused)]
 #[derive(Default)]
 #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
-#[cfg_attr(not(feature = "developer-visibility"), visibility::make(pub(crate)))]
-struct RemoveVisitor {
+pub(crate) struct RemoveVisitor {
     pub(crate) removes: Vec<Remove>,
 }
 
 impl RemoveVisitor {
     #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
-    #[cfg_attr(not(feature = "developer-visibility"), visibility::make(pub(crate)))]
-    fn visit_remove<'a>(
+    pub(crate) fn visit_remove<'a>(
         row_index: usize,
         path: String,
         getters: &[&'a dyn GetData<'a>],
     ) -> DeltaResult<Remove> {
+        require!(
+            getters.len() == 14,
+            Error::InternalError(format!(
+                "Wrong number of RemoveVisitor getters: {}",
+                getters.len()
+            ))
+        );
         let deletion_timestamp: Option<i64> =
             getters[1].get_opt(row_index, "remove.deletionTimestamp")?;
         let data_change: bool = getters[2].get(row_index, "remove.dataChange")?;
@@ -228,15 +292,73 @@ impl RemoveVisitor {
             default_row_commit_version,
         })
     }
+    pub(crate) fn names_and_types() -> (&'static [ColumnName], &'static [DataType]) {
+        static NAMES_AND_TYPES: LazyLock<ColumnNamesAndTypes> =
+            LazyLock::new(|| Remove::to_schema().leaves(REMOVE_NAME));
+        NAMES_AND_TYPES.as_ref()
+    }
 }
 
-impl DataVisitor for RemoveVisitor {
+impl RowVisitor for RemoveVisitor {
+    fn selected_column_names_and_types(&self) -> (&'static [ColumnName], &'static [DataType]) {
+        Self::names_and_types()
+    }
     fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<()> {
         for i in 0..row_count {
             // Since path column is required, use it to detect presence of an Remove action
             if let Some(path) = getters[0].get_opt(i, "remove.path")? {
                 self.removes.push(Self::visit_remove(i, path, getters)?);
                 break;
+            }
+        }
+        Ok(())
+    }
+}
+
+#[allow(unused)]
+#[derive(Default)]
+#[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
+#[cfg_attr(not(feature = "developer-visibility"), visibility::make(pub(crate)))]
+struct CdcVisitor {
+    pub(crate) cdcs: Vec<Cdc>,
+}
+
+impl CdcVisitor {
+    #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
+    #[cfg_attr(not(feature = "developer-visibility"), visibility::make(pub(crate)))]
+    fn visit_cdc<'a>(
+        row_index: usize,
+        path: String,
+        getters: &[&'a dyn GetData<'a>],
+    ) -> DeltaResult<Cdc> {
+        Ok(Cdc {
+            path,
+            partition_values: getters[1].get(row_index, "cdc.partitionValues")?,
+            size: getters[2].get(row_index, "cdc.size")?,
+            data_change: getters[3].get(row_index, "cdc.dataChange")?,
+            tags: getters[4].get_opt(row_index, "cdc.tags")?,
+        })
+    }
+}
+
+impl RowVisitor for CdcVisitor {
+    fn selected_column_names_and_types(&self) -> (&'static [ColumnName], &'static [DataType]) {
+        static NAMES_AND_TYPES: LazyLock<ColumnNamesAndTypes> =
+            LazyLock::new(|| Cdc::to_schema().leaves(CDC_NAME));
+        NAMES_AND_TYPES.as_ref()
+    }
+    fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<()> {
+        require!(
+            getters.len() == 5,
+            Error::InternalError(format!(
+                "Wrong number of CdcVisitor getters: {}",
+                getters.len()
+            ))
+        );
+        for i in 0..row_count {
+            // Since path column is required, use it to detect presence of an Add action
+            if let Some(path) = getters[0].get_opt(i, "cdc.path")? {
+                self.cdcs.push(Self::visit_cdc(i, path, getters)?);
             }
         }
         Ok(())
@@ -277,8 +399,15 @@ impl SetTransactionVisitor {
         app_id: String,
         getters: &[&'a dyn GetData<'a>],
     ) -> DeltaResult<SetTransaction> {
+        require!(
+            getters.len() == 3,
+            Error::InternalError(format!(
+                "Wrong number of SetTransactionVisitor getters: {}",
+                getters.len()
+            ))
+        );
         let version: i64 = getters[1].get(row_index, "txn.version")?;
-        let last_updated: Option<i64> = getters[2].get_long(row_index, "txn.lastUpdated")?;
+        let last_updated: Option<i64> = getters[2].get_opt(row_index, "txn.lastUpdated")?;
         Ok(SetTransaction {
             app_id,
             version,
@@ -287,7 +416,13 @@ impl SetTransactionVisitor {
     }
 }
 
-impl DataVisitor for SetTransactionVisitor {
+impl RowVisitor for SetTransactionVisitor {
+    fn selected_column_names_and_types(&self) -> (&'static [ColumnName], &'static [DataType]) {
+        static NAMES_AND_TYPES: LazyLock<ColumnNamesAndTypes> =
+            LazyLock::new(|| SetTransaction::to_schema().leaves(SET_TRANSACTION_NAME));
+        NAMES_AND_TYPES.as_ref()
+    }
+
     fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<()> {
         // Assumes batches are visited in reverse order relative to the log
         for i in 0..row_count {
@@ -344,7 +479,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        actions::{get_log_add_schema, get_log_schema, SET_TRANSACTION_NAME},
+        actions::get_log_schema,
         engine::arrow_data::ArrowEngineData,
         engine::sync::{json::SyncJsonHandler, SyncEngine},
         Engine, EngineData, JsonHandler,
@@ -365,7 +500,8 @@ mod tests {
             r#"{"add":{"path":"part-00000-fae5310a-a37d-4e51-827b-c3d5516560ca-c000.snappy.parquet","partitionValues":{},"size":635,"modificationTime":1677811178336,"dataChange":true,"stats":"{\"numRecords\":10,\"minValues\":{\"value\":0},\"maxValues\":{\"value\":9},\"nullCount\":{\"value\":0},\"tightBounds\":true}","tags":{"INSERTION_TIME":"1677811178336000","MIN_INSERTION_TIME":"1677811178336000","MAX_INSERTION_TIME":"1677811178336000","OPTIMIZE_TARGET_SIZE":"268435456"}}}"#,
             r#"{"commitInfo":{"timestamp":1677811178585,"operation":"WRITE","operationParameters":{"mode":"ErrorIfExists","partitionBy":"[]"},"isolationLevel":"WriteSerializable","isBlindAppend":true,"operationMetrics":{"numFiles":"1","numOutputRows":"10","numOutputBytes":"635"},"engineInfo":"Databricks-Runtime/<unknown>","txnId":"a6a94671-55ef-450e-9546-b8465b9147de"}}"#,
             r#"{"protocol":{"minReaderVersion":3,"minWriterVersion":7,"readerFeatures":["deletionVectors"],"writerFeatures":["deletionVectors"]}}"#,
-            r#"{"metaData":{"id":"testId","format":{"provider":"parquet","options":{}},"schemaString":"{\"type\":\"struct\",\"fields\":[{\"name\":\"value\",\"type\":\"integer\",\"nullable\":true,\"metadata\":{}}]}","partitionColumns":[],"configuration":{"delta.enableDeletionVectors":"true","delta.columnMapping.mode":"none"},"createdTime":1677811175819}}"#,
+            r#"{"metaData":{"id":"testId","format":{"provider":"parquet","options":{}},"schemaString":"{\"type\":\"struct\",\"fields\":[{\"name\":\"value\",\"type\":\"integer\",\"nullable\":true,\"metadata\":{}}]}","partitionColumns":[],"configuration":{"delta.enableDeletionVectors":"true","delta.columnMapping.mode":"none", "delta.enableChangeDataFeed":"true"},"createdTime":1677811175819}}"#,
+            r#"{"cdc":{"path":"_change_data/age=21/cdc-00000-93f7fceb-281a-446a-b221-07b88132d203.c000.snappy.parquet","partitionValues":{"age":"21"},"size":1033,"dataChange":false}}"#
         ]
         .into();
         let output_schema = get_log_schema().clone();
@@ -390,6 +526,25 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_cdc() -> DeltaResult<()> {
+        let data = action_batch();
+        let mut visitor = CdcVisitor::default();
+        visitor.visit_rows_of(data.as_ref())?;
+        let expected = Cdc {
+            path: "_change_data/age=21/cdc-00000-93f7fceb-281a-446a-b221-07b88132d203.c000.snappy.parquet".into(),
+            partition_values: HashMap::from([
+                ("age".to_string(), "21".to_string()),
+            ]),
+            size: 1033,
+            data_change: false,
+            tags: None
+        };
+
+        assert_eq!(&visitor.cdcs, &[expected]);
+        Ok(())
+    }
+
+    #[test]
     fn test_parse_metadata() -> DeltaResult<()> {
         let data = action_batch();
         let parsed = Metadata::try_new_from_data(data.as_ref())?.unwrap();
@@ -400,6 +555,7 @@ mod tests {
                 "true".to_string(),
             ),
             ("delta.columnMapping.mode".to_string(), "none".to_string()),
+            ("delta.enableChangeDataFeed".to_string(), "true".to_string()),
         ]);
         let expected = Metadata {
             id: "testId".into(),
@@ -435,9 +591,8 @@ mod tests {
         let batch = json_handler
             .parse_json(string_array_to_engine_data(json_strings), output_schema)
             .unwrap();
-        let add_schema = get_log_add_schema().clone();
         let mut add_visitor = AddVisitor::default();
-        batch.extract(add_schema, &mut add_visitor).unwrap();
+        add_visitor.visit_rows_of(batch.as_ref()).unwrap();
         let add1 = Add {
             path: "c1=4/c2=c/part-00003-f525f459-34f9-46f5-82d6-d42121d883fd.c000.snappy.parquet".into(),
             partition_values: HashMap::from([
@@ -497,11 +652,8 @@ mod tests {
         let batch = json_handler
             .parse_json(string_array_to_engine_data(json_strings), output_schema)
             .unwrap();
-        let add_schema = get_log_schema()
-            .project(&[SET_TRANSACTION_NAME])
-            .expect("Can't get txn schema");
         let mut txn_visitor = SetTransactionVisitor::default();
-        batch.extract(add_schema, &mut txn_visitor).unwrap();
+        txn_visitor.visit_rows_of(batch.as_ref()).unwrap();
         let mut actual = txn_visitor.set_transactions;
         assert_eq!(
             actual.remove("myApp2"),

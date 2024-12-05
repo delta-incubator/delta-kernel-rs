@@ -1,6 +1,8 @@
 //! An implementation of parquet row group skipping using data skipping predicates over footer stats.
-use crate::engine::parquet_stats_skipping::ParquetStatsSkippingFilter;
-use crate::expressions::{ColumnName, Expression, Scalar};
+use crate::engine::parquet_stats_skipping::{
+    ParquetStatsProvider, ParquetStatsSkippingFilter as _,
+};
+use crate::expressions::{ColumnName, Expression, Scalar, UnaryExpression, BinaryExpression, VariadicExpression};
 use crate::schema::{DataType, PrimitiveType};
 use chrono::{DateTime, Days};
 use parquet::arrow::arrow_reader::ArrowReaderBuilder;
@@ -55,7 +57,7 @@ impl<'a> RowGroupFilter<'a> {
 
     /// Applies a filtering predicate to a row group. Return value false means to skip it.
     fn apply(row_group: &'a RowGroupMetaData, predicate: &Expression) -> bool {
-        RowGroupFilter::new(row_group, predicate).apply_sql_where(predicate) != Some(false)
+        RowGroupFilter::new(row_group, predicate).eval_sql_where(predicate) != Some(false)
     }
 
     /// Returns `None` if the column doesn't exist and `Some(None)` if the column has no stats.
@@ -87,13 +89,13 @@ impl<'a> RowGroupFilter<'a> {
     }
 }
 
-impl<'a> ParquetStatsSkippingFilter for RowGroupFilter<'a> {
+impl ParquetStatsProvider for RowGroupFilter<'_> {
     // Extracts a stat value, converting from its physical type to the requested logical type.
     //
     // NOTE: This code is highly redundant with [`get_max_stat_value`] below, but parquet
     // ValueStatistics<T> requires T to impl a private trait, so we can't factor out any kind of
     // helper method. And macros are hard enough to read that it's not worth defining one.
-    fn get_min_stat_value(&self, col: &ColumnName, data_type: &DataType) -> Option<Scalar> {
+    fn get_parquet_min_stat(&self, col: &ColumnName, data_type: &DataType) -> Option<Scalar> {
         use PrimitiveType::*;
         let value = match (data_type.as_primitive_opt()?, self.get_stats(col)??) {
             (String, Statistics::ByteArray(s)) => s.min_opt()?.as_utf8().ok()?.into(),
@@ -135,7 +137,7 @@ impl<'a> ParquetStatsSkippingFilter for RowGroupFilter<'a> {
         Some(value)
     }
 
-    fn get_max_stat_value(&self, col: &ColumnName, data_type: &DataType) -> Option<Scalar> {
+    fn get_parquet_max_stat(&self, col: &ColumnName, data_type: &DataType) -> Option<Scalar> {
         use PrimitiveType::*;
         let value = match (data_type.as_primitive_opt()?, self.get_stats(col)??) {
             (String, Statistics::ByteArray(s)) => s.max_opt()?.as_utf8().ok()?.into(),
@@ -177,7 +179,7 @@ impl<'a> ParquetStatsSkippingFilter for RowGroupFilter<'a> {
         Some(value)
     }
 
-    fn get_nullcount_stat_value(&self, col: &ColumnName) -> Option<i64> {
+    fn get_parquet_nullcount_stat(&self, col: &ColumnName) -> Option<i64> {
         // NOTE: Stats for any given column are optional, which may produce a NULL nullcount. But if
         // the column itself is missing, then we know all values are implied to be NULL.
         //
@@ -186,8 +188,8 @@ impl<'a> ParquetStatsSkippingFilter for RowGroupFilter<'a> {
             // actually exists in the table's logical schema, and that any necessary logical to
             // physical name mapping has been performed. Because we currently lack both the
             // validation and the name mapping support, we must disable this optimization for the
-            // time being. See https://github.com/delta-incubator/delta-kernel-rs/issues/434.
-            return Some(self.get_rowcount_stat_value()).filter(|_| false);
+            // time being. See https://github.com/delta-io/delta-kernel-rs/issues/434.
+            return Some(self.get_parquet_rowcount_stat()).filter(|_| false);
         };
 
         // WARNING: [`Statistics::null_count_opt`] returns Some(0) when the underlying stat is
@@ -210,7 +212,7 @@ impl<'a> ParquetStatsSkippingFilter for RowGroupFilter<'a> {
         Some(nullcount? as i64)
     }
 
-    fn get_rowcount_stat_value(&self) -> i64 {
+    fn get_parquet_rowcount_stat(&self) -> i64 {
         self.row_group.num_rows()
     }
 }
@@ -229,9 +231,9 @@ pub(crate) fn compute_field_indices(
             Literal(_) => {}
             Column(name) => cols.extend([name.clone()]), // returns `()`, unlike `insert`
             Struct(fields) => fields.iter().for_each(recurse),
-            UnaryOperation { expr, .. } => recurse(expr),
-            BinaryOperation { left, right, .. } => [left, right].iter().for_each(|e| recurse(e)),
-            VariadicOperation { exprs, .. } => exprs.iter().for_each(recurse),
+            Unary(UnaryExpression { expr, .. }) => recurse(expr),
+            Binary(BinaryExpression { left, right, .. }) => [left, right].iter().for_each(|e| recurse(e)),
+            Variadic(VariadicExpression { exprs, .. }) => exprs.iter().for_each(recurse),
         }
     }
 
