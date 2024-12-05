@@ -105,14 +105,14 @@ impl TableChanges {
         // We also check the [`Protocol`] using [`ensure_cdf_read_supported`] to verify that
         // we support CDF with those features enabled.
         //
-        // Note: We must still check that each metadata and protocol action in the CDF range.
+        // Note: We must still check each metadata and protocol action in the CDF range.
         let check_snapshot = |snapshot: &Snapshot| -> DeltaResult<()> {
             ensure_cdf_read_supported(snapshot.protocol())?;
             check_cdf_table_properties(snapshot.table_properties())?;
             Ok(())
         };
         check_snapshot(&start_snapshot)
-            .map_err(|_| Error::change_data_feed_unsupported(end_snapshot.version()))?;
+            .map_err(|_| Error::change_data_feed_unsupported(start_snapshot.version()))?;
         check_snapshot(&end_snapshot)
             .map_err(|_| Error::change_data_feed_unsupported(end_snapshot.version()))?;
 
@@ -221,25 +221,12 @@ fn ensure_cdf_read_supported(protocol: &Protocol) -> DeltaResult<()> {
         Some(reader_features) if protocol.min_reader_version() == 3 => {
             ensure_supported_features(reader_features, &CDF_SUPPORTED_READER_FEATURES)
         }
-        // if min_reader_version = 3 and no reader features => ERROR
-        // NOTE this is caught by the protocol parsing.
-        None if protocol.min_reader_version() == 3 => Err(Error::internal_error(
-            "Reader features must be present when minimum reader version = 3",
-        )),
         // if min_reader_version = 1 and there are no reader features => OK
         None if protocol.min_reader_version() == 1 => Ok(()),
-        // if min_reader_version = 1,2 and there are reader features => ERROR
-        // NOTE this is caught by the protocol parsing.
-        Some(_) if protocol.min_reader_version() == 1 || protocol.min_reader_version() == 2 => {
-            Err(Error::internal_error(
-                "Reader features must not be present when minimum reader version = 1 or 2",
-            ))
-        }
-        // any other min_reader_version is not supported
-        _ => Err(Error::Unsupported(format!(
-            "Unsupported minimum reader version {}",
-            protocol.min_reader_version()
-        ))),
+        // any other protocol is not supported
+        _ => Err(Error::unsupported(
+            "Change data feed not supported on this protocol",
+        )),
     }
 }
 

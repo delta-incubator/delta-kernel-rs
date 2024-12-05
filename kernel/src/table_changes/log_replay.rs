@@ -30,19 +30,22 @@ mod tests;
 pub(crate) struct TableChangesScanData {
     /// Engine data with the schema defined in [`scan_row_schema`]
     ///
-    /// Note: The schema of the engine data will be updated in the future columns used by
-    /// Change Data Feed.
-    pub(crate) data: Box<dyn EngineData>,
-    /// The selection vector used to filter log actions in the engine data.
+    /// Note: The schema of the engine data will be updated in the future to include columns
+    /// used by Change Data Feed.
+    pub(crate) scan_data: Box<dyn EngineData>,
+    /// The selection vector used to filter the `scan_data`.
     pub(crate) selection_vector: Vec<bool>,
     /// An optional map from a remove action's path to its deletion vector
     pub(crate) remove_dv: Option<Arc<HashMap<String, DvInfo>>>,
 }
 
-/// Given an iterator of [`ParsedLogPath`] and a predicate, returns an iterator of
-/// [`TableChangesScanData`].  Each row that is selected in the returned
-/// `engine_data` _must_ be processed to complete the scan. Non-selected rows
-/// _must_ be ignored.
+/// Given an iterator of [`ParsedLogPath`] returns an iterator of [`TableChangesScanData`].
+/// Each row that is selected in the returned `TableChangesScanData.scan_data` (according
+/// to the `selection_vector` field) _must_ be processed to complete the scan. Non-selected
+/// rows _must_ be ignored.
+///
+/// Note: The [`ParsedLogPath`]s in `commit_files` must be ordered, contiguous (JSON) commit
+/// files.
 pub(crate) fn table_changes_action_iter(
     engine: Arc<dyn Engine>,
     commit_files: impl IntoIterator<Item = ParsedLogPath>,
@@ -53,11 +56,7 @@ pub(crate) fn table_changes_action_iter(
     let result = commit_files
         .into_iter()
         .map(move |commit_file| -> DeltaResult<_> {
-            let scanner = LogReplayScanner::prepare_table_changes(
-                commit_file,
-                engine.as_ref(),
-                &table_schema,
-            )?;
+            let scanner = LogReplayScanner::try_new(commit_file, engine.as_ref(), &table_schema)?;
             scanner.into_scan_batches(engine.clone(), filter.clone())
         }) //Iterator<DeltaResult<Iterator<DeltaResult<TableChangesScanData>>>>
         .flatten_ok() // Iterator<DeltaResult<DeltaResult<TableChangesScanData>>>
@@ -69,7 +68,7 @@ pub(crate) fn table_changes_action_iter(
 //
 // TODO: This expression is temporary. In the future it will also select `cdc` and `remove` actions
 // fields.
-fn get_add_transform_expr() -> Expression {
+fn add_transform_expr() -> Expression {
     Expression::Struct(vec![
         column_expr!("add.path"),
         column_expr!("add.size"),
@@ -82,7 +81,7 @@ fn get_add_transform_expr() -> Expression {
 
 /// Processes a single commit file from the log to generate an iterator of [`TableChangesScanData`].
 /// The scanner operates in two phases that _must_ be performed in the following order:
-/// 1. Prepare phase [`prepare_table_changes`]: This performs one iteration over every
+/// 1. Prepare phase [`LogReplayScanner::try_new`]: This performs one iteration over every
 ///    action in the commit. In this phase, we do the following:
 ///     - Determine if there exist any `cdc` actions. We determine this in the first phase because
 ///       the selection vectors for actions are lazily constructed in phase 2. We must know ahead
@@ -101,8 +100,8 @@ fn get_add_transform_expr() -> Expression {
 /// Note: We check the protocol, change data feed enablement, and schema compatibility in phase 1
 /// in order to detect errors and fail early.
 ///
-/// Note: We do collect deletion vectors regardless of whether it is enabled in [`TableProperties`]
-/// as specified in the Delta Protocol.
+/// Note: We do not check if deletion vectors is enabled in [`TableProperties`]. The protocol
+/// states:
 /// > Readers must read the table considering the existence of DVs, even when the
 /// > `delta.enableDeletionVectors` table property is not set.
 ///
@@ -116,7 +115,7 @@ fn get_add_transform_expr() -> Expression {
 ///
 /// 2. Scan file generation phase [`LogReplayScanner::into_scan_batches`]: This performs another
 ///    iteration over every action in the commit, and generates [`TableChangesScanData`]. It does
-///    so by transforming the actions using [`get_add_transform_expr`], and generating selection
+///    so by transforming the actions using [`add_transform_expr`], and generating selection
 ///    vectors with the following rules:
 ///     - If a `cdc` action was found in the prepare phase, only `cdc` actions are selected
 ///     - Otherwise, select `add` and `remove` actions. Note that only `remove` actions that do not
@@ -126,7 +125,7 @@ fn get_add_transform_expr() -> Expression {
 /// commit twice. It also may use an unbounded amount of memory, proportional to the number of
 /// `add` + `remove` actions in the _single_ commit.
 struct LogReplayScanner {
-    // True if a `cdc` action was found after running [`LogReplayScanner::prepare_table_changes`]
+    // True if a `cdc` action was found after running [`LogReplayScanner::try_new`]
     has_cdc_action: bool,
     // A map from path to the deletion vector from the remove action. It is guaranteed that there
     // is an add action with the same path in this commit
@@ -149,7 +148,7 @@ struct LogReplayScanner {
 impl LogReplayScanner {
     /// Constructs a LogReplayScanner, performing the Prepare phase detailed in [`LogReplayScanner`].
     /// This iterates over each action in the commit.
-    fn prepare_table_changes(
+    fn try_new(
         commit_file: ParsedLogPath,
         engine: &dyn Engine,
         table_schema: &SchemaRef,
@@ -255,16 +254,16 @@ impl LogReplayScanner {
             let mut visitor =
                 FileActionSelectionVisitor::new(&remove_dvs, selection_vector, has_cdc_action);
             visitor.visit_rows_of(actions.as_ref())?;
-            let data = engine
+            let scan_data = engine
                 .get_expression_handler()
                 .get_evaluator(
                     get_log_add_schema().clone(),
-                    get_add_transform_expr(),
+                    add_transform_expr(),
                     scan_row_schema().into(),
                 )
                 .evaluate(actions.as_ref())?;
             Ok(TableChangesScanData {
-                data,
+                scan_data,
                 selection_vector: visitor.selection_vector,
                 remove_dv: Some(remove_dvs.clone()),
             })
@@ -274,7 +273,7 @@ impl LogReplayScanner {
 }
 
 // This is a visitor used in the prepare phase of [`LogReplayScanner`]. See
-// [`LogReplayScanner::prepare_table_changes`] for details usage.
+// [`LogReplayScanner::try_new`] for details usage.
 struct PreparePhaseVisitor<'a> {
     protocol: Option<Protocol>,
     metadata_info: Option<(String, HashMap<String, String>)>,
@@ -338,15 +337,13 @@ impl RowVisitor for PreparePhaseVisitor<'_> {
         );
         for i in 0..row_count {
             if let Some(path) = getters[0].get_str(i, "add.path")? {
-                let data_change: bool = getters[1].get(i, "add.dataChange")?;
                 // If no data was changed, we must ignore that action
-                if data_change {
+                if getters[1].get(i, "add.dataChange")? {
                     self.add_paths.insert(path.to_string());
                 }
             } else if let Some(path) = getters[2].get_str(i, "remove.path")? {
-                let data_change: bool = getters[3].get(i, "remove.dataChange")?;
                 // If no data was changed, we must ignore that action
-                if data_change {
+                if getters[3].get(i, "remove.dataChange")? {
                     let deletion_vector = visit_deletion_vector_at(i, &getters[4..=8])?;
                     self.remove_dvs
                         .insert(path.to_string(), DvInfo { deletion_vector });
@@ -417,7 +414,7 @@ impl RowVisitor for FileActionSelectionVisitor<'_> {
         require!(
             getters.len() == 5,
             Error::InternalError(format!(
-                "Wrong number of AddRemoveDedupVisitor getters: {}",
+                "Wrong number of FileActionSelectionVisitor getters: {}",
                 getters.len()
             ))
         );

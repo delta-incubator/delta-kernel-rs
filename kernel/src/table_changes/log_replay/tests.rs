@@ -7,6 +7,7 @@ use crate::path::ParsedLogPath;
 use crate::scan::state::DvInfo;
 use crate::schema::{DataType, StructField, StructType};
 use crate::table_changes::log_replay::LogReplayScanner;
+use crate::table_features::ReaderFeatures;
 use crate::utils::test_utils::LocalMockTable;
 use crate::{DeltaResult, Engine, Error, Version};
 
@@ -17,7 +18,7 @@ use std::sync::Arc;
 
 fn get_schema() -> StructType {
     StructType::new([
-        StructField::new("id", DataType::LONG, true),
+        StructField::new("id", DataType::INTEGER, true),
         StructField::new("value", DataType::STRING, true),
     ])
 }
@@ -61,14 +62,19 @@ async fn metadata_protocol() {
                         "delta.enableDeletionVectors".to_string(),
                         "true".to_string(),
                     ),
-                    ("dela.columnMapping.mode".to_string(), "none".to_string()),
+                    ("delta.columnMapping.mode".to_string(), "none".to_string()),
                 ]),
                 ..Default::default()
             }
             .into(),
-            Protocol::try_new(3, 7, Some(["deletionVectors"]), Some(["deletionVectors"]))
-                .unwrap()
-                .into(),
+            Protocol::try_new(
+                3,
+                7,
+                Some([ReaderFeatures::DeletionVectors]),
+                Some([ReaderFeatures::ColumnMapping]),
+            )
+            .unwrap()
+            .into(),
         ])
         .await;
 
@@ -76,7 +82,7 @@ async fn metadata_protocol() {
         .unwrap()
         .into_iter();
 
-    let scanner = LogReplayScanner::prepare_table_changes(
+    let scanner = LogReplayScanner::try_new(
         commits.next().unwrap(),
         engine.as_ref(),
         &get_schema().into(),
@@ -111,7 +117,7 @@ async fn cdf_not_enabled() {
         .unwrap()
         .into_iter();
 
-    let res = LogReplayScanner::prepare_table_changes(
+    let res = LogReplayScanner::try_new(
         commits.next().unwrap(),
         engine.as_ref(),
         &get_schema().into(),
@@ -128,7 +134,10 @@ async fn unsupported_reader_feature() {
         .commit([Protocol::try_new(
             3,
             7,
-            Some(["deletionVectors", "columnMapping"]),
+            Some([
+                ReaderFeatures::DeletionVectors,
+                ReaderFeatures::ColumnMapping,
+            ]),
             Some([""; 0]),
         )
         .unwrap()
@@ -139,14 +148,13 @@ async fn unsupported_reader_feature() {
         .unwrap()
         .into_iter();
 
-    let res = LogReplayScanner::prepare_table_changes(
+    let res = LogReplayScanner::try_new(
         commits.next().unwrap(),
         engine.as_ref(),
         &get_schema().into(),
     );
-    println!("Res: {:?}", res.err());
 
-    //assert!(matches!(res, Err(Error::ChangeDataFeedUnsupported(_))));
+    assert!(matches!(res, Err(Error::ChangeDataFeedUnsupported(_))));
 }
 #[tokio::test]
 async fn column_mapping_should_fail() {
@@ -173,7 +181,7 @@ async fn column_mapping_should_fail() {
         .unwrap()
         .into_iter();
 
-    let res = LogReplayScanner::prepare_table_changes(
+    let res = LogReplayScanner::try_new(
         commits.next().unwrap(),
         engine.as_ref(),
         &get_schema().into(),
@@ -183,23 +191,24 @@ async fn column_mapping_should_fail() {
 }
 
 #[tokio::test]
-async fn incompatible_schema() {
+async fn widening_the_schema_type_fails() {
     let engine = Arc::new(SyncEngine::new());
     let mut mock_table = LocalMockTable::new();
 
-    // The original schema has two fields: `id` and value.
-    let schema = get_schema().project(&["id"]).unwrap();
+    // The CDF schema has fields: `id: int` and `value: string`.
+    // This commit has schema with fields: `id: long` and `value: string`.
+    let schema = StructType::new([
+        StructField::new("id", DataType::LONG, true),
+        StructField::new("value", DataType::STRING, true),
+    ]);
     let schema_string = serde_json::to_string(&schema).unwrap();
     mock_table
         .commit([Metadata {
             schema_string,
-            configuration: HashMap::from([
-                ("delta.enableChangeDataFeed".to_string(), "true".to_string()),
-                (
-                    "delta.enableDeletionVectors".to_string(),
-                    "true".to_string(),
-                ),
-            ]),
+            configuration: HashMap::from([(
+                "delta.enableChangeDataFeed".to_string(),
+                "true".to_string(),
+            )]),
             ..Default::default()
         }
         .into()])
@@ -209,7 +218,127 @@ async fn incompatible_schema() {
         .unwrap()
         .into_iter();
 
-    let res = LogReplayScanner::prepare_table_changes(
+    // We get the CDF schema from `get_schema()`
+    let res = LogReplayScanner::try_new(
+        commits.next().unwrap(),
+        engine.as_ref(),
+        &get_schema().into(),
+    );
+
+    assert!(matches!(
+        res,
+        Err(Error::ChangeDataFeedIncompatibleSchema(_, _))
+    ));
+}
+
+#[tokio::test]
+async fn disabling_nullability_fails() {
+    let engine = Arc::new(SyncEngine::new());
+    let mut mock_table = LocalMockTable::new();
+
+    // The CDF schema has fields: nullable `id`  and nullable `value`.
+    // This commit has schema with fields: non-nullable `id` and nullable `value: string`.
+    let schema = StructType::new([
+        StructField::new("id", DataType::LONG, false),
+        StructField::new("value", DataType::STRING, true),
+    ]);
+    let schema_string = serde_json::to_string(&schema).unwrap();
+    mock_table
+        .commit([Metadata {
+            schema_string,
+            configuration: HashMap::from([(
+                "delta.enableChangeDataFeed".to_string(),
+                "true".to_string(),
+            )]),
+            ..Default::default()
+        }
+        .into()])
+        .await;
+
+    let mut commits = get_segment(engine.as_ref(), mock_table.table_root(), 0, None)
+        .unwrap()
+        .into_iter();
+
+    // We get the CDF schema from `get_schema()`
+    let res = LogReplayScanner::try_new(
+        commits.next().unwrap(),
+        engine.as_ref(),
+        &get_schema().into(),
+    );
+
+    assert!(matches!(
+        res,
+        Err(Error::ChangeDataFeedIncompatibleSchema(_, _))
+    ));
+}
+
+#[tokio::test]
+async fn type_changed_in_schema() {
+    let engine = Arc::new(SyncEngine::new());
+    let mut mock_table = LocalMockTable::new();
+
+    // The CDF schema has fields: `id` with type `int`, `value` with type string.
+    // This commit has schema with fields:`id` with type `string`, value with type string.
+    let schema = StructType::new([
+        StructField::new("id", DataType::STRING, true),
+        StructField::new("value", DataType::STRING, true),
+    ]);
+    let schema_string = serde_json::to_string(&schema).unwrap();
+    mock_table
+        .commit([Metadata {
+            schema_string,
+            configuration: HashMap::from([(
+                "delta.enableChangeDataFeed".to_string(),
+                "true".to_string(),
+            )]),
+            ..Default::default()
+        }
+        .into()])
+        .await;
+
+    let mut commits = get_segment(engine.as_ref(), mock_table.table_root(), 0, None)
+        .unwrap()
+        .into_iter();
+
+    // We get the CDF schema from `get_schema()`
+    let res = LogReplayScanner::try_new(
+        commits.next().unwrap(),
+        engine.as_ref(),
+        &get_schema().into(),
+    );
+
+    assert!(matches!(
+        res,
+        Err(Error::ChangeDataFeedIncompatibleSchema(_, _))
+    ));
+}
+#[tokio::test]
+async fn column_removed_from_schema() {
+    let engine = Arc::new(SyncEngine::new());
+    let mut mock_table = LocalMockTable::new();
+
+    // The CDF schema has fields: `id`  and `value`.
+    // This commit has schema with fields: `id`
+    let schema = get_schema().project(&["id"]).unwrap();
+    let schema_string = serde_json::to_string(&schema).unwrap();
+    mock_table
+        .commit([Metadata {
+            schema_string,
+            configuration: HashMap::from([(
+                "delta.enableChangeDataFeed".to_string(),
+                "true".to_string(),
+            )]),
+            ..Default::default()
+        }
+        .into()])
+        .await;
+
+    let mut commits = get_segment(engine.as_ref(), mock_table.table_root(), 0, None)
+        .unwrap()
+        .into_iter();
+
+    // We get the CDF schema from `get_schema()`
+    let res = LogReplayScanner::try_new(
         commits.next().unwrap(),
         engine.as_ref(),
         &get_schema().into(),
@@ -246,7 +375,7 @@ async fn add_remove() {
         .unwrap()
         .into_iter();
 
-    let scanner = LogReplayScanner::prepare_table_changes(
+    let scanner = LogReplayScanner::try_new(
         commits.next().unwrap(),
         engine.as_ref(),
         &get_schema().into(),
@@ -291,14 +420,6 @@ async fn filter_data_change() {
                 ..Default::default()
             }
             .into(),
-            // Add action that has same path as remove
-            Add {
-                path: "fake_path_1".into(),
-                data_change: false,
-                ..Default::default()
-            }
-            .into(),
-            // Add action with unique path
             Add {
                 path: "fake_path_5".into(),
                 data_change: false,
@@ -312,7 +433,7 @@ async fn filter_data_change() {
         .unwrap()
         .into_iter();
 
-    let scanner = LogReplayScanner::prepare_table_changes(
+    let scanner = LogReplayScanner::try_new(
         commits.next().unwrap(),
         engine.as_ref(),
         &get_schema().into(),
@@ -323,7 +444,7 @@ async fn filter_data_change() {
 
     assert_eq!(
         result_to_sv(scanner.into_scan_batches(engine, None).unwrap()),
-        &[false; 6]
+        &[false; 5]
     );
 }
 
@@ -347,7 +468,6 @@ async fn cdc_selection() {
             .into(),
             Cdc {
                 path: "fake_path_3".into(),
-                data_change: true,
                 ..Default::default()
             }
             .into(),
@@ -358,7 +478,7 @@ async fn cdc_selection() {
         .unwrap()
         .into_iter();
 
-    let scanner = LogReplayScanner::prepare_table_changes(
+    let scanner = LogReplayScanner::try_new(
         commits.next().unwrap(),
         engine.as_ref(),
         &get_schema().into(),
@@ -392,18 +512,20 @@ async fn dv() {
         size_in_bytes: 38,
         cardinality: 3,
     };
+    // - fake_path_1 undergoes a restore. All rows are restored, so the deletion vector is removed.
+    // - All remaining rows of fake_path_2 are deleted
     mock_table
         .commit([
-            Add {
-                path: "fake_path_1".into(),
-                data_change: true,
-                ..Default::default()
-            }
-            .into(),
             Remove {
                 path: "fake_path_1".into(),
                 data_change: true,
                 deletion_vector: Some(deletion_vector1.clone()),
+                ..Default::default()
+            }
+            .into(),
+            Add {
+                path: "fake_path_1".into(),
+                data_change: true,
                 ..Default::default()
             }
             .into(),
@@ -421,7 +543,7 @@ async fn dv() {
         .unwrap()
         .into_iter();
 
-    let scanner = LogReplayScanner::prepare_table_changes(
+    let scanner = LogReplayScanner::try_new(
         commits.next().unwrap(),
         engine.as_ref(),
         &get_schema().into(),
@@ -440,7 +562,7 @@ async fn dv() {
 
     assert_eq!(
         result_to_sv(scanner.into_scan_batches(engine, None).unwrap()),
-        &[true, false, true]
+        &[false, true, true]
     );
 }
 #[tokio::test]
@@ -478,7 +600,7 @@ async fn failing_protocol() {
         .unwrap()
         .into_iter();
 
-    let res = LogReplayScanner::prepare_table_changes(
+    let res = LogReplayScanner::try_new(
         commits.next().unwrap(),
         engine.as_ref(),
         &get_schema().into(),
@@ -507,8 +629,6 @@ async fn file_meta_timestamp() {
 
     let commit = commits.next().unwrap();
     let file_meta_ts = commit.location.last_modified;
-    let scanner =
-        LogReplayScanner::prepare_table_changes(commit, engine.as_ref(), &get_schema().into())
-            .unwrap();
+    let scanner = LogReplayScanner::try_new(commit, engine.as_ref(), &get_schema().into()).unwrap();
     assert_eq!(scanner.timestamp, file_meta_ts);
 }
