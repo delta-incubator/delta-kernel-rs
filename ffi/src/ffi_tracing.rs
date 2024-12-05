@@ -16,7 +16,7 @@ use crate::{kernel_string_slice, KernelStringSlice};
 /// Definitions of level verbosity. Verbose Levels are "greater than" less verbose ones. So
 /// Level::ERROR is the lowest, and Level::TRACE the highest.
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Level {
     ERROR = 0,
     WARN = 1,
@@ -511,6 +511,21 @@ mod tests {
         } else {
             panic!("Messages wasn't Some");
         }
+
+        // ensure we can't setup again
+        // do in the same test to ensure ordering
+        let ok = unsafe {
+            enable_formatted_log_line_tracing(
+                record_callback,
+                Level::TRACE,
+                LogLineFormat::FULL,
+                true,
+                true,
+                true,
+                true,
+            )
+        };
+        assert!(!ok, "Should have not set up a second time")
     }
 
     #[test]
@@ -548,5 +563,57 @@ mod tests {
                 panic!("Messages wasn't Some");
             }
         })
+    }
+
+    static EVENTS_OK: Mutex<Option<Vec<bool>>> = Mutex::new(None);
+    fn setup_events() {
+        *EVENTS_OK.lock().unwrap() = Some(vec![]);
+    }
+
+    extern "C" fn event_callback(event: Event) {
+        let msg: &str = unsafe { TryFromStringSlice::try_from_slice(&event.message).unwrap() };
+        let target: &str = unsafe { TryFromStringSlice::try_from_slice(&event.target).unwrap() };
+        let file: &str = unsafe { TryFromStringSlice::try_from_slice(&event.file).unwrap() };
+        let ok = event.level == Level::INFO
+            && target == "delta_kernel_ffi::ffi_tracing::tests"
+            && file == "ffi/src/ffi_tracing.rs"
+            && (msg == "Testing 1" || msg == "Another line");
+        let mut lock = EVENTS_OK.lock().unwrap();
+        if let Some(ref mut events) = *lock {
+            events.push(ok);
+        }
+    }
+
+    #[test]
+    fn trace_event_tracking() {
+        let _lock = TEST_LOCK.lock().unwrap();
+        setup_events();
+        let dispatch = get_event_dispatcher(event_callback, Level::TRACE);
+        tracing_core::dispatcher::with_default(&dispatch, || {
+            let lines = ["Testing 1", "Another line"];
+            for line in lines {
+                info!("{line}");
+            }
+        });
+        let lock = EVENTS_OK.lock().unwrap();
+        if let Some(ref results) = *lock {
+            assert!(results.iter().all(|x| *x));
+        } else {
+            panic!("Events wasn't Some");
+        }
+    }
+
+    #[test]
+    fn level_from_impl() {
+        let trace: Level = (&tracing::Level::TRACE).into();
+        assert_eq!(trace, Level::TRACE);
+        let debug: Level = (&tracing::Level::DEBUG).into();
+        assert_eq!(debug, Level::DEBUG);
+        let info: Level = (&tracing::Level::INFO).into();
+        assert_eq!(info, Level::INFO);
+        let warn: Level = (&tracing::Level::WARN).into();
+        assert_eq!(warn, Level::WARN);
+        let error: Level = (&tracing::Level::ERROR).into();
+        assert_eq!(error, Level::ERROR);
     }
 }
