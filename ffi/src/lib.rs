@@ -730,15 +730,15 @@ mod tests {
     #[no_mangle]
     extern "C" fn allocate_str(kernel_str: KernelStringSlice) -> NullableCvoid {
         let s: String = unsafe { String::try_from_slice(&kernel_str).unwrap() };
-        let p = Box::leak(Box::new(s)) as *mut String as *mut c_void;
-        let ptr = unsafe { NonNull::new_unchecked(p) };
+        let ptr = Box::into_raw(Box::new(s)).cast();
+        let ptr = unsafe { NonNull::new_unchecked(ptr) };
         Some(ptr)
     }
 
     // helper to recover a string from the above
     fn recover_string(ptr: NonNull<c_void>) -> String {
-        let b: Box<String> = unsafe { Box::from_raw(ptr.as_ptr() as *mut String) };
-        *b
+        let ptr = ptr.as_ptr() as *mut String;
+        *unsafe { Box::from_raw(ptr) }
     }
 
     fn ok_or_panic<T>(result: ExternResult<T>) -> T {
