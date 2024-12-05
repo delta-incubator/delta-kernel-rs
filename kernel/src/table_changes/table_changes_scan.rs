@@ -1,6 +1,7 @@
-use std::{collections::HashMap, iter::once, sync::Arc};
+use std::{cmp::max, collections::HashMap, iter::once, sync::Arc};
 
 use itertools::{Either, Itertools};
+use roaring::RoaringTreemap;
 use tracing::debug;
 
 use crate::{
@@ -273,14 +274,28 @@ impl TableChangesScan {
                         let generated_columns =
                             get_generated_columns(timestamp, tpe, commit_version)?;
 
-                        let add_dv = dv_info
-                            .get_treemap(engine, &self.table_changes.table_root)?
-                            .unwrap_or(Default::default());
-                        let rm_dv = rm_dv
-                            .get_treemap(engine, &self.table_changes.table_root)?
-                            .unwrap_or(Default::default());
+                        let add_sv = treemap_to_bools(
+                            dv_info
+                                .get_treemap(engine, &self.table_changes.table_root)?
+                                .unwrap_or(Default::default()),
+                        );
+                        let rm_sv = treemap_to_bools(
+                            rm_dv
+                                .get_treemap(engine, &self.table_changes.table_root)?
+                                .unwrap_or(Default::default()),
+                        );
+                        println!("add_sv: {:?}", add_sv);
 
-                        let added = treemap_to_bools(&rm_dv - &add_dv);
+                        println!("rm_sv : {:?}", rm_sv);
+
+                        let mut added = vec![];
+                        let len = max(add_sv.len(), rm_sv.len());
+                        for i in 0..len {
+                            let add_sv = *add_sv.get(i).unwrap_or(&true);
+                            let rm_sv = *rm_sv.get(i).unwrap_or(&true);
+                            added.push((add_sv ^ rm_sv) && add_sv)
+                        }
+                        println!("Added: {:?}", added);
                         let added_rows = self.generate_output_rows(
                             engine,
                             file.clone(),
@@ -292,7 +307,15 @@ impl TableChangesScan {
                             self.global_scan_state().read_schema.clone(),
                         )?;
 
-                        let removed = treemap_to_bools(add_dv - rm_dv);
+                        let mut removed = vec![];
+                        for i in 0..len {
+                            let add_sv = *add_sv.get(i).unwrap_or(&true);
+                            let rm_sv = *rm_sv.get(i).unwrap_or(&true);
+                            removed.push((add_sv ^ rm_sv) && rm_sv)
+                        }
+                        println!("resolved Remove dv: {:?}", removed);
+                        let generated_columns =
+                            get_generated_columns(timestamp, ScanFileType::Remove, commit_version)?;
                         let removed_rows = self.generate_output_rows(
                             engine,
                             file,

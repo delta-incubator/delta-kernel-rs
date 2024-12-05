@@ -1,8 +1,14 @@
+use std::{collections::HashMap, option, sync::Arc};
+
 use arrow::{compute::filter_record_batch, util::pretty::print_batches};
 use arrow_array::RecordBatch;
 use clap::Parser;
 use delta_kernel::{
-    engine::{arrow_data::ArrowEngineData, sync::SyncEngine},
+    engine::{
+        arrow_data::ArrowEngineData,
+        default::{executor::tokio::TokioBackgroundExecutor, DefaultEngine},
+        sync::SyncEngine,
+    },
     DeltaResult, Table,
 };
 use itertools::Itertools;
@@ -21,8 +27,14 @@ struct Cli {
 
 fn main() -> DeltaResult<()> {
     let cli = Cli::parse();
+    println!("Reading path: {}", cli.path);
     let table = Table::try_from_uri(cli.path)?;
-    let engine = SyncEngine::new();
+    let options = HashMap::from([("skip_signature", "true".to_string())]);
+    let engine = DefaultEngine::try_new(
+        table.location(),
+        options,
+        Arc::new(TokioBackgroundExecutor::new()),
+    )?;
     let table_changes = table.table_changes(&engine, cli.start_version, cli.end_version)?;
 
     let x = table_changes.into_scan_builder().build()?;
