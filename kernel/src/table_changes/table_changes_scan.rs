@@ -286,9 +286,6 @@ impl TableChangesScan {
                                 .get_treemap(engine, &self.table_changes.table_root)?
                                 .unwrap_or(Default::default()),
                         );
-                        println!("add_sv: {:?}", add_sv);
-
-                        println!("rm_sv : {:?}", rm_sv);
 
                         let mut added = vec![];
                         let len = max(add_sv.len(), rm_sv.len());
@@ -297,7 +294,6 @@ impl TableChangesScan {
                             let rm_sv = *rm_sv.get(i).unwrap_or(&true);
                             added.push((add_sv ^ rm_sv) && add_sv)
                         }
-                        println!("Added: {:?}", added);
                         let added_rows = self.generate_output_rows(
                             engine,
                             file.clone(),
@@ -315,7 +311,6 @@ impl TableChangesScan {
                             let rm_sv = *rm_sv.get(i).unwrap_or(&true);
                             removed.push((add_sv ^ rm_sv) && rm_sv)
                         }
-                        println!("resolved Remove dv: {:?}", removed);
                         let generated_columns =
                             get_generated_columns(timestamp, ScanFileType::Remove, commit_version)?;
                         let removed_rows = self.generate_output_rows(

@@ -26,7 +26,6 @@ struct Cli {
 
 fn main() -> DeltaResult<()> {
     let cli = Cli::parse();
-    println!("Reading path: {}", cli.path);
     let table = Table::try_from_uri(cli.path)?;
     let options = HashMap::from([("skip_signature", "true".to_string())]);
     let engine = DefaultEngine::try_new(
