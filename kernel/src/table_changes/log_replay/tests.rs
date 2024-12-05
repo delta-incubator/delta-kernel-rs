@@ -190,8 +190,9 @@ async fn column_mapping_should_fail() {
     assert!(matches!(res, Err(Error::ChangeDataFeedUnsupported(_))));
 }
 
+// Note: This should be removed once type widening support is added for CDF
 #[tokio::test]
-async fn widening_the_schema_type_fails() {
+async fn type_widening_the_schema_fails() {
     let engine = Arc::new(SyncEngine::new());
     let mut mock_table = LocalMockTable::new();
 
