@@ -44,8 +44,8 @@ pub(crate) struct TableChangesScanData {
 /// to the `selection_vector` field) _must_ be processed to complete the scan. Non-selected
 /// rows _must_ be ignored.
 ///
-/// Note: The [`ParsedLogPath`]s in `commit_files` must be ordered, contiguous (JSON) commit
-/// files.
+/// Note: The [`ParsedLogPath`]s in the `commit_files` iterator must be ordered, contiguous
+/// (JSON) commit files.
 pub(crate) fn table_changes_action_iter(
     engine: Arc<dyn Engine>,
     commit_files: impl IntoIterator<Item = ParsedLogPath>,
@@ -147,7 +147,13 @@ struct LogReplayScanner {
 
 impl LogReplayScanner {
     /// Constructs a LogReplayScanner, performing the Prepare phase detailed in [`LogReplayScanner`].
-    /// This iterates over each action in the commit.
+    /// This iterates over each action in the commit. It performs the following:
+    /// 1. Check the commits for the presence of a `cdc` action.
+    /// 2. Construct a map from path to deletion vector of remove actions that share the same path
+    ///    as an add action.
+    /// 3. Perform validation on each protocol and metadata action in the commit.
+    ///
+    /// For more details, see the documentation for [`LogReplayScanner`].
     fn try_new(
         commit_file: ParsedLogPath,
         engine: &dyn Engine,

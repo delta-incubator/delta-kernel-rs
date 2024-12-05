@@ -170,6 +170,11 @@ impl TableChangesScanBuilder {
 }
 
 impl TableChangesScan {
+    /// Returns an iterator of [`TableChangesScanData`] necessary to read CDF. Each row
+    /// represents an action in the delta log. These rows are filtered to yield only the actions
+    /// necessary to read CDF. Additionally, [`TableChangesScanData`] holds metadata on the
+    /// deletion vectors present in the commit. The engine data in each scan data is guaranteed
+    /// to belong to the same commit. Several [`TableChangesScanData`] may belong to the same commit.
     #[allow(unused)]
     pub(crate) fn scan_data(
         &self,
@@ -187,7 +192,6 @@ impl TableChangesScan {
 
 #[cfg(test)]
 mod tests {
-
     use std::sync::Arc;
 
     use crate::engine::sync::SyncEngine;
