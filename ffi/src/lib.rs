@@ -729,15 +729,15 @@ mod tests {
 
     #[no_mangle]
     extern "C" fn allocate_str(kernel_str: KernelStringSlice) -> NullableCvoid {
-        let s: String = unsafe { String::try_from_slice(&kernel_str).unwrap() };
-        let ptr = Box::into_raw(Box::new(s)).cast();
+        let s = unsafe { String::try_from_slice(&kernel_str).unwrap() };
+        let ptr = Box::into_raw(Box::new(s)).cast(); // never null
         let ptr = unsafe { NonNull::new_unchecked(ptr) };
         Some(ptr)
     }
 
     // helper to recover a string from the above
     fn recover_string(ptr: NonNull<c_void>) -> String {
-        let ptr = ptr.as_ptr() as *mut String;
+        let ptr = ptr.as_ptr().cast();
         *unsafe { Box::from_raw(ptr) }
     }
 
@@ -798,12 +798,12 @@ mod tests {
         let path = "memory:///";
 
         let snapshot =
-            unsafe { ok_or_panic(snapshot(kernel_string_slice!(path), engine.clone_ptr())) };
+            unsafe { ok_or_panic(snapshot(kernel_string_slice!(path), engine.shallow_copy())) };
 
-        let version = unsafe { version(snapshot.clone_ptr()) };
+        let version = unsafe { version(snapshot.shallow_copy()) };
         assert_eq!(version, 0);
 
-        let table_root = unsafe { snapshot_table_root(snapshot.clone_ptr(), allocate_str) };
+        let table_root = unsafe { snapshot_table_root(snapshot.shallow_copy(), allocate_str) };
         assert!(table_root.is_some());
         let s = recover_string(table_root.unwrap());
         assert_eq!(&s, path);
