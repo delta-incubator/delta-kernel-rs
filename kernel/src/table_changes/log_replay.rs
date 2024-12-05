@@ -387,7 +387,7 @@ impl<'a> FileActionSelectionVisitor<'a> {
         }
     }
     fn schema() -> DeltaResult<Arc<StructType>> {
-        get_log_schema().project(&[ADD_NAME, REMOVE_NAME, CDC_NAME])
+        get_log_schema().project(&[CDC_NAME, ADD_NAME, REMOVE_NAME])
     }
 }
 
@@ -398,11 +398,11 @@ impl RowVisitor for FileActionSelectionVisitor<'_> {
             const STRING: DataType = DataType::STRING;
             const BOOLEAN: DataType = DataType::BOOLEAN;
             let types_and_names = vec![
+                (STRING, column_name!("cdc.path")),
                 (STRING, column_name!("add.path")),
                 (BOOLEAN, column_name!("add.dataChange")),
                 (STRING, column_name!("remove.path")),
                 (BOOLEAN, column_name!("remove.dataChange")),
-                (STRING, column_name!("cdc.path")),
             ];
             let (types, names) = types_and_names.into_iter().unzip();
             (names, types).into()
@@ -423,16 +423,18 @@ impl RowVisitor for FileActionSelectionVisitor<'_> {
             if !self.selection_vector[i] {
                 continue;
             }
-            if getters[0].get_str(i, "add.path")?.is_some() {
-                let data_change: bool = getters[1].get(i, "add.dataChange")?;
-                self.selection_vector[i] = data_change && !self.has_cdc_action;
-            } else if let Some(path) = getters[2].get_str(i, "remove.path")? {
-                let data_change: bool = getters[3].get(i, "remove.dataChange")?;
-                self.selection_vector[i] =
-                    data_change && !self.has_cdc_action && !self.remove_dvs.contains_key(path)
+
+            if self.has_cdc_action {
+                self.selection_vector[i] = getters[0].get_str(i, "cdc.path")?.is_some()
+            } else if getters[1].get_str(i, "add.path")?.is_some() {
+                let data_change: bool = getters[2].get(i, "add.dataChange")?;
+                self.selection_vector[i] = data_change;
+            } else if let Some(path) = getters[3].get_str(i, "remove.path")? {
+                let data_change: bool = getters[4].get(i, "remove.dataChange")?;
+                self.selection_vector[i] = data_change && !self.remove_dvs.contains_key(path)
             } else {
-                self.selection_vector[i] = getters[4].get_str(i, "cdc.path")?.is_some()
-            };
+                self.selection_vector[i] = false
+            }
         }
         Ok(())
     }
