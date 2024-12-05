@@ -1,7 +1,6 @@
 use std::{cmp::max, collections::HashMap, iter::once, sync::Arc};
 
 use itertools::{Either, Itertools};
-use roaring::RoaringTreemap;
 use tracing::debug;
 
 use crate::{

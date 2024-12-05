@@ -1,4 +1,4 @@
-use std::{collections::HashMap, option, sync::Arc};
+use std::{collections::HashMap, sync::Arc};
 
 use arrow::{compute::filter_record_batch, util::pretty::print_batches};
 use arrow_array::RecordBatch;
@@ -7,7 +7,6 @@ use delta_kernel::{
     engine::{
         arrow_data::ArrowEngineData,
         default::{executor::tokio::TokioBackgroundExecutor, DefaultEngine},
-        sync::SyncEngine,
     },
     DeltaResult, Table,
 };
