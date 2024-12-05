@@ -922,16 +922,16 @@ mod tests {
 
     #[no_mangle]
     extern "C" fn allocate_str(kernel_str: KernelStringSlice) -> NullableCvoid {
-        let s: &str = unsafe { TryFromStringSlice::try_from_slice(&kernel_str).unwrap() };
-        let b = Box::new(s.to_string());
-        let p = Box::leak(b) as *mut String as *mut c_void;
+        let s: String = unsafe { String::try_from_slice(&kernel_str).unwrap() };
+        let p = Box::leak(Box::new(s)) as *mut String as *mut c_void;
         let ptr = unsafe { NonNull::new_unchecked(p) };
         Some(ptr)
     }
 
     // helper to recover a string from the above
     fn recover_string(ptr: NonNull<c_void>) -> String {
-        unsafe { *Box::from_raw(ptr.as_ptr() as *mut String) }
+        let b: Box<String> = unsafe { Box::from_raw(ptr.as_ptr() as *mut String) };
+        *b
     }
 
     fn ok_or_panic<T>(result: ExternResult<T>) -> T {
