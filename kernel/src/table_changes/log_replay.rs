@@ -114,10 +114,9 @@ fn add_transform_expr() -> Expression {
 /// an extra timestamp column. Thus, the timestamp must be known ahead of time.
 /// See https://github.com/delta-io/delta-kernel-rs/issues/559
 ///
-/// 2. Scan file generation phase [`LogReplayScanner::into_scan_batches`]: This performs another
-///    iteration over every action in the commit, and generates [`TableChangesScanData`]. It does
-///    so by transforming the actions using [`add_transform_expr`], and generating selection
-///    vectors with the following rules:
+/// 2. Scan file generation phase [`LogReplayScanner::into_scan_batches`]: This iterates over every
+///    action in the commit, and generates [`TableChangesScanData`]. It does so by transforming the
+///    actions using [`add_transform_expr`], and generating selection vectors with the following rules:
 ///     - If a `cdc` action was found in the prepare phase, only `cdc` actions are selected
 ///     - Otherwise, select `add` and `remove` actions. Note that only `remove` actions that do not
 ///       share a path with an `add` action are selected.
@@ -225,8 +224,9 @@ impl LogReplayScanner {
             remove_dvs,
         })
     }
-    /// Generates an iterator of [`TableChangesScanData`] that iterates over each action of the
-    /// commit. This performs phase 2 of [`LogReplayScanner`].
+    /// Generates an iterator of [`TableChangesScanData`] by iterating over each action of the
+    /// commit, generating a selection vector, and transforming the engine data. This performs
+    /// phase 2 of [`LogReplayScanner`].
     fn into_scan_batches(
         self,
         engine: Arc<dyn Engine>,
