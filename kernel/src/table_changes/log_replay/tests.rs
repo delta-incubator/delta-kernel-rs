@@ -1,3 +1,4 @@
+use super::table_changes_action_iter;
 use super::TableChangesScanData;
 use crate::actions::deletion_vector::DeletionVectorDescriptor;
 use crate::actions::{Add, Cdc, Metadata, Protocol, Remove};
@@ -78,23 +79,14 @@ async fn metadata_protocol() {
         ])
         .await;
 
-    let mut commits = get_segment(engine.as_ref(), mock_table.table_root(), 0, None)
+    let commits = get_segment(engine.as_ref(), mock_table.table_root(), 0, None)
         .unwrap()
         .into_iter();
 
-    let scanner = LogReplayScanner::try_new(
-        commits.next().unwrap(),
-        engine.as_ref(),
-        &get_schema().into(),
-    )
-    .unwrap();
-    assert!(!scanner.has_cdc_action);
-    assert!(scanner.remove_dvs.is_empty());
-
-    assert_eq!(
-        result_to_sv(scanner.into_scan_batches(engine.clone(), None).unwrap()),
-        &[false, false]
-    );
+    let scan_batches =
+        table_changes_action_iter(engine, commits, get_schema().into(), None).unwrap();
+    let sv = result_to_sv(scan_batches);
+    assert_eq!(sv, &[false, false]);
 }
 #[tokio::test]
 async fn cdf_not_enabled() {
@@ -112,15 +104,13 @@ async fn cdf_not_enabled() {
         })])
         .await;
 
-    let mut commits = get_segment(engine.as_ref(), mock_table.table_root(), 0, None)
+    let commits = get_segment(engine.as_ref(), mock_table.table_root(), 0, None)
         .unwrap()
         .into_iter();
 
-    let res = LogReplayScanner::try_new(
-        commits.next().unwrap(),
-        engine.as_ref(),
-        &get_schema().into(),
-    );
+    let res: DeltaResult<Vec<_>> =
+        table_changes_action_iter(engine, commits, get_schema().into(), None)
+            .and_then(|iter| iter.try_collect());
 
     assert!(matches!(res, Err(Error::ChangeDataFeedUnsupported(_))));
 }
@@ -144,15 +134,13 @@ async fn unsupported_reader_feature() {
         )])
         .await;
 
-    let mut commits = get_segment(engine.as_ref(), mock_table.table_root(), 0, None)
+    let commits = get_segment(engine.as_ref(), mock_table.table_root(), 0, None)
         .unwrap()
         .into_iter();
 
-    let res = LogReplayScanner::try_new(
-        commits.next().unwrap(),
-        engine.as_ref(),
-        &get_schema().into(),
-    );
+    let res: DeltaResult<Vec<_>> =
+        table_changes_action_iter(engine, commits, get_schema().into(), None)
+            .and_then(|iter| iter.try_collect());
 
     assert!(matches!(res, Err(Error::ChangeDataFeedUnsupported(_))));
 }
@@ -176,15 +164,13 @@ async fn column_mapping_should_fail() {
         })])
         .await;
 
-    let mut commits = get_segment(engine.as_ref(), mock_table.table_root(), 0, None)
+    let commits = get_segment(engine.as_ref(), mock_table.table_root(), 0, None)
         .unwrap()
         .into_iter();
 
-    let res = LogReplayScanner::try_new(
-        commits.next().unwrap(),
-        engine.as_ref(),
-        &get_schema().into(),
-    );
+    let res: DeltaResult<Vec<_>> =
+        table_changes_action_iter(engine, commits, get_schema().into(), None)
+            .and_then(|iter| iter.try_collect());
 
     assert!(matches!(res, Err(Error::ChangeDataFeedUnsupported(_))));
 }
@@ -208,13 +194,13 @@ async fn incompatible_schemas_fail() {
             })])
             .await;
 
-        let mut commits = get_segment(engine.as_ref(), mock_table.table_root(), 0, None)
+        let commits = get_segment(engine.as_ref(), mock_table.table_root(), 0, None)
             .unwrap()
             .into_iter();
 
-        // We get the CDF schema from `get_schema()`
-        let res =
-            LogReplayScanner::try_new(commits.next().unwrap(), engine.as_ref(), &cdf_schema.into());
+        let res: DeltaResult<Vec<_>> =
+            table_changes_action_iter(engine, commits, cdf_schema.into(), None)
+                .and_then(|iter| iter.try_collect());
 
         assert!(matches!(
             res,
@@ -306,23 +292,20 @@ async fn add_remove() {
         ])
         .await;
 
-    let mut commits = get_segment(engine.as_ref(), mock_table.table_root(), 0, None)
+    let commits = get_segment(engine.as_ref(), mock_table.table_root(), 0, None)
         .unwrap()
         .into_iter();
 
-    let scanner = LogReplayScanner::try_new(
-        commits.next().unwrap(),
-        engine.as_ref(),
-        &get_schema().into(),
-    )
-    .unwrap();
-    assert!(!scanner.has_cdc_action);
-    assert_eq!(scanner.remove_dvs, HashMap::new());
+    let sv = table_changes_action_iter(engine, commits, get_schema().into(), None)
+        .unwrap()
+        .flat_map(|scan_data| {
+            let scan_data = scan_data.unwrap();
+            assert_eq!(scan_data.remove_dvs, HashMap::new().into());
+            scan_data.selection_vector
+        })
+        .collect_vec();
 
-    assert_eq!(
-        result_to_sv(scanner.into_scan_batches(engine, None).unwrap()),
-        &[true, true]
-    );
+    assert_eq!(sv, &[true, true]);
 }
 
 #[tokio::test]
@@ -359,23 +342,20 @@ async fn filter_data_change() {
         ])
         .await;
 
-    let mut commits = get_segment(engine.as_ref(), mock_table.table_root(), 0, None)
+    let commits = get_segment(engine.as_ref(), mock_table.table_root(), 0, None)
         .unwrap()
         .into_iter();
 
-    let scanner = LogReplayScanner::try_new(
-        commits.next().unwrap(),
-        engine.as_ref(),
-        &get_schema().into(),
-    )
-    .unwrap();
-    assert!(!scanner.has_cdc_action);
-    assert_eq!(scanner.remove_dvs, HashMap::new());
+    let sv = table_changes_action_iter(engine, commits, get_schema().into(), None)
+        .unwrap()
+        .flat_map(|scan_data| {
+            let scan_data = scan_data.unwrap();
+            assert_eq!(scan_data.remove_dvs, HashMap::new().into());
+            scan_data.selection_vector
+        })
+        .collect_vec();
 
-    assert_eq!(
-        result_to_sv(scanner.into_scan_batches(engine, None).unwrap()),
-        &[false; 5]
-    );
+    assert_eq!(sv, &[false; 5]);
 }
 
 #[tokio::test]
@@ -401,23 +381,20 @@ async fn cdc_selection() {
         ])
         .await;
 
-    let mut commits = get_segment(engine.as_ref(), mock_table.table_root(), 0, None)
+    let commits = get_segment(engine.as_ref(), mock_table.table_root(), 0, None)
         .unwrap()
         .into_iter();
 
-    let scanner = LogReplayScanner::try_new(
-        commits.next().unwrap(),
-        engine.as_ref(),
-        &get_schema().into(),
-    )
-    .unwrap();
-    assert!(scanner.has_cdc_action);
-    assert_eq!(scanner.remove_dvs, HashMap::new());
+    let sv = table_changes_action_iter(engine, commits, get_schema().into(), None)
+        .unwrap()
+        .flat_map(|scan_data| {
+            let scan_data = scan_data.unwrap();
+            assert_eq!(scan_data.remove_dvs, HashMap::new().into());
+            scan_data.selection_vector
+        })
+        .collect_vec();
 
-    assert_eq!(
-        result_to_sv(scanner.into_scan_batches(engine, None).unwrap()),
-        &[false, false, true]
-    );
+    assert_eq!(sv, &[false, false, true]);
 }
 
 #[tokio::test]
@@ -463,31 +440,27 @@ async fn dv() {
         ])
         .await;
 
-    let mut commits = get_segment(engine.as_ref(), mock_table.table_root(), 0, None)
+    let commits = get_segment(engine.as_ref(), mock_table.table_root(), 0, None)
         .unwrap()
         .into_iter();
 
-    let scanner = LogReplayScanner::try_new(
-        commits.next().unwrap(),
-        engine.as_ref(),
-        &get_schema().into(),
-    )
-    .unwrap();
-    assert!(!scanner.has_cdc_action);
-    assert_eq!(
-        scanner.remove_dvs,
-        HashMap::from([(
-            "fake_path_1".to_string(),
-            DvInfo {
-                deletion_vector: Some(deletion_vector1.clone())
-            }
-        )])
-    );
+    let expected_remove_dvs = HashMap::from([(
+        "fake_path_1".to_string(),
+        DvInfo {
+            deletion_vector: Some(deletion_vector1.clone()),
+        },
+    )])
+    .into();
+    let sv = table_changes_action_iter(engine, commits, get_schema().into(), None)
+        .unwrap()
+        .flat_map(|scan_data| {
+            let scan_data = scan_data.unwrap();
+            assert_eq!(scan_data.remove_dvs, expected_remove_dvs);
+            scan_data.selection_vector
+        })
+        .collect_vec();
 
-    assert_eq!(
-        result_to_sv(scanner.into_scan_batches(engine, None).unwrap()),
-        &[false, true, true]
-    );
+    assert_eq!(sv, &[false, true, true]);
 }
 #[tokio::test]
 async fn failing_protocol() {
@@ -518,15 +491,13 @@ async fn failing_protocol() {
         ])
         .await;
 
-    let mut commits = get_segment(engine.as_ref(), mock_table.table_root(), 0, None)
+    let commits = get_segment(engine.as_ref(), mock_table.table_root(), 0, None)
         .unwrap()
         .into_iter();
 
-    let res = LogReplayScanner::try_new(
-        commits.next().unwrap(),
-        engine.as_ref(),
-        &get_schema().into(),
-    );
+    let res: DeltaResult<Vec<_>> =
+        table_changes_action_iter(engine, commits, get_schema().into(), None)
+            .and_then(|iter| iter.try_collect());
 
     assert!(res.is_err());
 }
@@ -550,6 +521,6 @@ async fn file_meta_timestamp() {
 
     let commit = commits.next().unwrap();
     let file_meta_ts = commit.location.last_modified;
-    let scanner = LogReplayScanner::try_new(commit, engine.as_ref(), &get_schema().into()).unwrap();
+    let scanner = LogReplayScanner::try_new(engine.as_ref(), commit, &get_schema().into()).unwrap();
     assert_eq!(scanner.timestamp, file_meta_ts);
 }

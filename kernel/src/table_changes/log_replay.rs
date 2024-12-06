@@ -7,8 +7,8 @@ use std::sync::{Arc, LazyLock};
 use crate::actions::schemas::GetStructField;
 use crate::actions::visitors::{visit_deletion_vector_at, ProtocolVisitor};
 use crate::actions::{
-    get_log_add_schema, get_log_schema, Add, Cdc, Metadata, Protocol, Remove, ADD_NAME, CDC_NAME,
-    METADATA_NAME, PROTOCOL_NAME, REMOVE_NAME,
+    get_log_add_schema, Add, Cdc, Metadata, Protocol, Remove, ADD_NAME, CDC_NAME, METADATA_NAME,
+    PROTOCOL_NAME, REMOVE_NAME,
 };
 use crate::engine_data::{GetData, TypedGetData};
 use crate::expressions::{column_expr, column_name, ColumnName, Expression};
@@ -37,7 +37,7 @@ pub(crate) struct TableChangesScanData {
     /// The selection vector used to filter the `scan_data`.
     pub(crate) selection_vector: Vec<bool>,
     /// An map from a remove action's path to its deletion vector
-    pub(crate) remove_dv: Arc<HashMap<String, DvInfo>>,
+    pub(crate) remove_dvs: Arc<HashMap<String, DvInfo>>,
 }
 
 /// Given an iterator of [`ParsedLogPath`] returns an iterator of [`TableChangesScanData`].
@@ -57,7 +57,7 @@ pub(crate) fn table_changes_action_iter(
     let result = commit_files
         .into_iter()
         .map(move |commit_file| -> DeltaResult<_> {
-            let scanner = LogReplayScanner::try_new(commit_file, engine.as_ref(), &table_schema)?;
+            let scanner = LogReplayScanner::try_new(engine.as_ref(), commit_file, &table_schema)?;
             scanner.into_scan_batches(engine.clone(), filter.clone())
         }) //Iterator-Result-Iterator-Result
         .flatten_ok() // Iterator-Result-Result
@@ -89,7 +89,7 @@ fn add_transform_expr() -> Expression {
 ///       of time whether to filter out add/remove actions.
 ///     - Constructs the remove deletion vector map from paths belonging to `remove` actions to the
 ///       action's corresponding [`DvInfo`]. This map will be filtered to only contain paths that
-///       exists in another `add` action _within the same commit_. We store the result in  `remove_dv`.
+///       exists in another `add` action _within the same commit_. We store the result in  `remove_dvs`.
 ///       Deletion vector resolution affects whether a remove action is selected in the second
 ///       phase, so we must perform it ahead of time in phase 1.
 ///     - Ensure that reading is supported on any protocol updates.
@@ -156,8 +156,8 @@ impl LogReplayScanner {
     ///
     /// For more details, see the documentation for [`LogReplayScanner`].
     fn try_new(
-        commit_file: ParsedLogPath,
         engine: &dyn Engine,
+        commit_file: ParsedLogPath,
         table_schema: &SchemaRef,
     ) -> DeltaResult<Self> {
         let visitor_schema = PreparePhaseVisitor::schema();
@@ -271,7 +271,7 @@ impl LogReplayScanner {
             Ok(TableChangesScanData {
                 scan_data,
                 selection_vector: visitor.selection_vector,
-                remove_dv: remove_dvs.clone(),
+                remove_dvs: remove_dvs.clone(),
             })
         });
         Ok(result)
