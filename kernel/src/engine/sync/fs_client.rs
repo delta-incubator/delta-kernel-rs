@@ -51,19 +51,19 @@ impl FileSystemClient for SyncFilesystemClient {
                 .sorted_by_key(|ent| ent.path())
                 .map(|ent| {
                     ent.metadata().map_err(Error::IOError).and_then(|metadata| {
-                        let last_modified: u64 = metadata
+                        let last_modified = metadata
                             .modified()
-                            .map(
-                                |modified| match modified.duration_since(SystemTime::UNIX_EPOCH) {
-                                    Ok(d) => d.as_secs(),
-                                    Err(_) => 0,
-                                },
-                            )
+                            .ok()
+                            .and_then(|modified| {
+                                modified.duration_since(SystemTime::UNIX_EPOCH).ok()
+                            })
+                            .and_then(|modified| modified.as_millis().try_into().ok())
                             .unwrap_or(0);
+
                         Url::from_file_path(ent.path())
                             .map(|location| FileMeta {
                                 location,
-                                last_modified: last_modified as i64,
+                                last_modified,
                                 size: metadata.len() as usize,
                             })
                             .map_err(|_| Error::Generic(format!("Invalid path: {:?}", ent.path())))
@@ -97,18 +97,51 @@ impl FileSystemClient for SyncFilesystemClient {
 
 #[cfg(test)]
 mod tests {
-    use std::fs::File;
     use std::io::Write;
+    use std::os::unix::fs::MetadataExt;
+    use std::{fs::File, time::UNIX_EPOCH};
 
     use bytes::{BufMut, BytesMut};
+    use itertools::Itertools;
     use url::Url;
 
     use super::SyncFilesystemClient;
-    use crate::FileSystemClient;
+    use crate::{FileMeta, FileSystemClient};
 
     /// generate json filenames that follow the spec (numbered padded to 20 chars)
     fn get_json_filename(index: usize) -> String {
         format!("{index:020}.json")
+    }
+
+    #[test]
+    fn test_file_meta_is_correct() -> Result<(), Box<dyn std::error::Error>> {
+        let client = SyncFilesystemClient;
+        let tmp_dir = tempfile::tempdir().unwrap();
+
+        let path = tmp_dir.path().join(get_json_filename(1));
+        let mut f = File::create(path)?;
+        writeln!(f, "null")?;
+
+        let url_path = tmp_dir.path().join(get_json_filename(1));
+        let url = Url::from_file_path(url_path).unwrap();
+        let list: Vec<_> = client.list_from(&url)?.try_collect()?;
+
+        let metadata = f.metadata()?;
+        // We assert that the timestamp is in milliseconds
+        let expected_timestamp = metadata
+            .modified()?
+            .duration_since(UNIX_EPOCH)?
+            .as_millis()
+            .try_into()?;
+        let expected_size = metadata.size().try_into()?;
+        let expected_file_meta = FileMeta {
+            location: url,
+            last_modified: expected_timestamp,
+            size: expected_size,
+        };
+
+        assert_eq!(list, vec![expected_file_meta]);
+        Ok(())
     }
 
     #[test]

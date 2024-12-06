@@ -68,7 +68,7 @@ impl<E: TaskExecutor> FileSystemClient for ObjectStoreFileSystemClient<E> {
                         sender
                             .send(Ok(FileMeta {
                                 location,
-                                last_modified: meta.last_modified.timestamp(),
+                                last_modified: meta.last_modified.timestamp_millis(),
                                 size: meta.size,
                             }))
                             .ok();
@@ -216,6 +216,36 @@ mod tests {
         assert_eq!(data[2], Bytes::from("el-da"));
     }
 
+    #[tokio::test]
+    async fn test_file_meta_is_correct() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tmp_store = LocalFileSystem::new_with_prefix(tmp.path()).unwrap();
+
+        let data = Bytes::from("kernel-data");
+        let name = delta_path_for_version(1, "json");
+        tmp_store.put(&name, data.clone().into()).await.unwrap();
+
+        let url = Url::from_directory_path(tmp.path()).unwrap();
+        let prefix = Path::from_url_path(url.path()).expect("Couldn't get path");
+        let store = Arc::new(LocalFileSystem::new());
+        let engine = DefaultEngine::new(store, prefix, Arc::new(TokioBackgroundExecutor::new()));
+        let files: Vec<_> = engine
+            .get_file_system_client()
+            .list_from(&Url::parse("file://").unwrap())
+            .unwrap()
+            .try_collect()
+            .unwrap();
+
+        let object_meta = tmp_store.head(&name).await.unwrap();
+        let expected_location = url.join(name.as_ref()).unwrap();
+        let expected_file_meta = FileMeta {
+            location: expected_location,
+            // We assert that the timestamp is in milliseconds
+            last_modified: object_meta.last_modified.timestamp_millis(),
+            size: object_meta.size,
+        };
+        assert_eq!(files, vec![expected_file_meta]);
+    }
     #[tokio::test]
     async fn test_default_engine_listing() {
         let tmp = tempfile::tempdir().unwrap();
