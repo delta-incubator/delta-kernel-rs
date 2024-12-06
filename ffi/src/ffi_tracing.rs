@@ -519,10 +519,10 @@ mod tests {
                 record_callback,
                 Level::TRACE,
                 LogLineFormat::FULL,
-                true,
-                true,
-                true,
-                true,
+                true, // ansi
+                true, // with_time
+                true, // with_level
+                true, // with_target
             )
         };
         assert!(!ok, "Should have not set up a second time")
