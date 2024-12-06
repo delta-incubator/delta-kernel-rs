@@ -176,7 +176,7 @@ impl TableChangesScan {
     /// deletion vectors present in the commit. The engine data in each scan data is guaranteed
     /// to belong to the same commit. Several [`TableChangesScanData`] may belong to the same commit.
     #[allow(unused)]
-    pub(crate) fn scan_data(
+    fn scan_data(
         &self,
         engine: Arc<dyn Engine>,
     ) -> DeltaResult<impl Iterator<Item = DeltaResult<TableChangesScanData>>> {

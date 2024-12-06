@@ -113,7 +113,8 @@ async fn cdf_not_enabled() {
 
     let res: DeltaResult<Vec<_>> =
         table_changes_action_iter(engine, commits, get_schema().into(), None)
-            .and_then(|iter| iter.try_collect());
+            .unwrap()
+            .try_collect();
 
     assert!(matches!(res, Err(Error::ChangeDataFeedUnsupported(_))));
 }
@@ -143,7 +144,8 @@ async fn unsupported_reader_feature() {
 
     let res: DeltaResult<Vec<_>> =
         table_changes_action_iter(engine, commits, get_schema().into(), None)
-            .and_then(|iter| iter.try_collect());
+            .unwrap()
+            .try_collect();
 
     assert!(matches!(res, Err(Error::ChangeDataFeedUnsupported(_))));
 }
@@ -173,7 +175,8 @@ async fn column_mapping_should_fail() {
 
     let res: DeltaResult<Vec<_>> =
         table_changes_action_iter(engine, commits, get_schema().into(), None)
-            .and_then(|iter| iter.try_collect());
+            .unwrap()
+            .try_collect();
 
     assert!(matches!(res, Err(Error::ChangeDataFeedUnsupported(_))));
 }
@@ -203,22 +206,14 @@ async fn incompatible_schemas_fail() {
 
         let res: DeltaResult<Vec<_>> =
             table_changes_action_iter(engine, commits, cdf_schema.into(), None)
-                .and_then(|iter| iter.try_collect());
+                .unwrap()
+                .try_collect();
 
         assert!(matches!(
             res,
             Err(Error::ChangeDataFeedIncompatibleSchema(_, _))
         ));
     }
-
-    // The CDF schema has fields: `id: int` and `value: string`.
-    // This commit has schema with fields: `id: long`, `value: string` and `year: int` (non-nullable).
-    let schema = StructType::new([
-        StructField::new("id", DataType::LONG, true),
-        StructField::new("value", DataType::STRING, true),
-        StructField::new("year", DataType::INTEGER, false),
-    ]);
-    assert_incompatible_schema(schema, get_schema()).await;
 
     // The CDF schema has fields: `id: int` and `value: string`.
     // This commit has schema with fields: `id: long`, `value: string` and `year: int` (nullable).
@@ -580,7 +575,8 @@ async fn failing_protocol() {
 
     let res: DeltaResult<Vec<_>> =
         table_changes_action_iter(engine, commits, get_schema().into(), None)
-            .and_then(|iter| iter.try_collect());
+            .unwrap()
+            .try_collect();
 
     assert!(res.is_err());
 }

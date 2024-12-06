@@ -89,7 +89,7 @@ fn add_transform_expr() -> Expression {
 ///       of time whether to filter out add/remove actions.
 ///     - Constructs the remove deletion vector map from paths belonging to `remove` actions to the
 ///       action's corresponding [`DvInfo`]. This map will be filtered to only contain paths that
-///       exists in another `add` action _within the same commit_. We store the result in  `remove_dvs`.
+///       exists in another `add` action _within the same commit_. We store the result in `remove_dvs`.
 ///       Deletion vector resolution affects whether a remove action is selected in the second
 ///       phase, so we must perform it ahead of time in phase 1.
 ///     - Ensure that reading is supported on any protocol updates.
