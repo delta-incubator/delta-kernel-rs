@@ -1,9 +1,10 @@
 //! Code relating to parsing and using deletion vectors
 
-use bytes::Bytes;
-use roaring::RoaringTreemap;
 use std::io::{Cursor, Read};
 use std::sync::Arc;
+
+use bytes::Bytes;
+use roaring::RoaringTreemap;
 use url::Url;
 
 use delta_kernel_derive::Schema;

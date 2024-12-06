@@ -541,7 +541,7 @@ async fn data_skipping_filter() {
             })
             .collect_vec();
 
-    // Note: since the first pair is a dv operation, remove will always be removed
+    // Note: since the first pair is a dv operation, remove action will always be filtered
     assert_eq!(sv, &[false, true, false, false, true]);
 }
 
