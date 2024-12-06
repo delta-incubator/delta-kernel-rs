@@ -1,6 +1,6 @@
-//! This module handles [`CDFScanFile`]s for [`TableChangeScan`]. A [`CDFScanFile`] consists of all the
-//! metadata required to generate a change data feed. [`CDFScanFile`] can be constructed using
-//! [`CDFScanFileVisitor`]. The visitor reads from engine data with the schema [`cdf_scan_row_schema`].
+//! This module handles [`CdfScanFile`]s for [`TableChangeScan`]. A [`CdfScanFile`] consists of all the
+//! metadata required to generate a change data feed. [`CdfScanFile`] can be constructed using
+//! [`CdfScanFileVisitor`]. The visitor reads from engine data with the schema [`cdf_scan_row_schema`].
 //! You can convert engine data to this schema using the [`get_cdf_scan_row_expression`].
 use itertools::Itertools;
 use std::collections::HashMap;
@@ -17,22 +17,37 @@ use crate::schema::{
 use crate::utils::require;
 use crate::{DeltaResult, EngineData, Error, RowVisitor};
 
+/// A struct holding a [`CdfScanFile`] and map holding remove action paths to their deletion
+/// vectors. The [`CdfScanFile`] has a type [`CdfScanFileType`] that represents the action it was
+/// read from. Normally, a `scan_file` with type [`CdfScanFileType::Add`] produces row insertions.
+/// However the type may not be accurate due to deletion vector resolution. Add/Remove pairs are
+/// represented by a single `scan_file` with type add, and a corresponding deletion vector from the
+/// map. After resolving deletion vectors, the `scan_file` might only result in removed rows, only
+/// added rows, or both added and removed rows.
+///
+/// An [`UnresolvedCdfScanFile`] can be converted into [`ResolvedCdfScanFile`] by reading the
+/// deletion vectors, generating the correct selection vectors, and patching the [`CdfScanFileType`].
+/// This is done in `resolve_scan_file_dvs`.
 #[allow(unused)]
-pub(crate) struct UnresolvedCDFScanFile {
-    pub scan_file: CDFScanFile,
+pub(crate) struct UnresolvedCdfScanFile {
+    pub scan_file: CdfScanFile,
     pub remove_dvs: Arc<HashMap<String, DvInfo>>,
 }
+
+/// A struct holding a [`CdfScanFile`] and its selection vector. The [`CdfScanFile`] has a type
+/// [`CdfScanFileType`] that represents the `_change_type` that its rows will have in the change
+/// data feed. See [`UnresolvedCdfScanFile`] for more details.
 #[allow(unused)]
 #[derive(Debug)]
-pub(crate) struct ResolvedCDFScanFile {
-    pub scan_file: CDFScanFile,
+pub(crate) struct ResolvedCdfScanFile {
+    pub scan_file: CdfScanFile,
     pub selection_vector: Option<Vec<bool>>,
 }
 
-// The type of action associated with a [`CDFScanFile`].
+// The type of action associated with a [`CdfScanFile`].
 #[allow(unused)]
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) enum CDFScanFileType {
+pub(crate) enum CdfScanFileType {
     Add,
     Remove,
     Cdc,
@@ -41,9 +56,9 @@ pub(crate) enum CDFScanFileType {
 /// Represents all the metadata needed to read a Change Data Feed.
 #[allow(unused)]
 #[derive(Debug, PartialEq, Clone)]
-pub(crate) struct CDFScanFile {
+pub(crate) struct CdfScanFile {
     /// The type of action this file belongs to. This may be one of add, remove, or cdc.
-    pub scan_type: CDFScanFileType,
+    pub scan_type: CdfScanFileType,
     /// a `&str` which is the path to the file
     pub path: String,
     /// a [`DvInfo`] struct, which allows getting the selection vector for this file
@@ -56,18 +71,18 @@ pub(crate) struct CDFScanFile {
     pub commit_timestamp: i64,
 }
 
-pub(crate) type CDFScanCallback<T> = fn(context: &mut T, scan_file: CDFScanFile);
+pub(crate) type CdfScanCallback<T> = fn(context: &mut T, scan_file: CdfScanFile);
 
 /// Transforms an iterator of TableChangesScanData into an iterator  of
-/// `UnresolvedCDFScanFile` by visiting the engine data.
+/// `UnresolvedCdfScanFile` by visiting the engine data.
 #[allow(unused)]
 pub(crate) fn scan_data_to_scan_file(
     scan_data: impl Iterator<Item = DeltaResult<TableChangesScanData>>,
-) -> impl Iterator<Item = DeltaResult<UnresolvedCDFScanFile>> {
+) -> impl Iterator<Item = DeltaResult<UnresolvedCdfScanFile>> {
     scan_data
         .map(|scan_data| -> DeltaResult<_> {
             let scan_data = scan_data?;
-            let callback: CDFScanCallback<Vec<CDFScanFile>> =
+            let callback: CdfScanCallback<Vec<CdfScanFile>> =
                 |context, scan_file| context.push(scan_file);
             let result = visit_cdf_scan_files(
                 scan_data.scan_data.as_ref(),
@@ -76,7 +91,7 @@ pub(crate) fn scan_data_to_scan_file(
                 callback,
             )?
             .into_iter()
-            .map(move |scan_file| UnresolvedCDFScanFile {
+            .map(move |scan_file| UnresolvedCdfScanFile {
                 scan_file,
                 remove_dvs: scan_data.remove_dvs.clone(),
             });
@@ -90,7 +105,7 @@ pub(crate) fn scan_data_to_scan_file(
 ///
 /// The arguments to the callback are:
 /// * `context`: an `&mut context` argument. this can be anything that engine needs to pass through to each call
-/// * `CDFScanFile`: a [`CDFScanFile`] struct that holds all the metadata required to perform Change Data
+/// * `CdfScanFile`: a [`CdfScanFile`] struct that holds all the metadata required to perform Change Data
 ///   Feed
 ///
 /// ## Context
@@ -116,9 +131,9 @@ pub(crate) fn visit_cdf_scan_files<T>(
     data: &dyn EngineData,
     selection_vector: &[bool],
     context: T,
-    callback: CDFScanCallback<T>,
+    callback: CdfScanCallback<T>,
 ) -> DeltaResult<T> {
-    let mut visitor = CDFScanFileVisitor {
+    let mut visitor = CdfScanFileVisitor {
         callback,
         selection_vector,
         context,
@@ -130,18 +145,18 @@ pub(crate) fn visit_cdf_scan_files<T>(
 
 // add some visitor magic for engines
 #[allow(unused)]
-struct CDFScanFileVisitor<'a, T> {
-    callback: CDFScanCallback<T>,
+struct CdfScanFileVisitor<'a, T> {
+    callback: CdfScanCallback<T>,
     selection_vector: &'a [bool],
     context: T,
 }
 
-impl<T> RowVisitor for CDFScanFileVisitor<'_, T> {
+impl<T> RowVisitor for CdfScanFileVisitor<'_, T> {
     fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<()> {
         require!(
             getters.len() == 18,
             Error::InternalError(format!(
-                "Wrong number of CDFScanFileVisitor getters: {}",
+                "Wrong number of CdfScanFileVisitor getters: {}",
                 getters.len()
             ))
         );
@@ -152,13 +167,13 @@ impl<T> RowVisitor for CDFScanFileVisitor<'_, T> {
 
             let (scan_type, path, deletion_vector, partition_values) =
                 if let Some(path) = getters[0].get_opt(row_index, "scanFile.add.path")? {
-                    let scan_type = CDFScanFileType::Add;
+                    let scan_type = CdfScanFileType::Add;
                     let deletion_vector = visit_deletion_vector_at(row_index, &getters[1..=5])?;
                     let partition_values = getters[6]
                         .get(row_index, "scanFile.add.fileConstantValues.partitionValues")?;
                     (scan_type, path, deletion_vector, partition_values)
                 } else if let Some(path) = getters[7].get_opt(row_index, "scanFile.remove.path")? {
-                    let scan_type = CDFScanFileType::Remove;
+                    let scan_type = CdfScanFileType::Remove;
                     let deletion_vector = visit_deletion_vector_at(row_index, &getters[8..=12])?;
                     let partition_values = getters[13].get(
                         row_index,
@@ -166,7 +181,7 @@ impl<T> RowVisitor for CDFScanFileVisitor<'_, T> {
                     )?;
                     (scan_type, path, deletion_vector, partition_values)
                 } else if let Some(path) = getters[14].get_opt(row_index, "scanFile.cdc.path")? {
-                    let scan_type = CDFScanFileType::Cdc;
+                    let scan_type = CdfScanFileType::Cdc;
                     let partition_values = getters[15]
                         .get(row_index, "scanFile.cdc.fileConstantValues.partitionValues")?;
                     (scan_type, path, None, partition_values)
@@ -174,7 +189,7 @@ impl<T> RowVisitor for CDFScanFileVisitor<'_, T> {
                     continue;
                 };
             let dv_info = DvInfo { deletion_vector };
-            let scan_file = CDFScanFile {
+            let scan_file = CdfScanFile {
                 scan_type,
                 path,
                 dv_info,
@@ -196,7 +211,7 @@ impl<T> RowVisitor for CDFScanFileVisitor<'_, T> {
 
 /// Get the schema that scan rows (from [`TableChanges::scan_data`]) will be returned with.
 pub(crate) fn cdf_scan_row_schema() -> SchemaRef {
-    static CDF_SCAN_ROW_SCHEMA: LazyLock<Arc<StructType>> = LazyLock::new(|| {
+    static Cdf_SCAN_ROW_SCHEMA: LazyLock<Arc<StructType>> = LazyLock::new(|| {
         let deletion_vector = StructType::new([
             StructField::new("storageType", DataType::STRING, true),
             StructField::new("pathOrInlineDv", DataType::STRING, true),
@@ -231,7 +246,7 @@ pub(crate) fn cdf_scan_row_schema() -> SchemaRef {
             StructField::new("commit_version", DataType::LONG, true),
         ]))
     });
-    CDF_SCAN_ROW_SCHEMA.clone()
+    Cdf_SCAN_ROW_SCHEMA.clone()
 }
 
 /// Expression to convert an action with `log_schema` into one with
@@ -264,10 +279,10 @@ mod tests {
 
     use itertools::Itertools;
 
-    use super::CDFScanFileType;
+    use super::CdfScanFileType;
     use super::{
-        cdf_scan_row_schema, get_cdf_scan_row_expression, visit_cdf_scan_files, CDFScanCallback,
-        CDFScanFile,
+        cdf_scan_row_schema, get_cdf_scan_row_expression, visit_cdf_scan_files, CdfScanCallback,
+        CdfScanFile,
     };
     use crate::actions::deletion_vector::DeletionVectorDescriptor;
     use crate::actions::{get_log_schema, Add, Cdc, Remove};
@@ -358,7 +373,7 @@ mod tests {
             .map(|data| -> DeltaResult<_> {
                 let data = data?;
                 let selection_vector = vec![true; data.len()];
-                let callback: CDFScanCallback<Vec<CDFScanFile>> =
+                let callback: CdfScanCallback<Vec<CdfScanFile>> =
                     |context, scan_file| context.push(scan_file);
                 visit_cdf_scan_files(data.as_ref(), &selection_vector, vec![], callback)
             })
@@ -367,8 +382,8 @@ mod tests {
             .unwrap();
 
         let expected_scan_files = vec![
-            CDFScanFile {
-                scan_type: CDFScanFileType::Add,
+            CdfScanFile {
+                scan_type: CdfScanFileType::Add,
                 path: add.path,
                 dv_info: DvInfo {
                     deletion_vector: add.deletion_vector,
@@ -377,8 +392,8 @@ mod tests {
                 commit_version,
                 commit_timestamp,
             },
-            CDFScanFile {
-                scan_type: CDFScanFileType::Remove,
+            CdfScanFile {
+                scan_type: CdfScanFileType::Remove,
                 path: remove.path,
                 dv_info: DvInfo {
                     deletion_vector: remove.deletion_vector,
@@ -387,8 +402,8 @@ mod tests {
                 commit_version,
                 commit_timestamp,
             },
-            CDFScanFile {
-                scan_type: CDFScanFileType::Cdc,
+            CdfScanFile {
+                scan_type: CdfScanFileType::Cdc,
                 path: cdc.path,
                 dv_info: DvInfo {
                     deletion_vector: None,
