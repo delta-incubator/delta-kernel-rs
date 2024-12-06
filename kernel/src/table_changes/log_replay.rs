@@ -4,10 +4,11 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock};
 
+use crate::actions::schemas::GetStructField;
 use crate::actions::visitors::{visit_deletion_vector_at, ProtocolVisitor};
 use crate::actions::{
-    get_log_add_schema, get_log_schema, Protocol, ADD_NAME, CDC_NAME, METADATA_NAME, PROTOCOL_NAME,
-    REMOVE_NAME,
+    get_log_add_schema, get_log_schema, Add, Cdc, Metadata, Protocol, Remove, ADD_NAME, CDC_NAME,
+    METADATA_NAME, PROTOCOL_NAME, REMOVE_NAME,
 };
 use crate::engine_data::{GetData, TypedGetData};
 use crate::expressions::{column_expr, column_name, ColumnName, Expression};
@@ -35,8 +36,8 @@ pub(crate) struct TableChangesScanData {
     pub(crate) scan_data: Box<dyn EngineData>,
     /// The selection vector used to filter the `scan_data`.
     pub(crate) selection_vector: Vec<bool>,
-    /// An optional map from a remove action's path to its deletion vector
-    pub(crate) remove_dv: Option<Arc<HashMap<String, DvInfo>>>,
+    /// An map from a remove action's path to its deletion vector
+    pub(crate) remove_dv: Arc<HashMap<String, DvInfo>>,
 }
 
 /// Given an iterator of [`ParsedLogPath`] returns an iterator of [`TableChangesScanData`].
@@ -58,9 +59,9 @@ pub(crate) fn table_changes_action_iter(
         .map(move |commit_file| -> DeltaResult<_> {
             let scanner = LogReplayScanner::try_new(commit_file, engine.as_ref(), &table_schema)?;
             scanner.into_scan_batches(engine.clone(), filter.clone())
-        }) //Iterator<DeltaResult<Iterator<DeltaResult<TableChangesScanData>>>>
-        .flatten_ok() // Iterator<DeltaResult<DeltaResult<TableChangesScanData>>>
-        .map(|x| x?); // Iterator<DeltaResult<TableChangesScanData>>
+        }) //Iterator-Result-Iterator-Result
+        .flatten_ok() // Iterator-Result-Result
+        .map(|x| x?); // Iterator-Result
     Ok(result)
 }
 
@@ -81,8 +82,8 @@ fn add_transform_expr() -> Expression {
 
 /// Processes a single commit file from the log to generate an iterator of [`TableChangesScanData`].
 /// The scanner operates in two phases that _must_ be performed in the following order:
-/// 1. Prepare phase [`LogReplayScanner::try_new`]: This performs one iteration over every
-///    action in the commit. In this phase, we do the following:
+/// 1. Prepare phase [`LogReplayScanner::try_new`]: This iterates over every action in the commit.
+///    In this phase, we do the following:
 ///     - Determine if there exist any `cdc` actions. We determine this in the first phase because
 ///       the selection vectors for actions are lazily constructed in phase 2. We must know ahead
 ///       of time whether to filter out add/remove actions.
@@ -100,10 +101,10 @@ fn add_transform_expr() -> Expression {
 /// Note: We check the protocol, change data feed enablement, and schema compatibility in phase 1
 /// in order to detect errors and fail early.
 ///
-/// Note: We do not check if deletion vectors is enabled in [`TableProperties`]. The protocol
-/// states:
-/// > Readers must read the table considering the existence of DVs, even when the
-/// > `delta.enableDeletionVectors` table property is not set.
+/// Note: The reader feature [`ReaderFeatures::DeletionVectors`] controls whether the table is
+/// allowed to contain deletion vectors. [`TableProperties`].enable_deletion_vectors only
+/// determines whether writers are allowed to create _new_ deletion vectors. Hence, we do not need
+/// to check the table property for deletion vector enablement.
 ///
 /// See https://github.com/delta-io/delta/blob/master/PROTOCOL.md#deletion-vectors
 ///
@@ -159,11 +160,21 @@ impl LogReplayScanner {
         engine: &dyn Engine,
         table_schema: &SchemaRef,
     ) -> DeltaResult<Self> {
-        let visitor_schema = PreparePhaseVisitor::schema()?;
+        let visitor_schema = PreparePhaseVisitor::schema();
+
+        // Note: We do not perform data skipping yet because we need to visit all add and
+        // remove actions for deletion vector resolution to be correct.
+        //
+        // Consider a scenario with a pair of add/remove actions with the same path. The add
+        // action has file statistics, while the remove action does not (stats is optional for
+        // remove). In this scenario we might skip the add action, while the remove action remains.
+        // As a result, we would read the file path for the remove action, which is unnecessary because
+        // all of the rows will be filtered by the predicate. Instead, we wait until deletion
+        // vectors are resolved so that we can skip both actions in the pair.
         let action_iter = engine.get_json_handler().read_json_files(
             &[commit_file.location.clone()],
             visitor_schema,
-            None,
+            None, // not safe to apply data skipping yet
         )?;
 
         let mut remove_dvs = HashMap::default();
@@ -172,15 +183,6 @@ impl LogReplayScanner {
         for actions in action_iter {
             let actions = actions?;
 
-            // Note: We do not use a [`DataSkippingFilter`] because we need to visit all add and
-            // remove actions for deletion vector resolution to be correct.
-            //
-            // Consider a scenario with a pair of add/remove actions with the same path. The add
-            // action has file statistics, while the remove action does not (stats is optional for
-            // remove). The DataSkippingFilter may skip the add action, and the remove action will
-            // remain. The data file will be read for the remove action, which is unnecessary because
-            // all of the rows will be filtered by the predicate. Instead, we wait until deletion
-            // vectors are resolved so that we can skip both actions in the pair.
             let mut visitor = PreparePhaseVisitor {
                 add_paths: &mut add_paths,
                 remove_dvs: &mut remove_dvs,
@@ -239,12 +241,17 @@ impl LogReplayScanner {
         } = self;
         let remove_dvs = Arc::new(remove_dvs);
 
-        let schema = FileActionSelectionVisitor::schema()?;
+        let schema = FileActionSelectionVisitor::schema();
         let action_iter = engine.get_json_handler().read_json_files(
             &[commit_file.location.clone()],
             schema,
             None,
         )?;
+        let evaluator = engine.get_expression_handler().get_evaluator(
+            get_log_add_schema().clone(),
+            add_transform_expr(),
+            scan_row_schema().into(),
+        );
 
         let result = action_iter.map(move |actions| -> DeltaResult<_> {
             let actions = actions?;
@@ -260,18 +267,11 @@ impl LogReplayScanner {
             let mut visitor =
                 FileActionSelectionVisitor::new(&remove_dvs, selection_vector, has_cdc_action);
             visitor.visit_rows_of(actions.as_ref())?;
-            let scan_data = engine
-                .get_expression_handler()
-                .get_evaluator(
-                    get_log_add_schema().clone(),
-                    add_transform_expr(),
-                    scan_row_schema().into(),
-                )
-                .evaluate(actions.as_ref())?;
+            let scan_data = evaluator.evaluate(actions.as_ref())?;
             Ok(TableChangesScanData {
                 scan_data,
                 selection_vector: visitor.selection_vector,
-                remove_dv: Some(remove_dvs.clone()),
+                remove_dv: remove_dvs.clone(),
             })
         });
         Ok(result)
@@ -288,14 +288,14 @@ struct PreparePhaseVisitor<'a> {
     remove_dvs: &'a mut HashMap<String, DvInfo>,
 }
 impl PreparePhaseVisitor<'_> {
-    fn schema() -> DeltaResult<Arc<StructType>> {
-        get_log_schema().project(&[
-            ADD_NAME,
-            REMOVE_NAME,
-            CDC_NAME,
-            METADATA_NAME,
-            PROTOCOL_NAME,
-        ])
+    fn schema() -> Arc<StructType> {
+        Arc::new(StructType::new(vec![
+            Option::<Add>::get_struct_field(ADD_NAME),
+            Option::<Remove>::get_struct_field(REMOVE_NAME),
+            Option::<Cdc>::get_struct_field(CDC_NAME),
+            Option::<Metadata>::get_struct_field(METADATA_NAME),
+            Option::<Protocol>::get_struct_field(PROTOCOL_NAME),
+        ]))
     }
 }
 
@@ -344,12 +344,12 @@ impl RowVisitor for PreparePhaseVisitor<'_> {
         for i in 0..row_count {
             if let Some(path) = getters[0].get_str(i, "add.path")? {
                 // If no data was changed, we must ignore that action
-                if getters[1].get(i, "add.dataChange")? {
+                if !*self.has_cdc_action && getters[1].get(i, "add.dataChange")? {
                     self.add_paths.insert(path.to_string());
                 }
             } else if let Some(path) = getters[2].get_str(i, "remove.path")? {
                 // If no data was changed, we must ignore that action
-                if getters[3].get(i, "remove.dataChange")? {
+                if !*self.has_cdc_action && getters[3].get(i, "remove.dataChange")? {
                     let deletion_vector = visit_deletion_vector_at(i, &getters[4..=8])?;
                     self.remove_dvs
                         .insert(path.to_string(), DvInfo { deletion_vector });
@@ -392,8 +392,12 @@ impl<'a> FileActionSelectionVisitor<'a> {
             remove_dvs,
         }
     }
-    fn schema() -> DeltaResult<Arc<StructType>> {
-        get_log_schema().project(&[CDC_NAME, ADD_NAME, REMOVE_NAME])
+    fn schema() -> Arc<StructType> {
+        Arc::new(StructType::new(vec![
+            Option::<Cdc>::get_struct_field(CDC_NAME),
+            Option::<Add>::get_struct_field(ADD_NAME),
+            Option::<Remove>::get_struct_field(REMOVE_NAME),
+        ]))
     }
 }
 
@@ -433,8 +437,7 @@ impl RowVisitor for FileActionSelectionVisitor<'_> {
             if self.has_cdc_action {
                 self.selection_vector[i] = getters[0].get_str(i, "cdc.path")?.is_some()
             } else if getters[1].get_str(i, "add.path")?.is_some() {
-                let data_change: bool = getters[2].get(i, "add.dataChange")?;
-                self.selection_vector[i] = data_change;
+                self.selection_vector[i] = getters[2].get(i, "add.dataChange")?;
             } else if let Some(path) = getters[3].get_str(i, "remove.path")? {
                 let data_change: bool = getters[4].get(i, "remove.dataChange")?;
                 self.selection_vector[i] = data_change && !self.remove_dvs.contains_key(path)

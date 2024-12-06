@@ -8,7 +8,7 @@ use crate::scan::state::DvInfo;
 use crate::schema::{DataType, StructField, StructType};
 use crate::table_changes::log_replay::LogReplayScanner;
 use crate::table_features::ReaderFeatures;
-use crate::utils::test_utils::LocalMockTable;
+use crate::utils::test_utils::{Action, LocalMockTable};
 use crate::{DeltaResult, Engine, Error, Version};
 
 use itertools::Itertools;
@@ -54,7 +54,7 @@ async fn metadata_protocol() {
     let schema_string = serde_json::to_string(&get_schema()).unwrap();
     mock_table
         .commit([
-            Metadata {
+            Action::Metadata(Metadata {
                 schema_string,
                 configuration: HashMap::from([
                     ("delta.enableChangeDataFeed".to_string(), "true".to_string()),
@@ -65,16 +65,16 @@ async fn metadata_protocol() {
                     ("delta.columnMapping.mode".to_string(), "none".to_string()),
                 ]),
                 ..Default::default()
-            }
-            .into(),
-            Protocol::try_new(
-                3,
-                7,
-                Some([ReaderFeatures::DeletionVectors]),
-                Some([ReaderFeatures::ColumnMapping]),
-            )
-            .unwrap()
-            .into(),
+            }),
+            Action::Protocol(
+                Protocol::try_new(
+                    3,
+                    7,
+                    Some([ReaderFeatures::DeletionVectors]),
+                    Some([ReaderFeatures::ColumnMapping]),
+                )
+                .unwrap(),
+            ),
         ])
         .await;
 
@@ -102,15 +102,14 @@ async fn cdf_not_enabled() {
     let mut mock_table = LocalMockTable::new();
     let schema_string = serde_json::to_string(&get_schema()).unwrap();
     mock_table
-        .commit([Metadata {
+        .commit([Action::Metadata(Metadata {
             schema_string,
             configuration: HashMap::from([(
                 "delta.enableDeletionVectors".to_string(),
                 "true".to_string(),
             )]),
             ..Default::default()
-        }
-        .into()])
+        })])
         .await;
 
     let mut commits = get_segment(engine.as_ref(), mock_table.table_root(), 0, None)
@@ -131,17 +130,18 @@ async fn unsupported_reader_feature() {
     let engine = Arc::new(SyncEngine::new());
     let mut mock_table = LocalMockTable::new();
     mock_table
-        .commit([Protocol::try_new(
-            3,
-            7,
-            Some([
-                ReaderFeatures::DeletionVectors,
-                ReaderFeatures::ColumnMapping,
-            ]),
-            Some([""; 0]),
-        )
-        .unwrap()
-        .into()])
+        .commit([Action::Protocol(
+            Protocol::try_new(
+                3,
+                7,
+                Some([
+                    ReaderFeatures::DeletionVectors,
+                    ReaderFeatures::ColumnMapping,
+                ]),
+                Some([""; 0]),
+            )
+            .unwrap(),
+        )])
         .await;
 
     let mut commits = get_segment(engine.as_ref(), mock_table.table_root(), 0, None)
@@ -162,7 +162,7 @@ async fn column_mapping_should_fail() {
     let mut mock_table = LocalMockTable::new();
     let schema_string = serde_json::to_string(&get_schema()).unwrap();
     mock_table
-        .commit([Metadata {
+        .commit([Action::Metadata(Metadata {
             schema_string,
             configuration: HashMap::from([
                 (
@@ -173,8 +173,7 @@ async fn column_mapping_should_fail() {
                 ("delta.columnMapping.mode".to_string(), "id".to_string()),
             ]),
             ..Default::default()
-        }
-        .into()])
+        })])
         .await;
 
     let mut commits = get_segment(engine.as_ref(), mock_table.table_root(), 0, None)
@@ -193,21 +192,20 @@ async fn column_mapping_should_fail() {
 // Note: This should be removed once type widening support is added for CDF
 #[tokio::test]
 async fn incompatible_schemas_fail() {
-    async fn assert_incompatible_schema(schema: StructType) {
+    async fn assert_incompatible_schema(commit_schema: StructType, cdf_schema: StructType) {
         let engine = Arc::new(SyncEngine::new());
         let mut mock_table = LocalMockTable::new();
 
-        let schema_string = serde_json::to_string(&schema).unwrap();
+        let schema_string = serde_json::to_string(&commit_schema).unwrap();
         mock_table
-            .commit([Metadata {
+            .commit([Action::Metadata(Metadata {
                 schema_string,
                 configuration: HashMap::from([(
                     "delta.enableChangeDataFeed".to_string(),
                     "true".to_string(),
                 )]),
                 ..Default::default()
-            }
-            .into()])
+            })])
             .await;
 
         let mut commits = get_segment(engine.as_ref(), mock_table.table_root(), 0, None)
@@ -215,11 +213,8 @@ async fn incompatible_schemas_fail() {
             .into_iter();
 
         // We get the CDF schema from `get_schema()`
-        let res = LogReplayScanner::try_new(
-            commits.next().unwrap(),
-            engine.as_ref(),
-            &get_schema().into(),
-        );
+        let res =
+            LogReplayScanner::try_new(commits.next().unwrap(), engine.as_ref(), &cdf_schema.into());
 
         assert!(matches!(
             res,
@@ -234,7 +229,7 @@ async fn incompatible_schemas_fail() {
         StructField::new("value", DataType::STRING, true),
         StructField::new("year", DataType::INTEGER, false),
     ]);
-    assert_incompatible_schema(schema).await;
+    assert_incompatible_schema(schema, get_schema()).await;
 
     // The CDF schema has fields: `id: int` and `value: string`.
     // This commit has schema with fields: `id: long`, `value: string` and `year: int` (nullable).
@@ -243,7 +238,7 @@ async fn incompatible_schemas_fail() {
         StructField::new("value", DataType::STRING, true),
         StructField::new("year", DataType::INTEGER, true),
     ]);
-    assert_incompatible_schema(schema).await;
+    assert_incompatible_schema(schema, get_schema()).await;
 
     // The CDF schema has fields: `id: int` and `value: string`.
     // This commit has schema with fields: `id: long` and `value: string`.
@@ -251,28 +246,45 @@ async fn incompatible_schemas_fail() {
         StructField::new("id", DataType::LONG, true),
         StructField::new("value", DataType::STRING, true),
     ]);
-    assert_incompatible_schema(schema).await;
+    assert_incompatible_schema(schema, get_schema()).await;
 
+    // NOTE: Once type widening is supported, this should not return an error.
+    //
+    // The CDF schema has fields: `id: long` and `value: string`.
+    // This commit has schema with fields: `id: int` and `value: string`.
+    let cdf_schema = StructType::new([
+        StructField::new("id", DataType::LONG, true),
+        StructField::new("value", DataType::STRING, true),
+    ]);
+    let commit_schema = StructType::new([
+        StructField::new("id", DataType::INTEGER, true),
+        StructField::new("value", DataType::STRING, true),
+    ]);
+    assert_incompatible_schema(cdf_schema, commit_schema).await;
+
+    // Note: Once schema evolution is supported, this should not return an error.
+    //
     // The CDF schema has fields: nullable `id`  and nullable `value`.
-    // This commit has schema with fields: non-nullable `id` and nullable `value: string`.
+    // This commit has schema with fields: non-nullable `id` and nullable `value`.
     let schema = StructType::new([
         StructField::new("id", DataType::LONG, false),
         StructField::new("value", DataType::STRING, true),
     ]);
-    assert_incompatible_schema(schema).await;
+    assert_incompatible_schema(schema, get_schema()).await;
 
-    // The CDF schema has fields: _`id: int`_ and `value: string`.
-    // This commit has schema with fields:`_id: string`_ and `value: string`.
+    // The CDF schema has fields: `id: int` and `value: string`.
+    // This commit has schema with fields:`id: string` and `value: string`.
     let schema = StructType::new([
         StructField::new("id", DataType::STRING, true),
         StructField::new("value", DataType::STRING, true),
     ]);
-    assert_incompatible_schema(schema).await;
+    assert_incompatible_schema(schema, get_schema()).await;
 
-    // The CDF schema has fields: `id`  and `value`.
-    // This commit has schema with fields: `id`
+    // Note: Once schema evolution is supported, this should not return an error.
+    // The CDF schema has fields: `id` (nullable) and `value` (nullable).
+    // This commit has schema with fields: `id` (nullable).
     let schema = get_schema().project_as_struct(&["id"]).unwrap();
-    assert_incompatible_schema(schema).await;
+    assert_incompatible_schema(schema, get_schema()).await;
 }
 
 #[tokio::test]
@@ -281,18 +293,16 @@ async fn add_remove() {
     let mut mock_table = LocalMockTable::new();
     mock_table
         .commit([
-            Add {
+            Action::Add(Add {
                 path: "fake_path_1".into(),
                 data_change: true,
                 ..Default::default()
-            }
-            .into(),
-            Remove {
+            }),
+            Action::Remove(Remove {
                 path: "fake_path_2".into(),
                 data_change: true,
                 ..Default::default()
-            }
-            .into(),
+            }),
         ])
         .await;
 
@@ -321,36 +331,31 @@ async fn filter_data_change() {
     let mut mock_table = LocalMockTable::new();
     mock_table
         .commit([
-            Remove {
+            Action::Remove(Remove {
                 path: "fake_path_1".into(),
                 data_change: false,
                 ..Default::default()
-            }
-            .into(),
-            Remove {
+            }),
+            Action::Remove(Remove {
                 path: "fake_path_2".into(),
                 data_change: false,
                 ..Default::default()
-            }
-            .into(),
-            Remove {
+            }),
+            Action::Remove(Remove {
                 path: "fake_path_3".into(),
                 data_change: false,
                 ..Default::default()
-            }
-            .into(),
-            Remove {
+            }),
+            Action::Remove(Remove {
                 path: "fake_path_4".into(),
                 data_change: false,
                 ..Default::default()
-            }
-            .into(),
-            Add {
+            }),
+            Action::Add(Add {
                 path: "fake_path_5".into(),
                 data_change: false,
                 ..Default::default()
-            }
-            .into(),
+            }),
         ])
         .await;
 
@@ -379,23 +384,20 @@ async fn cdc_selection() {
     let mut mock_table = LocalMockTable::new();
     mock_table
         .commit([
-            Add {
+            Action::Add(Add {
                 path: "fake_path_1".into(),
                 data_change: true,
                 ..Default::default()
-            }
-            .into(),
-            Remove {
+            }),
+            Action::Remove(Remove {
                 path: "fake_path_2".into(),
                 data_change: true,
                 ..Default::default()
-            }
-            .into(),
-            Cdc {
+            }),
+            Action::Cdc(Cdc {
                 path: "fake_path_3".into(),
                 ..Default::default()
-            }
-            .into(),
+            }),
         ])
         .await;
 
@@ -441,26 +443,23 @@ async fn dv() {
     // - All remaining rows of fake_path_2 are deleted
     mock_table
         .commit([
-            Remove {
+            Action::Remove(Remove {
                 path: "fake_path_1".into(),
                 data_change: true,
                 deletion_vector: Some(deletion_vector1.clone()),
                 ..Default::default()
-            }
-            .into(),
-            Add {
+            }),
+            Action::Add(Add {
                 path: "fake_path_1".into(),
                 data_change: true,
                 ..Default::default()
-            }
-            .into(),
-            Remove {
+            }),
+            Action::Remove(Remove {
                 path: "fake_path_2".into(),
                 data_change: true,
                 deletion_vector: Some(deletion_vector2.clone()),
                 ..Default::default()
-            }
-            .into(),
+            }),
         ])
         .await;
 
@@ -505,19 +504,17 @@ async fn failing_protocol() {
 
     mock_table
         .commit([
-            Add {
+            Action::Add(Add {
                 path: "fake_path_1".into(),
                 data_change: true,
                 ..Default::default()
-            }
-            .into(),
-            Remove {
+            }),
+            Action::Remove(Remove {
                 path: "fake_path_2".into(),
                 data_change: true,
                 ..Default::default()
-            }
-            .into(),
-            protocol.into(),
+            }),
+            Action::Protocol(protocol),
         ])
         .await;
 
@@ -540,12 +537,11 @@ async fn file_meta_timestamp() {
     let mut mock_table = LocalMockTable::new();
 
     mock_table
-        .commit([Add {
+        .commit([Action::Add(Add {
             path: "fake_path_1".into(),
             data_change: true,
             ..Default::default()
-        }
-        .into()])
+        })])
         .await;
 
     let mut commits = get_segment(engine.as_ref(), mock_table.table_root(), 0, None)

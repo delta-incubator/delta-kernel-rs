@@ -15,7 +15,7 @@ use tracing::debug;
 
 mod fs_client;
 pub(crate) mod json;
-pub(crate) mod parquet;
+mod parquet;
 
 /// This is a simple implementation of [`Engine`]. It only supports reading data from the local
 /// filesystem, and internally represents data using `Arrow`.

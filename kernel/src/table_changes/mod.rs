@@ -73,8 +73,8 @@ impl TableChanges {
     /// Creates a new [`TableChanges`] instance for the given version range. This function checks
     /// these properties:
     /// - The change data feed table feature must be enabled in both the start or end versions.
-    /// - Only the deletion vector reader feature is enabled for the table.
-    /// - The schema at the start and end versions are the same.
+    /// - Other than the deletion vector reader feature, no other reader features are enabled for the table.
+    /// - The schemas at the start and end versions are the same.
     ///
     /// Note that this does not check that change data feed is enabled for every commit in the
     /// range. It also does not check that the schema remains the same for the entire range.

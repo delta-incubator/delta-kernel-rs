@@ -35,39 +35,9 @@ pub(crate) mod test_utils {
         Metadata(Metadata),
         #[serde(rename = "protocol")]
         Protocol(Protocol),
+        #[allow(unused)]
         #[serde(rename = "commitInfo")]
         CommitInfo(CommitInfo),
-    }
-
-    impl From<Add> for Action {
-        fn from(value: Add) -> Self {
-            Self::Add(value)
-        }
-    }
-    impl From<Remove> for Action {
-        fn from(value: Remove) -> Self {
-            Self::Remove(value)
-        }
-    }
-    impl From<Cdc> for Action {
-        fn from(value: Cdc) -> Self {
-            Self::Cdc(value)
-        }
-    }
-    impl From<Metadata> for Action {
-        fn from(value: Metadata) -> Self {
-            Self::Metadata(value)
-        }
-    }
-    impl From<Protocol> for Action {
-        fn from(value: Protocol) -> Self {
-            Self::Protocol(value)
-        }
-    }
-    impl From<CommitInfo> for Action {
-        fn from(value: CommitInfo) -> Self {
-            Self::CommitInfo(value)
-        }
     }
 
     /// A mock table that writes commits to a local temporary delta log. This can be used to
