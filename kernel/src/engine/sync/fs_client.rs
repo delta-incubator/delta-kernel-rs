@@ -51,11 +51,11 @@ impl FileSystemClient for SyncFilesystemClient {
                 .sorted_by_key(|ent| ent.path())
                 .map(|ent| {
                     ent.metadata().map_err(Error::IOError).and_then(|metadata| {
-                        let last_modified: u64 = metadata
+                        let last_modified: i64 = metadata
                             .modified()
                             .map(
                                 |modified| match modified.duration_since(SystemTime::UNIX_EPOCH) {
-                                    Ok(d) => d.as_secs(),
+                                    Ok(d) => d.as_millis() as i64,
                                     Err(_) => 0,
                                 },
                             )
@@ -63,7 +63,7 @@ impl FileSystemClient for SyncFilesystemClient {
                         Url::from_file_path(ent.path())
                             .map(|location| FileMeta {
                                 location,
-                                last_modified: last_modified as i64,
+                                last_modified,
                                 size: metadata.len() as usize,
                             })
                             .map_err(|_| Error::Generic(format!("Invalid path: {:?}", ent.path())))

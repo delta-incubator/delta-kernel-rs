@@ -79,7 +79,7 @@ pub(crate) fn get_generated_columns(
     //
     // See:
     // [`FileMeta`]
-    // [In-Commit Timestamps] : https://github.com/delta-io/delta/blob/master/PROTOCOL.md#writer-requirements-for-in-commit-timestampsa
+    // [In-Commit Timestamps] : https://github.com/delta-io/delta/blob/master/PROTOCOL.md#writer-requirements-for-in-commit-timestamps
     let timestamp = Scalar::timestamp_from_millis(timestamp)?;
     let expressions = match tpe {
         ScanFileType::Cdc => [

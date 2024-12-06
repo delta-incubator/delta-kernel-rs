@@ -68,7 +68,7 @@ impl<E: TaskExecutor> FileSystemClient for ObjectStoreFileSystemClient<E> {
                         sender
                             .send(Ok(FileMeta {
                                 location,
-                                last_modified: meta.last_modified.timestamp(),
+                                last_modified: meta.last_modified.timestamp_millis(),
                                 size: meta.size,
                             }))
                             .ok();
