@@ -3,6 +3,8 @@ use super::TableChangesScanData;
 use crate::actions::deletion_vector::DeletionVectorDescriptor;
 use crate::actions::{Add, Cdc, Metadata, Protocol, Remove};
 use crate::engine::sync::SyncEngine;
+use crate::expressions::Scalar;
+use crate::expressions::{column_expr, BinaryOperator};
 use crate::log_segment::LogSegment;
 use crate::path::ParsedLogPath;
 use crate::scan::state::DvInfo;
@@ -10,6 +12,7 @@ use crate::schema::{DataType, StructField, StructType};
 use crate::table_changes::log_replay::LogReplayScanner;
 use crate::table_features::ReaderFeatures;
 use crate::utils::test_utils::{Action, LocalMockTable};
+use crate::Expression;
 use crate::{DeltaResult, Engine, Error, Version};
 
 use itertools::Itertools;
@@ -362,20 +365,27 @@ async fn filter_data_change() {
 async fn cdc_selection() {
     let engine = Arc::new(SyncEngine::new());
     let mut mock_table = LocalMockTable::new();
+
+    mock_table
+        .commit([Action::Add(Add {
+            path: "fake_path_1".into(),
+            data_change: true,
+            ..Default::default()
+        })])
+        .await;
     mock_table
         .commit([
-            Action::Add(Add {
-                path: "fake_path_1".into(),
-                data_change: true,
-                ..Default::default()
-            }),
             Action::Remove(Remove {
-                path: "fake_path_2".into(),
+                path: "fake_path_1".into(),
                 data_change: true,
                 ..Default::default()
             }),
             Action::Cdc(Cdc {
                 path: "fake_path_3".into(),
+                ..Default::default()
+            }),
+            Action::Cdc(Cdc {
+                path: "fake_path_4".into(),
                 ..Default::default()
             }),
         ])
@@ -394,7 +404,7 @@ async fn cdc_selection() {
         })
         .collect_vec();
 
-    assert_eq!(sv, &[false, false, true]);
+    assert_eq!(sv, &[true, false, true, true]);
 }
 
 #[tokio::test]
@@ -462,6 +472,79 @@ async fn dv() {
 
     assert_eq!(sv, &[false, true, true]);
 }
+
+#[tokio::test]
+async fn data_skipping_filter() {
+    let engine = Arc::new(SyncEngine::new());
+    let mut mock_table = LocalMockTable::new();
+    let deletion_vector = Some(DeletionVectorDescriptor {
+        storage_type: "u".to_string(),
+        path_or_inline_dv: "vBn[lx{q8@P<9BNH/isA".to_string(),
+        offset: Some(1),
+        size_in_bytes: 36,
+        cardinality: 2,
+    });
+    mock_table
+        .commit([
+            // Remove/Add pair with max value id = 6
+            Action::Remove(Remove {
+                path: "fake_path_1".into(),
+                data_change: true,
+                ..Default::default()
+            }),
+            Action::Add(Add {
+                path: "fake_path_1".into(),
+                stats: Some("{\"numRecords\":4,\"minValues\":{\"id\":4},\"maxValues\":{\"id\":6},\"nullCount\":{\"id\":3}}".into()),
+                data_change: true,
+                deletion_vector: deletion_vector.clone(),
+                ..Default::default()
+            }),
+            // Remove/Add pair with max value id = 4
+            Action::Remove(Remove {
+                path: "fake_path_2".into(),
+                data_change: true,
+                ..Default::default()
+            }),
+            Action::Add(Add {
+                path: "fake_path_2".into(),
+                stats: Some("{\"numRecords\":4,\"minValues\":{\"id\":4},\"maxValues\":{\"id\":4},\"nullCount\":{\"id\":3}}".into()),
+                data_change: true,
+                deletion_vector,
+                ..Default::default()
+            }),
+            // Add action with max value id = 5
+            Action::Add(Add {
+                path: "fake_path_3".into(),
+                stats: Some("{\"numRecords\":4,\"minValues\":{\"id\":4},\"maxValues\":{\"id\":5},\"nullCount\":{\"id\":3}}".into()),
+                data_change: true,
+                ..Default::default()
+            }),
+        ])
+        .await;
+
+    // Look for actions with id > 4
+    let predicate = Expression::binary(
+        BinaryOperator::GreaterThan,
+        column_expr!("id"),
+        Scalar::from(4),
+    );
+    let commits = get_segment(engine.as_ref(), mock_table.table_root(), 0, None)
+        .unwrap()
+        .into_iter();
+
+    let sv =
+        table_changes_action_iter(engine, commits, get_schema().into(), Some(predicate.into()))
+            .unwrap()
+            .flat_map(|scan_data| {
+                let scan_data = scan_data.unwrap();
+                scan_data.selection_vector
+            })
+            .collect_vec();
+
+    // Note: since the first pair is a dv operation, remove will always be removed
+    assert_eq!(sv, &[false, true, false, false, true]);
+}
+
 #[tokio::test]
 async fn failing_protocol() {
     let engine = Arc::new(SyncEngine::new());
