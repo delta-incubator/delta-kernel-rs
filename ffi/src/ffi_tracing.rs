@@ -574,12 +574,14 @@ mod tests {
         let msg: &str = unsafe { TryFromStringSlice::try_from_slice(&event.message).unwrap() };
         let target: &str = unsafe { TryFromStringSlice::try_from_slice(&event.target).unwrap() };
         let file: &str = unsafe { TryFromStringSlice::try_from_slice(&event.file).unwrap() };
-        println!("msg: {msg}");
-        println!("target: {target}");
-        println!("file: {file}");
+
+        // file path will use \ on windows
+        use std::path::MAIN_SEPARATOR;
+        let expected_file = format!("ffi{}src{}ffi_tracing.rs",MAIN_SEPARATOR,MAIN_SEPARATOR);
+
         let ok = event.level == Level::INFO
             && target == "delta_kernel_ffi::ffi_tracing::tests"
-            && file == "ffi/src/ffi_tracing.rs"
+            && file == expected_file
             && (msg == "Testing 1" || msg == "Another line");
         let mut lock = EVENTS_OK.lock().unwrap();
         if let Some(ref mut events) = *lock {
