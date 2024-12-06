@@ -77,9 +77,9 @@ cloud = [
 ]
 default = []
 
-# the default-engine use the reqwest crate with default features which uses native-tls. if you want
-# to instead use rustls, use 'default-engine-rustls' which has no native-tls dependency
-default-engine = [
+# this is an 'internal' feature flag which has all the shared bits from default-engine and
+# default-engine-rustls
+_default_engine_base = [
   "arrow-conversion",
   "arrow-expression",
   "arrow-array",
@@ -92,32 +92,24 @@ default-engine = [
   "object_store",
   "parquet/async",
   "parquet/object_store",
-  "reqwest/default",
   "tokio",
   "uuid/v4",
   "uuid/fast-rng",
 ]
 
+# the default-engine use the reqwest crate with default features which uses native-tls. if you want
+# to instead use rustls, use 'default-engine-rustls' which has no native-tls dependency
+default-engine = [
+  "_default_engine_base",
+  "reqwest/default",
+]
+
 default-engine-rustls = [
-  "arrow-conversion",
-  "arrow-expression",
-  "arrow-array",
-  "arrow-buffer",
-  "arrow-cast",
-  "arrow-json",
-  "arrow-schema",
-  "arrow-select",
-  "futures",
-  "object_store",
-  "parquet/async",
-  "parquet/object_store",
+  "_default_engine_base",
   "reqwest/rustls-tls",
   "reqwest/charset",
   "reqwest/http2",
   "reqwest/macos-system-configuration",
-  "tokio",
-  "uuid/v4",
-  "uuid/fast-rng",
 ]
 
 developer-visibility = []
