@@ -167,8 +167,8 @@ mod private {
         }
 
         /// In testing code we want to simulate what c code can do where a pointer can be used
-        /// without consuming it. This creates a "new" handle just by copying the underlying
-        /// pointer. This is dangerous! Do not use outside testing code!
+        /// without consuming it. This creates a "new" handle just by copying the underlying pointer
+        /// without increasing the arc refcount. This is dangerous! Do not use outside testing code!
         #[cfg(test)]
         pub fn shallow_copy(&self) -> Self {
             Handle { ptr: self.ptr }

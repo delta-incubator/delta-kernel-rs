@@ -729,8 +729,8 @@ mod tests {
 
     #[no_mangle]
     extern "C" fn allocate_str(kernel_str: KernelStringSlice) -> NullableCvoid {
-        let s = unsafe { String::try_from_slice(&kernel_str).unwrap() };
-        let ptr = Box::into_raw(Box::new(s)).cast(); // never null
+        let s = unsafe { String::try_from_slice(&kernel_str) };
+        let ptr = Box::into_raw(Box::new(s.unwrap())).cast(); // never null
         let ptr = unsafe { NonNull::new_unchecked(ptr) };
         Some(ptr)
     }
