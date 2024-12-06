@@ -304,8 +304,8 @@ where
     fn on_event(&self, _: &TracingEvent<'_>, _context: Context<'_, S>) {
         match self.buf.lock() {
             Ok(mut buf) => {
-                let output = String::from_utf8_lossy(&buf);
-                let message = kernel_string_slice!(output);
+                let message = String::from_utf8_lossy(&buf);
+                let message = kernel_string_slice!(message);
                 (self.callback)(message);
                 buf.clear();
             }
