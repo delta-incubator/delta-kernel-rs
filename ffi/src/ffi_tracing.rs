@@ -577,7 +577,7 @@ mod tests {
 
         // file path will use \ on windows
         use std::path::MAIN_SEPARATOR;
-        let expected_file = format!("ffi{}src{}ffi_tracing.rs",MAIN_SEPARATOR,MAIN_SEPARATOR);
+        let expected_file = format!("ffi{}src{}ffi_tracing.rs", MAIN_SEPARATOR, MAIN_SEPARATOR);
 
         let ok = event.level == Level::INFO
             && target == "delta_kernel_ffi::ffi_tracing::tests"
