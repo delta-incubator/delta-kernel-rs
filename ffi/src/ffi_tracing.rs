@@ -574,6 +574,9 @@ mod tests {
         let msg: &str = unsafe { TryFromStringSlice::try_from_slice(&event.message).unwrap() };
         let target: &str = unsafe { TryFromStringSlice::try_from_slice(&event.target).unwrap() };
         let file: &str = unsafe { TryFromStringSlice::try_from_slice(&event.file).unwrap() };
+        println!("msg: {msg}");
+        println!("target: {target}");
+        println!("file: {file}");
         let ok = event.level == Level::INFO
             && target == "delta_kernel_ffi::ffi_tracing::tests"
             && file == "ffi/src/ffi_tracing.rs"
