@@ -217,7 +217,7 @@ pub unsafe extern "C" fn enable_formatted_log_line_tracing(
 
 // utility code below for setting up the tracing subscriber for events
 
-pub fn set_global_default(dispatch: tracing_core::Dispatch) -> DeltaResult<()> {
+fn set_global_default(dispatch: tracing_core::Dispatch) -> DeltaResult<()> {
     tracing_core::dispatcher::set_global_default(dispatch).map_err(|_| {
         Error::generic("Unable to set global default subscriber. Trying to set more than once?")
     })
