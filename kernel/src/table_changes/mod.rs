@@ -15,6 +15,7 @@ use crate::table_properties::TableProperties;
 use crate::utils::require;
 use crate::{DeltaResult, Engine, Error, Version};
 
+mod data_read;
 mod log_replay;
 mod resolve_dvs;
 pub mod scan;
