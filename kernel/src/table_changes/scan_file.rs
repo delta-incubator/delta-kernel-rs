@@ -211,7 +211,7 @@ impl<T> RowVisitor for CdfScanFileVisitor<'_, T> {
 
 /// Get the schema that scan rows (from [`TableChanges::scan_data`]) will be returned with.
 pub(crate) fn cdf_scan_row_schema() -> SchemaRef {
-    static Cdf_SCAN_ROW_SCHEMA: LazyLock<Arc<StructType>> = LazyLock::new(|| {
+    static CDF_SCAN_ROW_SCHEMA: LazyLock<Arc<StructType>> = LazyLock::new(|| {
         let deletion_vector = StructType::new([
             StructField::new("storageType", DataType::STRING, true),
             StructField::new("pathOrInlineDv", DataType::STRING, true),
@@ -246,7 +246,7 @@ pub(crate) fn cdf_scan_row_schema() -> SchemaRef {
             StructField::new("commit_version", DataType::LONG, true),
         ]))
     });
-    Cdf_SCAN_ROW_SCHEMA.clone()
+    CDF_SCAN_ROW_SCHEMA.clone()
 }
 
 /// Expression to convert an action with `log_schema` into one with
