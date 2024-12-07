@@ -188,11 +188,10 @@ impl<T> RowVisitor for CdfScanFileVisitor<'_, T> {
                 } else {
                     continue;
                 };
-            let dv_info = DvInfo { deletion_vector };
             let scan_file = CdfScanFile {
                 scan_type,
                 path,
-                dv_info,
+                dv_info: DvInfo { deletion_vector },
                 partition_values,
                 commit_timestamp: getters[16].get(row_index, "scanFile.timestamp")?,
                 commit_version: getters[17].get(row_index, "scanFile.commit_version")?,
