@@ -521,7 +521,9 @@ fn test_list_files_with_unusual_patterns() {
         // bogus part numbering
         Path::from("_delta_log/00000000000000000000.checkpoint.0000000010.0000000000.parquet"),
         // v2 checkpoint
-        Path::from("_delta_log/00000000000000000010.checkpoint.80a083e8-7026-4e79-81be-64bd76c43a11.json"),
+        Path::from(
+            "_delta_log/00000000000000000010.checkpoint.80a083e8-7026-4e79-81be-64bd76c43a11.json",
+        ),
         // compacted log file
         Path::from("_delta_log/00000000000000000004.00000000000000000006.compacted.json"),
         // CRC file
@@ -539,16 +541,13 @@ fn test_list_files_with_unusual_patterns() {
     // Collect the results and verify
     let paths: Vec<_> = result.unwrap().collect::<Result<Vec<_>, _>>().unwrap();
 
-    // We should find at least the valid commit file
-    assert!(!paths.is_empty(), "Should find at least one valid file");
+    // We should find exactly one file (the valid commit)
+    assert_eq!(paths.len(), 1, "Should find exactly one valid file");
 
     // Verify that the valid commit file is included
     let has_valid_commit = paths.iter().any(|p| p.version == 2 && p.is_commit());
     assert!(has_valid_commit, "Should find the valid commit file");
 
-    // Verify that none of the paths resulted in errors
-    // The invalid patterns should have been filtered out by ParsedLogPath::try_from
-    for path in paths {
-        assert!(!path.is_unknown(), "Found unexpected unknown file type");
-    }
+    // All other files should have been filtered out by ParsedLogPath::try_from
+    // and the filter_map_ok(identity) call
 }
