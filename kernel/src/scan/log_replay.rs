@@ -1,5 +1,6 @@
 use std::clone::Clone;
 use std::collections::HashSet;
+use std::iter;
 use std::sync::{Arc, LazyLock};
 
 use tracing::debug;
@@ -241,22 +242,30 @@ impl LogReplayScanner {
 /// indicates whether the record batch is a log or checkpoint batch.
 pub fn scan_action_iter(
     engine: &dyn Engine,
-    action_iter: impl Iterator<Item = DeltaResult<(Box<dyn EngineData>, bool)>>,
+    action_iter: impl Iterator<Item = DeltaResult<(Box<dyn EngineData>, bool)>> + 'static,
     table_schema: &SchemaRef,
     predicate: Option<ExpressionRef>,
-) -> impl Iterator<Item = DeltaResult<ScanData>> {
+) -> Box<dyn Iterator<Item = DeltaResult<ScanData>>> {
     let mut log_scanner = LogReplayScanner::new(engine, table_schema, predicate);
-    let add_transform = engine.get_expression_handler().get_evaluator(
+    match engine.get_expression_handler().get_evaluator(
         get_log_add_schema().clone(),
         get_add_transform_expr(),
         SCAN_ROW_DATATYPE.clone(),
-    );
-    action_iter
-        .map(move |action_res| {
-            let (batch, is_log_batch) = action_res?;
-            log_scanner.process_scan_batch(add_transform.as_ref(), batch.as_ref(), is_log_batch)
-        })
-        .filter(|res| res.as_ref().map_or(true, |(_, sv)| sv.contains(&true)))
+    ) {
+        Ok(add_transform) => Box::new(
+            action_iter
+                .map(move |action_res| {
+                    let (batch, is_log_batch) = action_res?;
+                    log_scanner.process_scan_batch(
+                        add_transform.as_ref(),
+                        batch.as_ref(),
+                        is_log_batch,
+                    )
+                })
+                .filter(|res| res.as_ref().map_or(true, |(_, sv)| sv.contains(&true))),
+        ),
+        Err(e) => Box::new(iter::once(Err(e))),
+    }
 }
 
 #[cfg(test)]
