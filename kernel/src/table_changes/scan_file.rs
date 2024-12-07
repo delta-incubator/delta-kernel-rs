@@ -1,7 +1,7 @@
 //! This module handles [`CdfScanFile`]s for [`TableChangeScan`]. A [`CdfScanFile`] consists of all the
 //! metadata required to generate a change data feed. [`CdfScanFile`] can be constructed using
 //! [`CdfScanFileVisitor`]. The visitor reads from engine data with the schema [`cdf_scan_row_schema`].
-//! You can convert engine data to this schema using the [`get_cdf_scan_row_expression`].
+//! You can convert engine data to this schema using the [`cdf_scan_row_expression`].
 use itertools::Itertools;
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
@@ -251,7 +251,7 @@ pub(crate) fn cdf_scan_row_schema() -> SchemaRef {
 /// Expression to convert an action with `log_schema` into one with
 /// `TABLE_CHANGES_cdf_scan_row_schema`. This is the expression used to create `TableChangesScanData`.
 #[allow(unused)]
-pub(crate) fn get_cdf_scan_row_expression(commit_timestamp: i64, commit_number: i64) -> Expression {
+pub(crate) fn cdf_scan_row_expression(commit_timestamp: i64, commit_number: i64) -> Expression {
     Expression::struct_from([
         Expression::struct_from([
             column_expr!("add.path"),
@@ -280,7 +280,7 @@ mod tests {
 
     use super::CdfScanFileType;
     use super::{
-        cdf_scan_row_schema, get_cdf_scan_row_expression, visit_cdf_scan_files, CdfScanCallback,
+        cdf_scan_row_expression, cdf_scan_row_schema, visit_cdf_scan_files, CdfScanCallback,
         CdfScanFile,
     };
     use crate::actions::deletion_vector::DeletionVectorDescriptor;
@@ -363,7 +363,7 @@ mod tests {
                     .get_expression_handler()
                     .get_evaluator(
                         get_log_schema().clone(),
-                        get_cdf_scan_row_expression(commit_timestamp, commit_version),
+                        cdf_scan_row_expression(commit_timestamp, commit_version),
                         cdf_scan_row_schema().into(),
                     )
                     .evaluate(actions.as_ref())
