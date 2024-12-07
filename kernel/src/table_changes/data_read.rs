@@ -84,7 +84,7 @@ pub(crate) fn resolve_scan_file_dv(
             //  The selection vector of add rows is calculated using `rm_dv - add_dv`. These rows went
             //  from 1 (deleted) in `rm_dv` to 0 (restored) in the `add_dv`. All unchanged rows will remain 0.
             //  Applying this to our deletion vectors:
-            //  rm_dv - add_dv =
+            //  `rm_dv - add_dv` =
             //      [1, 1, 0]
             //    - [0, 1, 1]
             //    = [1, 0, 0]
@@ -94,7 +94,7 @@ pub(crate) fn resolve_scan_file_dv(
             //  The selection vector of deleted rows is calculated using `add_dv - rm_dv`. These rows went
             //  from 0 (present) in `rm_dv` to 1 (deleted) in the `add_dv`. All unchanged rows will remain 0.
             //  Applying this to our deletion vectors:
-            //  add_dv - rm_dv =
+            //  `add_dv - rm_dv` =
             //      [0, 1, 1]
             //    - [1, 1, 0]
             //    = [0, 0, 1]
