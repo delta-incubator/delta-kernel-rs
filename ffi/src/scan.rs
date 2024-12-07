@@ -349,26 +349,19 @@ fn row_indexes_from_dv_impl(
 
 // Wrapper function that gets called by the kernel, transforms the arguments to make the ffi-able,
 // and then calls the ffi specified callback
-fn rust_callback(
-    context: &mut ContextWrapper,
-    path: &str,
-    size: i64,
-    kernel_stats: Option<delta_kernel::scan::state::Stats>,
-    dv_info: DvInfo,
-    partition_values: HashMap<String, String>,
-) {
+fn rust_callback(context: &mut ContextWrapper, file: ScanFile) {
     let partition_map = CStringMap {
-        values: partition_values,
+        values: file.partition_values,
     };
-    let stats = kernel_stats.map(|ks| Stats {
+    let stats = file.stats.map(|ks| Stats {
         num_records: ks.num_records,
     });
     (context.callback)(
         context.engine_context,
-        kernel_string_slice!(path),
-        size,
+        kernel_string_slice!(file.path),
+        file.size,
         stats.as_ref(),
-        &dv_info,
+        &file.dv_info,
         &partition_map,
     );
 }

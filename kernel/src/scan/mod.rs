@@ -267,22 +267,17 @@ impl Scan {
         struct ScanFile {
             path: String,
             size: i64,
+            stats: Option<Stats>,
             dv_info: DvInfo,
             partition_values: HashMap<String, String>,
         }
-        fn scan_data_callback(
-            batches: &mut Vec<ScanFile>,
-            path: &str,
-            size: i64,
-            _: Option<Stats>,
-            dv_info: DvInfo,
-            partition_values: HashMap<String, String>,
-        ) {
+        fn scan_data_callback(batches: &mut Vec<ScanFile>, file: state::ScanFile<'_>) {
             batches.push(ScanFile {
-                path: path.to_string(),
-                size,
-                dv_info,
-                partition_values,
+                path: file.path.to_string(),
+                size: file.size,
+                stats: file.stats,
+                dv_info: file.dv_info,
+                partition_values: file.partition_values,
             });
         }
 
@@ -620,16 +615,9 @@ mod tests {
 
     fn get_files_for_scan(scan: Scan, engine: &dyn Engine) -> DeltaResult<Vec<String>> {
         let scan_data = scan.scan_data(engine)?;
-        fn scan_data_callback(
-            paths: &mut Vec<String>,
-            path: &str,
-            _size: i64,
-            _: Option<Stats>,
-            dv_info: DvInfo,
-            _partition_values: HashMap<String, String>,
-        ) {
-            paths.push(path.to_string());
-            assert!(dv_info.deletion_vector.is_none());
+        fn scan_data_callback(paths: &mut Vec<String>, file: state::ScanFile<'_>) {
+            paths.push(file.path.to_string());
+            assert!(file.dv_info.deletion_vector.is_none());
         }
         let mut files = vec![];
         for data in scan_data {
