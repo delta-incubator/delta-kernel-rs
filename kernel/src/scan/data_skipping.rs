@@ -117,24 +117,29 @@ impl DataSkippingFilter {
         //
         // 3. The selection evaluator does DISTINCT(col(predicate), 'false') to produce true (= keep) when
         //    the predicate is true/null and false (= skip) when the predicate is false.
-        let select_stats_evaluator = engine.get_expression_handler().get_evaluator(
-            // safety: kernel is very broken if we don't have the schema for Add actions
-            get_log_add_schema().clone(),
-            STATS_EXPR.clone(),
-            DataType::STRING,
-        );
+        let select_stats_evaluator = engine
+            .get_expression_handler()
+            .get_evaluator(
+                // safety: kernel is very broken if we don't have the schema for Add actions
+                get_log_add_schema().clone(),
+                STATS_EXPR.clone(),
+                DataType::STRING,
+            )
+            .ok()?;
 
-        let skipping_evaluator = engine.get_expression_handler().get_evaluator(
-            stats_schema.clone(),
-            Expr::struct_from([as_data_skipping_predicate(predicate, false)?]),
-            PREDICATE_SCHEMA.clone(),
-        );
+        let skipping_evaluator = engine
+            .get_expression_handler()
+            .get_evaluator(
+                stats_schema.clone(),
+                Expr::struct_from([as_data_skipping_predicate(predicate, false)?]),
+                PREDICATE_SCHEMA.clone(),
+            )
+            .ok()?;
 
-        let filter_evaluator = engine.get_expression_handler().get_evaluator(
-            stats_schema.clone(),
-            FILTER_EXPR.clone(),
-            DataType::BOOLEAN,
-        );
+        let filter_evaluator = engine
+            .get_expression_handler()
+            .get_evaluator(stats_schema.clone(), FILTER_EXPR.clone(), DataType::BOOLEAN)
+            .ok()?;
 
         Some(Self {
             stats_schema,

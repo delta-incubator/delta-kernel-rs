@@ -251,7 +251,7 @@ impl LogReplayScanner {
             get_log_add_schema().clone(),
             add_transform_expr(),
             scan_row_schema().into(),
-        );
+        )?;
 
         let result = action_iter.map(move |actions| -> DeltaResult<_> {
             let actions = actions?;

@@ -503,7 +503,7 @@ fn transform_to_logical_internal(
             read_schema,
             read_expression,
             global_state.logical_schema.clone().into(),
-        )
+        )?
         .evaluate(data.as_ref())?;
     Ok(result)
 }
