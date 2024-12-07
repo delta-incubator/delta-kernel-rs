@@ -291,7 +291,11 @@ fn list_log_files(
         .list_from(&start_from)?
         .map(|meta| meta.map(|m| ParsedLogPath::try_from(m).ok().and_then(identity)))
         .filter_map_ok(identity)
-        .filter(|path_res| path_res.as_ref().map_or(true, |path| path.is_commit() || path.is_checkpoint()))
+        .filter(|path_res| {
+            path_res
+                .as_ref()
+                .map_or(true, |path| path.is_commit() || path.is_checkpoint())
+        })
         .take_while(move |path_res| match path_res {
             Ok(path) => !end_version.is_some_and(|end_version| end_version < path.version),
             Err(_) => true,
