@@ -289,7 +289,7 @@ fn list_log_files(
 
     Ok(fs_client
         .list_from(&start_from)?
-        .map(|meta| ParsedLogPath::try_from(meta?))
+        .map(|meta| meta.map(|m| ParsedLogPath::try_from(m).ok().and_then(identity)))
         // TODO this filters out .crc files etc which start with "." - how do we want to use these kind of files?
         .filter_map_ok(identity)
         .take_while(move |path_res| match path_res {
