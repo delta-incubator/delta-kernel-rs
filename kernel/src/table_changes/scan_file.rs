@@ -170,12 +170,12 @@ impl<T> RowVisitor for CdfScanFileVisitor<'_, T> {
                     let scan_type = CdfScanFileType::Add;
                     let deletion_vector = visit_deletion_vector_at(row_index, &getters[1..=5])?;
                     let partition_values = getters[6]
-                        .get(row_index, "scanFile.add.fileConstantValues.partitionValues")?;
+                        .get_opt(row_index, "scanFile.add.fileConstantValues.partitionValues")?;
                     (scan_type, path, deletion_vector, partition_values)
                 } else if let Some(path) = getters[7].get_opt(row_index, "scanFile.remove.path")? {
                     let scan_type = CdfScanFileType::Remove;
                     let deletion_vector = visit_deletion_vector_at(row_index, &getters[8..=12])?;
-                    let partition_values = getters[13].get(
+                    let partition_values = getters[13].get_opt(
                         row_index,
                         "scanFile.remove.fileConstantValues.partitionValues",
                     )?;
@@ -183,11 +183,12 @@ impl<T> RowVisitor for CdfScanFileVisitor<'_, T> {
                 } else if let Some(path) = getters[14].get_opt(row_index, "scanFile.cdc.path")? {
                     let scan_type = CdfScanFileType::Cdc;
                     let partition_values = getters[15]
-                        .get(row_index, "scanFile.cdc.fileConstantValues.partitionValues")?;
+                        .get_opt(row_index, "scanFile.cdc.fileConstantValues.partitionValues")?;
                     (scan_type, path, None, partition_values)
                 } else {
                     continue;
                 };
+            let partition_values = partition_values.unwrap_or_else(Default::default);
             let scan_file = CdfScanFile {
                 scan_type,
                 path,
@@ -241,8 +242,8 @@ pub(crate) fn cdf_scan_row_schema() -> SchemaRef {
             StructField::new("add", add, true),
             StructField::new("remove", remove, true),
             StructField::new("cdc", cdc, true),
-            StructField::new("timestamp", DataType::LONG, true),
-            StructField::new("commit_version", DataType::LONG, true),
+            StructField::new("timestamp", DataType::LONG, false),
+            StructField::new("commit_version", DataType::LONG, false),
         ]))
     });
     CDF_SCAN_ROW_SCHEMA.clone()
@@ -333,11 +334,19 @@ mod tests {
             ..Default::default()
         };
 
+        let remove_no_partition = Remove {
+            path: "fake_path_2".into(),
+            deletion_vector: None,
+            partition_values: None,
+            ..Default::default()
+        };
+
         mock_table
             .commit([
                 Action::Add(add.clone()),
                 Action::Remove(remove.clone()),
                 Action::Cdc(cdc.clone()),
+                Action::Remove(remove_no_partition.clone()),
             ])
             .await;
 
@@ -408,6 +417,16 @@ mod tests {
                     deletion_vector: None,
                 },
                 partition_values: cdc.partition_values,
+                commit_version,
+                commit_timestamp,
+            },
+            CdfScanFile {
+                scan_type: CdfScanFileType::Remove,
+                path: remove_no_partition.path,
+                dv_info: DvInfo {
+                    deletion_vector: None,
+                },
+                partition_values: HashMap::new(),
                 commit_version,
                 commit_timestamp,
             },
