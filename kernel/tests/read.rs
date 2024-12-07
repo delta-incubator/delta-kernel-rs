@@ -11,7 +11,8 @@ use delta_kernel::engine::arrow_data::ArrowEngineData;
 use delta_kernel::engine::default::executor::tokio::TokioBackgroundExecutor;
 use delta_kernel::engine::default::DefaultEngine;
 use delta_kernel::expressions::{column_expr, BinaryOperator, Expression};
-use delta_kernel::scan::state::{visit_scan_files, DvInfo, Stats};
+use delta_kernel::scan::state;
+use delta_kernel::scan::state::{visit_scan_files, DvInfo};
 use delta_kernel::scan::{transform_to_logical, Scan};
 use delta_kernel::schema::{DataType, Schema};
 use delta_kernel::{Engine, FileMeta, Table};
@@ -369,19 +370,12 @@ struct ScanFile {
     partition_values: HashMap<String, String>,
 }
 
-fn scan_data_callback(
-    batches: &mut Vec<ScanFile>,
-    path: &str,
-    size: i64,
-    _stats: Option<Stats>,
-    dv_info: DvInfo,
-    partition_values: HashMap<String, String>,
-) {
-    batches.push(ScanFile {
-        path: path.to_string(),
-        size,
-        dv_info,
-        partition_values,
+fn scan_data_callback(files: &mut Vec<ScanFile>, file: state::ScanFile<'_>) {
+    files.push(ScanFile {
+        path: file.path.to_string(),
+        size: file.size,
+        dv_info: file.dv_info,
+        partition_values: file.partition_values,
     });
 }
 
