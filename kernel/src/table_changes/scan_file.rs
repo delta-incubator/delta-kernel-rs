@@ -15,35 +15,7 @@ use crate::schema::{
     ColumnName, ColumnNamesAndTypes, DataType, MapType, SchemaRef, StructField, StructType,
 };
 use crate::utils::require;
-use crate::{DeltaResult, EngineData, Error, RowVisitor};
-
-/// A struct holding a [`CdfScanFile`] and map holding remove action paths to their deletion
-/// vectors. The [`CdfScanFile`] has a type [`CdfScanFileType`] that represents the action it was
-/// read from. Normally, a `scan_file` with type [`CdfScanFileType::Add`] produces row insertions.
-/// However the type may not be accurate due to deletion vector resolution. Add/Remove pairs are
-/// represented by a single `scan_file` with type add, and a corresponding deletion vector from the
-/// map. After resolving deletion vectors, the `scan_file` might only result in removed rows, only
-/// added rows, or both added and removed rows.
-///
-/// An [`UnresolvedCdfScanFile`] can be converted into [`ResolvedCdfScanFile`] by reading the
-/// deletion vectors, generating the correct selection vectors, and patching the [`CdfScanFileType`].
-/// This is done in `resolve_scan_file_dvs`.
-#[allow(unused)]
-#[derive(Debug)]
-pub(crate) struct UnresolvedCdfScanFile {
-    pub scan_file: CdfScanFile,
-    pub remove_dvs: Arc<HashMap<String, DvInfo>>,
-}
-
-/// A struct holding a [`CdfScanFile`] and its selection vector. The [`CdfScanFile`] has a type
-/// [`CdfScanFileType`] that represents the `_change_type` that its rows will have in the change
-/// data feed. See [`UnresolvedCdfScanFile`] for more details.
-#[allow(unused)]
-#[derive(Debug)]
-pub(crate) struct ResolvedCdfScanFile {
-    pub scan_file: CdfScanFile,
-    pub selection_vector: Option<Vec<bool>>,
-}
+use crate::{DeltaResult, Error, RowVisitor};
 
 // The type of action associated with a [`CdfScanFile`].
 #[allow(unused)]
@@ -60,16 +32,18 @@ pub(crate) enum CdfScanFileType {
 pub(crate) struct CdfScanFile {
     /// The type of action this file belongs to. This may be one of add, remove, or cdc.
     pub scan_type: CdfScanFileType,
-    /// a `&str` which is the path to the file
+    /// A `&str` which is the path to the file
     pub path: String,
-    /// a [`DvInfo`] struct, which allows getting the selection vector for this file
+    /// A [`DvInfo`] struct, which allows getting the selection vector for this file
     pub dv_info: DvInfo,
-    /// a `HashMap<String, String>` which are partition values
+    /// A `HashMap<String, String>` which are partition values
     pub partition_values: HashMap<String, String>,
-    /// the commit version that this action was performed in
+    /// The commit version that this action was performed in
     pub commit_version: i64,
-    /// the timestamp of the commit that this action was performed in
+    /// The timestamp of the commit that this action was performed in
     pub commit_timestamp: i64,
+    /// A map from a remove action's path to its deletion vector
+    pub remove_dvs: Arc<HashMap<String, DvInfo>>,
 }
 
 pub(crate) type CdfScanCallback<T> = fn(context: &mut T, scan_file: CdfScanFile);
@@ -79,24 +53,13 @@ pub(crate) type CdfScanCallback<T> = fn(context: &mut T, scan_file: CdfScanFile)
 #[allow(unused)]
 pub(crate) fn scan_data_to_scan_file(
     scan_data: impl Iterator<Item = DeltaResult<TableChangesScanData>>,
-) -> impl Iterator<Item = DeltaResult<UnresolvedCdfScanFile>> {
+) -> impl Iterator<Item = DeltaResult<CdfScanFile>> {
     scan_data
         .map(|scan_data| -> DeltaResult<_> {
             let scan_data = scan_data?;
             let callback: CdfScanCallback<Vec<CdfScanFile>> =
                 |context, scan_file| context.push(scan_file);
-            let result = visit_cdf_scan_files(
-                scan_data.scan_data.as_ref(),
-                &scan_data.selection_vector,
-                vec![],
-                callback,
-            )?
-            .into_iter()
-            .map(move |scan_file| UnresolvedCdfScanFile {
-                scan_file,
-                remove_dvs: scan_data.remove_dvs.clone(),
-            });
-            Ok(result)
+            Ok(visit_cdf_scan_files(&scan_data, vec![], callback)?.into_iter())
         }) // Iterator-Result-Iterator
         .flatten_ok() // Iterator-Result
 }
@@ -129,18 +92,18 @@ pub(crate) fn scan_data_to_scan_file(
 /// ```
 #[allow(unused)]
 pub(crate) fn visit_cdf_scan_files<T>(
-    data: &dyn EngineData,
-    selection_vector: &[bool],
+    scan_data: &TableChangesScanData,
     context: T,
     callback: CdfScanCallback<T>,
 ) -> DeltaResult<T> {
     let mut visitor = CdfScanFileVisitor {
         callback,
-        selection_vector,
         context,
+        selection_vector: &scan_data.selection_vector,
+        remove_dvs: &scan_data.remove_dvs,
     };
 
-    visitor.visit_rows_of(data)?;
+    visitor.visit_rows_of(scan_data.scan_data.as_ref())?;
     Ok(visitor.context)
 }
 
@@ -149,6 +112,7 @@ pub(crate) fn visit_cdf_scan_files<T>(
 struct CdfScanFileVisitor<'a, T> {
     callback: CdfScanCallback<T>,
     selection_vector: &'a [bool],
+    remove_dvs: &'a Arc<HashMap<String, DvInfo>>,
     context: T,
 }
 
@@ -197,6 +161,7 @@ impl<T> RowVisitor for CdfScanFileVisitor<'_, T> {
                 partition_values,
                 commit_timestamp: getters[16].get(row_index, "scanFile.timestamp")?,
                 commit_version: getters[17].get(row_index, "scanFile.commit_version")?,
+                remove_dvs: self.remove_dvs.clone(),
             };
             (self.callback)(&mut self.context, scan_file)
         }
@@ -373,7 +338,7 @@ mod tests {
             None,
         )
         .unwrap();
-        let scan_files = scan_data_to_scan_file(scan_data);
+        let scan_files: Vec<_> = scan_data_to_scan_file(scan_data).try_collect().unwrap();
 
         // Generate the expected [`CdfScanFile`]
         let timestamps = log_segment
@@ -381,6 +346,7 @@ mod tests {
             .iter()
             .map(|commit| commit.location.last_modified)
             .collect_vec();
+        let remove_dvs = Arc::new(HashMap::new());
         let expected_scan_files = vec![
             CdfScanFile {
                 scan_type: CdfScanFileType::Add,
@@ -391,6 +357,7 @@ mod tests {
                 partition_values: add.partition_values,
                 commit_version: 0,
                 commit_timestamp: timestamps[0],
+                remove_dvs: remove_dvs.clone(),
             },
             CdfScanFile {
                 scan_type: CdfScanFileType::Remove,
@@ -401,6 +368,7 @@ mod tests {
                 partition_values: remove.partition_values.unwrap(),
                 commit_version: 0,
                 commit_timestamp: timestamps[0],
+                remove_dvs: remove_dvs.clone(),
             },
             CdfScanFile {
                 scan_type: CdfScanFileType::Cdc,
@@ -411,6 +379,7 @@ mod tests {
                 partition_values: cdc.partition_values,
                 commit_version: 1,
                 commit_timestamp: timestamps[1],
+                remove_dvs: remove_dvs.clone(),
             },
             CdfScanFile {
                 scan_type: CdfScanFileType::Remove,
@@ -421,14 +390,10 @@ mod tests {
                 partition_values: HashMap::new(),
                 commit_version: 2,
                 commit_timestamp: timestamps[2],
+                remove_dvs,
             },
         ];
 
-        // Check the generated [`UnresolvedCdfScanFile`]
-        for (unresolved_scan_file, scan_file) in scan_files.zip(expected_scan_files.into_iter()) {
-            let unresolved_scan_file = unresolved_scan_file.unwrap();
-            assert_eq!(unresolved_scan_file.scan_file, scan_file);
-            assert_eq!(unresolved_scan_file.remove_dvs, HashMap::new().into());
-        }
+        assert_eq!(scan_files, expected_scan_files);
     }
 }

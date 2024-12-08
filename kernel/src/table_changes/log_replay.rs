@@ -37,7 +37,7 @@ pub(crate) struct TableChangesScanData {
     pub(crate) scan_data: Box<dyn EngineData>,
     /// The selection vector used to filter the `scan_data`.
     pub(crate) selection_vector: Vec<bool>,
-    /// An map from a remove action's path to its deletion vector
+    /// A map from a remove action's path to its deletion vector
     pub(crate) remove_dvs: Arc<HashMap<String, DvInfo>>,
 }
 
