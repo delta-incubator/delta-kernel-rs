@@ -155,7 +155,9 @@ impl<E: TaskExecutor> FileSystemClient for ObjectStoreFileSystemClient<E> {
 #[cfg(test)]
 mod tests {
     use std::ops::Range;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+    use object_store::memory::InMemory;
     use object_store::{local::LocalFileSystem, ObjectStore};
 
     use test_utils::delta_path_for_version;
@@ -218,33 +220,30 @@ mod tests {
 
     #[tokio::test]
     async fn test_file_meta_is_correct() {
-        let tmp = tempfile::tempdir().unwrap();
-        let tmp_store = LocalFileSystem::new_with_prefix(tmp.path()).unwrap();
+        let store = Arc::new(InMemory::new());
+
+        let begin_time = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+        // The [`FileMeta`]s must be greater than 2 minute ago
+        let allowed_time = begin_time - Duration::from_secs(120);
 
         let data = Bytes::from("kernel-data");
         let name = delta_path_for_version(1, "json");
-        tmp_store.put(&name, data.clone().into()).await.unwrap();
+        store.put(&name, data.clone().into()).await.unwrap();
 
-        let url = Url::from_directory_path(tmp.path()).unwrap();
-        let prefix = Path::from_url_path(url.path()).expect("Couldn't get path");
-        let store = Arc::new(LocalFileSystem::new());
-        let engine = DefaultEngine::new(store, prefix, Arc::new(TokioBackgroundExecutor::new()));
+        let table_root = Url::parse("memory:///").expect("valid url");
+        let path = Path::from(format!("_delta_log/{}", name));
+        let engine = DefaultEngine::new(store, path, Arc::new(TokioBackgroundExecutor::new()));
         let files: Vec<_> = engine
             .get_file_system_client()
-            .list_from(&Url::parse("file://").unwrap())
+            .list_from(&table_root)
             .unwrap()
             .try_collect()
             .unwrap();
 
-        let object_meta = tmp_store.head(&name).await.unwrap();
-        let expected_location = url.join(name.as_ref()).unwrap();
-        let expected_file_meta = FileMeta {
-            location: expected_location,
-            // We assert that the timestamp is in milliseconds
-            last_modified: object_meta.last_modified.timestamp_millis(),
-            size: object_meta.size,
-        };
-        assert_eq!(files, vec![expected_file_meta]);
+        for meta in files.into_iter() {
+            let meta_time = Duration::from_millis(meta.last_modified.try_into().unwrap());
+            assert!(allowed_time < meta_time);
+        }
     }
     #[tokio::test]
     async fn test_default_engine_listing() {

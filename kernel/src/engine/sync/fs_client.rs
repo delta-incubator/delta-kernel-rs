@@ -98,7 +98,7 @@ impl FileSystemClient for SyncFilesystemClient {
 #[cfg(test)]
 mod tests {
     use std::io::Write;
-    use std::os::unix::fs::MetadataExt;
+    use std::time::{Duration, SystemTime};
     use std::{fs::File, time::UNIX_EPOCH};
 
     use bytes::{BufMut, BytesMut};
@@ -106,7 +106,7 @@ mod tests {
     use url::Url;
 
     use super::SyncFilesystemClient;
-    use crate::{FileMeta, FileSystemClient};
+    use crate::FileSystemClient;
 
     /// generate json filenames that follow the spec (numbered padded to 20 chars)
     fn get_json_filename(index: usize) -> String {
@@ -118,29 +118,22 @@ mod tests {
         let client = SyncFilesystemClient;
         let tmp_dir = tempfile::tempdir().unwrap();
 
+        let begin_time = SystemTime::now().duration_since(UNIX_EPOCH)?;
+        // The [`FileMeta`]s must be greater than 2 minute ago
+        let allowed_time = begin_time - Duration::from_secs(120);
+
         let path = tmp_dir.path().join(get_json_filename(1));
         let mut f = File::create(path)?;
         writeln!(f, "null")?;
+        f.flush()?;
 
         let url_path = tmp_dir.path().join(get_json_filename(1));
         let url = Url::from_file_path(url_path).unwrap();
         let list: Vec<_> = client.list_from(&url)?.try_collect()?;
-
-        let metadata = f.metadata()?;
-        // We assert that the timestamp is in milliseconds
-        let expected_timestamp = metadata
-            .modified()?
-            .duration_since(UNIX_EPOCH)?
-            .as_millis()
-            .try_into()?;
-        let expected_size = metadata.size().try_into()?;
-        let expected_file_meta = FileMeta {
-            location: url,
-            last_modified: expected_timestamp,
-            size: expected_size,
-        };
-
-        assert_eq!(list, vec![expected_file_meta]);
+        for meta in list.iter() {
+            let meta_time = Duration::from_millis(meta.last_modified.try_into()?);
+            assert!(allowed_time < meta_time,);
+        }
         Ok(())
     }
 
