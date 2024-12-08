@@ -35,7 +35,7 @@ pub(crate) struct CdfScanFile {
     /// A `&str` which is the path to the file
     pub path: String,
     /// A [`DvInfo`] struct with the path to the action's deletion vector
-    pub add_dv: DvInfo,
+    pub dv_info: DvInfo,
     /// An optional [`DvInfo`] struct. If present, this is deletion vector of a remove action with
     /// the same path as this [`CdfScanFile`]
     pub remove_dv: Option<DvInfo>,
@@ -159,7 +159,7 @@ impl<T> RowVisitor for CdfScanFileVisitor<'_, T> {
                 remove_dv: self.remove_dvs.get(&path).cloned(),
                 scan_type,
                 path,
-                add_dv: DvInfo { deletion_vector },
+                dv_info: DvInfo { deletion_vector },
                 partition_values,
                 commit_timestamp: getters[16].get(row_index, "scanFile.timestamp")?,
                 commit_version: getters[17].get(row_index, "scanFile.commit_version")?,
@@ -263,7 +263,7 @@ mod tests {
         let engine = SyncEngine::new();
         let mut mock_table = LocalMockTable::new();
 
-        let add_dv = DeletionVectorDescriptor {
+        let dv_info = DeletionVectorDescriptor {
             storage_type: "u".to_string(),
             path_or_inline_dv: "vBn[lx{q8@P<9BNH/isA".to_string(),
             offset: Some(1),
@@ -273,7 +273,7 @@ mod tests {
         let add_partition_values = HashMap::from([("a".to_string(), "b".to_string())]);
         let add_paired = Add {
             path: "fake_path_1".into(),
-            deletion_vector: Some(add_dv.clone()),
+            deletion_vector: Some(dv_info.clone()),
             partition_values: add_partition_values,
             data_change: true,
             ..Default::default()
@@ -365,7 +365,7 @@ mod tests {
             CdfScanFile {
                 scan_type: CdfScanFileType::Add,
                 path: add_paired.path,
-                add_dv: DvInfo {
+                dv_info: DvInfo {
                     deletion_vector: add_paired.deletion_vector,
                 },
                 partition_values: add_paired.partition_values,
@@ -376,7 +376,7 @@ mod tests {
             CdfScanFile {
                 scan_type: CdfScanFileType::Remove,
                 path: remove.path,
-                add_dv: DvInfo {
+                dv_info: DvInfo {
                     deletion_vector: remove.deletion_vector,
                 },
                 partition_values: remove.partition_values.unwrap(),
@@ -387,7 +387,7 @@ mod tests {
             CdfScanFile {
                 scan_type: CdfScanFileType::Cdc,
                 path: cdc.path,
-                add_dv: DvInfo {
+                dv_info: DvInfo {
                     deletion_vector: None,
                 },
                 partition_values: cdc.partition_values,
@@ -398,7 +398,7 @@ mod tests {
             CdfScanFile {
                 scan_type: CdfScanFileType::Remove,
                 path: remove_no_partition.path,
-                add_dv: DvInfo {
+                dv_info: DvInfo {
                     deletion_vector: None,
                 },
                 partition_values: HashMap::new(),
