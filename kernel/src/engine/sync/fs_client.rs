@@ -49,26 +49,7 @@ impl FileSystemClient for SyncFilesystemClient {
             let it = all_ents
                 .into_iter()
                 .sorted_by_key(|ent| ent.path())
-                .map(|ent| {
-                    ent.metadata().map_err(Error::IOError).and_then(|metadata| {
-                        let last_modified = metadata
-                            .modified()
-                            .ok()
-                            .and_then(|modified| {
-                                modified.duration_since(SystemTime::UNIX_EPOCH).ok()
-                            })
-                            .and_then(|modified| modified.as_millis().try_into().ok())
-                            .unwrap_or(0);
-
-                        Url::from_file_path(ent.path())
-                            .map(|location| FileMeta {
-                                location,
-                                last_modified,
-                                size: metadata.len() as usize,
-                            })
-                            .map_err(|_| Error::Generic(format!("Invalid path: {:?}", ent.path())))
-                    })
-                });
+                .map(TryFrom::try_from);
             Ok(Box::new(it))
         } else {
             Err(Error::generic("Can only read local filesystem"))
