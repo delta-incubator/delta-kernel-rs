@@ -225,6 +225,8 @@ pub(crate) fn selection_treemap_to_bools(treemap: RoaringTreemap) -> Vec<bool> {
     treemap_to_bools_with(treemap, true)
 }
 
+/// helper function to generate vectors of bools from treemap. If `set_bit` is `true`, this is
+/// [`selection_treemap_to_bools`]. If `set_bit` is false, this is [`deletion_treemap_to_bools`]
 fn treemap_to_bools_with(treemap: RoaringTreemap, set_bit: bool) -> Vec<bool> {
     fn combine(high_bits: u32, low_bits: u32) -> usize {
         ((u64::from(high_bits) << 32) | u64::from(low_bits)) as usize
