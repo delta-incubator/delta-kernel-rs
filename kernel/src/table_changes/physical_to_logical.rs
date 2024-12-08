@@ -9,8 +9,14 @@ use crate::{DeltaResult, Engine, Error};
 /// match the `_change_type` that its rows will have in the change data feed.
 #[allow(unused)]
 struct ResolvedCdfScanFile {
+    /// The scan file that holds the path the data file to be read. The `scan_type` field is
+    /// resolved to the `_change_type` of the rows for this data file.
     scan_file: CdfScanFile,
-    selection_vector: Vec<bool>,
+    /// Optional vector of bools. If `selection_vector[i] = true`, then that row must be included
+    /// in the CDF output. Otherwise the row must be filtered out. The vector may be shorter than
+    /// the data file. In this case, all the remaining rows are *not* selected. If `selection_vector`
+    /// is `None`, then all rows are selected.
+    selection_vector: Option<Vec<bool>>,
 }
 
 /// Resolves the deletion vectors for a [`CdfScanFile`]. This function handles two
@@ -134,18 +140,14 @@ fn resolve_scan_file_dv(
         scan_type: CdfScanFileType::Remove,
         ..scan_file.clone()
     };
-    let adds = add_dv
-        .map(treemap_to_bools)
-        .map(|selection_vector| ResolvedCdfScanFile {
-            scan_file,
-            selection_vector,
-        });
-    let removes = rm_dv
-        .map(treemap_to_bools)
-        .map(|selection_vector| ResolvedCdfScanFile {
-            scan_file: rm_scan_file,
-            selection_vector,
-        });
+    let adds = add_dv.map(treemap_to_bools).map(|sv| ResolvedCdfScanFile {
+        scan_file,
+        selection_vector: (!sv.is_empty()).then_some(sv),
+    });
+    let removes = rm_dv.map(treemap_to_bools).map(|sv| ResolvedCdfScanFile {
+        scan_file: rm_scan_file,
+        selection_vector: (!sv.is_empty()).then_some(sv),
+    });
     Ok([removes, adds].into_iter().flatten())
 }
 
@@ -184,9 +186,13 @@ mod tests {
         }
     }
 
-    fn get_add_scan_file(dv_info: DvInfo, remove_dv: Option<DvInfo>) -> CdfScanFile {
+    fn get_scan_file(
+        scan_type: CdfScanFileType,
+        dv_info: DvInfo,
+        remove_dv: Option<DvInfo>,
+    ) -> CdfScanFile {
         CdfScanFile {
-            scan_type: CdfScanFileType::Add,
+            scan_type,
             path: "fake_path".to_string(),
             dv_info,
             remove_dv,
@@ -212,7 +218,7 @@ mod tests {
         });
         let dv_info = DvInfo { deletion_vector };
         let remove_dv = Some(Default::default());
-        let scan_file = get_add_scan_file(dv_info, remove_dv);
+        let scan_file = get_scan_file(CdfScanFileType::Add, dv_info, remove_dv);
 
         // Remove: None deleted
         // Add: DV with 0th and 9th bit set (ie deleted)
@@ -223,7 +229,7 @@ mod tests {
             .unwrap()
             .map(|file| (file.scan_file.scan_type, file.selection_vector))
             .collect_vec();
-        assert_eq!(resolved, vec![(CdfScanFileType::Remove, expected_sv)]);
+        assert_eq!(resolved, vec![(CdfScanFileType::Remove, Some(expected_sv))]);
     }
 
     #[test]
@@ -243,7 +249,7 @@ mod tests {
 
         let dv_info = Default::default();
         let remove_dv = Some(DvInfo { deletion_vector });
-        let scan_file = get_add_scan_file(dv_info, remove_dv);
+        let scan_file = get_scan_file(CdfScanFileType::Add, dv_info, remove_dv);
 
         // Remove: DV with 0th and 9th bit set (ie deleted)
         // Add: No rows deleted
@@ -254,7 +260,7 @@ mod tests {
             .unwrap()
             .map(|file| (file.scan_file.scan_type, file.selection_vector))
             .collect_vec();
-        assert_eq!(resolved, vec![(CdfScanFileType::Add, expected_sv)]);
+        assert_eq!(resolved, vec![(CdfScanFileType::Add, Some(expected_sv))]);
     }
 
     #[test]
@@ -269,7 +275,7 @@ mod tests {
 
         let dv_info = DvInfo::from(add_dv);
         let remove_dv = Some(DvInfo::from(rm_dv));
-        let scan_file = get_add_scan_file(dv_info, remove_dv);
+        let scan_file = get_scan_file(CdfScanFileType::Add, dv_info, remove_dv);
 
         let mut expected_sv = vec![false; 5];
         expected_sv[1] = true;
@@ -278,7 +284,7 @@ mod tests {
             .unwrap()
             .map(|file| (file.scan_file.scan_type, file.selection_vector))
             .collect_vec();
-        assert_eq!(resolved, vec![(CdfScanFileType::Add, expected_sv)]);
+        assert_eq!(resolved, vec![(CdfScanFileType::Add, Some(expected_sv))]);
     }
     #[test]
     fn delete_subset() {
@@ -292,7 +298,7 @@ mod tests {
 
         let dv_info = DvInfo::from(add_dv);
         let remove_dv = Some(DvInfo::from(rm_dv));
-        let scan_file = get_add_scan_file(dv_info, remove_dv);
+        let scan_file = get_scan_file(CdfScanFileType::Add, dv_info, remove_dv);
 
         let mut expected_sv = vec![false; 5];
         expected_sv[1] = true;
@@ -301,7 +307,7 @@ mod tests {
             .unwrap()
             .map(|file| (file.scan_file.scan_type, file.selection_vector))
             .collect_vec();
-        assert_eq!(resolved, vec![(CdfScanFileType::Remove, expected_sv)]);
+        assert_eq!(resolved, vec![(CdfScanFileType::Remove, Some(expected_sv))]);
     }
 
     #[test]
@@ -316,7 +322,7 @@ mod tests {
 
         let dv_info = DvInfo::from(add_dv);
         let remove_dv = Some(DvInfo::from(rm_dv));
-        let scan_file = get_add_scan_file(dv_info, remove_dv);
+        let scan_file = get_scan_file(CdfScanFileType::Add, dv_info, remove_dv);
 
         let mut rm_sv = vec![false; 2];
         rm_sv[1] = true;
@@ -330,14 +336,14 @@ mod tests {
         assert_eq!(
             resolved,
             vec![
-                (CdfScanFileType::Remove, rm_sv),
-                (CdfScanFileType::Add, add_sv)
+                (CdfScanFileType::Remove, Some(rm_sv)),
+                (CdfScanFileType::Add, Some(add_sv))
             ]
         );
     }
 
     #[test]
-    fn cdc_with_remove_dv_fails() {
+    fn cdc_and_remove_with_remove_dv_fails() {
         let engine = SyncEngine::new();
         let path =
             std::fs::canonicalize(PathBuf::from("./tests/data/table-with-dv-small/")).unwrap();
@@ -346,15 +352,7 @@ mod tests {
         let rm_dv = generate_dv(RoaringTreemap::from([0, 2]));
 
         let remove_dv = Some(DvInfo::from(rm_dv));
-        let mut scan_file = CdfScanFile {
-            scan_type: CdfScanFileType::Cdc,
-            path: "fake_path".to_string(),
-            dv_info: Default::default(),
-            remove_dv,
-            partition_values: HashMap::new(),
-            commit_version: 42,
-            commit_timestamp: 1234,
-        };
+        let mut scan_file = get_scan_file(CdfScanFileType::Cdc, Default::default(), remove_dv);
 
         let expected_err =
             Error::generic("CdfScanFile with type cdc cannot have a remove deletion vector");
@@ -380,20 +378,43 @@ mod tests {
             std::fs::canonicalize(PathBuf::from("./tests/data/table-with-dv-small/")).unwrap();
         let table_root = url::Url::from_directory_path(path).unwrap();
 
-        let scan_file = CdfScanFile {
-            scan_type: CdfScanFileType::Cdc,
-            path: "fake_path".to_string(),
-            dv_info: Default::default(),
-            remove_dv: None,
-            partition_values: HashMap::new(),
-            commit_version: 42,
-            commit_timestamp: 1234,
-        };
+        let scan_file = get_scan_file(CdfScanFileType::Cdc, Default::default(), None);
 
-        let res = resolve_scan_file_dv(&engine, &table_root, scan_file.clone())
+        let resolved = resolve_scan_file_dv(&engine, &table_root, scan_file.clone())
             .unwrap()
             .map(|file| (file.scan_file.scan_type, file.selection_vector))
             .collect_vec();
-        // TODO
+        assert_eq!(resolved, vec![(CdfScanFileType::Cdc, None),]);
+    }
+
+    #[test]
+    fn remove_file_resolution() {
+        let engine = SyncEngine::new();
+        let path =
+            std::fs::canonicalize(PathBuf::from("./tests/data/table-with-dv-small/")).unwrap();
+        let table_root = url::Url::from_directory_path(path).unwrap();
+
+        let scan_file = get_scan_file(CdfScanFileType::Remove, Default::default(), None);
+
+        let resolved = resolve_scan_file_dv(&engine, &table_root, scan_file.clone())
+            .unwrap()
+            .map(|file| (file.scan_file.scan_type, file.selection_vector))
+            .collect_vec();
+        assert_eq!(resolved, vec![(CdfScanFileType::Remove, None)]);
+    }
+    #[test]
+    fn add_file_no_dv_resolution() {
+        let engine = SyncEngine::new();
+        let path =
+            std::fs::canonicalize(PathBuf::from("./tests/data/table-with-dv-small/")).unwrap();
+        let table_root = url::Url::from_directory_path(path).unwrap();
+
+        let scan_file = get_scan_file(CdfScanFileType::Add, Default::default(), None);
+
+        let resolved = resolve_scan_file_dv(&engine, &table_root, scan_file.clone())
+            .unwrap()
+            .map(|file| (file.scan_file.scan_type, file.selection_vector))
+            .collect_vec();
+        assert_eq!(resolved, vec![(CdfScanFileType::Add, None)]);
     }
 }
