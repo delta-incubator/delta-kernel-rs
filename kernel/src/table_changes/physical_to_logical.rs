@@ -65,6 +65,8 @@ fn resolve_scan_file_dv(
             //   - _Selection_ treemaps (denoted `Treemap_s`) store the indices of selected rows.
             //     `Treemap_s(0, 1)` means that rows 0 and 1 are _selected_. This is equivalent
             //     to the selection vector [1, 1, 0] when converted into a boolean vector.
+            // In ordinary scans, only deletion treemaps are used. However in the case of deletion
+            // vector pairs, we generate selection treemaps.
             //
             // We use a motivating example to explain the deletion vector resolution. We read
             // `rm_dv` and `add_dv` from the [`CdfScanFile`]. They are initialized to the empty map
