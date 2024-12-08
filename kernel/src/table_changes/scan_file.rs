@@ -36,8 +36,9 @@ pub(crate) struct CdfScanFile {
     pub path: String,
     /// A [`DvInfo`] struct with the path to the action's deletion vector
     pub add_dv: DvInfo,
-    /// A [`DvInfo`] struct with the path to the paired remove action's deletion vector
-    pub remove_dv: DvInfo,
+    /// An optional [`DvInfo`] struct. If present, this is deletion vector of a remove action with
+    /// the same path as this [`CdfScanFile`]
+    pub remove_dv: Option<DvInfo>,
     /// A `HashMap<String, String>` which are partition values
     pub partition_values: HashMap<String, String>,
     /// The commit version that this action was performed in
@@ -154,17 +155,14 @@ impl<T> RowVisitor for CdfScanFileVisitor<'_, T> {
                     continue;
                 };
             let partition_values = partition_values.unwrap_or_else(Default::default);
-            let remove_dv = self.remove_dvs.get(&path).cloned().unwrap_or(DvInfo {
-                deletion_vector: None,
-            });
             let scan_file = CdfScanFile {
+                remove_dv: self.remove_dvs.get(&path).cloned(),
                 scan_type,
                 path,
                 add_dv: DvInfo { deletion_vector },
                 partition_values,
                 commit_timestamp: getters[16].get(row_index, "scanFile.timestamp")?,
                 commit_version: getters[17].get(row_index, "scanFile.commit_version")?,
-                remove_dv,
             };
             (self.callback)(&mut self.context, scan_file)
         }
@@ -261,7 +259,7 @@ mod tests {
     use crate::Engine;
 
     #[tokio::test]
-    async fn schema_transform_correct() {
+    async fn test_scan_file_visiting() {
         let engine = SyncEngine::new();
         let mut mock_table = LocalMockTable::new();
 
@@ -273,10 +271,17 @@ mod tests {
             cardinality: 2,
         };
         let add_partition_values = HashMap::from([("a".to_string(), "b".to_string())]);
-        let add = Add {
+        let add_paired = Add {
             path: "fake_path_1".into(),
             deletion_vector: Some(add_dv.clone()),
             partition_values: add_partition_values,
+            data_change: true,
+            ..Default::default()
+        };
+        let remove_paired = Remove {
+            path: "fake_path_1".into(),
+            deletion_vector: None,
+            partition_values: None,
             data_change: true,
             ..Default::default()
         };
@@ -313,7 +318,11 @@ mod tests {
         };
 
         mock_table
-            .commit([Action::Add(add.clone()), Action::Remove(remove.clone())])
+            .commit([
+                Action::Remove(remove_paired.clone()),
+                Action::Add(add_paired.clone()),
+                Action::Remove(remove.clone()),
+            ])
             .await;
         mock_table.commit([Action::Cdc(cdc.clone())]).await;
         mock_table
@@ -355,14 +364,14 @@ mod tests {
         let expected_scan_files = vec![
             CdfScanFile {
                 scan_type: CdfScanFileType::Add,
-                path: add.path,
+                path: add_paired.path,
                 add_dv: DvInfo {
-                    deletion_vector: add.deletion_vector,
+                    deletion_vector: add_paired.deletion_vector,
                 },
-                partition_values: add.partition_values,
+                partition_values: add_paired.partition_values,
                 commit_version: 0,
                 commit_timestamp: timestamps[0],
-                remove_dv: expected_remove_dv.clone(),
+                remove_dv: Some(expected_remove_dv),
             },
             CdfScanFile {
                 scan_type: CdfScanFileType::Remove,
@@ -373,7 +382,7 @@ mod tests {
                 partition_values: remove.partition_values.unwrap(),
                 commit_version: 0,
                 commit_timestamp: timestamps[0],
-                remove_dv: expected_remove_dv.clone(),
+                remove_dv: None,
             },
             CdfScanFile {
                 scan_type: CdfScanFileType::Cdc,
@@ -384,7 +393,7 @@ mod tests {
                 partition_values: cdc.partition_values,
                 commit_version: 1,
                 commit_timestamp: timestamps[1],
-                remove_dv: expected_remove_dv.clone(),
+                remove_dv: None,
             },
             CdfScanFile {
                 scan_type: CdfScanFileType::Remove,
@@ -395,7 +404,7 @@ mod tests {
                 partition_values: HashMap::new(),
                 commit_version: 2,
                 commit_timestamp: timestamps[2],
-                remove_dv: expected_remove_dv,
+                remove_dv: None,
             },
         ];
 
