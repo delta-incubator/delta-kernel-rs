@@ -33,7 +33,7 @@ pub(crate) fn resolve_scan_file_dv(
     table_root: &Url,
     scan_file: CdfScanFile,
 ) -> DeltaResult<impl Iterator<Item = ResolvedCdfScanFile>> {
-    let add_dv = scan_file.add_dv.get_treemap(engine, table_root)?;
+    let add_dv = scan_file.dv_info.get_treemap(engine, table_root)?;
     let rm_dv = scan_file
         .remove_dv
         .as_ref()
@@ -61,8 +61,8 @@ pub(crate) fn resolve_scan_file_dv(
             let adds = &rm_dv - &add_dv;
             let removes = add_dv - rm_dv;
             (
-                adds.is_empty().not().then_some(adds),
-                removes.is_empty().not().then_some(removes),
+                (!adds.is_empty()).then_some(adds),
+                (!removes.is_empty()).then_some(removes),
             )
         }
         (add_dv, None, CdfScanFileType::Add | CdfScanFileType::Cdc) => {
@@ -129,14 +129,12 @@ mod tests {
             cardinality: 2,
         });
         let path = "fake_path".to_string();
-        let add_dv = DvInfo { deletion_vector };
-        let remove_dv = Some(DvInfo {
-            deletion_vector: None,
-        });
+        let dv_info = DvInfo { deletion_vector };
+        let remove_dv = Some(Default::default());
         let scan_file = CdfScanFile {
             scan_type: CdfScanFileType::Add,
             path: path.clone(),
-            add_dv,
+            dv_info,
             remove_dv,
             partition_values: HashMap::new(),
             commit_version,
@@ -173,14 +171,12 @@ mod tests {
         let commit_timestamp = 1234_i64;
 
         let path = "fake_path".to_string();
-        let add_dv = DvInfo {
-            deletion_vector: None,
-        };
+        let dv_info = Default::default();
         let remove_dv = Some(DvInfo { deletion_vector });
         let scan_file = CdfScanFile {
             scan_type: CdfScanFileType::Add,
             path: path.clone(),
-            add_dv,
+            dv_info,
             remove_dv,
             partition_values: HashMap::new(),
             commit_version,
