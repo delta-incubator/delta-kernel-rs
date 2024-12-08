@@ -38,10 +38,6 @@ fn resolve_scan_file_dv(
         .as_ref()
         .map(|rm_dv| rm_dv.get_treemap(engine, table_root))
         .transpose()?;
-    println!(
-        "initial {add_dv:?}, {rm_dv:?}, scan type: {:?}",
-        scan_file.scan_type
-    );
     let (add_dv, rm_dv) = match (add_dv, rm_dv, &scan_file.scan_type) {
         (_, Some(_), CdfScanFileType::Remove) => {
             return Err(Error::generic(
@@ -56,13 +52,67 @@ fn resolve_scan_file_dv(
         (add_dv, Some(rm_dv), CdfScanFileType::Add) => {
             let add_dv = add_dv.unwrap_or_else(Default::default);
             let rm_dv = rm_dv.unwrap_or_else(Default::default);
-            // Take the symmetric difference so we don't double count rows
+            // Here we show how deletion vectors are resolved. Note that logically the `rm_dv` is the
+            // beginning state of the commit, and `add_dv` is the final state of the commit. In
+            // other words the dv went from being `rm_dv` to `add_dv`.
+            //
+            // ===== IMPORTANT =====
+            // It is important to note that `rm_dv` and `add_dv` are deletion treemaps. We specify
+            // two type of treemaps:
+            //   - _Deletion_ treemaps  (denoted `Treemap_d`) store the indices of deleted rows.
+            //     For instance, `Treemap_d(0, 2)` means that rows 0 and 2 are _deleted_. When
+            //     converted to a vector of bools, it is equivalent to a deletion vector [1, 0, 1].
+            //   - _Selection_ treemaps (denoted `Treemap_s`) store the indices of selected rows.
+            //     `Treemap_s(0, 1)` means that rows 0 and 1 are _selected_. This is equivalent
+            //     to the selection vector [1, 1, 0] when converted into a boolean vector.
+            //
+            // We use a motivating example to explain the deletion vector resolution. We read
+            // `rm_dv` and `add_dv` from the [`CdfScanFile`]. They are initialized to the empty map
+            // if no deletion vector is given.
+            //  rm_dv  = Treemap_d(0, 1)
+            //  add_dv = Treemap_d(1, 2)
+            //
+            // The result of this commit is:
+            // - row 0 is restored
+            // - row 1 is unchanged
+            // - row 2 is deleted
+            // Thus for this commit we must generate `Treemap_s(0)` for the added rows, and
+            // `Treemap_s(2)` for deleted rows.
+            //
+            //  # Insertion Selection Treemap
+            //  The selection vector of added rows is calculated using set subtraction over deletion
+            //  treemaps `rm_dv - add_dv`. These rows went from set (deleted) in `rm_dv` to unset
+            //  (restored) in the `add_dv`. All other rows are either cancelled in set subtraction,
+            //  or were not selected in either treemap. Hence, they are not selected to
+            //  be in the set of changed rows. Applying this to our deletion treemaps:
+            //  rm_dv - add_dv =
+            //      Treemap_d(0, 1)
+            //    - Treemap_d(1, 2)
+            //    = Treemap_s(0)
+            //  The selection treemap shows that row 0 was inserted
+            //
+            //  # Deletion Selection Treemap
+            //  The selection vector of deleted rows is calculated using `add_dv - rm_dv`. These rows went
+            //  from unset (present) in `rm_dv` to set (deleted) in the `add_dv`. Once again, all
+            //  other rows are either cancelled in set subtraction, or were not set in either treemap.
+            //  Applying this to our deletion vectors:
+            //  add_dv - rm_dv =
+            //      Treemap_d(1, 2)
+            //    - Treemap_d(0, 1)
+            //    = Treemap_s(2)
+            //  The selection treemap shows that row 2 was deleted
+            //
+            //  # Conversion to Selection Vector
+            //  The selection treemap is converted to a selection vector by setting the bits:
+            //      Treemap_s(0) => [true]
+            //      Treemap_s(2) => [false, false, true]
+            //  All other rows are unselected (false).
             let adds = &rm_dv - &add_dv;
             let removes = add_dv - rm_dv;
-            (
-                (!adds.is_empty()).then_some(adds),
-                (!removes.is_empty()).then_some(removes),
-            )
+
+            let adds = (!adds.is_empty()).then_some(adds);
+            let removes = (!removes.is_empty()).then_some(removes);
+            (adds, removes)
         }
         (add_dv, None, CdfScanFileType::Add | CdfScanFileType::Cdc) => {
             (Some(add_dv.unwrap_or_else(Default::default)), None)
