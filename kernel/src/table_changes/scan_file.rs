@@ -30,20 +30,20 @@ pub(crate) enum CdfScanFileType {
 #[allow(unused)]
 #[derive(Debug, PartialEq, Clone)]
 pub(crate) struct CdfScanFile {
-    /// The type of action this file belongs to. This may be one of add, remove, or cdc.
+    /// The type of action this file belongs to. This may be one of add, remove, or cdc
     pub scan_type: CdfScanFileType,
     /// A `&str` which is the path to the file
     pub path: String,
-    /// A [`DvInfo`] struct, which allows getting the selection vector for this file
-    pub dv_info: DvInfo,
+    /// A [`DvInfo`] struct with the path to the action's deletion vector
+    pub add_dv: DvInfo,
+    /// A [`DvInfo`] struct with the path to the paired remove action's deletion vector
+    pub remove_dv: DvInfo,
     /// A `HashMap<String, String>` which are partition values
     pub partition_values: HashMap<String, String>,
     /// The commit version that this action was performed in
     pub commit_version: i64,
     /// The timestamp of the commit that this action was performed in
     pub commit_timestamp: i64,
-    /// A map from a remove action's path to its deletion vector
-    pub remove_dvs: Arc<HashMap<String, DvInfo>>,
 }
 
 pub(crate) type CdfScanCallback<T> = fn(context: &mut T, scan_file: CdfScanFile);
@@ -154,14 +154,17 @@ impl<T> RowVisitor for CdfScanFileVisitor<'_, T> {
                     continue;
                 };
             let partition_values = partition_values.unwrap_or_else(Default::default);
+            let remove_dv = self.remove_dvs.get(&path).cloned().unwrap_or(DvInfo {
+                deletion_vector: None,
+            });
             let scan_file = CdfScanFile {
                 scan_type,
                 path,
-                dv_info: DvInfo { deletion_vector },
+                add_dv: DvInfo { deletion_vector },
                 partition_values,
                 commit_timestamp: getters[16].get(row_index, "scanFile.timestamp")?,
                 commit_version: getters[17].get(row_index, "scanFile.commit_version")?,
-                remove_dvs: self.remove_dvs.clone(),
+                remove_dv,
             };
             (self.callback)(&mut self.context, scan_file)
         }
@@ -346,51 +349,53 @@ mod tests {
             .iter()
             .map(|commit| commit.location.last_modified)
             .collect_vec();
-        let remove_dvs = Arc::new(HashMap::new());
+        let expected_remove_dv = DvInfo {
+            deletion_vector: None,
+        };
         let expected_scan_files = vec![
             CdfScanFile {
                 scan_type: CdfScanFileType::Add,
                 path: add.path,
-                dv_info: DvInfo {
+                add_dv: DvInfo {
                     deletion_vector: add.deletion_vector,
                 },
                 partition_values: add.partition_values,
                 commit_version: 0,
                 commit_timestamp: timestamps[0],
-                remove_dvs: remove_dvs.clone(),
+                remove_dv: expected_remove_dv.clone(),
             },
             CdfScanFile {
                 scan_type: CdfScanFileType::Remove,
                 path: remove.path,
-                dv_info: DvInfo {
+                add_dv: DvInfo {
                     deletion_vector: remove.deletion_vector,
                 },
                 partition_values: remove.partition_values.unwrap(),
                 commit_version: 0,
                 commit_timestamp: timestamps[0],
-                remove_dvs: remove_dvs.clone(),
+                remove_dv: expected_remove_dv.clone(),
             },
             CdfScanFile {
                 scan_type: CdfScanFileType::Cdc,
                 path: cdc.path,
-                dv_info: DvInfo {
+                add_dv: DvInfo {
                     deletion_vector: None,
                 },
                 partition_values: cdc.partition_values,
                 commit_version: 1,
                 commit_timestamp: timestamps[1],
-                remove_dvs: remove_dvs.clone(),
+                remove_dv: expected_remove_dv.clone(),
             },
             CdfScanFile {
                 scan_type: CdfScanFileType::Remove,
                 path: remove_no_partition.path,
-                dv_info: DvInfo {
+                add_dv: DvInfo {
                     deletion_vector: None,
                 },
                 partition_values: HashMap::new(),
                 commit_version: 2,
                 commit_timestamp: timestamps[2],
-                remove_dvs,
+                remove_dv: expected_remove_dv,
             },
         ];
 
