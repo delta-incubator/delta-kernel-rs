@@ -12,7 +12,7 @@ use crate::{DeltaResult, Error, Expression};
 use super::scan_file::{CdfScanFile, CdfScanFileType};
 
 #[allow(unused)]
-fn get_generated_columns(scan_file: &CdfScanFile) -> DeltaResult<HashMap<String, Expression>> {
+fn get_generated_columns(scan_file: &CdfScanFile) -> DeltaResult<HashMap<&str, Expression>> {
     let timestamp = Scalar::timestamp_from_millis(scan_file.commit_timestamp)?;
     let version = scan_file.commit_version;
     let change_type: Expression = match scan_file.scan_type {
@@ -22,9 +22,9 @@ fn get_generated_columns(scan_file: &CdfScanFile) -> DeltaResult<HashMap<String,
         CdfScanFileType::Remove => "delete".into(),
     };
     let expressions = [
-        ("_change_type".to_string(), change_type),
-        ("_commit_version".to_string(), Expression::literal(version)),
-        ("_commit_timestamp".to_string(), timestamp.into()),
+        ("_change_type", change_type),
+        ("_commit_version", Expression::literal(version)),
+        ("_commit_timestamp", timestamp.into()),
     ];
     Ok(expressions.into_iter().collect())
 }
@@ -53,7 +53,7 @@ fn get_expression(
             }
             ColumnType::Selected(field_name) => {
                 // Remove to take ownership
-                let generated_column = generated_columns.remove(field_name);
+                let generated_column = generated_columns.remove(field_name.as_str());
                 Ok(generated_column.unwrap_or_else(|| ColumnName::new([field_name]).into()))
             }
         })
