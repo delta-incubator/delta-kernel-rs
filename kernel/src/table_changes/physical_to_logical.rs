@@ -11,20 +11,19 @@ struct ResolvedCdfScanFile {
     selection_vector: Vec<bool>,
 }
 
-/// Resolves the deletion vectors for an [`UnresolvedCdfScanFile`]. This function handles two
+/// Resolves the deletion vectors for a [`CdfScanFile`]. This function handles two
 /// types of `CdfScanFile`s:
 /// 1. The first case is a [`CdfScanFile`] paired with a remove deletion vector. The `scan_type`
 ///    must be [`CdfScanFileType::Add`]. In this case, both the add and remove deletion vectors are
-///    read if they exist. Then, we find the set of rows in the scan file that have been added, and
-///    the set of rows that have been removed. The set of removed rows (if any) will be represented
-///    by a [`ResolvedCdfScanFile`] with `scan_type` = [`CdfScanFileType::Remove`]. The set of
-///    added rows (if any) will be represented by a [`ResolvedCdfScanFile`] with `scan_type` =
-///    [`CdfScanFileType::Add`].
+///    read if they exist. Then, we find the set of rows in the that have been added, and  rows that
+///    have been removed. The set of removed rows (if any) will be represented by a
+///    [`ResolvedCdfScanFile`] with `scan_type` = [`CdfScanFileType::Remove`]. The set of added rows
+///    (if any) will be  represented by a [`ResolvedCdfScanFile`] with `scan_type` = [`CdfScanFileType::Add`].
 ///
-///    Note: We allow the possibility for there to be both added rows, and removed rows for a
+///    Note: We allow the possibility for there to be both added rows and removed rows for a
 ///    single add/remove pair.
 /// 2. The second case handles all other add, remove, and cdc [`CdfScanFile`]s. These will simply
-///    have the deletion vector read (if present), and each is converted into a [`ResolvedCdfScanFile`].
+///    read the deletion vector (if present), and each is converted into a [`ResolvedCdfScanFile`].
 ///    No changes are made to the `scan_type`.
 #[allow(unused)]
 fn resolve_scan_file_dv(
