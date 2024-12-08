@@ -223,8 +223,8 @@ mod tests {
         let store = Arc::new(InMemory::new());
 
         let begin_time = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-        // The [`FileMeta`]s must be greater than 2 minute ago
-        let allowed_time = begin_time - Duration::from_secs(120);
+        // The [`FileMeta`]s must be greater than 1 minute ago
+        let allowed_time = begin_time - Duration::from_secs(60);
 
         let data = Bytes::from("kernel-data");
         let name = delta_path_for_version(1, "json");

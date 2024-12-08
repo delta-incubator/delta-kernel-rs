@@ -119,8 +119,8 @@ mod tests {
         let tmp_dir = tempfile::tempdir().unwrap();
 
         let begin_time = SystemTime::now().duration_since(UNIX_EPOCH)?;
-        // The [`FileMeta`]s must be greater than 2 minute ago
-        let allowed_time = begin_time - Duration::from_secs(120);
+        // The [`FileMeta`]s must be greater than 1 minute ago
+        let allowed_time = begin_time - Duration::from_secs(60);
 
         let path = tmp_dir.path().join(get_json_filename(1));
         let mut f = File::create(path)?;
