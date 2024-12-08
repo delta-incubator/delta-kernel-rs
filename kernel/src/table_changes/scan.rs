@@ -3,6 +3,7 @@ use std::sync::Arc;
 use itertools::Itertools;
 use tracing::debug;
 
+use crate::scan::state::GlobalScanState;
 use crate::scan::ColumnType;
 use crate::schema::{SchemaRef, StructType};
 use crate::{DeltaResult, Engine, ExpressionRef};
@@ -187,6 +188,20 @@ impl TableChangesScan {
             .clone();
         let schema = self.table_changes.end_snapshot.schema().clone().into();
         table_changes_action_iter(engine, commits, schema, self.predicate.clone())
+    }
+
+    /// Get global state that is valid for the entire scan. This is somewhat expensive so should
+    /// only be called once per scan.
+    #[allow(unused)]
+    fn global_scan_state(&self) -> GlobalScanState {
+        let end_snapshot = &self.table_changes.end_snapshot;
+        GlobalScanState {
+            table_root: self.table_changes.table_root.to_string(),
+            partition_columns: end_snapshot.metadata().partition_columns.clone(),
+            logical_schema: self.logical_schema.clone(),
+            read_schema: self.physical_schema.clone(),
+            column_mapping_mode: end_snapshot.column_mapping_mode,
+        }
     }
 }
 
