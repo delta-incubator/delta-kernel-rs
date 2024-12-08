@@ -108,7 +108,8 @@ pub(crate) fn visit_cdf_scan_files<T>(
     Ok(visitor.context)
 }
 
-// add some visitor magic for engines
+/// A visitor that extracts [`CdfScanFile`]s from engine data. Expects data to have the schema
+/// [`cdf_scan_row_schema`].
 #[allow(unused)]
 struct CdfScanFileVisitor<'a, T> {
     callback: CdfScanCallback<T>,
