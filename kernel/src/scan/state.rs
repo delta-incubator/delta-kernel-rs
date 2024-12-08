@@ -34,6 +34,14 @@ pub struct DvInfo {
     pub(crate) deletion_vector: Option<DeletionVectorDescriptor>,
 }
 
+impl From<DeletionVectorDescriptor> for DvInfo {
+    fn from(deletion_vector: DeletionVectorDescriptor) -> Self {
+        DvInfo {
+            deletion_vector: Some(deletion_vector),
+        }
+    }
+}
+
 /// Give engines an easy way to consume stats
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
