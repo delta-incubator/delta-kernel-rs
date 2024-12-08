@@ -16,7 +16,7 @@ use crate::utils::require;
 use crate::{DeltaResult, Engine, Error, Version};
 
 mod log_replay;
-mod physical_to_logical;
+mod resolve_dvs;
 pub mod scan;
 mod scan_file;
 
