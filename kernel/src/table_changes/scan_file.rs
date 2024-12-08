@@ -29,6 +29,7 @@ use crate::{DeltaResult, EngineData, Error, RowVisitor};
 /// deletion vectors, generating the correct selection vectors, and patching the [`CdfScanFileType`].
 /// This is done in `resolve_scan_file_dvs`.
 #[allow(unused)]
+#[derive(Debug)]
 pub(crate) struct UnresolvedCdfScanFile {
     pub scan_file: CdfScanFile,
     pub remove_dvs: Arc<HashMap<String, DvInfo>>,
@@ -276,21 +277,20 @@ pub(crate) fn cdf_scan_row_expression(commit_timestamp: i64, commit_number: i64)
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::sync::Arc;
 
     use itertools::Itertools;
 
-    use super::CdfScanFileType;
-    use super::{
-        cdf_scan_row_expression, cdf_scan_row_schema, visit_cdf_scan_files, CdfScanCallback,
-        CdfScanFile,
-    };
+    use super::{scan_data_to_scan_file, CdfScanFile, CdfScanFileType};
     use crate::actions::deletion_vector::DeletionVectorDescriptor;
-    use crate::actions::{get_log_schema, Add, Cdc, Remove};
+    use crate::actions::{Add, Cdc, Remove};
     use crate::engine::sync::SyncEngine;
     use crate::log_segment::LogSegment;
     use crate::scan::state::DvInfo;
+    use crate::schema::{DataType, StructField, StructType};
+    use crate::table_changes::log_replay::table_changes_action_iter;
     use crate::utils::test_utils::{Action, LocalMockTable};
-    use crate::{DeltaResult, Engine};
+    use crate::Engine;
 
     #[tokio::test]
     async fn schema_transform_correct() {
@@ -309,6 +309,7 @@ mod tests {
             path: "fake_path_1".into(),
             deletion_vector: Some(add_dv.clone()),
             partition_values: add_partition_values,
+            data_change: true,
             ..Default::default()
         };
 
@@ -324,6 +325,7 @@ mod tests {
             path: "fake_path_2".into(),
             deletion_vector: Some(rm_dv),
             partition_values: rm_partition_values,
+            data_change: true,
             ..Default::default()
         };
 
@@ -338,57 +340,47 @@ mod tests {
             path: "fake_path_2".into(),
             deletion_vector: None,
             partition_values: None,
+            data_change: true,
             ..Default::default()
         };
 
         mock_table
-            .commit([
-                Action::Add(add.clone()),
-                Action::Remove(remove.clone()),
-                Action::Cdc(cdc.clone()),
-                Action::Remove(remove_no_partition.clone()),
-            ])
+            .commit([Action::Add(add.clone()), Action::Remove(remove.clone())])
+            .await;
+        mock_table.commit([Action::Cdc(cdc.clone())]).await;
+        mock_table
+            .commit([Action::Remove(remove_no_partition.clone())])
             .await;
 
+        // Read the table and generate [`TableChangesScanData`]
         let table_root = url::Url::from_directory_path(mock_table.table_root()).unwrap();
         let log_root = table_root.join("_delta_log/").unwrap();
-        let log_segment =
-            LogSegment::for_table_changes(engine.get_file_system_client().as_ref(), log_root, 0, 0)
-                .unwrap();
-        let commit = log_segment.ascending_commit_files[0].clone();
+        let log_segment = LogSegment::for_table_changes(
+            engine.get_file_system_client().as_ref(),
+            log_root,
+            0,
+            None,
+        )
+        .unwrap();
+        let table_schema = StructType::new([
+            StructField::new("id", DataType::INTEGER, true),
+            StructField::new("value", DataType::STRING, true),
+        ]);
+        let scan_data = table_changes_action_iter(
+            Arc::new(engine),
+            log_segment.ascending_commit_files.clone(),
+            table_schema.into(),
+            None,
+        )
+        .unwrap();
+        let scan_files = scan_data_to_scan_file(scan_data);
 
-        let actions = engine
-            .get_json_handler()
-            .read_json_files(&[commit.location.clone()], get_log_schema().clone(), None)
-            .unwrap();
-
-        // Transform the engine data into the [`cdf_scan_row_schema`] and insert
-        // the following timestamp and commit version.
-        let commit_timestamp = 1234_i64;
-        let commit_version = 42_i64;
-        let scan_files: Vec<_> = actions
-            .map_ok(|actions| {
-                engine
-                    .get_expression_handler()
-                    .get_evaluator(
-                        get_log_schema().clone(),
-                        cdf_scan_row_expression(commit_timestamp, commit_version),
-                        cdf_scan_row_schema().into(),
-                    )
-                    .evaluate(actions.as_ref())
-                    .unwrap()
-            })
-            .map(|data| -> DeltaResult<_> {
-                let data = data?;
-                let selection_vector = vec![true; data.len()];
-                let callback: CdfScanCallback<Vec<CdfScanFile>> =
-                    |context, scan_file| context.push(scan_file);
-                visit_cdf_scan_files(data.as_ref(), &selection_vector, vec![], callback)
-            })
-            .flatten_ok()
-            .try_collect()
-            .unwrap();
-
+        // Generate the expected [`CdfScanFile`]
+        let timestamps = log_segment
+            .ascending_commit_files
+            .iter()
+            .map(|commit| commit.location.last_modified)
+            .collect_vec();
         let expected_scan_files = vec![
             CdfScanFile {
                 scan_type: CdfScanFileType::Add,
@@ -397,8 +389,8 @@ mod tests {
                     deletion_vector: add.deletion_vector,
                 },
                 partition_values: add.partition_values,
-                commit_version,
-                commit_timestamp,
+                commit_version: 0,
+                commit_timestamp: timestamps[0],
             },
             CdfScanFile {
                 scan_type: CdfScanFileType::Remove,
@@ -407,8 +399,8 @@ mod tests {
                     deletion_vector: remove.deletion_vector,
                 },
                 partition_values: remove.partition_values.unwrap(),
-                commit_version,
-                commit_timestamp,
+                commit_version: 0,
+                commit_timestamp: timestamps[0],
             },
             CdfScanFile {
                 scan_type: CdfScanFileType::Cdc,
@@ -417,8 +409,8 @@ mod tests {
                     deletion_vector: None,
                 },
                 partition_values: cdc.partition_values,
-                commit_version,
-                commit_timestamp,
+                commit_version: 1,
+                commit_timestamp: timestamps[1],
             },
             CdfScanFile {
                 scan_type: CdfScanFileType::Remove,
@@ -427,10 +419,16 @@ mod tests {
                     deletion_vector: None,
                 },
                 partition_values: HashMap::new(),
-                commit_version,
-                commit_timestamp,
+                commit_version: 2,
+                commit_timestamp: timestamps[2],
             },
         ];
-        assert_eq!(expected_scan_files, scan_files);
+
+        // Check the generated [`UnresolvedCdfScanFile`]
+        for (unresolved_scan_file, scan_file) in scan_files.zip(expected_scan_files.into_iter()) {
+            let unresolved_scan_file = unresolved_scan_file.unwrap();
+            assert_eq!(unresolved_scan_file.scan_file, scan_file);
+            assert_eq!(unresolved_scan_file.remove_dvs, HashMap::new().into());
+        }
     }
 }
