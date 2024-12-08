@@ -5,6 +5,8 @@ use crate::actions::deletion_vector::{deletion_treemap_to_bools, selection_treem
 use crate::table_changes::scan_file::CdfScanFile;
 use crate::{DeltaResult, Engine, Error};
 
+/// A [`CdfScanFile`] with its associated `selection_vector`. The `scan_type` is resolved to
+/// match the `_change_type` that its rows will have in the change data feed.
 #[allow(unused)]
 struct ResolvedCdfScanFile {
     scan_file: CdfScanFile,
@@ -369,5 +371,29 @@ mod tests {
             .err()
             .unwrap();
         assert_eq!(res.to_string(), expected_err.to_string());
+    }
+
+    #[test]
+    fn cdc_file_resolution() {
+        let engine = SyncEngine::new();
+        let path =
+            std::fs::canonicalize(PathBuf::from("./tests/data/table-with-dv-small/")).unwrap();
+        let table_root = url::Url::from_directory_path(path).unwrap();
+
+        let scan_file = CdfScanFile {
+            scan_type: CdfScanFileType::Cdc,
+            path: "fake_path".to_string(),
+            dv_info: Default::default(),
+            remove_dv: None,
+            partition_values: HashMap::new(),
+            commit_version: 42,
+            commit_timestamp: 1234,
+        };
+
+        let res = resolve_scan_file_dv(&engine, &table_root, scan_file.clone())
+            .unwrap()
+            .map(|file| (file.scan_file.scan_type, file.selection_vector))
+            .collect_vec();
+        // TODO
     }
 }
