@@ -138,7 +138,6 @@ mod tests {
 
     use arrow::compute::filter_record_batch;
     use arrow_array::RecordBatch;
-    use arrow_cast::pretty::pretty_format_batches;
     use itertools::Itertools;
 
     use crate::engine::arrow_data::ArrowEngineData;
