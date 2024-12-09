@@ -223,8 +223,6 @@ mod tests {
         let store = Arc::new(InMemory::new());
 
         let begin_time = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-        // The [`FileMeta`]s must be greater than 1 minute ago
-        let allowed_begin_time = begin_time - Duration::from_secs(60);
 
         let data = Bytes::from("kernel-data");
         let name = delta_path_for_version(1, "json");
@@ -240,15 +238,10 @@ mod tests {
             .try_collect()
             .unwrap();
 
-        let end_time = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-        // The [`FileMeta`]s must be less than one minute in the future
-        let allowed_end_time = end_time + Duration::from_secs(60);
-
         assert!(!files.is_empty());
         for meta in files.into_iter() {
             let meta_time = Duration::from_millis(meta.last_modified.try_into().unwrap());
-            assert!(allowed_begin_time < meta_time);
-            assert!(meta_time < allowed_end_time);
+            assert!(meta_time.abs_diff(begin_time) < Duration::from_secs(10));
         }
     }
     #[tokio::test]

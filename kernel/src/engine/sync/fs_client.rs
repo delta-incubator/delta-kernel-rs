@@ -98,8 +98,6 @@ mod tests {
         let tmp_dir = tempfile::tempdir().unwrap();
 
         let begin_time = SystemTime::now().duration_since(UNIX_EPOCH)?;
-        // The [`FileMeta`]s must be greater than 1 minute ago
-        let allowed_begin_time = begin_time - Duration::from_secs(60);
 
         let path = tmp_dir.path().join(get_json_filename(1));
         let mut f = File::create(path)?;
@@ -110,15 +108,10 @@ mod tests {
         let url = Url::from_file_path(url_path).unwrap();
         let files: Vec<_> = client.list_from(&url)?.try_collect()?;
 
-        let end_time = SystemTime::now().duration_since(UNIX_EPOCH)?;
-        // The [`FileMeta`]s must be less than one minute in the future
-        let allowed_end_time = end_time + Duration::from_secs(60);
-
         assert!(!files.is_empty());
         for meta in files.iter() {
             let meta_time = Duration::from_millis(meta.last_modified.try_into()?);
-            assert!(allowed_begin_time < meta_time);
-            assert!(meta_time < allowed_end_time);
+            assert!(meta_time.abs_diff(begin_time) < Duration::from_secs(10));
         }
         Ok(())
     }
