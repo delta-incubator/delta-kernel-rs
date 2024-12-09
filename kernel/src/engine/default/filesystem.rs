@@ -224,15 +224,15 @@ mod tests {
 
         let begin_time = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
         // The [`FileMeta`]s must be greater than 1 minute ago
-        let allowed_time = begin_time - Duration::from_secs(60);
+        let allowed_begin_time = begin_time - Duration::from_secs(60);
 
         let data = Bytes::from("kernel-data");
         let name = delta_path_for_version(1, "json");
         store.put(&name, data.clone().into()).await.unwrap();
 
         let table_root = Url::parse("memory:///").expect("valid url");
-        let path = Path::from(format!("_delta_log/{}", name));
-        let engine = DefaultEngine::new(store, path, Arc::new(TokioBackgroundExecutor::new()));
+        let prefix = Path::from_url_path(table_root.path()).expect("Couldn't get path");
+        let engine = DefaultEngine::new(store, prefix, Arc::new(TokioBackgroundExecutor::new()));
         let files: Vec<_> = engine
             .get_file_system_client()
             .list_from(&table_root)
@@ -240,9 +240,15 @@ mod tests {
             .try_collect()
             .unwrap();
 
+        let end_time = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+        // The [`FileMeta`]s must be less than one minute in the future
+        let allowed_end_time = end_time + Duration::from_secs(60);
+
+        assert!(!files.is_empty());
         for meta in files.into_iter() {
             let meta_time = Duration::from_millis(meta.last_modified.try_into().unwrap());
-            assert!(allowed_time < meta_time);
+            assert!(allowed_begin_time < meta_time);
+            assert!(meta_time < allowed_end_time);
         }
     }
     #[tokio::test]
