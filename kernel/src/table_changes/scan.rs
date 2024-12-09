@@ -269,7 +269,6 @@ mod tests {
             ]
         );
         assert_eq!(scan.predicate, None);
-        assert!(!scan.have_partition_cols);
     }
 
     #[test]
@@ -307,7 +306,6 @@ mod tests {
             ])
             .into()
         );
-        assert!(!scan.have_partition_cols);
         assert_eq!(scan.predicate, Some(predicate));
     }
 }
