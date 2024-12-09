@@ -330,7 +330,6 @@ mod tests {
             .commit([Action::Remove(remove_no_partition.clone())])
             .await;
 
-        // Read the table and generate [`TableChangesScanData`]
         let table_root = url::Url::from_directory_path(mock_table.table_root()).unwrap();
         let log_root = table_root.join("_delta_log/").unwrap();
         let log_segment = LogSegment::for_table_changes(
