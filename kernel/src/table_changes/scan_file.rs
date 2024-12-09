@@ -1,4 +1,4 @@
-//! This module handles [`CdfScanFile`]s for [`TableChangeScan`]. A [`CdfScanFile`] consists of all the
+//! This module handles [`CdfScanFile`]s for [`TableChangesScan`]. A [`CdfScanFile`] consists of all the
 //! metadata required to generate a change data feed. [`CdfScanFile`] can be constructed using
 //! [`CdfScanFileVisitor`]. The visitor reads from engine data with the schema [`cdf_scan_row_schema`].
 //! You can convert engine data to this schema using the [`cdf_scan_row_expression`].
@@ -49,8 +49,8 @@ pub(crate) struct CdfScanFile {
 
 pub(crate) type CdfScanCallback<T> = fn(context: &mut T, scan_file: CdfScanFile);
 
-/// Transforms an iterator of TableChangesScanData into an iterator  of
-/// `UnresolvedCdfScanFile` by visiting the engine data.
+/// Transforms an iterator of [`TableChangesScanData`] into an iterator of
+/// [`CdfScanFile`] by visiting the engine data.
 #[allow(unused)]
 pub(crate) fn scan_data_to_scan_file(
     scan_data: impl Iterator<Item = DeltaResult<TableChangesScanData>>,
@@ -101,7 +101,7 @@ pub(crate) fn visit_cdf_scan_files<T>(
         callback,
         context,
         selection_vector: &scan_data.selection_vector,
-        remove_dvs: &scan_data.remove_dvs,
+        remove_dvs: scan_data.remove_dvs.as_ref(),
     };
 
     visitor.visit_rows_of(scan_data.scan_data.as_ref())?;
@@ -114,7 +114,7 @@ pub(crate) fn visit_cdf_scan_files<T>(
 struct CdfScanFileVisitor<'a, T> {
     callback: CdfScanCallback<T>,
     selection_vector: &'a [bool],
-    remove_dvs: &'a Arc<HashMap<String, DvInfo>>,
+    remove_dvs: &'a HashMap<String, DvInfo>,
     context: T,
 }
 
@@ -218,7 +218,7 @@ pub(crate) fn cdf_scan_row_schema() -> SchemaRef {
 }
 
 /// Expression to convert an action with `log_schema` into one with
-/// `TABLE_CHANGES_cdf_scan_row_schema`. This is the expression used to create `TableChangesScanData`.
+/// [`cdf_scan_row_schema`]. This is the expression used to create [`TableChangesScanData`].
 #[allow(unused)]
 pub(crate) fn cdf_scan_row_expression(commit_timestamp: i64, commit_number: i64) -> Expression {
     Expression::struct_from([
@@ -330,7 +330,6 @@ mod tests {
             .commit([Action::Remove(remove_no_partition.clone())])
             .await;
 
-        // Read the table and generate [`TableChangesScanData`]
         let table_root = url::Url::from_directory_path(mock_table.table_root()).unwrap();
         let log_root = table_root.join("_delta_log/").unwrap();
         let log_segment = LogSegment::for_table_changes(
