@@ -144,18 +144,21 @@ mod tests {
     use crate::engine::arrow_data::ArrowEngineData;
     use crate::engine::default::executor::tokio::TokioBackgroundExecutor;
     use crate::engine::default::DefaultEngine;
-    use crate::{DeltaResult, Error, Table};
+    use crate::{DeltaResult, Error, Table, Version};
 
-    #[test]
-    fn basic_cdf() -> Result<(), Box<dyn error::Error>> {
-        let table = Table::try_from_uri("tests/data/table-with-cdf-and-dv")?;
+    fn read_cdf_for_table(
+        path: impl AsRef<str>,
+        start_version: Version,
+        end_version: impl Into<Option<Version>>,
+    ) -> DeltaResult<String> {
+        let table = Table::try_from_uri(path)?;
         let options = HashMap::from([("skip_signature", "true".to_string())]);
         let engine = Arc::new(DefaultEngine::try_new(
             table.location(),
             options,
             Arc::new(TokioBackgroundExecutor::new()),
         )?);
-        let table_changes = table.table_changes(engine.as_ref(), 0, None)?;
+        let table_changes = table.table_changes(engine.as_ref(), start_version, end_version)?;
 
         let x = table_changes.into_scan_builder().build()?;
         let batches: Vec<RecordBatch> = x
@@ -177,6 +180,12 @@ mod tests {
             })
             .try_collect()?;
         let formatted = pretty_format_batches(&batches)?.to_string();
+        Ok(formatted)
+    }
+
+    #[test]
+    fn basic_cdf() -> Result<(), Box<dyn error::Error>> {
+        let cdf = read_cdf_for_table("tests/data/table-with-cdf-and-dv", 0, None)?;
         let expected = concat!(
             "+-------+--------------+-----------------+--------------------------+\n",
             "| value | _change_type | _commit_version | _commit_timestamp        |\n",
@@ -197,7 +206,7 @@ mod tests {
             "| 9     | insert       | 2               | 1970-01-21T01:35:06.498Z |\n",
             "+-------+--------------+-----------------+--------------------------+"
         );
-        assert_eq!(expected, formatted);
+        assert_eq!(expected, cdf);
         Ok(())
     }
 }
