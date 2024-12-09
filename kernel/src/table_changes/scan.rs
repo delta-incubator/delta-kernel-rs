@@ -4,11 +4,14 @@ use itertools::Itertools;
 use tracing::debug;
 
 use crate::scan::state::GlobalScanState;
-use crate::scan::ColumnType;
+use crate::scan::{ColumnType, ScanResult};
 use crate::schema::{SchemaRef, StructType};
 use crate::{DeltaResult, Engine, ExpressionRef};
 
 use super::log_replay::{table_changes_action_iter, TableChangesScanData};
+use super::physical_to_logical::read_scan_data;
+use super::resolve_dvs::resolve_scan_file_dv;
+use super::scan_file::scan_data_to_scan_file;
 use super::{TableChanges, CDF_FIELDS};
 
 /// The result of building a [`TableChanges`] scan over a table. This can be used to get a change
