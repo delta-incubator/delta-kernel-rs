@@ -44,12 +44,15 @@ struct LogReplayScanner {
 struct AddRemoveDedupVisitor<'seen> {
     seen: &'seen mut HashSet<FileActionKey>,
     selection_vector: Vec<bool>,
+    transforms: Vec<Expression>,
     is_log_batch: bool,
 }
 
 impl AddRemoveDedupVisitor<'_> {
     /// Checks if log replay already processed this logical file (in which case the current action
     /// should be ignored). If not already seen, register it so we can recognize future duplicates.
+    /// Returns `true` if we have seen the file and should ignore it, `false` if we have not seen it
+    /// and should process it.
     fn check_and_record_seen(&mut self, key: FileActionKey) -> bool {
         // Note: each (add.path + add.dv_unique_id()) pair has a
         // unique Add + Remove pair in the log. For example:
@@ -83,11 +86,11 @@ impl AddRemoveDedupVisitor<'_> {
         // have a remove with a path at index 4. In either case, extract the three dv getters at
         // indexes that immediately follow a valid path index.
         let (path, dv_getters, is_add) = if let Some(path) = getters[0].get_str(i, "add.path")? {
-            (path, &getters[1..4], true)
+            (path, &getters[2..5], true)
         } else if !self.is_log_batch {
             return Ok(false);
-        } else if let Some(path) = getters[4].get_opt(i, "remove.path")? {
-            (path, &getters[5..8], false)
+        } else if let Some(path) = getters[5].get_opt(i, "remove.path")? {
+            (path, &getters[6..9], false)
         } else {
             return Ok(false);
         };
@@ -103,7 +106,11 @@ impl AddRemoveDedupVisitor<'_> {
 
         // Process both adds and removes, but only return not already-seen adds
         let file_key = FileActionKey::new(path, dv_unique_id);
-        Ok(!self.check_and_record_seen(file_key) && is_add)
+        let have_seen = self.check_and_record_seen(file_key);
+        if !have_seen {
+            // compute a transform for it here
+        }
+        Ok(!have_seen && is_add)
     }
 }
 
@@ -113,8 +120,10 @@ impl RowVisitor for AddRemoveDedupVisitor<'_> {
         static NAMES_AND_TYPES: LazyLock<ColumnNamesAndTypes> = LazyLock::new(|| {
             const STRING: DataType = DataType::STRING;
             const INTEGER: DataType = DataType::INTEGER;
+            let ss_map: DataType = MapType::new(STRING, STRING, true).into();
             let types_and_names = vec![
                 (STRING, column_name!("add.path")),
+                (ss_map, column_name!("add.partitionValues")),
                 (STRING, column_name!("add.deletionVector.storageType")),
                 (STRING, column_name!("add.deletionVector.pathOrInlineDv")),
                 (INTEGER, column_name!("add.deletionVector.offset")),
@@ -132,12 +141,12 @@ impl RowVisitor for AddRemoveDedupVisitor<'_> {
         } else {
             // All checkpoint actions are already reconciled and Remove actions in checkpoint files
             // only serve as tombstones for vacuum jobs. So we only need to examine the adds here.
-            (&names[..4], &types[..4])
+            (&names[..5], &types[..5])
         }
     }
 
     fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<()> {
-        let expected_getters = if self.is_log_batch { 8 } else { 4 };
+        let expected_getters = if self.is_log_batch { 9 } else { 5 };
         require!(
             getters.len() == expected_getters,
             Error::InternalError(format!(
@@ -224,6 +233,7 @@ impl LogReplayScanner {
         let mut visitor = AddRemoveDedupVisitor {
             seen: &mut self.seen,
             selection_vector,
+            transforms: vec!(),
             is_log_batch,
         };
         visitor.visit_rows_of(actions)?;
