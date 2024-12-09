@@ -81,6 +81,7 @@ fn main() -> ExitCode {
 struct ScanFile {
     path: String,
     size: i64,
+    stats: Option<Stats>,
     partition_values: HashMap<String, String>,
     dv_info: DvInfo,
 }
@@ -105,19 +106,13 @@ fn truncate_batch(batch: RecordBatch, rows: usize) -> RecordBatch {
 }
 
 // This is the callback that will be called fo each valid scan row
-fn send_scan_file(
-    scan_tx: &mut spmc::Sender<ScanFile>,
-    path: &str,
-    size: i64,
-    _stats: Option<Stats>,
-    dv_info: DvInfo,
-    partition_values: HashMap<String, String>,
-) {
+fn send_scan_file(scan_tx: &mut spmc::Sender<ScanFile>, file: delta_kernel::scan::state::ScanFile) {
     let scan_file = ScanFile {
-        path: path.to_string(),
-        size,
-        partition_values,
-        dv_info,
+        path: file.path.to_string(),
+        size: file.size,
+        stats: file.stats,
+        partition_values: file.partition_values,
+        dv_info: file.dv_info,
     };
     scan_tx.send(scan_file).unwrap();
 }
