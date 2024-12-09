@@ -289,7 +289,7 @@ fn list_log_files(
 
     Ok(fs_client
         .list_from(&start_from)?
-        .map(|meta| meta.map(|m| ParsedLogPath::try_from(m).ok().and_then(identity)))
+        .map(|meta| meta.map(|m| ParsedLogPath::try_from(m).ok().flatten()))
         .filter_map_ok(identity)
         .filter(|path_res| {
             path_res
