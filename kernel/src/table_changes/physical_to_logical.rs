@@ -38,7 +38,7 @@ fn get_generated_columns(scan_file: &CdfScanFile) -> DeltaResult<HashMap<&str, E
 #[allow(unused)]
 fn get_expression(
     scan_file: &CdfScanFile,
-    global_state: &GlobalScanState,
+    logical_schema: &StructType,
     all_fields: &[ColumnType],
 ) -> DeltaResult<Expression> {
     let mut generated_columns = get_generated_columns(scan_file)?;
@@ -46,7 +46,7 @@ fn get_expression(
         .iter()
         .map(|field| match field {
             ColumnType::Partition(field_idx) => {
-                let field = global_state.logical_schema.fields.get_index(*field_idx);
+                let field = logical_schema.fields.get_index(*field_idx);
                 let Some((_, field)) = field else {
                     return Err(Error::generic(
                         "logical schema did not contain expected field, can't transform data",
@@ -69,17 +69,13 @@ fn get_expression(
 
 /// Gets the physical schema that will be used to read data in the `scan_file` path.
 #[allow(unused)]
-fn get_read_schema(scan_file: &CdfScanFile, global_scan_state: &GlobalScanState) -> SchemaRef {
+fn get_read_schema(scan_file: &CdfScanFile, read_schema: &StructType) -> SchemaRef {
     if scan_file.scan_type == CdfScanFileType::Cdc {
         let change_type = StructField::new("_change_type", DataType::STRING, false);
-        let fields = global_scan_state
-            .read_schema
-            .fields()
-            .cloned()
-            .chain(iter::once(change_type));
+        let fields = read_schema.fields().cloned().chain(iter::once(change_type));
         StructType::new(fields).into()
     } else {
-        global_scan_state.read_schema.clone()
+        read_schema.clone().into()
     }
 }
 
@@ -98,8 +94,8 @@ pub(crate) fn read_scan_data(
         mut selection_vector,
     } = resolved_scan_file;
 
-    let expression = get_expression(&scan_file, global_state, all_fields)?;
-    let schema = get_read_schema(&scan_file, global_state);
+    let expression = get_expression(&scan_file, global_state.logical_schema.as_ref(), all_fields)?;
+    let schema = get_read_schema(&scan_file, global_state.read_schema.as_ref());
     let evaluator = engine.get_expression_handler().get_evaluator(
         schema.clone(),
         expression,
@@ -137,4 +133,59 @@ pub(crate) fn read_scan_data(
         Ok(result)
     });
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use crate::expressions::{column_expr, Expression, Scalar};
+    use crate::scan::ColumnType;
+    use crate::schema::{DataType, StructField, StructType};
+    use crate::table_changes::scan_file::{CdfScanFile, CdfScanFileType};
+
+    use super::get_expression;
+
+    #[test]
+    fn add_get_expression() {
+        let test = |scan_type, expected_expr| {
+            let scan_file = CdfScanFile {
+                scan_type,
+                path: "fake_path".to_string(),
+                dv_info: Default::default(),
+                remove_dv: None,
+                partition_values: HashMap::from([("age".to_string(), "20".to_string())]),
+                commit_version: 42,
+                commit_timestamp: 1234,
+            };
+            let logical_schema = StructType::new([
+                StructField::new("id", DataType::STRING, true),
+                StructField::new("age", DataType::LONG, false),
+                StructField::new("_change_type", DataType::STRING, false),
+                StructField::new("_commit_version", DataType::LONG, false),
+                StructField::new("_commit_timestamp", DataType::TIMESTAMP, false),
+            ]);
+            let all_fields = vec![
+                ColumnType::Selected("id".to_string()),
+                ColumnType::Partition(1),
+                ColumnType::Selected("_change_type".to_string()),
+                ColumnType::Selected("_commit_version".to_string()),
+                ColumnType::Selected("_commit_timestamp".to_string()),
+            ];
+            let expression = get_expression(&scan_file, &logical_schema, &all_fields).unwrap();
+            let expected = Expression::struct_from([
+                column_expr!("id"),
+                Scalar::Long(20).into(),
+                expected_expr,
+                Expression::literal(42i64),
+                Scalar::Timestamp(1234000).into(), // Microsecond is 1000x millisecond
+            ]);
+
+            assert_eq!(expression, expected)
+        };
+
+        test(CdfScanFileType::Add, "insert".into());
+        test(CdfScanFileType::Remove, "delete".into());
+        test(CdfScanFileType::Cdc, column_expr!("_change_type"));
+    }
 }
