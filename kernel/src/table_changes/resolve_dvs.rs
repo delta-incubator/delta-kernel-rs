@@ -64,8 +64,7 @@ fn resolve_scan_file_dv(
             // other words the dv went from being `rm_dv` to `add_dv`.
             //
             // ===== IMPORTANT =====
-            // It is important to note that `rm_dv` and `add_dv` are deletion treemaps. We define
-            // two type of treemaps:
+            // Both `rm_dv` and `add_dv` are deletion treemaps. We define two types of treemaps:
             //   - _Deletion_ treemaps  (denoted `Treemap_d`) store the indices of deleted rows.
             //     For instance, `Treemap_d(0, 2)` means that rows 0 and 2 are _deleted_. When
             //     converted to a vector of bools, it is equivalent to a deletion vector [1, 0, 1].
@@ -83,8 +82,8 @@ fn resolve_scan_file_dv(
             //
             // The result of this commit is:
             // - row 0 is restored
-            // - row 1 is unchanged
-            // - row 2 is deleted
+            // - row 1 is unchanged (previously deleted)
+            // - row 2 is newly deleted
             // Thus for this commit we must generate `Treemap_s(0)` for the added rows, and
             // `Treemap_s(2)` for deleted rows.
             //
@@ -136,18 +135,21 @@ fn resolve_scan_file_dv(
         deletion_treemap_to_bools
     };
 
-    let rm_scan_file = CdfScanFile {
-        scan_type: CdfScanFileType::Remove,
-        ..scan_file.clone()
-    };
-    let adds = add_dv.map(treemap_to_bools).map(|sv| ResolvedCdfScanFile {
+    let resolve = |scan_file, sv: Vec<bool>| ResolvedCdfScanFile {
         scan_file,
         selection_vector: (!sv.is_empty()).then_some(sv),
+    };
+
+    let removes = rm_dv.map(treemap_to_bools).map(|sv| {
+        let scan_file = CdfScanFile {
+            scan_type: CdfScanFileType::Remove,
+            ..scan_file.clone()
+        };
+        resolve(scan_file, sv)
     });
-    let removes = rm_dv.map(treemap_to_bools).map(|sv| ResolvedCdfScanFile {
-        scan_file: rm_scan_file,
-        selection_vector: (!sv.is_empty()).then_some(sv),
-    });
+    let adds = add_dv
+        .map(treemap_to_bools)
+        .map(|sv| resolve(scan_file, sv));
     Ok([removes, adds].into_iter().flatten())
 }
 

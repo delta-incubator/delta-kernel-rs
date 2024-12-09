@@ -36,9 +36,8 @@ pub struct DvInfo {
 
 impl From<DeletionVectorDescriptor> for DvInfo {
     fn from(deletion_vector: DeletionVectorDescriptor) -> Self {
-        DvInfo {
-            deletion_vector: Some(deletion_vector),
-        }
+        let deletion_vector = Some(deletion_vector);
+        DvInfo { deletion_vector }
     }
 }
 
