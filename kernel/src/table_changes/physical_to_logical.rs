@@ -184,7 +184,7 @@ mod tests {
     }
 
     #[test]
-    fn basic_cdf() -> Result<(), Box<dyn error::Error>> {
+    fn cdf_with_deletion_vector() -> Result<(), Box<dyn error::Error>> {
         let cdf = read_cdf_for_table("tests/data/table-with-cdf-and-dv", 0, None)?;
         let expected = concat!(
             "+-------+--------------+-----------------+--------------------------+\n",
@@ -207,6 +207,41 @@ mod tests {
             "+-------+--------------+-----------------+--------------------------+"
         );
         assert_eq!(expected, cdf);
+        Ok(())
+    }
+    #[test]
+    fn basic_cdf() -> Result<(), Box<dyn error::Error>> {
+        let cdf = read_cdf_for_table("tests/data/cdf-table", 0, None)?;
+        let expected = r#"
+             +----+--------+------------------+-----------------+-------------------------+------------+
+             | id | name   | _change_type     | _commit_version | _commit_timestamp       | birthday   |
+             +----+--------+------------------+-----------------+-------------------------+------------+
+             | 7  | Dennis | delete           | 3               | 2024-01-06T16:44:59.570 | 2023-12-29 |
+             | 3  | Dave   | update_preimage  | 1               | 2023-12-22T17:10:21.675 | 2023-12-23 |
+             | 4  | Kate   | update_preimage  | 1               | 2023-12-22T17:10:21.675 | 2023-12-23 |
+             | 2  | Bob    | update_preimage  | 1               | 2023-12-22T17:10:21.675 | 2023-12-23 |
+             | 7  | Dennis | update_preimage  | 2               | 2023-12-29T21:41:33.785 | 2023-12-24 |
+             | 5  | Emily  | update_preimage  | 2               | 2023-12-29T21:41:33.785 | 2023-12-24 |
+             | 6  | Carl   | update_preimage  | 2               | 2023-12-29T21:41:33.785 | 2023-12-24 |
+             | 7  | Dennis | update_postimage | 2               | 2023-12-29T21:41:33.785 | 2023-12-29 |
+             | 5  | Emily  | update_postimage | 2               | 2023-12-29T21:41:33.785 | 2023-12-29 |
+             | 6  | Carl   | update_postimage | 2               | 2023-12-29T21:41:33.785 | 2023-12-29 |
+             | 3  | Dave   | update_postimage | 1               | 2023-12-22T17:10:21.675 | 2023-12-22 |
+             | 4  | Kate   | update_postimage | 1               | 2023-12-22T17:10:21.675 | 2023-12-22 |
+             | 2  | Bob    | update_postimage | 1               | 2023-12-22T17:10:21.675 | 2023-12-22 |
+             | 2  | Bob    | insert           | 0               | 2023-12-22T17:10:18.828 | 2023-12-23 |
+             | 3  | Dave   | insert           | 0               | 2023-12-22T17:10:18.828 | 2023-12-23 |
+             | 4  | Kate   | insert           | 0               | 2023-12-22T17:10:18.828 | 2023-12-23 |
+             | 5  | Emily  | insert           | 0               | 2023-12-22T17:10:18.828 | 2023-12-24 |
+             | 6  | Carl   | insert           | 0               | 2023-12-22T17:10:18.828 | 2023-12-24 |
+             | 7  | Dennis | insert           | 0               | 2023-12-22T17:10:18.828 | 2023-12-24 |
+             | 1  | Steve  | insert           | 0               | 2023-12-22T17:10:18.828 | 2023-12-22 |
+             | 8  | Claire | insert           | 0               | 2023-12-22T17:10:18.828 | 2023-12-25 |
+             | 9  | Ada    | insert           | 0               | 2023-12-22T17:10:18.828 | 2023-12-25 |
+             | 10 | Borb   | insert           | 0               | 2023-12-22T17:10:18.828 | 2023-12-25 |
+             +----+--------+------------------+-----------------+-------------------------+------------+
+    "#;
+        //TODO
         Ok(())
     }
 }
