@@ -539,7 +539,7 @@ fn test_list_files_with_unusual_patterns() {
     assert!(result.is_ok(), "list_log_files should not fail");
 
     // Collect the results and verify
-    let paths: Vec<_> = result.unwrap().collect::<Result<Vec<_>, _>>().unwrap();
+    let paths: Vec<_> = result.unwrap().try_collect().unwrap();
 
     // We should find exactly one file (the valid commit)
     assert_eq!(paths.len(), 1, "Should find exactly one valid file");
