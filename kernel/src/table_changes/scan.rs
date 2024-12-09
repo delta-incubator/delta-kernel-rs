@@ -203,6 +203,43 @@ impl TableChangesScan {
             column_mapping_mode: end_snapshot.column_mapping_mode,
         }
     }
+
+    /// Perform an "all in one" scan to get the change data feed. This will use the provided `engine`
+    /// to read and process all the data for the query. Each [`ScanResult`] in the resultant iterator
+    /// encapsulates the raw data and an optional boolean vector built from the deletion vector if it
+    /// was present. See the documentation for [`ScanResult`] for more details.
+    pub fn execute(
+        &self,
+        engine: Arc<dyn Engine>,
+    ) -> DeltaResult<impl Iterator<Item = DeltaResult<ScanResult>>> {
+        let scan_data = self.scan_data(engine.clone())?;
+        let scan_files = scan_data_to_scan_file(scan_data);
+
+        let global_scan_state = self.global_scan_state();
+        let table_root = self.table_changes.table_root().clone();
+        let all_fields = self.all_fields.clone();
+        let predicate = self.predicate.clone();
+        let dv_engine_ref = engine.clone();
+
+        let result = scan_files
+            .map(move |scan_file| {
+                resolve_scan_file_dv(dv_engine_ref.as_ref(), &table_root, scan_file?)
+            }) // Iterator-Result-Iterator
+            .flatten_ok() // Iterator-Result
+            .map(move |resolved_scan_file| -> DeltaResult<_> {
+                read_scan_data(
+                    engine.as_ref(),
+                    resolved_scan_file?,
+                    &global_scan_state,
+                    &all_fields,
+                    predicate.clone(),
+                )
+            }) // Iterator-Result-Iterator-Result
+            .flatten_ok() // Iterator-Result-Result
+            .map(|x| x?); // Iterator-Result
+
+        Ok(result)
+    }
 }
 
 #[cfg(test)]
