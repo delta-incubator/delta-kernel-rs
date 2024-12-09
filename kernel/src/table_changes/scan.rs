@@ -4,11 +4,14 @@ use itertools::Itertools;
 use tracing::debug;
 
 use crate::scan::state::GlobalScanState;
-use crate::scan::ColumnType;
+use crate::scan::{ColumnType, ScanResult};
 use crate::schema::{SchemaRef, StructType};
 use crate::{DeltaResult, Engine, ExpressionRef};
 
 use super::log_replay::{table_changes_action_iter, TableChangesScanData};
+use super::physical_to_logical::read_scan_data;
+use super::resolve_dvs::resolve_scan_file_dv;
+use super::scan_file::scan_data_to_scan_file;
 use super::{TableChanges, CDF_FIELDS};
 
 /// The result of building a [`TableChanges`] scan over a table. This can be used to get a change
@@ -202,6 +205,39 @@ impl TableChangesScan {
             read_schema: self.physical_schema.clone(),
             column_mapping_mode: end_snapshot.column_mapping_mode,
         }
+    }
+
+    pub fn execute(
+        &self,
+        engine: Arc<dyn Engine>,
+    ) -> DeltaResult<impl Iterator<Item = DeltaResult<ScanResult>>> {
+        let scan_data = self.scan_data(engine.clone())?;
+        let scan_files = scan_data_to_scan_file(scan_data);
+
+        let global_scan_state = self.global_scan_state();
+        let table_root = self.table_changes.table_root().clone();
+        let all_fields = self.all_fields.clone();
+        let predicate = self.predicate.clone();
+        let dv_engine_ref = engine.clone();
+
+        let result = scan_files
+            .map(move |scan_file| {
+                resolve_scan_file_dv(dv_engine_ref.as_ref(), &table_root, scan_file?)
+            }) // Iterator-Result-Iterator
+            .flatten_ok() // Iterator-Result
+            .map(move |resolved_scan_file| -> DeltaResult<_> {
+                read_scan_data(
+                    engine.as_ref(),
+                    resolved_scan_file?,
+                    &global_scan_state,
+                    &all_fields,
+                    predicate.clone(),
+                )
+            }) // Iterator-Result-Iterator-Result
+            .flatten_ok() // Iterator-Result-Result
+            .map(|x| x?); // Iterator-Result
+
+        Ok(result)
     }
 }
 

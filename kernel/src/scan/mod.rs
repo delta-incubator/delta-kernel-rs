@@ -125,7 +125,7 @@ pub struct ScanResult {
     pub raw_data: DeltaResult<Box<dyn EngineData>>,
     /// Raw row mask.
     // TODO(nick) this should be allocated by the engine
-    raw_mask: Option<Vec<bool>>,
+    pub(crate) raw_mask: Option<Vec<bool>>,
 }
 
 impl ScanResult {
@@ -160,7 +160,7 @@ impl ScanResult {
 /// store the name of the column, as that's all that's needed during the actual query. For
 /// `Partition` we store an index into the logical schema for this query since later we need the
 /// data type as well to materialize the partition column.
-#[derive(PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug)]
 pub enum ColumnType {
     // A column, selected from the data, as is
     Selected(String),
