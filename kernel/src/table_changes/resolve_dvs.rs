@@ -64,7 +64,7 @@ fn resolve_scan_file_dv(
             // other words the dv went from being `rm_dv` to `add_dv`.
             //
             // ===== IMPORTANT =====
-            // It is important to note that `rm_dv` and `add_dv` are deletion treemaps. We specify
+            // It is important to note that `rm_dv` and `add_dv` are deletion treemaps. We define
             // two type of treemaps:
             //   - _Deletion_ treemaps  (denoted `Treemap_d`) store the indices of deleted rows.
             //     For instance, `Treemap_d(0, 2)` means that rows 0 and 2 are _deleted_. When
@@ -76,7 +76,7 @@ fn resolve_scan_file_dv(
             // vector pairs, we generate selection treemaps.
             //
             // We use a motivating example to explain the deletion vector resolution. We read
-            // `rm_dv` and `add_dv` from the [`CdfScanFile`]. They are initialized to the empty map
+            // `rm_dv` and `add_dv`, and they are initialized to the empty map by default.
             // if no deletion vector is given.
             //  rm_dv  = Treemap_d(0, 1)
             //  add_dv = Treemap_d(1, 2)
@@ -169,7 +169,7 @@ mod tests {
 
     use super::resolve_scan_file_dv;
 
-    fn generate_dv(map: RoaringTreemap) -> DeletionVectorDescriptor {
+    fn treemap_to_dv_descriptor(map: RoaringTreemap) -> DeletionVectorDescriptor {
         let buf = Vec::new();
         let mut writer = buf.writer();
         let magic: u32 = 1681511377;
@@ -270,8 +270,8 @@ mod tests {
             std::fs::canonicalize(PathBuf::from("./tests/data/table-with-dv-small/")).unwrap();
         let table_root = url::Url::from_directory_path(path).unwrap();
 
-        let rm_dv = generate_dv(RoaringTreemap::from([0, 1, 4, 5]));
-        let add_dv = generate_dv(RoaringTreemap::from([0, 5]));
+        let rm_dv = treemap_to_dv_descriptor(RoaringTreemap::from([0, 1, 4, 5]));
+        let add_dv = treemap_to_dv_descriptor(RoaringTreemap::from([0, 5]));
 
         let dv_info = DvInfo::from(add_dv);
         let remove_dv = Some(DvInfo::from(rm_dv));
@@ -293,8 +293,8 @@ mod tests {
             std::fs::canonicalize(PathBuf::from("./tests/data/table-with-dv-small/")).unwrap();
         let table_root = url::Url::from_directory_path(path).unwrap();
 
-        let rm_dv = generate_dv(RoaringTreemap::from([0, 5]));
-        let add_dv = generate_dv(RoaringTreemap::from([0, 1, 4, 5]));
+        let rm_dv = treemap_to_dv_descriptor(RoaringTreemap::from([0, 5]));
+        let add_dv = treemap_to_dv_descriptor(RoaringTreemap::from([0, 1, 4, 5]));
 
         let dv_info = DvInfo::from(add_dv);
         let remove_dv = Some(DvInfo::from(rm_dv));
@@ -317,8 +317,8 @@ mod tests {
             std::fs::canonicalize(PathBuf::from("./tests/data/table-with-dv-small/")).unwrap();
         let table_root = url::Url::from_directory_path(path).unwrap();
 
-        let rm_dv = generate_dv(RoaringTreemap::from([0, 2]));
-        let add_dv = generate_dv(RoaringTreemap::from([0, 1]));
+        let rm_dv = treemap_to_dv_descriptor(RoaringTreemap::from([0, 2]));
+        let add_dv = treemap_to_dv_descriptor(RoaringTreemap::from([0, 1]));
 
         let dv_info = DvInfo::from(add_dv);
         let remove_dv = Some(DvInfo::from(rm_dv));
@@ -349,7 +349,7 @@ mod tests {
             std::fs::canonicalize(PathBuf::from("./tests/data/table-with-dv-small/")).unwrap();
         let table_root = url::Url::from_directory_path(path).unwrap();
 
-        let rm_dv = generate_dv(RoaringTreemap::from([0, 2]));
+        let rm_dv = treemap_to_dv_descriptor(RoaringTreemap::from([0, 2]));
 
         let remove_dv = Some(DvInfo::from(rm_dv));
         let mut scan_file = get_scan_file(CdfScanFileType::Cdc, Default::default(), remove_dv);

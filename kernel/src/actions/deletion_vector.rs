@@ -392,7 +392,7 @@ mod tests {
     }
 
     // this test is ignored by default as it's expensive to allocate such big vecs full of `true`. you can run it via:
-    // cargo test actions::deletion_vector::tests::test_dv_to_bools -- --ignored    #[test]
+    // cargo test actions::deletion_vector::tests::test_dv_to_bools -- --ignored
     #[test]
     #[ignore]
     fn test_dv_to_bools() {
