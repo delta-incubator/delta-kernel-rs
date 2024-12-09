@@ -7,8 +7,7 @@ use crate::{DeltaResult, Engine, Error};
 
 /// A [`CdfScanFile`] with its associated `selection_vector`. The `scan_type` is resolved to
 /// match the `_change_type` that its rows will have in the change data feed.
-#[allow(unused)]
-struct ResolvedCdfScanFile {
+pub(crate) struct ResolvedCdfScanFile {
     /// The scan file that holds the path the data file to be read. The `scan_type` field is
     /// resolved to the `_change_type` of the rows for this data file.
     scan_file: CdfScanFile,
@@ -33,8 +32,7 @@ struct ResolvedCdfScanFile {
 /// 2. The second case handles all other add, remove, and cdc [`CdfScanFile`]s. These will simply
 ///    read the deletion vector (if present), and each is converted into a [`ResolvedCdfScanFile`].
 ///    No changes are made to the `scan_type`.
-#[allow(unused)]
-fn resolve_scan_file_dv(
+pub(crate) fn resolve_scan_file_dv(
     engine: &dyn Engine,
     table_root: &Url,
     scan_file: CdfScanFile,

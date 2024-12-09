@@ -9,14 +9,12 @@ use crate::schema::{SchemaRef, StructType};
 use crate::{DeltaResult, Engine, ExpressionRef};
 
 use super::log_replay::{table_changes_action_iter, TableChangesScanData};
-use super::physical_to_logical::read_scan_data;
 use super::resolve_dvs::resolve_scan_file_dv;
 use super::scan_file::scan_data_to_scan_file;
 use super::{TableChanges, CDF_FIELDS};
 
 /// The result of building a [`TableChanges`] scan over a table. This can be used to get a change
 /// data feed from the table
-#[allow(unused)]
 #[derive(Debug)]
 pub struct TableChangesScan {
     // The [`TableChanges`] that specifies this scan's start and end versions
@@ -32,8 +30,6 @@ pub struct TableChangesScan {
     predicate: Option<ExpressionRef>,
     // The [`ColumnType`] of all the fields in the `logical_schema`
     all_fields: Vec<ColumnType>,
-    // `true` if any column in the `logical_schema` is a partition column
-    have_partition_cols: bool,
 }
 
 /// This builder constructs a [`TableChangesScan`] that can be used to read the [`TableChanges`]
@@ -118,7 +114,6 @@ impl TableChangesScanBuilder {
         let logical_schema = self
             .schema
             .unwrap_or_else(|| self.table_changes.schema.clone().into());
-        let mut have_partition_cols = false;
         let mut read_fields = Vec::with_capacity(logical_schema.fields.len());
 
         // Loop over all selected fields. We produce the following:
@@ -141,7 +136,6 @@ impl TableChangesScanBuilder {
                     // Store the index into the schema for this field. When we turn it into an
                     // expression in the inner loop, we will index into the schema and get the name and
                     // data type, which we need to properly materialize the column.
-                    have_partition_cols = true;
                     Ok(ColumnType::Partition(index))
                 } else if CDF_FIELDS
                     .iter()
@@ -167,7 +161,6 @@ impl TableChangesScanBuilder {
             logical_schema,
             predicate: self.predicate,
             all_fields,
-            have_partition_cols,
             physical_schema: StructType::new(read_fields).into(),
         })
     }
@@ -179,7 +172,6 @@ impl TableChangesScan {
     /// necessary to read CDF. Additionally, [`TableChangesScanData`] holds metadata on the
     /// deletion vectors present in the commit. The engine data in each scan data is guaranteed
     /// to belong to the same commit. Several [`TableChangesScanData`] may belong to the same commit.
-    #[allow(unused)]
     fn scan_data(
         &self,
         engine: Arc<dyn Engine>,
@@ -195,7 +187,6 @@ impl TableChangesScan {
 
     /// Get global state that is valid for the entire scan. This is somewhat expensive so should
     /// only be called once per scan.
-    #[allow(unused)]
     fn global_scan_state(&self) -> GlobalScanState {
         let end_snapshot = &self.table_changes.end_snapshot;
         GlobalScanState {
