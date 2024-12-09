@@ -14,6 +14,7 @@ use crate::{DeltaResult, Engine, Error, Expression, ExpressionRef, FileMeta};
 use super::resolve_dvs::ResolvedCdfScanFile;
 use super::scan_file::{CdfScanFile, CdfScanFileType};
 
+/// Returns a map from change data feed column name to an expression that generates the row data.
 #[allow(unused)]
 fn get_generated_columns(scan_file: &CdfScanFile) -> DeltaResult<HashMap<&str, Expression>> {
     let timestamp = Scalar::timestamp_from_millis(scan_file.commit_timestamp)?;
@@ -32,6 +33,8 @@ fn get_generated_columns(scan_file: &CdfScanFile) -> DeltaResult<HashMap<&str, E
     Ok(expressions.into_iter().collect())
 }
 
+/// Generates the expression used to convert physical data from the `scan_file` path into logical
+/// data matching the `global_state.logical_schema`
 #[allow(unused)]
 fn get_expression(
     scan_file: &CdfScanFile,
@@ -63,7 +66,8 @@ fn get_expression(
         .try_collect()?;
     Ok(Expression::Struct(all_fields))
 }
-#[allow(unused)]
+
+/// Gets the physical schema that will be used to read data in the `scan_file` path.
 fn read_schema(scan_file: &CdfScanFile, global_scan_state: &GlobalScanState) -> SchemaRef {
     if scan_file.scan_type == CdfScanFileType::Cdc {
         let change_type = StructField::new("_change_type", DataType::STRING, false);
@@ -78,6 +82,8 @@ fn read_schema(scan_file: &CdfScanFile, global_scan_state: &GlobalScanState) -> 
     }
 }
 
+/// Reads the data at the `resolved_scan_file` and transforms the data from physical to logical.
+/// The result is a fallible iterator of [`ScanResult`] containing the logical data.
 pub(crate) fn read_scan_data(
     engine: &dyn Engine,
     resolved_scan_file: ResolvedCdfScanFile,
