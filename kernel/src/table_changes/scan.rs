@@ -6,7 +6,7 @@ use url::Url;
 
 use crate::actions::deletion_vector::split_vector;
 use crate::scan::state::GlobalScanState;
-use crate::scan::{ColumnType, ScanResult};
+use crate::scan::{ColumnType, PhysicalPredicate, ScanResult};
 use crate::schema::{SchemaRef, StructType};
 use crate::{DeltaResult, Engine, ExpressionRef, FileMeta};
 
@@ -30,7 +30,7 @@ pub struct TableChangesScan {
     // Data Feed
     physical_schema: SchemaRef,
     // The predicate to filter the data
-    predicate: Option<ExpressionRef>,
+    physical_predicate: PhysicalPredicate,
     // The [`ColumnType`] of all the fields in the `logical_schema`
     all_fields: Arc<Vec<ColumnType>>,
 }
@@ -159,10 +159,15 @@ impl TableChangesScanBuilder {
                 }
             })
             .try_collect()?;
+        let physical_predicate = match self.predicate {
+            Some(predicate) => PhysicalPredicate::try_new(&predicate, &logical_schema)?,
+            None => PhysicalPredicate::None,
+        };
+
         Ok(TableChangesScan {
             table_changes: self.table_changes,
             logical_schema,
-            predicate: self.predicate,
+            physical_predicate,
             all_fields: Arc::new(all_fields),
             physical_schema: StructType::new(read_fields).into(),
         })
@@ -184,8 +189,15 @@ impl TableChangesScan {
             .log_segment
             .ascending_commit_files
             .clone();
+        // NOTE: This is a cheap arc clone
+        let physical_predicate = match self.physical_predicate.clone() {
+            PhysicalPredicate::StaticSkipAll => return Ok(None.into_iter().flatten()),
+            PhysicalPredicate::Some(predicate, schema) => Some((predicate, schema)),
+            PhysicalPredicate::None => None,
+        };
         let schema = self.table_changes.end_snapshot.schema().clone().into();
-        table_changes_action_iter(engine, commits, schema, self.predicate.clone())
+        let it = table_changes_action_iter(engine, commits, schema, physical_predicate)?;
+        Ok(Some(it).into_iter().flatten())
     }
 
     /// Get global state that is valid for the entire scan. This is somewhat expensive so should
@@ -198,6 +210,15 @@ impl TableChangesScan {
             logical_schema: self.logical_schema.clone(),
             read_schema: self.physical_schema.clone(),
             column_mapping_mode: end_snapshot.column_mapping_mode,
+        }
+    }
+
+    /// Get the predicate [`Expression`] of the scan.
+    fn physical_predicate(&self) -> Option<ExpressionRef> {
+        if let PhysicalPredicate::Some(ref predicate, _) = self.physical_predicate {
+            Some(predicate.clone())
+        } else {
+            None
         }
     }
 
@@ -215,7 +236,7 @@ impl TableChangesScan {
         let global_scan_state = self.global_scan_state();
         let table_root = self.table_changes.table_root().clone();
         let all_fields = self.all_fields.clone();
-        let predicate = self.predicate.clone();
+        let physical_predicate = self.physical_predicate();
         let dv_engine_ref = engine.clone();
 
         let result = scan_files
@@ -229,7 +250,7 @@ impl TableChangesScan {
                     resolved_scan_file?,
                     &global_scan_state,
                     &all_fields,
-                    predicate.clone(),
+                    physical_predicate.clone(),
                 )
             }) // Iterator-Result-Iterator-Result
             .flatten_ok() // Iterator-Result-Result
@@ -246,7 +267,7 @@ fn read_scan_file(
     resolved_scan_file: ResolvedCdfScanFile,
     global_state: &GlobalScanState,
     all_fields: &[ColumnType],
-    predicate: Option<ExpressionRef>,
+    physical_predicate: Option<ExpressionRef>,
 ) -> DeltaResult<impl Iterator<Item = DeltaResult<ScanResult>>> {
     let ResolvedCdfScanFile {
         scan_file,
@@ -269,10 +290,11 @@ fn read_scan_file(
         size: 0,
         location,
     };
-    let read_result_iter =
-        engine
-            .get_parquet_handler()
-            .read_parquet_files(&[file], physical_schema, predicate)?;
+    let read_result_iter = engine.get_parquet_handler().read_parquet_files(
+        &[file],
+        physical_schema,
+        physical_predicate,
+    )?;
 
     let result = read_result_iter.map(move |batch| -> DeltaResult<_> {
         let batch = batch?;
@@ -301,7 +323,7 @@ mod tests {
 
     use crate::engine::sync::SyncEngine;
     use crate::expressions::{column_expr, Scalar};
-    use crate::scan::ColumnType;
+    use crate::scan::{ColumnType, PhysicalPredicate};
     use crate::schema::{DataType, StructField, StructType};
     use crate::table_changes::COMMIT_VERSION_COL_NAME;
     use crate::{Expression, Table};
@@ -328,7 +350,7 @@ mod tests {
             ]
             .into()
         );
-        assert_eq!(scan.predicate, None);
+        assert_eq!(scan.physical_predicate, PhysicalPredicate::None);
     }
 
     #[test]
@@ -367,6 +389,12 @@ mod tests {
             ])
             .into()
         );
-        assert_eq!(scan.predicate, Some(predicate));
+        assert_eq!(
+            scan.physical_predicate,
+            PhysicalPredicate::Some(
+                predicate,
+                StructType::new([StructField::new("id", DataType::INTEGER, true),]).into()
+            )
+        );
     }
 }
