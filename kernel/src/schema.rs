@@ -53,6 +53,12 @@ impl From<&String> for MetadataValue {
     }
 }
 
+impl From<&str> for MetadataValue {
+    fn from(value: &str) -> Self {
+        Self::String(value.to_string())
+    }
+}
+
 impl From<i32> for MetadataValue {
     fn from(value: i32) -> Self {
         Self::Number(value)

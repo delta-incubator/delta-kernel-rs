@@ -102,7 +102,7 @@ impl ScanBuilder {
         )?;
 
         let physical_predicate = match self.predicate {
-            Some(predicate) => Self::build_physical_predicate(predicate, &logical_schema)?,
+            Some(predicate) => Self::build_physical_predicate(&predicate, &logical_schema)?,
             None => PhysicalPredicate::None,
         };
 
@@ -124,10 +124,10 @@ impl ScanBuilder {
     // NOTE: It is possible the predicate resolves to FALSE even ignoring column references,
     // e.g. `col > 10 AND FALSE`. Such predicates can statically skip the whole query.
     fn build_physical_predicate(
-        predicate: ExpressionRef,
+        predicate: &Expression,
         logical_schema: &Schema,
     ) -> DeltaResult<PhysicalPredicate> {
-        if can_statically_skip_all_files(&predicate) {
+        if can_statically_skip_all_files(predicate) {
             return Ok(PhysicalPredicate::StaticSkipAll);
         }
         let mut get_referenced_fields = GetReferencedFields {
@@ -157,7 +157,7 @@ impl ScanBuilder {
         let mut apply_mappings = ApplyColumnMappings {
             column_mappings: get_referenced_fields.column_mappings,
         };
-        if let Some(predicate) = apply_mappings.transform(&predicate) {
+        if let Some(predicate) = apply_mappings.transform(predicate) {
             Ok(PhysicalPredicate::Some(
                 Arc::new(predicate.into_owned()),
                 Arc::new(schema.into_owned()),
@@ -168,7 +168,7 @@ impl ScanBuilder {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 enum PhysicalPredicate {
     Some(ExpressionRef, SchemaRef),
     StaticSkipAll,
@@ -775,10 +775,184 @@ mod tests {
 
     use crate::engine::sync::SyncEngine;
     use crate::expressions::column_expr;
-    use crate::schema::PrimitiveType;
+    use crate::schema::{ColumnMetadataKey, PrimitiveType};
     use crate::Table;
 
     use super::*;
+
+    #[test]
+    fn test_static_skipping() {
+        let test_cases = [
+            (false, column_expr!("a")),
+            (true, Expression::literal(false)),
+            (false, Expression::literal(true)),
+            (false, Expression::null_literal(DataType::LONG)),
+            (true, Expression::and(column_expr!("a"), false)),
+            (false, Expression::or(column_expr!("a"), true)),
+            (false, Expression::or(column_expr!("a"), false)),
+            (false, Expression::lt(column_expr!("a"), 10)),
+            (false, Expression::lt(Expression::literal(10), 100)),
+            (true, Expression::gt(Expression::literal(10), 100)),
+        ];
+        for (should_skip, predicate) in test_cases {
+            assert_eq!(
+                can_statically_skip_all_files(&predicate),
+                should_skip,
+                "Failed for predicate: {:#?}",
+                predicate
+            );
+        }
+    }
+
+    #[test]
+    fn test_physical_predicate() {
+        let logical_schema = StructType::new(vec![
+            StructField::new("a", DataType::LONG, true),
+            StructField::new("b", DataType::LONG, true).with_metadata([(
+                ColumnMetadataKey::ColumnMappingPhysicalName.as_ref(),
+                "phys_b",
+            )]),
+            StructField::new("phys_b", DataType::LONG, true).with_metadata([(
+                ColumnMetadataKey::ColumnMappingPhysicalName.as_ref(),
+                "phys_c",
+            )]),
+            StructField::new(
+                "nested",
+                StructType::new(vec![
+                    StructField::new("x", DataType::LONG, true),
+                    StructField::new("y", DataType::LONG, true).with_metadata([(
+                        ColumnMetadataKey::ColumnMappingPhysicalName.as_ref(),
+                        "phys_y",
+                    )]),
+                ]),
+                true,
+            ),
+            StructField::new(
+                "mapped",
+                StructType::new(vec![StructField::new("n", DataType::LONG, true)
+                    .with_metadata([(
+                        ColumnMetadataKey::ColumnMappingPhysicalName.as_ref(),
+                        "phys_n",
+                    )])]),
+                true,
+            )
+            .with_metadata([(
+                ColumnMetadataKey::ColumnMappingPhysicalName.as_ref(),
+                "phys_mapped",
+            )]),
+        ]);
+
+        // NOTE: We break several column mapping rules here because they don't matter for this
+        // test. For example, we do not provide field ids, and not all columns have physical names.
+        let test_cases = [
+            (Expression::literal(true), Some(PhysicalPredicate::None)),
+            (
+                Expression::literal(false),
+                Some(PhysicalPredicate::StaticSkipAll),
+            ),
+            (column_expr!("x"), None), // no such column
+            (
+                column_expr!("a"),
+                Some(PhysicalPredicate::Some(
+                    column_expr!("a").into(),
+                    StructType::new(vec![StructField::new("a", DataType::LONG, true)]).into(),
+                )),
+            ),
+            (
+                column_expr!("b"),
+                Some(PhysicalPredicate::Some(
+                    column_expr!("phys_b").into(),
+                    StructType::new(vec![StructField::new("phys_b", DataType::LONG, true)
+                        .with_metadata([(
+                            ColumnMetadataKey::ColumnMappingPhysicalName.as_ref(),
+                            "phys_b",
+                        )])])
+                    .into(),
+                )),
+            ),
+            (
+                column_expr!("nested.x"),
+                Some(PhysicalPredicate::Some(
+                    column_expr!("nested.x").into(),
+                    StructType::new(vec![StructField::new(
+                        "nested",
+                        StructType::new(vec![StructField::new("x", DataType::LONG, true)]),
+                        true,
+                    )])
+                    .into(),
+                )),
+            ),
+            (
+                column_expr!("nested.y"),
+                Some(PhysicalPredicate::Some(
+                    column_expr!("nested.phys_y").into(),
+                    StructType::new(vec![StructField::new(
+                        "nested",
+                        StructType::new(vec![StructField::new("phys_y", DataType::LONG, true)
+                            .with_metadata([(
+                                ColumnMetadataKey::ColumnMappingPhysicalName.as_ref(),
+                                "phys_y",
+                            )])]),
+                        true,
+                    )])
+                    .into(),
+                )),
+            ),
+            (
+                column_expr!("mapped.n"),
+                Some(PhysicalPredicate::Some(
+                    column_expr!("phys_mapped.phys_n").into(),
+                    StructType::new(vec![StructField::new(
+                        "phys_mapped",
+                        StructType::new(vec![StructField::new("phys_n", DataType::LONG, true)
+                            .with_metadata([(
+                                ColumnMetadataKey::ColumnMappingPhysicalName.as_ref(),
+                                "phys_n",
+                            )])]),
+                        true,
+                    )
+                    .with_metadata([(
+                        ColumnMetadataKey::ColumnMappingPhysicalName.as_ref(),
+                        "phys_mapped",
+                    )])])
+                    .into(),
+                )),
+            ),
+            (
+                Expression::and(column_expr!("mapped.n"), true),
+                Some(PhysicalPredicate::Some(
+                    Expression::and(column_expr!("phys_mapped.phys_n"), true).into(),
+                    StructType::new(vec![StructField::new(
+                        "phys_mapped",
+                        StructType::new(vec![StructField::new("phys_n", DataType::LONG, true)
+                            .with_metadata([(
+                                ColumnMetadataKey::ColumnMappingPhysicalName.as_ref(),
+                                "phys_n",
+                            )])]),
+                        true,
+                    )
+                    .with_metadata([(
+                        ColumnMetadataKey::ColumnMappingPhysicalName.as_ref(),
+                        "phys_mapped",
+                    )])])
+                    .into(),
+                )),
+            ),
+            (
+                Expression::and(column_expr!("mapped.n"), false),
+                Some(PhysicalPredicate::StaticSkipAll),
+            ),
+        ];
+
+        for (predicate, expected) in test_cases {
+            let result = ScanBuilder::build_physical_predicate(&predicate, &logical_schema).ok();
+            assert_eq!(
+                result, expected,
+                "Failed for predicate: {:#?}, expected {:#?}, got {:#?}",
+                predicate, expected, result
+            );
+        }
+    }
 
     fn get_files_for_scan(scan: Scan, engine: &dyn Engine) -> DeltaResult<Vec<String>> {
         let scan_data = scan.scan_data(engine)?;
