@@ -23,7 +23,7 @@ struct ResolvedCdfScanFile {
 /// types of `CdfScanFile`s:
 /// 1. The first case is a [`CdfScanFile`] paired with a remove deletion vector. The `scan_type`
 ///    must be [`CdfScanFileType::Add`]. In this case, both the add and remove deletion vectors are
-///    read if they exist. Then, we find the set of rows in the that have been added, and  rows that
+///    read if they exist. Then, we find the set of rows that have been added and rows that
 ///    have been removed. The set of removed rows (if any) will be represented by a
 ///    [`ResolvedCdfScanFile`] with `scan_type` = [`CdfScanFileType::Remove`]. The set of added rows
 ///    (if any) will be  represented by a [`ResolvedCdfScanFile`] with `scan_type` = [`CdfScanFileType::Add`].
@@ -75,7 +75,7 @@ fn resolve_scan_file_dv(
             // vector pairs, we generate selection treemaps.
             //
             // We use a motivating example to explain the deletion vector resolution. We read
-            // `rm_dv` and `add_dv`, and they are initialized to the empty map by default.
+            // `rm_dv` and `add_dv`, and they are initialized to the empty map by default
             // if no deletion vector is given.
             //  rm_dv  = Treemap_d(0, 1)
             //  add_dv = Treemap_d(1, 2)

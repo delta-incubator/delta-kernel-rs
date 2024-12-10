@@ -414,7 +414,10 @@ mod tests {
         assert_eq!(bools, expected);
     }
 
+    // this test is ignored by default as it's expensive to allocate such big vecs full of `false`. you can run it via:
+    // cargo test actions::deletion_vector::tests::test_sv_to_bools -- --ignored
     #[test]
+    #[ignore]
     fn test_sv_to_bools() {
         let mut rb = RoaringTreemap::new();
         rb.insert(0);
