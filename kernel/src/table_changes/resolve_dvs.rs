@@ -386,7 +386,7 @@ mod tests {
             .unwrap()
             .map(|file| (file.scan_file.scan_type, file.selection_vector))
             .collect_vec();
-        assert_eq!(resolved, vec![(CdfScanFileType::Cdc, None),]);
+        assert_eq!(resolved, vec![(CdfScanFileType::Cdc, None)]);
     }
 
     #[test]
