@@ -472,7 +472,6 @@ impl PrimitiveType {
 
 #[cfg(test)]
 mod tests {
-    use core::panic;
     use std::f32::consts::PI;
 
     use crate::expressions::{column_expr, BinaryOperator};

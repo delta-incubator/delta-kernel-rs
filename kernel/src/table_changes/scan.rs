@@ -213,9 +213,7 @@ mod tests {
     use crate::expressions::{column_expr, Scalar};
     use crate::scan::ColumnType;
     use crate::schema::{DataType, StructField, StructType};
-    use crate::table_changes::{
-        CHANGE_TYPE_COL_NAME, COMMIT_TIMESTAMP_COL_NAME, COMMIT_VERSION_COL_NAME,
-    };
+    use crate::table_changes::COMMIT_VERSION_COL_NAME;
     use crate::{Expression, Table};
 
     #[test]
@@ -234,9 +232,9 @@ mod tests {
             vec![
                 ColumnType::Selected("part".to_string()),
                 ColumnType::Selected("id".to_string()),
-                ColumnType::Selected(CHANGE_TYPE_COL_NAME.to_string()),
-                ColumnType::Selected(COMMIT_VERSION_COL_NAME.to_string()),
-                ColumnType::Selected(COMMIT_TIMESTAMP_COL_NAME.to_string()),
+                ColumnType::Selected("_change_type".to_string()),
+                ColumnType::Selected("_commit_version".to_string()),
+                ColumnType::Selected("_commit_timestamp".to_string()),
             ]
         );
         assert_eq!(scan.predicate, None);
@@ -267,14 +265,14 @@ mod tests {
             scan.all_fields,
             vec![
                 ColumnType::Selected("id".to_string()),
-                ColumnType::Selected(COMMIT_VERSION_COL_NAME.to_string()),
+                ColumnType::Selected("_commit_version".to_string()),
             ]
         );
         assert_eq!(
             scan.logical_schema,
             StructType::new([
                 StructField::new("id", DataType::INTEGER, true),
-                StructField::new(COMMIT_VERSION_COL_NAME, DataType::LONG, false),
+                StructField::new("_commit_version", DataType::LONG, false),
             ])
             .into()
         );
