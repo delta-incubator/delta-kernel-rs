@@ -20,9 +20,8 @@ fn get_cdf_columns(scan_file: &CdfScanFile) -> DeltaResult<HashMap<&str, Express
     let timestamp = Scalar::timestamp_from_millis(scan_file.commit_timestamp)?;
     let version = scan_file.commit_version;
     let change_type: Expression = match scan_file.scan_type {
-        CdfScanFileType::Cdc => Expression::from(CHANGE_TYPE_COL_NAME),
+        CdfScanFileType::Cdc => Expression::column([CHANGE_TYPE_COL_NAME]),
         CdfScanFileType::Add => ADD_CHANGE_TYPE.into(),
-
         CdfScanFileType::Remove => REMOVE_CHANGE_TYPE.into(),
     };
     let expressions = [
@@ -132,8 +131,9 @@ mod tests {
             assert_eq!(phys_to_logical_expr, expected_expr)
         };
 
+        let cdc_change_type = Expression::column([CHANGE_TYPE_COL_NAME]);
         test(CdfScanFileType::Add, ADD_CHANGE_TYPE.into());
         test(CdfScanFileType::Remove, REMOVE_CHANGE_TYPE.into());
-        test(CdfScanFileType::Cdc, Expression::from(CHANGE_TYPE_COL_NAME));
+        test(CdfScanFileType::Cdc, cdc_change_type);
     }
 }
