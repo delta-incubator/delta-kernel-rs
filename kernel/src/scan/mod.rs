@@ -23,7 +23,7 @@ use crate::{DeltaResult, Engine, EngineData, Error, FileMeta};
 use self::log_replay::scan_action_iter;
 use self::state::GlobalScanState;
 
-mod data_skipping;
+pub(crate) mod data_skipping;
 pub mod log_replay;
 pub mod state;
 
