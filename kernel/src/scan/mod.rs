@@ -125,7 +125,7 @@ pub struct ScanResult {
     pub raw_data: DeltaResult<Box<dyn EngineData>>,
     /// Raw row mask.
     // TODO(nick) this should be allocated by the engine
-    pub(crate) raw_mask: Option<Vec<bool>>,
+    raw_mask: Option<Vec<bool>>,
 }
 
 impl ScanResult {
