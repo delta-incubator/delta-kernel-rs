@@ -35,7 +35,7 @@ fn get_cdf_columns(scan_file: &CdfScanFile) -> DeltaResult<HashMap<&str, Express
 /// Generates the expression used to convert physical data from the `scan_file` path into logical
 /// data matching the `logical_schema`
 #[allow(unused)]
-fn physical_to_logical_expr(
+pub(crate) fn physical_to_logical_expr(
     scan_file: &CdfScanFile,
     logical_schema: &StructType,
     all_fields: &[ColumnType],
@@ -68,7 +68,10 @@ fn physical_to_logical_expr(
 
 /// Gets the physical schema that will be used to read data in the `scan_file` path.
 #[allow(unused)]
-fn scan_file_read_schema(scan_file: &CdfScanFile, read_schema: &StructType) -> SchemaRef {
+pub(crate) fn scan_file_read_schema(
+    scan_file: &CdfScanFile,
+    read_schema: &StructType,
+) -> SchemaRef {
     if scan_file.scan_type == CdfScanFileType::Cdc {
         let change_type = StructField::new(CHANGE_TYPE_COL_NAME, DataType::STRING, false);
         let fields = read_schema.fields().cloned().chain(iter::once(change_type));
