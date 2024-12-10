@@ -2,17 +2,22 @@ use std::sync::Arc;
 
 use itertools::Itertools;
 use tracing::debug;
+use url::Url;
 
-use crate::scan::ColumnType;
+use crate::actions::deletion_vector::split_vector;
+use crate::scan::state::GlobalScanState;
+use crate::scan::{ColumnType, ScanResult};
 use crate::schema::{SchemaRef, StructType};
-use crate::{DeltaResult, Engine, ExpressionRef};
+use crate::{DeltaResult, Engine, ExpressionRef, FileMeta};
 
 use super::log_replay::{table_changes_action_iter, TableChangesScanData};
+use super::physical_to_logical::{physical_to_logical_expr, scan_file_read_schema};
+use super::resolve_dvs::{resolve_scan_file_dv, ResolvedCdfScanFile};
+use super::scan_file::scan_data_to_scan_file;
 use super::{TableChanges, CDF_FIELDS};
 
 /// The result of building a [`TableChanges`] scan over a table. This can be used to get a change
 /// data feed from the table
-#[allow(unused)]
 #[derive(Debug)]
 pub struct TableChangesScan {
     // The [`TableChanges`] that specifies this scan's start and end versions
@@ -28,8 +33,6 @@ pub struct TableChangesScan {
     predicate: Option<ExpressionRef>,
     // The [`ColumnType`] of all the fields in the `logical_schema`
     all_fields: Vec<ColumnType>,
-    // `true` if any column in the `logical_schema` is a partition column
-    have_partition_cols: bool,
 }
 
 /// This builder constructs a [`TableChangesScan`] that can be used to read the [`TableChanges`]
@@ -114,7 +117,6 @@ impl TableChangesScanBuilder {
         let logical_schema = self
             .schema
             .unwrap_or_else(|| self.table_changes.schema.clone().into());
-        let mut have_partition_cols = false;
         let mut read_fields = Vec::with_capacity(logical_schema.fields.len());
 
         // Loop over all selected fields. We produce the following:
@@ -137,7 +139,6 @@ impl TableChangesScanBuilder {
                     // Store the index into the schema for this field. When we turn it into an
                     // expression in the inner loop, we will index into the schema and get the name and
                     // data type, which we need to properly materialize the column.
-                    have_partition_cols = true;
                     Ok(ColumnType::Partition(index))
                 } else if CDF_FIELDS
                     .iter()
@@ -163,7 +164,6 @@ impl TableChangesScanBuilder {
             logical_schema,
             predicate: self.predicate,
             all_fields,
-            have_partition_cols,
             physical_schema: StructType::new(read_fields).into(),
         })
     }
@@ -175,7 +175,6 @@ impl TableChangesScan {
     /// necessary to read CDF. Additionally, [`TableChangesScanData`] holds metadata on the
     /// deletion vectors present in the commit. The engine data in each scan data is guaranteed
     /// to belong to the same commit. Several [`TableChangesScanData`] may belong to the same commit.
-    #[allow(unused)]
     fn scan_data(
         &self,
         engine: Arc<dyn Engine>,
@@ -188,6 +187,112 @@ impl TableChangesScan {
         let schema = self.table_changes.end_snapshot.schema().clone().into();
         table_changes_action_iter(engine, commits, schema, self.predicate.clone())
     }
+
+    /// Get global state that is valid for the entire scan. This is somewhat expensive so should
+    /// only be called once per scan.
+    fn global_scan_state(&self) -> GlobalScanState {
+        let end_snapshot = &self.table_changes.end_snapshot;
+        GlobalScanState {
+            table_root: self.table_changes.table_root.to_string(),
+            partition_columns: end_snapshot.metadata().partition_columns.clone(),
+            logical_schema: self.logical_schema.clone(),
+            read_schema: self.physical_schema.clone(),
+            column_mapping_mode: end_snapshot.column_mapping_mode,
+        }
+    }
+
+    /// Perform an "all in one" scan to get the change data feed. This will use the provided `engine`
+    /// to read and process all the data for the query. Each [`ScanResult`] in the resultant iterator
+    /// encapsulates the raw data and an optional boolean vector built from the deletion vector if it
+    /// was present. See the documentation for [`ScanResult`] for more details.
+    pub fn execute(
+        &self,
+        engine: Arc<dyn Engine>,
+    ) -> DeltaResult<impl Iterator<Item = DeltaResult<ScanResult>>> {
+        let scan_data = self.scan_data(engine.clone())?;
+        let scan_files = scan_data_to_scan_file(scan_data);
+
+        let global_scan_state = self.global_scan_state();
+        let table_root = self.table_changes.table_root().clone();
+        let all_fields = self.all_fields.clone();
+        let predicate = self.predicate.clone();
+        let dv_engine_ref = engine.clone();
+
+        let result = scan_files
+            .map(move |scan_file| {
+                resolve_scan_file_dv(dv_engine_ref.as_ref(), &table_root, scan_file?)
+            }) // Iterator-Result-Iterator
+            .flatten_ok() // Iterator-Result
+            .map(move |resolved_scan_file| -> DeltaResult<_> {
+                read_scan_file(
+                    engine.as_ref(),
+                    resolved_scan_file?,
+                    &global_scan_state,
+                    &all_fields,
+                    predicate.clone(),
+                )
+            }) // Iterator-Result-Iterator-Result
+            .flatten_ok() // Iterator-Result-Result
+            .map(|x| x?); // Iterator-Result
+
+        Ok(result)
+    }
+}
+
+/// Reads the data at the `resolved_scan_file` and transforms the data from physical to logical.
+/// The result is a fallible iterator of [`ScanResult`] containing the logical data.
+fn read_scan_file(
+    engine: &dyn Engine,
+    resolved_scan_file: ResolvedCdfScanFile,
+    global_state: &GlobalScanState,
+    all_fields: &[ColumnType],
+    predicate: Option<ExpressionRef>,
+) -> DeltaResult<impl Iterator<Item = DeltaResult<ScanResult>>> {
+    let ResolvedCdfScanFile {
+        scan_file,
+        mut selection_vector,
+    } = resolved_scan_file;
+
+    let physical_to_logical_expr =
+        physical_to_logical_expr(&scan_file, global_state.logical_schema.as_ref(), all_fields)?;
+    let read_schema = scan_file_read_schema(&scan_file, global_state.read_schema.as_ref());
+    let phys_to_logical_eval = engine.get_expression_handler().get_evaluator(
+        read_schema.clone(),
+        physical_to_logical_expr,
+        global_state.logical_schema.clone().into(),
+    );
+
+    let table_root = Url::parse(&global_state.table_root)?;
+    let location = table_root.join(&scan_file.path)?;
+    let file = FileMeta {
+        last_modified: 0,
+        size: 0,
+        location,
+    };
+    let read_result_iter =
+        engine
+            .get_parquet_handler()
+            .read_parquet_files(&[file], read_schema, predicate)?;
+
+    let result = read_result_iter.map(move |batch| -> DeltaResult<_> {
+        let batch = batch?;
+        // to transform the physical data into the correct logical form
+        let logical = phys_to_logical_eval.evaluate(batch.as_ref());
+        let len = logical.as_ref().map_or(0, |res| res.len());
+        // need to split the dv_mask. what's left in dv_mask covers this result, and rest
+        // will cover the following results. we `take()` out of `selection_vector` to avoid
+        // trying to return a captured variable. We're going to reassign `selection_vector`
+        // to `rest` in a moment anyway
+        let mut sv = selection_vector.take();
+        let rest = split_vector(sv.as_mut(), len, None);
+        let result = ScanResult {
+            raw_data: logical,
+            raw_mask: sv,
+        };
+        selection_vector = rest;
+        Ok(result)
+    });
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -198,6 +303,7 @@ mod tests {
     use crate::expressions::{column_expr, Scalar};
     use crate::scan::ColumnType;
     use crate::schema::{DataType, StructField, StructType};
+    use crate::table_changes::COMMIT_VERSION_COL_NAME;
     use crate::{Expression, Table};
 
     #[test]
@@ -222,7 +328,6 @@ mod tests {
             ]
         );
         assert_eq!(scan.predicate, None);
-        assert!(!scan.have_partition_cols);
     }
 
     #[test]
@@ -236,7 +341,7 @@ mod tests {
 
         let schema = table_changes
             .schema()
-            .project(&["id", "_commit_version"])
+            .project(&["id", COMMIT_VERSION_COL_NAME])
             .unwrap();
         let predicate = Arc::new(Expression::gt(column_expr!("id"), Scalar::from(10)));
         let scan = table_changes
@@ -260,7 +365,6 @@ mod tests {
             ])
             .into()
         );
-        assert!(!scan.have_partition_cols);
         assert_eq!(scan.predicate, Some(predicate));
     }
 }
