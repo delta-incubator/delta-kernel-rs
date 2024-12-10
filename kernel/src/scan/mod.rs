@@ -104,7 +104,7 @@ impl ScanBuilder {
         )?;
 
         let physical_predicate = match self.predicate {
-            Some(predicate) => Self::build_physical_predicate(&predicate, &logical_schema)?,
+            Some(predicate) => PhysicalPredicate::try_new(&predicate, &logical_schema)?,
             None => PhysicalPredicate::None,
         };
 
@@ -117,15 +117,24 @@ impl ScanBuilder {
             have_partition_cols: state_info.have_partition_cols,
         })
     }
+}
 
-    // If we have a predicate, verify the columns it references and apply column mapping. First, get
-    // the set of references; use that to filter the schema to only the columns of interest (and
-    // verify that all referenced columns exist); then use the resulting logical/physical mappings
-    // to rewrite the expression with physical column names.
-    //
-    // NOTE: It is possible the predicate resolves to FALSE even ignoring column references,
-    // e.g. `col > 10 AND FALSE`. Such predicates can statically skip the whole query.
-    fn build_physical_predicate(
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum PhysicalPredicate {
+    Some(ExpressionRef, SchemaRef),
+    StaticSkipAll,
+    None,
+}
+
+impl PhysicalPredicate {
+    /// If we have a predicate, verify the columns it references and apply column mapping. First, get
+    /// the set of references; use that to filter the schema to only the columns of interest (and
+    /// verify that all referenced columns exist); then use the resulting logical/physical mappings
+    /// to rewrite the expression with physical column names.
+    ///
+    /// NOTE: It is possible the predicate resolves to FALSE even ignoring column references,
+    /// e.g. `col > 10 AND FALSE`. Such predicates can statically skip the whole query.
+    pub(crate) fn try_new(
         predicate: &Expression,
         logical_schema: &Schema,
     ) -> DeltaResult<PhysicalPredicate> {
@@ -168,13 +177,6 @@ impl ScanBuilder {
             Ok(PhysicalPredicate::None)
         }
     }
-}
-
-#[derive(Clone, Debug, PartialEq)]
-enum PhysicalPredicate {
-    Some(ExpressionRef, SchemaRef),
-    StaticSkipAll,
-    None,
 }
 
 // Evaluates a static data skipping predicate, ignoring any column references, and returns true if
@@ -947,7 +949,7 @@ mod tests {
         ];
 
         for (predicate, expected) in test_cases {
-            let result = ScanBuilder::build_physical_predicate(&predicate, &logical_schema).ok();
+            let result = PhysicalPredicate::try_new(&predicate, &logical_schema).ok();
             assert_eq!(
                 result, expected,
                 "Failed for predicate: {:#?}, expected {:#?}, got {:#?}",
