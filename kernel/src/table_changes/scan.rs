@@ -208,7 +208,7 @@ impl TableChangesScan {
             table_root: self.table_changes.table_root.to_string(),
             partition_columns: end_snapshot.metadata().partition_columns.clone(),
             logical_schema: self.logical_schema.clone(),
-            read_schema: self.physical_schema.clone(),
+            physical_schema: self.physical_schema.clone(),
             column_mapping_mode: end_snapshot.column_mapping_mode,
         }
     }
