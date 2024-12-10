@@ -5,7 +5,7 @@ use itertools::Itertools;
 use url::Url;
 
 use crate::actions::deletion_vector::split_vector;
-use crate::expressions::{column_expr, Scalar};
+use crate::expressions::Scalar;
 use crate::scan::state::GlobalScanState;
 use crate::scan::{parse_partition_value, ColumnType, ScanResult};
 use crate::schema::{ColumnName, DataType, SchemaRef, StructField, StructType};
@@ -13,35 +13,39 @@ use crate::{DeltaResult, Engine, Error, Expression, ExpressionRef, FileMeta};
 
 use super::resolve_dvs::ResolvedCdfScanFile;
 use super::scan_file::{CdfScanFile, CdfScanFileType};
+use super::{
+    ADD_CHANGE_TYPE, CHANGE_TYPE_COL_NAME, COMMIT_TIMESTAMP_COL_NAME, COMMIT_VERSION_COL_NAME,
+    REMOVE_CHANGE_TYPE,
+};
 
 /// Returns a map from change data feed column name to an expression that generates the row data.
 #[allow(unused)]
-fn get_generated_columns(scan_file: &CdfScanFile) -> DeltaResult<HashMap<&str, Expression>> {
+fn get_cdf_columns(scan_file: &CdfScanFile) -> DeltaResult<HashMap<&str, Expression>> {
     let timestamp = Scalar::timestamp_from_millis(scan_file.commit_timestamp)?;
     let version = scan_file.commit_version;
     let change_type: Expression = match scan_file.scan_type {
-        CdfScanFileType::Cdc => column_expr!("_change_type"),
-        CdfScanFileType::Add => "insert".into(),
+        CdfScanFileType::Cdc => Expression::from(CHANGE_TYPE_COL_NAME),
+        CdfScanFileType::Add => ADD_CHANGE_TYPE.into(),
 
-        CdfScanFileType::Remove => "delete".into(),
+        CdfScanFileType::Remove => REMOVE_CHANGE_TYPE.into(),
     };
     let expressions = [
-        ("_change_type", change_type),
-        ("_commit_version", Expression::literal(version)),
-        ("_commit_timestamp", timestamp.into()),
+        (CHANGE_TYPE_COL_NAME, change_type),
+        (COMMIT_VERSION_COL_NAME, Expression::literal(version)),
+        (COMMIT_TIMESTAMP_COL_NAME, timestamp.into()),
     ];
     Ok(expressions.into_iter().collect())
 }
 
 /// Generates the expression used to convert physical data from the `scan_file` path into logical
-/// data matching the `global_state.logical_schema`
+/// data matching the `logical_schema`
 #[allow(unused)]
-fn get_expression(
+fn physical_to_logical_expr(
     scan_file: &CdfScanFile,
     logical_schema: &StructType,
     all_fields: &[ColumnType],
 ) -> DeltaResult<Expression> {
-    let mut generated_columns = get_generated_columns(scan_file)?;
+    let mut cdf_columns = get_cdf_columns(scan_file)?;
     let all_fields = all_fields
         .iter()
         .map(|field| match field {
@@ -59,7 +63,7 @@ fn get_expression(
             }
             ColumnType::Selected(field_name) => {
                 // Remove to take ownership
-                let generated_column = generated_columns.remove(field_name.as_str());
+                let generated_column = cdf_columns.remove(field_name.as_str());
                 Ok(generated_column.unwrap_or_else(|| ColumnName::new([field_name]).into()))
             }
         })
@@ -69,9 +73,9 @@ fn get_expression(
 
 /// Gets the physical schema that will be used to read data in the `scan_file` path.
 #[allow(unused)]
-fn get_read_schema(scan_file: &CdfScanFile, read_schema: &StructType) -> SchemaRef {
+fn scan_file_read_schema(scan_file: &CdfScanFile, read_schema: &StructType) -> SchemaRef {
     if scan_file.scan_type == CdfScanFileType::Cdc {
-        let change_type = StructField::new("_change_type", DataType::STRING, false);
+        let change_type = StructField::new(CHANGE_TYPE_COL_NAME, DataType::STRING, false);
         let fields = read_schema.fields().cloned().chain(iter::once(change_type));
         StructType::new(fields).into()
     } else {
@@ -82,7 +86,7 @@ fn get_read_schema(scan_file: &CdfScanFile, read_schema: &StructType) -> SchemaR
 /// Reads the data at the `resolved_scan_file` and transforms the data from physical to logical.
 /// The result is a fallible iterator of [`ScanResult`] containing the logical data.
 #[allow(unused)]
-pub(crate) fn read_scan_data(
+pub(crate) fn read_scan_file(
     engine: &dyn Engine,
     resolved_scan_file: ResolvedCdfScanFile,
     global_state: &GlobalScanState,
@@ -94,11 +98,12 @@ pub(crate) fn read_scan_data(
         mut selection_vector,
     } = resolved_scan_file;
 
-    let expression = get_expression(&scan_file, global_state.logical_schema.as_ref(), all_fields)?;
-    let schema = get_read_schema(&scan_file, global_state.read_schema.as_ref());
-    let evaluator = engine.get_expression_handler().get_evaluator(
-        schema.clone(),
-        expression,
+    let phys_to_logical_expr =
+        physical_to_logical_expr(&scan_file, global_state.logical_schema.as_ref(), all_fields)?;
+    let read_schema = scan_file_read_schema(&scan_file, global_state.read_schema.as_ref());
+    let phys_to_logical_eval = engine.get_expression_handler().get_evaluator(
+        read_schema.clone(),
+        phys_to_logical_expr,
         global_state.logical_schema.clone().into(),
     );
 
@@ -112,12 +117,12 @@ pub(crate) fn read_scan_data(
     let read_result_iter =
         engine
             .get_parquet_handler()
-            .read_parquet_files(&[file], schema, predicate)?;
+            .read_parquet_files(&[file], read_schema, predicate)?;
 
     let result = read_result_iter.map(move |batch| -> DeltaResult<_> {
         let batch = batch?;
         // to transform the physical data into the correct logical form
-        let logical = evaluator.evaluate(batch.as_ref());
+        let logical = phys_to_logical_eval.evaluate(batch.as_ref());
         let len = logical.as_ref().map_or(0, |res| res.len());
         // need to split the dv_mask. what's left in dv_mask covers this result, and rest
         // will cover the following results. we `take()` out of `selection_vector` to avoid
@@ -142,12 +147,15 @@ mod tests {
     use crate::expressions::{column_expr, Expression, Scalar};
     use crate::scan::ColumnType;
     use crate::schema::{DataType, StructField, StructType};
+    use crate::table_changes::physical_to_logical::physical_to_logical_expr;
     use crate::table_changes::scan_file::{CdfScanFile, CdfScanFileType};
-
-    use super::get_expression;
+    use crate::table_changes::{
+        ADD_CHANGE_TYPE, CHANGE_TYPE_COL_NAME, COMMIT_TIMESTAMP_COL_NAME, COMMIT_VERSION_COL_NAME,
+        REMOVE_CHANGE_TYPE,
+    };
 
     #[test]
-    fn add_get_expression() {
+    fn verify_physical_to_logical_expression() {
         let test = |scan_type, expected_expr| {
             let scan_file = CdfScanFile {
                 scan_type,
@@ -161,19 +169,20 @@ mod tests {
             let logical_schema = StructType::new([
                 StructField::new("id", DataType::STRING, true),
                 StructField::new("age", DataType::LONG, false),
-                StructField::new("_change_type", DataType::STRING, false),
-                StructField::new("_commit_version", DataType::LONG, false),
-                StructField::new("_commit_timestamp", DataType::TIMESTAMP, false),
+                StructField::new(CHANGE_TYPE_COL_NAME, DataType::STRING, false),
+                StructField::new(COMMIT_VERSION_COL_NAME, DataType::LONG, false),
+                StructField::new(COMMIT_TIMESTAMP_COL_NAME, DataType::TIMESTAMP, false),
             ]);
             let all_fields = vec![
                 ColumnType::Selected("id".to_string()),
                 ColumnType::Partition(1),
-                ColumnType::Selected("_change_type".to_string()),
-                ColumnType::Selected("_commit_version".to_string()),
-                ColumnType::Selected("_commit_timestamp".to_string()),
+                ColumnType::Selected(CHANGE_TYPE_COL_NAME.to_string()),
+                ColumnType::Selected(COMMIT_VERSION_COL_NAME.to_string()),
+                ColumnType::Selected(COMMIT_TIMESTAMP_COL_NAME.to_string()),
             ];
-            let expression = get_expression(&scan_file, &logical_schema, &all_fields).unwrap();
-            let expected = Expression::struct_from([
+            let phys_to_logical_expr =
+                physical_to_logical_expr(&scan_file, &logical_schema, &all_fields).unwrap();
+            let expected_expr = Expression::struct_from([
                 column_expr!("id"),
                 Scalar::Long(20).into(),
                 expected_expr,
@@ -181,11 +190,11 @@ mod tests {
                 Scalar::Timestamp(1234000).into(), // Microsecond is 1000x millisecond
             ]);
 
-            assert_eq!(expression, expected)
+            assert_eq!(phys_to_logical_expr, expected_expr)
         };
 
-        test(CdfScanFileType::Add, "insert".into());
-        test(CdfScanFileType::Remove, "delete".into());
-        test(CdfScanFileType::Cdc, column_expr!("_change_type"));
+        test(CdfScanFileType::Add, ADD_CHANGE_TYPE.into());
+        test(CdfScanFileType::Remove, REMOVE_CHANGE_TYPE.into());
+        test(CdfScanFileType::Cdc, Expression::from(CHANGE_TYPE_COL_NAME));
     }
 }

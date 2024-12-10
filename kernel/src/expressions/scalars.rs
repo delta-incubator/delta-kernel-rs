@@ -153,7 +153,7 @@ impl Scalar {
     }
 
     /// Constructs a Scalar timestamp from an `i64` millisecond since unix epoch
-    pub fn timestamp_from_millis(millis: i64) -> DeltaResult<Self> {
+    pub(crate) fn timestamp_from_millis(millis: i64) -> DeltaResult<Self> {
         let Some(timestamp) = DateTime::from_timestamp_millis(millis) else {
             return Err(Error::generic(format!(
                 "Failed to create millisecond timestamp from {millis}"
@@ -472,7 +472,9 @@ impl PrimitiveType {
 
 #[cfg(test)]
 mod tests {
+    use core::panic;
     use std::f32::consts::PI;
+    use std::time::Duration;
 
     use crate::expressions::{column_expr, BinaryOperator};
     use crate::Expression;
