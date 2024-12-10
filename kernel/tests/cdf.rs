@@ -1,12 +1,11 @@
-use std::{collections::HashMap, error, sync::Arc};
+use std::{error, sync::Arc};
 
 use arrow::compute::filter_record_batch;
 use arrow_array::RecordBatch;
+use delta_kernel::engine::sync::SyncEngine;
 use itertools::Itertools;
 
 use delta_kernel::engine::arrow_data::ArrowEngineData;
-use delta_kernel::engine::default::executor::tokio::TokioBackgroundExecutor;
-use delta_kernel::engine::default::DefaultEngine;
 use delta_kernel::{DeltaResult, Error, Table, Version};
 
 fn read_cdf_for_table(
@@ -15,16 +14,23 @@ fn read_cdf_for_table(
     end_version: impl Into<Option<Version>>,
 ) -> DeltaResult<Vec<RecordBatch>> {
     let table = Table::try_from_uri(path)?;
-    let options = HashMap::from([("skip_signature", "true".to_string())]);
-    let engine = Arc::new(DefaultEngine::try_new(
-        table.location(),
-        options,
-        Arc::new(TokioBackgroundExecutor::new()),
-    )?);
+    let engine = Arc::new(SyncEngine::new());
     let table_changes = table.table_changes(engine.as_ref(), start_version, end_version)?;
 
-    let x = table_changes.into_scan_builder().build()?;
-    let batches: Vec<RecordBatch> = x
+    // Project out the commit timestamp since file modification time may change anytime git clones
+    // or switches branches
+    let names = table_changes
+        .schema()
+        .fields()
+        .map(|field| field.name())
+        .filter(|name| *name != "_commit_timestamp")
+        .collect_vec();
+    let schema = table_changes.schema().project(&names)?;
+    let scan = table_changes
+        .into_scan_builder()
+        .with_schema(schema)
+        .build()?;
+    let batches: Vec<RecordBatch> = scan
         .execute(engine)?
         .map(|scan_result| -> DeltaResult<_> {
             let scan_result = scan_result?;
@@ -89,24 +95,24 @@ fn cdf_with_deletion_vector() -> Result<(), Box<dyn error::Error>> {
     let cdf = read_cdf_for_table("tests/data/table-with-cdf-and-dv", 0, None)?;
     assert_batches_sorted_eq(
         &[
-            "+-------+--------------+-----------------+--------------------------+",
-            "| value | _change_type | _commit_version | _commit_timestamp        |",
-            "+-------+--------------+-----------------+--------------------------+",
-            "| 0     | insert       | 0               | 1970-01-21T01:35:06.498Z |",
-            "| 1     | insert       | 0               | 1970-01-21T01:35:06.498Z |",
-            "| 2     | insert       | 0               | 1970-01-21T01:35:06.498Z |",
-            "| 3     | insert       | 0               | 1970-01-21T01:35:06.498Z |",
-            "| 4     | insert       | 0               | 1970-01-21T01:35:06.498Z |",
-            "| 5     | insert       | 0               | 1970-01-21T01:35:06.498Z |",
-            "| 6     | insert       | 0               | 1970-01-21T01:35:06.498Z |",
-            "| 8     | insert       | 0               | 1970-01-21T01:35:06.498Z |",
-            "| 7     | insert       | 0               | 1970-01-21T01:35:06.498Z |",
-            "| 9     | insert       | 0               | 1970-01-21T01:35:06.498Z |",
-            "| 0     | delete       | 1               | 1970-01-21T01:35:06.498Z |",
-            "| 9     | delete       | 1               | 1970-01-21T01:35:06.498Z |",
-            "| 0     | insert       | 2               | 1970-01-21T01:35:06.498Z |",
-            "| 9     | insert       | 2               | 1970-01-21T01:35:06.498Z |",
-            "+-------+--------------+-----------------+--------------------------+",
+            "+-------+--------------+-----------------+",
+            "| value | _change_type | _commit_version |",
+            "+-------+--------------+-----------------+",
+            "| 0     | insert       | 0               |",
+            "| 1     | insert       | 0               |",
+            "| 2     | insert       | 0               |",
+            "| 3     | insert       | 0               |",
+            "| 4     | insert       | 0               |",
+            "| 5     | insert       | 0               |",
+            "| 6     | insert       | 0               |",
+            "| 8     | insert       | 0               |",
+            "| 7     | insert       | 0               |",
+            "| 9     | insert       | 0               |",
+            "| 0     | delete       | 1               |",
+            "| 9     | delete       | 1               |",
+            "| 0     | insert       | 2               |",
+            "| 9     | insert       | 2               |",
+            "+-------+--------------+-----------------+",
         ],
         &cdf,
     );
@@ -116,37 +122,38 @@ fn cdf_with_deletion_vector() -> Result<(), Box<dyn error::Error>> {
 #[test]
 fn basic_cdf() -> Result<(), Box<dyn error::Error>> {
     let batches = read_cdf_for_table("tests/data/cdf-table", 0, None)?;
-    assert_batches_sorted_eq(&[
-             "+----+--------+------------+------------------+-----------------+--------------------------+",
-             "| id | name   | birthday   | _change_type     | _commit_version | _commit_timestamp        |",
-             "+----+--------+------------+------------------+-----------------+--------------------------+",
-             "| 1  | Steve  | 2023-12-22 | insert           | 0               | 2023-12-22T17:10:18.828  |",
-             "| 2  | Bob    | 2023-12-23 | insert           | 0               | 2023-12-22T17:10:18.828  |",
-             "| 3  | Dave   | 2023-12-23 | insert           | 0               | 2023-12-22T17:10:18.828  |",
-             "| 4  | Kate   | 2023-12-23 | insert           | 0               | 2023-12-22T17:10:18.828  |",
-             "| 5  | Emily  | 2023-12-24 | insert           | 0               | 2023-12-22T17:10:18.828  |",
-             "| 6  | Carl   | 2023-12-24 | insert           | 0               | 2023-12-22T17:10:18.828  |",
-             "| 7  | Dennis | 2023-12-24 | insert           | 0               | 2023-12-22T17:10:18.828  |",
-             "| 8  | Claire | 2023-12-25 | insert           | 0               | 2023-12-22T17:10:18.828  |",
-             "| 9  | Ada    | 2023-12-25 | insert           | 0               | 2023-12-22T17:10:18.828  |",
-             "| 10 | Borb   | 2023-12-25 | insert           | 0               | 2023-12-22T17:10:18.828  |",
-             "| 3  | Dave   | 2023-12-22 | update_postimage | 1               | 2023-12-22T17:10:21.675  |",
-             "| 3  | Dave   | 2023-12-23 | update_preimage  | 1               | 2023-12-22T17:10:21.675  |",
-             "| 4  | Kate   | 2023-12-22 | update_postimage | 1               | 2023-12-22T17:10:21.675  |",
-             "| 4  | Kate   | 2023-12-23 | update_preimage  | 1               | 2023-12-22T17:10:21.675  |",
-             "| 2  | Bob    | 2023-12-22 | update_postimage | 1               | 2023-12-22T17:10:21.675  |",
-             "| 2  | Bob    | 2023-12-23 | update_preimage  | 1               | 2023-12-22T17:10:21.675  |",
-             "| 7  | Dennis | 2023-12-24 | update_preimage  | 2               | 2023-12-29T21:41:33.785  |",
-             "| 7  | Dennis | 2023-12-29 | update_postimage | 2               | 2023-12-29T21:41:33.785  |",
-             "| 5  | Emily  | 2023-12-24 | update_preimage  | 2               | 2023-12-29T21:41:33.785  |",
-             "| 5  | Emily  | 2023-12-29 | update_postimage | 2               | 2023-12-29T21:41:33.785  |",
-             "| 6  | Carl   | 2023-12-24 | update_preimage  | 2               | 2023-12-29T21:41:33.785  |",
-             "| 6  | Carl   | 2023-12-29 | update_postimage | 2               | 2023-12-29T21:41:33.785  |",
-             "| 7  | Dennis | 2023-12-29 | delete           | 3               | 2024-01-06T16:44:59.570  |",
-             "+----+--------+------------+------------------+-----------------+--------------------------+"
-            ],
-            &batches
-        );
+    assert_batches_sorted_eq(
+        &[
+            "+----+--------+------------+------------------+-----------------+",
+            "| id | name   | birthday   | _change_type     | _commit_version |",
+            "+----+--------+------------+------------------+-----------------+",
+            "| 1  | Steve  | 2023-12-22 | insert           | 0               |",
+            "| 2  | Bob    | 2023-12-23 | insert           | 0               |",
+            "| 3  | Dave   | 2023-12-23 | insert           | 0               |",
+            "| 4  | Kate   | 2023-12-23 | insert           | 0               |",
+            "| 5  | Emily  | 2023-12-24 | insert           | 0               |",
+            "| 6  | Carl   | 2023-12-24 | insert           | 0               |",
+            "| 7  | Dennis | 2023-12-24 | insert           | 0               |",
+            "| 8  | Claire | 2023-12-25 | insert           | 0               |",
+            "| 9  | Ada    | 2023-12-25 | insert           | 0               |",
+            "| 10 | Borb   | 2023-12-25 | insert           | 0               |",
+            "| 3  | Dave   | 2023-12-22 | update_postimage | 1               |",
+            "| 3  | Dave   | 2023-12-23 | update_preimage  | 1               |",
+            "| 4  | Kate   | 2023-12-22 | update_postimage | 1               |",
+            "| 4  | Kate   | 2023-12-23 | update_preimage  | 1               |",
+            "| 2  | Bob    | 2023-12-22 | update_postimage | 1               |",
+            "| 2  | Bob    | 2023-12-23 | update_preimage  | 1               |",
+            "| 7  | Dennis | 2023-12-24 | update_preimage  | 2               |",
+            "| 7  | Dennis | 2023-12-29 | update_postimage | 2               |",
+            "| 5  | Emily  | 2023-12-24 | update_preimage  | 2               |",
+            "| 5  | Emily  | 2023-12-29 | update_postimage | 2               |",
+            "| 6  | Carl   | 2023-12-24 | update_preimage  | 2               |",
+            "| 6  | Carl   | 2023-12-29 | update_postimage | 2               |",
+            "| 7  | Dennis | 2023-12-29 | delete           | 3               |",
+            "+----+--------+------------+------------------+-----------------+",
+        ],
+        &batches,
+    );
     Ok(())
 }
 
@@ -154,35 +161,35 @@ fn basic_cdf() -> Result<(), Box<dyn error::Error>> {
 fn cdf_non_partitioned() -> Result<(), Box<dyn error::Error>> {
     let batches = read_cdf_for_table("tests/data/cdf-table-non-partitioned", 0, None)?;
     assert_batches_sorted_eq(&[
-             "+----+--------+------------+-------------------+---------------+--------------+----------------+------------------+-----------------+--------------------------+",
-             "| id | name   | birthday   | long_field        | boolean_field | double_field | smallint_field | _change_type     | _commit_version | _commit_timestamp        |",
-             "+----+--------+------------+-------------------+---------------+--------------+----------------+------------------+-----------------+--------------------------+",
-             "| 1  | Steve  | 2024-04-14 | 1                 | true          | 3.14         | 1              | insert           | 0               | 2024-04-14T15:58:26.249  |",
-             "| 2  | Bob    | 2024-04-15 | 1                 | true          | 3.14         | 1              | insert           | 0               | 2024-04-14T15:58:26.249  |",
-             "| 3  | Dave   | 2024-04-15 | 2                 | true          | 3.14         | 1              | insert           | 0               | 2024-04-14T15:58:26.249  |",
-             "| 4  | Kate   | 2024-04-15 | 3                 | true          | 3.14         | 1              | insert           | 0               | 2024-04-14T15:58:26.249  |",
-             "| 5  | Emily  | 2024-04-16 | 4                 | true          | 3.14         | 1              | insert           | 0               | 2024-04-14T15:58:26.249  |",
-             "| 6  | Carl   | 2024-04-16 | 5                 | true          | 3.14         | 1              | insert           | 0               | 2024-04-14T15:58:26.249  |",
-             "| 7  | Dennis | 2024-04-16 | 6                 | true          | 3.14         | 1              | insert           | 0               | 2024-04-14T15:58:26.249  |",
-             "| 8  | Claire | 2024-04-17 | 7                 | true          | 3.14         | 1              | insert           | 0               | 2024-04-14T15:58:26.249  |",
-             "| 9  | Ada    | 2024-04-17 | 8                 | true          | 3.14         | 1              | insert           | 0               | 2024-04-14T15:58:26.249  |",
-             "| 10 | Borb   | 2024-04-17 | 99999999999999999 | true          | 3.14         | 1              | insert           | 0               | 2024-04-14T15:58:26.249  |",
-             "| 3  | Dave   | 2024-04-15 | 2                 | true          | 3.14         | 1              | update_preimage  | 1               | 2024-04-14T15:58:29.393  |",
-             "| 3  | Dave   | 2024-04-14 | 2                 | true          | 3.14         | 1              | update_postimage | 1               | 2024-04-14T15:58:29.393  |",
-             "| 4  | Kate   | 2024-04-15 | 3                 | true          | 3.14         | 1              | update_preimage  | 1               | 2024-04-14T15:58:29.393  |",
-             "| 4  | Kate   | 2024-04-14 | 3                 | true          | 3.14         | 1              | update_postimage | 1               | 2024-04-14T15:58:29.393  |",
-             "| 2  | Bob    | 2024-04-15 | 1                 | true          | 3.14         | 1              | update_preimage  | 1               | 2024-04-14T15:58:29.393  |",
-             "| 2  | Bob    | 2024-04-14 | 1                 | true          | 3.14         | 1              | update_postimage | 1               | 2024-04-14T15:58:29.393  |",
-             "| 7  | Dennis | 2024-04-16 | 6                 | true          | 3.14         | 1              | update_preimage  | 2               | 2024-04-14T15:58:31.257  |",
-             "| 7  | Dennis | 2024-04-14 | 6                 | true          | 3.14         | 1              | update_postimage | 2               | 2024-04-14T15:58:31.257  |",
-             "| 5  | Emily  | 2024-04-16 | 4                 | true          | 3.14         | 1              | update_preimage  | 2               | 2024-04-14T15:58:31.257  |",
-             "| 5  | Emily  | 2024-04-14 | 4                 | true          | 3.14         | 1              | update_postimage | 2               | 2024-04-14T15:58:31.257  |",
-             "| 6  | Carl   | 2024-04-16 | 5                 | true          | 3.14         | 1              | update_preimage  | 2               | 2024-04-14T15:58:31.257  |",
-             "| 6  | Carl   | 2024-04-14 | 5                 | true          | 3.14         | 1              | update_postimage | 2               | 2024-04-14T15:58:31.257  |",
-             "| 7  | Dennis | 2024-04-14 | 6                 | true          | 3.14         | 1              | delete           | 3               | 2024-04-14T15:58:32.495  |",
-             "| 1  | Alex   | 2024-04-14 | 1                 | true          | 3.14         | 1              | insert           | 4               | 2024-04-14T15:58:33.444  |",
-             "| 2  | Alan   | 2024-04-15 | 1                 | true          | 3.14         | 1              | insert           | 4               | 2024-04-14T15:58:33.444  |",
-             "+----+--------+------------+-------------------+---------------+--------------+----------------+------------------+-----------------+--------------------------+"
+             "+----+--------+------------+-------------------+---------------+--------------+----------------+------------------+-----------------+",
+             "| id | name   | birthday   | long_field        | boolean_field | double_field | smallint_field | _change_type     | _commit_version |",
+             "+----+--------+------------+-------------------+---------------+--------------+----------------+------------------+-----------------+",
+             "| 1  | Steve  | 2024-04-14 | 1                 | true          | 3.14         | 1              | insert           | 0               |",
+             "| 2  | Bob    | 2024-04-15 | 1                 | true          | 3.14         | 1              | insert           | 0               |",
+             "| 3  | Dave   | 2024-04-15 | 2                 | true          | 3.14         | 1              | insert           | 0               |",
+             "| 4  | Kate   | 2024-04-15 | 3                 | true          | 3.14         | 1              | insert           | 0               |",
+             "| 5  | Emily  | 2024-04-16 | 4                 | true          | 3.14         | 1              | insert           | 0               |",
+             "| 6  | Carl   | 2024-04-16 | 5                 | true          | 3.14         | 1              | insert           | 0               |",
+             "| 7  | Dennis | 2024-04-16 | 6                 | true          | 3.14         | 1              | insert           | 0               |",
+             "| 8  | Claire | 2024-04-17 | 7                 | true          | 3.14         | 1              | insert           | 0               |",
+             "| 9  | Ada    | 2024-04-17 | 8                 | true          | 3.14         | 1              | insert           | 0               |",
+             "| 10 | Borb   | 2024-04-17 | 99999999999999999 | true          | 3.14         | 1              | insert           | 0               |",
+             "| 3  | Dave   | 2024-04-15 | 2                 | true          | 3.14         | 1              | update_preimage  | 1               |",
+             "| 3  | Dave   | 2024-04-14 | 2                 | true          | 3.14         | 1              | update_postimage | 1               |",
+             "| 4  | Kate   | 2024-04-15 | 3                 | true          | 3.14         | 1              | update_preimage  | 1               |",
+             "| 4  | Kate   | 2024-04-14 | 3                 | true          | 3.14         | 1              | update_postimage | 1               |",
+             "| 2  | Bob    | 2024-04-15 | 1                 | true          | 3.14         | 1              | update_preimage  | 1               |",
+             "| 2  | Bob    | 2024-04-14 | 1                 | true          | 3.14         | 1              | update_postimage | 1               |",
+             "| 7  | Dennis | 2024-04-16 | 6                 | true          | 3.14         | 1              | update_preimage  | 2               |",
+             "| 7  | Dennis | 2024-04-14 | 6                 | true          | 3.14         | 1              | update_postimage | 2               |",
+             "| 5  | Emily  | 2024-04-16 | 4                 | true          | 3.14         | 1              | update_preimage  | 2               |",
+             "| 5  | Emily  | 2024-04-14 | 4                 | true          | 3.14         | 1              | update_postimage | 2               |",
+             "| 6  | Carl   | 2024-04-16 | 5                 | true          | 3.14         | 1              | update_preimage  | 2               |",
+             "| 6  | Carl   | 2024-04-14 | 5                 | true          | 3.14         | 1              | update_postimage | 2               |",
+             "| 7  | Dennis | 2024-04-14 | 6                 | true          | 3.14         | 1              | delete           | 3               |",
+             "| 1  | Alex   | 2024-04-14 | 1                 | true          | 3.14         | 1              | insert           | 4               |",
+             "| 2  | Alan   | 2024-04-15 | 1                 | true          | 3.14         | 1              | insert           | 4               |",
+             "+----+--------+------------+-------------------+---------------+--------------+----------------+------------------+-----------------+"
             ],
             &batches);
     Ok(())
