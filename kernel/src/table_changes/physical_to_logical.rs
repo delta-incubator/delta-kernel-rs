@@ -2,16 +2,12 @@ use std::collections::HashMap;
 use std::iter;
 
 use itertools::Itertools;
-use url::Url;
 
-use crate::actions::deletion_vector::split_vector;
 use crate::expressions::Scalar;
-use crate::scan::state::GlobalScanState;
-use crate::scan::{parse_partition_value, ColumnType, ScanResult};
+use crate::scan::{parse_partition_value, ColumnType};
 use crate::schema::{ColumnName, DataType, SchemaRef, StructField, StructType};
-use crate::{DeltaResult, Engine, Error, Expression, ExpressionRef, FileMeta};
+use crate::{DeltaResult, Error, Expression};
 
-use super::resolve_dvs::ResolvedCdfScanFile;
 use super::scan_file::{CdfScanFile, CdfScanFileType};
 use super::{
     ADD_CHANGE_TYPE, CHANGE_TYPE_COL_NAME, COMMIT_TIMESTAMP_COL_NAME, COMMIT_VERSION_COL_NAME,

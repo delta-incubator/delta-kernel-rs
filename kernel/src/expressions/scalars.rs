@@ -474,7 +474,6 @@ impl PrimitiveType {
 mod tests {
     use core::panic;
     use std::f32::consts::PI;
-    use std::time::Duration;
 
     use crate::expressions::{column_expr, BinaryOperator};
     use crate::Expression;
