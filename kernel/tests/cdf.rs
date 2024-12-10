@@ -6,14 +6,19 @@ use delta_kernel::engine::sync::SyncEngine;
 use itertools::Itertools;
 
 use delta_kernel::engine::arrow_data::ArrowEngineData;
-use delta_kernel::{DeltaResult, Error, Table, Version};
+use delta_kernel::{DeltaResult, Table, Version};
+
+mod common;
+use common::{load_test_data, to_arrow};
 
 fn read_cdf_for_table(
-    path: impl AsRef<str>,
+    test_name: impl AsRef<str>,
     start_version: Version,
     end_version: impl Into<Option<Version>>,
 ) -> DeltaResult<Vec<RecordBatch>> {
-    let table = Table::try_from_uri(path)?;
+    let test_dir = load_test_data("tests/data", test_name.as_ref()).unwrap();
+    let test_path = test_dir.path().join(test_name.as_ref());
+    let table = Table::try_from_uri(test_path.to_str().expect("table path to string")).unwrap();
     let engine = Arc::new(SyncEngine::new());
     let table_changes = table.table_changes(engine.as_ref(), start_version, end_version)?;
 
@@ -36,11 +41,7 @@ fn read_cdf_for_table(
             let scan_result = scan_result?;
             let mask = scan_result.full_mask();
             let data = scan_result.raw_data?;
-            let record_batch: RecordBatch = data
-                .into_any()
-                .downcast::<ArrowEngineData>()
-                .map_err(|_| Error::engine_data_type("ArrowEngineData".to_string()))?
-                .into();
+            let record_batch = to_arrow(data)?;
             if let Some(mask) = mask {
                 Ok(filter_record_batch(&record_batch, &mask.into())?)
             } else {
@@ -92,7 +93,7 @@ fn assert_batches_sorted_eq(expected_lines: &[impl ToString], batches: &[RecordB
 
 #[test]
 fn cdf_with_deletion_vector() -> Result<(), Box<dyn error::Error>> {
-    let cdf = read_cdf_for_table("tests/data/table-with-cdf-and-dv", 0, None)?;
+    let cdf = read_cdf_for_table("cdf-table-with-dv", 0, None)?;
     assert_batches_sorted_eq(
         &[
             "+-------+--------------+-----------------+",
@@ -121,7 +122,7 @@ fn cdf_with_deletion_vector() -> Result<(), Box<dyn error::Error>> {
 
 #[test]
 fn basic_cdf() -> Result<(), Box<dyn error::Error>> {
-    let batches = read_cdf_for_table("tests/data/cdf-table", 0, None)?;
+    let batches = read_cdf_for_table("cdf-table", 0, None)?;
     assert_batches_sorted_eq(
         &[
             "+----+--------+------------+------------------+-----------------+",
@@ -159,7 +160,7 @@ fn basic_cdf() -> Result<(), Box<dyn error::Error>> {
 
 #[test]
 fn cdf_non_partitioned() -> Result<(), Box<dyn error::Error>> {
-    let batches = read_cdf_for_table("tests/data/cdf-table-non-partitioned", 0, None)?;
+    let batches = read_cdf_for_table("cdf-table-non-partitioned", 0, None)?;
     assert_batches_sorted_eq(&[
              "+----+--------+------------+-------------------+---------------+--------------+----------------+------------------+-----------------+",
              "| id | name   | birthday   | long_field        | boolean_field | double_field | smallint_field | _change_type     | _commit_version |",

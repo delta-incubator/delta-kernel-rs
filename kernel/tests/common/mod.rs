@@ -9,6 +9,21 @@ use delta_kernel::{DeltaResult, Engine, EngineData, Table};
 
 use std::sync::Arc;
 
+/// unpack the test data from {test_parent_dir}/{test_name}.tar.zst into a temp dir, and return the dir it was
+/// unpacked into
+#[allow(unused)]
+pub(crate) fn load_test_data(
+    test_parent_dir: &str,
+    test_name: &str,
+) -> Result<tempfile::TempDir, Box<dyn std::error::Error>> {
+    let path = format!("{test_parent_dir}/{test_name}.tar.zst");
+    let tar = zstd::Decoder::new(std::fs::File::open(path)?)?;
+    let mut archive = tar::Archive::new(tar);
+    let temp_dir = tempfile::tempdir()?;
+    archive.unpack(temp_dir.path())?;
+    Ok(temp_dir)
+}
+
 pub(crate) fn to_arrow(data: Box<dyn EngineData>) -> DeltaResult<RecordBatch> {
     Ok(data
         .into_any()
