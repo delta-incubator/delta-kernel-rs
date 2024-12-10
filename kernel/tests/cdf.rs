@@ -46,37 +46,36 @@ fn read_cdf_for_table(
 }
 
 fn assert_batches_sorted_eq(expected_lines: &[impl ToString], batches: &[RecordBatch]) {
-    let mut expected_lines: Vec<String> = expected_lines.iter().map(ToString::to_string).collect();
+    let sort_rows = |lines: &mut Vec<String>| {
+        let num_lines = lines.len();
+        if num_lines > 3 {
+            // sort except for header + footer
+            lines.as_mut_slice()[2..num_lines - 1].sort_unstable()
+        }
+    };
 
-    // sort except for header + footer
-    let num_lines = expected_lines.len();
-    if num_lines > 3 {
-        expected_lines.as_mut_slice()[2..num_lines - 1].sort_unstable()
-    }
+    let mut expected_lines: Vec<String> = expected_lines.iter().map(ToString::to_string).collect();
+    sort_rows(&mut expected_lines);
 
     let formatted = arrow::util::pretty::pretty_format_batches(batches)
         .unwrap()
         .to_string();
-
-    let mut actual_lines: Vec<&str> = formatted.trim().lines().collect();
-
-    // sort except for header + footer
-    let num_lines = actual_lines.len();
-    if num_lines > 3 {
-        actual_lines.as_mut_slice()[2..num_lines - 1].sort_unstable()
-    }
+    let mut actual_lines: Vec<String> = formatted.trim().lines().map(ToString::to_string).collect();
+    sort_rows(&mut actual_lines);
 
     let expected_table_str = expected_lines.join("\n");
     let actual_table_str = actual_lines.join("\n");
 
     assert_eq!(
-        actual_lines.len(),
         expected_lines.len(),
-        "Incorrect number of lines. Expected:\n{}\nbut got:\n{} ",
+        actual_lines.len(),
+        "Incorrect number of lines. Expected {} lines:\n{}\nbut got {} lines:\n{} ",
+        expected_lines.len(),
         expected_table_str,
+        actual_lines.len(),
         actual_table_str
     );
-    for (expected, actual) in expected_lines.iter().zip(actual_lines) {
+    for (expected, actual) in expected_lines.iter().zip(&actual_lines) {
         assert_eq!(
             expected, actual,
             "Expected:\n{}\nbut got:\n{}",
