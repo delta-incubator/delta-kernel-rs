@@ -224,7 +224,7 @@ impl TableChangesScan {
             }) // Iterator-Result-Iterator
             .flatten_ok() // Iterator-Result
             .map(move |resolved_scan_file| -> DeltaResult<_> {
-                read_scan_data(
+                read_scan_file(
                     engine.as_ref(),
                     resolved_scan_file?,
                     &global_scan_state,
@@ -241,7 +241,7 @@ impl TableChangesScan {
 
 /// Reads the data at the `resolved_scan_file` and transforms the data from physical to logical.
 /// The result is a fallible iterator of [`ScanResult`] containing the logical data.
-fn read_scan_data(
+fn read_scan_file(
     engine: &dyn Engine,
     resolved_scan_file: ResolvedCdfScanFile,
     global_state: &GlobalScanState,
