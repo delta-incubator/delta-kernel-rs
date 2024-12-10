@@ -83,63 +83,6 @@ fn scan_file_read_schema(scan_file: &CdfScanFile, read_schema: &StructType) -> S
     }
 }
 
-/// Reads the data at the `resolved_scan_file` and transforms the data from physical to logical.
-/// The result is a fallible iterator of [`ScanResult`] containing the logical data.
-#[allow(unused)]
-pub(crate) fn read_scan_file(
-    engine: &dyn Engine,
-    resolved_scan_file: ResolvedCdfScanFile,
-    global_state: &GlobalScanState,
-    all_fields: &[ColumnType],
-    predicate: Option<ExpressionRef>,
-) -> DeltaResult<impl Iterator<Item = DeltaResult<ScanResult>>> {
-    let ResolvedCdfScanFile {
-        scan_file,
-        mut selection_vector,
-    } = resolved_scan_file;
-
-    let phys_to_logical_expr =
-        physical_to_logical_expr(&scan_file, global_state.logical_schema.as_ref(), all_fields)?;
-    let read_schema = scan_file_read_schema(&scan_file, global_state.read_schema.as_ref());
-    let phys_to_logical_eval = engine.get_expression_handler().get_evaluator(
-        read_schema.clone(),
-        phys_to_logical_expr,
-        global_state.logical_schema.clone().into(),
-    );
-
-    let table_root = Url::parse(&global_state.table_root)?;
-    let location = table_root.join(&scan_file.path)?;
-    let file = FileMeta {
-        last_modified: 0,
-        size: 0,
-        location,
-    };
-    let read_result_iter =
-        engine
-            .get_parquet_handler()
-            .read_parquet_files(&[file], read_schema, predicate)?;
-
-    let result = read_result_iter.map(move |batch| -> DeltaResult<_> {
-        let batch = batch?;
-        // to transform the physical data into the correct logical form
-        let logical = phys_to_logical_eval.evaluate(batch.as_ref());
-        let len = logical.as_ref().map_or(0, |res| res.len());
-        // need to split the dv_mask. what's left in dv_mask covers this result, and rest
-        // will cover the following results. we `take()` out of `selection_vector` to avoid
-        // trying to return a captured variable. We're going to reassign `selection_vector`
-        // to `rest` in a moment anyway
-        let mut sv = selection_vector.take();
-        let rest = split_vector(sv.as_mut(), len, None);
-        let result = ScanResult {
-            raw_data: logical,
-            raw_mask: sv,
-        };
-        selection_vector = rest;
-        Ok(result)
-    });
-    Ok(result)
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
