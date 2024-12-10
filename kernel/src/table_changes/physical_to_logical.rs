@@ -15,7 +15,6 @@ use super::{
 };
 
 /// Returns a map from change data feed column name to an expression that generates the row data.
-#[allow(unused)]
 fn get_cdf_columns(scan_file: &CdfScanFile) -> DeltaResult<HashMap<&str, Expression>> {
     let timestamp = Scalar::timestamp_ntz_from_millis(scan_file.commit_timestamp)?;
     let version = scan_file.commit_version;
@@ -34,7 +33,6 @@ fn get_cdf_columns(scan_file: &CdfScanFile) -> DeltaResult<HashMap<&str, Express
 
 /// Generates the expression used to convert physical data from the `scan_file` path into logical
 /// data matching the `logical_schema`
-#[allow(unused)]
 pub(crate) fn physical_to_logical_expr(
     scan_file: &CdfScanFile,
     logical_schema: &StructType,
@@ -67,7 +65,6 @@ pub(crate) fn physical_to_logical_expr(
 }
 
 /// Gets the physical schema that will be used to read data in the `scan_file` path.
-#[allow(unused)]
 pub(crate) fn scan_file_read_schema(
     scan_file: &CdfScanFile,
     read_schema: &StructType,
