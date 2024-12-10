@@ -17,7 +17,7 @@ use super::{
 /// Returns a map from change data feed column name to an expression that generates the row data.
 #[allow(unused)]
 fn get_cdf_columns(scan_file: &CdfScanFile) -> DeltaResult<HashMap<&str, Expression>> {
-    let timestamp = Scalar::timestamp_from_millis(scan_file.commit_timestamp)?;
+    let timestamp = Scalar::timestamp_ntz_from_millis(scan_file.commit_timestamp)?;
     let version = scan_file.commit_version;
     let change_type: Expression = match scan_file.scan_type {
         CdfScanFileType::Cdc => Expression::column([CHANGE_TYPE_COL_NAME]),
@@ -125,7 +125,7 @@ mod tests {
                 Scalar::Long(20).into(),
                 expected_expr,
                 Expression::literal(42i64),
-                Scalar::Timestamp(1234000).into(), // Microsecond is 1000x millisecond
+                Scalar::TimestampNtz(1234000).into(), // Microsecond is 1000x millisecond
             ]);
 
             assert_eq!(phys_to_logical_expr, expected_expr)
