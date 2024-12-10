@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::iter;
 
 use itertools::Itertools;
 
@@ -65,16 +64,16 @@ pub(crate) fn physical_to_logical_expr(
 }
 
 /// Gets the physical schema that will be used to read data in the `scan_file` path.
-pub(crate) fn scan_file_read_schema(
+pub(crate) fn scan_file_physical_schema(
     scan_file: &CdfScanFile,
-    read_schema: &StructType,
+    physical_schema: &StructType,
 ) -> SchemaRef {
     if scan_file.scan_type == CdfScanFileType::Cdc {
         let change_type = StructField::new(CHANGE_TYPE_COL_NAME, DataType::STRING, false);
-        let fields = read_schema.fields().cloned().chain(iter::once(change_type));
+        let fields = physical_schema.fields().cloned().chain(Some(change_type));
         StructType::new(fields).into()
     } else {
-        read_schema.clone().into()
+        physical_schema.clone().into()
     }
 }
 

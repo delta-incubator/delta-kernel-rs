@@ -11,7 +11,7 @@ use crate::schema::{SchemaRef, StructType};
 use crate::{DeltaResult, Engine, ExpressionRef, FileMeta};
 
 use super::log_replay::{table_changes_action_iter, TableChangesScanData};
-use super::physical_to_logical::{physical_to_logical_expr, scan_file_read_schema};
+use super::physical_to_logical::{physical_to_logical_expr, scan_file_physical_schema};
 use super::resolve_dvs::{resolve_scan_file_dv, ResolvedCdfScanFile};
 use super::scan_file::scan_data_to_scan_file;
 use super::{TableChanges, CDF_FIELDS};
@@ -255,9 +255,9 @@ fn read_scan_file(
 
     let physical_to_logical_expr =
         physical_to_logical_expr(&scan_file, global_state.logical_schema.as_ref(), all_fields)?;
-    let read_schema = scan_file_read_schema(&scan_file, global_state.read_schema.as_ref());
+    let physical_schema = scan_file_physical_schema(&scan_file, global_state.read_schema.as_ref());
     let phys_to_logical_eval = engine.get_expression_handler().get_evaluator(
-        read_schema.clone(),
+        physical_schema.clone(),
         physical_to_logical_expr,
         global_state.logical_schema.clone().into(),
     );
@@ -272,7 +272,7 @@ fn read_scan_file(
     let read_result_iter =
         engine
             .get_parquet_handler()
-            .read_parquet_files(&[file], read_schema, predicate)?;
+            .read_parquet_files(&[file], physical_schema, predicate)?;
 
     let result = read_result_iter.map(move |batch| -> DeltaResult<_> {
         let batch = batch?;
