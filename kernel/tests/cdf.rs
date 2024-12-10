@@ -42,10 +42,9 @@ fn read_cdf_for_table(
             let mask = scan_result.full_mask();
             let data = scan_result.raw_data?;
             let record_batch = to_arrow(data)?;
-            if let Some(mask) = mask {
-                Ok(filter_record_batch(&record_batch, &mask.into())?)
-            } else {
-                Ok(record_batch)
+            match mask {
+                Some(mask) => Ok(filter_record_batch(&record_batch, &mask.into())?),
+                None => Ok(record_batch),
             }
         })
         .try_collect()?;

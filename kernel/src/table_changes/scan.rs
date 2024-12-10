@@ -32,7 +32,7 @@ pub struct TableChangesScan {
     // The predicate to filter the data
     predicate: Option<ExpressionRef>,
     // The [`ColumnType`] of all the fields in the `logical_schema`
-    all_fields: Vec<ColumnType>,
+    all_fields: Arc<Vec<ColumnType>>,
 }
 
 /// This builder constructs a [`TableChangesScan`] that can be used to read the [`TableChanges`]
@@ -163,7 +163,7 @@ impl TableChangesScanBuilder {
             table_changes: self.table_changes,
             logical_schema,
             predicate: self.predicate,
-            all_fields,
+            all_fields: Arc::new(all_fields),
             physical_schema: StructType::new(read_fields).into(),
         })
     }
@@ -326,6 +326,7 @@ mod tests {
                 ColumnType::Selected("_commit_version".to_string()),
                 ColumnType::Selected("_commit_timestamp".to_string()),
             ]
+            .into()
         );
         assert_eq!(scan.predicate, None);
     }
@@ -356,6 +357,7 @@ mod tests {
                 ColumnType::Selected("id".to_string()),
                 ColumnType::Selected("_commit_version".to_string()),
             ]
+            .into()
         );
         assert_eq!(
             scan.logical_schema,
