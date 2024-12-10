@@ -10,12 +10,12 @@ use crate::{DeltaResult, Engine, Error};
 pub(crate) struct ResolvedCdfScanFile {
     /// The scan file that holds the path the data file to be read. The `scan_type` field is
     /// resolved to the `_change_type` of the rows for this data file.
-    scan_file: CdfScanFile,
+    pub(crate) scan_file: CdfScanFile,
     /// Optional vector of bools. If `selection_vector[i] = true`, then that row must be included
     /// in the CDF output. Otherwise the row must be filtered out. The vector may be shorter than
     /// the data file. In this case, all the remaining rows are *not* selected. If `selection_vector`
     /// is `None`, then all rows are selected.
-    selection_vector: Option<Vec<bool>>,
+    pub(crate) selection_vector: Option<Vec<bool>>,
 }
 
 /// Resolves the deletion vectors for a [`CdfScanFile`]. This function handles two
