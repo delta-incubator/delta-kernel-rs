@@ -253,12 +253,12 @@ fn read_scan_data(
         mut selection_vector,
     } = resolved_scan_file;
 
-    let expression =
+    let physical_to_logical_expr =
         physical_to_logical_expr(&scan_file, global_state.logical_schema.as_ref(), all_fields)?;
-    let schema = scan_file_read_schema(&scan_file, global_state.read_schema.as_ref());
-    let evaluator = engine.get_expression_handler().get_evaluator(
-        schema.clone(),
-        expression,
+    let read_schema = scan_file_read_schema(&scan_file, global_state.read_schema.as_ref());
+    let phys_to_logical_eval = engine.get_expression_handler().get_evaluator(
+        read_schema.clone(),
+        physical_to_logical_expr,
         global_state.logical_schema.clone().into(),
     );
 
@@ -272,12 +272,12 @@ fn read_scan_data(
     let read_result_iter =
         engine
             .get_parquet_handler()
-            .read_parquet_files(&[file], schema, predicate)?;
+            .read_parquet_files(&[file], read_schema, predicate)?;
 
     let result = read_result_iter.map(move |batch| -> DeltaResult<_> {
         let batch = batch?;
         // to transform the physical data into the correct logical form
-        let logical = evaluator.evaluate(batch.as_ref());
+        let logical = phys_to_logical_eval.evaluate(batch.as_ref());
         let len = logical.as_ref().map_or(0, |res| res.len());
         // need to split the dv_mask. what's left in dv_mask covers this result, and rest
         // will cover the following results. we `take()` out of `selection_vector` to avoid
