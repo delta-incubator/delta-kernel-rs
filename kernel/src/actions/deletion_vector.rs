@@ -414,10 +414,10 @@ mod tests {
         assert_eq!(bools, expected);
     }
 
-    // this test is ignored by default as it's expensive to allocate such big vecs full of `false`. you can run it via:
-    // cargo test actions::deletion_vector::tests::test_sv_to_bools -- --ignored
+    // Unlike [`test_dv_to_bools`], this test is not ignored because the large zero-initialized selection vector is fast to allocate.
+    // It just gets a bunch of empty pages from the OS. [`tet_dv_to_bools`] is slow because we must
+    // set every element to `true`.
     #[test]
-    #[ignore]
     fn test_sv_to_bools() {
         let mut rb = RoaringTreemap::new();
         rb.insert(0);
