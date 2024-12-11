@@ -298,7 +298,7 @@ mod tests {
 
     #[test]
     fn test_scan_action_iter_with_remove() {
-        let _ = run_with_validate_callback(
+        run_with_validate_callback(
             vec![add_batch_with_remove()],
             &[false, false, true, false],
             (),
