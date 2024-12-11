@@ -252,9 +252,7 @@ pub fn scan_action_iter(
             let (batch, is_log_batch) = action_res?;
             log_scanner.process_scan_batch(add_transform.as_ref(), batch.as_ref(), is_log_batch)
         })
-        .filter(|res| {
-            res.as_ref().map_or(true, |(_, sv)| sv.contains(&true))
-        });
+        .filter(|res| res.as_ref().map_or(true, |(_, sv)| sv.contains(&true)));
 
     Ok(actions)
 }
