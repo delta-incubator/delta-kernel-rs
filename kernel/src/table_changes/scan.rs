@@ -220,7 +220,7 @@ impl TableChangesScan {
         &self.logical_schema
     }
 
-    /// Get the predicate [`Expression`] of the scan.
+    /// Get the predicate [`ExpressionRef`] of the scan.
     pub fn physical_predicate(&self) -> Option<ExpressionRef> {
         if let PhysicalPredicate::Some(ref predicate, _) = self.physical_predicate {
             Some(predicate.clone())
