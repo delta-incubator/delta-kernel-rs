@@ -13,7 +13,6 @@ use crate::actions::deletion_vector::{
 };
 use crate::actions::{get_log_add_schema, get_log_schema, ADD_NAME, REMOVE_NAME};
 use crate::expressions::{ColumnName, Expression, ExpressionRef, ExpressionTransform, Scalar};
-use crate::scan::state::{DvInfo, Stats};
 use crate::schema::{
     ArrayType, DataType, MapType, PrimitiveType, Schema, SchemaRef, SchemaTransform, StructField,
     StructType,
@@ -428,33 +427,13 @@ impl Scan {
         &self,
         engine: Arc<dyn Engine>,
     ) -> DeltaResult<impl Iterator<Item = DeltaResult<ScanResult>> + '_> {
-        struct ScanFile {
-            path: String,
-            size: i64,
-            dv_info: DvInfo,
-            partition_values: HashMap<String, String>,
+        fn scan_data_callback(batches: &mut Vec<state::ScanFile>, file: state::ScanFile) {
+            batches.push(file);
         }
-        fn scan_data_callback(
-            batches: &mut Vec<ScanFile>,
-            path: &str,
-            size: i64,
-            _: Option<Stats>,
-            dv_info: DvInfo,
-            partition_values: HashMap<String, String>,
-        ) {
-            batches.push(ScanFile {
-                path: path.to_string(),
-                size,
-                dv_info,
-                partition_values,
-            });
-        }
-
         debug!(
             "Executing scan with logical schema {:#?} and physical schema {:#?}",
             self.logical_schema, self.physical_schema
         );
-
         let global_state = Arc::new(self.global_scan_state());
         let scan_data = self.scan_data(engine.as_ref())?;
         let scan_files_iter = scan_data
@@ -963,16 +942,9 @@ mod tests {
 
     fn get_files_for_scan(scan: Scan, engine: &dyn Engine) -> DeltaResult<Vec<String>> {
         let scan_data = scan.scan_data(engine)?;
-        fn scan_data_callback(
-            paths: &mut Vec<String>,
-            path: &str,
-            _size: i64,
-            _: Option<Stats>,
-            dv_info: DvInfo,
-            _partition_values: HashMap<String, String>,
-        ) {
-            paths.push(path.to_string());
-            assert!(dv_info.deletion_vector.is_none());
+        fn scan_data_callback(paths: &mut Vec<String>, file: state::ScanFile) {
+            paths.push(file.path);
+            assert!(file.dv_info.deletion_vector.is_none());
         }
         let mut files = vec![];
         for data in scan_data {

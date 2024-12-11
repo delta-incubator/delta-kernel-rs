@@ -256,32 +256,26 @@ pub fn scan_action_iter(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
     use crate::scan::{
-        state::{DvInfo, Stats},
+        state,
         test_utils::{add_batch_simple, add_batch_with_remove, run_with_validate_callback},
     };
 
     // dv-info is more complex to validate, we validate that works in the test for visit_scan_files
     // in state.rs
-    fn validate_simple(
-        _: &mut (),
-        path: &str,
-        size: i64,
-        stats: Option<Stats>,
-        _: DvInfo,
-        part_vals: HashMap<String, String>,
-    ) {
+    fn validate_simple(_: &mut (), file: state::ScanFile) {
         assert_eq!(
-            path,
+            file.path,
             "part-00000-fae5310a-a37d-4e51-827b-c3d5516560ca-c000.snappy.parquet"
         );
-        assert_eq!(size, 635);
-        assert!(stats.is_some());
-        assert_eq!(stats.as_ref().unwrap().num_records, 10);
-        assert_eq!(part_vals.get("date"), Some(&"2017-12-10".to_string()));
-        assert_eq!(part_vals.get("non-existent"), None);
+        assert_eq!(file.size, 635);
+        assert!(file.stats.is_some());
+        assert_eq!(file.stats.as_ref().unwrap().num_records, 10);
+        assert_eq!(
+            file.partition_values.get("date"),
+            Some(&"2017-12-10".to_string())
+        );
+        assert_eq!(file.partition_values.get("non-existent"), None);
     }
 
     #[test]

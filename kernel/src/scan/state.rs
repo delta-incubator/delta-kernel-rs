@@ -98,14 +98,17 @@ impl DvInfo {
     }
 }
 
-pub type ScanCallback<T> = fn(
-    context: &mut T,
-    path: &str,
-    size: i64,
-    stats: Option<Stats>,
-    dv_info: DvInfo,
-    partition_values: HashMap<String, String>,
-);
+/// A struct containing all the information needed for a scan file callback
+#[derive(Debug, Clone)]
+pub struct ScanFile {
+    pub path: String,
+    pub size: i64,
+    pub stats: Option<Stats>,
+    pub dv_info: DvInfo,
+    pub partition_values: HashMap<String, String>,
+}
+
+pub type ScanCallback<T> = fn(context: &mut T, file: ScanFile);
 
 /// Request that the kernel call a callback on each valid file that needs to be read for the
 /// scan.
@@ -176,7 +179,8 @@ impl<T> RowVisitor for ScanFileVisitor<'_, T> {
                 continue;
             }
             // Since path column is required, use it to detect presence of an Add action
-            if let Some(path) = getters[0].get_opt(row_index, "scanFile.path")? {
+            let path: Option<String> = getters[0].get_opt(row_index, "scanFile.path")?;
+            if let Some(path) = path {
                 let size = getters[1].get(row_index, "scanFile.size")?;
                 let stats: Option<String> = getters[3].get_opt(row_index, "scanFile.stats")?;
                 let stats: Option<Stats> =
@@ -195,14 +199,15 @@ impl<T> RowVisitor for ScanFileVisitor<'_, T> {
                 let dv_info = DvInfo { deletion_vector };
                 let partition_values =
                     getters[9].get(row_index, "scanFile.fileConstantValues.partitionValues")?;
-                (self.callback)(
-                    &mut self.context,
-                    path,
+
+                let scan_file = ScanFile {
+                    path: path.to_string(),
                     size,
                     stats,
                     dv_info,
                     partition_values,
-                )
+                };
+                (self.callback)(&mut self.context, scan_file)
             }
         }
         Ok(())
@@ -211,36 +216,30 @@ impl<T> RowVisitor for ScanFileVisitor<'_, T> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
     use crate::scan::test_utils::{add_batch_simple, run_with_validate_callback};
 
-    use super::{DvInfo, Stats};
+    use super::ScanFile;
 
     #[derive(Clone)]
     struct TestContext {
         id: usize,
     }
 
-    fn validate_visit(
-        context: &mut TestContext,
-        path: &str,
-        size: i64,
-        stats: Option<Stats>,
-        dv_info: DvInfo,
-        part_vals: HashMap<String, String>,
-    ) {
+    fn validate_visit(context: &mut TestContext, file: ScanFile) {
         assert_eq!(
-            path,
+            file.path,
             "part-00000-fae5310a-a37d-4e51-827b-c3d5516560ca-c000.snappy.parquet"
         );
-        assert_eq!(size, 635);
-        assert!(stats.is_some());
-        assert_eq!(stats.as_ref().unwrap().num_records, 10);
-        assert_eq!(part_vals.get("date"), Some(&"2017-12-10".to_string()));
-        assert_eq!(part_vals.get("non-existent"), None);
-        assert!(dv_info.deletion_vector.is_some());
-        let dv = dv_info.deletion_vector.unwrap();
+        assert_eq!(file.size, 635);
+        assert!(file.stats.is_some());
+        assert_eq!(file.stats.as_ref().unwrap().num_records, 10);
+        assert_eq!(
+            file.partition_values.get("date"),
+            Some(&"2017-12-10".to_string())
+        );
+        assert_eq!(file.partition_values.get("non-existent"), None);
+        assert!(file.dv_info.deletion_vector.is_some());
+        let dv = file.dv_info.deletion_vector.unwrap();
         assert_eq!(dv.unique_id(), "uvBn[lx{q8@P<9BNH/isA@1");
         assert_eq!(context.id, 2);
     }

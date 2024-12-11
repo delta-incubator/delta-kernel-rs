@@ -12,7 +12,7 @@ use delta_kernel::engine::arrow_data::ArrowEngineData;
 use delta_kernel::engine::default::executor::tokio::TokioBackgroundExecutor;
 use delta_kernel::engine::default::DefaultEngine;
 use delta_kernel::engine::sync::SyncEngine;
-use delta_kernel::scan::state::{DvInfo, GlobalScanState, Stats};
+use delta_kernel::scan::state::{DvInfo, GlobalScanState, ScanFile, Stats};
 use delta_kernel::scan::transform_to_logical;
 use delta_kernel::schema::Schema;
 use delta_kernel::{DeltaResult, Engine, EngineData, FileMeta, Table};
@@ -76,15 +76,6 @@ fn main() -> ExitCode {
     }
 }
 
-// the way we as a connector represent data to scan. this is computed from the raw data returned
-// from the scan, and could be any format the engine chooses to use to facilitate distributing work.
-struct ScanFile {
-    path: String,
-    size: i64,
-    partition_values: HashMap<String, String>,
-    dv_info: DvInfo,
-}
-
 // we know we're using arrow under the hood, so cast an EngineData into something we can work with
 fn to_arrow(data: Box<dyn EngineData>) -> DeltaResult<RecordBatch> {
     Ok(data
@@ -104,22 +95,9 @@ fn truncate_batch(batch: RecordBatch, rows: usize) -> RecordBatch {
     RecordBatch::try_new(batch.schema(), cols).unwrap()
 }
 
-// This is the callback that will be called fo each valid scan row
-fn send_scan_file(
-    scan_tx: &mut spmc::Sender<ScanFile>,
-    path: &str,
-    size: i64,
-    _stats: Option<Stats>,
-    dv_info: DvInfo,
-    partition_values: HashMap<String, String>,
-) {
-    let scan_file = ScanFile {
-        path: path.to_string(),
-        size,
-        partition_values,
-        dv_info,
-    };
-    scan_tx.send(scan_file).unwrap();
+// This is the callback that will be called for each valid scan row
+fn send_scan_file(scan_tx: &mut spmc::Sender<ScanFile>, file: ScanFile) {
+    scan_tx.send(file).unwrap();
 }
 
 fn try_main() -> DeltaResult<()> {
