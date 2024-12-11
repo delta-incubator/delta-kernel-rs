@@ -12,7 +12,7 @@ use delta_kernel::engine::arrow_data::ArrowEngineData;
 use delta_kernel::engine::default::executor::tokio::TokioBackgroundExecutor;
 use delta_kernel::engine::default::DefaultEngine;
 use delta_kernel::engine::sync::SyncEngine;
-use delta_kernel::scan::state::{DvInfo, GlobalScanState, Stats, ScanFile};
+use delta_kernel::scan::state::{DvInfo, GlobalScanState, ScanFile, Stats};
 use delta_kernel::scan::transform_to_logical;
 use delta_kernel::schema::Schema;
 use delta_kernel::{DeltaResult, Engine, EngineData, FileMeta, Table};
@@ -75,8 +75,6 @@ fn main() -> ExitCode {
         }
     }
 }
-
-// Using the official ScanFile from delta_kernel::scan::state instead of redefining it
 
 // we know we're using arrow under the hood, so cast an EngineData into something we can work with
 fn to_arrow(data: Box<dyn EngineData>) -> DeltaResult<RecordBatch> {
@@ -232,7 +230,7 @@ fn do_work(
     engine: Arc<dyn Engine>,
     scan_state: Arc<GlobalScanState>,
     record_batch_tx: Sender<RecordBatch>,
-    scan_file_rx: spmc::Receiver<ScanFile<'static>>,
+    scan_file_rx: spmc::Receiver<ScanFile>,
 ) {
     // get the type for the function calls
     let engine: &dyn Engine = engine.as_ref();
@@ -250,7 +248,7 @@ fn do_work(
             .unwrap();
 
         // build the required metadata for our parquet handler to read this file
-        let location = root_url.join(scan_file.path).unwrap();
+        let location = root_url.join(&scan_file.path).unwrap();
         let meta = FileMeta {
             last_modified: 0,
             size: scan_file.size as usize,

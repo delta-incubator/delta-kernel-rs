@@ -11,7 +11,7 @@ use delta_kernel::engine::default::executor::tokio::TokioBackgroundExecutor;
 use delta_kernel::engine::default::DefaultEngine;
 use delta_kernel::expressions::{column_expr, BinaryOperator, Expression};
 use delta_kernel::scan::state;
-use delta_kernel::scan::state::{visit_scan_files, ScanFile};
+use delta_kernel::scan::state::visit_scan_files;
 use delta_kernel::scan::{transform_to_logical, Scan};
 use delta_kernel::schema::{DataType, Schema};
 use delta_kernel::{Engine, FileMeta, Table};
