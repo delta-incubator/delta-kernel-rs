@@ -213,7 +213,7 @@ impl TableChangesScan {
         }
     }
 
-    /// Get a shared reference to the [`Schema`] of the scan.
+    /// Get a shared reference to the [`Schema`] of the table changes scan.
     ///
     /// [`Schema`]: crate::schema::Schema
     pub fn schema(&self) -> &SchemaRef {
