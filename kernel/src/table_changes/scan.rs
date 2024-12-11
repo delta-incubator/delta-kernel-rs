@@ -208,12 +208,19 @@ impl TableChangesScan {
             table_root: self.table_changes.table_root.to_string(),
             partition_columns: end_snapshot.metadata().partition_columns.clone(),
             logical_schema: self.logical_schema.clone(),
-            read_schema: self.physical_schema.clone(),
+            physical_schema: self.physical_schema.clone(),
             column_mapping_mode: end_snapshot.column_mapping_mode,
         }
     }
 
-    /// Get the predicate [`Expression`] of the scan.
+    /// Get a shared reference to the [`Schema`] of the table changes scan.
+    ///
+    /// [`Schema`]: crate::schema::Schema
+    pub fn schema(&self) -> &SchemaRef {
+        &self.logical_schema
+    }
+
+    /// Get the predicate [`ExpressionRef`] of the scan.
     fn physical_predicate(&self) -> Option<ExpressionRef> {
         if let PhysicalPredicate::Some(ref predicate, _) = self.physical_predicate {
             Some(predicate.clone())
@@ -276,7 +283,8 @@ fn read_scan_file(
 
     let physical_to_logical_expr =
         physical_to_logical_expr(&scan_file, global_state.logical_schema.as_ref(), all_fields)?;
-    let physical_schema = scan_file_physical_schema(&scan_file, global_state.read_schema.as_ref());
+    let physical_schema =
+        scan_file_physical_schema(&scan_file, global_state.physical_schema.as_ref());
     let phys_to_logical_eval = engine.get_expression_handler().get_evaluator(
         physical_schema.clone(),
         physical_to_logical_expr,
