@@ -1,5 +1,5 @@
 use std::clone::Clone;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock};
 
 use tracing::debug;
@@ -31,6 +31,8 @@ impl FileActionKey {
 struct LogReplayScanner {
     filter: Option<DataSkippingFilter>,
 
+    table_schema: SchemaRef,
+
     /// A set of (data file path, dv_unique_id) pairs that have been seen thus
     /// far in the log. This is used to filter out files with Remove actions as
     /// well as duplicate entries in the log.
@@ -44,7 +46,9 @@ struct LogReplayScanner {
 struct AddRemoveDedupVisitor<'seen> {
     seen: &'seen mut HashSet<FileActionKey>,
     selection_vector: Vec<bool>,
-    transforms: Vec<Expression>,
+    partition_columns: Arc<Vec<String>>,
+    static_transform_expr: ExpressionRef,
+    transforms: HashMap<usize, Expression>,
     is_log_batch: bool,
 }
 
@@ -108,7 +112,20 @@ impl AddRemoveDedupVisitor<'_> {
         let file_key = FileActionKey::new(path, dv_unique_id);
         let have_seen = self.check_and_record_seen(file_key);
         if !have_seen {
-            // compute a transform for it here
+            // compute transform here
+            let partition_values: HashMap<_, _> = getters[1].get(i, "add.partitionValues")?;
+            for col in self.partition_columns.iter() {
+                // TODO: ColumnMapping
+                let mut transform_expr = self.static_transform_expr.as_ref().clone();
+                if let Expression::Struct(ref mut inner) = transform_expr {
+                    let value_expression =
+                        super::parse_partition_value(partition_values.get(col), &DataType::STRING)?;
+                    inner.push(value_expression.into());
+                    self.transforms.insert(i, transform_expr);
+                } else {
+                    // error?
+                }
+            }
         }
         Ok(!have_seen && is_add)
     }
@@ -212,6 +229,7 @@ impl LogReplayScanner {
     ) -> Self {
         Self {
             filter: DataSkippingFilter::new(engine, table_schema, predicate),
+            table_schema: table_schema.clone(), // cheap arc clone
             seen: Default::default(),
         }
     }
@@ -220,6 +238,8 @@ impl LogReplayScanner {
         &mut self,
         add_transform: &dyn ExpressionEvaluator,
         actions: &dyn EngineData,
+        partition_columns: Arc<Vec<String>>,
+        static_transform_expr: ExpressionRef,
         is_log_batch: bool,
     ) -> DeltaResult<ScanData> {
         // Apply data skipping to get back a selection vector for actions that passed skipping. We
@@ -233,10 +253,14 @@ impl LogReplayScanner {
         let mut visitor = AddRemoveDedupVisitor {
             seen: &mut self.seen,
             selection_vector,
-            transforms: vec!(),
+            partition_columns,
+            static_transform_expr,
+            transforms: HashMap::new(),
             is_log_batch,
         };
         visitor.visit_rows_of(actions)?;
+
+        println!("Got transforms: {:#?}", visitor.transforms);
 
         // TODO: Teach expression eval to respect the selection vector we just computed so carefully!
         let selection_vector = visitor.selection_vector;
@@ -253,6 +277,8 @@ pub fn scan_action_iter(
     engine: &dyn Engine,
     action_iter: impl Iterator<Item = DeltaResult<(Box<dyn EngineData>, bool)>>,
     table_schema: &SchemaRef,
+    partition_columns: Vec<String>,
+    static_transform_expr: ExpressionRef,
     predicate: Option<ExpressionRef>,
 ) -> impl Iterator<Item = DeltaResult<ScanData>> {
     let mut log_scanner = LogReplayScanner::new(engine, table_schema, predicate);
@@ -261,10 +287,17 @@ pub fn scan_action_iter(
         get_add_transform_expr(),
         SCAN_ROW_DATATYPE.clone(),
     );
+    let partition_columns = Arc::new(partition_columns);
     action_iter
         .map(move |action_res| {
             let (batch, is_log_batch) = action_res?;
-            log_scanner.process_scan_batch(add_transform.as_ref(), batch.as_ref(), is_log_batch)
+            log_scanner.process_scan_batch(
+                add_transform.as_ref(),
+                batch.as_ref(),
+                partition_columns.clone(),
+                static_transform_expr.clone(),
+                is_log_batch,
+            )
         })
         .filter(|res| res.as_ref().map_or(true, |(_, sv)| sv.contains(&true)))
 }

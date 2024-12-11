@@ -201,6 +201,19 @@ impl Scan {
         self.predicate.clone()
     }
 
+    /// Get the part of the transform expression that can be computed statically. This expression is
+    /// a "no-op", in that it only returns the columns that need no transformation
+    fn get_static_transform_expr(all_fields: &[ColumnType]) -> ExpressionRef {
+        let static_fields = all_fields
+            .iter()
+            .flat_map(|field| match field {
+                ColumnType::Selected(field_name) => Some(ColumnName::new([field_name]).into()),
+                _ => None,
+            })
+            .collect();
+        Arc::new(Expression::Struct(static_fields))
+    }
+
     /// Get an iterator of [`EngineData`]s that should be included in scan for a query. This handles
     /// log-replay, reconciling Add and Remove actions, and applying data skipping (if
     /// possible). Each item in the returned iterator is a tuple of:
@@ -217,10 +230,21 @@ impl Scan {
         &self,
         engine: &dyn Engine,
     ) -> DeltaResult<impl Iterator<Item = DeltaResult<ScanData>>> {
+        /*
+        - build initial "no-op" expression here (as a Cow) (no as an ExpressionRef)
+        - pass into the iterator
+        - for each add, it can keep it as no-op, or add to it by cloning
+        -  Insert into a hashmap keyed by the row that its transforming
+        - on the way out of this we map the `Borrowed` one to `None` since no transform is needed
+         */
+        let static_transform_expr = Scan::get_static_transform_expr(&self.all_fields);
         Ok(scan_action_iter(
             engine,
             self.replay_for_scan_data(engine)?,
             &self.logical_schema,
+            // TODO: Arc and/or something else
+            self.snapshot.metadata().partition_columns.clone(),
+            static_transform_expr,
             self.predicate(),
         ))
     }
