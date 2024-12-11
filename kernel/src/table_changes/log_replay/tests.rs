@@ -615,7 +615,7 @@ async fn table_changes_in_commit_timestamp() {
     mock_table
         .commit([
             Action::CommitInfo(CommitInfo {
-                timestamp: Some(timestamp),
+                in_commit_timestamp: Some(timestamp),
                 ..Default::default()
             }),
             Action::Add(Add {
