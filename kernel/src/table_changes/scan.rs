@@ -290,6 +290,7 @@ fn read_scan_file(
         physical_to_logical_expr,
         global_state.logical_schema.clone().into(),
     );
+    let is_dv_resolved_pair = scan_file.remove_dv.is_some();
 
     let table_root = Url::parse(&global_state.table_root)?;
     let location = table_root.join(&scan_file.path)?;
@@ -314,7 +315,14 @@ fn read_scan_file(
         // trying to return a captured variable. We're going to reassign `selection_vector`
         // to `rest` in a moment anyway
         let mut sv = selection_vector.take();
-        let rest = split_vector(sv.as_mut(), len, None);
+
+        // If this is a resolve_dv_pair, we extend with false because we only want to select rows
+        // that are true in the selection vector.
+        //
+        // If this is not a resolve_dv_pair, then all rows not in the selection vector should be
+        // set to true.
+        let extend = Some(!is_dv_resolved_pair);
+        let rest = split_vector(sv.as_mut(), len, extend);
         let result = ScanResult {
             raw_data: logical,
             raw_mask: sv,
