@@ -704,15 +704,8 @@ pub(crate) mod test_utils {
             sync::{json::SyncJsonHandler, SyncEngine},
         },
         scan::log_replay::scan_action_iter,
-<<<<<<< HEAD
         schema::{StructField, StructType},
         DeltaResult, EngineData, JsonHandler,
-||||||| 5816620
-        schema::{StructField, StructType},
-        EngineData, JsonHandler,
-=======
-        EngineData, JsonHandler,
->>>>>>> upstream/main
     };
 
     use super::state::ScanCallback;
@@ -764,7 +757,6 @@ pub(crate) mod test_utils {
         expected_sel_vec: &[bool],
         context: T,
         validate_callback: ScanCallback<T>,
-<<<<<<< HEAD
     ) -> DeltaResult<()> {
         let engine = SyncEngine::new();
         // doesn't matter here
@@ -773,18 +765,6 @@ pub(crate) mod test_utils {
             crate::schema::DataType::STRING,
             false,
         )]));
-||||||| 5816620
-    ) {
-        let engine = SyncEngine::new();
-        // doesn't matter here
-        let table_schema = Arc::new(StructType::new([StructField::new(
-            "foo",
-            crate::schema::DataType::STRING,
-            false,
-        )]));
-=======
-    ) {
->>>>>>> upstream/main
         let iter = scan_action_iter(
             &SyncEngine::new(),
             batch.into_iter().map(|batch| Ok((batch as _, true))),

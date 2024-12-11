@@ -1,6 +1,5 @@
 use std::clone::Clone;
 use std::collections::HashSet;
-use std::iter;
 use std::sync::{Arc, LazyLock};
 
 use tracing::debug;

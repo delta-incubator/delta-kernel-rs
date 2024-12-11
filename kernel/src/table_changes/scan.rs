@@ -281,7 +281,7 @@ fn read_scan_file(
         physical_schema.clone(),
         physical_to_logical_expr,
         global_state.logical_schema.clone().into(),
-    );
+    )?;
 
     let table_root = Url::parse(&global_state.table_root)?;
     let location = table_root.join(&scan_file.path)?;

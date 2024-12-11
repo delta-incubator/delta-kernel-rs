@@ -142,6 +142,8 @@ impl DataSkippingFilter {
             filter_evaluator,
             json_handler: engine.get_json_handler(),
         })
+    }
+
     /// Apply the DataSkippingFilter to an EngineData batch of actions. Returns a selection vector
     /// which can be applied to the actions to find those that passed data skipping.
     pub(crate) fn apply(&self, actions: &dyn EngineData) -> DeltaResult<Vec<bool>> {
