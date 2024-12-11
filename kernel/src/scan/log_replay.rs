@@ -247,12 +247,16 @@ pub fn scan_action_iter(
         SCAN_ROW_DATATYPE.clone(),
     )?;
 
-    Ok(action_iter
+    let actions = action_iter
         .map(move |action_res| {
             let (batch, is_log_batch) = action_res?;
             log_scanner.process_scan_batch(add_transform.as_ref(), batch.as_ref(), is_log_batch)
         })
-        .filter(|res| res.as_ref().map_or(true, |(_, sv)| sv.contains(&true))))
+        .filter(|res: &Result<(Box<dyn EngineData>, Vec<bool>), Error>| {
+            res.as_ref().map_or(true, |(_, sv)| sv.contains(&true))
+        });
+
+    Ok(actions)
 }
 
 #[cfg(test)]

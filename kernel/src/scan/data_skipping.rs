@@ -107,10 +107,7 @@ impl DataSkippingFilter {
                 STATS_EXPR.clone(),
                 DataType::STRING,
             )
-            .map_err(|e| {
-                warn!("Failed to create stats selector evaluator: {}", e);
-                e
-            })
+            .inspect_err(|e| warn!("Failed to create stats selector evaluator: {}", e))
             .ok()?;
 
         let skipping_evaluator = engine
@@ -120,19 +117,13 @@ impl DataSkippingFilter {
                 Expr::struct_from([as_data_skipping_predicate(&predicate, false)?]),
                 PREDICATE_SCHEMA.clone(),
             )
-            .map_err(|e| {
-                warn!("Failed to create skipping evaluator: {}", e);
-                e
-            })
+            .inspect_err(|e| warn!("Failed to create skipping evaluator: {}", e))
             .ok()?;
 
         let filter_evaluator = engine
             .get_expression_handler()
             .get_evaluator(stats_schema.clone(), FILTER_EXPR.clone(), DataType::BOOLEAN)
-            .map_err(|e| {
-                warn!("Failed to create filter evaluator: {}", e);
-                e
-            })
+            .inspect_err(|e| warn!("Failed to create filter evaluator: {}", e))
             .ok()?;
 
         Some(Self {
