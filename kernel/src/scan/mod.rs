@@ -382,7 +382,6 @@ impl Scan {
             PhysicalPredicate::None => None,
         };
 
-        // Call scan_action_iter with proper error handling
         let it = scan_action_iter(
             engine,
             self.replay_for_scan_data(engine)?,
