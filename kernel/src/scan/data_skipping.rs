@@ -3,7 +3,7 @@ use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::sync::{Arc, LazyLock};
 
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::actions::get_log_add_schema;
 use crate::actions::visitors::SelectionVectorVisitor;
@@ -125,6 +125,10 @@ impl DataSkippingFilter {
                 STATS_EXPR.clone(),
                 DataType::STRING,
             )
+            .map_err(|e| {
+                warn!("Failed to create stats selector evaluator: {}", e);
+                e
+            })
             .ok()?;
 
         let skipping_evaluator = engine
@@ -134,11 +138,19 @@ impl DataSkippingFilter {
                 Expr::struct_from([as_data_skipping_predicate(predicate, false)?]),
                 PREDICATE_SCHEMA.clone(),
             )
+            .map_err(|e| {
+                warn!("Failed to create skipping evaluator: {}", e);
+                e
+            })
             .ok()?;
 
         let filter_evaluator = engine
             .get_expression_handler()
             .get_evaluator(stats_schema.clone(), FILTER_EXPR.clone(), DataType::BOOLEAN)
+            .map_err(|e| {
+                warn!("Failed to create filter evaluator: {}", e);
+                e
+            })
             .ok()?;
 
         Some(Self {
