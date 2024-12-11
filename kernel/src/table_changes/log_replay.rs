@@ -28,7 +28,6 @@ use itertools::Itertools;
 mod tests;
 
 /// Scan data for a Change Data Feed query. This holds metadata that is needed to read data rows.
-#[allow(unused)]
 pub(crate) struct TableChangesScanData {
     /// Engine data with the schema defined in [`scan_row_schema`]
     ///
@@ -52,9 +51,9 @@ pub(crate) fn table_changes_action_iter(
     engine: Arc<dyn Engine>,
     commit_files: impl IntoIterator<Item = ParsedLogPath>,
     table_schema: SchemaRef,
-    predicate: Option<ExpressionRef>,
+    physical_predicate: Option<(ExpressionRef, SchemaRef)>,
 ) -> DeltaResult<impl Iterator<Item = DeltaResult<TableChangesScanData>>> {
-    let filter = DataSkippingFilter::new(engine.as_ref(), &table_schema, predicate).map(Arc::new);
+    let filter = DataSkippingFilter::new(engine.as_ref(), physical_predicate).map(Arc::new);
     let result = commit_files
         .into_iter()
         .map(move |commit_file| -> DeltaResult<_> {
@@ -127,7 +126,6 @@ struct LogReplayScanner {
     //
     // Note: This will be used once an expression is introduced to transform the engine data in
     // [`TableChangesScanData`]
-    #[allow(unused)]
     timestamp: i64,
 }
 
