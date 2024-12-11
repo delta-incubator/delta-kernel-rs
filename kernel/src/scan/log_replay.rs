@@ -257,13 +257,13 @@ pub fn scan_action_iter(
 #[cfg(test)]
 mod tests {
     use crate::scan::{
-        state::{self, ScanFile},
+        state,
         test_utils::{add_batch_simple, add_batch_with_remove, run_with_validate_callback},
     };
 
     // dv-info is more complex to validate, we validate that works in the test for visit_scan_files
     // in state.rs
-    fn validate_simple(_: &mut (), file: state::ScanFile<'_>) {
+    fn validate_simple(_: &mut (), file: state::ScanFile) {
         assert_eq!(
             file.path,
             "part-00000-fae5310a-a37d-4e51-827b-c3d5516560ca-c000.snappy.parquet"

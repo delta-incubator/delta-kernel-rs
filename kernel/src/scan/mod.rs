@@ -13,7 +13,6 @@ use crate::actions::deletion_vector::{
 };
 use crate::actions::{get_log_add_schema, get_log_schema, ADD_NAME, REMOVE_NAME};
 use crate::expressions::{ColumnName, Expression, ExpressionRef, ExpressionTransform, Scalar};
-use crate::scan::state::{DvInfo, Stats};
 use crate::schema::{
     ArrayType, DataType, MapType, PrimitiveType, Schema, SchemaRef, SchemaTransform, StructField,
     StructType,
@@ -428,28 +427,13 @@ impl Scan {
         &self,
         engine: Arc<dyn Engine>,
     ) -> DeltaResult<impl Iterator<Item = DeltaResult<ScanResult>> + '_> {
-        struct ScanFile {
-            path: String,
-            size: i64,
-            stats: Option<Stats>,
-            dv_info: DvInfo,
-            partition_values: HashMap<String, String>,
+        fn scan_data_callback(batches: &mut Vec<state::ScanFile>, file: state::ScanFile) {
+            batches.push(file);
         }
-        fn scan_data_callback(batches: &mut Vec<ScanFile>, file: state::ScanFile<'_>) {
-            batches.push(ScanFile {
-                path: file.path.to_string(),
-                size: file.size,
-                stats: file.stats,
-                dv_info: file.dv_info,
-                partition_values: file.partition_values,
-            });
-        }
-
         debug!(
             "Executing scan with logical schema {:#?} and physical schema {:#?}",
             self.logical_schema, self.physical_schema
         );
-
         let global_state = Arc::new(self.global_scan_state());
         let scan_data = self.scan_data(engine.as_ref())?;
         let scan_files_iter = scan_data
@@ -958,8 +942,8 @@ mod tests {
 
     fn get_files_for_scan(scan: Scan, engine: &dyn Engine) -> DeltaResult<Vec<String>> {
         let scan_data = scan.scan_data(engine)?;
-        fn scan_data_callback(paths: &mut Vec<String>, file: state::ScanFile<'_>) {
-            paths.push(file.path.to_string());
+        fn scan_data_callback(paths: &mut Vec<String>, file: state::ScanFile) {
+            paths.push(file.path);
             assert!(file.dv_info.deletion_vector.is_none());
         }
         let mut files = vec![];

@@ -98,15 +98,8 @@ fn truncate_batch(batch: RecordBatch, rows: usize) -> RecordBatch {
 }
 
 // This is the callback that will be called for each valid scan row
-fn send_scan_file(scan_tx: &mut spmc::Sender<ScanFile<'static>>, file: ScanFile<'_>) {
-    let scan_file = ScanFile {
-        path: Box::leak(file.path.to_string().into_boxed_str()),  // Convert to 'static lifetime
-        size: file.size,
-        stats: file.stats,
-        partition_values: file.partition_values,
-        dv_info: file.dv_info,
-    };
-    scan_tx.send(scan_file).unwrap();
+fn send_scan_file(scan_tx: &mut spmc::Sender<ScanFile>, file: ScanFile) {
+    scan_tx.send(file).unwrap();
 }
 
 fn try_main() -> DeltaResult<()> {

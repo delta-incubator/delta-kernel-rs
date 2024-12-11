@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::ops::Not;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -12,7 +11,7 @@ use delta_kernel::engine::default::executor::tokio::TokioBackgroundExecutor;
 use delta_kernel::engine::default::DefaultEngine;
 use delta_kernel::expressions::{column_expr, BinaryOperator, Expression};
 use delta_kernel::scan::state;
-use delta_kernel::scan::state::{visit_scan_files, DvInfo};
+use delta_kernel::scan::state::{visit_scan_files, ScanFile};
 use delta_kernel::scan::{transform_to_logical, Scan};
 use delta_kernel::schema::{DataType, Schema};
 use delta_kernel::{Engine, FileMeta, Table};
@@ -336,20 +335,8 @@ fn read_with_execute(
     Ok(())
 }
 
-struct ScanFile {
-    path: String,
-    size: i64,
-    dv_info: DvInfo,
-    partition_values: HashMap<String, String>,
-}
-
-fn scan_data_callback(files: &mut Vec<ScanFile>, file: state::ScanFile<'_>) {
-    files.push(ScanFile {
-        path: file.path.to_string(),
-        size: file.size,
-        dv_info: file.dv_info,
-        partition_values: file.partition_values,
-    });
+fn scan_data_callback(files: &mut Vec<state::ScanFile>, file: state::ScanFile) {
+    files.push(file);
 }
 
 fn read_with_scan_data(

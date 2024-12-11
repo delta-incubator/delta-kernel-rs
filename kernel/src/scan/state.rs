@@ -100,15 +100,15 @@ impl DvInfo {
 
 /// A struct containing all the information needed for a scan file callback
 #[derive(Debug, Clone)]
-pub struct ScanFile<'a> {
-    pub path: &'a str,
+pub struct ScanFile {
+    pub path: String,
     pub size: i64,
     pub stats: Option<Stats>,
     pub dv_info: DvInfo,
     pub partition_values: HashMap<String, String>,
 }
 
-pub type ScanCallback<T> = fn(context: &mut T, file: ScanFile<'_>);
+pub type ScanCallback<T> = fn(context: &mut T, file: ScanFile);
 
 /// Request that the kernel call a callback on each valid file that needs to be read for the
 /// scan.
@@ -179,7 +179,8 @@ impl<T> RowVisitor for ScanFileVisitor<'_, T> {
                 continue;
             }
             // Since path column is required, use it to detect presence of an Add action
-            if let Some(path) = getters[0].get_opt(row_index, "scanFile.path")? {
+            let path: Option<String> = getters[0].get_opt(row_index, "scanFile.path")?;
+            if let Some(path) = path {
                 let size = getters[1].get(row_index, "scanFile.size")?;
                 let stats: Option<String> = getters[3].get_opt(row_index, "scanFile.stats")?;
                 let stats: Option<Stats> =
@@ -200,7 +201,7 @@ impl<T> RowVisitor for ScanFileVisitor<'_, T> {
                     getters[9].get(row_index, "scanFile.fileConstantValues.partitionValues")?;
 
                 let scan_file = ScanFile {
-                    path,
+                    path: path.to_string(),
                     size,
                     stats,
                     dv_info,
@@ -215,18 +216,16 @@ impl<T> RowVisitor for ScanFileVisitor<'_, T> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
     use crate::scan::test_utils::{add_batch_simple, run_with_validate_callback};
 
-    use super::{DvInfo, ScanFile, Stats};
+    use super::ScanFile;
 
     #[derive(Clone)]
     struct TestContext {
         id: usize,
     }
 
-    fn validate_visit(context: &mut TestContext, file: ScanFile<'_>) {
+    fn validate_visit(context: &mut TestContext, file: ScanFile) {
         assert_eq!(
             file.path,
             "part-00000-fae5310a-a37d-4e51-827b-c3d5516560ca-c000.snappy.parquet"
