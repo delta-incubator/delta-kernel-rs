@@ -56,10 +56,14 @@ jobs:
         shell: bash
         run: |
           cargo install cargo-msrv --locked
-      - name: Install Cargo.toml's rust-toolchain
+      - name: Get rust-version from Cargo.toml
+        id: rust-version
+        run: echo "RUST_VERSION=$(cargo msrv show --path kernel/ --output-format minimal)" >> $GITHUB_ENV
+      - name: Install specified rust version
         uses: actions-rs/toolchain@v1
         with:
-          toolchain: $(cargo msrv show --path kernel/ --output-format minimal)
+          toolchain: ${{ env.RUST_VERSION }}
+          profile: minimal
       - name: run tests
         run: |
           pushd kernel
