@@ -213,8 +213,15 @@ impl TableChangesScan {
         }
     }
 
+    /// Get a shared reference to the [`Schema`] of the scan.
+    ///
+    /// [`Schema`]: crate::schema::Schema
+    pub fn schema(&self) -> &SchemaRef {
+        &self.logical_schema
+    }
+
     /// Get the predicate [`Expression`] of the scan.
-    fn physical_predicate(&self) -> Option<ExpressionRef> {
+    pub fn physical_predicate(&self) -> Option<ExpressionRef> {
         if let PhysicalPredicate::Some(ref predicate, _) = self.physical_predicate {
             Some(predicate.clone())
         } else {
