@@ -292,7 +292,8 @@ mod tests {
             &[true, false],
             (),
             validate_simple,
-        ).unwrap();
+        )
+        .unwrap();
     }
 
     #[test]
@@ -302,6 +303,7 @@ mod tests {
             &[false, false, true, false],
             (),
             validate_simple,
-        ).unwrap();
+        )
+        .unwrap();
     }
 }
