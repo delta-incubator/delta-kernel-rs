@@ -219,12 +219,12 @@ impl Scan {
         &self,
         engine: &dyn Engine,
     ) -> DeltaResult<impl Iterator<Item = DeltaResult<ScanData>>> {
-        Ok(scan_action_iter(
+        scan_action_iter(
             engine,
             self.replay_for_scan_data(engine)?,
             &self.logical_schema,
             self.predicate(),
-        ))
+        )
     }
 
     // Factored out to facilitate testing
@@ -526,7 +526,7 @@ pub(crate) mod test_utils {
         },
         scan::log_replay::scan_action_iter,
         schema::{StructField, StructType},
-        EngineData, JsonHandler,
+        DeltaResult, EngineData, JsonHandler,
     };
 
     use super::state::ScanCallback;
@@ -578,7 +578,7 @@ pub(crate) mod test_utils {
         expected_sel_vec: &[bool],
         context: T,
         validate_callback: ScanCallback<T>,
-    ) {
+    ) -> DeltaResult<()> {
         let engine = SyncEngine::new();
         // doesn't matter here
         let table_schema = Arc::new(StructType::new([StructField::new(
@@ -591,21 +591,21 @@ pub(crate) mod test_utils {
             batch.into_iter().map(|batch| Ok((batch as _, true))),
             &table_schema,
             None,
-        );
+        )?;
         let mut batch_count = 0;
         for res in iter {
-            let (batch, sel) = res.unwrap();
-            assert_eq!(sel, expected_sel_vec);
+            let (batch, sel) = res?;
+            assert_eq!(sel.as_slice(), expected_sel_vec);
             crate::scan::state::visit_scan_files(
                 batch.as_ref(),
                 &sel,
                 context.clone(),
                 validate_callback,
-            )
-            .unwrap();
+            )?;
             batch_count += 1;
         }
         assert_eq!(batch_count, 1);
+        Ok(())
     }
 }
 

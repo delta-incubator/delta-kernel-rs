@@ -237,14 +237,11 @@ impl LogReplayScanner {
             .version
             .try_into()
             .map_err(|_| Error::generic("Failed to convert commit version to i64"))?;
-        let evaluator = engine
-            .get_expression_handler()
-            .get_evaluator(
-                get_log_add_schema().clone(),
-                cdf_scan_row_expression(timestamp, commit_version),
-                cdf_scan_row_schema().into(),
-            )?;
-
+        let evaluator = engine.get_expression_handler().get_evaluator(
+            get_log_add_schema().clone(),
+            cdf_scan_row_expression(timestamp, commit_version),
+            cdf_scan_row_schema().into(),
+        )?;
         let result = action_iter.map(move |actions| -> DeltaResult<_> {
             let actions = actions?;
 

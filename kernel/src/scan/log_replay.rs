@@ -245,27 +245,20 @@ pub fn scan_action_iter(
     action_iter: impl Iterator<Item = DeltaResult<(Box<dyn EngineData>, bool)>> + 'static,
     table_schema: &SchemaRef,
     predicate: Option<ExpressionRef>,
-) -> Box<dyn Iterator<Item = DeltaResult<ScanData>>> {
+) -> DeltaResult<impl Iterator<Item = DeltaResult<ScanData>>> {
     let mut log_scanner = LogReplayScanner::new(engine, table_schema, predicate);
-    match engine.get_expression_handler().get_evaluator(
+    let add_transform = engine.get_expression_handler().get_evaluator(
         get_log_add_schema().clone(),
         get_add_transform_expr(),
         SCAN_ROW_DATATYPE.clone(),
-    ) {
-        Ok(add_transform) => Box::new(
-            action_iter
-                .map(move |action_res| {
-                    let (batch, is_log_batch) = action_res?;
-                    log_scanner.process_scan_batch(
-                        add_transform.as_ref(),
-                        batch.as_ref(),
-                        is_log_batch,
-                    )
-                })
-                .filter(|res| res.as_ref().map_or(true, |(_, sv)| sv.contains(&true))),
-        ),
-        Err(e) => Box::new(iter::once(Err(e))),
-    }
+    )?;
+
+    Ok(action_iter
+        .map(move |action_res| {
+            let (batch, is_log_batch) = action_res?;
+            log_scanner.process_scan_batch(add_transform.as_ref(), batch.as_ref(), is_log_batch)
+        })
+        .filter(|res| res.as_ref().map_or(true, |(_, sv)| sv.contains(&true))))
 }
 
 #[cfg(test)]
