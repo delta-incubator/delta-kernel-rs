@@ -703,7 +703,6 @@ pub(crate) mod test_utils {
             sync::{json::SyncJsonHandler, SyncEngine},
         },
         scan::log_replay::scan_action_iter,
-        schema::{StructField, StructType},
         DeltaResult, EngineData, JsonHandler,
     };
 
@@ -757,13 +756,6 @@ pub(crate) mod test_utils {
         context: T,
         validate_callback: ScanCallback<T>,
     ) -> DeltaResult<()> {
-        let engine = SyncEngine::new();
-        // doesn't matter here
-        let table_schema = Arc::new(StructType::new([StructField::new(
-            "foo",
-            crate::schema::DataType::STRING,
-            false,
-        )]));
         let iter = scan_action_iter(
             &SyncEngine::new(),
             batch.into_iter().map(|batch| Ok((batch as _, true))),

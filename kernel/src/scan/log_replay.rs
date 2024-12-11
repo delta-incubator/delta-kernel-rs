@@ -292,16 +292,16 @@ mod tests {
             &[true, false],
             (),
             validate_simple,
-        );
+        ).unwrap();
     }
 
     #[test]
     fn test_scan_action_iter_with_remove() {
-        run_with_validate_callback(
+        let _ = run_with_validate_callback(
             vec![add_batch_with_remove()],
             &[false, false, true, false],
             (),
             validate_simple,
-        );
+        ).unwrap();
     }
 }
