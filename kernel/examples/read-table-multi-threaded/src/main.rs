@@ -12,7 +12,7 @@ use delta_kernel::engine::arrow_data::ArrowEngineData;
 use delta_kernel::engine::default::executor::tokio::TokioBackgroundExecutor;
 use delta_kernel::engine::default::DefaultEngine;
 use delta_kernel::engine::sync::SyncEngine;
-use delta_kernel::scan::state::{DvInfo, GlobalScanState, Stats};
+use delta_kernel::scan::state::{DvInfo, GlobalScanState, Stats, ScanFile};
 use delta_kernel::scan::transform_to_logical;
 use delta_kernel::schema::Schema;
 use delta_kernel::{DeltaResult, Engine, EngineData, FileMeta, Table};
@@ -76,15 +76,7 @@ fn main() -> ExitCode {
     }
 }
 
-// the way we as a connector represent data to scan. this is computed from the raw data returned
-// from the scan, and could be any format the engine chooses to use to facilitate distributing work.
-struct ScanFile {
-    path: String,
-    size: i64,
-    stats: Option<Stats>,
-    partition_values: HashMap<String, String>,
-    dv_info: DvInfo,
-}
+// Using the official ScanFile from delta_kernel::scan::state instead of redefining it
 
 // we know we're using arrow under the hood, so cast an EngineData into something we can work with
 fn to_arrow(data: Box<dyn EngineData>) -> DeltaResult<RecordBatch> {
@@ -105,10 +97,10 @@ fn truncate_batch(batch: RecordBatch, rows: usize) -> RecordBatch {
     RecordBatch::try_new(batch.schema(), cols).unwrap()
 }
 
-// This is the callback that will be called fo each valid scan row
-fn send_scan_file(scan_tx: &mut spmc::Sender<ScanFile>, file: delta_kernel::scan::state::ScanFile) {
+// This is the callback that will be called for each valid scan row
+fn send_scan_file(scan_tx: &mut spmc::Sender<ScanFile<'static>>, file: ScanFile<'_>) {
     let scan_file = ScanFile {
-        path: file.path.to_string(),
+        path: Box::leak(file.path.to_string().into_boxed_str()),  // Convert to 'static lifetime
         size: file.size,
         stats: file.stats,
         partition_values: file.partition_values,
@@ -247,7 +239,7 @@ fn do_work(
     engine: Arc<dyn Engine>,
     scan_state: Arc<GlobalScanState>,
     record_batch_tx: Sender<RecordBatch>,
-    scan_file_rx: spmc::Receiver<ScanFile>,
+    scan_file_rx: spmc::Receiver<ScanFile<'static>>,
 ) {
     // get the type for the function calls
     let engine: &dyn Engine = engine.as_ref();
@@ -265,7 +257,7 @@ fn do_work(
             .unwrap();
 
         // build the required metadata for our parquet handler to read this file
-        let location = root_url.join(&scan_file.path).unwrap();
+        let location = root_url.join(scan_file.path).unwrap();
         let meta = FileMeta {
             last_modified: 0,
             size: scan_file.size as usize,
