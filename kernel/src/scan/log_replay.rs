@@ -222,14 +222,9 @@ fn get_add_transform_expr() -> Expression {
 
 impl LogReplayScanner {
     /// Create a new [`LogReplayScanner`] instance
-    fn new(
-        engine: &dyn Engine,
-        table_schema: &SchemaRef,
-        predicate: Option<ExpressionRef>,
-    ) -> Self {
+    fn new(engine: &dyn Engine, physical_predicate: Option<(ExpressionRef, SchemaRef)>) -> Self {
         Self {
-            filter: DataSkippingFilter::new(engine, table_schema, predicate),
-            table_schema: table_schema.clone(), // cheap arc clone
+            filter: DataSkippingFilter::new(engine, physical_predicate),
             seen: Default::default(),
         }
     }
@@ -276,12 +271,11 @@ impl LogReplayScanner {
 pub fn scan_action_iter(
     engine: &dyn Engine,
     action_iter: impl Iterator<Item = DeltaResult<(Box<dyn EngineData>, bool)>>,
-    table_schema: &SchemaRef,
     partition_columns: Vec<String>,
     static_transform_expr: ExpressionRef,
-    predicate: Option<ExpressionRef>,
+    physical_predicate: Option<(ExpressionRef, SchemaRef)>,
 ) -> impl Iterator<Item = DeltaResult<ScanData>> {
-    let mut log_scanner = LogReplayScanner::new(engine, table_schema, predicate);
+    let mut log_scanner = LogReplayScanner::new(engine, physical_predicate);
     let add_transform = engine.get_expression_handler().get_evaluator(
         get_log_add_schema().clone(),
         get_add_transform_expr(),
