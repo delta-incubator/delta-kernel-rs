@@ -2,10 +2,11 @@ use std::clone::Clone;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock};
 
+use itertools::Itertools;
 use tracing::debug;
 
 use super::data_skipping::DataSkippingFilter;
-use super::ScanData;
+use super::{ColumnType, ScanData};
 use crate::actions::get_log_add_schema;
 use crate::engine_data::{GetData, RowVisitor, TypedGetData as _};
 use crate::expressions::{column_expr, column_name, ColumnName, Expression, ExpressionRef};
@@ -31,8 +32,6 @@ impl FileActionKey {
 struct LogReplayScanner {
     filter: Option<DataSkippingFilter>,
 
-    table_schema: SchemaRef,
-
     /// A set of (data file path, dv_unique_id) pairs that have been seen thus
     /// far in the log. This is used to filter out files with Remove actions as
     /// well as duplicate entries in the log.
@@ -47,7 +46,8 @@ struct AddRemoveDedupVisitor<'seen> {
     seen: &'seen mut HashSet<FileActionKey>,
     selection_vector: Vec<bool>,
     partition_columns: Arc<Vec<String>>,
-    static_transform_expr: ExpressionRef,
+    logical_schema: SchemaRef,
+    all_fields: Arc<Vec<ColumnType>>,
     transforms: HashMap<usize, Expression>,
     is_log_batch: bool,
 }
@@ -111,20 +111,31 @@ impl AddRemoveDedupVisitor<'_> {
         // Process both adds and removes, but only return not already-seen adds
         let file_key = FileActionKey::new(path, dv_unique_id);
         let have_seen = self.check_and_record_seen(file_key);
-        if !have_seen {
+        if is_add && !have_seen {
             // compute transform here
-            let partition_values: HashMap<_, _> = getters[1].get(i, "add.partitionValues")?;
-            for col in self.partition_columns.iter() {
-                // TODO: ColumnMapping
-                let mut transform_expr = self.static_transform_expr.as_ref().clone();
-                if let Expression::Struct(ref mut inner) = transform_expr {
-                    let value_expression =
-                        super::parse_partition_value(partition_values.get(col), &DataType::STRING)?;
-                    inner.push(value_expression.into());
-                    self.transforms.insert(i, transform_expr);
-                } else {
-                    // error?
-                }
+            if self.partition_columns.len() > 0 {
+                println!("Partition cols for path {path} here: {:?}", self.partition_columns);
+                let partition_values: HashMap<_, _> = getters[1].get(i, "add.partitionValues")?;
+                let all_fields = self.all_fields
+                    .iter()
+                    .map(|field| match field {
+                        ColumnType::Partition(field_idx) => {
+                            let field = self.logical_schema.fields.get_index(*field_idx);
+                            let Some((_, field)) = field else {
+                                return Err(Error::generic(
+                                    "logical schema did not contain expected field, can't transform data",
+                                ));
+                            };
+                            let name = field.physical_name();
+                            let value_expression =
+                                super::parse_partition_value(partition_values.get(name), field.data_type())?;
+                            Ok(value_expression.into())
+                        }
+                        ColumnType::Selected(field_expr) => Ok(field_expr.clone()),
+                    })
+                    .try_collect()?;
+                let read_expression = Expression::Struct(all_fields);
+                self.transforms.insert(i, read_expression);
             }
         }
         Ok(!have_seen && is_add)
@@ -234,7 +245,8 @@ impl LogReplayScanner {
         add_transform: &dyn ExpressionEvaluator,
         actions: &dyn EngineData,
         partition_columns: Arc<Vec<String>>,
-        static_transform_expr: ExpressionRef,
+        logical_schema: SchemaRef,
+        all_fields: Arc<Vec<ColumnType>>,
         is_log_batch: bool,
     ) -> DeltaResult<ScanData> {
         // Apply data skipping to get back a selection vector for actions that passed skipping. We
@@ -249,7 +261,8 @@ impl LogReplayScanner {
             seen: &mut self.seen,
             selection_vector,
             partition_columns,
-            static_transform_expr,
+            logical_schema,
+            all_fields,
             transforms: HashMap::new(),
             is_log_batch,
         };
@@ -272,7 +285,8 @@ pub fn scan_action_iter(
     engine: &dyn Engine,
     action_iter: impl Iterator<Item = DeltaResult<(Box<dyn EngineData>, bool)>>,
     partition_columns: Vec<String>,
-    static_transform_expr: ExpressionRef,
+    logical_schema: SchemaRef,
+    all_fields: Arc<Vec<ColumnType>>,
     physical_predicate: Option<(ExpressionRef, SchemaRef)>,
 ) -> impl Iterator<Item = DeltaResult<ScanData>> {
     let mut log_scanner = LogReplayScanner::new(engine, physical_predicate);
@@ -289,7 +303,8 @@ pub fn scan_action_iter(
                 add_transform.as_ref(),
                 batch.as_ref(),
                 partition_columns.clone(),
-                static_transform_expr.clone(),
+                logical_schema.clone(),
+                all_fields.clone(),
                 is_log_batch,
             )
         })

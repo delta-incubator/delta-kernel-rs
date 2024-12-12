@@ -53,10 +53,15 @@ pub(crate) fn physical_to_logical_expr(
                     parse_partition_value(scan_file.partition_values.get(name), field.data_type())?;
                 Ok(value_expression.into())
             }
-            ColumnType::Selected(field_name) => {
+            ColumnType::Selected(field_expr) => {
                 // Remove to take ownership
-                let generated_column = cdf_columns.remove(field_name.as_str());
-                Ok(generated_column.unwrap_or_else(|| ColumnName::new([field_name]).into()))
+                if let Expression::Column(name) = field_expr {
+                    let field_name = name.to_string();
+                    let generated_column = cdf_columns.remove(field_name.as_str());
+                    Ok(generated_column.unwrap_or_else(|| ColumnName::new([field_name]).into()))
+                } else {
+                    panic!("TODO");
+                }
             }
         })
         .try_collect()?;
@@ -83,7 +88,7 @@ mod tests {
 
     use crate::expressions::{column_expr, Expression, Scalar};
     use crate::scan::ColumnType;
-    use crate::schema::{DataType, StructField, StructType};
+    use crate::schema::{ColumnName, DataType, StructField, StructType};
     use crate::table_changes::physical_to_logical::physical_to_logical_expr;
     use crate::table_changes::scan_file::{CdfScanFile, CdfScanFileType};
     use crate::table_changes::{
@@ -111,11 +116,11 @@ mod tests {
                 StructField::new(COMMIT_TIMESTAMP_COL_NAME, DataType::TIMESTAMP, false),
             ]);
             let all_fields = vec![
-                ColumnType::Selected("id".to_string()),
+                ColumnType::Selected(ColumnName::new(["id"]).into()),
                 ColumnType::Partition(1),
-                ColumnType::Selected(CHANGE_TYPE_COL_NAME.to_string()),
-                ColumnType::Selected(COMMIT_VERSION_COL_NAME.to_string()),
-                ColumnType::Selected(COMMIT_TIMESTAMP_COL_NAME.to_string()),
+                ColumnType::Selected(ColumnName::new([CHANGE_TYPE_COL_NAME]).into()),
+                ColumnType::Selected(ColumnName::new([COMMIT_VERSION_COL_NAME]).into()),
+                ColumnType::Selected(ColumnName::new([COMMIT_TIMESTAMP_COL_NAME]).into()),
             ];
             let phys_to_logical_expr =
                 physical_to_logical_expr(&scan_file, &logical_schema, &all_fields).unwrap();

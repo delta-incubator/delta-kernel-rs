@@ -7,7 +7,7 @@ use url::Url;
 use crate::actions::deletion_vector::split_vector;
 use crate::scan::state::GlobalScanState;
 use crate::scan::{ColumnType, PhysicalPredicate, ScanResult};
-use crate::schema::{SchemaRef, StructType};
+use crate::schema::{ColumnName, SchemaRef, StructType};
 use crate::{DeltaResult, Engine, ExpressionRef, FileMeta};
 
 use super::log_replay::{table_changes_action_iter, TableChangesScanData};
@@ -147,7 +147,7 @@ impl TableChangesScanBuilder {
                     // CDF Columns are generated, so they do not have a column mapping. These will
                     // be processed separately and used to build an expression when transforming physical
                     // data to logical.
-                    Ok(ColumnType::Selected(logical_field.name().to_string()))
+                    Ok(ColumnType::Selected(ColumnName::new([logical_field.name()]).into()))
                 } else {
                     // Add to read schema, store field so we can build a `Column` expression later
                     // if needed (i.e. if we have partition columns)
@@ -155,7 +155,7 @@ impl TableChangesScanBuilder {
                     debug!("\n\n{logical_field:#?}\nAfter mapping: {physical_field:#?}\n\n");
                     let physical_name = physical_field.name.clone();
                     read_fields.push(physical_field);
-                    Ok(ColumnType::Selected(physical_name))
+                    Ok(ColumnType::Selected(ColumnName::new([physical_name]).into()))
                 }
             })
             .try_collect()?;
@@ -332,7 +332,7 @@ mod tests {
     use crate::engine::sync::SyncEngine;
     use crate::expressions::{column_expr, Scalar};
     use crate::scan::{ColumnType, PhysicalPredicate};
-    use crate::schema::{DataType, StructField, StructType};
+    use crate::schema::{ColumnName, DataType, StructField, StructType};
     use crate::table_changes::COMMIT_VERSION_COL_NAME;
     use crate::{Expression, Table};
 
@@ -350,11 +350,11 @@ mod tests {
         assert_eq!(
             scan.all_fields,
             vec![
-                ColumnType::Selected("part".to_string()),
-                ColumnType::Selected("id".to_string()),
-                ColumnType::Selected("_change_type".to_string()),
-                ColumnType::Selected("_commit_version".to_string()),
-                ColumnType::Selected("_commit_timestamp".to_string()),
+                ColumnType::Selected(ColumnName::new(["part"]).into()),
+                ColumnType::Selected(ColumnName::new(["id"]).into()),
+                ColumnType::Selected(ColumnName::new(["_change_type"]).into()),
+                ColumnType::Selected(ColumnName::new(["_commit_version"]).into()),
+                ColumnType::Selected(ColumnName::new(["_commit_timestamp"]).into()),
             ]
             .into()
         );
@@ -384,8 +384,8 @@ mod tests {
         assert_eq!(
             scan.all_fields,
             vec![
-                ColumnType::Selected("id".to_string()),
-                ColumnType::Selected("_commit_version".to_string()),
+                ColumnType::Selected(ColumnName::new(["id"]).into()),
+                ColumnType::Selected(ColumnName::new(["_commit_version"]).into()),
             ]
             .into()
         );
