@@ -290,6 +290,7 @@ fn read_scan_file(
         physical_to_logical_expr,
         global_state.logical_schema.clone().into(),
     );
+    // Determine if the scan file was derived from a deletion vector pair
     let is_dv_resolved_pair = scan_file.remove_dv.is_some();
 
     let table_root = Url::parse(&global_state.table_root)?;
@@ -316,11 +317,27 @@ fn read_scan_file(
         // to `rest` in a moment anyway
         let mut sv = selection_vector.take();
 
-        // If this is a resolve_dv_pair, we extend with false because we only want to select rows
-        // that are true in the selection vector.
+        // There are three cases to consider:
+        // 1. A scan file derived from a deletion vector pair getting resolved.
+        // 2. A scan file that was not the result of a resolved pair, and has no deletion vector.
+        // 3. A scan file that was not the result of a resolved pair, and has a deletion vector.
         //
-        // If this is not a resolve_dv_pair, then all rows not in the selection vector should be
-        // set to true.
+        // # Case 1
+        // If the scan file is derived from a deletion vector pair, its selection vector should be
+        // extended with `false`. Consider a resolved selection vector `[0, 1]`. Only row 1 has
+        // changed. If there were more rows (for example 4 total), then none of them have changed.
+        // Hence, the selection vector is extended to become `[0, 1, 0, 0]`.
+        //
+        // # Case 2
+        // These scan files are either simple adds, removes, or cdc files. The selection vector
+        // will be `None` We must select all of their rows.
+        //
+        // # Case 3
+        // If the scan file has a deletion vector but is unpaired, its selection vector should be
+        // extended with `true`. Consider a deletion vector with row 1 deleted. This generates a
+        // selection vector `[1, 0, 1]`. Only row 1 is deleted. Rows 0 and 2 are selected. If there
+        // are more rows (for example 4), then all the extra rows should be selected. The selection
+        // vector becomes `[1, 0, 1, 1]`.
         let extend = Some(!is_dv_resolved_pair);
         let rest = split_vector(sv.as_mut(), len, extend);
         let result = ScanResult {
