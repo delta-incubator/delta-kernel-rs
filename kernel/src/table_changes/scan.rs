@@ -317,10 +317,11 @@ fn read_scan_file(
         // to `rest` in a moment anyway
         let mut sv = selection_vector.take();
 
-        // There are three cases to consider:
+        // Gets the selection vector for a data batch with length `len`. There are three cases to
+        // consider:
         // 1. A scan file derived from a deletion vector pair getting resolved.
-        // 2. A scan file that was not the result of a resolved pair, and has no deletion vector.
-        // 3. A scan file that was not the result of a resolved pair, and has a deletion vector.
+        // 2. A scan file that was not the result of a resolved pair, and has a deletion vector.
+        // 3. A scan file that was not the result of a resolved pair, and has no deletion vector.
         //
         // # Case 1
         // If the scan file is derived from a deletion vector pair, its selection vector should be
@@ -329,15 +330,15 @@ fn read_scan_file(
         // Hence, the selection vector is extended to become `[0, 1, 0, 0]`.
         //
         // # Case 2
-        // These scan files are either simple adds, removes, or cdc files. The selection vector
-        // will be `None` We must select all of their rows.
-        //
-        // # Case 3
         // If the scan file has a deletion vector but is unpaired, its selection vector should be
         // extended with `true`. Consider a deletion vector with row 1 deleted. This generates a
         // selection vector `[1, 0, 1]`. Only row 1 is deleted. Rows 0 and 2 are selected. If there
         // are more rows (for example 4), then all the extra rows should be selected. The selection
         // vector becomes `[1, 0, 1, 1]`.
+        //
+        // # Case 3
+        // These scan files are either simple adds, removes, or cdc files. This case is a noop because
+        // the selection vector is `None`.
         let extend = Some(!is_dv_resolved_pair);
         let rest = split_vector(sv.as_mut(), len, extend);
         let result = ScanResult {
