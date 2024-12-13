@@ -1,4 +1,36 @@
 //! Provides an API to read the table's change data feed between two versions.
+//!
+//! # Example
+//! ```rust
+//! # use std::sync::Arc;
+//! # use delta_kernel::engine::sync::SyncEngine;
+//! # use delta_kernel::expressions::{column_expr, Scalar};
+//! # use delta_kernel::{Expression, Table, Error};
+//! # let path = "./tests/data/table-with-cdf";
+//! # let engine = Arc::new(SyncEngine::new());
+//! // Construct a table from a path oaeuhoanut
+//! let table = Table::try_from_uri(path)?;
+//!
+//! // Declare the version range for the table's change data feed
+//! let table_changes = table.table_changes(engine.as_ref(), 0, 1)?;
+//!
+//! // Optionally specify a schema and predicate for the table changes scan
+//! let schema = table_changes
+//!     .schema()
+//!     .project(&["id", "_commit_version"])?;
+//! let predicate = Arc::new(Expression::gt(column_expr!("id"), Scalar::from(10)));
+//!
+//! // Construct the table changes scan
+//! let table_changes_scan = table_changes
+//!     .into_scan_builder()
+//!     .with_schema(schema)
+//!     .with_predicate(predicate.clone())
+//!     .build()?;
+//!
+//! // Execute the table changes scan to get a fallible iterator of `ScanResult`s
+//! let batches = table_changes_scan.execute(engine.clone())?;
+//! # Ok::<(), Error>(())
+//! ```
 use std::collections::HashSet;
 use std::sync::{Arc, LazyLock};
 
