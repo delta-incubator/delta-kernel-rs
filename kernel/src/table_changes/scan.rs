@@ -340,8 +340,7 @@ fn read_scan_file(
         // # Case 3
         // These scan files are either simple adds, removes, or cdc files. This case is a noop because
         // the selection vector is `None`.
-        let extend = Some(!
-      );
+        let extend = Some(!is_dv_resolved_pair);
         let rest = split_vector(sv.as_mut(), len, extend);
         let result = ScanResult {
             raw_data: logical,
