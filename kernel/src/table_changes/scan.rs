@@ -208,12 +208,19 @@ impl TableChangesScan {
             table_root: self.table_changes.table_root.to_string(),
             partition_columns: end_snapshot.metadata().partition_columns.clone(),
             logical_schema: self.logical_schema.clone(),
-            read_schema: self.physical_schema.clone(),
+            physical_schema: self.physical_schema.clone(),
             column_mapping_mode: end_snapshot.column_mapping_mode,
         }
     }
 
-    /// Get the predicate [`Expression`] of the scan.
+    /// Get a shared reference to the [`Schema`] of the table changes scan.
+    ///
+    /// [`Schema`]: crate::schema::Schema
+    pub fn schema(&self) -> &SchemaRef {
+        &self.logical_schema
+    }
+
+    /// Get the predicate [`ExpressionRef`] of the scan.
     fn physical_predicate(&self) -> Option<ExpressionRef> {
         if let PhysicalPredicate::Some(ref predicate, _) = self.physical_predicate {
             Some(predicate.clone())
@@ -276,12 +283,15 @@ fn read_scan_file(
 
     let physical_to_logical_expr =
         physical_to_logical_expr(&scan_file, global_state.logical_schema.as_ref(), all_fields)?;
-    let physical_schema = scan_file_physical_schema(&scan_file, global_state.read_schema.as_ref());
+    let physical_schema =
+        scan_file_physical_schema(&scan_file, global_state.physical_schema.as_ref());
     let phys_to_logical_eval = engine.get_expression_handler().get_evaluator(
         physical_schema.clone(),
         physical_to_logical_expr,
         global_state.logical_schema.clone().into(),
     );
+    // Determine if the scan file was derived from a deletion vector pair
+    let is_dv_resolved_pair = scan_file.remove_dv.is_some();
 
     let table_root = Url::parse(&global_state.table_root)?;
     let location = table_root.join(&scan_file.path)?;
@@ -306,7 +316,31 @@ fn read_scan_file(
         // trying to return a captured variable. We're going to reassign `selection_vector`
         // to `rest` in a moment anyway
         let mut sv = selection_vector.take();
-        let rest = split_vector(sv.as_mut(), len, None);
+
+        // Gets the selection vector for a data batch with length `len`. There are three cases to
+        // consider:
+        // 1. A scan file derived from a deletion vector pair getting resolved.
+        // 2. A scan file that was not the result of a resolved pair, and has a deletion vector.
+        // 3. A scan file that was not the result of a resolved pair, and has no deletion vector.
+        //
+        // # Case 1
+        // If the scan file is derived from a deletion vector pair, its selection vector should be
+        // extended with `false`. Consider a resolved selection vector `[0, 1]`. Only row 1 has
+        // changed. If there were more rows (for example 4 total), then none of them have changed.
+        // Hence, the selection vector is extended to become `[0, 1, 0, 0]`.
+        //
+        // # Case 2
+        // If the scan file has a deletion vector but is unpaired, its selection vector should be
+        // extended with `true`. Consider a deletion vector with row 1 deleted. This generates a
+        // selection vector `[1, 0, 1]`. Only row 1 is deleted. Rows 0 and 2 are selected. If there
+        // are more rows (for example 4), then all the extra rows should be selected. The selection
+        // vector becomes `[1, 0, 1, 1]`.
+        //
+        // # Case 3
+        // These scan files are either simple adds, removes, or cdc files. This case is a noop because
+        // the selection vector is `None`.
+        let extend = Some(!is_dv_resolved_pair);
+        let rest = split_vector(sv.as_mut(), len, extend);
         let result = ScanResult {
             raw_data: logical,
             raw_mask: sv,
