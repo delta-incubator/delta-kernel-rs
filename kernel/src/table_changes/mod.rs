@@ -71,21 +71,28 @@ static CDF_FIELDS: LazyLock<[StructField; 3]> = LazyLock::new(|| {
 /// - `_change_type`: String representing the type of change that for that commit. This may be one
 ///   of `delete`, `insert`, `update_preimage`, or `update_postimage`.
 /// - `_commit_version`: Long representing the commit the change occurred in.
-/// - `_commit_timestamp`: Time at which the commit occurred. If In-commit timestamps is enabled,
-///   this is retrieved from the [`CommitInfo`] action. Otherwise, the timestamp is the same as the
-///   commit file's modification timestamp.
+/// - `_commit_timestamp`: Time at which the commit occurred. The timestamp is retrieved from the
+///   file modification time of the log file. No timezone is associated with the timestamp.
+///
+///   Currently, in-commit timestamps (ICT) is not supported. In the future when ICT is enabled, the
+///   timestamp will be retrieved from the `inCommitTimestamp` field of the CommitInfo` action.
+///   See issue [#559](https://github.com/delta-io/delta-kernel-rs/issues/559)
+///   For details on In-Commit Timestamps, see the [Protocol](https://github.com/delta-io/delta/blob/master/PROTOCOL.md#in-commit-timestamps).
+///
 ///
 /// Three properties must hold for the entire CDF range:
-/// - Reading must be supported for every commit in the range. This is determined using [`ensure_read_supported`]
+/// - Reading must be supported for every commit in the range. Currently the only read feature allowed
+///   is deletion vectors. This will be expanded in the future to support more delta table features.
+///   Because only deletion vectors are supported, reader version 2 will not be allowed. That is
+//    because version 2 requires that column mapping is enabled. Reader versions 1 and 3 are allowed.
 /// - Change Data Feed must be enabled for the entire range with the `delta.enableChangeDataFeed`
-///   table property set to 'true'.
+///   table property set to `true`. Performing change data feed on  tables with column mapping is
+///   currently disallowed. We check that column mapping is disabled, or the column mapping mode is `None`.
 /// - The schema for each commit must be compatible with the end schema. This means that all the
 ///   same fields and their nullability are the same. Schema compatibility will be expanded in the
 ///   future to allow compatible schemas that are not the exact same.
 ///   See issue [#523](https://github.com/delta-io/delta-kernel-rs/issues/523)
 ///
-/// [`CommitInfo`]: crate::actions::CommitInfo
-/// [`ensure_read_supported`]: crate::actions::Protocol::ensure_read_supported
 ///  # Examples
 ///  Get `TableChanges` for versions 0 to 1 (inclusive)
 ///  ```rust
@@ -225,11 +232,8 @@ impl TableChanges {
     }
 }
 
-/// Ensures that change data feed is enabled in `table_properties`.
-///
-/// Performing change data feed on  tables with column mapping is currently disallowed.
-/// This will be less restrictive in the future. Because column mapping is disallowed, we also
-/// check that column mapping is disabled, or the column mapping mode is `None`.
+/// Ensures that change data feed is enabled in `table_properties`. See the documentation
+/// of [`TableChanges`] for more details.
 fn check_cdf_table_properties(table_properties: &TableProperties) -> DeltaResult<()> {
     require!(
         table_properties.enable_change_data_feed.unwrap_or(false),
@@ -246,12 +250,7 @@ fn check_cdf_table_properties(table_properties: &TableProperties) -> DeltaResult
 }
 
 /// Ensures that Change Data Feed is supported for a table with this [`Protocol`] .
-//
-//  Currently the only read feature allowed is deletion vectors. This will be expanded in the
-//  future to support more delta table features.
-//
-//  Because only deletion vectors are supported, reader version 2 will not be allowed. That is
-//  because version 2 requires that column mapping is enabled. Reader versions 1 and 3 are allowed.
+//See the documentation of [`TableChanges`] for more details.
 fn ensure_cdf_read_supported(protocol: &Protocol) -> DeltaResult<()> {
     static CDF_SUPPORTED_READER_FEATURES: LazyLock<HashSet<ReaderFeatures>> =
         LazyLock::new(|| HashSet::from([ReaderFeatures::DeletionVectors]));
