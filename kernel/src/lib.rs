@@ -18,7 +18,7 @@
 //! https://github.com/delta-io/delta-kernel-rs/tree/main/kernel/examples/read-table-single-threaded
 //! [read-table-multi-threaded]:
 //! https://github.com/delta-io/delta-kernel-rs/tree/main/kernel/examples/read-table-multi-threaded
-//![read-table-changes]:
+//! [read-table-changes]:
 //! https://github.com/delta-io/delta-kernel-rs/tree/main/kernel/examples/read-table-changes
 //!
 //! Simple write examples can be found in the [`write.rs`] integration tests. Standalone write
