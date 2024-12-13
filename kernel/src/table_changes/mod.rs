@@ -11,10 +11,10 @@
 //! // Construct a table from a path oaeuhoanut
 //! let table = Table::try_from_uri(path)?;
 //!
-//! // Declare the version range for the table's change data feed
+//! // Get the table changes (change data feed) between version 0 and 1
 //! let table_changes = table.table_changes(engine.as_ref(), 0, 1)?;
 //!
-//! // Optionally specify a schema and predicate for the table changes scan
+//! // Optionally specify a schema and predicate to apply to the table changes scan
 //! let schema = table_changes
 //!     .schema()
 //!     .project(&["id", "_commit_version"])?;
@@ -28,7 +28,7 @@
 //!     .build()?;
 //!
 //! // Execute the table changes scan to get a fallible iterator of `ScanResult`s
-//! let batches = table_changes_scan.execute(engine.clone())?;
+//! let table_change_batches = table_changes_scan.execute(engine.clone())?;
 //! # Ok::<(), Error>(())
 //! ```
 use std::collections::HashSet;

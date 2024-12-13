@@ -34,8 +34,8 @@ fn main() -> DeltaResult<()> {
     )?);
     let table_changes = table.table_changes(engine.as_ref(), cli.start_version, cli.end_version)?;
 
-    let x = table_changes.into_scan_builder().build()?;
-    let batches: Vec<RecordBatch> = x
+    let table_changes_scan = table_changes.into_scan_builder().build()?;
+    let batches: Vec<RecordBatch> = table_changes_scan
         .execute(engine.clone())?
         .map(|scan_result| -> DeltaResult<_> {
             let scan_result = scan_result?;
