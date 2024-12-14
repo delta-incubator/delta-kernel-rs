@@ -15,11 +15,11 @@
 6. `scan::log_replay::scan_action_iter` now takes fewer (and different) params. ([#512])
 7. `Expression:Unary`, `Expression::Binary`, and `Expression::Variadic` now wrap a struct of the
    same name containing their fields ([#530])
-8. New `Error` variant `Error:ChangeDataFeedIncompatibleSchema`
+8. New `Error` variant `Error::ChangeDataFeedIncompatibleSchema`
 
 *Additions*
 1. Ability to read a table's change data feed with new TableChanges API! See new `table_changes`
-   module as well as the 'read-table-changes' example. Changes include:
+   module as well as the 'read-table-changes' example ([#597]). Changes include:
   - Implement Log Replay for Change Data Feed ([#540])
   - `ScanFile` expression and visitor for CDF ([#546])
   - Resolve deletion vectors to find inserted and removed rows for CDF ([#568])
@@ -60,6 +60,7 @@
 [#589]: https://github.com/delta-io/delta-kernel-rs/pull/589
 [#591]: https://github.com/delta-io/delta-kernel-rs/pull/591
 [#596]: https://github.com/delta-io/delta-kernel-rs/pull/596
+[#597]: https://github.com/delta-io/delta-kernel-rs/pull/597
 
 
 ## [v0.5.0](https://github.com/delta-io/delta-kernel-rs/tree/v0.5.0/) (2024-11-26)
