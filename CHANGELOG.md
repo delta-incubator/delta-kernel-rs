@@ -19,7 +19,7 @@
 
 *Additions*
 1. Ability to read a table's change data feed with new TableChanges API! See new `table_changes`
-   module as well as the 'read_table_changes' example. Changes include:
+   module as well as the 'read-table-changes' example. Changes include:
   - Implement Log Replay for Change Data Feed ([#540])
   - `ScanFile` expression and visitor for CDF ([#546])
   - Resolve deletion vectors to find inserted and removed rows for CDF ([#568])
