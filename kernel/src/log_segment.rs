@@ -68,7 +68,7 @@ impl LogSegment {
         {
             require!(
                 checkpoint_file.version + 1 == commit_file.version,
-                Error::invalid_checkpoint(format!(
+                Error::InvalidCheckpoint(format!(
                     "Gap between checkpoint version {} and next commit {}",
                     checkpoint_file.version, commit_file.version,
                 ))
