@@ -13,7 +13,7 @@
 4. Remove lifetime requirement on `Scan::execute` ([#588])
 5. `scan::Scan::predicate` renamed as `physical_predicate` to eliminate ambiguity ([#512])
 6. `scan::log_replay::scan_action_iter` now takes fewer (and different) params. ([#512])
-7. `Expression:Unary`, `Expression::Binary`, and `Expression::Variadic` now wrap a struct of the
+7. `Expression::Unary`, `Expression::Binary`, and `Expression::Variadic` now wrap a struct of the
    same name containing their fields ([#530])
 8. New `Error` variant `Error::ChangeDataFeedIncompatibleSchema`
 
