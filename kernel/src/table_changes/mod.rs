@@ -250,7 +250,7 @@ fn check_cdf_table_properties(table_properties: &TableProperties) -> DeltaResult
 }
 
 /// Ensures that Change Data Feed is supported for a table with this [`Protocol`] .
-//See the documentation of [`TableChanges`] for more details.
+/// See the documentation of [`TableChanges`] for more details.
 fn ensure_cdf_read_supported(protocol: &Protocol) -> DeltaResult<()> {
     static CDF_SUPPORTED_READER_FEATURES: LazyLock<HashSet<ReaderFeatures>> =
         LazyLock::new(|| HashSet::from([ReaderFeatures::DeletionVectors]));
