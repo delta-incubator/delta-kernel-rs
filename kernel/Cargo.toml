@@ -54,7 +54,7 @@ hdfs-native-object-store = { workspace = true, optional = true }
 # Used in default and sync engine
 parquet = { workspace = true, optional = true }
 # Used for fetching direct urls (like pre-signed urls)
-reqwest = { version = "0.12.7", optional = true }
+reqwest = { version = "0.12.7", default-features=false, optional = true }
 strum = { version = "0.26", features = ["derive"] }
 
 
