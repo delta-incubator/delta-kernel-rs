@@ -369,7 +369,7 @@ fn list_log_files_with_checkpoint(
             latest_checkpoint.version
         );
     } else if checkpoint_parts.len() != checkpoint_metadata.parts.unwrap_or(1) {
-        return Err(Error::invalid_checkpoint(format!(
+        return Err(Error::InvalidCheckpoint(format!(
             "_last_checkpoint indicated that checkpoint should have {} parts, but it has {}",
             checkpoint_metadata.parts.unwrap_or(1),
             checkpoint_parts.len()
