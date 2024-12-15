@@ -12,6 +12,8 @@ pub use self::column_names::{
 pub use self::scalars::{ArrayData, Scalar, StructData};
 use crate::DataType;
 
+pub mod parquet_stats_skipping;
+
 mod column_names;
 mod scalars;
 
