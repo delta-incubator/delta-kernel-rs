@@ -106,10 +106,8 @@ default-engine = [
 
 default-engine-rustls = [
   "_default_engine_base",
-  "reqwest/rustls-tls",
-  "reqwest/charset",
+  "reqwest/rustls-tls-native-roots",
   "reqwest/http2",
-  "reqwest/macos-system-configuration",
 ]
 
 developer-visibility = []
