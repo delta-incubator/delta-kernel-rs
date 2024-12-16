@@ -12,10 +12,10 @@ use crate::actions::deletion_vector::{
     deletion_treemap_to_bools, split_vector, DeletionVectorDescriptor,
 };
 use crate::actions::{get_log_add_schema, get_log_schema, ADD_NAME, REMOVE_NAME};
+use crate::expressions::{ColumnName, Expression, ExpressionRef, ExpressionTransform, Scalar};
 use crate::predicates::parquet_stats_skipping::{
     ParquetStatsProvider, ParquetStatsSkippingFilter as _,
 };
-use crate::expressions::{ColumnName, Expression, ExpressionRef, ExpressionTransform, Scalar};
 use crate::scan::state::{DvInfo, Stats};
 use crate::schema::{
     ArrayType, DataType, MapType, PrimitiveType, Schema, SchemaRef, SchemaTransform, StructField,
