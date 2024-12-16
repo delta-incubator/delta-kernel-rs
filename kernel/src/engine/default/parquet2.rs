@@ -84,7 +84,7 @@ fn read_files(
     // let semaphore = Arc::new(Semaphore::new(TASK_LIMIT));
     let (tx, rx) = mpsc::channel();
 
-    println!("files len: {:?}", files.len());
+    // println!("files len: {:?}", files.len());
 
     let file_opener: Arc<dyn FileOpener + Send + Sync> = Arc::from(file_opener);
     let len = files.len();
@@ -97,12 +97,12 @@ fn read_files(
             let tx_clone = tx.clone();
 
             let f = file_opener.clone();
-            println!("file: {:?}", file);
+            // println!("file: {:?}", file);
             let handle = runtime.spawn(async move {
                 // read the file as stream
                 let mut stream = f.open(file.clone(), None).unwrap().await.unwrap();
                 // tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-                println!("HERE");
+                // println!("sleeping");
                 while let Some(result) = stream.next().await {
                     let _ = tx_clone.send(result);
                 }

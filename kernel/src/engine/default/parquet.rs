@@ -292,8 +292,8 @@ impl FileOpener for ParquetOpener {
 
             let stream = builder.with_batch_size(batch_size).build()?;
 
-            println!("START");
-            tokio::time::sleep(std::time::Duration::from_millis(10000)).await; // simulate IO delay
+            // println!("read IO");
+            // tokio::time::sleep(std::time::Duration::from_millis(10000)).await; // simulate IO delay
 
             let stream = stream.map(move |rbr| {
                 // re-order each batch if needed
