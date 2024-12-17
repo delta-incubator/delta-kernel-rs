@@ -113,30 +113,30 @@ impl AddRemoveDedupVisitor<'_> {
         let have_seen = self.check_and_record_seen(file_key);
         if is_add && !have_seen {
             // compute transform here
-            if self.partition_columns.len() > 0 {
-                println!("Partition cols for path {path} here: {:?}", self.partition_columns);
-                let partition_values: HashMap<_, _> = getters[1].get(i, "add.partitionValues")?;
-                let all_fields = self.all_fields
-                    .iter()
-                    .map(|field| match field {
-                        ColumnType::Partition(field_idx) => {
-                            let field = self.logical_schema.fields.get_index(*field_idx);
-                            let Some((_, field)) = field else {
-                                return Err(Error::generic(
-                                    "logical schema did not contain expected field, can't transform data",
-                                ));
-                            };
-                            let name = field.physical_name();
-                            let value_expression =
-                                super::parse_partition_value(partition_values.get(name), field.data_type())?;
-                            Ok(value_expression.into())
-                        }
-                        ColumnType::Selected(field_expr) => Ok(field_expr.clone()),
-                    })
-                    .try_collect()?;
-                let read_expression = Expression::Struct(all_fields);
-                self.transforms.insert(i, read_expression);
-            }
+            // if self.partition_columns.len() > 0 {
+            //     println!("Partition cols for path {path} here: {:?}", self.partition_columns);
+            //     let partition_values: HashMap<_, _> = getters[1].get(i, "add.partitionValues")?;
+            //     let all_fields = self.all_fields
+            //         .iter()
+            //         .map(|field| match field {
+            //             ColumnType::Partition(field_idx) => {
+            //                 let field = self.logical_schema.fields.get_index(*field_idx);
+            //                 let Some((_, field)) = field else {
+            //                     return Err(Error::generic(
+            //                         "logical schema did not contain expected field, can't transform data",
+            //                     ));
+            //                 };
+            //                 let name = field.physical_name();
+            //                 let value_expression =
+            //                     super::parse_partition_value(partition_values.get(name), field.data_type())?;
+            //                 Ok(value_expression.into())
+            //             }
+            //             ColumnType::Selected(field_expr) => Ok(field_expr.clone()),
+            //         })
+            //         .try_collect()?;
+            //     let read_expression = Expression::Struct(all_fields);
+            //     self.transforms.insert(i, read_expression);
+            // }
         }
         Ok(!have_seen && is_add)
     }

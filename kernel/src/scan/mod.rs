@@ -309,13 +309,13 @@ impl ScanResult {
 }
 
 /// Scan uses this to set up what kinds of top-level columns it is scanning. For `Selected` we just
-/// store an expression that will directly select the column, as that's all that's needed during the
-/// actual query. For `Partition` we store an index into the logical schema for this query since
-/// later we need the data type as well to materialize the partition column.
+/// store the name of the column, as that's all that's needed during the actual query. For
+/// `Partition` we store an index into the logical schema for this query since later we need the
+/// data type as well to materialize the partition column.
 #[derive(PartialEq, Debug)]
 pub enum ColumnType {
     // A column, selected from the data, as is
-    Selected(Expression),
+    Selected(String),
     // A partition column that needs to be added back in
     Partition(usize),
 }
@@ -626,7 +626,7 @@ fn get_state_info(logical_schema: &Schema, partition_columns: &[String]) -> Delt
                 debug!("\n\n{logical_field:#?}\nAfter mapping: {physical_field:#?}\n\n");
                 let physical_name = physical_field.name.clone();
                 read_fields.push(physical_field);
-                Ok(ColumnType::Selected(ColumnName::new([physical_name]).into()))
+                Ok(ColumnType::Selected(physical_name))
             }
         })
         .try_collect()?;
@@ -699,7 +699,7 @@ fn transform_to_logical_internal(
                     parse_partition_value(partition_values.get(name), field.data_type())?;
                 Ok(value_expression.into())
             }
-            ColumnType::Selected(field_expr) => Ok(field_expr.clone()), // todo: make a ref?
+            ColumnType::Selected(field_name) => Ok(ColumnName::new([field_name]).into()),
         })
         .try_collect()?;
     let read_expression = Expression::Struct(all_fields);
