@@ -84,7 +84,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: build docs
         run: cargo doc
-  build_and_clippy:
+  build:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
