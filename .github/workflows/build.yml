@@ -34,7 +34,7 @@ jobs:
       - name: Install cargo-msrv
         shell: bash
         run: |
-          cargo install cargo-msrv --locked
+          cargo install cargo-msrv --locked --force
       - name: verify-msrv
         run: |
           cargo msrv --log-level trace --path kernel/ verify --all-features
