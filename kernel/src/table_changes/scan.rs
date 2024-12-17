@@ -1,3 +1,5 @@
+//! Functionality to create and execute table changes scans over the data in the delta table
+
 use std::sync::Arc;
 
 use itertools::Itertools;
@@ -16,8 +18,8 @@ use super::resolve_dvs::{resolve_scan_file_dv, ResolvedCdfScanFile};
 use super::scan_file::scan_data_to_scan_file;
 use super::{TableChanges, CDF_FIELDS};
 
-/// The result of building a [`TableChanges`] scan over a table. This can be used to get a change
-/// data feed from the table
+/// The result of building a [`TableChanges`] scan over a table. This can be used to get the change
+/// data feed from the table.
 #[derive(Debug)]
 pub struct TableChangesScan {
     // The [`TableChanges`] that specifies this scan's start and end versions
@@ -37,7 +39,7 @@ pub struct TableChangesScan {
 
 /// This builder constructs a [`TableChangesScan`] that can be used to read the [`TableChanges`]
 /// of a table. [`TableChangesScanBuilder`] allows you to specify a schema to project the columns
-/// or specify a predicate to filter rows in the Change Data Feed. Note that predicates over Change
+/// or specify a predicate to filter rows in the Change Data Feed. Note that predicates containing Change
 /// Data Feed columns `_change_type`, `_commit_version`, and `_commit_timestamp` are not currently
 /// allowed. See issue [#525](https://github.com/delta-io/delta-kernel-rs/issues/525).
 ///
@@ -45,7 +47,7 @@ pub struct TableChangesScan {
 /// [`ScanBuilder`].
 ///
 /// [`ScanBuilder`]: crate::scan::ScanBuilder
-/// #Examples
+/// # Example
 /// Construct a [`TableChangesScan`] from `table_changes` with a given schema and predicate
 /// ```rust
 /// # use std::sync::Arc;
@@ -290,6 +292,8 @@ fn read_scan_file(
         physical_to_logical_expr,
         global_state.logical_schema.clone().into(),
     );
+    // Determine if the scan file was derived from a deletion vector pair
+    let is_dv_resolved_pair = scan_file.remove_dv.is_some();
 
     let table_root = Url::parse(&global_state.table_root)?;
     let location = table_root.join(&scan_file.path)?;
@@ -314,7 +318,31 @@ fn read_scan_file(
         // trying to return a captured variable. We're going to reassign `selection_vector`
         // to `rest` in a moment anyway
         let mut sv = selection_vector.take();
-        let rest = split_vector(sv.as_mut(), len, None);
+
+        // Gets the selection vector for a data batch with length `len`. There are three cases to
+        // consider:
+        // 1. A scan file derived from a deletion vector pair getting resolved.
+        // 2. A scan file that was not the result of a resolved pair, and has a deletion vector.
+        // 3. A scan file that was not the result of a resolved pair, and has no deletion vector.
+        //
+        // # Case 1
+        // If the scan file is derived from a deletion vector pair, its selection vector should be
+        // extended with `false`. Consider a resolved selection vector `[0, 1]`. Only row 1 has
+        // changed. If there were more rows (for example 4 total), then none of them have changed.
+        // Hence, the selection vector is extended to become `[0, 1, 0, 0]`.
+        //
+        // # Case 2
+        // If the scan file has a deletion vector but is unpaired, its selection vector should be
+        // extended with `true`. Consider a deletion vector with row 1 deleted. This generates a
+        // selection vector `[1, 0, 1]`. Only row 1 is deleted. Rows 0 and 2 are selected. If there
+        // are more rows (for example 4), then all the extra rows should be selected. The selection
+        // vector becomes `[1, 0, 1, 1]`.
+        //
+        // # Case 3
+        // These scan files are either simple adds, removes, or cdc files. This case is a noop because
+        // the selection vector is `None`.
+        let extend = Some(!is_dv_resolved_pair);
+        let rest = split_vector(sv.as_mut(), len, extend);
         let result = ScanResult {
             raw_data: logical,
             raw_mask: sv,

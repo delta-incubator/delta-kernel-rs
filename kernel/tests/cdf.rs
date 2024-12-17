@@ -54,6 +54,14 @@ fn read_cdf_for_table(
 #[test]
 fn cdf_with_deletion_vector() -> Result<(), Box<dyn error::Error>> {
     let batches = read_cdf_for_table("cdf-table-with-dv", 0, None)?;
+    // Each commit performs the following:
+    // 0. Insert  0..=9
+    // 1. Remove  [0, 9]
+    // 2. Restore [0, 9]
+    // 3. Remove  [0, 1, 4, 5]
+    // 4. Restore [1, 4]
+    // 5. Restore [0, 5] and Remove [3]
+    // 6. Restore 3
     let mut expected = vec![
         "+-------+--------------+-----------------+",
         "| value | _change_type | _commit_version |",
@@ -65,13 +73,23 @@ fn cdf_with_deletion_vector() -> Result<(), Box<dyn error::Error>> {
         "| 4     | insert       | 0               |",
         "| 5     | insert       | 0               |",
         "| 6     | insert       | 0               |",
-        "| 8     | insert       | 0               |",
         "| 7     | insert       | 0               |",
+        "| 8     | insert       | 0               |",
         "| 9     | insert       | 0               |",
         "| 0     | delete       | 1               |",
         "| 9     | delete       | 1               |",
         "| 0     | insert       | 2               |",
         "| 9     | insert       | 2               |",
+        "| 0     | delete       | 3               |",
+        "| 1     | delete       | 3               |",
+        "| 4     | delete       | 3               |",
+        "| 5     | delete       | 3               |",
+        "| 1     | insert       | 4               |",
+        "| 4     | insert       | 4               |",
+        "| 3     | delete       | 5               |",
+        "| 0     | insert       | 5               |",
+        "| 5     | insert       | 5               |",
+        "| 3     | insert       | 6               |",
         "+-------+--------------+-----------------+",
     ];
     sort_lines!(expected);
@@ -149,6 +167,63 @@ fn cdf_non_partitioned() -> Result<(), Box<dyn error::Error>> {
              "| 1  | Alex   | 2024-04-14 | 1                 | true          | 3.14         | 1              | insert           | 4               |",
              "| 2  | Alan   | 2024-04-15 | 1                 | true          | 3.14         | 1              | insert           | 4               |",
              "+----+--------+------------+-------------------+---------------+--------------+----------------+------------------+-----------------+"
+    ];
+    sort_lines!(expected);
+    assert_batches_sorted_eq!(expected, &batches);
+    Ok(())
+}
+
+#[test]
+fn cdf_with_cdc_and_dvs() -> Result<(), Box<dyn error::Error>> {
+    let batches = read_cdf_for_table("cdf-table-with-cdc-and-dvs", 0, None)?;
+    let mut expected = vec![
+        "+----+--------------------+------------------+-----------------+",
+        "| id | comment            | _change_type     | _commit_version |",
+        "+----+--------------------+------------------+-----------------+",
+        "| 1  | initial            | insert           | 0               |",
+        "| 2  | insert1            | insert           | 1               |",
+        "| 3  | insert1-delete1    | insert           | 1               |",
+        "| 4  | insert1-delete2    | insert           | 1               |",
+        "| 5  | insert1-delete2    | insert           | 1               |",
+        "| 3  | insert1-delete1    | delete           | 2               |",
+        "| 3  | insert1-delete1    | insert           | 4               |",
+        "| 4  | insert1-delete2    | delete           | 5               |",
+        "| 5  | insert1-delete2    | delete           | 5               |",
+        "| 4  | insert1-delete2    | insert           | 7               |",
+        "| 5  | insert2            | insert           | 8               |",
+        "| 1  | initial            | update_preimage  | 9               |",
+        "| 1  | update1            | update_postimage | 9               |",
+        "| 2  | insert1            | update_preimage  | 9               |",
+        "| 2  | update1            | update_postimage | 9               |",
+        "| 3  | insert1-delete1    | update_preimage  | 9               |",
+        "| 3  | update1            | update_postimage | 9               |",
+        "| 1  | update1            | delete           | 10              |",
+        "| 2  | update1            | update_preimage  | 12              |",
+        "| 2  | update2            | update_postimage | 12              |",
+        "| 6  | insert3            | insert           | 14              |",
+        "| 7  | insert3            | insert           | 14              |",
+        "| 8  | insert4            | insert           | 15              |",
+        "| 9  | insert4            | insert           | 15              |",
+        "| 8  | insert4            | delete           | 16              |",
+        "| 7  | insert3            | delete           | 16              |",
+        "| 10 | merge1-insert      | insert           | 18              |",
+        "| 11 | merge1-insert      | insert           | 18              |",
+        "| 9  | merge1-update      | update_postimage | 18              |",
+        "| 9  | insert4            | update_preimage  | 18              |",
+        "| 11 | merge1-insert      | update_preimage  | 20              |",
+        "| 11 |                    | update_postimage | 20              |",
+        "| 12 | merge2-insert      | insert           | 22              |",
+        "| 11 |                    | delete           | 22              |",
+        "| 3  | update1            | delete           | 24              |",
+        "| 4  | insert1-delete2    | delete           | 24              |",
+        "| 5  | insert2            | delete           | 24              |",
+        "| 2  | update2            | delete           | 24              |",
+        "| 6  | insert3            | delete           | 24              |",
+        "| 9  | merge1-update      | delete           | 24              |",
+        "| 0  | new                | insert           | 25              |",
+        "| 1  | after-large-delete | insert           | 25              |",
+        "| 2  |                    | insert           | 25              |",
+        "+----+--------------------+------------------+-----------------+",
     ];
     sort_lines!(expected);
     assert_batches_sorted_eq!(expected, &batches);
