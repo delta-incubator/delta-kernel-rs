@@ -6,11 +6,11 @@ use itertools::Itertools;
 use tracing::debug;
 
 use super::data_skipping::DataSkippingFilter;
-use super::{ColumnType, ScanData};
+use super::{ScanData, Transform};
 use crate::actions::get_log_add_schema;
 use crate::engine_data::{GetData, RowVisitor, TypedGetData as _};
 use crate::expressions::{column_expr, column_name, ColumnName, Expression, ExpressionRef};
-use crate::scan::DeletionVectorDescriptor;
+use crate::scan::{DeletionVectorDescriptor, TransformExpr};
 use crate::schema::{ColumnNamesAndTypes, DataType, MapType, SchemaRef, StructField, StructType};
 use crate::utils::require;
 use crate::{DeltaResult, Engine, EngineData, Error, ExpressionEvaluator};
@@ -47,7 +47,7 @@ struct AddRemoveDedupVisitor<'seen> {
     selection_vector: Vec<bool>,
     partition_columns: Arc<Vec<String>>,
     logical_schema: SchemaRef,
-    all_fields: Arc<Vec<ColumnType>>,
+    transform: Arc<Transform>,
     transforms: HashMap<usize, Expression>,
     is_log_batch: bool,
 }
@@ -113,30 +113,29 @@ impl AddRemoveDedupVisitor<'_> {
         let have_seen = self.check_and_record_seen(file_key);
         if is_add && !have_seen {
             // compute transform here
-            // if self.partition_columns.len() > 0 {
-            //     println!("Partition cols for path {path} here: {:?}", self.partition_columns);
-            //     let partition_values: HashMap<_, _> = getters[1].get(i, "add.partitionValues")?;
-            //     let all_fields = self.all_fields
-            //         .iter()
-            //         .map(|field| match field {
-            //             ColumnType::Partition(field_idx) => {
-            //                 let field = self.logical_schema.fields.get_index(*field_idx);
-            //                 let Some((_, field)) = field else {
-            //                     return Err(Error::generic(
-            //                         "logical schema did not contain expected field, can't transform data",
-            //                     ));
-            //                 };
-            //                 let name = field.physical_name();
-            //                 let value_expression =
-            //                     super::parse_partition_value(partition_values.get(name), field.data_type())?;
-            //                 Ok(value_expression.into())
-            //             }
-            //             ColumnType::Selected(field_expr) => Ok(field_expr.clone()),
-            //         })
-            //         .try_collect()?;
-            //     let read_expression = Expression::Struct(all_fields);
-            //     self.transforms.insert(i, read_expression);
-            // }
+            if self.partition_columns.len() > 0 {
+                println!("Partition cols for path {path} here: {:?}", self.partition_columns);
+                let partition_values: HashMap<_, _> = getters[1].get(i, "add.partitionValues")?;
+                let transforms = self.transform
+                    .iter()
+                    .map(|transform_expr| match transform_expr {
+                        TransformExpr::Partition(field_idx) => {
+                            let field = self.logical_schema.fields.get_index(*field_idx);
+                            let Some((_, field)) = field else {
+                                return Err(Error::generic(
+                                    "logical schema did not contain expected field, can't transform data",
+                                ));
+                            };
+                            let name = field.physical_name();
+                            let value_expression =
+                                super::parse_partition_value(partition_values.get(name), field.data_type())?;
+                            Ok(value_expression.into())
+                        }
+                        TransformExpr::Static(field_expr) => Ok(field_expr.clone()),
+                    })
+                    .try_collect()?;
+                self.transforms.insert(i, Expression::Struct(transforms));
+            }
         }
         Ok(!have_seen && is_add)
     }
@@ -246,7 +245,7 @@ impl LogReplayScanner {
         actions: &dyn EngineData,
         partition_columns: Arc<Vec<String>>,
         logical_schema: SchemaRef,
-        all_fields: Arc<Vec<ColumnType>>,
+        transform: Arc<Transform>,
         is_log_batch: bool,
     ) -> DeltaResult<ScanData> {
         // Apply data skipping to get back a selection vector for actions that passed skipping. We
@@ -262,7 +261,7 @@ impl LogReplayScanner {
             selection_vector,
             partition_columns,
             logical_schema,
-            all_fields,
+            transform,
             transforms: HashMap::new(),
             is_log_batch,
         };
@@ -273,7 +272,7 @@ impl LogReplayScanner {
         // TODO: Teach expression eval to respect the selection vector we just computed so carefully!
         let selection_vector = visitor.selection_vector;
         let result = add_transform.evaluate(actions)?;
-        Ok((result, selection_vector))
+        Ok((result, selection_vector, visitor.transforms))
     }
 }
 
@@ -286,7 +285,7 @@ pub fn scan_action_iter(
     action_iter: impl Iterator<Item = DeltaResult<(Box<dyn EngineData>, bool)>>,
     partition_columns: Vec<String>,
     logical_schema: SchemaRef,
-    all_fields: Arc<Vec<ColumnType>>,
+    transform: Arc<Transform>,
     physical_predicate: Option<(ExpressionRef, SchemaRef)>,
 ) -> impl Iterator<Item = DeltaResult<ScanData>> {
     let mut log_scanner = LogReplayScanner::new(engine, physical_predicate);
@@ -304,11 +303,11 @@ pub fn scan_action_iter(
                 batch.as_ref(),
                 partition_columns.clone(),
                 logical_schema.clone(),
-                all_fields.clone(),
+                transform.clone(),
                 is_log_batch,
             )
         })
-        .filter(|res| res.as_ref().map_or(true, |(_, sv)| sv.contains(&true)))
+        .filter(|res| res.as_ref().map_or(true, |(_, sv, _)| sv.contains(&true)))
 }
 
 #[cfg(test)]

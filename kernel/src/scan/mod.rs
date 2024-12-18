@@ -320,7 +320,30 @@ pub enum ColumnType {
     Partition(usize),
 }
 
-pub type ScanData = (Box<dyn EngineData>, Vec<bool>);
+/// A transform is ultimately a `Struct` expr. This holds the set of expressions that make that struct expr up
+type Transform = Vec<TransformExpr>;
+impl TryFrom<Transform> for Expression {
+    type Error = Error;
+    fn try_from(transform: Transform) -> DeltaResult<Self> {
+        let expr_vec = transform.into_iter().map(|transform_expr| match transform_expr {
+            TransformExpr::Static(expr) => Ok(expr),
+            _ => Err(Error::generic("Can't make an expression with partially computed transform")),
+        }).try_collect()?;
+        Ok(Expression::Struct(expr_vec))
+    }
+}
+
+/// Transforms aren't computed all at once. So static ones can just go straight to `Expression`, but
+/// things like partition columns need to filled in. This enum holds an expression that's part of a
+/// `Transform`.
+enum TransformExpr {
+    Static(Expression),
+    Partition(usize),
+}
+
+// TODO(nick): Make this a struct in a follow-on PR
+// (data, deletion_vec, transforms)
+pub type ScanData = (Box<dyn EngineData>, Vec<bool>, HashMap<usize, Expression>);
 
 /// The result of building a scan over a table. This can be used to get the actual data from
 /// scanning the table.
@@ -359,17 +382,17 @@ impl Scan {
         }
     }
 
-    // /// Get the part of the transform expression that can be computed statically. This expression is
-    // /// a "no-op", in that it only returns the columns that need no transformation
-    // fn get_static_transform_exprs(all_fields: &[ColumnType]) ->  Vec<Option<Expression>> {
-    //     all_fields
-    //         .iter()
-    //         .map(|field| match field {
-    //             ColumnType::Selected(field_expr) => Some(ColumnName::new(["BLAH"]).into()),
-    //             _ => None,
-    //         })
-    //         .collect()
-    // }
+    // /// Get the part of the transform that can be computed statically. This expression is a
+    // "no-op", in that it only returns the columns that need no transformation
+    fn get_static_transform(all_fields: &[ColumnType]) -> Transform {
+        all_fields
+            .iter()
+            .map(|field| match field {
+                ColumnType::Selected(field_expr) => TransformExpr::Static(ColumnName::new(["BLAH"]).into()),
+                ColumnType::Partition(idx) => TransformExpr::Partition(*idx),
+            })
+            .collect()
+    }
 
     /// Get an iterator of [`EngineData`]s that should be included in scan for a query. This handles
     /// log-replay, reconciling Add and Remove actions, and applying data skipping (if
@@ -394,7 +417,7 @@ impl Scan {
         -  Insert into a hashmap keyed by the row that its transforming
         - on the way out of this we map the `Borrowed` one to `None` since no transform is needed
          */
-        //let static_transform_exprs = Arc::new(Scan::get_static_transform_exprs(&self.all_fields));
+        let static_transform = Arc::new(Scan::get_static_transform(&self.all_fields));
         let physical_predicate = match self.physical_predicate.clone() {
             PhysicalPredicate::StaticSkipAll => return Ok(None.into_iter().flatten()),
             PhysicalPredicate::Some(predicate, schema) => Some((predicate, schema)),
@@ -405,7 +428,7 @@ impl Scan {
             self.replay_for_scan_data(engine)?,
             self.snapshot.metadata().partition_columns.clone(),
             self.logical_schema.clone(),
-            self.all_fields.clone(), // cheap arc clone
+            static_transform,
             physical_predicate,
         );
         Ok(Some(it).into_iter().flatten())
@@ -486,7 +509,7 @@ impl Scan {
         let scan_data = self.scan_data(engine.as_ref())?;
         let scan_files_iter = scan_data
             .map(|res| {
-                let (data, vec) = res?;
+                let (data, vec, _transforms) = res?;
                 let scan_files = vec![];
                 state::visit_scan_files(data.as_ref(), &vec, scan_files, scan_data_callback)
             })
@@ -1004,7 +1027,7 @@ mod tests {
         }
         let mut files = vec![];
         for data in scan_data {
-            let (data, vec) = data?;
+            let (data, vec, _transforms) = data?;
             files = state::visit_scan_files(data.as_ref(), &vec, files, scan_data_callback)?;
         }
         Ok(files)
