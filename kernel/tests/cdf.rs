@@ -229,3 +229,97 @@ fn cdf_with_cdc_and_dvs() -> Result<(), Box<dyn error::Error>> {
     assert_batches_sorted_eq!(expected, &batches);
     Ok(())
 }
+
+#[test]
+fn test_simple_cdf_version_ranges() -> DeltaResult<()> {
+    let batches = read_cdf_for_table("cdf-table-simple", 0, 0)?;
+    let mut expected = vec![
+        "+----+--------------+-----------------+",
+        "| id | _change_type | _commit_version |",
+        "+----+--------------+-----------------+",
+        "| 0  | insert       | 0               |",
+        "| 1  | insert       | 0               |",
+        "| 2  | insert       | 0               |",
+        "| 3  | insert       | 0               |",
+        "| 4  | insert       | 0               |",
+        "| 5  | insert       | 0               |",
+        "| 6  | insert       | 0               |",
+        "| 7  | insert       | 0               |",
+        "| 8  | insert       | 0               |",
+        "| 9  | insert       | 0               |",
+        "+----+--------------+-----------------+",
+    ];
+    sort_lines!(expected);
+    assert_batches_sorted_eq!(expected, &batches);
+
+    let batches = read_cdf_for_table("cdf-table-simple", 1, 1)?;
+    let mut expected = vec![
+        "+----+--------------+-----------------+",
+        "| id | _change_type | _commit_version |",
+        "+----+--------------+-----------------+",
+        "| 0  | delete       | 1               |",
+        "| 1  | delete       | 1               |",
+        "| 2  | delete       | 1               |",
+        "| 3  | delete       | 1               |",
+        "| 4  | delete       | 1               |",
+        "| 5  | delete       | 1               |",
+        "| 6  | delete       | 1               |",
+        "| 7  | delete       | 1               |",
+        "| 8  | delete       | 1               |",
+        "| 9  | delete       | 1               |",
+        "+----+--------------+-----------------+",
+    ];
+    sort_lines!(expected);
+    assert_batches_sorted_eq!(expected, &batches);
+
+    let batches = read_cdf_for_table("cdf-table-simple", 2, 2)?;
+    let mut expected = vec![
+        "+----+--------------+-----------------+",
+        "| id | _change_type | _commit_version |",
+        "+----+--------------+-----------------+",
+        "| 20 | insert       | 2               |",
+        "| 21 | insert       | 2               |",
+        "| 22 | insert       | 2               |",
+        "| 23 | insert       | 2               |",
+        "| 24 | insert       | 2               |",
+        "+----+--------------+-----------------+",
+    ];
+    sort_lines!(expected);
+    assert_batches_sorted_eq!(expected, &batches);
+
+    let batches = read_cdf_for_table("cdf-table-simple", 0, 2)?;
+    let mut expected = vec![
+        "+----+--------------+-----------------+",
+        "| id | _change_type | _commit_version |",
+        "+----+--------------+-----------------+",
+        "| 0  | insert       | 0               |",
+        "| 1  | insert       | 0               |",
+        "| 2  | insert       | 0               |",
+        "| 3  | insert       | 0               |",
+        "| 4  | insert       | 0               |",
+        "| 5  | insert       | 0               |",
+        "| 6  | insert       | 0               |",
+        "| 7  | insert       | 0               |",
+        "| 8  | insert       | 0               |",
+        "| 9  | insert       | 0               |",
+        "| 0  | delete       | 1               |",
+        "| 1  | delete       | 1               |",
+        "| 2  | delete       | 1               |",
+        "| 3  | delete       | 1               |",
+        "| 4  | delete       | 1               |",
+        "| 5  | delete       | 1               |",
+        "| 6  | delete       | 1               |",
+        "| 7  | delete       | 1               |",
+        "| 8  | delete       | 1               |",
+        "| 9  | delete       | 1               |",
+        "| 20 | insert       | 2               |",
+        "| 21 | insert       | 2               |",
+        "| 22 | insert       | 2               |",
+        "| 23 | insert       | 2               |",
+        "| 24 | insert       | 2               |",
+        "+----+--------------+-----------------+",
+    ];
+    sort_lines!(expected);
+    assert_batches_sorted_eq!(expected, &batches);
+    Ok(())
+}
