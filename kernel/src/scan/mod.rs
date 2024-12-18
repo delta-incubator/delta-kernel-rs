@@ -325,10 +325,15 @@ type Transform = Vec<TransformExpr>;
 impl TryFrom<Transform> for Expression {
     type Error = Error;
     fn try_from(transform: Transform) -> DeltaResult<Self> {
-        let expr_vec = transform.into_iter().map(|transform_expr| match transform_expr {
-            TransformExpr::Static(expr) => Ok(expr),
-            _ => Err(Error::generic("Can't make an expression with partially computed transform")),
-        }).try_collect()?;
+        let expr_vec = transform
+            .into_iter()
+            .map(|transform_expr| match transform_expr {
+                TransformExpr::Static(expr) => Ok(expr),
+                _ => Err(Error::generic(
+                    "Can't make an expression with partially computed transform",
+                )),
+            })
+            .try_collect()?;
         Ok(Expression::Struct(expr_vec))
     }
 }
@@ -336,7 +341,7 @@ impl TryFrom<Transform> for Expression {
 /// Transforms aren't computed all at once. So static ones can just go straight to `Expression`, but
 /// things like partition columns need to filled in. This enum holds an expression that's part of a
 /// `Transform`.
-enum TransformExpr {
+pub(crate) enum TransformExpr {
     Static(Expression),
     Partition(usize),
 }
@@ -388,7 +393,9 @@ impl Scan {
         all_fields
             .iter()
             .map(|field| match field {
-                ColumnType::Selected(field_expr) => TransformExpr::Static(ColumnName::new(["BLAH"]).into()),
+                ColumnType::Selected(col_name) => {
+                    TransformExpr::Static(ColumnName::new([col_name]).into())
+                }
                 ColumnType::Partition(idx) => TransformExpr::Partition(*idx),
             })
             .collect()
@@ -805,25 +812,30 @@ pub(crate) mod test_utils {
         context: T,
         validate_callback: ScanCallback<T>,
     ) {
-        // let iter = scan_action_iter(
-        //     &SyncEngine::new(),
-        //     batch.into_iter().map(|batch| Ok((batch as _, true))),
-        //     None,
-        // );
-        // let mut batch_count = 0;
-        // for res in iter {
-        //     let (batch, sel) = res.unwrap();
-        //     assert_eq!(sel, expected_sel_vec);
-        //     crate::scan::state::visit_scan_files(
-        //         batch.as_ref(),
-        //         &sel,
-        //         context.clone(),
-        //         validate_callback,
-        //     )
-        //     .unwrap();
-        //     batch_count += 1;
-        // }
-        // assert_eq!(batch_count, 1);
+        // NB: This only works for now with data with no partitions
+        // TODO(nick): Make this more general, or at least less of a sharp edge
+        let iter = scan_action_iter(
+            &SyncEngine::new(),
+            batch.into_iter().map(|batch| Ok((batch as _, true))),
+            vec![], // no partition cols
+            Arc::new(crate::schema::StructType::new(vec![])),
+            Arc::new(vec![]), // no transform,
+            None,
+        );
+        let mut batch_count = 0;
+        for res in iter {
+            let (batch, sel, _transforms) = res.unwrap();
+            assert_eq!(sel, expected_sel_vec);
+            crate::scan::state::visit_scan_files(
+                batch.as_ref(),
+                &sel,
+                context.clone(),
+                validate_callback,
+            )
+            .unwrap();
+            batch_count += 1;
+        }
+        assert_eq!(batch_count, 1);
     }
 }
 

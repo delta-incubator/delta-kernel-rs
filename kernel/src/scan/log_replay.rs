@@ -114,7 +114,10 @@ impl AddRemoveDedupVisitor<'_> {
         if is_add && !have_seen {
             // compute transform here
             if self.partition_columns.len() > 0 {
-                println!("Partition cols for path {path} here: {:?}", self.partition_columns);
+                println!(
+                    "Partition cols for path {path} here: {:?}",
+                    self.partition_columns
+                );
                 let partition_values: HashMap<_, _> = getters[1].get(i, "add.partitionValues")?;
                 let transforms = self.transform
                     .iter()
@@ -280,7 +283,7 @@ impl LogReplayScanner {
 /// `(engine_data, selection_vec)`. Each row that is selected in the returned `engine_data` _must_
 /// be processed to complete the scan. Non-selected rows _must_ be ignored. The boolean flag
 /// indicates whether the record batch is a log or checkpoint batch.
-pub fn scan_action_iter(
+pub(crate) fn scan_action_iter(
     engine: &dyn Engine,
     action_iter: impl Iterator<Item = DeltaResult<(Box<dyn EngineData>, bool)>>,
     partition_columns: Vec<String>,
