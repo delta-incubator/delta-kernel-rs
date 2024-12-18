@@ -424,7 +424,11 @@ impl Scan {
         -  Insert into a hashmap keyed by the row that its transforming
         - on the way out of this we map the `Borrowed` one to `None` since no transform is needed
          */
-        let static_transform = Arc::new(Scan::get_static_transform(&self.all_fields));
+        let static_transform = if self.have_partition_cols {
+            Some(Arc::new(Scan::get_static_transform(&self.all_fields)))
+        } else {
+            None
+        };
         let physical_predicate = match self.physical_predicate.clone() {
             PhysicalPredicate::StaticSkipAll => return Ok(None.into_iter().flatten()),
             PhysicalPredicate::Some(predicate, schema) => Some((predicate, schema)),
@@ -433,7 +437,6 @@ impl Scan {
         let it = scan_action_iter(
             engine,
             self.replay_for_scan_data(engine)?,
-            self.snapshot.metadata().partition_columns.clone(),
             self.logical_schema.clone(),
             static_transform,
             physical_predicate,
@@ -759,10 +762,11 @@ pub(crate) mod test_utils {
             sync::{json::SyncJsonHandler, SyncEngine},
         },
         scan::log_replay::scan_action_iter,
+        schema::SchemaRef,
         EngineData, JsonHandler,
     };
 
-    use super::state::ScanCallback;
+    use super::{state::ScanCallback, Transform};
 
     // TODO(nick): Merge all copies of this into one "test utils" thing
     fn string_array_to_engine_data(string_array: StringArray) -> Box<dyn EngineData> {
@@ -805,21 +809,24 @@ pub(crate) mod test_utils {
         ArrowEngineData::try_from_engine_data(parsed).unwrap()
     }
 
+    /// Create a scan action iter and validate what's called back. If you pass `None` as
+    /// `logical_schema`, `transform` should also be `None`
     #[allow(clippy::vec_box)]
     pub(crate) fn run_with_validate_callback<T: Clone>(
         batch: Vec<Box<ArrowEngineData>>,
+        logical_schema: Option<SchemaRef>,
+        transform: Option<Arc<Transform>>,
         expected_sel_vec: &[bool],
         context: T,
         validate_callback: ScanCallback<T>,
     ) {
-        // NB: This only works for now with data with no partitions
-        // TODO(nick): Make this more general, or at least less of a sharp edge
+        let logical_schema =
+            logical_schema.unwrap_or_else(|| Arc::new(crate::schema::StructType::new(vec![])));
         let iter = scan_action_iter(
             &SyncEngine::new(),
             batch.into_iter().map(|batch| Ok((batch as _, true))),
-            vec![], // no partition cols
-            Arc::new(crate::schema::StructType::new(vec![])),
-            Arc::new(vec![]), // no transform,
+            logical_schema,
+            transform,
             None,
         );
         let mut batch_count = 0;

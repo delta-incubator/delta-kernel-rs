@@ -45,9 +45,8 @@ struct LogReplayScanner {
 struct AddRemoveDedupVisitor<'seen> {
     seen: &'seen mut HashSet<FileActionKey>,
     selection_vector: Vec<bool>,
-    partition_columns: Arc<Vec<String>>,
     logical_schema: SchemaRef,
-    transform: Arc<Transform>,
+    transform: Option<Arc<Transform>>,
     transforms: HashMap<usize, Expression>,
     is_log_batch: bool,
 }
@@ -113,13 +112,9 @@ impl AddRemoveDedupVisitor<'_> {
         let have_seen = self.check_and_record_seen(file_key);
         if is_add && !have_seen {
             // compute transform here
-            if self.partition_columns.len() > 0 {
-                println!(
-                    "Partition cols for path {path} here: {:?}",
-                    self.partition_columns
-                );
+            if let Some(ref transform) = self.transform {
                 let partition_values: HashMap<_, _> = getters[1].get(i, "add.partitionValues")?;
-                let transforms = self.transform
+                let transforms = transform
                     .iter()
                     .map(|transform_expr| match transform_expr {
                         TransformExpr::Partition(field_idx) => {
@@ -246,9 +241,8 @@ impl LogReplayScanner {
         &mut self,
         add_transform: &dyn ExpressionEvaluator,
         actions: &dyn EngineData,
-        partition_columns: Arc<Vec<String>>,
         logical_schema: SchemaRef,
-        transform: Arc<Transform>,
+        transform: Option<Arc<Transform>>,
         is_log_batch: bool,
     ) -> DeltaResult<ScanData> {
         // Apply data skipping to get back a selection vector for actions that passed skipping. We
@@ -262,15 +256,12 @@ impl LogReplayScanner {
         let mut visitor = AddRemoveDedupVisitor {
             seen: &mut self.seen,
             selection_vector,
-            partition_columns,
             logical_schema,
             transform,
             transforms: HashMap::new(),
             is_log_batch,
         };
         visitor.visit_rows_of(actions)?;
-
-        println!("Got transforms: {:#?}", visitor.transforms);
 
         // TODO: Teach expression eval to respect the selection vector we just computed so carefully!
         let selection_vector = visitor.selection_vector;
@@ -286,9 +277,8 @@ impl LogReplayScanner {
 pub(crate) fn scan_action_iter(
     engine: &dyn Engine,
     action_iter: impl Iterator<Item = DeltaResult<(Box<dyn EngineData>, bool)>>,
-    partition_columns: Vec<String>,
     logical_schema: SchemaRef,
-    transform: Arc<Transform>,
+    transform: Option<Arc<Transform>>,
     physical_predicate: Option<(ExpressionRef, SchemaRef)>,
 ) -> impl Iterator<Item = DeltaResult<ScanData>> {
     let mut log_scanner = LogReplayScanner::new(engine, physical_predicate);
@@ -297,14 +287,12 @@ pub(crate) fn scan_action_iter(
         get_add_transform_expr(),
         SCAN_ROW_DATATYPE.clone(),
     );
-    let partition_columns = Arc::new(partition_columns);
     action_iter
         .map(move |action_res| {
             let (batch, is_log_batch) = action_res?;
             log_scanner.process_scan_batch(
                 add_transform.as_ref(),
                 batch.as_ref(),
-                partition_columns.clone(),
                 logical_schema.clone(),
                 transform.clone(),
                 is_log_batch,
@@ -347,6 +335,8 @@ mod tests {
     fn test_scan_action_iter() {
         run_with_validate_callback(
             vec![add_batch_simple()],
+            None, // not testing schema
+            None, // not testing transform
             &[true, false],
             (),
             validate_simple,
@@ -357,6 +347,8 @@ mod tests {
     fn test_scan_action_iter_with_remove() {
         run_with_validate_callback(
             vec![add_batch_with_remove()],
+            None, // not testing schema
+            None, // not testing transform
             &[false, false, true, false],
             (),
             validate_simple,
