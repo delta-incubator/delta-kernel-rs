@@ -413,17 +413,19 @@ impl Scan {
     ///   the query. NB: If you are using the default engine and plan to call arrow's
     ///   `filter_record_batch`, you _need_ to extend this vector to the full length of the batch or
     ///   arrow will drop the extra rows.
+    /// - `HashMap<usize, Expression>`: Transformation expressions that need to be applied. For each
+    ///    row at index `i` in the above data, if an expression exists in this map for key `i`, the
+    ///    associated expression _must_ be applied to the data read from the file specified by the
+    ///    row. The resultant schema for this expression is guaranteed to be `Scan.schema()`. If
+    ///    there is no entry for a row `i` in this map, no expression need be applied and the data
+    ///    read from disk is already in the correct logical state.
     pub fn scan_data(
         &self,
         engine: &dyn Engine,
     ) -> DeltaResult<impl Iterator<Item = DeltaResult<ScanData>>> {
-        /*
-        - build initial "no-op" expression here (as a Cow) (no as an ExpressionRef)
-        - pass into the iterator
-        - for each add, it can keep it as no-op, or add to it by cloning
-        -  Insert into a hashmap keyed by the row that its transforming
-        - on the way out of this we map the `Borrowed` one to `None` since no transform is needed
-         */
+        // Compute the static part of the transformation. This is `None` if no transformation is
+        // needed (currently just means no partition cols, but will be extended for other transforms
+        // as we support them)
         let static_transform = if self.have_partition_cols {
             Some(Arc::new(Scan::get_static_transform(&self.all_fields)))
         } else {
