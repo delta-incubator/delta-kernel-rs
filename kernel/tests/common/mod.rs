@@ -46,9 +46,11 @@ pub(crate) fn load_test_data(
     test_name: &str,
 ) -> Result<tempfile::TempDir, Box<dyn std::error::Error>> {
     let path = format!("{test_parent_dir}/{test_name}.tar.zst");
+    println!("Path: {path}");
     let tar = zstd::Decoder::new(std::fs::File::open(path)?)?;
     let mut archive = tar::Archive::new(tar);
     let temp_dir = tempfile::tempdir()?;
+    println!("dir : {:?}", temp_dir.path());
     archive.unpack(temp_dir.path())?;
     Ok(temp_dir)
 }
