@@ -303,12 +303,25 @@ pub(crate) fn scan_action_iter(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::{collections::HashMap, sync::Arc};
 
+    use crate::expressions::{column_name, Scalar};
     use crate::scan::{
+        get_state_info,
         state::{DvInfo, Stats},
-        test_utils::{add_batch_simple, add_batch_with_remove, run_with_validate_callback},
+        test_utils::{
+            add_batch_simple, add_batch_with_partition_col, add_batch_with_remove,
+            run_with_validate_callback,
+        },
+        Scan,
     };
+    use crate::{
+        engine::sync::SyncEngine,
+        schema::{DataType, SchemaRef, StructField, StructType},
+        Expression,
+    };
+
+    use super::scan_action_iter;
 
     // dv-info is more complex to validate, we validate that works in the test for visit_scan_files
     // in state.rs
@@ -353,5 +366,70 @@ mod tests {
             (),
             validate_simple,
         );
+    }
+
+    #[test]
+    fn test_no_transforms() {
+        let batch = vec![add_batch_simple()];
+        let logical_schema = Arc::new(crate::schema::StructType::new(vec![]));
+        let iter = scan_action_iter(
+            &SyncEngine::new(),
+            batch.into_iter().map(|batch| Ok((batch as _, true))),
+            logical_schema,
+            None,
+            None,
+        );
+        for res in iter {
+            let (_batch, _sel, transforms) = res.unwrap();
+            assert!(transforms.is_empty(), "Should have no transforms");
+        }
+    }
+
+    #[test]
+    fn test_simple_transform() {
+        let schema: SchemaRef = Arc::new(StructType::new([
+            StructField::new("value", DataType::INTEGER, true),
+            StructField::new("date", DataType::DATE, true),
+        ]));
+        let partition_cols = ["date".to_string()];
+        let state_info = get_state_info(schema.as_ref(), &partition_cols).unwrap();
+        let static_transform = Some(Arc::new(Scan::get_static_transform(&state_info.all_fields)));
+        let batch = vec![add_batch_with_partition_col()];
+        let iter = scan_action_iter(
+            &SyncEngine::new(),
+            batch.into_iter().map(|batch| Ok((batch as _, true))),
+            schema,
+            static_transform,
+            None,
+        );
+
+        fn validate_transform(transform: Option<&Expression>, expected_date_offset: i32) {
+            assert!(transform.is_some());
+            if let Expression::Struct(inner) = transform.unwrap() {
+                if let Expression::Column(ref name) = inner[0] {
+                    assert_eq!(name, &column_name!("value"), "First col should be 'value'");
+                } else {
+                    panic!("Expected first expression to be a column");
+                }
+                if let Expression::Literal(ref scalar) = inner[1] {
+                    assert_eq!(
+                        scalar,
+                        &Scalar::Date(expected_date_offset),
+                        "Didn't get expected date offset"
+                    );
+                } else {
+                    panic!("Expected second expression to be a literal");
+                }
+            } else {
+                panic!("Transform should always be a struct expr");
+            }
+        }
+
+        for res in iter {
+            let (_batch, _sel, transforms) = res.unwrap();
+            assert_eq!(transforms.len(), 2, "Should have two transforms");
+            validate_transform(transforms.get(&0), 17511);
+            validate_transform(transforms.get(&1), 17510);
+        }
     }
 }
