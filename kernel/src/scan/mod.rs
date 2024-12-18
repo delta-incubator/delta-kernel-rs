@@ -387,8 +387,9 @@ impl Scan {
         }
     }
 
-    // /// Get the part of the transform that can be computed statically. This expression is a
-    // "no-op", in that it only returns the columns that need no transformation
+    /// Convert the parts of the transform that can be computed statically into `Expression`s. For
+    /// parts that cannot be computed statically, include enough metadata so lower levels of
+    /// processing can create and fill in an expression.
     fn get_static_transform(all_fields: &[ColumnType]) -> Transform {
         all_fields
             .iter()
