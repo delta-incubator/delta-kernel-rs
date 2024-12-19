@@ -322,21 +322,6 @@ pub enum ColumnType {
 
 /// A transform is ultimately a `Struct` expr. This holds the set of expressions that make that struct expr up
 type Transform = Vec<TransformExpr>;
-impl TryFrom<Transform> for Expression {
-    type Error = Error;
-    fn try_from(transform: Transform) -> DeltaResult<Self> {
-        let expr_vec = transform
-            .into_iter()
-            .map(|transform_expr| match transform_expr {
-                TransformExpr::Static(expr) => Ok(expr),
-                _ => Err(Error::generic(
-                    "Can't make an expression with partially computed transform",
-                )),
-            })
-            .try_collect()?;
-        Ok(Expression::Struct(expr_vec))
-    }
-}
 
 /// Transforms aren't computed all at once. So static ones can just go straight to `Expression`, but
 /// things like partition columns need to filled in. This enum holds an expression that's part of a
