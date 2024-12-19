@@ -416,7 +416,9 @@ impl Scan {
         // Compute the static part of the transformation. This is `None` if no transformation is
         // needed (currently just means no partition cols, but will be extended for other transforms
         // as we support them)
-        let static_transform = if self.have_partition_cols {
+        let static_transform = if self.have_partition_cols
+            || self.snapshot.column_mapping_mode != ColumnMappingMode::None
+        {
             Some(Arc::new(Scan::get_static_transform(&self.all_fields)))
         } else {
             None
