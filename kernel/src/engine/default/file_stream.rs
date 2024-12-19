@@ -16,7 +16,7 @@ use crate::engine::arrow_data::ArrowEngineData;
 use crate::{DeltaResult, FileDataReadResultIterator, FileMeta};
 
 /// A fallible future that resolves to a stream of [`RecordBatch`]
-// cbindgen:ignore
+/// cbindgen:ignore
 pub type FileOpenFuture =
     BoxFuture<'static, DeltaResult<BoxStream<'static, DeltaResult<RecordBatch>>>>;
 
