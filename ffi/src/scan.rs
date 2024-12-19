@@ -296,7 +296,6 @@ pub unsafe extern "C" fn get_from_string_map(
         .and_then(|v| allocate_fn(kernel_string_slice!(v)))
 }
 
-
 pub struct CTransformMap {
     transforms: HashMap<usize, ExpressionRef>,
 }
@@ -320,7 +319,6 @@ pub struct CTransformMap {
 //         .get(string_key.unwrap())
 //         .and_then(|v| allocate_fn(kernel_string_slice!(v)))
 // }
-
 
 /// Get a selection vector out of a [`DvInfo`] struct
 ///
@@ -429,5 +427,12 @@ pub unsafe extern "C" fn visit_scan_data(
         callback,
     };
     // TODO: return ExternResult to caller instead of panicking?
-    visit_scan_files(data, selection_vec, &transforms.transforms, context_wrapper, rust_callback).unwrap();
+    visit_scan_files(
+        data,
+        selection_vec,
+        &transforms.transforms,
+        context_wrapper,
+        rust_callback,
+    )
+    .unwrap();
 }
