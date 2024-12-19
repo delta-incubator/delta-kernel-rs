@@ -47,7 +47,7 @@ struct AddRemoveDedupVisitor<'seen> {
     selection_vector: Vec<bool>,
     logical_schema: SchemaRef,
     transform: Option<Arc<Transform>>,
-    transforms: HashMap<usize, Expression>,
+    transforms: HashMap<usize, ExpressionRef>,
     is_log_batch: bool,
 }
 
@@ -132,7 +132,8 @@ impl AddRemoveDedupVisitor<'_> {
                         TransformExpr::Static(field_expr) => Ok(field_expr.clone()),
                     })
                     .try_collect()?;
-                self.transforms.insert(i, Expression::Struct(transforms));
+                self.transforms
+                    .insert(i, Arc::new(Expression::Struct(transforms)));
             }
         }
         Ok(!have_seen && is_add)
@@ -315,10 +316,11 @@ mod tests {
         },
         Scan,
     };
+    use crate::Expression;
     use crate::{
         engine::sync::SyncEngine,
         schema::{DataType, SchemaRef, StructField, StructType},
-        Expression,
+        ExpressionRef,
     };
 
     use super::scan_action_iter;
@@ -403,9 +405,9 @@ mod tests {
             None,
         );
 
-        fn validate_transform(transform: Option<&Expression>, expected_date_offset: i32) {
+        fn validate_transform(transform: Option<&ExpressionRef>, expected_date_offset: i32) {
             assert!(transform.is_some());
-            if let Expression::Struct(inner) = transform.unwrap() {
+            if let Expression::Struct(inner) = transform.unwrap().as_ref() {
                 if let Expression::Column(ref name) = inner[0] {
                     assert_eq!(name, &column_name!("value"), "First col should be 'value'");
                 } else {
