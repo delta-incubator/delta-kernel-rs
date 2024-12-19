@@ -16,14 +16,14 @@ use crate::engine::arrow_data::ArrowEngineData;
 use crate::{DeltaResult, FileDataReadResultIterator, FileMeta};
 
 /// A fallible future that resolves to a stream of [`RecordBatch`]
-/// cbindgen:ignore
+// cbindgen:ignore
 pub type FileOpenFuture =
     BoxFuture<'static, DeltaResult<BoxStream<'static, DeltaResult<RecordBatch>>>>;
 
 /// Generic API for opening a file using an [`ObjectStore`] and resolving to a
 /// stream of [`RecordBatch`]
 ///
-/// [`ObjectStore`]: object_store::ObjectStore
+/// [ObjectStore]: object_store::ObjectStore
 pub trait FileOpener: Send + Unpin {
     /// Asynchronously open the specified file and return a stream
     /// of [`RecordBatch`]

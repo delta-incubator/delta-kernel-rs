@@ -46,7 +46,7 @@ pub struct TableChangesScan {
 /// Note: There is a lot of shared functionality between [`TableChangesScanBuilder`] and
 /// [`ScanBuilder`].
 ///
-/// [`ScanBuilder`]: crate::scan::ScanBuilder
+/// [ScanBuilder]: crate::scan::ScanBuilder
 /// # Example
 /// Construct a [`TableChangesScan`] from `table_changes` with a given schema and predicate
 /// ```rust
@@ -91,7 +91,7 @@ impl TableChangesScanBuilder {
     /// A table with columns `[a, b, c]` could have a scan which reads only the first
     /// two columns by using the schema `[a, b]`.
     ///
-    /// [`Schema`]: crate::schema::Schema
+    /// [Schema]: crate::schema::Schema
     pub fn with_schema(mut self, schema: impl Into<Option<SchemaRef>>) -> Self {
         self.schema = schema.into();
         self
@@ -217,7 +217,7 @@ impl TableChangesScan {
 
     /// Get a shared reference to the [`Schema`] of the table changes scan.
     ///
-    /// [`Schema`]: crate::schema::Schema
+    /// [Schema]: crate::schema::Schema
     pub fn schema(&self) -> &SchemaRef {
         &self.logical_schema
     }
