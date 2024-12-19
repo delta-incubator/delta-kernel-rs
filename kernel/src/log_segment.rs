@@ -31,7 +31,7 @@ mod tests;
 /// [`LogSegment`] is used in [`Snapshot`] when built with [`LogSegment::for_snapshot`], and
 /// and in `TableChanges` when built with [`LogSegment::for_table_changes`].
 ///
-/// [`Snapshot`]: crate::snapshot::Snapshot
+/// [Snapshot]: crate::snapshot::Snapshot
 #[derive(Debug)]
 #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
 pub(crate) struct LogSegment {
@@ -107,7 +107,7 @@ impl LogSegment {
     /// - `checkpoint_hint`: a `CheckpointMetadata` to start the log segment from (e.g. from reading the `last_checkpoint` file).
     /// - `time_travel_version`: The version of the log that the Snapshot will be at.
     ///
-    /// [`Snapshot`]: crate::snapshot::Snapshot
+    /// [Snapshot]: crate::snapshot::Snapshot
     #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
     pub(crate) fn for_snapshot(
         fs_client: &dyn FileSystemClient,
@@ -187,11 +187,15 @@ impl LogSegment {
     /// The boolean flags indicates whether the data was read from
     /// a commit file (true) or a checkpoint file (false).
     ///
-    /// `read_schema` is the schema to read the log files with. This can be used
-    /// to project the log files to a subset of the columns.
+    /// # Arguments
     ///
-    /// `meta_predicate` is an optional expression to filter the log files with. It is _NOT_ the
-    /// query's predicate, but rather a predicate for filtering log files themselves.
+    /// - `engine` is the engine to use to read and process the log files.
+    /// - `commit_read_schema` is the schema to read the commit files with. This can be used
+    ///   to project the log files to a subset of the columns.
+    /// - `checkpoint_read_schema` is the schema to read the checkpoint files with. This can be used
+    ///   to project the log files to a subset of the columns.
+    /// - `meta_predicate` is an optional expression to filter the log files with. It is _NOT_ the
+    ///   query's predicate, but rather a predicate for filtering log files themselves.
     #[cfg_attr(feature = "developer-visibility", visibility::make(pub))]
     pub(crate) fn replay(
         &self,
