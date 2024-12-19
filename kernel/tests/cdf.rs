@@ -449,3 +449,97 @@ fn backtick_column_names() -> DeltaResult<()> {
     assert_batches_sorted_eq!(expected, &batches);
     Ok(())
 }
+
+#[test]
+fn unconditional_delete() -> DeltaResult<()> {
+    let batches = read_cdf_for_table("cdf-table-delete-unconditional", 0, None, None)?;
+    let mut expected = vec![
+        "+----+--------------+-----------------+",
+        "| id | _change_type | _commit_version |",
+        "+----+--------------+-----------------+",
+        "| 0  | insert       | 0               |",
+        "| 1  | insert       | 0               |",
+        "| 2  | insert       | 0               |",
+        "| 3  | insert       | 0               |",
+        "| 4  | insert       | 0               |",
+        "| 5  | insert       | 0               |",
+        "| 6  | insert       | 0               |",
+        "| 7  | insert       | 0               |",
+        "| 8  | insert       | 0               |",
+        "| 9  | insert       | 0               |",
+        "| 0  | delete       | 1               |",
+        "| 1  | delete       | 1               |",
+        "| 2  | delete       | 1               |",
+        "| 3  | delete       | 1               |",
+        "| 4  | delete       | 1               |",
+        "| 5  | delete       | 1               |",
+        "| 6  | delete       | 1               |",
+        "| 7  | delete       | 1               |",
+        "| 8  | delete       | 1               |",
+        "| 9  | delete       | 1               |",
+        "+----+--------------+-----------------+",
+    ];
+    sort_lines!(expected);
+    assert_batches_sorted_eq!(expected, &batches);
+    Ok(())
+}
+
+#[test]
+fn conditional_delete_all_rows() -> DeltaResult<()> {
+    let batches = read_cdf_for_table("cdf-table-conditional-delete-all-rows", 0, None, None)?;
+    let mut expected = vec![
+        "+----+--------------+-----------------+",
+        "| id | _change_type | _commit_version |",
+        "+----+--------------+-----------------+",
+        "| 0  | insert       | 0               |",
+        "| 1  | insert       | 0               |",
+        "| 2  | insert       | 0               |",
+        "| 3  | insert       | 0               |",
+        "| 4  | insert       | 0               |",
+        "| 5  | insert       | 0               |",
+        "| 6  | insert       | 0               |",
+        "| 7  | insert       | 0               |",
+        "| 8  | insert       | 0               |",
+        "| 9  | insert       | 0               |",
+        "| 0  | delete       | 1               |",
+        "| 1  | delete       | 1               |",
+        "| 2  | delete       | 1               |",
+        "| 3  | delete       | 1               |",
+        "| 4  | delete       | 1               |",
+        "| 5  | delete       | 1               |",
+        "| 6  | delete       | 1               |",
+        "| 7  | delete       | 1               |",
+        "| 8  | delete       | 1               |",
+        "| 9  | delete       | 1               |",
+        "+----+--------------+-----------------+",
+    ];
+    sort_lines!(expected);
+    assert_batches_sorted_eq!(expected, &batches);
+    Ok(())
+}
+
+#[test]
+fn conditional_delete_two_rows() -> DeltaResult<()> {
+    let batches = read_cdf_for_table("cdf-table-delete-conditional-two-rows", 0, None, None)?;
+    let mut expected = vec![
+        "+----+--------------+-----------------+",
+        "| id | _change_type | _commit_version |",
+        "+----+--------------+-----------------+",
+        "| 0  | insert       | 0               |",
+        "| 1  | insert       | 0               |",
+        "| 2  | insert       | 0               |",
+        "| 3  | insert       | 0               |",
+        "| 4  | insert       | 0               |",
+        "| 5  | insert       | 0               |",
+        "| 6  | insert       | 0               |",
+        "| 7  | insert       | 0               |",
+        "| 8  | insert       | 0               |",
+        "| 9  | insert       | 0               |",
+        "| 2  | delete       | 1               |",
+        "| 8  | delete       | 1               |",
+        "+----+--------------+-----------------+",
+    ];
+    sort_lines!(expected);
+    assert_batches_sorted_eq!(expected, &batches);
+    Ok(())
+}
