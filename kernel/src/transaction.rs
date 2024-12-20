@@ -31,7 +31,7 @@ pub(crate) static WRITE_METADATA_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| 
 
 /// Get the expected schema for engine data passed to [`add_write_metadata`].
 ///
-/// [add_write_metadata]: crate::transaction::Transaction::add_write_metadata
+/// [`add_write_metadata`]: crate::transaction::Transaction::add_write_metadata
 pub fn get_write_metadata_schema() -> &'static SchemaRef {
     &WRITE_METADATA_SCHEMA
 }

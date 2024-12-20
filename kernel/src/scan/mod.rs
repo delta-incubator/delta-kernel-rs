@@ -272,7 +272,7 @@ pub struct ScanResult {
     /// that this data may include data that should be filtered out based on the mask given by
     /// [`full_mask`].
     ///
-    /// [full_mask]: #method.full_mask
+    /// [`full_mask`]: #method.full_mask
     pub raw_data: DeltaResult<Box<dyn EngineData>>,
     /// Raw row mask.
     // TODO(nick) this should be allocated by the engine
@@ -288,7 +288,7 @@ impl ScanResult {
     /// to extend the mask to the full length of the batch or arrow will drop the extra
     /// rows. Calling [`full_mask`] instead avoids this risk entirely, at the cost of a copy.
     ///
-    /// [full_mask]: #method.full_mask
+    /// [`full_mask`]: #method.full_mask
     pub fn raw_mask(&self) -> Option<&Vec<bool>> {
         self.raw_mask.as_ref()
     }

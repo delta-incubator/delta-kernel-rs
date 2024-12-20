@@ -93,7 +93,7 @@ static CDF_FIELDS: LazyLock<[StructField; 3]> = LazyLock::new(|| {
 ///   future to allow compatible schemas that are not the exact same.
 ///   See issue [#523](https://github.com/delta-io/delta-kernel-rs/issues/523)
 ///
-/// [CommitInfo]: crate::actions::CommitInfo
+/// [`CommitInfo`]: crate::actions::CommitInfo
 ///  # Examples
 ///  Get `TableChanges` for versions 0 to 1 (inclusive)
 ///  ```rust

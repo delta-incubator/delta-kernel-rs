@@ -183,7 +183,7 @@ impl Hash for ColumnName {
 /// assert_eq!(colname, parsed);
 /// ```
 ///
-/// [FromStr]: std::str::FromStr
+/// [`FromStr`]: std::str::FromStr
 impl Display for ColumnName {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         for (i, s) in self.iter().enumerate() {

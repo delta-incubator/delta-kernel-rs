@@ -330,8 +330,8 @@ pub trait ExpressionHandler: AsAny {
     /// - `expression`: Expression to evaluate.
     /// - `output_type`: Expected result data type.
     ///
-    /// [Schema]: crate::schema::StructType
-    /// [DataType]: crate::schema::DataType
+    /// [`Schema`]: crate::schema::StructType
+    /// [`DataType`]: crate::schema::DataType
     fn get_evaluator(
         &self,
         schema: SchemaRef,
