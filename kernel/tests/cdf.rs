@@ -485,7 +485,7 @@ fn unconditional_delete() -> DeltaResult<()> {
 
 #[test]
 fn conditional_delete_all_rows() -> DeltaResult<()> {
-    let batches = read_cdf_for_table("cdf-table-conditional-delete-all-rows", 0, None, None)?;
+    let batches = read_cdf_for_table("cdf-table-delete-conditional-all-rows", 0, None, None)?;
     let mut expected = vec![
         "+----+--------------+-----------------+",
         "| id | _change_type | _commit_version |",
