@@ -329,8 +329,9 @@ fn simple_cdf_version_ranges() -> DeltaResult<()> {
 #[test]
 fn update_operations() -> DeltaResult<()> {
     let batches = read_cdf_for_table("cdf-table-update-ops", 0, 2, None)?;
-    // Note: `update_pre` and `update_post` are technically not part of the delta spec, but are
-    // part of the tests used in delta
+    // Note: `update_pre` and `update_post` are technically not part of the delta spec, and instead
+    // should be `update_preimage` and `update_postimage` respectively. However, the tests in
+    // delta-spark use the post and pre.
     let mut expected = vec![
         "+----+--------------+-----------------+",
         "| id | _change_type | _commit_version |",
@@ -365,8 +366,6 @@ fn update_operations() -> DeltaResult<()> {
 #[test]
 fn false_data_change_is_ignored() -> DeltaResult<()> {
     let batches = read_cdf_for_table("cdf-table-data-change", 0, 1, None)?;
-    // Note: `update_pre` and `update_post` are technically not part of the delta spec, but are
-    // part of the tests used in delta
     let mut expected = vec![
         "+----+--------------+-----------------+",
         "| id | _change_type | _commit_version |",
