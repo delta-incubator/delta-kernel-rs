@@ -1185,7 +1185,7 @@ async fn build_table_changes_with_commit_versions() {
     ///////// Specify start version and end version /////////
 
     let log_segment =
-        LogSegment::for_table_changes(storage.as_ref(), log_root.clone(), 2, 5).unwrap();
+        LogSegment::for_table_changes(storage.as_ref(), log_root.clone(), 2, 5, vec![]).unwrap();
     let commit_files = log_segment.listed.ascending_commit_files;
     let checkpoint_parts = log_segment.listed.checkpoint_parts;
 
@@ -1199,7 +1199,8 @@ async fn build_table_changes_with_commit_versions() {
 
     ///////// Start version and end version are the same /////////
     let log_segment =
-        LogSegment::for_table_changes(storage.as_ref(), log_root.clone(), 0, Some(0)).unwrap();
+        LogSegment::for_table_changes(storage.as_ref(), log_root.clone(), 0, Some(0), vec![])
+            .unwrap();
 
     let commit_files = log_segment.listed.ascending_commit_files;
     let checkpoint_parts = log_segment.listed.checkpoint_parts;
@@ -1211,7 +1212,8 @@ async fn build_table_changes_with_commit_versions() {
     assert_eq!(commit_files[0].version, 0);
 
     ///////// Specify no start or end version /////////
-    let log_segment = LogSegment::for_table_changes(storage.as_ref(), log_root, 0, None).unwrap();
+    let log_segment =
+        LogSegment::for_table_changes(storage.as_ref(), log_root, 0, None, vec![]).unwrap();
     let commit_files = log_segment.listed.ascending_commit_files;
     let checkpoint_parts = log_segment.listed.checkpoint_parts;
 
@@ -1237,15 +1239,15 @@ async fn test_non_contiguous_log() {
     .await;
 
     let log_segment_res =
-        LogSegment::for_table_changes(storage.as_ref(), log_root.clone(), 0, None);
+        LogSegment::for_table_changes(storage.as_ref(), log_root.clone(), 0, None, vec![]);
     assert!(matches!(
         log_segment_res,
         Err(KernelError::MissingVersion(1))
     ));
 
     let log_segment_res =
-        LogSegment::for_table_changes(storage.as_ref(), log_root.clone(), 1, None);
-    assert!(matches!(
+        LogSegment::for_table_changes(storage.as_ref(), log_root.clone(), 1, None, vec![]);
+        assert!(matches!(
         log_segment_res,
         Err(KernelError::StartVersionNotFound {
             requested: 1,
@@ -1253,7 +1255,8 @@ async fn test_non_contiguous_log() {
         })
     ));
 
-    let log_segment_res = LogSegment::for_table_changes(storage.as_ref(), log_root, 0, Some(1));
+    let log_segment_res =
+        LogSegment::for_table_changes(storage.as_ref(), log_root, 0, Some(1), vec![]);
     assert!(matches!(
         log_segment_res,
         Err(KernelError::MissingVersion(1))
@@ -1271,7 +1274,8 @@ async fn table_changes_fails_with_larger_start_version_than_end() {
         None,
     )
     .await;
-    let log_segment_res = LogSegment::for_table_changes(storage.as_ref(), log_root, 1, Some(0));
+    let log_segment_res =
+        LogSegment::for_table_changes(storage.as_ref(), log_root, 1, Some(0), vec![]);
     assert_result_error_with_message(log_segment_res, "Generic delta kernel error: Failed to build LogSegment: start_version cannot be greater than end_version");
 }
 
@@ -5522,9 +5526,14 @@ async fn read_actions_with_null_map_values(
 
     // Build engine and read actions -- same as DeltaActionExtractor::get_actions.
     let engine = SyncEngine::new_with_store(store);
-    let log_segment =
-        LogSegment::for_table_changes(engine.storage_handler().as_ref(), log_root, 0, Some(0))
-            .unwrap();
+    let log_segment = LogSegment::for_table_changes(
+        engine.storage_handler().as_ref(),
+        log_root,
+        0,
+        Some(0),
+        vec![],
+    )
+    .unwrap();
 
     // Use all_actions_schema to cover sidecar and checkpointMetadata (checkpoint-only actions).
     let action_schema = get_all_actions_schema().clone();

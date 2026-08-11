@@ -19,6 +19,7 @@ use crate::cancellation::CancellationTokenRef;
 use crate::committer::CatalogCommit;
 use crate::expressions::ColumnName;
 use crate::last_checkpoint_hint::{HintAction, LastCheckpointHint};
+use crate::log_path::LogPath;
 use crate::log_replay::ActionsBatch;
 #[internal_api]
 use crate::log_segment_files::LogSegmentFiles;
@@ -582,14 +583,25 @@ impl LogSegment {
     /// and all commits between versions `start_version` (inclusive) and `end_version`
     /// (inclusive). If no `end_version` is specified it will be the most recent version by
     /// default.
+    ///
+    /// `log_tail` must contain a contiguous ascending sequence of commit paths. It takes
+    /// precedence over numbered commits at overlapping versions, and entries outside the selected
+    /// range are ignored.
     #[internal_api]
     pub(crate) fn for_table_changes(
         storage: &dyn StorageHandler,
         log_root: Url,
         start_version: Version,
         end_version: impl Into<Option<Version>>,
+        log_tail: Vec<LogPath>,
     ) -> KernelResult<Self> {
-        Self::for_table_changes_with_log_tail(storage, log_root, start_version, end_version, vec![])
+        Self::for_table_changes_with_log_tail(
+            storage,
+            log_root,
+            start_version,
+            end_version,
+            log_tail.into_iter().map(Into::into).collect(),
+        )
     }
 
     /// Constructs a table-changes log segment with a caller-provided authoritative commit tail.

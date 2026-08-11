@@ -116,6 +116,7 @@ impl LogCompactionWriter {
             self.snapshot.log_segment().log_root.clone(),
             self.start_version,
             Some(self.end_version),
+            vec![],
         )?;
 
         // Read actions from the version-filtered log segment

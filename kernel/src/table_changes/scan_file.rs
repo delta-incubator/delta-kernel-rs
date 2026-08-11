@@ -551,6 +551,7 @@ mod tests {
             table_root.join("_delta_log/").unwrap(),
             0,
             None,
+            vec![],
         )
         .unwrap();
         let table_schema = schema_ref! {
@@ -649,9 +650,14 @@ mod tests {
 
         let table_root = url::Url::from_directory_path(mock_table.table_root()).unwrap();
         let log_root = table_root.join("_delta_log/").unwrap();
-        let log_segment =
-            LogSegment::for_table_changes(engine.storage_handler().as_ref(), log_root, 0, None)
-                .unwrap();
+        let log_segment = LogSegment::for_table_changes(
+            engine.storage_handler().as_ref(),
+            log_root,
+            0,
+            None,
+            vec![],
+        )
+        .unwrap();
         let table_schema = schema_ref! {
             nullable "id": INTEGER,
             nullable "value": STRING,
