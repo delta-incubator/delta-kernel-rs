@@ -2,7 +2,7 @@ use url::Url;
 
 use crate::commit_range::CommitRange;
 use crate::log_segment::{
-    validate_catalog_managed_log_tail, validate_start_version_available, LogSegment,
+    validate_catalog_managed_log_tail, validate_start_version_available, LogLoadOptions, LogSegment,
 };
 use crate::path::{LogPathFileType, ParsedLogPath};
 use crate::snapshot::SnapshotRef;
@@ -77,6 +77,12 @@ impl CommitRangeBuilder {
     /// ignored.
     pub fn with_max_catalog_version(mut self, max_catalog_version: Version) -> Self {
         self.max_catalog_version = Some(max_catalog_version);
+        self
+    }
+
+    pub(crate) fn with_log_load_options(mut self, log_load_options: LogLoadOptions) -> Self {
+        self.max_catalog_version = log_load_options.max_catalog_version();
+        self.log_tail = log_load_options.log_tail().to_vec();
         self
     }
 

@@ -161,12 +161,7 @@ impl TableChangesScan {
         &self,
         engine: Arc<dyn Engine>,
     ) -> KernelResult<impl Iterator<Item = KernelResult<TableChangesScanMetadata>>> {
-        let commits = self
-            .table_changes
-            .log_segment
-            .listed
-            .ascending_commit_files
-            .clone();
+        let commits = self.table_changes.commit_range.commit_files().to_vec();
         // NOTE: This is a cheap arc clone
         let physical_predicate = match self.state_info.physical_predicate.clone() {
             PhysicalPredicate::StaticSkipAll => return Ok(None.into_iter().flatten()),
