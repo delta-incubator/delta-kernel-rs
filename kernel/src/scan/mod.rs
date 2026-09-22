@@ -38,11 +38,9 @@ use crate::scan::log_replay::{
 };
 use crate::scan::metrics::ScanMetrics;
 use crate::scan::state_info::StateInfo;
-#[cfg(feature = "udt-in-dev")]
-use crate::schema::UserDefinedType;
 use crate::schema::{
     lazy_schema_ref, schema_ref, ArrayType, DataType, MapType, PrimitiveType, Schema, SchemaRef,
-    StructField, StructType, ToSchema as _,
+    StructField, StructType, ToSchema as _, UserDefinedType,
 };
 use crate::table_configuration::TableConfiguration;
 use crate::table_features::{ColumnMappingMode, Operation};
@@ -708,7 +706,6 @@ impl<'a> SchemaTransform<'a> for GetReferencedFields<'a> {
         Some(Cow::Borrowed(ptype))
     }
 
-    #[cfg(feature = "udt-in-dev")]
     fn transform_user_defined(
         &mut self,
         udt: &'a UserDefinedType,

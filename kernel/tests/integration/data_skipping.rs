@@ -43,7 +43,6 @@ use url::Url;
 
 use crate::common::write_utils::set_table_properties;
 
-#[cfg(feature = "udt-in-dev")]
 mod user_defined;
 
 type TestEngine = DefaultEngine<TokioMultiThreadExecutor>;

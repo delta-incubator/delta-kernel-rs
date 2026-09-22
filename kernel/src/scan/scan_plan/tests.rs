@@ -198,7 +198,6 @@ fn leaf_paths(batches: &[RecordBatch]) -> Vec<String> {
     paths
 }
 
-#[cfg(feature = "udt-in-dev")]
 #[rstest]
 #[case::comparison(Pred::eq(col!("value"), lit(42i64)), vec!["mixed.parquet", "non_null.parquet", "unknown.parquet"])]
 #[case::is_null(Pred::is_null(col!("value")), vec!["all_null.parquet", "mixed.parquet", "unknown.parquet"])]
