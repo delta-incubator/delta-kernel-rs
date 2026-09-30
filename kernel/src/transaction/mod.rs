@@ -76,6 +76,8 @@ pub use builder::{TransactionBuilder, TransactionType};
 use commit_info::collect_operation_metadata;
 mod bound_write_context;
 mod commit_info;
+#[cfg(feature = "declarative-plans")]
+mod declarative;
 mod domain_metadata;
 mod exec_mode;
 mod operation;
@@ -100,6 +102,8 @@ mod write_state;
 mod write_validation;
 
 pub use bound_write_context::BoundWriteContext;
+#[cfg(feature = "declarative-plans")]
+pub use exec_mode::Declarative;
 pub use exec_mode::{ExecutionMode, Imperative};
 #[cfg(feature = "adaptive-metadata-in-dev")]
 #[cfg_attr(not(feature = "internal-api"), allow(unused_imports))]
@@ -209,6 +213,7 @@ pub struct CreateTable;
 /// The independent type parameter `MODE` selects the [`ExecutionMode`], which provides an
 /// abstraction over 1) how staged changes are represented and 2) how to inspect the changes. The
 /// default, [`Imperative`], stages [`EngineData`] and provides [`commit`](Self::commit).
+/// With the `declarative-plans` feature, `Declarative` stages relation handles instead.
 ///
 /// Both states support file additions. Schema-changing transactions use [`UpdateTable`] rather
 /// than a separate schema-only state, allowing schema and file changes in the same transaction.
