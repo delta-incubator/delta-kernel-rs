@@ -42,7 +42,9 @@ use crate::schema::SchemaRef;
 use crate::table_configuration::{InCommitTimestampEnablement, TableConfiguration};
 use crate::table_features::{physical_to_logical_column_name_and_type, Operation, TableFeature};
 use crate::table_properties::TableProperties;
-use crate::transaction::{UpdateTableOperation, UpdateTableTransactionBuilder};
+use crate::transaction::{
+    ReplaceTableTransactionBuilder, UpdateTableOperation, UpdateTableTransactionBuilder,
+};
 use crate::utils::require;
 use crate::{Engine, KernelError, KernelResult, LogCompactionWriter, Result, Version};
 
@@ -1160,6 +1162,15 @@ impl Snapshot {
         engine_info: impl Into<String>,
     ) -> UpdateTableTransactionBuilder {
         UpdateTableTransactionBuilder::new(self, operation, engine_info.into())
+    }
+
+    /// Creates a builder that replaces the table schema and all active data files.
+    ///
+    /// The existing table identity, properties, and protocol are preserved. A data layout
+    /// supplied to the builder replaces the current partitioning; otherwise it is inherited.
+    /// The builder validates the replacement and stages old-file removals during build.
+    pub fn replace_table(self: Arc<Self>, schema: SchemaRef) -> ReplaceTableTransactionBuilder {
+        ReplaceTableTransactionBuilder::new(self, schema)
     }
 
     /// Creates a [`CheckpointWriter`] for generating a checkpoint from this snapshot.

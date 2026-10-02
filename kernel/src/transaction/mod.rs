@@ -70,6 +70,7 @@ pub mod data_layout;
 #[cfg(not(feature = "internal-api"))]
 pub(crate) mod data_layout;
 
+pub use builder::replace_table::ReplaceTableTransactionBuilder;
 pub use builder::update_table::UpdateTableTransactionBuilder;
 use builder::TransactionBuilderState;
 pub use builder::{TransactionBuilder, TransactionType};
@@ -196,6 +197,10 @@ pub struct UpdateTable;
 /// updates, or domain metadata removals.
 #[derive(Debug)]
 pub struct CreateTable;
+
+/// Marker type for full-table replacement builders.
+#[derive(Debug)]
+pub struct ReplaceTable;
 
 /// A transaction represents an in-progress write to a table. After creating a transaction, changes
 /// to the table may be staged via the transaction methods before calling `commit` to commit the
@@ -586,6 +591,24 @@ impl<STATE, MODE: ExecutionMode> Transaction<STATE, MODE> {
     /// [`stats_schema`]: Transaction::stats_schema
     pub fn add_files_schema(&self) -> &'static SchemaRef {
         &BASE_ADD_FILES_SCHEMA
+    }
+}
+
+impl Transaction<UpdateTable> {
+    pub(super) fn with_table_replacement(
+        mut self,
+        config: TableConfiguration,
+        removals: Vec<FilteredEngineData>,
+    ) -> Self {
+        self.effective_table_config = config;
+        self.should_emit_metadata = true;
+        self.operation = Some(CommitOperation::Replace);
+        self.remove_files_metadata = removals;
+        self.data_change = true;
+        self.infer_data_change = false;
+        // Replacing every row leaves no old row IDs or commit versions to preserve.
+        self.row_tracking_preservation_acknowledged = true;
+        self
     }
 }
 
@@ -1104,6 +1127,7 @@ impl<STATE, MODE: ExecutionMode> Transaction<STATE, MODE> {
                 ))
             }
             (false, CommitOperation::UpdateTable(_)) => Ok(()),
+            (false, CommitOperation::Replace) => Ok(()),
             (true, _) => Err(KernelError::invalid_transaction_state(
                 "create-table transactions must use the CREATE TABLE operation",
             )),
@@ -1191,8 +1215,8 @@ impl<STATE, MODE: ExecutionMode> Transaction<STATE, MODE> {
             .iter()
             .find(|t| !app_ids.insert(&t.app_id))
         {
-            return Err(KernelError::generic(format!(
-                "app_id {} already exists in transaction",
+            return Err(KernelError::invalid_transaction_state(format!(
+                "app_id {} appears more than once",
                 dup.app_id
             )));
         }
