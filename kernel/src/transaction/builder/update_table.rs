@@ -246,11 +246,11 @@ impl TransactionBuilder<UpdateTable> {
     }
 }
 
-fn try_new_update_table<E: ExecutionMode>(
+fn try_new_update_table<MODE: ExecutionMode>(
     builder: UpdateTableTransactionBuilder,
     committer: Box<dyn Committer>,
     engine: &dyn Engine,
-) -> KernelResult<Transaction<UpdateTable, E>> {
+) -> KernelResult<Transaction<UpdateTable, MODE>> {
     let TransactionBuilder {
         common_state,
         local_state,

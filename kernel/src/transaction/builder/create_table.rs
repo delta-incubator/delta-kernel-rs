@@ -1087,13 +1087,13 @@ impl TransactionBuilder<CreateTable> {
     }
 }
 
-fn try_new_create_table<E: ExecutionMode>(
+fn try_new_create_table<MODE: ExecutionMode>(
     effective_table_config: TableConfiguration,
     committer: Box<dyn Committer>,
     system_domain_metadata: Vec<DomainMetadata>,
     clustering_columns: Option<Vec<ColumnName>>,
     common_state: TransactionBuilderState,
-) -> KernelResult<Transaction<CreateTable, E>> {
+) -> KernelResult<Transaction<CreateTable, MODE>> {
     validate_iceberg_compat_if_needed(
         &effective_table_config,
         &V2_VALIDATOR,

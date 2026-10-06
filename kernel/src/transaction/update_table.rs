@@ -44,7 +44,7 @@ use crate::{DataType, Engine, Expression, KernelResult, Result};
 // =============================================================================
 // Update table transactions only
 // =============================================================================
-impl<E: ExecutionMode> Transaction<UpdateTable, E> {
+impl<MODE: ExecutionMode> Transaction<UpdateTable, MODE> {
     // -------------------------------------------------------------------------
     // Public API
     // -------------------------------------------------------------------------
@@ -515,7 +515,7 @@ pub(super) fn new_dv_column_schema() -> &'static SchemaRef {
 
 // DV updates can only be staged on update-table transactions. The create-table guard protects
 // action generation, which is shared by all imperative transaction states.
-impl<S> Transaction<S, Imperative> {
+impl<STATE> Transaction<STATE, Imperative> {
     /// Generate remove/add action pairs for files with DV updates.
     ///
     /// This method processes the cached matched files, generating the necessary Remove and Add

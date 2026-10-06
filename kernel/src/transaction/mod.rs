@@ -99,7 +99,7 @@ mod write_state;
 mod write_validation;
 
 pub use bound_write_context::BoundWriteContext;
-pub use exec_mode::{ExecutionMode, Imperative, StagedDataChanges};
+pub use exec_mode::{ExecutionMode, Imperative};
 #[cfg(feature = "adaptive-metadata-in-dev")]
 #[cfg_attr(not(feature = "internal-api"), allow(unused_imports))]
 #[internal_api]
@@ -200,13 +200,14 @@ pub struct CreateTable;
 /// to the table may be staged via the transaction methods before calling `commit` to commit the
 /// changes to the table.
 ///
-/// The type parameter `S` controls which table operations are available:
+/// The type parameter `STATE` controls which table operations are available:
 /// - [`UpdateTable`] (default): Full API for modifying existing tables.
 /// - [`CreateTable`]: Restricted API for table creation (see
 ///   [`CreateTableTransaction`](create_table::CreateTableTransaction)).
 ///
-/// The independent type parameter `E` selects the [`ExecutionMode`]. The default, [`Imperative`],
-/// stages [`EngineData`] and provides [`commit`](Self::commit).
+/// The independent type parameter `MODE` selects the [`ExecutionMode`], which provides an
+/// abstraction over 1) how staged changes are represented and 2) how to inspect the changes. The
+/// default, [`Imperative`], stages [`EngineData`] and provides [`commit`](Self::commit).
 ///
 /// Both states support file additions. Schema-changing transactions use [`UpdateTable`] rather
 /// than a separate schema-only state, allowing schema and file changes in the same transaction.
@@ -239,7 +240,7 @@ pub struct CreateTable;
 ///
 /// ```compile_fail
 /// # use delta_kernel::transaction::Transaction;
-/// fn change_data_change<S>(txn: &mut Transaction<S>) {
+/// fn change_data_change<STATE>(txn: &mut Transaction<STATE>) {
 ///     txn.set_data_change(false);
 /// }
 /// ```
@@ -261,7 +262,7 @@ pub struct CreateTable;
 ///     let _ = txn.with_operation(UpdateTableOperation::Write);
 /// }
 /// ```
-pub struct Transaction<S = UpdateTable, E: ExecutionMode = Imperative> {
+pub struct Transaction<STATE = UpdateTable, MODE: ExecutionMode = Imperative> {
     span: tracing::Span,
     // Correlates all metric events emitted by this transaction.
     operation_id: MetricId,
@@ -286,7 +287,7 @@ pub struct Transaction<S = UpdateTable, E: ExecutionMode = Imperative> {
     operation_metrics: Option<HashMap<String, Option<String>>>,
     engine_info: Option<String>,
     engine_commit_info: Option<(Box<dyn EngineData>, SchemaRef)>,
-    staged_data_changes: E,
+    staged_data_changes: MODE,
     // NB: hashmap would require either duplicating the appid or splitting SetTransaction
     // key/payload. HashSet requires Borrow<&str> with matching Eq, Ord, and Hash. Plus,
     // HashSet::insert drops the to-be-inserted value without returning the existing one, which
@@ -328,7 +329,7 @@ pub struct Transaction<S = UpdateTable, E: ExecutionMode = Imperative> {
     physical_clustering_columns: Option<Vec<ColumnName>>,
     // PhantomType marker for transaction state (UpdateTable or CreateTable).
     // Zero-sized; only affects the type system.
-    _state: PhantomType<S>,
+    _state: PhantomType<STATE>,
 }
 
 /// The manifest a transaction will write. Root-file and content-tree commits are mutually
@@ -344,7 +345,7 @@ enum ManifestWrite {
     Commit(ManifestCommitState),
 }
 
-impl<S, E: ExecutionMode> std::fmt::Debug for Transaction<S, E> {
+impl<STATE, MODE: ExecutionMode> std::fmt::Debug for Transaction<STATE, MODE> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let version_info = match &self.read_snapshot_opt {
             Some(snap) => format!("{}", snap.version()),
@@ -407,7 +408,7 @@ where
 // =============================================================================
 // Imperative commit APIs
 // =============================================================================
-impl<S> Transaction<S, Imperative> {
+impl<STATE> Transaction<STATE, Imperative> {
     /// Consume the transaction and commit it to the table. The result is a result of
     /// [CommitResult] with the following semantics:
     /// - Ok(CommitResult) for either success or a recoverable error (includes the failed
@@ -437,7 +438,7 @@ impl<S> Transaction<S, Imperative> {
         ),
         err
     )]
-    pub fn commit(mut self, engine: &dyn Engine) -> Result<CommitResult<S>> {
+    pub fn commit(mut self, engine: &dyn Engine) -> Result<CommitResult<STATE>> {
         let commit_start = Instant::now();
 
         // === Pre-commit validation ===
@@ -488,9 +489,9 @@ impl<S> Transaction<S, Imperative> {
 }
 
 // =============================================================================
-// Shared methods available on ALL transaction types
+// Imperative commit-info configuration
 // =============================================================================
-impl<S> Transaction<S> {
+impl<STATE> Transaction<STATE, Imperative> {
     /// Set the content of the commitInfo action for this transaction. Note that kernel will
     /// _always_ write a commitInfo, this function simply allows engines to add their own data
     /// into that action if they wish. Kernel overrides the following fields if they are set in
@@ -523,7 +524,7 @@ impl<S> Transaction<S> {
 // =============================================================================
 // Shared methods available on ALL transaction types
 // =============================================================================
-impl<S, E: ExecutionMode> Transaction<S, E> {
+impl<STATE, MODE: ExecutionMode> Transaction<STATE, MODE> {
     /// Replaces operation metrics recorded in `commitInfo`.
     ///
     /// Present values must already be stringified as expected in table history. `None` writes a
@@ -592,7 +593,7 @@ impl<S, E: ExecutionMode> Transaction<S, E> {
 // =============================================================================
 // Shared data file methods
 // =============================================================================
-impl<S, E: ExecutionMode> Transaction<S, E> {
+impl<STATE, MODE: ExecutionMode> Transaction<STATE, MODE> {
     // TODO(#2499): Remove this API when Engine responsibilities encode column-default handling.
     /// Acknowledges that the connector applies column defaults before writing data files.
     ///
@@ -741,7 +742,7 @@ impl<S, E: ExecutionMode> Transaction<S, E> {
     }
 }
 
-impl<S> Transaction<S, Imperative> {
+impl<STATE> Transaction<STATE, Imperative> {
     /// Add files to include in this transaction. This API generally enables the engine to
     /// add/append/insert data (files) to the table. Note that this API can be called multiple times
     /// to add multiple batches.
@@ -767,7 +768,7 @@ struct NonfileCommitActions {
     set_transactions: Vec<SetTransaction>,
 }
 
-impl<S, E: ExecutionMode> Transaction<S, E> {
+impl<STATE, MODE: ExecutionMode> Transaction<STATE, MODE> {
     /// Determines the commit type based on whether this is a create-table operation and whether
     /// the table is catalog-managed.
     fn determine_commit_type(
@@ -1357,14 +1358,14 @@ impl<S, E: ExecutionMode> Transaction<S, E> {
         })
     }
 
-    fn into_conflicted(self, conflict_version: Version) -> ConflictedTransaction<S, E> {
+    fn into_conflicted(self, conflict_version: Version) -> ConflictedTransaction<STATE, MODE> {
         ConflictedTransaction {
             transaction: self,
             conflict_version,
         }
     }
 
-    fn into_retryable(self, error: KernelError) -> RetryableTransaction<S, E> {
+    fn into_retryable(self, error: KernelError) -> RetryableTransaction<STATE, MODE> {
         RetryableTransaction {
             transaction: self,
             error,
@@ -1375,7 +1376,7 @@ impl<S, E: ExecutionMode> Transaction<S, E> {
 // =============================================================================
 // Imperative action processing
 // =============================================================================
-impl<S> Transaction<S, Imperative> {
+impl<STATE> Transaction<STATE, Imperative> {
     // Reject data-file removals / DV updates on appendOnly tables when `data_change` is true.
     fn validate_append_only_semantics(&self) -> KernelResult<()> {
         if !self.data_change
@@ -1521,7 +1522,7 @@ impl<S> Transaction<S, Imperative> {
         dm_changes: Vec<DomainMetadata>,
         prepare_duration: Duration,
         committer_duration: Duration,
-    ) -> KernelResult<CommitResult<S>> {
+    ) -> KernelResult<CommitResult<STATE>> {
         match commit_response {
             Ok(CommitResponse::Committed { file_meta }) => {
                 // TODO(#2717): the commit already succeeded atomically; the post-commit `?`
@@ -1933,7 +1934,7 @@ pub struct PostCommitStats {
 ///   transaction can be retried without rebasing.
 #[derive(Debug)]
 #[must_use]
-pub enum CommitResult<S = UpdateTable, E: ExecutionMode = Imperative> {
+pub enum CommitResult<STATE = UpdateTable, MODE: ExecutionMode = Imperative> {
     /// The transaction was successfully committed.
     Committed(CommittedTransaction),
     /// This transaction conflicted with an existing version (see
@@ -1942,19 +1943,19 @@ pub enum CommitResult<S = UpdateTable, E: ExecutionMode = Imperative> {
     /// conflicted).
     // TODO(zach): in order to make the returning of a transaction useful, we need to add APIs to
     // update the transaction to a new version etc.
-    Conflicted(ConflictedTransaction<S, E>),
+    Conflicted(ConflictedTransaction<STATE, MODE>),
     /// An IO (retryable) error occurred during the commit.
-    Retryable(RetryableTransaction<S, E>),
+    Retryable(RetryableTransaction<STATE, MODE>),
 }
 
-impl<S, E: ExecutionMode> CommitResult<S, E> {
+impl<STATE, MODE: ExecutionMode> CommitResult<STATE, MODE> {
     /// Returns true if the commit was successful.
     pub fn is_committed(&self) -> bool {
         matches!(self, CommitResult::Committed(_))
     }
 }
 
-impl<S: std::fmt::Debug, E: ExecutionMode> CommitResult<S, E> {
+impl<STATE: std::fmt::Debug, MODE: ExecutionMode> CommitResult<STATE, MODE> {
     /// Unwraps the [`CommittedTransaction`], panicking if the commit was not successful.
     #[cfg(any(test, feature = "test-utils"))]
     #[allow(clippy::panic)]
@@ -2020,14 +2021,14 @@ impl CommittedTransaction {
 ///
 /// [conflict version]: Self::conflict_version
 #[derive(Debug)]
-pub struct ConflictedTransaction<S = UpdateTable, E: ExecutionMode = Imperative> {
+pub struct ConflictedTransaction<STATE = UpdateTable, MODE: ExecutionMode = Imperative> {
     // TODO: remove after rebase APIs
     #[allow(dead_code)]
-    transaction: Transaction<S, E>,
+    transaction: Transaction<STATE, MODE>,
     conflict_version: Version,
 }
 
-impl<S, E: ExecutionMode> ConflictedTransaction<S, E> {
+impl<STATE, MODE: ExecutionMode> ConflictedTransaction<STATE, MODE> {
     /// The version attempted commit that yielded a conflict
     pub fn conflict_version(&self) -> Version {
         self.conflict_version
@@ -2038,9 +2039,9 @@ impl<S, E: ExecutionMode> ConflictedTransaction<S, E> {
 /// can be recovered with `RetryableTransaction::transaction` and retried without rebasing. The
 /// associated error can be inspected via `RetryableTransaction::error`.
 #[derive(Debug)]
-pub struct RetryableTransaction<S = UpdateTable, E: ExecutionMode = Imperative> {
+pub struct RetryableTransaction<STATE = UpdateTable, MODE: ExecutionMode = Imperative> {
     /// The transaction that failed to commit due to a retryable error.
-    pub transaction: Transaction<S, E>,
+    pub transaction: Transaction<STATE, MODE>,
     /// Transient error that caused the commit to fail.
     pub error: KernelError,
 }
@@ -2062,6 +2063,7 @@ mod tests {
     use rstest::rstest;
     use url::Url;
 
+    use super::exec_mode::StagedDataChanges;
     use super::*;
     use crate::actions::deletion_vector::DeletionVectorDescriptor;
     use crate::actions::CommitInfo;
@@ -3217,7 +3219,7 @@ mod tests {
     // ============================================================================
     // validate_blind_append tests
     // ============================================================================
-    fn add_dummy_file<S>(txn: &mut Transaction<S>) {
+    fn add_dummy_file<STATE>(txn: &mut Transaction<STATE>) {
         let batch = create_valid_add_file_batch(false /* all_nullable */);
         txn.add_files(Box::new(ArrowEngineData::new(batch)));
     }

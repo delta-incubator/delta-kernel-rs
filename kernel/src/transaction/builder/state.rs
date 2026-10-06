@@ -88,10 +88,10 @@ impl TransactionBuilderState {
 
     /// Transfers builder intent into the transaction's commit configuration.
     // TODO(#3149): Replace this helper with direct initialization of immutable transaction state.
-    pub(super) fn apply_to_transaction<S, E: ExecutionMode>(
+    pub(super) fn apply_to_transaction<STATE, MODE: ExecutionMode>(
         self,
-        mut transaction: Transaction<S, E>,
-    ) -> Transaction<S, E> {
+        mut transaction: Transaction<STATE, MODE>,
+    ) -> Transaction<STATE, MODE> {
         let Self {
             correlation_id,
             operation_parameters,
