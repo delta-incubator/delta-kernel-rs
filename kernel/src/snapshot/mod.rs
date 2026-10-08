@@ -41,9 +41,13 @@ use crate::scan::ScanBuilder;
 use crate::schema::SchemaRef;
 use crate::table_configuration::{InCommitTimestampEnablement, TableConfiguration};
 use crate::table_features::{physical_to_logical_column_name_and_type, Operation, TableFeature};
+#[cfg(feature = "check-constraints-in-dev")]
+use crate::table_properties::CheckConstraint;
 use crate::table_properties::TableProperties;
 use crate::transaction::{UpdateTableOperation, UpdateTableTransactionBuilder};
 use crate::utils::require;
+#[cfg(feature = "check-constraints-in-dev")]
+use crate::write_expressions::TableWriteExpressions;
 use crate::{Engine, KernelError, KernelResult, LogCompactionWriter, Version};
 
 mod builder;
@@ -152,6 +156,13 @@ impl std::fmt::Debug for Snapshot {
             .field("log_segment", &self.log_segment)
             .field("skipped_new_checkpoints", &self.skipped_new_checkpoints)
             .finish()
+    }
+}
+
+#[cfg(feature = "check-constraints-in-dev")]
+impl TableWriteExpressions for Snapshot {
+    fn check_constraints(&self) -> &[CheckConstraint] {
+        &self.table_properties().check_constraints
     }
 }
 
