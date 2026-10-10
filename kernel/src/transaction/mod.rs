@@ -505,6 +505,7 @@ impl<STATE> Transaction<STATE, Imperative> {
     /// - `isBlindAppend`
     /// - `engineInfo`
     /// - `txnId`
+    /// - `dataChange` (adaptiveMetadata)
     ///
     /// Kernel merges the following field if it is set:
     ///
@@ -1006,6 +1007,11 @@ impl<STATE, MODE: ExecutionMode> Transaction<STATE, MODE> {
         Ok(Some(action))
     }
 
+    fn is_adaptive_metadata_enabled(&self) -> bool {
+        self.effective_table_config
+            .is_feature_enabled(&TableFeature::AdaptiveMetadataPreview)
+    }
+
     /// Reject data file writes (add/remove/DV) against an empty-schema table.
     /// CREATE TABLE and metadata-only commits are exempt.
     fn ensure_schema_non_empty_for_data_writes(&self) -> KernelResult<()> {
@@ -1264,6 +1270,11 @@ impl<STATE, MODE: ExecutionMode> Transaction<STATE, MODE> {
                 .is_feature_enabled(&TableFeature::RowTracking)
         {
             kernel_commit_info.set_row_tracking_preserved();
+        }
+
+        #[cfg(feature = "adaptive-metadata-in-dev")]
+        if self.is_adaptive_metadata_enabled() {
+            kernel_commit_info.set_data_change(self.data_change);
         }
         Ok(NonfileCommitActions {
             commit_version: self.get_commit_version(),
@@ -1817,9 +1828,7 @@ impl<STATE> Transaction<STATE, Imperative> {
 
         // adaptiveMetadata removes must carry a null deletionTimestamp and extendedFileMetadata =
         // true (see `Remove` and `build_remove_struct_patch`).
-        let adaptive_metadata_enabled = self
-            .effective_table_config
-            .is_feature_enabled(&TableFeature::AdaptiveMetadataPreview);
+        let adaptive_metadata_enabled = self.is_adaptive_metadata_enabled();
 
         let make_eval = |coalesce_stats_with_parsed: bool| {
             let columns_to_drop: Vec<_> = columns_to_drop.iter().map(String::as_str).collect();
