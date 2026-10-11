@@ -753,8 +753,7 @@ impl RowVisitor for InCommitTimestampVisitor {
 }
 
 /// Extracts `commitInfo.lastManifestCommit` (adaptiveMetadata) from a commit's actions. Leaves
-/// `last_manifest_commit` as `None` if no visited row carries it. The [`EngineData`] being visited
-/// must have the schema defined in [`LastManifestCommitVisitor::schema`].
+/// `last_manifest_commit` as `None` if no visited row carries it.
 #[cfg(feature = "adaptive-metadata-in-dev")]
 #[derive(Default)]
 pub(crate) struct LastManifestCommitVisitor {

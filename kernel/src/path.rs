@@ -412,7 +412,8 @@ impl ParsedLogPath<FileMeta> {
     /// `None` if the commit carries none.
     ///
     /// This method performs IO by reading the commit log file from storage. Returns an error if
-    /// this is not a commit file, the file cannot be read, or the value is invalid.
+    /// this is not a commit file, the file cannot be read, or the value is invalid, including a
+    /// pointer to a manifest commit newer than this commit.
     #[cfg(feature = "adaptive-metadata-in-dev")]
     #[cfg_attr(not(test), allow(dead_code))]
     #[tracing::instrument(skip(engine), ret, fields(version = self.version, path = %self.location.as_url()))]
@@ -426,6 +427,15 @@ impl ParsedLogPath<FileMeta> {
             if visitor.last_manifest_commit.is_some() {
                 break;
             }
+        }
+        if let Some(last_manifest_commit) = &visitor.last_manifest_commit {
+            require!(
+                u64::try_from(last_manifest_commit.version).is_ok_and(|v| v <= self.version),
+                KernelError::generic(format!(
+                    "lastManifestCommit version {} exceeds commit version {}",
+                    last_manifest_commit.version, self.version
+                ))
+            );
         }
         Ok(visitor.last_manifest_commit)
     }
@@ -1236,12 +1246,25 @@ pub(crate) mod tests {
         assert_result_error_with_message(result, "In-Commit Timestamp not found");
     }
 
-    #[test]
-    fn test_read_in_commit_timestamp_not_commit_file() {
+    #[rstest::rstest]
+    #[case::in_commit_timestamp(
+        |path: &ParsedLogPath<FileMeta>, engine: &dyn Engine| {
+            path.read_in_commit_timestamp(engine).map(|_| ())
+        }
+    )]
+    #[cfg_attr(
+        feature = "adaptive-metadata-in-dev",
+        case::last_manifest_commit(
+            |path: &ParsedLogPath<FileMeta>, engine: &dyn Engine| {
+                path.read_last_manifest_commit(engine).map(|_| ())
+            }
+        )
+    )]
+    fn test_read_commit_file_method_on_non_commit_file_fails(
+        #[case] read: fn(&ParsedLogPath<FileMeta>, &dyn Engine) -> KernelResult<()>,
+    ) {
         let engine = SyncEngine::new();
         let table_url = url::Url::try_from("file:///tmp/test_table").unwrap();
-
-        // Create a checkpoint file (not a commit file)
         let checkpoint_path = table_url
             .join("_delta_log/00000000000000000000.checkpoint.parquet")
             .unwrap();
@@ -1253,9 +1276,7 @@ pub(crate) mod tests {
         .unwrap()
         .unwrap();
 
-        // Should return error for non-commit files
-        let result = parsed_path.read_in_commit_timestamp(&engine);
-        assert_result_error_with_message(result, "expected a commit file");
+        assert_result_error_with_message(read(&parsed_path, &engine), "expected a commit file");
     }
 
     #[cfg(feature = "adaptive-metadata-in-dev")]
@@ -1286,6 +1307,21 @@ pub(crate) mod tests {
         None,
         Some("lastManifestCommit contentRootVersion 2 exceeds version 1")
     )]
+    #[case::pointer_equal_to_commit(
+        r#"{"commitInfo":{"lastManifestCommit":{"version":5,"contentRootVersion":5}}}"#,
+        Some((5, 5)),
+        None
+    )]
+    #[case::pointer_newer_than_commit(
+        r#"{"commitInfo":{"lastManifestCommit":{"version":6,"contentRootVersion":2}}}"#,
+        None,
+        Some("lastManifestCommit version 6 exceeds commit version 5")
+    )]
+    #[case::negative_versions(
+        r#"{"commitInfo":{"lastManifestCommit":{"version":-1,"contentRootVersion":-2}}}"#,
+        None,
+        Some("lastManifestCommit contentRootVersion -2 must be non-negative")
+    )]
     #[tokio::test]
     async fn test_read_last_manifest_commit(
         #[case] commit_content: &str,
@@ -1295,11 +1331,19 @@ pub(crate) mod tests {
         let store = Arc::new(InMemory::new());
         let engine = SyncEngine::new_with_store(store.clone());
         let table_root = "memory://test/";
-        add_commit(table_root, store.as_ref(), 0, commit_content.to_string())
-            .await
-            .unwrap();
-        let parsed_path =
-            ParsedLogPath::create_parsed_published_commit(&url::Url::parse(table_root).unwrap(), 0);
+        let commit_version = 5;
+        add_commit(
+            table_root,
+            store.as_ref(),
+            commit_version,
+            commit_content.to_string(),
+        )
+        .await
+        .unwrap();
+        let parsed_path = ParsedLogPath::create_parsed_published_commit(
+            &url::Url::parse(table_root).unwrap(),
+            commit_version,
+        );
 
         let result = parsed_path.read_last_manifest_commit(&engine);
         match expected_error {
