@@ -104,8 +104,10 @@ impl LogSegment {
                 candidate.last_manifest_commit.as_ref(),
             );
             #[cfg(feature = "adaptive-metadata-in-dev")]
-            let last_manifest_commit =
-                LastManifestCommitResolution::from_replay(candidate.last_manifest_commit);
+            let last_manifest_commit = LastManifestCommitResolution::from_replay(
+                candidate.last_manifest_commit,
+                candidate.newest_commit_read,
+            );
 
             if metadata_opt.is_some() && protocol_opt.is_some() {
                 info!("Found P&M from pruned log replay");
@@ -149,6 +151,7 @@ impl LogSegment {
             #[cfg(feature = "adaptive-metadata-in-dev")]
             last_manifest_commit: LastManifestCommitResolution::from_replay(
                 candidate.last_manifest_commit,
+                candidate.newest_commit_read,
             ),
         })
     }
@@ -171,8 +174,17 @@ impl LogSegment {
             .find_commit_cover_paths()
             .first()
             .is_some_and(|path| !path.is_commit());
-        let newest_commit = self.listed.ascending_commit_files.last();
-        newest_commit.filter(|c| newest_cover_is_compaction && c.version == self.end_version)
+        self.newest_commit().filter(|_| newest_cover_is_compaction)
+    }
+
+    /// The commit at `end_version`, if this segment lists it (it does not when the segment ends
+    /// on a checkpoint).
+    #[cfg(all(feature = "adaptive-metadata-in-dev", feature = "declarative-plans"))]
+    fn newest_commit(&self) -> Option<&ParsedLogPath> {
+        self.listed
+            .ascending_commit_files
+            .last()
+            .filter(|commit| commit.version == self.end_version)
     }
 
     /// Replays the log segment for the latest Protocol and Metadata, each with its version.
@@ -180,6 +192,12 @@ impl LogSegment {
         #[cfg(feature = "declarative-plans")]
         if let Some(executor) = engine.plan_executor() {
             let candidate = resolve_pm_batches(self.read_pm_batches_via_plan(executor.as_ref())?)?;
+            // The plan reads the newest commit whenever it is listed.
+            #[cfg(feature = "adaptive-metadata-in-dev")]
+            let candidate = PmCandidate {
+                newest_commit_read: self.newest_commit().is_some(),
+                ..candidate
+            };
             // Use `lastManifestCommit`, when present and needed, to find the checkpoint action.
             #[cfg(feature = "adaptive-metadata-in-dev")]
             let candidate = self.merge_pointed_checkpoint_action(executor.as_ref(), candidate)?;
@@ -475,11 +493,12 @@ pub(crate) enum LastManifestCommitResolution {
 #[cfg(feature = "adaptive-metadata-in-dev")]
 impl LastManifestCommitResolution {
     /// Resolves the `lastManifestCommit` that P&M replay read from the newest commit. A miss is
-    /// `Unresolved` because replay may not have read that commit (e.g. the segment ends on a
-    /// checkpoint).
-    fn from_replay(captured: Option<LastManifestCommit>) -> Self {
+    /// `Resolved(None)` if replay read that commit (adaptiveMetadata requires ICT, so commitInfo is
+    /// its first action), else `Unresolved` (e.g. the segment ends on a checkpoint).
+    fn from_replay(captured: Option<LastManifestCommit>, newest_commit_read: bool) -> Self {
         match captured {
             Some(pointer) => Self::Resolved(Some(pointer)),
+            None if newest_commit_read => Self::Resolved(None),
             None => Self::Unresolved,
         }
     }
@@ -534,6 +553,10 @@ struct PmCandidate {
     /// The newest commit's `commitInfo.lastManifestCommit`, if replay read it.
     #[cfg(feature = "adaptive-metadata-in-dev")]
     last_manifest_commit: Option<LastManifestCommit>,
+    /// Whether replay read the newest commit, so a `None` `last_manifest_commit` means that commit
+    /// has none.
+    #[cfg(feature = "adaptive-metadata-in-dev")]
+    newest_commit_read: bool,
 }
 
 /// A P&M-projected batch with the versions to rank its Protocol and Metadata at.
@@ -595,6 +618,8 @@ fn resolve_pm_batches(
         checkpoint,
         #[cfg(feature = "adaptive-metadata-in-dev")]
         last_manifest_commit,
+        #[cfg(feature = "adaptive-metadata-in-dev")]
+        newest_commit_read: false,
     })
 }
 
@@ -718,6 +743,7 @@ fn pm_candidate(
             metadata: newer(metadata, checkpoint_metadata),
             checkpoint: checkpoint.map(|c| (c.version(), c)),
             last_manifest_commit,
+            newest_commit_read: false,
         })
     }
 

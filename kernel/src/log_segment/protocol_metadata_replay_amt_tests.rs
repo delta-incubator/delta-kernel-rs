@@ -74,6 +74,16 @@ fn standalone_pm_commit(schema: SchemaRef) -> String {
     )
 }
 
+// Builds a commit with standalone P&M and no `lastManifestCommit`, so the plan path finds P&M
+// without following a pointer.
+fn pointerless_pm_commit() -> String {
+    format!(
+        "{}\n{}",
+        commit_info(None),
+        standalone_pm_commit(one_column_schema())
+    )
+}
+
 // Builds a top-level `protocol` commit line with the given reader/writer versions (no features).
 fn protocol_commit(min_reader_version: i64, min_writer_version: i64) -> String {
     serde_json::json!({ "protocol": {
@@ -732,20 +742,28 @@ async fn post_commit_snapshot_resolves_latest_checkpoint_action(
 
 // Replay takes `lastManifestCommit` from the newest commit only: a manifest commit records itself,
 // a later log commit carries it forward, and a newest commit without one is not back-filled from an
-// older commit (a miss stays `Unresolved`). Runs on both the plan and non-plan paths.
+// older commit. The plan path, which always reads the newest commit, resolves that miss as
+// `Resolved(None)`; the non-plan path leaves it `Unresolved`. The same holds when a CRC at v0 seeds
+// the replay.
 #[rstest]
-#[case::manifest_commit_records_itself(vec![], Some((0, 0)))]
-#[case::log_commit_carries_it_forward(vec![commit_info(Some((0, 0)))], Some((0, 0)))]
-#[case::newest_commit_without_it_is_not_backfilled(vec![commit_info(None)], None)]
+#[case::manifest_commit_records_itself(vec![], false, Some((0, 0)))]
+#[case::log_commit_carries_it_forward(vec![commit_info(Some((0, 0)))], false, Some((0, 0)))]
+#[case::newest_commit_without_it_is_not_backfilled(vec![commit_info(None)], false, None)]
+#[case::crc_seeded_log_commit_carries_it_forward(vec![commit_info(Some((0, 0)))], true, Some((0, 0)))]
+#[case::crc_seeded_newest_commit_without_it(vec![commit_info(None)], true, None)]
 #[tokio::test]
 async fn replay_resolves_last_manifest_commit_from_newest_commit(
     #[case] later_commits: Vec<String>,
+    #[case] crc_seeded: bool,
     #[case] expected: Option<(i64, i64)>,
 ) {
     let expected = expected.map(|(v, c)| LastManifestCommit::new(v, c).unwrap());
-    assert_replay_last_manifest_commit(&later_commits, &expected, non_plan_engine).await;
+    let crc = crc_seeded.then(|| Arc::new(Crc::default()));
+    let crc = crc.as_ref();
+    assert_replay_last_manifest_commit(&later_commits, crc, &expected, false, non_plan_engine)
+        .await;
     #[cfg(feature = "declarative-plans")]
-    assert_replay_last_manifest_commit(&later_commits, &expected, |store| {
+    assert_replay_last_manifest_commit(&later_commits, crc, &expected, true, |store| {
         SyncEngine::new_with_store(store)
     })
     .await;
@@ -753,7 +771,9 @@ async fn replay_resolves_last_manifest_commit_from_newest_commit(
 
 async fn assert_replay_last_manifest_commit<E: Engine>(
     later_commits: &[String],
+    crc: Option<&Arc<Crc>>,
     expected: &Option<LastManifestCommit>,
+    miss_is_resolved: bool,
     make_engine: impl FnOnce(Arc<InMemory>) -> E,
 ) {
     let (store, table_root) = manifest_commit_table(later_commits).await;
@@ -765,30 +785,41 @@ async fn assert_replay_last_manifest_commit<E: Engine>(
             .unwrap();
 
     let resolution = log_segment
-        .read_protocol_metadata_opt(&engine, None)
+        .read_protocol_metadata_opt(&engine, crc)
         .unwrap();
-    match (resolution.last_manifest_commit, expected) {
-        (LastManifestCommitResolution::Resolved(Some(resolved)), Some(expected)) => {
-            assert_eq!(&resolved, expected)
-        }
-        (LastManifestCommitResolution::Unresolved, None) => {}
-        (resolution, expected) => panic!("expected {expected:?}, got {resolution:?}"),
-    }
+    let resolved = match resolution.last_manifest_commit {
+        LastManifestCommitResolution::Resolved(resolved) => Some(resolved),
+        LastManifestCommitResolution::Unresolved => None,
+    };
+    let expected = (expected.is_some() || miss_is_resolved).then(|| expected.clone());
+    assert_eq!(resolved, expected);
 }
 
 // Log compaction files drop commitInfo, so when a compaction covers the newest commit the plan
-// path still reads that commit's `lastManifestCommit` and follows it to the checkpoint action that
-// carries the latest P&M. Compaction listing is disabled, so the compaction is added by hand.
+// path still reads that commit: it follows a `lastManifestCommit` to the checkpoint action that
+// carries the latest P&M, and resolves a missing one as `Resolved(None)`. Compaction listing is
+// disabled, so the compaction is added by hand.
 #[cfg(feature = "declarative-plans")]
+#[rstest]
+#[case::follows_pointer(
+    vec![checkpoint_commit(1, &[], test_schema_flat_with_column_mapping()), commit_info(Some((1, 1)))],
+    test_schema_flat_with_column_mapping(),
+    Some((1, 1)),
+)]
+#[case::no_pointer(
+    vec![pointerless_pm_commit(), commit_info(None), commit_info(None)],
+    one_column_schema(),
+    None,
+)]
 #[tokio::test]
-async fn plan_replay_reads_pointer_from_newest_commit_covered_by_compaction() {
-    let two_column_schema = test_schema_flat_with_column_mapping();
-    let (store, table_root) = manifest_commit_table(&[
-        checkpoint_commit(1, &[], two_column_schema.clone()),
-        commit_info(Some((1, 1))),
-    ])
-    .await;
-    let compaction = compacted_log_path_for_versions(1, 2, "json");
+async fn plan_replay_reads_newest_commit_covered_by_compaction(
+    #[case] later_commits: Vec<String>,
+    #[case] expected_schema: SchemaRef,
+    #[case] expected_pointer: Option<(i64, i64)>,
+) {
+    let (store, table_root) = manifest_commit_table(&later_commits).await;
+    let newest_version = later_commits.len() as u64;
+    let compaction = compacted_log_path_for_versions(newest_version - 1, newest_version, "json");
     let txn = serde_json::json!({ "txn": { "appId": "app", "version": 1 } }).to_string();
     store.put(&compaction, txn.into()).await.unwrap();
 
@@ -811,29 +842,50 @@ async fn plan_replay_reads_pointer_from_newest_commit_covered_by_compaction() {
         .read_protocol_metadata_opt(&engine, None)
         .unwrap();
     let schema = resolution.metadata.unwrap().parse_schema().unwrap();
-    assert_eq!(&schema, two_column_schema.as_ref());
+    assert_eq!(&schema, expected_schema.as_ref());
+    let expected_pointer = expected_pointer.map(|(v, c)| LastManifestCommit::new(v, c).unwrap());
     assert!(matches!(
         resolution.last_manifest_commit,
-        LastManifestCommitResolution::Resolved(Some(pointer)) if pointer.version == 1
+        LastManifestCommitResolution::Resolved(pointer) if pointer == expected_pointer
     ));
 }
 
 // A replayed snapshot serves `lastManifestCommit` from build-time state: it still resolves after
-// the commit file that carried it is deleted.
+// the newest commit file is deleted. Only the plan path resolves a missing pointer during replay.
+#[rstest]
+#[case::carried_pointer(commit_info(Some((0, 0))), Some((0, 0)))]
+#[case::no_pointer(pointerless_pm_commit(), None)]
 #[tokio::test]
-async fn replayed_snapshot_serves_last_manifest_commit_without_reading_the_log() {
-    let (store, table_root) = manifest_commit_table(&[commit_info(Some((0, 0)))]).await;
-    let engine = non_plan_engine(store.clone());
+async fn replayed_snapshot_serves_last_manifest_commit_without_reading_the_log(
+    #[case] newest_commit: String,
+    #[case] expected: Option<(i64, i64)>,
+) {
+    if expected.is_some() {
+        assert_snapshot_serves_last_manifest_commit(&newest_commit, expected, non_plan_engine)
+            .await;
+    }
+    #[cfg(feature = "declarative-plans")]
+    assert_snapshot_serves_last_manifest_commit(&newest_commit, expected, |store| {
+        SyncEngine::new_with_store(store)
+    })
+    .await;
+}
+
+async fn assert_snapshot_serves_last_manifest_commit<E: Engine>(
+    newest_commit: &str,
+    expected: Option<(i64, i64)>,
+    make_engine: impl FnOnce(Arc<InMemory>) -> E,
+) {
+    let (store, table_root) = manifest_commit_table(&[newest_commit.to_string()]).await;
+    let engine = make_engine(store.clone());
     let snapshot = Snapshot::builder_for(table_root).build(&engine).unwrap();
 
     store
         .delete(&delta_path_for_version(1, "json"))
         .await
         .unwrap();
-    assert_eq!(
-        snapshot.last_manifest_commit(&engine).unwrap(),
-        Some(LastManifestCommit::new(0, 0).unwrap())
-    );
+    let expected = expected.map(|(v, c)| LastManifestCommit::new(v, c).unwrap());
+    assert_eq!(snapshot.last_manifest_commit(&engine).unwrap(), expected);
 }
 
 // A snapshot built without P&M replay (`Snapshot::new`) reads `lastManifestCommit` from its
