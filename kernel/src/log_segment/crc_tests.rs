@@ -28,6 +28,8 @@ use crate::snapshot::{IncrementalReplay, SnapshotBuilder, SnapshotRef};
 use crate::table_features::TableFeature;
 use crate::unit_test_utils::TestCancellationToken;
 #[cfg(feature = "adaptive-metadata-in-dev")]
+use crate::unit_test_utils::adaptive_metadata_fixtures::last_manifest_commit_info;
+#[cfg(feature = "adaptive-metadata-in-dev")]
 use crate::unit_test_utils::{
     adaptive_metadata_table_configuration, test_schema_flat_with_column_mapping,
 };
@@ -815,11 +817,14 @@ async fn test_crc_seeded_replay_captures_checkpoint_action_after_crc() {
         )
         .commit(
             1,
-            [amt_checkpoint_action(
-                1,
-                checkpoint_config.protocol().clone(),
-                checkpoint_config.metadata().clone(),
-            )],
+            [
+                last_manifest_commit_info(1, 1),
+                amt_checkpoint_action(
+                    1,
+                    checkpoint_config.protocol().clone(),
+                    checkpoint_config.metadata().clone(),
+                ),
+            ],
         )
         .build()
         .await
@@ -895,6 +900,36 @@ async fn test_crc_seeded_replay_without_checkpoint_action_captures_none() {
         .await
         .captured_checkpoint_action();
     assert!(resolution.is_none());
+}
+
+// A CRC-seeded pruned replay whose newest commit points at a manifest commit at or below the CRC
+// version cannot capture that action (the pruned replay never reads it), so the snapshot follows
+// the pointer to it.
+#[cfg(feature = "adaptive-metadata-in-dev")]
+#[tokio::test]
+async fn test_crc_seeded_replay_with_pointer_at_or_below_crc_follows_pointer() {
+    let config = adaptive_metadata_table_configuration(test_schema_flat_with_column_mapping(), &[]);
+    let test = CrcReadTest::new()
+        .commit(
+            0,
+            [
+                last_manifest_commit_info(0, 0),
+                amt_checkpoint_action(0, config.protocol().clone(), config.metadata().clone()),
+            ],
+        )
+        .crc(
+            0,
+            config.protocol().clone(),
+            config.metadata().clone(),
+            1000, // AMT config enables ICT, so the CRC must carry an inCommitTimestampOpt.
+        )
+        .commit(1, [last_manifest_commit_info(0, 0)])
+        .build()
+        .await;
+    assert!(test.captured_checkpoint_action().is_none());
+    let (snapshot, _) = test.snapshot_at(None);
+    let action = snapshot.latest_checkpoint_action(&test.engine).unwrap();
+    assert_eq!(action.map(|action| action.version), Some(0));
 }
 
 #[tokio::test]
