@@ -390,10 +390,10 @@ async fn assert_replay_resolution<E: Engine>(
     let resolution = log_segment
         .read_protocol_metadata_opt(&engine, None)
         .unwrap();
-    // No CRC is passed, so replay never produces a `Hint`: only `Captured` or `Unresolved`.
+    // No CRC is passed, so replay never produces a `Located`: only `Captured` or `Unresolved`.
     let version = match resolution.checkpoint_action {
         CheckpointActionResolution::Captured(action) => Some(action.version),
-        CheckpointActionResolution::Hint(_) | CheckpointActionResolution::Unresolved => None,
+        CheckpointActionResolution::Located(_) | CheckpointActionResolution::Unresolved => None,
     };
     assert_eq!(version, expected_version);
 }
@@ -449,35 +449,45 @@ async fn incremental_update_resolves_latest_checkpoint_action(
 }
 
 // A CRC at the target version carrying `lastManifestCommit` makes `latest_checkpoint_action` read
-// only the commit it points at, failing when that commit does not carry the hinted action. Each
-// case has checkpoint commits at v0 and v2, the given v1, and a CRC at v2 holding the hint. A scan
-// would find v2's action first, so any other expected version proves the hint was followed.
+// only the commit it points at, failing when that commit does not carry the expected action. Each
+// case has checkpoint commits at v0 and v2, the given v1, and a CRC at v2 holding the pointer. A
+// scan would find v2's action first, so any other expected version proves the pointer was followed.
 #[rstest]
-#[case::hint_names_latest_manifest_commit(checkpoint_commit(1, &[], one_column_schema()), 2, 2, Ok(2))]
-#[case::hint_is_read_instead_of_scanning(checkpoint_commit(1, &[], one_column_schema()), 1, 1, Ok(1))]
-#[case::hint_names_commit_checkpointing_older_version(
+#[case::pointer_names_latest_manifest_commit(
+    checkpoint_commit(1, &[], one_column_schema()),
+    2,
+    2,
+    Ok(2)
+)]
+#[case::pointer_is_read_instead_of_scanning(
+    checkpoint_commit(1, &[], one_column_schema()),
+    1,
+    1,
+    Ok(1)
+)]
+#[case::pointer_names_commit_checkpointing_older_version(
     checkpoint_commit(0, &[], one_column_schema()),
     1,
     0,
     Ok(0)
 )]
-#[case::hinted_commit_without_action_fails(
+#[case::manifest_commit_without_action_fails(
     metadata_commit(one_column_schema()),
     1,
     1,
     Err("that commit carries no checkpoint action")
 )]
-#[case::hinted_commit_with_other_content_root_version_fails(
+#[case::manifest_commit_with_other_content_root_version_fails(
     checkpoint_commit(0, &[], one_column_schema()),
     1,
     1,
     Err("that commit's checkpoint action has content root version 0")
 )]
 #[tokio::test]
-async fn latest_checkpoint_action_reads_commit_named_by_crc_hint(
+async fn latest_checkpoint_action_reads_commit_named_by_crc_pointer(
     #[case] v1: String,
-    #[case] hinted_version: i64,
-    #[case] hinted_content_root_version: i64,
+    #[case] pointer_version: i64,
+    #[case] pointer_content_root_version: i64,
     #[case] expected: Result<i64, &str>,
 ) {
     let store = Arc::new(InMemory::new());
@@ -492,8 +502,8 @@ async fn latest_checkpoint_action_reads_commit_named_by_crc_hint(
             .await
             .unwrap();
     }
-    let hint = LastManifestCommit::new(hinted_version, hinted_content_root_version).unwrap();
-    put_crc_with_hint(&store, 2, hint).await;
+    let pointer = LastManifestCommit::new(pointer_version, pointer_content_root_version).unwrap();
+    put_crc_with_pointer(&store, 2, pointer).await;
 
     let engine = non_plan_engine(store);
     let snapshot = Snapshot::builder_for(table_root).build(&engine).unwrap();
@@ -505,11 +515,16 @@ async fn latest_checkpoint_action_reads_commit_named_by_crc_hint(
     }
 }
 
-// A hint naming a commit outside the segment's commit list cannot vouch for the latest action in
-// this segment, so the lookup falls back to scanning. The segment keeps only v1, so the hinted v0
-// is not listed and the scan finds v1's action.
+// The pointer is authoritative, so naming a commit outside the segment's commit list is an error
+// rather than a fallback to scanning. The segment keeps only v1, whose checkpoint action a scan
+// would find.
+#[rstest]
+#[case::below_segment(0)]
+#[case::above_segment(5)]
 #[tokio::test]
-async fn find_last_checkpoint_action_scans_when_hinted_commit_is_not_listed() {
+async fn find_last_checkpoint_action_errors_when_manifest_commit_is_not_listed(
+    #[case] pointer_version: i64,
+) {
     let store = Arc::new(InMemory::new());
     let table_root = url::Url::parse("memory:///").unwrap();
     for version in 0..2 {
@@ -531,16 +546,13 @@ async fn find_last_checkpoint_action_scans_when_hinted_commit_is_not_listed() {
             .unwrap()
             .segment_after_version(0);
 
-    let hint = LastManifestCommit::new(0, 0).unwrap();
-    let action = log_segment
-        .find_last_checkpoint_action(&engine, Some(&hint))
-        .unwrap()
-        .expect("scan should find v1's checkpoint action");
-    assert_eq!(action.version, 1);
+    let pointer = LastManifestCommit::new(pointer_version, pointer_version).unwrap();
+    let result = log_segment.find_last_checkpoint_action(&engine, Some(&pointer));
+    assert_result_error_with_message(result, "this log segment does not list that commit");
 }
 
-// Writes a CRC at `version` carrying `hint` as its `lastManifestCommit`.
-async fn put_crc_with_hint(store: &InMemory, version: u64, hint: LastManifestCommit) {
+// Writes a CRC at `version` carrying `pointer` as its `lastManifestCommit`.
+async fn put_crc_with_pointer(store: &InMemory, version: u64, pointer: LastManifestCommit) {
     let config = adaptive_metadata_table_configuration(one_column_schema(), &[]);
     let crc = Crc {
         version,
@@ -549,7 +561,7 @@ async fn put_crc_with_hint(store: &InMemory, version: u64, hint: LastManifestCom
         file_stats_state: FileStatsState::Complete(FileStats::try_new(0, 0, None).unwrap()),
         // AMT config enables ICT, so the CRC must carry an inCommitTimestampOpt.
         in_commit_timestamp_opt: Some(1000),
-        last_manifest_commit_opt: Some(hint),
+        last_manifest_commit_opt: Some(pointer),
         ..Default::default()
     };
     store
