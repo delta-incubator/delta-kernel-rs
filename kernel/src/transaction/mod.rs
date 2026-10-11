@@ -956,6 +956,15 @@ impl<STATE, MODE: ExecutionMode> Transaction<STATE, MODE> {
                     !self.has_data_file_actions(),
                     KernelError::generic("root manifest file commit cannot include file actions")
                 );
+                // The root manifest's file changes are opaque to kernel, so dataChange cannot be
+                // inferred.
+                require!(
+                    !self.infer_data_change,
+                    KernelError::invalid_transaction_state(
+                        "root manifest file commit requires an explicit data_change (call \
+                         with_data_change)"
+                    )
+                );
             }
             Some(ManifestWrite::Commit(_)) => {
                 return Err(KernelError::unsupported(
@@ -1126,6 +1135,16 @@ impl<STATE, MODE: ExecutionMode> Transaction<STATE, MODE> {
             || self.staged_data_changes.has_dv_inputs()
     }
 
+    /// Commit-level `dataChange`: true only if a staged file action changes data. A root manifest
+    /// file carries its file changes opaquely, so its explicit value is used as-is.
+    #[cfg(feature = "adaptive-metadata-in-dev")]
+    fn commit_info_data_change(&self) -> bool {
+        match self.manifest_write {
+            Some(ManifestWrite::RootFile(_)) => self.data_change,
+            _ => self.data_change && self.has_data_file_actions(),
+        }
+    }
+
     // Returns the read snapshot. Returns an error if this is a create-table transaction.
     // To get the `Option<SnapshotRef>` directly, use the `read_snapshot_opt` field.
     fn read_snapshot(&self) -> KernelResult<&Snapshot> {
@@ -1274,7 +1293,7 @@ impl<STATE, MODE: ExecutionMode> Transaction<STATE, MODE> {
 
         #[cfg(feature = "adaptive-metadata-in-dev")]
         if self.is_adaptive_metadata_enabled() {
-            kernel_commit_info.set_data_change(self.data_change);
+            kernel_commit_info.set_data_change(self.commit_info_data_change());
         }
         Ok(NonfileCommitActions {
             commit_version: self.get_commit_version(),

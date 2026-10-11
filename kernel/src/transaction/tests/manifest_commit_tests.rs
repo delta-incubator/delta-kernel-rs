@@ -1,8 +1,10 @@
 //! Tests for `adaptiveMetadata-preview` manifest (content-tree) commits and root manifest file
 //! commits.
 
+use rstest::rstest;
+
 use super::super::{ManifestCommitState, ManifestWrite, Transaction, UpdateTableOperation};
-use super::{add_dummy_file, create_existing_table_txn};
+use super::{add_dummy_file, create_existing_table_txn, create_existing_table_txn_with};
 use crate::actions::{DomainMetadata, LOG_DOMAIN_METADATA_SCHEMA};
 use crate::committer::FileSystemCommitter;
 use crate::engine::arrow_data::ArrowEngineData;
@@ -55,7 +57,8 @@ fn with_root_manifest_file_rejects_non_adaptive_table() -> Result<()> {
 
 #[test]
 fn validate_manifest_write_allows_root_manifest_on_adaptive_table() -> Result<()> {
-    let (_engine, mut txn, _tempdir) = create_existing_table_txn()?;
+    let (_engine, mut txn, _tempdir) =
+        create_existing_table_txn_with(|builder| builder.with_data_change(true))?;
     txn.effective_table_config = adaptive_table_config();
     let file = dummy_root_manifest_file_meta(&txn);
     txn = txn.with_root_manifest_file(file)?;
@@ -74,6 +77,47 @@ fn validate_manifest_write_rejects_root_manifest_with_file_actions() -> Result<(
         txn.validate_manifest_write_semantics(),
         "cannot include file actions",
     );
+    Ok(())
+}
+
+#[test]
+fn validate_manifest_write_rejects_root_manifest_without_explicit_data_change() -> Result<()> {
+    let (_engine, mut txn, _tempdir) = create_existing_table_txn()?;
+    txn.effective_table_config = adaptive_table_config();
+    let file = dummy_root_manifest_file_meta(&txn);
+    txn = txn.with_root_manifest_file(file)?;
+    assert_result_error_with_message(
+        txn.validate_manifest_write_semantics(),
+        "requires an explicit data_change",
+    );
+    Ok(())
+}
+
+// === commit-level dataChange ===
+
+#[rstest]
+#[case::no_files(false, false, true, false)]
+#[case::files_with_data_change(false, true, true, true)]
+#[case::files_without_data_change(false, true, false, false)]
+#[case::root_manifest_with_data_change(true, false, true, true)]
+#[case::root_manifest_without_data_change(true, false, false, false)]
+fn commit_info_data_change_requires_a_data_changing_file_action(
+    #[case] stage_root_manifest: bool,
+    #[case] stage_add_file: bool,
+    #[case] data_change: bool,
+    #[case] expected: bool,
+) -> Result<()> {
+    let (_engine, mut txn, _tempdir) = create_existing_table_txn()?;
+    txn.effective_table_config = adaptive_table_config();
+    if stage_root_manifest {
+        let file = dummy_root_manifest_file_meta(&txn);
+        txn = txn.with_root_manifest_file(file)?;
+    }
+    if stage_add_file {
+        add_dummy_file(&mut txn);
+    }
+    txn.data_change = data_change;
+    assert_eq!(txn.commit_info_data_change(), expected);
     Ok(())
 }
 

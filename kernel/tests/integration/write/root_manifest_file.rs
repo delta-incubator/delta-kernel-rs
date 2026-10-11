@@ -10,7 +10,7 @@ use rstest::rstest;
 use serde_json::{json, Value};
 use tempfile::TempDir;
 use test_utils::{
-    assert_result_error_with_message, begin_transaction, begin_transaction_with, create_table,
+    assert_result_error_with_message, begin_transaction_with, create_table,
     create_table_with_column_mapping_mode, engine_store_setup, read_actions_from_commit,
 };
 use url::Url;
@@ -67,7 +67,8 @@ async fn test_with_root_manifest_file_produces_a_self_contained_checkpoint_actio
         last_modified: 0,
         size: 1024,
     };
-    let txn = begin_transaction(snapshot, &engine)?.with_root_manifest_file(file.clone())?;
+    let txn = begin_transaction_with(snapshot, &engine, |builder| builder.with_data_change(true))?
+        .with_root_manifest_file(file.clone())?;
     txn.commit(&engine)?.unwrap_committed();
 
     let checkpoint_actions = read_actions_from_commit(&table_url, 1, "checkpoint")?;
@@ -139,6 +140,7 @@ async fn test_with_root_manifest_file_merges_domain_metadata_and_transactions(
             builder
                 .with_transaction_id("app-2", 7)
                 .with_domain_metadata("my.domain", "v2")
+                .with_data_change(true)
         },
     )?
     .with_root_manifest_file(file)?;
@@ -210,19 +212,53 @@ fn commit_info_at(table_url: &Url, version: u64) -> Result<Value, Box<dyn std::e
     Ok(commit_infos.remove(0))
 }
 
+/// Commits with no file actions record `dataChange: false` whatever the transaction's value.
 #[rstest]
 #[tokio::test]
-async fn test_commit_info_records_data_change(
-    #[values(true, false)] data_change: bool,
+async fn test_commit_info_data_change_is_false_without_file_actions(
+    #[values(None, Some(true), Some(false))] data_change: Option<bool>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (engine, _temp_dir, table_url, snapshot) =
-        setup_adaptive_metadata_table("commit_info_data_change").await?;
+        setup_adaptive_metadata_table("commit_info_data_change_no_files").await?;
 
-    begin_transaction_with(snapshot, &engine, |builder| {
-        builder.with_data_change(data_change)
+    begin_transaction_with(snapshot, &engine, |builder| match data_change {
+        Some(data_change) => builder.with_data_change(data_change),
+        None => builder,
     })?
     .commit(&engine)?
     .unwrap_committed();
+    let commit_info = commit_info_at(&table_url, 1)?;
+    assert_eq!(commit_info["dataChange"], json!(false));
+    Ok(())
+}
+
+/// A root manifest file commit records its explicit `dataChange` and rejects an unset one.
+#[rstest]
+#[tokio::test(flavor = "multi_thread")]
+async fn test_root_manifest_file_commit_info_data_change(
+    #[values(None, Some(true), Some(false))] data_change: Option<bool>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (engine, _temp_dir, table_url, snapshot) =
+        setup_adaptive_metadata_table("root_manifest_file_data_change").await?;
+
+    let file = FileMeta {
+        location: table_url.join("metadata/root-v1.parquet")?,
+        last_modified: 0,
+        size: 1024,
+    };
+    let txn = begin_transaction_with(snapshot, &engine, |builder| match data_change {
+        Some(data_change) => builder.with_data_change(data_change),
+        None => builder,
+    })?
+    .with_root_manifest_file(file)?;
+    let Some(data_change) = data_change else {
+        assert_result_error_with_message(
+            txn.commit(&engine),
+            "root manifest file commit requires an explicit data_change",
+        );
+        return Ok(());
+    };
+    txn.commit(&engine)?.unwrap_committed();
     let commit_info = commit_info_at(&table_url, 1)?;
     assert_eq!(commit_info["dataChange"], json!(data_change));
     Ok(())
@@ -244,5 +280,6 @@ async fn test_commit_info_omits_adaptive_metadata_fields_without_the_feature(
 
     let commit_info = commit_info_at(&table_url, 1)?;
     assert!(commit_info.get("dataChange").is_none());
+    assert!(commit_info.get("lastManifestCommit").is_none());
     Ok(())
 }
