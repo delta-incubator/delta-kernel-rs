@@ -644,19 +644,20 @@ mod tests {
     #[cfg(feature = "adaptive-metadata-in-dev")]
     #[rstest::rstest]
     fn test_build_commit_info_data_change(
-        #[values(None, Some(true), Some(false))] data_change: Option<bool>,
-        #[values(false, true)] engine_supplies_data_change: bool,
+        #[values(None, Some(true), Some(false))] txn_data_change: Option<bool>,
+        #[values(false, true)] engine_conflicting_data_change: bool,
     ) -> Result<()> {
-        let engine_commit_info = engine_supplies_data_change.then(|| {
-            let stale = !data_change.unwrap_or(false);
+        // Always differs from the txn value so an override is observable.
+        let engine_commit_info = engine_conflicting_data_change.then(|| {
+            let conflicting_value = !txn_data_change.unwrap_or(false);
             make_engine_commit_info(
                 vec![ArrowField::new("dataChange", ArrowDataType::Boolean, true)],
-                vec![Arc::new(BooleanArray::from(vec![Some(stale)])) as ArrayRef],
+                vec![Arc::new(BooleanArray::from(vec![Some(conflicting_value)])) as ArrayRef],
             )
         });
         let (engine, txn) = make_txn(engine_commit_info)?;
         let mut commit_info = make_kernel_commit_info();
-        if let Some(data_change) = data_change {
+        if let Some(data_change) = txn_data_change {
             commit_info.set_data_change(data_change);
         }
 
@@ -667,7 +668,7 @@ mod tests {
         let column = ci
             .column_by_name("dataChange")
             .expect("dataChange column should be present");
-        match data_change {
+        match txn_data_change {
             None => assert!(column.is_null(0)),
             Some(data_change) => assert_eq!(get_bool(ci, "dataChange"), data_change),
         }
