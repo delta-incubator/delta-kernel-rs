@@ -54,6 +54,25 @@ impl LogSegment {
         engine: &dyn Engine,
         crc: Option<&Arc<Crc>>,
     ) -> KernelResult<PmResolution> {
+        #[allow(unused_mut)]
+        let mut resolution = self.resolve_protocol_metadata(engine, crc)?;
+        // The hint's checkpoint action is in no listed commit, yet it is the latest one, so replay
+        // and the CRC cannot supply it. Say hint 5, manifest commit 8, snapshot at 7: commit 7 may
+        // carry an older manifest commit's checkpoint action, but content roots never decrease, so
+        // that action describes a root at or before 5 and the hint's action still wins.
+        #[cfg(feature = "adaptive-metadata-in-dev")]
+        if let Some(action) = self.unlisted_amt_checkpoint_action() {
+            resolution.checkpoint_action =
+                CheckpointActionResolution::Captured(Arc::new(action.clone()));
+        }
+        Ok(resolution)
+    }
+
+    fn resolve_protocol_metadata(
+        &self,
+        engine: &dyn Engine,
+        crc: Option<&Arc<Crc>>,
+    ) -> KernelResult<PmResolution> {
         // Case 1: If CRC at target version, use it directly and exit early.
         if let Some(crc) = crc.filter(|c| c.version == self.end_version) {
             info!("P&M from CRC at target version {}", self.end_version);
@@ -136,6 +155,28 @@ impl LogSegment {
 
     /// Replays the log segment for the latest Protocol and Metadata, each with its version.
     fn replay_for_pm(&self, engine: &dyn Engine) -> KernelResult<PmCandidate> {
+        #[allow(unused_mut)]
+        let mut candidate = self.replay_log_for_pm(engine)?;
+        // The hint's checkpoint action is in no listed commit, so seed replay with its P&M. Say
+        // hint 5, manifest commit 8, snapshot at 7: if commits 5 to 7 change no protocol or
+        // metadata, the hint's action at 5 is the only source, while a metadata change in commit 6
+        // is newer and still wins.
+        #[cfg(feature = "adaptive-metadata-in-dev")]
+        if let Some(action) = self.unlisted_amt_checkpoint_action() {
+            let version = action.version();
+            candidate.protocol = newer(
+                Some((version, action.protocol().clone())),
+                candidate.protocol,
+            );
+            candidate.metadata = newer(
+                Some((version, action.metadata().clone())),
+                candidate.metadata,
+            );
+        }
+        Ok(candidate)
+    }
+
+    fn replay_log_for_pm(&self, engine: &dyn Engine) -> KernelResult<PmCandidate> {
         #[cfg(feature = "declarative-plans")]
         if let Some(executor) = engine.plan_executor() {
             return resolve_pm_batches(self.read_pm_batches_via_plan(executor.as_ref())?);
