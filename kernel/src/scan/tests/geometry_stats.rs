@@ -10,9 +10,9 @@ use crate::object_store::ObjectStoreExt;
 use crate::parquet::arrow::ArrowSchemaConverter;
 use crate::parquet::basic::{LogicalType, Type as PhysicalType};
 use crate::parquet::schema::types::{SchemaDescriptor, Type as ParquetType};
-use crate::schema::{PrimitiveType, SchemaStructPatchBuilder};
+use crate::schema::{ColumnName, PrimitiveType, SchemaStructPatchBuilder};
 use crate::unit_test_utils::{geometry_type, load_test_table, string_array_to_engine_data};
-use crate::{EvaluationHandler, ExpressionEvaluator, PredicateEvaluator};
+use crate::{EvaluationHandler, ExpressionEvaluator, PredicateEvaluator, StorageHandler};
 
 #[rstest]
 #[case::all_struct(StatsOptions::all_struct())]
@@ -65,6 +65,8 @@ fn scan_builder_rejects_geometry_stats_without_typed_output_or_with_json_synthes
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum CheckpointStats {
     ParsedWkb,
+    MismatchedCrs,
+    Unannotated,
     MissingMin,
     IncompatibleString,
     NullBounds,
@@ -185,6 +187,60 @@ async fn geometry_stats_require_supporting_handlers_only_when_requested(#[case] 
     }
 }
 
+#[rstest]
+#[case::mismatched_crs(CheckpointStats::MismatchedCrs, "Geometry CRS mismatch")]
+#[case::unannotated(CheckpointStats::Unannotated, "Expected a Parquet GEOMETRY annotation")]
+#[tokio::test]
+async fn geometry_stats_handler_validates_annotations_hidden_by_binary_footer(
+    #[case] checkpoint_stats: CheckpointStats,
+    #[case] error: &str,
+    #[values(false, true)] enabled: bool,
+) {
+    let (engine, _, table_root) = setup_geometry_stats_table(checkpoint_stats).await;
+    let checkpoint = engine
+        .storage_handler()
+        .list_from(&Url::parse(&format!("{table_root}_delta_log/")).unwrap())
+        .unwrap()
+        .map(Result::unwrap)
+        .find(|file| file.location.path().ends_with(".checkpoint.parquet"))
+        .unwrap();
+    let footer = engine
+        .parquet_handler()
+        .read_parquet_footer(&checkpoint)
+        .unwrap();
+    for bound in [MIN_VALUES, MAX_VALUES] {
+        let path = ColumnName::new(["add", STATS_PARSED, bound, "g"]);
+        assert_eq!(
+            footer.schema.field_at(&path).unwrap().data_type(),
+            &DataType::BINARY
+        );
+    }
+    let snapshot = Snapshot::builder_for(&table_root).build(&engine).unwrap();
+    let scan = snapshot
+        .scan_builder()
+        .with_stats(StatsOptions::all_struct().with_geometry_min_max_stats(enabled))
+        .without_row_transforms()
+        .build()
+        .unwrap();
+    let result = scan
+        .scan_metadata(&engine)
+        .and_then(|iter| iter.collect::<Result<Vec<_>>>());
+    if enabled {
+        assert_result_error_with_message(result, error);
+    } else {
+        assert!(!result.unwrap().is_empty());
+    }
+}
+
+#[test]
+fn geometry_json_test_decoder_returns_unsupported_for_scalar_evaluation() {
+    let decoder = DecodePointStats(schema_ref! { nullable "g": (geometry_type("EPSG:4326")) });
+    assert_result_error_with_message(
+        decoder.eval_expr_scalar(&|_| None, &[]),
+        "The test Geometry JSON decoder does not support scalar evaluation",
+    );
+}
+
 // Kernel writers reject geospatial tables, so build protocol-shaped read fixtures directly.
 async fn setup_geometry_stats_table(
     checkpoint_stats: CheckpointStats,
@@ -195,6 +251,7 @@ async fn setup_geometry_stats_table(
     let handler = Arc::new(GeometryStatsHandler {
         evaluation: sync.evaluation_handler(),
         parquet: sync.parquet_handler(),
+        storage: sync.storage_handler(),
     });
     let engine = DelegatingEngine::new(sync.clone())
         .with_evaluation_handler(handler.clone())
@@ -291,7 +348,10 @@ async fn setup_geometry_stats_table(
     if checkpoint_stats != CheckpointStats::MissingStats {
         checkpoint_add["add"][STATS_PARSED] = stats(1, 3, true);
     }
-    if checkpoint_stats == CheckpointStats::ParsedWkb {
+    if matches!(
+        checkpoint_stats,
+        CheckpointStats::ParsedWkb | CheckpointStats::MismatchedCrs | CheckpointStats::Unannotated
+    ) {
         // No JSON fallback can hide a failure to read typed checkpoint bounds.
         checkpoint_add["add"]
             .as_object_mut()
@@ -316,8 +376,15 @@ async fn setup_geometry_stats_table(
     let parquet_schema = ArrowSchemaConverter::new()
         .convert(&batch.schema())
         .unwrap();
-    let parquet_schema =
-        SchemaDescriptor::new(Arc::new(annotate_geometry(parquet_schema.root_schema())));
+    let annotation = match checkpoint_stats {
+        CheckpointStats::MismatchedCrs => Some(LogicalType::geometry(Some("EPSG:3857".into()))),
+        CheckpointStats::Unannotated => None,
+        _ => Some(LogicalType::geometry(Some("EPSG:4326".into()))),
+    };
+    let parquet_schema = SchemaDescriptor::new(Arc::new(annotate_geometry(
+        parquet_schema.root_schema(),
+        &annotation,
+    )));
     let options = crate::engine::writer_options().with_parquet_schema(parquet_schema);
     let mut writer =
         ArrowWriter::try_new_with_options(Vec::new(), batch.schema(), options).unwrap();
@@ -340,13 +407,13 @@ async fn setup_geometry_stats_table(
     (engine, sync, table_root)
 }
 
-fn annotate_geometry(data_type: &ParquetType) -> ParquetType {
+fn annotate_geometry(data_type: &ParquetType, annotation: &Option<LogicalType>) -> ParquetType {
     match data_type {
         ParquetType::GroupType { basic_info, fields } => ParquetType::GroupType {
             basic_info: basic_info.clone(),
             fields: fields
                 .iter()
-                .map(|f| Arc::new(annotate_geometry(f)))
+                .map(|f| Arc::new(annotate_geometry(f, annotation)))
                 .collect(),
         },
         ParquetType::PrimitiveType {
@@ -355,7 +422,7 @@ fn annotate_geometry(data_type: &ParquetType) -> ParquetType {
         } if data_type.name() == "g" && data_type.get_basic_info().logical_type_ref().is_none() => {
             ParquetType::primitive_type_builder("g", PhysicalType::BYTE_ARRAY)
                 .with_repetition(data_type.get_basic_info().repetition())
-                .with_logical_type(Some(LogicalType::geometry(Some("EPSG:4326".into()))))
+                .with_logical_type(annotation.clone())
                 .build()
                 .unwrap()
         }
@@ -393,6 +460,7 @@ fn collect_geometry_bounds(
 struct GeometryStatsHandler {
     evaluation: Arc<dyn EvaluationHandler>,
     parquet: Arc<dyn ParquetHandler>,
+    storage: Arc<dyn StorageHandler>,
 }
 
 impl EvaluationHandler for GeometryStatsHandler {
@@ -436,6 +504,37 @@ impl ParquetHandler for GeometryStatsHandler {
         schema: SchemaRef,
         predicate: Option<PredicateRef>,
     ) -> Result<FileDataReadResultIterator> {
+        // Validate the raw annotations before GeometryAsBinary drops the requested logical type.
+        for file in files {
+            for data in self
+                .storage
+                .read_files(vec![(file.location.clone(), None)])?
+            {
+                let reader = ParquetRecordBatchReaderBuilder::try_new(data?)?;
+                for column in reader.parquet_schema().columns() {
+                    let path = ColumnName::new(column.path().parts().iter().cloned());
+                    let Ok(field) = schema.field_at(&path) else {
+                        continue;
+                    };
+                    let DataType::Primitive(PrimitiveType::Geometry(expected)) = field.data_type()
+                    else {
+                        continue;
+                    };
+                    let Some(LogicalType::Geometry(actual)) = column.logical_type_ref() else {
+                        return Err(KernelError::generic(format!(
+                            "Expected a Parquet GEOMETRY annotation for {path}",
+                        )));
+                    };
+                    let crs = actual.crs.as_deref().unwrap_or("OGC:CRS84");
+                    if crs != expected.crs() {
+                        return Err(KernelError::generic(format!(
+                            "Geometry CRS mismatch for {path}: expected {}, found {crs}",
+                            expected.crs(),
+                        )));
+                    }
+                }
+            }
+        }
         self.parquet.read_parquet_files(
             files,
             Arc::new(GeometryAsBinary.transform_struct(&schema).into_owned()),
@@ -521,7 +620,9 @@ impl ArrowOpaqueExpressionOp for DecodePointStats {
     }
 
     fn eval_expr_scalar(&self, _: &ScalarExpressionEvaluator<'_>, _: &[Expr]) -> Result<Scalar> {
-        unimplemented!()
+        Err(KernelError::unsupported(
+            "The test Geometry JSON decoder does not support scalar evaluation",
+        ))
     }
 }
 

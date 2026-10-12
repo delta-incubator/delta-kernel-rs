@@ -283,6 +283,9 @@ impl StatsOptions {
     /// `stats_parsed.maxValues`, retaining each column's logical Geometry type and CRS. Off by
     /// default; Geography bounds are not included.
     ///
+    /// The corner-point statistics encoding is experimental and is not defined by the published
+    /// Delta protocol. It is gated by `geo-type-in-dev`.
+    ///
     /// Kernel does not use these bounds for spatial pruning. This option requires struct stats
     /// without JSON synthesis, such as [`Self::all_struct`]; [`ScanBuilder::build`] rejects any
     /// other combination.
@@ -290,9 +293,12 @@ impl StatsOptions {
     /// The caller must supply an engine that supports Geometry statistics. For commits and
     /// checkpoints without compatible `stats_parsed`, the engine's [`ParseJson`] must decode WKT
     /// points. For compatible checkpoints, its Parquet handler must read WKB points into the same
-    /// logical type. Missing bounds in compatible `stats_parsed` read as null. Kernel does not
-    /// check engine capability or prescribe an in-memory representation; unsupported handlers,
-    /// including the default engine, may return an error.
+    /// logical type. If the reported footer schema exposes only Binary, the Parquet handler must
+    /// validate the file's Geometry annotation and CRS against the requested type before returning
+    /// bounds. Binary compatibility alone does not validate either. Missing bounds in compatible
+    /// `stats_parsed` read as null. Kernel does not check engine capability or prescribe an
+    /// in-memory representation; unsupported handlers, including the default engine, may return
+    /// an error.
     ///
     /// [`ParseJson`]: crate::expressions::ParseJsonExpression
     #[cfg(feature = "geo-type-in-dev")]

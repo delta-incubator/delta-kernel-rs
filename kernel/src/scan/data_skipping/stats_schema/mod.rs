@@ -30,14 +30,23 @@ use crate::KernelResult;
 /// Note: Array and Map types are included in `nullCount` (null counts are meaningful for these
 /// types) but excluded from `minValues`/`maxValues` (not eligible for data skipping). Variant is
 /// treated the same by default; [`StatsConfig::variant_min_max`] opts it into `minValues`/
-/// `maxValues`. Geometry bounds can also be requested separately from scalar min/max eligibility.
+/// `maxValues`.
+#[cfg_attr(
+    feature = "geo-type-in-dev",
+    doc = "[`StatsConfig::geometry_min_max`] requests Geometry bounds."
+)]
+#[cfg_attr(
+    not(feature = "geo-type-in-dev"),
+    doc = "The Geometry bounds option requires `geo-type-in-dev`."
+)]
 /// All of them count as leaf columns against the indexed column limit. The `nullCount` schema also
 /// includes primitive types that aren't eligible for min/max (e.g., Boolean, Binary) since null
 /// counts are still meaningful for those types.
 ///
 /// The `minValues`/`maxValues` struct fields are also nested structures mirroring the table's
-/// column hierarchy. They additionally filter out leaf fields with non-eligible data types
-/// (e.g., Boolean, Binary) via [`is_skipping_eligible_datatype`].
+/// column hierarchy. Scalar fields are filtered via [`is_skipping_eligible_datatype`] (excluding
+/// e.g. Boolean and Binary). Variant and Geometry are governed by their separate options above;
+/// including their statistics does not make them eligible for scalar min/max pruning.
 ///
 /// ## Stats value rules
 ///
@@ -45,10 +54,11 @@ use crate::KernelResult;
 ///
 /// - `numRecords`: the total number of rows in the file.
 /// - `nullCount`: the number of null values in the column. Always present for included columns.
-/// - `minValues`/`maxValues`: the smallest/largest non-null value in the column. When a column
-///   contains only null values, there are no non-null values to aggregate, so the column has no
-///   entry in `minValues`/`maxValues`. The `nullCount` entry is still present and equals
+/// - Scalar `minValues`/`maxValues`: the smallest/largest non-null value in the column. When a
+///   column contains only null values, there are no non-null values to aggregate, so the column has
+///   no entry in `minValues`/`maxValues`. The `nullCount` entry is still present and equals
 ///   `numRecords`.
+/// - Geometry `minValues`/`maxValues`: bounding-box corner points, not ordered Geometry values.
 /// - String min/max values must be truncated to a prefix no longer than 32 characters. For min
 ///   values, simple prefix truncation is valid (the truncated value is always <= the original). For
 ///   max values, a tie-breaker character must be appended after truncation to ensure the result is

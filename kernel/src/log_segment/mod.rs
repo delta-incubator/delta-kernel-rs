@@ -30,9 +30,9 @@ use crate::path::{LogPathFileType, ParsedLogPath};
 #[cfg(feature = "declarative-plans")]
 use crate::plans::ir::nodes::{FileType, ScanFile};
 use crate::schema::compare::SchemaComparison;
-#[cfg(feature = "geo-type-in-dev")]
-use crate::schema::PrimitiveType;
-use crate::schema::{lazy_schema_ref, DataType, SchemaRef, StructField, StructType, ToSchema as _};
+use crate::schema::{
+    lazy_schema_ref, DataType, PrimitiveType, SchemaRef, StructField, StructType, ToSchema as _,
+};
 use crate::utils::require;
 #[cfg(feature = "declarative-plans")]
 use crate::Scalar;
@@ -1549,8 +1549,7 @@ impl LogSegment {
             stats_struct,
             stats_schema,
             "stats_parsed",
-            #[cfg(feature = "geo-type-in-dev")]
-            true,
+            CheckpointFieldKind::Stats,
         ) {
             return false;
         }
@@ -1570,15 +1569,16 @@ impl LogSegment {
     ///   physical fields, with compatible types. A shredded struct is not compatible with an
     ///   unshredded VARIANT.
     /// - For statistics only, Binary can back requested Geometry bounds. The engine must read the
-    ///   WKB using the requested logical Geometry type; this does not establish CRS compatibility
-    ///   when the available schema omits it.
+    ///   WKB using the requested logical Geometry type and validate the file's annotation and CRS.
+    ///   This accommodates footer schemas that expose only the physical type; Kernel cannot
+    ///   validate an annotation or CRS absent from the reported schema.
     /// - Missing fields in checkpoint: OK (will return null when accessed)
     /// - Extra fields in checkpoint: OK (ignored)
     fn structs_have_compatible_types(
         available: &StructType,
         needed: &StructType,
         context: &str,
-        #[cfg(feature = "geo-type-in-dev")] allow_geometry_bounds: bool,
+        kind: CheckpointFieldKind,
     ) -> bool {
         for needed_field in needed.fields() {
             let Some(available_field) = available.field(needed_field.name()) else {
@@ -1593,8 +1593,7 @@ impl LogSegment {
                         avail_struct,
                         need_struct,
                         &nested_context(),
-                        #[cfg(feature = "geo-type-in-dev")]
-                        allow_geometry_bounds,
+                        kind,
                     ) {
                         return false;
                     }
@@ -1603,13 +1602,8 @@ impl LogSegment {
                 // schema rules otherwise.
                 (avail_type, need_type) => {
                     let compatible = match (avail_type, need_type) {
-                        #[cfg(feature = "geo-type-in-dev")]
-                        (
-                            DataType::Primitive(PrimitiveType::Binary),
-                            DataType::Primitive(PrimitiveType::Geometry(_)),
-                        ) if allow_geometry_bounds => true,
                         (DataType::Primitive(a), DataType::Primitive(b)) => {
-                            a.is_stats_type_compatible_with(b)
+                            kind.primitive_types_are_compatible(a, b)
                         }
                         (DataType::Struct(a), DataType::Variant(b)) => {
                             a.num_fields() == b.num_fields()
@@ -1618,8 +1612,7 @@ impl LogSegment {
                                     a,
                                     b,
                                     &nested_context(),
-                                    #[cfg(feature = "geo-type-in-dev")]
-                                    allow_geometry_bounds,
+                                    kind,
                                 )
                         }
                         (a, b) => a.can_read_as(b).is_ok(),
@@ -1674,14 +1667,38 @@ impl LogSegment {
             partition_struct,
             partition_schema,
             "partitionValues_parsed",
-            #[cfg(feature = "geo-type-in-dev")]
-            false,
+            CheckpointFieldKind::PartitionValues,
         ) {
             return false;
         }
 
         debug!("Checkpoint schema has compatible partitionValues_parsed for partition pruning");
         true
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CheckpointFieldKind {
+    Stats,
+    PartitionValues,
+}
+
+impl CheckpointFieldKind {
+    fn primitive_types_are_compatible(
+        self,
+        available: &PrimitiveType,
+        needed: &PrimitiveType,
+    ) -> bool {
+        #[cfg(feature = "geo-type-in-dev")]
+        if self == Self::Stats
+            && matches!(
+                (available, needed),
+                (PrimitiveType::Binary, PrimitiveType::Geometry(_))
+            )
+        {
+            return true;
+        }
+        available.is_stats_type_compatible_with(needed)
     }
 }
 
