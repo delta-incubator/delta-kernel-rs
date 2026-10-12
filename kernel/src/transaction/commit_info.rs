@@ -12,6 +12,18 @@ use crate::{
     create_row, DataType, Engine, EngineData, Expression, ExpressionRef, KernelError, KernelResult,
 };
 
+pub(super) fn collect_operation_metadata<I, K, V>(entries: I) -> HashMap<String, Option<String>>
+where
+    I: IntoIterator<Item = (K, Option<V>)>,
+    K: Into<String>,
+    V: Into<String>,
+{
+    entries
+        .into_iter()
+        .map(|(key, value)| (key.into(), value.map(Into::into)))
+        .collect()
+}
+
 /// Builds a list of `(field_name, literal_expression)` pairs covering every [`CommitInfo`]
 /// field. Field names match the camelCase schema names produced by the `ToSchema` derive macro.
 /// The returned vec preserves CommitInfo schema field order, which callers rely on when

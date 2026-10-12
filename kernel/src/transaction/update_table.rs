@@ -509,7 +509,7 @@ pub(super) fn new_dv_column_schema() -> &'static SchemaRef {
 
 // These methods are generic over the transaction state `S` because they are called from the
 // shared `commit()` path in `mod.rs` (`impl<S> Transaction<S>`). DV updates can only be
-// populated on `ExistingTableTransaction`, so the `is_create_table()` guard below is
+// populated on update-table transactions, so the `is_create_table()` guard below is
 // defense-in-depth against future misuse.
 impl<S> Transaction<S> {
     /// Generate remove/add action pairs for files with DV updates.
