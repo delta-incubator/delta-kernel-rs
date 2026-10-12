@@ -319,6 +319,7 @@ mod tests {
             requested_physical_stats_columns: Vec::new(),
             is_catalog_managed: true,
             skip_row_transforms: false,
+            dv_normalization_root: None,
         });
         let processor = ScanLogReplayProcessor::new(
             &engine,
