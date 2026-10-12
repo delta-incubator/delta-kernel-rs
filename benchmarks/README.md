@@ -128,14 +128,24 @@ from build caches, and available files are uploaded even if a benchmark or the r
 Canceled runs upload available output when cancellation allows the upload step to finish. Artifacts
 are retained for 90 days.
 
-The job logs identify each measurement phase and its full checked-out commit SHA. Use the GitHub API
-to retrieve logs, I/O summaries, runner details, source/configuration, and workload releases; these
-are not duplicated in the artifact. To reproduce the comparison after downloading the artifact:
+The job logs include the measured commit SHAs, runner details, and per-benchmark `[io]` summaries.
+Retrieve source/configuration from those commits; the workload release tag, asset name, and checksum
+are pinned in `benchmarks/build.rs`. These are available through GitHub and are not duplicated in the
+artifact. To download and reproduce the comparison using the same critcmp version as CI:
 
 ```bash
+cargo install critcmp --version 0.1.8 --locked
+gh run download RUN_ID --repo delta-io/delta-kernel-rs --name bench-results --dir bench-results
 critcmp --target-dir bench-results/base --export base > /tmp/base.json
 critcmp --target-dir bench-results/changes --export changes > /tmp/changes.json
 critcmp /tmp/base.json /tmp/changes.json
+```
+
+The script tests run in build CI, including on draft PRs. They use mocked benchmark tools and do
+not require installing critcmp. Run them locally with:
+
+```bash
+python3 -m unittest discover --start-directory benchmarks/ci --pattern 'test_*.py'
 ```
 
 To trigger benchmarks on a pull request manually, post a comment using the following syntax:

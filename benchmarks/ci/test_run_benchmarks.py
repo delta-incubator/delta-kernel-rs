@@ -108,6 +108,8 @@ class BenchmarkScriptTests(unittest.TestCase):
         self.git("remote", "add", "origin", str(self.repository))
         self.script = self.root / "run-benchmarks.sh"
         script = (source_directory / "run-benchmarks.sh").read_text()
+        self.assertIn("} > /tmp/bench-comment.md", script)
+        self.assertIn("export BENCH_REGRESSION_FILE=/tmp/bench-regression.txt", script)
         self.script.write_text(
             script.replace("/tmp/bench-comment.md", str(self.comment_file))
             .replace("/tmp/bench-regression.txt", str(self.regression_file))
@@ -220,6 +222,7 @@ class BenchmarkScriptTests(unittest.TestCase):
                     )
                 self.assertEqual(self.git("rev-parse", "HEAD").strip(), self.changes_sha)
                 self.assertEqual(stale.read_text(), "stale cache output")
+                self.assertFalse((self.root / "old-criterion").exists())
                 self.assertIn("mock_workload", self.comment_file.read_text())
                 previous_results = results
 

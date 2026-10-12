@@ -85,8 +85,7 @@ jobs:
     # Auto-trigger: PR push events, skipping drafts. Comment-trigger: a
     # literal /bench, optionally followed by args (e.g. /bench --tags base).
     if: >
-      (github.event_name == 'pull_request' &&
-       (github.event.pull_request.draft == false || github.event.pull_request.number == 3572))
+      (github.event_name == 'pull_request' && github.event.pull_request.draft == false)
       || (github.event_name == 'issue_comment' && github.event.issue.pull_request &&
           (github.event.comment.body == '/bench' || startsWith(github.event.comment.body, '/bench ')))
     # Job-level (not workflow-level) so unrelated PR comments don't join the
@@ -203,8 +202,6 @@ jobs:
           # and the job stops (parity with build/test; see SECURITY_MODEL.md).
           ref: refs/pull/${{ steps.pr.outputs.pr_number }}/merge
           persist-credentials: false
-      - name: Test benchmark comparison script
-        run: python3 -m unittest discover --start-directory benchmarks/ci --pattern 'test_*.py'
       - uses: actions-rust-lang/setup-rust-toolchain@150fca883cd4034361b621bd4e6a9d34e5143606 # v1.15.4
         with:
           cache: false
@@ -226,7 +223,7 @@ jobs:
         # COMMENT is only meaningful under issue_comment; under pull_request
         # the expression resolves to "" and the script treats that as bare /bench.
         env:
-          COMMENT:  /bench --tags base --filter ^crcLatest/snapshotLatest$
+          COMMENT:  ${{ github.event.comment.body }}
           TRIGGER:  ${{ github.event_name == 'issue_comment' && '/bench' || 'auto-push' }}
           BASE_REF: ${{ steps.pr.outputs.base_ref }}
           HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
