@@ -1,13 +1,14 @@
-//! Borrowed protobuf transport for request-local snapshot planning.
+//! Borrowed protobuf transport for snapshot reconstruction and scan planning.
 
-use delta_kernel::scan::externalized::{declarative_metadata_plan, SourceSnapshotScanState};
+use std::sync::Arc;
+
+use delta_kernel::snapshot::externalized::{snapshot_from_source, SourceSnapshotState};
 use delta_kernel::KernelResult;
 use url::Url;
 
 use super::{invalid, FfiSnapshotHint};
 use crate::error::{ExternResult, IntoExternResult};
 use crate::handle::Handle;
-use crate::scan::SharedScan;
 use crate::{
     KernelBytesSlice, KernelStringSlice, NullableCvoid, SharedExternEngine, SharedSnapshot,
     TryFromStringSlice,
@@ -41,32 +42,27 @@ pub unsafe extern "C" fn snapshot_schema_to_proto(
     unsafe { deliver(&bytes, context, visitor) }.into_extern_result(&engine)
 }
 
-/// Builds a default metadata plan from an unchanged exported snapshot hint and schema protobuf.
+/// Reconstructs an owned snapshot from an unchanged exported hint and complete schema protobuf.
 ///
-/// All transferred components and reconstructed native state live only for this call. The full
-/// schema is constructed. Table/protocol compatibility and scan-support checks run; source-proven
-/// schema structural and log-segment checks are not repeated. The callback receives an Operation
-/// encoded by Kernel's standard protobuf serializer. Returns true after delivery and false when
-/// there is no plan. Errors do not deliver plan bytes.
+/// Inputs are copied and remain owned by the caller. Release the returned handle with
+/// `free_snapshot`. Built scans retain their own snapshot reference and can be reused after this
+/// handle is released. Configuration and snapshot-load checks run; source-proven structural schema
+/// and log-shape checks are not repeated.
 ///
 /// # Safety
 ///
 /// `value` must be non-null and all nested input memory must remain readable for this call. Enum
 /// tags must be valid. `table_root`, `value`, and `schema` must be unchanged state exported from
 /// one validated snapshot by this same Kernel build, and must remain immutable. This API must
-/// not be used for connector-authored hints. The engine handle is borrowed. The callback must not
-/// retain its borrowed bytes, release the engine, or unwind.
-/// `value.metadata.schema_string` is ignored and may be an empty slice: the complete schema
-/// is supplied by `schema`.
+/// not be used for connector-authored hints. The engine handle is borrowed and must remain valid
+/// throughout the call. The metadata must include its original schema string.
 #[no_mangle]
-pub unsafe extern "C" fn snapshot_hint_declarative_metadata_plan_trusted(
+pub unsafe extern "C" fn snapshot_hint_reconstruct_trusted(
     table_root: KernelStringSlice,
     value: *const FfiSnapshotHint,
     schema: KernelBytesSlice,
     engine: Handle<SharedExternEngine>,
-    context: NullableCvoid,
-    visitor: VisitKernelBytesFn,
-) -> ExternResult<bool> {
+) -> ExternResult<Handle<SharedSnapshot>> {
     let engine = unsafe { engine.as_ref() };
     let result = (|| {
         let value =
@@ -76,54 +72,24 @@ pub unsafe extern "C" fn snapshot_hint_declarative_metadata_plan_trusted(
         let logical_schema =
             delta_kernel::plans::proto::decode_trusted_schema(unsafe { schema.try_as_slice() }?)?;
         let log_paths = unsafe { value.log_paths.trusted_snapshot_log_paths(&table_root) }?;
-        let state = SourceSnapshotScanState {
+        let state = SourceSnapshotState {
             table_root,
             version: value.version,
             publication_watermark: value.publication_watermark.into(),
             log_paths,
             protocol: unsafe { value.protocol.try_to_kernel() }?,
-            metadata: unsafe { value.metadata.try_to_kernel_with_schema(String::new()) }?,
+            metadata: unsafe { value.metadata.try_to_kernel() }?,
             logical_schema,
             last_checkpoint: unsafe { value.last_checkpoint.as_ref() }
                 .map(|value| unsafe { value.try_to_kernel() })
                 .transpose()?,
+            crc: unsafe { value.crc.as_ref() }
+                .map(|value| unsafe { value.try_to_kernel() }.map(Arc::new))
+                .transpose()?,
+            freshness: value.freshness.into(),
         };
-        let Some(plan) = declarative_metadata_plan(state, engine.engine().as_ref())? else {
-            return Ok(false);
-        };
-        let bytes = delta_kernel::Operation::QueryPlan(plan).to_proto_bytes();
-        unsafe { deliver(&bytes, context, visitor) }
+        snapshot_from_source(state).map(Into::into)
     })();
-    result.into_extern_result(&engine)
-}
-
-/// Delivers a retained scan's metadata plan through the same borrowed byte callback.
-///
-/// Returns true after delivery, false for no plan, and an error if planning or delivery fails.
-/// The callback receives the standard protobuf Operation, not an owned native byte allocation.
-///
-/// # Safety
-///
-/// Both handles are borrowed. The callback must not release them, retain borrowed bytes, or
-/// unwind. They must remain valid until the downcall returns.
-#[no_mangle]
-pub unsafe extern "C" fn scan_declarative_metadata_plan_visit(
-    scan: Handle<SharedScan>,
-    engine: Handle<SharedExternEngine>,
-    context: NullableCvoid,
-    visitor: VisitKernelBytesFn,
-) -> ExternResult<bool> {
-    let scan = unsafe { scan.as_ref() };
-    let engine = unsafe { engine.as_ref() };
-    let result = scan
-        .declarative_metadata_scan_plan(engine.engine().as_ref())
-        .and_then(|plan| match plan {
-            Some(plan) => {
-                let bytes = delta_kernel::Operation::QueryPlan(plan).to_proto_bytes();
-                unsafe { deliver(&bytes, context, visitor) }
-            }
-            None => Ok(false),
-        });
     result.into_extern_result(&engine)
 }
 

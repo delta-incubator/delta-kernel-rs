@@ -1,5 +1,6 @@
 //! Public-facing [`LogPath`] type for representing paths to delta log files.
 
+#[cfg(all(feature = "declarative-plans", feature = "internal-api"))]
 use delta_kernel_derive::internal_api;
 use url::Url;
 
@@ -26,6 +27,7 @@ impl LogPath {
     ///
     /// Uses the general log-path classifier without cloning file metadata for diagnostics.
     /// Returns an error if the supplied location is not a recognized log file.
+    #[cfg(all(feature = "declarative-plans", feature = "internal-api"))]
     #[internal_api]
     pub(crate) fn try_new_from_trusted_snapshot(file_meta: FileMeta) -> Result<Self> {
         let parsed = ParsedLogPath::try_from(file_meta)?
