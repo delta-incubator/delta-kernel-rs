@@ -8,6 +8,7 @@
 //! action is the file location, size, and row-tracking numbers. `modificationTime` and
 //! `dataChange` have no AMT source and are supplied by the caller via [`ReadContext`].
 
+use std::iter;
 use std::sync::{Arc, LazyLock};
 
 use bytes::Bytes;
@@ -467,6 +468,60 @@ impl RowVisitor for AddSelectionVisitor {
     }
 }
 
+/// Collects a [`LeafRef`] for every live `DataManifest` entry of the root-manifest entry batches
+/// it visits, in row order across batches. Non-live `DataManifest` entries and all other entries
+/// are skipped.
+///
+/// Visiting returns an error if an entry has an unknown content type, if a `DataManifest` entry
+/// has an unknown tracking status, or if a live one cannot be parsed (see
+/// [`LeafRef::try_from_getters`]).
+struct LeafRefVisitor<'u> {
+    /// The table root URL relative leaf locations resolve against.
+    table_root: &'u Url,
+    leaves: Vec<LeafRef>,
+}
+
+impl<'u> LeafRefVisitor<'u> {
+    fn new(table_root: &'u Url) -> Self {
+        Self {
+            table_root,
+            leaves: Vec::new(),
+        }
+    }
+}
+
+impl RowVisitor for LeafRefVisitor<'_> {
+    fn selected_column_names_and_types(&self) -> (&'static [ColumnName], &'static [DataType]) {
+        static NAMES_AND_TYPES: LazyLock<ColumnNamesAndTypes> = LazyLock::new(|| {
+            let (names, types) = LEAF_REF_COLUMNS.as_ref();
+            let names = iter::once(ColumnName::new([CONTENT_TYPE])).chain(names.iter().cloned());
+            let types = iter::once(DataType::INTEGER).chain(types.iter().cloned());
+            (names.collect(), types.collect()).into()
+        });
+        NAMES_AND_TYPES.as_ref()
+    }
+
+    fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> KernelResult<()> {
+        for row in 0..row_count {
+            let content_type = DataContentType::try_from_repr(getters[0].get(row, CONTENT_TYPE)?)?;
+            if content_type != DataContentType::DataManifest {
+                continue;
+            }
+            // Check liveness before parsing the rest of the row: `tracking.status` is the first
+            // tracking column, which ends `LEAF_REF_COLUMNS`.
+            let status_index =
+                1 + LEAF_REF_COLUMNS.as_ref().0.len() - TRACKING_COLUMNS.as_ref().0.len();
+            let status = getters[status_index].get(row, TRACKING_STATUS)?;
+            if !TrackingStatus::try_from_repr(status)?.is_live() {
+                continue;
+            }
+            let leaf = LeafRef::try_from_getters(row, &getters[1..], self.table_root)?;
+            self.leaves.push(leaf);
+        }
+        Ok(())
+    }
+}
+
 /// Rejects a selected (live `Data`) entry carrying a field the read path cannot yet translate into
 /// its `Add`. `getters` is [`AddSelectionVisitor`]'s column order.
 fn check_selected_entry<'a>(
@@ -613,7 +668,7 @@ mod tests {
 
     use super::*;
     use crate::content_tree::test_utils::{
-        added_data_entry, entry_batch, struct_batch, with_field,
+        added_data_entry, data_manifest_entry, entry_batch, struct_batch, with_field,
     };
     use crate::content_tree::{DeletionVectorInfo, ManifestInfo};
     use crate::engine::arrow_conversion::TryFromArrow as _;
@@ -803,6 +858,75 @@ mod tests {
         );
     }
 
+    /// Collects the leaf references of `batches`, visiting each as its own root entry batch.
+    fn collect_leaf_refs(batches: &[&[ContentTreeNodeEntry]]) -> KernelResult<Vec<LeafRef>> {
+        let engine = SyncEngine::new();
+        let table_root = Url::parse("memory:///table/").unwrap();
+        let mut visitor = LeafRefVisitor::new(&table_root);
+        for entries in batches {
+            visitor.visit_rows_of(entry_batch(&engine, entries).as_ref())?;
+        }
+        Ok(visitor.leaves)
+    }
+
+    #[test]
+    fn collect_leaf_refs_returns_live_data_manifests_in_order_across_batches() {
+        // Per-commit change positions are not a manifest deletion vector, so they are accepted.
+        let mut existing = data_manifest_entry("existing.parquet", 30, TrackingStatus::Existing);
+        existing.tracking.deleted_positions = Some(Bytes::from_static(b"dv"));
+        existing.tracking.replaced_positions = Some(Bytes::from_static(b"dv"));
+        let first = [
+            added_data_entry("data.parquet", 1, 1, 0, 0),
+            data_manifest_entry("added.parquet", 10, TrackingStatus::Added),
+            data_manifest_entry("deleted.parquet", 2, TrackingStatus::Deleted),
+        ];
+        let second = [
+            existing,
+            data_manifest_entry("replaced.parquet", 40, TrackingStatus::Replaced),
+            data_manifest_entry("modified.parquet", 50, TrackingStatus::Modified),
+        ];
+        let expected: Vec<_> = [&first[1], &second[0], &second[2]]
+            .iter()
+            .map(|e| {
+                let location = format!("memory:///table/{}", e.location);
+                (location, e.file_size_in_bytes as u64, e.tracking.clone())
+            })
+            .collect();
+
+        let leaves: Vec<_> = collect_leaf_refs(&[&first, &[], &second])
+            .unwrap()
+            .into_iter()
+            .map(|l| {
+                (
+                    l.file_meta.location.to_string(),
+                    l.file_meta.size,
+                    l.tracking,
+                )
+            })
+            .collect();
+        assert_eq!(leaves, expected);
+    }
+
+    #[rstest]
+    #[case::unknown_content_type(&[CONTENT_TYPE], Scalar::Integer(9), "content type value: 9")]
+    #[case::unknown_status(&[TRACKING, TRACKING_STATUS], Scalar::Integer(9), "status value: 9")]
+    #[case::unresolvable_location(
+        &[LOCATION],
+        Scalar::from("s3://bucket/a/../leaf.parquet"),
+        "s3://bucket/a/../leaf.parquet"
+    )]
+    fn collect_leaf_refs_rejects_malformed_entry(
+        #[case] path: &[&str],
+        #[case] value: Scalar,
+        #[case] message: &str,
+    ) {
+        let engine = SyncEngine::new();
+        let table_root = Url::parse("memory:///table/").unwrap();
+        let entry = data_manifest_entry("leaf.parquet", 1, TrackingStatus::Existing);
+        let batch = struct_batch(&engine, &[with_field(&entry.into(), path, value)]);
+        let mut visitor = LeafRefVisitor::new(&table_root);
+        assert_result_error_with_message(visitor.visit_rows_of(batch.as_ref()), message);
+    }
     #[test]
     fn converts_added_data_entries_to_add_actions() {
         let engine = SyncEngine::new();

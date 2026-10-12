@@ -51,6 +51,19 @@ pub(crate) fn added_data_entry(
     }
 }
 
+/// A `DataManifest` entry referencing the leaf manifest at `location` with the given size and
+/// tracking status.
+pub(crate) fn data_manifest_entry(
+    location: &str,
+    size: i64,
+    status: TrackingStatus,
+) -> ContentTreeNodeEntry {
+    let mut entry = added_data_entry(location, size, 0, 0, 1);
+    entry.content_type = DataContentType::DataManifest;
+    entry.tracking.status = status;
+    entry
+}
+
 /// Builds a content-tree entry batch from explicit entries, with the [`ContentTreeNodeEntry`]
 /// schema (no `partition` or `content_stats` columns).
 pub(crate) fn entry_batch(
