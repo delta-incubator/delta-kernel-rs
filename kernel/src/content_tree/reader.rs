@@ -10,12 +10,15 @@
 
 use std::sync::{Arc, LazyLock};
 
-use crate::actions::{ADD_NAME, ADD_SCHEMA, LOG_ADD_SCHEMA};
+use bytes::Bytes;
+use url::Url;
+
+use crate::actions::{amt_manifest_filemeta, ADD_NAME, ADD_SCHEMA, LOG_ADD_SCHEMA};
 use crate::content_tree::{
     struct_expr_from_schema, ContentTreeNodeEntry, DataContentType, DataFileFormat, TrackingInfo,
     TrackingStatus, CONTENT_TYPE, DV_INFO, DV_SNAPSHOT_ID, FILE_FORMAT, FILE_SIZE_IN_BYTES,
-    FIRST_ROW_ID, LOCATION, PARTITION_SPEC_ID, RECORD_COUNT, SEQUENCE_NUMBER, TRACKING,
-    TRACKING_STATUS,
+    FIRST_ROW_ID, FORMAT_VERSION, LOCATION, MANIFEST_DV, MANIFEST_DV_CARDINALITY, MANIFEST_INFO,
+    PARTITION_SPEC_ID, RECORD_COUNT, SEQUENCE_NUMBER, TRACKING, TRACKING_COLUMNS, TRACKING_STATUS,
 };
 use crate::engine_data::{EngineData, FilteredEngineData, GetData, RowVisitor, TypedGetData as _};
 use crate::expressions::{lit, ArrayData, ColumnName, Expression, MapData, Scalar};
@@ -27,7 +30,7 @@ use crate::schema::{
     ArrayType, ColumnNamesAndTypes, DataType, MapType, SchemaRef, StructField, StructType,
     ToSchema as _,
 };
-use crate::{Engine, ExpressionEvaluator, KernelError, KernelResult};
+use crate::{Engine, ExpressionEvaluator, FileMeta, KernelError, KernelResult};
 
 /// Values the read path emits into every `Add` action but cannot derive from an AMT entry, so the
 /// caller must supply them.
@@ -40,6 +43,79 @@ pub(crate) struct ReadContext {
     pub(crate) modification_time: i64,
     /// Emitted as `Add.dataChange`.
     pub(crate) data_change: bool,
+}
+
+/// A leaf manifest referenced by a live root `DataManifest` entry: where to read it, and the
+/// parent values its entries inherit or are filtered by.
+struct LeafRef {
+    /// The resolved leaf manifest file to read.
+    file_meta: FileMeta,
+    /// Tracking info of the referencing root `DataManifest` entry.
+    tracking: TrackingInfo,
+    /// The root entry's `manifestInfo.dv`: a deletion vector over the leaf's entry positions.
+    manifest_dv: Option<Bytes>,
+    /// The root entry's `manifestInfo.dvCardinality`.
+    manifest_dv_cardinality: Option<i64>,
+    /// The root entry's `formatVersion`.
+    format_version: i32,
+}
+
+/// The columns [`LeafRef::try_from_getters`] reads, in getter order: the root entry's own fields
+/// followed by [`TRACKING_COLUMNS`].
+static LEAF_REF_COLUMNS: LazyLock<ColumnNamesAndTypes> = LazyLock::new(|| {
+    let (tracking_names, tracking_types) = TRACKING_COLUMNS.as_ref();
+    let names = [
+        ColumnName::new([LOCATION]),
+        ColumnName::new([FILE_SIZE_IN_BYTES]),
+        ColumnName::new([MANIFEST_INFO, MANIFEST_DV]),
+        ColumnName::new([MANIFEST_INFO, MANIFEST_DV_CARDINALITY]),
+        ColumnName::new([FORMAT_VERSION]),
+    ];
+    let types = [
+        DataType::STRING,
+        DataType::LONG,
+        DataType::BINARY,
+        DataType::LONG,
+        DataType::INTEGER,
+    ];
+    let names = names.into_iter().chain(tracking_names.iter().cloned());
+    let types = types.into_iter().chain(tracking_types.iter().cloned());
+    (names.collect(), types.collect()).into()
+});
+
+impl LeafRef {
+    /// Parses one root `DataManifest` row from `getters`, which must follow [`LEAF_REF_COLUMNS`]
+    /// order. The raw `location` resolves against `table_root` when relative.
+    ///
+    /// # Errors
+    /// Returns an error if the getter count differs from [`LEAF_REF_COLUMNS`], if a required
+    /// field is null or has the wrong type, if `location` cannot be resolved, if
+    /// `fileSizeInBytes` is negative, or if the tracking info is invalid (see
+    /// [`TrackingInfo::try_from_getters`]).
+    fn try_from_getters<'a>(
+        row: usize,
+        getters: &[&'a dyn GetData<'a>],
+        table_root: &Url,
+    ) -> KernelResult<Self> {
+        let expected = LEAF_REF_COLUMNS.as_ref().0.len();
+        if getters.len() != expected {
+            return Err(KernelError::internal_error(format!(
+                "Expected {expected} AMT leaf reference getters, got {}",
+                getters.len()
+            )));
+        }
+        let location: &str = getters[0].get(row, LOCATION)?;
+        let size: i64 = getters[1].get(row, FILE_SIZE_IN_BYTES)?;
+        let manifest_dv: Option<&[u8]> = getters[2].get_opt(row, MANIFEST_DV)?;
+        let context = format!("AMT leaf manifest '{location}'");
+        Ok(Self {
+            file_meta: amt_manifest_filemeta(location, size, table_root, &context)?,
+            tracking: TrackingInfo::try_from_getters(row, &getters[5..])?,
+            manifest_dv: manifest_dv.map(Bytes::copy_from_slice),
+            manifest_dv_cardinality: getters[3].get_opt(row, MANIFEST_DV_CARDINALITY)?,
+            format_version: getters[4].get(row, FORMAT_VERSION)?,
+        })
+    }
 }
 
 /// Expressions for the `Add` row-tracking fields whose source differs between root and leaf
@@ -646,6 +722,85 @@ mod tests {
             .evaluation_handler()
             .create_many(LOG_ADD_SCHEMA.clone(), rows.to_vec())
             .unwrap()
+    }
+
+    /// Parses every row of `entries` as a [`LeafRef`] against `memory:///table/`.
+    fn parse_leaf_refs(entries: &[ContentTreeNodeEntry]) -> KernelResult<Vec<LeafRef>> {
+        struct Visitor {
+            table_root: Url,
+            leaves: Vec<LeafRef>,
+        }
+        impl RowVisitor for Visitor {
+            fn selected_column_names_and_types(
+                &self,
+            ) -> (&'static [ColumnName], &'static [DataType]) {
+                LEAF_REF_COLUMNS.as_ref()
+            }
+
+            fn visit<'a>(
+                &mut self,
+                row_count: usize,
+                getters: &[&'a dyn GetData<'a>],
+            ) -> KernelResult<()> {
+                for row in 0..row_count {
+                    let leaf = LeafRef::try_from_getters(row, getters, &self.table_root)?;
+                    self.leaves.push(leaf);
+                }
+                Ok(())
+            }
+        }
+        let engine = SyncEngine::new();
+        let mut visitor = Visitor {
+            table_root: Url::parse("memory:///table/").unwrap(),
+            leaves: Vec::new(),
+        };
+        visitor.visit_rows_of(entry_batch(&engine, entries).as_ref())?;
+        Ok(visitor.leaves)
+    }
+
+    #[rstest]
+    #[case::relative("metadata/leaf.parquet", "memory:///table/metadata/leaf.parquet")]
+    #[case::absolute("s3://bucket/leaf.parquet", "s3://bucket/leaf.parquet")]
+    fn leaf_ref_resolves_location_against_table_root(
+        #[case] location: &str,
+        #[case] expected: &str,
+    ) {
+        let leaves = parse_leaf_refs(&[added_data_entry(location, 42, 1, 0, 0)]).unwrap();
+        assert_eq!(leaves[0].file_meta.location.as_str(), expected);
+        assert_eq!(leaves[0].file_meta.size, 42);
+    }
+
+    #[rstest]
+    fn leaf_ref_carries_parent_fields(#[values(false, true)] with_dv: bool) {
+        let mut entry = added_data_entry("leaf.parquet", 1, 1, 7, 3);
+        entry.format_version = 9;
+        entry.manifest_info = Some(ManifestInfo {
+            dv: with_dv.then(|| Bytes::from_static(b"dv")),
+            dv_cardinality: with_dv.then_some(4),
+            ..Default::default()
+        });
+        let leaf = parse_leaf_refs(&[entry.clone()]).unwrap().pop().unwrap();
+        assert_eq!(leaf.tracking, entry.tracking);
+        assert_eq!(leaf.manifest_dv, with_dv.then(|| Bytes::from_static(b"dv")));
+        assert_eq!(leaf.manifest_dv_cardinality, with_dv.then_some(4));
+        assert_eq!(leaf.format_version, 9);
+    }
+
+    #[test]
+    fn leaf_ref_rejects_negative_size() {
+        assert_result_error_with_message(
+            parse_leaf_refs(&[added_data_entry("leaf.parquet", -1, 1, 0, 0)]),
+            "AMT leaf manifest 'leaf.parquet' size -1",
+        );
+    }
+
+    #[test]
+    fn leaf_ref_rejects_wrong_getter_count() {
+        let table_root = Url::parse("memory:///table/").unwrap();
+        assert_result_error_with_message(
+            LeafRef::try_from_getters(0, &[], &table_root),
+            "AMT leaf reference getters, got 0",
+        );
     }
 
     #[test]
