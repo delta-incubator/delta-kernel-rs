@@ -121,6 +121,23 @@ The bench job fails if any benchmark is at least 15% slower than the base branch
 comment is still posted so you can see which benchmark regressed. To merge anyway (for an
 expected or noise-driven regression), add the `ignore-benchmark-failure` label to the PR.
 
+Each measured run uploads a `bench-results` artifact with separate `base/criterion/` and
+`changes/criterion/` trees. These contain all generated Criterion files, including raw samples,
+statistical estimates, benchmark metadata, outlier fences, and HTML/SVG reports. Output is isolated
+from build caches, and available files are uploaded even if a benchmark or the regression gate fails.
+Canceled runs upload available output when cancellation allows the upload step to finish. Artifacts
+are retained for 90 days.
+
+The job logs identify each measurement phase and its full checked-out commit SHA. Use the GitHub API
+to retrieve logs, I/O summaries, runner details, source/configuration, and workload releases; these
+are not duplicated in the artifact. To reproduce the comparison after downloading the artifact:
+
+```bash
+critcmp --target-dir bench-results/base --export base > /tmp/base.json
+critcmp --target-dir bench-results/changes --export changes > /tmp/changes.json
+critcmp /tmp/base.json /tmp/changes.json
+```
+
 To trigger benchmarks on a pull request manually, post a comment using the following syntax:
 
 ```

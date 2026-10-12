@@ -202,6 +202,8 @@ jobs:
           # and the job stops (parity with build/test; see SECURITY_MODEL.md).
           ref: refs/pull/${{ steps.pr.outputs.pr_number }}/merge
           persist-credentials: false
+      - name: Test benchmark comparison script
+        run: python3 -m unittest discover --start-directory benchmarks/ci --pattern 'test_*.py'
       - uses: actions-rust-lang/setup-rust-toolchain@150fca883cd4034361b621bd4e6a9d34e5143606 # v1.15.4
         with:
           cache: false
@@ -216,6 +218,7 @@ jobs:
           shared-key: bench
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Run benchmarks
+        id: bench
         # The benchmark-post-comment workflow picks up the uploaded artifact
         # and posts the PR comment in base-branch context (which has the
         # write scope this workflow lacks on fork PRs).
@@ -251,3 +254,12 @@ jobs:
             exit 1
           fi
           echo "Regression gate passed (regressed=$REGRESSED, ignore_failure=$IGNORE_FAILURE)."
+      - name: Upload Criterion results
+        if: ${{ always() && steps.bench.outputs.results_dir != '' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: bench-results
+          path: ${{ steps.bench.outputs.results_dir }}
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 90
