@@ -5,7 +5,6 @@
 //! the `ClusteredTable` feature is enabled. This module validates that those stat entries
 //! exist for each required column.
 
-use std::ops::Deref;
 use std::sync::LazyLock;
 
 use crate::actions::{MAX_VALUES, MIN_VALUES, NULL_COUNT, NUM_RECORDS};
@@ -14,7 +13,7 @@ use crate::error::KernelError;
 use crate::expressions::{column_name, ColumnName};
 use crate::schema::{ColumnNamesAndTypes, DataType, DecimalType, PrimitiveType};
 use crate::utils::require;
-use crate::{EngineData, KernelResult, Result};
+use crate::{KernelResult, Result};
 
 /// Verifies that add file statistics contain required columns.
 ///
@@ -35,25 +34,25 @@ impl StatsColumnVerifier {
 
     /// Verify that all files in the provided batches have required statistics.
     #[cfg_attr(not(feature = "internal-api"), allow(unreachable_pub))]
-    pub fn verify(
-        &self,
-        add_files: impl IntoIterator<Item = Result<impl Deref<Target = dyn EngineData>>>,
-    ) -> Result<()> {
-        let mut validations: Vec<_> = self
+    pub fn verify(&self, add_files: &[Box<dyn crate::EngineData>]) -> Result<()> {
+        if self.required_columns.is_empty() {
+            return Ok(());
+        }
+
+        let mut validators: Vec<_> = self
             .required_columns
             .iter()
             .map(|(column, data_type)| ColumnStatsValidator::try_new(column, data_type))
             .collect::<Result<_>>()?;
 
         for batch in add_files {
-            let batch = batch?;
-            for (column_names, validation) in &mut validations {
-                batch.visit_rows(column_names, validation)?;
+            for (column_names, validator) in &mut validators {
+                batch.visit_rows(column_names, validator)?;
             }
         }
 
-        for (_, validation) in validations {
-            validation.finish()?;
+        for (_, validator) in validators {
+            validator.finish()?;
         }
         Ok(())
     }
@@ -69,17 +68,15 @@ impl ColumnStatsValidator {
             build_stat_path(column, MAX_VALUES),
         ];
         let types = column_types_for(data_type)?;
-        Ok((
-            column_names,
-            Self {
-                column: column.clone(),
-                data_type: data_type.clone(),
-                types,
-                missing_null_count: Vec::new(),
-                missing_min: Vec::new(),
-                missing_max: Vec::new(),
-            },
-        ))
+        let validator = Self {
+            column: column.clone(),
+            data_type: data_type.clone(),
+            types,
+            missing_null_count: Vec::new(),
+            missing_min: Vec::new(),
+            missing_max: Vec::new(),
+        };
+        Ok((column_names, validator))
     }
 
     fn finish(self) -> Result<()> {
@@ -319,13 +316,10 @@ impl RowVisitor for ColumnStatsValidator {
 /// Verify that every `add` action has `stats.numRecords` populated. Short-circuits on the first
 /// violation and returns an error containing the `add.path`.
 #[cfg_attr(not(feature = "internal-api"), allow(unreachable_pub))]
-pub fn verify_num_records_present(
-    add_files: impl IntoIterator<Item = Result<impl Deref<Target = dyn EngineData>>>,
-) -> Result<()> {
+pub fn verify_num_records_present(add_files: &[Box<dyn crate::EngineData>]) -> Result<()> {
     let column_names = vec![column_name!("path"), column_name!("stats", NUM_RECORDS)];
     let mut first_missing: Option<String> = None;
     for batch in add_files {
-        let batch = batch?;
         let mut visitor = NumRecordsValidator {
             first_missing: &mut first_missing,
         };

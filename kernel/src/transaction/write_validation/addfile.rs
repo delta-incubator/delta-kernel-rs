@@ -108,12 +108,6 @@ mod tests {
         )
     }
 
-    impl StagedDataValidator {
-        fn validate_slices(self, batches: &[Box<dyn EngineData>]) -> crate::Result<()> {
-            self.validate(batches.iter().map(|batch| Ok(batch.as_ref())))
-        }
-    }
-
     fn as_engine_data(batch: RecordBatch) -> [Box<dyn EngineData>; 1] {
         [Box::new(ArrowEngineData::new(batch)) as Box<dyn EngineData>]
     }
@@ -158,7 +152,7 @@ mod tests {
             })
             .collect();
         assert_result_error_with_message(
-            add_file_validator(&[] /* physical_partition_columns */).validate_slices(&adds),
+            add_file_validator(&[] /* physical_partition_columns */).validate(&adds),
             &format!("missing required field '{field}'"),
         );
     }
@@ -212,8 +206,7 @@ mod tests {
             Arc::new(Int64Array::from(vec![modification_time])),
         );
         let adds = [Box::new(ArrowEngineData::new(batch)) as Box<dyn EngineData>];
-        let result =
-            add_file_validator(&[] /* physical_partition_columns */).validate_slices(&adds);
+        let result = add_file_validator(&[] /* physical_partition_columns */).validate(&adds);
 
         if let Some(expected_error) = expected_error {
             assert_result_error_with_message(result, expected_error);
@@ -226,7 +219,7 @@ mod tests {
     fn partition_values_exact_match_ok() {
         let batch = add_files_with_partition_values(&[&[("p1", Some("a")), ("p2", Some("b"))]]);
         add_file_validator(&["p1", "p2"] /* physical_partition_columns */)
-            .validate_slices(&as_engine_data(batch))
+            .validate(&as_engine_data(batch))
             .unwrap();
     }
 
@@ -234,7 +227,7 @@ mod tests {
     fn partition_value_null_still_counts_as_present() {
         let batch = add_files_with_partition_values(&[&[("p1", Some("a")), ("p2", None)]]);
         add_file_validator(&["p1", "p2"] /* physical_partition_columns */)
-            .validate_slices(&as_engine_data(batch))
+            .validate(&as_engine_data(batch))
             .unwrap();
     }
 
@@ -291,7 +284,7 @@ mod tests {
             })
             .collect();
         let error = add_file_validator(physical_partition_columns)
-            .validate_slices(&adds)
+            .validate(&adds)
             .expect_err("invalid partition values should be rejected");
         let KernelError::InvalidPartitionValues(message) = error else {
             panic!("expected InvalidPartitionValues, got {error:?}");
@@ -307,7 +300,7 @@ mod tests {
         let batch = add_files_with_partition_values(&[&[("stray", Some("x"))]]);
         assert_result_error_with_message(
             add_file_validator(&[] /* physical_partition_columns */)
-                .validate_slices(&as_engine_data(batch)),
+                .validate(&as_engine_data(batch)),
             "partitionValues keys",
         );
     }

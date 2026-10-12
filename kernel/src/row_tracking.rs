@@ -74,7 +74,7 @@ pub(crate) struct RowTrackingVisitor {
     /// High water mark for row IDs
     pub(crate) row_id_high_water_mark: i64,
 
-    pub(crate) collect_base_row_ids: bool,
+    collect_base_row_ids: bool,
     base_row_ids: Vec<i64>,
 }
 
@@ -90,6 +90,15 @@ impl RowTrackingVisitor {
         }
     }
 
+    /// Like [`Self::new`], but does not materialize rowid bases.
+    pub(crate) fn dry_run(row_id_high_water_mark: Option<i64>) -> Self {
+        Self {
+            collect_base_row_ids: false,
+            ..Self::new(row_id_high_water_mark)
+        }
+    }
+
+    /// Takes all rowid bases materialized so far.
     pub(crate) fn take_base_row_ids(&mut self) -> Vec<i64> {
         std::mem::take(&mut self.base_row_ids)
     }
@@ -116,12 +125,10 @@ impl RowVisitor for RowTrackingVisitor {
             ))
         );
 
-        self.base_row_ids.clear();
         if self.collect_base_row_ids {
             self.base_row_ids.reserve(row_count);
         }
 
-        let mut current_hwm = self.row_id_high_water_mark;
         for i in 0..row_count {
             let num_records: i64 = getters[0].get_opt(i, NUM_RECORDS)?.ok_or_else(|| {
                 KernelError::InternalError(format!(
@@ -129,12 +136,11 @@ impl RowVisitor for RowTrackingVisitor {
                 ))
             })?;
             if self.collect_base_row_ids {
-                self.base_row_ids.push(current_hwm + 1);
+                self.base_row_ids.push(self.row_id_high_water_mark + 1);
             }
-            current_hwm += num_records;
+            self.row_id_high_water_mark += num_records;
         }
 
-        self.row_id_high_water_mark = current_hwm;
         Ok(())
     }
 }
