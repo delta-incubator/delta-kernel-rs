@@ -82,11 +82,9 @@ pub(crate) struct LastCheckpointHint {
     /// For an adaptive-metadata (AMT) checkpoint, the embedded AMT checkpoint info: the manifest
     /// commit version plus optional prefetched checkpoint/leaves.
     ///
-    /// A writer pairs this with `checkpoint_type ==
-    /// AdaptiveMetadataTree` and never sets it alongside `v2_checkpoint`. Kernel does not enforce
-    /// either constraint on read: it parses whatever the file contains, so a malformed hint (an
-    /// `AdaptiveMetadataTree` type with no `amtCheckpoint`, or both this and `v2_checkpoint`) is
-    /// retained as-is rather than rejected.
+    /// A writer pairs this with `checkpoint_type == AdaptiveMetadataTree` and never sets it
+    /// alongside `v2_checkpoint`. [`Self::try_read`] drops an `AdaptiveMetadataTree` hint without
+    /// this field; other combinations are retained as-is.
     ///
     /// Skipped on serialize when `None` so a classic hint's wire form is identical whether or not
     /// the `adaptive-metadata-in-dev` feature is compiled in.
@@ -321,6 +319,18 @@ impl LastCheckpointHint {
         .drop_oversized_fields())
     }
 
+    /// The version of the manifest commit carrying an AMT hint's checkpoint action, or `None` if
+    /// this is not an AMT hint with `amtCheckpoint`.
+    #[cfg(feature = "adaptive-metadata-in-dev")]
+    pub(crate) fn amt_manifest_commit_version(&self) -> Option<Version> {
+        if self.checkpoint_type != Some(CheckpointType::AdaptiveMetadataTree) {
+            return None;
+        }
+        self.amt_checkpoint
+            .as_ref()
+            .map(|amt| amt.manifest_commit_version)
+    }
+
     /// Whether this hint describes the checkpoint a log segment selected, given that segment's
     /// `checkpoint_parts`. Multiple checkpoints can share a version, so a matching version alone is
     /// not enough: the hint's own identity must equal the selected checkpoint's.
@@ -425,18 +435,26 @@ impl LastCheckpointHint {
                 let result = Self::from_bytes_with_oversized_fields_dropped(&data)
                     .inspect_err(|e| warn!("invalid _last_checkpoint JSON: {e}"))
                     .ok()
-                    // A hint tagged with a `checkpointType` kernel does not recognize
-                    // ([`CheckpointType::Unknown`]) is dropped entirely: kernel cannot interpret
-                    // it, so the reader falls back to log replay. An absent
-                    // `checkpointType` (a classic / multi-part / V2 checkpoint)
-                    // and an `AdaptiveMetadataTree` type are both kept. Without
-                    // the `adaptive-metadata-in-dev` feature the field does not exist, so
-                    // every hint is kept.
+                    // Kernel cannot locate the checkpoint a hint describes if its `checkpointType`
+                    // is unrecognized, or if it is AMT-typed without `amtCheckpoint` (no manifest
+                    // commit to anchor on). Such a hint is dropped so the reader falls back to log
+                    // replay.
                     .filter(|_hint| {
                         #[cfg(feature = "adaptive-metadata-in-dev")]
-                        if _hint.checkpoint_type == Some(CheckpointType::Unknown) {
-                            warn!("_last_checkpoint has an unrecognized checkpointType; dropping");
-                            return false;
+                        match _hint.checkpoint_type {
+                            Some(CheckpointType::Unknown) => {
+                                warn!(
+                                    "_last_checkpoint has an unrecognized checkpointType; dropping"
+                                );
+                                return false;
+                            }
+                            Some(CheckpointType::AdaptiveMetadataTree)
+                                if _hint.amt_checkpoint.is_none() =>
+                            {
+                                warn!("_last_checkpoint AMT hint has no amtCheckpoint; dropping");
+                                return false;
+                            }
+                            _ => {}
                         }
                         true
                     });
@@ -670,6 +688,29 @@ mod tests {
         assert_eq!(amt.leaves.expect("leaves present").len(), 1);
     }
 
+    #[cfg(feature = "adaptive-metadata-in-dev")]
+    #[rstest]
+    #[case::amt_hint(Some(CheckpointType::AdaptiveMetadataTree), Some(7), Some(7))]
+    #[case::amt_type_without_amt_checkpoint(Some(CheckpointType::AdaptiveMetadataTree), None, None)]
+    #[case::no_checkpoint_type(None, Some(7), None)]
+    #[case::unknown_checkpoint_type(Some(CheckpointType::Unknown), Some(7), None)]
+    fn amt_manifest_commit_version_requires_amt_type_and_amt_checkpoint(
+        #[case] checkpoint_type: Option<CheckpointType>,
+        #[case] manifest_commit_version: Option<Version>,
+        #[case] expected: Option<Version>,
+    ) {
+        let hint = LastCheckpointHint {
+            version: 5,
+            checkpoint_type,
+            amt_checkpoint: manifest_commit_version.map(|manifest_commit_version| AmtCheckpoint {
+                manifest_commit_version,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(hint.amt_manifest_commit_version(), expected);
+    }
+
     /// A `_last_checkpoint` without `checkpointType`/`amtCheckpoint` (classic / V2) leaves both
     /// `None`.
     #[cfg(feature = "adaptive-metadata-in-dev")]
@@ -714,10 +755,9 @@ mod tests {
         assert_eq!(hint.checkpoint_type, Some(CheckpointType::Unknown));
     }
 
-    /// `try_read` distinguishes the three `checkpointType` states: an absent type (a classic /
-    /// multi-part / V2 checkpoint) and an `AdaptiveMetadataTree` type are both recognized formats
-    /// and retained, whereas an unrecognized value drops the whole hint so the reader falls back
-    /// to log replay.
+    /// `try_read` retains a hint with an absent `checkpointType` (classic / multi-part / V2) or an
+    /// `AdaptiveMetadataTree` type with `amtCheckpoint`, and drops one with an unrecognized type or
+    /// an AMT type lacking `amtCheckpoint`, so the reader falls back to log replay.
     #[cfg(feature = "adaptive-metadata-in-dev")]
     #[test]
     fn try_read_retains_recognized_and_drops_unrecognized_checkpoint_type() {
@@ -753,6 +793,13 @@ mod tests {
         assert_eq!(
             hint.checkpoint_type,
             Some(CheckpointType::AdaptiveMetadataTree)
+        );
+
+        // AdaptiveMetadataTree without amtCheckpoint: no manifest commit to anchor on, so dropped.
+        assert!(
+            read_hint(r#"{"version": 6, "size": -1, "checkpointType": "AdaptiveMetadataTree"}"#)
+                .is_none(),
+            "AMT hint without amtCheckpoint must drop the hint"
         );
 
         // Unrecognized checkpointType: the whole hint is dropped.
