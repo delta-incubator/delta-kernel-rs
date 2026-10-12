@@ -536,6 +536,17 @@ impl<S> Transaction<S> {
         self
     }
 
+    /// Include a SetTransaction (app_id and version) action for this transaction (with an optional
+    /// `last_updated` timestamp).
+    /// Note that each app_id can only appear once per transaction. That is, multiple app_ids with
+    /// different versions are disallowed in a single transaction. If a duplicate app_id is
+    /// included, the `commit` will fail (that is, we don't eagerly check app_id validity here).
+    pub fn with_transaction_id(mut self, app_id: String, version: i64) -> Self {
+        let set_transaction = SetTransaction::new(app_id, version, Some(self.commit_timestamp));
+        self.set_transactions.push(set_transaction);
+        self
+    }
+
     /// Set domain metadata to be written to the Delta log.
     /// Note that each domain can only appear once per transaction. That is, multiple configurations
     /// of the same domain are disallowed in a single transaction, as well as setting and removing
