@@ -18,6 +18,9 @@ pub struct ExclusiveCreateTableTransaction;
 
 /// Replaces create-table operation metrics after writing and before commit.
 ///
+/// Map entries and nested strings are borrowed only until this call returns. Retained values
+/// are copied.
+///
 /// # Safety
 ///
 /// All handles and nested map pointers must be valid. This call borrows `engine` and `metrics`
@@ -25,13 +28,17 @@ pub struct ExclusiveCreateTableTransaction;
 #[no_mangle]
 pub unsafe extern "C" fn create_table_txn_with_operation_metrics(
     txn: Handle<ExclusiveCreateTableTransaction>,
-    metrics: &FfiNullableStringMap,
+    metrics: FfiNullableStringMap,
     engine: Handle<SharedExternEngine>,
 ) -> ExternResult<Handle<ExclusiveCreateTableTransaction>> {
     let txn = unsafe { *txn.into_inner() };
     let engine = unsafe { engine.as_ref() };
     unsafe {
-        apply_nullable_string_map(txn, metrics, CreateTableTransaction::with_operation_metrics)
+        apply_nullable_string_map(
+            txn,
+            &metrics,
+            CreateTableTransaction::with_operation_metrics,
+        )
     }
     .map(|txn| Box::new(txn).into())
     .into_extern_result(&engine)
@@ -39,15 +46,19 @@ pub unsafe extern "C" fn create_table_txn_with_operation_metrics(
 
 /// Replaces the connector-defined create-table `commitInfo` row before commit.
 ///
+/// Returns an error if `schema` is null or schema decoding fails.
+///
 /// # Safety
 ///
-/// All handles and `schema` must be valid. This call borrows `engine` and `schema` and
-/// unconditionally consumes both `txn` and `commit_info`, including on error.
+/// All handles must be valid. A non-null `schema` must point to an aligned, initialized record.
+/// The record, callback, and callback context are borrowed only through synchronous schema
+/// decoding. This call borrows `engine` and unconditionally consumes both `txn` and `commit_info`,
+/// including on error.
 #[no_mangle]
 pub unsafe extern "C" fn create_table_txn_with_commit_info(
     txn: Handle<ExclusiveCreateTableTransaction>,
     commit_info: Handle<ExclusiveEngineData>,
-    schema: &EngineSchema,
+    schema: *const EngineSchema,
     engine: Handle<SharedExternEngine>,
 ) -> ExternResult<Handle<ExclusiveCreateTableTransaction>> {
     let txn = unsafe { *txn.into_inner() };
@@ -202,6 +213,9 @@ pub unsafe extern "C" fn create_table_txn_builder_with_correlation_id(
 /// Duplicate keys are rejected by the FFI map decoder. Consecutive calls replace rather than
 /// merge.
 ///
+/// Map entries and nested strings are borrowed only until this call returns. Retained values
+/// are copied.
+///
 /// # Safety
 ///
 /// All handles and nested map pointers must be valid. This call borrows `engine` and `parameters`
@@ -209,7 +223,7 @@ pub unsafe extern "C" fn create_table_txn_builder_with_correlation_id(
 #[no_mangle]
 pub unsafe extern "C" fn create_table_txn_builder_with_operation_parameters(
     builder: Handle<ExclusiveCreateTableTransactionBuilder>,
-    parameters: &FfiNullableStringMap,
+    parameters: FfiNullableStringMap,
     engine: Handle<SharedExternEngine>,
 ) -> ExternResult<Handle<ExclusiveCreateTableTransactionBuilder>> {
     let builder = unsafe { *builder.into_inner() };
@@ -217,7 +231,7 @@ pub unsafe extern "C" fn create_table_txn_builder_with_operation_parameters(
     unsafe {
         apply_nullable_string_map(
             builder,
-            parameters,
+            &parameters,
             CreateTableTransactionBuilder::with_operation_parameters,
         )
     }
@@ -230,6 +244,9 @@ pub unsafe extern "C" fn create_table_txn_builder_with_operation_parameters(
 /// Metrics supplied to the built transaction replace these metrics. Dedicated metrics override
 /// the nested `operationMetrics` field in connector commit information.
 ///
+/// Map entries and nested strings are borrowed only until this call returns. Retained values
+/// are copied.
+///
 /// # Safety
 ///
 /// All handles and nested map pointers must be valid. This call borrows `engine` and `metrics`
@@ -237,7 +254,7 @@ pub unsafe extern "C" fn create_table_txn_builder_with_operation_parameters(
 #[no_mangle]
 pub unsafe extern "C" fn create_table_txn_builder_with_operation_metrics(
     builder: Handle<ExclusiveCreateTableTransactionBuilder>,
-    metrics: &FfiNullableStringMap,
+    metrics: FfiNullableStringMap,
     engine: Handle<SharedExternEngine>,
 ) -> ExternResult<Handle<ExclusiveCreateTableTransactionBuilder>> {
     let builder = unsafe { *builder.into_inner() };
@@ -245,7 +262,7 @@ pub unsafe extern "C" fn create_table_txn_builder_with_operation_metrics(
     unsafe {
         apply_nullable_string_map(
             builder,
-            metrics,
+            &metrics,
             CreateTableTransactionBuilder::with_operation_metrics,
         )
     }
@@ -258,15 +275,19 @@ pub unsafe extern "C" fn create_table_txn_builder_with_operation_metrics(
 /// Repeated calls replace the prior row. Kernel-owned fields and dedicated parameter or metric
 /// maps take precedence over same-named nested fields.
 ///
+/// Returns an error if `schema` is null or schema decoding fails.
+///
 /// # Safety
 ///
-/// All handles and `schema` must be valid. This call borrows `engine` and `schema` and
-/// unconditionally consumes both `builder` and `commit_info`, including on error.
+/// All handles must be valid. A non-null `schema` must point to an aligned, initialized record.
+/// The record, callback, and callback context are borrowed only through synchronous schema
+/// decoding. This call borrows `engine` and unconditionally consumes both `builder` and
+/// `commit_info`, including on error.
 #[no_mangle]
 pub unsafe extern "C" fn create_table_txn_builder_with_commit_info(
     builder: Handle<ExclusiveCreateTableTransactionBuilder>,
     commit_info: Handle<ExclusiveEngineData>,
-    schema: &EngineSchema,
+    schema: *const EngineSchema,
     engine: Handle<SharedExternEngine>,
 ) -> ExternResult<Handle<ExclusiveCreateTableTransactionBuilder>> {
     let builder = unsafe { *builder.into_inner() };
@@ -431,29 +452,32 @@ pub(super) fn create_table_txn_builder_with_data_layout_impl(
 /// before building with [`create_table_txn_builder_build`]. The engine is only used for error
 /// reporting at this stage.
 ///
+/// Returns an error for invalid strings, a null `schema`, or a schema decoding failure.
+///
 /// # Safety
 ///
-/// `path`, `schema`, `engine_info`, and `engine` must be valid. All inputs are borrowed for the
-/// call. The caller retains ownership.
+/// `path`, `engine_info`, and `engine` must be valid. A non-null `schema` must point to an aligned,
+/// initialized record. The record, callback, and callback context are borrowed only through
+/// synchronous schema decoding. All inputs are borrowed for the call; the caller retains ownership.
 #[no_mangle]
 pub unsafe extern "C" fn new_create_table_txn_builder(
     path: KernelStringSlice,
-    schema: &EngineSchema,
+    schema: *const EngineSchema,
     engine_info: KernelStringSlice,
     engine: Handle<SharedExternEngine>,
 ) -> ExternResult<Handle<ExclusiveCreateTableTransactionBuilder>> {
     let engine = unsafe { engine.as_ref() };
     let path = unsafe { TryFromStringSlice::try_from_slice(&path) };
     let info = unsafe { TryFromStringSlice::try_from_slice(&engine_info) };
-    new_create_table_txn_builder_impl(path, schema, info).into_extern_result(&engine)
+    unsafe { new_create_table_txn_builder_impl(path, schema, info) }.into_extern_result(&engine)
 }
 
-fn new_create_table_txn_builder_impl(
+unsafe fn new_create_table_txn_builder_impl(
     path: Result<&str>,
-    schema: &EngineSchema,
+    schema: *const EngineSchema,
     engine_info: Result<&str>,
 ) -> Result<Handle<ExclusiveCreateTableTransactionBuilder>> {
-    let schema = decode_engine_schema(schema)?;
+    let schema = unsafe { decode_engine_schema(schema) }?;
     let builder = delta_kernel::transaction::create_table::create_table(
         path?,
         Arc::new(schema),

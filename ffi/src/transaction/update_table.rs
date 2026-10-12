@@ -24,8 +24,8 @@ pub struct ExclusiveUpdateTableTransactionBuilder;
 ///
 /// # Safety
 ///
-/// `snapshot` must be a valid shared handle. This call borrows it, and the caller retains
-/// ownership.
+/// `snapshot` must be a valid shared handle. This call borrows it. The builder retains its own
+/// snapshot reference; the caller may free the input snapshot immediately after this call.
 #[no_mangle]
 pub unsafe extern "C" fn new_update_table_txn_builder(
     snapshot: Handle<SharedSnapshot>,
@@ -132,6 +132,9 @@ pub unsafe extern "C" fn update_table_txn_builder_with_correlation_id(
 /// the prior map. Dedicated parameters override same-named nested fields in connector commit
 /// information.
 ///
+/// Map entries and nested strings are borrowed only until this call returns. Retained values
+/// are copied.
+///
 /// # Safety
 ///
 /// All handles and nested map pointers must be valid. This call borrows `engine` and `parameters`
@@ -139,7 +142,7 @@ pub unsafe extern "C" fn update_table_txn_builder_with_correlation_id(
 #[no_mangle]
 pub unsafe extern "C" fn update_table_txn_builder_with_operation_parameters(
     builder: Handle<ExclusiveUpdateTableTransactionBuilder>,
-    parameters: &FfiNullableStringMap,
+    parameters: FfiNullableStringMap,
     engine: Handle<SharedExternEngine>,
 ) -> ExternResult<Handle<ExclusiveUpdateTableTransactionBuilder>> {
     let builder = unsafe { *builder.into_inner() };
@@ -147,7 +150,7 @@ pub unsafe extern "C" fn update_table_txn_builder_with_operation_parameters(
     unsafe {
         apply_nullable_string_map(
             builder,
-            parameters,
+            &parameters,
             UpdateTableTransactionBuilder::with_operation_parameters,
         )
     }
@@ -161,6 +164,9 @@ pub unsafe extern "C" fn update_table_txn_builder_with_operation_parameters(
 /// [`Transaction::with_operation_metrics`] replace these builder metrics. Dedicated metrics
 /// override the nested `operationMetrics` field in connector commit information.
 ///
+/// Map entries and nested strings are borrowed only until this call returns. Retained values
+/// are copied.
+///
 /// # Safety
 ///
 /// All handles and nested map pointers must be valid. This call borrows `engine` and `metrics`
@@ -168,7 +174,7 @@ pub unsafe extern "C" fn update_table_txn_builder_with_operation_parameters(
 #[no_mangle]
 pub unsafe extern "C" fn update_table_txn_builder_with_operation_metrics(
     builder: Handle<ExclusiveUpdateTableTransactionBuilder>,
-    metrics: &FfiNullableStringMap,
+    metrics: FfiNullableStringMap,
     engine: Handle<SharedExternEngine>,
 ) -> ExternResult<Handle<ExclusiveUpdateTableTransactionBuilder>> {
     let builder = unsafe { *builder.into_inner() };
@@ -176,7 +182,7 @@ pub unsafe extern "C" fn update_table_txn_builder_with_operation_metrics(
     unsafe {
         apply_nullable_string_map(
             builder,
-            metrics,
+            &metrics,
             UpdateTableTransactionBuilder::with_operation_metrics,
         )
     }
@@ -189,15 +195,19 @@ pub unsafe extern "C" fn update_table_txn_builder_with_operation_metrics(
 /// Repeated calls replace the previous row. Kernel-owned fields and dedicated operation
 /// parameters or metrics take precedence over same-named fields in this row.
 ///
+/// Returns an error if `schema` is null or schema decoding fails.
+///
 /// # Safety
 ///
-/// All handles and `schema` must be valid. This call borrows `engine` and `schema` and
-/// unconditionally consumes both `builder` and `commit_info`, including on error.
+/// All handles must be valid. A non-null `schema` must point to an aligned, initialized record.
+/// The record, callback, and callback context are borrowed only through synchronous schema
+/// decoding. This call borrows `engine` and unconditionally consumes both `builder` and
+/// `commit_info`, including on error.
 #[no_mangle]
 pub unsafe extern "C" fn update_table_txn_builder_with_commit_info(
     builder: Handle<ExclusiveUpdateTableTransactionBuilder>,
     commit_info: Handle<ExclusiveEngineData>,
-    schema: &EngineSchema,
+    schema: *const EngineSchema,
     engine: Handle<SharedExternEngine>,
 ) -> ExternResult<Handle<ExclusiveUpdateTableTransactionBuilder>> {
     let builder = unsafe { *builder.into_inner() };
@@ -247,41 +257,50 @@ pub unsafe extern "C" fn update_table_txn_builder_with_domain_metadata(
 
 /// Adds a nullable top-level field described by a single-field engine schema.
 ///
+/// Returns an error if `field` is null, schema decoding fails, or the schema does not contain
+/// exactly one field.
+///
 /// # Safety
 ///
-/// All handles and `field` must be valid. This call borrows `engine` and `field` and
-/// unconditionally consumes `builder`, including on error.
+/// All handles must be valid. A non-null `field` must point to an aligned, initialized record.
+/// The record, callback, and callback context are borrowed only through synchronous schema
+/// decoding. This call borrows `engine` and unconditionally consumes `builder`, including on error.
 #[no_mangle]
 pub unsafe extern "C" fn update_table_txn_builder_add_column(
     builder: Handle<ExclusiveUpdateTableTransactionBuilder>,
-    field: &EngineSchema,
+    field: *const EngineSchema,
     engine: Handle<SharedExternEngine>,
 ) -> ExternResult<Handle<ExclusiveUpdateTableTransactionBuilder>> {
     let builder = unsafe { *builder.into_inner() };
     let engine = unsafe { engine.as_ref() };
-    decode_single_field(field)
+    unsafe { decode_single_field(field) }
         .map(|field| Box::new(builder.add_column(field)).into())
         .into_extern_result(&engine)
 }
 
 /// Adds a nullable field beneath a nested parent path.
 ///
+/// Returns an error if `field` is null, schema decoding fails, the schema does not contain
+/// exactly one field, or the parent path cannot be decoded.
+///
 /// # Safety
 ///
-/// All handles and nested pointers must be valid. This call borrows `engine`, `parent`, and `field`
-/// and unconditionally consumes `builder`, including on error.
+/// All handles and nested parent pointers must be valid. A non-null `field` must point to an
+/// aligned, initialized record. The record, callback, and callback context are borrowed only
+/// through synchronous schema decoding. This call borrows `engine` and `parent` and
+/// unconditionally consumes `builder`, including on error.
 #[no_mangle]
 pub unsafe extern "C" fn update_table_txn_builder_add_column_at(
     builder: Handle<ExclusiveUpdateTableTransactionBuilder>,
     parent: &FfiColumnName,
-    field: &EngineSchema,
+    field: *const EngineSchema,
     engine: Handle<SharedExternEngine>,
 ) -> ExternResult<Handle<ExclusiveUpdateTableTransactionBuilder>> {
     let builder = unsafe { *builder.into_inner() };
     let engine = unsafe { engine.as_ref() };
     let parent = unsafe { decode_column_name(parent) };
     parent
-        .and_then(|parent| decode_single_field(field).map(|field| (parent, field)))
+        .and_then(|parent| unsafe { decode_single_field(field) }.map(|field| (parent, field)))
         .map(|(parent, field)| Box::new(builder.add_column_at(parent, field)).into())
         .into_extern_result(&engine)
 }
@@ -309,8 +328,10 @@ unsafe fn decode_column_name(column: &FfiColumnName) -> Result<ColumnName> {
     Ok(ColumnName::new(unsafe { column.path.try_to_strings() }?))
 }
 
-fn decode_single_field(schema: &EngineSchema) -> Result<delta_kernel::schema::StructField> {
-    let mut fields = decode_engine_schema(schema)?.into_fields();
+unsafe fn decode_single_field(
+    schema: *const EngineSchema,
+) -> Result<delta_kernel::schema::StructField> {
+    let mut fields = unsafe { decode_engine_schema(schema) }?.into_fields();
     match (fields.next(), fields.next()) {
         (Some(field), None) => Ok(field),
         _ => Err(delta_kernel::KernelError::invalid_transaction_state(
@@ -328,6 +349,9 @@ fn decode_single_field(schema: &EngineSchema) -> Result<delta_kernel::schema::St
 /// This is the late-binding counterpart to the builder setter. It replaces builder metrics and
 /// the nested `operationMetrics` field in connector commit information.
 ///
+/// Map entries and nested strings are borrowed only until this call returns. Retained values
+/// are copied.
+///
 /// # Safety
 ///
 /// All handles and nested map pointers must be valid. This call borrows `engine` and `metrics`
@@ -335,12 +359,12 @@ fn decode_single_field(schema: &EngineSchema) -> Result<delta_kernel::schema::St
 #[no_mangle]
 pub unsafe extern "C" fn update_table_txn_with_operation_metrics(
     txn: Handle<ExclusiveUpdateTableTransaction>,
-    metrics: &FfiNullableStringMap,
+    metrics: FfiNullableStringMap,
     engine: Handle<SharedExternEngine>,
 ) -> ExternResult<Handle<ExclusiveUpdateTableTransaction>> {
     let txn = unsafe { *txn.into_inner() };
     let engine = unsafe { engine.as_ref() };
-    unsafe { apply_nullable_string_map(txn, metrics, Transaction::with_operation_metrics) }
+    unsafe { apply_nullable_string_map(txn, &metrics, Transaction::with_operation_metrics) }
         .map(|txn| Box::new(txn).into())
         .into_extern_result(&engine)
 }
@@ -350,15 +374,19 @@ pub unsafe extern "C" fn update_table_txn_with_operation_metrics(
 /// Kernel-owned fields and dedicated parameter or metric maps take precedence over same-named
 /// fields in this row.
 ///
+/// Returns an error if `schema` is null or schema decoding fails.
+///
 /// # Safety
 ///
-/// All handles and `schema` must be valid. This call borrows `engine` and `schema` and
-/// unconditionally consumes both `txn` and `commit_info`, including on error.
+/// All handles must be valid. A non-null `schema` must point to an aligned, initialized record.
+/// The record, callback, and callback context are borrowed only through synchronous schema
+/// decoding. This call borrows `engine` and unconditionally consumes both `txn` and `commit_info`,
+/// including on error.
 #[no_mangle]
 pub unsafe extern "C" fn update_table_txn_with_commit_info(
     txn: Handle<ExclusiveUpdateTableTransaction>,
     commit_info: Handle<ExclusiveEngineData>,
-    schema: &EngineSchema,
+    schema: *const EngineSchema,
     engine: Handle<SharedExternEngine>,
 ) -> ExternResult<Handle<ExclusiveUpdateTableTransaction>> {
     let txn = unsafe { *txn.into_inner() };

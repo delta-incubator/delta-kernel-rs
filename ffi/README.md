@@ -13,6 +13,7 @@ setter, and commit calls borrow the engine handle. The caller retains ownership.
 ```c
 HandleSharedSnapshot snapshot = /* unwrap(snapshot_builder_build(...)) */;
 HandleExclusiveUpdateTableTransactionBuilder builder = new_update_table_txn_builder(snapshot);
+free_snapshot(snapshot);
 builder = unwrap(update_table_txn_builder_with_engine_info(
     builder, slice("my-engine/1.0"), engine));
 builder = update_table_txn_builder_with_operation(
@@ -21,14 +22,18 @@ builder = update_table_txn_builder_with_data_change(builder, true);
 
 HandleExclusiveUpdateTableTransaction txn = unwrap(update_table_txn_builder_build(builder, engine));
 /* Write files, then call update_table_txn_add_files(txn, metadata). */
-txn = unwrap(update_table_txn_with_operation_metrics(txn, &metrics, engine));
+txn = unwrap(update_table_txn_with_operation_metrics(txn, metrics, engine));
 HandleExclusiveCommittedTransaction committed = unwrap(update_table_txn_commit(txn, engine));
 uint64_t version = committed_transaction_version(&committed);
 free_committed_transaction(committed);
 ```
 
 Here `slice` and `unwrap` stand for the connector's usual `KernelStringSlice` and `ExternResult`
-helpers.
+helpers. Operation parameter and metric setters take `FfiNullableStringMap` views by value.
+Entries and nested strings are borrowed only for the call; retained values are copied.
+Schema inputs are `const EngineSchema*` records borrowed only through synchronous decoding,
+including the callback and its context. Null schema pointers return an error and still consume
+any owned builder, transaction, or commit-info handles passed to the setter.
 
 Create-table connectors use the same shape: call `new_create_table_txn_builder`, apply
 `create_table_txn_builder_with_*` functions, then call `create_table_txn_builder_build`. Application

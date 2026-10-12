@@ -15,10 +15,11 @@ in place. The common case today is adding a new column to a table that already h
 without rewriting the existing files. Existing rows read back `NULL` for the
 new column. Subsequent writes can populate it.
 
-A standalone schema evolution is a metadata-only change. When no file actions are staged, the
-transaction emits an updated `Metadata` action and commits with `data_change: false`. If an ALTER
-commit includes file actions, Kernel defaults `data_change` to `true`. Connectors performing a
-protocol-valid logical-preserving replacement can explicitly select `false`.
+A standalone schema evolution emits an updated `Metadata` action without rewriting data files.
+Unless you set `with_data_change(...)`, Kernel infers `false` when no Add, Remove, or deletion-vector
+batches are staged and `true` otherwise, including empty or unselected batches. An explicit value
+is preserved through commit. For a protocol-valid logical-preserving replacement, set
+`with_data_change(false)` before `build()`.
 
 > [!NOTE]
 > The supported operations are adding columns and making columns nullable. Other schema operations
@@ -90,8 +91,8 @@ column by including it in the `RecordBatch` they pass to
 | Column mapping tables must be protocol-valid | When column mapping is enabled, Kernel assigns or preserves column-mapping IDs and physical names for the added column and updates `delta.columnMapping.maxColumnId`. |
 
 > [!NOTE]
-> `ALTER TABLE` is rejected on tables with unsupported writer features, including
-> `icebergCompatV2`, `icebergCompatV3`, and `allowColumnDefaults`.
+> Tables with unsupported writer features cannot be altered. Schema evolution is also unavailable
+> on otherwise writable tables with `icebergCompatV2`, `icebergCompatV3`, or `allowColumnDefaults`.
 
 ## Chaining multiple operations
 

@@ -80,27 +80,27 @@ impl fmt::Display for UpdateTableOperation {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum CommitOperation {
+pub(super) enum CommitOperation {
     CreateTable,
     UpdateTable(UpdateTableOperation),
 }
 
 impl CommitOperation {
-    pub(crate) fn as_str(&self) -> &str {
+    pub(super) fn as_str(&self) -> &str {
         match self {
             Self::CreateTable => "CREATE TABLE",
             Self::UpdateTable(operation) => operation.as_str(),
         }
     }
 
-    pub(crate) fn validate(&self) -> Result<(), String> {
+    pub(super) fn validate(&self) -> Result<(), String> {
         match self {
             Self::UpdateTable(operation) => operation.validate(),
             Self::CreateTable => Ok(()),
         }
     }
 
-    pub(crate) fn is_incremental_safe(&self) -> bool {
+    pub(super) fn is_incremental_safe(&self) -> bool {
         match self {
             Self::CreateTable => is_incremental_safe_operation(self.as_str()),
             Self::UpdateTable(operation) => operation.is_incremental_safe(),

@@ -69,10 +69,10 @@ unsafe fn apply_nullable_string_map<T>(
 unsafe fn apply_commit_info<T>(
     value: T,
     commit_info: Box<dyn EngineData>,
-    schema: &EngineSchema,
+    schema: *const EngineSchema,
     apply: impl FnOnce(T, Box<dyn EngineData>, SchemaRef) -> T,
 ) -> Result<T> {
-    let schema = decode_engine_schema(schema)?;
+    let schema = unsafe { decode_engine_schema(schema) }?;
     Ok(apply(value, commit_info, Arc::new(schema)))
 }
 
@@ -87,7 +87,12 @@ unsafe fn apply_domain_metadata<T>(
     Ok(apply(value, domain, configuration))
 }
 
-fn decode_engine_schema(schema: &EngineSchema) -> Result<delta_kernel::schema::StructType> {
+unsafe fn decode_engine_schema(
+    schema: *const EngineSchema,
+) -> Result<delta_kernel::schema::StructType> {
+    let schema = unsafe { schema.as_ref() }.ok_or_else(|| {
+        delta_kernel::KernelError::invalid_transaction_state("schema must not be null")
+    })?;
     let mut visitor_state = KernelSchemaVisitorState::default();
     let schema_id = (schema.visitor)(schema.schema, &mut visitor_state);
     extract_kernel_schema(&mut visitor_state, schema_id)
@@ -122,7 +127,8 @@ mod tests {
     use delta_kernel::arrow::record_batch::RecordBatch;
     use delta_kernel::engine::arrow_conversion::TryIntoArrow;
     use delta_kernel::engine::arrow_data::ArrowEngineData;
-    use delta_kernel::engine_data::FilteredEngineData;
+    use delta_kernel::engine_data::{FilteredEngineData, RowVisitor};
+    use delta_kernel::expressions::ArrayData;
     use delta_kernel::metrics::MetricEvent;
     use delta_kernel::object_store::path::Path;
     use delta_kernel::object_store::{DynObjectStore, ObjectStoreExt as _};
@@ -208,6 +214,48 @@ mod tests {
     }
 
     struct DropTrackingCommitter(Arc<AtomicUsize>);
+
+    struct DropTrackingEngineData(Arc<AtomicUsize>);
+
+    impl Drop for DropTrackingEngineData {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    impl EngineData for DropTrackingEngineData {
+        fn visit_rows(&self, _columns: &[ColumnName], _visitor: &mut dyn RowVisitor) -> Result<()> {
+            panic!("invalid schema must be rejected before accessing commit info")
+        }
+
+        fn len(&self) -> usize {
+            1
+        }
+
+        fn append_columns(
+            &self,
+            _schema: SchemaRef,
+            _columns: Vec<ArrayData>,
+        ) -> Result<Box<dyn EngineData>> {
+            panic!("invalid schema must be rejected before accessing commit info")
+        }
+
+        fn apply_selection_vector(
+            self: Box<Self>,
+            _selection: Vec<bool>,
+        ) -> Result<Box<dyn EngineData>> {
+            panic!("invalid schema must be rejected before accessing commit info")
+        }
+
+        fn has_field(&self, _name: &ColumnName) -> bool {
+            panic!("invalid schema must be rejected before accessing commit info")
+        }
+    }
+
+    fn drop_tracking_commit_info(drops: &Arc<AtomicUsize>) -> Handle<ExclusiveEngineData> {
+        let data: Box<dyn EngineData> = Box::new(DropTrackingEngineData(Arc::clone(drops)));
+        data.into()
+    }
 
     impl Drop for DropTrackingCommitter {
         fn drop(&mut self) {
@@ -1218,11 +1266,11 @@ mod tests {
         Ok(())
     }
 
-    /// Read the commit log at `version` and return the `domainMetadata` action JSON.
-    async fn read_domain_metadata_action(
+    async fn read_commit_action(
         store: &DynObjectStore,
         table_url: &Url,
         version: u64,
+        action_name: &str,
     ) -> serde_json::Value {
         let path = format!("_delta_log/{version:020}.json");
         let commit_url = table_url.join(&path).unwrap();
@@ -1237,44 +1285,8 @@ mod tests {
                 .unwrap();
         actions
             .into_iter()
-            .find(|a| a.get("domainMetadata").is_some())
-            .expect("commit should contain a domainMetadata action")
-    }
-
-    async fn read_commit_info_action(
-        store: &DynObjectStore,
-        table_url: &Url,
-        version: u64,
-    ) -> serde_json::Value {
-        let path = format!("_delta_log/{version:020}.json");
-        let commit_url = table_url.join(&path).unwrap();
-        let data = store
-            .get(&Path::from_url_path(commit_url.path()).unwrap())
-            .await
-            .unwrap();
-        Deserializer::from_slice(&data.bytes().await.unwrap())
-            .into_iter::<serde_json::Value>()
-            .map(Result::unwrap)
-            .find(|action| action.get("commitInfo").is_some())
-            .expect("commit should contain a commitInfo action")
-    }
-
-    async fn read_transaction_action(
-        store: &DynObjectStore,
-        table_url: &Url,
-        version: u64,
-    ) -> serde_json::Value {
-        let path = format!("_delta_log/{version:020}.json");
-        let commit_url = table_url.join(&path).unwrap();
-        let data = store
-            .get(&Path::from_url_path(commit_url.path()).unwrap())
-            .await
-            .unwrap();
-        Deserializer::from_slice(&data.bytes().await.unwrap())
-            .into_iter::<serde_json::Value>()
-            .map(Result::unwrap)
-            .find(|action| action.get("txn").is_some())
-            .expect("commit should contain a txn action")
+            .find(|action| action.get(action_name).is_some())
+            .expect("commit should contain the requested action")
     }
 
     /// Create a table with the requested domain-metadata features.
@@ -1335,7 +1347,7 @@ mod tests {
         let version = unsafe { version_and_free(committed) };
         assert_eq!(version, 1);
 
-        let dm = read_domain_metadata_action(&*store, &table_url, 1).await;
+        let dm = read_commit_action(&*store, &table_url, 1, "domainMetadata").await;
         assert_eq!(dm["domainMetadata"]["domain"], "testDomain");
         assert_eq!(dm["domainMetadata"]["configuration"], r#"{"key": "value"}"#);
         assert_eq!(dm["domainMetadata"]["removed"], false);
@@ -1371,7 +1383,7 @@ mod tests {
         let version = unsafe { version_and_free(committed) };
         assert_eq!(version, 2);
 
-        let dm = read_domain_metadata_action(&*store, &table_url, 2).await;
+        let dm = read_commit_action(&*store, &table_url, 2, "domainMetadata").await;
         assert_eq!(dm["domainMetadata"]["domain"], "testDomain");
         assert_eq!(dm["domainMetadata"]["removed"], true);
         assert_eq!(dm["domainMetadata"]["configuration"], r#"{"key": "value"}"#);
@@ -1482,7 +1494,7 @@ mod tests {
 
         let committed = ok_or_panic(unsafe { update_table_txn_commit(txn, engine.shallow_copy()) });
         assert_eq!(unsafe { version_and_free(committed) }, 1);
-        let row_tracking = read_domain_metadata_action(&store, &table_url, 1).await;
+        let row_tracking = read_commit_action(&store, &table_url, 1, "domainMetadata").await;
         assert_eq!(
             row_tracking["domainMetadata"]["domain"],
             "delta.rowTracking"
@@ -1552,7 +1564,7 @@ mod tests {
         });
         let committed = ok_or_panic(unsafe { update_table_txn_commit(txn, engine.shallow_copy()) });
         assert_eq!(unsafe { version_and_free(committed) }, 1);
-        let row_tracking = read_domain_metadata_action(&store, &table_url, 1).await;
+        let row_tracking = read_commit_action(&store, &table_url, 1, "domainMetadata").await;
         assert_eq!(
             row_tracking["domainMetadata"]["configuration"],
             r#"{"rowIdHighWaterMark":7}"#
@@ -2073,6 +2085,52 @@ mod tests {
         }
     }
 
+    #[rstest]
+    #[case::malformed(
+        false,
+        FFIKernelError::SchemaError,
+        "Final returned id was not a struct"
+    )]
+    #[case::null(
+        true,
+        FFIKernelError::InvalidTransactionStateError,
+        "schema must not be null"
+    )]
+    fn new_create_table_builder_rejects_invalid_schema_without_consuming_engine(
+        #[case] null_schema: bool,
+        #[case] expected_error: FFIKernelError,
+        #[case] expected_message: &str,
+    ) {
+        let (store, _test_engine, table_url) =
+            test_utils::engine_store_setup("test_create_builder_invalid_schema", None);
+        let engine = engine_handle_for_store(store);
+        let engine_arc = unsafe { engine.clone_as_arc() };
+        let engine_ref_count = Arc::strong_count(&engine_arc);
+        let invalid_schema = EngineSchema {
+            schema: std::ptr::null_mut(),
+            visitor: visit_invalid_schema_not_struct,
+        };
+        let schema = if null_schema {
+            std::ptr::null()
+        } else {
+            &invalid_schema as *const EngineSchema
+        };
+        assert_extern_result_error_contains(
+            unsafe {
+                new_create_table_txn_builder(
+                    ffi_str(table_url.as_str()),
+                    schema,
+                    ffi_str("test-engine"),
+                    engine.shallow_copy(),
+                )
+            },
+            expected_error,
+            expected_message,
+        );
+        assert_eq!(Arc::strong_count(&engine_arc), engine_ref_count);
+        unsafe { free_engine(engine) };
+    }
+
     /// Create a [`CreateTableTransactionBuilder`] handle via the FFI, using the given schema
     /// fields. Returns `(table_path, engine_handle, builder_handle)`. The caller is responsible
     /// for freeing/consuming the engine and builder handles.
@@ -2276,7 +2334,7 @@ mod tests {
 
         let committed = ok_or_panic(unsafe { create_table_txn_commit(txn, engine.shallow_copy()) });
         assert_eq!(unsafe { version_and_free(committed) }, 0);
-        let domain_metadata = read_domain_metadata_action(&store, &table_url, 0).await;
+        let domain_metadata = read_commit_action(&store, &table_url, 0, "domainMetadata").await;
         assert_eq!(domain_metadata["domainMetadata"]["domain"], domain);
         assert_eq!(
             domain_metadata["domainMetadata"]["configuration"],
@@ -2349,14 +2407,14 @@ mod tests {
         let builder = ok_or_panic(unsafe {
             create_table_txn_builder_with_operation_parameters(
                 builder,
-                &parameters,
+                parameters,
                 engine.shallow_copy(),
             )
         });
         let builder = ok_or_panic(unsafe {
             create_table_txn_builder_with_operation_metrics(
                 builder,
-                &builder_metrics,
+                builder_metrics,
                 engine.shallow_copy(),
             )
         });
@@ -2387,11 +2445,7 @@ mod tests {
         let txn =
             ok_or_panic(unsafe { create_table_txn_builder_build(builder, engine.shallow_copy()) });
         let txn = ok_or_panic(unsafe {
-            create_table_txn_with_operation_metrics(
-                txn,
-                &transaction_metrics,
-                engine.shallow_copy(),
-            )
+            create_table_txn_with_operation_metrics(txn, transaction_metrics, engine.shallow_copy())
         });
         let txn = ok_or_panic(unsafe {
             create_table_txn_with_commit_info(
@@ -2404,7 +2458,7 @@ mod tests {
 
         let committed = ok_or_panic(unsafe { create_table_txn_commit(txn, engine.shallow_copy()) });
         assert_eq!(unsafe { version_and_free(committed) }, 0);
-        let commit_info = read_commit_info_action(&store, &table_url, 0).await;
+        let commit_info = read_commit_action(&store, &table_url, 0, "commitInfo").await;
         assert_eq!(
             commit_info["commitInfo"]["operationParameters"]["key"],
             "parameter"
@@ -2416,7 +2470,7 @@ mod tests {
         );
         assert!(commit_info["commitInfo"]["operationMetrics"]["nullMetric"].is_null());
         assert_eq!(commit_info["commitInfo"]["connectorField"], "transaction");
-        let transaction = read_transaction_action(&store, &table_url, 0).await;
+        let transaction = read_commit_action(&store, &table_url, 0, "txn").await;
         assert_eq!(transaction["txn"]["appId"], "create-app");
         assert_eq!(transaction["txn"]["version"], 7);
         unsafe { free_engine(engine) };
@@ -2475,14 +2529,14 @@ mod tests {
         let builder = ok_or_panic(unsafe {
             update_table_txn_builder_with_operation_parameters(
                 builder,
-                &parameters,
+                parameters,
                 engine.shallow_copy(),
             )
         });
         let builder = ok_or_panic(unsafe {
             update_table_txn_builder_with_operation_metrics(
                 builder,
-                &builder_metrics,
+                builder_metrics,
                 engine.shallow_copy(),
             )
         });
@@ -2528,11 +2582,7 @@ mod tests {
         let txn =
             ok_or_panic(unsafe { update_table_txn_builder_build(builder, engine.shallow_copy()) });
         let txn = ok_or_panic(unsafe {
-            update_table_txn_with_operation_metrics(
-                txn,
-                &transaction_metrics,
-                engine.shallow_copy(),
-            )
+            update_table_txn_with_operation_metrics(txn, transaction_metrics, engine.shallow_copy())
         });
         let txn = ok_or_panic(unsafe {
             update_table_txn_with_commit_info(
@@ -2545,7 +2595,7 @@ mod tests {
 
         let committed = ok_or_panic(unsafe { update_table_txn_commit(txn, engine.shallow_copy()) });
         assert_eq!(unsafe { version_and_free(committed) }, 1);
-        let commit_info = read_commit_info_action(&store, &table_url, 1).await;
+        let commit_info = read_commit_action(&store, &table_url, 1, "commitInfo").await;
         assert_eq!(commit_info["commitInfo"]["operation"], "CUSTOM");
         assert_eq!(
             commit_info["commitInfo"]["operationParameters"]["key"],
@@ -2590,7 +2640,7 @@ mod tests {
             unsafe {
                 create_table_txn_builder_with_operation_parameters(
                     builder,
-                    &values,
+                    values,
                     engine.shallow_copy(),
                 )
             },
@@ -2617,7 +2667,7 @@ mod tests {
         let builder = ok_or_panic(unsafe {
             update_table_txn_builder_with_operation_parameters(
                 builder,
-                &values,
+                values,
                 engine.shallow_copy(),
             )
         });
@@ -2629,13 +2679,33 @@ mod tests {
         Ok(())
     }
 
+    #[rstest]
+    #[case::malformed(
+        false,
+        || FFIKernelError::SchemaError,
+        "Final returned id was not a struct"
+    )]
+    #[case::null(
+        true,
+        || FFIKernelError::InvalidTransactionStateError,
+        "schema must not be null"
+    )]
     #[tokio::test]
     async fn commit_info_builder_setters_consume_inputs_on_schema_error(
+        #[case] null_schema: bool,
+        #[case] expected_error: fn() -> FFIKernelError,
+        #[case] expected_message: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let invalid_schema = EngineSchema {
             schema: std::ptr::null_mut(),
             visitor: visit_invalid_schema_not_struct,
         };
+        let schema = if null_schema {
+            std::ptr::null()
+        } else {
+            &invalid_schema as *const EngineSchema
+        };
+        let drops = Arc::new(AtomicUsize::new(0));
 
         let (store, _test_engine, table_url) =
             test_utils::engine_store_setup("test_create_builder_invalid_commit_info", None);
@@ -2648,14 +2718,15 @@ mod tests {
             unsafe {
                 create_table_txn_builder_with_commit_info(
                     create_builder,
-                    commit_info_engine_data("create"),
-                    &invalid_schema,
+                    drop_tracking_commit_info(&drops),
+                    schema,
                     create_engine.shallow_copy(),
                 )
             },
-            FFIKernelError::SchemaError,
-            "Final returned id was not a struct",
+            expected_error(),
+            expected_message,
         );
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
         unsafe { free_engine(create_engine) };
 
         let (table_url, _store, update_engine) =
@@ -2663,18 +2734,22 @@ mod tests {
         let snapshot =
             unsafe { build_snapshot(ffi_str(table_url.as_str()), update_engine.shallow_copy()) };
         let update_builder = unsafe { new_update_table_txn_builder(snapshot.shallow_copy()) };
+        let snapshot_arc = unsafe { snapshot.clone_as_arc() };
+        let snapshot_ref_count = Arc::strong_count(&snapshot_arc);
         assert_extern_result_error_contains(
             unsafe {
                 update_table_txn_builder_with_commit_info(
                     update_builder,
-                    commit_info_engine_data("update"),
-                    &invalid_schema,
+                    drop_tracking_commit_info(&drops),
+                    schema,
                     update_engine.shallow_copy(),
                 )
             },
-            FFIKernelError::SchemaError,
-            "Final returned id was not a struct",
+            expected_error(),
+            expected_message,
         );
+        assert_eq!(drops.load(Ordering::SeqCst), 2);
+        assert_eq!(Arc::strong_count(&snapshot_arc), snapshot_ref_count - 1);
         unsafe {
             free_snapshot(snapshot);
             free_engine(update_engine);
@@ -2682,13 +2757,34 @@ mod tests {
         Ok(())
     }
 
+    #[rstest]
+    #[case::malformed(
+        false,
+        || FFIKernelError::SchemaError,
+        "Final returned id was not a struct"
+    )]
+    #[case::null(
+        true,
+        || FFIKernelError::InvalidTransactionStateError,
+        "schema must not be null"
+    )]
     #[tokio::test]
     async fn commit_info_transaction_setters_consume_inputs_on_schema_error(
+        #[case] null_schema: bool,
+        #[case] expected_error: fn() -> FFIKernelError,
+        #[case] expected_message: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let invalid_schema = EngineSchema {
             schema: std::ptr::null_mut(),
             visitor: visit_invalid_schema_not_struct,
         };
+        let schema = if null_schema {
+            std::ptr::null()
+        } else {
+            &invalid_schema as *const EngineSchema
+        };
+        let drops = Arc::new(AtomicUsize::new(0));
+        let committer_drops = Arc::new(AtomicUsize::new(0));
 
         let (store, _test_engine, table_url) =
             test_utils::engine_store_setup("test_create_txn_invalid_commit_info", None);
@@ -2697,21 +2793,29 @@ mod tests {
             &table_url,
             vec![StructField::nullable("id", DataType::INTEGER)],
         );
+        let committer: Box<dyn Committer> =
+            Box::new(DropTrackingCommitter(Arc::clone(&committer_drops)));
         let create_txn = ok_or_panic(unsafe {
-            create_table_txn_builder_build(create_builder, create_engine.shallow_copy())
+            create_table_txn_builder_build_with_committer(
+                create_builder,
+                create_engine.shallow_copy(),
+                committer.into(),
+            )
         });
         assert_extern_result_error_contains(
             unsafe {
                 create_table_txn_with_commit_info(
                     create_txn,
-                    commit_info_engine_data("create"),
-                    &invalid_schema,
+                    drop_tracking_commit_info(&drops),
+                    schema,
                     create_engine.shallow_copy(),
                 )
             },
-            FFIKernelError::SchemaError,
-            "Final returned id was not a struct",
+            expected_error(),
+            expected_message,
         );
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert_eq!(committer_drops.load(Ordering::SeqCst), 1);
         unsafe { free_engine(create_engine) };
 
         let (table_url, _store, update_engine) =
@@ -2725,21 +2829,32 @@ mod tests {
                 KernelUpdateTableOperation::Write,
             )
         };
+        let committer: Box<dyn Committer> =
+            Box::new(DropTrackingCommitter(Arc::clone(&committer_drops)));
         let update_txn = ok_or_panic(unsafe {
-            update_table_txn_builder_build(update_builder, update_engine.shallow_copy())
+            update_table_txn_builder_build_with_committer(
+                update_builder,
+                update_engine.shallow_copy(),
+                committer.into(),
+            )
         });
+        let snapshot_arc = unsafe { snapshot.clone_as_arc() };
+        let snapshot_ref_count = Arc::strong_count(&snapshot_arc);
         assert_extern_result_error_contains(
             unsafe {
                 update_table_txn_with_commit_info(
                     update_txn,
-                    commit_info_engine_data("update"),
-                    &invalid_schema,
+                    drop_tracking_commit_info(&drops),
+                    schema,
                     update_engine.shallow_copy(),
                 )
             },
-            FFIKernelError::SchemaError,
-            "Final returned id was not a struct",
+            expected_error(),
+            expected_message,
         );
+        assert_eq!(drops.load(Ordering::SeqCst), 2);
+        assert_eq!(committer_drops.load(Ordering::SeqCst), 2);
+        assert_eq!(Arc::strong_count(&snapshot_arc), snapshot_ref_count - 1);
         unsafe {
             free_snapshot(snapshot);
             free_engine(update_engine);
@@ -2748,11 +2863,13 @@ mod tests {
     }
 
     #[rstest]
-    #[case::zero(0)]
-    #[case::two(2)]
+    #[case::zero(0, false)]
+    #[case::two(2, false)]
+    #[case::null(1, true)]
     #[tokio::test]
-    async fn update_table_add_column_requires_exactly_one_field(
+    async fn update_table_add_column_rejects_invalid_schema(
         #[case] field_count: usize,
+        #[case] null_schema: bool,
         #[values(false, true)] nested: bool,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let table_name = format!("test_update_add_column_{field_count}_{nested}");
@@ -2767,6 +2884,13 @@ mod tests {
             schema: &fields as *const Vec<StructField> as *mut c_void,
             visitor: visit_test_schema,
         };
+        let field = if null_schema {
+            std::ptr::null()
+        } else {
+            &schema as *const EngineSchema
+        };
+        let snapshot_arc = unsafe { snapshot.clone_as_arc() };
+        let snapshot_ref_count = Arc::strong_count(&snapshot_arc);
         let parent_parts = [ffi_str("id")];
         let parent = FfiColumnName {
             path: unsafe { FfiStringArray::new_unsafe(&parent_parts) },
@@ -2776,19 +2900,24 @@ mod tests {
                 update_table_txn_builder_add_column_at(
                     builder,
                     &parent,
-                    &schema,
+                    field,
                     engine.shallow_copy(),
                 )
             }
         } else {
-            unsafe { update_table_txn_builder_add_column(builder, &schema, engine.shallow_copy()) }
+            unsafe { update_table_txn_builder_add_column(builder, field, engine.shallow_copy()) }
         };
 
-        assert_extern_result_error_with_message(
+        assert_extern_result_error_contains(
             result,
             FFIKernelError::InvalidTransactionStateError,
-            Some("Invalid transaction state: add-column schema must contain exactly one field"),
+            if null_schema {
+                "schema must not be null"
+            } else {
+                "add-column schema must contain exactly one field"
+            },
         );
+        assert_eq!(Arc::strong_count(&snapshot_arc), snapshot_ref_count - 1);
         unsafe {
             free_snapshot(snapshot);
             free_engine(engine);
@@ -2955,7 +3084,7 @@ mod tests {
 
         let committed = ok_or_panic(unsafe { update_table_txn_commit(txn, engine.shallow_copy()) });
         assert_eq!(unsafe { version_and_free(committed) }, 1);
-        let commit_info = read_commit_info_action(&store, &table_url, 1).await;
+        let commit_info = read_commit_action(&store, &table_url, 1, "commitInfo").await;
         if blind_append {
             assert_eq!(commit_info["commitInfo"]["isBlindAppend"], true);
         } else {
@@ -2963,43 +3092,6 @@ mod tests {
         }
 
         unsafe { free_engine(engine) };
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn update_table_build_error_drops_consumed_custom_committer(
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let (table_url, _store, engine) =
-            setup_domain_metadata_table("test_build_error_drops_committer", false).await?;
-        let snapshot =
-            unsafe { build_snapshot(ffi_str(table_url.as_str()), engine.shallow_copy()) };
-        let builder = unsafe { new_update_table_txn_builder(snapshot.shallow_copy()) };
-        let builder = ok_or_panic(unsafe {
-            update_table_txn_builder_with_custom_operation(
-                builder,
-                ffi_str(""),
-                engine.shallow_copy(),
-            )
-        });
-        let drops = Arc::new(AtomicUsize::new(0));
-        let committer: Box<dyn Committer> = Box::new(DropTrackingCommitter(Arc::clone(&drops)));
-
-        assert_extern_result_error_contains(
-            unsafe {
-                update_table_txn_builder_build_with_committer(
-                    builder,
-                    engine.shallow_copy(),
-                    committer.into(),
-                )
-            },
-            FFIKernelError::InvalidTransactionStateError,
-            "custom operation name cannot be empty",
-        );
-        assert_eq!(drops.load(Ordering::SeqCst), 1);
-        unsafe {
-            free_snapshot(snapshot);
-            free_engine(engine);
-        }
         Ok(())
     }
 
@@ -3025,7 +3117,7 @@ mod tests {
             ok_or_panic(unsafe { update_table_txn_builder_build(builder, engine.shallow_copy()) });
         let committed = ok_or_panic(unsafe { update_table_txn_commit(txn, engine.shallow_copy()) });
         assert_eq!(unsafe { version_and_free(committed) }, 1);
-        let commit_info = read_commit_info_action(&_store, &table_url, 1).await;
+        let commit_info = read_commit_action(&_store, &table_url, 1, "commitInfo").await;
         assert_eq!(commit_info["commitInfo"]["operation"], expected);
         unsafe {
             free_snapshot(snapshot);

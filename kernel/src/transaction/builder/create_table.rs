@@ -1114,7 +1114,7 @@ fn try_new_create_table(
         should_emit_protocol: true,
         should_emit_metadata: true,
         committer,
-        operation: Some(CommitOperation::CreateTable),
+        operation: CommitOperation::CreateTable,
         operation_parameters: None,
         operation_metrics: None,
         engine_info: None,
