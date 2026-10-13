@@ -16,13 +16,15 @@ use crate::actions::{CheckpointAction, LastManifestCommit, CHECKPOINT_ACTION_FIE
 use crate::actions::{Metadata, Protocol, METADATA_FIELD, PROTOCOL_FIELD};
 #[cfg(feature = "declarative-plans")]
 use crate::actions::{METADATA_NAME, PROTOCOL_NAME};
+use crate::cancellation::CancellationTokenRef;
 use crate::crc::Crc;
 use crate::engine_data::{GetData, RowVisitor, TypedGetData as _};
 #[cfg(feature = "declarative-plans")]
 use crate::expressions::{col, Predicate};
 use crate::log_replay::ActionsBatch;
+use crate::log_segment_files::list_delta_log_from_storage;
 use crate::metrics::ProtocolMetadataSource;
-use crate::path::ParsedLogPath;
+use crate::path::{LogPathFileType, ParsedLogPath};
 #[cfg(feature = "declarative-plans")]
 use crate::plans::ir::nodes::Agg;
 #[cfg(feature = "declarative-plans")]
@@ -35,6 +37,7 @@ use crate::schema::{
     column_name, schema_ref, ColumnName, ColumnNamesAndTypes, DataType, MetadataColumnSpec,
     StructField, StructType,
 };
+use crate::table_features::TableFeature;
 use crate::{Engine, EngineData, KernelError, KernelResult, Result, Version};
 
 impl LogSegment {
@@ -132,6 +135,65 @@ impl LogSegment {
                 candidate.checkpoint.map(|(_, c)| c),
             ),
         })
+    }
+
+    /// Whether the terminal commit removes catalog management from the preceding protocol and its
+    /// numbered commit is absent. Rechecks publication through `engine`, including for reused
+    /// snapshots, and propagates listing and replay errors. `cancellation_token` cancels the
+    /// listing.
+    pub(crate) fn is_unpublished_catalog_downgrade(
+        &self,
+        engine: &dyn Engine,
+        cancellation_token: Option<&CancellationTokenRef>,
+    ) -> KernelResult<bool> {
+        if self
+            .listed
+            .max_published_version
+            .is_some_and(|version| version >= self.end_version)
+        {
+            return Ok(false);
+        }
+        for file in list_delta_log_from_storage(
+            engine.storage_handler().as_ref(),
+            &self.log_root,
+            self.end_version,
+            self.end_version,
+            cancellation_token,
+        )? {
+            if file?.file_type == LogPathFileType::Commit {
+                return Ok(false);
+            }
+        }
+
+        let mut terminal_protocol = None;
+        let mut preceding_protocol = None;
+        for batch in self.read_pm_batches(engine)? {
+            let VersionedBatch {
+                protocol_version,
+                metadata_version,
+                batch,
+            } = batch?;
+            let batch_version = protocol_version.max(metadata_version);
+            let candidate = pm_candidate(&batch, protocol_version, metadata_version)?;
+            if let Some((version, protocol)) = candidate.protocol {
+                if version == self.end_version as i64 {
+                    terminal_protocol = Some(protocol);
+                } else if version < self.end_version as i64 {
+                    preceding_protocol = newer(preceding_protocol, Some((version, protocol)));
+                }
+            }
+            if is_final(&preceding_protocol, batch_version) {
+                break;
+            }
+        }
+        let is_catalog_managed = |protocol: &Protocol| {
+            protocol.has_table_feature(&TableFeature::CatalogManaged)
+                || protocol.has_table_feature(&TableFeature::CatalogOwnedPreview)
+        };
+        Ok(
+            terminal_protocol.is_some_and(|protocol| !is_catalog_managed(&protocol))
+                && preceding_protocol.is_some_and(|(_, protocol)| is_catalog_managed(&protocol)),
+        )
     }
 
     /// Replays the log segment for the latest Protocol and Metadata, each with its version.
