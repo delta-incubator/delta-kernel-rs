@@ -272,13 +272,14 @@ impl PartitionValuesOptions {
     /// `timestamp_timezone` must be an IANA time zone identifier recognized by Kernel or a
     /// normalized fixed offset in `+HH:MM` or `-HH:MM` form. An explicit offset in a partition
     /// value takes precedence. This option does not affect `TIMESTAMP_NTZ`. It applies to typed
-    /// full scan metadata and final partition predicate evaluation, partition-column row
-    /// transforms used by [`Scan::execute`], and incremental typed output and predicate skipping.
+    /// full scan metadata and final partition predicate evaluation, and incremental typed output
+    /// and predicate skipping.
     /// Typed metadata and partition pruning use compatible native checkpoint values unchanged;
-    /// the timezone applies only when parsing the raw map. Row transforms parse the raw map even
-    /// when native checkpoint values are available. Without this option, Kernel interprets
-    /// offset-less timestamps as UTC. Invalid timezone identifiers are reported when the scan is
-    /// built.
+    /// the timezone applies only when parsing the raw map. Partition-column row transforms use
+    /// UTC and do not reuse native checkpoint values. Connectors consuming the typed output should
+    /// use [`ScanBuilder::without_row_transforms`] and construct partition columns from that
+    /// output. Without this option, Kernel interprets offset-less timestamps as UTC. Invalid
+    /// timezone identifiers are reported when the scan is built.
     pub fn with_timestamp_timezone(mut self, timestamp_timezone: impl Into<String>) -> Self {
         self.timestamp_timezone = Some(timestamp_timezone.into());
         self

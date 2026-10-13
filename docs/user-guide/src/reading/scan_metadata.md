@@ -274,6 +274,7 @@ let scan = snapshot
         PartitionValuesOptions::with_struct()
             .with_timestamp_timezone("America/Los_Angeles"),
     )
+    .without_row_transforms()
     .build()?;
 # Ok(())
 # }
@@ -287,15 +288,18 @@ adds the typed column.
 By default, offset-less `TIMESTAMP` partition strings are interpreted in UTC. Use
 `with_timestamp_timezone` with a recognized IANA timezone or a normalized `+HH:MM` or `-HH:MM`
 fixed offset when the reader uses another timezone. An explicit offset in a partition value takes
-precedence. This setting affects typed `scan_metadata` output, partition predicate evaluation after
-log replay, and the partition-column row transforms used by `Scan::execute`. For typed metadata
-and partition pruning, Kernel uses compatible native checkpoint values unchanged, including
-timestamps. The timezone applies when Kernel falls back to the raw map. Row transforms always
-parse the raw map. Incremental scans can also request typed partition values with
-`IncrementalScanBuilder::with_partition_values`.
+precedence. This setting affects typed `scan_metadata` output and partition predicate evaluation
+after log replay. Kernel uses compatible native checkpoint values unchanged, including timestamps.
+The timezone applies when Kernel falls back to the raw map. Incremental scans can also request
+typed partition values with `IncrementalScanBuilder::with_partition_values`.
 `TIMESTAMP_NTZ` remains timezone-independent. For daylight-saving transitions, ambiguous local
 times use the earlier instant, and nonexistent local times use the offset from before the
 transition.
+
+Use `without_row_transforms()` and construct partition columns from the typed output. Kernel's
+partition-column row transforms parse the raw map in UTC and don't reuse native checkpoint values.
+`Scan::execute` uses those row transforms, so it cannot provide the same timestamp interpretation.
+Change data feed scans also retain their default partition-value interpretation.
 
 > [!TIP]
 > Kernel parses commit rows from the raw map. Compatible checkpoints reuse the native parsed

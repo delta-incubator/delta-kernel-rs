@@ -86,6 +86,7 @@ impl TimestampTimezone {
     /// - If a backward clock change makes a local time occur twice, use the earlier instant.
     /// - If a forward clock change skips a local time, use the offset from before the change. For
     ///   example, `02:30` in a one-hour spring-forward gap is interpreted as `03:30`.
+    #[cfg_attr(not(feature = "arrow-expression"), allow(dead_code))]
     pub(crate) fn parse_timestamp(&self, raw: &str) -> Option<i64> {
         parse_timestamp(raw, self)
     }
