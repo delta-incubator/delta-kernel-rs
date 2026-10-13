@@ -536,6 +536,18 @@ impl<S> Transaction<S> {
         self
     }
 
+    /// Adds a [`SetTransaction`] action for `app_id` and `version`. Returns the updated
+    /// transaction.
+    ///
+    /// The action's `lastUpdated` uses this transaction's commit timestamp. Each application id may
+    /// occur only once per transaction, including ids added through the builder. Duplicates are not
+    /// checked here; [`Self::commit`] rejects them.
+    pub fn with_transaction_id(mut self, app_id: String, version: i64) -> Self {
+        let set_transaction = SetTransaction::new(app_id, version, Some(self.commit_timestamp));
+        self.set_transactions.push(set_transaction);
+        self
+    }
+
     /// Set domain metadata to be written to the Delta log.
     /// Note that each domain can only appear once per transaction. That is, multiple configurations
     /// of the same domain are disallowed in a single transaction, as well as setting and removing
