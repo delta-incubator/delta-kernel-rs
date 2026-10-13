@@ -24,7 +24,7 @@ use crate::table_changes::CdfMode;
 use crate::table_configuration::TableConfiguration;
 use crate::table_features::{format_features, Operation, TableFeature};
 use crate::utils::require;
-use crate::{Engine, EngineData, KernelError, KernelResult, PredicateRef, Result, RowVisitor};
+use crate::{Engine, EngineData, KernelError, KernelResult, PredicateRef, RowVisitor};
 
 #[cfg(test)]
 mod tests;
@@ -433,7 +433,7 @@ impl RowVisitor for PreparePhaseVisitor<'_> {
         NAMES_AND_TYPES.as_ref()
     }
 
-    fn visit<'b>(&mut self, row_count: usize, getters: &[&'b dyn GetData<'b>]) -> Result<()> {
+    fn visit<'b>(&mut self, row_count: usize, getters: &[&'b dyn GetData<'b>]) -> KernelResult<()> {
         require!(
             getters.len() == 11,
             KernelError::InternalError(format!(
@@ -512,7 +512,7 @@ impl RowVisitor for FileActionSelectionVisitor<'_> {
         NAMES_AND_TYPES.as_ref()
     }
 
-    fn visit<'b>(&mut self, row_count: usize, getters: &[&'b dyn GetData<'b>]) -> Result<()> {
+    fn visit<'b>(&mut self, row_count: usize, getters: &[&'b dyn GetData<'b>]) -> KernelResult<()> {
         require!(
             getters.len() == 5,
             KernelError::InternalError(format!(

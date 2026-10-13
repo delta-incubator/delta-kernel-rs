@@ -26,7 +26,7 @@ use crate::table_features::{
 };
 use crate::transforms::{transform_output_type, SchemaTransform};
 use crate::utils::{require, CollectInto};
-use crate::{KernelError, KernelResult, Result};
+use crate::{KernelError, KernelResult};
 
 pub(crate) mod column_default;
 pub use column_default::ColumnDefault;
@@ -155,7 +155,7 @@ pub(crate) use delta_kernel_derive::schema;
 pub(crate) use delta_kernel_derive::schema_ref;
 /// Like [`schema`], but validates field names at every level of the schema (each struct,
 /// including nested ones, is built via [`StructType::try_new`] and yields
-/// [`Result<StructType>`]. Use when field names are runtime values that could duplicate
+/// [`KernelResult<StructType>`]. Use when field names are runtime values that could duplicate
 /// in ways the macro cannot see.
 #[internal_api]
 #[doc(inline)]
@@ -526,7 +526,7 @@ impl StructField {
     /// - `Err(_)` -- either not a [`MetadataValue::String`] (corrupt: the protocol defines
     ///   `CURRENT_DEFAULT` as a SQL string, the only form the kernel writes), or rejected by
     ///   [`ColumnDefault`] (a non-NULL default on a Variant column, which the protocol forbids).
-    pub fn column_default(&self) -> Result<Option<ColumnDefault<'_>>> {
+    pub fn column_default(&self) -> KernelResult<Option<ColumnDefault<'_>>> {
         let raw_sql = match self.get_config_value(&ColumnMetadataKey::CurrentDefault) {
             None => return Ok(None),
             Some(MetadataValue::String(s)) => s.clone(),
@@ -721,7 +721,10 @@ impl StructField {
     ///
     /// [`read_parquet_files`]: crate::ParquetHandler::read_parquet_files
     #[internal_api]
-    pub(crate) fn make_physical(&self, column_mapping_mode: ColumnMappingMode) -> Result<Self> {
+    pub(crate) fn make_physical(
+        &self,
+        column_mapping_mode: ColumnMappingMode,
+    ) -> KernelResult<Self> {
         MakePhysical::new(column_mapping_mode)
             .transform_struct_field(self)
             .map(|f| f.into_owned())
@@ -860,7 +863,7 @@ impl StructTypeBuilder {
         self
     }
 
-    pub fn build(self) -> Result<StructType> {
+    pub fn build(self) -> KernelResult<StructType> {
         StructType::try_new(self.fields.into_values())
     }
 
@@ -877,7 +880,7 @@ impl StructType {
     ///   case-insensitive per the protocol)
     /// - the schema contains duplicate metadata columns
     /// - the schema contains nested metadata columns
-    pub fn try_new(fields: impl IntoIterator<Item = StructField>) -> Result<Self> {
+    pub fn try_new(fields: impl IntoIterator<Item = StructField>) -> KernelResult<Self> {
         let mut field_map = IndexMap::new();
         let mut metadata_columns = HashMap::new();
         let mut seen_lowercase_names = HashSet::new();
@@ -924,7 +927,7 @@ impl StructType {
     /// encountered, or a new [`StructType`] if all fields are successfully collected and validated.
     pub fn try_from_results<E: Into<KernelError>>(
         fields: impl IntoIterator<Item = Result<StructField, E>>,
-    ) -> Result<Self> {
+    ) -> KernelResult<Self> {
         fields
             .into_iter()
             .map(|result| result.map_err(Into::into))
@@ -961,7 +964,7 @@ impl StructType {
     /// Gets a [`StructType`] containing [`StructField`]s of the given names. The order of fields in
     /// the returned schema will match the order passed to this function, which can be different
     /// from this order in this schema. Returns an Err if a specified field doesn't exist.
-    pub fn project_as_struct(&self, names: &[impl AsRef<str>]) -> Result<StructType> {
+    pub fn project_as_struct(&self, names: &[impl AsRef<str>]) -> KernelResult<StructType> {
         let fields = names.iter().map(|name| {
             self.fields
                 .get(name.as_ref())
@@ -974,13 +977,13 @@ impl StructType {
     /// Gets a [`SchemaRef`] containing [`StructField`]s of the given names. The order of fields in
     /// the returned schema will match the order passed to this function, which can be different
     /// from this order in this schema. Returns an Err if a specified field doesn't exist.
-    pub fn project(&self, names: &[impl AsRef<str>]) -> Result<SchemaRef> {
+    pub fn project(&self, names: &[impl AsRef<str>]) -> KernelResult<SchemaRef> {
         let struct_type = self.project_as_struct(names)?;
         Ok(Arc::new(struct_type))
     }
 
     /// Adds fields to this [`StructType`], returning a new [`StructType`].
-    pub fn add(&self, fields: impl IntoIterator<Item = StructField>) -> Result<Self> {
+    pub fn add(&self, fields: impl IntoIterator<Item = StructField>) -> KernelResult<Self> {
         Self::try_new(self.fields.values().cloned().chain(fields))
     }
 
@@ -989,7 +992,7 @@ impl StructType {
         &self,
         name: impl Into<String>,
         spec: MetadataColumnSpec,
-    ) -> Result<Self> {
+    ) -> KernelResult<Self> {
         self.add([StructField::create_metadata_column(name, spec)])
     }
 
@@ -1022,7 +1025,7 @@ impl StructType {
     ///
     /// Returns an error if the path is empty, a field is not found, or an intermediate field is not
     /// a struct type.
-    pub fn field_at<'a>(&'a self, col: &ColumnName) -> Result<&'a StructField> {
+    pub fn field_at<'a>(&'a self, col: &ColumnName) -> KernelResult<&'a StructField> {
         let mut field = None;
         self.visit_fields_of_path(col, |f| field = Some(f))?;
         field.ok_or_else(|| KernelError::generic("Empty path"))
@@ -1043,7 +1046,7 @@ impl StructType {
         &'a self,
         col: &ColumnName,
         visit_field: impl FnMut(&'a StructField),
-    ) -> Result<()> {
+    ) -> KernelResult<()> {
         self.visit_fields_of_path_by(col, |s, name| s.field(name), visit_field)
     }
 
@@ -1056,7 +1059,10 @@ impl StructType {
     /// Returns an error if the path is empty, a field is not found, or an intermediate
     /// field is not a struct type.
     #[internal_api]
-    pub(crate) fn fields_of_path<'a>(&'a self, col: &ColumnName) -> Result<Vec<&'a StructField>> {
+    pub(crate) fn fields_of_path<'a>(
+        &'a self,
+        col: &ColumnName,
+    ) -> KernelResult<Vec<&'a StructField>> {
         let mut result = Vec::with_capacity(col.path().len());
         self.visit_fields_of_path(col, |f| result.push(f))?;
         Ok(result)
@@ -1246,7 +1252,10 @@ impl StructType {
     /// Uses a single transformer so duplicate column mapping IDs are detected across all
     /// fields in this struct, not just within each field's subtree.
     #[internal_api]
-    pub(crate) fn make_physical(&self, column_mapping_mode: ColumnMappingMode) -> Result<Self> {
+    pub(crate) fn make_physical(
+        &self,
+        column_mapping_mode: ColumnMappingMode,
+    ) -> KernelResult<Self> {
         let mut transformer = MakePhysical::new(column_mapping_mode);
         transformer.transform_struct(self).map(|s| s.into_owned())
     }
@@ -1301,7 +1310,10 @@ impl StructType {
 
     /// Returns a new [`StructType`] containing only the top-level fields for which `predicate`
     /// returns `true`. This does not recurse into nested [`StructType`] fields.
-    pub fn with_fields_filtered(&self, predicate: impl Fn(&StructField) -> bool) -> Result<Self> {
+    pub fn with_fields_filtered(
+        &self,
+        predicate: impl Fn(&StructField) -> bool,
+    ) -> KernelResult<Self> {
         Self::try_new(self.fields().filter(|f| predicate(f)).cloned())
     }
 
@@ -1313,7 +1325,7 @@ impl StructType {
     pub fn with_fields_filtered_nonempty(
         &self,
         predicate: impl Fn(&StructField) -> bool,
-    ) -> Result<Option<Self>> {
+    ) -> KernelResult<Option<Self>> {
         let filtered = self.with_fields_filtered(predicate)?;
         if filtered.num_fields() == 0 {
             Ok(None)
@@ -1834,7 +1846,7 @@ pub struct GeometryType {
 impl GeometryType {
     /// Constructs a GeometryType from the given CRS, or returns an error if the CRS is
     /// not in AUTHORITY:CODE form.
-    pub fn try_new(crs: &str) -> Result<Self> {
+    pub fn try_new(crs: &str) -> KernelResult<Self> {
         validate_crs(crs)?;
         Ok(Self {
             crs: crs.to_string(),
@@ -1867,7 +1879,7 @@ pub struct GeographyType {
 impl GeographyType {
     /// Constructs a GeographyType from the given CRS and edge interpolation algorithm, or
     /// returns an error if the CRS is not in AUTHORITY:CODE form.
-    pub fn try_new(crs: &str, algorithm: EdgeInterpolationAlgorithm) -> Result<Self> {
+    pub fn try_new(crs: &str, algorithm: EdgeInterpolationAlgorithm) -> KernelResult<Self> {
         validate_crs(crs)?;
         Ok(Self {
             crs: crs.to_string(),
@@ -1899,7 +1911,7 @@ pub struct DecimalType {
 
 impl DecimalType {
     /// Check if the given precision and scale are valid for a decimal type.
-    pub fn try_new(precision: u8, scale: u8) -> Result<Self> {
+    pub fn try_new(precision: u8, scale: u8) -> KernelResult<Self> {
         require!(
             0 < precision && precision <= 38,
             KernelError::invalid_decimal(format!(
@@ -1977,7 +1989,7 @@ pub enum PrimitiveType {
 }
 
 impl PrimitiveType {
-    pub fn decimal(precision: u8, scale: u8) -> Result<Self> {
+    pub fn decimal(precision: u8, scale: u8) -> KernelResult<Self> {
         Ok(DecimalType::try_new(precision, scale)?.into())
     }
 
@@ -2394,7 +2406,7 @@ impl DataType {
     ///
     /// Returns an error if a field does not exist, a path segment does not match the current data
     /// type, or the path target is not a struct.
-    pub fn struct_at_path<'a>(&'a mut self, path: &[String]) -> Result<&'a mut StructType> {
+    pub fn struct_at_path<'a>(&'a mut self, path: &[String]) -> KernelResult<&'a mut StructType> {
         let mut data_type = self;
         for segment in path {
             data_type = match (segment.as_str(), data_type) {
@@ -2454,19 +2466,19 @@ impl DataType {
     }
 
     /// Create a new decimal type with the given precision and scale.
-    pub fn decimal(precision: u8, scale: u8) -> Result<Self> {
+    pub fn decimal(precision: u8, scale: u8) -> KernelResult<Self> {
         Ok(PrimitiveType::decimal(precision, scale)?.into())
     }
 
     /// Create a new struct type with the given fields.
-    pub fn try_struct_type(fields: impl IntoIterator<Item = StructField>) -> Result<Self> {
+    pub fn try_struct_type(fields: impl IntoIterator<Item = StructField>) -> KernelResult<Self> {
         Ok(StructType::try_new(fields)?.into())
     }
 
     /// Create a new struct type from a fallible iterator of fields.
     pub fn try_struct_type_from_results<E: Into<KernelError>>(
         fields: impl IntoIterator<Item = Result<StructField, E>>,
-    ) -> Result<Self> {
+    ) -> KernelResult<Self> {
         StructType::try_from_results(fields).map(Self::from)
     }
 
@@ -2486,7 +2498,7 @@ impl DataType {
 
     /// Create a new [`DataType::Variant`] from the provided fields. For unshredded variants, you
     /// should prefer using [`DataType::unshredded_variant`].
-    pub fn variant_type(fields: impl IntoIterator<Item = StructField>) -> Result<Self> {
+    pub fn variant_type(fields: impl IntoIterator<Item = StructField>) -> KernelResult<Self> {
         // Different from regular StructTypes, Variants are not allowed to contain metadata columns
         // at all, so we also need to check their top-level primitive types.
         Ok(DataType::Variant(Box::new(StructType::try_from_results(
@@ -4106,7 +4118,7 @@ mod tests {
     }
 
     #[test]
-    fn test_metadata_column_spec() -> Result<()> {
+    fn test_metadata_column_spec() -> KernelResult<()> {
         // Test text_value
         assert_eq!(MetadataColumnSpec::RowIndex.text_value(), "row_index");
         assert_eq!(MetadataColumnSpec::RowId.text_value(), "row_id");
@@ -4197,7 +4209,7 @@ mod tests {
     }
 
     #[test]
-    fn test_add_column() -> Result<()> {
+    fn test_add_column() -> KernelResult<()> {
         let schema = schema! { nullable "col1": STRING };
 
         let new_field = StructField::nullable("col2", DataType::INTEGER);
@@ -4210,7 +4222,7 @@ mod tests {
     }
 
     #[test]
-    fn test_add_metadata_column() -> Result<()> {
+    fn test_add_metadata_column() -> KernelResult<()> {
         let schema = schema! { nullable "regular_col": STRING };
 
         let schema_with_metadata =
@@ -4227,7 +4239,7 @@ mod tests {
     }
 
     #[test]
-    fn test_duplicate_metadata_columns() -> Result<()> {
+    fn test_duplicate_metadata_columns() -> KernelResult<()> {
         let schema = schema! { nullable "regular_col": STRING };
 
         let schema_with_metadata =
@@ -4262,7 +4274,7 @@ mod tests {
     }
 
     #[test]
-    fn test_nested_metadata_columns_validation_struct() -> Result<()> {
+    fn test_nested_metadata_columns_validation_struct() -> KernelResult<()> {
         // Test that metadata columns in nested structs are rejected
         let nested_field_with_metadata =
             StructField::create_metadata_column("nested_row_index", MetadataColumnSpec::RowIndex);
@@ -4287,7 +4299,7 @@ mod tests {
     }
 
     #[test]
-    fn test_nested_metadata_columns_validation_array() -> Result<()> {
+    fn test_nested_metadata_columns_validation_array() -> KernelResult<()> {
         // Test that metadata columns in array element structs are rejected
         let nested_field_with_metadata =
             StructField::create_metadata_column("nested_row_index", MetadataColumnSpec::RowIndex);
@@ -4313,7 +4325,7 @@ mod tests {
     }
 
     #[test]
-    fn test_nested_metadata_columns_validation_map() -> Result<()> {
+    fn test_nested_metadata_columns_validation_map() -> KernelResult<()> {
         // Test that metadata columns in map key structs or map value structs are rejected
         let nested_field_with_metadata =
             StructField::create_metadata_column("nested_row_index", MetadataColumnSpec::RowIndex);
@@ -4344,7 +4356,7 @@ mod tests {
     }
 
     #[test]
-    fn test_column_identifier_trait() -> Result<()> {
+    fn test_column_identifier_trait() -> KernelResult<()> {
         let schema = schema! {
             nullable "regular_col": STRING,
             (StructField::create_metadata_column(
@@ -4369,7 +4381,7 @@ mod tests {
     }
 
     #[test]
-    fn test_metadata_column_serialization() -> Result<()> {
+    fn test_metadata_column_serialization() -> KernelResult<()> {
         let field = StructField::create_metadata_column("test_row_id", MetadataColumnSpec::RowId);
 
         // Test that serialization works
@@ -4388,7 +4400,7 @@ mod tests {
     }
 
     #[test]
-    fn test_all_metadata_column_specs() -> Result<()> {
+    fn test_all_metadata_column_specs() -> KernelResult<()> {
         let schema = schema! { nullable "regular_col": STRING };
 
         let schema = schema
@@ -4500,7 +4512,7 @@ mod tests {
     }
 
     #[test]
-    fn test_display_struct_type_stable_output() -> Result<()> {
+    fn test_display_struct_type_stable_output() -> KernelResult<()> {
         let nested_field_with_metadata =
             StructField::create_metadata_column("nested_row_index", MetadataColumnSpec::RowIndex);
         let inner_struct = schema! { not_null "q": LONG };

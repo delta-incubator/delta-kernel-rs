@@ -40,7 +40,7 @@ use crate::EngineData;
 #[cfg(feature = "declarative-plans")]
 use crate::Scalar;
 use crate::{
-    Engine, FileMeta, KernelError, KernelResult, Predicate, PredicateRef, Result, RowVisitor,
+    Engine, FileMeta, KernelError, KernelResult, Predicate, PredicateRef, RowVisitor,
     StorageHandler, Version,
 };
 
@@ -99,7 +99,7 @@ impl CheckpointReadInfo {
 ///
 /// This struct provides named access to the return values instead of tuple indexing.
 #[internal_api]
-pub(crate) struct ActionsWithCheckpointInfo<A: Iterator<Item = Result<ActionsBatch>>> {
+pub(crate) struct ActionsWithCheckpointInfo<A: Iterator<Item = KernelResult<ActionsBatch>>> {
     /// Iterator over action batches read from the log segment.
     pub actions: A,
     /// Metadata about checkpoint reading, including the schema used.
@@ -299,7 +299,7 @@ impl LogSegment {
         log_root: Url,
         end_version: Option<Version>,
         last_checkpoint_metadata: Option<LastCheckpointHint>,
-    ) -> Result<Self> {
+    ) -> KernelResult<Self> {
         validate_log_path_fields(&listed_files)?;
         validate_compaction_files(&listed_files.ascending_compaction_files)?;
         validate_checkpoint_parts(&listed_files.checkpoint_parts)?;
@@ -452,7 +452,7 @@ impl LogSegment {
         time_travel_version: impl Into<Option<Version>>,
         metric_context: SnapshotLoadMetricContext,
         cancellation_token: Option<&CancellationTokenRef>,
-    ) -> Result<Self> {
+    ) -> KernelResult<Self> {
         let time_travel_version = time_travel_version.into();
         let start = std::time::Instant::now();
         let build = || {
@@ -554,7 +554,7 @@ impl LogSegment {
         log_root: Url,
         start_version: Version,
         end_version: impl Into<Option<Version>>,
-    ) -> Result<Self> {
+    ) -> KernelResult<Self> {
         Self::for_table_changes_with_log_tail(storage, log_root, start_version, end_version, vec![])
     }
 
@@ -835,7 +835,9 @@ impl LogSegment {
         stats_schema: Option<&StructType>,
         partition_schema: Option<&StructType>,
         cancellation_token: Option<&CancellationTokenRef>,
-    ) -> Result<ActionsWithCheckpointInfo<impl Iterator<Item = Result<ActionsBatch>> + Send>> {
+    ) -> KernelResult<
+        ActionsWithCheckpointInfo<impl Iterator<Item = KernelResult<ActionsBatch>> + Send>,
+    > {
         // Combine the action-presence predicate with the caller's skipping predicate so readers
         // can omit checkpoint data that cannot contain a relevant action.
         let projection_predicate = checkpoint_action_projection_predicate(&checkpoint_read_schema);
@@ -870,7 +872,7 @@ impl LogSegment {
         &self,
         engine: &dyn Engine,
         action_schema: SchemaRef,
-    ) -> Result<impl Iterator<Item = Result<ActionsBatch>> + Send> {
+    ) -> KernelResult<impl Iterator<Item = KernelResult<ActionsBatch>> + Send> {
         let result = self.read_actions_with_projected_checkpoint_actions(
             engine,
             action_schema.clone(),
@@ -924,7 +926,7 @@ impl LogSegment {
         engine: &dyn Engine,
         schema: SchemaRef,
         cancellation_token: Option<&CancellationTokenRef>,
-    ) -> Result<impl Iterator<Item = Result<ActionsBatch>> + Send> {
+    ) -> KernelResult<impl Iterator<Item = KernelResult<ActionsBatch>> + Send> {
         let commit_files = self.find_commit_cover();
         let actions = engine
             .json_handler()
@@ -1735,7 +1737,7 @@ impl LogSegment {
 /// The first checkpoint action in `batches`, or `None` when no batch carries one.
 #[cfg(feature = "adaptive-metadata-in-dev")]
 fn first_checkpoint_action(
-    batches: impl Iterator<Item = Result<Box<dyn EngineData>>>,
+    batches: impl Iterator<Item = KernelResult<Box<dyn EngineData>>>,
 ) -> KernelResult<Option<CheckpointAction>> {
     for batch in batches {
         if let Some(action) = CheckpointAction::try_new_from_data(batch?.as_ref())? {

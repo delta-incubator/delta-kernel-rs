@@ -11,7 +11,7 @@ use crate::arrow::datatypes::{DataType as ArrowDataType, Field as ArrowField, Ti
 use crate::engine::arrow_utils::make_arrow_error;
 use crate::schema::{DataType, MetadataValue, StructField};
 use crate::utils::require;
-use crate::{KernelError, KernelResult, Result};
+use crate::{KernelError, KernelResult};
 
 /// Controls how `ensure_data_types` validates struct fields and metadata.
 #[derive(Clone, Copy)]
@@ -45,7 +45,7 @@ pub(crate) fn ensure_data_types(
     kernel_type: &DataType,
     arrow_type: &ArrowDataType,
     mode: ValidationMode,
-) -> Result<DataTypeCompat> {
+) -> KernelResult<DataTypeCompat> {
     let check = EnsureDataTypes { mode };
     check.ensure_data_types(kernel_type, arrow_type)
 }

@@ -45,7 +45,7 @@ pub(crate) use writer::try_write_crc_file;
 use crate::actions::LastManifestCommit;
 use crate::actions::{Add, DomainMetadata, Metadata, Protocol, SetTransaction};
 use crate::table_properties::ENABLE_IN_COMMIT_TIMESTAMPS;
-use crate::{KernelError, KernelResult, Result, Version};
+use crate::{KernelError, KernelResult, Version};
 
 // ============================================================================
 // Crc: in-memory representation
@@ -139,7 +139,7 @@ impl Crc {
         #[cfg(feature = "adaptive-metadata-in-dev")] last_manifest_commit_opt: Option<
             LastManifestCommit,
         >,
-    ) -> Result<Self> {
+    ) -> KernelResult<Self> {
         let crc = Self {
             version,
             metadata,
@@ -297,7 +297,7 @@ impl Crc {
     ///
     /// Returns an error for malformed JSON or invalid counts, statistics, or histogram fields.
     #[internal_api]
-    pub(crate) fn try_from_json_bytes(bytes: &[u8], version: Version) -> Result<Self> {
+    pub(crate) fn try_from_json_bytes(bytes: &[u8], version: Version) -> KernelResult<Self> {
         let raw: CrcRaw = serde_json::from_slice(bytes)?;
         // Per the Delta protocol spec, numMetadata and numProtocol MUST be 1 in any CRC file.
         // Reject malformed files at the deserialization boundary so callers can trust the value.
@@ -578,7 +578,7 @@ struct DerivedDeletionStats {
 impl TryFrom<&[Add]> for DerivedDeletionStats {
     type Error = KernelError;
 
-    fn try_from(files: &[Add]) -> Result<Self> {
+    fn try_from(files: &[Add]) -> KernelResult<Self> {
         let cardinalities = || {
             files.iter().map(|add| {
                 add.deletion_vector
@@ -653,7 +653,7 @@ struct DeletedRecordCountsHistogramRaw {
 impl TryFrom<DeletedRecordCountsHistogramRaw> for DeletedRecordCountsHistogram {
     type Error = KernelError;
 
-    fn try_from(value: DeletedRecordCountsHistogramRaw) -> Result<Self> {
+    fn try_from(value: DeletedRecordCountsHistogramRaw) -> KernelResult<Self> {
         Self::try_new(value.deleted_record_counts.into())
     }
 }
@@ -671,7 +671,7 @@ impl DeletedRecordCountsHistogram {
     /// Returns an error unless exactly ten non-negative bin counts are provided.
     #[internal_api]
     #[cfg_attr(not(feature = "internal-api"), allow(dead_code))]
-    pub(crate) fn try_new(deleted_record_counts: Vec<i64>) -> Result<Self> {
+    pub(crate) fn try_new(deleted_record_counts: Vec<i64>) -> KernelResult<Self> {
         Self::validate(&deleted_record_counts)?;
         Ok(Self {
             deleted_record_counts,

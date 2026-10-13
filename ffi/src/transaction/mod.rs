@@ -54,7 +54,7 @@ use crate::handle::Handle;
 use crate::scan::EngineSchema;
 use crate::schema_visitor::{extract_kernel_schema, KernelSchemaVisitorState};
 use crate::{
-    ExclusiveEngineData, ExternEngine, KernelStringSlice, Result, SharedExternEngine,
+    ExclusiveEngineData, ExternEngine, KernelResult, KernelStringSlice, SharedExternEngine,
     SharedSnapshot, TryFromStringSlice,
 };
 
@@ -62,7 +62,7 @@ unsafe fn apply_nullable_string_map<T>(
     value: T,
     input: &FfiNullableStringMap,
     apply: impl FnOnce(T, HashMap<String, Option<String>>) -> T,
-) -> Result<T> {
+) -> KernelResult<T> {
     Ok(apply(value, unsafe { input.try_to_hash_map() }?))
 }
 
@@ -71,7 +71,7 @@ unsafe fn apply_commit_info<T>(
     commit_info: Box<dyn EngineData>,
     schema: &EngineSchema,
     apply: impl FnOnce(T, Box<dyn EngineData>, SchemaRef) -> T,
-) -> Result<T> {
+) -> KernelResult<T> {
     let schema = decode_engine_schema(schema)?;
     Ok(apply(value, commit_info, Arc::new(schema)))
 }
@@ -81,13 +81,13 @@ unsafe fn apply_domain_metadata<T>(
     domain: KernelStringSlice,
     configuration: KernelStringSlice,
     apply: impl FnOnce(T, String, String) -> T,
-) -> Result<T> {
+) -> KernelResult<T> {
     let domain = unsafe { TryFromStringSlice::try_from_slice(&domain) }?;
     let configuration = unsafe { TryFromStringSlice::try_from_slice(&configuration) }?;
     Ok(apply(value, domain, configuration))
 }
 
-fn decode_engine_schema(schema: &EngineSchema) -> Result<delta_kernel::schema::StructType> {
+fn decode_engine_schema(schema: &EngineSchema) -> KernelResult<delta_kernel::schema::StructType> {
     let mut visitor_state = KernelSchemaVisitorState::default();
     let schema_id = (schema.visitor)(schema.schema, &mut visitor_state);
     extract_kernel_schema(&mut visitor_state, schema_id)
@@ -132,7 +132,7 @@ mod tests {
         schema_ref, ColumnMetadataKey, DataType, MetadataValue, SchemaRef, StructField, StructType,
     };
     use delta_kernel::table_features::TableFeature;
-    use delta_kernel::Result;
+    use delta_kernel::KernelResult;
     use delta_kernel_ffi::delta_types::{
         FfiColumnNameArray, FfiNullableStringMap, FfiNullableStringMapEntry, FfiStringArray,
     };
@@ -186,9 +186,9 @@ mod tests {
         fn commit(
             &self,
             _engine: &dyn delta_kernel::Engine,
-            _actions: delta_kernel::ResultIterator<'_, FilteredEngineData>,
+            _actions: delta_kernel::KernelResultIterator<'_, FilteredEngineData>,
             _commit_metadata: delta_kernel::committer::CommitMetadata,
-        ) -> Result<delta_kernel::committer::CommitResponse> {
+        ) -> KernelResult<delta_kernel::committer::CommitResponse> {
             Err(delta_kernel::KernelError::IOError(std::io::Error::other(
                 "simulated IO error",
             )))
@@ -202,7 +202,7 @@ mod tests {
             &self,
             _engine: &dyn delta_kernel::Engine,
             _publish_metadata: delta_kernel::committer::PublishMetadata,
-        ) -> Result<()> {
+        ) -> KernelResult<()> {
             Ok(())
         }
     }
@@ -219,9 +219,9 @@ mod tests {
         fn commit(
             &self,
             _engine: &dyn delta_kernel::Engine,
-            _actions: delta_kernel::ResultIterator<'_, FilteredEngineData>,
+            _actions: delta_kernel::KernelResultIterator<'_, FilteredEngineData>,
             _commit_metadata: delta_kernel::committer::CommitMetadata,
-        ) -> Result<delta_kernel::committer::CommitResponse> {
+        ) -> KernelResult<delta_kernel::committer::CommitResponse> {
             Err(delta_kernel::KernelError::generic(
                 "drop-tracking committer must not be called",
             ))
@@ -235,7 +235,7 @@ mod tests {
             &self,
             _engine: &dyn delta_kernel::Engine,
             _publish_metadata: delta_kernel::committer::PublishMetadata,
-        ) -> Result<()> {
+        ) -> KernelResult<()> {
             Ok(())
         }
     }
@@ -3656,7 +3656,8 @@ mod tests {
             vec![StructField::nullable("id", DataType::INTEGER)],
         );
         let builder = unsafe { *builder_handle.into_inner() };
-        let layout: Result<DataLayout> = Err(delta_kernel::KernelError::generic("bad column"));
+        let layout: KernelResult<DataLayout> =
+            Err(delta_kernel::KernelError::generic("bad column"));
         let result = create_table_txn_builder_with_data_layout_impl(builder, layout);
         assert!(result.is_err());
         unsafe { free_engine(engine) };

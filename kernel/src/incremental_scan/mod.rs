@@ -18,7 +18,7 @@ use crate::table_features::Operation;
 use crate::utils::require;
 use crate::{
     Engine, EngineData, FileDataReadResultIterator, FileMeta, KernelError, KernelResult,
-    PredicateRef, Result, Version,
+    PredicateRef, Version,
 };
 
 /// Builder for an incremental scan over `(base_version, target_version]`. Construct via
@@ -84,7 +84,7 @@ impl IncrementalScanBuilder {
     ///   references a column absent from the table schema.
     /// - `Err` if the target snapshot's protocol contains an unsupported reader feature.
     /// - `Err` if the engine fails to open the commit stream.
-    pub fn build(self, engine: &dyn Engine) -> Result<Option<IncrementalScanStream>> {
+    pub fn build(self, engine: &dyn Engine) -> KernelResult<Option<IncrementalScanStream>> {
         // TODO(#2493): the version validation, the snapshot-commit-list extraction and
         // clipping below, and the "snapshot covers the range" check should all be replaced
         // by a single `CommitRangeBuilder::from_snapshot(...).build(engine)` call once
@@ -244,7 +244,7 @@ pub struct IncrementalScanStream {
 }
 
 impl Iterator for IncrementalScanStream {
-    type Item = Result<FilteredEngineData>;
+    type Item = KernelResult<FilteredEngineData>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.errored {
@@ -293,7 +293,7 @@ impl IncrementalScanStream {
     ///   "cannot finish a stream that previously errored" when a terminal method is called after a
     ///   prior `next()` returned `Err`. Rebuild to retry the latter; the former indicates table
     ///   corruption.
-    pub fn into_summary(mut self) -> Result<IncrementalScanSummary> {
+    pub fn into_summary(mut self) -> KernelResult<IncrementalScanSummary> {
         if self.errored {
             return Err(KernelError::generic(
                 "IncrementalScanStream: cannot finish a stream that previously errored",
@@ -326,7 +326,7 @@ impl IncrementalScanStream {
     ///
     /// [`into_summary`]: Self::into_summary
     /// [`ActionsBatch`]: crate::log_replay::ActionsBatch
-    pub fn into_listing(mut self) -> Result<IncrementalListing> {
+    pub fn into_listing(mut self) -> KernelResult<IncrementalListing> {
         let mut add_files: Vec<FilteredEngineData> = Vec::new();
         for item in self.by_ref() {
             add_files.push(item?);
@@ -358,7 +358,7 @@ impl IncrementalScanStream {
     pub fn into_summary_against_base_iter<'a>(
         self,
         base_keys: impl IntoIterator<Item = &'a FileActionKey>,
-    ) -> Result<IncrementalScanSummaryAgainstBase> {
+    ) -> KernelResult<IncrementalScanSummaryAgainstBase> {
         let summary = self.into_summary()?;
         let duplicate_adds: HashSet<FileActionKey> = base_keys
             .into_iter()
@@ -391,7 +391,7 @@ impl IncrementalScanStream {
     pub fn into_summary_against_base_closure(
         self,
         base_contains: impl Fn(&FileActionKey) -> bool,
-    ) -> Result<IncrementalScanSummaryAgainstBase> {
+    ) -> KernelResult<IncrementalScanSummaryAgainstBase> {
         let summary = self.into_summary()?;
         let duplicate_adds: HashSet<FileActionKey> = summary
             .live_adds
@@ -424,7 +424,7 @@ impl IncrementalScanStream {
     pub fn into_listing_against_base_iter<'a>(
         mut self,
         base_keys: impl IntoIterator<Item = &'a FileActionKey>,
-    ) -> Result<IncrementalListingAgainstBase> {
+    ) -> KernelResult<IncrementalListingAgainstBase> {
         let mut add_files: Vec<FilteredEngineData> = Vec::new();
         for item in self.by_ref() {
             add_files.push(item?);
@@ -445,7 +445,7 @@ impl IncrementalScanStream {
     pub fn into_listing_against_base_closure(
         mut self,
         base_contains: impl Fn(&FileActionKey) -> bool,
-    ) -> Result<IncrementalListingAgainstBase> {
+    ) -> KernelResult<IncrementalListingAgainstBase> {
         let mut add_files: Vec<FilteredEngineData> = Vec::new();
         for item in self.by_ref() {
             add_files.push(item?);
@@ -673,7 +673,7 @@ impl RowVisitor for IncrementalDedupVisitor<'_, '_> {
         (names, types)
     }
 
-    fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> Result<()> {
+    fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> KernelResult<()> {
         require!(
             getters.len() == NUM_GETTERS,
             KernelError::InternalError(format!(

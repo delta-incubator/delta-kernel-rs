@@ -14,7 +14,7 @@ use crate::metrics::{MetricId, SnapshotLoadMetricContext, SnapshotLoadType};
 use crate::path::DELTA_LOG_DIR_WITH_SLASH;
 use crate::snapshot::{SnapshotHint, SnapshotRef};
 use crate::utils::{require, try_parse_uri, PhantomType};
-use crate::{Engine, KernelError, KernelResult, Result, Snapshot, Version};
+use crate::{Engine, KernelError, KernelResult, Snapshot, Version};
 
 /// Marker for builders that load a snapshot from a table root.
 #[doc(hidden)]
@@ -31,7 +31,7 @@ pub struct FromSnapshot;
 /// ```no_run
 /// # use delta_kernel::{Snapshot, Engine};
 /// # use url::Url;
-/// # fn example(engine: &dyn Engine) -> delta_kernel::Result<()> {
+/// # fn example(engine: &dyn Engine) -> delta_kernel::KernelResult<()> {
 /// let table_root = Url::parse("file:///path/to/table")?;
 ///
 /// // Build a snapshot
@@ -328,7 +328,7 @@ impl<Mode> SnapshotBuilder<Mode> {
         fields(path = %self.table_path(), report, enable_call_frame, version = tracing::field::Empty, operation_id = %self.operation_id, is_catalog_managed = self.max_catalog_version.is_some(), correlation_id = self.correlation_id.as_deref().unwrap_or(""), load_type = self.load_type().as_ref()),
         err
     )]
-    pub fn build(self, engine: &dyn Engine) -> Result<SnapshotRef> {
+    pub fn build(self, engine: &dyn Engine) -> KernelResult<SnapshotRef> {
         // Fold the context into the message string rather than passing structured fields: this
         // `info!` fires inside the `snap.build` metrics span, where any field the
         // `SnapshotBuildSuccess` event doesn't recognize would trip a spurious "Invalid field"

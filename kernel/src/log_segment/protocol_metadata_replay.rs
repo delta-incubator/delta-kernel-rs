@@ -35,7 +35,7 @@ use crate::schema::{
     column_name, schema_ref, ColumnName, ColumnNamesAndTypes, DataType, MetadataColumnSpec,
     StructField, StructType,
 };
-use crate::{Engine, EngineData, KernelError, KernelResult, Result, Version};
+use crate::{Engine, EngineData, KernelError, KernelResult, Version};
 
 impl LogSegment {
     /// Read the latest Protocol and Metadata from this log segment, using CRC when available.
@@ -414,7 +414,11 @@ fn batch_version(data: &dyn EngineData) -> KernelResult<Version> {
                 LazyLock::new(|| (vec![column_name!("_file")], vec![DataType::STRING]).into());
             NAMES_AND_TYPES.as_ref()
         }
-        fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> Result<()> {
+        fn visit<'a>(
+            &mut self,
+            row_count: usize,
+            getters: &[&'a dyn GetData<'a>],
+        ) -> KernelResult<()> {
             if self.file.is_none() && row_count > 0 {
                 self.file = getters[0].get_opt(0, "_file")?;
             }
@@ -541,7 +545,11 @@ fn pm_versions_from_plan_output(
             });
             NAMES_AND_TYPES.as_ref()
         }
-        fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> Result<()> {
+        fn visit<'a>(
+            &mut self,
+            row_count: usize,
+            getters: &[&'a dyn GetData<'a>],
+        ) -> KernelResult<()> {
             if row_count > 0 {
                 self.protocol = getters[0].get_opt(0, "protocol_version")?;
                 self.metadata = getters[1].get_opt(0, "metadata_version")?;
@@ -574,14 +582,14 @@ mod tests {
     use crate::plans::{Operation, PlanExecutor, PlanResult};
     use crate::Snapshot;
     #[cfg(feature = "declarative-plans")]
-    use crate::{KernelError, Result};
+    use crate::{KernelError, KernelResult};
 
     #[cfg(feature = "declarative-plans")]
     struct FailingPlanExecutor;
 
     #[cfg(feature = "declarative-plans")]
     impl PlanExecutor for FailingPlanExecutor {
-        fn execute_op(&self, _op: Operation) -> Result<PlanResult> {
+        fn execute_op(&self, _op: Operation) -> KernelResult<PlanResult> {
             Err(KernelError::generic("plan executor deliberately failed"))
         }
     }

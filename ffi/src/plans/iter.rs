@@ -8,7 +8,7 @@
 //! # `next()` protocol
 //!
 //! Each `next` callback writes its result as an `OptionalValue<EngineExecResult<T>>` (mirroring
-//! Rust's `Option<Result<T>>`) into a caller-provided out pointer. The out pointer is
+//! Rust's `Option<KernelResult<T>>`) into a caller-provided out pointer. The out pointer is
 //! pre-initialized to `Some(EngineExecResult::Uninit)`.
 //!
 //! This allows us to implement `ResultIterator<T>` semantics:

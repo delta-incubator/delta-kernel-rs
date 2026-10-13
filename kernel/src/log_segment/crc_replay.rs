@@ -36,7 +36,7 @@ use crate::schema::{
 };
 use crate::snapshot::IncrementalReplay;
 use crate::utils::require;
-use crate::{Engine, FileMeta, KernelError, KernelResult, Result, RowVisitor, Version};
+use crate::{Engine, FileMeta, KernelError, KernelResult, RowVisitor, Version};
 
 static REPLAY_SCHEMA: LazyLock<SchemaRef> = lazy_schema_ref! {
     // size is the only Add leaf the visitor reads, and it is required, so its presence marks
@@ -605,7 +605,7 @@ impl RowVisitor for CommitCrcVisitor<'_> {
         NAMES_AND_TYPES.as_ref()
     }
 
-    fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> Result<()> {
+    fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> KernelResult<()> {
         check_visitor_getters(getters, N_FIXED_COLS, "CommitCrcVisitor")?;
         if row_count == 0 {
             return Ok(());
@@ -666,7 +666,7 @@ impl RowVisitor for CheckpointCrcVisitor<'_> {
         NAMES_AND_TYPES.as_ref()
     }
 
-    fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> Result<()> {
+    fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> KernelResult<()> {
         check_visitor_getters(getters, N_SHARED_SINGLE_LEAF_COLS, "CheckpointCrcVisitor")?;
         for i in 0..row_count {
             self.acc.apply_shared_columns(i, getters)?;

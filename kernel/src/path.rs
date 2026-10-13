@@ -19,7 +19,7 @@ use crate::engine_data::RowVisitor;
 use crate::schema::lazy_schema_ref;
 use crate::schema::SchemaRef;
 use crate::utils::require;
-use crate::{Engine, EngineData, FileMeta, KernelError, KernelResult, Result, Version};
+use crate::{Engine, EngineData, FileMeta, KernelError, KernelResult, Version};
 
 /// The delta log subdirectory with a trailing slash for directory URL joins.
 pub(crate) const DELTA_LOG_DIR_WITH_SLASH: &str = "_delta_log/";
@@ -216,7 +216,7 @@ impl<Location: AsUrl> ParsedLogPath<Location> {
     // NOTE: We can't actually impl TryFrom because Option<T> is a foreign struct even if T is
     // local.
     #[internal_api]
-    pub(crate) fn try_from(location: Location) -> Result<Option<ParsedLogPath<Location>>> {
+    pub(crate) fn try_from(location: Location) -> KernelResult<Option<ParsedLogPath<Location>>> {
         let url = location.as_url();
         let Some(mut path_segments) = url.path_segments() else {
             return Ok(None);
@@ -529,7 +529,7 @@ impl ParsedLogPath<Url> {
 
     /// Create a new `ParsedLogPath<Url>` for a version checksum (CRC) file.
     #[internal_api]
-    pub(crate) fn new_crc(table_root: &Url, version: Version) -> Result<Self> {
+    pub(crate) fn new_crc(table_root: &Url, version: Version) -> KernelResult<Self> {
         let filename = format!("{version:020}.crc");
         let path = Self::create_path(table_root, filename)?;
         if !matches!(path.file_type, LogPathFileType::Crc) {

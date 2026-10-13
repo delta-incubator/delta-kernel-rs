@@ -8,7 +8,8 @@ use delta_kernel::object_store::ObjectStoreExt as _;
 use delta_kernel::scan::StatsOptions;
 use delta_kernel::{
     CancellationToken as _, CancellationTokenRef, Engine, FileMeta, FileSlice, JsonHandler,
-    KernelError, ParquetHandler, Result, ResultIteratorStatic, Snapshot, StorageHandler,
+    KernelError, KernelResult, KernelResultIteratorStatic, ParquetHandler, Snapshot,
+    StorageHandler,
 };
 use rstest::rstest;
 use test_utils::delta_kernel_default_engine::DefaultEngineBuilder;
@@ -71,8 +72,10 @@ async fn precancelled_scan_yields_cancelled(
 }
 
 /// Asserts that `scan_metadata` reports cancellation before producing any data.
-fn assert_cancelled<I: Iterator<Item = delta_kernel::Result<delta_kernel::scan::ScanMetadata>>>(
-    result: delta_kernel::Result<I>,
+fn assert_cancelled<
+    I: Iterator<Item = delta_kernel::KernelResult<delta_kernel::scan::ScanMetadata>>,
+>(
+    result: delta_kernel::KernelResult<I>,
 ) {
     match result {
         Err(KernelError::Cancelled) => {}
@@ -308,7 +311,7 @@ struct CancelOnListHandler {
 }
 
 impl StorageHandler for CancelOnListHandler {
-    fn list_from(&self, path: &url::Url) -> Result<ResultIteratorStatic<FileMeta>> {
+    fn list_from(&self, path: &url::Url) -> KernelResult<KernelResultIteratorStatic<FileMeta>> {
         self.inner.list_from(path)
     }
 
@@ -316,13 +319,16 @@ impl StorageHandler for CancelOnListHandler {
         &self,
         path: &url::Url,
         cancellation_token: Option<CancellationTokenRef>,
-    ) -> Result<ResultIteratorStatic<FileMeta>> {
+    ) -> KernelResult<KernelResultIteratorStatic<FileMeta>> {
         self.token.cancel();
         self.inner
             .list_from_with_cancellation(path, cancellation_token)
     }
 
-    fn read_files(&self, files: Vec<FileSlice>) -> Result<ResultIteratorStatic<bytes::Bytes>> {
+    fn read_files(
+        &self,
+        files: Vec<FileSlice>,
+    ) -> KernelResult<KernelResultIteratorStatic<bytes::Bytes>> {
         self.inner.read_files(files)
     }
 
@@ -330,24 +336,24 @@ impl StorageHandler for CancelOnListHandler {
         &self,
         files: Vec<FileSlice>,
         cancellation_token: Option<CancellationTokenRef>,
-    ) -> Result<ResultIteratorStatic<bytes::Bytes>> {
+    ) -> KernelResult<KernelResultIteratorStatic<bytes::Bytes>> {
         self.inner
             .read_files_with_cancellation(files, cancellation_token)
     }
 
-    fn put(&self, path: &url::Url, data: bytes::Bytes, overwrite: bool) -> Result<()> {
+    fn put(&self, path: &url::Url, data: bytes::Bytes, overwrite: bool) -> KernelResult<()> {
         self.inner.put(path, data, overwrite)
     }
 
-    fn copy_atomic(&self, src: &url::Url, dest: &url::Url) -> Result<()> {
+    fn copy_atomic(&self, src: &url::Url, dest: &url::Url) -> KernelResult<()> {
         self.inner.copy_atomic(src, dest)
     }
 
-    fn head(&self, path: &url::Url) -> Result<FileMeta> {
+    fn head(&self, path: &url::Url) -> KernelResult<FileMeta> {
         self.inner.head(path)
     }
 
-    fn delete(&self, path: &url::Url) -> Result<()> {
+    fn delete(&self, path: &url::Url) -> KernelResult<()> {
         self.inner.delete(path)
     }
 }

@@ -35,7 +35,7 @@ use crate::path::{LogPathFileType, ParsedLogPath};
 use crate::snapshot::Snapshot;
 use crate::table_configuration::InCommitTimestampEnablement;
 use crate::utils::require;
-use crate::{Engine, KernelError as DeltaError, KernelResult, Result, Version};
+use crate::{Engine, KernelError as DeltaError, KernelResult, Version};
 
 pub(crate) mod search;
 
@@ -533,7 +533,7 @@ pub fn latest_version_as_of(
     engine: &dyn Engine,
     timestamp: Timestamp,
     resolved_commit_type: HistoryCommitType,
-) -> Result<CommitAt> {
+) -> KernelResult<CommitAt> {
     timestamp_to_version(
         snapshot,
         engine,
@@ -574,7 +574,7 @@ pub fn first_version_after(
     engine: &dyn Engine,
     timestamp: Timestamp,
     resolved_commit_type: HistoryCommitType,
-) -> Result<CommitAt> {
+) -> KernelResult<CommitAt> {
     timestamp_to_version(
         snapshot,
         engine,
@@ -634,7 +634,7 @@ pub fn timestamp_range_to_versions(
     engine: &dyn Engine,
     start_timestamp: Timestamp,
     end_timestamp: Option<Timestamp>,
-) -> Result<(Version, Option<Version>)> {
+) -> KernelResult<(Version, Option<Version>)> {
     if let Some(end_timestamp) = end_timestamp {
         // The `start_timestamp` must be no greater than the `end_timestamp`.
         require!(
@@ -891,7 +891,7 @@ pub fn get_earliest_commit(
     log_root: &Url,
     earliest_ratified_commit_version: Option<Version>,
     commit_type: HistoryCommitType,
-) -> Result<Version> {
+) -> KernelResult<Version> {
     match commit_type {
         HistoryCommitType::Published => get_earliest_published_commit_version(
             engine,

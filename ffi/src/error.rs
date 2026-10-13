@@ -1,5 +1,5 @@
 use delta_kernel::snapshot::SnapshotHintError;
-use delta_kernel::{KernelError, Result};
+use delta_kernel::{KernelError, KernelResult};
 use tracing::warn;
 
 use crate::handle::Handle;
@@ -250,8 +250,8 @@ pub(crate) trait IntoExternResult<T> {
     unsafe fn into_extern_result(self, alloc: &dyn AllocateError) -> ExternResult<T>;
 }
 
-// NOTE: We can't "just" impl From<Result<T>> because we require an error allocator.
-impl<T> IntoExternResult<T> for Result<T> {
+// NOTE: We can't "just" impl From<KernelResult<T>> because we require an error allocator.
+impl<T> IntoExternResult<T> for KernelResult<T> {
     unsafe fn into_extern_result(self, alloc: &dyn AllocateError) -> ExternResult<T> {
         match self {
             Ok(ok) => ExternResult::Ok(ok),

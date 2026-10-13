@@ -40,7 +40,7 @@ use crate::table_features::{
 use crate::table_properties::TableProperties;
 use crate::transforms::SchemaTransform as _;
 use crate::utils::require;
-use crate::{KernelError, KernelResult, Result, Version};
+use crate::{KernelError, KernelResult, Version};
 
 /// Logical and physical schemas for the structured statistics emitted by a scan.
 ///
@@ -340,7 +340,7 @@ impl TableConfiguration {
         protocol: Protocol,
         table_root: Url,
         version: Version,
-    ) -> Result<Self> {
+    ) -> KernelResult<Self> {
         let logical_schema = Arc::new(metadata.parse_schema()?);
         Self::try_new_inner(metadata, protocol, table_root, version, logical_schema)
     }
@@ -1042,7 +1042,7 @@ impl TableConfiguration {
     /// - For `SnapshotLoad`, `Scan` and `Cdf`: checks reader version and reader features
     /// - For `Write` operations: checks writer version and writer features
     #[internal_api]
-    pub(crate) fn ensure_operation_supported(&self, operation: Operation) -> Result<()> {
+    pub(crate) fn ensure_operation_supported(&self, operation: Operation) -> KernelResult<()> {
         match operation {
             Operation::SnapshotLoad | Operation::Scan | Operation::Cdf => {
                 self.ensure_read_supported(operation)

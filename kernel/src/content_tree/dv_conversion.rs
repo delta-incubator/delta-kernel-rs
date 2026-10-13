@@ -6,7 +6,7 @@ use crate::content_tree::DeletionVectorInfo;
 use crate::engine_data::{GetData, RowVisitor, TypedGetData as _};
 use crate::expressions::{ArrayData, Scalar};
 use crate::schema::{column_name, lazy_schema_ref, ArrayType, ColumnName, DataType, SchemaRef};
-use crate::{EngineData, KernelError, KernelResult, Result};
+use crate::{EngineData, KernelError, KernelResult};
 
 /// Extracts deletion vector content from a DeletionVectorDescriptor.
 ///
@@ -202,7 +202,7 @@ impl RowVisitor for DecodedDvVisitor {
         (self.names, &DV_LEAF_TYPES)
     }
 
-    fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> Result<()> {
+    fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> KernelResult<()> {
         for i in 0..row_count {
             // `storageType` is a required (non-null) field of the DV descriptor, so it is null
             // for a row iff the whole `deletionVector` struct is null (the visitor unions parent
@@ -271,7 +271,11 @@ mod tests {
             COLUMNS.as_ref()
         }
 
-        fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> Result<()> {
+        fn visit<'a>(
+            &mut self,
+            row_count: usize,
+            getters: &[&'a dyn GetData<'a>],
+        ) -> KernelResult<()> {
             for i in 0..row_count {
                 self.locations.push(getters[0].get_opt(i, DV_LOCATION)?);
                 self.offsets.push(getters[1].get_opt(i, DV_OFFSET)?);

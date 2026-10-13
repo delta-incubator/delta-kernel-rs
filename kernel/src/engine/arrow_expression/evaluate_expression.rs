@@ -36,7 +36,7 @@ use crate::engine::arrow_expression::opaque::{
 };
 use crate::engine::arrow_utils::{list_type_with_element, parse_json_impl, prim_array_cmp};
 use crate::engine::ensure_data_types::{ensure_data_types, ValidationMode};
-use crate::error::{KernelError, Result};
+use crate::error::{KernelError, KernelResult};
 use crate::expressions::{
     BinaryExpression, BinaryExpressionOp, BinaryPredicate, BinaryPredicateOp, Expression,
     ExpressionRef, ExpressionStructPatch, JunctionPredicate, JunctionPredicateOp, OpaqueExpression,
@@ -44,7 +44,6 @@ use crate::expressions::{
     UnaryPredicateOp, VariadicExpression, VariadicExpressionOp,
 };
 use crate::schema::{DataType, PrimitiveType, StructField, StructType};
-use crate::KernelResult;
 
 #[internal_api]
 pub(crate) trait ProvidesColumnByName {
@@ -89,7 +88,7 @@ impl ProvidesColumnByName for StructArray {
 pub(crate) fn extract_column(
     parent: &dyn ProvidesColumnByName,
     col: &[impl AsRef<str>],
-) -> Result<ArrayRef> {
+) -> KernelResult<ArrayRef> {
     Ok(extract_column_ref(parent, col)?.clone())
 }
 
@@ -98,7 +97,7 @@ pub(crate) fn extract_column(
 pub(crate) fn extract_column_ref<'a>(
     mut parent: &'a dyn ProvidesColumnByName,
     col: &[impl AsRef<str>],
-) -> Result<&'a ArrayRef> {
+) -> KernelResult<&'a ArrayRef> {
     let mut field_names = col.iter();
     let mut field_name = match field_names.next() {
         Some(name) => name.as_ref(),
@@ -281,7 +280,7 @@ pub fn evaluate_expression(
     expression: &Expression,
     batch: &RecordBatch,
     result_type: Option<&DataType>,
-) -> Result<ArrayRef> {
+) -> KernelResult<ArrayRef> {
     use BinaryExpressionOp::*;
     use Expression::*;
     use UnaryExpressionOp::*;
@@ -618,7 +617,7 @@ pub fn evaluate_predicate(
     predicate: &Predicate,
     batch: &RecordBatch,
     inverted: bool,
-) -> Result<BooleanArray> {
+) -> KernelResult<BooleanArray> {
     use BinaryPredicateOp::*;
     use Predicate::*;
 
@@ -2839,7 +2838,7 @@ mod tests {
         raw: &str,
         target: DataType,
         timestamp_timezone: Option<&str>,
-    ) -> Result<ArrayRef> {
+    ) -> KernelResult<ArrayRef> {
         let mut builder = MapBuilder::new(None, StringBuilder::new(), StringBuilder::new());
         builder.keys().append_value("ts");
         builder.values().append_value(raw);
@@ -2862,7 +2861,7 @@ mod tests {
         raw: &str,
         target: DataType,
         timestamp_timezone: Option<&str>,
-    ) -> Result<Option<i64>> {
+    ) -> KernelResult<Option<i64>> {
         let field = evaluate_map_to_struct_field(raw, target, timestamp_timezone)?;
         let timestamps = field
             .as_any()

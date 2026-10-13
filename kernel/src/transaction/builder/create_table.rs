@@ -52,7 +52,7 @@ use crate::transaction::create_table::CreateTableTransaction;
 use crate::transaction::data_layout::DataLayout;
 use crate::transaction::{CommitOperation, CreateTable, ExecutionMode, Transaction};
 use crate::utils::{current_time_ms, try_parse_uri};
-use crate::{Engine, KernelError, KernelResult, Result, StorageHandler};
+use crate::{Engine, KernelError, KernelResult, StorageHandler};
 
 /// Table features allowed to be enabled via `delta.feature.*=supported` during CREATE TABLE.
 ///
@@ -161,7 +161,7 @@ fn ensure_table_does_not_exist(
 ) -> KernelResult<()> {
     match storage.list_from(delta_log_url) {
         Ok(mut files) => {
-            // files.next() returns Option<Result<FileMeta>>
+            // files.next() returns Option<KernelResult<FileMeta>>
             // - Some(Ok(_)) means a file exists -> table exists
             // - Some(Err(FileNotFound)) means path doesn't exist -> OK for new table
             // - Some(Err(other)) means real error -> propagate
@@ -846,7 +846,7 @@ impl TransactionBuilder<CreateTable> {
     /// # use delta_kernel::transaction::create_table::create_table;
     /// # use delta_kernel::schema::{StructType, DataType, StructField};
     /// # use std::sync::Arc;
-    /// # fn example() -> delta_kernel::Result<()> {
+    /// # fn example() -> delta_kernel::KernelResult<()> {
     /// # let schema = Arc::new(StructType::try_new(vec![StructField::nullable("id", DataType::INTEGER)])?);
     /// let builder = create_table("/path/to/table", schema, "MyApp/1.0", /* data_change */ true)
     ///     .with_table_properties([
@@ -892,7 +892,7 @@ impl TransactionBuilder<CreateTable> {
     /// # use delta_kernel::transaction::data_layout::DataLayout;
     /// # use delta_kernel::schema::{StructType, DataType, StructField};
     /// # use std::sync::Arc;
-    /// # fn example() -> delta_kernel::Result<()> {
+    /// # fn example() -> delta_kernel::KernelResult<()> {
     /// # let schema = Arc::new(StructType::try_new(vec![
     /// #     StructField::nullable("id", DataType::INTEGER),
     /// #     StructField::nullable("date", DataType::STRING),
@@ -957,7 +957,7 @@ impl TransactionBuilder<CreateTable> {
         self,
         engine: &dyn Engine,
         committer: Box<dyn Committer>,
-    ) -> Result<CreateTableTransaction> {
+    ) -> KernelResult<CreateTableTransaction> {
         self.common_state.validate()?;
 
         // Validate path
@@ -1166,7 +1166,7 @@ mod tests {
     #[rstest]
     fn common_builder_state_preserves_data_change_through_empty_commit(
         #[values(false, true)] expected_data_change: bool,
-    ) -> Result<()> {
+    ) -> KernelResult<()> {
         let tempdir = tempfile::tempdir()?;
         let table_path = tempdir.path().join("table");
         std::fs::create_dir(&table_path)?;
@@ -1220,7 +1220,7 @@ mod tests {
     #[rstest]
     #[case(0)]
     #[case(2)]
-    fn builder_rejects_non_single_row_commit_info(#[case] row_count: usize) -> Result<()> {
+    fn builder_rejects_non_single_row_commit_info(#[case] row_count: usize) -> KernelResult<()> {
         let tempdir = tempfile::tempdir()?;
         let table_path = tempdir.path().join("table");
         std::fs::create_dir(&table_path)?;
@@ -1250,7 +1250,7 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_transaction_ids_are_rejected() -> Result<()> {
+    fn duplicate_transaction_ids_are_rejected() -> KernelResult<()> {
         let tempdir = tempfile::tempdir()?;
         let table_path = tempdir.path().join("table");
         std::fs::create_dir(&table_path)?;
@@ -1284,7 +1284,7 @@ mod tests {
         #[case] domain: &str,
         #[case] property: Option<(&str, &str)>,
         #[case] expected: &str,
-    ) -> Result<()> {
+    ) -> KernelResult<()> {
         let tempdir = tempfile::tempdir()?;
         let table_path = tempdir.path().join("table");
         std::fs::create_dir(&table_path)?;
@@ -1307,7 +1307,7 @@ mod tests {
     }
 
     #[test]
-    fn user_domain_cannot_conflict_with_generated_clustering_domain() -> Result<()> {
+    fn user_domain_cannot_conflict_with_generated_clustering_domain() -> KernelResult<()> {
         let tempdir = tempfile::tempdir()?;
         let table_path = tempdir.path().join("table");
         std::fs::create_dir(&table_path)?;

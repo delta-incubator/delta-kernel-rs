@@ -15,7 +15,7 @@ use crate::path::{LogPathFileType, ParsedLogPath, DELTA_LOG_DIR_WITH_SLASH};
 use crate::snapshot::{IncrementalReplay, SnapshotRef};
 use crate::table_configuration::TableConfiguration;
 use crate::utils::{require, try_parse_uri};
-use crate::{KernelError, KernelResult, Result, Snapshot, Version};
+use crate::{KernelError, KernelResult, Snapshot, Version};
 
 /// The freshness claim for the version carried by a [`SnapshotHint`].
 ///
@@ -121,7 +121,7 @@ impl SnapshotHint {
         last_checkpoint_hint: Option<LastCheckpointHint>,
         crc: Option<Arc<Crc>>,
         freshness: SnapshotHintFreshness,
-    ) -> Result<Self> {
+    ) -> KernelResult<Self> {
         let log_root = try_parse_uri(table_root)?.join(DELTA_LOG_DIR_WITH_SLASH)?;
         let mut parsed_paths: Vec<ParsedLogPath> = log_paths.into_iter().map(Into::into).collect();
         require!(
@@ -472,7 +472,7 @@ mod tests {
         );
     }
 
-    fn assert_log_segment_hint_error(result: Result<SnapshotRef>, expected_source: &str) {
+    fn assert_log_segment_hint_error(result: KernelResult<SnapshotRef>, expected_source: &str) {
         let error = result.unwrap_err();
         assert_eq!(
             error.to_string(),
@@ -627,7 +627,7 @@ mod tests {
         ]
         .into_iter()
         .map(|path| LogPath::try_new(create_log_path(path).location))
-        .collect::<Result<Vec<_>>>()
+        .collect::<KernelResult<Vec<_>>>()
         .unwrap();
         let hint = SnapshotHint::try_new(
             table_root,
@@ -693,7 +693,7 @@ mod tests {
         #[case] expected_published_version: Option<Version>,
         #[values(false, true)] foreign_table: bool,
         #[values(false, true)] reverse_paths: bool,
-    ) -> Result<()> {
+    ) -> KernelResult<()> {
         const TABLE_ROOT: &str = "memory:///target/";
         const LOG_ROOT: &str = "memory:///target/_delta_log/";
 
@@ -709,7 +709,7 @@ mod tests {
         ]
         .into_iter()
         .map(|path| LogPath::try_new(create_log_path_with_size(path, 1).location))
-        .collect::<Result<Vec<_>>>()?;
+        .collect::<KernelResult<Vec<_>>>()?;
         if reverse_paths {
             log_paths.reverse();
         }

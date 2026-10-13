@@ -9,7 +9,7 @@ use delta_kernel::engine::arrow_data::ArrowEngineData;
 use delta_kernel::schema::{schema_ref, MetadataColumnSpec};
 use delta_kernel::transaction::create_table::create_table as kernel_create_table;
 use delta_kernel::transaction::{RowTrackingMetadataColumns, UpdateTableOperation};
-use delta_kernel::{Engine, Result, Snapshot};
+use delta_kernel::{Engine, KernelResult, Snapshot};
 use test_utils::{
     assert_result_error_with_message, insert_data, into_record_batch, read_scan, test_table_setup,
     test_table_setup_mt,
@@ -679,7 +679,7 @@ mod row_tracking_preservation {
         snapshot: Arc<Snapshot>,
         engine: &Arc<DefaultEngine<TokioMultiThreadExecutor>>,
         batch: RecordBatch,
-    ) -> Result<Arc<Snapshot>> {
+    ) -> KernelResult<Arc<Snapshot>> {
         let source_files = get_scan_files(snapshot.clone(), engine.as_ref())?;
         let mut txn = snapshot
             .update_table(UpdateTableOperation::Optimize, "test-engine", false)
@@ -755,7 +755,7 @@ mod row_tracking_preservation {
 fn write_context_row_tracking_columns_respect_iceberg_compat_v3(
     #[case] table_properties: &[(&str, &str)],
     #[case] expected_error: Option<&str>,
-) -> Result<()> {
+) -> KernelResult<()> {
     let (_temp_dir, table_path, engine) = test_table_setup()?;
     let snapshot = kernel_create_table(
         table_path.as_str(),

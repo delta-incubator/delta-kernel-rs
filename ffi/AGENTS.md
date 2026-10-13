@@ -527,7 +527,7 @@ pub unsafe extern "C" fn set_metadata(
 unsafe fn set_metadata_impl(
     builder: *mut FfiBuilder,
     entries: CMetadataEntries,
-) -> Result<bool> {
+) -> KernelResult<bool> {
     let builder = unsafe { builder.as_mut() }
         .ok_or_else(|| KernelError::generic("builder must not be null"))?;
     let entries = match (entries.ptr.is_null(), entries.len) {

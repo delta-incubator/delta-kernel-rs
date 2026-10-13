@@ -19,7 +19,7 @@ use delta_kernel::table_features::ColumnMappingMode;
 use delta_kernel::transaction::create_table::create_table;
 use delta_kernel::transaction::data_layout::DataLayout;
 use delta_kernel::transaction::{UpdateTableOperation, WriteState};
-use delta_kernel::{KernelError, Result, Snapshot};
+use delta_kernel::{KernelError, KernelResult, Snapshot};
 use itertools::Itertools;
 use rstest::rstest;
 use serde_json::{json, Deserializer};
@@ -226,7 +226,7 @@ async fn test_append_partitioned(
         )?;
 
         // create two new arrow record batches to append
-        let append_data = [[1, 2, 3], [4, 5, 6]].map(|data| -> Result<_> {
+        let append_data = [[1, 2, 3], [4, 5, 6]].map(|data| -> KernelResult<_> {
             let data = RecordBatch::try_new(
                 Arc::new(data_schema.as_ref().try_into_arrow()?),
                 vec![Arc::new(Int32Array::from(data.to_vec()))],
@@ -378,7 +378,7 @@ async fn test_append_invalid_schema() -> Result<(), Box<dyn std::error::Error>> 
         )?;
 
         // create two new arrow record batches to append
-        let append_data = [["a", "b"], ["c", "d"]].map(|data| -> Result<_> {
+        let append_data = [["a", "b"], ["c", "d"]].map(|data| -> KernelResult<_> {
             let data = RecordBatch::try_new(
                 Arc::new(data_schema.as_ref().try_into_arrow()?),
                 vec![Arc::new(StringArray::from(data.to_vec()))],

@@ -32,7 +32,9 @@ use delta_kernel::scan::{scan_row_schema, PartitionValuesOptions, StatsOptions};
 use delta_kernel::schema::{schema_ref, DataType, MapType};
 use delta_kernel::transaction::create_table::create_table;
 use delta_kernel::transaction::{CommitResult, UpdateTableOperation};
-use delta_kernel::{Engine, Expression as Expr, KernelError, Predicate as Pred, Result, Snapshot};
+use delta_kernel::{
+    Engine, Expression as Expr, KernelError, KernelResult, Predicate as Pred, Snapshot,
+};
 use itertools::Itertools;
 use rstest::rstest;
 use serde_json::Deserializer;
@@ -140,7 +142,7 @@ async fn append_only_enforces_data_change_for_file_actions(
             };
             FilteredEngineData::try_new(data, selection_vector)
         })
-        .collect::<Result<Vec<_>>>()?;
+        .collect::<KernelResult<Vec<_>>>()?;
     let mut txn = begin_transaction_with(
         snapshot,
         engine.as_ref(),
@@ -224,7 +226,7 @@ async fn append_only_enforces_data_change_for_file_actions(
 fn selected_scan_file_batch(
     snapshot: Arc<Snapshot>,
     engine: &dyn Engine,
-) -> Result<FilteredEngineData> {
+) -> KernelResult<FilteredEngineData> {
     for scan_files in get_scan_files(snapshot, engine)? {
         let data = scan_files.apply_selection_vector()?;
         if !data.is_empty() {
@@ -1432,7 +1434,7 @@ async fn test_update_deletion_vectors_respects_selection_vector(
     let initial_dv_ids: HashMap<_, _> = initial_dvs
         .iter()
         .map(|(path, dv)| Ok((path.clone(), dv.unique_id_for(&snapshot)?)))
-        .collect::<Result<_>>()?;
+        .collect::<KernelResult<_>>()?;
     setup_txn.update_deletion_vectors(
         initial_dvs,
         get_scan_files(snapshot, engine.as_ref())?
@@ -1469,7 +1471,7 @@ async fn test_update_deletion_vectors_respects_selection_vector(
     let updated_dv_ids: HashMap<_, _> = dv_map
         .iter()
         .map(|(path, dv)| Ok((path.clone(), dv.unique_id_for(&snapshot)?)))
-        .collect::<Result<_>>()?;
+        .collect::<KernelResult<_>>()?;
 
     let batches = get_scan_files(snapshot, engine.as_ref())?
         .into_iter()
@@ -2054,7 +2056,7 @@ async fn test_remove_files_partitioned_with_parsed_columns(
             |builder| builder,
         )?;
         let write_state = txn.write_state()?;
-        let append_data = [[1, 2, 3], [10, 20, 30]].map(|data| -> delta_kernel::Result<_> {
+        let append_data = [[1, 2, 3], [10, 20, 30]].map(|data| -> delta_kernel::KernelResult<_> {
             let data = RecordBatch::try_new(
                 Arc::new(data_schema.as_ref().try_into_arrow()?),
                 vec![Arc::new(Int32Array::from(data.to_vec()))],
@@ -2270,7 +2272,7 @@ async fn adaptive_metadata_remove_cancels_add_across_dv_storage_types(
     let live_files: usize = get_scan_files(snapshot.clone(), engine.as_ref())?
         .into_iter()
         .map(|scan_files| Ok(into_record_batch(scan_files.apply_selection_vector()?).num_rows()))
-        .sum::<Result<_>>()?;
+        .sum::<KernelResult<_>>()?;
     assert_eq!(live_files, 0, "the 'r' remove should cancel the 'u' add");
 
     let expected_remove = FileActionKey::new(path, Some(u_dv.unique_id_for(&snapshot)?));

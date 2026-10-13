@@ -25,7 +25,7 @@ use delta_kernel::schema::{
     DataType as KernelDataType, PrimitiveType, SchemaRef as KernelSchemaRef, StructField,
     StructType,
 };
-use delta_kernel::{EngineData, KernelError, KernelResult, Result};
+use delta_kernel::{EngineData, KernelError, KernelResult};
 
 use crate::predicate::to_df_predicate_expr;
 use crate::scalar::to_df_scalar;
@@ -50,7 +50,7 @@ pub fn to_df_expr(
     expr: &KernelExpression,
     input_schema: &StructType,
     output_type: Option<&KernelDataType>,
-) -> Result<DFExpr> {
+) -> KernelResult<DFExpr> {
     match expr {
         KernelExpression::Literal(scalar) => Ok(lit(to_df_scalar(scalar)?)),
         KernelExpression::Column(name) => column_to_df_expr(name, input_schema),
@@ -884,7 +884,7 @@ mod tests {
 
     /// Asserts `res` is an error whose message contains `message`.
     #[track_caller]
-    fn assert_error_message<T>(res: Result<T>, message: &str) {
+    fn assert_error_message<T>(res: KernelResult<T>, message: &str) {
         let error = res.err().expect("expected an error").to_string();
         assert!(error.contains(message), "{error}");
     }

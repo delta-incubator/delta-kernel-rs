@@ -8,7 +8,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::{DataType, StructField};
 use crate::transforms::{transform_output_type, SchemaTransform};
-use crate::{KernelError, Result};
+use crate::{KernelError, KernelResult};
 
 /// An engine-defined annotation over a physical Delta type.
 ///
@@ -59,7 +59,7 @@ impl UserDefinedType {
     pub fn try_new(
         sql_type: impl Into<DataType>,
         annotation: HashMap<String, Option<String>>,
-    ) -> Result<Self> {
+    ) -> KernelResult<Self> {
         let sql_type = sql_type.into();
         if contains_udt(&sql_type) {
             return Err(KernelError::schema(

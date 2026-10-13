@@ -347,7 +347,7 @@ mod tests {
     use delta_kernel::object_store::path::Path;
     use delta_kernel::object_store::{DynObjectStore, ObjectStoreExt as _};
     use delta_kernel::schema::{schema_ref, StructType};
-    use delta_kernel::{Engine, Result};
+    use delta_kernel::{Engine, KernelResult};
     use delta_kernel_default_engine::DefaultEngineBuilder;
     use delta_kernel_ffi::engine_data::get_engine_data;
     use itertools::Itertools;
@@ -488,7 +488,10 @@ mod tests {
         fields.iter().all(|f| schema.contains(f))
     }
 
-    fn read_scan(scan: &TableChangesScan, engine: Arc<dyn Engine>) -> Result<Vec<RecordBatch>> {
+    fn read_scan(
+        scan: &TableChangesScan,
+        engine: Arc<dyn Engine>,
+    ) -> KernelResult<Vec<RecordBatch>> {
         let scan_results = scan.execute(engine)?;
         scan_results
             .map(EngineDataArrowExt::try_into_record_batch)

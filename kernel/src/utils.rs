@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use delta_kernel_derive::internal_api;
 use url::Url;
 
-use crate::{KernelError, KernelResult, Result};
+use crate::{KernelError, KernelResult};
 
 /// Phantom type parameter `T`: The containing type mentions but does not own any instance of `T`.
 ///
@@ -70,7 +70,7 @@ impl<I: IntoIterator, T: FromIterator<I::Item>> CollectInto<T> for I {
 /// like `/local/paths`, and even `../relative/paths`.
 #[allow(unused)]
 #[internal_api]
-pub(crate) fn try_parse_uri(uri: impl AsRef<str>) -> Result<Url> {
+pub(crate) fn try_parse_uri(uri: impl AsRef<str>) -> KernelResult<Url> {
     let uri = uri.as_ref();
     let uri_type = resolve_uri_type(uri)?;
     let url = match uri_type {

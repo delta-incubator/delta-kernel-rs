@@ -25,7 +25,7 @@ use delta_kernel::schema::Schema;
 use delta_kernel::snapshot::{
     CheckpointWriteResult, IncrementalReplay, Snapshot, SnapshotHint, SnapshotRef,
 };
-use delta_kernel::{Engine, EngineData, FileStats, KernelResult, LogPath, Result, Version};
+use delta_kernel::{Engine, EngineData, FileStats, KernelResult, LogPath, Version};
 use delta_kernel_ffi_macros::handle_descriptor;
 use tracing::debug;
 use url::Url;
@@ -420,7 +420,7 @@ macro_rules! kernel_bytes_slice {
 pub(crate) use kernel_bytes_slice;
 
 trait TryFromStringSlice<'a>: Sized {
-    unsafe fn try_from_slice(slice: &'a KernelStringSlice) -> Result<Self>;
+    unsafe fn try_from_slice(slice: &'a KernelStringSlice) -> KernelResult<Self>;
 }
 
 impl<'a> TryFromStringSlice<'a> for String {
@@ -430,7 +430,7 @@ impl<'a> TryFromStringSlice<'a> for String {
     ///
     /// The slice must be a valid (non-null) pointer, and must point to the indicated number of
     /// valid utf8 bytes.
-    unsafe fn try_from_slice(slice: &'a KernelStringSlice) -> Result<Self> {
+    unsafe fn try_from_slice(slice: &'a KernelStringSlice) -> KernelResult<Self> {
         let slice: &str = unsafe { TryFromStringSlice::try_from_slice(slice) }?;
         Ok(slice.into())
     }
@@ -444,7 +444,7 @@ impl<'a> TryFromStringSlice<'a> for &'a str {
     ///
     /// The slice must be a valid (non-null) pointer, and must point to the indicated number of
     /// valid utf8 bytes.
-    unsafe fn try_from_slice(slice: &'a KernelStringSlice) -> Result<Self> {
+    unsafe fn try_from_slice(slice: &'a KernelStringSlice) -> KernelResult<Self> {
         let slice = unsafe { std::slice::from_raw_parts(slice.ptr.cast(), slice.len) };
         Ok(std::str::from_utf8(slice)?)
     }
@@ -1377,7 +1377,7 @@ pub unsafe extern "C" fn get_snapshot_builder(
     let url = unsafe { unwrap_and_parse_path_as_url(path) };
     let source = match url {
         Ok(url) => FfiSnapshotBuilderSource::TableRoot(url),
-        Err(e) => return Result::Err(e).into_extern_result(&engine_ref),
+        Err(e) => return KernelResult::Err(e).into_extern_result(&engine_ref),
     };
     make_snapshot_builder(source, engine_arc).into_extern_result(&engine_ref)
 }

@@ -24,7 +24,7 @@ use crate::path::LogPathFileType::*;
 use crate::path::{
     may_begin_listable_log_path, CheckpointInstance, LogPathFileType, ParsedLogPath,
 };
-use crate::{KernelError, KernelResult, Result, StorageHandler, Version};
+use crate::{KernelError, KernelResult, StorageHandler, Version};
 
 #[cfg(test)]
 mod tests;
@@ -75,7 +75,7 @@ pub(crate) fn list_delta_log_from_storage(
     start_version: Version,
     end_version: Version,
     cancellation_token: Option<&CancellationTokenRef>,
-) -> Result<impl Iterator<Item = Result<ParsedLogPath>>> {
+) -> KernelResult<impl Iterator<Item = KernelResult<ParsedLogPath>>> {
     let start_from = log_root.join(&format!("{start_version:020}"))?;
     let log_root_str = log_root.to_string();
     let files = storage

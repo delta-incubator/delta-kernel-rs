@@ -30,7 +30,7 @@ use delta_kernel::schema::{
 };
 #[cfg(feature = "geo-type-in-dev")]
 use delta_kernel::schema::{EdgeInterpolationAlgorithm, GeographyType, GeometryType};
-use delta_kernel::{KernelError, KernelResult, Result};
+use delta_kernel::{KernelError, KernelResult};
 use tracing::warn;
 
 use crate::delta_types::FfiNullableStringMap;
@@ -140,7 +140,7 @@ fn visit_metadata_value_impl(
 pub fn extract_kernel_schema(
     state: &mut KernelSchemaVisitorState,
     schema_id: usize,
-) -> Result<StructType> {
+) -> KernelResult<StructType> {
     let schema_element = state
         .elements
         .take(schema_id)
@@ -559,11 +559,11 @@ pub unsafe extern "C" fn visit_field_geometry(
 #[cfg(feature = "geo-type-in-dev")]
 fn visit_field_geometry_impl(
     state: &mut KernelSchemaVisitorState,
-    name: Result<&str>,
-    crs: Result<&str>,
+    name: KernelResult<&str>,
+    crs: KernelResult<&str>,
     nullable: bool,
-    metadata: Result<HashMap<String, MetadataValue>>,
-) -> Result<usize> {
+    metadata: KernelResult<HashMap<String, MetadataValue>>,
+) -> KernelResult<usize> {
     let geometry = GeometryType::try_new(crs?)?;
     visit_field_primitive_impl(
         state,
@@ -607,12 +607,12 @@ pub unsafe extern "C" fn visit_field_geography(
 #[cfg(feature = "geo-type-in-dev")]
 fn visit_field_geography_impl(
     state: &mut KernelSchemaVisitorState,
-    name: Result<&str>,
-    crs: Result<&str>,
-    algorithm: Result<&str>,
+    name: KernelResult<&str>,
+    crs: KernelResult<&str>,
+    algorithm: KernelResult<&str>,
     nullable: bool,
-    metadata: Result<HashMap<String, MetadataValue>>,
-) -> Result<usize> {
+    metadata: KernelResult<HashMap<String, MetadataValue>>,
+) -> KernelResult<usize> {
     let algorithm = algorithm?
         .parse::<EdgeInterpolationAlgorithm>()
         .map_err(|err| {
