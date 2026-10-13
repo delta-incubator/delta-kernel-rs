@@ -1046,7 +1046,7 @@ impl Scan {
             get_scan_metadata_transform_expr(),
             restored_add_schema().clone().into(),
         )?;
-        let apply_transform = move |data: DeltaResult<Box<dyn EngineData>>| {
+        let apply_transform = move |data: Result<Box<dyn EngineData>>| {
             let data = data?;
             let data = transform.evaluate(data.as_ref())?;
             Ok(ActionsBatch::new(data, false))
