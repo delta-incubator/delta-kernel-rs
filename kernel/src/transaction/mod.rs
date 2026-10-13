@@ -1400,8 +1400,7 @@ impl<S> Transaction<S> {
         // Validate protocol-required add-file statistics.
         // Note: Stats validation cannot use `StagedDataValidator` because its columns and types
         // are determined at runtime, whereas `RowVisitor::selected_column_names_and_types` must
-        // return a static projection. Consequently, stats validation makes a separate pass for
-        // each stats column.
+        // return a static projection. It therefore uses dynamic per-column visitors.
         self.validate_add_files_stats(&self.add_files_metadata)?;
 
         // Validate required fields for addFile.
@@ -1652,10 +1651,10 @@ impl<S> Transaction<S> {
     /// Generates add actions with row tracking columns and the row ID high water mark
     /// domain metadata.
     ///
-    /// Visits all add file batches once to read `numRecords` per file, assigning a unique
-    /// non-overlapping `baseRowId` range to each file and computing the final high water mark
-    /// for the domain metadata action. The initial high water mark is read from the snapshot
-    /// for existing tables, or defaults to -1 for create-table (no prior log to read from).
+    /// Reads `numRecords` in one pass to compute the final high water mark, then assigns unique
+    /// non-overlapping `baseRowId` ranges in a second pass. The initial high water mark is read
+    /// from the snapshot for existing tables, or defaults to -1 for create-table (no prior log
+    /// to read from).
     fn generate_adds_with_row_tracking<'a>(
         &'a self,
         engine: &dyn Engine,
@@ -1671,39 +1670,23 @@ impl<S> Transaction<S> {
                 .get_row_tracking_high_water_mark(engine)?
         };
 
-        // Create a row tracking visitor and visit all files to collect row tracking information
-        let mut row_tracking_visitor =
-            RowTrackingVisitor::new(row_id_high_water_mark, Some(self.add_files_metadata.len()));
-
-        // We visit all files with the row visitor before creating the add action iterator because
-        // we need to know the final row ID high water mark to create the domain metadata action.
-        for add_files_batch in &self.add_files_metadata {
+        // Assign base row IDs starting from the current high water mark.
+        let mut row_tracking_visitor = RowTrackingVisitor::new(row_id_high_water_mark);
+        let extended_add_files = self.add_files_metadata.iter().map(move |add_files_batch| {
             row_tracking_visitor.visit_rows_of(add_files_batch.deref())?;
-        }
+            let base_row_ids = row_tracking_visitor.take_base_row_ids();
+            let commit_versions = vec![commit_version; base_row_ids.len()];
+            let base_row_ids_array =
+                ArrayData::try_new(ArrayType::new(DataType::LONG, true), base_row_ids)?;
+            let commit_versions_array =
+                ArrayData::try_new(ArrayType::new(DataType::LONG, true), commit_versions)?;
 
-        // Destructure the visitor to move base_row_id_batches into the add-files iterator
-        // while also extracting the final high water mark for the domain metadata action.
-        let RowTrackingVisitor {
-            base_row_id_batches,
-            row_id_high_water_mark,
-        } = row_tracking_visitor;
-
-        // Create extended add files with row tracking columns
-        let extended_add_files = self.add_files_metadata.iter().zip(base_row_id_batches).map(
-            move |(add_files_batch, base_row_ids)| {
-                let commit_versions = vec![commit_version; base_row_ids.len()];
-                let base_row_ids_array =
-                    ArrayData::try_new(ArrayType::new(DataType::LONG, true), base_row_ids)?;
-                let commit_versions_array =
-                    ArrayData::try_new(ArrayType::new(DataType::LONG, true), commit_versions)?;
-
-                let row_tracking_schema = with_row_tracking_cols(&schema_ref! {})?;
-                add_files_batch.append_columns(
-                    row_tracking_schema,
-                    vec![base_row_ids_array, commit_versions_array],
-                )
-            },
-        );
+            let row_tracking_schema = with_row_tracking_cols(&schema_ref! {})?;
+            add_files_batch.append_columns(
+                row_tracking_schema,
+                vec![base_row_ids_array, commit_versions_array],
+            )
+        });
 
         // Generate add actions including row tracking metadata
         let add_actions = build_add_actions(
@@ -1713,9 +1696,14 @@ impl<S> Transaction<S> {
             self.data_change,
         )?;
 
-        // Generate a row tracking domain metadata based on the final high water mark
-        let row_tracking_domain_metadata: RowTrackingDomainMetadata =
-            RowTrackingDomainMetadata::new(row_id_high_water_mark);
+        // Do a dry run to eagerly compute the new high water mark so we can store it. The row
+        // tracking calculation above happens only lazily as our caller drives the iterator.
+        let mut dry_run = RowTrackingVisitor::dry_run(row_id_high_water_mark);
+        for add_files_batch in &self.add_files_metadata {
+            dry_run.visit_rows_of(add_files_batch.deref())?;
+        }
+        let row_tracking_domain_metadata =
+            RowTrackingDomainMetadata::new(dry_run.row_id_high_water_mark);
 
         Ok((Box::new(add_actions), Some(row_tracking_domain_metadata)))
     }
