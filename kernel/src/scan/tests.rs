@@ -1130,8 +1130,10 @@ fn test_build_actions_meta_predicate_static_skip_all() {
     );
 }
 
-#[test]
-fn checkpoint_meta_predicate_defers_timestamp_partitions_with_default_utc() {
+#[rstest]
+fn checkpoint_meta_predicate_uses_native_timestamp_partitions(
+    #[values(None, Some("America/Los_Angeles"))] timestamp_timezone: Option<&str>,
+) {
     let url = "memory:///timestamp-checkpoint-pushdown/";
     let engine = SyncEngine::new_with_store(Arc::new(InMemory::new()));
     create_table(
@@ -1153,6 +1155,11 @@ fn checkpoint_meta_predicate_defers_timestamp_partitions_with_default_utc() {
         .unwrap();
     let scan = snapshot
         .scan_builder()
+        .with_partition_values(
+            timestamp_timezone.map_or_else(PartitionValuesOptions::default, |timezone| {
+                PartitionValuesOptions::default().with_timestamp_timezone(timezone)
+            }),
+        )
         .with_predicate(Arc::new(Pred::eq(
             col!("p_ts"),
             Scalar::Timestamp(1_705_321_845_000_000),
@@ -1160,8 +1167,11 @@ fn checkpoint_meta_predicate_defers_timestamp_partitions_with_default_utc() {
         .build()
         .unwrap();
 
-    let meta_predicate = scan.build_actions_meta_predicate();
-    assert_eq!(meta_predicate.as_deref(), Some(&Pred::NULL));
+    let meta_predicate = scan.build_actions_meta_predicate().unwrap();
+    assert_eq!(
+        meta_predicate.references(),
+        HashSet::from([&column_name!("add.partitionValues_parsed.p_ts")])
+    );
 }
 
 // Partition-only scans have no stats schema, so the partition schema must enable the rewrite.

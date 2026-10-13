@@ -243,8 +243,8 @@ impl StatsOptions {
 /// Full scan metadata emits the struct at the top level; incremental Add batches emit it as
 /// `add.partitionValues_parsed`. It contains one typed nullable field per partition column using
 /// physical names and table partition-column order. On non-partitioned tables it is omitted.
-/// Commit values are parsed from the canonical string map. Full scans reuse compatible checkpoint
-/// values except zoned timestamps, whose meaning depends on the reader timezone.
+/// Full scans reuse compatible checkpoint values, including timestamps. When the native struct is
+/// unavailable, values are parsed from the string map using the configured timezone.
 #[derive(Clone, Debug, Default)]
 pub struct PartitionValuesOptions {
     /// Whether to emit the typed `partitionValues_parsed` struct column.
@@ -274,9 +274,11 @@ impl PartitionValuesOptions {
     /// value takes precedence. This option does not affect `TIMESTAMP_NTZ`. It applies to typed
     /// full scan metadata and final partition predicate evaluation, partition-column row
     /// transforms used by [`Scan::execute`], and incremental typed output and predicate skipping.
-    /// Native checkpoint pruning remains enabled for timezone-independent fields but defers zoned
-    /// `TIMESTAMP` predicates until after reparsing. Without this option, Kernel interprets
-    /// offset-less timestamps as UTC. Invalid values are reported when the scan is built.
+    /// Typed metadata and partition pruning use compatible native checkpoint values unchanged;
+    /// the timezone applies only when parsing the raw map. Row transforms parse the raw map even
+    /// when native checkpoint values are available. Without this option, Kernel interprets
+    /// offset-less timestamps as UTC. Invalid timezone identifiers are reported when the scan is
+    /// built.
     pub fn with_timestamp_timezone(mut self, timestamp_timezone: impl Into<String>) -> Self {
         self.timestamp_timezone = Some(timestamp_timezone.into());
         self
@@ -1241,16 +1243,9 @@ impl Scan {
         // partition schema rather than the logical names in table metadata.
         let mut partition_columns = HashSet::new();
         let mut floating_partition_columns = HashSet::new();
-        let mut eligible_stats_columns = self.state_info.eligible_physical_stats_columns.clone();
         if let Some(schema) = self.state_info.physical_partition_schema.as_ref() {
             for field in schema.fields() {
-                // Native checkpoint values may encode a different instant than reader-timezone
-                // parsing, so they cannot safely prune zoned timestamp partitions.
                 let column = ColumnName::new([field.name()]);
-                if field.data_type() == &DataType::TIMESTAMP {
-                    eligible_stats_columns.remove(&column);
-                    continue;
-                }
                 if field.data_type() == &DataType::FLOAT || field.data_type() == &DataType::DOUBLE {
                     floating_partition_columns.insert(column.clone());
                 }
@@ -1261,7 +1256,7 @@ impl Scan {
             predicate,
             &partition_columns,
             &floating_partition_columns,
-            &eligible_stats_columns,
+            &self.state_info.eligible_physical_stats_columns,
         )?;
 
         let mut prefixer = PrefixColumns {

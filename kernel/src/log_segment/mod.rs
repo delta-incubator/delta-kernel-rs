@@ -66,7 +66,7 @@ pub(crate) struct CheckpointReadInfo {
     #[serde(default)]
     #[allow(unused)]
     pub has_partition_values_parsed: bool,
-    /// Whether every timezone-independent partition field needed by the scan can be reused from
+    /// Whether every partition field needed by the scan can be reused from
     /// `partitionValues_parsed`.
     #[serde(default)]
     #[allow(unused)]
@@ -1545,8 +1545,8 @@ impl LogSegment {
         true
     }
 
-    /// Checks whether a compatible `partitionValues_parsed` struct contains every field that can
-    /// be reused by scan output. Zoned timestamps are reparsed from the raw map and may be absent.
+    /// Checks whether a compatible `partitionValues_parsed` struct contains every partition field
+    /// needed by the scan.
     fn schema_has_reusable_partition_values_parsed(
         checkpoint_schema: &StructType,
         partition_schema: &StructType,
@@ -1565,10 +1565,9 @@ impl LogSegment {
             return false;
         };
 
-        partition_schema.fields().all(|field| {
-            field.data_type() == &DataType::TIMESTAMP
-                || partition_struct.field(field.name()).is_some()
-        })
+        partition_schema
+            .fields()
+            .all(|field| partition_struct.field(field.name()).is_some())
     }
 }
 

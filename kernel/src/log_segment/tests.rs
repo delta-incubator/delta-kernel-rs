@@ -4409,8 +4409,11 @@ fn add_batch_with_partition_values_parsed(output_schema: SchemaRef) -> Box<Arrow
     ArrowEngineData::try_from_engine_data(parsed).unwrap()
 }
 
+#[rstest]
 #[tokio::test]
-async fn test_checkpoint_stream_sets_has_partition_values_parsed() -> DeltaResult<()> {
+async fn test_checkpoint_stream_sets_has_partition_values_parsed(
+    #[values(false, true)] request_timestamp: bool,
+) -> DeltaResult<()> {
     let (store, log_root) = new_in_memory_store();
     let engine = SyncEngine::new_with_store(store.clone());
 
@@ -4469,11 +4472,11 @@ async fn test_checkpoint_stream_sets_has_partition_values_parsed() -> DeltaResul
         None,
     )?;
 
-    // The checkpoint physically lacks the timestamp field. The projected read schema adds it so
-    // the scan transform can replace it from the raw map.
+    // Missing fields allow footer skipping on the present fields, but require raw-map fallback
+    // for scan output.
     let partition_schema = schema! {
-        nullable "timestamp": TIMESTAMP,
         nullable "id": INTEGER,
+        ..(request_timestamp.then(|| StructField::nullable("timestamp", DataType::TIMESTAMP))),
     };
     let checkpoint_result = log_segment.create_checkpoint_stream(
         &engine,
@@ -4491,11 +4494,11 @@ async fn test_checkpoint_stream_sets_has_partition_values_parsed() -> DeltaResul
             .has_partition_values_parsed,
         "Expected has_partition_values_parsed to be true"
     );
-    assert!(
+    assert_eq!(
         checkpoint_result
             .checkpoint_info
             .can_reuse_partition_values_parsed,
-        "Expected partitionValues_parsed to be reusable"
+        !request_timestamp,
     );
 
     // Verify that partitionValues_parsed was added to the checkpoint read schema
@@ -4526,13 +4529,17 @@ async fn test_checkpoint_stream_sets_has_partition_values_parsed() -> DeltaResul
         .as_any()
         .downcast_ref::<StructArray>()
         .unwrap();
-    let timestamp = parsed
-        .column_by_name("timestamp")
-        .unwrap()
-        .as_any()
-        .downcast_ref::<TimestampMicrosecondArray>()
-        .unwrap();
-    assert_eq!(timestamp.null_count(), timestamp.len());
+    if request_timestamp {
+        let timestamp = parsed
+            .column_by_name("timestamp")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<TimestampMicrosecondArray>()
+            .unwrap();
+        assert_eq!(timestamp.null_count(), timestamp.len());
+    } else {
+        assert!(parsed.column_by_name("timestamp").is_none());
+    }
     assert!(actions.next().is_none());
 
     Ok(())
@@ -4671,7 +4678,7 @@ fn test_partition_values_parsed_missing_field() {
 }
 
 #[test]
-fn test_partition_values_parsed_missing_timestamp_can_be_reused() {
+fn test_partition_values_parsed_missing_timestamp_cannot_be_reused() {
     let checkpoint_schema =
         create_checkpoint_schema_with_partition_parsed(vec![StructField::nullable(
             "region",
@@ -4681,7 +4688,7 @@ fn test_partition_values_parsed_missing_timestamp_can_be_reused() {
         nullable "timestamp": TIMESTAMP,
         nullable "region": STRING,
     };
-    assert!(LogSegment::schema_has_reusable_partition_values_parsed(
+    assert!(!LogSegment::schema_has_reusable_partition_values_parsed(
         &checkpoint_schema,
         &partition_schema,
     ));

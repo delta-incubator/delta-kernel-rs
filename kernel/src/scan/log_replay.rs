@@ -12,9 +12,8 @@ use super::{PhysicalPredicate, ScanMetadata, COMMIT_READ_SCHEMA};
 use crate::actions::deletion_vector::DeletionVectorDescriptor;
 use crate::engine_data::{EngineData, GetData, RowVisitor, TypedGetData as _};
 use crate::expressions::{
-    col, column_expr_ref, column_name, null_lit, ColumnName, Expression, ExpressionFieldPatch,
-    ExpressionRef, ExpressionStructPatch, MapToStructOptions, Predicate, PredicateRef,
-    UnaryExpressionOp,
+    col, column_expr_ref, column_name, null_lit, ColumnName, Expression, ExpressionRef,
+    MapToStructOptions, Predicate, PredicateRef, UnaryExpressionOp,
 };
 use crate::log_replay::deduplicator::{CheckpointDeduplicator, Deduplicator, FileActionInfo};
 use crate::log_replay::{
@@ -167,8 +166,8 @@ pub struct ScanLogReplayProcessor {
     /// StructPatch for log batches (commit files) - uses ParseJson for stats and MapToStruct
     /// for partition values
     commit_transform: Arc<dyn ExpressionEvaluator>,
-    /// Transform for checkpoint batches - reuses compatible parsed fields and reparses zoned
-    /// timestamps using the reader timezone.
+    /// Transform for checkpoint batches - reuses compatible parsed fields and parses raw values
+    /// only when the native partition struct is unavailable.
     checkpoint_transform: Arc<dyn ExpressionEvaluator>,
     state_info: Arc<StateInfo>,
     /// A set of (data file path, dv_unique_id) pairs that have been seen thus
@@ -834,7 +833,7 @@ pub(crate) static SCAN_ROW_SCHEMA: LazyLock<SchemaRef> = lazy_schema_ref! {
 /// nested inside it. This mirrors `stats_parsed`, keeps `fileConstantValues` a fixed shape
 /// regardless of the engine's options, and keeps data-skipping paths uniform:
 /// `partitionValues_parsed.<col>` parallels `stats_parsed.minValues.<col>`. Commits derive it from
-/// the raw map; compatible checkpoints reuse native fields that are timezone-independent.
+/// the raw map; compatible checkpoints reuse native fields.
 fn scan_row_schema_with_parsed_columns(
     stats_schema: Option<SchemaRef>,
     partition_schema: Option<SchemaRef>,
@@ -856,12 +855,10 @@ fn scan_row_schema_with_parsed_columns(
     Ok(Arc::new(patch.build(&SCAN_ROW_SCHEMA)?))
 }
 
-const REPARSED_TIMESTAMPS_NAME: &str = "__kernel_reparsed_partition_timestamps";
 const PARTITION_VALUES_FALLBACK_NAME: &str = "__kernel_partition_values_fallback";
 
 struct CheckpointPartitionValues {
     native: ColumnName,
-    reparsed_timestamps: Option<ColumnName>,
     raw_fallback: ColumnName,
 }
 
@@ -878,14 +875,6 @@ fn new_checkpoint_transform(
     can_reuse_partition_values_parsed: bool,
     timestamp_timezone: Option<&str>,
 ) -> DeltaResult<Arc<dyn ExpressionEvaluator>> {
-    let timestamp_schema = partition_schema.as_ref().and_then(|schema| {
-        let fields: Vec<_> = schema
-            .fields()
-            .filter(|field| field.data_type() == &DataType::TIMESTAMP)
-            .cloned()
-            .collect();
-        (!fields.is_empty()).then(|| Arc::new(StructType::new_unchecked(fields)))
-    });
     if !can_reuse_partition_values_parsed || partition_schema.is_none() {
         return evaluation_handler.new_expression_evaluator(
             checkpoint_read_schema,
@@ -917,35 +906,22 @@ fn new_checkpoint_transform(
         .clone();
     let fallback_schema = StructType::new_unchecked([raw_partition_values_field]);
 
-    let mut intermediate_fields = vec![add_field];
-    let mut intermediate_exprs = vec![Arc::new(col!("add"))];
-    if let Some(timestamp_schema) = &timestamp_schema {
-        intermediate_fields.push(StructField::nullable(
-            REPARSED_TIMESTAMPS_NAME,
-            timestamp_schema.as_ref().clone(),
-        ));
-        intermediate_exprs.push(Arc::new(parsed_partition_values_expr(
-            col!("add.partitionValues"),
-            timestamp_timezone,
-        )));
-    }
-    intermediate_fields.push(StructField::nullable(
-        PARTITION_VALUES_FALLBACK_NAME,
-        fallback_schema,
-    ));
+    let intermediate_schema = Arc::new(StructType::new_unchecked([
+        add_field,
+        StructField::nullable(PARTITION_VALUES_FALLBACK_NAME, fallback_schema),
+    ]));
     // The guard makes the nested map null on reusable rows, so eager evaluators do not parse it.
-    intermediate_exprs.push(Arc::new(Expression::struct_with_nullability_from(
+    let fallback = Expression::struct_with_nullability_from(
         [col!("add.partitionValues")],
         Arc::new(Expression::from_pred(Predicate::and(
             Predicate::is_not_null(col!("add.path")),
             Predicate::is_null(col!("add.partitionValues_parsed")),
         ))),
-    )));
+    );
 
-    let intermediate_schema = Arc::new(StructType::new_unchecked(intermediate_fields));
     let prepare_partition_values = evaluation_handler.new_expression_evaluator(
         checkpoint_read_schema,
-        Arc::new(Expression::struct_from(intermediate_exprs)),
+        Arc::new(Expression::struct_from([col!("add"), fallback])),
         intermediate_schema.clone().into(),
     )?;
     let merge_partition_values = evaluation_handler.new_expression_evaluator(
@@ -959,9 +935,6 @@ fn new_checkpoint_transform(
             timestamp_timezone,
             Some(CheckpointPartitionValues {
                 native: column_name!("add.partitionValues_parsed"),
-                reparsed_timestamps: timestamp_schema
-                    .is_some()
-                    .then(|| ColumnName::new([REPARSED_TIMESTAMPS_NAME])),
                 raw_fallback: ColumnName::new([PARTITION_VALUES_FALLBACK_NAME, "partitionValues"]),
             }),
         ),
@@ -990,9 +963,8 @@ fn new_checkpoint_transform(
 /// - `partition_schema`: Schema of typed partition columns for data skipping, or None if partition
 ///   value parsing is not needed.
 /// - `timestamp_timezone`: Reader timezone for offset-less zoned timestamp partition strings.
-/// - `checkpoint_partition_values`: Native checkpoint struct, optional timestamp-only replacement,
-///   and the row-masked raw map used when the native struct is null. `None` reconstructs the
-///   complete struct from `add.partitionValues`.
+/// - `checkpoint_partition_values`: Native checkpoint struct and the row-masked raw map used when
+///   the native struct is null. `None` reconstructs the complete struct from `add.partitionValues`.
 ///
 /// The transform includes `stats_parsed` only when `physical_stats_schema` is Some,
 /// and `partitionValues_parsed` only when `partition_schema` is Some.
@@ -1050,15 +1022,15 @@ fn get_add_transform_expr(
 
     // Add partitionValues_parsed when partition columns are needed for data skipping or for the
     // engine-facing typed output column.
-    if let Some(partition_schema) = partition_schema {
+    if partition_schema.is_some() {
         let pv_parsed_expr = match checkpoint_partition_values {
-            Some(checkpoint) => checkpoint_partition_values_expr(
-                Expression::from(checkpoint.raw_fallback),
-                checkpoint.native,
-                checkpoint.reparsed_timestamps,
-                partition_schema.as_ref(),
-                timestamp_timezone,
-            ),
+            Some(checkpoint) => Expression::coalesce([
+                Expression::from(checkpoint.native),
+                parsed_partition_values_expr(
+                    Expression::from(checkpoint.raw_fallback),
+                    timestamp_timezone,
+                ),
+            ]),
             None => parsed_partition_values_expr(col!("add.partitionValues"), timestamp_timezone),
         };
         fields.push(Arc::new(pv_parsed_expr));
@@ -1079,46 +1051,6 @@ fn parsed_partition_values_expr(
         ),
         None => Expression::map_to_struct(raw_partition_values, MapToStructOptions::default()),
     }
-}
-
-fn checkpoint_partition_values_expr(
-    raw_partition_values: Expression,
-    native_partition_values: ColumnName,
-    reparsed_timestamps: Option<ColumnName>,
-    partition_schema: &StructType,
-    timestamp_timezone: Option<&str>,
-) -> Expression {
-    let native_or_patched = match reparsed_timestamps {
-        Some(reparsed_timestamps) => {
-            let field_patches = partition_schema
-                .fields()
-                .filter(|field| field.data_type() == &DataType::TIMESTAMP)
-                .map(|field| {
-                    let replacement =
-                        reparsed_timestamps.join(&ColumnName::new([field.name().to_string()]));
-                    (
-                        field.name().to_string(),
-                        ExpressionFieldPatch {
-                            keep_input: false,
-                            insertions: vec![Arc::new(Expression::from(replacement))],
-                            optional: false,
-                        },
-                    )
-                })
-                .collect();
-            Expression::StructPatch(ExpressionStructPatch {
-                input_path: Some(native_partition_values),
-                field_patches,
-                ..Default::default()
-            })
-        }
-        None => Expression::from(native_partition_values),
-    };
-
-    Expression::coalesce([
-        native_or_patched,
-        parsed_partition_values_expr(raw_partition_values, timestamp_timezone),
-    ])
 }
 
 // TODO: Move this to transaction/mod.rs once `scan_metadata_from` is pub, as this is used for
@@ -1271,8 +1203,8 @@ impl LogReplayProcessor for ScanLogReplayProcessor {
         // type. In that case, we get a ParseError and retry after deduplication.
         // The transform depends on the batch type:
         // - Log batches: parse JSON for stats, MapToStruct for partition values
-        // - Checkpoint batches: reuse compatible parsed values and reparse only zoned timestamps or
-        //   rows whose native partition struct is null
+        // - Checkpoint batches: reuse compatible parsed values, falling back to the raw map when
+        //   the native partition struct is unavailable
         // This avoids double JSON parsing -- the transform already parsed the stats.
         // Data skipping is safe for Remove rows: their add-side columns (stats_parsed,
         // partitionValues_parsed) are null. For stats, the skipping predicate wraps comparisons
@@ -1473,7 +1405,7 @@ mod tests {
     }
 
     fn evaluate_checkpoint_partition_value_rows(
-        rows: &[(&str, serde_json::Value)],
+        rows: &[(&str, &str, serde_json::Value)],
         timestamp_timezone: Option<&str>,
     ) -> RecordBatch {
         let partition_schema = schema_ref! {
@@ -1501,12 +1433,12 @@ mod tests {
         let adds = rows
             .iter()
             .enumerate()
-            .map(|(index, (raw_integer, native))| {
+            .map(|(index, (raw_timestamp, raw_integer, native))| {
                 serde_json::json!({
                     "add": {
                         "path": format!("part-{index}.parquet"),
                         "partitionValues": {
-                            "p_ts": "2024-01-15 12:30:45",
+                            "p_ts": raw_timestamp,
                             "p_int": raw_integer,
                         },
                         "partitionValues_parsed": native,
@@ -1561,45 +1493,52 @@ mod tests {
         timestamp_timezone: Option<&str>,
     ) -> RecordBatch {
         evaluate_checkpoint_partition_value_rows(
-            &[(raw_integer, native_partition_values)],
+            &[("2024-01-15 12:30:45", raw_integer, native_partition_values)],
             timestamp_timezone,
         )
     }
 
     #[rstest]
-    #[case::reuse_non_timestamp(
+    #[case::reuse_native_values_with_reader_timezone(
         "invalid",
         serde_json::json!({"p_ts": "2024-01-15T12:30:45Z", "p_int": 7}),
         Some("America/Los_Angeles"),
-        1_705_350_645_000_000,
+        Some(1_705_321_845_000_000),
         7,
     )]
-    #[case::default_utc_reparses_timestamp(
+    #[case::reuse_native_values_with_default_utc(
         "7",
         serde_json::json!({"p_ts": "1970-01-01T00:00:00Z", "p_int": 7}),
         None,
-        1_705_321_845_000_000,
+        Some(0),
         7,
     )]
-    #[case::projected_missing_timestamp_is_patched(
+    #[case::null_native_timestamp_is_preserved(
         "invalid",
         serde_json::json!({"p_int": 7}),
         Some("America/Los_Angeles"),
-        1_705_350_645_000_000,
+        None,
         7,
     )]
     #[case::null_native_struct_falls_back_to_raw(
         "8",
         serde_json::Value::Null,
         Some("America/Los_Angeles"),
-        1_705_350_645_000_000,
+        Some(1_705_350_645_000_000),
         8
     )]
-    fn checkpoint_reuses_partition_values_and_reparses_timestamps(
+    #[case::null_native_struct_falls_back_to_utc(
+        "8",
+        serde_json::Value::Null,
+        None,
+        Some(1_705_321_845_000_000),
+        8
+    )]
+    fn checkpoint_prefers_native_partition_values_over_raw_fallback(
         #[case] raw_integer: &str,
         #[case] native_partition_values: serde_json::Value,
         #[case] timestamp_timezone: Option<&str>,
-        #[case] expected_timestamp: i64,
+        #[case] expected_timestamp: Option<i64>,
         #[case] expected_integer: i32,
     ) {
         let output = evaluate_checkpoint_partition_values(
@@ -1626,7 +1565,7 @@ mod tests {
             .downcast_ref::<Int32Array>()
             .unwrap();
 
-        assert_eq!(timestamps.value(0), expected_timestamp);
+        assert_eq!(timestamps.iter().next().unwrap(), expected_timestamp);
         assert_eq!(integers.value(0), expected_integer);
     }
 
@@ -1634,8 +1573,9 @@ mod tests {
     fn checkpoint_fallback_parses_only_rows_with_null_native_values() {
         let output = evaluate_checkpoint_partition_value_rows(
             &[
-                ("8", serde_json::Value::Null),
+                ("2024-01-15 12:30:45", "8", serde_json::Value::Null),
                 (
+                    "invalid",
                     "invalid",
                     serde_json::json!({"p_ts": "1970-01-01T00:00:00Z", "p_int": 7}),
                 ),
@@ -1654,7 +1594,17 @@ mod tests {
             .as_any()
             .downcast_ref::<Int32Array>()
             .unwrap();
+        let timestamps = parsed
+            .column_by_name("p_ts")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<TimestampMicrosecondArray>()
+            .unwrap();
 
+        assert_eq!(
+            timestamps.iter().take(2).collect::<Vec<_>>(),
+            [Some(1_705_350_645_000_000), Some(0)]
+        );
         assert_eq!(
             integers.iter().take(2).collect::<Vec<_>>(),
             [Some(8), Some(7)]
