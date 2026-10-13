@@ -149,6 +149,16 @@ class InlineReviewTest(unittest.TestCase):
         self.assertIn(self.inline_review._FINDING_ID.pattern, prompt)
         for side in self.inline_review.INLINE_FINDING_SIDES:
             self.assertIn(side, prompt)
+        normalized_prompt = " ".join(prompt.split())
+        self.assertIn(
+            "For a completed review, use this complete response layout",
+            normalized_prompt,
+        )
+        self.assertIn(
+            "For a completed review, the outer review end marker must be the final "
+            "line of your response.",
+            normalized_prompt,
+        )
 
     def test_inline_prompt_template_round_trips_through_publication_parsers(self) -> None:
         marker = "a" * 32

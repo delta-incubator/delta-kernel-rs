@@ -109,9 +109,9 @@ def inline_prompt_instructions(marker: str) -> str:
     )
     return f"""
 
-This review will also be published as GitHub inline comments. Use this complete
-response layout, with both the human-readable review and the machine-readable
-block inside the outer review markers:
+This review will also be published as GitHub inline comments. For a completed
+review, use this complete response layout, with both the human-readable review
+and the machine-readable block inside the outer review markers:
 
 {review_start}
 <human-readable review, including ### <ID> findings and Summary>
@@ -120,8 +120,8 @@ block inside the outer review markers:
 {end}
 {review_end}
 
-Do not close the outer review before the machine-readable block. The outer
-review end marker must be the final line of your response.
+Do not close the outer review before the machine-readable block. For a completed
+review, the outer review end marker must be the final line of your response.
 
 Include entries for up to {MAX_INLINE_FINDINGS} Blocker/Nit findings, prioritizing
 blockers and then the most useful notes. Findings omitted from this block remain
