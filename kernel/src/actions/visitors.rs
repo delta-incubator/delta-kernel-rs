@@ -750,6 +750,71 @@ impl RowVisitor for InCommitTimestampVisitor {
     }
 }
 
+/// Extracts `commitInfo.lastManifestCommit` from a commit's actions. The [`EngineData`] being
+/// visited must have the schema defined in [`LastManifestCommitVisitor::schema`].
+///
+/// Unlike [`InCommitTimestampVisitor`], every row is checked: the protocol does not require
+/// `commitInfo` to be the first action of a commit.
+#[cfg(feature = "adaptive-metadata-in-dev")]
+#[derive(Default)]
+pub(crate) struct LastManifestCommitVisitor {
+    pub(crate) last_manifest_commit: Option<LastManifestCommit>,
+}
+
+#[cfg(feature = "adaptive-metadata-in-dev")]
+impl LastManifestCommitVisitor {
+    /// The schema this visitor expects the data to have.
+    pub(crate) fn schema() -> SchemaRef {
+        static SCHEMA: LazyLock<SchemaRef> = lazy_schema_ref! {
+            nullable COMMIT_INFO_NAME: {
+                nullable "lastManifestCommit": {
+                    not_null "version": LONG,
+                    not_null "contentRootVersion": LONG,
+                },
+            },
+        };
+        SCHEMA.clone()
+    }
+}
+
+#[cfg(feature = "adaptive-metadata-in-dev")]
+impl RowVisitor for LastManifestCommitVisitor {
+    fn selected_column_names_and_types(&self) -> (&'static [ColumnName], &'static [DataType]) {
+        static NAMES_AND_TYPES: LazyLock<ColumnNamesAndTypes> = LazyLock::new(|| {
+            (
+                vec![
+                    column_name!("commitInfo.lastManifestCommit.version"),
+                    column_name!("commitInfo.lastManifestCommit.contentRootVersion"),
+                ],
+                vec![DataType::LONG, DataType::LONG],
+            )
+                .into()
+        });
+        NAMES_AND_TYPES.as_ref()
+    }
+
+    fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> Result<()> {
+        require!(
+            getters.len() == 2,
+            KernelError::InternalError(format!(
+                "Wrong number of LastManifestCommitVisitor getters: {}",
+                getters.len()
+            ))
+        );
+        for i in 0..row_count {
+            let Some(version) = getters[0].get_long(i, "lastManifestCommit.version")? else {
+                continue;
+            };
+            let content_root_version: i64 =
+                getters[1].get(i, "lastManifestCommit.contentRootVersion")?;
+            self.last_manifest_commit =
+                Some(LastManifestCommit::new(version, content_root_version)?);
+            break;
+        }
+        Ok(())
+    }
+}
+
 // === Checkpoint action (adaptiveMetadata) ===
 
 /// Extracts the first `checkpoint` action found, leaving `checkpoint` as `None` if a batch has

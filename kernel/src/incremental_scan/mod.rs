@@ -2,18 +2,28 @@
 //! [`IncrementalScanBuilder`] for the entry point.
 
 use std::collections::HashSet;
+#[cfg(feature = "adaptive-metadata-in-dev")]
+use std::slice;
 use std::sync::{Arc, LazyLock};
 
+#[cfg(feature = "adaptive-metadata-in-dev")]
+use crate::actions::visitors::LastManifestCommitVisitor;
 use crate::engine_data::{FilteredEngineData, GetData, RowVisitor};
 use crate::expressions::{column_name, ColumnName};
 use crate::log_replay::deduplicator::{Deduplicator, FileActionInfo};
 use crate::log_replay::{FileActionDeduplicator, FileActionKey};
+#[cfg(feature = "adaptive-metadata-in-dev")]
+use crate::path::ParsedLogPath;
 use crate::scan::data_skipping::DataSkippingFilter;
 use crate::scan::{PhysicalPredicate, COMMIT_READ_SCHEMA};
 use crate::schema::{ColumnNamesAndTypes, DataType};
 use crate::snapshot::SnapshotRef;
 use crate::table_features::Operation;
+#[cfg(feature = "adaptive-metadata-in-dev")]
+use crate::table_features::TableFeature;
 use crate::utils::require;
+#[cfg(feature = "adaptive-metadata-in-dev")]
+use crate::version_as_i64;
 use crate::{
     Engine, EngineData, FileDataReadResultIterator, FileMeta, KernelError, KernelResult,
     PredicateRef, Result, Version,
@@ -58,9 +68,11 @@ impl IncrementalScanBuilder {
         self
     }
 
-    /// Build the incremental scan stream, or `None` if the target snapshot's commit list
-    /// cannot serve `(base_version, target_version]` (consumers should fall back to a full
-    /// scan via [`crate::Snapshot::scan_builder`]).
+    /// Build the incremental scan stream, or `None` if the range cannot be served from commit
+    /// JSONs (consumers should fall back to a full scan via [`crate::Snapshot::scan_builder`]).
+    /// That happens when the target snapshot's commit list does not cover
+    /// `(base_version, target_version]`, or when an adaptiveMetadata manifest commit lies in the
+    /// range (its file actions may be recorded only in the metadata tree).
     ///
     /// Does not re-list `_delta_log/`: walks the target snapshot's already-validated commit
     /// list and clips it to `(base_version, target_version]`. For catalog-managed tables
@@ -81,7 +93,8 @@ impl IncrementalScanBuilder {
     /// - [`KernelError::MissingColumn`] if a [`with_predicate`](Self::with_predicate) predicate
     ///   references a column absent from the table schema.
     /// - `Err` if the target snapshot's protocol contains an unsupported reader feature.
-    /// - `Err` if the engine fails to open the commit stream.
+    /// - `Err` if the engine fails to open the commit stream, or to read the target commit's
+    ///   `commitInfo` on an adaptiveMetadata table.
     pub fn build(self, engine: &dyn Engine) -> Result<Option<IncrementalScanStream>> {
         // TODO(#2493): the version validation, the snapshot-commit-list extraction and
         // clipping below, and the "snapshot covers the range" check should all be replaced
@@ -127,6 +140,13 @@ impl IncrementalScanBuilder {
         // `CommitRange::build` (e.g. `KernelError::CommitsUnavailable { missing: Range<Version>
         // }`), pattern-matched here to return `None`.
         if snapshot_first_version.is_none_or(|v| v > start_version) {
+            return Ok(None);
+        }
+
+        // TODO: derive in-range manifest commits' file changes from the metadata tree instead of
+        // falling back.
+        #[cfg(feature = "adaptive-metadata-in-dev")]
+        if self.has_manifest_commit_in_range(engine, snapshot_commits)? {
             return Ok(None);
         }
 
@@ -193,6 +213,50 @@ impl IncrementalScanBuilder {
                 Ok(filter.map_or(AddSkipping::KeepAll, |f| AddSkipping::Filter(Arc::new(f))))
             }
         }
+    }
+
+    /// Whether an adaptiveMetadata manifest commit lies in `(base_version, target_version]`.
+    ///
+    /// A manifest commit may record its file actions only in the metadata tree, leaving them out
+    /// of the commit JSON this scan reads. Every commit from the table's first manifest commit
+    /// onward carries `commitInfo.lastManifestCommit`, so the target commit's value names the
+    /// latest manifest commit at or below the target.
+    #[cfg(feature = "adaptive-metadata-in-dev")]
+    fn has_manifest_commit_in_range(
+        &self,
+        engine: &dyn Engine,
+        snapshot_commits: &[ParsedLogPath],
+    ) -> KernelResult<bool> {
+        let table_configuration = self.target_snapshot.table_configuration();
+        if !table_configuration.is_feature_supported(&TableFeature::AdaptiveMetadataPreview) {
+            return Ok(false);
+        }
+        let target_version = self.target_snapshot.version();
+        let target_commit = snapshot_commits
+            .iter()
+            .rfind(|c| c.version == target_version)
+            .ok_or_else(|| {
+                KernelError::internal_error(format!(
+                    "IncrementalScanBuilder: no commit file at target version {target_version}"
+                ))
+            })?;
+        // Read the commit rather than the CRC: a CRC that kernel advances by replay does not
+        // update `lastManifestCommit`, so it can be stale.
+        let mut visitor = LastManifestCommitVisitor::default();
+        for batch in engine.json_handler().read_json_files(
+            slice::from_ref(&target_commit.location),
+            LastManifestCommitVisitor::schema(),
+            None,
+        )? {
+            visitor.visit_rows_of(batch?.as_ref())?;
+            if visitor.last_manifest_commit.is_some() {
+                break;
+            }
+        }
+        let base_version = version_as_i64(self.base_version)?;
+        Ok(visitor
+            .last_manifest_commit
+            .is_some_and(|last| last.version > base_version))
     }
 }
 
@@ -695,3 +759,6 @@ impl RowVisitor for IncrementalDedupVisitor<'_, '_> {
         Ok(())
     }
 }
+
+#[cfg(all(test, feature = "adaptive-metadata-in-dev"))]
+mod amt_tests;
