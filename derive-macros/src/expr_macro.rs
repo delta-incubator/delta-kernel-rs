@@ -253,6 +253,7 @@ mod tests {
     #[case::rust_not(quote!(!true), "expected an expr! constructor")]
     #[case::negated_string(quote!(-"a"), "only numeric literals can be negated")]
     #[case::negated_boolean(quote!(-true), "only numeric literals can be negated")]
+    #[case::negated_call(quote!(-col("a")), "only numeric literals can be negated")]
     #[case::bare_char(quote!('a'), "numeric, boolean, or string literal")]
     #[case::bare_bytes(quote!(b"a"), "numeric, boolean, or string literal")]
     #[case::attribute(quote!(#[allow(unused)] "a"), "expected an expr! constructor")]
