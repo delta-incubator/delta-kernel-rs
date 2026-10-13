@@ -474,6 +474,48 @@ mod tests {
         assert_eq!(len, 10, "list_from should have returned 10 files");
     }
 
+    #[rstest::rstest]
+    #[case("table", "table")]
+    #[case("table%2F", "table%252F")]
+    #[case("table%252F", "table%25252F")]
+    #[case("table%41", "table%2541")]
+    #[case("table%20", "table%2520")]
+    #[case("table%", "table%25")]
+    #[case("table name", "table%20name")]
+    #[case("table?#", "table%3F%23")]
+    #[case("table\u{e9}", "table%C3%A9")]
+    #[tokio::test]
+    async fn list_from_preserves_table_paths(
+        #[case] raw_table: &str,
+        #[case] encoded_table: &str,
+        #[values(1, 3)] file_count: usize,
+    ) {
+        // === Prepare objects under the literal table name ===
+        let store = Arc::new(InMemory::new());
+        for index in (0..file_count).rev() {
+            let key = Path::parse(format!("{raw_table}/file_{index}.json")).unwrap();
+            store.put(&key, "data".into()).await.unwrap();
+        }
+
+        // === Call the listing implementation using the escaped directory URL ===
+        let directory_url = Url::parse(&format!("s3://bucket/{encoded_table}/")).unwrap();
+        let files: Vec<_> = list_from_impl(store, directory_url)
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+
+        // === Check that every returned URL preserves the table name and file order ===
+        assert_eq!(files.len(), file_count);
+        for (index, file) in files.iter().enumerate() {
+            assert_eq!(
+                file.location.as_str(),
+                format!("s3://bucket/{encoded_table}/file_{index}.json")
+            );
+        }
+    }
+
     // Decoding a listed URL must recover the raw key, including literal text such as "%2F".
     // Cloud URL schemes use an in-memory store here, so the test needs no network access.
     #[rstest::rstest]
@@ -487,7 +529,7 @@ mod tests {
     #[case("table?#", "table%3F%23")]
     #[case("table\u{e9}", "table%C3%A9")]
     #[tokio::test]
-    async fn listing_preserves_object_keys(
+    async fn in_memory_store_listing_preserves_object_keys(
         #[case] raw_name: &str,
         #[case] encoded_name: &str,
         #[values(
@@ -513,12 +555,6 @@ mod tests {
         // Insert in reverse order so the assertions below also check the returned version order.
         for key in expected_keys.iter().rev() {
             store.put(key, expected_data.clone().into()).await.unwrap();
-
-            if raw_name == "table%41" {
-                // "%41" decodes to "A". Different bytes expose a read from the wrong existing key.
-                let decoy = Path::parse(key.as_ref().replace("%41", "A")).unwrap();
-                store.put(&decoy, "wrong file".into()).await.unwrap();
-            }
         }
 
         let engine = DefaultEngineBuilder::new(store.clone()).build();
@@ -550,7 +586,7 @@ mod tests {
                 metadata.last_modified.timestamp_millis()
             );
 
-            // Reading a listed URL must return the original bytes, including when a decoy exists.
+            // Reading a listed URL must return the original bytes.
             let read_back: Vec<_> = storage
                 .read_files(vec![(file.location.clone(), None)])
                 .unwrap()
@@ -566,6 +602,47 @@ mod tests {
             .try_collect()
             .unwrap();
         assert_eq!(after_first, listed_files[1..]);
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn listed_url_reads_original_object_when_decoded_key_exists(
+        #[values(
+            "s3://bucket/",
+            "gs://bucket/",
+            "az://container/",
+            "https://example.test/"
+        )]
+        base_url: &str,
+    ) {
+        let store = Arc::new(InMemory::new());
+        let expected_data = Bytes::from("kernel-data");
+        let original_key = Path::parse("table%41/file%41.json").unwrap();
+        store
+            .put(&original_key, expected_data.clone().into())
+            .await
+            .unwrap();
+
+        // "%41" decodes to "A". Different bytes expose a read from the wrong existing key.
+        let decoy_key = Path::parse("tableA/fileA.json").unwrap();
+        store.put(&decoy_key, "wrong file".into()).await.unwrap();
+
+        let engine = DefaultEngineBuilder::new(store).build();
+        let storage = engine.storage_handler();
+        let directory_url = Url::parse(&format!("{base_url}table%2541/")).unwrap();
+        let listed_files: Vec<_> = storage
+            .list_from(&directory_url)
+            .unwrap()
+            .try_collect()
+            .unwrap();
+        assert_eq!(listed_files.len(), 1);
+
+        let read_back: Vec<_> = storage
+            .read_files(vec![(listed_files[0].location.clone(), None)])
+            .unwrap()
+            .try_collect()
+            .unwrap();
+        assert_eq!(read_back, vec![expected_data]);
     }
 
     // Check the same name preservation on disk, where reading file:// URLs uses OS path conversion.
