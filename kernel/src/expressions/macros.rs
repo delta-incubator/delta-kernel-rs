@@ -562,12 +562,16 @@ mod tests {
     }
 
     mod macro_hygiene {
+        // Simulate a caller defining types named Vec, Expression, and Predicate.
+        // expr! must still use std::vec::Vec and Kernel's Expression and Predicate.
+        // Bare type names in its expansion would resolve to these () aliases and fail to compile.
         type Vec = ();
         type Expression = ();
         type Predicate = ();
 
         #[test]
         fn expressions_resolve_types_independently_of_caller_names() {
+            // Reference the aliases to avoid dead-code warnings.
             let _caller_types: (Vec, Expression, Predicate) = ((), (), ());
             assert_eq!(
                 crate::expressions::expr!(coalesce(lit(false), null(BOOLEAN))),
