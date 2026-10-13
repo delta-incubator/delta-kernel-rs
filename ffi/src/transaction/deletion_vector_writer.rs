@@ -35,7 +35,7 @@ pub struct FfiDeletionVectorUpdate {
 /// and allocates errors. The operation reads snapshot metadata once and merges each file's existing
 /// deleted indexes with the requested indexes. It does not read or rewrite business Parquet data.
 ///
-/// Returns an owned descriptor map. Pass it to `transaction_update_deletion_vectors` with a
+/// Returns an owned descriptor map. Pass it to `update_table_txn_update_deletion_vectors` with a
 /// metadata iterator from the same snapshot, or release it with `free_dv_descriptor_map`.
 /// No actions are staged or committed. An empty batch returns an empty map.
 ///
@@ -223,6 +223,7 @@ mod tests {
     use delta_kernel::parquet::file::properties::WriterProperties;
     use delta_kernel::schema::schema_ref;
     use delta_kernel::transaction::create_table::create_table;
+    use delta_kernel::transaction::UpdateTableOperation;
     use delta_kernel_default_engine::DefaultEngineBuilder;
     use rstest::rstest;
     use test_utils::{
@@ -235,8 +236,10 @@ mod tests {
     use crate::scan::{free_scan, scan, scan_metadata_iter_init};
     use crate::transaction::write_context::free_write_context;
     use crate::transaction::{
-        commit, committed_transaction_version, free_committed_transaction, free_transaction,
-        transaction_from_snapshot, transaction_update_deletion_vectors,
+        committed_transaction_version, free_committed_transaction, free_update_table_txn,
+        new_update_table_txn_builder, update_table_txn_builder_build,
+        update_table_txn_builder_with_operation, update_table_txn_commit,
+        update_table_txn_update_deletion_vectors, KernelUpdateTableOperation,
     };
     use crate::{free_engine, free_snapshot, kernel_string_slice};
 
@@ -271,7 +274,9 @@ mod tests {
                 .unwrap_committed();
             let snapshot = Snapshot::builder_for(&table_url).build(kernel_engine.as_ref())?;
             let mut transaction = snapshot
-                .transaction(Box::new(FileSystemCommitter::new()), kernel_engine.as_ref())?;
+                .transaction_builder()
+                .with_operation(UpdateTableOperation::Write)
+                .build(kernel_engine.as_ref(), Box::new(FileSystemCommitter::new()))?;
             let mut metadata = Vec::new();
             for (path, ids) in [
                 ("first.parquet", vec![10, 20, 30, 40]),
@@ -305,7 +310,9 @@ mod tests {
                 .unwrap_post_commit_snapshot();
             let context = snapshot
                 .clone()
-                .transaction(Box::new(FileSystemCommitter::new()), kernel_engine.as_ref())?
+                .transaction_builder()
+                .with_operation(UpdateTableOperation::Merge)
+                .build(kernel_engine.as_ref(), Box::new(FileSystemCommitter::new()))?
                 .write_state()?
                 .write_context_builder()
                 .build()?;
@@ -369,9 +376,11 @@ mod tests {
                 Snapshot::builder_for(&self.table_url).build(self.kernel_engine.as_ref())?;
             let context = snapshot
                 .clone()
-                .transaction(
-                    Box::new(FileSystemCommitter::new()),
+                .transaction_builder()
+                .with_operation(UpdateTableOperation::Merge)
+                .build(
                     self.kernel_engine.as_ref(),
+                    Box::new(FileSystemCommitter::new()),
                 )?
                 .write_state()?
                 .write_context_builder()
@@ -391,8 +400,12 @@ mod tests {
             new_rows: Option<(&str, Vec<i32>)>,
         ) -> TestResult<()> {
             let snapshot_version = unsafe { self.snapshot.as_ref() }.version();
+            let builder = unsafe { new_update_table_txn_builder(self.snapshot.shallow_copy()) };
+            let builder = unsafe {
+                update_table_txn_builder_with_operation(builder, KernelUpdateTableOperation::Merge)
+            };
             let mut transaction_handle = ok_or_panic(unsafe {
-                transaction_from_snapshot(self.snapshot.shallow_copy(), self.engine.shallow_copy())
+                update_table_txn_builder_build(builder, self.engine.shallow_copy())
             });
             if let Some((path, ids)) = new_rows {
                 let batch = RecordBatch::try_from_iter([(
@@ -425,7 +438,7 @@ mod tests {
                 scan_metadata_iter_init(self.engine.shallow_copy(), scan.shallow_copy())
             });
             let result = unsafe {
-                transaction_update_deletion_vectors(
+                update_table_txn_update_deletion_vectors(
                     transaction_handle.shallow_copy(),
                     map,
                     metadata,
@@ -434,8 +447,9 @@ mod tests {
             };
             unsafe { free_scan(scan) };
             ok_or_panic(result);
-            let committed = match unsafe { commit(transaction_handle, self.engine.shallow_copy()) }
-            {
+            let committed = match unsafe {
+                update_table_txn_commit(transaction_handle, self.engine.shallow_copy())
+            } {
                 ExternResult::Ok(committed) => committed,
                 ExternResult::Err(error) => {
                     return Err(unsafe { recover_error(error) }.message.into());
@@ -710,9 +724,12 @@ mod tests {
         let engine = engine_handle_for_store(fixture.store.clone());
         let snapshot: Handle<SharedSnapshot> = unsafe { fixture.snapshot.clone_as_arc() }.into();
         let table_root = fixture.table_url.clone();
-        let transaction = ok_or_panic(unsafe {
-            transaction_from_snapshot(snapshot.shallow_copy(), engine.shallow_copy())
-        });
+        let builder = unsafe { new_update_table_txn_builder(snapshot.shallow_copy()) };
+        let builder = unsafe {
+            update_table_txn_builder_with_operation(builder, KernelUpdateTableOperation::Merge)
+        };
+        let transaction =
+            ok_or_panic(unsafe { update_table_txn_builder_build(builder, engine.shallow_copy()) });
         unsafe { free_snapshot(snapshot) };
         drop(fixture);
 
@@ -721,7 +738,7 @@ mod tests {
         assert_eq!(context.table_root_dir(), &table_root);
         assert_eq!(context.logical_data_schema().num_fields(), 1);
         unsafe {
-            free_transaction(transaction);
+            free_update_table_txn(transaction);
             free_engine(engine);
         }
         Ok(())

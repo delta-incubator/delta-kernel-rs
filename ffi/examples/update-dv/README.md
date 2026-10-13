@@ -11,8 +11,8 @@ It demonstrates:
 - `dv_descriptor_new`
 - `dv_descriptor_map_insert`
 - `scan_metadata_iter_init`
-- `transaction_update_deletion_vectors`
-- `commit`
+- `update_table_txn_update_deletion_vectors`
+- `update_table_txn_commit`
 
 # Building
 
@@ -51,18 +51,21 @@ the exact Add-action path and a borrowed slice of physical row indexes. Indexes 
 zero-based across the whole file. Duplicate indexes within an entry are deduplicated;
 duplicate file entries are rejected.
 
-Start a filesystem transaction with `transaction_from_snapshot`, rather than loading a
-potentially newer snapshot through the path-based `transaction` function. Supply that
-snapshot and a bound write context from the same transaction to `write_deletion_vectors`.
+Start an existing-table transaction with `new_update_table_txn_builder` from the snapshot
+used to resolve physical row locations. Set the operation with
+`update_table_txn_builder_with_operation` and build with `update_table_txn_builder_build`.
+Supply that snapshot and a bound write context from the same transaction to
+`write_deletion_vectors`.
 The function reads snapshot file metadata once, validates all requested locations,
 preserves each existing DV, and uploads Kernel-serialized on-disk DVs using the Engine's
 storage handler. It does not open the business Parquet files, modify a transaction, or
 commit anything.
 
 The returned descriptor map is owned by the caller. Pass it to
-`transaction_update_deletion_vectors` together with a metadata iterator from the same
-snapshot. Stage new-file metadata with `add_files` on that transaction and call `commit`
-once. If preparation is abandoned, release the map with `free_dv_descriptor_map`.
+`update_table_txn_update_deletion_vectors` together with a metadata iterator from the same
+snapshot. Stage new-file metadata with `update_table_txn_add_files` on that transaction
+and call `update_table_txn_commit` once. If preparation is abandoned, release the map
+with `free_dv_descriptor_map`.
 The snapshot, write context, engine, and all input slices remain caller-owned.
 
 An empty batch returns an empty map without uploading files. Missing files, unsupported

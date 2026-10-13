@@ -24,7 +24,7 @@ use delta_kernel::table_features::{
 use delta_kernel::table_properties::TableProperties;
 use delta_kernel::transaction::create_table::{create_table, CreateTableTransaction};
 use delta_kernel::transaction::data_layout::DataLayout;
-use delta_kernel::Result;
+use delta_kernel::{KernelError, Result};
 use rstest::rstest;
 use serde_json::Value;
 use test_utils::{assert_result_error_with_message, test_table_setup, test_table_setup_mt};
@@ -274,7 +274,10 @@ async fn test_create_table_already_exists() -> Result<()> {
     let result = create_table(&table_path, schema.clone(), "UserManagementService/1.2.0")
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()));
 
-    assert_result_error_with_message(result, "already exists");
+    assert!(matches!(
+        result,
+        Err(KernelError::TableAlreadyExistsAtPath(path)) if path == table_path
+    ));
 
     Ok(())
 }
@@ -472,8 +475,11 @@ async fn test_create_table_rejects_delta_invariants_metadata() -> Result<()> {
     Ok(())
 }
 
+#[rstest]
+#[case::builder_metrics(false)]
+#[case::transaction_metrics_replace_builder_metrics(true)]
 #[tokio::test]
-async fn test_create_table_log_actions() -> Result<()> {
+async fn test_create_table_log_actions(#[case] replace_metrics_after_build: bool) -> Result<()> {
     let (_temp_dir, table_path, engine) = test_table_setup()?;
 
     // Create schema
@@ -485,11 +491,18 @@ async fn test_create_table_log_actions() -> Result<()> {
     let engine_info = "AuditService/2.1.0";
 
     // Create table
-    let _ = create_table(&table_path, schema, engine_info)
-        .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
+    let mut txn = create_table(&table_path, schema, engine_info)
         .with_operation_parameters([("mode", Some("Create")), ("description", None)])
-        .with_operation_metrics([("numFiles", Some("0"))])
-        .commit(engine.as_ref())?;
+        .with_operation_metrics(if replace_metrics_after_build {
+            [("staleMetric", Some("1"))]
+        } else {
+            [("numFiles", Some("0"))]
+        })
+        .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?;
+    if replace_metrics_after_build {
+        txn = txn.with_operation_metrics([("numFiles", Some("0"))]);
+    }
+    let _ = txn.commit(engine.as_ref())?;
 
     // Read the actual Delta log file
     let log_file_path = format!("{table_path}/_delta_log/00000000000000000000.json");
