@@ -8,9 +8,11 @@ use delta_kernel_derive::pub_macro;
 /// `Expression`, including predicate calls.
 ///
 /// Literals retain their Rust type: `lit(1)` is INTEGER and `lit(1_i64)` is LONG.
-/// `col("a.b")` addresses nested fields using [`col!`](crate::expressions::col), while
-/// `path("a.b")` addresses one field whose name contains a dot. `path` accepts Rust expressions
-/// for its segments. Literal arguments and path segments are evaluated once, in order.
+/// `null` takes a [`DataType`](crate::schema::DataType) associated constant name, such as `LONG`.
+/// `col` takes one string literal and follows [`col!`](crate::expressions::col) path rules.
+/// `col("a.b")` addresses nested fields; `path("a.b")` addresses one field whose name contains a
+/// dot. Use `path` for multiple explicit segments or computed names. Literal arguments and path
+/// segments are evaluated once, in order.
 ///
 /// Calls delegate to the existing builders without resolving types or evaluating rows.
 /// AND/OR preserve [`Predicate::junction`](crate::expressions::Predicate::junction)
@@ -55,14 +57,41 @@ use delta_kernel_derive::pub_macro;
 /// let _ = expr!(not(col("a"), col("b"), col("c")));
 /// ```
 ///
-/// ```compile_fail,E0599
+/// ```compile_fail
 /// use delta_kernel::expressions::expr;
 /// let _ = expr!(unknown_predicate(col("a")));
 /// ```
 ///
 /// ```compile_fail
+/// use delta_kernel::expressions::{expr, Expression, Predicate};
+/// trait CustomPredicate {
+///     fn custom_predicate(self) -> Predicate;
+/// }
+/// impl CustomPredicate for Expression {
+///     fn custom_predicate(self) -> Predicate { Predicate::TRUE }
+/// }
+/// let _ = expr!(custom_predicate(col("a")));
+/// ```
+///
+/// ```compile_fail
 /// use delta_kernel::expressions::expr;
 /// let _ = expr!(not());
+/// ```
+///
+/// ```compile_fail
+/// use delta_kernel::expressions::expr;
+/// let _ = expr!(not(col("a"), col("b")));
+/// ```
+///
+/// ```compile_fail
+/// use delta_kernel::expressions::{expr, Expression, Predicate};
+/// trait BinaryNot {
+///     fn not(self, other: Expression) -> Predicate;
+/// }
+/// impl BinaryNot for Expression {
+///     fn not(self, _other: Expression) -> Predicate { Predicate::TRUE }
+/// }
+/// let _ = expr!(not(col("a"), col("b")));
 /// ```
 ///
 /// ```compile_fail
@@ -85,6 +114,17 @@ use delta_kernel_derive::pub_macro;
 /// let _ = expr!(col("a", "b"));
 /// ```
 ///
+/// ```compile_fail
+/// use delta_kernel::expressions::expr;
+/// const COLUMN: &str = "a";
+/// let _ = expr!(col(COLUMN));
+/// ```
+///
+/// ```compile_fail
+/// use delta_kernel::expressions::expr;
+/// let _ = expr!(null(decimal(10, 2)));
+/// ```
+///
 /// ```compile_fail,E0277
 /// use delta_kernel::expressions::expr;
 /// let _ = expr!(lit(1_u64));
@@ -92,6 +132,11 @@ use delta_kernel_derive::pub_macro;
 #[pub_macro]
 macro_rules! expr {
     (col($path:literal)) => { $crate::expressions::col!($path) };
+    (col($($other:tt)*)) => {
+        ::core::compile_error!(
+            "col() requires one string literal; use path() for explicit or computed column segments"
+        )
+    };
     (path($($segment:expr),+ $(,)?)) => {
         $crate::expressions::Expression::column([$($segment),+])
     };
@@ -125,11 +170,50 @@ macro_rules! expr {
             ),
         )
     };
-    (@call $op:ident; $arg:expr) => {
-        $crate::expressions::Expression::from_pred(($arg).$op())
+    (@call is_null; $arg:expr) => {
+        $crate::expressions::Expression::from_pred(
+            $crate::expressions::Predicate::is_null($arg),
+        )
     };
-    (@call $op:ident; $left:expr, $right:expr) => {
-        $crate::expressions::Expression::from_pred(($left).$op($right))
+    (@call is_not_null; $arg:expr) => {
+        $crate::expressions::Expression::from_pred(
+            $crate::expressions::Predicate::is_not_null($arg),
+        )
+    };
+    (@call eq; $left:expr, $right:expr) => {
+        $crate::expressions::Expression::from_pred(
+            $crate::expressions::Predicate::eq($left, $right),
+        )
+    };
+    (@call ne; $left:expr, $right:expr) => {
+        $crate::expressions::Expression::from_pred(
+            $crate::expressions::Predicate::ne($left, $right),
+        )
+    };
+    (@call lt; $left:expr, $right:expr) => {
+        $crate::expressions::Expression::from_pred(
+            $crate::expressions::Predicate::lt($left, $right),
+        )
+    };
+    (@call le; $left:expr, $right:expr) => {
+        $crate::expressions::Expression::from_pred(
+            $crate::expressions::Predicate::le($left, $right),
+        )
+    };
+    (@call gt; $left:expr, $right:expr) => {
+        $crate::expressions::Expression::from_pred(
+            $crate::expressions::Predicate::gt($left, $right),
+        )
+    };
+    (@call ge; $left:expr, $right:expr) => {
+        $crate::expressions::Expression::from_pred(
+            $crate::expressions::Predicate::ge($left, $right),
+        )
+    };
+    (@call distinct; $left:expr, $right:expr) => {
+        $crate::expressions::Expression::from_pred(
+            $crate::expressions::Predicate::distinct($left, $right),
+        )
     };
     (@call $op:ident; $($arg:expr),*) => {
         ::core::compile_error!(::core::concat!(
