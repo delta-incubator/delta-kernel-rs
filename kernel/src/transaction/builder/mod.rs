@@ -1,4 +1,4 @@
-//! Class-specific transaction construction with shared configuration setters.
+//! Type-specific transaction construction with shared configuration setters.
 
 // Allow `pub` items in this module even though the module itself may be `pub(crate)`.
 // The module visibility controls external access; items are `pub` for use within the crate
@@ -18,26 +18,26 @@ use crate::transaction::commit_info::collect_operation_metadata;
 use crate::transaction::{CreateTable, UpdateTable};
 use crate::EngineData;
 
-/// A class of transactions supported by [`TransactionBuilder`].
+/// A transaction type supported by [`TransactionBuilder`].
 ///
-/// Each class selects its builder state and specializes constructors, setters, and build
-/// validation. This trait is sealed; Kernel provides the supported transaction classes.
+/// Each type selects its builder state and specializes constructors, setters, and build
+/// validation. This trait is sealed; Kernel provides the supported transaction types.
 pub trait TransactionType: private::Sealed {
-    /// Builder state specific to this transaction class. Use `()` when no extra state is needed.
+    /// Builder state specific to this transaction type. Use `()` when no extra state is needed.
     #[doc(hidden)]
     type BuilderState: Send;
 }
 
-/// Configures a transaction of class `T`.
+/// Configures a transaction of type `T`.
 ///
-/// Shared setters preserve the transaction class. Constructors, class-specific setters, and
+/// Shared setters preserve the transaction type. Constructors, type-specific setters, and
 /// `build` are provided by the specialized implementations for [`CreateTable`] and [`UpdateTable`].
 /// Use [`create_table`](super::create_table::create_table) or
 /// [`Snapshot::transaction_builder`](crate::Snapshot::transaction_builder) to obtain a builder.
 ///
 /// Create-table builders cannot configure existing-table operations:
 ///
-/// ```compile_fail
+/// ```compile_fail,E0599
 /// use delta_kernel::transaction::{CreateTable, TransactionBuilder, UpdateTableOperation};
 ///
 /// fn configure(builder: TransactionBuilder<CreateTable>) {
@@ -47,7 +47,7 @@ pub trait TransactionType: private::Sealed {
 ///
 /// Update-table builders cannot configure new-table properties:
 ///
-/// ```compile_fail
+/// ```compile_fail,E0599
 /// use delta_kernel::transaction::{TransactionBuilder, UpdateTable};
 ///
 /// fn configure(builder: TransactionBuilder<UpdateTable>) {

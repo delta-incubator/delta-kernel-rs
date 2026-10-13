@@ -120,7 +120,7 @@ table at a specific version. From it you build a `Scan` (reads) or `Transaction`
 **Write path:** `Snapshot` -> `UpdateTableTransactionBuilder` -> `Transaction` -> `commit()`.
 `UpdateTableTransactionBuilder` aliases `TransactionBuilder<UpdateTable>`; the create-table
 builder aliases `TransactionBuilder<CreateTable>`. Common setters have one generic implementation.
-The sealed `TransactionType` trait selects opaque mode-specific state; specialized implementations
+The sealed `TransactionType` trait selects opaque type-specific state; specialized implementations
 provide constructors, custom setters, and build validation. `UpdateTableOperation::AlterTable`
 records schema-changing DDL without introducing a separate transaction type.
 Writers configure transaction intent before `build()`, then call
