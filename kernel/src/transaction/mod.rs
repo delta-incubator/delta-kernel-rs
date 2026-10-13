@@ -70,8 +70,9 @@ pub mod data_layout;
 #[cfg(not(feature = "internal-api"))]
 pub(crate) mod data_layout;
 
-use builder::collect_operation_metadata;
 pub use builder::update_table::UpdateTableTransactionBuilder;
+pub use builder::{TransactionBuilder, TransactionType};
+use commit_info::collect_operation_metadata;
 mod bound_write_context;
 mod commit_info;
 mod domain_metadata;
@@ -179,12 +180,12 @@ pub(crate) fn augmented_write_metadata_schema() -> KernelResult<SchemaRef> {
     with_row_tracking_cols(&BASE_ADD_FILES_SCHEMA)
 }
 
-/// Marker type for transactions on existing tables.
+/// Marker type for transactions that update existing tables.
 ///
 /// This is the default state for [`Transaction`] and supports schema changes as well as file
 /// additions, removals, deletion-vector updates, and blind append semantics.
 #[derive(Debug)]
-pub struct ExistingTable;
+pub struct UpdateTable;
 
 /// Marker type for create-table transactions.
 ///
@@ -198,11 +199,11 @@ pub struct CreateTable;
 /// changes to the table.
 ///
 /// The type parameter `S` controls which operations are available:
-/// - [`ExistingTable`] (default): Full API for modifying existing tables.
+/// - [`UpdateTable`] (default): Full API for modifying existing tables.
 /// - [`CreateTable`]: Restricted API for table creation (see
 ///   [`CreateTableTransaction`](create_table::CreateTableTransaction)).
 ///
-/// Both states support file additions. Schema-changing transactions use [`ExistingTable`] rather
+/// Both states support file additions. Schema-changing transactions use [`UpdateTable`] rather
 /// than a separate schema-only state, allowing schema and file changes in the same transaction.
 /// The builder validates schema intent, and commit validates the staged actions. Schema-only
 /// behavior is not enforced by the type parameter.
@@ -255,7 +256,7 @@ pub struct CreateTable;
 ///     let _ = txn.with_operation(UpdateTableOperation::Write);
 /// }
 /// ```
-pub struct Transaction<S = ExistingTable> {
+pub struct Transaction<S = UpdateTable> {
     span: tracing::Span,
     // Correlates all metric events emitted by this transaction.
     operation_id: MetricId,
@@ -326,7 +327,7 @@ pub struct Transaction<S = ExistingTable> {
     // enabled. Used for determining which columns require statistics collection. Expected to be
     // physical column names.
     physical_clustering_columns: Option<Vec<ColumnName>>,
-    // PhantomType marker for transaction state (ExistingTable or CreateTable).
+    // PhantomType marker for transaction state (UpdateTable or CreateTable).
     // Zero-sized; only affects the type system.
     _state: PhantomType<S>,
 }
@@ -532,6 +533,18 @@ impl<S> Transaction<S> {
         V: Into<String>,
     {
         self.operation_metrics = Some(collect_operation_metadata(metrics));
+        self
+    }
+
+    /// Adds a [`SetTransaction`] action for `app_id` and `version`. Returns the updated
+    /// transaction.
+    ///
+    /// The action's `lastUpdated` uses this transaction's commit timestamp. Each application id may
+    /// occur only once per transaction, including ids added through the builder. Duplicates are not
+    /// checked here; [`Self::commit`] rejects them.
+    pub fn with_transaction_id(mut self, app_id: String, version: i64) -> Self {
+        let set_transaction = SetTransaction::new(app_id, version, Some(self.commit_timestamp));
+        self.set_transactions.push(set_transaction);
         self
     }
 
@@ -1917,7 +1930,7 @@ pub struct PostCommitStats {
 ///   transaction can be retried without rebasing.
 #[derive(Debug)]
 #[must_use]
-pub enum CommitResult<S = ExistingTable> {
+pub enum CommitResult<S = UpdateTable> {
     /// The transaction was successfully committed.
     Committed(CommittedTransaction),
     /// This transaction conflicted with an existing version (see
@@ -2004,7 +2017,7 @@ impl CommittedTransaction {
 ///
 /// [conflict version]: Self::conflict_version
 #[derive(Debug)]
-pub struct ConflictedTransaction<S = ExistingTable> {
+pub struct ConflictedTransaction<S = UpdateTable> {
     // TODO: remove after rebase APIs
     #[allow(dead_code)]
     transaction: Transaction<S>,
@@ -2022,7 +2035,7 @@ impl<S> ConflictedTransaction<S> {
 /// can be recovered with `RetryableTransaction::transaction` and retried without rebasing. The
 /// associated error can be inspected via `RetryableTransaction::error`.
 #[derive(Debug)]
-pub struct RetryableTransaction<S = ExistingTable> {
+pub struct RetryableTransaction<S = UpdateTable> {
     /// The transaction that failed to commit due to a retryable error.
     pub transaction: Transaction<S>,
     /// Transient error that caused the commit to fail.

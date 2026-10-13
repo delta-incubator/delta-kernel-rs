@@ -10,7 +10,7 @@ use crate::transaction::Transaction;
 use crate::utils::require;
 use crate::{EngineData, KernelError, Result};
 
-/// Transaction intent collected before building a transaction.
+/// Shared transaction configuration collected before build.
 #[derive(Default)]
 pub(super) struct TransactionBuilderState {
     pub(super) correlation_id: Option<Arc<str>>,
@@ -49,60 +49,6 @@ impl TransactionBuilderState {
             data_change: Some(true),
             ..Self::default()
         }
-    }
-
-    pub(super) fn with_engine_info(mut self, engine_info: impl Into<String>) -> Self {
-        self.engine_info = Some(engine_info.into());
-        self
-    }
-
-    pub(super) fn with_correlation_id(mut self, correlation_id: impl Into<Arc<str>>) -> Self {
-        self.correlation_id = Some(correlation_id.into()).filter(|id| !id.is_empty());
-        self
-    }
-
-    pub(super) fn with_operation_parameters<I, K, V>(mut self, parameters: I) -> Self
-    where
-        I: IntoIterator<Item = (K, Option<V>)>,
-        K: Into<String>,
-        V: Into<String>,
-    {
-        self.operation_parameters = Some(collect_operation_metadata(parameters));
-        self
-    }
-
-    pub(super) fn with_operation_metrics<I, K, V>(mut self, metrics: I) -> Self
-    where
-        I: IntoIterator<Item = (K, Option<V>)>,
-        K: Into<String>,
-        V: Into<String>,
-    {
-        self.operation_metrics = Some(collect_operation_metadata(metrics));
-        self
-    }
-
-    pub(super) fn with_commit_info(
-        mut self,
-        commit_info: Box<dyn EngineData>,
-        commit_info_schema: SchemaRef,
-    ) -> Self {
-        self.engine_commit_info = Some((commit_info, commit_info_schema));
-        self
-    }
-
-    pub(super) fn with_transaction_id(mut self, app_id: impl Into<String>, version: i64) -> Self {
-        self.transaction_ids.push((app_id.into(), version));
-        self
-    }
-
-    pub(super) fn with_domain_metadata(
-        mut self,
-        domain: impl Into<String>,
-        configuration: impl Into<String>,
-    ) -> Self {
-        self.domain_metadata_additions
-            .push(DomainMetadata::new(domain.into(), configuration.into()));
-        self
     }
 
     pub(super) fn validate(&self) -> Result<()> {
@@ -170,16 +116,4 @@ impl TransactionBuilderState {
         transaction.data_change = data_change.unwrap_or(true);
         transaction
     }
-}
-
-pub(crate) fn collect_operation_metadata<I, K, V>(entries: I) -> HashMap<String, Option<String>>
-where
-    I: IntoIterator<Item = (K, Option<V>)>,
-    K: Into<String>,
-    V: Into<String>,
-{
-    entries
-        .into_iter()
-        .map(|(key, value)| (key.into(), value.map(Into::into)))
-        .collect()
 }
