@@ -17,7 +17,6 @@ use delta_kernel::scan::state::ScanFile;
 use delta_kernel::scan::PartitionValuesOptions;
 use delta_kernel::table_features::{get_any_level_column_physical_name, ColumnMappingMode};
 use delta_kernel::Snapshot;
-use jiff::Timestamp;
 use rstest::rstest;
 use test_utils::delta_kernel_default_engine::DefaultEngineBuilder;
 use test_utils::table_builder::{partitioned, version_latest, FeatureSet, LogState, TableConfig};
@@ -28,8 +27,20 @@ use test_utils::{
 };
 use url::Url;
 
-/// Typed partition values use physical names across column mapping modes, with or without a
-/// checkpoint.
+/// Requesting the typed struct via `with_struct()` on a partitioned table must emit a
+/// `partitionValues_parsed` column with one field per partition column, keyed by physical name.
+///
+/// Run across every column mapping mode and both log-segment shapes:
+/// - `native_checkpoint = false`: no checkpoint, so the struct is synthesized from the
+///   `partitionValues` string map via `MAP_TO_STRUCT` on a JSON commit.
+/// - `native_checkpoint = true`: a checkpoint with `writeStatsAsStruct=true`, so the read takes the
+///   checkpoint's native `partitionValues_parsed` column directly. For the non-null values this
+///   table writes, that column matches what `MAP_TO_STRUCT` would reconstruct, so both sources
+///   yield the same struct.
+///
+/// The struct keys on physical names, so a logical-vs-physical mismatch under `Id`/`Name` mapping
+/// would surface every partition value as null. The builder writes well-defined (non-null)
+/// partition values, so the non-null assertion guards physical-name matching in all combinations.
 #[rstest]
 fn scan_metadata_emits_partition_values_parsed_across_column_mapping(
     #[values(
@@ -217,8 +228,10 @@ fn add_action(path: &str, p_str: &str, p_bin: &str, p_int: &str) -> String {
 /// reconstructs `partitionValues_parsed` with the empty-string cast: "" stays "" for string,
 /// becomes empty bytes for binary, and becomes null for every other type.
 ///
-/// The result is identical before and after checkpointing because scans parse the canonical raw
-/// map in both cases.
+/// The result is identical whether the value is reconstructed from the `partitionValues` map (JSON
+/// commit) or read from a kernel-written checkpoint's native `partitionValues_parsed` column: the
+/// checkpoint reconstructs that column with the same cast, so a checkpoint never changes the value
+/// a scan surfaces. The `native_checkpoint` axis exercises both sources.
 #[rstest]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn parsed_partition_values_read_foreign_empty_string(
@@ -278,6 +291,7 @@ async fn parsed_partition_values_read_foreign_empty_string(
         let p_int = pv.column_by_name("p_int").unwrap();
         let p_int = p_int.as_any().downcast_ref::<Int32Array>().unwrap();
 
+        // Identical whether read from the map (JSON commit) or the checkpoint's native column.
         assert!(!p_str.is_null(0), "string \"\" reconstructs as \"\"");
         assert_eq!(p_str.value(0), "");
         assert!(!p_bin.is_null(0), "binary \"\" reconstructs as empty bytes");
@@ -302,7 +316,9 @@ fn collect_path(paths: &mut Vec<String>, scan_file: ScanFile) {
 /// - `p_str IS NULL` prunes it and `p_str IS NOT NULL` keeps it (the value is "", not null).
 /// - the same holds for the binary column (`p_bin`), whose "" reconstructs as empty bytes.
 ///
-/// The checkpoint axis verifies that native parsed checkpoint values preserve these semantics.
+/// The `native_checkpoint` axis exercises that pruning is identical before and after a kernel
+/// checkpoint: the checkpoint reconstructs the same "" into its native `partitionValues_parsed`
+/// column, so skipping keeps and prunes the same files a scan of the JSON commit would.
 #[rstest]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn empty_string_partition_pruning(#[values(false, true)] native_checkpoint: bool) {
@@ -511,7 +527,9 @@ async fn write_timezone_partition_table(
 }
 
 fn timestamp_micros(value: &str) -> i64 {
-    value.parse::<Timestamp>().unwrap().as_microsecond()
+    chrono::DateTime::parse_from_rfc3339(value)
+        .unwrap()
+        .timestamp_micros()
 }
 
 #[rstest]

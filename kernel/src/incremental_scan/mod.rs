@@ -5,21 +5,18 @@ use std::collections::HashSet;
 use std::sync::{Arc, LazyLock};
 
 use crate::engine_data::{FilteredEngineData, GetData, RowVisitor};
-use crate::expressions::{col, column_name, ColumnName, Expression as Expr, MapToStructOptions};
+use crate::expressions::{column_name, ColumnName, MapToStructOptions};
 use crate::log_replay::deduplicator::{Deduplicator, FileActionInfo};
 use crate::log_replay::{FileActionDeduplicator, FileActionKey};
-use crate::partition_values::TimestampTimezone;
 use crate::scan::data_skipping::DataSkippingFilter;
-use crate::scan::log_replay::PARTITION_VALUES_PARSED_NAME;
-use crate::scan::{PartitionValuesOptions, PhysicalPredicate, COMMIT_READ_SCHEMA};
-use crate::schema::{ColumnNamesAndTypes, DataType, StructField};
+use crate::scan::{PhysicalPredicate, COMMIT_READ_SCHEMA};
+use crate::schema::{ColumnNamesAndTypes, DataType};
 use crate::snapshot::SnapshotRef;
-use crate::struct_patch::ProjectionStructPatchBuilder;
 use crate::table_features::Operation;
 use crate::utils::require;
 use crate::{
-    DeltaResult, Engine, EngineData, Error, ExpressionEvaluator, FileDataReadResultIterator,
-    FileMeta, PredicateRef, Version,
+    DeltaResult, Engine, EngineData, Error, FileDataReadResultIterator, FileMeta, PredicateRef,
+    Version,
 };
 
 /// Builder for an incremental scan over `(base_version, target_version]`. Construct via
@@ -30,7 +27,7 @@ pub struct IncrementalScanBuilder {
     target_snapshot: SnapshotRef,
     base_version: Version,
     predicate: Option<PredicateRef>,
-    partition_values: PartitionValuesOptions,
+    timestamp_timezone: Option<String>,
 }
 
 impl IncrementalScanBuilder {
@@ -40,7 +37,7 @@ impl IncrementalScanBuilder {
             target_snapshot: target_snapshot.into(),
             base_version,
             predicate: None,
-            partition_values: PartitionValuesOptions::default(),
+            timestamp_timezone: None,
         }
     }
 
@@ -63,14 +60,15 @@ impl IncrementalScanBuilder {
         self
     }
 
-    /// Configure partition value output and parsing for incremental Add batches.
+    /// Interpret offset-less `TIMESTAMP` partition strings in `timestamp_timezone` for
+    /// partition predicate pruning.
     ///
-    /// The raw `add.partitionValues` map is always preserved. Passing
-    /// [`PartitionValuesOptions::with_struct`] also appends a typed
-    /// `add.partitionValues_parsed` struct. Timestamp timezone options apply to both the typed
-    /// output and partition predicate skipping.
-    pub fn with_partition_values(mut self, partition_values: PartitionValuesOptions) -> Self {
-        self.partition_values = partition_values;
+    /// Accepts an IANA timezone recognized by Kernel or a normalized `+HH:MM` or `-HH:MM`
+    /// fixed offset. Defaults to UTC. An explicit offset in a partition value takes precedence;
+    /// `TIMESTAMP_NTZ` is unaffected. The engine validates the timezone when parsing partition
+    /// values.
+    pub fn with_timestamp_timezone(mut self, timestamp_timezone: impl Into<String>) -> Self {
+        self.timestamp_timezone = Some(timestamp_timezone.into());
         self
     }
 
@@ -96,7 +94,6 @@ impl IncrementalScanBuilder {
     /// - `Err` if `base_version >= target_snapshot.version()` (caller error).
     /// - [`Error::MissingColumn`] if a [`with_predicate`](Self::with_predicate) predicate
     ///   references a column absent from the table schema.
-    /// - `Err` if the configured timestamp timezone is invalid.
     /// - `Err` if the target snapshot's protocol contains an unsupported reader feature.
     /// - `Err` if the engine fails to open the commit stream.
     pub fn build(self, engine: &dyn Engine) -> DeltaResult<Option<IncrementalScanStream>> {
@@ -112,14 +109,10 @@ impl IncrementalScanBuilder {
                 self.base_version, target_version
             ))
         );
-        if let Some(timestamp_timezone) = self.partition_values.timestamp_timezone.as_deref() {
-            timestamp_timezone.parse::<TimestampTimezone>()?;
-        }
         // Resolve the predicate into an Add-side skipping strategy up front so `build` can
         // fail fast on a malformed predicate (e.g. references to unknown columns), rather
         // than surfacing the error lazily from the stream.
         let add_skipping = self.resolve_add_skipping(engine)?;
-        let partition_values_transform = self.partition_values_transform(engine)?;
         // `base_version < target_version` above guarantees `base_version < u64::MAX`, but use
         // `checked_add` to make the dependency explicit and panic-free.
         let start_version = self.base_version.checked_add(1).ok_or_else(|| {
@@ -175,7 +168,6 @@ impl IncrementalScanBuilder {
             target_version,
             actions,
             add_skipping,
-            partition_values_transform,
             seen_file_keys: HashSet::new(),
             live_adds: HashSet::new(),
             removes: HashSet::new(),
@@ -202,6 +194,12 @@ impl IncrementalScanBuilder {
             PhysicalPredicate::StaticSkipAll => Ok(AddSkipping::SkipAll),
             PhysicalPredicate::None => Ok(AddSkipping::KeepAll),
             PhysicalPredicate::Some(physical_predicate, _referenced_schema) => {
+                let options = self
+                    .timestamp_timezone
+                    .as_deref()
+                    .map_or_else(MapToStructOptions::default, |timezone| {
+                        MapToStructOptions::default().with_timestamp_timezone(timezone)
+                    });
                 // Reuse the same raw-action-batch filter the change-data-feed path builds:
                 // parse stats from `add.stats` JSON and partition values from
                 // `add.partitionValues`, then skip against the shared `DataSkippingFilter`.
@@ -211,56 +209,11 @@ impl IncrementalScanBuilder {
                     physical_predicate,
                     table_configuration,
                     COMMIT_READ_SCHEMA.clone(),
-                    self.map_to_struct_options(),
+                    options,
                 );
                 Ok(filter.map_or(AddSkipping::KeepAll, |f| AddSkipping::Filter(Arc::new(f))))
             }
         }
-    }
-
-    fn partition_values_transform(
-        &self,
-        engine: &dyn Engine,
-    ) -> DeltaResult<Option<Arc<dyn ExpressionEvaluator>>> {
-        if !self.partition_values.parsed_struct {
-            return Ok(None);
-        }
-        let Some(partition_schema) = self
-            .target_snapshot
-            .table_configuration()
-            .build_partition_values_parsed_schema()
-        else {
-            return Ok(None);
-        };
-        let parsed = Expr::map_to_struct(col!("add.partitionValues"), self.map_to_struct_options());
-        let (output_schema, expression) =
-            ProjectionStructPatchBuilder::new(COMMIT_READ_SCHEMA.as_ref())
-                .append_at(
-                    ["add"],
-                    StructField::nullable(
-                        PARTITION_VALUES_PARSED_NAME,
-                        partition_schema.as_ref().clone(),
-                    ),
-                    parsed,
-                )
-                .build()?;
-        engine
-            .evaluation_handler()
-            .new_expression_evaluator(
-                COMMIT_READ_SCHEMA.clone(),
-                expression,
-                output_schema.as_ref().clone().into(),
-            )
-            .map(Some)
-    }
-
-    fn map_to_struct_options(&self) -> MapToStructOptions {
-        self.partition_values
-            .timestamp_timezone
-            .as_deref()
-            .map_or_else(MapToStructOptions::default, |timezone| {
-                MapToStructOptions::default().with_timestamp_timezone(timezone)
-            })
     }
 }
 
@@ -297,7 +250,6 @@ pub struct IncrementalScanStream {
     target_version: Version,
     actions: FileDataReadResultIterator,
     add_skipping: AddSkipping,
-    partition_values_transform: Option<Arc<dyn ExpressionEvaluator>>,
     seen_file_keys: HashSet<FileActionKey>,
     live_adds: HashSet<FileActionKey>,
     removes: HashSet<FileActionKey>,
@@ -324,19 +276,7 @@ impl Iterator for IncrementalScanStream {
                     &mut self.live_adds,
                     &mut self.removes,
                 ) {
-                    Ok(Some(filtered)) => {
-                        let filtered = match apply_partition_values_transform(
-                            filtered,
-                            self.partition_values_transform.as_deref(),
-                        ) {
-                            Ok(filtered) => filtered,
-                            Err(e) => {
-                                self.errored = true;
-                                return Some(Err(e));
-                            }
-                        };
-                        return Some(Ok(filtered));
-                    }
+                    Ok(Some(filtered)) => return Some(Ok(filtered)),
                     Ok(None) => continue,
                     Err(e) => {
                         self.errored = true;
@@ -636,17 +576,6 @@ impl std::fmt::Debug for IncrementalListingAgainstBase {
 /// still advances dedup state (its `(path, dv_unique_id)` key is recorded as seen) so an
 /// older duplicate of the same file cannot leak through, matching newest-wins semantics.
 /// Removes are never skipped.
-fn apply_partition_values_transform(
-    filtered: FilteredEngineData,
-    transform: Option<&dyn ExpressionEvaluator>,
-) -> DeltaResult<FilteredEngineData> {
-    let Some(transform) = transform else {
-        return Ok(filtered);
-    };
-    let (data, selection_vector) = filtered.into_parts();
-    FilteredEngineData::try_new(transform.evaluate(data.as_ref())?, selection_vector)
-}
-
 fn process_batch(
     batch: Box<dyn EngineData>,
     add_skipping: &AddSkipping,

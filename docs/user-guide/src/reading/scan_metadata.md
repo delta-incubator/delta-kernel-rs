@@ -249,9 +249,9 @@ If the scan has no predicate, this returns `None`.
 ## Typed partition values
 
 Kernel reads each file's partition values from the Delta log and exposes them on its
-`ScanFile` as a raw string map. `transform_to_logical` materializes them as typed columns. A
-connector that assembles output rows itself instead of using that transform would otherwise need
-to parse the string map per file.
+`ScanFile` as a raw string map. Kernel's `transform_to_logical` could materialize them as
+typed columns. If your connector assembles output rows itself instead of using that transform,
+it parses the string map per file.
 
 To have Kernel hand you the typed values directly, opt in with `with_partition_values`:
 
@@ -290,8 +290,8 @@ By default, offset-less `TIMESTAMP` partition strings are interpreted in UTC. Us
 fixed offset when the reader uses another timezone. An explicit offset in a partition value takes
 precedence. This setting affects typed `scan_metadata` output and partition predicate evaluation
 after log replay. Kernel uses compatible native checkpoint values unchanged, including timestamps.
-The timezone applies when Kernel falls back to the raw map. Incremental scans can also request
-typed partition values with `IncrementalScanBuilder::with_partition_values`.
+The timezone applies when Kernel falls back to the raw map. For incremental partition predicate
+pruning, set the reader timezone with `IncrementalScanBuilder::with_timestamp_timezone`.
 `TIMESTAMP_NTZ` remains timezone-independent. For daylight-saving transitions, ambiguous local
 times use the earlier instant, and nonexistent local times use the offset from before the
 transition.
@@ -302,9 +302,8 @@ partition-column row transforms parse the raw map in UTC and don't reuse native 
 Change data feed scans also retain their default partition-value interpretation.
 
 > [!TIP]
-> Kernel parses commit rows from the raw map. Compatible checkpoints reuse the native parsed
-> struct, falling back to the raw map when the struct is null. A null field within a non-null
-> native struct remains null.
+> When the checkpoint already stores typed partition values, Kernel reads that column directly
+> and skips parsing entirely.
 
 ## Cancelling a scan
 

@@ -8,9 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::num::NonZero;
 use std::sync::Arc;
 
-use delta_kernel::arrow::array::{
-    Int32Array, MapArray, RecordBatch, StringArray, StructArray, TimestampMicrosecondArray,
-};
+use delta_kernel::arrow::array::{Int32Array, MapArray, RecordBatch, StringArray, StructArray};
 use delta_kernel::arrow::datatypes::Schema as ArrowSchema;
 use delta_kernel::engine::arrow_conversion::TryIntoArrow as _;
 use delta_kernel::expressions::{col, lit, Predicate as Pred, PredicateRef, Scalar};
@@ -23,7 +21,6 @@ use delta_kernel::object_store::memory::InMemory;
 use delta_kernel::object_store::path::Path as ObjectStorePath;
 use delta_kernel::object_store::ObjectStoreExt;
 use delta_kernel::scan::state::ScanFile;
-use delta_kernel::scan::PartitionValuesOptions;
 use delta_kernel::schema::{schema_ref, StructType};
 use delta_kernel::{
     Engine, EvaluationHandler, JsonHandler, ParquetHandler, Snapshot, SnapshotRef, StorageHandler,
@@ -1280,62 +1277,60 @@ async fn timestamp_partition_snapshot(
     Ok((engine, snapshot))
 }
 
+#[rstest]
+#[case::default(None, false)]
+#[case::utc(Some("UTC"), false)]
+#[case::reader_timezone(Some("America/Los_Angeles"), true)]
 #[tokio::test]
-async fn configured_partition_values_use_timezone_for_output_and_skipping(
+async fn timestamp_timezone_affects_pruning_and_preserves_raw_output(
+    #[case] timezone: Option<&str>,
+    #[case] predicate_matches: bool,
+    #[values(false, true)] with_predicate: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (engine, target) = timestamp_partition_snapshot().await?;
-    let predicate: PredicateRef =
-        Arc::new(col!("p_ts").gt(lit(Scalar::Timestamp(1_705_334_400_000_000))));
-    let listing = unwrap_listing(
-        target
-            .incremental_scan_builder(0)
-            .with_predicate(predicate)
-            .with_partition_values(
-                PartitionValuesOptions::with_struct()
-                    .with_timestamp_timezone("America/Los_Angeles"),
-            )
-            .build(engine.as_ref())?,
-    );
+    let mut builder = target.incremental_scan_builder(0);
+    if with_predicate {
+        let predicate: PredicateRef =
+            Arc::new(col!("p_ts").gt(lit(Scalar::Timestamp(1_705_334_400_000_000))));
+        builder = builder.with_predicate(predicate);
+    }
+    if let Some(timezone) = timezone {
+        builder = builder.with_timestamp_timezone(timezone);
+    }
+    let listing = unwrap_listing(builder.build(engine.as_ref())?);
 
-    assert_eq!(
-        listing.summary.live_adds,
+    let keep_file = !with_predicate || predicate_matches;
+    let expected_adds = if keep_file {
         HashSet::from([key("part.parquet")])
-    );
-    let filtered = listing
-        .add_files
-        .into_iter()
-        .next()
-        .expect("expected one incremental Add batch");
-    let batch = into_record_batch(filtered.apply_selection_vector()?);
-    let add = batch
-        .column_by_name("add")
-        .and_then(|column| column.as_any().downcast_ref::<StructArray>())
-        .expect("add should be a struct");
-    let raw = add
-        .column_by_name("partitionValues")
-        .and_then(|column| column.as_any().downcast_ref::<MapArray>())
-        .expect("raw partition values should be preserved");
-    let raw_keys = raw
-        .entries()
-        .column_by_name("key")
-        .and_then(|column| column.as_any().downcast_ref::<StringArray>())
-        .expect("partition keys should be strings");
-    let raw_values = raw
-        .entries()
-        .column_by_name("value")
-        .and_then(|column| column.as_any().downcast_ref::<StringArray>())
-        .expect("partition values should be strings");
-    assert_eq!(raw_keys.value(0), "p_ts");
-    assert_eq!(raw_values.value(0), "2024-01-15 12:30:45.123456");
-    let parsed = add
-        .column_by_name("partitionValues_parsed")
-        .and_then(|column| column.as_any().downcast_ref::<StructArray>())
-        .expect("parsed partition values should be a struct");
-    let timestamp = parsed
-        .column_by_name("p_ts")
-        .and_then(|column| column.as_any().downcast_ref::<TimestampMicrosecondArray>())
-        .expect("p_ts should be a timestamp");
-    assert_eq!(timestamp.value(0), 1_705_350_645_123_456);
+    } else {
+        HashSet::new()
+    };
+    assert_eq!(listing.summary.live_adds, expected_adds);
+    assert_eq!(live_add_count(&listing), usize::from(keep_file));
+    for filtered in listing.add_files {
+        let batch = into_record_batch(filtered.apply_selection_vector()?);
+        let add = batch
+            .column_by_name("add")
+            .and_then(|column| column.as_any().downcast_ref::<StructArray>())
+            .expect("add should be a struct");
+        assert!(add.column_by_name("partitionValues_parsed").is_none());
+        let raw = add
+            .column_by_name("partitionValues")
+            .and_then(|column| column.as_any().downcast_ref::<MapArray>())
+            .expect("raw partition values should be preserved");
+        let raw_keys = raw
+            .entries()
+            .column_by_name("key")
+            .and_then(|column| column.as_any().downcast_ref::<StringArray>())
+            .expect("partition keys should be strings");
+        let raw_values = raw
+            .entries()
+            .column_by_name("value")
+            .and_then(|column| column.as_any().downcast_ref::<StringArray>())
+            .expect("partition values should be strings");
+        assert_eq!(raw_keys.value(0), "p_ts");
+        assert_eq!(raw_values.value(0), "2024-01-15 12:30:45.123456");
+    }
     Ok(())
 }
 
@@ -1343,14 +1338,16 @@ async fn configured_partition_values_use_timezone_for_output_and_skipping(
 async fn incremental_scan_rejects_invalid_timestamp_timezone(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (engine, target) = timestamp_partition_snapshot().await?;
-    let result = target
+    let predicate: PredicateRef =
+        Arc::new(col!("p_ts").gt(lit(Scalar::Timestamp(1_705_334_400_000_000))));
+    let mut stream = target
         .incremental_scan_builder(0)
-        .with_partition_values(
-            PartitionValuesOptions::with_struct().with_timestamp_timezone("Not/AZone"),
-        )
-        .build(engine.as_ref());
+        .with_predicate(predicate)
+        .with_timestamp_timezone("Not/AZone")
+        .build(engine.as_ref())?
+        .expect("expected an incremental stream");
 
-    assert_result_error_with_message(result, "Not/AZone");
+    assert_result_error_with_message(stream.next().expect("expected an Add batch"), "Not/AZone");
     Ok(())
 }
 

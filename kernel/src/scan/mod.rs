@@ -30,7 +30,6 @@ use crate::log_segment_files::LogSegmentFiles;
 use crate::metrics::events::emit_scan_metadata_completed;
 use crate::metrics::{MetricId, ScanType};
 use crate::parallel::sequential_phase::SequentialPhase;
-use crate::partition_values::TimestampTimezone;
 #[cfg(feature = "declarative-plans")]
 use crate::plans::ir::plan::Plan;
 use crate::scan::log_replay::{
@@ -236,15 +235,15 @@ impl StatsOptions {
     }
 }
 
-/// Engine-facing partition value options. Pass to [`ScanBuilder::with_partition_values`] or
-/// [`crate::incremental_scan::IncrementalScanBuilder::with_partition_values`] to request a typed
-/// `partitionValues_parsed` struct alongside the raw string map, which is always preserved.
+/// Engine-facing partition value options. Pass to [`ScanBuilder::with_partition_values`] to
+/// declare whether scan metadata output includes the typed `partitionValues_parsed` struct
+/// alongside the raw string map (`fileConstantValues.partitionValues`), which is always present.
 ///
-/// Full scan metadata emits the struct at the top level; incremental Add batches emit it as
-/// `add.partitionValues_parsed`. It contains one typed nullable field per partition column using
-/// physical names and table partition-column order. On non-partitioned tables it is omitted.
-/// Full scans reuse compatible checkpoint values, including timestamps. When the native struct is
-/// unavailable, values are parsed from the string map using the configured timezone.
+/// When the typed struct is requested, scan metadata output gains a top-level
+/// `partitionValues_parsed` struct column with one typed nullable field per partition column
+/// (physical names, table partition-column order). On non-partitioned tables the column is
+/// omitted. Values come directly from the checkpoint's native `partitionValues_parsed` column
+/// when present, otherwise from parsing the string map.
 #[derive(Clone, Debug, Default)]
 pub struct PartitionValuesOptions {
     /// Whether to emit the typed `partitionValues_parsed` struct column.
@@ -259,7 +258,8 @@ impl PartitionValuesOptions {
         Self::default()
     }
 
-    /// Emit the typed `partitionValues_parsed` struct alongside the raw string map.
+    /// Emit the typed `partitionValues_parsed` struct alongside the raw string map. Lets engines
+    /// consume `partitionValues_parsed` directly instead of parsing the string map per row.
     pub fn with_struct() -> Self {
         Self {
             parsed_struct: true,
@@ -272,14 +272,13 @@ impl PartitionValuesOptions {
     /// `timestamp_timezone` must be an IANA time zone identifier recognized by Kernel or a
     /// normalized fixed offset in `+HH:MM` or `-HH:MM` form. An explicit offset in a partition
     /// value takes precedence. This option does not affect `TIMESTAMP_NTZ`. It applies to typed
-    /// full scan metadata and final partition predicate evaluation, and incremental typed output
-    /// and predicate skipping.
+    /// scan metadata and final partition predicate evaluation.
     /// Typed metadata and partition pruning use compatible native checkpoint values unchanged;
     /// the timezone applies only when parsing the raw map. Partition-column row transforms use
     /// UTC and do not reuse native checkpoint values. Connectors consuming the typed output should
     /// use [`ScanBuilder::without_row_transforms`] and construct partition columns from that
     /// output. Without this option, Kernel interprets offset-less timestamps as UTC. Invalid
-    /// timezone identifiers are reported when the scan is built.
+    /// timezone identifiers are reported by the engine when parsing partition values.
     pub fn with_timestamp_timezone(mut self, timestamp_timezone: impl Into<String>) -> Self {
         self.timestamp_timezone = Some(timestamp_timezone.into());
         self
@@ -446,10 +445,6 @@ impl ScanBuilder {
     /// perform actual data reads.
     #[tracing::instrument(name = "scan_builder.build", skip_all, fields(enable_call_frame), err)]
     pub fn build(self) -> DeltaResult<Scan> {
-        if let Some(timestamp_timezone) = self.partition_values.timestamp_timezone.as_deref() {
-            timestamp_timezone.parse::<TimestampTimezone>()?;
-        }
-
         // Predicates may reference columns outside self.logical_read_schema, so resolve against the
         // full table schema
         let table_schema = self.snapshot.schema();
@@ -1033,7 +1028,6 @@ impl Scan {
                 checkpoint_info: CheckpointReadInfo {
                     has_stats_parsed: false,
                     has_partition_values_parsed: false,
-                    can_reuse_partition_values_parsed: false,
                     checkpoint_read_schema: restored_add_schema().clone(),
                 },
             };
@@ -1089,7 +1083,6 @@ impl Scan {
             checkpoint_info: CheckpointReadInfo {
                 has_stats_parsed: false,
                 has_partition_values_parsed: false,
-                can_reuse_partition_values_parsed: false,
                 checkpoint_read_schema: restored_add_schema().clone(),
             },
         };
@@ -1174,7 +1167,7 @@ impl Scan {
     )]
     pub fn declarative_metadata_scan_plan(&self, engine: &dyn Engine) -> DeltaResult<Option<Plan>> {
         // Resolve the checkpoint shape once: it selects the leaf-vs-manifest arm and reports
-        // whether the checkpoint carries compatible parsed stats.
+        // whether the checkpoint carries a compatible parsed-stats column.
         let plan_executor = engine.require_plan_executor()?;
         let shape = CheckpointShape::try_new(
             plan_executor.as_ref(),
@@ -1229,7 +1222,6 @@ impl Scan {
         let PhysicalPredicate::Some(ref predicate, _) = self.state_info.physical_predicate else {
             return None;
         };
-
         // Skipping needs either data-column stats or partition values to rewrite against; a
         // partition-only predicate has no `stats_parsed` schema, a data-only predicate on an
         // unpartitioned table has no partition schema.
@@ -1350,7 +1342,6 @@ impl Scan {
         let checkpoint_info = CheckpointReadInfo {
             has_stats_parsed: false,
             has_partition_values_parsed: false,
-            can_reuse_partition_values_parsed: false,
             checkpoint_read_schema: checkpoint_read_schema.clone(),
         };
         let processor = ScanLogReplayProcessor::new(
