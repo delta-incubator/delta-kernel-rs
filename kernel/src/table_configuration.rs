@@ -361,23 +361,20 @@ impl TableConfiguration {
             .map(|s| s.as_str())
             .collect();
         let physical_data_schema_without_partition_columns = {
-            let fields = logical_schema
-                .fields()
-                .zip(physical_schema.fields())
-                .filter(|(logical_field, _)| {
-                    !partition_columns.contains(logical_field.name().as_str())
-                })
-                .map(|(_, physical_field)| physical_field.clone());
-            // Safety: subset of an already-valid schema.
-            Arc::new(StructType::new_unchecked(fields))
+            let mut logical_fields = logical_schema.fields();
+            Arc::new(physical_schema.share_selected_fields(|_| {
+                logical_fields
+                    .next()
+                    .is_some_and(|field| !partition_columns.contains(field.name().as_str()))
+            }))
         };
         let logical_schema_without_partition_columns = {
-            let fields = logical_schema
-                .fields()
-                .filter(|field| !partition_columns.contains(field.name().as_str()))
-                .cloned();
-            // Safety: subset of an already-valid schema.
-            Arc::new(StructType::new_unchecked(fields))
+            let mut logical_fields = logical_schema.fields();
+            Arc::new(logical_schema.share_selected_fields(|_| {
+                logical_fields
+                    .next()
+                    .is_some_and(|field| !partition_columns.contains(field.name().as_str()))
+            }))
         };
 
         let mut table_config = Self {
@@ -2674,6 +2671,44 @@ mod test {
             config.physical_partition_columns().collect::<Vec<_>>(),
             expected
         );
+    }
+
+    #[rstest]
+    fn partition_filtered_schemas_share_fields(
+        #[values(
+            ColumnMappingMode::None,
+            ColumnMappingMode::Name,
+            ColumnMappingMode::Id
+        )]
+        mode: ColumnMappingMode,
+        #[values(vec![], vec!["part_a"], vec!["part_a", "part_b"])] partitions: Vec<&str>,
+    ) {
+        let config = MockTableConfigurationBuilder::new()
+            .with_schema(partitioned_schema_with_column_mapping())
+            .with_column_mapping(mode)
+            .with_partition_columns(partitions.clone())
+            .with_protocol(MockProtocolBuilder::new().with_versions(2, 5).build())
+            .build();
+
+        let logical = &config.logical_schema_without_partition_columns;
+        let physical = &config.physical_data_schema_without_partition_columns;
+        assert_eq!(logical.fields().len(), 3 - partitions.len());
+        assert_eq!(physical.fields().len(), logical.fields().len());
+        for (logical_field, physical_field) in config
+            .logical_schema
+            .fields()
+            .zip(config.physical_schema.fields())
+        {
+            let retained_logical = logical.field(logical_field.name());
+            let retained_physical = physical.field(physical_field.name());
+            if partitions.contains(&logical_field.name().as_str()) {
+                assert!(retained_logical.is_none());
+                assert!(retained_physical.is_none());
+            } else {
+                assert!(std::ptr::eq(retained_logical.unwrap(), logical_field));
+                assert!(std::ptr::eq(retained_physical.unwrap(), physical_field));
+            }
+        }
     }
 
     #[test]
