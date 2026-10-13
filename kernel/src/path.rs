@@ -9,8 +9,12 @@ use uuid::Uuid;
 
 use crate::actions::visitors::InCommitTimestampVisitor;
 use crate::engine_data::RowVisitor;
+use crate::schema::SchemaRef;
 use crate::utils::require;
-use crate::{Engine, FileMeta, KernelError, KernelResult, Result, Version};
+use crate::{
+    Engine, EngineData, FileDataReadResultIterator, FileMeta, KernelError, KernelResult, Result,
+    Version,
+};
 
 /// The delta log subdirectory with a trailing slash for directory URL joins.
 pub(crate) const DELTA_LOG_DIR_WITH_SLASH: &str = "_delta_log/";
@@ -389,35 +393,41 @@ impl ParsedLogPath<FileMeta> {
     /// Callers should handle enablement version checks before calling this method.
     #[tracing::instrument(skip(engine), ret, fields(version = self.version, path = %self.location.as_url()))]
     pub(crate) fn read_in_commit_timestamp(&self, engine: &dyn Engine) -> KernelResult<i64> {
-        // Only works on commit files
-        if !self.is_commit() {
-            return Err(KernelError::generic(format!(
-                "read_in_commit_timestamp can only be called on commit files, got: {:?}",
-                self.file_type
-            )));
-        }
+        let mut action_iter =
+            self.read_commit_file_actions(engine, InCommitTimestampVisitor::schema())?;
 
-        let mut action_iter = engine.json_handler().read_json_files(
-            slice::from_ref(&self.location),
-            InCommitTimestampVisitor::schema(),
-            None,
-        )?;
-
-        // Process the actions to find inCommitTimestamp
         // According to protocol, CommitInfo MUST be the first action when ICT is enabled,
         // so we can optimize by only reading the first batch
         match action_iter.next() {
-            Some(Ok(actions)) => {
-                let mut visitor = InCommitTimestampVisitor::default();
-                visitor.visit_rows_of(actions.as_ref())?;
-                visitor.in_commit_timestamp.ok_or_else(|| {
-                    KernelError::generic("In-Commit Timestamp not found in commit file")
-                })
-            }
-            Some(Err(err)) => Err(err),
+            Some(actions) => in_commit_timestamp_from(actions?.as_ref()),
             None => Err(KernelError::generic("Commit file contains no actions")),
         }
     }
+
+    /// Reads this commit log file's actions with `schema`. Errors if this is not a commit file.
+    fn read_commit_file_actions(
+        &self,
+        engine: &dyn Engine,
+        schema: SchemaRef,
+    ) -> KernelResult<FileDataReadResultIterator> {
+        require!(
+            self.is_commit(),
+            KernelError::generic(format!("expected a commit file, got: {:?}", self.file_type))
+        );
+        engine
+            .json_handler()
+            .read_json_files(slice::from_ref(&self.location), schema, None)
+    }
+}
+
+/// Extracts the In-Commit Timestamp from a batch of commit actions whose first row is the
+/// commitInfo. Errors if the timestamp is absent.
+fn in_commit_timestamp_from(actions: &dyn EngineData) -> KernelResult<i64> {
+    let mut visitor = InCommitTimestampVisitor::default();
+    visitor.visit_rows_of(actions)?;
+    visitor
+        .in_commit_timestamp
+        .ok_or_else(|| KernelError::generic("In-Commit Timestamp not found in commit file"))
 }
 
 impl ParsedLogPath<Url> {
@@ -1219,10 +1229,7 @@ pub(crate) mod tests {
 
         // Should return error for non-commit files
         let result = parsed_path.read_in_commit_timestamp(&engine);
-        assert_result_error_with_message(
-            result,
-            "read_in_commit_timestamp can only be called on commit files",
-        );
+        assert_result_error_with_message(result, "expected a commit file");
     }
 
     /// Verifies `new_sidecar` builds a `<version:020>.checkpoint.<uuid>.parquet` filename
