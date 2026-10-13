@@ -34,8 +34,9 @@ pub trait TransactionType: private::Sealed {
 /// Shared setters preserve the transaction type. Constructors, type-specific setters, and
 /// `build` are provided by specialized implementations for [`CreateTable`], [`UpdateTable`], and
 /// [`ReplaceTable`].
-/// Use [`create_table`](super::create_table::create_table) or
-/// [`Snapshot::update_table`](crate::Snapshot::update_table) to obtain a builder.
+/// Use [`create_table`](super::create_table::create_table),
+/// [`Snapshot::update_table`](crate::Snapshot::update_table), or
+/// [`Snapshot::replace_table`](crate::Snapshot::replace_table) to obtain a builder.
 ///
 /// The operation cannot be changed on a builder:
 ///
