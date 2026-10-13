@@ -6,7 +6,7 @@ use std::sync::Arc;
 use crate::actions::{DomainMetadata, SetTransaction};
 use crate::schema::SchemaRef;
 use crate::transaction::domain_metadata::validate_unique_domains;
-use crate::transaction::Transaction;
+use crate::transaction::{ExecutionMode, Transaction};
 use crate::utils::require;
 use crate::{EngineData, KernelError, Result};
 
@@ -88,7 +88,10 @@ impl TransactionBuilderState {
 
     /// Transfers builder intent into the transaction's commit configuration.
     // TODO(#3149): Replace this helper with direct initialization of immutable transaction state.
-    pub(super) fn apply_to_transaction<S>(self, mut transaction: Transaction<S>) -> Transaction<S> {
+    pub(super) fn apply_to_transaction<STATE, MODE: ExecutionMode>(
+        self,
+        mut transaction: Transaction<STATE, MODE>,
+    ) -> Transaction<STATE, MODE> {
         let Self {
             correlation_id,
             operation_parameters,

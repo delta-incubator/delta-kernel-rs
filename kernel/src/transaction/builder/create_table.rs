@@ -50,7 +50,7 @@ use crate::table_properties::{
 };
 use crate::transaction::create_table::CreateTableTransaction;
 use crate::transaction::data_layout::DataLayout;
-use crate::transaction::{CommitOperation, CreateTable, Transaction};
+use crate::transaction::{CommitOperation, CreateTable, ExecutionMode, Transaction};
 use crate::utils::{current_time_ms, try_parse_uri, PhantomType};
 use crate::{Engine, KernelError, KernelResult, Result, StorageHandler};
 
@@ -1087,13 +1087,13 @@ impl TransactionBuilder<CreateTable> {
     }
 }
 
-fn try_new_create_table(
+fn try_new_create_table<MODE: ExecutionMode>(
     effective_table_config: TableConfiguration,
     committer: Box<dyn Committer>,
     system_domain_metadata: Vec<DomainMetadata>,
     clustering_columns: Option<Vec<ColumnName>>,
     common_state: TransactionBuilderState,
-) -> KernelResult<CreateTableTransaction> {
+) -> KernelResult<Transaction<CreateTable, MODE>> {
     validate_iceberg_compat_if_needed(
         &effective_table_config,
         &V2_VALIDATOR,
@@ -1118,8 +1118,7 @@ fn try_new_create_table(
         operation_parameters: None,
         operation_metrics: None,
         engine_info: None,
-        add_files_metadata: vec![],
-        remove_files_metadata: vec![],
+        staged_data_changes: Default::default(),
         set_transactions: vec![],
         commit_timestamp: current_time_ms()?,
         user_domain_metadata_additions: vec![],
@@ -1132,8 +1131,6 @@ fn try_new_create_table(
         row_tracking_preservation_acknowledged: false,
         engine_commit_info: None,
         is_blind_append: false,
-        dv_matched_files: vec![],
-        num_dv_updates: 0,
         #[cfg(feature = "adaptive-metadata-in-dev")]
         manifest_write: None,
         physical_clustering_columns: clustering_columns,
