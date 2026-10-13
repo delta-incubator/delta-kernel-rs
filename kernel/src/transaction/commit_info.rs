@@ -647,7 +647,7 @@ mod tests {
     fn test_build_commit_info_data_change(
         #[values(None, Some(true), Some(false))] txn_data_change: Option<bool>,
         #[values(false, true)] engine_conflicting_data_change: bool,
-    ) -> Result<()> {
+    ) -> KernelResult<()> {
         // Always differs from the txn value so an override is observable.
         let engine_commit_info = engine_conflicting_data_change.then(|| {
             let conflicting_value = !txn_data_change.unwrap_or(false);

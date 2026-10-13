@@ -87,8 +87,7 @@ async fn test_post_commit_snapshot_create_then_insert() -> KernelResult<()> {
 }
 
 #[tokio::test]
-async fn test_write_parquet_succeed_with_logical_partition_names(
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn test_write_parquet_succeed_with_logical_partition_names() -> KernelResult<()> {
     let schema = schema_ref! {
         nullable "id": INTEGER,
         nullable "letter": STRING,
@@ -129,7 +128,7 @@ async fn test_write_parquet_succeed_with_logical_partition_names(
 
 #[tokio::test]
 async fn test_write_context_builder_rejects_partition_values_on_unpartitioned_table(
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> KernelResult<()> {
     let schema = get_simple_int_schema();
 
     for (table_url, engine, _store, _table_name) in

@@ -586,7 +586,7 @@ pub(super) mod tests {
     }
 
     #[test_log::test(tokio::test)]
-    async fn test_snapshot_with_unsupported_type() -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_snapshot_with_unsupported_type() -> KernelResult<()> {
         let (engine, store, table_root) = setup_test();
         let engine = engine.as_ref();
 
@@ -648,7 +648,7 @@ pub(super) mod tests {
     }
 
     #[test_log::test(tokio::test)]
-    async fn snapshot_failed_emits_metric_on_error() -> Result<(), Box<dyn std::error::Error>> {
+    async fn snapshot_failed_emits_metric_on_error() -> KernelResult<()> {
         let (engine, store, table_root) = setup_test();
 
         // Unsupported schema type forces a build failure
@@ -694,8 +694,7 @@ pub(super) mod tests {
     }
 
     #[test_log::test(tokio::test)]
-    async fn log_segment_load_failure_emits_metric_on_empty_log(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    async fn log_segment_load_failure_emits_metric_on_empty_log() -> KernelResult<()> {
         let (engine, _store, table_root) = setup_test();
         let (reporter, _guard) = measuring_reporter();
 
@@ -957,8 +956,7 @@ pub(super) mod tests {
         }
 
         #[test_log::test(tokio::test)]
-        async fn test_version_exceeds_max_catalog_version_errors(
-        ) -> Result<(), Box<dyn std::error::Error>> {
+        async fn test_version_exceeds_max_catalog_version_errors() -> KernelResult<()> {
             let (engine, _store, table_root) = setup_catalog_managed_test().await;
 
             let result = SnapshotBuilder::new_for(table_root)
@@ -997,8 +995,8 @@ pub(super) mod tests {
         }
 
         #[test_log::test(tokio::test)]
-        async fn test_catalog_managed_table_without_max_catalog_version_errors(
-        ) -> Result<(), Box<dyn std::error::Error>> {
+        async fn test_catalog_managed_table_without_max_catalog_version_errors() -> KernelResult<()>
+        {
             let (engine, _store, table_root) = setup_catalog_managed_test().await;
 
             let result = SnapshotBuilder::new_for(table_root).build(engine.as_ref());

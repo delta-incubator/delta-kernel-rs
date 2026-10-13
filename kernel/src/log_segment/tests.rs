@@ -5435,7 +5435,7 @@ fn new_for_version_zero_rejects_non_commit_file() {
 }
 
 #[test]
-fn test_commit_phase_processes_commits() -> Result<(), Box<dyn std::error::Error>> {
+fn test_commit_phase_processes_commits() -> KernelResult<()> {
     let (engine, snapshot, _tempdir) = load_test_table("app-txn-no-checkpoint")?;
     let log_segment = snapshot.log_segment();
 

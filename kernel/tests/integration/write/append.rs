@@ -125,7 +125,7 @@ async fn test_append() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[tokio::test]
-async fn test_no_add_actions() -> Result<(), Box<dyn std::error::Error>> {
+async fn test_no_add_actions() -> KernelResult<()> {
     // setup tracing
     let _ = tracing_subscriber::fmt::try_init();
     // create a simple table: one int column named 'number'
@@ -164,7 +164,7 @@ async fn test_no_add_actions() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[tokio::test]
-async fn test_append_twice() -> Result<(), Box<dyn std::error::Error>> {
+async fn test_append_twice() -> KernelResult<()> {
     // setup tracing
     let _ = tracing_subscriber::fmt::try_init();
     // create a simple table: one int column named 'number'
@@ -357,7 +357,7 @@ async fn test_append_partitioned(
 }
 
 #[tokio::test]
-async fn test_append_invalid_schema() -> Result<(), Box<dyn std::error::Error>> {
+async fn test_append_invalid_schema() -> KernelResult<()> {
     // setup tracing
     let _ = tracing_subscriber::fmt::try_init();
     // create a simple table: one int column named 'number'
@@ -416,7 +416,7 @@ async fn test_append_invalid_schema() -> Result<(), Box<dyn std::error::Error>> 
 }
 
 #[tokio::test]
-async fn commit_rejects_add_missing_required_field() -> Result<(), Box<dyn std::error::Error>> {
+async fn commit_rejects_add_missing_required_field() -> KernelResult<()> {
     let _ = tracing_subscriber::fmt::try_init();
     let schema = get_simple_int_schema();
 
@@ -511,7 +511,7 @@ async fn commit_rejects_add_missing_required_field() -> Result<(), Box<dyn std::
 async fn commit_rejects_add_with_invalid_partition_keys(
     #[case] column_mapping_mode: Option<&str>,
     #[case] modifications: &[AddFilePartitionKeyModify<'_>],
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> KernelResult<()> {
     let _ = tracing_subscriber::fmt::try_init();
 
     let table_schema = schema_ref! {

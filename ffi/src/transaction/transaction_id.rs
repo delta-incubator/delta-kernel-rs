@@ -71,7 +71,7 @@ mod tests {
     use std::sync::Arc;
 
     use delta_kernel::schema::schema_ref;
-    use delta_kernel::{Result, Snapshot};
+    use delta_kernel::{KernelResult, Snapshot};
     use test_utils::setup_test_tables;
 
     use super::*;
@@ -84,7 +84,7 @@ mod tests {
 
     #[cfg(feature = "default-engine-base")]
     #[tokio::test]
-    async fn test_write_txn_actions() -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_write_txn_actions() -> KernelResult<()> {
         // create a simple table: one int column named 'number'
         let schema = schema_ref! { nullable "number": INTEGER };
 

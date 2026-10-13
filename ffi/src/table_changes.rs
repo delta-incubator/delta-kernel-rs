@@ -415,7 +415,7 @@ mod tests {
         storage: &DynObjectStore,
         version: u64,
         file: String,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> KernelResult<()> {
         let metadata = storage.head(&Path::from(file.as_ref())).await?;
         add_commit(
             table_root,
@@ -437,7 +437,7 @@ mod tests {
         storage: &DynObjectStore,
         version: u64,
         file: String,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> KernelResult<()> {
         let metadata = storage.head(&Path::from(file.as_ref())).await?;
         add_commit(
             table_root,
@@ -458,7 +458,7 @@ mod tests {
         storage: &DynObjectStore,
         file: String,
         batch: &RecordBatch,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> KernelResult<()> {
         storage
             .put(&Path::from(file), record_batch_to_bytes(batch).into())
             .await?;
@@ -533,7 +533,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_table_changes_getters() -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_table_changes_getters() -> KernelResult<()> {
         let storage = Arc::new(InMemory::new());
 
         let batch = generate_batch_with_id(1)?;
@@ -621,7 +621,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_table_changes_scan() -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_table_changes_scan() -> KernelResult<()> {
         let storage = Arc::new(InMemory::new());
 
         let batch = generate_batch_with_id(1)?;
@@ -678,7 +678,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_table_changes_scan_iterator() -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_table_changes_scan_iterator() -> KernelResult<()> {
         let storage = Arc::new(InMemory::new());
 
         let batch = generate_batch_with_id(1)?;
@@ -759,7 +759,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_table_changes_between_commits() -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_table_changes_between_commits() -> KernelResult<()> {
         let storage = Arc::new(InMemory::new());
 
         let batch = generate_batch_with_id(1)?;

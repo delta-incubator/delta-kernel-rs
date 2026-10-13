@@ -254,7 +254,7 @@ mod tests {
         schema: SchemaRef,
         partition_columns: &[&str],
         table_base_name: &str,
-    ) -> Result<(tempfile::TempDir, LocalTestTables), Box<dyn std::error::Error>> {
+    ) -> KernelResult<(tempfile::TempDir, LocalTestTables)> {
         let tmp_test_dir = tempdir()?;
         let tmp_dir_url = Url::from_directory_path(tmp_test_dir.path()).unwrap();
         let tables = setup_test_tables(
@@ -292,7 +292,7 @@ mod tests {
     fn create_arrow_ffi_from_json(
         schema: ArrowSchema,
         json_string: &str,
-    ) -> Result<ArrowFFIData, Box<dyn std::error::Error>> {
+    ) -> KernelResult<ArrowFFIData> {
         let cursor = std::io::Cursor::new(json_string.as_bytes());
         let mut reader = ReaderBuilder::new(schema.into()).build(cursor).unwrap();
         let batch = reader.next().unwrap().unwrap();
@@ -357,7 +357,7 @@ mod tests {
         file_size_bytes: u64,
         num_rows: i64,
         metadata_schema: ArrowSchema,
-    ) -> Result<ArrowFFIData, Box<dyn std::error::Error>> {
+    ) -> KernelResult<ArrowFFIData> {
         let current_time: i64 = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -375,7 +375,7 @@ mod tests {
         file_path: &str,
         batch: &RecordBatch,
         metadata_schema: ArrowSchema,
-    ) -> Result<ArrowFFIData, Box<dyn std::error::Error>> {
+    ) -> KernelResult<ArrowFFIData> {
         // WriterProperties can be used to set Parquet file options
         let props = WriterProperties::builder().build();
 
@@ -402,7 +402,7 @@ mod tests {
         file_path: &str,
         batch: &RecordBatch,
         metadata_schema: ArrowSchema,
-    ) -> Result<ArrowFFIData, Box<dyn std::error::Error>> {
+    ) -> KernelResult<ArrowFFIData> {
         let mut buf = Vec::new();
         let props = WriterProperties::builder().build();
         let mut writer = ArrowWriter::try_new(&mut buf, batch.schema(), Some(props))?;
@@ -617,7 +617,7 @@ mod tests {
         #[case] partitioned: bool,
         #[values(false, true)] roundtrip: bool,
         #[values(false, true)] physical_partition_keys: bool,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> KernelResult<()> {
         let schema = schema_ref! {
             nullable "number": INTEGER,
             nullable "part": INTEGER,
@@ -864,7 +864,7 @@ mod tests {
         miri,
         ignore = "local-filesystem commit calls `linkat`, unsupported under Miri"
     )]
-    async fn test_partitioned_append() -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_partitioned_append() -> KernelResult<()> {
         // Partition column `part` is listed last in the schema; the physical write schema must
         // exclude it (CM=none, partition columns are not materialized).
         let schema = schema_ref! {
@@ -1045,8 +1045,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_partitioned_write_context_rejects_unpartitioned_table(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_partitioned_write_context_rejects_unpartitioned_table() -> KernelResult<()> {
         let schema = schema_ref! { nullable "number": INTEGER };
         let tables = setup_test_tables(schema, &[], None, "test_unpartitioned").await?;
 
@@ -1093,7 +1092,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_visit_partition_values_surfaces_null() -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_visit_partition_values_surfaces_null() -> KernelResult<()> {
         // A null partition value must surface across the visitor as `is_null = true` with an
         // empty value slice (the documented C contract).
         let schema = schema_ref! {
@@ -1148,8 +1147,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_visit_partition_values_is_sorted_by_key() -> Result<(), Box<dyn std::error::Error>>
-    {
+    async fn test_visit_partition_values_is_sorted_by_key() -> KernelResult<()> {
         // Multiple partition columns must be visited in deterministic (sorted) key order,
         // regardless of insertion order or the underlying HashMap layout.
         let schema = schema_ref! {
@@ -1277,8 +1275,7 @@ mod tests {
     async fn setup_domain_metadata_table(
         name: &str,
         row_tracking: bool,
-    ) -> Result<(Url, Arc<DynObjectStore>, Handle<SharedExternEngine>), Box<dyn std::error::Error>>
-    {
+    ) -> KernelResult<(Url, Arc<DynObjectStore>, Handle<SharedExternEngine>)> {
         let schema = schema_ref! { nullable "id": INTEGER };
         let (store, _test_engine, table_location) = test_utils::engine_store_setup(name, None);
         let writer_features = if row_tracking {
@@ -1301,7 +1298,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_domain_metadata_add_and_remove() -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_domain_metadata_add_and_remove() -> KernelResult<()> {
         let (table_url, store, engine) = setup_domain_metadata_table("test_dm", false).await?;
         let table_path_str = table_url.as_str();
 
@@ -1381,8 +1378,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_domain_metadata_system_domain_rejected_at_commit(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_domain_metadata_system_domain_rejected_at_commit() -> KernelResult<()> {
         let (table_url, _store, engine) = setup_domain_metadata_table("test_dm_sys", false).await?;
         let table_path_str = table_url.as_str();
 
@@ -1421,8 +1417,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_row_tracking_high_water_mark_requires_row_tracking_feature(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_row_tracking_high_water_mark_requires_row_tracking_feature() -> KernelResult<()> {
         let (table_url, _store, engine) =
             setup_domain_metadata_table("test_row_tracking_hwm_feature", false).await?;
         let table_path = table_url.as_str();
@@ -1444,8 +1439,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_row_tracking_high_water_mark_rejects_duplicate(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_row_tracking_high_water_mark_rejects_duplicate() -> KernelResult<()> {
         let (table_url, _store, engine) =
             setup_domain_metadata_table("test_row_tracking_hwm_duplicate", true).await?;
         let table_path = table_url.as_str();
@@ -1469,7 +1463,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_row_tracking_high_water_mark_commit() -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_row_tracking_high_water_mark_commit() -> KernelResult<()> {
         let (table_url, store, engine) =
             setup_domain_metadata_table("test_row_tracking_hwm", true).await?;
         let table_path = table_url.as_str();
@@ -1497,8 +1491,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_row_tracking_high_water_mark_rejects_regression(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_row_tracking_high_water_mark_rejects_regression() -> KernelResult<()> {
         let (table_url, _store, engine) =
             setup_domain_metadata_table("test_row_tracking_hwm_regression", true).await?;
         let table_path = table_url.as_str();
@@ -1529,8 +1522,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_row_tracking_high_water_mark_with_add_files(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_row_tracking_high_water_mark_with_add_files() -> KernelResult<()> {
         let (table_url, store, engine) =
             setup_domain_metadata_table("test_row_tracking_hwm_with_adds", true).await?;
         let table_path = table_url.as_str();
@@ -1563,8 +1555,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_row_tracking_high_water_mark_rejects_value_below_added_files(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_row_tracking_high_water_mark_rejects_value_below_added_files() -> KernelResult<()>
+    {
         let (table_url, _store, engine) =
             setup_domain_metadata_table("test_row_tracking_hwm_below_adds", true).await?;
         let table_path = table_url.as_str();
@@ -1595,8 +1587,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_domain_metadata_duplicate_domain_rejected_at_commit(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_domain_metadata_duplicate_domain_rejected_at_commit() -> KernelResult<()> {
         let (table_url, _store, engine) = setup_domain_metadata_table("test_dm_dup", false).await?;
         let table_path_str = table_url.as_str();
 
@@ -1643,8 +1634,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_domain_metadata_rejected_without_feature(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_domain_metadata_rejected_without_feature() -> KernelResult<()> {
         let tmp_test_dir = tempdir()?;
         let tmp_dir_url = Url::from_directory_path(tmp_test_dir.path()).unwrap();
 
@@ -1700,7 +1690,7 @@ mod tests {
 
     #[cfg(feature = "delta-kernel-unity-catalog")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn test_transaction_with_uc_committer() -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_transaction_with_uc_committer() -> KernelResult<()> {
         use delta_kernel_ffi::{
             get_snapshot_builder, snapshot_builder_build, snapshot_builder_with_max_catalog_version,
         };
@@ -2120,7 +2110,7 @@ mod tests {
     #[tokio::test]
     async fn test_create_table_basic_preserves_data_change(
         #[values(false, true)] expected_data_change: bool,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> KernelResult<()> {
         let (store, _test_engine, table_url) =
             test_utils::engine_store_setup("test_create_table", None);
         let (table_path, engine, builder) = create_table_txn_builder(
@@ -2203,8 +2193,7 @@ mod tests {
 
     #[cfg(feature = "geo-type-in-dev")]
     #[tokio::test]
-    async fn test_create_table_rejects_geospatial_schema() -> Result<(), Box<dyn std::error::Error>>
-    {
+    async fn test_create_table_rejects_geospatial_schema() -> KernelResult<()> {
         let (store, _test_engine, table_url) =
             test_utils::engine_store_setup("test_create_table_rejects_geospatial_schema", None);
         let table_path = table_url.to_string();
@@ -2234,8 +2223,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_create_table_txn_with_domain_metadata() -> Result<(), Box<dyn std::error::Error>>
-    {
+    async fn test_create_table_txn_with_domain_metadata() -> KernelResult<()> {
         let (store, _test_engine, table_url) =
             test_utils::engine_store_setup("test_create_table_domain_metadata", None);
         let (_table_path, engine, builder) = create_table_txn_builder(
@@ -2417,8 +2405,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_update_table_builder_commit_info_setters(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_update_table_builder_commit_info_setters() -> KernelResult<()> {
         let (table_url, store, engine) =
             setup_domain_metadata_table("test_update_builder_setters", false).await?;
         let snapshot =
@@ -2589,8 +2576,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_table_builder_accepts_empty_operation_parameter_key(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    async fn update_table_builder_accepts_empty_operation_parameter_key() -> KernelResult<()> {
         let (table_url, _store, engine) =
             setup_domain_metadata_table("test_update_builder_empty_parameter", false).await?;
         let snapshot =
@@ -2626,8 +2612,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn commit_info_builder_setters_consume_inputs_on_schema_error(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    async fn commit_info_builder_setters_consume_inputs_on_schema_error() -> KernelResult<()> {
         let invalid_schema = EngineSchema {
             schema: std::ptr::null_mut(),
             visitor: visit_invalid_schema_not_struct,
@@ -2688,8 +2673,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn commit_info_transaction_setters_consume_inputs_on_schema_error(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    async fn commit_info_transaction_setters_consume_inputs_on_schema_error() -> KernelResult<()> {
         let invalid_schema = EngineSchema {
             schema: std::ptr::null_mut(),
             visitor: visit_invalid_schema_not_struct,
@@ -2762,7 +2746,7 @@ mod tests {
     async fn update_table_add_column_requires_exactly_one_field(
         #[case] field_count: usize,
         #[values(false, true)] nested: bool,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> KernelResult<()> {
         let table_name = format!("test_update_add_column_{field_count}_{nested}");
         let (table_url, _store, engine) = setup_domain_metadata_table(&table_name, false).await?;
         let snapshot =
@@ -2847,7 +2831,7 @@ mod tests {
         #[case] intent: InvalidUpdateIntent,
         #[case] expected: &str,
         #[values(false, true)] custom_committer: bool,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> KernelResult<()> {
         let table_name = format!("test_invalid_update_intent_{intent:?}").to_lowercase();
         let (table_url, _store, engine) = setup_domain_metadata_table(&table_name, false).await?;
         let snapshot =
@@ -2949,7 +2933,7 @@ mod tests {
     async fn update_table_blind_append_commits_expected_flag(
         #[values(false, true)] blind_append: bool,
         #[values(false, true)] custom_committer: bool,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> KernelResult<()> {
         let (table_url, store, engine) =
             setup_domain_metadata_table("test_update_blind_append", false).await?;
         let snapshot =
@@ -3005,8 +2989,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_table_build_error_drops_consumed_custom_committer(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    async fn update_table_build_error_drops_consumed_custom_committer() -> KernelResult<()> {
         let (table_url, _store, engine) =
             setup_domain_metadata_table("test_build_error_drops_committer", false).await?;
         let snapshot =
@@ -3184,7 +3167,7 @@ mod tests {
     async fn update_table_operation_variants_commit_expected_history_name(
         #[case] operation: KernelUpdateTableOperation,
         #[case] expected: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> KernelResult<()> {
         let (table_url, _store, engine) =
             setup_domain_metadata_table("test_update_builder_operation", false).await?;
         let snapshot =
@@ -3212,8 +3195,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn alter_table_operation_without_schema_change_is_rejected(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    async fn alter_table_operation_without_schema_change_is_rejected() -> KernelResult<()> {
         let (table_url, _store, engine) =
             setup_domain_metadata_table("test_alter_requires_schema_change", false).await?;
         let snapshot =
@@ -3240,8 +3222,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_table_commit_conflict_is_reported_through_ffi(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    async fn update_table_commit_conflict_is_reported_through_ffi() -> KernelResult<()> {
         let (table_url, _store, engine) =
             setup_domain_metadata_table("test_update_commit_conflict", false).await?;
         let snapshot =
@@ -3285,8 +3266,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_table_retryable_error_is_reported_through_ffi(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    async fn update_table_retryable_error_is_reported_through_ffi() -> KernelResult<()> {
         let (table_url, _store, engine) =
             setup_domain_metadata_table("test_update_retryable_error", false).await?;
         let snapshot =
@@ -3336,7 +3316,7 @@ mod tests {
     #[tokio::test]
     async fn test_with_root_manifest_file_commit(
         #[case] feature_enabled: bool,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> KernelResult<()> {
         let (store, _test_engine, table_url) =
             test_utils::engine_store_setup("test_root_manifest_file", None);
         let schema = schema_ref! { nullable "id": INTEGER };
@@ -3418,7 +3398,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_create_table_with_clustering_columns() -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_create_table_with_clustering_columns() -> KernelResult<()> {
         let (store, _test_engine, table_url) =
             test_utils::engine_store_setup("test_create_table", None);
         let (_table_path, engine, builder) = create_table_txn_builder(
@@ -3465,7 +3445,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_create_table_with_partition_columns() -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_create_table_with_partition_columns() -> KernelResult<()> {
         let (store, _test_engine, table_url) =
             test_utils::engine_store_setup("test_create_table", None);
         // Partitioning requires at least one non-partition column, so partition on `date`
@@ -3545,8 +3525,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_create_table_with_multiple_clustering_columns(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_create_table_with_multiple_clustering_columns() -> KernelResult<()> {
         let (store, _test_engine, table_url) =
             test_utils::engine_store_setup("test_create_table", None);
         let (_table_path, engine, builder) = create_table_txn_builder(
@@ -3584,8 +3563,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_create_table_data_layout_last_call_wins() -> Result<(), Box<dyn std::error::Error>>
-    {
+    async fn test_create_table_data_layout_last_call_wins() -> KernelResult<()> {
         let (store, _test_engine, table_url) =
             test_utils::engine_store_setup("test_create_table", None);
         let (_table_path, engine, builder) = create_table_txn_builder(
@@ -3666,7 +3644,7 @@ mod tests {
     /// CREATE TABLE: the committed transaction must expose a post-commit snapshot at version 0
     /// without re-listing the log.
     #[tokio::test]
-    async fn test_post_commit_snapshot_create_table() -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_post_commit_snapshot_create_table() -> KernelResult<()> {
         let (store, _test_engine, table_url) =
             test_utils::engine_store_setup("test_create_table", None);
         let (_table_path, engine, builder) = create_table_txn_builder(
@@ -3700,7 +3678,7 @@ mod tests {
     /// just-committed version. Also verifies that calling the accessor a second time yields an
     /// independent handle (Arc clone).
     #[tokio::test]
-    async fn test_post_commit_snapshot_existing_table() -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_post_commit_snapshot_existing_table() -> KernelResult<()> {
         let (store, _test_engine, table_url) =
             test_utils::engine_store_setup("test_post_commit_existing", None);
         // create_table_with_one_file commits v0 (create) and v1 (file add).
@@ -3924,7 +3902,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_create_table_already_exists() -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_create_table_already_exists() -> KernelResult<()> {
         let (store, _test_engine, table_url) =
             test_utils::engine_store_setup("test_create_table", None);
 
@@ -3982,8 +3960,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_create_table_build_with_empty_schema_succeeds(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_create_table_build_with_empty_schema_succeeds() -> KernelResult<()> {
         let (store, _test_engine, table_url) =
             test_utils::engine_store_setup("test_create_table", None);
         // CREATE TABLE with no columns is permitted by the Delta protocol; users may
@@ -4000,8 +3977,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_update_table_txn_builder_applies_nested_schema_changes(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_update_table_txn_builder_applies_nested_schema_changes() -> KernelResult<()> {
         let (store, kernel_engine, table_url) =
             test_utils::engine_store_setup("test_nested_schema_changes", None);
         let nested =
@@ -4085,7 +4061,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_create_table_with_custom_committer() -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_create_table_with_custom_committer() -> KernelResult<()> {
         let (store, _test_engine, table_url) =
             test_utils::engine_store_setup("test_create_table", None);
         let (table_path, engine, builder) = create_table_txn_builder(
@@ -4127,7 +4103,7 @@ mod tests {
     async fn create_table_with_one_file(
         store: &Arc<DynObjectStore>,
         table_url: &Url,
-    ) -> Result<(String, Handle<SharedExternEngine>), Box<dyn std::error::Error>> {
+    ) -> KernelResult<(String, Handle<SharedExternEngine>)> {
         let table_path = table_url.as_str();
         let fields = vec![
             StructField::nullable("number", DataType::INTEGER),
@@ -4201,14 +4177,14 @@ mod tests {
     fn assert_no_active_files(
         kernel_engine: &Arc<dyn delta_kernel::Engine>,
         table_path: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> KernelResult<()> {
         let snapshot =
             delta_kernel::snapshot::Snapshot::builder_for(delta_kernel::try_parse_uri(table_path)?)
                 .build(kernel_engine.as_ref())?;
         let scan = snapshot.scan_builder().build()?;
         let scan_meta: Vec<_> = scan
             .scan_metadata(kernel_engine.as_ref())?
-            .collect::<Result<_, _>>()?;
+            .collect::<KernelResult<_>>()?;
         let total_selected: usize = scan_meta
             .iter()
             .map(|m| {
@@ -4232,17 +4208,14 @@ mod tests {
     async fn setup_remove_files_test(
         store: &Arc<DynObjectStore>,
         table_url: &Url,
-    ) -> Result<
-        (
-            Box<dyn delta_kernel::EngineData>,
-            Vec<bool>,
-            Handle<ExclusiveUpdateTableTransaction>,
-            Handle<SharedExternEngine>,
-            Arc<dyn delta_kernel::Engine>,
-            String,
-        ),
-        Box<dyn std::error::Error>,
-    > {
+    ) -> KernelResult<(
+        Box<dyn delta_kernel::EngineData>,
+        Vec<bool>,
+        Handle<ExclusiveUpdateTableTransaction>,
+        Handle<SharedExternEngine>,
+        Arc<dyn delta_kernel::Engine>,
+        String,
+    )> {
         let (table_path, engine) = create_table_with_one_file(store, table_url).await?;
         let table_path_str = table_path.as_str();
 
@@ -4255,7 +4228,7 @@ mod tests {
         let scan = snapshot.scan_builder().build()?;
         let scan_meta_items: Vec<_> = scan
             .scan_metadata(kernel_engine.as_ref())?
-            .collect::<Result<_, _>>()?;
+            .collect::<KernelResult<_>>()?;
         assert_eq!(scan_meta_items.len(), 1);
 
         let scan_meta = scan_meta_items.into_iter().next().unwrap();
@@ -4275,8 +4248,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_remove_files_with_null_sv_commits_and_removes_all(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_remove_files_with_null_sv_commits_and_removes_all() -> KernelResult<()> {
         let (store, _test_engine, table_url) =
             test_utils::engine_store_setup("test_remove_files", None);
         let (data, sv, txn, engine, kernel_engine, table_path) =
@@ -4327,7 +4299,7 @@ mod tests {
 
     /// End-to-end FFI round trip for connector-authored deletion vector updates.
     #[tokio::test]
-    async fn test_dv_update_round_trip_via_ffi() -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_dv_update_round_trip_via_ffi() -> KernelResult<()> {
         use delta_kernel::actions::deletion_vector_writer::{
             KernelDeletionVector, StreamingDeletionVectorWriter,
         };
@@ -4479,7 +4451,7 @@ mod tests {
         let total: usize = scan_after
             .execute(kernel_engine.clone())?
             .map(|r| Ok::<_, delta_kernel::KernelError>(r?.len()))
-            .sum::<Result<_, _>>()?;
+            .sum::<KernelResult<_>>()?;
         assert_eq!(total, 2, "expected 2 surviving rows");
 
         unsafe {
@@ -4492,8 +4464,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_remove_files_with_non_empty_sv_exercises_from_raw_parts(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_remove_files_with_non_empty_sv_exercises_from_raw_parts() -> KernelResult<()> {
         // Exercises the from_raw_parts code path in the remove_files FFI wrapper by passing
         // a non-null selection vector pointer with non-zero length. The null-SV test always
         // passes a null pointer because scan_metadata for a single-file table returns an

@@ -356,7 +356,7 @@ impl Crc {
 /// Fails for non-`Complete` file stats: a degraded CRC has no well-defined on-disk shape.
 impl TryFrom<&Crc> for CrcRaw {
     type Error = KernelError;
-    fn try_from(crc: &Crc) -> Result<Self, Self::Error> {
+    fn try_from(crc: &Crc) -> KernelResult<Self> {
         crc.validate()?;
         let FileStatsState::Complete(stats) = &crc.file_stats_state else {
             return Err(KernelError::ChecksumWriteUnsupported(format!(

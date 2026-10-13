@@ -97,7 +97,7 @@ async fn test_checkpoint_stats_config_with_real_data(
     #[values(true, false)] struct1: bool,
     #[values(true, false)] json2: bool,
     #[values(true, false)] struct2: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> KernelResult<()> {
     let (store, table_root) = new_in_memory_store();
     let executor = Arc::new(TokioMultiThreadExecutor::new(
         tokio::runtime::Handle::current(),
@@ -220,7 +220,7 @@ async fn test_checkpoint_partitioned_with_real_data(
     #[values(true, false)] struct1: bool,
     #[values(true, false)] json2: bool,
     #[values(true, false)] struct2: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> KernelResult<()> {
     let (store, table_root) = new_in_memory_store();
     let executor = Arc::new(TokioMultiThreadExecutor::new(
         tokio::runtime::Handle::current(),
@@ -420,8 +420,7 @@ const COLUMN_MAPPING_SCHEMA: &str = r#"{"type":"struct","fields":[{"name":"id","
 /// is enabled. The checkpoint should contain `col-category-phys` (physical) not `category`
 /// (logical) as the field name inside `partitionValues_parsed`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_checkpoint_partition_values_parsed_with_column_mapping(
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn test_checkpoint_partition_values_parsed_with_column_mapping() -> KernelResult<()> {
     let (store, table_root) = new_in_memory_store();
     let executor = Arc::new(TokioMultiThreadExecutor::new(
         tokio::runtime::Handle::current(),
@@ -540,8 +539,8 @@ const WIDE_SCHEMA: &str = r#"{"type":"struct","fields":[{"name":"id","type":"lon
 /// pre-evolution columns, scanning with a predicate on a newly added column should
 /// not panic. The missing stats column should be treated as unknown (no data skipping).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_scan_schema_evolved_table_with_checkpoint_predicate_on_new_column(
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn test_scan_schema_evolved_table_with_checkpoint_predicate_on_new_column() -> KernelResult<()>
+{
     let (store, table_root) = new_in_memory_store();
     let executor = Arc::new(TokioMultiThreadExecutor::new(
         tokio::runtime::Handle::current(),

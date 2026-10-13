@@ -335,8 +335,7 @@ async fn commit_success_carries_table_type(#[case] catalog_managed: bool) -> Ker
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn commit_dv_update_reports_updated_file_count_not_batch_count(
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn commit_dv_update_reports_updated_file_count_not_batch_count() -> KernelResult<()> {
     // Three files get a new deletion vector in a single update_deletion_vectors call.
     // num_dv_updates must be the count of updated FILES (3), not the number of scan-metadata
     // batches they arrive in -- a single batch carrying all three would otherwise report 1.
@@ -384,8 +383,7 @@ async fn commit_dv_update_reports_updated_file_count_not_batch_count(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn commit_dv_update_accumulates_file_count_across_calls(
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn commit_dv_update_accumulates_file_count_across_calls() -> KernelResult<()> {
     // num_dv_updates must accumulate (`+=`) across multiple update_deletion_vectors calls on one
     // transaction: two calls updating one file each must report 2, not the last call's 1.
     let schema = schema_ref! {

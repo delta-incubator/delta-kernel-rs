@@ -185,7 +185,7 @@ where
             let record_batch = RecordBatch::try_new(arrow_schema.clone(), batch_columns)?;
             Ok(ArrowEngineData::new(record_batch))
         })
-        .collect::<Result<Vec<_>, _>>()
+        .collect::<KernelResult<Vec<_>>>()
 }
 
 /// Helper function to verify row tracking-related information in a commit.
@@ -1038,7 +1038,7 @@ impl RowTrackingTestCase {
 #[tokio::test]
 async fn test_read_row_commit_versions_use_add_action_defaults(
     #[case] test_case: RowTrackingTestCase,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> KernelResult<()> {
     let (_temp_dir, table_path, engine) = test_table_setup()?;
     let schema = schema_ref! { nullable "number": INTEGER };
     let table_url = Url::from_directory_path(&table_path)
@@ -1107,8 +1107,7 @@ async fn test_read_row_commit_versions_use_add_action_defaults(
 }
 
 #[tokio::test]
-async fn test_read_row_commit_versions_prefer_materialized_values(
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn test_read_row_commit_versions_prefer_materialized_values() -> KernelResult<()> {
     let tmp_dir = tempdir()?;
     let (_schema, table_url, engine, store) =
         setup_number_table(&tmp_dir, "test_read_materialized_row_commit_versions").await?;
@@ -1198,7 +1197,7 @@ async fn test_read_row_tracking_metadata_stable_across_deletion_vector_update(
     #[case] deleted_indexes: &[u64],
     #[values(MetadataColumnSpec::RowId, MetadataColumnSpec::RowCommitVersion)]
     metadata_column: MetadataColumnSpec,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> KernelResult<()> {
     let _ = tracing_subscriber::fmt::try_init();
     let tmp_dir = tempdir()?;
     let (schema, table_url, engine, store) = setup_number_table_with_features(

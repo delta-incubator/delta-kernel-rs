@@ -347,7 +347,7 @@ impl MetadataColumnSpec {
 impl FromStr for MetadataColumnSpec {
     type Err = KernelError;
 
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
+    fn from_str(s: &str) -> KernelResult<Self> {
         match s {
             "row_index" => Ok(Self::RowIndex),
             "row_id" => Ok(Self::RowId),

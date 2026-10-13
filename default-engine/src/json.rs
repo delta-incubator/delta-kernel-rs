@@ -709,7 +709,7 @@ mod tests {
     }
 
     #[test]
-    fn test_read_invalid_json() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_read_invalid_json() -> KernelResult<()> {
         let _ = tracing_subscriber::fmt().try_init();
         let (_temp_file1, file_url1) = make_invalid_named_temp();
         let (_temp_file2, file_url2) = make_invalid_named_temp();

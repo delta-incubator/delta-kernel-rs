@@ -212,7 +212,7 @@ pub async fn write_data_and_check_result_and_stats(
     schema: SchemaRef,
     engine: Arc<DefaultEngine<TokioBackgroundExecutor>>,
     expected_since_commit: u64,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> KernelResult<()> {
     let mut txn = test_utils::load_and_begin_transaction_with(
         table_url.clone(),
         engine.as_ref(),
@@ -282,7 +282,7 @@ pub fn set_table_properties(
     engine: &dyn Engine,
     current_version: Version,
     properties: &[(&str, &str)],
-) -> Result<Arc<Snapshot>, Box<dyn std::error::Error>> {
+) -> KernelResult<Arc<Snapshot>> {
     let v0_path = std::path::Path::new(table_path).join("_delta_log/00000000000000000000.json");
     let mut meta: serde_json::Value = std::fs::read_to_string(&v0_path)?
         .lines()
@@ -300,7 +300,7 @@ pub fn set_table_properties(
     let new_commit = std::path::Path::new(table_path)
         .join(format!("_delta_log/{:020}.json", current_version + 1));
     std::fs::write(&new_commit, serde_json::to_string(&meta)?)?;
-    Ok(Snapshot::builder_for(table_url.clone()).build(engine)?)
+    Snapshot::builder_for(table_url.clone()).build(engine)
 }
 
 /// Assert that the snapshot's column mapping mode matches the given `cm_mode` string,
@@ -377,15 +377,12 @@ pub async fn create_dv_table_with_files(
     schema: Arc<StructType>,
     partition_values: &[(&str, Option<&str>)],
     file_paths: &[&str],
-) -> Result<
-    (
-        Arc<DynObjectStore>,
-        Arc<dyn delta_kernel::Engine>,
-        Url,
-        Vec<String>,
-    ),
-    Box<dyn std::error::Error>,
-> {
+) -> KernelResult<(
+    Arc<DynObjectStore>,
+    Arc<dyn delta_kernel::Engine>,
+    Url,
+    Vec<String>,
+)> {
     let (store, engine, table_url) = engine_store_setup(table_name, None);
     let engine = Arc::new(engine);
     let partition_columns: Vec<_> = partition_values.iter().map(|(key, _)| *key).collect();
@@ -475,7 +472,9 @@ pub fn get_scan_files(
     engine: &dyn delta_kernel::Engine,
 ) -> KernelResult<Vec<FilteredEngineData>> {
     let scan = snapshot.scan_builder().build()?;
-    let all_scan_metadata: Vec<_> = scan.scan_metadata(engine)?.collect::<Result<Vec<_>, _>>()?;
+    let all_scan_metadata: Vec<_> = scan
+        .scan_metadata(engine)?
+        .collect::<KernelResult<Vec<_>>>()?;
 
     Ok(all_scan_metadata
         .into_iter()
@@ -489,7 +488,7 @@ pub async fn write_deletion_vector_to_store(
     write_context: &BoundWriteContext,
     dv: KernelDeletionVector,
     prefix: &str,
-) -> Result<DeletionVectorDescriptor, Box<dyn std::error::Error>> {
+) -> KernelResult<DeletionVectorDescriptor> {
     let dv_path = write_context.new_deletion_vector_path(String::from(prefix));
     let dv_object_path = Path::parse(dv_path.absolute_path()?.path())?;
 
@@ -507,12 +506,12 @@ pub async fn write_deletion_vector_to_store(
 pub fn create_dv_update_transaction(
     table_url: &Url,
     engine: &dyn Engine,
-) -> Result<Transaction, Box<dyn std::error::Error>> {
-    Ok(Snapshot::builder_for(table_url.clone())
+) -> KernelResult<Transaction> {
+    Snapshot::builder_for(table_url.clone())
         .build(engine)?
         .update_table(UpdateTableOperation::Delete, "test engine", true)
         .build(
             engine,
             Box::new(delta_kernel::committer::FileSystemCommitter::new()),
-        )?)
+        )
 }

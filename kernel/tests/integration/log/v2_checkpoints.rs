@@ -574,8 +574,7 @@ async fn test_v2_checkpoint_with_sidecars() -> KernelResult<()> {
 /// then read the raw checkpoint parquet to verify `stats_parsed`, `stats`, and
 /// `partitionValues_parsed` fields are correctly populated.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_v2_checkpoint_partition_values_parsed_and_stats(
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn test_v2_checkpoint_partition_values_parsed_and_stats() -> KernelResult<()> {
     let (_temp_dir, table_path, engine) = test_table_setup_mt()?;
     let table_url = delta_kernel::try_parse_uri(&table_path)?;
 
@@ -1148,7 +1147,7 @@ async fn create_partitioned_stats_table<E: TaskExecutor>(
     table_path: &str,
     table_url: &url::Url,
     engine: &Arc<test_utils::delta_kernel_default_engine::DefaultEngine<E>>,
-) -> Result<Arc<Snapshot>, Box<dyn std::error::Error>> {
+) -> KernelResult<Arc<Snapshot>> {
     let schema = schema_ref! {
         nullable "id": LONG,
         nullable "name": STRING,
@@ -1219,7 +1218,7 @@ async fn create_partitioned_stats_table<E: TaskExecutor>(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_snapshot_checkpoint_default_on_v2_table(
     #[case] spec: Option<CheckpointSpec>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> KernelResult<()> {
     let schema = get_simple_schema();
     let (_tmp_dir, table_path, engine) = test_table_setup_mt()?;
     let mut snapshot = create_table_and_load_snapshot(
@@ -1273,7 +1272,7 @@ async fn test_snapshot_checkpoint_default_on_v2_table(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_v2_sidecar_checkpoint_cross_feature(
     #[case] features: Vec<CrossFeature>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> KernelResult<()> {
     let (_temp_dir, table_path, engine) = test_table_setup_mt()?;
     let table_url = delta_kernel::try_parse_uri(&table_path)?;
 
@@ -1334,7 +1333,7 @@ async fn test_v2_sidecar_checkpoint_cross_feature(
 /// loads from that checkpoint with no trailing commits, and the scan returns the union
 /// of both write phases.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_v2_sidecar_consecutive_checkpoints() -> Result<(), Box<dyn std::error::Error>> {
+async fn test_v2_sidecar_consecutive_checkpoints() -> KernelResult<()> {
     let (_temp_dir, table_path, engine) = test_table_setup_mt()?;
     let table_url = delta_kernel::try_parse_uri(&table_path)?;
 
@@ -1433,8 +1432,7 @@ async fn test_v2_sidecar_consecutive_checkpoints() -> Result<(), Box<dyn std::er
 /// On a table with `deletionVectors` + `rowTracking` enabled, insert data, apply DV and write a
 /// V2 sidecar checkpoint. Scan back and make sure the DV and row-tracking columns are present.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_v2_sidecar_preserves_dv_and_row_tracking_on_add(
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn test_v2_sidecar_preserves_dv_and_row_tracking_on_add() -> KernelResult<()> {
     let (_temp_dir, table_path, engine) = test_table_setup_mt()?;
     let table_url = delta_kernel::try_parse_uri(&table_path)?;
     let schema = get_simple_schema();
@@ -1537,7 +1535,7 @@ async fn test_v2_sidecar_preserves_dv_and_row_tracking_on_add(
 /// across 60 batches of 1000 (so the splitter cuts cleanly at the 50k boundary) must
 /// produce exactly 2 sidecar files.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_v2_sidecar_default_hint_splits_at_50k() -> Result<(), Box<dyn std::error::Error>> {
+async fn test_v2_sidecar_default_hint_splits_at_50k() -> KernelResult<()> {
     const PER_COMMIT: usize = 1_000;
     const COMMITS: usize = 60;
 
@@ -1626,7 +1624,7 @@ async fn build_v2_table_with_feature<E: TaskExecutor>(
     table_url: &url::Url,
     engine: &Arc<test_utils::delta_kernel_default_engine::DefaultEngine<E>>,
     features: &[CrossFeature],
-) -> Result<Arc<Snapshot>, Box<dyn std::error::Error>> {
+) -> KernelResult<Arc<Snapshot>> {
     let schema = cross_feature_schema();
 
     let mut props: Vec<(&str, &str)> = vec![("delta.feature.v2Checkpoint", "supported")];
