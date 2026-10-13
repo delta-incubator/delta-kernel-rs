@@ -7,7 +7,7 @@ use quote::{quote, quote_spanned};
 use syn::ext::IdentExt;
 use syn::parse::{ParseStream, Parser};
 use syn::spanned::Spanned;
-use syn::{BinOp, Error, Expr, ExprCall, Ident, Lit, Path, Token, UnOp};
+use syn::{BinOp, Error, Expr, ExprCall, ExprLit, Ident, Lit, Path, Token, UnOp};
 
 /// Expands an expression preceded by the Kernel crate path supplied by the `macro_rules!` wrapper.
 /// Keeping that path's tokens preserves `$crate` hygiene when a caller renames the dependency.
@@ -94,8 +94,25 @@ fn emit_call(call: &ExprCall, kernel: &Path) -> syn::Result<TokenStream> {
     })?;
     let name = method.unraw().to_string();
     let args = &call.args;
+    if name == "col" {
+        let path = match args.first().filter(|_| args.len() == 1).map(ungroup) {
+            Some(Expr::Lit(ExprLit {
+                attrs,
+                lit: Lit::Str(path),
+                ..
+            })) if attrs.is_empty() => path,
+            _ => {
+                return Err(Error::new_spanned(
+                    call,
+                    "col() requires one string literal; \
+                     use path() for explicit or computed column segments",
+                ))
+            }
+        };
+        return Ok(quote! { #kernel::expressions::col!(#path) });
+    }
     let arity = match name.as_str() {
-        "col" | "lit" | "null" | "not" | "is_null" | "is_not_null" => Some(1),
+        "lit" | "null" | "not" | "is_null" | "is_not_null" => Some(1),
         "eq" | "ne" | "lt" | "le" | "gt" | "ge" | "distinct" => Some(2),
         "coalesce" | "and" | "or" | "path" => None,
         _ => {
@@ -105,24 +122,6 @@ fn emit_call(call: &ExprCall, kernel: &Path) -> syn::Result<TokenStream> {
             ))
         }
     };
-    if name == "col" {
-        if let Some(Expr::Lit(literal)) = args.first().filter(|_| args.len() == 1).map(ungroup) {
-            if let Lit::Str(path) = &literal.lit {
-                if !literal.attrs.is_empty() {
-                    return Err(Error::new_spanned(
-                        literal,
-                        "col() requires one string literal",
-                    ));
-                }
-                return Ok(quote! { #kernel::expressions::col!(#path) });
-            }
-        }
-        return Err(Error::new_spanned(
-            call,
-            "col() requires one string literal; \
-             use path() for explicit or computed column segments",
-        ));
-    }
     if let Some(arity) = arity {
         if args.len() != arity {
             return Err(Error::new_spanned(
@@ -160,7 +159,12 @@ fn emit_call(call: &ExprCall, kernel: &Path) -> syn::Result<TokenStream> {
                     "path() requires at least one column segment",
                 ));
             }
-            Ok(quote! { #kernel::expressions::Expression::column([#args]) })
+            let segments = args.iter();
+            Ok(quote! {
+                #kernel::expressions::Expression::column([
+                    #(::std::convert::Into::<::std::string::String>::into(#segments)),*
+                ])
+            })
         }
         _ => {
             let children = args
@@ -229,10 +233,6 @@ mod tests {
     #[case::extra_binary_arg(quote!(eq("a", 1, 2)), "requires 2 argument")]
     #[case::extra_null_predicate_arg(quote!(is_null("a", "b")), "requires 1 argument")]
     #[case::empty_path(quote!(path()), "at least one column segment")]
-    #[case::computed_col(quote!(col(COLUMN)), "col() requires one string literal")]
-    #[case::empty_col(quote!(col()), "col() requires one string literal")]
-    #[case::extra_col_arg(quote!(col("a", "b")), "col() requires one string literal")]
-    #[case::numeric_col(quote!(col(42)), "col() requires one string literal")]
     #[case::missing_literal_arg(quote!(lit()), "requires 1 argument")]
     #[case::extra_literal_arg(quote!(lit(1, 2)), "requires 1 argument")]
     #[case::computed_null_type(quote!(null(decimal(10, 2))), "DataType constant name")]
@@ -262,6 +262,22 @@ mod tests {
     ) {
         let error = expand(quote! { kernel; #input }).expect_err("expected invalid expr! syntax");
         assert!(error.to_string().contains(diagnostic), "{error}");
+    }
+
+    #[rstest]
+    #[case::computed(quote!(col(COLUMN)))]
+    #[case::empty(quote!(col()))]
+    #[case::extra_argument(quote!(col("a", "b")))]
+    #[case::numeric(quote!(col(42)))]
+    #[case::attribute(quote!(col(#[allow(unused)] "a")))]
+    fn invalid_col_arguments_include_path_hint(#[case] input: TokenStream) {
+        let error =
+            expand(quote! { kernel; #input }).expect_err("expected invalid col() arguments");
+        assert_eq!(
+            error.to_string(),
+            "col() requires one string literal; \
+             use path() for explicit or computed column segments",
+        );
     }
 
     #[rstest]

@@ -16,6 +16,7 @@ use delta_kernel_derive::pub_macro;
 /// `col` takes one string literal and follows [`col!`](crate::expressions::col) path rules.
 /// `col("a.b")` addresses nested fields. `path("a.b")` addresses one field named `a.b`, and
 /// `path("a.b", "c")` addresses its nested field `c`. `path` also accepts computed segment names.
+/// Segments can mix types implementing `Into<String>`, such as `&str` and `String`.
 /// `lit` and `path` arguments accept Rust expressions and are evaluated once, in order.
 ///
 /// Expression construction delegates to the existing builders without resolving types or
@@ -132,6 +133,11 @@ use delta_kernel_derive::pub_macro;
 /// ```compile_fail
 /// use delta_kernel::expressions::expr;
 /// let _ = expr!(path());
+/// ```
+///
+/// ```compile_fail,E0277
+/// use delta_kernel::expressions::expr;
+/// let _ = expr!(path("outer", 1));
 /// ```
 ///
 /// ```compile_fail
@@ -476,15 +482,20 @@ mod tests {
     }
 
     #[test]
-    fn path_segments_accept_owned_names_and_are_evaluated_once_in_order() {
+    fn path_segments_accept_mixed_string_types_and_are_evaluated_once_in_order() {
         let mut calls = 0;
         let mut next = || {
             calls += 1;
             format!("field.{calls}")
         };
-        let actual = expr!(path(next(), next(),));
+        let borrowed = String::from("borrowed");
+        let leaf = String::from("leaf");
+        let actual = expr!(path("outer", next(), &borrowed, next(), leaf,));
         assert_eq!(calls, 2);
-        assert_eq!(actual, Expression::column(["field.1", "field.2"]));
+        assert_eq!(
+            actual,
+            Expression::column(["outer", "field.1", "borrowed", "field.2", "leaf"]),
+        );
     }
 
     #[test]
