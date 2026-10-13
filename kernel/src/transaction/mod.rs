@@ -536,11 +536,12 @@ impl<S> Transaction<S> {
         self
     }
 
-    /// Include a SetTransaction (app_id and version) action for this transaction (with an optional
-    /// `last_updated` timestamp).
-    /// Note that each app_id can only appear once per transaction. That is, multiple app_ids with
-    /// different versions are disallowed in a single transaction. If a duplicate app_id is
-    /// included, the `commit` will fail (that is, we don't eagerly check app_id validity here).
+    /// Adds a [`SetTransaction`] action for `app_id` and `version`. Returns the updated
+    /// transaction.
+    ///
+    /// The action's `lastUpdated` uses this transaction's commit timestamp. Each application id may
+    /// occur only once per transaction, including ids added through the builder. Duplicates are not
+    /// checked here; [`Self::commit`] rejects them.
     pub fn with_transaction_id(mut self, app_id: String, version: i64) -> Self {
         let set_transaction = SetTransaction::new(app_id, version, Some(self.commit_timestamp));
         self.set_transactions.push(set_transaction);
