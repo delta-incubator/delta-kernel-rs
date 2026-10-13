@@ -970,8 +970,8 @@ impl Visit for TransactionCommitAttrs {
 pub(crate) const DOMAIN_METADATA_LOADED_SPAN: &str = "snap.get_domain_metadata";
 
 /// Emitted once per domain metadata load, whether served from the CRC cache (`from_cache`) or
-/// from a log replay. Covers connector-issued loads of user domains and kernel-internal loads of
-/// system (`delta.*`) domains such as clustering or row tracking.
+/// from a log replay. Covers connector-issued and kernel-internal loads of both user and system
+/// (`delta.*`) domains such as clustering or row tracking.
 #[derive(Debug, Clone)]
 pub struct DomainMetadataLoadSuccess {
     // === Set during span lifetime ===

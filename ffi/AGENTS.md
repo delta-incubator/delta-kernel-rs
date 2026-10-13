@@ -88,16 +88,13 @@ complete file stats). `visit_file_size_histogram` exposes the optional variable-
 the same file stats: it invokes one callback with borrowed `i64` slices for bin boundaries, file
 counts, and total bytes; callers must copy values they retain after the callback.
 
-Domain-metadata reads live in `ffi/src/domain_metadata.rs`: `get_domain_metadata` /
-`visit_domain_metadata` for user domains, and `visit_clustering_columns`, which reports one
-descriptor per clustering column -- logical name, physical name (what per-file stats are keyed on),
-and a type tag -- without exposing the guarded `delta.*` domain JSON directly. It returns
-`OptionalValue<usize>`: `None` means not clustered, `Some(0)` means clustered on no columns. The
-type tag reuses the `visit_expression_literal_null` encoding, with 255 for types that don't fit a
-compact tag (struct, array, map, variant, void, and geometry/geography).
-`get_clustering_domain_metadata` returns the complete clustering configuration through an allocator
-callback, preserving extension fields. It returns no value when the clustering feature or active
-domain is absent; generic domain APIs still exclude system domains.
+Domain-metadata reads live in `ffi/src/domain_metadata.rs`: `get_domain_metadata` reads a
+named user or system domain and preserves the complete configuration; `visit_domain_metadata`
+enumerates only user domains. `visit_clustering_columns` reports one descriptor per clustering
+column -- logical name, physical name (what per-file stats are keyed on), and a type tag.
+It returns `OptionalValue<usize>`: `None` means not clustered, `Some(0)` means clustered on no
+columns. The type tag reuses the `visit_expression_literal_null` encoding, with 255 for types
+that don't fit a compact tag (struct, array, map, variant, void, and geometry/geography).
 
 ## Commit Range Flow
 

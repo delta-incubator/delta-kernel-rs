@@ -15,12 +15,17 @@ pub const ROW_TRACKING_INITIAL_HIGH_WATER_MARK: i64 = -1;
 const _: [(); 1] = [(); (ROW_TRACKING_INITIAL_HIGH_WATER_MARK
     == delta_kernel::ROW_TRACKING_INITIAL_HIGH_WATER_MARK) as usize];
 
-/// Get the domain metadata as an optional string allocated by `AllocatedStringFn` for a specific
-/// domain in this snapshot
+/// Read the latest configuration of `domain`, including system-controlled `delta.*` domains.
+///
+/// Uses `engine` to load metadata and passes the unmodified configuration to `allocate_fn`.
+/// Returns the allocated pointer, or `None` without calling the allocator when the domain is
+/// absent or removed. Storage errors are returned through `ExternResult`.
 ///
 /// # Safety
 ///
-/// Caller is responsible for passing in a valid handle
+/// The snapshot and engine handles are borrowed and must remain valid for this call. `domain`
+/// must be a valid string slice. `allocate_fn` must copy any data it retains from its borrowed
+/// string slice; ownership of the returned allocation belongs to the caller.
 #[no_mangle]
 pub unsafe extern "C" fn get_domain_metadata(
     snapshot: Handle<SharedSnapshot>,
@@ -67,32 +72,6 @@ pub unsafe extern "C" fn snapshot_row_tracking_high_water_mark(
         .get_row_tracking_high_water_mark(engine_ref.engine().as_ref())
         .map(OptionalValue::from)
         .into_extern_result(&engine_ref)
-}
-
-/// Read the complete JSON configuration of the clustering domain in `snapshot` using `engine`.
-///
-/// Calls `allocate_fn` with the unmodified configuration, including fields not interpreted by
-/// Kernel. Returns its allocated pointer, or `None` without calling the allocator when the table
-/// has no clustering feature or active clustering domain. Storage errors are returned through
-/// `ExternResult`. The general domain-metadata APIs continue to exclude system domains.
-///
-/// # Safety
-///
-/// The snapshot and engine handles are borrowed and must remain valid for this call. The caller
-/// retains ownership of both handles. `allocate_fn` must copy any data it retains from its borrowed
-/// string slice; ownership of the returned allocation belongs to the caller.
-#[no_mangle]
-pub unsafe extern "C" fn get_clustering_domain_metadata(
-    snapshot: Handle<SharedSnapshot>,
-    engine: Handle<SharedExternEngine>,
-    allocate_fn: AllocateStringFn,
-) -> ExternResult<NullableCvoid> {
-    let snapshot = unsafe { snapshot.as_ref() };
-    let engine = unsafe { engine.as_ref() };
-    snapshot
-        .get_clustering_domain_metadata(engine.engine().as_ref())
-        .map(|config| config.and_then(|config| allocate_fn(kernel_string_slice!(config))))
-        .into_extern_result(&engine)
 }
 
 /// Signature of the callback invoked once per clustering column by
@@ -349,8 +328,8 @@ mod tests {
         assert_eq!(recover_string(res.unwrap()), "domain2_commit1");
 
         let domain3 = "delta.domain3";
-        let res = get_domain_metadata_helper(domain3);
-        assert_extern_result_error_with_message(res, FFIKernelError::GenericError, Some("Generic delta kernel error: User DomainMetadata are not allowed to use system-controlled 'delta.*' domain"));
+        let res = ok_or_panic(get_domain_metadata_helper(domain3));
+        assert_eq!(recover_string(res.unwrap()), "domain3_commit1");
 
         // Secondly, we visit the entire domain metadata
 
@@ -569,7 +548,7 @@ mod tests {
         false,
         Some(r#"{"clusteringColumns":[["id"]]}"#),
         vec![],
-        None
+        Some(r#"{"clusteringColumns":[["id"]]}"#)
     )]
     #[case::domain_absent(true, None, vec![], None)]
     #[case::empty_columns(
@@ -603,7 +582,7 @@ mod tests {
         None
     )]
     #[tokio::test]
-    async fn test_get_clustering_domain_metadata(
+    async fn test_get_domain_metadata_clustering(
         #[case] clustering_feature: bool,
         #[case] initial_config: Option<&str>,
         #[case] updates: Vec<serde_json::Value>,
@@ -616,9 +595,11 @@ mod tests {
             &updates,
         )
         .await;
+        let domain = "delta.clustering";
         let actual = ok_or_panic(unsafe {
-            get_clustering_domain_metadata(
+            get_domain_metadata(
                 snapshot.shallow_copy(),
+                kernel_string_slice!(domain),
                 engine.shallow_copy(),
                 allocate_str,
             )
@@ -629,42 +610,6 @@ mod tests {
             free_snapshot(snapshot);
             free_engine(engine);
         }
-    }
-
-    #[tokio::test]
-    async fn test_get_clustering_domain_metadata_user_facing_path_still_rejects() -> DeltaResult<()>
-    {
-        let table_root = "memory:///test_clustering_user_facing_rejected/";
-        let (engine, snapshot) = build_clustering_snapshot(
-            table_root,
-            true,
-            Some(r#"{"clusteringColumns":[["id"]]}"#),
-            &[],
-        )
-        .await;
-
-        let domain = "delta.clustering";
-        let rejected = unsafe {
-            get_domain_metadata(
-                snapshot.shallow_copy(),
-                kernel_string_slice!(domain),
-                engine.shallow_copy(),
-                allocate_str,
-            )
-        };
-        assert_extern_result_error_with_message(
-            rejected,
-            FFIKernelError::GenericError,
-            Some(
-                "Generic delta kernel error: User DomainMetadata are not allowed to use \
-                 system-controlled 'delta.*' domain",
-            ),
-        );
-
-        unsafe { free_snapshot(snapshot) }
-        unsafe { free_engine(engine) }
-
-        Ok(())
     }
 
     // Type tags mirror `visit_expression_literal_null`'s encoding.

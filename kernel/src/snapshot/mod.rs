@@ -12,7 +12,7 @@ use crate::action_reconciliation::calculate_transaction_expiration_timestamp;
 use crate::actions::set_transaction::SetTransactionScanner;
 #[cfg(feature = "adaptive-metadata-in-dev")]
 use crate::actions::visitors::SetTransactionMap;
-use crate::actions::{DomainMetadata, INTERNAL_DOMAIN_PREFIX};
+use crate::actions::DomainMetadata;
 use crate::checkpoint::{
     CheckpointSpec, CheckpointWriter, V2CheckpointConfig, DEFAULT_FILE_ACTIONS_PER_SIDECAR_HINT,
 };
@@ -637,8 +637,9 @@ impl Snapshot {
         SetTransactionScanner::get_all(self.log_segment(), engine)
     }
 
-    /// Fetch the domainMetadata for a specific domain in this snapshot. This returns the latest
-    /// configuration for the domain, or None if the domain does not exist.
+    /// Fetch the latest configuration for a user-controlled or system-controlled domain in this
+    /// snapshot. Returns `None` if the domain does not exist or was removed, and an error if
+    /// metadata cannot be loaded using `engine`.
     ///
     /// Note that this method performs log replay (fetches and processes metadata from storage).
     pub fn get_domain_metadata(
@@ -646,12 +647,6 @@ impl Snapshot {
         domain: &str,
         engine: &dyn Engine,
     ) -> DeltaResult<Option<String>> {
-        if domain.starts_with(INTERNAL_DOMAIN_PREFIX) {
-            return Err(KernelError::generic(
-                "User DomainMetadata are not allowed to use system-controlled 'delta.*' domain",
-            ));
-        }
-
         self.get_domain_metadata_internal(domain, engine)
     }
 
@@ -743,11 +738,6 @@ impl Snapshot {
     /// Returns `Ok(None)` when the `ClusteredTable` feature is absent on the protocol, or when
     /// the domain has no current entry. The JSON has the shape
     /// `{"clusteringColumns":[["col1"],["addr","city"], ...]}` with physical column names.
-    /// Additional fields are preserved without parsing or reserialization.
-    ///
-    /// Uses `engine` to load domain metadata when it is not cached. Returns an error if loading
-    /// domain metadata fails.
-    #[internal_api]
     pub(crate) fn get_clustering_domain_metadata(
         &self,
         engine: &dyn Engine,
@@ -859,8 +849,7 @@ impl Snapshot {
     /// in this snapshot.
     ///
     /// Returns the latest configuration for the domain, or `None` if the domain does not exist
-    /// (or was removed). Unlike [`Snapshot::get_domain_metadata`], this does not reject `delta.*`
-    /// domains.
+    /// or was removed.
     #[allow(unused)]
     #[internal_api]
     pub(crate) fn get_domain_metadata_internal(
@@ -1882,11 +1871,10 @@ mod tests {
             snapshot.get_domain_metadata("domain3", &engine)?,
             Some("domain3_commit0".to_string())
         );
-        let err = snapshot
-            .get_domain_metadata("delta.domain3", &engine)
-            .unwrap_err();
-        assert!(matches!(err, KernelError::Generic(msg) if
-                msg == "User DomainMetadata are not allowed to use system-controlled 'delta.*' domain"));
+        assert_eq!(
+            snapshot.get_domain_metadata("delta.domain3", &engine)?,
+            Some("domain3_commit1".to_string())
+        );
 
         // Test get_domain_metadata_internal
         assert_eq!(

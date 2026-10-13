@@ -181,8 +181,8 @@ directly: ALWAYS use the visitor pattern (`visit_rows` with typed `GetData` acce
   `SnapshotRef` directly. Do NOT use `match` + `panic!` for either: both helpers provide a clear
   error message on failure. Available under `#[cfg(test)]` and the `test-utils` feature.
 - **Prefer snapshot/public API assertions over reading raw commit JSON.** Only read raw
-  commit JSON when the data is inaccessible via public API (e.g., system domain metadata
-  is blocked by `get_domain_metadata`). For commit JSON reads, use `read_actions_from_commit`
+  commit JSON when the data is inaccessible via public APIs. For commit JSON reads, use
+  `read_actions_from_commit`
   from `test_utils`: do NOT write local helpers that duplicate this.
 - **`add_commit` and table setup in tests:** `add_commit` takes a `table_root` string and
   resolves it to an absolute object-store path. The `table_root` must be a proper URL string

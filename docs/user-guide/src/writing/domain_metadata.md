@@ -129,11 +129,10 @@ match config {
 # }
 ```
 
-> [!WARNING]
-> `get_domain_metadata()` rejects domain names that start with `delta.` and
-> returns an error. The `delta.*` namespace is reserved for Kernel's internal
-> use (row tracking, clustering). You can only read user-defined domains
-> through this API.
+> [!NOTE]
+> `get_domain_metadata()` reads both user-defined and system-controlled domains,
+> including `delta.clustering`. You can't write or remove `delta.*` domains
+> through the public API.
 
 ## Constraints and validation
 
@@ -146,8 +145,8 @@ apply:
   the commit fails with an error.
 
 - **Reserved prefix.** Domain names starting with `delta.` are reserved for
-  Kernel's internal use (e.g., clustering metadata). Attempting to read, write,
-  or remove a `delta.` domain through the public API returns an error.
+  Kernel's internal use (e.g., clustering metadata). Attempting to write or
+  remove a `delta.` domain through the public API returns an error.
 
 - **Feature requirement.** Domain metadata operations require the
   `domainMetadata` writer feature to be enabled on the table (writer version 7).
