@@ -241,7 +241,7 @@ impl<T: ExternEngine + ?Sized> AllocateError for &T {
     }
 }
 
-/// Converts a [Result] into an [ExternResult], using the engine's error allocator.
+/// Converts a [`KernelResult`] into an [`ExternResult`], using the engine's error allocator.
 ///
 /// # Safety
 ///
