@@ -1135,13 +1135,26 @@ impl Snapshot {
         if let Some(resolved) = self.last_manifest_commit.get() {
             return Ok(resolved.clone());
         }
-        let resolved = match &self.log_segment.listed.latest_commit_file {
-            Some(commit_file_meta) => commit_file_meta.read_last_manifest_commit(engine)?,
-            None => return Err(KernelError::MissingVersion(self.version())),
-        };
+        Ok(self.read_ict_and_last_manifest_commit(engine)?.1)
+    }
+
+    /// Reads the In-Commit Timestamp and `lastManifestCommit` from this version's commit file,
+    /// caching the `lastManifestCommit`.
+    #[cfg(feature = "adaptive-metadata-in-dev")]
+    fn read_ict_and_last_manifest_commit(
+        &self,
+        engine: &dyn Engine,
+    ) -> KernelResult<(i64, Option<LastManifestCommit>)> {
+        let (in_commit_timestamp, last_manifest_commit) =
+            match &self.log_segment.listed.latest_commit_file {
+                Some(commit_file_meta) => {
+                    commit_file_meta.read_ict_and_last_manifest_commit(engine)?
+                }
+                None => return Err(KernelError::MissingVersion(self.version())),
+            };
         // A concurrent caller may win the race to fill the cell; both read the same file.
-        let _ = self.last_manifest_commit.set(resolved.clone());
-        Ok(resolved)
+        let _ = self.last_manifest_commit.set(last_manifest_commit.clone());
+        Ok((in_commit_timestamp, last_manifest_commit))
     }
 
     /// Get the timestamp for this snapshot's version, in milliseconds since the Unix epoch.
@@ -1398,20 +1411,23 @@ impl Snapshot {
             span.record("root", "checkpoint");
             if checkpoint_version == end {
                 // A checkpoint carries no ICT or lastManifestCommit (it has no commitInfo). Since
-                // there's no tail delta to carry them either, we defer to `get_in_commit_timestamp`
-                // and `last_manifest_commit`, which read the commit at the checkpoint version
-                // and return None when their feature is disabled, or error when it is enabled but
-                // unreadable.
+                // there's no tail delta to carry them either, read them from the commit at the
+                // checkpoint version. adaptiveMetadata requires ICT, so one read yields both.
                 let mut crc = log_segment
                     .build_crc_from_checkpoint(engine)?
                     .ok_or_else(|| unresolved_crc("checkpoint is missing protocol or metadata"))?;
-                // TODO: both calls read this version's commit file; read commitInfo once for ICT
-                //       and lastManifestCommit.
-                crc.in_commit_timestamp_opt = self.get_in_commit_timestamp(engine)?;
                 #[cfg(feature = "adaptive-metadata-in-dev")]
+                if self
+                    .table_configuration()
+                    .is_feature_enabled(&TableFeature::AdaptiveMetadataPreview)
                 {
-                    crc.last_manifest_commit_opt = self.last_manifest_commit(engine)?;
+                    let (in_commit_timestamp, last_manifest_commit) =
+                        self.read_ict_and_last_manifest_commit(engine)?;
+                    crc.in_commit_timestamp_opt = Some(in_commit_timestamp);
+                    crc.last_manifest_commit_opt = last_manifest_commit;
+                    return Ok(Arc::new(crc));
                 }
+                crc.in_commit_timestamp_opt = self.get_in_commit_timestamp(engine)?;
                 return Ok(Arc::new(crc));
             }
             // Replay the tail commits first: a non-incremental tail dooms file stats no matter
