@@ -682,6 +682,8 @@ pub(crate) mod tests {
     use crate::actions::{MAX_VALUES, MIN_VALUES};
     use crate::expressions::{col, column_name, lit, Predicate as Pred};
     #[cfg(feature = "geo-type-in-dev")]
+    use crate::scan::build_stats_output_schemas;
+    #[cfg(feature = "geo-type-in-dev")]
     use crate::schema::GeometryType;
     use crate::schema::{schema, schema_ref, ColumnMetadataKey, MetadataValue};
     use crate::table_features::TableFeature;
@@ -1718,7 +1720,7 @@ pub(crate) mod tests {
         }
         let config = builder.build();
         let stats = stats.with_geometry_min_max_stats(geometry_min_max);
-        let output = crate::scan::build_stats_output_schemas(&config, &stats)
+        let output = build_stats_output_schemas(&config, &stats)
             .unwrap()
             .unwrap();
         let state = StateInfo::try_new(

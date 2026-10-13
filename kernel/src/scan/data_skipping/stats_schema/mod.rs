@@ -58,7 +58,10 @@ use crate::KernelResult;
 ///   column contains only null values, there are no non-null values to aggregate, so the column has
 ///   no entry in `minValues`/`maxValues`. The `nullCount` entry is still present and equals
 ///   `numRecords`.
-/// - Geometry `minValues`/`maxValues`: bounding-box corner points, not ordered Geometry values.
+/// - Geometry `minValues`/`maxValues`: the lower-left `(min_x, min_y)` and upper-right `(max_x,
+///   max_y)` corner points, respectively, of the column's axis-aligned 2D bounding rectangle for
+///   the file, expressed in the column's CRS. These coordinate bounds do not define scalar ordering
+///   for Geometry values.
 /// - String min/max values must be truncated to a prefix no longer than 32 characters. For min
 ///   values, simple prefix truncation is valid (the truncated value is always <= the original). For
 ///   max values, a tie-breaker character must be appended after truncation to ensure the result is
@@ -926,15 +929,12 @@ mod tests {
     ) {
         let geometry = DataType::from(GeometryType::try_new("EPSG:4326").unwrap());
         let nested_geometry = DataType::from(GeometryType::try_new("EPSG:3857").unwrap());
-        let geography =
-            GeographyType::try_new("EPSG:4326", EdgeInterpolationAlgorithm::Spherical).unwrap();
         let file_schema = schema! {
             not_null "id": LONG,
             not_null "g": (geometry.clone()),
             nullable "v": unshredded_variant(),
             not_null "nested": {
                 not_null "g": (nested_geometry.clone()),
-                nullable "geography": (geography),
             },
         };
         let config = StatsConfig {
@@ -949,7 +949,6 @@ mod tests {
             nullable "v": LONG,
             nullable "nested": {
                 nullable "g": LONG,
-                nullable "geography": LONG,
             },
         };
         let mut min_max = vec![StructField::nullable("id", DataType::LONG)];
@@ -968,6 +967,37 @@ mod tests {
         assert_eq!(
             actual,
             expected_stats(null_count, StructType::try_new(min_max).unwrap())
+        );
+    }
+
+    #[cfg(feature = "geo-type-in-dev")]
+    #[rstest]
+    fn geometry_min_max_does_not_produce_geography_stat(
+        #[values(false, true)] geometry_min_max: bool,
+        #[values(false, true)] variant_min_max: bool,
+    ) {
+        let geography =
+            GeographyType::try_new("EPSG:4326", EdgeInterpolationAlgorithm::Spherical).unwrap();
+        let file_schema = schema! {
+            nullable "geography": (geography.clone()),
+            nullable "nested": { nullable "geography": (geography) },
+        };
+        let config = StatsConfig {
+            geometry_min_max,
+            variant_min_max,
+            ..Default::default()
+        };
+        let actual = expected_stats_schema(&file_schema, &config, None, None).unwrap();
+        assert_eq!(
+            actual,
+            schema! {
+                nullable NUM_RECORDS: LONG,
+                nullable NULL_COUNT: {
+                    nullable "geography": LONG,
+                    nullable "nested": { nullable "geography": LONG },
+                },
+                nullable TIGHT_BOUNDS: BOOLEAN,
+            }
         );
     }
 
