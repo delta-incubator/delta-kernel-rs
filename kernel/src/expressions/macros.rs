@@ -2,10 +2,10 @@ use delta_kernel_derive::pub_macro;
 
 /// Builds an [`Expression`](crate::expressions::Expression) from constructors and comparisons.
 ///
-/// Numeric and boolean literals can be written directly. A bare string literal names one exact
-/// column: `"a.b"` addresses a field whose name contains a dot. Use `lit("value")` for string
-/// values. Comparisons support `<`, `<=`, `>`, `>=`, `==`, and `!=`, with parentheses for grouping.
-/// The equivalent builders `lt`, `le`, `gt`, `ge`, `eq`, and `ne` remain available.
+/// Numeric, boolean, and string literals can be written directly. Use `col("name")` or
+/// `path("name")` for column references. Parentheses can be used for grouping.
+/// Prefer infix comparisons (`<`, `<=`, `>`, `>=`, `==`, `!=`). The equivalent constructor forms
+/// (`lt`, `le`, `gt`, `ge`, `eq`, `ne`) are also supported.
 ///
 /// Also supports `lit(value)`, typed NULLs such as `null(LONG)`, `col("a.b")`, explicit column
 /// segments such as `path("a.b", "c")`, `coalesce`, `and`, `or`, `not`, `is_null`, `is_not_null`,
@@ -14,8 +14,9 @@ use delta_kernel_derive::pub_macro;
 /// Literals retain their Rust type: `1` is INTEGER and `1_i64` is LONG.
 /// `null` takes a [`DataType`](crate::schema::DataType) associated constant name, such as `LONG`.
 /// `col` takes one string literal and follows [`col!`](crate::expressions::col) path rules.
-/// `col("a.b")` addresses nested fields. Use `path` for multiple explicit segments or computed
-/// names. `lit` and `path` arguments accept Rust expressions and are evaluated once, in order.
+/// `col("a.b")` addresses nested fields. `path("a.b")` addresses one field named `a.b`, and
+/// `path("a.b", "c")` addresses its nested field `c`. `path` also accepts computed segment names.
+/// `lit` and `path` arguments accept Rust expressions and are evaluated once, in order.
 ///
 /// Expression construction delegates to the existing builders without resolving types or
 /// evaluating rows. Other Rust expressions must appear inside `lit` or `path` arguments.
@@ -29,8 +30,8 @@ use delta_kernel_derive::pub_macro;
 ///
 /// assert_eq!(
 ///     expr!(and(
-///         "status" == lit("active"),
-///         (coalesce("size", 0_i64) <= 100_i64),
+///         col("status") == "active",
+///         (coalesce(col("size"), 0_i64) <= 100_i64),
 ///     )),
 ///     Expression::from_pred(Predicate::and(
 ///         Expression::column(["status"]).eq(lit("active")),
@@ -66,7 +67,7 @@ use delta_kernel_derive::pub_macro;
 ///     Expression::coalesce([Expression::column(["a.b"]), null_lit(DataType::LONG)]),
 /// );
 /// assert_eq!(
-///     kernel_expr!("a.b" == null(LONG)),
+///     kernel_expr!(path("a.b") == null(LONG)),
 ///     Expression::from_pred(Expression::column(["a.b"]).eq(null_lit(DataType::LONG))),
 /// );
 /// ```
@@ -156,33 +157,33 @@ use delta_kernel_derive::pub_macro;
 ///
 /// ```compile_fail,E0277
 /// use delta_kernel::expressions::expr;
-/// let _ = expr!("size" > 1_u64);
+/// let _ = expr!(col("size") > 1_u64);
 /// ```
 ///
 /// ```compile_fail
 /// use delta_kernel::expressions::expr;
-/// let _ = expr!("size" + 1);
+/// let _ = expr!(col("size") + 1);
 /// ```
 ///
 /// ```compile_fail
 /// use delta_kernel::expressions::expr;
-/// let _ = expr!("size" = 1);
+/// let _ = expr!(col("size") = 1);
 /// ```
 ///
 /// ```compile_fail
 /// use delta_kernel::expressions::expr;
-/// let _ = expr!(0 < "size" < 100);
+/// let _ = expr!(0 < col("size") < 100);
 /// ```
 ///
 /// ```compile_fail
 /// use delta_kernel::expressions::expr;
 /// let size = 1_i64;
-/// let _ = expr!("size" >= size);
+/// let _ = expr!(col("size") >= size);
 /// ```
 ///
 /// ```compile_fail
 /// use delta_kernel::expressions::expr;
-/// let _ = expr!("size" > unknown_predicate("other"));
+/// let _ = expr!(col("size") > unknown_predicate(col("other")));
 /// ```
 #[pub_macro]
 macro_rules! expr {
@@ -230,12 +231,12 @@ mod tests {
     #[test]
     fn infix_comparisons_mix_with_builders_and_grouping() {
         let actual = expr!(and(
-            is_not_null("path"),
+            is_not_null(col("path")),
             not(or(
-                distinct("deleted", false),
-                ((coalesce("size", coalesce("fallback_size", 0_i64))) <= (15_i64)),
+                distinct(col("deleted"), false),
+                ((coalesce(col("size"), coalesce(col("fallback_size"), 0_i64))) <= (15_i64)),
             )),
-            eq((col("nested.status") == lit("active")), true),
+            eq((col("nested.status") == "active"), true),
         ));
         let expected = Expression::from_pred(Predicate::and_from([
             col!("path").is_not_null(),
@@ -253,12 +254,12 @@ mod tests {
     }
 
     #[rstest]
-    #[case::lt(expr!(7_i64 < "right"), BinaryPredicateOp::LessThan, false)]
-    #[case::gt(expr!(7_i64 > "right"), BinaryPredicateOp::GreaterThan, false)]
-    #[case::eq(expr!(7_i64 == "right"), BinaryPredicateOp::Equal, false)]
-    #[case::le(expr!(7_i64 <= "right"), BinaryPredicateOp::GreaterThan, true)]
-    #[case::ge(expr!(7_i64 >= "right"), BinaryPredicateOp::LessThan, true)]
-    #[case::ne(expr!(7_i64 != "right"), BinaryPredicateOp::Equal, true)]
+    #[case::lt(expr!(7_i64 < col("right")), BinaryPredicateOp::LessThan, false)]
+    #[case::gt(expr!(7_i64 > col("right")), BinaryPredicateOp::GreaterThan, false)]
+    #[case::eq(expr!(7_i64 == col("right")), BinaryPredicateOp::Equal, false)]
+    #[case::le(expr!(7_i64 <= col("right")), BinaryPredicateOp::GreaterThan, true)]
+    #[case::ge(expr!(7_i64 >= col("right")), BinaryPredicateOp::LessThan, true)]
+    #[case::ne(expr!(7_i64 != col("right")), BinaryPredicateOp::Equal, true)]
     fn comparisons_preserve_literal_left_operands(
         #[case] actual: Expression,
         #[case] op: BinaryPredicateOp,
@@ -275,12 +276,15 @@ mod tests {
 
     #[rstest]
     #[case::columns(
-        expr!("a.b" == "c.d"),
+        expr!(path("a.b") == path("c.d")),
         Expression::column(["a.b"]), Expression::column(["c.d"]),
     )]
-    #[case::string_values(expr!(lit("a.b") == lit("c.d")), lit("a.b"), lit("c.d"))]
-    #[case::column_and_string(expr!("a.b" == lit("c.d")), Expression::column(["a.b"]), lit("c.d"))]
-    fn quoted_columns_and_string_values_remain_distinct(
+    #[case::nested_columns(expr!(col("a.b") == col("c.d")), col!("a.b"), col!("c.d"))]
+    #[case::string_values(expr!("a.b" == "c.d"), lit("a.b"), lit("c.d"))]
+    #[case::wrapped_string_values(expr!(lit("a.b") == lit("c.d")), lit("a.b"), lit("c.d"))]
+    #[case::column_and_string(expr!(path("a.b") == "c.d"), Expression::column(["a.b"]), lit("c.d"))]
+    #[case::string_and_column(expr!("a.b" == path("c.d")), lit("a.b"), Expression::column(["c.d"]))]
+    fn explicit_columns_and_string_values_remain_distinct(
         #[case] actual: Expression,
         #[case] left: Expression,
         #[case] right: Expression,
@@ -323,15 +327,19 @@ mod tests {
         ])),
     )]
     #[case::bare_coalesce(
-        expr!(coalesce("a.b", -1_i64,)),
+        expr!(coalesce(path("a.b"), -1_i64,)),
         Expression::coalesce([Expression::column(["a.b"]), lit(-1_i64)]),
     )]
+    #[case::string_coalesce(
+        expr!(coalesce(col("status"), "active")),
+        Expression::coalesce([col!("status"), lit("active")]),
+    )]
     #[case::bare_and(
-        expr!(and(true, "a",)),
+        expr!(and(true, col("a"),)),
         Expression::from_pred(Predicate::and(Predicate::TRUE, Predicate::column(["a"]))),
     )]
     #[case::bare_or(
-        expr!(or(false, "a",)),
+        expr!(or(false, col("a"),)),
         Expression::from_pred(Predicate::or(Predicate::FALSE, Predicate::column(["a"]))),
     )]
     fn variadic_calls_preserve_operands_and_junction_identities(
@@ -344,11 +352,10 @@ mod tests {
     #[rstest]
     #[case::nested(expr!(col("a.b")), &["a", "b"])]
     #[case::literal_dot(expr!(path("a.b")), &["a.b"])]
-    #[case::quoted_dot(expr!("a.b"), &["a.b"])]
-    #[case::quoted_space(expr!("column with spaces"), &["column with spaces"])]
-    #[case::quoted_case(expr!("MiXeD"), &["MiXeD"])]
-    #[case::quoted_escape(expr!("a\"b\\c"), &["a\"b\\c"])]
-    #[case::raw_quoted(expr!(r#"a"b\c"#), &["a\"b\\c"])]
+    #[case::literal_space(expr!(path("column with spaces")), &["column with spaces"])]
+    #[case::literal_case(expr!(path("MiXeD")), &["MiXeD"])]
+    #[case::literal_escape(expr!(path("a\"b\\c")), &["a\"b\\c"])]
+    #[case::raw_literal(expr!(path(r#"a"b\c"#)), &["a\"b\\c"])]
     #[case::explicit_segments(expr!(path("outer", "inner.with.dot", "leaf")),
         &["outer", "inner.with.dot", "leaf"])]
     fn column_paths_distinguish_literal_dots_from_nested_fields(
@@ -366,12 +373,12 @@ mod tests {
     #[case::le(expr!(le(col("left"), lit(7_i64))), BinaryPredicateOp::GreaterThan, true)]
     #[case::ge(expr!(ge(col("left"), lit(7_i64))), BinaryPredicateOp::LessThan, true)]
     #[case::ne(expr!(ne(col("left"), lit(7_i64))), BinaryPredicateOp::Equal, true)]
-    #[case::infix_lt(expr!("left" < 7_i64), BinaryPredicateOp::LessThan, false)]
-    #[case::infix_gt(expr!("left" > 7_i64), BinaryPredicateOp::GreaterThan, false)]
-    #[case::infix_eq(expr!("left" == 7_i64), BinaryPredicateOp::Equal, false)]
-    #[case::infix_le(expr!("left" <= 7_i64), BinaryPredicateOp::GreaterThan, true)]
-    #[case::infix_ge(expr!("left" >= 7_i64), BinaryPredicateOp::LessThan, true)]
-    #[case::infix_ne(expr!("left" != 7_i64), BinaryPredicateOp::Equal, true)]
+    #[case::infix_lt(expr!(col("left") < 7_i64), BinaryPredicateOp::LessThan, false)]
+    #[case::infix_gt(expr!(col("left") > 7_i64), BinaryPredicateOp::GreaterThan, false)]
+    #[case::infix_eq(expr!(col("left") == 7_i64), BinaryPredicateOp::Equal, false)]
+    #[case::infix_le(expr!(col("left") <= 7_i64), BinaryPredicateOp::GreaterThan, true)]
+    #[case::infix_ge(expr!(col("left") >= 7_i64), BinaryPredicateOp::LessThan, true)]
+    #[case::infix_ne(expr!(col("left") != 7_i64), BinaryPredicateOp::Equal, true)]
     fn comparisons_preserve_operators_operand_order_and_negation(
         #[case] actual: Expression,
         #[case] op: BinaryPredicateOp,
@@ -430,6 +437,15 @@ mod tests {
     #[case::bare_float(expr!(1.5_f32), Scalar::Float(1.5))]
     #[case::bare_double(expr!(-2.5), Scalar::Double(-2.5))]
     #[case::bare_suffixed_double(expr!(-2.5_f64), Scalar::Double(-2.5))]
+    #[case::bare_string(expr!("active"), Scalar::String("active".into()))]
+    #[case::bare_empty_string(expr!(""), Scalar::String(String::new()))]
+    #[case::bare_dotted_string(expr!("a.b"), Scalar::String("a.b".into()))]
+    #[case::bare_string_with_spaces(
+        expr!("column with spaces"), Scalar::String("column with spaces".into()),
+    )]
+    #[case::bare_escaped_string(expr!("a\0b\n\"c\\d"), Scalar::String("a\0b\n\"c\\d".into()))]
+    #[case::bare_raw_string(expr!(r#"a"b\c"#), Scalar::String("a\"b\\c".into()))]
+    #[case::bare_unicode_string(expr!("café"), Scalar::String("café".into()))]
     fn literals_preserve_exact_scalar_variants(
         #[case] actual: Expression,
         #[case] expected: Scalar,
@@ -529,10 +545,11 @@ mod tests {
             };
         }
         assert_eq!(
-            forward!("size" >= 1_i64),
+            forward!(col("size") >= 1_i64),
             Expression::from_pred(col!("size").ge(lit(1_i64)))
         );
         assert_eq!(forward!(-7), lit(-7));
+        assert_eq!(forward!("active"), lit("active"));
     }
 
     #[test]
@@ -556,7 +573,7 @@ mod tests {
         assert_eq!(forward_null!(LONG), null_lit(DataType::LONG));
         assert_eq!(forward_negative!(7_i64), lit(-7_i64));
         assert_eq!(
-            expr!(r#gt("a", 7_i64)),
+            expr!(r#gt(col("a"), 7_i64)),
             Expression::from_pred(col!("a").gt(lit(7_i64)))
         );
     }
@@ -581,7 +598,7 @@ mod tests {
                 ]),
             );
             assert_eq!(
-                crate::expressions::expr!(coalesce("a.b", 0_i64) < 1_i64),
+                crate::expressions::expr!(coalesce(path("a.b"), 0_i64) < 1_i64),
                 crate::expressions::Expression::from_pred(
                     crate::expressions::Expression::coalesce([
                         crate::expressions::Expression::column(["a.b"]),

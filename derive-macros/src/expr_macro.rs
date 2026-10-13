@@ -27,15 +27,14 @@ fn emit(expr: &Expr, kernel: &Path) -> syn::Result<TokenStream> {
         Expr::Group(group) if group.attrs.is_empty() => emit(&group.expr, kernel),
         Expr::Paren(paren) if paren.attrs.is_empty() => emit(&paren.expr, kernel),
         Expr::Lit(literal) if literal.attrs.is_empty() => match &literal.lit {
-            Lit::Str(name) => Ok(quote_spanned! { name.span() =>
-                #kernel::expressions::Expression::column([#name])
-            }),
-            Lit::Bool(_) | Lit::Int(_) | Lit::Float(_) => Ok(quote_spanned! { expr.span() =>
-                #kernel::expressions::lit(#expr)
-            }),
+            Lit::Str(_) | Lit::Bool(_) | Lit::Int(_) | Lit::Float(_) => {
+                Ok(quote_spanned! { expr.span() =>
+                    #kernel::expressions::lit(#expr)
+                })
+            }
             _ => Err(Error::new_spanned(
                 expr,
-                "expected a numeric or boolean literal, or a quoted column name",
+                "expected a numeric, boolean, or string literal",
             )),
         },
         Expr::Unary(unary) if unary.attrs.is_empty() && matches!(unary.op, UnOp::Neg(_)) => {
@@ -80,7 +79,7 @@ fn emit(expr: &Expr, kernel: &Path) -> syn::Result<TokenStream> {
         Expr::Call(call) if call.attrs.is_empty() => emit_call(call, kernel),
         _ => Err(Error::new_spanned(
             expr,
-            "expected an expr! constructor, literal, quoted column name, or comparison",
+            "expected an expr! constructor, literal, or comparison",
         )),
     }
 }
@@ -252,10 +251,10 @@ mod tests {
     #[case::type_qualified_call(quote!(<T>::eq("a", 1)), "unqualified expr! constructor")]
     #[case::type_qualified_null(quote!(null(<T>::LONG)), "DataType constant name")]
     #[case::rust_not(quote!(!true), "expected an expr! constructor")]
-    #[case::negated_column(quote!(-"a"), "only numeric literals can be negated")]
+    #[case::negated_string(quote!(-"a"), "only numeric literals can be negated")]
     #[case::negated_boolean(quote!(-true), "only numeric literals can be negated")]
-    #[case::bare_char(quote!('a'), "numeric or boolean literal")]
-    #[case::bare_bytes(quote!(b"a"), "numeric or boolean literal")]
+    #[case::bare_char(quote!('a'), "numeric, boolean, or string literal")]
+    #[case::bare_bytes(quote!(b"a"), "numeric, boolean, or string literal")]
     #[case::attribute(quote!(#[allow(unused)] "a"), "expected an expr! constructor")]
     fn rejects_invalid_syntax_with_diagnostic(
         #[case] input: TokenStream,
