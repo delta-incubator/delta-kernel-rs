@@ -1,23 +1,43 @@
 use delta_kernel_derive::pub_macro;
 
-/// Builds an [`Expression`](crate::expressions::Expression) from nested constructor calls.
+/// Builds an [`Expression`](crate::expressions::Expression) from constructors and comparisons.
 ///
-/// Supports `lit(value)`, typed NULLs such as `null(LONG)`, `col("a.b")`, explicit column
-/// segments such as `path("a.b", "c")`, COALESCE, AND/OR/NOT, and unary/binary predicate
-/// builders such as `is_null`, `is_not_null`, `distinct`, and `gt`. Every call returns an
-/// `Expression`, including predicate calls.
+/// Numeric and boolean literals can be written directly. A bare string literal names one exact
+/// column: `"a.b"` addresses a field whose name contains a dot. Use `lit("value")` for string
+/// values. Comparisons support `<`, `<=`, `>`, `>=`, `==`, and `!=`, with parentheses for grouping.
+/// The equivalent builders `lt`, `le`, `gt`, `ge`, `eq`, and `ne` remain available.
 ///
-/// Literals retain their Rust type: `lit(1)` is INTEGER and `lit(1_i64)` is LONG.
+/// Also supports `lit(value)`, typed NULLs such as `null(LONG)`, `col("a.b")`, explicit column
+/// segments such as `path("a.b", "c")`, `coalesce`, `and`, `or`, `not`, `is_null`, `is_not_null`,
+/// and `distinct`. Every form returns an `Expression`, including comparisons and predicate calls.
+///
+/// Literals retain their Rust type: `1` is INTEGER and `1_i64` is LONG.
 /// `null` takes a [`DataType`](crate::schema::DataType) associated constant name, such as `LONG`.
 /// `col` takes one string literal and follows [`col!`](crate::expressions::col) path rules.
-/// `col("a.b")` addresses nested fields; `path("a.b")` addresses one field whose name contains a
-/// dot. Use `path` for multiple explicit segments or computed names. Literal arguments and path
-/// segments are evaluated once, in order.
+/// `col("a.b")` addresses nested fields. Use `path` for multiple explicit segments or computed
+/// names. `lit` and `path` arguments accept Rust expressions and are evaluated once, in order.
 ///
-/// Calls delegate to the existing builders without resolving types or evaluating rows.
+/// Expression construction delegates to the existing builders without resolving types or
+/// evaluating rows. Other Rust expressions must appear inside `lit` or `path` arguments.
 /// AND/OR preserve [`Predicate::junction`](crate::expressions::Predicate::junction)
 /// normalization: empty AND is TRUE, empty OR is FALSE, and single-input junctions unwrap.
-/// Invalid call shapes, unknown predicate builders, and unsupported literal types fail to compile.
+/// Invalid call shapes, unknown builders, unsupported operators, and unsupported literal types
+/// fail to compile. Chained comparisons require separate comparisons inside `and`.
+///
+/// ```
+/// use delta_kernel::expressions::{expr, lit, Expression, Predicate};
+///
+/// assert_eq!(
+///     expr!(and(
+///         "status" == lit("active"),
+///         (coalesce("size", 0_i64) <= 100_i64),
+///     )),
+///     Expression::from_pred(Predicate::and(
+///         Expression::column(["status"]).eq(lit("active")),
+///         Expression::coalesce([Expression::column(["size"]), lit(0_i64)]).le(lit(100_i64)),
+///     )),
+/// );
+/// ```
 ///
 /// ```
 /// use delta_kernel::expressions::{col, expr, lit, Expression, Predicate};
@@ -44,6 +64,10 @@ use delta_kernel_derive::pub_macro;
 /// assert_eq!(
 ///     kernel_expr!(coalesce(path("a.b"), null(LONG))),
 ///     Expression::coalesce([Expression::column(["a.b"]), null_lit(DataType::LONG)]),
+/// );
+/// assert_eq!(
+///     kernel_expr!("a.b" == null(LONG)),
+///     Expression::from_pred(Expression::column(["a.b"]).eq(null_lit(DataType::LONG))),
 /// );
 /// ```
 ///
@@ -129,102 +153,41 @@ use delta_kernel_derive::pub_macro;
 /// use delta_kernel::expressions::expr;
 /// let _ = expr!(lit(1_u64));
 /// ```
+///
+/// ```compile_fail,E0277
+/// use delta_kernel::expressions::expr;
+/// let _ = expr!("size" > 1_u64);
+/// ```
+///
+/// ```compile_fail
+/// use delta_kernel::expressions::expr;
+/// let _ = expr!("size" + 1);
+/// ```
+///
+/// ```compile_fail
+/// use delta_kernel::expressions::expr;
+/// let _ = expr!("size" = 1);
+/// ```
+///
+/// ```compile_fail
+/// use delta_kernel::expressions::expr;
+/// let _ = expr!(0 < "size" < 100);
+/// ```
+///
+/// ```compile_fail
+/// use delta_kernel::expressions::expr;
+/// let size = 1_i64;
+/// let _ = expr!("size" >= size);
+/// ```
+///
+/// ```compile_fail
+/// use delta_kernel::expressions::expr;
+/// let _ = expr!("size" > unknown_predicate("other"));
+/// ```
 #[pub_macro]
 macro_rules! expr {
-    (col($path:literal)) => { $crate::expressions::col!($path) };
-    (col($($other:tt)*)) => {
-        ::core::compile_error!(
-            "col() requires one string literal; use path() for explicit or computed column segments"
-        )
-    };
-    (path($($segment:expr),+ $(,)?)) => {
-        $crate::expressions::Expression::column([$($segment),+])
-    };
-    (lit($value:expr)) => { $crate::expressions::lit($value) };
-    (null($ty:ident)) => {
-        $crate::expressions::null_lit($crate::schema::DataType::$ty)
-    };
-    (@call coalesce; $($arg:expr),*) => {
-        $crate::expressions::Expression::coalesce(
-            ::std::vec::Vec::<$crate::expressions::Expression>::from([$($arg),*]),
-        )
-    };
-    (@call and; $($arg:expr),*) => {
-        $crate::expressions::Expression::from_pred(
-            $crate::expressions::Predicate::and_from([
-                $($crate::expressions::Predicate::from_expr($arg)),*
-            ]),
-        )
-    };
-    (@call or; $($arg:expr),*) => {
-        $crate::expressions::Expression::from_pred(
-            $crate::expressions::Predicate::or_from([
-                $($crate::expressions::Predicate::from_expr($arg)),*
-            ]),
-        )
-    };
-    (@call not; $arg:expr) => {
-        $crate::expressions::Expression::from_pred(
-            $crate::expressions::Predicate::not(
-                $crate::expressions::Predicate::from_expr($arg),
-            ),
-        )
-    };
-    (@call is_null; $arg:expr) => {
-        $crate::expressions::Expression::from_pred(
-            $crate::expressions::Predicate::is_null($arg),
-        )
-    };
-    (@call is_not_null; $arg:expr) => {
-        $crate::expressions::Expression::from_pred(
-            $crate::expressions::Predicate::is_not_null($arg),
-        )
-    };
-    (@call eq; $left:expr, $right:expr) => {
-        $crate::expressions::Expression::from_pred(
-            $crate::expressions::Predicate::eq($left, $right),
-        )
-    };
-    (@call ne; $left:expr, $right:expr) => {
-        $crate::expressions::Expression::from_pred(
-            $crate::expressions::Predicate::ne($left, $right),
-        )
-    };
-    (@call lt; $left:expr, $right:expr) => {
-        $crate::expressions::Expression::from_pred(
-            $crate::expressions::Predicate::lt($left, $right),
-        )
-    };
-    (@call le; $left:expr, $right:expr) => {
-        $crate::expressions::Expression::from_pred(
-            $crate::expressions::Predicate::le($left, $right),
-        )
-    };
-    (@call gt; $left:expr, $right:expr) => {
-        $crate::expressions::Expression::from_pred(
-            $crate::expressions::Predicate::gt($left, $right),
-        )
-    };
-    (@call ge; $left:expr, $right:expr) => {
-        $crate::expressions::Expression::from_pred(
-            $crate::expressions::Predicate::ge($left, $right),
-        )
-    };
-    (@call distinct; $left:expr, $right:expr) => {
-        $crate::expressions::Expression::from_pred(
-            $crate::expressions::Predicate::distinct($left, $right),
-        )
-    };
-    (@call $op:ident; $($arg:expr),*) => {
-        ::core::compile_error!(::core::concat!(
-            "unsupported expression call or arity: ", ::core::stringify!($op)
-        ))
-    };
-    ($op:ident($($child:ident($($args:tt)*)),* $(,)?)) => {
-        $crate::expressions::expr!(@call $op; $($crate::expressions::expr!($child($($args)*))),*)
-    };
-    ($($other:tt)*) => {
-        ::core::compile_error!("expected nested calls, e.g. coalesce(col(\"a\"), lit(0_i64))")
+    ($($expression:tt)*) => {
+        $crate::delta_kernel_derive::expr!($crate; $($expression)*)
     };
 }
 
@@ -264,6 +227,70 @@ mod tests {
         assert_eq!(actual, expected);
     }
 
+    #[test]
+    fn infix_comparisons_mix_with_builders_and_grouping() {
+        let actual = expr!(and(
+            is_not_null("path"),
+            not(or(
+                distinct("deleted", false),
+                ((coalesce("size", coalesce("fallback_size", 0_i64))) <= (15_i64)),
+            )),
+            eq((col("nested.status") == lit("active")), true),
+        ));
+        let expected = Expression::from_pred(Predicate::and_from([
+            col!("path").is_not_null(),
+            Predicate::not(Predicate::or(
+                col!("deleted").distinct(lit(false)),
+                Expression::coalesce([
+                    col!("size"),
+                    Expression::coalesce([col!("fallback_size"), lit(0_i64)]),
+                ])
+                .le(lit(15_i64)),
+            )),
+            Expression::from_pred(col!("nested.status").eq(lit("active"))).eq(lit(true)),
+        ]));
+        assert_eq!(actual, expected);
+    }
+
+    #[rstest]
+    #[case::lt(expr!(7_i64 < "right"), BinaryPredicateOp::LessThan, false)]
+    #[case::gt(expr!(7_i64 > "right"), BinaryPredicateOp::GreaterThan, false)]
+    #[case::eq(expr!(7_i64 == "right"), BinaryPredicateOp::Equal, false)]
+    #[case::le(expr!(7_i64 <= "right"), BinaryPredicateOp::GreaterThan, true)]
+    #[case::ge(expr!(7_i64 >= "right"), BinaryPredicateOp::LessThan, true)]
+    #[case::ne(expr!(7_i64 != "right"), BinaryPredicateOp::Equal, true)]
+    fn comparisons_preserve_literal_left_operands(
+        #[case] actual: Expression,
+        #[case] op: BinaryPredicateOp,
+        #[case] negated: bool,
+    ) {
+        let expected = Predicate::binary(op, lit(7_i64), col!("right"));
+        let expected = if negated {
+            Predicate::not(expected)
+        } else {
+            expected
+        };
+        assert_eq!(actual, Expression::from_pred(expected));
+    }
+
+    #[rstest]
+    #[case::columns(
+        expr!("a.b" == "c.d"),
+        Expression::column(["a.b"]), Expression::column(["c.d"]),
+    )]
+    #[case::string_values(expr!(lit("a.b") == lit("c.d")), lit("a.b"), lit("c.d"))]
+    #[case::column_and_string(expr!("a.b" == lit("c.d")), Expression::column(["a.b"]), lit("c.d"))]
+    fn quoted_columns_and_string_values_remain_distinct(
+        #[case] actual: Expression,
+        #[case] left: Expression,
+        #[case] right: Expression,
+    ) {
+        assert_eq!(
+            actual,
+            Expression::from_pred(Predicate::binary(BinaryPredicateOp::Equal, left, right)),
+        );
+    }
+
     #[rstest]
     #[case::coalesce_empty(expr!(coalesce()), Expression::coalesce(Vec::<Expression>::new()))]
     #[case::coalesce_single(expr!(coalesce(col("a"))), Expression::coalesce([col!("a")]))]
@@ -295,6 +322,18 @@ mod tests {
             col!("size").gt(lit(0_i64)),
         ])),
     )]
+    #[case::bare_coalesce(
+        expr!(coalesce("a.b", -1_i64,)),
+        Expression::coalesce([Expression::column(["a.b"]), lit(-1_i64)]),
+    )]
+    #[case::bare_and(
+        expr!(and(true, "a",)),
+        Expression::from_pred(Predicate::and(Predicate::TRUE, Predicate::column(["a"]))),
+    )]
+    #[case::bare_or(
+        expr!(or(false, "a",)),
+        Expression::from_pred(Predicate::or(Predicate::FALSE, Predicate::column(["a"]))),
+    )]
     fn variadic_calls_preserve_operands_and_junction_identities(
         #[case] actual: Expression,
         #[case] expected: Expression,
@@ -305,6 +344,11 @@ mod tests {
     #[rstest]
     #[case::nested(expr!(col("a.b")), &["a", "b"])]
     #[case::literal_dot(expr!(path("a.b")), &["a.b"])]
+    #[case::quoted_dot(expr!("a.b"), &["a.b"])]
+    #[case::quoted_space(expr!("column with spaces"), &["column with spaces"])]
+    #[case::quoted_case(expr!("MiXeD"), &["MiXeD"])]
+    #[case::quoted_escape(expr!("a\"b\\c"), &["a\"b\\c"])]
+    #[case::raw_quoted(expr!(r#"a"b\c"#), &["a\"b\\c"])]
     #[case::explicit_segments(expr!(path("outer", "inner.with.dot", "leaf")),
         &["outer", "inner.with.dot", "leaf"])]
     fn column_paths_distinguish_literal_dots_from_nested_fields(
@@ -322,6 +366,12 @@ mod tests {
     #[case::le(expr!(le(col("left"), lit(7_i64))), BinaryPredicateOp::GreaterThan, true)]
     #[case::ge(expr!(ge(col("left"), lit(7_i64))), BinaryPredicateOp::LessThan, true)]
     #[case::ne(expr!(ne(col("left"), lit(7_i64))), BinaryPredicateOp::Equal, true)]
+    #[case::infix_lt(expr!("left" < 7_i64), BinaryPredicateOp::LessThan, false)]
+    #[case::infix_gt(expr!("left" > 7_i64), BinaryPredicateOp::GreaterThan, false)]
+    #[case::infix_eq(expr!("left" == 7_i64), BinaryPredicateOp::Equal, false)]
+    #[case::infix_le(expr!("left" <= 7_i64), BinaryPredicateOp::GreaterThan, true)]
+    #[case::infix_ge(expr!("left" >= 7_i64), BinaryPredicateOp::LessThan, true)]
+    #[case::infix_ne(expr!("left" != 7_i64), BinaryPredicateOp::Equal, true)]
     fn comparisons_preserve_operators_operand_order_and_negation(
         #[case] actual: Expression,
         #[case] op: BinaryPredicateOp,
@@ -367,6 +417,19 @@ mod tests {
     #[case::owned_string(expr!(lit(String::from("a\0b\n"))), Scalar::String("a\0b\n".into()))]
     #[case::binary(expr!(lit(vec![0_u8, 255])), Scalar::Binary(vec![0, 255]))]
     #[case::scalar(expr!(lit(Scalar::Date(-1))), Scalar::Date(-1))]
+    #[case::bare_integer(expr!(1), Scalar::Integer(1))]
+    #[case::bare_negative(expr!(-7), Scalar::Integer(-7))]
+    #[case::bare_hex(expr!(0xff), Scalar::Integer(255))]
+    #[case::bare_long(expr!(1_i64), Scalar::Long(1))]
+    #[case::bare_byte_min(expr!(-128_i8), Scalar::Byte(i8::MIN))]
+    #[case::bare_short_min(expr!(-32768_i16), Scalar::Short(i16::MIN))]
+    #[case::bare_integer_min(expr!(-2147483648_i32), Scalar::Integer(i32::MIN))]
+    #[case::bare_long_min(expr!(-9223372036854775808_i64), Scalar::Long(i64::MIN))]
+    #[case::bare_true(expr!(true), Scalar::Boolean(true))]
+    #[case::bare_false(expr!(false), Scalar::Boolean(false))]
+    #[case::bare_float(expr!(1.5_f32), Scalar::Float(1.5))]
+    #[case::bare_double(expr!(-2.5), Scalar::Double(-2.5))]
+    #[case::bare_suffixed_double(expr!(-2.5_f64), Scalar::Double(-2.5))]
     fn literals_preserve_exact_scalar_variants(
         #[case] actual: Expression,
         #[case] expected: Scalar,
@@ -420,6 +483,84 @@ mod tests {
         assert_eq!(actual, Expression::from_pred(lit(1_i64).gt(lit(2_i64))));
     }
 
+    #[test]
+    fn mixed_infix_and_builder_arguments_are_evaluated_once_in_order() {
+        let mut calls = 0_i64;
+        let mut next = || {
+            calls += 1;
+            calls
+        };
+        let actual = expr!(and(
+            lit(next()) < lit(next()),
+            le(lit(next()), lit(next())),
+            coalesce(lit(next()), lit(next())) >= lit(next()),
+        ));
+        assert_eq!(calls, 7);
+        assert_eq!(
+            actual,
+            Expression::from_pred(Predicate::and_from([
+                lit(1_i64).lt(lit(2_i64)),
+                lit(3_i64).le(lit(4_i64)),
+                Expression::coalesce([lit(5_i64), lit(6_i64)]).ge(lit(7_i64)),
+            ])),
+        );
+    }
+
+    #[test]
+    fn infix_path_segments_are_evaluated_before_the_right_operand() {
+        let mut calls = 0;
+        let mut next = || {
+            calls += 1;
+            format!("field.{calls}")
+        };
+        let actual = expr!(path(next(), next(),) == lit(next()));
+        assert_eq!(calls, 3);
+        assert_eq!(
+            actual,
+            Expression::from_pred(Expression::column(["field.1", "field.2"]).eq(lit("field.3"))),
+        );
+    }
+
+    #[test]
+    fn forwarded_rust_expression_fragments_preserve_bare_literals_and_comparisons() {
+        macro_rules! forward {
+            ($expression:expr) => {
+                expr!($expression)
+            };
+        }
+        assert_eq!(
+            forward!("size" >= 1_i64),
+            Expression::from_pred(col!("size").ge(lit(1_i64)))
+        );
+        assert_eq!(forward!(-7), lit(-7));
+    }
+
+    #[test]
+    fn forwarded_literal_and_identifier_fragments_preserve_constructor_syntax() {
+        macro_rules! forward_col {
+            ($column:literal) => {
+                expr!(col($column))
+            };
+        }
+        macro_rules! forward_null {
+            ($data_type:ident) => {
+                expr!(null($data_type))
+            };
+        }
+        macro_rules! forward_negative {
+            ($number:literal) => {
+                expr!(-$number)
+            };
+        }
+        assert_eq!(forward_col!("a.b"), col!("a.b"));
+        assert_eq!(forward_null!(LONG), null_lit(DataType::LONG));
+        assert_eq!(forward_negative!(7_i64), lit(-7_i64));
+        assert_eq!(
+            expr!(r#gt("a", 7_i64)),
+            Expression::from_pred(col!("a").gt(lit(7_i64)))
+        );
+    }
+
     mod macro_hygiene {
         type Vec = ();
         type Expression = ();
@@ -434,6 +575,16 @@ mod tests {
                     crate::expressions::lit(false),
                     crate::expressions::null_lit(crate::schema::DataType::BOOLEAN),
                 ]),
+            );
+            assert_eq!(
+                crate::expressions::expr!(coalesce("a.b", 0_i64) < 1_i64),
+                crate::expressions::Expression::from_pred(
+                    crate::expressions::Expression::coalesce([
+                        crate::expressions::Expression::column(["a.b"]),
+                        crate::expressions::lit(0_i64),
+                    ])
+                    .lt(crate::expressions::lit(1_i64)),
+                ),
             );
         }
     }
