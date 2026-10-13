@@ -8,15 +8,16 @@ use delta_kernel::arrow::array::{
     TimestampMicrosecondArray,
 };
 use delta_kernel::arrow::compute::filter_record_batch;
+use delta_kernel::arrow::datatypes::{DataType as ArrowDataType, Field, Schema};
 use delta_kernel::engine::arrow_data::ArrowEngineData;
 use delta_kernel::expressions::{col, lit, ColumnName, Predicate, Scalar};
 use delta_kernel::object_store::local::LocalFileSystem;
 use delta_kernel::object_store::DynObjectStore;
 use delta_kernel::parquet::arrow::ArrowWriter;
 use delta_kernel::scan::state::ScanFile;
-use delta_kernel::scan::PartitionValuesOptions;
+use delta_kernel::scan::{PartitionValuesOptions, Scan, StatsOptions};
 use delta_kernel::table_features::{get_any_level_column_physical_name, ColumnMappingMode};
-use delta_kernel::Snapshot;
+use delta_kernel::{Engine, Snapshot};
 use rstest::rstest;
 use test_utils::delta_kernel_default_engine::DefaultEngineBuilder;
 use test_utils::table_builder::{partitioned, version_latest, FeatureSet, LogState, TableConfig};
@@ -404,7 +405,14 @@ async fn write_timezone_partition_table(
 ) -> Url {
     std::fs::create_dir_all(table_path).unwrap();
     let values: ArrayRef = Arc::new(Int32Array::from(vec![42]));
-    let batch = RecordBatch::try_from_iter([("value", values)]).unwrap();
+    let value_name = if column_mapping_mode == ColumnMappingMode::None {
+        "value"
+    } else {
+        "col-value"
+    };
+    let field = Field::new(value_name, ArrowDataType::Int32, true)
+        .with_metadata([("PARQUET:field_id".to_string(), "4".to_string())].into());
+    let batch = RecordBatch::try_new(Arc::new(Schema::new(vec![field])), vec![values]).unwrap();
     let mut writer = ArrowWriter::try_new(
         File::create(table_path.join("part.parquet")).unwrap(),
         batch.schema(),
@@ -532,6 +540,34 @@ fn timestamp_micros(value: &str) -> i64 {
         .timestamp_micros()
 }
 
+fn assert_timestamp_rows(scan: &Scan, engine: Arc<dyn Engine>, expected: &[i64]) {
+    let mut actual = Vec::new();
+    for data in scan.execute(engine).unwrap() {
+        let batch: RecordBatch = ArrowEngineData::try_from_engine_data(data.unwrap())
+            .unwrap()
+            .into();
+        let timestamps = get_column!(batch, "p_ts", TimestampMicrosecondArray);
+        let timestamps_ntz = get_column!(batch, "p_ntz", TimestampMicrosecondArray);
+        let integers = get_column!(batch, "p_int", Int32Array);
+        let values = get_column!(batch, "value", Int32Array);
+        for row in 0..batch.num_rows() {
+            assert!(timestamps.is_valid(row));
+            actual.push(timestamps.value(row));
+            assert_eq!(
+                timestamps_ntz.value(row),
+                timestamp_micros("2024-01-15T12:30:45.123456Z")
+            );
+            assert_eq!(integers.value(row), 7);
+            assert!(values.is_valid(row));
+            assert_eq!(values.value(row), 42);
+        }
+    }
+    actual.sort();
+    let mut expected = expected.to_vec();
+    expected.sort();
+    assert_eq!(actual, expected);
+}
+
 #[rstest]
 #[case::utc(
     None,
@@ -599,7 +635,6 @@ async fn timezone_aware_parsed_partition_values_across_json_and_checkpoint(
         });
     let scan = snapshot
         .scan_builder()
-        .without_row_transforms()
         .with_partition_values(partition_values)
         .build()
         .unwrap();
@@ -643,6 +678,13 @@ async fn timezone_aware_parsed_partition_values_across_json_and_checkpoint(
         rows += batch.num_rows();
     }
     assert_eq!(rows, 1);
+    assert_timestamp_rows(
+        &scan,
+        engine,
+        &[timestamp_micros(
+            expected_timestamps[usize::from(native_checkpoint)],
+        )],
+    );
 }
 
 #[rstest]
@@ -677,7 +719,6 @@ async fn timestamp_partition_predicates_prefer_native_values(
         .build(engine.as_ref())
         .unwrap()
         .scan_builder()
-        .without_row_transforms()
         .with_predicate(Arc::new(Predicate::eq(
             col!("p_ts"),
             Scalar::Timestamp(predicate_timestamp),
@@ -706,6 +747,7 @@ async fn timestamp_partition_predicates_prefer_native_values(
         selected_files,
         expected_files[usize::from(native_checkpoint)]
     );
+    assert_timestamp_rows(&scan, engine, &vec![predicate_timestamp; selected_files]);
 }
 
 #[rstest]
@@ -758,7 +800,6 @@ async fn timestamp_partition_predicates_use_native_checkpoint_and_reader_timezon
         .build(engine.as_ref())
         .unwrap()
         .scan_builder()
-        .without_row_transforms()
         .with_predicate(Arc::new(Predicate::eq(
             col!("p_ts"),
             Scalar::Timestamp(timestamp_micros(predicate_timestamp)),
@@ -781,6 +822,7 @@ async fn timestamp_partition_predicates_use_native_checkpoint_and_reader_timezon
         );
     }
     assert_eq!(paths, [expected_path]);
+    assert_timestamp_rows(&scan, engine, &[timestamp_micros(predicate_timestamp)]);
 }
 
 #[rstest]
@@ -821,7 +863,6 @@ async fn timezone_aware_partition_values_use_physical_column_names(
     .unwrap();
     let scan = snapshot
         .scan_builder()
-        .without_row_transforms()
         .with_partition_values(
             PartitionValuesOptions::with_struct().with_timestamp_timezone("America/Los_Angeles"),
         )
@@ -854,6 +895,15 @@ async fn timezone_aware_partition_values_use_physical_column_names(
         rows += batch.num_rows();
     }
     assert_eq!(rows, 1);
+    assert_timestamp_rows(
+        &scan,
+        engine,
+        &[timestamp_micros(if checkpoint {
+            "2024-01-15T12:30:45.123456Z"
+        } else {
+            "2024-01-15T20:30:45.123456Z"
+        })],
+    );
 }
 
 #[rstest]
@@ -896,4 +946,158 @@ async fn timezone_aware_parsed_partition_values_report_invalid_input(
         },
     };
     assert!(error.to_string().contains(expected_error), "{error}");
+}
+
+#[rstest]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn timestamp_row_transforms_without_typed_output_or_partition_predicate(
+    #[values(false, true)] skip_stats: bool,
+    #[values(None, Some(false), Some(true))] checkpoint_stats_as_struct: Option<bool>,
+    #[values(
+        ColumnMappingMode::None,
+        ColumnMappingMode::Id,
+        ColumnMappingMode::Name
+    )]
+    column_mapping_mode: ColumnMappingMode,
+) {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let native_checkpoint = checkpoint_stats_as_struct == Some(true);
+    let url = write_timezone_partition_table(
+        temp_dir.path(),
+        "2024-01-15 12:30:45",
+        column_mapping_mode,
+        native_checkpoint,
+    )
+    .await;
+    let engine = create_default_engine_mt_executor(&url).unwrap();
+    if checkpoint_stats_as_struct.is_some() {
+        Snapshot::builder_for(url.clone())
+            .build(engine.as_ref())
+            .unwrap()
+            .checkpoint(engine.as_ref(), None)
+            .unwrap();
+    }
+    let snapshot = Snapshot::builder_for(url).build(engine.as_ref()).unwrap();
+    let scan = snapshot
+        .scan_builder()
+        .with_stats(if skip_stats {
+            StatsOptions::none()
+        } else {
+            StatsOptions::default()
+        })
+        .with_partition_values(
+            PartitionValuesOptions::default().with_timestamp_timezone("America/Los_Angeles"),
+        )
+        .build()
+        .unwrap();
+    assert_timestamp_rows(
+        &scan,
+        engine,
+        &[timestamp_micros(if native_checkpoint {
+            "2024-01-15T12:30:45Z"
+        } else {
+            "2024-01-15T20:30:45Z"
+        })],
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn timestamp_row_transforms_stay_aligned_after_parse_error_retry_and_pruning() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let url = write_timezone_partition_table(
+        temp_dir.path(),
+        "2024-01-15 12:30:45",
+        ColumnMappingMode::None,
+        false,
+    )
+    .await;
+    let add = read_actions_from_commit(&url, 1, "add").unwrap().remove(0);
+    let mut dead = add.clone();
+    dead["path"] = "dead.parquet".into();
+    dead["partitionValues"]["p_ts"] = "invalid timestamp".into();
+    let mut pruned = add.clone();
+    pruned["path"] = "pruned.parquet".into();
+    pruned["partitionValues"]["p_ts"] = "2024-01-16 12:30:45".into();
+    pruned["partitionValues"]["p_int"] = "invalid integer".into();
+    let actions = [dead, add, pruned]
+        .map(|add| serde_json::json!({"add": add}).to_string())
+        .join("\n");
+    add_commit(url.as_str(), &LocalFileSystem::new(), 2, actions)
+        .await
+        .unwrap();
+    add_commit(url.as_str(), &LocalFileSystem::new(), 3,
+        serde_json::json!({"remove": {"path": "dead.parquet", "deletionTimestamp": 1700000000000_i64, "dataChange": true}}).to_string(),
+    ).await.unwrap();
+    let engine = create_default_engine_mt_executor(&url).unwrap();
+    let expected = timestamp_micros("2024-01-15T20:30:45Z");
+    let scan = Snapshot::builder_for(url)
+        .build(engine.as_ref())
+        .unwrap()
+        .scan_builder()
+        .with_partition_values(
+            PartitionValuesOptions::default().with_timestamp_timezone("America/Los_Angeles"),
+        )
+        .with_predicate(Arc::new(Predicate::eq(
+            col!("p_ts"),
+            Scalar::Timestamp(expected),
+        )))
+        .build()
+        .unwrap();
+    assert_timestamp_rows(&scan, engine, &[expected]);
+}
+
+#[rstest]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn timestamp_row_transforms_preserve_null_partitions(
+    #[values(false, true)] native_checkpoint: bool,
+    #[values(None, Some(""))] raw_timestamp: Option<&str>,
+) {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let url = write_timezone_partition_table(
+        temp_dir.path(),
+        "",
+        ColumnMappingMode::None,
+        native_checkpoint,
+    )
+    .await;
+    let mut add = read_actions_from_commit(&url, 1, "add").unwrap().remove(0);
+    add["partitionValues"]["p_ts"] = serde_json::json!(raw_timestamp);
+    add_commit(
+        url.as_str(),
+        &LocalFileSystem::new(),
+        2,
+        serde_json::json!({"add": add}).to_string(),
+    )
+    .await
+    .unwrap();
+    let engine = create_default_engine_mt_executor(&url).unwrap();
+    if native_checkpoint {
+        Snapshot::builder_for(url.clone())
+            .build(engine.as_ref())
+            .unwrap()
+            .checkpoint(engine.as_ref(), None)
+            .unwrap();
+    }
+    let scan = Snapshot::builder_for(url)
+        .build(engine.as_ref())
+        .unwrap()
+        .scan_builder()
+        .with_partition_values(
+            PartitionValuesOptions::default().with_timestamp_timezone("America/Los_Angeles"),
+        )
+        .with_predicate(Arc::new(Predicate::is_null(col!("p_ts"))))
+        .build()
+        .unwrap();
+    let mut rows = 0;
+    for data in scan.execute(engine).unwrap() {
+        let batch: RecordBatch = ArrowEngineData::try_from_engine_data(data.unwrap())
+            .unwrap()
+            .into();
+        assert_eq!(
+            get_column!(batch, "p_ts", TimestampMicrosecondArray).null_count(),
+            batch.num_rows()
+        );
+        rows += batch.num_rows();
+    }
+    assert_eq!(rows, 1);
 }

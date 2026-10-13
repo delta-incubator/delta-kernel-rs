@@ -10,7 +10,7 @@ use super::metrics::ScanMetrics;
 use super::state_info::StateInfo;
 use super::{PhysicalPredicate, ScanMetadata, COMMIT_READ_SCHEMA};
 use crate::actions::deletion_vector::DeletionVectorDescriptor;
-use crate::engine_data::{EngineData, GetData, RowVisitor, TypedGetData as _};
+use crate::engine_data::{EngineData, GetData, RowVisitor};
 use crate::expressions::{
     col, column_expr_ref, column_name, null_lit, ColumnName, Expression, ExpressionRef,
     MapToStructOptions, Predicate, PredicateRef, UnaryExpressionOp,
@@ -21,9 +21,7 @@ use crate::log_replay::{
     ParallelLogReplayProcessor,
 };
 use crate::log_segment::CheckpointReadInfo;
-use crate::scan::transform_spec::{
-    get_transform_expr, parse_partition_values, FileRowTrackingMetadata, TransformSpec,
-};
+use crate::scan::transform_spec::{build_row_transforms, TransformSpec};
 use crate::schema::{
     lazy_schema_ref, ColumnNamesAndTypes, DataType, MapType, SchemaRef, SchemaStructPatchBuilder,
     StructField, StructType, ToSchema as _,
@@ -186,7 +184,6 @@ pub struct ScanLogReplayProcessor {
 struct RetryTransformAndDataSkipOutput {
     transformed_actions: Box<dyn EngineData>,
     final_selection: Vec<bool>,
-    row_transform_exprs: Vec<Option<ExpressionRef>>,
     active_add_file_sizes: Vec<u64>,
 }
 
@@ -194,13 +191,8 @@ impl ScanLogReplayProcessor {
     // These index positions correspond to the order of columns defined in
     // `AddRemoveDedupVisitor::selected_column_names_and_types()`
     const ADD_PATH_INDEX: usize = 0; // Position of "add.path" in getters
-    const ADD_PARTITION_VALUES_INDEX: usize = 1; // Position of "add.partitionValues" in getters
     const ADD_SIZE_INDEX: usize = 2; // Position of "add.size" in getters
     const ADD_DV_START_INDEX: usize = 3; // Start position of add deletion vector columns
-    const BASE_ROW_ID_INDEX: usize = 6; // Position of add.baseRowId in getters
-
-    // Position of add.defaultRowCommitVersion in getters
-    const DEFAULT_ROW_COMMIT_VERSION_INDEX: usize = 7;
     const REMOVE_PATH_INDEX: usize = 8; // Position of "remove.path" in getters
     const REMOVE_DV_START_INDEX: usize = 9; // Start position of remove deletion vector columns
 
@@ -272,13 +264,26 @@ impl ScanLogReplayProcessor {
             state_info.physical_stats_schema.clone()
         };
 
-        // The partition schema feeds two consumers: the DataSkippingFilter (predicate
-        // pruning, disabled by skip_stats together with stats) and the engine-facing
-        // `partitionValues_parsed` output column (requested via `parsed_struct`, independent
-        // of skip_stats). Either consumer keeps the transform emitting the column.
+        // Typed partition values serve pruning, requested output, and timestamp row transforms.
+        // Disabling stats must not disable the values needed to materialize rows.
         let partition_schema_for_transform =
             if partition_values_options.parsed_struct || !skip_stats {
                 state_info.physical_partition_schema.clone()
+            } else if !state_info.skip_row_transforms {
+                let timestamp_names: HashSet<_> = state_info
+                    .logical_schema
+                    .fields()
+                    .filter(|field| field.data_type() == &DataType::TIMESTAMP)
+                    .map(|field| field.physical_name(state_info.column_mapping_mode))
+                    .collect();
+                let fields: Vec<_> = state_info
+                    .physical_partition_schema
+                    .iter()
+                    .flat_map(|schema| schema.fields())
+                    .filter(|field| timestamp_names.contains(field.name().as_str()))
+                    .cloned()
+                    .collect();
+                (!fields.is_empty()).then(|| Arc::new(StructType::new_unchecked(fields)))
             } else {
                 None
             };
@@ -526,15 +531,8 @@ impl ScanLogReplayProcessor {
         actions: Box<dyn EngineData>,
         is_log_batch: bool,
         dedup_selection: Vec<bool>,
-        row_transform_exprs: Vec<Option<ExpressionRef>>,
         active_add_file_sizes: Vec<u64>,
     ) -> DeltaResult<RetryTransformAndDataSkipOutput> {
-        let row_transform_exprs = dedup_selection
-            .iter()
-            .enumerate()
-            .filter(|(_, selected)| **selected)
-            .map(|(row, _)| row_transform_exprs.get(row).cloned().flatten())
-            .collect();
         let active_add_file_sizes = dedup_selection
             .iter()
             .zip(active_add_file_sizes)
@@ -546,7 +544,6 @@ impl ScanLogReplayProcessor {
         Ok(RetryTransformAndDataSkipOutput {
             transformed_actions,
             final_selection,
-            row_transform_exprs,
             active_add_file_sizes,
         })
     }
@@ -580,8 +577,6 @@ impl ScanLogReplayProcessor {
 struct AddRemoveDedupVisitor<'a, D: Deduplicator> {
     deduplicator: D,
     selection_vector: Vec<bool>,
-    state_info: Arc<StateInfo>,
-    row_transform_exprs: Vec<Option<ExpressionRef>>,
     active_add_file_sizes: Vec<u64>,
     metrics: &'a ScanMetrics,
 }
@@ -590,15 +585,12 @@ impl<'a, D: Deduplicator> AddRemoveDedupVisitor<'a, D> {
     fn new(
         deduplicator: D,
         selection_vector: Vec<bool>,
-        state_info: Arc<StateInfo>,
         metrics: &'a ScanMetrics,
     ) -> AddRemoveDedupVisitor<'a, D> {
         let active_add_file_sizes = vec![0; selection_vector.len()];
         AddRemoveDedupVisitor {
             deduplicator,
             selection_vector,
-            state_info,
-            row_transform_exprs: Vec::new(),
             active_add_file_sizes,
             metrics,
         }
@@ -657,53 +649,6 @@ impl<'a, D: Deduplicator> AddRemoveDedupVisitor<'a, D> {
             return Ok(false);
         }
 
-        // Parse partition values for building the per-row transform expression.
-        // Partition pruning is handled by DataSkippingFilter in the columnar data skipping phase,
-        // so we only need to parse values here for the transform.
-
-        // Only needed for survived addFiles.
-        let partition_values = match &self.state_info.transform_spec {
-            Some(transform) if !self.state_info.skip_row_transforms => {
-                let partition_values = getters[ScanLogReplayProcessor::ADD_PARTITION_VALUES_INDEX]
-                    .get(row, "add.partitionValues")?;
-                parse_partition_values(
-                    &self.state_info.logical_schema,
-                    transform,
-                    &partition_values,
-                    self.state_info.column_mapping_mode,
-                )?
-            }
-            _ => Default::default(),
-        };
-
-        if !self.state_info.skip_row_transforms {
-            let base_row_id: Option<i64> =
-                getters[ScanLogReplayProcessor::BASE_ROW_ID_INDEX].get_opt(row, "add.baseRowId")?;
-            let default_row_commit_version: Option<i64> = getters
-                [ScanLogReplayProcessor::DEFAULT_ROW_COMMIT_VERSION_INDEX]
-                .get_opt(row, "add.defaultRowCommitVersion")?;
-            let patch_expr = self
-                .state_info
-                .transform_spec
-                .as_ref()
-                .map(|transform_spec| {
-                    get_transform_expr(
-                        transform_spec,
-                        partition_values,
-                        &self.state_info.physical_schema,
-                        FileRowTrackingMetadata {
-                            base_row_id,
-                            default_row_commit_version,
-                        },
-                    )
-                })
-                .transpose()?;
-            if patch_expr.is_some() {
-                // fill in any needed `None`s for previous rows
-                self.row_transform_exprs.resize_with(row, Default::default);
-                self.row_transform_exprs.push(patch_expr);
-            }
-        }
         self.active_add_file_sizes[row] = size;
         Ok(true)
     }
@@ -997,26 +942,17 @@ impl ParallelLogReplayProcessor for ScanLogReplayProcessor {
             Self::ADD_SIZE_INDEX,
             Self::ADD_DV_START_INDEX,
         )?;
-        let (dedup_selection, row_transform_exprs, active_add_file_sizes) = {
-            let mut visitor = AddRemoveDedupVisitor::new(
-                deduplicator,
-                pre_dedup_selection,
-                self.state_info.clone(),
-                &self.metrics,
-            );
+        let (dedup_selection, active_add_file_sizes) = {
+            let mut visitor =
+                AddRemoveDedupVisitor::new(deduplicator, pre_dedup_selection, &self.metrics);
             visitor.visit_rows_of(actions.as_ref())?;
-            (
-                visitor.selection_vector,
-                visitor.row_transform_exprs,
-                visitor.active_add_file_sizes,
-            )
+            (visitor.selection_vector, visitor.active_add_file_sizes)
         };
 
         // Step 3: Return transformed batch with updated selection vector
         let RetryTransformAndDataSkipOutput {
             transformed_actions,
             final_selection,
-            row_transform_exprs,
             active_add_file_sizes,
         } = if should_retry_transform_and_data_skip {
             // If step 1 failed with a parse error, filter out the dead Adds and retry after
@@ -1025,18 +961,21 @@ impl ParallelLogReplayProcessor for ScanLogReplayProcessor {
                 actions,
                 is_log_batch,
                 dedup_selection,
-                row_transform_exprs,
                 active_add_file_sizes,
             )?
         } else {
             RetryTransformAndDataSkipOutput {
                 transformed_actions: pre_dedup_transform_result?,
                 final_selection: dedup_selection,
-                row_transform_exprs,
                 active_add_file_sizes,
             }
         };
         self.record_selected_add_files(&final_selection, &active_add_file_sizes)?;
+        let row_transform_exprs = build_row_transforms(
+            &self.state_info,
+            transformed_actions.as_ref(),
+            &final_selection,
+        )?;
         let scan_metadata =
             ScanMetadata::try_new(transformed_actions, final_selection, row_transform_exprs)?;
         self.metrics
@@ -1102,26 +1041,17 @@ impl LogReplayProcessor for ScanLogReplayProcessor {
             Self::ADD_DV_START_INDEX,
             Self::REMOVE_DV_START_INDEX,
         );
-        let (dedup_selection, row_transform_exprs, active_add_file_sizes) = {
-            let mut visitor = AddRemoveDedupVisitor::new(
-                deduplicator,
-                pre_dedup_selection,
-                self.state_info.clone(),
-                &self.metrics,
-            );
+        let (dedup_selection, active_add_file_sizes) = {
+            let mut visitor =
+                AddRemoveDedupVisitor::new(deduplicator, pre_dedup_selection, &self.metrics);
             visitor.visit_rows_of(actions.as_ref())?;
-            (
-                visitor.selection_vector,
-                visitor.row_transform_exprs,
-                visitor.active_add_file_sizes,
-            )
+            (visitor.selection_vector, visitor.active_add_file_sizes)
         };
 
         // Step 3: Return transformed batch with updated selection vector
         let RetryTransformAndDataSkipOutput {
             transformed_actions,
             final_selection,
-            row_transform_exprs,
             active_add_file_sizes,
         } = if should_retry_transform_and_data_skip {
             // If step 1 failed with a parse error, filter out the dead Adds and retry after
@@ -1130,18 +1060,21 @@ impl LogReplayProcessor for ScanLogReplayProcessor {
                 actions,
                 is_log_batch,
                 dedup_selection,
-                row_transform_exprs,
                 active_add_file_sizes,
             )?
         } else {
             RetryTransformAndDataSkipOutput {
                 transformed_actions: pre_dedup_transform_result?,
                 final_selection: dedup_selection,
-                row_transform_exprs,
                 active_add_file_sizes,
             }
         };
         self.record_selected_add_files(&final_selection, &active_add_file_sizes)?;
+        let row_transform_exprs = build_row_transforms(
+            &self.state_info,
+            transformed_actions.as_ref(),
+            &final_selection,
+        )?;
         let scan_metadata =
             ScanMetadata::try_new(transformed_actions, final_selection, row_transform_exprs)?;
         self.metrics
@@ -1202,6 +1135,8 @@ mod tests {
         get_add_transform_expr, scan_action_iter, InternalScanState, ScanLogReplayProcessor,
         ScanPartitionValuesOptions, ScanStatsOptions, SerializableScanState,
     };
+    use crate::arrow::array::{Array, StringArray, TimestampMicrosecondArray};
+    use crate::engine::arrow_data::ArrowEngineData;
     use crate::engine::sync::SyncEngine;
     use crate::expressions::{
         col, column_name, lit, null_lit, BinaryExpressionOp, Expression, OpaquePredicateOp,
@@ -1211,7 +1146,7 @@ mod tests {
         DirectDataSkippingPredicateEvaluator, DirectPredicateEvaluator,
         IndirectDataSkippingPredicateEvaluator,
     };
-    use crate::log_replay::ActionsBatch;
+    use crate::log_replay::{ActionsBatch, LogReplayProcessor, ParallelLogReplayProcessor};
     use crate::log_segment::CheckpointReadInfo;
     use crate::scan::state::ScanFile;
     use crate::scan::state_info::tests::{
@@ -1226,8 +1161,8 @@ mod tests {
     use crate::scan::{PhysicalPredicate, COMMIT_READ_SCHEMA};
     use crate::schema::{schema_ref, DataType, MetadataColumnSpec, SchemaRef};
     use crate::table_features::ColumnMappingMode;
-    use crate::unit_test_utils::assert_result_error_with_message;
-    use crate::{DeltaResult, Expression as Expr, ExpressionRef};
+    use crate::unit_test_utils::{assert_result_error_with_message, string_array_to_engine_data};
+    use crate::{DeltaResult, Engine, Expression as Expr, ExpressionRef};
 
     fn test_checkpoint_info() -> CheckpointReadInfo {
         CheckpointReadInfo::without_stats_parsed()
@@ -1590,6 +1525,80 @@ mod tests {
         assert!(deserialized.seen_file_keys.contains(&key1));
         assert!(deserialized.seen_file_keys.contains(&key2));
         assert!(deserialized.seen_file_keys.contains(&key3));
+    }
+
+    #[rstest::rstest]
+    fn timestamp_row_transforms_survive_serialization(
+        #[values(false, true)] is_log_batch: bool,
+    ) -> DeltaResult<()> {
+        let engine = SyncEngine::new();
+        let logical_schema = schema_ref! { nullable "p_ts": TIMESTAMP, nullable "value": INTEGER };
+        let expected = 1_705_350_645_000_000_i64;
+        let mut state = get_state_info(
+            logical_schema.clone(),
+            vec!["p_ts".to_string()],
+            Some(Arc::new(Predicate::eq(
+                col!("p_ts"),
+                Scalar::Timestamp(expected),
+            ))),
+            &[],
+            HashMap::new(),
+            vec![],
+        )?;
+        state.include_row_transform_partitions()?;
+        let physical_schema = state.physical_schema.clone();
+        let checkpoint_info = test_checkpoint_info();
+        let read_schema = if is_log_batch {
+            COMMIT_READ_SCHEMA.clone()
+        } else {
+            checkpoint_info.checkpoint_read_schema.clone()
+        };
+        let processor = ScanLogReplayProcessor::new(
+            &engine,
+            Arc::new(state),
+            checkpoint_info,
+            ScanStatsOptions::default(),
+            ScanPartitionValuesOptions {
+                timestamp_timezone: Some("America/Los_Angeles".to_string()),
+                ..Default::default()
+            },
+        )?;
+        let mut processor = ScanLogReplayProcessor::from_serializable_state(
+            &engine,
+            processor.into_serializable_state()?,
+        )?;
+        let actions = engine.json_handler().parse_json(
+            string_array_to_engine_data(StringArray::from(vec![r#"{"add":{"path":"part.parquet","size":1,"modificationTime":0,"dataChange":true,"partitionValues":{"p_ts":"2024-01-15 12:30:45"}}}"#])),
+            read_schema,
+        )?;
+        let batch = ActionsBatch::new(actions, is_log_batch);
+        let metadata = if is_log_batch {
+            LogReplayProcessor::process_actions_batch(&mut processor, batch)?
+        } else {
+            ParallelLogReplayProcessor::process_actions_batch(&processor, batch)?
+        };
+        assert_eq!(metadata.scan_files.selection_vector(), &[true]);
+        let input = engine.json_handler().parse_json(
+            string_array_to_engine_data(StringArray::from(vec![r#"{"value":42}"#])),
+            physical_schema.clone(),
+        )?;
+        let output = crate::scan::state::transform_to_logical(
+            &engine,
+            input,
+            &physical_schema,
+            &logical_schema,
+            metadata.scan_file_transforms[0].clone(),
+        )?;
+        let output = ArrowEngineData::try_from_engine_data(output)?;
+        let timestamps = output
+            .record_batch()
+            .column(0)
+            .as_any()
+            .downcast_ref::<TimestampMicrosecondArray>()
+            .unwrap();
+        assert!(timestamps.is_valid(0));
+        assert_eq!(timestamps.value(0), expected);
+        Ok(())
     }
 
     #[test]

@@ -5,14 +5,19 @@
 //! implementation lowers those specs into `Expression::StructPatch` expressions.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 
-use crate::expressions::{lit, Expression, ExpressionRef, ExpressionStructPatchBuilder, Scalar};
-use crate::schema::{DataType, SchemaRef, StructType};
+use crate::engine_data::{EngineData, GetData, RowVisitor, TypedGetData as _};
+use crate::expressions::{
+    column_name, lit, ColumnName, Expression, ExpressionRef, ExpressionStructPatchBuilder, Scalar,
+};
+use crate::scan::state_info::StateInfo;
+use crate::schema::{ColumnNamesAndTypes, DataType, MapType, SchemaRef, StructType};
 use crate::table_features::ColumnMappingMode;
+use crate::utils::require;
 use crate::{DeltaResult, Error};
 
 /// A list of field transforms used to convert physical file data to logical scan output.
@@ -83,6 +88,162 @@ pub(crate) enum FieldTransformSpec {
         /// Where to insert/reorder this column
         insert_after: Option<String>,
     },
+}
+
+/// Build per-file transforms, reusing the timestamps used by partition pruning.
+pub(crate) fn build_row_transforms(
+    state: &StateInfo,
+    data: &dyn EngineData,
+    selection: &[bool],
+) -> DeltaResult<Vec<Option<ExpressionRef>>> {
+    let Some(spec) = state
+        .transform_spec
+        .as_deref()
+        .filter(|_| !state.skip_row_transforms)
+    else {
+        return Ok(Vec::new());
+    };
+    if !selection.iter().any(|selected| *selected) && selection.len() == data.len() {
+        return Ok(Vec::new());
+    }
+    let mut timestamps = HashMap::new();
+    for transform in spec {
+        if let FieldTransformSpec::MetadataDerivedColumn { field_index, .. } = transform {
+            let field = state
+                .logical_schema
+                .field_at_index(*field_index)
+                .ok_or_else(|| {
+                    Error::internal_error(format!(
+                        "out of bounds partition column field index {field_index}"
+                    ))
+                })?;
+            if field.data_type() == &DataType::TIMESTAMP {
+                let name = field.physical_name(state.column_mapping_mode);
+                let mut visitor = TimestampPartitionVisitor {
+                    selection,
+                    values: Vec::new(),
+                };
+                data.visit_rows(
+                    &[ColumnName::new(["partitionValues_parsed", name])],
+                    &mut visitor,
+                )?;
+                timestamps.insert(*field_index, (name.to_string(), visitor.values));
+            }
+        }
+    }
+    let mut visitor = RowTransformVisitor {
+        state,
+        spec,
+        selection,
+        timestamps,
+        transforms: Vec::new(),
+    };
+    visitor.visit_rows_of(data)?;
+    Ok(visitor.transforms)
+}
+
+struct TimestampPartitionVisitor<'a> {
+    selection: &'a [bool],
+    values: Vec<Scalar>,
+}
+
+impl RowVisitor for TimestampPartitionVisitor<'_> {
+    fn selected_column_names_and_types(&self) -> (&'static [ColumnName], &'static [DataType]) {
+        static COLUMNS: LazyLock<ColumnNamesAndTypes> =
+            LazyLock::new(|| (vec![column_name!("timestamp")], vec![DataType::TIMESTAMP]).into());
+        COLUMNS.as_ref()
+    }
+
+    fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<()> {
+        require!(
+            getters.len() == 1,
+            Error::internal_error("Expected one timestamp getter")
+        );
+        for row in 0..row_count {
+            let value = if self.selection.get(row).copied().unwrap_or(true) {
+                getters[0].get_timestamp(row, "partitionValues_parsed")?
+            } else {
+                None
+            };
+            self.values
+                .push(value.map_or(Scalar::Null(DataType::TIMESTAMP), Scalar::Timestamp));
+        }
+        Ok(())
+    }
+}
+
+struct RowTransformVisitor<'a> {
+    state: &'a StateInfo,
+    spec: &'a TransformSpec,
+    selection: &'a [bool],
+    timestamps: HashMap<usize, (String, Vec<Scalar>)>,
+    transforms: Vec<Option<ExpressionRef>>,
+}
+
+impl RowVisitor for RowTransformVisitor<'_> {
+    fn selected_column_names_and_types(&self) -> (&'static [ColumnName], &'static [DataType]) {
+        static COLUMNS: LazyLock<ColumnNamesAndTypes> = LazyLock::new(|| {
+            let names = vec![
+                column_name!("fileConstantValues.partitionValues"),
+                column_name!("fileConstantValues.baseRowId"),
+                column_name!("fileConstantValues.defaultRowCommitVersion"),
+            ];
+            let types = vec![
+                MapType::new(DataType::STRING, DataType::STRING, true).into(),
+                DataType::LONG,
+                DataType::LONG,
+            ];
+            (names, types).into()
+        });
+        COLUMNS.as_ref()
+    }
+
+    fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<()> {
+        require!(
+            getters.len() == 3,
+            Error::internal_error("Expected three row transform getters")
+        );
+        for row in 0..row_count {
+            if !self.selection.get(row).copied().unwrap_or(true) {
+                continue;
+            }
+            let partition_values = getters[0].get(row, "partitionValues")?;
+            let metadata_values = self
+                .spec
+                .iter()
+                .filter_map(|transform| {
+                    let FieldTransformSpec::MetadataDerivedColumn { field_index, .. } = transform
+                    else {
+                        return None;
+                    };
+                    Some(match self.timestamps.get(field_index) {
+                        Some((name, values)) => {
+                            Ok((*field_index, (name.clone(), values[row].clone())))
+                        }
+                        None => parse_partition_value(
+                            *field_index,
+                            &self.state.logical_schema,
+                            &partition_values,
+                            self.state.column_mapping_mode,
+                        ),
+                    })
+                })
+                .collect::<DeltaResult<HashMap<_, _>>>()?;
+            let transform = get_transform_expr(
+                self.spec,
+                metadata_values,
+                &self.state.physical_schema,
+                FileRowTrackingMetadata {
+                    base_row_id: getters[1].get_long(row, "baseRowId")?,
+                    default_row_commit_version: getters[2]
+                        .get_long(row, "defaultRowCommitVersion")?,
+                },
+            )?;
+            self.transforms.resize_with(row, Default::default);
+            self.transforms.push(Some(transform));
+        }
+        Ok(())
+    }
 }
 
 /// Parse a single partition value from the raw string representation

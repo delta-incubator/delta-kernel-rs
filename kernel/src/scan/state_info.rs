@@ -35,8 +35,8 @@ pub(crate) struct StateInfo {
     /// Physical partition schema with native types for `partitionValues_parsed`. Fields use
     /// physical column names (for column mapping) and are always nullable. Present when the
     /// table has partition columns and either a predicate is provided (narrowed to
-    /// predicate-referenced columns, for partition pruning) or the engine requested the typed
-    /// struct in scan output (all partition columns).
+    /// predicate-referenced columns, for partition pruning), row transforms require partition
+    /// columns, or the engine requested the typed struct in scan output (all partition columns).
     pub(crate) physical_partition_schema: Option<SchemaRef>,
     /// Physical leaf paths eligible for data skipping.
     ///
@@ -264,6 +264,39 @@ fn union_extra_into_filter(filter: &mut Vec<ColumnName>, extra: &[ColumnName]) {
 }
 
 impl StateInfo {
+    /// Include projected timestamp partitions so row transforms and pruning share their values.
+    pub(crate) fn include_row_transform_partitions(&mut self) -> DeltaResult<()> {
+        let mut fields: Vec<_> = self
+            .physical_partition_schema
+            .iter()
+            .flat_map(|schema| schema.fields().cloned())
+            .collect();
+        let mut names: HashSet<_> = fields.iter().map(|field| field.name().clone()).collect();
+        for transform in self.transform_spec.iter().flat_map(|spec| spec.iter()) {
+            if let FieldTransformSpec::MetadataDerivedColumn { field_index, .. } = transform {
+                let field = self
+                    .logical_schema
+                    .field_at_index(*field_index)
+                    .ok_or_else(|| {
+                        Error::internal_error(format!(
+                            "out of bounds partition column field index {field_index}"
+                        ))
+                    })?;
+                if field.data_type() != &DataType::TIMESTAMP {
+                    continue;
+                }
+                let name = field.physical_name(self.column_mapping_mode);
+                if names.insert(name.to_string()) {
+                    fields.push(StructField::nullable(name, field.data_type().clone()));
+                }
+            }
+        }
+        if !fields.is_empty() {
+            self.physical_partition_schema = Some(Arc::new(StructType::try_new(fields)?));
+        }
+        Ok(())
+    }
+
     /// Create StateInfo with a custom field classifier for different scan types.
     /// Get the state needed to process a scan.
     ///

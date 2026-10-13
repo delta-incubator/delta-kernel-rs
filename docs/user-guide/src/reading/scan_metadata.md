@@ -296,10 +296,8 @@ pruning, set the reader timezone with `IncrementalScanBuilder::with_timestamp_ti
 times use the earlier instant, and nonexistent local times use the offset from before the
 transition.
 
-Use `without_row_transforms()` and construct partition columns from the typed output. Kernel's
-partition-column row transforms parse the raw map in UTC and don't reuse native checkpoint values.
-`Scan::execute` uses those row transforms, so it cannot provide the same timestamp interpretation.
-Change data feed scans also retain their default partition-value interpretation.
+Timestamp partition-column row transforms and `Scan::execute` use the same typed values as
+partition pruning. Change data feed scans retain their default partition-value interpretation.
 
 > [!TIP]
 > When the checkpoint already stores typed partition values, Kernel reads that column directly

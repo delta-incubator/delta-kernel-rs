@@ -274,11 +274,10 @@ impl PartitionValuesOptions {
     /// value takes precedence. This option does not affect `TIMESTAMP_NTZ`. It applies to typed
     /// scan metadata and final partition predicate evaluation.
     /// Typed metadata and partition pruning use compatible native checkpoint values unchanged;
-    /// the timezone applies only when parsing the raw map. Partition-column row transforms use
-    /// UTC and do not reuse native checkpoint values. Connectors consuming the typed output should
-    /// use [`ScanBuilder::without_row_transforms`] and construct partition columns from that
-    /// output. Without this option, Kernel interprets offset-less timestamps as UTC. Invalid
-    /// timezone identifiers are reported by the engine when parsing partition values.
+    /// the timezone applies only when parsing the raw map. Timestamp partition-column row
+    /// transforms reuse the same typed values as predicate evaluation. Without this option,
+    /// Kernel interprets offset-less timestamps as UTC. Invalid timezone identifiers are reported
+    /// by the engine when parsing partition values.
     pub fn with_timestamp_timezone(mut self, timestamp_timezone: impl Into<String>) -> Self {
         self.timestamp_timezone = Some(timestamp_timezone.into());
         self
@@ -478,9 +477,11 @@ impl ScanBuilder {
             (), // No classifier, default is for scans
         )?;
 
-        // Retain the transform spec but skip building per-file expressions, which also skips the
-        // per-row partition-value parse done only to build them.
+        // Retain the transform spec even when per-file expressions are disabled.
         state_info.skip_row_transforms = self.without_row_transforms;
+        if !self.without_row_transforms {
+            state_info.include_row_transform_partitions()?;
+        }
 
         let physical_stats_output_schema = build_physical_stats_output_schema(
             self.snapshot.table_configuration(),
