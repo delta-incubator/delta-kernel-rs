@@ -34,6 +34,7 @@ pub struct Imperative {
     pub(super) remove_files_metadata: Vec<FilteredEngineData>,
     // Matched scan files with new DV descriptors and rewritten statistics appended.
     pub(super) dv_matched_files: Vec<FilteredEngineData>,
+    // Number of selected files within dv_matched_files (after selection vector is applied)
     pub(super) num_dv_updates: usize,
 }
 

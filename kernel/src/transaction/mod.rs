@@ -706,9 +706,10 @@ impl<STATE, MODE: ExecutionMode> Transaction<STATE, MODE> {
     /// Called by [`write_state`](Self::write_state), before any Parquet is written, so connectors
     /// fail fast when the schema contains unsupported data types or void placements that cannot
     /// produce valid files.
-    /// The commit-time check in [`commit`](Transaction::commit) remains as defense-in-depth for
-    /// callers that reach [`add_files`](Transaction::add_files) without going through write
-    /// state.
+    ///
+    /// We perform this same check during [`commit`](Transaction::commit) as defense-in-depth, for
+    /// callers that directly use [`add_files`](Transaction::add_files) without going through
+    /// [`write_state`](Self::write_state)
     fn validate_for_data_write(&self) -> KernelResult<()> {
         validate_schema_for_write(&self.effective_table_config.logical_schema())
     }
@@ -3195,6 +3196,8 @@ mod tests {
             Transaction::scan_metadata_to_engine_data(scan.scan_metadata(&engine)?),
         )?;
 
+        // Since we staged a DV update (with no files matched), the transaction bypasses
+        // row-tracking + CDF checks and does not require explicit row tracking acknowledgement.
         assert!(txn.has_data_file_actions());
         assert!(!txn.staged_data_changes.has_dv_updates());
         txn.effective_table_config = MockTableConfigurationBuilder::new()
@@ -3208,6 +3211,8 @@ mod tests {
         add_dummy_file(&mut txn);
         txn.validate_commit()?;
 
+        // Blind append validations only consider staged DV updates (not whether any selection
+        // vector actually matched), so a blind append is still disallowed.
         txn.is_blind_append = true;
         assert_result_error_with_message(
             txn.validate_commit(),
