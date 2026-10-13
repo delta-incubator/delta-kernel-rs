@@ -432,7 +432,7 @@ mod tests {
         miri,
         ignore = "local-filesystem commit calls `linkat`, unsupported under Miri"
     )]
-    async fn test_basic_append() -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_basic_append() -> KernelResult<(), Box<dyn std::error::Error>> {
         let schema = schema_ref! {
             nullable "number": INTEGER,
             nullable "string": STRING,
@@ -1248,7 +1248,7 @@ mod tests {
             .unwrap();
         Deserializer::from_slice(&data.bytes().await.unwrap())
             .into_iter::<serde_json::Value>()
-            .map(Result::unwrap)
+            .map(KernelResult::unwrap)
             .find(|action| action.get("commitInfo").is_some())
             .expect("commit should contain a commitInfo action")
     }
@@ -1266,7 +1266,7 @@ mod tests {
             .unwrap();
         Deserializer::from_slice(&data.bytes().await.unwrap())
             .into_iter::<serde_json::Value>()
-            .map(Result::unwrap)
+            .map(KernelResult::unwrap)
             .find(|action| action.get("txn").is_some())
             .expect("commit should contain a txn action")
     }

@@ -1498,7 +1498,7 @@ impl EncoderFactory for NullValueMapEncoderFactory {
         field: &'a ArrowFieldRef,
         array: &'a dyn ArrowArray,
         _options: &'a EncoderOptions,
-    ) -> Result<Option<NullableEncoder<'a>>, crate::arrow::error::ArrowError> {
+    ) -> KernelResult<Option<NullableEncoder<'a>>, crate::arrow::error::ArrowError> {
         // `make_encoder` needs a new `EncoderOptions` in order to set `with_explicit_nulls`. The
         // lifetime of the created encoder becomes tied to the lifetime of the `EncoderOptions`,
         // and local options would be freed here. We also can't put the options inside the

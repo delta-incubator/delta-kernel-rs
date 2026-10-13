@@ -65,7 +65,7 @@ fn add_column_defaults_feature_commit(
     let mut actions = initial_commit
         .lines()
         .map(serde_json::from_str::<serde_json::Value>)
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect::<KernelResult<Vec<_>, _>>()?;
     let protocol = {
         let protocol = actions
             .iter_mut()
@@ -756,7 +756,7 @@ async fn test_defaulted_clustering_column_round_trips_with_stats() -> KernelResu
 #[tokio::test(flavor = "multi_thread")]
 async fn test_column_default_round_trips_with_column_mapping_and_checkpoint(
     #[case] column_mapping_mode: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> KernelResult<(), Box<dyn std::error::Error>> {
     let base = schema! {
         nullable "id": LONG,
         nullable "c": INTEGER,

@@ -53,7 +53,7 @@ impl StorageHandler for SyncStorageHandler {
                 .collect::<Vec<_>>(),
         )
         .into_iter()
-        .collect::<Result<_, _>>()?;
+        .collect::<KernelResult<_, _>>()?;
         metas.sort_unstable_by(|a, b| a.location.cmp(&b.location));
 
         let iter = metas.into_iter().map(move |meta| {

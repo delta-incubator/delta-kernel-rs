@@ -417,7 +417,7 @@ impl ArrowEngineData {
                     .then_some(array as _)
             })
         };
-        let result: Result<&'a dyn GetData<'a>, _> = match data_type {
+        let result: KernelResult<&'a dyn GetData<'a>, _> = match data_type {
             &DataType::BOOLEAN => {
                 debug!("Pushing boolean array for {}", ColumnName::new(path));
                 col.as_boolean_opt()

@@ -926,7 +926,7 @@ impl StructType {
     /// This constructor collects all fields from the iterator, returning the first error
     /// encountered, or a new [`StructType`] if all fields are successfully collected and validated.
     pub fn try_from_results<E: Into<KernelError>>(
-        fields: impl IntoIterator<Item = Result<StructField, E>>,
+        fields: impl IntoIterator<Item = KernelResult<StructField, E>>,
     ) -> KernelResult<Self> {
         fields
             .into_iter()
@@ -1545,9 +1545,9 @@ impl DoubleEndedIterator for StructFieldRefIter<'_> {
 struct InvariantChecker;
 
 impl<'a> SchemaTransform<'a> for InvariantChecker {
-    transform_output_type!(|'a, T| Result<(), ()>);
+    transform_output_type!(|'a, T| KernelResult<(), ()>);
 
-    fn transform_struct_field(&mut self, field: &'a StructField) -> Result<(), ()> {
+    fn transform_struct_field(&mut self, field: &'a StructField) -> KernelResult<(), ()> {
         if field.has_invariants() {
             Err(())
         } else {
@@ -1569,16 +1569,16 @@ pub(crate) fn schema_has_invariants(schema: &Schema) -> bool {
 struct NonNullFieldChecker;
 
 impl<'a> SchemaTransform<'a> for NonNullFieldChecker {
-    transform_output_type!(|'a, T| Result<(), ()>);
+    transform_output_type!(|'a, T| KernelResult<(), ()>);
 
     /// Skip recursion into variant internals. The `metadata` and `value` fields inside a
     /// `Variant` are protocol-defined, always non-null, and not user-controlled, so they
     /// must not be treated as user-declared non-null columns.
-    fn transform_variant(&mut self, _stype: &'a StructType) -> Result<(), ()> {
+    fn transform_variant(&mut self, _stype: &'a StructType) -> KernelResult<(), ()> {
         Ok(())
     }
 
-    fn transform_struct_field(&mut self, field: &'a StructField) -> Result<(), ()> {
+    fn transform_struct_field(&mut self, field: &'a StructField) -> KernelResult<(), ()> {
         if !field.is_nullable() {
             return Err(());
         }
@@ -1660,7 +1660,7 @@ struct StructTypeSerDeHelper {
 }
 
 impl Serialize for StructType {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    fn serialize<S>(&self, serializer: S) -> KernelResult<S::Ok, S::Error>
     where
         S: serde::Serializer,
     {
@@ -1673,7 +1673,7 @@ impl Serialize for StructType {
 }
 
 impl<'de> Deserialize<'de> for StructType {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    fn deserialize<D>(deserializer: D) -> KernelResult<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
         Self: Sized,
@@ -2083,7 +2083,7 @@ pub(crate) enum CheckpointFieldKind {
 fn serialize_decimal<S: serde::Serializer>(
     dtype: &DecimalType,
     serializer: S,
-) -> Result<S::Ok, S::Error> {
+) -> KernelResult<S::Ok, S::Error> {
     serializer.serialize_str(&format!("decimal({},{})", dtype.precision(), dtype.scale()))
 }
 
@@ -2091,14 +2091,14 @@ fn serialize_decimal<S: serde::Serializer>(
 fn serialize_geotype<T: std::fmt::Display, S: serde::Serializer>(
     value: &T,
     serializer: S,
-) -> Result<S::Ok, S::Error> {
+) -> KernelResult<S::Ok, S::Error> {
     serializer.serialize_str(&value.to_string())
 }
 
 fn serialize_variant<S: serde::Serializer>(
     _: &StructType,
     serializer: S,
-) -> Result<S::Ok, S::Error> {
+) -> KernelResult<S::Ok, S::Error> {
     serializer.serialize_str("variant")
 }
 
@@ -2160,7 +2160,7 @@ fn normalize_interval_type(s: &str) -> Option<PrimitiveType> {
 // The derived impl would produce: "unknown variant `interval second`, expected one of ..."
 // This impl produces: "Unsupported Delta table type: 'interval second'"
 impl<'de> serde::Deserialize<'de> for PrimitiveType {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    fn deserialize<D>(deserializer: D) -> KernelResult<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
@@ -2327,7 +2327,7 @@ impl From<SchemaRef> for DataType {
 // clear "Unsupported Delta table type: 'X'" message. We deserialize to Value first, then
 // dispatch based on structure (string -> Primitive/Variant, object -> Array/Struct/Map).
 impl<'de> serde::Deserialize<'de> for DataType {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    fn deserialize<D>(deserializer: D) -> KernelResult<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
@@ -2477,7 +2477,7 @@ impl DataType {
 
     /// Create a new struct type from a fallible iterator of fields.
     pub fn try_struct_type_from_results<E: Into<KernelError>>(
-        fields: impl IntoIterator<Item = Result<StructField, E>>,
+        fields: impl IntoIterator<Item = KernelResult<StructField, E>>,
     ) -> KernelResult<Self> {
         StructType::try_from_results(fields).map(Self::from)
     }
@@ -2834,7 +2834,8 @@ mod tests {
     #[case("geography(vincenty)", "expected 'geography(<crs>, <algorithm>)'")]
     #[case("geography(EPSG:4326, vincenty, karney)", "Matching variant not found")]
     fn test_invalid_geo_format(#[case] invalid_type: &str, #[case] expected_error: &str) {
-        let result: Result<StructField, _> = serde_json::from_str(&geo_field_json(invalid_type));
+        let result: KernelResult<StructField, _> =
+            serde_json::from_str(&geo_field_json(invalid_type));
         let err = result.expect_err(&format!("expected '{invalid_type}' to be rejected"));
         assert!(
             err.to_string().contains(expected_error),
@@ -3107,7 +3108,7 @@ mod tests {
                 "metadata": {{}}
             }}"#
         );
-        let result: Result<StructField, _> = serde_json::from_str(&data);
+        let result: KernelResult<StructField, _> = serde_json::from_str(&data);
         assert!(result.is_err());
         let err = result.unwrap_err();
         let expected_msg = format!("Unsupported Delta table type: '{unsupported_type}'");
@@ -3193,7 +3194,7 @@ mod tests {
                 "metadata": {{}}
             }}"#
         );
-        let result: Result<StructField, _> = serde_json::from_str(&data);
+        let result: KernelResult<StructField, _> = serde_json::from_str(&data);
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(
@@ -3527,11 +3528,11 @@ mod tests {
     #[test]
     fn test_read_schemas() {
         let file = std::fs::File::open("./tests/serde/schema.json").unwrap();
-        let schema: Result<Schema, _> = serde_json::from_reader(file);
+        let schema: KernelResult<Schema, _> = serde_json::from_reader(file);
         assert!(schema.is_ok());
 
         let file = std::fs::File::open("./tests/serde/checkpoint_schema.json").unwrap();
-        let schema: Result<Schema, _> = serde_json::from_reader(file);
+        let schema: KernelResult<Schema, _> = serde_json::from_reader(file);
         assert!(schema.is_ok())
     }
 

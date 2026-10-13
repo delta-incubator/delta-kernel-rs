@@ -213,8 +213,8 @@ fn require_map_compatibility(
 fn protocols_equal(
     actual: &delta_kernel::actions::Protocol,
     expected: &delta_kernel::actions::Protocol,
-) -> Result<bool, String> {
-    fn normalized(protocol: &delta_kernel::actions::Protocol) -> Result<Value, String> {
+) -> KernelResult<bool, String> {
+    fn normalized(protocol: &delta_kernel::actions::Protocol) -> KernelResult<Value, String> {
         let mut value = serde_json::to_value(protocol).map_err(|error| error.to_string())?;
         for name in ["readerFeatures", "writerFeatures"] {
             if let Some(features) = value.get_mut(name).and_then(Value::as_array_mut) {
@@ -330,7 +330,7 @@ fn expected_error_matches(expected: &ExpectedError, actual: &Error) -> bool {
     }
 }
 
-fn validate_expected_error(actual: &Error, expected: &ExpectedError) -> Result<(), String> {
+fn validate_expected_error(actual: &Error, expected: &ExpectedError) -> KernelResult<(), String> {
     if expected_error_matches(expected, actual) {
         debug!(
             "Got expected error '{}' with message: {:?}\nKernel error: {}",
@@ -346,7 +346,7 @@ fn validate_expected_error(actual: &Error, expected: &ExpectedError) -> Result<(
 }
 
 /// Read expected data from parquet files in expected_dir/expected_data/.
-fn read_expected_data(expected_dir: &Path) -> Result<RecordBatch, String> {
+fn read_expected_data(expected_dir: &Path) -> KernelResult<RecordBatch, String> {
     let expected_data_dir = expected_dir.join("expected_data");
     if !expected_data_dir.exists() {
         return Err(format!(
@@ -408,7 +408,7 @@ pub fn validate_read_result(
     result: KernelResult<ReadResult>,
     expected_dir: &Path,
     expected: &ReadExpected,
-) -> Result<(), String> {
+) -> KernelResult<(), String> {
     match (result, expected) {
         (Ok(read_result), ReadExpected::Success { expected: exp }) => {
             // TODO: Check file_count and files_skipped against scan metrics once available.
@@ -452,7 +452,7 @@ pub fn validate_snapshot(
     result: KernelResult<SnapshotResult>,
     time_travel: Option<&TimeTravel>,
     expected: &SnapshotExpected,
-) -> Result<(), String> {
+) -> KernelResult<(), String> {
     match (result, expected) {
         (Ok(snapshot_result), SnapshotExpected::Success { expected }) => {
             if let Some(TimeTravel::Version { version }) = time_travel {

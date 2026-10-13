@@ -97,7 +97,7 @@ pub(crate) fn add_scalar_path_context(
 pub type Result<T, E = KernelError> = std::result::Result<T, E>;
 
 /// A result whose error is a [`KernelError`].
-pub type KernelResult<T> = std::result::Result<T, KernelError>;
+pub type KernelResult<T, E = KernelError> = std::result::Result<T, E>;
 
 /// A boxed, `Send` iterator of [`KernelResult<T>`] items.
 pub type KernelResultIterator<'a, T> = Box<dyn Iterator<Item = KernelResult<T>> + Send + 'a>;

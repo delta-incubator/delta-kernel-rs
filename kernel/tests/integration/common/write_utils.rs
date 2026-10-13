@@ -167,7 +167,7 @@ pub fn validate_timestamp(commit_info: &serde_json::Value) {
 /// Check that the timestamps in commit_info and add actions are within 10s of SystemTime::now().
 pub fn check_action_timestamps<'a>(
     parsed_commits: impl Iterator<Item = &'a serde_json::Value>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> KernelResult<(), Box<dyn std::error::Error>> {
     let now: i64 = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_millis()

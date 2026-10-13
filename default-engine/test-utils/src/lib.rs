@@ -58,7 +58,7 @@ pub fn current_time_ms() -> KernelResult<i64> {
 
 /// Assert that `res` is an `Err` whose `Display` contains `message`.
 #[track_caller]
-pub fn assert_result_error_with_message<T, E: ToString>(res: Result<T, E>, message: &str) {
+pub fn assert_result_error_with_message<T, E: ToString>(res: KernelResult<T, E>, message: &str) {
     match res {
         Ok(_) => panic!("Expected error containing '{message}', but got Ok result"),
         Err(e) => {

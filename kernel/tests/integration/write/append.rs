@@ -35,7 +35,7 @@ use crate::common::write_utils::{
 };
 
 #[tokio::test]
-async fn test_append() -> Result<(), Box<dyn std::error::Error>> {
+async fn test_append() -> KernelResult<(), Box<dyn std::error::Error>> {
     // setup tracing
     let _ = tracing_subscriber::fmt::try_init();
     // create a simple table: one int column named 'number'
@@ -199,7 +199,7 @@ async fn test_append_twice() -> KernelResult<()> {
 #[tokio::test]
 async fn test_append_partitioned(
     #[case] transport_write_state: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> KernelResult<(), Box<dyn std::error::Error>> {
     // setup tracing
     let _ = tracing_subscriber::fmt::try_init();
 

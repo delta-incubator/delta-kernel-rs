@@ -2144,7 +2144,7 @@ async fn test_remove_files_partitioned_with_parsed_columns(
 fn modify_staged_remove_file(
     batch: &RecordBatch,
     modification: StagedRemoveFileModification,
-) -> Result<RecordBatch, ArrowError> {
+) -> KernelResult<RecordBatch, ArrowError> {
     let field_index = batch.schema().index_of(modification.field)?;
     let modified_value = match modification.value {
         StagedRemoveFileFieldValue::Null => {

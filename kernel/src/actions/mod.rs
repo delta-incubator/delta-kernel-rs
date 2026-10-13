@@ -1090,7 +1090,7 @@ pub(crate) struct Add {
 
 fn deserialize_partition_values<'de, D>(
     deserializer: D,
-) -> Result<HashMap<String, String>, D::Error>
+) -> KernelResult<HashMap<String, String>, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -1103,7 +1103,7 @@ where
             formatter.write_str("a map of nullable partition values")
         }
 
-        fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+        fn visit_map<A>(self, mut map: A) -> KernelResult<Self::Value, A::Error>
         where
             A: MapAccess<'de>,
         {
@@ -1578,7 +1578,7 @@ impl Serialize for CheckpointAction {
     /// `try_into_scalar` (`checkpointMetadata`, `contentRoot`, `protocol`, `metaData`,
     /// then `txn`, `domainMetadata`, and the `txn`/`domainMetadata` sidecars). Validates first,
     /// so an invalid action can never be written through serde either.
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> KernelResult<S::Ok, S::Error> {
         self.validate().map_err(serde::ser::Error::custom)?;
         let checkpoint_metadata = CheckpointMetadata {
             version: self.version,
@@ -1630,7 +1630,7 @@ impl<'de> Deserialize<'de> for CheckpointAction {
     /// checkpointMetadata.version` invariant. The one intended difference is unknown elements:
     /// this path fails closed on an unrecognized element key (see [`CheckpointActionElement`]),
     /// whereas the visitor skips it for forward compatibility.
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> KernelResult<Self, D::Error> {
         let elements = Vec::<CheckpointActionElement>::deserialize(deserializer)?;
         Self::from_elements(elements).map_err(serde::de::Error::custom)
     }
@@ -3242,7 +3242,7 @@ mod tests {
         #[case] path: &str,
         #[case] size_in_bytes: i64,
         #[case] expected_location: &str,
-        #[case] expected: Result<FileSize, &str>,
+        #[case] expected: KernelResult<FileSize, &str>,
     ) {
         let table_root = Url::parse(table_root).unwrap();
         let checkpoint_action = CheckpointAction {

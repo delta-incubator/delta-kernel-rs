@@ -380,7 +380,7 @@ pub struct ScanBuilder {
 }
 
 impl std::fmt::Debug for ScanBuilder {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> KernelResult<(), std::fmt::Error> {
         f.debug_struct("ScanBuilder")
             .field("logical_read_schema", &self.logical_read_schema)
             .field("predicate", &self.predicate)
@@ -878,7 +878,7 @@ fn build_stats_output_schemas(
 }
 
 impl std::fmt::Debug for Scan {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> KernelResult<(), std::fmt::Error> {
         f.debug_struct("Scan")
             .field("schema", &self.state_info.logical_schema)
             .field("predicate", &self.state_info.physical_predicate)

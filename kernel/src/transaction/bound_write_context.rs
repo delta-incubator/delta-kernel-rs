@@ -607,7 +607,7 @@ mod tests {
     #[case::error_different_host("s3://other-bucket/table/abc.parquet", Err(()))]
     #[case::error_outside_table_root("s3://bucket/other/abc.parquet", Err(()))]
     #[test]
-    fn test_resolve_file_path(#[case] file_url: &str, #[case] expected: Result<&str, ()>) {
+    fn test_resolve_file_path(#[case] file_url: &str, #[case] expected: KernelResult<&str, ()>) {
         let wc = make_write_context(ColumnMappingMode::None, vec![], HashMap::new(), false, 2);
         let file = Url::parse(file_url).unwrap();
         match expected {

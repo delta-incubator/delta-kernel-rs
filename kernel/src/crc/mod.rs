@@ -227,7 +227,7 @@ impl Crc {
 /// Refuses to serialize a degraded (non-`Complete`) CRC, so an invalid state can never
 /// round-trip through disk.
 impl Serialize for Crc {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> KernelResult<S::Ok, S::Error> {
         CrcRaw::try_from(self)
             .map_err(serde::ser::Error::custom)?
             .serialize(serializer)
@@ -401,7 +401,7 @@ impl TryFrom<&Crc> for CrcRaw {
 /// ensuring malformed CRC files are rejected rather than causing panics later.
 fn de_validated_file_size_histogram<'de, D>(
     deserializer: D,
-) -> Result<Option<FileSizeHistogram>, D::Error>
+) -> KernelResult<Option<FileSizeHistogram>, D::Error>
 where
     D: Deserializer<'de>,
 {

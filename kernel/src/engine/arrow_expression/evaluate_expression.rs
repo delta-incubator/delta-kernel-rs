@@ -322,7 +322,7 @@ pub fn evaluate_expression(
             let left_arr = evaluate_expression(left.as_ref(), batch, None)?;
             let right_arr = evaluate_expression(right.as_ref(), batch, None)?;
 
-            type Operation = fn(&dyn Datum, &dyn Datum) -> Result<ArrayRef, ArrowError>;
+            type Operation = fn(&dyn Datum, &dyn Datum) -> KernelResult<ArrayRef, ArrowError>;
             let eval: Operation = match op {
                 Plus => add,
                 Minus => sub,
@@ -753,7 +753,8 @@ pub fn evaluate_predicate(
             // In case of an empty junction, we return a default value of TRUE (FALSE) for AND (OR),
             // as a "hidden" extra child: AND(TRUE, ...) = AND(...) and OR(FALSE, ...) = OR(...).
             use JunctionPredicateOp::*;
-            type Operation = fn(&BooleanArray, &BooleanArray) -> Result<BooleanArray, ArrowError>;
+            type Operation =
+                fn(&BooleanArray, &BooleanArray) -> KernelResult<BooleanArray, ArrowError>;
             let (reducer, default): (Operation, _) = match (op, inverted) {
                 (And, false) | (Or, true) => (and_kleene, true),
                 (Or, false) | (And, true) => (or_kleene, false),
@@ -793,7 +794,7 @@ const STATS_TIMESTAMP_NTZ_FORMAT: &str = "%Y-%m-%dT%H:%M:%S%.3f";
 
 /// Converts a StructArray to JSON-encoded strings
 #[internal_api]
-pub(crate) fn to_json(input: &dyn Datum) -> Result<ArrayRef, ArrowError> {
+pub(crate) fn to_json(input: &dyn Datum) -> KernelResult<ArrayRef, ArrowError> {
     let (array_ref, _is_scalar) = input.get();
     match array_ref.data_type() {
         ArrowDataType::Struct(_) => {
@@ -881,7 +882,7 @@ pub(crate) fn to_json(input: &dyn Datum) -> Result<ArrayRef, ArrowError> {
 fn coalesce_arrays(
     arrays: &[ArrayRef],
     result_type: Option<&DataType>,
-) -> Result<ArrayRef, ArrowError> {
+) -> KernelResult<ArrayRef, ArrowError> {
     let Some((first, rest)) = arrays.split_first() else {
         return Err(ArrowError::InvalidArgumentError(
             "The default engine currently does not support empty COALESCE statements".into(),

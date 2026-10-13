@@ -428,7 +428,7 @@ impl IntoArray for Vec<&'static str> {
 
 /// Generate a record batch from an iterator over (name, array) pairs. Each pair specifies a column
 /// name and the array to associate with it
-pub fn generate_batch<I, F>(items: I) -> Result<RecordBatch, ArrowError>
+pub fn generate_batch<I, F>(items: I) -> KernelResult<RecordBatch, ArrowError>
 where
     I: IntoIterator<Item = (F, ArrayRef)>,
     F: AsRef<str>,
@@ -438,7 +438,7 @@ where
 
 /// Generate a RecordBatch with two columns (id: int, val: str), with values "1,2,3" and "a,b,c"
 /// respectively
-pub fn generate_simple_batch() -> Result<RecordBatch, ArrowError> {
+pub fn generate_simple_batch() -> KernelResult<RecordBatch, ArrowError> {
     generate_batch(vec![
         ("id", vec![1, 2, 3].into_arrow_array()),
         ("val", vec!["a", "b", "c"].into_arrow_array()),
@@ -1357,7 +1357,7 @@ pub fn set_json_value(
     value: &mut serde_json::Value,
     path: &str,
     new_value: serde_json::Value,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> KernelResult<(), Box<dyn std::error::Error>> {
     let mut path_string = path.replace(".", "/");
     path_string.insert(0, '/');
     let v = value
@@ -1517,7 +1517,7 @@ pub fn cm_properties(mode: &str) -> Vec<(&str, &str)> {
 pub fn resolve_field<'a>(
     schema: &'a delta_kernel::schema::StructType,
     path: &[impl AsRef<str>],
-) -> Result<&'a delta_kernel::schema::StructField, String> {
+) -> KernelResult<&'a delta_kernel::schema::StructField, String> {
     let path_str: Vec<&str> = path.iter().map(|s| s.as_ref()).collect();
     let display = path_str.join(".");
     let (last, rest) = path.split_last().ok_or_else(|| "empty path".to_string())?;
@@ -1549,7 +1549,7 @@ pub fn assert_schema_has_field(schema: &delta_kernel::schema::StructType, path: 
     resolve_field(schema, path).unwrap();
 }
 
-pub fn assert_result_error_with_message<T, E: ToString>(res: Result<T, E>, message: &str) {
+pub fn assert_result_error_with_message<T, E: ToString>(res: KernelResult<T, E>, message: &str) {
     match res {
         Ok(_) => panic!("Expected error, but got Ok result"),
         Err(error) => {

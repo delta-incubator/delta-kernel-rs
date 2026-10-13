@@ -2175,7 +2175,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_timestamp_with_ict_disabled() -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_timestamp_with_ict_disabled() -> KernelResult<(), Box<dyn std::error::Error>> {
         let store = Arc::new(InMemory::new());
         let table_root = "memory://test/";
         let engine = SyncEngine::new_with_store(store.clone());
@@ -2194,8 +2194,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_timestamp_with_ict_enablement_timeline() -> Result<(), Box<dyn std::error::Error>>
-    {
+    async fn test_timestamp_with_ict_enablement_timeline(
+    ) -> KernelResult<(), Box<dyn std::error::Error>> {
         let store = Arc::new(InMemory::new());
         let table_root = "memory://test/";
         let engine = SyncEngine::new_with_store(store.clone());

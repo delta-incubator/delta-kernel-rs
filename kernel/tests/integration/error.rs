@@ -1,6 +1,7 @@
 use std::backtrace::Backtrace;
 use std::error::Error as StdError;
 use std::io;
+use std::num::{IntErrorKind, ParseIntError};
 
 use delta_kernel::{Error, KernelError, KernelResult};
 use rstest::rstest;
@@ -43,6 +44,12 @@ fn test_kernel_result_explicitly_maps_into_error() {
     assert!(
         matches!(error, Error::Kernel(KernelError::FileNotFound(path)) if path == "missing.parquet")
     );
+}
+
+#[test]
+fn test_kernel_result_preserves_custom_error() {
+    let result: KernelResult<u64, ParseIntError> = "invalid".parse();
+    assert_eq!(result.unwrap_err().kind(), &IntErrorKind::InvalidDigit);
 }
 
 #[rstest]

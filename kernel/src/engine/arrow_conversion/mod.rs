@@ -698,7 +698,7 @@ mod tests {
         true,
     )))]
     fn test_geo_type_arrow_conversion_unsupported(#[case] dt: DataType) {
-        let result: Result<ArrowDataType, _> = (&dt).try_into_arrow();
+        let result: KernelResult<ArrowDataType, _> = (&dt).try_into_arrow();
         let err = result.unwrap_err();
         assert!(matches!(err, ArrowError::SchemaError(_)), "got: {err:?}");
     }

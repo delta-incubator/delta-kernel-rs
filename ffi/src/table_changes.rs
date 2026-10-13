@@ -465,7 +465,7 @@ mod tests {
         Ok(())
     }
 
-    pub fn generate_batch_with_id(start_i: i32) -> Result<RecordBatch, ArrowError> {
+    pub fn generate_batch_with_id(start_i: i32) -> KernelResult<RecordBatch, ArrowError> {
         generate_batch(vec![
             (
                 "id",

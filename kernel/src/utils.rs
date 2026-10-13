@@ -175,8 +175,8 @@ pub(crate) trait FoldWithOption: Sized {
     fn try_fold_with<U, E>(
         self,
         opt: Option<U>,
-        f: impl FnOnce(Self, U) -> Result<Self, E>,
-    ) -> Result<Self, E> {
+        f: impl FnOnce(Self, U) -> KernelResult<Self, E>,
+    ) -> KernelResult<Self, E> {
         match opt {
             Some(value) => f(self, value),
             None => Ok(self),

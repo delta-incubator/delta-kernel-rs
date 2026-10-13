@@ -194,7 +194,7 @@ pub fn execute_and_validate_workload(
     table_root: &Url,
     spec: &Spec,
     expected_dir: &std::path::Path,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> KernelResult<(), Box<dyn std::error::Error>> {
     match spec {
         Spec::Read(read_spec) => {
             let expected = read_spec

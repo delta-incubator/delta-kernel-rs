@@ -425,14 +425,16 @@ pub struct OpaquePredicate {
 fn fail_serialize_opaque_predicate<S>(
     _value: &OpaquePredicate,
     _serializer: S,
-) -> Result<S::Ok, S::Error>
+) -> KernelResult<S::Ok, S::Error>
 where
     S: Serializer,
 {
     Err(ser::Error::custom("Cannot serialize an Opaque Predicate"))
 }
 
-fn fail_deserialize_opaque_predicate<'de, D>(_deserializer: D) -> Result<OpaquePredicate, D::Error>
+fn fail_deserialize_opaque_predicate<'de, D>(
+    _deserializer: D,
+) -> KernelResult<OpaquePredicate, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -474,7 +476,7 @@ impl OpaqueExpression {
 fn fail_serialize_opaque_expression<S>(
     _value: &OpaqueExpression,
     _serializer: S,
-) -> Result<S::Ok, S::Error>
+) -> KernelResult<S::Ok, S::Error>
 where
     S: Serializer,
 {
@@ -483,7 +485,7 @@ where
 
 fn fail_deserialize_opaque_expression<'de, D>(
     _deserializer: D,
-) -> Result<OpaqueExpression, D::Error>
+) -> KernelResult<OpaqueExpression, D::Error>
 where
     D: Deserializer<'de>,
 {

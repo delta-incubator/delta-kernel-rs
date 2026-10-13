@@ -117,7 +117,7 @@ pub(crate) enum CheckpointType {
 // fires if a read-in hint is ever serialized back -- in which case failing closed is correct.
 #[cfg(feature = "adaptive-metadata-in-dev")]
 impl Serialize for CheckpointType {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> KernelResult<S::Ok, S::Error> {
         match self {
             CheckpointType::AdaptiveMetadataTree => {
                 serializer.serialize_str("AdaptiveMetadataTree")

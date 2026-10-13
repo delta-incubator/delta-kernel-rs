@@ -2174,7 +2174,7 @@ mod tests {
         obj["new_field"] = serde_json::json!("my_new_value");
         let invalid_blob = obj.to_string();
 
-        let res: Result<InternalScanState, _> = serde_json::from_str(&invalid_blob);
+        let res: KernelResult<InternalScanState, _> = serde_json::from_str(&invalid_blob);
         assert_result_error_with_message(res, "unknown field");
     }
 
@@ -2191,7 +2191,7 @@ mod tests {
         obj["new_field"] = serde_json::json!("my_new_value");
         let invalid_blob = obj.to_string();
 
-        let res: Result<SerializableScanState, _> = serde_json::from_str(&invalid_blob);
+        let res: KernelResult<SerializableScanState, _> = serde_json::from_str(&invalid_blob);
         assert_result_error_with_message(res, "unknown field");
     }
 

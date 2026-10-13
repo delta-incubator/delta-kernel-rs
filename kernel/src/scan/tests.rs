@@ -1589,7 +1589,7 @@ fn surviving_ids(parquet_bytes: Bytes, pred: &Pred) -> Vec<i64> {
     let mut ids: Vec<i64> = builder
         .build()
         .unwrap()
-        .map(Result::unwrap)
+        .map(KernelResult::unwrap)
         .flat_map(|batch| {
             let add = batch
                 .column(0)

@@ -114,7 +114,7 @@ fn get_timestamp_search_bounds(
     snapshot: &Snapshot,
     log_segment: &LogSegment,
     timestamp: Timestamp,
-) -> Result<TimestampSearchBounds, LogHistoryError> {
+) -> KernelResult<TimestampSearchBounds, LogHistoryError> {
     debug_assert!(log_segment.end_version == snapshot.version());
     let table_config = snapshot.table_configuration();
 
@@ -215,7 +215,7 @@ fn linear_search_file_mod_timestamps(
     commits: &[ParsedLogPath],
     timestamp: Timestamp,
     bound: Bound,
-) -> Result<CommitAt, LogHistoryError> {
+) -> KernelResult<CommitAt, LogHistoryError> {
     if commits.is_empty() {
         return Err(LogHistoryError::out_of_range(
             timestamp,
@@ -287,7 +287,7 @@ fn binary_search_ict_timestamps(
     timestamp: Timestamp,
     bound: Bound,
     engine: &dyn Engine,
-) -> Result<CommitAt, LogHistoryError> {
+) -> KernelResult<CommitAt, LogHistoryError> {
     if commits.is_empty() {
         return Err(LogHistoryError::out_of_range(
             timestamp,
@@ -303,7 +303,7 @@ fn binary_search_ict_timestamps(
         hi_version, "ICT binary search over version range"
     );
 
-    let commit_to_ict = |commit: &ParsedLogPath| -> Result<Timestamp, LogHistoryError> {
+    let commit_to_ict = |commit: &ParsedLogPath| -> KernelResult<Timestamp, LogHistoryError> {
         commit
             .read_in_commit_timestamp(engine)
             .map_err(|e| LogHistoryError::internal("failed to read in-commit timestamp", e))
@@ -384,7 +384,7 @@ pub(crate) fn timestamp_to_version(
     timestamp: Timestamp,
     bound: Bound,
     resolved_commit_type: HistoryCommitType,
-) -> Result<CommitAt, LogHistoryError> {
+) -> KernelResult<CommitAt, LogHistoryError> {
     // Short-circuit: compare against snapshot's timestamp to avoid log segment rebuild.
     // This optimization mirrors Delta Spark and Java Kernel behavior.
     let snap_ts = snapshot
@@ -1597,7 +1597,7 @@ mod tests {
     async fn test_timestamp_range_to_versions(
         #[case] start: Timestamp,
         #[case] end: Option<Timestamp>,
-        #[case] expected: Result<(Version, Option<Version>), ()>,
+        #[case] expected: KernelResult<(Version, Option<Version>), ()>,
     ) {
         let timestamps = [
             (50, None),
@@ -2018,7 +2018,7 @@ mod tests {
     async fn test_timestamp_range_file_mod_only(
         #[case] start: Timestamp,
         #[case] end: Option<Timestamp>,
-        #[case] expected: Result<(Version, Option<Version>), ()>,
+        #[case] expected: KernelResult<(Version, Option<Version>), ()>,
     ) {
         let table =
             mock_table_with_timestamps(&[(100, None), (200, None), (300, None)], None).await;
@@ -2047,7 +2047,7 @@ mod tests {
     async fn test_timestamp_range_ict_from_creation(
         #[case] start: Timestamp,
         #[case] end: Option<Timestamp>,
-        #[case] expected: Result<(Version, Option<Version>), ()>,
+        #[case] expected: KernelResult<(Version, Option<Version>), ()>,
     ) {
         let table =
             mock_table_with_timestamps(&[(0, Some(100)), (0, Some(200)), (0, Some(300))], Some(0))
