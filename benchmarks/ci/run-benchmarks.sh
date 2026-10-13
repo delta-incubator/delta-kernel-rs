@@ -27,7 +27,7 @@ shopt -s extglob
 
 # ---------------------------------------------------------------------------
 # 1. Parse the /bench comment
-#    Syntax: /bench [--tags <csv>] [--filter <regex>]
+#    Syntax: /bench [--tags <csv>] [--filter <regex>] [--archive]
 #      --tags    sets BENCH_TAGS (comma-separated tag list); defaults to "base"
 #                when the comment is just /bench (or COMMENT is unset, i.e.
 #                the auto-trigger path)
@@ -42,6 +42,7 @@ ARGS="${ARGS##+( )}"
 
 TAGS=""
 FILTER=""
+ARCHIVE_RESULTS=false
 
 if [[ -z "$ARGS" ]]; then
   # Bare /bench with no args: default to the "base" tag
@@ -59,6 +60,7 @@ else
     case "${TOKENS[$i]}" in
       --tags)   i=$((i + 1)); TAGS="${TOKENS[$i]:-}"   ;;
       --filter) i=$((i + 1)); FILTER="${TOKENS[$i]:-}" ;;
+      --archive) ARCHIVE_RESULTS=true ;;
       *)        echo "Unknown token: '${TOKENS[$i]}'" >&2; exit 1 ;;
     esac
     i=$((i + 1))
@@ -93,10 +95,10 @@ echo "==========================="
 # HEAD is the merge commit checked out by the workflow; capture it so step 5 can
 # restore this tree after the base checkout below.
 BENCH_RESULTS_DIR=$(mktemp -d "$RUNNER_TEMP/bench-results.XXXXXX")
-BENCH_COMPARISON_DIR=$(mktemp -d "$RUNNER_TEMP/bench-comparison.XXXXXX")
 if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
-  printf 'results_dir=%s\n' "$BENCH_RESULTS_DIR" >> "$GITHUB_OUTPUT"
+  printf 'results_dir=%s\narchive_results=true\n' "$BENCH_RESULTS_DIR" >> "$GITHUB_OUTPUT"
 fi
+BENCH_COMPARISON_DIR=$(mktemp -d "$RUNNER_TEMP/bench-comparison.XXXXXX")
 MERGE_SHA=$(git rev-parse HEAD)
 printf 'Benchmark phase: changes, commit: %s\n' "$MERGE_SHA"
 (cd benchmarks && CRITERION_HOME="$BENCH_RESULTS_DIR/changes/criterion" \
@@ -161,3 +163,11 @@ SUMMARY+=" &middot; Updated: $(TZ=America/Los_Angeles date '+%Y-%m-%d %H:%M %Z')
   echo "$COMPARISON"
   echo "<sub>${SUMMARY}</sub>"
 } > /tmp/bench-comment.md
+
+REGRESSED=$(cat "$BENCH_REGRESSION_FILE")
+if [[ "$REGRESSED" == "true" ]]; then
+  ARCHIVE_RESULTS=true
+fi
+if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
+  printf 'archive_results=%s\n' "$ARCHIVE_RESULTS" >> "$GITHUB_OUTPUT"
+fi

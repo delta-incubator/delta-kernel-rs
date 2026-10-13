@@ -1,3 +1,9 @@
+"""Exercise the benchmark CI script with mocked cargo and critcmp tools.
+
+Cover output isolation, archival decisions, and failures without running benchmarks or installing
+Rust tooling.
+"""
+
 import json
 import os
 from pathlib import Path
@@ -161,10 +167,11 @@ class BenchmarkScriptTests(unittest.TestCase):
             text=True,
         )
 
+    def outputs(self):
+        return dict(line.split("=", 1) for line in self.output_file.read_text().splitlines())
+
     def results_directory(self):
-        name, directory = self.output_file.read_text().strip().split("=", 1)
-        self.assertEqual(name, "results_dir")
-        return Path(directory)
+        return Path(self.outputs()["results_dir"])
 
     def assert_phase_output(self, results, phase):
         output = results / phase / "criterion" / "mock_workload"
@@ -224,6 +231,7 @@ class BenchmarkScriptTests(unittest.TestCase):
                 self.assertEqual(stale.read_text(), "stale cache output")
                 self.assertFalse((self.root / "old-criterion").exists())
                 self.assertIn("mock_workload", self.comment_file.read_text())
+                self.assertEqual(self.outputs()["archive_results"], "false")
                 previous_results = results
 
     def test_partial_output_survives_benchmark_failure(self):
@@ -235,6 +243,7 @@ class BenchmarkScriptTests(unittest.TestCase):
                         FAIL_PHASE=phase, FAIL_BEFORE_OUTPUT=before_output
                     )
                     self.assertEqual(completed.returncode, 17, completed.stderr)
+                    self.assertEqual(self.outputs()["archive_results"], "true")
                     results = self.results_directory()
                     if phase == "base":
                         self.assert_phase_output(results, "changes")
@@ -245,33 +254,76 @@ class BenchmarkScriptTests(unittest.TestCase):
                     self.assertFalse(self.comment_file.exists())
 
     def test_regression_threshold_and_override_preserve_evidence(self):
-        for duration, ignored, regressed in (
-            ("10", "false", "false"),
-            ("11.5", "false", "true"),
-            ("12", "true", "true"),
+        for comment in ("", "/bench"):
+            for duration, ignored, regressed in (
+                ("8", "false", "false"),
+                ("10", "false", "false"),
+                ("10", "true", "false"),
+                ("10.3", "false", "false"),
+                ("10.4", "false", "false"),
+                ("11.44", "false", "false"),
+                ("11.46", "false", "true"),
+                ("11.5", "false", "true"),
+                ("12", "true", "true"),
+            ):
+                with self.subTest(comment=comment, duration=duration, ignored=ignored):
+                    completed = self.run_benchmarks(
+                        COMMENT=comment, CHANGES_TIME=duration, BENCH_IGNORE_FAILURE=ignored
+                    )
+                    self.assertEqual(completed.returncode, 0, completed.stderr)
+                    self.assertEqual(self.regression_file.read_text(), regressed)
+                    self.assertEqual(self.outputs()["archive_results"], regressed)
+                    verdict = next(
+                        line for line in self.comment_file.read_text().splitlines()
+                        if line.startswith("## Benchmark results:")
+                    )
+                    if regressed == "true" and ignored == "true":
+                        self.assertIn("slowdown ignored", verdict)
+                    elif regressed == "true":
+                        self.assertIn("Fail", verdict)
+                    else:
+                        self.assertIn("Pass", verdict)
+                    for phase in ("base", "changes"):
+                        self.assert_phase_output(self.results_directory(), phase)
+
+    def test_archive_flag_preserves_benchmark_selection(self):
+        for comment, tags, filter_pattern in (
+            ("/bench --archive", "base", ""),
+            ("/bench --archive --tags base,my-tag", "base,my-tag", ""),
+            ("/bench --filter snapshotLatest --archive", None, "snapshotLatest"),
+            (
+                "/bench --archive --tags base,my-tag --filter snapshotLatest",
+                "base,my-tag", "snapshotLatest",
+            ),
+            (
+                "/bench --filter snapshotLatest --archive --tags base,my-tag",
+                "base,my-tag", "snapshotLatest",
+            ),
         ):
-            with self.subTest(duration=duration, ignored=ignored):
-                completed = self.run_benchmarks(
-                    CHANGES_TIME=duration, BENCH_IGNORE_FAILURE=ignored
-                )
+            with self.subTest(comment=comment):
+                completed = self.run_benchmarks(COMMENT=comment)
                 self.assertEqual(completed.returncode, 0, completed.stderr)
-                self.assertEqual(self.regression_file.read_text(), regressed)
-                verdict = next(
-                    line for line in self.comment_file.read_text().splitlines()
-                    if line.startswith("## Benchmark results:")
-                )
-                if ignored == "true":
-                    self.assertIn("slowdown ignored", verdict)
-                elif regressed == "true":
-                    self.assertIn("Fail", verdict)
-                else:
-                    self.assertIn("Pass", verdict)
-                for phase in ("base", "changes"):
-                    self.assert_phase_output(self.results_directory(), phase)
+                self.assertEqual(self.regression_file.read_text(), "false")
+                self.assertEqual(self.outputs()["archive_results"], "true")
+                calls = [json.loads(line) for line in self.calls_file.read_text().splitlines()]
+                benchmarks = [call for call in calls if call["tool"] == "cargo"]
+                self.assertEqual(len(benchmarks), 2)
+                for call in benchmarks:
+                    self.assertEqual(call["tags"], tags)
+                    self.assertEqual(call["arguments"][-1], filter_pattern)
+                    self.assertNotIn("--archive", call["arguments"])
+
+    def test_benchmark_script_does_not_require_github_outputs(self):
+        completed = self.run_benchmarks(GITHUB_OUTPUT="")
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(self.regression_file.read_text(), "false")
+        self.assertTrue(self.comment_file.exists())
+        self.assertEqual(self.output_file.read_text(), "")
 
     def test_comparison_failure_preserves_both_measurements(self):
         completed = self.run_benchmarks(FAIL_COMPARISON="true")
         self.assertEqual(completed.returncode, 19, completed.stderr)
+        self.assertEqual(self.outputs()["archive_results"], "true")
         for phase in ("base", "changes"):
             self.assert_phase_output(self.results_directory(), phase)
         self.assertFalse(self.comment_file.exists())
