@@ -326,8 +326,9 @@ impl DeletionVectorDescriptor {
     ///
     /// # Errors
     ///
-    /// Returns [`KernelError::DeletionVector`] for a malformed `'u'` path or a `'p'` path that is
-    /// not a valid URL.
+    /// Returns [`KernelError::InvalidTableLocation`] if `table_root` does not end with `/`, and
+    /// [`KernelError::DeletionVector`] for a malformed `'u'` path or a `'p'` path that is not a
+    /// valid URL.
     #[cfg(feature = "adaptive-metadata-in-dev")]
     #[allow(dead_code)]
     pub(crate) fn normalized_unique_id_from_parts(
@@ -336,6 +337,12 @@ impl DeletionVectorDescriptor {
         offset: Option<i32>,
         table_root: &Url,
     ) -> KernelResult<String> {
+        // Root membership is a path-prefix check, so a root like `s3://b/t` would match
+        // `s3://b/t2`.
+        require!(
+            table_root.path().ends_with('/'),
+            KernelError::invalid_table_location(table_root)
+        );
         let (marker, path) =
             Self::normalized_marker_and_path(storage_type, path_or_inline_dv, table_root)?;
         Ok(Self::unique_id_from_parts(marker, &path, offset))
@@ -1404,19 +1411,28 @@ mod tests {
     #[case::uuid_relative_too_short(
         DeletionVectorStorageType::PersistedRelative,
         "ab",
+        "s3://mytable/",
         "Invalid length 2 for \"ab\""
     )]
     #[case::absolute_not_a_url(
         DeletionVectorStorageType::PersistedAbsolute,
         "not a url",
+        "s3://mytable/",
         "must parse as a URL: not a url"
+    )]
+    #[case::root_without_trailing_slash(
+        DeletionVectorStorageType::PersistedAbsolute,
+        "s3://bucket/table2/dv.bin",
+        "s3://bucket/table",
+        "Invalid table location: s3://bucket/table"
     )]
     fn test_normalized_unique_id_from_parts_errors(
         #[case] storage_type: DeletionVectorStorageType,
         #[case] path_or_inline_dv: &str,
+        #[case] table_root: &str,
         #[case] expected_message: &str,
     ) {
-        let table_root = Url::parse("s3://mytable/").unwrap();
+        let table_root = Url::parse(table_root).unwrap();
         let result = DeletionVectorDescriptor::normalized_unique_id_from_parts(
             storage_type,
             path_or_inline_dv,
