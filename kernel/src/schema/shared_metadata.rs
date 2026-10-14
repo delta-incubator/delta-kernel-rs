@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use super::MetadataValue;
 
-/// Field metadata whose clones share storage until either owner is modified.
+/// Cloning shares the metadata map. Mutable map access copies it if it is shared.
 #[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct SharedFieldMetadata(Arc<HashMap<String, MetadataValue>>);
