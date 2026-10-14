@@ -471,7 +471,8 @@ mod tests {
             .with_schema_changes([SchemaOperation::add_column(
                 None,
                 StructField::nullable("new_column", DataType::STRING),
-            )])?
+            )])
+            .expect("non-empty schema changes must be accepted by the setter")
             .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?;
         transaction.ack_column_defaults();
         transaction.ack_row_tracking_preservation();
@@ -678,7 +679,7 @@ mod tests {
         )]
         input: SchemaInput,
     ) -> Result<()> {
-        let snapshot = schema_validation_snapshot(feature.as_ref(), enabled)?;
+        let snapshot = schema_validation_snapshot(feature.as_ref(), enabled);
         let is_alter = operation == UpdateTableOperation::AlterTable;
         let changes_allowed = if is_alter {
             alter_changes_allowed
@@ -689,8 +690,9 @@ mod tests {
             .clone()
             .transaction_builder()
             .with_operation(operation.clone());
+        let changes = input.changes();
         if input == SchemaInput::Empty {
-            let error = builder.with_schema_changes([]).unwrap_err();
+            let error = builder.with_schema_changes(changes).unwrap_err();
             assert!(matches!(&error, KernelError::Generic(message)
                 if message == "with_schema_changes requires at least one schema operation"));
             return Ok(());
@@ -699,7 +701,7 @@ mod tests {
             builder
         } else {
             builder
-                .with_schema_changes(input.changes())
+                .with_schema_changes(changes)
                 .expect("non-empty schema changes must be accepted by the setter")
         };
         let result = builder.build(&SyncEngine::new(), Box::new(FileSystemCommitter::new()));
@@ -747,7 +749,7 @@ mod tests {
         #[values(false, true)] individual_setter: bool,
         #[values(SchemaInput::AddColumn, SchemaInput::AlreadyNullable)] input: SchemaInput,
     ) -> Result<()> {
-        let snapshot = schema_validation_snapshot(Some(&feature), enabled)?;
+        let snapshot = schema_validation_snapshot(Some(&feature), enabled);
         let builder = snapshot
             .transaction_builder()
             .with_operation(UpdateTableOperation::Write);
@@ -765,10 +767,7 @@ mod tests {
         Ok(())
     }
 
-    fn schema_validation_snapshot(
-        feature: Option<&TableFeature>,
-        enabled: bool,
-    ) -> Result<SnapshotRef> {
+    fn schema_validation_snapshot(feature: Option<&TableFeature>, enabled: bool) -> SnapshotRef {
         let mut config = MockTableConfigurationBuilder::new().with_schema(test_schema_flat());
         let mut features: Vec<_> = feature.into_iter().cloned().collect();
         if matches!(
@@ -797,15 +796,17 @@ mod tests {
             assert_eq!(config.is_feature_enabled(feature), enabled);
         }
         let log_segment = LogSegment::new_for_version_zero(
-            config.table_root().join("_delta_log/")?,
+            config.table_root().join("_delta_log/").unwrap(),
             create_log_path("file:///_delta_log/00000000000000000000.json"),
-        )?;
-        Ok(Arc::new(Snapshot::new(log_segment, config)?))
+        )
+        .expect("valid version-zero log segment");
+        Arc::new(Snapshot::new(log_segment, config).expect("valid schema-validation snapshot"))
     }
 
     #[test]
-    fn nonempty_schema_change_calls_preserve_iterator_items_and_call_order() -> Result<()> {
-        let (engine, snapshot, _tempdir) = load_test_table("table-without-dv-small")?;
+    fn nonempty_schema_change_calls_preserve_iterator_items_and_call_order() {
+        let (engine, snapshot, _tempdir) =
+            load_test_table("table-without-dv-small").expect("load test table");
         let mut changes = [SchemaOperation::add_column(
             None,
             StructField::nullable("new_column", DataType::STRING),
@@ -814,19 +815,22 @@ mod tests {
         let builder = snapshot
             .transaction_builder()
             .with_operation(UpdateTableOperation::Write)
-            .with_schema_changes(std::iter::from_fn(move || changes.next()))?
+            .with_schema_changes(std::iter::from_fn(move || changes.next()))
+            .expect("non-empty iterator must be accepted")
             .with_schema_changes([SchemaOperation::SetNullable {
                 column: column_name!("new_column"),
-            }])?
+            }])
+            .expect("subsequent non-empty schema changes must be accepted")
             .add_column(StructField::nullable("another_column", DataType::INTEGER));
 
         assert_eq!(builder.local_state.schema_changes.len(), 3);
-        let transaction = builder.build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?;
+        let transaction = builder
+            .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))
+            .expect("schema changes must build in call order");
         assert!(transaction.should_emit_metadata);
         let schema = transaction.effective_table_config.logical_schema();
         assert!(schema.contains("new_column"));
         assert!(schema.contains("another_column"));
-        Ok(())
     }
 
     #[derive(Debug)]
