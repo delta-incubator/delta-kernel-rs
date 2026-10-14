@@ -16,7 +16,8 @@ use crate::object_store::ObjectStoreExt as _;
 use crate::schema::SchemaRef;
 use crate::table_features::TableFeature;
 use crate::unit_test_utils::{
-    adaptive_metadata_table_configuration, test_schema_flat_with_column_mapping,
+    adaptive_metadata_table_configuration, assert_result_error_with_message,
+    test_schema_flat_with_column_mapping,
 };
 use crate::{Engine, Snapshot};
 
@@ -571,16 +572,7 @@ async fn check_hint_checkpoint_action<E: Engine>(
 async fn incremental_update_lists_after_amt_hint_version(
     #[values(true, false)] pre_amt_checkpoint: bool,
 ) {
-    let store = Arc::new(InMemory::new());
-    let table_root = url::Url::parse("memory:///").unwrap();
-    for (version, commit) in [
-        (2, commit_info_commit()),
-        (3, checkpoint_commit(2, &[], one_column_schema())),
-    ] {
-        add_commit(table_root.as_str(), store.as_ref(), version, commit)
-            .await
-            .unwrap();
-    }
+    let (store, table_root) = setup_amt_hint_table().await;
     if pre_amt_checkpoint {
         store
             .put(
@@ -590,7 +582,6 @@ async fn incremental_update_lists_after_amt_hint_version(
             .await
             .unwrap();
     }
-    put_amt_last_checkpoint_hint(&store, 2, 3).await;
     let engine = non_plan_engine(store.clone());
     let base = Snapshot::builder_for(table_root.clone())
         .build(&engine)
@@ -612,6 +603,36 @@ async fn incremental_update_lists_after_amt_hint_version(
         .map(|commit| commit.version)
         .collect();
     assert_eq!(commits, vec![3, 4]);
+}
+
+// A snapshot listed from an AMT `_last_checkpoint` hint, with no CRC, cannot resolve a CRC to
+// write: its file stats live in the content tree rather than the log.
+#[tokio::test]
+async fn write_checksum_on_amt_checkpoint_is_unsupported() {
+    let (store, table_root) = setup_amt_hint_table().await;
+    let engine = non_plan_engine(store);
+    let snapshot = Snapshot::builder_for(table_root).build(&engine).unwrap();
+    assert_result_error_with_message(
+        snapshot.write_checksum(&engine),
+        "the AMT checkpoint at version 2 needs file stats from its content tree",
+    );
+}
+
+// An AMT table whose `_last_checkpoint` hint is at version 2, written by manifest commit 3. No
+// commits precede the hint.
+async fn setup_amt_hint_table() -> (Arc<InMemory>, url::Url) {
+    let store = Arc::new(InMemory::new());
+    let table_root = url::Url::parse("memory:///").unwrap();
+    for (version, commit) in [
+        (2, commit_info_commit()),
+        (3, checkpoint_commit(2, &[], one_column_schema())),
+    ] {
+        add_commit(table_root.as_str(), store.as_ref(), version, commit)
+            .await
+            .unwrap();
+    }
+    put_amt_last_checkpoint_hint(&store, 2, 3).await;
+    (store, table_root)
 }
 
 // Writes an AMT `_last_checkpoint` hint at `version` that embeds its checkpoint action and names
