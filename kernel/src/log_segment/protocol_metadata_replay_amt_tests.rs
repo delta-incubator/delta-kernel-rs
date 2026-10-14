@@ -525,22 +525,7 @@ async fn check_hint_checkpoint_action<E: Engine>(
             .await
             .unwrap();
     }
-    let hint = serde_json::json!({
-        "version": 2,
-        "size": -1,
-        "checkpointType": "AdaptiveMetadataTree",
-        "amtCheckpoint": {
-            "manifestCommitVersion": 4,
-            "checkpoint": checkpoint_entries(2, &[], one_column_schema()),
-        },
-    });
-    store
-        .put(
-            &Path::from("_delta_log/_last_checkpoint"),
-            hint.to_string().into(),
-        )
-        .await
-        .unwrap();
+    put_amt_last_checkpoint_hint(&store, 2, 4).await;
     if crc_at_target {
         let config = adaptive_metadata_table_configuration(one_column_schema(), &[]);
         let crc = serde_json::json!({
@@ -575,4 +560,81 @@ async fn check_hint_checkpoint_action<E: Engine>(
         .unwrap()
         .expect("checkpoint action present");
     assert_eq!(action.version(), 2);
+}
+
+// An incremental update of a snapshot listed from an AMT `_last_checkpoint` hint at version 2
+// (manifest commit 3) lists only after the hint's version. Listing from version 0 would adopt a
+// classic checkpoint from before the table enabled AMT, which drops the hint and leaves a gap up to
+// the hint's commits.
+#[rstest]
+#[tokio::test]
+async fn incremental_update_lists_after_amt_hint_version(
+    #[values(true, false)] pre_amt_checkpoint: bool,
+) {
+    let store = Arc::new(InMemory::new());
+    let table_root = url::Url::parse("memory:///").unwrap();
+    for (version, commit) in [
+        (2, commit_info_commit()),
+        (3, checkpoint_commit(2, &[], one_column_schema())),
+    ] {
+        add_commit(table_root.as_str(), store.as_ref(), version, commit)
+            .await
+            .unwrap();
+    }
+    if pre_amt_checkpoint {
+        store
+            .put(
+                &Path::from("_delta_log/00000000000000000001.checkpoint.parquet"),
+                "never read".into(),
+            )
+            .await
+            .unwrap();
+    }
+    put_amt_last_checkpoint_hint(&store, 2, 3).await;
+    let engine = non_plan_engine(store.clone());
+    let base = Snapshot::builder_for(table_root.clone())
+        .build(&engine)
+        .unwrap();
+
+    add_commit(table_root.as_str(), store.as_ref(), 4, commit_info_commit())
+        .await
+        .unwrap();
+    let updated = Snapshot::builder_from(base).build(&engine).unwrap();
+
+    let log_segment = updated.log_segment();
+    assert_eq!(updated.version(), 4);
+    assert_eq!(log_segment.checkpoint_version, None);
+    assert_eq!(log_segment.amt_checkpoint_version(), Some(2));
+    let commits: Vec<_> = log_segment
+        .listed
+        .ascending_commit_files
+        .iter()
+        .map(|commit| commit.version)
+        .collect();
+    assert_eq!(commits, vec![3, 4]);
+}
+
+// Writes an AMT `_last_checkpoint` hint at `version` that embeds its checkpoint action and names
+// `manifest_commit_version` as the manifest commit that added it.
+async fn put_amt_last_checkpoint_hint(
+    store: &InMemory,
+    version: i64,
+    manifest_commit_version: i64,
+) {
+    let hint = serde_json::json!({
+        "version": version,
+        "size": -1,
+        "checkpointType": "AdaptiveMetadataTree",
+        "amtCheckpoint": {
+            "manifestCommitVersion": manifest_commit_version,
+            "checkpoint": checkpoint_entries(version, &[], one_column_schema()),
+        },
+    });
+    store
+        .put(
+            &Path::from("_delta_log/_last_checkpoint"),
+            hint.to_string().into(),
+        )
+        .await
+        .unwrap();
 }
