@@ -28,6 +28,7 @@ use crate::crc::{
     FileSizeHistogram, FileStatsDelta,
 };
 use crate::engine_data::{GetData, TypedGetData as _};
+use crate::kernel_reader::KernelReader;
 use crate::metrics::ProtocolMetadataSource;
 use crate::path::ParsedLogPath;
 use crate::schema::{
@@ -68,7 +69,7 @@ impl LogSegment {
     ///   `incremental_replay` permits, else fall back to normal log replay (return None)
     pub(crate) fn try_build_crc_within_budget(
         &self,
-        engine: &dyn Engine,
+        reader: &KernelReader<'_>,
         base: Option<&Arc<Crc>>,
         incremental_replay: IncrementalReplay,
     ) -> KernelResult<Option<(Arc<Crc>, ProtocolMetadataSource)>> {
@@ -81,7 +82,7 @@ impl LogSegment {
         if !incremental_replay.should_advance(base.version, self.end_version)? {
             return Ok(None);
         }
-        let advanced = self.build_crc_from_base(engine, base)?;
+        let advanced = self.build_crc_from_base(reader, base)?;
         Ok(Some((
             Arc::new(advanced),
             ProtocolMetadataSource::CrcAdvancedByReplay,
@@ -90,31 +91,36 @@ impl LogSegment {
 
     /// Pick the latest CRC to use as an advance base: this segment's on-disk CRC or
     /// `in_memory_base`, whichever is newer, falling back to `in_memory_base` on a failed on-disk
-    /// read. Drops a base below the checkpoint; returns None when no candidate remains.
+    /// read, except cancellation. Drops a base below the checkpoint; returns None when no candidate
+    /// remains.
     pub(crate) fn pick_latest_base_crc(
         &self,
-        engine: &dyn Engine,
+        reader: &KernelReader<'_>,
         in_memory_base: Option<&Arc<Crc>>,
-    ) -> Option<Arc<Crc>> {
+    ) -> KernelResult<Option<Arc<Crc>>> {
         let preferred_disk_crc = self
             .listed
             .latest_crc_file
             .as_ref()
             .filter(|f| in_memory_base.is_none_or(|m| f.version > m.version));
-        preferred_disk_crc
-            .and_then(|f| read_crc_file_or_none(engine, f))
-            .or_else(|| in_memory_base.cloned())
-            .filter(|crc| {
-                self.checkpoint_version
-                    .is_none_or(|ckpt| crc.version >= ckpt)
-            })
+        let disk_crc = preferred_disk_crc
+            .map(|file| read_crc_file_or_none(reader, file))
+            .transpose()?
+            .flatten();
+        Ok(disk_crc.or_else(|| in_memory_base.cloned()).filter(|crc| {
+            self.checkpoint_version
+                .is_none_or(|ckpt| crc.version >= ckpt)
+        }))
     }
 
     /// Read this segment's latest on-disk CRC (`latest_crc_file`), at whatever version it sits.
-    /// Returns None when there is no CRC file or the read fails. The returned CRC may be stale
-    /// (older than `end_version`).
-    pub(crate) fn read_latest_crc(&self, engine: &dyn Engine) -> Option<Arc<Crc>> {
-        self.pick_latest_base_crc(engine, /* in_memory_base */ None)
+    /// Returns None when there is no CRC file or a non-cancellation read failure. The CRC may be
+    /// stale (older than `end_version`).
+    pub(crate) fn read_latest_crc(
+        &self,
+        reader: &KernelReader<'_>,
+    ) -> KernelResult<Option<Arc<Crc>>> {
+        self.pick_latest_base_crc(reader, /* in_memory_base */ None)
     }
 
     /// Produce a fresh `Crc` at `self.end_version` by reverse-replaying the commits in
@@ -128,7 +134,7 @@ impl LogSegment {
     )]
     pub(crate) fn build_crc_from_base(
         &self,
-        engine: &dyn Engine,
+        reader: &KernelReader<'_>,
         base_crc: &Crc,
     ) -> KernelResult<Crc> {
         let seed_histogram = base_crc
@@ -138,7 +144,7 @@ impl LogSegment {
                 FileSizeHistogram::create_empty_with_boundaries(h.sorted_bin_boundaries().to_vec())
             })
             .transpose()?;
-        let delta = self.build_crc_delta_from_base(engine, base_crc.version, seed_histogram)?;
+        let delta = self.build_crc_delta_from_base(reader, base_crc.version, seed_histogram)?;
         Ok(base_crc.clone().apply(delta, self.end_version))
     }
 
@@ -204,7 +210,7 @@ impl LogSegment {
         // truncated without a checkpoint.
         require!(first.version == 0, KernelError::MissingVersion(0));
         let delta = self.replay_commits_into_crc_delta(
-            engine,
+            &KernelReader::new(engine, None),
             self.listed.ascending_commit_files.iter(),
             Some(FileSizeHistogram::create_default()),
         )?;
@@ -219,7 +225,7 @@ impl LogSegment {
     /// commit at `base_version + 1` (i.e. has a gap above `base_version`).
     pub(crate) fn build_crc_delta_from_base(
         &self,
-        engine: &dyn Engine,
+        reader: &KernelReader<'_>,
         base_version: Version,
         seed_histogram: Option<FileSizeHistogram>,
     ) -> KernelResult<CrcDelta> {
@@ -250,7 +256,7 @@ impl LogSegment {
             ))
         );
 
-        self.replay_commits_into_crc_delta(engine, deltas.into_iter(), seed_histogram)
+        self.replay_commits_into_crc_delta(reader, deltas.into_iter(), seed_histogram)
     }
 
     /// Replay the given commits into a [`CrcDelta`]. The shared core of
@@ -259,7 +265,7 @@ impl LogSegment {
     /// downstream base's bin boundaries, or `None` to skip histogram tracking.
     fn replay_commits_into_crc_delta<'a>(
         &self,
-        engine: &dyn Engine,
+        reader: &KernelReader<'_>,
         ascending_commits: impl DoubleEndedIterator<Item = &'a ParsedLogPath>,
         seed_histogram: Option<FileSizeHistogram>,
     ) -> KernelResult<CrcDelta> {
@@ -269,10 +275,7 @@ impl LogSegment {
             .map(|c| c.location.clone())
             .collect();
         let mut acc = CrcReplayAccumulator::new(seed_histogram);
-        let batches =
-            engine
-                .json_handler()
-                .read_json_files(&locations, REPLAY_SCHEMA.clone(), None)?;
+        let batches = reader.read_json_files(&locations, REPLAY_SCHEMA.clone())?;
 
         for batch_result in batches {
             // Transient visitor borrows the shared accumulator for the duration of the
@@ -990,7 +993,9 @@ mod tests {
             set_transaction_state: SetTransactionState::Complete(HashMap::new()),
             ..Default::default()
         };
-        let crc = segment.build_crc_from_base(&engine, &base).unwrap();
+        let crc = segment
+            .build_crc_from_base(&KernelReader::new(&engine, None), &base)
+            .unwrap();
 
         // Newest-wins: v2's upgraded protocol (now carries `rowTracking` on top of v0's
         // features), v2's metadata, v2's ICT.
@@ -1058,7 +1063,7 @@ mod tests {
         .unwrap();
         for base in [0, 5] {
             assert_result_error_with_message(
-                segment.build_crc_delta_from_base(&engine, base, None),
+                segment.build_crc_delta_from_base(&KernelReader::new(&engine, None), base, None),
                 "must be strictly less than end_version",
             );
         }

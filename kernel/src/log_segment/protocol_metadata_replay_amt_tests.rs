@@ -10,6 +10,7 @@ use super::{CheckpointActionResolution, LogSegment};
 use crate::engine::sync::SyncEngine;
 #[cfg(feature = "declarative-plans")]
 use crate::engine::test_delegating::DelegatingEngine;
+use crate::kernel_reader::KernelReader;
 use crate::object_store::memory::InMemory;
 use crate::schema::SchemaRef;
 use crate::table_features::TableFeature;
@@ -385,7 +386,7 @@ async fn assert_replay_resolution<E: Engine>(
             .unwrap();
 
     let resolution = log_segment
-        .read_protocol_metadata_opt(&engine, None)
+        .read_protocol_metadata_opt(&KernelReader::new(&engine, None), None)
         .unwrap();
     // No CRC is passed, so replay never produces a `Hint`: only `Captured` or `Unresolved`.
     let version = match resolution.checkpoint_action {

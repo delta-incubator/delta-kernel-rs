@@ -101,6 +101,7 @@ pub mod engine_data;
 pub mod error;
 pub mod expressions;
 pub mod incremental_scan;
+mod kernel_reader;
 mod log_compaction;
 mod log_path;
 mod log_reader;

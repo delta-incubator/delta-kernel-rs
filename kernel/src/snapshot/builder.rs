@@ -6,8 +6,9 @@ use delta_kernel_derive::internal_api;
 use tracing::{info, instrument};
 
 use crate::cancellation::CancellationTokenRef;
+use crate::kernel_reader::KernelReader;
 use crate::log_path::LogPath;
-use crate::log_segment::{validate_catalog_managed_log_tail, LogSegment};
+use crate::log_segment::validate_catalog_managed_log_tail;
 use crate::log_segment_files::CheckpointHandling;
 use crate::metrics::events::SNAPSHOT_COMPLETED_SPAN;
 use crate::metrics::{MetricId, SnapshotLoadMetricContext, SnapshotLoadType};
@@ -56,9 +57,7 @@ pub struct SnapshotBuilder<Mode = FromTableRoot> {
     /// Opaque, caller-supplied id recorded on this build's metric events. Not interpreted by
     /// kernel; set via [`with_correlation_id`](Self::with_correlation_id).
     correlation_id: Option<Arc<str>>,
-    /// Optional cooperative cancellation token supplied via
-    /// [`with_cancellation_token`](Self::with_cancellation_token). `None` means the build is not
-    /// cancellable.
+    /// Optional cooperative cancellation token for this build's handler-backed reads.
     cancellation_token: Option<CancellationTokenRef>,
     // Carries the zero-sized typestate that limits mode-specific methods at compile time.
     mode: PhantomType<Mode>,
@@ -267,10 +266,11 @@ impl<Mode> SnapshotBuilder<Mode> {
     /// Supply a [`CancellationToken`] for snapshot builds that list or read the log.
     ///
     /// Kernel forwards the token (if any) to cancellation-aware [`Engine`] listing and read
-    /// operations, and [`build`](Self::build) fails with [`KernelError::Cancelled`] if cancellation
-    /// is observed before they complete. Snapshot-hint builds perform no listing or reads, so
-    /// the token has no effect on them. By default (or when passing `None`), the build is not
-    /// cancellable.
+    /// operations, including CRC and imperative protocol/metadata replay. Declarative plan
+    /// execution does not use this token. The build fails with [`KernelError::Cancelled`] if
+    /// cancellation is observed during these reads. Snapshot-hint builds perform no listing or
+    /// reads, so the token has no effect on them. By default (or when passing `None`), no
+    /// cancellation token is supplied to the engine.
     ///
     /// [`CancellationToken`]: crate::CancellationToken
     /// [`KernelError::Cancelled`]: crate::KernelError::Cancelled
@@ -376,6 +376,7 @@ impl<Mode> SnapshotBuilder<Mode> {
                 incremental_replay,
             )?
         } else {
+            let reader = KernelReader::new(engine, cancellation_token);
             let log_tail: Vec<_> = log_tail.into_iter().map(Into::into).collect();
 
             // Pre-build validations for catalog-managed tables
@@ -392,18 +393,16 @@ impl<Mode> SnapshotBuilder<Mode> {
 
             if let Some(table_root) = table_root {
                 let table_url = try_parse_uri(table_root)?;
-                let log_segment = LogSegment::for_snapshot(
-                    engine.storage_handler().as_ref(),
+                let log_segment = reader.discover_snapshot(
                     table_url.join(DELTA_LOG_DIR_WITH_SLASH)?,
                     log_tail,
                     effective_version,
                     metric_context.clone(),
-                    cancellation_token.as_ref(),
                 )?;
                 Snapshot::try_new_from_log_segment(
                     table_url,
                     log_segment,
-                    engine,
+                    &reader,
                     metric_context,
                     incremental_replay,
                     built_as_latest,
@@ -418,13 +417,12 @@ impl<Mode> SnapshotBuilder<Mode> {
                 Snapshot::try_new_from(
                     existing_snapshot,
                     log_tail,
-                    engine,
+                    &reader,
                     effective_version,
                     metric_context,
                     incremental_replay,
                     checkpoint_handling,
                     built_as_latest,
-                    cancellation_token.as_ref(),
                 )?
             }
         };

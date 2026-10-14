@@ -19,6 +19,7 @@ use crate::crc::{
     try_read_crc_file, Crc, DomainMetadataState, FileSizeHistogram, SetTransactionState,
 };
 use crate::engine::sync::SyncEngine;
+use crate::kernel_reader::KernelReader;
 use crate::object_store::memory::InMemory;
 use crate::object_store::ObjectStoreExt as _;
 use crate::path::ParsedLogPath;
@@ -415,7 +416,7 @@ impl BuiltCrcTest {
         let log_root = self.url.join("_delta_log/").unwrap();
         let log_segment =
             LogSegment::for_snapshot_impl(storage.as_ref(), log_root, vec![], None, None, None)?;
-        log_segment.build_crc_from_base(&self.engine, base)
+        log_segment.build_crc_from_base(&KernelReader::new(&self.engine, None), base)
     }
 
     /// Run `pick_latest_base_crc` against a directly-listed `LogSegment`, using `in_memory_base`.
@@ -428,14 +429,14 @@ impl BuiltCrcTest {
         let log_segment =
             LogSegment::for_snapshot_impl(storage.as_ref(), log_root, vec![], None, None, None)?;
         Ok(log_segment
-            .pick_latest_base_crc(&self.engine, in_memory_base)
+            .pick_latest_base_crc(&KernelReader::new(&self.engine, None), in_memory_base)?
             .map(|c| c.version))
     }
 
     /// Read the on-disk CRC at `version` from this test's log.
     fn read_crc_at(&self, version: u64) -> KernelResult<Crc> {
         try_read_crc_file(
-            &self.engine,
+            &KernelReader::new(&self.engine, None),
             &ParsedLogPath::create_parsed_crc(&self.url, version),
         )
     }
@@ -521,9 +522,11 @@ impl BuiltCrcTest {
         let log_segment =
             LogSegment::for_snapshot_impl(storage.as_ref(), log_root, vec![], None, None, None)
                 .unwrap();
-        let crc = log_segment.read_latest_crc(&self.engine);
+        let crc = log_segment
+            .read_latest_crc(&KernelReader::new(&self.engine, None))
+            .unwrap();
         log_segment
-            .read_protocol_metadata_opt(&self.engine, crc.as_ref())
+            .read_protocol_metadata_opt(&KernelReader::new(&self.engine, None), crc.as_ref())
             .unwrap()
             .checkpoint_action
     }

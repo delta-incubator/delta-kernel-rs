@@ -8,7 +8,7 @@ use std::sync::Arc;
 use tracing::{error, instrument};
 
 use super::{IncrementalReplay, PreparedSnapshot, Snapshot};
-use crate::cancellation::CancellationTokenRef;
+use crate::kernel_reader::KernelReader;
 use crate::log_segment::{LogSegment, PmResolution};
 use crate::log_segment_files::{CheckpointHandling, LogSegmentFiles};
 use crate::metrics::{
@@ -17,7 +17,7 @@ use crate::metrics::{
 };
 use crate::path::ParsedLogPath;
 use crate::table_configuration::TableConfiguration;
-use crate::{Engine, KernelError, KernelResult, Version};
+use crate::{KernelError, KernelResult, Version};
 
 /// The assembled outcome of the listing phase of an incremental update. Listing/assembly
 /// failures surface as `Err` from [`Snapshot::build_new_segment`], not a variant here.
@@ -105,26 +105,24 @@ impl Snapshot {
     pub(super) fn try_new_from(
         existing_snapshot: Arc<Snapshot>,
         log_tail: Vec<ParsedLogPath>,
-        engine: &dyn Engine,
+        reader: &KernelReader<'_>,
         target_version: impl Into<Option<Version>>,
         metric_context: SnapshotLoadMetricContext,
         incremental_replay: IncrementalReplay,
         checkpoint_handling: CheckpointHandling,
         built_as_latest: bool,
-        cancellation_token: Option<&CancellationTokenRef>,
     ) -> KernelResult<Arc<Self>> {
         let requested_version = target_version.into();
         let mut current_segment = None;
         let result = Self::try_new_from_impl(
             existing_snapshot.clone(),
             log_tail,
-            engine,
+            reader,
             requested_version,
             &metric_context,
             incremental_replay,
             checkpoint_handling,
             built_as_latest,
-            cancellation_token,
             &mut current_segment,
         );
         result.inspect_err(|error| {
@@ -145,13 +143,12 @@ impl Snapshot {
     fn try_new_from_impl(
         existing_snapshot: Arc<Snapshot>,
         log_tail: Vec<ParsedLogPath>,
-        engine: &dyn Engine,
+        reader: &KernelReader<'_>,
         requested_version: Option<Version>,
         metric_context: &SnapshotLoadMetricContext,
         incremental_replay: IncrementalReplay,
         checkpoint_handling: CheckpointHandling,
         built_as_latest: bool,
-        cancellation_token: Option<&CancellationTokenRef>,
         current_segment: &mut Option<LogSegment>,
     ) -> KernelResult<Arc<Self>> {
         let existing_snapshot_version = existing_snapshot.version();
@@ -179,13 +176,12 @@ impl Snapshot {
         // the `inspect_err` below.
         let segment_load_start = std::time::Instant::now();
         let (combined_log_segment, new_end_version) = match Self::build_new_segment(
-            engine,
+            reader,
             existing_log_segment,
             existing_snapshot_version,
             log_tail,
             requested_version,
             checkpoint_handling,
-            cancellation_token,
         )
         .inspect_err(|_| emit_log_segment_load_failure(metric_context))?
         {
@@ -213,7 +209,7 @@ impl Snapshot {
                 } = Self::prepare_new_from_log_segment(
                     existing_snapshot.table_root(),
                     segment,
-                    engine,
+                    reader,
                     metric_context,
                     incremental_replay,
                     built_as_latest,
@@ -249,10 +245,11 @@ impl Snapshot {
         // `incremental_replay`. Time from here so the CRC-advance cost lands in the P&M duration,
         // matching the fresh path.
         let pm_start = std::time::Instant::now();
-        let base_crc =
-            combined_log_segment.pick_latest_base_crc(engine, existing_snapshot.base_crc());
+        let base_crc = combined_log_segment
+            .pick_latest_base_crc(reader, existing_snapshot.base_crc())
+            .inspect_err(|_| emit_protocol_metadata_load_failure(metric_context))?;
         let crc_at_version = combined_log_segment
-            .try_build_crc_within_budget(engine, base_crc.as_ref(), incremental_replay)
+            .try_build_crc_within_budget(reader, base_crc.as_ref(), incremental_replay)
             .inspect_err(|_| emit_protocol_metadata_load_failure(metric_context))?;
 
         let existing_table_config = existing_snapshot.table_configuration();
@@ -279,7 +276,7 @@ impl Snapshot {
                     .filter(|c| c.version > existing_snapshot_version);
                 combined_log_segment
                     .segment_after_version(existing_snapshot_version)
-                    .read_protocol_metadata_opt(engine, newer_base)
+                    .read_protocol_metadata_opt(reader, newer_base)
                     .inspect_err(|_| emit_protocol_metadata_load_failure(metric_context))?
             }
         };
@@ -321,16 +318,14 @@ impl Snapshot {
     /// incremental update. Returns a non-failure [`NewSegment`] on the C/D.1/E/F cases; a
     /// propagated `Err` is a genuine listing/assembly failure.
     fn build_new_segment(
-        engine: &dyn Engine,
+        reader: &KernelReader<'_>,
         existing_log_segment: &LogSegment,
         existing_snapshot_version: Version,
         log_tail: Vec<ParsedLogPath>,
         requested_version: Option<Version>,
         checkpoint_handling: CheckpointHandling,
-        cancellation_token: Option<&CancellationTokenRef>,
     ) -> KernelResult<NewSegment> {
         let log_root = existing_log_segment.log_root.clone();
-        let storage = engine.storage_handler();
 
         let listing_base_version = match checkpoint_handling {
             CheckpointHandling::Adopt => {
@@ -349,14 +344,12 @@ impl Snapshot {
             // No version can follow Version::MAX.
             return Ok(NewSegment::Unchanged);
         };
-        let new_listed_files = LogSegmentFiles::list_with_checkpoint_handling(
-            storage.as_ref(),
+        let new_listed_files = reader.list_log_files(
             &log_root,
             log_tail,
             Some(listing_start),
             requested_version,
             checkpoint_handling,
-            cancellation_token,
         )?;
 
         // NB: we need to check both checkpoints and commits since we filter commits at and below
@@ -605,7 +598,7 @@ mod tests {
     use crate::unit_test_utils::{
         install_thread_local_metrics_reporter, string_array_to_engine_data, CapturingReporter,
     };
-    use crate::Result;
+    use crate::{Engine, Result};
 
     // ============================================================================
     // Helpers
@@ -744,13 +737,12 @@ mod tests {
         let result = Snapshot::try_new_from(
             base_snapshot.clone(),
             vec![],
-            &engine,
+            &KernelReader::new(&engine, None),
             None,
             SnapshotLoadMetricContext::for_test(),
             IncrementalReplay::Disabled,
             CheckpointHandling::Adopt,
             true, /* built_as_latest */
-            None, /* cancellation_token */
         )?;
         assert_eq!(result, base_snapshot);
         // `PartialEq` ignores `built_as_latest`, so assert it explicitly.
@@ -826,13 +818,12 @@ mod tests {
         let new_snapshot = Snapshot::try_new_from(
             base_snapshot.clone(),
             log_tail,
-            &engine,
+            &KernelReader::new(&engine, None),
             Some(2),
             SnapshotLoadMetricContext::for_test(),
             IncrementalReplay::Disabled,
             CheckpointHandling::Adopt,
             false, /* built_as_latest */
-            None,  /* cancellation_token */
         )?;
 
         // Latest commit should now be version 2
@@ -887,13 +878,12 @@ mod tests {
         let same_version = Snapshot::try_new_from(
             base_snapshot.clone(),
             vec![],
-            &engine,
+            &KernelReader::new(&engine, None),
             Some(1),
             SnapshotLoadMetricContext::for_test(),
             IncrementalReplay::Disabled,
             CheckpointHandling::Adopt,
             false, /* built_as_latest */
-            None,  /* cancellation_token */
         )?;
         assert!(Arc::ptr_eq(&same_version, &base_snapshot));
 
@@ -901,13 +891,12 @@ mod tests {
         let older_version = Snapshot::try_new_from(
             base_snapshot.clone(),
             vec![],
-            &engine,
+            &KernelReader::new(&engine, None),
             Some(0),
             SnapshotLoadMetricContext::for_test(),
             IncrementalReplay::Disabled,
             CheckpointHandling::Adopt,
             false, /* built_as_latest */
-            None,  /* cancellation_token */
         );
         assert!(matches!(
             older_version,
