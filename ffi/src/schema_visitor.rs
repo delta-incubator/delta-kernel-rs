@@ -40,6 +40,9 @@ use crate::{
     TryFromStringSlice,
 };
 
+/// In-progress fields created by an engine while reconstructing a Kernel schema.
+///
+/// Complex field visitors consume the IDs of their child fields from this state.
 #[derive(Default)]
 pub struct KernelSchemaVisitorState {
     elements: ReferenceSet<StructField>,
@@ -972,6 +975,7 @@ mod tests {
     use crate::scan::visit_metadata_map;
     use crate::{KernelStringSlice, NullableCvoid};
 
+    /// Verifies annotation validation and ownership of parent and physical-field attributes.
     #[cfg(feature = "udt-in-dev")]
     #[rstest]
     #[case("class", true)]
@@ -1035,6 +1039,8 @@ mod tests {
         }
     }
 
+    /// Verifies that invalid and consumed physical IDs return schema errors without disturbing
+    /// unrelated fields.
     #[cfg(feature = "udt-in-dev")]
     #[rstest]
     fn udt_schema_visit_rejects_invalid_or_consumed_id(#[values(false, true)] consumed: bool) {
@@ -1084,6 +1090,7 @@ mod tests {
         assert!(!state.elements.contains(physical));
     }
 
+    /// Verifies that failures before physical-ID resolution leave the child available for retry.
     #[cfg(feature = "udt-in-dev")]
     #[rstest]
     #[case::name(0)]
@@ -1129,6 +1136,7 @@ mod tests {
         assert!(state.elements.contains(physical));
     }
 
+    /// Verifies that validation after physical-ID resolution consumes the child field.
     #[cfg(feature = "udt-in-dev")]
     #[rstest]
     #[case::nested_udt(
@@ -1167,6 +1175,7 @@ mod tests {
         assert!(state.elements.contains(unrelated));
     }
 
+    /// Verifies that disabled UDT support rejects before visiting metadata or consuming the child.
     #[cfg(not(feature = "udt-in-dev"))]
     #[test]
     fn udt_schema_visit_disabled_preserves_child_and_skips_metadata() {
@@ -1196,6 +1205,7 @@ mod tests {
         assert!(!metadata.visited);
     }
 
+    /// Metadata fixture that records callback invocation and the values supplied to Kernel.
     #[derive(Default)]
     struct TestMetadata {
         visited: bool,

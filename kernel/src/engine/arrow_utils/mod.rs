@@ -2200,6 +2200,7 @@ mod tests {
             Err(e) if e.to_string().contains("The default engine does not support shredded reads")));
         #[cfg(feature = "udt-in-dev")]
         {
+            // A UDT backed by an unshredded variant follows the same physical-read validation.
             let udt = crate::schema::UserDefinedType::try_new(
                 DataType::unshredded_variant(),
                 Default::default(),

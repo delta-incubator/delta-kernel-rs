@@ -41,7 +41,7 @@ make
 ./read_table ../../../../kernel/tests/data/table-with-dv-small
 ```
 
-Note there are two configurations that can currently be configured in cmake:
+Available CMake options include:
 ```bash
 # turn on VERBOSE mode (default is off) - print more diagnostics
 $ cmake -DVERBOSE=yes ..
@@ -60,6 +60,10 @@ cmake -DPRINT_DATA=no ..
 ```
 
 and the example will only print out the schema of the table, not the data.
+
+The [UDT annotation test instructions](examples/read-table/README.md#udt-annotation-tests) describe
+building the Rust library with `udt-in-dev` and enabling CMake's `UDT_IN_DEV=ON` option to run the
+schema round-trip test.
 
 ### 2. Visit Expression Example (`examples/visit-expression`)
 

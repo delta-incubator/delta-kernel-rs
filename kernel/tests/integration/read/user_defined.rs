@@ -1,3 +1,7 @@
+//! End-to-end reads of UDT columns through their physical `sqlType` representations.
+//!
+//! These tests also verify that snapshot and scan schemas retain the logical UDT and annotation.
+
 use std::collections::HashMap;
 use std::io::Cursor;
 use std::sync::Arc;
@@ -16,6 +20,8 @@ use serde_json::json;
 use test_utils::delta_kernel_default_engine::DefaultEngineBuilder;
 use test_utils::{add_commit, read_scan, record_batch_to_bytes};
 
+/// Verifies physical UDT reads while varying representation, nesting, projection, and missing
+/// nullable columns.
 #[rstest]
 #[case::long(
     udt(DataType::LONG),

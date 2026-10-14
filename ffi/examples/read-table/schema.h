@@ -31,6 +31,22 @@
 
 typedef struct SchemaItemList SchemaItemList;
 
+/** One UDT annotation entry owning its key and optional value as C strings. */
+typedef struct
+{
+  char* key;
+  // NULL represents JSON null; an allocated empty string represents an empty value.
+  char* value;
+} UdtAnnotationEntry;
+
+/** Owned annotation entries retained by the C schema model. */
+typedef struct
+{
+  size_t len;
+  UdtAnnotationEntry* entries;
+} UdtAnnotation;
+
+/** One field in the printable C schema model. */
 typedef struct
 {
   char* name;
@@ -39,15 +55,18 @@ typedef struct
   uintptr_t children;
   char* column_mapping_id;
   char* column_mapping_physical_name;
-  FfiNullableStringMap annotation;
+  // Empty for non-UDT fields.
+  UdtAnnotation udt_annotation;
 } SchemaItem;
 
+/** Ordered fields allocated for one struct, array, map, or UDT physical type. */
 typedef struct SchemaItemList
 {
   uint32_t len;
   SchemaItem* list;
 } SchemaItemList;
 
+/** Owns all field lists produced during one schema visit. */
 typedef struct
 {
   int list_count;
@@ -55,6 +74,7 @@ typedef struct
   SharedExternEngine* engine;
 } SchemaBuilder;
 
+/** Root list and backing allocation for a printable schema. */
 typedef struct
 {
   uintptr_t list_id;
@@ -71,7 +91,7 @@ SchemaItem* add_to_list(SchemaItemList* list, char* name, char* type, bool is_nu
   list->list[idx].is_nullable = is_nullable;
   list->list[idx].column_mapping_id = NULL;
   list->list[idx].column_mapping_physical_name = NULL;
-  list->list[idx].annotation = (FfiNullableStringMap){ NULL, 0 };
+  list->list[idx].udt_annotation = (UdtAnnotation){ 0, NULL };
   list->len++;
   return &list->list[idx];
 }
@@ -196,10 +216,14 @@ void visit_struct(
   read_column_mapping_metadata(struct_item, metadata, builder->engine);
 }
 
-// Annotation strings are length-delimited and may contain embedded NUL bytes.
-static KernelStringSlice copy_annotation_slice(KernelStringSlice source)
+/** Copies an annotation into an owned C string, exiting on embedded NULs or allocation failure. */
+static char* copy_udt_annotation_string(KernelStringSlice source)
 {
-  char* copy = malloc(source.len ? source.len : 1);
+  if (source.len && memchr(source.ptr, '\0', source.len)) {
+    fprintf(stderr, "UDT annotations in this example cannot contain embedded NUL bytes\n");
+    exit(EXIT_FAILURE);
+  }
+  char* copy = malloc(source.len + 1);
   if (!copy) {
     fprintf(stderr, "Could not allocate UDT annotation\n");
     exit(EXIT_FAILURE);
@@ -207,7 +231,8 @@ static KernelStringSlice copy_annotation_slice(KernelStringSlice source)
   if (source.len) {
     memcpy(copy, source.ptr, source.len);
   }
-  return (KernelStringSlice){ copy, source.len };
+  copy[source.len] = '\0';
+  return copy;
 }
 
 void visit_user_defined(
@@ -224,19 +249,18 @@ void visit_user_defined(
   SchemaItem* item = add_to_list(&builder->lists[sibling_list_id], name_ptr, "udt", is_nullable);
   item->children = child_list_id;
   read_column_mapping_metadata(item, metadata, builder->engine);
-  FfiNullableStringMapEntry* entries = calloc(annotation.len, sizeof(FfiNullableStringMapEntry));
+  UdtAnnotationEntry* entries = calloc(annotation.len, sizeof(UdtAnnotationEntry));
   if (annotation.len && !entries) {
     fprintf(stderr, "Could not allocate UDT annotation entries\n");
     exit(EXIT_FAILURE);
   }
   for (uintptr_t i = 0; i < annotation.len; i++) {
-    entries[i].key = copy_annotation_slice(annotation.ptr[i].key);
-    entries[i].value = annotation.ptr[i].value;
-    if (entries[i].value.tag == SomeKernelStringSlice) {
-      entries[i].value.some = copy_annotation_slice(entries[i].value.some);
+    entries[i].key = copy_udt_annotation_string(annotation.ptr[i].key);
+    if (annotation.ptr[i].value.tag == SomeKernelStringSlice) {
+      entries[i].value = copy_udt_annotation_string(annotation.ptr[i].value.some);
     }
   }
-  item->annotation = (FfiNullableStringMap){ entries, annotation.len };
+  item->udt_annotation = (UdtAnnotation){ annotation.len, entries };
 }
 
 void visit_array(
@@ -395,13 +419,11 @@ void free_builder(SchemaBuilder* builder)
       free(item->name);
       free(item->column_mapping_id); // NULL when the field carried no column-mapping id; free(NULL) is a no-op
       free(item->column_mapping_physical_name);
-      for (uintptr_t k = 0; k < item->annotation.len; k++) {
-        free((void*)item->annotation.ptr[k].key.ptr);
-        if (item->annotation.ptr[k].value.tag == SomeKernelStringSlice) {
-          free((void*)item->annotation.ptr[k].value.some.ptr);
-        }
+      for (size_t k = 0; k < item->udt_annotation.len; k++) {
+        free(item->udt_annotation.entries[k].key);
+        free(item->udt_annotation.entries[k].value);
       }
-      free((void*)item->annotation.ptr);
+      free(item->udt_annotation.entries);
       // don't free item->type, those are static strings
       if (field_type_needs_free(item->type)) {
         // except decimal and geo types, we malloc'd those :)

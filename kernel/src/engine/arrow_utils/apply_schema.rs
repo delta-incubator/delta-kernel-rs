@@ -368,7 +368,7 @@ fn apply_schema_to_inner(
     let array: ArrayRef = match schema {
         #[cfg(feature = "udt-in-dev")]
         UserDefined(udt) => {
-            // Reject mismatched struct arity before rebuilding, allowing nullability normalization.
+            // Check physical type compatibility before rebuilding with logical nullability.
             ensure_data_types(udt.sql_type(), array.data_type(), ValidationMode::TypesOnly)?;
             // Column-mapping ancestry ends at the UDT boundary: nothing under `sqlType` carries a
             // field ID.
@@ -411,6 +411,8 @@ mod apply_schema_validation_tests {
         collect_arrow_field_metadata, complex_nested_with_field_ids,
     };
 
+    /// Verifies that applying a UDT schema restores logical child nullability without changing
+    /// its physical container shape.
     #[cfg(feature = "udt-in-dev")]
     #[rstest]
     #[case::struct_type(
@@ -438,6 +440,8 @@ mod apply_schema_validation_tests {
         assert_eq!(output.data_type(), &expected);
     }
 
+    /// Verifies that a struct-backed UDT rejects physical structs with a different arity before
+    /// rebuilding child fields.
     #[cfg(feature = "udt-in-dev")]
     #[rstest]
     fn apply_schema_rejects_udt_struct_field_count_mismatch(#[values(1, 3)] count: usize) {
@@ -453,6 +457,8 @@ mod apply_schema_validation_tests {
         );
     }
 
+    /// Verifies that schema application rejects an Arrow value incompatible with the UDT's
+    /// physical type.
     #[cfg(feature = "udt-in-dev")]
     #[test]
     fn apply_schema_rejects_udt_long_over_utf8() {

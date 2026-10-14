@@ -1,3 +1,5 @@
+// Verifies native C annotation ownership and requested-schema reconstruction through the FFI.
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -5,18 +7,13 @@
 #include "schema.h"
 #include "kernel_schema_visitor.h"
 
-static bool slices_equal(KernelStringSlice left, KernelStringSlice right)
-{
-  return left.len == right.len && (!left.len || memcmp(left.ptr, right.ptr, left.len) == 0);
-}
-
+// Keeps JSON-null values distinct from empty C strings across schema reconstruction.
 static bool check_schema(CSchema* schema)
 {
-  const FfiNullableStringMapEntry expected[] = {
-    { { "class", 5 }, { .tag = SomeKernelStringSlice, .some = { "example.Value", 13 } } },
-    { { "pyClass", 7 }, { .tag = NoneKernelStringSlice } },
-    { { "", 0 }, { .tag = SomeKernelStringSlice, .some = { "", 0 } } },
-    { { "a\0b", 3 }, { .tag = SomeKernelStringSlice, .some = { "x\0y", 3 } } },
+  const UdtAnnotationEntry expected[] = {
+    { "class", "example.Value" },
+    { "pyClass", NULL },
+    { "", "" },
   };
   SchemaItemList fields = schema->builder->lists[schema->list_id];
   if (fields.len != 2) {
@@ -34,17 +31,17 @@ static bool check_schema(CSchema* schema)
       return false;
     }
     size_t expected_len = i == 0 ? sizeof(expected) / sizeof(expected[0]) : 0;
-    if (field->annotation.len != expected_len) {
+    if (field->udt_annotation.len != expected_len) {
       return false;
     }
     for (size_t j = 0; j < expected_len; j++) {
       bool found = false;
-      for (size_t k = 0; k < field->annotation.len; k++) {
-        const FfiNullableStringMapEntry* actual = &field->annotation.ptr[k];
-        if (slices_equal(actual->key, expected[j].key)) {
-          found = actual->value.tag == expected[j].value.tag &&
-                  (actual->value.tag == NoneKernelStringSlice ||
-                   slices_equal(actual->value.some, expected[j].value.some));
+      for (size_t k = 0; k < field->udt_annotation.len; k++) {
+        const UdtAnnotationEntry* actual = &field->udt_annotation.entries[k];
+        if (strcmp(actual->key, expected[j].key) == 0) {
+          found = expected[j].value ?
+                    actual->value && strcmp(actual->value, expected[j].value) == 0 :
+                    actual->value == NULL;
           break;
         }
       }
@@ -56,6 +53,8 @@ static bool check_schema(CSchema* schema)
   return true;
 }
 
+// Rebuilds the fixture schema through a requested scan and verifies that copied annotations remain
+// valid after their source Rust schemas are released.
 static bool check_round_trip(const char* table_path)
 {
   bool success = false;
@@ -111,7 +110,7 @@ static bool check_round_trip(const char* table_path)
   requested_scan = NULL;
   free_snapshot(snapshot);
   snapshot = NULL;
-  // Retained annotation bytes must outlive both the source and reconstructed Rust schemas.
+  // Native annotations must outlive both the source and reconstructed Rust schemas.
   success = check_schema(rebuilt);
 
 cleanup:
@@ -125,17 +124,16 @@ cleanup:
 
 int main(int argc, char** argv)
 {
-  const KernelStringSlice inputs[] = { { "", 0 }, { "plain", 5 }, { "a\0b", 3 } };
-  for (size_t i = 0; i < sizeof(inputs) / sizeof(inputs[0]); i++) {
-    KernelStringSlice copy = copy_annotation_slice(inputs[i]);
-    bool matches = slices_equal(copy, inputs[i]);
-    free((void*)copy.ptr);
-    if (!matches) {
-      fprintf(stderr, "UDT annotation byte copy mismatch\n");
-      return EXIT_FAILURE;
-    }
+  if (argc == 2 && strcmp(argv[1], "--embedded-nul") == 0) {
+    KernelStringSlice invalid = { "a\0b", 3 };
+    free(copy_udt_annotation_string(invalid));
+    return EXIT_SUCCESS;
   }
-  if (argc > 1 && !check_round_trip(argv[1])) {
+  if (argc != 2) {
+    fprintf(stderr, "Usage: %s <table-path>|--embedded-nul\n", argv[0]);
+    return EXIT_FAILURE;
+  }
+  if (!check_round_trip(argv[1])) {
     fprintf(stderr, "UDT annotation round trip failed\n");
     return EXIT_FAILURE;
   }

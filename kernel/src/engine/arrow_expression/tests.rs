@@ -68,6 +68,8 @@ fn test_array_column() {
     assert_eq!(result, expected_not_in);
 }
 
+/// Verifies that null UDT scalars materialize as their physical Arrow type and remain compatible
+/// with the logical UDT.
 #[cfg(feature = "udt-in-dev")]
 #[rstest]
 #[case(KernelDataType::LONG)]
