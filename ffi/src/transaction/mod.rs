@@ -2999,10 +2999,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn custom_operation_constructor_rejects_invalid_utf8_without_retaining_snapshot(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    async fn custom_operation_constructor_rejects_invalid_utf8_without_retaining_snapshot() {
         let (table_url, _store, engine) =
-            setup_domain_metadata_table("test_custom_operation_invalid_utf8", false).await?;
+            setup_domain_metadata_table("test_custom_operation_invalid_utf8", false)
+                .await
+                .unwrap();
         let snapshot =
             unsafe { build_snapshot(ffi_str(table_url.as_str()), engine.shallow_copy()) };
         let snapshot_arc = unsafe { snapshot.clone_as_arc() };
@@ -3030,7 +3031,6 @@ mod tests {
             free_snapshot(snapshot);
             free_engine(engine);
         }
-        Ok(())
     }
 
     #[rstest]
