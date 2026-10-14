@@ -34,6 +34,8 @@ pub(crate) use column_default::{try_collect_column_defaults, validate_column_def
 pub(crate) mod compare;
 #[cfg(feature = "schema-diff")]
 pub(crate) mod diff;
+mod metadata_key;
+pub use metadata_key::MetadataKey;
 
 #[cfg(feature = "internal-api")]
 pub mod derive_macro_utils;
@@ -370,7 +372,7 @@ pub struct StructField {
     /// Denotes whether this Field can be null
     pub nullable: bool,
     /// A JSON map containing information about this column
-    pub metadata: HashMap<String, MetadataValue>,
+    pub metadata: HashMap<MetadataKey, MetadataValue>,
 }
 
 /// Parsed (and validated) pre-existing column-mapping annotations on a single field, as
@@ -420,7 +422,7 @@ impl StructField {
     pub fn create_metadata_column(name: impl Into<String>, spec: MetadataColumnSpec) -> Self {
         let mut metadata = HashMap::new();
         metadata.insert(
-            ColumnMetadataKey::MetadataSpec.as_ref().to_string(),
+            ColumnMetadataKey::MetadataSpec.as_ref().into(),
             MetadataValue::String(spec.text_value().to_string()),
         );
 
@@ -450,7 +452,7 @@ impl StructField {
     /// Replaces `self.metadata` with the list of <key, value> pairs in `metadata`.
     pub fn with_metadata(
         mut self,
-        metadata: impl IntoIterator<Item = (impl Into<String>, impl Into<MetadataValue>)>,
+        metadata: impl IntoIterator<Item = (impl Into<MetadataKey>, impl Into<MetadataValue>)>,
     ) -> Self {
         self.metadata = metadata
             .into_iter()
@@ -462,7 +464,7 @@ impl StructField {
     /// Extends `self.metadata` to include the <key, value> pairs in `metadata`.
     pub fn add_metadata(
         mut self,
-        metadata: impl IntoIterator<Item = (impl Into<String>, impl Into<MetadataValue>)>,
+        metadata: impl IntoIterator<Item = (impl Into<MetadataKey>, impl Into<MetadataValue>)>,
     ) -> Self {
         self.metadata
             .extend(metadata.into_iter().map(|(k, v)| (k.into(), v.into())));
@@ -694,7 +696,7 @@ impl StructField {
     }
 
     #[inline]
-    pub const fn metadata(&self) -> &HashMap<String, MetadataValue> {
+    pub const fn metadata(&self) -> &HashMap<MetadataKey, MetadataValue> {
         &self.metadata
     }
 
@@ -743,7 +745,7 @@ impl StructField {
     fn logical_to_physical_metadata(
         &self,
         column_mapping_mode: ColumnMappingMode,
-    ) -> HashMap<String, MetadataValue> {
+    ) -> HashMap<MetadataKey, MetadataValue> {
         let mut base_metadata = self.metadata.clone();
         let physical_name_key = ColumnMetadataKey::ColumnMappingPhysicalName.as_ref();
         let field_id_key = ColumnMetadataKey::ColumnMappingId.as_ref();
@@ -759,10 +761,7 @@ impl StructField {
                     return base_metadata;
                 };
                 // Insert the parquet field id matching the column mapping id
-                base_metadata.insert(
-                    parquet_field_id_key.to_string(),
-                    MetadataValue::Number(*fid),
-                );
+                base_metadata.insert(parquet_field_id_key.into(), MetadataValue::Number(*fid));
                 // Ensure that physical name is present
                 debug_assert!(base_metadata.contains_key(physical_name_key));
             }
@@ -779,10 +778,7 @@ impl StructField {
                     debug_assert!(false);
                     return base_metadata;
                 };
-                base_metadata.insert(
-                    parquet_field_id_key.to_string(),
-                    MetadataValue::Number(*fid),
-                );
+                base_metadata.insert(parquet_field_id_key.into(), MetadataValue::Number(*fid));
                 // TODO(#1070): Remove nested column ids when they are supported in kernel
             }
             ColumnMappingMode::None => {
@@ -3564,7 +3560,7 @@ mod tests {
         // Schema with top-level invariant
         let mut field = StructField::nullable("c", DataType::STRING);
         field.metadata.insert(
-            ColumnMetadataKey::Invariants.as_ref().to_string(),
+            ColumnMetadataKey::Invariants.as_ref().into(),
             MetadataValue::String("c > 0".to_string()),
         );
 
@@ -3579,7 +3575,7 @@ mod tests {
             ({
                 let mut field = StructField::nullable("d", DataType::INTEGER);
                 field.metadata.insert(
-                    ColumnMetadataKey::Invariants.as_ref().to_string(),
+                    ColumnMetadataKey::Invariants.as_ref().into(),
                     MetadataValue::String("d > 0".to_string()),
                 );
                 field
@@ -3598,7 +3594,7 @@ mod tests {
             ({
                 let mut field = StructField::nullable("d", DataType::INTEGER);
                 field.metadata.insert(
-                    ColumnMetadataKey::Invariants.as_ref().to_string(),
+                    ColumnMetadataKey::Invariants.as_ref().into(),
                     MetadataValue::String("d > 0".to_string()),
                 );
                 field
@@ -3617,7 +3613,7 @@ mod tests {
             ({
                 let mut field = StructField::nullable("d", DataType::INTEGER);
                 field.metadata.insert(
-                    ColumnMetadataKey::Invariants.as_ref().to_string(),
+                    ColumnMetadataKey::Invariants.as_ref().into(),
                     MetadataValue::String("d > 0".to_string()),
                 );
                 field

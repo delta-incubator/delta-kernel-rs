@@ -49,10 +49,10 @@ pub(crate) fn kernel_flat_parquet_id_to_arrow_metadata(
         .metadata()
         .iter()
         .map(|(key, val)| {
-            let transformed_key = if key == ColumnMetadataKey::ParquetFieldId.as_ref() {
+            let transformed_key = if key.as_str() == ColumnMetadataKey::ParquetFieldId.as_ref() {
                 PARQUET_FIELD_ID_META_KEY.to_string()
             } else {
-                key.clone()
+                key.to_string()
             };
             match val {
                 MetadataValue::String(s) => Ok((transformed_key, s.clone())),

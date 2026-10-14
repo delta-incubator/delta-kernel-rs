@@ -1648,7 +1648,7 @@ mod tests {
     use crate::parquet::schema::types::{SchemaDescriptor, Type};
     use crate::schema::{
         schema, schema_ref, ArrayType, ColumnMetadataKey, DataType, MapType, MetadataColumnSpec,
-        MetadataValue, StructField, StructType,
+        MetadataKey, MetadataValue, StructField, StructType,
     };
     use crate::table_features::ColumnMappingMode;
     use crate::unit_test_utils::assert_result_error_with_message;
@@ -1687,7 +1687,7 @@ mod tests {
     fn column_mapping_metadata(
         field_id: i64,
         mode: ColumnMappingMode,
-    ) -> HashMap<String, MetadataValue> {
+    ) -> HashMap<MetadataKey, MetadataValue> {
         match mode {
             ColumnMappingMode::None => HashMap::new(),
             _ => kernel_fid_and_name(field_id, physical_name(field_id)),
@@ -1701,16 +1701,17 @@ mod tests {
 
     /// Generates appropriate column mapping metadata for a kernel struct field with column mapping
     /// id `field_id`.
-    fn kernel_fid_and_name(field_id: i64, name: impl AsRef<str>) -> HashMap<String, MetadataValue> {
+    fn kernel_fid_and_name(
+        field_id: i64,
+        name: impl AsRef<str>,
+    ) -> HashMap<MetadataKey, MetadataValue> {
         HashMap::from([
             (
-                ColumnMetadataKey::ColumnMappingId.as_ref().to_string(),
+                ColumnMetadataKey::ColumnMappingId.as_ref().into(),
                 field_id.into(),
             ),
             (
-                ColumnMetadataKey::ColumnMappingPhysicalName
-                    .as_ref()
-                    .to_string(),
+                ColumnMetadataKey::ColumnMappingPhysicalName.as_ref().into(),
                 name.as_ref().to_string().into(),
             ),
         ])
