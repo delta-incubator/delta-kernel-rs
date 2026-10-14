@@ -483,11 +483,14 @@ impl<Mode> SnapshotBuilder<Mode> {
             )
         );
         if let Some(max_catalog_version) = max_catalog_version {
+            // A downgrade is catalog-ratified even though its resulting protocol is not
+            // catalog-managed. Publication does not invalidate this bounded snapshot.
             let is_catalog_downgrade = !is_catalog_managed
                 && max_catalog_version == snapshot.version()
                 && supplied_tail_end.is_some_and(|tail| {
                     tail.version == snapshot.version()
                         && tail.file_type == LogPathFileType::StagedCommit
+                        // Bind the exception to the selected ratified commit, not just its version.
                         && snapshot.log_segment.listed.ascending_commit_files.last() == Some(tail)
                 });
             require!(
