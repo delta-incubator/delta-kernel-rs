@@ -683,7 +683,7 @@ impl ParseJsonExpression {
 ///
 /// Kernel does not infer these settings from the host environment or table metadata.
 /// Expression producers must use one reader timezone for all partition-value expressions in a
-/// scan so materialization and pruning cannot interpret the same value differently.
+/// scan so materialization and final predicate pruning cannot interpret the same value differently.
 #[derive(Clone, Debug, Default, Eq, Hash, PartialEq, Serialize, Deserialize)]
 pub struct MapToStructOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
