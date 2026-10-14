@@ -82,9 +82,8 @@ pub(crate) struct LastCheckpointHint {
     /// For an adaptive-metadata (AMT) checkpoint, the embedded AMT checkpoint info: the manifest
     /// commit version plus optional prefetched checkpoint/leaves.
     ///
-    /// A writer pairs this with `checkpoint_type == AdaptiveMetadataTree` and never sets it
-    /// alongside `v2_checkpoint`. [`Self::try_read`] drops an `AdaptiveMetadataTree` hint without
-    /// this field; other combinations are retained as-is.
+    /// A writer sets this exactly when `checkpoint_type == AdaptiveMetadataTree`, and never
+    /// alongside `v2_checkpoint`. [`Self::try_read`] drops a hint that violates either rule.
     ///
     /// Skipped on serialize when `None` so a classic hint's wire form is identical whether or not
     /// the `adaptive-metadata-in-dev` feature is compiled in.
@@ -346,9 +345,15 @@ impl LastCheckpointHint {
     }
 
     /// The checkpoint identity this hint's fields describe, mirroring Delta-Spark's
-    /// `getFormatEnum`: a `v2Checkpoint` object means uuid-named, else `parts` means multi-part,
-    /// else classic-named. `None` if `parts` overflows `u32`, so no checkpoint can match it.
+    /// `getFormatEnum`: an `amtCheckpoint` object means an AMT checkpoint, else a `v2Checkpoint`
+    /// object means uuid-named, else `parts` means multi-part, else classic-named. `None` for an
+    /// AMT checkpoint (it has no checkpoint file) or if `parts` overflows `u32`, so no checkpoint
+    /// can match it.
     fn implied_instance(&self) -> Option<CheckpointInstance> {
+        #[cfg(feature = "adaptive-metadata-in-dev")]
+        if self.amt_checkpoint.is_some() {
+            return None;
+        }
         Some(match (&self.v2_checkpoint, self.parts) {
             (Some(v2), _) => CheckpointInstance::Uuid {
                 filename: v2.path.clone(),
@@ -358,6 +363,25 @@ impl LastCheckpointHint {
             },
             (None, None) => CheckpointInstance::Classic,
         })
+    }
+
+    /// Describes why this hint's `checkpointType`, `amtCheckpoint`, and `v2Checkpoint` fields
+    /// cannot describe a single checkpoint, or `None` if they are consistent.
+    #[cfg(feature = "adaptive-metadata-in-dev")]
+    fn amt_fields_problem(&self) -> Option<&'static str> {
+        match (
+            self.checkpoint_type,
+            &self.amt_checkpoint,
+            &self.v2_checkpoint,
+        ) {
+            (Some(CheckpointType::Unknown), _, _) => Some("has an unrecognized checkpointType"),
+            (Some(CheckpointType::AdaptiveMetadataTree), None, _) => {
+                Some("AMT hint has no amtCheckpoint")
+            }
+            (None, Some(_), _) => Some("has amtCheckpoint without an AdaptiveMetadataTree type"),
+            (_, Some(_), Some(_)) => Some("has both amtCheckpoint and v2Checkpoint"),
+            _ => None,
+        }
     }
 
     /// Parses a hint from raw `_last_checkpoint` bytes, dropping oversized fields so the retained
@@ -435,26 +459,17 @@ impl LastCheckpointHint {
                 let result = Self::from_bytes_with_oversized_fields_dropped(&data)
                     .inspect_err(|e| warn!("invalid _last_checkpoint JSON: {e}"))
                     .ok()
-                    // Kernel cannot locate the checkpoint a hint describes if its `checkpointType`
-                    // is unrecognized, or if it is AMT-typed without `amtCheckpoint` (no manifest
-                    // commit to anchor on). Such a hint is dropped so the reader falls back to log
-                    // replay.
+                    // Kernel cannot tell which checkpoint a hint describes if its `checkpointType`
+                    // is unrecognized or its AMT fields are inconsistent. Such a hint is dropped so
+                    // the reader falls back to log replay.
                     .filter(|_hint| {
                         #[cfg(feature = "adaptive-metadata-in-dev")]
-                        match _hint.checkpoint_type {
-                            Some(CheckpointType::Unknown) => {
-                                warn!(
-                                    "_last_checkpoint has an unrecognized checkpointType; dropping"
-                                );
-                                return false;
-                            }
-                            Some(CheckpointType::AdaptiveMetadataTree)
-                                if _hint.amt_checkpoint.is_none() =>
-                            {
-                                warn!("_last_checkpoint AMT hint has no amtCheckpoint; dropping");
-                                return false;
-                            }
-                            _ => {}
+                        if let Some(problem) = _hint.amt_fields_problem() {
+                            warn!(
+                                version = _hint.version,
+                                "_last_checkpoint {problem}; dropping"
+                            );
+                            return false;
                         }
                         true
                     });
@@ -548,6 +563,8 @@ impl LastCheckpointV2 {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "adaptive-metadata-in-dev")]
+    use bytes::Bytes;
     use rstest::rstest;
 
     use super::*;
@@ -555,6 +572,8 @@ mod tests {
     use crate::table_features::TableFeature;
     use crate::unit_test_utils::create_log_path;
     use crate::ResultIteratorStatic;
+    #[cfg(feature = "adaptive-metadata-in-dev")]
+    use crate::{engine::sync::SyncEngine, object_store::memory::InMemory, Engine};
 
     /// A real `_last_checkpoint` for a V2 checkpoint carries a `v2Checkpoint` object; we parse its
     /// `path` and file metadata. An empty `sidecarFiles` (a leaf checkpoint) parses to `Some([])`,
@@ -755,59 +774,50 @@ mod tests {
         assert_eq!(hint.checkpoint_type, Some(CheckpointType::Unknown));
     }
 
-    /// `try_read` retains a hint with an absent `checkpointType` (classic / multi-part / V2) or an
-    /// `AdaptiveMetadataTree` type with `amtCheckpoint`, and drops one with an unrecognized type or
-    /// an AMT type lacking `amtCheckpoint`, so the reader falls back to log replay.
+    /// `try_read` retains a hint whose `checkpointType` and AMT fields describe one checkpoint, and
+    /// drops one it cannot interpret so the reader falls back to log replay.
     #[cfg(feature = "adaptive-metadata-in-dev")]
-    #[test]
-    fn try_read_retains_recognized_and_drops_unrecognized_checkpoint_type() {
-        use crate::engine::sync::SyncEngine;
-        use crate::object_store::memory::InMemory;
-        use crate::Engine;
-
+    #[rstest]
+    #[case::no_checkpoint_type(r#"{"version": 5, "size": 10}"#, true)]
+    #[case::amt(
+        r#"{"version": 6, "size": -1, "checkpointType": "AdaptiveMetadataTree",
+            "amtCheckpoint": {"manifestCommitVersion": 6}}"#,
+        true
+    )]
+    #[case::amt_type_without_amt_checkpoint(
+        r#"{"version": 6, "size": -1, "checkpointType": "AdaptiveMetadataTree"}"#,
+        false
+    )]
+    #[case::amt_checkpoint_without_amt_type(
+        r#"{"version": 6, "size": -1, "amtCheckpoint": {"manifestCommitVersion": 6}}"#,
+        false
+    )]
+    #[case::amt_checkpoint_with_v2_checkpoint(
+        r#"{"version": 6, "size": -1, "checkpointType": "AdaptiveMetadataTree",
+            "amtCheckpoint": {"manifestCommitVersion": 6},
+            "v2Checkpoint": {"path": "00000000000000000006.checkpoint.abc.parquet"}}"#,
+        false
+    )]
+    #[case::unknown_checkpoint_type(
+        r#"{"version": 5, "size": 10, "checkpointType": "SomethingNewer"}"#,
+        false
+    )]
+    fn try_read_drops_unrecognized_or_inconsistent_checkpoint_type(
+        #[case] json: &str,
+        #[case] retained: bool,
+    ) {
         let log_root = Url::parse("memory:///_delta_log/").unwrap();
-        let read_hint = |json: &str| {
-            let engine = SyncEngine::new_with_store(std::sync::Arc::new(InMemory::new()));
-            let storage = engine.storage_handler();
-            storage
-                .put(
-                    &LastCheckpointHint::path(&log_root).unwrap(),
-                    bytes::Bytes::copy_from_slice(json.as_bytes()),
-                    true,
-                )
-                .unwrap();
-            LastCheckpointHint::try_read(storage.as_ref(), &log_root, None).unwrap()
-        };
-
-        // Absent checkpointType (classic / multi-part / V2): recognized, so retained.
-        let hint = read_hint(r#"{"version": 5, "size": 10}"#).expect("legacy hint retained");
-        assert_eq!(hint.version, 5);
-        assert!(hint.checkpoint_type.is_none());
-
-        // AdaptiveMetadataTree: recognized, so retained.
-        let hint = read_hint(
-            r#"{"version": 6, "size": -1, "checkpointType": "AdaptiveMetadataTree",
-                "amtCheckpoint": {"manifestCommitVersion": 6}}"#,
-        )
-        .expect("AMT hint retained");
-        assert_eq!(
-            hint.checkpoint_type,
-            Some(CheckpointType::AdaptiveMetadataTree)
-        );
-
-        // AdaptiveMetadataTree without amtCheckpoint: no manifest commit to anchor on, so dropped.
-        assert!(
-            read_hint(r#"{"version": 6, "size": -1, "checkpointType": "AdaptiveMetadataTree"}"#)
-                .is_none(),
-            "AMT hint without amtCheckpoint must drop the hint"
-        );
-
-        // Unrecognized checkpointType: the whole hint is dropped.
-        assert!(
-            read_hint(r#"{"version": 5, "size": 10, "checkpointType": "SomethingNewer"}"#)
-                .is_none(),
-            "unrecognized checkpointType must drop the hint"
-        );
+        let engine = SyncEngine::new_with_store(Arc::new(InMemory::new()));
+        let storage = engine.storage_handler();
+        storage
+            .put(
+                &LastCheckpointHint::path(&log_root).unwrap(),
+                Bytes::copy_from_slice(json.as_bytes()),
+                true,
+            )
+            .unwrap();
+        let hint = LastCheckpointHint::try_read(storage.as_ref(), &log_root, None).unwrap();
+        assert_eq!(hint.is_some(), retained, "{json}");
     }
 
     /// `AdaptiveMetadataTree` serializes to its wire string, but `Unknown` refuses to serialize --
@@ -921,7 +931,6 @@ mod tests {
     #[test]
     fn checkpoint_action_cross_serializes_between_log_and_hint() -> Result<()> {
         use crate::actions::ContentRoot;
-        use crate::engine::sync::SyncEngine;
         use crate::engine::to_json_bytes;
         use crate::engine_data::FilteredEngineData;
         use crate::unit_test_utils::parse_json_batch;
@@ -1089,6 +1098,28 @@ mod tests {
         );
 
         assert!(!v1_single.applies_to(&[]), "no checkpoint selected");
+    }
+
+    /// An AMT hint's `parts` counts its leaves, not checkpoint files, so it never applies to a
+    /// listed checkpoint even when the part counts coincide.
+    #[cfg(feature = "adaptive-metadata-in-dev")]
+    #[test]
+    fn applies_to_rejects_amt_hint_for_listed_checkpoint() {
+        let root = Url::parse("memory:///_delta_log/").unwrap();
+        let part = |name: &str| create_log_path(root.join(name).unwrap().as_str());
+        let amt = LastCheckpointHint {
+            version: 1,
+            parts: Some(2),
+            checkpoint_type: Some(CheckpointType::AdaptiveMetadataTree),
+            amt_checkpoint: Some(AmtCheckpoint {
+                manifest_commit_version: 1,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let mp1 = "00000000000000000001.checkpoint.0000000001.0000000002.parquet";
+        let mp2 = "00000000000000000001.checkpoint.0000000002.0000000002.parquet";
+        assert!(!amt.applies_to(&[part(mp1), part(mp2)]));
     }
 
     /// `sidecarFiles` / `nonFileActions` are dropped only when their count exceeds the threshold --
