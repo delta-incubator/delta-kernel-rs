@@ -271,8 +271,10 @@ impl LogSegment {
         ascending_commits: impl DoubleEndedIterator<Item = &'a ParsedLogPath>,
         seed_histogram: Option<FileSizeHistogram>,
     ) -> KernelResult<CrcDelta> {
+        let ascending_commits: Vec<_> = ascending_commits.collect();
         // Replay newest-first: ICT capture reads from the newest commit only.
         let locations: Vec<FileMeta> = ascending_commits
+            .iter()
             .rev()
             .map(|c| c.location.clone())
             .collect();
@@ -293,7 +295,14 @@ impl LogSegment {
         // will trigger it.
         acc.process_commit_file_end();
 
-        Ok(acc.into_crc_delta())
+        let delta = acc.into_crc_delta();
+        #[cfg(feature = "adaptive-metadata-in-dev")]
+        if let (Some(newest), Some(last_manifest_commit)) =
+            (ascending_commits.last(), &delta.last_manifest_commit)
+        {
+            last_manifest_commit.ensure_not_after(newest.version)?;
+        }
+        Ok(delta)
     }
 }
 

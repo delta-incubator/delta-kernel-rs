@@ -1265,6 +1265,25 @@ async fn test_trips_indeterminate(#[case] v1_actions: Vec<Value>) {
     );
 }
 
+#[cfg(feature = "adaptive-metadata-in-dev")]
+#[tokio::test]
+async fn test_replay_rejects_last_manifest_commit_newer_than_newest_commit() {
+    let mut v1 = commit_info("WRITE", None);
+    v1["commitInfo"]["lastManifestCommit"] = json!({"version": 5, "contentRootVersion": 5});
+    let err = CrcReadTest::new()
+        .commit(0, create_table_actions())
+        .commit(1, vec![v1])
+        .build()
+        .await
+        .incrementally_build_crc(&crc_complete_empty_dm_set_txn())
+        .unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("lastManifestCommit version 5 exceeds commit version 1"),
+        "unexpected error: {err}"
+    );
+}
+
 // === On-disk base CRC (exercises serde round-trip) ===
 
 #[tokio::test]

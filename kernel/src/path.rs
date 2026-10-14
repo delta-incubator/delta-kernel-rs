@@ -427,13 +427,7 @@ impl ParsedLogPath<FileMeta> {
         let mut visitor = LastManifestCommitVisitor::default();
         visitor.visit_rows_of(actions.as_ref())?;
         if let Some(last_manifest_commit) = &visitor.last_manifest_commit {
-            require!(
-                u64::try_from(last_manifest_commit.version).is_ok_and(|v| v <= self.version),
-                KernelError::generic(format!(
-                    "lastManifestCommit version {} exceeds commit version {}",
-                    last_manifest_commit.version, self.version
-                ))
-            );
+            last_manifest_commit.ensure_not_after(self.version)?;
         }
         Ok((in_commit_timestamp, visitor.last_manifest_commit))
     }
