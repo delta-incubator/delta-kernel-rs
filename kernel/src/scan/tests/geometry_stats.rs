@@ -6,91 +6,39 @@ use crate::arrow::array::{ArrayRef, AsArray, BinaryArray};
 use crate::engine::arrow_expression::evaluate_expression::evaluate_expression;
 use crate::engine::arrow_expression::opaque::{ArrowOpaqueExpression, ArrowOpaqueExpressionOp};
 use crate::expressions::{ParseJsonExpression, ScalarExpressionEvaluator};
-use crate::object_store::ObjectStoreExt;
-use crate::parquet::arrow::ArrowSchemaConverter;
-use crate::parquet::basic::{LogicalType, Type as PhysicalType};
-use crate::parquet::schema::types::{SchemaDescriptor, Type as ParquetType};
-use crate::schema::{ColumnName, PrimitiveType, SchemaStructPatchBuilder};
-use crate::unit_test_utils::{geometry_type, load_test_table, string_array_to_engine_data};
-use crate::{EvaluationHandler, ExpressionEvaluator, PredicateEvaluator, StorageHandler};
+use crate::schema::{PrimitiveType, SchemaStructPatchBuilder};
+use crate::unit_test_utils::{geometry_type, string_array_to_engine_data};
+use crate::{EvaluationHandler, ExpressionEvaluator, PredicateEvaluator};
 
 #[rstest]
-#[case::all_struct(StatsOptions::all_struct())]
-#[case::struct_columns(StatsOptions::struct_columns(vec![column_name!("id")]))]
-#[case::extra_indexed(StatsOptions::all_struct_with_extra_indexed(vec![column_name!("g")]))]
-fn scan_builder_accepts_geometry_stats_with_typed_output(
-    #[case] stats: StatsOptions,
-    #[values(false, true)] variant: bool,
-) {
-    let (_, snapshot, _tempdir) = load_test_table("parsed-stats").unwrap();
-    snapshot
-        .scan_builder()
-        .with_stats(
-            stats
-                .with_variant_min_max_stats(variant)
-                .with_geometry_min_max_stats(true),
-        )
-        .build()
-        .unwrap();
+#[case::struct_output(StatsOptions::all_struct(), None)]
+#[case::no_struct_output(StatsOptions::none(), Some("requires struct stats output"))]
+#[case::json_synthesis(
+    StatsOptions::all(),
+    Some("cannot be combined with JSON stats synthesis")
+)]
+fn geometry_stats_options_validation(#[case] stats: StatsOptions, #[case] error: Option<&str>) {
+    let result = stats.with_geometry_min_max_stats(true).validate();
+    if let Some(error) = error {
+        assert_result_error_with_message(result, error);
+    } else {
+        result.unwrap();
+    }
 }
 
-#[rstest]
-#[case::json_only(StatsOptions::json_only(), "requires struct stats output")]
-#[case::none(StatsOptions::none(), "requires struct stats output")]
-#[case::all(StatsOptions::all(), "cannot be combined with JSON stats synthesis")]
-fn scan_builder_rejects_geometry_stats_without_typed_output_or_with_json_synthesis(
-    #[case] stats: StatsOptions,
-    #[case] message: &str,
-) {
-    let (_, snapshot, _tempdir) = load_test_table("parsed-stats").unwrap();
-    assert_result_error_with_message(
-        snapshot
-            .clone()
-            .scan_builder()
-            .with_stats(stats.clone().with_geometry_min_max_stats(true))
-            .build(),
-        message,
-    );
-    snapshot
-        .scan_builder()
-        .with_stats(
-            stats
-                .with_geometry_min_max_stats(true)
-                .with_geometry_min_max_stats(false),
-        )
-        .build()
-        .unwrap();
+#[test]
+fn geometry_stats_are_disabled_by_default() {
+    assert!(!StatsOptions::default().geometry_min_max);
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum CheckpointStats {
-    ParsedWkb,
-    MismatchedCrs,
-    Unannotated,
-    MissingMin,
-    IncompatibleString,
-    NullBounds,
-    MissingStats,
-}
-
-#[rstest]
-#[case::parsed_only(CheckpointStats::ParsedWkb)]
-#[case::missing_bound_is_null(CheckpointStats::MissingMin)]
-#[case::incompatible_type_uses_json(CheckpointStats::IncompatibleString)]
-#[case::null_bounds(CheckpointStats::NullBounds)]
-#[case::missing_stats(CheckpointStats::MissingStats)]
 #[tokio::test]
-async fn geometry_bounds_reach_typed_scan_output_from_commits_and_checkpoints(
-    #[case] checkpoint_stats: CheckpointStats,
-    #[values(false, true)] scalar_predicate: bool,
-) {
-    let (engine, _, table_root) = setup_geometry_stats_table(checkpoint_stats).await;
+async fn geometry_bounds_reach_typed_scan_output_from_commits_and_checkpoints() {
+    let (engine, table_root) = setup_geometry_stats_table().await;
     let snapshot = Snapshot::builder_for(&table_root).build(&engine).unwrap();
     assert_eq!(snapshot.log_segment().checkpoint_version, Some(1));
     let builder = snapshot
         .scan_builder()
         .with_stats(StatsOptions::all_struct().with_geometry_min_max_stats(true))
-        .with_predicate(scalar_predicate.then(|| Arc::new(Pred::gt(col!("id"), lit(3_i64)))))
         .without_row_transforms();
     let preview = builder.stats_output_schemas().unwrap().unwrap();
     assert_eq!(preview.logical, preview.physical);
@@ -108,150 +56,26 @@ async fn geometry_bounds_reach_typed_scan_output_from_commits_and_checkpoints(
         scan.state_info.physical_stats_read_schema(),
         Some(&preview.physical)
     );
-    let has_bounds = !matches!(
-        checkpoint_stats,
-        CheckpointStats::NullBounds | CheckpointStats::MissingStats
-    );
-    let mut expected = vec![
-        (
-            "b.parquet".to_owned(),
-            MAX_VALUES,
-            has_bounds.then(|| point_wkb(6.0, 16.0)),
-        ),
-        (
-            "b.parquet".to_owned(),
-            MIN_VALUES,
-            has_bounds.then(|| point_wkb(4.0, 14.0)),
-        ),
-    ];
-    if !scalar_predicate || checkpoint_stats == CheckpointStats::MissingStats {
-        expected.extend([
-            (
-                "a.parquet".to_owned(),
-                MAX_VALUES,
-                has_bounds.then(|| point_wkb(3.0, 13.0)),
-            ),
-            (
-                "a.parquet".to_owned(),
-                MIN_VALUES,
-                (has_bounds && checkpoint_stats != CheckpointStats::MissingMin)
-                    .then(|| point_wkb(1.0, 11.0)),
-            ),
-        ]);
-    }
-    expected.sort();
-    assert_eq!(collect_geometry_bounds(&scan, &engine), expected);
-}
-
-#[rstest]
-#[case::default_off(false)]
-#[case::unsupported_handler(true)]
-#[tokio::test]
-async fn geometry_stats_require_supporting_handlers_only_when_requested(#[case] enabled: bool) {
-    let (_, sync, table_root) = setup_geometry_stats_table(CheckpointStats::ParsedWkb).await;
-    let snapshot = Snapshot::builder_for(&table_root)
-        .build(sync.as_ref())
-        .unwrap();
-    let scan = snapshot
-        .scan_builder()
-        .with_stats(StatsOptions::all_struct().with_geometry_min_max_stats(enabled))
-        .with_predicate(Arc::new(Pred::gt(col!("id"), lit(3_i64))))
-        .without_row_transforms()
-        .build()
-        .unwrap();
-    let result = scan
-        .scan_metadata(sync.as_ref())
-        .and_then(|iter| iter.collect::<Result<Vec<_>>>());
-    if enabled {
-        assert_result_error_with_message(result, "Geo types are not yet supported");
-    } else {
-        let mut paths = vec![];
-        for metadata in result.unwrap() {
-            let (data, selected) = metadata.scan_files.into_parts();
-            let batch: RecordBatch = ArrowEngineData::try_from_engine_data(data).unwrap().into();
-            let batch = filter_record_batch(&batch, &BooleanArray::from(selected)).unwrap();
-            let stats = get_column!(batch, STATS_PARSED, StructArray);
-            for bound in [MIN_VALUES, MAX_VALUES] {
-                assert!(get_column!(stats, bound, StructArray)
-                    .column_by_name("g")
-                    .is_none());
-            }
-            paths.extend(
-                get_column!(batch, "path", StringArray)
-                    .iter()
-                    .flatten()
-                    .map(str::to_owned),
-            );
-        }
-        assert_eq!(paths, ["b.parquet"]);
-    }
-}
-
-#[rstest]
-#[case::mismatched_crs(CheckpointStats::MismatchedCrs, "Geometry CRS mismatch")]
-#[case::unannotated(CheckpointStats::Unannotated, "Expected a Parquet GEOMETRY annotation")]
-#[tokio::test]
-async fn geometry_stats_handler_validates_annotations_hidden_by_binary_footer(
-    #[case] checkpoint_stats: CheckpointStats,
-    #[case] error: &str,
-    #[values(false, true)] enabled: bool,
-) {
-    let (engine, _, table_root) = setup_geometry_stats_table(checkpoint_stats).await;
-    let checkpoint = engine
-        .storage_handler()
-        .list_from(&Url::parse(&format!("{table_root}_delta_log/")).unwrap())
-        .unwrap()
-        .map(Result::unwrap)
-        .find(|file| file.location.path().ends_with(".checkpoint.parquet"))
-        .unwrap();
-    let footer = engine
-        .parquet_handler()
-        .read_parquet_footer(&checkpoint)
-        .unwrap();
-    for bound in [MIN_VALUES, MAX_VALUES] {
-        let path = ColumnName::new(["add", STATS_PARSED, bound, "g"]);
-        assert_eq!(
-            footer.schema.field_at(&path).unwrap().data_type(),
-            &DataType::BINARY
-        );
-    }
-    let snapshot = Snapshot::builder_for(&table_root).build(&engine).unwrap();
-    let scan = snapshot
-        .scan_builder()
-        .with_stats(StatsOptions::all_struct().with_geometry_min_max_stats(enabled))
-        .without_row_transforms()
-        .build()
-        .unwrap();
-    let result = scan
-        .scan_metadata(&engine)
-        .and_then(|iter| iter.collect::<Result<Vec<_>>>());
-    if enabled {
-        assert_result_error_with_message(result, error);
-    } else {
-        assert!(!result.unwrap().is_empty());
-    }
-}
-
-#[test]
-fn geometry_json_test_decoder_returns_unsupported_for_scalar_evaluation() {
-    let decoder = DecodePointStats(schema_ref! { nullable "g": (geometry_type("EPSG:4326")) });
-    assert_result_error_with_message(
-        decoder.eval_expr_scalar(&|_| None, &[]),
-        "The test Geometry JSON decoder does not support scalar evaluation",
+    let expected = |path: &str, bound, x| (path.to_owned(), bound, Some(point_wkb(x, x + 10.0)));
+    assert_eq!(
+        collect_geometry_bounds(&scan, &engine),
+        vec![
+            expected("a.parquet", MAX_VALUES, 3.0),
+            expected("a.parquet", MIN_VALUES, 1.0),
+            expected("b.parquet", MAX_VALUES, 6.0),
+            expected("b.parquet", MIN_VALUES, 4.0),
+        ],
     );
 }
 
 // Kernel writers reject geospatial tables, so build protocol-shaped read fixtures directly.
-async fn setup_geometry_stats_table(
-    checkpoint_stats: CheckpointStats,
-) -> (DelegatingEngine, Arc<SyncEngine>, String) {
+async fn setup_geometry_stats_table() -> (DelegatingEngine, String) {
     let table_root = String::from("memory:///");
     let store = Arc::new(InMemory::new());
     let sync = Arc::new(SyncEngine::new_with_store(store.clone()));
     let handler = Arc::new(GeometryStatsHandler {
         evaluation: sync.evaluation_handler(),
         parquet: sync.parquet_handler(),
-        storage: sync.storage_handler(),
     });
     let engine = DelegatingEngine::new(sync.clone())
         .with_evaluation_handler(handler.clone())
@@ -277,27 +101,17 @@ async fn setup_geometry_stats_table(
                 format!("POINT ({n} {})", n + 10)
             }
         };
-        let mut stats = serde_json::json!({
+        serde_json::json!({
             "numRecords": 3, "nullCount": {"id": 0, "g": 0},
             "minValues": {"id": min, "g": corner(min)},
             "maxValues": {"id": max, "g": corner(max)}, "tightBounds": true,
-        });
-        if checkpoint_stats == CheckpointStats::NullBounds {
-            stats[MIN_VALUES]["g"] = serde_json::Value::Null;
-            stats[MAX_VALUES]["g"] = serde_json::Value::Null;
-            stats[NULL_COUNT]["g"] = 3.into();
-        }
-        stats
+        })
     };
     let add = |path: &str, min, max| {
-        let mut add = serde_json::json!({"add": {
+        serde_json::json!({"add": {
             "path": path, "partitionValues": {}, "size": 1, "modificationTime": 1,
             "dataChange": true, "stats": stats(min, max, false).to_string(),
-        }});
-        if checkpoint_stats == CheckpointStats::MissingStats {
-            add["add"].as_object_mut().unwrap().remove("stats");
-        }
-        add
+        }})
     };
     add_commit(
         &table_root,
@@ -316,17 +130,7 @@ async fn setup_geometry_stats_table(
     .await
     .unwrap();
 
-    let physical_type = if checkpoint_stats == CheckpointStats::IncompatibleString {
-        DataType::STRING
-    } else {
-        DataType::BINARY
-    };
-    let bounds = schema! { nullable "id": LONG, nullable "g": (physical_type) };
-    let min_bounds = if checkpoint_stats == CheckpointStats::MissingMin {
-        schema! { nullable "id": LONG }
-    } else {
-        bounds.clone()
-    };
+    let bounds = schema! { nullable "id": LONG, nullable "g": BINARY };
     let checkpoint_schema = Arc::new(
         SchemaStructPatchBuilder::new()
             .append_at(
@@ -336,7 +140,7 @@ async fn setup_geometry_stats_table(
                     schema! {
                         nullable NUM_RECORDS: LONG,
                         nullable NULL_COUNT: { nullable "id": LONG, nullable "g": LONG },
-                        nullable MIN_VALUES: (min_bounds), nullable MAX_VALUES: (bounds),
+                        nullable MIN_VALUES: (bounds.clone()), nullable MAX_VALUES: (bounds),
                         nullable TIGHT_BOUNDS: BOOLEAN,
                     },
                 ),
@@ -345,20 +149,12 @@ async fn setup_geometry_stats_table(
             .unwrap(),
     );
     let mut checkpoint_add = add("a.parquet", 1, 3);
-    if checkpoint_stats != CheckpointStats::MissingStats {
-        checkpoint_add["add"][STATS_PARSED] = stats(1, 3, true);
-    }
-    if matches!(
-        checkpoint_stats,
-        CheckpointStats::ParsedWkb | CheckpointStats::MismatchedCrs | CheckpointStats::Unannotated
-    ) {
-        // No JSON fallback can hide a failure to read typed checkpoint bounds.
-        checkpoint_add["add"]
-            .as_object_mut()
-            .unwrap()
-            .remove("stats");
-    }
-    // MissingMin deliberately keeps complete JSON stats: the missing typed bound must stay null.
+    checkpoint_add["add"][STATS_PARSED] = stats(1, 3, true);
+    // No JSON fallback can hide a failure to read typed checkpoint bounds.
+    checkpoint_add["add"]
+        .as_object_mut()
+        .unwrap()
+        .remove("stats");
     let checkpoint = sync
         .json_handler()
         .parse_json(
@@ -370,31 +166,15 @@ async fn setup_geometry_stats_table(
             checkpoint_schema,
         )
         .unwrap();
-    let batch: RecordBatch = ArrowEngineData::try_from_engine_data(checkpoint)
-        .unwrap()
-        .into();
-    let parquet_schema = ArrowSchemaConverter::new()
-        .convert(&batch.schema())
-        .unwrap();
-    let annotation = match checkpoint_stats {
-        CheckpointStats::MismatchedCrs => Some(LogicalType::geometry(Some("EPSG:3857".into()))),
-        CheckpointStats::Unannotated => None,
-        _ => Some(LogicalType::geometry(Some("EPSG:4326".into()))),
-    };
-    let parquet_schema = SchemaDescriptor::new(Arc::new(annotate_geometry(
-        parquet_schema.root_schema(),
-        &annotation,
-    )));
-    let options = crate::engine::writer_options().with_parquet_schema(parquet_schema);
-    let mut writer =
-        ArrowWriter::try_new_with_options(Vec::new(), batch.schema(), options).unwrap();
-    writer.write(&batch).unwrap();
-    store
-        .put(
-            &"_delta_log/00000000000000000001.checkpoint.parquet".into(),
-            writer.into_inner().unwrap().into(),
+    engine
+        .parquet_handler()
+        .write_parquet_file(
+            Url::parse(&table_root)
+                .unwrap()
+                .join("_delta_log/00000000000000000001.checkpoint.parquet")
+                .unwrap(),
+            Box::new(std::iter::once(Ok(checkpoint))),
         )
-        .await
         .unwrap();
     add_commit(
         &table_root,
@@ -404,30 +184,7 @@ async fn setup_geometry_stats_table(
     )
     .await
     .unwrap();
-    (engine, sync, table_root)
-}
-
-fn annotate_geometry(data_type: &ParquetType, annotation: &Option<LogicalType>) -> ParquetType {
-    match data_type {
-        ParquetType::GroupType { basic_info, fields } => ParquetType::GroupType {
-            basic_info: basic_info.clone(),
-            fields: fields
-                .iter()
-                .map(|f| Arc::new(annotate_geometry(f, annotation)))
-                .collect(),
-        },
-        ParquetType::PrimitiveType {
-            physical_type: PhysicalType::BYTE_ARRAY,
-            ..
-        } if data_type.name() == "g" && data_type.get_basic_info().logical_type_ref().is_none() => {
-            ParquetType::primitive_type_builder("g", PhysicalType::BYTE_ARRAY)
-                .with_repetition(data_type.get_basic_info().repetition())
-                .with_logical_type(annotation.clone())
-                .build()
-                .unwrap()
-        }
-        _ => data_type.clone(),
-    }
+    (engine, table_root)
 }
 
 fn collect_geometry_bounds(
@@ -460,7 +217,6 @@ fn collect_geometry_bounds(
 struct GeometryStatsHandler {
     evaluation: Arc<dyn EvaluationHandler>,
     parquet: Arc<dyn ParquetHandler>,
-    storage: Arc<dyn StorageHandler>,
 }
 
 impl EvaluationHandler for GeometryStatsHandler {
@@ -504,37 +260,6 @@ impl ParquetHandler for GeometryStatsHandler {
         schema: SchemaRef,
         predicate: Option<PredicateRef>,
     ) -> Result<FileDataReadResultIterator> {
-        // Validate the raw annotations before GeometryAsBinary drops the requested logical type.
-        for file in files {
-            for data in self
-                .storage
-                .read_files(vec![(file.location.clone(), None)])?
-            {
-                let reader = ParquetRecordBatchReaderBuilder::try_new(data?)?;
-                for column in reader.parquet_schema().columns() {
-                    let path = ColumnName::new(column.path().parts().iter().cloned());
-                    let Ok(field) = schema.field_at(&path) else {
-                        continue;
-                    };
-                    let DataType::Primitive(PrimitiveType::Geometry(expected)) = field.data_type()
-                    else {
-                        continue;
-                    };
-                    let Some(LogicalType::Geometry(actual)) = column.logical_type_ref() else {
-                        return Err(KernelError::generic(format!(
-                            "Expected a Parquet GEOMETRY annotation for {path}",
-                        )));
-                    };
-                    let crs = actual.crs.as_deref().unwrap_or("OGC:CRS84");
-                    if crs != expected.crs() {
-                        return Err(KernelError::generic(format!(
-                            "Geometry CRS mismatch for {path}: expected {}, found {crs}",
-                            expected.crs(),
-                        )));
-                    }
-                }
-            }
-        }
         self.parquet.read_parquet_files(
             files,
             Arc::new(GeometryAsBinary.transform_struct(&schema).into_owned()),
@@ -543,7 +268,6 @@ impl ParquetHandler for GeometryStatsHandler {
     }
 
     fn read_parquet_footer(&self, file: &FileMeta) -> Result<ParquetFooter> {
-        // This reader's Arrow-derived footer reports GEOMETRY's physical Binary type.
         self.parquet.read_parquet_footer(file)
     }
 

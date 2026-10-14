@@ -229,7 +229,9 @@ mod tests {
     use rstest::rstest;
 
     use crate::schema::compare::{Error, SchemaComparison, SchemaComparisonResult};
-    use crate::schema::{schema, ArrayType, DataType, MapType, PrimitiveType, StructField};
+    use crate::schema::{
+        schema, ArrayType, CheckpointFieldKind, DataType, MapType, PrimitiveType, StructField,
+    };
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     enum ComparisonMode {
@@ -519,9 +521,11 @@ mod tests {
         #[case] source: PrimitiveType,
         #[case] target: PrimitiveType,
         #[case] expected: bool,
+        #[values(CheckpointFieldKind::Stats, CheckpointFieldKind::PartitionValues)]
+        kind: CheckpointFieldKind,
     ) {
         assert_eq!(
-            source.is_stats_type_compatible_with(&target),
+            source.is_stats_type_compatible_with(&target, kind),
             expected,
             "{source:?} -> {target:?} should be {expected}"
         );

@@ -283,14 +283,15 @@ impl StatsOptions {
     /// `stats_parsed.maxValues`, retaining each column's logical Geometry type and CRS. Off by
     /// default; Geography bounds are not included.
     ///
-    /// The corner-point statistics encoding is experimental and is not defined by the published
-    /// Delta protocol. It is gated by `geo-type-in-dev`.
+    /// The corner-point statistics encoding is experimental; see the
+    /// [geospatial RFC](https://github.com/delta-io/delta/issues/4725). It is gated by `geo-type-in-dev`.
     ///
     /// Kernel does not use these bounds for spatial pruning. This option requires struct stats
     /// without JSON synthesis, such as [`Self::all_struct`]; [`ScanBuilder::build`] rejects any
     /// other combination.
     ///
-    /// The caller must supply an engine that supports Geometry statistics. For commits and
+    /// When enabling this option, the engine supplied when executing the scan (for example, to
+    /// [`Scan::scan_metadata`]) must support Geometry statistics. For commits and
     /// checkpoints without compatible `stats_parsed`, the engine's [`ParseJson`] must decode WKT
     /// points. For compatible checkpoints, its Parquet handler must read WKB points into the same
     /// logical type. If the reported footer schema exposes only Binary, the Parquet handler must

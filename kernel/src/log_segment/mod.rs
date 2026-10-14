@@ -31,7 +31,8 @@ use crate::path::{LogPathFileType, ParsedLogPath};
 use crate::plans::ir::nodes::{FileType, ScanFile};
 use crate::schema::compare::SchemaComparison;
 use crate::schema::{
-    lazy_schema_ref, DataType, PrimitiveType, SchemaRef, StructField, StructType, ToSchema as _,
+    lazy_schema_ref, CheckpointFieldKind, DataType, SchemaRef, StructField, StructType,
+    ToSchema as _,
 };
 use crate::utils::require;
 #[cfg(feature = "declarative-plans")]
@@ -1562,8 +1563,7 @@ impl LogSegment {
     ///
     /// Used by both `stats_parsed` and `partitionValues_parsed` compatibility checks.
     /// For each field in `needed`, if it exists in `available` (checkpoint):
-    /// - Primitive types: must be compatible via [`PrimitiveType::is_stats_type_compatible_with`]
-    ///   (allows type widening and Parquet physical type reinterpretation)
+    /// - Primitive types: allow type widening and checkpoint-specific physical encodings
     /// - Nested structs: recursively check inner fields
     /// - A needed VARIANT against an available struct: the struct must have exactly the variant's
     ///   physical fields, with compatible types. A shredded struct is not compatible with an
@@ -1603,7 +1603,7 @@ impl LogSegment {
                 (avail_type, need_type) => {
                     let compatible = match (avail_type, need_type) {
                         (DataType::Primitive(a), DataType::Primitive(b)) => {
-                            kind.primitive_types_are_compatible(a, b)
+                            a.is_stats_type_compatible_with(b, kind)
                         }
                         (DataType::Struct(a), DataType::Variant(b)) => {
                             a.num_fields() == b.num_fields()
@@ -1674,31 +1674,6 @@ impl LogSegment {
 
         debug!("Checkpoint schema has compatible partitionValues_parsed for partition pruning");
         true
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum CheckpointFieldKind {
-    Stats,
-    PartitionValues,
-}
-
-impl CheckpointFieldKind {
-    fn primitive_types_are_compatible(
-        self,
-        available: &PrimitiveType,
-        needed: &PrimitiveType,
-    ) -> bool {
-        #[cfg(feature = "geo-type-in-dev")]
-        if self == Self::Stats
-            && matches!(
-                (available, needed),
-                (PrimitiveType::Binary, PrimitiveType::Geometry(_))
-            )
-        {
-            return true;
-        }
-        available.is_stats_type_compatible_with(needed)
     }
 }
 

@@ -286,8 +286,8 @@ fn check_cast_compat(
         // guarantees data files conform to the table schema, so a schema mismatch (e.g. Int32
         // where Date32 is expected) would not occur in normal data files.
         //
-        // NOTE: The kernel-type equivalent lives in `PrimitiveType::is_stats_type_compatible_with`
-        // in `schema/mod.rs`. Changes here must be mirrored there.
+        // Keep these date/timestamp rules aligned with
+        // `PrimitiveType::is_checkpoint_cast_compatible` in `schema/mod.rs`.
         (Int32, Date32) => Ok(DataTypeCompat::NeedsCast(target_type)),
         (Int64, Timestamp(TimeUnit::Microsecond, _)) => Ok(DataTypeCompat::NeedsCast(target_type)),
         _ => Err(make_arrow_error(format!(
@@ -353,7 +353,7 @@ mod tests {
     use super::*;
     use crate::arrow::datatypes::{DataType as ArrowDataType, Field as ArrowField, Fields};
     use crate::engine::arrow_conversion::TryFromKernel as _;
-    use crate::schema::{schema, ArrayType, DataType, MapType};
+    use crate::schema::{schema, ArrayType, CheckpointFieldKind, DataType, MapType, PrimitiveType};
     use crate::unit_test_utils::assert_result_error_with_message;
 
     #[test]
@@ -904,13 +904,11 @@ mod tests {
         );
     }
 
-    /// Ensures that every kernel-level checkpoint reinterpretation rule in
-    /// `PrimitiveType::is_checkpoint_cast_compatible` has a corresponding Arrow cast
-    /// in `check_cast_compat`. If one side is updated without the other, this test fails.
-    #[test]
-    fn checkpoint_reinterpretation_rules_match_arrow_cast_rules() {
-        use crate::schema::PrimitiveType;
-
+    #[rstest]
+    fn checkpoint_date_timestamp_rules_match_arrow_cast_rules(
+        #[values(CheckpointFieldKind::Stats, CheckpointFieldKind::PartitionValues)]
+        kind: CheckpointFieldKind,
+    ) {
         let reinterpretation_pairs: &[(PrimitiveType, PrimitiveType)] = &[
             (PrimitiveType::Integer, PrimitiveType::Date),
             (PrimitiveType::Long, PrimitiveType::Timestamp),
@@ -919,7 +917,7 @@ mod tests {
         for (source_kernel, target_kernel) in reinterpretation_pairs {
             // Verify the kernel-level rule holds
             assert!(
-                source_kernel.is_checkpoint_cast_compatible(target_kernel),
+                source_kernel.is_checkpoint_cast_compatible(target_kernel, kind),
                 "Kernel should allow {source_kernel:?} -> {target_kernel:?}"
             );
 
