@@ -933,7 +933,9 @@ pub(super) mod tests {
         use super::*;
         use crate::actions::Protocol;
         use crate::log_path::LogPath;
+        use crate::snapshot::ChecksumWriteResult;
         use crate::table_features::TableFeature;
+        use crate::unit_test_utils::TestCancellationToken;
         use crate::utils::try_parse_uri;
         use crate::FileMeta;
 
@@ -1193,17 +1195,28 @@ pub(super) mod tests {
             Ok(())
         }
 
+        #[rstest]
         #[test_log::test(tokio::test)]
         async fn test_reused_catalog_downgrade_rechecks_publication_and_path_sees_later_commit(
+            #[values(false, true)] with_checksum: bool,
         ) -> Result<(), Box<dyn std::error::Error>> {
             let (engine, store, table_root) = setup_catalog_managed_test().await;
-            let downgrade = json!({
-                "protocol": Protocol::try_new_modern(
-                    std::iter::empty::<TableFeature>(),
-                    [TableFeature::InCommitTimestamp],
-                )?
-            })
-            .to_string();
+            let downgrade = format!(
+                "{}\n{}",
+                json!({
+                    "commitInfo": {
+                        "timestamp": 1587968586155i64,
+                        "inCommitTimestamp": 1587968586155i64,
+                        "txnId": "test-downgrade",
+                    }
+                }),
+                json!({
+                    "protocol": Protocol::try_new_modern(
+                        std::iter::empty::<TableFeature>(),
+                        [TableFeature::InCommitTimestamp],
+                    )?
+                }),
+            );
             let staged =
                 add_staged_commit(&table_root, store.as_ref(), 1, downgrade.clone()).await?;
             let log_tail = vec![create_log_path(&table_root, staged)];
@@ -1211,6 +1224,13 @@ pub(super) mod tests {
                 .with_log_tail(log_tail.clone())
                 .with_max_catalog_version(1)
                 .build(engine.as_ref())?;
+            let snapshot = if with_checksum {
+                let (result, snapshot) = snapshot.write_checksum(engine.as_ref())?;
+                assert_eq!(result, ChecksumWriteResult::Written);
+                snapshot
+            } else {
+                snapshot
+            };
             let reused = SnapshotBuilder::new_from(snapshot.clone())
                 .with_log_tail(log_tail.clone())
                 .with_max_catalog_version(1)
@@ -1240,6 +1260,56 @@ pub(super) mod tests {
             let latest = SnapshotBuilder::new_from(snapshot).build(engine.as_ref())?;
             assert_eq!(latest.version(), 2);
             assert!(!latest.table_configuration().is_catalog_managed());
+            Ok(())
+        }
+
+        #[rstest]
+        #[case::missing_staged_commit(None, false)]
+        #[case::malformed_protocol(
+            Some(r#"{"protocol":{"minReaderVersion":3,"minWriterVersion":7}}"#),
+            false
+        )]
+        #[case::cancelled(None, true)]
+        #[test_log::test(tokio::test)]
+        async fn test_reused_catalog_downgrade_propagates_revalidation_errors(
+            #[case] replacement_commit: Option<&str>,
+            #[case] cancelled: bool,
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            let (engine, store, table_root) = setup_catalog_managed_test().await;
+            let downgrade = json!({
+                "protocol": Protocol::try_new_modern(
+                    std::iter::empty::<TableFeature>(),
+                    [TableFeature::InCommitTimestamp],
+                )?
+            })
+            .to_string();
+            let staged = add_staged_commit(&table_root, store.as_ref(), 1, downgrade).await?;
+            let log_tail = vec![create_log_path(&table_root, staged.clone())];
+            let snapshot = SnapshotBuilder::new_for(&table_root)
+                .with_log_tail(log_tail.clone())
+                .with_max_catalog_version(1)
+                .build(engine.as_ref())?;
+            let mut builder = SnapshotBuilder::new_from(snapshot)
+                .with_log_tail(log_tail)
+                .with_max_catalog_version(1);
+            if cancelled {
+                let token: CancellationTokenRef = Arc::new(TestCancellationToken::cancelled());
+                builder = builder.with_cancellation_token(token);
+            } else if let Some(replacement_commit) = replacement_commit {
+                store
+                    .put(&staged, replacement_commit.to_string().into())
+                    .await?;
+            } else {
+                store.delete(&staged).await?;
+            }
+            let error = builder.build(engine.as_ref()).unwrap_err();
+            if cancelled {
+                assert!(matches!(error, KernelError::Cancelled), "{error}");
+            } else if replacement_commit.is_some() {
+                assert!(matches!(error, KernelError::InvalidProtocol(_)), "{error}");
+            } else {
+                assert!(matches!(error, KernelError::FileNotFound(_)), "{error}");
+            }
             Ok(())
         }
 
