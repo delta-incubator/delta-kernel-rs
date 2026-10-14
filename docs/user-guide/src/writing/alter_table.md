@@ -10,8 +10,8 @@ Before reading this page, make sure you understand
 
 ## When to use alter table
 
-Use `update_table(UpdateTableOperation::AlterTable)` when you need to evolve a table's schema
-in place. The common case today is adding a new column to a table that already has data,
+Use `update_table(UpdateTableOperation::AlterTable, engine_info)` when you need to evolve a table's
+schema in place. The common case today is adding a new column to a table that already has data,
 without rewriting the existing files. Existing rows read back `NULL` for the
 new column. Subsequent writes can populate it.
 

@@ -302,7 +302,7 @@ these fields in your custom commit info:
 | `operationMetrics` | Metrics recorded for the operation | The value from `with_operation_metrics()`. Omitted when unset. An explicitly empty map is written as `{}` |
 | `kernelVersion` | The Kernel library version | Current Kernel version |
 | `isBlindAppend` | Whether the commit is a blind append | `true` after `with_blind_append()`. Omitted (`false`) otherwise |
-| `engineInfo` | The engine identifier | The connector name and version required by the transaction constructor |
+| `engineInfo` | The engine identifier | Always written using the connector name and version required by the transaction constructor |
 | `txnId` | A unique transaction identifier | A new UUID generated for the commit |
 
 Kernel ignores reserved fields in custom commit info. Use `with_operation_parameters()` and

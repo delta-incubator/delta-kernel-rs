@@ -33,6 +33,12 @@ For connector-defined names, use
 `new_update_table_txn_builder_with_custom_operation(snapshot, name, engine_info, engine)`.
 Both constructors validate UTF-8 before retaining the snapshot and borrow all inputs.
 
+The typed constructor returns an `ExternResult`, not a bare builder handle. When migrating from
+setter-based configuration, update constructor calls and rebuild C/C++ connectors against the
+generated headers. The typed constructor's parameters and return type are not ABI-compatible.
+The `update_table_txn_builder_with_operation`, `update_table_txn_builder_with_custom_operation`,
+and `update_table_txn_builder_with_engine_info` setters are removed.
+
 Create-table connectors use the same shape: call `new_create_table_txn_builder`, apply
 `create_table_txn_builder_with_*` functions, then call `create_table_txn_builder_build`. Application
 transaction identifiers are available on both builders. Metadata removals are update-only. Nested
