@@ -33,7 +33,7 @@ use crate::table_features::{
 use crate::table_properties::TableProperties;
 use crate::utils::require;
 #[cfg(feature = "adaptive-metadata-in-dev")]
-use crate::{create_row, Engine};
+use crate::{create_row, Engine, Version};
 use crate::{EngineData, FileMeta, FileSize, KernelError, KernelResult, Result, RowVisitor as _};
 
 const KERNEL_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -1468,6 +1468,19 @@ impl LastManifestCommit {
             KernelError::generic(format!(
                 "lastManifestCommit contentRootVersion {} exceeds version {}",
                 self.content_root_version, self.version
+            ))
+        );
+        Ok(())
+    }
+
+    /// Errors if this names a manifest commit newer than `commit_version`, the version of the
+    /// commit or CRC that carries it.
+    pub(crate) fn ensure_not_after(&self, commit_version: Version) -> KernelResult<()> {
+        require!(
+            u64::try_from(self.version).is_ok_and(|v| v <= commit_version),
+            KernelError::generic(format!(
+                "lastManifestCommit version {} exceeds commit version {commit_version}",
+                self.version
             ))
         );
         Ok(())
