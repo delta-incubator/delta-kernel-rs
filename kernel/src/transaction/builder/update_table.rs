@@ -16,7 +16,7 @@ use crate::table_features::{
 use crate::transaction::domain_metadata::validate_unique_domains;
 use crate::transaction::schema_evolution::{evolve_table_config, SchemaOperation};
 use crate::transaction::{ExecutionMode, Transaction, UpdateTable, UpdateTableOperation};
-use crate::utils::current_time_ms;
+use crate::utils::{current_time_ms, require};
 use crate::{Engine, KernelError, KernelResult, Result};
 
 /// Configures DML and schema-changing DDL transactions against an existing table.
@@ -82,14 +82,24 @@ impl TransactionBuilder<UpdateTable> {
 
     /// Adds schema changes to validate and apply during [`build`](Self::build).
     ///
-    /// Changes are applied in order, and each change observes the result of prior changes.
+    /// Appends `changes` in call order and returns the updated builder. Each change observes the
+    /// result of prior changes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `changes` is empty.
     #[internal_api]
     pub(crate) fn with_schema_changes(
         mut self,
         changes: impl IntoIterator<Item = SchemaOperation>,
-    ) -> Self {
+    ) -> Result<Self> {
+        let mut changes = changes.into_iter().peekable();
+        require!(
+            changes.peek().is_some(),
+            KernelError::generic("with_schema_changes requires at least one schema operation")
+        );
         self.local_state.schema_changes.extend(changes);
-        self
+        Ok(self)
     }
 
     /// Adds a nullable top-level column to the table schema.
@@ -169,6 +179,10 @@ impl TransactionBuilder<UpdateTable> {
     /// - Unsupported table writes, schema evolution, or CDF validation failures.
     /// - Conflicting application ids or domain metadata, or reserved or unsupported domains.
     /// - Connector commit information that does not contain exactly one row.
+    ///
+    /// Schema evolution is rejected when `icebergCompatV3` or `allowColumnDefaults` is enabled.
+    /// With `icebergCompatV2` enabled, only [`UpdateTableOperation::AlterTable`] schema evolution
+    /// is rejected.
     pub fn build(self, engine: &dyn Engine, committer: Box<dyn Committer>) -> Result<Transaction> {
         self.validate()?;
         let transaction = try_new_update_table(self, committer, engine)?;
@@ -282,7 +296,11 @@ fn try_new_update_table<MODE: ExecutionMode>(
 
     let should_emit_metadata = !schema_changes.is_empty();
     let effective_table_config = if should_emit_metadata {
-        apply_schema_changes(effective_table_config, schema_changes)?
+        apply_schema_changes(
+            effective_table_config,
+            schema_changes,
+            operation.as_ref() == Some(&UpdateTableOperation::AlterTable),
+        )?
     } else {
         effective_table_config
     };
@@ -307,10 +325,14 @@ fn try_new_update_table<MODE: ExecutionMode>(
 fn apply_schema_changes(
     table_config: TableConfiguration,
     changes: Vec<SchemaOperation>,
+    is_alter_table: bool,
 ) -> KernelResult<TableConfiguration> {
     let unsupported_iceberg_compat = [TableFeature::IcebergCompatV2, TableFeature::IcebergCompatV3]
         .into_iter()
-        .find(|feature| table_config.is_feature_enabled(feature));
+        .find(|feature| {
+            table_config.is_feature_enabled(feature)
+                && (is_alter_table || feature == &TableFeature::IcebergCompatV3)
+        });
     if let Some(feature) = unsupported_iceberg_compat {
         return Err(KernelError::unsupported(format!(
             "Schema changes are not yet supported on tables with {feature} enabled"
@@ -336,6 +358,7 @@ mod tests {
     use crate::committer::FileSystemCommitter;
     use crate::engine::arrow_conversion::TryIntoArrow;
     use crate::engine::arrow_data::ArrowEngineData;
+    use crate::expressions::column_name;
     #[cfg(feature = "adaptive-metadata-in-dev")]
     use crate::expressions::ColumnName;
     use crate::schema::{schema_ref, DataType, StructField};
@@ -439,7 +462,7 @@ mod tests {
             .with_schema_changes([SchemaOperation::add_column(
                 None,
                 StructField::nullable("new_column", DataType::STRING),
-            )])
+            )])?
             .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?;
         transaction.ack_column_defaults();
         transaction.ack_row_tracking_preservation();
@@ -561,6 +584,60 @@ mod tests {
         assert!(error
             .to_string()
             .contains("requires at least one schema change"));
+        Ok(())
+    }
+
+    #[rstest]
+    fn empty_schema_changes_are_rejected_even_for_blind_append(
+        #[values(false, true)] blind_append: bool,
+        #[values(false, true)] unknown_length: bool,
+    ) -> Result<()> {
+        let (_engine, snapshot, _tempdir) = load_test_table("table-without-dv-small")?;
+        let builder = snapshot
+            .transaction_builder()
+            .with_operation(UpdateTableOperation::Write);
+        let builder = if blind_append {
+            builder.with_blind_append()
+        } else {
+            builder
+        };
+        let result = if unknown_length {
+            builder.with_schema_changes(std::iter::from_fn(|| None::<SchemaOperation>))
+        } else {
+            builder.with_schema_changes([])
+        };
+        let error = result.unwrap_err();
+
+        assert!(matches!(&error, KernelError::Generic(_)));
+        assert!(error
+            .to_string()
+            .contains("with_schema_changes requires at least one schema operation"));
+        Ok(())
+    }
+
+    #[test]
+    fn nonempty_schema_change_calls_preserve_iterator_items_and_call_order() -> Result<()> {
+        let (engine, snapshot, _tempdir) = load_test_table("table-without-dv-small")?;
+        let mut changes = [SchemaOperation::add_column(
+            None,
+            StructField::nullable("new_column", DataType::STRING),
+        )]
+        .into_iter();
+        let builder = snapshot
+            .transaction_builder()
+            .with_operation(UpdateTableOperation::Write)
+            .with_schema_changes(std::iter::from_fn(move || changes.next()))?
+            .with_schema_changes([SchemaOperation::SetNullable {
+                column: column_name!("new_column"),
+            }])?
+            .add_column(StructField::nullable("another_column", DataType::INTEGER));
+
+        assert_eq!(builder.local_state.schema_changes.len(), 3);
+        let transaction = builder.build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?;
+        assert!(transaction.should_emit_metadata);
+        let schema = transaction.effective_table_config.logical_schema();
+        assert!(schema.contains("new_column"));
+        assert!(schema.contains("another_column"));
         Ok(())
     }
 

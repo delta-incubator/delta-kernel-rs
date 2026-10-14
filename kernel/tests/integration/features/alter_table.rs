@@ -1522,9 +1522,14 @@ async fn add_column_with_orphan_default_metadata_succeeds() -> Result<()> {
     Ok(())
 }
 
+#[rstest]
+#[case(UpdateTableOperation::Write)]
+#[case(UpdateTableOperation::AlterTable)]
+#[case(UpdateTableOperation::Custom("UNKNOWN".to_string()))]
 #[tokio::test]
-async fn alter_blocked_when_allow_column_defaults_enabled() -> Result<(), Box<dyn std::error::Error>>
-{
+async fn schema_changes_blocked_when_allow_column_defaults_enabled(
+    #[case] operation: UpdateTableOperation,
+) -> Result<(), Box<dyn std::error::Error>> {
     let (store, engine, table_url) = engine_store_setup("alter_column_defaults", None);
     let table_url = create_test_table(
         store,
@@ -1539,7 +1544,7 @@ async fn alter_blocked_when_allow_column_defaults_enabled() -> Result<(), Box<dy
     let snapshot = Snapshot::builder_for(table_url).build(&engine)?;
 
     let msg = snapshot
-        .update_table(UpdateTableOperation::AlterTable, "test-engine")
+        .update_table(operation, "test-engine")
         .add_column(StructField::nullable("new_col", DataType::STRING))
         .build(&engine, committer())
         .unwrap_err()

@@ -2769,15 +2769,16 @@ mod tests {
     }
 
     #[test]
-    fn empty_builder_schema_changes_do_not_emit_metadata() -> Result<()> {
-        let (_engine, txn, _tempdir) =
-            create_existing_table_txn_with(|builder| builder.with_schema_changes([]))?;
-        assert!(!txn.should_emit_metadata);
-        assert_eq!(
-            txn.effective_table_config.logical_schema(),
-            txn.read_snapshot()?.schema()
+    fn empty_builder_schema_changes_are_rejected() {
+        let (_engine, snapshot) = setup_non_dv_table();
+        let result = snapshot
+            .transaction_builder()
+            .with_operation(UpdateTableOperation::Write)
+            .with_schema_changes([]);
+        assert_result_error_with_message(
+            result,
+            "with_schema_changes requires at least one schema operation",
         );
-        Ok(())
     }
 
     mod column_defaults {
