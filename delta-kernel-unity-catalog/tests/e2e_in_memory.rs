@@ -123,7 +123,7 @@ fn commit(
 ) -> Result<Arc<Snapshot>, TestError> {
     Ok(snapshot
         .clone()
-        .update_table(UpdateTableOperation::Write)
+        .update_table(UpdateTableOperation::Write, "test-engine")
         .build(engine, Box::new(uc_committer(update_table_client)))?
         .commit(engine)?
         .unwrap_post_commit_snapshot())
@@ -191,7 +191,7 @@ async fn test_insert_without_publish_hits_limit() -> Result<(), TestError> {
     let committer = Box::new(uc_committer(&update_table_client));
     let err = snapshot
         .clone()
-        .update_table(UpdateTableOperation::Write)
+        .update_table(UpdateTableOperation::Write, "test-engine")
         .build(&engine, committer)?
         .commit(&engine)
         .unwrap_err();

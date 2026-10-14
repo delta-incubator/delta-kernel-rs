@@ -20,46 +20,61 @@ pub struct ExclusiveUpdateTableTransaction;
 #[handle_descriptor(target=UpdateTableTransactionBuilder, mutable=true, sized=true)]
 pub struct ExclusiveUpdateTableTransactionBuilder;
 
-/// Creates an update-table transaction builder from a snapshot and a known `operation`.
+/// Creates a builder from a snapshot, known `operation`, and connector `engine_info`.
 ///
-/// Returns an owned builder with an operation that cannot be changed. Invalid intent is rejected
-/// when the builder is built.
+/// Returns an owned builder, or an error if `engine_info` is not valid UTF-8. The operation and
+/// engine info cannot be changed. Invalid intent is rejected when the builder is built.
 ///
 /// # Safety
 ///
-/// `snapshot` must be a valid shared handle. This call borrows it, and the caller retains
-/// ownership. `operation` must contain a valid [`KernelUpdateTableOperation`] discriminant. Any
+/// `snapshot`, `engine_info`, and `engine` must be valid and are borrowed for this call.
+/// `operation` must contain a valid [`KernelUpdateTableOperation`] discriminant. Any
 /// other tag is undefined behavior.
 #[no_mangle]
 pub unsafe extern "C" fn new_update_table_txn_builder(
     snapshot: Handle<SharedSnapshot>,
     operation: KernelUpdateTableOperation,
-) -> Handle<ExclusiveUpdateTableTransactionBuilder> {
-    let snapshot = unsafe { snapshot.clone_as_arc() };
-    Box::new(snapshot.update_table(operation.into())).into()
+    engine_info: KernelStringSlice,
+    engine: Handle<SharedExternEngine>,
+) -> ExternResult<Handle<ExclusiveUpdateTableTransactionBuilder>> {
+    let engine = unsafe { engine.as_ref() };
+    let engine_info: Result<String> = unsafe { TryFromStringSlice::try_from_slice(&engine_info) };
+    engine_info
+        .map(|engine_info| {
+            let snapshot = unsafe { snapshot.clone_as_arc() };
+            Box::new(snapshot.update_table(operation.into(), engine_info)).into()
+        })
+        .into_extern_result(&engine)
 }
 
-/// Creates an update-table transaction builder with a connector-defined `operation` name.
+/// Creates a builder with a connector-defined `operation` name and connector `engine_info`.
 ///
-/// Returns an owned builder on success, or an error if the name is not valid UTF-8. Name
+/// Returns an owned builder on success, or an error if either string is not valid UTF-8. Name
 /// restrictions and intent are validated when the builder is built. See
 /// [`UpdateTableOperation::Custom`] for name restrictions and compatibility across Kernel versions.
 ///
 /// # Safety
 ///
-/// `snapshot`, `operation`, and `engine` must be valid. All inputs are borrowed for this call.
+/// `snapshot`, `operation`, `engine_info`, and `engine` must be valid and are borrowed for this
+/// call.
 #[no_mangle]
 pub unsafe extern "C" fn new_update_table_txn_builder_with_custom_operation(
     snapshot: Handle<SharedSnapshot>,
     operation: KernelStringSlice,
+    engine_info: KernelStringSlice,
     engine: Handle<SharedExternEngine>,
 ) -> ExternResult<Handle<ExclusiveUpdateTableTransactionBuilder>> {
     let engine = unsafe { engine.as_ref() };
     let operation: Result<String> = unsafe { TryFromStringSlice::try_from_slice(&operation) };
+    let engine_info: Result<String> = unsafe { TryFromStringSlice::try_from_slice(&engine_info) };
     operation
-        .map(|operation| {
+        .and_then(|operation| {
+            let engine_info = engine_info?;
             let snapshot = unsafe { snapshot.clone_as_arc() };
-            Box::new(snapshot.update_table(UpdateTableOperation::Custom(operation))).into()
+            Ok(Box::new(
+                snapshot.update_table(UpdateTableOperation::Custom(operation), engine_info),
+            )
+            .into())
         })
         .into_extern_result(&engine)
 }
@@ -432,25 +447,6 @@ impl From<KernelUpdateTableOperation> for UpdateTableOperation {
             KernelUpdateTableOperation::Optimize => Self::Optimize,
         }
     }
-}
-
-/// Attaches engine info to an update-table builder.
-///
-/// # Safety
-///
-/// `builder`, `engine_info`, and `engine` must be valid. This call borrows `engine` and
-/// `engine_info` and unconditionally consumes `builder`, including on error.
-#[no_mangle]
-pub unsafe extern "C" fn update_table_txn_builder_with_engine_info(
-    builder: Handle<ExclusiveUpdateTableTransactionBuilder>,
-    engine_info: KernelStringSlice,
-    engine: Handle<SharedExternEngine>,
-) -> ExternResult<Handle<ExclusiveUpdateTableTransactionBuilder>> {
-    let builder = unsafe { *builder.into_inner() };
-    let engine = unsafe { engine.as_ref() };
-    let info = unsafe { TryFromStringSlice::try_from_slice(&engine_info) };
-    info.map(|info: &str| Box::new(builder.with_engine_info(info)).into())
-        .into_extern_result(&engine)
 }
 
 /// Add domain metadata to the transaction. The domain metadata will be written to the Delta log

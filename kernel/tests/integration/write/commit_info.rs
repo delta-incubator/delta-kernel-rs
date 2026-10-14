@@ -35,8 +35,7 @@ async fn test_commit_info_defaults_to_empty_parameters_and_omitted_metrics(
         // create a transaction
         let txn = Snapshot::builder_for(table_url.clone())
             .build(&engine)?
-            .update_table(UpdateTableOperation::Write)
-            .with_engine_info("default engine")
+            .update_table(UpdateTableOperation::Write, "default engine")
             .build(&engine, Box::new(FileSystemCommitter::new()))?;
 
         // commit!
@@ -89,7 +88,7 @@ async fn transaction_builder_writes_operation_parameters_and_metrics(
     {
         let snapshot = Snapshot::builder_for(table_url).build(&engine)?;
         let transaction = snapshot
-            .update_table(UpdateTableOperation::Write)
+            .update_table(UpdateTableOperation::Write, "test-engine")
             .with_operation_parameters([("mode", Some("Append"))])
             .with_operation_metrics([("numFiles", Some("3"))])
             .build(&engine, Box::new(FileSystemCommitter::new()))?;
@@ -127,8 +126,7 @@ async fn test_commit_info_action() -> Result<(), Box<dyn std::error::Error>> {
     {
         let txn = Snapshot::builder_for(table_url.clone())
             .build(&engine)?
-            .update_table(UpdateTableOperation::Write)
-            .with_engine_info("default engine")
+            .update_table(UpdateTableOperation::Write, "default engine")
             .build(&engine, Box::new(FileSystemCommitter::new()))?;
 
         let _ = txn.commit(&engine)?;
@@ -178,6 +176,7 @@ async fn test_commit_info_with_operation_maps() -> Result<(), Box<dyn std::error
             table_url.clone(),
             &engine,
             UpdateTableOperation::Write,
+            "test-engine",
             |builder| {
                 builder
                     .with_operation_parameters([("stale", Some("value"))])
@@ -240,6 +239,7 @@ async fn test_commit_info_with_empty_operation_map(
             table_url.clone(),
             &engine,
             UpdateTableOperation::Write,
+            "test-engine",
             |builder| match operation_map {
                 EmptyOperationMap::Parameters => {
                     builder.with_operation_parameters(std::iter::empty::<(&str, Option<&str>)>())
@@ -310,6 +310,7 @@ async fn test_commit_info_merges_custom_fields_and_ignores_reserved_fields(
             Field::new("myApp", ArrowDataType::Utf8, false),
             Field::new("myVersion", ArrowDataType::Utf8, false),
             Field::new("operation", ArrowDataType::Utf8, false),
+            Field::new("engineInfo", ArrowDataType::Utf8, false),
             Field::new(
                 "operationParameters",
                 stale_operation_parameters.data_type().clone(),
@@ -327,6 +328,7 @@ async fn test_commit_info_merges_custom_fields_and_ignores_reserved_fields(
                 Arc::new(StringArray::from(vec!["spark"])) as ArrayRef,
                 Arc::new(StringArray::from(vec!["3.5.0"])) as ArrayRef,
                 Arc::new(StringArray::from(vec!["STALE_OP"])) as ArrayRef,
+                Arc::new(StringArray::from(vec!["stale-engine"])) as ArrayRef,
                 stale_operation_parameters,
                 stale_operation_metrics,
             ],
@@ -335,6 +337,7 @@ async fn test_commit_info_merges_custom_fields_and_ignores_reserved_fields(
             not_null "myApp": STRING,
             not_null "myVersion": STRING,
             nullable "operation": STRING,
+            nullable "engineInfo": STRING,
             nullable "operationParameters": { STRING => nullable STRING },
             nullable "operationMetrics": { STRING => nullable STRING },
         };
@@ -343,6 +346,7 @@ async fn test_commit_info_merges_custom_fields_and_ignores_reserved_fields(
             table_url.clone(),
             &engine,
             UpdateTableOperation::Write,
+            "test-engine",
             |builder| match setters {
                 OperationMapSetters::Unset => {
                     builder.with_commit_info(Box::new(ArrowEngineData::new(batch)), engine_schema)
@@ -382,12 +386,13 @@ async fn test_commit_info_merges_custom_fields_and_ignores_reserved_fields(
                 (json!({"mode": "Append"}), Some(json!({"numFiles": "3"})))
             }
         };
-        // Null-valued CommitInfo fields (inCommitTimestamp, isBlindAppend, engineInfo) are
+        // Null-valued CommitInfo fields (inCommitTimestamp, isBlindAppend) are
         // omitted from the JSON, consistent with how the Delta log serializes optional fields.
         let mut expected_commit_info = json!({
             "myApp": "spark",
             "myVersion": "3.5.0",
             "operation": "WRITE",
+            "engineInfo": "test-engine",
             "operationParameters": operation_parameters,
             "kernelVersion": format!("v{}", env!("CARGO_PKG_VERSION")),
             "txnId": ZERO_UUID,

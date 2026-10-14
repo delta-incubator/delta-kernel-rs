@@ -330,23 +330,20 @@ mod tests {
         path: &str,
         engine: &Handle<SharedExternEngine>,
         data_change: bool,
-        engine_info: Option<&str>,
+        engine_info: &str,
         operation: KernelUpdateTableOperation,
     ) -> Handle<ExclusiveUpdateTableTransaction> {
         let snapshot = unsafe { build_snapshot(ffi_str(path), engine.shallow_copy()) };
-        let builder = unsafe { new_update_table_txn_builder(snapshot.shallow_copy(), operation) };
+        let builder = ok_or_panic(unsafe {
+            new_update_table_txn_builder(
+                snapshot.shallow_copy(),
+                operation,
+                ffi_str(engine_info),
+                engine.shallow_copy(),
+            )
+        });
         unsafe { free_snapshot(snapshot) };
         let builder = unsafe { update_table_txn_builder_with_data_change(builder, data_change) };
-        let builder = match engine_info {
-            Some(engine_info) => unsafe {
-                ok_or_panic(update_table_txn_builder_with_engine_info(
-                    builder,
-                    ffi_str(engine_info),
-                    engine.shallow_copy(),
-                ))
-            },
-            None => builder,
-        };
         unsafe {
             ok_or_panic(update_table_txn_builder_build(
                 builder,
@@ -453,7 +450,7 @@ mod tests {
                     table_path_str,
                     &engine,
                     false,
-                    Some("default_engine"),
+                    "default_engine",
                     KernelUpdateTableOperation::Write,
                 )
             };
@@ -888,7 +885,7 @@ mod tests {
                     table_path_str,
                     &engine,
                     true,
-                    Some("default_engine"),
+                    "default_engine",
                     KernelUpdateTableOperation::Write,
                 )
             };
@@ -1314,7 +1311,7 @@ mod tests {
                 table_path_str,
                 &engine,
                 false,
-                None,
+                "test-engine/1.0",
                 KernelUpdateTableOperation::Write,
             )
         };
@@ -1343,7 +1340,12 @@ mod tests {
         let snapshot =
             unsafe { build_snapshot(kernel_string_slice!(table_path_str), engine.shallow_copy()) };
         let builder = unsafe {
-            new_update_table_txn_builder(snapshot.shallow_copy(), KernelUpdateTableOperation::Write)
+            ok_or_panic(new_update_table_txn_builder(
+                snapshot.shallow_copy(),
+                KernelUpdateTableOperation::Write,
+                ffi_str("test-engine/1.0"),
+                engine.shallow_copy(),
+            ))
         };
         unsafe { free_snapshot(snapshot) };
         let builder = unsafe { update_table_txn_builder_with_data_change(builder, false) };
@@ -1391,7 +1393,7 @@ mod tests {
                 table_path_str,
                 &engine,
                 false,
-                None,
+                "test-engine/1.0",
                 KernelUpdateTableOperation::Write,
             )
         };
@@ -1604,7 +1606,7 @@ mod tests {
                 table_path_str,
                 &engine,
                 false,
-                None,
+                "test-engine/1.0",
                 KernelUpdateTableOperation::Write,
             )
         };
@@ -1669,7 +1671,7 @@ mod tests {
                 table_path_str,
                 &engine,
                 false,
-                None,
+                "test-engine/1.0",
                 KernelUpdateTableOperation::Write,
             )
         };
@@ -1783,19 +1785,14 @@ mod tests {
             };
 
             let builder = unsafe {
-                new_update_table_txn_builder(
+                ok_or_panic(new_update_table_txn_builder(
                     snapshot.shallow_copy(),
                     KernelUpdateTableOperation::Write,
-                )
-            };
-            let builder = unsafe { update_table_txn_builder_with_data_change(builder, false) };
-            let builder = unsafe {
-                ok_or_panic(update_table_txn_builder_with_engine_info(
-                    builder,
                     ffi_str("uc_test_engine"),
                     engine.shallow_copy(),
                 ))
             };
+            let builder = unsafe { update_table_txn_builder_with_data_change(builder, false) };
             let txn = ok_or_panic(unsafe {
                 update_table_txn_builder_build_with_committer(
                     builder,
@@ -2433,6 +2430,7 @@ mod tests {
             new_update_table_txn_builder_with_custom_operation(
                 snapshot.shallow_copy(),
                 ffi_str("CUSTOM"),
+                ffi_str("test-engine/1.0"),
                 engine.shallow_copy(),
             )
         });
@@ -2515,13 +2513,6 @@ mod tests {
         };
         let builder = ok_or_panic(unsafe {
             update_table_txn_builder_add_column(builder, &added_field, engine.shallow_copy())
-        });
-        let builder = ok_or_panic(unsafe {
-            update_table_txn_builder_with_engine_info(
-                builder,
-                ffi_str("test-engine/1.0"),
-                engine.shallow_copy(),
-            )
         });
         let builder = unsafe { update_table_txn_builder_with_data_change(builder, true) };
         let txn =
@@ -2607,7 +2598,12 @@ mod tests {
         let snapshot =
             unsafe { build_snapshot(ffi_str(table_url.as_str()), engine.shallow_copy()) };
         let builder = unsafe {
-            new_update_table_txn_builder(snapshot.shallow_copy(), KernelUpdateTableOperation::Write)
+            ok_or_panic(new_update_table_txn_builder(
+                snapshot.shallow_copy(),
+                KernelUpdateTableOperation::Write,
+                ffi_str("test-engine/1.0"),
+                engine.shallow_copy(),
+            ))
         };
         let entries = [FfiNullableStringMapEntry {
             key: ffi_str(""),
@@ -2664,7 +2660,12 @@ mod tests {
         let snapshot =
             unsafe { build_snapshot(ffi_str(table_url.as_str()), update_engine.shallow_copy()) };
         let update_builder = unsafe {
-            new_update_table_txn_builder(snapshot.shallow_copy(), KernelUpdateTableOperation::Write)
+            ok_or_panic(new_update_table_txn_builder(
+                snapshot.shallow_copy(),
+                KernelUpdateTableOperation::Write,
+                ffi_str("test-engine/1.0"),
+                update_engine.shallow_copy(),
+            ))
         };
         assert_extern_result_error_contains(
             unsafe {
@@ -2722,7 +2723,12 @@ mod tests {
         let snapshot =
             unsafe { build_snapshot(ffi_str(table_url.as_str()), update_engine.shallow_copy()) };
         let update_builder = unsafe {
-            new_update_table_txn_builder(snapshot.shallow_copy(), KernelUpdateTableOperation::Write)
+            ok_or_panic(new_update_table_txn_builder(
+                snapshot.shallow_copy(),
+                KernelUpdateTableOperation::Write,
+                ffi_str("test-engine/1.0"),
+                update_engine.shallow_copy(),
+            ))
         };
         let update_txn = ok_or_panic(unsafe {
             update_table_txn_builder_build(update_builder, update_engine.shallow_copy())
@@ -2759,10 +2765,12 @@ mod tests {
         let snapshot =
             unsafe { build_snapshot(ffi_str(table_url.as_str()), engine.shallow_copy()) };
         let builder = unsafe {
-            new_update_table_txn_builder(
+            ok_or_panic(new_update_table_txn_builder(
                 snapshot.shallow_copy(),
                 KernelUpdateTableOperation::AlterTable,
-            )
+                ffi_str("test-engine/1.0"),
+                engine.shallow_copy(),
+            ))
         };
         let fields = (0..field_count)
             .map(|index| StructField::nullable(format!("field_{index}"), DataType::INTEGER))
@@ -2841,6 +2849,7 @@ mod tests {
                 new_update_table_txn_builder_with_custom_operation(
                     snapshot.shallow_copy(),
                     ffi_str(""),
+                    ffi_str("test-engine/1.0"),
                     engine.shallow_copy(),
                 )
             }),
@@ -2848,25 +2857,30 @@ mod tests {
                 new_update_table_txn_builder_with_custom_operation(
                     snapshot.shallow_copy(),
                     ffi_str("WRITE"),
+                    ffi_str("test-engine/1.0"),
                     engine.shallow_copy(),
                 )
             }),
             InvalidUpdateIntent::BlindAppendWithoutDataChange => {
                 let builder = unsafe {
-                    new_update_table_txn_builder(
+                    ok_or_panic(new_update_table_txn_builder(
                         snapshot.shallow_copy(),
                         KernelUpdateTableOperation::Write,
-                    )
+                        ffi_str("test-engine/1.0"),
+                        engine.shallow_copy(),
+                    ))
                 };
                 let builder = unsafe { update_table_txn_builder_with_data_change(builder, false) };
                 unsafe { update_table_txn_builder_with_blind_append(builder) }
             }
             InvalidUpdateIntent::BlindAppendWithSchemaChange => {
                 let builder = unsafe {
-                    new_update_table_txn_builder(
+                    ok_or_panic(new_update_table_txn_builder(
                         snapshot.shallow_copy(),
                         KernelUpdateTableOperation::Write,
-                    )
+                        ffi_str("test-engine/1.0"),
+                        engine.shallow_copy(),
+                    ))
                 };
                 let fields = vec![StructField::nullable("added", DataType::INTEGER)];
                 let field = EngineSchema {
@@ -2919,7 +2933,12 @@ mod tests {
         let snapshot =
             unsafe { build_snapshot(ffi_str(table_url.as_str()), engine.shallow_copy()) };
         let builder = unsafe {
-            new_update_table_txn_builder(snapshot.shallow_copy(), KernelUpdateTableOperation::Write)
+            ok_or_panic(new_update_table_txn_builder(
+                snapshot.shallow_copy(),
+                KernelUpdateTableOperation::Write,
+                ffi_str("test-engine/1.0"),
+                engine.shallow_copy(),
+            ))
         };
         unsafe { free_snapshot(snapshot) };
         let builder = if blind_append {
@@ -2973,6 +2992,7 @@ mod tests {
             new_update_table_txn_builder_with_custom_operation(
                 snapshot.shallow_copy(),
                 ffi_str(""),
+                ffi_str("test-engine/1.0"),
                 engine.shallow_copy(),
             )
         });
@@ -2998,8 +3018,15 @@ mod tests {
         Ok(())
     }
 
+    #[rstest]
+    #[case::custom_operation(true, true)]
+    #[case::custom_engine_info(true, false)]
+    #[case::typed_engine_info(false, false)]
     #[tokio::test]
-    async fn custom_operation_constructor_rejects_invalid_utf8_without_retaining_snapshot() {
+    async fn update_table_constructor_rejects_invalid_utf8_without_retaining_snapshot(
+        #[case] custom_operation: bool,
+        #[case] invalid_operation: bool,
+    ) {
         let (table_url, _store, engine) =
             setup_domain_metadata_table("test_custom_operation_invalid_utf8", false)
                 .await
@@ -3009,18 +3036,38 @@ mod tests {
         let snapshot_arc = unsafe { snapshot.clone_as_arc() };
         let snapshot_ref_count = Arc::strong_count(&snapshot_arc);
         let invalid_utf8 = [0xffu8];
-        let operation = KernelStringSlice {
+        let invalid_string = || KernelStringSlice {
             ptr: invalid_utf8.as_ptr().cast(),
             len: invalid_utf8.len(),
+        };
+        let operation = if invalid_operation {
+            invalid_string()
+        } else {
+            ffi_str("CUSTOM")
+        };
+        let engine_info = if invalid_operation {
+            ffi_str("test-engine/1.0")
+        } else {
+            invalid_string()
         };
 
         assert_extern_result_error_contains(
             unsafe {
-                new_update_table_txn_builder_with_custom_operation(
-                    snapshot.shallow_copy(),
-                    operation,
-                    engine.shallow_copy(),
-                )
+                if custom_operation {
+                    new_update_table_txn_builder_with_custom_operation(
+                        snapshot.shallow_copy(),
+                        operation,
+                        engine_info,
+                        engine.shallow_copy(),
+                    )
+                } else {
+                    new_update_table_txn_builder(
+                        snapshot.shallow_copy(),
+                        KernelUpdateTableOperation::Write,
+                        engine_info,
+                        engine.shallow_copy(),
+                    )
+                }
             },
             FFIKernelError::Utf8Error,
             "invalid utf-8",
@@ -3031,6 +3078,57 @@ mod tests {
             free_snapshot(snapshot);
             free_engine(engine);
         }
+    }
+
+    #[rstest]
+    #[case::typed(false, "WRITE")]
+    #[case::custom(true, "CUSTOM")]
+    #[tokio::test]
+    async fn update_table_constructor_preserves_intent_after_inputs_are_dropped(
+        #[case] custom_operation: bool,
+        #[case] expected_operation: &str,
+    ) {
+        let (table_url, store, engine) =
+            setup_domain_metadata_table("test_constructor_intent", false)
+                .await
+                .unwrap();
+        let snapshot =
+            unsafe { build_snapshot(ffi_str(table_url.as_str()), engine.shallow_copy()) };
+        let operation = "CUSTOM".to_string();
+        let engine_info = "constructor-engine/1.0".to_string();
+        let builder = ok_or_panic(unsafe {
+            if custom_operation {
+                new_update_table_txn_builder_with_custom_operation(
+                    snapshot.shallow_copy(),
+                    ffi_str(&operation),
+                    ffi_str(&engine_info),
+                    engine.shallow_copy(),
+                )
+            } else {
+                new_update_table_txn_builder(
+                    snapshot.shallow_copy(),
+                    KernelUpdateTableOperation::Write,
+                    ffi_str(&engine_info),
+                    engine.shallow_copy(),
+                )
+            }
+        });
+        drop(operation);
+        drop(engine_info);
+        unsafe { free_snapshot(snapshot) };
+
+        let transaction =
+            ok_or_panic(unsafe { update_table_txn_builder_build(builder, engine.shallow_copy()) });
+        let committed =
+            ok_or_panic(unsafe { update_table_txn_commit(transaction, engine.shallow_copy()) });
+        assert_eq!(unsafe { version_and_free(committed) }, 1);
+        let commit_info = read_commit_info_action(&store, &table_url, 1).await;
+        assert_eq!(commit_info["commitInfo"]["operation"], expected_operation);
+        assert_eq!(
+            commit_info["commitInfo"]["engineInfo"],
+            "constructor-engine/1.0"
+        );
+        unsafe { free_engine(engine) };
     }
 
     #[rstest]
@@ -3049,7 +3147,14 @@ mod tests {
             setup_domain_metadata_table("test_update_builder_operation", false).await?;
         let snapshot =
             unsafe { build_snapshot(ffi_str(table_url.as_str()), engine.shallow_copy()) };
-        let builder = unsafe { new_update_table_txn_builder(snapshot.shallow_copy(), operation) };
+        let builder = unsafe {
+            ok_or_panic(new_update_table_txn_builder(
+                snapshot.shallow_copy(),
+                operation,
+                ffi_str("test-engine/1.0"),
+                engine.shallow_copy(),
+            ))
+        };
         let txn =
             ok_or_panic(unsafe { update_table_txn_builder_build(builder, engine.shallow_copy()) });
         let committed = ok_or_panic(unsafe { update_table_txn_commit(txn, engine.shallow_copy()) });
@@ -3071,10 +3176,12 @@ mod tests {
         let snapshot =
             unsafe { build_snapshot(ffi_str(table_url.as_str()), engine.shallow_copy()) };
         let builder = unsafe {
-            new_update_table_txn_builder(
+            ok_or_panic(new_update_table_txn_builder(
                 snapshot.shallow_copy(),
                 KernelUpdateTableOperation::AlterTable,
-            )
+                ffi_str("test-engine/1.0"),
+                engine.shallow_copy(),
+            ))
         };
         assert_extern_result_error_contains(
             unsafe { update_table_txn_builder_build(builder, engine.shallow_copy()) },
@@ -3096,12 +3203,22 @@ mod tests {
         let snapshot =
             unsafe { build_snapshot(ffi_str(table_url.as_str()), engine.shallow_copy()) };
         let first = unsafe {
-            new_update_table_txn_builder(snapshot.shallow_copy(), KernelUpdateTableOperation::Write)
+            ok_or_panic(new_update_table_txn_builder(
+                snapshot.shallow_copy(),
+                KernelUpdateTableOperation::Write,
+                ffi_str("test-engine/1.0"),
+                engine.shallow_copy(),
+            ))
         };
         let first =
             ok_or_panic(unsafe { update_table_txn_builder_build(first, engine.shallow_copy()) });
         let second = unsafe {
-            new_update_table_txn_builder(snapshot.shallow_copy(), KernelUpdateTableOperation::Write)
+            ok_or_panic(new_update_table_txn_builder(
+                snapshot.shallow_copy(),
+                KernelUpdateTableOperation::Write,
+                ffi_str("test-engine/1.0"),
+                engine.shallow_copy(),
+            ))
         };
         let second =
             ok_or_panic(unsafe { update_table_txn_builder_build(second, engine.shallow_copy()) });
@@ -3129,7 +3246,12 @@ mod tests {
         let snapshot =
             unsafe { build_snapshot(ffi_str(table_url.as_str()), engine.shallow_copy()) };
         let builder = unsafe {
-            new_update_table_txn_builder(snapshot.shallow_copy(), KernelUpdateTableOperation::Write)
+            ok_or_panic(new_update_table_txn_builder(
+                snapshot.shallow_copy(),
+                KernelUpdateTableOperation::Write,
+                ffi_str("test-engine/1.0"),
+                engine.shallow_copy(),
+            ))
         };
         let committer: Box<dyn Committer> = Box::new(IoErrorCommitter);
         let txn = ok_or_panic(unsafe {
@@ -3531,7 +3653,7 @@ mod tests {
                 &table_path,
                 &engine,
                 false,
-                Some("test-engine/1.0"),
+                "test-engine/1.0",
                 KernelUpdateTableOperation::Write,
             )
         };
@@ -3833,10 +3955,12 @@ mod tests {
             delta_kernel::Snapshot::builder_for(table_url.clone()).build(&kernel_engine)?;
         let snapshot_handle: Handle<SharedSnapshot> = snapshot.into();
         let mut builder = unsafe {
-            new_update_table_txn_builder(
+            ok_or_panic(new_update_table_txn_builder(
                 snapshot_handle.shallow_copy(),
                 KernelUpdateTableOperation::AlterTable,
-            )
+                ffi_str("test-engine/1.0"),
+                engine.shallow_copy(),
+            ))
         };
 
         let profile_name = "profile";
@@ -3974,7 +4098,7 @@ mod tests {
                 table_path,
                 &engine,
                 true,
-                Some("test-engine/1.0"),
+                "test-engine/1.0",
                 KernelUpdateTableOperation::Write,
             )
         };
@@ -4070,7 +4194,7 @@ mod tests {
                 table_path_str,
                 &engine,
                 true,
-                Some("test-engine/1.0"),
+                "test-engine/1.0",
                 KernelUpdateTableOperation::Delete,
             )
         };
@@ -4185,8 +4309,7 @@ mod tests {
             .build(kernel_engine.as_ref())?;
         let mut add_txn = snapshot
             .clone()
-            .update_table(UpdateTableOperation::Write)
-            .with_engine_info("test-engine/1.0")
+            .update_table(UpdateTableOperation::Write, "test-engine/1.0")
             .build(kernel_engine.as_ref(), Box::new(FileSystemCommitter::new()))?;
         let add_files_schema = add_txn.add_files_schema();
         let add_metadata = test_utils::create_add_files_metadata(
@@ -4219,7 +4342,7 @@ mod tests {
                 table_path_str,
                 &engine,
                 true,
-                Some("test-engine/1.0"),
+                "test-engine/1.0",
                 KernelUpdateTableOperation::Delete,
             )
         };

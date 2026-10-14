@@ -89,10 +89,11 @@ file listing without re-scanning the table.
 `TransactionType` trait selects `T::BuilderState`; each type supplies its own constructors, custom
 setters, and build validation. `UpdateTableTransactionBuilder` aliases
 `TransactionBuilder<UpdateTable>` and builds `Transaction<UpdateTable>`, the default transaction
-type. Construct it with `snapshot.update_table(operation)`, which requires the operation.
+type. Construct it with `snapshot.update_table(operation, engine_info)`, which requires both values.
 `CreateTableTransactionBuilder` aliases `TransactionBuilder<CreateTable>` and builds
 `Transaction<CreateTable>`. Its constructor requires the path, schema, and engine info and fixes
-the operation to `CREATE TABLE`. Operations cannot be changed on either builder or transaction.
+the operation to `CREATE TABLE`. Operations and engine info cannot be changed on either builder
+or transaction.
 Schema changes use `UpdateTable`, including the
 `UpdateTableOperation::AlterTable` operation.
 

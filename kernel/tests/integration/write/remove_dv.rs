@@ -104,6 +104,7 @@ async fn append_only_enforces_data_change_for_file_actions(
         snapshot,
         engine.as_ref(),
         UpdateTableOperation::Write,
+        "test-engine",
         |builder| builder.with_data_change(true),
     )?;
     let write_context = txn.write_state()?.write_context_builder().build()?;
@@ -139,6 +140,7 @@ async fn append_only_enforces_data_change_for_file_actions(
         snapshot,
         engine.as_ref(),
         UpdateTableOperation::Delete,
+        "test-engine",
         |builder| builder.with_data_change(data_change),
     )?;
     // NOTE: The data_change=false cases do not preserve removed records in replacement AddFiles.
@@ -351,6 +353,7 @@ async fn commit_validates_staged_remove_fields(
         snapshot,
         engine.as_ref(),
         UpdateTableOperation::Write,
+        "test-engine",
         |builder| builder.with_data_change(true),
     )?;
     let adds = create_add_files_metadata(
@@ -441,8 +444,7 @@ async fn test_remove_files_adds_expected_entries() -> Result<(), Box<dyn std::er
 
     let mut txn = snapshot
         .clone()
-        .update_table(UpdateTableOperation::Write)
-        .with_engine_info("test engine")
+        .update_table(UpdateTableOperation::Write, "test engine")
         .with_data_change(true)
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?;
 
@@ -609,6 +611,7 @@ async fn remove_on_adaptive_metadata_table_nulls_deletion_timestamp_and_forces_e
         snapshot,
         engine.as_ref(),
         UpdateTableOperation::Write,
+        "test-engine",
         |builder| builder.with_data_change(true),
     )?;
     txn.remove_files(scan_files);
@@ -659,6 +662,7 @@ async fn test_remove_scanned_file_sets_extended_metadata(
         snapshot,
         engine.as_ref(),
         UpdateTableOperation::Write,
+        "test-engine",
         |builder| builder.with_data_change(true),
     )?;
     for scan_metadata in scan.scan_metadata(engine.as_ref())? {
@@ -735,8 +739,7 @@ async fn test_update_deletion_vectors_adds_expected_entries(
     // Create transaction with DV update mode enabled
     let mut txn = snapshot
         .clone()
-        .update_table(UpdateTableOperation::Update)
-        .with_engine_info("test engine")
+        .update_table(UpdateTableOperation::Update, "test engine")
         .with_data_change(true)
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?;
 
@@ -1119,6 +1122,7 @@ async fn test_update_deletion_vectors_rejects_corrupted_scan_files(
         snapshot,
         engine.as_ref(),
         UpdateTableOperation::Write,
+        "test-engine",
         |builder| builder.with_data_change(true),
     )?;
     let mut descriptors = sequential_dv_descriptors(&file_paths);
@@ -1280,8 +1284,7 @@ async fn test_update_deletion_vectors_multiple_files(
     let snapshot = Snapshot::builder_for(table_url.clone()).build(engine.as_ref())?;
     let mut txn = snapshot
         .clone()
-        .update_table(UpdateTableOperation::Update)
-        .with_engine_info("test engine")
+        .update_table(UpdateTableOperation::Update, "test engine")
         .with_data_change(true)
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?;
 
@@ -1438,8 +1441,7 @@ async fn test_update_deletion_vectors_respects_selection_vector(
     let snapshot = Snapshot::builder_for(table_url.clone()).build(engine.as_ref())?;
     let mut txn = snapshot
         .clone()
-        .update_table(UpdateTableOperation::Update)
-        .with_engine_info("test engine")
+        .update_table(UpdateTableOperation::Update, "test engine")
         .with_data_change(true)
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?;
 
@@ -1747,8 +1749,7 @@ async fn test_remove_files_with_modified_selection_vector() -> Result<(), Box<dy
         // Create a transaction to remove files in two batches
         let mut txn = snapshot
             .clone()
-            .update_table(UpdateTableOperation::Delete)
-            .with_engine_info("selective remove test")
+            .update_table(UpdateTableOperation::Delete, "selective remove test")
             .with_data_change(true)
             .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?;
 
@@ -1931,6 +1932,7 @@ async fn test_remove_files_after_predicate_scan_includes_stats_parsed(
             snapshot,
             engine.as_ref(),
             UpdateTableOperation::Write,
+            "test-engine",
             |builder| builder.with_data_change(true),
         )?;
 
@@ -2041,6 +2043,7 @@ async fn test_remove_files_partitioned_with_parsed_columns(
             table_url.clone(),
             engine.as_ref(),
             UpdateTableOperation::Write,
+            "test-engine",
             |builder| builder.with_data_change(true),
         )?;
         let write_state = txn.write_state()?;
@@ -2079,6 +2082,7 @@ async fn test_remove_files_partitioned_with_parsed_columns(
             snapshot,
             engine.as_ref(),
             UpdateTableOperation::Write,
+            "test-engine",
             |builder| builder.with_data_change(true),
         )?;
         for scan_metadata in scan.scan_metadata(engine.as_ref())? {

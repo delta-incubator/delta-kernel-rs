@@ -28,7 +28,8 @@ async fn write_batch_to_table_simple(
         snapshot.clone(),
         engine,
         delta_kernel::transaction::UpdateTableOperation::Write,
-        |builder| builder.with_engine_info("test"),
+        "test",
+        |builder| builder,
     )?;
     let write_context = txn.write_state()?.write_context_builder().build()?;
     let add_meta = engine
@@ -83,7 +84,8 @@ async fn test_multiple_files_in_commit_all_use_relative_paths(
         snapshot.clone(),
         engine.as_ref(),
         delta_kernel::transaction::UpdateTableOperation::Write,
-        |builder| builder.with_engine_info("test"),
+        "test",
+        |builder| builder,
     )?;
     let write_context = txn.write_state()?.write_context_builder().build()?;
     for values in [vec![1, 2], vec![3, 4]] {

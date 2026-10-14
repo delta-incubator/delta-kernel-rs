@@ -96,6 +96,7 @@ async fn write_data_to_table(
         table_url.clone(),
         engine.as_ref(),
         delta_kernel::transaction::UpdateTableOperation::Write,
+        "test-engine",
         |builder| builder.with_data_change(true),
     )?;
 
@@ -675,21 +676,15 @@ async fn test_row_tracking_parallel_transactions_conflict() -> Result<()> {
         snapshot1,
         engine1.as_ref(),
         delta_kernel::transaction::UpdateTableOperation::Write,
-        |builder| {
-            builder
-                .with_engine_info("transaction 1")
-                .with_data_change(true)
-        },
+        "transaction 1",
+        |builder| builder.with_data_change(true),
     )?;
     let mut txn2 = begin_transaction_with(
         snapshot2,
         engine2.as_ref(),
         delta_kernel::transaction::UpdateTableOperation::Write,
-        |builder| {
-            builder
-                .with_engine_info("transaction 2")
-                .with_data_change(true)
-        },
+        "transaction 2",
+        |builder| builder.with_data_change(true),
     )?;
 
     // Prepare data for both transactions

@@ -100,6 +100,7 @@ async fn test_get_file_stats_stale_crc_advances_via_safe_commit_serves_stats() -
         snapshot,
         engine.as_ref(),
         delta_kernel::transaction::UpdateTableOperation::Write,
+        "test-engine",
         |builder| builder,
     )?
     .commit(engine.as_ref())?
@@ -189,6 +190,7 @@ async fn test_get_all_files_none_when_crc_advanced_via_safe_commit() -> Result<(
         snapshot,
         engine.as_ref(),
         delta_kernel::transaction::UpdateTableOperation::Write,
+        "test-engine",
         |builder| builder,
     )?
     .commit(engine.as_ref())?
@@ -486,6 +488,7 @@ async fn test_post_commit_crc_chains_only_if_read_snapshot_has_crc(
         read_snapshot,
         engine.as_ref(),
         delta_kernel::transaction::UpdateTableOperation::Write,
+        "test-engine",
         |builder| builder.with_domain_metadata("zip", "zap1"),
     )?
     .commit(engine.as_ref())?
@@ -568,6 +571,7 @@ async fn test_post_commit_crc_tracks_file_stats_across_inserts() -> Result<()> {
         snapshot_v2.clone(),
         engine.as_ref(),
         delta_kernel::transaction::UpdateTableOperation::Delete,
+        "test-engine",
         |builder| builder.with_data_change(true),
     )?;
     for sm in scan.scan_metadata(engine.as_ref())? {
@@ -604,6 +608,7 @@ async fn test_post_commit_crc_tracks_domain_metadata_changes() -> Result<()> {
         snapshot_v0.clone(),
         engine.as_ref(),
         delta_kernel::transaction::UpdateTableOperation::Write,
+        "test-engine",
         |builder| {
             builder
                 .with_domain_metadata("zip", "zap1") // <-- set to zap1
@@ -622,7 +627,7 @@ async fn test_post_commit_crc_tracks_domain_metadata_changes() -> Result<()> {
     // ===== WHEN: remove zip, keep foo =====
     let txn = snapshot_v1
         .clone()
-        .update_table(UpdateTableOperation::Write)
+        .update_table(UpdateTableOperation::Write, "test-engine")
         .with_domain_metadata_removed("zip")
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?;
     let committed = txn.commit(engine.as_ref())?.unwrap_committed();
@@ -656,6 +661,7 @@ async fn test_post_commit_crc_non_incremental_op_makes_file_stats_indeterminate(
         snapshot_v1.clone(),
         engine.as_ref(),
         delta_kernel::transaction::UpdateTableOperation::Custom("ANALYZE STATS".to_string()),
+        "test-engine",
         |builder| builder,
     )?
     .commit(engine.as_ref())?
@@ -785,7 +791,7 @@ async fn test_write_checksum_resolves_correct_crc_from_each_root(
         )
         .map_err(|e| delta_kernel::KernelError::generic(e.to_string()))?;
         let mut txn = snap
-            .update_table(UpdateTableOperation::Write)
+            .update_table(UpdateTableOperation::Write, "test-engine")
             .with_data_change(true)
             .with_domain_metadata(format!("d{v}"), format!("cfg{v}"))
             .with_transaction_id(format!("app{v}"), v);
@@ -894,6 +900,7 @@ async fn test_disabled_load_retains_stale_crc_as_base() -> Result<()> {
         snap0,
         engine.as_ref(),
         delta_kernel::transaction::UpdateTableOperation::Write,
+        "test-engine",
         |builder| builder,
     )?
     .commit(engine.as_ref())?
@@ -938,6 +945,7 @@ async fn test_write_checksum_after_checkpoint_with_stale_base_resolves_from_chec
         snap0,
         engine.as_ref(),
         delta_kernel::transaction::UpdateTableOperation::Write,
+        "test-engine",
         |builder| builder,
     )?
     .commit(engine.as_ref())?
@@ -984,7 +992,7 @@ async fn setup_incremental_below_checkpoint_base<E: TaskExecutor>(
         )
         .map_err(|e| delta_kernel::KernelError::generic(e.to_string()))?;
         let mut txn = snap
-            .update_table(UpdateTableOperation::Write)
+            .update_table(UpdateTableOperation::Write, "test-engine")
             .with_data_change(true)
             .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?;
         let write_context = txn.write_state()?.write_context_builder().build()?;
@@ -1127,6 +1135,7 @@ async fn test_write_checksum_no_crc_with_non_incremental_tail_returns_unsupporte
         snap,
         engine.as_ref(),
         delta_kernel::transaction::UpdateTableOperation::Custom("ANALYZE STATS".to_string()),
+        "test-engine",
         |builder| builder,
     )?
     .commit(engine.as_ref())?
@@ -1358,6 +1367,7 @@ async fn test_get_domain_metadata_with_crc_skips_log_replay() -> Result<()> {
         snapshot_v0.clone(),
         engine.as_ref(),
         delta_kernel::transaction::UpdateTableOperation::Write,
+        "test-engine",
         |builder| {
             builder
                 .with_domain_metadata("zip", "zap1")
@@ -1463,6 +1473,7 @@ async fn test_partial_dm_serves_hits_and_falls_through_for_misses() -> Result<()
         snapshot_v0.clone(),
         engine.as_ref(),
         delta_kernel::transaction::UpdateTableOperation::Write,
+        "test-engine",
         |builder| builder.with_domain_metadata("foo", "bar"),
     )?
     .commit(engine.as_ref())?
@@ -1549,7 +1560,7 @@ async fn test_set_transaction_crc_tracking_and_fast_path() -> Result<()> {
     // -- v1: commit with my-app=1 --
     let committed = snapshot_v0
         .clone()
-        .update_table(UpdateTableOperation::Write)
+        .update_table(UpdateTableOperation::Write, "test-engine")
         .with_transaction_id("my-app", 1)
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
         .commit(engine.as_ref())?
@@ -1594,7 +1605,7 @@ async fn test_set_transaction_crc_tracking_and_fast_path() -> Result<()> {
     // -- v2: commit with my-app=2 (upsert) + other-app=1 (new) --
     let committed = snapshot_v1
         .clone()
-        .update_table(UpdateTableOperation::Write)
+        .update_table(UpdateTableOperation::Write, "test-engine")
         .with_transaction_id("my-app", 2)
         .with_transaction_id("other-app", 1)
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
@@ -1648,7 +1659,7 @@ async fn test_partial_set_txn_serves_hits_and_falls_through_for_misses() -> Resu
     let snapshot_v0 = committed.post_commit_snapshot().unwrap();
     let committed = snapshot_v0
         .clone()
-        .update_table(UpdateTableOperation::Write)
+        .update_table(UpdateTableOperation::Write, "test-engine")
         .with_transaction_id("v1-app", 1)
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
         .commit(engine.as_ref())?
@@ -1671,7 +1682,7 @@ async fn test_partial_set_txn_serves_hits_and_falls_through_for_misses() -> Resu
     // v2: commit with my-app=1; post-commit CRC accumulates into Partial.
     let committed = snapshot_v1_reloaded
         .clone()
-        .update_table(UpdateTableOperation::Write)
+        .update_table(UpdateTableOperation::Write, "test-engine")
         .with_transaction_id("my-app", 1)
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
         .commit(engine.as_ref())?
@@ -1750,7 +1761,7 @@ async fn test_set_txn_expiration_via_crc_fast_path(
     // v1: commit a set transaction for "my-app" (lastUpdated = now)
     let snapshot_v0 = committed.post_commit_snapshot().unwrap().clone();
     let committed = snapshot_v0
-        .update_table(UpdateTableOperation::Write)
+        .update_table(UpdateTableOperation::Write, "test-engine")
         .with_transaction_id("my-app", 1)
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
         .commit(engine.as_ref())?
@@ -1798,7 +1809,7 @@ async fn test_partial_set_txn_expired_hit_returns_none_via_fast_path() -> Result
     // v1: commit my-app=1, write CRC at v1.
     let snapshot_v0 = committed.post_commit_snapshot().unwrap().clone();
     let committed = snapshot_v0
-        .update_table(UpdateTableOperation::Write)
+        .update_table(UpdateTableOperation::Write, "test-engine")
         .with_transaction_id("my-app", 1)
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
         .commit(engine.as_ref())?
@@ -1814,7 +1825,7 @@ async fn test_partial_set_txn_expired_hit_returns_none_via_fast_path() -> Result
 
     // v2: commit my-app=2 from the Partial base; post-commit CRC is Partial(map) containing my-app.
     let committed = snapshot_v1_reloaded
-        .update_table(UpdateTableOperation::Write)
+        .update_table(UpdateTableOperation::Write, "test-engine")
         .with_transaction_id("my-app", 2)
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
         .commit(engine.as_ref())?
@@ -2087,6 +2098,7 @@ async fn test_file_histogram_tracks_adds_and_removes_across_bins() -> Result<()>
         snapshot.clone(),
         engine.as_ref(),
         delta_kernel::transaction::UpdateTableOperation::Delete,
+        "test-engine",
         |builder| builder.with_data_change(true),
     )?;
     for sm in scan.scan_metadata(engine.as_ref())? {
@@ -2232,6 +2244,7 @@ async fn test_file_histogram_with_bin_type_and_operation_type(
             fresh_v1,
             engine.as_ref(),
             delta_kernel::transaction::UpdateTableOperation::Custom("ANALYZE STATS".to_string()),
+            "test-engine",
             |builder| builder,
         )?
         .commit(engine.as_ref())?
@@ -2311,7 +2324,7 @@ async fn commit_data<E: TaskExecutor>(
     )
     .map_err(|e| delta_kernel::KernelError::generic(e.to_string()))?;
     let builder = snapshot
-        .update_table(UpdateTableOperation::Write)
+        .update_table(UpdateTableOperation::Write, "test-engine")
         .with_data_change(true);
     let mut txn =
         customize(builder).build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?;
@@ -2512,6 +2525,7 @@ async fn test_stale_crc_fresh_build_non_incremental_op_trips_indeterminate() -> 
         snap,
         engine.as_ref(),
         delta_kernel::transaction::UpdateTableOperation::Custom("ANALYZE STATS".to_string()),
+        "test-engine",
         |builder| builder,
     )?
     .commit(engine.as_ref())?

@@ -217,6 +217,7 @@ pub async fn write_data_and_check_result_and_stats(
         table_url.clone(),
         engine.as_ref(),
         UpdateTableOperation::Write,
+        "test-engine",
         |builder| builder.with_data_change(true),
     )?;
 
@@ -403,8 +404,7 @@ pub async fn create_dv_table_with_files(
     // Write files
     let snapshot = Snapshot::builder_for(table_url.clone()).build(engine.as_ref())?;
     let mut txn = snapshot
-        .update_table(UpdateTableOperation::Write)
-        .with_engine_info("test engine")
+        .update_table(UpdateTableOperation::Write, "test engine")
         .with_data_change(true)
         .build(
             engine.as_ref(),
@@ -510,8 +510,7 @@ pub fn create_dv_update_transaction(
 ) -> Result<Transaction, Box<dyn std::error::Error>> {
     Ok(Snapshot::builder_for(table_url.clone())
         .build(engine)?
-        .update_table(UpdateTableOperation::Delete)
-        .with_engine_info("test engine")
+        .update_table(UpdateTableOperation::Delete, "test engine")
         .build(
             engine,
             Box::new(delta_kernel::committer::FileSystemCommitter::new()),

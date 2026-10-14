@@ -1121,26 +1121,45 @@ impl Snapshot {
         IncrementalScanBuilder::new(self, base_version)
     }
 
-    /// Creates a builder for an update-table transaction with the given `operation`.
+    /// Creates a builder with the given `operation` and connector name/version `engine_info`.
     ///
-    /// Returns a builder supporting both data-changing transactions and schema changes. The
-    /// operation is recorded in `commitInfo` and cannot be changed on the builder. Invalid custom
-    /// names and incompatible configuration are rejected by
+    /// Returns a builder supporting both data-changing transactions and schema changes.
+    /// Both values are recorded in `commitInfo` and cannot be changed on the builder or
+    /// transaction. Invalid custom names and incompatible configuration are rejected by
     /// [`UpdateTableTransactionBuilder::build`].
     ///
-    /// An operation is required:
+    /// An operation and engine info are required:
     ///
     /// ```compile_fail,E0061
     /// # use delta_kernel::snapshot::SnapshotRef;
+    /// # use delta_kernel::transaction::UpdateTableOperation;
     /// fn configure(snapshot: SnapshotRef) {
-    ///     let _ = snapshot.update_table();
+    ///     let _ = snapshot.clone().update_table();
+    ///     let _ = snapshot.update_table(UpdateTableOperation::Write);
+    /// }
+    /// ```
+    ///
+    /// Neither value can be replaced with a setter:
+    ///
+    /// ```compile_fail,E0599
+    /// # use delta_kernel::transaction::Transaction;
+    /// fn configure(transaction: Transaction) {
+    ///     let _ = transaction.with_engine_info("my-app/1.0");
+    /// }
+    /// ```
+    ///
+    /// ```compile_fail,E0599
+    /// # use delta_kernel::transaction::UpdateTableTransactionBuilder;
+    /// fn configure(builder: UpdateTableTransactionBuilder) {
+    ///     let _ = builder.with_engine_info("my-app/1.0");
     /// }
     /// ```
     pub fn update_table(
         self: Arc<Self>,
         operation: UpdateTableOperation,
+        engine_info: impl Into<String>,
     ) -> UpdateTableTransactionBuilder {
-        UpdateTableTransactionBuilder::new(self, operation)
+        UpdateTableTransactionBuilder::new(self, operation, engine_info.into())
     }
 
     /// Creates a [`CheckpointWriter`] for generating a checkpoint from this snapshot.

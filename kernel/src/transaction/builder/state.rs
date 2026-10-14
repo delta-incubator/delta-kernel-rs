@@ -39,8 +39,11 @@ impl std::fmt::Debug for TransactionBuilderState {
 }
 
 impl TransactionBuilderState {
-    pub(super) fn for_update_table() -> Self {
-        Self::default()
+    pub(super) fn for_update_table(engine_info: String) -> Self {
+        Self {
+            engine_info: Some(engine_info),
+            ..Self::default()
+        }
     }
 
     pub(super) fn for_create_table(engine_info: String) -> Self {

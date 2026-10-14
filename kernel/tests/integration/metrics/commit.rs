@@ -117,6 +117,7 @@ async fn commit_reports_added_file_count_not_batch_count() -> Result<()> {
         snap,
         engine.as_ref(),
         delta_kernel::transaction::UpdateTableOperation::Write,
+        "test-engine",
         |builder| builder.with_data_change(true),
     )?;
     let add_files_schema = txn.add_files_schema();
@@ -219,7 +220,7 @@ async fn alter_table_builder_carries_correlation_id(
     let table_url = delta_kernel::try_parse_uri(&table_path)?;
     let snapshot = Snapshot::builder_for(table_url).build(engine.as_ref())?;
     // Set the id in the `Ready` state (before `add_column`) to exercise the carry-through.
-    let mut builder = snapshot.update_table(UpdateTableOperation::AlterTable);
+    let mut builder = snapshot.update_table(UpdateTableOperation::AlterTable, "test-engine");
     if let Some(id) = correlation_id {
         builder = builder.with_correlation_id(id);
     }
@@ -324,6 +325,7 @@ async fn commit_dv_update_reports_updated_file_count_not_batch_count(
         snapshot.clone(),
         engine.as_ref(),
         delta_kernel::transaction::UpdateTableOperation::Update,
+        "test-engine",
         |builder| builder.with_data_change(true),
     )?;
 
@@ -370,6 +372,7 @@ async fn commit_dv_update_accumulates_file_count_across_calls(
         snapshot.clone(),
         engine.as_ref(),
         delta_kernel::transaction::UpdateTableOperation::Update,
+        "test-engine",
         |builder| builder.with_data_change(true),
     )?;
 

@@ -60,7 +60,8 @@ async fn test_post_commit_snapshot_create_then_insert() -> Result<()> {
             current_snapshot.clone(),
             engine.as_ref(),
             delta_kernel::transaction::UpdateTableOperation::Write,
-            |builder| builder.with_engine_info("test"),
+            "test",
+            |builder| builder,
         )?;
 
         match txn.commit(engine.as_ref())? {
@@ -137,7 +138,8 @@ async fn test_write_context_builder_rejects_partition_values_on_unpartitioned_ta
             snapshot.clone(),
             &engine,
             delta_kernel::transaction::UpdateTableOperation::Write,
-            |builder| builder.with_engine_info("test"),
+            "test",
+            |builder| builder,
         )?;
         let write_state = txn.write_state()?;
 

@@ -79,7 +79,8 @@ let committer = Box::new(UCCommitter::new(
     table_id.clone(),
     TableIdentifier::new("my_catalog", "my_schema", "my_table"),
 ));
-let mut txn = snapshot.clone().update_table(UpdateTableOperation::Custom("INSERT".to_string()))
+let mut txn = snapshot.clone()
+    .update_table(UpdateTableOperation::Custom("INSERT".to_string()), "my-app/1.0")
     .build(&engine, committer)?;
 ```
 
@@ -286,7 +287,8 @@ let committer = Box::new(UCCommitter::new(
     table_id.clone(),
     TableIdentifier::new("my_catalog", "my_schema", "my_table"),
 ));
-let mut txn = snapshot.clone().update_table(UpdateTableOperation::Custom("INSERT".to_string()))
+let mut txn = snapshot.clone()
+    .update_table(UpdateTableOperation::Custom("INSERT".to_string()), "my-app/1.0")
     .build(&engine, committer)?;
 
 // 6. Write data

@@ -82,6 +82,7 @@ async fn test_append() -> Result<(), Box<dyn std::error::Error>> {
                 "commitInfo": {
                     "timestamp": 0,
                     "operation": "WRITE",
+                    "engineInfo": "test-engine",
                     "kernelVersion": format!("v{}", env!("CARGO_PKG_VERSION")),
                     "operationParameters": {},
                     "txnId": ZERO_UUID
@@ -137,7 +138,8 @@ async fn test_no_add_actions() -> Result<(), Box<dyn std::error::Error>> {
             table_url.clone(),
             &engine,
             UpdateTableOperation::Write,
-            |builder| builder.with_engine_info("default engine"),
+            "default engine",
+            |builder| builder,
         )?;
 
         // Commit without adding any add files
@@ -217,11 +219,8 @@ async fn test_append_partitioned(
             table_url.clone(),
             &engine,
             UpdateTableOperation::Write,
-            |builder| {
-                builder
-                    .with_engine_info("default engine")
-                    .with_data_change(false)
-            },
+            "default engine",
+            |builder| builder.with_data_change(false),
         )?;
 
         // create two new arrow record batches to append
@@ -371,7 +370,8 @@ async fn test_append_invalid_schema() -> Result<(), Box<dyn std::error::Error>> 
             table_url.clone(),
             &engine,
             UpdateTableOperation::Write,
-            |builder| builder.with_engine_info("default engine"),
+            "default engine",
+            |builder| builder,
         )?;
 
         // create two new arrow record batches to append
@@ -429,6 +429,7 @@ async fn commit_rejects_add_missing_required_field() -> Result<(), Box<dyn std::
             table_url,
             engine.as_ref(),
             UpdateTableOperation::Write,
+            "test-engine",
             |builder| builder.with_data_change(true),
         )?;
 
@@ -563,7 +564,7 @@ async fn commit_rejects_add_with_invalid_partition_keys(
         })
         .collect();
     let mut txn = snapshot
-        .update_table(UpdateTableOperation::Write)
+        .update_table(UpdateTableOperation::Write, "test-engine")
         .with_data_change(true)
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?;
     let write_state = txn.write_state()?;

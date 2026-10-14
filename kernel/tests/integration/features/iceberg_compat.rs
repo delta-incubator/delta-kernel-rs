@@ -225,7 +225,7 @@ async fn v3_invalid_type_change_blocks_writes_but_not_snapshot_loading() {
         .build(engine.as_ref())
         .unwrap();
     let err = snapshot
-        .update_table(UpdateTableOperation::Write)
+        .update_table(UpdateTableOperation::Write, "test-engine")
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))
         .unwrap_err()
         .to_string();
@@ -291,7 +291,7 @@ async fn v2_and_deletion_vectors_active_blocks_writes() {
         .build(engine.as_ref())
         .unwrap();
     let err = snapshot
-        .update_table(UpdateTableOperation::Write)
+        .update_table(UpdateTableOperation::Write, "test-engine")
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))
         .unwrap_err()
         .to_string();
@@ -320,8 +320,7 @@ async fn iceberg_compat_commit_validates_num_records(
         .unwrap();
 
     let mut txn = snapshot
-        .update_table(UpdateTableOperation::Write)
-        .with_engine_info("Test/1.0")
+        .update_table(UpdateTableOperation::Write, "Test/1.0")
         .with_data_change(true)
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))
         .unwrap();

@@ -82,7 +82,8 @@ fn test_at_timestamp_resolves_to_intermediate_version() -> Result<()> {
             snap.clone(),
             engine.as_ref(),
             delta_kernel::transaction::UpdateTableOperation::Write,
-            |builder| builder.with_engine_info("AtTimestampTest"),
+            "AtTimestampTest",
+            |builder| builder,
         )?
         .commit(engine.as_ref())?
         .unwrap_post_commit_snapshot();

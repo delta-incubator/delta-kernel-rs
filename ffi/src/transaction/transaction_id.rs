@@ -95,11 +95,14 @@ mod tests {
 
             let snapshot = Snapshot::builder_for(table_url.clone()).build(&engine)?;
             let snapshot_handle: Handle<SharedSnapshot> = snapshot.into();
+            let engine_info = "test-engine/1.0";
             let builder = unsafe {
-                new_update_table_txn_builder(
+                ok_or_panic(new_update_table_txn_builder(
                     snapshot_handle.shallow_copy(),
                     KernelUpdateTableOperation::Write,
-                )
+                    kernel_string_slice!(engine_info),
+                    default_engine_handle.shallow_copy(),
+                ))
             };
 
             // Add app ids

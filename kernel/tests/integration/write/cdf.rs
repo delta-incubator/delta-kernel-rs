@@ -61,7 +61,8 @@ async fn write_data_to_table(
         table_url.clone(),
         engine.as_ref(),
         UpdateTableOperation::Write,
-        |builder| builder.with_engine_info("test"),
+        "test",
+        |builder| builder,
     )?;
 
     add_files_to_transaction(&mut txn, engine, schema, values).await?;
@@ -129,11 +130,8 @@ async fn test_cdf_write_all_removes_succeeds() -> Result<(), Box<dyn std::error:
         snapshot.clone(),
         engine.as_ref(),
         UpdateTableOperation::Write,
-        |builder| {
-            builder
-                .with_engine_info("cdf remove test")
-                .with_data_change(true)
-        },
+        "cdf remove test",
+        |builder| builder.with_data_change(true),
     )?;
 
     let scan = snapshot.scan_builder().build()?;
@@ -174,11 +172,8 @@ async fn test_cdf_write_mixed_no_data_change_succeeds() -> Result<(), Box<dyn st
         snapshot.clone(),
         engine.as_ref(),
         UpdateTableOperation::Write,
-        |builder| {
-            builder
-                .with_engine_info("cdf mixed test")
-                .with_data_change(false)
-        },
+        "cdf mixed test",
+        |builder| builder.with_data_change(false),
     )?; // dataChange=false is key here
 
     // Add new files
@@ -222,11 +217,8 @@ async fn test_cdf_write_mixed_with_data_change_fails() -> Result<(), Box<dyn std
         snapshot.clone(),
         engine.as_ref(),
         UpdateTableOperation::Write,
-        |builder| {
-            builder
-                .with_engine_info("cdf mixed fail test")
-                .with_data_change(true)
-        },
+        "cdf mixed fail test",
+        |builder| builder.with_data_change(true),
     )?; // dataChange=true - this should fail
 
     // Add new files
@@ -292,8 +284,12 @@ async fn test_file_rewrite_resolves_data_change_before_cdf_validation(
     } else {
         UpdateTableOperation::Write
     };
-    let mut txn =
-        begin_transaction_with(before.clone(), engine.as_ref(), operation, |mut builder| {
+    let mut txn = begin_transaction_with(
+        before.clone(),
+        engine.as_ref(),
+        operation,
+        "test-engine",
+        |mut builder| {
             if schema_change {
                 builder = builder.add_column(StructField::nullable("added", DataType::INTEGER));
             }
@@ -301,7 +297,8 @@ async fn test_file_rewrite_resolves_data_change_before_cdf_validation(
                 builder = builder.with_data_change(data_change);
             }
             builder
-        })?;
+        },
+    )?;
     let new_file = create_add_files_metadata(
         txn.add_files_schema(),
         vec![(

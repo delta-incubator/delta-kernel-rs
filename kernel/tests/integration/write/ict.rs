@@ -112,7 +112,8 @@ async fn test_ict_commit_e2e() -> Result<(), Box<dyn std::error::Error>> {
         table_url.clone(),
         &engine,
         delta_kernel::transaction::UpdateTableOperation::Write,
-        |builder| builder.with_engine_info("ict test"),
+        "ict test",
+        |builder| builder,
     )?;
 
     // Add some data
@@ -161,7 +162,8 @@ async fn test_ict_commit_e2e() -> Result<(), Box<dyn std::error::Error>> {
         table_url.clone(),
         &engine,
         delta_kernel::transaction::UpdateTableOperation::Write,
-        |builder| builder.with_engine_info("ict test 2"),
+        "ict test 2",
+        |builder| builder,
     )?;
 
     // Add more data

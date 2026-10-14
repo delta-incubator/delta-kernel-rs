@@ -174,7 +174,7 @@ mod tests {
         // Commit 1: add domainA and domainB via an existing-table transaction.
         let snapshot = Snapshot::builder_for(url.clone()).build(&engine).unwrap();
         let _ = snapshot
-            .update_table(UpdateTableOperation::Write)
+            .update_table(UpdateTableOperation::Write, "test-engine")
             .with_domain_metadata("domainA", "cfgA")
             .with_domain_metadata("domainB", "cfgB")
             .build(&engine, Box::new(FileSystemCommitter::new()))
@@ -317,7 +317,7 @@ mod tests {
         let (engine, snapshot) = build_two_commit_log();
         let table_root = snapshot.table_root().clone();
         let _ = snapshot
-            .update_table(UpdateTableOperation::Write)
+            .update_table(UpdateTableOperation::Write, "test-engine")
             .with_domain_metadata_removed("domainA")
             .build(&engine, Box::new(FileSystemCommitter::new()))
             .unwrap()

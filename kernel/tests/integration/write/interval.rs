@@ -65,7 +65,8 @@ mod supported {
             table_url.clone(),
             engine.as_ref(),
             delta_kernel::transaction::UpdateTableOperation::Write,
-            |builder| builder.with_engine_info("default engine"),
+            "default engine",
+            |builder| builder,
         )?;
         let arrow_schema: ArrowSchema = schema.as_ref().try_into_arrow()?;
         let arrow_schema = Arc::new(arrow_schema);

@@ -155,7 +155,7 @@ A `Transaction` writes data to a table. It is built from a snapshot:
 
 ```rust,ignore
 let mut txn = snapshot                              // Arc<Snapshot>
-    .update_table(UpdateTableOperation::Custom("INSERT".to_string()))
+    .update_table(UpdateTableOperation::Custom("INSERT".to_string()), "my-app/1.0")
     .with_data_change(true)
     .build(&engine, Box::new(FileSystemCommitter::new()))?;
 
@@ -176,12 +176,12 @@ The `file_metadata` argument is an `EngineData` batch that matches
 build that batch from Parquet write results.
 
 > [!NOTE]
-> `update_table(operation)` requires an operation for update transactions (append, delete, etc.). For
+> `update_table(operation, engine_info)` requires both values for update transactions. For
 > create-table transactions the operation is fixed to `"CREATE TABLE"` and
 > cannot be overridden.
 
-For schema evolution, call `snapshot.update_table(UpdateTableOperation::AlterTable)` and add the
-schema changes. See
+For schema evolution, call `snapshot.update_table(UpdateTableOperation::AlterTable, engine_info)`
+and add the schema changes. See
 [Altering a Table](../writing/alter_table.md).
 
 See [Quick Start: Writing a Table](../getting_started/quick_start_write.md) for a complete example.

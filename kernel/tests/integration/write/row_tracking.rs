@@ -152,7 +152,7 @@ mod row_tracking_preservation {
         .commit(engine.as_ref())?
         .unwrap_post_commit_snapshot();
         let commit_version = snapshot
-            .update_table(UpdateTableOperation::AlterTable)
+            .update_table(UpdateTableOperation::AlterTable, "test-engine")
             .add_column(StructField::nullable("added", DataType::INTEGER))
             .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
             .commit(engine.as_ref())?
@@ -188,7 +188,7 @@ mod row_tracking_preservation {
         let (connector_commit_info, connector_commit_info_schema) =
             test_case.connector_commit_info()?;
         let commit_info = Box::new(ArrowEngineData::new(connector_commit_info));
-        let builder = snapshot.update_table(UpdateTableOperation::Write);
+        let builder = snapshot.update_table(UpdateTableOperation::Write, "test-engine");
         let txn = if set_commit_info_after_build {
             builder
                 .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
@@ -387,7 +387,7 @@ mod row_tracking_preservation {
             .unwrap()?
             .scan_files;
         let mut txn = snapshot
-            .update_table(UpdateTableOperation::Write)
+            .update_table(UpdateTableOperation::Write, "test-engine")
             .with_data_change(true)
             .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?;
         txn.remove_files(scan_files);
@@ -603,7 +603,7 @@ mod row_tracking_preservation {
         // === Delete rows 20 and 40 with a deletion vector ===
         let mut txn = source_snapshot
             .clone()
-            .update_table(UpdateTableOperation::Delete)
+            .update_table(UpdateTableOperation::Delete, "test-engine")
             .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?;
         let write_context = txn.write_state()?.write_context_builder().build()?;
         let mut deletion_vector = KernelDeletionVector::new();
@@ -678,7 +678,7 @@ mod row_tracking_preservation {
     ) -> Result<Arc<Snapshot>> {
         let source_files = get_scan_files(snapshot.clone(), engine.as_ref())?;
         let mut txn = snapshot
-            .update_table(UpdateTableOperation::Optimize)
+            .update_table(UpdateTableOperation::Optimize, "test-engine")
             .with_data_change(false)
             .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?;
         let write_context = txn
@@ -764,7 +764,7 @@ fn write_context_row_tracking_columns_respect_iceberg_compat_v3(
     .commit(engine.as_ref())?
     .unwrap_post_commit_snapshot();
     let txn = snapshot
-        .update_table(UpdateTableOperation::Write)
+        .update_table(UpdateTableOperation::Write, "test-engine")
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?;
     let result = txn
         .write_state()?
@@ -842,7 +842,7 @@ async fn write_context_maps_row_tracking_metadata_to_physical(
     // === Build the write context ===
     let txn = source_snapshot
         .clone()
-        .update_table(UpdateTableOperation::Write)
+        .update_table(UpdateTableOperation::Write, "test-engine")
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?;
     let write_context = txn
         .write_state()?

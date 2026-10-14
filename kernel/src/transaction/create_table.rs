@@ -85,6 +85,16 @@ pub type CreateTableTransaction = Transaction<CreateTable>;
 /// * `schema` - The schema for the new table
 /// * `engine_info` - Information about the engine creating the table (e.g., "MyApp/1.0")
 ///
+/// Engine info is required at construction:
+///
+/// ```compile_fail,E0061
+/// # use delta_kernel::schema::SchemaRef;
+/// # use delta_kernel::transaction::create_table::create_table;
+/// fn configure(schema: SchemaRef) {
+///     let _ = create_table("/path/to/table", schema);
+/// }
+/// ```
+///
 /// # Example
 ///
 /// ```no_run

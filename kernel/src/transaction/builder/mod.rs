@@ -189,9 +189,11 @@ mod tests {
     }
 
     impl TransactionBuilder<CustomType> {
-        fn with_test_engine_info(mut self, engine_info: &str) -> Self {
-            self.common_state.engine_info = Some(engine_info.into());
-            self
+        fn new(engine_info: &str) -> Self {
+            Self {
+                common_state: TransactionBuilderState::for_update_table(engine_info.into()),
+                local_state: (),
+            }
         }
     }
 
@@ -212,12 +214,9 @@ mod tests {
     }
 
     #[test]
-    fn custom_type_supports_shared_and_specialized_setters_without_custom_state() {
-        let builder = TransactionBuilder::<CustomType> {
-            common_state: TransactionBuilderState::default(),
-            local_state: (),
-        };
-        let builder = configure_shared_setters(builder).with_test_engine_info("test-engine");
+    fn custom_type_supports_shared_setters_without_custom_state() {
+        let builder = TransactionBuilder::<CustomType>::new("test-engine");
+        let builder = configure_shared_setters(builder);
 
         assert_eq!(
             builder.common_state.engine_info.as_deref(),

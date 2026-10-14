@@ -359,6 +359,7 @@ async fn test_v2_checkpoint_with_sidecars() -> Result<()> {
         post_ckpt_snapshot,
         engine.as_ref(),
         delta_kernel::transaction::UpdateTableOperation::Write,
+        "test-engine",
         |builder| builder.with_domain_metadata("app.settings", r#"{"version":3}"#),
     )?
     .commit(engine.as_ref())?
@@ -912,6 +913,7 @@ async fn v2_table_with_domain_metadata_and_txn<E: TaskExecutor>(
         snapshot,
         engine.as_ref(),
         delta_kernel::transaction::UpdateTableOperation::Write,
+        "test-engine",
         |builder| {
             builder
                 .with_domain_metadata("app.settings", r#"{"version":1}"#)
@@ -927,6 +929,7 @@ async fn v2_table_with_domain_metadata_and_txn<E: TaskExecutor>(
         snapshot,
         engine.as_ref(),
         delta_kernel::transaction::UpdateTableOperation::Write,
+        "test-engine",
         |builder| {
             builder
                 .with_domain_metadata("app.analytics", r#"{"tracking":false}"#)
@@ -943,6 +946,7 @@ async fn v2_table_with_domain_metadata_and_txn<E: TaskExecutor>(
             snapshot,
             engine.as_ref(),
             delta_kernel::transaction::UpdateTableOperation::Write,
+            "test-engine",
             |builder| builder.with_transaction_id(app_id, version),
         )?
         .commit(engine.as_ref())?
@@ -955,6 +959,7 @@ async fn v2_table_with_domain_metadata_and_txn<E: TaskExecutor>(
         snapshot,
         engine.as_ref(),
         delta_kernel::transaction::UpdateTableOperation::Delete,
+        "test-engine",
         |builder| builder.with_data_change(true),
     )?;
     for sm in scan.scan_metadata(engine.as_ref())? {
@@ -1469,6 +1474,7 @@ async fn test_v2_sidecar_preserves_dv_and_row_tracking_on_add(
         snapshot,
         engine.as_ref(),
         delta_kernel::transaction::UpdateTableOperation::Write,
+        "test-engine",
         |builder| builder.with_data_change(true),
     )?;
     txn.update_deletion_vectors(
@@ -1542,6 +1548,7 @@ async fn test_v2_sidecar_default_hint_splits_at_50k() -> Result<(), Box<dyn std:
             snapshot,
             engine.as_ref(),
             delta_kernel::transaction::UpdateTableOperation::Write,
+            "test-engine",
             |builder| builder.with_data_change(true),
         )?;
         let add_files_schema = txn.add_files_schema().clone();
