@@ -20,7 +20,6 @@ use crate::crc::Crc;
 use crate::engine_data::{GetData, RowVisitor, TypedGetData as _};
 #[cfg(feature = "declarative-plans")]
 use crate::expressions::{col, Predicate};
-use crate::kernel_reader::KernelReader;
 use crate::log_replay::ActionsBatch;
 use crate::metrics::ProtocolMetadataSource;
 use crate::path::ParsedLogPath;
@@ -36,7 +35,7 @@ use crate::schema::{
     column_name, schema_ref, ColumnName, ColumnNamesAndTypes, DataType, MetadataColumnSpec,
     StructField, StructType,
 };
-use crate::{EngineData, KernelError, KernelResult, Result, Version};
+use crate::{Engine, EngineData, KernelError, KernelResult, Result, Version};
 
 impl LogSegment {
     /// Read the latest Protocol and Metadata from this log segment, using CRC when available.
@@ -52,7 +51,7 @@ impl LogSegment {
     #[instrument(name = "log_seg.load_p_m", skip_all, fields(enable_call_frame), err)]
     pub(crate) fn read_protocol_metadata_opt(
         &self,
-        reader: &KernelReader<'_>,
+        engine: &dyn Engine,
         crc: Option<&Arc<Crc>>,
     ) -> KernelResult<PmResolution> {
         // Case 1: If CRC at target version, use it directly and exit early.
@@ -80,7 +79,7 @@ impl LogSegment {
                 crc.version
             );
             let pruned = self.segment_after_version(crc.version);
-            let candidate = pruned.replay_for_pm(reader)?;
+            let candidate = pruned.replay_for_pm(engine)?;
             // Ignore pruned P&M at or below the CRC version: a lagging AMT checkpoint action can
             // carry it, and the CRC's P&M is at least as new.
             let metadata_opt = candidate
@@ -123,7 +122,7 @@ impl LogSegment {
         }
 
         // Case 3: Full P&M log replay.
-        let candidate = self.replay_for_pm(reader)?;
+        let candidate = self.replay_for_pm(engine)?;
         Ok(PmResolution {
             metadata: candidate.metadata.map(|(_, m)| m),
             protocol: candidate.protocol.map(|(_, p)| p),
@@ -136,12 +135,12 @@ impl LogSegment {
     }
 
     /// Replays the log segment for the latest Protocol and Metadata, each with its version.
-    fn replay_for_pm(&self, reader: &KernelReader<'_>) -> KernelResult<PmCandidate> {
+    fn replay_for_pm(&self, engine: &dyn Engine) -> KernelResult<PmCandidate> {
         #[cfg(feature = "declarative-plans")]
-        if let Some(executor) = reader.engine().plan_executor() {
+        if let Some(executor) = engine.plan_executor() {
             return resolve_pm_batches(self.read_pm_batches_via_plan(executor.as_ref())?);
         }
-        resolve_pm_batches(self.read_pm_batches(reader)?)
+        resolve_pm_batches(self.read_pm_batches(engine)?)
     }
 
     /// Builds the declarative plan that selects the latest Protocol and Metadata actions.
@@ -244,7 +243,7 @@ impl LogSegment {
     /// Reads the P&M commit cover and checkpoint, tagging each batch with its version.
     fn read_pm_batches(
         &self,
-        reader: &KernelReader<'_>,
+        engine: &dyn Engine,
     ) -> KernelResult<impl Iterator<Item = KernelResult<VersionedBatch>> + Send> {
         let (commit_schema, checkpoint_schema) = pm_replay_schemas();
         // Commit schema only: `_file` in the checkpoint schema would break its skipping predicate.
@@ -254,8 +253,16 @@ impl LogSegment {
             commit_schema.fields().cloned().chain([file_column]),
         )?);
         let checkpoint_version = self.checkpoint_version.map(|v| v as i64);
-        let batches = reader
-            .read_actions(self, commit_schema, checkpoint_schema)?
+        let batches = self
+            .read_actions_with_projected_checkpoint_actions(
+                engine,
+                commit_schema,
+                checkpoint_schema,
+                None,
+                None,
+                None,
+                None,
+            )?
             .actions;
         Ok(batches.map(move |batch| {
             let batch = batch?;
@@ -564,7 +571,6 @@ mod tests {
     use crate::engine::test_delegating::DelegatingEngine;
     #[cfg(feature = "declarative-plans")]
     use crate::expressions::{col, Predicate};
-    use crate::kernel_reader::KernelReader;
     #[cfg(feature = "declarative-plans")]
     use crate::plans::ir::nodes::Operator;
     #[cfg(feature = "declarative-plans")]
@@ -602,7 +608,7 @@ mod tests {
         let snapshot = Snapshot::builder_for(url).build(&engine).unwrap();
         let data: Vec<_> = snapshot
             .log_segment()
-            .read_pm_batches(&KernelReader::new(&engine, None))
+            .read_pm_batches(&engine)
             .unwrap()
             .try_collect()
             .unwrap();

@@ -50,11 +50,12 @@ typed hint through a callback; connectors must copy any state retained after the
    (`kernel/src/log_segment/`) and resolve Protocol and Metadata through CRC state or log replay.
    Domain metadata is resolved lazily from CRC state or log replay when queried. Snapshot-hint
    builds validate and assemble the supplied state instead.
-   The snapshot builder's optional cancellation token is held by an operation-scoped
-   `KernelReader`, which borrows the engine and supplies the token to handler-backed discovery,
-   CRC reads/reconstruction, and imperative Protocol/Metadata replay. The completed snapshot
-   retains neither the reader nor its token. Declarative plan execution and subsequent metadata
-   accessors do not inherit the build token.
+   The snapshot builder binds its optional cancellation token through `KernelEngine`, an owned
+   adapter over the existing engine handlers. Discovery, CRC reads/reconstruction, and imperative
+   replay use the ordinary `Engine` APIs. Callers can also construct `KernelEngine` explicitly to
+   cover several calls, including subsequent metadata accessors, with one cancellation scope.
+   Completed snapshots retain neither the adapter nor its token. Declarative plan execution
+   uses the original executor unchanged.
 2. **Log replay** (`kernel/src/log_replay/`): file-action deduplication via
    `FileActionDeduplicator` and `LogReplayProcessor` trait (distinct from Protocol/Metadata
    replay above)

@@ -5,10 +5,9 @@ use std::sync::Arc;
 use tracing::instrument;
 
 use super::Crc;
-use crate::kernel_reader::KernelReader;
 use crate::metrics::events::CRC_READ_COMPLETED_SPAN;
 use crate::path::{AsUrl as _, ParsedLogPath};
-use crate::{KernelError, KernelResult};
+use crate::{Engine, KernelError, KernelResult};
 
 /// Attempt to read and parse a CRC file.
 ///
@@ -21,11 +20,12 @@ use crate::{KernelError, KernelResult};
 /// Reports metrics: `CrcReadSuccess` or `CrcReadFailure`.
 #[instrument(name = CRC_READ_COMPLETED_SPAN, err(level = "warn"), skip_all, fields(report, enable_call_frame, bytes_read, path = ?crc_path.location.location))]
 pub(crate) fn try_read_crc_file(
-    reader: &KernelReader<'_>,
+    engine: &dyn Engine,
     crc_path: &ParsedLogPath,
 ) -> KernelResult<Crc> {
     let url = crc_path.location.as_url().clone();
-    let data = reader
+    let data = engine
+        .storage_handler()
         .read_files(vec![(url, None)])?
         .next()
         .ok_or_else(|| KernelError::generic("CRC file read returned no data"))??;
@@ -38,10 +38,10 @@ pub(crate) fn try_read_crc_file(
 /// CRC files are optional, so an unreadable one is not an error: the caller proceeds without
 /// it. The failure is logged and metered by [`try_read_crc_file`]'s instrumentation.
 pub(crate) fn read_crc_file_or_none(
-    reader: &KernelReader<'_>,
+    engine: &dyn Engine,
     crc_file: &ParsedLogPath,
 ) -> KernelResult<Option<Arc<Crc>>> {
-    match try_read_crc_file(reader, crc_file) {
+    match try_read_crc_file(engine, crc_file) {
         Ok(crc) => Ok(Some(Arc::new(crc))),
         Err(KernelError::Cancelled) => Err(KernelError::Cancelled),
         Err(_) => Ok(None),
@@ -79,7 +79,7 @@ mod tests {
         let crc_path = ParsedLogPath::create_parsed_crc(&table_root, 0);
 
         // Read and parse the CRC file
-        let crc = try_read_crc_file(&KernelReader::new(&engine, None), &crc_path).unwrap();
+        let crc = try_read_crc_file(&engine, &crc_path).unwrap();
 
         // Verify basic fields
         let stats = crc.file_stats().unwrap();
@@ -200,10 +200,7 @@ mod tests {
         let table_root = test_table_root("./tests/data/crc-malformed/");
         let crc_path = ParsedLogPath::create_parsed_crc(&table_root, 0);
 
-        assert_result_error_with_message(
-            try_read_crc_file(&KernelReader::new(&engine, None), &crc_path),
-            "expected value",
-        );
+        assert_result_error_with_message(try_read_crc_file(&engine, &crc_path), "expected value");
 
         let events = reporter.events();
         assert!(

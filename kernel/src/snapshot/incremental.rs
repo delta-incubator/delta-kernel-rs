@@ -8,7 +8,6 @@ use std::sync::Arc;
 use tracing::{error, instrument};
 
 use super::{IncrementalReplay, PreparedSnapshot, Snapshot};
-use crate::kernel_reader::KernelReader;
 use crate::log_segment::{LogSegment, PmResolution};
 use crate::log_segment_files::{CheckpointHandling, LogSegmentFiles};
 use crate::metrics::{
@@ -17,7 +16,7 @@ use crate::metrics::{
 };
 use crate::path::ParsedLogPath;
 use crate::table_configuration::TableConfiguration;
-use crate::{KernelError, KernelResult, Version};
+use crate::{Engine, KernelError, KernelResult, Version};
 
 /// The assembled outcome of the listing phase of an incremental update. Listing/assembly
 /// failures surface as `Err` from [`Snapshot::build_new_segment`], not a variant here.
@@ -105,7 +104,7 @@ impl Snapshot {
     pub(super) fn try_new_from(
         existing_snapshot: Arc<Snapshot>,
         log_tail: Vec<ParsedLogPath>,
-        reader: &KernelReader<'_>,
+        engine: &dyn Engine,
         target_version: impl Into<Option<Version>>,
         metric_context: SnapshotLoadMetricContext,
         incremental_replay: IncrementalReplay,
@@ -117,7 +116,7 @@ impl Snapshot {
         let result = Self::try_new_from_impl(
             existing_snapshot.clone(),
             log_tail,
-            reader,
+            engine,
             requested_version,
             &metric_context,
             incremental_replay,
@@ -143,7 +142,7 @@ impl Snapshot {
     fn try_new_from_impl(
         existing_snapshot: Arc<Snapshot>,
         log_tail: Vec<ParsedLogPath>,
-        reader: &KernelReader<'_>,
+        engine: &dyn Engine,
         requested_version: Option<Version>,
         metric_context: &SnapshotLoadMetricContext,
         incremental_replay: IncrementalReplay,
@@ -176,7 +175,7 @@ impl Snapshot {
         // the `inspect_err` below.
         let segment_load_start = std::time::Instant::now();
         let (combined_log_segment, new_end_version) = match Self::build_new_segment(
-            reader,
+            engine,
             existing_log_segment,
             existing_snapshot_version,
             log_tail,
@@ -209,7 +208,7 @@ impl Snapshot {
                 } = Self::prepare_new_from_log_segment(
                     existing_snapshot.table_root(),
                     segment,
-                    reader,
+                    engine,
                     metric_context,
                     incremental_replay,
                     built_as_latest,
@@ -246,10 +245,10 @@ impl Snapshot {
         // matching the fresh path.
         let pm_start = std::time::Instant::now();
         let base_crc = combined_log_segment
-            .pick_latest_base_crc(reader, existing_snapshot.base_crc())
+            .pick_latest_base_crc(engine, existing_snapshot.base_crc())
             .inspect_err(|_| emit_protocol_metadata_load_failure(metric_context))?;
         let crc_at_version = combined_log_segment
-            .try_build_crc_within_budget(reader, base_crc.as_ref(), incremental_replay)
+            .try_build_crc_within_budget(engine, base_crc.as_ref(), incremental_replay)
             .inspect_err(|_| emit_protocol_metadata_load_failure(metric_context))?;
 
         let existing_table_config = existing_snapshot.table_configuration();
@@ -276,7 +275,7 @@ impl Snapshot {
                     .filter(|c| c.version > existing_snapshot_version);
                 combined_log_segment
                     .segment_after_version(existing_snapshot_version)
-                    .read_protocol_metadata_opt(reader, newer_base)
+                    .read_protocol_metadata_opt(engine, newer_base)
                     .inspect_err(|_| emit_protocol_metadata_load_failure(metric_context))?
             }
         };
@@ -318,7 +317,7 @@ impl Snapshot {
     /// incremental update. Returns a non-failure [`NewSegment`] on the C/D.1/E/F cases; a
     /// propagated `Err` is a genuine listing/assembly failure.
     fn build_new_segment(
-        reader: &KernelReader<'_>,
+        engine: &dyn Engine,
         existing_log_segment: &LogSegment,
         existing_snapshot_version: Version,
         log_tail: Vec<ParsedLogPath>,
@@ -344,12 +343,14 @@ impl Snapshot {
             // No version can follow Version::MAX.
             return Ok(NewSegment::Unchanged);
         };
-        let new_listed_files = reader.list_log_files(
+        let new_listed_files = LogSegmentFiles::list_with_checkpoint_handling(
+            engine.storage_handler().as_ref(),
             &log_root,
             log_tail,
             Some(listing_start),
             requested_version,
             checkpoint_handling,
+            None,
         )?;
 
         // NB: we need to check both checkpoints and commits since we filter commits at and below
@@ -737,7 +738,7 @@ mod tests {
         let result = Snapshot::try_new_from(
             base_snapshot.clone(),
             vec![],
-            &KernelReader::new(&engine, None),
+            &engine,
             None,
             SnapshotLoadMetricContext::for_test(),
             IncrementalReplay::Disabled,
@@ -818,7 +819,7 @@ mod tests {
         let new_snapshot = Snapshot::try_new_from(
             base_snapshot.clone(),
             log_tail,
-            &KernelReader::new(&engine, None),
+            &engine,
             Some(2),
             SnapshotLoadMetricContext::for_test(),
             IncrementalReplay::Disabled,
@@ -878,7 +879,7 @@ mod tests {
         let same_version = Snapshot::try_new_from(
             base_snapshot.clone(),
             vec![],
-            &KernelReader::new(&engine, None),
+            &engine,
             Some(1),
             SnapshotLoadMetricContext::for_test(),
             IncrementalReplay::Disabled,
@@ -891,7 +892,7 @@ mod tests {
         let older_version = Snapshot::try_new_from(
             base_snapshot.clone(),
             vec![],
-            &KernelReader::new(&engine, None),
+            &engine,
             Some(0),
             SnapshotLoadMetricContext::for_test(),
             IncrementalReplay::Disabled,

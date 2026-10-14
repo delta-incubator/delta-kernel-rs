@@ -6,9 +6,9 @@ use delta_kernel_derive::internal_api;
 use tracing::{info, instrument};
 
 use crate::cancellation::CancellationTokenRef;
-use crate::kernel_reader::KernelReader;
+use crate::engine::KernelEngine;
 use crate::log_path::LogPath;
-use crate::log_segment::validate_catalog_managed_log_tail;
+use crate::log_segment::{validate_catalog_managed_log_tail, LogSegment};
 use crate::log_segment_files::CheckpointHandling;
 use crate::metrics::events::SNAPSHOT_COMPLETED_SPAN;
 use crate::metrics::{MetricId, SnapshotLoadMetricContext, SnapshotLoadType};
@@ -269,8 +269,11 @@ impl<Mode> SnapshotBuilder<Mode> {
     /// operations, including CRC and imperative protocol/metadata replay. Declarative plan
     /// execution does not use this token. The build fails with [`KernelError::Cancelled`] if
     /// cancellation is observed during these reads. Snapshot-hint builds perform no listing or
-    /// reads, so the token has no effect on them. By default (or when passing `None`), no
-    /// cancellation token is supplied to the engine.
+    /// reads, so the token has no effect on them. By default (or when passing `None`), the
+    /// supplied engine's cancellation behavior is unchanged.
+    ///
+    /// This token applies only to the build. To share a scope with subsequent metadata reads,
+    /// pass a [`KernelEngine`] to both the build and those reads.
     ///
     /// [`CancellationToken`]: crate::CancellationToken
     /// [`KernelError::Cancelled`]: crate::KernelError::Cancelled
@@ -376,7 +379,10 @@ impl<Mode> SnapshotBuilder<Mode> {
                 incremental_replay,
             )?
         } else {
-            let reader = KernelReader::new(engine, cancellation_token);
+            let scoped_engine = cancellation_token.map(|token| KernelEngine::new(engine, token));
+            let engine = scoped_engine
+                .as_ref()
+                .map_or(engine, |engine| engine as &dyn Engine);
             let log_tail: Vec<_> = log_tail.into_iter().map(Into::into).collect();
 
             // Pre-build validations for catalog-managed tables
@@ -393,16 +399,18 @@ impl<Mode> SnapshotBuilder<Mode> {
 
             if let Some(table_root) = table_root {
                 let table_url = try_parse_uri(table_root)?;
-                let log_segment = reader.discover_snapshot(
+                let log_segment = LogSegment::for_snapshot(
+                    engine.storage_handler().as_ref(),
                     table_url.join(DELTA_LOG_DIR_WITH_SLASH)?,
                     log_tail,
                     effective_version,
                     metric_context.clone(),
+                    None,
                 )?;
                 Snapshot::try_new_from_log_segment(
                     table_url,
                     log_segment,
-                    &reader,
+                    engine,
                     metric_context,
                     incremental_replay,
                     built_as_latest,
@@ -417,7 +425,7 @@ impl<Mode> SnapshotBuilder<Mode> {
                 Snapshot::try_new_from(
                     existing_snapshot,
                     log_tail,
-                    &reader,
+                    engine,
                     effective_version,
                     metric_context,
                     incremental_replay,

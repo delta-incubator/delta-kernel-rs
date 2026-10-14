@@ -28,7 +28,6 @@ use crate::crc::{
 };
 use crate::expressions::ColumnName;
 use crate::incremental_scan::IncrementalScanBuilder;
-use crate::kernel_reader::KernelReader;
 #[cfg(feature = "adaptive-metadata-in-dev")]
 use crate::log_segment::CheckpointActionResolution;
 use crate::log_segment::{DomainMetadataMap, LogSegment, PmResolution};
@@ -310,7 +309,7 @@ impl Snapshot {
     fn try_new_from_log_segment(
         location: Url,
         log_segment: LogSegment,
-        reader: &KernelReader<'_>,
+        engine: &dyn Engine,
         metric_context: SnapshotLoadMetricContext,
         incremental_replay: IncrementalReplay,
         built_as_latest: bool,
@@ -323,7 +322,7 @@ impl Snapshot {
         } = Self::prepare_new_from_log_segment(
             &location,
             &log_segment,
-            reader,
+            engine,
             &metric_context,
             incremental_replay,
             built_as_latest,
@@ -344,7 +343,7 @@ impl Snapshot {
     fn prepare_new_from_log_segment(
         location: &Url,
         log_segment: &LogSegment,
-        reader: &KernelReader<'_>,
+        engine: &dyn Engine,
         metric_context: &SnapshotLoadMetricContext,
         incremental_replay: IncrementalReplay,
         built_as_latest: bool,
@@ -352,7 +351,7 @@ impl Snapshot {
         Self::resolve_table_configuration_and_crc(
             location,
             log_segment,
-            reader,
+            engine,
             metric_context,
             incremental_replay,
         )
@@ -372,7 +371,7 @@ impl Snapshot {
     fn resolve_table_configuration_and_crc(
         location: &Url,
         log_segment: &LogSegment,
-        reader: &KernelReader<'_>,
+        engine: &dyn Engine,
         metric_context: &SnapshotLoadMetricContext,
         incremental_replay: IncrementalReplay,
     ) -> KernelResult<PreparedSnapshot> {
@@ -381,10 +380,10 @@ impl Snapshot {
         // Step 1: read the latest on-disk CRC and, if usable, advance it to the end version
         //         (or use it as-is when already there) per `incremental_replay`.
         let base_crc = log_segment
-            .read_latest_crc(reader)
+            .read_latest_crc(engine)
             .inspect_err(|_| emit_protocol_metadata_load_failure(metric_context))?;
         let crc_at_version = log_segment
-            .try_build_crc_within_budget(reader, base_crc.as_ref(), incremental_replay)
+            .try_build_crc_within_budget(engine, base_crc.as_ref(), incremental_replay)
             .inspect_err(|_| emit_protocol_metadata_load_failure(metric_context))?;
 
         // Step 2: P&M from that CRC, else log replay rooted at the base CRC, checkpoint, or
@@ -399,7 +398,7 @@ impl Snapshot {
         } = match &crc_at_version {
             Some((crc, crc_source)) => PmResolution::from_crc(crc, *crc_source),
             None => log_segment
-                .read_protocol_metadata_opt(reader, base_crc.as_ref())
+                .read_protocol_metadata_opt(engine, base_crc.as_ref())
                 .inspect_err(|_| emit_protocol_metadata_load_failure(metric_context))?,
         };
 
@@ -1277,7 +1276,7 @@ impl Snapshot {
         // tail commits (a held base is always at or above the checkpoint, so a tail exists).
         if let Some(base) = self.base_crc() {
             span.record("root", "stale_crc");
-            let crc = log_segment.build_crc_from_base(&KernelReader::new(engine, None), base)?;
+            let crc = log_segment.build_crc_from_base(engine, base)?;
             return Ok(Arc::new(crc));
         }
 
@@ -1298,7 +1297,7 @@ impl Snapshot {
             // Replay the tail commits first: a non-incremental tail dooms file stats no matter
             // what the checkpoint holds, so skip the larger checkpoint read in that case.
             let delta = log_segment.build_crc_delta_from_base(
-                &KernelReader::new(engine, None),
+                engine,
                 checkpoint_version,
                 Some(FileSizeHistogram::create_default()),
             )?;

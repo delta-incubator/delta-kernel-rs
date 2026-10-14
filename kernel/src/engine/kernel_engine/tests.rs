@@ -1,4 +1,4 @@
-//! Snapshot-build cancellation through real engine read paths.
+//! Cancellation and ownership through real engine read paths.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -7,10 +7,10 @@ use bytes::Bytes;
 use rstest::rstest;
 use url::Url;
 
+use crate::actions::LOG_METADATA_SCHEMA;
 use crate::engine::sync::SyncEngine;
 use crate::engine::test_delegating::DelegatingEngine;
-#[cfg(feature = "declarative-plans")]
-use crate::kernel_reader::KernelReader;
+use crate::engine::KernelEngine;
 use crate::schema::SchemaRef;
 use crate::snapshot::IncrementalReplay;
 use crate::unit_test_utils::TestCancellationToken;
@@ -81,8 +81,8 @@ impl RecordingReads {
 }
 
 impl StorageHandler for RecordingReads {
-    fn list_from(&self, _path: &Url) -> KernelResult<ResultIteratorStatic<FileMeta>> {
-        panic!("unscoped listing");
+    fn list_from(&self, path: &Url) -> KernelResult<ResultIteratorStatic<FileMeta>> {
+        self.list_from_with_cancellation(path, None)
     }
 
     fn list_from_with_cancellation(
@@ -96,8 +96,8 @@ impl StorageHandler for RecordingReads {
             .list_from_with_cancellation(path, token)
     }
 
-    fn read_files(&self, _files: Vec<FileSlice>) -> KernelResult<ResultIteratorStatic<Bytes>> {
-        panic!("unscoped raw read");
+    fn read_files(&self, files: Vec<FileSlice>) -> KernelResult<ResultIteratorStatic<Bytes>> {
+        self.read_files_with_cancellation(files, None)
     }
 
     fn read_files_with_cancellation(
@@ -144,11 +144,11 @@ impl JsonHandler for RecordingReads {
 
     fn read_json_files(
         &self,
-        _files: &[FileMeta],
-        _schema: SchemaRef,
-        _predicate: Option<PredicateRef>,
+        files: &[FileMeta],
+        schema: SchemaRef,
+        predicate: Option<PredicateRef>,
     ) -> KernelResult<FileDataReadResultIterator> {
-        panic!("unscoped JSON read");
+        self.read_json_files_with_cancellation(files, schema, predicate, None)
     }
 
     fn read_json_files_with_cancellation(
@@ -188,11 +188,11 @@ impl JsonHandler for RecordingReads {
 impl ParquetHandler for RecordingReads {
     fn read_parquet_files(
         &self,
-        _files: &[FileMeta],
-        _schema: SchemaRef,
-        _predicate: Option<PredicateRef>,
+        files: &[FileMeta],
+        schema: SchemaRef,
+        predicate: Option<PredicateRef>,
     ) -> KernelResult<FileDataReadResultIterator> {
-        panic!("unscoped Parquet read");
+        self.read_parquet_files_with_cancellation(files, schema, predicate, None)
     }
 
     fn read_parquet_files_with_cancellation(
@@ -208,8 +208,8 @@ impl ParquetHandler for RecordingReads {
             .read_parquet_files_with_cancellation(files, schema, predicate, token)
     }
 
-    fn read_parquet_footer(&self, _file: &FileMeta) -> KernelResult<ParquetFooter> {
-        panic!("unscoped footer read");
+    fn read_parquet_footer(&self, file: &FileMeta) -> KernelResult<ParquetFooter> {
+        self.read_parquet_footer_with_cancellation(file, None)
     }
 
     fn read_parquet_footer_with_cancellation(
@@ -239,6 +239,196 @@ fn table_url(table: &str) -> Url {
         std::fs::canonicalize(PathBuf::from("tests/data").join(table)).unwrap(),
     )
     .unwrap()
+}
+
+#[derive(Clone, Copy)]
+enum ReadApi {
+    Plain,
+    WithCancellation,
+}
+
+fn start_read(
+    engine: &dyn Engine,
+    read: Read,
+    api: ReadApi,
+    token: Option<CancellationTokenRef>,
+) -> KernelResult<ResultIteratorStatic<()>> {
+    let log = table_url("parquet_row_group_skipping").join("_delta_log/")?;
+    let file_name = match read {
+        Read::List => "00000000000000000000",
+        Read::Hint => "_last_checkpoint",
+        Read::Crc => "00000000000000000000.crc",
+        Read::Json => "00000000000000000000.json",
+        Read::Parquet | Read::Footer => {
+            "00000000000000000001.checkpoint.0000000001.0000000005.parquet"
+        }
+    };
+    let path = if read == Read::Crc {
+        table_url("crc-full").join("_delta_log/00000000000000000000.crc")?
+    } else {
+        log.join(file_name)?
+    };
+    let file = FileMeta::new(path.clone(), 0, 0);
+    let schema = LOG_METADATA_SCHEMA.clone();
+    match (read, api) {
+        (Read::List, ReadApi::Plain) => Ok(Box::new(
+            engine
+                .storage_handler()
+                .list_from(&path)?
+                .map(|r| r.map(|_| ())),
+        )),
+        (Read::List, ReadApi::WithCancellation) => Ok(Box::new(
+            engine
+                .storage_handler()
+                .list_from_with_cancellation(&path, token)?
+                .map(|r| r.map(|_| ())),
+        )),
+        (Read::Hint | Read::Crc, ReadApi::Plain) => Ok(Box::new(
+            engine
+                .storage_handler()
+                .read_files(vec![(path, None)])?
+                .map(|r| r.map(|_| ())),
+        )),
+        (Read::Hint | Read::Crc, ReadApi::WithCancellation) => Ok(Box::new(
+            engine
+                .storage_handler()
+                .read_files_with_cancellation(vec![(path, None)], token)?
+                .map(|r| r.map(|_| ())),
+        )),
+        (Read::Json, ReadApi::Plain) => Ok(Box::new(
+            engine
+                .json_handler()
+                .read_json_files(&[file], schema, None)?
+                .map(|r| r.map(|_| ())),
+        )),
+        (Read::Json, ReadApi::WithCancellation) => Ok(Box::new(
+            engine
+                .json_handler()
+                .read_json_files_with_cancellation(&[file], schema, None, token)?
+                .map(|r| r.map(|_| ())),
+        )),
+        (Read::Parquet, ReadApi::Plain) => Ok(Box::new(
+            engine
+                .parquet_handler()
+                .read_parquet_files(&[file], schema, None)?
+                .map(|r| r.map(|_| ())),
+        )),
+        (Read::Parquet, ReadApi::WithCancellation) => Ok(Box::new(
+            engine
+                .parquet_handler()
+                .read_parquet_files_with_cancellation(&[file], schema, None, token)?
+                .map(|r| r.map(|_| ())),
+        )),
+        (Read::Footer, ReadApi::Plain) => {
+            engine.parquet_handler().read_parquet_footer(&file)?;
+            Ok(Box::new(std::iter::once(Ok(()))))
+        }
+        (Read::Footer, ReadApi::WithCancellation) => {
+            engine
+                .parquet_handler()
+                .read_parquet_footer_with_cancellation(&file, token)?;
+            Ok(Box::new(std::iter::once(Ok(()))))
+        }
+    }
+}
+
+#[rstest]
+fn handler_reads_inherit_scope_and_explicit_tokens_override_it(
+    #[values(
+        Read::List,
+        Read::Hint,
+        Read::Crc,
+        Read::Json,
+        Read::Parquet,
+        Read::Footer
+    )]
+    read: Read,
+    #[values(ReadApi::Plain, ReadApi::WithCancellation)] api: ReadApi,
+    #[values(false, true)] cancelled: bool,
+) {
+    let reads = RecordingReads::new(None);
+    if cancelled {
+        reads.token.cancel();
+    }
+    let engine = KernelEngine::new(&reads.engine(), reads.token.clone());
+    let result = start_read(&engine, read, api, None)
+        .and_then(|mut iter| iter.next().expect("fixture must produce a result"));
+    if cancelled {
+        assert!(matches!(result, Err(KernelError::Cancelled)));
+    } else {
+        result.unwrap();
+    }
+    assert_eq!(*reads.events.lock().unwrap(), [read]);
+
+    let explicit = RecordingReads::new(None);
+    let engine = KernelEngine::new(
+        &explicit.engine(),
+        Arc::new(TestCancellationToken::cancelled()),
+    );
+    start_read(
+        &engine,
+        read,
+        ReadApi::WithCancellation,
+        Some(explicit.token.clone()),
+    )
+    .unwrap()
+    .next()
+    .unwrap()
+    .unwrap();
+    assert_eq!(*explicit.events.lock().unwrap(), [read]);
+}
+
+#[rstest]
+fn iterators_keep_scope_after_engine_is_dropped(
+    #[values(Read::List, Read::Hint, Read::Crc, Read::Json, Read::Parquet)] read: Read,
+    #[values(false, true)] cancel: bool,
+) {
+    let token = Arc::new(TestCancellationToken::default());
+    let mut iter = {
+        let engine = KernelEngine::new(&SyncEngine::new(), token.clone());
+        start_read(&engine, read, ReadApi::Plain, None).unwrap()
+    };
+    if cancel {
+        token.cancel();
+        assert!(matches!(iter.next(), Some(Err(KernelError::Cancelled))));
+    } else {
+        iter.next().unwrap().unwrap();
+    }
+}
+
+#[test]
+fn nested_scope_uses_inner_operation_token_and_keeps_writes_unscoped() {
+    let engine = SyncEngine::new();
+    let cancelled: CancellationTokenRef = Arc::new(TestCancellationToken::cancelled());
+    let outer = KernelEngine::new(&engine, cancelled);
+    let inner = KernelEngine::new(&outer, Arc::new(TestCancellationToken::default()));
+    start_read(&inner, Read::Json, ReadApi::Plain, None)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap();
+
+    let temp = tempfile::tempdir().unwrap();
+    let path = Url::from_file_path(temp.path().join("data")).unwrap();
+    outer
+        .storage_handler()
+        .put(&path, Bytes::from_static(b"data"), false)
+        .unwrap();
+    assert!(matches!(
+        outer.storage_handler().head(&path),
+        Err(KernelError::Cancelled)
+    ));
+    assert_eq!(
+        engine
+            .storage_handler()
+            .read_files(vec![(path.clone(), None)])
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap(),
+        Bytes::from_static(b"data")
+    );
+    outer.storage_handler().delete(&path).unwrap();
 }
 
 #[rstest]
@@ -395,16 +585,16 @@ fn completed_snapshot_does_not_retain_build_scope() {
 
 #[cfg(feature = "declarative-plans")]
 #[test]
-fn declarative_replay_does_not_use_reader_cancellation() {
+fn declarative_replay_does_not_use_handler_cancellation() {
     let engine = SyncEngine::new();
     let snapshot = Snapshot::builder_for(table_url("table-without-dv-small"))
         .build(&engine)
         .unwrap();
     let token: CancellationTokenRef = Arc::new(TestCancellationToken::cancelled());
-    let reader = KernelReader::new(&engine, Some(token));
+    let engine = KernelEngine::new(&engine, token);
     let resolution = snapshot
         .log_segment()
-        .read_protocol_metadata_opt(&reader, None)
+        .read_protocol_metadata_opt(&engine, None)
         .unwrap();
     assert!(resolution.metadata.is_some());
     assert!(resolution.protocol.is_some());
