@@ -102,8 +102,10 @@ impl FfiLogPath {
 
 fn log_url(location: &str, log_root: &Url) -> Result<Url, url::ParseError> {
     if let Some(suffix) = location.strip_prefix(log_root.as_str()) {
-        // Joining a root-relative or scheme-like suffix would change the absolute input's meaning.
-        if !suffix.starts_with(['/', '\\'])
+        // Relative parsing must preserve the absolute input's path, including leading whitespace.
+        let leading_control_or_space = suffix.as_bytes().first().is_some_and(|byte| *byte <= b' ');
+        if !leading_control_or_space
+            && !suffix.starts_with(['/', '\\'])
             && !suffix
                 .split('/')
                 .next()
@@ -127,6 +129,9 @@ mod tests {
     #[case::staged("_staged_commits/00000000000000000123.uuid.json")]
     #[case::crc("00000000000000000123.crc")]
     #[case::escaped("dir%20name/00000000000000000123.json")]
+    #[case::leading_space(" 00000000000000000123.json")]
+    #[case::leading_control("\u{0001}00000000000000000123.json")]
+    #[case::tab_before_slash("\t/00000000000000000123.json")]
     #[case::dot_segments("a/../00000000000000000123.json")]
     #[case::leading_slash("/00000000000000000123.json")]
     #[case::leading_backslash("\\00000000000000000123.json")]
@@ -149,6 +154,22 @@ mod tests {
     fn other_log_urls_retain_general_parsing(#[case] location: &str) {
         let log_root = Url::parse("memory:///table/_delta_log/").unwrap();
         assert_eq!(log_url(location, &log_root), Url::parse(location));
+    }
+
+    #[rstest]
+    #[case::space(" 00000000000000000123.json")]
+    #[case::control("\u{0001}00000000000000000123.json")]
+    fn rooted_descriptor_conversion_preserves_invalid_filename(#[case] suffix: &str) {
+        let root = Url::parse("memory:///table/").unwrap();
+        let location = format!("{root}_delta_log/{suffix}");
+        let paths = [FfiLogPath::new(
+            unsafe { KernelStringSlice::new_unsafe(&location) },
+            1234,
+            5678,
+        )];
+        let array = unsafe { LogPathArray::new_unsafe(&paths) };
+        assert!(unsafe { array.log_paths() }.is_err());
+        assert!(unsafe { array.log_paths_with_root(&root) }.is_err());
     }
 
     #[test]
