@@ -83,7 +83,9 @@ impl TransactionBuilder<UpdateTable> {
     /// Adds schema changes to validate and apply during [`build`](Self::build).
     ///
     /// Appends `changes` in call order and returns the updated builder. Each change observes the
-    /// result of prior changes.
+    /// result of prior changes. Empty input is rejected immediately because appending it would
+    /// erase the distinction between an explicit empty request and no request, including when
+    /// other schema changes are already queued.
     ///
     /// # Errors
     ///
