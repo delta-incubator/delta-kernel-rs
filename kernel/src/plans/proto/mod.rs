@@ -42,24 +42,34 @@ pub mod operation {
 
 mod convert;
 
-/// Encodes a complete schema using the declarative-plan schema protobuf.
+/// Encodes a logical table schema using the declarative-plan protobuf, including field metadata.
+///
+/// Variant types are opaque in this format. Their inner field structure is not encoded, and
+/// decoding produces the canonical unshredded Variant type.
 pub fn encode_schema(value: &StructType) -> Vec<u8> {
     schema::StructType::from(value).encode_to_vec()
 }
 
-/// Decodes a schema, checking its structural invariants.
+/// Decodes a logical table schema and validates its structural invariants.
 ///
+/// Variant types decode to the canonical unshredded form, as described in [`encode_schema`].
 /// Returns an error for malformed protobuf or an invalid schema.
 pub fn decode_schema(bytes: &[u8]) -> KernelResult<SchemaRef> {
     let value = schema::StructType::decode(bytes).map_err(KernelError::generic_err)?;
     Ok(Arc::new(StructType::try_from(value)?))
 }
 
-/// Decodes a complete schema exported from a validated snapshot by this Kernel build.
+/// Decodes unchanged logical schema `bytes` exported from a validated snapshot by this Kernel
+/// build.
 ///
-/// The caller must supply the unchanged exported schema. Duplicate-name and nested
-/// metadata-column checks are not repeated. Protobuf decoding, required fields, scalar type
-/// parameters, metadata decoding, and construction of the schema's lookup indexes still run.
+/// Variant types decode to the canonical unshredded form, as described in [`encode_schema`].
+///
+/// The caller must preserve the source schema, including field metadata. This entry point is
+/// not for connector-authored schemas or state from a different Kernel build. It relies on the
+/// source having checked case-insensitive duplicate field names, duplicate metadata-column
+/// specifications, and nested metadata columns.
+/// Protobuf decoding, required values, scalar parameters, metadata, and lookup indexes still run.
+/// It does not skip table configuration or operation-support checks.
 ///
 /// Returns an error for malformed protobuf or invalid scalar parameters.
 pub fn decode_trusted_schema(bytes: &[u8]) -> KernelResult<SchemaRef> {
