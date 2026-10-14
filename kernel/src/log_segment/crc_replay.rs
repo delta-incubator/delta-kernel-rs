@@ -21,12 +21,12 @@ use crate::actions::visitors::visit_last_manifest_commit_at;
 use crate::actions::visitors::{
     visit_metadata_at, visit_protocol_at, METADATA_LEAVES, PROTOCOL_LEAVES,
 };
-#[cfg(feature = "adaptive-metadata-in-dev")]
-use crate::actions::LastManifestCommit;
 use crate::actions::{
     DomainMetadata, SetTransaction, ADD_NAME, COMMIT_INFO_NAME, DOMAIN_METADATA_FIELD,
     METADATA_FIELD, PROTOCOL_FIELD, REMOVE_NAME, SET_TRANSACTION_FIELD,
 };
+#[cfg(feature = "adaptive-metadata-in-dev")]
+use crate::actions::{LastManifestCommit, LAST_MANIFEST_COMMIT_FIELD};
 use crate::crc::{
     is_incremental_safe_operation, read_crc_file_or_none, size_to_u64, Crc, CrcDelta,
     FileSizeHistogram, FileStatsDelta,
@@ -36,7 +36,7 @@ use crate::metrics::ProtocolMetadataSource;
 use crate::path::ParsedLogPath;
 use crate::schema::{
     column_name, lazy_schema_ref, ColumnName, ColumnNamesAndTypes, DataType, MetadataColumnSpec,
-    SchemaRef, StructField,
+    SchemaRef, StructField, StructType,
 };
 use crate::snapshot::IncrementalReplay;
 use crate::utils::require;
@@ -56,16 +56,23 @@ static REPLAY_SCHEMA: LazyLock<SchemaRef> = lazy_schema_ref! {
     (&METADATA_FIELD),
     (&SET_TRANSACTION_FIELD),
     (&DOMAIN_METADATA_FIELD),
-    nullable COMMIT_INFO_NAME: {
-        nullable "operation": STRING,
-        nullable "inCommitTimestamp": LONG,
-        nullable "lastManifestCommit": {
-            not_null "version": LONG,
-            not_null "contentRootVersion": LONG,
-        },
-    },
+    (&REPLAY_COMMIT_INFO_FIELD),
     (StructField::create_metadata_column("_file", MetadataColumnSpec::FilePath)),
 };
+
+/// The commitInfo leaves CRC replay reads. `lastManifestCommit` is read only with
+/// adaptiveMetadata, so a differently shaped value there cannot fail the read in other builds.
+static REPLAY_COMMIT_INFO_FIELD: LazyLock<StructField> = LazyLock::new(|| {
+    let fields = [
+        StructField::nullable("operation", DataType::STRING),
+        StructField::nullable("inCommitTimestamp", DataType::LONG),
+    ];
+    #[cfg(feature = "adaptive-metadata-in-dev")]
+    let fields = fields
+        .into_iter()
+        .chain([LAST_MANIFEST_COMMIT_FIELD.clone()]);
+    StructField::nullable(COMMIT_INFO_NAME, StructType::new_unchecked(fields))
+});
 
 impl LogSegment {
     /// Try to build the CRC at this segment's `end_version` from the caller's resolved `base` CRC.
@@ -605,12 +612,15 @@ const COL_OP: usize = 1;
 const COL_ICT: usize = 2;
 const COL_REMOVE_PATH: usize = 3;
 const COL_REMOVE_SIZE: usize = 4;
-#[cfg_attr(not(feature = "adaptive-metadata-in-dev"), allow(dead_code))]
+#[cfg(feature = "adaptive-metadata-in-dev")]
 const COL_LMC_VERSION: usize = 5;
-#[cfg_attr(not(feature = "adaptive-metadata-in-dev"), allow(dead_code))]
+#[cfg(feature = "adaptive-metadata-in-dev")]
 const COL_LMC_CONTENT_ROOT_VERSION: usize = 6;
 /// Source-specific columns end here; the shared columns follow.
+#[cfg(feature = "adaptive-metadata-in-dev")]
 const N_CRC_SPECIFIC_COLS: usize = COL_LMC_CONTENT_ROOT_VERSION + 1;
+#[cfg(not(feature = "adaptive-metadata-in-dev"))]
+const N_CRC_SPECIFIC_COLS: usize = COL_REMOVE_SIZE + 1;
 const N_FIXED_COLS: usize = N_CRC_SPECIFIC_COLS + N_SHARED_SINGLE_LEAF_COLS;
 
 /// Thin shim that pulls leaf values from `getters` and forwards them to the accumulator's
@@ -628,6 +638,9 @@ impl RowVisitor for CommitCrcVisitor<'_> {
                 (DataType::LONG, column_name!("commitInfo.inCommitTimestamp")),
                 (DataType::STRING, column_name!("remove.path")),
                 (DataType::LONG, column_name!("remove.size")),
+            ];
+            #[cfg(feature = "adaptive-metadata-in-dev")]
+            fixed.extend([
                 (
                     DataType::LONG,
                     column_name!("commitInfo.lastManifestCommit.version"),
@@ -636,7 +649,7 @@ impl RowVisitor for CommitCrcVisitor<'_> {
                     DataType::LONG,
                     column_name!("commitInfo.lastManifestCommit.contentRootVersion"),
                 ),
-            ];
+            ]);
             fixed.extend(shared_columns());
             append_protocol_metadata_leaves(fixed).into()
         });

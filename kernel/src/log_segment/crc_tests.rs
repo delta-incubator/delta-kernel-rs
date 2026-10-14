@@ -1439,6 +1439,23 @@ async fn test_stale_crc_advanced_only_within_replay_budget(
     );
 }
 
+// Without adaptiveMetadata, CRC replay ignores `commitInfo.lastManifestCommit`, so a value of any
+// shape there cannot break advancing a stale CRC.
+#[cfg(not(feature = "adaptive-metadata-in-dev"))]
+#[tokio::test]
+async fn test_stale_crc_advances_past_foreign_last_manifest_commit() {
+    let mut info = commit_info(DEFAULT_OPERATION, None);
+    info["commitInfo"]["lastManifestCommit"] = json!("not-a-struct");
+    let built = CrcReadTest::new()
+        .v2_checkpoint(0, protocol_a(), metadata_a())
+        .crc(0, protocol_a(), metadata_a(), None)
+        .commit(1, [info])
+        .build()
+        .await;
+    let snapshot = built.snapshot_latest_with_replay(IncrementalReplay::Unlimited);
+    assert_eq!(snapshot.crc_at_version().map(|c| c.version), Some(1));
+}
+
 // A base exactly at the checkpoint version is kept (its tail is (ckpt, end]); a base below it is
 // dropped. Guards the `>=` vs `>` seam in `pick_latest_base_crc`.
 #[tokio::test]
