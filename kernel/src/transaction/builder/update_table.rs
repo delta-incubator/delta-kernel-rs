@@ -597,32 +597,18 @@ mod tests {
         Ok(())
     }
 
-    #[rstest]
-    fn empty_schema_changes_are_rejected(
-        #[values(false, true)] blind_append: bool,
-        #[values(false, true)] unknown_length: bool,
-    ) -> Result<()> {
-        let (_engine, snapshot, _tempdir) = load_test_table("table-without-dv-small")?;
-        let builder = snapshot
+    #[test]
+    fn empty_schema_changes_are_rejected() {
+        let (_engine, snapshot, _tempdir) =
+            load_test_table("table-without-dv-small").expect("load test table");
+        let error = snapshot
             .transaction_builder()
-            .with_operation(UpdateTableOperation::Write);
-        let builder = if blind_append {
-            builder.with_blind_append()
-        } else {
-            builder
-        };
-        let result = if unknown_length {
-            builder.with_schema_changes(std::iter::from_fn(|| None::<SchemaOperation>))
-        } else {
-            builder.with_schema_changes([])
-        };
-        let error = result.unwrap_err();
+            .with_operation(UpdateTableOperation::Write)
+            .with_schema_changes(std::iter::from_fn(|| None::<SchemaOperation>))
+            .unwrap_err();
 
-        assert!(matches!(&error, KernelError::Generic(_)));
-        assert!(error
-            .to_string()
-            .contains("with_schema_changes requires at least one schema operation"));
-        Ok(())
+        assert!(matches!(&error, KernelError::Generic(message)
+            if message == "with_schema_changes requires at least one schema operation"));
     }
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -698,6 +684,14 @@ mod tests {
     fn schema_validation_tables(
         #[case] table: SchemaValidationTable,
         #[case] schema_change_support: SchemaChangeSupport,
+    ) {
+    }
+
+    #[template]
+    #[apply(schema_validation_tables)]
+    fn schema_validation_tables_and_operations(
+        table: SchemaValidationTable,
+        schema_change_support: SchemaChangeSupport,
         #[values(
             UpdateTableOperation::Write,
             UpdateTableOperation::StreamingUpdate,
@@ -712,7 +706,7 @@ mod tests {
     ) {
     }
 
-    #[apply(schema_validation_tables)]
+    #[apply(schema_validation_tables_and_operations)]
     fn empty_schema_changes_are_rejected_for_all_table_operations(
         table: SchemaValidationTable,
         _schema_change_support: SchemaChangeSupport,
@@ -728,7 +722,7 @@ mod tests {
             if message == "with_schema_changes requires at least one schema operation"));
     }
 
-    #[apply(schema_validation_tables)]
+    #[apply(schema_validation_tables_and_operations)]
     fn omitted_schema_changes_require_a_non_alter_operation(
         table: SchemaValidationTable,
         _schema_change_support: SchemaChangeSupport,
@@ -758,7 +752,7 @@ mod tests {
         }
     }
 
-    #[apply(schema_validation_tables)]
+    #[apply(schema_validation_tables_and_operations)]
     fn nonempty_schema_changes_respect_table_feature_restrictions(
         table: SchemaValidationTable,
         schema_change_support: SchemaChangeSupport,
