@@ -358,13 +358,22 @@ mod tests {
     use crate::committer::FileSystemCommitter;
     use crate::engine::arrow_conversion::TryIntoArrow;
     use crate::engine::arrow_data::ArrowEngineData;
+    use crate::engine::sync::SyncEngine;
     use crate::expressions::column_name;
     #[cfg(feature = "adaptive-metadata-in-dev")]
     use crate::expressions::ColumnName;
+    use crate::log_segment::LogSegment;
     use crate::schema::{schema_ref, DataType, StructField};
+    use crate::table_features::{ColumnMappingMode, TableFeature};
+    use crate::table_properties::{
+        ENABLE_ICEBERG_COMPAT_V2, ENABLE_ICEBERG_COMPAT_V3, ENABLE_ROW_TRACKING,
+    };
     use crate::transaction::{SchemaOperation, UpdateTableOperation};
-    use crate::unit_test_utils::load_test_table;
-    use crate::{KernelError, Result};
+    use crate::unit_test_utils::{
+        create_log_path, load_test_table, test_schema_flat, test_schema_flat_with_column_mapping,
+        MockProtocolBuilder, MockTableConfigurationBuilder,
+    };
+    use crate::{KernelError, Result, Snapshot, SnapshotRef};
 
     #[rstest]
     #[case::write(UpdateTableOperation::Write)]
@@ -588,7 +597,7 @@ mod tests {
     }
 
     #[rstest]
-    fn empty_schema_changes_are_rejected_even_for_blind_append(
+    fn empty_schema_changes_are_rejected(
         #[values(false, true)] blind_append: bool,
         #[values(false, true)] unknown_length: bool,
     ) -> Result<()> {
@@ -613,6 +622,185 @@ mod tests {
             .to_string()
             .contains("with_schema_changes requires at least one schema operation"));
         Ok(())
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum SchemaInput {
+        Omitted,
+        Empty,
+        AddColumn,
+        AlreadyNullable,
+    }
+
+    impl SchemaInput {
+        fn changes(self) -> Vec<SchemaOperation> {
+            match self {
+                Self::Omitted | Self::Empty => vec![],
+                Self::AddColumn => vec![SchemaOperation::add_column(
+                    None,
+                    StructField::nullable("added", DataType::STRING),
+                )],
+                Self::AlreadyNullable => vec![SchemaOperation::SetNullable {
+                    column: column_name!("id"),
+                }],
+            }
+        }
+    }
+
+    #[rstest]
+    #[case::plain(None, false, true, true)]
+    #[case::v2_enabled(Some(TableFeature::IcebergCompatV2), true, true, false)]
+    #[case::v2_disabled(Some(TableFeature::IcebergCompatV2), false, true, true)]
+    #[case::v3_enabled(Some(TableFeature::IcebergCompatV3), true, false, false)]
+    #[case::v3_disabled(Some(TableFeature::IcebergCompatV3), false, true, true)]
+    #[case::column_defaults(Some(TableFeature::AllowColumnDefaults), true, false, false)]
+    fn schema_change_validation_by_operation_and_feature(
+        #[case] feature: Option<TableFeature>,
+        #[case] enabled: bool,
+        #[case] non_alter_changes_allowed: bool,
+        #[case] alter_changes_allowed: bool,
+        #[values(
+            UpdateTableOperation::Write,
+            UpdateTableOperation::StreamingUpdate,
+            UpdateTableOperation::AlterTable,
+            UpdateTableOperation::Delete,
+            UpdateTableOperation::Update,
+            UpdateTableOperation::Merge,
+            UpdateTableOperation::Optimize,
+            UpdateTableOperation::Custom("UNKNOWN".to_string())
+        )]
+        operation: UpdateTableOperation,
+        #[values(
+            SchemaInput::Omitted,
+            SchemaInput::Empty,
+            SchemaInput::AddColumn,
+            SchemaInput::AlreadyNullable
+        )]
+        input: SchemaInput,
+    ) -> Result<()> {
+        let snapshot = schema_validation_snapshot(feature.as_ref(), enabled)?;
+        let is_alter = operation == UpdateTableOperation::AlterTable;
+        let changes_allowed = if is_alter {
+            alter_changes_allowed
+        } else {
+            non_alter_changes_allowed
+        };
+        let builder = snapshot
+            .clone()
+            .transaction_builder()
+            .with_operation(operation.clone());
+        if input == SchemaInput::Empty {
+            let error = builder.with_schema_changes([]).unwrap_err();
+            assert!(matches!(&error, KernelError::Generic(message)
+                if message == "with_schema_changes requires at least one schema operation"));
+            return Ok(());
+        }
+        let builder = if input == SchemaInput::Omitted {
+            builder
+        } else {
+            builder
+                .with_schema_changes(input.changes())
+                .expect("non-empty schema changes must be accepted by the setter")
+        };
+        let result = builder.build(&SyncEngine::new(), Box::new(FileSystemCommitter::new()));
+        if input == SchemaInput::Omitted && is_alter {
+            let error = result.unwrap_err();
+            assert!(
+                matches!(&error, KernelError::InvalidTransactionState(message)
+                if message == "ALTER TABLE requires at least one schema change")
+            );
+        } else if input != SchemaInput::Omitted && !changes_allowed {
+            let error = result.unwrap_err();
+            let expected = format!(
+                "Schema changes are not yet supported on tables with {} enabled",
+                feature.unwrap()
+            );
+            assert!(matches!(&error, KernelError::Unsupported(message) if message == &expected));
+        } else {
+            let transaction = result?;
+            assert_eq!(transaction.operation, Some(operation.into()));
+            assert_eq!(
+                transaction.should_emit_metadata,
+                input != SchemaInput::Omitted
+            );
+            assert!(!transaction.should_emit_protocol);
+            let schema = transaction.effective_table_config.logical_schema();
+            if input == SchemaInput::AddColumn {
+                assert_eq!(
+                    schema.field("added").unwrap().data_type(),
+                    &DataType::STRING
+                );
+                assert!(schema.field("added").unwrap().is_nullable());
+                assert_eq!(schema.num_fields(), snapshot.schema().num_fields() + 1);
+            } else {
+                assert_eq!(schema, snapshot.schema());
+            }
+        }
+        Ok(())
+    }
+
+    #[rstest]
+    fn empty_schema_changes_are_rejected_after_queued_changes(
+        #[values(TableFeature::IcebergCompatV2, TableFeature::IcebergCompatV3)]
+        feature: TableFeature,
+        #[values(false, true)] enabled: bool,
+        #[values(false, true)] individual_setter: bool,
+        #[values(SchemaInput::AddColumn, SchemaInput::AlreadyNullable)] input: SchemaInput,
+    ) -> Result<()> {
+        let snapshot = schema_validation_snapshot(Some(&feature), enabled)?;
+        let builder = snapshot
+            .transaction_builder()
+            .with_operation(UpdateTableOperation::Write);
+        let builder = match (individual_setter, input) {
+            (true, SchemaInput::AddColumn) => {
+                builder.add_column(StructField::nullable("added", DataType::STRING))
+            }
+            (true, SchemaInput::AlreadyNullable) => builder.set_nullable(column_name!("id")),
+            _ => builder.with_schema_changes(input.changes())?,
+        };
+        assert_eq!(builder.local_state.schema_changes.len(), 1);
+        let error = builder.with_schema_changes([]).unwrap_err();
+        assert!(matches!(&error, KernelError::Generic(message)
+            if message == "with_schema_changes requires at least one schema operation"));
+        Ok(())
+    }
+
+    fn schema_validation_snapshot(
+        feature: Option<&TableFeature>,
+        enabled: bool,
+    ) -> Result<SnapshotRef> {
+        let mut config = MockTableConfigurationBuilder::new().with_schema(test_schema_flat());
+        let mut features: Vec<_> = feature.into_iter().cloned().collect();
+        if matches!(
+            feature,
+            Some(TableFeature::IcebergCompatV2 | TableFeature::IcebergCompatV3)
+        ) {
+            features.push(TableFeature::ColumnMapping);
+            config = config
+                .with_schema(test_schema_flat_with_column_mapping())
+                .with_column_mapping(ColumnMappingMode::Name)
+                .with_properties([("delta.columnMapping.maxColumnId", "2")]);
+            let property = if feature == Some(&TableFeature::IcebergCompatV2) {
+                ENABLE_ICEBERG_COMPAT_V2
+            } else {
+                features.extend([TableFeature::RowTracking, TableFeature::DomainMetadata]);
+                config = config.with_properties([(ENABLE_ROW_TRACKING, "true")]);
+                ENABLE_ICEBERG_COMPAT_V3
+            };
+            config = config.with_properties([(property, if enabled { "true" } else { "false" })]);
+        }
+        let config = config
+            .with_protocol(MockProtocolBuilder::new().with_features(features).build())
+            .build();
+        if let Some(feature) = feature {
+            assert!(config.is_feature_supported(feature));
+            assert_eq!(config.is_feature_enabled(feature), enabled);
+        }
+        let log_segment = LogSegment::new_for_version_zero(
+            config.table_root().join("_delta_log/")?,
+            create_log_path("file:///_delta_log/00000000000000000000.json"),
+        )?;
+        Ok(Arc::new(Snapshot::new(log_segment, config)?))
     }
 
     #[test]
