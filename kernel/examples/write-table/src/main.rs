@@ -88,8 +88,7 @@ async fn try_main() -> Result<()> {
     // Write sample data to the table
     let committer = Box::new(FileSystemCommitter::new());
     let mut txn = snapshot
-        .transaction_builder()
-        .with_operation(UpdateTableOperation::Custom("INSERT".to_string()))
+        .update_table(UpdateTableOperation::Custom("INSERT".to_string()))
         .with_engine_info("default_engine/write-table-example")
         .with_data_change(true)
         .build(&engine, committer)?;

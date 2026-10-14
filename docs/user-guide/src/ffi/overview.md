@@ -78,11 +78,9 @@ A typical write flow:
 ```text
 get_default_engine()  ->  Handle<SharedExternEngine>
         |
-new_update_table_txn_builder() -> Handle<ExclusiveUpdateTableTransactionBuilder>
+new_update_table_txn_builder(snapshot, operation) -> Handle<ExclusiveUpdateTableTransactionBuilder>
         |
 update_table_txn_builder_with_engine_info()
-        |
-update_table_txn_builder_with_operation()
         |
 update_table_txn_builder_build() -> Handle<ExclusiveUpdateTableTransaction>
         |
@@ -233,10 +231,10 @@ feature is enabled; the rest are always available.
 
 | Function | Purpose |
 |----------|---------|
-| `new_update_table_txn_builder` | Create an update-table transaction builder from a snapshot |
+| `new_update_table_txn_builder` | Create an update-table transaction builder from a snapshot and a required typed operation |
 | `update_table_txn_builder_with_engine_info` | Record a connector name and version before writing |
 | `update_table_txn_builder_with_correlation_id` | Attach a correlation identifier to transaction metrics |
-| `update_table_txn_builder_with_operation` / `update_table_txn_builder_with_custom_operation` | Select the operation stored in table history |
+| `new_update_table_txn_builder_with_custom_operation` | Create a builder from a snapshot and a required connector-defined operation name |
 | `update_table_txn_builder_with_operation_parameters` | Replace the operation parameters recorded in `commitInfo` |
 | `update_table_txn_builder_with_operation_metrics` / `update_table_txn_with_operation_metrics` | Set metrics before writing or replace them with write-time results |
 | `update_table_txn_builder_with_commit_info` / `update_table_txn_with_commit_info` | Set connector commit information before writing or before commit |

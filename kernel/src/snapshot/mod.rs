@@ -42,7 +42,7 @@ use crate::schema::SchemaRef;
 use crate::table_configuration::{InCommitTimestampEnablement, TableConfiguration};
 use crate::table_features::{physical_to_logical_column_name_and_type, Operation, TableFeature};
 use crate::table_properties::TableProperties;
-use crate::transaction::UpdateTableTransactionBuilder;
+use crate::transaction::{UpdateTableOperation, UpdateTableTransactionBuilder};
 use crate::utils::require;
 use crate::{Engine, KernelError, KernelResult, LogCompactionWriter, Result, Version};
 
@@ -1121,12 +1121,26 @@ impl Snapshot {
         IncrementalScanBuilder::new(self, base_version)
     }
 
-    /// Creates a builder for a transaction against this snapshot.
+    /// Creates a builder for an update-table transaction with the given `operation`.
     ///
-    /// The builder supports both data-changing transactions and schema changes. Configuration is
-    /// validated when [`UpdateTableTransactionBuilder::build`] is called.
-    pub fn transaction_builder(self: Arc<Self>) -> UpdateTableTransactionBuilder {
-        UpdateTableTransactionBuilder::new(self)
+    /// Returns a builder supporting both data-changing transactions and schema changes. The
+    /// operation is recorded in `commitInfo` and cannot be changed on the builder. Invalid custom
+    /// names and incompatible configuration are rejected by
+    /// [`UpdateTableTransactionBuilder::build`].
+    ///
+    /// An operation is required:
+    ///
+    /// ```compile_fail,E0061
+    /// # use delta_kernel::snapshot::SnapshotRef;
+    /// fn configure(snapshot: SnapshotRef) {
+    ///     let _ = snapshot.update_table();
+    /// }
+    /// ```
+    pub fn update_table(
+        self: Arc<Self>,
+        operation: UpdateTableOperation,
+    ) -> UpdateTableTransactionBuilder {
+        UpdateTableTransactionBuilder::new(self, operation)
     }
 
     /// Creates a [`CheckpointWriter`] for generating a checkpoint from this snapshot.

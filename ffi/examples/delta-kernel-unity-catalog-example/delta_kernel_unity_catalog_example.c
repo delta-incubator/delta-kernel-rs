@@ -221,9 +221,7 @@ int main(int argc, char* argv[])
     SharedSnapshot* snapshot = snapshot_res.ok;
 
     HandleExclusiveUpdateTableTransactionBuilder txn_builder =
-        new_update_table_txn_builder(snapshot);
-    txn_builder = update_table_txn_builder_with_operation(
-        txn_builder, KernelUpdateTableOperationWrite);
+        new_update_table_txn_builder(snapshot, KernelUpdateTableOperationWrite);
     const char* engine_info = "uc_example_engine";
     KernelStringSlice engine_info_slice = { .ptr = engine_info, .len = strlen(engine_info) };
     ExternResultHandleExclusiveUpdateTableTransactionBuilder builder_with_info_res =

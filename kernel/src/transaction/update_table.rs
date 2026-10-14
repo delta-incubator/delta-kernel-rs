@@ -215,8 +215,7 @@ impl Transaction {
     /// let snapshot = Snapshot::builder_for(table_url).build(engine.as_ref())?;
     /// let mut txn = snapshot
     ///     .clone()
-    ///     .transaction_builder()
-    ///     .with_operation(delta_kernel::transaction::UpdateTableOperation::Write)
+    ///     .update_table(delta_kernel::transaction::UpdateTableOperation::Write)
     ///     .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?;
     ///
     /// // Get file metadata from a scan
@@ -304,8 +303,7 @@ impl Transaction {
     /// ```rust,ignore
     /// let mut txn = snapshot
     ///     .clone()
-    ///     .transaction_builder()
-    ///     .with_operation(UpdateTableOperation::Update)
+    ///     .update_table(UpdateTableOperation::Update)
     ///     .build(engine, Box::new(FileSystemCommitter::new()))?;
     ///
     /// let scan = snapshot.scan_builder().build()?;

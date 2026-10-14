@@ -35,8 +35,7 @@ async fn test_commit_info_defaults_to_empty_parameters_and_omitted_metrics(
         // create a transaction
         let txn = Snapshot::builder_for(table_url.clone())
             .build(&engine)?
-            .transaction_builder()
-            .with_operation(UpdateTableOperation::Write)
+            .update_table(UpdateTableOperation::Write)
             .with_engine_info("default engine")
             .build(&engine, Box::new(FileSystemCommitter::new()))?;
 
@@ -90,8 +89,7 @@ async fn transaction_builder_writes_operation_parameters_and_metrics(
     {
         let snapshot = Snapshot::builder_for(table_url).build(&engine)?;
         let transaction = snapshot
-            .transaction_builder()
-            .with_operation(UpdateTableOperation::Write)
+            .update_table(UpdateTableOperation::Write)
             .with_operation_parameters([("mode", Some("Append"))])
             .with_operation_metrics([("numFiles", Some("3"))])
             .build(&engine, Box::new(FileSystemCommitter::new()))?;
@@ -129,8 +127,7 @@ async fn test_commit_info_action() -> Result<(), Box<dyn std::error::Error>> {
     {
         let txn = Snapshot::builder_for(table_url.clone())
             .build(&engine)?
-            .transaction_builder()
-            .with_operation(UpdateTableOperation::Write)
+            .update_table(UpdateTableOperation::Write)
             .with_engine_info("default engine")
             .build(&engine, Box::new(FileSystemCommitter::new()))?;
 
@@ -177,18 +174,25 @@ async fn test_commit_info_with_operation_maps() -> Result<(), Box<dyn std::error
     for (table_url, engine, store, table_name) in
         setup_test_tables(schema, &[], None, "test_table").await?
     {
-        let txn = load_and_begin_transaction_with(table_url.clone(), &engine, |builder| {
-            builder
-                .with_operation(UpdateTableOperation::Write)
-                .with_operation_parameters([("stale", Some("value"))])
-                .with_operation_parameters([
-                    ("mode", Some("Append")),
-                    ("mode", Some("Overwrite")),
-                    ("partitionBy", Some("[]")),
-                    ("description", None),
-                ])
-                .with_operation_metrics([("numFiles", Some("1")), ("numOutputRows", Some("10"))])
-        })?;
+        let txn = load_and_begin_transaction_with(
+            table_url.clone(),
+            &engine,
+            UpdateTableOperation::Write,
+            |builder| {
+                builder
+                    .with_operation_parameters([("stale", Some("value"))])
+                    .with_operation_parameters([
+                        ("mode", Some("Append")),
+                        ("mode", Some("Overwrite")),
+                        ("partitionBy", Some("[]")),
+                        ("description", None),
+                    ])
+                    .with_operation_metrics([
+                        ("numFiles", Some("1")),
+                        ("numOutputRows", Some("10")),
+                    ])
+            },
+        )?;
 
         let _ = txn.commit(&engine)?;
 
@@ -232,16 +236,19 @@ async fn test_commit_info_with_empty_operation_map(
     for (table_url, engine, store, table_name) in
         setup_test_tables(schema, &[], None, "test_table").await?
     {
-        let txn = load_and_begin_transaction_with(table_url.clone(), &engine, |builder| {
-            match operation_map {
+        let txn = load_and_begin_transaction_with(
+            table_url.clone(),
+            &engine,
+            UpdateTableOperation::Write,
+            |builder| match operation_map {
                 EmptyOperationMap::Parameters => {
                     builder.with_operation_parameters(std::iter::empty::<(&str, Option<&str>)>())
                 }
                 EmptyOperationMap::Metrics => {
                     builder.with_operation_metrics(std::iter::empty::<(&str, Option<&str>)>())
                 }
-            }
-        })?;
+            },
+        )?;
 
         let _ = txn.commit(&engine)?;
 
@@ -332,9 +339,11 @@ async fn test_commit_info_merges_custom_fields_and_ignores_reserved_fields(
             nullable "operationMetrics": { STRING => nullable STRING },
         };
 
-        let txn = load_and_begin_transaction_with(table_url.clone(), &engine, |builder| {
-            let builder = builder.with_operation(UpdateTableOperation::Write);
-            match setters {
+        let txn = load_and_begin_transaction_with(
+            table_url.clone(),
+            &engine,
+            UpdateTableOperation::Write,
+            |builder| match setters {
                 OperationMapSetters::Unset => {
                     builder.with_commit_info(Box::new(ArrowEngineData::new(batch)), engine_schema)
                 }
@@ -346,8 +355,8 @@ async fn test_commit_info_merges_custom_fields_and_ignores_reserved_fields(
                     .with_commit_info(Box::new(ArrowEngineData::new(batch)), engine_schema)
                     .with_operation_parameters([("mode", Some("Append"))])
                     .with_operation_metrics([("numFiles", Some("3"))]),
-            }
-        })?;
+            },
+        )?;
 
         let _ = txn.commit(&engine)?;
 

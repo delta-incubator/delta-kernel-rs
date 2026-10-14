@@ -12,11 +12,10 @@ setter, and commit calls borrow the engine handle. The caller retains ownership.
 
 ```c
 HandleSharedSnapshot snapshot = /* unwrap(snapshot_builder_build(...)) */;
-HandleExclusiveUpdateTableTransactionBuilder builder = new_update_table_txn_builder(snapshot);
+HandleExclusiveUpdateTableTransactionBuilder builder =
+    new_update_table_txn_builder(snapshot, KernelUpdateTableOperationWrite);
 builder = unwrap(update_table_txn_builder_with_engine_info(
     builder, slice("my-engine/1.0"), engine));
-builder = update_table_txn_builder_with_operation(
-    builder, KernelUpdateTableOperationWrite);
 builder = update_table_txn_builder_with_data_change(builder, true);
 
 HandleExclusiveUpdateTableTransaction txn = unwrap(update_table_txn_builder_build(builder, engine));
@@ -29,6 +28,10 @@ free_committed_transaction(committed);
 
 Here `slice` and `unwrap` stand for the connector's usual `KernelStringSlice` and `ExternResult`
 helpers.
+
+The update operation is required at construction and cannot be changed. For connector-defined names,
+use `new_update_table_txn_builder_with_custom_operation(snapshot, name, engine)`. Both constructors
+borrow the snapshot; the returned builder retains its own reference.
 
 Create-table connectors use the same shape: call `new_create_table_txn_builder`, apply
 `create_table_txn_builder_with_*` functions, then call `create_table_txn_builder_build`. Application

@@ -33,14 +33,14 @@ pub trait TransactionType: private::Sealed {
 /// Shared setters preserve the transaction type. Constructors, type-specific setters, and
 /// `build` are provided by the specialized implementations for [`CreateTable`] and [`UpdateTable`].
 /// Use [`create_table`](super::create_table::create_table) or
-/// [`Snapshot::transaction_builder`](crate::Snapshot::transaction_builder) to obtain a builder.
+/// [`Snapshot::update_table`](crate::Snapshot::update_table) to obtain a builder.
 ///
-/// Create-table builders cannot configure existing-table operations:
+/// The operation cannot be changed on a builder:
 ///
 /// ```compile_fail,E0599
-/// use delta_kernel::transaction::{CreateTable, TransactionBuilder, UpdateTableOperation};
+/// use delta_kernel::transaction::{TransactionBuilder, UpdateTableOperation};
 ///
-/// fn configure(builder: TransactionBuilder<CreateTable>) {
+/// fn configure(builder: TransactionBuilder) {
 ///     let _ = builder.with_operation(UpdateTableOperation::Write);
 /// }
 /// ```

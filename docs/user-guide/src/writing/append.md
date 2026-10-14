@@ -42,8 +42,7 @@ let snapshot = Snapshot::builder_for(url).build(&engine)?;
 
 // 2. Create a transaction
 let mut txn = snapshot
-    .transaction_builder()
-    .with_operation(UpdateTableOperation::Write)
+    .update_table(UpdateTableOperation::Write)
     .with_engine_info("my-app/1.0")
     .with_data_change(true)
     .build(&engine, Box::new(FileSystemCommitter::new()))?;
@@ -93,18 +92,20 @@ writing against:
 
 ```rust,ignore
 let mut txn = snapshot
-    .transaction_builder()
-    .with_operation(UpdateTableOperation::Write)
+    .update_table(UpdateTableOperation::Write)
     .with_engine_info("my-app/1.0")
     .with_data_change(true)
     .build(&engine, Box::new(FileSystemCommitter::new()))?;
 ```
 
-The builder methods:
+Pass the operation to `snapshot.update_table(operation)`. Kernel records its name in the commit log.
+Use `UpdateTableOperation::Custom` for connector-specific names. You can't change the operation on
+the returned builder.
+
+The optional builder methods:
 
 | Method | Purpose |
 |--------|---------|
-| `with_operation(UpdateTableOperation)` | Required before `build()`. Sets the typed operation stored in the commit log. Use `UpdateTableOperation::Custom` for connector-specific names |
 | `with_engine_info(impl Into<String>)` | Supplies the connector name and version recorded in commit information |
 | `with_data_change(bool)` | Whether this commit materially changes data (`true`) or just reorganizes it (`false`, e.g. OPTIMIZE) |
 
@@ -249,8 +250,7 @@ construction:
 
 ```rust,ignore
 let txn = snapshot
-    .transaction_builder()
-    .with_operation(UpdateTableOperation::Custom("INSERT".to_string()))
+    .update_table(UpdateTableOperation::Custom("INSERT".to_string()))
     .with_blind_append()
     .build(&engine, Box::new(FileSystemCommitter::new()))?;
 ```
@@ -282,8 +282,7 @@ that action, call `with_commit_info()` with your custom data and its schema:
 
 ```rust,ignore
 let txn = snapshot
-    .transaction_builder()
-    .with_operation(UpdateTableOperation::Custom("INSERT".to_string()))
+    .update_table(UpdateTableOperation::Custom("INSERT".to_string()))
     .with_operation_parameters([("mode", Some("Append")), ("predicate", None)])
     .with_operation_metrics([("numFiles", Some("1"))])
     .build(&engine, Box::new(FileSystemCommitter::new()))?

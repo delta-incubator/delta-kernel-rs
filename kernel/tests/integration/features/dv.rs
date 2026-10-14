@@ -194,9 +194,8 @@ async fn test_write_deletion_vectors_end_to_end() -> Result<(), Box<dyn std::err
     // Step 2: Add both files to the table via a transaction
     let mut txn = Snapshot::builder_for(table_url.clone())
         .build(engine.as_ref())?
-        .transaction_builder()
+        .update_table(UpdateTableOperation::Write)
         .with_engine_info("test engine")
-        .with_operation(UpdateTableOperation::Write)
         .build(
             engine.as_ref(),
             Box::new(delta_kernel::committer::FileSystemCommitter::new()),
