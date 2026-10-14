@@ -22,9 +22,8 @@ use crate::engine_data::{GetData, RowVisitor, TypedGetData as _};
 #[cfg(feature = "declarative-plans")]
 use crate::expressions::{col, Predicate};
 use crate::log_replay::ActionsBatch;
-use crate::log_segment_files::list_delta_log_from_storage;
 use crate::metrics::ProtocolMetadataSource;
-use crate::path::{LogPathFileType, ParsedLogPath};
+use crate::path::ParsedLogPath;
 #[cfg(feature = "declarative-plans")]
 use crate::plans::ir::nodes::Agg;
 #[cfg(feature = "declarative-plans")]
@@ -137,37 +136,16 @@ impl LogSegment {
         })
     }
 
-    /// Whether the terminal commit removes catalog management from the preceding protocol and its
-    /// numbered commit is absent. Rechecks publication through `engine`, including for reused
-    /// snapshots, and propagates listing and replay errors. `cancellation_token` cancels the
-    /// listing.
-    pub(crate) fn is_unpublished_catalog_downgrade(
+    /// Returns whether the terminal commit removes catalog management from the preceding protocol.
+    /// Propagates replay errors; `cancellation_token` applies to log reads through `engine`.
+    pub(crate) fn is_catalog_downgrade(
         &self,
         engine: &dyn Engine,
         cancellation_token: Option<&CancellationTokenRef>,
     ) -> KernelResult<bool> {
-        if self
-            .listed
-            .max_published_version
-            .is_some_and(|version| version >= self.end_version)
-        {
-            return Ok(false);
-        }
-        for file in list_delta_log_from_storage(
-            engine.storage_handler().as_ref(),
-            &self.log_root,
-            self.end_version,
-            self.end_version,
-            cancellation_token,
-        )? {
-            if file?.file_type == LogPathFileType::Commit {
-                return Ok(false);
-            }
-        }
-
         let mut terminal_protocol = None;
         let mut preceding_protocol = None;
-        for batch in self.read_pm_batches(engine)? {
+        for batch in self.read_pm_batches(engine, cancellation_token)? {
             let VersionedBatch {
                 protocol_version,
                 metadata_version,
@@ -202,7 +180,7 @@ impl LogSegment {
         if let Some(executor) = engine.plan_executor() {
             return resolve_pm_batches(self.read_pm_batches_via_plan(executor.as_ref())?);
         }
-        resolve_pm_batches(self.read_pm_batches(engine)?)
+        resolve_pm_batches(self.read_pm_batches(engine, None)?)
     }
 
     /// Builds the declarative plan that selects the latest Protocol and Metadata actions.
@@ -306,6 +284,7 @@ impl LogSegment {
     fn read_pm_batches(
         &self,
         engine: &dyn Engine,
+        cancellation_token: Option<&CancellationTokenRef>,
     ) -> KernelResult<impl Iterator<Item = KernelResult<VersionedBatch>> + Send> {
         let (commit_schema, checkpoint_schema) = pm_replay_schemas();
         // Commit schema only: `_file` in the checkpoint schema would break its skipping predicate.
@@ -323,7 +302,7 @@ impl LogSegment {
                 None,
                 None,
                 None,
-                None,
+                cancellation_token,
             )?
             .actions;
         Ok(batches.map(move |batch| {
@@ -670,7 +649,7 @@ mod tests {
         let snapshot = Snapshot::builder_for(url).build(&engine).unwrap();
         let data: Vec<_> = snapshot
             .log_segment()
-            .read_pm_batches(&engine)
+            .read_pm_batches(&engine, None)
             .unwrap()
             .try_collect()
             .unwrap();
