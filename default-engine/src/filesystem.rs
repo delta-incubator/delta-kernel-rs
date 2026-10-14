@@ -486,19 +486,19 @@ mod tests {
     #[case("table\u{e9}", "table%C3%A9")]
     #[tokio::test]
     async fn list_from_preserves_table_paths(
-        #[case] raw_table: &str,
-        #[case] encoded_table: &str,
+        #[case] raw_table_name: &str,
+        #[case] encoded_table_name: &str,
         #[values(1, 3)] file_count: usize,
     ) {
         // === Prepare objects under the literal table name ===
         let store = Arc::new(InMemory::new());
         for index in (0..file_count).rev() {
-            let key = Path::parse(format!("{raw_table}/file_{index}.json")).unwrap();
+            let key = Path::parse(format!("{raw_table_name}/file_{index}.json")).unwrap();
             store.put(&key, "data".into()).await.unwrap();
         }
 
         // === Call the listing implementation using the escaped directory URL ===
-        let directory_url = Url::parse(&format!("s3://bucket/{encoded_table}/")).unwrap();
+        let directory_url = Url::parse(&format!("s3://bucket/{encoded_table_name}/")).unwrap();
         let files: Vec<_> = list_from_impl(store, directory_url)
             .await
             .unwrap()
@@ -511,7 +511,7 @@ mod tests {
         for (index, file) in files.iter().enumerate() {
             assert_eq!(
                 file.location.as_str(),
-                format!("s3://bucket/{encoded_table}/file_{index}.json")
+                format!("s3://bucket/{encoded_table_name}/file_{index}.json")
             );
         }
     }
