@@ -290,16 +290,11 @@ impl StatsOptions {
     /// without JSON synthesis, such as [`Self::all_struct`]; [`ScanBuilder::build`] rejects any
     /// other combination.
     ///
-    /// When enabling this option, the engine supplied when executing the scan (for example, to
-    /// [`Scan::scan_metadata`]) must support Geometry statistics. For commits and
-    /// checkpoints without compatible `stats_parsed`, the engine's [`ParseJson`] must decode WKT
-    /// points. For compatible checkpoints, its Parquet handler must read WKB points into the same
-    /// logical type. If the reported footer schema exposes only Binary, the Parquet handler must
-    /// validate the file's Geometry annotation and CRS against the requested type before returning
-    /// bounds. Binary compatibility alone does not validate either. Missing bounds in compatible
-    /// `stats_parsed` read as null. Kernel does not check engine capability or prescribe an
-    /// in-memory representation; unsupported handlers, including the default engine, may return
-    /// an error.
+    /// The engine passed to [`Scan::scan_metadata`] or another scan execution API must support
+    /// Geometry statistics. Its [`ParseJson`] must decode WKT bounds, and its Parquet handler must
+    /// read WKB bounds into the same logical Geometry type. If the footer schema reports Binary,
+    /// the Parquet handler must validate the file's Geometry annotation and CRS. Kernel does not
+    /// check engine capability or prescribe an in-memory representation.
     ///
     /// [`ParseJson`]: crate::expressions::ParseJsonExpression
     #[cfg(feature = "geo-type-in-dev")]
