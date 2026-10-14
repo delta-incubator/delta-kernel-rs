@@ -243,18 +243,27 @@ impl Snapshot {
         skipped_new_checkpoints: bool,
     ) -> KernelResult<Self> {
         let crc = Self::validate_configuration_and_crc(&log_segment, &table_configuration, crc)?;
+        // A CRC at the snapshot version records `lastManifestCommit` authoritatively, including
+        // its absence.
+        #[cfg(feature = "adaptive-metadata-in-dev")]
+        let last_manifest_commit = match crc.at_version() {
+            Some(crc) => {
+                LastManifestCommitResolution::Resolved(crc.last_manifest_commit_opt.clone())
+            }
+            None => LastManifestCommitResolution::Unresolved,
+        };
         Ok(Self::new_with_validated_crc(
             log_segment,
             table_configuration,
             crc,
             built_as_latest,
             skipped_new_checkpoints,
-            // No replay ran on this path, so the checkpoint action and `lastManifestCommit` are
-            // resolved on demand.
+            // No replay ran on this path, so the checkpoint action is resolved on demand, as is
+            // `lastManifestCommit` without a CRC at this version.
             #[cfg(feature = "adaptive-metadata-in-dev")]
             CheckpointActionResolution::Unresolved,
             #[cfg(feature = "adaptive-metadata-in-dev")]
-            LastManifestCommitResolution::Unresolved,
+            last_manifest_commit,
         ))
     }
 

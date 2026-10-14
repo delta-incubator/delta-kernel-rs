@@ -911,6 +911,41 @@ async fn unresolved_snapshot_reads_last_manifest_commit_from_commit_file_once() 
     assert_eq!(snapshot.last_manifest_commit(&engine).unwrap(), expected);
 }
 
+// A snapshot handed a CRC at its version takes `lastManifestCommit` from that CRC, including its
+// absence, so it resolves without the commit file. The commit carries `(0, 0)`, so a `None` result
+// can only come from the CRC.
+#[rstest]
+#[case::crc_records_pointer(Some((0, 0)))]
+#[case::crc_records_no_pointer(None)]
+#[tokio::test]
+async fn snapshot_with_crc_at_version_serves_last_manifest_commit_from_crc(
+    #[case] crc_pointer: Option<(i64, i64)>,
+) {
+    let (store, table_root) = manifest_commit_table(&[commit_info(Some((0, 0)))]).await;
+    let engine = non_plan_engine(store.clone());
+    let loaded = Snapshot::builder_for(table_root).build(&engine).unwrap();
+    let expected = crc_pointer.map(|(v, c)| LastManifestCommit::new(v, c).unwrap());
+    let crc = Crc {
+        version: loaded.version(),
+        last_manifest_commit_opt: expected.clone(),
+        ..Default::default()
+    };
+    let snapshot = Snapshot::new_with_crc(
+        loaded.log_segment().clone(),
+        loaded.table_configuration().clone(),
+        Some(Arc::new(crc)),
+        false, /* built_as_latest */
+        false, /* skipped_new_checkpoints */
+    )
+    .unwrap();
+
+    store
+        .delete(&delta_path_for_version(1, "json"))
+        .await
+        .unwrap();
+    assert_eq!(snapshot.last_manifest_commit(&engine).unwrap(), expected);
+}
+
 // A post-commit snapshot takes `lastManifestCommit` from the committing transaction: the new
 // commit file is never written here, so any log read would fail.
 #[tokio::test]
