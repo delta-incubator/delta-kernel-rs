@@ -16,7 +16,6 @@ use crate::actions::{CheckpointAction, LastManifestCommit, CHECKPOINT_ACTION_FIE
 use crate::actions::{Metadata, Protocol, METADATA_FIELD, PROTOCOL_FIELD};
 #[cfg(feature = "declarative-plans")]
 use crate::actions::{METADATA_NAME, PROTOCOL_NAME};
-use crate::cancellation::CancellationTokenRef;
 use crate::crc::Crc;
 use crate::engine_data::{GetData, RowVisitor, TypedGetData as _};
 #[cfg(feature = "declarative-plans")]
@@ -36,7 +35,6 @@ use crate::schema::{
     column_name, schema_ref, ColumnName, ColumnNamesAndTypes, DataType, MetadataColumnSpec,
     StructField, StructType,
 };
-use crate::table_features::TableFeature;
 use crate::{Engine, EngineData, KernelError, KernelResult, Result, Version};
 
 impl LogSegment {
@@ -136,51 +134,13 @@ impl LogSegment {
         })
     }
 
-    /// Returns whether the terminal commit removes catalog management from the preceding protocol.
-    /// Propagates replay errors; `cancellation_token` applies to log reads through `engine`.
-    pub(crate) fn is_catalog_downgrade(
-        &self,
-        engine: &dyn Engine,
-        cancellation_token: Option<&CancellationTokenRef>,
-    ) -> KernelResult<bool> {
-        let mut terminal_protocol = None;
-        let mut preceding_protocol = None;
-        for batch in self.read_pm_batches(engine, cancellation_token)? {
-            let VersionedBatch {
-                protocol_version,
-                metadata_version,
-                batch,
-            } = batch?;
-            let batch_version = protocol_version.max(metadata_version);
-            let candidate = pm_candidate(&batch, protocol_version, metadata_version)?;
-            if let Some((version, protocol)) = candidate.protocol {
-                if version == self.end_version as i64 {
-                    terminal_protocol = Some(protocol);
-                } else if version < self.end_version as i64 {
-                    preceding_protocol = newer(preceding_protocol, Some((version, protocol)));
-                }
-            }
-            if is_final(&preceding_protocol, batch_version) {
-                break;
-            }
-        }
-        let is_catalog_managed = |protocol: &Protocol| {
-            protocol.has_table_feature(&TableFeature::CatalogManaged)
-                || protocol.has_table_feature(&TableFeature::CatalogOwnedPreview)
-        };
-        Ok(
-            terminal_protocol.is_some_and(|protocol| !is_catalog_managed(&protocol))
-                && preceding_protocol.is_some_and(|(_, protocol)| is_catalog_managed(&protocol)),
-        )
-    }
-
     /// Replays the log segment for the latest Protocol and Metadata, each with its version.
     fn replay_for_pm(&self, engine: &dyn Engine) -> KernelResult<PmCandidate> {
         #[cfg(feature = "declarative-plans")]
         if let Some(executor) = engine.plan_executor() {
             return resolve_pm_batches(self.read_pm_batches_via_plan(executor.as_ref())?);
         }
-        resolve_pm_batches(self.read_pm_batches(engine, None)?)
+        resolve_pm_batches(self.read_pm_batches(engine)?)
     }
 
     /// Builds the declarative plan that selects the latest Protocol and Metadata actions.
@@ -284,7 +244,6 @@ impl LogSegment {
     fn read_pm_batches(
         &self,
         engine: &dyn Engine,
-        cancellation_token: Option<&CancellationTokenRef>,
     ) -> KernelResult<impl Iterator<Item = KernelResult<VersionedBatch>> + Send> {
         let (commit_schema, checkpoint_schema) = pm_replay_schemas();
         // Commit schema only: `_file` in the checkpoint schema would break its skipping predicate.
@@ -302,7 +261,7 @@ impl LogSegment {
                 None,
                 None,
                 None,
-                cancellation_token,
+                None,
             )?
             .actions;
         Ok(batches.map(move |batch| {
@@ -649,7 +608,7 @@ mod tests {
         let snapshot = Snapshot::builder_for(url).build(&engine).unwrap();
         let data: Vec<_> = snapshot
             .log_segment()
-            .read_pm_batches(&engine, None)
+            .read_pm_batches(&engine)
             .unwrap()
             .try_collect()
             .unwrap();

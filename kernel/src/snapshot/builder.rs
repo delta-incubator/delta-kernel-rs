@@ -231,6 +231,10 @@ impl<Mode> SnapshotBuilder<Mode> {
     /// Set the log tail to use when building the snapshot. This allows catalogs or external
     /// systems to provide an up-to-date log tail when used to build a snapshot.
     ///
+    /// Staged commits must be ratified by the managing catalog. The caller is responsible for
+    /// obtaining this authoritative tail; discovering a staged file does not establish
+    /// ratification.
+    ///
     /// Note that the log tail must be a contiguous sequence of commits from M..=N where N is the
     /// target version of the snapshot and 0 <= M <= N.
     ///
@@ -253,8 +257,9 @@ impl<Mode> SnapshotBuilder<Mode> {
     /// must not exceed it.
     ///
     /// A ratified downgrade may produce a non-catalog-managed snapshot at `max_catalog_version`.
-    /// This is accepted when the terminal staged commit supplied in the log tail removes catalog
-    /// management, whether or not its numbered commit has been published.
+    /// This is accepted when the snapshot ends at the catalog-supplied staged commit at that bound,
+    /// whether or not its numbered commit has been published. Validation uses the resolved protocol
+    /// and trusts ratification; it does not reread history to verify the transition.
     ///
     /// # Log tail requirements
     ///
@@ -439,8 +444,6 @@ impl<Mode> SnapshotBuilder<Mode> {
             &snapshot,
             max_catalog_version,
             supplied_tail_end.as_ref(),
-            engine,
-            cancellation_token.as_ref(),
         )?;
         tracing::Span::current().record("version", snapshot.version());
         Ok(snapshot)
@@ -462,13 +465,12 @@ impl<Mode> SnapshotBuilder<Mode> {
     }
 
     /// Validate the catalog bound against the resulting protocol, allowing a connector-supplied
-    /// terminal downgrade at the bound. Propagates errors while checking the downgrade.
+    /// terminal downgrade at the bound. Relies on the caller supplying only ratified staged
+    /// commits.
     fn validate_catalog_managed_build_result(
         snapshot: &SnapshotRef,
         max_catalog_version: Option<Version>,
         supplied_tail_end: Option<&ParsedLogPath>,
-        engine: &dyn Engine,
-        cancellation_token: Option<&CancellationTokenRef>,
     ) -> KernelResult<()> {
         let is_catalog_managed = snapshot.table_configuration().is_catalog_managed();
 
@@ -487,10 +489,7 @@ impl<Mode> SnapshotBuilder<Mode> {
                     tail.version == snapshot.version()
                         && tail.file_type == LogPathFileType::StagedCommit
                         && snapshot.log_segment.listed.ascending_commit_files.last() == Some(tail)
-                })
-                && snapshot
-                    .log_segment
-                    .is_catalog_downgrade(engine, cancellation_token)?;
+                });
             require!(
                 is_catalog_managed || is_catalog_downgrade,
                 KernelError::MaxCatalogVersion(format!(
@@ -936,7 +935,6 @@ pub(super) mod tests {
         use crate::metrics::MeteredDeltaEngine;
         use crate::snapshot::ChecksumWriteResult;
         use crate::table_features::TableFeature;
-        use crate::unit_test_utils::TestCancellationToken;
         use crate::utils::try_parse_uri;
         use crate::FileMeta;
 
@@ -1059,14 +1057,14 @@ pub(super) mod tests {
         #[case::catalog_managed("catalogManaged")]
         #[case::catalog_owned("catalogOwned-preview")]
         #[test_log::test(tokio::test(flavor = "multi_thread"))]
-        async fn test_staged_catalog_downgrade_requires_terminal_transition(
+        async fn test_staged_catalog_downgrade_does_not_add_replay_io(
             #[case] catalog_feature: &str,
             #[values(false, true)] published: bool,
             #[values(false, true)] incremental: bool,
-            #[values(false, true)] protocol_in_top_commit: bool,
             #[values(false, true)] checkpointed: bool,
         ) -> Result<(), Box<dyn std::error::Error>> {
             let (engine, store, table_root) = setup_test();
+            let engine = Arc::new(MeteredDeltaEngine::new(engine));
             let initial_actions = actions_to_string_catalog_managed(vec![TestAction::Metadata])
                 .replace("catalogManaged", catalog_feature);
             add_commit(&table_root, store.as_ref(), 0, initial_actions).await?;
@@ -1087,85 +1085,92 @@ pub(super) mod tests {
             .to_string();
             let staged_downgrade =
                 add_staged_commit(&table_root, store.as_ref(), 1, downgrade.clone()).await?;
-            let mut log_tail = vec![create_log_path(&table_root, staged_downgrade)];
-            let target_version = if protocol_in_top_commit {
-                1
-            } else {
-                let staged_append = add_staged_commit(
-                    &table_root,
-                    store.as_ref(),
-                    2,
-                    actions_to_string(vec![TestAction::Add("after-downgrade.parquet".into())]),
-                )
-                .await?;
-                log_tail.push(create_log_path(&table_root, staged_append));
-                2
-            };
+            let log_tail = vec![create_log_path(&table_root, staged_downgrade)];
             if published {
                 add_commit(&table_root, store.as_ref(), 1, downgrade).await?;
             }
 
-            let result = if incremental {
+            let (reporter, _guard) = measuring_reporter();
+            let snapshot = if incremental {
                 SnapshotBuilder::new_from(base)
                     .with_log_tail(log_tail)
-                    .with_max_catalog_version(target_version)
+                    .with_max_catalog_version(1)
                     .build(engine.as_ref())
             } else {
                 SnapshotBuilder::new_for(&table_root)
                     .with_log_tail(log_tail)
-                    .with_max_catalog_version(target_version)
+                    .with_max_catalog_version(1)
                     .build(engine.as_ref())
-            };
-            if protocol_in_top_commit {
-                let snapshot = result?;
-                assert_eq!(snapshot.version(), target_version);
-                assert!(!snapshot.table_configuration().is_catalog_managed());
-            } else {
-                assert!(matches!(result, Err(KernelError::MaxCatalogVersion(_))));
-            }
+            }?;
+            assert_eq!(snapshot.version(), 1);
+            assert!(!snapshot.table_configuration().is_catalog_managed());
+            assert_eq!(
+                reporter
+                    .events()
+                    .iter()
+                    .filter(|event| matches!(event, MetricEvent::JsonReadCompleted(_)))
+                    .count(),
+                1
+            );
+            assert!(
+                reporter
+                    .events()
+                    .iter()
+                    .filter(|event| matches!(event, MetricEvent::ParquetReadCompleted(_)))
+                    .count()
+                    <= 1
+            );
             Ok(())
         }
 
         #[rstest]
+        #[case::missing_tail(None)]
+        #[case::published_tail(Some(false))]
+        #[case::staged_tail(Some(true))]
         #[test_log::test(tokio::test)]
-        async fn test_non_catalog_staged_protocol_is_not_a_downgrade(
-            #[values(false, true)] incremental: bool,
+        async fn test_catalog_downgrade_requires_matching_selected_staged_tail(
+            #[case] supplied_staged: Option<bool>,
+            #[values(false, true)] staged_snapshot: bool,
         ) -> Result<(), Box<dyn std::error::Error>> {
-            let (engine, store, table_root) = setup_test();
-            add_commit(
-                &table_root,
-                store.as_ref(),
-                0,
-                actions_to_string(vec![TestAction::Metadata]),
-            )
-            .await?;
-            let base = SnapshotBuilder::new_for(&table_root).build(engine.as_ref())?;
-            let staged = add_staged_commit(
-                &table_root,
-                store.as_ref(),
-                1,
-                json!({
-                    "protocol": Protocol::try_new_modern(
-                        std::iter::empty::<TableFeature>(),
-                        [TableFeature::InCommitTimestamp],
-                    )?
-                })
-                .to_string(),
-            )
-            .await?;
-            let log_tail = vec![create_log_path(&table_root, staged)];
-            let result = if incremental {
-                SnapshotBuilder::new_from(base)
-                    .with_log_tail(log_tail)
+            let (engine, store, table_root) = setup_catalog_managed_test().await;
+            let downgrade = json!({
+                "protocol": Protocol::try_new_modern(
+                    std::iter::empty::<TableFeature>(),
+                    [TableFeature::InCommitTimestamp],
+                )?
+            })
+            .to_string();
+            let staged =
+                add_staged_commit(&table_root, store.as_ref(), 1, downgrade.clone()).await?;
+            add_commit(&table_root, store.as_ref(), 1, downgrade).await?;
+            let staged = create_log_path(&table_root, staged);
+            let snapshot = if staged_snapshot {
+                SnapshotBuilder::new_for(&table_root)
+                    .with_log_tail(vec![staged.clone()])
                     .with_max_catalog_version(1)
                     .build(engine.as_ref())
             } else {
                 SnapshotBuilder::new_for(&table_root)
-                    .with_log_tail(log_tail)
-                    .with_max_catalog_version(1)
+                    .at_version(1)
                     .build(engine.as_ref())
+            }?;
+            let log_tail = match supplied_staged {
+                None => vec![],
+                Some(false) => vec![create_log_path(
+                    &table_root,
+                    test_utils::delta_path_for_version(1, "json"),
+                )],
+                Some(true) => vec![staged],
             };
-            assert!(matches!(result, Err(KernelError::MaxCatalogVersion(_))));
+            let result = SnapshotBuilder::new_from(snapshot)
+                .with_log_tail(log_tail)
+                .with_max_catalog_version(1)
+                .build(engine.as_ref());
+            if staged_snapshot && supplied_staged == Some(true) {
+                assert_eq!(result?.version(), 1);
+            } else {
+                assert!(matches!(result, Err(KernelError::MaxCatalogVersion(_))));
+            }
             Ok(())
         }
 
@@ -1203,7 +1208,7 @@ pub(super) mod tests {
 
         #[rstest]
         #[test_log::test(tokio::test)]
-        async fn test_catalog_downgrade_stays_bounded_after_publication_without_relisting_on_reuse(
+        async fn test_catalog_downgrade_stays_bounded_after_publication_without_io_on_reuse(
             #[values(false, true)] with_checksum: bool,
         ) -> Result<(), Box<dyn std::error::Error>> {
             let (engine, store, table_root) = setup_catalog_managed_test().await;
@@ -1238,48 +1243,57 @@ pub(super) mod tests {
             } else {
                 snapshot
             };
-            let (reporter, _guard) = measuring_reporter();
-            let reused = SnapshotBuilder::new_from(snapshot.clone())
-                .with_log_tail(log_tail.clone())
-                .with_max_catalog_version(1)
-                .build(engine.as_ref())?;
-            assert!(Arc::ptr_eq(&snapshot, &reused));
-            let without_tail = SnapshotBuilder::new_from(snapshot.clone())
-                .with_max_catalog_version(1)
-                .build(engine.as_ref());
-            assert!(matches!(
-                without_tail,
-                Err(KernelError::MaxCatalogVersion(_))
-            ));
-
-            add_commit(&table_root, store.as_ref(), 1, downgrade).await?;
-            add_commit(
-                &table_root,
-                store.as_ref(),
-                2,
-                actions_to_string(vec![TestAction::Add("after-downgrade.parquet".into())]),
-            )
-            .await?;
-            let reused = SnapshotBuilder::new_from(snapshot.clone())
-                .with_log_tail(log_tail.clone())
-                .with_max_catalog_version(1)
-                .build(engine.as_ref())?;
-            assert!(Arc::ptr_eq(&snapshot, &reused));
-            assert_eq!(reused.version(), 1);
-            assert!(!reporter
-                .events()
-                .iter()
-                .any(|event| matches!(event, MetricEvent::StorageListCompleted(_))));
-            let fresh = SnapshotBuilder::new_for(&table_root)
-                .with_log_tail(log_tail)
-                .with_max_catalog_version(1)
-                .build(engine.as_ref())?;
-            assert_eq!(fresh.version(), 1);
-            assert!(!fresh.table_configuration().is_catalog_managed());
-            assert!(reporter
-                .events()
-                .iter()
-                .any(|event| matches!(event, MetricEvent::StorageListCompleted(_))));
+            for published in [false, true] {
+                if published {
+                    add_commit(&table_root, store.as_ref(), 1, downgrade.clone()).await?;
+                    add_commit(
+                        &table_root,
+                        store.as_ref(),
+                        2,
+                        actions_to_string(vec![TestAction::Add("after-downgrade.parquet".into())]),
+                    )
+                    .await?;
+                }
+                let (reporter, _guard) = measuring_reporter();
+                let reused = SnapshotBuilder::new_from(snapshot.clone())
+                    .with_log_tail(log_tail.clone())
+                    .with_max_catalog_version(1)
+                    .build(engine.as_ref())?;
+                assert!(Arc::ptr_eq(&snapshot, &reused));
+                assert_eq!(reused.version(), 1);
+                let without_tail = SnapshotBuilder::new_from(snapshot.clone())
+                    .with_max_catalog_version(1)
+                    .build(engine.as_ref());
+                assert!(matches!(
+                    without_tail,
+                    Err(KernelError::MaxCatalogVersion(_))
+                ));
+                assert!(!reporter.events().iter().any(|event| matches!(
+                    event,
+                    MetricEvent::StorageListCompleted(_)
+                        | MetricEvent::StorageReadCompleted(_)
+                        | MetricEvent::JsonReadCompleted(_)
+                        | MetricEvent::ParquetReadCompleted(_)
+                )));
+                let fresh = SnapshotBuilder::new_for(&table_root)
+                    .with_log_tail(log_tail.clone())
+                    .with_max_catalog_version(1)
+                    .build(engine.as_ref())?;
+                assert_eq!(fresh.version(), 1);
+                assert!(!fresh.table_configuration().is_catalog_managed());
+                assert_eq!(
+                    reporter
+                        .events()
+                        .iter()
+                        .filter(|event| matches!(event, MetricEvent::JsonReadCompleted(_)))
+                        .count(),
+                    usize::from(!with_checksum)
+                );
+                assert!(reporter
+                    .events()
+                    .iter()
+                    .any(|event| matches!(event, MetricEvent::StorageListCompleted(_))));
+            }
             let latest = SnapshotBuilder::new_from(snapshot).build(engine.as_ref())?;
             assert_eq!(latest.version(), 2);
             assert!(!latest.table_configuration().is_catalog_managed());
@@ -1287,16 +1301,121 @@ pub(super) mod tests {
         }
 
         #[rstest]
-        #[case::missing_staged_commit(None, false)]
-        #[case::malformed_protocol(
-            Some(r#"{"protocol":{"minReaderVersion":3,"minWriterVersion":7}}"#),
-            false
-        )]
-        #[case::cancelled(None, true)]
+        #[case::catalog_managed("catalogManaged")]
+        #[case::catalog_owned("catalogOwned-preview")]
         #[test_log::test(tokio::test)]
-        async fn test_reused_catalog_downgrade_propagates_revalidation_errors(
+        async fn test_catalog_downgrade_and_reupgrade_follow_catalog_bound(
+            #[case] catalog_feature: &str,
+            #[values(false, true)] incremental: bool,
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            let (engine, store, table_root) = setup_test();
+            add_commit(
+                &table_root,
+                store.as_ref(),
+                0,
+                actions_to_string_catalog_managed(vec![TestAction::Metadata])
+                    .replace("catalogManaged", catalog_feature),
+            )
+            .await?;
+            let mut snapshot = SnapshotBuilder::new_for(&table_root)
+                .with_max_catalog_version(0)
+                .build(engine.as_ref())?;
+            let downgrade = json!({
+                "protocol": Protocol::try_new_modern(
+                    std::iter::empty::<TableFeature>(),
+                    [TableFeature::InCommitTimestamp],
+                )?
+            })
+            .to_string();
+            let upgrade = json!({
+                "protocol": Protocol::try_new_modern(
+                    [catalog_feature],
+                    [catalog_feature, "inCommitTimestamp"],
+                )?
+            })
+            .to_string();
+
+            for downgrade_version in [1, 3] {
+                let staged = add_staged_commit(
+                    &table_root,
+                    store.as_ref(),
+                    downgrade_version,
+                    downgrade.clone(),
+                )
+                .await?;
+                let log_tail = vec![create_log_path(&table_root, staged)];
+                add_commit(
+                    &table_root,
+                    store.as_ref(),
+                    downgrade_version,
+                    downgrade.clone(),
+                )
+                .await?;
+                snapshot = if incremental {
+                    SnapshotBuilder::new_from(snapshot)
+                        .with_log_tail(log_tail.clone())
+                        .with_max_catalog_version(downgrade_version)
+                        .build(engine.as_ref())
+                } else {
+                    SnapshotBuilder::new_for(&table_root)
+                        .with_log_tail(log_tail.clone())
+                        .with_max_catalog_version(downgrade_version)
+                        .build(engine.as_ref())
+                }?;
+                assert_eq!(snapshot.version(), downgrade_version);
+                assert!(!snapshot.table_configuration().is_catalog_managed());
+
+                let upgrade_version = downgrade_version + 1;
+                add_commit(
+                    &table_root,
+                    store.as_ref(),
+                    upgrade_version,
+                    upgrade.clone(),
+                )
+                .await?;
+                let bounded = if incremental {
+                    SnapshotBuilder::new_from(snapshot.clone())
+                        .with_log_tail(log_tail)
+                        .with_max_catalog_version(downgrade_version)
+                        .build(engine.as_ref())
+                } else {
+                    SnapshotBuilder::new_for(&table_root)
+                        .with_log_tail(log_tail)
+                        .with_max_catalog_version(downgrade_version)
+                        .build(engine.as_ref())
+                }?;
+                assert_eq!(bounded.version(), downgrade_version);
+                assert!(!bounded.table_configuration().is_catalog_managed());
+
+                snapshot = if incremental {
+                    SnapshotBuilder::new_from(snapshot)
+                        .with_max_catalog_version(upgrade_version)
+                        .build(engine.as_ref())
+                } else {
+                    SnapshotBuilder::new_for(&table_root)
+                        .with_max_catalog_version(upgrade_version)
+                        .build(engine.as_ref())
+                }?;
+                assert_eq!(snapshot.version(), upgrade_version);
+                assert!(snapshot.table_configuration().is_catalog_managed());
+                let without_catalog_bound =
+                    SnapshotBuilder::new_from(snapshot.clone()).build(engine.as_ref());
+                assert!(matches!(
+                    without_catalog_bound,
+                    Err(KernelError::MaxCatalogVersion(_))
+                ));
+            }
+            Ok(())
+        }
+
+        #[rstest]
+        #[case::missing_staged_commit(None)]
+        #[case::malformed_protocol(Some(
+            r#"{"protocol":{"minReaderVersion":3,"minWriterVersion":7}}"#
+        ))]
+        #[test_log::test(tokio::test)]
+        async fn test_catalog_downgrade_reuses_loaded_state_but_fresh_replay_propagates_errors(
             #[case] replacement_commit: Option<&str>,
-            #[case] cancelled: bool,
         ) -> Result<(), Box<dyn std::error::Error>> {
             let (engine, store, table_root) = setup_catalog_managed_test().await;
             let downgrade = json!({
@@ -1312,23 +1431,24 @@ pub(super) mod tests {
                 .with_log_tail(log_tail.clone())
                 .with_max_catalog_version(1)
                 .build(engine.as_ref())?;
-            let mut builder = SnapshotBuilder::new_from(snapshot)
-                .with_log_tail(log_tail)
-                .with_max_catalog_version(1);
-            if cancelled {
-                let token: CancellationTokenRef = Arc::new(TestCancellationToken::cancelled());
-                builder = builder.with_cancellation_token(token);
-            } else if let Some(replacement_commit) = replacement_commit {
+            if let Some(replacement_commit) = replacement_commit {
                 store
                     .put(&staged, replacement_commit.to_string().into())
                     .await?;
             } else {
                 store.delete(&staged).await?;
             }
-            let error = builder.build(engine.as_ref()).unwrap_err();
-            if cancelled {
-                assert!(matches!(error, KernelError::Cancelled), "{error}");
-            } else if replacement_commit.is_some() {
+            let reused = SnapshotBuilder::new_from(snapshot.clone())
+                .with_log_tail(log_tail.clone())
+                .with_max_catalog_version(1)
+                .build(engine.as_ref())?;
+            assert!(Arc::ptr_eq(&snapshot, &reused));
+            let error = SnapshotBuilder::new_for(&table_root)
+                .with_log_tail(log_tail)
+                .with_max_catalog_version(1)
+                .build(engine.as_ref())
+                .unwrap_err();
+            if replacement_commit.is_some() {
                 assert!(matches!(error, KernelError::InvalidProtocol(_)), "{error}");
             } else {
                 assert!(matches!(error, KernelError::FileNotFound(_)), "{error}");
