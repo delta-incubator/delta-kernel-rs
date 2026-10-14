@@ -302,12 +302,26 @@ impl LogSegment {
         // will trigger it.
         acc.process_commit_file_end();
 
-        let delta = acc.into_crc_delta();
+        #[cfg_attr(not(feature = "adaptive-metadata-in-dev"), allow(unused_mut))]
+        let mut delta = acc.into_crc_delta();
+        // A manifest commit records its files in the manifest rather than as add/remove actions.
+        // Every later commit carries `lastManifestCommit` forward, so the newest commit's value
+        // reveals whether one falls inside the replayed range.
         #[cfg(feature = "adaptive-metadata-in-dev")]
-        if let (Some(newest), Some(last_manifest_commit)) =
-            (ascending_commits.last(), &delta.last_manifest_commit)
-        {
+        if let (Some(oldest), Some(newest), Some(last_manifest_commit)) = (
+            ascending_commits.first(),
+            ascending_commits.last(),
+            &delta.last_manifest_commit,
+        ) {
             last_manifest_commit.ensure_not_after(newest.version)?;
+            if u64::try_from(last_manifest_commit.version).is_ok_and(|v| v >= oldest.version) {
+                warn!(
+                    "CRC reverse-replay: manifest commit at {} carries files outside the log; \
+                     defaulting to non-incremental-safe",
+                    last_manifest_commit.version
+                );
+                delta.is_incremental_safe = false;
+            }
         }
         Ok(delta)
     }
