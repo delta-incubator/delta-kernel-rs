@@ -74,14 +74,9 @@ message UnionAllNode {}
 
 message WriteJsonNode {
   string file_path = 1;
-  bool overwrite = 2;
   delta.kernel.schema.StructType schema = 3;
-}
-
-message WriteParquetNode {
-  string file_path = 1;
   bool overwrite = 2;
-  delta.kernel.schema.StructType schema = 3;
+  bool ordered = 4;
 }
 
 enum FileType {
@@ -172,7 +167,6 @@ message Operator {
     SemiJoinNode semi_join = 9;
     // Sinks (write nodes)
     WriteJsonNode write_json = 11;
-    WriteParquetNode write_parquet = 12;
   }
 }
 

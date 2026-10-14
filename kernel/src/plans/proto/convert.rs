@@ -20,7 +20,7 @@ use crate::expressions::{
 };
 use crate::plans::ir::nodes::{
     Agg, Aggregate, DynamicScan, FileType, Filter, Operator, Project, RelationRef, ScanFile,
-    ScanJson, ScanParquet, SemiJoin, Values, WriteJson, WriteParquet,
+    ScanJson, ScanParquet, SemiJoin, Values, WriteJson,
 };
 use crate::plans::ir::plan::{Plan, PlanNode};
 use crate::plans::{IoOperation, Operation};
@@ -154,7 +154,6 @@ impl From<&Operator> for proto_plan::Operator {
             Operator::DynamicScan(n) => Op::DynamicScan(n.into()),
             Operator::Aggregate(n) => Op::Aggregate(n.into()),
             Operator::WriteJson(n) => Op::WriteJson(n.into()),
-            Operator::WriteParquet(n) => Op::WriteParquet(n.into()),
             Operator::SemiJoin(n) => Op::SemiJoin(n.into()),
             Operator::UnionAll(_) => Op::UnionAll(proto_plan::UnionAllNode {}),
         };
@@ -230,16 +229,7 @@ impl From<&WriteJson> for proto_plan::WriteJsonNode {
         Self {
             file_path: node.file_path.to_string(),
             overwrite: node.overwrite,
-            schema: Some(node.schema.as_ref().into()),
-        }
-    }
-}
-
-impl From<&WriteParquet> for proto_plan::WriteParquetNode {
-    fn from(node: &WriteParquet) -> Self {
-        Self {
-            file_path: node.file_path.to_string(),
-            overwrite: node.overwrite,
+            ordered: node.ordered,
             schema: Some(node.schema.as_ref().into()),
         }
     }
@@ -1072,7 +1062,7 @@ mod tests {
     };
     use crate::plans::ir::nodes::{
         Agg, Aggregate, DynamicScan, FileType, Filter, Operator, Project, RelationRef, ScanFile,
-        ScanJson, ScanParquet, SemiJoin, UnionAll, Values, WriteJson, WriteParquet,
+        ScanJson, ScanParquet, SemiJoin, UnionAll, Values, WriteJson,
     };
     use crate::plans::ir::plan::{Plan, PlanNode};
     use crate::plans::proto::{
@@ -1417,11 +1407,9 @@ mod tests {
     )]
     #[case(Operator::UnionAll(UnionAll), "union_all")]
     #[case(Operator::WriteJson(WriteJson {
-        file_path: Url::parse("memory:///out.json").unwrap(), overwrite: false, schema: sample_schema(),
+        file_path: Url::parse("memory:///out.json").unwrap(), overwrite: false,
+        schema: sample_schema(), ordered: true,
     }), "write_json")]
-    #[case(Operator::WriteParquet(WriteParquet {
-        file_path: Url::parse("memory:///out.parquet").unwrap(), overwrite: true, schema: sample_schema(),
-    }), "write_parquet")]
     fn from_operator(#[case] op: Operator, #[case] expected: &str) {
         use proto_plan::operator::Op;
         let kind = match proto_plan::Operator::from(&op).op.unwrap() {
@@ -1436,34 +1424,25 @@ mod tests {
             Op::SemiJoin(_) => "semi_join",
             Op::UnionAll(_) => "union_all",
             Op::WriteJson(_) => "write_json",
-            Op::WriteParquet(_) => "write_parquet",
         };
         assert_eq!(kind, expected);
     }
 
     #[rstest]
-    fn from_write_json(#[values(false, true)] overwrite: bool) {
+    fn from_write_json(
+        #[values(false, true)] overwrite: bool,
+        #[values(false, true)] ordered: bool,
+    ) {
         let node = WriteJson {
             file_path: Url::parse("memory:///output%20file.json").unwrap(),
             overwrite,
+            ordered,
             schema: sample_schema(),
         };
         let proto = proto_plan::WriteJsonNode::from(&node);
         assert_eq!(proto.file_path, node.file_path.as_str());
         assert_eq!(proto.overwrite, overwrite);
-        assert_eq!(proto.schema, Some(node.schema.as_ref().into()));
-    }
-
-    #[rstest]
-    fn from_write_parquet(#[values(false, true)] overwrite: bool) {
-        let node = WriteParquet {
-            file_path: Url::parse("memory:///output%20file.parquet").unwrap(),
-            overwrite,
-            schema: sample_schema(),
-        };
-        let proto = proto_plan::WriteParquetNode::from(&node);
-        assert_eq!(proto.file_path, node.file_path.as_str());
-        assert_eq!(proto.overwrite, overwrite);
+        assert_eq!(proto.ordered, ordered);
         assert_eq!(proto.schema, Some(node.schema.as_ref().into()));
     }
 

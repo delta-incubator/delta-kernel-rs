@@ -45,18 +45,16 @@ pub enum Operator {
     Filter(Filter),
     DynamicScan(DynamicScan),
     Aggregate(Aggregate),
-    // TODO(#3517): Unify JSON and Parquet scan/write nodes.
-    WriteJson(WriteJson),
-    WriteParquet(WriteParquet),
 
     // === Binary operators (2 inputs) =========================================
     SemiJoin(SemiJoin),
 
     // === N-ary operators (variable inputs) ===================================
     UnionAll(UnionAll),
+    WriteJson(WriteJson),
 }
 
-/// Output schema of [`WriteJson`] and [`WriteParquet`]: the file's fully qualified `location`,
+/// Output schema of [`WriteJson`]: the file's fully qualified `location`,
 /// `size` in bytes, and `last_modified` in milliseconds since the Unix epoch.
 pub static FILE_META_SCHEMA: LazyLock<SchemaRef> = lazy_schema_ref! {
     not_null "location": STRING,
@@ -64,7 +62,7 @@ pub static FILE_META_SCHEMA: LazyLock<SchemaRef> = lazy_schema_ref! {
     not_null "last_modified": LONG,
 };
 
-/// Writes all rows from its single input to one newline-delimited JSON file at `file_path`.
+/// Writes all rows from its inputs to one newline-delimited JSON file at `file_path`.
 /// Outputs exactly one row matching [`FILE_META_SCHEMA`] after the write succeeds.
 ///
 /// # Implementation Contract
@@ -73,12 +71,15 @@ pub static FILE_META_SCHEMA: LazyLock<SchemaRef> = lazy_schema_ref! {
 ///   it, including field order, nullability, and metadata. A schema mismatch is an error and must
 ///   leave the destination untouched.
 /// - When `overwrite` is false, the destination must be created atomically without replacing an
-///   existing file. When true, the file is replaced, rather than appended to.
-/// - Empty input is considered invalid; valid Delta metadata files (e.g commits and checkpoints)
-///   should never be empty. It is recommended that implementors reject such inputs with an error,
-///   however kernel does not rely on such behavior and will perform its own pre-write validations
-///   to ensure this does not happen.
-/// - The output row order is unspecified.
+///   existing or otherwise return a FileAlreadyExists error. When true, existing files may be
+///   replaced.
+/// - When `ordered` is true, all rows from input N must be written before any rows from input N+1,
+///   following the order of [`PlanNode::inputs`](super::plan::PlanNode::inputs). Row order within
+///   each input is unspecified. When false, rows from different inputs may be interleaved.
+/// - No rows across all inputs is considered invalid (Delta metadata files, e.g. commits and
+///   checkpoints, should never be empty). It is recommended that implementors reject such inputs
+///   with an error, however kernel does not rely on such behavior and will perform its own
+///   pre-write validations to ensure this does not happen.
 /// - Behavior can be undefined if a single plan contains multiple writes to the same destination,
 ///   because execution order is unspecified and executors may optimize away common table
 ///   expressions.
@@ -88,8 +89,6 @@ pub static FILE_META_SCHEMA: LazyLock<SchemaRef> = lazy_schema_ref! {
 /// - [`KernelError::Schema`] if the declared schema is unsupported or an input batch does not match
 ///   it.
 /// - [`KernelError::FileAlreadyExists`] if the destination exists and `overwrite` is false.
-/// - [`KernelError::Generic`] otherwise (e.g. no input rows, serialization or storage I/O fails,
-///   etc.).
 #[derive(Debug, Clone)]
 pub struct WriteJson {
     /// Declared schema for the output rows.
@@ -98,17 +97,9 @@ pub struct WriteJson {
     pub file_path: Url,
     /// Whether an existing destination may be replaced.
     pub overwrite: bool,
-}
-
-/// The Parquet equivalent of [`WriteJson`], with the same behavior and semantics.
-#[derive(Debug, Clone)]
-pub struct WriteParquet {
-    /// Declared schema for the output rows.
-    pub schema: SchemaRef,
-    /// Fully qualified URL of the destination file.
-    pub file_path: Url,
-    /// Whether an existing destination may be replaced.
-    pub overwrite: bool,
+    /// Whether inputs must be written in their declared order; ordering within an input is
+    /// unspecified.
+    pub ordered: bool,
 }
 
 /// An engine-assigned identifier for a relation retained by a
