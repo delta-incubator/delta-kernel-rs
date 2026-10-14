@@ -302,25 +302,29 @@ impl LogSegment {
         // will trigger it.
         acc.process_commit_file_end();
 
+        #[cfg(feature = "adaptive-metadata-in-dev")]
+        let newest_files_only_in_manifest = acc.newest_files_only_in_manifest;
         #[cfg_attr(not(feature = "adaptive-metadata-in-dev"), allow(unused_mut))]
         let mut delta = acc.into_crc_delta();
-        // A manifest commit records its files in the manifest rather than as add/remove actions.
-        // Every later commit carries `lastManifestCommit` forward, so the newest commit's value
-        // reveals whether one falls inside the replayed range.
         #[cfg(feature = "adaptive-metadata-in-dev")]
-        if let (Some(oldest), Some(newest), Some(last_manifest_commit)) = (
-            ascending_commits.first(),
-            ascending_commits.last(),
-            &delta.last_manifest_commit,
-        ) {
-            last_manifest_commit.ensure_not_after(newest.version)?;
-            if u64::try_from(last_manifest_commit.version).is_ok_and(|v| v >= oldest.version) {
-                warn!(
-                    "CRC reverse-replay: manifest commit at {} carries files outside the log; \
-                     defaulting to non-incremental-safe",
-                    last_manifest_commit.version
-                );
-                delta.is_incremental_safe = false;
+        {
+            if let (Some(newest), Some(last_manifest_commit)) =
+                (ascending_commits.last(), &delta.last_manifest_commit)
+            {
+                last_manifest_commit.ensure_not_after(newest.version)?;
+            }
+            // Replay misses only a replayed manifest commit's unlogged file changes; earlier
+            // commits and manifest commits with an older content root log theirs.
+            if let (Some(oldest), Some(version)) =
+                (ascending_commits.first(), newest_files_only_in_manifest)
+            {
+                if u64::try_from(version).is_ok_and(|v| v >= oldest.version) {
+                    warn!(
+                        "CRC reverse-replay: manifest commit at {version} may record files only \
+                         in its manifest; defaulting to non-incremental-safe"
+                    );
+                    delta.is_incremental_safe = false;
+                }
             }
         }
         Ok(delta)
@@ -343,6 +347,11 @@ struct CrcReplayAccumulator {
     /// be derived from `current_file_url` alone, since after the first batch the URL is
     /// `Some` but we're still on the newest commit until a transition.
     is_first_commit: bool,
+
+    /// Newest manifest commit named by any replayed commit's `lastManifestCommit` whose own file
+    /// changes may be recorded only in its manifest.
+    #[cfg(feature = "adaptive-metadata-in-dev")]
+    newest_files_only_in_manifest: Option<i64>,
 
     /// URL of the commit file currently being processed. Drives commit-boundary detection:
     /// a different URL on a later batch means we've moved to an older commit.
@@ -370,6 +379,8 @@ impl CrcReplayAccumulator {
                 ..Default::default()
             },
             is_first_commit: true,
+            #[cfg(feature = "adaptive-metadata-in-dev")]
+            newest_files_only_in_manifest: None,
             current_file_url: None,
             current_commit_saw_file_action: false,
             current_commit_saw_safe_op: false,
@@ -427,9 +438,16 @@ impl CrcReplayAccumulator {
     }
 
     /// Called for each commitInfo row carrying a `lastManifestCommit`. Only the newest commit
-    /// contributes, so an absent value on the newest commit leaves the delta's `None`.
+    /// supplies the delta's value, so an absent value on the newest commit leaves it `None`.
     #[cfg(feature = "adaptive-metadata-in-dev")]
     fn on_last_manifest_commit(&mut self, last_manifest_commit: LastManifestCommit) {
+        // Every commit from a manifest commit onward carries its pointer, so checking all of them
+        // finds one hidden behind a newer manifest commit.
+        if last_manifest_commit.files_only_in_manifest() {
+            self.newest_files_only_in_manifest = self
+                .newest_files_only_in_manifest
+                .max(Some(last_manifest_commit.version));
+        }
         if self.is_first_commit {
             self.delta.last_manifest_commit = Some(last_manifest_commit);
         }

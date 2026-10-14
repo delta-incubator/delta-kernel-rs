@@ -1473,6 +1473,13 @@ impl LastManifestCommit {
         Ok(())
     }
 
+    /// Whether the manifest commit's own file changes may be recorded only in its manifest. A
+    /// manifest commit whose content root is older than the commit also logs its add and remove
+    /// actions.
+    pub(crate) fn files_only_in_manifest(&self) -> bool {
+        self.content_root_version == self.version
+    }
+
     /// Errors if this names a manifest commit newer than `commit_version`, the version of the
     /// commit or CRC that carries it.
     pub(crate) fn ensure_not_after(&self, commit_version: Version) -> KernelResult<()> {
