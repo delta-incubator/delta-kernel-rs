@@ -4,17 +4,20 @@ use std::fs::File;
 use std::sync::Arc;
 
 use delta_kernel::arrow::array::{
-    Array, ArrayRef, BinaryArray, BooleanArray, Int32Array, RecordBatch, StringArray, StructArray,
-    TimestampMicrosecondArray,
+    Array, ArrayRef, BinaryArray, BooleanArray, Int32Array, MapArray, RecordBatch,
+    RecordBatchReader, StringArray, StructArray, TimestampMicrosecondArray,
 };
 use delta_kernel::arrow::compute::filter_record_batch;
 use delta_kernel::arrow::datatypes::{DataType as ArrowDataType, Field, Schema};
+use delta_kernel::engine::arrow_conversion::scalar::extract_primitive_scalar;
+use delta_kernel::engine::arrow_conversion::TryIntoArrow as _;
 use delta_kernel::engine::arrow_data::ArrowEngineData;
 use delta_kernel::expressions::{col, lit, ColumnName, Predicate, Scalar};
 use delta_kernel::object_store::local::LocalFileSystem;
-use delta_kernel::object_store::DynObjectStore;
+use delta_kernel::object_store::{DynObjectStore, ObjectStoreExt as _};
+use delta_kernel::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use delta_kernel::parquet::arrow::ArrowWriter;
-use delta_kernel::scan::state::ScanFile;
+use delta_kernel::scan::state::{transform_to_logical, ScanFile};
 use delta_kernel::scan::{PartitionValuesOptions, Scan, StatsOptions};
 use delta_kernel::table_features::{get_any_level_column_physical_name, ColumnMappingMode};
 use delta_kernel::{Engine, Snapshot};
@@ -22,35 +25,28 @@ use rstest::rstest;
 use test_utils::delta_kernel_default_engine::DefaultEngineBuilder;
 use test_utils::table_builder::{partitioned, version_latest, FeatureSet, LogState, TableConfig};
 use test_utils::{
-    add_commit, create_default_engine_mt_executor, get_column,
+    add_commit, assert_result_error_with_message, create_default_engine_mt_executor, get_column,
     install_thread_local_metrics_reporter, read_actions_from_commit, test_context,
     CountingReporter,
 };
 use url::Url;
 
-/// Requesting the typed struct via `with_struct()` on a partitioned table must emit a
-/// `partitionValues_parsed` column with one field per partition column, keyed by physical name.
-///
-/// Run across every column mapping mode and both log-segment shapes:
-/// - `native_checkpoint = false`: no checkpoint, so the struct is synthesized from the
-///   `partitionValues` string map via `MAP_TO_STRUCT` on a JSON commit.
-/// - `native_checkpoint = true`: a checkpoint with `writeStatsAsStruct=true`, so the read takes the
-///   checkpoint's native `partitionValues_parsed` column directly. For the non-null values this
-///   table writes, that column matches what `MAP_TO_STRUCT` would reconstruct, so both sources
-///   yield the same struct.
-///
-/// The struct keys on physical names, so a logical-vs-physical mismatch under `Id`/`Name` mapping
-/// would surface every partition value as null. The builder writes well-defined (non-null)
-/// partition values, so the non-null assertion guards physical-name matching in all combinations.
+/// Parsed metadata and transformed rows must agree for every partition type and column mapping
+/// mode. Native checkpoint values take precedence even when the raw map cannot be parsed.
 #[rstest]
-fn scan_metadata_emits_partition_values_parsed_across_column_mapping(
+#[case::json(false, false)]
+#[case::native_checkpoint(true, false)]
+#[case::native_checkpoint_with_invalid_raw_values(true, true)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn scan_metadata_emits_partition_values_parsed_across_column_mapping(
     #[values(
         ColumnMappingMode::None,
         ColumnMappingMode::Id,
         ColumnMappingMode::Name
     )]
     cm_mode: ColumnMappingMode,
-    #[values(false, true)] native_checkpoint: bool,
+    #[case] native_checkpoint: bool,
+    #[case] invalid_raw_values: bool,
 ) {
     let cm_str = match cm_mode {
         ColumnMappingMode::None => "none",
@@ -69,7 +65,7 @@ fn scan_metadata_emits_partition_values_parsed_across_column_mapping(
     } else {
         TableConfig::new()
     };
-    let (engine, snapshot, _table) = test_context!(
+    let (engine, snapshot, table) = test_context!(
         log_state,
         FeatureSet::empty().column_mapping(cm_str),
         partitioned(),
@@ -77,8 +73,80 @@ fn scan_metadata_emits_partition_values_parsed_across_column_mapping(
         version_latest(),
     );
 
+    let snapshot = if invalid_raw_values {
+        // A conflicting raw map makes any reparsing observable, including for string and binary.
+        let path = "_delta_log/00000000000000000001.checkpoint.parquet".into();
+        let bytes = table
+            .store()
+            .get(&path)
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+        let reader = ParquetRecordBatchReaderBuilder::try_new(bytes)
+            .unwrap()
+            .build()
+            .unwrap();
+        let mut writer = ArrowWriter::try_new(Vec::new(), reader.schema(), None).unwrap();
+        for batch in reader {
+            let batch = batch.unwrap();
+            let add = get_column!(batch, "add", StructArray);
+            let raw = add
+                .column_by_name("partitionValues")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<MapArray>()
+                .unwrap();
+            let entries = StructArray::new(
+                raw.entries().fields().clone(),
+                vec![
+                    raw.keys().clone(),
+                    Arc::new(StringArray::from(vec![
+                        "invalid raw partition";
+                        raw.values().len()
+                    ])),
+                ],
+                None,
+            );
+            let ArrowDataType::Map(field, ordered) = raw.data_type() else {
+                panic!("expected map")
+            };
+            let raw = MapArray::new(
+                field.clone(),
+                raw.offsets().clone(),
+                entries,
+                raw.nulls().cloned(),
+                *ordered,
+            );
+            let mut add_columns = add.columns().to_vec();
+            let raw_index = add
+                .fields()
+                .iter()
+                .position(|f| f.name() == "partitionValues")
+                .unwrap();
+            add_columns[raw_index] = Arc::new(raw);
+            let add = StructArray::new(add.fields().clone(), add_columns, add.nulls().cloned());
+            let mut columns = batch.columns().to_vec();
+            columns[batch.schema().index_of("add").unwrap()] = Arc::new(add);
+            let batch = RecordBatch::try_new(batch.schema(), columns).unwrap();
+            writer.write(&batch).unwrap();
+        }
+        table
+            .store()
+            .put(&path, writer.into_inner().unwrap().into())
+            .await
+            .unwrap();
+        Snapshot::builder_for(table.table_root())
+            .build(&engine)
+            .unwrap()
+    } else {
+        snapshot
+    };
+
     let schema = snapshot.schema();
     let scan = snapshot
+        .clone()
         .scan_builder()
         .with_partition_values(PartitionValuesOptions::with_struct())
         .build()
@@ -106,6 +174,7 @@ fn scan_metadata_emits_partition_values_parsed_across_column_mapping(
     );
 
     let mut file_count = 0;
+    let mut expected_partitions = Vec::new();
     for scan_metadata in scan_metadata_results {
         let (underlying_data, selection_vector) = scan_metadata.scan_files.into_parts();
         let batch: RecordBatch = ArrowEngineData::try_from_engine_data(underlying_data)
@@ -135,6 +204,15 @@ fn scan_metadata_emits_partition_values_parsed_across_column_mapping(
                 "partition value unexpectedly null (cm={cm_str}, native_checkpoint={native_checkpoint})"
             );
         }
+        for field in schema.fields().filter(|field| field.name() != "value") {
+            let array = pv_parsed
+                .column_by_name(&physical_name(field.name()))
+                .unwrap();
+            expected_partitions.push((
+                field.name().clone(),
+                extract_primitive_scalar(array.as_ref(), 0).unwrap(),
+            ));
+        }
 
         // The struct must be keyed by physical name. Under Id/Name mapping the physical name
         // differs from the logical name, so a logical-keyed struct would fail this lookup.
@@ -151,6 +229,34 @@ fn scan_metadata_emits_partition_values_parsed_across_column_mapping(
     }
 
     assert_eq!(file_count, 1, "Should have processed exactly one file");
+    let engine = Arc::new(engine);
+    for stats in [StatsOptions::default(), StatsOptions::none()] {
+        // Row transforms also need typed values without opting into parsed metadata output.
+        let scan = snapshot
+            .clone()
+            .scan_builder()
+            .with_stats(stats)
+            .build()
+            .unwrap();
+        let mut row_count = 0;
+        for data in scan.execute(engine.clone()).unwrap() {
+            let batch: RecordBatch = ArrowEngineData::try_from_engine_data(data.unwrap())
+                .unwrap()
+                .into();
+            for (name, expected) in &expected_partitions {
+                let array = batch.column_by_name(name).unwrap();
+                for row in 0..batch.num_rows() {
+                    assert_eq!(
+                        &extract_primitive_scalar(array.as_ref(), row).unwrap(),
+                        expected,
+                        "{name}"
+                    );
+                }
+            }
+            row_count += batch.num_rows();
+        }
+        assert!(row_count > 0);
+    }
 }
 
 // === Foreign-writer literal empty-string partition values ===
@@ -280,7 +386,9 @@ async fn parsed_partition_values_read_foreign_empty_string(
 
     let mut asserted_rows = 0;
     for scan_metadata in scan.scan_metadata(engine.as_ref()).unwrap() {
-        let (data, selection) = scan_metadata.unwrap().scan_files.into_parts();
+        let scan_metadata = scan_metadata.unwrap();
+        let transforms = scan_metadata.scan_file_transforms;
+        let (data, selection) = scan_metadata.scan_files.into_parts();
         let batch: RecordBatch = ArrowEngineData::try_from_engine_data(data).unwrap().into();
         let batch = filter_record_batch(&batch, &BooleanArray::from(selection)).unwrap();
         let pv = get_column!(batch, "partitionValues_parsed", StructArray);
@@ -298,6 +406,31 @@ async fn parsed_partition_values_read_foreign_empty_string(
         assert!(!p_bin.is_null(0), "binary \"\" reconstructs as empty bytes");
         assert_eq!(p_bin.value(0), b"");
         assert!(p_int.is_null(0), "non-string \"\" must be null");
+
+        let physical = RecordBatch::try_new(
+            Arc::new(scan.physical_schema().as_ref().try_into_arrow().unwrap()),
+            vec![Arc::new(Int32Array::from(vec![42]))],
+        )
+        .unwrap();
+        let logical = transform_to_logical(
+            engine.as_ref(),
+            Box::new(ArrowEngineData::new(physical)),
+            scan.physical_schema(),
+            scan.logical_schema(),
+            transforms[0].clone(),
+        )
+        .unwrap();
+        let logical = ArrowEngineData::try_from_engine_data(logical).unwrap();
+        for name in ["p_str", "p_bin", "p_int"] {
+            assert_eq!(
+                logical
+                    .record_batch()
+                    .column_by_name(name)
+                    .unwrap()
+                    .as_ref(),
+                pv.column_by_name(name).unwrap().as_ref(),
+            );
+        }
 
         asserted_rows += batch.num_rows();
     }
@@ -1001,8 +1134,12 @@ async fn timestamp_row_transforms_without_typed_output_or_partition_predicate(
     );
 }
 
+#[rstest]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn timestamp_row_transforms_stay_aligned_after_parse_error_retry_and_pruning() {
+async fn timestamp_row_transforms_stay_aligned_after_parse_error_retry_and_pruning(
+    #[values(false, true)] select_invalid_partition: bool,
+    #[values(false, true)] predicate_on_timestamp: bool,
+) {
     let temp_dir = tempfile::tempdir().unwrap();
     let url = write_timezone_partition_table(
         temp_dir.path(),
@@ -1015,10 +1152,16 @@ async fn timestamp_row_transforms_stay_aligned_after_parse_error_retry_and_pruni
     let mut dead = add.clone();
     dead["path"] = "dead.parquet".into();
     dead["partitionValues"]["p_ts"] = "invalid timestamp".into();
+    dead["partitionValues"]["p_int"] = "invalid integer".into();
     let mut pruned = add.clone();
     pruned["path"] = "pruned.parquet".into();
-    pruned["partitionValues"]["p_ts"] = "2024-01-16 12:30:45".into();
-    pruned["partitionValues"]["p_int"] = "invalid integer".into();
+    if predicate_on_timestamp {
+        pruned["partitionValues"]["p_ts"] = "2024-01-16 12:30:45".into();
+        pruned["partitionValues"]["p_int"] = "invalid integer".into();
+    } else {
+        pruned["partitionValues"]["p_ts"] = "invalid timestamp".into();
+        pruned["partitionValues"]["p_int"] = "8".into();
+    }
     let actions = [dead, add, pruned]
         .map(|add| serde_json::json!({"add": add}).to_string())
         .join("\n");
@@ -1029,7 +1172,19 @@ async fn timestamp_row_transforms_stay_aligned_after_parse_error_retry_and_pruni
         serde_json::json!({"remove": {"path": "dead.parquet", "deletionTimestamp": 1700000000000_i64, "dataChange": true}}).to_string(),
     ).await.unwrap();
     let engine = create_default_engine_mt_executor(&url).unwrap();
-    let expected = timestamp_micros("2024-01-15T20:30:45Z");
+    let expected = timestamp_micros(if select_invalid_partition && predicate_on_timestamp {
+        "2024-01-16T20:30:45Z"
+    } else {
+        "2024-01-15T20:30:45Z"
+    });
+    let predicate = if predicate_on_timestamp {
+        Predicate::eq(col!("p_ts"), Scalar::Timestamp(expected))
+    } else {
+        Predicate::eq(
+            col!("p_int"),
+            lit(if select_invalid_partition { 8 } else { 7 }),
+        )
+    };
     let scan = Snapshot::builder_for(url)
         .build(engine.as_ref())
         .unwrap()
@@ -1037,13 +1192,25 @@ async fn timestamp_row_transforms_stay_aligned_after_parse_error_retry_and_pruni
         .with_partition_values(
             PartitionValuesOptions::default().with_timestamp_timezone("America/Los_Angeles"),
         )
-        .with_predicate(Arc::new(Predicate::eq(
-            col!("p_ts"),
-            Scalar::Timestamp(expected),
-        )))
+        .with_predicate(Arc::new(predicate))
         .build()
         .unwrap();
-    assert_timestamp_rows(&scan, engine, &[expected]);
+    if select_invalid_partition {
+        let result = scan
+            .scan_metadata(engine.as_ref())
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>();
+        assert_result_error_with_message(
+            result,
+            if predicate_on_timestamp {
+                "invalid integer"
+            } else {
+                "invalid timestamp"
+            },
+        );
+    } else {
+        assert_timestamp_rows(&scan, engine, &[expected]);
+    }
 }
 
 #[rstest]

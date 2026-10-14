@@ -274,7 +274,7 @@ impl PartitionValuesOptions {
     /// value takes precedence. This option does not affect `TIMESTAMP_NTZ`. It applies to typed
     /// scan metadata and final partition predicate evaluation.
     /// Typed metadata and partition pruning use compatible native checkpoint values unchanged;
-    /// the timezone applies only when parsing the raw map. Timestamp partition-column row
+    /// the timezone applies only when parsing the raw map. Partition-column row
     /// transforms reuse the same typed values as predicate evaluation. Without this option,
     /// Kernel interprets offset-less timestamps as UTC. Invalid timezone identifiers are reported
     /// by the engine when parsing partition values.
@@ -479,9 +479,6 @@ impl ScanBuilder {
 
         // Retain the transform spec even when per-file expressions are disabled.
         state_info.skip_row_transforms = self.without_row_transforms;
-        if !self.without_row_transforms {
-            state_info.include_row_transform_partitions()?;
-        }
 
         let physical_stats_output_schema = build_physical_stats_output_schema(
             self.snapshot.table_configuration(),
@@ -1187,6 +1184,7 @@ impl Scan {
     > {
         let (checkpoint_schema, meta_predicate, physical_stats_schema) =
             self.checkpoint_read_options();
+        let partition_schema = self.state_info.checkpoint_partition_schema()?;
         // Checkpoints already represent reconciled state, so scans project only Add actions. This
         // derives `add.path IS NOT NULL` and allows readers to skip non-Add row groups.
         self.snapshot
@@ -1197,10 +1195,7 @@ impl Scan {
                 checkpoint_schema,
                 meta_predicate,
                 physical_stats_schema,
-                self.state_info
-                    .physical_partition_schema
-                    .as_ref()
-                    .map(|s| s.as_ref()),
+                partition_schema.as_deref(),
                 self.cancellation_token.as_ref(),
             )
     }

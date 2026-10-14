@@ -296,7 +296,7 @@ pruning, set the reader timezone with `IncrementalScanBuilder::with_timestamp_ti
 times use the earlier instant, and nonexistent local times use the offset from before the
 transition.
 
-Timestamp partition-column row transforms and `Scan::execute` use the same typed values as
+Partition-column row transforms and `Scan::execute` use the same typed values as
 partition pruning. Change data feed scans retain their default partition-value interpretation.
 
 > [!TIP]

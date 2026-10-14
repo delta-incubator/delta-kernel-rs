@@ -13,7 +13,7 @@ use crate::actions::deletion_vector::DeletionVectorDescriptor;
 use crate::engine_data::{EngineData, GetData, RowVisitor};
 use crate::expressions::{
     col, column_expr_ref, column_name, null_lit, ColumnName, Expression, ExpressionRef,
-    MapToStructOptions, Predicate, PredicateRef, UnaryExpressionOp,
+    ExpressionStructPatchBuilder, MapToStructOptions, Predicate, PredicateRef, UnaryExpressionOp,
 };
 use crate::log_replay::deduplicator::{CheckpointDeduplicator, Deduplicator, FileActionInfo};
 use crate::log_replay::{
@@ -21,7 +21,9 @@ use crate::log_replay::{
     ParallelLogReplayProcessor,
 };
 use crate::log_segment::CheckpointReadInfo;
-use crate::scan::transform_spec::{build_row_transforms, TransformSpec};
+use crate::scan::transform_spec::{
+    build_row_transforms, RowTransformPartitionValues, TransformSpec,
+};
 use crate::schema::{
     lazy_schema_ref, ColumnNamesAndTypes, DataType, MapType, SchemaRef, SchemaStructPatchBuilder,
     StructField, StructType, ToSchema as _,
@@ -160,6 +162,7 @@ pub struct SerializableScanState {
 #[allow(rustdoc::broken_intra_doc_links, rustdoc::private_intra_doc_links)]
 pub struct ScanLogReplayProcessor {
     data_skipping_filter: Option<DataSkippingFilter>,
+    row_transform_partition_values: Option<RowTransformPartitionValues>,
     /// StructPatch for log batches (commit files) - uses ParseJson for stats and MapToStruct
     /// for partition values
     commit_transform: Arc<dyn ExpressionEvaluator>,
@@ -182,6 +185,7 @@ pub struct ScanLogReplayProcessor {
 }
 
 struct RetryTransformAndDataSkipOutput {
+    actions: Box<dyn EngineData>,
     transformed_actions: Box<dyn EngineData>,
     final_selection: Vec<bool>,
     active_add_file_sizes: Vec<u64>,
@@ -264,26 +268,9 @@ impl ScanLogReplayProcessor {
             state_info.physical_stats_schema.clone()
         };
 
-        // Typed partition values serve pruning, requested output, and timestamp row transforms.
-        // Disabling stats must not disable the values needed to materialize rows.
         let partition_schema_for_transform =
             if partition_values_options.parsed_struct || !skip_stats {
                 state_info.physical_partition_schema.clone()
-            } else if !state_info.skip_row_transforms {
-                let timestamp_names: HashSet<_> = state_info
-                    .logical_schema
-                    .fields()
-                    .filter(|field| field.data_type() == &DataType::TIMESTAMP)
-                    .map(|field| field.physical_name(state_info.column_mapping_mode))
-                    .collect();
-                let fields: Vec<_> = state_info
-                    .physical_partition_schema
-                    .iter()
-                    .flat_map(|schema| schema.fields())
-                    .filter(|field| timestamp_names.contains(field.name().as_str()))
-                    .cloned()
-                    .collect();
-                (!fields.is_empty()).then(|| Arc::new(StructType::new_unchecked(fields)))
             } else {
                 None
             };
@@ -319,8 +306,37 @@ impl ScanLogReplayProcessor {
             )
         };
 
+        let row_transform_partition_values = RowTransformPartitionValues::try_new(
+            engine,
+            &state_info,
+            output_schema.clone(),
+            partition_schema_for_transform.as_deref(),
+            partition_values_options.timestamp_timezone.as_deref(),
+        )?;
+        let native_partition_values = if let (true, Some(schema)) = (
+            has_partition_values_parsed,
+            partition_schema_for_transform.as_ref(),
+        ) {
+            let mut patch =
+                ExpressionStructPatchBuilder::new_nested(["add", "partitionValues_parsed"]);
+            for field in state_info.row_transform_partition_fields()? {
+                if schema.field(field.name()).is_none() {
+                    patch = patch.drop(field.name());
+                }
+            }
+            let patch = patch.build()?;
+            Some(if patch.is_empty() {
+                column_expr_ref!("add.partitionValues_parsed")
+            } else {
+                Arc::new(Expression::StructPatch(patch))
+            })
+        } else {
+            None
+        };
+
         Ok(Self {
             data_skipping_filter,
+            row_transform_partition_values,
             // Commit transform: parse JSON for stats, MapToStruct for partition values
             commit_transform: engine.evaluation_handler().new_expression_evaluator(
                 COMMIT_READ_SCHEMA.clone(),
@@ -330,7 +346,7 @@ impl ScanLogReplayProcessor {
                     skip_stats,
                     synthesize_json,
                     partition_schema_for_transform.clone(),
-                    false,
+                    None,
                     partition_values_options.timestamp_timezone.as_deref(),
                 ),
                 output_schema.clone().into(),
@@ -344,7 +360,7 @@ impl ScanLogReplayProcessor {
                     skip_stats,
                     synthesize_json,
                     partition_schema_for_transform,
-                    has_partition_values_parsed,
+                    native_partition_values,
                     partition_values_options.timestamp_timezone.as_deref(),
                 ),
                 output_schema.into(),
@@ -542,6 +558,7 @@ impl ScanLogReplayProcessor {
         let (transformed_actions, final_selection) =
             self.transform_and_data_skip(actions.as_ref(), is_log_batch)?;
         Ok(RetryTransformAndDataSkipOutput {
+            actions,
             transformed_actions,
             final_selection,
             active_add_file_sizes,
@@ -791,9 +808,8 @@ fn scan_row_schema_with_parsed_columns(
 ///   the JSON stats column; JSON-only checkpoints and commits retain `add.stats` as fallback input.
 /// - `partition_schema`: Schema of typed partition columns for data skipping, or None if partition
 ///   value parsing is not needed.
-/// - `has_partition_values_parsed`: Whether the source carries a native `partitionValues_parsed`
-///   column (checkpoint). When true it is read directly; otherwise the struct is reconstructed from
-///   the `partitionValues` string map.
+/// - `native_partition_values`: Expression selecting native checkpoint partition values, or None to
+///   parse the `partitionValues` string map.
 /// - `timestamp_timezone`: Reader timezone used when parsing timestamp partition strings.
 ///
 /// The transform includes `stats_parsed` only when `physical_stats_schema` is Some,
@@ -805,7 +821,7 @@ fn get_add_transform_expr(
     skip_stats: bool,
     synthesize_json: bool,
     partition_schema: Option<SchemaRef>,
-    has_partition_values_parsed: bool,
+    native_partition_values: Option<ExpressionRef>,
     timestamp_timezone: Option<&str>,
 ) -> ExpressionRef {
     let stats_expr = if skip_stats {
@@ -853,17 +869,17 @@ fn get_add_transform_expr(
     // Add partitionValues_parsed when partition columns are needed for data skipping or for the
     // engine-facing typed output column.
     if partition_schema.is_some() {
-        let pv_parsed_expr = if has_partition_values_parsed {
-            // Checkpoint carries a native partitionValues_parsed column - read it directly.
-            col!("add.partitionValues_parsed")
-        } else {
+        let pv_parsed_expr = native_partition_values.unwrap_or_else(|| {
             // No native column (JSON commit): reconstruct from the string map.
             let options = timestamp_timezone.map_or_else(MapToStructOptions::default, |timezone| {
                 MapToStructOptions::default().with_timestamp_timezone(timezone)
             });
-            Expression::map_to_struct(col!("add.partitionValues"), options)
-        };
-        fields.push(Arc::new(pv_parsed_expr));
+            Arc::new(Expression::map_to_struct(
+                col!("add.partitionValues"),
+                options,
+            ))
+        });
+        fields.push(pv_parsed_expr);
     }
 
     Arc::new(Expression::struct_from(fields))
@@ -951,6 +967,7 @@ impl ParallelLogReplayProcessor for ScanLogReplayProcessor {
 
         // Step 3: Return transformed batch with updated selection vector
         let RetryTransformAndDataSkipOutput {
+            actions,
             transformed_actions,
             final_selection,
             active_add_file_sizes,
@@ -965,6 +982,7 @@ impl ParallelLogReplayProcessor for ScanLogReplayProcessor {
             )?
         } else {
             RetryTransformAndDataSkipOutput {
+                actions,
                 transformed_actions: pre_dedup_transform_result?,
                 final_selection: dedup_selection,
                 active_add_file_sizes,
@@ -974,7 +992,10 @@ impl ParallelLogReplayProcessor for ScanLogReplayProcessor {
         let row_transform_exprs = build_row_transforms(
             &self.state_info,
             transformed_actions.as_ref(),
+            (!is_log_batch && self.checkpoint_info.has_partition_values_parsed)
+                .then_some(actions.as_ref()),
             &final_selection,
+            self.row_transform_partition_values.as_ref(),
         )?;
         let scan_metadata =
             ScanMetadata::try_new(transformed_actions, final_selection, row_transform_exprs)?;
@@ -1050,6 +1071,7 @@ impl LogReplayProcessor for ScanLogReplayProcessor {
 
         // Step 3: Return transformed batch with updated selection vector
         let RetryTransformAndDataSkipOutput {
+            actions,
             transformed_actions,
             final_selection,
             active_add_file_sizes,
@@ -1064,6 +1086,7 @@ impl LogReplayProcessor for ScanLogReplayProcessor {
             )?
         } else {
             RetryTransformAndDataSkipOutput {
+                actions,
                 transformed_actions: pre_dedup_transform_result?,
                 final_selection: dedup_selection,
                 active_add_file_sizes,
@@ -1073,7 +1096,10 @@ impl LogReplayProcessor for ScanLogReplayProcessor {
         let row_transform_exprs = build_row_transforms(
             &self.state_info,
             transformed_actions.as_ref(),
+            (!is_log_batch && self.checkpoint_info.has_partition_values_parsed)
+                .then_some(actions.as_ref()),
             &final_selection,
+            self.row_transform_partition_values.as_ref(),
         )?;
         let scan_metadata =
             ScanMetadata::try_new(transformed_actions, final_selection, row_transform_exprs)?;
@@ -1135,7 +1161,7 @@ mod tests {
         get_add_transform_expr, scan_action_iter, InternalScanState, ScanLogReplayProcessor,
         ScanPartitionValuesOptions, ScanStatsOptions, SerializableScanState,
     };
-    use crate::arrow::array::{Array, StringArray, TimestampMicrosecondArray};
+    use crate::arrow::array::{Array, Int32Array, StringArray, TimestampMicrosecondArray};
     use crate::engine::arrow_data::ArrowEngineData;
     use crate::engine::sync::SyncEngine;
     use crate::expressions::{
@@ -1532,11 +1558,15 @@ mod tests {
         #[values(false, true)] is_log_batch: bool,
     ) -> DeltaResult<()> {
         let engine = SyncEngine::new();
-        let logical_schema = schema_ref! { nullable "p_ts": TIMESTAMP, nullable "value": INTEGER };
+        let logical_schema = schema_ref! {
+            nullable "p_ts": TIMESTAMP,
+            nullable "p_int": INTEGER,
+            nullable "value": INTEGER,
+        };
         let expected = 1_705_350_645_000_000_i64;
-        let mut state = get_state_info(
+        let state = get_state_info(
             logical_schema.clone(),
-            vec!["p_ts".to_string()],
+            vec!["p_ts".to_string(), "p_int".to_string()],
             Some(Arc::new(Predicate::eq(
                 col!("p_ts"),
                 Scalar::Timestamp(expected),
@@ -1545,7 +1575,6 @@ mod tests {
             HashMap::new(),
             vec![],
         )?;
-        state.include_row_transform_partitions()?;
         let physical_schema = state.physical_schema.clone();
         let checkpoint_info = test_checkpoint_info();
         let read_schema = if is_log_batch {
@@ -1568,7 +1597,10 @@ mod tests {
             processor.into_serializable_state()?,
         )?;
         let actions = engine.json_handler().parse_json(
-            string_array_to_engine_data(StringArray::from(vec![r#"{"add":{"path":"part.parquet","size":1,"modificationTime":0,"dataChange":true,"partitionValues":{"p_ts":"2024-01-15 12:30:45"}}}"#])),
+            string_array_to_engine_data(StringArray::from(vec![
+                r#"{"add":{"path":"pruned.parquet","size":1,"modificationTime":0,"dataChange":true,"partitionValues":{"p_ts":"2024-01-16 12:30:45","p_int":"invalid integer"}}}"#,
+                r#"{"add":{"path":"part.parquet","size":1,"modificationTime":0,"dataChange":true,"partitionValues":{"p_ts":"2024-01-15 12:30:45","p_int":"7"}}}"#,
+            ])),
             read_schema,
         )?;
         let batch = ActionsBatch::new(actions, is_log_batch);
@@ -1577,7 +1609,18 @@ mod tests {
         } else {
             ParallelLogReplayProcessor::process_actions_batch(&processor, batch)?
         };
-        assert_eq!(metadata.scan_files.selection_vector(), &[true]);
+        let selected: Vec<_> = metadata
+            .scan_files
+            .selection_vector()
+            .iter()
+            .enumerate()
+            .filter_map(|(row, selected)| selected.then_some(row))
+            .collect();
+        assert_eq!(selected.len(), 1);
+        assert!(!metadata
+            .scan_files
+            .data()
+            .has_field(&column_name!("partitionValues_parsed.p_int")));
         let input = engine.json_handler().parse_json(
             string_array_to_engine_data(StringArray::from(vec![r#"{"value":42}"#])),
             physical_schema.clone(),
@@ -1587,7 +1630,7 @@ mod tests {
             input,
             &physical_schema,
             &logical_schema,
-            metadata.scan_file_transforms[0].clone(),
+            metadata.scan_file_transforms[selected[0]].clone(),
         )?;
         let output = ArrowEngineData::try_from_engine_data(output)?;
         let timestamps = output
@@ -1598,6 +1641,14 @@ mod tests {
             .unwrap();
         assert!(timestamps.is_valid(0));
         assert_eq!(timestamps.value(0), expected);
+        let integers = output
+            .record_batch()
+            .column(1)
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .unwrap();
+        assert!(integers.is_valid(0));
+        assert_eq!(integers.value(0), 7);
         Ok(())
     }
 
@@ -2163,8 +2214,8 @@ mod tests {
             false, // skip_stats
             true,  // synthesize_json
             partition_schema.clone(),
-            false, // has_partition_values_parsed
-            None,  // timestamp_timezone
+            None, // native_partition_values
+            None, // timestamp_timezone
         );
         assert_eq!(
             count_to_json(&with_synthesis),
@@ -2179,8 +2230,8 @@ mod tests {
             false, // skip_stats
             false, // synthesize_json
             partition_schema,
-            false, // has_partition_values_parsed
-            None,  // timestamp_timezone
+            None, // native_partition_values
+            None, // timestamp_timezone
         );
         assert_eq!(
             count_to_json(&without_synthesis),
