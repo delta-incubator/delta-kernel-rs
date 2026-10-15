@@ -1042,16 +1042,6 @@ fn build_rest_client_rejects_partial_mtls() {
 }
 
 #[test]
-fn build_rest_client_rejects_certificate_only_verification_without_mtls() {
-    let opts = RestClientOptions {
-        certificate_only_verification: true,
-        ..Default::default()
-    };
-    let error = build_rest_client(&opts).unwrap_err();
-    assert!(error.to_string().contains("requires complete mTLS"));
-}
-
-#[test]
 fn build_rest_client_rejects_malformed_dns_override() {
     let missing_eq = RestClientOptions {
         dns_overrides: vec!["no-equals".into()],

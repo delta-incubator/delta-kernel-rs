@@ -61,13 +61,6 @@ pub const REST_BUILDER_OPTION_TLS_CA_PATH: &str = "tls.ca_path";
 #[no_mangle]
 pub static REST_BUILDER_OPTION_TLS_CA_PATH_KEY: [u8; 12] = *b"tls.ca_path\0";
 
-/// Verify only against the configured CA bundle without DNS-name matching; requires complete mTLS.
-pub const REST_BUILDER_OPTION_TLS_CERTIFICATE_ONLY_VERIFICATION: &str =
-    "tls.certificate_only_verification";
-#[no_mangle]
-pub static REST_BUILDER_OPTION_TLS_CERTIFICATE_ONLY_VERIFICATION_KEY: [u8; 34] =
-    *b"tls.certificate_only_verification\0";
-
 /// Comma-separated DNS overrides as `host=ip:port` entries (bypasses system resolver; SNI
 /// unchanged).
 pub const REST_BUILDER_OPTION_TLS_DNS_OVERRIDE: &str = "tls.dns_override";
@@ -313,10 +306,6 @@ pub(crate) fn build_rest_object_store(
         cert_path: options.get(REST_BUILDER_OPTION_TLS_CERT_PATH).cloned(),
         key_path: options.get(REST_BUILDER_OPTION_TLS_KEY_PATH).cloned(),
         ca_path: options.get(REST_BUILDER_OPTION_TLS_CA_PATH).cloned(),
-        certificate_only_verification: parse_bool_option(
-            REST_BUILDER_OPTION_TLS_CERTIFICATE_ONLY_VERIFICATION,
-            options.get(REST_BUILDER_OPTION_TLS_CERTIFICATE_ONLY_VERIFICATION),
-        )?,
         dns_overrides: options
             .get(REST_BUILDER_OPTION_TLS_DNS_OVERRIDE)
             .map(|s| s.split(',').map(str::to_string).collect())
@@ -484,10 +473,6 @@ mod tests {
             REST_BUILDER_OPTION_TLS_CA_PATH,
         );
         option_key_bytes_match_const(
-            &REST_BUILDER_OPTION_TLS_CERTIFICATE_ONLY_VERIFICATION_KEY,
-            REST_BUILDER_OPTION_TLS_CERTIFICATE_ONLY_VERIFICATION,
-        );
-        option_key_bytes_match_const(
             &REST_BUILDER_OPTION_TLS_DNS_OVERRIDE_KEY,
             REST_BUILDER_OPTION_TLS_DNS_OVERRIDE,
         );
@@ -633,30 +618,6 @@ mod tests {
             build_rest_object_store(&test_base_url(), &options, &test_rest_builder_state())
                 .is_err()
         );
-    }
-
-    #[test]
-    fn build_rejects_certificate_only_verification_without_mtls() {
-        let mut options = HashMap::new();
-        options.insert(
-            REST_BUILDER_OPTION_TLS_CERTIFICATE_ONLY_VERIFICATION.into(),
-            "true".into(),
-        );
-        let error = build_rest_object_store(&test_base_url(), &options, &test_rest_builder_state())
-            .unwrap_err();
-        assert!(error.to_string().contains("requires complete mTLS"));
-    }
-
-    #[test]
-    fn build_rejects_invalid_certificate_only_verification() {
-        let mut options = HashMap::new();
-        options.insert(
-            REST_BUILDER_OPTION_TLS_CERTIFICATE_ONLY_VERIFICATION.into(),
-            "nope".into(),
-        );
-        let error = build_rest_object_store(&test_base_url(), &options, &test_rest_builder_state())
-            .unwrap_err();
-        assert!(error.to_string().contains("expected `true` or `false`"));
     }
 
     #[test]
