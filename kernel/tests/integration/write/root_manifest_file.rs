@@ -212,14 +212,13 @@ fn commit_info_at(table_url: &Url, version: u64) -> Result<Value, Box<dyn std::e
     Ok(commit_infos.remove(0))
 }
 
-/// Commits with no file actions record `dataChange: false` whatever the transaction's value.
 #[rstest]
 #[tokio::test]
-async fn test_commit_info_data_change_is_false_without_file_actions(
+async fn test_commit_info_data_change_matches_transaction_data_change(
     #[values(None, Some(true), Some(false))] data_change: Option<bool>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (engine, _temp_dir, table_url, snapshot) =
-        setup_adaptive_metadata_table("commit_info_data_change_no_files").await?;
+        setup_adaptive_metadata_table("commit_info_data_change").await?;
 
     begin_transaction_with(snapshot, &engine, |builder| match data_change {
         Some(data_change) => builder.with_data_change(data_change),
@@ -228,7 +227,10 @@ async fn test_commit_info_data_change_is_false_without_file_actions(
     .commit(&engine)?
     .unwrap_committed();
     let commit_info = commit_info_at(&table_url, 1)?;
-    assert_eq!(commit_info["dataChange"], json!(false));
+    assert_eq!(
+        commit_info["dataChange"],
+        json!(data_change.unwrap_or(true))
+    );
     Ok(())
 }
 
