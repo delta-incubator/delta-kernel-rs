@@ -1428,9 +1428,10 @@ pub unsafe extern "C" fn snapshot_builder_with_version(
 
 /// Set the replay mode for advancing a stale CRC during a fresh or incremental snapshot build.
 /// By default, stale CRC replay is disabled. A resolved CRC provides file
-/// statistics, domain metadata, and set transactions to subsequent operations. A non-disabled
-/// mode conflicts with a snapshot hint, and [`snapshot_builder_build`] returns an error for that
-/// combination.
+/// statistics, domain metadata, and set transactions to subsequent operations.
+///
+/// Setting a non-disabled mode (Disabled or UpToCommits(0)) is mutually exclusive with providing a
+/// snapshot hint, and [`snapshot_builder_build`] returns an error if that occurs.
 ///
 /// # Safety
 ///

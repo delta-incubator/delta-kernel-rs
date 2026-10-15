@@ -27,9 +27,9 @@ use crate::ffi_test_utils::{
 use crate::log_path::FfiLogPath;
 use crate::{
     engine_to_handle, free_engine, free_snapshot, get_snapshot_builder, get_snapshot_builder_from,
-    snapshot_builder_build, snapshot_builder_with_max_catalog_version,
-    snapshot_builder_with_version, FfiFileStats, KernelI64Slice, KernelStringSlice, OptionalValue,
-    SharedExternEngine,
+    snapshot_builder_build, snapshot_builder_with_incremental_crc_replay,
+    snapshot_builder_with_max_catalog_version, snapshot_builder_with_version, FfiFileStats,
+    FfiIncrementalReplay, KernelI64Slice, KernelStringSlice, OptionalValue, SharedExternEngine,
 };
 
 fn slice(value: &'static str) -> KernelStringSlice {
@@ -1685,6 +1685,41 @@ fn aggregate_with_validates_explicit_builder_version_at_build(
         unsafe { free_snapshot(snapshot) };
     } else {
         assert_extern_result_error_with_message(result, FFIKernelError::InvalidSnapshotHint, None);
+    }
+    unsafe { free_engine(engine) };
+}
+
+#[rstest::rstest]
+#[case::disabled(FfiIncrementalReplay::Disabled, true)]
+#[case::zero_budget(FfiIncrementalReplay::UpToCommits(0), true)]
+#[case::positive_budget(FfiIncrementalReplay::UpToCommits(1), false)]
+#[case::unlimited(FfiIncrementalReplay::Unlimited, false)]
+fn aggregate_with_validates_incremental_crc_replay_at_build(
+    #[case] mode: FfiIncrementalReplay,
+    #[case] should_build: bool,
+    #[values(false, true)] replay_before_hint: bool,
+) {
+    let engine = test_engine();
+    let builder = test_builder(&engine);
+    let builder = unsafe {
+        if replay_before_hint {
+            with_minimal_hint(snapshot_builder_with_incremental_crc_replay(builder, mode))
+        } else {
+            snapshot_builder_with_incremental_crc_replay(with_minimal_hint(builder), mode)
+        }
+    };
+
+    let result = unsafe { snapshot_builder_build(builder) };
+    if should_build {
+        let snapshot = ok_or_panic(result);
+        assert_eq!(unsafe { snapshot.as_ref() }.version(), 0);
+        unsafe { free_snapshot(snapshot) };
+    } else {
+        assert_extern_result_error_contains(
+            result,
+            FFIKernelError::InvalidSnapshotHint,
+            "cannot be combined with incremental CRC replay",
+        );
     }
     unsafe { free_engine(engine) };
 }
