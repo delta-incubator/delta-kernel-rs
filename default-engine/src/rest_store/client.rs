@@ -24,6 +24,8 @@ pub struct RestClientOptions {
     pub ca_path: Option<String>,
     /// Accept certificates whose names do not match the server hostname. Defaults to `false`.
     /// Certificate trust and validity checks remain enabled. Intended for test environments.
+    /// With rustls, enabling this switches from the platform verifier to webpki, using a snapshot
+    /// of system roots loaded by `rustls-native-certs` plus the configured `ca_path` certificate.
     pub allow_invalid_hostnames: bool,
     /// DNS overrides as `host=ip:port` entries: connect to the given address for `host`,
     /// bypassing the system resolver. Does not change TLS SNI or the hostname used for
@@ -94,20 +96,12 @@ pub fn build_rest_client(opts: &RestClientOptions) -> ObjectStoreResult<Client> 
     {
         builder = builder.use_rustls_tls();
         if opts.allow_invalid_hostnames {
-            // reqwest's hostname-only verifier requires explicit roots. Retain the system roots
-            // before adding the caller's CA bundle.
-            let roots = rustls_native_certs::load_native_certs();
-            if roots.certs.is_empty() && opts.ca_path.is_none() {
-                return Err(generic_error(
-                    "cannot disable hostname verification without trusted CA certificates",
-                ));
-            }
-            let roots = roots
-                .certs
-                .iter()
-                .map(|cert| Certificate::from_der(cert.as_ref()))
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(generic_error)?;
+            // reqwest's hostname-only verifier requires explicit roots instead of its platform
+            // verifier. Add the caller's CA certificate during mTLS configuration below.
+            let roots = hostname_bypass_roots(
+                rustls_native_certs::load_native_certs(),
+                opts.ca_path.is_some(),
+            )?;
             builder = builder.tls_certs_only(roots);
         }
     }
@@ -155,4 +149,62 @@ pub fn build_rest_client(opts: &RestClientOptions) -> ObjectStoreResult<Client> 
         builder = builder.resolve(host, addr);
     }
     builder.build().map_err(generic_error)
+}
+
+#[cfg(feature = "rustls")]
+fn hostname_bypass_roots(
+    roots: rustls_native_certs::CertificateResult,
+    has_ca_certificate: bool,
+) -> ObjectStoreResult<Vec<Certificate>> {
+    for error in &roots.errors {
+        tracing::warn!(%error, "failed to load a system TLS root certificate");
+    }
+    if roots.certs.is_empty() && !has_ca_certificate {
+        return Err(generic_error(format!(
+            "cannot disable hostname verification without trusted CA certificates; \
+             system root loading errors: {:?}",
+            roots.errors
+        )));
+    }
+    roots
+        .certs
+        .iter()
+        .map(|cert| Certificate::from_der(cert.as_ref()))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(generic_error)
+}
+
+#[cfg(all(test, feature = "rustls"))]
+mod tests {
+    use rstest::rstest;
+    use rustls_native_certs::{CertificateResult, Error, ErrorKind};
+
+    use super::hostname_bypass_roots;
+
+    #[rstest]
+    fn hostname_bypass_without_system_roots_requires_ca_certificate(
+        #[values(false, true)] has_ca_certificate: bool,
+        #[values(false, true)] load_error: bool,
+    ) {
+        let mut roots = CertificateResult::default();
+        if load_error {
+            roots.errors.push(Error {
+                context: "cannot read test root store",
+                kind: ErrorKind::Os(
+                    std::io::Error::from(std::io::ErrorKind::PermissionDenied).into(),
+                ),
+            });
+        }
+        let result = hostname_bypass_roots(roots, has_ca_certificate);
+        if has_ca_certificate {
+            assert!(result.unwrap().is_empty());
+        } else {
+            let error = result.unwrap_err().to_string();
+            assert!(error.contains("without trusted CA certificates"));
+            if load_error {
+                assert!(error.contains("cannot read test root store"));
+                assert!(error.contains("PermissionDenied"));
+            }
+        }
+    }
 }

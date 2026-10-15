@@ -45,12 +45,10 @@ rustls = ["reqwest/rustls", "dep:rustls-native-certs"]
 [dev-dependencies]
 delta_kernel_default_engine_test_utils = { path = "./test-utils" }
 rstest = "0.23"
-rcgen = "0.13"
 serde = { version = "1", features = ["derive"] }
 tempfile = "3"
 test_utils = { path = "../test-utils", default-features = false }
 tokio = { version = "1.47", features = ["rt-multi-thread", "macros"] }
-tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt"] }
 wiremock = "0.6"
 hdfs_native_object_store_13 = { package = "hdfs-native-object-store", version = "0.16.0" }

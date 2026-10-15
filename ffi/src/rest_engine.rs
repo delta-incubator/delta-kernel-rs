@@ -309,30 +309,7 @@ pub(crate) fn build_rest_object_store(
         }
     };
 
-    let tls = RestClientOptions {
-        cert_path: options.get(REST_BUILDER_OPTION_TLS_CERT_PATH).cloned(),
-        key_path: options.get(REST_BUILDER_OPTION_TLS_KEY_PATH).cloned(),
-        ca_path: options.get(REST_BUILDER_OPTION_TLS_CA_PATH).cloned(),
-        allow_invalid_hostnames: parse_bool_option(
-            REST_BUILDER_OPTION_TLS_ALLOW_INVALID_HOSTNAMES,
-            options.get(REST_BUILDER_OPTION_TLS_ALLOW_INVALID_HOSTNAMES),
-        )?,
-        dns_overrides: options
-            .get(REST_BUILDER_OPTION_TLS_DNS_OVERRIDE)
-            .map(|s| s.split(',').map(str::to_string).collect())
-            .unwrap_or_default(),
-        timeout_secs: options
-            .get(REST_BUILDER_OPTION_TLS_TIMEOUT_SECS)
-            .map(|s| {
-                s.parse::<u64>().map_err(|e| {
-                    KernelError::generic(format!(
-                        "invalid {} `{s}`: {e}",
-                        REST_BUILDER_OPTION_TLS_TIMEOUT_SECS
-                    ))
-                })
-            })
-            .transpose()?,
-    };
+    let tls = rest_client_options(options)?;
     let max_retries = options
         .get(REST_BUILDER_OPTION_RETRY_MAX_RETRIES)
         .map(|s| {
@@ -359,6 +336,33 @@ pub(crate) fn build_rest_object_store(
             .with_max_retries(max_retries)
             .with_verify_on_ambiguous(verify),
     ))
+}
+
+fn rest_client_options(options: &HashMap<String, String>) -> KernelResult<RestClientOptions> {
+    Ok(RestClientOptions {
+        cert_path: options.get(REST_BUILDER_OPTION_TLS_CERT_PATH).cloned(),
+        key_path: options.get(REST_BUILDER_OPTION_TLS_KEY_PATH).cloned(),
+        ca_path: options.get(REST_BUILDER_OPTION_TLS_CA_PATH).cloned(),
+        allow_invalid_hostnames: parse_bool_option(
+            REST_BUILDER_OPTION_TLS_ALLOW_INVALID_HOSTNAMES,
+            options.get(REST_BUILDER_OPTION_TLS_ALLOW_INVALID_HOSTNAMES),
+        )?,
+        dns_overrides: options
+            .get(REST_BUILDER_OPTION_TLS_DNS_OVERRIDE)
+            .map(|s| s.split(',').map(str::to_string).collect())
+            .unwrap_or_default(),
+        timeout_secs: options
+            .get(REST_BUILDER_OPTION_TLS_TIMEOUT_SECS)
+            .map(|s| {
+                s.parse::<u64>().map_err(|e| {
+                    KernelError::generic(format!(
+                        "invalid {} `{s}`: {e}",
+                        REST_BUILDER_OPTION_TLS_TIMEOUT_SECS
+                    ))
+                })
+            })
+            .transpose()?,
+    })
 }
 
 fn parse_bool_option(key: &str, value: Option<&String>) -> KernelResult<bool> {
@@ -464,6 +468,31 @@ mod tests {
     }
 
     // === Group 1: pure-logic tests (no unsafe; run under Miri, cheap) ===
+
+    #[rstest::rstest]
+    #[case::default(None, false)]
+    #[case::enabled(Some("true"), true)]
+    #[case::disabled(Some("false"), false)]
+    fn rest_client_options_preserve_hostname_verification_setting(
+        #[case] value: Option<&str>,
+        #[case] expected: bool,
+    ) {
+        let options = value
+            .map(|value| {
+                (
+                    REST_BUILDER_OPTION_TLS_ALLOW_INVALID_HOSTNAMES.to_string(),
+                    value.to_string(),
+                )
+            })
+            .into_iter()
+            .collect();
+        assert_eq!(
+            rest_client_options(&options)
+                .unwrap()
+                .allow_invalid_hostnames,
+            expected
+        );
+    }
 
     #[test]
     fn rest_builder_option_keys_match_c_exports() {

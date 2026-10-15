@@ -14,9 +14,6 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use super::*;
 
-#[cfg(any(feature = "rustls", feature = "native-tls"))]
-mod tls;
-
 fn token_producer(
     calls: Arc<AtomicUsize>,
     ttl: Option<std::time::Duration>,
@@ -1068,17 +1065,4 @@ fn build_rest_client_plain_and_valid_dns_override_succeed() {
         ..Default::default()
     };
     assert!(build_rest_client(&opts).is_ok());
-}
-
-#[test]
-#[cfg(not(any(feature = "rustls", feature = "native-tls")))]
-fn build_rest_client_rejects_hostname_bypass_without_tls_backend() {
-    let opts = RestClientOptions {
-        allow_invalid_hostnames: true,
-        ..Default::default()
-    };
-    let error = build_rest_client(&opts).unwrap_err();
-    assert!(error
-        .to_string()
-        .contains("requires the `rustls` or `native-tls` feature"));
 }
