@@ -8,17 +8,33 @@ Before reading this page, make sure you understand
 [Creating a Table](./create_table.md) and
 [Appending Data](./append.md).
 
-## When to use alter table
+## ALTER TABLE versus schema evolution
 
-Use `update_table(UpdateTableOperation::AlterTable, engine_info)` when you need to evolve a table's
-schema in place. The common case today is adding a new column to a table that already has data,
-without rewriting the existing files. Existing rows read back `NULL` for the
-new column. Subsequent writes can populate it.
+Use **ALTER TABLE** for a standalone, metadata-only schema change. For example, you can add a nullable
+column without writing or removing data files.
 
-A standalone schema evolution is a metadata-only change. When no file actions are staged, the
-transaction emits an updated `Metadata` action and commits with `data_change: false`. If an ALTER
-commit includes file actions, Kernel defaults `data_change` to `true`. Connectors performing a
-protocol-valid logical-preserving replacement can explicitly select `false`.
+Use **SCHEMA EVOLUTION** to change the schema and the table's data in the same
+transaction. For example, you can add a nullable column and append rows containing values for that
+column atomically.
+
+The `dataChange` flag indicates whether file actions change the table's logical data.
+
+| Transaction Component | ALTER TABLE | SCHEMA EVOLUTION |
+|--------|------------------------|---------------------------------|
+| Operation | `UpdateTableOperation::AlterTable` | The data operation, such as `UpdateTableOperation::Write` |
+| Schema operations | Required | Queued alongside the data operation |
+| Data-file changes | None staged | Staged on the built transaction |
+| Default `dataChange` | `false` | `true` |
+
+Both workflows use `UpdateTableTransactionBuilder`. You queue all schema operations before `build()`;
+Kernel validates and applies them during `build()`. You stage any data-file changes on the returned
+`Transaction`, whose `WriteState` uses the evolved schema.
+
+Choosing `AlterTable` doesn't prohibit file actions or force `dataChange = false`. Unless you call
+`with_data_change(...)`, schema-changing transactions infer `dataChange` at commit: `false` without
+staged file batches and `true` otherwise. Add, Remove, and deletion-vector update batches count even
+when empty or fully unselected. For protocol-valid rewrites that preserve logical data, explicitly
+use `with_data_change(false)`.
 
 > [!NOTE]
 > The supported operations are adding columns and making columns nullable. Other schema operations
@@ -89,8 +105,9 @@ column by including it in the `RecordBatch` they pass to
 | Column mapping tables must be protocol-valid | When column mapping is enabled, Kernel assigns or preserves column-mapping IDs and physical names for the added column and updates `delta.columnMapping.maxColumnId`. |
 
 > [!NOTE]
-> `ALTER TABLE` is rejected on tables with unsupported writer features, including
-> `icebergCompatV2`, `icebergCompatV3`, and `allowColumnDefaults`.
+> Kernel rejects schema changes at `build()` when `icebergCompatV2`, `icebergCompatV3`, or
+> `allowColumnDefaults` is enabled. This restriction applies to both workflows, regardless of the
+> transaction operation or `dataChange` value.
 
 ## Chaining multiple operations
 

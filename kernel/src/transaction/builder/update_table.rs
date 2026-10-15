@@ -34,7 +34,7 @@ pub type UpdateTableTransactionBuilder = TransactionBuilder<UpdateTable>;
 pub struct UpdateTableBuilderState {
     snapshot: SnapshotRef,
     operation: UpdateTableOperation,
-    schema_changes: Vec<SchemaOperation>,
+    schema_changes: Option<Vec<SchemaOperation>>,
     domain_metadata_removals: Vec<String>,
     is_blind_append: bool,
 }
@@ -46,7 +46,7 @@ impl std::fmt::Debug for TransactionBuilder<UpdateTable> {
             .field("operation", &self.local_state.operation)
             .field(
                 "schema_change_count",
-                &self.local_state.schema_changes.len(),
+                &self.local_state.schema_changes.as_ref().map_or(0, Vec::len),
             )
             .finish()
     }
@@ -63,7 +63,7 @@ impl TransactionBuilder<UpdateTable> {
             local_state: UpdateTableBuilderState {
                 snapshot,
                 operation,
-                schema_changes: Vec::new(),
+                schema_changes: None,
                 domain_metadata_removals: Vec::new(),
                 is_blind_append: false,
             },
@@ -98,7 +98,10 @@ impl TransactionBuilder<UpdateTable> {
             changes.peek().is_some(),
             KernelError::generic("with_schema_changes requires at least one schema operation")
         );
-        self.local_state.schema_changes.extend(changes);
+        self.local_state
+            .schema_changes
+            .get_or_insert_with(Vec::new)
+            .extend(changes);
         Ok(self)
     }
 
@@ -112,6 +115,7 @@ impl TransactionBuilder<UpdateTable> {
     pub fn add_column(mut self, field: StructField) -> Self {
         self.local_state
             .schema_changes
+            .get_or_insert_with(Vec::new)
             .push(SchemaOperation::add_column(None, field));
         self
     }
@@ -128,6 +132,7 @@ impl TransactionBuilder<UpdateTable> {
     pub fn add_column_at(mut self, parent: ColumnName, field: StructField) -> Self {
         self.local_state
             .schema_changes
+            .get_or_insert_with(Vec::new)
             .push(SchemaOperation::add_column(parent, field));
         self
     }
@@ -139,6 +144,7 @@ impl TransactionBuilder<UpdateTable> {
     pub fn set_nullable(mut self, column: ColumnName) -> Self {
         self.local_state
             .schema_changes
+            .get_or_insert_with(Vec::new)
             .push(SchemaOperation::SetNullable { column });
         self
     }
@@ -180,8 +186,9 @@ impl TransactionBuilder<UpdateTable> {
     /// - Conflicting application ids or domain metadata, or reserved or unsupported domains.
     /// - Connector commit information that does not contain exactly one row.
     ///
-    /// Schema evolution is rejected when `icebergCompatV2`, `icebergCompatV3`, or
-    /// `allowColumnDefaults` is enabled, regardless of the transaction operation.
+    /// Schema changes are rejected when `icebergCompatV2`, `icebergCompatV3`, or
+    /// `allowColumnDefaults` is enabled. This applies to standalone ALTER TABLE transactions and
+    /// schema evolution during data-changing writes.
     pub fn build(self, engine: &dyn Engine, committer: Box<dyn Committer>) -> Result<Transaction> {
         self.validate()?;
         let transaction = try_new_update_table(self, committer, engine)?;
@@ -195,7 +202,7 @@ impl TransactionBuilder<UpdateTable> {
             .validate()
             .map_err(KernelError::invalid_transaction_state)?;
         if operation == &UpdateTableOperation::AlterTable {
-            if self.local_state.schema_changes.is_empty() {
+            if self.local_state.schema_changes.is_none() {
                 return Err(KernelError::invalid_transaction_state(
                     "ALTER TABLE requires at least one schema change",
                 ));
@@ -211,7 +218,7 @@ impl TransactionBuilder<UpdateTable> {
                 "blind append requires data_change to be true",
             ));
         }
-        if self.local_state.is_blind_append && !self.local_state.schema_changes.is_empty() {
+        if self.local_state.is_blind_append && self.local_state.schema_changes.is_some() {
             return Err(KernelError::invalid_transaction_state(
                 "blind append cannot include schema changes",
             ));
@@ -293,11 +300,10 @@ fn try_new_update_table<MODE: ExecutionMode>(
         IcebergCompatValidationContext::Write,
     )?;
 
-    let should_emit_metadata = !schema_changes.is_empty();
-    let effective_table_config = if should_emit_metadata {
-        apply_schema_changes(effective_table_config, schema_changes)?
-    } else {
-        effective_table_config
+    let should_emit_metadata = schema_changes.is_some();
+    let effective_table_config = match schema_changes {
+        Some(changes) => apply_schema_changes(effective_table_config, changes)?,
+        None => effective_table_config,
     };
 
     Ok(Transaction {
@@ -517,7 +523,10 @@ mod tests {
                 StructField::nullable("child", DataType::STRING),
             );
 
-        assert_eq!(builder.local_state.schema_changes.len(), 1);
+        assert_eq!(
+            builder.local_state.schema_changes.as_ref().unwrap().len(),
+            1
+        );
         Ok(())
     }
 
@@ -678,10 +687,11 @@ mod tests {
     ) {
         let (engine, snapshot, _tempdir) =
             create_schema_validation_table(feature.as_ref(), feature_enabled);
-        let result = snapshot
+        let builder = snapshot
             .clone()
-            .update_table(operation.clone(), "test-engine")
-            .build(engine.as_ref(), Box::new(FileSystemCommitter::new()));
+            .update_table(operation.clone(), "test-engine");
+        assert!(builder.local_state.schema_changes.is_none());
+        let result = builder.build(engine.as_ref(), Box::new(FileSystemCommitter::new()));
         if operation == UpdateTableOperation::AlterTable {
             let error = result.unwrap_err();
             assert!(
@@ -715,6 +725,10 @@ mod tests {
             .update_table(operation.clone(), "test-engine")
             .with_schema_changes(input.changes())
             .expect("non-empty schema changes must be accepted by the setter");
+        assert_eq!(
+            builder.local_state.schema_changes.as_ref().unwrap().len(),
+            1
+        );
         let result = builder.build(engine.as_ref(), Box::new(FileSystemCommitter::new()));
         if let Some(feature) = feature.filter(|_| feature_enabled) {
             assert!(snapshot
@@ -766,7 +780,10 @@ mod tests {
                 .with_schema_changes(input.changes())
                 .expect("non-empty schema changes must be accepted by the setter"),
         };
-        assert_eq!(builder.local_state.schema_changes.len(), 1);
+        assert_eq!(
+            builder.local_state.schema_changes.as_ref().unwrap().len(),
+            1
+        );
         let error = builder.with_schema_changes([]).unwrap_err();
         assert!(matches!(&error, KernelError::Generic(message)
             if message == "with_schema_changes requires at least one schema operation"));
@@ -791,7 +808,10 @@ mod tests {
             .expect("subsequent non-empty schema changes must be accepted")
             .add_column(StructField::nullable("another_column", DataType::INTEGER));
 
-        assert_eq!(builder.local_state.schema_changes.len(), 3);
+        assert_eq!(
+            builder.local_state.schema_changes.as_ref().unwrap().len(),
+            3
+        );
         let transaction = builder
             .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))
             .expect("schema changes must build in call order");
