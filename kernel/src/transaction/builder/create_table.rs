@@ -43,10 +43,10 @@ use crate::table_properties::{
     DATA_SKIPPING_NUM_INDEXED_COLS, DATA_SKIPPING_STATS_COLUMNS, DELETED_FILE_RETENTION_DURATION,
     DELTA_PROPERTY_PREFIX, ENABLE_CHANGE_DATA_FEED, ENABLE_DELETION_VECTORS,
     ENABLE_EXPIRED_LOG_CLEANUP, ENABLE_ICEBERG_COMPAT_V1, ENABLE_ICEBERG_COMPAT_V2,
-    ENABLE_ICEBERG_COMPAT_V3, ENABLE_IN_COMMIT_TIMESTAMPS, ENABLE_ROW_TRACKING,
-    ENABLE_TYPE_WIDENING, LOG_RETENTION_DURATION, MATERIALIZED_ROW_COMMIT_VERSION_COLUMN_NAME,
-    MATERIALIZED_ROW_ID_COLUMN_NAME, PARQUET_FORMAT_VERSION, ROW_TRACKING_SUSPENDED,
-    SET_TRANSACTION_RETENTION_DURATION,
+    ENABLE_ICEBERG_COMPAT_V3, ENABLE_ICEBERG_WRITER_COMPAT_V3, ENABLE_IN_COMMIT_TIMESTAMPS,
+    ENABLE_ROW_TRACKING, ENABLE_TYPE_WIDENING, LOG_RETENTION_DURATION,
+    MATERIALIZED_ROW_COMMIT_VERSION_COLUMN_NAME, MATERIALIZED_ROW_ID_COLUMN_NAME,
+    PARQUET_FORMAT_VERSION, ROW_TRACKING_SUSPENDED, SET_TRANSACTION_RETENTION_DURATION,
 };
 use crate::transaction::create_table::CreateTableTransaction;
 use crate::transaction::data_layout::DataLayout;
@@ -100,7 +100,13 @@ const ALLOWED_DELTA_FEATURES: &[TableFeature] = &[
     // Dependent features (ColumnMapping, RowTracking, DomainMetadata) are auto-added during
     // create table.
     TableFeature::IcebergCompatV3,
+    TableFeature::IcebergWriterCompatV3,
+    TableFeature::TimestampWithoutTimezone,
+    TableFeature::AdaptiveMetadataPreview,
+    TableFeature::IcebergNativeV4Preview,
 ];
+
+const UNIVERSAL_FORMAT_ENABLED_FORMATS: &str = "delta.universalFormat.enabledFormats";
 
 /// The single allow-list of `delta.*` properties accepted during CREATE TABLE. Any `delta.*`
 /// key not present here is rejected.
@@ -131,6 +137,8 @@ const ALLOWED_DELTA_PROPERTIES: &[&str] = &[
     // IcebergCompatV3 enablement: triggers auto-enablement of ColumnMapping,
     // RowTracking, DomainMetadata.
     ENABLE_ICEBERG_COMPAT_V3,
+    ENABLE_ICEBERG_WRITER_COMPAT_V3,
+    UNIVERSAL_FORMAT_ENABLED_FORMATS,
     // Log/checkpoint maintenance configs: stored verbatim, consumed by log cleanup / checkpoint
     // scheduling.
     LOG_RETENTION_DURATION,
@@ -1082,6 +1090,9 @@ fn try_new_create_table<MODE: ExecutionMode>(
     clustering_columns: Option<Vec<ColumnName>>,
     common_state: TransactionBuilderState,
 ) -> KernelResult<Transaction<CreateTable, MODE>> {
+    if effective_table_config.is_feature_enabled(&TableFeature::IcebergNativeV4Preview) {
+        effective_table_config.ensure_read_write_supported()?;
+    }
     validate_iceberg_compat_if_needed(
         &effective_table_config,
         &V2_VALIDATOR,

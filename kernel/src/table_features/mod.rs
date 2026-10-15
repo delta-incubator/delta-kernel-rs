@@ -129,6 +129,8 @@ pub(crate) enum TableFeature {
     #[strum(serialize = "icebergNativeV4-preview")]
     #[serde(rename = "icebergNativeV4-preview")]
     IcebergNativeV4Preview,
+    /// Iceberg V3 writer compatibility support.
+    IcebergWriterCompatV3,
     /// The Clustered Table feature facilitates the physical clustering of rows
     /// that share similar values on a predefined set of clustering columns.
     #[strum(serialize = "clustering")]
@@ -520,6 +522,16 @@ static ICEBERG_NATIVE_V4_PREVIEW_INFO: FeatureInfo = FeatureInfo {
     enablement_check: EnablementCheck::AlwaysIfSupported,
 };
 
+static ICEBERG_WRITER_COMPAT_V3_INFO: FeatureInfo = FeatureInfo {
+    feature_type: FeatureType::WriterOnly,
+    min_legacy_version: None,
+    feature_requirements: &[],
+    kernel_support: KernelSupport::Supported,
+    enablement_check: EnablementCheck::EnabledIf(|props| {
+        props.enable_iceberg_writer_compat_v3 == Some(true)
+    }),
+};
+
 // TODO(#3553): Support writing clusteringProvider to AddFile actions.
 static CLUSTERED_TABLE_INFO: FeatureInfo = FeatureInfo {
     feature_type: FeatureType::WriterOnly,
@@ -771,6 +783,7 @@ impl TableFeature {
             | TableFeature::IcebergCompatV2
             | TableFeature::IcebergCompatV3
             | TableFeature::IcebergNativeV4Preview
+            | TableFeature::IcebergWriterCompatV3
             | TableFeature::ClusteredTable
             | TableFeature::MaterializePartitionColumns => FeatureType::WriterOnly,
             TableFeature::AllowColumnDefaults => FeatureType::WriterOnly,
@@ -808,6 +821,7 @@ impl TableFeature {
             TableFeature::IcebergCompatV2 => &ICEBERG_COMPAT_V2_INFO,
             TableFeature::IcebergCompatV3 => &ICEBERG_COMPAT_V3_INFO,
             TableFeature::IcebergNativeV4Preview => &ICEBERG_NATIVE_V4_PREVIEW_INFO,
+            TableFeature::IcebergWriterCompatV3 => &ICEBERG_WRITER_COMPAT_V3_INFO,
             TableFeature::ClusteredTable => &CLUSTERED_TABLE_INFO,
             TableFeature::MaterializePartitionColumns => &MATERIALIZE_PARTITION_COLUMNS_INFO,
             TableFeature::AllowColumnDefaults => &ALLOW_COLUMN_DEFAULTS_INFO,
@@ -1181,6 +1195,7 @@ mod tests {
                 TableFeature::IcebergCompatV2 => "icebergCompatV2",
                 TableFeature::IcebergCompatV3 => "icebergCompatV3",
                 TableFeature::IcebergNativeV4Preview => "icebergNativeV4-preview",
+                TableFeature::IcebergWriterCompatV3 => "icebergWriterCompatV3",
                 TableFeature::ClusteredTable => "clustering",
                 TableFeature::MaterializePartitionColumns => "materializePartitionColumns",
                 TableFeature::CatalogManaged => "catalogManaged",

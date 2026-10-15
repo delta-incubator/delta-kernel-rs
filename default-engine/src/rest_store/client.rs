@@ -22,6 +22,9 @@ pub struct RestClientOptions {
     pub key_path: Option<String>,
     /// PEM CA-bundle path used to verify the server.
     pub ca_path: Option<String>,
+    /// Verify server certificates only against the configured CA bundle, without DNS-name
+    /// matching. Requires complete mTLS configuration; disabled by default.
+    pub certificate_only_verification: bool,
     /// DNS overrides as `host=ip:port` entries: connect to the given address for `host`,
     /// bypassing the system resolver. TLS SNI/hostname verification is unchanged.
     pub dns_overrides: Vec<String>,
@@ -56,11 +59,19 @@ fn configure_mtls(
     cert: &str,
     key: &str,
     ca: &str,
+    certificate_only_verification: bool,
 ) -> ObjectStoreResult<reqwest::ClientBuilder> {
     let identity = build_identity(cert, key)?;
     let ca_cert =
         Certificate::from_pem(&std::fs::read(ca).map_err(generic_error)?).map_err(generic_error)?;
-    Ok(builder.identity(identity).add_root_certificate(ca_cert))
+    let builder = builder.identity(identity);
+    if certificate_only_verification {
+        Ok(builder
+            .tls_certs_only([ca_cert])
+            .tls_danger_accept_invalid_hostnames(true))
+    } else {
+        Ok(builder.add_root_certificate(ca_cert))
+    }
 }
 
 #[cfg(not(any(feature = "rustls", feature = "native-tls")))]
@@ -69,6 +80,7 @@ fn configure_mtls(
     _cert: &str,
     _key: &str,
     _ca: &str,
+    _certificate_only_verification: bool,
 ) -> ObjectStoreResult<reqwest::ClientBuilder> {
     Err(generic_error(
         "mTLS requires the `rustls` or `native-tls` feature to be enabled",
@@ -95,7 +107,12 @@ pub fn build_rest_client(opts: &RestClientOptions) -> ObjectStoreResult<Client> 
     }
     match (&opts.cert_path, &opts.key_path, &opts.ca_path) {
         (Some(cert), Some(key), Some(ca)) => {
-            builder = configure_mtls(builder, cert, key, ca)?;
+            builder = configure_mtls(builder, cert, key, ca, opts.certificate_only_verification)?;
+        }
+        (None, None, None) if opts.certificate_only_verification => {
+            return Err(generic_error(
+                "certificate-only verification requires complete mTLS configuration",
+            ));
         }
         (None, None, None) => {}
         // A partial mTLS config is an error, not a silent fall-through to a plain client.
