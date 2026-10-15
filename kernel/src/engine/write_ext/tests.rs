@@ -48,6 +48,10 @@ fn storage_writes_preserve_overwrite_copy_and_delete_contracts(
         std::fs::read(temp.path().join("destination")).unwrap(),
         b"second"
     );
+    assert_eq!(
+        std::fs::read(temp.path().join("source")).unwrap(),
+        b"second"
+    );
     assert!(matches!(
         engine.copy_atomic(&source, &destination),
         Err(KernelError::FileAlreadyExists(_))
@@ -55,6 +59,14 @@ fn storage_writes_preserve_overwrite_copy_and_delete_contracts(
     engine.delete(&destination).unwrap();
     engine.delete(&destination).unwrap();
     assert!(!temp.path().join("destination").exists());
+    assert!(matches!(
+        engine.copy_atomic(&destination, &source),
+        Err(KernelError::FileNotFound(_))
+    ));
+    assert_eq!(
+        std::fs::read(temp.path().join("source")).unwrap(),
+        b"second"
+    );
 }
 
 #[rstest]

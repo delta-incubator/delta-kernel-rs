@@ -5,7 +5,7 @@ use derive_more::Constructor;
 use futures::StreamExt as _;
 use url::Url;
 
-use super::{put_bytes, resolve_scope};
+use super::{get_bytes, put_bytes, resolve_scope};
 use crate::object_store::path::Path;
 use crate::object_store::{DynObjectStore, ObjectStoreExt as _};
 use crate::{FileMeta, FileSlice, KernelError, Result, ResultIteratorStatic, StorageHandler};
@@ -84,8 +84,10 @@ impl StorageHandler for SyncStorageHandler {
         put_bytes(self.store.as_ref(), path, data, overwrite)
     }
 
-    fn copy_atomic(&self, _src: &Url, _dest: &Url) -> Result<()> {
-        unimplemented!("SyncStorageHandler does not implement copy");
+    /// Copies an immutable source with an atomic create-if-absent destination write.
+    fn copy_atomic(&self, src: &Url, dest: &Url) -> Result<()> {
+        let bytes = get_bytes(self.store.as_ref(), src)?;
+        put_bytes(self.store.as_ref(), dest, bytes, false)
     }
 
     fn head(&self, url: &Url) -> Result<FileMeta> {
