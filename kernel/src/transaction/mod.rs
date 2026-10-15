@@ -2772,8 +2772,7 @@ mod tests {
     fn empty_builder_schema_changes_are_rejected() {
         let (_engine, snapshot) = setup_non_dv_table();
         let result = snapshot
-            .transaction_builder()
-            .with_operation(UpdateTableOperation::Write)
+            .update_table(UpdateTableOperation::Write, "test-engine")
             .with_schema_changes([]);
         assert_result_error_with_message(
             result,

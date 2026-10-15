@@ -83,9 +83,7 @@ impl TransactionBuilder<UpdateTable> {
     /// Adds schema changes to validate and apply during [`build`](Self::build).
     ///
     /// Appends `changes` in call order and returns the updated builder. Each change observes the
-    /// result of prior changes. Empty input is rejected immediately because appending it would
-    /// erase the distinction between an explicit empty request and no request, including when
-    /// other schema changes are already queued.
+    /// result of prior changes. Empty input is rejected immediately.
     ///
     /// # Errors
     ///
@@ -182,9 +180,8 @@ impl TransactionBuilder<UpdateTable> {
     /// - Conflicting application ids or domain metadata, or reserved or unsupported domains.
     /// - Connector commit information that does not contain exactly one row.
     ///
-    /// Schema evolution is rejected when `icebergCompatV3` or `allowColumnDefaults` is enabled.
-    /// With `icebergCompatV2` enabled, only [`UpdateTableOperation::AlterTable`] schema evolution
-    /// is rejected.
+    /// Schema evolution is rejected when `icebergCompatV2`, `icebergCompatV3`, or
+    /// `allowColumnDefaults` is enabled, regardless of the transaction operation.
     pub fn build(self, engine: &dyn Engine, committer: Box<dyn Committer>) -> Result<Transaction> {
         self.validate()?;
         let transaction = try_new_update_table(self, committer, engine)?;
@@ -298,11 +295,7 @@ fn try_new_update_table<MODE: ExecutionMode>(
 
     let should_emit_metadata = !schema_changes.is_empty();
     let effective_table_config = if should_emit_metadata {
-        apply_schema_changes(
-            effective_table_config,
-            schema_changes,
-            operation.as_ref() == Some(&UpdateTableOperation::AlterTable),
-        )?
+        apply_schema_changes(effective_table_config, schema_changes)?
     } else {
         effective_table_config
     };
@@ -327,14 +320,10 @@ fn try_new_update_table<MODE: ExecutionMode>(
 fn apply_schema_changes(
     table_config: TableConfiguration,
     changes: Vec<SchemaOperation>,
-    is_alter_table: bool,
 ) -> KernelResult<TableConfiguration> {
     let unsupported_iceberg_compat = [TableFeature::IcebergCompatV2, TableFeature::IcebergCompatV3]
         .into_iter()
-        .find(|feature| {
-            table_config.is_feature_enabled(feature)
-                && (is_alter_table || feature == &TableFeature::IcebergCompatV3)
-        });
+        .find(|feature| table_config.is_feature_enabled(feature));
     if let Some(feature) = unsupported_iceberg_compat {
         return Err(KernelError::unsupported(format!(
             "Schema changes are not yet supported on tables with {feature} enabled"
@@ -602,8 +591,7 @@ mod tests {
         let (_engine, snapshot, _tempdir) =
             load_test_table("table-without-dv-small").expect("load test table");
         let error = snapshot
-            .transaction_builder()
-            .with_operation(UpdateTableOperation::Write)
+            .update_table(UpdateTableOperation::Write, "test-engine")
             .with_schema_changes(std::iter::from_fn(|| None::<SchemaOperation>))
             .unwrap_err();
 
@@ -633,65 +621,25 @@ mod tests {
 
     type SchemaValidationTable = (Arc<dyn Engine>, SnapshotRef, Option<TempDir>);
 
-    #[derive(Debug)]
-    enum SchemaChangeSupport {
-        AllOperations,
-        NonAlterOnly(TableFeature),
-        Unsupported(TableFeature),
-    }
-
     #[template]
     #[rstest]
-    #[case::plain(create_schema_validation_table(&[]), SchemaChangeSupport::AllOperations)]
-    #[case::v2_compatibility_property_true(
-        create_schema_validation_table(&[
-            ("delta.feature.icebergCompatV2", "supported"),
-            ("delta.enableIcebergCompatV2", "true"),
-            ("delta.columnMapping.mode", "name"),
-        ]),
-        SchemaChangeSupport::NonAlterOnly(TableFeature::IcebergCompatV2),
-    )]
-    #[case::v2_compatibility_property_false(
-        create_schema_validation_table(&[
-            ("delta.feature.icebergCompatV2", "supported"),
-            ("delta.enableIcebergCompatV2", "false"),
-            ("delta.columnMapping.mode", "name"),
-        ]),
-        SchemaChangeSupport::AllOperations,
-    )]
-    #[case::v3_compatibility_property_true(
-        create_schema_validation_table(&[
-            ("delta.feature.icebergCompatV3", "supported"),
-            ("delta.enableIcebergCompatV3", "true"),
-            ("delta.columnMapping.mode", "name"),
-            ("delta.enableRowTracking", "true"),
-        ]),
-        SchemaChangeSupport::Unsupported(TableFeature::IcebergCompatV3),
-    )]
-    #[case::v3_compatibility_property_false(
-        create_schema_validation_table(&[
-            ("delta.feature.icebergCompatV3", "supported"),
-            ("delta.enableIcebergCompatV3", "false"),
-            ("delta.columnMapping.mode", "name"),
-            ("delta.enableRowTracking", "true"),
-        ]),
-        SchemaChangeSupport::AllOperations,
-    )]
-    #[case::column_defaults(
-        load_test_table("table-with-column-defaults").expect("load column-defaults table"),
-        SchemaChangeSupport::Unsupported(TableFeature::AllowColumnDefaults),
-    )]
+    #[case::plain(None, false)]
+    #[case::v2_compatibility_property_true(Some(TableFeature::IcebergCompatV2), true)]
+    #[case::v2_compatibility_property_false(Some(TableFeature::IcebergCompatV2), false)]
+    #[case::v3_compatibility_property_true(Some(TableFeature::IcebergCompatV3), true)]
+    #[case::v3_compatibility_property_false(Some(TableFeature::IcebergCompatV3), false)]
+    #[case::column_defaults(Some(TableFeature::AllowColumnDefaults), true)]
     fn schema_validation_tables(
-        #[case] table: SchemaValidationTable,
-        #[case] schema_change_support: SchemaChangeSupport,
+        #[case] feature: Option<TableFeature>,
+        #[case] feature_enabled: bool,
     ) {
     }
 
     #[template]
     #[apply(schema_validation_tables)]
     fn schema_validation_tables_and_operations(
-        table: SchemaValidationTable,
-        schema_change_support: SchemaChangeSupport,
+        feature: Option<TableFeature>,
+        feature_enabled: bool,
         #[values(
             UpdateTableOperation::Write,
             UpdateTableOperation::StreamingUpdate,
@@ -708,14 +656,14 @@ mod tests {
 
     #[apply(schema_validation_tables_and_operations)]
     fn empty_schema_changes_are_rejected_for_all_table_operations(
-        table: SchemaValidationTable,
-        _schema_change_support: SchemaChangeSupport,
+        feature: Option<TableFeature>,
+        feature_enabled: bool,
         operation: UpdateTableOperation,
     ) {
-        let (_engine, snapshot, _tempdir) = table;
+        let (_engine, snapshot, _tempdir) =
+            create_schema_validation_table(feature.as_ref(), feature_enabled);
         let error = snapshot
-            .transaction_builder()
-            .with_operation(operation)
+            .update_table(operation, "test-engine")
             .with_schema_changes([])
             .unwrap_err();
         assert!(matches!(&error, KernelError::Generic(message)
@@ -724,15 +672,15 @@ mod tests {
 
     #[apply(schema_validation_tables_and_operations)]
     fn omitted_schema_changes_require_a_non_alter_operation(
-        table: SchemaValidationTable,
-        _schema_change_support: SchemaChangeSupport,
+        feature: Option<TableFeature>,
+        feature_enabled: bool,
         operation: UpdateTableOperation,
     ) {
-        let (engine, snapshot, _tempdir) = table;
+        let (engine, snapshot, _tempdir) =
+            create_schema_validation_table(feature.as_ref(), feature_enabled);
         let result = snapshot
             .clone()
-            .transaction_builder()
-            .with_operation(operation.clone())
+            .update_table(operation.clone(), "test-engine")
             .build(engine.as_ref(), Box::new(FileSystemCommitter::new()));
         if operation == UpdateTableOperation::AlterTable {
             let error = result.unwrap_err();
@@ -742,7 +690,7 @@ mod tests {
             );
         } else {
             let transaction = result.expect("non-ALTER transactions do not require schema changes");
-            assert_eq!(transaction.operation, Some(operation.into()));
+            assert_eq!(transaction.operation, operation.into());
             assert!(!transaction.should_emit_metadata);
             assert!(!transaction.should_emit_protocol);
             assert_eq!(
@@ -754,30 +702,21 @@ mod tests {
 
     #[apply(schema_validation_tables_and_operations)]
     fn nonempty_schema_changes_respect_table_feature_restrictions(
-        table: SchemaValidationTable,
-        schema_change_support: SchemaChangeSupport,
+        feature: Option<TableFeature>,
+        feature_enabled: bool,
         operation: UpdateTableOperation,
         #[values(NonemptySchemaInput::AddColumn, NonemptySchemaInput::AlreadyNullable)]
         input: NonemptySchemaInput,
     ) {
-        let (engine, snapshot, _tempdir) = table;
+        let (engine, snapshot, _tempdir) =
+            create_schema_validation_table(feature.as_ref(), feature_enabled);
         let builder = snapshot
             .clone()
-            .transaction_builder()
-            .with_operation(operation.clone())
+            .update_table(operation.clone(), "test-engine")
             .with_schema_changes(input.changes())
             .expect("non-empty schema changes must be accepted by the setter");
-        let unsupported_feature = match schema_change_support {
-            SchemaChangeSupport::Unsupported(feature) => Some(feature),
-            SchemaChangeSupport::NonAlterOnly(feature)
-                if operation == UpdateTableOperation::AlterTable =>
-            {
-                Some(feature)
-            }
-            _ => None,
-        };
         let result = builder.build(engine.as_ref(), Box::new(FileSystemCommitter::new()));
-        if let Some(feature) = unsupported_feature {
+        if let Some(feature) = feature.filter(|_| feature_enabled) {
             assert!(snapshot
                 .table_configuration()
                 .is_feature_supported(&feature));
@@ -788,7 +727,7 @@ mod tests {
             assert!(matches!(&error, KernelError::Unsupported(message) if message == &expected));
         } else {
             let transaction = result.expect("supported schema changes must build successfully");
-            assert_eq!(transaction.operation, Some(operation.into()));
+            assert_eq!(transaction.operation, operation.into());
             assert!(transaction.should_emit_metadata);
             assert!(!transaction.should_emit_protocol);
             let schema = transaction.effective_table_config.logical_schema();
@@ -807,16 +746,15 @@ mod tests {
 
     #[apply(schema_validation_tables)]
     fn empty_schema_changes_are_rejected_after_queued_changes(
-        table: SchemaValidationTable,
-        _schema_change_support: SchemaChangeSupport,
+        feature: Option<TableFeature>,
+        feature_enabled: bool,
         #[values(false, true)] individual_setter: bool,
         #[values(NonemptySchemaInput::AddColumn, NonemptySchemaInput::AlreadyNullable)]
         input: NonemptySchemaInput,
     ) {
-        let (_engine, snapshot, _tempdir) = table;
-        let builder = snapshot
-            .transaction_builder()
-            .with_operation(UpdateTableOperation::Write);
+        let (_engine, snapshot, _tempdir) =
+            create_schema_validation_table(feature.as_ref(), feature_enabled);
+        let builder = snapshot.update_table(UpdateTableOperation::Write, "test-engine");
         let builder = match (individual_setter, input) {
             (true, NonemptySchemaInput::AddColumn) => {
                 builder.add_column(StructField::nullable("added", DataType::STRING))
@@ -844,8 +782,7 @@ mod tests {
         )]
         .into_iter();
         let builder = snapshot
-            .transaction_builder()
-            .with_operation(UpdateTableOperation::Write)
+            .update_table(UpdateTableOperation::Write, "test-engine")
             .with_schema_changes(std::iter::from_fn(move || changes.next()))
             .expect("non-empty iterator must be accepted")
             .with_schema_changes([SchemaOperation::SetNullable {
@@ -1070,29 +1007,47 @@ mod tests {
         Ok(())
     }
 
-    fn create_schema_validation_table(properties: &[(&str, &str)]) -> SchemaValidationTable {
-        let engine = Arc::new(SyncEngine::new_with_store(Arc::new(InMemory::new())));
-        let snapshot = create_table("memory:///", test_schema_flat(), "test")
-            .with_table_properties(properties.iter().copied())
-            .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))
-            .expect("valid table properties")
-            .commit(engine.as_ref())
-            .expect("create schema-validation table")
-            .unwrap_post_commit_snapshot();
-        for (feature, property) in [
-            (TableFeature::IcebergCompatV2, ENABLE_ICEBERG_COMPAT_V2),
-            (TableFeature::IcebergCompatV3, ENABLE_ICEBERG_COMPAT_V3),
-        ] {
-            if let Some((_, value)) = properties.iter().find(|(key, _)| *key == property) {
-                assert!(snapshot
-                    .table_configuration()
-                    .is_feature_supported(&feature));
-                assert_eq!(
-                    snapshot.table_configuration().is_feature_enabled(&feature),
-                    *value == "true"
-                );
-            }
+    fn create_schema_validation_table(
+        feature: Option<&TableFeature>,
+        feature_enabled: bool,
+    ) -> SchemaValidationTable {
+        let (engine, snapshot, tempdir): SchemaValidationTable =
+            if feature == Some(&TableFeature::AllowColumnDefaults) {
+                load_test_table("table-with-column-defaults").expect("load column-defaults table")
+            } else {
+                let property_value = if feature_enabled { "true" } else { "false" };
+                let properties = match feature {
+                    None => vec![],
+                    Some(TableFeature::IcebergCompatV2) => vec![
+                        ("delta.feature.icebergCompatV2", "supported"),
+                        (ENABLE_ICEBERG_COMPAT_V2, property_value),
+                        ("delta.columnMapping.mode", "name"),
+                    ],
+                    Some(TableFeature::IcebergCompatV3) => vec![
+                        ("delta.feature.icebergCompatV3", "supported"),
+                        (ENABLE_ICEBERG_COMPAT_V3, property_value),
+                        ("delta.columnMapping.mode", "name"),
+                        ("delta.enableRowTracking", "true"),
+                    ],
+                    Some(feature) => panic!("unsupported schema-validation fixture: {feature}"),
+                };
+                let engine = Arc::new(SyncEngine::new_with_store(Arc::new(InMemory::new())));
+                let snapshot = create_table("memory:///", test_schema_flat(), "test")
+                    .with_table_properties(properties)
+                    .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))
+                    .expect("valid table properties")
+                    .commit(engine.as_ref())
+                    .expect("create schema-validation table")
+                    .unwrap_post_commit_snapshot();
+                (engine, snapshot, None)
+            };
+        if let Some(feature) = feature {
+            assert!(snapshot.table_configuration().is_feature_supported(feature));
+            assert_eq!(
+                snapshot.table_configuration().is_feature_enabled(feature),
+                feature_enabled
+            );
         }
-        (engine, snapshot, None)
+        (engine, snapshot, tempdir)
     }
 }
