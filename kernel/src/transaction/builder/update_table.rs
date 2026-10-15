@@ -826,10 +826,17 @@ mod tests {
             .expect("subsequent non-empty schema changes must be accepted")
             .add_column(StructField::nullable("another_column", DataType::INTEGER));
 
-        assert_eq!(
-            builder.local_state.schema_changes.as_ref().unwrap().len(),
-            3
-        );
+        let queued_changes = builder.local_state.schema_changes.as_deref().unwrap();
+        assert!(matches!(
+            queued_changes,
+            [
+                SchemaOperation::AddColumn { parent: None, field: first_column },
+                SchemaOperation::SetNullable { column },
+                SchemaOperation::AddColumn { parent: None, field: second_column },
+            ] if first_column == &StructField::nullable("new_column", DataType::STRING)
+                && column == &column_name!("new_column")
+                && second_column == &StructField::nullable("another_column", DataType::INTEGER)
+        ));
         let transaction = builder
             .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))
             .expect("schema changes must build in call order");
