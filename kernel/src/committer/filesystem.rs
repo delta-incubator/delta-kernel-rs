@@ -8,9 +8,7 @@ use super::Committer;
 use crate::engine::EngineWriteExt;
 use crate::{Engine, FileMeta, FilteredEngineData, KernelError, Result, ResultIterator};
 
-/// The `FileSystemCommitter` is an internal implementation of the `Committer` trait which
-/// commits to a file system directly via `Engine::json_handler().write_json_file` for
-/// non-catalog-managed tables.
+/// Publishes JSON commits directly to storage for non-catalog-managed tables.
 ///
 /// SAFETY: it is _incorrect_ to use this committer for catalog-managed tables.
 #[derive(Debug, Default)]
@@ -38,7 +36,7 @@ impl Committer for FileSystemCommitter {
         let version = commit_metadata.version();
         let published_commit_path = commit_metadata.published_commit_path()?;
 
-        match engine.write_json_file(&published_commit_path, Box::new(actions), false) {
+        match engine.write_json_file(&published_commit_path, actions, false) {
             Ok(written_size) => {
                 info!(
                     committed_version = version,
