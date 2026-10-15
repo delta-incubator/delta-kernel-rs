@@ -1,8 +1,10 @@
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use delta_kernel::commit_range::{CommitAction, CommitRange, DeltaAction as KernelDeltaAction};
+use delta_kernel::commit_range::{
+    CommitAction, CommitRange, CommitRangeBuilder, DeltaAction as KernelDeltaAction,
+};
 use delta_kernel::snapshot::SnapshotRef;
-use delta_kernel::{KernelError, KernelResult, KernelResultIteratorStatic, LogPath, Version};
+use delta_kernel::{KernelError, KernelResult, KernelResultIteratorStatic, Version};
 use delta_kernel_ffi_macros::handle_descriptor;
 use url::Url;
 
@@ -29,11 +31,7 @@ pub struct SharedCommitRange;
 /// discard the builder without building, call [`free_commit_range_builder`].
 pub struct FfiCommitRangeBuilder {
     engine: Arc<dyn ExternEngine>,
-    table_root: Url,
-    start_version: Version,
-    end_version: Option<Version>,
-    log_tail: Vec<LogPath>,
-    max_catalog_version: Option<Version>,
+    kernel_builder: CommitRangeBuilder,
 }
 
 /// An opaque handle with exclusive (Box-like) ownership of a [`FfiCommitRangeBuilder`].
@@ -47,11 +45,7 @@ fn make_commit_range_builder(
 ) -> Handle<ExclusiveCommitRangeBuilder> {
     Box::new(FfiCommitRangeBuilder {
         engine,
-        table_root,
-        start_version,
-        end_version: None,
-        log_tail: Vec::new(),
-        max_catalog_version: None,
+        kernel_builder: CommitRange::builder_for(table_root, start_version),
     })
     .into()
 }
@@ -92,7 +86,7 @@ pub unsafe extern "C" fn commit_range_builder_with_end_version(
     end_version: Version,
 ) -> Handle<ExclusiveCommitRangeBuilder> {
     let mut builder = unsafe { builder.into_inner() };
-    builder.end_version = Some(end_version);
+    builder.kernel_builder = builder.kernel_builder.with_end_version(end_version);
     builder.into()
 }
 
@@ -117,8 +111,9 @@ pub unsafe extern "C" fn commit_range_builder_with_log_tail(
     let mut builder = unsafe { builder.into_inner() };
     let engine = builder.engine.clone();
     let result = unsafe { log_tail.log_paths() }.map(|paths| {
-        builder.log_tail = paths;
-        builder.max_catalog_version = Some(max_catalog_version);
+        builder.kernel_builder = builder
+            .kernel_builder
+            .with_log_tail(paths, max_catalog_version);
         builder.into()
     });
     result.into_extern_result(&engine.as_ref())
@@ -136,7 +131,9 @@ pub unsafe extern "C" fn commit_range_builder_with_max_catalog_version(
     max_catalog_version: Version,
 ) -> Handle<ExclusiveCommitRangeBuilder> {
     let mut builder = unsafe { builder.into_inner() };
-    builder.max_catalog_version = Some(max_catalog_version);
+    builder.kernel_builder = builder
+        .kernel_builder
+        .with_max_catalog_version(max_catalog_version);
     builder.into()
 }
 
@@ -162,22 +159,7 @@ fn commit_range_builder_build_impl(
     builder: FfiCommitRangeBuilder,
 ) -> KernelResult<Handle<SharedCommitRange>> {
     let engine = builder.engine.engine();
-    let mut kernel_builder = CommitRange::builder_for(builder.table_root, builder.start_version);
-    if let Some(end_version) = builder.end_version {
-        kernel_builder = kernel_builder.with_end_version(end_version);
-    }
-    if builder.log_tail.is_empty() {
-        if let Some(max_catalog_version) = builder.max_catalog_version {
-            kernel_builder = kernel_builder.with_max_catalog_version(max_catalog_version);
-        }
-    } else if let Some(max_catalog_version) = builder.max_catalog_version {
-        kernel_builder = kernel_builder.with_log_tail(builder.log_tail, max_catalog_version);
-    } else {
-        return Err(KernelError::MaxCatalogVersion(
-            "Max catalog version is required when providing staged commits.".to_string(),
-        ));
-    }
-    let range = kernel_builder.build(engine.as_ref())?;
+    let range = builder.kernel_builder.build(engine.as_ref())?;
     Ok(Arc::new(range).into())
 }
 
@@ -608,8 +590,10 @@ mod tests {
         Ok(())
     }
 
+    #[rstest]
     #[tokio::test]
     async fn test_commit_range_builder_accepts_catalog_log_tail(
+        #[values(false, true)] max_catalog_version_first: bool,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let (engine, table_root) = setup_engine_with_commits(1).await;
         let builder = unsafe {
@@ -628,8 +612,15 @@ mod tests {
             len: paths.len(),
         };
 
-        let builder =
-            unsafe { ok_or_panic(commit_range_builder_with_log_tail(builder, log_tail, 1)) };
+        let builder = unsafe {
+            if max_catalog_version_first {
+                let builder = commit_range_builder_with_max_catalog_version(builder, 0);
+                ok_or_panic(commit_range_builder_with_log_tail(builder, log_tail, 1))
+            } else {
+                let builder = ok_or_panic(commit_range_builder_with_log_tail(builder, log_tail, 0));
+                commit_range_builder_with_max_catalog_version(builder, 1)
+            }
+        };
         let range = unsafe { ok_or_panic(commit_range_builder_build(builder)) };
         assert_eq!(unsafe { range.as_ref() }.end_version(), 1);
 

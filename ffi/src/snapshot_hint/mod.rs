@@ -10,8 +10,8 @@ use crate::error::{ExternResult, IntoExternResult};
 use crate::handle::Handle;
 use crate::log_path::LogPathArray;
 use crate::{
-    ExclusiveSnapshotBuilder, FfiSnapshotBuilder, FfiSnapshotBuilderSource, NullableCvoid,
-    SharedExternEngine, SharedSnapshot,
+    ExclusiveSnapshotBuilder, FfiSnapshotBuilder, NullableCvoid, SharedExternEngine,
+    SharedSnapshot, SnapshotBuilderKind,
 };
 
 mod export;
@@ -104,14 +104,6 @@ fn invalid_with_source(message: impl Into<String>, source: KernelError) -> Kerne
     .into()
 }
 
-pub(crate) fn invalid(message: impl Into<String>) -> KernelError {
-    SnapshotHintError::Connector {
-        message: message.into(),
-        source: None,
-    }
-    .into()
-}
-
 fn invalid_crc(source: KernelError) -> KernelError {
     invalid_with_source("supplied CRC is invalid", source)
 }
@@ -126,10 +118,14 @@ impl From<FfiSnapshotHintFreshness> for SnapshotHintFreshness {
 }
 
 unsafe fn snapshot_builder_with_snapshot_hint_impl(
-    builder: &mut FfiSnapshotBuilder,
+    mut builder: FfiSnapshotBuilder,
     value: &FfiSnapshotHint,
-) -> KernelResult<()> {
-    let FfiSnapshotBuilderSource::TableRoot(table_root) = &builder.source else {
+) -> KernelResult<FfiSnapshotBuilder> {
+    let SnapshotBuilderKind::Fresh {
+        table_root,
+        kernel_builder,
+    } = builder.kernel_builder
+    else {
         return Err(KernelError::unsupported(
             "snapshot hints cannot be set on builders created by get_snapshot_builder_from",
         ));
@@ -151,7 +147,7 @@ unsafe fn snapshot_builder_with_snapshot_hint_impl(
         .transpose()?
         .map(std::sync::Arc::new);
     let snapshot_hint = SnapshotHint::try_new(
-        table_root,
+        &table_root,
         value.version,
         value.publication_watermark.into(),
         log_paths,
@@ -161,8 +157,11 @@ unsafe fn snapshot_builder_with_snapshot_hint_impl(
         crc,
         freshness,
     )?;
-    builder.snapshot_hint = Some(Box::new(snapshot_hint));
-    Ok(())
+    builder.kernel_builder = SnapshotBuilderKind::Fresh {
+        table_root,
+        kernel_builder: kernel_builder.with_snapshot_hint(snapshot_hint),
+    };
+    Ok(builder)
 }
 
 /// Copies and installs a complete typed snapshot hint, returning the updated builder handle on
@@ -194,10 +193,10 @@ pub unsafe extern "C" fn snapshot_builder_with_snapshot_hint(
     builder: Handle<ExclusiveSnapshotBuilder>,
     value: &FfiSnapshotHint,
 ) -> ExternResult<Handle<ExclusiveSnapshotBuilder>> {
-    let mut builder = unsafe { builder.into_inner() };
+    let builder = unsafe { builder.into_inner() };
     let engine = builder.engine.clone();
-    unsafe { snapshot_builder_with_snapshot_hint_impl(&mut builder, value) }
-        .map(|_| builder.into())
+    unsafe { snapshot_builder_with_snapshot_hint_impl(*builder, value) }
+        .map(|builder| Box::new(builder).into())
         .into_extern_result(&engine.as_ref())
 }
 

@@ -22,8 +22,10 @@ use delta_kernel::history_manager::{
 #[cfg(feature = "default-engine-base")]
 use delta_kernel::object_store::ObjectStore;
 use delta_kernel::schema::Schema;
-use delta_kernel::snapshot::{CheckpointWriteResult, Snapshot, SnapshotHint, SnapshotRef};
-use delta_kernel::{Engine, EngineData, FileStats, KernelResult, LogPath, Result, Version};
+use delta_kernel::snapshot::{
+    CheckpointWriteResult, IncrementalSnapshotBuilder, Snapshot, SnapshotBuilder, SnapshotRef,
+};
+use delta_kernel::{Engine, EngineData, FileStats, KernelResult, Result, Version};
 use delta_kernel_ffi_macros::handle_descriptor;
 use tracing::debug;
 use url::Url;
@@ -1294,35 +1296,31 @@ pub struct SharedMetadata;
 /// need to discard the builder without building, call [`free_snapshot_builder`].
 pub struct FfiSnapshotBuilder {
     engine: Arc<dyn ExternEngine>,
-    source: FfiSnapshotBuilderSource,
-    version: Option<Version>,
-    log_tail: Vec<LogPath>,
-    max_catalog_version: Option<Version>,
-    snapshot_hint: Option<Box<SnapshotHint>>,
+    kernel_builder: SnapshotBuilderKind,
 }
 
 /// An opaque handle with exclusive (Box-like) ownership of a [`FfiSnapshotBuilder`].
 #[handle_descriptor(target=FfiSnapshotBuilder, mutable=true, sized=true)]
 pub struct ExclusiveSnapshotBuilder;
 
-enum FfiSnapshotBuilderSource {
-    TableRoot(Url),
-    ExistingSnapshot(SnapshotRef),
+enum SnapshotBuilderKind {
+    Fresh {
+        // Hint conversion validates paths against the table root before build.
+        table_root: Url,
+        kernel_builder: SnapshotBuilder,
+    },
+    Incremental(IncrementalSnapshotBuilder),
 }
 
 fn make_snapshot_builder(
-    source: FfiSnapshotBuilderSource,
+    kernel_builder: SnapshotBuilderKind,
     engine: Arc<dyn ExternEngine>,
-) -> KernelResult<Handle<ExclusiveSnapshotBuilder>> {
-    Ok(Box::new(FfiSnapshotBuilder {
+) -> Handle<ExclusiveSnapshotBuilder> {
+    Box::new(FfiSnapshotBuilder {
         engine,
-        source,
-        version: None,
-        log_tail: Vec::new(),
-        max_catalog_version: None,
-        snapshot_hint: None,
+        kernel_builder,
     })
-    .into())
+    .into()
 }
 
 /// Get a builder for creating a [`SharedSnapshot`] from a table path.
@@ -1343,11 +1341,14 @@ pub unsafe extern "C" fn get_snapshot_builder(
     let engine_ref = unsafe { engine.as_ref() };
     let engine_arc = unsafe { engine.clone_as_arc() };
     let url = unsafe { unwrap_and_parse_path_as_url(path) };
-    let source = match url {
-        Ok(url) => FfiSnapshotBuilderSource::TableRoot(url),
+    let builder = match url {
+        Ok(table_root) => SnapshotBuilderKind::Fresh {
+            kernel_builder: Snapshot::builder_for(table_root.as_str()),
+            table_root,
+        },
         Err(e) => return Result::Err(e).into_extern_result(&engine_ref),
     };
-    make_snapshot_builder(source, engine_arc).into_extern_result(&engine_ref)
+    Ok(make_snapshot_builder(builder, engine_arc)).into_extern_result(&engine_ref)
 }
 
 /// Get a builder for incrementally updating an existing snapshot.
@@ -1368,10 +1369,10 @@ pub unsafe extern "C" fn get_snapshot_builder_from(
     let engine_ref = unsafe { engine.as_ref() };
     let engine_arc = unsafe { engine.clone_as_arc() };
     let snapshot_arc = unsafe { prev_snapshot.clone_as_arc() };
-    make_snapshot_builder(
-        FfiSnapshotBuilderSource::ExistingSnapshot(snapshot_arc),
+    Ok(make_snapshot_builder(
+        SnapshotBuilderKind::Incremental(Snapshot::builder_from(snapshot_arc)),
         engine_arc,
-    )
+    ))
     .into_extern_result(&engine_ref)
 }
 
@@ -1390,7 +1391,18 @@ pub unsafe extern "C" fn snapshot_builder_with_version(
     version: Version,
 ) -> Handle<ExclusiveSnapshotBuilder> {
     let mut builder = unsafe { builder.into_inner() };
-    builder.version = Some(version);
+    builder.kernel_builder = match builder.kernel_builder {
+        SnapshotBuilderKind::Fresh {
+            table_root,
+            kernel_builder,
+        } => SnapshotBuilderKind::Fresh {
+            table_root,
+            kernel_builder: kernel_builder.at_version(version),
+        },
+        SnapshotBuilderKind::Incremental(kernel_builder) => {
+            SnapshotBuilderKind::Incremental(kernel_builder.at_version(version))
+        }
+    };
     builder.into()
 }
 
@@ -1411,20 +1423,32 @@ pub unsafe extern "C" fn snapshot_builder_with_log_tail(
     builder: Handle<ExclusiveSnapshotBuilder>,
     log_tail: log_path::LogPathArray,
 ) -> ExternResult<Handle<ExclusiveSnapshotBuilder>> {
-    let mut builder = unsafe { builder.into_inner() };
+    let builder = unsafe { builder.into_inner() };
     let engine_arc = builder.engine.clone();
     let engine_ref = engine_arc.as_ref();
-    snapshot_builder_with_log_tail_impl(&mut builder, log_tail)
-        .map(|_| builder.into())
+    unsafe { snapshot_builder_with_log_tail_impl(*builder, log_tail) }
+        .map(|builder| Box::new(builder).into())
         .into_extern_result(&engine_ref)
 }
 
 unsafe fn snapshot_builder_with_log_tail_impl(
-    builder: &mut FfiSnapshotBuilder,
+    mut builder: FfiSnapshotBuilder,
     log_tail: log_path::LogPathArray,
-) -> KernelResult<()> {
-    builder.log_tail = unsafe { log_tail.log_paths() }?;
-    Ok(())
+) -> KernelResult<FfiSnapshotBuilder> {
+    let log_tail = unsafe { log_tail.log_paths() }?;
+    builder.kernel_builder = match builder.kernel_builder {
+        SnapshotBuilderKind::Fresh {
+            table_root,
+            kernel_builder,
+        } => SnapshotBuilderKind::Fresh {
+            table_root,
+            kernel_builder: kernel_builder.with_log_tail(log_tail),
+        },
+        SnapshotBuilderKind::Incremental(kernel_builder) => {
+            SnapshotBuilderKind::Incremental(kernel_builder.with_log_tail(log_tail))
+        }
+    };
+    Ok(builder)
 }
 
 /// Set the max catalog version on a snapshot builder for catalog-managed tables. This bounds the
@@ -1440,7 +1464,18 @@ pub unsafe extern "C" fn snapshot_builder_with_max_catalog_version(
     max_catalog_version: Version,
 ) -> Handle<ExclusiveSnapshotBuilder> {
     let mut builder = unsafe { builder.into_inner() };
-    builder.max_catalog_version = Some(max_catalog_version);
+    builder.kernel_builder = match builder.kernel_builder {
+        SnapshotBuilderKind::Fresh {
+            table_root,
+            kernel_builder,
+        } => SnapshotBuilderKind::Fresh {
+            table_root,
+            kernel_builder: kernel_builder.with_max_catalog_version(max_catalog_version),
+        },
+        SnapshotBuilderKind::Incremental(kernel_builder) => SnapshotBuilderKind::Incremental(
+            kernel_builder.with_max_catalog_version(max_catalog_version),
+        ),
+    };
     builder.into()
 }
 
@@ -1464,69 +1499,10 @@ pub unsafe extern "C" fn snapshot_builder_build(
 fn snapshot_builder_build_impl(
     builder: FfiSnapshotBuilder,
 ) -> KernelResult<Handle<SharedSnapshot>> {
-    let FfiSnapshotBuilder {
-        engine,
-        source,
-        version,
-        log_tail,
-        max_catalog_version,
-        snapshot_hint,
-    } = builder;
-    let engine = engine.engine();
-
-    fn build<Mode>(
-        mut builder: delta_kernel::snapshot::SnapshotBuilder<Mode>,
-        engine: &dyn Engine,
-        version: Option<Version>,
-        log_tail: Vec<LogPath>,
-        max_catalog_version: Option<Version>,
-        snapshot_hint: Option<Box<SnapshotHint>>,
-        apply_snapshot_hint: impl FnOnce(
-            delta_kernel::snapshot::SnapshotBuilder<Mode>,
-            Box<SnapshotHint>,
-        )
-            -> KernelResult<delta_kernel::snapshot::SnapshotBuilder<Mode>>,
-    ) -> KernelResult<SnapshotRef> {
-        if let Some(version) = version {
-            builder = builder.at_version(version);
-        }
-        if !log_tail.is_empty() {
-            builder = builder.with_log_tail(log_tail);
-        }
-        if let Some(max_catalog_version) = max_catalog_version {
-            builder = builder.with_max_catalog_version(max_catalog_version);
-        }
-        if let Some(snapshot_hint) = snapshot_hint {
-            builder = apply_snapshot_hint(builder, snapshot_hint)?;
-        }
-        builder.build(engine)
-    }
-
-    let snapshot = match source {
-        FfiSnapshotBuilderSource::TableRoot(url) => build(
-            Snapshot::builder_for(url),
-            engine.as_ref(),
-            version,
-            log_tail,
-            max_catalog_version,
-            snapshot_hint,
-            |builder, hint| Ok(builder.with_snapshot_hint(hint)),
-        ),
-        FfiSnapshotBuilderSource::ExistingSnapshot(snapshot) => build(
-            Snapshot::builder_from(snapshot),
-            engine.as_ref(),
-            version,
-            log_tail,
-            max_catalog_version,
-            snapshot_hint,
-            |_, _| {
-                // The public API rejects this combination; retain the invariant here for
-                // internal construction paths.
-                Err(snapshot_hint::invalid(
-                    "A snapshot hint cannot be used with Snapshot::builder_from",
-                ))
-            },
-        ),
+    let engine = builder.engine.engine();
+    let snapshot = match builder.kernel_builder {
+        SnapshotBuilderKind::Fresh { kernel_builder, .. } => kernel_builder.build(engine.as_ref()),
+        SnapshotBuilderKind::Incremental(kernel_builder) => kernel_builder.build(engine.as_ref()),
     }?;
     Ok(snapshot.into())
 }

@@ -1661,10 +1661,14 @@ fn aggregate_with_builds_latest_snapshot_from_rich_crc(
 fn aggregate_with_validates_explicit_builder_version_at_build(
     #[case] requested_version: Version,
     #[case] should_build: bool,
+    #[values(false, true)] hint_first: bool,
 ) {
     let engine = test_engine();
     let builder = test_builder(&engine);
-    let builder = unsafe { snapshot_builder_with_version(builder, requested_version) };
+    let mut builder = unsafe { snapshot_builder_with_version(builder, requested_version + 1) };
+    if !hint_first {
+        builder = unsafe { snapshot_builder_with_version(builder, requested_version) };
+    }
 
     let log_path = FfiLogPath::new(
         slice("memory:///hinted-table/_delta_log/00000000000000000000.checkpoint.parquet"),
@@ -1676,7 +1680,10 @@ fn aggregate_with_validates_explicit_builder_version_at_build(
         0,
         FfiSnapshotHintFreshness::Unverified,
     );
-    let builder = unsafe { ok_or_panic(snapshot_builder_with_snapshot_hint(builder, &hint)) };
+    builder = unsafe { ok_or_panic(snapshot_builder_with_snapshot_hint(builder, &hint)) };
+    if hint_first {
+        builder = unsafe { snapshot_builder_with_version(builder, requested_version) };
+    }
 
     let result = unsafe { snapshot_builder_build(builder) };
     if should_build {
@@ -1986,29 +1993,6 @@ fn aggregate_with_reports_unsupported_for_existing_snapshot_builder() {
         result,
         FFIKernelError::UnsupportedError,
         "builders created by get_snapshot_builder_from",
-    );
-
-    unsafe {
-        free_snapshot(snapshot);
-        free_engine(engine);
-    }
-}
-
-#[test]
-fn build_rejects_internally_supplied_hint_for_existing_snapshot_builder() {
-    let engine = test_engine();
-    let initial_builder = unsafe { with_minimal_hint(test_builder(&engine)) };
-    let snapshot = unsafe { ok_or_panic(snapshot_builder_build(initial_builder)) };
-
-    let mut update_builder = unsafe { with_minimal_hint(test_builder(&engine)) };
-    unsafe { update_builder.as_mut() }.source =
-        FfiSnapshotBuilderSource::ExistingSnapshot(unsafe { snapshot.clone_as_arc() });
-
-    let result = unsafe { snapshot_builder_build(update_builder) };
-    assert_extern_result_error_contains(
-        result,
-        FFIKernelError::InvalidSnapshotHint,
-        "cannot be used with Snapshot::builder_from",
     );
 
     unsafe {
