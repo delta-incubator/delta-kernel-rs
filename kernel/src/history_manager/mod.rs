@@ -920,7 +920,7 @@ mod tests {
     use super::*;
     use crate::actions::{CommitInfo, Metadata, Protocol};
     use crate::engine::sync::SyncEngine;
-    use crate::engine::KernelEngine;
+    use crate::engine::{EngineWriteExt, KernelEngine};
     use crate::object_store::memory::InMemory;
     use crate::schema::{schema_ref, SchemaRef};
     use crate::snapshot::{Snapshot, SnapshotBuilder};
@@ -2070,7 +2070,6 @@ mod tests {
     /// `empty_paths` are written as 0-byte files to exercise empty-file skipping.
     fn engine_with_log_files(paths: &[String], empty_paths: &HashSet<String>) -> (SyncEngine, Url) {
         let engine = SyncEngine::new_with_store(Arc::new(InMemory::new()));
-        let storage = engine.storage_handler();
         for path in paths {
             let bytes = if empty_paths.contains(path) {
                 Bytes::new()
@@ -2078,7 +2077,7 @@ mod tests {
                 Bytes::from_static(b"x")
             };
             let url = Url::parse(&format!("memory:///{path}")).unwrap();
-            storage.put(&url, bytes, false).expect("put log file");
+            engine.put(&url, bytes, false).expect("put log file");
         }
         (engine, Url::parse("memory:///_delta_log/").unwrap())
     }

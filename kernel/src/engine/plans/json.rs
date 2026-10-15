@@ -59,6 +59,10 @@ impl JsonHandler for PlanBasedJsonHandler {
             .into_data()
     }
 
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "The declarative handler delegates unsupported writes to its fallback."
+    )]
     fn write_json_file(
         &self,
         path: &Url,

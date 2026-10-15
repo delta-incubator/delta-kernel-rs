@@ -1,6 +1,8 @@
-//! Negative Clippy fixture for handler calls that bypass the engine read helpers.
+//! Negative Clippy fixture for handler calls that bypass the engine I/O helpers.
 
 #![allow(dead_code)]
+
+use bytes::Bytes;
 
 use crate::{Engine, FileMeta, JsonHandler, ParquetHandler, SchemaRef, StorageHandler};
 
@@ -43,4 +45,30 @@ fn direct_reads(engine: &dyn Engine, file: &FileMeta, schema: SchemaRef) {
     );
     let _ = ParquetHandler::read_parquet_footer(parquet.as_ref(), file);
     let _ = ParquetHandler::read_parquet_footer_with_cancellation(parquet.as_ref(), file, None);
+}
+
+/// Exercises both method-call and fully qualified handler writes.
+fn direct_writes(engine: &dyn Engine, file: &FileMeta) {
+    let storage = engine.storage_handler();
+    let json = engine.json_handler();
+    let parquet = engine.parquet_handler();
+    let _ = storage.put(&file.location, Bytes::new(), false);
+    let _ = storage.copy_atomic(&file.location, &file.location);
+    let _ = storage.delete(&file.location);
+    let _ = json.write_json_file(&file.location, Box::new(std::iter::empty()), false);
+    let _ = parquet.write_parquet_file(file.location.clone(), Box::new(std::iter::empty()));
+    let _ = StorageHandler::put(storage.as_ref(), &file.location, Bytes::new(), false);
+    let _ = StorageHandler::copy_atomic(storage.as_ref(), &file.location, &file.location);
+    let _ = StorageHandler::delete(storage.as_ref(), &file.location);
+    let _ = JsonHandler::write_json_file(
+        json.as_ref(),
+        &file.location,
+        Box::new(std::iter::empty()),
+        false,
+    );
+    let _ = ParquetHandler::write_parquet_file(
+        parquet.as_ref(),
+        file.location.clone(),
+        Box::new(std::iter::empty()),
+    );
 }

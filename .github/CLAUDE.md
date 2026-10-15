@@ -3,7 +3,7 @@
 Workflow-authoring rules for GitHub Actions.
 
 The Clippy job also runs `scripts/test-engine-io-lints.py` on Linux x64. It compiles a negative
-fixture and verifies that every configured direct handler read is rejected, without accepting
+fixture and verifies that every configured direct handler I/O method is rejected, without accepting
 unrelated compiler errors as a passing lint test.
 
 ## Triggers: restrict `push` to long-lived branches

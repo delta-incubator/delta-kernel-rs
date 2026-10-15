@@ -116,7 +116,7 @@ use crate::actions::{
     DOMAIN_METADATA_FIELD, METADATA_FIELD, PROTOCOL_FIELD, REMOVE_FIELD, SET_TRANSACTION_FIELD,
     SIDECAR_FIELD,
 };
-use crate::engine::EngineReadExt;
+use crate::engine::{EngineReadExt, EngineWriteExt};
 use crate::engine_data::FilteredEngineData;
 use crate::expressions::{ExpressionRef, Scalar};
 use crate::last_checkpoint_hint::LastCheckpointHint;
@@ -550,7 +550,7 @@ impl CheckpointWriter {
 
         // Write the `_last_checkpoint` file to `table/_delta_log/_last_checkpoint`
         let filtered_data = FilteredEngineData::with_all_rows_selected(data?);
-        engine.json_handler().write_json_file(
+        engine.write_json_file(
             &last_checkpoint_path,
             Box::new(std::iter::once(Ok(filtered_data))),
             true,
@@ -618,9 +618,7 @@ impl CheckpointWriter {
         let checkpoint_path = self.checkpoint_path()?;
         let main_data: KernelResultIteratorStatic<Box<dyn EngineData>> =
             Box::new(non_file_batches.into_iter().chain(sidecar_batch).map(Ok));
-        let main_size = engine
-            .parquet_handler()
-            .write_parquet_file(checkpoint_path.clone(), main_data)?;
+        let main_size = engine.write_parquet_file(checkpoint_path.clone(), main_data)?;
 
         // size_in_bytes covers the main checkpoint file plus all sidecar files.
         let sidecar_sizes_sum = sidecar_metas
@@ -648,9 +646,7 @@ impl CheckpointWriter {
         let data_iter = self.checkpoint_data(engine)?;
         let state = data_iter.state();
         let lazy_data = data_iter.map(|r| r.and_then(|f| f.apply_selection_vector()));
-        let main_size = engine
-            .parquet_handler()
-            .write_parquet_file(checkpoint_path.clone(), Box::new(lazy_data))?;
+        let main_size = engine.write_parquet_file(checkpoint_path.clone(), Box::new(lazy_data))?;
 
         build_written_checkpoint_info(
             engine,
@@ -812,9 +808,7 @@ fn write_single_sidecar(
         return Ok(None);
     }
     let (filename, sidecar_url) = path::new_sidecar(table_root, version)?;
-    let written_size = engine
-        .parquet_handler()
-        .write_parquet_file(sidecar_url.clone(), Box::new(iter))?;
+    let written_size = engine.write_parquet_file(sidecar_url.clone(), Box::new(iter))?;
     let meta = engine.head(&sidecar_url)?;
     verify_written_size(&sidecar_url, written_size, meta.size)?;
     Ok(Some((filename, meta)))

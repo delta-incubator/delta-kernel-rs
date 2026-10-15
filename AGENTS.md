@@ -47,7 +47,7 @@ cargo check-no-default-kernel
 cargo check-no-default-engine
 cargo clippy-no-default-kernel-leaves
 
-# Verify that both method-call and fully qualified handler reads are rejected
+# Verify that both method-call and fully qualified handler I/O calls are rejected
 python3 .github/scripts/test-engine-io-lints.py
 
 # Quick pre-push check (mimics CI)

@@ -537,6 +537,7 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
+    use crate::engine::EngineWriteExt;
     use crate::schema::schema;
     use crate::table_features::TableFeature;
     use crate::unit_test_utils::create_log_path;
@@ -733,7 +734,7 @@ mod tests {
         let read_hint = |json: &str| {
             let engine = SyncEngine::new_with_store(std::sync::Arc::new(InMemory::new()));
             let storage = engine.storage_handler();
-            storage
+            engine
                 .put(
                     &LastCheckpointHint::path(&log_root).unwrap(),
                     bytes::Bytes::copy_from_slice(json.as_bytes()),

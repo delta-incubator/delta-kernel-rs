@@ -5,10 +5,12 @@
 
 mod kernel_engine;
 mod read_ext;
+mod write_ext;
 #[cfg(feature = "arrow-expression")]
 use delta_kernel_derive::internal_api;
 pub use kernel_engine::KernelEngine;
 pub(crate) use read_ext::EngineReadExt;
+pub(crate) use write_ext::EngineWriteExt;
 
 #[cfg(feature = "arrow-expression")]
 use crate::parquet::arrow::arrow_reader::ArrowReaderOptions;

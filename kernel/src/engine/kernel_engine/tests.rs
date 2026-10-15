@@ -11,7 +11,7 @@ use crate::actions::LOG_METADATA_SCHEMA;
 use crate::committer::FileSystemCommitter;
 use crate::engine::sync::SyncEngine;
 use crate::engine::test_delegating::DelegatingEngine;
-use crate::engine::{EngineReadExt, KernelEngine};
+use crate::engine::{EngineReadExt, EngineWriteExt, KernelEngine};
 use crate::metrics::MeteredDeltaEngine;
 use crate::object_store::memory::InMemory;
 use crate::schema::{schema_ref, ColumnName, SchemaRef};
@@ -481,7 +481,6 @@ fn nested_scope_uses_inner_operation_token_and_keeps_writes_unscoped() {
     let temp = tempfile::tempdir().unwrap();
     let path = Url::from_file_path(temp.path().join("data")).unwrap();
     outer
-        .storage_handler()
         .put(&path, Bytes::from_static(b"data"), false)
         .unwrap();
     assert!(matches!(outer.head(&path), Err(KernelError::Cancelled)));
@@ -494,7 +493,7 @@ fn nested_scope_uses_inner_operation_token_and_keeps_writes_unscoped() {
             .unwrap(),
         Bytes::from_static(b"data")
     );
-    outer.storage_handler().delete(&path).unwrap();
+    outer.delete(&path).unwrap();
 }
 
 #[rstest]

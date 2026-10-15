@@ -5,6 +5,7 @@ use crate::actions::{get_commit_schema, TIGHT_BOUNDS};
 use crate::arrow::array::{ArrayRef, AsArray, BinaryArray};
 use crate::engine::arrow_expression::evaluate_expression::evaluate_expression;
 use crate::engine::arrow_expression::opaque::{ArrowOpaqueExpression, ArrowOpaqueExpressionOp};
+use crate::engine::EngineWriteExt;
 use crate::expressions::{ParseJsonExpression, ScalarExpressionEvaluator};
 use crate::schema::SchemaStructPatchBuilder;
 use crate::unit_test_utils::{load_test_table, string_array_to_engine_data};
@@ -195,7 +196,6 @@ async fn setup_variant_stats_table() -> (DelegatingEngine, String) {
         )
         .unwrap();
     engine
-        .parquet_handler()
         .write_parquet_file(
             Url::parse(&table_root)
                 .unwrap()

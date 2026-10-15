@@ -145,7 +145,11 @@ method. `KernelEngine` binds the operation token and preserves the original hand
 engine decorators forward the token accessor. Direct handler calls do not inherit the token.
 HEAD checks cancellation before the request, without interrupting an active request.
 
-`kernel/clippy.toml` rejects direct handler reads in Kernel code. Narrow exceptions cover handler
+Imperative writes use `EngineWriteExt` helpers to delegate storage and file-format writes to the
+original handlers. These helpers do not inspect the engine's read cancellation token. Handler
+errors, overwrite behavior, and returned file sizes are preserved.
+
+`kernel/clippy.toml` rejects direct handler I/O in Kernel code. Narrow exceptions cover handler
 defaults/decorators, handler tests, and storage-only compatibility APIs. Discovery callers pass
 the effective token into those storage-only APIs; engine-aware deletion-vector reads use the
 read helpers. Declarative execution uses its own executor contract.

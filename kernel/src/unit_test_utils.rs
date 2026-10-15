@@ -27,6 +27,7 @@ use crate::committer::FileSystemCommitter;
 use crate::engine::arrow_conversion::{parquet_field_id_metadata, TryIntoArrow as _};
 use crate::engine::arrow_data::ArrowEngineData;
 use crate::engine::sync::SyncEngine;
+use crate::engine::EngineWriteExt;
 use crate::metrics::{MetricEvent, MetricsReporter, WithMetricsReporterLayer as _};
 use crate::object_store::local::LocalFileSystem;
 use crate::object_store::memory::InMemory;
@@ -381,7 +382,7 @@ pub(crate) mod adaptive_metadata_fixtures {
     ) -> KernelResult<()> {
         let filtered = FilteredEngineData::with_all_rows_selected(data);
         let commit_path = LogRoot::new(table_root.clone())?.new_commit_path(version)?;
-        engine.json_handler().write_json_file(
+        engine.write_json_file(
             &commit_path.location,
             Box::new(iter::once(Ok(filtered))),
             false,

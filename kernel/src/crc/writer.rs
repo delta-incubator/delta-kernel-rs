@@ -3,6 +3,7 @@
 use url::Url;
 
 use super::Crc;
+use crate::engine::EngineWriteExt;
 use crate::table_properties::ENABLE_IN_COMMIT_TIMESTAMPS;
 use crate::utils::require;
 use crate::{Engine, KernelError, KernelResult};
@@ -41,9 +42,7 @@ pub(crate) fn try_write_crc_file(engine: &dyn Engine, path: &Url, crc: &Crc) -> 
         )
     );
     let data = serde_json::to_vec(crc)?;
-    engine
-        .storage_handler()
-        .put(path, data.into(), false /* overwrite */)
+    engine.put(path, data.into(), false /* overwrite */)
 }
 
 #[cfg(test)]

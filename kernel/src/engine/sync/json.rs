@@ -79,6 +79,10 @@ impl JsonHandler for SyncJsonHandler {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "These tests exercise the handler contract directly."
+)]
 mod tests {
     use std::path::Path;
     use std::sync::Arc;

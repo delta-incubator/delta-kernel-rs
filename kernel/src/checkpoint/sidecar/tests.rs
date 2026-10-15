@@ -20,6 +20,7 @@ use crate::checkpoint::CheckpointWriter;
 use crate::engine::arrow_data::{ArrowEngineData, EngineDataArrowExt};
 use crate::engine::arrow_expression::ArrowEvaluationHandler;
 use crate::engine::sync::SyncEngine;
+use crate::engine::EngineWriteExt;
 use crate::object_store::memory::InMemory;
 use crate::object_store::path::Path;
 use crate::object_store::ObjectStoreExt as _;
@@ -36,7 +37,7 @@ struct CheckpointParts {
 
 /// Test helper: generates sidecar parquet files using the [`SidecarSplitter`] +
 /// [`SingleSidecarDataIterator`] pipeline. Writes real parquet files to storage via
-/// `engine.parquet_handler().write_parquet_file()` with names `sidecar_1.parquet`,
+/// `engine.write_parquet_file()` with names `sidecar_1.parquet`,
 /// `sidecar_2.parquet`, etc. Does NOT write the main checkpoint or `_last_checkpoint`.
 fn generate_checkpoint_parts(
     writer: &CheckpointWriter,
@@ -62,9 +63,7 @@ fn generate_checkpoint_parts(
                 .peekable();
         if single_sidecar_iter.peek().is_some() {
             let sidecar_url = sidecars_base.join(&format!("sidecar_{sidecar_index}.parquet"))?;
-            engine
-                .parquet_handler()
-                .write_parquet_file(sidecar_url.clone(), Box::new(single_sidecar_iter))?;
+            engine.write_parquet_file(sidecar_url.clone(), Box::new(single_sidecar_iter))?;
             sidecar_files.push(sidecar_url);
             sidecar_index += 1;
         }

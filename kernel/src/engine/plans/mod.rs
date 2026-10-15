@@ -105,6 +105,7 @@ mod tests {
     use crate::engine::arrow_expression::ArrowEvaluationHandler;
     use crate::engine::sync::plan::SyncPlanExecutor;
     use crate::engine::sync::SyncEngine;
+    use crate::engine::EngineWriteExt;
     use crate::engine_data::FilteredEngineData;
     use crate::{Engine as _, EngineData, KernelError};
 
@@ -148,7 +149,6 @@ mod tests {
         let json_data: Box<dyn EngineData> = Box::new(ArrowEngineData::new(json_batch));
 
         engine
-            .json_handler()
             .write_json_file(
                 &json_location,
                 Box::new(std::iter::once(Ok(
@@ -171,7 +171,6 @@ mod tests {
         let parquet_data: Box<dyn EngineData> = Box::new(ArrowEngineData::new(parquet_batch));
 
         engine
-            .parquet_handler()
             .write_parquet_file(
                 parquet_location.clone(),
                 Box::new(std::iter::once(Ok(parquet_data))),
@@ -191,13 +190,11 @@ mod tests {
         let location = Url::parse("memory:///table/out").unwrap();
 
         let json_err = engine
-            .json_handler()
             .write_json_file(&location, Box::new(std::iter::empty()), false)
             .expect_err("no fallback is configured");
         assert!(matches!(json_err, KernelError::Unsupported(_)));
 
         let parquet_err = engine
-            .parquet_handler()
             .write_parquet_file(location, Box::new(std::iter::empty()))
             .expect_err("no fallback is configured");
         assert!(matches!(parquet_err, KernelError::Unsupported(_)));

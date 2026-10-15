@@ -50,6 +50,10 @@ impl ParquetHandler for PlanBasedParquetHandler {
             .into_data()
     }
 
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "The declarative handler delegates unsupported writes to its fallback."
+    )]
     fn write_parquet_file(
         &self,
         location: Url,

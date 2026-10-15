@@ -1,5 +1,10 @@
-# Kernel-owned imperative reads must select the engine token before issuing I/O.
+# Kernel-owned imperative I/O goes through the engine extension helpers.
 disallowed-methods = [
+    { path = "delta_kernel::StorageHandler::copy_atomic", reason = "Use EngineWriteExt for imperative writes." },
+    { path = "delta_kernel::StorageHandler::delete", reason = "Use EngineWriteExt for imperative writes." },
+    { path = "delta_kernel::StorageHandler::put", reason = "Use EngineWriteExt for imperative writes." },
+    { path = "delta_kernel::JsonHandler::write_json_file", reason = "Use EngineWriteExt for imperative writes." },
+    { path = "delta_kernel::ParquetHandler::write_parquet_file", reason = "Use EngineWriteExt for imperative writes." },
     { path = "delta_kernel::StorageHandler::list_from", reason = "Use EngineReadExt so imperative reads inherit the engine cancellation token." },
     { path = "delta_kernel::StorageHandler::list_from_with_cancellation", reason = "Use EngineReadExt so imperative reads inherit the engine cancellation token." },
     { path = "delta_kernel::StorageHandler::read_files", reason = "Use EngineReadExt so imperative reads inherit the engine cancellation token." },
