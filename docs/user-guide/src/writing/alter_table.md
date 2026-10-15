@@ -10,8 +10,8 @@ Before reading this page, make sure you understand
 
 ## When to use alter table
 
-Use `transaction_builder()` with `UpdateTableOperation::AlterTable` when you need to evolve a table's schema
-in place. The common case today is adding a new column to a table that already has data,
+Use `update_table(UpdateTableOperation::AlterTable, engine_info)` when you need to evolve a table's
+schema in place. The common case today is adding a new column to a table that already has data,
 without rewriting the existing files. Existing rows read back `NULL` for the
 new column. Subsequent writes can populate it.
 
@@ -32,8 +32,9 @@ STRING` with rows for Alice, Bob, and Carol, and you want to add a `country`
 column. The flow is:
 
 1. Load a `Snapshot` of the table.
-2. Call `snapshot.transaction_builder()` to get an `UpdateTableTransactionBuilder`.
-3. Configure `UpdateTableOperation::AlterTable` and call `add_column()` with the new field.
+2. Call `snapshot.update_table(UpdateTableOperation::AlterTable, "my-app/1.0")` to get an
+   `UpdateTableTransactionBuilder`.
+3. Call `add_column()` with the new field.
 4. Call `build()` to produce a `Transaction`.
 5. Call `commit()` to atomically apply the schema change.
 
@@ -54,10 +55,8 @@ let snapshot = Snapshot::builder_for(url).build(&engine)?;
 
 // 2. Build and commit an alter-table transaction that adds a new column.
 let result = snapshot
-    .transaction_builder()
-    .with_operation(UpdateTableOperation::AlterTable)
+    .update_table(UpdateTableOperation::AlterTable, "my-app/1.0")
     .add_column(StructField::nullable("country", DataType::STRING))
-    .with_engine_info("my-app/1.0")
     .build(&engine, Box::new(FileSystemCommitter::new()))?
     .commit(&engine)?;
 
@@ -101,8 +100,7 @@ validated as a whole before the commit is constructed:
 
 ```rust,ignore
 let result = snapshot
-    .transaction_builder()
-    .with_operation(UpdateTableOperation::AlterTable)
+    .update_table(UpdateTableOperation::AlterTable, "my-app/1.0")
     .add_column(StructField::nullable("country", DataType::STRING))
     .add_column(StructField::nullable("postal_code", DataType::STRING))
     .build(&engine, Box::new(FileSystemCommitter::new()))?
@@ -115,14 +113,13 @@ schema evolution with data-file actions.
 
 ## Evolving a schema while writing
 
-Use `transaction_builder()` when the same transaction evolves the schema and writes files. Kernel
-applies the schema operations during `build()`, so the transaction's `WriteState` uses the evolved
-schema.
+Use `update_table(operation, engine_info)` when the same transaction evolves the schema and writes
+files. Kernel applies the schema operations during `build()`, so the transaction's `WriteState` uses
+the evolved schema.
 
 ```rust,ignore
 let mut transaction = snapshot
-    .transaction_builder()
-    .with_operation(UpdateTableOperation::Write)
+    .update_table(UpdateTableOperation::Write, "my-app/1.0")
     .add_column(StructField::nullable("country", DataType::STRING))
     .build(&engine, Box::new(FileSystemCommitter::new()))?;
 

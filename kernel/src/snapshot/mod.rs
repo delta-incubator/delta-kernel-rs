@@ -42,7 +42,7 @@ use crate::schema::SchemaRef;
 use crate::table_configuration::{InCommitTimestampEnablement, TableConfiguration};
 use crate::table_features::{physical_to_logical_column_name_and_type, Operation, TableFeature};
 use crate::table_properties::TableProperties;
-use crate::transaction::UpdateTableTransactionBuilder;
+use crate::transaction::{UpdateTableOperation, UpdateTableTransactionBuilder};
 use crate::utils::require;
 use crate::{Engine, KernelError, KernelResult, LogCompactionWriter, Result, Version};
 
@@ -1121,12 +1121,45 @@ impl Snapshot {
         IncrementalScanBuilder::new(self, base_version)
     }
 
-    /// Creates a builder for a transaction against this snapshot.
+    /// Creates a builder with the given `operation` and connector name/version `engine_info`.
     ///
-    /// The builder supports both data-changing transactions and schema changes. Configuration is
-    /// validated when [`UpdateTableTransactionBuilder::build`] is called.
-    pub fn transaction_builder(self: Arc<Self>) -> UpdateTableTransactionBuilder {
-        UpdateTableTransactionBuilder::new(self)
+    /// Returns a builder supporting both data-changing transactions and schema changes.
+    /// Both values are recorded in `commitInfo` and cannot be changed on the builder or
+    /// transaction. Invalid custom names and incompatible configuration are rejected by
+    /// [`UpdateTableTransactionBuilder::build`].
+    ///
+    /// An operation and engine info are required:
+    ///
+    /// ```compile_fail,E0061
+    /// # use delta_kernel::snapshot::SnapshotRef;
+    /// # use delta_kernel::transaction::UpdateTableOperation;
+    /// fn configure(snapshot: SnapshotRef) {
+    ///     let _ = snapshot.clone().update_table();
+    ///     let _ = snapshot.update_table(UpdateTableOperation::Write);
+    /// }
+    /// ```
+    ///
+    /// Neither value can be replaced with a setter:
+    ///
+    /// ```compile_fail,E0599
+    /// # use delta_kernel::transaction::Transaction;
+    /// fn configure(transaction: Transaction) {
+    ///     let _ = transaction.with_engine_info("my-app/1.0");
+    /// }
+    /// ```
+    ///
+    /// ```compile_fail,E0599
+    /// # use delta_kernel::transaction::UpdateTableTransactionBuilder;
+    /// fn configure(builder: UpdateTableTransactionBuilder) {
+    ///     let _ = builder.with_engine_info("my-app/1.0");
+    /// }
+    /// ```
+    pub fn update_table(
+        self: Arc<Self>,
+        operation: UpdateTableOperation,
+        engine_info: impl Into<String>,
+    ) -> UpdateTableTransactionBuilder {
+        UpdateTableTransactionBuilder::new(self, operation, engine_info.into())
     }
 
     /// Creates a [`CheckpointWriter`] for generating a checkpoint from this snapshot.

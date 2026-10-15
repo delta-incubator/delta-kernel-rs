@@ -12,11 +12,9 @@ setter, and commit calls borrow the engine handle. The caller retains ownership.
 
 ```c
 HandleSharedSnapshot snapshot = /* unwrap(snapshot_builder_build(...)) */;
-HandleExclusiveUpdateTableTransactionBuilder builder = new_update_table_txn_builder(snapshot);
-builder = unwrap(update_table_txn_builder_with_engine_info(
-    builder, slice("my-engine/1.0"), engine));
-builder = update_table_txn_builder_with_operation(
-    builder, KernelUpdateTableOperationWrite);
+HandleExclusiveUpdateTableTransactionBuilder builder =
+    unwrap(new_update_table_txn_builder(
+        snapshot, KernelUpdateTableOperationWrite, slice("my-engine/1.0"), engine));
 builder = update_table_txn_builder_with_data_change(builder, true);
 
 HandleExclusiveUpdateTableTransaction txn = unwrap(update_table_txn_builder_build(builder, engine));
@@ -29,6 +27,17 @@ free_committed_transaction(committed);
 
 Here `slice` and `unwrap` stand for the connector's usual `KernelStringSlice` and `ExternResult`
 helpers.
+
+The update operation and engine info are required at construction and cannot be changed.
+For connector-defined names, use
+`new_update_table_txn_builder_with_custom_operation(snapshot, name, engine_info, engine)`.
+Both constructors validate UTF-8 before retaining the snapshot and borrow all inputs.
+
+The typed constructor returns an `ExternResult`, not a bare builder handle. When migrating from
+setter-based configuration, update constructor calls and rebuild C/C++ connectors against the
+generated headers. The typed constructor's parameters and return type are not ABI-compatible.
+The `update_table_txn_builder_with_operation`, `update_table_txn_builder_with_custom_operation`,
+and `update_table_txn_builder_with_engine_info` setters are removed.
 
 Create-table connectors use the same shape: call `new_create_table_txn_builder`, apply
 `create_table_txn_builder_with_*` functions, then call `create_table_txn_builder_build`. Application
