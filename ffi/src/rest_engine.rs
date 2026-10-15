@@ -61,6 +61,13 @@ pub const REST_BUILDER_OPTION_TLS_CA_PATH: &str = "tls.ca_path";
 #[no_mangle]
 pub static REST_BUILDER_OPTION_TLS_CA_PATH_KEY: [u8; 12] = *b"tls.ca_path\0";
 
+/// Accept server certificate hostname mismatches (default `false`). Certificate trust and
+/// validity checks remain enabled. Intended for test environments.
+pub const REST_BUILDER_OPTION_TLS_ALLOW_INVALID_HOSTNAMES: &str = "tls.allow_invalid_hostnames";
+#[no_mangle]
+pub static REST_BUILDER_OPTION_TLS_ALLOW_INVALID_HOSTNAMES_KEY: [u8; 28] =
+    *b"tls.allow_invalid_hostnames\0";
+
 /// Comma-separated DNS overrides as `host=ip:port` entries (bypasses system resolver; SNI
 /// unchanged).
 pub const REST_BUILDER_OPTION_TLS_DNS_OVERRIDE: &str = "tls.dns_override";
@@ -306,6 +313,10 @@ pub(crate) fn build_rest_object_store(
         cert_path: options.get(REST_BUILDER_OPTION_TLS_CERT_PATH).cloned(),
         key_path: options.get(REST_BUILDER_OPTION_TLS_KEY_PATH).cloned(),
         ca_path: options.get(REST_BUILDER_OPTION_TLS_CA_PATH).cloned(),
+        allow_invalid_hostnames: parse_bool_option(
+            REST_BUILDER_OPTION_TLS_ALLOW_INVALID_HOSTNAMES,
+            options.get(REST_BUILDER_OPTION_TLS_ALLOW_INVALID_HOSTNAMES),
+        )?,
         dns_overrides: options
             .get(REST_BUILDER_OPTION_TLS_DNS_OVERRIDE)
             .map(|s| s.split(',').map(str::to_string).collect())
@@ -473,6 +484,10 @@ mod tests {
             REST_BUILDER_OPTION_TLS_CA_PATH,
         );
         option_key_bytes_match_const(
+            &REST_BUILDER_OPTION_TLS_ALLOW_INVALID_HOSTNAMES_KEY,
+            REST_BUILDER_OPTION_TLS_ALLOW_INVALID_HOSTNAMES,
+        );
+        option_key_bytes_match_const(
             &REST_BUILDER_OPTION_TLS_DNS_OVERRIDE_KEY,
             REST_BUILDER_OPTION_TLS_DNS_OVERRIDE,
         );
@@ -630,17 +645,16 @@ mod tests {
         );
     }
 
-    #[test]
-    fn build_rejects_invalid_verify_on_ambiguous() {
+    #[rstest::rstest]
+    #[case(REST_BUILDER_OPTION_PUT_VERIFY_ON_AMBIGUOUS)]
+    #[case(REST_BUILDER_OPTION_TLS_ALLOW_INVALID_HOSTNAMES)]
+    fn build_rejects_invalid_boolean_option(#[case] key: &str) {
         let mut options = HashMap::new();
-        options.insert(
-            REST_BUILDER_OPTION_PUT_VERIFY_ON_AMBIGUOUS.into(),
-            "nope".into(),
-        );
-        assert!(
-            build_rest_object_store(&test_base_url(), &options, &test_rest_builder_state())
-                .is_err()
-        );
+        options.insert(key.into(), "nope".into());
+        let error = build_rest_object_store(&test_base_url(), &options, &test_rest_builder_state())
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains(key));
     }
 
     // === 3b: build the reqwest/rustls client (~minutes under Miri, so skipped) ===

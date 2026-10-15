@@ -27,6 +27,7 @@ chrono = "0.4.41"
 futures = "0.3"
 itertools = "0.14"
 reqwest = { version = "0.13", default-features = false, features = ["charset", "http2", "query", "system-proxy"] }
+rustls-native-certs = { version = "0.8", optional = true }
 serde_json = "1"
 tokio = { version = "1.47", features = ["rt-multi-thread"] }
 tracing = { version = "0.1", features = ["log"] }
@@ -39,15 +40,17 @@ arrow = ["arrow-60"]
 arrow-60 = ["delta_kernel/arrow-60"]
 arrow-59 = ["delta_kernel/arrow-59"]
 native-tls = ["reqwest/native-tls"]
-rustls = ["reqwest/rustls"]
+rustls = ["reqwest/rustls", "dep:rustls-native-certs"]
 
 [dev-dependencies]
 delta_kernel_default_engine_test_utils = { path = "./test-utils" }
 rstest = "0.23"
+rcgen = "0.13"
 serde = { version = "1", features = ["derive"] }
 tempfile = "3"
 test_utils = { path = "../test-utils", default-features = false }
 tokio = { version = "1.47", features = ["rt-multi-thread", "macros"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt"] }
 wiremock = "0.6"
 hdfs_native_object_store_13 = { package = "hdfs-native-object-store", version = "0.16.0" }
