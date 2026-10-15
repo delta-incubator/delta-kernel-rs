@@ -117,16 +117,17 @@ table at a specific version. From it you build a `Scan` (reads) or `Transaction`
 `parallel_scan_metadata()` (two-phase distributed log replay).
 
 
-**Write path:** `Snapshot` -> `UpdateTableTransactionBuilder` -> `Transaction` -> `commit()`.
-`UpdateTableTransactionBuilder` aliases `TransactionBuilder<UpdateTable>`; the create-table
-builder aliases `TransactionBuilder<CreateTable>`. Common setters have one generic implementation.
-The sealed `TransactionType` trait selects opaque type-specific state; specialized implementations
-provide constructors, custom setters, and build validation.
+**Write path:** `Snapshot` -> `UpdateTableTransactionBuilder` (or
+`ReplaceTableTransactionBuilder` for full replacement) -> `Transaction` -> `commit()`.
+These builders alias `TransactionBuilder<UpdateTable>` and `TransactionBuilder<ReplaceTable>`;
+the create-table builder aliases `TransactionBuilder<CreateTable>`. Common setters have one generic
+implementation. The sealed `TransactionType` trait selects opaque type-specific state; specialized
+implementations provide constructors, custom setters, and build validation.
 `Snapshot::update_table(operation, engine_info)` requires both values at construction;
-create-table constructors require the path, schema,
-and engine info and fix the operation to `CREATE TABLE`. Operations and engine info cannot be changed
-on builders or built transactions. `UpdateTableOperation::AlterTable`
-records schema-changing DDL without introducing a separate transaction type.
+create-table constructors require the path, schema, and engine info and fix the operation to
+`CREATE TABLE`. Operations and engine info cannot be changed on builders or built transactions.
+`UpdateTableOperation::AlterTable` records schema-changing DDL without introducing a separate
+transaction type.
 Writers configure transaction intent before `build()`, then call
 `Transaction::write_state`, then bind partition values through the returned `WriteState` to get a
 `BoundWriteContext`. Distributed writers can encode and transport the state before binding it.

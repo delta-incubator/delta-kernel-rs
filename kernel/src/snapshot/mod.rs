@@ -42,7 +42,10 @@ use crate::schema::SchemaRef;
 use crate::table_configuration::{InCommitTimestampEnablement, TableConfiguration};
 use crate::table_features::{physical_to_logical_column_name_and_type, Operation, TableFeature};
 use crate::table_properties::TableProperties;
-use crate::transaction::{UpdateTableOperation, UpdateTableTransactionBuilder};
+use crate::transaction::{
+    MetadataPolicy, ReplaceTableTransactionBuilder, UpdateTableOperation,
+    UpdateTableTransactionBuilder,
+};
 use crate::utils::require;
 use crate::{Engine, KernelError, KernelResult, LogCompactionWriter, Result, Version};
 
@@ -1160,6 +1163,24 @@ impl Snapshot {
         engine_info: impl Into<String>,
     ) -> UpdateTableTransactionBuilder {
         UpdateTableTransactionBuilder::new(self, operation, engine_info.into())
+    }
+
+    /// Creates a builder that replaces all active data files and changes the table definition.
+    ///
+    /// `engine_info` records the connector name and version in `commitInfo`.
+    ///
+    /// [`MetadataPolicy::Patch`] preserves unspecified metadata, including properties and
+    /// protocol. An empty patch replaces only the data files, without emitting a metadata action.
+    /// Properties referencing dropped columns remain unchanged; schemas requiring a new table
+    /// feature are rejected. Under `internal-api`, a data layout supplied to the builder replaces
+    /// the current partitioning; otherwise it is inherited. The builder stages old-file removals
+    /// during build.
+    pub fn replace_table(
+        self: Arc<Self>,
+        metadata_policy: MetadataPolicy,
+        engine_info: impl Into<String>,
+    ) -> ReplaceTableTransactionBuilder {
+        ReplaceTableTransactionBuilder::new(self, metadata_policy, engine_info.into())
     }
 
     /// Creates a [`CheckpointWriter`] for generating a checkpoint from this snapshot.
