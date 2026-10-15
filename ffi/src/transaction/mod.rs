@@ -3324,7 +3324,7 @@ mod tests {
                 &table_path,
                 &engine,
                 true,
-                None,
+                "test-engine/1.0",
                 KernelUpdateTableOperation::Write,
             )
         };

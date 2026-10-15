@@ -5,6 +5,7 @@ use std::collections::HashMap;
 
 use delta_kernel::schema::schema_ref;
 use delta_kernel::snapshot::{Snapshot, SnapshotRef};
+use delta_kernel::transaction::UpdateTableOperation;
 use delta_kernel::{Engine, FileMeta};
 use rstest::rstest;
 use serde_json::{json, Value};
@@ -67,8 +68,14 @@ async fn test_with_root_manifest_file_produces_a_self_contained_checkpoint_actio
         last_modified: 0,
         size: 1024,
     };
-    let txn = begin_transaction_with(snapshot, &engine, |builder| builder.with_data_change(true))?
-        .with_root_manifest_file(file.clone())?;
+    let txn = begin_transaction_with(
+        snapshot,
+        &engine,
+        UpdateTableOperation::Write,
+        "test-engine",
+        |builder| builder.with_data_change(true),
+    )?
+    .with_root_manifest_file(file.clone())?;
     txn.commit(&engine)?.unwrap_committed();
 
     let checkpoint_actions = read_actions_from_commit(&table_url, 1, "checkpoint")?;
@@ -212,57 +219,47 @@ fn commit_info_at(table_url: &Url, version: u64) -> Result<Value, Box<dyn std::e
     Ok(commit_infos.remove(0))
 }
 
+/// `commitInfo.dataChange` records the transaction's value; a root manifest file commit requires
+/// an explicit one.
 #[rstest]
-#[tokio::test]
-async fn test_commit_info_data_change_matches_transaction_data_change(
+#[tokio::test(flavor = "multi_thread")]
+async fn test_commit_info_data_change(
     #[values(None, Some(true), Some(false))] data_change: Option<bool>,
+    #[values(false, true)] root_manifest: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (engine, _temp_dir, table_url, snapshot) =
         setup_adaptive_metadata_table("commit_info_data_change").await?;
 
-    begin_transaction_with(snapshot, &engine, |builder| match data_change {
-        Some(data_change) => builder.with_data_change(data_change),
-        None => builder,
-    })?
-    .commit(&engine)?
-    .unwrap_committed();
+    let mut txn = begin_transaction_with(
+        snapshot,
+        &engine,
+        UpdateTableOperation::Write,
+        "test-engine",
+        |builder| match data_change {
+            Some(data_change) => builder.with_data_change(data_change),
+            None => builder,
+        },
+    )?;
+    if root_manifest {
+        txn = txn.with_root_manifest_file(FileMeta {
+            location: table_url.join("metadata/root-v1.parquet")?,
+            last_modified: 0,
+            size: 1024,
+        })?;
+        if data_change.is_none() {
+            assert_result_error_with_message(
+                txn.commit(&engine),
+                "root manifest file commit requires an explicit data_change",
+            );
+            return Ok(());
+        }
+    }
+    txn.commit(&engine)?.unwrap_committed();
     let commit_info = commit_info_at(&table_url, 1)?;
     assert_eq!(
         commit_info["dataChange"],
         json!(data_change.unwrap_or(true))
     );
-    Ok(())
-}
-
-/// A root manifest file commit records its explicit `dataChange` and rejects an unset one.
-#[rstest]
-#[tokio::test(flavor = "multi_thread")]
-async fn test_root_manifest_file_commit_info_data_change(
-    #[values(None, Some(true), Some(false))] data_change: Option<bool>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let (engine, _temp_dir, table_url, snapshot) =
-        setup_adaptive_metadata_table("root_manifest_file_data_change").await?;
-
-    let file = FileMeta {
-        location: table_url.join("metadata/root-v1.parquet")?,
-        last_modified: 0,
-        size: 1024,
-    };
-    let txn = begin_transaction_with(snapshot, &engine, |builder| match data_change {
-        Some(data_change) => builder.with_data_change(data_change),
-        None => builder,
-    })?
-    .with_root_manifest_file(file)?;
-    let Some(data_change) = data_change else {
-        assert_result_error_with_message(
-            txn.commit(&engine),
-            "root manifest file commit requires an explicit data_change",
-        );
-        return Ok(());
-    };
-    txn.commit(&engine)?.unwrap_committed();
-    let commit_info = commit_info_at(&table_url, 1)?;
-    assert_eq!(commit_info["dataChange"], json!(data_change));
     Ok(())
 }
 

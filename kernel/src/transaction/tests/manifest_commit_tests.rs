@@ -78,19 +78,6 @@ fn validate_manifest_write_rejects_root_manifest_with_file_actions() -> Result<(
     Ok(())
 }
 
-#[test]
-fn validate_manifest_write_rejects_root_manifest_without_explicit_data_change() -> Result<()> {
-    let (_engine, mut txn, _tempdir) = create_existing_table_txn()?;
-    txn.effective_table_config = adaptive_table_config();
-    let file = dummy_root_manifest_file_meta(&txn);
-    txn = txn.with_root_manifest_file(file)?;
-    assert_result_error_with_message(
-        txn.validate_manifest_write_semantics(),
-        "requires an explicit data_change",
-    );
-    Ok(())
-}
-
 // === with_manifest_commit staging ===
 
 #[test]
