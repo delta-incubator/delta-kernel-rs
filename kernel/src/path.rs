@@ -2,15 +2,24 @@
 
 use std::slice;
 use std::str::FromStr;
+#[cfg(feature = "adaptive-metadata-in-dev")]
+use std::sync::LazyLock;
 
 use delta_kernel_derive::internal_api;
 use url::Url;
 use uuid::Uuid;
 
 use crate::actions::visitors::InCommitTimestampVisitor;
+#[cfg(feature = "adaptive-metadata-in-dev")]
+use crate::actions::visitors::LastManifestCommitVisitor;
+#[cfg(feature = "adaptive-metadata-in-dev")]
+use crate::actions::{LastManifestCommit, COMMIT_INFO_NAME, LAST_MANIFEST_COMMIT_FIELD};
 use crate::engine_data::RowVisitor;
+#[cfg(feature = "adaptive-metadata-in-dev")]
+use crate::schema::lazy_schema_ref;
+use crate::schema::SchemaRef;
 use crate::utils::require;
-use crate::{Engine, FileMeta, KernelError, KernelResult, Result, Version};
+use crate::{Engine, EngineData, FileMeta, KernelError, KernelResult, Result, Version};
 
 /// The delta log subdirectory with a trailing slash for directory URL joins.
 pub(crate) const DELTA_LOG_DIR_WITH_SLASH: &str = "_delta_log/";
@@ -389,35 +398,78 @@ impl ParsedLogPath<FileMeta> {
     /// Callers should handle enablement version checks before calling this method.
     #[tracing::instrument(skip(engine), ret, fields(version = self.version, path = %self.location.as_url()))]
     pub(crate) fn read_in_commit_timestamp(&self, engine: &dyn Engine) -> KernelResult<i64> {
-        // Only works on commit files
-        if !self.is_commit() {
-            return Err(KernelError::generic(format!(
-                "read_in_commit_timestamp can only be called on commit files, got: {:?}",
-                self.file_type
-            )));
+        let actions = self.read_commit_info_batch(engine, InCommitTimestampVisitor::schema())?;
+        in_commit_timestamp_from(actions.as_ref())
+    }
+
+    /// Extract the In-Commit Timestamp and `commitInfo.lastManifestCommit` (adaptiveMetadata) from
+    /// this commit log file in a single read. The `lastManifestCommit` is `None` if the commit
+    /// carries none.
+    ///
+    /// This method performs IO by reading the commit log file from storage. Returns an error if
+    /// this is not a commit file, the file cannot be read, the In-Commit Timestamp is missing, or
+    /// the `lastManifestCommit` is invalid, including a pointer to a manifest commit newer than
+    /// this commit.
+    #[cfg(feature = "adaptive-metadata-in-dev")]
+    #[cfg_attr(not(test), allow(dead_code))]
+    #[tracing::instrument(skip(engine), ret, fields(version = self.version, path = %self.location.as_url()))]
+    pub(crate) fn read_ict_and_last_manifest_commit(
+        &self,
+        engine: &dyn Engine,
+    ) -> KernelResult<(i64, Option<LastManifestCommit>)> {
+        static SCHEMA: LazyLock<SchemaRef> = lazy_schema_ref! {
+            nullable COMMIT_INFO_NAME: {
+                nullable "inCommitTimestamp": LONG,
+                (&LAST_MANIFEST_COMMIT_FIELD),
+            },
+        };
+        let actions = self.read_commit_info_batch(engine, SCHEMA.clone())?;
+        let in_commit_timestamp = in_commit_timestamp_from(actions.as_ref())?;
+        let mut visitor = LastManifestCommitVisitor::default();
+        visitor.visit_rows_of(actions.as_ref())?;
+        if let Some(last_manifest_commit) = &visitor.last_manifest_commit {
+            require!(
+                u64::try_from(last_manifest_commit.version).is_ok_and(|v| v <= self.version),
+                KernelError::generic(format!(
+                    "lastManifestCommit version {} exceeds commit version {}",
+                    last_manifest_commit.version, self.version
+                ))
+            );
         }
+        Ok((in_commit_timestamp, visitor.last_manifest_commit))
+    }
 
-        let mut action_iter = engine.json_handler().read_json_files(
-            slice::from_ref(&self.location),
-            InCommitTimestampVisitor::schema(),
-            None,
-        )?;
-
-        // Process the actions to find inCommitTimestamp
-        // According to protocol, CommitInfo MUST be the first action when ICT is enabled,
-        // so we can optimize by only reading the first batch
-        match action_iter.next() {
-            Some(Ok(actions)) => {
-                let mut visitor = InCommitTimestampVisitor::default();
-                visitor.visit_rows_of(actions.as_ref())?;
-                visitor.in_commit_timestamp.ok_or_else(|| {
-                    KernelError::generic("In-Commit Timestamp not found in commit file")
-                })
-            }
-            Some(Err(err)) => Err(err),
+    /// Reads the first batch of this commit log file's actions with `schema`. When In-Commit
+    /// Timestamps are enabled, commitInfo is the first action, so this batch holds it. Errors if
+    /// this is not a commit file or the file has no actions.
+    fn read_commit_info_batch(
+        &self,
+        engine: &dyn Engine,
+        schema: SchemaRef,
+    ) -> KernelResult<Box<dyn EngineData>> {
+        require!(
+            self.is_commit(),
+            KernelError::generic(format!("expected a commit file, got: {:?}", self.file_type))
+        );
+        let mut actions =
+            engine
+                .json_handler()
+                .read_json_files(slice::from_ref(&self.location), schema, None)?;
+        match actions.next() {
+            Some(actions) => actions,
             None => Err(KernelError::generic("Commit file contains no actions")),
         }
     }
+}
+
+/// Extracts the In-Commit Timestamp from a batch of commit actions whose first row is the
+/// commitInfo. Errors if the timestamp is absent.
+fn in_commit_timestamp_from(actions: &dyn EngineData) -> KernelResult<i64> {
+    let mut visitor = InCommitTimestampVisitor::default();
+    visitor.visit_rows_of(actions)?;
+    visitor
+        .in_commit_timestamp
+        .ok_or_else(|| KernelError::generic("In-Commit Timestamp not found in commit file"))
 }
 
 impl ParsedLogPath<Url> {
@@ -1200,12 +1252,25 @@ pub(crate) mod tests {
         assert_result_error_with_message(result, "In-Commit Timestamp not found");
     }
 
-    #[test]
-    fn test_read_in_commit_timestamp_not_commit_file() {
+    #[rstest::rstest]
+    #[case::in_commit_timestamp(
+        |path: &ParsedLogPath<FileMeta>, engine: &dyn Engine| {
+            path.read_in_commit_timestamp(engine).map(|_| ())
+        }
+    )]
+    #[cfg_attr(
+        feature = "adaptive-metadata-in-dev",
+        case::last_manifest_commit(
+            |path: &ParsedLogPath<FileMeta>, engine: &dyn Engine| {
+                path.read_ict_and_last_manifest_commit(engine).map(|_| ())
+            }
+        )
+    )]
+    fn test_read_commit_file_method_on_non_commit_file_fails(
+        #[case] read: fn(&ParsedLogPath<FileMeta>, &dyn Engine) -> KernelResult<()>,
+    ) {
         let engine = SyncEngine::new();
         let table_url = url::Url::try_from("file:///tmp/test_table").unwrap();
-
-        // Create a checkpoint file (not a commit file)
         let checkpoint_path = table_url
             .join("_delta_log/00000000000000000000.checkpoint.parquet")
             .unwrap();
@@ -1217,12 +1282,85 @@ pub(crate) mod tests {
         .unwrap()
         .unwrap();
 
-        // Should return error for non-commit files
-        let result = parsed_path.read_in_commit_timestamp(&engine);
-        assert_result_error_with_message(
-            result,
-            "read_in_commit_timestamp can only be called on commit files",
+        assert_result_error_with_message(read(&parsed_path, &engine), "expected a commit file");
+    }
+
+    #[cfg(feature = "adaptive-metadata-in-dev")]
+    #[rstest::rstest]
+    #[case::commit_info_without_it(r#"{"commitInfo":{"inCommitTimestamp":10}}"#, Ok(None))]
+    #[case::present(
+        r#"{"commitInfo":{"inCommitTimestamp":10,"lastManifestCommit":{"version":3,"contentRootVersion":2}}}"#,
+        Ok(Some((3, 2)))
+    )]
+    #[case::pointer_equal_to_commit(
+        r#"{"commitInfo":{"inCommitTimestamp":10,"lastManifestCommit":{"version":5,"contentRootVersion":5}}}"#,
+        Ok(Some((5, 5)))
+    )]
+    #[case::missing_ict(
+        r#"{"commitInfo":{"lastManifestCommit":{"version":3,"contentRootVersion":2}}}"#,
+        Err("In-Commit Timestamp not found")
+    )]
+    #[case::commit_info_not_first(
+        concat!(
+            r#"{"txn":{"appId":"a","version":1}}"#,
+            "\n",
+            r#"{"commitInfo":{"inCommitTimestamp":10,"lastManifestCommit":{"version":3,"contentRootVersion":2}}}"#,
+        ),
+        Err("In-Commit Timestamp not found")
+    )]
+    #[case::missing_content_root_version(
+        r#"{"commitInfo":{"inCommitTimestamp":10,"lastManifestCommit":{"version":3}}}"#,
+        Err(r#""contentRootVersion""#)
+    )]
+    #[case::missing_version(
+        r#"{"commitInfo":{"inCommitTimestamp":10,"lastManifestCommit":{"contentRootVersion":2}}}"#,
+        Err(r#""version""#)
+    )]
+    #[case::content_root_newer_than_version(
+        r#"{"commitInfo":{"inCommitTimestamp":10,"lastManifestCommit":{"version":1,"contentRootVersion":2}}}"#,
+        Err("lastManifestCommit contentRootVersion 2 exceeds version 1")
+    )]
+    #[case::pointer_newer_than_commit(
+        r#"{"commitInfo":{"inCommitTimestamp":10,"lastManifestCommit":{"version":6,"contentRootVersion":2}}}"#,
+        Err("lastManifestCommit version 6 exceeds commit version 5")
+    )]
+    #[case::negative_versions(
+        r#"{"commitInfo":{"inCommitTimestamp":10,"lastManifestCommit":{"version":-1,"contentRootVersion":-2}}}"#,
+        Err("lastManifestCommit contentRootVersion -2 must be non-negative")
+    )]
+    #[tokio::test]
+    async fn test_read_ict_and_last_manifest_commit(
+        #[case] commit_content: &str,
+        #[case] expected: Result<Option<(i64, i64)>, &str>,
+    ) {
+        let store = Arc::new(InMemory::new());
+        let engine = SyncEngine::new_with_store(store.clone());
+        let table_root = "memory://test/";
+        let commit_version = 5;
+        add_commit(
+            table_root,
+            store.as_ref(),
+            commit_version,
+            commit_content.to_string(),
+        )
+        .await
+        .unwrap();
+        let parsed_path = ParsedLogPath::create_parsed_published_commit(
+            &url::Url::parse(table_root).unwrap(),
+            commit_version,
         );
+
+        let result = parsed_path.read_ict_and_last_manifest_commit(&engine);
+        match expected {
+            Err(message) => assert_result_error_with_message(result, message),
+            Ok(expected) => assert_eq!(
+                result.unwrap(),
+                (
+                    10,
+                    expected.map(|(v, c)| LastManifestCommit::new(v, c).unwrap())
+                )
+            ),
+        }
     }
 
     /// Verifies `new_sidecar` builds a `<version:020>.checkpoint.<uuid>.parquet` filename

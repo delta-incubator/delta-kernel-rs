@@ -15,7 +15,7 @@ use crate::table_features::{
 };
 use crate::transaction::domain_metadata::validate_unique_domains;
 use crate::transaction::schema_evolution::{evolve_table_config, SchemaOperation};
-use crate::transaction::{Transaction, UpdateTable, UpdateTableOperation};
+use crate::transaction::{ExecutionMode, Transaction, UpdateTable, UpdateTableOperation};
 use crate::utils::current_time_ms;
 use crate::{Engine, KernelError, KernelResult, Result};
 
@@ -229,11 +229,11 @@ impl TransactionBuilder<UpdateTable> {
     }
 }
 
-fn try_new_update_table(
+fn try_new_update_table<MODE: ExecutionMode>(
     builder: UpdateTableTransactionBuilder,
     committer: Box<dyn Committer>,
     engine: &dyn Engine,
-) -> KernelResult<Transaction> {
+) -> KernelResult<Transaction<UpdateTable, MODE>> {
     let TransactionBuilder {
         common_state,
         local_state,
@@ -646,13 +646,19 @@ mod tests {
             ))
         };
         match action {
-            StagedFileAction::Add => transaction.add_files_metadata.push(data()),
+            StagedFileAction::Add => transaction
+                .staged_data_changes
+                .add_files_metadata
+                .push(data()),
             StagedFileAction::Remove | StagedFileAction::DeletionVectorUpdate => {
                 let data = crate::FilteredEngineData::with_all_rows_selected(data());
                 match action {
-                    StagedFileAction::Remove => transaction.remove_files_metadata.push(data),
+                    StagedFileAction::Remove => transaction
+                        .staged_data_changes
+                        .remove_files_metadata
+                        .push(data),
                     StagedFileAction::DeletionVectorUpdate => {
-                        transaction.dv_matched_files.push(data)
+                        transaction.staged_data_changes.dv_matched_files.push(data)
                     }
                     StagedFileAction::Add => unreachable!(),
                 }
@@ -695,6 +701,7 @@ mod tests {
 
         let values = Arc::new(Int32Array::from_iter_values([1])) as ArrayRef;
         transaction
+            .staged_data_changes
             .add_files_metadata
             .push(Box::new(ArrowEngineData::new(RecordBatch::try_from_iter(
                 [("value", values)],
