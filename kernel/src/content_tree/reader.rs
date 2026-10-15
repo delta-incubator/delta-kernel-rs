@@ -19,10 +19,10 @@ use crate::actions::{CheckpointAction, ADD_NAME, ADD_SCHEMA, LOG_ADD_SCHEMA};
 use crate::amt_path_util::amt_manifest_filemeta;
 use crate::content_tree::{
     struct_expr_from_schema, ColumnFile, ContentTreeNodeEntry, DataContentType, DataFileFormat,
-    TrackingInfo, TrackingStatus, COLUMN_FILES, CONTENT_TYPE, DV_INFO, FILE_FORMAT,
-    FILE_SIZE_IN_BYTES, FIRST_ROW_ID, FORMAT_VERSION, LOCATION, MANIFEST_DV, MANIFEST_INFO,
-    MODIFIED_SNAPSHOT_ID, PARTITION_SPEC_ID, RECORD_COUNT, SEQUENCE_NUMBER, TRACKING,
-    TRACKING_COLUMNS, TRACKING_STATUS,
+    TrackingInfo, TrackingStatus, AMT_FORMAT_VERSION, COLUMN_FILES, CONTENT_TYPE, DV_INFO,
+    FILE_FORMAT, FILE_SIZE_IN_BYTES, FIRST_ROW_ID, FORMAT_VERSION, LOCATION, MANIFEST_DV,
+    MANIFEST_INFO, MODIFIED_SNAPSHOT_ID, PARTITION_SPEC_ID, RECORD_COUNT, SEQUENCE_NUMBER,
+    TRACKING, TRACKING_COLUMNS, TRACKING_STATUS,
 };
 use crate::engine_data::{
     EngineData, FilteredEngineData, GetData, RowVisitor, StructList, TypedGetData as _,
@@ -112,6 +112,8 @@ struct LeafRef {
     /// The root entry's `manifestInfo.formatVersion`: the format version the leaf was written
     /// with.
     format_version: i32,
+    /// Whether the root entry carries a non-empty `columnFiles` list: column updates to the leaf.
+    has_column_files: bool,
 }
 
 /// The columns [`LeafRef::try_from_getters`] reads, in getter order: the root entry's own fields
@@ -123,12 +125,14 @@ static LEAF_REF_COLUMNS: LazyLock<ColumnNamesAndTypes> = LazyLock::new(|| {
         ColumnName::new([FILE_SIZE_IN_BYTES]),
         ColumnName::new([MANIFEST_INFO, MANIFEST_DV]),
         ColumnName::new([MANIFEST_INFO, FORMAT_VERSION]),
+        ColumnName::new([COLUMN_FILES]),
     ];
     let types = [
         DataType::STRING,
         DataType::LONG,
         DataType::BINARY,
         DataType::INTEGER,
+        ArrayType::new(ColumnFile::to_schema(), false).into(),
     ];
     let names = names.into_iter().chain(tracking_names.iter().cloned());
     let types = types.into_iter().chain(tracking_types.iter().cloned());
@@ -159,28 +163,39 @@ impl LeafRef {
             parent_info: TrackingInfo::try_from_getters(row, tracking)?,
             manifest_dv: manifest_dv.map(Bytes::copy_from_slice),
             format_version: fields[3].get(row, FORMAT_VERSION)?,
+            has_column_files: has_column_files(fields[4].get_struct_list(row, COLUMN_FILES)?)?,
         })
     }
 
-    /// Rejects a parent manifest deletion vector, which the read path cannot yet apply to the
-    /// leaf's entries.
+    /// Rejects a leaf the read path cannot yet read: one written before Iceberg v4, or one whose
+    /// parent has a manifest deletion vector or column files, which the read path cannot yet apply
+    /// to the leaf's entries.
     ///
     /// # Errors
-    /// Returns an unsupported error if the parent has a manifest deletion vector, or an invalid
-    /// checkpoint error if it sets only one of `manifestInfo.dv` and `dvCardinality`.
-    fn check_manifest_dv(&self) -> KernelResult<()> {
+    /// Returns an unsupported error if the parent's `manifestInfo.formatVersion` is not
+    /// [`AMT_FORMAT_VERSION`], or the parent has a manifest deletion vector or column files.
+    fn check_readable(&self) -> KernelResult<()> {
         let location = &self.file_meta.location;
-        match (&self.manifest_dv, self.manifest_dv_cardinality) {
-            (None, None) => Ok(()),
-            (Some(_), Some(_)) => Err(KernelError::unsupported(format!(
+        if self.format_version != AMT_FORMAT_VERSION {
+            return Err(KernelError::unsupported(format!(
+                "AMT read path only supports format version {AMT_FORMAT_VERSION} leaf \
+                 manifests; DataManifest entry '{location}' has {MANIFEST_INFO}.{FORMAT_VERSION} {}",
+                self.format_version
+            )));
+        }
+        if self.manifest_dv.is_some() {
+            return Err(KernelError::unsupported(format!(
                 "AMT read path does not yet support manifest deletion vectors; \
                  DataManifest entry '{location}' has {MANIFEST_INFO}.{MANIFEST_DV} set"
-            ))),
-            _ => Err(KernelError::invalid_checkpoint(format!(
-                "AMT DataManifest entry '{location}' must set both or neither of \
-                 {MANIFEST_INFO}.{MANIFEST_DV} and {MANIFEST_INFO}.{MANIFEST_DV_CARDINALITY}"
-            ))),
+            )));
         }
+        if self.has_column_files {
+            return Err(KernelError::unsupported(format!(
+                "AMT read path does not yet support column files on a leaf manifest; \
+                 DataManifest entry '{location}' has {COLUMN_FILES} set"
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -364,9 +379,10 @@ impl LeafReadContext {
     /// [`EntryConverter::convert`]. Batches must be passed in manifest order, since null
     /// `firstRowId`s are assigned sequentially across them.
     ///
-    /// Parents with a manifest deletion vector are rejected before the leaf is read (see
-    /// [`LeafRef::check_manifest_dv`]). TODO(#3663): supporting them means masking the selection
-    /// after `firstRowId` assignment, which must still run over every entry.
+    /// Unreadable leaves, including those whose parent has a manifest deletion vector, are
+    /// rejected before they are read (see [`LeafRef::check_readable`]). TODO(#3663): supporting
+    /// manifest deletion vectors means masking the selection after `firstRowId` assignment, which
+    /// must still run over every entry.
     ///
     /// # Errors
     /// Returns an error if an entry is malformed for a leaf (see [`LeafEntryVisitor`]), or any
@@ -425,7 +441,7 @@ impl LeafActions {
     ///
     /// # Errors
     /// Returns an error if two leaves share a location (their batches could not be told apart), if
-    /// a parent has a manifest deletion vector (see [`LeafRef::check_manifest_dv`]), if a leaf's
+    /// a leaf cannot yet be read (see [`LeafRef::check_readable`]), if a leaf's
     /// context cannot be built (see [`LeafReadContext::new`]), or if the engine fails to start the
     /// read.
     fn try_new(
@@ -444,7 +460,7 @@ impl LeafActions {
         let pending = leaves
             .iter()
             .map(|leaf| {
-                leaf.check_manifest_dv()?;
+                leaf.check_readable()?;
                 let location = leaf.file_meta.location.to_string();
                 let context =
                     LeafReadContext::new(engine, &leaf.tracking, ctx).map_err(|e| match e {
@@ -975,7 +991,7 @@ mod tests {
     use crate::schema::StructType;
     use crate::unit_test_utils::adaptive_metadata_fixtures::checkpoint_action_with_root;
     use crate::unit_test_utils::assert_result_error_with_message;
-    use crate::{FileSize, ParquetFooter, ParquetHandler, PredicateRef, ResultIteratorStatic};
+    use crate::{FileSize, ParquetFooter, ParquetHandler, PredicateRef};
 
     /// The [`ReadContext`] the tests read against; [`expected_add_row`] reads its values back.
     /// Non-default values so a hard-coded `modificationTime` / `dataChange` would fail.
@@ -1306,7 +1322,7 @@ mod tests {
         fn write_parquet_file(
             &self,
             location: Url,
-            data: ResultIteratorStatic<Box<dyn EngineData>>,
+            data: KernelResultIteratorStatic<Box<dyn EngineData>>,
         ) -> KernelResult<FileSize> {
             self.inner.write_parquet_file(location, data)
         }
@@ -1441,7 +1457,7 @@ mod tests {
             1000,
         );
         let empty_leaf = write_leaf(&engine, "metadata/empty.parquet", &[], 6, 5000);
-        let leaf3 = write_leaf(
+        let mut leaf3 = write_leaf(
             &engine,
             "metadata/leaf3.parquet",
             &[
@@ -1451,6 +1467,8 @@ mod tests {
             7,
             9000,
         );
+        // An empty `columnFiles` list carries no column updates, so the leaf still reads.
+        leaf3.column_files = Some(vec![]);
         // Non-live leaves are never read, so their files need not exist.
         let deleted = data_manifest_entry("metadata/gone.parquet", 1, TrackingStatus::Deleted);
         let replaced =
@@ -1488,8 +1506,16 @@ mod tests {
         );
     }
 
-    #[test]
-    fn leaf_actions_rejects_batch_from_unexpected_file() {
+    #[rstest]
+    #[case::unexpected_file(
+        Scalar::from("memory:///table/other.parquet"),
+        "batch from 'memory:///table/other.parquet' matches no remaining leaf manifest"
+    )]
+    #[case::null_file(Scalar::Null(DataType::STRING), "batch has no `_file` value")]
+    fn leaf_actions_rejects_batch_without_matching_file(
+        #[case] file: Scalar,
+        #[case] message: &str,
+    ) {
         let engine = SyncEngine::new();
         let leaf = "memory:///table/leaf.parquet".to_string();
         let mut actions = LeafActions {
@@ -1499,19 +1525,15 @@ mod tests {
             )]),
             batches: None,
         };
-        let schema = Arc::new(StructType::new_unchecked([StructField::not_null(
+        let schema = Arc::new(StructType::new_unchecked([StructField::nullable(
             FILE_PATH_COLUMN,
             DataType::STRING,
         )]));
-        let other = "memory:///table/other.parquet";
         let batch = engine
             .evaluation_handler()
-            .create_many(schema, vec![vec![Scalar::from(other)]])
+            .create_many(schema, vec![vec![file]])
             .unwrap();
-        assert_result_error_with_message(
-            actions.convert(batch.as_ref()),
-            &format!("batch from '{other}' matches no remaining leaf manifest"),
-        );
+        assert_result_error_with_message(actions.convert(batch.as_ref()), message);
     }
 
     #[rstest]
@@ -1539,21 +1561,27 @@ mod tests {
     }
 
     #[rstest]
-    #[case::manifest_dv(true, true, "does not yet support manifest deletion vectors")]
-    #[case::dv_without_cardinality(true, false, "both or neither")]
-    #[case::cardinality_without_dv(false, true, "both or neither")]
-    fn read_add_actions_from_amt_rejects_parent_manifest_dv(
-        #[case] dv: bool,
-        #[case] cardinality: bool,
+    #[case::manifest_dv(
+        |leaf: &mut ContentTreeNodeEntry| {
+            leaf.manifest_info.as_mut().unwrap().dv = Some(Bytes::from_static(b"dv"))
+        },
+        "does not yet support manifest deletion vectors"
+    )]
+    #[case::pre_v4_leaf(
+        |leaf: &mut ContentTreeNodeEntry| leaf.manifest_info.as_mut().unwrap().format_version = 0,
+        "has manifestInfo.formatVersion 0"
+    )]
+    #[case::column_files(
+        |leaf: &mut ContentTreeNodeEntry| leaf.column_files = Some(vec![test_column_file()]),
+        "has columnFiles set"
+    )]
+    fn read_add_actions_from_amt_rejects_unreadable_leaf(
+        #[case] edit_parent: fn(&mut ContentTreeNodeEntry),
         #[case] message: &str,
     ) {
         let engine = memory_engine();
         let mut leaf = write_leaf(&engine, "metadata/leaf.parquet", &[], 5, 100);
-        leaf.manifest_info = Some(ManifestInfo {
-            dv: dv.then(|| Bytes::from_static(b"dv")),
-            dv_cardinality: cardinality.then_some(1),
-            ..Default::default()
-        });
+        edit_parent(&mut leaf);
         let checkpoint = write_root(&engine, &[leaf]);
         let err = read_tree(&engine, &checkpoint).unwrap_err().to_string();
         assert!(err.contains(message), "{err}");
