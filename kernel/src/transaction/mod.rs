@@ -1092,15 +1092,14 @@ impl<STATE, MODE: ExecutionMode> Transaction<STATE, MODE> {
 
     /// Finalizes the data-change default before commit validation and action generation.
     ///
-    /// The update builder initially defaults to `true`. For existing-table transactions with
-    /// schema changes and no connector-supplied value, commit infers `false` without staged file
-    /// batches and `true` otherwise. Add, Remove, and DV-update batches count even when empty or
-    /// fully unselected. Other transactions retain their configured value or `true` default.
+    /// Without a connector-supplied value, commit infers `false` without staged file batches and
+    /// `true` otherwise. Add, Remove, and DV-update batches count even when empty or fully
+    /// unselected.
     ///
     /// Explicit connector values are preserved. Batch presence does not establish logical changes,
     /// so logical-preserving rewrites such as OPTIMIZE must explicitly request `false`.
     pub(super) fn resolve_data_change(&mut self) {
-        if self.infer_data_change && self.should_emit_metadata {
+        if self.infer_data_change {
             self.data_change = self.has_data_file_actions();
         }
     }

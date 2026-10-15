@@ -258,7 +258,7 @@ async fn test_commit_info_data_change(
     let commit_info = commit_info_at(&table_url, 1)?;
     assert_eq!(
         commit_info["dataChange"],
-        json!(data_change.unwrap_or(true))
+        json!(data_change.unwrap_or(false))
     );
     Ok(())
 }
