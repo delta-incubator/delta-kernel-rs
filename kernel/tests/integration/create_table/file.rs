@@ -157,6 +157,21 @@ fn test_create_table_file_map_key_rejected(#[case] map: MapType) -> Result<()> {
     Ok(())
 }
 
+/// Partitioning on a file column is rejected (a `file` value is a group and has no partition-value
+/// serialization).
+#[test]
+fn test_create_table_file_partitioning_rejected() -> Result<()> {
+    let (_temp_dir, table_path, engine) = test_table_setup()?;
+
+    let result = create_table(&table_path, top_level_file_schema(), "Test/1.0")
+        .with_data_layout(DataLayout::partitioned(["col"]))
+        .build(engine.as_ref(), Box::new(FileSystemCommitter::new()));
+
+    assert_result_error_with_message(result, "must have primitive types");
+
+    Ok(())
+}
+
 /// Clustering on a file column is rejected (a `file` value is not a comparable type).
 #[test]
 fn test_create_table_file_clustering_rejected() -> Result<()> {

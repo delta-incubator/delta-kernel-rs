@@ -179,6 +179,10 @@ pub(crate) enum StaleAnnotationPolicy {
 ///      "metadata":{"delta.columnMapping.id":1,"delta.columnMapping.physicalName":"col-b"}}
 ///   ]}
 ///   ```
+/// - `seen_ids` is provided, the field is a `file`, and one of the six ids reserved after its own
+///   id for its sub-fields (`id + 1` through `id + 6`) is already claimed by another field, or is
+///   claimed by a field visited later. The check fires on whichever of the two is visited second.
+///   An id above the protocol's 32-bit maximum is rejected too.
 /// - `current_field_siblings` is provided and the current field's
 ///   `delta.columnMapping.physicalName` is already claimed by a sibling. Example rejection (two
 ///   siblings share `delta.columnMapping.physicalName="x"`):
@@ -291,6 +295,32 @@ pub(crate) fn validate_and_extract_column_mapping_annotations<'a>(
                     field.name()
                 )))
             })?;
+            // A `file` column also reserves the ids of its implicit sub-fields, so no other column
+            // may claim them.
+            if matches!(field.data_type(), DataType::File(_)) {
+                for offset in 1..=FILE_SUBFIELD_ID_COUNT {
+                    let reserved = id
+                        .checked_add(offset)
+                        .filter(|reserved| *reserved <= MAX_COLUMN_MAPPING_ID)
+                        .ok_or_else(|| {
+                            KernelError::schema(format!(
+                                "The sub-field ids of `file` column '{}' (column mapping id {id}) \
+                                 exceed the Delta protocol's 32-bit non-negative maximum \
+                                 ({MAX_COLUMN_MAPPING_ID})",
+                                field.name()
+                            ))
+                        })?;
+                    seen_ids
+                        .insert(reserved, field.name())
+                        .map_or(Ok(()), |prev| {
+                            Err(KernelError::schema(format!(
+                                "Duplicate column mapping ID {reserved} reserved for a sub-field \
+                                 of `file` column '{}' and assigned to '{prev}'",
+                                field.name()
+                            )))
+                        })?;
+                }
+            }
         }
         // Dedup `physicalName` among siblings. Two distinct columns with the same full
         // physical path must diverge at some ancestor struct, where two siblings share
@@ -434,18 +464,6 @@ pub(crate) fn assign_column_mapping_metadata(
 /// field.
 type NestedFieldIds = serde_json::Map<String, serde_json::Value>;
 
-/// Advances `max_id` by one and returns the new value, surfacing `i64` overflow as an error.
-///
-/// `assign_column_mapping_metadata` allocates fresh column-mapping IDs as `max_id + 1`. A
-/// connector that preserves an `id` near `i64::MAX` and then asks kernel to allocate a fresh
-/// sibling would silently wrap to `i64::MIN` without this guard, producing a negative id that
-/// would then trip the negative-id check on the next round-trip.
-///
-/// In practice this should be unreachable: the Delta protocol restricts `columnMapping.id` to a
-/// 32-bit non-negative integer (`i32::MAX` ~ 2.1B), so anything near `i64::MAX` (~ 9.2
-/// quintillion) is over four billion times the protocol-permitted maximum and points at a bug
-/// in the connector's id allocator rather than legitimate id exhaustion. The error message
-/// reflects that diagnosis.
 /// The number of field ids a `file` column reserves after its own id, one per sub-field (`uri` =
 /// +1, `offset` = +2, `size` = +3, `content_type` = +4, `checksum` = +5, `inline` = +6). The
 /// offsets match the Iceberg `FILE` type. The sub-fields are implicit (they are not schema
@@ -494,6 +512,18 @@ fn collect_file_slot_paths(data_type: &DataType, path: &str, out: &mut Vec<Strin
     }
 }
 
+/// Advances `max_id` by one and returns the new value, surfacing `i64` overflow as an error.
+///
+/// `assign_column_mapping_metadata` allocates fresh column-mapping IDs as `max_id + 1`. A
+/// connector that preserves an `id` near `i64::MAX` and then asks kernel to allocate a fresh
+/// sibling would silently wrap to `i64::MIN` without this guard, producing a negative id that
+/// would then trip the negative-id check on the next round-trip.
+///
+/// In practice this should be unreachable: the Delta protocol restricts `columnMapping.id` to a
+/// 32-bit non-negative integer (`i32::MAX` ~ 2.1B), so anything near `i64::MAX` (~ 9.2
+/// quintillion) is over four billion times the protocol-permitted maximum and points at a bug
+/// in the connector's id allocator rather than legitimate id exhaustion. The error message
+/// reflects that diagnosis.
 fn next_column_mapping_id(max_id: &mut i64) -> KernelResult<i64> {
     let next = max_id.checked_add(1).ok_or_else(|| {
         KernelError::generic(format!(
@@ -1519,6 +1549,72 @@ mod tests {
             ),
             "Duplicate column mapping ID",
         );
+    }
+
+    /// A `file` column with id 1 reserves ids 2 through 7 for its sub-fields, so a sibling that
+    /// claims any of them is rejected whichever field is visited first.
+    #[rstest::rstest]
+    fn test_file_reserved_subfield_id_collision_rejected(
+        #[values(ColumnMappingMode::Name, ColumnMappingMode::Id)] mode: ColumnMappingMode,
+        #[values(true, false)] file_first: bool,
+        #[values(2, 7)] sibling_id: i64,
+    ) {
+        let file = make_cm_field("f", 1, DataType::file_type());
+        let sibling = make_cm_field("x", sibling_id, DataType::LONG);
+        let schema = if file_first {
+            StructType::try_new([file, sibling]).unwrap()
+        } else {
+            StructType::try_new([sibling, file]).unwrap()
+        };
+        assert_result_error_with_message(
+            validate_schema_column_mapping(&schema, mode),
+            "Duplicate column mapping ID",
+        );
+    }
+
+    #[test]
+    fn test_file_reserved_id_collision_rejected() {
+        let schema = schema! {
+            (make_cm_field("f", 1, DataType::file_type())),
+            (make_cm_field("x", 2, DataType::LONG)),
+        };
+        let mut max_id = find_max_column_id_in_schema(&schema).unwrap();
+        let assigned = assign_column_mapping_metadata(&schema, &mut max_id, false).unwrap();
+        assert_result_error_with_message(
+            validate_schema_column_mapping(&assigned, ColumnMappingMode::Id),
+            "Duplicate column mapping ID",
+        );
+    }
+
+    #[rstest::rstest]
+    fn test_file_reserved_subfield_ids_leave_other_ids_usable(
+        #[values(ColumnMappingMode::Name, ColumnMappingMode::Id)] mode: ColumnMappingMode,
+        #[values(true, false)] file_first: bool,
+    ) {
+        // Ids 2 through 7 are reserved by `f`; 8 is the first id past them.
+        let file = make_cm_field("f", 1, DataType::file_type());
+        let sibling = make_cm_field("x", 8, DataType::LONG);
+        let schema = if file_first {
+            StructType::try_new([file, sibling]).unwrap()
+        } else {
+            StructType::try_new([sibling, file]).unwrap()
+        };
+        validate_schema_column_mapping(&schema, mode).unwrap();
+    }
+
+    #[test]
+    fn test_file_reserved_subfield_ids_beyond_protocol_max_rejected() {
+        let schema = schema! {
+            (make_cm_field("f", MAX_COLUMN_MAPPING_ID - 5, DataType::file_type())),
+        };
+        assert_result_error_with_message(
+            validate_schema_column_mapping(&schema, ColumnMappingMode::Id),
+            "exceed the Delta protocol's 32-bit non-negative maximum",
+        );
+        let fits = schema! {
+            (make_cm_field("f", MAX_COLUMN_MAPPING_ID - 6, DataType::file_type())),
+        };
+        validate_schema_column_mapping(&fits, ColumnMappingMode::Id).unwrap();
     }
 
     #[rstest::rstest]
