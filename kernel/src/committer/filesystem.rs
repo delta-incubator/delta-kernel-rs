@@ -98,6 +98,7 @@ mod tests {
     use crate::object_store::ObjectStoreExt as _;
     use crate::path::LogRoot;
     use crate::schema::schema_ref;
+    use crate::transaction::UpdateTableOperation;
 
     #[tokio::test]
     async fn disallow_filesystem_committer_for_catalog_managed_tables() {
@@ -121,7 +122,8 @@ mod tests {
         // Try to commit a transaction with FileSystemCommitter
         let committer = Box::new(FileSystemCommitter::new());
         let err = snapshot
-            .transaction(committer, &engine)
+            .update_table(UpdateTableOperation::Write, "test-engine")
+            .build(&engine, committer)
             .unwrap()
             .commit(&engine)
             .unwrap_err();

@@ -108,7 +108,7 @@ and per-row `DEFAULT` requests need separate handling.
 # use delta_kernel::engine::arrow_conversion::TryIntoArrow;
 # use delta_kernel::engine::arrow_data::ArrowEngineData;
 # use delta_kernel::expressions::Scalar;
-# use delta_kernel::transaction::CommitResult;
+# use delta_kernel::transaction::{CommitResult, UpdateTableOperation};
 # use delta_kernel::{Result, KernelError, SnapshotRef};
 # use delta_kernel_default_engine::executor::TaskExecutor;
 # use delta_kernel_default_engine::DefaultEngine;
@@ -126,7 +126,9 @@ async fn append_with_defaults(
 ) -> Result<CommitResult> {
     // 1. Start the transaction.
     let table_schema = snapshot.schema();
-    let mut txn = snapshot.transaction(Box::new(FileSystemCommitter::new()), engine)?;
+    let mut txn = snapshot
+        .update_table(UpdateTableOperation::Write, "my-app/1.0")
+        .build(engine, Box::new(FileSystemCommitter::new()))?;
 
     // 2. Build one reusable mapping from input columns or parsed defaults.
     let defaults = txn.top_level_column_defaults()?;

@@ -39,7 +39,11 @@ Under `internal-api`, `.with_snapshot_hint(hint)` constructs a snapshot without 
 `_delta_log` root before grouping and checkpoint selection. Kernel preserves the supplied locations;
 the connector must canonicalize them into the same URL form as the table root. Build checks the
 hint's table membership against the builder's root and validates structural consistency. The
-connector owns protocol/metadata provenance and freshness.
+connector owns protocol/metadata provenance, publication state, and freshness.
+`Snapshot::to_snapshot_hint()` exports retained state without engine I/O, preserving build-time
+freshness, the selected log files and publication watermark, a matching checkpoint hint, and any CRC
+resolved at the snapshot version. It rejects log compactions. The FFI exports one complete borrowed
+typed hint through a callback; connectors must copy any state retained after the callback returns.
 
 **Snapshot loading internals:**
 1. Ordinary builds discover commits and checkpoints through **LogSegment**
@@ -78,8 +82,20 @@ file listing without re-scanning the table.
 
 ## Write Path
 
-`Snapshot` -> `Transaction` -> (`WriteState` -> `BoundWriteContextBuilder` ->
-`BoundWriteContext`) -> commit
+`Snapshot` -> `UpdateTableTransactionBuilder` -> `Transaction` -> (`WriteState` ->
+`BoundWriteContextBuilder` -> `BoundWriteContext`) -> commit
+
+`TransactionBuilder<T>` shares configuration setters across transaction types. The sealed
+`TransactionType` trait selects `T::BuilderState`; each type supplies its own constructors, custom
+setters, and build validation. `UpdateTableTransactionBuilder` aliases
+`TransactionBuilder<UpdateTable>` and builds `Transaction<UpdateTable>`, the default transaction
+type. Construct it with `snapshot.update_table(operation, engine_info)`, which requires both values.
+`CreateTableTransactionBuilder` aliases `TransactionBuilder<CreateTable>` and builds
+`Transaction<CreateTable>`. Its constructor requires the path, schema, and engine info and fixes
+the operation to `CREATE TABLE`. Operations and engine info cannot be changed on either builder
+or transaction.
+Schema changes use `UpdateTable`, including the
+`UpdateTableOperation::AlterTable` operation.
 
 Kernel captures table-wide configuration in a transportable `WriteState`. Each writer binds
 partition values and any logical materialized row-tracking columns to create a `BoundWriteContext`
@@ -88,8 +104,9 @@ directory. The transaction registers the resulting files, enforces protocol comp
 commit actions, and delegates the atomic commit to a `Committer`.
 
 **Data-write steps:**
-1. Create `Transaction` from a snapshot with a `Committer` (e.g. `FileSystemCommitter`)
-2. Call `txn.write_state()` after configuring the transaction, then use
+1. Configure an `UpdateTableTransactionBuilder` from a snapshot and build it with a `Committer`
+   (e.g. `FileSystemCommitter`)
+2. Call `txn.write_state()`, then use
    `WriteState::write_context_builder()` to bind partition values and build a `BoundWriteContext`.
    Distributed writers can encode the state and decode it on each worker before binding partition
    values.

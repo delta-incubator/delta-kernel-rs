@@ -753,31 +753,37 @@ descriptor and read it during that call.
 #### Example: snapshot hint input
 
 A snapshot hint is a complete value when its setter call begins, so one borrowed aggregate is the
-appropriate input. The C-facing shape is equivalent to:
+appropriate input. The exported Rust API is:
 
 ```rust
 #[repr(C)]
 pub struct FfiSnapshotHint {
     pub version: Version,
+    pub freshness: FfiSnapshotHintFreshness,
     pub log_paths: LogPathArray,
     pub protocol: FfiProtocol,
     pub metadata: FfiMetadata,
-    pub last_checkpoint: *const FfiSnapshotHintLastCheckpoint,
+    pub last_checkpoint: *const FfiLastCheckpoint,
+    pub crc: *const FfiCrc,
+    pub publication_watermark: FfiPublicationWatermark,
 }
 
-pub unsafe extern "C" fn snapshot_builder_set_snapshot_hint(
-    builder: *mut Handle<MutableFfiSnapshotBuilder>,
-    hint: *const FfiSnapshotHint,
-) -> ExternResult<bool>;
+pub unsafe extern "C" fn snapshot_builder_with_snapshot_hint(
+    builder: Handle<ExclusiveSnapshotBuilder>,
+    value: &FfiSnapshotHint,
+) -> ExternResult<Handle<ExclusiveSnapshotBuilder>>;
 ```
 
 The host keeps `hint` and all reachable memory alive for the call. Rust validates and copies the
 full graph before changing the builder. One call avoids partial state and callback choreography.
+The setter consumes the builder on both success and error, returning its replacement on success.
 
 ## Key Files
 
 - `src/lib.rs` -- main FFI entry points and type definitions
-- `src/delta_types.rs` -- reusable borrowed C representations of Delta state and actions
+- `src/delta_types.rs` -- reusable borrowed C representations of Delta state and actions,
+  with their backing storage and conversions colocated
+- `src/snapshot_hint/` -- typed snapshot-hint input and callback export
 - `src/handle.rs` -- opaque handle system for passing Rust objects across FFI
 - `src/column_default.rs` -- column-default (`allowColumnDefaults`) reads and the write-path ack
 - `src/scan.rs` -- scan FFI interface
@@ -794,7 +800,7 @@ full graph before changing the builder. One call avoids partial state and callba
 get_default_engine() -> get_snapshot_builder() -> snapshot_builder_build() -> scan() -> scan_metadata() -> read + transform
 ```
 
-Snapshot builder API (`ffi/src/lib.rs`):
+Snapshot builder API (`ffi/src/lib.rs` and `ffi/src/snapshot_hint/mod.rs`):
 - `get_snapshot_builder(path, engine)` -- fresh snapshot from a table path
 - `get_snapshot_builder_from(old_snapshot, engine)` -- incremental update reusing an existing snapshot (avoids re-reading the log)
 - `snapshot_builder_with_version(builder, version)` -- optional: pin to a specific version
@@ -815,6 +821,25 @@ dropped. Snapshot-hint inputs and all nested pointers are borrowed only for the 
 into the builder. Cross-component and table validation occurs when the builder is built. The caller
 must eventually pass the final returned handle to either `snapshot_builder_build` or
 `free_snapshot_builder`.
+
+`snapshot_to_snapshot_hint(snapshot, engine, context, visitor)` exports retained state without
+engine I/O through one callback with a complete borrowed `FfiSnapshotHint`. Both input handles are
+borrowed. The callback runs once on success and is not invoked on error. All nested pointers expire
+when the callback returns; copy retained values during the callback. No hint handle is returned.
+Supply the copied values through `snapshot_builder_with_snapshot_hint` when rebuilding a snapshot.
+The hint preserves build-time freshness, not current freshness, and includes only a matching
+checkpoint hint and an at-version CRC. Compaction files are unsupported.
+
+Export includes an explicit publication watermark,
+preserving absence even when published commits are not represented by the retained paths.
+`FfiSnapshotHint.publication_watermark` is a tagged `FfiPublicationWatermark`:
+`InferFromLogPaths` derives publication from supplied published commit paths,
+`NoPublishedCommits` explicitly preserves absence without inference, and `PublishedThrough(version)`
+preserves the observed highest published version independently of the retained paths. Export
+always uses an explicit variant. Neither the snapshot version nor its freshness claim is a
+publication watermark.
+When built with `adaptive-metadata-in-dev`, typed export rejects CRCs containing experimental
+adaptive-metadata `lastManifestCommit` or Add `backReference` state.
 
 Snapshot accessors (`ffi/src/lib.rs`) read a built `SharedSnapshot` without I/O -- e.g. `version`,
 `snapshot_timestamp`, and `snapshot_file_stats`, which returns `OptionalValue<FfiFileStats>` (scalar
@@ -876,19 +901,35 @@ reuses `ScanMetadataArrowResult` with null `transforms`.
 
 ## Write Flow
 
+Rust builders are aliases for `TransactionBuilder<CreateTable>` and
+`TransactionBuilder<UpdateTable>`. Keep their concrete opaque FFI descriptors and explicit
+`create_table_txn_builder_*` / `update_table_txn_builder_*` exports. Shared Rust setters do not imply
+a universal C handle; custom setters are exposed only for their applicable builder descriptor.
+Rust-only builder aliases carry `cbindgen:ignore` so header generation uses the descriptors rather
+than monomorphizing builder state.
+
 ```
-get_default_engine() -> transaction() -> with_engine_info() -> with_operation() -> add_files() -> commit()
-                                                                                  |
-                                                                                  v
+get_default_engine() -> get_snapshot_builder() -> snapshot_builder_build()
+  -> new_update_table_txn_builder(snapshot, operation, engine_info, engine)
+  -> update_table_txn_builder_build()
+  -> update_table_txn_add_files() -> update_table_txn_commit()
+                    |
+                    v
               committed_transaction_version / committed_transaction_post_commit_snapshot
                                                                                   |
                                                                                   v
                                                                   free_committed_transaction
 ```
 
-`commit()` and `create_table_commit()` return a `Handle<ExclusiveCommittedTransaction>` that the caller can read via `committed_transaction_version` and `committed_transaction_post_commit_snapshot`, then must release with `free_committed_transaction`. The post-commit snapshot, when present, is a separate `SharedSnapshot` handle that must be freed with `free_snapshot`.
+Update operations and engine info are required at construction and cannot be changed.
+`new_update_table_txn_builder` accepts a typed operation;
+`new_update_table_txn_builder_with_custom_operation` accepts a connector-defined name.
+Both accept engine info and an engine for UTF-8 errors, borrow all inputs, and retain their own
+snapshot reference only after decoding the strings. Custom-name restrictions are validated at build.
 
-Write context: `get_unpartitioned_write_context` covers unpartitioned tables. For partitioned tables, build a `PartitionValueMap` (`partition_value_map_new` + the typed `partition_value_map_insert_*` functions, one entry per partition column keyed by logical name) and pass it to `get_partitioned_write_context` (consumes the map). Then use `get_write_dir` for the partition's target directory (Hive-style prefix or random prefix), `visit_partition_values` to read the physical `partitionValues` to record in each Add action, and `resolve_file_path` to turn a written file's URL into its relative `add.path`. The `create_table_*` variants apply the same flow to a create-table transaction whose partition columns were declared with `create_table_builder_with_partition_columns`.
+`update_table_txn_commit()` and `create_table_txn_commit()` return a `Handle<ExclusiveCommittedTransaction>` that the caller can read via `committed_transaction_version` and `committed_transaction_post_commit_snapshot`, then must release with `free_committed_transaction`. The post-commit snapshot, when present, is a separate `SharedSnapshot` handle that must be freed with `free_snapshot`.
+
+Write context: `update_table_txn_get_unpartitioned_write_context` covers unpartitioned tables. For partitioned tables, build a `PartitionValueMap` (`partition_value_map_new` + the typed `partition_value_map_insert_*` functions, one entry per partition column keyed by logical name) and pass it to `update_table_txn_get_partitioned_write_context` (consumes the map). Then use `get_write_dir` for the partition's target directory (Hive-style prefix or random prefix), `visit_partition_values` to read the physical `partitionValues` to record in each Add action, and `resolve_file_path` to turn a written file's URL into its relative `add.path`. The `create_table_*` variants apply the same flow to a create-table transaction whose partition columns were declared with `create_table_txn_builder_with_partition_columns`.
 
 Catalog-managed publish flow (after a catalog committer stages commits):
 
@@ -896,7 +937,7 @@ Catalog-managed publish flow (after a catalog committer stages commits):
 committed_transaction_post_commit_snapshot()
   -> snapshot_publish_with_committer(snapshot, committer, engine)
      // borrows snapshot; consumes committer (do not free)
-  -> use returned snapshot for subsequent transaction_with_committer / checkpoint
+  -> use returned snapshot for a subsequent update_table_txn_builder_build_with_committer / checkpoint
      // mint a fresh get_uc_committer for that transaction -- it also consumes
   -> free_snapshot (returned snapshot) when done
   -> free_snapshot (post-commit input snapshot)
@@ -912,35 +953,39 @@ Column defaults (`allowColumnDefaults`) live in `ffi/src/column_default.rs`. The
 defaults but never materializes them, so the connector fills every omitted column itself:
 
 ```
-transaction()
-  -> transaction_visit_top_level_column_defaults(txn, engine, ctx, visitor)
-  -> transaction_ack_column_defaults(txn)   // REQUIRED, else the write context errors with
+new_update_table_txn_builder(snapshot, operation, engine_info, engine)
+  -> update_table_txn_builder_build()
+  -> update_table_txn_visit_top_level_column_defaults(txn, engine, ctx, visitor)
+  -> update_table_txn_ack_column_defaults(txn)   // REQUIRED, else the write context errors with
                                             // FFIKernelError::InvalidTransactionStateError
-  -> get_unpartitioned_write_context(txn, engine) ... add_files ... commit
+  -> update_table_txn_get_unpartitioned_write_context(txn, engine)
+  -> update_table_txn_add_files(txn, metadata)
+  -> update_table_txn_commit(txn, engine)
 ```
 
 Deletion vector update flow:
 
 ```
-transaction()
+new_update_table_txn_builder(snapshot, operation, engine_info, engine)
+  -> update_table_txn_builder_build()
   -> dv_descriptor_map_new()
   -> dv_descriptor_new()
   -> dv_descriptor_map_insert()
   -> scan() -> scan_metadata_iter_init()
-  -> transaction_update_deletion_vectors()
-  -> commit()
+  -> update_table_txn_update_deletion_vectors()
+  -> update_table_txn_commit()
 ```
 
 The engine authors the DV file and passes descriptor fields to `dv_descriptor_new`. The
-descriptor map and scan iterator are both consumed by `transaction_update_deletion_vectors`;
-descriptor handles are consumed by `dv_descriptor_map_insert` regardless of the result. DV
+descriptor map and scan iterator are both consumed by `update_table_txn_update_deletion_vectors`.
+Descriptor handles are consumed by `dv_descriptor_map_insert` regardless of the result. DV
 updates require both the `deletionVectors` reader/writer feature and
 `delta.enableDeletionVectors=true`.
 
-For distributed writes, `transaction_write_state` returns an owned state handle that outlives the
+For distributed writes, `update_table_txn_write_state` returns an owned state handle that outlives the
 transaction. `write_state_encode` returns opaque bytes to copy to workers. Decode them once on each
 worker with `write_state_decode`. Local writers can skip this round trip.
-Create-table writes use the `create_table_get_*_write_context` functions and do not expose
+Create-table writes use the `create_table_txn_get_*_write_context` functions and do not expose
 transportable write state.
 Create a builder for each output partition with `write_context_builder`. Partitioned writers set
 values keyed by logical names with `write_context_builder_with_partition_values` or exact physical

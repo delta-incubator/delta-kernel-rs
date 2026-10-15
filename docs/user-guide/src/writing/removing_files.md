@@ -72,7 +72,7 @@ For full details on working with `scan_metadata()`, see
 [Advanced Reads with scan_metadata()](../reading/scan_metadata.md).
 
 > [!NOTE]
-> If your scan was built with a partition predicate (`Scan::with_predicate`), the
+> If your scan was built with a partition predicate (`ScanBuilder::with_predicate`), the
 > scan-row schema also includes a `partitionValues_parsed` field. Kernel drops that
 > field internally when transforming the rows for `remove_files()`, so you don't need
 > to handle it.
@@ -121,9 +121,9 @@ You can call `remove_files()` multiple times to remove files from different
 pending removals.
 
 > [!NOTE]
-> `remove_files()` is available on transaction states that produce data files (gated by
-> the `SupportsDataFiles` trait bound). Metadata-only transaction states cannot register
-> file removals.
+> Unless overridden, transactions with schema changes infer `dataChange` from staged file batches:
+> `false` when none are staged and `true` otherwise, including empty or unselected batches.
+> Transactions without schema changes default to `true`.
 
 ## Full example
 
@@ -138,7 +138,7 @@ This example removes the first file from a filesystem-backed table:
 # use delta_kernel_default_engine::DefaultEngine;
 # use delta_kernel_default_engine::storage::store_from_url;
 # use delta_kernel::engine_data::FilteredEngineData;
-# use delta_kernel::transaction::CommitResult;
+# use delta_kernel::transaction::{CommitResult, UpdateTableOperation};
 # use delta_kernel::{Result, Snapshot};
 # #[tokio::main]
 # async fn main() -> Result<()> {
@@ -150,8 +150,8 @@ let snapshot = Snapshot::builder_for(url).build(&engine)?;
 // 2. Create a transaction
 let mut txn = snapshot
     .clone()
-    .transaction(Box::new(FileSystemCommitter::new()), &engine)?
-    .with_operation("DELETE".to_string());
+    .update_table(UpdateTableOperation::Delete, "my-app/1.0")
+    .build(&engine, Box::new(FileSystemCommitter::new()))?;
 
 // 3. Build a scan and get file metadata
 let scan = snapshot.scan_builder().build()?;

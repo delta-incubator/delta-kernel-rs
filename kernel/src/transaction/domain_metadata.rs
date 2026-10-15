@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use super::Transaction;
+use super::{ExecutionMode, Transaction};
 use crate::actions::{DomainMetadata, INTERNAL_DOMAIN_PREFIX};
 use crate::error::KernelError;
 use crate::row_tracking::{
@@ -9,7 +9,7 @@ use crate::row_tracking::{
 use crate::table_features::TableFeature;
 use crate::{Engine, KernelResult};
 
-impl<S> Transaction<S> {
+impl<STATE, MODE: ExecutionMode> Transaction<STATE, MODE> {
     /// Validate domain metadata operations for both create-table and existing-table transactions.
     ///
     /// Enforces the following rules:
@@ -247,4 +247,19 @@ impl<S> Transaction<S> {
 
         Ok(dm_actions_vec)
     }
+}
+
+/// Returns the unique domains, or the caller's error for the first duplicate.
+pub(super) fn validate_unique_domains<'a>(
+    domains: impl IntoIterator<Item = &'a str>,
+    duplicate_error: impl FnOnce(&str) -> KernelError,
+) -> KernelResult<HashSet<&'a str>> {
+    let domains = domains.into_iter();
+    let mut seen = HashSet::with_capacity(domains.size_hint().0);
+    for domain in domains {
+        if !seen.insert(domain) {
+            return Err(duplicate_error(domain));
+        }
+    }
+    Ok(seen)
 }

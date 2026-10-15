@@ -189,6 +189,11 @@ pub(crate) static CHECKPOINT_ACTION_FIELD: LazyLock<StructField> = LazyLock::new
     )
 });
 
+/// The `lastManifestCommit` field as nested in commitInfo actions and CRC files.
+#[cfg(feature = "adaptive-metadata-in-dev")]
+pub(crate) static LAST_MANIFEST_COMMIT_FIELD: LazyLock<StructField> =
+    LazyLock::new(|| StructField::nullable("lastManifestCommit", LastManifestCommit::to_schema()));
+
 /// The `checkpoint` action field, present only under the `adaptive-metadata-in-dev` feature;
 /// otherwise an empty iterator.
 fn checkpoint_action_field() -> impl IntoIterator<Item = &'static StructField> {
@@ -891,7 +896,7 @@ pub(crate) struct CommitInfo {
     /// specified by the engine. Read: optional, write: required (that is, kernel alwarys writes).
     pub(crate) operation: Option<String>,
     /// Map of arbitrary string key-value pairs that provide additional information about the
-    /// operation. This is specified by the engine.
+    /// operation. This is specified by the connector and may be populated on write.
     pub(crate) operation_parameters: Option<HashMap<String, Option<String>>>,
     /// Map of arbitrary string key-value pairs that provide operation metrics.
     /// This is specified by the engine.
@@ -986,6 +991,7 @@ impl CommitInfo {
 #[derive(Debug, Clone, PartialEq, Eq, ToSchema, IntoStructData, Deserialize)]
 #[cfg_attr(test, derive(Serialize))]
 #[serde(rename_all = "camelCase")]
+#[internal_api]
 pub(crate) struct BackReference {
     /// Path to the leaf manifest containing this file, relative to the table root
     /// (e.g. `metadata/leaf-m1.parquet`). Resolved by joining the table location and this path
@@ -1107,6 +1113,49 @@ where
 }
 
 impl Add {
+    /// Returns the URI-encoded data-file path.
+    #[internal_api]
+    #[cfg_attr(not(feature = "internal-api"), allow(dead_code))]
+    pub(crate) fn path(&self) -> &str {
+        &self.path
+    }
+
+    /// Returns non-null partition values. Missing partition columns represent null values.
+    #[internal_api]
+    #[cfg_attr(not(feature = "internal-api"), allow(dead_code))]
+    pub(crate) fn partition_values(&self) -> &HashMap<String, String> {
+        &self.partition_values
+    }
+
+    /// Returns the data-file size in bytes.
+    #[internal_api]
+    #[cfg_attr(not(feature = "internal-api"), allow(dead_code))]
+    pub(crate) fn size(&self) -> i64 {
+        self.size
+    }
+
+    /// Returns the file modification time in milliseconds since the Unix epoch.
+    #[internal_api]
+    #[cfg_attr(not(feature = "internal-api"), allow(dead_code))]
+    pub(crate) fn modification_time(&self) -> i64 {
+        self.modification_time
+    }
+
+    /// Returns whether the action changes table data.
+    #[internal_api]
+    #[cfg_attr(not(feature = "internal-api"), allow(dead_code))]
+    pub(crate) fn data_change(&self) -> bool {
+        self.data_change
+    }
+
+    /// Returns this action's adaptive-metadata back reference, if present.
+    #[cfg(feature = "adaptive-metadata-in-dev")]
+    #[internal_api]
+    #[cfg_attr(not(feature = "internal-api"), allow(dead_code))]
+    pub(crate) fn back_reference(&self) -> Option<&BackReference> {
+        self.back_reference.as_ref()
+    }
+
     /// Reconstructs an Add action from its serialized fields.
     #[internal_api]
     #[cfg_attr(not(feature = "internal-api"), allow(dead_code))]
@@ -1279,6 +1328,27 @@ pub(crate) struct SetTransaction {
 }
 
 impl SetTransaction {
+    /// Returns the application identifier.
+    #[internal_api]
+    #[cfg_attr(not(feature = "internal-api"), allow(dead_code))]
+    pub(crate) fn app_id(&self) -> &str {
+        &self.app_id
+    }
+
+    /// Returns the application-specific transaction version.
+    #[internal_api]
+    #[cfg_attr(not(feature = "internal-api"), allow(dead_code))]
+    pub(crate) fn version(&self) -> i64 {
+        self.version
+    }
+
+    /// Returns the last-updated timestamp, if captured.
+    #[internal_api]
+    #[cfg_attr(not(feature = "internal-api"), allow(dead_code))]
+    pub(crate) fn last_updated(&self) -> Option<i64> {
+        self.last_updated
+    }
+
     /// Whether this transaction is expired: `last_updated <= expiration_timestamp` with both
     /// present. A `None` `last_updated` (no timestamp recorded) or a `None` `expiration_timestamp`
     /// (no retention duration configured) never expires.
@@ -1346,9 +1416,9 @@ impl LastManifestCommit {
     /// Builds a reference to the manifest commit at `version` whose checkpoint action's content
     /// root reflects `content_root_version`.
     ///
-    /// Enforces the adaptiveMetadata invariant that the referenced content root version never
-    /// exceeds the manifest commit version, so an invalid pair can never be constructed. Mirrors
-    /// the validation on `CheckpointAction`.
+    /// Enforces the adaptiveMetadata invariants that both versions are non-negative and the
+    /// referenced content root version never exceeds the manifest commit version, so an invalid
+    /// pair can never be constructed. Mirrors the validation on `CheckpointAction`.
     #[internal_api]
     #[cfg_attr(not(feature = "internal-api"), allow(dead_code))]
     pub(crate) fn new(version: i64, content_root_version: i64) -> Result<Self> {
@@ -1360,10 +1430,18 @@ impl LastManifestCommit {
         Ok(last_manifest_commit)
     }
 
-    /// Enforce the adaptiveMetadata invariant that `contentRootVersion` never exceeds the manifest
-    /// commit `version`. Because [`LastManifestCommit`] derives [`Deserialize`], values parsed from
-    /// JSON bypass [`Self::new`], so callers that deserialize must invoke this explicitly.
+    /// Enforce the adaptiveMetadata invariants that `contentRootVersion` is non-negative and never
+    /// exceeds the manifest commit `version`. Because [`LastManifestCommit`] derives
+    /// [`Deserialize`], values parsed from JSON bypass [`Self::new`], so callers that deserialize
+    /// must invoke this explicitly.
     pub(crate) fn validate(&self) -> KernelResult<()> {
+        require!(
+            self.content_root_version >= 0,
+            KernelError::generic(format!(
+                "lastManifestCommit contentRootVersion {} must be non-negative",
+                self.content_root_version
+            ))
+        );
         require!(
             self.content_root_version <= self.version,
             KernelError::generic(format!(
@@ -1763,6 +1841,12 @@ impl CheckpointAction {
         &self.content_root.path
     }
 
+    /// The table version the root manifest reflects (delegates to the nested [`ContentRoot`]).
+    #[internal_api]
+    pub(crate) fn content_root_version(&self) -> i64 {
+        self.content_root.version
+    }
+
     /// Get the checkpoint version.
     #[internal_api]
     pub(crate) fn version(&self) -> i64 {
@@ -1892,6 +1976,22 @@ pub(crate) struct CheckpointMetadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[allow_null_container_values]
     pub(crate) tags: Option<HashMap<String, String>>,
+}
+
+impl CheckpointMetadata {
+    /// Returns the checkpoint version.
+    #[internal_api]
+    #[cfg_attr(not(feature = "internal-api"), allow(dead_code))]
+    pub(crate) fn version(&self) -> i64 {
+        self.version
+    }
+
+    /// Returns checkpoint tags, preserving absent versus empty maps.
+    #[internal_api]
+    #[cfg_attr(not(feature = "internal-api"), allow(dead_code))]
+    pub(crate) fn tags(&self) -> Option<&HashMap<String, String>> {
+        self.tags.as_ref()
+    }
 }
 
 /// The [DomainMetadata] action contains a configuration (string) for a named metadata domain. Two
@@ -3000,7 +3100,7 @@ mod tests {
             ]))
         );
         assert_eq!(
-            add.deletion_vector.unwrap().storage_type,
+            add.deletion_vector.as_ref().unwrap().storage_type,
             deletion_vector::DeletionVectorStorageType::Inline
         );
         assert_eq!(add.base_row_id, Some(10));
@@ -3008,8 +3108,8 @@ mod tests {
         assert_eq!(add.clustering_provider.as_deref(), Some("liquid"));
         #[cfg(feature = "adaptive-metadata-in-dev")]
         assert_eq!(
-            add.back_reference,
-            Some(BackReference {
+            add.back_reference(),
+            Some(&BackReference {
                 manifest: "manifest.parquet".to_string(),
                 pos: 3,
             })
@@ -3028,6 +3128,8 @@ mod tests {
 
         let add: Add = serde_json::from_str(json).unwrap();
         assert!(add.partition_values.is_empty());
+        #[cfg(feature = "adaptive-metadata-in-dev")]
+        assert!(add.back_reference().is_none());
     }
 
     #[cfg(feature = "adaptive-metadata-in-dev")]

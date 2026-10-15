@@ -17,7 +17,7 @@ use crate::actions::{BackReference, CheckpointAction};
 use crate::committer::{
     CommitMetadata, CommitProtocolMetadata, CommitResponse, CommitType, Committer,
 };
-use crate::crc::{is_incremental_safe_operation, CrcDelta, FileStatsDelta};
+use crate::crc::{CrcDelta, FileStatsDelta};
 use crate::engine_data::FilteredEngineData;
 use crate::error::KernelError;
 use crate::expressions::UnaryExpressionOp::ToJson;
@@ -34,7 +34,8 @@ use crate::row_tracking::{RowTrackingDomainMetadata, RowTrackingVisitor};
 use crate::scan::data_skipping::stats_schema::schema_with_all_fields_nullable;
 use crate::scan::log_replay::{
     BASE_ROW_ID_NAME, DEFAULT_ROW_COMMIT_VERSION_NAME, FILE_CONSTANT_VALUES_NAME,
-    PARTITION_VALUES_NAME, PARTITION_VALUES_PARSED_NAME, SIZE_NAME, STATS_PARSED_NAME, TAGS_NAME,
+    PARTITION_VALUES_NAME, PARTITION_VALUES_PARSED_NAME, SIZE_NAME, STATS_NAME, STATS_PARSED_NAME,
+    TAGS_NAME,
 };
 use crate::scan::scan_row_schema;
 use crate::schema::void_utils::validate_schema_for_write;
@@ -69,11 +70,17 @@ pub mod data_layout;
 #[cfg(not(feature = "internal-api"))]
 pub(crate) mod data_layout;
 
-pub(crate) mod alter_table;
-pub use alter_table::AlterTableTransaction;
+pub use builder::update_table::UpdateTableTransactionBuilder;
+use builder::TransactionBuilderState;
+pub use builder::{TransactionBuilder, TransactionType};
+use commit_info::collect_operation_metadata;
 mod bound_write_context;
 mod commit_info;
 mod domain_metadata;
+mod exec_mode;
+mod operation;
+pub(crate) use operation::CommitOperation;
+pub use operation::UpdateTableOperation;
 #[cfg(feature = "adaptive-metadata-in-dev")]
 mod leaf_writer;
 #[cfg(feature = "adaptive-metadata-in-dev")]
@@ -81,18 +88,19 @@ mod manifest_commit_state;
 #[cfg(feature = "adaptive-metadata-in-dev")]
 mod root_manifest_file;
 pub(crate) mod schema_evolution;
-#[cfg_attr(not(feature = "internal-api"), allow(unused_imports))]
 #[internal_api]
+#[cfg_attr(not(feature = "internal-api"), allow(unused_imports))]
 pub(crate) use schema_evolution::SchemaOperation;
 #[cfg(feature = "internal-api")]
 pub mod stats_verifier;
 #[cfg(not(feature = "internal-api"))]
 mod stats_verifier;
-mod update;
+mod update_table;
 mod write_state;
 mod write_validation;
 
 pub use bound_write_context::BoundWriteContext;
+pub use exec_mode::{ExecutionMode, Imperative};
 #[cfg(feature = "adaptive-metadata-in-dev")]
 #[cfg_attr(not(feature = "internal-api"), allow(unused_imports))]
 #[internal_api]
@@ -104,7 +112,7 @@ pub(crate) use manifest_commit_state::ManifestCommitState;
 #[cfg(feature = "adaptive-metadata-in-dev")]
 use root_manifest_file::RootManifestFile;
 use stats_verifier::StatsColumnVerifier;
-use update::{intermediate_dv_schema, new_dv_column_schema};
+use update_table::{intermediate_dv_schema, new_dv_column_schema};
 pub use write_state::{BoundWriteContextBuilder, RowTrackingMetadataColumns, WriteState};
 
 /// Type alias for an iterator of [`EngineData`] results.
@@ -141,7 +149,7 @@ pub(crate) fn mandatory_add_file_schema() -> &'static SchemaRef {
 /// expected stats schema for a specific table.
 pub(crate) static BASE_ADD_FILES_SCHEMA: LazyLock<SchemaRef> = lazy_schema_ref! {
     ..(mandatory_add_file_schema().fields().cloned()),
-    nullable "stats": {
+    nullable STATS_NAME: {
         nullable NUM_RECORDS: LONG,
         // nullCount, minValues, maxValues are dynamic based on data schema. Empty struct
         // placeholders indicate these fields exist but their inner structure depends on the
@@ -169,56 +177,92 @@ fn with_row_tracking_cols(schema: &SchemaRef) -> KernelResult<SchemaRef> {
     Ok(Arc::new(patch.build(schema)?))
 }
 
-/// Marker type for transactions on existing tables.
+/// The row-tracking-augmented add-file write-metadata schema: [`BASE_ADD_FILES_SCHEMA`] extended
+/// with the row-tracking columns.
+pub(crate) fn augmented_write_metadata_schema() -> KernelResult<SchemaRef> {
+    with_row_tracking_cols(&BASE_ADD_FILES_SCHEMA)
+}
+
+/// Marker type for transactions that update existing tables.
 ///
-/// This is the default state for [`Transaction`] and provides the full set of operations
-/// including file removal, deletion vector updates, and blind append semantics.
+/// This is the default state for [`Transaction`] and supports schema changes as well as file
+/// additions, removals, deletion-vector updates, and blind append semantics.
 #[derive(Debug)]
-pub struct ExistingTable;
+pub struct UpdateTable;
 
 /// Marker type for create-table transactions.
 ///
-/// Transactions in this state have a restricted API surface — operations that are semantically
-/// invalid for table creation (e.g. file removal, domain metadata removal) are not available.
+/// Transactions in this state support file additions but not file removals, deletion-vector
+/// updates, or domain metadata removals.
 #[derive(Debug)]
 pub struct CreateTable;
-
-/// Marker type for alter-table (schema evolution) transactions.
-///
-/// Transactions in this state perform metadata-only commits. Data file operations are not
-/// available at compile time because `AlterTable` does not implement [`SupportsDataFiles`].
-#[derive(Debug)]
-pub struct AlterTable;
-
-/// Marker trait for transaction states that support data file operations.
-///
-/// Only transaction types that implement this trait can access methods for adding, removing, or
-/// updating data files. This prevents compile-time misuse by states like `AlterTable` that
-/// only perform metadata-only commits.
-pub trait SupportsDataFiles {}
-impl SupportsDataFiles for ExistingTable {}
-impl SupportsDataFiles for CreateTable {}
 
 /// A transaction represents an in-progress write to a table. After creating a transaction, changes
 /// to the table may be staged via the transaction methods before calling `commit` to commit the
 /// changes to the table.
 ///
-/// The type parameter `S` controls which operations are available:
-/// - [`ExistingTable`] (default): Full API for modifying existing tables.
+/// The type parameter `STATE` controls which table operations are available:
+/// - [`UpdateTable`] (default): Full API for modifying existing tables.
 /// - [`CreateTable`]: Restricted API for table creation (see
 ///   [`CreateTableTransaction`](create_table::CreateTableTransaction)).
+///
+/// The independent type parameter `MODE` selects the [`ExecutionMode`], which provides an
+/// abstraction over 1) how staged changes are represented and 2) how to inspect the changes. The
+/// default, [`Imperative`], stages [`EngineData`] and provides [`commit`](Self::commit).
+///
+/// Both states support file additions. Schema-changing transactions use [`UpdateTable`] rather
+/// than a separate schema-only state, allowing schema and file changes in the same transaction.
+/// The builder validates schema intent, and commit validates the staged actions. Schema-only
+/// behavior is not enforced by the type parameter.
+///
+/// Configure schema and data-change intent on the builder. Built transactions do not expose
+/// setters for either, including when the `internal-api` feature is enabled.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// // create a transaction
-/// let mut txn = table.new_transaction(&engine)?;
-/// // stage table changes (right now only commit info)
-/// txn.commit_info(Box::new(ArrowEngineData::new(engine_commit_info)));
-/// // commit! (consume the transaction)
+/// let txn = snapshot
+///     .update_table(UpdateTableOperation::Write, "my-app/1.0")
+///     .build(&engine, Box::new(FileSystemCommitter::new()))?;
 /// txn.commit(&engine)?;
 /// ```
-pub struct Transaction<S = ExistingTable> {
+///
+/// Schema changes cannot be added to a built transaction:
+///
+/// ```compile_fail
+/// # use delta_kernel::transaction::Transaction;
+/// fn change_schema(txn: Transaction) {
+///     let _ = txn.with_schema_changes(Vec::new());
+/// }
+/// ```
+///
+/// The data-change flag cannot be overridden on a built transaction:
+///
+/// ```compile_fail
+/// # use delta_kernel::transaction::Transaction;
+/// fn change_data_change<STATE>(txn: &mut Transaction<STATE>) {
+///     txn.set_data_change(false);
+/// }
+/// ```
+///
+/// Blind-append intent cannot be added to a built transaction:
+///
+/// ```compile_fail
+/// # use delta_kernel::transaction::Transaction;
+/// fn change_blind_append(txn: Transaction) {
+///     let _ = txn.with_blind_append();
+/// }
+/// ```
+///
+/// The operation cannot be changed on a built transaction:
+///
+/// ```compile_fail
+/// # use delta_kernel::transaction::{Transaction, UpdateTableOperation};
+/// fn change_operation(txn: Transaction) {
+///     let _ = txn.with_operation(UpdateTableOperation::Write);
+/// }
+/// ```
+pub struct Transaction<STATE = UpdateTable, MODE: ExecutionMode = Imperative> {
     span: tracing::Span,
     // Correlates all metric events emitted by this transaction.
     operation_id: MetricId,
@@ -232,20 +276,18 @@ pub struct Transaction<S = ExistingTable> {
     // config, this is cloned from the read snapshot; when the config changes (e.g. schema
     // evolution), it is constructed separately with the new schema/protocol.
     effective_table_config: TableConfiguration,
-    // Whether to emit a Protocol action. True for CREATE TABLE and ALTER TABLE, false otherwise.
+    // Whether to emit a Protocol action. True for CREATE TABLE, false otherwise.
     should_emit_protocol: bool,
-    // Whether to emit a Metadata action. True for CREATE TABLE and ALTER TABLE, false otherwise.
+    // Whether to emit a Metadata action. True for CREATE TABLE and transactions with staged
+    // schema changes, false otherwise.
     should_emit_metadata: bool,
     committer: Box<dyn Committer>,
-    operation: Option<String>,
-    engine_info: Option<String>,
-    // Engine-provided CommitInfo.operationParameters. None uses CommitInfo's empty-map default.
+    operation: CommitOperation,
     operation_parameters: Option<HashMap<String, Option<String>>>,
-    // Engine-provided CommitInfo.operationMetrics. None uses CommitInfo's omitted default.
     operation_metrics: Option<HashMap<String, Option<String>>>,
+    engine_info: String,
     engine_commit_info: Option<(Box<dyn EngineData>, SchemaRef)>,
-    add_files_metadata: Vec<Box<dyn EngineData>>,
-    remove_files_metadata: Vec<FilteredEngineData>,
+    staged_data_changes: MODE,
     // NB: hashmap would require either duplicating the appid or splitting SetTransaction
     // key/payload. HashSet requires Borrow<&str> with matching Eq, Ord, and Hash. Plus,
     // HashSet::insert drops the to-be-inserted value without returning the existing one, which
@@ -264,8 +306,10 @@ pub struct Transaction<S = ExistingTable> {
     // Domain names to remove in this transaction. The configuration values are fetched during
     // commit from the log to preserve the pre-image in tombstones.
     user_domain_removals: Vec<String>,
-    // Whether this transaction contains any logical data changes.
+    // Data-change value used by commit validation, file actions, and transaction metrics.
     data_change: bool,
+    // Set when the builder leaves data_change unspecified. Explicit values disable inference.
+    infer_data_change: bool,
     // TODO(#2499): Replace this state when Conntector responsibilities encode column-default
     // handling. Whether the connector acknowledged responsibility for applying column
     // defaults.
@@ -275,11 +319,6 @@ pub struct Transaction<S = ExistingTable> {
     row_tracking_preservation_acknowledged: bool,
     // Whether this transaction should be marked as a blind append.
     is_blind_append: bool,
-    // Files matched by update_deletion_vectors() with new DV descriptors appended. These are used
-    // to generate remove/add action pairs during commit, ensuring file statistics are preserved.
-    dv_matched_files: Vec<FilteredEngineData>,
-    // Count of files whose deletion vector was updated.
-    num_dv_updates: usize,
     // The manifest this transaction will write, if any. The two ways of writing it are mutually
     // exclusive, so a single field makes staging both unrepresentable.
     #[cfg(feature = "adaptive-metadata-in-dev")]
@@ -288,9 +327,9 @@ pub struct Transaction<S = ExistingTable> {
     // enabled. Used for determining which columns require statistics collection. Expected to be
     // physical column names.
     physical_clustering_columns: Option<Vec<ColumnName>>,
-    // PhantomType marker for transaction state (ExistingTable or CreateTable).
+    // PhantomType marker for transaction state (UpdateTable or CreateTable).
     // Zero-sized; only affects the type system.
-    _state: PhantomType<S>,
+    _state: PhantomType<STATE>,
 }
 
 /// The manifest a transaction will write. Root-file and content-tree commits are mutually
@@ -306,16 +345,15 @@ enum ManifestWrite {
     Commit(ManifestCommitState),
 }
 
-impl<S> std::fmt::Debug for Transaction<S> {
+impl<STATE, MODE: ExecutionMode> std::fmt::Debug for Transaction<STATE, MODE> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let version_info = match &self.read_snapshot_opt {
             Some(snap) => format!("{}", snap.version()),
             None => "create_table".to_string(),
         };
         f.write_str(&format!(
-            "Transaction {{ read_snapshot version: {}, engine_info: {} }}",
-            version_info,
-            self.engine_info.is_some()
+            "Transaction {{ read_snapshot version: {}, engine_info: {:?} }}",
+            version_info, self.engine_info
         ))
     }
 }
@@ -369,7 +407,7 @@ where
 // =============================================================================
 // Imperative commit APIs
 // =============================================================================
-impl<S> Transaction<S> {
+impl<STATE> Transaction<STATE, Imperative> {
     /// Consume the transaction and commit it to the table. The result is a result of
     /// [CommitResult] with the following semantics:
     /// - Ok(CommitResult) for either success or a recoverable error (includes the failed
@@ -399,10 +437,12 @@ impl<S> Transaction<S> {
         ),
         err
     )]
-    pub fn commit(self, engine: &dyn Engine) -> Result<CommitResult<S>> {
+    pub fn commit(mut self, engine: &dyn Engine) -> Result<CommitResult<STATE>> {
         let commit_start = Instant::now();
 
         // === Pre-commit validation ===
+        self.resolve_data_change();
+        self.validate_operation_compatibility()?;
         self.validate_commit()?;
         self.validate_file_actions()?;
 
@@ -445,7 +485,12 @@ impl<S> Transaction<S> {
             committer_duration,
         )
     }
+}
 
+// =============================================================================
+// Imperative commit-info configuration
+// =============================================================================
+impl<STATE> Transaction<STATE, Imperative> {
     /// Set the content of the commitInfo action for this transaction. Note that kernel will
     /// _always_ write a commitInfo, this function simply allows engines to add their own data
     /// into that action if they wish. Kernel overrides the following fields if they are set in
@@ -460,9 +505,6 @@ impl<S> Transaction<S> {
     /// - `isBlindAppend`
     /// - `engineInfo`
     /// - `txnId`
-    ///
-    /// Use [`Transaction::with_operation_parameters`] and
-    /// [`Transaction::with_operation_metrics`] to set the operation maps.
     ///
     /// Kernel merges the following field if it is set:
     ///
@@ -481,89 +523,29 @@ impl<S> Transaction<S> {
 // =============================================================================
 // Shared methods available on ALL transaction types
 // =============================================================================
-impl<S> Transaction<S> {
-    /// Set the data change flag.
+impl<STATE, MODE: ExecutionMode> Transaction<STATE, MODE> {
+    /// Replaces operation metrics recorded in `commitInfo`.
     ///
-    /// True indicates this commit is a "data changing" commit. False indicates table data was
-    /// reorganized but not materially modified.
-    ///
-    /// Data change might be set to false in the following scenarios:
-    /// 1. Operations that only change metadata (e.g. backfilling statistics)
-    /// 2. Operations that make no logical changes to the contents of the table (i.e. rows are only
-    ///    moved from old files to new ones.  OPTIMIZE commands is one example of this type of
-    ///    optimizaton).
-    pub fn with_data_change(mut self, data_change: bool) -> Self {
-        self.data_change = data_change;
-        self
-    }
-
-    /// Same as [`Transaction::with_data_change`] but set the value directly instead of
-    /// using a fluent API.
-    #[internal_api]
-    #[allow(dead_code)] // used in FFI
-    pub(crate) fn set_data_change(&mut self, data_change: bool) {
-        self.data_change = data_change;
-    }
-
-    /// Set the engine info field of this transaction's commit info action. This field is optional.
-    pub fn with_engine_info(mut self, engine_info: impl Into<String>) -> Self {
-        self.engine_info = Some(engine_info.into());
-        self
-    }
-
-    /// Set `CommitInfo.operationParameters` for this transaction.
-    ///
-    /// Common parameters include the write `mode`, `partitionBy` columns, and the `predicate` used
-    /// by update or delete operations.
-    ///
-    /// Present values must already be stringified as expected in table history. Kernel writes the
-    /// map as-is without interpreting or validating its keys; `None` writes a null map value.
-    /// Kernel ignores `operationParameters` supplied through [`Transaction::with_commit_info`],
-    /// so this is the only way to set it. A later call replaces the complete map. If a key occurs
-    /// more than once in one call, the last value wins.
-    pub fn with_operation_parameters<I, K, V>(mut self, operation_parameters: I) -> Self
+    /// Present values must already be stringified as expected in table history. `None` writes a
+    /// null map value. When unset, `operationMetrics` is omitted. An explicitly empty map is
+    /// written as `{}`. A later call replaces the complete map, and the last value wins when a key
+    /// occurs more than once.
+    pub fn with_operation_metrics<I, K, V>(mut self, metrics: I) -> Self
     where
         I: IntoIterator<Item = (K, Option<V>)>,
         K: Into<String>,
         V: Into<String>,
     {
-        self.operation_parameters = Some(collect_string_map(operation_parameters));
+        self.operation_metrics = Some(collect_operation_metadata(metrics));
         self
     }
 
-    /// Set `CommitInfo.operationMetrics` for this transaction.
+    /// Adds a [`SetTransaction`] action for `app_id` and `version`. Returns the updated
+    /// transaction.
     ///
-    /// Common metrics include `numFiles`, `numOutputRows`, `numOutputBytes`, and `executionTimeMs`.
-    ///
-    /// Present values must already be stringified as expected in table history. Kernel writes the
-    /// map as-is without interpreting or validating its keys; `None` writes a null map value.
-    /// Kernel ignores `operationMetrics` supplied through [`Transaction::with_commit_info`], so
-    /// this is the only way to set it. When unset, `operationMetrics` is omitted; an explicitly
-    /// empty map is written as `{}`. A later call replaces the complete map. If a key occurs more
-    /// than once in one call, the last value wins.
-    pub fn with_operation_metrics<I, K, V>(mut self, operation_metrics: I) -> Self
-    where
-        I: IntoIterator<Item = (K, Option<V>)>,
-        K: Into<String>,
-        V: Into<String>,
-    {
-        self.operation_metrics = Some(collect_string_map(operation_metrics));
-        self
-    }
-
-    /// Attach an opaque, caller-supplied correlation id for joining this transaction's commit
-    /// metric events to the caller's own request or operation id. An empty id is treated as unset.
-    /// When unset, behavior is unchanged.
-    pub fn with_correlation_id(mut self, correlation_id: impl Into<Arc<str>>) -> Self {
-        self.correlation_id = Some(correlation_id.into()).filter(|id| !id.is_empty());
-        self
-    }
-
-    /// Include a SetTransaction (app_id and version) action for this transaction (with an optional
-    /// `last_updated` timestamp).
-    /// Note that each app_id can only appear once per transaction. That is, multiple app_ids with
-    /// different versions are disallowed in a single transaction. If a duplicate app_id is
-    /// included, the `commit` will fail (that is, we don't eagerly check app_id validity here).
+    /// The action's `lastUpdated` uses this transaction's commit timestamp. Each application id may
+    /// occur only once per transaction, including ids added through the builder. Duplicates are not
+    /// checked here; [`Self::commit`] rejects them.
     pub fn with_transaction_id(mut self, app_id: String, version: i64) -> Self {
         let set_transaction = SetTransaction::new(app_id, version, Some(self.commit_timestamp));
         self.set_transactions.push(set_transaction);
@@ -608,9 +590,9 @@ impl<S> Transaction<S> {
 }
 
 // =============================================================================
-// Data file methods -- only available on transaction types that support data files
+// Shared data file methods
 // =============================================================================
-impl<S: SupportsDataFiles> Transaction<S> {
+impl<STATE, MODE: ExecutionMode> Transaction<STATE, MODE> {
     // TODO(#2499): Remove this API when Engine responsibilities encode column-default handling.
     /// Acknowledges that the connector applies column defaults before writing data files.
     ///
@@ -723,8 +705,10 @@ impl<S: SupportsDataFiles> Transaction<S> {
     /// Called by [`write_state`](Self::write_state), before any Parquet is written, so connectors
     /// fail fast when the schema contains unsupported data types or void placements that cannot
     /// produce valid files.
-    /// The commit-time check in [`commit`](Self::commit) remains as defense-in-depth for callers
-    /// that reach [`add_files`](Self::add_files) without going through write state.
+    ///
+    /// We perform this same check during [`commit`](Transaction::commit) as defense-in-depth, for
+    /// callers that directly use [`add_files`](Transaction::add_files) without going through
+    /// [`write_state`](Self::write_state)
     fn validate_for_data_write(&self) -> KernelResult<()> {
         validate_schema_for_write(&self.effective_table_config.logical_schema())
     }
@@ -758,14 +742,16 @@ impl<S: SupportsDataFiles> Transaction<S> {
     }
 }
 
-impl<S: SupportsDataFiles> Transaction<S> {
+impl<STATE> Transaction<STATE, Imperative> {
     /// Add files to include in this transaction. This API generally enables the engine to
     /// add/append/insert data (files) to the table. Note that this API can be called multiple times
     /// to add multiple batches.
     ///
     /// The expected schema for `add_metadata` is given by [`Transaction::add_files_schema`].
     pub fn add_files(&mut self, add_metadata: Box<dyn EngineData>) {
-        self.add_files_metadata.push(add_metadata);
+        self.staged_data_changes
+            .add_files_metadata
+            .push(add_metadata);
     }
 }
 
@@ -782,7 +768,57 @@ struct NonfileCommitActions {
     set_transactions: Vec<SetTransaction>,
 }
 
-impl<S> Transaction<S> {
+impl<STATE, MODE: ExecutionMode> Transaction<STATE, MODE> {
+    /// Initializes shared transaction fields from builder intent and the supplied table
+    /// configuration, committer, operation, span, and timestamp. Builders fill table-specific
+    /// fields via struct update before returning the transaction.
+    fn new(
+        common_state: TransactionBuilderState,
+        effective_table_config: TableConfiguration,
+        committer: Box<dyn Committer>,
+        operation: CommitOperation,
+        span: tracing::Span,
+        commit_timestamp: i64,
+    ) -> Self {
+        let set_transactions = common_state
+            .transaction_ids
+            .into_iter()
+            .map(|(app_id, version)| SetTransaction::new(app_id, version, Some(commit_timestamp)))
+            .collect();
+
+        Self {
+            span,
+            operation_id: MetricId::new(),
+            correlation_id: common_state.correlation_id,
+            read_snapshot_opt: None,
+            effective_table_config,
+            should_emit_protocol: false,
+            should_emit_metadata: false,
+            committer,
+            operation,
+            operation_parameters: common_state.operation_parameters,
+            operation_metrics: common_state.operation_metrics,
+            engine_info: common_state.engine_info,
+            engine_commit_info: common_state.engine_commit_info,
+            staged_data_changes: MODE::default(),
+            set_transactions,
+            commit_timestamp,
+            user_domain_metadata_additions: common_state.domain_metadata_additions,
+            system_domain_metadata_additions: vec![],
+            provided_row_tracking_high_water_mark: None,
+            user_domain_removals: vec![],
+            data_change: common_state.data_change.unwrap_or(true),
+            infer_data_change: common_state.data_change.is_none(),
+            column_defaults_acknowledged: false,
+            row_tracking_preservation_acknowledged: false,
+            is_blind_append: false,
+            #[cfg(feature = "adaptive-metadata-in-dev")]
+            manifest_write: None,
+            physical_clustering_columns: None,
+            _state: PhantomType::default(),
+        }
+    }
+
     /// Determines the commit type based on whether this is a create-table operation and whether
     /// the table is catalog-managed.
     fn determine_commit_type(
@@ -814,7 +850,7 @@ impl<S> Transaction<S> {
             (true, true) | (false, false) => Ok(()),
             (false, true) => Err(KernelError::generic(
                 "This table is catalog-managed and requires a catalog committer. \
-                 Please provide a catalog committer via Snapshot::transaction().",
+                 Please provide a catalog committer via UpdateTableTransactionBuilder::build().",
             )),
             (true, false) => Err(KernelError::generic(
                 "This table is path-based and cannot be committed to with a catalog committer.",
@@ -884,7 +920,7 @@ impl<S> Transaction<S> {
             )
         );
         require!(
-            !self.add_files_metadata.is_empty(),
+            self.staged_data_changes.has_adds(),
             KernelError::invalid_transaction_state(
                 "Blind append requires at least one added data file"
             )
@@ -894,11 +930,11 @@ impl<S> Transaction<S> {
             KernelError::invalid_transaction_state("Blind append requires data_change to be true")
         );
         require!(
-            self.remove_files_metadata.is_empty(),
+            !self.staged_data_changes.has_removes(),
             KernelError::invalid_transaction_state("Blind append cannot remove files")
         );
         require!(
-            self.dv_matched_files.is_empty(),
+            !self.staged_data_changes.has_dv_inputs(),
             KernelError::invalid_transaction_state("Blind append cannot update deletion vectors")
         );
 
@@ -989,8 +1025,8 @@ impl<S> Transaction<S> {
         if self.effective_table_config.logical_schema().num_fields() == 0 {
             return Err(KernelError::generic(
                 "Cannot write data files to a Delta table with empty schema; \
-                 use `snapshot.alter_table().add_column(...)` to add at least one \
-                 column before writing data",
+                 use `snapshot.update_table(UpdateTableOperation::AlterTable, engine_info)` and \
+                 `add_column(...)` to add at least one column before writing data",
             ));
         }
         Ok(())
@@ -1034,18 +1070,52 @@ impl<S> Transaction<S> {
     /// Returns true if this is a create-table transaction.
     /// A create-table transaction has no read snapshot (no pre-existing table).
     fn is_create_table(&self) -> bool {
-        debug_assert!(
-            self.operation.as_deref() != Some("CREATE TABLE") || self.read_snapshot_opt.is_none(),
-            "CREATE TABLE operation should not have a read snapshot"
-        );
         self.read_snapshot_opt.is_none()
     }
 
-    /// True iff this transaction stages any data-file action (add, remove, or DV update).
+    /// Finalizes the data-change default before commit validation and action generation.
+    ///
+    /// The update builder initially defaults to `true`. For existing-table transactions with
+    /// schema changes and no connector-supplied value, commit infers `false` without staged file
+    /// batches and `true` otherwise. Add, Remove, and DV-update batches count even when empty or
+    /// fully unselected. Other transactions retain their configured value or `true` default.
+    ///
+    /// Explicit connector values are preserved. Batch presence does not establish logical changes,
+    /// so logical-preserving rewrites such as OPTIMIZE must explicitly request `false`.
+    pub(super) fn resolve_data_change(&mut self) {
+        if self.infer_data_change && self.should_emit_metadata {
+            self.data_change = self.has_data_file_actions();
+        }
+    }
+
+    fn validate_operation_compatibility(&self) -> KernelResult<()> {
+        self.operation
+            .validate()
+            .map_err(KernelError::invalid_transaction_state)?;
+        match (self.is_create_table(), &self.operation) {
+            (true, CommitOperation::CreateTable) => Ok(()),
+            (false, CommitOperation::UpdateTable(UpdateTableOperation::AlterTable))
+                if !self.should_emit_metadata =>
+            {
+                Err(KernelError::invalid_transaction_state(
+                    "ALTER TABLE requires at least one schema change",
+                ))
+            }
+            (false, CommitOperation::UpdateTable(_)) => Ok(()),
+            (true, _) => Err(KernelError::invalid_transaction_state(
+                "create-table transactions must use the CREATE TABLE operation",
+            )),
+            (false, CommitOperation::CreateTable) => Err(KernelError::invalid_transaction_state(
+                "CREATE TABLE cannot use an update-table transaction",
+            )),
+        }
+    }
+
+    /// True iff this transaction stages any data-file batch (add, remove, or DV update).
     fn has_data_file_actions(&self) -> bool {
-        !self.add_files_metadata.is_empty()
-            || !self.remove_files_metadata.is_empty()
-            || !self.dv_matched_files.is_empty()
+        self.staged_data_changes.has_adds()
+            || self.staged_data_changes.has_removes()
+            || self.staged_data_changes.has_dv_inputs()
     }
 
     // Returns the read snapshot. Returns an error if this is a create-table transaction.
@@ -1105,7 +1175,7 @@ impl<S> Transaction<S> {
     fn validate_commit(&self) -> KernelResult<()> {
         // Kernel cannot distinguish Remove actions and DV updates that only delete rows from those
         // that accompany copied or updated rows, so both require the preservation acknowledgment.
-        if !self.remove_files_metadata.is_empty() || self.num_dv_updates > 0 {
+        if self.staged_data_changes.has_removes() || self.staged_data_changes.has_dv_updates() {
             self.effective_table_config
                 .validate_feature_support_for_remove()?;
             self.ensure_row_tracking_preservation_acknowledged()?;
@@ -1134,7 +1204,7 @@ impl<S> Transaction<S> {
 
         // Validate that the schema supports data writes when files are being added. Reads and
         // metadata-only commits are always allowed.
-        if !self.add_files_metadata.is_empty() {
+        if self.staged_data_changes.has_adds() {
             validate_schema_for_write(&self.effective_table_config.logical_schema())?;
         }
 
@@ -1143,8 +1213,8 @@ impl<S> Transaction<S> {
         // update rows require a `cdc` file, but Kernel does not currently support writing CDC
         // files.
         if !self.is_create_table()
-            && !self.add_files_metadata.is_empty()
-            && (!self.remove_files_metadata.is_empty() || self.num_dv_updates > 0)
+            && self.staged_data_changes.has_adds()
+            && (self.staged_data_changes.has_removes() || self.staged_data_changes.has_dv_updates())
             && self.data_change
         {
             let cdf_enabled = self
@@ -1172,8 +1242,8 @@ impl<S> Transaction<S> {
         let mut kernel_commit_info = CommitInfo::new(
             self.commit_timestamp,
             in_commit_timestamp,
-            self.operation.clone(),
-            self.engine_info.clone(),
+            Some(self.operation.to_string()),
+            Some(self.engine_info.clone()),
             self.is_blind_append,
         );
         if let Some(operation_parameters) = self.operation_parameters.clone() {
@@ -1222,9 +1292,7 @@ impl<S> Transaction<S> {
         span.record("remove_files_bytes", file_stats.gross_remove_bytes);
         span.record("is_blind_append", self.is_blind_append);
         span.record("data_change", self.data_change);
-        if let Some(operation) = self.operation.as_deref() {
-            span.record("operation", operation);
-        }
+        span.record("operation", self.operation.as_str());
         span.record("prepare_duration_ns", prepare_duration.as_nanos() as u64);
         span.record(
             "committer_duration_ns",
@@ -1314,10 +1382,7 @@ impl<S> Transaction<S> {
         // add or remove row lacks `size` (see `FileStatsVisitor::visit` in
         // `kernel/src/crc/file_stats.rs`). So at this point every size is known to be
         // present, and only operation classification can flip `is_incremental_safe`.
-        let is_incremental_safe = self
-            .operation
-            .as_deref()
-            .is_some_and(is_incremental_safe_operation);
+        let is_incremental_safe = self.operation.is_incremental_safe();
         Ok(CrcDelta {
             file_stats,
             protocol: self
@@ -1333,14 +1398,14 @@ impl<S> Transaction<S> {
         })
     }
 
-    fn into_conflicted(self, conflict_version: Version) -> ConflictedTransaction<S> {
+    fn into_conflicted(self, conflict_version: Version) -> ConflictedTransaction<STATE, MODE> {
         ConflictedTransaction {
             transaction: self,
             conflict_version,
         }
     }
 
-    fn into_retryable(self, error: KernelError) -> RetryableTransaction<S> {
+    fn into_retryable(self, error: KernelError) -> RetryableTransaction<STATE, MODE> {
         RetryableTransaction {
             transaction: self,
             error,
@@ -1351,7 +1416,7 @@ impl<S> Transaction<S> {
 // =============================================================================
 // Imperative action processing
 // =============================================================================
-impl<S> Transaction<S> {
+impl<STATE> Transaction<STATE, Imperative> {
     // Reject data-file removals / DV updates on appendOnly tables when `data_change` is true.
     fn validate_append_only_semantics(&self) -> KernelResult<()> {
         if !self.data_change
@@ -1363,9 +1428,10 @@ impl<S> Transaction<S> {
         }
 
         let removes_data = self
+            .staged_data_changes
             .remove_files_metadata
             .iter()
-            .chain(&self.dv_matched_files)
+            .chain(&self.staged_data_changes.dv_matched_files)
             .any(HasSelectionVector::has_selected_rows);
         require!(
             !removes_data,
@@ -1383,24 +1449,23 @@ impl<S> Transaction<S> {
         // Validate protocol-required add-file statistics.
         // Note: Stats validation cannot use `StagedDataValidator` because its columns and types
         // are determined at runtime, whereas `RowVisitor::selected_column_names_and_types` must
-        // return a static projection. Consequently, stats validation makes a separate pass for
-        // each stats column.
-        self.validate_add_files_stats(&self.add_files_metadata)?;
+        // return a static projection. It therefore uses dynamic per-column visitors.
+        self.validate_add_files_stats(&self.staged_data_changes.add_files_metadata)?;
 
         // Validate required fields for addFile.
         write_validation::StagedDataValidator::staged_add_file(
             self.effective_table_config.physical_partition_columns(),
         )
-        .validate(&self.add_files_metadata)?;
+        .validate(&self.staged_data_changes.add_files_metadata)?;
 
         write_validation::StagedDataValidator::staged_dv_matched_file(
             self.effective_table_config.physical_partition_columns(),
         )?
-        .validate_filtered(&self.dv_matched_files)?;
+        .validate_filtered(&self.staged_data_changes.dv_matched_files)?;
 
         // Validate required fields for RemoveFile.
         write_validation::StagedDataValidator::staged_remove_file()
-            .validate_filtered(&self.remove_files_metadata)?;
+            .validate_filtered(&self.staged_data_changes.remove_files_metadata)?;
 
         Ok(())
     }
@@ -1446,7 +1511,7 @@ impl<S> Transaction<S> {
 
         let remove_actions = self.generate_remove_actions(
             engine,
-            self.remove_files_metadata.iter(),
+            self.staged_data_changes.remove_files_metadata.iter(),
             false, /* has_dv_update_columns */
         )?;
 
@@ -1497,7 +1562,7 @@ impl<S> Transaction<S> {
         dm_changes: Vec<DomainMetadata>,
         prepare_duration: Duration,
         committer_duration: Duration,
-    ) -> KernelResult<CommitResult<S>> {
+    ) -> KernelResult<CommitResult<STATE>> {
         match commit_response {
             Ok(CommitResponse::Committed { file_meta }) => {
                 // TODO(#2717): the commit already succeeded atomically; the post-commit `?`
@@ -1509,13 +1574,13 @@ impl<S> Transaction<S> {
                     .and_then(|s| s.file_size_histogram)
                     .map(|h| h.sorted_bin_boundaries);
                 let file_stats = FileStatsDelta::try_compute_for_txn(
-                    &self.add_files_metadata,
-                    &self.remove_files_metadata,
+                    &self.staged_data_changes.add_files_metadata,
+                    &self.staged_data_changes.remove_files_metadata,
                     bin_boundaries.as_deref(),
                 )?;
                 self.record_commit_success_metrics(
                     &file_stats,
-                    self.num_dv_updates as u64,
+                    self.staged_data_changes.num_dv_updates as u64,
                     prepare_duration,
                     committer_duration,
                 );
@@ -1607,7 +1672,7 @@ impl<S> Transaction<S> {
             .effective_table_config
             .should_assign_fresh_row_tracking_metadata();
 
-        if self.add_files_metadata.is_empty() {
+        if self.staged_data_changes.add_files_metadata.is_empty() {
             // No files to add. For an empty CREATE TABLE with row tracking, emit the initial
             // high water mark domain metadata (rowIdHighWaterMark = -1) so subsequent writes
             // have a valid starting point. For all other empty commits (metadata-only, etc.),
@@ -1624,7 +1689,10 @@ impl<S> Transaction<S> {
         } else {
             let add_actions = build_add_actions(
                 engine,
-                self.add_files_metadata.iter().map(|a| Ok(a.deref())),
+                self.staged_data_changes
+                    .add_files_metadata
+                    .iter()
+                    .map(|a| Ok(a.deref())),
                 self.add_files_schema().clone(),
                 self.data_change,
             )?;
@@ -1635,10 +1703,10 @@ impl<S> Transaction<S> {
     /// Generates add actions with row tracking columns and the row ID high water mark
     /// domain metadata.
     ///
-    /// Visits all add file batches once to read `numRecords` per file, assigning a unique
-    /// non-overlapping `baseRowId` range to each file and computing the final high water mark
-    /// for the domain metadata action. The initial high water mark is read from the snapshot
-    /// for existing tables, or defaults to -1 for create-table (no prior log to read from).
+    /// Reads `numRecords` in one pass to compute the final high water mark, then assigns unique
+    /// non-overlapping `baseRowId` ranges in a second pass. The initial high water mark is read
+    /// from the snapshot for existing tables, or defaults to -1 for create-table (no prior log
+    /// to read from).
     fn generate_adds_with_row_tracking<'a>(
         &'a self,
         engine: &dyn Engine,
@@ -1654,51 +1722,44 @@ impl<S> Transaction<S> {
                 .get_row_tracking_high_water_mark(engine)?
         };
 
-        // Create a row tracking visitor and visit all files to collect row tracking information
-        let mut row_tracking_visitor =
-            RowTrackingVisitor::new(row_id_high_water_mark, Some(self.add_files_metadata.len()));
+        // Assign base row IDs starting from the current high water mark.
+        let mut row_tracking_visitor = RowTrackingVisitor::new(row_id_high_water_mark);
+        let extended_add_files =
+            self.staged_data_changes
+                .add_files_metadata
+                .iter()
+                .map(move |add_files_batch| {
+                    row_tracking_visitor.visit_rows_of(add_files_batch.deref())?;
+                    let base_row_ids = row_tracking_visitor.take_base_row_ids();
+                    let commit_versions = vec![commit_version; base_row_ids.len()];
+                    let base_row_ids_array =
+                        ArrayData::try_new(ArrayType::new(DataType::LONG, true), base_row_ids)?;
+                    let commit_versions_array =
+                        ArrayData::try_new(ArrayType::new(DataType::LONG, true), commit_versions)?;
 
-        // We visit all files with the row visitor before creating the add action iterator because
-        // we need to know the final row ID high water mark to create the domain metadata action.
-        for add_files_batch in &self.add_files_metadata {
-            row_tracking_visitor.visit_rows_of(add_files_batch.deref())?;
-        }
-
-        // Destructure the visitor to move base_row_id_batches into the add-files iterator
-        // while also extracting the final high water mark for the domain metadata action.
-        let RowTrackingVisitor {
-            base_row_id_batches,
-            row_id_high_water_mark,
-        } = row_tracking_visitor;
-
-        // Create extended add files with row tracking columns
-        let extended_add_files = self.add_files_metadata.iter().zip(base_row_id_batches).map(
-            move |(add_files_batch, base_row_ids)| {
-                let commit_versions = vec![commit_version; base_row_ids.len()];
-                let base_row_ids_array =
-                    ArrayData::try_new(ArrayType::new(DataType::LONG, true), base_row_ids)?;
-                let commit_versions_array =
-                    ArrayData::try_new(ArrayType::new(DataType::LONG, true), commit_versions)?;
-
-                let row_tracking_schema = with_row_tracking_cols(&schema_ref! {})?;
-                add_files_batch.append_columns(
-                    row_tracking_schema,
-                    vec![base_row_ids_array, commit_versions_array],
-                )
-            },
-        );
+                    let row_tracking_schema = with_row_tracking_cols(&schema_ref! {})?;
+                    add_files_batch.append_columns(
+                        row_tracking_schema,
+                        vec![base_row_ids_array, commit_versions_array],
+                    )
+                });
 
         // Generate add actions including row tracking metadata
         let add_actions = build_add_actions(
             engine,
             extended_add_files,
-            with_row_tracking_cols(self.add_files_schema())?,
+            augmented_write_metadata_schema()?,
             self.data_change,
         )?;
 
-        // Generate a row tracking domain metadata based on the final high water mark
-        let row_tracking_domain_metadata: RowTrackingDomainMetadata =
-            RowTrackingDomainMetadata::new(row_id_high_water_mark);
+        // Do a dry run to eagerly compute the new high water mark so we can store it. The row
+        // tracking calculation above happens only lazily as our caller drives the iterator.
+        let mut dry_run = RowTrackingVisitor::dry_run(row_id_high_water_mark);
+        for add_files_batch in &self.staged_data_changes.add_files_metadata {
+            dry_run.visit_rows_of(add_files_batch.deref())?;
+        }
+        let row_tracking_domain_metadata =
+            RowTrackingDomainMetadata::new(dry_run.row_id_high_water_mark);
 
         Ok((Box::new(add_actions), Some(row_tracking_domain_metadata)))
     }
@@ -1731,7 +1792,7 @@ impl<S> Transaction<S> {
     ) -> KernelResult<impl Iterator<Item = KernelResult<FilteredEngineData>> + Send + 'a> {
         // Create-table transactions should not have any remove actions.
         // Only error if there are actually files queued for removal.
-        if self.is_create_table() && !self.remove_files_metadata.is_empty() {
+        if self.is_create_table() && !self.staged_data_changes.remove_files_metadata.is_empty() {
             return Err(KernelError::internal_error(
                 "CREATE TABLE transaction cannot have remove actions",
             ));
@@ -1913,7 +1974,7 @@ pub struct PostCommitStats {
 ///   transaction can be retried without rebasing.
 #[derive(Debug)]
 #[must_use]
-pub enum CommitResult<S = ExistingTable> {
+pub enum CommitResult<STATE = UpdateTable, MODE: ExecutionMode = Imperative> {
     /// The transaction was successfully committed.
     Committed(CommittedTransaction),
     /// This transaction conflicted with an existing version (see
@@ -1922,19 +1983,19 @@ pub enum CommitResult<S = ExistingTable> {
     /// conflicted).
     // TODO(zach): in order to make the returning of a transaction useful, we need to add APIs to
     // update the transaction to a new version etc.
-    Conflicted(ConflictedTransaction<S>),
+    Conflicted(ConflictedTransaction<STATE, MODE>),
     /// An IO (retryable) error occurred during the commit.
-    Retryable(RetryableTransaction<S>),
+    Retryable(RetryableTransaction<STATE, MODE>),
 }
 
-impl<S> CommitResult<S> {
+impl<STATE, MODE: ExecutionMode> CommitResult<STATE, MODE> {
     /// Returns true if the commit was successful.
     pub fn is_committed(&self) -> bool {
         matches!(self, CommitResult::Committed(_))
     }
 }
 
-impl<S: std::fmt::Debug> CommitResult<S> {
+impl<STATE: std::fmt::Debug, MODE: ExecutionMode> CommitResult<STATE, MODE> {
     /// Unwraps the [`CommittedTransaction`], panicking if the commit was not successful.
     #[cfg(any(test, feature = "test-utils"))]
     #[allow(clippy::panic)]
@@ -2000,14 +2061,14 @@ impl CommittedTransaction {
 ///
 /// [conflict version]: Self::conflict_version
 #[derive(Debug)]
-pub struct ConflictedTransaction<S = ExistingTable> {
+pub struct ConflictedTransaction<STATE = UpdateTable, MODE: ExecutionMode = Imperative> {
     // TODO: remove after rebase APIs
     #[allow(dead_code)]
-    transaction: Transaction<S>,
+    transaction: Transaction<STATE, MODE>,
     conflict_version: Version,
 }
 
-impl<S> ConflictedTransaction<S> {
+impl<STATE, MODE: ExecutionMode> ConflictedTransaction<STATE, MODE> {
     /// The version attempted commit that yielded a conflict
     pub fn conflict_version(&self) -> Version {
         self.conflict_version
@@ -2018,23 +2079,11 @@ impl<S> ConflictedTransaction<S> {
 /// can be recovered with `RetryableTransaction::transaction` and retried without rebasing. The
 /// associated error can be inspected via `RetryableTransaction::error`.
 #[derive(Debug)]
-pub struct RetryableTransaction<S = ExistingTable> {
+pub struct RetryableTransaction<STATE = UpdateTable, MODE: ExecutionMode = Imperative> {
     /// The transaction that failed to commit due to a retryable error.
-    pub transaction: Transaction<S>,
+    pub transaction: Transaction<STATE, MODE>,
     /// Transient error that caused the commit to fail.
     pub error: KernelError,
-}
-
-fn collect_string_map<I, K, V>(pairs: I) -> HashMap<String, Option<String>>
-where
-    I: IntoIterator<Item = (K, Option<V>)>,
-    K: Into<String>,
-    V: Into<String>,
-{
-    pairs
-        .into_iter()
-        .map(|(key, value)| (key.into(), value.map(Into::into)))
-        .collect()
 }
 
 #[cfg(test)]
@@ -2054,13 +2103,14 @@ mod tests {
     use rstest::rstest;
     use url::Url;
 
+    use super::exec_mode::StagedDataChanges;
     use super::*;
     use crate::actions::deletion_vector::DeletionVectorDescriptor;
     use crate::actions::CommitInfo;
     use crate::arrow::array::builder::{MapBuilder, MapFieldNames, StringBuilder};
     use crate::arrow::array::{
-        new_null_array, ArrayRef, Float64Array, Int32Array, Int64Array, NullArray, StringArray,
-        StructArray,
+        new_null_array, ArrayRef, BooleanArray, Float64Array, Int32Array, Int64Array, NullArray,
+        StringArray, StructArray,
     };
     use crate::arrow::datatypes::{
         DataType as ArrowDataType, Field as ArrowField, Schema as ArrowSchema,
@@ -2079,10 +2129,8 @@ mod tests {
     use crate::scan::log_replay::PATH_NAME;
     use crate::scan::state_info::tests::RowTrackingState;
     use crate::schema::{schema, schema_ref, MapType};
-    use crate::table_features::ColumnMappingMode;
-    #[cfg(feature = "adaptive-metadata-in-dev")]
-    use crate::table_features::TableFeature;
-    use crate::table_properties::APPEND_ONLY;
+    use crate::table_features::{ColumnMappingMode, TableFeature};
+    use crate::table_properties::{APPEND_ONLY, ENABLE_CHANGE_DATA_FEED, ENABLE_ROW_TRACKING};
     use crate::transaction::create_table::create_table;
     use crate::transaction::data_layout::DataLayout;
     #[cfg(feature = "adaptive-metadata-in-dev")]
@@ -2093,9 +2141,188 @@ mod tests {
         assert_result_error_with_message, copy_test_table, create_valid_add_file_batch,
         install_thread_local_metrics_reporter, load_test_table, string_array_to_engine_data,
         test_schema_flat, test_schema_nested, test_schema_with_array, test_schema_with_map,
-        CapturingReporter,
+        CapturingReporter, MockProtocolBuilder, MockTableConfigurationBuilder,
     };
     use crate::{EvaluationHandler, ResultIterator, Snapshot};
+
+    #[rstest]
+    #[case::inferred(None, true, true)]
+    #[case::explicit_true(Some(true), true, false)]
+    #[case::explicit_false(Some(false), false, false)]
+    fn transaction_constructor_initializes_all_defaults(
+        #[case] requested_data_change: Option<bool>,
+        #[case] expected_data_change: bool,
+        #[case] expected_infer_data_change: bool,
+        #[values("", "test-engine")] expected_engine_info: &str,
+    ) -> Result<()> {
+        let (_engine, snapshot, _tempdir) = load_test_table("table-without-dv-small")?;
+        let _guard = tracing::subscriber::set_default(tracing_subscriber::registry());
+        let expected_span = tracing::info_span!("transaction_constructor_defaults");
+        assert!(expected_span.id().is_some());
+        let expected_commit_timestamp = 1234;
+
+        let transaction = Transaction::<UpdateTable>::new(
+            TransactionBuilderState {
+                engine_info: expected_engine_info.into(),
+                data_change: requested_data_change,
+                ..Default::default()
+            },
+            snapshot.table_configuration().clone(),
+            Box::new(FileSystemCommitter::new()),
+            UpdateTableOperation::Write.into(),
+            expected_span.clone(),
+            expected_commit_timestamp,
+        );
+        let Transaction {
+            span,
+            operation_id,
+            correlation_id,
+            read_snapshot_opt,
+            effective_table_config,
+            should_emit_protocol,
+            should_emit_metadata,
+            committer,
+            operation,
+            operation_parameters,
+            operation_metrics,
+            engine_info,
+            engine_commit_info,
+            staged_data_changes:
+                Imperative {
+                    add_files_metadata,
+                    remove_files_metadata,
+                    dv_matched_files,
+                    num_dv_updates,
+                },
+            set_transactions,
+            commit_timestamp,
+            user_domain_metadata_additions,
+            system_domain_metadata_additions,
+            provided_row_tracking_high_water_mark,
+            user_domain_removals,
+            data_change,
+            infer_data_change,
+            column_defaults_acknowledged,
+            row_tracking_preservation_acknowledged,
+            is_blind_append,
+            #[cfg(feature = "adaptive-metadata-in-dev")]
+            manifest_write,
+            physical_clustering_columns,
+            _state: _,
+        } = transaction;
+
+        assert_eq!(span.id(), expected_span.id());
+        assert_ne!(operation_id, MetricId::nil());
+        assert!(correlation_id.is_none());
+        assert!(read_snapshot_opt.is_none());
+        assert_eq!(&effective_table_config, snapshot.table_configuration());
+        assert!(!should_emit_protocol);
+        assert!(!should_emit_metadata);
+        assert!(!committer.is_catalog_committer());
+        assert_eq!(operation, UpdateTableOperation::Write.into());
+        assert!(operation_parameters.is_none());
+        assert!(operation_metrics.is_none());
+        assert_eq!(engine_info, expected_engine_info);
+        assert!(engine_commit_info.is_none());
+        assert!(add_files_metadata.is_empty());
+        assert!(remove_files_metadata.is_empty());
+        assert!(set_transactions.is_empty());
+        assert_eq!(commit_timestamp, expected_commit_timestamp);
+        assert!(user_domain_metadata_additions.is_empty());
+        assert!(system_domain_metadata_additions.is_empty());
+        assert!(provided_row_tracking_high_water_mark.is_none());
+        assert!(user_domain_removals.is_empty());
+        assert_eq!(data_change, expected_data_change);
+        assert_eq!(infer_data_change, expected_infer_data_change);
+        assert!(!column_defaults_acknowledged);
+        assert!(!row_tracking_preservation_acknowledged);
+        assert!(!is_blind_append);
+        assert!(dv_matched_files.is_empty());
+        assert_eq!(num_dv_updates, 0);
+        #[cfg(feature = "adaptive-metadata-in-dev")]
+        assert!(manifest_write.is_none());
+        assert!(physical_clustering_columns.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn transaction_constructor_generates_unique_operation_ids() -> Result<()> {
+        let (_engine, snapshot, _tempdir) = load_test_table("table-without-dv-small")?;
+        let first = Transaction::<UpdateTable>::new(
+            TransactionBuilderState::default(),
+            snapshot.table_configuration().clone(),
+            Box::new(FileSystemCommitter::new()),
+            UpdateTableOperation::Write.into(),
+            tracing::Span::none(),
+            1234,
+        );
+        let second = Transaction::<UpdateTable>::new(
+            TransactionBuilderState::default(),
+            snapshot.table_configuration().clone(),
+            Box::new(FileSystemCommitter::new()),
+            UpdateTableOperation::Write.into(),
+            tracing::Span::none(),
+            1234,
+        );
+
+        assert_ne!(first.operation_id, second.operation_id);
+        Ok(())
+    }
+
+    #[test]
+    fn transaction_constructor_preserves_shared_intent() -> Result<()> {
+        let (_engine, snapshot, _tempdir) = load_test_table("table-without-dv-small")?;
+        let expected_parameters = HashMap::from([("mode".into(), Some("Create".into()))]);
+        let expected_metrics = HashMap::from([("numFiles".into(), Some("3".into()))]);
+        let expected_domains = vec![DomainMetadata::new("app.domain".into(), "{}".into())];
+        let expected_commit_info_schema = schema_ref! { nullable "tag": STRING };
+        let commit_info = string_array_to_engine_data(StringArray::from(vec!["connector-tag"]));
+        let expected_commit_info = std::ptr::from_ref(commit_info.as_ref());
+        let expected_commit_timestamp = 5678;
+
+        let transaction = Transaction::<CreateTable>::new(
+            TransactionBuilderState {
+                correlation_id: Some("correlation-id".into()),
+                operation_parameters: Some(expected_parameters.clone()),
+                operation_metrics: Some(expected_metrics.clone()),
+                engine_info: "connector/1.0".into(),
+                engine_commit_info: Some((commit_info, expected_commit_info_schema.clone())),
+                transaction_ids: vec![("app-one".into(), 7), ("app-two".into(), 8)],
+                domain_metadata_additions: expected_domains.clone(),
+                data_change: Some(false),
+            },
+            snapshot.table_configuration().clone(),
+            Box::new(MockCatalogCommitter),
+            CommitOperation::CreateTable,
+            tracing::Span::none(),
+            expected_commit_timestamp,
+        );
+
+        assert_eq!(transaction.operation, CommitOperation::CreateTable);
+        assert_eq!(transaction.engine_info, "connector/1.0");
+        assert_eq!(
+            transaction.correlation_id.as_deref(),
+            Some("correlation-id")
+        );
+        assert_eq!(transaction.operation_parameters, Some(expected_parameters));
+        assert_eq!(transaction.operation_metrics, Some(expected_metrics));
+        assert_eq!(transaction.user_domain_metadata_additions, expected_domains);
+        assert!(transaction.committer.is_catalog_committer());
+        assert_eq!(transaction.commit_timestamp, expected_commit_timestamp);
+        assert_eq!(
+            transaction.set_transactions,
+            vec![
+                SetTransaction::new("app-one".into(), 7, Some(expected_commit_timestamp)),
+                SetTransaction::new("app-two".into(), 8, Some(expected_commit_timestamp)),
+            ]
+        );
+        let (commit_info, commit_info_schema) = transaction.engine_commit_info.unwrap();
+        assert!(std::ptr::eq(expected_commit_info, commit_info.as_ref()));
+        assert_eq!(commit_info_schema, expected_commit_info_schema);
+        assert!(!transaction.data_change);
+        assert!(!transaction.infer_data_change);
+        Ok(())
+    }
 
     impl Transaction {
         /// Set clustering columns for testing purposes without needing a table
@@ -2244,14 +2471,10 @@ mod tests {
         }
     }
 
-    fn create_dv_transaction(
-        snapshot: Arc<Snapshot>,
-        engine: &dyn Engine,
-    ) -> KernelResult<Transaction> {
-        Ok(snapshot
-            .transaction(Box::new(FileSystemCommitter::new()), engine)?
-            .with_operation("DELETE".to_string())
-            .with_engine_info("test_engine"))
+    fn create_dv_transaction(snapshot: Arc<Snapshot>, engine: &dyn Engine) -> Result<Transaction> {
+        snapshot
+            .update_table(UpdateTableOperation::Delete, "test_engine")
+            .build(engine, Box::new(FileSystemCommitter::new()))
     }
 
     // TODO: create a finer-grained unit tests for transactions (issue#1091)
@@ -2266,8 +2489,8 @@ mod tests {
             .build(&engine)
             .unwrap();
         let txn = snapshot
-            .transaction(Box::new(FileSystemCommitter::new()), &engine)?
-            .with_engine_info("default engine");
+            .update_table(UpdateTableOperation::Write, "default engine")
+            .build(&engine, Box::new(FileSystemCommitter::new()))?;
 
         let schema = txn.add_files_schema();
         let expected = schema! {
@@ -2388,8 +2611,8 @@ mod tests {
             .build(&engine)
             .unwrap();
         let txn = snapshot
-            .transaction(Box::new(FileSystemCommitter::new()), &engine)?
-            .with_engine_info("default engine");
+            .update_table(UpdateTableOperation::Write, "default engine")
+            .build(&engine, Box::new(FileSystemCommitter::new()))?;
         let write_state = txn.write_state().unwrap();
         let write_context = write_state.write_context_builder().build().unwrap();
 
@@ -2414,26 +2637,25 @@ mod tests {
     }
 
     #[test]
-    fn write_state_reflects_updated_effective_table_config(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    fn write_state_reflects_schema_configured_on_builder() -> Result<(), Box<dyn std::error::Error>>
+    {
         let (engine, snapshot) = setup_non_dv_table();
         let txn = snapshot
             .clone()
-            .transaction(Box::new(FileSystemCommitter::new()), &engine)?
-            .with_engine_info("default engine");
+            .update_table(UpdateTableOperation::Write, "default engine")
+            .build(&engine, Box::new(FileSystemCommitter::new()))?;
 
-        // Regression coverage for stale WriteState caching: keep the first context alive
-        // while the transaction's effective table config changes.
+        // Independently built transactions must retain their own write schemas.
         let initial_write_state = txn.write_state()?;
         let initial_write_context = initial_write_state.write_context_builder().build()?;
         assert!(!initial_write_context
             .logical_data_schema()
             .contains("fresh_column"));
 
-        let txn = txn.with_schema_changes(vec![SchemaOperation::add_column(
-            None,
-            StructField::nullable("fresh_column", DataType::INTEGER),
-        )])?;
+        let txn = snapshot
+            .update_table(UpdateTableOperation::Write, "test-engine")
+            .add_column(StructField::nullable("fresh_column", DataType::INTEGER))
+            .build(&engine, Box::new(FileSystemCommitter::new()))?;
 
         let updated_write_state = txn.write_state()?;
         let updated_write_context = updated_write_state.write_context_builder().build()?;
@@ -2452,23 +2674,17 @@ mod tests {
 
     #[test]
     fn schema_changes_are_applied_once_and_persisted_on_commit() -> Result<()> {
-        let (engine, txn, _tempdir) = create_existing_table_txn()?;
+        let (engine, txn, _tempdir) = create_existing_table_txn_with(|builder| {
+            builder.add_column(StructField::nullable("first_column", DataType::INTEGER))
+        })?;
 
-        let snapshot = txn
-            .with_schema_changes(vec![SchemaOperation::add_column(
-                None,
-                StructField::nullable("first_column", DataType::INTEGER),
-            )])?
-            .commit(engine.as_ref())?
-            .unwrap_post_commit_snapshot();
+        let snapshot = txn.commit(engine.as_ref())?.unwrap_post_commit_snapshot();
         assert!(snapshot.schema().contains("first_column"));
 
         let snapshot = snapshot
-            .transaction(Box::new(FileSystemCommitter::new()), engine.as_ref())?
-            .with_schema_changes(vec![SchemaOperation::add_column(
-                None,
-                StructField::nullable("second_column", DataType::STRING),
-            )])?
+            .update_table(UpdateTableOperation::Write, "test-engine")
+            .add_column(StructField::nullable("second_column", DataType::STRING))
+            .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
             .commit(engine.as_ref())?
             .unwrap_post_commit_snapshot();
 
@@ -2500,10 +2716,9 @@ mod tests {
             .unwrap_post_commit_snapshot();
 
         let snapshot = snapshot
-            .transaction(Box::new(FileSystemCommitter::new()), engine.as_ref())?
-            .with_schema_changes(vec![SchemaOperation::SetNullable {
-                column: column_name!("id"),
-            }])?
+            .update_table(UpdateTableOperation::Write, "test-engine")
+            .set_nullable(column_name!("id"))
+            .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
             .commit(engine.as_ref())?
             .unwrap_post_commit_snapshot();
 
@@ -2514,20 +2729,18 @@ mod tests {
 
     #[test]
     fn schema_add_struct_then_nested_field_is_persisted_on_commit() -> Result<()> {
-        let (engine, txn, _tempdir) = create_existing_table_txn()?;
-        let snapshot = txn
-            .with_schema_changes(vec![
-                SchemaOperation::add_column(
-                    None,
-                    StructField::nullable("address", StructType::try_new([])?),
-                ),
-                SchemaOperation::add_column(
+        let (engine, txn, _tempdir) = create_existing_table_txn_with(|builder| {
+            builder
+                .add_column(StructField::nullable(
+                    "address",
+                    StructType::try_new([]).unwrap(),
+                ))
+                .add_column_at(
                     column_name!("address"),
                     StructField::nullable("city", DataType::STRING),
-                ),
-            ])?
-            .commit(engine.as_ref())?
-            .unwrap_post_commit_snapshot();
+                )
+        })?;
+        let snapshot = txn.commit(engine.as_ref())?.unwrap_post_commit_snapshot();
 
         let schema = snapshot.schema();
         let address = schema.field("address").expect("address must exist");
@@ -2544,11 +2757,9 @@ mod tests {
 
     #[test]
     fn schema_changes_can_precede_staged_data_in_the_same_commit() -> Result<()> {
-        let (engine, txn, _tempdir) = create_existing_table_txn()?;
-        let mut txn = txn.with_schema_changes(vec![SchemaOperation::add_column(
-            None,
-            StructField::nullable("fresh_column", DataType::INTEGER),
-        )])?;
+        let (engine, mut txn, _tempdir) = create_existing_table_txn_with(|builder| {
+            builder.add_column(StructField::nullable("fresh_column", DataType::INTEGER))
+        })?;
         add_dummy_file(&mut txn);
 
         let snapshot = txn.commit(engine.as_ref())?.unwrap_post_commit_snapshot();
@@ -2558,31 +2769,13 @@ mod tests {
     }
 
     #[test]
-    fn schema_changes_are_rejected_after_staging_data() -> Result<()> {
-        let (_engine, mut txn, _tempdir) = create_existing_table_txn()?;
-        add_dummy_file(&mut txn);
-
-        let result = txn.with_schema_changes(vec![SchemaOperation::add_column(
-            None,
-            StructField::nullable("fresh_column", DataType::INTEGER),
-        )]);
-
-        assert!(matches!(
-            result,
-            Err(KernelError::InvalidTransactionState(_))
-        ));
-        Ok(())
-    }
-
-    #[test]
-    fn empty_schema_changes_are_rejected() -> Result<()> {
-        let (_engine, txn, _tempdir) = create_existing_table_txn()?;
-
-        let result = txn.with_schema_changes(vec![]);
-
-        assert_result_error_with_message(
-            result,
-            "with_schema_changes requires at least one schema operation",
+    fn empty_builder_schema_changes_do_not_emit_metadata() -> Result<()> {
+        let (_engine, txn, _tempdir) =
+            create_existing_table_txn_with(|builder| builder.with_schema_changes([]))?;
+        assert!(!txn.should_emit_metadata);
+        assert_eq!(
+            txn.effective_table_config.logical_schema(),
+            txn.read_snapshot()?.schema()
         );
         Ok(())
     }
@@ -2611,7 +2804,8 @@ mod tests {
         ) -> Transaction {
             let (engine, snapshot) = setup_non_dv_table();
             let mut txn = snapshot
-                .transaction(Box::new(FileSystemCommitter::new()), &engine)
+                .update_table(UpdateTableOperation::Write, "test-engine")
+                .build(&engine, Box::new(FileSystemCommitter::new()))
                 .unwrap();
             let table_config = try_table_config(&txn, schema, writer_features).unwrap();
             txn.replace_effective_table_config(table_config);
@@ -2649,7 +2843,8 @@ mod tests {
         fn base_txn() -> Transaction {
             let (engine, snapshot) = setup_non_dv_table();
             snapshot
-                .transaction(Box::new(FileSystemCommitter::new()), &engine)
+                .update_table(UpdateTableOperation::Write, "test-engine")
+                .build(&engine, Box::new(FileSystemCommitter::new()))
                 .unwrap()
         }
 
@@ -2725,8 +2920,8 @@ mod tests {
         let url = url::Url::from_directory_path(path).unwrap();
         let snapshot = Snapshot::builder_for(url).build(&engine).unwrap();
         let txn = snapshot
-            .transaction(Box::new(FileSystemCommitter::new()), &engine)?
-            .with_engine_info("default engine");
+            .update_table(UpdateTableOperation::Write, "default engine")
+            .build(&engine, Box::new(FileSystemCommitter::new()))?;
 
         let write_state = txn.write_state()?;
         let write_context = write_state
@@ -2775,7 +2970,8 @@ mod tests {
         let snapshot = Snapshot::builder_for(url).build(&engine)?;
         let txn = snapshot
             .clone()
-            .transaction(Box::new(FileSystemCommitter::new()), &engine)?;
+            .update_table(UpdateTableOperation::Write, "test-engine")
+            .build(&engine, Box::new(FileSystemCommitter::new()))?;
         let write_state = txn.write_state()?;
         let wc = write_state
             .write_context_builder()
@@ -2991,7 +3187,9 @@ mod tests {
         let path = std::fs::canonicalize(PathBuf::from(table_path)).unwrap();
         let url = url::Url::from_directory_path(path).unwrap();
         let snapshot = Snapshot::builder_for(url).build(&engine)?;
-        let txn = snapshot.transaction(Box::new(FileSystemCommitter::new()), &engine)?;
+        let txn = snapshot
+            .update_table(UpdateTableOperation::Write, "test-engine")
+            .build(&engine, Box::new(FileSystemCommitter::new()))?;
         let write_state = txn.write_state()?;
         let mut builder = write_state.write_context_builder();
         if let Some(partition_values) = partition_values {
@@ -3119,7 +3317,7 @@ mod tests {
             "Should fail when only some DV descriptors match scan files"
         );
         assert!(
-            txn.dv_matched_files.is_empty(),
+            txn.staged_data_changes.dv_matched_files.is_empty(),
             "Failed DV update should not leave staged file updates"
         );
         Ok(())
@@ -3130,11 +3328,12 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let (engine, snapshot) = setup_dv_enabled_table();
         let mut txn = create_dv_transaction(snapshot.clone(), &engine)?;
-        txn.dv_matched_files
+        txn.staged_data_changes
+            .dv_matched_files
             .push(FilteredEngineData::with_all_rows_selected(
                 string_array_to_engine_data(StringArray::from(vec!["sentinel"])),
             ));
-        let staged_len_before = txn.dv_matched_files.len();
+        let staged_len_before = txn.staged_data_changes.dv_matched_files.len();
         let scan = snapshot.scan_builder().build()?;
         let scan_metadata = scan.scan_metadata(&engine)?.collect::<Result<Vec<_>>>()?;
 
@@ -3163,7 +3362,7 @@ mod tests {
 
         assert!(result.is_err(), "iterator error should propagate");
         assert_eq!(
-            txn.dv_matched_files.len(),
+            txn.staged_data_changes.dv_matched_files.len(),
             staged_len_before,
             "Failed DV update should not stage additional file updates"
         );
@@ -3188,10 +3387,45 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn unmatched_dv_inputs_do_not_require_row_tracking_acknowledgment() -> Result<()> {
+        let (engine, snapshot) = setup_dv_enabled_table();
+        let mut txn = create_dv_transaction(snapshot.clone(), &engine)?;
+        let scan = snapshot.scan_builder().build()?;
+        txn.update_deletion_vectors(
+            HashMap::new(),
+            Transaction::scan_metadata_to_engine_data(scan.scan_metadata(&engine)?),
+        )?;
+
+        // Since we staged a DV update (with no files matched), the transaction bypasses
+        // row-tracking + CDF checks and does not require explicit row tracking acknowledgement.
+        assert!(txn.has_data_file_actions());
+        assert!(!txn.staged_data_changes.has_dv_updates());
+        txn.effective_table_config = MockTableConfigurationBuilder::new()
+            .with_protocol(
+                MockProtocolBuilder::new()
+                    .with_features([TableFeature::RowTracking, TableFeature::ChangeDataFeed])
+                    .build(),
+            )
+            .with_properties([(ENABLE_ROW_TRACKING, true), (ENABLE_CHANGE_DATA_FEED, true)])
+            .build();
+        add_dummy_file(&mut txn);
+        txn.validate_commit()?;
+
+        // Blind append validations only consider staged DV updates (not whether any selection
+        // vector actually matched), so a blind append is still disallowed.
+        txn.is_blind_append = true;
+        assert_result_error_with_message(
+            txn.validate_commit(),
+            "Blind append cannot update deletion vectors",
+        );
+        Ok(())
+    }
+
     // ============================================================================
     // validate_blind_append tests
     // ============================================================================
-    fn add_dummy_file<S: SupportsDataFiles>(txn: &mut Transaction<S>) {
+    fn add_dummy_file<STATE>(txn: &mut Transaction<STATE>) {
         let batch = create_valid_add_file_batch(false /* all_nullable */);
         txn.add_files(Box::new(ArrowEngineData::new(batch)));
     }
@@ -3276,17 +3510,26 @@ mod tests {
         let data = make_scan_files(selection_vector);
         match removal {
             DataRemoval::RemoveFile => txn.remove_files(data),
-            DataRemoval::DeletionVectorUpdate => txn.dv_matched_files.push(data),
+            DataRemoval::DeletionVectorUpdate => {
+                txn.staged_data_changes.dv_matched_files.push(data)
+            }
         }
     }
 
     /// Build a transaction on a writable copy of the `table-without-dv-small` fixture.
     fn create_existing_table_txn() -> KernelResult<(Arc<dyn Engine>, Transaction, tempfile::TempDir)>
     {
+        create_existing_table_txn_with(|builder| builder)
+    }
+
+    fn create_existing_table_txn_with(
+        configure: impl FnOnce(UpdateTableTransactionBuilder) -> UpdateTableTransactionBuilder,
+    ) -> KernelResult<(Arc<dyn Engine>, Transaction, tempfile::TempDir)> {
         let (url, tempdir) = copy_test_table("table-without-dv-small")?;
         let engine: Arc<dyn Engine> = Arc::new(SyncEngine::new());
         let snapshot = Snapshot::builder_for(url).build(engine.as_ref())?;
-        let txn = snapshot.transaction(Box::new(FileSystemCommitter::new()), engine.as_ref())?;
+        let txn = configure(snapshot.update_table(UpdateTableOperation::Write, "test-engine"))
+            .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?;
         Ok((engine, txn, tempdir))
     }
 
@@ -3307,12 +3550,94 @@ mod tests {
         Ok(())
     }
 
+    #[rstest]
+    #[case::create_with_update_operation(
+        true,
+        CommitOperation::UpdateTable(UpdateTableOperation::Write),
+        "create-table transactions must use the CREATE TABLE operation"
+    )]
+    #[case::update_with_create_operation(
+        false,
+        CommitOperation::CreateTable,
+        "CREATE TABLE cannot use an update-table transaction"
+    )]
+    #[case::alter_without_schema_changes(
+        false,
+        CommitOperation::UpdateTable(UpdateTableOperation::AlterTable),
+        "ALTER TABLE requires at least one schema change"
+    )]
+    #[case::empty_custom_operation(
+        false,
+        CommitOperation::UpdateTable(UpdateTableOperation::Custom(String::new())),
+        "custom operation name cannot be empty"
+    )]
+    #[case::reserved_custom_operation(
+        false,
+        CommitOperation::UpdateTable(UpdateTableOperation::Custom("WRITE".to_string())),
+        "custom operation name 'WRITE' is reserved"
+    )]
+    fn operation_compatibility_rejects_invalid_internal_state(
+        #[case] is_create_table: bool,
+        #[case] operation: CommitOperation,
+        #[case] expected: &str,
+    ) -> Result<()> {
+        // Public builders reject these states. Mutate private intent to test the runtime guard.
+        let result = if is_create_table {
+            let tempdir = tempfile::tempdir()?;
+            let engine = SyncEngine::new();
+            let mut txn = create_table(
+                tempdir.path().to_string_lossy(),
+                test_schema_flat(),
+                "test-engine",
+            )
+            .build(&engine, Box::new(FileSystemCommitter::new()))?;
+            txn.operation = operation;
+            txn.validate_operation_compatibility()
+        } else {
+            let (_engine, mut txn, _tempdir) = create_existing_table_txn()?;
+            txn.operation = operation;
+            txn.validate_operation_compatibility()
+        };
+
+        let error = result.expect_err("invalid internal operation must be rejected");
+        assert!(matches!(&error, KernelError::InvalidTransactionState(_)));
+        assert!(error.to_string().contains(expected), "{error}");
+        Ok(())
+    }
+
     #[test]
     fn test_validate_blind_append_success() -> Result<()> {
-        let (_engine, mut txn, _tempdir) = create_existing_table_txn()?;
-        txn = txn.with_blind_append();
+        let (_engine, mut txn, _tempdir) =
+            create_existing_table_txn_with(UpdateTableTransactionBuilder::with_blind_append)?;
         add_dummy_file(&mut txn);
         txn.validate_blind_append_semantics()?;
+        Ok(())
+    }
+
+    #[rstest]
+    fn create_table_add_actions_preserve_data_change(
+        #[values(false, true)] data_change: bool,
+    ) -> Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let engine = SyncEngine::new();
+        let mut transaction = create_table(
+            tempdir.path().to_string_lossy(),
+            test_schema_flat(),
+            "test-engine",
+        )
+        .with_data_change(data_change)
+        .build(&engine, Box::new(FileSystemCommitter::new()))?;
+        add_dummy_file(&mut transaction);
+        transaction.resolve_data_change();
+
+        let (mut adds, _) = transaction.generate_adds(&engine, 0)?;
+        let add = ArrowEngineData::try_from_engine_data(adds.next().expect("Add action")?)?;
+        let add = get_column!(add.record_batch(), "add", StructArray);
+        assert_eq!(
+            get_column!(add, "dataChange", BooleanArray).value(0),
+            data_change
+        );
+        assert!(adds.next().is_none());
         Ok(())
     }
 
@@ -3355,9 +3680,9 @@ mod tests {
         #[case] selection_vector: &[bool],
         #[case] expected_error: bool,
     ) -> Result<()> {
-        let (_engine, mut txn, _tempdir) = create_existing_table_txn()?;
+        let (_engine, mut txn, _tempdir) =
+            create_existing_table_txn_with(|builder| builder.with_data_change(data_change))?;
         set_append_only(&mut txn, append_only)?;
-        txn.set_data_change(data_change);
         for index in 0..2 {
             let selection_vector = if index == batch_index {
                 selection_vector
@@ -3381,8 +3706,8 @@ mod tests {
 
     #[test]
     fn test_validate_blind_append_requires_adds() -> Result<()> {
-        let (_engine, mut txn, _tempdir) = create_existing_table_txn()?;
-        txn = txn.with_blind_append();
+        let (_engine, txn, _tempdir) =
+            create_existing_table_txn_with(UpdateTableTransactionBuilder::with_blind_append)?;
         let result = txn.validate_blind_append_semantics();
         assert!(matches!(
             result,
@@ -3393,9 +3718,10 @@ mod tests {
 
     #[test]
     fn test_validate_blind_append_requires_data_change() -> Result<()> {
-        let (_engine, mut txn, _tempdir) = create_existing_table_txn()?;
-        txn = txn.with_blind_append();
-        txn.set_data_change(false);
+        let (_engine, mut txn, _tempdir) =
+            create_existing_table_txn_with(UpdateTableTransactionBuilder::with_blind_append)?;
+        // Exercise defensive commit validation of an invalid internal state.
+        txn.data_change = false;
         add_dummy_file(&mut txn);
         let result = txn.validate_blind_append_semantics();
         assert!(matches!(
@@ -3407,8 +3733,8 @@ mod tests {
 
     #[test]
     fn test_validate_blind_append_rejects_removes() -> Result<()> {
-        let (_engine, mut txn, _tempdir) = create_existing_table_txn()?;
-        txn = txn.with_blind_append();
+        let (_engine, mut txn, _tempdir) =
+            create_existing_table_txn_with(UpdateTableTransactionBuilder::with_blind_append)?;
         add_dummy_file(&mut txn);
         let remove_data = FilteredEngineData::with_all_rows_selected(string_array_to_engine_data(
             StringArray::from(vec!["remove"]),
@@ -3424,13 +3750,13 @@ mod tests {
 
     #[test]
     fn test_validate_blind_append_rejects_dv_updates() -> Result<()> {
-        let (_engine, mut txn, _tempdir) = create_existing_table_txn()?;
-        txn = txn.with_blind_append();
+        let (_engine, mut txn, _tempdir) =
+            create_existing_table_txn_with(UpdateTableTransactionBuilder::with_blind_append)?;
         add_dummy_file(&mut txn);
         let dv_data = FilteredEngineData::with_all_rows_selected(string_array_to_engine_data(
             StringArray::from(vec!["dv"]),
         ));
-        txn.dv_matched_files.push(dv_data);
+        txn.staged_data_changes.dv_matched_files.push(dv_data);
         let result = txn.validate_blind_append_semantics();
         assert!(matches!(
             result,
@@ -3450,8 +3776,8 @@ mod tests {
             "test_engine",
         )
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?;
-        // CreateTableTransaction does not expose with_blind_append() (compile-time
-        // prevention per #1768). Directly set the field to test the runtime check.
+        // Create-table builders do not expose with_blind_append(). Set the field directly to
+        // exercise the defensive runtime check.
         txn.is_blind_append = true;
         add_dummy_file(&mut txn);
         let result = txn.validate_blind_append_semantics();
@@ -3474,8 +3800,8 @@ mod tests {
 
     #[test]
     fn test_blind_append_commit_rejects_no_adds() -> Result<()> {
-        let (_engine, mut txn, _tempdir) = create_existing_table_txn()?;
-        txn = txn.with_blind_append();
+        let (_engine, txn, _tempdir) =
+            create_existing_table_txn_with(UpdateTableTransactionBuilder::with_blind_append)?;
         // No files added — commit should fail with blind append validation
         let err = txn
             .commit(_engine.as_ref())
@@ -3490,8 +3816,8 @@ mod tests {
 
     #[test]
     fn test_blind_append_commit_success() -> Result<()> {
-        let (engine, mut txn, _tempdir) = create_existing_table_txn()?;
-        txn = txn.with_blind_append();
+        let (engine, mut txn, _tempdir) =
+            create_existing_table_txn_with(UpdateTableTransactionBuilder::with_blind_append)?;
         add_dummy_file(&mut txn);
         // Blind append with add files should pass validation and proceed to commit.
         // The commit itself may fail due to schema mismatch with the dummy data,
@@ -3515,7 +3841,9 @@ mod tests {
     #[test]
     fn test_commit_io_error_returns_retryable_transaction() -> Result<()> {
         let (engine, snapshot, _tempdir) = load_test_table("table-without-dv-small")?;
-        let mut txn = snapshot.transaction(Box::new(IoErrorCommitter), engine.as_ref())?;
+        let mut txn = snapshot
+            .update_table(UpdateTableOperation::Write, "test-engine")
+            .build(engine.as_ref(), Box::new(IoErrorCommitter))?;
         add_dummy_file(&mut txn);
         let result = txn.commit(engine.as_ref())?;
         assert!(
@@ -3882,9 +4210,9 @@ mod tests {
     fn test_stats_validation_allows_all_null_clustering_column() {
         let (engine, snapshot) = setup_non_dv_table();
         let txn = snapshot
-            .transaction(Box::new(FileSystemCommitter::new()), &engine)
+            .update_table(UpdateTableOperation::Write, "test-engine")
+            .build(&engine, Box::new(FileSystemCommitter::new()))
             .unwrap()
-            .with_operation("WRITE".to_string())
             .with_clustering_columns_for_test(vec![column_name!("value")]);
 
         let add_files = create_test_add_files(vec!["file1.parquet"], vec![TestFileStats::AllNull]);
@@ -3901,9 +4229,9 @@ mod tests {
     fn test_stats_validation_when_clustering_cols_missing_stats() {
         let (engine, snapshot) = setup_non_dv_table();
         let txn = snapshot
-            .transaction(Box::new(FileSystemCommitter::new()), &engine)
+            .update_table(UpdateTableOperation::Write, "test-engine")
+            .build(&engine, Box::new(FileSystemCommitter::new()))
             .unwrap()
-            .with_operation("WRITE".to_string())
             // Enable clustering columns for this test
             .with_clustering_columns_for_test(vec![column_name!("value")]);
 
@@ -3929,9 +4257,9 @@ mod tests {
     fn test_stats_validation_when_clustering_stats_present() {
         let (engine, snapshot) = setup_non_dv_table();
         let txn = snapshot
-            .transaction(Box::new(FileSystemCommitter::new()), &engine)
+            .update_table(UpdateTableOperation::Write, "test-engine")
+            .build(&engine, Box::new(FileSystemCommitter::new()))
             .unwrap()
-            .with_operation("WRITE".to_string())
             // Enable clustering columns for this test
             .with_clustering_columns_for_test(vec![column_name!("value")]);
 
@@ -3951,9 +4279,9 @@ mod tests {
     fn test_stats_validation_skipped_without_clustering() {
         let (engine, snapshot) = setup_non_dv_table();
         let txn = snapshot
-            .transaction(Box::new(FileSystemCommitter::new()), &engine)
-            .unwrap()
-            .with_operation("WRITE".to_string());
+            .update_table(UpdateTableOperation::Write, "test-engine")
+            .build(&engine, Box::new(FileSystemCommitter::new()))
+            .unwrap();
         // No clustering columns set (default)
 
         // Add files WITHOUT stats
@@ -3991,7 +4319,8 @@ mod tests {
         // Try to commit with a catalog committer to a non-catalog-managed table
         let committer = Box::new(MockCatalogCommitter);
         let err = snapshot
-            .transaction(committer, &engine)
+            .update_table(UpdateTableOperation::Write, "test-engine")
+            .build(&engine, committer)
             .unwrap()
             .commit(&engine)
             .unwrap_err();
@@ -4113,7 +4442,9 @@ mod tests {
         assert_eq!(prev_ict, Some(future_ict));
 
         let (committer, captured_ts) = CapturingCommitter::new();
-        let mut txn = snapshot.transaction(Box::new(committer), &engine)?;
+        let mut txn = snapshot
+            .update_table(UpdateTableOperation::Write, "test-engine")
+            .build(&engine, Box::new(committer))?;
         add_dummy_file(&mut txn);
 
         let result = txn.commit(&engine)?;
@@ -4150,7 +4481,9 @@ mod tests {
         let (engine, snapshot, _tempdir) = load_test_table("table-without-dv-small")?;
         let reporter = Arc::new(CapturingReporter::default());
         let _guard = install_thread_local_metrics_reporter(reporter.clone());
-        let mut txn = snapshot.transaction(Box::new(IoErrorCommitter), engine.as_ref())?;
+        let mut txn = snapshot
+            .update_table(UpdateTableOperation::Write, "test-engine")
+            .build(engine.as_ref(), Box::new(IoErrorCommitter))?;
         add_dummy_file(&mut txn);
         let result = txn.commit(engine.as_ref())?;
         assert!(matches!(result, CommitResult::Retryable(_)));
@@ -4165,7 +4498,9 @@ mod tests {
         let (engine, snapshot, _tempdir) = load_test_table("table-without-dv-small")?;
         let reporter = Arc::new(CapturingReporter::default());
         let _guard = install_thread_local_metrics_reporter(reporter.clone());
-        let mut txn = snapshot.transaction(Box::new(GenericErrorCommitter), engine.as_ref())?;
+        let mut txn = snapshot
+            .update_table(UpdateTableOperation::Write, "test-engine")
+            .build(engine.as_ref(), Box::new(GenericErrorCommitter))?;
         add_dummy_file(&mut txn);
         assert!(txn.commit(engine.as_ref()).is_err());
         let failure = commit_failure_event(&reporter).expect("commit failure event");

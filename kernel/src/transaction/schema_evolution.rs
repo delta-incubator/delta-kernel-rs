@@ -26,9 +26,9 @@ use crate::KernelResult;
 /// Operations are validated and applied in order during
 /// `apply_schema_operations`. Each operation sees the schema state after all prior operations
 /// have been applied.
+#[internal_api]
 #[non_exhaustive]
 #[derive(Debug, Clone)]
-#[internal_api]
 pub(crate) enum SchemaOperation {
     /// Add a column or nested field to the table schema.
     AddColumn {
@@ -43,6 +43,7 @@ pub(crate) enum SchemaOperation {
 
 impl SchemaOperation {
     /// Creates an add-column operation under `parent`; `None` selects the root schema.
+    #[internal_api]
     pub(crate) fn add_column(parent: impl Into<Option<ColumnName>>, field: StructField) -> Self {
         Self::AddColumn {
             parent: parent.into(),
@@ -196,9 +197,9 @@ pub(crate) fn apply_schema_operations(
                     // <https://github.com/delta-io/delta-kernel-rs/issues/2492>
                     try_assign_flat_column_mapping_info(&field, id)?
                 } else {
-                    // Stray CM metadata on a mapping-disabled table is handled by the AlterTable
-                    // builder, which strips annotations this ALTER newly introduces from the
-                    // evolved schema.
+                    // `evolve_table_config` strips column-mapping annotations introduced into a
+                    // mapping-disabled table whose original schema had none. Existing residual
+                    // annotations are preserved.
                     field
                 };
                 let parent_path = parent.as_ref().map_or(&[][..], ColumnName::path);

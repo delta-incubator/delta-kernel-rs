@@ -25,7 +25,7 @@ use delta_kernel::table_features::{
 use delta_kernel::table_properties::TableProperties;
 use delta_kernel::transaction::create_table::{create_table, CreateTableTransaction};
 use delta_kernel::transaction::data_layout::DataLayout;
-use delta_kernel::Result;
+use delta_kernel::{KernelError, Result};
 use rstest::rstest;
 use serde_json::Value;
 use test_utils::{assert_result_error_with_message, test_table_setup, test_table_setup_mt};
@@ -275,7 +275,10 @@ async fn test_create_table_already_exists() -> Result<()> {
     let result = create_table(&table_path, schema.clone(), "UserManagementService/1.2.0")
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()));
 
-    assert_result_error_with_message(result, "already exists");
+    assert!(matches!(
+        result,
+        Err(KernelError::TableAlreadyExistsAtPath(path)) if path == table_path
+    ));
 
     Ok(())
 }
@@ -473,8 +476,14 @@ async fn test_create_table_rejects_delta_invariants_metadata() -> Result<()> {
     Ok(())
 }
 
+#[rstest]
+#[case::builder_metrics(false)]
+#[case::transaction_metrics_replace_builder_metrics(true)]
 #[tokio::test]
-async fn test_create_table_log_actions() -> Result<()> {
+async fn test_create_table_log_actions(
+    #[case] replace_metrics_after_build: bool,
+    #[values("AuditService/2.1.0", "")] engine_info: &str,
+) -> Result<()> {
     let (_temp_dir, table_path, engine) = test_table_setup()?;
 
     // Create schema
@@ -483,14 +492,19 @@ async fn test_create_table_log_actions() -> Result<()> {
         nullable "action": STRING,
     };
 
-    let engine_info = "AuditService/2.1.0";
-
     // Create table
-    let _ = create_table(&table_path, schema, engine_info)
-        .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
+    let mut txn = create_table(&table_path, schema, engine_info)
         .with_operation_parameters([("mode", Some("Create")), ("description", None)])
-        .with_operation_metrics([("numFiles", Some("0"))])
-        .commit(engine.as_ref())?;
+        .with_operation_metrics(if replace_metrics_after_build {
+            [("staleMetric", Some("1"))]
+        } else {
+            [("numFiles", Some("0"))]
+        })
+        .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?;
+    if replace_metrics_after_build {
+        txn = txn.with_operation_metrics([("numFiles", Some("0"))]);
+    }
+    let _ = txn.commit(engine.as_ref())?;
 
     // Read the actual Delta log file
     let log_file_path = format!("{table_path}/_delta_log/00000000000000000000.json");
@@ -630,29 +644,38 @@ async fn test_create_table_txn_debug() -> Result<()> {
 
 #[rstest]
 // ReaderWriter features (AlwaysIfSupported)
-#[case("vacuumProtocolCheck", TableFeature::VacuumProtocolCheck, true, true)]
-#[case("v2Checkpoint", TableFeature::V2Checkpoint, true, true)]
-#[case("variantType", TableFeature::VariantType, true, true)]
-#[case("variantShredding", TableFeature::VariantShredding, true, true)]
+#[case(
+    "vacuumProtocolCheck",
+    TableFeature::VacuumProtocolCheck,
+    true,
+    true,
+    false
+)]
+#[case("v2Checkpoint", TableFeature::V2Checkpoint, true, true, false)]
+#[case("variantType", TableFeature::VariantType, true, true, false)]
+#[case("variantShredding", TableFeature::VariantShredding, true, true, false)]
 // ReaderWriter features (EnabledIf -- feature signal alone does not enable)
-#[case("deletionVectors", TableFeature::DeletionVectors, true, false)]
-#[case("typeWidening", TableFeature::TypeWidening, true, false)]
+#[case("deletionVectors", TableFeature::DeletionVectors, true, false, false)]
+#[case("typeWidening", TableFeature::TypeWidening, true, false, false)]
 // WriterOnly features (EnabledIf -- feature signal alone does not enable)
-#[case("appendOnly", TableFeature::AppendOnly, false, false)]
-#[case("changeDataFeed", TableFeature::ChangeDataFeed, false, false)]
-#[case("rowTracking", TableFeature::RowTracking, false, false)]
+#[case("appendOnly", TableFeature::AppendOnly, false, false, false)]
+#[case("changeDataFeed", TableFeature::ChangeDataFeed, false, false, false)]
+#[case("rowTracking", TableFeature::RowTracking, false, false, true)]
+#[case("domainMetadata", TableFeature::DomainMetadata, false, true, true)]
 // WriterOnly features (AlwaysIfSupported)
 #[case(
     "materializePartitionColumns",
     TableFeature::MaterializePartitionColumns,
     false,
-    true
+    true,
+    false
 )]
 fn test_create_table_with_feature_signal(
     #[case] feature_name: &str,
     #[case] feature: TableFeature,
     #[case] is_reader_writer: bool,
     #[case] enabled_when_supported: bool,
+    #[case] expects_domain_metadata: bool,
 ) -> Result<()> {
     let (_temp_dir, table_path, engine) = test_table_setup()?;
 
@@ -664,6 +687,10 @@ fn test_create_table_with_feature_signal(
 
     let snapshot = Snapshot::builder_for(&table_path).build(engine.as_ref())?;
     let table_config = snapshot.table_configuration();
+    assert_eq!(
+        table_config.is_feature_supported(&TableFeature::DomainMetadata),
+        expects_domain_metadata,
+    );
 
     assert!(
         table_config.is_feature_supported(&feature),
@@ -690,6 +717,43 @@ fn test_create_table_with_feature_signal(
         );
     }
 
+    Ok(())
+}
+
+#[rstest]
+#[case::plain(&[], DataLayout::None, false)]
+#[case::row_tracking_property(&[("delta.enableRowTracking", "true")], DataLayout::None, true)]
+#[case::row_tracking_dependency(&[("delta.enableIcebergCompatV3", "true")], DataLayout::None, true)]
+#[case::clustered(&[], DataLayout::clustered(["id"]), true)]
+#[case::deduplicated(
+    &[("delta.feature.domainMetadata", "supported"), ("delta.enableRowTracking", "true")],
+    DataLayout::clustered(["id"]),
+    true
+)]
+fn create_resolves_domain_metadata_after_all_feature_selection(
+    #[case] properties: &[(&str, &str)],
+    #[case] layout: DataLayout,
+    #[case] expects_domain_metadata: bool,
+) -> Result<()> {
+    let (_temp_dir, table_path, engine) = test_table_setup()?;
+    let snapshot = create_table(&table_path, simple_schema()?, "test")
+        .with_table_properties(properties.iter().copied())
+        .with_data_layout(layout)
+        .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
+        .commit(engine.as_ref())?
+        .unwrap_post_commit_snapshot();
+    let features = snapshot
+        .table_configuration()
+        .protocol()
+        .writer_features()
+        .unwrap();
+    assert_eq!(
+        features
+            .iter()
+            .filter(|feature| **feature == TableFeature::DomainMetadata)
+            .count(),
+        usize::from(expects_domain_metadata),
+    );
     Ok(())
 }
 
