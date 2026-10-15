@@ -13,7 +13,7 @@ Before reading this page, make sure you understand
 Use **ALTER TABLE** for a standalone, metadata-only schema change. For example, you can add a nullable
 column without writing or removing data files.
 
-Use **SCHEMA EVOLUTION** to change the schema and the table's data in the same
+Use **SCHEMA EVOLUTION** to change the schema while writing or rewriting data files in the same
 transaction. For example, you can add a nullable column and append rows containing values for that
 column atomically.
 
@@ -25,7 +25,7 @@ Pass it explicitly when you construct the builder. The table shows typical workf
 | Operation | `UpdateTableOperation::AlterTable` | The data operation, such as `UpdateTableOperation::Write` |
 | Schema operations | Required | Queued alongside the data operation |
 | Data-file changes | None staged | Staged on the built transaction |
-| `data_change` constructor argument | `false` | `true` when adding or removing records |
+| `data_change` constructor argument | `false` | `true` if records change; `false` otherwise |
 
 Both workflows use `UpdateTableTransactionBuilder`. You queue all schema operations before `build()`;
 Kernel validates and applies them during `build()`. You stage any data-file changes on the returned
@@ -80,7 +80,7 @@ let result = snapshot
 
 match result {
     CommitResult::Committed(committed) => {
-        println!("Schema evolved at version {}", committed.commit_version());
+        println!("Schema altered at version {}", committed.commit_version());
     }
     _ => eprintln!("alter table did not succeed"),
 }
@@ -132,9 +132,10 @@ schema evolution with data-file actions.
 
 ## Evolving a schema while writing
 
-Use `update_table(operation, engine_info, true)` when the same transaction evolves the schema and writes
-files. Kernel applies the schema operations during `build()`, so the transaction's `WriteState` uses
-the evolved schema.
+Select a data operation, such as `UpdateTableOperation::Write`, rather than `AlterTable` when the
+same transaction evolves the schema and writes files. Choose `data_change` based on whether the
+logical data changes, not merely whether files are written. Kernel applies the schema operations
+during `build()`, so the transaction's `WriteState` uses the evolved schema.
 
 ```rust,ignore
 let mut transaction = snapshot

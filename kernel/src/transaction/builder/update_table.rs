@@ -32,17 +32,18 @@ use crate::{Engine, KernelError, KernelResult, Result};
 /// Use **ALTER TABLE** for a standalone schema change without changing table data, such as adding
 /// a nullable column without writing data files. Select [`UpdateTableOperation::AlterTable`].
 ///
-/// Use **schema evolution during a write** to change the schema and table data in the same
-/// transaction. Select the data operation, such as [`UpdateTableOperation::Write`], and configure
-/// the schema changes on the same builder.
+/// Use **schema evolution during a write** to change the schema while writing or rewriting data
+/// files in the same transaction. Select the data operation, such as
+/// [`UpdateTableOperation::Write`], and configure the schema changes on the same builder.
 ///
 /// In both workflows, configure schema operations before `build()`, which validates and applies
 /// them. Stage any data-file changes on the returned [`Transaction`], using the evolved schema
 /// provided by [`Transaction::write_state`].
 ///
-/// Set `data_change` when constructing the builder. `ALTER TABLE` requires `false`, while blind
-/// append requires `true`. [`build`](UpdateTableTransactionBuilder::build) rejects incompatible
-/// intent; commit validates the staged file actions.
+/// Set `data_change` when constructing the builder: `true` for logical data changes, or `false`
+/// for metadata-only changes and data-preserving rewrites. `ALTER TABLE` requires `false`, while
+/// blind append requires `true`. [`build`](UpdateTableTransactionBuilder::build) rejects
+/// incompatible intent; commit validates the staged file actions.
 ///
 /// cbindgen:ignore
 pub type UpdateTableTransactionBuilder = TransactionBuilder<UpdateTable>;

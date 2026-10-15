@@ -167,10 +167,10 @@ See [Creating UC Tables](./creating_tables.md) for the creation flow and
 generic ratification flow.
 
 > [!WARNING]
-> `UCCommitter` does not support ALTER TABLE operations (protocol changes,
-> metadata changes, or clustering column changes). It also rejects attempts to
-> upgrade a path-based table to catalog-managed or downgrade a catalog-managed
-> table to path-based. Attempting any of these returns an error.
+> For existing-table writes, `UCCommitter` rejects protocol, table-metadata, and clustering-column
+> changes. This blocks both standalone ALTER TABLE and schema evolution during writes, regardless
+> of `data_change`. It also rejects attempts to upgrade a path-based table to catalog-managed or
+> downgrade a catalog-managed table to path-based. Attempting any of these returns an error.
 
 ## Publish staged commits
 
