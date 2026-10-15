@@ -511,7 +511,7 @@ impl<STATE> Transaction<STATE, Imperative> {
     /// - `isBlindAppend`
     /// - `engineInfo`
     /// - `txnId`
-    /// - `dataChange` (adaptiveMetadata)
+    /// - `dataChange`
     ///
     /// Kernel merges the following field if it is set:
     ///
@@ -1297,10 +1297,7 @@ impl<STATE, MODE: ExecutionMode> Transaction<STATE, MODE> {
             kernel_commit_info.set_row_tracking_preserved();
         }
 
-        #[cfg(feature = "adaptive-metadata-in-dev")]
-        if self.is_adaptive_metadata_enabled() {
-            kernel_commit_info.set_data_change(self.data_change);
-        }
+        kernel_commit_info.set_data_change(self.data_change);
         Ok(NonfileCommitActions {
             commit_version: self.get_commit_version(),
             in_commit_timestamp,
