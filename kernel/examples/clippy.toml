@@ -1,0 +1,2 @@
+# Examples are external connectors and use the public handler API.
+disallowed-methods = []

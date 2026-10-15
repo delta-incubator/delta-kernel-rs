@@ -719,13 +719,12 @@ fn get_earliest_published_commit_version(
     log_root: &Url,
     earliest_ratified_commit_version: Option<Version>,
 ) -> KernelResult<Version> {
-    // TODO(#3188): thread a cancellation token through the history-manager entry points.
     list_delta_log_from_storage(
         engine.storage_handler().as_ref(),
         log_root,
         0,
         Version::MAX,
-        None,
+        engine.cancellation_token().as_ref(),
     )?
     .filter_ok(|f| f.file_type == LogPathFileType::Commit)
     .next()
@@ -776,13 +775,12 @@ fn get_earliest_recreatable_commit(
     let mut multi_part_checkpoint_progress = HashMap::<(Version, u32), HashSet<u32>>::new();
     let mut earliest_commit_version: Option<Version> = None;
 
-    // TODO(#3188): thread a cancellation token through the history-manager entry points.
     let listing = list_delta_log_from_storage(
         engine.storage_handler().as_ref(),
         log_root,
         0,
         Version::MAX,
-        None,
+        engine.cancellation_token().as_ref(),
     )?;
     for parsed_result in listing {
         let parsed_log_path = parsed_result?;
@@ -922,13 +920,14 @@ mod tests {
     use super::*;
     use crate::actions::{CommitInfo, Metadata, Protocol};
     use crate::engine::sync::SyncEngine;
+    use crate::engine::KernelEngine;
     use crate::object_store::memory::InMemory;
     use crate::schema::{schema_ref, SchemaRef};
     use crate::snapshot::{Snapshot, SnapshotBuilder};
     use crate::table_features::TableFeature;
-    use crate::unit_test_utils::{Action, LocalMockTable};
+    use crate::unit_test_utils::{Action, LocalMockTable, TestCancellationToken};
     use crate::utils::FoldWithOption as _;
-    use crate::Version;
+    use crate::{KernelError, Version};
 
     fn get_test_schema() -> SchemaRef {
         schema_ref! {
@@ -2088,6 +2087,26 @@ mod tests {
         version_range
             .map(|v| delta_path_for_version(v, "json").to_string())
             .collect()
+    }
+
+    #[rstest::rstest]
+    fn earliest_commit_listing_inherits_engine_token(
+        #[values(HistoryCommitType::Published, HistoryCommitType::Recreatable)]
+        commit_type: HistoryCommitType,
+        #[values(false, true)] cancelled: bool,
+    ) {
+        let (engine, log_root) = engine_with_log_files(&commit_path(0..=1), &HashSet::new());
+        let token = Arc::new(TestCancellationToken::default());
+        if cancelled {
+            token.cancel();
+        }
+        let engine = KernelEngine::new(&engine, token);
+        let result = get_earliest_commit(&engine, &log_root, None, commit_type);
+        if cancelled {
+            assert!(matches!(result, Err(KernelError::Cancelled)));
+        } else {
+            assert_eq!(result.unwrap(), 0);
+        }
     }
 
     fn single_part_checkpoint_path(v: Version) -> String {
