@@ -79,7 +79,7 @@ async fn test_create_table_with_row_tracking(
     let (_temp_dir, table_path, engine) = test_table_setup()?;
     let schema = super::simple_schema()?;
 
-    let mut txn = create_table(&table_path, schema.clone(), "Test/1.0")
+    let mut txn = create_table(&table_path, schema.clone(), "Test/1.0", true)
         .with_table_properties([(key, value)])
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?;
 
@@ -195,7 +195,7 @@ async fn test_create_table_with_multiple_files_and_row_tracking() -> Result<()> 
     let (_temp_dir, table_path, engine) = test_table_setup()?;
 
     let schema = super::simple_schema()?;
-    let mut txn = create_table(&table_path, schema.clone(), "Test/1.0")
+    let mut txn = create_table(&table_path, schema.clone(), "Test/1.0", true)
         .with_table_properties([("delta.enableRowTracking", "true")])
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?;
 
@@ -267,7 +267,7 @@ async fn test_create_table_with_multiple_files_and_row_tracking() -> Result<()> 
 fn test_create_table_with_row_tracking_and_clustering() -> Result<()> {
     let (_temp_dir, table_path, engine) = test_table_setup()?;
 
-    let committed = create_table(&table_path, super::simple_schema()?, "Test/1.0")
+    let committed = create_table(&table_path, super::simple_schema()?, "Test/1.0", true)
         .with_table_properties([("delta.enableRowTracking", "true")])
         .with_data_layout(DataLayout::clustered(["id"]))
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
@@ -319,7 +319,7 @@ async fn test_create_table_with_row_tracking_and_clustering_and_data() -> Result
     let (_temp_dir, table_path, engine) = test_table_setup()?;
 
     let schema = super::simple_schema()?;
-    let mut txn = create_table(&table_path, schema.clone(), "Test/1.0")
+    let mut txn = create_table(&table_path, schema.clone(), "Test/1.0", true)
         .with_table_properties([("delta.enableRowTracking", "true")])
         .with_data_layout(DataLayout::clustered(["id"]))
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?;
@@ -405,7 +405,7 @@ async fn test_feature_signal_create_then_append_assigns_correct_base_row_id() ->
     let (_temp_dir, table_path, engine) = test_table_setup()?;
 
     // Create empty table with feature signal only (no enablement property)
-    let _ = create_table(&table_path, super::simple_schema()?, "Test/1.0")
+    let _ = create_table(&table_path, super::simple_schema()?, "Test/1.0", true)
         .with_table_properties([("delta.feature.rowTracking", "supported")])
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
         .commit(engine.as_ref())?;

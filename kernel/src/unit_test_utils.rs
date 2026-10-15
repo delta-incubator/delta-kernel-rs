@@ -362,7 +362,7 @@ pub(crate) mod adaptive_metadata_fixtures {
     pub(crate) fn setup_table() -> KernelResult<(SyncEngine, Url)> {
         let engine = SyncEngine::new_with_store(Arc::new(InMemory::new()));
         let schema = schema_ref! { nullable "id": INTEGER };
-        let _ = create_table("memory:///", schema, "test")
+        let _ = create_table("memory:///", schema, "test", true)
             .build(&engine, Box::new(FileSystemCommitter::new()))?
             .commit(&engine)?;
         let table_root = Snapshot::builder_for("memory:///")
@@ -1181,7 +1181,7 @@ pub(crate) fn setup_column_mapping_txn(
     let store = Arc::new(InMemory::new());
     let engine: Arc<dyn Engine> = Arc::new(SyncEngine::new_with_store(store));
 
-    let txn = create_table("memory:///test_table", schema, "DefaultEngine")
+    let txn = create_table("memory:///test_table", schema, "DefaultEngine", true)
         .with_table_properties([("delta.columnMapping.mode", mode_str)])
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?;
     Ok((engine, txn))

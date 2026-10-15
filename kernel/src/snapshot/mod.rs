@@ -1121,14 +1121,17 @@ impl Snapshot {
         IncrementalScanBuilder::new(self, base_version)
     }
 
-    /// Creates a builder with the given `operation` and connector name/version `engine_info`.
+    /// Creates a builder with the given `operation`, connector `engine_info`, and `data_change`.
     ///
     /// Returns a builder supporting both data-changing transactions and schema changes.
-    /// Both values are recorded in `commitInfo` and cannot be changed on the builder or
-    /// transaction. Invalid custom names and incompatible configuration are rejected by
+    /// Operation and engine info are recorded in `commitInfo`. All three inputs are immutable.
+    /// Set `data_change` to `true` for logical data changes, or `false` for metadata-only changes
+    /// and data-preserving rewrites. Kernel preserves this value even when no files are staged;
+    /// it does not compare file contents to verify it. Invalid names and incompatible intent are
+    /// rejected by
     /// [`UpdateTableTransactionBuilder::build`].
     ///
-    /// An operation and engine info are required:
+    /// Operation, engine info, and data-change intent are required:
     ///
     /// ```compile_fail,E0061
     /// # use delta_kernel::snapshot::SnapshotRef;
@@ -1139,7 +1142,15 @@ impl Snapshot {
     /// }
     /// ```
     ///
-    /// Neither value can be replaced with a setter:
+    /// ```compile_fail,E0061
+    /// # use delta_kernel::snapshot::SnapshotRef;
+    /// # use delta_kernel::transaction::UpdateTableOperation;
+    /// fn configure(snapshot: SnapshotRef) {
+    ///     let _ = snapshot.update_table(UpdateTableOperation::Write, "my-app/1.0");
+    /// }
+    /// ```
+    ///
+    /// Intent cannot be replaced with a setter:
     ///
     /// ```compile_fail,E0599
     /// # use delta_kernel::transaction::Transaction;
@@ -1154,12 +1165,27 @@ impl Snapshot {
     ///     let _ = builder.with_engine_info("my-app/1.0");
     /// }
     /// ```
+    ///
+    /// ```compile_fail,E0599
+    /// # use delta_kernel::transaction::UpdateTableTransactionBuilder;
+    /// fn configure(builder: UpdateTableTransactionBuilder) {
+    ///     let _ = builder.with_data_change(true);
+    /// }
+    /// ```
+    ///
+    /// ```compile_fail,E0599
+    /// # use delta_kernel::transaction::Transaction;
+    /// fn configure(transaction: Transaction) {
+    ///     let _ = transaction.with_data_change(true);
+    /// }
+    /// ```
     pub fn update_table(
         self: Arc<Self>,
         operation: UpdateTableOperation,
         engine_info: impl Into<String>,
+        data_change: bool,
     ) -> UpdateTableTransactionBuilder {
-        UpdateTableTransactionBuilder::new(self, operation, engine_info.into())
+        UpdateTableTransactionBuilder::new(self, operation, engine_info.into(), data_change)
     }
 
     /// Creates a [`CheckpointWriter`] for generating a checkpoint from this snapshot.
@@ -2409,7 +2435,7 @@ mod tests {
 
         let schema = schema_ref! { nullable "id": INTEGER };
 
-        let mut create_table_builder = create_table(&table_path, schema, "Test/1.0");
+        let mut create_table_builder = create_table(&table_path, schema, "Test/1.0", true);
         if ict_enabled {
             create_table_builder = create_table_builder
                 .with_table_properties(vec![(ENABLE_IN_COMMIT_TIMESTAMPS, "true")]);
@@ -2734,7 +2760,7 @@ mod tests {
                 nullable "zip": INTEGER,
             },
         };
-        let _ = create_table("memory:///", schema, "test")
+        let _ = create_table("memory:///", schema, "test", true)
             .fold_with(clustering_cols.as_ref(), |builder, cols| {
                 let columns = cols
                     .iter()
@@ -2866,7 +2892,7 @@ mod tests {
         fn snap_with_schema(schema: SchemaRef) -> SnapshotRef {
             let store = Arc::new(InMemory::new());
             let engine = SyncEngine::new_with_store(store);
-            create_table("memory:///", schema, "test")
+            create_table("memory:///", schema, "test", true)
                 .build(&engine, Box::new(FileSystemCommitter::new()))
                 .unwrap()
                 .commit(&engine)

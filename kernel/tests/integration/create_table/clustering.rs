@@ -58,7 +58,7 @@ async fn test_create_clustered_table(#[case] col_paths: Vec<Vec<&str>>) -> Resul
         .map(|p| ColumnName::new(p.iter().map(|s| s.to_lowercase()).collect::<Vec<_>>()))
         .collect();
 
-    let txn = create_table(&table_path, schema, "Test/1.0")
+    let txn = create_table(&table_path, schema, "Test/1.0", true)
         .with_data_layout(DataLayout::Clustered {
             columns: input_cols,
         })
@@ -106,7 +106,7 @@ async fn test_clustering_with_explicit_feature_signal_no_duplicates() -> Result<
     let schema = simple_schema()?;
 
     // Combine BOTH: explicit feature signal AND clustering (which auto-adds domainMetadata)
-    let _ = create_table(&table_path, schema, "Test/1.0")
+    let _ = create_table(&table_path, schema, "Test/1.0", true)
         .with_table_properties([("delta.feature.domainMetadata", "supported")])
         .with_data_layout(DataLayout::clustered(["id"]))
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
@@ -149,7 +149,7 @@ async fn test_clustering_stats_columns_within_limit() -> Result<()> {
     let schema = Arc::new(StructType::try_new(fields)?);
 
     // Create clustered table on col5
-    let txn = create_table(&table_path, schema, "Test/1.0")
+    let txn = create_table(&table_path, schema, "Test/1.0", true)
         .with_data_layout(DataLayout::clustered(["col5"]))
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?;
 
@@ -174,7 +174,7 @@ async fn test_clustering_stats_columns_beyond_limit() -> Result<()> {
     let schema = Arc::new(StructType::try_new(fields)?);
 
     // Create clustered table on col35 (position > 32)
-    let txn = create_table(&table_path, schema, "Test/1.0")
+    let txn = create_table(&table_path, schema, "Test/1.0", true)
         .with_data_layout(DataLayout::clustered(["col35"]))
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?;
 
@@ -208,7 +208,7 @@ async fn test_clustering_column_error(
     let (_temp_dir, table_path, engine) = test_table_setup()?;
     let schema = clustering_test_schema()?;
 
-    let result = create_table(&table_path, schema, "Test/1.0")
+    let result = create_table(&table_path, schema, "Test/1.0", true)
         .with_data_layout(DataLayout::Clustered {
             columns: vec![ColumnName::new(col_path.iter().copied())],
         })

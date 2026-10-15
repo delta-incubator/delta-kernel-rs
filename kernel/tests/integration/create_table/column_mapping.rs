@@ -236,7 +236,7 @@ fn test_column_mapping_feature_only_without_mode() -> Result<()> {
     let schema = simple_schema()?;
 
     // Create table with ONLY the feature flag, no delta.columnMapping.mode
-    let _ = create_table(&table_path, schema, "Test/1.0")
+    let _ = create_table(&table_path, schema, "Test/1.0", true)
         .with_table_properties([("delta.feature.columnMapping", "supported")])
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
         .commit(engine.as_ref())?;
@@ -265,7 +265,7 @@ fn test_column_mapping_invalid_mode_rejected() {
     let schema = schema_ref! { nullable "id": INTEGER };
 
     // Try to create table with invalid column mapping mode
-    let result = create_table(&table_path, schema, "Test/1.0")
+    let result = create_table(&table_path, schema, "Test/1.0", true)
         .with_table_properties([("delta.columnMapping.mode", "invalid")])
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()));
 
@@ -360,7 +360,7 @@ fn test_create_clustered_table_with_column_mapping(
     let schema = simple_schema()?;
 
     // Create clustered table with column mapping enabled
-    let _ = create_table(&table_path, schema, "Test/1.0")
+    let _ = create_table(&table_path, schema, "Test/1.0", true)
         .with_table_properties([("delta.columnMapping.mode", "name")])
         .with_data_layout(DataLayout::clustered(clustering_cols.iter().copied()))
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
@@ -542,7 +542,7 @@ fn test_create_clustered_table_nested_with_column_mapping(
         .map(|p| ColumnName::new(p.iter().copied()))
         .collect();
 
-    let _ = create_table(&table_path, schema, "Test/1.0")
+    let _ = create_table(&table_path, schema, "Test/1.0", true)
         .with_table_properties([("delta.columnMapping.mode", cm_mode)])
         .with_data_layout(DataLayout::Clustered {
             columns: expected_cols.clone(),
@@ -604,7 +604,7 @@ fn test_partitioned_table_stores_logical_column_names_with_column_mapping(
     let (_temp_dir, table_path, engine) = test_table_setup()?;
     let schema = super::partition_test_schema()?;
 
-    let _ = create_table(&table_path, schema, "Test/1.0")
+    let _ = create_table(&table_path, schema, "Test/1.0", true)
         .with_table_properties([("delta.columnMapping.mode", "name")])
         .with_data_layout(DataLayout::partitioned(partition_cols.iter().copied()))
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
@@ -670,7 +670,7 @@ fn test_create_table_dup_physical_name(
     #[values("name", "id")] cm_mode: &str,
 ) -> Result<()> {
     let (_temp_dir, table_path, engine) = test_table_setup()?;
-    let result = create_table(&table_path, Arc::new(schema), "Test/1.0")
+    let result = create_table(&table_path, Arc::new(schema), "Test/1.0", true)
         .with_table_properties([("delta.columnMapping.mode", cm_mode)])
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()));
 

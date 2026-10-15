@@ -216,7 +216,7 @@ fn manifest_commit_after_schema_change_uses_evolved_schema() -> Result<()> {
     let snapshot = Snapshot::builder_for(table_root).build(&engine)?;
     let initial_schema = snapshot.table_configuration().physical_schema();
     let mut txn = snapshot
-        .update_table(UpdateTableOperation::AlterTable, "test-engine")
+        .update_table(UpdateTableOperation::AlterTable, "test-engine", false)
         .add_column(StructField::nullable("fresh_column", DataType::INTEGER))
         .build(&engine, Box::new(FileSystemCommitter::new()))?;
     let expected = txn.effective_table_config.physical_schema();

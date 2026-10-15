@@ -14,8 +14,7 @@ setter, and commit calls borrow the engine handle. The caller retains ownership.
 HandleSharedSnapshot snapshot = /* unwrap(snapshot_builder_build(...)) */;
 HandleExclusiveUpdateTableTransactionBuilder builder =
     unwrap(new_update_table_txn_builder(
-        snapshot, KernelUpdateTableOperationWrite, slice("my-engine/1.0"), engine));
-builder = update_table_txn_builder_with_data_change(builder, true);
+        snapshot, KernelUpdateTableOperationWrite, slice("my-engine/1.0"), true, engine));
 
 HandleExclusiveUpdateTableTransaction txn = unwrap(update_table_txn_builder_build(builder, engine));
 /* Write files, then call update_table_txn_add_files(txn, metadata). */
@@ -28,10 +27,11 @@ free_committed_transaction(committed);
 Here `slice` and `unwrap` stand for the connector's usual `KernelStringSlice` and `ExternResult`
 helpers.
 
-The update operation and engine info are required at construction and cannot be changed.
+The update operation, engine info, and `data_change` are required at construction and cannot be changed.
 For connector-defined names, use
-`new_update_table_txn_builder_with_custom_operation(snapshot, name, engine_info, engine)`.
+`new_update_table_txn_builder_with_custom_operation(snapshot, name, engine_info, data_change, engine)`.
 Both constructors validate UTF-8 before retaining the snapshot and borrow all inputs.
+The create-table constructor also requires `data_change` before the engine handle.
 
 The typed constructor returns an `ExternResult`, not a bare builder handle. When migrating from
 setter-based configuration, update constructor calls and rebuild C/C++ connectors against the

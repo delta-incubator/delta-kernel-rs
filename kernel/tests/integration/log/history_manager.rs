@@ -71,7 +71,7 @@ fn test_at_timestamp_resolves_to_intermediate_version() -> Result<()> {
 
     // v0: CreateTable
     let schema = get_simple_int_schema();
-    let mut snap = create_table(&table_path, schema, "AtTimestampTest/1.0")
+    let mut snap = create_table(&table_path, schema, "AtTimestampTest/1.0", true)
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
         .commit(engine.as_ref())?
         .unwrap_post_commit_snapshot();
@@ -83,6 +83,7 @@ fn test_at_timestamp_resolves_to_intermediate_version() -> Result<()> {
             engine.as_ref(),
             delta_kernel::transaction::UpdateTableOperation::Write,
             "AtTimestampTest",
+            true,
             |builder| builder,
         )?
         .commit(engine.as_ref())?

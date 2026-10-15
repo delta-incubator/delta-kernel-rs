@@ -532,7 +532,7 @@ mod tests {
             nullable "id": INTEGER,
             nullable "part": STRING,
         };
-        create_table(url_str, schema, "DefaultEngine")
+        create_table(url_str, schema, "DefaultEngine", true)
             .with_table_properties([("delta.enableChangeDataFeed", "true")])
             .build(&engine, Box::new(FileSystemCommitter::new()))
             .unwrap()

@@ -44,6 +44,7 @@ async fn test_set_domain_metadata_basic() -> Result<(), Box<dyn std::error::Erro
         &engine,
         UpdateTableOperation::Write,
         "test-engine",
+        true,
         |builder| {
             builder
                 .with_domain_metadata(domain1, config1)
@@ -198,6 +199,7 @@ async fn test_remove_domain_metadata_unsupported_writer_feature(
         &engine,
         UpdateTableOperation::Write,
         "test-engine",
+        true,
         |builder| builder.with_domain_metadata_removed("app.config"),
     );
 
@@ -284,7 +286,7 @@ async fn test_domain_metadata_set_remove_conflicts() -> Result<(), Box<dyn std::
     // set then remove same domain
     let err = snapshot
         .clone()
-        .update_table(UpdateTableOperation::Write, "test-engine")
+        .update_table(UpdateTableOperation::Write, "test-engine", true)
         .with_domain_metadata("app.config", "v1")
         .with_domain_metadata_removed("app.config")
         .build(&engine, Box::new(FileSystemCommitter::new()))
@@ -296,7 +298,7 @@ async fn test_domain_metadata_set_remove_conflicts() -> Result<(), Box<dyn std::
     // remove then set same domain
     let err = snapshot
         .clone()
-        .update_table(UpdateTableOperation::Write, "test-engine")
+        .update_table(UpdateTableOperation::Write, "test-engine", true)
         .with_domain_metadata_removed("test.domain")
         .with_domain_metadata("test.domain", "v1")
         .build(&engine, Box::new(FileSystemCommitter::new()))
@@ -308,7 +310,7 @@ async fn test_domain_metadata_set_remove_conflicts() -> Result<(), Box<dyn std::
     // remove same domain twice
     let err = snapshot
         .clone()
-        .update_table(UpdateTableOperation::Write, "test-engine")
+        .update_table(UpdateTableOperation::Write, "test-engine", true)
         .with_domain_metadata_removed("another.domain")
         .with_domain_metadata_removed("another.domain")
         .build(&engine, Box::new(FileSystemCommitter::new()))
@@ -321,6 +323,7 @@ async fn test_domain_metadata_set_remove_conflicts() -> Result<(), Box<dyn std::
         &engine,
         UpdateTableOperation::Write,
         "test-engine",
+        true,
         |builder| builder.with_domain_metadata_removed("delta.system"),
     )
     .unwrap_err();
@@ -354,6 +357,7 @@ async fn test_builder_domain_metadata_with_late_operation(
         &engine,
         UpdateTableOperation::Write,
         "test-engine",
+        true,
         |builder| builder.with_domain_metadata("app.other", "original"),
     )?
     .commit(&engine)?
@@ -363,6 +367,7 @@ async fn test_builder_domain_metadata_with_late_operation(
         &engine,
         UpdateTableOperation::Write,
         "test-engine",
+        true,
         |builder| builder.with_domain_metadata("app.config", "builder"),
     )?;
     let transaction = if remove {
@@ -433,6 +438,7 @@ async fn test_domain_metadata_set_then_remove() -> Result<(), Box<dyn std::error
         &engine,
         UpdateTableOperation::Write,
         "test-engine",
+        true,
         |builder| builder.with_domain_metadata_removed(domain),
     )?
     .commit(&engine)?;

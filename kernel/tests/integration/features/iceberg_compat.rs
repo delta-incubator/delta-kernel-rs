@@ -225,7 +225,7 @@ async fn v3_invalid_type_change_blocks_writes_but_not_snapshot_loading() {
         .build(engine.as_ref())
         .unwrap();
     let err = snapshot
-        .update_table(UpdateTableOperation::Write, "test-engine")
+        .update_table(UpdateTableOperation::Write, "test-engine", true)
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))
         .unwrap_err()
         .to_string();
@@ -291,7 +291,7 @@ async fn v2_and_deletion_vectors_active_blocks_writes() {
         .build(engine.as_ref())
         .unwrap();
     let err = snapshot
-        .update_table(UpdateTableOperation::Write, "test-engine")
+        .update_table(UpdateTableOperation::Write, "test-engine", true)
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))
         .unwrap_err()
         .to_string();
@@ -309,7 +309,7 @@ async fn iceberg_compat_commit_validates_num_records(
 ) {
     let (_, engine) = make_default_engine_and_store();
 
-    let _ = create_table(TABLE_ROOT, simple_schema(), "Test/1.0")
+    let _ = create_table(TABLE_ROOT, simple_schema(), "Test/1.0", true)
         .with_table_properties([(feature_property, "true")])
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))
         .unwrap()
@@ -320,8 +320,7 @@ async fn iceberg_compat_commit_validates_num_records(
         .unwrap();
 
     let mut txn = snapshot
-        .update_table(UpdateTableOperation::Write, "Test/1.0")
-        .with_data_change(true)
+        .update_table(UpdateTableOperation::Write, "Test/1.0", true)
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))
         .unwrap();
     let add_files = create_add_files_metadata(
@@ -360,7 +359,7 @@ async fn v2_partitioned_write_materializes_partition_and_nested_field_ids() {
         nullable "id": INTEGER,
         nullable "data": { INTEGER => nullable [nullable INTEGER] },
     };
-    let snapshot = create_table(&table_path, schema, "Test/1.0")
+    let snapshot = create_table(&table_path, schema, "Test/1.0", true)
         .with_table_properties([("delta.enableIcebergCompatV2", "true")])
         .with_data_layout(DataLayout::partitioned(["region"]))
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))
@@ -478,7 +477,7 @@ async fn v3_e2e_partitioned_writes_with_field_ids(
             .iter()
             .map(|(k, v)| (k.as_str(), v.as_str())),
     );
-    let _ = create_table(&table_path, schema.clone(), "Test/1.0")
+    let _ = create_table(&table_path, schema.clone(), "Test/1.0", true)
         .with_table_properties(props)
         .with_data_layout(DataLayout::partitioned(["region"]))
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))

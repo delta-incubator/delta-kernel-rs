@@ -44,7 +44,7 @@ async fn test_commit_info_defaults_to_empty_parameters_and_omitted_metrics(
         // create a transaction
         let txn = Snapshot::builder_for(table_url.clone())
             .build(&engine)?
-            .update_table(operation.clone(), engine_info)
+            .update_table(operation.clone(), engine_info, true)
             .build(&engine, Box::new(FileSystemCommitter::new()))?;
 
         // commit!
@@ -97,7 +97,7 @@ async fn transaction_builder_writes_operation_parameters_and_metrics(
     {
         let snapshot = Snapshot::builder_for(table_url).build(&engine)?;
         let transaction = snapshot
-            .update_table(UpdateTableOperation::Write, "test-engine")
+            .update_table(UpdateTableOperation::Write, "test-engine", true)
             .with_operation_parameters([("mode", Some("Append"))])
             .with_operation_metrics([("numFiles", Some("3"))])
             .build(&engine, Box::new(FileSystemCommitter::new()))?;
@@ -135,7 +135,7 @@ async fn test_commit_info_action() -> Result<(), Box<dyn std::error::Error>> {
     {
         let txn = Snapshot::builder_for(table_url.clone())
             .build(&engine)?
-            .update_table(UpdateTableOperation::Write, "default engine")
+            .update_table(UpdateTableOperation::Write, "default engine", true)
             .build(&engine, Box::new(FileSystemCommitter::new()))?;
 
         let _ = txn.commit(&engine)?;
@@ -186,6 +186,7 @@ async fn test_commit_info_with_operation_maps() -> Result<(), Box<dyn std::error
             &engine,
             UpdateTableOperation::Write,
             "test-engine",
+            true,
             |builder| {
                 builder
                     .with_operation_parameters([("stale", Some("value"))])
@@ -249,6 +250,7 @@ async fn test_commit_info_with_empty_operation_map(
             &engine,
             UpdateTableOperation::Write,
             "test-engine",
+            true,
             |builder| match operation_map {
                 EmptyOperationMap::Parameters => {
                     builder.with_operation_parameters(std::iter::empty::<(&str, Option<&str>)>())
@@ -356,6 +358,7 @@ async fn test_commit_info_merges_custom_fields_and_ignores_reserved_fields(
             &engine,
             UpdateTableOperation::Write,
             "test-engine",
+            true,
             |builder| match setters {
                 OperationMapSetters::Unset => {
                     builder.with_commit_info(Box::new(ArrowEngineData::new(batch)), engine_schema)

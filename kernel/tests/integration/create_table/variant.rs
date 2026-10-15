@@ -52,7 +52,7 @@ fn test_create_table_with_variant(
 ) -> Result<()> {
     let (_temp_dir, table_path, engine) = test_table_setup()?;
 
-    let _ = create_table(&table_path, schema.clone(), "Test/1.0")
+    let _ = create_table(&table_path, schema.clone(), "Test/1.0", true)
         .with_table_properties(cm_properties(cm_mode))
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
         .commit(engine.as_ref())?;
@@ -99,7 +99,7 @@ fn test_create_table_no_variant_no_feature() -> Result<()> {
         nullable "name": STRING,
     };
 
-    let _ = create_table(&table_path, schema, "Test/1.0")
+    let _ = create_table(&table_path, schema, "Test/1.0", true)
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
         .commit(engine.as_ref())?;
 
@@ -120,7 +120,7 @@ fn test_create_table_no_variant_no_feature() -> Result<()> {
 fn test_create_table_variant_clustering_rejected() -> Result<()> {
     let (_temp_dir, table_path, engine) = test_table_setup()?;
 
-    let result = create_table(&table_path, top_level_variant_schema(), "Test/1.0")
+    let result = create_table(&table_path, top_level_variant_schema(), "Test/1.0", true)
         .with_data_layout(DataLayout::clustered(["col"]))
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()));
 

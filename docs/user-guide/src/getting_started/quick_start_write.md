@@ -60,7 +60,7 @@ async fn main() -> Result<()> {
         StructField::nullable("name", DataType::STRING),
     ])?);
 
-    create_table(url.as_str(), schema.clone(), "quick-start/1.0")
+    create_table(url.as_str(), schema.clone(), "quick-start/1.0", true)
         .build(&engine, Box::new(FileSystemCommitter::new()))?
         .commit(&engine)?;
     println!("Created table at {url}");
@@ -69,8 +69,7 @@ async fn main() -> Result<()> {
     let snapshot = Snapshot::builder_for(url.clone()).build(&engine)?;
 
     let mut txn = snapshot
-        .update_table(UpdateTableOperation::Custom("INSERT".to_string()), "quick-start/1.0")
-        .with_data_change(true)
+        .update_table(UpdateTableOperation::Custom("INSERT".to_string()), "quick-start/1.0", true)
         .build(&engine, Box::new(FileSystemCommitter::new()))?;
 
     // Build an Arrow RecordBatch
@@ -131,7 +130,7 @@ let schema = Arc::new(StructType::try_new(vec![
     StructField::nullable("name", DataType::STRING),
 ])?);
 
-create_table(url.as_str(), schema.clone(), "quick-start/1.0")
+create_table(url.as_str(), schema.clone(), "quick-start/1.0", true)
     .build(&engine, Box::new(FileSystemCommitter::new()))?
     .commit(&engine)?;
 ```
@@ -154,8 +153,7 @@ The write flow has four parts:
 **Start a transaction:**
 ```rust,ignore
 let mut txn = snapshot
-    .update_table(UpdateTableOperation::Custom("INSERT".to_string()), "quick-start/1.0")
-    .with_data_change(true)
+    .update_table(UpdateTableOperation::Custom("INSERT".to_string()), "quick-start/1.0", true)
     .build(&engine, Box::new(FileSystemCommitter::new()))?;
 ```
 

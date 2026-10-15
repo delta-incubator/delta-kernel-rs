@@ -32,7 +32,7 @@ fn test_create_table_rejects_interval_clustering(
         )
     };
 
-    let result = create_table(&table_path, schema, "Test/1.0")
+    let result = create_table(&table_path, schema, "Test/1.0", true)
         .with_data_layout(DataLayout::Clustered {
             columns: vec![clustering_column],
         })
@@ -84,7 +84,7 @@ mod supported {
         let (_temp_dir, table_path, engine) = test_table_setup()?;
         let schema = make_schema(interval);
 
-        let _ = create_table(&table_path, schema.clone(), "Test/1.0")
+        let _ = create_table(&table_path, schema.clone(), "Test/1.0", true)
             .with_table_properties(cm_properties(cm_mode))
             .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
             .commit(engine.as_ref())?;

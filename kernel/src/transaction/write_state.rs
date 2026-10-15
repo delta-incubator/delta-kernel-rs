@@ -494,6 +494,7 @@ mod tests {
                 nullable "value": INTEGER,
             },
             "test",
+            true,
         )
         .with_data_layout(DataLayout::partitioned(["year"]))
         .with_table_properties(properties)
@@ -720,7 +721,7 @@ mod tests {
         ])?);
         let engine: Arc<dyn Engine> =
             Arc::new(SyncEngine::new_with_store(Arc::new(InMemory::new())));
-        let txn = create_table("memory:///case_sensitive_partitions", schema, "test")
+        let txn = create_table("memory:///case_sensitive_partitions", schema, "test", true)
             .with_data_layout(DataLayout::partitioned(["first", "second"]))
             .with_table_properties([("delta.columnMapping.mode", mode_property)])
             .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?;

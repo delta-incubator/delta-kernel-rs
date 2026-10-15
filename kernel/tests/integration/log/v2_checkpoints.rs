@@ -260,7 +260,7 @@ async fn test_v2_checkpoint_parquet_write() -> Result<()> {
     let table_url = delta_kernel::try_parse_uri(&table_path)?;
 
     let schema = schema_ref! { nullable "value": INTEGER };
-    let _ = create_table(&table_path, schema.clone(), "Test/1.0")
+    let _ = create_table(&table_path, schema.clone(), "Test/1.0", true)
         .with_table_properties([("delta.feature.v2Checkpoint", "supported")])
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
         .commit(engine.as_ref())?;
@@ -360,6 +360,7 @@ async fn test_v2_checkpoint_with_sidecars() -> Result<()> {
         engine.as_ref(),
         delta_kernel::transaction::UpdateTableOperation::Write,
         "test-engine",
+        true,
         |builder| builder.with_domain_metadata("app.settings", r#"{"version":3}"#),
     )?
     .commit(engine.as_ref())?
@@ -768,7 +769,7 @@ async fn test_checkpoint_spec_rejected(
 
     let schema = schema_ref! { nullable "value": INTEGER };
 
-    let mut builder = create_table(&table_path, schema, "Test/1.0");
+    let mut builder = create_table(&table_path, schema, "Test/1.0", true);
     if enable_v2checkpoint {
         builder = builder.with_table_properties([("delta.feature.v2Checkpoint", "supported")]);
     }
@@ -799,7 +800,7 @@ async fn test_v2_sidecar_checkpoint_with_no_file_actions() -> Result<()> {
     let schema = schema_ref! { nullable "value": INTEGER };
 
     // v2 table, no data commits -> only protocol + metadata at version 0.
-    let _ = create_table(&table_path, schema, "Test/1.0")
+    let _ = create_table(&table_path, schema, "Test/1.0", true)
         .with_table_properties([("delta.feature.v2Checkpoint", "supported")])
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
         .commit(engine.as_ref())?;
@@ -888,7 +889,7 @@ async fn v2_table_with_domain_metadata_and_txn<E: TaskExecutor>(
         },
     };
 
-    let _ = create_table(table_path, schema.clone(), "Test/1.0")
+    let _ = create_table(table_path, schema.clone(), "Test/1.0", true)
         .with_table_properties([
             ("delta.feature.v2Checkpoint", "supported"),
             ("delta.feature.domainMetadata", "supported"),
@@ -914,6 +915,7 @@ async fn v2_table_with_domain_metadata_and_txn<E: TaskExecutor>(
         engine.as_ref(),
         delta_kernel::transaction::UpdateTableOperation::Write,
         "test-engine",
+        true,
         |builder| {
             builder
                 .with_domain_metadata("app.settings", r#"{"version":1}"#)
@@ -930,6 +932,7 @@ async fn v2_table_with_domain_metadata_and_txn<E: TaskExecutor>(
         engine.as_ref(),
         delta_kernel::transaction::UpdateTableOperation::Write,
         "test-engine",
+        true,
         |builder| {
             builder
                 .with_domain_metadata("app.analytics", r#"{"tracking":false}"#)
@@ -947,6 +950,7 @@ async fn v2_table_with_domain_metadata_and_txn<E: TaskExecutor>(
             engine.as_ref(),
             delta_kernel::transaction::UpdateTableOperation::Write,
             "test-engine",
+            true,
             |builder| builder.with_transaction_id(app_id, version),
         )?
         .commit(engine.as_ref())?
@@ -960,7 +964,8 @@ async fn v2_table_with_domain_metadata_and_txn<E: TaskExecutor>(
         engine.as_ref(),
         delta_kernel::transaction::UpdateTableOperation::Delete,
         "test-engine",
-        |builder| builder.with_data_change(true),
+        true,
+        |builder| builder,
     )?;
     for sm in scan.scan_metadata(engine.as_ref())? {
         txn.remove_files(sm?.scan_files);
@@ -1147,7 +1152,7 @@ async fn create_partitioned_stats_table<E: TaskExecutor>(
         nullable "part_key": STRING,
     };
 
-    let _ = create_table(table_path, schema.clone(), "Test/1.0")
+    let _ = create_table(table_path, schema.clone(), "Test/1.0", true)
         .with_table_properties([
             ("delta.feature.v2Checkpoint", "supported"),
             ("delta.checkpoint.writeStatsAsStruct", "true"),
@@ -1432,7 +1437,7 @@ async fn test_v2_sidecar_preserves_dv_and_row_tracking_on_add(
     let schema = get_simple_schema();
 
     // === Step 1: Create v2 + DV + row-tracking table. ===
-    let _ = create_table(&table_path, schema.clone(), "Test/1.0")
+    let _ = create_table(&table_path, schema.clone(), "Test/1.0", true)
         .with_table_properties([
             ("delta.feature.v2Checkpoint", "supported"),
             ("delta.feature.deletionVectors", "supported"),
@@ -1475,7 +1480,8 @@ async fn test_v2_sidecar_preserves_dv_and_row_tracking_on_add(
         engine.as_ref(),
         delta_kernel::transaction::UpdateTableOperation::Write,
         "test-engine",
-        |builder| builder.with_data_change(true),
+        true,
+        |builder| builder,
     )?;
     txn.update_deletion_vectors(
         HashMap::from([(path, dv.clone())]),
@@ -1536,7 +1542,7 @@ async fn test_v2_sidecar_default_hint_splits_at_50k() -> Result<(), Box<dyn std:
     let table_url = delta_kernel::try_parse_uri(&table_path)?;
 
     // === Step 1: Create v2Checkpoint table. ===
-    let _ = create_table(&table_path, get_simple_schema(), "Test/1.0")
+    let _ = create_table(&table_path, get_simple_schema(), "Test/1.0", true)
         .with_table_properties([("delta.feature.v2Checkpoint", "supported")])
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
         .commit(engine.as_ref())?;
@@ -1549,7 +1555,8 @@ async fn test_v2_sidecar_default_hint_splits_at_50k() -> Result<(), Box<dyn std:
             engine.as_ref(),
             delta_kernel::transaction::UpdateTableOperation::Write,
             "test-engine",
-            |builder| builder.with_data_change(true),
+            true,
+            |builder| builder,
         )?;
         let add_files_schema = txn.add_files_schema().clone();
         let paths: Vec<String> = (0..PER_COMMIT)
@@ -1646,7 +1653,7 @@ async fn build_v2_table_with_feature<E: TaskExecutor>(
     }
 
     let mut builder =
-        create_table(table_path, schema.clone(), "Test/1.0").with_table_properties(props);
+        create_table(table_path, schema.clone(), "Test/1.0", true).with_table_properties(props);
     if let Some(layout) = layout {
         builder = builder.with_data_layout(layout);
     }
@@ -1703,7 +1710,7 @@ async fn snapshot_selects_uuid_checkpoint_over_classic_at_one_version() -> Resul
     let table_url = delta_kernel::try_parse_uri(&table_path)?;
 
     let schema = schema_ref! { nullable "value": INTEGER };
-    let _ = create_table(&table_path, schema, "Test/1.0")
+    let _ = create_table(&table_path, schema, "Test/1.0", true)
         .with_table_properties([("delta.feature.v2Checkpoint", "supported")])
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
         .commit(engine.as_ref())?;

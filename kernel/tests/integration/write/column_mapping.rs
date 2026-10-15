@@ -406,7 +406,7 @@ async fn test_same_phy_name_different_path(
     );
 
     let logical_schema = Arc::new(fixtures::same_leaf_phy_name_under_different_parents());
-    let snapshot = create_table(table_url.as_str(), logical_schema.clone(), "Test/1.0")
+    let snapshot = create_table(table_url.as_str(), logical_schema.clone(), "Test/1.0", true)
         .with_table_properties([("delta.columnMapping.mode", cm_mode)])
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
         .commit(engine.as_ref())?

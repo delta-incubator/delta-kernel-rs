@@ -101,6 +101,7 @@ mod tests {
                     snapshot_handle.shallow_copy(),
                     KernelUpdateTableOperation::Write,
                     kernel_string_slice!(engine_info),
+                    true,
                     default_engine_handle.shallow_copy(),
                 ))
             };

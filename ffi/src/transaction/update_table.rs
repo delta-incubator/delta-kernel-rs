@@ -20,10 +20,14 @@ pub struct ExclusiveUpdateTableTransaction;
 #[handle_descriptor(target=UpdateTableTransactionBuilder, mutable=true, sized=true)]
 pub struct ExclusiveUpdateTableTransactionBuilder;
 
-/// Creates a builder from a snapshot, known `operation`, and connector `engine_info`.
+/// Creates a builder from a snapshot, known `operation`, connector `engine_info`, and
+/// `data_change`.
 ///
 /// Returns an owned builder, or an error if `engine_info` is not valid UTF-8. The operation and
-/// engine info cannot be changed. Invalid intent is rejected when the builder is built.
+/// engine info cannot be changed. `data_change` is also immutable and is preserved for empty
+/// commits. Use `true` for logical data changes and `false` for metadata-only changes or
+/// data-preserving rewrites. Build validation rejects `ALTER TABLE` with `true` and blind append
+/// with `false`.
 ///
 /// # Safety
 ///
@@ -35,6 +39,7 @@ pub unsafe extern "C" fn new_update_table_txn_builder(
     snapshot: Handle<SharedSnapshot>,
     operation: KernelUpdateTableOperation,
     engine_info: KernelStringSlice,
+    data_change: bool,
     engine: Handle<SharedExternEngine>,
 ) -> ExternResult<Handle<ExclusiveUpdateTableTransactionBuilder>> {
     let engine = unsafe { engine.as_ref() };
@@ -42,7 +47,7 @@ pub unsafe extern "C" fn new_update_table_txn_builder(
     engine_info
         .map(|engine_info| {
             let snapshot = unsafe { snapshot.clone_as_arc() };
-            Box::new(snapshot.update_table(operation.into(), engine_info)).into()
+            Box::new(snapshot.update_table(operation.into(), engine_info, data_change)).into()
         })
         .into_extern_result(&engine)
 }
@@ -52,6 +57,7 @@ pub unsafe extern "C" fn new_update_table_txn_builder(
 /// Returns an owned builder on success, or an error if either string is not valid UTF-8. Name
 /// restrictions and intent are validated when the builder is built. See
 /// [`UpdateTableOperation::Custom`] for name restrictions and compatibility across Kernel versions.
+/// `data_change` has the same contract as in [`new_update_table_txn_builder`].
 ///
 /// # Safety
 ///
@@ -62,6 +68,7 @@ pub unsafe extern "C" fn new_update_table_txn_builder_with_custom_operation(
     snapshot: Handle<SharedSnapshot>,
     operation: KernelStringSlice,
     engine_info: KernelStringSlice,
+    data_change: bool,
     engine: Handle<SharedExternEngine>,
 ) -> ExternResult<Handle<ExclusiveUpdateTableTransactionBuilder>> {
     let engine = unsafe { engine.as_ref() };
@@ -71,9 +78,11 @@ pub unsafe extern "C" fn new_update_table_txn_builder_with_custom_operation(
         .and_then(|operation| {
             let engine_info = engine_info?;
             let snapshot = unsafe { snapshot.clone_as_arc() };
-            Ok(Box::new(
-                snapshot.update_table(UpdateTableOperation::Custom(operation), engine_info),
-            )
+            Ok(Box::new(snapshot.update_table(
+                UpdateTableOperation::Custom(operation),
+                engine_info,
+                data_change,
+            ))
             .into())
         })
         .into_extern_result(&engine)
@@ -648,20 +657,6 @@ pub unsafe extern "C" fn update_table_txn_remove_files(
         Ok(true)
     })();
     result.into_extern_result(&engine)
-}
-
-/// Sets whether file actions represent a logical data change.
-///
-/// # Safety
-///
-/// `builder` must be valid and is consumed.
-#[no_mangle]
-pub unsafe extern "C" fn update_table_txn_builder_with_data_change(
-    builder: Handle<ExclusiveUpdateTableTransactionBuilder>,
-    data_change: bool,
-) -> Handle<ExclusiveUpdateTableTransactionBuilder> {
-    let builder = unsafe { *builder.into_inner() };
-    Box::new(builder.with_data_change(data_change)).into()
 }
 
 /// Marks the update as a blind append assertion.

@@ -122,11 +122,13 @@ table at a specific version. From it you build a `Scan` (reads) or `Transaction`
 builder aliases `TransactionBuilder<CreateTable>`. Common setters have one generic implementation.
 The sealed `TransactionType` trait selects opaque type-specific state; specialized implementations
 provide constructors, custom setters, and build validation.
-`Snapshot::update_table(operation, engine_info)` requires both values at construction;
-create-table constructors require the path, schema,
-and engine info and fix the operation to `CREATE TABLE`. Operations and engine info cannot be changed
-on builders or built transactions. `UpdateTableOperation::AlterTable`
-records schema-changing DDL without introducing a separate transaction type.
+`Snapshot::update_table(operation, engine_info, data_change)` requires all three values at
+construction; create-table constructors require the path, schema, engine info, and `data_change`
+and fix the operation to `CREATE TABLE`. These inputs cannot be changed on builders or built
+transactions. `data_change` is never inferred from staged files, including for empty commits.
+`build()` rejects ALTER with `true` and blind append with `false`; `commit()` retains operation and
+staged-file checks. `UpdateTableOperation::AlterTable` records schema-changing DDL without
+introducing a separate transaction type.
 Writers configure transaction intent before `build()`, then call
 `Transaction::write_state`, then bind partition values through the returned `WriteState` to get a
 `BoundWriteContext`. Distributed writers can encode and transport the state before binding it.

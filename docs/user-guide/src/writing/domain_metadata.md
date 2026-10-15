@@ -34,7 +34,7 @@ while writing to a built transaction before committing it.
 # let engine = DefaultEngine::builder(store_from_url(&url)?).build();
 # let snapshot = Snapshot::builder_for(url).build(&engine)?;
 let txn = snapshot
-    .update_table(UpdateTableOperation::Custom("UPDATE METADATA".to_string()), "my-app/1.0")
+    .update_table(UpdateTableOperation::Custom("UPDATE METADATA".to_string()), "my-app/1.0", false)
     .with_domain_metadata(
         "myConnector.settings".to_string(),
         r#"{"version": 1, "compress": true}"#.to_string(),
@@ -91,7 +91,7 @@ that does not exist yet.
 # let engine = DefaultEngine::builder(store_from_url(&url)?).build();
 # let snapshot = Snapshot::builder_for(url).build(&engine)?;
 let txn = snapshot
-    .update_table(UpdateTableOperation::Custom("REMOVE METADATA".to_string()), "my-app/1.0")
+    .update_table(UpdateTableOperation::Custom("REMOVE METADATA".to_string()), "my-app/1.0", false)
     .with_domain_metadata_removed("myConnector.settings")
     .build(&engine, Box::new(FileSystemCommitter::new()))?;
 

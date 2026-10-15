@@ -65,7 +65,7 @@ int main(int argc, char* argv[]) {
   KernelStringSlice engine_info_slice = { engine_info, strlen(engine_info) };
   ExternResultHandleExclusiveUpdateTableTransactionBuilder builder_res =
       new_update_table_txn_builder(
-          snapshot, KernelUpdateTableOperationWrite, engine_info_slice, engine);
+          snapshot, KernelUpdateTableOperationWrite, engine_info_slice, false, engine);
   if (builder_res.tag != OkHandleExclusiveUpdateTableTransactionBuilder) {
     print_error("Failed to create transaction builder.", (Error*)builder_res.err);
     free_error((Error*)builder_res.err);
@@ -73,8 +73,7 @@ int main(int argc, char* argv[]) {
     free_engine(engine);
     return 1;
   }
-  ExclusiveUpdateTableTransactionBuilder* txn_builder =
-      update_table_txn_builder_with_data_change(builder_res.ok, false);
+  ExclusiveUpdateTableTransactionBuilder* txn_builder = builder_res.ok;
   ExternResultHandleExclusiveUpdateTableTransaction txn_res =
       update_table_txn_builder_build(txn_builder, engine);
   if (txn_res.tag != OkHandleExclusiveUpdateTableTransaction) {

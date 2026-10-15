@@ -78,7 +78,7 @@ A typical write flow:
 ```text
 get_default_engine()  ->  Handle<SharedExternEngine>
         |
-new_update_table_txn_builder(snapshot, operation, engine_info, engine)
+new_update_table_txn_builder(snapshot, operation, engine_info, data_change, engine)
     -> ExternResult<Handle<ExclusiveUpdateTableTransactionBuilder>>
         |
 update_table_txn_builder_build() -> Handle<ExclusiveUpdateTableTransaction>
@@ -238,7 +238,7 @@ feature is enabled; the rest are always available.
 | `update_table_txn_builder_with_operation_metrics` / `update_table_txn_with_operation_metrics` | Set metrics before writing or replace them with write-time results |
 | `update_table_txn_builder_with_commit_info` / `update_table_txn_with_commit_info` | Set connector commit information before writing or before commit |
 | `update_table_txn_builder_with_transaction_id` | Add an `(app_id, version)` pair for idempotent writes (see [Idempotent Writes](../writing/idempotent_writes.md)) |
-| `update_table_txn_builder_with_data_change` / `update_table_txn_builder_with_blind_append` | Configure file-action and blind-append semantics before `build()` |
+| `update_table_txn_builder_with_blind_append` | Assert blind-append semantics before `build()` |
 | `update_table_txn_builder_add_column` / `update_table_txn_builder_add_column_at` / `update_table_txn_builder_set_nullable` | Configure schema evolution before `build()` |
 | `update_table_txn_builder_with_domain_metadata` / `update_table_txn_builder_with_domain_metadata_removed` | Add or remove user domain metadata |
 | `update_table_txn_builder_build` / `update_table_txn_builder_build_with_committer` | Consume the builder and produce a transaction |
@@ -301,7 +301,6 @@ unpartitioned writes.
 |----------|---------|
 | `new_create_table_txn_builder` | Create a builder for a new Delta table with a schema |
 | `create_table_txn_builder_with_table_property` | Add a table property to the builder |
-| `create_table_txn_builder_with_data_change` | Override the default `true` file-action data-change flag before `build()` |
 | `create_table_txn_builder_with_correlation_id` | Attach a correlation identifier to transaction metrics |
 | `create_table_txn_builder_with_operation_parameters` | Replace the operation parameters recorded in `commitInfo` |
 | `create_table_txn_builder_with_operation_metrics` / `create_table_txn_with_operation_metrics` | Set metrics before writing or replace them with write-time results |
@@ -317,8 +316,11 @@ unpartitioned writes.
 | `free_create_table_txn_builder` | Release a create-table builder handle (before it is consumed by `create_table_txn_builder_build*`) |
 | `free_create_table_txn` | Release a create-table transaction handle (after build, before commit) |
 
-Initial Add actions default to `dataChange = true`. To override it, call
-`create_table_txn_builder_with_data_change` before building the transaction.
+All transaction-builder constructors require a `data_change` boolean before the engine handle.
+Kernel uses this value for file actions and preserves it through empty commits. It cannot be
+changed on a builder or transaction. Use `true` for logical data changes and `false` for
+metadata-only changes or rewrites that preserve logical data. Build validation rejects
+`ALTER TABLE` with `true` and blind append with `false`; commit validation checks staged files.
 
 **Change data feed (table changes)**
 

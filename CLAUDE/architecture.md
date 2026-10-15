@@ -89,11 +89,14 @@ file listing without re-scanning the table.
 `TransactionType` trait selects `T::BuilderState`; each type supplies its own constructors, custom
 setters, and build validation. `UpdateTableTransactionBuilder` aliases
 `TransactionBuilder<UpdateTable>` and builds `Transaction<UpdateTable>`, the default transaction
-type. Construct it with `snapshot.update_table(operation, engine_info)`, which requires both values.
+type. Construct it with `snapshot.update_table(operation, engine_info, data_change)`, requiring all
+three values.
 `CreateTableTransactionBuilder` aliases `TransactionBuilder<CreateTable>` and builds
-`Transaction<CreateTable>`. Its constructor requires the path, schema, and engine info and fixes
-the operation to `CREATE TABLE`. Operations and engine info cannot be changed on either builder
-or transaction.
+`Transaction<CreateTable>`. Its constructor requires the path, schema, engine info, and `data_change`
+and fixes the operation to `CREATE TABLE`. These inputs cannot be changed on either builder or
+transaction. Kernel preserves `data_change` even for empty commits rather than inferring it from
+staged files. `build()` rejects ALTER with `true` and blind append with `false`; `commit()` retains
+operation and staged-file validation.
 Schema changes use `UpdateTable`, including the
 `UpdateTableOperation::AlterTable` operation.
 

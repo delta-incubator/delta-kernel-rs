@@ -218,7 +218,8 @@ pub async fn write_data_and_check_result_and_stats(
         engine.as_ref(),
         UpdateTableOperation::Write,
         "test-engine",
-        |builder| builder.with_data_change(true),
+        true,
+        |builder| builder,
     )?;
 
     // create two new arrow record batches to append
@@ -404,8 +405,7 @@ pub async fn create_dv_table_with_files(
     // Write files
     let snapshot = Snapshot::builder_for(table_url.clone()).build(engine.as_ref())?;
     let mut txn = snapshot
-        .update_table(UpdateTableOperation::Write, "test engine")
-        .with_data_change(true)
+        .update_table(UpdateTableOperation::Write, "test engine", true)
         .build(
             engine.as_ref(),
             Box::new(delta_kernel::committer::FileSystemCommitter::new()),
@@ -510,7 +510,7 @@ pub fn create_dv_update_transaction(
 ) -> Result<Transaction, Box<dyn std::error::Error>> {
     Ok(Snapshot::builder_for(table_url.clone())
         .build(engine)?
-        .update_table(UpdateTableOperation::Delete, "test engine")
+        .update_table(UpdateTableOperation::Delete, "test engine", true)
         .build(
             engine,
             Box::new(delta_kernel::committer::FileSystemCommitter::new()),

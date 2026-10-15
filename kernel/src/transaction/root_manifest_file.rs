@@ -377,7 +377,7 @@ mod tests {
     fn new_preserves_an_absolute_file_location() -> Result<()> {
         let engine = SyncEngine::new_with_store(Arc::new(InMemory::new()));
         let schema = schema_ref! { nullable "id": INTEGER };
-        let _ = create_table("memory:///t/", schema, "test")
+        let _ = create_table("memory:///t/", schema, "test", true)
             .build(&engine, Box::new(FileSystemCommitter::new()))?
             .commit(&engine)?;
         let snapshot = Snapshot::builder_for("memory:///t/").build(&engine)?;

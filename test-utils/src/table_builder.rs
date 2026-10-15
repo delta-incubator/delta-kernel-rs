@@ -1298,7 +1298,7 @@ impl TestTableBuilder {
             self.log_state.checkpoints_at().iter().copied().collect();
 
         // Version 0: CreateTable
-        let mut builder = create_table(table_root, schema, "TestTableBuilder/1.0");
+        let mut builder = create_table(table_root, schema, "TestTableBuilder/1.0", true);
         let all_properties: Vec<_> = self
             .features
             .table_properties
@@ -1457,8 +1457,8 @@ async fn write_data_commit<E: TaskExecutor>(
         .update_table(
             delta_kernel::transaction::UpdateTableOperation::Write,
             "test-utils",
+            true,
         )
-        .with_data_change(true)
         .build(engine, Box::new(FileSystemCommitter::new()))?;
     let write_state = txn.write_state()?;
 

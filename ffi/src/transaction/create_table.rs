@@ -157,23 +157,6 @@ pub unsafe extern "C" fn create_table_txn_commit(
 #[handle_descriptor(target=CreateTableTransactionBuilder, mutable=true, sized=true)]
 pub struct ExclusiveCreateTableTransactionBuilder;
 
-/// Sets whether files added during creation represent a logical data change.
-///
-/// `data_change` defaults to `true`. Returns the updated builder handle. Consecutive calls
-/// replace the previous value, which is preserved through commit even when no files are added.
-///
-/// # Safety
-///
-/// `builder` must be valid. This unconditionally consumes `builder`.
-#[no_mangle]
-pub unsafe extern "C" fn create_table_txn_builder_with_data_change(
-    builder: Handle<ExclusiveCreateTableTransactionBuilder>,
-    data_change: bool,
-) -> Handle<ExclusiveCreateTableTransactionBuilder> {
-    let builder = unsafe { *builder.into_inner() };
-    Box::new(builder.with_data_change(data_change)).into()
-}
-
 /// Attaches a correlation identifier to create transaction metric events.
 ///
 /// Repeated calls replace the previous value. An empty value clears it.
@@ -426,6 +409,9 @@ pub(super) fn create_table_txn_builder_with_data_layout_impl(
 /// Create a new [`CreateTableTransactionBuilder`] for creating a Delta table at the given path.
 ///
 /// `schema` supplies the table schema through the [`EngineSchema`] visitor callback.
+/// `engine_info` identifies the connector. `data_change` determines whether initial Add actions
+/// change logical data; use `true` for new records. Both values are immutable, and `data_change`
+/// is preserved through commit even when no files are staged.
 ///
 /// The returned builder can be configured with [`create_table_txn_builder_with_table_property`]
 /// before building with [`create_table_txn_builder_build`]. The engine is only used for error
@@ -440,24 +426,27 @@ pub unsafe extern "C" fn new_create_table_txn_builder(
     path: KernelStringSlice,
     schema: &EngineSchema,
     engine_info: KernelStringSlice,
+    data_change: bool,
     engine: Handle<SharedExternEngine>,
 ) -> ExternResult<Handle<ExclusiveCreateTableTransactionBuilder>> {
     let engine = unsafe { engine.as_ref() };
     let path = unsafe { TryFromStringSlice::try_from_slice(&path) };
     let info = unsafe { TryFromStringSlice::try_from_slice(&engine_info) };
-    new_create_table_txn_builder_impl(path, schema, info).into_extern_result(&engine)
+    new_create_table_txn_builder_impl(path, schema, info, data_change).into_extern_result(&engine)
 }
 
 fn new_create_table_txn_builder_impl(
     path: Result<&str>,
     schema: &EngineSchema,
     engine_info: Result<&str>,
+    data_change: bool,
 ) -> Result<Handle<ExclusiveCreateTableTransactionBuilder>> {
     let schema = decode_engine_schema(schema)?;
     let builder = delta_kernel::transaction::create_table::create_table(
         path?,
         Arc::new(schema),
         engine_info?.to_string(),
+        data_change,
     );
     Ok(Box::new(builder).into())
 }

@@ -125,6 +125,7 @@ async fn test_with_root_manifest_file_merges_domain_metadata_and_transactions(
         &engine,
         delta_kernel::transaction::UpdateTableOperation::Write,
         "test-engine",
+        true,
         |builder| {
             builder
                 .with_transaction_id("app-1", 5)
@@ -143,6 +144,7 @@ async fn test_with_root_manifest_file_merges_domain_metadata_and_transactions(
         &engine,
         delta_kernel::transaction::UpdateTableOperation::Write,
         "test-engine",
+        true,
         |builder| {
             builder
                 .with_transaction_id("app-2", 7)

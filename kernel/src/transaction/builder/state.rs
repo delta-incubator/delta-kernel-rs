@@ -19,7 +19,7 @@ pub(in crate::transaction) struct TransactionBuilderState {
     pub(in crate::transaction) engine_commit_info: Option<(Box<dyn EngineData>, SchemaRef)>,
     pub(in crate::transaction) transaction_ids: Vec<(String, i64)>,
     pub(in crate::transaction) domain_metadata_additions: Vec<DomainMetadata>,
-    pub(in crate::transaction) data_change: Option<bool>,
+    pub(in crate::transaction) data_change: bool,
 }
 
 impl std::fmt::Debug for TransactionBuilderState {
@@ -38,17 +38,10 @@ impl std::fmt::Debug for TransactionBuilderState {
 }
 
 impl TransactionBuilderState {
-    pub(super) fn for_update_table(engine_info: String) -> Self {
+    pub(super) fn new(engine_info: String, data_change: bool) -> Self {
         Self {
             engine_info,
-            ..Self::default()
-        }
-    }
-
-    pub(super) fn for_create_table(engine_info: String) -> Self {
-        Self {
-            engine_info,
-            data_change: Some(true),
+            data_change,
             ..Self::default()
         }
     }

@@ -18,10 +18,11 @@ pub enum UpdateTableOperation {
     Write,
     /// A streaming write.
     StreamingUpdate,
-    /// A schema-changing operation.
+    /// A standalone schema-changing operation.
     ///
-    /// Requires at least one schema operation at build time. It does not prohibit data-file
-    /// actions or force `dataChange = false`. See the builder's
+    /// Requires at least one schema operation and `dataChange = false` at build time. Commit
+    /// validation retains the data-change check. File actions are not independently prohibited.
+    /// See the builder's
     /// [schema-change workflows](super::UpdateTableTransactionBuilder#schema-changes).
     AlterTable,
     /// A row deletion.
