@@ -14,11 +14,12 @@ use url::Url;
 
 #[cfg(feature = "adaptive-metadata-in-dev")]
 use crate::amt_path_util::{resolve_table_relative, validate_table_relative};
+use crate::engine::EngineReadExt;
 #[cfg(feature = "adaptive-metadata-in-dev")]
 use crate::path_encoding::uri_decode_path;
 use crate::schema::DataType;
 use crate::utils::require;
-use crate::{KernelError, KernelResult, Result, Scalar, StorageHandler};
+use crate::{Engine, KernelError, KernelResult, Result, Scalar, StorageHandler};
 
 /// Magic number for portable RoaringBitmap serialization format.
 /// This is the standard format defined in the RoaringBitmap Specification
@@ -455,7 +456,43 @@ impl DeletionVectorDescriptor {
     //  little, while the version, size, and checksum are big
     //  - dvs can potentially indicate the size in the delta log, and _also_ in the file. If both
     //  are present, we assert they are the same
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "The public storage-only API has no engine token; Kernel callers use the engine-aware entry."
+    )]
     pub fn read(&self, storage: Arc<dyn StorageHandler>, parent: &Url) -> Result<RoaringTreemap> {
+        self.read_with(parent, |path| {
+            storage
+                .read_files(vec![(path.clone(), None)])?
+                .next()
+                .ok_or_else(|| {
+                    KernelError::missing_data(format!("No deletion vector data for {path}"))
+                })?
+        })
+    }
+
+    /// Reads a stored deletion vector using the engine's operation token.
+    pub(crate) fn read_with_engine(
+        &self,
+        engine: &dyn Engine,
+        parent: &Url,
+    ) -> Result<RoaringTreemap> {
+        self.read_with(parent, |path| {
+            engine
+                .read_files(vec![(path.clone(), None)])?
+                .next()
+                .ok_or_else(|| {
+                    KernelError::missing_data(format!("No deletion vector data for {path}"))
+                })?
+        })
+    }
+
+    /// Decodes an inline or persisted deletion vector using the supplied byte reader.
+    fn read_with(
+        &self,
+        parent: &Url,
+        read: impl FnOnce(&Url) -> Result<Bytes>,
+    ) -> Result<RoaringTreemap> {
         match self.absolute_path(parent)? {
             None => {
                 let byte_slice = z85::decode(&self.path_or_inline_dv)
@@ -491,12 +528,7 @@ impl DeletionVectorDescriptor {
                             "size_in_bytes doesn't fit in usize for {path}"
                         ))))?;
 
-                let dv_data = storage
-                    .read_files(vec![(path.clone(), None)])?
-                    .next()
-                    .ok_or(KernelError::missing_data(format!(
-                        "No deletion vector data for {path}"
-                    )))??;
+                let dv_data = read(&path)?;
                 let dv_data_len = dv_data.len();
 
                 let mut cursor = Cursor::new(dv_data);

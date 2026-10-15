@@ -163,6 +163,10 @@ impl CountingStorageHandler {
     }
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "The test adapter exercises handler calls directly."
+)]
 impl StorageHandler for CountingStorageHandler {
     fn list_from(&self, path: &Url) -> Result<ResultIteratorStatic<FileMeta>> {
         self.list_from_count.fetch_add(1, Ordering::Relaxed);

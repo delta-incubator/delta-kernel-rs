@@ -6,6 +6,7 @@ use std::sync::{Arc, LazyLock};
 
 use url::Url;
 
+use crate::engine::EngineReadExt;
 use crate::engine_data::{FilteredEngineData, GetData, RowVisitor};
 use crate::expressions::{column_name, ColumnName};
 use crate::log_replay::deduplicator::{Deduplicator, FileActionInfo};
@@ -145,11 +146,8 @@ impl IncrementalScanBuilder {
             .map(|c| c.location.clone())
             .collect();
 
-        let actions = engine.json_handler().read_json_files(
-            &commit_locations,
-            COMMIT_READ_SCHEMA.clone(),
-            None,
-        )?;
+        let actions =
+            engine.read_json_files(&commit_locations, COMMIT_READ_SCHEMA.clone(), None)?;
 
         Ok(Some(IncrementalScanStream {
             base_version: self.base_version,

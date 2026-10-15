@@ -116,6 +116,7 @@ use crate::actions::{
     DOMAIN_METADATA_FIELD, METADATA_FIELD, PROTOCOL_FIELD, REMOVE_FIELD, SET_TRANSACTION_FIELD,
     SIDECAR_FIELD,
 };
+use crate::engine::EngineReadExt;
 use crate::engine_data::FilteredEngineData;
 use crate::expressions::{ExpressionRef, Scalar};
 use crate::last_checkpoint_hint::LastCheckpointHint;
@@ -814,7 +815,7 @@ fn write_single_sidecar(
     let written_size = engine
         .parquet_handler()
         .write_parquet_file(sidecar_url.clone(), Box::new(iter))?;
-    let meta = engine.storage_handler().head(&sidecar_url)?;
+    let meta = engine.head(&sidecar_url)?;
     verify_written_size(&sidecar_url, written_size, meta.size)?;
     Ok(Some((filename, meta)))
 }
@@ -840,7 +841,7 @@ fn build_written_checkpoint_info(
     sidecar_sizes_sum: u64,
     sidecar_count: u64,
 ) -> KernelResult<WrittenCheckpointInfo> {
-    let file_meta = engine.storage_handler().head(checkpoint_path)?;
+    let file_meta = engine.head(checkpoint_path)?;
     verify_written_size(checkpoint_path, written_size, file_meta.size)?;
     let total_size_in_bytes = file_meta
         .size

@@ -69,6 +69,10 @@ pub(crate) struct LogSegmentFiles {
 /// With a `cancellation_token`, [`StorageHandler::list_from_with_cancellation`] owns cancellation
 /// for the underlying listing. This pipeline preserves any cancellation error through its filters.
 #[internal_api]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "The storage-only listing API receives an explicit effective token."
+)]
 pub(crate) fn list_delta_log_from_storage(
     storage: &dyn StorageHandler,
     log_root: &Url,

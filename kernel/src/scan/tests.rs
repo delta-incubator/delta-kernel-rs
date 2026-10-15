@@ -1762,6 +1762,10 @@ impl RecordingParquetHandler {
     }
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "The test adapter exercises handler calls directly."
+)]
 impl ParquetHandler for RecordingParquetHandler {
     fn read_parquet_files(
         &self,

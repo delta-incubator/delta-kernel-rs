@@ -6,6 +6,7 @@ use itertools::Itertools;
 use url::Url;
 
 use crate::actions::visitors::SidecarVisitor;
+use crate::engine::EngineReadExt;
 use crate::log_replay::ActionsBatch;
 use crate::path::ParsedLogPath;
 use crate::schema::SchemaRef;
@@ -43,12 +44,12 @@ impl CheckpointManifestReader {
         read_schema: SchemaRef,
     ) -> KernelResult<Self> {
         let actions = match manifest.extension.as_str() {
-            "json" => engine.json_handler().read_json_files(
+            "json" => engine.read_json_files(
                 std::slice::from_ref(&manifest.location),
                 read_schema.clone(),
                 None,
             )?,
-            "parquet" => engine.parquet_handler().read_parquet_files(
+            "parquet" => engine.read_parquet_files(
                 std::slice::from_ref(&manifest.location),
                 read_schema,
                 None,

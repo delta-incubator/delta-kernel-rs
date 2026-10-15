@@ -1,0 +1,14 @@
+# Kernel-owned imperative reads must select the engine token before issuing I/O.
+disallowed-methods = [
+    { path = "delta_kernel::StorageHandler::list_from", reason = "Use EngineReadExt so imperative reads inherit the engine cancellation token." },
+    { path = "delta_kernel::StorageHandler::list_from_with_cancellation", reason = "Use EngineReadExt so imperative reads inherit the engine cancellation token." },
+    { path = "delta_kernel::StorageHandler::read_files", reason = "Use EngineReadExt so imperative reads inherit the engine cancellation token." },
+    { path = "delta_kernel::StorageHandler::read_files_with_cancellation", reason = "Use EngineReadExt so imperative reads inherit the engine cancellation token." },
+    { path = "delta_kernel::StorageHandler::head", reason = "Use EngineReadExt so imperative reads inherit the engine cancellation token." },
+    { path = "delta_kernel::JsonHandler::read_json_files", reason = "Use EngineReadExt so imperative reads inherit the engine cancellation token." },
+    { path = "delta_kernel::JsonHandler::read_json_files_with_cancellation", reason = "Use EngineReadExt so imperative reads inherit the engine cancellation token." },
+    { path = "delta_kernel::ParquetHandler::read_parquet_files", reason = "Use EngineReadExt so imperative reads inherit the engine cancellation token." },
+    { path = "delta_kernel::ParquetHandler::read_parquet_files_with_cancellation", reason = "Use EngineReadExt so imperative reads inherit the engine cancellation token." },
+    { path = "delta_kernel::ParquetHandler::read_parquet_footer", reason = "Use EngineReadExt so imperative reads inherit the engine cancellation token." },
+    { path = "delta_kernel::ParquetHandler::read_parquet_footer_with_cancellation", reason = "Use EngineReadExt so imperative reads inherit the engine cancellation token." },
+]

@@ -43,6 +43,10 @@ impl std::fmt::Debug for MeteredStorageHandler {
     }
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "Metering forwards handler calls and their explicit tokens."
+)]
 impl StorageHandler for MeteredStorageHandler {
     fn list_from(&self, path: &Url) -> Result<ResultIteratorStatic<FileMeta>> {
         let start = Instant::now();
@@ -118,6 +122,10 @@ impl StorageHandler for MeteredStorageHandler {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "These tests exercise the handler contract directly."
+)]
 mod tests {
     use std::sync::Arc;
 

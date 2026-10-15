@@ -74,6 +74,10 @@ impl ParquetHandler for PlanBasedParquetHandler {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "These tests exercise the handler contract directly."
+)]
 mod tests {
     // TODO(#2618): Refactor and share a test suite with sync engine tests.
 

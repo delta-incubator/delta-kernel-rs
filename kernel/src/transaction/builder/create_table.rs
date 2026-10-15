@@ -19,6 +19,7 @@ use super::TransactionBuilder;
 use crate::actions::{DomainMetadata, Metadata, Protocol};
 use crate::clustering::{create_clustering_domain_metadata, validate_clustering_columns};
 use crate::committer::Committer;
+use crate::engine::EngineReadExt;
 use crate::expressions::ColumnName;
 use crate::metrics::MetricId;
 use crate::schema::validation::validate_schema;
@@ -53,7 +54,7 @@ use crate::transaction::create_table::CreateTableTransaction;
 use crate::transaction::data_layout::DataLayout;
 use crate::transaction::{CommitOperation, CreateTable, ExecutionMode, Transaction};
 use crate::utils::{current_time_ms, try_parse_uri, PhantomType};
-use crate::{Engine, KernelError, KernelResult, Result, StorageHandler};
+use crate::{Engine, KernelError, KernelResult, Result};
 
 /// Table features allowed to be enabled via `delta.feature.*=supported` during CREATE TABLE.
 ///
@@ -152,15 +153,15 @@ const ALLOWED_DELTA_PROPERTIES: &[&str] = &[
 /// - For other errors (permissions, network), propagates the error
 ///
 /// # Arguments
-/// * `storage` - The storage handler to use for listing
+/// * `engine` - The engine to use for listing
 /// * `delta_log_url` - URL to the `_delta_log` directory
 /// * `table_path` - Original table path (for error messages)
 fn ensure_table_does_not_exist(
-    storage: &dyn StorageHandler,
+    engine: &dyn Engine,
     delta_log_url: &Url,
     table_path: &str,
 ) -> KernelResult<()> {
-    match storage.list_from(delta_log_url) {
+    match engine.list_from(delta_log_url) {
         Ok(mut files) => {
             // files.next() returns Option<Result<FileMeta>>
             // - Some(Ok(_)) means a file exists -> table exists
@@ -963,8 +964,7 @@ impl TransactionBuilder<CreateTable> {
 
         // Check if table already exists by looking for _delta_log directory
         let delta_log_url = table_url.join("_delta_log/")?;
-        let storage = engine.storage_handler();
-        ensure_table_does_not_exist(storage.as_ref(), &delta_log_url, &self.local_state.path)?;
+        ensure_table_does_not_exist(engine, &delta_log_url, &self.local_state.path)?;
 
         // Validate and transform table properties
         // - Extracts and validates feature signals

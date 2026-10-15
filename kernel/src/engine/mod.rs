@@ -4,9 +4,11 @@
 //! `SyncEngine` is included only in test builds.
 
 mod kernel_engine;
+mod read_ext;
 #[cfg(feature = "arrow-expression")]
 use delta_kernel_derive::internal_api;
 pub use kernel_engine::KernelEngine;
+pub(crate) use read_ext::EngineReadExt;
 
 #[cfg(feature = "arrow-expression")]
 use crate::parquet::arrow::arrow_reader::ArrowReaderOptions;

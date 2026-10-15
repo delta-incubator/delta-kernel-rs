@@ -49,6 +49,7 @@
 //! needed to execute the operation.
 
 #![cfg_attr(all(doc, NIGHTLY_CHANNEL), feature(doc_cfg))]
+#![deny(clippy::disallowed_methods)]
 #![warn(
     unreachable_pub,
     trivial_numeric_casts,
@@ -571,6 +572,10 @@ pub trait StorageHandler: AsAny {
     ///
     /// [`list_from`]: Self::list_from
     /// [Engine operation cancellation contract]: crate::cancellation#engine-operation-contract
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "The handler default wraps the unscoped primitive with cancellation checks."
+    )]
     fn list_from_with_cancellation(
         &self,
         path: &Url,
@@ -592,6 +597,10 @@ pub trait StorageHandler: AsAny {
     ///
     /// [`read_files`]: Self::read_files
     /// [Engine operation cancellation contract]: crate::cancellation#engine-operation-contract
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "The handler default wraps the unscoped primitive with cancellation checks."
+    )]
     fn read_files_with_cancellation(
         &self,
         files: Vec<FileSlice>,
@@ -681,6 +690,10 @@ pub trait JsonHandler: AsAny {
     ///
     /// [`read_json_files`]: Self::read_json_files
     /// [Engine operation cancellation contract]: crate::cancellation#engine-operation-contract
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "The handler default wraps the unscoped primitive with cancellation checks."
+    )]
     fn read_json_files_with_cancellation(
         &self,
         files: &[FileMeta],
@@ -931,6 +944,10 @@ pub trait ParquetHandler: AsAny {
     ///
     /// [`read_parquet_files`]: Self::read_parquet_files
     /// [Engine operation cancellation contract]: crate::cancellation#engine-operation-contract
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "The handler default wraps the unscoped primitive with cancellation checks."
+    )]
     fn read_parquet_files_with_cancellation(
         &self,
         files: &[FileMeta],
@@ -1030,6 +1047,10 @@ pub trait ParquetHandler: AsAny {
     ///
     /// [`read_parquet_footer`]: Self::read_parquet_footer
     /// [Engine operation cancellation contract]: crate::cancellation#engine-operation-contract
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "The handler default wraps the unscoped primitive with cancellation checks."
+    )]
     fn read_parquet_footer_with_cancellation(
         &self,
         file: &FileMeta,
@@ -1045,6 +1066,14 @@ pub trait ParquetHandler: AsAny {
 ///
 /// Connectors pass an implementation of this trait to Delta Kernel operations.
 pub trait Engine: AsAny {
+    /// Returns the default token for imperative reads, or `None` for unscoped reads.
+    ///
+    /// Engine decorators must forward this token to preserve the wrapped engine's scope.
+    /// Direct handler calls and declarative execution do not inherit it.
+    fn cancellation_token(&self) -> Option<CancellationTokenRef> {
+        None
+    }
+
     /// Get the connector provided [`EvaluationHandler`].
     fn evaluation_handler(&self) -> Arc<dyn EvaluationHandler>;
 
@@ -1085,6 +1114,10 @@ pub trait Engine: AsAny {
 // also be added. https://doc.rust-lang.org/rustdoc/write-documentation/documentation-tests.html#include-items-only-when-collecting-doctests
 #[cfg(doctest)]
 mod doctests;
+
+#[cfg(engine_io_lint_test)]
+#[path = "../tests/ui/engine_io_lint.rs"]
+mod engine_io_lint;
 
 #[cfg(test)]
 mod tests {

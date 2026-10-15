@@ -10,7 +10,8 @@ use url::Url;
 use crate::actions::LOG_METADATA_SCHEMA;
 use crate::engine::sync::SyncEngine;
 use crate::engine::test_delegating::DelegatingEngine;
-use crate::engine::KernelEngine;
+use crate::engine::{EngineReadExt, KernelEngine};
+use crate::metrics::MeteredDeltaEngine;
 use crate::schema::SchemaRef;
 use crate::snapshot::IncrementalReplay;
 use crate::unit_test_utils::TestCancellationToken;
@@ -80,6 +81,10 @@ impl RecordingReads {
     }
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "The test adapter exercises handler calls directly."
+)]
 impl StorageHandler for RecordingReads {
     fn list_from(&self, path: &Url) -> KernelResult<ResultIteratorStatic<FileMeta>> {
         self.list_from_with_cancellation(path, None)
@@ -133,6 +138,10 @@ impl StorageHandler for RecordingReads {
     }
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "The test adapter exercises handler calls directly."
+)]
 impl JsonHandler for RecordingReads {
     fn parse_json(
         &self,
@@ -185,6 +194,10 @@ impl JsonHandler for RecordingReads {
     }
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "The test adapter exercises handler calls directly."
+)]
 impl ParquetHandler for RecordingReads {
     fn read_parquet_files(
         &self,
@@ -271,69 +284,57 @@ fn start_read(
     let file = FileMeta::new(path.clone(), 0, 0);
     let schema = LOG_METADATA_SCHEMA.clone();
     match (read, api) {
-        (Read::List, ReadApi::Plain) => Ok(Box::new(
-            engine
-                .storage_handler()
-                .list_from(&path)?
-                .map(|r| r.map(|_| ())),
-        )),
+        (Read::List, ReadApi::Plain) => {
+            Ok(Box::new(engine.list_from(&path)?.map(|r| r.map(|_| ()))))
+        }
         (Read::List, ReadApi::WithCancellation) => Ok(Box::new(
             engine
-                .storage_handler()
                 .list_from_with_cancellation(&path, token)?
                 .map(|r| r.map(|_| ())),
         )),
         (Read::Hint | Read::Crc, ReadApi::Plain) => Ok(Box::new(
             engine
-                .storage_handler()
                 .read_files(vec![(path, None)])?
                 .map(|r| r.map(|_| ())),
         )),
         (Read::Hint | Read::Crc, ReadApi::WithCancellation) => Ok(Box::new(
             engine
-                .storage_handler()
                 .read_files_with_cancellation(vec![(path, None)], token)?
                 .map(|r| r.map(|_| ())),
         )),
         (Read::Json, ReadApi::Plain) => Ok(Box::new(
             engine
-                .json_handler()
                 .read_json_files(&[file], schema, None)?
                 .map(|r| r.map(|_| ())),
         )),
         (Read::Json, ReadApi::WithCancellation) => Ok(Box::new(
             engine
-                .json_handler()
                 .read_json_files_with_cancellation(&[file], schema, None, token)?
                 .map(|r| r.map(|_| ())),
         )),
         (Read::Parquet, ReadApi::Plain) => Ok(Box::new(
             engine
-                .parquet_handler()
                 .read_parquet_files(&[file], schema, None)?
                 .map(|r| r.map(|_| ())),
         )),
         (Read::Parquet, ReadApi::WithCancellation) => Ok(Box::new(
             engine
-                .parquet_handler()
                 .read_parquet_files_with_cancellation(&[file], schema, None, token)?
                 .map(|r| r.map(|_| ())),
         )),
         (Read::Footer, ReadApi::Plain) => {
-            engine.parquet_handler().read_parquet_footer(&file)?;
+            engine.read_parquet_footer(&file)?;
             Ok(Box::new(std::iter::once(Ok(()))))
         }
         (Read::Footer, ReadApi::WithCancellation) => {
-            engine
-                .parquet_handler()
-                .read_parquet_footer_with_cancellation(&file, token)?;
+            engine.read_parquet_footer_with_cancellation(&file, token)?;
             Ok(Box::new(std::iter::once(Ok(()))))
         }
     }
 }
 
 #[rstest]
-fn handler_reads_inherit_scope_and_explicit_tokens_override_it(
+fn engine_reads_inherit_scope_and_explicit_tokens_override_it(
     #[values(
         Read::List,
         Read::Hint,
@@ -396,6 +397,71 @@ fn iterators_keep_scope_after_engine_is_dropped(
     }
 }
 
+#[rstest]
+fn unscoped_engine_reads_pass_none(
+    #[values(
+        Read::List,
+        Read::Hint,
+        Read::Crc,
+        Read::Json,
+        Read::Parquet,
+        Read::Footer
+    )]
+    read: Read,
+) {
+    let mut reads = RecordingReads::new(None);
+    Arc::get_mut(&mut reads).unwrap().expected_token = None;
+    start_read(&reads.engine(), read, ReadApi::Plain, None)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap();
+    assert_eq!(*reads.events.lock().unwrap(), [read]);
+}
+
+#[test]
+fn adapter_preserves_handler_identity_and_builder_token_overrides_engine_token() {
+    let reads = RecordingReads::new(None);
+    let original = reads.engine();
+    let engine = KernelEngine::new(&original, Arc::new(TestCancellationToken::cancelled()));
+    assert!(Arc::ptr_eq(
+        &engine.storage_handler(),
+        &original.storage_handler()
+    ));
+    assert!(Arc::ptr_eq(
+        &engine.json_handler(),
+        &original.json_handler()
+    ));
+    assert!(Arc::ptr_eq(
+        &engine.parquet_handler(),
+        &original.parquet_handler()
+    ));
+    assert!(Arc::ptr_eq(
+        &engine.evaluation_handler(),
+        &original.evaluation_handler()
+    ));
+    Snapshot::builder_for(table_url("table-without-dv-small"))
+        .with_cancellation_token(reads.token.clone() as CancellationTokenRef)
+        .build(&engine)
+        .unwrap();
+    let events = reads.events.lock().unwrap();
+    assert!(events.contains(&Read::Hint));
+    assert!(events.contains(&Read::List));
+    assert!(events.contains(&Read::Json));
+}
+
+#[test]
+fn metered_engine_preserves_operation_token() {
+    let token = Arc::new(TestCancellationToken::default());
+    let engine = MeteredDeltaEngine::new(Arc::new(KernelEngine::new(
+        &SyncEngine::new(),
+        token.clone(),
+    )));
+    let mut iter = start_read(&engine, Read::Json, ReadApi::Plain, None).unwrap();
+    token.cancel();
+    assert!(matches!(iter.next(), Some(Err(KernelError::Cancelled))));
+}
+
 #[test]
 fn nested_scope_uses_inner_operation_token_and_keeps_writes_unscoped() {
     let engine = SyncEngine::new();
@@ -414,13 +480,9 @@ fn nested_scope_uses_inner_operation_token_and_keeps_writes_unscoped() {
         .storage_handler()
         .put(&path, Bytes::from_static(b"data"), false)
         .unwrap();
-    assert!(matches!(
-        outer.storage_handler().head(&path),
-        Err(KernelError::Cancelled)
-    ));
+    assert!(matches!(outer.head(&path), Err(KernelError::Cancelled)));
     assert_eq!(
         engine
-            .storage_handler()
             .read_files(vec![(path.clone(), None)])
             .unwrap()
             .next()
@@ -439,13 +501,17 @@ fn snapshot_reads_keep_builder_token(
     #[case] table: &str,
     #[case] read: Read,
     #[values(false, true)] cancel: bool,
+    #[values(false, true)] bind_in_builder: bool,
 ) {
     let reads = RecordingReads::new(cancel.then_some(read));
     let engine = reads.engine();
     let token: CancellationTokenRef = reads.token.clone();
-    let result = Snapshot::builder_for(table_url(table))
-        .with_cancellation_token(token)
-        .build(&engine);
+    let builder = Snapshot::builder_for(table_url(table));
+    let result = if bind_in_builder {
+        builder.with_cancellation_token(token).build(&engine)
+    } else {
+        builder.build(&KernelEngine::new(&engine, token))
+    };
     if cancel {
         assert!(matches!(result, Err(KernelError::Cancelled)));
         assert_eq!(reads.events.lock().unwrap().last(), Some(&read));
@@ -466,6 +532,7 @@ fn incremental_reads_keep_builder_token(
     #[case] table: &str,
     #[case] read: Read,
     #[values(false, true)] cancel: bool,
+    #[values(false, true)] bind_in_builder: bool,
 ) {
     let reads = RecordingReads::new(cancel.then_some(read));
     let base = Snapshot::builder_for(table_url(table))
@@ -473,9 +540,14 @@ fn incremental_reads_keep_builder_token(
         .build(reads.inner.as_ref())
         .unwrap();
     let token: CancellationTokenRef = reads.token.clone();
-    let result = Snapshot::builder_from(base)
-        .with_cancellation_token(token)
-        .build(&reads.engine());
+    let builder = Snapshot::builder_from(base);
+    let result = if bind_in_builder {
+        builder
+            .with_cancellation_token(token)
+            .build(&reads.engine())
+    } else {
+        builder.build(&KernelEngine::new(&reads.engine(), token))
+    };
     if cancel {
         assert!(matches!(result, Err(KernelError::Cancelled)));
     } else {

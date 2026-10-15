@@ -4,7 +4,9 @@ use std::sync::Arc;
 
 #[cfg(feature = "declarative-plans")]
 use crate::plans::PlanExecutor;
-use crate::{Engine, EvaluationHandler, JsonHandler, ParquetHandler, StorageHandler};
+use crate::{
+    CancellationTokenRef, Engine, EvaluationHandler, JsonHandler, ParquetHandler, StorageHandler,
+};
 
 /// A test [`Engine`] that forwards every handler to `inner`, except those overridden via the
 /// `with_*` setters. Lets a test swap a single handler without re-typing the forwards for the
@@ -76,6 +78,11 @@ impl DelegatingEngine {
 }
 
 impl Engine for DelegatingEngine {
+    /// Preserves the wrapped engine's imperative read token.
+    fn cancellation_token(&self) -> Option<CancellationTokenRef> {
+        self.inner.cancellation_token()
+    }
+
     fn evaluation_handler(&self) -> Arc<dyn EvaluationHandler> {
         self.evaluation
             .clone()

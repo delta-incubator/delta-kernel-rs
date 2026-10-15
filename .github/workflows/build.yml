@@ -230,6 +230,9 @@ jobs:
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: build and lint with clippy
         run: cargo clippy --locked --benches --tests --all-features -- -D warnings
+      - name: verify engine I/O lint enforcement
+        if: runner.os == 'Linux' && runner.arch == 'X64'
+        run: python3 .github/scripts/test-engine-io-lints.py
       - name: lint without default features - packages which depend on kernel with features enabled
         run: cargo clippy-no-default-kernel-dependents
       - name: check without default features - kernel

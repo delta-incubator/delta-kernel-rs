@@ -13,6 +13,7 @@ use crate::actions::{
     Metadata, Protocol, ADD_FIELD, CDC_FIELD, COMMIT_INFO_NAME, METADATA_FIELD, PROTOCOL_FIELD,
     REMOVE_FIELD,
 };
+use crate::engine::EngineReadExt;
 use crate::engine_data::{GetData, TypedGetData};
 use crate::expressions::{column_name, ColumnName};
 use crate::path::{AsUrl, ParsedLogPath};
@@ -195,7 +196,6 @@ impl LogReplayScanner {
         // because all of the rows will be filtered by the predicate. Instead, we wait until
         // deletion vectors are resolved so that we can skip both actions in the pair.
         let mut action_iter = engine
-            .json_handler()
             .read_json_files(
                 slice::from_ref(&commit_file.location),
                 visitor_schema,
@@ -343,11 +343,8 @@ impl LogReplayScanner {
         let remove_dvs = Arc::new(remove_dvs);
 
         let schema = FileActionSelectionVisitor::schema();
-        let action_iter = engine.json_handler().read_json_files(
-            slice::from_ref(&commit_file.location),
-            schema.clone(),
-            None,
-        )?;
+        let action_iter =
+            engine.read_json_files(slice::from_ref(&commit_file.location), schema.clone(), None)?;
         let commit_version = commit_file
             .version
             .try_into()

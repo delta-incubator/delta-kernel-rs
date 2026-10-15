@@ -6,6 +6,7 @@ use url::Url;
 use crate::actions::visitors::InCommitTimestampVisitor;
 use crate::actions::{Metadata, Protocol, COMMIT_INFO_FIELD, METADATA_FIELD, PROTOCOL_FIELD};
 use crate::commit_range::with_version_context;
+use crate::engine::EngineReadExt;
 use crate::engine_data::RowVisitor as _;
 use crate::path::ParsedLogPath;
 use crate::schema::{lazy_schema_ref, SchemaRef};
@@ -127,7 +128,7 @@ impl CommitAction {
     /// `Protocol` / `Metadata` the commit carries onto `self` (a `None` extraction does NOT clear
     /// the inherited value), and return the commit's `inCommitTimestamp` if present.
     fn read_commit_header(&mut self, engine: &dyn Engine) -> KernelResult<Option<i64>> {
-        let json_iter = engine.json_handler().read_json_files(
+        let json_iter = engine.read_json_files(
             slice::from_ref(&self.log_path.location),
             HEADER_READ_SCHEMA.clone(),
             None,
@@ -218,7 +219,7 @@ impl CommitAction {
     /// Batches contain raw actions exactly as recorded in the commit JSON; no column-mapping
     /// translation is applied.
     pub fn get_actions(&self, engine: &dyn Engine) -> Result<FileDataReadResultIterator> {
-        engine.json_handler().read_json_files(
+        engine.read_json_files(
             slice::from_ref(&self.log_path.location),
             self.read_schema.clone(),
             None,

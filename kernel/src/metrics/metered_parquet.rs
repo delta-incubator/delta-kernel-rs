@@ -55,6 +55,10 @@ impl MeteredParquetHandler {
     }
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "Metering forwards handler calls and their explicit tokens."
+)]
 impl ParquetHandler for MeteredParquetHandler {
     fn read_parquet_files(
         &self,
@@ -107,6 +111,10 @@ impl ParquetHandler for MeteredParquetHandler {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "These tests exercise the handler contract directly."
+)]
 mod tests {
     use std::sync::Arc;
 

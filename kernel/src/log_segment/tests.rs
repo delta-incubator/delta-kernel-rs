@@ -61,6 +61,10 @@ use crate::{
 ///
 /// This function extracts any sidecar file references from the provided batch.
 /// Each sidecar file is read and an iterator of file action batches is returned.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "The test adapter exercises handler calls directly."
+)]
 fn process_sidecars(
     parquet_handler: Arc<dyn ParquetHandler>,
     log_root: Url,
@@ -232,6 +236,10 @@ fn collect_projected_adds(
 
 struct IgnorePredicateParquetHandler(Arc<dyn ParquetHandler>);
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "The test adapter exercises handler calls directly."
+)]
 impl ParquetHandler for IgnorePredicateParquetHandler {
     fn read_parquet_files(
         &self,
@@ -2987,6 +2995,7 @@ async fn for_timestamp_conversion_cases(#[case] case: TimestampConversionCase) {
         end_version,
         limit.map(|l| NonZero::new(l).unwrap()),
         staged_commit_log_paths(staged),
+        None,
     )
     .unwrap();
 
@@ -3008,8 +3017,14 @@ async fn for_timestamp_conversion_no_commit_files() {
     )
     .await;
 
-    let res =
-        LogSegment::for_timestamp_conversion(storage.as_ref(), log_root.clone(), 0, None, vec![]);
+    let res = LogSegment::for_timestamp_conversion(
+        storage.as_ref(),
+        log_root.clone(),
+        0,
+        None,
+        vec![],
+        None,
+    );
     assert!(matches!(res, Err(KernelError::EmptyLog)));
 }
 

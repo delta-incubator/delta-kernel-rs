@@ -154,6 +154,10 @@ impl SyncPlanExecutor {
         }
     }
 
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "Declarative execution uses its own handler contract."
+    )]
     fn execute_io(&self, op: IoOperation) -> KernelResult<PlanResult> {
         match op {
             IoOperation::FileListing { url } => {

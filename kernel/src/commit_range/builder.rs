@@ -133,6 +133,7 @@ impl CommitRangeBuilder {
                 start_version,
                 configured_end_version,
                 log_tail,
+                engine.cancellation_token().as_ref(),
             )?;
             let end_version = configured_end_version.unwrap_or(log_segment.end_version);
             let commit_files = log_segment

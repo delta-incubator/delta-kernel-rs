@@ -64,10 +64,7 @@ impl DvInfo {
     ) -> KernelResult<Option<RoaringTreemap>> {
         self.deletion_vector
             .as_ref()
-            .map(|dv_descriptor| {
-                let storage = engine.storage_handler();
-                dv_descriptor.read(storage, table_root)
-            })
+            .map(|dv_descriptor| dv_descriptor.read_with_engine(engine, table_root))
             .transpose()
     }
 
@@ -86,13 +83,9 @@ impl DvInfo {
         engine: &dyn Engine,
         table_root: &url::Url,
     ) -> Result<Option<Vec<u64>>> {
-        self.deletion_vector
-            .as_ref()
-            .map(|dv| {
-                let storage = engine.storage_handler();
-                dv.row_indexes(storage, table_root)
-            })
-            .transpose()
+        Ok(self
+            .get_treemap(engine, table_root)?
+            .map(|rows| rows.into_iter().collect()))
     }
 }
 

@@ -27,6 +27,7 @@ use crate::crc::{
     is_incremental_safe_operation, read_crc_file_or_none, size_to_u64, Crc, CrcDelta,
     FileSizeHistogram, FileStatsDelta,
 };
+use crate::engine::EngineReadExt;
 use crate::engine_data::{GetData, TypedGetData as _};
 use crate::metrics::ProtocolMetadataSource;
 use crate::path::ParsedLogPath;
@@ -271,10 +272,7 @@ impl LogSegment {
             .map(|c| c.location.clone())
             .collect();
         let mut acc = CrcReplayAccumulator::new(seed_histogram);
-        let batches =
-            engine
-                .json_handler()
-                .read_json_files(&locations, REPLAY_SCHEMA.clone(), None)?;
+        let batches = engine.read_json_files(&locations, REPLAY_SCHEMA.clone(), None)?;
 
         for batch_result in batches {
             // Transient visitor borrows the shared accumulator for the duration of the

@@ -19,6 +19,7 @@ use crate::actions::{Add, ADD_FIELD, ADD_NAME, REMOVE_FIELD, SIDECAR_FIELD};
 use crate::cancellation::{CancellableIterator, CancellationTokenRef};
 #[cfg(feature = "declarative-plans")]
 use crate::checkpoint::CheckpointShape;
+use crate::engine::EngineReadExt;
 use crate::engine_data::FilteredEngineData;
 use crate::expressions::{column_name, ColumnName, ExpressionRef, Predicate, PredicateRef};
 use crate::kernel_predicates::{
@@ -1460,7 +1461,7 @@ impl Scan {
                 // https://github.com/delta-io/delta-kernel-rs/issues/434 for more details.
                 //
                 // TODO(#860): we disable predicate pushdown until we support row indexes.
-                let read_result_iter = engine.parquet_handler().read_parquet_files(
+                let read_result_iter = engine.read_parquet_files(
                     &[meta],
                     physical_schema.clone(),
                     None,
@@ -1553,7 +1554,6 @@ pub fn selection_vector(
     descriptor: &DeletionVectorDescriptor,
     table_root: &Url,
 ) -> Result<Vec<bool>> {
-    let storage = engine.storage_handler();
-    let dv_treemap = descriptor.read(storage, table_root)?;
+    let dv_treemap = descriptor.read_with_engine(engine, table_root)?;
     Ok(deletion_treemap_to_bools(dv_treemap))
 }

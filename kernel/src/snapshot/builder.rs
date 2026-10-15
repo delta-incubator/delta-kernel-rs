@@ -405,7 +405,7 @@ impl<Mode> SnapshotBuilder<Mode> {
                     log_tail,
                     effective_version,
                     metric_context.clone(),
-                    None,
+                    engine.cancellation_token().as_ref(),
                 )?;
                 Snapshot::try_new_from_log_segment(
                     table_url,

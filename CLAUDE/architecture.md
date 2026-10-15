@@ -52,7 +52,7 @@ typed hint through a callback; connectors must copy any state retained after the
    builds validate and assemble the supplied state instead.
    The snapshot builder binds its optional cancellation token through `KernelEngine`, an owned
    adapter over the existing engine handlers. Discovery, CRC reads/reconstruction, and imperative
-   replay use the ordinary `Engine` APIs. Callers can also construct `KernelEngine` explicitly to
+   replay inherit the engine token. Callers can also construct `KernelEngine` explicitly to
    cover several calls, including subsequent metadata accessors, with one cancellation scope.
    Completed snapshots retain neither the adapter nor its token. Declarative plan execution
    uses the original executor unchanged.
@@ -138,6 +138,17 @@ handlers below and an optional `PlanExecutor` under the `declarative-plans` feat
 Metrics are emitted as tracing events and collected by tracing layers. A `DefaultEngine` (Arrow +
 `object_store` + Tokio) lives in `default-engine/src/`. Custom engines only need to replace
 specific handlers: they can reuse defaults for the rest.
+
+Imperative Kernel reads use the internal `EngineReadExt` helpers. These select an explicit read
+token or inherit `Engine::cancellation_token()` before calling the cancellation-aware handler
+method. `KernelEngine` binds the operation token and preserves the original handler objects;
+engine decorators forward the token accessor. Direct handler calls do not inherit the token.
+HEAD checks cancellation before the request, without interrupting an active request.
+
+`kernel/clippy.toml` rejects direct handler reads in Kernel code. Narrow exceptions cover handler
+defaults/decorators, handler tests, and storage-only compatibility APIs. Discovery callers pass
+the effective token into those storage-only APIs; engine-aware deletion-vector reads use the
+read helpers. Declarative execution uses its own executor contract.
 
 ## EngineData Trait
 

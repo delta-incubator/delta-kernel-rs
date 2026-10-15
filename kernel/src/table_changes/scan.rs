@@ -11,6 +11,7 @@ use super::resolve_dvs::{resolve_scan_file_dv, ResolvedCdfScanFile};
 use super::scan_file::scan_metadata_to_scan_file;
 use super::{CdfMode, TableChanges};
 use crate::actions::deletion_vector::split_vector;
+use crate::engine::EngineReadExt;
 use crate::scan::field_classifiers::CdfTransformFieldClassifier;
 use crate::scan::state_info::StateInfo;
 use crate::scan::{PartitionValuesOptions, PhysicalPredicate, StatsOptions};
@@ -292,10 +293,7 @@ fn read_scan_file(
         location,
     };
     // TODO(#860): we disable predicate pushdown until we support row indexes.
-    let read_result_iter =
-        engine
-            .parquet_handler()
-            .read_parquet_files(&[file], physical_schema, None)?;
+    let read_result_iter = engine.read_parquet_files(&[file], physical_schema, None)?;
 
     let result = read_result_iter.map(move |batch| -> KernelResult<_> {
         let batch = batch?;

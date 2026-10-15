@@ -4,6 +4,11 @@
 //! compile + link cycle. Each topic lives in its own submodule below and is
 //! organized by file/directory.
 
+#![allow(
+    clippy::disallowed_methods,
+    reason = "Integration tests exercise public handler APIs unavailable through internal helpers."
+)]
+
 #[macro_use]
 mod common;
 

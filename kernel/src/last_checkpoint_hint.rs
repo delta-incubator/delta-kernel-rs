@@ -411,6 +411,10 @@ impl LastCheckpointHint {
         fields(enable_call_frame),
         err
     )]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "Storage-only discovery receives its effective token from the engine caller."
+    )]
     pub(crate) fn try_read(
         storage: &dyn StorageHandler,
         log_root: &Url,

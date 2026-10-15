@@ -10,7 +10,9 @@
 use std::sync::Arc;
 
 use crate::metrics::{MeteredJsonHandler, MeteredParquetHandler, MeteredStorageHandler};
-use crate::{Engine, EvaluationHandler, JsonHandler, ParquetHandler, StorageHandler};
+use crate::{
+    CancellationTokenRef, Engine, EvaluationHandler, JsonHandler, ParquetHandler, StorageHandler,
+};
 
 /// Decorator over any [`Engine`] that meters its storage, JSON, and Parquet handlers.
 /// See module docs.
@@ -67,6 +69,11 @@ impl std::fmt::Debug for MeteredDeltaEngine {
 }
 
 impl Engine for MeteredDeltaEngine {
+    /// Preserves the wrapped engine's imperative read token.
+    fn cancellation_token(&self) -> Option<CancellationTokenRef> {
+        self.inner.cancellation_token()
+    }
+
     fn evaluation_handler(&self) -> Arc<dyn EvaluationHandler> {
         self.inner.evaluation_handler()
     }
@@ -85,6 +92,10 @@ impl Engine for MeteredDeltaEngine {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "These tests exercise the handler contract directly."
+)]
 mod tests {
     use std::sync::Arc;
 

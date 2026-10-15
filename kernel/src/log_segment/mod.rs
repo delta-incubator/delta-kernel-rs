@@ -17,6 +17,7 @@ use crate::actions::{
 use crate::actions::{CheckpointAction, CHECKPOINT_ACTION_FIELD};
 use crate::cancellation::CancellationTokenRef;
 use crate::committer::CatalogCommit;
+use crate::engine::EngineReadExt;
 use crate::expressions::ColumnName;
 use crate::last_checkpoint_hint::{HintAction, LastCheckpointHint};
 use crate::log_replay::ActionsBatch;
@@ -550,7 +551,14 @@ impl LogSegment {
         start_version: Version,
         end_version: impl Into<Option<Version>>,
     ) -> Result<Self> {
-        Self::for_table_changes_with_log_tail(storage, log_root, start_version, end_version, vec![])
+        Self::for_table_changes_with_log_tail(
+            storage,
+            log_root,
+            start_version,
+            end_version,
+            vec![],
+            None,
+        )
     }
 
     /// Constructs a table-changes log segment with a caller-provided authoritative commit tail.
@@ -560,6 +568,7 @@ impl LogSegment {
         start_version: Version,
         end_version: impl Into<Option<Version>>,
         log_tail: Vec<ParsedLogPath>,
+        cancellation_token: Option<&CancellationTokenRef>,
     ) -> KernelResult<Self> {
         let end_version = end_version.into();
         if let Some(end_version) = end_version {
@@ -577,7 +586,7 @@ impl LogSegment {
             log_tail,
             Some(start_version),
             end_version,
-            None, // table-changes does not thread a cancellation token
+            cancellation_token,
         )?;
         // - Here check that the start version is correct.
         // - [`LogSegment::try_new`] will verify that the `end_version` is correct if present.
@@ -605,6 +614,7 @@ impl LogSegment {
         end_version: Version,
         limit: Option<NonZero<usize>>,
         log_tail: Vec<ParsedLogPath>,
+        cancellation_token: Option<&CancellationTokenRef>,
     ) -> KernelResult<Self> {
         // Compute the version to start listing from.
         let start_from = limit
@@ -624,7 +634,7 @@ impl LogSegment {
             log_tail,
             start_from,
             Some(end_version),
-            None, // timestamp conversion does not thread a cancellation token
+            cancellation_token,
         )?;
         if listed_commits.ascending_commit_files().is_empty() {
             return Err(KernelError::EmptyLog);
@@ -918,7 +928,6 @@ impl LogSegment {
     ) -> Result<impl Iterator<Item = Result<ActionsBatch>> + Send> {
         let commit_files = self.find_commit_cover();
         let actions = engine
-            .json_handler()
             .read_json_files_with_cancellation(
                 &commit_files,
                 schema,
@@ -1127,7 +1136,6 @@ impl LogSegment {
         cancellation_token: Option<&CancellationTokenRef>,
     ) -> KernelResult<SchemaRef> {
         Ok(engine
-            .parquet_handler()
             .read_parquet_footer_with_cancellation(file, cancellation_token.cloned())?
             .schema)
     }
@@ -1281,16 +1289,14 @@ impl LogSegment {
         // where it *could* have been useful, but for now, we're keeping them separate.
         // If similar patterns start appearing elsewhere, we should reconsider that decision.
         let actions = match self.listed.checkpoint_parts.first() {
-            Some(parsed_log_path) if parsed_log_path.extension == "json" => {
-                engine.json_handler().read_json_files_with_cancellation(
+            Some(parsed_log_path) if parsed_log_path.extension == "json" => engine
+                .read_json_files_with_cancellation(
                     &checkpoint_file_meta,
                     augmented_checkpoint_read_schema.clone(),
                     meta_predicate.clone(),
                     cancellation_token.cloned(),
-                )?
-            }
+                )?,
             Some(parsed_log_path) if parsed_log_path.extension == "parquet" => engine
-                .parquet_handler()
                 .read_parquet_files_with_cancellation(
                     &checkpoint_file_meta,
                     augmented_checkpoint_read_schema.clone(),
@@ -1313,14 +1319,12 @@ impl LogSegment {
         // Both checkpoint and sidecar parquet files share the same `add.stats_parsed.*` column
         // layout, so we reuse the same predicate for row group skipping.
         let sidecar_batches = if !sidecar_files.is_empty() {
-            engine
-                .parquet_handler()
-                .read_parquet_files_with_cancellation(
-                    &sidecar_files,
-                    augmented_checkpoint_read_schema.clone(),
-                    meta_predicate,
-                    cancellation_token.cloned(),
-                )?
+            engine.read_parquet_files_with_cancellation(
+                &sidecar_files,
+                augmented_checkpoint_read_schema.clone(),
+                meta_predicate,
+                cancellation_token.cloned(),
+            )?
         } else {
             Box::new(std::iter::empty())
         };
@@ -1352,20 +1356,18 @@ impl LogSegment {
     ) -> KernelResult<Vec<FileMeta>> {
         // Read checkpoint with just the sidecar column
         let batches = match checkpoint.extension.as_str() {
-            "json" => engine.json_handler().read_json_files_with_cancellation(
+            "json" => engine.read_json_files_with_cancellation(
                 std::slice::from_ref(&checkpoint.location),
                 Self::sidecar_read_schema(),
                 None,
                 cancellation_token.cloned(),
             )?,
-            "parquet" => engine
-                .parquet_handler()
-                .read_parquet_files_with_cancellation(
-                    std::slice::from_ref(&checkpoint.location),
-                    Self::sidecar_read_schema(),
-                    None,
-                    cancellation_token.cloned(),
-                )?,
+            "parquet" => engine.read_parquet_files_with_cancellation(
+                std::slice::from_ref(&checkpoint.location),
+                Self::sidecar_read_schema(),
+                None,
+                cancellation_token.cloned(),
+            )?,
             _ => return Ok(vec![]),
         };
 

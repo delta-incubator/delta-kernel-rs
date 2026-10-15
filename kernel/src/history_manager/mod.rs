@@ -460,6 +460,7 @@ pub(crate) fn timestamp_to_version(
         snapshot.version(),
         listing_limit,
         staged_log_tail,
+        engine.cancellation_token().as_ref(),
     )
     .map_err(|e| {
         LogHistoryError::internal("failed to build log segment for timestamp conversion", e)
@@ -1052,6 +1053,7 @@ mod tests {
             snapshot.version(),
             None,
             vec![],
+            None,
         )
         .unwrap();
         (table, engine, snapshot, log_segment)
@@ -1167,6 +1169,7 @@ mod tests {
             snapshot.version(),
             None,
             vec![],
+            None,
         )
         .unwrap();
 

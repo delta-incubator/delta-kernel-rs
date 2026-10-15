@@ -14,6 +14,7 @@ use crate::actions::visitors::InCommitTimestampVisitor;
 use crate::actions::visitors::LastManifestCommitVisitor;
 #[cfg(feature = "adaptive-metadata-in-dev")]
 use crate::actions::{LastManifestCommit, COMMIT_INFO_NAME, LAST_MANIFEST_COMMIT_FIELD};
+use crate::engine::EngineReadExt;
 use crate::engine_data::RowVisitor;
 #[cfg(feature = "adaptive-metadata-in-dev")]
 use crate::schema::lazy_schema_ref;
@@ -451,10 +452,7 @@ impl ParsedLogPath<FileMeta> {
             self.is_commit(),
             KernelError::generic(format!("expected a commit file, got: {:?}", self.file_type))
         );
-        let mut actions =
-            engine
-                .json_handler()
-                .read_json_files(slice::from_ref(&self.location), schema, None)?;
+        let mut actions = engine.read_json_files(slice::from_ref(&self.location), schema, None)?;
         match actions.next() {
             Some(actions) => actions,
             None => Err(KernelError::generic("Commit file contains no actions")),

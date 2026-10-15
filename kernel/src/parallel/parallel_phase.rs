@@ -11,6 +11,7 @@ use std::sync::Arc;
 use delta_kernel_derive::internal_api;
 use itertools::Itertools;
 
+use crate::engine::EngineReadExt;
 use crate::log_replay::{ActionsBatch, ParallelLogReplayProcessor};
 use crate::scan::CHECKPOINT_READ_SCHEMA;
 use crate::schema::SchemaRef;
@@ -54,7 +55,6 @@ impl<P: ParallelLogReplayProcessor> ParallelPhase<P> {
         read_schema: SchemaRef,
     ) -> Result<Self> {
         let leaf_checkpoint_reader = engine
-            .parquet_handler()
             .read_parquet_files(&leaf_files, read_schema, None)?
             .map_ok(|batch| ActionsBatch::new(batch, false));
         Ok(Self {

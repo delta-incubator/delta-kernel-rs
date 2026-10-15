@@ -5,6 +5,7 @@ use std::sync::Arc;
 use tracing::instrument;
 
 use super::Crc;
+use crate::engine::EngineReadExt;
 use crate::metrics::events::CRC_READ_COMPLETED_SPAN;
 use crate::path::{AsUrl as _, ParsedLogPath};
 use crate::{Engine, KernelError, KernelResult};
@@ -25,7 +26,6 @@ pub(crate) fn try_read_crc_file(
 ) -> KernelResult<Crc> {
     let url = crc_path.location.as_url().clone();
     let data = engine
-        .storage_handler()
         .read_files(vec![(url, None)])?
         .next()
         .ok_or_else(|| KernelError::generic("CRC file read returned no data"))??;

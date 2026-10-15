@@ -350,7 +350,7 @@ impl Snapshot {
             Some(listing_start),
             requested_version,
             checkpoint_handling,
-            None,
+            engine.cancellation_token().as_ref(),
         )?;
 
         // NB: we need to check both checkpoints and commits since we filter commits at and below
