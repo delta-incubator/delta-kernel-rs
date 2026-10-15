@@ -180,9 +180,10 @@ build that batch from Parquet write results.
 > create-table transactions the operation is fixed to `"CREATE TABLE"` and
 > cannot be overridden.
 
-For schema evolution, call `snapshot.update_table(UpdateTableOperation::AlterTable, engine_info)`
-and add the schema changes. See
-[Altering a Table](../writing/alter_table.md).
+For a standalone schema change, use `UpdateTableOperation::AlterTable`. To evolve the schema during a
+data-changing write, use the data operation, such as `UpdateTableOperation::Write`, and queue the
+schema changes on the same builder. See
+[ALTER TABLE versus schema evolution](../writing/alter_table.md#alter-table-versus-schema-evolution).
 
 See [Quick Start: Writing a Table](../getting_started/quick_start_write.md) for a complete example.
 
