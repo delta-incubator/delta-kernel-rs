@@ -8,12 +8,16 @@ use rstest::rstest;
 use url::Url;
 
 use crate::actions::LOG_METADATA_SCHEMA;
+use crate::committer::FileSystemCommitter;
 use crate::engine::sync::SyncEngine;
 use crate::engine::test_delegating::DelegatingEngine;
 use crate::engine::{EngineReadExt, KernelEngine};
 use crate::metrics::MeteredDeltaEngine;
-use crate::schema::SchemaRef;
+use crate::object_store::memory::InMemory;
+use crate::schema::{schema_ref, ColumnName, SchemaRef};
 use crate::snapshot::IncrementalReplay;
+use crate::transaction::create_table::create_table;
+use crate::transaction::data_layout::DataLayout;
 use crate::unit_test_utils::TestCancellationToken;
 use crate::{
     CancellationTokenRef, Engine, EngineData, FileDataReadResultIterator, FileMeta, FileSize,
@@ -653,6 +657,71 @@ fn completed_snapshot_does_not_retain_build_scope() {
         )
         .build(&engine)
         .unwrap();
+}
+
+/// Lazy snapshot metadata that requires log replay when no CRC is available.
+#[derive(Clone, Copy, Debug)]
+enum MetadataRead {
+    Domain,
+    Transaction,
+    Clustering,
+}
+
+#[rstest]
+fn post_build_metadata_reads_inherit_operation_token(
+    #[values(
+        MetadataRead::Domain,
+        MetadataRead::Transaction,
+        MetadataRead::Clustering
+    )]
+    read: MetadataRead,
+    #[values(false, true)] cancelled: bool,
+) {
+    let original = SyncEngine::new_with_store(Arc::new(InMemory::new()));
+    create_table("memory:///", schema_ref! { nullable "id": INTEGER }, "test")
+        .with_domain_metadata("test", "value")
+        .with_transaction_id("app", 7)
+        .with_data_layout(DataLayout::Clustered {
+            columns: vec![ColumnName::new(["id"])],
+        })
+        .build(&original, Box::new(FileSystemCommitter::new()))
+        .unwrap()
+        .commit(&original)
+        .unwrap()
+        .unwrap_committed();
+    let mut reads = RecordingReads::new(None);
+    Arc::get_mut(&mut reads).unwrap().inner = Arc::new(original);
+    let engine = KernelEngine::new(&reads.engine(), reads.token.clone());
+    let snapshot = Snapshot::builder_for("memory:///").build(&engine).unwrap();
+    assert!(snapshot.crc_at_version().is_none());
+    reads.events.lock().unwrap().clear();
+    if cancelled {
+        reads.token.cancel();
+    }
+    let load = |engine: &dyn Engine| -> KernelResult<()> {
+        match read {
+            MetadataRead::Domain => assert_eq!(
+                snapshot.get_domain_metadata("test", engine)?,
+                Some("value".into())
+            ),
+            MetadataRead::Transaction => {
+                assert_eq!(snapshot.get_app_id_version("app", engine)?, Some(7));
+            }
+            MetadataRead::Clustering => assert_eq!(
+                snapshot.get_physical_clustering_columns(engine)?,
+                Some(vec![ColumnName::new(["id"])])
+            ),
+        }
+        Ok(())
+    };
+    let result = load(&engine);
+    if cancelled {
+        assert!(matches!(result, Err(KernelError::Cancelled)), "{result:?}");
+    } else {
+        result.unwrap();
+    }
+    assert_eq!(*reads.events.lock().unwrap(), [Read::Json]);
+    load(reads.inner.as_ref()).unwrap();
 }
 
 #[cfg(feature = "declarative-plans")]
