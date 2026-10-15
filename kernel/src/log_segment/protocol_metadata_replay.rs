@@ -54,25 +54,6 @@ impl LogSegment {
         engine: &dyn Engine,
         crc: Option<&Arc<Crc>>,
     ) -> KernelResult<PmResolution> {
-        #[allow(unused_mut)]
-        let mut resolution = self.resolve_protocol_metadata(engine, crc)?;
-        // The hint's checkpoint action is in no listed commit, yet it is the latest one, so replay
-        // and the CRC cannot supply it. Say hint 5, manifest commit 8, snapshot at 7: commit 7 may
-        // carry an older manifest commit's checkpoint action, but content roots never decrease, so
-        // that action describes a root at or before 5 and the hint's action still wins.
-        #[cfg(feature = "adaptive-metadata-in-dev")]
-        if let Some(action) = self.unlisted_amt_checkpoint_action() {
-            resolution.checkpoint_action =
-                CheckpointActionResolution::Captured(Arc::new(action.clone()));
-        }
-        Ok(resolution)
-    }
-
-    fn resolve_protocol_metadata(
-        &self,
-        engine: &dyn Engine,
-        crc: Option<&Arc<Crc>>,
-    ) -> KernelResult<PmResolution> {
         // Case 1: If CRC at target version, use it directly and exit early.
         if let Some(crc) = crc.filter(|c| c.version == self.end_version) {
             info!("P&M from CRC at target version {}", self.end_version);
@@ -157,12 +138,13 @@ impl LogSegment {
     fn replay_for_pm(&self, engine: &dyn Engine) -> KernelResult<PmCandidate> {
         #[allow(unused_mut)]
         let mut candidate = self.replay_log_for_pm(engine)?;
-        // The hint's checkpoint action is in no listed commit, so seed replay with its P&M. Say
-        // hint 5, manifest commit 8, snapshot at 7: if commits 5 to 7 change no protocol or
-        // metadata, the hint's action at 5 is the only source, while a metadata change in commit 6
-        // is newer and still wins.
+        // Seed replay with the embedded base action, as a checkpoint file's actions would be. Say
+        // hint 5, manifest commit 8, snapshot at 7: commits 6 and 7 are replayed, and the action at
+        // 5 supplies protocol and metadata unless they change a newer value. Content roots never
+        // decrease across manifest commits, so any checkpoint action in commits 6 or 7 comes from
+        // an earlier manifest commit with a root at or before 5, and the base action stays latest.
         #[cfg(feature = "adaptive-metadata-in-dev")]
-        if let Some(action) = self.unlisted_amt_checkpoint_action() {
+        if let Some(action) = self.amt_base().and_then(|base| base.checkpoint_action) {
             let version = action.version();
             candidate.protocol = newer(
                 Some((version, action.protocol().clone())),
@@ -172,6 +154,7 @@ impl LogSegment {
                 Some((version, action.metadata().clone())),
                 candidate.metadata,
             );
+            candidate.checkpoint = newer(Some((version, action.clone())), candidate.checkpoint);
         }
         Ok(candidate)
     }
