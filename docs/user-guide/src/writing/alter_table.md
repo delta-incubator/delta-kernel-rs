@@ -18,13 +18,14 @@ transaction. For example, you can add a nullable column and append rows containi
 column atomically.
 
 The `dataChange` flag indicates whether file actions change the table's logical data.
+The table shows typical workflows; the defaults follow the staged file batches, not the operation name.
 
 | Transaction Component | ALTER TABLE | SCHEMA EVOLUTION |
 |--------|------------------------|---------------------------------|
 | Operation | `UpdateTableOperation::AlterTable` | The data operation, such as `UpdateTableOperation::Write` |
 | Schema operations | Required | Queued alongside the data operation |
 | Data-file changes | None staged | Staged on the built transaction |
-| Default `dataChange` | `false` | `true` |
+| Default `dataChange` | `false` (no staged batches) | `true` (staged batches) |
 
 Both workflows use `UpdateTableTransactionBuilder`. You queue all schema operations before `build()`;
 Kernel validates and applies them during `build()`. You stage any data-file changes on the returned
