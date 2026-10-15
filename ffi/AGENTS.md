@@ -796,6 +796,10 @@ The setter consumes the builder on both success and error, returning its replace
 
 ## Read Flow
 
+Snapshot, commit-range, and incremental-scan FFI builders own their kernel builders and forward
+configuration calls immediately. Keep defaults and build-time validation in kernel. The fresh
+snapshot wrapper also retains the table root for validating snapshot-hint paths at the setter.
+
 ```
 get_default_engine() -> get_snapshot_builder() -> snapshot_builder_build() -> scan() -> scan_metadata() -> read + transform
 ```

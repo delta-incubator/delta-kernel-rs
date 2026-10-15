@@ -34,10 +34,11 @@
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
-use delta_kernel::incremental_scan::{IncrementalScanStream, IncrementalScanSummary};
+use delta_kernel::incremental_scan::{
+    IncrementalScanBuilder, IncrementalScanStream, IncrementalScanSummary,
+};
 use delta_kernel::log_replay::FileActionKey;
-use delta_kernel::snapshot::SnapshotRef;
-use delta_kernel::{KernelError, KernelResult, PredicateRef, Version};
+use delta_kernel::{KernelError, KernelResult, Version};
 use delta_kernel_ffi_macros::handle_descriptor;
 
 #[cfg(feature = "default-engine-base")]
@@ -58,9 +59,7 @@ use crate::{
 /// without building.
 pub struct FfiIncrementalScanBuilder {
     engine: Arc<dyn ExternEngine>,
-    target_snapshot: SnapshotRef,
-    base_version: Version,
-    predicate: Option<PredicateRef>,
+    kernel_builder: IncrementalScanBuilder,
 }
 
 /// An opaque handle with exclusive (Box-like) ownership of a [`FfiIncrementalScanBuilder`].
@@ -107,9 +106,7 @@ pub unsafe extern "C" fn snapshot_incremental_scan_builder(
     let engine = unsafe { engine.clone_as_arc() };
     Box::new(FfiIncrementalScanBuilder {
         engine,
-        target_snapshot,
-        base_version,
-        predicate: None,
+        kernel_builder: target_snapshot.incremental_scan_builder(base_version),
     })
     .into()
 }
@@ -143,7 +140,9 @@ fn incremental_scan_builder_with_predicate_impl(
     mut builder: FfiIncrementalScanBuilder,
     predicate: &mut EnginePredicate,
 ) -> KernelResult<Handle<ExclusiveIncrementalScanBuilder>> {
-    builder.predicate = Some(Arc::new(decode_engine_predicate(predicate)?));
+    builder.kernel_builder = builder
+        .kernel_builder
+        .with_predicate(Arc::new(decode_engine_predicate(predicate)?));
     Ok(Box::new(builder).into())
 }
 
@@ -176,11 +175,7 @@ fn incremental_scan_builder_build_impl(
     builder: FfiIncrementalScanBuilder,
 ) -> KernelResult<OptionalValue<Handle<SharedIncrementalScanStream>>> {
     let engine = builder.engine.engine();
-    let maybe_stream = builder
-        .target_snapshot
-        .incremental_scan_builder(builder.base_version)
-        .with_predicate(builder.predicate)
-        .build(engine.as_ref())?;
+    let maybe_stream = builder.kernel_builder.build(engine.as_ref())?;
     let handle = maybe_stream.map(|stream| {
         Arc::new(FfiIncrementalScanStream {
             stream: Mutex::new(Some(stream)),
@@ -854,8 +849,11 @@ mod tests {
 
     // A predicate applied through the builder prunes streamed live Adds by their `add.stats`:
     // `id > 25` drops the [0, 9] file and keeps the [20, 30] file. Removes are unaffected.
+    #[rstest::rstest]
     #[tokio::test]
-    async fn with_predicate_prunes_live_adds() -> Result<(), Box<dyn std::error::Error>> {
+    async fn with_predicate_prunes_live_adds(
+        #[values(false, true)] replace_unknown_column: bool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let (engine, snapshot) = setup_with_id_metadata(vec![[
             add_with_id_stats("low.parquet", 0, 9),
             add_with_id_stats("high.parquet", 20, 30),
@@ -865,6 +863,21 @@ mod tests {
 
         let builder = unsafe {
             snapshot_incremental_scan_builder(snapshot.shallow_copy(), 0, engine.shallow_copy())
+        };
+        let builder = if replace_unknown_column {
+            let mut predicate = EnginePredicate {
+                predicate: std::ptr::null_mut(),
+                visitor: visit_nonexistent_gt_25,
+            };
+            unsafe {
+                ok_or_panic(incremental_scan_builder_with_predicate(
+                    builder,
+                    engine.shallow_copy(),
+                    &mut predicate,
+                ))
+            }
+        } else {
+            builder
         };
         let mut predicate = EnginePredicate {
             predicate: std::ptr::null_mut(),
