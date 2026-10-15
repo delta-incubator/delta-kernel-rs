@@ -314,7 +314,7 @@ async fn test_commit_info_records_data_change_and_last_manifest_commit(
         .commit(&engine)?
         .unwrap_post_commit_snapshot();
     let commit_info = commit_info_at(&table_url, 1)?;
-    assert_eq!(commit_info["dataChange"], json!(false));
+    assert_eq!(commit_info["dataChange"], json!(data_change));
     assert!(commit_info.get("lastManifestCommit").is_none());
 
     // v2: root manifest commit records itself.
@@ -344,7 +344,7 @@ async fn test_commit_info_records_data_change_and_last_manifest_commit(
         .commit(&engine)?
         .unwrap_post_commit_snapshot();
     let commit_info = commit_info_at(&table_url, 3)?;
-    assert_eq!(commit_info["dataChange"], json!(false));
+    assert_eq!(commit_info["dataChange"], json!(data_change));
     assert_eq!(
         commit_info["lastManifestCommit"],
         expected_last_manifest_commit
