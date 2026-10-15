@@ -748,6 +748,8 @@ impl<STATE> Transaction<STATE, Imperative> {
     /// to add multiple batches.
     ///
     /// The expected schema for `add_metadata` is given by [`Transaction::add_files_schema`].
+    ///
+    /// TODO(#3553): Support writing clusteringProvider to AddFile actions.
     pub fn add_files(&mut self, add_metadata: Box<dyn EngineData>) {
         self.staged_data_changes
             .add_files_metadata
