@@ -107,7 +107,8 @@ fn commit_info_data_change_requires_a_data_changing_file_action(
     #[case] data_change: bool,
     #[case] expected: bool,
 ) -> Result<()> {
-    let (_engine, mut txn, _tempdir) = create_existing_table_txn()?;
+    let (_engine, mut txn, _tempdir) =
+        create_existing_table_txn_with(|builder| builder.with_data_change(data_change))?;
     txn.effective_table_config = adaptive_table_config();
     if stage_root_manifest {
         let file = dummy_root_manifest_file_meta(&txn);
@@ -116,7 +117,6 @@ fn commit_info_data_change_requires_a_data_changing_file_action(
     if stage_add_file {
         add_dummy_file(&mut txn);
     }
-    txn.data_change = data_change;
     assert_eq!(txn.commit_info_data_change(), expected);
     Ok(())
 }
