@@ -61,7 +61,7 @@ pub(crate) fn validate_file_type_feature_support(tc: &TableConfiguration) -> Ker
         require!(
             !schema_contains_file_type(&tc.logical_schema()),
             KernelError::unsupported(
-                "Table contains FILE columns but does not have the required 'fileType' feature in reader and writer features"
+                "Table contains FILE columns but does not have the required 'fileType' or 'fileType-preview' feature in reader and writer features"
             )
         );
     }
@@ -125,7 +125,7 @@ mod tests {
         };
         let protocol_without =
             Protocol::try_new_modern(TableFeature::EMPTY_LIST, TableFeature::EMPTY_LIST).unwrap();
-        let err_msg = "Table contains FILE columns but does not have the required 'fileType' feature in reader and writer features";
+        let err_msg = "Table contains FILE columns but does not have the required 'fileType' or 'fileType-preview' feature in reader and writer features";
 
         for (reader, writer) in [
             (TableFeature::FileType, TableFeature::FileType),
