@@ -3,24 +3,23 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::actions::{DomainMetadata, SetTransaction};
+use crate::actions::DomainMetadata;
 use crate::schema::SchemaRef;
 use crate::transaction::domain_metadata::validate_unique_domains;
-use crate::transaction::Transaction;
 use crate::utils::require;
 use crate::{EngineData, KernelError, Result};
 
 /// Shared transaction configuration collected before build.
 #[derive(Default)]
-pub(super) struct TransactionBuilderState {
-    pub(super) correlation_id: Option<Arc<str>>,
-    pub(super) operation_parameters: Option<HashMap<String, Option<String>>>,
-    pub(super) operation_metrics: Option<HashMap<String, Option<String>>>,
-    pub(super) engine_info: Option<String>,
-    pub(super) engine_commit_info: Option<(Box<dyn EngineData>, SchemaRef)>,
-    pub(super) transaction_ids: Vec<(String, i64)>,
-    pub(super) domain_metadata_additions: Vec<DomainMetadata>,
-    pub(super) data_change: Option<bool>,
+pub(in crate::transaction) struct TransactionBuilderState {
+    pub(in crate::transaction) correlation_id: Option<Arc<str>>,
+    pub(in crate::transaction) operation_parameters: Option<HashMap<String, Option<String>>>,
+    pub(in crate::transaction) operation_metrics: Option<HashMap<String, Option<String>>>,
+    pub(in crate::transaction) engine_info: String,
+    pub(in crate::transaction) engine_commit_info: Option<(Box<dyn EngineData>, SchemaRef)>,
+    pub(in crate::transaction) transaction_ids: Vec<(String, i64)>,
+    pub(in crate::transaction) domain_metadata_additions: Vec<DomainMetadata>,
+    pub(in crate::transaction) data_change: Option<bool>,
 }
 
 impl std::fmt::Debug for TransactionBuilderState {
@@ -41,14 +40,14 @@ impl std::fmt::Debug for TransactionBuilderState {
 impl TransactionBuilderState {
     pub(super) fn for_update_table(engine_info: String) -> Self {
         Self {
-            engine_info: Some(engine_info),
+            engine_info,
             ..Self::default()
         }
     }
 
     pub(super) fn for_create_table(engine_info: String) -> Self {
         Self {
-            engine_info: Some(engine_info),
+            engine_info,
             data_change: Some(true),
             ..Self::default()
         }
@@ -87,36 +86,5 @@ impl TransactionBuilderState {
         )?;
 
         Ok(())
-    }
-
-    /// Transfers builder intent into the transaction's commit configuration.
-    // TODO(#3149): Replace this helper with direct initialization of immutable transaction state.
-    pub(super) fn apply_to_transaction<S>(self, mut transaction: Transaction<S>) -> Transaction<S> {
-        let Self {
-            correlation_id,
-            operation_parameters,
-            operation_metrics,
-            engine_info,
-            engine_commit_info,
-            transaction_ids,
-            domain_metadata_additions,
-            data_change,
-        } = self;
-
-        transaction.correlation_id = correlation_id;
-        transaction.operation_parameters = operation_parameters;
-        transaction.operation_metrics = operation_metrics;
-        transaction.engine_info = engine_info;
-        transaction.engine_commit_info = engine_commit_info;
-        transaction.set_transactions = transaction_ids
-            .into_iter()
-            .map(|(app_id, version)| {
-                SetTransaction::new(app_id, version, Some(transaction.commit_timestamp))
-            })
-            .collect();
-        transaction.user_domain_metadata_additions = domain_metadata_additions;
-        transaction.infer_data_change = data_change.is_none();
-        transaction.data_change = data_change.unwrap_or(true);
-        transaction
     }
 }

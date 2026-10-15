@@ -20,8 +20,17 @@ use crate::common::write_utils::{
     get_simple_int_schema, validate_timestamp, validate_txn_id, ZERO_UUID,
 };
 
+#[rstest]
+#[case::write(UpdateTableOperation::Write, "WRITE")]
+#[case::custom(
+    UpdateTableOperation::Custom("CONNECTOR WRITE".to_string()),
+    "CONNECTOR WRITE"
+)]
 #[tokio::test]
 async fn test_commit_info_defaults_to_empty_parameters_and_omitted_metrics(
+    #[case] operation: UpdateTableOperation,
+    #[case] expected_operation: &str,
+    #[values("default engine", "")] engine_info: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // setup tracing
     let _ = tracing_subscriber::fmt::try_init();
@@ -35,7 +44,7 @@ async fn test_commit_info_defaults_to_empty_parameters_and_omitted_metrics(
         // create a transaction
         let txn = Snapshot::builder_for(table_url.clone())
             .build(&engine)?
-            .update_table(UpdateTableOperation::Write, "default engine")
+            .update_table(operation.clone(), engine_info)
             .build(&engine, Box::new(FileSystemCommitter::new()))?;
 
         // commit!
@@ -65,10 +74,10 @@ async fn test_commit_info_defaults_to_empty_parameters_and_omitted_metrics(
         let expected_commit = json!({
             "commitInfo": {
                 "timestamp": 0,
-                "operation": "WRITE",
+                "operation": expected_operation,
                 "kernelVersion": format!("v{}", env!("CARGO_PKG_VERSION")),
                 "operationParameters": {},
-                "engineInfo": "default engine",
+                "engineInfo": engine_info,
                 "txnId": ZERO_UUID,
             }
         });

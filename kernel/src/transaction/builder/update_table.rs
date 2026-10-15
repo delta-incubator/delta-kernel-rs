@@ -6,7 +6,6 @@ use super::state::TransactionBuilderState;
 use super::TransactionBuilder;
 use crate::committer::Committer;
 use crate::expressions::ColumnName;
-use crate::metrics::MetricId;
 use crate::schema::StructField;
 use crate::snapshot::SnapshotRef;
 use crate::table_configuration::TableConfiguration;
@@ -17,7 +16,7 @@ use crate::table_features::{
 use crate::transaction::domain_metadata::validate_unique_domains;
 use crate::transaction::schema_evolution::{evolve_table_config, SchemaOperation};
 use crate::transaction::{Transaction, UpdateTable, UpdateTableOperation};
-use crate::utils::{current_time_ms, PhantomType};
+use crate::utils::current_time_ms;
 use crate::{Engine, KernelError, KernelResult, Result};
 
 /// Configures DML and schema-changing DDL transactions against an existing table.
@@ -288,40 +287,21 @@ fn try_new_update_table(
         effective_table_config
     };
 
-    Ok(common_state.apply_to_transaction(Transaction {
-        span,
-        operation_id: MetricId::new(),
-        correlation_id: None,
+    Ok(Transaction {
         read_snapshot_opt: Some(read_snapshot),
-        effective_table_config,
-        should_emit_protocol: false,
         should_emit_metadata,
-        committer,
-        operation: operation.into(),
-        operation_parameters: None,
-        operation_metrics: None,
-        engine_info: None,
-        add_files_metadata: vec![],
-        remove_files_metadata: vec![],
-        set_transactions: vec![],
-        commit_timestamp,
-        user_domain_metadata_additions: vec![],
-        system_domain_metadata_additions: vec![],
-        provided_row_tracking_high_water_mark: None,
         user_domain_removals: domain_metadata_removals,
-        data_change: true,
-        infer_data_change: false,
-        column_defaults_acknowledged: false,
-        row_tracking_preservation_acknowledged: false,
-        engine_commit_info: None,
         is_blind_append,
-        dv_matched_files: vec![],
-        num_dv_updates: 0,
-        #[cfg(feature = "adaptive-metadata-in-dev")]
-        manifest_write: None,
         physical_clustering_columns: clustering_columns,
-        _state: PhantomType::default(),
-    }))
+        ..Transaction::new(
+            common_state,
+            effective_table_config,
+            committer,
+            operation.into(),
+            span,
+            commit_timestamp,
+        )
+    })
 }
 
 fn apply_schema_changes(
@@ -379,7 +359,7 @@ mod tests {
             .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?;
 
         assert_eq!(transaction.operation, operation.into());
-        assert_eq!(transaction.engine_info.as_deref(), Some("test-engine"));
+        assert_eq!(transaction.engine_info, "test-engine");
         assert_eq!(
             transaction.operation_parameters.as_ref().unwrap()["mode"].as_deref(),
             Some("Append")
@@ -389,6 +369,11 @@ mod tests {
             Some("3")
         );
         assert_eq!(transaction.set_transactions[0].app_id, "app");
+        assert_eq!(transaction.set_transactions[0].version, 7);
+        assert_eq!(
+            transaction.set_transactions[0].last_updated,
+            Some(transaction.commit_timestamp)
+        );
         assert!(transaction.data_change);
         Ok(())
     }
@@ -409,7 +394,7 @@ mod tests {
             .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?;
 
         assert_eq!(transaction.operation, UpdateTableOperation::Delete.into());
-        assert_eq!(transaction.engine_info.as_deref(), Some("second-engine"));
+        assert_eq!(transaction.engine_info, "second-engine");
         assert!(transaction.correlation_id.is_none());
         let parameters = transaction.operation_parameters.as_ref().unwrap();
         assert_eq!(parameters.len(), 1);

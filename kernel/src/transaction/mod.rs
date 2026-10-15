@@ -71,6 +71,7 @@ pub mod data_layout;
 pub(crate) mod data_layout;
 
 pub use builder::update_table::UpdateTableTransactionBuilder;
+use builder::TransactionBuilderState;
 pub use builder::{TransactionBuilder, TransactionType};
 use commit_info::collect_operation_metadata;
 mod bound_write_context;
@@ -278,7 +279,7 @@ pub struct Transaction<S = UpdateTable> {
     operation: CommitOperation,
     operation_parameters: Option<HashMap<String, Option<String>>>,
     operation_metrics: Option<HashMap<String, Option<String>>>,
-    engine_info: Option<String>,
+    engine_info: String,
     engine_commit_info: Option<(Box<dyn EngineData>, SchemaRef)>,
     add_files_metadata: Vec<Box<dyn EngineData>>,
     remove_files_metadata: Vec<FilteredEngineData>,
@@ -351,9 +352,8 @@ impl<S> std::fmt::Debug for Transaction<S> {
             None => "create_table".to_string(),
         };
         f.write_str(&format!(
-            "Transaction {{ read_snapshot version: {}, engine_info: {} }}",
-            version_info,
-            self.engine_info.is_some()
+            "Transaction {{ read_snapshot version: {}, engine_info: {:?} }}",
+            version_info, self.engine_info
         ))
     }
 }
@@ -760,6 +760,59 @@ struct NonfileCommitActions {
 }
 
 impl<S> Transaction<S> {
+    /// Initializes shared transaction fields from builder intent and the supplied table
+    /// configuration, committer, operation, span, and timestamp. Builders fill table-specific
+    /// fields via struct update before returning the transaction.
+    fn new(
+        common_state: TransactionBuilderState,
+        effective_table_config: TableConfiguration,
+        committer: Box<dyn Committer>,
+        operation: CommitOperation,
+        span: tracing::Span,
+        commit_timestamp: i64,
+    ) -> Self {
+        let set_transactions = common_state
+            .transaction_ids
+            .into_iter()
+            .map(|(app_id, version)| SetTransaction::new(app_id, version, Some(commit_timestamp)))
+            .collect();
+
+        Self {
+            span,
+            operation_id: MetricId::new(),
+            correlation_id: common_state.correlation_id,
+            read_snapshot_opt: None,
+            effective_table_config,
+            should_emit_protocol: false,
+            should_emit_metadata: false,
+            committer,
+            operation,
+            operation_parameters: common_state.operation_parameters,
+            operation_metrics: common_state.operation_metrics,
+            engine_info: common_state.engine_info,
+            engine_commit_info: common_state.engine_commit_info,
+            add_files_metadata: vec![],
+            remove_files_metadata: vec![],
+            set_transactions,
+            commit_timestamp,
+            user_domain_metadata_additions: common_state.domain_metadata_additions,
+            system_domain_metadata_additions: vec![],
+            provided_row_tracking_high_water_mark: None,
+            user_domain_removals: vec![],
+            data_change: common_state.data_change.unwrap_or(true),
+            infer_data_change: common_state.data_change.is_none(),
+            column_defaults_acknowledged: false,
+            row_tracking_preservation_acknowledged: false,
+            is_blind_append: false,
+            dv_matched_files: vec![],
+            num_dv_updates: 0,
+            #[cfg(feature = "adaptive-metadata-in-dev")]
+            manifest_write: None,
+            physical_clustering_columns: None,
+            _state: PhantomType::default(),
+        }
+    }
+
     /// Determines the commit type based on whether this is a create-table operation and whether
     /// the table is catalog-managed.
     fn determine_commit_type(
@@ -1184,7 +1237,7 @@ impl<S> Transaction<S> {
             self.commit_timestamp,
             in_commit_timestamp,
             Some(self.operation.to_string()),
-            self.engine_info.clone(),
+            Some(self.engine_info.clone()),
             self.is_blind_append,
         );
         if let Some(operation_parameters) = self.operation_parameters.clone() {
@@ -2078,6 +2131,182 @@ mod tests {
         CapturingReporter,
     };
     use crate::{EvaluationHandler, ResultIterator, Snapshot};
+
+    #[rstest]
+    #[case::inferred(None, true, true)]
+    #[case::explicit_true(Some(true), true, false)]
+    #[case::explicit_false(Some(false), false, false)]
+    fn transaction_constructor_initializes_all_defaults(
+        #[case] requested_data_change: Option<bool>,
+        #[case] expected_data_change: bool,
+        #[case] expected_infer_data_change: bool,
+        #[values("", "test-engine")] expected_engine_info: &str,
+    ) -> Result<()> {
+        let (_engine, snapshot, _tempdir) = load_test_table("table-without-dv-small")?;
+        let _guard = tracing::subscriber::set_default(tracing_subscriber::registry());
+        let expected_span = tracing::info_span!("transaction_constructor_defaults");
+        assert!(expected_span.id().is_some());
+        let expected_commit_timestamp = 1234;
+
+        let transaction = Transaction::<UpdateTable>::new(
+            TransactionBuilderState {
+                engine_info: expected_engine_info.into(),
+                data_change: requested_data_change,
+                ..Default::default()
+            },
+            snapshot.table_configuration().clone(),
+            Box::new(FileSystemCommitter::new()),
+            UpdateTableOperation::Write.into(),
+            expected_span.clone(),
+            expected_commit_timestamp,
+        );
+        let Transaction {
+            span,
+            operation_id,
+            correlation_id,
+            read_snapshot_opt,
+            effective_table_config,
+            should_emit_protocol,
+            should_emit_metadata,
+            committer,
+            operation,
+            operation_parameters,
+            operation_metrics,
+            engine_info,
+            engine_commit_info,
+            add_files_metadata,
+            remove_files_metadata,
+            set_transactions,
+            commit_timestamp,
+            user_domain_metadata_additions,
+            system_domain_metadata_additions,
+            provided_row_tracking_high_water_mark,
+            user_domain_removals,
+            data_change,
+            infer_data_change,
+            column_defaults_acknowledged,
+            row_tracking_preservation_acknowledged,
+            is_blind_append,
+            dv_matched_files,
+            num_dv_updates,
+            #[cfg(feature = "adaptive-metadata-in-dev")]
+            manifest_write,
+            physical_clustering_columns,
+            _state: _,
+        } = transaction;
+
+        assert_eq!(span.id(), expected_span.id());
+        assert_ne!(operation_id, MetricId::nil());
+        assert!(correlation_id.is_none());
+        assert!(read_snapshot_opt.is_none());
+        assert_eq!(&effective_table_config, snapshot.table_configuration());
+        assert!(!should_emit_protocol);
+        assert!(!should_emit_metadata);
+        assert!(!committer.is_catalog_committer());
+        assert_eq!(operation, UpdateTableOperation::Write.into());
+        assert!(operation_parameters.is_none());
+        assert!(operation_metrics.is_none());
+        assert_eq!(engine_info, expected_engine_info);
+        assert!(engine_commit_info.is_none());
+        assert!(add_files_metadata.is_empty());
+        assert!(remove_files_metadata.is_empty());
+        assert!(set_transactions.is_empty());
+        assert_eq!(commit_timestamp, expected_commit_timestamp);
+        assert!(user_domain_metadata_additions.is_empty());
+        assert!(system_domain_metadata_additions.is_empty());
+        assert!(provided_row_tracking_high_water_mark.is_none());
+        assert!(user_domain_removals.is_empty());
+        assert_eq!(data_change, expected_data_change);
+        assert_eq!(infer_data_change, expected_infer_data_change);
+        assert!(!column_defaults_acknowledged);
+        assert!(!row_tracking_preservation_acknowledged);
+        assert!(!is_blind_append);
+        assert!(dv_matched_files.is_empty());
+        assert_eq!(num_dv_updates, 0);
+        #[cfg(feature = "adaptive-metadata-in-dev")]
+        assert!(manifest_write.is_none());
+        assert!(physical_clustering_columns.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn transaction_constructor_generates_unique_operation_ids() -> Result<()> {
+        let (_engine, snapshot, _tempdir) = load_test_table("table-without-dv-small")?;
+        let first = Transaction::<UpdateTable>::new(
+            TransactionBuilderState::default(),
+            snapshot.table_configuration().clone(),
+            Box::new(FileSystemCommitter::new()),
+            UpdateTableOperation::Write.into(),
+            tracing::Span::none(),
+            1234,
+        );
+        let second = Transaction::<UpdateTable>::new(
+            TransactionBuilderState::default(),
+            snapshot.table_configuration().clone(),
+            Box::new(FileSystemCommitter::new()),
+            UpdateTableOperation::Write.into(),
+            tracing::Span::none(),
+            1234,
+        );
+
+        assert_ne!(first.operation_id, second.operation_id);
+        Ok(())
+    }
+
+    #[test]
+    fn transaction_constructor_preserves_shared_intent() -> Result<()> {
+        let (_engine, snapshot, _tempdir) = load_test_table("table-without-dv-small")?;
+        let expected_parameters = HashMap::from([("mode".into(), Some("Create".into()))]);
+        let expected_metrics = HashMap::from([("numFiles".into(), Some("3".into()))]);
+        let expected_domains = vec![DomainMetadata::new("app.domain".into(), "{}".into())];
+        let expected_commit_info_schema = schema_ref! { nullable "tag": STRING };
+        let commit_info = string_array_to_engine_data(StringArray::from(vec!["connector-tag"]));
+        let expected_commit_info = std::ptr::from_ref(commit_info.as_ref());
+        let expected_commit_timestamp = 5678;
+
+        let transaction = Transaction::<CreateTable>::new(
+            TransactionBuilderState {
+                correlation_id: Some("correlation-id".into()),
+                operation_parameters: Some(expected_parameters.clone()),
+                operation_metrics: Some(expected_metrics.clone()),
+                engine_info: "connector/1.0".into(),
+                engine_commit_info: Some((commit_info, expected_commit_info_schema.clone())),
+                transaction_ids: vec![("app-one".into(), 7), ("app-two".into(), 8)],
+                domain_metadata_additions: expected_domains.clone(),
+                data_change: Some(false),
+            },
+            snapshot.table_configuration().clone(),
+            Box::new(MockCatalogCommitter),
+            CommitOperation::CreateTable,
+            tracing::Span::none(),
+            expected_commit_timestamp,
+        );
+
+        assert_eq!(transaction.operation, CommitOperation::CreateTable);
+        assert_eq!(transaction.engine_info, "connector/1.0");
+        assert_eq!(
+            transaction.correlation_id.as_deref(),
+            Some("correlation-id")
+        );
+        assert_eq!(transaction.operation_parameters, Some(expected_parameters));
+        assert_eq!(transaction.operation_metrics, Some(expected_metrics));
+        assert_eq!(transaction.user_domain_metadata_additions, expected_domains);
+        assert!(transaction.committer.is_catalog_committer());
+        assert_eq!(transaction.commit_timestamp, expected_commit_timestamp);
+        assert_eq!(
+            transaction.set_transactions,
+            vec![
+                SetTransaction::new("app-one".into(), 7, Some(expected_commit_timestamp)),
+                SetTransaction::new("app-two".into(), 8, Some(expected_commit_timestamp)),
+            ]
+        );
+        let (commit_info, commit_info_schema) = transaction.engine_commit_info.unwrap();
+        assert!(std::ptr::eq(expected_commit_info, commit_info.as_ref()));
+        assert_eq!(commit_info_schema, expected_commit_info_schema);
+        assert!(!transaction.data_change);
+        assert!(!transaction.infer_data_change);
+        Ok(())
+    }
 
     impl Transaction {
         /// Set clustering columns for testing purposes without needing a table

@@ -11,7 +11,7 @@ pub mod update_table;
 
 use std::sync::Arc;
 
-use self::state::TransactionBuilderState;
+pub(super) use self::state::TransactionBuilderState;
 use crate::actions::DomainMetadata;
 use crate::schema::SchemaRef;
 use crate::transaction::commit_info::collect_operation_metadata;
@@ -218,10 +218,7 @@ mod tests {
         let builder = TransactionBuilder::<CustomType>::new("test-engine");
         let builder = configure_shared_setters(builder);
 
-        assert_eq!(
-            builder.common_state.engine_info.as_deref(),
-            Some("test-engine")
-        );
+        assert_eq!(builder.common_state.engine_info, "test-engine");
         assert_eq!(
             builder.common_state.correlation_id.as_deref(),
             Some("correlation")
