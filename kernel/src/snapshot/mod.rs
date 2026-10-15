@@ -65,6 +65,19 @@ pub use crate::error::SnapshotHintError;
 /// A shared, thread-safe reference to a [`Snapshot`].
 pub type SnapshotRef = Arc<Snapshot>;
 
+/// Statistics for the commit files selected to replay a snapshot's log segment.
+///
+/// Includes published and staged commits, and selected log compactions in place of the commits
+/// they cover. Excludes checkpoints, sidecars, CRCs, and commits retained only for timestamp
+/// lookup.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LogSegmentStats {
+    /// Number of selected commit files, counting each selected compaction as one file.
+    pub num_commit_files: u64,
+    /// Sum of the selected commit file sizes in bytes.
+    pub total_commit_file_bytes: u64,
+}
+
 /// Result of attempting to write a version checksum (CRC) file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChecksumWriteResult {
@@ -495,6 +508,18 @@ impl Snapshot {
     // ============================================================================
     // Field accessors and state queries
     // ============================================================================
+
+    /// Returns statistics for this snapshot's selected replay commit files without I/O.
+    ///
+    /// Uses retained file metadata regardless of whether replay has run or a CRC is available.
+    /// Returns zero counts and bytes when a checkpoint covers the entire snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the total commit file size exceeds [`u64::MAX`].
+    pub fn log_segment_stats(&self) -> KernelResult<LogSegmentStats> {
+        self.log_segment.stats()
+    }
 
     /// Captures retained snapshot state as an owned hint without engine I/O.
     ///
@@ -2932,5 +2957,50 @@ mod tests {
         let mut new_log_segment = baseline.log_segment().clone();
         mutate(&mut new_log_segment.listed, &new_log_segment.log_root);
         Snapshot::new(new_log_segment, baseline.table_configuration().clone()).unwrap()
+    }
+
+    #[rstest]
+    fn log_segment_stats_survives_snapshot_hint_and_incremental_update(
+        #[values(None, Some(1), Some(3))] checkpoint: Option<u64>,
+        #[values(false, true)] with_crc: bool,
+    ) {
+        let mut log_state = LogState::with_latest_version(3).maybe_with_checkpoint_at(checkpoint);
+        if with_crc {
+            log_state = log_state.with_crc_at([3]);
+        }
+        let table = TestTableBuilder::new()
+            .with_log_state(log_state)
+            .build()
+            .unwrap();
+        let engine = SyncEngine::new_with_store(table.store().clone());
+        let snapshot = Snapshot::builder_for(table.table_root())
+            .build(&engine)
+            .unwrap();
+        let first_commit = checkpoint.map_or(0, |v| v + 1);
+        let expected = LogSegmentStats {
+            num_commit_files: 4 - first_commit,
+            total_commit_file_bytes: (first_commit..=3)
+                .map(|v| {
+                    let path = delta_path_for_version(v, "json");
+                    futures::executor::block_on(table.store().head(&path))
+                        .unwrap()
+                        .size
+                })
+                .sum(),
+        };
+        assert_eq!(snapshot.log_segment_stats().unwrap(), expected);
+
+        let hinted = Snapshot::builder_for(table.table_root())
+            .with_snapshot_hint(snapshot.to_snapshot_hint().unwrap())
+            .build(&engine)
+            .unwrap();
+        assert_eq!(hinted.log_segment_stats().unwrap(), expected);
+
+        let earlier = Snapshot::builder_for(table.table_root())
+            .at_version(0)
+            .build(&engine)
+            .unwrap();
+        let updated = Snapshot::builder_from(earlier).build(&engine).unwrap();
+        assert_eq!(updated.log_segment_stats().unwrap(), expected);
     }
 }

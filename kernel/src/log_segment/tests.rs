@@ -311,6 +311,105 @@ fn staged_commit_log_paths(versions: &[Version]) -> Vec<ParsedLogPath> {
         .collect()
 }
 
+#[rstest]
+#[case::empty(vec![], false, Some(0))]
+#[case::version_zero(vec![0], false, Some(0))]
+#[case::different_sizes(vec![7, 13, 29], false, Some(49))]
+#[case::staged_and_published(vec![7, 13, 29], true, Some(49))]
+#[case::unsigned_total(vec![i64::MAX as u64, 1], false, Some(1 << 63))]
+#[case::maximum_total(vec![u64::MAX, 0], false, Some(u64::MAX))]
+#[case::overflow(vec![u64::MAX, 1], false, None)]
+fn log_segment_stats_counts_only_replay_commits(
+    #[case] sizes: Vec<u64>,
+    #[case] staged: bool,
+    #[case] expected_bytes: Option<u64>,
+) {
+    let commits: Vec<_> = sizes
+        .iter()
+        .enumerate()
+        .map(|(version, size)| {
+            let path = if staged && version > 0 {
+                staged_commit_path_for_version(version as u64)
+            } else {
+                delta_path_for_version(version as u64, "json")
+            };
+            create_log_path_with_size(&format!("memory:///{path}"), *size)
+        })
+        .collect();
+    let checkpoint_only = commits.is_empty();
+    let latest_commit_file = commits.last().cloned().unwrap_or_else(|| {
+        create_log_path_with_size("memory:///_delta_log/00000000000000000000.json", u64::MAX)
+    });
+    let segment = LogSegment {
+        end_version: sizes.len().saturating_sub(1) as u64,
+        checkpoint_version: checkpoint_only.then_some(0),
+        log_root: Url::parse("memory:///_delta_log/").unwrap(),
+        last_checkpoint_metadata: None,
+        listed: LogSegmentFiles {
+            ascending_commit_files: commits,
+            checkpoint_parts: if checkpoint_only {
+                vec![create_log_path_with_size(
+                    "memory:///_delta_log/00000000000000000000.checkpoint.parquet",
+                    u64::MAX,
+                )]
+            } else {
+                vec![]
+            },
+            latest_crc_file: Some(create_log_path_with_size(
+                "memory:///_delta_log/00000000000000000000.crc",
+                u64::MAX,
+            )),
+            latest_commit_file: Some(latest_commit_file),
+            ..Default::default()
+        },
+    };
+    match expected_bytes {
+        Some(total_commit_file_bytes) => assert_eq!(
+            segment.stats().unwrap(),
+            LogSegmentStats {
+                num_commit_files: sizes.len() as u64,
+                total_commit_file_bytes,
+            }
+        ),
+        None => assert_result_error_with_message(segment.stats(), "commit file size overflow"),
+    }
+}
+
+#[test]
+fn log_segment_stats_uses_selected_compactions() {
+    let segment = LogSegment {
+        end_version: 3,
+        checkpoint_version: None,
+        log_root: Url::parse("memory:///_delta_log/").unwrap(),
+        last_checkpoint_metadata: None,
+        listed: LogSegmentFiles {
+            ascending_commit_files: (0..=3)
+                .map(|v| {
+                    create_log_path_with_size(&format!("memory:///_delta_log/{v:020}.json"), 10)
+                })
+                .collect(),
+            ascending_compaction_files: vec![
+                create_log_path_with_size(
+                    "memory:///_delta_log/00000000000000000001.00000000000000000002.compacted.json",
+                    7,
+                ),
+                create_log_path_with_size(
+                    "memory:///_delta_log/00000000000000000001.00000000000000000003.compacted.json",
+                    12,
+                ),
+            ],
+            ..Default::default()
+        },
+    };
+    assert_eq!(
+        segment.stats().unwrap(),
+        LogSegmentStats {
+            num_commit_files: 2,
+            total_commit_file_bytes: 22,
+        }
+    );
+}
+
 /// Gets the file size from the store for use in FileMeta
 async fn get_file_size(store: &Arc<InMemory>, path: &str) -> u64 {
     let object_meta = store.head(&Path::from(path)).await.unwrap();

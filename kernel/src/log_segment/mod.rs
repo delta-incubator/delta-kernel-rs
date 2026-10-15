@@ -31,6 +31,7 @@ use crate::path::{LogPathFileType, ParsedLogPath};
 use crate::plans::ir::nodes::{FileType, ScanFile};
 use crate::schema::compare::SchemaComparison;
 use crate::schema::{lazy_schema_ref, DataType, SchemaRef, StructField, StructType, ToSchema as _};
+use crate::snapshot::LogSegmentStats;
 use crate::utils::require;
 #[cfg(feature = "adaptive-metadata-in-dev")]
 use crate::EngineData;
@@ -249,6 +250,27 @@ fn combine_checkpoint_predicates(
 }
 
 impl LogSegment {
+    /// Returns selected replay commit file statistics, failing if the byte sum overflows.
+    pub(crate) fn stats(&self) -> KernelResult<LogSegmentStats> {
+        let selected;
+        let paths = if self.listed.ascending_compaction_files.is_empty() {
+            &self.listed.ascending_commit_files
+        } else {
+            selected = self.find_commit_cover_paths();
+            &selected
+        };
+        paths
+            .iter()
+            .try_fold(LogSegmentStats::default(), |mut stats, path| {
+                stats.total_commit_file_bytes = stats
+                    .total_commit_file_bytes
+                    .checked_add(path.location.size)
+                    .ok_or_else(|| KernelError::generic("Log segment commit file size overflow"))?;
+                stats.num_commit_files += 1;
+                Ok(stats)
+            })
+    }
+
     /// Creates a LogSegment for a newly created table at version 0 from a single commit file.
     ///
     /// Normal log segments are built by listing files from storage and replaying them. For CREATE
