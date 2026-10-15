@@ -464,6 +464,7 @@ impl CheckpointWriter {
         let mut processor = ActionReconciliationProcessor::new(
             self.deleted_file_retention_timestamp()?,
             self.get_transaction_expiration_timestamp()?,
+            self.snapshot.table_configuration().dv_normalization_root(),
         );
         let checkpoint_data = actions
             .map(move |batch| processor.process_actions_batch(batch?))

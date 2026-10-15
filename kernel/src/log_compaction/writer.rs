@@ -126,6 +126,7 @@ impl LogCompactionWriter {
         let mut processor = ActionReconciliationProcessor::new(
             min_file_retention_timestamp_millis,
             self.get_transaction_expiration_timestamp()?,
+            self.snapshot.table_configuration().dv_normalization_root(),
         );
 
         // Process actions using the same iterator pattern as checkpoints
