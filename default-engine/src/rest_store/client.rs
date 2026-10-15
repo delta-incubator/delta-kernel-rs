@@ -96,8 +96,10 @@ pub fn build_rest_client(opts: &RestClientOptions) -> ObjectStoreResult<Client> 
     {
         builder = builder.use_rustls_tls();
         if opts.allow_invalid_hostnames {
-            // reqwest's hostname-only verifier requires explicit roots instead of its platform
-            // verifier. Add the caller's CA certificate during mTLS configuration below.
+            // reqwest's rustls backend requires tls_certs_only(...) when
+            // tls_danger_accept_invalid_hostnames(true) is set; otherwise build() fails.
+            // This selects its webpki verifier instead of the platform verifier, so load system
+            // roots explicitly to keep validating the server's certificate chain.
             let roots = hostname_bypass_roots(
                 rustls_native_certs::load_native_certs(),
                 opts.ca_path.is_some(),
@@ -151,6 +153,8 @@ pub fn build_rest_client(opts: &RestClientOptions) -> ObjectStoreResult<Client> 
     builder.build().map_err(generic_error)
 }
 
+// Returns system roots only. has_ca_certificate permits an empty result because configure_mtls
+// reads ca_path and appends that CA to the same builder before build().
 #[cfg(feature = "rustls")]
 fn hostname_bypass_roots(
     roots: rustls_native_certs::CertificateResult,
