@@ -804,6 +804,8 @@ Snapshot builder API (`ffi/src/lib.rs` and `ffi/src/snapshot_hint/mod.rs`):
 - `get_snapshot_builder(path, engine)` -- fresh snapshot from a table path
 - `get_snapshot_builder_from(old_snapshot, engine)` -- incremental update reusing an existing snapshot (avoids re-reading the log)
 - `snapshot_builder_with_version(builder, version)` -- optional: pin to a specific version
+- `snapshot_builder_with_incremental_crc_replay(builder, mode)` -- optional: advance a stale CRC
+  within a commit limit or without a limit; defaults to disabled for fresh and incremental builds
 - `snapshot_builder_with_log_tail(builder, log_tail)` -- optional: set log tail (for catalog-managed tables)
 - `snapshot_builder_with_max_catalog_version(builder, version)` -- optional: set max catalog version (for catalog-managed tables)
 - `snapshot_builder_with_snapshot_hint(builder, hint)` -- optional: validate and copy a complete
