@@ -537,6 +537,7 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
+    #[cfg(feature = "adaptive-metadata-in-dev")]
     use crate::engine::EngineWriteExt;
     use crate::schema::schema;
     use crate::table_features::TableFeature;

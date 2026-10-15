@@ -27,7 +27,6 @@ use crate::committer::FileSystemCommitter;
 use crate::engine::arrow_conversion::{parquet_field_id_metadata, TryIntoArrow as _};
 use crate::engine::arrow_data::ArrowEngineData;
 use crate::engine::sync::SyncEngine;
-use crate::engine::EngineWriteExt;
 use crate::metrics::{MetricEvent, MetricsReporter, WithMetricsReporterLayer as _};
 use crate::object_store::local::LocalFileSystem;
 use crate::object_store::memory::InMemory;
@@ -328,6 +327,7 @@ pub(crate) mod adaptive_metadata_fixtures {
 
     use super::*;
     use crate::actions::{CheckpointAction, ContentRoot};
+    use crate::engine::EngineWriteExt;
     use crate::engine_data::FilteredEngineData;
     use crate::path::LogRoot;
     use crate::version_as_i64;
