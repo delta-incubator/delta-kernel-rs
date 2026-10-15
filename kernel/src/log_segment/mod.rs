@@ -355,6 +355,35 @@ impl LogSegment {
             .filter(|hint| hint.applies_to(&self.listed.checkpoint_parts))
     }
 
+    /// The version of the AMT `_last_checkpoint` hint this segment was listed from, when the
+    /// segment has no checkpoint file. The hint's checkpoint action holds the table state through
+    /// this version, so it stands in for a checkpoint version: the segment's commits follow it.
+    #[cfg(feature = "adaptive-metadata-in-dev")]
+    pub(crate) fn amt_checkpoint_version(&self) -> Option<Version> {
+        if self.checkpoint_version.is_some() {
+            return None;
+        }
+        let hint = self.last_checkpoint_metadata.as_ref()?;
+        hint.amt_manifest_commit_version()?;
+        (hint.version <= self.end_version).then_some(hint.version)
+    }
+
+    /// The checkpoint action embedded in this segment's AMT `_last_checkpoint` hint, when the
+    /// segment was listed from that hint but ends before the hint's manifest commit, so the action
+    /// is in no listed commit. For example, a hint at version 5 written by manifest commit 8
+    /// applies to a snapshot at 5 through 7, but not at 8 or later, where commit 8 itself is
+    /// listed. Content roots never decrease across manifest commits, so this is then the
+    /// segment's latest checkpoint action.
+    #[cfg(feature = "adaptive-metadata-in-dev")]
+    pub(crate) fn unlisted_amt_checkpoint_action(&self) -> Option<&CheckpointAction> {
+        self.amt_checkpoint_version()?;
+        let hint = self.last_checkpoint_metadata.as_ref()?;
+        if hint.amt_manifest_commit_version()? <= self.end_version {
+            return None;
+        }
+        hint.amt_checkpoint.as_ref()?.checkpoint.as_ref()
+    }
+
     /// The checkpoint schema from the `_last_checkpoint` hint, when the hint describes the selected
     /// checkpoint (see [`Self::checkpoint_hint`]) and carried a `checkpointSchema`. `None`
     /// otherwise -- the caller then reads the checkpoint footer instead.

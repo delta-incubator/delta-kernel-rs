@@ -1255,7 +1255,8 @@ impl Snapshot {
     ///
     /// Returns [`KernelError::ChecksumWriteUnsupported`] when a root is reached but cannot yield a
     /// writable CRC (missing protocol or metadata, or a non-incremental tail that dooms file
-    /// stats).
+    /// stats), or when the log starts at an AMT checkpoint, whose file stats live in its content
+    /// tree.
     ///
     /// The `root` span field records which root resolved the CRC.
     #[instrument(parent = &self.span, name = "snap.resolve_crc_for_write", skip_all, err, fields(root))]
@@ -1308,6 +1309,18 @@ impl Snapshot {
                 .ok_or_else(|| unresolved_crc("checkpoint is missing protocol or metadata"))?;
             // The tail delta carries v_end's ICT, which `apply` sets on the result.
             return Ok(Arc::new(base.apply(delta, end)));
+        }
+
+        // The log starts at an AMT checkpoint rather than version 0, and its file stats live in
+        // the content tree, which kernel does not read yet.
+        // TODO: build the base CRC from the AMT checkpoint action and its content tree.
+        #[cfg(feature = "adaptive-metadata-in-dev")]
+        if let Some(checkpoint_version) = log_segment.amt_checkpoint_version() {
+            span.record("root", "amt_checkpoint");
+            return Err(unresolved_crc(&format!(
+                "the AMT checkpoint at version {checkpoint_version} needs file stats from its \
+                 content tree"
+            )));
         }
 
         // Case 4: neither CRC nor checkpoint, so reverse-replay the full commit history.
