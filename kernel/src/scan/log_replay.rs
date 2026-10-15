@@ -5,6 +5,7 @@ use std::sync::{Arc, LazyLock};
 use delta_kernel_derive::internal_api;
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
+use url::Url;
 
 use super::data_skipping::DataSkippingFilter;
 use super::metrics::ScanMetrics;
@@ -96,6 +97,9 @@ struct InternalScanState {
     #[serde(default)]
     is_catalog_managed: bool,
     skip_row_transforms: bool,
+    /// Table root for normalizing paths. `Some` iff adaptiveMetadata is enabled.
+    #[serde(default)]
+    dv_normalization_root: Option<Url>,
 }
 
 /// Serializable processor state for distributed processing. This can be serialized using the
@@ -401,6 +405,7 @@ impl ScanLogReplayProcessor {
             requested_physical_stats_columns,
             is_catalog_managed,
             skip_row_transforms,
+            dv_normalization_root,
         } = self.state_info.as_ref().clone();
 
         // Extract predicate from PhysicalPredicate
@@ -424,6 +429,7 @@ impl ScanLogReplayProcessor {
             requested_physical_stats_columns,
             is_catalog_managed,
             skip_row_transforms,
+            dv_normalization_root,
         };
         let internal_state_blob = serde_json::to_vec(&internal_state).map_err(|e| {
             KernelError::generic(format!("Failed to serialize internal state: {e}"))
@@ -488,6 +494,7 @@ impl ScanLogReplayProcessor {
             requested_physical_stats_columns: internal_state.requested_physical_stats_columns,
             is_catalog_managed: internal_state.is_catalog_managed,
             skip_row_transforms: internal_state.skip_row_transforms,
+            dv_normalization_root: internal_state.dv_normalization_root,
         });
 
         Self::new_with_seen_files(
@@ -1059,6 +1066,7 @@ impl ParallelLogReplayProcessor for ScanLogReplayProcessor {
             Self::ADD_PATH_INDEX,
             Self::ADD_SIZE_INDEX,
             Self::ADD_DV_START_INDEX,
+            self.state_info.dv_normalization_root.clone(),
         )?;
         let (dedup_selection, row_transform_exprs, active_add_file_sizes) = {
             let mut visitor = AddRemoveDedupVisitor::new(
@@ -1166,6 +1174,7 @@ impl ScanLogReplayProcessor {
             Self::REMOVE_PATH_INDEX,
             Self::ADD_DV_START_INDEX,
             Self::REMOVE_DV_START_INDEX,
+            self.state_info.dv_normalization_root.clone(),
         );
         let (dedup_selection, row_transform_exprs, active_add_file_sizes) = {
             let mut visitor = AddRemoveDedupVisitor::new(
@@ -1271,6 +1280,7 @@ mod tests {
     use std::time::Duration;
 
     use rstest::rstest;
+    use url::Url;
 
     use super::{
         get_add_transform_expr, scan_action_iter, InternalScanState, ScanLogReplayProcessor,
@@ -1464,6 +1474,7 @@ mod tests {
             requested_physical_stats_columns: Vec::new(),
             is_catalog_managed: false,
             skip_row_transforms: false,
+            dv_normalization_root: None,
         });
         let (iter, _metrics) = scan_action_iter(
             &SyncEngine::new(),
@@ -1895,6 +1906,7 @@ mod tests {
                 requested_physical_stats_columns: Vec::new(),
                 is_catalog_managed: false,
                 skip_row_transforms: false,
+                dv_normalization_root: None,
             });
             let checkpoint_info = test_checkpoint_info();
             let processor = ScanLogReplayProcessor::new(
@@ -1932,6 +1944,7 @@ mod tests {
             requested_physical_stats_columns: Vec::new(),
             is_catalog_managed: false,
             skip_row_transforms: false,
+            dv_normalization_root: None,
         });
         let processor = ScanLogReplayProcessor::new(
             &engine,
@@ -1965,6 +1978,7 @@ mod tests {
             requested_physical_stats_columns: Vec::new(),
             is_catalog_managed: true,
             skip_row_transforms: false,
+            dv_normalization_root: None,
         });
         let processor = ScanLogReplayProcessor::new(
             &engine,
@@ -1998,6 +2012,7 @@ mod tests {
             requested_physical_stats_columns: Vec::new(),
             is_catalog_managed: false,
             skip_row_transforms: skip,
+            dv_normalization_root: None,
         });
         let processor = ScanLogReplayProcessor::new(
             &engine,
@@ -2013,6 +2028,69 @@ mod tests {
         )
         .unwrap();
         assert_eq!(deserialized.state_info.skip_row_transforms, skip);
+    }
+
+    fn processor_with_dv_normalization_root(
+        engine: &SyncEngine,
+        dv_normalization_root: Option<Url>,
+    ) -> ScanLogReplayProcessor {
+        let schema: SchemaRef = schema_ref! { nullable "id": INTEGER };
+        let state_info = Arc::new(StateInfo {
+            logical_schema: schema.clone(),
+            physical_schema: schema,
+            physical_predicate: PhysicalPredicate::None,
+            transform_spec: None,
+            column_mapping_mode: ColumnMappingMode::None,
+            physical_stats_schemas: None,
+            physical_partition_schema: None,
+            eligible_physical_stats_columns: HashSet::new(),
+            requested_physical_stats_columns: Vec::new(),
+            is_catalog_managed: false,
+            skip_row_transforms: false,
+            dv_normalization_root,
+        });
+        ScanLogReplayProcessor::new(
+            engine,
+            state_info,
+            test_checkpoint_info(),
+            ScanStatsOptions::default(),
+            ScanPartitionValuesOptions::default(),
+        )
+        .unwrap()
+    }
+
+    #[rstest]
+    fn test_serialization_round_trips_dv_normalization_root(
+        #[values(None, Some("s3://bucket/table/"))] root: Option<&str>,
+    ) {
+        let engine = SyncEngine::new();
+        let root = root.map(|r| Url::parse(r).unwrap());
+        let processor = processor_with_dv_normalization_root(&engine, root.clone());
+        let deserialized = ScanLogReplayProcessor::from_serializable_state(
+            &engine,
+            processor.into_serializable_state().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(deserialized.state_info.dv_normalization_root, root);
+    }
+
+    #[test]
+    fn test_deserialize_blob_without_dv_normalization_root_defaults_to_none() {
+        let engine = SyncEngine::new();
+        let root = Url::parse("s3://bucket/table/").unwrap();
+        let mut state = processor_with_dv_normalization_root(&engine, Some(root))
+            .into_serializable_state()
+            .unwrap();
+        let mut blob: serde_json::Value =
+            serde_json::from_slice(&state.internal_state_blob).unwrap();
+        assert!(blob
+            .as_object_mut()
+            .unwrap()
+            .remove("dv_normalization_root")
+            .is_some());
+        state.internal_state_blob = serde_json::to_vec(&blob).unwrap();
+        let deserialized = ScanLogReplayProcessor::from_serializable_state(&engine, state).unwrap();
+        assert_eq!(deserialized.state_info.dv_normalization_root, None);
     }
 
     #[test]
@@ -2049,6 +2127,7 @@ mod tests {
             requested_physical_stats_columns: Vec::new(),
             is_catalog_managed: false,
             skip_row_transforms: false,
+            dv_normalization_root: None,
         };
         let predicate = Arc::new(crate::expressions::column_pred!("id"));
         let invalid_blob = serde_json::to_vec(&invalid_internal_state).unwrap();
@@ -2082,6 +2161,7 @@ mod tests {
             requested_physical_stats_columns: Vec::new(),
             is_catalog_managed: false,
             skip_row_transforms: false,
+            dv_normalization_root: None,
         };
         let blob = serde_json::to_string(&invalid_internal_state).unwrap();
         let mut obj: serde_json::Value = serde_json::from_str(&blob).unwrap();

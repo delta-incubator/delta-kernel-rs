@@ -38,6 +38,11 @@ schema changes use `update_table_txn_builder_add_column_at` and
 by `committed_transaction_post_commit_snapshot` is independently owned and must be released with
 `free_snapshot`.
 
+The Rust builders share a generic `TransactionBuilder<T>` implementation, but the C API uses
+distinct create-table and update-table handles and function families. Shared setters call the
+common Rust implementation; custom setters remain specific to their transaction type. No generic
+type parameters or builder state cross the C boundary.
+
 ## Building
 
 ### Building Kernel and Headers
@@ -77,7 +82,7 @@ make
 ./read_table ../../../../kernel/tests/data/table-with-dv-small
 ```
 
-Note there are two configurations that can currently be configured in cmake:
+Available CMake options include:
 ```bash
 # turn on VERBOSE mode (default is off) - print more diagnostics
 $ cmake -DVERBOSE=yes ..
@@ -96,6 +101,10 @@ cmake -DPRINT_DATA=no ..
 ```
 
 and the example will only print out the schema of the table, not the data.
+
+The [UDT annotation test instructions](examples/read-table/README.md#udt-annotation-tests) describe
+building the Rust library with `udt-in-dev` and enabling CMake's `UDT_IN_DEV=ON` option to run the
+schema round-trip test.
 
 ### 2. Visit Expression Example (`examples/visit-expression`)
 
