@@ -544,6 +544,10 @@ impl LogSegment {
     /// and all commits between versions `start_version` (inclusive) and `end_version`
     /// (inclusive). If no `end_version` is specified it will be the most recent version by
     /// default.
+    #[cfg_attr(
+        not(feature = "internal-api"),
+        allow(dead_code, reason = "Retained as a storage-only internal API.")
+    )]
     #[internal_api]
     pub(crate) fn for_table_changes(
         storage: &dyn StorageHandler,

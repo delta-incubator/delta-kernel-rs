@@ -2109,6 +2109,38 @@ mod tests {
         }
     }
 
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn timestamp_lookup_preserves_cancellation(
+        #[values(HistoryCommitType::Published, HistoryCommitType::Recreatable)]
+        commit_type: HistoryCommitType,
+        #[values(Bound::GreatestLower, Bound::LeastUpper)] bound: Bound,
+        #[values(false, true)] cancelled: bool,
+    ) {
+        let table = mock_table_with_timestamps(&[(100, None), (200, None)], None).await;
+        let original = SyncEngine::new();
+        let path = Url::from_directory_path(table.table_root()).unwrap();
+        let snapshot = Snapshot::builder_for(path).build(&original).unwrap();
+        let token = Arc::new(TestCancellationToken::default());
+        if cancelled {
+            token.cancel();
+        }
+        let engine = KernelEngine::new(&original, token);
+        let result = match bound {
+            Bound::GreatestLower => latest_version_as_of(&snapshot, &engine, 150, commit_type),
+            Bound::LeastUpper => first_version_after(&snapshot, &engine, 150, commit_type),
+        };
+        if cancelled {
+            assert!(matches!(result, Err(KernelError::Cancelled)), "{result:?}");
+        } else {
+            let expected = match bound {
+                Bound::GreatestLower => CommitAt::new(0, 100),
+                Bound::LeastUpper => CommitAt::new(1, 200),
+            };
+            assert_eq!(result.unwrap(), expected);
+        }
+    }
+
     fn single_part_checkpoint_path(v: Version) -> String {
         format!("_delta_log/{v:020}.checkpoint.parquet")
     }

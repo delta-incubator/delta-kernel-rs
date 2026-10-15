@@ -322,9 +322,10 @@ Cancellation can race with successful completion. Work already initiated may com
 results may still be returned. If cancellation stops replay before completion, it surfaces as
 `KernelError::Cancelled` rather than a partial result that appears complete.
 
-Without a token, the scan is not cancellable and runs to completion as usual. Cancellation applies
-to the lazy `scan_metadata()` path; [`parallel_scan_metadata()`](./parallel_scan_metadata.md) does
-not support it and rejects a token rather than silently ignoring it.
+Without a scan token, I/O still inherits the Engine's cancellation token, if present. Checks on
+cached scan metadata require a scan token. Without either token, the scan runs to completion.
+[`parallel_scan_metadata()`](./parallel_scan_metadata.md) rejects a scan token; it doesn't provide
+end-to-end cancellation across its distributed phases.
 
 ## What's next
 

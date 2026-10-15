@@ -20,6 +20,9 @@ mod tests;
 /// Reuse the adapter across calls in one operation, including metadata access after snapshot
 /// construction. Snapshots retain neither the adapter nor its token; read iterators own their
 /// cancellation state and can outlive the adapter.
+///
+/// Place this adapter outside other engine decorators, or make outer decorators forward the
+/// cancellation-token accessor.
 pub struct KernelEngine {
     evaluation: Arc<dyn EvaluationHandler>,
     storage: Arc<dyn StorageHandler>,
