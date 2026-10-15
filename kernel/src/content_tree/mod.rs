@@ -37,9 +37,6 @@ pub(crate) const RECORD_COUNT: &str = "recordCount";
 pub(crate) const FILE_SIZE_IN_BYTES: &str = "fileSizeInBytes";
 pub(crate) const CONTENT_STATS_FIELD_NAME: &str = "content_stats";
 pub(crate) const MANIFEST_INFO: &str = "manifestInfo";
-/// Field names within the [`ManifestInfo`] sub-struct.
-pub(crate) const MANIFEST_DV: &str = "dv";
-pub(crate) const MANIFEST_DV_CARDINALITY: &str = "dvCardinality";
 pub(crate) const KEY_METADATA: &str = "keyMetadata";
 pub(crate) const SPLIT_OFFSETS: &str = "splitOffsets";
 pub(crate) const COLUMN_FILES: &str = "columnFiles";
@@ -217,7 +214,7 @@ impl TrackingInfo {
         Ok(Self {
             status: TrackingStatus::try_from_repr(getters[0].get(row, TRACKING_STATUS)?)?,
             snapshot_id: getters[1].get_opt(row, TRACKING_SNAPSHOT_ID)?,
-            dv_snapshot_id: getters[2].get_opt(row, DV_SNAPSHOT_ID)?,
+            modified_snapshot_id: getters[2].get_opt(row, MODIFIED_SNAPSHOT_ID)?,
             sequence_number: getters[3].get_opt(row, SEQUENCE_NUMBER)?,
             file_sequence_number: getters[4].get_opt(row, FILE_SEQUENCE_NUMBER)?,
             first_row_id: getters[5].get_opt(row, FIRST_ROW_ID)?,
@@ -538,7 +535,7 @@ mod tests {
     };
     use crate::engine::sync::SyncEngine;
     use crate::engine_data::RowVisitor;
-    use crate::schema::{ColumnMetadataKey, ColumnName, MetadataValue, StructField, ToSchema};
+    use crate::schema::{ColumnMetadataKey, ColumnName, MetadataValue, StructField};
     use crate::unit_test_utils::assert_result_error_with_message;
 
     /// Collects every row's [`TrackingInfo`] via [`TrackingInfo::try_from_getters`].
@@ -575,7 +572,7 @@ mod tests {
     #[case::all_fields_set(TrackingInfo {
         status: TrackingStatus::Existing,
         snapshot_id: Some(1),
-        dv_snapshot_id: Some(2),
+        modified_snapshot_id: Some(2),
         sequence_number: Some(3),
         file_sequence_number: Some(4),
         first_row_id: Some(5),
@@ -585,7 +582,7 @@ mod tests {
     #[case::optional_fields_null(TrackingInfo {
         status: TrackingStatus::Deleted,
         snapshot_id: None,
-        dv_snapshot_id: None,
+        modified_snapshot_id: None,
         sequence_number: None,
         file_sequence_number: None,
         first_row_id: None,

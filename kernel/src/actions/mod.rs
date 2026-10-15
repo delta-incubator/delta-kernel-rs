@@ -15,7 +15,7 @@ use visitors::{MetadataVisitor, ProtocolVisitor};
 
 use self::deletion_vector::DeletionVectorDescriptor;
 #[cfg(feature = "adaptive-metadata-in-dev")]
-use crate::amt_path_util::resolve_amt_location;
+use crate::amt_path_util::amt_manifest_filemeta;
 #[cfg(feature = "adaptive-metadata-in-dev")]
 use crate::expressions::Scalar;
 #[cfg(feature = "adaptive-metadata-in-dev")]
@@ -1964,30 +1964,9 @@ pub(crate) struct Sidecar {
     pub tags: Option<HashMap<String, String>>,
 }
 
-/// Builds the [`FileMeta`] of an AMT manifest file referenced by `path` (absolute, or relative to
-/// `table_root`) with `size_in_bytes`. AMT references carry no modification time, so
-/// `last_modified` is `i64::MAX`.
-///
-/// # Errors
-/// Returns an error if `path` cannot be resolved (see [`resolve_amt_location`]), or if
-/// `size_in_bytes` is negative (the error names `context`).
-#[cfg(feature = "adaptive-metadata-in-dev")]
-pub(crate) fn amt_manifest_filemeta(
-    path: &str,
-    size_in_bytes: i64,
-    table_root: &Url,
-    context: &str,
-) -> KernelResult<FileMeta> {
-    Ok(FileMeta {
-        location: resolve_amt_location(path, table_root)?,
-        last_modified: i64::MAX,
-        size: to_file_size(size_in_bytes, context)?,
-    })
-}
-
 /// Convert an `i64` byte count from a log action into a [`FileSize`], erroring with `context` (a
 /// short action name, e.g. `"sidecar"`) and the offending value when it is negative.
-fn to_file_size(bytes: i64, context: &str) -> KernelResult<FileSize> {
+pub(crate) fn to_file_size(bytes: i64, context: &str) -> KernelResult<FileSize> {
     bytes.try_into().map_err(|_| {
         KernelError::generic(format!(
             "Failed to convert {context} size {bytes} to FileSize"
