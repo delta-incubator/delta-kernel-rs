@@ -28,23 +28,23 @@ let schema = Arc::new(StructType::try_new([
     StructField::nullable("age", DataType::INTEGER),
 ])?);
 
-create_table(url.as_str(), schema, "my-app/1.0", true)
+create_table(url.as_str(), schema, "my-app/1.0", /* data_change */ true)
     .build(&engine, Box::new(FileSystemCommitter::new()))?
     .commit(&engine)?;
 # Ok(())
 # }
 ```
 
-The three required arguments are:
+The required arguments are:
 - **`path`**: Where to create the table (local path or URI like `s3://bucket/path`)
 - **`schema`**: The table's column definitions as a `StructType`
 - **`engine_info`**: A string identifying your application (stored in the commit log)
+- **`data_change`**: Whether added files change logical data; use `true` for new records
 
 `.build()` validates the inputs and creates a `CreateTableTransaction`. `.commit()` writes
 version 0 of the table, producing the initial Protocol and Metadata actions.
 
-Pass `data_change` as the last argument to `create_table()`. Use `true` when you add files
-containing new records. The value cannot be changed on the builder or transaction and is preserved
+You cannot change `data_change` on the builder or transaction. Kernel preserves the value
 through commit, including when you create an empty table.
 
 ## Defining a schema
@@ -112,7 +112,7 @@ You can set custom application properties on the table:
 # let schema = Arc::new(StructType::try_new([
 #     StructField::not_null("id", DataType::INTEGER),
 # ])?);
-create_table(url.as_str(), schema, "my-app/1.0", true)
+create_table(url.as_str(), schema, "my-app/1.0", /* data_change */ true)
     .with_table_properties([
         ("myapp.version", "2.0"),
         ("myapp.owner", "data-team"),
@@ -152,7 +152,7 @@ let schema = Arc::new(StructType::try_new([
     StructField::nullable("timestamp", DataType::TIMESTAMP),
 ])?);
 
-create_table(url.as_str(), schema, "my-app/1.0", true)
+create_table(url.as_str(), schema, "my-app/1.0", /* data_change */ true)
     .with_data_layout(DataLayout::clustered(["region", "timestamp"]))
     .build(&engine, Box::new(FileSystemCommitter::new()))?
     .commit(&engine)?;
@@ -209,7 +209,7 @@ let schema = Arc::new(StructType::try_new([
     StructField::not_null("month", DataType::INTEGER),
 ])?);
 
-create_table(url.as_str(), schema, "my-app/1.0", true)
+create_table(url.as_str(), schema, "my-app/1.0", /* data_change */ true)
     .with_data_layout(DataLayout::partitioned(["year", "month"]))
     .build(&engine, Box::new(FileSystemCommitter::new()))?
     .commit(&engine)?;

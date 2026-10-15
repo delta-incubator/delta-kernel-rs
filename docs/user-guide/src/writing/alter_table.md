@@ -73,7 +73,7 @@ let snapshot = Snapshot::builder_for(url).build(&engine)?;
 
 // 2. Build and commit an alter-table transaction that adds a new column.
 let result = snapshot
-    .update_table(UpdateTableOperation::AlterTable, "my-app/1.0", false)
+    .update_table(UpdateTableOperation::AlterTable, "my-app/1.0", /* data_change */ false)
     .add_column(StructField::nullable("country", DataType::STRING))
     .build(&engine, Box::new(FileSystemCommitter::new()))?
     .commit(&engine)?;
@@ -119,7 +119,7 @@ validated as a whole before the commit is constructed:
 
 ```rust,ignore
 let result = snapshot
-    .update_table(UpdateTableOperation::AlterTable, "my-app/1.0", false)
+    .update_table(UpdateTableOperation::AlterTable, "my-app/1.0", /* data_change */ false)
     .add_column(StructField::nullable("country", DataType::STRING))
     .add_column(StructField::nullable("postal_code", DataType::STRING))
     .build(&engine, Box::new(FileSystemCommitter::new()))?
@@ -138,7 +138,7 @@ the evolved schema.
 
 ```rust,ignore
 let mut transaction = snapshot
-    .update_table(UpdateTableOperation::Write, "my-app/1.0", true)
+    .update_table(UpdateTableOperation::Write, "my-app/1.0", /* data_change */ true)
     .add_column(StructField::nullable("country", DataType::STRING))
     .build(&engine, Box::new(FileSystemCommitter::new()))?;
 

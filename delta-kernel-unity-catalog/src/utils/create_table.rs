@@ -14,7 +14,7 @@
 //!
 //! // Step 2: Build and commit the create-table transaction
 //! let disk_props = get_required_properties_for_disk(&staging_info.table_id);
-//! let create_table_txn = kernel::create_table(path, schema, "MyApp/1.0", true)
+//! let create_table_txn = kernel::create_table(path, schema, "MyApp/1.0", /* data_change */ true)
 //!     .with_table_properties(disk_props)
 //!     .build(engine, committer);
 //! create_table_txn.commit(engine)?;

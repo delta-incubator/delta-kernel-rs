@@ -848,7 +848,7 @@ impl TransactionBuilder<CreateTable> {
     /// # use std::sync::Arc;
     /// # fn example() -> delta_kernel::Result<()> {
     /// # let schema = Arc::new(StructType::try_new(vec![StructField::nullable("id", DataType::INTEGER)])?);
-    /// let builder = create_table("/path/to/table", schema, "MyApp/1.0", true)
+    /// let builder = create_table("/path/to/table", schema, "MyApp/1.0", /* data_change */ true)
     ///     .with_table_properties([
     ///         ("myapp.version", "1.0"),
     ///         ("myapp.author", "test"),
@@ -898,11 +898,13 @@ impl TransactionBuilder<CreateTable> {
     /// #     StructField::nullable("date", DataType::STRING),
     /// # ])?);
     /// // Clustered layout:
-    /// let builder = create_table("/path/to/table", schema.clone(), "MyApp/1.0", true)
+    /// let builder = create_table(
+    ///     "/path/to/table", schema.clone(), "MyApp/1.0", /* data_change */ true,
+    /// )
     ///     .with_data_layout(DataLayout::clustered(["id"]));
     ///
     /// // Partitioned layout:
-    /// let builder = create_table("/path/to/table", schema, "MyApp/1.0", true)
+    /// let builder = create_table("/path/to/table", schema, "MyApp/1.0", /* data_change */ true)
     ///     .with_data_layout(DataLayout::partitioned(["date"]));
     /// # Ok(())
     /// # }

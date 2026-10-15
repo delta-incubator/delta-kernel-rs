@@ -224,7 +224,8 @@ int main(int argc, char* argv[])
     KernelStringSlice engine_info_slice = { .ptr = engine_info, .len = strlen(engine_info) };
     ExternResultHandleExclusiveUpdateTableTransactionBuilder builder_res =
         new_update_table_txn_builder(
-            snapshot, KernelUpdateTableOperationWrite, engine_info_slice, false, engine);
+            snapshot, KernelUpdateTableOperationWrite, engine_info_slice,
+            /* data_change */ false, engine);
     if (builder_res.tag != OkHandleExclusiveUpdateTableTransactionBuilder) {
         print_error("Failed to create transaction builder", (Error*)builder_res.err);
         free_error((Error*)builder_res.err);
@@ -249,7 +250,8 @@ int main(int argc, char* argv[])
 
     HandleExclusiveUpdateTableTransaction txn_with_info = txn_res.ok;
 
-    // In a real txn we could now add files using update_table_txn_add_files().
+    // This example commits no files. To append new records with update_table_txn_add_files(),
+    // construct the builder with data_change=true.
     // calling commit here will end up calling our callback
     ExternResultHandleExclusiveCommittedTransaction commit_res = update_table_txn_commit(txn_with_info, engine);
 

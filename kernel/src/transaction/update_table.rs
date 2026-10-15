@@ -218,7 +218,11 @@ impl Transaction<UpdateTable, Imperative> {
     /// let snapshot = Snapshot::builder_for(table_url).build(engine.as_ref())?;
     /// let mut txn = snapshot
     ///     .clone()
-    ///     .update_table(delta_kernel::transaction::UpdateTableOperation::Write, "my-app/1.0", true)
+    ///     .update_table(
+    ///         delta_kernel::transaction::UpdateTableOperation::Write,
+    ///         "my-app/1.0",
+    ///         /* data_change */ true,
+    ///     )
     ///     .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?;
     ///
     /// // Get file metadata from a scan
@@ -308,7 +312,7 @@ impl Transaction<UpdateTable, Imperative> {
     /// ```rust,ignore
     /// let mut txn = snapshot
     ///     .clone()
-    ///     .update_table(UpdateTableOperation::Update, "my-app/1.0", true)
+    ///     .update_table(UpdateTableOperation::Update, "my-app/1.0", /* data_change */ true)
     ///     .build(engine, Box::new(FileSystemCommitter::new()))?;
     ///
     /// let scan = snapshot.scan_builder().build()?;

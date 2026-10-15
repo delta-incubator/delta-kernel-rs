@@ -231,9 +231,9 @@ feature is enabled; the rest are always available.
 
 | Function | Purpose |
 |----------|---------|
-| `new_update_table_txn_builder` | Create a builder from a snapshot, typed operation, and required connector name/version |
+| `new_update_table_txn_builder` | Create a builder from a snapshot, typed operation, required connector name/version, and `data_change` |
 | `update_table_txn_builder_with_correlation_id` | Attach a correlation identifier to transaction metrics |
-| `new_update_table_txn_builder_with_custom_operation` | Create a builder from a snapshot, connector-defined operation, and required connector name/version |
+| `new_update_table_txn_builder_with_custom_operation` | Create a builder from a snapshot, connector-defined operation, required connector name/version, and `data_change` |
 | `update_table_txn_builder_with_operation_parameters` | Replace the operation parameters recorded in `commitInfo` |
 | `update_table_txn_builder_with_operation_metrics` / `update_table_txn_with_operation_metrics` | Set metrics before writing or replace them with write-time results |
 | `update_table_txn_builder_with_commit_info` / `update_table_txn_with_commit_info` | Set connector commit information before writing or before commit |

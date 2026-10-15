@@ -18,7 +18,7 @@
 //!     StructField::nullable("id", DataType::INTEGER),
 //! ])?);
 //!
-//! let result = create_table("/path/to/table", schema, "MyApp/1.0", true)
+//! let result = create_table("/path/to/table", schema, "MyApp/1.0", /* data_change */ true)
 //!     .with_table_properties([("myapp.version", "1.0")])
 //!     .build(engine, Box::new(FileSystemCommitter::new()))?
 //!     .commit(engine)?;
@@ -66,7 +66,7 @@ use crate::transaction::{CreateTable, Transaction};
 ///     StructField::nullable("id", DataType::INTEGER),
 /// ])?);
 ///
-/// let result = create_table("/path/to/table", schema, "MyApp/1.0", true)
+/// let result = create_table("/path/to/table", schema, "MyApp/1.0", /* data_change */ true)
 ///     .build(engine, Box::new(FileSystemCommitter::new()))?
 ///     .commit(engine)?;
 /// # Ok(())
@@ -108,7 +108,7 @@ pub type CreateTableTransaction = Transaction<CreateTable>;
 /// ```
 ///
 /// ```compile_fail,E0599
-/// # use delta_kernel::transaction::CreateTableTransactionBuilder;
+/// # use delta_kernel::transaction::create_table::CreateTableTransactionBuilder;
 /// fn configure(builder: CreateTableTransactionBuilder) {
 ///     let _ = builder.with_data_change(true);
 /// }
@@ -133,7 +133,7 @@ pub type CreateTableTransaction = Transaction<CreateTable>;
 /// let url = url::Url::parse("file:///tmp/my_table")?;
 /// let engine = DefaultEngineBuilder::new(store_from_url(&url)?).build();
 ///
-/// let transaction = create_table("/tmp/my_table", schema, "MyApp/1.0", true)
+/// let transaction = create_table("/tmp/my_table", schema, "MyApp/1.0", /* data_change */ true)
 ///     .build(&engine, Box::new(FileSystemCommitter::new()))?;
 ///
 /// // Commit the transaction to create the table

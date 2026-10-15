@@ -42,7 +42,7 @@ let snapshot = Snapshot::builder_for(url).build(&engine)?;
 
 // 2. Create a transaction
 let mut txn = snapshot
-    .update_table(UpdateTableOperation::Write, "my-app/1.0", true)
+    .update_table(UpdateTableOperation::Write, "my-app/1.0", /* data_change */ true)
     .build(&engine, Box::new(FileSystemCommitter::new()))?;
 
 // 3. Create write state and bind a write context
@@ -90,7 +90,7 @@ writing against:
 
 ```rust,ignore
 let mut txn = snapshot
-    .update_table(UpdateTableOperation::Write, "my-app/1.0", true)
+    .update_table(UpdateTableOperation::Write, "my-app/1.0", /* data_change */ true)
     .build(&engine, Box::new(FileSystemCommitter::new()))?;
 ```
 
@@ -241,7 +241,11 @@ construction:
 
 ```rust,ignore
 let txn = snapshot
-    .update_table(UpdateTableOperation::Custom("INSERT".to_string()), "my-app/1.0", true)
+    .update_table(
+        UpdateTableOperation::Custom("INSERT".to_string()),
+        "my-app/1.0",
+        /* data_change */ true,
+    )
     .with_blind_append()
     .build(&engine, Box::new(FileSystemCommitter::new()))?;
 ```
@@ -273,7 +277,11 @@ that action, call `with_commit_info()` with your custom data and its schema:
 
 ```rust,ignore
 let txn = snapshot
-    .update_table(UpdateTableOperation::Custom("INSERT".to_string()), "my-app/1.0", true)
+    .update_table(
+        UpdateTableOperation::Custom("INSERT".to_string()),
+        "my-app/1.0",
+        /* data_change */ true,
+    )
     .with_operation_parameters([("mode", Some("Append")), ("predicate", None)])
     .with_operation_metrics([("numFiles", Some("1"))])
     .build(&engine, Box::new(FileSystemCommitter::new()))?

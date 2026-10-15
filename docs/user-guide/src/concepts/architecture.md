@@ -155,7 +155,11 @@ A `Transaction` writes data to a table. It is built from a snapshot:
 
 ```rust,ignore
 let mut txn = snapshot                              // Arc<Snapshot>
-    .update_table(UpdateTableOperation::Custom("INSERT".to_string()), "my-app/1.0", true)
+    .update_table(
+        UpdateTableOperation::Custom("INSERT".to_string()),
+        "my-app/1.0",
+        /* data_change */ true,
+    )
     .build(&engine, Box::new(FileSystemCommitter::new()))?;
 
 // Write Parquet files, then register their metadata.

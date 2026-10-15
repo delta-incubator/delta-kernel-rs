@@ -149,7 +149,7 @@ let snapshot = Snapshot::builder_for(url).build(&engine)?;
 // 2. Create a transaction
 let mut txn = snapshot
     .clone()
-    .update_table(UpdateTableOperation::Delete, "my-app/1.0", true)
+    .update_table(UpdateTableOperation::Delete, "my-app/1.0", /* data_change */ true)
     .build(&engine, Box::new(FileSystemCommitter::new()))?;
 
 // 3. Build a scan and get file metadata

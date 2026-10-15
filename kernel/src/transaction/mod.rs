@@ -222,7 +222,7 @@ pub struct CreateTable;
 ///
 /// ```rust,ignore
 /// let txn = snapshot
-///     .update_table(UpdateTableOperation::Write, "my-app/1.0", true)
+///     .update_table(UpdateTableOperation::Write, "my-app/1.0", /* data_change */ true)
 ///     .build(&engine, Box::new(FileSystemCommitter::new()))?;
 /// txn.commit(&engine)?;
 /// ```
