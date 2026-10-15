@@ -298,7 +298,7 @@ is the source of truth. Key concepts:
 
 - Writer: `allowColumnDefaults`, `appendOnly`, `changeDataFeed`, `checkConstraints`,
   `clustering`, `domainMetadata`, `generatedColumns`, `icebergCompatV1`, `icebergCompatV2`,
-  `icebergCompatV3`, `icebergNativeV4-preview`, `identityColumns`, `inCommitTimestamp`, `invariants`,
+  `icebergCompatV3`, `identityColumns`, `inCommitTimestamp`, `invariants`,
   `materializePartitionColumns`, `rowTracking`
 - Reader + writer: `adaptiveMetadata-preview`, `catalogManaged`, `catalogOwned-preview`,
   `columnMapping`, `deletionVectors`, `geospatial`, `timestampNtz`,
