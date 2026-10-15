@@ -289,7 +289,7 @@ mod tests {
         assert_eq!(scan_file.dv_info.cardinality().unwrap(), Some(2_u64));
         assert!(scan_file.dv_info.deletion_vector.is_some());
         let dv = scan_file.dv_info.deletion_vector.unwrap();
-        assert_eq!(dv.unique_id(), "uvBn[lx{q8@P<9BNH/isA@1");
+        assert_eq!(dv.legacy_unique_id(), "uvBn[lx{q8@P<9BNH/isA@1");
         assert!(scan_file.transform.is_none());
         assert_eq!(context.id, 2);
     }

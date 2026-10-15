@@ -36,7 +36,10 @@ pub struct FileActionKey {
 }
 
 impl FileActionKey {
-    /// Build a key from a path and optional deletion-vector unique id.
+    /// Build a key from a path and optional deletion-vector unique id. Derive the id with
+    /// [`DeletionVectorDescriptor::unique_id_for`] so it matches the keys kernel produces.
+    ///
+    /// [`DeletionVectorDescriptor::unique_id_for`]: crate::actions::deletion_vector::DeletionVectorDescriptor::unique_id_for
     pub fn new(path: impl Into<String>, dv_unique_id: Option<String>) -> Self {
         let path = path.into();
         Self { path, dv_unique_id }
@@ -86,7 +89,6 @@ pub(crate) struct FileActionDeduplicator<'seen> {
     /// Starting index for remove action deletion vector columns
     remove_dv_start_index: usize,
     /// Table root for normalizing paths. `Some` iff adaptiveMetadata is enabled.
-    #[allow(dead_code)]
     dv_normalization_root: Option<Url>,
 }
 
@@ -215,6 +217,10 @@ impl Deduplicator for FileActionDeduplicator<'_> {
     fn is_log_batch(&self) -> bool {
         self.is_log_batch
     }
+
+    fn dv_normalization_root(&self) -> Option<&Url> {
+        self.dv_normalization_root.as_ref()
+    }
 }
 
 #[internal_api]
@@ -270,6 +276,8 @@ mod tests {
     use super::deduplicator::CheckpointDeduplicator;
     use super::*;
     use crate::engine_data::GetData;
+    #[cfg(feature = "adaptive-metadata-in-dev")]
+    use crate::unit_test_utils::assert_result_error_with_message;
     use crate::Result;
 
     /// Mock GetData implementation for testing
@@ -341,16 +349,35 @@ mod tests {
         seen: &mut HashSet<FileActionKey>,
         is_log_batch: bool,
     ) -> FileActionDeduplicator<'_> {
+        create_deduplicator_with_root(seen, is_log_batch, None)
+    }
+
+    fn create_deduplicator_with_root(
+        seen: &mut HashSet<FileActionKey>,
+        is_log_batch: bool,
+        dv_normalization_root: Option<Url>,
+    ) -> FileActionDeduplicator<'_> {
         FileActionDeduplicator::new(
             seen,
             is_log_batch,
-            0,    // add_path_index
-            1,    // add_size_index,
-            5,    // remove_path_index
-            2,    // add_dv_start_index
-            6,    // remove_dv_start_index
-            None, // dv_normalization_root (not under adaptiveMetadata)
+            0, // add_path_index
+            1, // add_size_index,
+            5, // remove_path_index
+            2, // add_dv_start_index
+            6, // remove_dv_start_index
+            dv_normalization_root,
         )
+    }
+
+    /// A file action row for `path_field` carrying a DV at offset 4.
+    #[cfg(feature = "adaptive-metadata-in-dev")]
+    fn file_action_with_dv(path_field: &str, storage_type: &str, dv_path: &str) -> MockGetData {
+        let mut mock = MockGetData::new();
+        mock.add_string(0, path_field, "f.parquet");
+        mock.add_string(0, "deletionVector.storageType", storage_type);
+        mock.add_string(0, "deletionVector.pathOrInlineDv", dv_path);
+        mock.add_int(0, "deletionVector.offset", 4);
+        mock
     }
 
     /// Helper to create a getters array with mocks at specific positions
@@ -373,6 +400,82 @@ mod tests {
             remove_mock.unwrap_or(empty_ref), // 7: remove.dv.pathOrInlineDv
             remove_mock.unwrap_or(empty_ref), // 8: remove.dv.offset
         ]
+    }
+
+    // A newer remove encodes the DV as `'r'` and an older add encodes the same DV file as `'u'`.
+    // Only under adaptiveMetadata (a normalization root) does the remove cancel the add.
+    #[cfg(feature = "adaptive-metadata-in-dev")]
+    #[rstest]
+    #[case::normalized(
+        Some("s3://mytable/"),
+        "rab/deletion_vector_d2c639aa-8816-431a-aaf6-d3fe2512ff61.bin@4",
+        true
+    )]
+    #[case::legacy(None, "uab^-aqEH.-t@S}K{vb[*k^@4", false)]
+    fn test_remove_cancels_add_across_dv_storage_types(
+        #[case] root: Option<&str>,
+        #[case] expected_add_dv_id: &str,
+        #[case] expect_cancelled: bool,
+    ) -> Result<()> {
+        let mut seen = HashSet::new();
+        let root = root.map(|r| Url::parse(r).unwrap());
+        let mut deduplicator = create_deduplicator_with_root(&mut seen, true, root.clone());
+        let remove = file_action_with_dv(
+            "remove.path",
+            "r",
+            "ab/deletion_vector_d2c639aa-8816-431a-aaf6-d3fe2512ff61.bin",
+        );
+        let add = file_action_with_dv("add.path", "u", "ab^-aqEH.-t@S}K{vb[*k^");
+
+        let remove_key = deduplicator
+            .extract_file_action(0, &create_getters_with_mocks(None, Some(&remove)), false)?
+            .unwrap()
+            .key;
+        let add_key = deduplicator
+            .extract_file_action(0, &create_getters_with_mocks(Some(&add), None), false)?
+            .unwrap()
+            .key;
+        assert_eq!(
+            remove_key.dv_unique_id(),
+            Some("rab/deletion_vector_d2c639aa-8816-431a-aaf6-d3fe2512ff61.bin@4")
+        );
+        assert_eq!(add_key.dv_unique_id(), Some(expected_add_dv_id));
+
+        let commit_removes = HashSet::from([remove_key.clone()]);
+        assert!(!deduplicator.check_and_record_seen(remove_key));
+        assert_eq!(
+            deduplicator.check_and_record_seen(add_key),
+            expect_cancelled
+        );
+
+        // The same add read from a checkpoint is filtered against the removes seen in commits.
+        let mut checkpoint = CheckpointDeduplicator::try_new(&commit_removes, 0, 1, 2, root)?;
+        let checkpoint_add_key = checkpoint
+            .extract_file_action(0, &create_getters_with_mocks(Some(&add), None), false)?
+            .unwrap()
+            .key;
+        assert_eq!(
+            checkpoint.check_and_record_seen(checkpoint_add_key),
+            expect_cancelled
+        );
+        Ok(())
+    }
+
+    #[cfg(feature = "adaptive-metadata-in-dev")]
+    #[test]
+    fn test_normalized_dv_identity_rejects_unknown_storage_type() {
+        let mut seen = HashSet::new();
+        let root = Url::parse("s3://mytable/").unwrap();
+        let deduplicator = create_deduplicator_with_root(&mut seen, true, Some(root));
+        let add = file_action_with_dv("add.path", "z", "ABC");
+        assert_result_error_with_message(
+            deduplicator.extract_file_action(
+                0,
+                &create_getters_with_mocks(Some(&add), None),
+                false,
+            ),
+            "unsupported deletion vector storage type: z",
+        );
     }
 
     #[rstest]

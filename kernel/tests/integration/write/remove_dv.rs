@@ -1,6 +1,8 @@
 //! Integration tests for remove-file and deletion-vector-update write paths.
 
 use std::collections::HashMap;
+#[cfg(feature = "adaptive-metadata-in-dev")]
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use delta_kernel::actions::deletion_vector::{DeletionVectorDescriptor, DeletionVectorStorageType};
@@ -22,6 +24,8 @@ use delta_kernel::engine_data::FilteredEngineData;
 use delta_kernel::expressions::{
     col, lit, null_lit, ExpressionStructPatchBuilder, MapData, Scalar,
 };
+#[cfg(feature = "adaptive-metadata-in-dev")]
+use delta_kernel::log_replay::FileActionKey;
 use delta_kernel::object_store::path::Path;
 use delta_kernel::object_store::ObjectStoreExt as _;
 use delta_kernel::scan::{scan_row_schema, PartitionValuesOptions, StatsOptions};
@@ -1424,8 +1428,8 @@ async fn test_update_deletion_vectors_respects_selection_vector(
     let initial_dvs = sequential_dv_descriptors(&file_paths);
     let initial_dv_ids: HashMap<_, _> = initial_dvs
         .iter()
-        .map(|(path, dv)| (path.clone(), dv.unique_id()))
-        .collect();
+        .map(|(path, dv)| Ok((path.clone(), dv.unique_id_for(&snapshot)?)))
+        .collect::<Result<_>>()?;
     setup_txn.update_deletion_vectors(
         initial_dvs,
         get_scan_files(snapshot, engine.as_ref())?
@@ -1462,8 +1466,8 @@ async fn test_update_deletion_vectors_respects_selection_vector(
         .collect();
     let updated_dv_ids: HashMap<_, _> = dv_map
         .iter()
-        .map(|(path, dv)| (path.clone(), dv.unique_id()))
-        .collect();
+        .map(|(path, dv)| Ok((path.clone(), dv.unique_id_for(&snapshot)?)))
+        .collect::<Result<_>>()?;
 
     let batches = get_scan_files(snapshot, engine.as_ref())?
         .into_iter()
@@ -2186,6 +2190,83 @@ fn setup_table_with_dv_small() -> Result<DvSmallTableSetup, Box<dyn std::error::
         .at_version(1)
         .build(engine.as_ref())?;
     Ok((temp_dir, table_path, engine, snapshot))
+}
+
+/// On an adaptiveMetadata table, a remove naming a DV file as `'r'` cancels the add that named the
+/// same DV file as `'u'`: the file drops out of the scan, and the incremental scan reports the
+/// remove under the id that [`DeletionVectorDescriptor::unique_id_for`] derives for the add's DV.
+#[cfg(feature = "adaptive-metadata-in-dev")]
+#[tokio::test]
+async fn adaptive_metadata_remove_cancels_add_across_dv_storage_types(
+) -> Result<(), Box<dyn std::error::Error>> {
+    // v1: create an adaptiveMetadata table with one data file.
+    let (_tmp_dir, table_url, engine, snapshot) =
+        create_number_table(vec!["adaptiveMetadata-preview"], vec![], "id", true).await?;
+    let path = read_actions_from_commit(&table_url, 1, "add")?[0]["path"]
+        .as_str()
+        .expect("add path should be present")
+        .to_string();
+
+    // v2: attach a `'u'` DV to the file.
+    let u_dv = DeletionVectorDescriptor {
+        storage_type: DeletionVectorStorageType::PersistedRelative,
+        path_or_inline_dv: "ab^-aqEH.-t@S}K{vb[*k^".to_string(),
+        offset: Some(4),
+        size_in_bytes: 40,
+        cardinality: 1,
+    };
+    let mut txn = begin_transaction_with(snapshot.clone(), engine.as_ref(), |builder| {
+        builder.with_data_change(true)
+    })?;
+    txn.update_deletion_vectors(
+        HashMap::from([(path.clone(), u_dv.clone())]),
+        get_scan_files(snapshot, engine.as_ref())?
+            .into_iter()
+            .map(Ok),
+    )?;
+    txn.ack_row_tracking_preservation();
+    let snapshot = txn.commit(engine.as_ref())?.unwrap_post_commit_snapshot();
+
+    // v3: remove the file, then rewrite the remove's DV to the equivalent `'r'` encoding.
+    let mut txn = begin_transaction_with(snapshot.clone(), engine.as_ref(), |builder| {
+        builder.with_data_change(true)
+    })?;
+    for scan_files in get_scan_files(snapshot, engine.as_ref())? {
+        txn.remove_files(scan_files);
+    }
+    txn.ack_row_tracking_preservation();
+    let version = txn
+        .commit(engine.as_ref())?
+        .unwrap_committed()
+        .commit_version();
+    let commit_path = table_url
+        .join(&format!("_delta_log/{version:020}.json"))?
+        .to_file_path()
+        .expect("local table");
+    let commit = std::fs::read_to_string(&commit_path)?;
+    let u_json = r#""storageType":"u","pathOrInlineDv":"ab^-aqEH.-t@S}K{vb[*k^""#;
+    let r_json = r#""storageType":"r","pathOrInlineDv":"ab/deletion_vector_d2c639aa-8816-431a-aaf6-d3fe2512ff61.bin""#;
+    assert!(
+        commit.contains(u_json),
+        "unexpected remove encoding: {commit}"
+    );
+    std::fs::write(&commit_path, commit.replace(u_json, r_json))?;
+
+    let snapshot = Snapshot::builder_for(table_url).build(engine.as_ref())?;
+    let live_files: usize = get_scan_files(snapshot.clone(), engine.as_ref())?
+        .into_iter()
+        .map(|scan_files| Ok(into_record_batch(scan_files.apply_selection_vector()?).num_rows()))
+        .sum::<Result<_>>()?;
+    assert_eq!(live_files, 0, "the 'r' remove should cancel the 'u' add");
+
+    let expected_remove = FileActionKey::new(path, Some(u_dv.unique_id_for(&snapshot)?));
+    let summary = snapshot
+        .incremental_scan_builder(version - 1)
+        .build(engine.as_ref())?
+        .expect("commits in range should be available")
+        .into_summary()?;
+    assert_eq!(summary.removes, HashSet::from([expected_remove]));
+    Ok(())
 }
 
 /// Creates a `number: INTEGER` table with the given protocol/features/column-mapping mode and
