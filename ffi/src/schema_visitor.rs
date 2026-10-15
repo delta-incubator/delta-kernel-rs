@@ -25,8 +25,8 @@ use std::collections::HashMap;
 use std::ffi::c_void;
 
 use delta_kernel::schema::{
-    ArrayType, DataType, DecimalType, MapType, MetadataValue, PrimitiveType, StructField,
-    StructType,
+    ArrayType, DataType, DecimalType, MapType, MetadataKey, MetadataValue, PrimitiveType,
+    StructField, StructType,
 };
 #[cfg(feature = "geo-type-in-dev")]
 use delta_kernel::schema::{EdgeInterpolationAlgorithm, GeographyType, GeometryType};
@@ -98,7 +98,7 @@ pub unsafe extern "C" fn visit_metadata_value(
 
 fn visit_engine_metadata(
     engine_metadata: Option<&EngineMetadata>,
-) -> KernelResult<HashMap<String, MetadataValue>> {
+) -> KernelResult<HashMap<MetadataKey, MetadataValue>> {
     let Some(engine_metadata) = engine_metadata else {
         return Ok(HashMap::new());
     };
@@ -179,7 +179,7 @@ fn visit_field_primitive_impl(
     name: KernelResult<&str>,
     primitive_type: PrimitiveType,
     nullable: bool,
-    metadata: KernelResult<HashMap<String, MetadataValue>>,
+    metadata: KernelResult<HashMap<MetadataKey, MetadataValue>>,
 ) -> KernelResult<usize> {
     let name_str = name?.to_string();
     let metadata = metadata?;
@@ -562,7 +562,7 @@ fn visit_field_geometry_impl(
     name: Result<&str>,
     crs: Result<&str>,
     nullable: bool,
-    metadata: Result<HashMap<String, MetadataValue>>,
+    metadata: Result<HashMap<MetadataKey, MetadataValue>>,
 ) -> Result<usize> {
     let geometry = GeometryType::try_new(crs?)?;
     visit_field_primitive_impl(
@@ -611,7 +611,7 @@ fn visit_field_geography_impl(
     crs: Result<&str>,
     algorithm: Result<&str>,
     nullable: bool,
-    metadata: Result<HashMap<String, MetadataValue>>,
+    metadata: Result<HashMap<MetadataKey, MetadataValue>>,
 ) -> Result<usize> {
     let algorithm = algorithm?
         .parse::<EdgeInterpolationAlgorithm>()
@@ -660,7 +660,7 @@ fn visit_field_decimal_impl(
     precision: u8,
     scale: u8,
     nullable: bool,
-    metadata: KernelResult<HashMap<String, MetadataValue>>,
+    metadata: KernelResult<HashMap<MetadataKey, MetadataValue>>,
 ) -> KernelResult<usize> {
     let name_str = name?.to_string();
     let metadata = metadata?;
@@ -733,7 +733,7 @@ fn visit_field_struct_impl(
     name: KernelResult<&str>,
     field_ids: &[usize],
     nullable: bool,
-    metadata: KernelResult<HashMap<String, MetadataValue>>,
+    metadata: KernelResult<HashMap<MetadataKey, MetadataValue>>,
 ) -> KernelResult<usize> {
     let name_str = name?.to_string();
     let metadata = metadata?;
@@ -772,7 +772,7 @@ fn visit_field_array_impl(
     name: KernelResult<&str>,
     element_type_id: usize,
     nullable: bool,
-    metadata: KernelResult<HashMap<String, MetadataValue>>,
+    metadata: KernelResult<HashMap<MetadataKey, MetadataValue>>,
 ) -> KernelResult<usize> {
     let name_str = name?.to_string();
     let metadata = metadata?;
@@ -828,7 +828,7 @@ fn visit_field_map_impl(
     key_type_id: usize,
     value_type_id: usize,
     nullable: bool,
-    metadata: KernelResult<HashMap<String, MetadataValue>>,
+    metadata: KernelResult<HashMap<MetadataKey, MetadataValue>>,
 ) -> KernelResult<usize> {
     let name_str = name?.to_string();
     let metadata = metadata?;
@@ -934,7 +934,7 @@ fn visit_field_variant_impl(
     name: KernelResult<&str>,
     variant_struct_id: usize,
     nullable: bool,
-    metadata: KernelResult<HashMap<String, MetadataValue>>,
+    metadata: KernelResult<HashMap<MetadataKey, MetadataValue>>,
 ) -> KernelResult<usize> {
     let name_str = name?.to_string();
     let metadata = metadata?;
@@ -1209,13 +1209,13 @@ mod tests {
     #[derive(Default)]
     struct TestMetadata {
         visited: bool,
-        values: HashMap<String, MetadataValue>,
+        values: HashMap<MetadataKey, MetadataValue>,
     }
 
     impl TestMetadata {
         fn from<K>(values: impl IntoIterator<Item = (K, MetadataValue)>) -> Self
         where
-            K: Into<String>,
+            K: Into<MetadataKey>,
         {
             Self {
                 visited: false,
@@ -1490,53 +1490,44 @@ mod tests {
 
     #[test]
     fn outbound_metadata_round_trips_through_field_visitor() {
-        let values = HashMap::from([
-            ("number".to_string(), MetadataValue::Number(17)),
+        let values: HashMap<MetadataKey, MetadataValue> = HashMap::from([
+            ("number".into(), MetadataValue::Number(17)),
+            ("string".into(), MetadataValue::String("true".to_string())),
+            ("boolean".into(), MetadataValue::Boolean(true)),
             (
-                "string".to_string(),
-                MetadataValue::String("true".to_string()),
-            ),
-            ("boolean".to_string(), MetadataValue::Boolean(true)),
-            (
-                "array".to_string(),
+                "array".into(),
                 MetadataValue::Other(serde_json::json!([1, true])),
             ),
             (
-                "object".to_string(),
+                "object".into(),
                 MetadataValue::Other(serde_json::json!({"nested": 1})),
             ),
+            ("float".into(), MetadataValue::Other(serde_json::json!(2.5))),
+            ("null".into(), MetadataValue::Other(serde_json::Value::Null)),
             (
-                "float".to_string(),
-                MetadataValue::Other(serde_json::json!(2.5)),
-            ),
-            (
-                "null".to_string(),
-                MetadataValue::Other(serde_json::Value::Null),
-            ),
-            (
-                "large".to_string(),
+                "large".into(),
                 MetadataValue::Other(serde_json::json!(9_223_372_036_854_775_808_u64)),
             ),
             (
-                "json_number".to_string(),
+                "json_number".into(),
                 MetadataValue::Other(serde_json::json!(17)),
             ),
             (
-                "json_string".to_string(),
+                "json_string".into(),
                 MetadataValue::Other(serde_json::json!("value")),
             ),
             (
-                "json_boolean".to_string(),
+                "json_boolean".into(),
                 MetadataValue::Other(serde_json::json!(true)),
             ),
         ]);
         let mut expected = values.clone();
-        expected.insert("json_number".to_string(), MetadataValue::Number(17));
+        expected.insert("json_number".into(), MetadataValue::Number(17));
         expected.insert(
-            "json_string".to_string(),
+            "json_string".into(),
             MetadataValue::String("value".to_string()),
         );
-        expected.insert("json_boolean".to_string(), MetadataValue::Boolean(true));
+        expected.insert("json_boolean".into(), MetadataValue::Boolean(true));
         let mut source = CMetadataMap::from(values.clone());
         let metadata = EngineMetadata {
             metadata: std::ptr::from_mut(&mut source).cast(),
@@ -1679,15 +1670,12 @@ mod tests {
     #[test]
     fn field_metadata_preserves_typed_values_and_callback_context() {
         let mut state = KernelSchemaVisitorState::default();
-        let expected = HashMap::from([
-            ("number".to_string(), MetadataValue::Number(17)),
+        let expected: HashMap<MetadataKey, MetadataValue> = HashMap::from([
+            ("number".into(), MetadataValue::Number(17)),
+            ("string".into(), MetadataValue::String("value".to_string())),
+            ("boolean".into(), MetadataValue::Boolean(true)),
             (
-                "string".to_string(),
-                MetadataValue::String("value".to_string()),
-            ),
-            ("boolean".to_string(), MetadataValue::Boolean(true)),
-            (
-                "json".to_string(),
+                "json".into(),
                 MetadataValue::Other(serde_json::json!({
                     "nested": [1, null, 2.5]
                 })),
