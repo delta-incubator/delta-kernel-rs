@@ -21,7 +21,6 @@ pub use deletion_vector::{
     ExclusiveDvDescriptorMap, KernelDvStorageType,
 };
 use delta_kernel::committer::{Committer, FileSystemCommitter};
-use delta_kernel::expressions::ColumnName;
 use delta_kernel::schema::SchemaRef;
 use delta_kernel::transaction::create_table::{
     CreateTableTransaction, CreateTableTransactionBuilder,
