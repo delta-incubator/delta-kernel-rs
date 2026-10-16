@@ -72,6 +72,28 @@ pub unsafe extern "C" fn get_plan_based_engine(
     engine_to_handle(engine, allocate_error)
 }
 
+/// Construct a native Arrow engine whose raw I/O is supplied by `plan_executor`.
+///
+/// Only I/O operations are dispatched to the executor. Parsing and expression evaluation stay in
+/// Rust, and callbacks run synchronously on the thread invoking each kernel operation.
+///
+/// # Safety
+///
+/// `plan_executor` must be a valid handle from [`get_plan_executor`]. It is consumed
+/// unconditionally. The caller must keep its context and callbacks alive until the returned engine
+/// and all resources derived from it are released. `allocate_error` must remain valid for the same
+/// lifetime.
+#[no_mangle]
+pub unsafe extern "C" fn get_storage_engine(
+    plan_executor: Handle<SharedPlanExecutor>,
+    allocate_error: AllocateErrorFn,
+) -> Handle<SharedExternEngine> {
+    let executor = unsafe { plan_executor.into_inner() };
+    let storage = delta_kernel::engine::plans::storage::PlanBasedStorageHandler::new(executor);
+    let engine = delta_kernel::engine::storage::StorageEngine::new(Arc::new(storage));
+    engine_to_handle(Arc::new(engine), allocate_error)
+}
+
 #[cfg(test)]
 mod tests {
     use delta_kernel::arrow::array::{Array, RecordBatch, StringArray};
