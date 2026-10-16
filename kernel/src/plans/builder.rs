@@ -40,10 +40,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use delta_kernel_derive::internal_api;
+use url::Url;
 
 use super::ir::nodes::{
     Aggregate, AggregateBuilder, DynamicScan, FileType, Filter, Operator, Project, RelationRef,
-    ScanFile, ScanJson, ScanParquet, SemiJoin, UnionAll, Values,
+    ScanFile, ScanJson, ScanParquet, SemiJoin, UnionAll, Values, WriteJson, FILE_META_SCHEMA,
 };
 use super::ir::plan::{Plan, PlanNode};
 use crate::expressions::{ColumnName, ExpressionRef, PredicateRef, Scalar, StructData};
@@ -273,6 +274,58 @@ impl PlanBuilder {
     pub fn relation_source(relation_ref: RelationRef) -> Self {
         let schema = Arc::clone(relation_ref.schema());
         Self::present(schema, relation_ref, vec![])
+    }
+
+    /// Writes `inputs` to the fully qualified `file_path` as newline-delimited JSON.
+    /// All inputs must share the first input's schema. Absent inputs are dropped.
+    /// `overwrite` controls whether an existing file may be replaced. When `ordered` is true,
+    /// all rows from each input precede all rows from the next input; row order within an input
+    /// is unspecified. See [`WriteJson`].
+    ///
+    /// Returns a relation with one row of [`FILE_META_SCHEMA`]. Returns [`KernelError::Schema`]
+    /// if input schemas differ, or [`KernelError::Generic`] if no inputs remain after dropping
+    /// absent relations.
+    pub fn write_json(
+        inputs: impl IntoIterator<Item = PlanBuilder>,
+        file_path: Url,
+        overwrite: bool,
+        ordered: bool,
+    ) -> Result<Self> {
+        let inputs = Vec::from_iter(inputs);
+        let Some(schema) = inputs.first().map(|input| input.schema().clone()) else {
+            return Err(KernelError::generic(
+                "WriteJson requires at least one input",
+            ));
+        };
+        for (i, input) in inputs.iter().enumerate() {
+            if !input.schema().fields().eq(schema.fields()) {
+                return Err(KernelError::schema(format!(
+                    "WriteJson input {i} has a schema differing from input 0"
+                )));
+            }
+        }
+        let inputs: Vec<_> = inputs
+            .into_iter()
+            .filter_map(|input| match input.0 {
+                PlanBuilderRoot::Present(node) => Some(node),
+                PlanBuilderRoot::Absent(_) => None,
+            })
+            .collect();
+        if inputs.is_empty() {
+            return Err(KernelError::generic(
+                "WriteJson requires at least one input row",
+            ));
+        }
+        Ok(Self::present(
+            FILE_META_SCHEMA.clone(),
+            WriteJson {
+                schema,
+                file_path,
+                overwrite,
+                ordered,
+            },
+            inputs,
+        ))
     }
 
     /// Keep rows where `predicate` holds. Output schema is unchanged. See [`Filter`].
@@ -931,6 +984,56 @@ mod tests {
             PlanBuilder::union_all([vals(id_schema())])?,
             &[(&[], "values")],
         );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn write_json_preserves_inputs_and_declares_schema(
+        #[values(false, true)] overwrite: bool,
+        #[values(false, true)] ordered: bool,
+    ) -> Result<()> {
+        let first = vals(id_schema());
+        let second = vals(id_schema());
+        let path = Url::parse("memory:///output")?;
+        let builder = PlanBuilder::write_json(
+            [first.clone(), absent_src(), second, first],
+            path.clone(),
+            overwrite,
+            ordered,
+        )?;
+        assert_eq!(builder.schema(), &*FILE_META_SCHEMA);
+        let plan = assert_plan(
+            builder,
+            &[(&[], "values"), (&[], "values"), (&[0, 1, 0], "write_json")],
+        );
+        let Operator::WriteJson(node) = &plan.nodes[2].op else {
+            panic!("expected WriteJson");
+        };
+        assert_eq!(node.schema, id_schema());
+        assert_eq!(node.file_path, path);
+        assert_eq!(node.overwrite, overwrite);
+        assert_eq!(node.ordered, ordered);
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[case::no_inputs(vec![])]
+    #[case::absent_inputs(vec![absent_src(), absent_src()])]
+    fn write_json_rejects_empty_inputs(#[case] inputs: Vec<PlanBuilder>) -> Result<()> {
+        let path = Url::parse("memory:///output")?;
+        let result = PlanBuilder::write_json(inputs, path, false, false);
+        assert!(matches!(result, Err(KernelError::Generic(message))
+            if message.contains("at least one input")));
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[case::present(vals(x_schema()))]
+    #[case::absent(absent_over(x_schema()))]
+    fn write_json_rejects_mismatched_input_schema(#[case] other: PlanBuilder) -> Result<()> {
+        let path = Url::parse("memory:///output")?;
+        let result = PlanBuilder::write_json([vals(id_schema()), other], path, false, false);
+        assert!(matches!(result, Err(KernelError::Schema(_))));
         Ok(())
     }
 
