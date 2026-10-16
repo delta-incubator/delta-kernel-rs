@@ -5,51 +5,70 @@
 [Full Changelog](https://github.com/delta-io/delta-kernel-rs/compare/v0.29.0...v0.30.0)
 
 
-### Breaking changes
+### 🏗️ Breaking changes
 
-1. Rename the error and result APIs ([#3420]), ([#3477]). Replace `DeltaResult`,
-   `DeltaResultIterator`, and `DeltaResultIteratorStatic` with `Result`, `ResultIterator`, and
-   `ResultIteratorStatic`. Replace the old `Error` imports and variant matches with `KernelError`.
-   `Result<T>` still defaults to `KernelError`; the new top-level `Error` is a separate wrapper.
+1. Rename the error and result APIs ([#3420]), ([#3477])
+    - Replace `DeltaResult`, `DeltaResultIterator`, and `DeltaResultIteratorStatic` with
+    `Result`, `ResultIterator`, and `ResultIteratorStatic`.
+    - Replace the old `Error` imports and variant matches with `KernelError`.
+    - `Result<T>` still defaults to `KernelError`; the new top-level `Error` is a separate wrapper.
 2. Construct existing-table transactions through `Snapshot::update_table` ([#3174]), ([#3574]),
-   ([#3592]), ([#3627]). Replace `snapshot.transaction(committer, engine)?` with
-   `snapshot.update_table(UpdateTableOperation::Write, "connector/1.0", true)
-   .build(engine, committer)?`. Supply the operation, engine info, and data-change intent at
-   construction. Use `false` for metadata-only commits or data-preserving rewrites; Kernel retains
-   explicit intent even when no files are staged. Configure schema changes, blind append, and
-   correlation IDs on the builder before `build()`; operation and engine info cannot be changed.
-   Replace `snapshot.alter_table()` with
-   `snapshot.update_table(UpdateTableOperation::AlterTable, "connector/1.0", false)` and add a schema
-   change before building. Empty schema-change requests are rejected ([#3606]).
-   Replace `ExistingTable` and `AlterTable` with `UpdateTable`, and `AlterTableTransaction` with
-   `Transaction<UpdateTable>` using the ALTER operation. Remove `SupportsDataFiles` bounds.
-   Transaction/result generics gain an execution-mode parameter defaulting to `Imperative`;
-   default type annotations continue to work. ALTER file staging is rejected at commit.
-3. Return the written file size from `ParquetHandler::write_parquet_file` ([#3346]). Custom
-   handlers must return `Result<FileSize>` with the complete serialized length, including footer,
-   instead of `Result<()>`; callers that need no size can discard the result.
-4. Update Arrow integration to Arrow 60 ([#3403]). Remove `arrow-58` feature selections; `arrow`
-   now selects Arrow 60, and explicit `arrow-59` remains supported with Arrow/Parquet 59.3 or newer.
-   Align shared Arrow, Parquet, and object-store types with the selected version. For Arrow 59,
-   disable default-engine's default features and explicitly select `arrow-59` and a TLS backend.
-5. Add `allow_invalid_hostnames: false` or `..Default::default()` to complete
-   `RestClientOptions` literals ([#3621]). The new option defaults to false; enabling it bypasses
-   hostname matching while retaining certificate trust and validity checks.
-6. Import `transform_output_type!` from `delta_kernel::transforms` instead of the crate root
-   ([#3402]).
-7. Add `check_constraints` or `..Default::default()` to complete `TableProperties` literals
-   ([#3439]). Lowercase `delta.constraints.` properties move from `unknown_properties` into this
-   collection. Parsing does not enable CHECK-constraint writes; unsupported writes remain blocked.
-8. Update unavailable-range fallback logic for `KernelError::StartVersionNotFound` ([#3432]).
-   A missing requested start with later retained commits returns this error; an empty log returns
-   `EmptyLog`. Continue handling `MissingVersion` for gaps or an unavailable end.
-9. Structured scan statistics exclude fields read solely for predicate pruning ([#3308]). Request
-   needed output fields explicitly and use `ScanBuilder::stats_output_schemas()` to inspect the
-   logical and physical output schemas.
-10. With experimental features enabled, update exhaustive enum matches for
+   ([#3592]), ([#3627])
+    - Replace `snapshot.transaction(committer, engine)?` with
+    `snapshot.update_table(UpdateTableOperation::Write, "connector/1.0", true)
+    .build(engine, committer)?`.
+    - Supply the operation, engine info, and data-change intent at construction. Use `false` for
+    metadata-only commits or data-preserving rewrites; Kernel retains explicit intent even when
+    no files are staged.
+    - Configure schema changes, blind append, and correlation IDs on the builder before `build()`;
+    operation and engine info cannot be changed.
+    - Replace `snapshot.alter_table()` with
+    `snapshot.update_table(UpdateTableOperation::AlterTable, "connector/1.0", false)` and add a schema
+    change before building. Empty schema-change requests are rejected ([#3606]).
+    - Replace `ExistingTable` and `AlterTable` with `UpdateTable`, and `AlterTableTransaction` with
+    `Transaction<UpdateTable>` using the ALTER operation. Remove `SupportsDataFiles` bounds.
+    - Transaction/result generics gain an execution-mode parameter defaulting to `Imperative`;
+    default type annotations continue to work. ALTER file staging is rejected at commit.
+3. Return the written file size from `ParquetHandler::write_parquet_file` ([#3346])
+    - Custom handlers must return `Result<FileSize>` with the complete serialized length, including
+    footer, instead of `Result<()>`; callers that need no size can discard the result.
+4. Update Arrow integration to Arrow 60 ([#3403])
+    - Remove `arrow-58` feature selections; `arrow` now selects Arrow 60, and explicit `arrow-59`
+    remains supported with Arrow/Parquet 59.3 or newer.
+    - Align shared Arrow, Parquet, and object-store types with the selected version. For Arrow 59,
+    disable default-engine's default features and explicitly select `arrow-59` and a TLS backend.
+5. Add a REST client hostname-verification option ([#3621])
+    - Add `allow_invalid_hostnames: false` or `..Default::default()` to complete
+    `RestClientOptions` literals.
+    - The new option defaults to false; enabling it bypasses hostname matching while retaining
+    certificate trust and validity checks.
+6. Move `transform_output_type!` into the `transforms` module ([#3402])
+    - Import `transform_output_type!` from `delta_kernel::transforms` instead of the crate root.
+7. Parse CHECK constraints into `TableProperties` ([#3439])
+    - Add `check_constraints` or `..Default::default()` to complete `TableProperties` literals.
+    - Lowercase `delta.constraints.` properties move from `unknown_properties` into this collection.
+    Parsing does not enable CHECK-constraint writes; unsupported writes remain blocked.
+8. Update unavailable-range fallback logic for `KernelError::StartVersionNotFound` ([#3432])
+    - A missing requested start with later retained commits returns this error; an empty log returns
+    `EmptyLog`. Continue handling `MissingVersion` for gaps or an unavailable end.
+9. Exclude predicate-only fields from structured scan statistics ([#3308])
+    - Structured scan statistics exclude fields read solely for predicate pruning. Request needed
+    output fields explicitly and use `ScanBuilder::stats_output_schemas()` to inspect the logical
+    and physical output schemas.
+10. Extend experimental schema and deletion-vector enums ([#3372]), ([#3473])
+    - With experimental features enabled, update exhaustive enum matches for
     `DataType::UserDefined` (`udt-in-dev`) and
-    `DeletionVectorStorageType::PersistedUnencodedRelative` (`adaptive-metadata-in-dev`)
-    ([#3372]), ([#3473]). See the preview migration details below.
+    `DeletionVectorStorageType::PersistedUnencodedRelative` (`adaptive-metadata-in-dev`).
+    See “Experimental and internal API migration” below.
+11. Make ffi builder configuration consuming ([#3431])
+    - Replace engine setters with `builder_with_option`,
+    `builder_with_multithreaded_executor`, `builder_with_io_concurrency`, and
+    `builder_with_rest_object_store`.
+    - Pass builder handles by value and use the returned handle on success. The original handle
+    is consumed on every outcome; never reuse or free it, including after an error.
+    - Snapshot, snapshot-hint, and commit-range builder configuration follows the same ownership
+    contract. Builder handle types change from `MutableFfi*Builder` to `Exclusive*Builder`.
+    - Regenerate C headers and rebuild callers against the new ABI.
 
 ### Experimental and internal API migration
 
@@ -68,8 +87,9 @@
   Replace `ExpectedStatsSchemas` and `build_expected_stats_schemas` with the scan output-schema API
   ([#3308]). Regenerate distributed scan state when upgrading workers together.
 - Under `internal-api`, VARIANT bounds and, with `geo-type-in-dev`, GEOMETRY bounds are opt-in
-  structured-statistics requests requiring engine decoding support ([#3367]), ([#3524]). Kernel does not prune using these
-  bounds. These options do not establish general default-engine encoding support.
+  structured-statistics requests requiring engine decoding support ([#3367]), ([#3524]).
+  Kernel does not prune using these bounds. These options do not establish general default-engine
+  encoding support.
 
 ### 🚀 Features / new APIs
 
@@ -98,7 +118,7 @@
 23. Add nested expression construction macro ([#3587])
 24. Add normalized adaptiveMetadata deletion-vector identity ([#3474])
 25. Read UDT columns as their sqlType ([#3374])
-26. Use the `Location` to lookup `LastManifestCommit` ([#3546])
+26. Resolve the latest AMT checkpoint action from CRC `lastManifestCommit` ([#3546])
 27. Expose incremental crc replay on FFI snapshot builder ([#3620])
 28. Introduce write json plan node ([#3511])
 29. Enable new log replay normalization for AMT ([#3476])
@@ -135,23 +155,22 @@
 ### 🚜 Refactor
 
 1. Extract a helper finding latest checkpoint action ([#3413])
-2. Make ffi builder configuration consuming ([#3431])
-3. Rename UCClient to UCDeltaTableClient; already shipped in REST 0.1.0 ([#3463])
-4. Use kernel results for private operations ([#3478])
-5. Relocate iceberg path resolution into top level module ([#3481])
-6. Split txn.commit into engine-data vs non-engine-data helpers ([#3440])
-7. Extract snapshot hint into its own module ([#3525])
-8. Extract struct_expr_from_schema into content_tree mod ([#3516])
-9. Remove the unhelpful LogReplayProcessor trait ([#3549])
-10. Load DAT specs once ([#3452])
-11. Parameterize AMT read path over Add row-tracking field sources ([#3471])
-12. Clean up transaction validation and commit path ([#3559])
-13. Introduce execution mode typestate for transactions ([#3512])
-14. Extract commit-file action reader in ParsedLogPath ([#3550])
-15. Resolve domain metadata dependencies after feature selection ([#3521])
-16. Centralize cached scan cancellation ([#3585])
-17. Plumb optional table_root into file-action deduplicators ([#3475])
-18. Bundle commit-path state into CommitBatches and PostCommitInputs ([#3557])
+2. Rename UCClient to UCDeltaTableClient; already shipped in REST 0.1.0 ([#3463])
+3. Use kernel results for private operations ([#3478])
+4. Relocate iceberg path resolution into top level module ([#3481])
+5. Split txn.commit into engine-data vs non-engine-data helpers ([#3440])
+6. Extract snapshot hint into its own module ([#3525])
+7. Extract struct_expr_from_schema into content_tree mod ([#3516])
+8. Remove the unhelpful LogReplayProcessor trait ([#3549])
+9. Load DAT specs once ([#3452])
+10. Parameterize AMT read path over Add row-tracking field sources ([#3471])
+11. Clean up transaction validation and commit path ([#3559])
+12. Introduce execution mode typestate for transactions ([#3512])
+13. Extract commit-file action reader in ParsedLogPath ([#3550])
+14. Resolve domain metadata dependencies after feature selection ([#3521])
+15. Centralize cached scan cancellation ([#3585])
+16. Plumb optional table_root into file-action deduplicators ([#3475])
+17. Bundle commit-path state into CommitBatches and PostCommitInputs ([#3557])
 
 ### 🧪 Testing
 
