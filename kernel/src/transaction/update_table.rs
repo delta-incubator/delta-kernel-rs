@@ -206,9 +206,10 @@ impl Transaction<UpdateTable, Imperative> {
     /// selection vector are the ones to be removed).
     /// When row tracking is enabled, selected rows must have non-null,
     /// non-negative `baseRowId` and `defaultRowCommitVersion` in `fileConstantValues`.
-    /// When row tracking is supported but not enabled, some rows may lack these fields.
-    /// E.g., if row tracking support is added partway through a table's history, files that existed
-    /// before row tracking was supported may not have been backfilled with these fields yet.
+    /// Note: We only validate these fields when row tracking is enabled. When row tracking is
+    /// supported but not enabled, some rows may lack these fields. E.g., if row tracking support is
+    /// added partway through a table's history, files that existed before row tracking was supported
+    /// may not have been backfilled with these fields yet.
     ///
     /// # Example
     ///
