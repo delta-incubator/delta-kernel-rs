@@ -275,14 +275,14 @@ impl LogSegment {
     fn replay_commits_into_crc_delta<'a>(
         &self,
         engine: &dyn Engine,
-        ascending_commits: impl DoubleEndedIterator<Item = &'a ParsedLogPath>,
+        mut ascending_commits: impl DoubleEndedIterator<Item = &'a ParsedLogPath>,
         seed_histogram: Option<FileSizeHistogram>,
     ) -> KernelResult<CrcDelta> {
-        let ascending_commits: Vec<_> = ascending_commits.collect();
         // Replay newest-first: ICT capture reads from the newest commit only.
-        let locations: Vec<FileMeta> = ascending_commits
-            .iter()
-            .rev()
+        let newest = ascending_commits.next_back();
+        let locations: Vec<FileMeta> = newest
+            .into_iter()
+            .chain(ascending_commits.rev())
             .map(|c| c.location.clone())
             .collect();
         let mut acc = CrcReplayAccumulator::new(seed_histogram);
@@ -305,7 +305,7 @@ impl LogSegment {
         let delta = acc.into_crc_delta();
         #[cfg(feature = "adaptive-metadata-in-dev")]
         if let (Some(newest), Some(last_manifest_commit)) =
-            (ascending_commits.last(), &delta.last_manifest_commit)
+            (newest, &delta.last_manifest_commit)
         {
             last_manifest_commit.ensure_at_or_before(newest.version)?;
         }
