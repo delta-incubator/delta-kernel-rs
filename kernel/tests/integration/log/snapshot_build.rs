@@ -78,7 +78,7 @@ async fn setup_multi_version_table<E: TaskExecutor>(
     kind: TableKind,
 ) -> Result<()> {
     let schema = schema_ref! { nullable "id": INTEGER };
-    let builder = create_table(table_path, schema, "test_engine");
+    let builder = create_table(table_path, schema, "test_engine", true);
     let builder = match kind {
         TableKind::FileSystem => builder,
         TableKind::CatalogManaged => builder.with_table_properties([
@@ -202,6 +202,7 @@ async fn snapshot_load_validates_reader_protocol(
         table_url.as_str(),
         schema_ref! { nullable "id": INTEGER },
         "test_engine",
+        true,
     )
     .build(&engine, Box::new(FileSystemCommitter::new()))?
     .commit(&engine)?
@@ -271,7 +272,7 @@ async fn row_tracking_configuration_rejects_only_enabled_and_suspended(
     // === Create version 0 with row-tracking support ===
     let schema = schema_ref! { nullable "value": INTEGER };
     let (store, engine, table_url) = engine_store_setup("row_tracking_configuration", None);
-    create_table(&table_url, schema, "test_engine")
+    create_table(&table_url, schema, "test_engine", true)
         .with_table_properties([("delta.feature.rowTracking", "supported")])
         .build(&engine, Box::new(FileSystemCommitter::new()))?
         .commit(&engine)?

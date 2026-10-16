@@ -229,9 +229,9 @@ fn dv_descriptor_map_insert_impl(
 /// references a path that does not appear in the iterator, the call returns an error and
 /// leaves the transaction unchanged.
 ///
-/// This stages data-changing DV updates by default. Configure the update-table builder with
-/// [`crate::transaction::update_table_txn_builder_with_data_change`] for maintenance operations
-/// that should commit with `dataChange = false`.
+/// These updates use the `data_change` flag supplied to
+/// [`crate::transaction::new_update_table_txn_builder`]. Pass `false` for maintenance operations
+/// that preserve logical data.
 ///
 /// # Safety
 ///

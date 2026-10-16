@@ -52,7 +52,7 @@ if let Some(committed_version) = snapshot.get_app_id_version(app_id, &engine)? {
 
 // Not yet committed. Proceed with the write.
 let txn = snapshot
-    .update_table(UpdateTableOperation::StreamingUpdate, "my-app/1.0")
+    .update_table(UpdateTableOperation::StreamingUpdate, "my-app/1.0", /* data_change */ true)
     .with_transaction_id(app_id.to_string(), batch_version)
     .build(&engine, Box::new(FileSystemCommitter::new()))?;
 

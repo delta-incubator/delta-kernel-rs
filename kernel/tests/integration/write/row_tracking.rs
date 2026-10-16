@@ -88,6 +88,7 @@ mod row_tracking_preservation {
             table_path.as_str(),
             schema_ref! { nullable "number": INTEGER },
             "Test/1.0",
+            true,
         )
         .with_table_properties(test_case.create_table_properties().iter().copied())
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
@@ -127,6 +128,7 @@ mod row_tracking_preservation {
             table_path.as_str(),
             schema_ref! { nullable "number": INTEGER },
             "Test/1.0",
+            true,
         )
         .with_table_properties([("delta.enableRowTracking", "true")])
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
@@ -146,13 +148,14 @@ mod row_tracking_preservation {
             table_path.as_str(),
             schema_ref! { nullable "number": INTEGER },
             "Test/1.0",
+            true,
         )
         .with_table_properties([("delta.enableRowTracking", "true")])
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
         .commit(engine.as_ref())?
         .unwrap_post_commit_snapshot();
         let commit_version = snapshot
-            .update_table(UpdateTableOperation::AlterTable, "test-engine")
+            .update_table(UpdateTableOperation::AlterTable, "test-engine", false)
             .add_column(StructField::nullable("added", DataType::INTEGER))
             .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
             .commit(engine.as_ref())?
@@ -178,6 +181,7 @@ mod row_tracking_preservation {
             table_path.as_str(),
             schema_ref! { nullable "number": INTEGER },
             "Test/1.0",
+            true,
         )
         .with_table_properties([("delta.enableRowTracking", "true")])
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
@@ -188,7 +192,7 @@ mod row_tracking_preservation {
         let (connector_commit_info, connector_commit_info_schema) =
             test_case.connector_commit_info()?;
         let commit_info = Box::new(ArrowEngineData::new(connector_commit_info));
-        let builder = snapshot.update_table(UpdateTableOperation::Write, "test-engine");
+        let builder = snapshot.update_table(UpdateTableOperation::Write, "test-engine", true);
         let txn = if set_commit_info_after_build {
             builder
                 .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
@@ -353,7 +357,7 @@ mod row_tracking_preservation {
         let (_temp_dir, table_path, engine) = test_table_setup_mt()?;
         let schema = schema_ref! { nullable "number": INTEGER };
         let table_url = Url::from_directory_path(&table_path).unwrap();
-        kernel_create_table(table_path.as_str(), schema.clone(), "Test/1.0")
+        kernel_create_table(table_path.as_str(), schema.clone(), "Test/1.0", true)
             .with_table_properties(test_case.create_table_properties().iter().copied())
             .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
             .commit(engine.as_ref())?
@@ -387,8 +391,7 @@ mod row_tracking_preservation {
             .unwrap()?
             .scan_files;
         let mut txn = snapshot
-            .update_table(UpdateTableOperation::Write, "test-engine")
-            .with_data_change(true)
+            .update_table(UpdateTableOperation::Write, "test-engine", true)
             .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?;
         txn.remove_files(scan_files);
         if test_case.acknowledges_preservation() {
@@ -476,7 +479,7 @@ mod row_tracking_preservation {
         // === Write two source files ===
         let (_temp_dir, table_path, engine) = test_table_setup_mt()?;
         let schema = schema_ref! { nullable "number": INTEGER };
-        let snapshot = kernel_create_table(table_path.as_str(), schema, "Test/1.0")
+        let snapshot = kernel_create_table(table_path.as_str(), schema, "Test/1.0", true)
             .with_table_properties(table_properties.iter().copied())
             .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
             .commit(engine.as_ref())?
@@ -584,6 +587,7 @@ mod row_tracking_preservation {
             table_path.as_str(),
             schema_ref! { nullable "number": INTEGER },
             "Test/1.0",
+            true,
         )
         .with_table_properties([
             ("delta.enableDeletionVectors", "true"),
@@ -603,7 +607,7 @@ mod row_tracking_preservation {
         // === Delete rows 20 and 40 with a deletion vector ===
         let mut txn = source_snapshot
             .clone()
-            .update_table(UpdateTableOperation::Delete, "test-engine")
+            .update_table(UpdateTableOperation::Delete, "test-engine", true)
             .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?;
         let write_context = txn.write_state()?.write_context_builder().build()?;
         let mut deletion_vector = KernelDeletionVector::new();
@@ -678,8 +682,7 @@ mod row_tracking_preservation {
     ) -> Result<Arc<Snapshot>> {
         let source_files = get_scan_files(snapshot.clone(), engine.as_ref())?;
         let mut txn = snapshot
-            .update_table(UpdateTableOperation::Optimize, "test-engine")
-            .with_data_change(false)
+            .update_table(UpdateTableOperation::Optimize, "test-engine", false)
             .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?;
         let write_context = txn
             .write_state()?
@@ -758,13 +761,14 @@ fn write_context_row_tracking_columns_respect_iceberg_compat_v3(
         table_path.as_str(),
         schema_ref! { nullable "number": INTEGER },
         "Test/1.0",
+        true,
     )
     .with_table_properties(table_properties.iter().copied())
     .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
     .commit(engine.as_ref())?
     .unwrap_post_commit_snapshot();
     let txn = snapshot
-        .update_table(UpdateTableOperation::Write, "test-engine")
+        .update_table(UpdateTableOperation::Write, "test-engine", true)
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?;
     let result = txn
         .write_state()?
@@ -791,7 +795,7 @@ async fn write_context_maps_row_tracking_metadata_to_physical(
     // === Create table and insert data ===
     let (_temp_dir, table_path, engine) = test_table_setup_mt()?;
     let schema = schema_ref! { nullable "number": INTEGER };
-    let snapshot = kernel_create_table(table_path.as_str(), schema, "Test/1.0")
+    let snapshot = kernel_create_table(table_path.as_str(), schema, "Test/1.0", true)
         .with_table_properties([
             ("delta.columnMapping.mode", column_mapping_mode),
             ("delta.enableRowTracking", "true"),
@@ -842,7 +846,7 @@ async fn write_context_maps_row_tracking_metadata_to_physical(
     // === Build the write context ===
     let txn = source_snapshot
         .clone()
-        .update_table(UpdateTableOperation::Write, "test-engine")
+        .update_table(UpdateTableOperation::Write, "test-engine", true)
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?;
     let write_context = txn
         .write_state()?

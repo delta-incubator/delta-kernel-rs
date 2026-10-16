@@ -22,7 +22,7 @@ async fn test_checkpoint_and_checksum_return_updated_snapshots(
     // ===== GIVEN =====
     let (_temp_dir, table_path, engine) = test_table_setup_mt()?;
     let schema = schema_ref! { nullable "id": INTEGER };
-    let mut builder = create_table(&table_path, schema, "test_engine");
+    let mut builder = create_table(&table_path, schema, "test_engine", true);
     if v2_checkpoint {
         builder = builder.with_table_properties([("delta.feature.v2Checkpoint", "supported")]);
     }
@@ -79,7 +79,7 @@ async fn test_checkpoint_and_checksum_return_updated_snapshots(
 async fn test_checkpoint_already_exists(#[case] v2_checkpoint: bool) -> Result<()> {
     let (_temp_dir, table_path, engine) = test_table_setup_mt()?;
     let schema = schema_ref! { nullable "id": INTEGER };
-    let mut builder = create_table(&table_path, schema, "test_engine");
+    let mut builder = create_table(&table_path, schema, "test_engine", true);
     if v2_checkpoint {
         builder = builder.with_table_properties([("delta.feature.v2Checkpoint", "supported")]);
     }

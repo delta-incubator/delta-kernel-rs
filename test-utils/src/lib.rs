@@ -1237,9 +1237,7 @@ pub async fn insert_data_with<E: TaskExecutor>(
         "OPTIMIZE" => UpdateTableOperation::Optimize,
         operation => UpdateTableOperation::Custom(operation.to_string()),
     };
-    let mut builder = snapshot
-        .update_table(operation, "test-utils")
-        .with_data_change(data_change);
+    let mut builder = snapshot.update_table(operation, "test-utils", data_change);
     if is_blind_append {
         builder = builder.with_blind_append();
     }
@@ -1263,11 +1261,13 @@ pub fn begin_transaction(snapshot: Arc<Snapshot>, engine: &dyn Engine) -> Result
         engine,
         UpdateTableOperation::Write,
         "test-utils",
+        true,
         |builder| builder,
     )
 }
 
-/// Starts a transaction with `operation` and `engine_info` after applying `configure`.
+/// Starts a transaction with `operation`, `engine_info`, and `data_change` after applying
+/// `configure`.
 ///
 /// Uses `snapshot` as the read state and `engine` for build validation. Returns the built
 /// transaction using a [`FileSystemCommitter`], or an error if the configured intent is invalid.
@@ -1276,9 +1276,10 @@ pub fn begin_transaction_with(
     engine: &dyn Engine,
     operation: UpdateTableOperation,
     engine_info: impl Into<String>,
+    data_change: bool,
     configure: impl FnOnce(UpdateTableTransactionBuilder) -> UpdateTableTransactionBuilder,
 ) -> Result<Transaction> {
-    configure(snapshot.update_table(operation, engine_info))
+    configure(snapshot.update_table(operation, engine_info, data_change))
         .build(engine, Box::new(FileSystemCommitter::new()))
 }
 
@@ -1325,12 +1326,13 @@ pub fn load_and_begin_transaction(
         engine,
         UpdateTableOperation::Write,
         "test-utils",
+        true,
         |builder| builder,
     )
 }
 
 /// Loads the latest snapshot from `table_url` and starts a transaction with `operation` and
-/// `engine_info`.
+/// `engine_info` and `data_change`.
 ///
 /// Applies `configure` to the builder and uses `engine` for snapshot loading and build validation.
 /// Returns the built transaction, or propagates snapshot loading and builder validation errors.
@@ -1339,10 +1341,18 @@ pub fn load_and_begin_transaction_with(
     engine: &dyn Engine,
     operation: UpdateTableOperation,
     engine_info: impl Into<String>,
+    data_change: bool,
     configure: impl FnOnce(UpdateTableTransactionBuilder) -> UpdateTableTransactionBuilder,
 ) -> Result<Transaction> {
     let snapshot = Snapshot::builder_for(table_url).build(engine)?;
-    begin_transaction_with(snapshot, engine, operation, engine_info, configure)
+    begin_transaction_with(
+        snapshot,
+        engine,
+        operation,
+        engine_info,
+        data_change,
+        configure,
+    )
 }
 
 // Helper function to set json values in a serde_json Values
@@ -1698,8 +1708,7 @@ pub async fn write_batch_to_table(
 ) -> Result<Arc<Snapshot>, Box<dyn std::error::Error>> {
     let mut txn = snapshot
         .clone()
-        .update_table(UpdateTableOperation::Write, "DefaultEngine")
-        .with_data_change(true)
+        .update_table(UpdateTableOperation::Write, "DefaultEngine", true)
         .build(engine, Box::new(FileSystemCommitter::new()))?;
     txn.ack_column_defaults();
     let write_state = txn.write_state()?;
@@ -2012,7 +2021,7 @@ pub fn create_table_and_load_snapshot(
     use delta_kernel::committer::FileSystemCommitter;
     use delta_kernel::transaction::create_table::create_table;
 
-    let _ = create_table(table_path, schema, "Test/1.0")
+    let _ = create_table(table_path, schema, "Test/1.0", true)
         .with_table_properties(properties.to_vec())
         .build(engine, Box::new(FileSystemCommitter::new()))?
         .commit(engine)?;
@@ -2181,8 +2190,7 @@ pub fn remove_all_and_get_remove_actions(
 
     let mut txn = snapshot
         .clone()
-        .update_table(UpdateTableOperation::Write, "DefaultEngine")
-        .with_data_change(true)
+        .update_table(UpdateTableOperation::Write, "DefaultEngine", true)
         .build(engine, Box::new(FileSystemCommitter::new()))?;
     for sm in all_scan_metadata {
         txn.remove_files(sm.scan_files);

@@ -91,8 +91,8 @@ async fn try_main() -> Result<()> {
         .update_table(
             UpdateTableOperation::Custom("INSERT".to_string()),
             "default_engine/write-table-example",
+            /* data_change */ true,
         )
-        .with_data_change(true)
         .build(&engine, committer)?;
 
     // This example assumes the table is unpartitioned.
@@ -200,9 +200,14 @@ async fn create_table(
 ) -> KernelResult<()> {
     // Use the create_table API to create the table
     let table_path = table_url.as_str();
-    let _result = create_delta_table(table_path, schema.clone(), "write-table-example/1.0")
-        .build(engine, Box::new(FileSystemCommitter::new()))?
-        .commit(engine)?;
+    let _result = create_delta_table(
+        table_path,
+        schema.clone(),
+        "write-table-example/1.0",
+        /* data_change */ true,
+    )
+    .build(engine, Box::new(FileSystemCommitter::new()))?
+    .commit(engine)?;
 
     println!("✓ Created Delta table with schema: {schema:#?}");
     Ok(())

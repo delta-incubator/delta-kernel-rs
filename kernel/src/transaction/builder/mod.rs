@@ -60,20 +60,6 @@ pub struct TransactionBuilder<T: TransactionType = UpdateTable> {
 }
 
 impl<T: TransactionType> TransactionBuilder<T> {
-    /// Sets whether file actions represent a logical data change and returns the updated builder.
-    ///
-    /// `true` indicates that the commit changes the table's logical contents. Use `false` for
-    /// metadata-only commits or rewrites that reorganize data without changing its contents.
-    /// Consecutive calls replace the previous value. Kernel preserves the supplied value through
-    /// commit, including empty commits, without comparing file contents to verify it.
-    ///
-    /// Transaction-specific defaults and inference are documented by the corresponding `build`
-    /// method.
-    pub fn with_data_change(mut self, data_change: bool) -> Self {
-        self.common_state.data_change = Some(data_change);
-        self
-    }
-
     /// Adds an application transaction identifier to emit as a `txn` action.
     ///
     /// Returns the updated builder. The action's `lastUpdated` value uses the transaction's commit
@@ -191,7 +177,7 @@ mod tests {
     impl TransactionBuilder<CustomType> {
         fn new(engine_info: &str) -> Self {
             Self {
-                common_state: TransactionBuilderState::for_update_table(engine_info.into()),
+                common_state: TransactionBuilderState::new(engine_info.into(), false),
                 local_state: (),
             }
         }
@@ -206,7 +192,6 @@ mod tests {
             .with_operation_metrics([("numFiles", Some("3"))])
             .with_transaction_id("app", 7)
             .with_domain_metadata("app.domain", "{}")
-            .with_data_change(false)
             .with_commit_info(
                 string_array_to_engine_data(StringArray::from(vec!["tag"])),
                 schema_ref! { nullable "a": STRING },
@@ -236,7 +221,7 @@ mod tests {
             builder.common_state.domain_metadata_additions[0].domain(),
             "app.domain"
         );
-        assert_eq!(builder.common_state.data_change, Some(false));
+        assert!(!builder.common_state.data_change);
         let (commit_info, schema) = builder.common_state.engine_commit_info.as_ref().unwrap();
         assert_eq!(commit_info.len(), 1);
         assert_eq!(

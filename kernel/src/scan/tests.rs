@@ -367,7 +367,7 @@ fn test_scan_builder_accepts_predicate_on_unprojected_data_column() {
         nullable "number": LONG,
         nullable "a_float": FLOAT,
     };
-    create_table(url, schema, "DefaultEngine")
+    create_table(url, schema, "DefaultEngine", true)
         .build(&engine, Box::new(FileSystemCommitter::new()))
         .unwrap()
         .commit(&engine)
@@ -398,7 +398,7 @@ fn test_scan_builder_rejects_predicate_on_projection_only_metadata_column() {
     let engine = SyncEngine::new_with_store(store);
 
     let schema = schema_ref! { nullable "id": LONG };
-    create_table(url, schema, "DefaultEngine")
+    create_table(url, schema, "DefaultEngine", true)
         .build(&engine, Box::new(FileSystemCommitter::new()))
         .unwrap()
         .commit(&engine)
@@ -2348,7 +2348,7 @@ fn scan_builder_stats_output_schemas_match_scan_output(#[case] column_mapping_mo
         nullable "value": LONG,
         nullable "other": LONG,
     };
-    let mut create_builder = create_table(table_root, schema, "DefaultEngine")
+    let mut create_builder = create_table(table_root, schema, "DefaultEngine", true)
         .with_table_properties([("delta.dataSkippingNumIndexedCols", "1")]);
     if let Some(mode) = column_mapping_mode {
         create_builder = create_builder.with_table_properties([("delta.columnMapping.mode", mode)]);
@@ -2426,6 +2426,7 @@ fn scan_builder_stats_output_schemas_returns_none_without_data_columns(
         &table_root,
         schema_ref! { nullable "id": LONG },
         "DefaultEngine",
+        true,
     )
     .with_table_properties([("delta.dataSkippingNumIndexedCols", "0")]);
     if let Some(mode) = column_mapping_mode {
@@ -2468,7 +2469,7 @@ fn scan_builder_stats_output_schemas_respect_explicit_columns_and_partitions(
         nullable "part": STRING,
         nullable "other": LONG,
     };
-    let mut create_builder = create_table(table_root, schema, "DefaultEngine")
+    let mut create_builder = create_table(table_root, schema, "DefaultEngine", true)
         .with_data_layout(DataLayout::partitioned(["part"]))
         .with_table_properties([("delta.dataSkippingStatsColumns", "info.name")]);
     if let Some(mode) = column_mapping_mode {
@@ -2524,7 +2525,7 @@ fn scan_builder_stats_output_schemas_handle_extra_column_shapes() {
         nullable "items": [ nullable INTEGER ],
         nullable "part": STRING,
     };
-    create_table(table_root, schema, "DefaultEngine")
+    create_table(table_root, schema, "DefaultEngine", true)
         .with_data_layout(DataLayout::partitioned(["part"]))
         .with_table_properties([("delta.dataSkippingNumIndexedCols", "1")])
         .build(&engine, Box::new(FileSystemCommitter::new()))
@@ -2574,7 +2575,7 @@ fn scan_builder_stats_output_schemas_validate_selected_columns() {
         },
         nullable "part": STRING,
     };
-    create_table(table_root, schema, "DefaultEngine")
+    create_table(table_root, schema, "DefaultEngine", true)
         .with_data_layout(DataLayout::partitioned(["part"]))
         .build(&engine, Box::new(FileSystemCommitter::new()))
         .unwrap()
@@ -2627,7 +2628,7 @@ fn scan_builder_stats_output_schemas_follow_struct_columns(
         nullable "id": LONG,
         nullable "name": STRING,
     };
-    let mut create_builder = create_table(&table_root, schema, "DefaultEngine");
+    let mut create_builder = create_table(&table_root, schema, "DefaultEngine", true);
     if let Some(mode) = column_mapping_mode {
         create_builder = create_builder.with_table_properties([("delta.columnMapping.mode", mode)]);
     }

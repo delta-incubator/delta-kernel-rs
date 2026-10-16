@@ -118,8 +118,7 @@ impl<MODE: ExecutionMode> Transaction<UpdateTable, MODE> {
     /// # Errors
     ///
     /// Returns an error if the table does not support the `adaptiveMetadata-preview` feature, or if
-    /// a manifest (content-tree) commit was already staged. Commit fails unless the transaction was
-    /// built with an explicit `with_data_change`.
+    /// a manifest (content-tree) commit was already staged.
     #[cfg(feature = "adaptive-metadata-in-dev")]
     pub fn with_root_manifest_file(mut self, file: FileMeta) -> Result<Self> {
         require!(
@@ -218,7 +217,11 @@ impl Transaction<UpdateTable, Imperative> {
     /// let snapshot = Snapshot::builder_for(table_url).build(engine.as_ref())?;
     /// let mut txn = snapshot
     ///     .clone()
-    ///     .update_table(delta_kernel::transaction::UpdateTableOperation::Write, "my-app/1.0")
+    ///     .update_table(
+    ///         delta_kernel::transaction::UpdateTableOperation::Write,
+    ///         "my-app/1.0",
+    ///         /* data_change */ true,
+    ///     )
     ///     .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?;
     ///
     /// // Get file metadata from a scan
@@ -308,7 +311,7 @@ impl Transaction<UpdateTable, Imperative> {
     /// ```rust,ignore
     /// let mut txn = snapshot
     ///     .clone()
-    ///     .update_table(UpdateTableOperation::Update, "my-app/1.0")
+    ///     .update_table(UpdateTableOperation::Update, "my-app/1.0", /* data_change */ true)
     ///     .build(engine, Box::new(FileSystemCommitter::new()))?;
     ///
     /// let scan = snapshot.scan_builder().build()?;

@@ -322,6 +322,7 @@ mod tests {
             .update_table(
                 crate::transaction::UpdateTableOperation::Write,
                 "test-engine",
+                true,
             )
             .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
             .fold_with(engine_commit_info, |txn, (data, schema)| {

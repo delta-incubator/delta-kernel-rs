@@ -46,7 +46,7 @@ fn v3_create_table_rejects_incompatible_props(
     let mut props: Vec<(&str, &str)> = vec![("delta.enableIcebergCompatV3", "true")];
     props.extend_from_slice(extra_props);
 
-    let err = create_table(&table_path, super::simple_schema()?, "Test/1.0")
+    let err = create_table(&table_path, super::simple_schema()?, "Test/1.0", true)
         .with_table_properties(props)
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))
         .unwrap_err()
@@ -80,7 +80,7 @@ fn v3_create_table_rejects_void_column(#[case] void_field: StructField) -> Resul
         (void_field),
     };
 
-    let err = create_table(&table_path, schema, "Test/1.0")
+    let err = create_table(&table_path, schema, "Test/1.0", true)
         .with_table_properties([("delta.enableIcebergCompatV3", "true")])
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))
         .unwrap_err()
@@ -110,7 +110,7 @@ fn v3_create_table_rejects_interval_column(
         (interval_field),
     };
 
-    let err = create_table(&table_path, schema, "Test/1.0")
+    let err = create_table(&table_path, schema, "Test/1.0", true)
         .with_table_properties([("delta.enableIcebergCompatV3", "true")])
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))
         .unwrap_err()
@@ -132,7 +132,7 @@ fn v3_supported_but_not_enabled_skips_cm_and_nested_ids() -> Result<()> {
         nullable "data": { INTEGER => nullable [nullable INTEGER] },
     };
 
-    let _ = create_table(&table_path, schema, "Test/1.0")
+    let _ = create_table(&table_path, schema, "Test/1.0", true)
         .with_table_properties([("delta.feature.icebergCompatV3", "supported")])
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
         .commit(engine.as_ref())?;
@@ -180,7 +180,7 @@ fn v2_create_table_enables_column_mapping_and_nested_ids() -> Result<()> {
         nullable "data": { STRING => nullable [nullable INTEGER] },
     };
 
-    let _ = create_table(&table_path, schema, "Test/1.0")
+    let _ = create_table(&table_path, schema, "Test/1.0", true)
         .with_table_properties([("delta.enableIcebergCompatV2", "true")])
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
         .commit(engine.as_ref())?;
@@ -225,7 +225,7 @@ fn v2_create_table_enables_column_mapping_and_nested_ids() -> Result<()> {
 fn v2_create_table_rejects_active_deletion_vectors() -> Result<()> {
     let (_temp_dir, table_path, engine) = test_table_setup()?;
 
-    let err = create_table(&table_path, super::simple_schema()?, "Test/1.0")
+    let err = create_table(&table_path, super::simple_schema()?, "Test/1.0", true)
         .with_table_properties([
             ("delta.enableIcebergCompatV2", "true"),
             ("delta.enableDeletionVectors", "true"),
@@ -244,7 +244,7 @@ fn v2_create_table_rejects_active_deletion_vectors() -> Result<()> {
 fn v2_create_table_allows_supported_inactive_deletion_vectors() -> Result<()> {
     let (_temp_dir, table_path, engine) = test_table_setup()?;
 
-    create_table(&table_path, super::simple_schema()?, "Test/1.0")
+    create_table(&table_path, super::simple_schema()?, "Test/1.0", true)
         .with_table_properties([
             ("delta.enableIcebergCompatV2", "true"),
             ("delta.feature.deletionVectors", "supported"),
@@ -267,7 +267,7 @@ fn v2_create_table_rejects_unsupported_type_change() -> Result<()> {
     )]);
     let schema = schema_ref! { (widened) };
 
-    let result = create_table(&table_path, schema, "Test/1.0")
+    let result = create_table(&table_path, schema, "Test/1.0", true)
         .with_table_properties([
             ("delta.enableIcebergCompatV2", "true"),
             ("delta.enableTypeWidening", "true"),

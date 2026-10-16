@@ -139,6 +139,7 @@ async fn test_no_add_actions() -> Result<(), Box<dyn std::error::Error>> {
             &engine,
             UpdateTableOperation::Write,
             "default engine",
+            true,
             |builder| builder,
         )?;
 
@@ -220,7 +221,8 @@ async fn test_append_partitioned(
             &engine,
             UpdateTableOperation::Write,
             "default engine",
-            |builder| builder.with_data_change(false),
+            false,
+            |builder| builder,
         )?;
 
         // create two new arrow record batches to append
@@ -371,6 +373,7 @@ async fn test_append_invalid_schema() -> Result<(), Box<dyn std::error::Error>> 
             &engine,
             UpdateTableOperation::Write,
             "default engine",
+            true,
             |builder| builder,
         )?;
 
@@ -430,7 +433,8 @@ async fn commit_rejects_add_missing_required_field() -> Result<(), Box<dyn std::
             engine.as_ref(),
             UpdateTableOperation::Write,
             "test-engine",
-            |builder| builder.with_data_change(true),
+            true,
+            |builder| builder,
         )?;
 
         let data = ArrowEngineData::new(RecordBatch::try_new(
@@ -516,7 +520,7 @@ async fn commit_rejects_add_with_invalid_partition_keys(
         nullable "p2": INTEGER,
     };
     let (_tmp_dir, table_path, engine) = test_utils::test_table_setup_mt()?;
-    let mut builder = create_table(&table_path, table_schema, "test/1.0")
+    let mut builder = create_table(&table_path, table_schema, "test/1.0", true)
         .with_data_layout(DataLayout::partitioned(["p1", "p2"]));
     if let Some(mode) = column_mapping_mode {
         builder = builder.with_table_properties([("delta.columnMapping.mode", mode)]);
@@ -564,8 +568,7 @@ async fn commit_rejects_add_with_invalid_partition_keys(
         })
         .collect();
     let mut txn = snapshot
-        .update_table(UpdateTableOperation::Write, "test-engine")
-        .with_data_change(true)
+        .update_table(UpdateTableOperation::Write, "test-engine", true)
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?;
     let write_state = txn.write_state()?;
     let add = make_add(&write_state, "b", 6)?;

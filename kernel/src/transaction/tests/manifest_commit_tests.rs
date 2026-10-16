@@ -2,7 +2,7 @@
 //! commits.
 
 use super::super::{ManifestCommitState, ManifestWrite, Transaction, UpdateTableOperation};
-use super::{add_dummy_file, create_existing_table_txn, create_existing_table_txn_with};
+use super::{add_dummy_file, create_existing_table_txn};
 use crate::actions::{DomainMetadata, LOG_DOMAIN_METADATA_SCHEMA};
 use crate::committer::FileSystemCommitter;
 use crate::engine::arrow_data::ArrowEngineData;
@@ -18,7 +18,7 @@ use crate::unit_test_utils::{
     assert_result_error_with_message, create_valid_add_file_batch, MockProtocolBuilder,
     MockTableConfigurationBuilder,
 };
-use crate::{create_row, FileMeta, Result};
+use crate::{create_row, FileMeta, KernelError, Result};
 
 fn adaptive_table_config() -> TableConfiguration {
     MockTableConfigurationBuilder::new()
@@ -55,8 +55,7 @@ fn with_root_manifest_file_rejects_non_adaptive_table() -> Result<()> {
 
 #[test]
 fn validate_manifest_write_allows_root_manifest_on_adaptive_table() -> Result<()> {
-    let (_engine, mut txn, _tempdir) =
-        create_existing_table_txn_with(|builder| builder.with_data_change(true))?;
+    let (_engine, mut txn, _tempdir) = create_existing_table_txn()?;
     txn.effective_table_config = adaptive_table_config();
     let file = dummy_root_manifest_file_meta(&txn);
     txn = txn.with_root_manifest_file(file)?;
@@ -198,8 +197,12 @@ fn new_leaf_node_writer_uses_effective_config_schema_not_snapshot() -> Result<()
     Ok(())
 }
 
-#[test]
-fn manifest_commit_after_schema_change_uses_evolved_schema() -> Result<()> {
+#[rstest::rstest]
+#[case(UpdateTableOperation::Write)]
+#[case(UpdateTableOperation::AlterTable)]
+fn manifest_commit_after_schema_change_uses_evolved_schema(
+    #[case] operation: UpdateTableOperation,
+) -> Result<()> {
     let (engine, table_root) = setup_table()?;
     let mut checkpoint = minimal_checkpoint_action("metadata/root-v1.parquet", 1)?;
     let max_column_id = find_max_column_id_in_schema(&checkpoint.metadata.parse_schema()?)
@@ -215,8 +218,9 @@ fn manifest_commit_after_schema_change_uses_evolved_schema() -> Result<()> {
     )?;
     let snapshot = Snapshot::builder_for(table_root).build(&engine)?;
     let initial_schema = snapshot.table_configuration().physical_schema();
+    let is_alter = operation == UpdateTableOperation::AlterTable;
     let mut txn = snapshot
-        .update_table(UpdateTableOperation::AlterTable, "test-engine")
+        .update_table(operation, "test-engine", !is_alter)
         .add_column(StructField::nullable("fresh_column", DataType::INTEGER))
         .build(&engine, Box::new(FileSystemCommitter::new()))?;
     let expected = txn.effective_table_config.physical_schema();
@@ -225,6 +229,13 @@ fn manifest_commit_after_schema_change_uses_evolved_schema() -> Result<()> {
         .with_manifest_commit(&engine)?
         .new_leaf_node_writer(&engine);
     assert_eq!(writer.physical_schema(), &expected);
+    if is_alter {
+        let error = txn.commit(&engine).unwrap_err();
+        assert!(
+            matches!(&error, KernelError::InvalidTransactionState(message)
+            if message == "ALTER TABLE cannot include manifest writes")
+        );
+    }
     Ok(())
 }
 

@@ -3,10 +3,11 @@
 
 use std::collections::HashMap;
 
-use delta_kernel::schema::schema_ref;
+use delta_kernel::committer::FileSystemCommitter;
+use delta_kernel::schema::{schema_ref, DataType, StructField};
 use delta_kernel::snapshot::{Snapshot, SnapshotRef};
 use delta_kernel::transaction::UpdateTableOperation;
-use delta_kernel::{Engine, FileMeta};
+use delta_kernel::{Engine, FileMeta, KernelError};
 use rstest::rstest;
 use serde_json::{json, Value};
 use tempfile::TempDir;
@@ -73,7 +74,8 @@ async fn test_with_root_manifest_file_produces_a_self_contained_checkpoint_actio
         &engine,
         UpdateTableOperation::Write,
         "test-engine",
-        |builder| builder.with_data_change(true),
+        true,
+        |builder| builder,
     )?
     .with_root_manifest_file(file.clone())?;
     txn.commit(&engine)?.unwrap_committed();
@@ -115,6 +117,33 @@ async fn test_with_root_manifest_file_produces_a_self_contained_checkpoint_actio
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn alter_table_commit_rejects_root_manifest() -> Result<(), Box<dyn std::error::Error>> {
+    let (engine, _temp_dir, table_url, before) =
+        setup_adaptive_metadata_table("alter_table_root_manifest").await?;
+    let file = FileMeta {
+        location: table_url.join("metadata/root-v1.parquet")?,
+        last_modified: 0,
+        size: 1024,
+    };
+    let txn = before
+        .clone()
+        .update_table(UpdateTableOperation::AlterTable, "test-engine", false)
+        .add_column(StructField::nullable("fresh_column", DataType::INTEGER))
+        .build(&engine, Box::new(FileSystemCommitter::new()))?
+        .with_root_manifest_file(file)?;
+
+    let error = txn.commit(&engine).unwrap_err();
+    assert!(
+        matches!(&error, KernelError::InvalidTransactionState(message)
+        if message == "ALTER TABLE cannot include manifest writes")
+    );
+    let fresh = Snapshot::builder_for(table_url).build(&engine)?;
+    assert_eq!(fresh.version(), before.version());
+    assert_eq!(fresh.schema(), before.schema());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn test_with_root_manifest_file_merges_domain_metadata_and_transactions(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (engine, _temp_dir, table_url, snapshot) =
@@ -125,6 +154,7 @@ async fn test_with_root_manifest_file_merges_domain_metadata_and_transactions(
         &engine,
         delta_kernel::transaction::UpdateTableOperation::Write,
         "test-engine",
+        true,
         |builder| {
             builder
                 .with_transaction_id("app-1", 5)
@@ -143,11 +173,11 @@ async fn test_with_root_manifest_file_merges_domain_metadata_and_transactions(
         &engine,
         delta_kernel::transaction::UpdateTableOperation::Write,
         "test-engine",
+        true,
         |builder| {
             builder
                 .with_transaction_id("app-2", 7)
                 .with_domain_metadata("my.domain", "v2")
-                .with_data_change(true)
         },
     )?
     .with_root_manifest_file(file)?;
@@ -219,12 +249,11 @@ fn commit_info_at(table_url: &Url, version: u64) -> Result<Value, Box<dyn std::e
     Ok(commit_infos.remove(0))
 }
 
-/// `commitInfo.dataChange` records the transaction's value; a root manifest file commit requires
-/// an explicit one.
+/// `commitInfo.dataChange` records the transaction's value with or without a root manifest.
 #[rstest]
 #[tokio::test(flavor = "multi_thread")]
 async fn test_commit_info_data_change(
-    #[values(None, Some(true), Some(false))] data_change: Option<bool>,
+    #[values(false, true)] data_change: bool,
     #[values(false, true)] root_manifest: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (engine, _temp_dir, table_url, snapshot) =
@@ -235,10 +264,8 @@ async fn test_commit_info_data_change(
         &engine,
         UpdateTableOperation::Write,
         "test-engine",
-        |builder| match data_change {
-            Some(data_change) => builder.with_data_change(data_change),
-            None => builder,
-        },
+        data_change,
+        |builder| builder,
     )?;
     if root_manifest {
         txn = txn.with_root_manifest_file(FileMeta {
@@ -246,20 +273,10 @@ async fn test_commit_info_data_change(
             last_modified: 0,
             size: 1024,
         })?;
-        if data_change.is_none() {
-            assert_result_error_with_message(
-                txn.commit(&engine),
-                "root manifest file commit requires an explicit data_change",
-            );
-            return Ok(());
-        }
     }
     txn.commit(&engine)?.unwrap_committed();
     let commit_info = commit_info_at(&table_url, 1)?;
-    assert_eq!(
-        commit_info["dataChange"],
-        json!(data_change.unwrap_or(true))
-    );
+    assert_eq!(commit_info["dataChange"], json!(data_change));
     Ok(())
 }
 

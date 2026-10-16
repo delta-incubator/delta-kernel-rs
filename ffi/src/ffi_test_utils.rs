@@ -138,6 +138,7 @@ pub(crate) unsafe fn build_update_table_txn(
             snapshot.shallow_copy(),
             KernelUpdateTableOperation::Write,
             kernel_string_slice!(engine_info),
+            true,
             engine.shallow_copy(),
         ))
     };

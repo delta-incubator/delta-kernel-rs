@@ -173,7 +173,8 @@ int main(int argc, char* argv[]) {
   KernelStringSlice engine_info_slice = { engine_info, strlen(engine_info) };
   ExternResultHandleExclusiveUpdateTableTransactionBuilder builder_res =
       new_update_table_txn_builder(
-          snapshot, KernelUpdateTableOperationUpdate, engine_info_slice, engine);
+          snapshot, KernelUpdateTableOperationUpdate, engine_info_slice,
+          /* data_change */ true, engine);
   if (builder_res.tag != OkHandleExclusiveUpdateTableTransactionBuilder) {
     err = (Error*)builder_res.err;
     print_error("Failed to create transaction builder.", err);

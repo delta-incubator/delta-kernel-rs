@@ -121,9 +121,8 @@ You can call `remove_files()` multiple times to remove files from different
 pending removals.
 
 > [!NOTE]
-> Unless overridden, transactions with schema changes infer `dataChange` from staged file batches:
-> `false` when none are staged and `true` otherwise, including empty or unselected batches.
-> Transactions without schema changes default to `true`.
+> Set `data_change` in the builder constructor. Use `true` when deleting records and `false` for
+> rewrites that preserve logical data. Kernel preserves your value even when no files are staged.
 
 ## Full example
 
@@ -150,7 +149,7 @@ let snapshot = Snapshot::builder_for(url).build(&engine)?;
 // 2. Create a transaction
 let mut txn = snapshot
     .clone()
-    .update_table(UpdateTableOperation::Delete, "my-app/1.0")
+    .update_table(UpdateTableOperation::Delete, "my-app/1.0", /* data_change */ true)
     .build(&engine, Box::new(FileSystemCommitter::new()))?;
 
 // 3. Build a scan and get file metadata

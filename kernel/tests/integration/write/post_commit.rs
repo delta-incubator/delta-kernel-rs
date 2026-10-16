@@ -30,9 +30,10 @@ async fn test_post_commit_snapshot_create_then_insert() -> Result<()> {
     let schema = get_simple_int_schema();
 
     // Create table and verify post_commit_snapshot
-    let create_result = create_table_txn(table_url.as_str(), schema, env!("CARGO_PKG_VERSION"))
-        .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
-        .commit(engine.as_ref())?;
+    let create_result =
+        create_table_txn(table_url.as_str(), schema, env!("CARGO_PKG_VERSION"), true)
+            .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
+            .commit(engine.as_ref())?;
 
     let mut current_snapshot = match create_result {
         CommitResult::Committed(committed) => {
@@ -61,6 +62,7 @@ async fn test_post_commit_snapshot_create_then_insert() -> Result<()> {
             engine.as_ref(),
             delta_kernel::transaction::UpdateTableOperation::Write,
             "test",
+            true,
             |builder| builder,
         )?;
 
@@ -139,6 +141,7 @@ async fn test_write_context_builder_rejects_partition_values_on_unpartitioned_ta
             &engine,
             delta_kernel::transaction::UpdateTableOperation::Write,
             "test",
+            true,
             |builder| builder,
         )?;
         let write_state = txn.write_state()?;

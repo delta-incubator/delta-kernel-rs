@@ -245,11 +245,8 @@ impl<E: TaskExecutor> DefaultParquetHandler<E> {
     /// Write `data` to a new parquet file under the [`BoundWriteContext::write_dir`] and return
     /// Add action metadata ready for [`Transaction::add_files`].
     ///
-    /// Note that the schema does not contain the dataChange column. In order to set `data_change`
-    /// flag, use
-    /// [`UpdateTableTransactionBuilder::with_data_change`][with_data_change].
-    ///
-    /// [with_data_change]: delta_kernel::transaction::UpdateTableTransactionBuilder::with_data_change
+    /// The metadata schema does not contain the `dataChange` column. Kernel uses the
+    /// `data_change` flag supplied when constructing the transaction builder.
     ///
     /// [`BoundWriteContext::write_dir`]: delta_kernel::transaction::BoundWriteContext::write_dir
     /// [`Transaction::add_files`]: delta_kernel::transaction::Transaction::add_files

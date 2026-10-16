@@ -155,8 +155,11 @@ A `Transaction` writes data to a table. It is built from a snapshot:
 
 ```rust,ignore
 let mut txn = snapshot                              // Arc<Snapshot>
-    .update_table(UpdateTableOperation::Custom("INSERT".to_string()), "my-app/1.0")
-    .with_data_change(true)
+    .update_table(
+        UpdateTableOperation::Custom("INSERT".to_string()),
+        "my-app/1.0",
+        /* data_change */ true,
+    )
     .build(&engine, Box::new(FileSystemCommitter::new()))?;
 
 // Write Parquet files, then register their metadata.
@@ -176,13 +179,13 @@ The `file_metadata` argument is an `EngineData` batch that matches
 build that batch from Parquet write results.
 
 > [!NOTE]
-> `update_table(operation, engine_info)` requires both values for update transactions. For
-> create-table transactions the operation is fixed to `"CREATE TABLE"` and
-> cannot be overridden.
+> `update_table(operation, engine_info, data_change)` requires all three values for update
+> transactions. Create-table constructors also require `data_change`, but fix the operation to
+> `"CREATE TABLE"`. These values cannot be changed after construction.
 
-For a standalone schema change, use `UpdateTableOperation::AlterTable`. To evolve the schema during a
-data-changing write, use the data operation, such as `UpdateTableOperation::Write`, and queue the
-schema changes on the same builder. See
+For a standalone schema change, use `UpdateTableOperation::AlterTable` with `data_change = false`.
+To evolve the schema while writing or rewriting data files, use the data operation, such as
+`UpdateTableOperation::Write`, and queue the schema changes on the same builder. See
 [ALTER TABLE versus schema evolution](../writing/alter_table.md#alter-table-versus-schema-evolution).
 
 See [Quick Start: Writing a Table](../getting_started/quick_start_write.md) for a complete example.

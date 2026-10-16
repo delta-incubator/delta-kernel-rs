@@ -81,7 +81,7 @@ fn test_create_table_ict(
 
     let (_temp_dir, table_path, engine) = test_table_setup()?;
 
-    let committed = create_table(&table_path, super::simple_schema()?, "Test/1.0")
+    let committed = create_table(&table_path, super::simple_schema()?, "Test/1.0", true)
         .with_table_properties(properties.iter().copied())
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
         .commit(engine.as_ref())?

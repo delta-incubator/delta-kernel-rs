@@ -180,7 +180,7 @@ pub(super) fn create_simple_table(
     table_path: &str,
     catalog_managed: bool,
 ) -> Result<()> {
-    let builder = create_table(table_path, simple_schema(), "Test/1.0");
+    let builder = create_table(table_path, simple_schema(), "Test/1.0", true);
     let builder = if catalog_managed {
         builder.with_table_properties([
             ("delta.feature.catalogManaged", "supported"),

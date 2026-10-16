@@ -51,6 +51,7 @@ async fn test_append_timestamp_ntz() -> Result<(), Box<dyn std::error::Error>> {
         &engine,
         UpdateTableOperation::Write,
         "default engine",
+        true,
         |builder| builder,
     )?;
 
@@ -99,7 +100,7 @@ async fn test_append_timestamp_ntz() -> Result<(), Box<dyn std::error::Error>> {
 
     // Check that the add action exists
     assert!(parsed_commits[1].get("add").is_some());
-    // Ensure default of data change is true.
+    // Ensure the supplied data-change intent is used.
     assert!(parsed_commits[1]
         .get("add")
         .unwrap()
@@ -143,6 +144,7 @@ async fn test_append_timestamp_stats_are_millisecond_truncated(
         &engine,
         UpdateTableOperation::Write,
         "default engine",
+        true,
         |builder| builder,
     )?;
 
@@ -243,7 +245,8 @@ async fn test_append_variant(
         &engine,
         UpdateTableOperation::Write,
         "test-engine",
-        |builder| builder.with_data_change(true),
+        true,
+        |builder| builder,
     )?;
 
     // First value corresponds to the variant value "1". Third value corresponds to the variant
@@ -441,7 +444,8 @@ async fn test_shredded_variant_read_rejection() -> Result<(), Box<dyn std::error
         &engine,
         UpdateTableOperation::Write,
         "test-engine",
-        |builder| builder.with_data_change(true),
+        true,
+        |builder| builder,
     )?;
 
     // First value corresponds to the variant value "1". Third value corresponds to the variant
@@ -563,7 +567,7 @@ async fn test_not_null_data_column_rejects_null_in_batch(
     // Create a table with a NOT NULL column.
     let schema = schema_ref! { not_null "c": (data_type.clone()) };
     let (_tmp_dir, table_path, engine) = test_table_setup()?;
-    let _ = kernel_create_table(&table_path, schema.clone(), "test/1.0")
+    let _ = kernel_create_table(&table_path, schema.clone(), "test/1.0", true)
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
         .commit(engine.as_ref())?;
 
@@ -583,6 +587,7 @@ async fn test_not_null_data_column_rejects_null_in_batch(
         engine.as_ref(),
         UpdateTableOperation::Write,
         "default engine",
+        true,
         |builder| builder,
     )?;
     let write_context = txn.write_state()?.write_context_builder().build()?;
@@ -628,7 +633,7 @@ async fn try_write_with_void_schema(schema: SchemaRef) -> KernelError {
         .build(engine.as_ref())
         .expect("snapshot should build");
     let mut txn = snapshot
-        .update_table(UpdateTableOperation::Write, "test-engine")
+        .update_table(UpdateTableOperation::Write, "test-engine", true)
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))
         .expect("transaction should create");
 
@@ -767,7 +772,7 @@ async fn write_state_creation_fails_fast_on_invalid_void_schema(
         .build(engine.as_ref())
         .expect("snapshot should build");
     let txn = snapshot
-        .update_table(UpdateTableOperation::Write, "test-engine")
+        .update_table(UpdateTableOperation::Write, "test-engine", true)
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))
         .expect("transaction should create");
 
@@ -801,7 +806,7 @@ async fn write_context_excludes_void_from_physical_schema() -> Result<(), Box<dy
     }
 
     let txn = snapshot
-        .update_table(UpdateTableOperation::Write, "test-engine")
+        .update_table(UpdateTableOperation::Write, "test-engine", true)
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?;
 
     let wc = txn.write_state()?.write_context_builder().build()?;
@@ -830,7 +835,7 @@ async fn metadata_only_commit_with_void_in_array_succeeds() -> Result<(), Box<dy
     let engine = Arc::new(engine);
     let snapshot = Snapshot::builder_for(table_url).build(engine.as_ref())?;
     let txn = snapshot
-        .update_table(UpdateTableOperation::Write, "test-engine")
+        .update_table(UpdateTableOperation::Write, "test-engine", true)
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?;
 
     // Commit with NO add_files — this is a metadata-only operation and should succeed
@@ -876,7 +881,7 @@ async fn write_context_excludes_nested_void_from_physical_schema(
     }
 
     let txn = snapshot
-        .update_table(UpdateTableOperation::Write, "test-engine")
+        .update_table(UpdateTableOperation::Write, "test-engine", true)
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?;
     let wc = txn.write_state()?.write_context_builder().build()?;
     let physical = wc.physical_data_schema();
@@ -916,7 +921,7 @@ async fn write_transform_drops_nested_void_fields() -> Result<(), Box<dyn std::e
     let snapshot = Snapshot::builder_for(table_url).build(engine.as_ref())?;
 
     let txn = snapshot
-        .update_table(UpdateTableOperation::Write, "test-engine")
+        .update_table(UpdateTableOperation::Write, "test-engine", true)
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?;
     let wc = txn.write_state()?.write_context_builder().build()?;
 
