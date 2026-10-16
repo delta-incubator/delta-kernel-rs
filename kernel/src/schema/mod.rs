@@ -2015,27 +2015,34 @@ impl PrimitiveType {
         )
     }
 
-    /// Returns `true` if `self` is a physical integer type that some checkpoint writers
-    /// produce when they omit Parquet logical type annotations for date or timestamp columns.
+    /// Returns `true` if `self` can back `target` in the given checkpoint field.
     ///
     /// Specifically:
     /// - Integer -> Date (int32 stored without DATE annotation)
     /// - Long -> Timestamp/TimestampNtz (int64 stored without TIMESTAMP annotation)
+    /// - Binary -> Geometry (statistics only; the engine validates and decodes the WKB bounds)
     ///
     /// These are **not** Delta protocol type widening rules and must not be used outside of
     /// checkpoint compatibility checks.
     ///
-    /// NOTE: The Arrow-level equivalent lives in `check_cast_compat` in
-    /// `engine/ensure_data_types.rs`. Changes here must be mirrored there.
-    pub(crate) fn is_checkpoint_cast_compatible(&self, target: &Self) -> bool {
-        matches!(
-            (self, target),
-            (Self::Integer, Self::Date) | (Self::Long, Self::Timestamp | Self::TimestampNtz)
-        )
+    /// The date/timestamp rules must match `check_cast_compat` in `engine/ensure_data_types.rs`.
+    /// Geometry decoding and its in-memory representation remain engine-specific.
+    pub(crate) fn is_checkpoint_cast_compatible(
+        &self,
+        target: &Self,
+        kind: CheckpointFieldKind,
+    ) -> bool {
+        match (self, target, kind) {
+            (Self::Integer, Self::Date, _)
+            | (Self::Long, Self::Timestamp | Self::TimestampNtz, _) => true,
+            #[cfg(feature = "geo-type-in-dev")]
+            (Self::Binary, Self::Geometry(_), CheckpointFieldKind::Stats) => true,
+            _ => false,
+        }
     }
 
     /// Returns `true` if this primitive type is compatible with `target` for reading
-    /// `stats_parsed` columns from checkpoint parquet files.
+    /// `stats_parsed` or `partitionValues_parsed` columns from checkpoint parquet files.
     ///
     /// This is a superset of [`can_widen_to`]: it includes all Delta protocol type widening
     /// rules plus physical Parquet encoding accommodations for checkpoint interop (see
@@ -2043,9 +2050,22 @@ impl PrimitiveType {
     ///
     /// [`can_widen_to`]: PrimitiveType::can_widen_to
     /// [`is_checkpoint_cast_compatible`]: PrimitiveType::is_checkpoint_cast_compatible
-    pub(crate) fn is_stats_type_compatible_with(&self, target: &Self) -> bool {
-        self == target || self.can_widen_to(target) || self.is_checkpoint_cast_compatible(target)
+    pub(crate) fn is_stats_type_compatible_with(
+        &self,
+        target: &Self,
+        kind: CheckpointFieldKind,
+    ) -> bool {
+        self == target
+            || self.can_widen_to(target)
+            || self.is_checkpoint_cast_compatible(target, kind)
     }
+}
+
+/// Selects the physical encoding rules for a parsed checkpoint field.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CheckpointFieldKind {
+    Stats,
+    PartitionValues,
 }
 
 fn serialize_decimal<S: serde::Serializer>(
