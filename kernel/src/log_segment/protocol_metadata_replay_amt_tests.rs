@@ -612,6 +612,55 @@ async fn post_commit_snapshot_resolves_latest_checkpoint_action(
     assert_eq!(action.version, expected_version);
 }
 
+// A snapshot handed a CRC at its version takes `lastManifestCommit` from that CRC, including its
+// absence, so it resolves without the commit file. The commit carries `(0, 0)`, so a `None` result
+// can only come from the CRC.
+#[rstest]
+#[case::crc_records_pointer(Some((0, 0)))]
+#[case::crc_records_no_pointer(None)]
+#[tokio::test]
+async fn snapshot_with_crc_at_version_serves_last_manifest_commit_from_crc(
+    #[case] crc_pointer: Option<(i64, i64)>,
+) {
+    let store = Arc::new(InMemory::new());
+    let table_root = url::Url::parse("memory:///").unwrap();
+    let commits = [
+        checkpoint_commit(0, &[], one_column_schema()),
+        serde_json::json!({ "commitInfo": {
+            "inCommitTimestamp": 1,
+            "lastManifestCommit": { "version": 0, "contentRootVersion": 0 },
+        } })
+        .to_string(),
+    ];
+    for (version, commit) in commits.into_iter().enumerate() {
+        add_commit(table_root.as_str(), store.as_ref(), version as u64, commit)
+            .await
+            .unwrap();
+    }
+    let engine = non_plan_engine(store.clone());
+    let loaded = Snapshot::builder_for(table_root).build(&engine).unwrap();
+    let expected = crc_pointer.map(|(v, c)| LastManifestCommit::new(v, c).unwrap());
+    let crc = Crc {
+        version: loaded.version(),
+        last_manifest_commit_opt: expected.clone(),
+        ..Default::default()
+    };
+    let snapshot = Snapshot::new_with_crc(
+        loaded.log_segment().clone(),
+        loaded.table_configuration().clone(),
+        Some(Arc::new(crc)),
+        false, /* built_as_latest */
+        false, /* skipped_new_checkpoints */
+    )
+    .unwrap();
+
+    store
+        .delete(&delta_path_for_version(1, "json"))
+        .await
+        .unwrap();
+    assert_eq!(snapshot.last_manifest_commit(&engine).unwrap(), expected);
+}
+
 // Writes a CRC at `version` carrying `pointer` as its `lastManifestCommit`.
 async fn put_crc_with_pointer(store: &InMemory, version: u64, pointer: LastManifestCommit) {
     let config = adaptive_metadata_table_configuration(one_column_schema(), &[]);

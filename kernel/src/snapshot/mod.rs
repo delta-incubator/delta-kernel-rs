@@ -231,8 +231,8 @@ impl Snapshot {
             crc,
             built_as_latest,
             skipped_new_checkpoints,
-            // No replay ran on this path, so the checkpoint action and `lastManifestCommit` are
-            // resolved on demand.
+            // No replay ran on this path, so the checkpoint action is resolved on demand, as is
+            // `lastManifestCommit` without a CRC at this version.
             #[cfg(feature = "adaptive-metadata-in-dev")]
             CheckpointActionResolution::Unresolved,
             #[cfg(feature = "adaptive-metadata-in-dev")]
@@ -253,6 +253,9 @@ impl Snapshot {
         )
     }
 
+    /// `last_manifest_commit` is how the build resolved `lastManifestCommit` without the CRC. A CRC
+    /// at the snapshot version takes precedence, since it records the value authoritatively,
+    /// including its absence.
     fn new_with_validated_crc(
         log_segment: LogSegment,
         table_configuration: TableConfiguration,
@@ -270,6 +273,12 @@ impl Snapshot {
             version = table_configuration.version(),
         );
         info!(parent: &span, "Created snapshot");
+        #[cfg(feature = "adaptive-metadata-in-dev")]
+        let last_manifest_commit = match (crc.at_version(), last_manifest_commit) {
+            (Some(crc), _) => OnceLock::from(crc.last_manifest_commit_opt.clone()),
+            (None, LastManifestCommitResolution::Resolved(resolved)) => OnceLock::from(resolved),
+            (None, LastManifestCommitResolution::Unresolved) => OnceLock::new(),
+        };
         Self {
             span,
             log_segment,
@@ -282,10 +291,7 @@ impl Snapshot {
             #[cfg(feature = "adaptive-metadata-in-dev")]
             checkpoint_action: OnceLock::new(),
             #[cfg(feature = "adaptive-metadata-in-dev")]
-            last_manifest_commit: match last_manifest_commit {
-                LastManifestCommitResolution::Resolved(resolved) => OnceLock::from(resolved),
-                LastManifestCommitResolution::Unresolved => OnceLock::new(),
-            },
+            last_manifest_commit,
         }
     }
 
