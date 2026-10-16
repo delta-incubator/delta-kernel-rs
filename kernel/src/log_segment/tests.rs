@@ -21,6 +21,8 @@ use crate::engine::sync::json::SyncJsonHandler;
 use crate::engine::sync::SyncEngine;
 use crate::engine::test_delegating::DelegatingEngine;
 use crate::expressions::{col, column_name};
+#[cfg(feature = "adaptive-metadata-in-dev")]
+use crate::last_checkpoint_hint::{AmtCheckpoint, CheckpointType};
 use crate::last_checkpoint_hint::{HintAction, LastCheckpointHint, LastCheckpointV2};
 use crate::log_replay::ActionsBatch;
 use crate::log_segment::LogSegment;
@@ -43,7 +45,7 @@ use crate::schema::{
 };
 #[cfg(feature = "adaptive-metadata-in-dev")]
 use crate::unit_test_utils::adaptive_metadata_fixtures::{
-    minimal_checkpoint_action, setup_table, write_commit,
+    adaptive_metadata_protocol_and_metadata, minimal_checkpoint_action, setup_table, write_commit,
 };
 use crate::unit_test_utils::{
     assert_batch_matches, assert_result_error_with_message, create_log_path,
@@ -5487,5 +5489,123 @@ fn latest_checkpoint_action_is_stable_when_newer_checkpoint_written_later() -> R
             .version(),
         2
     );
+    Ok(())
+}
+
+// An AMT `_last_checkpoint` hint at version 5 has no checkpoint file. The listing starts at the
+// hinted version as long as the manifest commit carrying the checkpoint action is listed.
+#[cfg(feature = "adaptive-metadata-in-dev")]
+#[rstest]
+#[case::manifest_commit_at_hint(5, None, &[], None, Ok((None, vec![5, 6, 7])))]
+#[case::manifest_commit_after_hint(6, None, &[], None, Ok((None, vec![5, 6, 7])))]
+#[case::hinted_commit_cleaned_up(6, None, &[0, 1, 2, 3, 4, 5], None, Ok((None, vec![6, 7])))]
+#[case::time_travel_after_manifest_commit(6, None, &[], Some(7), Ok((None, vec![5, 6, 7])))]
+#[case::time_travel_at_manifest_commit(6, None, &[], Some(6), Ok((None, vec![5, 6])))]
+#[case::time_travel_before_hint(5, None, &[], Some(3), Ok((None, vec![0, 1, 2, 3])))]
+#[case::newer_checkpoint_file_wins(5, Some(6), &[], None, Ok((Some(6), vec![7])))]
+#[case::commits_after_hint_missing(
+    7,
+    None,
+    &[5, 6],
+    None,
+    Err("requires commits starting at or before version 6, but the first listed commit is Some(7)")
+)]
+#[case::manifest_commit_not_listed(
+    9,
+    None,
+    &[],
+    None,
+    Err("names manifest commit 9, which was not found in the log (listed commits Some(5)..=Some(7))")
+)]
+#[case::manifest_commit_before_hint(
+    4,
+    None,
+    &[],
+    None,
+    Err("checkpoint version 5 must be less than or equal to the version of the manifest commit it was added in (4)")
+)]
+#[tokio::test]
+async fn amt_last_checkpoint_hint_bounds_listing(
+    #[case] manifest_commit_version: Version,
+    #[case] checkpoint_file: Option<Version>,
+    #[case] missing_commits: &[Version],
+    #[case] end_version: Option<Version>,
+    #[case] expected: Result<(Option<Version>, Vec<Version>), &str>,
+) {
+    let hint = LastCheckpointHint {
+        version: 5,
+        size: 10,
+        checkpoint_type: Some(CheckpointType::AdaptiveMetadataTree),
+        amt_checkpoint: Some(AmtCheckpoint {
+            manifest_commit_version,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let paths = (0..=7)
+        .filter(|v| !missing_commits.contains(v))
+        .map(|v| delta_path_for_version(v, "json"))
+        .chain(checkpoint_file.map(|v| delta_path_for_version(v, "checkpoint.parquet")))
+        .collect_vec();
+    let (storage, log_root) = build_log_with_paths_and_checkpoint(&paths, None).await;
+
+    let log_segment = LogSegment::for_snapshot_impl(
+        storage.as_ref(),
+        log_root,
+        vec![], // log_tail
+        Some(hint),
+        end_version,
+        None,
+    );
+    match expected {
+        Ok((checkpoint_version, commits)) => {
+            let log_segment = log_segment.unwrap();
+            assert_eq!(log_segment.checkpoint_version, checkpoint_version);
+            assert_eq!(extract_commit_versions(&log_segment), commits);
+        }
+        Err(message) => assert_result_error_with_message(log_segment, message),
+    }
+}
+
+// With an AMT hint, a snapshot is built from the commits at and after the hinted version alone:
+// the protocol and metadata come from the manifest commit's checkpoint action, not commit 0.
+#[cfg(feature = "adaptive-metadata-in-dev")]
+#[test]
+fn snapshot_with_amt_last_checkpoint_hint_skips_earlier_commits() -> Result<()> {
+    let (engine, table_root) = setup_table()?;
+    for version in 1..=2 {
+        write_commit(
+            &engine,
+            &table_root,
+            version,
+            minimal_checkpoint_action(&format!("metadata/root-v{version}.parquet"), version)?
+                .into_engine_data(&engine)?,
+        )?;
+    }
+    let hint = LastCheckpointHint {
+        version: 2,
+        size: 1,
+        checkpoint_type: Some(CheckpointType::AdaptiveMetadataTree),
+        amt_checkpoint: Some(AmtCheckpoint {
+            manifest_commit_version: 2,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let log_root = table_root.join("_delta_log/")?;
+    engine.storage_handler().put(
+        &LastCheckpointHint::path(&log_root)?,
+        hint.to_json_bytes().into(),
+        true,
+    )?;
+
+    let snapshot = Snapshot::builder_for(table_root).build(&engine)?;
+    assert_eq!(extract_commit_versions(snapshot.log_segment()), vec![2]);
+    let (protocol, _) = adaptive_metadata_protocol_and_metadata();
+    assert_eq!(snapshot.table_configuration().protocol(), &protocol);
+    let checkpoint = snapshot
+        .latest_checkpoint_action(&engine)?
+        .expect("checkpoint present");
+    assert_eq!(checkpoint.path(), "metadata/root-v2.parquet");
     Ok(())
 }
