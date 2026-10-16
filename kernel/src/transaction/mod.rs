@@ -238,10 +238,10 @@ pub struct CreateTable;
 ///
 /// The data-change flag cannot be overridden on a built transaction:
 ///
-/// ```compile_fail
+/// ```compile_fail,E0599
 /// # use delta_kernel::transaction::Transaction;
-/// fn change_data_change<STATE>(txn: &mut Transaction<STATE>) {
-///     txn.set_data_change(false);
+/// fn change_data_change<STATE>(txn: Transaction<STATE>) {
+///     let _ = txn.with_data_change(false);
 /// }
 /// ```
 ///

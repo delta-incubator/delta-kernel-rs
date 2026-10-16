@@ -299,7 +299,7 @@ unpartitioned writes.
 
 | Function | Purpose |
 |----------|---------|
-| `new_create_table_txn_builder` | Create a builder for a new Delta table with a schema |
+| `new_create_table_txn_builder` | Create a builder from a path, schema, engine info, and `data_change` |
 | `create_table_txn_builder_with_table_property` | Add a table property to the builder |
 | `create_table_txn_builder_with_correlation_id` | Attach a correlation identifier to transaction metrics |
 | `create_table_txn_builder_with_operation_parameters` | Replace the operation parameters recorded in `commitInfo` |
