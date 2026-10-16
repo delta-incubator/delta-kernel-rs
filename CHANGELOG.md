@@ -5,43 +5,105 @@
 [Full Changelog](https://github.com/delta-io/delta-kernel-rs/compare/v0.29.0...v0.30.0)
 
 
+### Breaking changes
+
+1. Rename the error and result APIs ([#3420]), ([#3477]). Replace `DeltaResult`,
+   `DeltaResultIterator`, and `DeltaResultIteratorStatic` with `Result`, `ResultIterator`, and
+   `ResultIteratorStatic`. Replace the old `Error` imports and variant matches with `KernelError`.
+   `Result<T>` still defaults to `KernelError`; the new top-level `Error` is a separate wrapper.
+2. Construct existing-table transactions through `Snapshot::update_table` ([#3174]), ([#3574]),
+   ([#3592]), ([#3627]). Replace `snapshot.transaction(committer, engine)?` with
+   `snapshot.update_table(UpdateTableOperation::Write, "connector/1.0", true)
+   .build(engine, committer)?`. Supply the operation, engine info, and data-change intent at
+   construction. Use `false` for metadata-only commits or data-preserving rewrites; Kernel retains
+   explicit intent even when no files are staged. Configure schema changes, blind append, and
+   correlation IDs on the builder before `build()`; operation and engine info cannot be changed.
+   Replace `snapshot.alter_table()` with
+   `snapshot.update_table(UpdateTableOperation::AlterTable, "connector/1.0", false)` and add a schema
+   change before building. Empty schema-change requests are rejected ([#3606]).
+   Replace `ExistingTable` and `AlterTable` with `UpdateTable`, and `AlterTableTransaction` with
+   `Transaction<UpdateTable>` using the ALTER operation. Remove `SupportsDataFiles` bounds.
+   Transaction/result generics gain an execution-mode parameter defaulting to `Imperative`;
+   default type annotations continue to work. ALTER file staging is rejected at commit.
+3. Return the written file size from `ParquetHandler::write_parquet_file` ([#3346]). Custom
+   handlers must return `Result<FileSize>` with the complete serialized length, including footer,
+   instead of `Result<()>`; callers that need no size can discard the result.
+4. Update Arrow integration to Arrow 60 ([#3403]). Remove `arrow-58` feature selections; `arrow`
+   now selects Arrow 60, and explicit `arrow-59` remains supported with Arrow/Parquet 59.3 or newer.
+   Align shared Arrow, Parquet, and object-store types with the selected version. For Arrow 59,
+   disable default-engine's default features and explicitly select `arrow-59` and a TLS backend.
+5. Add `allow_invalid_hostnames: false` or `..Default::default()` to complete
+   `RestClientOptions` literals ([#3621]). The new option defaults to false; enabling it bypasses
+   hostname matching while retaining certificate trust and validity checks.
+6. Import `transform_output_type!` from `delta_kernel::transforms` instead of the crate root
+   ([#3402]).
+7. Add `check_constraints` or `..Default::default()` to complete `TableProperties` literals
+   ([#3439]). Lowercase `delta.constraints.` properties move from `unknown_properties` into this
+   collection. Parsing does not enable CHECK-constraint writes; unsupported writes remain blocked.
+8. Update unavailable-range fallback logic for `KernelError::StartVersionNotFound` ([#3432]).
+   A missing requested start with later retained commits returns this error; an empty log returns
+   `EmptyLog`. Continue handling `MissingVersion` for gaps or an unavailable end.
+9. Structured scan statistics exclude fields read solely for predicate pruning ([#3308]). Request
+   needed output fields explicitly and use `ScanBuilder::stats_output_schemas()` to inspect the
+   logical and physical output schemas.
+10. With experimental features enabled, update exhaustive enum matches for
+    `DataType::UserDefined` (`udt-in-dev`) and
+    `DeletionVectorStorageType::PersistedUnencodedRelative` (`adaptive-metadata-in-dev`)
+    ([#3372]), ([#3473]). See the preview migration details below.
+
+### Experimental and internal API migration
+
+- Under `internal-api`, `create_table(path, schema, engine_info, data_change)` requires explicit
+  data-change intent as its fourth argument ([#3627]). Use `false` for schema-only creation and
+  `true` when inserting initial rows. The value remains unchanged even for an empty commit.
+- With `udt-in-dev`, handle `DataType::UserDefined` in exhaustive matches ([#3372]). Physical reads
+  use its `sqlType`; schema round trips retain annotations. This does not enable general UDT writes.
+- With `adaptive-metadata-in-dev`, handle deletion-vector storage type `r` and use
+  `DeletionVectorDescriptor::unique_id_for(&snapshot)` for keys compared with Kernel output
+  ([#3473]), ([#3474]), ([#3476]). AMT identities normalize equivalent relative and absolute paths.
+  These are preview behaviors. The content-tree reader rejects live deletion vectors, non-Parquet
+  files, nonzero spec IDs, and live delete entries; this is limited preview support.
+- Under `internal-api`, construct snapshot hints with the table root and `PublicationWatermark`;
+  every supplied path must validate beneath that table's log root ([#3395]), ([#3514]), ([#3501]).
+  Replace `ExpectedStatsSchemas` and `build_expected_stats_schemas` with the scan output-schema API
+  ([#3308]). Regenerate distributed scan state when upgrading workers together.
+- Under `internal-api`, VARIANT bounds and, with `geo-type-in-dev`, GEOMETRY bounds are opt-in
+  structured-statistics requests requiring engine decoding support ([#3367]), ([#3524]). Kernel does not prune using these
+  bounds. These options do not establish general default-engine encoding support.
+
 ### 🚀 Features / new APIs
 
 1. Make `spec-id` optional ([#3422])
-2. Return written file size from write_parquet_file ([#3346])
-3. Add top level error enum ([#3437])
-4. Distinguish commit version error for log listing. ([#3432])
-5. Add geo schema visitor FFI ([#3434])
-6. Introduce RelationRef to declarative plans ([#3429])
-7. Add AMT Field on `_last_checkpoint` hint ([#3393])
-8. Expose cardinality from dv descriptor ([#3457])
-9. Add transaction operation metadata setters ([#3468])
-10. Expose read-side expected stats schemas ([#3308])
-11. Add minimal internal manifest-commit transaction API ([#3414])
-12. Add opt-in VARIANT min/max statistics to the stats schema ([#3367])
-13. Implement RelationRef functionality for SyncPlanExecutor ([#3430])
-14. Extend workload predicate parsing ([#3450])
-15. Add user-defined types and schema round-trip support ([#3372])
-16. Basic support of icebergNativeV4-preview feature ([#3489])
-17. Export snapshot hints with ffi bindings ([#3501])
-18. Add translation for minimal root AMT writes ([#3288])
-19. Keep track of `CheckpointAction` at PM-replay ([#3426])
-20. Parse CHECK constraints into TableProperties and gate writes ([#3439])
-21. Content-tree read path (reader.rs + shared struct_expr_from_schema) ([#3292])
-22. Add 'r' (unencoded-relative) deletion-vector storage type ([#3473])
-23. Support AMT Modified tracking status on read path ([#3470])
-24. Replace content_stats avg_value_size_in_bytes with total_bytes ([#3526])
-25. Read lastManifestCommit from a commit file ([#3555])
-26. Add nested expression construction macro ([#3587])
-27. Add normalized adaptiveMetadata deletion-vector identity ([#3474])
-28. Read UDT columns as their sqlType ([#3374])
-29. Use the `Location` to lookup `LastManifestCommit` ([#3546])
-30. Allow skipping rest certificate hostname verification ([#3621])
-31. Expose incremental crc replay on FFI snapshot builder ([#3620])
-32. Introduce write json plan node ([#3511])
-33. Enable new log replay normalization for AMT ([#3476])
-34. Write dataChange to CommitInfo on adaptiveMetadata tables ([#3556])
-35. Add opt-in GEOMETRY min/max statistics to the stats schema ([#3524])
+2. Add top level error enum ([#3437])
+3. Add geo schema visitor FFI ([#3434])
+4. Introduce RelationRef to declarative plans ([#3429])
+5. Add AMT Field on `_last_checkpoint` hint ([#3393])
+6. Expose cardinality from dv descriptor ([#3457])
+7. Add transaction operation metadata setters ([#3468])
+8. Expose logical and physical scan output statistics schemas ([#3308])
+9. Add minimal internal manifest-commit transaction API ([#3414])
+10. Add opt-in VARIANT min/max statistics to the stats schema ([#3367])
+11. Implement RelationRef functionality for SyncPlanExecutor ([#3430])
+12. Extend workload predicate parsing ([#3450])
+13. Add user-defined types and schema round-trip support ([#3372])
+14. Basic support of icebergNativeV4-preview feature ([#3489])
+15. Export snapshot hints with ffi bindings ([#3501])
+16. Add translation for minimal root AMT writes ([#3288])
+17. Keep track of `CheckpointAction` at PM-replay ([#3426])
+18. Content-tree read path (reader.rs + shared struct_expr_from_schema) ([#3292])
+19. Add 'r' (unencoded-relative) deletion-vector storage type ([#3473])
+20. Support AMT Modified tracking status on read path ([#3470])
+21. Replace content_stats avg_value_size_in_bytes with total_bytes ([#3526])
+22. Read lastManifestCommit from a commit file ([#3555])
+23. Add nested expression construction macro ([#3587])
+24. Add normalized adaptiveMetadata deletion-vector identity ([#3474])
+25. Read UDT columns as their sqlType ([#3374])
+26. Use the `Location` to lookup `LastManifestCommit` ([#3546])
+27. Expose incremental crc replay on FFI snapshot builder ([#3620])
+28. Introduce write json plan node ([#3511])
+29. Enable new log replay normalization for AMT ([#3476])
+30. Write dataChange to CommitInfo on adaptiveMetadata tables ([#3556])
+31. Add opt-in GEOMETRY min/max statistics to the stats schema ([#3524])
 
 ### 🐛 Bug Fixes
 
@@ -57,10 +119,8 @@
 10. Return typed error for existing table path ([#3528])
 11. Reject signed log path numeric components ([#3493])
 12. Clarify inline review publication boundaries ([#3582])
-13. Reject empty schema-change requests ([#3606])
-14. Resolve merge queue PR for title comments ([#3394])
-15. Correct listing logic for AMT _last_checkpoint hint ([#3548])
-16. Require explicit transaction data-change intent ([#3627])
+13. Resolve merge queue PR for title comments ([#3394])
+14. Correct listing logic for AMT _last_checkpoint hint ([#3548])
 
 ### 📚 Documentation
 
@@ -74,30 +134,24 @@
 
 ### 🚜 Refactor
 
-1. Rename `Error` to `KernelError` ([#3420])
-2. Extract a helper finding latest checkpoint action ([#3413])
-3. Make ffi builder configuration consuming ([#3431])
-4. Rename UCClient to UCDeltaTableClient ([#3463])
-5. New pub_macro annotation for module scoped macros ([#3402])
-6. Rename delta result aliases to result ([#3477])
-7. Use kernel results for private operations ([#3478])
-8. Relocate iceberg path resolution into top level module ([#3481])
-9. Split txn.commit into engine-data vs non-engine-data helpers ([#3440])
-10. Extract snapshot hint into its own module ([#3525])
-11. Unify existing-table transaction builders ([#3174])
-12. Extract struct_expr_from_schema into content_tree mod ([#3516])
-13. Remove the unhelpful LogReplayProcessor trait ([#3549])
-14. Load DAT specs once ([#3452])
-15. Parameterize AMT read path over Add row-tracking field sources ([#3471])
-16. Unify transaction builders by transaction type ([#3574])
-17. Clean up transaction validation and commit path ([#3559])
-18. Introduce execution mode typestate for transactions ([#3512])
-19. Extract commit-file action reader in ParsedLogPath ([#3550])
-20. Resolve domain metadata dependencies after feature selection ([#3521])
-21. Centralize cached scan cancellation ([#3585])
-22. Plumb optional table_root into file-action deduplicators ([#3475])
-23. Require transaction operations/engineInfo at construction ([#3592])
-24. Bundle commit-path state into CommitBatches and PostCommitInputs ([#3557])
+1. Extract a helper finding latest checkpoint action ([#3413])
+2. Make ffi builder configuration consuming ([#3431])
+3. Rename UCClient to UCDeltaTableClient; already shipped in REST 0.1.0 ([#3463])
+4. Use kernel results for private operations ([#3478])
+5. Relocate iceberg path resolution into top level module ([#3481])
+6. Split txn.commit into engine-data vs non-engine-data helpers ([#3440])
+7. Extract snapshot hint into its own module ([#3525])
+8. Extract struct_expr_from_schema into content_tree mod ([#3516])
+9. Remove the unhelpful LogReplayProcessor trait ([#3549])
+10. Load DAT specs once ([#3452])
+11. Parameterize AMT read path over Add row-tracking field sources ([#3471])
+12. Clean up transaction validation and commit path ([#3559])
+13. Introduce execution mode typestate for transactions ([#3512])
+14. Extract commit-file action reader in ParsedLogPath ([#3550])
+15. Resolve domain metadata dependencies after feature selection ([#3521])
+16. Centralize cached scan cancellation ([#3585])
+17. Plumb optional table_root into file-action deduplicators ([#3475])
+18. Bundle commit-path state into CommitBatches and PostCommitInputs ([#3557])
 
 ### 🧪 Testing
 
@@ -111,14 +165,13 @@
 1. Release 0.29.0 ([#3427])
 2. Update AI reviewer model clients ([#3443])
 3. Add tags to checkpoint ([#3291])
-4. Update to arrow-60, drop arrow-58 ([#3403])
-5. Fix CI for  1.99 tool chain ([#3484])
-6. Remove stray checkpoint mod.rsc ([#3492])
-7. Make AI review reruns command-driven ([#3499])
-8. Remove all Box::leak calls from FFI code ([#3506])
-9. Export complete criterion artifacts ([#3572])
-10. Add per-crate release tagging and bump tooling ([#3066])
-11. Add TODO for supporting clusteringProvider ([#3584])
+4. Fix CI for  1.99 tool chain ([#3484])
+5. Remove stray checkpoint mod.rsc ([#3492])
+6. Make AI review reruns command-driven ([#3499])
+7. Remove all Box::leak calls from FFI code ([#3506])
+8. Export complete criterion artifacts ([#3572])
+9. Add per-crate release tagging and bump tooling ([#3066])
+10. Add TODO for supporting clusteringProvider ([#3584])
 
 
 [#3417]: https://github.com/delta-io/delta-kernel-rs/pull/3417
@@ -215,6 +268,8 @@
 [#3548]: https://github.com/delta-io/delta-kernel-rs/pull/3548
 [#3627]: https://github.com/delta-io/delta-kernel-rs/pull/3627
 [#3524]: https://github.com/delta-io/delta-kernel-rs/pull/3524
+
+
 
 
 ## [v0.29.0](https://github.com/delta-io/delta-kernel-rs/tree/v0.29.0/) (2026-09-28)
