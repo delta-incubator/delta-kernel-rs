@@ -307,7 +307,7 @@ impl LogSegment {
         if let (Some(newest), Some(last_manifest_commit)) =
             (ascending_commits.last(), &delta.last_manifest_commit)
         {
-            last_manifest_commit.ensure_not_after(newest.version)?;
+            last_manifest_commit.ensure_at_or_before(newest.version)?;
         }
         Ok(delta)
     }

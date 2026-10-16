@@ -1486,9 +1486,9 @@ impl LastManifestCommit {
         Ok(())
     }
 
-    /// Errors if this names a manifest commit newer than `commit_version`, the version of the
-    /// commit or CRC that carries it.
-    pub(crate) fn ensure_not_after(&self, commit_version: Version) -> KernelResult<()> {
+    /// Errors unless this names a manifest commit at or before `commit_version`, the version of
+    /// the commit or CRC that carries it.
+    pub(crate) fn ensure_at_or_before(&self, commit_version: Version) -> KernelResult<()> {
         require!(
             u64::try_from(self.version).is_ok_and(|v| v <= commit_version),
             KernelError::generic(format!(

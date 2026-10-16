@@ -564,7 +564,7 @@ impl Crc {
         #[cfg(feature = "adaptive-metadata-in-dev")]
         if let Some(last_manifest_commit) = &self.last_manifest_commit_opt {
             last_manifest_commit.validate()?;
-            last_manifest_commit.ensure_not_after(self.version)?;
+            last_manifest_commit.ensure_at_or_before(self.version)?;
         }
         Ok(())
     }

@@ -427,7 +427,7 @@ impl ParsedLogPath<FileMeta> {
         let mut visitor = LastManifestCommitVisitor::default();
         visitor.visit_rows_of(actions.as_ref())?;
         if let Some(last_manifest_commit) = &visitor.last_manifest_commit {
-            last_manifest_commit.ensure_not_after(self.version)?;
+            last_manifest_commit.ensure_at_or_before(self.version)?;
         }
         Ok((in_commit_timestamp, visitor.last_manifest_commit))
     }
