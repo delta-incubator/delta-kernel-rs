@@ -304,9 +304,7 @@ impl LogSegment {
 
         let delta = acc.into_crc_delta();
         #[cfg(feature = "adaptive-metadata-in-dev")]
-        if let (Some(newest), Some(last_manifest_commit)) =
-            (newest, &delta.last_manifest_commit)
-        {
+        if let (Some(newest), Some(last_manifest_commit)) = (newest, &delta.last_manifest_commit) {
             last_manifest_commit.ensure_at_or_before(newest.version)?;
         }
         Ok(delta)
@@ -395,10 +393,17 @@ impl CrcReplayAccumulator {
 
     // ===== Row-level updates (also the seams used by `on_*` unit tests) =====
 
-    /// Called by the visitor once per commitInfo row (gated on operation or ict being
-    /// present). Handles both pieces: `operation` drives per-commit safety classification,
-    /// `ict` is captured into the delta from the newest commit only.
-    fn on_commit_info(&mut self, operation: Option<&str>, ict: Option<i64>) {
+    /// Called by the visitor once per commitInfo row (gated on any of its fields being present).
+    /// `operation` drives per-commit safety classification; `ict` and `last_manifest_commit` are
+    /// captured into the delta from the newest commit only, so an absent value there stays `None`.
+    fn on_commit_info(
+        &mut self,
+        operation: Option<&str>,
+        ict: Option<i64>,
+        #[cfg(feature = "adaptive-metadata-in-dev")] last_manifest_commit: Option<
+            LastManifestCommit,
+        >,
+    ) {
         if let Some(op) = operation {
             if is_incremental_safe_operation(op) {
                 self.current_commit_saw_safe_op = true;
@@ -409,15 +414,10 @@ impl CrcReplayAccumulator {
         }
         if self.is_first_commit {
             self.delta.in_commit_timestamp = ict;
-        }
-    }
-
-    /// Called for each commitInfo row carrying a `lastManifestCommit`. Only the newest commit
-    /// contributes, so an absent value on the newest commit leaves the delta's `None`.
-    #[cfg(feature = "adaptive-metadata-in-dev")]
-    fn on_last_manifest_commit(&mut self, last_manifest_commit: LastManifestCommit) {
-        if self.is_first_commit {
-            self.delta.last_manifest_commit = Some(last_manifest_commit);
+            #[cfg(feature = "adaptive-metadata-in-dev")]
+            {
+                self.delta.last_manifest_commit = last_manifest_commit;
+            }
         }
     }
 
@@ -669,15 +669,21 @@ impl RowVisitor for CommitCrcVisitor<'_> {
         for i in 0..row_count {
             let operation: Option<String> = getters[COL_OP].get_opt(i, "commitInfo.operation")?;
             let ict: Option<i64> = getters[COL_ICT].get_opt(i, "commitInfo.inCommitTimestamp")?;
-            if operation.is_some() || ict.is_some() {
-                self.acc.on_commit_info(operation.as_deref(), ict);
-            }
+            let is_commit_info = operation.is_some() || ict.is_some();
             #[cfg(feature = "adaptive-metadata-in-dev")]
-            if let Some(last_manifest_commit) = visit_last_manifest_commit_at(
+            let last_manifest_commit = visit_last_manifest_commit_at(
                 i,
                 &getters[COL_LMC_VERSION..=COL_LMC_CONTENT_ROOT_VERSION],
-            )? {
-                self.acc.on_last_manifest_commit(last_manifest_commit);
+            )?;
+            #[cfg(feature = "adaptive-metadata-in-dev")]
+            let is_commit_info = is_commit_info || last_manifest_commit.is_some();
+            if is_commit_info {
+                self.acc.on_commit_info(
+                    operation.as_deref(),
+                    ict,
+                    #[cfg(feature = "adaptive-metadata-in-dev")]
+                    last_manifest_commit,
+                );
             }
 
             let remove_path: Option<String> = getters[COL_REMOVE_PATH].get_opt(i, "remove.path")?;
@@ -750,6 +756,18 @@ mod tests {
     use crate::object_store::memory::InMemory;
     use crate::table_features::TableFeature;
 
+    impl CrcReplayAccumulator {
+        /// [`Self::on_commit_info`] for a commitInfo row without a `lastManifestCommit`.
+        fn on_commit_info_without_lmc(&mut self, operation: Option<&str>, ict: Option<i64>) {
+            self.on_commit_info(
+                operation,
+                ict,
+                #[cfg(feature = "adaptive-metadata-in-dev")]
+                None,
+            );
+        }
+    }
+
     // ===== Unit tests on `on_*` methods =====
 
     // ===== commitInfo =====
@@ -760,7 +778,7 @@ mod tests {
     #[case::unsafe_op("ANALYZE STATS", false)]
     fn on_commit_info_classifies_operation(#[case] op: &str, #[case] is_safe: bool) {
         let mut acc = CrcReplayAccumulator::new(None);
-        acc.on_commit_info(Some(op), None);
+        acc.on_commit_info_without_lmc(Some(op), None);
         assert_eq!(acc.current_commit_saw_safe_op, is_safe);
         assert_eq!(acc.delta.is_incremental_safe, is_safe);
     }
@@ -768,7 +786,7 @@ mod tests {
     #[test]
     fn on_commit_info_ict_only_no_operation_does_not_mark_saw_safe_op() {
         let mut acc = CrcReplayAccumulator::new(None);
-        acc.on_commit_info(None, Some(1234));
+        acc.on_commit_info_without_lmc(None, Some(1234));
         assert!(!acc.current_commit_saw_safe_op);
         assert!(acc.delta.is_incremental_safe);
         assert_eq!(acc.delta.in_commit_timestamp, Some(1234));
@@ -778,10 +796,10 @@ mod tests {
     fn on_commit_info_captures_ict_only_on_first_commit() {
         let mut acc = CrcReplayAccumulator::new(None);
         acc.process_batch_start("v2.json");
-        acc.on_commit_info(Some("WRITE"), Some(2000));
+        acc.on_commit_info_without_lmc(Some("WRITE"), Some(2000));
         assert_eq!(acc.delta.in_commit_timestamp, Some(2000));
         acc.process_batch_start("v1.json");
-        acc.on_commit_info(Some("WRITE"), Some(1000));
+        acc.on_commit_info_without_lmc(Some("WRITE"), Some(1000));
         assert_eq!(acc.delta.in_commit_timestamp, Some(2000));
     }
 
@@ -789,33 +807,33 @@ mod tests {
     fn on_commit_info_first_commit_none_ict_does_not_get_overwritten_by_older() {
         let mut acc = CrcReplayAccumulator::new(None);
         acc.process_batch_start("v2.json");
-        acc.on_commit_info(Some("WRITE"), None);
+        acc.on_commit_info_without_lmc(Some("WRITE"), None);
         assert_eq!(acc.delta.in_commit_timestamp, None);
         acc.process_batch_start("v1.json");
-        acc.on_commit_info(Some("WRITE"), Some(1000));
+        acc.on_commit_info_without_lmc(Some("WRITE"), Some(1000));
         assert_eq!(acc.delta.in_commit_timestamp, None);
     }
 
     #[cfg(feature = "adaptive-metadata-in-dev")]
     #[test]
-    fn on_last_manifest_commit_captures_only_on_first_commit() {
-        let lmc = |v| LastManifestCommit::new(v, v).unwrap();
+    fn on_commit_info_captures_last_manifest_commit_only_on_first_commit() {
+        let lmc = |v| Some(LastManifestCommit::new(v, v).unwrap());
         let mut acc = CrcReplayAccumulator::new(None);
         acc.process_batch_start("v3.json");
-        acc.on_last_manifest_commit(lmc(3));
+        acc.on_commit_info(Some("WRITE"), None, lmc(3));
         acc.process_batch_start("v2.json");
-        acc.on_last_manifest_commit(lmc(1));
-        assert_eq!(acc.delta.last_manifest_commit, Some(lmc(3)));
+        acc.on_commit_info(Some("WRITE"), None, lmc(1));
+        assert_eq!(acc.delta.last_manifest_commit, lmc(3));
     }
 
     #[cfg(feature = "adaptive-metadata-in-dev")]
     #[test]
-    fn on_last_manifest_commit_absent_on_newest_commit_is_not_backfilled_by_older() {
+    fn on_commit_info_absent_last_manifest_commit_on_newest_commit_is_not_backfilled_by_older() {
         let mut acc = CrcReplayAccumulator::new(None);
         acc.process_batch_start("v3.json");
-        acc.on_commit_info(Some("WRITE"), None);
+        acc.on_commit_info_without_lmc(Some("WRITE"), None);
         acc.process_batch_start("v2.json");
-        acc.on_last_manifest_commit(LastManifestCommit::new(1, 1).unwrap());
+        acc.on_commit_info(None, None, Some(LastManifestCommit::new(1, 1).unwrap()));
         assert_eq!(acc.delta.last_manifest_commit, None);
     }
 
@@ -958,7 +976,7 @@ mod tests {
         acc.process_batch_start("v1.json");
         acc.on_add(0).unwrap();
         acc.process_batch_start("v1.json");
-        acc.on_commit_info(Some("WRITE"), None);
+        acc.on_commit_info_without_lmc(Some("WRITE"), None);
         acc.process_commit_file_end();
         assert!(acc.delta.is_incremental_safe);
     }
@@ -978,7 +996,7 @@ mod tests {
         let mut acc = CrcReplayAccumulator::new(None);
         acc.process_batch_start("v1.json");
         acc.on_add(100).unwrap();
-        acc.on_commit_info(None, Some(42));
+        acc.on_commit_info_without_lmc(None, Some(42));
         acc.process_commit_file_end();
         assert!(!acc.delta.is_incremental_safe);
     }
