@@ -79,7 +79,7 @@ async fn test_commit_info_defaults_to_empty_parameters_and_omitted_metrics(
                 "operationParameters": {},
                 "engineInfo": engine_info,
                 "txnId": ZERO_UUID,
-                "dataChange": false,
+                "dataChange": true,
             }
         });
 
@@ -166,7 +166,7 @@ async fn test_commit_info_action() -> Result<(), Box<dyn std::error::Error>> {
                 "operationParameters": {},
                 "engineInfo": "default engine",
                 "txnId": ZERO_UUID,
-                "dataChange": false
+                "dataChange": true
             }
         })];
 
@@ -411,7 +411,7 @@ async fn test_commit_info_merges_custom_fields_and_ignores_reserved_fields(
             "kernelVersion": format!("v{}", env!("CARGO_PKG_VERSION")),
             "txnId": ZERO_UUID,
             "timestamp": 0,
-            "dataChange": false,
+            "dataChange": true,
         });
         if let Some(operation_metrics) = operation_metrics {
             expected_commit_info["operationMetrics"] = operation_metrics;
