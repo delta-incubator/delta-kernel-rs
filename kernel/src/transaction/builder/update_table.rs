@@ -183,10 +183,9 @@ impl TransactionBuilder<UpdateTable> {
 
     /// Validates the accumulated intent and builds a transaction.
     ///
-    /// If [`with_data_change`](Self::with_data_change) is not set, updates without schema changes
-    /// default to `true`. Updates with schema changes infer the value at commit: `false` without
-    /// staged Add, Remove, or DV-update batches, and `true` otherwise, including empty or
-    /// unselected batches.
+    /// If [`with_data_change`](Self::with_data_change) is not set, the value is inferred at commit:
+    /// `false` without staged Add, Remove, or DV-update batches, and `true` otherwise, including
+    /// empty or unselected batches.
     ///
     /// # Parameters
     ///
@@ -967,16 +966,19 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn schema_change_data_change_inference_does_not_depend_on_operation_name() -> Result<()> {
+    #[rstest]
+    fn data_change_inference_does_not_depend_on_operation_or_schema_changes(
+        #[values(UpdateTableOperation::Write, UpdateTableOperation::Custom("CUSTOM".to_string()))]
+        operation: UpdateTableOperation,
+        #[values(false, true)] schema_change: bool,
+    ) -> Result<()> {
         let (engine, snapshot, _tempdir) = load_test_table("table-without-dv-small")?;
-        let mut transaction = snapshot
-            .update_table(
-                UpdateTableOperation::Custom("CUSTOM".to_string()),
-                "test-engine",
-            )
-            .add_column(StructField::nullable("new_column", DataType::STRING))
-            .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?;
+        let mut builder = snapshot.update_table(operation, "test-engine");
+        if schema_change {
+            builder = builder.add_column(StructField::nullable("new_column", DataType::STRING));
+        }
+        let mut transaction =
+            builder.build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?;
 
         transaction.resolve_data_change();
         assert!(!transaction.data_change);
