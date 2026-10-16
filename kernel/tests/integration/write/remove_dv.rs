@@ -2215,9 +2215,13 @@ async fn adaptive_metadata_remove_cancels_add_across_dv_storage_types(
         size_in_bytes: 40,
         cardinality: 1,
     };
-    let mut txn = begin_transaction_with(snapshot.clone(), engine.as_ref(), |builder| {
-        builder.with_data_change(true)
-    })?;
+    let mut txn = begin_transaction_with(
+        snapshot.clone(),
+        engine.as_ref(),
+        UpdateTableOperation::Update,
+        "test-engine",
+        |builder| builder.with_data_change(true),
+    )?;
     txn.update_deletion_vectors(
         HashMap::from([(path.clone(), u_dv.clone())]),
         get_scan_files(snapshot, engine.as_ref())?
@@ -2228,9 +2232,13 @@ async fn adaptive_metadata_remove_cancels_add_across_dv_storage_types(
     let snapshot = txn.commit(engine.as_ref())?.unwrap_post_commit_snapshot();
 
     // v3: remove the file, then rewrite the remove's DV to the equivalent `'r'` encoding.
-    let mut txn = begin_transaction_with(snapshot.clone(), engine.as_ref(), |builder| {
-        builder.with_data_change(true)
-    })?;
+    let mut txn = begin_transaction_with(
+        snapshot.clone(),
+        engine.as_ref(),
+        UpdateTableOperation::Delete,
+        "test-engine",
+        |builder| builder.with_data_change(true),
+    )?;
     for scan_files in get_scan_files(snapshot, engine.as_ref())? {
         txn.remove_files(scan_files);
     }
