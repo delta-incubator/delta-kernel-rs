@@ -37,13 +37,14 @@ use crate::{Engine, KernelError, KernelResult, Result};
 /// [`UpdateTableOperation::Write`], and configure the schema changes on the same builder.
 ///
 /// In both workflows, configure schema operations before `build()`, which validates and applies
-/// them. Stage any data-file changes on the returned [`Transaction`], using the evolved schema
-/// provided by [`Transaction::write_state`].
+/// them. For schema evolution, stage data-file changes on the returned [`Transaction`], using the
+/// evolved schema provided by [`Transaction::write_state`].
 ///
 /// Set `data_change` when constructing the builder: `true` for logical data changes, or `false`
 /// for metadata-only changes and data-preserving rewrites. `ALTER TABLE` requires `false`, while
 /// blind append requires `true`. [`build`](UpdateTableTransactionBuilder::build) rejects
-/// incompatible intent; commit validates the staged file actions.
+/// incompatible intent; commit validates the staged file actions and rejects any staged
+/// data-file batches or manifest writes for `ALTER TABLE`.
 ///
 /// cbindgen:ignore
 pub type UpdateTableTransactionBuilder = TransactionBuilder<UpdateTable>;
@@ -186,8 +187,9 @@ impl TransactionBuilder<UpdateTable> {
     /// Validates the accumulated intent and builds a transaction.
     ///
     /// The caller-supplied `data_change` is preserved, including when no files are staged.
-    /// `ALTER TABLE` requires `false`; blind append requires `true`. Commit validates file actions
-    /// staged after building without inferring or overriding the configured value.
+    /// `ALTER TABLE` requires `false` and rejects staged data-file batches or manifest writes at
+    /// commit; blind append requires `true`. Commit validates file actions staged after building
+    /// without inferring or overriding the configured value.
     ///
     /// # Parameters
     ///
@@ -926,13 +928,17 @@ mod tests {
     }
 
     #[rstest]
-    fn alter_table_preserves_data_change_false_after_staging_file_batches(
-        #[values(
-            StagedFileAction::Add,
-            StagedFileAction::Remove,
-            StagedFileAction::DeletionVectorUpdate
-        )]
-        action: StagedFileAction,
+    #[case::add(StagedFileAction::Add, &[true])]
+    #[case::empty_add(StagedFileAction::Add, &[])]
+    #[case::remove(StagedFileAction::Remove, &[true])]
+    #[case::empty_remove(StagedFileAction::Remove, &[])]
+    #[case::unselected_remove(StagedFileAction::Remove, &[false])]
+    #[case::dv_update(StagedFileAction::DeletionVectorUpdate, &[true])]
+    #[case::empty_dv_update(StagedFileAction::DeletionVectorUpdate, &[])]
+    #[case::unselected_dv_update(StagedFileAction::DeletionVectorUpdate, &[false])]
+    fn alter_table_commit_rejects_staged_file_batches(
+        #[case] action: StagedFileAction,
+        #[case] selection_vector: &[bool],
     ) -> Result<()> {
         let (engine, snapshot, _tempdir) = load_test_table("table-without-dv-small")?;
         let mut transaction = snapshot
@@ -943,32 +949,34 @@ mod tests {
         assert!(!transaction.data_change);
 
         let data = || {
-            let values = Arc::new(Int32Array::from_iter_values([1])) as ArrayRef;
+            let values = Arc::new(Int32Array::from(vec![1; selection_vector.len()])) as ArrayRef;
             Box::new(ArrowEngineData::new(
                 RecordBatch::try_from_iter([("value", values)]).unwrap(),
             ))
         };
         match action {
-            StagedFileAction::Add => transaction
-                .staged_data_changes
-                .add_files_metadata
-                .push(data()),
+            StagedFileAction::Add => transaction.add_files(data()),
             StagedFileAction::Remove | StagedFileAction::DeletionVectorUpdate => {
-                let data = crate::FilteredEngineData::with_all_rows_selected(data());
+                let data = crate::FilteredEngineData::try_new(data(), selection_vector.to_vec())?;
                 match action {
-                    StagedFileAction::Remove => transaction
-                        .staged_data_changes
-                        .remove_files_metadata
-                        .push(data),
+                    StagedFileAction::Remove => transaction.remove_files(data),
                     StagedFileAction::DeletionVectorUpdate => {
-                        transaction.staged_data_changes.dv_matched_files.push(data)
+                        transaction.staged_data_changes.dv_matched_files.push(data);
+                        transaction.staged_data_changes.num_dv_updates = selection_vector
+                            .iter()
+                            .filter(|&&selected| selected)
+                            .count();
                     }
                     StagedFileAction::Add => unreachable!(),
                 }
             }
         }
         assert!(!transaction.data_change);
-        transaction.validate_operation_compatibility()?;
+        let error = transaction.commit(engine.as_ref()).unwrap_err();
+        assert!(
+            matches!(&error, KernelError::InvalidTransactionState(message)
+            if message == "ALTER TABLE cannot include data-file actions")
+        );
         Ok(())
     }
 

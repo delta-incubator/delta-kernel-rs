@@ -339,10 +339,10 @@ async fn test_file_rewrite_validates_explicit_data_change(
     }
 
     let commit_result = txn.commit(engine.as_ref());
-    let expected_error = if cdf_enabled && data_change {
-        Some("Cannot add and remove data in the same transaction")
-    } else {
-        None
+    let expected_error = match (is_alter, cdf_enabled && data_change) {
+        (true, _) => Some("ALTER TABLE cannot include data-file actions"),
+        (false, true) => Some("Cannot add and remove data in the same transaction"),
+        (false, false) => None,
     };
     if let Some(expected_error) = expected_error {
         assert_result_error_with_message(commit_result, expected_error);

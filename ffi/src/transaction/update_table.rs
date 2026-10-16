@@ -25,9 +25,10 @@ pub struct ExclusiveUpdateTableTransactionBuilder;
 ///
 /// Returns an owned builder, or an error if `engine_info` is not valid UTF-8. The operation and
 /// engine info cannot be changed. `data_change` is also immutable and is preserved for empty
-/// commits. Use `true` for logical data changes and `false` for metadata-only changes or
-/// data-preserving rewrites. Build validation rejects `ALTER TABLE` with `true` and blind append
-/// with `false`.
+/// commits. Use `true` for inserting or deleting rows or updating their values, even if the row
+/// count stays the same. Use `false` for metadata-only changes, such as adding a nullable column
+/// with `ALTER TABLE`, or compaction that rewrites files without changing any records. Build
+/// validation rejects `ALTER TABLE` with `true` and blind append with `false`.
 ///
 /// # Safety
 ///

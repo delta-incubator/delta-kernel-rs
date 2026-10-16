@@ -84,8 +84,10 @@ pub type CreateTableTransaction = Transaction<CreateTable>;
 /// * `path` - The file system path where the Delta table will be created
 /// * `schema` - The schema for the new table
 /// * `engine_info` - Information about the engine creating the table (e.g., "MyApp/1.0")
-/// * `data_change` - Whether added files change logical data. Use `true` for new records. The value
-///   cannot be changed later and is preserved even when no files are staged.
+/// * `data_change` - Whether added files change logical data. Use `true` when inserting initial
+///   rows, such as `CREATE TABLE AS SELECT`, and `false` for schema-only creation with no staged
+///   files. The value cannot be changed later and is preserved even when no files are staged, so an
+///   empty creation may also use `true`.
 ///
 /// Engine info is required at construction:
 ///

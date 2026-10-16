@@ -21,7 +21,8 @@ pub enum UpdateTableOperation {
     /// A standalone schema-changing operation.
     ///
     /// Requires at least one schema operation and `dataChange = false` at build time. Commit
-    /// validation retains the data-change check. File actions are not independently prohibited.
+    /// validation retains the data-change check and rejects any staged data-file batches or
+    /// manifest writes, including empty or fully unselected data-file batches.
     /// See the builder's
     /// [schema-change workflows](super::UpdateTableTransactionBuilder#schema-changes).
     AlterTable,

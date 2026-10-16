@@ -410,8 +410,9 @@ pub(super) fn create_table_txn_builder_with_data_layout_impl(
 ///
 /// `schema` supplies the table schema through the [`EngineSchema`] visitor callback.
 /// `engine_info` identifies the connector. `data_change` determines whether initial Add actions
-/// change logical data; use `true` for new records. Both values are immutable, and `data_change`
-/// is preserved through commit even when no files are staged.
+/// change logical data. Use `true` when inserting initial rows, such as `CREATE TABLE AS SELECT`,
+/// and `false` for schema-only creation with no staged files. Both values are immutable. An empty
+/// creation may also use `true`; the supplied value is preserved through commit.
 ///
 /// The returned builder can be configured with [`create_table_txn_builder_with_table_property`]
 /// before building with [`create_table_txn_builder_build`]. The engine is only used for error

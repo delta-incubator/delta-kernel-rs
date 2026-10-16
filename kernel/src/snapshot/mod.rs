@@ -1125,10 +1125,11 @@ impl Snapshot {
     ///
     /// Returns a builder supporting both data-changing transactions and schema changes.
     /// Operation and engine info are recorded in `commitInfo`. All three inputs are immutable.
-    /// Set `data_change` to `true` for logical data changes, or `false` for metadata-only changes
-    /// and data-preserving rewrites. Kernel preserves this value even when no files are staged;
-    /// it does not compare file contents to verify it. Invalid names and incompatible intent are
-    /// rejected by
+    /// Set `data_change` to `true` when inserting or deleting rows or updating their values, even
+    /// if the row count stays the same. Use `false` for metadata-only changes, such as adding a
+    /// nullable column with `ALTER TABLE`, or compaction that rewrites files without changing any
+    /// records. Kernel preserves this value even when no files are staged; it does not compare
+    /// file contents to verify it. Invalid names and incompatible intent are rejected by
     /// [`UpdateTableTransactionBuilder::build`].
     ///
     /// Operation, engine info, and data-change intent are required:

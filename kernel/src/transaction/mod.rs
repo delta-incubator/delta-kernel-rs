@@ -212,8 +212,8 @@ pub struct CreateTable;
 ///
 /// Both states support file additions. Schema-changing transactions use [`UpdateTable`] rather
 /// than a separate schema-only state, allowing schema and file changes in the same transaction.
-/// The builder validates schema intent, and commit validates the staged actions. Schema-only
-/// behavior is not enforced by the type parameter.
+/// The builder validates schema intent, and commit validates the staged actions. `ALTER TABLE`
+/// commits reject staged data-file batches and manifest writes.
 ///
 /// Configure schema and data-change intent on the builder. Built transactions do not expose
 /// setters for either, including when the `internal-api` feature is enabled.
@@ -411,6 +411,9 @@ impl<STATE> Transaction<STATE, Imperative> {
     /// - Ok(CommitResult) for either success or a recoverable error (includes the failed
     ///   transaction in case of a conflict so the user can retry, etc.)
     /// - Err(KernelError) indicates a non-retryable error (e.g. logic/validation error).
+    ///
+    /// `ALTER TABLE` returns a validation error if any data-file batches or manifest writes are
+    /// staged. Empty or fully unselected data-file batches are also rejected.
     #[instrument(
         parent = &self.span,
         name = TRANSACTION_COMMIT_SPAN,
@@ -1104,6 +1107,21 @@ impl<STATE, MODE: ExecutionMode> Transaction<STATE, MODE> {
             {
                 Err(KernelError::invalid_transaction_state(
                     "ALTER TABLE requires data_change to be false",
+                ))
+            }
+            (false, CommitOperation::UpdateTable(UpdateTableOperation::AlterTable))
+                if self.has_data_file_actions() =>
+            {
+                Err(KernelError::invalid_transaction_state(
+                    "ALTER TABLE cannot include data-file actions",
+                ))
+            }
+            #[cfg(feature = "adaptive-metadata-in-dev")]
+            (false, CommitOperation::UpdateTable(UpdateTableOperation::AlterTable))
+                if self.manifest_write.is_some() =>
+            {
+                Err(KernelError::invalid_transaction_state(
+                    "ALTER TABLE cannot include manifest writes",
                 ))
             }
             (false, CommitOperation::UpdateTable(_)) => Ok(()),

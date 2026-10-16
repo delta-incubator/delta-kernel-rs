@@ -28,11 +28,13 @@ Pass it explicitly when you construct the builder. The table shows typical workf
 | `data_change` constructor argument | `false` | `true` if records change; `false` otherwise |
 
 Both workflows use `UpdateTableTransactionBuilder`. You queue all schema operations before `build()`;
-Kernel validates and applies them during `build()`. You stage any data-file changes on the returned
-`Transaction`, whose `WriteState` uses the evolved schema.
+Kernel validates and applies them during `build()`. For schema evolution, you stage data-file changes
+on the returned `Transaction`, whose `WriteState` uses the evolved schema.
 
 `ALTER TABLE` requires `dataChange = false`. Kernel checks this at `build()` and retains a defensive
-check at `commit()`. File actions are not independently prohibited by this check.
+check at `commit()`. Commit validation also rejects staged file additions, removals, and
+deletion-vector updates, including empty or fully unselected batches. Staged manifest writes are
+also rejected.
 The supplied value cannot be changed and is preserved even when no file batches are staged.
 
 For a rewrite that preserves logical data, select the data operation, such as

@@ -18,7 +18,7 @@ use crate::unit_test_utils::{
     assert_result_error_with_message, create_valid_add_file_batch, MockProtocolBuilder,
     MockTableConfigurationBuilder,
 };
-use crate::{create_row, FileMeta, Result};
+use crate::{create_row, FileMeta, KernelError, Result};
 
 fn adaptive_table_config() -> TableConfiguration {
     MockTableConfigurationBuilder::new()
@@ -198,8 +198,12 @@ fn new_leaf_node_writer_uses_effective_config_schema_not_snapshot() -> Result<()
     Ok(())
 }
 
-#[test]
-fn manifest_commit_after_schema_change_uses_evolved_schema() -> Result<()> {
+#[rstest::rstest]
+#[case(UpdateTableOperation::Write)]
+#[case(UpdateTableOperation::AlterTable)]
+fn manifest_commit_after_schema_change_uses_evolved_schema(
+    #[case] operation: UpdateTableOperation,
+) -> Result<()> {
     let (engine, table_root) = setup_table()?;
     let mut checkpoint = minimal_checkpoint_action("metadata/root-v1.parquet", 1)?;
     let max_column_id = find_max_column_id_in_schema(&checkpoint.metadata.parse_schema()?)
@@ -215,8 +219,9 @@ fn manifest_commit_after_schema_change_uses_evolved_schema() -> Result<()> {
     )?;
     let snapshot = Snapshot::builder_for(table_root).build(&engine)?;
     let initial_schema = snapshot.table_configuration().physical_schema();
+    let is_alter = operation == UpdateTableOperation::AlterTable;
     let mut txn = snapshot
-        .update_table(UpdateTableOperation::AlterTable, "test-engine", false)
+        .update_table(operation, "test-engine", !is_alter)
         .add_column(StructField::nullable("fresh_column", DataType::INTEGER))
         .build(&engine, Box::new(FileSystemCommitter::new()))?;
     let expected = txn.effective_table_config.physical_schema();
@@ -225,6 +230,13 @@ fn manifest_commit_after_schema_change_uses_evolved_schema() -> Result<()> {
         .with_manifest_commit(&engine)?
         .new_leaf_node_writer(&engine);
     assert_eq!(writer.physical_schema(), &expected);
+    if is_alter {
+        let error = txn.commit(&engine).unwrap_err();
+        assert!(
+            matches!(&error, KernelError::InvalidTransactionState(message)
+            if message == "ALTER TABLE cannot include manifest writes")
+        );
+    }
     Ok(())
 }
 

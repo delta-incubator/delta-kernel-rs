@@ -3,7 +3,8 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use delta_kernel::arrow::array::{Array, Int32Array, StringArray};
+use delta_kernel::arrow::array::{new_null_array, Array, Int32Array, StringArray};
+use delta_kernel::arrow::datatypes::DataType as ArrowDataType;
 use delta_kernel::arrow::record_batch::RecordBatch;
 use delta_kernel::committer::FileSystemCommitter;
 use delta_kernel::engine::arrow_conversion::TryIntoArrow as _;
@@ -18,13 +19,14 @@ use delta_kernel::table_features::ColumnMappingMode;
 use delta_kernel::transaction::create_table::create_table;
 use delta_kernel::transaction::data_layout::DataLayout;
 use delta_kernel::transaction::UpdateTableOperation;
-use delta_kernel::Result;
+use delta_kernel::{KernelError, Result};
 use rstest::rstest;
 use serde_json::json;
 use test_utils::{
     add_commit, assert_result_error_with_message, column_mapping_fixtures as fixtures,
     create_table as create_test_table, create_table_and_load_snapshot, engine_store_setup,
-    read_actions_from_commit, test_table_setup, test_table_setup_mt, write_batch_to_table,
+    read_actions_from_commit, test_read, test_table_setup, test_table_setup_mt,
+    write_batch_to_table,
 };
 
 fn simple_schema() -> SchemaRef {
@@ -196,6 +198,148 @@ async fn alter_table_rejects_data_change_true_at_build(
     let fresh = Snapshot::builder_for(&table_path).build(engine.as_ref())?;
     assert_eq!(fresh.version(), before.version());
     assert_eq!(fresh.schema(), before.schema());
+    Ok(())
+}
+
+#[rstest]
+#[tokio::test]
+async fn alter_table_commit_rejects_staged_files(
+    #[values("none", "name", "id")] cm_mode: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (temp_dir, table_path, engine) = test_table_setup()?;
+    let snapshot = create_table_and_load_snapshot(
+        &table_path,
+        simple_schema(),
+        engine.as_ref(),
+        &[("delta.columnMapping.mode", cm_mode)],
+    )?;
+    let old_batch = RecordBatch::try_new(
+        Arc::new(snapshot.schema().as_ref().try_into_arrow()?),
+        vec![
+            Arc::new(Int32Array::from(vec![1, 2])),
+            Arc::new(StringArray::from(vec!["old-a", "old-b"])),
+        ],
+    )?;
+    let before = write_batch_to_table(
+        &snapshot,
+        engine.as_ref(),
+        old_batch.clone(),
+        HashMap::new(),
+    )
+    .await?;
+    let mut transaction = before
+        .clone()
+        .update_table(UpdateTableOperation::AlterTable, "test-engine", false)
+        .add_column(StructField::nullable("country", DataType::STRING))
+        .build(engine.as_ref(), committer())?;
+    let write_context = transaction.write_state()?.write_context_builder().build()?;
+    let batch = RecordBatch::try_new(
+        Arc::new(
+            write_context
+                .logical_data_schema()
+                .as_ref()
+                .try_into_arrow()?,
+        ),
+        vec![
+            Arc::new(Int32Array::from(vec![3, 4])),
+            Arc::new(StringArray::from(vec!["new-a", "new-b"])),
+            Arc::new(StringArray::from(vec!["US", "CA"])),
+        ],
+    )?;
+    transaction.add_files(
+        engine
+            .write_parquet(&ArrowEngineData::new(batch), &write_context)
+            .await?,
+    );
+
+    let error = transaction.commit(engine.as_ref()).unwrap_err();
+    assert!(
+        matches!(&error, KernelError::InvalidTransactionState(message)
+        if message == "ALTER TABLE cannot include data-file actions")
+    );
+    let fresh = Snapshot::builder_for(&table_path).build(engine.as_ref())?;
+    assert_eq!(fresh.version(), before.version());
+    assert_eq!(fresh.schema(), before.schema());
+    assert!(!temp_dir
+        .path()
+        .join("_delta_log")
+        .join(format!("{:020}.json", before.version() + 1))
+        .exists());
+    test_read(&ArrowEngineData::new(old_batch), fresh.table_root(), engine)?;
+    Ok(())
+}
+
+#[rstest]
+#[tokio::test]
+async fn schema_evolution_during_data_preserving_rewrite(
+    #[values("none", "name", "id")] cm_mode: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (_temp_dir, table_path, engine) = test_table_setup()?;
+    let snapshot = create_table_and_load_snapshot(
+        &table_path,
+        simple_schema(),
+        engine.as_ref(),
+        &[("delta.columnMapping.mode", cm_mode)],
+    )?;
+    let old_batch = RecordBatch::try_new(
+        Arc::new(snapshot.schema().as_ref().try_into_arrow()?),
+        vec![
+            Arc::new(Int32Array::from(vec![1, 2])),
+            Arc::new(StringArray::from(vec!["old-a", "old-b"])),
+        ],
+    )?;
+    let before = write_batch_to_table(
+        &snapshot,
+        engine.as_ref(),
+        old_batch.clone(),
+        HashMap::new(),
+    )
+    .await?;
+    let mut transaction = before
+        .clone()
+        .update_table(UpdateTableOperation::Optimize, "test-engine", false)
+        .add_column(StructField::nullable("country", DataType::STRING))
+        .build(engine.as_ref(), committer())?;
+    let write_context = transaction.write_state()?.write_context_builder().build()?;
+    let mut columns = old_batch.columns().to_vec();
+    columns.push(new_null_array(&ArrowDataType::Utf8, old_batch.num_rows()));
+    let batch = RecordBatch::try_new(
+        Arc::new(
+            write_context
+                .logical_data_schema()
+                .as_ref()
+                .try_into_arrow()?,
+        ),
+        columns,
+    )?;
+    transaction.add_files(
+        engine
+            .write_parquet(&ArrowEngineData::new(batch.clone()), &write_context)
+            .await?,
+    );
+    let scan = before.clone().scan_builder().build()?;
+    for metadata in scan.scan_metadata(engine.as_ref())? {
+        transaction.remove_files(metadata?.scan_files);
+    }
+
+    let post = transaction
+        .commit(engine.as_ref())?
+        .unwrap_post_commit_snapshot();
+    let fresh = Snapshot::builder_for(&table_path).build(engine.as_ref())?;
+    for snapshot in [post, fresh] {
+        assert_eq!(snapshot.version(), before.version() + 1);
+        assert!(snapshot.schema().contains("country"));
+        for field in before.schema().fields() {
+            assert_eq!(snapshot.schema().field(field.name()), Some(field));
+        }
+        for action in ["add", "remove"] {
+            let actions =
+                read_actions_from_commit(snapshot.table_root(), snapshot.version(), action)?;
+            assert_eq!(actions.len(), 1);
+            assert_eq!(actions[0]["dataChange"], false);
+        }
+    }
+    test_read(&ArrowEngineData::new(batch), before.table_root(), engine)?;
     Ok(())
 }
 
