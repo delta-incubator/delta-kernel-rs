@@ -484,6 +484,8 @@ mod tests {
     #[case("table name", "table%20name")]
     #[case("table?#", "table%3F%23")]
     #[case("table\u{e9}", "table%C3%A9")]
+    #[case("parent/%2E", "parent/%252E")]
+    #[case("parent/%2e%2e", "parent/%252e%252e")]
     #[tokio::test]
     async fn list_from_preserves_table_paths(
         #[case] raw_table_name: &str,
