@@ -1502,7 +1502,7 @@ checksum = "092966b41edc516079bdf31ec78a2e0588d1d0c08f78b91d8307215928642b2b"
 
 [[package]]
 name = "delta-kernel-unity-catalog"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "delta_kernel",
  "delta_kernel_default_engine",
