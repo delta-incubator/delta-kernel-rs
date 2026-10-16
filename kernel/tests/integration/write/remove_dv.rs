@@ -2224,7 +2224,8 @@ async fn adaptive_metadata_remove_cancels_add_across_dv_storage_types(
         engine.as_ref(),
         UpdateTableOperation::Update,
         "test-engine",
-        |builder| builder.with_data_change(true),
+        true,
+        |builder| builder,
     )?;
     txn.update_deletion_vectors(
         HashMap::from([(path.clone(), u_dv.clone())]),
@@ -2241,7 +2242,8 @@ async fn adaptive_metadata_remove_cancels_add_across_dv_storage_types(
         engine.as_ref(),
         UpdateTableOperation::Delete,
         "test-engine",
-        |builder| builder.with_data_change(true),
+        true,
+        |builder| builder,
     )?;
     for scan_files in get_scan_files(snapshot, engine.as_ref())? {
         txn.remove_files(scan_files);

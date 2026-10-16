@@ -74,7 +74,8 @@ async fn test_with_root_manifest_file_produces_a_self_contained_checkpoint_actio
         &engine,
         UpdateTableOperation::Write,
         "test-engine",
-        |builder| builder.with_data_change(true),
+        true,
+        |builder| builder,
     )?
     .with_root_manifest_file(file.clone())?;
     txn.commit(&engine)?.unwrap_committed();
@@ -177,7 +178,6 @@ async fn test_with_root_manifest_file_merges_domain_metadata_and_transactions(
             builder
                 .with_transaction_id("app-2", 7)
                 .with_domain_metadata("my.domain", "v2")
-                .with_data_change(true)
         },
     )?
     .with_root_manifest_file(file)?;
@@ -249,12 +249,11 @@ fn commit_info_at(table_url: &Url, version: u64) -> Result<Value, Box<dyn std::e
     Ok(commit_infos.remove(0))
 }
 
-/// `commitInfo.dataChange` records the transaction's value; a root manifest file commit requires
-/// an explicit one.
+/// `commitInfo.dataChange` records the transaction's value with or without a root manifest.
 #[rstest]
 #[tokio::test(flavor = "multi_thread")]
 async fn test_commit_info_data_change(
-    #[values(None, Some(true), Some(false))] data_change: Option<bool>,
+    #[values(false, true)] data_change: bool,
     #[values(false, true)] root_manifest: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (engine, _temp_dir, table_url, snapshot) =
@@ -265,10 +264,8 @@ async fn test_commit_info_data_change(
         &engine,
         UpdateTableOperation::Write,
         "test-engine",
-        |builder| match data_change {
-            Some(data_change) => builder.with_data_change(data_change),
-            None => builder,
-        },
+        data_change,
+        |builder| builder,
     )?;
     if root_manifest {
         txn = txn.with_root_manifest_file(FileMeta {
@@ -276,20 +273,10 @@ async fn test_commit_info_data_change(
             last_modified: 0,
             size: 1024,
         })?;
-        if data_change.is_none() {
-            assert_result_error_with_message(
-                txn.commit(&engine),
-                "root manifest file commit requires an explicit data_change",
-            );
-            return Ok(());
-        }
     }
     txn.commit(&engine)?.unwrap_committed();
     let commit_info = commit_info_at(&table_url, 1)?;
-    assert_eq!(
-        commit_info["dataChange"],
-        json!(data_change.unwrap_or(true))
-    );
+    assert_eq!(commit_info["dataChange"], json!(data_change));
     Ok(())
 }
 

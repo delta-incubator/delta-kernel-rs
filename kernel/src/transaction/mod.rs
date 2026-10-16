@@ -955,15 +955,6 @@ impl<STATE, MODE: ExecutionMode> Transaction<STATE, MODE> {
                     !self.has_data_file_actions(),
                     KernelError::generic("root manifest file commit cannot include file actions")
                 );
-                // The root manifest's file changes are opaque to kernel, so dataChange cannot be
-                // inferred.
-                require!(
-                    !self.infer_data_change,
-                    KernelError::invalid_transaction_state(
-                        "root manifest file commit requires an explicit data_change (call \
-                         with_data_change)"
-                    )
-                );
             }
             Some(ManifestWrite::Commit(_)) => {
                 return Err(KernelError::unsupported(

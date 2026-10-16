@@ -2,7 +2,7 @@
 //! commits.
 
 use super::super::{ManifestCommitState, ManifestWrite, Transaction, UpdateTableOperation};
-use super::{add_dummy_file, create_existing_table_txn, create_existing_table_txn_with};
+use super::{add_dummy_file, create_existing_table_txn};
 use crate::actions::{DomainMetadata, LOG_DOMAIN_METADATA_SCHEMA};
 use crate::committer::FileSystemCommitter;
 use crate::engine::arrow_data::ArrowEngineData;
@@ -55,8 +55,7 @@ fn with_root_manifest_file_rejects_non_adaptive_table() -> Result<()> {
 
 #[test]
 fn validate_manifest_write_allows_root_manifest_on_adaptive_table() -> Result<()> {
-    let (_engine, mut txn, _tempdir) =
-        create_existing_table_txn_with(|builder| builder.with_data_change(true))?;
+    let (_engine, mut txn, _tempdir) = create_existing_table_txn()?;
     txn.effective_table_config = adaptive_table_config();
     let file = dummy_root_manifest_file_meta(&txn);
     txn = txn.with_root_manifest_file(file)?;

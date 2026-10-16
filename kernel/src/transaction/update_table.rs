@@ -118,8 +118,7 @@ impl<MODE: ExecutionMode> Transaction<UpdateTable, MODE> {
     /// # Errors
     ///
     /// Returns an error if the table does not support the `adaptiveMetadata-preview` feature, or if
-    /// a manifest (content-tree) commit was already staged. Commit fails unless the transaction was
-    /// built with an explicit `with_data_change`.
+    /// a manifest (content-tree) commit was already staged.
     #[cfg(feature = "adaptive-metadata-in-dev")]
     pub fn with_root_manifest_file(mut self, file: FileMeta) -> Result<Self> {
         require!(
