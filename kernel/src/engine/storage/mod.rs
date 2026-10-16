@@ -307,12 +307,38 @@ fn read_one(
 
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
+
     use super::*;
 
+    #[derive(Clone, Copy)]
+    enum ReadFault {
+        None,
+        Call,
+        Empty,
+        FirstItem,
+        ExtraBuffer,
+        ExtraError,
+        ShortRange,
+    }
+
     // Adapt the test-only SyncEngine, which reads whole files, to the byte-range storage contract.
-    struct RangedStorage(Arc<dyn StorageHandler>);
+    struct RangedStorage(Arc<dyn StorageHandler>, ReadFault);
     impl StorageHandler for RangedStorage {
         fn read_files(&self, files: Vec<crate::FileSlice>) -> Result<ResultIteratorStatic<Bytes>> {
+            let error = || KernelError::generic("connector read failure");
+            let response = match self.1 {
+                ReadFault::None => None,
+                ReadFault::Call => return Err(error()),
+                ReadFault::Empty => Some(vec![]),
+                ReadFault::FirstItem => Some(vec![Err(error())]),
+                ReadFault::ExtraBuffer => Some(vec![Ok(Bytes::new()), Ok(Bytes::new())]),
+                ReadFault::ExtraError => Some(vec![Ok(Bytes::new()), Err(error())]),
+                ReadFault::ShortRange => Some(vec![Ok(Bytes::from_static(b"x"))]),
+            };
+            if let Some(response) = response {
+                return Ok(Box::new(response.into_iter()));
+            }
             let results = files
                 .into_iter()
                 .map(|(url, range)| {
@@ -342,8 +368,40 @@ mod tests {
     }
     fn engine() -> StorageEngine {
         let storage = crate::engine::sync::SyncEngine::new().storage_handler();
-        StorageEngine::new(Arc::new(RangedStorage(storage)))
+        StorageEngine::new(Arc::new(RangedStorage(storage, ReadFault::None)))
     }
+
+    #[rstest]
+    #[case(ReadFault::Call, "connector read failure")]
+    #[case(ReadFault::Empty, "storage returned no byte buffer")]
+    #[case(ReadFault::FirstItem, "connector read failure")]
+    #[case(ReadFault::ExtraBuffer, "storage returned more than one byte buffer")]
+    #[case(ReadFault::ExtraError, "connector read failure")]
+    #[case(ReadFault::ShortRange, "storage returned an incomplete byte range")]
+    fn byte_reads_reject_invalid_connector_responses(
+        #[case] fault: ReadFault,
+        #[case] expected: &str,
+    ) {
+        let storage: Arc<dyn StorageHandler> = Arc::new(RangedStorage(
+            crate::engine::sync::SyncEngine::new().storage_handler(),
+            fault,
+        ));
+        let url = Url::parse("memory:///bytes").unwrap();
+        let error = read_one(&storage, &url, Some(0..2)).unwrap_err();
+        assert!(error.to_string().contains(expected), "{error}");
+        let reader = StorageChunkReader::new(
+            storage,
+            FileMeta {
+                location: url,
+                last_modified: 0,
+                size: 2,
+            },
+        );
+        let mut sequential = reader.get_read(0).unwrap();
+        let error = sequential.read(&mut [0; 2]).unwrap_err();
+        assert!(error.to_string().contains(expected), "{error}");
+    }
+
     #[test]
     fn chunk_reader_obeys_ranges_eof_and_empty_reads() {
         let directory = tempfile::tempdir().unwrap();
@@ -357,6 +415,7 @@ mod tests {
         assert_eq!(reader.get_bytes(3, 4).unwrap().as_ref(), b"3456");
         assert!(reader.get_bytes(u64::MAX, 2).is_err());
         assert!(reader.get_bytes(9, 2).is_err());
+        assert!(reader.get_read(11).is_err());
         assert!(reader.get_bytes(10, 0).unwrap().is_empty());
         let mut sequential = reader.get_read(7).unwrap();
         assert_eq!(sequential.read(&mut []).unwrap(), 0);
