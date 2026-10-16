@@ -136,6 +136,30 @@ impl LogSegment {
 
     /// Replays the log segment for the latest Protocol and Metadata, each with its version.
     fn replay_for_pm(&self, engine: &dyn Engine) -> KernelResult<PmCandidate> {
+        #[allow(unused_mut)]
+        let mut candidate = self.replay_log_for_pm(engine)?;
+        // Seed replay with the embedded base action, as a checkpoint file's actions would be. Say
+        // hint 5, manifest commit 8, snapshot at 7: commits 6 and 7 are replayed, and the action at
+        // 5 supplies protocol and metadata unless they change a newer value. Content roots never
+        // decrease across manifest commits, so any checkpoint action in commits 6 or 7 comes from
+        // an earlier manifest commit with a root at or before 5, and the base action stays latest.
+        #[cfg(feature = "adaptive-metadata-in-dev")]
+        if let Some(action) = self.amt_base().and_then(|base| base.checkpoint_action) {
+            let version = action.version();
+            candidate.protocol = newer(
+                Some((version, action.protocol().clone())),
+                candidate.protocol,
+            );
+            candidate.metadata = newer(
+                Some((version, action.metadata().clone())),
+                candidate.metadata,
+            );
+            candidate.checkpoint = newer(Some((version, action.clone())), candidate.checkpoint);
+        }
+        Ok(candidate)
+    }
+
+    fn replay_log_for_pm(&self, engine: &dyn Engine) -> KernelResult<PmCandidate> {
         #[cfg(feature = "declarative-plans")]
         if let Some(executor) = engine.plan_executor() {
             return resolve_pm_batches(self.read_pm_batches_via_plan(executor.as_ref())?);

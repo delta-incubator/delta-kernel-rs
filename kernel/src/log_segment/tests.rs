@@ -106,6 +106,16 @@ async fn build_log_with_paths_and_checkpoint(
     paths: &[Path],
     checkpoint_metadata: Option<&LastCheckpointHint>,
 ) -> (Arc<dyn StorageHandler>, Url) {
+    let (engine, log_root) =
+        build_engine_with_paths_and_checkpoint(paths, checkpoint_metadata).await;
+    (engine.storage_handler(), log_root)
+}
+
+// Like `build_log_with_paths_and_checkpoint`, but returns the engine over the log.
+async fn build_engine_with_paths_and_checkpoint(
+    paths: &[Path],
+    checkpoint_metadata: Option<&LastCheckpointHint>,
+) -> (SyncEngine, Url) {
     let store = Arc::new(InMemory::new());
 
     let data = bytes::Bytes::from("kernel-data");
@@ -130,11 +140,9 @@ async fn build_log_with_paths_and_checkpoint(
     }
 
     let engine = SyncEngine::new_with_store(store);
-    let storage = engine.storage_handler();
-
     let table_root = Url::parse("memory:///").expect("valid url");
     let log_root = table_root.join("_delta_log/").unwrap();
-    (storage, log_root)
+    (engine, log_root)
 }
 
 // Create an in-memory store and return the store and the URL for the store's _delta_log directory.
@@ -3018,7 +3026,7 @@ async fn for_timestamp_conversion_no_commit_files() {
 #[tokio::test]
 async fn test_latest_commit_file_field_is_captured() {
     // Test that the latest commit is preserved even after checkpoint filtering
-    let (storage, log_root) = build_log_with_paths_and_checkpoint(
+    let (engine, log_root) = build_engine_with_paths_and_checkpoint(
         &[
             delta_path_for_version(0, "json"),
             delta_path_for_version(1, "json"),
@@ -3033,7 +3041,7 @@ async fn test_latest_commit_file_field_is_captured() {
     .await;
 
     let log_segment = LogSegment::for_snapshot(
-        storage.as_ref(),
+        &engine,
         log_root.clone(),
         vec![],
         None,
@@ -3054,7 +3062,7 @@ async fn test_latest_commit_file_field_is_captured() {
 #[tokio::test]
 async fn test_latest_commit_file_with_checkpoint_filtering() {
     // Test when commits get filtered by checkpoint
-    let (storage, log_root) = build_log_with_paths_and_checkpoint(
+    let (engine, log_root) = build_engine_with_paths_and_checkpoint(
         &[
             delta_path_for_version(0, "json"),
             delta_path_for_version(1, "json"),
@@ -3067,7 +3075,7 @@ async fn test_latest_commit_file_with_checkpoint_filtering() {
     .await;
 
     let log_segment = LogSegment::for_snapshot(
-        storage.as_ref(),
+        &engine,
         log_root.clone(),
         vec![],
         None,
@@ -3088,14 +3096,14 @@ async fn test_latest_commit_file_with_checkpoint_filtering() {
 async fn test_latest_commit_file_with_no_commits() {
     // Test when there are only checkpoints and no commits at all
     // This should now succeed with latest_commit_file as None
-    let (storage, log_root) = build_log_with_paths_and_checkpoint(
+    let (engine, log_root) = build_engine_with_paths_and_checkpoint(
         &[delta_path_for_version(2, "checkpoint.parquet")],
         None,
     )
     .await;
 
     let log_segment = LogSegment::for_snapshot(
-        storage.as_ref(),
+        &engine,
         log_root.clone(),
         vec![],
         None,
@@ -3115,7 +3123,7 @@ async fn test_latest_commit_file_with_no_commits() {
 async fn test_latest_commit_file_with_checkpoint_at_same_version() {
     // Test when checkpoint is at the same version as the latest commit
     // This tests: 0.json, 1.json, 1.checkpoint.parquet
-    let (storage, log_root) = build_log_with_paths_and_checkpoint(
+    let (engine, log_root) = build_engine_with_paths_and_checkpoint(
         &[
             delta_path_for_version(0, "json"),
             delta_path_for_version(1, "json"),
@@ -3126,7 +3134,7 @@ async fn test_latest_commit_file_with_checkpoint_at_same_version() {
     .await;
 
     let log_segment = LogSegment::for_snapshot(
-        storage.as_ref(),
+        &engine,
         log_root.clone(),
         vec![],
         None,
@@ -3149,7 +3157,7 @@ async fn test_latest_commit_file_with_checkpoint_at_same_version() {
 async fn test_latest_commit_file_edge_case_commit_before_checkpoint() {
     // Test edge case: 0.json, 1.checkpoint.parquet
     // The latest_commit_file should NOT be set to version 0 since there's no commit at version 1
-    let (storage, log_root) = build_log_with_paths_and_checkpoint(
+    let (engine, log_root) = build_engine_with_paths_and_checkpoint(
         &[
             delta_path_for_version(0, "json"),
             delta_path_for_version(1, "checkpoint.parquet"),
@@ -3159,7 +3167,7 @@ async fn test_latest_commit_file_edge_case_commit_before_checkpoint() {
     .await;
 
     let log_segment = LogSegment::for_snapshot(
-        storage.as_ref(),
+        &engine,
         log_root.clone(),
         vec![],
         None,
@@ -5493,32 +5501,55 @@ fn latest_checkpoint_action_is_stable_when_newer_checkpoint_written_later() -> R
 }
 
 // An AMT `_last_checkpoint` hint at version 5 has no checkpoint file. The listing starts at the
-// hinted version as long as the manifest commit carrying the checkpoint action is listed.
+// hinted version as long as the manifest commit carrying the checkpoint action is listed, or, for
+// time travel before the manifest commit, the hint embeds that action. Commit 5 is dropped unless
+// it is the manifest commit or the last listed commit. `embedded_action` is the embedded action's
+// version.
 #[cfg(feature = "adaptive-metadata-in-dev")]
 #[rstest]
-#[case::manifest_commit_at_hint(5, None, &[], None, Ok((None, vec![5, 6, 7])))]
-#[case::manifest_commit_after_hint(6, None, &[], None, Ok((None, vec![5, 6, 7])))]
-#[case::hinted_commit_cleaned_up(6, None, &[0, 1, 2, 3, 4, 5], None, Ok((None, vec![6, 7])))]
-#[case::time_travel_after_manifest_commit(6, None, &[], Some(7), Ok((None, vec![5, 6, 7])))]
-#[case::time_travel_at_manifest_commit(6, None, &[], Some(6), Ok((None, vec![5, 6])))]
-#[case::time_travel_before_hint(5, None, &[], Some(3), Ok((None, vec![0, 1, 2, 3])))]
-#[case::newer_checkpoint_file_wins(5, Some(6), &[], None, Ok((Some(6), vec![7])))]
+#[case::manifest_commit_at_hint(5, None, None, &[], None, Ok((None, vec![5, 6, 7])))]
+#[case::manifest_commit_after_hint(6, None, None, &[], None, Ok((None, vec![6, 7])))]
+#[case::hinted_commit_cleaned_up(6, None, None, &[0, 1, 2, 3, 4, 5], None, Ok((None, vec![6, 7])))]
+#[case::time_travel_after_manifest_commit(6, None, None, &[], Some(7), Ok((None, vec![6, 7])))]
+#[case::time_travel_at_manifest_commit(6, None, None, &[], Some(6), Ok((None, vec![6])))]
+#[case::time_travel_before_manifest_commit(6, Some(5), None, &[], Some(5), Ok((None, vec![5])))]
+#[case::embedded_action_version_mismatch(
+    6,
+    Some(4),
+    None,
+    &[],
+    Some(5),
+    Err("embeds a checkpoint action at version 4")
+)]
+#[case::time_travel_before_hint(5, None, None, &[], Some(3), Ok((None, vec![0, 1, 2, 3])))]
+#[case::newer_checkpoint_file_wins(5, None, Some(6), &[], None, Ok((Some(6), vec![7])))]
 #[case::commits_after_hint_missing(
     7,
+    None,
     None,
     &[5, 6],
     None,
     Err("requires commits starting at or before version 6, but the first listed commit is Some(7)")
 )]
-#[case::manifest_commit_not_listed(
+#[case::manifest_commit_after_latest_commit(
     9,
+    Some(5),
     None,
     &[],
     None,
-    Err("names manifest commit 9, which was not found in the log (listed commits Some(5)..=Some(7))")
+    Ok((None, vec![6, 7]))
+)]
+#[case::manifest_commit_cleaned_up(
+    5,
+    Some(5),
+    None,
+    &[0, 1, 2, 3, 4, 5],
+    None,
+    Err("names manifest commit 5, which was not found in the log (listed commits Some(6)..=Some(7))")
 )]
 #[case::manifest_commit_before_hint(
     4,
+    None,
     None,
     &[],
     None,
@@ -5527,21 +5558,16 @@ fn latest_checkpoint_action_is_stable_when_newer_checkpoint_written_later() -> R
 #[tokio::test]
 async fn amt_last_checkpoint_hint_bounds_listing(
     #[case] manifest_commit_version: Version,
+    #[case] embedded_action: Option<Version>,
     #[case] checkpoint_file: Option<Version>,
     #[case] missing_commits: &[Version],
     #[case] end_version: Option<Version>,
     #[case] expected: Result<(Option<Version>, Vec<Version>), &str>,
-) {
-    let hint = LastCheckpointHint {
-        version: 5,
-        size: 10,
-        checkpoint_type: Some(CheckpointType::AdaptiveMetadataTree),
-        amt_checkpoint: Some(AmtCheckpoint {
-            manifest_commit_version,
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
+) -> Result<()> {
+    let checkpoint = embedded_action
+        .map(|version| minimal_checkpoint_action("metadata/root.parquet", version))
+        .transpose()?;
+    let hint = amt_hint_at_version_5(manifest_commit_version, checkpoint);
     let paths = (0..=7)
         .filter(|v| !missing_commits.contains(v))
         .map(|v| delta_path_for_version(v, "json"))
@@ -5564,6 +5590,27 @@ async fn amt_last_checkpoint_hint_bounds_listing(
             assert_eq!(extract_commit_versions(&log_segment), commits);
         }
         Err(message) => assert_result_error_with_message(log_segment, message),
+    }
+    Ok(())
+}
+
+// An AMT `_last_checkpoint` hint at version 5 whose checkpoint action was added in manifest commit
+// `manifest_commit_version`, optionally embedding the action.
+#[cfg(feature = "adaptive-metadata-in-dev")]
+fn amt_hint_at_version_5(
+    manifest_commit_version: Version,
+    checkpoint: Option<CheckpointAction>,
+) -> LastCheckpointHint {
+    LastCheckpointHint {
+        version: 5,
+        size: 10,
+        checkpoint_type: Some(CheckpointType::AdaptiveMetadataTree),
+        amt_checkpoint: Some(AmtCheckpoint {
+            manifest_commit_version,
+            checkpoint,
+            ..Default::default()
+        }),
+        ..Default::default()
     }
 }
 

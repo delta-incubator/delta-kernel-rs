@@ -393,7 +393,7 @@ impl<Mode> SnapshotBuilder<Mode> {
             if let Some(table_root) = table_root {
                 let table_url = try_parse_uri(table_root)?;
                 let log_segment = LogSegment::for_snapshot(
-                    engine.storage_handler().as_ref(),
+                    engine,
                     table_url.join(DELTA_LOG_DIR_WITH_SLASH)?,
                     log_tail,
                     effective_version,
