@@ -581,8 +581,7 @@ async fn post_commit_snapshot_resolves_latest_checkpoint_action(
         .unwrap();
 
     let mut txn = snapshot
-        .update_table(UpdateTableOperation::Write, "test-engine")
-        .with_data_change(true)
+        .update_table(UpdateTableOperation::Write, "test-engine", true)
         .build(&engine, Box::new(FileSystemCommitter::new()))
         .unwrap();
     // A root manifest commit captures the action it writes; a plain commit carries the read
