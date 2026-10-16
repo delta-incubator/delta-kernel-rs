@@ -3,15 +3,15 @@ use std::collections::HashSet;
 use crate::engine_data::MapItem;
 use crate::scan::log_replay::{BASE_ROW_ID_NAME, DEFAULT_ROW_COMMIT_VERSION_NAME};
 use crate::utils::require;
-use crate::{DeltaResult, Error};
+use crate::{KernelError, KernelResult};
 
 pub(super) fn validate_required_field_exist<T>(
     value: Option<T>,
     path: &str,
     field: &str,
-) -> DeltaResult<T> {
+) -> KernelResult<T> {
     value.ok_or_else(|| {
-        Error::missing_data(format!(
+        KernelError::missing_data(format!(
             "AddFile for '{path}' is missing required field '{field}'"
         ))
     })
@@ -21,7 +21,7 @@ pub(super) fn validate_partition_keys(
     path: &str,
     actual_partition_values: MapItem<'_>,
     expected_physical_partition_columns: &HashSet<String>,
-) -> DeltaResult<()> {
+) -> KernelResult<()> {
     let actual_keys_vec: Vec<&str> = actual_partition_values.keys().collect();
     let actual_keys_set: HashSet<&str> = actual_keys_vec.iter().copied().collect();
     let keys_match = actual_keys_set.len() == expected_physical_partition_columns.len()
@@ -31,14 +31,14 @@ pub(super) fn validate_partition_keys(
 
     require!(
         actual_keys_vec.len() == actual_keys_set.len(),
-        Error::invalid_partition_values(format!(
+        KernelError::invalid_partition_values(format!(
             "AddFile for '{path}' has duplicate partition column names in partitionValues: \
              {actual_keys_vec:?}"
         ))
     );
     require!(
         keys_match,
-        Error::invalid_partition_values(format!(
+        KernelError::invalid_partition_values(format!(
             "AddFile for '{path}' has partitionValues keys {actual_keys_vec:?}, but the table's \
              physical partition columns are {expected_physical_partition_columns:?}"
         ))
@@ -52,20 +52,20 @@ pub(super) fn require_row_tracking_metadata(
     path: &str,
     base_row_id: Option<i64>,
     default_row_commit_version: Option<i64>,
-) -> DeltaResult<()> {
+) -> KernelResult<()> {
     for (field, value) in [
         (BASE_ROW_ID_NAME, base_row_id),
         (DEFAULT_ROW_COMMIT_VERSION_NAME, default_row_commit_version),
     ] {
         let value = value.ok_or_else(|| {
-            Error::missing_data(format!(
+            KernelError::missing_data(format!(
                 "File '{path}' is missing required row-tracking field '{field}' \
                  when row tracking is enabled"
             ))
         })?;
         require!(
             value >= 0,
-            Error::generic(format!(
+            KernelError::generic(format!(
                 "File '{path}' has negative row-tracking field '{field}': {value}; \
                  {field} must be non-negative"
             ))

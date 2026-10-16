@@ -14,7 +14,7 @@ use delta_kernel::object_store::path::Path;
 use delta_kernel::object_store::{DynObjectStore, ObjectStoreExt};
 use delta_kernel::schema::{schema_ref, MetadataColumnSpec, SchemaRef, StructField};
 use delta_kernel::transaction::CommitResult;
-use delta_kernel::{DeltaResult, Error, Snapshot};
+use delta_kernel::{KernelError, Result, Snapshot};
 use itertools::Itertools;
 use rstest::rstest;
 use serde_json::{Deserializer, Value};
@@ -23,11 +23,11 @@ use test_utils::delta_kernel_default_engine::executor::tokio::TokioBackgroundExe
 use test_utils::delta_kernel_default_engine::DefaultEngine;
 use test_utils::table_builder::{FeatureSet, LogState, TestTableBuilder};
 use test_utils::{
-    add_commit, assert_result_error_with_message, begin_transaction, collect_row_ids,
+    add_commit, assert_result_error_with_message, begin_transaction_with, collect_row_ids,
     create_default_engine_mt_executor, create_table, create_table_and_load_snapshot,
     engine_store_setup, get_materialized_row_tracking_column_names, load_and_begin_transaction,
-    read_actions_from_commit, read_add_infos, read_scan, record_batch_to_bytes, test_read,
-    test_table_setup,
+    load_and_begin_transaction_with, read_actions_from_commit, read_add_infos, read_scan,
+    record_batch_to_bytes, test_read, test_table_setup,
 };
 use url::Url;
 
@@ -42,7 +42,7 @@ async fn create_row_tracking_table(
     tmp_dir: &TempDir,
     table_name: &str,
     schema: SchemaRef,
-) -> DeltaResult<(
+) -> Result<(
     Url,
     Arc<DefaultEngine<TokioBackgroundExecutor>>,
     Arc<DynObjectStore>,
@@ -57,13 +57,13 @@ async fn create_row_tracking_table_with_features(
     schema: SchemaRef,
     extra_reader_writer_features: &[&str],
     extra_writer_features: &[&str],
-) -> DeltaResult<(
+) -> Result<(
     Url,
     Arc<DefaultEngine<TokioBackgroundExecutor>>,
     Arc<DynObjectStore>,
 )> {
     let tmp_test_dir_url = Url::from_directory_path(tmp_dir.path())
-        .map_err(|_| Error::generic("Failed to convert directory path to URL"))?;
+        .map_err(|_| KernelError::generic("Failed to convert directory path to URL"))?;
     let (store, engine, table_location) = engine_store_setup(table_name, Some(&tmp_test_dir_url));
 
     let reader_features = extra_reader_writer_features.to_vec();
@@ -81,7 +81,7 @@ async fn create_row_tracking_table_with_features(
         writer_features,
     )
     .await
-    .map_err(|e| Error::generic(format!("Failed to create table: {e}")))?;
+    .map_err(|e| KernelError::generic(format!("Failed to create table: {e}")))?;
 
     Ok((table_url, Arc::new(engine), store))
 }
@@ -91,9 +91,15 @@ async fn write_data_to_table(
     table_url: &Url,
     engine: Arc<DefaultEngine<TokioBackgroundExecutor>>,
     data: Vec<ArrowEngineData>,
-) -> DeltaResult<CommitResult> {
-    let mut txn =
-        load_and_begin_transaction(table_url.clone(), engine.as_ref())?.with_data_change(true);
+) -> Result<CommitResult> {
+    let mut txn = load_and_begin_transaction_with(
+        table_url.clone(),
+        engine.as_ref(),
+        delta_kernel::transaction::UpdateTableOperation::Write,
+        "test-engine",
+        true,
+        |builder| builder,
+    )?;
 
     // Write data out by spawning async tasks to simulate executors
     let write_context = Arc::new(txn.write_state()?.write_context_builder().build()?);
@@ -118,7 +124,7 @@ async fn write_data_to_table(
 async fn setup_number_table(
     tmp_dir: &TempDir,
     name: &str,
-) -> DeltaResult<(
+) -> Result<(
     SchemaRef,
     Url,
     Arc<DefaultEngine<TokioBackgroundExecutor>>,
@@ -134,7 +140,7 @@ pub(crate) async fn setup_number_table_with_features(
     name: &str,
     extra_reader_writer_features: &[&str],
     extra_writer_features: &[&str],
-) -> DeltaResult<(
+) -> Result<(
     SchemaRef,
     Url,
     Arc<DefaultEngine<TokioBackgroundExecutor>>,
@@ -168,14 +174,14 @@ fn string_array(data: Vec<String>) -> Arc<dyn Array> {
 }
 
 /// Helper function to generate ArrowEngineData from batches of Arrow arrays.
-fn generate_data<I>(schema: SchemaRef, batches: I) -> DeltaResult<Vec<ArrowEngineData>>
+fn generate_data<I>(schema: SchemaRef, batches: I) -> Result<Vec<ArrowEngineData>>
 where
     I: IntoIterator<Item = Vec<Arc<dyn Array>>>,
 {
     let arrow_schema: Arc<ArrowSchema> = Arc::new(schema.as_ref().try_into_arrow()?);
     batches
         .into_iter()
-        .map(|batch_columns| -> DeltaResult<ArrowEngineData> {
+        .map(|batch_columns| -> Result<ArrowEngineData> {
             let record_batch = RecordBatch::try_new(arrow_schema.clone(), batch_columns)?;
             Ok(ArrowEngineData::new(record_batch))
         })
@@ -189,7 +195,7 @@ async fn verify_row_tracking_in_commit(
     commit_version: u64,
     expected_base_row_ids: Vec<i64>,
     expected_row_id_high_water_mark: i64,
-) -> DeltaResult<()> {
+) -> Result<()> {
     let commit_url = table_url.join(&format!("_delta_log/{commit_version:020}.json"))?;
     let commit = store.get(&Path::from_url_path(commit_url.path())?).await?;
 
@@ -267,7 +273,7 @@ async fn verify_row_tracking_in_commit(
 }
 
 #[tokio::test]
-async fn test_row_tracking_append() -> DeltaResult<()> {
+async fn test_row_tracking_append() -> Result<()> {
     // Setup
     let _ = tracing_subscriber::fmt::try_init();
     let tmp_test_dir = tempdir()?;
@@ -310,7 +316,7 @@ async fn test_row_tracking_append() -> DeltaResult<()> {
 }
 
 #[tokio::test]
-async fn test_row_tracking_single_record_batches() -> DeltaResult<()> {
+async fn test_row_tracking_single_record_batches() -> Result<()> {
     // Setup
     let _ = tracing_subscriber::fmt::try_init();
     let tmp_test_dir = tempdir()?;
@@ -344,7 +350,7 @@ async fn test_row_tracking_single_record_batches() -> DeltaResult<()> {
 }
 
 #[tokio::test]
-async fn test_row_tracking_large_batch() -> DeltaResult<()> {
+async fn test_row_tracking_large_batch() -> Result<()> {
     // Setup
     let _ = tracing_subscriber::fmt::try_init();
     let tmp_test_dir = tempdir()?;
@@ -382,7 +388,7 @@ async fn test_row_tracking_large_batch() -> DeltaResult<()> {
 }
 
 #[tokio::test]
-async fn test_row_tracking_consecutive_transactions() -> DeltaResult<()> {
+async fn test_row_tracking_consecutive_transactions() -> Result<()> {
     // Setup
     let _ = tracing_subscriber::fmt::try_init();
     let tmp_test_dir = tempdir()?;
@@ -443,7 +449,7 @@ async fn test_row_tracking_consecutive_transactions() -> DeltaResult<()> {
 }
 
 #[tokio::test]
-async fn test_row_tracking_three_consecutive_transactions() -> DeltaResult<()> {
+async fn test_row_tracking_three_consecutive_transactions() -> Result<()> {
     // Setup
     let _ = tracing_subscriber::fmt::try_init();
     let tmp_test_dir = tempdir()?;
@@ -535,7 +541,7 @@ async fn test_row_tracking_three_consecutive_transactions() -> DeltaResult<()> {
 }
 
 #[tokio::test]
-async fn test_row_tracking_with_regular_and_empty_adds() -> DeltaResult<()> {
+async fn test_row_tracking_with_regular_and_empty_adds() -> Result<()> {
     // Setup
     let _ = tracing_subscriber::fmt::try_init();
     let tmp_test_dir = tempdir()?;
@@ -579,7 +585,7 @@ async fn test_row_tracking_with_regular_and_empty_adds() -> DeltaResult<()> {
 }
 
 #[tokio::test]
-async fn test_row_tracking_with_empty_adds() -> DeltaResult<()> {
+async fn test_row_tracking_with_empty_adds() -> Result<()> {
     // Setup
     let _ = tracing_subscriber::fmt::try_init();
     let tmp_test_dir = tempdir()?;
@@ -623,7 +629,7 @@ async fn test_row_tracking_with_empty_adds() -> DeltaResult<()> {
 }
 
 #[tokio::test]
-async fn test_row_tracking_without_adds() -> DeltaResult<()> {
+async fn test_row_tracking_without_adds() -> Result<()> {
     // Setup
     let _ = tracing_subscriber::fmt::try_init();
     let tmp_test_dir = tempdir()?;
@@ -652,7 +658,7 @@ async fn test_row_tracking_without_adds() -> DeltaResult<()> {
 }
 
 #[tokio::test]
-async fn test_row_tracking_parallel_transactions_conflict() -> DeltaResult<()> {
+async fn test_row_tracking_parallel_transactions_conflict() -> Result<()> {
     // Setup
     let _ = tracing_subscriber::fmt::try_init();
     let tmp_test_dir = tempdir()?;
@@ -667,12 +673,22 @@ async fn test_row_tracking_parallel_transactions_conflict() -> DeltaResult<()> {
     let snapshot2 = Snapshot::builder_for(table_url.clone()).build(engine2.as_ref())?;
 
     // Create two transactions from the same snapshot (simulating parallel transactions)
-    let mut txn1 = begin_transaction(snapshot1, engine1.as_ref())?
-        .with_engine_info("transaction 1")
-        .with_data_change(true);
-    let mut txn2 = begin_transaction(snapshot2, engine2.as_ref())?
-        .with_engine_info("transaction 2")
-        .with_data_change(true);
+    let mut txn1 = begin_transaction_with(
+        snapshot1,
+        engine1.as_ref(),
+        delta_kernel::transaction::UpdateTableOperation::Write,
+        "transaction 1",
+        true,
+        |builder| builder,
+    )?;
+    let mut txn2 = begin_transaction_with(
+        snapshot2,
+        engine2.as_ref(),
+        delta_kernel::transaction::UpdateTableOperation::Write,
+        "transaction 2",
+        true,
+        |builder| builder,
+    )?;
 
     // Prepare data for both transactions
     let data1 = RecordBatch::try_new(
@@ -768,7 +784,7 @@ async fn test_row_tracking_parallel_transactions_conflict() -> DeltaResult<()> {
 }
 
 #[tokio::test]
-async fn test_no_row_tracking_fields_without_feature() -> DeltaResult<()> {
+async fn test_no_row_tracking_fields_without_feature() -> Result<()> {
     // Setup
     let _ = tracing_subscriber::fmt::try_init();
     let tmp_test_dir = tempdir()?;
@@ -776,7 +792,7 @@ async fn test_no_row_tracking_fields_without_feature() -> DeltaResult<()> {
 
     // Create a table without row tracking
     let tmp_test_dir_url = Url::from_directory_path(tmp_test_dir.path())
-        .map_err(|_| Error::generic("Failed to convert directory path to URL"))?;
+        .map_err(|_| KernelError::generic("Failed to convert directory path to URL"))?;
     let (store, engine, table_location) =
         engine_store_setup("test_no_row_tracking", Some(&tmp_test_dir_url));
 
@@ -790,7 +806,7 @@ async fn test_no_row_tracking_fields_without_feature() -> DeltaResult<()> {
         vec![], // no writer features
     )
     .await
-    .map_err(|e| Error::generic(format!("Failed to create table: {e}")))?;
+    .map_err(|e| KernelError::generic(format!("Failed to create table: {e}")))?;
 
     let engine = Arc::new(engine);
 
@@ -862,20 +878,20 @@ async fn test_no_row_tracking_fields_without_feature() -> DeltaResult<()> {
 fn read_row_id_scan(
     snapshot: Arc<Snapshot>,
     engine: Arc<dyn delta_kernel::Engine>,
-) -> DeltaResult<Vec<RecordBatch>> {
+) -> Result<Vec<RecordBatch>> {
     read_row_tracking_scan(snapshot, engine, [MetadataColumnSpec::RowId])
 }
 
 fn read_row_commit_version_scan(
     snapshot: Arc<Snapshot>,
     engine: Arc<dyn delta_kernel::Engine>,
-) -> DeltaResult<Vec<RecordBatch>> {
+) -> Result<Vec<RecordBatch>> {
     read_row_tracking_scan(snapshot, engine, [MetadataColumnSpec::RowCommitVersion])
 }
 
 /// Basic read: write one file with 3 rows, verify row IDs are sequential starting from 0.
 #[tokio::test]
-async fn test_read_row_ids_basic() -> DeltaResult<()> {
+async fn test_read_row_ids_basic() -> Result<()> {
     let _ = tracing_subscriber::fmt::try_init();
     let tmp_dir = tempdir()?;
     let (schema, table_url, engine, _store) =
@@ -904,7 +920,7 @@ async fn test_read_row_ids_basic() -> DeltaResult<()> {
 /// scan-schema order.
 fn generated_row_tracking_and_partition_columns_preserve_scan_schema_order(
     #[case] column_mapping_mode: &str,
-) -> DeltaResult<()> {
+) -> Result<()> {
     let table_schema = schema_ref! {
         nullable "value": INTEGER,
         nullable "part_a": STRING,
@@ -1026,7 +1042,7 @@ async fn test_read_row_commit_versions_use_add_action_defaults(
     let (_temp_dir, table_path, engine) = test_table_setup()?;
     let schema = schema_ref! { nullable "number": INTEGER };
     let table_url = Url::from_directory_path(&table_path)
-        .map_err(|_| Error::generic("Failed to convert table path to URL"))?;
+        .map_err(|_| KernelError::generic("Failed to convert table path to URL"))?;
     create_table_and_load_snapshot(
         &table_path,
         schema.clone(),
@@ -1098,7 +1114,9 @@ async fn test_read_row_commit_versions_prefer_materialized_values(
         setup_number_table(&tmp_dir, "test_read_materialized_row_commit_versions").await?;
     let materialized_column_name = get_materialized_row_tracking_column_names(&table_url, 0)?
         .row_commit_version_column_name
-        .ok_or_else(|| Error::generic("Materialized Row Commit Version column name not found"))?;
+        .ok_or_else(|| {
+            KernelError::generic("Materialized Row Commit Version column name not found")
+        })?;
     let batch = RecordBatch::try_new(
         Arc::new(ArrowSchema::new(vec![
             Field::new("number", ArrowDataType::Int32, true),
@@ -1281,7 +1299,7 @@ async fn test_read_row_tracking_metadata_stable_across_deletion_vector_update(
 
 /// Multiple files in one commit: each file's row IDs start at its baseRowId with no overlap.
 #[tokio::test]
-async fn test_read_row_ids_multiple_files_one_commit() -> DeltaResult<()> {
+async fn test_read_row_ids_multiple_files_one_commit() -> Result<()> {
     let _ = tracing_subscriber::fmt::try_init();
     let tmp_dir = tempdir()?;
     let (schema, table_url, engine, _store) =
@@ -1330,7 +1348,7 @@ async fn test_read_row_ids_multiple_files_one_commit() -> DeltaResult<()> {
 
 /// Multiple commits: row IDs are globally unique and monotonically increasing across commits.
 #[tokio::test]
-async fn test_read_row_ids_multiple_commits() -> DeltaResult<()> {
+async fn test_read_row_ids_multiple_commits() -> Result<()> {
     let _ = tracing_subscriber::fmt::try_init();
     let tmp_dir = tempdir()?;
     let (schema, table_url, engine, _store) =
@@ -1374,7 +1392,7 @@ async fn test_read_row_ids_multiple_commits() -> DeltaResult<()> {
 /// instead, which requires a multi-threaded runtime to delegate work to other workers.
 /// Writes use the standard `TokioBackgroundExecutor` engine, matching all other tests in this file.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_read_row_tracking_values_after_checkpoint() -> DeltaResult<()> {
+async fn test_read_row_tracking_values_after_checkpoint() -> Result<()> {
     let _ = tracing_subscriber::fmt::try_init();
     let tmp_dir = tempdir()?;
     let (schema, table_url, engine, _store) =
@@ -1439,7 +1457,7 @@ async fn test_read_row_tracking_values_after_checkpoint() -> DeltaResult<()> {
 ///
 /// Row index is file-local (resets to 0 per file); row ID is global (baseRowId + row_index).
 #[tokio::test]
-async fn test_read_row_ids_coexist_with_row_index() -> DeltaResult<()> {
+async fn test_read_row_ids_coexist_with_row_index() -> Result<()> {
     let _ = tracing_subscriber::fmt::try_init();
     let tmp_dir = tempdir()?;
     let (schema, table_url, engine, _store) =
@@ -1526,7 +1544,7 @@ async fn test_read_row_ids_coexist_with_row_index() -> DeltaResult<()> {
 /// metadata survive compaction without being dropped or corrupted.
 #[tokio::test]
 #[ignore = "log compaction is not yet supported, tracked in #2337"]
-async fn test_read_row_ids_after_log_compaction() -> DeltaResult<()> {
+async fn test_read_row_ids_after_log_compaction() -> Result<()> {
     let _ = tracing_subscriber::fmt::try_init();
     let tmp_dir = tempdir()?;
     let (schema, table_url, engine, store) =
@@ -1550,7 +1568,7 @@ async fn test_read_row_ids_after_log_compaction() -> DeltaResult<()> {
     let compaction_path = writer.compaction_path().clone();
     let batches = writer
         .compaction_data(engine.as_ref())?
-        .collect::<DeltaResult<Vec<_>>>()?;
+        .collect::<Result<Vec<_>>>()?;
 
     let json_bytes = to_json_bytes(batches.into_iter().map(Ok))?;
     store
@@ -1559,7 +1577,7 @@ async fn test_read_row_ids_after_log_compaction() -> DeltaResult<()> {
             json_bytes.into(),
         )
         .await
-        .map_err(|e| Error::generic(e.to_string()))?;
+        .map_err(|e| KernelError::generic(e.to_string()))?;
 
     // Load a fresh snapshot -- it should read Protocol and Metadata and file list from the
     // compaction file.

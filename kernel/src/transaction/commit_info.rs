@@ -1,14 +1,28 @@
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
 
-use super::Transaction;
+use super::{Imperative, Transaction};
 use crate::actions::{CommitInfo, COMMIT_INFO_NAME, LOG_COMMIT_INFO_SCHEMA};
 use crate::engine_data::{GetData, MapItem, RowVisitor, TypedGetData as _};
 use crate::expressions::{lit, null_lit, MapData, Scalar};
 use crate::schema::{column_name, schema_ref, ColumnName, MapType, ToSchema};
 use crate::struct_patch::ProjectionStructPatchBuilder;
 use crate::utils::require;
-use crate::{create_row, DataType, Engine, EngineData, Error, Expression, ExpressionRef};
+use crate::{
+    create_row, DataType, Engine, EngineData, Expression, ExpressionRef, KernelError, KernelResult,
+};
+
+pub(super) fn collect_operation_metadata<I, K, V>(entries: I) -> HashMap<String, Option<String>>
+where
+    I: IntoIterator<Item = (K, Option<V>)>,
+    K: Into<String>,
+    V: Into<String>,
+{
+    entries
+        .into_iter()
+        .map(|(key, value)| (key.into(), value.map(Into::into)))
+        .collect()
+}
 
 /// Builds a list of `(field_name, literal_expression)` pairs covering every [`CommitInfo`]
 /// field. Field names match the camelCase schema names produced by the `ToSchema` derive macro.
@@ -16,9 +30,10 @@ use crate::{create_row, DataType, Engine, EngineData, Error, Expression, Express
 /// inserting kernel-only fields after the last engine field.
 fn commit_info_literal_exprs(
     commit_info: CommitInfo,
-) -> Result<Vec<(&'static str, ExpressionRef)>, Error> {
+) -> KernelResult<Vec<(&'static str, ExpressionRef)>> {
     let string_map_type = MapType::new(DataType::STRING, DataType::STRING, true);
-    let literal_exprs = vec![
+    #[cfg_attr(not(feature = "adaptive-metadata-in-dev"), allow(unused_mut))]
+    let mut literal_exprs = vec![
         ("timestamp", Arc::new(lit(commit_info.timestamp))),
         (
             "inCommitTimestamp",
@@ -42,9 +57,20 @@ fn commit_info_literal_exprs(
             string_map_literal_expr(commit_info.tags, &string_map_type)?,
         ),
     ];
+    #[cfg(feature = "adaptive-metadata-in-dev")]
+    literal_exprs.extend([
+        (
+            "dataChange",
+            Arc::new(lit(commit_info.data_change)) as ExpressionRef,
+        ),
+        (
+            "lastManifestCommit",
+            Arc::new(lit(commit_info.last_manifest_commit)),
+        ),
+    ]);
     let expected_expr_len = CommitInfo::to_schema().fields().len();
     if literal_exprs.len() != expected_expr_len {
-        return Err(Error::Generic(format!("expect the commit_info_literal_exprs return {expected_expr_len} expressions, but only get {} expressions. \
+        return Err(KernelError::Generic(format!("expect the commit_info_literal_exprs return {expected_expr_len} expressions, but only get {} expressions. \
             If CommitInfo field was added/removed, please update Expression::Literal in this function and update the with_commit_info doc comment", literal_exprs.len())));
     }
     Ok(literal_exprs)
@@ -53,7 +79,7 @@ fn commit_info_literal_exprs(
 fn string_map_literal_expr(
     map: Option<HashMap<String, Option<String>>>,
     map_type: &MapType,
-) -> Result<ExpressionRef, Error> {
+) -> KernelResult<ExpressionRef> {
     let expression = match map {
         Some(map) => lit(MapData::try_new(
             map_type.clone(),
@@ -65,14 +91,20 @@ fn string_map_literal_expr(
     Ok(Arc::new(expression))
 }
 
-impl<S> Transaction<S> {
+impl<STATE> Transaction<STATE, Imperative> {
     pub(super) fn generate_commit_info(
         &self,
         engine: &dyn Engine,
         kernel_commit_info: CommitInfo,
-    ) -> Result<Box<dyn EngineData>, Error> {
+    ) -> KernelResult<Box<dyn EngineData>> {
         match &self.engine_commit_info {
             Some((engine_commit_info, engine_commit_info_schema)) => {
+                require!(
+                    engine_commit_info.len() == 1,
+                    KernelError::invalid_transaction_state(
+                        "Connector commit info must contain exactly one row",
+                    )
+                );
                 let kernel_schema = CommitInfo::to_schema();
                 let mut commit_info = kernel_commit_info;
                 if engine_commit_info_schema.contains("tags") {
@@ -90,7 +122,7 @@ impl<S> Transaction<S> {
                 let mut patch = ProjectionStructPatchBuilder::new(engine_commit_info_schema);
                 for (field_name, expr_ref) in &literal_exprs {
                     let field = kernel_schema.field(*field_name).ok_or_else(|| {
-                        Error::internal_error(format!(
+                        KernelError::internal_error(format!(
                             "CommitInfo schema is missing field '{field_name}'"
                         ))
                     })?;
@@ -100,7 +132,7 @@ impl<S> Transaction<S> {
                 }
                 for (field_name, expr_ref) in &literal_exprs {
                     let field = kernel_schema.field(*field_name).ok_or_else(|| {
-                        Error::internal_error(format!(
+                        KernelError::internal_error(format!(
                             "CommitInfo schema is missing field '{field_name}'"
                         ))
                     })?;
@@ -149,13 +181,15 @@ impl RowVisitor for CommitInfoTagsVisitor {
         &mut self,
         row_count: usize,
         getters: &[&'a dyn GetData<'a>],
-    ) -> Result<(), Error> {
+    ) -> Result<(), KernelError> {
         require!(
             row_count == 1,
-            Error::generic("Connector commit info must contain exactly one row")
+            KernelError::invalid_transaction_state(
+                "Connector commit info must contain exactly one row"
+            )
         );
         let [tags_getter] = getters else {
-            return Err(Error::internal_error(format!(
+            return Err(KernelError::internal_error(format!(
                 "CommitInfoTagsVisitor received {} getters instead of one",
                 getters.len()
             )));
@@ -177,8 +211,8 @@ mod tests {
     use super::CommitInfoTagsVisitor;
     use crate::actions::CommitInfo;
     use crate::arrow::array::{
-        Array, ArrayRef, AsArray, BooleanArray, Int64Array, MapArray, MapBuilder, StringArray,
-        StringBuilder, StructArray,
+        Array, ArrayRef, AsArray, BooleanArray, Int64Array, MapArray, MapBuilder,
+        RecordBatchOptions, StringArray, StringBuilder, StructArray,
     };
     use crate::arrow::datatypes::{
         DataType as ArrowDataType, Field as ArrowField, Schema as ArrowSchema,
@@ -191,7 +225,7 @@ mod tests {
     use crate::transaction::Transaction;
     use crate::unit_test_utils::{assert_result_error_with_message, load_test_table};
     use crate::utils::FoldWithOption as _;
-    use crate::{DeltaResult, Engine, EngineData, RowVisitor};
+    use crate::{Engine, EngineData, KernelResult, Result, RowVisitor};
 
     // ── build_commit_info tests ────────────────────────────────────────────────
 
@@ -282,11 +316,15 @@ mod tests {
     /// Create a transaction with the given engine_commit_info, using the shared test table.
     fn make_txn(
         engine_commit_info: Option<(Box<dyn EngineData>, SchemaRef)>,
-    ) -> DeltaResult<(Arc<dyn Engine>, Transaction)> {
+    ) -> KernelResult<(Arc<dyn Engine>, Transaction)> {
         let (engine, snapshot, _tempdir) = load_test_table("table-without-dv-small")?;
         let txn = snapshot
-            .transaction(Box::new(FileSystemCommitter::new()), engine.as_ref())?
-            .with_operation("WRITE".to_string())
+            .update_table(
+                crate::transaction::UpdateTableOperation::Write,
+                "test-engine",
+                true,
+            )
+            .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
             .fold_with(engine_commit_info, |txn, (data, schema)| {
                 txn.with_commit_info(data, schema)
             });
@@ -309,7 +347,7 @@ mod tests {
     /// no engine_commit_info -- output is the kernel CommitInfo wrapped in a "commitInfo"
     /// outer struct, matching the Delta log action format produced by `LOG_COMMIT_INFO_SCHEMA`.
     #[test]
-    fn test_build_commit_info_none_branch() -> DeltaResult<()> {
+    fn test_build_commit_info_none_branch() -> Result<()> {
         let (engine, txn) = make_txn(None)?;
         let result = ArrowEngineData::try_from_engine_data(
             txn.generate_commit_info(engine.as_ref(), make_kernel_commit_info())?,
@@ -327,7 +365,7 @@ mod tests {
     /// engine schema has fields that are fully disjoint from CommitInfo -- all CommitInfo
     /// fields are appended after the engine-only fields, in CommitInfo schema order.
     #[test]
-    fn test_build_commit_info_disjoint_schemas() -> DeltaResult<()> {
+    fn test_build_commit_info_disjoint_schemas() -> Result<()> {
         let (data, schema) = make_engine_commit_info(
             vec![
                 ArrowField::new("customApp", ArrowDataType::Utf8, false),
@@ -373,7 +411,7 @@ mod tests {
     /// engine schema contains every kernel's CommitInfo field.
     /// All overlapping fields must be replaced by kernel values, no new fields added.
     #[test]
-    fn test_build_commit_info_full_overlap() -> DeltaResult<()> {
+    fn test_build_commit_info_full_overlap() -> Result<()> {
         let mut map_builder = MapBuilder::new(None, StringBuilder::new(), StringBuilder::new());
         map_builder.keys().append_value("stale_key");
         map_builder.values().append_value("stale_value");
@@ -422,9 +460,23 @@ mod tests {
             ],
         );
         let (engine, txn) = make_txn(Some((data, schema)))?;
+        let mut kernel_commit_info = make_kernel_commit_info();
+        kernel_commit_info.operation_parameters = Some(
+            [(
+                "current_parameter".to_string(),
+                Some("current_value".to_string()),
+            )]
+            .into_iter()
+            .collect(),
+        );
+        kernel_commit_info.operation_metrics = Some(
+            [("current_metric".to_string(), Some("1".to_string()))]
+                .into_iter()
+                .collect(),
+        );
 
         let result = ArrowEngineData::try_from_engine_data(
-            txn.generate_commit_info(engine.as_ref(), make_kernel_commit_info())?,
+            txn.generate_commit_info(engine.as_ref(), kernel_commit_info)?,
         )?;
         let commit_info = commit_info_struct(&result);
 
@@ -436,8 +488,14 @@ mod tests {
 
         assert_eq!(get_str(commit_info, "operation"), "WRITE");
         assert!(!get_str(commit_info, "kernelVersion").is_empty());
-        assert_eq!(get_map(commit_info, "operationParameters").len(), 0);
-        assert!(get_map(commit_info, "operationMetrics").is_empty());
+        let parameters = get_map(commit_info, "operationParameters");
+        assert_eq!(parameters.len(), 1);
+        assert_eq!(get_str(&parameters, "key"), "current_parameter");
+        assert_eq!(get_str(&parameters, "value"), "current_value");
+        let metrics = get_map(commit_info, "operationMetrics");
+        assert_eq!(metrics.len(), 1);
+        assert_eq!(get_str(&metrics, "key"), "current_metric");
+        assert_eq!(get_str(&metrics, "value"), "1");
         assert!(uuid::Uuid::parse_str(get_str(commit_info, "txnId")).is_ok());
         assert!(get_i64(commit_info, "timestamp") > 0);
         assert_eq!(get_i64(commit_info, "inCommitTimestamp"), 134_000_000);
@@ -456,7 +514,7 @@ mod tests {
     /// fields pass through, and remaining CommitInfo fields are appended after the last engine
     /// field.
     #[test]
-    fn test_build_commit_info_partial_overlap() -> DeltaResult<()> {
+    fn test_build_commit_info_partial_overlap() -> Result<()> {
         let (data, schema) = make_engine_commit_info(
             vec![
                 ArrowField::new("timestamp", ArrowDataType::Int64, true),
@@ -499,7 +557,7 @@ mod tests {
     /// engine schema has overlapping fields with different DataTypes than kernel expects.
     /// Kernel replacement must win, so each output field has the kernel's type.
     #[test]
-    fn test_build_commit_info_type_conflict_replaced_by_kernel() -> DeltaResult<()> {
+    fn test_build_commit_info_type_conflict_replaced_by_kernel() -> Result<()> {
         let (data, schema) = make_engine_commit_info(
             vec![
                 ArrowField::new("timestamp", ArrowDataType::Utf8, true),
@@ -543,31 +601,120 @@ mod tests {
         Ok(())
     }
 
-    /// engine schema is empty -- all CommitInfo fields are prepended (which, with no engine
-    /// fields preceding them, is equivalent to producing the full CommitInfo schema).
-    #[test]
-    fn test_build_commit_info_empty_engine_schema() -> DeltaResult<()> {
-        // A 0-row, 0-column RecordBatch with an empty kernel schema.
-        let empty_batch = RecordBatch::new_empty(Arc::new(ArrowSchema::empty()));
+    #[rstest::rstest]
+    #[case::zero_rows(0, false)]
+    #[case::one_row(1, true)]
+    #[case::two_rows(2, false)]
+    fn test_build_commit_info_empty_engine_schema(
+        #[case] row_count: usize,
+        #[case] succeeds: bool,
+    ) -> Result<()> {
+        let empty_batch = RecordBatch::try_new_with_options(
+            Arc::new(ArrowSchema::empty()),
+            vec![],
+            &RecordBatchOptions::new().with_row_count(Some(row_count)),
+        )?;
         let empty_schema = schema_ref! {};
         let (engine, txn) = make_txn(Some((
             Box::new(ArrowEngineData::new(empty_batch)),
             empty_schema,
         )))?;
 
-        let result = ArrowEngineData::try_from_engine_data(
-            txn.generate_commit_info(engine.as_ref(), make_kernel_commit_info())?,
-        )?;
+        let result = txn.generate_commit_info(engine.as_ref(), make_kernel_commit_info());
+        if !succeeds {
+            assert_result_error_with_message(
+                result,
+                "Connector commit info must contain exactly one row",
+            );
+            return Ok(());
+        }
+
+        let result = ArrowEngineData::try_from_engine_data(result?)?;
         let ci = commit_info_struct(&result);
 
-        // With no engine fields, the inner schema matches CommitInfo::to_schema().
         let kernel_schema = CommitInfo::to_schema();
         assert_eq!(ci.num_columns(), kernel_schema.fields().count());
 
-        // Column order matches CommitInfo schema field order.
         for (i, field) in kernel_schema.fields().enumerate() {
             assert_eq!(ci.fields()[i].name(), field.name());
         }
         Ok(())
+    }
+
+    /// Kernel's `dataChange` is emitted (null when unset) and overrides any engine-supplied value.
+    #[cfg(feature = "adaptive-metadata-in-dev")]
+    #[rstest::rstest]
+    fn test_build_commit_info_data_change(
+        #[values(None, Some(true), Some(false))] txn_data_change: Option<bool>,
+        #[values(false, true)] engine_conflicting_data_change: bool,
+    ) -> Result<()> {
+        // Always differs from the txn value so an override is observable.
+        let engine_commit_info = engine_conflicting_data_change.then(|| {
+            let conflicting_value = !txn_data_change.unwrap_or(false);
+            make_engine_commit_info(
+                vec![ArrowField::new("dataChange", ArrowDataType::Boolean, true)],
+                vec![Arc::new(BooleanArray::from(vec![Some(conflicting_value)])) as ArrayRef],
+            )
+        });
+        let (engine, txn) = make_txn(engine_commit_info)?;
+        let mut commit_info = make_kernel_commit_info();
+        if let Some(data_change) = txn_data_change {
+            commit_info.set_data_change(data_change);
+        }
+
+        let result = ArrowEngineData::try_from_engine_data(
+            txn.generate_commit_info(engine.as_ref(), commit_info)?,
+        )?;
+        let ci = commit_info_struct(&result);
+        let column = ci
+            .column_by_name("dataChange")
+            .expect("dataChange column should be present");
+        match txn_data_change {
+            None => assert!(column.is_null(0)),
+            Some(data_change) => assert_eq!(get_bool(ci, "dataChange"), data_change),
+        }
+        Ok(())
+    }
+
+    /// A `None` `last_manifest_commit` emits a present-but-null `lastManifestCommit` struct column;
+    /// a `Some` emits the struct values.
+    #[cfg(feature = "adaptive-metadata-in-dev")]
+    #[rstest::rstest]
+    #[case::absent(None)]
+    #[case::present(Some((5, 3)))]
+    fn test_build_commit_info_last_manifest_commit(
+        #[case] last_manifest_commit: Option<(i64, i64)>,
+    ) {
+        use crate::actions::LastManifestCommit;
+
+        let (engine, txn) = make_txn(None).unwrap();
+        let mut commit_info = make_kernel_commit_info();
+        commit_info.last_manifest_commit =
+            last_manifest_commit.map(|(version, content_root_version)| {
+                LastManifestCommit::new(version, content_root_version).unwrap()
+            });
+
+        let result = ArrowEngineData::try_from_engine_data(
+            txn.generate_commit_info(engine.as_ref(), commit_info)
+                .unwrap(),
+        )
+        .unwrap();
+        let ci = commit_info_struct(&result);
+        let column = ci
+            .column_by_name("lastManifestCommit")
+            .expect("lastManifestCommit column should be present");
+
+        match last_manifest_commit {
+            None => assert!(column.is_null(0)),
+            Some((version, content_root_version)) => {
+                let lmc = column
+                    .as_any()
+                    .downcast_ref::<StructArray>()
+                    .expect("lastManifestCommit should be a StructArray");
+                assert!(lmc.is_valid(0));
+                assert_eq!(get_i64(lmc, "version"), version);
+                assert_eq!(get_i64(lmc, "contentRootVersion"), content_root_version);
+            }
+        }
     }
 }

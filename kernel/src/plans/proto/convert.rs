@@ -19,8 +19,8 @@ use crate::expressions::{
     VariadicExpressionOp,
 };
 use crate::plans::ir::nodes::{
-    Agg, Aggregate, DynamicScan, FileType, Filter, Operator, Project, ScanFile, ScanJson,
-    ScanParquet, SemiJoin, Values,
+    Agg, Aggregate, DynamicScan, FileType, Filter, Operator, Project, RelationRef, ScanFile,
+    ScanJson, ScanParquet, SemiJoin, Values, WriteJson,
 };
 use crate::plans::ir::plan::{Plan, PlanNode};
 use crate::plans::{IoOperation, Operation};
@@ -30,7 +30,7 @@ use crate::schema::{
 };
 #[cfg(feature = "geo-type-in-dev")]
 use crate::schema::{EdgeInterpolationAlgorithm, GeographyType, GeometryType};
-use crate::{DeltaResult, Error, FileMeta, FileSlice};
+use crate::{FileMeta, FileSlice, KernelError, Result};
 
 // === Helpers ===
 
@@ -124,6 +124,8 @@ impl From<&FileMeta> for proto_plan::FileMeta {
 
 impl From<&Plan> for proto_plan::Plan {
     fn from(plan: &Plan) -> Self {
+        // The plan's output schema is lost when converting to proto. It can be
+        // reconstructed by traversing the nodes.
         proto_plan::Plan {
             nodes: convert_vec(&plan.nodes),
         }
@@ -146,10 +148,12 @@ impl From<&Operator> for proto_plan::Operator {
             Operator::ScanParquet(n) => Op::ScanParquet(n.into()),
             Operator::ScanJson(n) => Op::ScanJson(n.into()),
             Operator::Values(n) => Op::Values(n.into()),
+            Operator::RelationSource(n) => Op::RelationSource(n.into()),
             Operator::Project(n) => Op::Project(n.into()),
             Operator::Filter(n) => Op::Filter(n.into()),
             Operator::DynamicScan(n) => Op::DynamicScan(n.into()),
             Operator::Aggregate(n) => Op::Aggregate(n.into()),
+            Operator::WriteJson(n) => Op::WriteJson(n.into()),
             Operator::SemiJoin(n) => Op::SemiJoin(n.into()),
             Operator::UnionAll(_) => Op::UnionAll(proto_plan::UnionAllNode {}),
         };
@@ -202,10 +206,30 @@ impl From<&Values> for proto_plan::ValuesNode {
     }
 }
 
+impl From<&RelationRef> for proto_plan::RelationSourceNode {
+    fn from(relation_ref: &RelationRef) -> Self {
+        proto_plan::RelationSourceNode {
+            id: relation_ref.id().to_owned(),
+            schema: Some(relation_ref.schema().as_ref().into()),
+        }
+    }
+}
+
 impl From<&Project> for proto_plan::ProjectNode {
     fn from(node: &Project) -> Self {
         proto_plan::ProjectNode {
             expr: Some(node.expr.as_ref().into()),
+            schema: Some(node.schema.as_ref().into()),
+        }
+    }
+}
+
+impl From<&WriteJson> for proto_plan::WriteJsonNode {
+    fn from(node: &WriteJson) -> Self {
+        Self {
+            file_path: node.file_path.to_string(),
+            overwrite: node.overwrite,
+            ordered: node.ordered,
             schema: Some(node.schema.as_ref().into()),
         }
     }
@@ -626,6 +650,24 @@ impl From<&DataType> for proto_schema::DataType {
             DataType::Map(map) => DataTypeKind::Map(Box::new(map.as_ref().into())),
             // The proto `VariantType` is intentionally empty: variants are opaque on the wire.
             DataType::Variant(_) => DataTypeKind::Variant(proto_schema::VariantType {}),
+            #[cfg(feature = "udt-in-dev")]
+            DataType::UserDefined(udt) => {
+                DataTypeKind::UserDefined(Box::new(proto_schema::UserDefinedType {
+                    sql_type: Some(Box::new(udt.sql_type().into())),
+                    annotation: udt
+                        .annotation()
+                        .iter()
+                        .map(|(key, value)| {
+                            (
+                                key.clone(),
+                                proto_schema::UserDefinedAnnotationValue {
+                                    value: value.clone(),
+                                },
+                            )
+                        })
+                        .collect(),
+                }))
+            }
         };
         proto_schema::DataType { kind: Some(kind) }
     }
@@ -766,29 +808,29 @@ impl From<&MetadataValue> for proto_schema::MetadataValue {
 // === Schema from Proto ===
 
 impl TryFrom<proto_schema::StructType> for StructType {
-    type Error = Error;
-    fn try_from(proto: proto_schema::StructType) -> DeltaResult<Self> {
+    type Error = KernelError;
+    fn try_from(proto: proto_schema::StructType) -> Result<Self> {
         let fields = proto
             .fields
             .into_iter()
             .map(StructField::try_from)
-            .collect::<DeltaResult<Vec<_>>>()?;
+            .collect::<Result<Vec<_>>>()?;
         StructType::try_new(fields)
     }
 }
 
 impl TryFrom<proto_schema::StructField> for StructField {
-    type Error = Error;
+    type Error = KernelError;
 
-    fn try_from(proto: proto_schema::StructField) -> DeltaResult<Self> {
+    fn try_from(proto: proto_schema::StructField) -> Result<Self> {
         let data_type = proto
             .data_type
-            .ok_or_else(|| Error::schema("StructField proto missing data_type"))?;
+            .ok_or_else(|| KernelError::schema("StructField proto missing data_type"))?;
         let metadata = proto
             .metadata
             .into_iter()
-            .map(|(key, value)| Ok::<_, Error>((key, MetadataValue::try_from(value)?)))
-            .collect::<DeltaResult<std::collections::HashMap<_, _>>>()?;
+            .map(|(key, value)| Ok::<_, KernelError>((key, MetadataValue::try_from(value)?)))
+            .collect::<Result<std::collections::HashMap<_, _>>>()?;
         Ok(StructField {
             name: proto.name,
             data_type: DataType::try_from(data_type)?,
@@ -799,11 +841,11 @@ impl TryFrom<proto_schema::StructField> for StructField {
 }
 
 impl TryFrom<proto_schema::DataType> for DataType {
-    type Error = Error;
-    fn try_from(proto: proto_schema::DataType) -> DeltaResult<Self> {
+    type Error = KernelError;
+    fn try_from(proto: proto_schema::DataType) -> Result<Self> {
         let kind = proto
             .kind
-            .ok_or_else(|| Error::schema("DataType proto missing kind"))?;
+            .ok_or_else(|| KernelError::schema("DataType proto missing kind"))?;
         let data_type = match kind {
             DataTypeKind::Primitive(primitive) => DataType::Primitive(primitive.try_into()?),
             DataTypeKind::Array(array) => DataType::from(ArrayType::try_from(*array)?),
@@ -811,21 +853,42 @@ impl TryFrom<proto_schema::DataType> for DataType {
             DataTypeKind::Map(map) => DataType::from(MapType::try_from(*map)?),
             // Kernel does not support shredded variants, so always decode as unshredded.
             DataTypeKind::Variant(_) => DataType::unshredded_variant(),
+            DataTypeKind::UserDefined(udt) => {
+                #[cfg(feature = "udt-in-dev")]
+                {
+                    let sql_type = DataType::try_from(
+                        *udt.sql_type
+                            .ok_or_else(|| KernelError::schema("UDT proto missing sql_type"))?,
+                    )?;
+                    let annotation = udt
+                        .annotation
+                        .into_iter()
+                        .map(|(key, value)| (key, value.value))
+                        .collect();
+                    let udt = crate::schema::UserDefinedType::try_new(sql_type, annotation)?;
+                    DataType::UserDefined(udt)
+                }
+                #[cfg(not(feature = "udt-in-dev"))]
+                {
+                    let _ = udt;
+                    return Err(KernelError::unsupported("UDT requires udt-in-dev"));
+                }
+            }
         };
         Ok(data_type)
     }
 }
 
 impl TryFrom<proto_schema::PrimitiveType> for PrimitiveType {
-    type Error = Error;
-    fn try_from(proto: proto_schema::PrimitiveType) -> DeltaResult<Self> {
+    type Error = KernelError;
+    fn try_from(proto: proto_schema::PrimitiveType) -> Result<Self> {
         let kind = proto
             .kind
-            .ok_or_else(|| Error::schema("PrimitiveType proto missing kind"))?;
+            .ok_or_else(|| KernelError::schema("PrimitiveType proto missing kind"))?;
         let primitive = match kind {
             PrimitiveTypeKind::Simple(simple) => {
                 let simple = Simple::try_from(simple).map_err(|_| {
-                    Error::schema(format!("unknown SimplePrimitiveType value: {simple}"))
+                    KernelError::schema(format!("unknown SimplePrimitiveType value: {simple}"))
                 })?;
                 match simple {
                     Simple::String => PrimitiveType::String,
@@ -844,7 +907,7 @@ impl TryFrom<proto_schema::PrimitiveType> for PrimitiveType {
                     Simple::IntervalYearMonth => PrimitiveType::IntervalYearMonth,
                     Simple::IntervalDayTime => PrimitiveType::IntervalDayTime,
                     Simple::Unspecified => {
-                        return Err(Error::schema("SimplePrimitiveType is unspecified"))
+                        return Err(KernelError::schema("SimplePrimitiveType is unspecified"))
                     }
                 }
             }
@@ -861,7 +924,7 @@ impl TryFrom<proto_schema::PrimitiveType> for PrimitiveType {
             // them when the geo feature is enabled.
             #[cfg(not(feature = "geo-type-in-dev"))]
             PrimitiveTypeKind::Geometry(_) | PrimitiveTypeKind::Geography(_) => {
-                return Err(Error::schema(
+                return Err(KernelError::schema(
                     "geometry/geography types require the 'geo-type-in-dev' feature",
                 ))
             }
@@ -871,32 +934,33 @@ impl TryFrom<proto_schema::PrimitiveType> for PrimitiveType {
 }
 
 impl TryFrom<proto_schema::DecimalType> for DecimalType {
-    type Error = Error;
-    fn try_from(proto: proto_schema::DecimalType) -> DeltaResult<Self> {
+    type Error = KernelError;
+    fn try_from(proto: proto_schema::DecimalType) -> Result<Self> {
         let precision = u8::try_from(proto.precision).map_err(|_| {
-            Error::invalid_decimal(format!("precision out of range: {}", proto.precision))
+            KernelError::invalid_decimal(format!("precision out of range: {}", proto.precision))
         })?;
-        let scale = u8::try_from(proto.scale)
-            .map_err(|_| Error::invalid_decimal(format!("scale out of range: {}", proto.scale)))?;
+        let scale = u8::try_from(proto.scale).map_err(|_| {
+            KernelError::invalid_decimal(format!("scale out of range: {}", proto.scale))
+        })?;
         DecimalType::try_new(precision, scale)
     }
 }
 
 #[cfg(feature = "geo-type-in-dev")]
 impl TryFrom<proto_schema::GeometryType> for GeometryType {
-    type Error = Error;
-    fn try_from(proto: proto_schema::GeometryType) -> DeltaResult<Self> {
+    type Error = KernelError;
+    fn try_from(proto: proto_schema::GeometryType) -> Result<Self> {
         GeometryType::try_new(&proto.crs)
     }
 }
 
 #[cfg(feature = "geo-type-in-dev")]
 impl TryFrom<proto_schema::GeographyType> for GeographyType {
-    type Error = Error;
-    fn try_from(proto: proto_schema::GeographyType) -> DeltaResult<Self> {
+    type Error = KernelError;
+    fn try_from(proto: proto_schema::GeographyType) -> Result<Self> {
         let algorithm = EdgeAlgo::try_from(proto.algorithm)
             .map_err(|_| {
-                Error::invalid_geo_params(format!(
+                KernelError::invalid_geo_params(format!(
                     "unknown EdgeInterpolationAlgorithm value: {}",
                     proto.algorithm
                 ))
@@ -908,8 +972,8 @@ impl TryFrom<proto_schema::GeographyType> for GeographyType {
 
 #[cfg(feature = "geo-type-in-dev")]
 impl TryFrom<EdgeAlgo> for EdgeInterpolationAlgorithm {
-    type Error = Error;
-    fn try_from(proto: EdgeAlgo) -> DeltaResult<Self> {
+    type Error = KernelError;
+    fn try_from(proto: EdgeAlgo) -> Result<Self> {
         let algorithm = match proto {
             EdgeAlgo::Spherical => EdgeInterpolationAlgorithm::Spherical,
             EdgeAlgo::Vincenty => EdgeInterpolationAlgorithm::Vincenty,
@@ -917,7 +981,7 @@ impl TryFrom<EdgeAlgo> for EdgeInterpolationAlgorithm {
             EdgeAlgo::Andoyer => EdgeInterpolationAlgorithm::Andoyer,
             EdgeAlgo::Karney => EdgeInterpolationAlgorithm::Karney,
             EdgeAlgo::Unspecified => {
-                return Err(Error::invalid_geo_params(
+                return Err(KernelError::invalid_geo_params(
                     "EdgeInterpolationAlgorithm is unspecified",
                 ))
             }
@@ -927,11 +991,11 @@ impl TryFrom<EdgeAlgo> for EdgeInterpolationAlgorithm {
 }
 
 impl TryFrom<proto_schema::ArrayType> for ArrayType {
-    type Error = Error;
-    fn try_from(proto: proto_schema::ArrayType) -> DeltaResult<Self> {
+    type Error = KernelError;
+    fn try_from(proto: proto_schema::ArrayType) -> Result<Self> {
         let element_type = proto
             .element_type
-            .ok_or_else(|| Error::schema("ArrayType proto missing element_type"))?;
+            .ok_or_else(|| KernelError::schema("ArrayType proto missing element_type"))?;
         Ok(ArrayType::new(
             DataType::try_from(*element_type)?,
             proto.contains_null,
@@ -940,14 +1004,14 @@ impl TryFrom<proto_schema::ArrayType> for ArrayType {
 }
 
 impl TryFrom<proto_schema::MapType> for MapType {
-    type Error = Error;
-    fn try_from(proto: proto_schema::MapType) -> DeltaResult<Self> {
+    type Error = KernelError;
+    fn try_from(proto: proto_schema::MapType) -> Result<Self> {
         let key_type = proto
             .key_type
-            .ok_or_else(|| Error::schema("MapType proto missing key_type"))?;
+            .ok_or_else(|| KernelError::schema("MapType proto missing key_type"))?;
         let value_type = proto
             .value_type
-            .ok_or_else(|| Error::schema("MapType proto missing value_type"))?;
+            .ok_or_else(|| KernelError::schema("MapType proto missing value_type"))?;
         Ok(MapType::new(
             DataType::try_from(*key_type)?,
             DataType::try_from(*value_type)?,
@@ -957,11 +1021,11 @@ impl TryFrom<proto_schema::MapType> for MapType {
 }
 
 impl TryFrom<proto_schema::MetadataValue> for MetadataValue {
-    type Error = Error;
-    fn try_from(proto: proto_schema::MetadataValue) -> DeltaResult<Self> {
+    type Error = KernelError;
+    fn try_from(proto: proto_schema::MetadataValue) -> Result<Self> {
         let value = proto
             .value
-            .ok_or_else(|| Error::schema("MetadataValue proto missing value"))?;
+            .ok_or_else(|| KernelError::schema("MetadataValue proto missing value"))?;
         let metadata = match value {
             MetadataValueKind::Number(n) => MetadataValue::Number(n),
             MetadataValueKind::String(s) => MetadataValue::String(s),
@@ -997,8 +1061,8 @@ mod tests {
         IndirectDataSkippingPredicateEvaluator,
     };
     use crate::plans::ir::nodes::{
-        Agg, Aggregate, DynamicScan, FileType, Filter, Operator, Project, ScanFile, ScanJson,
-        ScanParquet, SemiJoin, UnionAll, Values,
+        Agg, Aggregate, DynamicScan, FileType, Filter, Operator, Project, RelationRef, ScanFile,
+        ScanJson, ScanParquet, SemiJoin, UnionAll, Values, WriteJson,
     };
     use crate::plans::ir::plan::{Plan, PlanNode};
     use crate::plans::proto::{
@@ -1012,7 +1076,7 @@ mod tests {
     };
     #[cfg(feature = "geo-type-in-dev")]
     use crate::schema::{EdgeInterpolationAlgorithm, GeographyType, GeometryType};
-    use crate::{DeltaResult, FileMeta, FileSlice};
+    use crate::{FileMeta, FileSlice, Result};
 
     // === Test helpers ===
 
@@ -1027,7 +1091,7 @@ mod tests {
             &self,
             _eval_expr: &ScalarExpressionEvaluator<'_>,
             _exprs: &[Expression],
-        ) -> DeltaResult<Scalar> {
+        ) -> Result<Scalar> {
             Ok(Scalar::Integer(0))
         }
     }
@@ -1045,7 +1109,7 @@ mod tests {
             _eval_pred: &DirectPredicateEvaluator<'_>,
             _exprs: &[Expression],
             _inverted: bool,
-        ) -> DeltaResult<Option<bool>> {
+        ) -> Result<Option<bool>> {
             Ok(Some(true))
         }
         fn eval_as_data_skipping_predicate(
@@ -1115,7 +1179,7 @@ mod tests {
         Operation::IoOperation(IoOperation::head_file(Url::parse("memory:///h").unwrap())),
         "io"
     )]
-    #[case(Operation::QueryPlan(Plan { nodes: vec![] }), "query_plan")]
+    #[case(Operation::QueryPlan(Plan { schema: sample_schema(), nodes: vec![] }), "query_plan")]
     fn from_operation(#[case] op: Operation, #[case] expected: &str) {
         use proto_op::operation::Op;
         let kind = match decode(&op).op.unwrap() {
@@ -1232,6 +1296,7 @@ mod tests {
             not_null "name": STRING,
         };
         let plan = Plan {
+            schema: schema.clone(),
             nodes: vec![
                 PlanNode {
                     op: Operator::ScanParquet(ScanParquet {
@@ -1304,6 +1369,10 @@ mod tests {
     )]
     #[case(Operator::Values(Values { schema: sample_schema(), rows: vec![] }), "values")]
     #[case(
+        Operator::RelationSource(RelationRef::new("relation-7", sample_schema())),
+        "relation_source"
+    )]
+    #[case(
         Operator::Project(Project {
             expr: Arc::new(Expression::struct_from([lit(1)])),
             schema: sample_schema(),
@@ -1337,20 +1406,44 @@ mod tests {
         "semi_join"
     )]
     #[case(Operator::UnionAll(UnionAll), "union_all")]
+    #[case(Operator::WriteJson(WriteJson {
+        file_path: Url::parse("memory:///out.json").unwrap(), overwrite: false,
+        schema: sample_schema(), ordered: true,
+    }), "write_json")]
     fn from_operator(#[case] op: Operator, #[case] expected: &str) {
         use proto_plan::operator::Op;
         let kind = match proto_plan::Operator::from(&op).op.unwrap() {
             Op::ScanParquet(_) => "scan_parquet",
             Op::ScanJson(_) => "scan_json",
             Op::Values(_) => "values",
+            Op::RelationSource(_) => "relation_source",
             Op::Project(_) => "project",
             Op::Filter(_) => "filter",
             Op::DynamicScan(_) => "dynamic_scan",
             Op::Aggregate(_) => "aggregate",
             Op::SemiJoin(_) => "semi_join",
             Op::UnionAll(_) => "union_all",
+            Op::WriteJson(_) => "write_json",
         };
         assert_eq!(kind, expected);
+    }
+
+    #[rstest]
+    fn from_write_json(
+        #[values(false, true)] overwrite: bool,
+        #[values(false, true)] ordered: bool,
+    ) {
+        let node = WriteJson {
+            file_path: Url::parse("memory:///output%20file.json").unwrap(),
+            overwrite,
+            ordered,
+            schema: sample_schema(),
+        };
+        let proto = proto_plan::WriteJsonNode::from(&node);
+        assert_eq!(proto.file_path, node.file_path.as_str());
+        assert_eq!(proto.overwrite, overwrite);
+        assert_eq!(proto.ordered, ordered);
+        assert_eq!(proto.schema, Some(node.schema.as_ref().into()));
     }
 
     #[test]
@@ -1400,6 +1493,14 @@ mod tests {
         assert!(proto.schema.is_some());
         assert_eq!(proto.rows.len(), 2);
         assert_eq!(proto.rows[0].values.len(), 1);
+    }
+
+    #[test]
+    fn from_relation_source() {
+        let node = RelationRef::new("scope/a:relation", sample_schema());
+        let proto = proto_plan::RelationSourceNode::from(&node);
+        assert_eq!(proto.id, "scope/a:relation");
+        assert!(proto.schema.is_some());
     }
 
     #[test]
@@ -1463,7 +1564,7 @@ mod tests {
         #[case] base_url: Url,
         #[case] expected_base_url: &str,
         #[case] dv_column: Option<ColumnName>,
-    ) -> DeltaResult<()> {
+    ) -> Result<()> {
         let expect_dv_column = dv_column.is_some();
         let node = DynamicScan::try_new(
             &sample_dynamic_scan_input_schema(),
@@ -2065,6 +2166,75 @@ mod tests {
 
     // === Schema ===
 
+    #[cfg(feature = "udt-in-dev")]
+    #[test]
+    fn round_trip_user_defined_annotation() {
+        let value = serde_json::json!({
+            "type": "udt", "sqlType": "long", "class": "Id", "pyClass": null,
+            "extension": "opaque"
+        });
+        let data_type: DataType = serde_json::from_value(value.clone()).unwrap();
+        let decoded = DataType::try_from(proto_schema::DataType::from(&data_type)).unwrap();
+        assert_eq!(serde_json::to_value(decoded).unwrap(), value);
+    }
+
+    #[test]
+    fn reject_user_defined_proto_without_physical_type() {
+        let proto = proto_schema::DataType {
+            kind: Some(proto_schema::data_type::Kind::UserDefined(Box::new(
+                proto_schema::UserDefinedType {
+                    sql_type: None,
+                    annotation: Default::default(),
+                },
+            ))),
+        };
+        let error = DataType::try_from(proto).unwrap_err();
+        #[cfg(feature = "udt-in-dev")]
+        assert!(error.to_string().contains("missing sql_type"));
+        #[cfg(not(feature = "udt-in-dev"))]
+        assert!(error.to_string().contains("udt-in-dev"));
+    }
+
+    #[cfg(feature = "udt-in-dev")]
+    #[rstest]
+    #[case::reserved_key(true)]
+    #[case::nested_udt(false)]
+    fn proto_decode_rejects_invalid_udt(#[case] reserved_key: bool) {
+        let inner = proto_schema::UserDefinedType {
+            sql_type: Some(Box::new(proto_schema::DataType::from(&DataType::LONG))),
+            annotation: Default::default(),
+        };
+        let invalid = proto_schema::UserDefinedType {
+            sql_type: Some(Box::new(if reserved_key {
+                proto_schema::DataType::from(&DataType::LONG)
+            } else {
+                proto_schema::DataType {
+                    kind: Some(proto_schema::data_type::Kind::UserDefined(Box::new(inner))),
+                }
+            })),
+            annotation: if reserved_key {
+                [(
+                    "type".into(),
+                    proto_schema::UserDefinedAnnotationValue { value: None },
+                )]
+                .into()
+            } else {
+                Default::default()
+            },
+        };
+        let proto = proto_schema::DataType {
+            kind: Some(proto_schema::data_type::Kind::UserDefined(Box::new(
+                invalid,
+            ))),
+        };
+        let error = DataType::try_from(proto).unwrap_err();
+        assert!(error.to_string().contains(if reserved_key {
+            "reserved"
+        } else {
+            "another UDT"
+        }));
+    }
+
     #[rstest]
     #[case(DataType::INTEGER, "primitive")]
     #[case(ArrayType::new(DataType::INTEGER, true).into(), "array")]
@@ -2079,6 +2249,7 @@ mod tests {
             Kind::Struct(_) => "struct",
             Kind::Map(_) => "map",
             Kind::Variant(_) => "variant",
+            Kind::UserDefined(_) => "udt",
         };
         assert_eq!(kind, expected);
     }

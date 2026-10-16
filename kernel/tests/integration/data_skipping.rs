@@ -29,7 +29,7 @@ use delta_kernel::scan::{AfterSequentialScanMetadata, ParallelScanMetadata, Scan
 use delta_kernel::schema::{schema, schema_ref, DataType, SchemaRef, StructField, StructType};
 use delta_kernel::transaction::create_table::create_table;
 use delta_kernel::transaction::data_layout::DataLayout;
-use delta_kernel::{Error, Snapshot, SnapshotRef};
+use delta_kernel::{KernelError, Snapshot, SnapshotRef};
 use rstest::rstest;
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -953,7 +953,7 @@ async fn scan_with_replace_table_schema_change(
         nullable "part": STRING,
         nullable "value": STRING,
     };
-    create_table(&table_path, old_schema, "Test/1.0")
+    create_table(&table_path, old_schema, "Test/1.0", true)
         .with_data_layout(DataLayout::partitioned(["part"]))
         .with_table_properties([("delta.feature.v2Checkpoint", "supported")])
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
@@ -1184,8 +1184,8 @@ async fn scan_with_replace_table_schema_change(
     let error = surviving_paths(&table_path, engine, predicate, use_parallel)
         .expect_err("an active incompatible add file should fail the scan");
     assert!(matches!(
-        error.downcast_ref::<Error>(),
-        Some(Error::ParseError(_, _))
+        error.downcast_ref::<KernelError>(),
+        Some(KernelError::ParseError(_, _))
     ));
     Ok(())
 }
@@ -1220,7 +1220,7 @@ async fn partition_pruning_honors_rfc3339_offset_partition_values(
         nullable "ts": TIMESTAMP,
         nullable "v": LONG,
     };
-    create_table(&table_path, schema, "Test/1.0")
+    create_table(&table_path, schema, "Test/1.0", true)
         .with_data_layout(DataLayout::partitioned(["ts"]))
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
         .commit(engine.as_ref())?
@@ -1297,7 +1297,7 @@ async fn interval_partition_values_do_not_prune_files(
         nullable "period": (interval),
         nullable "v": LONG,
     };
-    let mut snapshot = create_table(&table_path, schema, "Test/1.0")
+    let mut snapshot = create_table(&table_path, schema, "Test/1.0", true)
         .with_data_layout(DataLayout::partitioned(["period"]))
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
         .commit(engine.as_ref())?

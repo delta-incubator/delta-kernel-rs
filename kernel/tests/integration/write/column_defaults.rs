@@ -22,7 +22,8 @@ use delta_kernel::table_features::{
 };
 use delta_kernel::transaction::create_table::create_table as kernel_create_table;
 use delta_kernel::transaction::data_layout::DataLayout;
-use delta_kernel::{DeltaResult, Engine, Snapshot};
+use delta_kernel::transaction::UpdateTableOperation;
+use delta_kernel::{Engine, Result, Snapshot};
 use rstest::rstest;
 use test_utils::delta_kernel_default_engine::executor::tokio::TokioBackgroundExecutor;
 use test_utils::delta_kernel_default_engine::DefaultEngine;
@@ -106,10 +107,11 @@ fn assert_top_level_default(
     engine: &dyn Engine,
     column: &str,
     expected: Scalar,
-) -> DeltaResult<()> {
+) -> Result<()> {
     let txn = snapshot
         .clone()
-        .transaction(Box::new(FileSystemCommitter::new()), engine)?;
+        .update_table(UpdateTableOperation::Write, "test-engine", true)
+        .build(engine, Box::new(FileSystemCommitter::new()))?;
     assert_eq!(
         txn.top_level_column_defaults()?[column].to_scalar()?,
         Some(expected)
@@ -148,11 +150,11 @@ fn assert_checkpoint_parsed_columns_have_no_column_defaults(
 
 // TODO(#2630): Allow create table to support column defaults
 #[test]
-fn test_create_table_rejects_col_defaults() -> DeltaResult<()> {
+fn test_create_table_rejects_col_defaults() -> Result<()> {
     let (_temp_dir, table_path, engine) = test_table_setup()?;
     let schema = schema_ref! { nullable "id": LONG };
 
-    let err = kernel_create_table(&table_path, schema, "Test/1.0")
+    let err = kernel_create_table(&table_path, schema, "Test/1.0", true)
         .with_table_properties([("delta.feature.allowColumnDefaults", "supported")])
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))
         .expect_err("kernel create_table must reject allowColumnDefaults")
@@ -287,7 +289,9 @@ async fn write_state_acknowledgement_depends_on_column_defaults(
     .await?;
 
     let snapshot = Snapshot::builder_for(table_url).build(&engine)?;
-    let mut txn = snapshot.transaction(Box::new(FileSystemCommitter::new()), &engine)?;
+    let mut txn = snapshot
+        .update_table(UpdateTableOperation::Write, "test-engine", true)
+        .build(&engine, Box::new(FileSystemCommitter::new()))?;
 
     let defaults = txn.top_level_column_defaults()?;
     if has_default {
@@ -304,7 +308,7 @@ async fn write_state_acknowledgement_depends_on_column_defaults(
             .expect_err("inspecting defaults must not implicitly acknowledge them");
         assert!(matches!(
             &error,
-            delta_kernel::Error::InvalidTransactionState(_)
+            delta_kernel::KernelError::InvalidTransactionState(_)
         ));
         assert!(error.to_string().contains("ack_column_defaults"));
 
@@ -372,7 +376,8 @@ async fn assert_materialized_column_default_round_trips(
     let scalar = {
         let txn = snapshot
             .clone()
-            .transaction(Box::new(FileSystemCommitter::new()), engine.as_ref())?;
+            .update_table(UpdateTableOperation::Write, "test-engine", true)
+            .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?;
         let defaults = txn.top_level_column_defaults()?;
         defaults["c"]
             .to_scalar()?
@@ -452,7 +457,9 @@ async fn test_transaction_top_level_column_defaults_excludes_nested_defaults(
     .await?;
 
     let snapshot = Snapshot::builder_for(table_url).build(&engine)?;
-    let txn = snapshot.transaction(Box::new(FileSystemCommitter::new()), &engine)?;
+    let txn = snapshot
+        .update_table(UpdateTableOperation::Write, "test-engine", true)
+        .build(&engine, Box::new(FileSystemCommitter::new()))?;
 
     let defaults = txn.top_level_column_defaults()?;
     assert_eq!(defaults.len(), 2, "only b and c declare a default");
@@ -513,7 +520,9 @@ async fn test_load_and_write_tolerate_v3_unverifiable_default(
     let snapshot = Snapshot::builder_for(table_url).build(&engine)?;
 
     let logging = LoggingTest::new();
-    snapshot.transaction(Box::new(FileSystemCommitter::new()), &engine)?;
+    snapshot
+        .update_table(UpdateTableOperation::Write, "test-engine", true)
+        .build(&engine, Box::new(FileSystemCommitter::new()))?;
     assert!(
         logging.logs().contains(warning_text),
         "logs: {}",
@@ -563,7 +572,9 @@ async fn test_load_and_write_allow_orphan_default() -> Result<(), Box<dyn std::e
     let snapshot = Snapshot::builder_for(table_url).build(&engine)?;
 
     // Write: a write state and context build without error.
-    let txn = snapshot.transaction(Box::new(FileSystemCommitter::new()), &engine)?;
+    let txn = snapshot
+        .update_table(UpdateTableOperation::Write, "test-engine", true)
+        .build(&engine, Box::new(FileSystemCommitter::new()))?;
     assert!(
         txn.top_level_column_defaults()?.is_empty(),
         "orphaned defaults must not be surfaced without allowColumnDefaults",
@@ -609,7 +620,9 @@ async fn test_variant_column_default_validation_at_snapshot_load(
         }
         None => {
             let snapshot = Snapshot::builder_for(table_url).build(&engine)?;
-            let txn = snapshot.transaction(Box::new(FileSystemCommitter::new()), &engine)?;
+            let txn = snapshot
+                .update_table(UpdateTableOperation::Write, "test-engine", true)
+                .build(&engine, Box::new(FileSystemCommitter::new()))?;
             let defaults = txn.top_level_column_defaults()?;
             let column_default = &defaults["v"];
             assert_eq!(column_default.raw_sql(), default_sql);
@@ -650,7 +663,9 @@ async fn test_load_tolerates_unmaterializable_default(
     .await?;
 
     let snapshot = Snapshot::builder_for(table_url).build(&engine)?;
-    let txn = snapshot.transaction(Box::new(FileSystemCommitter::new()), &engine)?;
+    let txn = snapshot
+        .update_table(UpdateTableOperation::Write, "test-engine", true)
+        .build(&engine, Box::new(FileSystemCommitter::new()))?;
     let defaults = txn.top_level_column_defaults()?;
 
     let c = &defaults["c"];
@@ -703,7 +718,7 @@ async fn test_defaulted_clustering_column_round_trips_with_stats(
     };
     let schema = schema_with_column_defaults(&base, HashMap::from([("c", "42")]))?;
 
-    kernel_create_table(&table_path, schema.clone(), "Test/1.0")
+    kernel_create_table(&table_path, schema.clone(), "Test/1.0", true)
         .with_data_layout(DataLayout::clustered(["c"]))
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
         .commit(engine.as_ref())?
@@ -755,7 +770,7 @@ async fn test_column_default_round_trips_with_column_mapping_and_checkpoint(
     if column_mapping_mode != "none" {
         table_properties.push(("delta.columnMapping.mode", column_mapping_mode));
     }
-    kernel_create_table(&table_path, schema.clone(), "Test/1.0")
+    kernel_create_table(&table_path, schema.clone(), "Test/1.0", true)
         .with_data_layout(DataLayout::partitioned(["p"]))
         .with_table_properties(table_properties)
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
@@ -956,7 +971,8 @@ async fn test_column_default_with_iceberg_compat_v3_e2e() -> Result<(), Box<dyn 
     // The default is still keyed by the logical name `c` and parses to its literal.
     let txn = snapshot
         .clone()
-        .transaction(Box::new(FileSystemCommitter::new()), engine.as_ref())?;
+        .update_table(UpdateTableOperation::Write, "test-engine", true)
+        .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?;
     let defaults = txn.top_level_column_defaults()?;
     assert_eq!(defaults["c"].to_scalar()?, Some(Scalar::Integer(42)));
     drop(defaults);

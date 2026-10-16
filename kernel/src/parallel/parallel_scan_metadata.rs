@@ -12,7 +12,7 @@ use crate::parallel::sequential_phase::{AfterSequential, SequentialPhase};
 use crate::scan::log_replay::{ScanLogReplayProcessor, SerializableScanState};
 use crate::scan::ScanMetadata;
 use crate::schema::SchemaRef;
-use crate::{DeltaResult, Engine, EngineData, Error, FileMeta};
+use crate::{Engine, EngineData, FileMeta, KernelError, Result};
 
 /// Result of sequential scan metadata processing.
 ///
@@ -33,7 +33,7 @@ pub enum AfterSequentialScanMetadata {
 /// After exhaustion, call `finish()` to get the result which indicates whether
 /// a distributed phase is needed.
 pub struct SequentialScanMetadata {
-    pub(crate) sequential: SequentialPhase<ScanLogReplayProcessor>,
+    pub(crate) sequential: SequentialPhase,
     operation_id: MetricId,
     /// Opaque, caller-supplied correlation id propagated to both phases' metric events.
     correlation_id: Option<Arc<str>>,
@@ -42,10 +42,7 @@ pub struct SequentialScanMetadata {
 }
 
 impl SequentialScanMetadata {
-    pub(crate) fn new(
-        sequential: SequentialPhase<ScanLogReplayProcessor>,
-        correlation_id: Option<Arc<str>>,
-    ) -> Self {
+    pub(crate) fn new(sequential: SequentialPhase, correlation_id: Option<Arc<str>>) -> Self {
         let operation_id = MetricId::new();
         Self {
             sequential,
@@ -58,7 +55,7 @@ impl SequentialScanMetadata {
         }
     }
 
-    pub fn finish(self) -> DeltaResult<AfterSequentialScanMetadata> {
+    pub fn finish(self) -> Result<AfterSequentialScanMetadata> {
         let _guard = self.span.enter();
         match self.sequential.finish()? {
             AfterSequential::Done(processor) => {
@@ -104,7 +101,7 @@ impl SequentialScanMetadata {
 }
 
 impl Iterator for SequentialScanMetadata {
-    type Item = DeltaResult<ScanMetadata>;
+    type Item = Result<ScanMetadata>;
 
     fn next(&mut self) -> Option<Self::Item> {
         let _guard = self.span.enter();
@@ -131,8 +128,8 @@ pub struct ParallelState {
 impl ParallelLogReplayProcessor for Arc<ParallelState> {
     type Output = ScanMetadata;
 
-    fn process_actions_batch(&self, actions_batch: ActionsBatch) -> DeltaResult<Self::Output> {
-        self.inner.process_actions_batch(actions_batch)
+    fn process_actions_batch_parallel(&self, actions_batch: ActionsBatch) -> Result<Self::Output> {
+        self.inner.process_actions_batch_parallel(actions_batch)
     }
 }
 
@@ -188,7 +185,7 @@ impl ParallelState {
     /// Returns an error if the state cannot be serialized (e.g., contains opaque predicates).
     #[internal_api]
     #[allow(unused)]
-    pub(crate) fn into_serializable_state(self) -> DeltaResult<SerializableScanState> {
+    pub(crate) fn into_serializable_state(self) -> Result<SerializableScanState> {
         self.inner.into_serializable_state()
     }
 
@@ -202,7 +199,7 @@ impl ParallelState {
     pub(crate) fn from_serializable_state(
         engine: &dyn Engine,
         state: SerializableScanState,
-    ) -> DeltaResult<Self> {
+    ) -> Result<Self> {
         let inner = ScanLogReplayProcessor::from_serializable_state(engine, state)?;
         Ok(Self {
             inner,
@@ -223,10 +220,11 @@ impl ParallelState {
     /// # Errors
     /// Returns an error if the state cannot be serialized.
     #[allow(unused)]
-    pub fn into_bytes(self) -> DeltaResult<Vec<u8>> {
+    pub fn into_bytes(self) -> Result<Vec<u8>> {
         let state = self.into_serializable_state()?;
-        serde_json::to_vec(&state)
-            .map_err(|e| Error::generic(format!("Failed to serialize ParallelState to bytes: {e}")))
+        serde_json::to_vec(&state).map_err(|e| {
+            KernelError::generic(format!("Failed to serialize ParallelState to bytes: {e}"))
+        })
     }
 
     /// Reconstruct a ParallelState from bytes.
@@ -238,9 +236,9 @@ impl ParallelState {
     /// - `engine`: Engine for creating evaluators and filters
     /// - `bytes`: The serialized bytes from a previous `into_bytes()` call
     #[allow(unused)]
-    pub fn from_bytes(engine: &dyn Engine, bytes: &[u8]) -> DeltaResult<Self> {
+    pub fn from_bytes(engine: &dyn Engine, bytes: &[u8]) -> Result<Self> {
         let state: SerializableScanState =
-            serde_json::from_slice(bytes).map_err(Error::MalformedJson)?;
+            serde_json::from_slice(bytes).map_err(KernelError::MalformedJson)?;
         Self::from_serializable_state(engine, state)
     }
 }
@@ -255,7 +253,7 @@ impl ParallelScanMetadata {
         engine: Arc<dyn Engine>,
         state: Arc<ParallelState>,
         leaf_files: Vec<FileMeta>,
-    ) -> DeltaResult<Self> {
+    ) -> Result<Self> {
         let read_schema = state.file_read_schema();
         Ok(Self {
             processor: ParallelPhase::try_new(engine, state, leaf_files, read_schema)?,
@@ -266,7 +264,7 @@ impl ParallelScanMetadata {
 
     pub fn new_from_iter(
         state: Arc<ParallelState>,
-        iter: impl IntoIterator<Item = DeltaResult<Box<dyn EngineData>>, IntoIter: Send + 'static>,
+        iter: impl IntoIterator<Item = Result<Box<dyn EngineData>>, IntoIter: Send + 'static>,
     ) -> Self {
         Self {
             processor: ParallelPhase::new_from_iter(state.clone(), iter),
@@ -277,7 +275,7 @@ impl ParallelScanMetadata {
 }
 
 impl Iterator for ParallelScanMetadata {
-    type Item = DeltaResult<ScanMetadata>;
+    type Item = Result<ScanMetadata>;
 
     fn next(&mut self) -> Option<Self::Item> {
         let _guard = self.span.enter();
@@ -315,12 +313,13 @@ mod tests {
             physical_predicate: PhysicalPredicate::None,
             transform_spec: None,
             column_mapping_mode: ColumnMappingMode::None,
-            physical_stats_schema: None,
+            physical_stats_schemas: None,
             physical_partition_schema: None,
             eligible_physical_stats_columns: HashSet::new(),
             requested_physical_stats_columns: Vec::new(),
             is_catalog_managed: true,
             skip_row_transforms: false,
+            dv_normalization_root: None,
         });
         let processor = ScanLogReplayProcessor::new(
             &engine,

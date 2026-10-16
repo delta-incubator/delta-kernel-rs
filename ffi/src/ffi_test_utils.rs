@@ -6,17 +6,22 @@ use std::ptr::NonNull;
 use std::sync::Arc;
 
 #[cfg(test)]
-use delta_kernel::object_store::memory::InMemory;
+use delta_kernel::{object_store::memory::InMemory, Engine};
 #[cfg(test)]
 use delta_kernel_default_engine::DefaultEngineBuilder;
 #[cfg(test)]
 use test_utils::add_commit;
 
-use crate::error::{EngineError, ExternResult, KernelError};
+use crate::error::{AllocateError, AllocateErrorFn, EngineError, ExternResult, FFIKernelError};
 #[cfg(test)]
 use crate::{
-    engine_to_handle, get_snapshot_builder, kernel_string_slice, snapshot_builder_build,
-    SharedExternEngine, SharedSnapshot,
+    engine_to_handle, free_snapshot, get_snapshot_builder, kernel_string_slice,
+    snapshot_builder_build,
+    transaction::{
+        new_update_table_txn_builder, update_table_txn_builder_build,
+        ExclusiveUpdateTableTransaction, KernelUpdateTableOperation,
+    },
+    ExternEngine, SharedExternEngine, SharedSnapshot,
 };
 use crate::{KernelBytesSlice, KernelStringSlice, NullableCvoid, TryFromStringSlice};
 
@@ -24,13 +29,13 @@ use crate::{KernelBytesSlice, KernelStringSlice, NullableCvoid, TryFromStringSli
 #[cfg(test)]
 #[repr(C)]
 pub(crate) struct EngineErrorWithMessage {
-    pub(crate) etype: KernelError,
+    pub(crate) etype: FFIKernelError,
     pub(crate) message: String,
 }
 
 #[no_mangle]
 pub(crate) extern "C" fn allocate_err(
-    etype: KernelError,
+    etype: FFIKernelError,
     message: KernelStringSlice,
 ) -> *mut EngineError {
     let message = unsafe { String::try_from_slice(&message).unwrap() };
@@ -82,6 +87,28 @@ pub(crate) fn ok_or_panic<T>(result: ExternResult<T>) -> T {
     }
 }
 
+struct ErrorOnlyExternEngine {
+    allocate_error: AllocateErrorFn,
+}
+
+impl ExternEngine for ErrorOnlyExternEngine {
+    fn engine(&self) -> Arc<dyn Engine> {
+        panic!("error-only test engine does not expose a kernel engine")
+    }
+
+    fn error_allocator(&self) -> &dyn AllocateError {
+        &self.allocate_error
+    }
+}
+
+/// Return a lightweight engine handle for tests that only exercise FFI error allocation.
+pub(crate) fn error_only_engine_handle() -> crate::handle::Handle<SharedExternEngine> {
+    let engine: Arc<dyn ExternEngine> = Arc::new(ErrorOnlyExternEngine {
+        allocate_error: allocate_err,
+    });
+    engine.into()
+}
+
 /// Build a latest-version snapshot via the FFI builder API. Panics on error.
 #[cfg(test)]
 pub(crate) unsafe fn build_snapshot(
@@ -90,6 +117,33 @@ pub(crate) unsafe fn build_snapshot(
 ) -> crate::handle::Handle<SharedSnapshot> {
     let builder = ok_or_panic(get_snapshot_builder(path, engine));
     ok_or_panic(snapshot_builder_build(builder))
+}
+
+/// Build a `WRITE` transaction through the FFI snapshot and transaction-builder APIs.
+///
+/// Returns an error if the transaction cannot be built. Panics if the snapshot cannot be loaded.
+///
+/// # Safety
+///
+/// `path` and `engine` must be valid. This call borrows both inputs. The caller retains ownership.
+#[cfg(test)]
+pub(crate) unsafe fn build_update_table_txn(
+    path: KernelStringSlice,
+    engine: crate::handle::Handle<SharedExternEngine>,
+) -> ExternResult<crate::handle::Handle<ExclusiveUpdateTableTransaction>> {
+    let snapshot = unsafe { build_snapshot(path, engine.shallow_copy()) };
+    let engine_info = "test-engine/1.0";
+    let builder = unsafe {
+        ok_or_panic(new_update_table_txn_builder(
+            snapshot.shallow_copy(),
+            KernelUpdateTableOperation::Write,
+            kernel_string_slice!(engine_info),
+            true,
+            engine.shallow_copy(),
+        ))
+    };
+    unsafe { free_snapshot(snapshot) };
+    unsafe { update_table_txn_builder_build(builder, engine) }
 }
 
 /// Wrap an already-seeded object store in an engine handle. Caller must free it.
@@ -128,7 +182,7 @@ pub(crate) async fn setup_snapshot(
 /// Check error type and message while also recovering the error to prevent leaks
 pub(crate) fn assert_extern_result_error_with_message<T>(
     res: ExternResult<T>,
-    expected_etype: KernelError,
+    expected_etype: FFIKernelError,
     opt_message: Option<&str>,
 ) {
     let error = expect_extern_result_error(res, expected_etype);
@@ -141,7 +195,7 @@ pub(crate) fn assert_extern_result_error_with_message<T>(
 /// leaks.
 pub(crate) fn assert_extern_result_error_contains<T>(
     res: ExternResult<T>,
-    expected_etype: KernelError,
+    expected_etype: FFIKernelError,
     expected_message: &str,
 ) {
     let error = expect_extern_result_error(res, expected_etype);
@@ -154,7 +208,7 @@ pub(crate) fn assert_extern_result_error_contains<T>(
 
 fn expect_extern_result_error<T>(
     res: ExternResult<T>,
-    expected_etype: KernelError,
+    expected_etype: FFIKernelError,
 ) -> EngineErrorWithMessage {
     match res {
         ExternResult::Err(e) => {
@@ -190,7 +244,7 @@ mod tests {
     fn test_ok_or_panic_with_error() {
         // Create a test error
         let message = "Test error message";
-        let error_ptr = allocate_err(KernelError::GenericError, kernel_string_slice!(message));
+        let error_ptr = allocate_err(FFIKernelError::GenericError, kernel_string_slice!(message));
         let result = ExternResult::<i32>::Err(error_ptr);
 
         // Test that ok_or_panic panics with the expected message

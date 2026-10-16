@@ -12,7 +12,6 @@
 
 // TODO: add `extract_scalar` that handles complex types (Struct, Array, Map) via recursive
 // extraction into StructData/ArrayData/MapData when there is a concrete use case.
-
 use crate::arrow::array::cast::AsArray;
 use crate::arrow::array::types::{
     Date32Type, Decimal128Type, Float32Type, Float64Type, Int16Type, Int32Type, Int64Type,
@@ -22,7 +21,7 @@ use crate::arrow::array::Array;
 use crate::arrow::datatypes::{DataType as ArrowDataType, TimeUnit};
 use crate::expressions::Scalar;
 use crate::schema::DataType;
-use crate::{DeltaResult, Error};
+use crate::{KernelError, KernelResult, Result};
 
 /// Extracts a primitive kernel [`Scalar`] from the given row of an Arrow array.
 ///
@@ -38,9 +37,9 @@ use crate::{DeltaResult, Error};
 /// - The Arrow data type is not a supported primitive type (e.g., Struct, List, Map)
 /// - The Arrow data type is a `Timestamp` with a non-microsecond time unit
 /// - The decimal precision/scale is invalid
-pub fn extract_primitive_scalar(array: &dyn Array, row_idx: usize) -> DeltaResult<Scalar> {
+pub fn extract_primitive_scalar(array: &dyn Array, row_idx: usize) -> Result<Scalar> {
     if row_idx >= array.len() {
-        return Err(Error::generic(format!(
+        return Err(KernelError::generic(format!(
             "row index {row_idx} out of bounds for array of length {}",
             array.len()
         )));
@@ -102,7 +101,7 @@ pub fn extract_primitive_scalar(array: &dyn Array, row_idx: usize) -> DeltaResul
         )),
         ArrowDataType::Decimal128(precision, scale) => {
             if *scale < 0 {
-                return Err(Error::generic(format!(
+                return Err(KernelError::generic(format!(
                     "negative decimal scale ({scale}) is not supported"
                 )));
             }
@@ -115,7 +114,7 @@ pub fn extract_primitive_scalar(array: &dyn Array, row_idx: usize) -> DeltaResul
         ArrowDataType::LargeBinary => Ok(Scalar::Binary(
             array.as_binary::<i64>().value(row_idx).to_vec(),
         )),
-        other => Err(Error::generic(format!(
+        other => Err(KernelError::generic(format!(
             "unsupported Arrow type for primitive scalar extraction: {other:?}"
         ))),
     }
@@ -131,7 +130,7 @@ pub fn extract_primitive_scalar(array: &dyn Array, row_idx: usize) -> DeltaResul
 /// `arrow_conversion` because this function has different requirements: we accept any
 /// timezone annotation (not just UTC) and reject types like UInt*, Utf8View, Date64
 /// that `TryFromArrow` supports but are not valid for direct scalar extraction.
-fn arrow_primitive_to_kernel_type(arrow_type: &ArrowDataType) -> DeltaResult<DataType> {
+fn arrow_primitive_to_kernel_type(arrow_type: &ArrowDataType) -> KernelResult<DataType> {
     match arrow_type {
         ArrowDataType::Int8 => Ok(DataType::BYTE),
         ArrowDataType::Int16 => Ok(DataType::SHORT),
@@ -150,14 +149,14 @@ fn arrow_primitive_to_kernel_type(arrow_type: &ArrowDataType) -> DeltaResult<Dat
         ArrowDataType::Timestamp(TimeUnit::Microsecond, _) => Ok(DataType::TIMESTAMP_NTZ),
         ArrowDataType::Decimal128(p, s) => {
             if *s < 0 {
-                return Err(Error::generic(format!(
+                return Err(KernelError::generic(format!(
                     "negative decimal scale ({s}) is not supported"
                 )));
             }
             DataType::decimal(*p, *s as u8)
         }
         ArrowDataType::Binary | ArrowDataType::LargeBinary => Ok(DataType::BINARY),
-        other => Err(Error::generic(format!(
+        other => Err(KernelError::generic(format!(
             "unsupported Arrow type for primitive scalar extraction: {other:?}"
         ))),
     }

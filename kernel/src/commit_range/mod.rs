@@ -19,7 +19,7 @@
 //! ```no_run
 //! use std::sync::Arc;
 //! use delta_kernel::commit_range::{CommitRange, DeltaAction};
-//! use delta_kernel::{Engine, Error, Snapshot};
+//! use delta_kernel::{Engine, KernelError, Snapshot};
 //! use delta_kernel::object_store::local::LocalFileSystem;
 //! use test_utils::delta_kernel_default_engine::DefaultEngineBuilder;
 //!
@@ -41,7 +41,7 @@
 //!         let _batch = batch?;
 //!     }
 //! }
-//! # Ok::<(), Error>(())
+//! # Ok::<(), KernelError>(())
 //! ```
 
 mod actions;
@@ -64,7 +64,7 @@ use crate::schema::{ArrayType, MapType, SchemaRef, StructField, StructType};
 use crate::snapshot::SnapshotRef;
 use crate::table_features::Operation;
 use crate::transforms::{transform_output_type, SchemaTransform};
-use crate::{DeltaResult, Engine, Error, Version};
+use crate::{Engine, KernelError, KernelResult, Result, Version};
 
 /// A contiguous range of Delta commits, holding resolved `[start_version, end_version]` bounds
 /// plus the materialized commit-file pointers in `commit_files`.
@@ -133,15 +133,17 @@ impl CommitRange {
         engine: Arc<dyn Engine>,
         start_snapshot: Option<SnapshotRef>,
         actions: &[DeltaAction],
-    ) -> DeltaResult<impl Iterator<Item = DeltaResult<CommitAction>> + Send> {
+    ) -> Result<impl Iterator<Item = Result<CommitAction>> + Send> {
         if actions.is_empty() {
-            return Err(Error::generic("at least one DeltaAction must be requested"));
+            return Err(KernelError::generic(
+                "at least one DeltaAction must be requested",
+            ));
         }
 
         let (latest_protocol, latest_metadata) = match &start_snapshot {
             Some(snapshot) => {
                 if snapshot.table_root() != &self.table_root {
-                    return Err(Error::generic(format!(
+                    return Err(KernelError::generic(format!(
                         "snapshot table root ({}) does not match commit range table root ({})",
                         snapshot.table_root(),
                         self.table_root,
@@ -152,7 +154,7 @@ impl CommitRange {
                     CommitOrdering::DescendingOrder => (self.end_version, "end_version"),
                 };
                 if snapshot.version() != anchor_version {
-                    return Err(Error::generic(format!(
+                    return Err(KernelError::generic(format!(
                         "snapshot version {} does not match {anchor_name} ({anchor_version})",
                         snapshot.version(),
                     )));
@@ -204,7 +206,7 @@ impl CommitActionsIterator {
     /// Commits below the anchor are validated/timestamped best-effort against only their own
     /// actions. Another solution is to walk the commit in ascending then reversing in the
     /// [`CommitOrdering::DescendingOrder`] scenario.
-    fn try_advance(&mut self, log_path: ParsedLogPath) -> DeltaResult<CommitAction> {
+    fn try_advance(&mut self, log_path: ParsedLogPath) -> KernelResult<CommitAction> {
         let version = log_path.version;
         let commit_action = CommitAction::try_new(
             self.engine.as_ref(),
@@ -231,18 +233,22 @@ impl CommitActionsIterator {
 }
 
 /// Prepend `commit v={version}` context to `err`, preserving the original variant for the two
-/// kernel error kinds that protocol validation surfaces ([`Error::Unsupported`] and
-/// [`Error::InvalidProtocol`]). Other variants fall back to [`Error::generic`].
-fn with_version_context(version: Version, err: Error) -> Error {
+/// kernel error kinds that protocol validation surfaces ([`KernelError::Unsupported`] and
+/// [`KernelError::InvalidProtocol`]). Other variants fall back to [`KernelError::generic`].
+fn with_version_context(version: Version, err: KernelError) -> KernelError {
     match err {
-        Error::Unsupported(msg) => Error::Unsupported(format!("commit v={version}: {msg}")),
-        Error::InvalidProtocol(msg) => Error::InvalidProtocol(format!("commit v={version}: {msg}")),
-        other => Error::generic(format!("commit v={version}: {other}")),
+        KernelError::Unsupported(msg) => {
+            KernelError::Unsupported(format!("commit v={version}: {msg}"))
+        }
+        KernelError::InvalidProtocol(msg) => {
+            KernelError::InvalidProtocol(format!("commit v={version}: {msg}"))
+        }
+        other => KernelError::generic(format!("commit v={version}: {other}")),
     }
 }
 
 impl Iterator for CommitActionsIterator {
-    type Item = DeltaResult<CommitAction>;
+    type Item = Result<CommitAction>;
 
     fn next(&mut self) -> Option<Self::Item> {
         let log_path = self.log_path_iter.next()?;
@@ -358,7 +364,7 @@ mod tests {
         let collected = range
             .commits(engine, Some(anchor_snapshot), &actions)
             .unwrap()
-            .collect::<DeltaResult<Vec<_>>>()
+            .collect::<Result<Vec<_>>>()
             .unwrap();
 
         assert_eq!(collected.len(), 2, "yield one CommitAction per commit");
@@ -671,7 +677,7 @@ mod tests {
         engine: Arc<dyn Engine>,
         start_snapshot: Option<SnapshotRef>,
         actions: &[DeltaAction],
-    ) -> DeltaResult<()> {
+    ) -> Result<()> {
         for commit_res in range.commits(engine.clone(), start_snapshot, actions)? {
             let commit = commit_res?;
             for batch_res in commit.get_actions(engine.as_ref())? {
@@ -691,16 +697,16 @@ mod tests {
     #[rstest::rstest]
     #[case::too_high_reader_version(
         r#"{"protocol":{"minReaderVersion":99,"minWriterVersion":99}}"#,
-        |err: &Error| matches!(err, Error::Unsupported(_)),
+        |err: &KernelError| matches!(err, KernelError::Unsupported(_)),
     )]
     #[case::too_low_reader_version(
         r#"{"protocol":{"minReaderVersion":0,"minWriterVersion":1}}"#,
-        |err: &Error| matches!(err, Error::InvalidProtocol(_)),
+        |err: &KernelError| matches!(err, KernelError::InvalidProtocol(_)),
     )]
     #[tokio::test]
     async fn test_commits_errors_on_unsupported_reader_version(
         #[case] v1: &str,
-        #[case] is_expected_err: fn(&Error) -> bool,
+        #[case] is_expected_err: fn(&KernelError) -> bool,
     ) {
         let v0 = format!("{}\n{}", VALID_PROTOCOL_LINE, VALID_METADATA_LINE);
         let (engine, table_root) = engine_with_commits(&[(0, &v0), (1, v1)]).await;
@@ -870,7 +876,7 @@ mod tests {
     fn collect_adds_and_removes(
         commit: &CommitAction,
         engine: &dyn Engine,
-    ) -> DeltaResult<(Vec<Add>, Vec<Remove>)> {
+    ) -> Result<(Vec<Add>, Vec<Remove>)> {
         let mut add_visitor = AddVisitor::default();
         let mut remove_visitor = RemoveVisitor::default();
         for batch_res in commit.get_actions(engine)? {
@@ -954,8 +960,8 @@ mod tests {
         if expects_unsupported {
             let err = result.expect_err("commit-driven validation must reject");
             assert!(
-                matches!(err, Error::Unsupported(_)),
-                "expected Error::Unsupported, got: {err:?}",
+                matches!(err, KernelError::Unsupported(_)),
+                "expected KernelError::Unsupported, got: {err:?}",
             );
         } else {
             result.expect("snapshot-less range must drain cleanly");
@@ -983,10 +989,10 @@ mod tests {
         let v0_result = iter.next().expect("v=0 commit yield slot");
         match v0_result {
             Ok(_) => panic!("v=0 must reject during iter.next()"),
-            Err(Error::Unsupported(msg)) => {
+            Err(KernelError::Unsupported(msg)) => {
                 assert!(msg.contains("futureFeature"), "got: {msg}")
             }
-            Err(other) => panic!("expected Error::Unsupported, got: {other:?}"),
+            Err(other) => panic!("expected KernelError::Unsupported, got: {other:?}"),
         }
     }
 

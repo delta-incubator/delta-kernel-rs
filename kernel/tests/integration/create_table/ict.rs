@@ -12,7 +12,7 @@ use delta_kernel::table_features::{
     TableFeature, TABLE_FEATURES_MIN_READER_VERSION, TABLE_FEATURES_MIN_WRITER_VERSION,
 };
 use delta_kernel::transaction::create_table::create_table;
-use delta_kernel::{DeltaResult, Engine};
+use delta_kernel::{Engine, Result};
 use test_utils::test_table_setup;
 
 /// Asserts the ICT protocol and enablement state of a snapshot, returning the ICT value.
@@ -22,7 +22,7 @@ fn assert_ict_state(
     expect_supported: bool,
     expect_enabled: bool,
     test_start_ms: i64,
-) -> DeltaResult<Option<i64>> {
+) -> Result<Option<i64>> {
     let table_config = snapshot.table_configuration();
     assert_eq!(
         table_config.is_feature_supported(&TableFeature::InCommitTimestamp),
@@ -73,7 +73,7 @@ fn test_create_table_ict(
     #[case] properties: &[(&str, &str)],
     #[case] expect_ict_feature_supported: bool,
     #[case] expect_ict_enabled: bool,
-) -> DeltaResult<()> {
+) -> Result<()> {
     let test_start_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -81,7 +81,7 @@ fn test_create_table_ict(
 
     let (_temp_dir, table_path, engine) = test_table_setup()?;
 
-    let committed = create_table(&table_path, super::simple_schema()?, "Test/1.0")
+    let committed = create_table(&table_path, super::simple_schema()?, "Test/1.0", true)
         .with_table_properties(properties.iter().copied())
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
         .commit(engine.as_ref())?

@@ -27,15 +27,16 @@ use delta_kernel::parquet::schema::types::Type as ParquetType;
 use delta_kernel::path::ParsedLogPath;
 use delta_kernel::schema::{schema_ref, SchemaRef, StructType};
 use delta_kernel::table_features::ColumnMappingMode;
-use delta_kernel::transaction::{BoundWriteContext, CommitResult, Transaction};
-use delta_kernel::{DeltaResult, Engine, Snapshot, Version};
+use delta_kernel::transaction::{
+    BoundWriteContext, CommitResult, Transaction, UpdateTableOperation,
+};
+use delta_kernel::{Engine, Result, Snapshot, Version};
 use serde_json::json;
 use test_utils::delta_kernel_default_engine::executor::tokio::TokioBackgroundExecutor;
 use test_utils::delta_kernel_default_engine::DefaultEngine;
 use test_utils::{
-    begin_transaction, create_add_files_metadata, create_table, engine_store_setup,
-    into_record_batch, load_and_begin_transaction, modify_add_file_partition_keys,
-    AddFilePartitionKeyModify,
+    create_add_files_metadata, create_table, engine_store_setup, into_record_batch,
+    modify_add_file_partition_keys, AddFilePartitionKeyModify,
 };
 use url::Url;
 use uuid::Uuid;
@@ -212,11 +213,17 @@ pub async fn write_data_and_check_result_and_stats(
     engine: Arc<DefaultEngine<TokioBackgroundExecutor>>,
     expected_since_commit: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = test_utils::load_and_begin_transaction(table_url.clone(), engine.as_ref())?
-        .with_data_change(true);
+    let mut txn = test_utils::load_and_begin_transaction_with(
+        table_url.clone(),
+        engine.as_ref(),
+        UpdateTableOperation::Write,
+        "test-engine",
+        true,
+        |builder| builder,
+    )?;
 
     // create two new arrow record batches to append
-    let append_data = [[1, 2, 3], [4, 5, 6]].map(|data| -> DeltaResult<_> {
+    let append_data = [[1, 2, 3], [4, 5, 6]].map(|data| -> Result<_> {
         let data = RecordBatch::try_new(
             Arc::new(schema.as_ref().try_into_arrow()?),
             vec![Arc::new(Int32Array::from(data.to_vec()))],
@@ -397,10 +404,12 @@ pub async fn create_dv_table_with_files(
 
     // Write files
     let snapshot = Snapshot::builder_for(table_url.clone()).build(engine.as_ref())?;
-    let mut txn = begin_transaction(snapshot.clone(), engine.as_ref())?
-        .with_engine_info("test engine")
-        .with_operation("WRITE".to_string())
-        .with_data_change(true);
+    let mut txn = snapshot
+        .update_table(UpdateTableOperation::Write, "test engine", true)
+        .build(
+            engine.as_ref(),
+            Box::new(delta_kernel::committer::FileSystemCommitter::new()),
+        )?;
 
     let add_files_schema = txn.add_files_schema();
 
@@ -464,7 +473,7 @@ pub fn sequential_dv_descriptors(
 pub fn get_scan_files(
     snapshot: Arc<Snapshot>,
     engine: &dyn delta_kernel::Engine,
-) -> DeltaResult<Vec<FilteredEngineData>> {
+) -> Result<Vec<FilteredEngineData>> {
     let scan = snapshot.scan_builder().build()?;
     let all_scan_metadata: Vec<_> = scan.scan_metadata(engine)?.collect::<Result<Vec<_>, _>>()?;
 
@@ -499,7 +508,11 @@ pub fn create_dv_update_transaction(
     table_url: &Url,
     engine: &dyn Engine,
 ) -> Result<Transaction, Box<dyn std::error::Error>> {
-    Ok(load_and_begin_transaction(table_url.clone(), engine)?
-        .with_engine_info("test engine")
-        .with_operation("DELETE".to_string()))
+    Ok(Snapshot::builder_for(table_url.clone())
+        .build(engine)?
+        .update_table(UpdateTableOperation::Delete, "test engine", true)
+        .build(
+            engine,
+            Box::new(delta_kernel::committer::FileSystemCommitter::new()),
+        )?)
 }

@@ -13,6 +13,16 @@ use crate::schema::{DataType, StructType};
 use crate::table_properties::ParseIntervalError;
 use crate::Version;
 
+/// An error returned by a Delta Kernel operation.
+#[derive(Debug, thiserror::Error)]
+// TODO(#2630): Remove non_exhaustive once Delta and Engine variants are introduced.
+#[non_exhaustive]
+pub enum Error {
+    /// A failure represented by a kernel implementation error.
+    #[error(transparent)]
+    Kernel(KernelError),
+}
+
 /// Details of a failed conversion from a scalar into a Rust value.
 ///
 /// Conversion code adds path elements as an error unwinds, producing a path from the outermost
@@ -71,25 +81,39 @@ impl std::error::Error for ScalarConversionError {}
 ///
 /// Other error variants are returned unchanged: a field's `TryFrom<Scalar>` implementation may
 /// report a failure unrelated to scalar shape, and this helper must not reclassify it.
-pub(crate) fn add_scalar_path_context(error: Error, element: impl Into<String>) -> Error {
+pub(crate) fn add_scalar_path_context(
+    error: KernelError,
+    element: impl Into<String>,
+) -> KernelError {
     match error {
-        Error::ScalarConversion(error) => Error::ScalarConversion(error.add_path_context(element)),
+        KernelError::ScalarConversion(error) => {
+            KernelError::ScalarConversion(error.add_path_context(element))
+        }
         other => other,
     }
 }
 
-/// A [`std::result::Result`] that has the kernel [`Error`] as the error variant
-pub type DeltaResult<T, E = Error> = std::result::Result<T, E>;
+/// A [`std::result::Result`] that has the kernel [`KernelError`] as the error variant
+pub type Result<T, E = KernelError> = std::result::Result<T, E>;
 
-/// A boxed, `Send` iterator of [`DeltaResult<T>`] items.
+/// A result whose error is a [`KernelError`].
+pub type KernelResult<T> = std::result::Result<T, KernelError>;
+
+/// A boxed, `Send` iterator of [`KernelResult<T>`] items.
+pub type KernelResultIterator<'a, T> = Box<dyn Iterator<Item = KernelResult<T>> + Send + 'a>;
+
+/// A [`KernelResultIterator`] that does not borrow data.
+pub type KernelResultIteratorStatic<T> = KernelResultIterator<'static, T>;
+
+/// A boxed, `Send` iterator of [`Result<T>`] items.
 ///
 /// Convenience alias for the common pattern of returning a streaming, fallible iterator from
 /// kernel APIs.
-pub type DeltaResultIterator<'a, T> = Box<dyn Iterator<Item = DeltaResult<T>> + Send + 'a>;
+pub type ResultIterator<'a, T> = Box<dyn Iterator<Item = Result<T>> + Send + 'a>;
 
-/// `'static` counterpart to [`DeltaResultIterator`] for cases where the iterator does not
+/// `'static` counterpart to [`ResultIterator`] for cases where the iterator does not
 /// reference borrowed data.
-pub type DeltaResultIteratorStatic<T> = DeltaResultIterator<'static, T>;
+pub type ResultIteratorStatic<T> = ResultIterator<'static, T>;
 
 /// An error validating connector-provided state for snapshot construction.
 #[derive(Debug, thiserror::Error)]
@@ -138,12 +162,20 @@ pub enum SnapshotHintError {
     /// The supplied log files contain log compaction files, which snapshot hints do not support.
     #[error("Invalid snapshot hint: log compaction files are not supported")]
     LogCompaction,
+    /// A supplied log file is not beneath the table's `_delta_log` root.
+    #[error("Invalid snapshot hint: log path '{path}' is not beneath log root '{log_root}'")]
+    LogPathOutsideRoot {
+        /// The supplied log file path.
+        path: String,
+        /// The expected table log root.
+        log_root: String,
+    },
     /// The supplied log files cannot form a valid log segment.
     #[error("Invalid snapshot hint: supplied log files do not form a valid log segment")]
     LogSegment {
         /// The log-segment construction error.
         #[source]
-        source: Box<Error>,
+        source: Box<KernelError>,
     },
     /// The hint includes a published version after its snapshot version.
     #[error("Invalid snapshot hint: max_published_version exceeds snapshot hint version {hint}")]
@@ -177,11 +209,11 @@ pub enum SnapshotHintError {
         message: String,
         /// The underlying validation error, if available.
         #[source]
-        source: Option<Box<Error>>,
+        source: Option<Box<KernelError>>,
     },
 }
 
-impl From<SnapshotHintError> for Error {
+impl From<SnapshotHintError> for KernelError {
     fn from(error: SnapshotHintError) -> Self {
         Box::new(error).into()
     }
@@ -190,7 +222,7 @@ impl From<SnapshotHintError> for Error {
 /// All the types of errors that the kernel can run into
 #[non_exhaustive]
 #[derive(thiserror::Error, Debug)]
-pub enum Error {
+pub enum KernelError {
     /// This is an error that includes a backtrace. To have a particular type of error include such
     /// backtrace (when RUST_BACKTRACE=1), annotate the error with `#[error(transparent)]` and then
     /// add the error type and enum variant to the `from_with_backtrace!` macro invocation
@@ -305,6 +337,21 @@ pub enum Error {
     #[error("Table version {0} is missing or unavailable for this log operation.")]
     MissingVersion(Version),
 
+    /// The requested start version is unavailable from the queried log segment, though later
+    /// versions remain.
+    #[error(
+        "Start version {requested} is not available; earliest available version is {earliest}."
+    )]
+    StartVersionNotFound {
+        /// The start version the caller requested.
+        requested: Version,
+        /// The earliest version servable from the queried log segment (always > `requested`).
+        /// This is the lowest version this producer can serve, not a promise about the lowest
+        /// version readable on disk: a checkpoint may have trimmed the segment past commits a
+        /// path-based read could still serve.
+        earliest: Version,
+    },
+
     /// A table version required by an operation has not been published to the Delta log.
     ///
     /// The payload is the first unpublished version.
@@ -391,7 +438,7 @@ pub enum Error {
     InvalidLogPath(String),
 
     /// The assembled log segment is inconsistent with its declared file kinds, ordering, or
-    /// version bounds. Malformed checkpoint file sets use [`Error::InvalidCheckpoint`].
+    /// version bounds. Malformed checkpoint file sets use [`KernelError::InvalidCheckpoint`].
     #[error("Invalid log segment: {0}")]
     InvalidLogSegment(String),
 
@@ -404,6 +451,13 @@ pub enum Error {
     /// The file already exists at the path, prohibiting a non-overwrite write
     #[error("File already exists: {0}")]
     FileAlreadyExists(String),
+
+    /// A Delta table was found during create-table validation.
+    ///
+    /// The payload is the caller-supplied table path, not the normalized table URL. Concurrent
+    /// create attempts that pass validation surface as a commit conflict instead of this error.
+    #[error("Table already exists at path: {0}")]
+    TableAlreadyExistsAtPath(String),
 
     /// Some functionality is currently unsupported
     #[error("Unsupported: {0}")]
@@ -462,8 +516,8 @@ pub enum Error {
     Cancelled,
 }
 
-// Convenience constructors for Error types that take a String argument
-impl Error {
+// Convenience constructors for KernelError types that take a String argument
+impl KernelError {
     pub(crate) fn scalar_conversion(
         expected: impl Into<String>,
         actual: impl Into<String>,
@@ -552,8 +606,9 @@ impl Error {
     pub fn change_data_feed_unsupported(version: impl Into<Version>) -> Self {
         Self::ChangeDataFeedUnsupported(version.into())
     }
-    /// Creates an [`Error::RowTrackingChangeFeedUnsupported`] for the given version, used when row
-    /// tracking is not enabled at some point in a row-tracking change feed's version range.
+    /// Creates a [`KernelError::RowTrackingChangeFeedUnsupported`] for the given version, used
+    /// when row tracking is not enabled at some point in a row-tracking change feed's version
+    /// range.
     pub(crate) fn row_tracking_change_feed_unsupported(version: impl Into<Version>) -> Self {
         Self::RowTrackingChangeFeedUnsupported(version.into())
     }
@@ -593,6 +648,16 @@ impl Error {
         Self::PlanResultTypeMismatch { expected, actual }
     }
 
+    /// Returns the first error that is not wrapped by [`KernelError::Backtraced`].
+    ///
+    /// If this error has no backtrace wrapper, this returns `self`.
+    pub fn without_backtrace(&self) -> &Self {
+        match self {
+            Self::Backtraced { source, .. } => source.without_backtrace(),
+            error => error,
+        }
+    }
+
     // Capture a backtrace when the error is constructed.
     #[must_use]
     pub fn with_backtrace(self) -> Self {
@@ -610,7 +675,7 @@ impl Error {
 macro_rules! from_with_backtrace(
     ( $(($error_type: ty, $error_variant: ident)), * ) => {
         $(
-            impl From<$error_type> for Error {
+            impl From<$error_type> for KernelError {
                 fn from(value: $error_type) -> Self {
                     Self::$error_variant(value).with_backtrace()
                 }
@@ -625,14 +690,14 @@ from_with_backtrace!(
 );
 
 #[cfg(feature = "default-engine-base")]
-impl From<ArrowError> for Error {
+impl From<ArrowError> for KernelError {
     fn from(value: ArrowError) -> Self {
         Self::Arrow(value).with_backtrace()
     }
 }
 
 #[cfg(feature = "default-engine-base")]
-impl From<object_store::Error> for Error {
+impl From<object_store::Error> for KernelError {
     fn from(value: object_store::Error) -> Self {
         match value {
             object_store::Error::NotFound { path, .. } => Self::file_not_found(path),
@@ -642,10 +707,10 @@ impl From<object_store::Error> for Error {
 }
 
 /// This impl is needed so the `?` operator can auto-convert `Result<T, Infallible>` to
-/// `DeltaResult<T>`. For example, `TryFrom` impls for infallible conversions use `Infallible` as
+/// `KernelResult<T>`. For example, `TryFrom` impls for infallible conversions use `Infallible` as
 /// their error type, and this allows those results to be propagated with `?` in functions
-/// returning `DeltaResult`. The match is unreachable since `Infallible` has no variants.
-impl From<Infallible> for Error {
+/// returning `KernelResult`. The match is unreachable since `Infallible` has no variants.
+impl From<Infallible> for KernelError {
     fn from(value: Infallible) -> Self {
         match value {}
     }

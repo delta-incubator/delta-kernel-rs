@@ -24,7 +24,7 @@ use crate::path::LogPathFileType::*;
 use crate::path::{
     may_begin_listable_log_path, CheckpointInstance, LogPathFileType, ParsedLogPath,
 };
-use crate::{DeltaResult, Error, StorageHandler, Version};
+use crate::{KernelError, KernelResult, Result, StorageHandler, Version};
 
 #[cfg(test)]
 mod tests;
@@ -75,7 +75,7 @@ pub(crate) fn list_delta_log_from_storage(
     start_version: Version,
     end_version: Version,
     cancellation_token: Option<&CancellationTokenRef>,
-) -> DeltaResult<impl Iterator<Item = DeltaResult<ParsedLogPath>>> {
+) -> Result<impl Iterator<Item = Result<ParsedLogPath>>> {
     let start_from = log_root.join(&format!("{start_version:020}"))?;
     let log_root_str = log_root.to_string();
     let files = storage
@@ -186,6 +186,51 @@ fn find_complete_checkpoint_version(ascending_files: &[ParsedLogPath]) -> Option
                 .then_some(version)
         })
         .last()
+}
+
+/// Checks that a listing from an AMT hint's version can stand in for a checkpoint: the checkpoint
+/// version must be less than or equal to the version of the manifest commit it was added in, that
+/// manifest commit must be listed, and the commits must start no later than the version after the
+/// hint.
+#[cfg(feature = "adaptive-metadata-in-dev")]
+fn validate_amt_listing(
+    listed_files: &LogSegmentFiles,
+    hint: &LastCheckpointHint,
+    manifest_commit_version: Version,
+) -> KernelResult<()> {
+    let checkpoint_version = hint.version;
+    if manifest_commit_version < checkpoint_version {
+        return Err(KernelError::invalid_checkpoint(format!(
+            "_last_checkpoint AMT hint checkpoint version {checkpoint_version} must be less than \
+             or equal to the version of the manifest commit it was added in \
+             ({manifest_commit_version})"
+        )));
+    }
+    let commits = &listed_files.ascending_commit_files;
+    let first = commits.first().map(|c| c.version);
+    let last = commits.last().map(|c| c.version);
+    // Neither listing nor replay catches a gap right after the hint. With no checkpoint file,
+    // `LogSegment::try_new` has no checkpoint version to check the first commit against, and it
+    // only requires the listed commits to be contiguous with each other. If commits after the hint
+    // were deleted but the manifest commit and its successors remain (say hint 5, manifest commit
+    // 8, commits 6 and 7 missing), the listing starts at 8, replay takes protocol and metadata from
+    // commit 8's checkpoint action, and the snapshot silently drops the file actions in 6 and 7.
+    let latest_first_commit = checkpoint_version.saturating_add(1);
+    if first.is_none_or(|first| first > latest_first_commit) {
+        return Err(KernelError::invalid_checkpoint(format!(
+            "_last_checkpoint AMT hint at version {checkpoint_version} requires commits starting \
+             at or before version {latest_first_commit}, but the first listed commit is \
+             {first:?}"
+        )));
+    }
+    if !commits.iter().any(|c| c.version == manifest_commit_version) {
+        return Err(KernelError::invalid_checkpoint(format!(
+            "_last_checkpoint AMT hint at version {checkpoint_version} names manifest commit \
+             {manifest_commit_version}, which was not found in the log (listed commits \
+             {first:?}..={last:?})"
+        )));
+    }
+    Ok(())
 }
 
 /// Validates a log file's size. Returns `true` to keep the file, `false` to skip it
@@ -384,12 +429,12 @@ impl LogSegmentFiles {
     /// - `end_version`: upper bound (inclusive) on versions to include, `None` means no bound
     /// - `checkpoint_handling`: whether complete checkpoints replace the replay base
     pub(crate) fn build_log_segment_files(
-        fs_files: impl Iterator<Item = DeltaResult<ParsedLogPath>>,
+        fs_files: impl Iterator<Item = KernelResult<ParsedLogPath>>,
         log_tail: Vec<ParsedLogPath>,
         start_version: Version,
         end_version: Option<Version>,
         checkpoint_handling: CheckpointHandling,
-    ) -> DeltaResult<Self> {
+    ) -> KernelResult<Self> {
         // check log_tail is only commits
         // note that LogSegment checks no gaps/duplicates so we don't duplicate that here
         debug_assert!(
@@ -531,7 +576,7 @@ impl LogSegmentFiles {
         start_version: Option<Version>,
         end_version: Option<Version>,
         cancellation_token: Option<&CancellationTokenRef>,
-    ) -> DeltaResult<Self> {
+    ) -> KernelResult<Self> {
         debug_assert!(
             log_tail.iter().all(|entry| entry.is_commit()),
             "log_tail should only contain commits"
@@ -599,7 +644,7 @@ impl LogSegmentFiles {
         start_version: Option<Version>,
         end_version: Option<Version>,
         cancellation_token: Option<&CancellationTokenRef>,
-    ) -> DeltaResult<Self> {
+    ) -> KernelResult<Self> {
         Self::list_with_checkpoint_handling(
             storage,
             log_root,
@@ -619,7 +664,7 @@ impl LogSegmentFiles {
         end_version: Option<Version>,
         checkpoint_handling: CheckpointHandling,
         cancellation_token: Option<&CancellationTokenRef>,
-    ) -> DeltaResult<Self> {
+    ) -> KernelResult<Self> {
         let start = start_version.unwrap_or(0);
         let end = end_version.unwrap_or(Version::MAX);
         let fs_iter =
@@ -633,7 +678,8 @@ impl LogSegmentFiles {
     ///
     /// The hint only tells us where to start listing; it never influences which checkpoint is
     /// selected at a version. A hint that turns out to describe a different checkpoint than the one
-    /// selected is logged and ignored, not an error.
+    /// selected is logged and ignored, not an error. An AMT hint has no checkpoint file, so its
+    /// listing is accepted without one as long as the hint's manifest commit is listed.
     pub(crate) fn list_with_checkpoint_hint(
         checkpoint_metadata: &LastCheckpointHint,
         storage: &dyn StorageHandler,
@@ -641,7 +687,7 @@ impl LogSegmentFiles {
         log_tail: Vec<ParsedLogPath>,
         end_version: Option<Version>,
         cancellation_token: Option<&CancellationTokenRef>,
-    ) -> DeltaResult<Self> {
+    ) -> KernelResult<Self> {
         let listed_files = Self::list(
             storage,
             log_root,
@@ -652,6 +698,14 @@ impl LogSegmentFiles {
         )?;
 
         let Some(latest_checkpoint) = listed_files.checkpoint_parts.last() else {
+            // The segment has no checkpoint version yet starts at the hinted version: the
+            // manifest commit's checkpoint action supplies the state before it.
+            #[cfg(feature = "adaptive-metadata-in-dev")]
+            if let Some(manifest_commit_version) = checkpoint_metadata.amt_manifest_commit_version()
+            {
+                validate_amt_listing(&listed_files, checkpoint_metadata, manifest_commit_version)?;
+                return Ok(listed_files);
+            }
             // The hint names a checkpoint that no longer exists, and because the listing started
             // at the hinted version, no checkpoint exists at or after it either. The log was
             // modified out of band: the checkpoint was deleted without clearing the hint, or the
@@ -669,7 +723,7 @@ impl LogSegmentFiles {
             //     the drop leaves commits 0-2 behind, the new table writes its own 0, 1, 2, ...,
             //     and listing from version 0 sees one contiguous sequence whose low versions belong
             //     to two different tables and replays it as a single history.
-            return Err(Error::invalid_checkpoint(
+            return Err(KernelError::invalid_checkpoint(
                 "Had a _last_checkpoint hint but didn't find any checkpoints",
             ));
         };
@@ -725,7 +779,7 @@ impl LogSegmentFiles {
         log_tail: Vec<ParsedLogPath>,
         end_version: Version,
         cancellation_token: Option<&CancellationTokenRef>,
-    ) -> DeltaResult<Self> {
+    ) -> KernelResult<Self> {
         // Scan backward in 1000-version windows, collecting ALL file types, until a complete
         // checkpoint is found or the log is exhausted.
         let mut windows: Vec<Vec<ParsedLogPath>> = Vec::new();

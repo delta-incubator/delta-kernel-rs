@@ -12,11 +12,11 @@ use crate::arrow::datatypes::{
 };
 use crate::engine::arrow_data::{extract_record_batch, ArrowEngineData};
 use crate::engine::arrow_utils::apply_schema::{apply_schema, apply_schema_to};
-use crate::error::{DeltaResult, Error};
+use crate::error::{KernelError, Result};
 use crate::expressions::{ArrayData, Expression, ExpressionRef, PredicateRef, Scalar};
 use crate::schema::{DataType, PrimitiveType, SchemaRef};
 use crate::utils::require;
-use crate::{EngineData, EvaluationHandler, ExpressionEvaluator, PredicateEvaluator};
+use crate::{EngineData, EvaluationHandler, ExpressionEvaluator, KernelResult, PredicateEvaluator};
 
 pub mod evaluate_expression;
 pub mod opaque;
@@ -29,7 +29,7 @@ mod tests;
 
 impl Scalar {
     /// Convert scalar to arrow array.
-    pub fn to_array(&self, num_rows: usize) -> DeltaResult<ArrayRef> {
+    pub fn to_array(&self, num_rows: usize) -> Result<ArrayRef> {
         let data_type = ArrowDataType::try_from_kernel(&self.data_type())?;
         let mut builder = array::make_builder(&data_type, num_rows);
         self.append_to(&mut builder, num_rows)?;
@@ -58,12 +58,15 @@ impl Scalar {
     // rows, because empty list/map is a valid state. But struct builders _DO_ require appending
     // (possibly NULL) entries in order to preserve consistent row counts between the struct and its
     // fields.
-    fn append_to(&self, builder: &mut dyn ArrayBuilder, num_rows: usize) -> DeltaResult<()> {
+    fn append_to(&self, builder: &mut dyn ArrayBuilder, num_rows: usize) -> KernelResult<()> {
         use Scalar::*;
         macro_rules! builder_as {
             ($t:ty) => {{
                 builder.as_any_mut().downcast_mut::<$t>().ok_or_else(|| {
-                    Error::invalid_expression(format!("Invalid builder for {}", self.data_type()))
+                    KernelError::invalid_expression(format!(
+                        "Invalid builder for {}",
+                        self.data_type()
+                    ))
                 })?
             }};
         }
@@ -110,7 +113,7 @@ impl Scalar {
                 let builder = builder_as!(array::StructBuilder);
                 require!(
                     builder.num_fields() == data.fields().len(),
-                    Error::generic("Struct builder has wrong number of fields")
+                    KernelError::generic("Struct builder has wrong number of fields")
                 );
                 let field_builders = builder.field_builders_mut().iter_mut();
                 for (builder, value) in field_builders.zip(data.values()) {
@@ -151,12 +154,12 @@ impl Scalar {
         builder: &mut dyn ArrayBuilder,
         data_type: &DataType,
         num_rows: usize,
-    ) -> DeltaResult<()> {
+    ) -> KernelResult<()> {
         // Almost the same as above -- differs only in the data type parameter
         macro_rules! builder_as {
             ($t:ty) => {{
                 builder.as_any_mut().downcast_mut::<$t>().ok_or_else(|| {
-                    Error::invalid_expression(format!("Invalid builder for {data_type}"))
+                    KernelError::invalid_expression(format!("Invalid builder for {data_type}"))
                 })?
             }};
         }
@@ -169,6 +172,10 @@ impl Scalar {
         }
 
         match *data_type {
+            #[cfg(feature = "udt-in-dev")]
+            DataType::UserDefined(_) => {
+                Self::append_null(builder, data_type.physical_type(), num_rows)?
+            }
             DataType::INTEGER => append_nulls_as!(array::Int32Builder),
             DataType::LONG => append_nulls_as!(array::Int64Builder),
             DataType::SHORT => append_nulls_as!(array::Int16Builder),
@@ -194,7 +201,7 @@ impl Scalar {
                 let builder = builder_as!(array::StructBuilder);
                 require!(
                     builder.num_fields() == stype.num_fields(),
-                    Error::generic("Struct builder has wrong number of fields")
+                    KernelError::generic("Struct builder has wrong number of fields")
                 );
                 let field_builders = builder.field_builders_mut().iter_mut();
                 for (builder, field) in field_builders.zip(stype.fields()) {
@@ -219,7 +226,9 @@ impl Scalar {
             DataType::INTERVAL_DAY_TIME => append_nulls_as!(array::Int64Builder),
             #[cfg(feature = "geo-type-in-dev")]
             DataType::Primitive(PrimitiveType::Geometry(_) | PrimitiveType::Geography(_)) => {
-                return Err(Error::unsupported("Geo is not supported as scalar yet."));
+                return Err(KernelError::unsupported(
+                    "Geo is not supported as scalar yet.",
+                ));
             }
         }
         Ok(())
@@ -228,7 +237,7 @@ impl Scalar {
 
 impl ArrayData {
     /// Convert kernel [`ArrayData`] to an Arrow [`ArrayRef`] of the equivalent type.
-    pub fn to_arrow(&self) -> DeltaResult<ArrayRef> {
+    pub fn to_arrow(&self) -> Result<ArrayRef> {
         let arrow_data_type = ArrowDataType::try_from_kernel(self.array_type().element_type())?;
 
         let elements = self.array_elements();
@@ -250,7 +259,7 @@ impl EvaluationHandler for ArrowEvaluationHandler {
         schema: SchemaRef,
         expression: ExpressionRef,
         output_type: DataType,
-    ) -> DeltaResult<Arc<dyn ExpressionEvaluator>> {
+    ) -> Result<Arc<dyn ExpressionEvaluator>> {
         Ok(Arc::new(DefaultExpressionEvaluator {
             input_schema: schema,
             expression,
@@ -262,7 +271,7 @@ impl EvaluationHandler for ArrowEvaluationHandler {
         &self,
         schema: SchemaRef,
         predicate: PredicateRef,
-    ) -> DeltaResult<Arc<dyn PredicateEvaluator>> {
+    ) -> Result<Arc<dyn PredicateEvaluator>> {
         Ok(Arc::new(DefaultPredicateEvaluator {
             input_schema: schema,
             predicate,
@@ -273,7 +282,7 @@ impl EvaluationHandler for ArrowEvaluationHandler {
         &self,
         schema: SchemaRef,
         rows: Vec<Vec<Scalar>>,
-    ) -> DeltaResult<Box<dyn EngineData>> {
+    ) -> Result<Box<dyn EngineData>> {
         let arrow_schema: Arc<ArrowSchema> = Arc::new(schema.as_ref().try_into_arrow()?);
         if rows.is_empty() {
             return Ok(Box::new(ArrowEngineData::new(RecordBatch::new_empty(
@@ -285,7 +294,7 @@ impl EvaluationHandler for ArrowEvaluationHandler {
         let num_fields = schema.fields().len();
         for (row_idx, row) in rows.iter().enumerate() {
             if row.len() != num_fields {
-                return Err(Error::generic(format!(
+                return Err(KernelError::generic(format!(
                     "Row {} has {} scalars but schema has {} fields",
                     row_idx,
                     row.len(),
@@ -305,7 +314,7 @@ impl EvaluationHandler for ArrowEvaluationHandler {
             let field_name = fields[col_idx].name();
             for (row_idx, row) in rows.iter().enumerate() {
                 row[col_idx].append_to(builder.as_mut(), 1).map_err(|e| {
-                    Error::generic(format!(
+                    KernelError::generic(format!(
                         "Row {row_idx}, field '{field_name}' \
                             (expected type {}, got {}): {e}",
                         fields[col_idx].data_type(),
@@ -332,7 +341,7 @@ pub struct DefaultExpressionEvaluator {
 }
 
 impl ExpressionEvaluator for DefaultExpressionEvaluator {
-    fn evaluate(&self, batch: &dyn EngineData) -> DeltaResult<Box<dyn EngineData>> {
+    fn evaluate(&self, batch: &dyn EngineData) -> Result<Box<dyn EngineData>> {
         debug!("Arrow evaluator evaluating: {:#?}", self.expression);
         let batch = extract_record_batch(batch)?;
         // TODO(#3263): Validate nested fields.
@@ -372,7 +381,7 @@ pub struct DefaultPredicateEvaluator {
 }
 
 impl PredicateEvaluator for DefaultPredicateEvaluator {
-    fn evaluate(&self, batch: &dyn EngineData) -> DeltaResult<Box<dyn EngineData>> {
+    fn evaluate(&self, batch: &dyn EngineData) -> Result<Box<dyn EngineData>> {
         debug!("Arrow evaluator evaluating: {:#?}", self.predicate);
         let batch = extract_record_batch(batch)?;
         // TODO(#3263): Validate nested fields.
@@ -391,7 +400,7 @@ impl PredicateEvaluator for DefaultPredicateEvaluator {
 fn validate_data_schema_top_level(
     expected_schema: &SchemaRef,
     data_schema: &ArrowSchema,
-) -> DeltaResult<()> {
+) -> KernelResult<()> {
     let mut data_fields = data_schema.fields().iter();
     // Some Kernel code does not provide the full input schema to the evaluator. For example,
     // `scan_metadata_from` may evaluate scan rows containing optional `stats_parsed` and
@@ -411,7 +420,7 @@ fn validate_data_schema_top_level(
                 } else {
                     "missing"
                 };
-                Error::schema(format!(
+                KernelError::schema(format!(
                     "Expected schema field '{}' is {mismatch} in data schema fields {:?}",
                     expected_field.name(),
                     data_schema
@@ -423,7 +432,7 @@ fn validate_data_schema_top_level(
             })?;
         require!(
             top_level_types_compatible(expected_field.data_type(), data_field.data_type()),
-            Error::schema(format!(
+            KernelError::schema(format!(
                 "Expected schema type for '{}' does not match the data schema type: {:?} != {:?}",
                 expected_field.name(),
                 expected_field.data_type(),
@@ -439,6 +448,7 @@ fn validate_data_schema_top_level(
 ///
 /// Unlike a full conversion, this does not inspect nested types or field metadata.
 fn top_level_types_compatible(expected_type: &DataType, data_type: &ArrowDataType) -> bool {
+    let expected_type = expected_type.physical_type();
     match (expected_type, data_type) {
         // Dictionary types have the same logical type as their values.
         (_, ArrowDataType::Dictionary(_, value_type)) => {

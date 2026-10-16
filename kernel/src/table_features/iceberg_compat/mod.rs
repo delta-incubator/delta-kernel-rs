@@ -13,7 +13,7 @@ use crate::schema::{ColumnMetadataKey, DataType, MetadataValue, StructField};
 use crate::table_configuration::TableConfiguration;
 use crate::table_features::TableFeature;
 use crate::transforms::{transform_output_type, SchemaTransform};
-use crate::{DeltaResult, Error};
+use crate::{KernelError, KernelResult};
 
 pub(crate) enum IcebergCompatVersion {
     // TODO: Add V1 when kernel supports it
@@ -30,7 +30,7 @@ impl IcebergCompatVersion {
     }
 }
 
-type IcebergCompatCheckFn = fn(&TableConfiguration) -> DeltaResult<()>;
+type IcebergCompatCheckFn = fn(&TableConfiguration) -> KernelResult<()>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum IcebergCompatValidationContext {
@@ -82,7 +82,7 @@ pub(crate) fn validate_iceberg_compat_if_needed(
     tc: &TableConfiguration,
     validator: &IcebergCompatValidator,
     context: IcebergCompatValidationContext,
-) -> DeltaResult<()> {
+) -> KernelResult<()> {
     if !tc.is_feature_enabled(&validator.version.as_table_feature()) {
         return Ok(());
     }
@@ -100,7 +100,7 @@ pub(super) fn check_only_supported_types(
     tc: &TableConfiguration,
     is_supported: fn(&DataType) -> bool,
     feature_label: &str,
-) -> DeltaResult<()> {
+) -> KernelResult<()> {
     let mut v = TypeAllowListVisitor {
         is_supported,
         offender: None,
@@ -110,7 +110,7 @@ pub(super) fn check_only_supported_types(
     let Some(offender) = v.offender else {
         return Ok(());
     };
-    Err(Error::generic(format!(
+    Err(KernelError::generic(format!(
         "{feature_label} does not support type at column: {offender}",
     )))
 }
@@ -175,7 +175,7 @@ impl<'a> SchemaTransform<'a> for TypeAllowListVisitor {
 /// Rejects fields carrying the legacy `parquet.field.nested.ids` metadata.
 ///
 /// See <https://github.com/delta-io/delta/issues/6688>.
-pub(super) fn check_no_legacy_nested_ids(tc: &TableConfiguration) -> DeltaResult<()> {
+pub(super) fn check_no_legacy_nested_ids(tc: &TableConfiguration) -> KernelResult<()> {
     let mut v = LegacyNestedIdsVisitor {
         path: vec![],
         offender: None,
@@ -184,7 +184,7 @@ pub(super) fn check_no_legacy_nested_ids(tc: &TableConfiguration) -> DeltaResult
     let Some(offender) = v.offender else {
         return Ok(());
     };
-    Err(Error::generic(format!(
+    Err(KernelError::generic(format!(
         "field `{offender}` carries deprecated `{}` metadata; use `{}` instead. \
          See https://github.com/delta-io/delta/issues/6688",
         ColumnMetadataKey::ParquetFieldNestedIds.as_ref(),
@@ -246,26 +246,26 @@ struct TypeChangesValidator {
 }
 
 impl TypeChangesValidator {
-    fn validate_field_type_changes(&self, field: &StructField) -> DeltaResult<()> {
+    fn validate_field_type_changes(&self, field: &StructField) -> KernelResult<()> {
         let type_changes_key = ColumnMetadataKey::TypeChanges.as_ref();
         let Some(metadata) = field.metadata().get(type_changes_key) else {
             return Ok(());
         };
         let path = self.path.join(".");
         let MetadataValue::Other(value) = metadata else {
-            return Err(Error::schema(format!(
+            return Err(KernelError::schema(format!(
                 "Field '{path}' has a non-array `{type_changes_key}` annotation: \
                  {metadata}"
             )));
         };
         let type_changes: Vec<TypeChange> = serde_json::from_value(value.clone()).map_err(|e| {
-            Error::schema(format!(
+            KernelError::schema(format!(
                 "Field '{path}' has an invalid `{type_changes_key}` annotation: {e}"
             ))
         })?;
         for type_change in type_changes {
             if !is_iceberg_allowed_type_change(&type_change.from_type, &type_change.to_type) {
-                return Err(Error::schema(format!(
+                return Err(KernelError::schema(format!(
                     "{} does not support type change on field '{path}': {} -> {}",
                     self.version.as_table_feature(),
                     type_change.from_type,
@@ -278,9 +278,9 @@ impl TypeChangesValidator {
 }
 
 impl<'a> SchemaTransform<'a> for TypeChangesValidator {
-    transform_output_type!(|'a, T| DeltaResult<()>);
+    transform_output_type!(|'a, T| KernelResult<()>);
 
-    fn transform_struct_field(&mut self, field: &'a StructField) -> DeltaResult<()> {
+    fn transform_struct_field(&mut self, field: &'a StructField) -> KernelResult<()> {
         self.path.push(field.name().clone());
         let result = self
             .validate_field_type_changes(field)
@@ -289,28 +289,28 @@ impl<'a> SchemaTransform<'a> for TypeChangesValidator {
         result
     }
 
-    fn transform_array_element(&mut self, etype: &'a DataType) -> DeltaResult<()> {
+    fn transform_array_element(&mut self, etype: &'a DataType) -> KernelResult<()> {
         self.path.push("element".to_string());
         let result = self.transform(etype);
         self.path.pop();
         result
     }
 
-    fn transform_map_key(&mut self, ktype: &'a DataType) -> DeltaResult<()> {
+    fn transform_map_key(&mut self, ktype: &'a DataType) -> KernelResult<()> {
         self.path.push("key".to_string());
         let result = self.transform(ktype);
         self.path.pop();
         result
     }
 
-    fn transform_map_value(&mut self, vtype: &'a DataType) -> DeltaResult<()> {
+    fn transform_map_value(&mut self, vtype: &'a DataType) -> KernelResult<()> {
         self.path.push("value".to_string());
         let result = self.transform(vtype);
         self.path.pop();
         result
     }
 
-    fn transform_variant(&mut self, _stype: &'a crate::schema::StructType) -> DeltaResult<()> {
+    fn transform_variant(&mut self, _stype: &'a crate::schema::StructType) -> KernelResult<()> {
         Ok(())
     }
 }

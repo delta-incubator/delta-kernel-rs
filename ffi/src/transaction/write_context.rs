@@ -5,11 +5,11 @@ use delta_kernel::expressions::Scalar;
 use delta_kernel::transaction::{
     BoundWriteContext, BoundWriteContextBuilder, RowTrackingMetadataColumns, WriteState,
 };
-use delta_kernel::{DeltaResult, Error};
+use delta_kernel::{KernelError, KernelResult};
 use delta_kernel_ffi_macros::handle_descriptor;
 
 use super::partition_value::{ExclusivePartitionValueMap, PartitionValueMap};
-use super::{ExclusiveCreateTransaction, ExclusiveTransaction};
+use super::{ExclusiveCreateTableTransaction, ExclusiveUpdateTableTransaction};
 use crate::delta_types::{FfiColumnName, FfiColumnNameArray, FfiStringArray};
 use crate::error::{ExternResult, IntoExternResult};
 use crate::expressions::SharedExpression;
@@ -50,14 +50,14 @@ pub struct FfiRowTrackingMetadataColumns {
 
 /// Returns owned write state for an existing-table transaction without serializing it. Returns an
 /// error if the transaction cannot write. The state remains valid after the transaction is freed.
-/// Create-table transactions use the `create_table_get_*_write_context` functions instead.
+/// Create-table transactions use the `create_table_txn_get_*_write_context` functions instead.
 /// The transaction remains valid on success and error and must eventually be committed or freed.
 ///
 /// # Safety
 /// The transaction and engine handles are borrowed and must be valid.
 #[no_mangle]
-pub unsafe extern "C" fn transaction_write_state(
-    txn: Handle<ExclusiveTransaction>,
+pub unsafe extern "C" fn update_table_txn_write_state(
+    txn: Handle<ExclusiveUpdateTableTransaction>,
     engine: Handle<SharedExternEngine>,
 ) -> ExternResult<Handle<SharedWriteState>> {
     let txn = unsafe { txn.as_ref() };
@@ -137,6 +137,23 @@ pub unsafe extern "C" fn write_context_builder_with_partition_values(
     let builder = unsafe { builder.into_inner() };
     let partition_values = unsafe { partition_values.into_inner() };
     Box::new(builder.with_partition_values(partition_values.inner)).into()
+}
+
+/// Sets partition values keyed by exact physical column names and consumes both input handles.
+///
+/// The returned handle replaces `builder`; neither input handle remains valid. Kernel validates the
+/// values in [`write_context_builder_build`]. Unpartitioned writers skip this function.
+///
+/// # Safety
+/// The builder and partition-value map handles must be valid and are consumed by this call.
+#[no_mangle]
+pub unsafe extern "C" fn write_context_builder_with_physical_partition_values(
+    builder: Handle<ExclusiveWriteContextBuilder>,
+    partition_values: Handle<ExclusivePartitionValueMap>,
+) -> Handle<ExclusiveWriteContextBuilder> {
+    let builder = unsafe { builder.into_inner() };
+    let partition_values = unsafe { partition_values.into_inner() };
+    Box::new(builder.with_physical_partition_values(partition_values.inner)).into()
 }
 
 /// Sets the logical names of materialized row-tracking columns and consumes the builder.
@@ -253,15 +270,15 @@ pub unsafe extern "C" fn get_write_state_stats_columns(
 /// Gets the write context from a transaction for an unpartitioned table. The write context
 /// provides schema and path information needed for writing data.
 ///
-/// For partitioned tables, use [`get_partitioned_write_context`] instead. Returns an error if the
-/// table is partitioned.
+/// For partitioned tables, use [`update_table_txn_get_partitioned_write_context`] instead. Returns
+/// an error if the table is partitioned.
 ///
 /// # Safety
 ///
-/// Caller is responsible for passing a [valid][Handle#Validity] transaction handle and engine.
+/// `txn` and `engine` must be [valid][Handle#Validity] handles. Both are borrowed for this call.
 #[no_mangle]
-pub unsafe extern "C" fn get_unpartitioned_write_context(
-    txn: Handle<ExclusiveTransaction>,
+pub unsafe extern "C" fn update_table_txn_get_unpartitioned_write_context(
+    txn: Handle<ExclusiveUpdateTableTransaction>,
     engine: Handle<SharedExternEngine>,
 ) -> ExternResult<Handle<SharedWriteContext>> {
     let txn = unsafe { txn.as_ref() };
@@ -274,15 +291,15 @@ pub unsafe extern "C" fn get_unpartitioned_write_context(
 
 /// Gets the write context from a create-table transaction for an unpartitioned table.
 ///
-/// For partitioned tables, use [`create_table_get_partitioned_write_context`] instead. Returns an
-/// error if the table is partitioned.
+/// For partitioned tables, use [`create_table_txn_get_partitioned_write_context`] instead. Returns
+/// an error if the table is partitioned.
 ///
 /// # Safety
 ///
-/// Caller is responsible for passing a [valid][Handle#Validity] transaction handle and engine.
+/// `txn` and `engine` must be [valid][Handle#Validity] handles. Both are borrowed for this call.
 #[no_mangle]
-pub unsafe extern "C" fn create_table_get_unpartitioned_write_context(
-    txn: Handle<ExclusiveCreateTransaction>,
+pub unsafe extern "C" fn create_table_txn_get_unpartitioned_write_context(
+    txn: Handle<ExclusiveCreateTableTransaction>,
     engine: Handle<SharedExternEngine>,
 ) -> ExternResult<Handle<SharedWriteContext>> {
     let txn = unsafe { txn.as_ref() };
@@ -303,16 +320,17 @@ pub unsafe extern "C" fn create_table_get_unpartitioned_write_context(
 /// columns (the kernel validates completeness and value types and rejects extras). This function
 /// consumes the map handle on both success and error; do not use or free it afterward.
 ///
-/// Returns an error if the table is not partitioned (use [`get_unpartitioned_write_context`]
-/// instead) or if the partition values are invalid for the table's partition schema.
+/// Returns an error if the table is not partitioned (use
+/// [`update_table_txn_get_unpartitioned_write_context`] instead) or if the partition values are
+/// invalid for the table's partition schema.
 ///
 /// # Safety
 ///
-/// Caller is responsible for passing a [valid][Handle#Validity] transaction handle, partition
-/// value map handle, and engine.
+/// All handles must be [valid][Handle#Validity]. This call borrows `txn` and `engine` and
+/// unconditionally consumes `partition_values`, including on error.
 #[no_mangle]
-pub unsafe extern "C" fn get_partitioned_write_context(
-    txn: Handle<ExclusiveTransaction>,
+pub unsafe extern "C" fn update_table_txn_get_partitioned_write_context(
+    txn: Handle<ExclusiveUpdateTableTransaction>,
     partition_values: Handle<ExclusivePartitionValueMap>,
     engine: Handle<SharedExternEngine>,
 ) -> ExternResult<Handle<SharedWriteContext>> {
@@ -332,15 +350,16 @@ pub unsafe extern "C" fn get_partitioned_write_context(
 }
 
 /// Gets the write context from a create-table transaction for a partitioned table. See
-/// [`get_partitioned_write_context`] for the contract; this is the create-table counterpart.
+/// [`update_table_txn_get_partitioned_write_context`] for the contract. This is the create-table
+/// counterpart.
 ///
 /// # Safety
 ///
-/// Caller is responsible for passing a [valid][Handle#Validity] transaction handle, partition
-/// value map handle, and engine.
+/// All handles must be [valid][Handle#Validity]. This call borrows `txn` and `engine` and
+/// unconditionally consumes `partition_values`, including on error.
 #[no_mangle]
-pub unsafe extern "C" fn create_table_get_partitioned_write_context(
-    txn: Handle<ExclusiveCreateTransaction>,
+pub unsafe extern "C" fn create_table_txn_get_partitioned_write_context(
+    txn: Handle<ExclusiveCreateTableTransaction>,
     partition_values: Handle<ExclusivePartitionValueMap>,
     engine: Handle<SharedExternEngine>,
 ) -> ExternResult<Handle<SharedWriteContext>> {
@@ -360,9 +379,9 @@ pub unsafe extern "C" fn create_table_get_partitioned_write_context(
 }
 
 fn partitioned_write_context_impl(
-    build: impl FnOnce(HashMap<String, Scalar>) -> DeltaResult<BoundWriteContext>,
+    build: impl FnOnce(HashMap<String, Scalar>) -> KernelResult<BoundWriteContext>,
     partition_values: PartitionValueMap,
-) -> DeltaResult<Handle<SharedWriteContext>> {
+) -> KernelResult<Handle<SharedWriteContext>> {
     let context = build(partition_values.inner)?;
     Ok(Arc::new(context).into())
 }
@@ -530,7 +549,7 @@ pub unsafe extern "C" fn resolve_file_path(
 ) -> ExternResult<NullableCvoid> {
     let write_context = unsafe { write_context.as_ref() };
     let engine = unsafe { engine.as_ref() };
-    let file_url: DeltaResult<&str> = unsafe { TryFromStringSlice::try_from_slice(&file_url) };
+    let file_url: KernelResult<&str> = unsafe { TryFromStringSlice::try_from_slice(&file_url) };
     resolve_file_path_impl(write_context, file_url)
         .map(|path| allocate_fn(kernel_string_slice!(path)))
         .into_extern_result(&engine)
@@ -538,10 +557,10 @@ pub unsafe extern "C" fn resolve_file_path(
 
 fn resolve_file_path_impl(
     write_context: &BoundWriteContext,
-    file_url: DeltaResult<&str>,
-) -> DeltaResult<String> {
+    file_url: KernelResult<&str>,
+) -> KernelResult<String> {
     let url = Url::parse(file_url?).map_err(|e| {
-        Error::generic(format!("invalid file URL passed to resolve_file_path: {e}"))
+        KernelError::generic(format!("invalid file URL passed to resolve_file_path: {e}"))
     })?;
     write_context.resolve_file_path(&url)
 }

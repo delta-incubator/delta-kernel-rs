@@ -10,7 +10,7 @@ use crate::scan::log_replay::{
 };
 use crate::schema::{lazy_schema_ref, ColumnNamesAndTypes, SchemaRef};
 use crate::utils::require;
-use crate::{DeltaResult, Error};
+use crate::{KernelError, KernelResult};
 
 /// Column indices, matching the order in [`MANDATORY_REMOVE_FILE_COLUMNS`].
 const PATH: usize = 0;
@@ -51,13 +51,17 @@ struct RemoveFileRequiredFields {
 }
 
 impl Validation for RemoveFileRequiredFields {
-    fn validate_row<'a>(&mut self, row: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<()> {
-        let path: &str = getters[PATH]
-            .get_opt(row, "path")?
-            .ok_or_else(|| Error::missing_data("RemoveFile is missing required field 'path'"))?;
+    fn validate_row<'a>(
+        &mut self,
+        row: usize,
+        getters: &[&'a dyn GetData<'a>],
+    ) -> KernelResult<()> {
+        let path: &str = getters[PATH].get_opt(row, "path")?.ok_or_else(|| {
+            KernelError::missing_data("RemoveFile is missing required field 'path'")
+        })?;
         require!(
             !path.is_empty(),
-            Error::generic("RemoveFile path must not be empty")
+            KernelError::generic("RemoveFile path must not be empty")
         );
         let size = validate_required_field_exist::<i64>(
             getters[SIZE].get_opt(row, "size")?,
@@ -66,7 +70,7 @@ impl Validation for RemoveFileRequiredFields {
         )?;
         require!(
             size >= 0,
-            Error::generic(format!(
+            KernelError::generic(format!(
                 "RemoveFile for '{path}' has negative size {size}; size must be non-negative"
             ))
         );

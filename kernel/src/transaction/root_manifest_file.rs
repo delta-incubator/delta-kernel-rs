@@ -1,18 +1,17 @@
 //! Commits a caller-supplied root manifest file as the table's content root.
 
+use std::sync::Arc;
+
 use crate::action_reconciliation::calculate_transaction_expiration_timestamp;
 use crate::actions::visitors::SetTransactionMap;
-use crate::actions::{
-    CheckpointAction, ContentRoot, DomainMetadata, SetTransaction, CHECKPOINT_ACTION_FIELD,
-};
+use crate::actions::{CheckpointAction, ContentRoot, DomainMetadata, SetTransaction};
 use crate::crc::{merge_domain_metadata, DomainMetadataState, SetTransactionState};
-use crate::error::Error;
+use crate::error::KernelError;
 use crate::log_segment::DomainMetadataMap;
-use crate::schema::StructType;
 use crate::snapshot::SnapshotRef;
 use crate::table_configuration::TableConfiguration;
 use crate::utils::require;
-use crate::{version_as_i64, DeltaResult, Engine, FileMeta, Version};
+use crate::{version_as_i64, Engine, FileMeta, KernelResult, Version};
 
 /// A pointer to an on-disk root manifest file to be committed as the table's content root via a
 /// `checkpoint` action.
@@ -45,7 +44,7 @@ impl RootManifestFile {
         table_config: &TableConfiguration,
         dm_changes: &[DomainMetadata],
         set_transactions: &[SetTransaction],
-    ) -> DeltaResult<CheckpointAction> {
+    ) -> KernelResult<CheckpointAction> {
         let (mut domain_metadata, mut transactions, existing_checkpoint) =
             self.scan_non_content_metadata(engine)?;
 
@@ -72,7 +71,7 @@ impl RootManifestFile {
         if let Some(existing) = &existing_checkpoint {
             require!(
                 existing.version() >= read_snapshot_version,
-                Error::generic(format!(
+                KernelError::generic(format!(
                     "root manifest file commit requires no delta log commits pending replay since \
                      the last checkpoint; existing checkpoint covers version {} but snapshot is \
                      at {read_snapshot_version}",
@@ -83,7 +82,7 @@ impl RootManifestFile {
 
         let version = version_as_i64(commit_version)?;
         let size = i64::try_from(self.file.size)
-            .map_err(|_| Error::generic("root manifest file size exceeds i64::MAX"))?;
+            .map_err(|_| KernelError::generic("root manifest file size exceeds i64::MAX"))?;
         let content_root = ContentRoot::new(self.file.location.to_string(), size, version);
 
         Ok(CheckpointAction::new(
@@ -101,10 +100,10 @@ impl RootManifestFile {
     fn scan_non_content_metadata(
         &self,
         engine: &dyn Engine,
-    ) -> DeltaResult<(
+    ) -> KernelResult<(
         DomainMetadataMap,
         SetTransactionMap,
-        Option<CheckpointAction>,
+        Option<Arc<CheckpointAction>>,
     )> {
         let snapshot = self.read_snapshot.as_ref();
         let crc = snapshot.crc_at_version();
@@ -117,15 +116,7 @@ impl RootManifestFile {
             Some(SetTransactionState::Complete(_))
         );
 
-        let schema = StructType::try_new([CHECKPOINT_ACTION_FIELD.clone()])?.into();
-        let mut checkpoint_action = None;
-        for batch in snapshot.log_segment().read_actions(engine, schema)? {
-            if let Some(checkpoint) = CheckpointAction::try_new_from_data(batch?.actions.as_ref())?
-            {
-                checkpoint_action = Some(checkpoint);
-                break;
-            }
-        }
+        let checkpoint_action = snapshot.latest_checkpoint_action(engine)?;
 
         // Reject a checkpoint that spilled txns/domain metadata to sidecars, since sidecars aren't
         // read yet and that state would be lost.
@@ -133,7 +124,7 @@ impl RootManifestFile {
             require!(
                 checkpoint.txn_sidecars.is_empty()
                     && checkpoint.domain_metadata_sidecars.is_empty(),
-                Error::generic(
+                KernelError::generic(
                     "root manifest file commit cannot yet replace a checkpoint that spills txns \
                      or domain metadata to sidecars"
                 )
@@ -171,80 +162,27 @@ impl RootManifestFile {
 
 #[cfg(test)]
 mod tests {
-    use std::iter;
     use std::sync::Arc;
 
     use rstest::rstest;
 
     use super::*;
-    use crate::actions::{Metadata, Protocol, Sidecar, LOG_DOMAIN_METADATA_SCHEMA, LOG_TXN_SCHEMA};
+    use crate::actions::{Sidecar, LOG_DOMAIN_METADATA_SCHEMA, LOG_TXN_SCHEMA};
     use crate::committer::FileSystemCommitter;
     use crate::crc::{Crc, DomainMetadataState, SetTransactionState};
     use crate::engine::sync::SyncEngine;
-    use crate::engine_data::FilteredEngineData;
     use crate::object_store::memory::InMemory;
-    use crate::path::LogRoot;
     use crate::schema::schema_ref;
     use crate::snapshot::Snapshot;
     use crate::transaction::create_table::create_table;
-    use crate::unit_test_utils::{
-        adaptive_metadata_table_configuration, assert_result_error_with_message,
-        test_schema_flat_with_column_mapping, MockTableConfigurationBuilder,
+    use crate::unit_test_utils::adaptive_metadata_fixtures::{
+        adaptive_metadata_protocol_and_metadata, minimal_checkpoint_action, setup_table,
+        write_commit,
     };
-    use crate::{create_row, Engine};
+    use crate::unit_test_utils::{assert_result_error_with_message, MockTableConfigurationBuilder};
+    use crate::{create_row, Result};
 
-    fn adaptive_metadata_protocol_and_metadata() -> (Protocol, Metadata) {
-        let table_config =
-            adaptive_metadata_table_configuration(test_schema_flat_with_column_mapping(), &[]);
-        (
-            table_config.protocol().clone(),
-            table_config.metadata().clone(),
-        )
-    }
-
-    fn minimal_checkpoint_action(path: &str, version: Version) -> DeltaResult<CheckpointAction> {
-        let (protocol, metadata) = adaptive_metadata_protocol_and_metadata();
-        let version = version_as_i64(version)?;
-        Ok(CheckpointAction::new(
-            version,
-            ContentRoot::new(path.to_string(), 1024, version),
-            protocol,
-            metadata,
-            vec![],
-            vec![],
-        ))
-    }
-
-    fn setup_table() -> DeltaResult<(SyncEngine, url::Url)> {
-        let engine = SyncEngine::new_with_store(Arc::new(InMemory::new()));
-        let schema = schema_ref! { nullable "id": INTEGER };
-        let _ = create_table("memory:///", schema, "test")
-            .build(&engine, Box::new(FileSystemCommitter::new()))?
-            .commit(&engine)?;
-        let table_root = Snapshot::builder_for("memory:///")
-            .build(&engine)?
-            .table_root()
-            .clone();
-        Ok((engine, table_root))
-    }
-
-    fn write_commit(
-        engine: &SyncEngine,
-        table_root: &url::Url,
-        version: Version,
-        data: Box<dyn crate::EngineData>,
-    ) -> DeltaResult<()> {
-        let filtered = FilteredEngineData::with_all_rows_selected(data);
-        let commit_path = LogRoot::new(table_root.clone())?.new_commit_path(version)?;
-        engine.json_handler().write_json_file(
-            &commit_path.location,
-            Box::new(iter::once(Ok(filtered))),
-            false,
-        )?;
-        Ok(())
-    }
-
-    fn manifest_file(location: &str, size: u64) -> DeltaResult<FileMeta> {
+    fn manifest_file(location: &str, size: u64) -> KernelResult<FileMeta> {
         Ok(FileMeta {
             location: url::Url::parse(location)?,
             last_modified: 0,
@@ -269,7 +207,7 @@ mod tests {
     }
 
     #[test]
-    fn compute_checkpoint_action_builds_a_self_contained_action() -> DeltaResult<()> {
+    fn compute_checkpoint_action_builds_a_self_contained_action() -> Result<()> {
         let (engine, table_root) = setup_table()?;
         let snapshot = Snapshot::builder_for(table_root.clone()).build(&engine)?;
         let manifest = root_manifest(
@@ -309,7 +247,7 @@ mod tests {
 
     #[test]
     fn compute_checkpoint_action_allows_replacing_a_checkpoint_that_covers_the_snapshot(
-    ) -> DeltaResult<()> {
+    ) -> Result<()> {
         let (engine, table_root) = setup_table()?;
         let existing = minimal_checkpoint_action("metadata/root-v1.parquet", 1)?;
         write_commit(&engine, &table_root, 1, existing.into_engine_data(&engine)?)?;
@@ -335,7 +273,7 @@ mod tests {
     }
 
     #[test]
-    fn compute_checkpoint_action_rejects_a_stale_checkpoint() -> DeltaResult<()> {
+    fn compute_checkpoint_action_rejects_a_stale_checkpoint() -> Result<()> {
         let (engine, table_root) = setup_table()?;
         let existing = minimal_checkpoint_action("metadata/root-v1.parquet", 1)?;
         write_commit(&engine, &table_root, 1, existing.into_engine_data(&engine)?)?;
@@ -368,7 +306,7 @@ mod tests {
     }
 
     #[test]
-    fn compute_checkpoint_action_prunes_expired_transactions() -> DeltaResult<()> {
+    fn compute_checkpoint_action_prunes_expired_transactions() -> Result<()> {
         let (engine, table_root) = setup_table()?;
         let expired = SetTransaction::new("app-1".to_string(), 5, Some(0));
         write_commit(
@@ -393,7 +331,7 @@ mod tests {
     }
 
     #[test]
-    fn compute_checkpoint_action_new_change_wins() -> DeltaResult<()> {
+    fn compute_checkpoint_action_new_change_wins() -> Result<()> {
         let (engine, table_root) = setup_table()?;
         let write = |version, data| write_commit(&engine, &table_root, version, data);
 
@@ -436,10 +374,10 @@ mod tests {
     }
 
     #[test]
-    fn new_preserves_an_absolute_file_location() -> DeltaResult<()> {
+    fn new_preserves_an_absolute_file_location() -> Result<()> {
         let engine = SyncEngine::new_with_store(Arc::new(InMemory::new()));
         let schema = schema_ref! { nullable "id": INTEGER };
-        let _ = create_table("memory:///t/", schema, "test")
+        let _ = create_table("memory:///t/", schema, "test", true)
             .build(&engine, Box::new(FileSystemCommitter::new()))?
             .commit(&engine)?;
         let snapshot = Snapshot::builder_for("memory:///t/").build(&engine)?;
@@ -453,8 +391,7 @@ mod tests {
     // A checkpoint holds complete state, so its inline entries win and stale top-level entries
     // from before it are ignored.
     #[test]
-    fn scan_non_content_metadata_prefers_checkpoint_inline_over_stale_top_level() -> DeltaResult<()>
-    {
+    fn scan_non_content_metadata_prefers_checkpoint_inline_over_stale_top_level() -> Result<()> {
         let (engine, table_root) = setup_table()?;
         let write = |version, data| write_commit(&engine, &table_root, version, data);
 
@@ -501,8 +438,7 @@ mod tests {
     // (as an external writer would, with no tombstone), must not come back in the rebuilt
     // checkpoint from those older log entries.
     #[test]
-    fn compute_checkpoint_action_does_not_resurrect_entries_the_checkpoint_dropped(
-    ) -> DeltaResult<()> {
+    fn compute_checkpoint_action_does_not_resurrect_entries_the_checkpoint_dropped() -> Result<()> {
         let (engine, table_root) = setup_table()?;
         let write = |version, data| write_commit(&engine, &table_root, version, data);
 
@@ -541,7 +477,7 @@ mod tests {
     // The existing checkpoint spilled txns/domain metadata into sidecar files that can't be read
     // yet; replacing it would drop that state, so the commit is refused.
     #[test]
-    fn compute_checkpoint_action_rejects_a_checkpoint_that_spills_to_sidecars() -> DeltaResult<()> {
+    fn compute_checkpoint_action_rejects_a_checkpoint_that_spills_to_sidecars() -> Result<()> {
         let (engine, table_root) = setup_table()?;
         let (protocol, metadata) = adaptive_metadata_protocol_and_metadata();
         let mut existing = CheckpointAction::new(
@@ -582,7 +518,7 @@ mod tests {
     }
 
     #[test]
-    fn scan_non_content_metadata_uses_crc_fast_path_with_existing_checkpoint() -> DeltaResult<()> {
+    fn scan_non_content_metadata_uses_crc_fast_path_with_existing_checkpoint() -> Result<()> {
         let (engine, table_root) = setup_table()?;
         let write = |version, data| write_commit(&engine, &table_root, version, data);
 
@@ -623,7 +559,7 @@ mod tests {
     }
 
     #[test]
-    fn scan_non_content_metadata_uses_crc_fast_path() -> DeltaResult<()> {
+    fn scan_non_content_metadata_uses_crc_fast_path() -> Result<()> {
         let (engine, table_root) = setup_table()?;
         let write = |version, data| write_commit(&engine, &table_root, version, data);
 
@@ -659,7 +595,7 @@ mod tests {
     fn compute_checkpoint_action_folds_prior_checkpoint_nested_set(
         #[case] dm_changes: Vec<DomainMetadata>,
         #[case] domain_kept: bool,
-    ) -> DeltaResult<()> {
+    ) -> Result<()> {
         let (engine, table_root) = setup_table()?;
         let config = Snapshot::builder_for(table_root.clone())
             .build(&engine)?
@@ -707,7 +643,7 @@ mod tests {
     }
 
     #[test]
-    fn scan_non_content_metadata_scans_past_a_partial_crc() -> DeltaResult<()> {
+    fn scan_non_content_metadata_scans_past_a_partial_crc() -> Result<()> {
         let (engine, table_root) = setup_table()?;
         let write = |version, data| write_commit(&engine, &table_root, version, data);
 
