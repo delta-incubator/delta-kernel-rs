@@ -1528,17 +1528,21 @@ mod scan_builder_tests {
     }
 
     #[rstest::rstest]
-    #[case::requested(false)]
-    #[case::extra_indexed(true)]
+    #[case::requested(false, vec!["s", "a.b"])]
+    #[case::extra_indexed(true, vec!["id", "s", "a.b"])]
     #[tokio::test]
-    async fn column_stats_copy_paths_and_bypass_indexed_limit(#[case] extra_indexed: bool) {
+    async fn column_stats_copy_paths_and_bypass_indexed_limit(
+        #[case] extra_indexed: bool,
+        #[case] expected_fields: Vec<&str>,
+    ) {
         let field = |name: &str, data_type: serde_json::Value| serde_json::json!({"name": name, "type": data_type, "nullable": true, "metadata": {}});
         let schema = serde_json::json!({"type": "struct", "fields": [
             field("id", serde_json::json!("integer")),
             field("s", serde_json::json!({"type": "struct", "fields": [
                 field("a", serde_json::json!("integer"))
             ]})),
-            field("a.b", serde_json::json!("integer"))
+            field("a.b", serde_json::json!("integer")),
+            field("unrequested", serde_json::json!("integer"))
         ]});
         let metadata = test_utils::METADATA
             .lines()
@@ -1547,7 +1551,7 @@ mod scan_builder_tests {
                 if let Some(metadata) = action.get_mut("metaData") {
                     metadata["schemaString"] = serde_json::json!(schema.to_string());
                     metadata["configuration"] =
-                        serde_json::json!({"delta.dataSkippingNumIndexedCols": "0"});
+                        serde_json::json!({"delta.dataSkippingNumIndexedCols": "1"});
                 }
                 action.to_string()
             })
@@ -1564,7 +1568,6 @@ mod scan_builder_tests {
         };
         let builder = {
             let names = [
-                vec![String::from("id")],
                 vec![String::from("s"), String::from("a")],
                 vec![String::from("a.b")],
             ];
@@ -1598,10 +1601,7 @@ mod scan_builder_tests {
             let delta_kernel::schema::DataType::Struct(fields) = field.data_type() else {
                 panic!("expected struct for {name}")
             };
-            assert_eq!(
-                fields.field_names().collect::<Vec<_>>(),
-                vec!["id", "s", "a.b"]
-            );
+            assert_eq!(fields.field_names().collect::<Vec<_>>(), expected_fields);
             let delta_kernel::schema::DataType::Struct(nested) =
                 fields.field("s").unwrap().data_type()
             else {
@@ -1617,116 +1617,139 @@ mod scan_builder_tests {
         }
     }
 
-    #[rstest::rstest]
-    #[case::requested(false)]
-    #[case::extra_indexed(true)]
-    #[tokio::test]
-    async fn column_stats_empty_and_unresolvable_names(#[case] extra_indexed: bool) {
-        let (engine, snapshot) = setup_snapshot(test_utils::METADATA.to_string())
-            .await
-            .unwrap();
-        let empty = FfiColumnNameArray {
-            ptr: std::ptr::null(),
-            len: 0,
-        };
-        let missing_name = "missing";
-        let missing = [kernel_string_slice!(missing_name)];
-        let columns = [FfiColumnName {
-            path: unsafe { FfiSlice::new_unsafe(&missing) },
-        }];
-        for columns in [empty, unsafe { FfiColumnNameArray::new_unsafe(&columns) }] {
-            let is_empty = columns.len == 0;
-            let options = column_stats_options(extra_indexed, columns);
-            let builder = unsafe { scan_builder(snapshot.shallow_copy()) };
-            let builder = unsafe {
-                ok_or_panic(scan_builder_with_stats(
-                    builder,
-                    engine.shallow_copy(),
-                    &options,
-                ))
-            };
-            let schemas = unsafe { builder.as_ref() }.stats_output_schemas();
-            if extra_indexed {
-                let schemas = schemas.unwrap().unwrap();
-                let delta_kernel::schema::DataType::Struct(fields) =
-                    schemas.logical.field("minValues").unwrap().data_type()
-                else {
-                    panic!("expected struct")
-                };
-                assert_eq!(fields.field_names().collect::<Vec<_>>(), vec!["id", "val"]);
-            } else if is_empty {
-                assert!(schemas.unwrap().is_none());
-            } else {
-                assert!(schemas.is_err());
-            }
-            let result = unsafe { scan_builder_build(builder, engine.shallow_copy()) };
-            if extra_indexed || is_empty {
-                unsafe { free_scan(ok_or_panic(result)) };
-            } else {
-                let ExternResult::Err(error) = result else {
-                    panic!("unresolvable requested column must fail at build")
-                };
-                let _ = unsafe { recover_error(error) };
-            }
-        }
-        unsafe {
-            free_snapshot(snapshot);
-            free_engine(engine);
-        }
+    enum ColumnStatsInput {
+        Empty,
+        Missing,
+        NullColumns,
+        NullPath,
+        InvalidUtf8,
+    }
+
+    enum ColumnStatsExpected {
+        Fields(&'static [&'static str]),
+        SetterError(FFIKernelError),
+        BuildError(FFIKernelError),
     }
 
     #[rstest::rstest]
-    #[case::requested(false)]
-    #[case::extra_indexed(true)]
+    #[case::requested_empty(false, ColumnStatsInput::Empty, ColumnStatsExpected::Fields(&[]))]
+    #[case::extra_empty(true, ColumnStatsInput::Empty, ColumnStatsExpected::Fields(&["id", "val"]))]
+    #[case::requested_missing(
+        false,
+        ColumnStatsInput::Missing,
+        ColumnStatsExpected::BuildError(FFIKernelError::GenericError)
+    )]
+    #[case::extra_missing(true, ColumnStatsInput::Missing,
+        ColumnStatsExpected::Fields(&["id", "val"]))]
+    #[case::requested_null_columns(
+        false,
+        ColumnStatsInput::NullColumns,
+        ColumnStatsExpected::SetterError(FFIKernelError::GenericError)
+    )]
+    #[case::extra_null_columns(
+        true,
+        ColumnStatsInput::NullColumns,
+        ColumnStatsExpected::SetterError(FFIKernelError::GenericError)
+    )]
+    #[case::requested_null_path(
+        false,
+        ColumnStatsInput::NullPath,
+        ColumnStatsExpected::SetterError(FFIKernelError::GenericError)
+    )]
+    #[case::extra_null_path(
+        true,
+        ColumnStatsInput::NullPath,
+        ColumnStatsExpected::SetterError(FFIKernelError::GenericError)
+    )]
+    #[case::requested_invalid_utf8(
+        false,
+        ColumnStatsInput::InvalidUtf8,
+        ColumnStatsExpected::SetterError(FFIKernelError::Utf8Error)
+    )]
+    #[case::extra_invalid_utf8(
+        true,
+        ColumnStatsInput::InvalidUtf8,
+        ColumnStatsExpected::SetterError(FFIKernelError::Utf8Error)
+    )]
     #[tokio::test]
-    async fn column_stats_reject_invalid_borrowed_input(#[case] extra_indexed: bool) {
+    async fn column_stats_inputs(
+        #[case] extra_indexed: bool,
+        #[case] input: ColumnStatsInput,
+        #[case] expected: ColumnStatsExpected,
+    ) {
         let (engine, snapshot) = setup_snapshot(test_utils::METADATA.to_string())
             .await
             .unwrap();
         let invalid_utf8 = [0xffu8];
-        let segments = [crate::KernelStringSlice {
+        let missing_name = "missing";
+        let missing = [kernel_string_slice!(missing_name)];
+        let invalid_string = [crate::KernelStringSlice {
             ptr: invalid_utf8.as_ptr().cast(),
             len: 1,
         }];
-        let invalid_path = [FfiColumnName {
-            path: FfiSlice {
+        let path = match input {
+            ColumnStatsInput::NullPath => FfiSlice {
                 ptr: std::ptr::null(),
                 len: 1,
             },
-        }];
-        let invalid_string = [FfiColumnName {
-            path: unsafe { FfiSlice::new_unsafe(&segments) },
-        }];
-        let cases = [
-            (
-                "null columns",
-                FfiColumnNameArray {
-                    ptr: std::ptr::null(),
-                    len: 1,
-                },
-                FFIKernelError::GenericError,
-            ),
-            (
-                "null path",
-                unsafe { FfiColumnNameArray::new_unsafe(&invalid_path) },
-                FFIKernelError::GenericError,
-            ),
-            (
-                "invalid UTF-8",
-                unsafe { FfiColumnNameArray::new_unsafe(&invalid_string) },
-                FFIKernelError::Utf8Error,
-            ),
-        ];
-        for (label, columns, expected) in cases {
-            let builder = unsafe { scan_builder(snapshot.shallow_copy()) };
-            let options = column_stats_options(extra_indexed, columns);
-            let result =
-                unsafe { scan_builder_with_stats(builder, engine.shallow_copy(), &options) };
-            let ExternResult::Err(error) = result else {
-                panic!("expected invalid input error: {label}")
-            };
-            let error = unsafe { recover_error(error) };
-            assert_eq!(error.etype, expected, "{label}");
+            ColumnStatsInput::InvalidUtf8 => unsafe { FfiSlice::new_unsafe(&invalid_string) },
+            _ => unsafe { FfiSlice::new_unsafe(&missing) },
+        };
+        let columns = [FfiColumnName { path }];
+        let columns = match input {
+            ColumnStatsInput::Empty => FfiColumnNameArray {
+                ptr: std::ptr::null(),
+                len: 0,
+            },
+            ColumnStatsInput::NullColumns => FfiColumnNameArray {
+                ptr: std::ptr::null(),
+                len: 1,
+            },
+            _ => unsafe { FfiColumnNameArray::new_unsafe(&columns) },
+        };
+        let builder = unsafe { scan_builder(snapshot.shallow_copy()) };
+        let options = column_stats_options(extra_indexed, columns);
+        let result = unsafe { scan_builder_with_stats(builder, engine.shallow_copy(), &options) };
+        match expected {
+            ColumnStatsExpected::SetterError(expected) => {
+                let ExternResult::Err(error) = result else {
+                    panic!("expected setter error")
+                };
+                assert_eq!(unsafe { recover_error(error) }.etype, expected);
+            }
+            expected => {
+                let builder = ok_or_panic(result);
+                let schemas = unsafe { builder.as_ref() }.stats_output_schemas();
+                match expected {
+                    ColumnStatsExpected::Fields(expected_fields) => {
+                        if expected_fields.is_empty() {
+                            assert!(schemas.unwrap().is_none());
+                        } else {
+                            let schemas = schemas.unwrap().unwrap();
+                            let delta_kernel::schema::DataType::Struct(fields) =
+                                schemas.logical.field("minValues").unwrap().data_type()
+                            else {
+                                panic!("expected struct")
+                            };
+                            assert_eq!(fields.field_names().collect::<Vec<_>>(), expected_fields);
+                        }
+                        let scan = unsafe {
+                            ok_or_panic(scan_builder_build(builder, engine.shallow_copy()))
+                        };
+                        unsafe { free_scan(scan) };
+                    }
+                    ColumnStatsExpected::BuildError(expected) => {
+                        assert!(schemas.is_err());
+                        let ExternResult::Err(error) =
+                            (unsafe { scan_builder_build(builder, engine.shallow_copy()) })
+                        else {
+                            panic!("expected build error")
+                        };
+                        assert_eq!(unsafe { recover_error(error) }.etype, expected);
+                    }
+                    ColumnStatsExpected::SetterError(_) => unreachable!(),
+                }
+            }
         }
         unsafe {
             free_snapshot(snapshot);
