@@ -121,10 +121,8 @@ pub struct Snapshot {
     /// only the pointer, not the action's inline transaction and domain-metadata vectors.
     #[cfg(feature = "adaptive-metadata-in-dev")]
     checkpoint_action: OnceLock<Option<Arc<CheckpointAction>>>,
-    /// This snapshot's `lastManifestCommit`, filled at build time when the build read it (see
-    /// [`LastManifestCommitResolution`]), otherwise on the first call to
-    /// [`Snapshot::last_manifest_commit`]. Safe to memoize for the same reason as
-    /// [`Self::checkpoint_action`].
+    /// This snapshot's `lastManifestCommit`, resolved during build or on first access
+    /// (see [`LastManifestCommitResolution`]). Safe to cache like [`Self::checkpoint_action`].
     #[cfg(feature = "adaptive-metadata-in-dev")]
     last_manifest_commit: OnceLock<Option<LastManifestCommit>>,
 }
