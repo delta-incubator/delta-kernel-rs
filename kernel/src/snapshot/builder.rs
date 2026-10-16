@@ -165,7 +165,8 @@ impl SnapshotBuilder<FromTableRoot> {
     /// version. The caller must canonicalize supplied log paths into the same URL form as the table
     /// root. Kernel preserves the paths, requires them to be beneath this builder's table log root,
     /// and validates structural consistency without reading the supplied files. The caller must
-    /// ensure the protocol and metadata came from those files.
+    /// ensure the protocol and metadata came from those files and any staged commits were ratified
+    /// by the managing catalog.
     ///
     /// # Errors
     ///
@@ -258,8 +259,9 @@ impl<Mode> SnapshotBuilder<Mode> {
     ///
     /// A ratified downgrade may produce a non-catalog-managed snapshot at `max_catalog_version`.
     /// This is accepted when the snapshot ends at the catalog-supplied staged commit at that bound,
-    /// whether or not its numbered commit has been published. Validation uses the resolved protocol
-    /// and trusts ratification; it does not reread history to verify the transition.
+    /// supplied through a log tail or snapshot hint, whether or not its numbered commit has been
+    /// published. Validation uses the resolved protocol and trusts ratification; it does not reread
+    /// history to verify the transition.
     ///
     /// # Log tail requirements
     ///
@@ -375,16 +377,25 @@ impl<Mode> SnapshotBuilder<Mode> {
             correlation_id,
             load_type,
         };
-        let supplied_tail_end: Option<ParsedLogPath> = log_tail.last().cloned().map(Into::into);
+        let mut supplied_terminal_commit: Option<ParsedLogPath> =
+            log_tail.last().cloned().map(Into::into);
 
         let snapshot = if let Some(snapshot_hint) = snapshot_hint {
-            snapshot_hint.build(
+            let snapshot = snapshot_hint.build(
                 table_root,
                 version,
                 log_tail,
                 max_catalog_version,
                 incremental_replay,
-            )?
+            )?;
+            // A validated hint supplies ratified commits in place of a separate log tail.
+            supplied_terminal_commit = snapshot
+                .log_segment
+                .listed
+                .ascending_commit_files
+                .last()
+                .cloned();
+            snapshot
         } else {
             let log_tail: Vec<_> = log_tail.into_iter().map(Into::into).collect();
 
@@ -443,7 +454,7 @@ impl<Mode> SnapshotBuilder<Mode> {
         Self::validate_catalog_managed_build_result(
             &snapshot,
             max_catalog_version,
-            supplied_tail_end.as_ref(),
+            supplied_terminal_commit.as_ref(),
         )?;
         tracing::Span::current().record("version", snapshot.version());
         Ok(snapshot)
@@ -470,7 +481,7 @@ impl<Mode> SnapshotBuilder<Mode> {
     fn validate_catalog_managed_build_result(
         snapshot: &SnapshotRef,
         max_catalog_version: Option<Version>,
-        supplied_tail_end: Option<&ParsedLogPath>,
+        supplied_terminal_commit: Option<&ParsedLogPath>,
     ) -> KernelResult<()> {
         let is_catalog_managed = snapshot.table_configuration().is_catalog_managed();
 
@@ -487,7 +498,7 @@ impl<Mode> SnapshotBuilder<Mode> {
             // catalog-managed. Publication does not invalidate this bounded snapshot.
             let is_catalog_downgrade = !is_catalog_managed
                 && max_catalog_version == snapshot.version()
-                && supplied_tail_end.is_some_and(|tail| {
+                && supplied_terminal_commit.is_some_and(|tail| {
                     tail.version == snapshot.version()
                         && tail.file_type == LogPathFileType::StagedCommit
                         // Bind the exception to the selected ratified commit, not just its version.
@@ -1089,6 +1100,7 @@ pub(super) mod tests {
             let staged_downgrade =
                 add_staged_commit(&table_root, store.as_ref(), 1, downgrade.clone()).await?;
             let log_tail = vec![create_log_path(&table_root, staged_downgrade)];
+            let expected_commit: ParsedLogPath = log_tail[0].clone().into();
             if published {
                 add_commit(&table_root, store.as_ref(), 1, downgrade).await?;
             }
@@ -1108,6 +1120,10 @@ pub(super) mod tests {
             assert_eq!(snapshot.version(), 1);
             assert!(!snapshot.table_configuration().is_catalog_managed());
             assert_eq!(
+                snapshot.log_segment.listed.ascending_commit_files.last(),
+                Some(&expected_commit)
+            );
+            assert_eq!(
                 reporter
                     .events()
                     .iter()
@@ -1115,27 +1131,38 @@ pub(super) mod tests {
                     .count(),
                 1
             );
-            assert!(
+            assert_eq!(
                 reporter
                     .events()
                     .iter()
                     .filter(|event| matches!(event, MetricEvent::ParquetReadCompleted(_)))
-                    .count()
-                    <= 1
+                    .count(),
+                usize::from(checkpointed && !incremental)
+            );
+            assert_eq!(
+                reporter
+                    .events()
+                    .iter()
+                    .filter(|event| matches!(event, MetricEvent::StorageListCompleted(_)))
+                    .count(),
+                1
             );
             Ok(())
         }
 
         #[rstest]
-        #[case::missing_tail(None)]
-        #[case::published_tail(Some(false))]
-        #[case::staged_tail(Some(true))]
+        #[case::missing_tail(None, false)]
+        #[case::published_tail(Some(false), false)]
+        #[case::staged_tail(Some(true), false)]
+        #[case::different_staged_tail(Some(true), true)]
         #[test_log::test(tokio::test)]
         async fn test_catalog_downgrade_requires_matching_selected_staged_tail(
             #[case] supplied_staged: Option<bool>,
+            #[case] different_uuid: bool,
             #[values(false, true)] staged_snapshot: bool,
         ) -> Result<(), Box<dyn std::error::Error>> {
             let (engine, store, table_root) = setup_catalog_managed_test().await;
+            let engine = Arc::new(MeteredDeltaEngine::new(engine));
             let downgrade = json!({
                 "protocol": Protocol::try_new_modern(
                     std::iter::empty::<TableFeature>(),
@@ -1145,7 +1172,7 @@ pub(super) mod tests {
             .to_string();
             let staged =
                 add_staged_commit(&table_root, store.as_ref(), 1, downgrade.clone()).await?;
-            add_commit(&table_root, store.as_ref(), 1, downgrade).await?;
+            add_commit(&table_root, store.as_ref(), 1, downgrade.clone()).await?;
             let staged = create_log_path(&table_root, staged);
             let snapshot = if staged_snapshot {
                 SnapshotBuilder::new_for(&table_root)
@@ -1163,17 +1190,29 @@ pub(super) mod tests {
                     &table_root,
                     test_utils::delta_path_for_version(1, "json"),
                 )],
+                Some(true) if different_uuid => vec![create_log_path(
+                    &table_root,
+                    add_staged_commit(&table_root, store.as_ref(), 1, downgrade).await?,
+                )],
                 Some(true) => vec![staged],
             };
-            let result = SnapshotBuilder::new_from(snapshot)
+            let (reporter, _guard) = measuring_reporter();
+            let result = SnapshotBuilder::new_from(snapshot.clone())
                 .with_log_tail(log_tail)
                 .with_max_catalog_version(1)
                 .build(engine.as_ref());
-            if staged_snapshot && supplied_staged == Some(true) {
-                assert_eq!(result?.version(), 1);
+            if staged_snapshot && supplied_staged == Some(true) && !different_uuid {
+                assert!(Arc::ptr_eq(&snapshot, &result?));
             } else {
                 assert!(matches!(result, Err(KernelError::MaxCatalogVersion(_))));
             }
+            assert!(!reporter.events().iter().any(|event| matches!(
+                event,
+                MetricEvent::StorageListCompleted(_)
+                    | MetricEvent::StorageReadCompleted(_)
+                    | MetricEvent::JsonReadCompleted(_)
+                    | MetricEvent::ParquetReadCompleted(_)
+            )));
             Ok(())
         }
 
@@ -1246,6 +1285,7 @@ pub(super) mod tests {
             } else {
                 snapshot
             };
+            let hint = snapshot.to_snapshot_hint()?;
             for published in [false, true] {
                 if published {
                     add_commit(&table_root, store.as_ref(), 1, downgrade.clone()).await?;
@@ -1271,6 +1311,14 @@ pub(super) mod tests {
                     without_tail,
                     Err(KernelError::MaxCatalogVersion(_))
                 ));
+                let hinted = SnapshotBuilder::new_for(&table_root)
+                    .with_snapshot_hint(hint.clone())
+                    .with_max_catalog_version(1)
+                    .build(engine.as_ref())?;
+                assert_eq!(hinted.version(), 1);
+                assert!(!hinted.table_configuration().is_catalog_managed());
+                assert_eq!(hinted.log_segment.listed, snapshot.log_segment.listed);
+                assert_eq!(hinted.crc_at_version(), snapshot.crc_at_version());
                 assert!(!reporter.events().iter().any(|event| matches!(
                     event,
                     MetricEvent::StorageListCompleted(_)
@@ -1292,10 +1340,14 @@ pub(super) mod tests {
                         .count(),
                     usize::from(!with_checksum)
                 );
-                assert!(reporter
-                    .events()
-                    .iter()
-                    .any(|event| matches!(event, MetricEvent::StorageListCompleted(_))));
+                assert_eq!(
+                    reporter
+                        .events()
+                        .iter()
+                        .filter(|event| matches!(event, MetricEvent::StorageListCompleted(_)))
+                        .count(),
+                    1
+                );
             }
             let latest = SnapshotBuilder::new_from(snapshot).build(engine.as_ref())?;
             assert_eq!(latest.version(), 2);
