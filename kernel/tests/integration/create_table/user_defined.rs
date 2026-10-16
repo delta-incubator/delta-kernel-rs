@@ -56,7 +56,7 @@ async fn create_and_read_vector_udt(
         .build(Cursor::new(rows))?
         .next()
         .unwrap()?;
-    let mut txn = create_table(&table_path, schema, "test")
+    let mut txn = create_table(&table_path, schema, "test", true)
         .with_table_properties([("delta.columnMapping.mode", mapping_mode)])
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?;
     let context = txn.write_state()?.write_context_builder().build()?;
