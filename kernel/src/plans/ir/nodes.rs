@@ -75,7 +75,8 @@ pub static FILE_META_SCHEMA: LazyLock<SchemaRef> = lazy_schema_ref! {
 ///   replaced.
 /// - When `ordered` is true, all rows from input N must be written before any rows from input N+1,
 ///   following the order of [`PlanNode::inputs`](super::plan::PlanNode::inputs). Row order within
-///   each input is unspecified. When false, rows from different inputs may be interleaved.
+///   each input is unspecified. When false, rows from different inputs may be interleaved. See
+///   example below.
 /// - No rows across all inputs is considered invalid (Delta metadata files, e.g. commits and
 ///   checkpoints, should never be empty). It is recommended that implementors reject such inputs
 ///   with an error, however kernel does not rely on such behavior and will perform its own
@@ -83,6 +84,19 @@ pub static FILE_META_SCHEMA: LazyLock<SchemaRef> = lazy_schema_ref! {
 /// - Behavior can be undefined if a single plan contains multiple writes to the same destination,
 ///   because execution order is unspecified and executors may optimize away common table
 ///   expressions.
+///
+/// # Ordering Example
+///
+/// Suppose input 0 contains `{"id":1}` and `{"id":2}`, and input 1 contains `{"id":3}`.
+/// With `ordered = true`, the file may contain:
+///
+/// ```text
+/// {"id":1}
+/// {"id":2}
+/// {"id":3}
+/// ```
+///
+/// The first two lines may be swapped, but `{"id":3}` must follow both.
 ///
 /// # Errors
 ///
@@ -98,7 +112,8 @@ pub struct WriteJson {
     /// Whether an existing destination may be replaced.
     pub overwrite: bool,
     /// Whether inputs must be written in their declared order; ordering within an input is
-    /// unspecified.
+    /// unspecified. For example, Delta uses this to write the `commitInfo` action before other
+    /// actions in a commit.
     pub ordered: bool,
 }
 
