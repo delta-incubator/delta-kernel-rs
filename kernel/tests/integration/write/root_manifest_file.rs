@@ -5,11 +5,13 @@ use std::collections::HashMap;
 
 use delta_kernel::schema::schema_ref;
 use delta_kernel::snapshot::{Snapshot, SnapshotRef};
+use delta_kernel::transaction::UpdateTableOperation;
 use delta_kernel::{Engine, FileMeta};
-use serde_json::json;
+use rstest::rstest;
+use serde_json::{json, Value};
 use tempfile::TempDir;
 use test_utils::{
-    assert_result_error_with_message, begin_transaction, begin_transaction_with, create_table,
+    assert_result_error_with_message, begin_transaction_with, create_table,
     create_table_with_column_mapping_mode, engine_store_setup, read_actions_from_commit,
 };
 use url::Url;
@@ -66,7 +68,14 @@ async fn test_with_root_manifest_file_produces_a_self_contained_checkpoint_actio
         last_modified: 0,
         size: 1024,
     };
-    let txn = begin_transaction(snapshot, &engine)?.with_root_manifest_file(file.clone())?;
+    let txn = begin_transaction_with(
+        snapshot,
+        &engine,
+        UpdateTableOperation::Write,
+        "test-engine",
+        |builder| builder.with_data_change(true),
+    )?
+    .with_root_manifest_file(file.clone())?;
     txn.commit(&engine)?.unwrap_committed();
 
     let checkpoint_actions = read_actions_from_commit(&table_url, 1, "checkpoint")?;
@@ -138,6 +147,7 @@ async fn test_with_root_manifest_file_merges_domain_metadata_and_transactions(
             builder
                 .with_transaction_id("app-2", 7)
                 .with_domain_metadata("my.domain", "v2")
+                .with_data_change(true)
         },
     )?
     .with_root_manifest_file(file)?;
@@ -195,5 +205,80 @@ async fn test_with_root_manifest_file_requires_the_feature(
         result,
         "root manifest file commit requires the adaptiveMetadata-preview feature",
     );
+    Ok(())
+}
+
+/// Returns the single `commitInfo` action written at `version`.
+fn commit_info_at(table_url: &Url, version: u64) -> Result<Value, Box<dyn std::error::Error>> {
+    let mut commit_infos = read_actions_from_commit(table_url, version, "commitInfo")?;
+    assert_eq!(
+        commit_infos.len(),
+        1,
+        "expected one commitInfo at version {version}"
+    );
+    Ok(commit_infos.remove(0))
+}
+
+/// `commitInfo.dataChange` records the transaction's value; a root manifest file commit requires
+/// an explicit one.
+#[rstest]
+#[tokio::test(flavor = "multi_thread")]
+async fn test_commit_info_data_change(
+    #[values(None, Some(true), Some(false))] data_change: Option<bool>,
+    #[values(false, true)] root_manifest: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (engine, _temp_dir, table_url, snapshot) =
+        setup_adaptive_metadata_table("commit_info_data_change").await?;
+
+    let mut txn = begin_transaction_with(
+        snapshot,
+        &engine,
+        UpdateTableOperation::Write,
+        "test-engine",
+        |builder| match data_change {
+            Some(data_change) => builder.with_data_change(data_change),
+            None => builder,
+        },
+    )?;
+    if root_manifest {
+        txn = txn.with_root_manifest_file(FileMeta {
+            location: table_url.join("metadata/root-v1.parquet")?,
+            last_modified: 0,
+            size: 1024,
+        })?;
+        if data_change.is_none() {
+            assert_result_error_with_message(
+                txn.commit(&engine),
+                "root manifest file commit requires an explicit data_change",
+            );
+            return Ok(());
+        }
+    }
+    txn.commit(&engine)?.unwrap_committed();
+    let commit_info = commit_info_at(&table_url, 1)?;
+    assert_eq!(
+        commit_info["dataChange"],
+        json!(data_change.unwrap_or(true))
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_commit_info_omits_adaptive_metadata_fields_without_the_feature(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = tempfile::tempdir()?;
+    let dir_url = Url::from_directory_path(temp_dir.path()).expect("valid directory url");
+    let (store, engine, table_url) =
+        engine_store_setup("commit_info_no_adaptive_metadata", Some(&dir_url));
+    let schema = schema_ref! { nullable "id": INTEGER };
+    create_table(store, table_url.clone(), schema, &[], true, vec![], vec![]).await?;
+
+    test_utils::load_and_begin_transaction(table_url.as_str(), &engine)?
+        .commit(&engine)?
+        .unwrap_committed();
+
+    let commit_info = commit_info_at(&table_url, 1)?;
+    assert!(commit_info.get("dataChange").is_none());
+    assert!(commit_info.get("lastManifestCommit").is_none());
     Ok(())
 }

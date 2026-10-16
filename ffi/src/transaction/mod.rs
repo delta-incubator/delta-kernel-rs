@@ -3319,10 +3319,15 @@ mod tests {
 
         let engine = engine_handle_for_store(Arc::clone(&store));
         let table_path = table_url.to_string();
-        let table_path_str = table_path.as_str();
-        let txn = ok_or_panic(unsafe {
-            build_update_table_txn(kernel_string_slice!(table_path_str), engine.shallow_copy())
-        });
+        let txn = unsafe {
+            build_update_transaction(
+                &table_path,
+                &engine,
+                true,
+                "test-engine/1.0",
+                KernelUpdateTableOperation::Write,
+            )
+        };
 
         let manifest_path = table_url.join("metadata/root-v1.parquet")?.to_string();
         let file = root_manifest_file_meta(&manifest_path);
