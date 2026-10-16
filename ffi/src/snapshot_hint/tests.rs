@@ -1693,6 +1693,7 @@ fn aggregate_with_validates_explicit_builder_version_at_build(
 #[case::disabled(FfiIncrementalReplay::Disabled, true)]
 #[case::zero_budget(FfiIncrementalReplay::UpToCommits(0), true)]
 #[case::positive_budget(FfiIncrementalReplay::UpToCommits(1), false)]
+#[case::maximum_budget(FfiIncrementalReplay::UpToCommits(u64::MAX), false)]
 #[case::unlimited(FfiIncrementalReplay::Unlimited, false)]
 fn aggregate_with_validates_incremental_crc_replay_at_build(
     #[case] mode: FfiIncrementalReplay,
