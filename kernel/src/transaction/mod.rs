@@ -449,10 +449,7 @@ impl<STATE> Transaction<STATE, Imperative> {
         // === Action generation ===
         let NonfileCommitActions {
             commit_version,
-            in_commit_timestamp,
             kernel_commit_info,
-            #[cfg(feature = "adaptive-metadata-in-dev")]
-            last_manifest_commit,
             protocol,
             metadata,
             set_transactions,
@@ -465,7 +462,7 @@ impl<STATE> Transaction<STATE, Imperative> {
         } = self.assemble_commit_batches(
             engine,
             commit_version,
-            kernel_commit_info,
+            kernel_commit_info.clone(),
             protocol.as_ref(),
             metadata.as_ref(),
             set_transactions,
@@ -474,7 +471,7 @@ impl<STATE> Transaction<STATE, Imperative> {
         // === Commit ===
         let commit_metadata = self.create_commit_metadata(
             commit_version,
-            in_commit_timestamp,
+            kernel_commit_info.in_commit_timestamp,
             protocol,
             metadata,
             dm_changes.clone(),
@@ -485,10 +482,8 @@ impl<STATE> Transaction<STATE, Imperative> {
 
         // === Result translation ===
         let post_commit_inputs = PostCommitInputs {
-            in_commit_timestamp,
+            commit_info: kernel_commit_info,
             dm_changes,
-            #[cfg(feature = "adaptive-metadata-in-dev")]
-            last_manifest_commit,
             #[cfg(feature = "adaptive-metadata-in-dev")]
             checkpoint_action,
         };
@@ -778,10 +773,7 @@ impl<STATE> Transaction<STATE, Imperative> {
 /// In-memory representation of non-file commit actions, built from the transaction.
 struct NonfileCommitActions {
     commit_version: Version,
-    in_commit_timestamp: Option<i64>,
     kernel_commit_info: CommitInfo,
-    #[cfg(feature = "adaptive-metadata-in-dev")]
-    last_manifest_commit: Option<LastManifestCommit>,
     protocol: Option<Protocol>,
     metadata: Option<Metadata>,
     set_transactions: Vec<SetTransaction>,
@@ -799,10 +791,9 @@ struct CommitBatches<'a> {
 /// Commit state produced during action generation that the post-commit CRC and snapshot are built
 /// from.
 struct PostCommitInputs {
-    in_commit_timestamp: Option<i64>,
+    /// The kernel's commitInfo for this commit, the source of its ICT and `lastManifestCommit`.
+    commit_info: CommitInfo,
     dm_changes: Vec<DomainMetadata>,
-    #[cfg(feature = "adaptive-metadata-in-dev")]
-    last_manifest_commit: Option<LastManifestCommit>,
     #[cfg(feature = "adaptive-metadata-in-dev")]
     checkpoint_action: Option<CheckpointAction>,
 }
@@ -1048,20 +1039,18 @@ impl<STATE, MODE: ExecutionMode> Transaction<STATE, MODE> {
     }
 
     /// Sets the adaptiveMetadata `dataChange` and `lastManifestCommit` fields on `commit_info` when
-    /// the feature is enabled, returning the `lastManifestCommit` set (`None` when disabled).
+    /// the feature is enabled.
     #[cfg(feature = "adaptive-metadata-in-dev")]
     fn set_adaptive_metadata_commit_info(
         &self,
         engine: &dyn Engine,
         commit_info: &mut CommitInfo,
-    ) -> KernelResult<Option<LastManifestCommit>> {
-        if !self.is_adaptive_metadata_enabled() {
-            return Ok(None);
+    ) -> KernelResult<()> {
+        if self.is_adaptive_metadata_enabled() {
+            commit_info.set_data_change(self.data_change);
+            commit_info.set_last_manifest_commit(self.last_manifest_commit(engine)?);
         }
-        let last_manifest_commit = self.last_manifest_commit(engine)?;
-        commit_info.set_data_change(self.data_change);
-        commit_info.set_last_manifest_commit(last_manifest_commit.clone());
-        Ok(last_manifest_commit)
+        Ok(())
     }
 
     /// The `lastManifestCommit` this commit records: its own when it writes a root manifest file
@@ -1357,14 +1346,10 @@ impl<STATE, MODE: ExecutionMode> Transaction<STATE, MODE> {
         }
 
         #[cfg(feature = "adaptive-metadata-in-dev")]
-        let last_manifest_commit =
-            self.set_adaptive_metadata_commit_info(engine, &mut kernel_commit_info)?;
+        self.set_adaptive_metadata_commit_info(engine, &mut kernel_commit_info)?;
         Ok(NonfileCommitActions {
             commit_version: self.get_commit_version(),
-            in_commit_timestamp,
             kernel_commit_info,
-            #[cfg(feature = "adaptive-metadata-in-dev")]
-            last_manifest_commit,
             protocol: self
                 .should_emit_protocol
                 .then(|| self.effective_table_config.protocol().clone()),
@@ -1460,16 +1445,13 @@ impl<STATE, MODE: ExecutionMode> Transaction<STATE, MODE> {
         })
     }
 
-    /// Build a [`CrcDelta`] from the transaction's commit state and a precomputed
-    /// [`FileStatsDelta`].
+    /// Build a [`CrcDelta`] from the transaction's commit state, the commitInfo it wrote, and a
+    /// precomputed [`FileStatsDelta`].
     fn build_crc_delta(
         &self,
         file_stats: FileStatsDelta,
-        in_commit_timestamp: Option<i64>,
+        commit_info: CommitInfo,
         dm_changes: Vec<DomainMetadata>,
-        #[cfg(feature = "adaptive-metadata-in-dev")] last_manifest_commit: Option<
-            LastManifestCommit,
-        >,
     ) -> KernelResult<CrcDelta> {
         // TODO: drop these conversions by migrating the upstream chain
         //       (`CommitMetadata.domain_metadata_changes`, `Transaction.set_transactions`)
@@ -1500,9 +1482,9 @@ impl<STATE, MODE: ExecutionMode> Transaction<STATE, MODE> {
                 .then(|| self.effective_table_config.metadata().clone()),
             domain_metadata,
             set_transactions,
-            in_commit_timestamp,
+            in_commit_timestamp: commit_info.in_commit_timestamp,
             #[cfg(feature = "adaptive-metadata-in-dev")]
-            last_manifest_commit,
+            last_manifest_commit: commit_info.last_manifest_commit,
             is_incremental_safe,
         })
     }
@@ -1679,10 +1661,8 @@ impl<STATE> Transaction<STATE, Imperative> {
         match commit_response {
             Ok(CommitResponse::Committed { file_meta }) => {
                 let PostCommitInputs {
-                    in_commit_timestamp,
+                    commit_info,
                     dm_changes,
-                    #[cfg(feature = "adaptive-metadata-in-dev")]
-                    last_manifest_commit,
                     #[cfg(feature = "adaptive-metadata-in-dev")]
                     checkpoint_action,
                 } = post_commit_inputs;
@@ -1705,13 +1685,7 @@ impl<STATE> Transaction<STATE, Imperative> {
                     prepare_duration,
                     committer_duration,
                 );
-                let crc_delta = self.build_crc_delta(
-                    file_stats,
-                    in_commit_timestamp,
-                    dm_changes,
-                    #[cfg(feature = "adaptive-metadata-in-dev")]
-                    last_manifest_commit,
-                )?;
+                let crc_delta = self.build_crc_delta(file_stats, commit_info, dm_changes)?;
                 Ok(CommitResult::Committed(self.into_committed(
                     file_meta,
                     crc_delta,
