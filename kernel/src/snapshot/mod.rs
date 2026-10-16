@@ -61,22 +61,10 @@ pub(crate) use hint::{PublicationWatermark, SnapshotHint, SnapshotHintFreshness}
 use snapshot_crc::SnapshotCrc;
 
 pub use crate::error::SnapshotHintError;
+pub use crate::log_segment::LogSegmentStats;
 
 /// A shared, thread-safe reference to a [`Snapshot`].
 pub type SnapshotRef = Arc<Snapshot>;
-
-/// Statistics for the commit files selected to replay a snapshot's log segment.
-///
-/// Includes published and staged commits, and selected log compactions in place of the commits
-/// they cover. Excludes checkpoints, sidecars, CRCs, and commits retained only for timestamp
-/// lookup.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct LogSegmentStats {
-    /// Number of selected commit files, counting each selected compaction as one file.
-    pub num_commit_files: u64,
-    /// Sum of the selected commit file sizes in bytes.
-    pub total_commit_file_bytes: u64,
-}
 
 /// Result of attempting to write a version checksum (CRC) file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

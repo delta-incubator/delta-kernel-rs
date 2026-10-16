@@ -375,39 +375,105 @@ fn log_segment_stats_counts_only_replay_commits(
     }
 }
 
-#[test]
-fn log_segment_stats_uses_selected_compactions() {
+#[rstest]
+#[case::nested_same_start(
+    &[10, 10, 10, 10],
+    &[(1, 2, 7), (1, 3, 12)],
+    &[(1, 3), (0, 0)],
+    Some(22),
+)]
+#[case::uncovered_trailing_commits(
+    &[10, 10, 10, 10, 10],
+    &[(1, 2, 7)],
+    &[(4, 4), (3, 3), (1, 2), (0, 0)],
+    Some(37),
+)]
+#[case::disjoint_compactions(
+    &[10, 10, 10, 10, 10, 10, 10],
+    &[(0, 1, 7), (3, 4, 13)],
+    &[(6, 6), (5, 5), (3, 4), (2, 2), (0, 1)],
+    Some(50),
+)]
+#[case::maximum_total(
+    &[10, 10, 1],
+    &[(0, 1, u64::MAX - 1)],
+    &[(2, 2), (0, 1)],
+    Some(u64::MAX),
+)]
+#[case::overflow(
+    &[10, 10, 1],
+    &[(0, 1, u64::MAX)],
+    &[(2, 2), (0, 1)],
+    None,
+)]
+fn log_segment_stats_uses_selected_compactions(
+    #[case] commit_sizes: &[u64],
+    #[case] compactions: &[(Version, Version, u64)],
+    #[case] expected_cover: &[(Version, Version)],
+    #[case] expected_bytes: Option<u64>,
+) {
     let segment = LogSegment {
-        end_version: 3,
+        end_version: commit_sizes.len() as u64 - 1,
         checkpoint_version: None,
         log_root: Url::parse("memory:///_delta_log/").unwrap(),
         last_checkpoint_metadata: None,
         listed: LogSegmentFiles {
-            ascending_commit_files: (0..=3)
-                .map(|v| {
-                    create_log_path_with_size(&format!("memory:///_delta_log/{v:020}.json"), 10)
+            ascending_commit_files: commit_sizes
+                .iter()
+                .enumerate()
+                .map(|(version, size)| {
+                    let path = delta_path_for_version(version as u64, "json");
+                    create_log_path_with_size(&format!("memory:///{path}"), *size)
                 })
                 .collect(),
-            ascending_compaction_files: vec![
-                create_log_path_with_size(
-                    "memory:///_delta_log/00000000000000000001.00000000000000000002.compacted.json",
-                    7,
-                ),
-                create_log_path_with_size(
-                    "memory:///_delta_log/00000000000000000001.00000000000000000003.compacted.json",
-                    12,
-                ),
-            ],
+            ascending_compaction_files: compactions
+                .iter()
+                .map(|(start, end, size)| {
+                    let path = compacted_log_path_for_versions(*start, *end, "json");
+                    create_log_path_with_size(&format!("memory:///{path}"), *size)
+                })
+                .collect(),
             ..Default::default()
         },
     };
+    let cover = segment.find_commit_cover();
+    let expected_locations = expected_cover
+        .iter()
+        .map(|(start, end)| {
+            let path = if start == end {
+                delta_path_for_version(*start, "json")
+            } else {
+                compacted_log_path_for_versions(*start, *end, "json")
+            };
+            format!("memory:///{path}")
+        })
+        .collect_vec();
     assert_eq!(
-        segment.stats().unwrap(),
-        LogSegmentStats {
-            num_commit_files: 2,
-            total_commit_file_bytes: 22,
-        }
+        cover
+            .iter()
+            .map(|file| file.location.to_string())
+            .collect_vec(),
+        expected_locations,
     );
+    let cover_bytes = cover
+        .iter()
+        .try_fold(0u64, |total, file| total.checked_add(file.size));
+    assert_eq!(cover_bytes, expected_bytes);
+    match expected_bytes {
+        Some(total_commit_file_bytes) => {
+            let stats = segment.stats().unwrap();
+            assert_eq!(
+                stats,
+                LogSegmentStats {
+                    num_commit_files: expected_cover.len() as u64,
+                    total_commit_file_bytes,
+                }
+            );
+            assert_eq!(stats.num_commit_files, cover.len() as u64);
+            assert_eq!(Some(stats.total_commit_file_bytes), cover_bytes);
+        }
+        None => assert_result_error_with_message(segment.stats(), "commit file size overflow"),
+    }
 }
 
 /// Gets the file size from the store for use in FileMeta

@@ -31,7 +31,6 @@ use crate::path::{LogPathFileType, ParsedLogPath};
 use crate::plans::ir::nodes::{FileType, ScanFile};
 use crate::schema::compare::SchemaComparison;
 use crate::schema::{lazy_schema_ref, DataType, SchemaRef, StructField, StructType, ToSchema as _};
-use crate::snapshot::LogSegmentStats;
 use crate::utils::require;
 #[cfg(feature = "adaptive-metadata-in-dev")]
 use crate::EngineData;
@@ -57,6 +56,19 @@ mod crc_tests;
 mod protocol_metadata_replay_amt_tests;
 #[cfg(test)]
 mod tests;
+
+/// Statistics for the commit files selected to replay a snapshot's log segment.
+///
+/// Includes published and staged commits, and selected log compactions in place of the commits
+/// they cover. Excludes checkpoints, sidecars, CRCs, and commits retained only for timestamp
+/// lookup.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LogSegmentStats {
+    /// Number of selected commit files, counting each selected compaction as one file.
+    pub num_commit_files: u64,
+    /// Sum of the selected commit file sizes in bytes.
+    pub total_commit_file_bytes: u64,
+}
 
 /// Information about checkpoint reading for data skipping optimization.
 ///
