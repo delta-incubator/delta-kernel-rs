@@ -411,7 +411,6 @@ impl ParsedLogPath<FileMeta> {
     /// the `lastManifestCommit` is invalid, including a pointer to a manifest commit newer than
     /// this commit.
     #[cfg(feature = "adaptive-metadata-in-dev")]
-    #[cfg_attr(not(test), allow(dead_code))]
     #[tracing::instrument(skip(engine), ret, fields(version = self.version, path = %self.location.as_url()))]
     pub(crate) fn read_ict_and_last_manifest_commit(
         &self,
