@@ -474,6 +474,12 @@ impl std::fmt::Debug for IncrementalScanStream {
 /// on the full key rather than just the path: the same path with different DV ids (e.g. an
 /// `add(P, dv=new) + remove(P, dv=old)` DV-replacement pair) refers to distinct logical
 /// files, and collapsing to path alone loses that distinction.
+///
+/// To compare against keys built from a [`DeletionVectorDescriptor`], derive the DV id with
+/// [`DeletionVectorDescriptor::unique_id_for`] using the scan's target snapshot.
+///
+/// [`DeletionVectorDescriptor`]: crate::actions::deletion_vector::DeletionVectorDescriptor
+/// [`DeletionVectorDescriptor::unique_id_for`]: crate::actions::deletion_vector::DeletionVectorDescriptor::unique_id_for
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct IncrementalScanSummary {

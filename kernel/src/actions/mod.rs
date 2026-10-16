@@ -1192,8 +1192,21 @@ impl Add {
 
     #[internal_api]
     #[allow(dead_code)]
-    pub(crate) fn dv_unique_id(&self) -> Option<String> {
-        self.deletion_vector.as_ref().map(|dv| dv.unique_id())
+    pub(crate) fn dv_unique_id(
+        &self,
+        dv_normalization_root: Option<&Url>,
+    ) -> KernelResult<Option<String>> {
+        self.deletion_vector
+            .as_ref()
+            .map(|dv| {
+                DeletionVectorDescriptor::unique_id_with_root(
+                    &dv.storage_type.to_string(),
+                    &dv.path_or_inline_dv,
+                    dv.offset,
+                    dv_normalization_root,
+                )
+            })
+            .transpose()
     }
 }
 
