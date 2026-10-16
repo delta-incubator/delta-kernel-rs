@@ -2,10 +2,16 @@
 # AI PR Review - Omnigent-powered reviewer for GitHub PRs.
 #
 # Setup as repository secrets:
-#   LLM_API_KEY       Bearer token for the LLM gateway.
-#   GATEWAY_BASE_URL  Gateway base URL, e.g. https://<host>/serving-endpoints
+#   LLM_API_KEY       Raw Databricks PAT from the gateway workspace, without "Bearer ".
+#                    Example (placeholder): dapi<your-workspace-token>
+#   GATEWAY_BASE_URL  Workspace URL plus /serving-endpoints, without a trailing slash.
+#     Example for ai-oss:
+#     https://ai-oss-ecosystem-integration-testing.cloud.databricks.com/serving-endpoints
+# Ask the gateway owner for a CI token and access to the chosen models.
+#
 # Required repository variables:
 #   GATEWAY_HOST      Bare hostname of GATEWAY_BASE_URL, for the egress allowlist.
+#                    Example: ai-oss-ecosystem-integration-testing.cloud.databricks.com
 #   MODEL                    Default Claude model.
 #   CLAUDE_MAINTAINER_MODEL  Claude maintainer-pass model.
 #   CODEX_MAINTAINER_MODEL   Codex maintainer-pass model.
