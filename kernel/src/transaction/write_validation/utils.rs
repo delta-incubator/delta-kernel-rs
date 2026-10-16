@@ -48,7 +48,7 @@ pub(super) fn validate_partition_keys(
 
 /// Requires non-null, non-negative `baseRowId` and `defaultRowCommitVersion` when row tracking is
 /// enabled.
-pub(super) fn require_row_tracking_metadata(
+pub(super) fn validate_row_tracking_metadata(
     path: &str,
     base_row_id: Option<i64>,
     default_row_commit_version: Option<i64>,
@@ -99,7 +99,7 @@ mod tests {
         #[case] expected_error: Option<&str>,
     ) {
         let result =
-            require_row_tracking_metadata("file.parquet", base_row_id, default_row_commit_version);
+            validate_row_tracking_metadata("file.parquet", base_row_id, default_row_commit_version);
         if let Some(expected_error) = expected_error {
             assert_result_error_with_message(result, expected_error);
         } else {

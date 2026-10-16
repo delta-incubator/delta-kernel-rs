@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::sync::LazyLock;
 
 use super::utils::{
-    require_row_tracking_metadata, validate_partition_keys, validate_required_field_exist,
+    validate_partition_keys, validate_required_field_exist, validate_row_tracking_metadata,
 };
 use super::{StagedDataValidator, Validation};
 use crate::engine_data::{GetData, TypedGetData as _};
@@ -91,7 +91,7 @@ impl Validation for DvMatchedFileRequiredFields {
             MODIFICATION_TIME_NAME,
         )?;
         if self.row_tracking_enabled {
-            require_row_tracking_metadata(
+            validate_row_tracking_metadata(
                 path,
                 getters[BASE_ROW_ID].get_opt(row, BASE_ROW_ID_NAME)?,
                 getters[DEFAULT_ROW_COMMIT_VERSION]
