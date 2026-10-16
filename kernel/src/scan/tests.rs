@@ -36,7 +36,8 @@ use crate::transaction::data_layout::DataLayout;
 use crate::unit_test_utils::TestCancellationToken;
 use crate::{
     CancellationTokenRef, Engine, EngineData, FileDataReadResultIterator, FileMeta, FileSize,
-    KernelResult, ParquetFooter, ParquetHandler, PredicateRef, ResultIteratorStatic, Snapshot,
+    KernelResult, KernelResultIteratorStatic, ParquetFooter, ParquetHandler, PredicateRef,
+    Snapshot,
 };
 
 #[cfg(feature = "geo-type-in-dev")]
@@ -927,7 +928,7 @@ fn test_missing_column_row_group_skipping() {
 }
 
 #[test_log::test]
-fn test_scan_with_checkpoint() -> Result<()> {
+fn test_scan_with_checkpoint() -> KernelResult<()> {
     let path = std::fs::canonicalize(PathBuf::from(
         "./tests/data/with_checkpoint_no_last_checkpoint/",
     ))?;
@@ -999,7 +1000,7 @@ fn test_scan_metadata_with_stats_columns() {
     let scan_metadata_results: Vec<_> = scan
         .scan_metadata(engine.as_ref())
         .unwrap()
-        .collect::<Result<Vec<_>, _>>()
+        .collect::<KernelResult<Vec<_>>>()
         .unwrap();
 
     assert!(
@@ -1588,7 +1589,7 @@ fn surviving_ids(parquet_bytes: Bytes, pred: &Pred) -> Vec<i64> {
     let mut ids: Vec<i64> = builder
         .build()
         .unwrap()
-        .map(Result::unwrap)
+        .map(KernelResult::unwrap)
         .flat_map(|batch| {
             let add = batch
                 .column(0)
@@ -1770,7 +1771,7 @@ impl ParquetHandler for RecordingParquetHandler {
         files: &[FileMeta],
         physical_schema: schema::SchemaRef,
         predicate: Option<PredicateRef>,
-    ) -> Result<FileDataReadResultIterator> {
+    ) -> KernelResult<FileDataReadResultIterator> {
         self.reads.lock().unwrap().push(RecordedParquetRead {
             files: files.to_vec(),
             physical_schema: physical_schema.clone(),
@@ -1780,15 +1781,15 @@ impl ParquetHandler for RecordingParquetHandler {
             .read_parquet_files(files, physical_schema, predicate)
     }
 
-    fn read_parquet_footer(&self, file: &FileMeta) -> Result<ParquetFooter> {
+    fn read_parquet_footer(&self, file: &FileMeta) -> KernelResult<ParquetFooter> {
         self.inner.read_parquet_footer(file)
     }
 
     fn write_parquet_file(
         &self,
         location: url::Url,
-        data: ResultIteratorStatic<Box<dyn EngineData>>,
-    ) -> Result<FileSize> {
+        data: KernelResultIteratorStatic<Box<dyn EngineData>>,
+    ) -> KernelResult<FileSize> {
         self.inner.write_parquet_file(location, data)
     }
 }
@@ -1943,7 +1944,7 @@ fn test_all_struct_parses_json_commit_stats() {
     for scan_metadata in scan
         .scan_metadata(engine.as_ref())
         .unwrap()
-        .collect::<Result<Vec<_>, _>>()
+        .collect::<KernelResult<Vec<_>>>()
         .unwrap()
     {
         let (underlying_data, selection_vector) = scan_metadata.scan_files.into_parts();
@@ -2032,7 +2033,7 @@ fn test_skip_stats_disables_data_skipping() {
     let scan_metadata_results: Vec<_> = scan
         .scan_metadata(engine.as_ref())
         .unwrap()
-        .collect::<Result<Vec<_>, _>>()
+        .collect::<KernelResult<Vec<_>>>()
         .unwrap();
 
     let mut selected_file_count = 0;
@@ -2066,7 +2067,7 @@ fn test_with_stats_last_call_wins() {
     for scan_metadata in scan
         .scan_metadata(engine.as_ref())
         .unwrap()
-        .collect::<Result<Vec<_>, _>>()
+        .collect::<KernelResult<Vec<_>>>()
         .unwrap()
     {
         let (underlying_data, _) = scan_metadata.scan_files.into_parts();
@@ -2097,7 +2098,7 @@ fn test_default_stats_options_no_struct_output() {
     let scan_metadata_results: Vec<_> = scan
         .scan_metadata(engine.as_ref())
         .unwrap()
-        .collect::<Result<Vec<_>, _>>()
+        .collect::<KernelResult<Vec<_>>>()
         .unwrap();
 
     assert!(
@@ -2699,19 +2700,19 @@ impl ParquetHandler for EmptyParquetHandler {
         _files: &[FileMeta],
         _schema: schema::SchemaRef,
         _predicate: Option<PredicateRef>,
-    ) -> Result<FileDataReadResultIterator> {
+    ) -> KernelResult<FileDataReadResultIterator> {
         Ok(Box::new(std::iter::empty()))
     }
 
-    fn read_parquet_footer(&self, _file: &FileMeta) -> Result<ParquetFooter> {
+    fn read_parquet_footer(&self, _file: &FileMeta) -> KernelResult<ParquetFooter> {
         unimplemented!()
     }
 
     fn write_parquet_file(
         &self,
         _location: url::Url,
-        _data: ResultIteratorStatic<Box<dyn EngineData>>,
-    ) -> Result<FileSize> {
+        _data: KernelResultIteratorStatic<Box<dyn EngineData>>,
+    ) -> KernelResult<FileSize> {
         unimplemented!()
     }
 }

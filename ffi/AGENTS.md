@@ -443,6 +443,10 @@ an opaque pointer when the API needs one.
 
 ### Error handling
 
+Rust helpers use `KernelResult<T>` and pass it to `IntoExternResult` to produce the C ABI's
+`ExternResult<T>`. Preserve `KernelError` variants through this conversion. `delta_kernel::Result<T>`
+uses the separate top-level `Error` envelope.
+
 There are two error directions, with opposite message owners:
 
 | Direction | Result envelope | Message construction | Final owner |
@@ -527,7 +531,7 @@ pub unsafe extern "C" fn set_metadata(
 unsafe fn set_metadata_impl(
     builder: *mut FfiBuilder,
     entries: CMetadataEntries,
-) -> Result<bool> {
+) -> KernelResult<bool> {
     let builder = unsafe { builder.as_mut() }
         .ok_or_else(|| KernelError::generic("builder must not be null"))?;
     let entries = match (entries.ptr.is_null(), entries.len) {

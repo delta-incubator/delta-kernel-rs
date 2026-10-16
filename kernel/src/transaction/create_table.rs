@@ -12,7 +12,7 @@
 //! use delta_kernel::committer::FileSystemCommitter;
 //! use std::sync::Arc;
 //! # use delta_kernel::Engine;
-//! # fn example(engine: &dyn Engine) -> delta_kernel::Result<()> {
+//! # fn example(engine: &dyn Engine) -> delta_kernel::KernelResult<()> {
 //!
 //! let schema = Arc::new(StructType::try_new(vec![
 //!     StructField::nullable("id", DataType::INTEGER),
@@ -60,7 +60,7 @@ use crate::transaction::{CreateTable, Transaction};
 /// use delta_kernel::committer::FileSystemCommitter;
 /// use std::sync::Arc;
 /// # use delta_kernel::Engine;
-/// # fn example(engine: &dyn Engine) -> delta_kernel::Result<()> {
+/// # fn example(engine: &dyn Engine) -> delta_kernel::KernelResult<()> {
 ///
 /// let schema = Arc::new(StructType::try_new(vec![
 ///     StructField::nullable("id", DataType::INTEGER),
@@ -126,7 +126,7 @@ pub type CreateTableTransaction = Transaction<CreateTable>;
 /// use test_utils::delta_kernel_default_engine::DefaultEngineBuilder;
 /// use test_utils::delta_kernel_default_engine::storage::store_from_url;
 ///
-/// # fn main() -> delta_kernel::Result<()> {
+/// # fn main() -> delta_kernel::KernelResult<()> {
 /// let schema = Arc::new(StructType::try_new([
 ///     StructField::nullable("id", DataType::INTEGER),
 ///     StructField::nullable("name", DataType::STRING),

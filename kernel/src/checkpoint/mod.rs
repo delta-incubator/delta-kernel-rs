@@ -39,11 +39,14 @@
 //! # use delta_kernel::Engine;
 //! # use delta_kernel::Snapshot;
 //! # use delta_kernel::SnapshotRef;
-//! # use delta_kernel::Result;
+//! # use delta_kernel::KernelResult;
 //! # use delta_kernel::KernelError;
 //! # use delta_kernel::FileMeta;
 //! # use url::Url;
-//! fn write_checkpoint_file(path: Url, data: ActionReconciliationIterator) -> Result<FileMeta> {
+//! fn write_checkpoint_file(
+//!     path: Url,
+//!     data: ActionReconciliationIterator,
+//! ) -> KernelResult<FileMeta> {
 //!     todo!() /* engine-specific logic to write data to object storage*/
 //! }
 //!
@@ -127,7 +130,7 @@ use crate::table_features::TableFeature;
 use crate::table_properties::TableProperties;
 use crate::{
     version_as_i64, Engine, EngineData, FileMeta, KernelError, KernelResult,
-    KernelResultIteratorStatic, Result, Version,
+    KernelResultIteratorStatic, Version,
 };
 
 #[cfg(feature = "declarative-plans")]
@@ -195,7 +198,7 @@ impl LastCheckpointHintStats {
         state: ActionReconciliationIteratorState,
         size_in_bytes: u64,
         num_sidecars: u64,
-    ) -> Result<Self> {
+    ) -> KernelResult<Self> {
         if !state.is_exhausted() {
             return Err(KernelError::checkpoint_write(
                 "Cannot build LastCheckpointHintStats: the reconciliation iterator must be fully \
@@ -412,7 +415,7 @@ impl CheckpointWriter {
     ///
     /// For example, if the table root is `s3://bucket/path` and the version is `10`,
     /// the checkpoint path will be: `s3://bucket/path/00000000000000000010.checkpoint.parquet`
-    pub fn checkpoint_path(&self) -> Result<Url> {
+    pub fn checkpoint_path(&self) -> KernelResult<Url> {
         ParsedLogPath::new_classic_parquet_checkpoint(
             self.snapshot.table_root(),
             self.snapshot.version(),
@@ -453,7 +456,10 @@ impl CheckpointWriter {
     // 3. Reads actions from the log segment and deduplicates via reconciliation
     // 4. Applies stats transforms (COALESCE/drop) to each reconciled batch
     // 5. Chains the checkpoint metadata action for V2 checkpoints
-    pub fn checkpoint_data(&self, engine: &dyn Engine) -> Result<ActionReconciliationIterator> {
+    pub fn checkpoint_data(
+        &self,
+        engine: &dyn Engine,
+    ) -> KernelResult<ActionReconciliationIterator> {
         // Read actions from log segment
         let actions = self
             .snapshot
@@ -522,7 +528,7 @@ impl CheckpointWriter {
         self,
         engine: &dyn Engine,
         last_checkpoint_stats: &LastCheckpointHintStats,
-    ) -> Result<()> {
+    ) -> KernelResult<()> {
         // Skip writing `_last_checkpoint` if the existing hint already points to a newer
         // checkpoint, to avoid regressing the hint.
         let checkpoint_version = self.snapshot.version();

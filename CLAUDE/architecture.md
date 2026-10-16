@@ -20,6 +20,17 @@ log replay or checkpoint writes, kernel receives opaque `EngineData` batches, in
 visitor pattern, updates a selection vector, and hands them back to the engine: it never
 deserializes the full batch into in-memory structs.
 
+## Error Handling
+
+Kernel APIs return `KernelResult<T, E = KernelError>`, preserving `KernelError` by default while
+allowing helpers to specify another error type. `Result<T>` always uses the top-level `Error` enum.
+Converting a kernel error to that envelope requires `Error::Kernel` or `.map_err(Error::Kernel)`.
+There is no implicit `From<KernelError> for Error` conversion.
+
+Fallible kernel streams use `KernelResultIterator` and `KernelResultIteratorStatic`, including
+engine handlers and declarative-plan results. `ResultIterator` and `ResultIteratorStatic` yield
+top-level `Error` values.
+
 ## Snapshot
 
 `Snapshot` (`kernel/src/snapshot/`) is the primary entry point for operations on an existing table.

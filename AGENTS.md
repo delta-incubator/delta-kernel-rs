@@ -359,9 +359,11 @@ Keep this list updated when new protocol features are added to kernel.
     binding/field, a `[DataType]`/`Vec<DataType>` element, or a `&DataType` argument),
     prefer `DataType::from(ArrayType::new(...))` over
     `DataType::Array(Box::new(ArrayType::new(...)))`.
-- Prefer the `ResultIterator<'a, T>` / `ResultIteratorStatic<T>` aliases over
-  hand-rolled `Box<dyn Iterator<Item = Result<T>> + Send (+ 'a)>`.
-  Private kernel-error streams use `KernelResultIterator` / `KernelResultIteratorStatic`.
+- Kernel APIs use `KernelResult<T, E = KernelError>`, which defaults to `KernelError` and permits
+  an explicit error type. `Result<T>` is reserved for the top-level `Error` envelope. Wrap kernel
+  errors explicitly with `Error::Kernel` when returning it.
+- Prefer `KernelResultIterator<'a, T>` / `KernelResultIteratorStatic<T>` for kernel-error streams,
+  including public APIs. `ResultIterator` / `ResultIteratorStatic` yield the top-level `Error`.
 - Prefer the `lit` / `null_lit` constructors over `Expression::literal(...)` / `lit(Scalar::Null(...))`
   when building expressions inline. They take `impl Into<Scalar>` and `impl Into<DataType>`,
   respectively. Prefer `Predicate::TRUE` / `FALSE` / `NULL` for predicates whose value is statically

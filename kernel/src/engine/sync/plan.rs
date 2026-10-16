@@ -44,7 +44,7 @@ use crate::plans::{IoOperation, Operation, PlanExecutor, PlanResult, ScopedPlanE
 use crate::schema::{ArrayType, DataType, SchemaRef, StructType};
 use crate::{
     EvaluationHandler as _, FileMeta, FilteredEngineData, KernelError, KernelResult,
-    KernelResultIteratorStatic, Result, StorageHandler as _,
+    KernelResultIteratorStatic, StorageHandler as _,
 };
 
 /// A synchronous, test-only [`PlanExecutor`].
@@ -122,20 +122,20 @@ impl Default for SyncPlanExecutor {
 }
 
 impl PlanExecutor for SyncPlanExecutor {
-    fn execute_op(&self, op: Operation) -> Result<PlanResult> {
+    fn execute_op(&self, op: Operation) -> KernelResult<PlanResult> {
         self.execute_op_with_relation_store(op, None)
     }
 }
 
 impl PlanExecutor for ScopedSyncPlanExecutor {
-    fn execute_op(&self, op: Operation) -> Result<PlanResult> {
+    fn execute_op(&self, op: Operation) -> KernelResult<PlanResult> {
         self.executor
             .execute_op_with_relation_store(op, Some(&self.relation_store))
     }
 }
 
 impl ScopedPlanExecutor for ScopedSyncPlanExecutor {
-    fn execute_and_retain(&self, name: &str, plan: Plan) -> Result<RelationRef> {
+    fn execute_and_retain(&self, name: &str, plan: Plan) -> KernelResult<RelationRef> {
         let schema = Arc::clone(&plan.schema);
         let batches = self.executor.eval_plan(plan, Some(&self.relation_store))?;
         retain_relation(&self.relation_store, name, schema, batches)
@@ -726,7 +726,7 @@ mod tests {
         path: &Url,
         overwrite: bool,
         ordered: bool,
-    ) -> Result<Plan> {
+    ) -> KernelResult<Plan> {
         PlanBuilder::write_json(inputs, path.clone(), overwrite, ordered)?.build()
     }
 
@@ -736,7 +736,7 @@ mod tests {
         path: &Url,
         schema: SchemaRef,
         expected_rows: &[&str],
-    ) -> Result<()> {
+    ) -> KernelResult<()> {
         assert_eq!(
             plan.schema,
             schema_ref! {
@@ -749,7 +749,7 @@ mod tests {
             .execute_op(Operation::QueryPlan(plan))?
             .into_data()?
             .map(|data| data.try_into_record_batch())
-            .collect::<Result<Vec<_>>>()?;
+            .collect::<KernelResult<Vec<_>>>()?;
         let meta = executor.storage.head(path)?;
         let expected = values_to_record_batch(Values::new(
             FILE_META_SCHEMA.clone(),
@@ -775,7 +775,7 @@ mod tests {
         #[values(false, true)] ordered: bool,
         #[values(false, true)] in_memory: bool,
         #[values(false, true)] overwrite: bool,
-    ) -> Result<()> {
+    ) -> KernelResult<()> {
         let dir = tempfile::tempdir()?;
         let path = if in_memory {
             Url::parse("memory:///nested/output")?
@@ -834,7 +834,7 @@ mod tests {
             let mut ids = serde_json::Deserializer::from_slice(&original_bytes)
                 .into_iter::<serde_json::Value>()
                 .map(|row| Ok(row?["id"].as_i64().unwrap()))
-                .collect::<Result<Vec<_>>>()?;
+                .collect::<KernelResult<Vec<_>>>()?;
             // Each input's rows must stay together; their order within the group is unrestricted.
             assert_eq!(ids.len(), 7);
             ids[..2].sort_unstable();
@@ -864,7 +864,7 @@ mod tests {
     }
 
     #[test]
-    fn write_json_rejects_empty_input() -> Result<()> {
+    fn write_json_rejects_empty_input() -> KernelResult<()> {
         let executor = SyncPlanExecutor::new(Some(Arc::new(InMemory::new())));
         let input =
             PlanBuilder::values(schema_ref! { not_null "id": LONG }, vec![vec![1i64.into()]])?
@@ -882,7 +882,7 @@ mod tests {
     }
 
     #[test]
-    fn write_json_rejects_mismatched_batch_without_writing() -> Result<()> {
+    fn write_json_rejects_mismatched_batch_without_writing() -> KernelResult<()> {
         let executor = SyncPlanExecutor::new(Some(Arc::new(InMemory::new())));
         let path = Url::parse("memory:///output")?;
         let original = Bytes::from_static(b"original contents");
@@ -903,7 +903,7 @@ mod tests {
     }
 
     #[test]
-    fn scoped_executor_creates_ref_from_arrow_batch() -> Result<()> {
+    fn scoped_executor_creates_ref_from_arrow_batch() -> KernelResult<()> {
         let executor = SyncPlanExecutor::default();
         let scoped = executor.get_scoped();
         let schema = schema_ref! { nullable "id": LONG };
@@ -927,7 +927,7 @@ mod tests {
             .execute_op(Operation::QueryPlan(query))?
             .into_data()?
             .map(|data| data.try_into_record_batch())
-            .collect::<Result<_>>()?;
+            .collect::<KernelResult<_>>()?;
         assert_eq!(scoped_batches, vec![batch]);
 
         let query = PlanBuilder::relation_source(relation_ref).build()?;
@@ -942,7 +942,7 @@ mod tests {
     }
 
     #[test]
-    fn scoped_executor_rejects_batches_that_differ_from_plan_schema() -> Result<()> {
+    fn scoped_executor_rejects_batches_that_differ_from_plan_schema() -> KernelResult<()> {
         let scoped = SyncPlanExecutor::default().get_scoped();
         let batch_schema = schema_ref! { nullable "id": LONG };
         let mut plan = PlanBuilder::values(batch_schema, vec![vec![1i64.into()]])?.build()?;
@@ -959,7 +959,7 @@ mod tests {
     }
 
     #[test]
-    fn scoped_executor_retains_and_reuses_filtered_relations() -> Result<()> {
+    fn scoped_executor_retains_and_reuses_filtered_relations() -> KernelResult<()> {
         let executor = SyncPlanExecutor::default();
         let scoped = executor.get_scoped();
         let schema = schema_ref! { nullable "id": LONG };
@@ -985,7 +985,7 @@ mod tests {
             .execute_op(Operation::QueryPlan(query))?
             .into_data()?
             .map(|data| data.try_into_record_batch())
-            .collect::<Result<_>>()?;
+            .collect::<KernelResult<_>>()?;
         assert_eq!(batches.len(), 1);
         let ids = batches[0]
             .column(0)
@@ -998,7 +998,7 @@ mod tests {
     }
 
     #[test]
-    fn scoped_executors_isolate_relations_and_release_batches_on_drop() -> Result<()> {
+    fn scoped_executors_isolate_relations_and_release_batches_on_drop() -> KernelResult<()> {
         let executor = SyncPlanExecutor::default();
         let first_scope = executor.get_scoped();
         let second_scope = executor.get_scoped();
@@ -1042,13 +1042,13 @@ mod tests {
             .execute_op(Operation::QueryPlan(query))?
             .into_data()?
             .map(|data| data.try_into_record_batch())
-            .collect::<Result<_>>()?;
+            .collect::<KernelResult<_>>()?;
         assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 1);
         Ok(())
     }
 
     #[test]
-    fn scoped_executor_rejects_relation_ref_with_wrong_schema() -> Result<()> {
+    fn scoped_executor_rejects_relation_ref_with_wrong_schema() -> KernelResult<()> {
         let executor = SyncPlanExecutor::default();
         let scoped = executor.get_scoped();
         let schema = schema_ref! { nullable "id": LONG };
@@ -1068,7 +1068,7 @@ mod tests {
     }
 
     #[test]
-    fn scoped_executor_retains_empty_relation_with_schema() -> Result<()> {
+    fn scoped_executor_retains_empty_relation_with_schema() -> KernelResult<()> {
         let executor = SyncPlanExecutor::default();
         let scoped = executor.get_scoped();
         let schema = schema_ref! { nullable "id": LONG };
@@ -1081,13 +1081,13 @@ mod tests {
             .execute_op(Operation::QueryPlan(query))?
             .into_data()?
             .map(|data| data.try_into_record_batch())
-            .collect::<Result<_>>()?;
+            .collect::<KernelResult<_>>()?;
         assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 0);
         Ok(())
     }
 
     #[test]
-    fn encode_keys_as_rows_synthesizes_empty_keys_when_ungrouped() -> Result<()> {
+    fn encode_keys_as_rows_synthesizes_empty_keys_when_ungrouped() -> KernelResult<()> {
         let batch = RecordBatch::try_from_iter([(
             "x",
             Arc::new(Int64Array::from(vec![1, 2, 3])) as ArrayRef,
@@ -1126,7 +1126,7 @@ mod tests {
         size: Scalar,
         last_modified: Scalar,
         dv: Scalar,
-    ) -> Result<Vec<ScanFile>> {
+    ) -> KernelResult<Vec<ScanFile>> {
         let input_schema = schema_ref! {
             nullable "path": STRING,
             nullable "size": LONG,

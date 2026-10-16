@@ -32,7 +32,7 @@ use crate::table_features::TableFeature;
 use crate::transaction::create_table::create_table;
 use crate::transaction::UpdateTableOperation;
 use crate::unit_test_utils::Action;
-use crate::{FileMeta, KernelResult, LogPath, Result, Snapshot};
+use crate::{FileMeta, KernelResult, LogPath, Snapshot};
 
 #[rstest::rstest]
 #[case::default_retention(
@@ -44,7 +44,7 @@ use crate::{FileMeta, KernelResult, LogPath, Result, Snapshot};
 fn test_deleted_file_retention_timestamp(
     #[case] retention: Option<Duration>,
     #[case] expected_timestamp: i64,
-) -> Result<()> {
+) -> KernelResult<()> {
     let reference_time_secs = 10_000;
     let reference_time = Duration::from_secs(reference_time_secs);
 
@@ -79,7 +79,7 @@ fn test_verify_written_size(
 }
 
 #[tokio::test]
-async fn test_create_checkpoint_metadata_batch() -> Result<()> {
+async fn test_create_checkpoint_metadata_batch() -> KernelResult<()> {
     let (store, _) = new_in_memory_store();
     let engine = SyncEngine::new_with_store(store.clone());
 
@@ -159,7 +159,7 @@ async fn test_create_checkpoint_metadata_batch() -> Result<()> {
 }
 
 #[test]
-fn test_create_last_checkpoint_data() -> Result<()> {
+fn test_create_last_checkpoint_data() -> KernelResult<()> {
     let version = 10;
     let total_actions_counter = 100;
     let add_actions_counter = 75;
@@ -345,7 +345,7 @@ async fn read_last_checkpoint_file(store: &Arc<InMemory>) -> KernelResult<Value>
 /// - A table that does not support v2Checkpoint
 /// - No version specified (latest version is used)
 #[tokio::test]
-async fn test_v1_checkpoint_latest_version_by_default() -> Result<()> {
+async fn test_v1_checkpoint_latest_version_by_default() -> KernelResult<()> {
     let (store, _) = new_in_memory_store();
     let engine = SyncEngine::new_with_store(store.clone());
 
@@ -423,7 +423,7 @@ async fn test_v1_checkpoint_latest_version_by_default() -> Result<()> {
 /// - A table that does not support v2Checkpoint
 /// - A specific version specified (version 0)
 #[tokio::test]
-async fn test_v1_checkpoint_specific_version() -> Result<()> {
+async fn test_v1_checkpoint_specific_version() -> KernelResult<()> {
     let (store, _) = new_in_memory_store();
     let engine = SyncEngine::new_with_store(store.clone());
 
@@ -488,7 +488,7 @@ async fn test_v1_checkpoint_specific_version() -> Result<()> {
 }
 
 #[tokio::test]
-async fn test_finalize_errors_if_checkpoint_data_iterator_is_not_exhausted() -> Result<()> {
+async fn test_finalize_errors_if_checkpoint_data_iterator_is_not_exhausted() -> KernelResult<()> {
     let (store, _) = new_in_memory_store();
     let engine = SyncEngine::new_with_store(store.clone());
 
@@ -526,7 +526,7 @@ async fn test_finalize_errors_if_checkpoint_data_iterator_is_not_exhausted() -> 
 }
 
 #[test]
-fn test_last_checkpoint_hint_stats_with_nonzero_num_sidecars() -> Result<()> {
+fn test_last_checkpoint_hint_stats_with_nonzero_num_sidecars() -> KernelResult<()> {
     let state = ActionReconciliationIteratorState::new_exhausted(5, 2);
     let stats = LastCheckpointHintStats::from_reconciliation_state(state, 100, 3)?;
     assert_eq!(stats.num_actions, 8); // 5 reconciled + 3 sidecar actions
@@ -578,7 +578,7 @@ fn test_last_checkpoint_hint_stats_rejects_invalid_input(
 /// - A table that does supports v2Checkpoint
 /// - No version specified (latest version is used)
 #[tokio::test]
-async fn test_v2_checkpoint_supported_table() -> Result<()> {
+async fn test_v2_checkpoint_supported_table() -> KernelResult<()> {
     let (store, _) = new_in_memory_store();
     let engine = SyncEngine::new_with_store(store.clone());
 
@@ -653,7 +653,7 @@ async fn test_v2_checkpoint_supported_table() -> Result<()> {
 }
 
 #[tokio::test]
-async fn test_no_checkpoint_on_unpublished_snapshot() -> Result<()> {
+async fn test_no_checkpoint_on_unpublished_snapshot() -> KernelResult<()> {
     let (store, _) = new_in_memory_store();
     let engine = SyncEngine::new_with_store(store.clone());
 
@@ -716,7 +716,7 @@ fn create_add_action_with_stats(path: &str, num_records: i64) -> Action {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_snapshot_checkpoint() -> Result<()> {
+async fn test_snapshot_checkpoint() -> KernelResult<()> {
     let (store, _) = new_in_memory_store();
     let engine = SyncEngine::new_with_store(store.clone());
 
@@ -813,7 +813,7 @@ async fn test_snapshot_checkpoint() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_checkpoint_preserves_domain_metadata() -> Result<()> {
+async fn test_checkpoint_preserves_domain_metadata() -> KernelResult<()> {
     // ===== Setup =====
     let tmp_dir = tempdir().unwrap();
     let table_path = tmp_dir.path();
@@ -852,7 +852,7 @@ async fn test_checkpoint_preserves_domain_metadata() -> Result<()> {
     // ===== Create Engine =====
     let engine = SyncEngine::new();
 
-    let commit_domain_metadata = |domain: &str, value: &str| -> Result<()> {
+    let commit_domain_metadata = |domain: &str, value: &str| -> KernelResult<()> {
         let snapshot = Snapshot::builder_for(table_url.clone()).build(&engine)?;
         let txn = snapshot
             .update_table(UpdateTableOperation::Write, "test-engine", true)
@@ -887,7 +887,7 @@ async fn test_checkpoint_preserves_domain_metadata() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_checkpoint_excludes_tombstoned_domain_metadata() -> Result<()> {
+async fn test_checkpoint_excludes_tombstoned_domain_metadata() -> KernelResult<()> {
     // ===== Setup =====
     let tmp_dir = tempdir().unwrap();
     let table_path = tmp_dir.path();
@@ -971,7 +971,8 @@ async fn test_checkpoint_excludes_tombstoned_domain_metadata() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_checkpoint_skips_last_checkpoint_write_when_hint_version_is_newer() -> Result<()> {
+async fn test_checkpoint_skips_last_checkpoint_write_when_hint_version_is_newer() -> KernelResult<()>
+{
     let (store, _) = new_in_memory_store();
     let engine = SyncEngine::new_with_store(store.clone());
 
@@ -1133,7 +1134,7 @@ async fn test_stats_config_round_trip(
     #[values(true, false)] struct1: bool,
     #[values(true, false)] json2: bool,
     #[values(true, false)] struct2: bool,
-) -> Result<()> {
+) -> KernelResult<()> {
     let (store, _) = new_in_memory_store();
     let engine = SyncEngine::new_with_store(store.clone());
     let table_root = Url::parse("memory:///")?;
@@ -1200,7 +1201,7 @@ async fn test_stats_config_round_trip_partitioned(
     #[values(true, false)] struct1: bool,
     #[values(true, false)] json2: bool,
     #[values(true, false)] struct2: bool,
-) -> Result<()> {
+) -> KernelResult<()> {
     let (store, _) = new_in_memory_store();
     let engine = SyncEngine::new_with_store(store.clone());
     let table_root = Url::parse("memory:///")?;
@@ -1312,7 +1313,7 @@ async fn test_stats_config_round_trip_partitioned(
 // NullCountStatsTransform), but the stats_parsed data from the old checkpoint lacks it,
 // causing an Arrow schema mismatch in the COALESCE expression.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_checkpoint_with_varchar_metadata_on_field() -> Result<()> {
+async fn test_checkpoint_with_varchar_metadata_on_field() -> KernelResult<()> {
     let (store, _) = new_in_memory_store();
     let engine = SyncEngine::new_with_store(store.clone());
 

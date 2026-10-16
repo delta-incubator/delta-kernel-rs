@@ -5,8 +5,8 @@ use delta_kernel::committer::{
     CommitMetadata, CommitResponse, CommitType, Committer, PublishMetadata,
 };
 use delta_kernel::{
-    Engine, FileMeta, FilteredEngineData, KernelError as DeltaError, KernelResult, Result,
-    ResultIterator,
+    Engine, FileMeta, FilteredEngineData, KernelError as DeltaError, KernelResult,
+    KernelResultIterator,
 };
 use tracing::{debug, info};
 use unity_catalog_delta_client_api::{
@@ -136,7 +136,7 @@ impl<C: UpdateTableClient> UCCommitter<C> {
     fn commit_version_0(
         &self,
         engine: &dyn Engine,
-        actions: ResultIterator<'_, FilteredEngineData>,
+        actions: KernelResultIterator<'_, FilteredEngineData>,
         commit_metadata: &CommitMetadata,
     ) -> KernelResult<CommitResponse> {
         debug_assert!(
@@ -173,7 +173,7 @@ impl<C: UpdateTableClient> UCCommitter<C> {
     fn commit_version_non_zero(
         &self,
         engine: &dyn Engine,
-        actions: ResultIterator<'_, FilteredEngineData>,
+        actions: KernelResultIterator<'_, FilteredEngineData>,
         commit_metadata: CommitMetadata,
     ) -> KernelResult<CommitResponse>
     where
@@ -263,9 +263,9 @@ impl<C: UpdateTableClient + 'static> Committer for UCCommitter<C> {
     fn commit(
         &self,
         engine: &dyn Engine,
-        actions: ResultIterator<'_, FilteredEngineData>,
+        actions: KernelResultIterator<'_, FilteredEngineData>,
         commit_metadata: CommitMetadata,
-    ) -> Result<CommitResponse> {
+    ) -> KernelResult<CommitResponse> {
         if commit_metadata.version() == 0 {
             return self.commit_version_0(engine, actions, &commit_metadata);
         }
@@ -276,7 +276,7 @@ impl<C: UpdateTableClient + 'static> Committer for UCCommitter<C> {
         true
     }
 
-    fn publish(&self, engine: &dyn Engine, publish_metadata: PublishMetadata) -> Result<()> {
+    fn publish(&self, engine: &dyn Engine, publish_metadata: PublishMetadata) -> KernelResult<()> {
         if publish_metadata.commits_to_publish().is_empty() {
             return Ok(());
         }
