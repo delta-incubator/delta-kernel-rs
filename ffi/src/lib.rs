@@ -22,7 +22,9 @@ use delta_kernel::history_manager::{
 #[cfg(feature = "default-engine-base")]
 use delta_kernel::object_store::ObjectStore;
 use delta_kernel::schema::Schema;
-use delta_kernel::snapshot::{CheckpointWriteResult, Snapshot, SnapshotHint, SnapshotRef};
+use delta_kernel::snapshot::{
+    CheckpointWriteResult, IncrementalReplay, Snapshot, SnapshotHint, SnapshotRef,
+};
 use delta_kernel::{Engine, EngineData, FileStats, KernelResult, LogPath, Result, Version};
 use delta_kernel_ffi_macros::handle_descriptor;
 use tracing::debug;
@@ -1287,15 +1289,17 @@ pub struct SharedMetadata;
 ///
 /// Create with [`get_snapshot_builder`] (from a table path) or [`get_snapshot_builder_from`]
 /// (incrementally from an existing snapshot). Configure with [`snapshot_builder_with_version`],
-/// [`snapshot_builder_with_log_tail`], and [`snapshot_builder_with_max_catalog_version`] (for
-/// catalog-managed tables). Builders returned by [`get_snapshot_builder`] may instead receive a
-/// complete typed snapshot hint with [`snapshot_hint::snapshot_builder_with_snapshot_hint`].
+/// [`snapshot_builder_with_incremental_crc_replay`], [`snapshot_builder_with_log_tail`], and
+/// [`snapshot_builder_with_max_catalog_version`] (for catalog-managed tables). Builders returned
+/// by [`get_snapshot_builder`] may instead receive a complete typed snapshot hint with
+/// [`snapshot_hint::snapshot_builder_with_snapshot_hint`].
 /// Finally, call [`snapshot_builder_build`] to consume the builder and obtain the snapshot. If you
 /// need to discard the builder without building, call [`free_snapshot_builder`].
 pub struct FfiSnapshotBuilder {
     engine: Arc<dyn ExternEngine>,
     source: FfiSnapshotBuilderSource,
     version: Option<Version>,
+    incremental_replay: IncrementalReplay,
     log_tail: Vec<LogPath>,
     max_catalog_version: Option<Version>,
     snapshot_hint: Option<Box<SnapshotHint>>,
@@ -1305,9 +1309,36 @@ pub struct FfiSnapshotBuilder {
 #[handle_descriptor(target=FfiSnapshotBuilder, mutable=true, sized=true)]
 pub struct ExclusiveSnapshotBuilder;
 
+/// Controls whether a snapshot build advances a stale CRC by replaying later commits.
+///
+/// A CRC at the target version is used regardless of this setting. See [`IncrementalReplay`] for
+/// the effect of each mode. The default is [`FfiIncrementalReplay::Disabled`].
+///
+/// cbindgen:prefix-with-name=true
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub enum FfiIncrementalReplay {
+    /// Do not advance a stale CRC.
+    Disabled,
+    /// Advance only when the CRC is at most this many commits behind the target version.
+    UpToCommits(u64),
+    /// Advance a stale CRC regardless of its distance from the target version.
+    Unlimited,
+}
+
 enum FfiSnapshotBuilderSource {
     TableRoot(Url),
     ExistingSnapshot(SnapshotRef),
+}
+
+impl From<FfiIncrementalReplay> for IncrementalReplay {
+    fn from(mode: FfiIncrementalReplay) -> Self {
+        match mode {
+            FfiIncrementalReplay::Disabled => Self::Disabled,
+            FfiIncrementalReplay::UpToCommits(commits) => Self::UpToCommits(commits),
+            FfiIncrementalReplay::Unlimited => Self::Unlimited,
+        }
+    }
 }
 
 fn make_snapshot_builder(
@@ -1318,6 +1349,7 @@ fn make_snapshot_builder(
         engine,
         source,
         version: None,
+        incremental_replay: IncrementalReplay::Disabled,
         log_tail: Vec::new(),
         max_catalog_version: None,
         snapshot_hint: None,
@@ -1391,6 +1423,27 @@ pub unsafe extern "C" fn snapshot_builder_with_version(
 ) -> Handle<ExclusiveSnapshotBuilder> {
     let mut builder = unsafe { builder.into_inner() };
     builder.version = Some(version);
+    builder.into()
+}
+
+/// Set the replay mode for advancing a stale CRC during a fresh or incremental snapshot build.
+/// By default, stale CRC replay is disabled. A resolved CRC provides file
+/// statistics, domain metadata, and set transactions to subsequent operations.
+///
+/// Setting a non-disabled mode (Disabled or UpToCommits(0)) is mutually exclusive with providing a
+/// snapshot hint, and [`snapshot_builder_build`] returns an error if that occurs.
+///
+/// # Safety
+///
+/// Caller must pass a valid builder handle and mode tag. The input handle is consumed; the
+/// returned handle owns the builder with the replay mode applied.
+#[no_mangle]
+pub unsafe extern "C" fn snapshot_builder_with_incremental_crc_replay(
+    builder: Handle<ExclusiveSnapshotBuilder>,
+    mode: FfiIncrementalReplay,
+) -> Handle<ExclusiveSnapshotBuilder> {
+    let mut builder = unsafe { builder.into_inner() };
+    builder.incremental_replay = mode.into();
     builder.into()
 }
 
@@ -1468,25 +1521,39 @@ fn snapshot_builder_build_impl(
         engine,
         source,
         version,
+        incremental_replay,
         log_tail,
         max_catalog_version,
         snapshot_hint,
     } = builder;
     let engine = engine.engine();
 
-    fn build<Mode>(
-        mut builder: delta_kernel::snapshot::SnapshotBuilder<Mode>,
-        engine: &dyn Engine,
+    struct BuildOptions {
         version: Option<Version>,
+        incremental_replay: IncrementalReplay,
         log_tail: Vec<LogPath>,
         max_catalog_version: Option<Version>,
         snapshot_hint: Option<Box<SnapshotHint>>,
+    }
+
+    fn build<Mode>(
+        mut builder: delta_kernel::snapshot::SnapshotBuilder<Mode>,
+        engine: &dyn Engine,
+        options: BuildOptions,
         apply_snapshot_hint: impl FnOnce(
             delta_kernel::snapshot::SnapshotBuilder<Mode>,
             Box<SnapshotHint>,
         )
             -> KernelResult<delta_kernel::snapshot::SnapshotBuilder<Mode>>,
     ) -> KernelResult<SnapshotRef> {
+        let BuildOptions {
+            version,
+            incremental_replay,
+            log_tail,
+            max_catalog_version,
+            snapshot_hint,
+        } = options;
+        builder = builder.with_incremental_crc_replay(incremental_replay);
         if let Some(version) = version {
             builder = builder.at_version(version);
         }
@@ -1502,23 +1569,24 @@ fn snapshot_builder_build_impl(
         builder.build(engine)
     }
 
+    let options = BuildOptions {
+        version,
+        incremental_replay,
+        log_tail,
+        max_catalog_version,
+        snapshot_hint,
+    };
     let snapshot = match source {
         FfiSnapshotBuilderSource::TableRoot(url) => build(
             Snapshot::builder_for(url),
             engine.as_ref(),
-            version,
-            log_tail,
-            max_catalog_version,
-            snapshot_hint,
+            options,
             |builder, hint| Ok(builder.with_snapshot_hint(hint)),
         ),
         FfiSnapshotBuilderSource::ExistingSnapshot(snapshot) => build(
             Snapshot::builder_from(snapshot),
             engine.as_ref(),
-            version,
-            log_tail,
-            max_catalog_version,
-            snapshot_hint,
+            options,
             |_, _| {
                 // The public API rejects this combination; retain the invariant here for
                 // internal construction paths.
@@ -2278,6 +2346,7 @@ mod tests {
     use delta_kernel_default_engine::DefaultEngineBuilder;
     use rstest::rstest;
     use serde_json::Value;
+    use test_utils::table_builder::{LogState, TestTableBuilder};
     use test_utils::{
         actions_to_string, actions_to_string_catalog_managed, actions_to_string_partitioned,
         actions_to_string_with_metadata, add_commit, add_staged_commit,
@@ -2635,6 +2704,63 @@ mod tests {
         unsafe { free_snapshot(snapshot1) }
         unsafe { free_snapshot(snapshot2) }
         unsafe { free_engine(engine) }
+        Ok(())
+    }
+
+    #[rstest]
+    #[case::default(None, false)]
+    #[case::disabled(Some(FfiIncrementalReplay::Disabled), false)]
+    #[case::zero_budget(Some(FfiIncrementalReplay::UpToCommits(0)), false)]
+    #[case::sufficient_budget(Some(FfiIncrementalReplay::UpToCommits(1)), true)]
+    #[case::unlimited(Some(FfiIncrementalReplay::Unlimited), true)]
+    fn snapshot_builder_incremental_crc_replay_applies_to_fresh_and_incremental_builds(
+        #[case] mode: Option<FfiIncrementalReplay>,
+        #[case] expect_file_stats: bool,
+        #[values(false, true)] from_existing: bool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let table = TestTableBuilder::new()
+            .with_log_state(LogState::with_latest_version(1).with_crc_at([0]))
+            .build()?;
+        let table_root = table.table_root();
+        let engine = engine_to_handle(Arc::new(table.engine()), allocate_err);
+
+        let snapshot = unsafe {
+            let builder = if from_existing {
+                let base_builder = ok_or_panic(get_snapshot_builder(
+                    kernel_string_slice!(table_root),
+                    engine.shallow_copy(),
+                ));
+                let base_builder = snapshot_builder_with_version(base_builder, 0);
+                let base = ok_or_panic(snapshot_builder_build(base_builder));
+                let builder = ok_or_panic(get_snapshot_builder_from(
+                    base.shallow_copy(),
+                    engine.shallow_copy(),
+                ));
+                free_snapshot(base);
+                builder
+            } else {
+                ok_or_panic(get_snapshot_builder(
+                    kernel_string_slice!(table_root),
+                    engine.shallow_copy(),
+                ))
+            };
+            let builder = snapshot_builder_with_version(builder, 1);
+            let builder = match mode {
+                Some(mode) => snapshot_builder_with_incremental_crc_replay(builder, mode),
+                None => builder,
+            };
+            ok_or_panic(snapshot_builder_build(builder))
+        };
+        let stats = unsafe { snapshot_file_stats(snapshot.shallow_copy()) };
+        assert_eq!(stats != OptionalValue::None, expect_file_stats);
+        if let OptionalValue::Some(stats) = stats {
+            assert_eq!(stats.num_files, 1);
+        }
+
+        unsafe {
+            free_snapshot(snapshot);
+            free_engine(engine);
+        }
         Ok(())
     }
 

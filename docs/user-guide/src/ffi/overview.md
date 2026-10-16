@@ -134,6 +134,7 @@ Replace the input handle with the result; on error, the builder has been dropped
 | `get_snapshot_builder` | Create a snapshot builder from a table path |
 | `get_snapshot_builder_from` | Create a snapshot builder incrementally from an existing snapshot |
 | `snapshot_builder_with_version` | Pin the snapshot to a specific table version |
+| `snapshot_builder_with_incremental_crc_replay` | Set the stale CRC replay mode for fresh or incremental builds (`Disabled`, `UpToCommits`, or `Unlimited`) |
 | `snapshot_builder_with_log_tail` | Provide a log tail for catalog-managed tables |
 | `snapshot_builder_with_max_catalog_version` | Bound the snapshot to the version the catalog has ratified |
 | `snapshot_builder_build` | Consume the builder and produce the snapshot |
