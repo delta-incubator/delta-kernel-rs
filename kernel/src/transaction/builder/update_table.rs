@@ -27,12 +27,13 @@ use crate::{Engine, KernelError, KernelResult};
 ///
 /// # Schema changes
 ///
-/// Use [`Snapshot::alter_table`](crate::Snapshot::alter_table) for a standalone metadata-only
-/// schema change, such as adding a nullable column without writing data files.
+/// Use [`Snapshot::alter_table`](crate::Snapshot::alter_table) for schema changes that preserve
+/// logical data, optionally rewriting files with the evolved schema.
 ///
-/// Use **schema evolution during a write** to change the schema while writing or rewriting data
-/// files in the same transaction. Select the data operation, such as
+/// To evolve the schema while changing logical data, select the data operation, such as
 /// [`UpdateTableOperation::Write`], and configure the schema changes on the same builder.
+/// Operations without schema changes also use this builder, including
+/// [`UpdateTableOperation::Optimize`] with `data_change = false`.
 ///
 /// In both workflows, configure schema operations before `build()`, which validates and applies
 /// them. For schema evolution during a write, stage data-file changes on the returned
@@ -139,12 +140,13 @@ impl TransactionBuilder<UpdateTable> {
     /// Schema changes are rejected when `icebergCompatV2`, `icebergCompatV3`, or
     /// `allowColumnDefaults` is enabled. This applies to standalone ALTER TABLE transactions and
     /// schema evolution during writes.
-    pub fn build(self, engine: &dyn Engine, committer: Box<dyn Committer>) -> Result<Transaction> {
+    pub fn build(
+        self,
+        engine: &dyn Engine,
+        committer: Box<dyn Committer>,
+    ) -> KernelResult<Transaction> {
         self.validate()?;
-        let mut transaction = try_new_existing_table(self, committer)?;
-        transaction.physical_clustering_columns = transaction
-            .read_snapshot()?
-            .get_physical_clustering_columns(engine)?;
+        let transaction = try_new_existing_table(self, engine, committer)?;
         transaction.validate_domain_metadata_operations()?;
         Ok(transaction)
     }
@@ -195,6 +197,7 @@ pub(super) fn try_new_existing_table<
     MODE: ExecutionMode,
 >(
     builder: TransactionBuilder<STATE>,
+    engine: &dyn Engine,
     committer: Box<dyn Committer>,
 ) -> KernelResult<Transaction<STATE, MODE>> {
     let TransactionBuilder {
@@ -246,8 +249,10 @@ pub(super) fn try_new_existing_table<
         None => effective_table_config,
     };
 
+    let physical_clustering_columns = read_snapshot.get_physical_clustering_columns(engine)?;
     Ok(Transaction {
         read_snapshot_opt: Some(read_snapshot),
+        physical_clustering_columns,
         should_emit_metadata,
         user_domain_removals: domain_metadata_removals,
         is_blind_append,
@@ -312,15 +317,15 @@ mod tests {
     use crate::transaction::data_layout::DataLayout;
     use crate::transaction::{SchemaOperation, UpdateTableOperation};
     use crate::unit_test_utils::{load_test_table, test_schema_flat};
-    use crate::{Engine, KernelError, Result, SnapshotRef};
+    use crate::{Engine, KernelError, KernelResult, SnapshotRef};
 
     #[rstest]
     #[case::alter(false)]
     #[case::update(true)]
-    fn only_update_build_reads_clustering_metadata(
+    fn existing_table_build_reads_clustering_metadata(
         #[case] update: bool,
         #[values(true, false)] commit_available: bool,
-    ) -> Result<()> {
+    ) -> KernelResult<()> {
         let tempdir = tempfile::tempdir()?;
         let table_path = tempdir.path().join("table");
         std::fs::create_dir(&table_path)?;
@@ -355,10 +360,10 @@ mod tests {
                 .build(&engine, Box::new(FileSystemCommitter::new()))
                 .map(|transaction| transaction.physical_clustering_columns)
         };
-        if update && !commit_available {
+        if !commit_available {
             assert!(result.is_err());
         } else {
-            assert_eq!(result?, update.then(|| vec![column_name!("id")]));
+            assert_eq!(result?, Some(vec![column_name!("id")]));
         }
         Ok(())
     }
@@ -503,7 +508,7 @@ mod tests {
     fn builder_rejects_non_single_row_commit_info(
         #[case] row_count: usize,
         #[values(false, true)] alter_table: bool,
-    ) -> Result<()> {
+    ) -> KernelResult<()> {
         let (engine, snapshot, _tempdir) = load_test_table("table-without-dv-small")?;
         let commit_info_schema = schema_ref! { nullable "tag": STRING };
         let arrow_schema: ArrowSchema = commit_info_schema.as_ref().try_into_arrow()?;
@@ -609,7 +614,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_alter_table_schema_changes_are_rejected() -> Result<()> {
+    fn empty_alter_table_schema_changes_are_rejected() -> KernelResult<()> {
         let (_engine, snapshot, _tempdir) = load_test_table("table-without-dv-small")?;
         let error = snapshot
             .alter_table("test-engine")
@@ -884,78 +889,12 @@ mod tests {
         Ok(())
     }
 
-    #[derive(Clone, Copy, Debug)]
-    enum StagedFileAction {
-        Add,
-        Remove,
-        DeletionVectorUpdate,
-    }
-
-    #[rstest]
-    #[case::add(StagedFileAction::Add, &[true])]
-    #[case::empty_add(StagedFileAction::Add, &[])]
-    #[case::remove(StagedFileAction::Remove, &[true])]
-    #[case::empty_remove(StagedFileAction::Remove, &[])]
-    #[case::unselected_remove(StagedFileAction::Remove, &[false])]
-    #[case::dv_update(StagedFileAction::DeletionVectorUpdate, &[true])]
-    #[case::empty_dv_update(StagedFileAction::DeletionVectorUpdate, &[])]
-    #[case::unselected_dv_update(StagedFileAction::DeletionVectorUpdate, &[false])]
-    fn alter_table_commit_rejects_staged_file_batches(
-        #[case] action: StagedFileAction,
-        #[case] selection_vector: &[bool],
-    ) -> KernelResult<()> {
-        let (engine, snapshot, _tempdir) = load_test_table("table-without-dv-small")?;
-        let mut transaction = snapshot
-            .alter_table("test-engine")
-            .add_column(StructField::nullable("new_column", DataType::STRING))
-            .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?;
-
-        assert!(!transaction.data_change);
-
-        let data = || {
-            let values = Arc::new(Int32Array::from(vec![1; selection_vector.len()])) as ArrayRef;
-            Box::new(ArrowEngineData::new(
-                RecordBatch::try_from_iter([("value", values)]).unwrap(),
-            ))
-        };
-        match action {
-            StagedFileAction::Add => transaction
-                .staged_data_changes
-                .add_files_metadata
-                .push(data()),
-            StagedFileAction::Remove | StagedFileAction::DeletionVectorUpdate => {
-                let data = crate::FilteredEngineData::try_new(data(), selection_vector.to_vec())?;
-                match action {
-                    StagedFileAction::Remove => {
-                        transaction
-                            .staged_data_changes
-                            .remove_files_metadata
-                            .push(data);
-                    }
-                    StagedFileAction::DeletionVectorUpdate => {
-                        transaction.staged_data_changes.dv_matched_files.push(data);
-                        transaction.staged_data_changes.num_dv_updates = selection_vector
-                            .iter()
-                            .filter(|&&selected| selected)
-                            .count();
-                    }
-                    StagedFileAction::Add => unreachable!(),
-                }
-            }
-        }
-        assert!(!transaction.data_change);
-        let error = transaction.commit(engine.as_ref()).unwrap_err();
-        assert!(
-            matches!(&error, KernelError::InvalidTransactionState(message)
-            if message == "ALTER TABLE cannot include data-file actions")
-        );
-        Ok(())
-    }
-
     #[rstest]
     #[case(false)]
     #[case(true)]
-    fn schema_evolution_preserves_explicit_data_change(#[case] data_change: bool) -> Result<()> {
+    fn schema_evolution_preserves_explicit_data_change(
+        #[case] data_change: bool,
+    ) -> KernelResult<()> {
         let (engine, snapshot, _tempdir) = load_test_table("table-without-dv-small")?;
         let transaction = snapshot
             .update_table(UpdateTableOperation::Write, "test-engine", data_change)
@@ -1022,7 +961,7 @@ mod tests {
         #[case] app_ids: &[&str],
         #[case] expected: &str,
         #[values(false, true)] alter_table: bool,
-    ) -> Result<()> {
+    ) -> KernelResult<()> {
         let (engine, snapshot, _tempdir) = load_test_table("table-without-dv-small")?;
         let result = if alter_table {
             configure_builder_metadata(snapshot.alter_table("test-engine"), additions, app_ids)
@@ -1081,7 +1020,7 @@ mod tests {
     #[rstest]
     fn domain_metadata_without_table_feature_is_rejected_during_build(
         #[values(false, true)] alter_table: bool,
-    ) -> Result<()> {
+    ) -> KernelResult<()> {
         let (engine, snapshot, _tempdir) = load_test_table("table-without-dv-small")?;
         let result = if alter_table {
             snapshot

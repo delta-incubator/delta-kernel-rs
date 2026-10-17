@@ -1,7 +1,5 @@
 //! Existing-table transaction FFI lifecycle.
 
-use delta_kernel::engine_data::FilteredEngineData;
-
 use super::committed::commit_result_to_committed_handle;
 use super::*;
 
@@ -26,9 +24,9 @@ pub struct ExclusiveUpdateTableTransactionBuilder;
 /// Returns an owned builder, or an error if `engine_info` is not valid UTF-8. The operation and
 /// engine info cannot be changed. `data_change` is also immutable and is preserved for empty
 /// commits. Use `true` for inserting or deleting rows or updating their values, even if the row
-/// count stays the same. Use `false` for metadata-only changes, such as adding a nullable column
-/// with `ALTER TABLE`, or compaction that rewrites files without changing any records. Build
-/// validation rejects `ALTER TABLE` with `true` and blind append with `false`.
+/// count stays the same. Use `false` for metadata-only changes or compaction that rewrites files
+/// without changing any records. Build validation rejects blind append with `false`. Use
+/// [`new_alter_table_txn_builder`] for schema changes with the ALTER TABLE operation.
 ///
 /// # Safety
 ///
@@ -360,13 +358,9 @@ pub unsafe extern "C" fn update_table_txn_builder_set_nullable(
         .into_extern_result(&engine)
 }
 
-pub(super) unsafe fn decode_column_name(column: &FfiColumnName) -> Result<ColumnName> {
-    Ok(ColumnName::new(unsafe { column.path.try_to_strings() }?))
-}
-
 pub(super) fn decode_single_field(
     schema: &EngineSchema,
-) -> Result<delta_kernel::schema::StructField> {
+) -> KernelResult<delta_kernel::schema::StructField> {
     let mut fields = decode_engine_schema(schema)?.into_fields();
     match (fields.next(), fields.next()) {
         (Some(field), None) => Ok(field),
@@ -648,17 +642,7 @@ pub unsafe extern "C" fn update_table_txn_remove_files(
     let engine = unsafe { engine.as_ref() };
     let data = unsafe { data.into_inner() };
     let txn = unsafe { txn.as_mut() };
-    let selection_vector = if selection_vector.is_null() || selection_vector_len == 0 {
-        vec![]
-    } else {
-        let raw = unsafe { std::slice::from_raw_parts(selection_vector, selection_vector_len) };
-        raw.iter().map(|&value| value != 0).collect()
-    };
-    let result: KernelResult<bool> = (|| {
-        let filtered = FilteredEngineData::try_new(data, selection_vector)?;
-        txn.remove_files(filtered);
-        Ok(true)
-    })();
+    let result = unsafe { stage_file_removals(txn, data, selection_vector, selection_vector_len) };
     result.into_extern_result(&engine)
 }
 

@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use delta_kernel::schema::schema_ref;
 use delta_kernel::snapshot::{Snapshot, SnapshotRef};
 use delta_kernel::transaction::{Transaction, UpdateTableOperation};
-use delta_kernel::{Engine, FileMeta, KernelError, KernelResult};
+use delta_kernel::{Engine, FileMeta, KernelResult};
 use rstest::rstest;
 use serde_json::{json, Value};
 use tempfile::TempDir;

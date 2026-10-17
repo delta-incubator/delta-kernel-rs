@@ -22,7 +22,7 @@ use crate::transaction::commit_info::collect_operation_metadata;
 use crate::transaction::schema_evolution::SchemaOperation;
 use crate::transaction::{AlterTable, CreateTable, SupportsSchemaChanges, UpdateTable};
 use crate::utils::require;
-use crate::{EngineData, KernelError, Result};
+use crate::{EngineData, KernelError, KernelResult};
 
 /// A transaction type supported by [`TransactionBuilder`].
 ///
@@ -165,7 +165,7 @@ impl<T: SupportsSchemaChanges> TransactionBuilder<T> {
     pub(crate) fn with_schema_changes(
         mut self,
         changes: impl IntoIterator<Item = SchemaOperation>,
-    ) -> Result<TransactionBuilder<T::WithSchemaChanges>> {
+    ) -> KernelResult<TransactionBuilder<T::WithSchemaChanges>> {
         let mut changes = changes.into_iter().peekable();
         require!(
             changes.peek().is_some(),

@@ -16,12 +16,15 @@ use delta_kernel::schema::{
 };
 use delta_kernel::snapshot::Snapshot;
 use delta_kernel::table_features::ColumnMappingMode;
+use delta_kernel::transaction::builder::update_table::ExistingTableBuilderState;
 use delta_kernel::transaction::create_table::create_table;
 use delta_kernel::transaction::data_layout::DataLayout;
-use delta_kernel::transaction::UpdateTableOperation;
-use delta_kernel::{KernelError, KernelResult};
+use delta_kernel::transaction::{SupportsDataFiles, Transaction, UpdateTableOperation};
+use delta_kernel::{KernelResult, SnapshotRef};
 use rstest::rstest;
 use serde_json::json;
+use test_utils::delta_kernel_default_engine::executor::tokio::TokioBackgroundExecutor;
+use test_utils::delta_kernel_default_engine::DefaultEngine;
 use test_utils::{
     add_commit, assert_result_error_with_message, column_mapping_fixtures as fixtures,
     create_table as create_test_table, create_table_and_load_snapshot, engine_store_setup,
@@ -174,13 +177,21 @@ async fn schema_evolution_while_writing_round_trips_new_column(
 #[tokio::test]
 async fn schema_evolution_during_data_preserving_rewrite(
     #[values("none", "name", "id")] cm_mode: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
+    #[values(false, true)] alter: bool,
+    #[values(false, true)] cdf_enabled: bool,
+) -> KernelResult<(), Box<dyn std::error::Error>> {
     let (_temp_dir, table_path, engine) = test_table_setup()?;
     let snapshot = create_table_and_load_snapshot(
         &table_path,
         simple_schema(),
         engine.as_ref(),
-        &[("delta.columnMapping.mode", cm_mode)],
+        &[
+            ("delta.columnMapping.mode", cm_mode),
+            (
+                "delta.enableChangeDataFeed",
+                if cdf_enabled { "true" } else { "false" },
+            ),
+        ],
     )?;
     let old_batch = RecordBatch::try_new(
         Arc::new(snapshot.schema().as_ref().try_into_arrow()?),
@@ -196,11 +207,50 @@ async fn schema_evolution_during_data_preserving_rewrite(
         HashMap::new(),
     )
     .await?;
-    let mut transaction = before
-        .clone()
-        .update_table(UpdateTableOperation::Optimize, "test-engine", false)
-        .add_column(StructField::nullable("country", DataType::STRING))
-        .build(engine.as_ref(), committer())?;
+    let field = StructField::nullable("country", DataType::STRING);
+    let (post, batch) = if alter {
+        let transaction = before
+            .clone()
+            .alter_table("test-engine")
+            .add_column(field)
+            .build(engine.as_ref(), committer())?;
+        rewrite_with_evolved_schema(transaction, &before, engine.as_ref(), old_batch).await?
+    } else {
+        let transaction = before
+            .clone()
+            .update_table(UpdateTableOperation::Optimize, "test-engine", false)
+            .add_column(field)
+            .build(engine.as_ref(), committer())?;
+        rewrite_with_evolved_schema(transaction, &before, engine.as_ref(), old_batch).await?
+    };
+    let fresh = Snapshot::builder_for(&table_path).build(engine.as_ref())?;
+    for snapshot in [post, fresh] {
+        assert_eq!(snapshot.version(), before.version() + 1);
+        assert!(snapshot.schema().contains("country"));
+        for field in before.schema().fields() {
+            assert_eq!(snapshot.schema().field(field.name()), Some(field));
+        }
+        let adds = read_actions_from_commit(snapshot.table_root(), snapshot.version(), "add")?;
+        let removes =
+            read_actions_from_commit(snapshot.table_root(), snapshot.version(), "remove")?;
+        assert_eq!(adds.len(), 1);
+        assert_eq!(removes.len(), 1);
+        assert_ne!(adds[0]["path"], removes[0]["path"]);
+        assert_eq!(adds[0]["dataChange"], false);
+        assert_eq!(removes[0]["dataChange"], false);
+    }
+    test_read(&ArrowEngineData::new(batch), before.table_root(), engine)?;
+    Ok(())
+}
+
+async fn rewrite_with_evolved_schema<
+    T: SupportsDataFiles<BuilderState = ExistingTableBuilderState> + std::fmt::Debug,
+>(
+    mut transaction: Transaction<T>,
+    before: &SnapshotRef,
+    engine: &DefaultEngine<TokioBackgroundExecutor>,
+    old_batch: RecordBatch,
+) -> KernelResult<(SnapshotRef, RecordBatch), Box<dyn std::error::Error>> {
     let write_context = transaction.write_state()?.write_context_builder().build()?;
     let mut columns = old_batch.columns().to_vec();
     columns.push(new_null_array(&ArrowDataType::Utf8, old_batch.num_rows()));
@@ -219,29 +269,12 @@ async fn schema_evolution_during_data_preserving_rewrite(
             .await?,
     );
     let scan = before.clone().scan_builder().build()?;
-    for metadata in scan.scan_metadata(engine.as_ref())? {
+    for metadata in scan.scan_metadata(engine)? {
         transaction.remove_files(metadata?.scan_files);
     }
 
-    let post = transaction
-        .commit(engine.as_ref())?
-        .unwrap_post_commit_snapshot();
-    let fresh = Snapshot::builder_for(&table_path).build(engine.as_ref())?;
-    for snapshot in [post, fresh] {
-        assert_eq!(snapshot.version(), before.version() + 1);
-        assert!(snapshot.schema().contains("country"));
-        for field in before.schema().fields() {
-            assert_eq!(snapshot.schema().field(field.name()), Some(field));
-        }
-        for action in ["add", "remove"] {
-            let actions =
-                read_actions_from_commit(snapshot.table_root(), snapshot.version(), action)?;
-            assert_eq!(actions.len(), 1);
-            assert_eq!(actions[0]["dataChange"], false);
-        }
-    }
-    test_read(&ArrowEngineData::new(batch), before.table_root(), engine)?;
-    Ok(())
+    let post = transaction.commit(engine)?.unwrap_post_commit_snapshot();
+    Ok((post, batch))
 }
 
 /// Reads `delta.columnMapping.maxColumnId` from the snapshot's metadata. Returns
@@ -1541,7 +1574,7 @@ async fn schema_changes_blocked_when_iceberg_compat_enabled(
         Some(UpdateTableOperation::Custom("UNKNOWN".to_string()))
     )]
     operation: Option<UpdateTableOperation>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> KernelResult<(), Box<dyn std::error::Error>> {
     let (_temp_dir, table_path, engine) = test_table_setup_mt()?;
     let snapshot = create_table_and_load_snapshot(
         &table_path,
@@ -1618,7 +1651,7 @@ async fn add_column_with_orphan_default_metadata_succeeds() -> KernelResult<()> 
 #[tokio::test]
 async fn schema_changes_blocked_when_allow_column_defaults_enabled(
     #[case] operation: Option<UpdateTableOperation>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> KernelResult<(), Box<dyn std::error::Error>> {
     let (store, engine, table_url) = engine_store_setup("alter_column_defaults", None);
     let table_url = create_test_table(
         store,

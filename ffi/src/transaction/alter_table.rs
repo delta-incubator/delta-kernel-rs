@@ -1,10 +1,13 @@
-//! Metadata-only ALTER TABLE transaction FFI lifecycle.
+//! ALTER TABLE transaction FFI lifecycle.
 
 use delta_kernel::transaction::builder::alter_table::{Modifying, Ready};
 
 use super::committed::commit_result_to_committed_handle;
-use super::update_table::{decode_column_name, decode_single_field};
+use super::deletion_vector::stage_deletion_vector_updates;
+use super::update_table::decode_single_field;
+use super::write_context::SharedWriteState;
 use super::*;
+use crate::scan::SharedScanMetadataIterator;
 
 /// Opaque builder state for callers that cannot express Rust type-state transitions.
 ///
@@ -33,7 +36,7 @@ impl AlterTableBuilder {
         self,
         engine: &dyn delta_kernel::Engine,
         committer: Box<dyn delta_kernel::committer::Committer>,
-    ) -> Result<AlterTableTransaction> {
+    ) -> KernelResult<AlterTableTransaction> {
         match self {
             Self::Ready(_) => Err(delta_kernel::KernelError::invalid_transaction_state(
                 "ALTER TABLE requires at least one schema change",
@@ -59,10 +62,10 @@ macro_rules! with_alter_builder {
 #[handle_descriptor(target=AlterTableBuilder, mutable=true, sized=true)]
 pub struct ExclusiveAlterTableTransactionBuilder;
 
-/// An owned metadata-only transaction. Commit it or release it with [`free_alter_table_txn`].
+/// An owned ALTER transaction. Commit it or release it with [`free_alter_table_txn`].
 ///
 /// Commit information, operation metrics, and user domain metadata can be supplied before commit.
-/// This handle cannot be passed to update-table data-file or manifest APIs.
+/// File rewrites must preserve logical data; all Add and Remove actions use `dataChange = false`.
 #[handle_descriptor(target=AlterTableTransaction, mutable=true, sized=true)]
 pub struct ExclusiveAlterTableTransaction;
 
@@ -80,7 +83,8 @@ pub unsafe extern "C" fn new_alter_table_txn_builder(
     engine: Handle<SharedExternEngine>,
 ) -> ExternResult<Handle<ExclusiveAlterTableTransactionBuilder>> {
     let engine = unsafe { engine.as_ref() };
-    let engine_info: Result<String> = unsafe { TryFromStringSlice::try_from_slice(&engine_info) };
+    let engine_info: KernelResult<String> =
+        unsafe { TryFromStringSlice::try_from_slice(&engine_info) };
     engine_info
         .map(|engine_info| {
             let snapshot = unsafe { snapshot.clone_as_arc() };
@@ -89,10 +93,11 @@ pub unsafe extern "C" fn new_alter_table_txn_builder(
         .into_extern_result(&engine)
 }
 
-/// Validates and builds a metadata-only transaction with the filesystem committer.
+/// Validates and builds an ALTER transaction with the filesystem committer.
 ///
 /// Returns an error for missing or invalid schema operations, unsupported tables, or invalid
-/// transaction metadata.
+/// transaction metadata, or table-state I/O. On clustered tables, building may replay the log to
+/// read clustering columns for write statistics.
 ///
 /// # Safety
 ///
@@ -113,7 +118,7 @@ pub unsafe extern "C" fn alter_table_txn_builder_build(
         .into_extern_result(&engine)
 }
 
-/// Validates and builds a metadata-only transaction with the supplied committer.
+/// Validates and builds an ALTER transaction with the supplied committer.
 ///
 /// Returns the same validation errors as [`alter_table_txn_builder_build`].
 ///
@@ -191,8 +196,8 @@ pub unsafe extern "C" fn alter_table_txn_builder_add_column_at(
 ) -> ExternResult<Handle<ExclusiveAlterTableTransactionBuilder>> {
     let builder = unsafe { *builder.into_inner() };
     let engine = unsafe { engine.as_ref() };
-    let result: Result<Handle<ExclusiveAlterTableTransactionBuilder>> = (|| {
-        let parent = unsafe { decode_column_name(required_ref(parent)?) }?;
+    let result: KernelResult<Handle<ExclusiveAlterTableTransactionBuilder>> = (|| {
+        let parent = unsafe { required_ref(parent)?.try_to_column_name() }?;
         let field = decode_single_field(unsafe { required_ref(field) }?)?;
         Ok(with_alter_builder!(builder, |builder| {
             Box::new(AlterTableBuilder::from(
@@ -220,7 +225,7 @@ pub unsafe extern "C" fn alter_table_txn_builder_set_nullable(
 ) -> ExternResult<Handle<ExclusiveAlterTableTransactionBuilder>> {
     let builder = unsafe { *builder.into_inner() };
     let engine = unsafe { engine.as_ref() };
-    unsafe { required_ref(column).and_then(|column| decode_column_name(column)) }
+    unsafe { required_ref(column).and_then(|column| column.try_to_column_name()) }
         .map(|column| {
             with_alter_builder!(builder, |builder| {
                 Box::new(AlterTableBuilder::from(builder.set_nullable(column))).into()
@@ -245,7 +250,7 @@ pub unsafe extern "C" fn alter_table_txn_builder_with_correlation_id(
 ) -> ExternResult<Handle<ExclusiveAlterTableTransactionBuilder>> {
     let builder = unsafe { *builder.into_inner() };
     let engine = unsafe { engine.as_ref() };
-    let correlation_id: Result<String> =
+    let correlation_id: KernelResult<String> =
         unsafe { TryFromStringSlice::try_from_slice(&correlation_id) };
     correlation_id
         .map(|identifier| {
@@ -400,7 +405,7 @@ pub unsafe extern "C" fn alter_table_txn_builder_with_transaction_id(
 ) -> ExternResult<Handle<ExclusiveAlterTableTransactionBuilder>> {
     let builder = unsafe { *builder.into_inner() };
     let engine = unsafe { engine.as_ref() };
-    let app_id: Result<String> = unsafe { TryFromStringSlice::try_from_slice(&app_id) };
+    let app_id: KernelResult<String> = unsafe { TryFromStringSlice::try_from_slice(&app_id) };
     app_id
         .map(|app_id| {
             with_alter_builder!(builder, |builder| {
@@ -499,7 +504,133 @@ pub unsafe extern "C" fn alter_table_txn_with_domain_metadata(
     .into_extern_result(&engine)
 }
 
-/// Commits a metadata-only transaction and returns an owned committed-transaction handle.
+/// Returns owned write state using the evolved schema, or an error if the transaction cannot write.
+///
+/// The state can outlive the transaction. Release it with `free_write_state`. The transaction
+/// remains owned by the caller on success and error.
+///
+/// # Safety
+///
+/// `txn` must point to a valid live handle and is borrowed for this call. `engine` must be valid
+/// and is borrowed. A null `txn` returns an error.
+#[no_mangle]
+pub unsafe extern "C" fn alter_table_txn_write_state(
+    txn: *const Handle<ExclusiveAlterTableTransaction>,
+    engine: Handle<SharedExternEngine>,
+) -> ExternResult<Handle<SharedWriteState>> {
+    let engine = unsafe { engine.as_ref() };
+    unsafe { required_ref(txn) }
+        .and_then(|txn| unsafe { txn.as_ref() }.write_state())
+        .map(Into::into)
+        .into_extern_result(&engine)
+}
+
+/// Stages replacement files written with the evolved schema. Returns true on success, or an error
+/// for a null `txn`.
+///
+/// The connector must preserve logical data across the added and removed files.
+///
+/// # Safety
+///
+/// `txn` must point to a valid handle and is mutably borrowed; it remains owned by the caller.
+/// `write_metadata` must be valid and is consumed on success and error. `engine` must be valid and
+/// is borrowed. A null `txn` is allowed and returns an error.
+#[no_mangle]
+pub unsafe extern "C" fn alter_table_txn_add_files(
+    txn: *mut Handle<ExclusiveAlterTableTransaction>,
+    write_metadata: Handle<ExclusiveEngineData>,
+    engine: Handle<SharedExternEngine>,
+) -> ExternResult<bool> {
+    let write_metadata = unsafe { write_metadata.into_inner() };
+    let engine = unsafe { engine.as_ref() };
+    let result = unsafe { required_mut(txn) }.map(|txn| {
+        unsafe { txn.as_mut() }.add_files(write_metadata);
+        true
+    });
+    result.into_extern_result(&engine)
+}
+
+/// Stages selected files for removal during a data-preserving rewrite.
+///
+/// `data` must use the scan-row schema and preserve scan metadata. Select only rows active in the
+/// original scan. A null or empty selection vector selects every row; use it only when all rows are
+/// active and intended for removal. Returns true on success, or an error for a null `txn` or an
+/// invalid selection vector.
+///
+/// # Safety
+///
+/// `txn` must point to a valid handle and is mutably borrowed. `engine` must be valid and is
+/// borrowed. `data` must be valid and is consumed on success and error. A non-null selection vector
+/// with nonzero length must address that many readable bytes for this call. A null `txn` returns
+/// an error. The transaction remains owned by the caller on success and error.
+#[no_mangle]
+pub unsafe extern "C" fn alter_table_txn_remove_files(
+    txn: *mut Handle<ExclusiveAlterTableTransaction>,
+    data: Handle<ExclusiveEngineData>,
+    selection_vector: *const u8,
+    selection_vector_len: usize,
+    engine: Handle<SharedExternEngine>,
+) -> ExternResult<bool> {
+    let data = unsafe { data.into_inner() };
+    let engine = unsafe { engine.as_ref() };
+    let result = unsafe { required_mut(txn) }.and_then(|txn| unsafe {
+        stage_file_removals(txn.as_mut(), data, selection_vector, selection_vector_len)
+    });
+    result.into_extern_result(&engine)
+}
+
+/// Acknowledges preservation of Stable Row IDs and Stable Row Commit Versions in replacement files.
+///
+/// Required before committing removals on row-tracked tables. Kernel does not inspect file contents
+/// to verify preservation. Returns true on success, or an error for a null `txn`.
+///
+/// # Safety
+///
+/// `txn` must point to a valid handle and is mutably borrowed. `engine` must be valid and is
+/// borrowed. A null `txn` returns an error. The transaction remains owned by the caller.
+#[no_mangle]
+pub unsafe extern "C" fn alter_table_txn_ack_row_tracking_preservation(
+    txn: *mut Handle<ExclusiveAlterTableTransaction>,
+    engine: Handle<SharedExternEngine>,
+) -> ExternResult<bool> {
+    let engine = unsafe { engine.as_ref() };
+    unsafe { required_mut(txn) }
+        .map(|txn| {
+            unsafe { txn.as_mut() }.ack_row_tracking_preservation();
+            true
+        })
+        .into_extern_result(&engine)
+}
+
+/// Stages replacement deletion-vector descriptors without changing logical data.
+///
+/// Each descriptor must match a selected scan row and preserve its logical rows, for example by
+/// relocating the same bitmap. Kernel does not verify bitmap equivalence. Matched scan metadata
+/// must have accurate `numRecords` and valid AddFile fields. An unmatched path or invalid metadata
+/// returns an error without changing the transaction. Returns true on success.
+///
+/// # Safety
+///
+/// `txn` must point to a valid handle and is mutably borrowed. A null `txn` returns an error.
+/// `dv_map` and `scan_iter` must be valid and are consumed on success and error. `engine` must be
+/// valid and is borrowed. The transaction remains owned by the caller.
+#[no_mangle]
+pub unsafe extern "C" fn alter_table_txn_update_deletion_vectors(
+    txn: *mut Handle<ExclusiveAlterTableTransaction>,
+    dv_map: Handle<ExclusiveDvDescriptorMap>,
+    scan_iter: Handle<SharedScanMetadataIterator>,
+    engine: Handle<SharedExternEngine>,
+) -> ExternResult<bool> {
+    let dv_map = unsafe { dv_map.into_inner() };
+    let scan_iter = unsafe { scan_iter.into_inner() };
+    let engine = unsafe { engine.as_ref() };
+    unsafe { required_mut(txn) }
+        .and_then(|txn| unsafe { stage_deletion_vector_updates(txn.as_mut(), *dv_map, &scan_iter) })
+        .map(|_| true)
+        .into_extern_result(&engine)
+}
+
+/// Commits an ALTER transaction and returns an owned committed-transaction handle.
 ///
 /// Returns an error for validation, I/O, or commit conflicts. Release the result with
 /// [`free_committed_transaction`]. Conflict/retry state is not preserved by this FFI.
@@ -528,8 +659,16 @@ pub unsafe extern "C" fn free_alter_table_txn(txn: Handle<ExclusiveAlterTableTra
     txn.drop_handle();
 }
 
-unsafe fn required_ref<'a, T>(value: *const T) -> Result<&'a T> {
+unsafe fn required_ref<'a, T>(value: *const T) -> KernelResult<&'a T> {
     unsafe { value.as_ref() }.ok_or_else(|| {
+        delta_kernel::KernelError::invalid_transaction_state(
+            "ALTER TABLE argument must not be null",
+        )
+    })
+}
+
+unsafe fn required_mut<'a, T>(value: *mut T) -> KernelResult<&'a mut T> {
+    unsafe { value.as_mut() }.ok_or_else(|| {
         delta_kernel::KernelError::invalid_transaction_state(
             "ALTER TABLE argument must not be null",
         )

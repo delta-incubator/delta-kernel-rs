@@ -200,7 +200,7 @@ fn new_leaf_node_writer_uses_effective_config_schema_not_snapshot() -> KernelRes
 }
 
 #[test]
-fn manifest_commit_after_schema_change_uses_evolved_schema() -> Result<()> {
+fn manifest_commit_after_schema_change_uses_evolved_schema() -> KernelResult<()> {
     let (engine, table_root) = setup_table()?;
     let mut checkpoint = minimal_checkpoint_action("metadata/root-v1.parquet", 1)?;
     let max_column_id = find_max_column_id_in_schema(&checkpoint.metadata.parse_schema()?)
@@ -230,7 +230,7 @@ fn manifest_commit_after_schema_change_uses_evolved_schema() -> Result<()> {
 }
 
 #[test]
-fn alter_table_commit_rejects_internal_manifest_write() -> Result<()> {
+fn alter_table_commit_rejects_internal_manifest_write() -> KernelResult<()> {
     let (engine, transaction, _tempdir) = create_existing_table_txn()?;
     let snapshot = transaction.read_snapshot_opt.unwrap();
     let file = FileMeta {

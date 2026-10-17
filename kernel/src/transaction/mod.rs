@@ -202,16 +202,15 @@ pub struct CreateTable;
 
 /// Marker type for alter-table (schema evolution) transactions.
 ///
-/// Transactions in this state perform metadata-only commits. Data file operations are not
-/// available at compile time because `AlterTable` does not implement [`SupportsDataFiles`].
+/// Transactions in this state apply schema changes and may rewrite files without changing logical
+/// data. The transaction always uses `dataChange = false`.
 #[derive(Debug)]
 pub struct AlterTable<S = builder::alter_table::Modifying>(PhantomType<S>);
 
 /// Marker trait for transaction states that support data file operations.
 ///
-/// Only transaction types that implement this trait can access methods for adding, removing, or
-/// updating data files. This prevents compile-time misuse by states like `AlterTable` that
-/// only perform metadata-only commits.
+/// Transaction types that implement this trait can access write state, statistics, and file
+/// additions. File removals additionally require an existing-table builder state.
 pub trait SupportsDataFiles: TransactionType {}
 
 /// A transaction type that accepts schema changes against an existing table.
@@ -225,6 +224,7 @@ pub trait SupportsSchemaChanges: TransactionType<BuilderState = ExistingTableBui
 
 impl SupportsDataFiles for CreateTable {}
 impl SupportsDataFiles for UpdateTable {}
+impl SupportsDataFiles for AlterTable {}
 
 impl SupportsSchemaChanges for UpdateTable {
     type WithSchemaChanges = UpdateTable;
@@ -236,37 +236,13 @@ impl<S> SupportsSchemaChanges for AlterTable<S> {
 
 /// A type alias for alter-table transactions.
 ///
-/// This provides a restricted API surface that only exposes operations valid during ALTER
-/// commands. Data file operations are not available at compile time because `AlterTable`
-/// does not implement [`SupportsDataFiles`].
+/// Schema operations are applied before building this transaction. Use [`Self::write_state`] to
+/// write replacement files with the evolved schema, then stage them with [`Self::add_files`] and
+/// remove the replaced files with [`Self::remove_files`]. The connector must preserve logical data;
+/// Kernel fixes `dataChange = false` but does not inspect file contents to verify equivalence.
 ///
-/// ```compile_fail,E0599
-/// use delta_kernel::transaction::AlterTableTransaction;
-/// fn write_state(txn: AlterTableTransaction) {
-///     let _ = txn.write_state();
-/// }
-/// ```
-///
-/// ```compile_fail,E0599
-/// use delta_kernel::{EngineData, transaction::AlterTableTransaction};
-/// fn add_files(mut txn: AlterTableTransaction, data: Box<dyn EngineData>) {
-///     txn.add_files(data);
-/// }
-/// ```
-///
-/// ```compile_fail,E0599
-/// use delta_kernel::{engine_data::FilteredEngineData, transaction::AlterTableTransaction};
-/// fn remove_files(mut txn: AlterTableTransaction, data: FilteredEngineData) {
-///     txn.remove_files(data);
-/// }
-/// ```
-///
-/// ```compile_fail,E0599
-/// use delta_kernel::transaction::AlterTableTransaction;
-/// fn update_deletion_vectors(mut txn: AlterTableTransaction) {
-///     let _ = txn.update_deletion_vectors(Default::default(), std::iter::empty());
-/// }
-/// ```
+/// Manifest writes, explicit row-tracking high-water marks, and user domain removals remain
+/// available only on update-table transactions.
 ///
 /// ```compile_fail,E0599
 /// use delta_kernel::{Engine, transaction::AlterTableTransaction};
@@ -279,20 +255,6 @@ impl<S> SupportsSchemaChanges for AlterTable<S> {
 /// use delta_kernel::{FileMeta, transaction::AlterTableTransaction};
 /// fn root_manifest(txn: AlterTableTransaction, file: FileMeta) {
 ///     let _ = txn.with_root_manifest_file(file);
-/// }
-/// ```
-///
-/// ```compile_fail,E0599
-/// use delta_kernel::transaction::AlterTableTransaction;
-/// fn stats_schema(txn: AlterTableTransaction) {
-///     let _ = txn.stats_schema();
-/// }
-/// ```
-///
-/// ```compile_fail,E0599
-/// use delta_kernel::transaction::AlterTableTransaction;
-/// fn add_files_schema(txn: AlterTableTransaction) {
-///     let _ = txn.add_files_schema();
 /// }
 /// ```
 ///
@@ -319,14 +281,16 @@ pub type AlterTableTransaction = Transaction<AlterTable>;
 /// - [`UpdateTable`] (default): Full API for modifying existing tables.
 /// - [`CreateTable`]: Restricted API for table creation (see
 ///   [`CreateTableTransaction`](create_table::CreateTableTransaction)).
-/// - [`AlterTable`]: Metadata-only schema changes, without data-file or manifest APIs.
+/// - [`AlterTable`]: Schema changes and data-preserving file rewrites, without manifest APIs.
 ///
 /// The independent type parameter `MODE` selects the [`ExecutionMode`], which provides an
 /// abstraction over 1) how staged changes are represented and 2) how to inspect the changes. The
 /// default, [`Imperative`], stages [`EngineData`] and provides [`commit`](Self::commit).
 ///
-/// [`UpdateTable`] supports schema evolution together with data-file changes. Standalone ALTER
-/// transactions use [`AlterTable`], which does not implement [`SupportsDataFiles`].
+/// [`UpdateTable`] supports schema evolution together with logical data changes. ALTER transactions
+/// use [`AlterTable`] and require logical data to be preserved when rewriting files.
+/// Operations without schema changes use [`UpdateTable`], including OPTIMIZE with
+/// `dataChange = false`.
 ///
 /// Configure schema and data-change intent on the builder. Built transactions do not expose
 /// setters for either, including when the `internal-api` feature is enabled.
@@ -525,8 +489,9 @@ impl<STATE> Transaction<STATE, Imperative> {
     ///   transaction in case of a conflict so the user can retry, etc.)
     /// - Err(KernelError) indicates a non-retryable error (e.g. logic/validation error).
     ///
-    /// `ALTER TABLE` returns a validation error if any data-file batches or manifest writes are
-    /// staged. Empty or fully unselected data-file batches are also rejected.
+    /// ALTER transactions require `dataChange = false` and at least one queued schema operation.
+    /// File rewrites and deletion-vector updates must preserve logical data. Manifest writes are
+    /// not supported for ALTER.
     #[instrument(
         parent = &self.span,
         name = TRANSACTION_COMMIT_SPAN,
@@ -1276,11 +1241,6 @@ impl<STATE, MODE: ExecutionMode> Transaction<STATE, MODE> {
             (false, CommitOperation::AlterTable) if self.data_change => {
                 Err(KernelError::invalid_transaction_state(
                     "ALTER TABLE requires data_change to be false",
-                ))
-            }
-            (false, CommitOperation::AlterTable) if self.has_data_file_actions() => {
-                Err(KernelError::invalid_transaction_state(
-                    "ALTER TABLE cannot include data-file actions",
                 ))
             }
             #[cfg(feature = "adaptive-metadata-in-dev")]

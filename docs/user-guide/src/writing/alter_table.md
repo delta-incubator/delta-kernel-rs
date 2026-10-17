@@ -2,8 +2,8 @@
 
 To add a column to an existing Delta table, you build an `AlterTableTransaction`
 from a `Snapshot`, queue one or more schema operations, and commit. The result
-is a metadata-only commit that updates the table's schema without rewriting any
-data files.
+updates the table's schema. You can commit without rewriting files, or rewrite files while
+preserving the table's logical data.
 
 Before reading this page, make sure you understand
 [Creating a Table](./create_table.md) and
@@ -11,30 +11,31 @@ Before reading this page, make sure you understand
 
 ## ALTER TABLE versus schema evolution
 
-Use **ALTER TABLE** for a standalone, metadata-only schema change. For example, you can add a nullable
-column without writing or removing data files.
+Use **ALTER TABLE** for schema changes that preserve logical data. You can add a nullable column
+without rewriting files, or replace files using the evolved schema without changing logical rows.
 
-Use **SCHEMA EVOLUTION** to change the schema while writing or rewriting data files in the same
-transaction. For example, you can add a nullable column and append rows containing values for that
-column atomically.
+Use **UPDATE** for data operations, including schema evolution with backfills or appended rows.
+UPDATE also handles operations without schema changes, including OPTIMIZE rewrites that preserve
+logical data.
 
 The `dataChange` flag indicates whether file actions change the table's logical data.
 
-| Transaction Component | ALTER TABLE | SCHEMA EVOLUTION |
-|--------|------------------------|---------------------------------|
-| Builder | `AlterTableTransactionBuilder` | `UpdateTableTransactionBuilder` |
-| Schema operations | Required | Queued alongside the data operation |
-| Data-file changes | Unavailable at compile time | Staged on the built transaction |
-| `dataChange` | Always `false` | Required when constructing the builder |
+| Schema change | Logical data change | Builder entry point | `dataChange` |
+|---------------|---------------------|---------------------|--------------|
+| Yes | No | `alter_table()` | Always `false` |
+| Yes | Yes | `update_table()` | `true` |
+| No | Yes | `update_table()` | `true` |
+| No | No | `update_table()`, such as OPTIMIZE | `false` |
 
 Both builders use `TransactionBuilder<T>` and share schema operations and common setters.
 You queue all schema operations before `build()`; Kernel validates and applies them during
-`build()`. Schema evolution during a write also lets you stage data-file changes on the returned
-`Transaction`, whose `WriteState` uses the evolved schema.
+`build()`. Both workflows let you stage data-file changes on the returned `Transaction`, whose
+`WriteState` uses the evolved schema. On clustered tables, `build()` may perform log replay to read
+clustering columns for write statistics.
 
 For schema evolution during a write, supply `data_change` when constructing the update-table builder.
-Kernel preserves this value even for empty commits. For protocol-valid rewrites that preserve
-logical data, use `snapshot.update_table(operation, engine_info, false)`.
+Kernel preserves this value even for empty commits. For rewrites without schema changes, use
+`snapshot.update_table(UpdateTableOperation::Optimize, engine_info, false)`.
 
 > [!NOTE]
 > The supported operations are adding columns and making columns nullable. Other schema operations
@@ -61,8 +62,8 @@ column. The flow is:
 # use delta_kernel_default_engine::storage::store_from_url;
 # use delta_kernel::schema::{DataType, StructField};
 # use delta_kernel::transaction::CommitResult;
-# use delta_kernel::{Result, Snapshot};
-# fn example() -> Result<()> {
+# use delta_kernel::{KernelResult, Snapshot};
+# fn example() -> KernelResult<()> {
 # let url = delta_kernel::try_parse_uri("/tmp/table")?;
 # let engine = DefaultEngine::builder(store_from_url(&url)?).build();
 // 1. Load a snapshot of the existing table.
@@ -128,25 +129,32 @@ queued before `build()` is callable. Calling `.build()` directly on
 `snapshot.alter_table("my-app/1.0")` without first queuing a schema operation is a compile
 error.
 
-## What you cannot do on an alter-table transaction
+## Rewriting files without changing logical data
 
-`AlterTableTransaction` is a metadata-only transaction. It does not implement
-`SupportsDataFiles`, so the data-file methods are not available at compile
-time. In particular, the following are not callable on an `AlterTableTransaction`:
+After building an `AlterTableTransaction`, get its `write_state()` and bind a write context. Write
+replacement files using that context's evolved schema, register their metadata with `add_files()`,
+and pass the replaced files' scan metadata to `remove_files()`. Commit the additions, removals, and
+schema change together.
 
-| Method | Used for |
-|--------|----------|
-| `write_state()` | Creating the `WriteState` used to bind a `BoundWriteContext` |
-| `add_files()` | Registering newly written data files |
-| `stats_schema()` | Retrieving the statistics schema for written files |
+`AlterTableTransaction` implements `SupportsDataFiles`, sharing these methods and statistics
+configuration with UPDATE. It also accepts replacement deletion-vector descriptors through
+`update_deletion_vectors()`, such as when you relocate the same deletion bitmap.
+All emitted Add and Remove actions use `dataChange = false`. Your connector must preserve the logical
+rows across file and deletion-vector changes; Kernel doesn't compare their contents.
 
-The ALTER builder also has no `with_data_change()` or `with_blind_append()` setter.
+On row-tracked tables, preserve Stable Row IDs and Stable Row Commit Versions in replacement files.
+Bind their materialized columns through the write-context builder, and call
+`ack_row_tracking_preservation()` before committing removals or deletion-vector updates.
+
+The ALTER builder has no `with_data_change()` or `with_blind_append()` setter. Manifest writes,
+user domain removals, and explicit row-tracking high-water overrides remain UPDATE-only.
+Changing an existing table's partitioning or clustering isn't supported by this builder.
 
 ## Evolving a schema while writing
 
-Select a data operation, such as `UpdateTableOperation::Write`, rather than `AlterTable` when the
-same transaction evolves the schema and writes files. Choose `data_change` based on whether the
-logical data changes, not merely whether files are written. Kernel applies the schema operations
+Select a data operation, such as `UpdateTableOperation::Write`, when the same transaction evolves
+the schema and changes logical data. Choose `data_change` based on whether the logical data changes,
+not merely whether files are written. Kernel applies the schema operations
 during `build()`, so the transaction's `WriteState` uses the evolved schema.
 
 ```rust,ignore

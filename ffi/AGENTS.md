@@ -908,7 +908,7 @@ reuses `ScanMetadataArrowResult` with null `transforms`.
 ## Write Flow
 
 Rust builders are aliases for `TransactionBuilder<CreateTable>` and
-`TransactionBuilder<UpdateTable>`; metadata-only ALTER uses `TransactionBuilder<AlterTable<S>>`.
+`TransactionBuilder<UpdateTable>`; ALTER uses `TransactionBuilder<AlterTable<S>>`.
 Keep their concrete opaque FFI descriptors and explicit
 `create_table_txn_builder_*` / `update_table_txn_builder_*` / `alter_table_txn_builder_*` exports.
 Shared Rust setters do not imply a universal C handle; custom setters are exposed only for their
@@ -941,7 +941,13 @@ constructors likewise require engine info and `data_change`, with the operation 
 and data-change intent to false. Schema setters transition its opaque builder from Ready to
 Modifying; building without a schema operation returns an error. The resulting
 `ExclusiveAlterTableTransaction` supports late-bound commit information, operation metrics, and
-user domain additions before commit. It has no file, manifest, or write-context operations.
+user domain additions before commit. It supports data-preserving file rewrites through
+`alter_table_txn_write_state`, `alter_table_txn_add_files`, and `alter_table_txn_remove_files`, plus
+deletion-vector relocation through `alter_table_txn_update_deletion_vectors`. These file APIs borrow
+the transaction through a pointer to its handle; input metadata, DV maps, and scan iterators are
+consumed on success and error. All Add and Remove actions use `dataChange=false`; the connector must
+preserve logical rows. Row-tracked rewrites require
+`alter_table_txn_ack_row_tracking_preservation`. Manifest APIs remain UPDATE-only.
 Common setters use the shared Rust implementation. Build consumes its builder and any supplied
 committer on success and error; transaction setters consume the transaction and return its
 replacement on success, dropping consumed inputs on error.
