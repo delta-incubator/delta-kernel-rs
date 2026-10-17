@@ -334,7 +334,7 @@ pub unsafe extern "C" fn update_table_txn_builder_add_column_at(
 ) -> ExternResult<Handle<ExclusiveUpdateTableTransactionBuilder>> {
     let builder = unsafe { *builder.into_inner() };
     let engine = unsafe { engine.as_ref() };
-    let parent = unsafe { decode_column_name(parent) };
+    let parent = unsafe { parent.try_to_column_name() };
     parent
         .and_then(|parent| decode_single_field(field).map(|field| (parent, field)))
         .map(|(parent, field)| Box::new(builder.add_column_at(parent, field)).into())
@@ -355,13 +355,9 @@ pub unsafe extern "C" fn update_table_txn_builder_set_nullable(
 ) -> ExternResult<Handle<ExclusiveUpdateTableTransactionBuilder>> {
     let builder = unsafe { *builder.into_inner() };
     let engine = unsafe { engine.as_ref() };
-    unsafe { decode_column_name(column) }
+    unsafe { column.try_to_column_name() }
         .map(|column| Box::new(builder.set_nullable(column)).into())
         .into_extern_result(&engine)
-}
-
-unsafe fn decode_column_name(column: &FfiColumnName) -> KernelResult<ColumnName> {
-    Ok(ColumnName::new(unsafe { column.path.try_to_strings() }?))
 }
 
 fn decode_single_field(schema: &EngineSchema) -> KernelResult<delta_kernel::schema::StructField> {
