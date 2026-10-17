@@ -13,7 +13,7 @@ use crate::actions::{
     LOG_TXN_SCHEMA, MAX_VALUES, MIN_VALUES, NULL_COUNT, NUM_RECORDS, TIGHT_BOUNDS,
 };
 #[cfg(feature = "adaptive-metadata-in-dev")]
-use crate::actions::{BackReference, CheckpointAction};
+use crate::actions::{BackReference, CheckpointAction, LastManifestCommit};
 use crate::committer::{
     CommitMetadata, CommitProtocolMetadata, CommitResponse, CommitType, Committer,
 };
@@ -449,7 +449,6 @@ impl<STATE> Transaction<STATE, Imperative> {
         // === Action generation ===
         let NonfileCommitActions {
             commit_version,
-            in_commit_timestamp,
             kernel_commit_info,
             protocol,
             metadata,
@@ -458,10 +457,12 @@ impl<STATE> Transaction<STATE, Imperative> {
         let CommitBatches {
             actions,
             dm_changes,
+            #[cfg(feature = "adaptive-metadata-in-dev")]
+            checkpoint_action,
         } = self.assemble_commit_batches(
             engine,
             commit_version,
-            kernel_commit_info,
+            kernel_commit_info.clone(),
             protocol.as_ref(),
             metadata.as_ref(),
             set_transactions,
@@ -470,7 +471,7 @@ impl<STATE> Transaction<STATE, Imperative> {
         // === Commit ===
         let commit_metadata = self.create_commit_metadata(
             commit_version,
-            in_commit_timestamp,
+            kernel_commit_info.in_commit_timestamp,
             protocol,
             metadata,
             dm_changes.clone(),
@@ -481,8 +482,10 @@ impl<STATE> Transaction<STATE, Imperative> {
 
         // === Result translation ===
         let post_commit_inputs = PostCommitInputs {
-            in_commit_timestamp,
+            commit_info: kernel_commit_info,
             dm_changes,
+            #[cfg(feature = "adaptive-metadata-in-dev")]
+            checkpoint_action,
         };
         self.translate_commit_result(
             commit_response,
@@ -511,7 +514,7 @@ impl<STATE> Transaction<STATE, Imperative> {
     /// - `isBlindAppend`
     /// - `engineInfo`
     /// - `txnId`
-    /// - `dataChange` (adaptiveMetadata)
+    /// - `dataChange` and `lastManifestCommit` (adaptiveMetadata)
     ///
     /// Kernel merges the following field if it is set:
     ///
@@ -770,7 +773,6 @@ impl<STATE> Transaction<STATE, Imperative> {
 /// In-memory representation of non-file commit actions, built from the transaction.
 struct NonfileCommitActions {
     commit_version: Version,
-    in_commit_timestamp: Option<i64>,
     kernel_commit_info: CommitInfo,
     protocol: Option<Protocol>,
     metadata: Option<Metadata>,
@@ -781,13 +783,19 @@ struct NonfileCommitActions {
 struct CommitBatches<'a> {
     actions: KernelResultIterator<'a, FilteredEngineData>,
     dm_changes: Vec<DomainMetadata>,
+    /// The `checkpoint` action this commit writes, if any (adaptiveMetadata).
+    #[cfg(feature = "adaptive-metadata-in-dev")]
+    checkpoint_action: Option<CheckpointAction>,
 }
 
 /// Commit state produced during action generation that the post-commit CRC and snapshot are built
 /// from.
 struct PostCommitInputs {
-    in_commit_timestamp: Option<i64>,
+    /// The kernel's commitInfo for this commit, the source of its ICT and `lastManifestCommit`.
+    commit_info: CommitInfo,
     dm_changes: Vec<DomainMetadata>,
+    #[cfg(feature = "adaptive-metadata-in-dev")]
+    checkpoint_action: Option<CheckpointAction>,
 }
 
 impl<STATE, MODE: ExecutionMode> Transaction<STATE, MODE> {
@@ -1028,6 +1036,46 @@ impl<STATE, MODE: ExecutionMode> Transaction<STATE, MODE> {
     fn is_adaptive_metadata_enabled(&self) -> bool {
         self.effective_table_config
             .is_feature_enabled(&TableFeature::AdaptiveMetadataPreview)
+    }
+
+    /// Sets the adaptiveMetadata `dataChange` and `lastManifestCommit` fields on `commit_info` when
+    /// the feature is enabled.
+    #[cfg(feature = "adaptive-metadata-in-dev")]
+    fn set_adaptive_metadata_commit_info(
+        &self,
+        engine: &dyn Engine,
+        commit_info: &mut CommitInfo,
+    ) -> KernelResult<()> {
+        if self.is_adaptive_metadata_enabled() {
+            commit_info.set_data_change(self.data_change);
+            commit_info.set_last_manifest_commit(self.last_manifest_commit(engine)?);
+        }
+        Ok(())
+    }
+
+    /// The `lastManifestCommit` this commit records: its own when it writes a root manifest file
+    /// (whose content root is at the commit version), otherwise the read snapshot's carried
+    /// forward. `None` before the table's first manifest commit.
+    #[cfg(feature = "adaptive-metadata-in-dev")]
+    fn last_manifest_commit(
+        &self,
+        engine: &dyn Engine,
+    ) -> KernelResult<Option<LastManifestCommit>> {
+        match &self.manifest_write {
+            Some(ManifestWrite::RootFile(_)) => {
+                let version = version_as_i64(self.get_commit_version())?;
+                LastManifestCommit::new(version, version).map(Some)
+            }
+            // TODO(#3352): a manifest commit must record (its commit version, the contentRoot
+            // version of its emitted checkpoint action).
+            Some(ManifestWrite::Commit(_)) => Err(KernelError::unsupported(
+                "lastManifestCommit for a manifest commit is not yet supported",
+            )),
+            None => match &self.read_snapshot_opt {
+                Some(snapshot) => snapshot.last_manifest_commit(engine),
+                None => Ok(None),
+            },
+        }
     }
 
     /// Reject data file writes (add/remove/DV) against an empty-schema table.
@@ -1298,12 +1346,9 @@ impl<STATE, MODE: ExecutionMode> Transaction<STATE, MODE> {
         }
 
         #[cfg(feature = "adaptive-metadata-in-dev")]
-        if self.is_adaptive_metadata_enabled() {
-            kernel_commit_info.set_data_change(self.data_change);
-        }
+        self.set_adaptive_metadata_commit_info(engine, &mut kernel_commit_info)?;
         Ok(NonfileCommitActions {
             commit_version: self.get_commit_version(),
-            in_commit_timestamp,
             kernel_commit_info,
             protocol: self
                 .should_emit_protocol
@@ -1342,6 +1387,7 @@ impl<STATE, MODE: ExecutionMode> Transaction<STATE, MODE> {
         self,
         file_meta: FileMeta,
         crc_delta: CrcDelta,
+        #[cfg(feature = "adaptive-metadata-in-dev")] checkpoint_action: Option<CheckpointAction>,
     ) -> KernelResult<CommittedTransaction> {
         let parsed_commit = ParsedLogPath::parse_commit(file_meta)?;
 
@@ -1357,7 +1403,12 @@ impl<STATE, MODE: ExecutionMode> Transaction<STATE, MODE> {
                         .commits_since_log_compaction_or_checkpoint()
                         + 1,
                 };
-                let snapshot = snap.new_post_commit(parsed_commit, crc_delta)?;
+                let snapshot = snap.new_post_commit(
+                    parsed_commit,
+                    crc_delta,
+                    #[cfg(feature = "adaptive-metadata-in-dev")]
+                    checkpoint_action,
+                )?;
                 (stats, Arc::new(snapshot))
             }
             None => {
@@ -1394,12 +1445,12 @@ impl<STATE, MODE: ExecutionMode> Transaction<STATE, MODE> {
         })
     }
 
-    /// Build a [`CrcDelta`] from the transaction's commit state and a precomputed
-    /// [`FileStatsDelta`].
+    /// Build a [`CrcDelta`] from the transaction's commit state, the commitInfo it wrote, and a
+    /// precomputed [`FileStatsDelta`].
     fn build_crc_delta(
         &self,
         file_stats: FileStatsDelta,
-        in_commit_timestamp: Option<i64>,
+        commit_info: CommitInfo,
         dm_changes: Vec<DomainMetadata>,
     ) -> KernelResult<CrcDelta> {
         // TODO: drop these conversions by migrating the upstream chain
@@ -1431,7 +1482,9 @@ impl<STATE, MODE: ExecutionMode> Transaction<STATE, MODE> {
                 .then(|| self.effective_table_config.metadata().clone()),
             domain_metadata,
             set_transactions,
-            in_commit_timestamp,
+            in_commit_timestamp: commit_info.in_commit_timestamp,
+            #[cfg(feature = "adaptive-metadata-in-dev")]
+            last_manifest_commit: commit_info.last_manifest_commit,
             is_incremental_safe,
         })
     }
@@ -1510,7 +1563,7 @@ impl<STATE> Transaction<STATE, Imperative> {
 
     /// Encodes actions (both non-file and file) into a committable iterator of EngineData,
     /// retaining per-action errors in the commit iterator. Returns the action iterator with the
-    /// domain changes used by the post-commit CRC and snapshot logic.
+    /// domain changes and checkpoint action used by the post-commit CRC and snapshot logic.
     fn assemble_commit_batches<'a>(
         &'a self,
         engine: &'a dyn Engine,
@@ -1551,18 +1604,21 @@ impl<STATE> Transaction<STATE, Imperative> {
         )?;
 
         #[cfg(feature = "adaptive-metadata-in-dev")]
-        let checkpoint_action = self
-            .generate_checkpoint_action(engine, commit_version, &dm_changes)?
+        let checkpoint_action =
+            self.generate_checkpoint_action(engine, commit_version, &dm_changes)?;
+        #[cfg(feature = "adaptive-metadata-in-dev")]
+        let checkpoint_action_data = checkpoint_action
+            .clone()
             .map(|action| action.into_engine_data(engine))
             .transpose()?;
         #[cfg(not(feature = "adaptive-metadata-in-dev"))]
-        let checkpoint_action: Option<Box<dyn EngineData>> = None;
+        let checkpoint_action_data: Option<Box<dyn EngineData>> = None;
 
         // CommitInfo must precede all other actions.
         let actions = iter::once(commit_info_action)
             .chain(protocol_action.map(Ok))
             .chain(metadata_action.map(Ok))
-            .chain(checkpoint_action.map(Ok))
+            .chain(checkpoint_action_data.map(Ok))
             .chain(add_actions)
             .chain(set_transaction_actions)
             .chain(domain_metadata_actions);
@@ -1575,6 +1631,8 @@ impl<STATE> Transaction<STATE, Imperative> {
         Ok(CommitBatches {
             actions: Box::new(filtered_actions),
             dm_changes,
+            #[cfg(feature = "adaptive-metadata-in-dev")]
+            checkpoint_action,
         })
     }
 
@@ -1603,8 +1661,10 @@ impl<STATE> Transaction<STATE, Imperative> {
         match commit_response {
             Ok(CommitResponse::Committed { file_meta }) => {
                 let PostCommitInputs {
-                    in_commit_timestamp,
+                    commit_info,
                     dm_changes,
+                    #[cfg(feature = "adaptive-metadata-in-dev")]
+                    checkpoint_action,
                 } = post_commit_inputs;
                 // TODO(#2717): the commit already succeeded atomically; the post-commit `?`
                 //              below must not fail the txn (and must not mislabel the metric).
@@ -1625,11 +1685,13 @@ impl<STATE> Transaction<STATE, Imperative> {
                     prepare_duration,
                     committer_duration,
                 );
-                let crc_delta =
-                    self.build_crc_delta(file_stats, in_commit_timestamp, dm_changes)?;
-                Ok(CommitResult::Committed(
-                    self.into_committed(file_meta, crc_delta)?,
-                ))
+                let crc_delta = self.build_crc_delta(file_stats, commit_info, dm_changes)?;
+                Ok(CommitResult::Committed(self.into_committed(
+                    file_meta,
+                    crc_delta,
+                    #[cfg(feature = "adaptive-metadata-in-dev")]
+                    checkpoint_action,
+                )?))
             }
             Ok(CommitResponse::Conflict { version }) => {
                 // Flips the metric event from success -> failure.

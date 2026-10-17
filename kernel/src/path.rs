@@ -411,7 +411,6 @@ impl ParsedLogPath<FileMeta> {
     /// the `lastManifestCommit` is invalid, including a pointer to a manifest commit newer than
     /// this commit.
     #[cfg(feature = "adaptive-metadata-in-dev")]
-    #[cfg_attr(not(test), allow(dead_code))]
     #[tracing::instrument(skip(engine), ret, fields(version = self.version, path = %self.location.as_url()))]
     pub(crate) fn read_ict_and_last_manifest_commit(
         &self,
@@ -428,13 +427,7 @@ impl ParsedLogPath<FileMeta> {
         let mut visitor = LastManifestCommitVisitor::default();
         visitor.visit_rows_of(actions.as_ref())?;
         if let Some(last_manifest_commit) = &visitor.last_manifest_commit {
-            require!(
-                u64::try_from(last_manifest_commit.version).is_ok_and(|v| v <= self.version),
-                KernelError::generic(format!(
-                    "lastManifestCommit version {} exceeds commit version {}",
-                    last_manifest_commit.version, self.version
-                ))
-            );
+            last_manifest_commit.ensure_at_or_before(self.version)?;
         }
         Ok((in_commit_timestamp, visitor.last_manifest_commit))
     }

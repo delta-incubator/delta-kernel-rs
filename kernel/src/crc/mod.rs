@@ -564,6 +564,7 @@ impl Crc {
         #[cfg(feature = "adaptive-metadata-in-dev")]
         if let Some(last_manifest_commit) = &self.last_manifest_commit_opt {
             last_manifest_commit.validate()?;
+            last_manifest_commit.ensure_at_or_before(self.version)?;
         }
         Ok(())
     }
@@ -1086,6 +1087,7 @@ mod tests {
             protocol: valid_protocol(),
             file_stats_state: FileStatsState::Complete(FileStats::try_new(0, 0, None).unwrap()),
             last_manifest_commit_opt: Some(LastManifestCommit::new(5, 3).unwrap()),
+            version: 5,
             ..Default::default()
         };
 
@@ -1093,7 +1095,7 @@ mod tests {
         assert_eq!(json["lastManifestCommit"]["version"], 5);
         assert_eq!(json["lastManifestCommit"]["contentRootVersion"], 3);
 
-        let deserialized = Crc::try_from_json_bytes(json.to_string().as_bytes(), 0).unwrap();
+        let deserialized = Crc::try_from_json_bytes(json.to_string().as_bytes(), 5).unwrap();
         assert_eq!(crc, deserialized);
     }
 
@@ -1124,6 +1126,26 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("contentRootVersion 5 exceeds version 3"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[cfg(feature = "adaptive-metadata-in-dev")]
+    #[test]
+    fn de_last_manifest_commit_newer_than_crc_version_is_rejected() {
+        let crc = Crc {
+            protocol: valid_protocol(),
+            file_stats_state: FileStatsState::Complete(FileStats::try_new(0, 0, None).unwrap()),
+            last_manifest_commit_opt: Some(LastManifestCommit::new(5, 3).unwrap()),
+            version: 5,
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&crc).unwrap();
+
+        let err = Crc::try_from_json_bytes(json.to_string().as_bytes(), 4).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("lastManifestCommit version 5 exceeds commit version 4"),
             "unexpected error: {err}"
         );
     }

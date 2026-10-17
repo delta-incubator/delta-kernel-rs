@@ -33,7 +33,7 @@ use crate::table_features::{
 use crate::table_properties::TableProperties;
 use crate::utils::require;
 #[cfg(feature = "adaptive-metadata-in-dev")]
-use crate::{create_row, Engine};
+use crate::{create_row, Engine, Version};
 use crate::{EngineData, FileMeta, FileSize, KernelError, KernelResult, RowVisitor as _};
 
 const KERNEL_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -978,6 +978,14 @@ impl CommitInfo {
         self.data_change = Some(data_change);
     }
 
+    #[cfg(feature = "adaptive-metadata-in-dev")]
+    pub(crate) fn set_last_manifest_commit(
+        &mut self,
+        last_manifest_commit: Option<LastManifestCommit>,
+    ) {
+        self.last_manifest_commit = last_manifest_commit;
+    }
+
     /// Merges the supplied tags into this CommitInfo's tags.
     ///
     /// Existing values take precedence when both maps contain the same key.
@@ -1473,6 +1481,19 @@ impl LastManifestCommit {
             KernelError::generic(format!(
                 "lastManifestCommit contentRootVersion {} exceeds version {}",
                 self.content_root_version, self.version
+            ))
+        );
+        Ok(())
+    }
+
+    /// Errors unless this names a manifest commit at or before `commit_version`, the version of
+    /// the commit or CRC that carries it.
+    pub(crate) fn ensure_at_or_before(&self, commit_version: Version) -> KernelResult<()> {
+        require!(
+            u64::try_from(self.version).is_ok_and(|v| v <= commit_version),
+            KernelError::generic(format!(
+                "lastManifestCommit version {} exceeds commit version {commit_version}",
+                self.version
             ))
         );
         Ok(())
