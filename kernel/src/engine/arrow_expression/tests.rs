@@ -1393,11 +1393,6 @@ fn evaluator_accepts_round_trippable_arrow_representations() {
         DataType::Timestamp(TimeUnit::Microsecond, None),
         DataType::Timestamp(TimeUnit::Nanosecond, None),
         DataType::Timestamp(TimeUnit::Millisecond, None),
-        // Any non-empty timezone marks a nanosecond timestamp as UTC-adjusted; empty means none.
-        #[cfg(feature = "nanosecond-timestamps")]
-        DataType::Timestamp(TimeUnit::Nanosecond, Some("+00:00".into())),
-        #[cfg(feature = "nanosecond-timestamps")]
-        DataType::Timestamp(TimeUnit::Nanosecond, Some("".into())),
         DataType::Struct(Fields::empty()),
         DataType::List(arrow_int_array_element()),
         DataType::ListView(arrow_int_array_element()),

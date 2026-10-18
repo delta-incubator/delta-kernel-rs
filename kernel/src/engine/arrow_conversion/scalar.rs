@@ -391,26 +391,33 @@ mod tests {
         );
     }
 
-    // Schema inference and scalar extraction must agree on the kernel type for every timezone
-    // annotation, not just "UTC".
+    // Scalar extraction accepts any timezone annotation, but schema conversion accepts only
+    // "UTC" (as for microsecond timestamps), since timestamp stats are serialized with a
+    // hardcoded `Z` suffix.
     #[cfg(feature = "nanosecond-timestamps")]
     #[rstest]
-    #[case::no_tz(None, DataType::TIMESTAMP_NANOS_NTZ)]
-    #[case::empty_tz(Some(""), DataType::TIMESTAMP_NANOS_NTZ)]
-    #[case::utc(Some("UTC"), DataType::TIMESTAMP_NANOS)]
-    #[case::utc_lowercase(Some("utc"), DataType::TIMESTAMP_NANOS)]
-    #[case::utc_offset(Some("+00:00"), DataType::TIMESTAMP_NANOS)]
-    #[case::etc_utc(Some("Etc/UTC"), DataType::TIMESTAMP_NANOS)]
-    #[case::us_eastern(Some("America/New_York"), DataType::TIMESTAMP_NANOS)]
-    fn test_timestamp_nanos_schema_and_scalar_conversion_agree(
+    #[case::no_tz(None, DataType::TIMESTAMP_NANOS_NTZ, true)]
+    #[case::empty_tz(Some(""), DataType::TIMESTAMP_NANOS_NTZ, false)]
+    #[case::utc(Some("UTC"), DataType::TIMESTAMP_NANOS, true)]
+    #[case::utc_lowercase(Some("utc"), DataType::TIMESTAMP_NANOS, true)]
+    #[case::utc_offset(Some("+00:00"), DataType::TIMESTAMP_NANOS, false)]
+    #[case::etc_utc(Some("Etc/UTC"), DataType::TIMESTAMP_NANOS, false)]
+    #[case::us_eastern(Some("America/New_York"), DataType::TIMESTAMP_NANOS, false)]
+    fn test_timestamp_nanos_schema_and_scalar_conversion(
         #[case] tz: Option<&str>,
         #[case] expected: DataType,
+        #[case] schema_conversion_succeeds: bool,
     ) {
         let array = TimestampNanosecondArray::from(vec![1_000_000i64])
             .fold_with(tz, TimestampNanosecondArray::with_timezone);
         let arrow_type = array.data_type();
 
-        assert_eq!(DataType::try_from_arrow(arrow_type).unwrap(), expected);
+        let schema_type = DataType::try_from_arrow(arrow_type);
+        if schema_conversion_succeeds {
+            assert_eq!(schema_type.unwrap(), expected);
+        } else {
+            assert!(schema_type.is_err());
+        }
         assert_eq!(
             arrow_primitive_to_kernel_type(arrow_type).unwrap(),
             expected
