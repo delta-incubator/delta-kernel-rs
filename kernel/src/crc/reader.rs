@@ -59,14 +59,42 @@ mod tests {
     use super::*;
     use crate::actions::{Format, Metadata, Protocol};
     use crate::engine::sync::SyncEngine;
+    use crate::engine::KernelEngine;
     use crate::metrics::MetricEvent;
     use crate::path::ParsedLogPath;
     use crate::table_features::TableFeature;
-    use crate::unit_test_utils::{install_thread_local_metrics_reporter, CapturingReporter};
+    use crate::unit_test_utils::{
+        install_thread_local_metrics_reporter, CapturingReporter, TestCancellationToken,
+    };
 
     fn test_table_root(dir: &str) -> url::Url {
         let path = std::fs::canonicalize(PathBuf::from(dir)).unwrap();
         url::Url::from_directory_path(path).unwrap()
+    }
+
+    #[rstest::rstest]
+    #[case("crc-full", 0, Some(0))]
+    #[case("crc-malformed", 0, None)]
+    #[case("crc-full", 999, None)]
+    fn optional_crc_read_preserves_cancellation(
+        #[case] fixture: &str,
+        #[case] version: u64,
+        #[case] expected: Option<u64>,
+        #[values(false, true)] cancelled: bool,
+    ) {
+        let table_root = test_table_root(&format!("./tests/data/{fixture}/"));
+        let crc_path = ParsedLogPath::create_parsed_crc(&table_root, version);
+        let token = Arc::new(TestCancellationToken::default());
+        if cancelled {
+            token.cancel();
+        }
+        let engine = KernelEngine::new(&SyncEngine::new(), token);
+        let result = read_crc_file_or_none(&engine, &crc_path);
+        if cancelled {
+            assert!(matches!(result, Err(KernelError::Cancelled)), "{result:?}");
+        } else {
+            assert_eq!(result.unwrap().map(|crc| crc.version), expected);
+        }
     }
 
     #[test]

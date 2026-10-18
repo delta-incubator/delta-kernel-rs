@@ -610,6 +610,7 @@ impl LogSegment {
         }
 
         // TODO: compactions?
+        // Inherit any cancellation token bound to `storage`.
         let listed_files = LogSegmentFiles::list_commits(
             storage,
             &log_root,
@@ -657,6 +658,7 @@ impl LogSegment {
 
         // this is a list of commits with possible gaps, we want to take the latest contiguous
         // chunk of commits
+        // Inherit any cancellation token bound to `storage`.
         let mut listed_commits = LogSegmentFiles::list_commits(
             storage,
             &log_root,
