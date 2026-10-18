@@ -17,7 +17,7 @@ use chrono_tz::Tz;
 
 use crate::arrow::compute::kernels::cast_utils::string_to_datetime;
 use crate::expressions::MapToStructOptions;
-use crate::{DeltaResult, Error};
+use crate::{KernelError, KernelResult};
 
 /// A validated timezone used to interpret an offset-less `TIMESTAMP` value.
 ///
@@ -40,15 +40,15 @@ impl Default for TimestampTimezone {
 }
 
 impl FromStr for TimestampTimezone {
-    type Err = Error;
+    type Err = KernelError;
 
-    fn from_str(value: &str) -> DeltaResult<Self> {
+    fn from_str(value: &str) -> KernelResult<Self> {
         let timezone = if value.starts_with(['+', '-']) {
             parse_normalized_fixed_offset(value).map(Self::Fixed)
         } else {
             value.parse::<Tz>().ok().map(Self::Named)
         };
-        timezone.ok_or_else(|| Error::generic(format!("Invalid timestamp timezone: {value}")))
+        timezone.ok_or_else(|| KernelError::generic(format!("Invalid timestamp timezone: {value}")))
     }
 }
 
@@ -59,7 +59,7 @@ impl TimestampTimezone {
     ///
     /// Returns an error when the configured value is neither a recognized IANA timezone nor a
     /// fixed offset in `+HH:MM` or `-HH:MM` form.
-    pub(crate) fn try_from_options(options: &MapToStructOptions) -> DeltaResult<Self> {
+    pub(crate) fn try_from_options(options: &MapToStructOptions) -> KernelResult<Self> {
         match options.timestamp_timezone() {
             Some(value) => value.parse(),
             None => Ok(Self::default()),

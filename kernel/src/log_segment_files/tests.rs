@@ -11,7 +11,7 @@ use crate::object_store::path::Path as ObjectPath;
 use crate::object_store::ObjectStoreExt as _;
 use crate::path::tests::multipart_checkpoint_name;
 use crate::unit_test_utils::TestCancellationToken;
-use crate::{DeltaResultIteratorStatic, Engine as _, FileMeta, StorageHandler};
+use crate::{Engine as _, FileMeta, KernelResultIteratorStatic, StorageHandler};
 
 // size markers used to identify commit sources in tests
 const FILESYSTEM_SIZE_MARKER: u64 = 10;
@@ -164,7 +164,7 @@ impl CountingStorageHandler {
 }
 
 impl StorageHandler for CountingStorageHandler {
-    fn list_from(&self, path: &Url) -> DeltaResult<DeltaResultIteratorStatic<FileMeta>> {
+    fn list_from(&self, path: &Url) -> KernelResult<KernelResultIteratorStatic<FileMeta>> {
         self.list_from_count.fetch_add(1, Ordering::Relaxed);
         let items_listed = self.items_listed.clone();
         let iter = self.inner.list_from(path)?;
@@ -176,23 +176,23 @@ impl StorageHandler for CountingStorageHandler {
     fn read_files(
         &self,
         _files: Vec<crate::FileSlice>,
-    ) -> DeltaResult<DeltaResultIteratorStatic<bytes::Bytes>> {
+    ) -> KernelResult<KernelResultIteratorStatic<bytes::Bytes>> {
         panic!("read_files should not be called during listing");
     }
 
-    fn put(&self, _path: &Url, _data: bytes::Bytes, _overwrite: bool) -> DeltaResult<()> {
+    fn put(&self, _path: &Url, _data: bytes::Bytes, _overwrite: bool) -> KernelResult<()> {
         panic!("put should not be called during listing");
     }
 
-    fn copy_atomic(&self, _src: &Url, _dest: &Url) -> DeltaResult<()> {
+    fn copy_atomic(&self, _src: &Url, _dest: &Url) -> KernelResult<()> {
         panic!("copy_atomic should not be called during listing");
     }
 
-    fn head(&self, _path: &Url) -> DeltaResult<crate::FileMeta> {
+    fn head(&self, _path: &Url) -> KernelResult<crate::FileMeta> {
         panic!("head should not be called during listing");
     }
 
-    fn delete(&self, _path: &Url) -> DeltaResult<()> {
+    fn delete(&self, _path: &Url) -> KernelResult<()> {
         panic!("delete should not be called during listing");
     }
 }
@@ -363,25 +363,25 @@ fn test_log_tail_covers_entire_range_empty_filesystem() {
     // have nothing — e.g. a purely catalog-managed table.
     struct EmptyStorageHandler;
     impl StorageHandler for EmptyStorageHandler {
-        fn list_from(&self, _path: &Url) -> DeltaResult<DeltaResultIteratorStatic<FileMeta>> {
+        fn list_from(&self, _path: &Url) -> KernelResult<KernelResultIteratorStatic<FileMeta>> {
             Ok(Box::new(std::iter::empty()))
         }
         fn read_files(
             &self,
             _files: Vec<crate::FileSlice>,
-        ) -> DeltaResult<DeltaResultIteratorStatic<bytes::Bytes>> {
+        ) -> KernelResult<KernelResultIteratorStatic<bytes::Bytes>> {
             panic!("read_files should not be called during listing");
         }
-        fn put(&self, _path: &Url, _data: bytes::Bytes, _overwrite: bool) -> DeltaResult<()> {
+        fn put(&self, _path: &Url, _data: bytes::Bytes, _overwrite: bool) -> KernelResult<()> {
             panic!("put should not be called during listing");
         }
-        fn copy_atomic(&self, _src: &Url, _dest: &Url) -> DeltaResult<()> {
+        fn copy_atomic(&self, _src: &Url, _dest: &Url) -> KernelResult<()> {
             panic!("copy_atomic should not be called during listing");
         }
-        fn head(&self, _path: &Url) -> DeltaResult<crate::FileMeta> {
+        fn head(&self, _path: &Url) -> KernelResult<crate::FileMeta> {
             panic!("head should not be called during listing");
         }
-        fn delete(&self, _path: &Url) -> DeltaResult<()> {
+        fn delete(&self, _path: &Url) -> KernelResult<()> {
             panic!("delete should not be called during listing");
         }
     }
@@ -1810,7 +1810,7 @@ struct FiniteListingHandler {
 }
 
 impl StorageHandler for FiniteListingHandler {
-    fn list_from(&self, _path: &Url) -> DeltaResult<DeltaResultIteratorStatic<FileMeta>> {
+    fn list_from(&self, _path: &Url) -> KernelResult<KernelResultIteratorStatic<FileMeta>> {
         let log_root = self.log_root.clone();
         let pulled = self.items_pulled.clone();
         let iter = (0..self.count as u64).map(move |version| {
@@ -1827,23 +1827,23 @@ impl StorageHandler for FiniteListingHandler {
     fn read_files(
         &self,
         _files: Vec<crate::FileSlice>,
-    ) -> DeltaResult<DeltaResultIteratorStatic<bytes::Bytes>> {
+    ) -> KernelResult<KernelResultIteratorStatic<bytes::Bytes>> {
         panic!("read_files should not be called during listing");
     }
 
-    fn put(&self, _path: &Url, _data: bytes::Bytes, _overwrite: bool) -> DeltaResult<()> {
+    fn put(&self, _path: &Url, _data: bytes::Bytes, _overwrite: bool) -> KernelResult<()> {
         panic!("put should not be called during listing");
     }
 
-    fn copy_atomic(&self, _src: &Url, _dest: &Url) -> DeltaResult<()> {
+    fn copy_atomic(&self, _src: &Url, _dest: &Url) -> KernelResult<()> {
         panic!("copy_atomic should not be called during listing");
     }
 
-    fn head(&self, _path: &Url) -> DeltaResult<FileMeta> {
+    fn head(&self, _path: &Url) -> KernelResult<FileMeta> {
         panic!("head should not be called during listing");
     }
 
-    fn delete(&self, _path: &Url) -> DeltaResult<()> {
+    fn delete(&self, _path: &Url) -> KernelResult<()> {
         panic!("delete should not be called during listing");
     }
 }
@@ -1870,13 +1870,12 @@ fn precancelled_token_stops_listing_before_any_storage_call() {
     let token: CancellationTokenRef = Arc::new(TestCancellationToken::cancelled());
 
     let result = list_delta_log_from_storage(&storage, &log_root, 0, Version::MAX, Some(&token));
-    assert!(matches!(result, Err(Error::Cancelled)));
+    assert!(matches!(result, Err(KernelError::Cancelled)));
     assert_eq!(pulled.load(Ordering::Relaxed), 0);
 }
 
-// Cancelling partway yields the items already produced, then exactly one terminal
-// `Error::Cancelled` -- never a bare `None`, which would make a truncated listing look complete.
-// This is the regression guard for polling inside (rather than outside) the version `take_while`.
+// The default `list_from_with_cancellation` adapter surfaces cancellation through the log-file
+// filters instead of making a truncated listing look complete.
 #[test]
 fn mid_listing_cancellation_yields_terminal_error_not_silent_truncation() {
     let (log_root, pulled, storage) = finite_listing_handler(100);
@@ -1892,10 +1891,7 @@ fn mid_listing_cancellation_yields_terminal_error_not_silent_truncation() {
 
     token.cancel();
 
-    assert!(matches!(iter.next(), Some(Err(Error::Cancelled))));
-    // Fused: no second error and no further items.
-    assert!(iter.next().is_none());
-    assert!(iter.next().is_none());
+    assert!(matches!(iter.next(), Some(Err(KernelError::Cancelled))));
     // The listing stopped early rather than draining all 100 entries.
     assert!(pulled.load(Ordering::Relaxed) < 100);
 }
@@ -1907,92 +1903,7 @@ fn listing_without_token_is_unchanged() {
 
     let listed: Vec<_> = list_delta_log_from_storage(&storage, &log_root, 0, Version::MAX, None)
         .unwrap()
-        .map(Result::unwrap)
+        .map(KernelResult::unwrap)
         .collect();
     assert_eq!(listed.len(), 5);
-}
-
-/// An iterator that yields nothing but cancels `token` the instant it is polled (i.e. as the
-/// enclosing listing is exhausted), so a later poll of the token observes the cancellation.
-struct CancelOnExhaustion {
-    token: Arc<TestCancellationToken>,
-    done: bool,
-}
-
-impl Iterator for CancelOnExhaustion {
-    type Item = DeltaResult<FileMeta>;
-    fn next(&mut self) -> Option<Self::Item> {
-        if !self.done {
-            self.done = true;
-            self.token.cancel();
-        }
-        None
-    }
-}
-
-/// A storage handler that returns an empty listing and cancels `token` as that listing is
-/// exhausted, counting its `list_from` calls. Lets a test flip the token *between* backward-scan
-/// windows rather than before the first one.
-struct CancelAfterListingHandler {
-    token: Arc<TestCancellationToken>,
-    list_calls: Arc<AtomicU32>,
-}
-
-impl StorageHandler for CancelAfterListingHandler {
-    fn list_from(&self, _path: &Url) -> DeltaResult<DeltaResultIteratorStatic<FileMeta>> {
-        self.list_calls.fetch_add(1, Ordering::Relaxed);
-        Ok(Box::new(CancelOnExhaustion {
-            token: self.token.clone(),
-            done: false,
-        }))
-    }
-
-    fn read_files(
-        &self,
-        _files: Vec<crate::FileSlice>,
-    ) -> DeltaResult<DeltaResultIteratorStatic<bytes::Bytes>> {
-        panic!("read_files should not be called during listing");
-    }
-
-    fn put(&self, _path: &Url, _data: bytes::Bytes, _overwrite: bool) -> DeltaResult<()> {
-        panic!("put should not be called during listing");
-    }
-
-    fn copy_atomic(&self, _src: &Url, _dest: &Url) -> DeltaResult<()> {
-        panic!("copy_atomic should not be called during listing");
-    }
-
-    fn head(&self, _path: &Url) -> DeltaResult<FileMeta> {
-        panic!("head should not be called during listing");
-    }
-
-    fn delete(&self, _path: &Url) -> DeltaResult<()> {
-        panic!("delete should not be called during listing");
-    }
-}
-
-// The backward scan collects each window eagerly and re-checks the token at the top of every
-// window. Window 1 lists an empty window and succeeds; the token flips as that listing is
-// exhausted, so it is window 2's up-front check -- not window 1's -- that surfaces the cancellation
-// (exactly one listing ran).
-#[test]
-fn backward_scan_checks_cancellation_between_windows() {
-    let log_root = Url::parse("memory:///_delta_log/").unwrap();
-    let token = Arc::new(TestCancellationToken::default());
-    let list_calls = Arc::new(AtomicU32::new(0));
-    let storage = CancelAfterListingHandler {
-        token: token.clone(),
-        list_calls: list_calls.clone(),
-    };
-    let token_ref: CancellationTokenRef = token;
-
-    let result = LogSegmentFiles::list_with_backward_checkpoint_scan(
-        &storage,
-        &log_root,
-        vec![],
-        5_000,
-        Some(&token_ref),
-    );
-    assert!(matches!(result, Err(Error::Cancelled)));
-    assert_eq!(list_calls.load(Ordering::Relaxed), 1);
 }

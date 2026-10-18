@@ -164,12 +164,13 @@ pub(crate) fn run_with_validate_callback<T: Clone>(
         physical_predicate: PhysicalPredicate::None,
         transform_spec,
         column_mapping_mode: ColumnMappingMode::None,
-        physical_stats_schema: None,
+        physical_stats_schemas: None,
         physical_partition_schema: None,
         eligible_physical_stats_columns: HashSet::new(),
         requested_physical_stats_columns: Vec::new(),
         is_catalog_managed: false,
         skip_row_transforms: false,
+        dv_normalization_root: None,
     });
     let checkpoint_info = CheckpointReadInfo::without_stats_parsed();
     let (iter, _metrics) = scan_action_iter(

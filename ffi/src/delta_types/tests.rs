@@ -1,9 +1,44 @@
 use std::collections::HashMap;
 
+use rstest::rstest;
 use test_utils::assert_result_error_with_message;
 
 use super::*;
-use crate::{FfiFileStats, KernelI64Slice, KernelStringSlice, OptionalValue};
+use crate::{optional_pointer, FfiFileStats, KernelI64Slice, KernelStringSlice, OptionalValue};
+
+#[rstest]
+#[case(HashMap::new())]
+#[case(HashMap::from([
+    (String::from("key"), String::from("value")),
+    (String::from("empty"), String::new()),
+]))]
+fn borrowed_string_map_entries_round_trip_without_copying_payloads(
+    #[case] source: HashMap<String, String>,
+) {
+    // Both the source map and entry vector outlive every use of the borrowed FFI map.
+    let entries = unsafe { FfiStringMapEntry::from_map_unsafe(&source) };
+    let map = unsafe { FfiStringMap::new_unsafe(&entries) };
+    assert_eq!(unsafe { map.try_to_hash_map() }.unwrap(), source);
+    for entry in entries {
+        let key = unsafe { entry.key.try_to_string() }.unwrap();
+        let (source_key, source_value) = source.get_key_value(&key).unwrap();
+        assert_eq!(entry.key.ptr.cast::<u8>(), source_key.as_ptr());
+        assert_eq!(entry.value.ptr.cast::<u8>(), source_value.as_ptr());
+    }
+}
+
+#[rstest]
+fn optional_pointer_preserves_absence_and_borrows_present_value(
+    #[values(false, true)] present: bool,
+) {
+    let source = 42;
+    let pointer = optional_pointer(present.then_some(&source));
+    assert_eq!(pointer.is_null(), !present);
+    if present {
+        assert_eq!(pointer, std::ptr::from_ref(&source));
+        assert_eq!(unsafe { *pointer }, source);
+    }
+}
 
 fn slice(value: &'static str) -> KernelStringSlice {
     unsafe { KernelStringSlice::new_unsafe(value) }
@@ -317,6 +352,13 @@ fn typed_components_construct_rich_snapshot_state() {
     FfiDeletionVectorStorageType::PersistedAbsolute,
     DeletionVectorStorageType::PersistedAbsolute
 )]
+#[cfg_attr(
+    feature = "adaptive-metadata-in-dev",
+    case::persisted_unencoded_relative(
+        FfiDeletionVectorStorageType::PersistedUnencodedRelative,
+        DeletionVectorStorageType::PersistedUnencodedRelative
+    )
+)]
 fn deletion_vector_storage_type_maps_all_variants(
     #[case] ffi_type: FfiDeletionVectorStorageType,
     #[case] kernel_type: DeletionVectorStorageType,
@@ -424,6 +466,8 @@ fn typed_crc_accepts_full_kernel_state() {
         Some(13),
         Some(1),
         Some(DeletedRecordCountsHistogram::try_new(deleted_record_counts.to_vec()).unwrap()),
+        #[cfg(feature = "adaptive-metadata-in-dev")]
+        None,
     )
     .unwrap();
     assert_eq!(actual, expected);
@@ -443,6 +487,76 @@ fn typed_crc_accepts_full_kernel_state() {
         .unwrap()
         .file_stats()
         .is_none());
+}
+
+#[test]
+fn typed_add_array_preserves_file_fields() {
+    let partition_value = FfiStringMapEntry {
+        key: slice("p"),
+        value: slice("one"),
+    };
+    let add = FfiAdd {
+        path: slice("p=one/part-00000.parquet"),
+        partition_values: FfiStringMap {
+            ptr: &partition_value,
+            len: 1,
+        },
+        size: 17,
+        modification_time: 19,
+        data_change: true,
+        stats: OptionalValue::None,
+        tags: OptionalValue::None,
+        deletion_vector: std::ptr::null(),
+        base_row_id: OptionalValue::None,
+        default_row_commit_version: OptionalValue::None,
+        clustering_provider: OptionalValue::None,
+    };
+    let adds = FfiAddArray { ptr: &add, len: 1 };
+
+    let actual = unsafe { adds.try_to_kernel() }.unwrap();
+    let expected = Add::from_parts(
+        "p=one/part-00000.parquet".to_string(),
+        HashMap::from([("p".to_string(), "one".to_string())]),
+        17,
+        19,
+        true,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
+    assert_eq!(actual, vec![expected]);
+}
+
+#[test]
+fn typed_domain_metadata_array_rejects_duplicate() {
+    let domain_metadata = [
+        FfiDomainMetadata {
+            domain: slice("example.domain"),
+            configuration: slice("first"),
+            removed: false,
+        },
+        FfiDomainMetadata {
+            domain: slice("example.domain"),
+            configuration: slice("second"),
+            removed: false,
+        },
+    ];
+    let values = FfiDomainMetadataArray {
+        ptr: domain_metadata.as_ptr(),
+        len: domain_metadata.len(),
+    };
+
+    let state = FfiDomainMetadataState {
+        kind: FfiDomainMetadataStateKind::Complete,
+        domain_metadata: values,
+    };
+    assert_result_error_with_message(
+        unsafe { state.try_to_kernel() },
+        "CRC state contains duplicate domain example.domain",
+    );
 }
 
 #[test]
@@ -1002,7 +1116,7 @@ fn typed_actions_validate_tags_and_convert_each_payload() {
     for action in &null_actions {
         assert!(matches!(
             unsafe { action.try_to_kernel() },
-            Err(Error::Generic(_))
+            Err(KernelError::Generic(_))
         ));
     }
 }

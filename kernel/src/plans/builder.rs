@@ -1,7 +1,7 @@
 //! Fluent builder for declarative [`Plan`]s: a source, chained transforms, then
 //! [`PlanBuilder::build`] / [`PlanBuilder::build_opt`]. Each transform consumes `self` and returns
 //! a new builder; clone a builder (cheap) to feed it into more than one transform. Validating
-//! methods return [`DeltaResult`] and surface errors at the call site.
+//! methods return [`KernelResult`] and surface errors at the call site.
 //!
 //! A source with no rows (e.g. a scan over no files) is the *absent* relation. The builder treats
 //! it as dead code: transforms validate as usual but propagate absence, eliminating the parts of
@@ -33,24 +33,25 @@
 //! let plan = scan.build()?;
 //! let [node] = plan.nodes.as_slice() else { panic!("expected one node") };
 //! assert!(matches!(&node.op, Operator::Values(values) if values.rows.is_empty()));
-//! # Ok::<(), delta_kernel::Error>(())
+//! # Ok::<(), delta_kernel::KernelError>(())
 //! ```
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use delta_kernel_derive::internal_api;
+use url::Url;
 
 use super::ir::nodes::{
-    Aggregate, AggregateBuilder, DynamicScan, FileType, Filter, Operator, Project, ScanFile,
-    ScanJson, ScanParquet, SemiJoin, UnionAll, Values,
+    Aggregate, AggregateBuilder, DynamicScan, FileType, Filter, Operator, Project, RelationRef,
+    ScanFile, ScanJson, ScanParquet, SemiJoin, UnionAll, Values, WriteJson, FILE_META_SCHEMA,
 };
 use super::ir::plan::{Plan, PlanNode};
 use crate::expressions::{ColumnName, ExpressionRef, PredicateRef, Scalar, StructData};
 use crate::schema::{SchemaRef, ToSchema};
 use crate::struct_patch::ProjectionStructPatchBuilder;
 use crate::utils::CollectInto;
-use crate::{DeltaResult, Error};
+use crate::{KernelError, KernelResult};
 
 /// One node of a plan DAG: an operator, its inputs, and its output schema. Node identity is the
 /// `Arc`'s address ([`PlanBuilder::build`] dedups shared subgraphs by pointer). Inputs are always
@@ -119,7 +120,7 @@ impl PlanBuilder {
         files: impl IntoIterator<Item = impl Into<ScanFile>>,
         file_constant_columns: &[&str],
         schema: impl Into<SchemaRef>,
-    ) -> DeltaResult<Self> {
+    ) -> KernelResult<Self> {
         Self::scan_source(FileType::Parquet, files, file_constant_columns, schema)
     }
 
@@ -129,7 +130,7 @@ impl PlanBuilder {
         files: impl IntoIterator<Item = impl Into<ScanFile>>,
         file_constant_columns: &[&str],
         schema: impl Into<SchemaRef>,
-    ) -> DeltaResult<Self> {
+    ) -> KernelResult<Self> {
         Self::scan_source(FileType::Json, files, file_constant_columns, schema)
     }
 
@@ -141,13 +142,13 @@ impl PlanBuilder {
         files: impl IntoIterator<Item = impl Into<ScanFile>>,
         file_constant_columns: &[&str],
         schema: impl Into<SchemaRef>,
-    ) -> DeltaResult<Self> {
+    ) -> KernelResult<Self> {
         let schema = schema.into();
         let files = Vec::from_iter(files.into_iter().map(Into::into));
         let cols = Vec::from_iter(file_constant_columns.iter().map(|&c| c.to_string()));
         for (i, file) in files.iter().enumerate() {
             if file.file_constants.len() != cols.len() {
-                return Err(Error::generic(format!(
+                return Err(KernelError::generic(format!(
                     "scan: file {i} has {} constant value(s) {:?} for {} file-constant column(s) {:?}",
                     file.file_constants.len(),
                     file.file_constants,
@@ -188,14 +189,14 @@ impl PlanBuilder {
     /// # use delta_kernel::schema::{DataType, StructField, StructType};
     /// let schema = Arc::new(StructType::try_new([StructField::not_null("id", DataType::INTEGER)])?);
     /// let plan = PlanBuilder::values(schema, vec![vec![1.into()], vec![2.into()]])?.build()?;
-    /// # Ok::<(), delta_kernel::Error>(())
+    /// # Ok::<(), delta_kernel::KernelError>(())
     /// ```
-    pub fn values(schema: impl Into<SchemaRef>, rows: Vec<Vec<Scalar>>) -> DeltaResult<Self> {
+    pub fn values(schema: impl Into<SchemaRef>, rows: Vec<Vec<Scalar>>) -> KernelResult<Self> {
         let schema = schema.into();
         let width = schema.fields().count();
         for (i, row) in rows.iter().enumerate() {
             if row.len() != width {
-                return Err(Error::generic(format!(
+                return Err(KernelError::generic(format!(
                     "values: row {i} has {} value(s) {row:?} but schema has {width} field(s) {:?}",
                     row.len(),
                     Vec::from_iter(schema.fields().map(|f| f.name())),
@@ -232,7 +233,7 @@ impl PlanBuilder {
     /// assert!(PlanBuilder::values_from(std::iter::empty::<Row>())
     ///     .build_opt()?
     ///     .is_none());
-    /// # Ok::<(), delta_kernel::Error>(())
+    /// # Ok::<(), delta_kernel::KernelError>(())
     /// ```
     #[internal_api]
     pub(crate) fn values_from<T>(rows: impl IntoIterator<Item = T>) -> Self
@@ -240,6 +241,91 @@ impl PlanBuilder {
         T: Into<StructData> + ToSchema,
     {
         Values::from_iter(rows).into()
+    }
+
+    /// A source reading all rows of a relation the engine previously retained, identified by
+    /// `relation_ref`. Output schema is the handle's schema. See [`Operator::RelationSource`] and
+    /// [`RelationRef`].
+    ///
+    /// Unlike an empty file scan or empty `Values`, a `RelationSource` is never treated as the
+    /// absent relation: kernel cannot know whether the retained relation holds any rows, so it
+    /// always builds a present source node.
+    ///
+    /// # Example
+    /// ```
+    /// # use std::sync::Arc;
+    /// # use delta_kernel::{KernelResult, PlanBuilder};
+    /// # use delta_kernel::expressions::col;
+    /// # use delta_kernel::plans::ScopedPlanExecutor;
+    /// # use delta_kernel::schema::{DataType, StructField, StructType};
+    /// # fn build_plan(scoped: &dyn ScopedPlanExecutor) -> KernelResult<()> {
+    /// let schema = Arc::new(StructType::try_new([
+    ///     StructField::not_null("id", DataType::INTEGER),
+    /// ])?);
+    /// let source = PlanBuilder::values(schema, vec![vec![1i32.into()]])?.build()?;
+    /// let relation_ref = scoped.execute_and_retain("example", source)?;
+    /// let plan = PlanBuilder::relation_source(relation_ref)
+    ///     .filter(col!("id").is_not_null())?
+    ///     .build()?;
+    /// # let _ = plan;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn relation_source(relation_ref: RelationRef) -> Self {
+        let schema = Arc::clone(relation_ref.schema());
+        Self::present(schema, relation_ref, vec![])
+    }
+
+    /// Writes `inputs` to the fully qualified `file_path` as newline-delimited JSON.
+    /// All inputs must share the first input's schema. Absent inputs are dropped.
+    /// `overwrite` controls whether an existing file may be replaced. When `ordered` is true,
+    /// all rows from each input precede all rows from the next input; row order within an input
+    /// is unspecified. See [`WriteJson`].
+    ///
+    /// Returns a relation with one row of [`FILE_META_SCHEMA`]. Returns [`KernelError::Schema`]
+    /// if input schemas differ, or [`KernelError::Generic`] if no inputs remain after dropping
+    /// absent relations.
+    pub fn write_json(
+        inputs: impl IntoIterator<Item = PlanBuilder>,
+        file_path: Url,
+        overwrite: bool,
+        ordered: bool,
+    ) -> KernelResult<Self> {
+        let inputs = Vec::from_iter(inputs);
+        let Some(schema) = inputs.first().map(|input| input.schema().clone()) else {
+            return Err(KernelError::generic(
+                "WriteJson requires at least one input",
+            ));
+        };
+        for (i, input) in inputs.iter().enumerate() {
+            if !input.schema().fields().eq(schema.fields()) {
+                return Err(KernelError::schema(format!(
+                    "WriteJson input {i} has a schema differing from input 0"
+                )));
+            }
+        }
+        let inputs: Vec<_> = inputs
+            .into_iter()
+            .filter_map(|input| match input.0 {
+                PlanBuilderRoot::Present(node) => Some(node),
+                PlanBuilderRoot::Absent(_) => None,
+            })
+            .collect();
+        if inputs.is_empty() {
+            return Err(KernelError::generic(
+                "WriteJson requires at least one input row",
+            ));
+        }
+        Ok(Self::present(
+            FILE_META_SCHEMA.clone(),
+            WriteJson {
+                schema,
+                file_path,
+                overwrite,
+                ordered,
+            },
+            inputs,
+        ))
     }
 
     /// Keep rows where `predicate` holds. Output schema is unchanged. See [`Filter`].
@@ -256,9 +342,9 @@ impl PlanBuilder {
     /// let plan = PlanBuilder::values(schema, vec![vec![1.into()], vec![2.into()]])?
     ///     .filter(col!("id").is_not_null())?
     ///     .build()?;
-    /// # Ok::<(), delta_kernel::Error>(())
+    /// # Ok::<(), delta_kernel::KernelError>(())
     /// ```
-    pub fn filter(self, predicate: impl Into<PredicateRef>) -> DeltaResult<Self> {
+    pub fn filter(self, predicate: impl Into<PredicateRef>) -> KernelResult<Self> {
         let predicate = predicate.into();
         check_columns_resolve(self.schema(), predicate.references(), "filter")?;
         let schema = Arc::clone(self.schema());
@@ -288,13 +374,13 @@ impl PlanBuilder {
     /// let plan = PlanBuilder::values(input, vec![vec![1.into(), "a".into()]])?
     ///     .project(Expression::struct_from([col!("id")]), out)?
     ///     .build()?;
-    /// # Ok::<(), delta_kernel::Error>(())
+    /// # Ok::<(), delta_kernel::KernelError>(())
     /// ```
     pub fn project(
         self,
         expr: impl Into<ExpressionRef>,
         schema: impl Into<SchemaRef>,
-    ) -> DeltaResult<Self> {
+    ) -> KernelResult<Self> {
         let schema = schema.into();
         let expr = expr.into();
         check_columns_resolve(self.schema(), expr.references(), "project")?;
@@ -310,7 +396,7 @@ impl PlanBuilder {
     pub fn project_patch(
         self,
         patch: impl FnOnce(ProjectionStructPatchBuilder<'_>) -> ProjectionStructPatchBuilder<'_>,
-    ) -> DeltaResult<Self> {
+    ) -> KernelResult<Self> {
         let (out, expr) = patch(ProjectionStructPatchBuilder::new(self.schema())).build()?;
         self.project(expr, out)
     }
@@ -319,7 +405,7 @@ impl PlanBuilder {
     /// [`DynamicScan`].
     ///
     /// Applies [`DynamicScan::validate_input`]'s validation against `self`'s schema.
-    pub fn dynamic_scan(self, dynamic_scan: DynamicScan) -> DeltaResult<Self> {
+    pub fn dynamic_scan(self, dynamic_scan: DynamicScan) -> KernelResult<Self> {
         dynamic_scan.validate_input(self.schema())?;
         let schema = Arc::clone(&dynamic_scan.schema);
         Ok(self.unary_op_or_absent(schema, dynamic_scan))
@@ -334,7 +420,10 @@ impl PlanBuilder {
     ///
     /// Produces an error when building `aggregate` fails: a group key or an aggregate's operand
     /// column is absent from its input schema, or two output columns would share a name.
-    pub fn aggregate(self, aggregate: impl TryInto<Aggregate, Error = Error>) -> DeltaResult<Self> {
+    pub fn aggregate(
+        self,
+        aggregate: impl TryInto<Aggregate, Error = KernelError>,
+    ) -> KernelResult<Self> {
         let aggregate = aggregate.try_into()?;
         let schema = Arc::clone(&aggregate.schema);
         match self.0 {
@@ -378,13 +467,13 @@ impl PlanBuilder {
     /// let plan = PlanBuilder::values(schema, vec![vec![1.into(), 7i64.into()]])?
     ///     .aggregate_by([column_name!("id")], |a| a.max(column_name!("version")))?
     ///     .build()?;
-    /// # Ok::<(), delta_kernel::Error>(())
+    /// # Ok::<(), delta_kernel::KernelError>(())
     /// ```
     pub fn aggregate_by(
         self,
         keys: impl CollectInto<Vec<ColumnName>>,
         aggs: impl FnOnce(AggregateBuilder) -> AggregateBuilder,
-    ) -> DeltaResult<Self> {
+    ) -> KernelResult<Self> {
         let builder = Aggregate::group_by(Arc::clone(self.schema()), keys);
         self.aggregate(aggs(builder))
     }
@@ -411,12 +500,12 @@ impl PlanBuilder {
     /// let plan = PlanBuilder::values(schema, vec![vec![1.into(), 7i64.into()]])?
     ///     .aggregate_ungrouped(|a| a.max(column_name!("version")))?
     ///     .build()?;
-    /// # Ok::<(), delta_kernel::Error>(())
+    /// # Ok::<(), delta_kernel::KernelError>(())
     /// ```
     pub fn aggregate_ungrouped(
         self,
         aggs: impl FnOnce(AggregateBuilder) -> AggregateBuilder,
-    ) -> DeltaResult<Self> {
+    ) -> KernelResult<Self> {
         let builder = Aggregate::ungrouped(Arc::clone(self.schema()));
         self.aggregate(aggs(builder))
     }
@@ -440,14 +529,14 @@ impl PlanBuilder {
     /// let allow = PlanBuilder::values(schema, vec![vec![2.into()]])?;
     /// // Probe rows whose `id` appears in `allow`.
     /// let plan = probe.semi_join(allow, [column_name!("id")], [column_name!("id")])?.build()?;
-    /// # Ok::<(), delta_kernel::Error>(())
+    /// # Ok::<(), delta_kernel::KernelError>(())
     /// ```
     pub fn semi_join(
         self,
         build: PlanBuilder,
         probe_keys: impl IntoIterator<Item = ColumnName>,
         build_keys: impl IntoIterator<Item = ColumnName>,
-    ) -> DeltaResult<Self> {
+    ) -> KernelResult<Self> {
         self.semi_join_impl(build, false, probe_keys, build_keys)
     }
 
@@ -458,7 +547,7 @@ impl PlanBuilder {
         build: PlanBuilder,
         probe_keys: impl IntoIterator<Item = ColumnName>,
         build_keys: impl IntoIterator<Item = ColumnName>,
-    ) -> DeltaResult<Self> {
+    ) -> KernelResult<Self> {
         self.semi_join_impl(build, true, probe_keys, build_keys)
     }
 
@@ -468,11 +557,11 @@ impl PlanBuilder {
         inverted: bool,
         probe_keys: impl IntoIterator<Item = ColumnName>,
         build_keys: impl IntoIterator<Item = ColumnName>,
-    ) -> DeltaResult<Self> {
+    ) -> KernelResult<Self> {
         let probe_keys = Vec::from_iter(probe_keys);
         let build_keys = Vec::from_iter(build_keys);
         if probe_keys.len() != build_keys.len() {
-            return Err(Error::generic(format!(
+            return Err(KernelError::generic(format!(
                 "join: {} probe key(s) {probe_keys:?} but {} build key(s) {build_keys:?}; \
                  they must match in length.",
                 probe_keys.len(),
@@ -517,15 +606,17 @@ impl PlanBuilder {
     /// let a = PlanBuilder::values(Arc::clone(&schema), vec![vec![1.into()]])?;
     /// let b = PlanBuilder::values(schema, vec![vec![2.into()]])?;
     /// let plan = PlanBuilder::union_all([a, b])?.build()?;
-    /// # Ok::<(), delta_kernel::Error>(())
+    /// # Ok::<(), delta_kernel::KernelError>(())
     /// ```
-    pub fn union_all(inputs: impl IntoIterator<Item = PlanBuilder>) -> DeltaResult<Self> {
+    pub fn union_all(inputs: impl IntoIterator<Item = PlanBuilder>) -> KernelResult<Self> {
         let inputs = Vec::from_iter(inputs);
         let Some(schema) = inputs.first().map(|b| Arc::clone(b.schema())) else {
-            return Err(Error::generic("union_all: requires at least one input"));
+            return Err(KernelError::generic(
+                "union_all: requires at least one input",
+            ));
         };
         if let Some(i) = inputs.iter().position(|b| b.schema() != &schema) {
-            return Err(Error::generic(format!(
+            return Err(KernelError::generic(format!(
                 "union_all: input {i} has a schema differing from input 0: {:?} vs {:?}",
                 inputs[i].schema(),
                 schema,
@@ -544,10 +635,11 @@ impl PlanBuilder {
 
     /// Linearize the DAG reachable from `self` into a [`Plan`]. An absent relation builds to a
     /// single empty [`Values`] node carrying its schema, so the result is always a runnable plan.
-    pub fn build(&self) -> DeltaResult<Plan> {
+    pub fn build(&self) -> KernelResult<Plan> {
         Ok(match &self.0 {
             PlanBuilderRoot::Present(root) => Self::build_plan(root),
             PlanBuilderRoot::Absent(schema) => Plan {
+                schema: Arc::clone(schema),
                 nodes: vec![PlanNode::new(
                     Values::new(Arc::clone(schema), vec![]),
                     vec![],
@@ -557,7 +649,7 @@ impl PlanBuilder {
     }
 
     /// Like [`Self::build`], but yields `None` for an absent relation instead of an empty plan.
-    pub fn build_opt(&self) -> DeltaResult<Option<Plan>> {
+    pub fn build_opt(&self) -> KernelResult<Option<Plan>> {
         Ok(match &self.0 {
             PlanBuilderRoot::Present(root) => Some(Self::build_plan(root)),
             PlanBuilderRoot::Absent(_) => None,
@@ -588,7 +680,10 @@ impl PlanBuilder {
         }
         let mut nodes = Vec::new();
         emit(root, &mut nodes, &mut HashMap::new());
-        Plan { nodes }
+        Plan {
+            schema: Arc::clone(&root.schema),
+            nodes,
+        }
     }
 }
 
@@ -608,10 +703,10 @@ fn check_columns_resolve<'a>(
     schema: &SchemaRef,
     cols: impl IntoIterator<Item = &'a ColumnName>,
     ctx: &str,
-) -> DeltaResult<()> {
+) -> KernelResult<()> {
     for col in cols {
         schema.field_at(col).map_err(|_| {
-            Error::generic(format!(
+            KernelError::generic(format!(
                 "{ctx}: column `{col}` not found; schema has {:?}",
                 Vec::from_iter(schema.fields().map(|f| f.name())),
             ))
@@ -627,16 +722,16 @@ fn check_file_constant_columns<'a>(
     schema: &SchemaRef,
     names: impl IntoIterator<Item = &'a String>,
     ctx: &str,
-) -> DeltaResult<()> {
+) -> KernelResult<()> {
     for name in names {
         let Some(field) = schema.field(name.as_str()) else {
-            return Err(Error::generic(format!(
+            return Err(KernelError::generic(format!(
                 "{ctx}: column `{name}` not found; schema has {:?}",
                 Vec::from_iter(schema.fields().map(|f| f.name())),
             )));
         };
         if field.is_metadata_column() {
-            return Err(Error::generic(format!(
+            return Err(KernelError::generic(format!(
                 "{ctx}: column `{name}` is a metadata column"
             )));
         }
@@ -705,6 +800,7 @@ mod tests {
     /// inspection.
     fn assert_plan(builder: PlanBuilder, expected: &[(&[usize], &str)]) -> Plan {
         let plan = builder.build().unwrap();
+        assert_eq!(&plan.schema, builder.schema(), "output schema");
         assert_eq!(plan.nodes.len(), expected.len(), "node count");
         for (i, (node, &(inputs, op))) in plan.nodes.iter().zip(expected).enumerate() {
             assert_eq!(node.inputs.as_slice(), inputs, "node {i} inputs");
@@ -719,6 +815,29 @@ mod tests {
         let src = scan(id_schema());
         assert_eq!(src.schema(), &id_schema());
         assert_plan(src, &[(&[], "scan_parquet")]);
+    }
+
+    /// `relation_source` records the handle's id and schema and builds to a single source node.
+    #[test]
+    fn relation_source_builds_single_node_with_ref_schema() {
+        let src = PlanBuilder::relation_source(RelationRef::new("relation-3", id_schema()));
+        assert_eq!(src.schema(), &id_schema());
+        let plan = assert_plan(src, &[(&[], "relation_source")]);
+        let Operator::RelationSource(relation_ref) = &plan.nodes[0].op else {
+            panic!("expected RelationSource");
+        };
+        assert_eq!(relation_ref.id(), "relation-3");
+        assert_eq!(relation_ref.schema(), &id_schema());
+    }
+
+    /// A `relation_source` feeds downstream transforms, which validate against its schema.
+    #[test]
+    fn relation_source_supports_downstream_transforms() -> KernelResult<()> {
+        let filtered = PlanBuilder::relation_source(RelationRef::new("relation-1", id_schema()))
+            .filter(col!("id").is_not_null())?;
+        assert_eq!(filtered.schema(), &id_schema());
+        assert_plan(filtered, &[(&[], "relation_source"), (&[0], "filter")]);
+        Ok(())
     }
 
     /// `{ id, part }`, with `part` used as a file-constant column.
@@ -739,7 +858,7 @@ mod tests {
 
     /// Both scan sources carry file-constant columns and record them on the node.
     #[test]
-    fn scans_record_file_constant_columns() -> DeltaResult<()> {
+    fn scans_record_file_constant_columns() -> KernelResult<()> {
         let part = vec!["part".to_string()];
 
         let parquet = PlanBuilder::scan_parquet(
@@ -769,7 +888,7 @@ mod tests {
 
     /// Filter passes the input schema through unchanged.
     #[test]
-    fn filter_preserves_schema() -> DeltaResult<()> {
+    fn filter_preserves_schema() -> KernelResult<()> {
         let filtered = vals(id_schema()).filter(col!("id").is_not_null())?;
         assert_eq!(filtered.schema(), &id_schema());
         Ok(())
@@ -777,7 +896,7 @@ mod tests {
 
     /// A method chain linearizes in topological order with the terminal last.
     #[test]
-    fn monadic_chain_is_topological() -> DeltaResult<()> {
+    fn monadic_chain_is_topological() -> KernelResult<()> {
         assert_plan(
             scan(id_schema())
                 .filter(col!("id").is_not_null())?
@@ -790,7 +909,7 @@ mod tests {
     /// A value reused by two consumers (SSA style) is emitted exactly once: the shared source
     /// node appears a single time and both consumers reference its index.
     #[test]
-    fn shared_source_emitted_once() -> DeltaResult<()> {
+    fn shared_source_emitted_once() -> KernelResult<()> {
         let a = vals(id_schema());
         let b = a.clone().filter(col!("id").is_not_null())?;
         let c = a.filter(col!("id").is_null())?;
@@ -810,7 +929,7 @@ mod tests {
 
     /// Nodes not reachable from the terminal are dropped (dead-code elimination).
     #[test]
-    fn unreachable_nodes_are_dropped() -> DeltaResult<()> {
+    fn unreachable_nodes_are_dropped() -> KernelResult<()> {
         let src = vals(id_schema());
         let _dead = src.clone().filter(col!("id").is_null())?; // never reaches the terminal
         let kept = src.filter(col!("id").is_not_null())?;
@@ -823,7 +942,7 @@ mod tests {
     /// A shared *intermediate* (a node with its own input) feeding two consumers is emitted once,
     /// and both consumers reference its single index.
     #[test]
-    fn shared_intermediate_emitted_once_diamond() -> DeltaResult<()> {
+    fn shared_intermediate_emitted_once_diamond() -> KernelResult<()> {
         let mid = vals(id_schema()).filter(col!("id").is_not_null())?;
         let left = mid.clone().filter(col!("id").is_not_null())?;
         let right = mid.filter(col!("id").is_null())?;
@@ -844,7 +963,7 @@ mod tests {
 
     /// `union_all` over two or more present inputs keeps `self`'s schema and records all inputs.
     #[test]
-    fn union_all_records_present_inputs() -> DeltaResult<()> {
+    fn union_all_records_present_inputs() -> KernelResult<()> {
         let inputs = Vec::from_iter((0..3).map(|_| vals(id_schema())));
         assert_plan(
             PlanBuilder::union_all(inputs)?,
@@ -860,11 +979,61 @@ mod tests {
 
     /// `union_all` with a single present input forwards it unchanged -- no `UnionAll` node.
     #[test]
-    fn union_all_of_one_forwards() -> DeltaResult<()> {
+    fn union_all_of_one_forwards() -> KernelResult<()> {
         assert_plan(
             PlanBuilder::union_all([vals(id_schema())])?,
             &[(&[], "values")],
         );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    fn write_json_preserves_inputs_and_declares_schema(
+        #[values(false, true)] overwrite: bool,
+        #[values(false, true)] ordered: bool,
+    ) -> KernelResult<()> {
+        let first = vals(id_schema());
+        let second = vals(id_schema());
+        let path = Url::parse("memory:///output")?;
+        let builder = PlanBuilder::write_json(
+            [first.clone(), absent_src(), second, first],
+            path.clone(),
+            overwrite,
+            ordered,
+        )?;
+        assert_eq!(builder.schema(), &*FILE_META_SCHEMA);
+        let plan = assert_plan(
+            builder,
+            &[(&[], "values"), (&[], "values"), (&[0, 1, 0], "write_json")],
+        );
+        let Operator::WriteJson(node) = &plan.nodes[2].op else {
+            panic!("expected WriteJson");
+        };
+        assert_eq!(node.schema, id_schema());
+        assert_eq!(node.file_path, path);
+        assert_eq!(node.overwrite, overwrite);
+        assert_eq!(node.ordered, ordered);
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[case::no_inputs(vec![])]
+    #[case::absent_inputs(vec![absent_src(), absent_src()])]
+    fn write_json_rejects_empty_inputs(#[case] inputs: Vec<PlanBuilder>) -> KernelResult<()> {
+        let path = Url::parse("memory:///output")?;
+        let result = PlanBuilder::write_json(inputs, path, false, false);
+        assert!(matches!(result, Err(KernelError::Generic(message))
+            if message.contains("at least one input")));
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[case::present(vals(x_schema()))]
+    #[case::absent(absent_over(x_schema()))]
+    fn write_json_rejects_mismatched_input_schema(#[case] other: PlanBuilder) -> KernelResult<()> {
+        let path = Url::parse("memory:///output")?;
+        let result = PlanBuilder::write_json([vals(id_schema()), other], path, false, false);
+        assert!(matches!(result, Err(KernelError::Schema(_))));
         Ok(())
     }
 
@@ -893,7 +1062,7 @@ mod tests {
     #[case::anti_join_absent_probe(
         absent_src().anti_join(vals(x_schema()), [column_name!("id")], [column_name!("x")]))]
     #[case::union_all_of_absent(PlanBuilder::union_all([absent_src(), absent_src()]))]
-    fn collapses_to_absent(#[case] builder: DeltaResult<PlanBuilder>) -> DeltaResult<()> {
+    fn collapses_to_absent(#[case] builder: KernelResult<PlanBuilder>) -> KernelResult<()> {
         assert!(builder?.build_opt()?.is_none()); // absent has no plan to run
         Ok(())
     }
@@ -901,7 +1070,7 @@ mod tests {
     /// An absent relation still carries its schema, and `build` materializes it as an empty
     /// `Values` node.
     #[test]
-    fn absent_carries_schema_and_builds_empty_values() -> DeltaResult<()> {
+    fn absent_carries_schema_and_builds_empty_values() -> KernelResult<()> {
         let absent = absent_src();
         assert_eq!(absent.schema(), &id_schema());
         let plan = assert_plan(absent, &[(&[], "values")]);
@@ -916,7 +1085,7 @@ mod tests {
     /// `union_all` drops absent arms, so a lone present arm survives and is forwarded unchanged --
     /// no `UnionAll` node.
     #[test]
-    fn union_all_forwards_lone_present_arm() -> DeltaResult<()> {
+    fn union_all_forwards_lone_present_arm() -> KernelResult<()> {
         assert_plan(
             PlanBuilder::union_all([absent_src(), vals(id_schema())])?,
             &[(&[], "values")],
@@ -926,7 +1095,7 @@ mod tests {
 
     /// An anti join with an absent build forwards its probe unchanged: it subtracts nothing.
     #[test]
-    fn anti_join_over_absent_build_forwards_probe() -> DeltaResult<()> {
+    fn anti_join_over_absent_build_forwards_probe() -> KernelResult<()> {
         let anti = vals(id_schema()).anti_join(
             absent_src(),
             [column_name!("id")],
@@ -938,7 +1107,7 @@ mod tests {
 
     /// `aggregate` outputs the group keys followed by the aggregate columns.
     #[test]
-    fn aggregate_outputs_keys_then_aggs() -> DeltaResult<()> {
+    fn aggregate_outputs_keys_then_aggs() -> KernelResult<()> {
         // Group by `id`, take the latest `part` by version -- output is `{id, part}`.
         let agg = vals(part_schema()).aggregate(
             Aggregate::group_by(part_schema(), [column_name!("id")]).max_non_null_by(
@@ -955,7 +1124,7 @@ mod tests {
     /// `aggregate_by` roots the `AggregateBuilder` at the input schema, yielding the same plan as
     /// `aggregate` with an explicitly schema'd builder.
     #[test]
-    fn aggregate_by_infers_input_schema() -> DeltaResult<()> {
+    fn aggregate_by_infers_input_schema() -> KernelResult<()> {
         let agg = vals(part_schema()).aggregate_by([column_name!("id")], |a| {
             a.max_non_null_by(
                 column_name!("part"),
@@ -970,7 +1139,7 @@ mod tests {
 
     /// `aggregate_ungrouped` roots the `AggregateBuilder` at the input schema without grouping.
     #[test]
-    fn aggregate_ungrouped_infers_input_schema() -> DeltaResult<()> {
+    fn aggregate_ungrouped_infers_input_schema() -> KernelResult<()> {
         let agg = vals(part_schema()).aggregate_ungrouped(|a| a.max(column_name!("part")))?;
         let schema = agg.schema();
         assert_eq!(schema.fields().count(), 1);
@@ -982,7 +1151,7 @@ mod tests {
     /// A global (no group keys) aggregate over an absent input aggregates an empty `Values`
     /// relation, so the engine produces the single output row.
     #[test]
-    fn aggregate_global_over_absent_aggregates_empty_values() -> DeltaResult<()> {
+    fn aggregate_global_over_absent_aggregates_empty_values() -> KernelResult<()> {
         let agg = absent_src().aggregate(
             Aggregate::group_by(id_schema(), Vec::<ColumnName>::new()).max(column_name!("id")),
         )?;
@@ -996,7 +1165,7 @@ mod tests {
 
     /// A global (no group keys) aggregate over a present input outputs just the aggregate columns.
     #[test]
-    fn aggregate_global_over_present_outputs_aggs_only() -> DeltaResult<()> {
+    fn aggregate_global_over_present_outputs_aggs_only() -> KernelResult<()> {
         let agg = vals(part_schema()).aggregate(
             Aggregate::group_by(part_schema(), Vec::<ColumnName>::new()).max(column_name!("part")),
         )?;
@@ -1025,7 +1194,7 @@ mod tests {
     /// `project_patch` lowers field edits and the output schema together: a nested replace, a
     /// top-level append, and a drop are all reflected in the resulting schema.
     #[test]
-    fn project_patch_edits_track_schema() -> DeltaResult<()> {
+    fn project_patch_edits_track_schema() -> KernelResult<()> {
         let patched = vals(nested_ab_c()).project_patch(|p| {
             p.replace_at(
                 ["outer"],
@@ -1052,7 +1221,7 @@ mod tests {
     /// A shared edit `fn` can be reused across multiple `project_patch` sites: it is higher-ranked
     /// over the patch-builder lifetime, which a `let` closure cannot express.
     #[test]
-    fn project_patch_accepts_shared_fn() -> DeltaResult<()> {
+    fn project_patch_accepts_shared_fn() -> KernelResult<()> {
         fn drop_c(p: ProjectionStructPatchBuilder<'_>) -> ProjectionStructPatchBuilder<'_> {
             p.drop("c")
         }
@@ -1064,7 +1233,7 @@ mod tests {
 
     /// `project` records the caller's declared output schema verbatim.
     #[test]
-    fn project_records_declared_schema() -> DeltaResult<()> {
+    fn project_records_declared_schema() -> KernelResult<()> {
         let out = x_schema();
         let p = vals(id_schema()).project(Expression::struct_from([col!("id")]), out.clone())?;
         assert_eq!(p.schema(), &out);
@@ -1077,7 +1246,7 @@ mod tests {
     #[rstest::rstest]
     fn join_mirrors_probe_and_orders_inputs(
         #[values(false, true)] inverted: bool,
-    ) -> DeltaResult<()> {
+    ) -> KernelResult<()> {
         let probe = vals(id_schema());
         let build = vals(x_schema());
         let joined = if inverted {
@@ -1101,7 +1270,7 @@ mod tests {
     fn dynamic_scan_node(
         input_schema: &SchemaRef,
         out_schema: SchemaRef,
-    ) -> DeltaResult<DynamicScan> {
+    ) -> KernelResult<DynamicScan> {
         DynamicScan::try_new(
             input_schema,
             out_schema,
@@ -1133,7 +1302,7 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_scan_sets_output_schema_and_records_input() -> DeltaResult<()> {
+    fn dynamic_scan_sets_output_schema_and_records_input() -> KernelResult<()> {
         let input = dynamic_scan_input_schema();
         let out = dynamic_scan_output_schema();
         let node = dynamic_scan_node(&input, out.clone())?;
@@ -1167,14 +1336,14 @@ mod tests {
         schema_with_field(dynamic_scan_input_schema(), field)
     }
 
-    fn construct_dynamic_scan(input: SchemaRef) -> DeltaResult<DynamicScan> {
+    fn construct_dynamic_scan(input: SchemaRef) -> KernelResult<DynamicScan> {
         dynamic_scan_node(&input, dynamic_scan_output_schema())
     }
 
     fn build_dynamic_scan_with_schemas(
         input: SchemaRef,
         output: SchemaRef,
-    ) -> DeltaResult<PlanBuilder> {
+    ) -> KernelResult<PlanBuilder> {
         let dynamic_scan = dynamic_scan_node(&input, output)?;
         vals(input).dynamic_scan(dynamic_scan)
     }
@@ -1289,6 +1458,8 @@ mod tests {
     // transforms referencing an absent column
     #[case::filter_unknown_column("`nope` not found",
         || vals(id_schema()).filter(col!("nope").is_not_null()))]
+    #[case::relation_source_unknown_column("`nope` not found",
+        || PlanBuilder::relation_source(RelationRef::new("relation-0", id_schema())).filter(col!("nope").is_not_null()))]
     #[case::project_unknown_column("`nope` not found",
         || vals(id_schema()).project(Expression::struct_from([col!("nope")]), id_schema()))]
     #[case::project_patch_missing_field("does not exist",
@@ -1349,7 +1520,7 @@ mod tests {
         );
         build_dynamic_scan_with_schemas(dynamic_scan_input_schema(), output)
     })]
-    fn rejects(#[case] needle: &str, #[case] make: impl Fn() -> DeltaResult<PlanBuilder>) {
+    fn rejects(#[case] needle: &str, #[case] make: impl Fn() -> KernelResult<PlanBuilder>) {
         assert_result_error_with_message(make(), needle);
     }
 
@@ -1396,7 +1567,7 @@ mod tests {
     })]
     fn dynamic_scan_constructor_rejects_invalid_configuration(
         #[case] needle: &str,
-        #[case] make: impl Fn() -> DeltaResult<DynamicScan>,
+        #[case] make: impl Fn() -> KernelResult<DynamicScan>,
     ) {
         assert_result_error_with_message(make(), needle);
     }

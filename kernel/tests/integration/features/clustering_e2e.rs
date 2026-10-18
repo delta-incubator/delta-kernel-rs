@@ -41,7 +41,7 @@ async fn test_clustered_table_write_and_checkpoint(
     let expected_clustering = vec![column_name!("id"), column_name!("city")];
 
     // Create table clustered on "id" and "city"
-    let create_result = create_table(&table_path, schema, "Test/1.0")
+    let create_result = create_table(&table_path, schema, "Test/1.0", true)
         .with_data_layout(DataLayout::Clustered {
             columns: expected_clustering.clone(),
         })
@@ -54,11 +54,11 @@ async fn test_clustered_table_write_and_checkpoint(
         Snapshot::builder_for(table_url).build(engine.as_ref())?
     } else {
         match create_result {
-            CommitResult::CommittedTransaction(committed) => committed
+            CommitResult::Committed(committed) => committed
                 .post_commit_snapshot()
                 .expect("post-commit snapshot should exist")
                 .clone(),
-            other => panic!("Expected CommittedTransaction, got: {other:?}"),
+            other => panic!("Expected Committed, got: {other:?}"),
         }
     };
 
@@ -154,7 +154,7 @@ async fn test_clustered_table_write_all_null_clustering_column() {
     };
 
     // Create table clustered on "category" and "region_id"
-    let create_result = create_table(&table_path, schema, "Test/1.0")
+    let create_result = create_table(&table_path, schema, "Test/1.0", true)
         .with_data_layout(DataLayout::Clustered {
             columns: vec![column_name!("category"), column_name!("region_id")],
         })

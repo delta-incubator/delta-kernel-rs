@@ -5,6 +5,7 @@ use delta_kernel::arrow::array::{ArrayRef, Int32Array, StringArray};
 use delta_kernel::object_store::local::LocalFileSystem;
 use delta_kernel::schema::schema_ref;
 use delta_kernel::transaction::create_table::create_table;
+use delta_kernel::transaction::UpdateTableOperation;
 use delta_kernel::{Engine, Snapshot};
 use delta_kernel_default_engine::executor::tokio::TokioMultiThreadExecutor;
 use delta_kernel_default_engine::DefaultEngine;
@@ -122,8 +123,8 @@ fn commit(
 ) -> Result<Arc<Snapshot>, TestError> {
     Ok(snapshot
         .clone()
-        .transaction(Box::new(uc_committer(update_table_client)), engine)?
-        .with_operation("WRITE".to_string())
+        .update_table(UpdateTableOperation::Write, "test-engine", true)
+        .build(engine, Box::new(uc_committer(update_table_client)))?
         .commit(engine)?
         .unwrap_post_commit_snapshot())
 }
@@ -190,11 +191,12 @@ async fn test_insert_without_publish_hits_limit() -> Result<(), TestError> {
     let committer = Box::new(uc_committer(&update_table_client));
     let err = snapshot
         .clone()
-        .transaction(committer, &engine)?
+        .update_table(UpdateTableOperation::Write, "test-engine", true)
+        .build(&engine, committer)?
         .commit(&engine)
         .unwrap_err();
     assert!(
-        matches!(err, delta_kernel::Error::Generic(msg) if msg.contains("Max unpublished commits"))
+        matches!(err, delta_kernel::KernelError::Generic(msg) if msg.contains("Max unpublished commits"))
     );
     Ok(())
 }
@@ -234,7 +236,10 @@ async fn test_cannot_checkpoint_unpublished_snapshot() -> Result<(), TestError> 
 
     let snapshot = commit(&snapshot, &update_table_client, &engine)?;
     let err = snapshot.checkpoint(&engine, None).unwrap_err();
-    assert!(matches!(err, delta_kernel::Error::UnpublishedVersion(1)));
+    assert!(matches!(
+        err,
+        delta_kernel::KernelError::UnpublishedVersion(1)
+    ));
     Ok(())
 }
 
@@ -261,7 +266,7 @@ async fn test_append_scan_back_and_incremental_read() -> Result<(), TestError> {
     };
 
     // v0 create: writes 000.json directly to storage, does not call the catalog.
-    create_table(table_uri.as_str(), schema, "delta-kernel-uc-test")
+    create_table(table_uri.as_str(), schema, "delta-kernel-uc-test", true)
         .with_table_properties(get_required_properties_for_disk(TABLE_ID))
         .build(engine.as_ref(), Box::new(uc_committer(&client)))?
         .commit(engine.as_ref())?

@@ -96,7 +96,7 @@ mod tests {
     use crate::engine::test_delegating::DelegatingEngine;
     use crate::metrics::MetricEvent;
     use crate::unit_test_utils::{install_thread_local_metrics_reporter, CapturingReporter};
-    use crate::{DeltaResult, DeltaResultIteratorStatic, FileMeta, FileSlice};
+    use crate::{FileMeta, FileSlice, KernelResult, KernelResultIteratorStatic};
 
     /// Minimal storage handler used in tests: returns N preconfigured FileMeta items.
     #[derive(Debug)]
@@ -105,26 +105,26 @@ mod tests {
     }
 
     impl StorageHandler for StubStorageHandler {
-        fn list_from(&self, _path: &Url) -> DeltaResult<DeltaResultIteratorStatic<FileMeta>> {
+        fn list_from(&self, _path: &Url) -> KernelResult<KernelResultIteratorStatic<FileMeta>> {
             let results: Vec<_> = self.list_results.iter().cloned().map(Ok).collect();
             Ok(Box::new(results.into_iter()))
         }
         fn read_files(
             &self,
             _files: Vec<FileSlice>,
-        ) -> DeltaResult<DeltaResultIteratorStatic<Bytes>> {
+        ) -> KernelResult<KernelResultIteratorStatic<Bytes>> {
             Ok(Box::new(std::iter::empty()))
         }
-        fn copy_atomic(&self, _src: &Url, _dest: &Url) -> DeltaResult<()> {
+        fn copy_atomic(&self, _src: &Url, _dest: &Url) -> KernelResult<()> {
             Ok(())
         }
-        fn put(&self, _path: &Url, _data: Bytes, _overwrite: bool) -> DeltaResult<()> {
+        fn put(&self, _path: &Url, _data: Bytes, _overwrite: bool) -> KernelResult<()> {
             Ok(())
         }
-        fn head(&self, _path: &Url) -> DeltaResult<FileMeta> {
+        fn head(&self, _path: &Url) -> KernelResult<FileMeta> {
             unreachable!("not exercised")
         }
-        fn delete(&self, _path: &Url) -> DeltaResult<()> {
+        fn delete(&self, _path: &Url) -> KernelResult<()> {
             Ok(())
         }
     }
