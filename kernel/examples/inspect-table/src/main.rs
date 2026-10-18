@@ -17,7 +17,7 @@ use delta_kernel::expressions::ColumnName;
 use delta_kernel::scan::state::ScanFile;
 use delta_kernel::scan::ScanBuilder;
 use delta_kernel::schema::{ColumnNamesAndTypes, DataType};
-use delta_kernel::{DeltaResult, KernelError, Snapshot};
+use delta_kernel::{KernelError, KernelResult, Snapshot};
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -106,7 +106,7 @@ impl RowVisitor for LogVisitor {
     fn selected_column_names_and_types(&self) -> (&'static [ColumnName], &'static [DataType]) {
         NAMES_AND_TYPES.as_ref()
     }
-    fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<()> {
+    fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> KernelResult<()> {
         let expected = NAMES_AND_TYPES.as_ref().0.len();
         if getters.len() != expected {
             return Err(KernelError::InternalError(format!(
@@ -187,7 +187,7 @@ fn print_scan_file(_: &mut (), file: ScanFile) {
     );
 }
 
-fn try_main() -> DeltaResult<()> {
+fn try_main() -> KernelResult<()> {
     let cli = Cli::parse_with_examples(env!("CARGO_PKG_NAME"), "Inspect", "inspect", "<COMMAND>");
     common::init_logging(&cli.logging_args)?;
 

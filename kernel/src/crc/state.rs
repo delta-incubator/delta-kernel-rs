@@ -16,7 +16,7 @@ use delta_kernel_derive::internal_api;
 
 use super::file_stats::FileStats;
 use crate::actions::{DomainMetadata, SetTransaction};
-use crate::{DeltaResult, KernelError};
+use crate::{KernelError, KernelResult};
 
 /// The state of file statistics for a CRC.
 ///
@@ -103,7 +103,7 @@ impl DomainMetadataState {
     #[internal_api]
     pub(crate) fn try_complete(
         values: impl IntoIterator<Item = DomainMetadata>,
-    ) -> DeltaResult<Self> {
+    ) -> KernelResult<Self> {
         Ok(Self::Complete(domain_metadata_map(values, true)?))
     }
 
@@ -111,7 +111,7 @@ impl DomainMetadataState {
     #[internal_api]
     pub(crate) fn try_partial(
         values: impl IntoIterator<Item = DomainMetadata>,
-    ) -> DeltaResult<Self> {
+    ) -> KernelResult<Self> {
         Ok(Self::Partial(domain_metadata_map(values, false)?))
     }
 }
@@ -119,7 +119,7 @@ impl DomainMetadataState {
 fn domain_metadata_map(
     values: impl IntoIterator<Item = DomainMetadata>,
     reject_tombstones: bool,
-) -> DeltaResult<HashMap<String, DomainMetadata>> {
+) -> KernelResult<HashMap<String, DomainMetadata>> {
     let values = values.into_iter();
     let mut result = HashMap::with_capacity(values.size_hint().0);
     for value in values {
@@ -195,7 +195,7 @@ impl SetTransactionState {
     #[internal_api]
     pub(crate) fn try_complete(
         values: impl IntoIterator<Item = SetTransaction>,
-    ) -> DeltaResult<Self> {
+    ) -> KernelResult<Self> {
         Ok(Self::Complete(transaction_map(values)?))
     }
 
@@ -203,14 +203,14 @@ impl SetTransactionState {
     #[internal_api]
     pub(crate) fn try_partial(
         values: impl IntoIterator<Item = SetTransaction>,
-    ) -> DeltaResult<Self> {
+    ) -> KernelResult<Self> {
         Ok(Self::Partial(transaction_map(values)?))
     }
 }
 
 fn transaction_map(
     values: impl IntoIterator<Item = SetTransaction>,
-) -> DeltaResult<HashMap<String, SetTransaction>> {
+) -> KernelResult<HashMap<String, SetTransaction>> {
     let values = values.into_iter();
     let mut result = HashMap::with_capacity(values.size_hint().0);
     for value in values {

@@ -6,7 +6,7 @@ use std::ptr::NonNull;
 use std::sync::Arc;
 
 #[cfg(test)]
-use delta_kernel::{object_store::memory::InMemory, Engine};
+use delta_kernel::{object_store::memory::InMemory, Engine, KernelResult};
 #[cfg(test)]
 use delta_kernel_default_engine::DefaultEngineBuilder;
 #[cfg(test)]
@@ -15,7 +15,12 @@ use test_utils::add_commit;
 use crate::error::{AllocateError, AllocateErrorFn, EngineError, ExternResult, FFIKernelError};
 #[cfg(test)]
 use crate::{
-    engine_to_handle, get_snapshot_builder, kernel_string_slice, snapshot_builder_build,
+    engine_to_handle, free_snapshot, get_snapshot_builder, kernel_string_slice,
+    snapshot_builder_build,
+    transaction::{
+        new_update_table_txn_builder, update_table_txn_builder_build,
+        ExclusiveUpdateTableTransaction, KernelUpdateTableOperation,
+    },
     ExternEngine, SharedExternEngine, SharedSnapshot,
 };
 use crate::{KernelBytesSlice, KernelStringSlice, NullableCvoid, TryFromStringSlice};
@@ -114,6 +119,33 @@ pub(crate) unsafe fn build_snapshot(
     ok_or_panic(snapshot_builder_build(builder))
 }
 
+/// Build a `WRITE` transaction through the FFI snapshot and transaction-builder APIs.
+///
+/// Returns an error if the transaction cannot be built. Panics if the snapshot cannot be loaded.
+///
+/// # Safety
+///
+/// `path` and `engine` must be valid. This call borrows both inputs. The caller retains ownership.
+#[cfg(test)]
+pub(crate) unsafe fn build_update_table_txn(
+    path: KernelStringSlice,
+    engine: crate::handle::Handle<SharedExternEngine>,
+) -> ExternResult<crate::handle::Handle<ExclusiveUpdateTableTransaction>> {
+    let snapshot = unsafe { build_snapshot(path, engine.shallow_copy()) };
+    let engine_info = "test-engine/1.0";
+    let builder = unsafe {
+        ok_or_panic(new_update_table_txn_builder(
+            snapshot.shallow_copy(),
+            KernelUpdateTableOperation::Write,
+            kernel_string_slice!(engine_info),
+            true,
+            engine.shallow_copy(),
+        ))
+    };
+    unsafe { free_snapshot(snapshot) };
+    unsafe { update_table_txn_builder_build(builder, engine) }
+}
+
 /// Wrap an already-seeded object store in an engine handle. Caller must free it.
 ///
 /// Needed because `get_default_engine` resolves the store from the URL, so a `memory://` path
@@ -131,13 +163,10 @@ pub(crate) fn engine_handle_for_store(
 #[cfg(test)]
 pub(crate) async fn setup_snapshot(
     commit_data: String,
-) -> Result<
-    (
-        crate::handle::Handle<crate::SharedExternEngine>,
-        crate::handle::Handle<crate::SharedSnapshot>,
-    ),
-    Box<dyn std::error::Error>,
-> {
+) -> KernelResult<(
+    crate::handle::Handle<crate::SharedExternEngine>,
+    crate::handle::Handle<crate::SharedSnapshot>,
+)> {
     let table_root = "memory:///";
     let storage = Arc::new(InMemory::new());
     add_commit(table_root, storage.as_ref(), 0, commit_data).await?;

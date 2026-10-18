@@ -10,7 +10,7 @@ use delta_kernel::scan::{PartitionValuesOptions, Scan, ScanBuilder, ScanMetadata
 use delta_kernel::schema::MetadataValue;
 use delta_kernel::snapshot::SnapshotRef;
 use delta_kernel::{
-    DeltaResult, DeltaResultIteratorStatic, Expression, ExpressionRef, KernelError,
+    Expression, ExpressionRef, KernelError, KernelResult, KernelResultIteratorStatic,
 };
 use delta_kernel_ffi_macros::handle_descriptor;
 use derive_more::From;
@@ -18,6 +18,7 @@ use tracing::debug;
 use url::Url;
 
 use super::handle::Handle;
+use crate::delta_types::FfiColumnNameArray;
 #[cfg(feature = "default-engine-base")]
 use crate::engine_data::ArrowFFIData;
 use crate::error::AllocateErrorFn;
@@ -38,7 +39,7 @@ pub struct SharedScan;
 pub struct SharedScanMetadata;
 
 /// Boxed scan metadata iterator stored behind [`ScanMetadataIterator`]'s mutex.
-type ScanMetadataIter = DeltaResultIteratorStatic<ScanMetadata>;
+type ScanMetadataIter = KernelResultIteratorStatic<ScanMetadata>;
 
 /// An opaque, exclusive handle owning a [`ScanBuilder`].
 ///
@@ -62,17 +63,38 @@ pub enum FfiStatsOptions {
     All,
     /// Emit no stats and disable kernel data skipping.
     None,
-    // TODO: Expose StructColumns variant (matching `StatsOptions::struct_columns`)
+    /// Emit struct stats for these logical column paths, regardless of the indexed set.
+    /// Unresolvable names fail when the scan is built. An empty array emits no struct stats,
+    /// while predicate-only stats may still be read for skipping. JSON is not synthesized.
+    StructColumns(FfiColumnNameArray),
+    /// Emit all indexed struct stats plus these logical column paths. Unresolvable extra names
+    /// are ignored with a warning. An empty array is equivalent to `AllStruct`.
+    /// JSON is not synthesized.
+    AllStructWithExtraIndexed(FfiColumnNameArray),
 }
 
-impl From<FfiStatsOptions> for StatsOptions {
-    fn from(options: FfiStatsOptions) -> Self {
-        match options {
-            FfiStatsOptions::JsonOnly => Self::json_only(),
-            FfiStatsOptions::AllStruct => Self::all_struct(),
-            FfiStatsOptions::All => Self::all(),
-            FfiStatsOptions::None => Self::none(),
-        }
+impl FfiStatsOptions {
+    /// Copy borrowed logical column paths into owned kernel options.
+    ///
+    /// # Safety
+    ///
+    /// Column arrays and all nested slices must follow the [`crate::FfiSlice`] contract and
+    /// remain valid for this call. Path segments are field names, not dotted strings.
+    unsafe fn try_to_kernel(&self) -> KernelResult<StatsOptions> {
+        Ok(match self {
+            Self::JsonOnly => StatsOptions::json_only(),
+            Self::AllStruct => StatsOptions::all_struct(),
+            Self::All => StatsOptions::all(),
+            Self::None => StatsOptions::none(),
+            Self::StructColumns(columns) => {
+                StatsOptions::struct_columns(unsafe { columns.try_to_column_names() }?)
+            }
+            Self::AllStructWithExtraIndexed(columns) => {
+                StatsOptions::all_struct_with_extra_indexed(unsafe {
+                    columns.try_to_column_names()
+                }?)
+            }
+        })
     }
 }
 
@@ -116,13 +138,13 @@ pub struct EnginePredicate {
 /// An engine-provided schema along with a visitor function to convert it to a kernel schema.
 ///
 /// Used by [`scan`] and [`scan_builder_with_schema`] for projection pushdown, and by
-/// [`get_create_table_builder`] to specify the table schema at creation time. The engine
+/// [`new_create_table_txn_builder`] to specify the table schema at creation time. The engine
 /// provides a pointer to its native schema representation along with a visitor function. The
 /// kernel allocates visitor state internally, which becomes the second argument to the schema
 /// visitor invocation. Thanks to this double indirection, engine and kernel each retain
 /// ownership of their respective objects with no need to coordinate memory lifetimes.
 ///
-/// [`get_create_table_builder`]: crate::transaction::get_create_table_builder
+/// [`new_create_table_txn_builder`]: crate::transaction::new_create_table_txn_builder
 #[repr(C)]
 pub struct EngineSchema {
     pub schema: *mut c_void,
@@ -169,7 +191,7 @@ pub unsafe extern "C" fn selection_vector_from_scan_metadata(
 
 fn selection_vector_from_scan_metadata_impl(
     scan_metadata: &ScanMetadata,
-) -> DeltaResult<KernelBoolSlice> {
+) -> KernelResult<KernelBoolSlice> {
     Ok(scan_metadata.scan_files.selection_vector().to_vec().into())
 }
 
@@ -206,7 +228,7 @@ pub unsafe extern "C" fn scan(
 /// construction failed, which would silently widen to a full scan if ignored.
 pub(crate) fn decode_engine_predicate(
     predicate: &mut EnginePredicate,
-) -> DeltaResult<delta_kernel::Predicate> {
+) -> KernelResult<delta_kernel::Predicate> {
     let mut visitor_state = KernelExpressionVisitorState::default();
     let pred_id = (predicate.visitor)(predicate.predicate, &mut visitor_state);
     unwrap_kernel_predicate(&mut visitor_state, pred_id).ok_or_else(|| {
@@ -224,7 +246,7 @@ pub(crate) fn decode_engine_predicate(
 fn apply_predicate(
     builder: ScanBuilder,
     predicate: &mut EnginePredicate,
-) -> DeltaResult<ScanBuilder> {
+) -> KernelResult<ScanBuilder> {
     let predicate = decode_engine_predicate(predicate)?;
     debug!("Got predicate: {:#?}", predicate);
     Ok(builder.with_predicate(Some(Arc::new(predicate))))
@@ -233,7 +255,7 @@ fn apply_predicate(
 /// Decode an [`EngineSchema`] and apply it as a column projection to a [`ScanBuilder`].
 ///
 /// Returns an error if the schema visitor produces an invalid schema.
-fn apply_schema(builder: ScanBuilder, schema: &EngineSchema) -> DeltaResult<ScanBuilder> {
+fn apply_schema(builder: ScanBuilder, schema: &EngineSchema) -> KernelResult<ScanBuilder> {
     let mut visitor_state = KernelSchemaVisitorState::default();
     let schema_id = (schema.visitor)(schema.schema, &mut visitor_state);
     let schema = extract_kernel_schema(&mut visitor_state, schema_id)?;
@@ -245,7 +267,7 @@ fn scan_impl(
     snapshot: SnapshotRef,
     predicate: Option<&mut EnginePredicate>,
     schema: Option<&EngineSchema>,
-) -> DeltaResult<Handle<SharedScan>> {
+) -> KernelResult<Handle<SharedScan>> {
     let mut scan_builder = snapshot.scan_builder();
     if let Some(predicate) = predicate {
         scan_builder = apply_predicate(scan_builder, predicate)?;
@@ -325,27 +347,35 @@ pub unsafe extern "C" fn scan_builder_with_schema(
 fn scan_builder_with_schema_impl(
     builder: Handle<ExclusiveScanBuilder>,
     schema: &EngineSchema,
-) -> DeltaResult<Handle<ExclusiveScanBuilder>> {
+) -> KernelResult<Handle<ExclusiveScanBuilder>> {
     let builder = unsafe { builder.into_inner() };
     Ok(Box::new(apply_schema(*builder, schema)?).into())
 }
 
 /// Configure how stats are included in the resulting scan metadata.
 ///
-/// Consumes the `builder` handle and returns a new handle with `options` applied. The caller must
-/// replace its builder handle with the returned handle. The old handle must not be reused or
-/// freed. Calls replace the previous stats options.
+/// Replaces the previous stats options. Consumes `builder` on success and error, borrows `engine`
+/// and `options`, and copies any borrowed column paths before returning. Returns a replacement
+/// builder, or an error for invalid slices or UTF-8. Missing per-file statistics do not prune
+/// files.
 ///
 /// # Safety
 ///
-/// `builder` must be a valid handle that has not been consumed or freed.
+/// `builder` and `engine` must be valid handles. The consumed builder must not be reused or freed.
+/// `options` must contain a valid variant. All nested column slices must remain valid for this
+/// call and follow the [`crate::FfiSlice`] contract. Path segments are logical field names,
+/// not dotted strings.
 #[no_mangle]
 pub unsafe extern "C" fn scan_builder_with_stats(
     builder: Handle<ExclusiveScanBuilder>,
-    options: FfiStatsOptions,
-) -> Handle<ExclusiveScanBuilder> {
+    engine: Handle<SharedExternEngine>,
+    options: &FfiStatsOptions,
+) -> ExternResult<Handle<ExclusiveScanBuilder>> {
     let builder = unsafe { builder.into_inner() };
-    Box::new(builder.with_stats(options.into())).into()
+    let engine = unsafe { engine.as_ref() };
+    unsafe { options.try_to_kernel() }
+        .map(|options| Box::new(builder.with_stats(options)).into())
+        .into_extern_result(&engine)
 }
 
 /// Configure how partition values are included in the resulting scan metadata.
@@ -469,7 +499,7 @@ pub unsafe extern "C" fn scan_declarative_metadata_plan(
 fn scan_declarative_metadata_plan_impl(
     scan: &Scan,
     engine: &dyn delta_kernel::Engine,
-) -> DeltaResult<OptionalValue<crate::KernelOwnedBytes>> {
+) -> KernelResult<OptionalValue<crate::KernelOwnedBytes>> {
     let plan = scan.declarative_metadata_scan_plan(engine)?;
     Ok(plan
         .map(|plan| {
@@ -499,7 +529,7 @@ pub struct ScanMetadataIterator {
 impl ScanMetadataIterator {
     /// Acquire the iterator's mutex, returning a guard the caller can drain. While the
     /// guard is alive, concurrent `scan_metadata_next` calls on the same handle block.
-    pub(crate) fn lock_iter(&self) -> DeltaResult<std::sync::MutexGuard<'_, ScanMetadataIter>> {
+    pub(crate) fn lock_iter(&self) -> KernelResult<std::sync::MutexGuard<'_, ScanMetadataIter>> {
         self.data
             .lock()
             .map_err(|_| KernelError::generic("poisoned scan-metadata iterator mutex"))
@@ -535,7 +565,7 @@ pub unsafe extern "C" fn scan_metadata_iter_init(
 fn scan_metadata_iter_init_impl(
     engine: &Arc<dyn ExternEngine>,
     scan: &Scan,
-) -> DeltaResult<Handle<SharedScanMetadataIterator>> {
+) -> KernelResult<Handle<SharedScanMetadataIterator>> {
     let scan_metadata = scan.scan_metadata(engine.engine().as_ref())?;
     let data = ScanMetadataIterator {
         data: Mutex::new(Box::new(scan_metadata)),
@@ -576,7 +606,7 @@ fn scan_metadata_next_impl(
         engine_context: NullableCvoid,
         scan_metadata: Handle<SharedScanMetadata>,
     ),
-) -> DeltaResult<bool> {
+) -> KernelResult<bool> {
     let mut data = data.lock_iter()?;
     if let Some(scan_metadata) = data.next().transpose()? {
         (engine_visitor)(engine_context, Arc::new(scan_metadata).into());
@@ -670,7 +700,7 @@ fn get_from_string_map_impl(
     map: &CStringMap,
     key: KernelStringSlice,
     allocate_fn: AllocateStringFn,
-) -> DeltaResult<NullableCvoid> {
+) -> KernelResult<NullableCvoid> {
     let string_key = unsafe { TryFromStringSlice::try_from_slice(&key) }?;
     Ok(map
         .values
@@ -741,7 +771,7 @@ pub struct CMetadataMap {
 
 impl CMetadataMap {
     /// Insert a value without replacing an existing key.
-    pub(crate) fn insert(&mut self, key: String, value: MetadataValue) -> DeltaResult<()> {
+    pub(crate) fn insert(&mut self, key: String, value: MetadataValue) -> KernelResult<()> {
         match self.values.entry(key) {
             Entry::Vacant(entry) => {
                 entry.insert(value);
@@ -785,7 +815,7 @@ fn get_from_metadata_map_impl(
     key: KernelStringSlice,
     kind_out: *mut CMetadataValueKind,
     allocate_fn: AllocateStringFn,
-) -> DeltaResult<NullableCvoid> {
+) -> KernelResult<NullableCvoid> {
     let string_key = unsafe { TryFromStringSlice::try_from_slice(&key) }?;
     let Some(val) = map.values.get(string_key) else {
         return Ok(None);
@@ -915,8 +945,8 @@ pub unsafe extern "C" fn selection_vector_from_dv(
 fn selection_vector_from_dv_impl(
     dv_info: &DvInfo,
     extern_engine: &dyn ExternEngine,
-    root_url: DeltaResult<Url>,
-) -> DeltaResult<KernelBoolSlice> {
+    root_url: KernelResult<Url>,
+) -> KernelResult<KernelBoolSlice> {
     match dv_info.get_selection_vector(extern_engine.engine().as_ref(), &root_url?)? {
         Some(v) => Ok(v.into()),
         None => Ok(KernelBoolSlice::empty()),
@@ -941,8 +971,8 @@ pub unsafe extern "C" fn row_indexes_from_dv(
 fn row_indexes_from_dv_impl(
     dv_info: &DvInfo,
     extern_engine: &dyn ExternEngine,
-    root_url: DeltaResult<Url>,
-) -> DeltaResult<KernelRowIndexArray> {
+    root_url: KernelResult<Url>,
+) -> KernelResult<KernelRowIndexArray> {
     match dv_info.get_row_indexes(extern_engine.engine().as_ref(), &root_url?)? {
         Some(v) => Ok(v.into()),
         None => Ok(KernelRowIndexArray::empty()),
@@ -1002,7 +1032,7 @@ fn visit_scan_metadata_impl(
     scan_metadata: &ScanMetadata,
     engine_context: NullableCvoid,
     callback: CScanCallback,
-) -> DeltaResult<bool> {
+) -> KernelResult<bool> {
     let context_wrapper = ContextWrapper {
         engine_context,
         callback,
@@ -1064,7 +1094,7 @@ pub unsafe extern "C" fn scan_metadata_next_arrow(
 #[cfg(feature = "default-engine-base")]
 fn scan_metadata_next_arrow_impl(
     data: &ScanMetadataIterator,
-) -> DeltaResult<*mut ScanMetadataArrowResult> {
+) -> KernelResult<*mut ScanMetadataArrowResult> {
     let mut iter = data
         .data
         .lock()
@@ -1104,7 +1134,7 @@ pub unsafe extern "C" fn free_scan_metadata_arrow_result(result: *mut ScanMetada
         selection_vector,
         transforms,
     } = unsafe { *Box::from_raw(result) };
-    // KernelBoolSlice is a leaked Vec<bool>; reconstitute and drop to free
+    // KernelBoolSlice owns a Vec<bool> allocation; reconstitute and drop to free
     let _ = unsafe { selection_vector.into_vec() };
     // ArrowFFIData's FFI_ArrowArray/FFI_ArrowSchema have Drop impls that call
     // their release callbacks if non-null. If the consumer already imported the
@@ -1126,9 +1156,10 @@ mod scan_builder_tests {
 
     use super::{
         free_scan, free_scan_builder, scan_builder, scan_builder_build,
-        scan_builder_with_predicate, scan_builder_with_schema, scan_logical_schema,
-        EnginePredicate, EngineSchema,
+        scan_builder_with_predicate, scan_builder_with_schema, scan_builder_with_stats,
+        scan_logical_schema, EnginePredicate, EngineSchema, FfiStatsOptions,
     };
+    use crate::delta_types::{FfiColumnName, FfiColumnNameArray};
     use crate::error::FFIKernelError;
     use crate::expressions::kernel_visitor::{
         visit_expression_column, visit_expression_literal_int, visit_predicate_lt,
@@ -1140,7 +1171,9 @@ mod scan_builder_tests {
     use crate::schema_visitor::{
         visit_field_integer, visit_field_struct, KernelSchemaVisitorState,
     };
-    use crate::{free_engine, free_schema, free_snapshot, kernel_string_slice, ExternResult};
+    use crate::{
+        free_engine, free_schema, free_snapshot, kernel_string_slice, ExternResult, FfiSlice,
+    };
     #[cfg(feature = "geo-type-in-dev")]
     use crate::{
         schema_visitor::{visit_field_geography, visit_field_geometry},
@@ -1485,6 +1518,244 @@ mod scan_builder_tests {
         unsafe { free_snapshot(snapshot) };
         unsafe { free_engine(engine) };
     }
+
+    fn column_stats_options(extra_indexed: bool, columns: FfiColumnNameArray) -> FfiStatsOptions {
+        if extra_indexed {
+            FfiStatsOptions::AllStructWithExtraIndexed(columns)
+        } else {
+            FfiStatsOptions::StructColumns(columns)
+        }
+    }
+
+    #[rstest::rstest]
+    #[case::requested(false, vec!["s", "a.b"])]
+    #[case::extra_indexed(true, vec!["id", "s", "a.b"])]
+    #[tokio::test]
+    async fn column_stats_copy_paths_and_bypass_indexed_limit(
+        #[case] extra_indexed: bool,
+        #[case] expected_fields: Vec<&str>,
+    ) {
+        let field = |name: &str, data_type: serde_json::Value| serde_json::json!({"name": name, "type": data_type, "nullable": true, "metadata": {}});
+        let schema = serde_json::json!({"type": "struct", "fields": [
+            field("id", serde_json::json!("integer")),
+            field("s", serde_json::json!({"type": "struct", "fields": [
+                field("a", serde_json::json!("integer"))
+            ]})),
+            field("a.b", serde_json::json!("integer")),
+            field("unrequested", serde_json::json!("integer"))
+        ]});
+        let metadata = test_utils::METADATA
+            .lines()
+            .map(|line| {
+                let mut action: serde_json::Value = serde_json::from_str(line).unwrap();
+                if let Some(metadata) = action.get_mut("metaData") {
+                    metadata["schemaString"] = serde_json::json!(schema.to_string());
+                    metadata["configuration"] =
+                        serde_json::json!({"delta.dataSkippingNumIndexedCols": "1"});
+                }
+                action.to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let (engine, snapshot) = setup_snapshot(metadata).await.unwrap();
+        let builder = unsafe { scan_builder(snapshot.shallow_copy()) };
+        let builder = unsafe {
+            ok_or_panic(scan_builder_with_stats(
+                builder,
+                engine.shallow_copy(),
+                &FfiStatsOptions::All,
+            ))
+        };
+        let builder = {
+            let names = [
+                vec![String::from("s"), String::from("a")],
+                vec![String::from("a.b")],
+            ];
+            let paths: Vec<Vec<_>> = names
+                .iter()
+                .map(|path| path.iter().map(|name| kernel_string_slice!(name)).collect())
+                .collect();
+            let columns: Vec<_> = paths
+                .iter()
+                .map(|path| FfiColumnName {
+                    path: unsafe { FfiSlice::new_unsafe(path) },
+                })
+                .collect();
+            let options = column_stats_options(extra_indexed, unsafe {
+                FfiColumnNameArray::new_unsafe(&columns)
+            });
+            unsafe {
+                ok_or_panic(scan_builder_with_stats(
+                    builder,
+                    engine.shallow_copy(),
+                    &options,
+                ))
+            }
+        };
+        let schemas = unsafe { builder.as_ref() }
+            .stats_output_schemas()
+            .unwrap()
+            .unwrap();
+        for name in ["minValues", "maxValues", "nullCount"] {
+            let field = schemas.logical.field(name).unwrap();
+            let delta_kernel::schema::DataType::Struct(fields) = field.data_type() else {
+                panic!("expected struct for {name}")
+            };
+            assert_eq!(fields.field_names().collect::<Vec<_>>(), expected_fields);
+            let delta_kernel::schema::DataType::Struct(nested) =
+                fields.field("s").unwrap().data_type()
+            else {
+                panic!("expected nested struct")
+            };
+            assert_eq!(nested.field_names().collect::<Vec<_>>(), vec!["a"]);
+        }
+        let scan = unsafe { ok_or_panic(scan_builder_build(builder, engine.shallow_copy())) };
+        unsafe {
+            free_scan(scan);
+            free_snapshot(snapshot);
+            free_engine(engine);
+        }
+    }
+
+    enum ColumnStatsInput {
+        Empty,
+        Missing,
+        NullColumns,
+        NullPath,
+        InvalidUtf8,
+    }
+
+    enum ColumnStatsExpected {
+        Fields(&'static [&'static str]),
+        SetterError(FFIKernelError),
+        BuildError(FFIKernelError),
+    }
+
+    #[rstest::rstest]
+    #[case::requested_empty(false, ColumnStatsInput::Empty, ColumnStatsExpected::Fields(&[]))]
+    #[case::extra_empty(true, ColumnStatsInput::Empty, ColumnStatsExpected::Fields(&["id", "val"]))]
+    #[case::requested_missing(
+        false,
+        ColumnStatsInput::Missing,
+        ColumnStatsExpected::BuildError(FFIKernelError::GenericError)
+    )]
+    #[case::extra_missing(true, ColumnStatsInput::Missing,
+        ColumnStatsExpected::Fields(&["id", "val"]))]
+    #[case::requested_null_columns(
+        false,
+        ColumnStatsInput::NullColumns,
+        ColumnStatsExpected::SetterError(FFIKernelError::GenericError)
+    )]
+    #[case::extra_null_columns(
+        true,
+        ColumnStatsInput::NullColumns,
+        ColumnStatsExpected::SetterError(FFIKernelError::GenericError)
+    )]
+    #[case::requested_null_path(
+        false,
+        ColumnStatsInput::NullPath,
+        ColumnStatsExpected::SetterError(FFIKernelError::GenericError)
+    )]
+    #[case::extra_null_path(
+        true,
+        ColumnStatsInput::NullPath,
+        ColumnStatsExpected::SetterError(FFIKernelError::GenericError)
+    )]
+    #[case::requested_invalid_utf8(
+        false,
+        ColumnStatsInput::InvalidUtf8,
+        ColumnStatsExpected::SetterError(FFIKernelError::Utf8Error)
+    )]
+    #[case::extra_invalid_utf8(
+        true,
+        ColumnStatsInput::InvalidUtf8,
+        ColumnStatsExpected::SetterError(FFIKernelError::Utf8Error)
+    )]
+    #[tokio::test]
+    async fn column_stats_inputs(
+        #[case] extra_indexed: bool,
+        #[case] input: ColumnStatsInput,
+        #[case] expected: ColumnStatsExpected,
+    ) {
+        let (engine, snapshot) = setup_snapshot(test_utils::METADATA.to_string())
+            .await
+            .unwrap();
+        let invalid_utf8 = [0xffu8];
+        let missing_name = "missing";
+        let missing = [kernel_string_slice!(missing_name)];
+        let invalid_string = [crate::KernelStringSlice {
+            ptr: invalid_utf8.as_ptr().cast(),
+            len: 1,
+        }];
+        let path = match input {
+            ColumnStatsInput::NullPath => FfiSlice {
+                ptr: std::ptr::null(),
+                len: 1,
+            },
+            ColumnStatsInput::InvalidUtf8 => unsafe { FfiSlice::new_unsafe(&invalid_string) },
+            _ => unsafe { FfiSlice::new_unsafe(&missing) },
+        };
+        let columns = [FfiColumnName { path }];
+        let columns = match input {
+            ColumnStatsInput::Empty => FfiColumnNameArray {
+                ptr: std::ptr::null(),
+                len: 0,
+            },
+            ColumnStatsInput::NullColumns => FfiColumnNameArray {
+                ptr: std::ptr::null(),
+                len: 1,
+            },
+            _ => unsafe { FfiColumnNameArray::new_unsafe(&columns) },
+        };
+        let builder = unsafe { scan_builder(snapshot.shallow_copy()) };
+        let options = column_stats_options(extra_indexed, columns);
+        let result = unsafe { scan_builder_with_stats(builder, engine.shallow_copy(), &options) };
+        match expected {
+            ColumnStatsExpected::SetterError(expected) => {
+                let ExternResult::Err(error) = result else {
+                    panic!("expected setter error")
+                };
+                assert_eq!(unsafe { recover_error(error) }.etype, expected);
+            }
+            expected => {
+                let builder = ok_or_panic(result);
+                let schemas = unsafe { builder.as_ref() }.stats_output_schemas();
+                match expected {
+                    ColumnStatsExpected::Fields(expected_fields) => {
+                        if expected_fields.is_empty() {
+                            assert!(schemas.unwrap().is_none());
+                        } else {
+                            let schemas = schemas.unwrap().unwrap();
+                            let delta_kernel::schema::DataType::Struct(fields) =
+                                schemas.logical.field("minValues").unwrap().data_type()
+                            else {
+                                panic!("expected struct")
+                            };
+                            assert_eq!(fields.field_names().collect::<Vec<_>>(), expected_fields);
+                        }
+                        let scan = unsafe {
+                            ok_or_panic(scan_builder_build(builder, engine.shallow_copy()))
+                        };
+                        unsafe { free_scan(scan) };
+                    }
+                    ColumnStatsExpected::BuildError(expected) => {
+                        assert!(schemas.is_err());
+                        let ExternResult::Err(error) =
+                            (unsafe { scan_builder_build(builder, engine.shallow_copy()) })
+                        else {
+                            panic!("expected build error")
+                        };
+                        assert_eq!(unsafe { recover_error(error) }.etype, expected);
+                    }
+                    ColumnStatsExpected::SetterError(_) => unreachable!(),
+                }
+            }
+        }
+        unsafe {
+            free_snapshot(snapshot);
+            free_engine(engine);
+        }
+    }
 }
 
 #[cfg(all(test, feature = "default-engine-base"))]
@@ -1644,7 +1915,13 @@ mod scan_metadata_arrow_tests {
         .await
         .unwrap();
         let builder = unsafe { scan_builder(snapshot.shallow_copy()) };
-        let builder = unsafe { scan_builder_with_stats(builder, options) };
+        let builder = unsafe {
+            ok_or_panic(scan_builder_with_stats(
+                builder,
+                engine.shallow_copy(),
+                &options,
+            ))
+        };
         let scan = unsafe { ok_or_panic(scan_builder_build(builder, engine.shallow_copy())) };
         let iter = unsafe {
             ok_or_panic(scan_metadata_iter_init(

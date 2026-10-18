@@ -35,10 +35,14 @@ use crate::transaction::create_table::create_table;
 use crate::transaction::data_layout::DataLayout;
 use crate::unit_test_utils::TestCancellationToken;
 use crate::{
-    CancellationTokenRef, DeltaResultIteratorStatic, Engine, EngineData,
-    FileDataReadResultIterator, FileMeta, FileSize, ParquetFooter, ParquetHandler, PredicateRef,
+    CancellationTokenRef, Engine, EngineData, FileDataReadResultIterator, FileMeta, FileSize,
+    KernelResult, KernelResultIteratorStatic, ParquetFooter, ParquetHandler, PredicateRef,
     Snapshot,
 };
+
+#[cfg(feature = "geo-type-in-dev")]
+mod geometry_stats;
+mod variant_stats;
 
 fn field_names(s: &StructArray) -> Vec<String> {
     s.fields().iter().map(|f| f.name().clone()).collect()
@@ -366,7 +370,7 @@ fn test_scan_builder_accepts_predicate_on_unprojected_data_column() {
         nullable "number": LONG,
         nullable "a_float": FLOAT,
     };
-    create_table(url, schema, "DefaultEngine")
+    create_table(url, schema, "DefaultEngine", true)
         .build(&engine, Box::new(FileSystemCommitter::new()))
         .unwrap()
         .commit(&engine)
@@ -397,7 +401,7 @@ fn test_scan_builder_rejects_predicate_on_projection_only_metadata_column() {
     let engine = SyncEngine::new_with_store(store);
 
     let schema = schema_ref! { nullable "id": LONG };
-    create_table(url, schema, "DefaultEngine")
+    create_table(url, schema, "DefaultEngine", true)
         .build(&engine, Box::new(FileSystemCommitter::new()))
         .unwrap()
         .commit(&engine)
@@ -616,7 +620,7 @@ fn test_without_row_transforms_scan_metadata_surfaces_deletion_vectors() {
     );
 }
 
-fn get_files_for_scan(scan: Scan, engine: &dyn Engine) -> DeltaResult<Vec<String>> {
+fn get_files_for_scan(scan: Scan, engine: &dyn Engine) -> KernelResult<Vec<String>> {
     let scan_metadata_iter = scan.scan_metadata(engine)?;
     fn scan_metadata_callback(paths: &mut Vec<String>, scan_file: ScanFile) {
         paths.push(scan_file.path.to_string());
@@ -924,7 +928,7 @@ fn test_missing_column_row_group_skipping() {
 }
 
 #[test_log::test]
-fn test_scan_with_checkpoint() -> DeltaResult<()> {
+fn test_scan_with_checkpoint() -> KernelResult<()> {
     let path = std::fs::canonicalize(PathBuf::from(
         "./tests/data/with_checkpoint_no_last_checkpoint/",
     ))?;
@@ -996,7 +1000,7 @@ fn test_scan_metadata_with_stats_columns() {
     let scan_metadata_results: Vec<_> = scan
         .scan_metadata(engine.as_ref())
         .unwrap()
-        .collect::<Result<Vec<_>, _>>()
+        .collect::<KernelResult<Vec<_>>>()
         .unwrap();
 
     assert!(
@@ -1585,7 +1589,7 @@ fn surviving_ids(parquet_bytes: Bytes, pred: &Pred) -> Vec<i64> {
     let mut ids: Vec<i64> = builder
         .build()
         .unwrap()
-        .map(Result::unwrap)
+        .map(KernelResult::unwrap)
         .flat_map(|batch| {
             let add = batch
                 .column(0)
@@ -1767,7 +1771,7 @@ impl ParquetHandler for RecordingParquetHandler {
         files: &[FileMeta],
         physical_schema: schema::SchemaRef,
         predicate: Option<PredicateRef>,
-    ) -> DeltaResult<FileDataReadResultIterator> {
+    ) -> KernelResult<FileDataReadResultIterator> {
         self.reads.lock().unwrap().push(RecordedParquetRead {
             files: files.to_vec(),
             physical_schema: physical_schema.clone(),
@@ -1777,15 +1781,15 @@ impl ParquetHandler for RecordingParquetHandler {
             .read_parquet_files(files, physical_schema, predicate)
     }
 
-    fn read_parquet_footer(&self, file: &FileMeta) -> DeltaResult<ParquetFooter> {
+    fn read_parquet_footer(&self, file: &FileMeta) -> KernelResult<ParquetFooter> {
         self.inner.read_parquet_footer(file)
     }
 
     fn write_parquet_file(
         &self,
         location: url::Url,
-        data: DeltaResultIteratorStatic<Box<dyn EngineData>>,
-    ) -> DeltaResult<FileSize> {
+        data: KernelResultIteratorStatic<Box<dyn EngineData>>,
+    ) -> KernelResult<FileSize> {
         self.inner.write_parquet_file(location, data)
     }
 }
@@ -1940,7 +1944,7 @@ fn test_all_struct_parses_json_commit_stats() {
     for scan_metadata in scan
         .scan_metadata(engine.as_ref())
         .unwrap()
-        .collect::<Result<Vec<_>, _>>()
+        .collect::<KernelResult<Vec<_>>>()
         .unwrap()
     {
         let (underlying_data, selection_vector) = scan_metadata.scan_files.into_parts();
@@ -2029,7 +2033,7 @@ fn test_skip_stats_disables_data_skipping() {
     let scan_metadata_results: Vec<_> = scan
         .scan_metadata(engine.as_ref())
         .unwrap()
-        .collect::<Result<Vec<_>, _>>()
+        .collect::<KernelResult<Vec<_>>>()
         .unwrap();
 
     let mut selected_file_count = 0;
@@ -2063,7 +2067,7 @@ fn test_with_stats_last_call_wins() {
     for scan_metadata in scan
         .scan_metadata(engine.as_ref())
         .unwrap()
-        .collect::<Result<Vec<_>, _>>()
+        .collect::<KernelResult<Vec<_>>>()
         .unwrap()
     {
         let (underlying_data, _) = scan_metadata.scan_files.into_parts();
@@ -2094,7 +2098,7 @@ fn test_default_stats_options_no_struct_output() {
     let scan_metadata_results: Vec<_> = scan
         .scan_metadata(engine.as_ref())
         .unwrap()
-        .collect::<Result<Vec<_>, _>>()
+        .collect::<KernelResult<Vec<_>>>()
         .unwrap();
 
     assert!(
@@ -2137,6 +2141,7 @@ fn test_default_stats_options_no_struct_output() {
         struct_stats: StructStats::Columns {
             requested: vec![column_name!("id")],
         },
+        ..Default::default()
     },
     &["id"],
     None,
@@ -2305,6 +2310,7 @@ fn test_scan_metadata_with_nonexistent_stats_columns() {
             struct_stats: StructStats::Columns {
                 requested: vec![column_name!("nonexistent_column")],
             },
+            ..Default::default()
         })
         .build();
 
@@ -2345,7 +2351,7 @@ fn scan_builder_stats_output_schemas_match_scan_output(#[case] column_mapping_mo
         nullable "value": LONG,
         nullable "other": LONG,
     };
-    let mut create_builder = create_table(table_root, schema, "DefaultEngine")
+    let mut create_builder = create_table(table_root, schema, "DefaultEngine", true)
         .with_table_properties([("delta.dataSkippingNumIndexedCols", "1")]);
     if let Some(mode) = column_mapping_mode {
         create_builder = create_builder.with_table_properties([("delta.columnMapping.mode", mode)]);
@@ -2423,6 +2429,7 @@ fn scan_builder_stats_output_schemas_returns_none_without_data_columns(
         &table_root,
         schema_ref! { nullable "id": LONG },
         "DefaultEngine",
+        true,
     )
     .with_table_properties([("delta.dataSkippingNumIndexedCols", "0")]);
     if let Some(mode) = column_mapping_mode {
@@ -2465,7 +2472,7 @@ fn scan_builder_stats_output_schemas_respect_explicit_columns_and_partitions(
         nullable "part": STRING,
         nullable "other": LONG,
     };
-    let mut create_builder = create_table(table_root, schema, "DefaultEngine")
+    let mut create_builder = create_table(table_root, schema, "DefaultEngine", true)
         .with_data_layout(DataLayout::partitioned(["part"]))
         .with_table_properties([("delta.dataSkippingStatsColumns", "info.name")]);
     if let Some(mode) = column_mapping_mode {
@@ -2521,7 +2528,7 @@ fn scan_builder_stats_output_schemas_handle_extra_column_shapes() {
         nullable "items": [ nullable INTEGER ],
         nullable "part": STRING,
     };
-    create_table(table_root, schema, "DefaultEngine")
+    create_table(table_root, schema, "DefaultEngine", true)
         .with_data_layout(DataLayout::partitioned(["part"]))
         .with_table_properties([("delta.dataSkippingNumIndexedCols", "1")])
         .build(&engine, Box::new(FileSystemCommitter::new()))
@@ -2571,7 +2578,7 @@ fn scan_builder_stats_output_schemas_validate_selected_columns() {
         },
         nullable "part": STRING,
     };
-    create_table(table_root, schema, "DefaultEngine")
+    create_table(table_root, schema, "DefaultEngine", true)
         .with_data_layout(DataLayout::partitioned(["part"]))
         .build(&engine, Box::new(FileSystemCommitter::new()))
         .unwrap()
@@ -2624,7 +2631,7 @@ fn scan_builder_stats_output_schemas_follow_struct_columns(
         nullable "id": LONG,
         nullable "name": STRING,
     };
-    let mut create_builder = create_table(&table_root, schema, "DefaultEngine");
+    let mut create_builder = create_table(&table_root, schema, "DefaultEngine", true);
     if let Some(mode) = column_mapping_mode {
         create_builder = create_builder.with_table_properties([("delta.columnMapping.mode", mode)]);
     }
@@ -2693,19 +2700,19 @@ impl ParquetHandler for EmptyParquetHandler {
         _files: &[FileMeta],
         _schema: schema::SchemaRef,
         _predicate: Option<PredicateRef>,
-    ) -> DeltaResult<FileDataReadResultIterator> {
+    ) -> KernelResult<FileDataReadResultIterator> {
         Ok(Box::new(std::iter::empty()))
     }
 
-    fn read_parquet_footer(&self, _file: &FileMeta) -> DeltaResult<ParquetFooter> {
+    fn read_parquet_footer(&self, _file: &FileMeta) -> KernelResult<ParquetFooter> {
         unimplemented!()
     }
 
     fn write_parquet_file(
         &self,
         _location: url::Url,
-        _data: DeltaResultIteratorStatic<Box<dyn EngineData>>,
-    ) -> DeltaResult<FileSize> {
+        _data: KernelResultIteratorStatic<Box<dyn EngineData>>,
+    ) -> KernelResult<FileSize> {
         unimplemented!()
     }
 }

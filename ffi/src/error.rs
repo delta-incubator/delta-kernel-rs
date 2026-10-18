@@ -1,5 +1,5 @@
 use delta_kernel::snapshot::SnapshotHintError;
-use delta_kernel::{DeltaResult, KernelError};
+use delta_kernel::{KernelError, KernelResult};
 use tracing::warn;
 
 use crate::handle::Handle;
@@ -80,6 +80,7 @@ pub enum FFIKernelError {
     StartVersionNotFound = 51,
     InvalidGeoParamsError = 52,
     MaxCatalogVersionError = 53,
+    TableAlreadyExistsAtPath = 54,
 }
 
 impl From<KernelError> for FFIKernelError {
@@ -142,6 +143,7 @@ impl From<KernelError> for FFIKernelError {
             KernelError::InvalidLogSegment(_) => FFIKernelError::InvalidLogSegment,
             KernelError::SnapshotHint(_) => FFIKernelError::InvalidSnapshotHint,
             KernelError::FileAlreadyExists(_) => FFIKernelError::FileAlreadyExists,
+            KernelError::TableAlreadyExistsAtPath(_) => FFIKernelError::TableAlreadyExistsAtPath,
             KernelError::Unsupported(_) => FFIKernelError::UnsupportedError,
             KernelError::ParseIntervalError(_) => FFIKernelError::ParseIntervalError,
             KernelError::ChangeDataFeedUnsupported(_) => FFIKernelError::ChangeDataFeedUnsupported,
@@ -239,7 +241,7 @@ impl<T: ExternEngine + ?Sized> AllocateError for &T {
     }
 }
 
-/// Converts a [DeltaResult] into an [ExternResult], using the engine's error allocator.
+/// Converts a [`KernelResult`] into an [`ExternResult`], using the engine's error allocator.
 ///
 /// # Safety
 ///
@@ -248,8 +250,8 @@ pub(crate) trait IntoExternResult<T> {
     unsafe fn into_extern_result(self, alloc: &dyn AllocateError) -> ExternResult<T>;
 }
 
-// NOTE: We can't "just" impl From<DeltaResult<T>> because we require an error allocator.
-impl<T> IntoExternResult<T> for DeltaResult<T> {
+// NOTE: We can't "just" impl From<KernelResult<T>> because we require an error allocator.
+impl<T> IntoExternResult<T> for KernelResult<T> {
     unsafe fn into_extern_result(self, alloc: &dyn AllocateError) -> ExternResult<T> {
         match self {
             Ok(ok) => ExternResult::Ok(ok),
@@ -343,6 +345,9 @@ impl From<EngineExecError> for KernelError {
             }
             .into(),
             FFIKernelError::FileAlreadyExists => KernelError::FileAlreadyExists(message),
+            FFIKernelError::TableAlreadyExistsAtPath => {
+                KernelError::TableAlreadyExistsAtPath(message)
+            }
             FFIKernelError::UnsupportedError => KernelError::Unsupported(message),
             FFIKernelError::InvalidCheckpoint => KernelError::InvalidCheckpoint(message),
             FFIKernelError::SchemaError => KernelError::Schema(message),
@@ -515,6 +520,24 @@ mod error_code_tests {
 
         let err: KernelError = exec_error(FFIKernelError::MaxCatalogVersionError, "invalid").into();
         assert!(matches!(err, KernelError::MaxCatalogVersion(message) if message == "invalid"));
+    }
+
+    #[test]
+    fn table_already_exists_at_path_has_stable_ffi_mapping() {
+        assert_eq!(
+            FFIKernelError::from(KernelError::TableAlreadyExistsAtPath(
+                "memory:///table".to_string()
+            )),
+            FFIKernelError::TableAlreadyExistsAtPath
+        );
+        assert_eq!(FFIKernelError::TableAlreadyExistsAtPath as i32, 54);
+
+        let err: KernelError =
+            exec_error(FFIKernelError::TableAlreadyExistsAtPath, "memory:///table").into();
+        assert!(matches!(
+            err,
+            KernelError::TableAlreadyExistsAtPath(path) if path == "memory:///table"
+        ));
     }
 }
 

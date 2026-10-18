@@ -6,7 +6,7 @@ use common::{LocationArgs, LoggingArgs, ParseWithExamples, ScanArgs};
 use delta_kernel::arrow::record_batch::RecordBatch;
 use delta_kernel::arrow::util::pretty::print_batches;
 use delta_kernel::engine::arrow_data::EngineDataArrowExt;
-use delta_kernel::{DeltaResult, Snapshot};
+use delta_kernel::{KernelResult, Snapshot};
 use itertools::Itertools;
 
 /// An example program that dumps out the data of a delta table.
@@ -37,7 +37,7 @@ fn main() -> ExitCode {
     }
 }
 
-fn try_main() -> DeltaResult<()> {
+fn try_main() -> KernelResult<()> {
     let cli = Cli::parse_with_examples(env!("CARGO_PKG_NAME"), "Read", "read", "");
     common::init_logging(&cli.logging_args)?;
     let url = delta_kernel::try_parse_uri(&cli.location_args.path)?;
