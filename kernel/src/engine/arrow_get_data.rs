@@ -74,7 +74,7 @@ impl GetData<'_> for PrimitiveArray<TimestampMicrosecondType> {
 }
 
 impl GetData<'_> for PrimitiveArray<TimestampNanosecondType> {
-    fn get_timestamp(&self, row_index: usize, _field_name: &str) -> DeltaResult<Option<i64>> {
+    fn get_timestamp(&self, row_index: usize, _field_name: &str) -> KernelResult<Option<i64>> {
         Ok(self.is_valid(row_index).then(|| self.value(row_index)))
     }
 }

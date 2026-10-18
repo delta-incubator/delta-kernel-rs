@@ -397,7 +397,7 @@ pub extern "C" fn visit_expression_literal_timestamp_nanos(
 fn visit_expression_literal_timestamp_nanos_impl(
     state: &mut KernelExpressionVisitorState,
     value: i64,
-) -> DeltaResult<usize> {
+) -> KernelResult<usize> {
     Ok(wrap_expression(
         state,
         Expression::literal(Scalar::TimestampNanos(value)),
@@ -408,8 +408,8 @@ fn visit_expression_literal_timestamp_nanos_impl(
 fn visit_expression_literal_timestamp_nanos_impl(
     _state: &mut KernelExpressionVisitorState,
     _value: i64,
-) -> DeltaResult<usize> {
-    Err(delta_kernel::Error::unsupported(
+) -> KernelResult<usize> {
+    Err(delta_kernel::KernelError::unsupported(
         "`nanosecond-timestamps` feature not enabled in delta-kernel",
     ))
 }
@@ -435,7 +435,7 @@ pub extern "C" fn visit_expression_literal_timestamp_nanos_ntz(
 fn visit_expression_literal_timestamp_nanos_ntz_impl(
     state: &mut KernelExpressionVisitorState,
     value: i64,
-) -> DeltaResult<usize> {
+) -> KernelResult<usize> {
     Ok(wrap_expression(
         state,
         Expression::literal(Scalar::TimestampNanosNtz(value)),
@@ -446,8 +446,8 @@ fn visit_expression_literal_timestamp_nanos_ntz_impl(
 fn visit_expression_literal_timestamp_nanos_ntz_impl(
     _state: &mut KernelExpressionVisitorState,
     _value: i64,
-) -> DeltaResult<usize> {
-    Err(delta_kernel::Error::unsupported(
+) -> KernelResult<usize> {
+    Err(delta_kernel::KernelError::unsupported(
         "`nanosecond-timestamps` feature not enabled in delta-kernel",
     ))
 }
@@ -685,13 +685,13 @@ impl NullTypeTag {
             Self::Timestamp => Ok(DataType::TIMESTAMP),
             Self::TimestampNtz => Ok(DataType::TIMESTAMP_NTZ),
             #[cfg(not(feature = "nanosecond-timestamps"))]
-            Self::TimestampNanos => Err(delta_kernel::Error::generic(
+            Self::TimestampNanos => Err(delta_kernel::KernelError::generic(
                 "`nanosecond-timestamps` Cargo feature not enabled",
             )),
             #[cfg(feature = "nanosecond-timestamps")]
             Self::TimestampNanos => Ok(DataType::TIMESTAMP_NANOS),
             #[cfg(not(feature = "nanosecond-timestamps"))]
-            Self::TimestampNanosNtz => Err(delta_kernel::Error::generic(
+            Self::TimestampNanosNtz => Err(delta_kernel::KernelError::generic(
                 "`nanosecond-timestamps` Cargo feature not enabled",
             )),
             #[cfg(feature = "nanosecond-timestamps")]

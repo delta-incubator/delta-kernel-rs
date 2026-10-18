@@ -861,7 +861,7 @@ impl PrimitiveType {
     /// Parses a date-time string into a UTC [`DateTime`].
     /// Always accepts the `%Y-%m-%d %H:%M:%S%.f` form. When `with_timezone` is set,
     /// also accepts ISO 8601 / RFC 3339 strings with an optional timezone offset.
-    fn parse_timestamp(&self, raw: &str, with_timezone: bool) -> Result<DateTime<Utc>, Error> {
+    fn parse_timestamp(&self, raw: &str, with_timezone: bool) -> KernelResult<DateTime<Utc>> {
         let mut timestamp = NaiveDateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S%.f");
         if timestamp.is_err() && with_timezone {
             // `%+` is chrono's relaxed ISO 8601 / RFC 3339 parser: unlike the stricter

@@ -926,7 +926,7 @@ impl TryFrom<proto_schema::PrimitiveType> for PrimitiveType {
                     // decoded when the nanosecond-timestamps feature is enabled.
                     #[cfg(not(feature = "nanosecond-timestamps"))]
                     Simple::TimestampNanos | Simple::TimestampNanosNtz => {
-                        return Err(Error::schema(
+                        return Err(KernelError::schema(
                             "timestamp_nanos types require the 'nanosecond-timestamps' feature",
                         ))
                     }

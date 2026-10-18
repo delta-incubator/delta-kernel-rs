@@ -533,10 +533,10 @@ pub unsafe extern "C" fn visit_field_timestamp_nanos(
 #[cfg(feature = "nanosecond-timestamps")]
 fn visit_field_timestamp_nanos_impl(
     state: &mut KernelSchemaVisitorState,
-    name: DeltaResult<&str>,
+    name: KernelResult<&str>,
     nullable: bool,
     metadata: *const EngineMetadata,
-) -> DeltaResult<usize> {
+) -> KernelResult<usize> {
     let metadata = visit_engine_metadata(unsafe { metadata.as_ref() });
     visit_field_primitive_impl(
         state,
@@ -550,11 +550,11 @@ fn visit_field_timestamp_nanos_impl(
 #[cfg(not(feature = "nanosecond-timestamps"))]
 fn visit_field_timestamp_nanos_impl(
     _state: &mut KernelSchemaVisitorState,
-    _name: DeltaResult<&str>,
+    _name: KernelResult<&str>,
     _nullable: bool,
     _metadata: *const EngineMetadata,
-) -> DeltaResult<usize> {
-    Err(Error::unsupported(
+) -> KernelResult<usize> {
+    Err(KernelError::unsupported(
         "`nanosecond-timestamps` feature not enabled in delta-kernel",
     ))
 }
@@ -584,10 +584,10 @@ pub unsafe extern "C" fn visit_field_timestamp_nanos_ntz(
 #[cfg(feature = "nanosecond-timestamps")]
 fn visit_field_timestamp_nanos_ntz_impl(
     state: &mut KernelSchemaVisitorState,
-    name: DeltaResult<&str>,
+    name: KernelResult<&str>,
     nullable: bool,
     metadata: *const EngineMetadata,
-) -> DeltaResult<usize> {
+) -> KernelResult<usize> {
     let metadata = visit_engine_metadata(unsafe { metadata.as_ref() });
     visit_field_primitive_impl(
         state,
@@ -601,11 +601,11 @@ fn visit_field_timestamp_nanos_ntz_impl(
 #[cfg(not(feature = "nanosecond-timestamps"))]
 fn visit_field_timestamp_nanos_ntz_impl(
     _state: &mut KernelSchemaVisitorState,
-    _name: DeltaResult<&str>,
+    _name: KernelResult<&str>,
     _nullable: bool,
     _metadata: *const EngineMetadata,
-) -> DeltaResult<usize> {
-    Err(Error::unsupported(
+) -> KernelResult<usize> {
+    Err(KernelError::unsupported(
         "`nanosecond-timestamps` feature not enabled in delta-kernel",
     ))
 }
@@ -2419,17 +2419,17 @@ mod tests {
 
         #[cfg(feature = "geo-type-in-dev")]
         {
-            assert_eq!(fields[20].name(), "col_geometry");
+            assert_eq!(fields[num_primitive + 5].name(), "col_geometry");
             let DataType::Primitive(PrimitiveType::Geometry(geometry_type)) =
-                fields[20].data_type()
+                fields[num_primitive + 5].data_type()
             else {
                 panic!("Field col_geometry is not a geometry type");
             };
             assert_eq!(geometry_type.crs(), "OGC:CRS84");
 
-            assert_eq!(fields[21].name(), "col_geography");
+            assert_eq!(fields[num_primitive + 6].name(), "col_geography");
             let DataType::Primitive(PrimitiveType::Geography(geography_type)) =
-                fields[21].data_type()
+                fields[num_primitive + 6].data_type()
             else {
                 panic!("Field col_geography is not a geography type");
             };
