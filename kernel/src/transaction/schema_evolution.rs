@@ -19,16 +19,16 @@ use crate::table_features::{
 use crate::table_properties::COLUMN_MAPPING_MAX_COLUMN_ID;
 use crate::transforms::{transform_output_type, SchemaTransform};
 use crate::utils::FoldWithOption as _;
-use crate::Result;
+use crate::KernelResult;
 
 /// A schema evolution operation to be applied to a table.
 ///
 /// Operations are validated and applied in order during
 /// `apply_schema_operations`. Each operation sees the schema state after all prior operations
 /// have been applied.
+#[internal_api]
 #[non_exhaustive]
 #[derive(Debug, Clone)]
-#[internal_api]
 pub(crate) enum SchemaOperation {
     /// Add a column or nested field to the table schema.
     AddColumn {
@@ -43,6 +43,7 @@ pub(crate) enum SchemaOperation {
 
 impl SchemaOperation {
     /// Creates an add-column operation under `parent`; `None` selects the root schema.
+    #[internal_api]
     pub(crate) fn add_column(parent: impl Into<Option<ColumnName>>, field: StructField) -> Self {
         Self::AddColumn {
             parent: parent.into(),
@@ -51,7 +52,7 @@ impl SchemaOperation {
     }
 }
 
-fn add_field(parent: &mut StructType, field: StructField, parent_path: String) -> Result<()> {
+fn add_field(parent: &mut StructType, field: StructField, parent_path: String) -> KernelResult<()> {
     let lowered = field.name().to_lowercase();
     if parent
         .fields()
@@ -70,9 +71,9 @@ fn add_field(parent: &mut StructType, field: StructField, parent_path: String) -
 struct AddedFieldMetadataValidator;
 
 impl<'a> SchemaTransform<'a> for AddedFieldMetadataValidator {
-    transform_output_type!(|'a, T| Result<()>);
+    transform_output_type!(|'a, T| KernelResult<()>);
 
-    fn transform_struct_field(&mut self, field: &'a StructField) -> Result<()> {
+    fn transform_struct_field(&mut self, field: &'a StructField) -> KernelResult<()> {
         if let Some(key) = field.metadata.keys().find(|key| {
             key.as_str() == ColumnMetadataKey::GenerationExpression.as_ref()
                 || key.starts_with("delta.identity.")
@@ -88,11 +89,11 @@ impl<'a> SchemaTransform<'a> for AddedFieldMetadataValidator {
     }
 }
 
-fn reject_generated_or_identity_metadata(field: &StructField) -> Result<()> {
+fn reject_generated_or_identity_metadata(field: &StructField) -> KernelResult<()> {
     AddedFieldMetadataValidator.transform_struct_field(field)
 }
 
-fn set_field_nullable(parent: &mut StructType, name: &str) -> Result<()> {
+fn set_field_nullable(parent: &mut StructType, name: &str) -> KernelResult<()> {
     let parent = parent
         .field_map_mut()
         .values_mut()
@@ -128,7 +129,7 @@ pub(crate) fn apply_schema_operations(
     column_mapping_mode: ColumnMappingMode,
     current_max_column_id: Option<i64>,
     cdf_enabled: bool,
-) -> Result<SchemaEvolutionResult> {
+) -> KernelResult<SchemaEvolutionResult> {
     let cm_enabled = column_mapping_mode != ColumnMappingMode::None;
 
     // Reject a persisted seed that already violates the protocol's 32-bit non-negative bound
@@ -196,9 +197,9 @@ pub(crate) fn apply_schema_operations(
                     // <https://github.com/delta-io/delta-kernel-rs/issues/2492>
                     try_assign_flat_column_mapping_info(&field, id)?
                 } else {
-                    // Stray CM metadata on a mapping-disabled table is handled by the AlterTable
-                    // builder, which strips annotations this ALTER newly introduces from the
-                    // evolved schema.
+                    // `evolve_table_config` strips column-mapping annotations introduced into a
+                    // mapping-disabled table whose original schema had none. Existing residual
+                    // annotations are preserved.
                     field
                 };
                 let parent_path = parent.as_ref().map_or(&[][..], ColumnName::path);
@@ -255,7 +256,7 @@ pub(crate) fn apply_schema_operations(
 pub(crate) fn evolve_table_config(
     table_config: &TableConfiguration,
     operations: Vec<SchemaOperation>,
-) -> Result<TableConfiguration> {
+) -> KernelResult<TableConfiguration> {
     let schema = Arc::unwrap_or_clone(table_config.logical_schema());
     let column_mapping_mode = table_config.column_mapping_mode();
     let current_max_column_id = table_config.table_properties().column_mapping_max_column_id;

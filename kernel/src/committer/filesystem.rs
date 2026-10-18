@@ -5,7 +5,9 @@ use tracing::{info, instrument};
 use super::commit_types::{CommitMetadata, CommitResponse};
 use super::publish_types::PublishMetadata;
 use super::Committer;
-use crate::{Engine, FileMeta, FilteredEngineData, KernelError, Result, ResultIterator};
+use crate::{
+    Engine, FileMeta, FilteredEngineData, KernelError, KernelResult, KernelResultIterator,
+};
 
 /// The `FileSystemCommitter` is an internal implementation of the `Committer` trait which
 /// commits to a file system directly via `Engine::json_handler().write_json_file` for
@@ -31,9 +33,9 @@ impl Committer for FileSystemCommitter {
     fn commit(
         &self,
         engine: &dyn Engine,
-        actions: ResultIterator<'_, FilteredEngineData>,
+        actions: KernelResultIterator<'_, FilteredEngineData>,
         commit_metadata: CommitMetadata,
-    ) -> Result<CommitResponse> {
+    ) -> KernelResult<CommitResponse> {
         let version = commit_metadata.version();
         let published_commit_path = commit_metadata.published_commit_path()?;
 
@@ -71,7 +73,7 @@ impl Committer for FileSystemCommitter {
 
     /// The FileSystemCommitter should never be invoked to publish catalog commits. If it is,
     /// something has gone wrong upstream.
-    fn publish(&self, _engine: &dyn Engine, publish_metadata: PublishMetadata) -> Result<()> {
+    fn publish(&self, _engine: &dyn Engine, publish_metadata: PublishMetadata) -> KernelResult<()> {
         if !publish_metadata.commits_to_publish().is_empty() {
             return Err(KernelError::generic(
                 "The FilesystemCommitter does not support publishing catalog commits.",
@@ -98,6 +100,7 @@ mod tests {
     use crate::object_store::ObjectStoreExt as _;
     use crate::path::LogRoot;
     use crate::schema::schema_ref;
+    use crate::transaction::UpdateTableOperation;
 
     #[tokio::test]
     async fn disallow_filesystem_committer_for_catalog_managed_tables() {
@@ -121,7 +124,8 @@ mod tests {
         // Try to commit a transaction with FileSystemCommitter
         let committer = Box::new(FileSystemCommitter::new());
         let err = snapshot
-            .transaction(committer, &engine)
+            .update_table(UpdateTableOperation::Write, "test-engine", true)
+            .build(&engine, committer)
             .unwrap()
             .commit(&engine)
             .unwrap_err();

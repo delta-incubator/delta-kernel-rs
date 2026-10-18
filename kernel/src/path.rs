@@ -2,15 +2,27 @@
 
 use std::slice;
 use std::str::FromStr;
+#[cfg(feature = "adaptive-metadata-in-dev")]
+use std::sync::LazyLock;
 
 use delta_kernel_derive::internal_api;
 use url::Url;
 use uuid::Uuid;
 
 use crate::actions::visitors::InCommitTimestampVisitor;
+#[cfg(feature = "adaptive-metadata-in-dev")]
+use crate::actions::visitors::LastManifestCommitVisitor;
+#[cfg(feature = "adaptive-metadata-in-dev")]
+use crate::actions::{LastManifestCommit, COMMIT_INFO_NAME, LAST_MANIFEST_COMMIT_FIELD};
 use crate::engine_data::RowVisitor;
+#[cfg(feature = "adaptive-metadata-in-dev")]
+use crate::schema::lazy_schema_ref;
+use crate::schema::SchemaRef;
 use crate::utils::require;
-use crate::{Engine, FileMeta, KernelError, Result, Version};
+use crate::{Engine, EngineData, FileMeta, KernelError, KernelResult, Version};
+
+/// The delta log subdirectory with a trailing slash for directory URL joins.
+pub(crate) const DELTA_LOG_DIR_WITH_SLASH: &str = "_delta_log/";
 
 /// How many characters a version tag has
 const VERSION_LEN: usize = 20;
@@ -23,7 +35,6 @@ const UUID_PART_LEN: usize = 36;
 
 /// The subdirectory name within the table root where the delta log resides
 const DELTA_LOG_DIR: &str = "_delta_log";
-const DELTA_LOG_DIR_WITH_SLASH: &str = "_delta_log/";
 /// The subdirectory name within the delta log where staged commits reside
 const STAGED_COMMITS_DIR: &str = "_staged_commits/";
 /// The subdirectory name within the delta log where checkpoint sidecars reside
@@ -135,14 +146,22 @@ pub(crate) struct ParsedLogPath<Location: AsUrl = FileMeta> {
     pub file_type: LogPathFileType,
 }
 
-// Internal helper used by TryFrom<FileMeta> below. It parses a fixed-length string into the numeric
-// type expected by the caller. A parsing failure returns None. A wrong length produces None, even
-// if the parse succeeded.
+// Internal helper used by TryFrom<FileMeta> below. It parses a fixed-length path component.
+// A parsing failure returns None. A wrong length produces None, even if the parse succeeded.
 fn parse_path_part<T: FromStr>(value: &str, expect_len: usize) -> Option<T> {
     match value.parse() {
         Ok(result) if value.len() == expect_len => Some(result),
         _ => None,
     }
+}
+
+// Numeric path components must contain only ASCII digits. Rust's integer parsers also accept a
+// leading `+`, which is not valid in Delta's zero-padded numeric filename components.
+fn parse_numeric_path_part<T: FromStr>(value: &str, expect_len: usize) -> Option<T> {
+    if !value.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    parse_path_part(value, expect_len)
 }
 
 // We normally construct ParsedLogPath from FileMeta, but in testing it's convenient to use
@@ -197,7 +216,7 @@ impl<Location: AsUrl> ParsedLogPath<Location> {
     // NOTE: We can't actually impl TryFrom because Option<T> is a foreign struct even if T is
     // local.
     #[internal_api]
-    pub(crate) fn try_from(location: Location) -> Result<Option<ParsedLogPath<Location>>> {
+    pub(crate) fn try_from(location: Location) -> KernelResult<Option<ParsedLogPath<Location>>> {
         let url = location.as_url();
         let Some(mut path_segments) = url.path_segments() else {
             return Ok(None);
@@ -218,13 +237,9 @@ impl<Location: AsUrl> ParsedLogPath<Location> {
         #[allow(clippy::unwrap_used)]
         let version = split.next().unwrap();
 
-        // Every valid log path starts with a numeric version part. If version parsing fails, it
-        // must not be a log path and we simply return None. However, it is an error if version
-        // parsing succeeds for a wrong-length numeric string.
-        let version = match version.parse().ok() {
-            Some(v) if version.len() == VERSION_LEN => v,
-            Some(_) => return Ok(None), // has a version but it's not 20 chars
-            None => return Ok(None),
+        // Every valid log path starts with a zero-padded 20-digit version.
+        let Some(version) = parse_numeric_path_part::<Version>(version, VERSION_LEN) else {
+            return Ok(None);
         };
 
         // Every valid log path has a file extension as its last part. Return None if it's missing.
@@ -275,16 +290,16 @@ impl<Location: AsUrl> ParsedLogPath<Location> {
                 LogPathFileType::UuidCheckpoint
             }
             [hi, "compacted", "json"] if in_delta_log_dir => {
-                let Some(hi) = parse_path_part(hi, VERSION_LEN) else {
+                let Some(hi) = parse_numeric_path_part(hi, VERSION_LEN) else {
                     return Ok(None);
                 };
                 LogPathFileType::CompactedCommit { hi }
             }
             ["checkpoint", part_num, num_parts, "parquet"] if in_delta_log_dir => {
-                let Some(part_num) = parse_path_part(part_num, MULTIPART_PART_LEN) else {
+                let Some(part_num) = parse_numeric_path_part(part_num, MULTIPART_PART_LEN) else {
                     return Ok(None);
                 };
-                let Some(num_parts) = parse_path_part(num_parts, MULTIPART_PART_LEN) else {
+                let Some(num_parts) = parse_numeric_path_part(num_parts, MULTIPART_PART_LEN) else {
                     return Ok(None);
                 };
 
@@ -312,7 +327,7 @@ impl<Location: AsUrl> ParsedLogPath<Location> {
 
     /// Parse a location into a commit path (published or staged), returning an error if invalid or
     /// not a commit.
-    pub(crate) fn parse_commit(location: Location) -> Result<Self> {
+    pub(crate) fn parse_commit(location: Location) -> KernelResult<Self> {
         let url = location.as_url().to_string();
         let parsed =
             Self::try_from(location)?.ok_or_else(|| KernelError::invalid_log_path(&url))?;
@@ -341,7 +356,7 @@ impl<Location: AsUrl> ParsedLogPath<Location> {
 
     /// Convenience wrapper around [`version_as_i64`] for this parsed path's `version`.
     #[cfg(feature = "declarative-plans")]
-    pub(crate) fn version_as_i64(&self) -> Result<i64> {
+    pub(crate) fn version_as_i64(&self) -> KernelResult<i64> {
         crate::version_as_i64(self.version)
     }
 
@@ -382,41 +397,77 @@ impl ParsedLogPath<FileMeta> {
     /// Returns the inCommitTimestamp value, or an error if ICT is not found or cannot be read.
     /// Callers should handle enablement version checks before calling this method.
     #[tracing::instrument(skip(engine), ret, fields(version = self.version, path = %self.location.as_url()))]
-    pub(crate) fn read_in_commit_timestamp(&self, engine: &dyn Engine) -> Result<i64> {
-        // Only works on commit files
-        if !self.is_commit() {
-            return Err(KernelError::generic(format!(
-                "read_in_commit_timestamp can only be called on commit files, got: {:?}",
-                self.file_type
-            )));
+    pub(crate) fn read_in_commit_timestamp(&self, engine: &dyn Engine) -> KernelResult<i64> {
+        let actions = self.read_commit_info_batch(engine, InCommitTimestampVisitor::schema())?;
+        in_commit_timestamp_from(actions.as_ref())
+    }
+
+    /// Extract the In-Commit Timestamp and `commitInfo.lastManifestCommit` (adaptiveMetadata) from
+    /// this commit log file in a single read. The `lastManifestCommit` is `None` if the commit
+    /// carries none.
+    ///
+    /// This method performs IO by reading the commit log file from storage. Returns an error if
+    /// this is not a commit file, the file cannot be read, the In-Commit Timestamp is missing, or
+    /// the `lastManifestCommit` is invalid, including a pointer to a manifest commit newer than
+    /// this commit.
+    #[cfg(feature = "adaptive-metadata-in-dev")]
+    #[tracing::instrument(skip(engine), ret, fields(version = self.version, path = %self.location.as_url()))]
+    pub(crate) fn read_ict_and_last_manifest_commit(
+        &self,
+        engine: &dyn Engine,
+    ) -> KernelResult<(i64, Option<LastManifestCommit>)> {
+        static SCHEMA: LazyLock<SchemaRef> = lazy_schema_ref! {
+            nullable COMMIT_INFO_NAME: {
+                nullable "inCommitTimestamp": LONG,
+                (&LAST_MANIFEST_COMMIT_FIELD),
+            },
+        };
+        let actions = self.read_commit_info_batch(engine, SCHEMA.clone())?;
+        let in_commit_timestamp = in_commit_timestamp_from(actions.as_ref())?;
+        let mut visitor = LastManifestCommitVisitor::default();
+        visitor.visit_rows_of(actions.as_ref())?;
+        if let Some(last_manifest_commit) = &visitor.last_manifest_commit {
+            last_manifest_commit.ensure_at_or_before(self.version)?;
         }
+        Ok((in_commit_timestamp, visitor.last_manifest_commit))
+    }
 
-        let mut action_iter = engine.json_handler().read_json_files(
-            slice::from_ref(&self.location),
-            InCommitTimestampVisitor::schema(),
-            None,
-        )?;
-
-        // Process the actions to find inCommitTimestamp
-        // According to protocol, CommitInfo MUST be the first action when ICT is enabled,
-        // so we can optimize by only reading the first batch
-        match action_iter.next() {
-            Some(Ok(actions)) => {
-                let mut visitor = InCommitTimestampVisitor::default();
-                visitor.visit_rows_of(actions.as_ref())?;
-                visitor.in_commit_timestamp.ok_or_else(|| {
-                    KernelError::generic("In-Commit Timestamp not found in commit file")
-                })
-            }
-            Some(Err(err)) => Err(err),
+    /// Reads the first batch of this commit log file's actions with `schema`. When In-Commit
+    /// Timestamps are enabled, commitInfo is the first action, so this batch holds it. Errors if
+    /// this is not a commit file or the file has no actions.
+    fn read_commit_info_batch(
+        &self,
+        engine: &dyn Engine,
+        schema: SchemaRef,
+    ) -> KernelResult<Box<dyn EngineData>> {
+        require!(
+            self.is_commit(),
+            KernelError::generic(format!("expected a commit file, got: {:?}", self.file_type))
+        );
+        let mut actions =
+            engine
+                .json_handler()
+                .read_json_files(slice::from_ref(&self.location), schema, None)?;
+        match actions.next() {
+            Some(actions) => actions,
             None => Err(KernelError::generic("Commit file contains no actions")),
         }
     }
 }
 
+/// Extracts the In-Commit Timestamp from a batch of commit actions whose first row is the
+/// commitInfo. Errors if the timestamp is absent.
+fn in_commit_timestamp_from(actions: &dyn EngineData) -> KernelResult<i64> {
+    let mut visitor = InCommitTimestampVisitor::default();
+    visitor.visit_rows_of(actions)?;
+    visitor
+        .in_commit_timestamp
+        .ok_or_else(|| KernelError::generic("In-Commit Timestamp not found in commit file"))
+}
+
 impl ParsedLogPath<Url> {
     /// Helper method to create a path with the given filename generator
-    fn create_path(table_root: &Url, filename: String) -> Result<Self> {
+    fn create_path(table_root: &Url, filename: String) -> KernelResult<Self> {
         let location = table_root.join(DELTA_LOG_DIR_WITH_SLASH)?.join(&filename)?;
         Self::try_from(location)?.ok_or_else(|| {
             KernelError::internal_error(format!("Attempted to create an invalid path: {filename}"))
@@ -427,7 +478,7 @@ impl ParsedLogPath<Url> {
     // LogRoot types.
     #[allow(unused)]
     /// Create a new ParsedCommitPath<Url> for a new json commit file
-    pub(crate) fn new_commit(table_root: &Url, version: Version) -> Result<Self> {
+    pub(crate) fn new_commit(table_root: &Url, version: Version) -> KernelResult<Self> {
         let filename = format!("{version:020}.json");
         let path = Self::create_path(table_root, filename)?;
         if !path.is_commit() {
@@ -442,7 +493,7 @@ impl ParsedLogPath<Url> {
     pub(crate) fn new_classic_parquet_checkpoint(
         table_root: &Url,
         version: Version,
-    ) -> Result<Self> {
+    ) -> KernelResult<Self> {
         let filename = format!("{version:020}.checkpoint.parquet");
         let path = Self::create_path(table_root, filename)?;
         if !path.is_checkpoint() {
@@ -455,7 +506,10 @@ impl ParsedLogPath<Url> {
 
     /// Create a new ParsedCheckpointPath<Url> for a UUID-based parquet checkpoint file
     #[allow(dead_code)] // TODO: Remove this once we have a use case for it
-    pub(crate) fn new_uuid_parquet_checkpoint(table_root: &Url, version: Version) -> Result<Self> {
+    pub(crate) fn new_uuid_parquet_checkpoint(
+        table_root: &Url,
+        version: Version,
+    ) -> KernelResult<Self> {
         let filename = format!("{:020}.checkpoint.{}.parquet", version, Uuid::new_v4());
         let path = Self::create_path(table_root, filename)?;
         if !path.is_checkpoint() {
@@ -468,7 +522,7 @@ impl ParsedLogPath<Url> {
 
     /// Create a new `ParsedLogPath<Url>` for a version checksum (CRC) file.
     #[internal_api]
-    pub(crate) fn new_crc(table_root: &Url, version: Version) -> Result<Self> {
+    pub(crate) fn new_crc(table_root: &Url, version: Version) -> KernelResult<Self> {
         let filename = format!("{version:020}.crc");
         let path = Self::create_path(table_root, filename)?;
         if !matches!(path.file_type, LogPathFileType::Crc) {
@@ -486,7 +540,7 @@ impl ParsedLogPath<Url> {
         table_root: &Url,
         start_version: Version,
         end_version: Version,
-    ) -> Result<Self> {
+    ) -> KernelResult<Self> {
         let filename = format!("{start_version:020}.{end_version:020}.compacted.json");
         let path = Self::create_path(table_root, filename)?;
         if !matches!(path.file_type, LogPathFileType::CompactedCommit { .. }) {
@@ -503,7 +557,7 @@ impl ParsedLogPath<Url> {
 ///
 /// Sidecar paths should be URI-encoded. All characters in the filename here are Unreserved
 /// Characters, so we can just retain them. Ref: <https://www.ietf.org/rfc/rfc2396.txt>
-pub(crate) fn new_sidecar(table_root: &Url, version: Version) -> Result<(String, Url)> {
+pub(crate) fn new_sidecar(table_root: &Url, version: Version) -> KernelResult<(String, Url)> {
     let filename = format!("{version:020}.checkpoint.{}.parquet", Uuid::new_v4());
     let url = table_root
         .join(DELTA_LOG_DIR_WITH_SLASH)?
@@ -525,7 +579,7 @@ impl LogRoot {
     /// s3://bucket/table/_delta_log/)
     ///
     /// TODO: could take a `table_root: TableRoot`
-    pub(crate) fn new(mut table_root: Url) -> Result<Self> {
+    pub(crate) fn new(mut table_root: Url) -> KernelResult<Self> {
         if !table_root.path().ends_with('/') {
             let new_path = format!("{}/", table_root.path());
             table_root.set_path(&new_path);
@@ -546,7 +600,7 @@ impl LogRoot {
     }
 
     /// Create a new commit path (absolute path) for the given version.
-    pub(crate) fn new_commit_path(&self, version: Version) -> Result<ParsedLogPath<Url>> {
+    pub(crate) fn new_commit_path(&self, version: Version) -> KernelResult<ParsedLogPath<Url>> {
         let filename = format!("{version:020}.json");
         let path = self.log_root().join(&filename)?;
         ParsedLogPath::try_from(path)?.ok_or_else(|| {
@@ -555,7 +609,10 @@ impl LogRoot {
     }
 
     /// Create a new staged commit path (absolute path) for the given version.
-    pub(crate) fn new_staged_commit_path(&self, version: Version) -> Result<ParsedLogPath<Url>> {
+    pub(crate) fn new_staged_commit_path(
+        &self,
+        version: Version,
+    ) -> KernelResult<ParsedLogPath<Url>> {
         let uuid = uuid::Uuid::new_v4();
         let filename = format!("{version:020}.{uuid}.json");
         let path = self.log_root().join(STAGED_COMMITS_DIR)?.join(&filename)?;
@@ -683,6 +740,45 @@ pub(crate) mod tests {
         assert!(!may_begin_listable_log_path("Zsentinel"));
     }
 
+    #[rstest::rstest]
+    #[case::not_versioned("_last_checkpoint")]
+    #[case::missing_extension("00000000000000000010")]
+    #[case::invalid_version("abc.json")]
+    #[case::version_too_long("000000000000000000010.json")]
+    #[case::version_too_short("0000000000000000010.json")]
+    #[case::signed_version("+0000000000000000001.json")]
+    #[case::invalid_uuid_checkpoint("00000000000000000002.checkpoint.foo.parquet")]
+    #[case::short_uuid_checkpoint(
+        "00000000000000000010.checkpoint.3a0d65cd-4056-49b8-937b-95f9e3ee90e.parquet"
+    )]
+    #[case::zero_checkpoint_part("00000000000000000008.checkpoint.0000000000.0000000002.parquet")]
+    #[case::checkpoint_part_exceeds_total(
+        "00000000000000000008.checkpoint.0000000003.0000000002.parquet"
+    )]
+    #[case::short_checkpoint_part("00000000000000000008.checkpoint.000000001.0000000002.parquet")]
+    #[case::signed_checkpoint_part("00000000000000000008.checkpoint.+000000001.0000000002.parquet")]
+    #[case::signed_checkpoint_total(
+        "00000000000000000008.checkpoint.0000000001.+000000002.parquet"
+    )]
+    #[case::short_checkpoint_total("00000000000000000008.checkpoint.0000000001.000000002.parquet")]
+    #[case::non_digit_checkpoint_part(
+        "00000000000000000008.checkpoint.00000000x1.0000000002.parquet"
+    )]
+    #[case::non_digit_checkpoint_total(
+        "00000000000000000008.checkpoint.0000000001.00000000x2.parquet"
+    )]
+    #[case::signed_compacted_high("00000000000000000008.+0000000000000000015.compacted.json")]
+    #[case::short_compacted_high("00000000000000000008.0000000000000000015.compacted.json")]
+    #[case::long_compacted_high("00000000000000000008.000000000000000000015.compacted.json")]
+    #[case::non_digit_compacted_high("00000000000000000008.00000000000000000a15.compacted.json")]
+    fn test_reject_invalid_log_paths(#[case] filename: &str) {
+        let log_path = table_log_dir_url().join(filename).unwrap();
+        assert!(
+            ParsedLogPath::try_from(log_path).unwrap().is_none(),
+            "expected {filename} to be rejected"
+        );
+    }
+
     #[test]
     fn test_unknown_invalid_patterns() {
         let table_log_dir = table_log_dir_url();
@@ -694,19 +790,6 @@ pub(crate) mod tests {
             .ends_with("/tests/data/table-with-dv-small/_delta_log/subdir/"));
         let log_path = ParsedLogPath::try_from(log_path).unwrap();
         assert!(log_path.is_none());
-
-        // ignored - not versioned
-        let log_path = table_log_dir.join("_last_checkpoint").unwrap();
-        let log_path = ParsedLogPath::try_from(log_path).unwrap();
-        assert!(log_path.is_none());
-
-        // ignored - no extension
-        let log_path = table_log_dir.join("00000000000000000010").unwrap();
-        let result = ParsedLogPath::try_from(log_path);
-        assert!(
-            matches!(result, Ok(None)),
-            "Expected Ok(None) for missing file extension"
-        );
 
         // empty extension - should be treated as unknown file type
         let log_path = table_log_dir.join("00000000000000000011.").unwrap();
@@ -721,21 +804,6 @@ pub(crate) mod tests {
             ),
             "Expected Unknown file type, got {result:?}"
         );
-
-        // ignored - version fails to parse
-        let log_path = table_log_dir.join("abc.json").unwrap();
-        let log_path = ParsedLogPath::try_from(log_path).unwrap();
-        assert!(log_path.is_none());
-
-        // invalid - version has too many digits
-        let log_path = table_log_dir.join("000000000000000000010.json").unwrap();
-        let log_path = ParsedLogPath::try_from(log_path).unwrap();
-        assert!(log_path.is_none());
-
-        // invalid - version has too few digits
-        let log_path = table_log_dir.join("0000000000000000010.json").unwrap();
-        let log_path = ParsedLogPath::try_from(log_path).unwrap();
-        assert!(log_path.is_none());
 
         // unknown - two parts
         let log_path = table_log_dir.join("00000000000000000010.foo").unwrap();
@@ -878,12 +946,6 @@ pub(crate) mod tests {
         assert!(!log_path.is_checkpoint());
         assert!(log_path.is_unknown());
 
-        let log_path = table_log_dir
-            .join("00000000000000000002.checkpoint.foo.parquet")
-            .unwrap();
-        let log_path = ParsedLogPath::try_from(log_path).unwrap();
-        assert!(log_path.is_none());
-
         // invalid file extension
         let log_path = table_log_dir
             .join("00000000000000000002.checkpoint.foo")
@@ -895,13 +957,6 @@ pub(crate) mod tests {
         assert!(!log_path.is_commit());
         assert!(!log_path.is_checkpoint());
         assert!(log_path.is_unknown());
-
-        // Boundary test - UUID with exactly 35 characters (one too short)
-        let log_path = table_log_dir
-            .join("00000000000000000010.checkpoint.3a0d65cd-4056-49b8-937b-95f9e3ee90e.parquet")
-            .unwrap();
-        let log_path = ParsedLogPath::try_from(log_path).unwrap();
-        assert!(log_path.is_none());
     }
 
     #[test]
@@ -921,12 +976,6 @@ pub(crate) mod tests {
         assert!(!log_path.is_commit());
         assert!(!log_path.is_checkpoint());
         assert!(log_path.is_unknown());
-
-        let log_path = table_log_dir
-            .join("00000000000000000008.checkpoint.0000000000.0000000002.parquet")
-            .unwrap();
-        let log_path = ParsedLogPath::try_from(log_path).unwrap();
-        assert!(log_path.is_none());
 
         let log_path = table_log_dir
             .join("00000000000000000008.checkpoint.0000000001.0000000002.parquet")
@@ -967,36 +1016,6 @@ pub(crate) mod tests {
         ));
         assert!(!log_path.is_commit());
         assert!(log_path.is_checkpoint());
-
-        let log_path = table_log_dir
-            .join("00000000000000000008.checkpoint.0000000003.0000000002.parquet")
-            .unwrap();
-        let log_path = ParsedLogPath::try_from(log_path).unwrap();
-        assert!(log_path.is_none());
-
-        let log_path = table_log_dir
-            .join("00000000000000000008.checkpoint.000000001.0000000002.parquet")
-            .unwrap();
-        let log_path = ParsedLogPath::try_from(log_path).unwrap();
-        assert!(log_path.is_none());
-
-        let log_path = table_log_dir
-            .join("00000000000000000008.checkpoint.0000000001.000000002.parquet")
-            .unwrap();
-        let log_path = ParsedLogPath::try_from(log_path).unwrap();
-        assert!(log_path.is_none());
-
-        let log_path = table_log_dir
-            .join("00000000000000000008.checkpoint.00000000x1.0000000002.parquet")
-            .unwrap();
-        let log_path = ParsedLogPath::try_from(log_path).unwrap();
-        assert!(log_path.is_none());
-
-        let log_path = table_log_dir
-            .join("00000000000000000008.checkpoint.0000000001.00000000x2.parquet")
-            .unwrap();
-        let log_path = ParsedLogPath::try_from(log_path).unwrap();
-        assert!(log_path.is_none());
     }
 
     #[test]
@@ -1034,24 +1053,6 @@ pub(crate) mod tests {
         assert!(!log_path.is_commit());
         assert!(!log_path.is_checkpoint());
         assert!(log_path.is_unknown());
-
-        let log_path = table_log_dir
-            .join("00000000000000000008.0000000000000000015.compacted.json")
-            .unwrap();
-        let log_path = ParsedLogPath::try_from(log_path).unwrap();
-        assert!(log_path.is_none());
-
-        let log_path = table_log_dir
-            .join("00000000000000000008.000000000000000000015.compacted.json")
-            .unwrap();
-        let log_path = ParsedLogPath::try_from(log_path).unwrap();
-        assert!(log_path.is_none());
-
-        let log_path = table_log_dir
-            .join("00000000000000000008.00000000000000000a15.compacted.json")
-            .unwrap();
-        let log_path = ParsedLogPath::try_from(log_path).unwrap();
-        assert!(log_path.is_none());
     }
 
     #[test]
@@ -1244,12 +1245,25 @@ pub(crate) mod tests {
         assert_result_error_with_message(result, "In-Commit Timestamp not found");
     }
 
-    #[test]
-    fn test_read_in_commit_timestamp_not_commit_file() {
+    #[rstest::rstest]
+    #[case::in_commit_timestamp(
+        |path: &ParsedLogPath<FileMeta>, engine: &dyn Engine| {
+            path.read_in_commit_timestamp(engine).map(|_| ())
+        }
+    )]
+    #[cfg_attr(
+        feature = "adaptive-metadata-in-dev",
+        case::last_manifest_commit(
+            |path: &ParsedLogPath<FileMeta>, engine: &dyn Engine| {
+                path.read_ict_and_last_manifest_commit(engine).map(|_| ())
+            }
+        )
+    )]
+    fn test_read_commit_file_method_on_non_commit_file_fails(
+        #[case] read: fn(&ParsedLogPath<FileMeta>, &dyn Engine) -> KernelResult<()>,
+    ) {
         let engine = SyncEngine::new();
         let table_url = url::Url::try_from("file:///tmp/test_table").unwrap();
-
-        // Create a checkpoint file (not a commit file)
         let checkpoint_path = table_url
             .join("_delta_log/00000000000000000000.checkpoint.parquet")
             .unwrap();
@@ -1261,12 +1275,85 @@ pub(crate) mod tests {
         .unwrap()
         .unwrap();
 
-        // Should return error for non-commit files
-        let result = parsed_path.read_in_commit_timestamp(&engine);
-        assert_result_error_with_message(
-            result,
-            "read_in_commit_timestamp can only be called on commit files",
+        assert_result_error_with_message(read(&parsed_path, &engine), "expected a commit file");
+    }
+
+    #[cfg(feature = "adaptive-metadata-in-dev")]
+    #[rstest::rstest]
+    #[case::commit_info_without_it(r#"{"commitInfo":{"inCommitTimestamp":10}}"#, Ok(None))]
+    #[case::present(
+        r#"{"commitInfo":{"inCommitTimestamp":10,"lastManifestCommit":{"version":3,"contentRootVersion":2}}}"#,
+        Ok(Some((3, 2)))
+    )]
+    #[case::pointer_equal_to_commit(
+        r#"{"commitInfo":{"inCommitTimestamp":10,"lastManifestCommit":{"version":5,"contentRootVersion":5}}}"#,
+        Ok(Some((5, 5)))
+    )]
+    #[case::missing_ict(
+        r#"{"commitInfo":{"lastManifestCommit":{"version":3,"contentRootVersion":2}}}"#,
+        Err("In-Commit Timestamp not found")
+    )]
+    #[case::commit_info_not_first(
+        concat!(
+            r#"{"txn":{"appId":"a","version":1}}"#,
+            "\n",
+            r#"{"commitInfo":{"inCommitTimestamp":10,"lastManifestCommit":{"version":3,"contentRootVersion":2}}}"#,
+        ),
+        Err("In-Commit Timestamp not found")
+    )]
+    #[case::missing_content_root_version(
+        r#"{"commitInfo":{"inCommitTimestamp":10,"lastManifestCommit":{"version":3}}}"#,
+        Err(r#""contentRootVersion""#)
+    )]
+    #[case::missing_version(
+        r#"{"commitInfo":{"inCommitTimestamp":10,"lastManifestCommit":{"contentRootVersion":2}}}"#,
+        Err(r#""version""#)
+    )]
+    #[case::content_root_newer_than_version(
+        r#"{"commitInfo":{"inCommitTimestamp":10,"lastManifestCommit":{"version":1,"contentRootVersion":2}}}"#,
+        Err("lastManifestCommit contentRootVersion 2 exceeds version 1")
+    )]
+    #[case::pointer_newer_than_commit(
+        r#"{"commitInfo":{"inCommitTimestamp":10,"lastManifestCommit":{"version":6,"contentRootVersion":2}}}"#,
+        Err("lastManifestCommit version 6 exceeds commit version 5")
+    )]
+    #[case::negative_versions(
+        r#"{"commitInfo":{"inCommitTimestamp":10,"lastManifestCommit":{"version":-1,"contentRootVersion":-2}}}"#,
+        Err("lastManifestCommit contentRootVersion -2 must be non-negative")
+    )]
+    #[tokio::test]
+    async fn test_read_ict_and_last_manifest_commit(
+        #[case] commit_content: &str,
+        #[case] expected: Result<Option<(i64, i64)>, &str>,
+    ) {
+        let store = Arc::new(InMemory::new());
+        let engine = SyncEngine::new_with_store(store.clone());
+        let table_root = "memory://test/";
+        let commit_version = 5;
+        add_commit(
+            table_root,
+            store.as_ref(),
+            commit_version,
+            commit_content.to_string(),
+        )
+        .await
+        .unwrap();
+        let parsed_path = ParsedLogPath::create_parsed_published_commit(
+            &url::Url::parse(table_root).unwrap(),
+            commit_version,
         );
+
+        let result = parsed_path.read_ict_and_last_manifest_commit(&engine);
+        match expected {
+            Err(message) => assert_result_error_with_message(result, message),
+            Ok(expected) => assert_eq!(
+                result.unwrap(),
+                (
+                    10,
+                    expected.map(|(v, c)| LastManifestCommit::new(v, c).unwrap())
+                )
+            ),
+        }
     }
 
     /// Verifies `new_sidecar` builds a `<version:020>.checkpoint.<uuid>.parquet` filename

@@ -7,7 +7,6 @@ use tracing::{debug, error};
 
 use crate::actions::visitors::SelectionVectorVisitor;
 use crate::actions::{MAX_VALUES, MIN_VALUES, NULL_COUNT, NUM_RECORDS};
-use crate::error::Result;
 use crate::expressions::{
     col, column_name, column_pred, lit, BinaryPredicateOp, ColumnName, Expression as Expr,
     ExpressionRef, JunctionPredicateOp, MapToStructOptions, OpaquePredicateOpRef,
@@ -23,14 +22,13 @@ use crate::schema::{lazy_schema_ref, schema_ref, DataType, PrimitiveType, Schema
 use crate::table_configuration::TableConfiguration;
 use crate::utils::require;
 use crate::{
-    Engine, EngineData, ExpressionEvaluator, KernelError, PredicateEvaluator, RowVisitor as _,
+    Engine, EngineData, ExpressionEvaluator, KernelError, KernelResult, PredicateEvaluator,
+    RowVisitor as _,
 };
 
 pub(crate) mod stats_schema;
 #[cfg(test)]
 mod tests;
-
-use delta_kernel_derive::internal_api;
 
 /// Rewrites a predicate to a predicate that can be used to skip files based on their stats.
 /// Returns `None` if the predicate is not eligible for data skipping.
@@ -91,7 +89,6 @@ pub(crate) fn as_sql_data_skipping_predicate_with_stats_columns(
     DataSkippingPredicateCreator::new(partition_columns, stats_columns).eval_sql_where(pred)
 }
 
-#[internal_api]
 pub(crate) struct DataSkippingFilter {
     /// Evaluator that extracts file-level statistics from the input batch. The caller provides
     /// the expression at construction time, which determines where stats come from:
@@ -369,7 +366,7 @@ impl DataSkippingFilter {
 
     /// Apply the DataSkippingFilter to an EngineData batch. Returns a selection vector
     /// which can be applied to the batch to find rows that passed data skipping.
-    pub(crate) fn apply(&self, batch: &dyn EngineData) -> Result<Vec<bool>> {
+    pub(crate) fn apply(&self, batch: &dyn EngineData) -> KernelResult<Vec<bool>> {
         let start_time = Instant::now();
         let batch_len = batch.len();
 

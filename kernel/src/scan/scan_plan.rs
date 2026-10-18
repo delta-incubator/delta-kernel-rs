@@ -28,7 +28,7 @@ use crate::schema::{
 use crate::struct_patch::{project_struct_preserving_nulls, ProjectionStructPatchBuilder};
 use crate::transforms::{transform_output_type, ExpressionTransform};
 use crate::utils::FoldWithOption as _;
-use crate::{KernelError, PlanBuilder, Result};
+use crate::{KernelError, KernelResult, PlanBuilder};
 
 // === Internal column names ===
 
@@ -53,7 +53,10 @@ impl Scan {
         fields(enable_call_frame),
         err
     )]
-    pub(super) fn build_metadata_scan_plan(&self, shape: &CheckpointShape) -> Result<Option<Plan>> {
+    pub(super) fn build_metadata_scan_plan(
+        &self,
+        shape: &CheckpointShape,
+    ) -> KernelResult<Option<Plan>> {
         let state = &self.state_info;
         // A statically-unsatisfiable predicate (e.g. `x > 10 AND FALSE`) skips the whole table.
         if state.physical_predicate == PhysicalPredicate::StaticSkipAll {
@@ -135,7 +138,7 @@ impl Scan {
     /// When the checkpoint lacks native parsed metadata, `FROM_JSON(add.stats, physical_stats)`
     /// and `MAP_TO_STRUCT(add.partitionValues, physical_partitions)` replace the corresponding
     /// fields above. A parsed field is omitted when its schema is absent.
-    fn checkpoint_arm(&self, shape: &CheckpointShape) -> Result<PlanBuilder> {
+    fn checkpoint_arm(&self, shape: &CheckpointShape) -> KernelResult<PlanBuilder> {
         let log_segment = self.snapshot.log_segment();
         let physical_stats = self.state_info.physical_stats_read_schema();
         let physical_partitions = self.state_info.physical_partition_schema.as_ref();
@@ -204,7 +207,7 @@ impl Scan {
     /// WHERE add.path IS NOT NULL OR remove.path IS NOT NULL
     ///
     /// A parsed field is omitted when its schema is absent.
-    fn commit_arm(&self) -> Result<PlanBuilder> {
+    fn commit_arm(&self) -> KernelResult<PlanBuilder> {
         let log_segment = self.snapshot.log_segment();
         let commit_files = log_segment.commit_cover_version_tagged_scan_files()?;
         PlanBuilder::scan_json(commit_files, &[VERSION], json_read_schema(true))?
@@ -236,7 +239,7 @@ impl Scan {
             })
     }
 
-    fn normalized_add_field(&self) -> Result<StructField> {
+    fn normalized_add_field(&self) -> KernelResult<StructField> {
         let physical_stats_read_schema = self.state_info.physical_stats_read_schema();
         let physical_partition_schema = self.state_info.physical_partition_schema.as_ref();
         let patch = SchemaStructPatchBuilder::new()
@@ -279,7 +282,7 @@ impl Scan {
     fn metadata_output_projection(
         &self,
         add_field: &StructField,
-    ) -> Result<(ExpressionRef, SchemaRef)> {
+    ) -> KernelResult<(ExpressionRef, SchemaRef)> {
         let input_schema = schema_ref! { (add_field.clone()) };
         let has_stats_parsed = input_schema.contains_col([ADD_NAME, STATS_PARSED_NAME]);
         let projection = ProjectionStructPatchBuilder::new_nested(&input_schema, [ADD_NAME]);
@@ -346,7 +349,7 @@ fn sidecar_actions(
     root_parts: Vec<ScanFile>,
     action_schema: SchemaRef,
     log_root: &Url,
-) -> Result<PlanBuilder> {
+) -> KernelResult<PlanBuilder> {
     const FILE_PATH: &str = "path";
     const FILE_SIZE: &str = "size";
     const FILE_MOD: &str = "filemod";
@@ -412,7 +415,7 @@ fn json_read_schema(include_remove: bool) -> SchemaRef {
 fn parquet_read_schema(
     physical_stats: Option<&SchemaRef>,
     physical_partitions: Option<&SchemaRef>,
-) -> Result<SchemaRef> {
+) -> KernelResult<SchemaRef> {
     let add_patch = SchemaStructPatchBuilder::new()
         .fold_with(physical_stats, |patch, schema| {
             patch.append(StructField::nullable(STATS_PARSED, schema.as_ref().clone()))
@@ -574,9 +577,9 @@ mod tests {
     use crate::unit_test_utils::{
         create_log_path, MockProtocolBuilder, MockTableConfigurationBuilder,
     };
-    use crate::Engine as _;
+    use crate::{Engine as _, KernelResult};
 
-    fn mock_snapshot(log_segment: LogSegment) -> Result<Arc<Snapshot>> {
+    fn mock_snapshot(log_segment: LogSegment) -> KernelResult<Arc<Snapshot>> {
         let table_configuration = MockTableConfigurationBuilder::new()
             .with_schema(partitioned_schema())
             .with_partition_columns(["p"])
@@ -663,7 +666,7 @@ mod tests {
     }
 
     // One add with JSON stats and no `stats_parsed`.
-    fn write_parquet_checkpoint(store: &Arc<InMemory>, path: &str) -> Result<()> {
+    fn write_parquet_checkpoint(store: &Arc<InMemory>, path: &str) -> KernelResult<()> {
         use crate::arrow::array::builder::{MapBuilder, MapFieldNames, StringBuilder};
         use crate::arrow::array::{
             Array, BooleanArray, Int64Array, RecordBatch, StringArray as SA,
@@ -766,7 +769,7 @@ mod tests {
         #[case] shape: CheckpointShape,
         #[case] file_type: FileType,
         #[case] checkpoint_arm_tags: Vec<&'static str>,
-    ) -> Result<()> {
+    ) -> KernelResult<()> {
         let segment = log_segment(
             log_root(),
             &["file:///_delta_log/00000000000000000001.json"],
@@ -792,7 +795,7 @@ mod tests {
         #[case] expect_native_partitions: bool,
         #[values(None, Some(struct_stats_schema()))] parsed_stats: Option<SchemaRef>,
         #[values(CheckpointType::Leaf, CheckpointType::Manifest)] checkpoint_type: CheckpointType,
-    ) -> Result<()> {
+    ) -> KernelResult<()> {
         let stats = StatsOptions::all();
         let partition_values = PartitionValuesOptions::with_struct();
         let segment = log_segment(log_root(), &[], Some(checkpoint_path(FileType::Parquet)));
@@ -855,7 +858,7 @@ mod tests {
     }
 
     #[test]
-    fn metadata_plan_commits_only() -> Result<()> {
+    fn metadata_plan_commits_only() -> KernelResult<()> {
         let segment = log_segment(
             log_root(),
             &["file:///_delta_log/00000000000000000001.json"],
@@ -878,7 +881,7 @@ mod tests {
         #[case] shape: CheckpointShape,
         #[case] file_type: FileType,
         #[case] checkpoint_arm_tags: Vec<&'static str>,
-    ) -> Result<()> {
+    ) -> KernelResult<()> {
         let segment = log_segment(log_root(), &[], Some(checkpoint_path(file_type)));
         let scan = mock_snapshot(segment)?.scan_builder().build()?;
         let plan = scan.build_metadata_scan_plan(&shape)?.expect("non-empty");
@@ -887,7 +890,7 @@ mod tests {
     }
 
     #[test]
-    fn metadata_plan_empty_is_none() -> Result<()> {
+    fn metadata_plan_empty_is_none() -> KernelResult<()> {
         let segment = log_segment(log_root(), &[], None);
         let scan = mock_snapshot(segment)?.scan_builder().build()?;
         assert!(scan.build_metadata_scan_plan(&no_checkpoint())?.is_none());
@@ -895,7 +898,7 @@ mod tests {
     }
 
     #[test]
-    fn metadata_plan_static_skip_all_is_none() -> Result<()> {
+    fn metadata_plan_static_skip_all_is_none() -> KernelResult<()> {
         let segment = log_segment(log_root(), &[], None);
         let scan = mock_snapshot(segment)?
             .scan_builder()
@@ -912,7 +915,7 @@ mod tests {
     }
 
     #[test]
-    fn metadata_plan_executes_commit_dedup_with_sync_executor() -> Result<()> {
+    fn metadata_plan_executes_commit_dedup_with_sync_executor() -> KernelResult<()> {
         let store = Arc::new(InMemory::new());
         futures::executor::block_on(async {
             store
@@ -932,7 +935,7 @@ mod tests {
                     .into(),
                 )
                 .await?;
-            Result::<()>::Ok(())
+            KernelResult::<()>::Ok(())
         })?;
 
         let segment = log_segment(
@@ -983,7 +986,7 @@ mod tests {
     fn metadata_plan_executes_leaf_without_stats_parsed(
         #[case] lower_bound: i64,
         #[case] expected_rows: usize,
-    ) -> Result<()> {
+    ) -> KernelResult<()> {
         let store = Arc::new(InMemory::new());
         // A single-row parquet checkpoint carrying an `add` with a JSON `stats` string but no
         // `stats_parsed` column.

@@ -30,15 +30,19 @@ use delta_kernel::schema::{
 };
 #[cfg(feature = "geo-type-in-dev")]
 use delta_kernel::schema::{EdgeInterpolationAlgorithm, GeographyType, GeometryType};
-use delta_kernel::{KernelError, Result};
+use delta_kernel::{KernelError, KernelResult};
 use tracing::warn;
 
+use crate::delta_types::FfiNullableStringMap;
 use crate::scan::{CMetadataMap, CMetadataValueKind};
 use crate::{
     AllocateErrorFn, ExternResult, IntoExternResult, KernelStringSlice, ReferenceSet,
     TryFromStringSlice,
 };
 
+/// In-progress fields created by an engine while reconstructing a Kernel schema.
+///
+/// Complex field visitors consume the IDs of their child fields from this state.
 #[derive(Default)]
 pub struct KernelSchemaVisitorState {
     elements: ReferenceSet<StructField>,
@@ -94,7 +98,7 @@ pub unsafe extern "C" fn visit_metadata_value(
 
 fn visit_engine_metadata(
     engine_metadata: Option<&EngineMetadata>,
-) -> Result<HashMap<String, MetadataValue>> {
+) -> KernelResult<HashMap<String, MetadataValue>> {
     let Some(engine_metadata) = engine_metadata else {
         return Ok(HashMap::new());
     };
@@ -109,10 +113,10 @@ fn visit_engine_metadata(
 
 fn visit_metadata_value_impl(
     state: &mut CMetadataMap,
-    key: Result<&str>,
+    key: KernelResult<&str>,
     kind: CMetadataValueKind,
-    value: Result<&str>,
-) -> Result<()> {
+    value: KernelResult<&str>,
+) -> KernelResult<()> {
     let key = key?;
     let value = value?;
     let value = match kind {
@@ -136,7 +140,7 @@ fn visit_metadata_value_impl(
 pub fn extract_kernel_schema(
     state: &mut KernelSchemaVisitorState,
     schema_id: usize,
-) -> Result<StructType> {
+) -> KernelResult<StructType> {
     let schema_element = state
         .elements
         .take(schema_id)
@@ -172,11 +176,11 @@ fn unwrap_field(state: &mut KernelSchemaVisitorState, field_id: usize) -> Option
 /// Generic helper to create primitive fields
 fn visit_field_primitive_impl(
     state: &mut KernelSchemaVisitorState,
-    name: Result<&str>,
+    name: KernelResult<&str>,
     primitive_type: PrimitiveType,
     nullable: bool,
-    metadata: Result<HashMap<String, MetadataValue>>,
-) -> Result<usize> {
+    metadata: KernelResult<HashMap<String, MetadataValue>>,
+) -> KernelResult<usize> {
     let name_str = name?.to_string();
     let metadata = metadata?;
     let field = StructField::new(name_str, DataType::Primitive(primitive_type), nullable)
@@ -555,11 +559,11 @@ pub unsafe extern "C" fn visit_field_geometry(
 #[cfg(feature = "geo-type-in-dev")]
 fn visit_field_geometry_impl(
     state: &mut KernelSchemaVisitorState,
-    name: Result<&str>,
-    crs: Result<&str>,
+    name: KernelResult<&str>,
+    crs: KernelResult<&str>,
     nullable: bool,
-    metadata: Result<HashMap<String, MetadataValue>>,
-) -> Result<usize> {
+    metadata: KernelResult<HashMap<String, MetadataValue>>,
+) -> KernelResult<usize> {
     let geometry = GeometryType::try_new(crs?)?;
     visit_field_primitive_impl(
         state,
@@ -603,12 +607,12 @@ pub unsafe extern "C" fn visit_field_geography(
 #[cfg(feature = "geo-type-in-dev")]
 fn visit_field_geography_impl(
     state: &mut KernelSchemaVisitorState,
-    name: Result<&str>,
-    crs: Result<&str>,
-    algorithm: Result<&str>,
+    name: KernelResult<&str>,
+    crs: KernelResult<&str>,
+    algorithm: KernelResult<&str>,
     nullable: bool,
-    metadata: Result<HashMap<String, MetadataValue>>,
-) -> Result<usize> {
+    metadata: KernelResult<HashMap<String, MetadataValue>>,
+) -> KernelResult<usize> {
     let algorithm = algorithm?
         .parse::<EdgeInterpolationAlgorithm>()
         .map_err(|err| {
@@ -652,12 +656,12 @@ pub unsafe extern "C" fn visit_field_decimal(
 
 fn visit_field_decimal_impl(
     state: &mut KernelSchemaVisitorState,
-    name: Result<&str>,
+    name: KernelResult<&str>,
     precision: u8,
     scale: u8,
     nullable: bool,
-    metadata: Result<HashMap<String, MetadataValue>>,
-) -> Result<usize> {
+    metadata: KernelResult<HashMap<String, MetadataValue>>,
+) -> KernelResult<usize> {
     let name_str = name?.to_string();
     let metadata = metadata?;
 
@@ -698,7 +702,7 @@ pub unsafe extern "C" fn visit_field_struct(
     metadata: *const EngineMetadata,
     allocate_error: AllocateErrorFn,
 ) -> ExternResult<usize> {
-    let name_str: Result<&str, KernelError> = unsafe { TryFromStringSlice::try_from_slice(&name) };
+    let name_str: KernelResult<&str> = unsafe { TryFromStringSlice::try_from_slice(&name) };
     let metadata = visit_engine_metadata(unsafe { metadata.as_ref() });
     let field_ids = unsafe { std::slice::from_raw_parts(field_ids, field_count) };
 
@@ -710,7 +714,7 @@ pub unsafe extern "C" fn visit_field_struct(
 fn create_struct_data_type(
     state: &mut KernelSchemaVisitorState,
     field_ids: &[usize],
-) -> Result<DataType> {
+) -> KernelResult<DataType> {
     let field_vec = field_ids
         .iter()
         .map(|&field_id| {
@@ -718,7 +722,7 @@ fn create_struct_data_type(
                 KernelError::generic(format!("Invalid field ID {field_id} in struct"))
             })
         })
-        .collect::<Result<Vec<_>>>()?;
+        .collect::<KernelResult<Vec<_>>>()?;
 
     let struct_type = StructType::try_new(field_vec)?;
     Ok(DataType::from(struct_type))
@@ -726,11 +730,11 @@ fn create_struct_data_type(
 
 fn visit_field_struct_impl(
     state: &mut KernelSchemaVisitorState,
-    name: Result<&str>,
+    name: KernelResult<&str>,
     field_ids: &[usize],
     nullable: bool,
-    metadata: Result<HashMap<String, MetadataValue>>,
-) -> Result<usize> {
+    metadata: KernelResult<HashMap<String, MetadataValue>>,
+) -> KernelResult<usize> {
     let name_str = name?.to_string();
     let metadata = metadata?;
     let data_type = create_struct_data_type(state, field_ids)?;
@@ -765,11 +769,11 @@ pub unsafe extern "C" fn visit_field_array(
 
 fn visit_field_array_impl(
     state: &mut KernelSchemaVisitorState,
-    name: Result<&str>,
+    name: KernelResult<&str>,
     element_type_id: usize,
     nullable: bool,
-    metadata: Result<HashMap<String, MetadataValue>>,
-) -> Result<usize> {
+    metadata: KernelResult<HashMap<String, MetadataValue>>,
+) -> KernelResult<usize> {
     let name_str = name?.to_string();
     let metadata = metadata?;
     let element_field = unwrap_field(state, element_type_id).ok_or_else(|| {
@@ -820,12 +824,12 @@ pub unsafe extern "C" fn visit_field_map(
 
 fn visit_field_map_impl(
     state: &mut KernelSchemaVisitorState,
-    name: Result<&str>,
+    name: KernelResult<&str>,
     key_type_id: usize,
     value_type_id: usize,
     nullable: bool,
-    metadata: Result<HashMap<String, MetadataValue>>,
-) -> Result<usize> {
+    metadata: KernelResult<HashMap<String, MetadataValue>>,
+) -> KernelResult<usize> {
     let name_str = name?.to_string();
     let metadata = metadata?;
 
@@ -848,6 +852,56 @@ fn visit_field_map_impl(
     );
     let field = StructField::new(name_str, map_type, nullable).with_metadata(metadata);
     Ok(wrap_field(state, field))
+}
+
+/// Visit a UDT field with the physical type referenced by `sql_type_id` and a borrowed annotation.
+///
+/// Copies the annotation and returns a new field ID. After decoding the name and annotation and
+/// visiting metadata, consumes `sql_type_id` even if UDT validation fails. Earlier errors and
+/// disabled UDT support leave the ID available. The physical field's name, nullability, and
+/// metadata are ignored. Returns an error for invalid IDs, invalid UTF-8, duplicate or reserved
+/// annotation keys, failed metadata callbacks, physical types containing UDTs or metadata columns,
+/// or disabled UDT support.
+///
+/// # Safety
+///
+/// `state` must be valid and exclusively borrowed. String slices must reference readable memory for
+/// their lengths. `annotation.ptr` must reference `annotation.len` initialized, aligned entries, or
+/// may be null when the length is zero. Optional values must have valid discriminants. All inputs
+/// are borrowed for the call. Non-null `metadata` must satisfy [`EngineMetadata`]'s contract, and
+/// `allocate_error` must be a valid error allocator.
+#[no_mangle]
+pub unsafe extern "C" fn visit_field_user_defined(
+    state: &mut KernelSchemaVisitorState,
+    name: KernelStringSlice,
+    sql_type_id: usize,
+    annotation: FfiNullableStringMap,
+    nullable: bool,
+    metadata: *const EngineMetadata,
+    allocate_error: AllocateErrorFn,
+) -> ExternResult<usize> {
+    #[cfg(feature = "udt-in-dev")]
+    let result = (|| -> KernelResult<usize> {
+        let name = unsafe { name.try_to_string() }?;
+        let annotation = unsafe { annotation.try_to_hash_map() }?;
+        let metadata = visit_engine_metadata(unsafe { metadata.as_ref() })?;
+        let physical = unwrap_field(state, sql_type_id).ok_or_else(|| {
+            KernelError::schema(format!("Invalid UDT physical type ID {sql_type_id}"))
+        })?;
+        let udt = delta_kernel::schema::UserDefinedType::try_new(physical.data_type, annotation)?;
+        Ok(wrap_field(
+            state,
+            StructField::new(name, udt, nullable).with_metadata(metadata),
+        ))
+    })();
+    #[cfg(not(feature = "udt-in-dev"))]
+    let result: KernelResult<usize> = {
+        let _ = (state, name, sql_type_id, annotation, nullable, metadata);
+        Err(KernelError::unsupported(
+            "UDT schema construction requires udt-in-dev",
+        ))
+    };
+    result.into_extern_result(&allocate_error)
 }
 
 /// Visit a variant field.
@@ -877,11 +931,11 @@ pub unsafe extern "C" fn visit_field_variant(
 
 fn visit_field_variant_impl(
     state: &mut KernelSchemaVisitorState,
-    name: Result<&str>,
+    name: KernelResult<&str>,
     variant_struct_id: usize,
     nullable: bool,
-    metadata: Result<HashMap<String, MetadataValue>>,
-) -> Result<usize> {
+    metadata: KernelResult<HashMap<String, MetadataValue>>,
+) -> KernelResult<usize> {
     let name_str = name?.to_string();
     let metadata = metadata?;
     let data_type = create_variant_data_type(state, variant_struct_id)?;
@@ -893,7 +947,7 @@ fn visit_field_variant_impl(
 fn create_variant_data_type(
     state: &mut KernelSchemaVisitorState,
     struct_type_id: usize,
-) -> Result<DataType> {
+) -> KernelResult<DataType> {
     let Some(DataType::Struct(variant_struct)) =
         state.elements.take(struct_type_id).map(|f| f.data_type)
     else {
@@ -915,11 +969,243 @@ mod tests {
     use super::*;
     use crate::error::{EngineError, FFIKernelError};
     use crate::ffi_test_utils::{
-        allocate_err, assert_extern_result_error_with_message, ok_or_panic,
+        allocate_err, assert_extern_result_error_contains, assert_extern_result_error_with_message,
+        ok_or_panic,
     };
     use crate::scan::visit_metadata_map;
     use crate::{KernelStringSlice, NullableCvoid};
 
+    /// Verifies annotation validation and ownership of parent and physical-field attributes.
+    #[cfg(feature = "udt-in-dev")]
+    #[rstest]
+    #[case("class", true)]
+    #[case("type", false)]
+    #[case("sqlType", false)]
+    fn udt_schema_visit_preserves_annotation_and_rejects_reserved_keys(
+        #[case] key: &str,
+        #[case] valid: bool,
+        #[values(false, true)] duplicate: bool,
+    ) {
+        let mut state = KernelSchemaVisitorState::default();
+        let physical = wrap_field(
+            &mut state,
+            StructField::not_null("sqlType", DataType::LONG)
+                .with_metadata([("child", MetadataValue::String("ignored".into()))]),
+        );
+        let mut metadata = TestMetadata::from([("parent", MetadataValue::String("kept".into()))]);
+        let entries: Vec<_> = (0..if duplicate { 2 } else { 1 })
+            .map(|_| crate::delta_types::FfiNullableStringMapEntry {
+                key: unsafe { KernelStringSlice::new_unsafe(key) },
+                value: None.into(),
+            })
+            .collect();
+        let result = unsafe {
+            visit_field_user_defined(
+                &mut state,
+                KernelStringSlice::new_unsafe("value"),
+                physical,
+                FfiNullableStringMap {
+                    ptr: entries.as_ptr(),
+                    len: entries.len(),
+                },
+                true,
+                &test_engine_metadata(&mut metadata),
+                allocate_err,
+            )
+        };
+        assert_eq!(state.elements.contains(physical), duplicate);
+        if duplicate {
+            assert_extern_result_error_contains(
+                result,
+                FFIKernelError::GenericError,
+                "duplicate map key",
+            );
+        } else if valid {
+            let field = state.elements.take(ok_or_panic(result)).unwrap();
+            assert_eq!(field.name, "value");
+            assert!(field.nullable);
+            assert_eq!(field.metadata, metadata.values);
+            let DataType::UserDefined(udt) = field.data_type else {
+                panic!("Expected UDT")
+            };
+            assert_eq!(udt.sql_type(), &DataType::LONG);
+            assert_eq!(udt.annotation().get(key), Some(&None));
+        } else {
+            assert_extern_result_error_with_message(
+                result,
+                FFIKernelError::SchemaError,
+                Some("Schema error: UDT annotation keys type and sqlType are reserved"),
+            );
+        }
+    }
+
+    /// Verifies that invalid and consumed physical IDs return schema errors without disturbing
+    /// unrelated fields.
+    #[cfg(feature = "udt-in-dev")]
+    #[rstest]
+    fn udt_schema_visit_rejects_invalid_or_consumed_id(#[values(false, true)] consumed: bool) {
+        let mut state = KernelSchemaVisitorState::default();
+        let unrelated = wrap_field(&mut state, StructField::nullable("other", DataType::STRING));
+        let physical = if consumed {
+            let id = wrap_field(&mut state, StructField::nullable("sqlType", DataType::LONG));
+            let udt_id = unsafe {
+                ok_or_panic(visit_field_user_defined(
+                    &mut state,
+                    KernelStringSlice::new_unsafe("first"),
+                    id,
+                    FfiNullableStringMap {
+                        ptr: null(),
+                        len: 0,
+                    },
+                    true,
+                    null(),
+                    allocate_err,
+                ))
+            };
+            assert!(state.elements.contains(udt_id));
+            id
+        } else {
+            usize::MAX
+        };
+        let result = unsafe {
+            visit_field_user_defined(
+                &mut state,
+                KernelStringSlice::new_unsafe("value"),
+                physical,
+                FfiNullableStringMap {
+                    ptr: null(),
+                    len: 0,
+                },
+                true,
+                null(),
+                allocate_err,
+            )
+        };
+        assert_extern_result_error_contains(
+            result,
+            FFIKernelError::SchemaError,
+            "Invalid UDT physical type ID",
+        );
+        assert!(state.elements.contains(unrelated));
+        assert!(!state.elements.contains(physical));
+    }
+
+    /// Verifies that failures before physical-ID resolution leave the child available for retry.
+    #[cfg(feature = "udt-in-dev")]
+    #[rstest]
+    #[case::name(0)]
+    #[case::annotation_key(1)]
+    #[case::annotation_value(2)]
+    #[case::metadata_callback(3)]
+    fn udt_schema_visit_early_errors_preserve_child(#[case] failure: usize) {
+        let mut state = KernelSchemaVisitorState::default();
+        let physical = wrap_field(&mut state, StructField::nullable("sqlType", DataType::LONG));
+        let valid = || unsafe { KernelStringSlice::new_unsafe("value") };
+        let invalid_bytes = [0xff_u8];
+        let invalid = || KernelStringSlice {
+            ptr: invalid_bytes.as_ptr().cast(),
+            len: 1,
+        };
+        let entry = crate::delta_types::FfiNullableStringMapEntry {
+            key: if failure == 1 { invalid() } else { valid() },
+            value: Some(if failure == 2 { invalid() } else { valid() }).into(),
+        };
+        let result = unsafe {
+            visit_field_user_defined(
+                &mut state,
+                if failure == 0 { invalid() } else { valid() },
+                physical,
+                FfiNullableStringMap {
+                    ptr: &entry,
+                    len: 1,
+                },
+                true,
+                &rejected_engine_metadata(),
+                allocate_err,
+            )
+        };
+        assert_extern_result_error_with_message(
+            result,
+            if failure == 3 {
+                FFIKernelError::SchemaError
+            } else {
+                FFIKernelError::Utf8Error
+            },
+            None,
+        );
+        assert!(state.elements.contains(physical));
+    }
+
+    /// Verifies that validation after physical-ID resolution consumes the child field.
+    #[cfg(feature = "udt-in-dev")]
+    #[rstest]
+    #[case::nested_udt(
+        DataType::from(delta_kernel::schema::UserDefinedType::try_new(DataType::LONG, HashMap::new()).unwrap()),
+        "must not contain another UDT"
+    )]
+    #[case::metadata_column(
+        DataType::from(StructType::try_new([StructField::create_metadata_column(
+            "row_index", delta_kernel::schema::MetadataColumnSpec::RowIndex
+        )]).unwrap()),
+        "must not contain a metadata column"
+    )]
+    fn udt_schema_visit_validation_errors_consume_child(
+        #[case] physical_type: DataType,
+        #[case] message: &str,
+    ) {
+        let mut state = KernelSchemaVisitorState::default();
+        let physical = wrap_field(&mut state, StructField::nullable("sqlType", physical_type));
+        let unrelated = wrap_field(&mut state, StructField::nullable("other", DataType::LONG));
+        let result = unsafe {
+            visit_field_user_defined(
+                &mut state,
+                KernelStringSlice::new_unsafe("value"),
+                physical,
+                FfiNullableStringMap {
+                    ptr: null(),
+                    len: 0,
+                },
+                true,
+                null(),
+                allocate_err,
+            )
+        };
+        assert_extern_result_error_contains(result, FFIKernelError::SchemaError, message);
+        assert!(!state.elements.contains(physical));
+        assert!(state.elements.contains(unrelated));
+    }
+
+    /// Verifies that disabled UDT support rejects before visiting metadata or consuming the child.
+    #[cfg(not(feature = "udt-in-dev"))]
+    #[test]
+    fn udt_schema_visit_disabled_preserves_child_and_skips_metadata() {
+        let mut state = KernelSchemaVisitorState::default();
+        let physical = wrap_field(&mut state, StructField::nullable("sqlType", DataType::LONG));
+        let mut metadata = TestMetadata::default();
+        let result = unsafe {
+            visit_field_user_defined(
+                &mut state,
+                KernelStringSlice::new_unsafe("value"),
+                physical,
+                FfiNullableStringMap {
+                    ptr: null(),
+                    len: 0,
+                },
+                true,
+                &test_engine_metadata(&mut metadata),
+                allocate_err,
+            )
+        };
+        assert_extern_result_error_contains(
+            result,
+            FFIKernelError::UnsupportedError,
+            "requires udt-in-dev",
+        );
+        assert!(state.elements.contains(physical));
+        assert!(!metadata.visited);
+    }
+
+    /// Metadata fixture that records callback invocation and the values supplied to Kernel.
     #[derive(Default)]
     struct TestMetadata {
         visited: bool,

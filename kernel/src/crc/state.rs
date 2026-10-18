@@ -16,7 +16,7 @@ use delta_kernel_derive::internal_api;
 
 use super::file_stats::FileStats;
 use crate::actions::{DomainMetadata, SetTransaction};
-use crate::{KernelError, Result};
+use crate::{KernelError, KernelResult};
 
 /// The state of file statistics for a CRC.
 ///
@@ -101,13 +101,17 @@ impl Default for DomainMetadataState {
 impl DomainMetadataState {
     /// Builds complete state, rejecting tombstones and duplicate domains.
     #[internal_api]
-    pub(crate) fn try_complete(values: impl IntoIterator<Item = DomainMetadata>) -> Result<Self> {
+    pub(crate) fn try_complete(
+        values: impl IntoIterator<Item = DomainMetadata>,
+    ) -> KernelResult<Self> {
         Ok(Self::Complete(domain_metadata_map(values, true)?))
     }
 
     /// Builds partial state, rejecting duplicate domains.
     #[internal_api]
-    pub(crate) fn try_partial(values: impl IntoIterator<Item = DomainMetadata>) -> Result<Self> {
+    pub(crate) fn try_partial(
+        values: impl IntoIterator<Item = DomainMetadata>,
+    ) -> KernelResult<Self> {
         Ok(Self::Partial(domain_metadata_map(values, false)?))
     }
 }
@@ -115,7 +119,7 @@ impl DomainMetadataState {
 fn domain_metadata_map(
     values: impl IntoIterator<Item = DomainMetadata>,
     reject_tombstones: bool,
-) -> Result<HashMap<String, DomainMetadata>> {
+) -> KernelResult<HashMap<String, DomainMetadata>> {
     let values = values.into_iter();
     let mut result = HashMap::with_capacity(values.size_hint().0);
     for value in values {
@@ -189,20 +193,24 @@ impl Default for SetTransactionState {
 impl SetTransactionState {
     /// Builds complete state, rejecting duplicate application IDs.
     #[internal_api]
-    pub(crate) fn try_complete(values: impl IntoIterator<Item = SetTransaction>) -> Result<Self> {
+    pub(crate) fn try_complete(
+        values: impl IntoIterator<Item = SetTransaction>,
+    ) -> KernelResult<Self> {
         Ok(Self::Complete(transaction_map(values)?))
     }
 
     /// Builds partial state, rejecting duplicate application IDs.
     #[internal_api]
-    pub(crate) fn try_partial(values: impl IntoIterator<Item = SetTransaction>) -> Result<Self> {
+    pub(crate) fn try_partial(
+        values: impl IntoIterator<Item = SetTransaction>,
+    ) -> KernelResult<Self> {
         Ok(Self::Partial(transaction_map(values)?))
     }
 }
 
 fn transaction_map(
     values: impl IntoIterator<Item = SetTransaction>,
-) -> Result<HashMap<String, SetTransaction>> {
+) -> KernelResult<HashMap<String, SetTransaction>> {
     let values = values.into_iter();
     let mut result = HashMap::with_capacity(values.size_hint().0);
     for value in values {

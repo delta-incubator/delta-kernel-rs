@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "acceptance"
-version = "0.29.0"
+version = "0.30.0"
 dependencies = [
  "datatest-stable",
  "delta_kernel",
@@ -1216,7 +1216,7 @@ dependencies = [
 
 [[package]]
 name = "common"
-version = "0.29.0"
+version = "0.30.0"
 dependencies = [
  "clap",
  "delta_kernel",
@@ -1502,7 +1502,7 @@ checksum = "092966b41edc516079bdf31ec78a2e0588d1d0c08f78b91d8307215928642b2b"
 
 [[package]]
 name = "delta-kernel-unity-catalog"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "delta_kernel",
  "delta_kernel_default_engine",
@@ -1521,7 +1521,7 @@ dependencies = [
 
 [[package]]
 name = "delta_kernel"
-version = "0.29.0"
+version = "0.30.0"
 dependencies = [
  "arrow 59.3.0",
  "arrow 60.0.0",
@@ -1572,7 +1572,7 @@ dependencies = [
 
 [[package]]
 name = "delta_kernel_benchmarks"
-version = "0.29.0"
+version = "0.30.0"
 dependencies = [
  "criterion",
  "delta-kernel-unity-catalog",
@@ -1589,6 +1589,7 @@ dependencies = [
  "tempfile",
  "test_utils",
  "tokio",
+ "tracing-subscriber",
  "unity-catalog-delta-client-api",
  "unity-catalog-delta-rest-client",
  "ureq",
@@ -1597,7 +1598,7 @@ dependencies = [
 
 [[package]]
 name = "delta_kernel_default_engine"
-version = "0.29.0"
+version = "0.30.0"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -1611,6 +1612,7 @@ dependencies = [
  "itertools 0.14.0",
  "reqwest 0.13.2",
  "rstest",
+ "rustls-native-certs",
  "serde",
  "serde_json",
  "tempfile",
@@ -1625,14 +1627,14 @@ dependencies = [
 
 [[package]]
 name = "delta_kernel_default_engine_test_utils"
-version = "0.29.0"
+version = "0.30.0"
 dependencies = [
  "delta_kernel",
 ]
 
 [[package]]
 name = "delta_kernel_derive"
-version = "0.29.0"
+version = "0.30.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1642,7 +1644,7 @@ dependencies = [
 
 [[package]]
 name = "delta_kernel_ffi"
-version = "0.29.0"
+version = "0.30.0"
 dependencies = [
  "bytes",
  "cbindgen",
@@ -1673,7 +1675,7 @@ dependencies = [
 
 [[package]]
 name = "delta_kernel_ffi_macros"
-version = "0.29.0"
+version = "0.30.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1682,7 +1684,7 @@ dependencies = [
 
 [[package]]
 name = "delta_kernel_workloads"
-version = "0.29.0"
+version = "0.30.0"
 dependencies = [
  "bigdecimal",
  "delta_kernel",
@@ -1891,7 +1893,7 @@ checksum = "37909eebbb50d72f9059c3b6d82c0463f2ff062c9e95845c43a6c9c0355411be"
 
 [[package]]
 name = "feature_tests"
-version = "0.29.0"
+version = "0.30.0"
 dependencies = [
  "delta_kernel",
  "delta_kernel_default_engine",
@@ -3012,7 +3014,7 @@ dependencies = [
 
 [[package]]
 name = "mem-test"
-version = "0.29.0"
+version = "0.30.0"
 dependencies = [
  "delta_kernel",
  "delta_kernel_default_engine",
@@ -4837,7 +4839,7 @@ dependencies = [
 
 [[package]]
 name = "test_utils"
-version = "0.29.0"
+version = "0.30.0"
 dependencies = [
  "delta_kernel",
  "delta_kernel_default_engine",

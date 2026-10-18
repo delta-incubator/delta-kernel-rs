@@ -55,7 +55,7 @@ use crate::table_properties::{
     MATERIALIZED_ROW_COMMIT_VERSION_COLUMN_NAME, MATERIALIZED_ROW_ID_COLUMN_NAME,
 };
 use crate::utils::require;
-use crate::{Engine, KernelError, Result, Version};
+use crate::{Engine, KernelError, KernelResult, Version};
 
 mod log_replay;
 mod net_changes;
@@ -125,7 +125,8 @@ impl CdfMode {
     /// Whether data written with `candidate` can be read using the change feed's `read_schema`.
     ///
     /// [`CdfMode::ChangeDataFeed`] requires exact equality. Row-tracking CDF accepts additive
-    /// nullable fields and wider nullability, but not datatype changes.
+    /// nullable fields and wider nullability, but not datatype changes. Both modes require exact
+    /// UDT equality, including annotations.
     pub(crate) fn schemas_compatible(
         self,
         candidate: &StructType,
@@ -256,7 +257,7 @@ impl TableChanges {
         engine: &dyn Engine,
         start_version: Version,
         end_version: Option<Version>,
-    ) -> Result<Self> {
+    ) -> KernelResult<Self> {
         Self::try_new_internal(
             table_root,
             engine,
@@ -297,7 +298,7 @@ impl TableChanges {
         engine: &dyn Engine,
         start_version: Version,
         end_version: Option<Version>,
-    ) -> Result<Self> {
+    ) -> KernelResult<Self> {
         Self::try_new_internal(
             table_root,
             engine,
@@ -313,7 +314,7 @@ impl TableChanges {
         start_version: Version,
         end_version: Option<Version>,
         mode: CdfMode,
-    ) -> Result<Self> {
+    ) -> KernelResult<Self> {
         let log_root = table_root.join("_delta_log/")?;
         let log_segment = LogSegment::for_table_changes(
             engine.storage_handler().as_ref(),
@@ -346,7 +347,7 @@ impl TableChanges {
         // for the cdc-file path, RowTracking for the row-tracking path.
         //
         // Note: We must still check each metadata and protocol action in the CDF range.
-        let check_table_config = |snapshot: &Snapshot| -> Result<()> {
+        let check_table_config = |snapshot: &Snapshot| -> KernelResult<()> {
             require!(
                 snapshot
                     .table_configuration()
@@ -431,7 +432,7 @@ impl TableChanges {
     /// [`TableChanges::try_new_row_tracking_cdf_listing`].
     #[cfg_attr(not(feature = "internal-api"), allow(dead_code))]
     #[internal_api]
-    pub(crate) fn materialized_row_id_column_name(&self) -> Result<&str> {
+    pub(crate) fn materialized_row_id_column_name(&self) -> KernelResult<&str> {
         self.row_tracking_table_properties()?
             .materialized_row_id_column_name
             .as_deref()
@@ -450,7 +451,7 @@ impl TableChanges {
     /// [`TableChanges::try_new_row_tracking_cdf_listing`].
     #[cfg_attr(not(feature = "internal-api"), allow(dead_code))]
     #[internal_api]
-    pub(crate) fn materialized_row_commit_version_column_name(&self) -> Result<&str> {
+    pub(crate) fn materialized_row_commit_version_column_name(&self) -> KernelResult<&str> {
         self.row_tracking_table_properties()?
             .materialized_row_commit_version_column_name
             .as_deref()
@@ -462,7 +463,9 @@ impl TableChanges {
             })
     }
 
-    fn row_tracking_table_properties(&self) -> Result<&crate::table_properties::TableProperties> {
+    fn row_tracking_table_properties(
+        &self,
+    ) -> KernelResult<&crate::table_properties::TableProperties> {
         require!(
             self.mode == CdfMode::RowTracking,
             KernelError::unsupported(
@@ -515,7 +518,7 @@ impl TableChanges {
         self: Arc<Self>,
         engine: Arc<dyn Engine>,
         mode: TableChangesListingMode,
-    ) -> Result<impl Iterator<Item = Result<TableChangesFileAction>>> {
+    ) -> KernelResult<impl Iterator<Item = KernelResult<TableChangesFileAction>>> {
         if self.mode != CdfMode::RowTracking {
             return Err(KernelError::unsupported(
                 "scan_file_listing is only supported for row-tracking change feeds; construct \
@@ -536,7 +539,7 @@ impl TableChanges {
         // Any listing error surfaces here rather than mid-iteration.
         let actions = scan_metadata_to_scan_file(scan_metadata)
             .map(|scan_file| TableChangesFileAction::try_from_scan_file(scan_file?))
-            .collect::<Result<Vec<_>>>()?;
+            .collect::<KernelResult<Vec<_>>>()?;
         let actions = match mode {
             TableChangesListingMode::AllChanges => actions,
             TableChangesListingMode::NetChanges => net_changes::collapse_net_changes(actions)?,

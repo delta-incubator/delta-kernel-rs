@@ -37,7 +37,7 @@ use std::sync::{Arc, Mutex};
 use delta_kernel::incremental_scan::{IncrementalScanStream, IncrementalScanSummary};
 use delta_kernel::log_replay::FileActionKey;
 use delta_kernel::snapshot::SnapshotRef;
-use delta_kernel::{KernelError, PredicateRef, Result, Version};
+use delta_kernel::{KernelError, KernelResult, PredicateRef, Version};
 use delta_kernel_ffi_macros::handle_descriptor;
 
 #[cfg(feature = "default-engine-base")]
@@ -142,7 +142,7 @@ pub unsafe extern "C" fn incremental_scan_builder_with_predicate(
 fn incremental_scan_builder_with_predicate_impl(
     mut builder: FfiIncrementalScanBuilder,
     predicate: &mut EnginePredicate,
-) -> Result<Handle<ExclusiveIncrementalScanBuilder>> {
+) -> KernelResult<Handle<ExclusiveIncrementalScanBuilder>> {
     builder.predicate = Some(Arc::new(decode_engine_predicate(predicate)?));
     Ok(Box::new(builder).into())
 }
@@ -174,7 +174,7 @@ pub unsafe extern "C" fn incremental_scan_builder_build(
 
 fn incremental_scan_builder_build_impl(
     builder: FfiIncrementalScanBuilder,
-) -> Result<OptionalValue<Handle<SharedIncrementalScanStream>>> {
+) -> KernelResult<OptionalValue<Handle<SharedIncrementalScanStream>>> {
     let engine = builder.engine.engine();
     let maybe_stream = builder
         .target_snapshot
@@ -233,7 +233,7 @@ pub unsafe extern "C" fn incremental_scan_stream_next_arrow(
 #[cfg(feature = "default-engine-base")]
 fn incremental_scan_stream_next_arrow_impl(
     stream: &FfiIncrementalScanStream,
-) -> Result<*mut ScanMetadataArrowResult> {
+) -> KernelResult<*mut ScanMetadataArrowResult> {
     let mut guard = lock_stream(stream)?;
     let Some(inner) = guard.as_mut() else {
         // The stream was already consumed by `into_summary` or dropped by a prior error.
@@ -251,7 +251,9 @@ fn incremental_scan_stream_next_arrow_impl(
 }
 
 #[cfg(feature = "default-engine-base")]
-fn next_arrow_batch(stream: &mut IncrementalScanStream) -> Result<*mut ScanMetadataArrowResult> {
+fn next_arrow_batch(
+    stream: &mut IncrementalScanStream,
+) -> KernelResult<*mut ScanMetadataArrowResult> {
     let Some(filtered) = stream.next().transpose()? else {
         return Ok(std::ptr::null_mut());
     };
@@ -290,7 +292,7 @@ pub unsafe extern "C" fn incremental_scan_stream_into_summary(
 
 fn incremental_scan_stream_into_summary_impl(
     stream: &FfiIncrementalScanStream,
-) -> Result<Handle<SharedIncrementalScanSummary>> {
+) -> KernelResult<Handle<SharedIncrementalScanSummary>> {
     let inner = lock_stream(stream)?
         .take()
         .ok_or_else(|| KernelError::generic("incremental scan stream was already consumed"))?;
@@ -300,7 +302,7 @@ fn incremental_scan_stream_into_summary_impl(
 
 fn lock_stream(
     stream: &FfiIncrementalScanStream,
-) -> Result<std::sync::MutexGuard<'_, Option<IncrementalScanStream>>> {
+) -> KernelResult<std::sync::MutexGuard<'_, Option<IncrementalScanStream>>> {
     stream
         .stream
         .lock()
@@ -426,6 +428,7 @@ mod tests {
     use std::sync::Arc;
 
     use delta_kernel::object_store::memory::InMemory;
+    use delta_kernel::KernelResult;
     use delta_kernel_default_engine::DefaultEngineBuilder;
     use test_utils::{actions_to_string, add_commit, TestAction};
 
@@ -557,8 +560,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_and_summary_reports_live_adds_and_removes(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    async fn build_and_summary_reports_live_adds_and_removes() -> KernelResult<()> {
         // Range (0, 3]: A added at v1, removed at v3; B added at v2 stays live; C added at v3.
         let (engine, snapshot) = setup(vec![
             vec![TestAction::Add("A".to_string())],
@@ -604,7 +606,7 @@ mod tests {
 
     #[cfg(feature = "default-engine-base")]
     #[tokio::test]
-    async fn next_arrow_drains_then_null_then_summary() -> Result<(), Box<dyn std::error::Error>> {
+    async fn next_arrow_drains_then_null_then_summary() -> KernelResult<()> {
         let (engine, snapshot) = setup(vec![
             vec![TestAction::Add("A".to_string())],
             vec![TestAction::Add("B".to_string())],
@@ -641,7 +643,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_errors_when_base_not_below_target() -> Result<(), Box<dyn std::error::Error>> {
+    async fn build_errors_when_base_not_below_target() -> KernelResult<()> {
         // Target snapshot is v2; base_version 2 makes the range empty.
         let (engine, snapshot) = setup(vec![
             vec![TestAction::Add("A".to_string())],
@@ -661,7 +663,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn free_builder_without_building() -> Result<(), Box<dyn std::error::Error>> {
+    async fn free_builder_without_building() -> KernelResult<()> {
         let (engine, snapshot) = setup(vec![vec![TestAction::Add("A".to_string())]]).await;
 
         let builder = unsafe {
@@ -678,7 +680,7 @@ mod tests {
     // ids is a distinct file. Assert the FFI visitor passes the full key through, not just the
     // path: v1 adds (X, dv=uabc@1), v2 adds (X, dv=uxyz@2) -> two distinct live Adds.
     #[tokio::test]
-    async fn visit_reports_full_dv_unique_id() -> Result<(), Box<dyn std::error::Error>> {
+    async fn visit_reports_full_dv_unique_id() -> KernelResult<()> {
         let (engine, snapshot) = setup_raw(vec![
             add_with_dv("X.parquet", "u", "abc", 1),
             add_with_dv("X.parquet", "u", "xyz", 2),
@@ -711,7 +713,7 @@ mod tests {
     // contract, not this path; this test holds a real second reference.)
     #[cfg(feature = "default-engine-base")]
     #[tokio::test]
-    async fn terminal_calls_after_into_summary_error() -> Result<(), Box<dyn std::error::Error>> {
+    async fn terminal_calls_after_into_summary_error() -> KernelResult<()> {
         let (engine, snapshot) = setup(vec![vec![TestAction::Add("A".to_string())]]).await;
 
         let stream = build_stream(&snapshot, &engine, 0);
@@ -736,7 +738,7 @@ mod tests {
     // `next_arrow` and a following `into_summary` both fail rather than exposing a partial summary.
     #[cfg(feature = "default-engine-base")]
     #[tokio::test]
-    async fn next_arrow_error_kills_stream() -> Result<(), Box<dyn std::error::Error>> {
+    async fn next_arrow_error_kills_stream() -> KernelResult<()> {
         // A DV with `storageType` set but `pathOrInlineDv` null fails the required-field read
         // when the stream extracts the file key.
         let bad_dv = "{\"add\":{\"path\":\"X.parquet\",\"partitionValues\":{},\"size\":100,\"modificationTime\":1700000000000,\"dataChange\":true,\"stats\":null,\"deletionVector\":{\"storageType\":\"u\",\"pathOrInlineDv\":null,\"offset\":1,\"sizeInBytes\":10,\"cardinality\":1}}}";
@@ -765,7 +767,7 @@ mod tests {
     // Abandoning a never-drained stream must free the retained engine Arc and undrained kernel
     // stream without leak or panic (the symmetric counterpart to free_builder_without_building).
     #[tokio::test]
-    async fn free_stream_without_draining() -> Result<(), Box<dyn std::error::Error>> {
+    async fn free_stream_without_draining() -> KernelResult<()> {
         let (engine, snapshot) = setup(vec![vec![TestAction::Add("A".to_string())]]).await;
 
         let stream = build_stream(&snapshot, &engine, 0);
@@ -780,7 +782,7 @@ mod tests {
     // batches, then assert the summary still reports both commits' Adds.
     #[cfg(feature = "default-engine-base")]
     #[tokio::test]
-    async fn into_summary_drains_unread_batches() -> Result<(), Box<dyn std::error::Error>> {
+    async fn into_summary_drains_unread_batches() -> KernelResult<()> {
         let (engine, snapshot) = setup(vec![
             vec![TestAction::Add("A".to_string())],
             vec![TestAction::Add("B".to_string())],
@@ -852,7 +854,7 @@ mod tests {
     // A predicate applied through the builder prunes streamed live Adds by their `add.stats`:
     // `id > 25` drops the [0, 9] file and keeps the [20, 30] file. Removes are unaffected.
     #[tokio::test]
-    async fn with_predicate_prunes_live_adds() -> Result<(), Box<dyn std::error::Error>> {
+    async fn with_predicate_prunes_live_adds() -> KernelResult<()> {
         let (engine, snapshot) = setup_with_id_metadata(vec![[
             add_with_id_stats("low.parquet", 0, 9),
             add_with_id_stats("high.parquet", 20, 30),
@@ -898,8 +900,7 @@ mod tests {
     // A predicate referencing a column absent from the table schema fails at build (fail-fast),
     // surfacing the unresolved column rather than silently keeping every Add.
     #[tokio::test]
-    async fn with_predicate_unknown_column_errors_at_build(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    async fn with_predicate_unknown_column_errors_at_build() -> KernelResult<()> {
         let (engine, snapshot) =
             setup_with_id_metadata(vec![add_with_id_stats("a.parquet", 0, 9)]).await;
 
@@ -951,8 +952,7 @@ mod tests {
     // `next_arrow` (the summary path is covered separately by `with_predicate_prunes_live_adds`).
     #[cfg(feature = "default-engine-base")]
     #[tokio::test]
-    async fn next_arrow_selection_vector_reflects_predicate_pruning(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    async fn next_arrow_selection_vector_reflects_predicate_pruning() -> KernelResult<()> {
         use delta_kernel::arrow::array::{Array, RecordBatch, StringArray, StructArray};
         use delta_kernel::arrow::ffi::from_ffi;
 
@@ -1028,7 +1028,7 @@ mod tests {
     // then requires commit 1 and the range is uncovered. Needs a multi-thread runtime because
     // `checkpoint_snapshot` issues nested `block_on` calls.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn build_returns_none_when_range_not_covered() -> Result<(), Box<dyn std::error::Error>> {
+    async fn build_returns_none_when_range_not_covered() -> KernelResult<()> {
         use delta_kernel_default_engine::executor::tokio::TokioMultiThreadExecutor;
 
         use crate::{checkpoint_snapshot, version, FfiCheckpointWriteResult};

@@ -13,7 +13,7 @@ use crate::actions::visitors::DomainMetadataVisitor;
 use crate::actions::{DomainMetadata, LOG_DOMAIN_METADATA_SCHEMA};
 use crate::crc::merge_domain_metadata;
 use crate::log_replay::ActionsBatch;
-use crate::{Engine, Result, RowVisitor as _, Version};
+use crate::{Engine, KernelResult, RowVisitor as _, Version};
 
 pub(crate) type DomainMetadataMap = HashMap<String, DomainMetadata>;
 
@@ -29,7 +29,7 @@ impl LogSegment {
         &self,
         domains: Option<&HashSet<&str>>,
         engine: &dyn Engine,
-    ) -> Result<DomainMetadataMap> {
+    ) -> KernelResult<DomainMetadataMap> {
         Ok(self
             .visit_domain_metadatas(domains, engine)?
             .into_domain_metadatas())
@@ -51,7 +51,7 @@ impl LogSegment {
         base_active: &HashMap<String, DomainMetadata>,
         domains: Option<&HashSet<&str>>,
         engine: &dyn Engine,
-    ) -> Result<DomainMetadataMap> {
+    ) -> KernelResult<DomainMetadataMap> {
         let tail = self
             .segment_after_version(base_version)
             .scan_tail_including_tombstones(domains, engine)?;
@@ -83,7 +83,7 @@ impl LogSegment {
         &self,
         domains: Option<&HashSet<&str>>,
         engine: &dyn Engine,
-    ) -> Result<DomainMetadataMap> {
+    ) -> KernelResult<DomainMetadataMap> {
         Ok(self
             .visit_domain_metadatas(domains, engine)?
             .into_domain_metadatas_including_tombstones())
@@ -98,7 +98,7 @@ impl LogSegment {
         &self,
         domains: Option<&HashSet<&str>>,
         engine: &dyn Engine,
-    ) -> Result<DomainMetadataVisitor> {
+    ) -> KernelResult<DomainMetadataVisitor> {
         let domain_filter = domains.map(|set| {
             set.iter()
                 .map(|s| s.to_string())
@@ -123,7 +123,7 @@ impl LogSegment {
     fn read_domain_metadata_batches(
         &self,
         engine: &dyn Engine,
-    ) -> Result<impl Iterator<Item = Result<ActionsBatch>> + Send> {
+    ) -> KernelResult<impl Iterator<Item = KernelResult<ActionsBatch>> + Send> {
         self.read_actions(engine, LOG_DOMAIN_METADATA_SCHEMA.clone())
     }
 }
@@ -141,6 +141,7 @@ mod tests {
     use crate::object_store::memory::InMemory;
     use crate::schema::schema_ref;
     use crate::transaction::create_table::create_table as create_table_txn;
+    use crate::transaction::UpdateTableOperation;
     use crate::{RowVisitor as _, Snapshot};
 
     /// Builds a two-commit in-memory Delta table:
@@ -162,21 +163,23 @@ mod tests {
                 nullable "id": INTEGER,
             },
             "test",
+            true,
         )
         .with_table_properties([("delta.feature.domainMetadata", "supported")])
+        .with_domain_metadata("domainC", "cfgC")
         .build(&engine, Box::new(FileSystemCommitter::new()))
         .unwrap()
-        .with_domain_metadata("domainC".to_string(), "cfgC".to_string())
         .commit(&engine)
         .unwrap();
 
         // Commit 1: add domainA and domainB via an existing-table transaction.
         let snapshot = Snapshot::builder_for(url.clone()).build(&engine).unwrap();
         let _ = snapshot
-            .transaction(Box::new(FileSystemCommitter::new()), &engine)
+            .update_table(UpdateTableOperation::Write, "test-engine", true)
+            .with_domain_metadata("domainA", "cfgA")
+            .with_domain_metadata("domainB", "cfgB")
+            .build(&engine, Box::new(FileSystemCommitter::new()))
             .unwrap()
-            .with_domain_metadata("domainA".to_string(), "cfgA".to_string())
-            .with_domain_metadata("domainB".to_string(), "cfgB".to_string())
             .commit(&engine)
             .unwrap();
 
@@ -315,9 +318,10 @@ mod tests {
         let (engine, snapshot) = build_two_commit_log();
         let table_root = snapshot.table_root().clone();
         let _ = snapshot
-            .transaction(Box::new(FileSystemCommitter::new()), &engine)
+            .update_table(UpdateTableOperation::Write, "test-engine", true)
+            .with_domain_metadata_removed("domainA")
+            .build(&engine, Box::new(FileSystemCommitter::new()))
             .unwrap()
-            .with_domain_metadata_removed("domainA".to_string())
             .commit(&engine)
             .unwrap();
         let snapshot = Snapshot::builder_for(table_root).build(&engine).unwrap();

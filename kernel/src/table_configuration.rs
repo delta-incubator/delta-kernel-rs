@@ -40,7 +40,7 @@ use crate::table_features::{
 use crate::table_properties::TableProperties;
 use crate::transforms::SchemaTransform as _;
 use crate::utils::require;
-use crate::{KernelError, Result, Version};
+use crate::{KernelError, KernelResult, Version};
 
 /// Logical and physical schemas for the structured statistics emitted by a scan.
 ///
@@ -60,7 +60,7 @@ pub struct StatsOutputSchemas {
 }
 
 impl StatsOutputSchemas {
-    fn try_new(logical: SchemaRef, physical: SchemaRef) -> Result<Self> {
+    fn try_new(logical: SchemaRef, physical: SchemaRef) -> KernelResult<Self> {
         validate_stats_schema_alignment(&logical, &physical, "stats")?;
         Ok(Self { logical, physical })
     }
@@ -70,7 +70,7 @@ fn validate_stats_schema_alignment(
     logical: &StructType,
     physical: &StructType,
     path: &str,
-) -> Result<()> {
+) -> KernelResult<()> {
     if logical.num_fields() != physical.num_fields() {
         return Err(KernelError::internal_error(format!(
             "logical and physical stats schemas differ at '{path}'"
@@ -123,6 +123,9 @@ pub(crate) struct StatsSchemaBuilder<'a> {
     /// Whether VARIANT columns appear in `minValues`/`maxValues`, typed as the variant's physical
     /// struct.
     variant_min_max: bool,
+    /// Whether Geometry bounding-box statistics appear with the column's logical type.
+    #[cfg(feature = "geo-type-in-dev")]
+    geometry_min_max: bool,
 }
 
 impl<'a> StatsSchemaBuilder<'a> {
@@ -153,6 +156,14 @@ impl<'a> StatsSchemaBuilder<'a> {
         self
     }
 
+    /// Sets whether Geometry bounding-box statistics appear in `minValues`/`maxValues`,
+    /// retaining the column's CRS. Off by default.
+    #[cfg(feature = "geo-type-in-dev")]
+    pub(crate) fn with_geometry_min_max(mut self, include: bool) -> Self {
+        self.geometry_min_max = include;
+        self
+    }
+
     /// Builds the stats schema, using physical column names.
     ///
     /// Engines can provide statistics for files written to the delta table, enabling data skipping
@@ -172,7 +183,8 @@ impl<'a> StatsSchemaBuilder<'a> {
     /// - **`delta.dataSkippingStatsColumns`**: If set, only specified columns are included.
     /// - **`delta.dataSkippingNumIndexedCols`**: Otherwise, includes the first N leaf columns
     ///   (default 32).
-    /// - **Builder options**: required and requested columns, and VARIANT min/max statistics.
+    /// - **Builder options**: required and requested columns, and VARIANT/Geometry min/max
+    ///   statistics.
     ///
     /// See the Delta protocol for more details on per-file statistics:
     /// <https://github.com/delta-io/delta/blob/master/PROTOCOL.md#per-file-statistics>
@@ -180,7 +192,7 @@ impl<'a> StatsSchemaBuilder<'a> {
     /// # Errors
     ///
     /// Returns an error if the derived stats schema is invalid (see [`StructType::try_new`]).
-    pub(crate) fn build(self) -> Result<SchemaRef> {
+    pub(crate) fn build(self) -> KernelResult<SchemaRef> {
         let tc = self.table_configuration;
         let physical_data_schema = tc.physical_data_schema_without_partition_columns();
         let required_physical_stats_columns = tc.required_physical_stats_columns();
@@ -188,6 +200,8 @@ impl<'a> StatsSchemaBuilder<'a> {
             data_skipping_stats_columns: required_physical_stats_columns.as_deref(),
             data_skipping_num_indexed_cols: tc.table_properties().data_skipping_num_indexed_cols,
             variant_min_max: self.variant_min_max,
+            #[cfg(feature = "geo-type-in-dev")]
+            geometry_min_max: self.geometry_min_max,
         };
         let physical_stats_schema = Arc::new(expected_stats_schema(
             &physical_data_schema,
@@ -230,11 +244,14 @@ fn build_stats_schema_for_columns(
     data_schema: &StructType,
     selected_columns: &[ColumnName],
     variant_min_max: bool,
-) -> Result<SchemaRef> {
+    #[cfg(feature = "geo-type-in-dev")] geometry_min_max: bool,
+) -> KernelResult<SchemaRef> {
     let config = StatsConfig {
         data_skipping_stats_columns: Some(selected_columns),
         data_skipping_num_indexed_cols: None,
         variant_min_max,
+        #[cfg(feature = "geo-type-in-dev")]
+        geometry_min_max,
     };
     let required_columns = None;
     let requested_columns = None;
@@ -247,7 +264,10 @@ fn build_stats_schema_for_columns(
     Ok(strip_metadata(schema))
 }
 
-fn validate_partition_columns(metadata: &Metadata, logical_schema: &StructType) -> Result<()> {
+fn validate_partition_columns(
+    metadata: &Metadata,
+    logical_schema: &StructType,
+) -> KernelResult<()> {
     let mut seen = HashSet::new();
     for col in metadata.partition_columns() {
         if !seen.insert(col) {
@@ -320,7 +340,7 @@ impl TableConfiguration {
         protocol: Protocol,
         table_root: Url,
         version: Version,
-    ) -> Result<Self> {
+    ) -> KernelResult<Self> {
         let logical_schema = Arc::new(metadata.parse_schema()?);
         Self::try_new_inner(metadata, protocol, table_root, version, logical_schema)
     }
@@ -331,7 +351,7 @@ impl TableConfiguration {
         base: &Self,
         metadata: Metadata,
         logical_schema: SchemaRef,
-    ) -> Result<Self> {
+    ) -> KernelResult<Self> {
         Self::try_new_inner(
             metadata,
             base.protocol.clone(),
@@ -347,7 +367,7 @@ impl TableConfiguration {
         table_root: Url,
         version: Version,
         logical_schema: SchemaRef,
-    ) -> Result<Self> {
+    ) -> KernelResult<Self> {
         let table_properties = metadata.parse_table_properties();
         let column_mapping_mode = column_mapping_mode(&protocol, &table_properties);
 
@@ -435,7 +455,7 @@ impl TableConfiguration {
         new_metadata: Option<Metadata>,
         new_protocol: Option<Protocol>,
         new_version: Version,
-    ) -> Result<Self> {
+    ) -> KernelResult<Self> {
         // simplest case: no new P/M, just return the existing table configuration with new version
         if new_metadata.is_none() && new_protocol.is_none() {
             return Ok(Self {
@@ -475,7 +495,7 @@ impl TableConfiguration {
         new_version: Version,
         new_metadata: Option<Metadata>,
         new_protocol: Option<Protocol>,
-    ) -> Result<Self> {
+    ) -> KernelResult<Self> {
         Self::try_new_from(table_configuration, new_metadata, new_protocol, new_version)
     }
 
@@ -489,7 +509,8 @@ impl TableConfiguration {
         &self,
         extra_indexed_columns: &[ColumnName],
         variant_min_max: bool,
-    ) -> Result<Option<StatsOutputSchemas>> {
+        #[cfg(feature = "geo-type-in-dev")] geometry_min_max: bool,
+    ) -> KernelResult<Option<StatsOutputSchemas>> {
         let logical_data_schema = self.logical_schema_without_partition_columns();
         let logical_schema = self.logical_schema();
         let column_mapping_mode = self.column_mapping_mode();
@@ -551,12 +572,14 @@ impl TableConfiguration {
                         )
                     })
             })
-            .collect::<Result<Vec<_>>>()?;
+            .collect::<KernelResult<Vec<_>>>()?;
 
         self.build_stats_output_schemas_for_resolved_columns(
             &logical_columns,
             &physical_columns,
             variant_min_max,
+            #[cfg(feature = "geo-type-in-dev")]
+            geometry_min_max,
         )
     }
 
@@ -570,7 +593,8 @@ impl TableConfiguration {
         &self,
         logical_columns: &[ColumnName],
         variant_min_max: bool,
-    ) -> Result<Option<StatsOutputSchemas>> {
+        #[cfg(feature = "geo-type-in-dev")] geometry_min_max: bool,
+    ) -> KernelResult<Option<StatsOutputSchemas>> {
         if logical_columns.is_empty() {
             return Ok(None);
         }
@@ -587,12 +611,14 @@ impl TableConfiguration {
                     column_mapping_mode,
                 )
             })
-            .collect::<Result<Vec<_>>>()?;
+            .collect::<KernelResult<Vec<_>>>()?;
 
         self.build_stats_output_schemas_for_resolved_columns(
             logical_columns,
             &physical_columns,
             variant_min_max,
+            #[cfg(feature = "geo-type-in-dev")]
+            geometry_min_max,
         )
     }
 
@@ -601,11 +627,14 @@ impl TableConfiguration {
         logical_columns: &[ColumnName],
         physical_columns: &[ColumnName],
         variant_min_max: bool,
-    ) -> Result<Option<StatsOutputSchemas>> {
+        #[cfg(feature = "geo-type-in-dev")] geometry_min_max: bool,
+    ) -> KernelResult<Option<StatsOutputSchemas>> {
         let logical = build_stats_schema_for_columns(
             &self.logical_schema_without_partition_columns(),
             logical_columns,
             variant_min_max,
+            #[cfg(feature = "geo-type-in-dev")]
+            geometry_min_max,
         )?;
         // `expected_stats_schema` emits `nullCount` only when a data column is selected.
         if logical.field(NULL_COUNT).is_none() {
@@ -616,6 +645,8 @@ impl TableConfiguration {
             &self.physical_data_schema_without_partition_columns(),
             physical_columns,
             variant_min_max,
+            #[cfg(feature = "geo-type-in-dev")]
+            geometry_min_max,
         )?;
 
         Ok(Some(StatsOutputSchemas::try_new(logical, physical)?))
@@ -629,6 +660,8 @@ impl TableConfiguration {
             required_physical_columns: None,
             requested_physical_columns: None,
             variant_min_max: false,
+            #[cfg(feature = "geo-type-in-dev")]
+            geometry_min_max: false,
         }
     }
 
@@ -791,6 +824,11 @@ impl TableConfiguration {
         self.has_column_with_default
     }
 
+    /// Whether the table's metadata configuration declares at least one CHECK constraint.
+    pub(crate) fn has_check_constraints(&self) -> bool {
+        !self.table_properties.check_constraints.is_empty()
+    }
+
     /// The physical schema ([`SchemaRef`]) of this table at this version.
     ///
     /// When column mapping is disabled, this is identical to
@@ -871,6 +909,12 @@ impl TableConfiguration {
         &self.table_root
     }
 
+    /// Table root for normalizing paths. `Some` iff adaptiveMetadata is enabled.
+    pub(crate) fn dv_normalization_root(&self) -> Option<Url> {
+        self.is_feature_enabled(&TableFeature::AdaptiveMetadataPreview)
+            .then(|| self.table_root.clone())
+    }
+
     /// The [`Version`] which this [`TableConfiguration`] belongs to.
     #[internal_api]
     pub(crate) fn version(&self) -> Version {
@@ -896,7 +940,7 @@ impl TableConfiguration {
     }
 
     /// Validates that all feature requirements for a given feature are satisfied.
-    fn validate_feature_requirements(&self, feature: &TableFeature) -> Result<()> {
+    fn validate_feature_requirements(&self, feature: &TableFeature) -> KernelResult<()> {
         for req in feature.info().feature_requirements {
             match req {
                 FeatureRequirement::Supported(dep) => {
@@ -941,7 +985,11 @@ impl TableConfiguration {
 
     /// Checks that kernel supports a feature for the given operation.
     /// Returns an error if the feature is unknown, not supported, or fails validation.
-    fn check_feature_support(&self, feature: &TableFeature, operation: Operation) -> Result<()> {
+    fn check_feature_support(
+        &self,
+        feature: &TableFeature,
+        operation: Operation,
+    ) -> KernelResult<()> {
         let info = feature.info();
         match &info.kernel_support {
             KernelSupport::Supported => {}
@@ -994,7 +1042,7 @@ impl TableConfiguration {
     /// - For `SnapshotLoad`, `Scan` and `Cdf`: checks reader version and reader features
     /// - For `Write` operations: checks writer version and writer features
     #[internal_api]
-    pub(crate) fn ensure_operation_supported(&self, operation: Operation) -> Result<()> {
+    pub(crate) fn ensure_operation_supported(&self, operation: Operation) -> KernelResult<()> {
         match operation {
             Operation::SnapshotLoad | Operation::Scan | Operation::Cdf => {
                 self.ensure_read_supported(operation)
@@ -1004,13 +1052,13 @@ impl TableConfiguration {
     }
 
     /// Ensures Kernel supports both scanning and writing this table.
-    pub(crate) fn ensure_read_write_supported(&self) -> Result<()> {
+    pub(crate) fn ensure_read_write_supported(&self) -> KernelResult<()> {
         self.ensure_operation_supported(Operation::Scan)?;
         self.ensure_operation_supported(Operation::Write)
     }
 
     /// Internal helper for read operations (Scan, Cdf, SnapshotLoad)
-    fn ensure_read_supported(&self, operation: Operation) -> Result<()> {
+    fn ensure_read_supported(&self, operation: Operation) -> KernelResult<()> {
         check_reader_version_range(&self.protocol)?;
 
         // Check all enabled reader features have kernel support
@@ -1022,7 +1070,7 @@ impl TableConfiguration {
     }
 
     /// Internal helper for write operations
-    fn ensure_write_supported(&self) -> Result<()> {
+    fn ensure_write_supported(&self) -> KernelResult<()> {
         // Version check: kernel supports writer versions
         // MIN_VALID_RW_VERSION..=MAX_VALID_WRITER_VERSION
         require!(
@@ -1045,6 +1093,17 @@ impl TableConfiguration {
             self.check_feature_support(&feature, Operation::Write)?;
         }
 
+        // The protocol allows CHECK constraints only on tables that support the `checkConstraints`
+        // writer feature.
+        require!(
+            self.is_feature_supported(&TableFeature::CheckConstraints)
+                || !self.has_check_constraints(),
+            KernelError::invalid_protocol(
+                "Table contains CHECK constraints but does not support the 'checkConstraints' \
+                 writer feature",
+            )
+        );
+
         // Schema-dependent validation for Invariants (can't be in FeatureInfo)
         // TODO: Better story for schema validation for Invariants and other features
         if self.is_feature_supported(&TableFeature::Invariants)
@@ -1063,7 +1122,9 @@ impl TableConfiguration {
     /// Returns an error if only one of the enablement properties is present, as this indicates
     /// an inconsistent state.
     #[allow(unused)]
-    pub(crate) fn in_commit_timestamp_enablement(&self) -> Result<InCommitTimestampEnablement> {
+    pub(crate) fn in_commit_timestamp_enablement(
+        &self,
+    ) -> KernelResult<InCommitTimestampEnablement> {
         if !self.is_feature_enabled(&TableFeature::InCommitTimestamp) {
             return Ok(InCommitTimestampEnablement::NotEnabled);
         }
@@ -1204,7 +1265,7 @@ impl TableConfiguration {
             || self.is_feature_enabled(&TableFeature::IcebergCompatV3)
     }
 
-    pub(crate) fn validate_feature_support_for_remove(&self) -> Result<()> {
+    pub(crate) fn validate_feature_support_for_remove(&self) -> KernelResult<()> {
         if self.is_feature_enabled(&TableFeature::IcebergCompatV3) {
             return Err(KernelError::unsupported(
                 "Remove actions are not yet supported on tables with icebergCompatV3 enabled",
@@ -1283,6 +1344,119 @@ mod test {
             .try_build();
 
         assert_result_error_with_message(result, "Partition column 'missing' not found in schema");
+    }
+
+    #[derive(Debug, PartialEq)]
+    enum WriteSupport {
+        Supported,
+        InvalidProtocol,
+        Unsupported,
+    }
+
+    #[rstest]
+    // Tables declaring CHECK constraints.
+    #[case::without_feature(
+        &[("delta.constraints.positive", "amount > 0")],
+        MockProtocolBuilder::new().build(),
+        WriteSupport::InvalidProtocol
+    )]
+    #[case::with_feature(
+        &[("delta.constraints.positive", "amount > 0")],
+        MockProtocolBuilder::new()
+            .with_writer_features([TableFeature::CheckConstraints])
+            .build(),
+        WriteSupport::Unsupported
+    )]
+    #[case::legacy_writer_below_min_version(
+        &[("delta.constraints.positive", "amount > 0")],
+        MockProtocolBuilder::new().with_versions(1, 2).build(),
+        WriteSupport::InvalidProtocol
+    )]
+    #[case::legacy_writer_at_min_version(
+        &[("delta.constraints.positive", "amount > 0")],
+        MockProtocolBuilder::new().with_versions(1, 3).build(),
+        WriteSupport::Unsupported
+    )]
+    // Unusual names, accepted only because other Delta writers can store and enforce them.
+    #[case::bare_prefix(
+        &[("delta.constraints.", "amount > 0")],
+        MockProtocolBuilder::new().with_versions(1, 2).build(),
+        WriteSupport::InvalidProtocol
+    )]
+    #[case::names_differing_only_in_case(
+        &[
+            ("delta.constraints.positive", "amount > 0"),
+            ("delta.constraints.POSITIVE", "amount > 1"),
+        ],
+        MockProtocolBuilder::new().with_versions(1, 2).build(),
+        WriteSupport::InvalidProtocol
+    )]
+    // No CHECK constraint keys.
+    #[case::no_properties(
+        &[],
+        MockProtocolBuilder::new().with_versions(1, 2).build(),
+        WriteSupport::Supported
+    )]
+    #[case::unrelated_delta_property(
+        &[("delta.appendOnly", "false")],
+        MockProtocolBuilder::new().with_versions(1, 2).build(),
+        WriteSupport::Supported
+    )]
+    #[case::prefix_without_trailing_dot(
+        &[("delta.constraintsX", "amount > 0")],
+        MockProtocolBuilder::new().with_versions(1, 2).build(),
+        WriteSupport::Supported
+    )]
+    #[case::non_lowercase_prefix(
+        &[("DELTA.CONSTRAINTS.positive", "amount > 0")],
+        MockProtocolBuilder::new().with_versions(1, 2).build(),
+        WriteSupport::Supported
+    )]
+    fn write_and_read_support_for_check_constraints(
+        #[case] properties: &[(&str, &str)],
+        #[case] protocol: Protocol,
+        #[case] expected_write_support: WriteSupport,
+    ) {
+        let table_config = MockTableConfigurationBuilder::new()
+            .with_properties(properties)
+            .with_protocol(protocol)
+            .build();
+
+        let write_support = match table_config.ensure_operation_supported(Operation::Write) {
+            Ok(()) => WriteSupport::Supported,
+            Err(KernelError::InvalidProtocol(_)) => WriteSupport::InvalidProtocol,
+            Err(KernelError::Unsupported(_)) => WriteSupport::Unsupported,
+            Err(err) => panic!("unexpected write error: {err:?}"),
+        };
+        assert_eq!(write_support, expected_write_support);
+
+        let read_supported = table_config
+            .ensure_operation_supported(Operation::Scan)
+            .is_ok();
+        assert!(read_supported);
+    }
+
+    #[rstest]
+    // Names a user would expect.
+    #[case::lowercase_prefix(&[("delta.constraints.positive", "amount > 0")], true)]
+    // Unusual names, accepted only because other Delta writers can store and enforce them.
+    #[case::bare_prefix(&[("delta.constraints.", "amount > 0")], true)]
+    #[case::whitespace_only_name(&[("delta.constraints.   ", "amount > 0")], true)]
+    // No CHECK constraint keys.
+    #[case::no_properties(&[], false)]
+    #[case::unrelated_delta_property(&[("delta.appendOnly", "false")], false)]
+    #[case::prefix_without_trailing_dot(&[("delta.constraintsX", "amount > 0")], false)]
+    #[case::non_lowercase_prefix(&[("DELTA.CONSTRAINTS.positive", "amount > 0")], false)]
+    fn has_check_constraints_detects_constraint_keys(
+        #[case] properties: &[(&str, &str)],
+        #[case] expected: bool,
+    ) {
+        let table_config = MockTableConfigurationBuilder::new()
+            .with_properties(properties)
+            .build();
+
+        let has_check_constraints = table_config.has_check_constraints();
+        assert_eq!(has_check_constraints, expected);
     }
 
     #[test]
@@ -2010,6 +2184,18 @@ mod test {
             .build();
         assert!(!config.is_feature_supported(&feature));
         assert!(!config.is_feature_enabled(&feature));
+    }
+
+    #[rstest]
+    fn test_dv_normalization_root_is_some_iff_adaptive_metadata_enabled(
+        #[values(false, true)] adaptive_metadata: bool,
+    ) {
+        let features = adaptive_metadata.then_some(TableFeature::AdaptiveMetadataPreview);
+        let config = MockTableConfigurationBuilder::new()
+            .with_protocol(MockProtocolBuilder::new().with_features(features).build())
+            .build();
+        let expected = adaptive_metadata.then(|| config.table_root().clone());
+        assert_eq!(config.dv_normalization_root(), expected);
     }
 
     #[test]
@@ -3153,6 +3339,37 @@ mod test {
         let mut deps = all_adaptive_metadata_deps();
         deps.push(extra);
         deps
+    }
+
+    #[rstest]
+    #[case::all_satisfied(
+        vec![TableFeature::AdaptiveMetadataPreview, TableFeature::IcebergNativeV4Preview],
+        None
+    )]
+    #[case::missing_adaptive_metadata(
+        vec![TableFeature::IcebergNativeV4Preview],
+        Some("requires 'adaptiveMetadata-preview' to be enabled")
+    )]
+    #[case::invariants_enabled(
+        vec![
+            TableFeature::AdaptiveMetadataPreview,
+            TableFeature::IcebergNativeV4Preview,
+            TableFeature::Invariants,
+        ],
+        Some("requires 'invariants' to not be enabled")
+    )]
+    fn test_iceberg_native_v4_feature_requirements(
+        #[case] features: Vec<TableFeature>,
+        #[case] expected_error_substring: Option<&str>,
+    ) {
+        let config = MockTableConfigurationBuilder::new()
+            .with_protocol(MockProtocolBuilder::new().with_features(features).build())
+            .build();
+        let result = config.validate_feature_requirements(&TableFeature::IcebergNativeV4Preview);
+        match expected_error_substring {
+            Some(msg) => assert_result_error_with_message(result, msg),
+            None => assert!(result.is_ok(), "expected Ok, got {result:?}"),
+        }
     }
 
     // IcebergCompatV1/V2/V3 are pairwise mutually exclusive.
