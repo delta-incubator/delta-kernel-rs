@@ -225,3 +225,6 @@ impl ParquetHandler for ReadHandler<dyn ParquetHandler> {
         ) -> KernelResult<FileSize>;
     }
 }
+
+#[cfg(test)]
+mod tests;
