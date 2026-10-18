@@ -322,24 +322,23 @@ fn binary_search_ict_timestamps(
         Err(SearchError::OutOfRange) => {
             // OutOfRange under `GreatestLower` means timestamp < commits[0]'s
             // ICT; under `LeastUpper` it means timestamp > commits.last()'s
-            // ICT. The boundary timestamp is read via `commit_to_ict`; on
-            // engine failure we degrade to `Unknown` so the original
-            // out-of-range error is preserved.
-            let nearest = bound
-                .boundary_of(commits)
-                .and_then(|boundary| {
-                    commit_to_ict(boundary)
-                        .inspect_err(|e| {
-                            warn!(
-                                error = ?e,
-                                version = boundary.version,
-                                "failed to read boundary ICT for nearest_timestamp hint",
-                            );
-                        })
-                        .ok()
-                        .map(|ts| NearestTimestamp::from_boundary(bound, ts))
-                })
-                .unwrap_or(NearestTimestamp::Unknown);
+            // ICT. Preserve cancellation from the boundary read; other failures
+            // degrade to `Unknown` so the original out-of-range error survives.
+            let nearest = match bound.boundary_of(commits) {
+                Some(boundary) => match commit_to_ict(boundary) {
+                    Ok(timestamp) => NearestTimestamp::from_boundary(bound, timestamp),
+                    Err(error) if error.is_cancelled() => return Err(error),
+                    Err(error) => {
+                        warn!(
+                            error = ?error,
+                            version = boundary.version,
+                            "failed to read boundary ICT for nearest_timestamp hint",
+                        );
+                        NearestTimestamp::Unknown
+                    }
+                },
+                None => NearestTimestamp::Unknown,
+            };
             Err(LogHistoryError::out_of_range(timestamp, bound, nearest))
         }
     }
@@ -718,7 +717,6 @@ fn get_earliest_published_commit_version(
     log_root: &Url,
     earliest_ratified_commit_version: Option<Version>,
 ) -> KernelResult<Version> {
-    // TODO(#3188): thread a cancellation token through the history-manager entry points.
     list_delta_log_from_storage(
         engine.storage_handler().as_ref(),
         log_root,
@@ -775,7 +773,6 @@ fn get_earliest_recreatable_commit(
     let mut multi_part_checkpoint_progress = HashMap::<(Version, u32), HashSet<u32>>::new();
     let mut earliest_commit_version: Option<Version> = None;
 
-    // TODO(#3188): thread a cancellation token through the history-manager entry points.
     let listing = list_delta_log_from_storage(
         engine.storage_handler().as_ref(),
         log_root,

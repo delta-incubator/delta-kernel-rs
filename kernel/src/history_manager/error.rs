@@ -104,6 +104,17 @@ pub enum LogHistoryError {
 }
 
 impl LogHistoryError {
+    /// Returns whether this error wraps a typed cancellation.
+    pub(crate) fn is_cancelled(&self) -> bool {
+        matches!(
+            self,
+            Self::Internal {
+                source: Some(source),
+                ..
+            } if matches!(source.as_ref(), crate::KernelError::Cancelled)
+        )
+    }
+
     /// Creates an internal error with context and an underlying cause.
     pub(crate) fn internal(context: &'static str, source: crate::KernelError) -> Self {
         Self::Internal {
@@ -135,7 +146,11 @@ impl LogHistoryError {
 }
 
 impl From<LogHistoryError> for crate::KernelError {
+    /// Preserves typed cancellation and wraps other timestamp-conversion failures with context.
     fn from(e: LogHistoryError) -> Self {
+        if e.is_cancelled() {
+            return crate::KernelError::Cancelled;
+        }
         crate::KernelError::LogHistory(Box::new(e))
     }
 }
