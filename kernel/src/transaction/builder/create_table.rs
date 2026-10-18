@@ -20,7 +20,6 @@ use crate::actions::{DomainMetadata, Metadata, Protocol};
 use crate::clustering::{create_clustering_domain_metadata, validate_clustering_columns};
 use crate::committer::Committer;
 use crate::expressions::ColumnName;
-use crate::metrics::MetricId;
 use crate::schema::validation::validate_schema;
 use crate::schema::variant_utils::schema_contains_variant_type;
 use crate::schema::{
@@ -52,8 +51,8 @@ use crate::table_properties::{
 use crate::transaction::create_table::CreateTableTransaction;
 use crate::transaction::data_layout::DataLayout;
 use crate::transaction::{CommitOperation, CreateTable, ExecutionMode, Transaction};
-use crate::utils::{current_time_ms, try_parse_uri, PhantomType};
-use crate::{Engine, KernelError, KernelResult, Result, StorageHandler};
+use crate::utils::{current_time_ms, try_parse_uri};
+use crate::{Engine, KernelError, KernelResult, StorageHandler};
 
 /// Table features allowed to be enabled via `delta.feature.*=supported` during CREATE TABLE.
 ///
@@ -162,7 +161,7 @@ fn ensure_table_does_not_exist(
 ) -> KernelResult<()> {
     match storage.list_from(delta_log_url) {
         Ok(mut files) => {
-            // files.next() returns Option<Result<FileMeta>>
+            // files.next() returns Option<KernelResult<FileMeta>>
             // - Some(Ok(_)) means a file exists -> table exists
             // - Some(Err(FileNotFound)) means path doesn't exist -> OK for new table
             // - Some(Err(other)) means real error -> propagate
@@ -814,9 +813,10 @@ impl TransactionBuilder<CreateTable> {
         path: impl AsRef<str>,
         schema: SchemaRef,
         engine_info: impl Into<String>,
+        data_change: bool,
     ) -> Self {
         Self {
-            common_state: TransactionBuilderState::for_create_table(engine_info.into()),
+            common_state: TransactionBuilderState::new(engine_info.into(), data_change),
             local_state: CreateTableBuilderState {
                 path: path.as_ref().to_string(),
                 schema,
@@ -846,9 +846,9 @@ impl TransactionBuilder<CreateTable> {
     /// # use delta_kernel::transaction::create_table::create_table;
     /// # use delta_kernel::schema::{StructType, DataType, StructField};
     /// # use std::sync::Arc;
-    /// # fn example() -> delta_kernel::Result<()> {
+    /// # fn example() -> delta_kernel::KernelResult<()> {
     /// # let schema = Arc::new(StructType::try_new(vec![StructField::nullable("id", DataType::INTEGER)])?);
-    /// let builder = create_table("/path/to/table", schema, "MyApp/1.0")
+    /// let builder = create_table("/path/to/table", schema, "MyApp/1.0", /* data_change */ true)
     ///     .with_table_properties([
     ///         ("myapp.version", "1.0"),
     ///         ("myapp.author", "test"),
@@ -892,17 +892,19 @@ impl TransactionBuilder<CreateTable> {
     /// # use delta_kernel::transaction::data_layout::DataLayout;
     /// # use delta_kernel::schema::{StructType, DataType, StructField};
     /// # use std::sync::Arc;
-    /// # fn example() -> delta_kernel::Result<()> {
+    /// # fn example() -> delta_kernel::KernelResult<()> {
     /// # let schema = Arc::new(StructType::try_new(vec![
     /// #     StructField::nullable("id", DataType::INTEGER),
     /// #     StructField::nullable("date", DataType::STRING),
     /// # ])?);
     /// // Clustered layout:
-    /// let builder = create_table("/path/to/table", schema.clone(), "MyApp/1.0")
+    /// let builder = create_table(
+    ///     "/path/to/table", schema.clone(), "MyApp/1.0", /* data_change */ true,
+    /// )
     ///     .with_data_layout(DataLayout::clustered(["id"]));
     ///
     /// // Partitioned layout:
-    /// let builder = create_table("/path/to/table", schema, "MyApp/1.0")
+    /// let builder = create_table("/path/to/table", schema, "MyApp/1.0", /* data_change */ true)
     ///     .with_data_layout(DataLayout::partitioned(["date"]));
     /// # Ok(())
     /// # }
@@ -919,7 +921,7 @@ impl TransactionBuilder<CreateTable> {
     /// table creation. Operations like removing files, removing domain metadata, or updating
     /// deletion vectors are not available, preventing misuse at compile time.
     ///
-    /// If [`with_data_change`](Self::with_data_change) is not set, creation defaults to `true`.
+    /// The caller-supplied `data_change` is preserved, including when no files are staged.
     ///
     /// This method performs validation:
     /// - Checks that the table path is valid
@@ -955,7 +957,7 @@ impl TransactionBuilder<CreateTable> {
         self,
         engine: &dyn Engine,
         committer: Box<dyn Committer>,
-    ) -> Result<CreateTableTransaction> {
+    ) -> KernelResult<CreateTableTransaction> {
         self.common_state.validate()?;
 
         // Validate path
@@ -1064,13 +1066,15 @@ impl TransactionBuilder<CreateTable> {
         let table_configuration = TableConfiguration::try_new(metadata, protocol, table_url, 0)?;
 
         // Create Transaction<CreateTable> with the effective table configuration
-        try_new_create_table(
+        let transaction = try_new_create_table(
             table_configuration,
             committer,
             data_layout_result.system_domain_metadata,
             data_layout_result.clustering_columns,
             self.common_state,
-        )
+        )?;
+        transaction.validate_domain_metadata_operations()?;
+        Ok(transaction)
     }
 }
 
@@ -1092,39 +1096,21 @@ fn try_new_create_table<MODE: ExecutionMode>(
         path = %effective_table_config.table_root(),
         operation = "CREATE",
     );
-    let transaction = common_state.apply_to_transaction(Transaction {
-        span,
-        operation_id: MetricId::new(),
-        correlation_id: None,
-        read_snapshot_opt: None,
-        effective_table_config,
+    let commit_timestamp = current_time_ms()?;
+    Ok(Transaction {
         should_emit_protocol: true,
         should_emit_metadata: true,
-        committer,
-        operation: Some(CommitOperation::CreateTable),
-        operation_parameters: None,
-        operation_metrics: None,
-        engine_info: None,
-        staged_data_changes: Default::default(),
-        set_transactions: vec![],
-        commit_timestamp: current_time_ms()?,
-        user_domain_metadata_additions: vec![],
         system_domain_metadata_additions: system_domain_metadata,
-        provided_row_tracking_high_water_mark: None,
-        user_domain_removals: vec![],
-        data_change: true,
-        infer_data_change: false,
-        column_defaults_acknowledged: false,
-        row_tracking_preservation_acknowledged: false,
-        engine_commit_info: None,
-        is_blind_append: false,
-        #[cfg(feature = "adaptive-metadata-in-dev")]
-        manifest_write: None,
         physical_clustering_columns: clustering_columns,
-        _state: PhantomType::default(),
-    });
-    transaction.validate_domain_metadata_operations()?;
-    Ok(transaction)
+        ..Transaction::new(
+            common_state,
+            effective_table_config,
+            committer,
+            CommitOperation::CreateTable,
+            span,
+            commit_timestamp,
+        )
+    })
 }
 
 #[cfg(test)]
@@ -1165,27 +1151,22 @@ mod tests {
     #[test]
     fn test_basic_builder_creation() {
         let schema = test_schema();
-        let builder =
-            CreateTableTransactionBuilder::new("/path/to/table", schema.clone(), "TestApp/1.0");
+        let builder = CreateTableTransactionBuilder::new(
+            "/path/to/table",
+            schema.clone(),
+            "TestApp/1.0",
+            true,
+        );
 
         assert_eq!(builder.local_state.path, "/path/to/table");
-        assert_eq!(
-            builder.common_state.engine_info.as_deref(),
-            Some("TestApp/1.0")
-        );
+        assert_eq!(builder.common_state.engine_info, "TestApp/1.0");
         assert!(builder.local_state.table_properties.is_empty());
     }
 
     #[rstest]
-    #[case::default(&[], true)]
-    #[case::explicit_true(&[true], true)]
-    #[case::explicit_false(&[false], false)]
-    #[case::last_true(&[false, true], true)]
-    #[case::last_false(&[true, false], false)]
     fn common_builder_state_preserves_data_change_through_empty_commit(
-        #[case] overrides: &[bool],
-        #[case] expected_data_change: bool,
-    ) -> Result<()> {
+        #[values(false, true)] expected_data_change: bool,
+    ) -> KernelResult<()> {
         let tempdir = tempfile::tempdir()?;
         let table_path = tempdir.path().join("table");
         std::fs::create_dir(&table_path)?;
@@ -1193,20 +1174,18 @@ mod tests {
         let reporter = Arc::new(CapturingReporter::default());
         let _guard = install_thread_local_metrics_reporter(reporter.clone());
 
-        let mut builder = CreateTableTransactionBuilder::new(
+        let builder = CreateTableTransactionBuilder::new(
             table_path.to_string_lossy(),
             test_schema(),
             "test-engine",
+            expected_data_change,
         )
         .with_correlation_id("test-correlation")
         .with_operation_parameters([("mode", Some("Create"))])
         .with_transaction_id("app", 7);
-        for &data_change in overrides {
-            builder = builder.with_data_change(data_change);
-        }
-        let mut transaction = builder.build(&engine, Box::new(FileSystemCommitter::new()))?;
+        let transaction = builder.build(&engine, Box::new(FileSystemCommitter::new()))?;
 
-        assert_eq!(transaction.engine_info.as_deref(), Some("test-engine"));
+        assert_eq!(transaction.engine_info, "test-engine");
         assert_eq!(
             transaction.correlation_id.as_deref(),
             Some("test-correlation")
@@ -1217,9 +1196,10 @@ mod tests {
         );
         assert_eq!(transaction.set_transactions[0].app_id, "app");
         assert_eq!(transaction.set_transactions[0].version, 7);
-        assert_eq!(transaction.data_change, expected_data_change);
-        assert!(!transaction.infer_data_change);
-        transaction.resolve_data_change();
+        assert_eq!(
+            transaction.set_transactions[0].last_updated,
+            Some(transaction.commit_timestamp)
+        );
         assert_eq!(transaction.data_change, expected_data_change);
         let committed = transaction.commit(&engine)?.unwrap_committed();
         assert_eq!(committed.commit_version(), 0);
@@ -1240,7 +1220,7 @@ mod tests {
     #[rstest]
     #[case(0)]
     #[case(2)]
-    fn builder_rejects_non_single_row_commit_info(#[case] row_count: usize) -> Result<()> {
+    fn builder_rejects_non_single_row_commit_info(#[case] row_count: usize) -> KernelResult<()> {
         let tempdir = tempfile::tempdir()?;
         let table_path = tempdir.path().join("table");
         std::fs::create_dir(&table_path)?;
@@ -1255,6 +1235,7 @@ mod tests {
             table_path.to_string_lossy(),
             test_schema(),
             "test-engine",
+            true,
         )
         .with_commit_info(commit_info, commit_info_schema)
         .build(&SyncEngine::new(), Box::new(FileSystemCommitter::new()))
@@ -1269,7 +1250,7 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_transaction_ids_are_rejected() -> Result<()> {
+    fn duplicate_transaction_ids_are_rejected() -> KernelResult<()> {
         let tempdir = tempfile::tempdir()?;
         let table_path = tempdir.path().join("table");
         std::fs::create_dir(&table_path)?;
@@ -1277,6 +1258,7 @@ mod tests {
             table_path.to_string_lossy(),
             test_schema(),
             "test-engine",
+            true,
         )
         .with_transaction_id("app", 1)
         .with_transaction_id("app", 2)
@@ -1302,7 +1284,7 @@ mod tests {
         #[case] domain: &str,
         #[case] property: Option<(&str, &str)>,
         #[case] expected: &str,
-    ) -> Result<()> {
+    ) -> KernelResult<()> {
         let tempdir = tempfile::tempdir()?;
         let table_path = tempdir.path().join("table");
         std::fs::create_dir(&table_path)?;
@@ -1310,6 +1292,7 @@ mod tests {
             table_path.to_string_lossy(),
             test_schema(),
             "test-engine",
+            true,
         )
         .with_domain_metadata(domain, "{}");
         if let Some(property) = property {
@@ -1324,7 +1307,7 @@ mod tests {
     }
 
     #[test]
-    fn user_domain_cannot_conflict_with_generated_clustering_domain() -> Result<()> {
+    fn user_domain_cannot_conflict_with_generated_clustering_domain() -> KernelResult<()> {
         let tempdir = tempfile::tempdir()?;
         let table_path = tempdir.path().join("table");
         std::fs::create_dir(&table_path)?;
@@ -1332,6 +1315,7 @@ mod tests {
             table_path.to_string_lossy(),
             test_schema(),
             "test-engine",
+            true,
         )
         .with_data_layout(DataLayout::clustered(["id"]))
         .with_domain_metadata("delta.clustering", "{}")
@@ -1349,6 +1333,7 @@ mod tests {
             "/path/to/table/nested",
             schema.clone(),
             "TestApp/1.0",
+            true,
         );
 
         assert_eq!(builder.local_state.path, "/path/to/table/nested");
@@ -1358,8 +1343,9 @@ mod tests {
     fn test_with_table_properties() {
         let schema = test_schema();
 
-        let builder = CreateTableTransactionBuilder::new("/path/to/table", schema, "TestApp/1.0")
-            .with_table_properties([("key1", "value1")]);
+        let builder =
+            CreateTableTransactionBuilder::new("/path/to/table", schema, "TestApp/1.0", true)
+                .with_table_properties([("key1", "value1")]);
 
         assert_eq!(
             builder.local_state.table_properties.get("key1"),
@@ -1371,9 +1357,10 @@ mod tests {
     fn test_with_multiple_table_properties() {
         let schema = test_schema();
 
-        let builder = CreateTableTransactionBuilder::new("/path/to/table", schema, "TestApp/1.0")
-            .with_table_properties([("key1", "value1")])
-            .with_table_properties([("key2", "value2")]);
+        let builder =
+            CreateTableTransactionBuilder::new("/path/to/table", schema, "TestApp/1.0", true)
+                .with_table_properties([("key1", "value1")])
+                .with_table_properties([("key2", "value2")]);
 
         assert_eq!(
             builder.local_state.table_properties.get("key1"),
@@ -1679,8 +1666,9 @@ mod tests {
     ) {
         let schema = test_schema();
 
-        let builder = CreateTableTransactionBuilder::new("/path/to/table", schema, "TestApp/1.0")
-            .with_data_layout(layout);
+        let builder =
+            CreateTableTransactionBuilder::new("/path/to/table", schema, "TestApp/1.0", true)
+                .with_data_layout(layout);
 
         assert_eq!(
             builder.local_state.data_layout.is_clustered(),

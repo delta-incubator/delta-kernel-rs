@@ -71,21 +71,20 @@ mod tests {
     use std::sync::Arc;
 
     use delta_kernel::schema::schema_ref;
-    use delta_kernel::{Result, Snapshot};
+    use delta_kernel::{KernelResult, Snapshot};
     use test_utils::setup_test_tables;
 
     use super::*;
     use crate::ffi_test_utils::{engine_handle_for_store, ok_or_panic};
     use crate::transaction::{
         free_committed_transaction, new_update_table_txn_builder, update_table_txn_builder_build,
-        update_table_txn_builder_with_operation, update_table_txn_commit,
-        KernelUpdateTableOperation,
+        update_table_txn_commit, KernelUpdateTableOperation,
     };
     use crate::{free_engine, free_snapshot, kernel_string_slice};
 
     #[cfg(feature = "default-engine-base")]
     #[tokio::test]
-    async fn test_write_txn_actions() -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_write_txn_actions() -> KernelResult<()> {
         // create a simple table: one int column named 'number'
         let schema = schema_ref! { nullable "number": INTEGER };
 
@@ -96,9 +95,15 @@ mod tests {
 
             let snapshot = Snapshot::builder_for(table_url.clone()).build(&engine)?;
             let snapshot_handle: Handle<SharedSnapshot> = snapshot.into();
-            let builder = unsafe { new_update_table_txn_builder(snapshot_handle.shallow_copy()) };
+            let engine_info = "test-engine/1.0";
             let builder = unsafe {
-                update_table_txn_builder_with_operation(builder, KernelUpdateTableOperation::Write)
+                ok_or_panic(new_update_table_txn_builder(
+                    snapshot_handle.shallow_copy(),
+                    KernelUpdateTableOperation::Write,
+                    kernel_string_slice!(engine_info),
+                    true,
+                    default_engine_handle.shallow_copy(),
+                ))
             };
 
             // Add app ids

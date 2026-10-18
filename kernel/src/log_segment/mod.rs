@@ -30,14 +30,17 @@ use crate::path::{LogPathFileType, ParsedLogPath};
 #[cfg(feature = "declarative-plans")]
 use crate::plans::ir::nodes::{FileType, ScanFile};
 use crate::schema::compare::SchemaComparison;
-use crate::schema::{lazy_schema_ref, DataType, SchemaRef, StructField, StructType, ToSchema as _};
+use crate::schema::{
+    lazy_schema_ref, CheckpointFieldKind, DataType, SchemaRef, StructField, StructType,
+    ToSchema as _,
+};
 use crate::utils::require;
 #[cfg(feature = "adaptive-metadata-in-dev")]
 use crate::EngineData;
 #[cfg(feature = "declarative-plans")]
 use crate::Scalar;
 use crate::{
-    Engine, FileMeta, KernelError, KernelResult, Predicate, PredicateRef, Result, RowVisitor,
+    Engine, FileMeta, KernelError, KernelResult, Predicate, PredicateRef, RowVisitor,
     StorageHandler, Version,
 };
 
@@ -46,9 +49,11 @@ mod domain_metadata_replay;
 mod protocol_metadata_replay;
 
 pub(crate) use domain_metadata_replay::DomainMetadataMap;
-#[cfg(feature = "adaptive-metadata-in-dev")]
-pub(crate) use protocol_metadata_replay::CheckpointActionResolution;
 pub(crate) use protocol_metadata_replay::PmResolution;
+#[cfg(feature = "adaptive-metadata-in-dev")]
+pub(crate) use protocol_metadata_replay::{
+    CheckpointActionResolution, LastManifestCommitResolution,
+};
 
 #[cfg(test)]
 mod crc_tests;
@@ -96,7 +101,7 @@ impl CheckpointReadInfo {
 ///
 /// This struct provides named access to the return values instead of tuple indexing.
 #[internal_api]
-pub(crate) struct ActionsWithCheckpointInfo<A: Iterator<Item = Result<ActionsBatch>>> {
+pub(crate) struct ActionsWithCheckpointInfo<A: Iterator<Item = KernelResult<ActionsBatch>>> {
     /// Iterator over action batches read from the log segment.
     pub actions: A,
     /// Metadata about checkpoint reading, including the schema used.
@@ -296,7 +301,7 @@ impl LogSegment {
         log_root: Url,
         end_version: Option<Version>,
         last_checkpoint_metadata: Option<LastCheckpointHint>,
-    ) -> Result<Self> {
+    ) -> KernelResult<Self> {
         validate_log_path_fields(&listed_files)?;
         validate_compaction_files(&listed_files.ascending_compaction_files)?;
         validate_checkpoint_parts(&listed_files.checkpoint_parts)?;
@@ -449,7 +454,7 @@ impl LogSegment {
         time_travel_version: impl Into<Option<Version>>,
         metric_context: SnapshotLoadMetricContext,
         cancellation_token: Option<&CancellationTokenRef>,
-    ) -> Result<Self> {
+    ) -> KernelResult<Self> {
         let time_travel_version = time_travel_version.into();
         let start = std::time::Instant::now();
         let build = || {
@@ -551,7 +556,7 @@ impl LogSegment {
         log_root: Url,
         start_version: Version,
         end_version: impl Into<Option<Version>>,
-    ) -> Result<Self> {
+    ) -> KernelResult<Self> {
         Self::for_table_changes_with_log_tail(storage, log_root, start_version, end_version, vec![])
     }
 
@@ -832,7 +837,9 @@ impl LogSegment {
         stats_schema: Option<&StructType>,
         partition_schema: Option<&StructType>,
         cancellation_token: Option<&CancellationTokenRef>,
-    ) -> Result<ActionsWithCheckpointInfo<impl Iterator<Item = Result<ActionsBatch>> + Send>> {
+    ) -> KernelResult<
+        ActionsWithCheckpointInfo<impl Iterator<Item = KernelResult<ActionsBatch>> + Send>,
+    > {
         // Combine the action-presence predicate with the caller's skipping predicate so readers
         // can omit checkpoint data that cannot contain a relevant action.
         let projection_predicate = checkpoint_action_projection_predicate(&checkpoint_read_schema);
@@ -867,7 +874,7 @@ impl LogSegment {
         &self,
         engine: &dyn Engine,
         action_schema: SchemaRef,
-    ) -> Result<impl Iterator<Item = Result<ActionsBatch>> + Send> {
+    ) -> KernelResult<impl Iterator<Item = KernelResult<ActionsBatch>> + Send> {
         let result = self.read_actions_with_projected_checkpoint_actions(
             engine,
             action_schema.clone(),
@@ -921,7 +928,7 @@ impl LogSegment {
         engine: &dyn Engine,
         schema: SchemaRef,
         cancellation_token: Option<&CancellationTokenRef>,
-    ) -> Result<impl Iterator<Item = Result<ActionsBatch>> + Send> {
+    ) -> KernelResult<impl Iterator<Item = KernelResult<ActionsBatch>> + Send> {
         let commit_files = self.find_commit_cover();
         let actions = engine
             .json_handler()
@@ -1549,7 +1556,12 @@ impl LogSegment {
             return false;
         };
 
-        if !Self::structs_have_compatible_types(stats_struct, stats_schema, "stats_parsed") {
+        if !Self::structs_have_compatible_types(
+            stats_struct,
+            stats_schema,
+            "stats_parsed",
+            CheckpointFieldKind::Stats,
+        ) {
             return false;
         }
 
@@ -1561,18 +1573,22 @@ impl LogSegment {
     ///
     /// Used by both `stats_parsed` and `partitionValues_parsed` compatibility checks.
     /// For each field in `needed`, if it exists in `available` (checkpoint):
-    /// - Primitive types: must be compatible via [`PrimitiveType::is_stats_type_compatible_with`]
-    ///   (allows type widening and Parquet physical type reinterpretation)
+    /// - Primitive types: allow type widening and checkpoint-specific physical encodings
     /// - Nested structs: recursively check inner fields
     /// - A needed VARIANT against an available struct: the struct must have exactly the variant's
     ///   physical fields, with compatible types. A shredded struct is not compatible with an
     ///   unshredded VARIANT.
+    /// - For statistics only, Binary can back requested Geometry bounds. The engine must read the
+    ///   WKB using the requested logical Geometry type and validate the file's annotation and CRS.
+    ///   This accommodates footer schemas that expose only the physical type; Kernel cannot
+    ///   validate an annotation or CRS absent from the reported schema.
     /// - Missing fields in checkpoint: OK (will return null when accessed)
     /// - Extra fields in checkpoint: OK (ignored)
     fn structs_have_compatible_types(
         available: &StructType,
         needed: &StructType,
         context: &str,
+        kind: CheckpointFieldKind,
     ) -> bool {
         for needed_field in needed.fields() {
             let Some(available_field) = available.field(needed_field.name()) else {
@@ -1587,6 +1603,7 @@ impl LogSegment {
                         avail_struct,
                         need_struct,
                         &nested_context(),
+                        kind,
                     ) {
                         return false;
                     }
@@ -1596,12 +1613,17 @@ impl LogSegment {
                 (avail_type, need_type) => {
                     let compatible = match (avail_type, need_type) {
                         (DataType::Primitive(a), DataType::Primitive(b)) => {
-                            a.is_stats_type_compatible_with(b)
+                            a.is_stats_type_compatible_with(b, kind)
                         }
                         (DataType::Struct(a), DataType::Variant(b)) => {
                             a.num_fields() == b.num_fields()
                                 && b.fields().all(|f| a.field(f.name()).is_some())
-                                && Self::structs_have_compatible_types(a, b, &nested_context())
+                                && Self::structs_have_compatible_types(
+                                    a,
+                                    b,
+                                    &nested_context(),
+                                    kind,
+                                )
                         }
                         (a, b) => a.can_read_as(b).is_ok(),
                     };
@@ -1655,6 +1677,7 @@ impl LogSegment {
             partition_struct,
             partition_schema,
             "partitionValues_parsed",
+            CheckpointFieldKind::PartitionValues,
         ) {
             return false;
         }
@@ -1716,7 +1739,7 @@ impl LogSegment {
 /// The first checkpoint action in `batches`, or `None` when no batch carries one.
 #[cfg(feature = "adaptive-metadata-in-dev")]
 fn first_checkpoint_action(
-    batches: impl Iterator<Item = Result<Box<dyn EngineData>>>,
+    batches: impl Iterator<Item = KernelResult<Box<dyn EngineData>>>,
 ) -> KernelResult<Option<CheckpointAction>> {
     for batch in batches {
         if let Some(action) = CheckpointAction::try_new_from_data(batch?.as_ref())? {

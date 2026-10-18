@@ -54,17 +54,21 @@ mod supported {
         };
 
         let (_temp_dir, table_path, engine) = test_table_setup_mt()?;
-        let snapshot = create_table_transaction(&table_path, schema.clone(), "Test/1.0")
+        let snapshot = create_table_transaction(&table_path, schema.clone(), "Test/1.0", true)
             .with_table_properties([("delta.checkpoint.writeStatsAsStruct", "true")])
             .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
             .commit(engine.as_ref())?
             .unwrap_post_commit_snapshot();
         let table_url = snapshot.table_root().clone();
 
-        let mut txn =
-            load_and_begin_transaction_with(table_url.clone(), engine.as_ref(), |builder| {
-                builder.with_engine_info("default engine")
-            })?;
+        let mut txn = load_and_begin_transaction_with(
+            table_url.clone(),
+            engine.as_ref(),
+            delta_kernel::transaction::UpdateTableOperation::Write,
+            "default engine",
+            true,
+            |builder| builder,
+        )?;
         let arrow_schema: ArrowSchema = schema.as_ref().try_into_arrow()?;
         let arrow_schema = Arc::new(arrow_schema);
         let nested_fields = match arrow_schema.field_with_name("nested").unwrap().data_type() {
@@ -205,7 +209,7 @@ mod supported {
         };
 
         let (_temp_dir, table_path, engine) = test_table_setup()?;
-        let snapshot = create_table_transaction(&table_path, schema.clone(), "Test/1.0")
+        let snapshot = create_table_transaction(&table_path, schema.clone(), "Test/1.0", true)
             .with_table_properties([(property_name, property_value)])
             .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
             .commit(engine.as_ref())?

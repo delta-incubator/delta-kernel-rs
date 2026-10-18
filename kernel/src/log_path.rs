@@ -4,7 +4,7 @@ use url::Url;
 
 use crate::path::ParsedLogPath;
 use crate::utils::require;
-use crate::{FileMeta, FileSize, KernelError, Result};
+use crate::{FileMeta, FileSize, KernelError, KernelResult};
 
 /// A path to a valid delta log file. You can parse a given `FileMeta` into a `LogPath` using
 /// [`LogPath::try_new`].
@@ -23,7 +23,7 @@ impl From<LogPath> for ParsedLogPath {
 impl LogPath {
     /// Attempt to create a `LogPath` from `FileMeta`. This returns an error if the path isn't a
     /// valid log path.
-    pub fn try_new(file_meta: FileMeta) -> Result<Self> {
+    pub fn try_new(file_meta: FileMeta) -> KernelResult<Self> {
         // TODO: we should avoid the clone
         let parsed = ParsedLogPath::try_from(file_meta.clone())?
             .ok_or_else(|| KernelError::invalid_log_path(&file_meta.location))?;
@@ -43,7 +43,7 @@ impl LogPath {
         filename: &str,
         last_modified: i64,
         size: FileSize,
-    ) -> Result<LogPath> {
+    ) -> KernelResult<LogPath> {
         let commit_path = Self::staged_commit_url(table_root, filename)?;
         let file_meta = FileMeta {
             location: commit_path,
@@ -55,7 +55,7 @@ impl LogPath {
 
     /// Create the URL for a staged commit file given the table root and filename. The table_root
     /// must point to the root of the table and end with a '/'.
-    pub fn staged_commit_url(table_root: Url, filename: &str) -> Result<Url> {
+    pub fn staged_commit_url(table_root: Url, filename: &str) -> KernelResult<Url> {
         // TODO: we should introduce TablePath/LogPath types which enforce checks like ending '/'
         if !table_root.path().ends_with('/') {
             return Err(KernelError::invalid_table_location(table_root));

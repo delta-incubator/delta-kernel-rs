@@ -20,6 +20,17 @@ log replay or checkpoint writes, kernel receives opaque `EngineData` batches, in
 visitor pattern, updates a selection vector, and hands them back to the engine: it never
 deserializes the full batch into in-memory structs.
 
+## Error Handling
+
+Kernel APIs return `KernelResult<T, E = KernelError>`, preserving `KernelError` by default while
+allowing helpers to specify another error type. `Result<T>` always uses the top-level `Error` enum.
+Converting a kernel error to that envelope requires `Error::Kernel` or `.map_err(Error::Kernel)`.
+There is no implicit `From<KernelError> for Error` conversion.
+
+Fallible kernel streams use `KernelResultIterator` and `KernelResultIteratorStatic`, including
+engine handlers and declarative-plan results. `ResultIterator` and `ResultIteratorStatic` yield
+top-level `Error` values.
+
 ## Snapshot
 
 `Snapshot` (`kernel/src/snapshot/`) is the primary entry point for operations on an existing table.
@@ -89,8 +100,15 @@ file listing without re-scanning the table.
 `TransactionType` trait selects `T::BuilderState`; each type supplies its own constructors, custom
 setters, and build validation. `UpdateTableTransactionBuilder` aliases
 `TransactionBuilder<UpdateTable>` and builds `Transaction<UpdateTable>`, the default transaction
-type. `CreateTableTransactionBuilder` aliases `TransactionBuilder<CreateTable>` and builds
-`Transaction<CreateTable>`. Schema changes use `UpdateTable`, including the
+type. Construct it with `snapshot.update_table(operation, engine_info, data_change)`, requiring all
+three values.
+`CreateTableTransactionBuilder` aliases `TransactionBuilder<CreateTable>` and builds
+`Transaction<CreateTable>`. Its constructor requires the path, schema, engine info, and `data_change`
+and fixes the operation to `CREATE TABLE`. These inputs cannot be changed on either builder or
+transaction. Kernel preserves `data_change` even for empty commits rather than inferring it from
+staged files. `build()` rejects ALTER with `true` and blind append with `false`; `commit()` retains
+operation and staged-file validation.
+Schema changes use `UpdateTable`, including the
 `UpdateTableOperation::AlterTable` operation.
 
 Kernel captures table-wide configuration in a transportable `WriteState`. Each writer binds

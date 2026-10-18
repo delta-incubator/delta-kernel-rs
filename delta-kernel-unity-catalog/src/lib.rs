@@ -7,7 +7,7 @@ mod utils;
 
 pub use committer::UCCommitter;
 use delta_kernel::snapshot::SnapshotBuilder;
-use delta_kernel::{KernelError, LogPath, Result, Snapshot};
+use delta_kernel::{KernelError, KernelResult, LogPath, Snapshot};
 use unity_catalog_delta_client_api::{Commit, LoadTableResponse};
 use url::Url;
 pub use utils::{
@@ -24,7 +24,10 @@ pub use utils::{
 ///
 /// Returns an error if a commit's `file_size` is negative (does not fit in `FileSize`) or if
 /// [`LogPath::staged_commit`] rejects the resolved path.
-pub fn log_tail_from_commits(commits: &[Commit], mut table_root: Url) -> Result<Vec<LogPath>> {
+pub fn log_tail_from_commits(
+    commits: &[Commit],
+    mut table_root: Url,
+) -> KernelResult<Vec<LogPath>> {
     // `load_table` returns the location without a trailing slash, but staged-commit path
     // resolution requires the table root to end in `/`.
     if !table_root.path().ends_with('/') {
@@ -62,7 +65,7 @@ pub fn log_tail_from_commits(commits: &[Commit], mut table_root: Url) -> Result<
 ///
 /// Returns an error if the response's location is not a valid URL, if [`log_tail_from_commits`]
 /// fails, or if `latest_table_version` is negative.
-pub fn snapshot_builder_from_load_table(resp: &LoadTableResponse) -> Result<SnapshotBuilder> {
+pub fn snapshot_builder_from_load_table(resp: &LoadTableResponse) -> KernelResult<SnapshotBuilder> {
     let table_root = Url::parse(&resp.metadata.location)
         .map_err(|e| KernelError::generic(format!("invalid table location: {e}")))?;
     let log_tail = log_tail_from_commits(&resp.commits, table_root.clone())?;

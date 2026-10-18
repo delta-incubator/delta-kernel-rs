@@ -51,6 +51,11 @@ pub(crate) trait Deduplicator {
     /// (read-only).
     fn is_log_batch(&self) -> bool;
 
+    /// The table root against which [`Self::extract_dv_unique_id`] normalizes deletion-vector
+    /// identities. `Some` iff adaptiveMetadata is enabled; `None` keeps the legacy
+    /// storage-type-prefixed identity.
+    fn dv_normalization_root(&self) -> Option<&Url>;
+
     /// Extracts the deletion vector unique ID if it exists.
     ///
     /// This function retrieves the necessary fields for constructing a deletion vector unique ID
@@ -59,6 +64,14 @@ pub(crate) trait Deduplicator {
     /// - `dv_start_index + 1` retrieves the path or inline deletion vector
     ///   (`deletionVector.pathOrInlineDv`).
     /// - `dv_start_index + 2` retrieves the optional offset (`deletionVector.offset`).
+    ///
+    /// When [`Self::dv_normalization_root`] is `Some`, the id is the normalized object identity, so
+    /// an `add` and `remove` that encode the same DV file under different storage types match.
+    ///
+    /// # Errors
+    ///
+    /// Under normalization, returns [`crate::KernelError::DeletionVector`] for an unknown storage
+    /// type or a malformed DV path.
     fn extract_dv_unique_id<'a>(
         &self,
         i: usize,
@@ -73,11 +86,13 @@ pub(crate) trait Deduplicator {
         let path_or_inline = getters[dv_start_index + 1].get(i, "deletionVector.pathOrInlineDv")?;
         let offset = getters[dv_start_index + 2].get_opt(i, "deletionVector.offset")?;
 
-        Ok(Some(DeletionVectorDescriptor::unique_id_from_parts(
+        DeletionVectorDescriptor::unique_id_with_root(
             storage_type,
             path_or_inline,
             offset,
-        )))
+            self.dv_normalization_root(),
+        )
+        .map(Some)
     }
 }
 
@@ -154,5 +169,9 @@ impl Deduplicator for CheckpointDeduplicator<'_> {
     /// Always `false` - checkpoint batches never update the seen set.
     fn is_log_batch(&self) -> bool {
         false
+    }
+
+    fn dv_normalization_root(&self) -> Option<&Url> {
+        self.dv_normalization_root.as_ref()
     }
 }

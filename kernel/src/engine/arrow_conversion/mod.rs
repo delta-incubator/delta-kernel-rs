@@ -682,7 +682,7 @@ mod tests {
     };
     #[cfg(feature = "geo-type-in-dev")]
     use crate::unit_test_utils::{geography_type, geometry_type};
-    use crate::Result;
+    use crate::KernelResult;
 
     #[cfg(feature = "geo-type-in-dev")]
     #[rstest]
@@ -698,13 +698,13 @@ mod tests {
         true,
     )))]
     fn test_geo_type_arrow_conversion_unsupported(#[case] dt: DataType) {
-        let result: Result<ArrowDataType, _> = (&dt).try_into_arrow();
+        let result: KernelResult<ArrowDataType, _> = (&dt).try_into_arrow();
         let err = result.unwrap_err();
         assert!(matches!(err, ArrowError::SchemaError(_)), "got: {err:?}");
     }
 
     #[test]
-    fn test_metadata_string_conversion() -> Result<()> {
+    fn test_metadata_string_conversion() -> KernelResult<()> {
         let mut metadata = HashMap::new();
         metadata.insert("description", "hello world".to_owned());
         let struct_field = StructField::not_null("name", DataType::STRING).with_metadata(metadata);
@@ -722,7 +722,7 @@ mod tests {
     // Delta tables can have void columns. The kernel should parse them and convert
     // to Arrow's Null type (and back).
     #[test]
-    fn test_void_type_roundtrip() -> Result<()> {
+    fn test_void_type_roundtrip() -> KernelResult<()> {
         let json = r#"
         {
             "name": "void_col",
@@ -751,7 +751,7 @@ mod tests {
     fn test_interval_type_arrow_conversion(
         #[case] kernel_type: DataType,
         #[case] expected: ArrowDataType,
-    ) -> Result<()> {
+    ) -> KernelResult<()> {
         assert_eq!(ArrowDataType::try_from_kernel(&kernel_type)?, expected);
         Ok(())
     }
@@ -759,7 +759,7 @@ mod tests {
     // Millisecond-precision timestamps (e.g. from externally-written checkpoint stats)
     // must convert like microsecond/nanosecond: UTC tz -> TIMESTAMP, no tz -> TIMESTAMP_NTZ.
     #[test]
-    fn test_millisecond_timestamp_conversion() -> Result<()> {
+    fn test_millisecond_timestamp_conversion() -> KernelResult<()> {
         let utc = DataType::try_from_arrow(&ArrowDataType::Timestamp(
             TimeUnit::Millisecond,
             Some("UTC".into()),
@@ -776,7 +776,7 @@ mod tests {
     // We tolerate it on reads (be permissive), and the Arrow conversion still
     // produces ArrowDataType::Null. The field retains nullable=false as-is — no coercion.
     #[test]
-    fn test_void_type_not_nullable() -> Result<()> {
+    fn test_void_type_not_nullable() -> KernelResult<()> {
         let json = r#"
         {
             "name": "void_col",
@@ -802,7 +802,7 @@ mod tests {
     }
 
     #[test]
-    fn test_void_field_in_struct() -> Result<()> {
+    fn test_void_field_in_struct() -> KernelResult<()> {
         // A struct schema with a void column should convert to Arrow with a Null field
         let schema = schema! {
             nullable "id": INTEGER,
@@ -826,7 +826,7 @@ mod tests {
     }
 
     #[test]
-    fn test_variant_shredded_type_fail() -> Result<()> {
+    fn test_variant_shredded_type_fail() -> KernelResult<()> {
         let unshredded_variant = DataType::unshredded_variant();
         let unshredded_variant_arrow = ArrowDataType::try_from_kernel(&unshredded_variant)?;
         assert!(unshredded_variant_arrow == unshredded_variant_arrow_type());
@@ -867,7 +867,7 @@ mod tests {
     }
 
     #[test]
-    fn test_try_into_arrow_threads_nested_ids_onto_arrow_schema() -> Result<()> {
+    fn test_try_into_arrow_threads_nested_ids_onto_arrow_schema() -> KernelResult<()> {
         let meta_key = ColumnMetadataKey::ColumnMappingNestedIds.as_ref();
         let fixture = complex_nested_with_field_ids(meta_key);
         let arrow_schema: ArrowSchema = (&fixture.kernel_schema).try_into_arrow()?;
@@ -897,7 +897,7 @@ mod tests {
     fn test_try_into_arrow_sets_field_ids_for_matched_nested_ids_only(
         #[case] schema: StructType,
         #[case] expected_field_ids: &[(&str, &str)],
-    ) -> Result<()> {
+    ) -> KernelResult<()> {
         let arrow_schema: ArrowSchema = (&schema).try_into_arrow()?;
         let field_ids: HashMap<String, String> =
             collect_arrow_field_metadata(&arrow_schema, PARQUET_FIELD_ID_META_KEY)
@@ -940,7 +940,7 @@ mod tests {
     }
 
     #[test]
-    fn test_recursive_field_id_transformation() -> Result<()> {
+    fn test_recursive_field_id_transformation() -> KernelResult<()> {
         // Create a complex nested structure with field IDs at multiple levels:
         // top_struct {
         //   simple_field: int (field_id=1)
@@ -1146,7 +1146,7 @@ mod tests {
     #[case::fixed_size_list(ArrowDataType::FixedSizeList(arc_elem_with_id(42), 3))]
     fn test_try_from_arrow_aggregates_nested_id_for_all_list_kinds(
         #[case] dt: ArrowDataType,
-    ) -> Result<()> {
+    ) -> KernelResult<()> {
         let arrow_field = ArrowField::new("arr", dt, true);
         let kernel = StructField::try_from_arrow(&arrow_field)?;
         assert_eq!(
@@ -1163,7 +1163,7 @@ mod tests {
     /// `Dictionary` is a transparent wrapper on the Arrow side (kernel collapses it to its value
     /// type), so a nested-ids walker must still descend through it.
     #[test]
-    fn test_try_from_arrow_aggregates_nested_id_through_dictionary() -> Result<()> {
+    fn test_try_from_arrow_aggregates_nested_id_through_dictionary() -> KernelResult<()> {
         let arrow_dict = ArrowDataType::Dictionary(
             Box::new(ArrowDataType::Int32),
             Box::new(ArrowDataType::List(arc_elem_with_id(7))),

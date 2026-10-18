@@ -1265,6 +1265,25 @@ async fn test_trips_indeterminate(#[case] v1_actions: Vec<Value>) {
     );
 }
 
+#[cfg(feature = "adaptive-metadata-in-dev")]
+#[tokio::test]
+async fn test_replay_rejects_last_manifest_commit_newer_than_newest_commit() {
+    let mut v1 = commit_info("WRITE", None);
+    v1["commitInfo"]["lastManifestCommit"] = json!({"version": 5, "contentRootVersion": 5});
+    let err = CrcReadTest::new()
+        .commit(0, create_table_actions())
+        .commit(1, vec![v1])
+        .build()
+        .await
+        .incrementally_build_crc(&crc_complete_empty_dm_set_txn())
+        .unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("lastManifestCommit version 5 exceeds commit version 1"),
+        "unexpected error: {err}"
+    );
+}
+
 // === On-disk base CRC (exercises serde round-trip) ===
 
 #[tokio::test]
@@ -1418,6 +1437,23 @@ async fn test_stale_crc_advanced_only_within_replay_budget(
         snapshot.crc_at_version().map(|c| c.version),
         expected_crc_version
     );
+}
+
+// Without adaptiveMetadata, CRC replay ignores `commitInfo.lastManifestCommit`, so a value of any
+// shape there cannot break advancing a stale CRC.
+#[cfg(not(feature = "adaptive-metadata-in-dev"))]
+#[tokio::test]
+async fn test_stale_crc_advances_past_foreign_last_manifest_commit() {
+    let mut info = commit_info(DEFAULT_OPERATION, None);
+    info["commitInfo"]["lastManifestCommit"] = json!("not-a-struct");
+    let built = CrcReadTest::new()
+        .v2_checkpoint(0, protocol_a(), metadata_a())
+        .crc(0, protocol_a(), metadata_a(), None)
+        .commit(1, [info])
+        .build()
+        .await;
+    let snapshot = built.snapshot_latest_with_replay(IncrementalReplay::Unlimited);
+    assert_eq!(snapshot.crc_at_version().map(|c| c.version), Some(1));
 }
 
 // A base exactly at the checkpoint version is kept (its tail is (ckpt, end]); a base below it is

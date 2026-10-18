@@ -35,7 +35,7 @@ use crate::schema::{
     column_name, schema_ref, ColumnName, ColumnNamesAndTypes, DataType, MetadataColumnSpec,
     StructField, StructType,
 };
-use crate::{Engine, EngineData, KernelError, KernelResult, Result, Version};
+use crate::{Engine, EngineData, KernelError, KernelResult, Version};
 
 impl LogSegment {
     /// Read the latest Protocol and Metadata from this log segment, using CRC when available.
@@ -105,6 +105,8 @@ impl LogSegment {
                     source: ProtocolMetadataSource::CrcSeededPmOnlyReplay,
                     #[cfg(feature = "adaptive-metadata-in-dev")]
                     checkpoint_action,
+                    #[cfg(feature = "adaptive-metadata-in-dev")]
+                    last_manifest_commit: LastManifestCommitResolution::Unresolved,
                 });
             }
 
@@ -118,6 +120,8 @@ impl LogSegment {
                 source: ProtocolMetadataSource::CrcSeededPmOnlyReplay,
                 #[cfg(feature = "adaptive-metadata-in-dev")]
                 checkpoint_action,
+                #[cfg(feature = "adaptive-metadata-in-dev")]
+                last_manifest_commit: LastManifestCommitResolution::Unresolved,
             });
         }
 
@@ -131,6 +135,8 @@ impl LogSegment {
             checkpoint_action: CheckpointActionResolution::from_replay(
                 candidate.checkpoint.map(|(_, c)| c),
             ),
+            #[cfg(feature = "adaptive-metadata-in-dev")]
+            last_manifest_commit: LastManifestCommitResolution::Unresolved,
         })
     }
 
@@ -286,7 +292,7 @@ impl LogSegment {
 /// How the latest AMT `checkpoint` action was resolved during P&M replay, stored on the
 /// [`Snapshot`](crate::Snapshot) so consumers can read it without re-scanning the log.
 #[cfg(feature = "adaptive-metadata-in-dev")]
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) enum CheckpointActionResolution {
     /// The latest `checkpoint` action, captured during replay.
     Captured(Arc<CheckpointAction>),
@@ -316,6 +322,19 @@ impl CheckpointActionResolution {
     }
 }
 
+/// How a snapshot's `lastManifestCommit` was resolved at build time, stored on the
+/// [`Snapshot`](crate::Snapshot) so consumers can read it without opening the log.
+#[cfg(feature = "adaptive-metadata-in-dev")]
+#[derive(Debug, Clone)]
+pub(crate) enum LastManifestCommitResolution {
+    /// Read from the CRC at the snapshot version or the committing transaction. `None` means the
+    /// table has no manifest commit at this version.
+    Resolved(Option<LastManifestCommit>),
+    /// The build never read the snapshot version's commitInfo; consumers read it from that
+    /// version's commit file.
+    Unresolved,
+}
+
 /// Result of a P&M resolution (see [`LogSegment::read_protocol_metadata_opt`]).
 pub(crate) struct PmResolution {
     pub(crate) metadata: Option<Metadata>,
@@ -326,6 +345,9 @@ pub(crate) struct PmResolution {
     /// CRC's `lastManifestCommit`, or unresolved. See [`CheckpointActionResolution`].
     #[cfg(feature = "adaptive-metadata-in-dev")]
     pub(crate) checkpoint_action: CheckpointActionResolution,
+    /// How the segment's `lastManifestCommit` was resolved. See [`LastManifestCommitResolution`].
+    #[cfg(feature = "adaptive-metadata-in-dev")]
+    pub(crate) last_manifest_commit: LastManifestCommitResolution,
 }
 
 impl PmResolution {
@@ -341,6 +363,10 @@ impl PmResolution {
             checkpoint_action: crc.last_manifest_commit_opt.clone().map_or(
                 CheckpointActionResolution::Unresolved,
                 CheckpointActionResolution::Located,
+            ),
+            #[cfg(feature = "adaptive-metadata-in-dev")]
+            last_manifest_commit: LastManifestCommitResolution::Resolved(
+                crc.last_manifest_commit_opt.clone(),
             ),
         }
     }
@@ -414,7 +440,11 @@ fn batch_version(data: &dyn EngineData) -> KernelResult<Version> {
                 LazyLock::new(|| (vec![column_name!("_file")], vec![DataType::STRING]).into());
             NAMES_AND_TYPES.as_ref()
         }
-        fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> Result<()> {
+        fn visit<'a>(
+            &mut self,
+            row_count: usize,
+            getters: &[&'a dyn GetData<'a>],
+        ) -> KernelResult<()> {
             if self.file.is_none() && row_count > 0 {
                 self.file = getters[0].get_opt(0, "_file")?;
             }
@@ -541,7 +571,11 @@ fn pm_versions_from_plan_output(
             });
             NAMES_AND_TYPES.as_ref()
         }
-        fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> Result<()> {
+        fn visit<'a>(
+            &mut self,
+            row_count: usize,
+            getters: &[&'a dyn GetData<'a>],
+        ) -> KernelResult<()> {
             if row_count > 0 {
                 self.protocol = getters[0].get_opt(0, "protocol_version")?;
                 self.metadata = getters[1].get_opt(0, "metadata_version")?;
@@ -574,14 +608,14 @@ mod tests {
     use crate::plans::{Operation, PlanExecutor, PlanResult};
     use crate::Snapshot;
     #[cfg(feature = "declarative-plans")]
-    use crate::{KernelError, Result};
+    use crate::{KernelError, KernelResult};
 
     #[cfg(feature = "declarative-plans")]
     struct FailingPlanExecutor;
 
     #[cfg(feature = "declarative-plans")]
     impl PlanExecutor for FailingPlanExecutor {
-        fn execute_op(&self, _op: Operation) -> Result<PlanResult> {
+        fn execute_op(&self, _op: Operation) -> KernelResult<PlanResult> {
             Err(KernelError::generic("plan executor deliberately failed"))
         }
     }

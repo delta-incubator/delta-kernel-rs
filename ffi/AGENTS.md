@@ -443,6 +443,10 @@ an opaque pointer when the API needs one.
 
 ### Error handling
 
+Rust helpers use `KernelResult<T>` and pass it to `IntoExternResult` to produce the C ABI's
+`ExternResult<T>`. Preserve `KernelError` variants through this conversion. `delta_kernel::Result<T>`
+uses the separate top-level `Error` envelope.
+
 There are two error directions, with opposite message owners:
 
 | Direction | Result envelope | Message construction | Final owner |
@@ -527,7 +531,7 @@ pub unsafe extern "C" fn set_metadata(
 unsafe fn set_metadata_impl(
     builder: *mut FfiBuilder,
     entries: CMetadataEntries,
-) -> Result<bool> {
+) -> KernelResult<bool> {
     let builder = unsafe { builder.as_mut() }
         .ok_or_else(|| KernelError::generic("builder must not be null"))?;
     let entries = match (entries.ptr.is_null(), entries.len) {
@@ -804,6 +808,8 @@ Snapshot builder API (`ffi/src/lib.rs` and `ffi/src/snapshot_hint/mod.rs`):
 - `get_snapshot_builder(path, engine)` -- fresh snapshot from a table path
 - `get_snapshot_builder_from(old_snapshot, engine)` -- incremental update reusing an existing snapshot (avoids re-reading the log)
 - `snapshot_builder_with_version(builder, version)` -- optional: pin to a specific version
+- `snapshot_builder_with_incremental_crc_replay(builder, mode)` -- optional: advance a stale CRC
+  within a commit limit or without a limit; defaults to disabled for fresh and incremental builds
 - `snapshot_builder_with_log_tail(builder, log_tail)` -- optional: set log tail (for catalog-managed tables)
 - `snapshot_builder_with_max_catalog_version(builder, version)` -- optional: set max catalog version (for catalog-managed tables)
 - `snapshot_builder_with_snapshot_hint(builder, hint)` -- optional: validate and copy a complete
@@ -910,8 +916,8 @@ than monomorphizing builder state.
 
 ```
 get_default_engine() -> get_snapshot_builder() -> snapshot_builder_build()
-  -> new_update_table_txn_builder() -> update_table_txn_builder_with_engine_info()
-  -> update_table_txn_builder_with_operation() -> update_table_txn_builder_build()
+  -> new_update_table_txn_builder(snapshot, operation, engine_info, data_change, engine)
+  -> update_table_txn_builder_build()
   -> update_table_txn_add_files() -> update_table_txn_commit()
                     |
                     v
@@ -920,6 +926,14 @@ get_default_engine() -> get_snapshot_builder() -> snapshot_builder_build()
                                                                                   v
                                                                   free_committed_transaction
 ```
+
+Update operations, engine info, and `data_change` are required at construction and cannot be changed.
+`new_update_table_txn_builder` accepts a typed operation;
+`new_update_table_txn_builder_with_custom_operation` accepts a connector-defined name.
+Both borrow all inputs and use the engine for UTF-8 errors. They retain a snapshot reference only
+after decoding the strings. Custom-name restrictions are validated at build. Create-table
+constructors likewise require engine info and `data_change`, with the operation fixed to
+`CREATE TABLE`.
 
 `update_table_txn_commit()` and `create_table_txn_commit()` return a `Handle<ExclusiveCommittedTransaction>` that the caller can read via `committed_transaction_version` and `committed_transaction_post_commit_snapshot`, then must release with `free_committed_transaction`. The post-commit snapshot, when present, is a separate `SharedSnapshot` handle that must be freed with `free_snapshot`.
 
@@ -947,8 +961,7 @@ Column defaults (`allowColumnDefaults`) live in `ffi/src/column_default.rs`. The
 defaults but never materializes them, so the connector fills every omitted column itself:
 
 ```
-new_update_table_txn_builder()
-  -> update_table_txn_builder_with_operation()
+new_update_table_txn_builder(snapshot, operation, engine_info, data_change, engine)
   -> update_table_txn_builder_build()
   -> update_table_txn_visit_top_level_column_defaults(txn, engine, ctx, visitor)
   -> update_table_txn_ack_column_defaults(txn)   // REQUIRED, else the write context errors with
@@ -961,8 +974,7 @@ new_update_table_txn_builder()
 Deletion vector update flow:
 
 ```
-new_update_table_txn_builder()
-  -> update_table_txn_builder_with_operation()
+new_update_table_txn_builder(snapshot, operation, engine_info, data_change, engine)
   -> update_table_txn_builder_build()
   -> dv_descriptor_map_new()
   -> dv_descriptor_new()

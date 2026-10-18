@@ -16,7 +16,7 @@ use delta_kernel::engine::arrow_data::{ArrowEngineData, EngineDataArrowExt};
 use delta_kernel::schema::{DataType, SchemaRef, StructField, StructType};
 use delta_kernel::transaction::create_table::create_table as create_delta_table;
 use delta_kernel::transaction::{CommitResult, RetryableTransaction, UpdateTableOperation};
-use delta_kernel::{Engine, KernelError, KernelResult, Result, Snapshot, SnapshotRef};
+use delta_kernel::{Engine, KernelError, KernelResult, Snapshot, SnapshotRef};
 use delta_kernel_default_engine::executor::tokio::TokioBackgroundExecutor;
 use delta_kernel_default_engine::{DefaultEngine, DefaultEngineBuilder};
 use itertools::Itertools;
@@ -59,7 +59,7 @@ async fn main() -> ExitCode {
 }
 
 // TODO: Update the example once official write APIs are introduced (issue#1123)
-async fn try_main() -> Result<()> {
+async fn try_main() -> KernelResult<()> {
     let cli = Cli::parse_with_examples(env!("CARGO_PKG_NAME"), "Write", "write", "");
 
     // Check if path is a directory and if not, create it
@@ -88,10 +88,11 @@ async fn try_main() -> Result<()> {
     // Write sample data to the table
     let committer = Box::new(FileSystemCommitter::new());
     let mut txn = snapshot
-        .transaction_builder()
-        .with_operation(UpdateTableOperation::Custom("INSERT".to_string()))
-        .with_engine_info("default_engine/write-table-example")
-        .with_data_change(true)
+        .update_table(
+            UpdateTableOperation::Custom("INSERT".to_string()),
+            "default_engine/write-table-example",
+            /* data_change */ true,
+        )
         .build(&engine, committer)?;
 
     // This example assumes the table is unpartitioned.
@@ -140,7 +141,7 @@ async fn create_or_get_base_snapshot(
     url: &Url,
     engine: &dyn Engine,
     schema_str: &str,
-) -> Result<SnapshotRef> {
+) -> KernelResult<SnapshotRef> {
     // Check if table already exists
     match Snapshot::builder_for(url.clone()).build(engine) {
         Ok(snapshot) => {
@@ -199,9 +200,14 @@ async fn create_table(
 ) -> KernelResult<()> {
     // Use the create_table API to create the table
     let table_path = table_url.as_str();
-    let _result = create_delta_table(table_path, schema.clone(), "write-table-example/1.0")
-        .build(engine, Box::new(FileSystemCommitter::new()))?
-        .commit(engine)?;
+    let _result = create_delta_table(
+        table_path,
+        schema.clone(),
+        "write-table-example/1.0",
+        /* data_change */ true,
+    )
+    .build(engine, Box::new(FileSystemCommitter::new()))?
+    .commit(engine)?;
 
     println!("✓ Created Delta table with schema: {schema:#?}");
     Ok(())

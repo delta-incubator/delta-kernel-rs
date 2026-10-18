@@ -7,7 +7,7 @@ use crate::log_segment::{
 use crate::path::{LogPathFileType, ParsedLogPath};
 use crate::snapshot::SnapshotRef;
 use crate::utils::require;
-use crate::{Engine, KernelError, KernelResult, LogPath, Result, Version};
+use crate::{Engine, KernelError, KernelResult, LogPath, Version};
 
 /// Builder for a [`CommitRange`].
 ///
@@ -90,7 +90,7 @@ impl CommitRangeBuilder {
     /// the earliest still-available version) if the requested start is unavailable but later
     /// versions exist, [`KernelError::EmptyLog`] if nothing is available in the requested range at
     /// all, and a generic error if the resolved version range is invalid (start > end).
-    pub fn build(&self, engine: &dyn Engine) -> Result<CommitRange> {
+    pub fn build(&self, engine: &dyn Engine) -> KernelResult<CommitRange> {
         let table_root = Self::parse_table_root(&self.table_root)?;
         let log_root = table_root.join("_delta_log/")?;
 
@@ -228,35 +228,35 @@ mod tests {
     use crate::engine::sync::SyncEngine;
     use crate::engine::test_delegating::DelegatingEngine;
     use crate::utils::FoldWithOption as _;
-    use crate::{Engine, FileMeta, LogPath, ResultIteratorStatic, Snapshot, StorageHandler};
+    use crate::{Engine, FileMeta, KernelResultIteratorStatic, LogPath, Snapshot, StorageHandler};
 
     struct NoIoStorageHandler;
 
     impl StorageHandler for NoIoStorageHandler {
-        fn list_from(&self, _path: &Url) -> Result<ResultIteratorStatic<FileMeta>> {
+        fn list_from(&self, _path: &Url) -> KernelResult<KernelResultIteratorStatic<FileMeta>> {
             panic!("snapshot-based commit ranges must not list storage");
         }
 
         fn read_files(
             &self,
             _files: Vec<crate::FileSlice>,
-        ) -> Result<ResultIteratorStatic<bytes::Bytes>> {
+        ) -> KernelResult<KernelResultIteratorStatic<bytes::Bytes>> {
             panic!("commit range construction must not read files");
         }
 
-        fn copy_atomic(&self, _src: &Url, _dest: &Url) -> Result<()> {
+        fn copy_atomic(&self, _src: &Url, _dest: &Url) -> KernelResult<()> {
             panic!("unexpected copy");
         }
 
-        fn put(&self, _path: &Url, _data: bytes::Bytes, _overwrite: bool) -> Result<()> {
+        fn put(&self, _path: &Url, _data: bytes::Bytes, _overwrite: bool) -> KernelResult<()> {
             panic!("unexpected write");
         }
 
-        fn head(&self, _path: &Url) -> Result<FileMeta> {
+        fn head(&self, _path: &Url) -> KernelResult<FileMeta> {
             panic!("unexpected head");
         }
 
-        fn delete(&self, _path: &Url) -> Result<()> {
+        fn delete(&self, _path: &Url) -> KernelResult<()> {
             panic!("unexpected delete");
         }
     }

@@ -14,11 +14,11 @@ use url::Url;
 
 #[cfg(feature = "adaptive-metadata-in-dev")]
 use crate::amt_path_util::{resolve_table_relative, validate_table_relative};
-#[cfg(feature = "adaptive-metadata-in-dev")]
 use crate::path_encoding::uri_decode_path;
 use crate::schema::DataType;
+use crate::snapshot::Snapshot;
 use crate::utils::require;
-use crate::{KernelError, KernelResult, Result, Scalar, StorageHandler};
+use crate::{KernelError, KernelResult, Scalar, StorageHandler};
 
 /// Magic number for portable RoaringBitmap serialization format.
 /// This is the standard format defined in the RoaringBitmap Specification
@@ -52,7 +52,7 @@ pub enum DeletionVectorStorageType {
 impl FromStr for DeletionVectorStorageType {
     type Err = KernelError;
 
-    fn from_str(s: &str) -> Result<Self> {
+    fn from_str(s: &str) -> KernelResult<Self> {
         match s {
             "u" => Ok(Self::PersistedRelative),
             "i" => Ok(Self::Inline),
@@ -134,7 +134,7 @@ impl DeletionVectorPath {
     }
 
     /// Returns the absolute path to the deletion vector file.
-    pub fn absolute_path(&self) -> Result<Url> {
+    pub fn absolute_path(&self) -> KernelResult<Url> {
         let dv_suffix = Self::relative_path(&self.prefix, &self.uuid);
         self.table_path
             .join(&dv_suffix)
@@ -198,7 +198,7 @@ struct DeletionVectorRaw {
 impl TryFrom<DeletionVectorRaw> for DeletionVectorDescriptor {
     type Error = KernelError;
 
-    fn try_from(raw: DeletionVectorRaw) -> Result<Self> {
+    fn try_from(raw: DeletionVectorRaw) -> KernelResult<Self> {
         Self::try_new(
             raw.storage_type.parse()?,
             raw.path_or_inline_dv,
@@ -231,7 +231,7 @@ impl DeletionVectorDescriptor {
         offset: Option<i32>,
         size_in_bytes: i32,
         cardinality: i64,
-    ) -> Result<Self> {
+    ) -> KernelResult<Self> {
         require!(
             size_in_bytes >= 0,
             KernelError::deletion_vector("size_in_bytes must be non-negative")
@@ -290,7 +290,60 @@ impl DeletionVectorDescriptor {
         })
     }
 
+    /// Returns this deletion vector's unique id in `snapshot`'s table: the `dv_unique_id` that
+    /// kernel uses in the `FileActionKey`s it produces for that table (for example, from an
+    /// incremental scan). On tables with adaptiveMetadata enabled, descriptors that name the same
+    /// DV file under different storage types share an id.
+    pub fn unique_id_for(&self, snapshot: &Snapshot) -> KernelResult<String> {
+        Self::unique_id_with_root(
+            &self.storage_type.to_string(),
+            &self.path_or_inline_dv,
+            self.offset,
+            snapshot
+                .table_configuration()
+                .dv_normalization_root()
+                .as_ref(),
+        )
+    }
+
+    /// Returns the storage-type-prefixed unique id of this deletion vector.
+    #[deprecated(
+        note = "use `unique_id_for`, which returns the id kernel uses for the descriptor's table"
+    )]
     pub fn unique_id(&self) -> String {
+        self.legacy_unique_id()
+    }
+
+    /// Returns the unique id for a descriptor's raw parts: the normalized identity (see
+    /// [`Self::normalized_unique_id_from_parts`]) when `dv_normalization_root` is `Some`, else the
+    /// legacy storage-type-prefixed id.
+    ///
+    /// # Errors
+    ///
+    /// Under normalization, returns [`KernelError::DeletionVector`] for an unknown storage type or
+    /// a malformed DV path.
+    pub(crate) fn unique_id_with_root(
+        storage_type: &str,
+        path_or_inline_dv: &str,
+        offset: Option<i32>,
+        dv_normalization_root: Option<&Url>,
+    ) -> KernelResult<String> {
+        let Some(table_root) = dv_normalization_root else {
+            return Ok(Self::unique_id_from_parts(
+                storage_type,
+                path_or_inline_dv,
+                offset,
+            ));
+        };
+        let storage_type = storage_type.parse().map_err(|_| {
+            KernelError::deletion_vector(format!(
+                "unsupported deletion vector storage type: {storage_type}"
+            ))
+        })?;
+        Self::normalized_unique_id_from_parts(storage_type, path_or_inline_dv, offset, table_root)
+    }
+
+    pub(crate) fn legacy_unique_id(&self) -> String {
         Self::unique_id_from_parts(
             &self.storage_type.to_string(),
             &self.path_or_inline_dv,
@@ -329,8 +382,6 @@ impl DeletionVectorDescriptor {
     /// Returns [`KernelError::InvalidTableLocation`] if `table_root` does not end with `/`, and
     /// [`KernelError::DeletionVector`] for a malformed `'u'` path or a `'p'` path that is not a
     /// valid URL.
-    #[cfg(feature = "adaptive-metadata-in-dev")]
-    #[allow(dead_code)]
     pub(crate) fn normalized_unique_id_from_parts(
         storage_type: DeletionVectorStorageType,
         path_or_inline_dv: &str,
@@ -351,7 +402,6 @@ impl DeletionVectorDescriptor {
     /// Normalizes a descriptor's `(storage_type, path_or_inline_dv)` to the `(marker, path)` pair
     /// used by [`Self::normalized_unique_id_from_parts`]. See that method for the per-storage-type
     /// rules.
-    #[cfg(feature = "adaptive-metadata-in-dev")]
     fn normalized_marker_and_path(
         storage_type: DeletionVectorStorageType,
         path_or_inline_dv: &str,
@@ -362,6 +412,7 @@ impl DeletionVectorDescriptor {
             DeletionVectorStorageType::PersistedRelative => {
                 ("r", Self::decode_uuid_relative_path(path_or_inline_dv)?)
             }
+            #[cfg(feature = "adaptive-metadata-in-dev")]
             DeletionVectorStorageType::PersistedUnencodedRelative => {
                 ("r", path_or_inline_dv.to_string())
             }
@@ -424,7 +475,7 @@ impl DeletionVectorDescriptor {
         Ok(DeletionVectorPath::relative_path(prefix, &uuid))
     }
 
-    pub fn absolute_path(&self, parent: &Url) -> Result<Option<Url>> {
+    pub fn absolute_path(&self, parent: &Url) -> KernelResult<Option<Url>> {
         match self.storage_type {
             DeletionVectorStorageType::PersistedRelative => {
                 let dv_suffix = self.relative_path()?;
@@ -455,7 +506,11 @@ impl DeletionVectorDescriptor {
     //  little, while the version, size, and checksum are big
     //  - dvs can potentially indicate the size in the delta log, and _also_ in the file. If both
     //  are present, we assert they are the same
-    pub fn read(&self, storage: Arc<dyn StorageHandler>, parent: &Url) -> Result<RoaringTreemap> {
+    pub fn read(
+        &self,
+        storage: Arc<dyn StorageHandler>,
+        parent: &Url,
+    ) -> KernelResult<RoaringTreemap> {
         match self.absolute_path(parent)? {
             None => {
                 let byte_slice = z85::decode(&self.path_or_inline_dv)
@@ -604,7 +659,11 @@ impl DeletionVectorDescriptor {
 
     /// Materialize the row indexes of the deletion vector as a `Vec<u64>` in which each element
     /// represents a row index that is deleted from the table.
-    pub fn row_indexes(&self, storage: Arc<dyn StorageHandler>, parent: &Url) -> Result<Vec<u64>> {
+    pub fn row_indexes(
+        &self,
+        storage: Arc<dyn StorageHandler>,
+        parent: &Url,
+    ) -> KernelResult<Vec<u64>> {
         Ok(self.read(storage, parent)?.into_iter().collect())
     }
 }
@@ -721,7 +780,6 @@ pub fn split_vector(
 /// Paths are compared decoded so that alternate encodings of the same characters (e.g. `%74` vs
 /// `t`) agree, and the relative form matches the raw form of `'u'`/`'r'` paths. A URL with a query
 /// or fragment, or whose path is not valid UTF-8 once decoded, is treated as outside the root.
-#[cfg(feature = "adaptive-metadata-in-dev")]
 fn normalized_absolute_marker_and_path(
     url: &Url,
     original: &str,
@@ -756,7 +814,6 @@ mod tests {
 
     use super::{DeletionVectorDescriptor, *};
     use crate::engine::sync::SyncEngine;
-    #[cfg(feature = "adaptive-metadata-in-dev")]
     use crate::unit_test_utils::assert_result_error_with_message;
     use crate::Engine;
 
@@ -1253,7 +1310,6 @@ mod tests {
     }
 
     // `expected` is the normalized `<marker><path>[@<offset>]` identity against `table_root`.
-    #[cfg(feature = "adaptive-metadata-in-dev")]
     #[rstest::rstest]
     #[case::uuid_relative(
         DeletionVectorStorageType::PersistedRelative,
@@ -1262,12 +1318,15 @@ mod tests {
         "s3://mytable/",
         "rab/deletion_vector_d2c639aa-8816-431a-aaf6-d3fe2512ff61.bin@4"
     )]
-    #[case::unencoded_relative(
-        DeletionVectorStorageType::PersistedUnencodedRelative,
-        "data/deletion_vector_x.bin",
-        Some(2),
-        "s3://mytable/",
-        "rdata/deletion_vector_x.bin@2"
+    #[cfg_attr(
+        feature = "adaptive-metadata-in-dev",
+        case::unencoded_relative(
+            DeletionVectorStorageType::PersistedUnencodedRelative,
+            "data/deletion_vector_x.bin",
+            Some(2),
+            "s3://mytable/",
+            "rdata/deletion_vector_x.bin@2"
+        )
     )]
     #[case::absolute_under_root(
         DeletionVectorStorageType::PersistedAbsolute,
@@ -1406,7 +1465,6 @@ mod tests {
         assert_eq!(id, expected);
     }
 
-    #[cfg(feature = "adaptive-metadata-in-dev")]
     #[rstest::rstest]
     #[case::uuid_relative_too_short(
         DeletionVectorStorageType::PersistedRelative,
