@@ -75,14 +75,8 @@ static FIRST_ROW_ID_HELPER_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
 });
 
 /// Leaf converter input schema: the entry schema plus [`FIRST_ROW_ID_HELPER`].
-static LEAF_INPUT_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
-    let mut fields: Vec<StructField> = ContentTreeNodeEntry::to_schema()
-        .fields()
-        .cloned()
-        .collect();
-    fields.push(StructField::nullable(FIRST_ROW_ID_HELPER, DataType::LONG));
-    Arc::new(StructType::new_unchecked(fields))
-});
+static LEAF_INPUT_SCHEMA: LazyLock<SchemaRef> =
+    LazyLock::new(|| entry_schema_with(&FIRST_ROW_ID_HELPER_SCHEMA));
 
 /// Converts content-tree entry batches into `Add`-action batches. The entry->`Add` evaluator is
 /// built once, so one converter can be reused across every batch of a manifest.
@@ -192,11 +186,12 @@ impl LeafReadContext {
     /// [`EntryConverter::convert`]. Batches must be passed in manifest order, since null
     /// `firstRowId`s are assigned sequentially across them.
     ///
-    /// The parent's manifest deletion vector is not applied; the caller must apply it to the
-    /// returned selection.
+    /// TODO(#3663): the parent's manifest deletion vector is not applied, so entries it masks are
+    /// still validated. Supporting it means masking the selection after `firstRowId` assignment,
+    /// which must still run over every entry.
     ///
     /// # Errors
-    /// Returns an error if an entry is malformed for a leaf (see [`FirstRowIdVisitor`]), or any
+    /// Returns an error if an entry is malformed for a leaf (see [`LeafEntryVisitor`]), or any
     /// error from [`EntryConverter::convert`].
     pub(crate) fn convert_leaf_entries_to_add_actions(
         &mut self,
@@ -204,7 +199,7 @@ impl LeafReadContext {
     ) -> KernelResult<FilteredEngineData> {
         // Only update `self` once the whole batch succeeds, so a retried batch gets the same IDs.
         let (first_row_ids, next_first_row_id) =
-            assign_first_row_ids(entries, self.next_first_row_id)?;
+            validate_and_assign_first_row_ids(entries, self.next_first_row_id)?;
 
         let helper_column =
             ArrayData::try_new(ArrayType::new(DataType::LONG, true), first_row_ids)?;
@@ -218,6 +213,16 @@ impl LeafReadContext {
 }
 
 // === Helpers ===
+
+/// [`ContentTreeNodeEntry::to_schema`] followed by the fields of `helpers`.
+fn entry_schema_with(helpers: &StructType) -> SchemaRef {
+    Arc::new(StructType::new_unchecked(
+        ContentTreeNodeEntry::to_schema()
+            .fields()
+            .chain(helpers.fields())
+            .cloned(),
+    ))
+}
 
 /// Shared constructor for [`EntryConverter`]: builds the entry->`Add` transform (with the caller's
 /// [`AddFieldSources`]) and its evaluator.
@@ -240,16 +245,19 @@ fn make_entry_converter(
     Ok(EntryConverter { evaluator })
 }
 
-/// Resolves each leaf entry's `firstRowId`, starting from `seed`. Returns the per-row values and
-/// the next unassigned row ID.
+/// Validates each leaf entry and resolves its `firstRowId`, starting from `seed`. Returns the
+/// per-row values and the next unassigned row ID.
 ///
 /// An entry with a `firstRowId` keeps it. An `Added` entry without one gets the next unassigned
 /// ID, which then advances by the entry's `recordCount`.
 ///
 /// # Errors
-/// See [`FirstRowIdVisitor`].
-fn assign_first_row_ids(entries: &dyn EngineData, seed: i64) -> KernelResult<(Vec<Scalar>, i64)> {
-    let mut visitor = FirstRowIdVisitor::new(seed);
+/// See [`LeafEntryVisitor`].
+fn validate_and_assign_first_row_ids(
+    entries: &dyn EngineData,
+    seed: i64,
+) -> KernelResult<(Vec<Scalar>, i64)> {
+    let mut visitor = LeafEntryVisitor::new(seed);
     visitor.visit_rows_of(entries)?;
     Ok((visitor.first_row_ids, visitor.next_first_row_id))
 }
@@ -429,19 +437,19 @@ fn check_selected_entry<'a>(
     Ok(())
 }
 
-/// Visitor behind [`assign_first_row_ids`].
+/// Visitor behind [`validate_and_assign_first_row_ids`].
 ///
 /// Errors if a leaf entry is not `Data`, has an unknown status, is live and non-`Added` with a
 /// null `sequenceNumber` or `firstRowId`, or needs a `firstRowId` but has a negative
 /// `recordCount`, or if assignment overflows `i64`.
-struct FirstRowIdVisitor {
+struct LeafEntryVisitor {
     /// Next unassigned `firstRowId`.
     next_first_row_id: i64,
     /// Resolved `firstRowId` per row, in entry order.
     first_row_ids: Vec<Scalar>,
 }
 
-impl FirstRowIdVisitor {
+impl LeafEntryVisitor {
     fn new(next_first_row_id: i64) -> Self {
         Self {
             next_first_row_id,
@@ -450,7 +458,7 @@ impl FirstRowIdVisitor {
     }
 }
 
-impl RowVisitor for FirstRowIdVisitor {
+impl RowVisitor for LeafEntryVisitor {
     fn selected_column_names_and_types(&self) -> (&'static [ColumnName], &'static [DataType]) {
         static NAMES_AND_TYPES: LazyLock<ColumnNamesAndTypes> = LazyLock::new(|| {
             (
