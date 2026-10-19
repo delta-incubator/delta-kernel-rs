@@ -64,6 +64,7 @@ use crate::schema::{ArrayType, MapType, SchemaRef, StructField, StructType};
 use crate::snapshot::SnapshotRef;
 use crate::table_features::Operation;
 use crate::transforms::{transform_output_type, SchemaTransform};
+use crate::utils::require;
 use crate::{Engine, KernelError, KernelResult, KernelResultIterator, Version};
 
 /// A contiguous range of Delta commits, holding resolved `[start_version, end_version]` bounds
@@ -79,6 +80,7 @@ pub struct CommitRange {
     start_version: Version,
     end_version: Version,
     commit_ordering: CommitOrdering,
+    fail_on_data_loss: bool,
 }
 
 impl CommitRange {
@@ -109,6 +111,31 @@ impl CommitRange {
     /// The table root URL this range was built from.
     pub fn table_root(&self) -> &Url {
         &self.table_root
+    }
+
+    /// Iterator over the range's commit files in ascending version order.
+    ///
+    /// Version gaps are detected lazily as the iterator advances. When the range was built with
+    /// `fail_on_data_loss` enabled, a missing start version yields
+    /// [`KernelError::StartVersionNotFound`] and a gap after the first file yields
+    /// [`KernelError::MissingVersion`]. Otherwise, available files are yielded across gaps.
+    /// Missing versions after the last listed file are not reported.
+    ///
+    /// Returns [`KernelError::Unsupported`] if the range was not built with
+    /// [`CommitOrdering::AscendingOrder`].
+    pub(crate) fn commit_files(
+        &self,
+    ) -> KernelResult<impl Iterator<Item = KernelResult<ParsedLogPath>> + Send> {
+        require!(
+            self.commit_ordering == CommitOrdering::AscendingOrder,
+            KernelError::unsupported("Commit file iteration requires ascending commit ordering")
+        );
+        Ok(CommitFileIterator {
+            files: self.commit_files.clone().into_iter(),
+            start_version: self.start_version,
+            expected_version: self.start_version,
+            fail_on_data_loss: self.fail_on_data_loss,
+        })
     }
 
     /// Iterator over the commits in the range, yielding one [`CommitAction`] per commit.
@@ -180,6 +207,36 @@ impl CommitRange {
             latest_protocol,
             latest_metadata,
         })
+    }
+}
+
+/// Iterator yielded by [`CommitRange::commit_files`]. Tracks the next expected version to detect
+/// gaps lazily.
+struct CommitFileIterator {
+    files: std::vec::IntoIter<ParsedLogPath>,
+    start_version: Version,
+    expected_version: Version,
+    fail_on_data_loss: bool,
+}
+
+impl Iterator for CommitFileIterator {
+    type Item = KernelResult<ParsedLogPath>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let file = self.files.next()?;
+        if self.fail_on_data_loss && file.version != self.expected_version {
+            let err = if self.expected_version == self.start_version {
+                KernelError::StartVersionNotFound {
+                    requested: self.start_version,
+                    earliest: file.version,
+                }
+            } else {
+                KernelError::MissingVersion(self.expected_version)
+            };
+            return Some(Err(err));
+        }
+        self.expected_version = file.version.saturating_add(1);
+        Some(Ok(file))
     }
 }
 

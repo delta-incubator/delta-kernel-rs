@@ -4,6 +4,7 @@ use crate::commit_range::CommitRange;
 use crate::log_segment::{
     validate_catalog_managed_log_tail, validate_start_version_available, LogSegment,
 };
+use crate::log_segment_files::LogSegmentFiles;
 use crate::path::{LogPathFileType, ParsedLogPath};
 use crate::snapshot::SnapshotRef;
 use crate::utils::require;
@@ -24,6 +25,8 @@ pub struct CommitRangeBuilder {
     commit_ordering: CommitOrdering,
     log_tail: Vec<LogPath>,
     max_catalog_version: Option<Version>,
+    commit_range_validation: bool,
+    fail_on_data_loss: bool,
 }
 
 impl CommitRangeBuilder {
@@ -36,6 +39,8 @@ impl CommitRangeBuilder {
             commit_ordering: CommitOrdering::AscendingOrder,
             log_tail: Vec::new(),
             max_catalog_version: None,
+            commit_range_validation: true,
+            fail_on_data_loss: true,
         }
     }
 
@@ -48,6 +53,8 @@ impl CommitRangeBuilder {
             commit_ordering: CommitOrdering::AscendingOrder,
             log_tail: Vec::new(),
             max_catalog_version: None,
+            commit_range_validation: true,
+            fail_on_data_loss: true,
         }
     }
 
@@ -80,6 +87,29 @@ impl CommitRangeBuilder {
         self
     }
 
+    /// Enable or disable build-time commit range validation. Defaults to `true`.
+    ///
+    /// When `true`, [`Self::build`] requires the requested start version to be present and the
+    /// listed commits to be contiguous. When `false`, [`Self::build`] materializes whatever
+    /// commits are listed in the range without validating the start version, contiguity, or
+    /// commit count; gaps are instead reported lazily per [`Self::with_fail_on_data_loss`].
+    /// Disabling validation is only supported for path-based builders
+    /// ([`CommitRange::builder_for`]).
+    pub fn with_commit_range_validation(mut self, commit_range_validation: bool) -> Self {
+        self.commit_range_validation = commit_range_validation;
+        self
+    }
+
+    /// Set whether iterating the built range's commit files fails on missing versions. Defaults
+    /// to `true`.
+    ///
+    /// When `true`, a missing start version or an internal version gap surfaces as an error when
+    /// the iterator reaches it. When `false`, available commit files are yielded across gaps.
+    pub fn with_fail_on_data_loss(mut self, fail_on_data_loss: bool) -> Self {
+        self.fail_on_data_loss = fail_on_data_loss;
+        self
+    }
+
     /// Resolve commit-file metadata, validate contiguity, and produce a [`CommitRange`]. A
     /// path-based builder lists `_delta_log/`; a snapshot-based builder reuses the snapshot's log
     /// segment. Neither path reads commit JSON.
@@ -90,7 +120,16 @@ impl CommitRangeBuilder {
     /// the earliest still-available version) if the requested start is unavailable but later
     /// versions exist, [`KernelError::EmptyLog`] if nothing is available in the requested range at
     /// all, and a generic error if the resolved version range is invalid (start > end).
+    ///
+    /// With commit range validation disabled, only [`KernelError::EmptyLog`] (no commit listed in
+    /// the range) and the version-range and catalog-tail errors apply. Returns
+    /// [`KernelError::Unsupported`] if validation is disabled on a snapshot-based builder.
     pub fn build(&self, engine: &dyn Engine) -> KernelResult<CommitRange> {
+        if self.snapshot.is_some() && !self.commit_range_validation {
+            return Err(KernelError::unsupported(
+                "Disabling commit range validation is only supported for path-based commit ranges",
+            ));
+        }
         let table_root = Self::parse_table_root(&self.table_root)?;
         let log_root = table_root.join("_delta_log/")?;
 
@@ -126,6 +165,18 @@ impl CommitRangeBuilder {
                 return Err(KernelError::MissingVersion(available_end_version + 1));
             }
             (commit_files, end_version)
+        } else if !self.commit_range_validation {
+            let commit_files = LogSegmentFiles::list_commits(
+                engine.storage_handler().as_ref(),
+                &log_root,
+                log_tail,
+                Some(start_version),
+                configured_end_version,
+                None,
+            )?
+            .ascending_commit_files;
+            let last_version = commit_files.last().ok_or(KernelError::EmptyLog)?.version;
+            (commit_files, configured_end_version.unwrap_or(last_version))
         } else {
             let log_segment = LogSegment::for_table_changes_with_log_tail(
                 engine.storage_handler().as_ref(),
@@ -143,7 +194,9 @@ impl CommitRangeBuilder {
                 .collect();
             (commit_files, end_version)
         };
-        validate_number_of_commit_files(start_version, end_version, commit_files.len())?;
+        if self.commit_range_validation {
+            validate_number_of_commit_files(start_version, end_version, commit_files.len())?;
+        }
 
         if self.commit_ordering == CommitOrdering::DescendingOrder {
             commit_files.reverse();
@@ -155,6 +208,7 @@ impl CommitRangeBuilder {
             start_version,
             end_version,
             commit_ordering: self.commit_ordering,
+            fail_on_data_loss: self.fail_on_data_loss,
         })
     }
 
