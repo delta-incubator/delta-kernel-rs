@@ -535,9 +535,18 @@ fn primitive_types_compatible(expected: &PrimitiveType, data_type: &ArrowDataTyp
         _ => false,
     }
 }
+
 #[cfg(test)]
 fn expected_timestamp_micros(value: &str) -> i64 {
     chrono::DateTime::parse_from_rfc3339(value)
         .unwrap()
         .timestamp_micros()
+}
+
+#[cfg(all(test, feature = "nanosecond-timestamps"))]
+fn expected_timestamp_nanos(value: &str) -> i64 {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .unwrap()
+        .timestamp_nanos_opt()
+        .unwrap()
 }
