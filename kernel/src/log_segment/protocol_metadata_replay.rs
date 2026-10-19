@@ -146,17 +146,6 @@ impl LogSegment {
         })
     }
 
-    /// `end_version` as the `i64` that log actions use for versions.
-    #[cfg(feature = "adaptive-metadata-in-dev")]
-    fn end_version_i64(&self) -> KernelResult<i64> {
-        i64::try_from(self.end_version).map_err(|_| {
-            KernelError::generic(format!(
-                "log segment end version {} does not fit in i64",
-                self.end_version
-            ))
-        })
-    }
-
     /// The commit at `end_version` when the commit cover reads a log compaction in its place.
     #[cfg(all(feature = "adaptive-metadata-in-dev", feature = "declarative-plans"))]
     fn newest_commit_if_compacted(&self) -> Option<&ParsedLogPath> {
@@ -301,7 +290,7 @@ impl LogSegment {
             relevant_action,
             Predicate::and(
                 col!(COMMIT_INFO_NAME, "lastManifestCommit", "version").is_not_null(),
-                col!("version").eq(lit(self.end_version_i64()?)),
+                col!("version").eq(lit(self.end_version as i64)),
             ),
         );
 
@@ -376,7 +365,7 @@ impl LogSegment {
         )?);
         let checkpoint_version = self.checkpoint_version.map(|v| v as i64);
         #[cfg(feature = "adaptive-metadata-in-dev")]
-        let end_version = self.end_version_i64()?;
+        let end_version = self.end_version as i64;
         let batches = self
             .read_actions_with_projected_checkpoint_actions(
                 engine,
