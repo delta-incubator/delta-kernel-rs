@@ -19,7 +19,7 @@ use crate::schema::{
 };
 use crate::table_properties::{TableProperties, COLUMN_MAPPING_MODE};
 use crate::transforms::{transform_output_type, SchemaTransform};
-use crate::{DeltaResult, Error};
+use crate::{KernelError, KernelResult};
 
 /// Modes of column mapping a table can be in
 #[derive(Debug, EnumString, Serialize, Deserialize, Copy, Clone, PartialEq, Eq)]
@@ -45,14 +45,14 @@ pub(crate) const MAX_COLUMN_MAPPING_ID: i64 = i32::MAX as i64;
 /// `0..=`[`MAX_COLUMN_MAPPING_ID`]. Out-of-range ids (negative or above `i32::MAX`) are rejected
 /// with a single canonical message naming the offending value and the protocol bound. Callers
 /// that want to add context (e.g. the offending field name or table-property name) wrap with
-/// `.map_err(|e| Error::schema(format!("Field '{name}': {e}")))?` -- matching the kernel
+/// `.map_err(|e| KernelError::schema(format!("Field '{name}': {e}")))?` -- matching the kernel
 /// convention used by sibling validators in `schema/validation.rs`.
-pub(crate) fn validate_column_mapping_id(id: i64) -> DeltaResult<()> {
+pub(crate) fn validate_column_mapping_id(id: i64) -> KernelResult<()> {
     if (0..=MAX_COLUMN_MAPPING_ID).contains(&id) {
         return Ok(());
     }
     let key = ColumnMetadataKey::ColumnMappingId.as_ref();
-    Err(Error::schema(format!(
+    Err(KernelError::schema(format!(
         "Invalid column mapping id {id}: the Delta protocol restricts \
          `{key}` to a 32-bit non-negative integer (max {MAX_COLUMN_MAPPING_ID}).",
     )))
@@ -110,7 +110,10 @@ pub(crate) fn column_mapping_mode(
 ///   ]}}
 /// ]}
 /// ```
-pub fn validate_schema_column_mapping(schema: &Schema, mode: ColumnMappingMode) -> DeltaResult<()> {
+pub fn validate_schema_column_mapping(
+    schema: &Schema,
+    mode: ColumnMappingMode,
+) -> KernelResult<()> {
     MakePhysical::validate_schema_column_mapping(mode, schema)
 }
 
@@ -198,7 +201,7 @@ pub(crate) fn validate_and_extract_column_mapping_annotations<'a>(
     parent_field_logical_path: &[&'a str],
     seen_ids: Option<&mut HashMap<i64, &'a str>>,
     current_field_siblings: Option<&mut HashMap<&'a str, &'a str>>,
-) -> DeltaResult<(&'a str, Option<i64>)> {
+) -> KernelResult<(&'a str, Option<i64>)> {
     let logical_field_path = || {
         ColumnName::new(
             parent_field_logical_path
@@ -216,7 +219,7 @@ pub(crate) fn validate_and_extract_column_mapping_annotations<'a>(
 
     if field.is_metadata_column() {
         if physical_name_meta.is_some() || id_meta.is_some() {
-            return Err(Error::internal_error(format!(
+            return Err(KernelError::internal_error(format!(
                 "Metadata column '{}' must not have column mapping annotations",
                 field.name()
             )));
@@ -229,13 +232,13 @@ pub(crate) fn validate_and_extract_column_mapping_annotations<'a>(
         (ColumnMappingMode::None, None) => field.name(),
         (ColumnMappingMode::Name | ColumnMappingMode::Id, Some(MetadataValue::String(s))) => s,
         (ColumnMappingMode::Name | ColumnMappingMode::Id, Some(_)) => {
-            return Err(Error::schema(format!(
+            return Err(KernelError::schema(format!(
                 "The {annotation} annotation on field '{}' must be a string",
                 logical_field_path(),
             )));
         }
         (ColumnMappingMode::Name | ColumnMappingMode::Id, None) => {
-            return Err(Error::schema(format!(
+            return Err(KernelError::schema(format!(
                 "Column mapping is enabled but field '{}' lacks the {annotation} annotation",
                 logical_field_path(),
             )));
@@ -243,7 +246,7 @@ pub(crate) fn validate_and_extract_column_mapping_annotations<'a>(
         (ColumnMappingMode::None, Some(_)) => match stale_policy {
             StaleAnnotationPolicy::Ignore => field.name(),
             StaleAnnotationPolicy::Reject => {
-                return Err(Error::schema(format!(
+                return Err(KernelError::schema(format!(
                     "Column mapping is not enabled but field '{}' is annotated with {annotation}",
                     logical_field_path(),
                 )));
@@ -258,13 +261,13 @@ pub(crate) fn validate_and_extract_column_mapping_annotations<'a>(
             Some(*n)
         }
         (ColumnMappingMode::Name | ColumnMappingMode::Id, Some(_)) => {
-            return Err(Error::schema(format!(
+            return Err(KernelError::schema(format!(
                 "The {annotation} annotation on field '{}' must be a number",
                 logical_field_path(),
             )));
         }
         (ColumnMappingMode::Name | ColumnMappingMode::Id, None) => {
-            return Err(Error::schema(format!(
+            return Err(KernelError::schema(format!(
                 "Column mapping is enabled but field '{}' lacks the {annotation} annotation",
                 logical_field_path(),
             )));
@@ -272,7 +275,7 @@ pub(crate) fn validate_and_extract_column_mapping_annotations<'a>(
         (ColumnMappingMode::None, Some(_)) => match stale_policy {
             StaleAnnotationPolicy::Ignore => None,
             StaleAnnotationPolicy::Reject => {
-                return Err(Error::schema(format!(
+                return Err(KernelError::schema(format!(
                     "Column mapping is not enabled but field '{}' is annotated with {annotation}",
                     logical_field_path(),
                 )));
@@ -286,7 +289,7 @@ pub(crate) fn validate_and_extract_column_mapping_annotations<'a>(
     if mode != ColumnMappingMode::None {
         if let (Some(id), Some(seen_ids)) = (id, seen_ids) {
             seen_ids.insert(id, field.name()).map_or(Ok(()), |prev| {
-                Err(Error::schema(format!(
+                Err(KernelError::schema(format!(
                     "Duplicate column mapping ID {id} assigned to both '{prev}' and '{}'",
                     field.name()
                 )))
@@ -299,7 +302,7 @@ pub(crate) fn validate_and_extract_column_mapping_annotations<'a>(
             siblings
                 .insert(physical_name.as_str(), field.name().as_str())
                 .map_or(Ok(()), |prev| {
-                    Err(Error::schema(format!(
+                    Err(KernelError::schema(format!(
                         "Duplicate `delta.columnMapping.physicalName` '{physical_name}' \
                          assigned to both '{}' and '{}'",
                         ColumnName::new(parent_field_logical_path.iter().copied().chain([prev])),
@@ -324,10 +327,10 @@ pub(crate) fn validate_and_extract_column_mapping_annotations<'a>(
 /// Returns `ColumnMappingMode::None` if the property is not set.
 pub(crate) fn get_column_mapping_mode_from_properties(
     properties: &HashMap<String, String>,
-) -> DeltaResult<ColumnMappingMode> {
+) -> KernelResult<ColumnMappingMode> {
     match properties.get(COLUMN_MAPPING_MODE) {
         Some(mode_str) => mode_str.parse::<ColumnMappingMode>().map_err(|_| {
-            Error::generic(format!(
+            KernelError::generic(format!(
                 "Invalid column mapping mode '{mode_str}'. Must be one of: none, name, id"
             ))
         }),
@@ -414,14 +417,14 @@ pub(crate) fn assign_column_mapping_metadata(
     schema: &StructType,
     max_id: &mut i64,
     assign_nested_field_ids: bool,
-) -> DeltaResult<StructType> {
+) -> KernelResult<StructType> {
     // Assign CM id + physical name to every StructField (top-level and nested).
     // `delta.columnMapping.nested.ids` is assigned later separately, this is to
     // align with delta-spark's behavior.
     let new_fields: Vec<StructField> = schema
         .fields()
         .map(|field| try_assign_flat_column_mapping_info(field, max_id))
-        .collect::<DeltaResult<Vec<_>>>()?;
+        .collect::<KernelResult<Vec<_>>>()?;
     let with_flat_cm_info = StructType::try_new(new_fields)?;
     if !assign_nested_field_ids {
         return Ok(with_flat_cm_info);
@@ -446,9 +449,9 @@ type NestedFieldIds = serde_json::Map<String, serde_json::Value>;
 /// quintillion) is over four billion times the protocol-permitted maximum and points at a bug
 /// in the connector's id allocator rather than legitimate id exhaustion. The error message
 /// reflects that diagnosis.
-fn next_column_mapping_id(max_id: &mut i64) -> DeltaResult<i64> {
+fn next_column_mapping_id(max_id: &mut i64) -> KernelResult<i64> {
     let next = max_id.checked_add(1).ok_or_else(|| {
-        Error::generic(format!(
+        KernelError::generic(format!(
             "Cannot allocate column mapping id: `max_id + 1` overflows `i64` \
              (max_id={current}). The Delta protocol caps `delta.columnMapping.id` at a \
              32-bit non-negative integer; fix the upstream id allocator producing \
@@ -457,7 +460,7 @@ fn next_column_mapping_id(max_id: &mut i64) -> DeltaResult<i64> {
         ))
     })?;
     if next > MAX_COLUMN_MAPPING_ID {
-        return Err(Error::generic(format!(
+        return Err(KernelError::generic(format!(
             "Cannot allocate column mapping id {next}: exceeds the Delta protocol's 32-bit \
              non-negative maximum ({MAX_COLUMN_MAPPING_ID}). A preserved \
              `delta.columnMapping.id` is at the protocol cap; lower the largest preserved \
@@ -491,13 +494,13 @@ fn next_column_mapping_id(max_id: &mut i64) -> DeltaResult<i64> {
 pub(crate) fn try_assign_flat_column_mapping_info(
     field: &StructField,
     max_id: &mut i64,
-) -> DeltaResult<StructField> {
+) -> KernelResult<StructField> {
     for key in [
         ColumnMetadataKey::ColumnMappingNestedIds,
         ColumnMetadataKey::ParquetFieldNestedIds,
     ] {
         if field.get_config_value(&key).is_some() {
-            return Err(Error::generic(format!(
+            return Err(KernelError::generic(format!(
                 "Field '{}' has pre-populated `{}` metadata; this annotation is \
                  kernel-managed and must not be supplied on input fields.",
                 field.name,
@@ -560,7 +563,7 @@ pub(crate) fn try_assign_flat_column_mapping_info(
 fn flat_cm_info_for_nested_data_type(
     data_type: &DataType,
     max_id: &mut i64,
-) -> DeltaResult<DataType> {
+) -> KernelResult<DataType> {
     match data_type {
         DataType::Struct(inner) => {
             let new_inner = assign_column_mapping_metadata(
@@ -587,6 +590,8 @@ fn flat_cm_info_for_nested_data_type(
         }
         // Primitive and Variant types don't contain nested struct fields - return as-is
         DataType::Primitive(_) | DataType::Variant(_) => Ok(data_type.clone()),
+        #[cfg(feature = "udt-in-dev")]
+        DataType::UserDefined(_) => Ok(data_type.clone()),
     }
 }
 
@@ -607,13 +612,13 @@ fn flat_cm_info_for_nested_data_type(
 ///   "<phys>.value":       4
 /// }
 /// ```
-fn assign_nested_cm_ids(schema: &StructType, max_id: &mut i64) -> DeltaResult<StructType> {
+fn assign_nested_cm_ids(schema: &StructType, max_id: &mut i64) -> KernelResult<StructType> {
     fn walk(
         data_type: &DataType,
         max_id: &mut i64,
         path: &str,
         nested_ids: &mut NestedFieldIds,
-    ) -> DeltaResult<DataType> {
+    ) -> KernelResult<DataType> {
         match data_type {
             DataType::Struct(inner) => Ok(DataType::from(assign_nested_cm_ids(inner, max_id)?)),
             DataType::Array(array_type) => {
@@ -643,6 +648,8 @@ fn assign_nested_cm_ids(schema: &StructType, max_id: &mut i64) -> DeltaResult<St
                 )))
             }
             DataType::Primitive(_) | DataType::Variant(_) => Ok(data_type.clone()),
+            #[cfg(feature = "udt-in-dev")]
+            DataType::UserDefined(_) => Ok(data_type.clone()),
         }
     }
 
@@ -659,18 +666,18 @@ fn assign_nested_cm_ids(schema: &StructType, max_id: &mut i64) -> DeltaResult<St
             }
             Ok(new_field)
         })
-        .collect::<DeltaResult<Vec<_>>>()?;
+        .collect::<KernelResult<Vec<_>>>()?;
     StructType::try_new(new_fields)
 }
 
 // Get the physical name for a field. Error if the field is missing the physical name annotation.
-fn expect_physical_name(field: &StructField) -> DeltaResult<String> {
+fn expect_physical_name(field: &StructField) -> KernelResult<String> {
     match field
         .metadata
         .get(ColumnMetadataKey::ColumnMappingPhysicalName.as_ref())
     {
         Some(MetadataValue::String(s)) => Ok(s.clone()),
-        _ => Err(Error::internal_error(format!(
+        _ => Err(KernelError::internal_error(format!(
             "Expect field '{}' to have a physical name annotation",
             field.name,
         ))),
@@ -846,21 +853,21 @@ pub(crate) fn get_any_level_column_physical_name(
     schema: &StructType,
     col_name: &ColumnName,
     column_mapping_mode: ColumnMappingMode,
-) -> DeltaResult<ColumnName> {
+) -> KernelResult<ColumnName> {
     let fields = schema.fields_of_path(col_name)?;
     let physical_path: Vec<String> = fields
         .iter()
-        .map(|field| -> DeltaResult<String> {
+        .map(|field| -> KernelResult<String> {
             if column_mapping_mode != ColumnMappingMode::None {
                 if !field.has_physical_name_annotation() {
-                    return Err(Error::Schema(format!(
+                    return Err(KernelError::Schema(format!(
                         "Column mapping is enabled but field '{}' lacks the {} annotation",
                         field.name,
                         ColumnMetadataKey::ColumnMappingPhysicalName.as_ref()
                     )));
                 }
                 if !field.has_id_annotation() {
-                    return Err(Error::Schema(format!(
+                    return Err(KernelError::Schema(format!(
                         "Column mapping is enabled but field '{}' lacks the {} annotation",
                         field.name,
                         ColumnMetadataKey::ColumnMappingId.as_ref()
@@ -870,7 +877,7 @@ pub(crate) fn get_any_level_column_physical_name(
 
             Ok(field.physical_name(column_mapping_mode).to_string())
         })
-        .collect::<DeltaResult<Vec<_>>>()?;
+        .collect::<KernelResult<Vec<_>>>()?;
     Ok(ColumnName::new(physical_path))
 }
 
@@ -884,7 +891,7 @@ pub(crate) fn physical_to_logical_column_name_and_type(
     logical_schema: &StructType,
     physical_col: &ColumnName,
     column_mapping_mode: ColumnMappingMode,
-) -> DeltaResult<(ColumnName, DataType)> {
+) -> KernelResult<(ColumnName, DataType)> {
     let mut fields = vec![];
     logical_schema.visit_fields_of_path_by(
         physical_col,
@@ -898,7 +905,9 @@ pub(crate) fn physical_to_logical_column_name_and_type(
     // component, so on success `fields` is non-empty and its last element is the leaf.
     let leaf_type = fields
         .last()
-        .ok_or_else(|| Error::generic(format!("Column path '{physical_col}' resolved no fields")))?
+        .ok_or_else(|| {
+            KernelError::generic(format!("Column path '{physical_col}' resolved no fields"))
+        })?
         .data_type()
         .clone();
     Ok((ColumnName::new(fields.iter().map(|f| &f.name)), leaf_type))
@@ -910,12 +919,54 @@ mod tests {
 
     use super::*;
     use crate::expressions::{column_name, ColumnName};
+    #[cfg(feature = "udt-in-dev")]
+    use crate::schema::UserDefinedType;
     use crate::schema::{schema, DataType, MetadataValue, StructField, StructType};
     use crate::unit_test_utils::{
         assert_result_error_with_message, column_mapping_physical_name_dedup_fixtures as fixtures,
         test_deep_nested_schema_missing_leaf_cm, MockTableConfigurationBuilder,
     };
     use crate::utils::FoldWithOption as _;
+
+    #[cfg(feature = "udt-in-dev")]
+    #[rstest::rstest]
+    fn test_udt_column_mapping_preserves_sql_type(
+        #[values(ColumnMappingMode::Name, ColumnMappingMode::Id)] mode: ColumnMappingMode,
+        #[values(false, true)] assign_nested_field_ids: bool,
+    ) {
+        let sql_type = schema! {
+            nullable "kind": BYTE,
+            nullable "values": (ArrayType::new(DataType::DOUBLE, false)),
+            nullable "labels": (MapType::new(DataType::STRING, DataType::LONG, true)),
+        };
+        let udt = UserDefinedType::try_new(
+            sql_type,
+            [("class".into(), Some("example.Vector".into()))].into(),
+        )
+        .unwrap();
+        let schema = schema! { nullable "value": (udt.clone()) };
+        let mut max_id = 0;
+        let mapped =
+            assign_column_mapping_metadata(&schema, &mut max_id, assign_nested_field_ids).unwrap();
+        assert_eq!(max_id, 1);
+        validate_schema_column_mapping(&mapped, mode).unwrap();
+        let field = mapped.field("value").unwrap();
+        assert_eq!(
+            field.get_config_value(&ColumnMetadataKey::ColumnMappingId),
+            Some(&MetadataValue::Number(1))
+        );
+        assert!(field
+            .get_config_value(&ColumnMetadataKey::ColumnMappingNestedIds)
+            .is_none());
+        let physical = field.make_physical(mode).unwrap();
+        assert_ne!(physical.name(), "value");
+        assert_eq!(physical.name(), field.physical_name(mode));
+        assert_eq!(
+            physical.get_config_value(&ColumnMetadataKey::ParquetFieldId),
+            Some(&MetadataValue::Number(1))
+        );
+        assert_eq!(physical.data_type(), &DataType::from(udt));
+    }
 
     #[test]
     fn test_column_mapping_mode() {

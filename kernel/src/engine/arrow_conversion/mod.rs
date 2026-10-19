@@ -27,7 +27,7 @@ use crate::arrow::datatypes::{
     SchemaRef as ArrowSchemaRef, TimeUnit,
 };
 use crate::arrow::error::ArrowError;
-use crate::error::Error;
+use crate::error::KernelError;
 use crate::parquet::arrow::PARQUET_FIELD_ID_META_KEY;
 use crate::schema::{
     ArrayType, ColumnMetadataKey, DataType, MapType, MetadataValue, PrimitiveType, StructField,
@@ -264,6 +264,8 @@ fn kernel_field_into_arrow(
     datatype: &DataType,
 ) -> Result<ArrowDataType, ArrowError> {
     match datatype {
+        #[cfg(feature = "udt-in-dev")]
+        DataType::UserDefined(udt) => udt.sql_type().try_into_arrow(),
         DataType::Array(a) => {
             let element_path = format!("{relative_path}.{LIST_ARRAY_ROOT}");
             let element_id = lookup_nested_field_id(ancestor, &element_path)?;
@@ -340,6 +342,8 @@ impl TryFromKernel<&MapType> for ArrowField {
 impl TryFromKernel<&DataType> for ArrowDataType {
     fn try_from_kernel(t: &DataType) -> Result<Self, ArrowError> {
         match t {
+            #[cfg(feature = "udt-in-dev")]
+            DataType::UserDefined(_) => t.physical_type().try_into_arrow(),
             DataType::Primitive(p) => {
                 match p {
                     PrimitiveType::String => Ok(ArrowDataType::Utf8),
@@ -574,7 +578,8 @@ impl TryFromArrow<&ArrowDataType> for DataType {
             ArrowDataType::Decimal128(p, s) => {
                 if *s < 0 {
                     return Err(ArrowError::from_external_error(
-                        Error::invalid_decimal("Negative scales are not supported in Delta").into(),
+                        KernelError::invalid_decimal("Negative scales are not supported in Delta")
+                            .into(),
                     ));
                 };
                 DataType::decimal(*p, *s as u8)
@@ -677,7 +682,7 @@ mod tests {
     };
     #[cfg(feature = "geo-type-in-dev")]
     use crate::unit_test_utils::{geography_type, geometry_type};
-    use crate::DeltaResult;
+    use crate::KernelResult;
 
     #[cfg(feature = "geo-type-in-dev")]
     #[rstest]
@@ -693,13 +698,13 @@ mod tests {
         true,
     )))]
     fn test_geo_type_arrow_conversion_unsupported(#[case] dt: DataType) {
-        let result: Result<ArrowDataType, _> = (&dt).try_into_arrow();
+        let result: KernelResult<ArrowDataType, _> = (&dt).try_into_arrow();
         let err = result.unwrap_err();
         assert!(matches!(err, ArrowError::SchemaError(_)), "got: {err:?}");
     }
 
     #[test]
-    fn test_metadata_string_conversion() -> DeltaResult<()> {
+    fn test_metadata_string_conversion() -> KernelResult<()> {
         let mut metadata = HashMap::new();
         metadata.insert("description", "hello world".to_owned());
         let struct_field = StructField::not_null("name", DataType::STRING).with_metadata(metadata);
@@ -717,7 +722,7 @@ mod tests {
     // Delta tables can have void columns. The kernel should parse them and convert
     // to Arrow's Null type (and back).
     #[test]
-    fn test_void_type_roundtrip() -> DeltaResult<()> {
+    fn test_void_type_roundtrip() -> KernelResult<()> {
         let json = r#"
         {
             "name": "void_col",
@@ -746,7 +751,7 @@ mod tests {
     fn test_interval_type_arrow_conversion(
         #[case] kernel_type: DataType,
         #[case] expected: ArrowDataType,
-    ) -> DeltaResult<()> {
+    ) -> KernelResult<()> {
         assert_eq!(ArrowDataType::try_from_kernel(&kernel_type)?, expected);
         Ok(())
     }
@@ -754,7 +759,7 @@ mod tests {
     // Millisecond-precision timestamps (e.g. from externally-written checkpoint stats)
     // must convert like microsecond/nanosecond: UTC tz -> TIMESTAMP, no tz -> TIMESTAMP_NTZ.
     #[test]
-    fn test_millisecond_timestamp_conversion() -> DeltaResult<()> {
+    fn test_millisecond_timestamp_conversion() -> KernelResult<()> {
         let utc = DataType::try_from_arrow(&ArrowDataType::Timestamp(
             TimeUnit::Millisecond,
             Some("UTC".into()),
@@ -771,7 +776,7 @@ mod tests {
     // We tolerate it on reads (be permissive), and the Arrow conversion still
     // produces ArrowDataType::Null. The field retains nullable=false as-is — no coercion.
     #[test]
-    fn test_void_type_not_nullable() -> DeltaResult<()> {
+    fn test_void_type_not_nullable() -> KernelResult<()> {
         let json = r#"
         {
             "name": "void_col",
@@ -797,7 +802,7 @@ mod tests {
     }
 
     #[test]
-    fn test_void_field_in_struct() -> DeltaResult<()> {
+    fn test_void_field_in_struct() -> KernelResult<()> {
         // A struct schema with a void column should convert to Arrow with a Null field
         let schema = schema! {
             nullable "id": INTEGER,
@@ -821,7 +826,7 @@ mod tests {
     }
 
     #[test]
-    fn test_variant_shredded_type_fail() -> DeltaResult<()> {
+    fn test_variant_shredded_type_fail() -> KernelResult<()> {
         let unshredded_variant = DataType::unshredded_variant();
         let unshredded_variant_arrow = ArrowDataType::try_from_kernel(&unshredded_variant)?;
         assert!(unshredded_variant_arrow == unshredded_variant_arrow_type());
@@ -862,7 +867,7 @@ mod tests {
     }
 
     #[test]
-    fn test_try_into_arrow_threads_nested_ids_onto_arrow_schema() -> DeltaResult<()> {
+    fn test_try_into_arrow_threads_nested_ids_onto_arrow_schema() -> KernelResult<()> {
         let meta_key = ColumnMetadataKey::ColumnMappingNestedIds.as_ref();
         let fixture = complex_nested_with_field_ids(meta_key);
         let arrow_schema: ArrowSchema = (&fixture.kernel_schema).try_into_arrow()?;
@@ -892,7 +897,7 @@ mod tests {
     fn test_try_into_arrow_sets_field_ids_for_matched_nested_ids_only(
         #[case] schema: StructType,
         #[case] expected_field_ids: &[(&str, &str)],
-    ) -> DeltaResult<()> {
+    ) -> KernelResult<()> {
         let arrow_schema: ArrowSchema = (&schema).try_into_arrow()?;
         let field_ids: HashMap<String, String> =
             collect_arrow_field_metadata(&arrow_schema, PARQUET_FIELD_ID_META_KEY)
@@ -935,7 +940,7 @@ mod tests {
     }
 
     #[test]
-    fn test_recursive_field_id_transformation() -> DeltaResult<()> {
+    fn test_recursive_field_id_transformation() -> KernelResult<()> {
         // Create a complex nested structure with field IDs at multiple levels:
         // top_struct {
         //   simple_field: int (field_id=1)
@@ -1048,16 +1053,14 @@ mod tests {
     /// value, the round-trip to kernel should succeed (one key is kept after translation).
     #[test]
     fn test_arrow_to_kernel_matching_field_ids_succeed() {
-        let arrow_field = ArrowField::new("a", ArrowDataType::Int32, false).with_metadata(
-            [
+        let arrow_field =
+            ArrowField::new("a", ArrowDataType::Int32, false).with_metadata(HashMap::from([
                 (PARQUET_FIELD_ID_META_KEY.to_string(), "42".to_string()),
                 (
                     ColumnMetadataKey::ParquetFieldId.as_ref().to_string(),
                     "42".to_string(),
                 ),
-            ]
-            .into(),
-        );
+            ]));
         let kernel = StructField::try_from_arrow(&arrow_field).unwrap();
         // The two arrow keys collapse to a single kernel `parquet.field.id` entry whose value is
         // a `Number`.
@@ -1074,16 +1077,14 @@ mod tests {
     /// other.
     #[test]
     fn test_arrow_to_kernel_conflicting_field_ids_fail() {
-        let arrow_field = ArrowField::new("a", ArrowDataType::Int32, false).with_metadata(
-            [
+        let arrow_field =
+            ArrowField::new("a", ArrowDataType::Int32, false).with_metadata(HashMap::from([
                 (PARQUET_FIELD_ID_META_KEY.to_string(), "1".to_string()),
                 (
                     ColumnMetadataKey::ParquetFieldId.as_ref().to_string(),
                     "2".to_string(),
                 ),
-            ]
-            .into(),
-        );
+            ]));
         assert_result_error_with_message(
             StructField::try_from_arrow(&arrow_field),
             "conflicting parquet field IDs",
@@ -1124,8 +1125,10 @@ mod tests {
     /// rather than silently being dropped.
     #[test]
     fn test_try_from_arrow_invalid_inner_field_id_errors() {
-        let element_field = ArrowField::new("element", ArrowDataType::Int32, true)
-            .with_metadata([(PARQUET_FIELD_ID_META_KEY.to_string(), "oops".to_string())].into());
+        let element_field =
+            ArrowField::new("element", ArrowDataType::Int32, true).with_metadata(HashMap::from([
+                (PARQUET_FIELD_ID_META_KEY.to_string(), "oops".to_string()),
+            ]));
         let list_field = ArrowField::new("arr", ArrowDataType::List(Arc::new(element_field)), true);
         assert_result_error_with_message(
             StructField::try_from_arrow(&list_field),
@@ -1143,7 +1146,7 @@ mod tests {
     #[case::fixed_size_list(ArrowDataType::FixedSizeList(arc_elem_with_id(42), 3))]
     fn test_try_from_arrow_aggregates_nested_id_for_all_list_kinds(
         #[case] dt: ArrowDataType,
-    ) -> DeltaResult<()> {
+    ) -> KernelResult<()> {
         let arrow_field = ArrowField::new("arr", dt, true);
         let kernel = StructField::try_from_arrow(&arrow_field)?;
         assert_eq!(
@@ -1160,7 +1163,7 @@ mod tests {
     /// `Dictionary` is a transparent wrapper on the Arrow side (kernel collapses it to its value
     /// type), so a nested-ids walker must still descend through it.
     #[test]
-    fn test_try_from_arrow_aggregates_nested_id_through_dictionary() -> DeltaResult<()> {
+    fn test_try_from_arrow_aggregates_nested_id_through_dictionary() -> KernelResult<()> {
         let arrow_dict = ArrowDataType::Dictionary(
             Box::new(ArrowDataType::Int32),
             Box::new(ArrowDataType::List(arc_elem_with_id(7))),
@@ -1178,8 +1181,9 @@ mod tests {
 
     fn arc_elem_with_id(id: i32) -> Arc<ArrowField> {
         Arc::new(
-            ArrowField::new("element", ArrowDataType::Int32, true)
-                .with_metadata([(PARQUET_FIELD_ID_META_KEY.to_string(), id.to_string())].into()),
+            ArrowField::new("element", ArrowDataType::Int32, true).with_metadata(HashMap::from([
+                (PARQUET_FIELD_ID_META_KEY.to_string(), id.to_string()),
+            ])),
         )
     }
 }

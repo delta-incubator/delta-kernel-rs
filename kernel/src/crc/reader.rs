@@ -7,7 +7,7 @@ use tracing::instrument;
 use super::Crc;
 use crate::metrics::events::CRC_READ_COMPLETED_SPAN;
 use crate::path::{AsUrl as _, ParsedLogPath};
-use crate::{DeltaResult, Engine, Error};
+use crate::{Engine, KernelError, KernelResult};
 
 /// Attempt to read and parse a CRC file.
 ///
@@ -19,13 +19,16 @@ use crate::{DeltaResult, Engine, Error};
 ///
 /// Reports metrics: `CrcReadSuccess` or `CrcReadFailure`.
 #[instrument(name = CRC_READ_COMPLETED_SPAN, err(level = "warn"), skip_all, fields(report, enable_call_frame, bytes_read, path = ?crc_path.location.location))]
-pub(crate) fn try_read_crc_file(engine: &dyn Engine, crc_path: &ParsedLogPath) -> DeltaResult<Crc> {
+pub(crate) fn try_read_crc_file(
+    engine: &dyn Engine,
+    crc_path: &ParsedLogPath,
+) -> KernelResult<Crc> {
     let storage = engine.storage_handler();
     let url = crc_path.location.as_url().clone();
     let data = storage
         .read_files(vec![(url, None)])?
         .next()
-        .ok_or_else(|| Error::generic("CRC file read returned no data"))??;
+        .ok_or_else(|| KernelError::generic("CRC file read returned no data"))??;
     tracing::Span::current().record("bytes_read", data.len() as u64);
     Crc::try_from_json_bytes(&data, crc_path.version)
 }

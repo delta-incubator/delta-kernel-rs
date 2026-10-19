@@ -4,6 +4,7 @@ use std::collections::HashSet;
 use std::fmt::{Display, Formatter};
 use std::sync::Arc;
 
+use derive_more::From;
 use itertools::Itertools;
 use serde::{de, ser, Deserialize, Deserializer, Serialize, Serializer};
 
@@ -13,6 +14,8 @@ pub use self::column_names::{
     col, column_expr_ref, column_name, column_pred, joined_column_expr, joined_column_name,
     ColumnName,
 };
+#[doc(inline)]
+pub use self::macros::expr;
 pub use self::scalars::{ArrayData, DecimalData, MapData, Scalar, StructData};
 use crate::kernel_predicates::{
     DirectDataSkippingPredicateEvaluator, DirectPredicateEvaluator,
@@ -22,9 +25,10 @@ use crate::schema::SchemaRef;
 pub use crate::struct_patch::{ExpressionFieldPatch, ExpressionStructPatch};
 use crate::transforms::{transform_output_type, ExpressionTransform};
 use crate::utils::CollectInto;
-use crate::{DataType, DeltaResult, DynPartialEq, Error};
+use crate::{DataType, DynPartialEq, KernelError, KernelResult};
 
 mod column_names;
+mod macros;
 mod scalars;
 mod sql;
 pub(crate) use self::sql::parse_sql;
@@ -171,8 +175,22 @@ pub enum BinaryExpressionOp {
 /// A variadic expression operator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum VariadicExpressionOp {
-    /// SQL `COALESCE(exprs...)`: the first non-null value, or null when every input is null. All
-    /// inputs share one type, which is also the result type. Requires at least one input.
+    /// SQL `COALESCE(exprs...)`: the first non-null argument value per row, or NULL when every
+    /// argument is NULL. Requires at least one argument.
+    ///
+    /// For COALESCE expressions generated internally, Kernel guarantees that every argument has
+    /// the same logical data type as the result. Engines may translate these expressions to native
+    /// ANSI SQL COALESCE, including native type resolution and implicit casts, while preserving
+    /// the result type and value semantics.
+    ///
+    /// Caller-constructed expressions may have different argument types if the evaluator supports
+    /// implicit conversion to a common result type. The result has that type regardless of which
+    /// argument supplies a value. Supported type combinations and conversions depend on the
+    /// engine; an engine may require all arguments to have the same type. Callers that need
+    /// portable expressions should use arguments with the same type.
+    ///
+    /// The Arrow evaluator used by the default engine does not insert implicit COALESCE
+    /// conversions and requires evaluated argument arrays to have matching Arrow types.
     Coalesce,
     /// SQL `ARRAY(exprs...)`: an array built by evaluating each input per row, so
     /// `ARRAY(1, 1 + 2, my_int_col)` yields `[1, 3, <my_int_col value>]`. All inputs must share
@@ -227,7 +245,7 @@ pub trait OpaqueExpressionOp: DynPartialEq + std::fmt::Debug {
         &self,
         eval_expr: &ScalarExpressionEvaluator<'_>,
         exprs: &[Expression],
-    ) -> DeltaResult<Scalar>;
+    ) -> KernelResult<Scalar>;
 }
 
 /// An opaque predicate operation (ie defined and implemented by the engine).
@@ -253,7 +271,7 @@ pub trait OpaquePredicateOp: DynPartialEq + std::fmt::Debug {
         eval_pred: &DirectPredicateEvaluator<'_>,
         exprs: &[Expression],
         inverted: bool,
-    ) -> DeltaResult<Option<bool>>;
+    ) -> KernelResult<Option<bool>>;
 
     /// Evaluates this (possibly inverted) opaque predicate for data skipping on behalf of a
     /// [`DirectDataSkippingPredicateEvaluator`], e.g. for parquet row group skipping.
@@ -407,14 +425,16 @@ pub struct OpaquePredicate {
 fn fail_serialize_opaque_predicate<S>(
     _value: &OpaquePredicate,
     _serializer: S,
-) -> Result<S::Ok, S::Error>
+) -> KernelResult<S::Ok, S::Error>
 where
     S: Serializer,
 {
     Err(ser::Error::custom("Cannot serialize an Opaque Predicate"))
 }
 
-fn fail_deserialize_opaque_predicate<'de, D>(_deserializer: D) -> Result<OpaquePredicate, D::Error>
+fn fail_deserialize_opaque_predicate<'de, D>(
+    _deserializer: D,
+) -> KernelResult<OpaquePredicate, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -456,7 +476,7 @@ impl OpaqueExpression {
 fn fail_serialize_opaque_expression<S>(
     _value: &OpaqueExpression,
     _serializer: S,
-) -> Result<S::Ok, S::Error>
+) -> KernelResult<S::Ok, S::Error>
 where
     S: Serializer,
 {
@@ -465,7 +485,7 @@ where
 
 fn fail_deserialize_opaque_expression<'de, D>(
     _deserializer: D,
-) -> Result<OpaqueExpression, D::Error>
+) -> KernelResult<OpaqueExpression, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -474,15 +494,17 @@ where
 
 /// A SQL expression.
 ///
-/// These expressions do not track or validate data types, other than the type
-/// of literals. It is up to the expression evaluator to validate the
-/// expression against a schema and add appropriate casts as required.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// Expression construction does not validate argument types or infer result types. The
+/// expression evaluator validates the expression against a schema and the expected result type,
+/// and applies supported implicit conversions. Conversion support depends on the engine.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, From)]
 pub enum Expression {
     /// A literal value.
+    #[from]
     Literal(Scalar),
     /// A column reference by name. A [`ColumnName`] is a path, so a multi-segment name like
     /// `add.stats.numRecords` descends one nested struct field per segment, matching by name.
+    #[from]
     Column(ColumnName),
     /// A predicate treated as a boolean expression
     Predicate(Box<Predicate>), // should this be Arc?
@@ -753,7 +775,7 @@ impl MapToStructOptions {
 ///
 /// Non-empty geometry and geography values are unsupported. Struct, array, map, and variant target
 /// fields are not primitive partition types and are rejected. Any other unparseable non-empty value
-/// returns [`Error::ParseError`] and fails evaluation; it does not silently become null.
+/// returns [`KernelError::ParseError`] and fails evaluation; it does not silently become null.
 ///
 /// # Implementing this expression
 ///
@@ -858,10 +880,10 @@ impl Expression {
     /// # Errors
     ///
     /// Returns an error if the supplied patch builder contains conflicting operations.
-    pub fn struct_patch<P>(patch: P) -> DeltaResult<Self>
+    pub fn struct_patch<P>(patch: P) -> KernelResult<Self>
     where
         P: TryInto<ExpressionStructPatch>,
-        Error: From<P::Error>,
+        KernelError: From<P::Error>,
     {
         Ok(Self::StructPatch(patch.try_into()?))
     }
@@ -933,10 +955,10 @@ impl Expression {
         Self::Variadic(VariadicExpression::new(op, exprs))
     }
 
-    /// Creates a new COALESCE expression that returns the first non-null value.
+    /// Creates a COALESCE expression from `exprs` that returns the first non-null value.
     ///
-    /// COALESCE evaluates expressions in order and returns the first non-null result.
     /// If all expressions evaluate to null, the result is null.
+    /// See [`VariadicExpressionOp::Coalesce`] for the type contract and engine-specific support.
     pub fn coalesce(exprs: impl IntoIterator<Item = impl Into<Expression>>) -> Self {
         Self::variadic(VariadicExpressionOp::Coalesce, exprs)
     }
@@ -1306,18 +1328,6 @@ impl Display for Predicate {
             }
             Unknown(name) => write!(f, "<unknown: {name}>"),
         }
-    }
-}
-
-impl From<Scalar> for Expression {
-    fn from(value: Scalar) -> Self {
-        Self::literal(value)
-    }
-}
-
-impl From<ColumnName> for Expression {
-    fn from(value: ColumnName) -> Self {
-        Self::Column(value)
     }
 }
 
@@ -1897,7 +1907,7 @@ mod tests {
         #[test]
         fn test_opaque_expression_serialize_fails() {
             use crate::expressions::{OpaqueExpressionOp, ScalarExpressionEvaluator};
-            use crate::DeltaResult;
+            use crate::KernelResult;
 
             #[derive(Debug, PartialEq)]
             struct TestOpaqueExprOp;
@@ -1910,7 +1920,7 @@ mod tests {
                     &self,
                     _eval_expr: &ScalarExpressionEvaluator<'_>,
                     _exprs: &[Expression],
-                ) -> DeltaResult<Scalar> {
+                ) -> KernelResult<Scalar> {
                     Ok(Scalar::Integer(0))
                 }
             }
@@ -1927,7 +1937,7 @@ mod tests {
                 DirectDataSkippingPredicateEvaluator, DirectPredicateEvaluator,
                 IndirectDataSkippingPredicateEvaluator,
             };
-            use crate::DeltaResult;
+            use crate::KernelResult;
 
             #[derive(Debug, PartialEq)]
             struct TestOpaquePredOp;
@@ -1942,7 +1952,7 @@ mod tests {
                     _eval_pred: &DirectPredicateEvaluator<'_>,
                     _exprs: &[Expression],
                     _inverted: bool,
-                ) -> DeltaResult<Option<bool>> {
+                ) -> KernelResult<Option<bool>> {
                     Ok(Some(true))
                 }
                 fn eval_as_data_skipping_predicate(

@@ -13,7 +13,7 @@ use crate::scan::log_replay::{
 use crate::scan::scan_row_schema;
 use crate::schema::ColumnNamesAndTypes;
 use crate::utils::require;
-use crate::{DeltaResult, Error};
+use crate::{KernelError, KernelResult};
 
 const PATH: usize = 0;
 const SIZE: usize = 1;
@@ -21,7 +21,7 @@ const MODIFICATION_TIME: usize = 2;
 const PARTITION_VALUES: usize = 3;
 const MODIFICATION_TIME_NAME: &str = "modificationTime";
 
-static DV_MATCHED_FILE_COLUMNS: LazyLock<DeltaResult<ColumnNamesAndTypes>> = LazyLock::new(|| {
+static DV_MATCHED_FILE_COLUMNS: LazyLock<KernelResult<ColumnNamesAndTypes>> = LazyLock::new(|| {
     let names = vec![
         column_name!(PATH_NAME),
         column_name!(SIZE_NAME),
@@ -37,7 +37,7 @@ static DV_MATCHED_FILE_COLUMNS: LazyLock<DeltaResult<ColumnNamesAndTypes>> = Laz
                 .field_at(name)
                 .map(|field| field.data_type().clone())
         })
-        .collect::<DeltaResult<Vec<_>>>()?;
+        .collect::<KernelResult<Vec<_>>>()?;
     Ok((names, types).into())
 });
 
@@ -46,13 +46,17 @@ struct DvMatchedFileRequiredFields {
 }
 
 impl Validation for DvMatchedFileRequiredFields {
-    fn validate_row<'a>(&mut self, row: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<()> {
+    fn validate_row<'a>(
+        &mut self,
+        row: usize,
+        getters: &[&'a dyn GetData<'a>],
+    ) -> KernelResult<()> {
         let path: &str = getters[PATH]
             .get_opt(row, PATH_NAME)?
-            .ok_or_else(|| Error::missing_data("AddFile is missing required field 'path'"))?;
+            .ok_or_else(|| KernelError::missing_data("AddFile is missing required field 'path'"))?;
         require!(
             !path.is_empty(),
-            Error::generic("AddFile path must not be empty")
+            KernelError::generic("AddFile path must not be empty")
         );
 
         let partition_values = validate_required_field_exist(
@@ -69,7 +73,7 @@ impl Validation for DvMatchedFileRequiredFields {
         )?;
         require!(
             size >= 0,
-            Error::generic(format!(
+            KernelError::generic(format!(
                 "AddFile for '{path}' has negative size {size}; size must be non-negative"
             ))
         );
@@ -88,9 +92,9 @@ impl StagedDataValidator {
     /// Errors if the required columns are absent from the scan-row schema.
     pub(crate) fn staged_dv_matched_file(
         physical_partition_columns: impl IntoIterator<Item = String>,
-    ) -> DeltaResult<Self> {
+    ) -> KernelResult<Self> {
         let columns = DV_MATCHED_FILE_COLUMNS.as_ref().map_err(|error| {
-            Error::internal_error(format!(
+            KernelError::internal_error(format!(
                 "DV validation columns must exist in the scan-row schema: {error}"
             ))
         })?;

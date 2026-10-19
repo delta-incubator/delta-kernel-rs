@@ -23,7 +23,7 @@ use delta_kernel::schema::{
     schema_ref, ColumnMetadataKey, DataType, MetadataColumnSpec, PrimitiveType, SchemaRef,
     StructField, StructType,
 };
-use delta_kernel::{DeltaResult, Engine, EngineData, FileMeta, JsonHandler, ParquetHandler};
+use delta_kernel::{Engine, EngineData, FileMeta, JsonHandler, KernelResult, ParquetHandler};
 use itertools::Itertools;
 use tempfile::{tempdir, NamedTempFile};
 use url::Url;
@@ -103,7 +103,7 @@ pub fn test_json_handler_file_path_contract(handler: &dyn JsonHandler) {
             &mut self,
             row_count: usize,
             getters: &[&'a dyn GetData<'a>],
-        ) -> DeltaResult<()> {
+        ) -> KernelResult<()> {
             for i in 0..row_count {
                 self.paths.push(getters[0].get(i, "_file")?);
             }

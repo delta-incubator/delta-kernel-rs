@@ -1,10 +1,10 @@
-//! REST [`RestObjectStore`] wiring for [`EngineBuilder`](crate::EngineBuilder).
+//! REST [`RestObjectStore`] wiring for [`FfiEngineBuilder`](crate::FfiEngineBuilder).
 //!
-//! Call [`set_builder_rest_object_store`](crate::set_builder_rest_object_store) with a
+//! Call [`builder_with_rest_object_store`](crate::builder_with_rest_object_store) with a
 //! [`CRestEndpointConfig`] to select the REST backend. The builder `url` must be the REST service
 //! base URL, not a Delta table path.
 //!
-//! TLS, retries, and static auth use [`set_builder_option`](crate::set_builder_option) with the
+//! TLS, retries, and static auth use [`builder_with_option`](crate::builder_with_option) with the
 //! `REST_BUILDER_OPTION_*` keys below. Pass a [`CAuthHeaderCallback`] when headers expire; with
 //! `callback = NULL`, set static headers via `header.<Name>` options instead. See
 //! [`CAuthHeaderCallback`] for the callback contract.
@@ -16,11 +16,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use delta_kernel::object_store::{Error as ObjectStoreError, ObjectStore};
-use delta_kernel::{DeltaResult, Error};
+use delta_kernel::{KernelError, KernelResult};
 use delta_kernel_default_engine::rest_store::{
     build_rest_client, headers_from_pairs, AuthHeaderProvider, HeaderMap, RefreshingHeaderProvider,
     RestClientOptions, RestEndpointConfig, RestObjectStore, StaticHeaderProvider,
 };
+use derive_more::Constructor;
 use url::Url;
 
 use crate::error::AllocateErrorFn;
@@ -30,7 +31,7 @@ use crate::{ExclusiveRustString, KernelStringSlice, NullableCvoid, TryFromString
 /// Max `(name, value)` pairs in a [`CAuthHeaders`] struct.
 pub const AUTH_MAX_NUM_HEADERS: usize = 8;
 
-// === `set_builder_option` keys for REST engines ===
+// === `builder_with_option` keys for REST engines ===
 //
 // Each `REST_BUILDER_OPTION_*` is the Rust `&str` key. The matching `*_KEY` static is a
 // null-terminated byte array exported to C via cbindgen (`extern const uint8_t ...`).
@@ -39,7 +40,7 @@ pub const AUTH_MAX_NUM_HEADERS: usize = 8;
 ///
 /// Example: `header.Authorization` with value `Bearer <token>`. Ignored when a
 /// [`CAuthHeaderCallback`] is passed to
-/// [`set_builder_rest_object_store`](crate::set_builder_rest_object_store).
+/// [`builder_with_rest_object_store`](crate::builder_with_rest_object_store).
 pub const REST_BUILDER_OPTION_HEADER_PREFIX: &str = "header.";
 #[no_mangle]
 pub static REST_BUILDER_OPTION_HEADER_PREFIX_KEY: [u8; 8] = *b"header.\0";
@@ -59,6 +60,13 @@ pub static REST_BUILDER_OPTION_TLS_KEY_PATH_KEY: [u8; 13] = *b"tls.key_path\0";
 pub const REST_BUILDER_OPTION_TLS_CA_PATH: &str = "tls.ca_path";
 #[no_mangle]
 pub static REST_BUILDER_OPTION_TLS_CA_PATH_KEY: [u8; 12] = *b"tls.ca_path\0";
+
+/// Accept server certificate hostname mismatches (default `false`). Certificate trust and
+/// validity checks remain enabled. Intended for test environments.
+pub const REST_BUILDER_OPTION_TLS_ALLOW_INVALID_HOSTNAMES: &str = "tls.allow_invalid_hostnames";
+#[no_mangle]
+pub static REST_BUILDER_OPTION_TLS_ALLOW_INVALID_HOSTNAMES_KEY: [u8; 28] =
+    *b"tls.allow_invalid_hostnames\0";
 
 /// Comma-separated DNS overrides as `host=ip:port` entries (bypasses system resolver; SNI
 /// unchanged).
@@ -86,7 +94,7 @@ pub static REST_BUILDER_OPTION_PUT_VERIFY_ON_AMBIGUOUS_KEY: [u8; 24] =
     *b"put.verify_on_ambiguous\0";
 
 /// REST file API dialect passed to
-/// [`set_builder_rest_object_store`](crate::set_builder_rest_object_store).
+/// [`builder_with_rest_object_store`](crate::builder_with_rest_object_store).
 ///
 /// Each [`KernelStringSlice`] must remain valid for the duration of that call; the kernel copies
 /// the strings into the built engine. Optional fields (the prefixes and `entry_strip_prefix`) may
@@ -140,15 +148,16 @@ pub struct CAuthHeaders {
 /// `ttl_ms = 0` it invokes the callback on every request.
 ///
 /// `context` is the opaque pointer registered via
-/// [`set_builder_rest_object_store`](crate::set_builder_rest_object_store). `allocate_error` is
+/// [`builder_with_rest_object_store`](crate::builder_with_rest_object_store). `allocate_error` is
 /// forwarded on each invocation so the callback can pass it to
 /// [`allocate_kernel_string`](crate::allocate_kernel_string) without the engine having to stash it
 /// separately.
 pub type CAuthHeaderCallback =
     extern "C" fn(context: NullableCvoid, out: *mut CAuthHeaders, allocate_error: AllocateErrorFn);
 
-/// State for [`crate::ObjectStoreBackend::Rest`], stored on [`EngineBuilder`](crate::EngineBuilder)
-/// after [`set_builder_rest_object_store`](crate::set_builder_rest_object_store).
+/// State for [`crate::ObjectStoreBackend::Rest`], stored on
+/// [`FfiEngineBuilder`](crate::FfiEngineBuilder)
+/// after [`builder_with_rest_object_store`](crate::builder_with_rest_object_store).
 pub(crate) struct RestBuilderState {
     endpoint_config: RestEndpointConfig,
     auth_callback: Option<FfiAuthHeaderProvider>,
@@ -156,32 +165,20 @@ pub(crate) struct RestBuilderState {
 
 /// Upcalls a [`CAuthHeaderCallback`] whenever the REST client needs fresh auth headers.
 ///
-/// Registered via [`set_builder_rest_object_store`](crate::set_builder_rest_object_store).
-#[derive(Clone, Copy)]
+/// Registered via [`builder_with_rest_object_store`](crate::builder_with_rest_object_store).
+#[derive(Clone, Copy, Constructor)]
 pub(crate) struct FfiAuthHeaderProvider {
     callback: CAuthHeaderCallback,
     context: NullableCvoid,
     allocate_error: AllocateErrorFn,
 }
-// SAFETY: see [`set_builder_rest_object_store`](crate::set_builder_rest_object_store): `context`
+// SAFETY: see [`builder_with_rest_object_store`](crate::builder_with_rest_object_store): `context`
 // and `callback` must be safe to invoke from any thread concurrently.
 unsafe impl Send for FfiAuthHeaderProvider {}
 unsafe impl Sync for FfiAuthHeaderProvider {}
 
 impl FfiAuthHeaderProvider {
-    pub(crate) fn new(
-        callback: CAuthHeaderCallback,
-        context: NullableCvoid,
-        allocate_error: AllocateErrorFn,
-    ) -> Self {
-        Self {
-            callback,
-            context,
-            allocate_error,
-        }
-    }
-
-    fn collect(&self) -> DeltaResult<(HeaderMap, Option<Duration>)> {
+    fn collect(&self) -> KernelResult<(HeaderMap, Option<Duration>)> {
         let mut headers = MaybeUninit::<CAuthHeaders>::uninit();
         let out = headers.as_mut_ptr();
         // SAFETY: `out` is valid for writes here. The callback initializes `headers[0..count]`;
@@ -203,7 +200,7 @@ pub(crate) fn rest_builder_state_from_ffi(
     callback: Option<CAuthHeaderCallback>,
     context: NullableCvoid,
     allocate_error: AllocateErrorFn,
-) -> DeltaResult<RestBuilderState> {
+) -> KernelResult<RestBuilderState> {
     Ok(RestBuilderState {
         endpoint_config: rest_endpoint_config_from_c(endpoint_config)?,
         auth_callback: callback.map(|cb| FfiAuthHeaderProvider::new(cb, context, allocate_error)),
@@ -218,10 +215,12 @@ pub(crate) fn rest_builder_state_from_ffi(
 /// `headers[0..count]` must hold handles produced by
 /// [`allocate_kernel_string`](crate::allocate_kernel_string). Padding slots are never read or
 /// dropped.
-unsafe fn take_auth_pairs_from_c(headers: *mut CAuthHeaders) -> DeltaResult<Vec<(String, String)>> {
+unsafe fn take_auth_pairs_from_c(
+    headers: *mut CAuthHeaders,
+) -> KernelResult<Vec<(String, String)>> {
     let count = (*headers).count as usize;
     if count > AUTH_MAX_NUM_HEADERS {
-        return Err(Error::generic(format!(
+        return Err(KernelError::generic(format!(
             "auth header count {count} exceeds max {AUTH_MAX_NUM_HEADERS}"
         )));
     }
@@ -240,7 +239,7 @@ unsafe fn take_auth_pairs_from_c(headers: *mut CAuthHeaders) -> DeltaResult<Vec<
 /// Copy a [`CRestEndpointConfig`] into an owned [`RestEndpointConfig`].
 pub(crate) fn rest_endpoint_config_from_c(
     config: &CRestEndpointConfig,
-) -> DeltaResult<RestEndpointConfig> {
+) -> KernelResult<RestEndpointConfig> {
     Ok(RestEndpointConfig {
         files_prefix: copy_optional_string(&config.files_prefix)?,
         directories_prefix: copy_optional_string(&config.directories_prefix)?,
@@ -270,15 +269,15 @@ pub(crate) fn rest_endpoint_config_from_c(
     })
 }
 
-fn copy_optional_string(slice: &KernelStringSlice) -> DeltaResult<String> {
-    // SAFETY: caller keeps slice memory valid until `set_builder_rest_object_store` returns.
+fn copy_optional_string(slice: &KernelStringSlice) -> KernelResult<String> {
+    // SAFETY: caller keeps slice memory valid until `builder_with_rest_object_store` returns.
     unsafe { String::try_from_slice(slice) }
 }
 
-fn copy_required_string(slice: &KernelStringSlice, field: &str) -> DeltaResult<String> {
+fn copy_required_string(slice: &KernelStringSlice, field: &str) -> KernelResult<String> {
     let value = copy_optional_string(slice)?;
     if value.is_empty() {
-        return Err(Error::generic(format!("`{field}` must be non-empty")));
+        return Err(KernelError::generic(format!("`{field}` must be non-empty")));
     }
     Ok(value)
 }
@@ -288,7 +287,7 @@ pub(crate) fn build_rest_object_store(
     base_url: &Url,
     options: &HashMap<String, String>,
     rest: &RestBuilderState,
-) -> DeltaResult<Arc<dyn ObjectStore>> {
+) -> KernelResult<Arc<dyn ObjectStore>> {
     let config = rest.endpoint_config.clone();
 
     let auth: Arc<dyn AuthHeaderProvider> = match rest.auth_callback {
@@ -310,31 +309,12 @@ pub(crate) fn build_rest_object_store(
         }
     };
 
-    let tls = RestClientOptions {
-        cert_path: options.get(REST_BUILDER_OPTION_TLS_CERT_PATH).cloned(),
-        key_path: options.get(REST_BUILDER_OPTION_TLS_KEY_PATH).cloned(),
-        ca_path: options.get(REST_BUILDER_OPTION_TLS_CA_PATH).cloned(),
-        dns_overrides: options
-            .get(REST_BUILDER_OPTION_TLS_DNS_OVERRIDE)
-            .map(|s| s.split(',').map(str::to_string).collect())
-            .unwrap_or_default(),
-        timeout_secs: options
-            .get(REST_BUILDER_OPTION_TLS_TIMEOUT_SECS)
-            .map(|s| {
-                s.parse::<u64>().map_err(|e| {
-                    Error::generic(format!(
-                        "invalid {} `{s}`: {e}",
-                        REST_BUILDER_OPTION_TLS_TIMEOUT_SECS
-                    ))
-                })
-            })
-            .transpose()?,
-    };
+    let tls = rest_client_options(options)?;
     let max_retries = options
         .get(REST_BUILDER_OPTION_RETRY_MAX_RETRIES)
         .map(|s| {
             s.parse::<u32>().map_err(|e| {
-                Error::generic(format!(
+                KernelError::generic(format!(
                     "invalid {} `{s}`: {e}",
                     REST_BUILDER_OPTION_RETRY_MAX_RETRIES
                 ))
@@ -358,13 +338,40 @@ pub(crate) fn build_rest_object_store(
     ))
 }
 
-fn parse_bool_option(key: &str, value: Option<&String>) -> DeltaResult<bool> {
+fn rest_client_options(options: &HashMap<String, String>) -> KernelResult<RestClientOptions> {
+    Ok(RestClientOptions {
+        cert_path: options.get(REST_BUILDER_OPTION_TLS_CERT_PATH).cloned(),
+        key_path: options.get(REST_BUILDER_OPTION_TLS_KEY_PATH).cloned(),
+        ca_path: options.get(REST_BUILDER_OPTION_TLS_CA_PATH).cloned(),
+        allow_invalid_hostnames: parse_bool_option(
+            REST_BUILDER_OPTION_TLS_ALLOW_INVALID_HOSTNAMES,
+            options.get(REST_BUILDER_OPTION_TLS_ALLOW_INVALID_HOSTNAMES),
+        )?,
+        dns_overrides: options
+            .get(REST_BUILDER_OPTION_TLS_DNS_OVERRIDE)
+            .map(|s| s.split(',').map(str::to_string).collect())
+            .unwrap_or_default(),
+        timeout_secs: options
+            .get(REST_BUILDER_OPTION_TLS_TIMEOUT_SECS)
+            .map(|s| {
+                s.parse::<u64>().map_err(|e| {
+                    KernelError::generic(format!(
+                        "invalid {} `{s}`: {e}",
+                        REST_BUILDER_OPTION_TLS_TIMEOUT_SECS
+                    ))
+                })
+            })
+            .transpose()?,
+    })
+}
+
+fn parse_bool_option(key: &str, value: Option<&String>) -> KernelResult<bool> {
     match value {
         None => Ok(false),
         Some(v) => match v.as_str() {
             "true" => Ok(true),
             "false" => Ok(false),
-            other => Err(Error::generic(format!(
+            other => Err(KernelError::generic(format!(
                 "invalid {key} `{other}`: expected `true` or `false`"
             ))),
         },
@@ -379,7 +386,7 @@ mod tests {
     use crate::ffi_test_utils::allocate_err;
     use crate::kernel_string_slice;
 
-    // Miri policy for this module. See ffi/CLAUDE.md "Testing under Miri" for the policy;
+    // Miri policy for this module. See ffi/AGENTS.md "Testing under Miri" for the policy;
     // tests below are grouped by their relationship to `unsafe`, in file order:
     //
     //   1. Pure-logic tests: no `unsafe`. Run under Miri.
@@ -462,6 +469,31 @@ mod tests {
 
     // === Group 1: pure-logic tests (no unsafe; run under Miri, cheap) ===
 
+    #[rstest::rstest]
+    #[case::default(None, false)]
+    #[case::enabled(Some("true"), true)]
+    #[case::disabled(Some("false"), false)]
+    fn rest_client_options_preserve_hostname_verification_setting(
+        #[case] value: Option<&str>,
+        #[case] expected: bool,
+    ) {
+        let options = value
+            .map(|value| {
+                (
+                    REST_BUILDER_OPTION_TLS_ALLOW_INVALID_HOSTNAMES.to_string(),
+                    value.to_string(),
+                )
+            })
+            .into_iter()
+            .collect();
+        assert_eq!(
+            rest_client_options(&options)
+                .unwrap()
+                .allow_invalid_hostnames,
+            expected
+        );
+    }
+
     #[test]
     fn rest_builder_option_keys_match_c_exports() {
         option_key_bytes_match_const(
@@ -479,6 +511,10 @@ mod tests {
         option_key_bytes_match_const(
             &REST_BUILDER_OPTION_TLS_CA_PATH_KEY,
             REST_BUILDER_OPTION_TLS_CA_PATH,
+        );
+        option_key_bytes_match_const(
+            &REST_BUILDER_OPTION_TLS_ALLOW_INVALID_HOSTNAMES_KEY,
+            REST_BUILDER_OPTION_TLS_ALLOW_INVALID_HOSTNAMES,
         );
         option_key_bytes_match_const(
             &REST_BUILDER_OPTION_TLS_DNS_OVERRIDE_KEY,
@@ -638,17 +674,16 @@ mod tests {
         );
     }
 
-    #[test]
-    fn build_rejects_invalid_verify_on_ambiguous() {
+    #[rstest::rstest]
+    #[case(REST_BUILDER_OPTION_PUT_VERIFY_ON_AMBIGUOUS)]
+    #[case(REST_BUILDER_OPTION_TLS_ALLOW_INVALID_HOSTNAMES)]
+    fn build_rejects_invalid_boolean_option(#[case] key: &str) {
         let mut options = HashMap::new();
-        options.insert(
-            REST_BUILDER_OPTION_PUT_VERIFY_ON_AMBIGUOUS.into(),
-            "nope".into(),
-        );
-        assert!(
-            build_rest_object_store(&test_base_url(), &options, &test_rest_builder_state())
-                .is_err()
-        );
+        options.insert(key.into(), "nope".into());
+        let error = build_rest_object_store(&test_base_url(), &options, &test_rest_builder_state())
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains(key));
     }
 
     // === 3b: build the reqwest/rustls client (~minutes under Miri, so skipped) ===
