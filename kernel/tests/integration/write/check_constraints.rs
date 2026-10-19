@@ -4,9 +4,9 @@
 use delta_kernel::committer::FileSystemCommitter;
 use delta_kernel::object_store::local::LocalFileSystem;
 use delta_kernel::schema::{schema_ref, DataType, SchemaRef, StructField};
-use delta_kernel::transaction::Transaction;
+use delta_kernel::transaction::{Transaction, UpdateTableOperation};
 use delta_kernel::write_expressions::TableWriteExpressions;
-use delta_kernel::{KernelError, Result, Snapshot};
+use delta_kernel::{Engine, KernelError, KernelResult, Snapshot, SnapshotRef};
 use rstest::rstest;
 use serde_json::json;
 use test_utils::{add_commit, create_add_files_metadata, test_table_setup, test_table_setup_mt};
@@ -32,7 +32,15 @@ fn test_schema() -> SchemaRef {
     }
 }
 
-fn stage_one_file(txn: &mut Transaction) -> Result<(), Box<dyn std::error::Error>> {
+/// Builds a data-changing write transaction on `snapshot`.
+fn write_txn(snapshot: &SnapshotRef, engine: &dyn Engine) -> KernelResult<Transaction> {
+    snapshot
+        .clone()
+        .update_table(UpdateTableOperation::Write, "Test/1.0", true)
+        .build(engine, Box::new(FileSystemCommitter::new()))
+}
+
+fn stage_one_file(txn: &mut Transaction) -> KernelResult<(), Box<dyn std::error::Error>> {
     let add = create_add_files_metadata(
         txn.add_files_schema(),
         vec![("part-00000.parquet", 1024, 1_000_000, Some(1))],
@@ -42,7 +50,7 @@ fn stage_one_file(txn: &mut Transaction) -> Result<(), Box<dyn std::error::Error
 }
 
 /// Asserts `result` failed with the acknowledgement gate error.
-fn assert_gate_error<T: std::fmt::Debug>(result: Result<T>) {
+fn assert_gate_error<T: std::fmt::Debug>(result: KernelResult<T>) {
     let err = result.expect_err("acknowledgement gate must reject this operation");
     let is_gate_error = matches!(err, KernelError::InvalidTransactionState(_));
     assert!(
@@ -67,7 +75,7 @@ async fn write_table(
     table_path: &str,
     writer_features: &[&str],
     constraints: &[(&str, &str)],
-) -> Result<Url, Box<dyn std::error::Error>> {
+) -> KernelResult<Url, Box<dyn std::error::Error>> {
     let table_url = Url::from_directory_path(table_path).expect("table path must be a URL");
     let configuration: serde_json::Map<String, serde_json::Value> = constraints
         .iter()
@@ -99,7 +107,7 @@ async fn write_table(
 
 #[tokio::test]
 async fn discovers_constraints_from_snapshot_and_transaction(
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> KernelResult<(), Box<dyn std::error::Error>> {
     let (_tmp, table_path, engine) = test_table_setup()?;
     let constraints = [
         ("positive_amount", "amount > 0"),
@@ -116,7 +124,7 @@ async fn discovers_constraints_from_snapshot_and_transaction(
     ];
     assert_eq!(from_snapshot, expected);
 
-    let txn = snapshot.transaction(Box::new(FileSystemCommitter::new()), engine.as_ref())?;
+    let txn = write_txn(&snapshot, engine.as_ref())?;
     let from_txn = discovered(&txn);
     assert_eq!(from_txn, expected);
     Ok(())
@@ -133,12 +141,12 @@ async fn constrained_table_write_requires_acknowledgement(
     op: GatedOp,
     #[values(true, false)] acknowledge: bool,
     #[values(true, false)] discover_first: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> KernelResult<(), Box<dyn std::error::Error>> {
     let (_tmp, table_path, engine) = test_table_setup()?;
     let table_url = write_table(&table_path, CHECK_CONSTRAINTS_FEATURE, POSITIVE_AMOUNT).await?;
 
     let snapshot = Snapshot::builder_for(table_url).build(engine.as_ref())?;
-    let mut txn = snapshot.transaction(Box::new(FileSystemCommitter::new()), engine.as_ref())?;
+    let mut txn = write_txn(&snapshot, engine.as_ref())?;
     // Discovery alone must not count as an acknowledgement.
     if discover_first {
         let _discovered = txn.check_constraints();
@@ -174,7 +182,7 @@ async fn constrained_table_write_requires_acknowledgement(
 #[tokio::test]
 async fn data_commit_to_table_without_constraints_needs_no_acknowledgement(
     #[values(&[][..], CHECK_CONSTRAINTS_FEATURE)] writer_features: &[&str],
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> KernelResult<(), Box<dyn std::error::Error>> {
     let (_tmp, table_path, engine) = test_table_setup()?;
     let table_url = write_table(&table_path, writer_features, &[]).await?;
 
@@ -182,7 +190,7 @@ async fn data_commit_to_table_without_constraints_needs_no_acknowledgement(
     let from_snapshot = discovered(snapshot.as_ref());
     assert!(from_snapshot.is_empty());
 
-    let mut txn = snapshot.transaction(Box::new(FileSystemCommitter::new()), engine.as_ref())?;
+    let mut txn = write_txn(&snapshot, engine.as_ref())?;
     stage_one_file(&mut txn)?;
     txn.commit(engine.as_ref())?.unwrap_committed();
     Ok(())
@@ -192,13 +200,12 @@ async fn data_commit_to_table_without_constraints_needs_no_acknowledgement(
 #[tokio::test]
 async fn remove_only_commit_on_constrained_table_requires_acknowledgement(
     #[values(true, false)] acknowledge: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> KernelResult<(), Box<dyn std::error::Error>> {
     let (_tmp, table_path, engine) = test_table_setup()?;
     let table_url = write_table(&table_path, CHECK_CONSTRAINTS_FEATURE, POSITIVE_AMOUNT).await?;
 
     let snapshot = Snapshot::builder_for(table_url).build(engine.as_ref())?;
-    let mut add_txn =
-        snapshot.transaction(Box::new(FileSystemCommitter::new()), engine.as_ref())?;
+    let mut add_txn = write_txn(&snapshot, engine.as_ref())?;
     add_txn.ack_check_constraints();
     stage_one_file(&mut add_txn)?;
     let snapshot = add_txn
@@ -206,8 +213,7 @@ async fn remove_only_commit_on_constrained_table_requires_acknowledgement(
         .unwrap_post_commit_snapshot();
 
     let scan_files = get_scan_files(snapshot.clone(), engine.as_ref())?;
-    let mut remove_txn =
-        snapshot.transaction(Box::new(FileSystemCommitter::new()), engine.as_ref())?;
+    let mut remove_txn = write_txn(&snapshot, engine.as_ref())?;
     for scan_file in scan_files {
         remove_txn.remove_files(scan_file);
     }
@@ -225,7 +231,7 @@ async fn remove_only_commit_on_constrained_table_requires_acknowledgement(
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn discovers_constraints_after_checkpoint() -> Result<(), Box<dyn std::error::Error>> {
+async fn discovers_constraints_after_checkpoint() -> KernelResult<(), Box<dyn std::error::Error>> {
     let (_tmp, table_path, engine) = test_table_setup_mt()?;
     let table_url = write_table(&table_path, CHECK_CONSTRAINTS_FEATURE, POSITIVE_AMOUNT).await?;
 
@@ -238,23 +244,24 @@ async fn discovers_constraints_after_checkpoint() -> Result<(), Box<dyn std::err
     let from_reloaded = discovered(reloaded.as_ref());
     assert_eq!(from_reloaded, POSITIVE_AMOUNT);
 
-    let mut txn = reloaded.transaction(Box::new(FileSystemCommitter::new()), engine.as_ref())?;
+    let mut txn = write_txn(&reloaded, engine.as_ref())?;
     stage_one_file(&mut txn)?;
     assert_gate_error(txn.commit(engine.as_ref()));
     Ok(())
 }
 
 #[tokio::test]
-async fn acknowledgement_survives_later_builder_calls() -> Result<(), Box<dyn std::error::Error>> {
+async fn acknowledgement_survives_later_builder_calls(
+) -> KernelResult<(), Box<dyn std::error::Error>> {
     let (_tmp, table_path, engine) = test_table_setup()?;
     let table_url = write_table(&table_path, CHECK_CONSTRAINTS_FEATURE, POSITIVE_AMOUNT).await?;
 
     let snapshot = Snapshot::builder_for(table_url).build(engine.as_ref())?;
-    let mut txn = snapshot.transaction(Box::new(FileSystemCommitter::new()), engine.as_ref())?;
+    let mut txn = write_txn(&snapshot, engine.as_ref())?;
     txn.ack_check_constraints();
     let mut txn = txn
-        .with_operation("WRITE".to_string())
-        .with_engine_info("Test/1.0");
+        .with_transaction_id("app_id".to_string(), 1)
+        .with_operation_metrics([("numFiles", Some("1"))]);
     stage_one_file(&mut txn)?;
     txn.commit(engine.as_ref())?.unwrap_committed();
     Ok(())
@@ -262,7 +269,7 @@ async fn acknowledgement_survives_later_builder_calls() -> Result<(), Box<dyn st
 
 #[tokio::test]
 async fn table_with_constraints_but_without_feature_is_readable_but_not_writable(
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> KernelResult<(), Box<dyn std::error::Error>> {
     let (_tmp, table_path, engine) = test_table_setup()?;
     let table_url = write_table(&table_path, &[], POSITIVE_AMOUNT).await?;
 
@@ -270,7 +277,7 @@ async fn table_with_constraints_but_without_feature_is_readable_but_not_writable
     let from_snapshot = discovered(snapshot.as_ref());
     assert_eq!(from_snapshot, POSITIVE_AMOUNT);
 
-    let result = snapshot.transaction(Box::new(FileSystemCommitter::new()), engine.as_ref());
+    let result = write_txn(&snapshot, engine.as_ref());
     let rejected_as_malformed = matches!(result, Err(KernelError::InvalidProtocol(_)));
     assert!(rejected_as_malformed);
     Ok(())
@@ -280,13 +287,13 @@ async fn table_with_constraints_but_without_feature_is_readable_but_not_writable
 #[tokio::test]
 async fn alter_table_on_constrained_table_requires_acknowledgement(
     #[values(true, false)] acknowledge: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> KernelResult<(), Box<dyn std::error::Error>> {
     let (_tmp, table_path, engine) = test_table_setup()?;
     let table_url = write_table(&table_path, CHECK_CONSTRAINTS_FEATURE, POSITIVE_AMOUNT).await?;
 
     let snapshot = Snapshot::builder_for(table_url).build(engine.as_ref())?;
     let mut txn = snapshot
-        .alter_table()
+        .update_table(UpdateTableOperation::AlterTable, "Test/1.0", false)
         .add_column(StructField::nullable("note", DataType::STRING))
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?;
     if !acknowledge {

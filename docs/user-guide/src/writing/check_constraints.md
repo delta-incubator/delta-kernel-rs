@@ -41,7 +41,7 @@ exposes each constraint's SQL and requires your connector to take responsibility
 A write follows this order:
 
 ```text
-snapshot.transaction(..)      start the transaction
+snapshot.update_table(..)     start the transaction
 txn.check_constraints()       discover the constraints and compile them in your evaluator
 txn.ack_check_constraints()   acknowledge that your connector enforces them
 txn.write_state()             fails on a constrained table without the acknowledgement
@@ -60,9 +60,9 @@ name through `name()` and its SQL expression, verbatim from the table, through `
 # extern crate delta_kernel_default_engine;
 # use delta_kernel_default_engine::DefaultEngine;
 # use delta_kernel_default_engine::storage::store_from_url;
-# use delta_kernel::{Result, Snapshot};
+# use delta_kernel::{KernelResult, Snapshot};
 use delta_kernel::write_expressions::TableWriteExpressions;
-# fn main() -> Result<()> {
+# fn main() -> KernelResult<()> {
 # let url = delta_kernel::try_parse_uri("/tmp/people")?;
 # let engine = DefaultEngine::builder(store_from_url(&url)?).build();
 
@@ -96,21 +96,23 @@ row. Kernel doesn't provide a SQL evaluator for constraints.
 # use delta_kernel::arrow::array::{BooleanArray, RecordBatch};
 # use delta_kernel::committer::FileSystemCommitter;
 # use delta_kernel::engine::arrow_data::ArrowEngineData;
-# use delta_kernel::transaction::CommitResult;
-# use delta_kernel::{KernelError, Result, SnapshotRef};
+# use delta_kernel::transaction::{CommitResult, UpdateTableOperation};
+# use delta_kernel::{KernelError, KernelResult, SnapshotRef};
 # use delta_kernel_default_engine::executor::TaskExecutor;
 # use delta_kernel_default_engine::DefaultEngine;
-# type CompiledCheck = Box<dyn Fn(&RecordBatch) -> Result<BooleanArray>>;
+# type CompiledCheck = Box<dyn Fn(&RecordBatch) -> KernelResult<BooleanArray>>;
 use delta_kernel::write_expressions::TableWriteExpressions;
 
 async fn append_with_check_constraints(
     engine: &DefaultEngine<impl TaskExecutor>,
     snapshot: SnapshotRef,
-    batches: impl IntoIterator<Item = Result<RecordBatch>>,
-    compile_check: impl Fn(&str) -> Result<CompiledCheck>,
-) -> Result<CommitResult> {
+    batches: impl IntoIterator<Item = KernelResult<RecordBatch>>,
+    compile_check: impl Fn(&str) -> KernelResult<CompiledCheck>,
+) -> KernelResult<CommitResult> {
     // 1. Start the transaction.
-    let mut txn = snapshot.transaction(Box::new(FileSystemCommitter::new()), engine)?;
+    let mut txn = snapshot
+        .update_table(UpdateTableOperation::Write, "my-app/1.0", /* data_change */ true)
+        .build(engine, Box::new(FileSystemCommitter::new()))?;
 
     // 2. Discover the constraints and compile each one before writing anything.
     let mut checks = Vec::new();
