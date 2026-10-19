@@ -381,10 +381,13 @@ impl PartitionValuesOptions {
     /// `add.partitionValues["ts"] = "2024-01-15 12:30:45"`, setting `timestamp_timezone` to
     /// `"America/Los_Angeles"` (UTC-08:00 on that date) interprets it as `2024-01-15T20:30:45Z`.
     ///
-    /// Kernel does not support setting a timezone for row transforms, so this option omits them
+    /// Kernel does not yet support setting a timezone for row transforms, so this option omits them
     /// as if [`ScanBuilder::without_row_transforms`] were set. Without this option, Kernel
     /// interprets offset-less timestamps as UTC. Invalid timezones are reported when partition
     /// values are parsed.
+    ///
+    /// TODO(#3609): Row transforms do not reuse existing `partitionValues_parsed`. Support reusing
+    /// those values and enable session timezone support.
     pub fn with_timestamp_timezone(mut self, timestamp_timezone: impl Into<String>) -> Self {
         self.timestamp_timezone = Some(timestamp_timezone.into());
         self

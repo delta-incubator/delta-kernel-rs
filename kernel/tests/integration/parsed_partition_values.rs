@@ -534,39 +534,50 @@ async fn offset_less_timestamp_partition_read_with_json_and_checkpoint(
 #[case::utc_before(
     col!("p_ts").lt(lit(Scalar::Timestamp(timestamp_micros("2024-01-15T16:00:00Z")))),
     None,
-    2 /* expected_file_num */,
+    &[
+        ("offset-less-in-checkpoint.parquet", "2024-01-15T12:30:45.123456Z"),
+        ("offset-less-in-json.parquet", "2024-01-15T12:30:45.123456Z"),
+    ],
     true /* write_parsed_partition */
 )]
 #[case::utc_after(
     col!("p_ts").gt(lit(Scalar::Timestamp(timestamp_micros("2024-01-15T16:00:00Z")))),
     None,
-    2 /* expected_file_num */,
+    &[
+        ("utc-in-checkpoint.parquet", "2024-01-15T18:30:45.123456Z"),
+        ("utc-in-json.parquet", "2024-01-15T18:30:45.123456Z"),
+    ],
     true /* write_parsed_partition */
 )]
 #[case::los_angeles_before(
     col!("p_ts").lt(lit(Scalar::Timestamp(timestamp_micros("2024-01-15T16:00:00Z")))),
     Some("America/Los_Angeles"),
-    1 /* expected_file_num */,
+    &[("offset-less-in-checkpoint.parquet", "2024-01-15T12:30:45.123456Z")],
     true /* write_parsed_partition */
 )]
 #[case::los_angeles_after(
     col!("p_ts").gt(lit(Scalar::Timestamp(timestamp_micros("2024-01-15T16:00:00Z")))),
     Some("America/Los_Angeles"),
-    3 /* expected_file_num */,
+    &[
+        ("offset-less-in-json.parquet", "2024-01-15T20:30:45.123456Z"),
+        ("utc-in-checkpoint.parquet", "2024-01-15T18:30:45.123456Z"),
+        ("utc-in-json.parquet", "2024-01-15T18:30:45.123456Z"),
+    ],
     true /* write_parsed_partition */
 )]
 #[case::los_angeles_before_without_parsed(
     col!("p_ts").lt(lit(Scalar::Timestamp(timestamp_micros("2024-01-15T16:00:00Z")))),
     Some("America/Los_Angeles"),
-    0 /* expected_file_num */,
+    &[],
     false /* write_parsed_partition */
 )]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn offset_less_timestamp_partition_predicates_with_json_and_checkpoint(
     #[case] predicate: Predicate,
     #[case] tz: Option<&str>,
-    #[case] expected_file_num: usize,
+    #[case] expected_files_and_timestamps: &[(&str, &str)],
     #[case] write_parsed_partition: bool,
+    #[values(false, true)] parsed_struct_on_scan: bool,
 ) {
     for cm_mode in ["none", "id", "name"] {
         let (_temp_dir, table_path, engine) = test_table_setup_mt().unwrap();
@@ -613,9 +624,15 @@ async fn offset_less_timestamp_partition_predicates_with_json_and_checkpoint(
         let snapshot = Snapshot::builder_for(&table_path)
             .build(engine.as_ref())
             .unwrap();
-        let options = tz.map_or_else(PartitionValuesOptions::string_map_only, |tz| {
-            PartitionValuesOptions::string_map_only().with_timestamp_timezone(tz)
-        });
+        let physical_names = physical_timestamp_partition_names(&snapshot);
+        let mut options = if parsed_struct_on_scan {
+            PartitionValuesOptions::with_struct()
+        } else {
+            PartitionValuesOptions::string_map_only()
+        };
+        if let Some(tz) = tz {
+            options = options.with_timestamp_timezone(tz);
+        }
         let scan = snapshot
             .scan_builder()
             .with_predicate(Arc::new(predicate.clone()))
@@ -623,14 +640,40 @@ async fn offset_less_timestamp_partition_predicates_with_json_and_checkpoint(
             .build()
             .unwrap();
 
-        let mut file_num = 0;
+        let mut actual = Vec::new();
         for metadata in scan.scan_metadata(engine.as_ref()).unwrap() {
-            file_num = metadata
-                .unwrap()
-                .visit_scan_files(file_num, |count, _| *count += 1)
-                .unwrap();
+            let (data, selection) = metadata.unwrap().scan_files.into_parts();
+            let batch: RecordBatch = ArrowEngineData::try_from_engine_data(data).unwrap().into();
+            let batch = filter_record_batch(&batch, &BooleanArray::from(selection)).unwrap();
+            let paths = get_column!(batch, "path", StringArray);
+            let timestamps = parsed_struct_on_scan.then(|| {
+                let parsed = get_column!(batch, "partitionValues_parsed", StructArray);
+                get_column!(parsed, &physical_names[0], TimestampMicrosecondArray)
+            });
+            for row in 0..batch.num_rows() {
+                actual.push((
+                    paths.value(row).to_string(),
+                    timestamps.map(|timestamps| {
+                        assert!(!timestamps.is_null(row));
+                        timestamps.value(row)
+                    }),
+                ));
+            }
         }
-        assert_eq!(file_num, expected_file_num, "tz={tz:?}, cm={cm_mode}");
+        actual.sort();
+        let expected: Vec<_> = expected_files_and_timestamps
+            .iter()
+            .map(|(path, timestamp)| {
+                (
+                    path.to_string(),
+                    parsed_struct_on_scan.then(|| timestamp_micros(timestamp)),
+                )
+            })
+            .collect();
+        assert_eq!(
+            actual, expected,
+            "tz={tz:?}, cm={cm_mode}, parsed={parsed_struct_on_scan}"
+        );
     }
 }
 
