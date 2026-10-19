@@ -11,6 +11,7 @@ use test_utils::{add_commit, assert_result_error_with_message, delta_path_for_ve
 use super::tests::add_checkpoint_to_store;
 use super::{LastManifestCommitResolution, LogSegment};
 use crate::actions::LastManifestCommit;
+use crate::arrow::array::StringArray;
 use crate::committer::FileSystemCommitter;
 use crate::crc::{Crc, CrcDelta, FileStats, FileStatsState};
 use crate::engine::sync::SyncEngine;
@@ -510,18 +511,25 @@ async fn plan_replay_skips_pointed_commit_when_pm_is_newer() {
 // version) fails the build rather than silently dropping the action's P&M.
 #[cfg(feature = "declarative-plans")]
 #[rstest]
-#[case::pointed_commit_has_no_checkpoint_action(vec![
-    standalone_pm_commit(one_column_schema()),
-    commit_info(Some((0, 0))),
-])]
-#[case::pointed_action_has_other_content_root(vec![
-    standalone_pm_commit(one_column_schema()),
-    checkpoint_action(0, &[], one_column_schema()),
-    commit_info(Some((1, 1))),
-])]
+#[case::pointed_commit_has_no_checkpoint_action(
+    vec![
+        standalone_pm_commit(one_column_schema()),
+        commit_info(Some((0, 0))),
+    ],
+    "that commit carries no checkpoint action"
+)]
+#[case::pointed_action_has_other_content_root(
+    vec![
+        standalone_pm_commit(one_column_schema()),
+        checkpoint_action(0, &[], one_column_schema()),
+        commit_info(Some((1, 1))),
+    ],
+    "that commit's checkpoint action has content root version 0"
+)]
 #[tokio::test]
 async fn plan_replay_errors_when_pointed_commit_lacks_matching_action(
     #[case] commits: Vec<String>,
+    #[case] expected_error: &str,
 ) {
     let store = Arc::new(InMemory::new());
     let table_root = url::Url::parse("memory:///").unwrap();
@@ -533,7 +541,58 @@ async fn plan_replay_errors_when_pointed_commit_lacks_matching_action(
 
     let engine = SyncEngine::new_with_store(store);
     let result = Snapshot::builder_for(table_root).build(&engine);
-    assert_result_error_with_message(result, "carries no matching checkpoint action");
+    assert!(matches!(&result, Err(KernelError::InvalidLogSegment(_))));
+    assert_result_error_with_message(result, expected_error);
+}
+
+// A standalone checkpoint written after the manifest commit hides that commit from the segment.
+// Replay still resolves P&M from the checkpoint and the newest commit's pointer, but following the
+// pointer to the action fails because the segment does not list its commit.
+#[tokio::test]
+async fn standalone_checkpoint_above_pointed_commit_locates_unlisted_action() {
+    check_standalone_checkpoint_above_pointed_commit(non_plan_engine).await;
+    #[cfg(feature = "declarative-plans")]
+    check_standalone_checkpoint_above_pointed_commit(|store| SyncEngine::new_with_store(store))
+        .await;
+}
+
+async fn check_standalone_checkpoint_above_pointed_commit<E: Engine>(
+    make_engine: impl FnOnce(Arc<InMemory>) -> E,
+) {
+    let pointer = commit_info(Some((0, 0)));
+    let (store, table_root) = manifest_commit_table(&[pointer.clone(), pointer]).await;
+    let checkpoint_rows = standalone_pm_commit(one_column_schema());
+    add_checkpoint_to_store(
+        &store,
+        parse_json_batch(StringArray::from_iter_values(checkpoint_rows.lines())),
+        &format!("{:020}.checkpoint.parquet", 1),
+    )
+    .await
+    .unwrap();
+
+    let engine = make_engine(store);
+    let storage = engine.storage_handler();
+    let log_root = table_root.join("_delta_log/").unwrap();
+    let log_segment =
+        LogSegment::for_snapshot_impl(storage.as_ref(), log_root, vec![], None, None, None)
+            .unwrap();
+    assert_eq!(log_segment.checkpoint_version, Some(1));
+    let resolution = log_segment
+        .read_protocol_metadata_opt(&engine, None)
+        .unwrap();
+    assert!(resolution.protocol.is_some() && resolution.metadata.is_some());
+    assert!(resolution.captured_checkpoint_action.is_none());
+    assert!(matches!(
+        resolution.last_manifest_commit,
+        LastManifestCommitResolution::Resolved(Some(pointer))
+            if pointer == LastManifestCommit::new(0, 0).unwrap()
+    ));
+
+    let snapshot = Snapshot::builder_for(table_root).build(&engine).unwrap();
+    assert_result_error_with_message(
+        snapshot.latest_checkpoint_action(&engine),
+        "this log segment does not list that commit",
+    );
 }
 
 // An incremental update resolves the latest checkpoint action for the updated snapshot: a new
