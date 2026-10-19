@@ -49,11 +49,9 @@ mod domain_metadata_replay;
 mod protocol_metadata_replay;
 
 pub(crate) use domain_metadata_replay::DomainMetadataMap;
-pub(crate) use protocol_metadata_replay::PmResolution;
 #[cfg(feature = "adaptive-metadata-in-dev")]
-pub(crate) use protocol_metadata_replay::{
-    CheckpointActionResolution, LastManifestCommitResolution,
-};
+pub(crate) use protocol_metadata_replay::LastManifestCommitResolution;
+pub(crate) use protocol_metadata_replay::PmResolution;
 
 #[cfg(test)]
 mod crc_tests;
@@ -890,31 +888,22 @@ impl LogSegment {
     /// Find the latest AMT `checkpoint` action in this segment, returning `None` when the segment
     /// has no checkpoint action (a classic non-AMT table, or an AMT table that has none yet).
     ///
-    /// `pointer` is a CRC's `lastManifestCommit`, naming the latest manifest commit. It is
-    /// authoritative: only that one commit is read, and the log is never scanned. Without a
-    /// pointer, the log is scanned newest-first until an action is found.
-    ///
-    /// TODO(delta-io/delta#7533): use the commitInfo pointer when no CRC is available.
+    /// `pointer` is the snapshot's `lastManifestCommit`, naming the latest manifest commit, or
+    /// `None` when there is none yet. It is authoritative: only the named commit is read, and the
+    /// log is never scanned.
     ///
     /// # Errors
-    /// Returns an error if the log cannot be read or a checkpoint action fails to parse. With a
-    /// pointer, also returns an error if this segment does not list the named manifest commit or
-    /// that commit does not carry the checkpoint action `pointer` describes.
+    /// Returns an error if the named manifest commit cannot be read or does not carry the
+    /// checkpoint action `pointer` describes.
     #[cfg(feature = "adaptive-metadata-in-dev")]
     pub(crate) fn find_last_checkpoint_action(
         &self,
         engine: &dyn Engine,
         pointer: Option<&LastManifestCommit>,
     ) -> KernelResult<Option<CheckpointAction>> {
-        match pointer {
-            Some(pointer) => self
-                .read_manifest_commit_checkpoint_action(engine, pointer)
-                .map(Some),
-            None => first_checkpoint_action(
-                self.read_actions(engine, LOG_CHECKPOINT_SCHEMA.clone())?
-                    .map_ok(|batch| batch.actions),
-            ),
-        }
+        pointer
+            .map(|pointer| self.read_manifest_commit_checkpoint_action(engine, pointer))
+            .transpose()
     }
 
     /// Read this segment's JSON commit/compaction cover as [`ActionsBatch`]es (`is_log_batch =
@@ -1686,13 +1675,14 @@ impl LogSegment {
         true
     }
 
-    /// The checkpoint action in the manifest commit `pointer` names as the latest one.
+    /// The checkpoint action in the manifest commit `pointer` names as the latest one. The commit
+    /// may predate this segment (for example, at or below its checkpoint); it is then read from
+    /// its published location.
     ///
     /// # Errors
-    /// Returns an error if the commit cannot be read, or if the CRC and the log are inconsistent:
-    /// this segment does not list the commit (commits at or below the checkpoint never are), the
-    /// commit carries no checkpoint action, or its action's content root version differs from the
-    /// pointer's.
+    /// Returns an error if the commit cannot be read, or if the pointer and the log are
+    /// inconsistent: the commit is newer than this segment, carries no checkpoint action, or its
+    /// action's content root version differs from the pointer's.
     #[cfg(feature = "adaptive-metadata-in-dev")]
     fn read_manifest_commit_checkpoint_action(
         &self,
@@ -1706,19 +1696,29 @@ impl LogSegment {
                 pointer.version, pointer.content_root_version
             ))
         };
+        let version = Version::try_from(pointer.version)
+            .map_err(|_| inconsistent("that version is negative".to_string()))?;
+        // Under time travel, a commit past the end version exists in storage but is not part of
+        // this snapshot.
+        require!(
+            version <= self.end_version,
+            inconsistent(format!(
+                "that commit is newer than this log segment's end version {}",
+                self.end_version
+            ))
+        );
+        // A listed commit may be an unpublished catalog commit, so prefer its listed location. An
+        // unlisted one predates the segment and is therefore published.
         let commits = &self.listed.ascending_commit_files;
-        let commit = Version::try_from(pointer.version)
+        let listed = commits
+            .binary_search_by_key(&version, |commit| commit.version)
             .ok()
-            .and_then(|version| {
-                let index = commits
-                    .binary_search_by_key(&version, |commit| commit.version)
-                    .ok()?;
-                commits.get(index)
-            })
-            .ok_or_else(|| {
-                inconsistent("this log segment does not list that commit".to_string())
-            })?;
-        let files = std::slice::from_ref(&commit.location);
+            .and_then(|index| commits.get(index));
+        let location = match listed {
+            Some(commit) => commit.location.clone(),
+            None => FileMeta::new(self.log_root.join(&format!("{version:020}.json"))?, 0, 0),
+        };
+        let files = std::slice::from_ref(&location);
         let batches =
             engine
                 .json_handler()

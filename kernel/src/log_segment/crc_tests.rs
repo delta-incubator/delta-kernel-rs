@@ -11,9 +11,9 @@ use serde_json::{json, Value};
 use test_utils::delta_path_for_version;
 use url::Url;
 
-#[cfg(feature = "adaptive-metadata-in-dev")]
-use super::CheckpointActionResolution;
 use super::LogSegment;
+#[cfg(feature = "adaptive-metadata-in-dev")]
+use crate::actions::CheckpointAction;
 use crate::actions::{DomainMetadata, Format, Metadata, Protocol, SetTransaction};
 use crate::crc::{
     try_read_crc_file, Crc, DomainMetadataState, FileSizeHistogram, SetTransactionState,
@@ -513,9 +513,9 @@ impl BuiltCrcTest {
     }
 
     /// Lists the log, reads the latest on-disk CRC, and runs the unchecked P&M replay, returning
-    /// how it resolved the latest AMT `checkpoint` action.
+    /// the latest AMT `checkpoint` action it captured, if any.
     #[cfg(feature = "adaptive-metadata-in-dev")]
-    fn checkpoint_action_resolution(&self) -> CheckpointActionResolution {
+    fn captured_checkpoint_action(&self) -> Option<Arc<CheckpointAction>> {
         let storage = self.engine.storage_handler();
         let log_root = self.url.join("_delta_log/").unwrap();
         let log_segment =
@@ -820,18 +820,18 @@ async fn test_crc_seeded_replay_captures_checkpoint_action_after_crc() {
         )
         .build()
         .await
-        .checkpoint_action_resolution();
+        .captured_checkpoint_action();
     assert!(
-        matches!(resolution, CheckpointActionResolution::Captured(a) if a.version == 1),
+        resolution.is_some_and(|a| a.version == 1),
         "a checkpoint action after the CRC is the latest and must be captured, not deferred"
     );
 }
 
-// A CRC at the target version short-circuits before any replay, so the checkpoint action is left
-// `Unresolved` for the accessor to settle by scanning.
+// A CRC at the target version short-circuits before any replay, so no checkpoint action is
+// captured; the accessor follows the CRC's `lastManifestCommit` instead.
 #[cfg(feature = "adaptive-metadata-in-dev")]
 #[tokio::test]
-async fn test_crc_at_target_leaves_checkpoint_action_unresolved() {
+async fn test_crc_at_target_captures_no_checkpoint_action() {
     let config = adaptive_metadata_table_configuration(test_schema_flat_with_column_mapping(), &[]);
     let resolution = CrcReadTest::new()
         .commit(
@@ -850,16 +850,16 @@ async fn test_crc_at_target_leaves_checkpoint_action_unresolved() {
         )
         .build()
         .await
-        .checkpoint_action_resolution();
-    assert!(matches!(resolution, CheckpointActionResolution::Unresolved));
+        .captured_checkpoint_action();
+    assert!(resolution.is_none());
 }
 
 // A CRC-seeded pruned replay that resolves P&M from standalone actions but finds no checkpoint
-// action after the CRC leaves the resolution `Unresolved`: the latest action may sit at or below
-// the CRC version, which the pruned replay never reads.
+// action after the CRC captures none: the latest action may sit at or below the CRC version, which
+// the pruned replay never reads.
 #[cfg(feature = "adaptive-metadata-in-dev")]
 #[tokio::test]
-async fn test_crc_seeded_replay_without_checkpoint_action_is_unresolved() {
+async fn test_crc_seeded_replay_without_checkpoint_action_captures_none() {
     let crc_config =
         adaptive_metadata_table_configuration(test_schema_flat_with_column_mapping(), &[]);
     let newer_config = adaptive_metadata_table_configuration(
@@ -890,8 +890,8 @@ async fn test_crc_seeded_replay_without_checkpoint_action_is_unresolved() {
         )
         .build()
         .await
-        .checkpoint_action_resolution();
-    assert!(matches!(resolution, CheckpointActionResolution::Unresolved));
+        .captured_checkpoint_action();
+    assert!(resolution.is_none());
 }
 
 #[tokio::test]

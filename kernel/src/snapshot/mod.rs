@@ -29,7 +29,7 @@ use crate::crc::{
 use crate::expressions::ColumnName;
 use crate::incremental_scan::IncrementalScanBuilder;
 #[cfg(feature = "adaptive-metadata-in-dev")]
-use crate::log_segment::{CheckpointActionResolution, LastManifestCommitResolution};
+use crate::log_segment::LastManifestCommitResolution;
 use crate::log_segment::{DomainMetadataMap, LogSegment, PmResolution};
 use crate::metrics::events::{DOMAIN_METADATA_LOADED_SPAN, SET_TRANSACTION_LOADED_SPAN};
 use crate::metrics::{
@@ -101,22 +101,14 @@ pub struct Snapshot {
     built_as_latest: bool,
     /// Whether the last applicable incremental build requested ignoring new checkpoints.
     skipped_new_checkpoints: bool,
-    /// How this snapshot's latest AMT `checkpoint` action was resolved at build time: captured
-    /// during P&M replay, named by the CRC's `lastManifestCommit`, or unresolved (see
-    /// [`CheckpointActionResolution`]). [`Snapshot::latest_checkpoint_action`] serves `Captured`
-    /// directly; for `Located` it reads the named commit, for `Unresolved` it scans the log, and
-    /// memoizes the result in [`Self::checkpoint_action`].
-    #[cfg(feature = "adaptive-metadata-in-dev")]
-    checkpoint_action_resolution: CheckpointActionResolution,
-    /// Memoized lookup result backing [`Self::checkpoint_action_resolution`]'s
-    /// `Located`/`Unresolved` path, filled after the first successful lookup so later calls do
-    /// not re-read (a failed lookup is not cached and is retried); unused for a `Captured`
-    /// resolution, which serves its action directly. `None` means the lookup found no checkpoint
-    /// action in this snapshot's log segment (a classic non-AMT table, or an AMT table that
-    /// has none yet).
+    /// This snapshot's latest AMT `checkpoint` action (see
+    /// [`Snapshot::latest_checkpoint_action`]), filled at build time when P&M replay or the
+    /// committing transaction captured it, else on the first successful lookup (a failed
+    /// lookup is not cached and is retried). `None` means the table has no checkpoint action
+    /// at this version (a classic non-AMT table, or an AMT table that has none yet).
     ///
     /// Safe to memoize: the snapshot's `log_segment` is frozen and Delta log files are immutable,
-    /// so the scanned result cannot change for this snapshot. A checkpoint written later belongs
+    /// so the resolved action cannot change for this snapshot. A checkpoint written later belongs
     /// to a new snapshot's segment, not this one. Behind an [`Arc`] so repeated calls clone
     /// only the pointer, not the action's inline transaction and domain-metadata vectors.
     #[cfg(feature = "adaptive-metadata-in-dev")]
@@ -167,7 +159,7 @@ struct PreparedSnapshot {
     table_configuration: TableConfiguration,
     crc: SnapshotCrc,
     #[cfg(feature = "adaptive-metadata-in-dev")]
-    checkpoint_action: CheckpointActionResolution,
+    checkpoint_action: Option<Arc<CheckpointAction>>,
     #[cfg(feature = "adaptive-metadata-in-dev")]
     last_manifest_commit: LastManifestCommitResolution,
 }
@@ -232,7 +224,7 @@ impl Snapshot {
             // No replay ran on this path, so the checkpoint action is resolved on demand, as is
             // `lastManifestCommit` without a CRC at this version.
             #[cfg(feature = "adaptive-metadata-in-dev")]
-            CheckpointActionResolution::Unresolved,
+            None,
             #[cfg(feature = "adaptive-metadata-in-dev")]
             LastManifestCommitResolution::Unresolved,
         ))
@@ -251,6 +243,7 @@ impl Snapshot {
         )
     }
 
+    /// `checkpoint_action` is the latest checkpoint action when the build already has it in hand.
     /// `last_manifest_commit` is how the build resolved `lastManifestCommit` without the CRC. A CRC
     /// at the snapshot version takes precedence, since it records the value authoritatively,
     /// including its absence.
@@ -260,7 +253,9 @@ impl Snapshot {
         crc: SnapshotCrc,
         built_as_latest: bool,
         skipped_new_checkpoints: bool,
-        #[cfg(feature = "adaptive-metadata-in-dev")] checkpoint_action: CheckpointActionResolution,
+        #[cfg(feature = "adaptive-metadata-in-dev")] checkpoint_action: Option<
+            Arc<CheckpointAction>,
+        >,
         #[cfg(feature = "adaptive-metadata-in-dev")]
         last_manifest_commit: LastManifestCommitResolution,
     ) -> Self {
@@ -285,41 +280,37 @@ impl Snapshot {
             built_as_latest,
             skipped_new_checkpoints,
             #[cfg(feature = "adaptive-metadata-in-dev")]
-            checkpoint_action_resolution: checkpoint_action,
-            #[cfg(feature = "adaptive-metadata-in-dev")]
-            checkpoint_action: OnceLock::new(),
+            checkpoint_action: match checkpoint_action {
+                Some(action) => OnceLock::from(Some(action)),
+                None => OnceLock::new(),
+            },
             #[cfg(feature = "adaptive-metadata-in-dev")]
             last_manifest_commit,
         }
     }
 
-    /// The latest AMT `checkpoint` action this snapshot covers, or `None` when this snapshot's log
-    /// segment has no checkpoint action (a classic non-AMT table, or an AMT table that has none
-    /// yet). Serves the action captured during P&M replay directly; otherwise reads it from the
-    /// manifest commit the CRC names (erroring if the CRC and the log disagree), or scans the log
-    /// when there is no CRC pointer, and memoizes a successful result so
-    /// later calls do not re-read (a failure is not cached and is retried). Memoizing is correct
-    /// because the snapshot's `log_segment` is frozen and Delta log files are immutable.
+    /// The latest AMT `checkpoint` action this snapshot covers, or `None` when the table has no
+    /// checkpoint action at this version (a classic non-AMT table, or an AMT table that has none
+    /// yet). Served from memory when the build captured it; otherwise read from the manifest
+    /// commit that [`Self::last_manifest_commit`] names, so the log is never scanned.
+    ///
+    /// # Errors
+    /// Returns an error if `lastManifestCommit` or the manifest commit cannot be read, or if the
+    /// pointer and the log disagree (see [`LogSegment::find_last_checkpoint_action`]).
     #[cfg(feature = "adaptive-metadata-in-dev")]
     pub(crate) fn latest_checkpoint_action(
         &self,
         engine: &dyn Engine,
     ) -> KernelResult<Option<Arc<CheckpointAction>>> {
-        let pointer = match &self.checkpoint_action_resolution {
-            // Captured during replay: serve it directly (cheap `Arc` clone).
-            CheckpointActionResolution::Captured(action) => return Ok(Some(action.clone())),
-            CheckpointActionResolution::Located(pointer) => Some(pointer),
-            CheckpointActionResolution::Unresolved => None,
-        };
-        // A concurrent caller may win the race to fill the cell; both compute the same action, so
-        // either value is correct.
         if let Some(cached) = self.checkpoint_action.get() {
             return Ok(cached.clone());
         }
+        let pointer = self.last_manifest_commit(engine)?;
         let found = self
             .log_segment
-            .find_last_checkpoint_action(engine, pointer)?
+            .find_last_checkpoint_action(engine, pointer.as_ref())?
             .map(Arc::new);
+        // A concurrent caller may win the race to fill the cell; both read the same commit.
         let _ = self.checkpoint_action.set(found.clone());
         Ok(found)
     }
@@ -474,7 +465,7 @@ impl Snapshot {
     ///
     /// `checkpoint_action` is the `checkpoint` action the commit wrote, if any; it becomes the
     /// post-commit snapshot's latest checkpoint action. Without one, the latest action is unchanged
-    /// and this snapshot's resolution carries forward.
+    /// and this snapshot's resolved action, if any, carries forward.
     pub(crate) fn new_post_commit(
         &self,
         commit: ParsedLogPath,
@@ -535,10 +526,9 @@ impl Snapshot {
             true, /* built_as_latest */
             self.skipped_new_checkpoints,
             #[cfg(feature = "adaptive-metadata-in-dev")]
-            match checkpoint_action {
-                Some(action) => CheckpointActionResolution::Captured(Arc::new(action)),
-                None => self.checkpoint_action_resolution.clone(),
-            },
+            checkpoint_action
+                .map(Arc::new)
+                .or_else(|| self.checkpoint_action.get().cloned().flatten()),
             #[cfg(feature = "adaptive-metadata-in-dev")]
             last_manifest_commit,
         ))
