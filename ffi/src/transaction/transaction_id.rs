@@ -91,12 +91,12 @@ mod tests {
     #[case::builder(2, false)]
     #[case::transaction(0, false)]
     #[case::mixed(1, false)]
-    #[case::duplicate_transaction(0, true)]
-    #[case::duplicate_mixed(1, true)]
+    #[case::duplicate_app_id_after_build(0, true)]
+    #[case::duplicate_app_id_across_build(1, true)]
     #[tokio::test]
     async fn test_write_txn_actions(
         #[case] builder_ids: usize,
-        #[case] duplicate: bool,
+        #[case] duplicate_app_id: bool,
     ) -> KernelResult<()> {
         // create a simple table: one int column named 'number'
         let schema = schema_ref! { nullable "number": INTEGER };
@@ -122,7 +122,10 @@ mod tests {
             // Add app ids
             let app_id1 = "app_id1";
             let app_id2 = "app_id2";
-            let ids = [(app_id1, 1), (if duplicate { app_id1 } else { app_id2 }, 2)];
+            let ids = [
+                (app_id1, 1),
+                (if duplicate_app_id { app_id1 } else { app_id2 }, 2),
+            ];
             for (app_id, version) in ids.iter().take(builder_ids) {
                 builder = ok_or_panic(unsafe {
                     update_table_txn_builder_with_transaction_id(
@@ -150,7 +153,7 @@ mod tests {
 
             let result =
                 unsafe { update_table_txn_commit(txn, default_engine_handle.shallow_copy()) };
-            if duplicate {
+            if duplicate_app_id {
                 assert_extern_result_error_contains(
                     result,
                     FFIKernelError::GenericError,
