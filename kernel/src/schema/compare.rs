@@ -568,14 +568,47 @@ mod tests {
             true
         )
     )]
-    // Timestamp precision changes are not compatible in either direction
+    // Nanosecond (or INT96) checkpoint values can back microsecond stats, but microsecond values
+    // can't back nanosecond stats
     #[cfg_attr(
         feature = "nanosecond-timestamps",
         case::timestamp_to_nanos(PrimitiveType::Timestamp, PrimitiveType::TimestampNanos, false)
     )]
     #[cfg_attr(
         feature = "nanosecond-timestamps",
-        case::nanos_to_timestamp(PrimitiveType::TimestampNanos, PrimitiveType::Timestamp, false)
+        case::timestamp_ntz_to_nanos_ntz(
+            PrimitiveType::TimestampNtz,
+            PrimitiveType::TimestampNanosNtz,
+            false
+        )
+    )]
+    #[cfg_attr(
+        feature = "nanosecond-timestamps",
+        case::nanos_to_timestamp(PrimitiveType::TimestampNanos, PrimitiveType::Timestamp, true)
+    )]
+    #[cfg_attr(
+        feature = "nanosecond-timestamps",
+        case::nanos_to_timestamp_ntz(
+            PrimitiveType::TimestampNanos,
+            PrimitiveType::TimestampNtz,
+            true
+        )
+    )]
+    #[cfg_attr(
+        feature = "nanosecond-timestamps",
+        case::nanos_ntz_to_timestamp(
+            PrimitiveType::TimestampNanosNtz,
+            PrimitiveType::Timestamp,
+            true
+        )
+    )]
+    #[cfg_attr(
+        feature = "nanosecond-timestamps",
+        case::nanos_ntz_to_timestamp_ntz(
+            PrimitiveType::TimestampNanosNtz,
+            PrimitiveType::TimestampNtz,
+            true
+        )
     )]
     // Long not reinterpretable as nanosecond timestamp
     #[cfg_attr(

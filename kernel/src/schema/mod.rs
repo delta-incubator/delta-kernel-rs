@@ -2040,6 +2040,8 @@ impl PrimitiveType {
     /// Specifically:
     /// - Integer -> Date (int32 stored without DATE annotation)
     /// - Long -> Timestamp/TimestampNtz (int64 stored without TIMESTAMP annotation)
+    /// - TimestampNanos/TimestampNanosNtz -> Timestamp/TimestampNtz (nanosecond or INT96 encoding,
+    ///   which Arrow reads as nanoseconds; microsecond values convert exactly)
     /// - Binary -> Geometry (statistics only; the engine validates and decodes the WKB bounds)
     ///
     /// These are **not** Delta protocol type widening rules and must not be used outside of
@@ -2055,6 +2057,12 @@ impl PrimitiveType {
         match (self, target, kind) {
             (Self::Integer, Self::Date, _)
             | (Self::Long, Self::Timestamp | Self::TimestampNtz, _) => true,
+            #[cfg(feature = "nanosecond-timestamps")]
+            (
+                Self::TimestampNanos | Self::TimestampNanosNtz,
+                Self::Timestamp | Self::TimestampNtz,
+                _,
+            ) => true,
             #[cfg(feature = "geo-type-in-dev")]
             (Self::Binary, Self::Geometry(_), CheckpointFieldKind::Stats) => true,
             _ => false,
