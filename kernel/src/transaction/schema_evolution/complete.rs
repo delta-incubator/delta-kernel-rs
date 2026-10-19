@@ -3,7 +3,7 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 
-use crate::actions::Metadata;
+use crate::actions::{Metadata, Protocol};
 use crate::schema::diff::{field_paths_by_id, fields_by_id};
 use crate::schema::validation::validate_schema;
 use crate::schema::{
@@ -15,7 +15,9 @@ use crate::table_features::{
     assign_column_mapping_metadata, find_max_column_id_in_schema, is_iceberg_allowed_type_change,
     validate_column_mapping_id, ColumnMappingMode, TableFeature,
 };
-use crate::table_properties::{COLUMN_MAPPING_MAX_COLUMN_ID, DATA_SKIPPING_STATS_COLUMNS};
+use crate::table_properties::{
+    TableProperties, COLUMN_MAPPING_MAX_COLUMN_ID, DATA_SKIPPING_STATS_COLUMNS,
+};
 use crate::transforms::{transform_output_type, SchemaTransform};
 use crate::{KernelError, KernelResult};
 
@@ -23,16 +25,25 @@ use crate::{KernelError, KernelResult};
 ///
 /// Assigns identities to new fields and restores omitted, Kernel-controlled metadata on surviving
 /// fields. Returns an error for identity reuse, relocation, incompatible types, or invalid
-/// defaults.
+/// defaults. When `stats_columns_requested` is true, the requested statistics selection uses final
+/// logical names; otherwise retained selections follow field identities.
 pub(crate) fn replace_schema(
     config: &TableConfiguration,
     requested: SchemaRef,
+    metadata: Metadata,
+    protocol: Protocol,
+    stats_columns_requested: bool,
 ) -> KernelResult<TableConfiguration> {
     if config.column_mapping_mode() == ColumnMappingMode::None {
         return Err(KernelError::schema(
             "Complete schema updates require column mapping",
         ));
     }
+    let effective = SchemaTransitionContext {
+        properties: metadata.parse_table_properties(),
+        protocol: &protocol,
+        version: config.version(),
+    };
     let old = config.logical_schema();
     let old_fields = fields_by_id(&old).map_err(|e| KernelError::schema(e.to_string()))?;
     let historical_max = config
@@ -51,11 +62,11 @@ pub(crate) fn replace_schema(
     let mut mapping = PrepareMapping {
         old_fields: &old_fields,
         max_id: &mut max_id,
-        nested_ids: config.is_feature_enabled(&TableFeature::IcebergCompatV2)
-            || config.is_feature_enabled(&TableFeature::IcebergCompatV3),
+        nested_ids: effective.properties.enable_iceberg_compat_v2 == Some(true)
+            || effective.properties.enable_iceberg_compat_v3 == Some(true),
     };
     let requested = mapping.transform_struct(&requested)?.into_owned();
-    // The diff deliberately suppresses descendants of additions. Check every new identity here.
+    // Validate new identities at every depth, including descendants of newly added fields.
     for (id, field) in fields_by_id(&requested).map_err(|e| KernelError::schema(e.to_string()))? {
         super::reject_generated_or_identity_metadata(&field)?;
         if field.is_metadata_column() {
@@ -111,11 +122,11 @@ pub(crate) fn replace_schema(
             }
         }
     }
-    let schema: SchemaRef = transition_struct(&old, &requested, config, &old_fields)?.into();
+    let schema: SchemaRef = transition_struct(&old, &requested, &effective, &old_fields)?.into();
     validate_schema(
         &schema,
         config.column_mapping_mode(),
-        config.is_feature_enabled(&TableFeature::ChangeDataFeed),
+        effective.properties.enable_change_data_feed == Some(true),
     )?;
     for name in config.metadata().partition_columns() {
         let previous = old
@@ -131,13 +142,26 @@ pub(crate) fn replace_schema(
             ));
         }
     }
-    let metadata = config
-        .metadata()
-        .clone()
+    let metadata = metadata
         .with_schema(schema.clone())?
         .with_configuration_entry(COLUMN_MAPPING_MAX_COLUMN_ID, max_id.to_string());
-    let metadata = update_stats_columns(config, &schema, metadata)?;
-    TableConfiguration::try_new_with_schema(config, metadata, schema)
+    let metadata = if stats_columns_requested {
+        metadata
+    } else {
+        update_stats_columns(config, &schema, metadata)?
+    };
+    TableConfiguration::try_new(
+        metadata,
+        protocol,
+        config.table_root().clone(),
+        config.version(),
+    )
+}
+
+struct SchemaTransitionContext<'a> {
+    properties: TableProperties,
+    protocol: &'a Protocol,
+    version: crate::Version,
 }
 
 fn update_stats_columns(
@@ -281,7 +305,7 @@ fn field_id(field: &StructField) -> KernelResult<i64> {
 fn transition_struct(
     old: &StructType,
     new: &StructType,
-    config: &TableConfiguration,
+    config: &SchemaTransitionContext<'_>,
     all_old: &HashMap<i64, StructField>,
 ) -> KernelResult<StructType> {
     let siblings = old
@@ -340,7 +364,9 @@ fn transition_struct(
                 || previous.data_type() != field.data_type()
             {
                 if let Some(default) = field.column_default()? {
-                    if !config.is_feature_supported(&TableFeature::AllowColumnDefaults)
+                    if !config
+                        .protocol
+                        .has_table_feature(&TableFeature::AllowColumnDefaults)
                         || !default.is_kernel_parsable_literal()
                     {
                         return Err(KernelError::schema(format!(
@@ -371,7 +397,7 @@ fn transition_struct(
 fn transition_type(
     old: &DataType,
     new: &DataType,
-    config: &TableConfiguration,
+    config: &SchemaTransitionContext<'_>,
     all_old: &HashMap<i64, StructField>,
     changes: &mut Vec<serde_json::Value>,
     path: &str,
@@ -427,13 +453,19 @@ fn transition_type(
         }
         _ if old == new => Ok(new.clone()),
         (DataType::Primitive(a), DataType::Primitive(b))
-            if (config.is_feature_enabled(&TableFeature::TypeWidening)
-                || config.is_feature_enabled(&TableFeature::TypeWideningPreview))
+            if config.properties.enable_type_widening == Some(true)
+                && (config
+                    .protocol
+                    .has_table_feature(&TableFeature::TypeWidening)
+                    || config
+                        .protocol
+                        .has_table_feature(&TableFeature::TypeWideningPreview))
                 && can_widen(a, b) =>
         {
+            // Disabling compatibility does not remove protocol support or its widening rules.
             if [TableFeature::IcebergCompatV2, TableFeature::IcebergCompatV3]
                 .iter()
-                .any(|feature| config.is_feature_supported(feature))
+                .any(|feature| config.protocol.has_table_feature(feature))
                 && !is_iceberg_allowed_type_change(old, new)
             {
                 return Err(KernelError::schema(format!(
@@ -441,10 +473,13 @@ fn transition_type(
                 )));
             }
             let mut record = serde_json::json!({"fromType": old, "toType": new});
-            if config.is_feature_supported(&TableFeature::TypeWideningPreview) {
+            if config
+                .protocol
+                .has_table_feature(&TableFeature::TypeWideningPreview)
+            {
                 // Preview clients use the version to identify files that need rewriting.
                 record["tableVersion"] = config
-                    .version()
+                    .version
                     .checked_add(1)
                     .ok_or_else(|| KernelError::schema("Type-change version overflow"))?
                     .into();
@@ -497,6 +532,19 @@ mod tests {
     use super::*;
     use crate::actions::{Metadata, Protocol};
     use crate::schema::{schema, schema_ref};
+
+    fn replace_schema(
+        config: &TableConfiguration,
+        schema: SchemaRef,
+    ) -> KernelResult<TableConfiguration> {
+        super::replace_schema(
+            config,
+            schema,
+            config.metadata().clone(),
+            config.protocol().clone(),
+            false,
+        )
+    }
 
     fn mapped(name: &str, id: i64, data_type: impl Into<DataType>) -> StructField {
         StructField::nullable(name, data_type).add_metadata([

@@ -276,10 +276,9 @@ pub struct Transaction<STATE = UpdateTable, MODE: ExecutionMode = Imperative> {
     // config, this is cloned from the read snapshot; when the config changes (e.g. schema
     // evolution), it is constructed separately with the new schema/protocol.
     effective_table_config: TableConfiguration,
-    // Whether to emit a Protocol action. True for CREATE TABLE, false otherwise.
+    // Emit Protocol when creating a table or adding feature support.
     should_emit_protocol: bool,
-    // Whether to emit a Metadata action. True for CREATE TABLE and transactions with staged
-    // schema changes, false otherwise.
+    // Emit Metadata for table creation, schema changes, and effective property changes.
     should_emit_metadata: bool,
     // Accepted table intent is independent of which actions are emitted.
     has_table_change_request: bool,
@@ -1160,7 +1159,7 @@ impl<STATE, MODE: ExecutionMode> Transaction<STATE, MODE> {
                 if !self.has_table_change_request =>
             {
                 Err(KernelError::invalid_transaction_state(
-                    "ALTER TABLE requires at least one schema change",
+                    "ALTER TABLE requires at least one table change",
                 ))
             }
             (false, CommitOperation::UpdateTable(UpdateTableOperation::AlterTable))
@@ -1231,11 +1230,16 @@ impl<STATE, MODE: ExecutionMode> Transaction<STATE, MODE> {
         // Existing table: enforce monotonicity per the Delta protocol. The timestamp
         // must be the larger of:
         // - The time at which the writer attempted the commit
-        // - One millisecond later than the previous commit's inCommitTimestamp
-        Ok(self
+        // - One millisecond later than the previous commit timestamp (file time before ICT
+        //   enablement)
+        let previous = self
             .read_snapshot()?
-            .get_in_commit_timestamp(engine)?
-            .map(|prev_ict| self.commit_timestamp.max(prev_ict + 1)))
+            .get_timestamp(engine)?
+            .checked_add(1)
+            .ok_or_else(|| {
+                KernelError::invalid_transaction_state("In-commit timestamp overflow")
+            })?;
+        Ok(Some(self.commit_timestamp.max(previous)))
     }
 
     /// Returns the commit version for this transaction.
@@ -3680,7 +3684,7 @@ mod tests {
     #[case::alter_without_schema_changes(
         false,
         CommitOperation::UpdateTable(UpdateTableOperation::AlterTable),
-        "ALTER TABLE requires at least one schema change"
+        "ALTER TABLE requires at least one table change"
     )]
     #[case::empty_custom_operation(
         false,

@@ -134,6 +134,7 @@ mod tests {
     use delta_kernel::KernelResult;
     use delta_kernel_ffi::delta_types::{
         FfiColumnNameArray, FfiNullableStringMap, FfiNullableStringMapEntry, FfiStringArray,
+        FfiStringMap, FfiStringMapEntry,
     };
     use delta_kernel_ffi::engine_data::{get_engine_data, ArrowFFIData};
     use delta_kernel_ffi::error::FFIKernelError;
@@ -2873,6 +2874,87 @@ mod tests {
         Ok(())
     }
 
+    #[rstest]
+    #[tokio::test]
+    async fn table_property_ffi_copies_inputs_and_consumes_on_decode_error(
+        #[values(false, true)] removal: bool,
+        #[values(false, true)] invalid: bool,
+    ) -> KernelResult<()> {
+        let (url, _store, engine) = setup_domain_metadata_table("property_ffi", false).await?;
+        let snapshot = unsafe { build_snapshot(ffi_str(url.as_str()), engine.shallow_copy()) };
+        let retained = unsafe { snapshot.clone_as_arc() };
+        let builder = ok_or_panic(unsafe {
+            new_update_table_txn_builder(
+                snapshot.shallow_copy(),
+                KernelUpdateTableOperation::AlterTable,
+                ffi_str("test"),
+                false,
+                engine.shallow_copy(),
+            )
+        });
+        let result = {
+            let invalid_bytes = [0xff_u8];
+            let key = if invalid {
+                KernelStringSlice {
+                    ptr: invalid_bytes.as_ptr().cast(),
+                    len: 1,
+                }
+            } else {
+                ffi_str("App.Key")
+            };
+            if removal {
+                let keys = [key];
+                let input = unsafe { FfiStringArray::new_unsafe(&keys) };
+                unsafe {
+                    update_table_txn_builder_with_table_properties_removed(
+                        builder,
+                        &input,
+                        engine.shallow_copy(),
+                    )
+                }
+            } else {
+                let values = [FfiStringMapEntry {
+                    key,
+                    value: ffi_str("copied"),
+                }];
+                let input = unsafe { FfiStringMap::new_unsafe(&values) };
+                unsafe {
+                    update_table_txn_builder_with_table_properties_added(
+                        builder,
+                        &input,
+                        engine.shallow_copy(),
+                    )
+                }
+            }
+        };
+        if invalid {
+            assert_extern_result_error_contains(result, FFIKernelError::Utf8Error, "invalid utf-8");
+        } else {
+            let txn = ok_or_panic(unsafe {
+                update_table_txn_builder_build(ok_or_panic(result), engine.shallow_copy())
+            });
+            let committed =
+                ok_or_panic(unsafe { update_table_txn_commit(txn, engine.shallow_copy()) });
+            assert_eq!(unsafe { version_and_free(committed) }, 1);
+            let fresh = unsafe { build_snapshot(ffi_str(url.as_str()), engine.shallow_copy()) };
+            assert_eq!(
+                unsafe { fresh.as_ref() }
+                    .table_properties()
+                    .unknown_properties
+                    .get("App.Key")
+                    .map(String::as_str),
+                if removal { None } else { Some("copied") }
+            );
+            unsafe { free_snapshot(fresh) };
+        }
+        assert_eq!(Arc::strong_count(&retained), 2);
+        unsafe {
+            free_snapshot(snapshot);
+            free_engine(engine);
+        }
+        Ok(())
+    }
+
     #[derive(Debug)]
     enum InvalidUpdateIntent {
         EmptyCustomOperation,
@@ -3289,7 +3371,7 @@ mod tests {
         assert_extern_result_error_contains(
             unsafe { update_table_txn_builder_build(builder, engine.shallow_copy()) },
             FFIKernelError::InvalidTransactionStateError,
-            "ALTER TABLE requires at least one schema change",
+            "ALTER TABLE requires at least one table change",
         );
         unsafe {
             free_snapshot(snapshot);

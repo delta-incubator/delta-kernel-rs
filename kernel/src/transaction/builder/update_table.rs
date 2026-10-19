@@ -1,12 +1,16 @@
 //! Builder for transactions against an existing table.
 
+use std::collections::HashMap;
+
 use delta_kernel_derive::internal_api;
 
+use super::properties::{finalize_properties, prepare_properties};
 use super::state::TransactionBuilderState;
 use super::TransactionBuilder;
 use crate::clustering::validate_clustering_columns;
 use crate::committer::Committer;
 use crate::expressions::ColumnName;
+use crate::schema::validation::validate_schema;
 use crate::schema::{SchemaRef, StructField};
 use crate::snapshot::SnapshotRef;
 use crate::table_configuration::TableConfiguration;
@@ -20,7 +24,7 @@ use crate::transaction::{ExecutionMode, Transaction, UpdateTable, UpdateTableOpe
 use crate::utils::{current_time_ms, require};
 use crate::{Engine, KernelError, KernelResult};
 
-/// Configures DML and schema-changing DDL transactions against an existing table.
+/// Configures DML and table-metadata DDL transactions against an existing table.
 ///
 /// This builder does not create or replace tables. Construct it with
 /// [`Snapshot::update_table`](crate::Snapshot::update_table); operation, engine info, and
@@ -57,6 +61,8 @@ pub struct UpdateTableBuilderState {
     operation: UpdateTableOperation,
     schema_changes: Option<Vec<SchemaOperation>>,
     updated_schema: Option<SchemaRef>,
+    properties_added: Option<HashMap<String, String>>,
+    properties_removed: Option<Vec<String>>,
     domain_metadata_removals: Vec<String>,
     is_blind_append: bool,
 }
@@ -88,6 +94,8 @@ impl TransactionBuilder<UpdateTable> {
                 operation,
                 schema_changes: None,
                 updated_schema: None,
+                properties_added: None,
+                properties_removed: None,
                 domain_metadata_removals: Vec::new(),
                 is_blind_append: false,
             },
@@ -140,6 +148,38 @@ impl TransactionBuilder<UpdateTable> {
     /// Returns the builder; validation errors are reported by [`build`](Self::build).
     pub fn with_updated_schema(mut self, schema: SchemaRef) -> Self {
         self.local_state.updated_schema = Some(schema);
+        self
+    }
+
+    /// Replaces the requested property additions and updates with `properties`.
+    ///
+    /// Ordinary keys retain their spelling. Build canonicalizes recognized Delta keys, validates
+    /// values and feature dependencies, and rejects protected settings and overlap with removals.
+    /// Returns the builder without validating cross-field intent.
+    pub fn with_table_properties_added<I, K, V>(mut self, properties: I) -> Self
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: Into<String>,
+        V: Into<String>,
+    {
+        self.local_state.properties_added = Some(
+            properties
+                .into_iter()
+                .map(|(k, v)| (k.into(), v.into()))
+                .collect(),
+        );
+        self
+    }
+
+    /// Replaces the requested property removals with `keys` and returns the builder.
+    ///
+    /// Removing an absent ordinary key succeeds. Build rejects case-insensitive `delta.*` keys
+    /// and keys also supplied for addition. Repeated calls replace the previous collection.
+    pub fn with_table_properties_removed(
+        mut self,
+        keys: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.local_state.properties_removed = Some(keys.into_iter().map(Into::into).collect());
         self
     }
 
@@ -250,9 +290,11 @@ impl TransactionBuilder<UpdateTable> {
         if operation == &UpdateTableOperation::AlterTable {
             if self.local_state.schema_changes.is_none()
                 && self.local_state.updated_schema.is_none()
+                && self.local_state.properties_added.is_none()
+                && self.local_state.properties_removed.is_none()
             {
                 return Err(KernelError::invalid_transaction_state(
-                    "ALTER TABLE requires at least one schema change",
+                    "ALTER TABLE requires at least one table change",
                 ));
             }
             if self.local_state.is_blind_append {
@@ -277,6 +319,15 @@ impl TransactionBuilder<UpdateTable> {
         {
             return Err(KernelError::invalid_transaction_state(
                 "blind append cannot include schema changes",
+            ));
+        }
+
+        if self.local_state.is_blind_append
+            && (self.local_state.properties_added.is_some()
+                || self.local_state.properties_removed.is_some())
+        {
+            return Err(KernelError::invalid_transaction_state(
+                "blind append cannot include table property changes",
             ));
         }
 
@@ -319,6 +370,8 @@ fn try_new_update_table<MODE: ExecutionMode>(
         operation,
         schema_changes,
         updated_schema,
+        properties_added,
+        properties_removed,
         domain_metadata_removals,
         is_blind_append,
     } = local_state;
@@ -335,7 +388,28 @@ fn try_new_update_table<MODE: ExecutionMode>(
     // Read clustering columns from snapshot (returns None if clustering not enabled)
     let clustering_columns = read_snapshot.get_physical_clustering_columns(engine)?;
 
-    let commit_timestamp = current_time_ms()?;
+    let mut commit_timestamp = current_time_ms()?;
+    let enables_ict = read_snapshot.table_properties().enable_in_commit_timestamps != Some(true)
+        && properties_added.as_ref().is_some_and(|properties| {
+            properties.iter().any(|(key, value)| {
+                key.eq_ignore_ascii_case(crate::table_properties::ENABLE_IN_COMMIT_TIMESTAMPS)
+                    && value.eq_ignore_ascii_case("true")
+            })
+        });
+    if enables_ict {
+        let previous = read_snapshot
+            .get_timestamp(engine)
+            .map_err(|error| {
+                KernelError::invalid_transaction_state(format!(
+                "Cannot enable in-commit timestamps: previous commit timestamp unavailable: {error}"
+            ))
+            })?
+            .checked_add(1)
+            .ok_or_else(|| {
+                KernelError::invalid_transaction_state("In-commit timestamp overflow")
+            })?;
+        commit_timestamp = commit_timestamp.max(previous);
+    }
 
     let span = tracing::info_span!(
         "txn",
@@ -343,49 +417,76 @@ fn try_new_update_table<MODE: ExecutionMode>(
         read_version = read_snapshot.version(),
     );
 
-    let effective_table_config = read_snapshot.table_configuration().clone();
-
-    validate_iceberg_compat_if_needed(
-        &effective_table_config,
-        &V2_VALIDATOR,
-        IcebergCompatValidationContext::Write,
+    let old = read_snapshot.table_configuration();
+    let has_schema_request = schema_changes.is_some() || updated_schema.is_some();
+    let has_table_change_request =
+        has_schema_request || properties_added.is_some() || properties_removed.is_some();
+    let stats_columns_requested = properties_added.as_ref().is_some_and(|properties| {
+        properties.keys().any(|key| {
+            key.eq_ignore_ascii_case(crate::table_properties::DATA_SKIPPING_STATS_COLUMNS)
+        })
+    });
+    let (metadata, protocol) = prepare_properties(
+        old,
+        properties_added,
+        properties_removed,
+        read_snapshot.version() + 1,
+        commit_timestamp,
     )?;
-
-    validate_iceberg_compat_if_needed(
-        &effective_table_config,
-        &V3_VALIDATOR,
-        IcebergCompatValidationContext::Write,
-    )?;
-
-    let should_emit_metadata = schema_changes.is_some() || updated_schema.is_some();
-    let effective_table_config = match schema_changes {
-        Some(changes) => apply_schema_changes(effective_table_config, changes)?,
-        None => effective_table_config,
-    };
-
     let effective_table_config = match updated_schema {
-        Some(schema) => replace_schema(&effective_table_config, schema)?,
-        None => effective_table_config,
+        Some(schema) => replace_schema(old, schema, metadata, protocol, stats_columns_requested)?,
+        None => {
+            let configured = if metadata == *old.metadata() && protocol == *old.protocol() {
+                old.clone()
+            } else {
+                TableConfiguration::try_new_from(
+                    old,
+                    Some(metadata),
+                    Some(protocol),
+                    old.version(),
+                )?
+            };
+            match schema_changes {
+                Some(changes) => apply_schema_changes(configured, changes)?,
+                None => configured,
+            }
+        }
     };
-    if should_emit_metadata {
+    let effective_table_config = if has_table_change_request {
+        finalize_properties(old, effective_table_config)?
+    } else {
+        effective_table_config
+    };
+    if has_table_change_request {
+        validate_schema(
+            effective_table_config.logical_schema_ref(),
+            effective_table_config.column_mapping_mode(),
+            effective_table_config.is_feature_enabled(&TableFeature::ChangeDataFeed),
+        )?;
+    }
+    if has_schema_request {
         if let Some(columns) = clustering_columns
             .as_ref()
             .filter(|columns| !columns.is_empty())
         {
             validate_clustering_columns(&effective_table_config.physical_schema(), columns)?;
         }
-        for validator in [&V2_VALIDATOR, &V3_VALIDATOR] {
-            validate_iceberg_compat_if_needed(
-                &effective_table_config,
-                validator,
-                IcebergCompatValidationContext::Write,
-            )?;
-        }
-        effective_table_config.ensure_operation_supported(Operation::Write)?;
     }
+    for validator in [&V2_VALIDATOR, &V3_VALIDATOR] {
+        validate_iceberg_compat_if_needed(
+            &effective_table_config,
+            validator,
+            IcebergCompatValidationContext::Write,
+        )?;
+    }
+    effective_table_config.ensure_operation_supported(Operation::Write)?;
+    let should_emit_metadata =
+        has_schema_request || old.metadata() != effective_table_config.metadata();
+    let should_emit_protocol = old.protocol() != effective_table_config.protocol();
 
     Ok(Transaction {
-        has_table_change_request: should_emit_metadata,
+        has_table_change_request,
+        should_emit_protocol,
         read_snapshot_opt: Some(read_snapshot),
         should_emit_metadata,
         user_domain_removals: domain_metadata_removals,
@@ -664,7 +765,7 @@ mod tests {
     }
 
     #[test]
-    fn alter_table_requires_schema_changes() -> KernelResult<()> {
+    fn alter_table_requires_table_changes() -> KernelResult<()> {
         let (engine, snapshot, _tempdir) = load_test_table("table-without-dv-small")?;
         let error = snapshot
             .update_table(UpdateTableOperation::AlterTable, "test-engine", false)
@@ -673,7 +774,7 @@ mod tests {
 
         assert!(error
             .to_string()
-            .contains("requires at least one schema change"));
+            .contains("requires at least one table change"));
         Ok(())
     }
 
@@ -778,7 +879,7 @@ mod tests {
             let error = result.unwrap_err();
             assert!(
                 matches!(&error, KernelError::InvalidTransactionState(message)
-                if message == "ALTER TABLE requires at least one schema change")
+                if message == "ALTER TABLE requires at least one table change")
             );
         } else {
             let transaction = result.expect("non-ALTER transactions do not require schema changes");
@@ -990,6 +1091,27 @@ mod tests {
             .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))
             .unwrap_err();
         assert!(error.to_string().contains("Cannot mix"), "{error}");
+        Ok(())
+    }
+
+    #[rstest]
+    #[case::noop(false)]
+    #[case::protocol_only(true)]
+    fn property_requests_preserve_intent_without_metadata(
+        #[case] feature: bool,
+    ) -> KernelResult<()> {
+        let (engine, snapshot, _dir) = load_test_table("table-without-dv-small")?;
+        let builder = snapshot.update_table(UpdateTableOperation::AlterTable, "test", false);
+        let builder = if feature {
+            builder.with_table_properties_added([("delta.feature.timestampNtz", "supported")])
+        } else {
+            builder.with_table_properties_removed(["absent"])
+        };
+        let transaction = builder.build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?;
+        assert!(transaction.has_table_change_request);
+        assert!(!transaction.should_emit_metadata);
+        assert_eq!(transaction.should_emit_protocol, feature);
+        transaction.validate_operation_compatibility()?;
         Ok(())
     }
 

@@ -6,6 +6,7 @@
 #![allow(unreachable_pub, dead_code)]
 
 pub mod create_table;
+mod properties;
 mod state;
 pub mod update_table;
 
