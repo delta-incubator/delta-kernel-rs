@@ -16,8 +16,8 @@ use crate::engine_data::FilteredEngineData;
 use crate::object_store::DynObjectStore;
 use crate::schema::SchemaRef;
 use crate::{
-    EngineData, FileDataReadResultIterator, FileMeta, FileSize, JsonHandler, KernelError,
-    KernelResult, KernelResultIterator, PredicateRef,
+    EngineData, FileDataReadResultIterator, FileMeta, FileSize, JsonHandler, KernelResult,
+    KernelResultIterator, PredicateRef,
 };
 
 #[derive(Constructor)]
@@ -90,6 +90,7 @@ mod tests {
     use super::*;
     use crate::arrow::array::{RecordBatch, StringArray};
     use crate::arrow::datatypes::{DataType as ArrowDataType, Field, Schema as ArrowSchema};
+    use crate::KernelError;
 
     // Helper function to create test data
     fn create_test_data(values: Vec<&str>) -> KernelResult<Box<dyn EngineData>> {
