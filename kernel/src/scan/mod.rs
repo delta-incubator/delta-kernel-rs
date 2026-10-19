@@ -1087,6 +1087,12 @@ impl Scan {
     /// * `existing_version` - Table version the provided data was read from.
     /// * `existing_data` - Existing processed scan metadata with all selection vectors applied.
     /// * `existing_predicate` - The predicate used by the previous scan.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if [`PartitionValuesOptions::with_timestamp_timezone`] was set,
+    /// if `existing_version` exceeds the snapshot version, or if scan metadata cannot be
+    /// restored or read.
     #[allow(unused)]
     #[internal_api]
     pub(crate) fn scan_metadata_from(
@@ -1096,6 +1102,15 @@ impl Scan {
         existing_data: impl IntoIterator<Item = Box<dyn EngineData>, IntoIter: Send + 'static>,
         _existing_predicate: Option<PredicateRef>,
     ) -> KernelResult<KernelResultIteratorStatic<ScanMetadata>> {
+        // TODO(#3609): scan_metadata_from does not reuse existing partitionValues_parsed. Support
+        // reusing those values and enable session timezone support.
+        require!(
+            self.partition_values.timestamp_timezone.is_none(),
+            KernelError::unsupported(
+                "Kernel does not yet support with_timestamp_timezone in scan_metadata_from; \
+                 use scan_metadata instead"
+            )
+        );
         // TODO(#966): validate that the current predicate is compatible with the hint predicate.
         let existing_data = existing_data.into_iter();
         // Cached metadata bypasses engine handlers, so kernel must poll cancellation while

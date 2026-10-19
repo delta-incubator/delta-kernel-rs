@@ -717,6 +717,30 @@ fn test_scan_metadata_from_same_version() {
     assert_eq!(new_files.len(), 1);
 }
 
+#[rstest]
+fn scan_metadata_from_rejects_timestamp_timezone(
+    #[values("UTC", "America/Los_Angeles", "+05:30")] timezone: &str,
+    #[values(false, true)] parsed_struct: bool,
+) {
+    let (engine, snapshot) = without_transforms_snapshot("./tests/data/basic_partitioned/");
+    let version = snapshot.version();
+    let options = if parsed_struct {
+        PartitionValuesOptions::with_struct()
+    } else {
+        PartitionValuesOptions::string_map_only()
+    };
+    let scan = snapshot
+        .scan_builder()
+        .with_partition_values(options.with_timestamp_timezone(timezone))
+        .build()
+        .unwrap();
+
+    assert_result_error_with_message(
+        scan.scan_metadata_from(engine.as_ref(), version, Vec::new(), None),
+        "with_timestamp_timezone in scan_metadata_from",
+    );
+}
+
 #[test_log::test]
 fn scan_metadata_from_cancels_cached_metadata_consumption() {
     let path =
