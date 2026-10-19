@@ -136,7 +136,7 @@ impl<C: UpdateTableClient> UCCommitter<C> {
     fn commit_version_0(
         &self,
         engine: &dyn Engine,
-        actions: KernelResultIterator<'_, FilteredEngineData>,
+        actions: Box<dyn KernelResultIterator<FilteredEngineData> + '_>,
         commit_metadata: &CommitMetadata,
     ) -> KernelResult<CommitResponse> {
         debug_assert!(
@@ -173,7 +173,7 @@ impl<C: UpdateTableClient> UCCommitter<C> {
     fn commit_version_non_zero(
         &self,
         engine: &dyn Engine,
-        actions: KernelResultIterator<'_, FilteredEngineData>,
+        actions: Box<dyn KernelResultIterator<FilteredEngineData> + '_>,
         commit_metadata: CommitMetadata,
     ) -> KernelResult<CommitResponse>
     where
@@ -263,7 +263,7 @@ impl<C: UpdateTableClient + 'static> Committer for UCCommitter<C> {
     fn commit(
         &self,
         engine: &dyn Engine,
-        actions: KernelResultIterator<'_, FilteredEngineData>,
+        actions: Box<dyn KernelResultIterator<FilteredEngineData> + '_>,
         commit_metadata: CommitMetadata,
     ) -> KernelResult<CommitResponse> {
         if commit_metadata.version() == 0 {

@@ -33,7 +33,7 @@ use crate::schema::{
 use crate::struct_patch::{project_struct_preserving_nulls, ProjectionStructPatchBuilder};
 use crate::table_features::ColumnMappingMode;
 use crate::utils::{require, FoldWithOption as _};
-use crate::{Engine, ExpressionEvaluator, KernelError, KernelResult};
+use crate::{Engine, ExpressionEvaluator, KernelError, KernelResult, KernelResultIterator};
 
 /// Read-time stats toggles consumed by [`ScanLogReplayProcessor`].
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
@@ -1252,15 +1252,12 @@ impl ScanLogReplayProcessor {
 /// the actions in the log from most recent to least recent.
 pub(crate) fn scan_action_iter(
     engine: &dyn Engine,
-    action_iter: impl Iterator<Item = KernelResult<ActionsBatch>>,
+    action_iter: impl KernelResultIterator<ActionsBatch>,
     state_info: Arc<StateInfo>,
     checkpoint_info: CheckpointReadInfo,
     stats_options: ScanStatsOptions,
     partition_values_options: ScanPartitionValuesOptions,
-) -> KernelResult<(
-    impl Iterator<Item = KernelResult<ScanMetadata>>,
-    Arc<ScanMetrics>,
-)> {
+) -> KernelResult<(impl KernelResultIterator<ScanMetadata>, Arc<ScanMetrics>)> {
     let mut processor = ScanLogReplayProcessor::new(
         engine,
         state_info,

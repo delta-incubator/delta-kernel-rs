@@ -88,7 +88,7 @@ pub struct SharedConfiguration;
 /// use delta_kernel::actions::deletion_vector::DeletionVectorDescriptor;
 /// use delta_kernel::engine_data::FilteredEngineData;
 /// use delta_kernel::transaction::{CommitResult, UpdateTable, Imperative, Transaction};
-/// use delta_kernel::{Engine, EngineData, KernelResult};
+/// use delta_kernel::{Engine, EngineData, KernelResult, KernelResultIterator};
 ///
 /// fn stage_and_commit(
 ///     txn: Transaction,
@@ -96,7 +96,7 @@ pub struct SharedConfiguration;
 ///     add_metadata: Box<dyn EngineData>,
 ///     remove_metadata: FilteredEngineData,
 ///     new_dv_descriptors: HashMap<String, DeletionVectorDescriptor>,
-///     existing_data_files: impl Iterator<Item = KernelResult<FilteredEngineData>>,
+///     existing_data_files: impl KernelResultIterator<FilteredEngineData>,
 /// ) -> KernelResult<CommitResult> {
 ///     let mut txn: Transaction<UpdateTable, Imperative> = txn;
 ///     txn.add_files(add_metadata);

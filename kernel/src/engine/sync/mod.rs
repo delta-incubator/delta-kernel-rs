@@ -26,8 +26,8 @@ use crate::object_store::local::LocalFileSystem;
 use crate::object_store::path::Path;
 use crate::object_store::{DynObjectStore, ObjectStoreExt as _};
 use crate::{
-    Engine, EvaluationHandler, FileMeta, JsonHandler, KernelError, KernelResult, ParquetHandler,
-    PredicateRef, SchemaRef, StorageHandler,
+    Engine, EvaluationHandler, FileMeta, JsonHandler, KernelError, KernelResult,
+    KernelResultIterator, ParquetHandler, PredicateRef, SchemaRef, StorageHandler,
 };
 
 pub(crate) mod json;
@@ -224,9 +224,9 @@ fn read_files_arrow<F, I>(
     schema: SchemaRef,
     predicate: Option<PredicateRef>,
     mut try_create_from_bytes: F,
-) -> impl Iterator<Item = KernelResult<ArrowEngineData>> + Send + 'static
+) -> impl KernelResultIterator<ArrowEngineData> + 'static
 where
-    I: Iterator<Item = KernelResult<ArrowEngineData>> + Send + 'static,
+    I: KernelResultIterator<ArrowEngineData> + 'static,
     F: FnMut(Bytes, SchemaRef, Option<PredicateRef>, String) -> KernelResult<I> + Send + 'static,
 {
     debug!("Reading files: {files:#?} with schema {schema:#?} and predicate {predicate:#?}");

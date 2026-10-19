@@ -47,8 +47,8 @@ use crate::table_features::{ColumnMappingMode, Operation};
 use crate::transforms::{transform_output_type, ExpressionTransform, SchemaTransform};
 use crate::utils::{require, FoldWithOption as _, IteratorExt};
 use crate::{
-    Engine, EngineData, FileMeta, KernelError, KernelResult, KernelResultIteratorStatic,
-    SnapshotRef, Version,
+    Engine, EngineData, FileMeta, KernelError, KernelResult, KernelResultIterator, SnapshotRef,
+    Version,
 };
 
 pub(crate) mod data_skipping;
@@ -1014,7 +1014,7 @@ impl Scan {
     pub fn scan_metadata(
         &self,
         engine: &dyn Engine,
-    ) -> KernelResult<impl Iterator<Item = KernelResult<ScanMetadata>>> {
+    ) -> KernelResult<impl KernelResultIterator<ScanMetadata>> {
         let actions_with_checkpoint_info = self.replay_for_scan_metadata(engine)?;
         self.scan_metadata_inner(engine, actions_with_checkpoint_info)
     }
@@ -1069,7 +1069,7 @@ impl Scan {
         existing_version: Version,
         existing_data: impl IntoIterator<Item = Box<dyn EngineData>, IntoIter: Send + 'static>,
         _existing_predicate: Option<PredicateRef>,
-    ) -> KernelResult<KernelResultIteratorStatic<ScanMetadata>> {
+    ) -> KernelResult<Box<dyn KernelResultIterator<ScanMetadata>>> {
         // TODO(#966): validate that the current predicate is compatible with the hint predicate.
         let existing_data = existing_data.into_iter();
         // Cached metadata bypasses engine handlers, so kernel must poll cancellation while
@@ -1181,9 +1181,9 @@ impl Scan {
         &self,
         engine: &dyn Engine,
         actions_with_checkpoint_info: ActionsWithCheckpointInfo<
-            impl Iterator<Item = KernelResult<ActionsBatch>> + Send,
+            impl KernelResultIterator<ActionsBatch>,
         >,
-    ) -> KernelResult<impl Iterator<Item = KernelResult<ScanMetadata>> + Send> {
+    ) -> KernelResult<impl KernelResultIterator<ScanMetadata>> {
         let start = Instant::now();
         let operation_id = MetricId::new();
         let is_catalog_managed = self.snapshot.table_configuration().is_catalog_managed();
@@ -1264,9 +1264,7 @@ impl Scan {
     fn replay_for_scan_metadata(
         &self,
         engine: &dyn Engine,
-    ) -> KernelResult<
-        ActionsWithCheckpointInfo<impl Iterator<Item = KernelResult<ActionsBatch>> + Send>,
-    > {
+    ) -> KernelResult<ActionsWithCheckpointInfo<impl KernelResultIterator<ActionsBatch>>> {
         let (checkpoint_schema, meta_predicate, physical_stats_read_schema) =
             self.checkpoint_read_options();
         // Checkpoints already represent reconciled state, so scans project only Add actions. This
@@ -1459,7 +1457,7 @@ impl Scan {
     pub fn execute(
         &self,
         engine: Arc<dyn Engine>,
-    ) -> KernelResult<impl Iterator<Item = KernelResult<Box<dyn EngineData>>>> {
+    ) -> KernelResult<impl KernelResultIterator<Box<dyn EngineData>>> {
         if self.state_info.skip_row_transforms {
             return Err(KernelError::unsupported(
                 "Scan::execute is not supported when the scan was built with \

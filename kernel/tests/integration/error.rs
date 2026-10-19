@@ -4,8 +4,7 @@ use std::io;
 use std::num::{IntErrorKind, ParseIntError};
 
 use delta_kernel::{
-    Error, KernelError, KernelResult, KernelResultIterator, KernelResultIteratorStatic, Result,
-    ResultIterator, ResultIteratorStatic,
+    Error, KernelError, KernelResult, KernelResultIterator, Result, ResultIterator,
 };
 use rstest::rstest;
 
@@ -57,12 +56,11 @@ fn test_kernel_result_preserves_custom_error() {
 
 #[test]
 fn test_kernel_result_iterator_explicitly_maps_into_error() {
-    let kernel: KernelResultIteratorStatic<()> = Box::new(std::iter::once(Err(
+    let kernel: Box<dyn KernelResultIterator<()>> = Box::new(std::iter::once(Err(
         KernelError::file_not_found("missing.parquet"),
     )));
-    let kernel: KernelResultIterator<'_, ()> = kernel;
-    let result: ResultIteratorStatic<()> = Box::new(kernel.map(|item| item.map_err(Error::Kernel)));
-    let mut result: ResultIterator<'_, ()> = result;
+    let mut result: Box<dyn ResultIterator<()>> =
+        Box::new(kernel.map(|item| item.map_err(Error::Kernel)));
     assert!(matches!(
         result.next().unwrap(),
         Err(Error::Kernel(KernelError::FileNotFound(path))) if path == "missing.parquet"

@@ -64,7 +64,7 @@ use crate::schema::{ArrayType, MapType, SchemaRef, StructField, StructType};
 use crate::snapshot::SnapshotRef;
 use crate::table_features::Operation;
 use crate::transforms::{transform_output_type, SchemaTransform};
-use crate::{Engine, KernelError, KernelResult, Version};
+use crate::{Engine, KernelError, KernelResult, KernelResultIterator, Version};
 
 /// A contiguous range of Delta commits, holding resolved `[start_version, end_version]` bounds
 /// plus the materialized commit-file pointers in `commit_files`.
@@ -133,7 +133,7 @@ impl CommitRange {
         engine: Arc<dyn Engine>,
         start_snapshot: Option<SnapshotRef>,
         actions: &[DeltaAction],
-    ) -> KernelResult<impl Iterator<Item = KernelResult<CommitAction>> + Send> {
+    ) -> KernelResult<impl KernelResultIterator<CommitAction>> {
         if actions.is_empty() {
             return Err(KernelError::generic(
                 "at least one DeltaAction must be requested",

@@ -362,8 +362,11 @@ Keep this list updated when new protocol features are added to kernel.
 - Kernel APIs use `KernelResult<T, E = KernelError>`, which defaults to `KernelError` and permits
   an explicit error type. `Result<T>` is reserved for the top-level `Error` envelope. Wrap kernel
   errors explicitly with `Error::Kernel` when returning it.
-- Prefer `KernelResultIterator<'a, T>` / `KernelResultIteratorStatic<T>` for kernel-error streams,
-  including public APIs. `ResultIterator` / `ResultIteratorStatic` yield the top-level `Error`.
+- Prefer the `KernelResultIterator<T>` marker trait over spelling
+  `Iterator<Item = KernelResult<T>> + Send`, including in public APIs. Use
+  `impl KernelResultIterator<T>` for unboxed streams and `Box<dyn KernelResultIterator<T>>`
+  (`'static`) or `Box<dyn KernelResultIterator<T> + '_>` (borrowed) at dyn/storage boundaries.
+  `ResultIterator<T>` is the counterpart that yields the top-level `Error`.
 - Prefer the `lit` / `null_lit` constructors over `Expression::literal(...)` / `lit(Scalar::Null(...))`
   when building expressions inline. They take `impl Into<Scalar>` and `impl Into<DataType>`,
   respectively. Prefer `Predicate::TRUE` / `FALSE` / `NULL` for predicates whose value is statically

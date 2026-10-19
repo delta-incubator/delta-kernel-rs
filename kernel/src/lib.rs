@@ -194,10 +194,7 @@ pub use delta_kernel_derive;
 pub use engine_data::{
     EngineData, FilteredEngineData, FilteredRowVisitor, GetData, RowIndexIterator, RowVisitor,
 };
-pub use error::{
-    Error, KernelError, KernelResult, KernelResultIterator, KernelResultIteratorStatic, Result,
-    ResultIterator, ResultIteratorStatic,
-};
+pub use error::{Error, KernelError, KernelResult, KernelResultIterator, Result, ResultIterator};
 use expressions::Scalar;
 pub use expressions::{Expression, ExpressionRef, Predicate, PredicateRef};
 pub use log_compaction::{should_compact, LogCompactionWriter};
@@ -233,7 +230,7 @@ pub type FileSlice = (Url, Option<Range<FileIndex>>);
 pub type FileDataReadResult = (FileMeta, Box<dyn EngineData>);
 
 /// An iterator of data read from specified files
-pub type FileDataReadResultIterator = KernelResultIteratorStatic<Box<dyn EngineData>>;
+pub type FileDataReadResultIterator = Box<dyn KernelResultIterator<Box<dyn EngineData>>>;
 
 /// The metadata that describes an object.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -569,7 +566,7 @@ pub trait StorageHandler: AsAny {
     ///   contains all files at or below that directory.
     /// - Otherwise, the parent is the directory containing `path`, and only files (at any depth
     ///   under that parent) whose full path sorts strictly greater than `path` are returned.
-    fn list_from(&self, path: &Url) -> KernelResult<KernelResultIteratorStatic<FileMeta>>;
+    fn list_from(&self, path: &Url) -> KernelResult<Box<dyn KernelResultIterator<FileMeta>>>;
 
     /// Cancellation-aware variant of [`list_from`].
     ///
@@ -583,14 +580,17 @@ pub trait StorageHandler: AsAny {
         &self,
         path: &Url,
         cancellation_token: Option<CancellationTokenRef>,
-    ) -> KernelResult<KernelResultIteratorStatic<FileMeta>> {
+    ) -> KernelResult<Box<dyn KernelResultIterator<FileMeta>>> {
         check_cancelled(cancellation_token.as_ref())?;
         let iter = self.list_from(path)?;
         Ok(Box::new(CancellableIterator::new(iter, cancellation_token)))
     }
 
     /// Read data specified by the start and end offset from the file.
-    fn read_files(&self, files: Vec<FileSlice>) -> KernelResult<KernelResultIteratorStatic<Bytes>>;
+    fn read_files(
+        &self,
+        files: Vec<FileSlice>,
+    ) -> KernelResult<Box<dyn KernelResultIterator<Bytes>>>;
 
     /// Cancellation-aware variant of [`read_files`].
     ///
@@ -604,7 +604,7 @@ pub trait StorageHandler: AsAny {
         &self,
         files: Vec<FileSlice>,
         cancellation_token: Option<CancellationTokenRef>,
-    ) -> KernelResult<KernelResultIteratorStatic<Bytes>> {
+    ) -> KernelResult<Box<dyn KernelResultIterator<Bytes>>> {
         check_cancelled(cancellation_token.as_ref())?;
         let iter = self.read_files(files)?;
         Ok(Box::new(CancellableIterator::new(iter, cancellation_token)))
@@ -737,7 +737,7 @@ pub trait JsonHandler: AsAny {
     fn write_json_file(
         &self,
         path: &Url,
-        data: KernelResultIterator<'_, FilteredEngineData>,
+        data: Box<dyn KernelResultIterator<FilteredEngineData> + '_>,
         overwrite: bool,
     ) -> KernelResult<FileSize>;
 }
@@ -991,7 +991,7 @@ pub trait ParquetHandler: AsAny {
     fn write_parquet_file(
         &self,
         location: url::Url,
-        data: KernelResultIteratorStatic<Box<dyn EngineData>>,
+        data: Box<dyn KernelResultIterator<Box<dyn EngineData>>>,
     ) -> KernelResult<FileSize>;
 
     /// Read the footer metadata from a Parquet file without reading the data.

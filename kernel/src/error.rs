@@ -102,20 +102,22 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// A result whose error defaults to [`KernelError`].
 pub type KernelResult<T, E = KernelError> = std::result::Result<T, E>;
 
-/// A boxed, `Send` iterator of [`KernelResult<T>`] items.
-pub type KernelResultIterator<'a, T> = Box<dyn Iterator<Item = KernelResult<T>> + Send + 'a>;
-
-/// A [`KernelResultIterator`] that does not borrow data.
-pub type KernelResultIteratorStatic<T> = KernelResultIterator<'static, T>;
-
-/// A boxed, `Send` iterator of [`Result<T>`] items.
+/// A `Send` iterator of [`KernelResult<T>`] items.
 ///
-/// Convenience alias for fallible streams that return the top-level error envelope.
-pub type ResultIterator<'a, T> = Box<dyn Iterator<Item = Result<T>> + Send + 'a>;
+/// Use `impl KernelResultIterator<T>` for unboxed streams. At `dyn` and stored-iterator
+/// boundaries, erase with `Box<dyn KernelResultIterator<T>>` (`'static`) or
+/// `Box<dyn KernelResultIterator<T> + '_>` (borrowed).
+pub trait KernelResultIterator<T>: Iterator<Item = KernelResult<T>> + Send {}
 
-/// `'static` counterpart to [`ResultIterator`] for cases where the iterator does not
-/// reference borrowed data.
-pub type ResultIteratorStatic<T> = ResultIterator<'static, T>;
+impl<T, I> KernelResultIterator<T> for I where I: Iterator<Item = KernelResult<T>> + Send {}
+
+/// A `Send` iterator of [`Result<T>`] items, which yield the top-level error envelope.
+///
+/// Use `impl ResultIterator<T>` for unboxed streams. At `dyn` and stored-iterator boundaries,
+/// erase with `Box<dyn ResultIterator<T>>` (`'static`) or `Box<dyn ResultIterator<T> + '_>`
+/// (borrowed).
+pub trait ResultIterator<T>: Iterator<Item = Result<T>> + Send {}
+impl<T, I> ResultIterator<T> for I where I: Iterator<Item = Result<T>> + Send {}
 
 /// An error validating connector-provided state for snapshot construction.
 #[derive(Debug, thiserror::Error)]
