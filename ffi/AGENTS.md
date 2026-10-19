@@ -937,6 +937,11 @@ constructors likewise require engine info and `data_change`, with the operation 
 
 `update_table_txn_commit()` and `create_table_txn_commit()` return a `Handle<ExclusiveCommittedTransaction>` that the caller can read via `committed_transaction_version` and `committed_transaction_post_commit_snapshot`, then must release with `free_committed_transaction`. The post-commit snapshot, when present, is a separate `SharedSnapshot` handle that must be freed with `free_snapshot`.
 
+Transaction identifiers can be added on builders or on built transactions through
+`update_table_txn_with_transaction_id` / `create_table_txn_with_transaction_id`. These setters
+consume the transaction on success or error and return its replacement on success. Duplicate
+application ids, including ids shared with the builder, are rejected at commit.
+
 Write context: `update_table_txn_get_unpartitioned_write_context` covers unpartitioned tables. For partitioned tables, build a `PartitionValueMap` (`partition_value_map_new` + the typed `partition_value_map_insert_*` functions, one entry per partition column keyed by logical name) and pass it to `update_table_txn_get_partitioned_write_context` (consumes the map). Then use `get_write_dir` for the partition's target directory (Hive-style prefix or random prefix), `visit_partition_values` to read the physical `partitionValues` to record in each Add action, and `resolve_file_path` to turn a written file's URL into its relative `add.path`. The `create_table_*` variants apply the same flow to a create-table transaction whose partition columns were declared with `create_table_txn_builder_with_partition_columns`.
 
 Catalog-managed publish flow (after a catalog committer stages commits):
