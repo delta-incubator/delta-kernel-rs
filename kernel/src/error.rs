@@ -111,14 +111,6 @@ pub trait KernelResultIterator<T>: Iterator<Item = KernelResult<T>> + Send {}
 
 impl<T, I> KernelResultIterator<T> for I where I: Iterator<Item = KernelResult<T>> + Send {}
 
-/// A `Send` iterator of [`Result<T>`] items, which yield the top-level error envelope.
-///
-/// Use `impl ResultIterator<T>` for unboxed streams. At `dyn` and stored-iterator boundaries,
-/// erase with `Box<dyn ResultIterator<T>>` (`'static`) or `Box<dyn ResultIterator<T> + '_>`
-/// (borrowed).
-pub trait ResultIterator<T>: Iterator<Item = Result<T>> + Send {}
-impl<T, I> ResultIterator<T> for I where I: Iterator<Item = Result<T>> + Send {}
-
 /// An error validating connector-provided state for snapshot construction.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]

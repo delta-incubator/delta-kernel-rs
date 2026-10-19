@@ -29,7 +29,6 @@ There is no implicit `From<KernelError> for Error` conversion.
 
 Fallible kernel streams implement the `KernelResultIterator<T>` marker trait, including engine
 handlers and declarative-plan results, which erase it as `Box<dyn KernelResultIterator<T>>`.
-`ResultIterator<T>` is the counterpart that yields top-level `Error` values.
 
 ## Snapshot
 
