@@ -8,6 +8,8 @@ use std::sync::{Arc, LazyLock};
 use tracing::{info, instrument};
 use url::Url;
 
+#[cfg(all(feature = "adaptive-metadata-in-dev", feature = "declarative-plans"))]
+use super::require_pointed_checkpoint_action;
 use super::LogSegment;
 #[cfg(feature = "adaptive-metadata-in-dev")]
 use crate::actions::visitors::LastManifestCommitVisitor;
@@ -208,15 +210,10 @@ impl LogSegment {
         else {
             return Ok(candidate);
         };
-        let checkpoint = Self::read_checkpoint_action_via_plan(executor, commit)?
-            .filter(|c| c.content_root.version() == pointer.content_root_version)
-            .ok_or_else(|| {
-                KernelError::generic(format!(
-                    "lastManifestCommit points at version {} with contentRootVersion {}, but that \
-                     commit carries no matching checkpoint action",
-                    pointer.version, pointer.content_root_version
-                ))
-            })?;
+        let checkpoint = require_pointed_checkpoint_action(
+            &pointer,
+            Self::read_checkpoint_action_via_plan(executor, commit)?,
+        )?;
         let (protocol, metadata) = checkpoint_pm(&checkpoint);
         Ok(PmCandidate {
             protocol: newer(candidate.protocol, Some(protocol)),

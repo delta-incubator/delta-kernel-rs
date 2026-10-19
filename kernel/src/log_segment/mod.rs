@@ -931,31 +931,15 @@ impl LogSegment {
         engine: &dyn Engine,
         pointer: &LastManifestCommit,
     ) -> KernelResult<CheckpointAction> {
-        let inconsistent = |detail: String| {
-            KernelError::invalid_log_segment(format!(
-                "lastManifestCommit names manifest commit version {} as the source of content \
-                 root version {}, but {detail}",
-                pointer.version, pointer.content_root_version
-            ))
-        };
         let commit = self.find_pointed_commit(pointer).ok_or_else(|| {
-            inconsistent("this log segment does not list that commit".to_string())
+            inconsistent_pointer(pointer, "this log segment does not list that commit")
         })?;
         let files = std::slice::from_ref(&commit.location);
         let batches =
             engine
                 .json_handler()
                 .read_json_files(files, LOG_CHECKPOINT_SCHEMA.clone(), None)?;
-        let action = first_checkpoint_action(batches)?
-            .ok_or_else(|| inconsistent("that commit carries no checkpoint action".to_string()))?;
-        require!(
-            action.content_root_version() == pointer.content_root_version,
-            inconsistent(format!(
-                "that commit's checkpoint action has content root version {}",
-                action.content_root_version()
-            ))
-        );
-        Ok(action)
+        require_pointed_checkpoint_action(pointer, first_checkpoint_action(batches)?)
     }
 
     /// The listed commit at `pointer`'s version, or `None` when this segment does not list it.
@@ -1738,6 +1722,41 @@ impl LogSegment {
         debug!("Checkpoint schema has compatible partitionValues_parsed for partition pruning");
         true
     }
+}
+
+/// Checks that `action`, the first checkpoint action read from the manifest commit `pointer`
+/// names, is the one `pointer` describes, and returns it.
+///
+/// # Errors
+/// Returns an error if `action` is `None` or its content root version differs from the pointer's.
+#[cfg(feature = "adaptive-metadata-in-dev")]
+fn require_pointed_checkpoint_action(
+    pointer: &LastManifestCommit,
+    action: Option<CheckpointAction>,
+) -> KernelResult<CheckpointAction> {
+    let action = action
+        .ok_or_else(|| inconsistent_pointer(pointer, "that commit carries no checkpoint action"))?;
+    require!(
+        action.content_root_version() == pointer.content_root_version,
+        inconsistent_pointer(
+            pointer,
+            &format!(
+                "that commit's checkpoint action has content root version {}",
+                action.content_root_version()
+            )
+        )
+    );
+    Ok(action)
+}
+
+/// The error for a `pointer` that the log contradicts, as explained by `detail`.
+#[cfg(feature = "adaptive-metadata-in-dev")]
+fn inconsistent_pointer(pointer: &LastManifestCommit, detail: &str) -> KernelError {
+    KernelError::invalid_log_segment(format!(
+        "lastManifestCommit names manifest commit version {} as the source of content root \
+         version {}, but {detail}",
+        pointer.version, pointer.content_root_version
+    ))
 }
 
 /// The first checkpoint action in `batches`, or `None` when no batch carries one.
