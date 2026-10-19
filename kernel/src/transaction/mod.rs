@@ -185,8 +185,8 @@ pub(crate) fn augmented_write_metadata_schema() -> KernelResult<SchemaRef> {
 
 /// Marker type for transactions that update existing tables.
 ///
-/// This is the default state for [`Transaction`] and supports schema changes as well as file
-/// additions, removals, deletion-vector updates, and blind append semantics.
+/// This is the default state for [`Transaction`] and supports schema, property, and clustering
+/// changes as well as file additions, removals, deletion-vector updates, and blind appends.
 #[derive(Debug)]
 pub struct UpdateTable;
 
@@ -210,13 +210,13 @@ pub struct CreateTable;
 /// abstraction over 1) how staged changes are represented and 2) how to inspect the changes. The
 /// default, [`Imperative`], stages [`EngineData`] and provides [`commit`](Self::commit).
 ///
-/// Both states support file additions. Schema-changing transactions use [`UpdateTable`] rather
-/// than a separate schema-only state, allowing schema and file changes in the same transaction.
-/// The builder validates schema intent, and commit validates the staged actions. `ALTER TABLE`
-/// commits reject staged data-file batches and manifest writes.
+/// Both states support file additions. [`UpdateTable`] transactions can commit schema, property,
+/// clustering, and file changes atomically. The builder validates their combined configuration,
+/// and commit validates the staged actions. `ALTER TABLE` commits reject staged data-file batches
+/// and manifest writes.
 ///
-/// Configure schema and data-change intent on the builder. Built transactions do not expose
-/// setters for either, including when the `internal-api` feature is enabled.
+/// Configure schema, property, clustering, and data-change intent on the builder before obtaining
+/// write state. Built transactions do not expose setters for this intent.
 ///
 /// # Examples
 ///

@@ -163,7 +163,7 @@ mod tests {
                 UpdateTableOperation::StreamingUpdate,
                 true,
             ),
-            ("ALTER TABLE", UpdateTableOperation::AlterTable, false),
+            ("ALTER TABLE", UpdateTableOperation::AlterTable, true),
             ("DELETE", UpdateTableOperation::Delete, true),
             ("UPDATE", UpdateTableOperation::Update, true),
             ("MERGE", UpdateTableOperation::Merge, true),

@@ -254,7 +254,7 @@ Kernel records `isBlindAppend: true` in the commit's `commitInfo` action. This f
 enables conflict resolution optimizations: two blind appends to the same table can never
 conflict with each other, because neither depends on the other's output.
 
-Kernel rejects incompatible intent during `build()`: `ALTER TABLE`, schema changes, and
+Kernel rejects incompatible intent during `build()`: `ALTER TABLE`, schema/property/clustering changes, and
 `dataChange = false`. During `commit()`, Kernel requires staged Add metadata and rejects staged
 Remove metadata or deletion-vector batches. These checks use batch presence, so empty or fully
 unselected batches still count as staged.

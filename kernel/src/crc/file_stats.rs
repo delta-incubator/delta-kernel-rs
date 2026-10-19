@@ -111,6 +111,8 @@ const INCREMENTAL_SAFE_OPS: &[&str] = &[
     "DELETE",
     "OPTIMIZE",
     "CREATE TABLE",
+    // Kernel-written ALTER TABLE commits carry no file actions and preserve file statistics.
+    "ALTER TABLE",
     "REPLACE TABLE",
     "CREATE TABLE AS SELECT",
     "REPLACE TABLE AS SELECT",

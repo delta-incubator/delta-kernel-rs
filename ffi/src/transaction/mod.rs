@@ -122,6 +122,7 @@ mod tests {
     use delta_kernel::engine::arrow_conversion::TryIntoArrow;
     use delta_kernel::engine::arrow_data::ArrowEngineData;
     use delta_kernel::engine_data::FilteredEngineData;
+    use delta_kernel::expressions::ColumnName;
     use delta_kernel::metrics::MetricEvent;
     use delta_kernel::object_store::path::Path;
     use delta_kernel::object_store::{DynObjectStore, ObjectStoreExt as _};
@@ -2952,6 +2953,96 @@ mod tests {
             free_snapshot(snapshot);
             free_engine(engine);
         }
+        Ok(())
+    }
+
+    #[rstest]
+    #[case::nested(0)]
+    #[case::clear(1)]
+    #[case::invalid_utf8(2)]
+    #[case::empty_path(3)]
+    #[tokio::test]
+    async fn clustering_ffi_copies_segmented_paths_and_consumes_errors(
+        #[case] scenario: u8,
+    ) -> KernelResult<()> {
+        let (store, test_engine, table_url) =
+            test_utils::engine_store_setup("clustering_ffi", None);
+        let snapshot = delta_kernel::transaction::create_table::create_table(
+            table_url.as_str(),
+            schema_ref! { (StructField::nullable("parent.with.dot", StructType::try_new([StructField::nullable("child", DataType::INTEGER)])?)) },
+            "test", false,
+        ).with_table_properties([("delta.columnMapping.mode", "name")])
+            .build(&test_engine, Box::new(FileSystemCommitter::new()))?
+            .commit(&test_engine)?.unwrap_post_commit_snapshot();
+        let engine = engine_handle_for_store(store);
+        let builder: Handle<ExclusiveUpdateTableTransactionBuilder> = Box::new(
+            snapshot
+                .clone()
+                .update_table(UpdateTableOperation::AlterTable, "test", false),
+        )
+        .into();
+        let result = {
+            let bad = [0xff_u8];
+            let first = if scenario == 2 {
+                KernelStringSlice {
+                    ptr: bad.as_ptr().cast(),
+                    len: 1,
+                }
+            } else {
+                ffi_str("parent.with.dot")
+            };
+            let path = [first, ffi_str("child")];
+            let path = if scenario == 3 { &path[..0] } else { &path[..] };
+            let names = [FfiColumnName {
+                path: unsafe { FfiStringArray::new_unsafe(path) },
+            }];
+            let names = if scenario == 1 {
+                &names[..0]
+            } else {
+                &names[..]
+            };
+            let input = unsafe { FfiColumnNameArray::new_unsafe(names) };
+            unsafe {
+                update_table_txn_builder_with_clustering_columns(
+                    builder,
+                    &input,
+                    engine.shallow_copy(),
+                )
+            }
+        };
+        if scenario == 2 {
+            assert_extern_result_error_contains(result, FFIKernelError::Utf8Error, "invalid utf-8");
+        } else {
+            let built = unsafe {
+                update_table_txn_builder_build(ok_or_panic(result), engine.shallow_copy())
+            };
+            if scenario == 3 {
+                match built {
+                    ExternResult::Err(error) => {
+                        let _ = unsafe { recover_error(error) };
+                    }
+                    ExternResult::Ok(_) => panic!("empty column path must fail"),
+                }
+            } else {
+                let committed = ok_or_panic(unsafe {
+                    update_table_txn_commit(ok_or_panic(built), engine.shallow_copy())
+                });
+                assert_eq!(unsafe { version_and_free(committed) }, 1);
+                let fresh =
+                    delta_kernel::Snapshot::builder_for(table_url.as_str()).build(&test_engine)?;
+                let columns = fresh.get_clustering_column_infos(&test_engine)?.unwrap();
+                if scenario == 1 {
+                    assert!(columns.is_empty());
+                } else {
+                    assert_eq!(
+                        columns[0].logical_column,
+                        ColumnName::new(["parent.with.dot", "child"])
+                    );
+                }
+            }
+        }
+        assert_eq!(Arc::strong_count(&snapshot), 1);
+        unsafe { free_engine(engine) };
         Ok(())
     }
 

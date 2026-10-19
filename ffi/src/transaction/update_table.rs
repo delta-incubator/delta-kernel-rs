@@ -4,7 +4,7 @@ use delta_kernel::engine_data::FilteredEngineData;
 
 use super::committed::commit_result_to_committed_handle;
 use super::*;
-use crate::delta_types::{FfiStringArray, FfiStringMap};
+use crate::delta_types::{FfiColumnNameArray, FfiStringArray, FfiStringMap};
 
 /// A handle for an update-table transaction (`Transaction<UpdateTable>`).
 ///
@@ -145,6 +145,30 @@ fn update_table_txn_builder_build_with_committer_impl(
     let engine = extern_engine.engine();
     let transaction = builder.build(engine.as_ref(), committer);
     Ok(Box::new(transaction?).into())
+}
+
+/// Replaces the requested clustering keys with borrowed logical column paths.
+///
+/// Copies each path segment during the call; dots within a segment remain literal. An empty
+/// array requests clearing and enables clustering protocol support even on an unclustered table.
+/// Omit this call to retain existing keys and avoid that upgrade. Build validates the final
+/// schema, properties, and keys together. Returns a replacement builder or a decoding error.
+///
+/// # Safety
+///
+/// All handles and nested slices must be valid. Borrows `columns` and `engine` for the call,
+/// and unconditionally consumes `builder`, including on error.
+#[no_mangle]
+pub unsafe extern "C" fn update_table_txn_builder_with_clustering_columns(
+    builder: Handle<ExclusiveUpdateTableTransactionBuilder>,
+    columns: &FfiColumnNameArray,
+    engine: Handle<SharedExternEngine>,
+) -> ExternResult<Handle<ExclusiveUpdateTableTransactionBuilder>> {
+    let builder = unsafe { *builder.into_inner() };
+    let engine = unsafe { engine.as_ref() };
+    unsafe { columns.try_to_column_names() }
+        .map(|columns| Box::new(builder.with_clustering_columns(columns)).into())
+        .into_extern_result(&engine)
 }
 
 /// Frees an update-table builder without building it.

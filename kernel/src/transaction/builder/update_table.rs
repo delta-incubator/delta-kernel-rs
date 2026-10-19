@@ -4,19 +4,19 @@ use std::collections::HashMap;
 
 use delta_kernel_derive::internal_api;
 
-use super::properties::{finalize_properties, prepare_properties};
+use super::properties::{finalize_properties, prepare_properties, upgrade_protocol};
 use super::state::TransactionBuilderState;
 use super::TransactionBuilder;
-use crate::clustering::validate_clustering_columns;
+use crate::clustering::{create_clustering_domain_metadata, validate_clustering_columns};
 use crate::committer::Committer;
 use crate::expressions::ColumnName;
 use crate::schema::validation::validate_schema;
-use crate::schema::{SchemaRef, StructField};
+use crate::schema::{normalize_column_names_to_schema_casing, SchemaRef, StructField};
 use crate::snapshot::SnapshotRef;
 use crate::table_configuration::TableConfiguration;
 use crate::table_features::{
-    validate_iceberg_compat_if_needed, IcebergCompatValidationContext, Operation, TableFeature,
-    V2_VALIDATOR, V3_VALIDATOR,
+    get_any_level_column_physical_name, validate_iceberg_compat_if_needed,
+    IcebergCompatValidationContext, Operation, TableFeature, V2_VALIDATOR, V3_VALIDATOR,
 };
 use crate::transaction::domain_metadata::validate_unique_domains;
 use crate::transaction::schema_evolution::{evolve_table_config, replace_schema, SchemaOperation};
@@ -63,6 +63,7 @@ pub struct UpdateTableBuilderState {
     updated_schema: Option<SchemaRef>,
     properties_added: Option<HashMap<String, String>>,
     properties_removed: Option<Vec<String>>,
+    clustering_columns: Option<Vec<ColumnName>>,
     domain_metadata_removals: Vec<String>,
     is_blind_append: bool,
 }
@@ -96,6 +97,7 @@ impl TransactionBuilder<UpdateTable> {
                 updated_schema: None,
                 properties_added: None,
                 properties_removed: None,
+                clustering_columns: None,
                 domain_metadata_removals: Vec::new(),
                 is_blind_append: false,
             },
@@ -106,7 +108,8 @@ impl TransactionBuilder<UpdateTable> {
     ///
     /// Blind appends add new files without depending on existing table state. Commit validation
     /// requires staged Add metadata and rejects staged Remove metadata or deletion-vector batches.
-    /// Blind append is also invalid for `ALTER TABLE`, schema changes, or `dataChange = false`.
+    /// Blind append is also invalid for `ALTER TABLE`, schema/property/clustering changes, or
+    /// `dataChange = false`.
     pub fn with_blind_append(mut self) -> Self {
         self.local_state.is_blind_append = true;
         self
@@ -180,6 +183,22 @@ impl TransactionBuilder<UpdateTable> {
         keys: impl IntoIterator<Item = impl Into<String>>,
     ) -> Self {
         self.local_state.properties_removed = Some(keys.into_iter().map(Into::into).collect());
+        self
+    }
+
+    /// Replaces the requested clustering keys with logical `columns`, in the supplied order.
+    ///
+    /// Omission retains current keys; an empty list clears them while retaining protocol support.
+    /// Every explicit request, including an empty list on an unclustered table, enables the
+    /// clustering and domain-metadata features. Omit the setter to avoid that protocol upgrade.
+    /// Build resolves keys against the final schema and rejects invalid keys or physical
+    /// partitioning. Returns the builder; repeated calls replace the previous request.
+    ///
+    /// Connectors must ensure historical files have statistics for newly selected keys. Kernel
+    /// enforces statistics on new files, but does not backfill statistics or recluster existing
+    /// data.
+    pub fn with_clustering_columns(mut self, columns: Vec<ColumnName>) -> Self {
+        self.local_state.clustering_columns = Some(columns);
         self
     }
 
@@ -292,6 +311,7 @@ impl TransactionBuilder<UpdateTable> {
                 && self.local_state.updated_schema.is_none()
                 && self.local_state.properties_added.is_none()
                 && self.local_state.properties_removed.is_none()
+                && self.local_state.clustering_columns.is_none()
             {
                 return Err(KernelError::invalid_transaction_state(
                     "ALTER TABLE requires at least one table change",
@@ -328,6 +348,12 @@ impl TransactionBuilder<UpdateTable> {
         {
             return Err(KernelError::invalid_transaction_state(
                 "blind append cannot include table property changes",
+            ));
+        }
+
+        if self.local_state.is_blind_append && self.local_state.clustering_columns.is_some() {
+            return Err(KernelError::invalid_transaction_state(
+                "blind append cannot include clustering changes",
             ));
         }
 
@@ -372,6 +398,7 @@ fn try_new_update_table<MODE: ExecutionMode>(
         updated_schema,
         properties_added,
         properties_removed,
+        clustering_columns: requested_clustering,
         domain_metadata_removals,
         is_blind_append,
     } = local_state;
@@ -381,12 +408,10 @@ fn try_new_update_table<MODE: ExecutionMode>(
         .table_configuration()
         .ensure_operation_supported(Operation::Write)?;
 
-    // TODO(#3240): Validate that delta.enableRowTracking=true has the required protocol support
-    // and materialized column-name properties. Materialized names must be distinct and must not
-    // collide with physical data columns.
-
-    // Read clustering columns from snapshot (returns None if clustering not enabled)
-    let clustering_columns = read_snapshot.get_physical_clustering_columns(engine)?;
+    let mut clustering_columns = match &requested_clustering {
+        Some(_) => None,
+        None => read_snapshot.get_physical_clustering_columns(engine)?,
+    };
 
     let mut commit_timestamp = current_time_ms()?;
     let enables_ict = read_snapshot.table_properties().enable_in_commit_timestamps != Some(true)
@@ -419,8 +444,10 @@ fn try_new_update_table<MODE: ExecutionMode>(
 
     let old = read_snapshot.table_configuration();
     let has_schema_request = schema_changes.is_some() || updated_schema.is_some();
-    let has_table_change_request =
-        has_schema_request || properties_added.is_some() || properties_removed.is_some();
+    let has_table_change_request = has_schema_request
+        || properties_added.is_some()
+        || properties_removed.is_some()
+        || requested_clustering.is_some();
     let stats_columns_requested = properties_added.as_ref().is_some_and(|properties| {
         properties.keys().any(|key| {
             key.eq_ignore_ascii_case(crate::table_properties::DATA_SKIPPING_STATS_COLUMNS)
@@ -452,7 +479,7 @@ fn try_new_update_table<MODE: ExecutionMode>(
             }
         }
     };
-    let effective_table_config = if has_table_change_request {
+    let mut effective_table_config = if has_table_change_request {
         finalize_properties(old, effective_table_config)?
     } else {
         effective_table_config
@@ -463,6 +490,41 @@ fn try_new_update_table<MODE: ExecutionMode>(
             effective_table_config.column_mapping_mode(),
             effective_table_config.is_feature_enabled(&TableFeature::ChangeDataFeed),
         )?;
+    }
+    let mut system_domain_metadata_additions = Vec::new();
+    if let Some(columns) = requested_clustering {
+        require!(
+            effective_table_config
+                .metadata()
+                .partition_columns()
+                .is_empty(),
+            KernelError::unsupported("Clustering updates require an unpartitioned Delta table")
+        );
+        let schema = effective_table_config.logical_schema();
+        let columns = normalize_column_names_to_schema_casing(&schema, &columns);
+        if !columns.is_empty() {
+            validate_clustering_columns(&schema, &columns)?;
+        }
+        let physical_columns = columns
+            .iter()
+            .map(|column| {
+                get_any_level_column_physical_name(
+                    &schema,
+                    column,
+                    effective_table_config.column_mapping_mode(),
+                )
+            })
+            .collect::<KernelResult<Vec<_>>>()?;
+        let protocol =
+            upgrade_protocol(&effective_table_config, vec![TableFeature::ClusteredTable])?;
+        effective_table_config = TableConfiguration::try_new_from(
+            &effective_table_config,
+            None,
+            Some(protocol),
+            old.version(),
+        )?;
+        system_domain_metadata_additions.push(create_clustering_domain_metadata(&physical_columns));
+        clustering_columns = Some(physical_columns);
     }
     if has_schema_request {
         if let Some(columns) = clustering_columns
@@ -492,6 +554,7 @@ fn try_new_update_table<MODE: ExecutionMode>(
         user_domain_removals: domain_metadata_removals,
         is_blind_append,
         physical_clustering_columns: clustering_columns,
+        system_domain_metadata_additions,
         ..Transaction::new(
             common_state,
             effective_table_config,
@@ -1112,6 +1175,45 @@ mod tests {
         assert!(!transaction.should_emit_metadata);
         assert_eq!(transaction.should_emit_protocol, feature);
         transaction.validate_operation_compatibility()?;
+        Ok(())
+    }
+
+    #[rstest]
+    fn clustering_request_is_domain_only_and_rejects_blind_append(
+        #[values(false, true)] clear: bool,
+        #[values(false, true)] blind: bool,
+    ) -> KernelResult<()> {
+        let (engine, snapshot, _dir) = load_test_table("table-without-dv-small")?;
+        let columns = if clear {
+            vec![]
+        } else {
+            vec![column_name!("value")]
+        };
+        let builder = snapshot
+            .update_table(UpdateTableOperation::Write, "test", true)
+            .with_clustering_columns(columns);
+        let builder = if blind {
+            builder.with_blind_append()
+        } else {
+            builder
+        };
+        let result = builder.build(engine.as_ref(), Box::new(FileSystemCommitter::new()));
+        if blind {
+            assert!(result
+                .unwrap_err()
+                .to_string()
+                .contains("blind append cannot include clustering"));
+        } else {
+            let transaction = result?;
+            assert!(transaction.has_table_change_request);
+            assert!(!transaction.should_emit_metadata);
+            assert!(transaction.should_emit_protocol);
+            assert_eq!(transaction.system_domain_metadata_additions.len(), 1);
+            assert_eq!(
+                transaction.physical_clustering_columns.unwrap().is_empty(),
+                clear
+            );
+        }
         Ok(())
     }
 

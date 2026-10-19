@@ -70,11 +70,11 @@ distinct create-table and update-table handles and function families. Shared set
 common Rust implementation; custom setters remain specific to their transaction type. No generic
 type parameters or builder state cross the C boundary.
 
-
 Use `update_table_txn_builder_with_updated_schema` to supply a complete schema through
 `EngineSchema`, preserving field metadata. This requires column mapping and cannot be combined
 with incremental add-column or nullability setters. The setter consumes the builder even if schema
-decoding fails. Build validates the transition before a write context can be obtained.
+decoding fails. New fields must omit physical names so Kernel can allocate fresh identities.
+Build validates the transition before a write context can be obtained.
 
 Use `update_table_txn_builder_with_table_properties_added` with `FfiStringMap` and
 `update_table_txn_builder_with_table_properties_removed` with `FfiStringArray` to replace the two
@@ -82,6 +82,12 @@ property request collections. Both functions copy borrowed inputs and consume th
 success or error. Build rejects protected Delta settings, Delta-key removals, and overlapping keys;
 ordinary property spelling is preserved. Feature requests update the protocol without persisting
 `delta.feature.*` entries. An unchanged accepted request can commit without a Metadata action.
+
+`update_table_txn_builder_with_clustering_columns` copies a borrowed `FfiColumnNameArray` of
+segmented logical paths. Dots within a segment are literal. Omit the call to retain keys; pass an
+empty array to clear them. Every explicit request enables clustering protocol support, including
+an empty array on an unclustered table. Like the schema and property setters, it consumes the builder
+even when decoding fails. Build validates the combined final state before write state can be obtained.
 
 ## Building
 

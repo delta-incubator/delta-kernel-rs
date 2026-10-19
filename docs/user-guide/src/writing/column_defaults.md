@@ -294,9 +294,11 @@ isn't required.
 
 ### Can I create, change, or remove defaults through Kernel?
 
-Kernel's public create-table API can't enable column defaults. `ALTER TABLE` and transaction schema
-changes are also rejected on tables with `allowColumnDefaults` enabled, even if the requested change
-doesn't modify a default. Use another supporting Delta writer for these operations.
+Kernel's public create-table API cannot enable column defaults. On a column-mapped existing table,
+use `with_updated_schema()` to change supported literal defaults on surviving fields, with
+`delta.feature.allowColumnDefaults=supported` when feature support is needed. Defaults on newly added
+fields and unsupported default expressions are rejected. Incremental schema operations remain
+unsupported on tables with `allowColumnDefaults` enabled.
 
 ### What about nested defaults?
 

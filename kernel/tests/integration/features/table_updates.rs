@@ -1,15 +1,29 @@
-//! Complete-schema and property updates through the public transaction builder.
+//! Schema, property, and clustering updates through the public transaction builder.
 
 use std::fs::File;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
+use delta_kernel::arrow::array::{new_null_array, Array, Int32Array, StringArray, StructArray};
+use delta_kernel::arrow::record_batch::RecordBatch;
 use delta_kernel::committer::FileSystemCommitter;
-use delta_kernel::schema::{schema_ref, ColumnMetadataKey, DataType, MapType, StructField};
+use delta_kernel::engine::arrow_conversion::TryIntoArrow as _;
+use delta_kernel::engine::arrow_data::ArrowEngineData;
+use delta_kernel::expressions::{column_name, ColumnName};
+use delta_kernel::object_store::local::LocalFileSystem;
+use delta_kernel::schema::{
+    schema_ref, ColumnMetadataKey, DataType, MapType, StructField, StructType,
+};
 use delta_kernel::table_features::TableFeature;
+use delta_kernel::transaction::create_table::create_table;
+use delta_kernel::transaction::data_layout::DataLayout;
 use delta_kernel::transaction::UpdateTableOperation;
 use delta_kernel::{KernelResult, Snapshot};
 use rstest::rstest;
-use test_utils::{create_table_and_load_snapshot, test_table_setup, test_table_setup_mt};
+use test_utils::{
+    add_commit, create_table_and_load_snapshot, read_actions_from_commit, read_add_infos,
+    read_scan, test_table_setup, test_table_setup_mt, write_batch_to_table,
+};
 
 #[tokio::test]
 async fn table_property_updates_merge_remove_and_accept_noops() -> KernelResult<()> {
@@ -388,6 +402,420 @@ async fn metadata_conflicts_require_preparation_from_a_fresh_snapshot() -> Kerne
         .unwrap_post_commit_snapshot();
     assert_eq!(post.table_properties().unknown_properties["winner"], "yes");
     assert_eq!(post.table_properties().unknown_properties["other"], "yes");
+    Ok(())
+}
+
+#[rstest]
+#[case::retain(None)]
+#[case::clear(Some(vec![]))]
+#[case::replace(Some(vec![column_name!("id")]))]
+#[tokio::test]
+async fn explicit_clustering_request_repairs_malformed_domain(
+    #[case] columns: Option<Vec<ColumnName>>,
+) -> KernelResult<()> {
+    let (_dir, path, engine) = test_table_setup()?;
+    let original = create_table(&path, schema_ref! { nullable "id": INTEGER }, "test", false)
+        .with_data_layout(DataLayout::Clustered {
+            columns: vec![column_name!("id")],
+        })
+        .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
+        .commit(engine.as_ref())?
+        .unwrap_post_commit_snapshot();
+    let malformed = serde_json::json!({"domainMetadata": {
+        "domain": "delta.clustering", "configuration": "{", "removed": false
+    }});
+    add_commit(
+        original.table_root().as_str(),
+        &LocalFileSystem::new(),
+        1,
+        malformed.to_string(),
+    )
+    .await?;
+    let snapshot = Snapshot::builder_for(&path).build(engine.as_ref())?;
+    assert!(snapshot
+        .get_physical_clustering_columns(engine.as_ref())
+        .is_err());
+    let builder = snapshot
+        .update_table(UpdateTableOperation::AlterTable, "test", false)
+        .with_table_properties_added([("app.key", "value")]);
+    let builder = match &columns {
+        Some(columns) => builder.with_clustering_columns(columns.clone()),
+        None => builder,
+    };
+    let result = builder.build(engine.as_ref(), Box::new(FileSystemCommitter::new()));
+    if let Some(columns) = columns {
+        let updated = result?
+            .commit(engine.as_ref())?
+            .unwrap_post_commit_snapshot();
+        let fresh = Snapshot::builder_for(&path).build(engine.as_ref())?;
+        assert_eq!(updated.version(), 2);
+        assert_eq!(
+            updated.get_physical_clustering_columns(engine.as_ref())?,
+            Some(columns.clone())
+        );
+        assert_eq!(
+            fresh.get_physical_clustering_columns(engine.as_ref())?,
+            Some(columns)
+        );
+    } else {
+        assert!(result.is_err());
+        assert_eq!(
+            Snapshot::builder_for(&path)
+                .build(engine.as_ref())?
+                .version(),
+            1
+        );
+    }
+    Ok(())
+}
+
+#[rstest]
+#[tokio::test(flavor = "multi_thread")]
+async fn clustering_enable_replace_clear_and_retain_round_trip(
+    #[values("none", "name", "id")] mapping: &str,
+    #[values("classic", "v2")] checkpoint: &str,
+) -> KernelResult<()> {
+    let (_dir, path, engine) = test_table_setup_mt()?;
+    let original = create_table_and_load_snapshot(
+        &path,
+        schema_ref! { nullable "a": INTEGER, nullable "b": STRING },
+        engine.as_ref(),
+        &[
+            ("delta.columnMapping.mode", mapping),
+            ("delta.checkpointPolicy", checkpoint),
+        ],
+    )?;
+    let batch = RecordBatch::try_new(
+        Arc::new(original.schema().as_ref().try_into_arrow()?),
+        vec![
+            Arc::new(Int32Array::from(vec![1])),
+            Arc::new(StringArray::from(vec!["value"])),
+        ],
+    )?;
+    let original =
+        write_batch_to_table(&original, engine.as_ref(), batch, Default::default()).await?;
+    original.write_checksum(engine.as_ref())?;
+    let original = Snapshot::builder_for(&path).build(engine.as_ref())?;
+    let original_file_stats = original.get_file_stats_if_present().unwrap();
+    let mut snapshot = original.clone();
+    for columns in [
+        vec![],
+        vec![column_name!("B"), column_name!("A")],
+        vec![column_name!("a")],
+        vec![],
+    ] {
+        let post = snapshot
+            .clone()
+            .update_table(UpdateTableOperation::AlterTable, "test", false)
+            .with_clustering_columns(vec![column_name!("discarded")])
+            .with_clustering_columns(columns.clone())
+            .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
+            .commit(engine.as_ref())?
+            .unwrap_post_commit_snapshot();
+        assert_eq!(
+            post.get_file_stats_if_present(),
+            Some(original_file_stats.clone())
+        );
+        let infos = post.get_clustering_column_infos(engine.as_ref())?.unwrap();
+        let logical: Vec<_> = infos
+            .iter()
+            .map(|info| info.logical_column.to_string())
+            .collect();
+        assert_eq!(
+            logical,
+            columns
+                .iter()
+                .map(|column| column.to_string().to_lowercase())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(post.schema(), original.schema());
+        assert!(
+            read_actions_from_commit(post.table_root(), post.version(), "metaData")?.is_empty()
+        );
+        assert_eq!(
+            read_actions_from_commit(post.table_root(), post.version(), "domainMetadata")?.len(),
+            1
+        );
+        let retained = post
+            .clone()
+            .update_table(UpdateTableOperation::AlterTable, "test", false)
+            .with_table_properties_removed(["absent"])
+            .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
+            .commit(engine.as_ref())?
+            .unwrap_post_commit_snapshot();
+        assert_eq!(
+            retained.get_physical_clustering_columns(engine.as_ref())?,
+            post.get_physical_clustering_columns(engine.as_ref())?
+        );
+        retained.clone().checkpoint(engine.as_ref(), None)?;
+        retained.write_checksum(engine.as_ref())?;
+        snapshot = Snapshot::builder_for(&path).build(engine.as_ref())?;
+        assert_eq!(
+            snapshot.get_clustering_column_infos(engine.as_ref())?,
+            Some(infos)
+        );
+    }
+    assert!(snapshot
+        .table_configuration()
+        .is_feature_supported(&TableFeature::ClusteredTable));
+    assert!(snapshot
+        .table_configuration()
+        .is_feature_supported(&TableFeature::DomainMetadata));
+    assert!(Snapshot::builder_for(&path)
+        .at_version(0)
+        .build(engine.as_ref())?
+        .get_physical_clustering_columns(engine.as_ref())?
+        .is_none());
+    Ok(())
+}
+
+#[rstest]
+#[case::retain(None, false)]
+#[case::replace(Some(vec![column_name!("a")]), true)]
+#[case::clear(Some(vec![]), true)]
+#[tokio::test]
+async fn schema_drop_validates_final_clustering_selection(
+    #[case] columns: Option<Vec<ColumnName>>,
+    #[case] accepted: bool,
+    #[values(false, true)] schema_first: bool,
+) -> KernelResult<()> {
+    let (_dir, path, engine) = test_table_setup()?;
+    let original = create_table(
+        &path,
+        schema_ref! { nullable "a": INTEGER, nullable "b": INTEGER, nullable "c": INTEGER },
+        "test",
+        false,
+    )
+    .with_table_properties([("delta.columnMapping.mode", "name")])
+    .with_data_layout(DataLayout::Clustered {
+        columns: vec![column_name!("a"), column_name!("b")],
+    })
+    .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
+    .commit(engine.as_ref())?
+    .unwrap_post_commit_snapshot();
+    let schema = StructType::try_new(
+        original
+            .schema()
+            .fields()
+            .filter(|field| field.name() != "b")
+            .cloned(),
+    )?
+    .into();
+    let mut builder =
+        original
+            .clone()
+            .update_table(UpdateTableOperation::AlterTable, "test", false);
+    if schema_first {
+        builder = builder.with_updated_schema(schema);
+    }
+    if let Some(columns) = columns {
+        builder = builder.with_clustering_columns(columns);
+    }
+    if !schema_first {
+        builder = builder.with_updated_schema(
+            StructType::try_new(
+                original
+                    .schema()
+                    .fields()
+                    .filter(|field| field.name() != "b")
+                    .cloned(),
+            )?
+            .into(),
+        );
+    }
+    let result = builder.build(engine.as_ref(), Box::new(FileSystemCommitter::new()));
+    if accepted {
+        let post = result?
+            .commit(engine.as_ref())?
+            .unwrap_post_commit_snapshot();
+        assert!(!post.schema().contains("b"));
+        assert_eq!(
+            Snapshot::builder_for(&path)
+                .build(engine.as_ref())?
+                .schema(),
+            post.schema()
+        );
+    } else {
+        assert!(result.is_err());
+        assert_eq!(
+            Snapshot::builder_for(&path)
+                .build(engine.as_ref())?
+                .version(),
+            0
+        );
+    }
+    Ok(())
+}
+
+#[rstest]
+#[case::duplicate(vec![column_name!("a"), column_name!("A")], false)]
+#[case::missing(vec![column_name!("missing")], false)]
+#[case::unsupported(vec![column_name!("flag")], false)]
+#[case::empty_path(vec![ColumnName::new(Vec::<String>::new())], false)]
+#[case::partitioned(vec![column_name!("a")], true)]
+#[case::partitioned_clear(vec![], true)]
+#[tokio::test]
+async fn invalid_clustering_request_publishes_nothing(
+    #[case] columns: Vec<ColumnName>,
+    #[case] partitioned: bool,
+) -> KernelResult<()> {
+    let (_dir, path, engine) = test_table_setup()?;
+    let mut builder = create_table(
+        &path,
+        schema_ref! { nullable "a": INTEGER, nullable "flag": BOOLEAN },
+        "test",
+        false,
+    );
+    if partitioned {
+        builder = builder.with_data_layout(DataLayout::Partitioned {
+            columns: vec![column_name!("a")],
+        });
+    }
+    let snapshot = builder
+        .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
+        .commit(engine.as_ref())?
+        .unwrap_post_commit_snapshot();
+    let result = snapshot
+        .update_table(UpdateTableOperation::AlterTable, "test", false)
+        .with_clustering_columns(columns)
+        .build(engine.as_ref(), Box::new(FileSystemCommitter::new()));
+    assert!(result.is_err());
+    assert_eq!(
+        Snapshot::builder_for(&path)
+            .build(engine.as_ref())?
+            .version(),
+        0
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn nested_clustering_preserves_physical_identity_after_rename() -> KernelResult<()> {
+    let (_dir, path, engine) = test_table_setup()?;
+    let original = create_table_and_load_snapshot(
+        &path,
+        schema_ref! { (StructField::nullable("parent.with.dot", StructType::try_new([StructField::nullable("child", DataType::INTEGER)])?)) },
+        engine.as_ref(),
+        &[("delta.columnMapping.mode", "name")],
+    )?;
+    let clustered = original
+        .update_table(UpdateTableOperation::AlterTable, "test", false)
+        .with_clustering_columns(vec![ColumnName::new(["PARENT.WITH.DOT", "CHILD"])])
+        .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
+        .commit(engine.as_ref())?
+        .unwrap_post_commit_snapshot();
+    let parent = clustered.schema().field("parent.with.dot").unwrap().clone();
+    let renamed = StructField::nullable("renamed", parent.data_type().clone())
+        .with_metadata(parent.metadata().clone());
+    let post = clustered
+        .clone()
+        .update_table(UpdateTableOperation::AlterTable, "test", false)
+        .with_updated_schema(schema_ref! { (renamed) })
+        .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
+        .commit(engine.as_ref())?
+        .unwrap_post_commit_snapshot();
+    assert_eq!(
+        post.get_physical_clustering_columns(engine.as_ref())?,
+        clustered.get_physical_clustering_columns(engine.as_ref())?
+    );
+    assert_eq!(
+        post.get_clustering_column_infos(engine.as_ref())?.unwrap()[0].logical_column,
+        column_name!("renamed.child")
+    );
+    Ok(())
+}
+
+#[rstest]
+#[tokio::test]
+async fn schema_properties_and_clustering_commit_with_data_and_required_statistics(
+    #[values(false, true)] missing_statistics: bool,
+) -> KernelResult<()> {
+    let (_dir, path, engine) = test_table_setup()?;
+    let original = create_table_and_load_snapshot(
+        &path,
+        schema_ref! { nullable "a": INTEGER },
+        engine.as_ref(),
+        &[("delta.columnMapping.mode", "name")],
+    )?;
+    let schema =
+        schema_ref! { (original.schema().field("a").unwrap().clone()), nullable "b": INTEGER };
+    let mut transaction = original
+        .update_table(UpdateTableOperation::Write, "test", true)
+        .with_clustering_columns(vec![column_name!("b")])
+        .with_table_properties_added([
+            ("format-version", "3"),
+            ("delta.dataSkippingNumIndexedCols", "0"),
+        ])
+        .with_updated_schema(schema)
+        .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?;
+    let context = transaction.write_state()?.write_context_builder().build()?;
+    let batch = RecordBatch::try_new(
+        Arc::new(context.logical_data_schema().as_ref().try_into_arrow()?),
+        vec![
+            Arc::new(Int32Array::from(vec![1, 2])),
+            Arc::new(Int32Array::from(vec![3, 4])),
+        ],
+    )?;
+    let metadata = engine
+        .write_parquet(&ArrowEngineData::new(batch), &context)
+        .await?;
+    if missing_statistics {
+        let batch = test_utils::into_record_batch(metadata);
+        let mut columns = batch.columns().to_vec();
+        let stats_index = batch.schema().index_of("stats")?;
+        let stats = columns[stats_index]
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .unwrap();
+        let mut stats_columns = stats.columns().to_vec();
+        let null_count = stats
+            .fields()
+            .iter()
+            .position(|field| field.name() == "nullCount")
+            .unwrap();
+        stats_columns[null_count] =
+            new_null_array(stats_columns[null_count].data_type(), batch.num_rows());
+        columns[stats_index] = Arc::new(StructArray::new(
+            stats.fields().clone(),
+            stats_columns,
+            stats.nulls().cloned(),
+        ));
+        transaction.add_files(Box::new(ArrowEngineData::new(RecordBatch::try_new(
+            batch.schema(),
+            columns,
+        )?)));
+        test_utils::assert_result_error_with_message(
+            transaction.commit(engine.as_ref()),
+            "Required column",
+        );
+        assert_eq!(
+            Snapshot::builder_for(&path)
+                .build(engine.as_ref())?
+                .version(),
+            0
+        );
+        return Ok(());
+    }
+    transaction.add_files(metadata);
+    let post = transaction
+        .commit(engine.as_ref())?
+        .unwrap_post_commit_snapshot();
+    let physical = post
+        .get_physical_clustering_columns(engine.as_ref())?
+        .unwrap();
+    let adds = read_add_infos(&post, engine.as_ref())?;
+    assert_eq!(adds.len(), 1);
+    assert_eq!(
+        adds[0].stats.as_ref().unwrap()["minValues"][physical[0].path()[0].as_str()],
+        3
+    );
+    assert_eq!(
+        post.table_properties().unknown_properties["format-version"],
+        "3"
+    );
+    let fresh = Snapshot::builder_for(&path).build(engine.as_ref())?;
+    let batches = read_scan(&fresh.scan_builder().build()?, engine.clone())?;
+    assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 2);
     Ok(())
 }
 
