@@ -5,8 +5,9 @@ use std::iter;
 use super::action_projector::ActionProjector;
 use super::checkpoint_sidecar::read_sidecar_actions;
 use crate::actions::{
-    CheckpointAction, Sidecar, ADD_NAME, LOG_ADD_SCHEMA, LOG_METADATA_SCHEMA, LOG_PROTOCOL_SCHEMA,
-    LOG_TXN_SCHEMA, METADATA_NAME, PROTOCOL_NAME, REMOVE_NAME, SET_TRANSACTION_NAME,
+    CheckpointAction, Sidecar, ADD_NAME, DOMAIN_METADATA_NAME, LOG_ADD_SCHEMA,
+    LOG_DOMAIN_METADATA_SCHEMA, LOG_METADATA_SCHEMA, LOG_PROTOCOL_SCHEMA, LOG_TXN_SCHEMA,
+    METADATA_NAME, PROTOCOL_NAME, REMOVE_NAME, SET_TRANSACTION_NAME,
 };
 use crate::cancellation::CancellationTokenRef;
 use crate::content_tree::{read_add_actions_from_amt, ReadContext};
@@ -23,6 +24,7 @@ const CHECKPOINT_ACTION_KINDS: &[&str] = &[
     PROTOCOL_NAME,
     METADATA_NAME,
     SET_TRANSACTION_NAME,
+    DOMAIN_METADATA_NAME,
     REMOVE_NAME,
 ];
 
@@ -31,8 +33,8 @@ const CHECKPOINT_ACTION_KINDS: &[&str] = &[
 /// references, and `cancellation_token` stops their reads.
 ///
 /// `add` rows come from the action's content tree, `protocol` and `metaData` rows from the action
-/// itself, and `txn` rows from the action and its `txn` sidecars. A checkpoint holds reconciled
-/// state, so `remove` rows are never produced.
+/// itself, and `txn` and `domainMetadata` rows from the action and its sidecars of that kind. A
+/// checkpoint holds reconciled state, so `remove` rows are never produced.
 pub(super) fn read_checkpoint_action(
     engine: &dyn Engine,
     checkpoint: &CheckpointAction,
@@ -86,6 +88,21 @@ pub(super) fn read_checkpoint_action(
                     .map(Into::into)
                     .collect(),
                 &checkpoint.txn_sidecars,
+                read_schema.clone(),
+                cancellation_token,
+            )?,
+            DOMAIN_METADATA_NAME => inline_and_sidecar_actions(
+                engine,
+                log_root,
+                DOMAIN_METADATA_NAME,
+                LOG_DOMAIN_METADATA_SCHEMA.clone(),
+                checkpoint
+                    .domain_metadata
+                    .iter()
+                    .cloned()
+                    .map(Into::into)
+                    .collect(),
+                &checkpoint.domain_metadata_sidecars,
                 read_schema.clone(),
                 cancellation_token,
             )?,
@@ -196,8 +213,8 @@ mod tests {
 
     use super::*;
     use crate::actions::{
-        get_commit_schema, Add, ContentRoot, Metadata, Protocol, SetTransaction, ADD_SCHEMA,
-        DOMAIN_METADATA_NAME, LOG_DOMAIN_METADATA_SCHEMA, REMOVE_FIELD,
+        get_commit_schema, Add, ContentRoot, DomainMetadata, Metadata, Protocol, SetTransaction,
+        ADD_SCHEMA, COMMIT_INFO_NAME, REMOVE_FIELD,
     };
     use crate::arrow::array::{AsArray as _, RecordBatch};
     use crate::arrow::datatypes::Int64Type;
@@ -212,7 +229,7 @@ mod tests {
     use crate::object_store::ObjectStoreExt as _;
     use crate::scan::test_utils::add_batch_simple;
     use crate::scan::{CHECKPOINT_READ_SCHEMA, COMMIT_READ_SCHEMA};
-    use crate::schema::{schema_ref, StructType};
+    use crate::schema::schema_ref;
     use crate::unit_test_utils::adaptive_metadata_fixtures::{
         adaptive_metadata_pm, adaptive_metadata_protocol_and_metadata, checkpoint_action_with_root,
         commit_files, create_adaptive_metadata_table, write_sidecar,
@@ -659,6 +676,21 @@ mod tests {
         SetTransaction::new(app_id.to_string(), 1, None)
     }
 
+    /// Sets the inline `domainMetadata` entries of `checkpoint` to `domains` and its
+    /// `domainMetadata` sidecars to `sidecars`.
+    fn set_domain_metadata(
+        checkpoint: &mut CheckpointAction,
+        domains: &[&str],
+        sidecars: Vec<Sidecar>,
+    ) {
+        checkpoint.domain_metadata = domains.iter().map(|d| domain_metadata(d)).collect();
+        checkpoint.domain_metadata_sidecars = sidecars;
+    }
+
+    fn domain_metadata(domain: &str) -> DomainMetadata {
+        DomainMetadata::new(domain.to_string(), format!("{domain}-cfg"))
+    }
+
     /// The non-null `<action>.<key>` values of `batch`.
     fn action_keys(batch: &RecordBatch, action: &str, key: &str) -> Vec<String> {
         let action = batch.column_by_name(action).unwrap().as_struct();
@@ -673,6 +705,13 @@ mod tests {
         "appId",
         set_transactions as SetActions,
         |id: &str| transaction(id).into(),
+    )]
+    #[case::domain_metadata(
+        DOMAIN_METADATA_NAME,
+        LOG_DOMAIN_METADATA_SCHEMA.clone(),
+        "domain",
+        set_domain_metadata as SetActions,
+        |domain: &str| domain_metadata(domain).into(),
     )]
     fn actions_come_from_the_checkpoint_action_and_its_sidecars(
         #[case] action: &str,
@@ -710,18 +749,12 @@ mod tests {
     fn unsupported_action_kind_errors() {
         let engine = SyncEngine::new_with_store(Arc::new(InMemory::new()));
         let checkpoint = checkpoint_action_with_root(ROOT_PATH, 1, 1).unwrap();
-        let schema = Arc::new(
-            StructType::try_new(
-                CHECKPOINT_READ_SCHEMA
-                    .fields()
-                    .cloned()
-                    .chain(LOG_DOMAIN_METADATA_SCHEMA.fields().cloned()),
-            )
-            .unwrap(),
-        );
+        let schema = get_commit_schema()
+            .project(&[ADD_NAME, COMMIT_INFO_NAME])
+            .unwrap();
         assert_result_error_with_message(
             read_checkpoint_action(&engine, &checkpoint, &log_root(), schema, None),
-            &format!("reading `{DOMAIN_METADATA_NAME}` actions"),
+            &format!("reading `{COMMIT_INFO_NAME}` actions"),
         );
     }
 }
