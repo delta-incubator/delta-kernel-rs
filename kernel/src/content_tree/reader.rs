@@ -17,6 +17,7 @@ use url::Url;
 
 use crate::actions::{CheckpointAction, ADD_NAME, ADD_SCHEMA, LOG_ADD_SCHEMA};
 use crate::amt_path_util::amt_manifest_filemeta;
+use crate::cancellation::CancellationTokenRef;
 use crate::content_tree::{
     struct_expr_from_schema, ColumnFile, ContentTreeNodeEntry, DataContentType, DataFileFormat,
     TrackingInfo, TrackingStatus, AMT_FORMAT_VERSION, COLUMN_FILES, CONTENT_TYPE, DV_INFO,
@@ -51,6 +52,8 @@ use crate::{
 /// - `checkpoint`: the AMT `checkpoint` action whose content tree to read.
 /// - `table_root`: the table root URL relative manifest locations resolve against.
 /// - `ctx`: the per-read values the entries cannot supply (see [`ReadContext`]).
+/// - `cancellation_token`: when cancelled, stops the manifest reads with
+///   [`KernelError::Cancelled`].
 ///
 /// # Returns
 /// An iterator of `Add`-action batches (schema [`LOG_ADD_SCHEMA`]) whose selection vectors keep
@@ -65,23 +68,28 @@ pub(crate) fn read_add_actions_from_amt(
     checkpoint: &CheckpointAction,
     table_root: &Url,
     ctx: &ReadContext,
+    cancellation_token: Option<&CancellationTokenRef>,
 ) -> KernelResult<KernelResultIteratorStatic<FilteredEngineData>> {
     let root = checkpoint.root_filemeta(table_root)?;
     let schemas = ManifestReadSchema::new();
     let converter = make_root_entry_converter(engine, ctx)?;
     let mut root_actions = Vec::new();
     let mut leaves = LeafRefVisitor::new(table_root);
-    let batches = engine.parquet_handler().read_parquet_files(
-        slice::from_ref(&root),
-        schemas.root.clone(),
-        None,
-    )?;
+    let batches = engine
+        .parquet_handler()
+        .read_parquet_files_with_cancellation(
+            slice::from_ref(&root),
+            schemas.root.clone(),
+            None,
+            cancellation_token.cloned(),
+        )?;
     for batch in batches {
         let batch = batch?;
         leaves.visit_rows_of(batch.as_ref())?;
         root_actions.push(converter.convert(batch.as_ref())?);
     }
-    let leaf_actions = LeafActions::try_new(engine, leaves.leaves, schemas.leaf, ctx)?;
+    let leaf_actions =
+        LeafActions::try_new(engine, leaves.leaves, schemas.leaf, ctx, cancellation_token)?;
     Ok(Box::new(
         root_actions.into_iter().map(Ok).chain(leaf_actions),
     ))
@@ -437,7 +445,8 @@ struct LeafActions {
 }
 
 impl LeafActions {
-    /// Validates and reads all the leaves, with `read_schema` (see [`ManifestReadSchemas::leaf`]).
+    /// Validates and reads all the leaves, with `read_schema` (see [`ManifestReadSchemas::leaf`]),
+    /// stopping when `cancellation_token` is cancelled.
     ///
     /// # Errors
     /// Returns an error if two leaves share a location (their batches could not be told apart), if
@@ -449,6 +458,7 @@ impl LeafActions {
         leaves: Vec<LeafRef>,
         read_schema: SchemaRef,
         ctx: &ReadContext,
+        cancellation_token: Option<&CancellationTokenRef>,
     ) -> KernelResult<Self> {
         let mut seen = HashSet::new();
         if let Some(dup) = leaves.iter().find(|l| !seen.insert(&l.file_meta.location)) {
@@ -479,7 +489,12 @@ impl LeafActions {
             Some(
                 engine
                     .parquet_handler()
-                    .read_parquet_files(&files, read_schema, None)?,
+                    .read_parquet_files_with_cancellation(
+                        &files,
+                        read_schema,
+                        None,
+                        cancellation_token.cloned(),
+                    )?,
             )
         };
         Ok(Self { pending, batches })
@@ -990,7 +1005,7 @@ mod tests {
     use crate::object_store::memory::InMemory;
     use crate::schema::StructType;
     use crate::unit_test_utils::adaptive_metadata_fixtures::checkpoint_action_with_root;
-    use crate::unit_test_utils::assert_result_error_with_message;
+    use crate::unit_test_utils::{assert_result_error_with_message, TestCancellationToken};
     use crate::{FileSize, ParquetFooter, ParquetHandler, PredicateRef};
 
     /// The [`ReadContext`] the tests read against; [`expected_add_row`] reads its values back.
@@ -1383,7 +1398,7 @@ mod tests {
         engine: &dyn Engine,
         checkpoint: &CheckpointAction,
     ) -> KernelResult<Vec<RecordBatch>> {
-        read_add_actions_from_amt(engine, checkpoint, &table_root(), &read_ctx())?
+        read_add_actions_from_amt(engine, checkpoint, &table_root(), &read_ctx(), None)?
             .map(|batch| filtered_to_batch(batch?).try_into_record_batch())
             .collect()
     }
@@ -1614,7 +1629,7 @@ mod tests {
         );
         let checkpoint = write_root(&engine, &[malformed, valid]);
         let results: Vec<_> =
-            read_add_actions_from_amt(&engine, &checkpoint, &table_root(), &read_ctx())
+            read_add_actions_from_amt(&engine, &checkpoint, &table_root(), &read_ctx(), None)
                 .unwrap()
                 .collect();
         let first_error = results.iter().position(Result::is_err).unwrap();
@@ -1643,6 +1658,41 @@ mod tests {
             read_tree(&engine, &checkpoint),
             "references leaf manifest 'memory:///table/metadata/leaf.parquet' more than once",
         );
+    }
+
+    #[test]
+    fn read_add_actions_from_amt_stops_when_cancelled() {
+        let engine = memory_engine();
+        let leaf = write_leaf(
+            &engine,
+            "metadata/leaf.parquet",
+            &[leaf_entry("b.parquet", 100, 10, None, None, None)],
+            5,
+            100,
+        );
+        let checkpoint = write_root(
+            &engine,
+            &[added_data_entry("a.parquet", 100, 10, 0, 5), leaf],
+        );
+        let read = |token: CancellationTokenRef| {
+            read_add_actions_from_amt(
+                &engine,
+                &checkpoint,
+                &table_root(),
+                &read_ctx(),
+                Some(&token),
+            )
+        };
+
+        let cancelled = Arc::new(TestCancellationToken::cancelled());
+        assert!(matches!(read(cancelled), Err(KernelError::Cancelled)));
+
+        let token = Arc::new(TestCancellationToken::default());
+        let mut batches = read(token.clone()).unwrap();
+        token.cancel();
+        // The root manifest is read eagerly, so only the leaf read is stopped.
+        assert!(batches.next().unwrap().is_ok());
+        assert!(matches!(batches.next(), Some(Err(KernelError::Cancelled))));
     }
 
     #[test]
