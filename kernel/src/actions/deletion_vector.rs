@@ -188,7 +188,6 @@ pub struct DeletionVectorDescriptor {
 struct DeletionVectorRaw {
     storage_type: String,
     path_or_inline_dv: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
     offset: Option<i32>,
     size_in_bytes: i32,
     cardinality: i64,
@@ -938,13 +937,13 @@ mod tests {
                 value["storageType"].is_string(),
                 "storageType must serialize as a string: {json}"
             );
-            // A present offset serializes as a number; an absent one is omitted entirely (not
-            // `null`), matching the protocol JSON shape (inline DVs never carry an offset).
+            // A present offset serializes as a number; an absent one as `null`. Keeping the field
+            // present lets positional binary formats (e.g. bincode) round-trip.
             match descriptor.offset {
                 Some(offset) => assert_eq!(value["offset"].as_i64(), Some(i64::from(offset))),
                 None => assert!(
-                    value.get("offset").is_none(),
-                    "offset must be omitted: {json}"
+                    value["offset"].is_null(),
+                    "offset must serialize as null: {json}"
                 ),
             }
             let round_tripped: DeletionVectorDescriptor = serde_json::from_str(&json).unwrap();
@@ -970,6 +969,25 @@ mod tests {
             serde_json::from_str::<DeletionVectorDescriptor>(&json).unwrap(),
             descriptor
         );
+    }
+
+    // Positional binary formats carry no field names, so a skipped/omitted field would desync the
+    // stream; serde must round-trip the descriptor and DvInfo through bincode, not just JSON.
+    #[rstest::rstest]
+    #[case::relative(dv_relative())]
+    #[case::absolute(dv_absolute())]
+    #[case::inline(dv_inline())]
+    fn descriptor_and_dv_info_bincode_round_trip(#[case] descriptor: DeletionVectorDescriptor) {
+        use crate::scan::state::DvInfo;
+
+        let bytes = bincode::serialize(&descriptor).unwrap();
+        let decoded: DeletionVectorDescriptor = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(decoded, descriptor);
+
+        let dv_info = DvInfo::from(descriptor);
+        let bytes = bincode::serialize(&dv_info).unwrap();
+        let decoded: DvInfo = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(decoded, dv_info);
     }
 
     #[test]
