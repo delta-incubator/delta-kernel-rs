@@ -6,6 +6,7 @@ use std::sync::Arc;
 use rstest::rstest;
 use test_utils::{add_commit, assert_result_error_with_message, delta_path_for_version};
 
+use super::tests::add_checkpoint_to_store;
 use super::LogSegment;
 use crate::actions::LastManifestCommit;
 use crate::committer::FileSystemCommitter;
@@ -19,7 +20,7 @@ use crate::schema::SchemaRef;
 use crate::table_features::TableFeature;
 use crate::transaction::UpdateTableOperation;
 use crate::unit_test_utils::{
-    adaptive_metadata_table_configuration, test_schema_flat_with_column_mapping,
+    adaptive_metadata_table_configuration, parse_json_batch, test_schema_flat_with_column_mapping,
 };
 use crate::{Engine, FileMeta, Snapshot};
 
@@ -535,6 +536,40 @@ async fn latest_checkpoint_action_reads_commit_named_by_crc_pointer(
     }
 }
 
+// The protocol defines no source for `lastManifestCommit` besides the CRC and the snapshot
+// version's `commitInfo`, so a checkpoint-only snapshot with neither cannot locate the checkpoint
+// action. Such a log needs a classic checkpoint, which adaptiveMetadata forbids.
+#[tokio::test]
+async fn latest_checkpoint_action_fails_without_commit_or_crc_at_checkpoint_version() {
+    let store = Arc::new(InMemory::new());
+    let table_root = url::Url::parse("memory:///").unwrap();
+    let commit = format!(
+        "{}\n{}",
+        commit_info_line(Some((0, 0))),
+        checkpoint_commit(0, &[], one_column_schema())
+    );
+    add_commit(table_root.as_str(), store.as_ref(), 0, commit)
+        .await
+        .unwrap();
+    let pm = standalone_pm_commit(one_column_schema());
+    add_checkpoint_to_store(
+        &store,
+        parse_json_batch(pm.lines().collect::<Vec<_>>().into()),
+        "00000000000000000001.checkpoint.parquet",
+    )
+    .await
+    .unwrap();
+
+    let engine = non_plan_engine(store);
+    let snapshot = Snapshot::builder_for(table_root).build(&engine).unwrap();
+    assert_eq!(snapshot.version(), 1);
+
+    assert_result_error_with_message(
+        snapshot.latest_checkpoint_action(&engine),
+        "Table version 1 is missing",
+    );
+}
+
 // Without a CRC, a replay miss makes `latest_checkpoint_action` follow the `lastManifestCommit` in
 // the latest commit's `commitInfo`. v0 and v1 carry checkpoint actions; v2 carries standalone P&M
 // so replay stops there without capturing one, plus the given pointer. A scan would find v1's
@@ -581,17 +616,12 @@ async fn latest_checkpoint_action_follows_commit_info_pointer(
 }
 
 // The pointer alone decides the lookup. Without one (AMT enabled, but no manifest commit yet) there
-// is no checkpoint action. A pointer may name a manifest commit older than the segment, which is
-// read from its published location rather than the segment's listing, while a pointer past the
-// segment's end version is inconsistent. The segment keeps only v1, whose checkpoint action a scan
-// would find.
+// is no checkpoint action. A pointer naming a commit the segment does not list, below or above it,
+// is inconsistent. The segment keeps only v1, whose checkpoint action a scan would find.
 #[rstest]
 #[case::no_pointer(None, Ok(None))]
-#[case::below_segment(Some(0), Ok(Some(0)))]
-#[case::above_segment(
-    Some(5),
-    Err("that commit is newer than this log segment's end version 1")
-)]
+#[case::below_segment(Some(0), Err("this log segment does not list that commit"))]
+#[case::above_segment(Some(5), Err("this log segment does not list that commit"))]
 #[tokio::test]
 async fn find_last_checkpoint_action_follows_pointer_outside_segment(
     #[case] pointer_version: Option<i64>,

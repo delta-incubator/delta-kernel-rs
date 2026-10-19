@@ -893,8 +893,8 @@ impl LogSegment {
     /// log is never scanned.
     ///
     /// # Errors
-    /// Returns an error if the named manifest commit cannot be read or does not carry the
-    /// checkpoint action `pointer` describes.
+    /// Returns an error if this segment does not list the named manifest commit, or that commit
+    /// cannot be read or does not carry the checkpoint action `pointer` describes.
     #[cfg(feature = "adaptive-metadata-in-dev")]
     pub(crate) fn find_last_checkpoint_action(
         &self,
@@ -1675,14 +1675,13 @@ impl LogSegment {
         true
     }
 
-    /// The checkpoint action in the manifest commit `pointer` names as the latest one. The commit
-    /// may predate this segment (for example, at or below its checkpoint); it is then read from
-    /// its published location.
+    /// The checkpoint action in the manifest commit `pointer` names as the latest one.
     ///
     /// # Errors
     /// Returns an error if the commit cannot be read, or if the pointer and the log are
-    /// inconsistent: the commit is newer than this segment, carries no checkpoint action, or its
-    /// action's content root version differs from the pointer's.
+    /// inconsistent: this segment does not list the commit (commits at or below the checkpoint
+    /// never are), the commit carries no checkpoint action, or its action's content root version
+    /// differs from the pointer's.
     #[cfg(feature = "adaptive-metadata-in-dev")]
     fn read_manifest_commit_checkpoint_action(
         &self,
@@ -1696,29 +1695,22 @@ impl LogSegment {
                 pointer.version, pointer.content_root_version
             ))
         };
-        let version = Version::try_from(pointer.version)
-            .map_err(|_| inconsistent("that version is negative".to_string()))?;
-        // Under time travel, a commit past the end version exists in storage but is not part of
-        // this snapshot.
-        require!(
-            version <= self.end_version,
-            inconsistent(format!(
-                "that commit is newer than this log segment's end version {}",
-                self.end_version
-            ))
-        );
-        // A listed commit may be an unpublished catalog commit, so prefer its listed location. An
-        // unlisted one predates the segment and is therefore published.
+        // Only the listing carries real file metadata and the location of an unpublished catalog
+        // commit. It also bounds the lookup to this snapshot: under time travel, a commit past the
+        // end version exists in storage but is not listed.
         let commits = &self.listed.ascending_commit_files;
-        let listed = commits
-            .binary_search_by_key(&version, |commit| commit.version)
+        let commit = Version::try_from(pointer.version)
             .ok()
-            .and_then(|index| commits.get(index));
-        let location = match listed {
-            Some(commit) => commit.location.clone(),
-            None => FileMeta::new(self.log_root.join(&format!("{version:020}.json"))?, 0, 0),
-        };
-        let files = std::slice::from_ref(&location);
+            .and_then(|version| {
+                let index = commits
+                    .binary_search_by_key(&version, |commit| commit.version)
+                    .ok()?;
+                commits.get(index)
+            })
+            .ok_or_else(|| {
+                inconsistent("this log segment does not list that commit".to_string())
+            })?;
+        let files = std::slice::from_ref(&commit.location);
         let batches =
             engine
                 .json_handler()

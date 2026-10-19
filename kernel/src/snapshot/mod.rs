@@ -296,7 +296,9 @@ impl Snapshot {
     ///
     /// # Errors
     /// Returns an error if `lastManifestCommit` or the manifest commit cannot be read, or if the
-    /// pointer and the log disagree (see [`LogSegment::find_last_checkpoint_action`]).
+    /// pointer and the log disagree (see [`LogSegment::find_last_checkpoint_action`]). The pointer
+    /// comes only from the CRC or the `commitInfo` at this version, so a snapshot with neither (a
+    /// classic checkpoint without its commit) yields [`KernelError::MissingVersion`].
     #[cfg(feature = "adaptive-metadata-in-dev")]
     pub(crate) fn latest_checkpoint_action(
         &self,
@@ -1292,8 +1294,8 @@ impl Snapshot {
     ///
     /// # Errors
     ///
-    /// Returns an error if Kernel does not support reading or writing the table, or if the
-    /// snapshot is not published.
+    /// Returns an error if Kernel does not support reading or writing the table, if the table
+    /// forbids classic checkpoints (adaptiveMetadata), or if the snapshot is not published.
     pub fn create_checkpoint_writer(
         self: Arc<Self>,
         engine: &dyn Engine,
@@ -1501,6 +1503,7 @@ impl Snapshot {
     ///
     /// # Errors
     /// - If Kernel does not support reading or writing the table.
+    /// - If the table has adaptiveMetadata enabled, which forbids classic checkpoints.
     /// - If `CheckpointSpec::V2` is used but the table does not support the `v2Checkpoint` feature.
     /// - If `CheckpointSpec::V1` is used but the table supports `v2Checkpoint` feature. Note: the
     ///   Delta protocol permits writing V1 checkpoints to such tables; this is a kernel limitation.
