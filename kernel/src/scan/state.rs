@@ -18,7 +18,10 @@ use crate::schema::{ColumnName, ColumnNamesAndTypes, DataType, Schema, SchemaRef
 use crate::utils::require;
 use crate::{Engine, EngineData, ExpressionRef, KernelError, KernelResult};
 
-/// this struct can be used by an engine to materialize a selection vector
+/// Deletion-vector metadata used by an engine to materialize a selection vector.
+///
+/// Its serde representation supports transport between processes running the same Kernel version.
+/// The serialized representation may change between Kernel versions.
 #[derive(Default, Debug, Clone, PartialEq, Eq, From, Serialize, Deserialize)]
 #[from(DeletionVectorDescriptor)]
 pub struct DvInfo {
