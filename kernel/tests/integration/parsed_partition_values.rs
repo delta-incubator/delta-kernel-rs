@@ -761,7 +761,7 @@ fn create_timestamp_partition_table_with_parsed_partition(
         nullable "p_int": INTEGER,
         nullable "value": INTEGER,
     };
-    create_table(table_path, schema, "Test/1.0")
+    create_table(table_path, schema, "Test/1.0", true)
         .with_data_layout(DataLayout::partitioned(["p_ts", "p_ntz", "p_int"]))
         .with_table_properties([
             ("delta.columnMapping.mode", cm_mode),
