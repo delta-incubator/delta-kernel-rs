@@ -24,7 +24,7 @@
 use bytes::{Buf, Bytes};
 use itertools::Either;
 
-use crate::{DeltaResult, Error};
+use crate::{KernelError, KernelResult};
 
 /// Only format version this decoder supports.
 const FORMAT_VERSION: u8 = 0x01;
@@ -71,11 +71,11 @@ impl MumblingBitmap {
     /// `0x01`, a PFOR chunk or container body extends past the end of the buffer, the PFOR bit
     /// widths are inconsistent, an exception offset is out of range, or the number of set bits
     /// does not match the header's cardinality.
-    pub(crate) fn deserialize(mut bytes: Bytes) -> DeltaResult<Self> {
+    pub(crate) fn deserialize(mut bytes: Bytes) -> KernelResult<Self> {
         let mut header = take(&mut bytes, HEADER_LEN)?;
         let version = header.get_u8();
         if version != FORMAT_VERSION {
-            return Err(Error::generic(format!(
+            return Err(KernelError::generic(format!(
                 "Mumbling bitmap has unsupported version {version}, expected {FORMAT_VERSION}"
             )));
         }
@@ -95,7 +95,7 @@ impl MumblingBitmap {
         }
 
         if set != cardinality {
-            return Err(Error::generic(format!(
+            return Err(KernelError::generic(format!(
                 "Mumbling bitmap set {set} bits but header cardinality is {cardinality}"
             )));
         }
@@ -142,11 +142,11 @@ impl MumblingBitmap {
     ///
     /// # Errors
     /// Returns an error if any set position is `>= len`.
-    pub(crate) fn to_selection_vec(&self, len: usize) -> DeltaResult<Vec<bool>> {
+    pub(crate) fn to_selection_vec(&self, len: usize) -> KernelResult<Vec<bool>> {
         let mut out = vec![false; len];
         for pos in self.iter() {
             let slot = out.get_mut(pos as usize).ok_or_else(|| {
-                Error::generic(format!(
+                KernelError::generic(format!(
                     "Mumbling bitmap position {pos} exceeds selection vector length {len}"
                 ))
             })?;
@@ -160,7 +160,7 @@ impl MumblingBitmap {
 ///
 /// Convenience wrapper over [`MumblingBitmap::deserialize`] and
 /// [`MumblingBitmap::to_selection_vec`]; see those for the layout and errors.
-pub(crate) fn read_bitmap(bytes: Bytes, len: usize) -> DeltaResult<Vec<bool>> {
+pub(crate) fn read_bitmap(bytes: Bytes, len: usize) -> KernelResult<Vec<bool>> {
     MumblingBitmap::deserialize(bytes)?.to_selection_vec(len)
 }
 
@@ -177,9 +177,9 @@ enum Container {
 
 impl Container {
     /// Read the container described by `descriptor` from `bytes`.
-    fn read(bytes: &mut Bytes, descriptor: u8) -> DeltaResult<Self> {
+    fn read(bytes: &mut Bytes, descriptor: u8) -> KernelResult<Self> {
         if descriptor & RESERVED_DESCRIPTOR_BITS != 0 {
-            return Err(Error::generic(format!(
+            return Err(KernelError::generic(format!(
                 "Mumbling container descriptor {descriptor:#04x} sets reserved bits"
             )));
         }
@@ -192,7 +192,7 @@ impl Container {
         // over-count and let a malformed body slip past the cardinality check -- and upholds the
         // ascending-order contract of `MumblingBitmap::iter`.
         if values.windows(2).any(|w| w[0] >= w[1]) {
-            return Err(Error::generic(
+            return Err(KernelError::generic(
                 "Mumbling sparse container values are not strictly ascending",
             ));
         }
@@ -237,7 +237,7 @@ fn dense_bit_set(block: &[u8], value: u8) -> bool {
 /// Values are grouped into 256-value chunks; the final chunk holds the remainder. Each chunk
 /// stores its own frame-of-reference minimum, primary bit width, and patched exceptions. See the
 /// module docs and the Mumbling spec Appendix A for the wire layout.
-fn decode_pfor(bytes: &mut Bytes, count: usize) -> DeltaResult<Vec<u8>> {
+fn decode_pfor(bytes: &mut Bytes, count: usize) -> KernelResult<Vec<u8>> {
     let mut values = Vec::with_capacity(count);
     while values.len() < count {
         let chunk_len = (count - values.len()).min(PFOR_CHUNK);
@@ -249,7 +249,7 @@ fn decode_pfor(bytes: &mut Bytes, count: usize) -> DeltaResult<Vec<u8>> {
         let exception_count = header.get_u8() as usize;
         let min = header.get_u8();
         if b1 + b2 > 8 {
-            return Err(Error::generic(format!(
+            return Err(KernelError::generic(format!(
                 "Mumbling PFOR chunk has invalid bit widths b1={b1} b2={b2} (sum exceeds 8)"
             )));
         }
@@ -264,12 +264,12 @@ fn decode_pfor(bytes: &mut Bytes, count: usize) -> DeltaResult<Vec<u8>> {
         for (&offset, &high) in offsets.as_ref().iter().zip(&exception_bits) {
             let offset = offset as usize;
             if offset >= chunk_len {
-                return Err(Error::generic(format!(
+                return Err(KernelError::generic(format!(
                     "Mumbling PFOR exception offset {offset} out of range for chunk length {chunk_len}"
                 )));
             }
             if patched[offset] {
-                return Err(Error::generic(format!(
+                return Err(KernelError::generic(format!(
                     "Mumbling PFOR chunk has a duplicate exception offset {offset}"
                 )));
             }
@@ -313,9 +313,9 @@ fn bytes_for_bits(count: usize, width: u32) -> usize {
 }
 
 /// Split the first `n` bytes off `bytes` (zero-copy), erroring if fewer remain.
-fn take(bytes: &mut Bytes, n: usize) -> DeltaResult<Bytes> {
+fn take(bytes: &mut Bytes, n: usize) -> KernelResult<Bytes> {
     if bytes.remaining() < n {
-        return Err(Error::generic(format!(
+        return Err(KernelError::generic(format!(
             "Mumbling bitmap is truncated: need {n} bytes but only {} remain",
             bytes.remaining()
         )));
