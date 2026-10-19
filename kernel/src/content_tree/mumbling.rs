@@ -32,9 +32,6 @@ const FORMAT_VERSION: u8 = 0x01;
 /// Byte length of the fixed header (version + cardinality + container count).
 const HEADER_LEN: usize = 6;
 
-/// Positions covered by a single container (one 256-bit region of the bitmap).
-const POSITIONS_PER_CONTAINER: usize = 256;
-
 /// Number of values in a full PFOR chunk (the last chunk is the remainder).
 const PFOR_CHUNK: usize = 256;
 
@@ -64,13 +61,13 @@ pub(crate) struct MumblingBitmap {
 }
 
 impl MumblingBitmap {
-    /// Decode a Mumbling bitmap (version 1) from `bytes`.
+    /// Decode a Mumbling bitmap (version 1) from `bytes`. The buffer must hold exactly one bitmap.
     ///
     /// # Errors
     /// Returns an error if the buffer is shorter than the 6-byte header, the version byte is not
     /// `0x01`, a PFOR chunk or container body extends past the end of the buffer, the PFOR bit
-    /// widths are inconsistent, an exception offset is out of range, or the number of set bits
-    /// does not match the header's cardinality.
+    /// widths are inconsistent, an exception offset is out of range, the number of set bits
+    /// does not match the header's cardinality, or bytes remain after the last container.
     pub(crate) fn deserialize(mut bytes: Bytes) -> KernelResult<Self> {
         let mut header = take(&mut bytes, HEADER_LEN)?;
         let version = header.get_u8();
@@ -97,6 +94,12 @@ impl MumblingBitmap {
         if set != cardinality {
             return Err(KernelError::generic(format!(
                 "Mumbling bitmap set {set} bits but header cardinality is {cardinality}"
+            )));
+        }
+        if bytes.has_remaining() {
+            return Err(KernelError::generic(format!(
+                "Mumbling bitmap has {} trailing bytes after the last container",
+                bytes.remaining()
             )));
         }
         Ok(Self {
@@ -632,6 +635,7 @@ mod tests {
     #[case::sparse_duplicate_values(
         encode_bitmap(1, &[(0, Body::Sparse(vec![5, 5]))], None), "ascending"
     )]
+    #[case::trailing_bytes(encode_trailing_bytes(), "trailing")]
     fn rejects_malformed_bitmap(#[case] bytes: Bytes, #[case] needle: &str) {
         let err = read_bitmap(bytes, 256).unwrap_err();
         assert!(err.to_string().contains(needle), "{err:?}");
@@ -644,6 +648,13 @@ mod tests {
         buf.extend_from_slice(&1u16.to_le_bytes()); // one container
         buf.extend_from_slice(&encode_pfor_raw(&[0x40])); // reserved bit 6 set (sparse, length 0)
         Bytes::from(buf) // length-0 sparse body: no bytes follow
+    }
+
+    /// A well-formed bitmap followed by an extra byte.
+    fn encode_trailing_bytes() -> Bytes {
+        let mut bytes = encode_bitmap(1, &[(0, Body::Sparse(vec![1]))], None).to_vec();
+        bytes.push(0x00);
+        Bytes::from(bytes)
     }
 
     /// A header whose version byte is not `0x01`.
