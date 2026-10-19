@@ -28,6 +28,7 @@ use delta_kernel::snapshot::Snapshot;
 use delta_kernel::table_features::{get_any_level_column_physical_name, ColumnMappingMode};
 use delta_kernel::transaction::create_table::create_table;
 use delta_kernel::transaction::data_layout::DataLayout;
+use delta_kernel::transaction::UpdateTableOperation;
 use delta_kernel::transforms::{transform_output_type, SchemaTransform};
 use test_utils::delta_kernel_default_engine::executor::tokio::{
     TokioBackgroundExecutor, TokioMultiThreadExecutor,
@@ -224,7 +225,8 @@ async fn v3_invalid_type_change_blocks_writes_but_not_snapshot_loading() {
         .build(engine.as_ref())
         .unwrap();
     let err = snapshot
-        .transaction(Box::new(FileSystemCommitter::new()), engine.as_ref())
+        .update_table(UpdateTableOperation::Write, "test-engine", true)
+        .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))
         .unwrap_err()
         .to_string();
     assert!(
@@ -289,7 +291,8 @@ async fn v2_and_deletion_vectors_active_blocks_writes() {
         .build(engine.as_ref())
         .unwrap();
     let err = snapshot
-        .transaction(Box::new(FileSystemCommitter::new()), engine.as_ref())
+        .update_table(UpdateTableOperation::Write, "test-engine", true)
+        .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))
         .unwrap_err()
         .to_string();
     assert!(
@@ -306,7 +309,7 @@ async fn iceberg_compat_commit_validates_num_records(
 ) {
     let (_, engine) = make_default_engine_and_store();
 
-    let _ = create_table(TABLE_ROOT, simple_schema(), "Test/1.0")
+    let _ = create_table(TABLE_ROOT, simple_schema(), "Test/1.0", true)
         .with_table_properties([(feature_property, "true")])
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))
         .unwrap()
@@ -317,10 +320,9 @@ async fn iceberg_compat_commit_validates_num_records(
         .unwrap();
 
     let mut txn = snapshot
-        .transaction(Box::new(FileSystemCommitter::new()), engine.as_ref())
-        .unwrap()
-        .with_engine_info("Test/1.0")
-        .with_data_change(true);
+        .update_table(UpdateTableOperation::Write, "Test/1.0", true)
+        .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))
+        .unwrap();
     let add_files = create_add_files_metadata(
         txn.add_files_schema(),
         vec![("part-fake.parquet", 1024, 1_000_000, num_records)],
@@ -357,7 +359,7 @@ async fn v2_partitioned_write_materializes_partition_and_nested_field_ids() {
         nullable "id": INTEGER,
         nullable "data": { INTEGER => nullable [nullable INTEGER] },
     };
-    let snapshot = create_table(&table_path, schema, "Test/1.0")
+    let snapshot = create_table(&table_path, schema, "Test/1.0", true)
         .with_table_properties([("delta.enableIcebergCompatV2", "true")])
         .with_data_layout(DataLayout::partitioned(["region"]))
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))
@@ -475,7 +477,7 @@ async fn v3_e2e_partitioned_writes_with_field_ids(
             .iter()
             .map(|(k, v)| (k.as_str(), v.as_str())),
     );
-    let _ = create_table(&table_path, schema.clone(), "Test/1.0")
+    let _ = create_table(&table_path, schema.clone(), "Test/1.0", true)
         .with_table_properties(props)
         .with_data_layout(DataLayout::partitioned(["region"]))
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))

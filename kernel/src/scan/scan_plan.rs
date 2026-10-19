@@ -23,13 +23,12 @@ use crate::plans::ir::nodes::{DynamicScan, FileType, ScanFile};
 use crate::plans::ir::plan::Plan;
 use crate::scan::log_replay::{PARTITION_VALUES_PARSED_NAME, STATS_PARSED_NAME};
 use crate::schema::{
-    lazy_schema_ref, schema, schema_ref, DataType, SchemaRef, SchemaStructPatchBuilder,
-    StructField, StructType,
+    lazy_schema_ref, schema, schema_ref, DataType, SchemaRef, SchemaStructPatchBuilder, StructField,
 };
-use crate::struct_patch::ProjectionStructPatchBuilder;
+use crate::struct_patch::{project_struct_preserving_nulls, ProjectionStructPatchBuilder};
 use crate::transforms::{transform_output_type, ExpressionTransform};
-use crate::utils::{CollectInto, FoldWithOption as _};
-use crate::{DeltaResult, KernelError, PlanBuilder};
+use crate::utils::FoldWithOption as _;
+use crate::{KernelError, KernelResult, PlanBuilder};
 
 // === Internal column names ===
 
@@ -57,7 +56,7 @@ impl Scan {
     pub(super) fn build_metadata_scan_plan(
         &self,
         shape: &CheckpointShape,
-    ) -> DeltaResult<Option<Plan>> {
+    ) -> KernelResult<Option<Plan>> {
         let state = &self.state_info;
         // A statically-unsatisfiable predicate (e.g. `x > 10 AND FALSE`) skips the whole table.
         if state.physical_predicate == PhysicalPredicate::StaticSkipAll {
@@ -139,9 +138,9 @@ impl Scan {
     /// When the checkpoint lacks native parsed metadata, `FROM_JSON(add.stats, physical_stats)`
     /// and `MAP_TO_STRUCT(add.partitionValues, physical_partitions)` replace the corresponding
     /// fields above. A parsed field is omitted when its schema is absent.
-    fn checkpoint_arm(&self, shape: &CheckpointShape) -> DeltaResult<PlanBuilder> {
+    fn checkpoint_arm(&self, shape: &CheckpointShape) -> KernelResult<PlanBuilder> {
         let log_segment = self.snapshot.log_segment();
-        let physical_stats = self.state_info.physical_stats_schema.as_ref();
+        let physical_stats = self.state_info.physical_stats_read_schema();
         let physical_partitions = self.state_info.physical_partition_schema.as_ref();
         let source_physical_stats =
             physical_stats.and_then(|schema| shape.compatible_stats_parsed_schema(schema));
@@ -208,7 +207,7 @@ impl Scan {
     /// WHERE add.path IS NOT NULL OR remove.path IS NOT NULL
     ///
     /// A parsed field is omitted when its schema is absent.
-    fn commit_arm(&self) -> DeltaResult<PlanBuilder> {
+    fn commit_arm(&self) -> KernelResult<PlanBuilder> {
         let log_segment = self.snapshot.log_segment();
         let commit_files = log_segment.commit_cover_version_tagged_scan_files()?;
         PlanBuilder::scan_json(commit_files, &[VERSION], json_read_schema(true))?
@@ -220,7 +219,7 @@ impl Scan {
                 // Commits never carry source-native parsed columns, so normalize from the raw
                 // encodings.
                 patch
-                    .with_parsed_add_stats(self.state_info.physical_stats_schema.as_ref())
+                    .with_parsed_add_stats(self.state_info.physical_stats_read_schema())
                     .with_parsed_add_partition_values(
                         self.state_info.physical_partition_schema.as_ref(),
                     )
@@ -240,11 +239,11 @@ impl Scan {
             })
     }
 
-    fn normalized_add_field(&self) -> DeltaResult<StructField> {
-        let physical_stats_schema = self.state_info.physical_stats_schema.as_ref();
+    fn normalized_add_field(&self) -> KernelResult<StructField> {
+        let physical_stats_read_schema = self.state_info.physical_stats_read_schema();
         let physical_partition_schema = self.state_info.physical_partition_schema.as_ref();
         let patch = SchemaStructPatchBuilder::new()
-            .fold_with(physical_stats_schema, |patch, schema| {
+            .fold_with(physical_stats_read_schema, |patch, schema| {
                 patch.append(StructField::nullable(STATS_PARSED, schema.as_ref().clone()))
             })
             .fold_with(physical_partition_schema, |patch, schema| {
@@ -283,7 +282,7 @@ impl Scan {
     fn metadata_output_projection(
         &self,
         add_field: &StructField,
-    ) -> DeltaResult<(ExpressionRef, SchemaRef)> {
+    ) -> KernelResult<(ExpressionRef, SchemaRef)> {
         let input_schema = schema_ref! { (add_field.clone()) };
         let has_stats_parsed = input_schema.contains_col([ADD_NAME, STATS_PARSED_NAME]);
         let projection = ProjectionStructPatchBuilder::new_nested(&input_schema, [ADD_NAME]);
@@ -301,11 +300,14 @@ impl Scan {
         };
 
         // Parsed stats output.
-        let projection = match (self.physical_stats_output_schema.as_ref(), has_stats_parsed) {
+        let projection = match (
+            self.state_info.physical_stats_output_schema(),
+            has_stats_parsed,
+        ) {
             (Some(physical_stats), _) => projection.replace(
                 STATS_PARSED,
                 StructField::nullable(STATS_PARSED, physical_stats.as_ref().clone()),
-                project_nested_struct_to_schema([ADD_NAME, STATS_PARSED_NAME], physical_stats),
+                project_struct_preserving_nulls([ADD_NAME, STATS_PARSED_NAME], physical_stats),
             ),
             (None, true) => projection.drop(STATS_PARSED),
             (None, false) => projection,
@@ -323,7 +325,7 @@ impl Scan {
             (Some(schema), true) => projection.replace(
                 PARTITION_VALUES_PARSED,
                 StructField::nullable(PARTITION_VALUES_PARSED, schema.as_ref().clone()),
-                project_nested_struct_to_schema([ADD_NAME, PARTITION_VALUES_PARSED_NAME], schema),
+                project_struct_preserving_nulls([ADD_NAME, PARTITION_VALUES_PARSED_NAME], schema),
             ),
             (Some(_), false) => {
                 return Err(KernelError::internal_error(
@@ -347,7 +349,7 @@ fn sidecar_actions(
     root_parts: Vec<ScanFile>,
     action_schema: SchemaRef,
     log_root: &Url,
-) -> DeltaResult<PlanBuilder> {
+) -> KernelResult<PlanBuilder> {
     const FILE_PATH: &str = "path";
     const FILE_SIZE: &str = "size";
     const FILE_MOD: &str = "filemod";
@@ -413,7 +415,7 @@ fn json_read_schema(include_remove: bool) -> SchemaRef {
 fn parquet_read_schema(
     physical_stats: Option<&SchemaRef>,
     physical_partitions: Option<&SchemaRef>,
-) -> DeltaResult<SchemaRef> {
+) -> KernelResult<SchemaRef> {
     let add_patch = SchemaStructPatchBuilder::new()
         .fold_with(physical_stats, |patch, schema| {
             patch.append(StructField::nullable(STATS_PARSED, schema.as_ref().clone()))
@@ -509,26 +511,6 @@ impl<'a> ProjectionStructPatchBuilderExt<'a> for ProjectionStructPatchBuilder<'a
     }
 }
 
-/// Rebuilds `root` to match a narrowed schema while preserving a null parent struct. A direct
-/// column reference would retain fields not requested by the caller.
-fn project_nested_struct_to_schema(
-    root: impl CollectInto<ColumnName>,
-    schema: &StructType,
-) -> Expr {
-    let root = root.collect_into();
-    let fields = schema.fields().map(|field| {
-        let column = root.join(&ColumnName::new([field.name()]));
-        match field.data_type() {
-            DataType::Struct(schema) => project_nested_struct_to_schema(column, schema),
-            _ => Expr::from(column),
-        }
-    });
-    Expr::struct_with_nullability_from(
-        fields,
-        Expr::from_pred(Expr::from(root.clone()).is_not_null()),
-    )
-}
-
 /// Build the metadata pruning predicate, or `None` when no pruning is possible.
 fn stats_skipping_predicate(state: &StateInfo) -> Option<Predicate> {
     /// Re-roots metadata columns under `add`.
@@ -595,9 +577,9 @@ mod tests {
     use crate::unit_test_utils::{
         create_log_path, MockProtocolBuilder, MockTableConfigurationBuilder,
     };
-    use crate::Engine as _;
+    use crate::{Engine as _, KernelResult};
 
-    fn mock_snapshot(log_segment: LogSegment) -> DeltaResult<Arc<Snapshot>> {
+    fn mock_snapshot(log_segment: LogSegment) -> KernelResult<Arc<Snapshot>> {
         let table_configuration = MockTableConfigurationBuilder::new()
             .with_schema(partitioned_schema())
             .with_partition_columns(["p"])
@@ -684,7 +666,7 @@ mod tests {
     }
 
     // One add with JSON stats and no `stats_parsed`.
-    fn write_parquet_checkpoint(store: &Arc<InMemory>, path: &str) -> DeltaResult<()> {
+    fn write_parquet_checkpoint(store: &Arc<InMemory>, path: &str) -> KernelResult<()> {
         use crate::arrow::array::builder::{MapBuilder, MapFieldNames, StringBuilder};
         use crate::arrow::array::{
             Array, BooleanArray, Int64Array, RecordBatch, StringArray as SA,
@@ -761,8 +743,8 @@ mod tests {
             .build()
             .unwrap()
             .state_info
-            .physical_stats_schema
-            .clone()
+            .physical_stats_read_schema()
+            .cloned()
             .expect("stats schema")
     }
 
@@ -787,7 +769,7 @@ mod tests {
         #[case] shape: CheckpointShape,
         #[case] file_type: FileType,
         #[case] checkpoint_arm_tags: Vec<&'static str>,
-    ) -> DeltaResult<()> {
+    ) -> KernelResult<()> {
         let segment = log_segment(
             log_root(),
             &["file:///_delta_log/00000000000000000001.json"],
@@ -813,7 +795,7 @@ mod tests {
         #[case] expect_native_partitions: bool,
         #[values(None, Some(struct_stats_schema()))] parsed_stats: Option<SchemaRef>,
         #[values(CheckpointType::Leaf, CheckpointType::Manifest)] checkpoint_type: CheckpointType,
-    ) -> DeltaResult<()> {
+    ) -> KernelResult<()> {
         let stats = StatsOptions::all();
         let partition_values = PartitionValuesOptions::with_struct();
         let segment = log_segment(log_root(), &[], Some(checkpoint_path(FileType::Parquet)));
@@ -876,7 +858,7 @@ mod tests {
     }
 
     #[test]
-    fn metadata_plan_commits_only() -> DeltaResult<()> {
+    fn metadata_plan_commits_only() -> KernelResult<()> {
         let segment = log_segment(
             log_root(),
             &["file:///_delta_log/00000000000000000001.json"],
@@ -899,7 +881,7 @@ mod tests {
         #[case] shape: CheckpointShape,
         #[case] file_type: FileType,
         #[case] checkpoint_arm_tags: Vec<&'static str>,
-    ) -> DeltaResult<()> {
+    ) -> KernelResult<()> {
         let segment = log_segment(log_root(), &[], Some(checkpoint_path(file_type)));
         let scan = mock_snapshot(segment)?.scan_builder().build()?;
         let plan = scan.build_metadata_scan_plan(&shape)?.expect("non-empty");
@@ -908,7 +890,7 @@ mod tests {
     }
 
     #[test]
-    fn metadata_plan_empty_is_none() -> DeltaResult<()> {
+    fn metadata_plan_empty_is_none() -> KernelResult<()> {
         let segment = log_segment(log_root(), &[], None);
         let scan = mock_snapshot(segment)?.scan_builder().build()?;
         assert!(scan.build_metadata_scan_plan(&no_checkpoint())?.is_none());
@@ -916,7 +898,7 @@ mod tests {
     }
 
     #[test]
-    fn metadata_plan_static_skip_all_is_none() -> DeltaResult<()> {
+    fn metadata_plan_static_skip_all_is_none() -> KernelResult<()> {
         let segment = log_segment(log_root(), &[], None);
         let scan = mock_snapshot(segment)?
             .scan_builder()
@@ -933,7 +915,7 @@ mod tests {
     }
 
     #[test]
-    fn metadata_plan_executes_commit_dedup_with_sync_executor() -> DeltaResult<()> {
+    fn metadata_plan_executes_commit_dedup_with_sync_executor() -> KernelResult<()> {
         let store = Arc::new(InMemory::new());
         futures::executor::block_on(async {
             store
@@ -953,7 +935,7 @@ mod tests {
                     .into(),
                 )
                 .await?;
-            DeltaResult::<()>::Ok(())
+            KernelResult::<()>::Ok(())
         })?;
 
         let segment = log_segment(
@@ -1004,7 +986,7 @@ mod tests {
     fn metadata_plan_executes_leaf_without_stats_parsed(
         #[case] lower_bound: i64,
         #[case] expected_rows: usize,
-    ) -> DeltaResult<()> {
+    ) -> KernelResult<()> {
         let store = Arc::new(InMemory::new());
         // A single-row parquet checkpoint carrying an `add` with a JSON `stats` string but no
         // `stats_parsed` column.

@@ -17,7 +17,7 @@ use crate::schema::{
     MapType, PrimitiveType, StructField, StructType,
 };
 use crate::utils::require;
-use crate::{DeltaResult, KernelError};
+use crate::{KernelError, KernelResult};
 
 /// Pairs [`Into<Scalar>`] with [`ToDataType`] for infallible container conversions.
 ///
@@ -35,7 +35,7 @@ pub struct DecimalData {
 }
 
 impl DecimalData {
-    pub fn try_new(bits: impl Into<i128>, ty: DecimalType) -> DeltaResult<Self> {
+    pub fn try_new(bits: impl Into<i128>, ty: DecimalType) -> KernelResult<Self> {
         let bits = bits.into();
         require!(
             ty.precision() >= get_decimal_precision(bits),
@@ -83,7 +83,7 @@ impl ArrayData {
     pub fn try_new(
         tpe: ArrayType,
         elements: impl IntoIterator<Item = impl Into<Scalar>>,
-    ) -> DeltaResult<Self> {
+    ) -> KernelResult<Self> {
         let elements = elements
             .into_iter()
             .map(|v| {
@@ -160,7 +160,7 @@ impl MapData {
     pub fn try_new(
         data_type: MapType,
         values: impl IntoIterator<Item = (impl Into<Scalar>, impl Into<Scalar>)>,
-    ) -> DeltaResult<Self> {
+    ) -> KernelResult<Self> {
         let key_type = data_type.key_type();
         let val_type = data_type.value_type();
         let pairs = values
@@ -215,7 +215,7 @@ impl MapData {
 
     /// Infallible constructor used by `From<HashMap<K, V>>` / `From<HashMap<K, Option<V>>>`
     /// where key/value scalars are known to match `K`/`V`'s [`ToDataType`].
-    fn from_pairs<K: ToDataType, V: ToDataType>(
+    pub(crate) fn from_pairs<K: ToDataType, V: ToDataType>(
         pairs: impl IntoIterator<Item = (impl Into<Scalar>, impl Into<Scalar>)>,
         value_contains_null: bool,
     ) -> Self {
@@ -254,7 +254,7 @@ impl StructData {
     /// - if the number of fields and values do not match
     /// - if the data types of the values do not match the data types of the fields
     /// - if a null value is assigned to a non-nullable field
-    pub fn try_new(fields: Vec<StructField>, values: Vec<Scalar>) -> DeltaResult<Self> {
+    pub fn try_new(fields: Vec<StructField>, values: Vec<Scalar>) -> KernelResult<Self> {
         require!(
             fields.len() == values.len(),
             KernelError::invalid_struct_data(format!(
@@ -417,7 +417,7 @@ impl Scalar {
     }
 
     /// Constructs a Decimal value from raw parts
-    pub fn decimal(bits: impl Into<i128>, precision: u8, scale: u8) -> DeltaResult<Self> {
+    pub fn decimal(bits: impl Into<i128>, precision: u8, scale: u8) -> KernelResult<Self> {
         let dtype = DecimalType::try_new(precision, scale)?;
         let dval = DecimalData::try_new(bits, dtype)?;
         Ok(Self::Decimal(dval))
@@ -430,7 +430,7 @@ impl Scalar {
     }
 
     /// Constructs a Scalar timestamp (in UTC) from an `i64` millisecond since unix epoch
-    pub(crate) fn timestamp_from_millis(millis: i64) -> DeltaResult<Self> {
+    pub(crate) fn timestamp_from_millis(millis: i64) -> KernelResult<Self> {
         let Some(timestamp) = DateTime::from_timestamp_millis(millis) else {
             return Err(KernelError::generic(format!(
                 "Failed to create millisecond timestamp from {millis}"
@@ -698,7 +698,7 @@ macro_rules! impl_try_from_scalar {
             impl TryFrom<Scalar> for $rust_type {
                 type Error = KernelError;
 
-                fn try_from(scalar: Scalar) -> DeltaResult<Self> {
+                fn try_from(scalar: Scalar) -> KernelResult<Self> {
                     match scalar {
                         Scalar::$variant(value) => Ok(value.into()),
                         other => Err(other.conversion_error(stringify!($rust_type))),
@@ -730,7 +730,7 @@ impl_try_from_scalar!(
 impl<T: TryFrom<Scalar, Error = KernelError> + ToDataType> TryFrom<Scalar> for Option<T> {
     type Error = KernelError;
 
-    fn try_from(scalar: Scalar) -> DeltaResult<Self> {
+    fn try_from(scalar: Scalar) -> KernelResult<Self> {
         match scalar {
             Scalar::Null(data_type) => {
                 let expected = T::to_data_type();
@@ -752,7 +752,7 @@ where
 {
     type Error = KernelError;
 
-    fn try_from(scalar: Scalar) -> DeltaResult<Self> {
+    fn try_from(scalar: Scalar) -> KernelResult<Self> {
         let array: ArrayData = scalar.try_into()?;
         let element = T::get_struct_field("element");
         let expected = ArrayType::new(element.data_type().clone(), element.is_nullable());
@@ -792,7 +792,7 @@ where
 {
     type Error = KernelError;
 
-    fn try_from(scalar: Scalar) -> DeltaResult<Self> {
+    fn try_from(scalar: Scalar) -> KernelResult<Self> {
         let map: MapData = scalar.try_into()?;
         let value = V::get_struct_field("value");
         let expected = MapType::new(
@@ -855,7 +855,7 @@ impl PrimitiveType {
     /// Returns [`KernelError::ParseError`] if `raw` is not a valid encoding of this type.
     ///
     /// [partition value serialization]: https://github.com/delta-io/delta/blob/master/PROTOCOL.md#partition-value-serialization
-    pub fn parse_scalar(&self, raw: &str) -> Result<Scalar, KernelError> {
+    pub fn parse_scalar(&self, raw: &str) -> KernelResult<Scalar> {
         use PrimitiveType::*;
 
         if raw.is_empty() {
@@ -963,14 +963,14 @@ impl PrimitiveType {
         &self,
         raw: &str,
         f: impl FnOnce(T) -> Scalar,
-    ) -> Result<Scalar, KernelError> {
+    ) -> KernelResult<Scalar> {
         match raw.parse() {
             Ok(val) => Ok(f(val)),
             Err(..) => Err(self.parse_error(raw)),
         }
     }
 
-    fn parse_decimal(raw: &str, dtype: DecimalType) -> Result<Scalar, KernelError> {
+    fn parse_decimal(raw: &str, dtype: DecimalType) -> KernelResult<Scalar> {
         let parse_error = || PrimitiveType::from(dtype).parse_error(raw);
         let (base, exp): (&str, i128) = match raw.find(['e', 'E']) {
             None => (raw, 0), // no 'e' or 'E', so there's no exponent
@@ -1201,7 +1201,7 @@ mod tests {
 
     use super::*;
     use crate::expressions::{col, lit, BinaryPredicateOp};
-    use crate::schema::{schema, ToSchema as _};
+    use crate::schema::{schema, ToSchema};
     use crate::table_features::TableFeature;
     use crate::unit_test_utils::assert_result_error_with_message;
     use crate::Predicate as Pred;
@@ -1273,7 +1273,7 @@ mod tests {
         expect_int: i128,
         expect_prec: u8,
         expect_scale: u8,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> KernelResult<()> {
         let s = PrimitiveType::decimal(expect_prec, expect_scale)?;
         match s.parse_scalar(raw)? {
             Scalar::Decimal(val) => {
@@ -1350,7 +1350,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_decimal() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_parse_decimal() -> KernelResult<()> {
         assert_decimal("0.999", 999, 3, 3)?;
         assert_decimal("0", 0, 1, 0)?;
         assert_decimal("0.00", 0, 3, 2)?;
@@ -2105,6 +2105,24 @@ mod tests {
         features: Option<Vec<TableFeature>>,
     }
 
+    #[derive(IntoStructData)]
+    struct NullableMapValues {
+        #[allow_null_container_values]
+        values: HashMap<String, String>,
+    }
+
+    impl ToSchema for NullableMapValues {
+        fn to_schema() -> StructType {
+            schema! { not_null "values": { STRING => nullable STRING } }
+        }
+    }
+
+    #[derive(ToSchema, IntoStructData)]
+    struct OptionalNullableMapValues {
+        #[allow_null_container_values]
+        values: Option<HashMap<String, String>>,
+    }
+
     fn test_person() -> Person {
         Person {
             id: 1,
@@ -2119,6 +2137,45 @@ mod tests {
     #[test]
     fn derived_struct_conversions_round_trip() {
         assert_round_trip(test_person(), Person::to_schema());
+    }
+
+    #[test]
+    fn derived_struct_conversion_preserves_nullable_map_value_type() {
+        let data: StructData = NullableMapValues {
+            values: HashMap::from([("key".to_string(), "value".to_string())]),
+        }
+        .into();
+        let [Scalar::Map(values)] = data.values() else {
+            panic!("expected one map value");
+        };
+        assert!(values.map_type().value_contains_null());
+        StructData::try_new(data.fields().to_vec(), data.values().to_vec())
+            .expect("derived value must match its declared schema");
+    }
+
+    #[rstest]
+    #[case::absent(None)]
+    #[case::empty(Some(HashMap::new()))]
+    #[case::present(Some(HashMap::from([("key".to_string(), "value".to_string())])))]
+    fn derived_optional_struct_conversion_preserves_nullable_map_value_type(
+        #[case] values: Option<HashMap<String, String>>,
+    ) {
+        let data: StructData = OptionalNullableMapValues {
+            values: values.clone(),
+        }
+        .into();
+        StructData::try_new(data.fields().to_vec(), data.values().to_vec())
+            .expect("derived value must match its declared schema");
+        match (values, &data.values()[0]) {
+            (None, Scalar::Null(_)) => {}
+            (Some(expected), Scalar::Map(actual)) => {
+                assert_eq!(actual.pairs().len(), expected.len());
+                for (key, value) in expected {
+                    assert!(actual.pairs().contains(&(key.into(), value.into())));
+                }
+            }
+            (expected, actual) => panic!("expected {expected:?}, got {actual:?}"),
+        }
     }
 
     #[test]

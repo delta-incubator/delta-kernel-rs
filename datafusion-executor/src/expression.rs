@@ -5,7 +5,9 @@ use std::sync::Arc;
 use datafusion::arrow::array::{new_null_array, ArrayRef, RecordBatch, StructArray};
 use datafusion::arrow::datatypes::{DataType as ArrowDataType, Schema as ArrowSchema};
 use datafusion::common::utils::take_function_args;
-use datafusion::common::{Column as DFColumn, DataFusionError, ScalarValue as DFScalarValue};
+use datafusion::common::{
+    Column as DFColumn, DataFusionError, Result as DFResult, ScalarValue as DFScalarValue,
+};
 use datafusion::functions::core::expr_fn::{coalesce, get_field, named_struct, nullif};
 use datafusion::functions_nested::expr_fn::make_array;
 use datafusion::logical_expr::{
@@ -25,7 +27,7 @@ use delta_kernel::schema::{
     DataType as KernelDataType, PrimitiveType, SchemaRef as KernelSchemaRef, StructField,
     StructType,
 };
-use delta_kernel::{DeltaResult, EngineData, KernelError};
+use delta_kernel::{EngineData, KernelError, KernelResult};
 
 use crate::predicate::to_df_predicate_expr;
 use crate::scalar::to_df_scalar;
@@ -37,8 +39,9 @@ use crate::utils::column_to_df_expr;
 /// `output_type` supplies result type information that the expression itself does not carry.
 /// `Struct` and `StructPatch` require a struct type for output field names and computed child
 /// types. `Array` validates that a supplied type is an array and forwards its element type, while
-/// `Coalesce` forwards the result type unchanged to every branch. Callers pass `None` when the
-/// result type is unknown or the expression does not need it.
+/// `Coalesce` forwards `output_type` to its arguments for construction type information, leaving
+/// common-type resolution to DataFusion. Callers pass `None` when the result type is unknown or
+/// the expression does not need it.
 ///
 /// # Errors
 /// Returns an error when a column cannot be resolved, a scalar cannot be converted, supplied type
@@ -49,7 +52,7 @@ pub fn to_df_expr(
     expr: &KernelExpression,
     input_schema: &StructType,
     output_type: Option<&KernelDataType>,
-) -> DeltaResult<DFExpr> {
+) -> KernelResult<DFExpr> {
     match expr {
         KernelExpression::Literal(scalar) => Ok(lit(to_df_scalar(scalar)?)),
         KernelExpression::Column(name) => column_to_df_expr(name, input_schema),
@@ -100,7 +103,7 @@ pub(crate) fn to_df_struct_columns(
     expr: &KernelExpression,
     input_schema: &StructType,
     output_type: &StructType,
-) -> DeltaResult<StructColumns> {
+) -> KernelResult<StructColumns> {
     match expr {
         KernelExpression::Struct(fields, nullability) => {
             struct_columns_from_fields(fields, nullability.as_ref(), input_schema, output_type)
@@ -120,7 +123,7 @@ pub(crate) fn to_df_struct_columns(
 fn binary_expr_to_df_expr(
     binary: &BinaryExpression,
     input_schema: &StructType,
-) -> DeltaResult<DFExpr> {
+) -> KernelResult<DFExpr> {
     let op = match binary.op {
         BinaryExpressionOp::Plus => Operator::Plus,
         BinaryExpressionOp::Minus => Operator::Minus,
@@ -133,15 +136,15 @@ fn binary_expr_to_df_expr(
 }
 
 /// Lowers a variadic expression: `Coalesce` to `coalesce(..)` and `Array` to `make_array(..)`, each
-/// over the converted arguments. Coalesce is type-preserving, so it forwards `output_type` to each
-/// argument (every branch produces the same type). Array is type-wrapping: a known `Array<E>`
-/// target is peeled to `E` and threaded to each element (so an array of structs still gets its
-/// element schema); an unknown target leaves elements untyped.
+/// over the converted arguments. `Coalesce` forwards `output_type` to construct schema-dependent
+/// arguments before DataFusion performs common-type resolution and supported implicit conversions.
+/// A known `Array<E>` target is peeled to `E` and forwarded to each element so an array of structs
+/// gets its element schema; an unknown target leaves elements untyped.
 fn variadic_to_df_expr(
     variadic: &VariadicExpression,
     input_schema: &StructType,
     output_type: Option<&KernelDataType>,
-) -> DeltaResult<DFExpr> {
+) -> KernelResult<DFExpr> {
     let arg_output_type = match variadic.op {
         VariadicExpressionOp::Coalesce => output_type,
         VariadicExpressionOp::Array => match output_type {
@@ -154,7 +157,7 @@ fn variadic_to_df_expr(
             None => None,
         },
     };
-    let args: DeltaResult<Vec<DFExpr>> = variadic
+    let args: KernelResult<Vec<DFExpr>> = variadic
         .exprs
         .iter()
         .map(|e| to_df_expr(e, input_schema, arg_output_type))
@@ -170,7 +173,7 @@ fn variadic_to_df_expr(
 fn require_struct_output<'a>(
     output_type: Option<&'a KernelDataType>,
     arm: &str,
-) -> DeltaResult<&'a StructType> {
+) -> KernelResult<&'a StructType> {
     match output_type {
         Some(KernelDataType::Struct(schema)) => Ok(schema),
         Some(other) => Err(KernelError::unsupported(format!(
@@ -236,7 +239,7 @@ fn struct_to_df_expr(
     nullability: Option<&ExpressionRef>,
     input_schema: &StructType,
     output_type: Option<&KernelDataType>,
-) -> DeltaResult<DFExpr> {
+) -> KernelResult<DFExpr> {
     let target = require_struct_output(output_type, "Struct")?;
     let columns = struct_columns_from_fields(fields, nullability, input_schema, target)?;
     Ok(columns.pack())
@@ -249,7 +252,7 @@ fn struct_columns_from_fields(
     nullability: Option<&ExpressionRef>,
     input_schema: &StructType,
     target: &StructType,
-) -> DeltaResult<StructColumns> {
+) -> KernelResult<StructColumns> {
     if fields.len() != target.num_fields() {
         return Err(KernelError::generic(format!(
             "Struct expression field count mismatch: {} fields in expression but {} in schema",
@@ -274,7 +277,7 @@ fn struct_patch_to_df_expr(
     patch: &ExpressionStructPatch,
     input_schema: &StructType,
     output_type: Option<&KernelDataType>,
-) -> DeltaResult<DFExpr> {
+) -> KernelResult<DFExpr> {
     let target = require_struct_output(output_type, "StructPatch")?;
     let columns = struct_columns_from_patch(patch, input_schema, target)?;
     Ok(columns.pack())
@@ -289,7 +292,7 @@ fn struct_columns_from_patch(
     patch: &ExpressionStructPatch,
     input_schema: &StructType,
     target: &StructType,
-) -> DeltaResult<StructColumns> {
+) -> KernelResult<StructColumns> {
     // A patch targets either the whole input struct (`input_path` is `None`), whose fields are the
     // top-level columns, or the nested struct at that path, whose fields are reached through it.
     let (mut source_struct, mut source_expr) = (input_schema, None);
@@ -313,7 +316,7 @@ fn struct_columns_from_patch(
     let append_converted = |pairs: &mut Vec<(String, DFExpr)>,
                             output_fields: &mut dyn Iterator<Item = &StructField>,
                             expr: &KernelExpression|
-     -> DeltaResult<()> {
+     -> KernelResult<()> {
         let field = output_fields.next().ok_or_else(|| {
             KernelError::generic("StructPatch produced more fields than the output schema has")
         })?;
@@ -324,7 +327,7 @@ fn struct_columns_from_patch(
     let append_existing = |pairs: &mut Vec<(String, DFExpr)>,
                            output_fields: &mut dyn Iterator<Item = &StructField>,
                            name: &str|
-     -> DeltaResult<()> {
+     -> KernelResult<()> {
         let field = output_fields.next().ok_or_else(|| {
             KernelError::generic("StructPatch produced more fields than the output schema has")
         })?;
@@ -417,7 +420,7 @@ fn map_to_struct_to_df_expr(
     map_to_struct: &MapToStructExpression,
     input_schema: &StructType,
     output_type: Option<&KernelDataType>,
-) -> DeltaResult<DFExpr> {
+) -> KernelResult<DFExpr> {
     let target = require_struct_output(output_type, "MapToStruct")?;
     let map = to_df_expr(&map_to_struct.map_expr, input_schema, None)?;
 
@@ -431,7 +434,7 @@ fn map_to_struct_to_df_expr(
     Ok(ScalarUDF::new_from_impl(udf).call(vec![map]))
 }
 
-fn lower_default_map_to_struct(map: DFExpr, target: &StructType) -> DeltaResult<DFExpr> {
+fn lower_default_map_to_struct(map: DFExpr, target: &StructType) -> KernelResult<DFExpr> {
     let mut args = Vec::with_capacity(target.num_fields() * 2);
     for field in target.fields() {
         let primitive = map_to_struct_primitive(field)?;
@@ -451,14 +454,14 @@ fn lower_default_map_to_struct(map: DFExpr, target: &StructType) -> DeltaResult<
     Ok(struct_null_when_not(map.is_not_null(), named_struct(args)))
 }
 
-fn validate_map_to_struct_target(target: &StructType) -> DeltaResult<()> {
+fn validate_map_to_struct_target(target: &StructType) -> KernelResult<()> {
     for field in target.fields() {
         map_to_struct_primitive(field)?;
     }
     Ok(())
 }
 
-fn map_to_struct_primitive(field: &StructField) -> DeltaResult<&PrimitiveType> {
+fn map_to_struct_primitive(field: &StructField) -> KernelResult<&PrimitiveType> {
     field.data_type().as_primitive_opt().ok_or_else(|| {
         KernelError::unsupported(format!(
             "MapToStruct only supports primitive target types, but field '{}' is {:?}",
@@ -488,7 +491,7 @@ impl std::hash::Hash for KernelMapToStructUdf {
 }
 
 impl KernelMapToStructUdf {
-    fn try_new(output_schema: KernelSchemaRef, options: MapToStructOptions) -> DeltaResult<Self> {
+    fn try_new(output_schema: KernelSchemaRef, options: MapToStructOptions) -> KernelResult<Self> {
         let arrow_schema: ArrowSchema = output_schema
             .as_ref()
             .try_into_arrow()
@@ -511,11 +514,11 @@ impl ScalarUDFImpl for KernelMapToStructUdf {
         &self.signature
     }
 
-    fn return_type(&self, _arg_types: &[ArrowDataType]) -> Result<ArrowDataType, DataFusionError> {
+    fn return_type(&self, _arg_types: &[ArrowDataType]) -> DFResult<ArrowDataType> {
         Ok(self.return_type.clone())
     }
 
-    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> Result<ColumnarValue, DataFusionError> {
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
         let num_rows = args.number_rows;
         let [map] = take_function_args(self.name(), args.args)?;
         let batch = RecordBatch::try_from_iter([("map", map.into_array(num_rows)?)])?;
@@ -538,7 +541,7 @@ impl ScalarUDFImpl for KernelMapToStructUdf {
 fn parse_json_to_df_expr(
     parse: &ParseJsonExpression,
     input_schema: &StructType,
-) -> DeltaResult<DFExpr> {
+) -> KernelResult<DFExpr> {
     let json = to_df_expr(&parse.json_expr, input_schema, None)?;
     let udf = ScalarUDF::new_from_impl(ParseJsonUdf::try_new(parse.output_schema.clone())?);
     Ok(udf.call(vec![json]))
@@ -574,7 +577,7 @@ impl std::hash::Hash for ParseJsonUdf {
 }
 
 impl ParseJsonUdf {
-    fn try_new(output_schema: KernelSchemaRef) -> DeltaResult<Self> {
+    fn try_new(output_schema: KernelSchemaRef) -> KernelResult<Self> {
         let arrow_schema: ArrowSchema = output_schema
             .as_ref()
             .try_into_arrow()
@@ -597,11 +600,11 @@ impl ScalarUDFImpl for ParseJsonUdf {
         &self.signature
     }
 
-    fn return_type(&self, _arg_types: &[ArrowDataType]) -> Result<ArrowDataType, DataFusionError> {
+    fn return_type(&self, _arg_types: &[ArrowDataType]) -> DFResult<ArrowDataType> {
         Ok(self.return_type.clone())
     }
 
-    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> Result<ColumnarValue, DataFusionError> {
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
         let num_rows = args.number_rows;
         let [json] = take_function_args(self.name(), args.args)?;
         let json = json.into_array(num_rows)?;
@@ -883,7 +886,7 @@ mod tests {
 
     /// Asserts `res` is an error whose message contains `message`.
     #[track_caller]
-    fn assert_error_message<T>(res: DeltaResult<T>, message: &str) {
+    fn assert_error_message<T>(res: KernelResult<T>, message: &str) {
         let error = res.err().expect("expected an error").to_string();
         assert!(error.contains(message), "{error}");
     }

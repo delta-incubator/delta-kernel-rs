@@ -16,9 +16,10 @@ use crate::arrow::datatypes::{
     DataType as ArrowDataType, Field as ArrowField, Schema as ArrowSchema,
 };
 use crate::engine::ensure_data_types::{ensure_data_types, ValidationMode};
-use crate::error::{DeltaResult, KernelError};
+use crate::error::KernelError;
 use crate::parquet::arrow::PARQUET_FIELD_ID_META_KEY;
 use crate::schema::{ArrayType, ColumnMetadataKey, DataType, MapType, Schema, StructField};
+use crate::KernelResult;
 
 // Apply a schema to an array. The array _must_ be a `StructArray`. Returns a `RecordBatch` where
 // the names of fields, nullable, and metadata in the struct have been transformed to match those
@@ -28,7 +29,7 @@ use crate::schema::{ArrayType, ColumnMetadataKey, DataType, MapType, Schema, Str
 // those nulls propagated. Arrow's JSON reader does this automatically, and parquet data goes
 // through `fix_nested_null_masks` which handles it. We decompose the struct and discard its null
 // buffer since RecordBatch cannot have top-level nulls.
-pub(crate) fn apply_schema(array: &dyn Array, schema: &DataType) -> DeltaResult<RecordBatch> {
+pub(crate) fn apply_schema(array: &dyn Array, schema: &DataType) -> KernelResult<RecordBatch> {
     let DataType::Struct(struct_schema) = schema else {
         return Err(KernelError::generic(
             "apply_schema at top-level must be passed a struct schema",
@@ -67,14 +68,14 @@ fn new_field_with_metadata(
 fn transform_struct(
     struct_array: &StructArray,
     target_fields: impl Iterator<Item = impl Borrow<StructField>>,
-) -> DeltaResult<StructArray> {
+) -> KernelResult<StructArray> {
     let (input_fields, arrow_cols, nulls) = struct_array.clone().into_parts();
     let input_col_count = arrow_cols.len();
     let result_iter = arrow_cols
         .into_iter()
         .zip(input_fields.iter())
         .zip(target_fields)
-        .map(|((sa_col, input_field), target_field)| -> DeltaResult<_> {
+        .map(|((sa_col, input_field), target_field)| -> KernelResult<_> {
             let target_field = target_field.borrow();
             let transformed_col = apply_schema_to_inner(
                 &sa_col,
@@ -127,7 +128,7 @@ fn transform_struct(
 pub(crate) fn apply_schema_to_struct(
     array: &dyn Array,
     kernel_fields: &Schema,
-) -> DeltaResult<StructArray> {
+) -> KernelResult<StructArray> {
     let Some(sa) = array.as_struct_opt() else {
         return Err(make_arrow_error(
             "Arrow claimed to be a struct but isn't a StructArray",
@@ -144,7 +145,7 @@ fn apply_schema_to_list(
     target_inner_type: &ArrayType,
     nearest_ancestor_struct_field: Option<&StructField>,
     relative_path: &str,
-) -> DeltaResult<ListArray> {
+) -> KernelResult<ListArray> {
     let Some(la) = array.as_list_opt() else {
         return Err(make_arrow_error(
             "Arrow claimed to be a list but isn't a ListArray",
@@ -188,7 +189,7 @@ fn apply_schema_to_map(
     kernel_map_type: &MapType,
     ancestor: Option<&StructField>,
     relative_path: &str,
-) -> DeltaResult<MapArray> {
+) -> KernelResult<MapArray> {
     let Some(ma) = array.as_map_opt() else {
         return Err(make_arrow_error(
             "Arrow claimed to be a map but isn't a MapArray",
@@ -270,7 +271,7 @@ fn apply_schema_to_map(
 
 // Apply `schema` to `array`. This handles renaming, and adjusting nullability and metadata. if the
 // actual data types don't match, this will return an error.
-pub(crate) fn apply_schema_to(array: &ArrayRef, schema: &DataType) -> DeltaResult<ArrayRef> {
+pub(crate) fn apply_schema_to(array: &ArrayRef, schema: &DataType) -> KernelResult<ArrayRef> {
     apply_schema_to_inner(array, schema, None, "")
 }
 
@@ -362,9 +363,17 @@ fn apply_schema_to_inner(
     schema: &DataType,
     ancestor: Option<&StructField>,
     relative_path: &str,
-) -> DeltaResult<ArrayRef> {
+) -> KernelResult<ArrayRef> {
     use DataType::*;
     let array: ArrayRef = match schema {
+        #[cfg(feature = "udt-in-dev")]
+        UserDefined(udt) => {
+            // Check physical type compatibility before rebuilding with logical nullability.
+            ensure_data_types(udt.sql_type(), array.data_type(), ValidationMode::TypesOnly)?;
+            // Column-mapping ancestry ends at the UDT boundary: nothing under `sqlType` carries a
+            // field ID.
+            apply_schema_to_inner(array, udt.sql_type(), None, "")?
+        }
         Struct(stype) => Arc::new(apply_schema_to_struct(array, stype)?),
         Array(atype) => Arc::new(apply_schema_to_list(array, atype, ancestor, relative_path)?),
         Map(mtype) => Arc::new(apply_schema_to_map(array, mtype, ancestor, relative_path)?),
@@ -390,6 +399,8 @@ mod apply_schema_validation_tests {
     use crate::arrow::datatypes::{
         DataType as ArrowDataType, Field as ArrowField, Fields, Schema as ArrowSchema,
     };
+    #[cfg(feature = "udt-in-dev")]
+    use crate::engine::arrow_conversion::TryIntoArrow as _;
     use crate::parquet::arrow::PARQUET_FIELD_ID_META_KEY;
     use crate::schema::{
         schema, ColumnMetadataKey, DataType, MetadataValue, StructField, StructType,
@@ -399,6 +410,63 @@ mod apply_schema_validation_tests {
         array_in_map_with_field_ids, assert_result_error_with_message,
         collect_arrow_field_metadata, complex_nested_with_field_ids,
     };
+
+    /// Verifies that applying a UDT schema restores logical child nullability without changing
+    /// its physical container shape.
+    #[cfg(feature = "udt-in-dev")]
+    #[rstest]
+    #[case::struct_type(
+        DataType::from(schema! { nullable "x": LONG }),
+        DataType::from(schema! { not_null "x": LONG }),
+    )]
+    #[case::array(
+        DataType::from(crate::schema::ArrayType::new(DataType::LONG, true)),
+        DataType::from(crate::schema::ArrayType::new(DataType::LONG, false))
+    )]
+    #[case::map(
+        DataType::from(crate::schema::MapType::new(DataType::STRING, DataType::LONG, true)),
+        DataType::from(crate::schema::MapType::new(DataType::STRING, DataType::LONG, false))
+    )]
+    fn apply_schema_normalizes_udt_child_nullability(
+        #[case] logical: DataType,
+        #[case] physical: DataType,
+    ) {
+        let physical: ArrowDataType = (&physical).try_into_arrow().unwrap();
+        let input = crate::arrow::array::new_empty_array(&physical);
+        let udt =
+            crate::schema::UserDefinedType::try_new(logical.clone(), Default::default()).unwrap();
+        let output = apply_schema_to(&input, &DataType::from(udt)).unwrap();
+        let expected: ArrowDataType = (&logical).try_into_arrow().unwrap();
+        assert_eq!(output.data_type(), &expected);
+    }
+
+    /// Verifies that a struct-backed UDT rejects physical structs with a different arity before
+    /// rebuilding child fields.
+    #[cfg(feature = "udt-in-dev")]
+    #[rstest]
+    fn apply_schema_rejects_udt_struct_field_count_mismatch(#[values(1, 3)] count: usize) {
+        let sql_type = DataType::from(schema! { nullable "x": LONG, nullable "y": LONG });
+        let udt = crate::schema::UserDefinedType::try_new(sql_type, Default::default()).unwrap();
+        let fields: Fields = (0..count)
+            .map(|i| ArrowField::new(format!("field{i}"), ArrowDataType::Int64, false))
+            .collect();
+        let input = crate::arrow::array::new_empty_array(&ArrowDataType::Struct(fields));
+        assert_result_error_with_message(
+            apply_schema_to(&input, &DataType::from(udt)),
+            "Struct field count mismatch",
+        );
+    }
+
+    /// Verifies that schema application rejects an Arrow value incompatible with the UDT's
+    /// physical type.
+    #[cfg(feature = "udt-in-dev")]
+    #[test]
+    fn apply_schema_rejects_udt_long_over_utf8() {
+        let input: ArrayRef = Arc::new(crate::arrow::array::StringArray::from(vec!["42"]));
+        let udt =
+            crate::schema::UserDefinedType::try_new(DataType::LONG, Default::default()).unwrap();
+        assert!(apply_schema_to(&input, &DataType::from(udt)).is_err());
+    }
 
     #[rstest]
     fn apply_schema_accepts_any_binary_representation_for_variant(

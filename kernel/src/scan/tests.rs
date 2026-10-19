@@ -32,15 +32,46 @@ use crate::schema::{
     StructType,
 };
 use crate::transaction::create_table::create_table;
+use crate::transaction::data_layout::DataLayout;
 use crate::unit_test_utils::TestCancellationToken;
 use crate::{
-    CancellationTokenRef, DeltaResultIteratorStatic, Engine, EngineData,
-    FileDataReadResultIterator, FileMeta, FileSize, ParquetFooter, ParquetHandler, PredicateRef,
+    CancellationTokenRef, Engine, EngineData, FileDataReadResultIterator, FileMeta, FileSize,
+    KernelResult, KernelResultIteratorStatic, ParquetFooter, ParquetHandler, PredicateRef,
     Snapshot,
 };
 
+#[cfg(feature = "geo-type-in-dev")]
+mod geometry_stats;
+mod variant_stats;
+
 fn field_names(s: &StructArray) -> Vec<String> {
     s.fields().iter().map(|f| f.name().clone()).collect()
+}
+
+fn stats_struct_field<'a>(schema: &'a StructType, name: &str) -> &'a StructType {
+    let DataType::Struct(inner) = schema
+        .field(name)
+        .unwrap_or_else(|| panic!("stats schema should have {name}"))
+        .data_type()
+    else {
+        panic!("{name} should be a struct");
+    };
+    inner
+}
+
+fn assert_stats_schemas_aligned(logical: &StructType, physical: &StructType) {
+    assert_eq!(logical.num_fields(), physical.num_fields());
+    for (logical_field, physical_field) in logical.fields().zip(physical.fields()) {
+        assert_eq!(logical_field.is_nullable(), physical_field.is_nullable());
+        assert!(logical_field.metadata().is_empty());
+        assert!(physical_field.metadata().is_empty());
+        match (logical_field.data_type(), physical_field.data_type()) {
+            (DataType::Struct(logical), DataType::Struct(physical)) => {
+                assert_stats_schemas_aligned(logical, physical);
+            }
+            (logical, physical) => assert_eq!(logical, physical),
+        }
+    }
 }
 
 #[test]
@@ -339,7 +370,7 @@ fn test_scan_builder_accepts_predicate_on_unprojected_data_column() {
         nullable "number": LONG,
         nullable "a_float": FLOAT,
     };
-    create_table(url, schema, "DefaultEngine")
+    create_table(url, schema, "DefaultEngine", true)
         .build(&engine, Box::new(FileSystemCommitter::new()))
         .unwrap()
         .commit(&engine)
@@ -370,7 +401,7 @@ fn test_scan_builder_rejects_predicate_on_projection_only_metadata_column() {
     let engine = SyncEngine::new_with_store(store);
 
     let schema = schema_ref! { nullable "id": LONG };
-    create_table(url, schema, "DefaultEngine")
+    create_table(url, schema, "DefaultEngine", true)
         .build(&engine, Box::new(FileSystemCommitter::new()))
         .unwrap()
         .commit(&engine)
@@ -591,7 +622,7 @@ fn test_without_row_transforms_scan_metadata_surfaces_deletion_vectors() {
     );
 }
 
-fn get_files_for_scan(scan: Scan, engine: &dyn Engine) -> DeltaResult<Vec<String>> {
+fn get_files_for_scan(scan: Scan, engine: &dyn Engine) -> KernelResult<Vec<String>> {
     let scan_metadata_iter = scan.scan_metadata(engine)?;
     fn scan_metadata_callback(paths: &mut Vec<String>, scan_file: ScanFile) -> bool {
         paths.push(scan_file.path.to_string());
@@ -900,7 +931,7 @@ fn test_missing_column_row_group_skipping() {
 }
 
 #[test_log::test]
-fn test_scan_with_checkpoint() -> DeltaResult<()> {
+fn test_scan_with_checkpoint() -> KernelResult<()> {
     let path = std::fs::canonicalize(PathBuf::from(
         "./tests/data/with_checkpoint_no_last_checkpoint/",
     ))?;
@@ -972,7 +1003,7 @@ fn test_scan_metadata_with_stats_columns() {
     let scan_metadata_results: Vec<_> = scan
         .scan_metadata(engine.as_ref())
         .unwrap()
-        .collect::<Result<Vec<_>, _>>()
+        .collect::<KernelResult<Vec<_>>>()
         .unwrap();
 
     assert!(
@@ -1561,7 +1592,7 @@ fn surviving_ids(parquet_bytes: Bytes, pred: &Pred) -> Vec<i64> {
     let mut ids: Vec<i64> = builder
         .build()
         .unwrap()
-        .map(Result::unwrap)
+        .map(KernelResult::unwrap)
         .flat_map(|batch| {
             let add = batch
                 .column(0)
@@ -1743,7 +1774,7 @@ impl ParquetHandler for RecordingParquetHandler {
         files: &[FileMeta],
         physical_schema: schema::SchemaRef,
         predicate: Option<PredicateRef>,
-    ) -> DeltaResult<FileDataReadResultIterator> {
+    ) -> KernelResult<FileDataReadResultIterator> {
         self.reads.lock().unwrap().push(RecordedParquetRead {
             files: files.to_vec(),
             physical_schema: physical_schema.clone(),
@@ -1753,15 +1784,15 @@ impl ParquetHandler for RecordingParquetHandler {
             .read_parquet_files(files, physical_schema, predicate)
     }
 
-    fn read_parquet_footer(&self, file: &FileMeta) -> DeltaResult<ParquetFooter> {
+    fn read_parquet_footer(&self, file: &FileMeta) -> KernelResult<ParquetFooter> {
         self.inner.read_parquet_footer(file)
     }
 
     fn write_parquet_file(
         &self,
         location: url::Url,
-        data: DeltaResultIteratorStatic<Box<dyn EngineData>>,
-    ) -> DeltaResult<FileSize> {
+        data: KernelResultIteratorStatic<Box<dyn EngineData>>,
+    ) -> KernelResult<FileSize> {
         self.inner.write_parquet_file(location, data)
     }
 }
@@ -1917,7 +1948,7 @@ fn test_all_struct_parses_json_commit_stats() {
     for scan_metadata in scan
         .scan_metadata(engine.as_ref())
         .unwrap()
-        .collect::<Result<Vec<_>, _>>()
+        .collect::<KernelResult<Vec<_>>>()
         .unwrap()
     {
         let (underlying_data, selection_vector) = scan_metadata.scan_files.into_parts();
@@ -2006,7 +2037,7 @@ fn test_skip_stats_disables_data_skipping() {
     let scan_metadata_results: Vec<_> = scan
         .scan_metadata(engine.as_ref())
         .unwrap()
-        .collect::<Result<Vec<_>, _>>()
+        .collect::<KernelResult<Vec<_>>>()
         .unwrap();
 
     let mut selected_file_count = 0;
@@ -2040,7 +2071,7 @@ fn test_with_stats_last_call_wins() {
     for scan_metadata in scan
         .scan_metadata(engine.as_ref())
         .unwrap()
-        .collect::<Result<Vec<_>, _>>()
+        .collect::<KernelResult<Vec<_>>>()
         .unwrap()
     {
         let (underlying_data, _) = scan_metadata.scan_files.into_parts();
@@ -2071,7 +2102,7 @@ fn test_default_stats_options_no_struct_output() {
     let scan_metadata_results: Vec<_> = scan
         .scan_metadata(engine.as_ref())
         .unwrap()
-        .collect::<Result<Vec<_>, _>>()
+        .collect::<KernelResult<Vec<_>>>()
         .unwrap();
 
     assert!(
@@ -2114,6 +2145,7 @@ fn test_default_stats_options_no_struct_output() {
         struct_stats: StructStats::Columns {
             requested: vec![column_name!("id")],
         },
+        ..Default::default()
     },
     &["id"],
     None,
@@ -2136,21 +2168,21 @@ fn test_default_stats_options_no_struct_output() {
 )]
 #[case::id_predicate_not_requested(
     StatsOptions::struct_columns(vec![column_name!("name")]),
-    &["id", "name"],
+    &["name"],
     Some(col!("id").gt(lit(400i64))),
     "name",
     &[("name_401", "name_500"), ("name_501", "name_600")],
 )]
 #[case::salary_predicate_with_multiple_requested_columns(
     StatsOptions::struct_columns(vec![column_name!("id"), column_name!("name")]),
-    &["id", "name", "salary"],
+    &["id", "name"],
     Some(col!("salary").le(lit(70_000i64))),
     "id",
     &[("1", "100"), ("101", "200")],
 )]
 #[case::salary_requested_with_different_predicate_column(
     StatsOptions::struct_columns(vec![column_name!("salary")]),
-    &["id", "salary"],
+    &["salary"],
     Some(col!("id").gt(lit(500i64))),
     "salary",
     &[("100100", "110000")],
@@ -2282,6 +2314,7 @@ fn test_scan_metadata_with_nonexistent_stats_columns() {
             struct_stats: StructStats::Columns {
                 requested: vec![column_name!("nonexistent_column")],
             },
+            ..Default::default()
         })
         .build();
 
@@ -2309,6 +2342,358 @@ fn scan_builder_tolerates_nonexistent_extra_indexed_column() {
     );
 }
 
+#[rstest]
+#[case::no_column_mapping(None)]
+#[case::name_column_mapping(Some("name"))]
+#[case::id_column_mapping(Some("id"))]
+fn scan_builder_stats_output_schemas_match_scan_output(#[case] column_mapping_mode: Option<&str>) {
+    let table_root = "memory:///expected-stats-schemas/";
+    let store = Arc::new(InMemory::new());
+    let engine = SyncEngine::new_with_store(store);
+    let schema = schema_ref! {
+        nullable "id": LONG,
+        nullable "value": LONG,
+        nullable "other": LONG,
+    };
+    let mut create_builder = create_table(table_root, schema, "DefaultEngine", true)
+        .with_table_properties([("delta.dataSkippingNumIndexedCols", "1")]);
+    if let Some(mode) = column_mapping_mode {
+        create_builder = create_builder.with_table_properties([("delta.columnMapping.mode", mode)]);
+    }
+    create_builder
+        .build(&engine, Box::new(FileSystemCommitter::new()))
+        .unwrap()
+        .commit(&engine)
+        .unwrap()
+        .unwrap_committed();
+
+    let snapshot = Snapshot::builder_for(table_root).build(&engine).unwrap();
+    let extra_indexed_columns = vec![column_name!("value"), column_name!("unresolvable_extra")];
+    let builder = snapshot
+        .scan_builder()
+        .with_stats(StatsOptions::all_struct_with_extra_indexed(
+            extra_indexed_columns,
+        ));
+    let expected = builder
+        .stats_output_schemas()
+        .unwrap()
+        .expect("stats should include indexed data columns");
+    let scan = builder.build().unwrap();
+
+    assert_eq!(
+        scan.state_info.physical_stats_read_schema(),
+        Some(&expected.physical)
+    );
+
+    assert_stats_schemas_aligned(&expected.logical, &expected.physical);
+
+    let logical_min_values = stats_struct_field(&expected.logical, MIN_VALUES);
+    assert_eq!(logical_min_values.num_fields(), 2);
+    assert!(logical_min_values.field("id").is_some());
+    assert!(logical_min_values.field("value").is_some());
+    assert!(logical_min_values.field("other").is_none());
+    assert!(logical_min_values.field("unresolvable_extra").is_none());
+
+    let physical_min_values = stats_struct_field(&expected.physical, MIN_VALUES);
+    assert_eq!(physical_min_values.num_fields(), 2);
+    if column_mapping_mode.is_some() {
+        assert!(logical_min_values.fields().all(|field| {
+            field
+                .get_config_value(&ColumnMetadataKey::ColumnMappingPhysicalName)
+                .is_none()
+                && field
+                    .get_config_value(&ColumnMetadataKey::ParquetFieldId)
+                    .is_none()
+        }));
+        assert!(physical_min_values.fields().all(|field| {
+            field.name().starts_with("col-")
+                && field
+                    .get_config_value(&ColumnMetadataKey::ParquetFieldId)
+                    .is_none()
+        }));
+    } else {
+        assert_eq!(physical_min_values, logical_min_values);
+    }
+}
+
+#[rstest]
+#[case::no_column_mapping(None)]
+#[case::name_column_mapping(Some("name"))]
+#[case::id_column_mapping(Some("id"))]
+fn scan_builder_stats_output_schemas_returns_none_without_data_columns(
+    #[case] column_mapping_mode: Option<&str>,
+) {
+    let table_root = format!(
+        "memory:///expected-stats-schemas-empty-{}/",
+        column_mapping_mode.unwrap_or("none")
+    );
+    let store = Arc::new(InMemory::new());
+    let engine = SyncEngine::new_with_store(store);
+    let mut create_builder = create_table(
+        &table_root,
+        schema_ref! { nullable "id": LONG },
+        "DefaultEngine",
+        true,
+    )
+    .with_table_properties([("delta.dataSkippingNumIndexedCols", "0")]);
+    if let Some(mode) = column_mapping_mode {
+        create_builder = create_builder.with_table_properties([("delta.columnMapping.mode", mode)]);
+    }
+    create_builder
+        .build(&engine, Box::new(FileSystemCommitter::new()))
+        .unwrap()
+        .commit(&engine)
+        .unwrap()
+        .unwrap_committed();
+
+    let builder = Snapshot::builder_for(&table_root)
+        .build(&engine)
+        .unwrap()
+        .scan_builder()
+        .with_stats(StatsOptions::all_struct());
+    assert!(builder.stats_output_schemas().unwrap().is_none());
+
+    let scan = builder.build().unwrap();
+    assert!(scan.state_info.physical_stats_output_schema().is_none());
+}
+
+#[rstest]
+#[case::no_column_mapping(None)]
+#[case::name_column_mapping(Some("name"))]
+#[case::id_column_mapping(Some("id"))]
+fn scan_builder_stats_output_schemas_respect_explicit_columns_and_partitions(
+    #[case] column_mapping_mode: Option<&str>,
+) {
+    let table_root = "memory:///expected-stats-schemas-explicit/";
+    let store = Arc::new(InMemory::new());
+    let engine = SyncEngine::new_with_store(store);
+    let schema = schema_ref! {
+        nullable "id": LONG,
+        nullable "info": {
+            nullable "name": STRING,
+            nullable "age": INTEGER,
+        },
+        nullable "part": STRING,
+        nullable "other": LONG,
+    };
+    let mut create_builder = create_table(table_root, schema, "DefaultEngine", true)
+        .with_data_layout(DataLayout::partitioned(["part"]))
+        .with_table_properties([("delta.dataSkippingStatsColumns", "info.name")]);
+    if let Some(mode) = column_mapping_mode {
+        create_builder = create_builder.with_table_properties([("delta.columnMapping.mode", mode)]);
+    }
+    create_builder
+        .build(&engine, Box::new(FileSystemCommitter::new()))
+        .unwrap()
+        .commit(&engine)
+        .unwrap()
+        .unwrap_committed();
+
+    let snapshot = Snapshot::builder_for(table_root).build(&engine).unwrap();
+    let extra_indexed_columns = vec![column_name!("part"), column_name!("other")];
+    let builder = snapshot
+        .scan_builder()
+        .with_stats(StatsOptions::all_struct_with_extra_indexed(
+            extra_indexed_columns,
+        ));
+    let expected = builder
+        .stats_output_schemas()
+        .unwrap()
+        .expect("explicit and extra stats columns should be selected");
+    let scan = builder.build().unwrap();
+
+    assert_eq!(
+        scan.state_info.physical_stats_output_schema(),
+        Some(&expected.physical)
+    );
+    assert_stats_schemas_aligned(&expected.logical, &expected.physical);
+
+    let null_count = stats_struct_field(&expected.logical, NULL_COUNT);
+    assert!(null_count.field("id").is_none());
+    assert!(null_count.field("part").is_none());
+    assert!(null_count.field("other").is_some());
+    let info = stats_struct_field(null_count, "info");
+    assert!(info.field("name").is_some());
+    assert!(info.field("age").is_none());
+}
+
+#[test]
+fn scan_builder_stats_output_schemas_handle_extra_column_shapes() {
+    let table_root = "memory:///expected-stats-schemas-extra-shapes/";
+    let store = Arc::new(InMemory::new());
+    let engine = SyncEngine::new_with_store(store);
+    let schema = schema_ref! {
+        nullable "id": LONG,
+        nullable "info": {
+            nullable "name": STRING,
+            nullable "age": INTEGER,
+        },
+        nullable "entries": { STRING => nullable STRING },
+        nullable "items": [ nullable INTEGER ],
+        nullable "part": STRING,
+    };
+    create_table(table_root, schema, "DefaultEngine", true)
+        .with_data_layout(DataLayout::partitioned(["part"]))
+        .with_table_properties([("delta.dataSkippingNumIndexedCols", "1")])
+        .build(&engine, Box::new(FileSystemCommitter::new()))
+        .unwrap()
+        .commit(&engine)
+        .unwrap()
+        .unwrap_committed();
+
+    let snapshot = Snapshot::builder_for(table_root).build(&engine).unwrap();
+    let schemas = snapshot
+        .scan_builder()
+        .with_stats(StatsOptions::all_struct_with_extra_indexed(vec![
+            column_name!("id"),
+            column_name!("info"),
+            column_name!("entries"),
+            column_name!("items"),
+            column_name!("part"),
+        ]))
+        .stats_output_schemas()
+        .unwrap()
+        .unwrap();
+
+    let null_count = stats_struct_field(&schemas.logical, NULL_COUNT);
+    for name in ["id", "info", "entries", "items"] {
+        assert!(null_count.field(name).is_some(), "missing {name}");
+    }
+    assert!(null_count.field("part").is_none());
+
+    let min_values = stats_struct_field(&schemas.logical, MIN_VALUES);
+    assert!(min_values.field("id").is_some());
+    let info = stats_struct_field(min_values, "info");
+    assert!(info.field("name").is_some());
+    assert!(info.field("age").is_some());
+    assert!(min_values.field("entries").is_none());
+    assert!(min_values.field("items").is_none());
+}
+
+#[test]
+fn scan_builder_stats_output_schemas_validate_selected_columns() {
+    let table_root = "memory:///expected-stats-schemas-selected-columns/";
+    let store = Arc::new(InMemory::new());
+    let engine = SyncEngine::new_with_store(store);
+    let schema = schema_ref! {
+        nullable "info": {
+            nullable "name": STRING,
+            nullable "age": INTEGER,
+        },
+        nullable "part": STRING,
+    };
+    create_table(table_root, schema, "DefaultEngine", true)
+        .with_data_layout(DataLayout::partitioned(["part"]))
+        .build(&engine, Box::new(FileSystemCommitter::new()))
+        .unwrap()
+        .commit(&engine)
+        .unwrap()
+        .unwrap_committed();
+
+    let snapshot = Snapshot::builder_for(table_root).build(&engine).unwrap();
+    let nested = snapshot
+        .clone()
+        .scan_builder()
+        .with_stats(StatsOptions::struct_columns(vec![column_name!(
+            "info.name"
+        )]))
+        .stats_output_schemas()
+        .unwrap()
+        .unwrap();
+    let info = stats_struct_field(stats_struct_field(&nested.logical, MIN_VALUES), "info");
+    assert!(info.field("name").is_some());
+    assert!(info.field("age").is_none());
+
+    let partition_only = snapshot
+        .clone()
+        .scan_builder()
+        .with_stats(StatsOptions::struct_columns(vec![column_name!("part")]));
+    assert!(partition_only.stats_output_schemas().unwrap().is_none());
+    partition_only.build().unwrap();
+
+    let unresolved = snapshot
+        .scan_builder()
+        .with_stats(StatsOptions::struct_columns(vec![column_name!("missing")]));
+    assert!(unresolved.stats_output_schemas().is_err());
+    assert!(unresolved.build().is_err());
+}
+
+#[rstest]
+#[case::no_column_mapping(None)]
+#[case::name_column_mapping(Some("name"))]
+#[case::id_column_mapping(Some("id"))]
+fn scan_builder_stats_output_schemas_follow_struct_columns(
+    #[case] column_mapping_mode: Option<&str>,
+) {
+    let table_root = format!(
+        "memory:///selected-stats-schemas-{}/",
+        column_mapping_mode.unwrap_or("none")
+    );
+    let store = Arc::new(InMemory::new());
+    let engine = SyncEngine::new_with_store(store);
+    let schema = schema_ref! {
+        nullable "id": LONG,
+        nullable "name": STRING,
+    };
+    let mut create_builder = create_table(&table_root, schema, "DefaultEngine", true);
+    if let Some(mode) = column_mapping_mode {
+        create_builder = create_builder.with_table_properties([("delta.columnMapping.mode", mode)]);
+    }
+    create_builder
+        .build(&engine, Box::new(FileSystemCommitter::new()))
+        .unwrap()
+        .commit(&engine)
+        .unwrap()
+        .unwrap_committed();
+
+    let snapshot = Snapshot::builder_for(&table_root).build(&engine).unwrap();
+    let builder = snapshot
+        .scan_builder()
+        .with_predicate(Arc::new(col!("id").gt(lit(400i64))))
+        .with_stats(StatsOptions::struct_columns(vec![column_name!("name")]));
+
+    let schemas = builder
+        .stats_output_schemas()
+        .unwrap()
+        .expect("the requested column should produce structured statistics");
+    let logical_min_values = stats_struct_field(&schemas.logical, MIN_VALUES);
+    assert!(logical_min_values.field("name").is_some());
+    assert!(logical_min_values.field("id").is_none());
+    let physical_min_values = stats_struct_field(&schemas.physical, MIN_VALUES);
+    if column_mapping_mode.is_some() {
+        assert!(physical_min_values
+            .fields()
+            .all(|field| field.name().starts_with("col-")));
+    } else {
+        assert_eq!(physical_min_values, logical_min_values);
+    }
+
+    let scan = builder.build().unwrap();
+    assert_eq!(
+        scan.state_info.physical_stats_output_schema(),
+        Some(&schemas.physical)
+    );
+}
+
+#[rstest]
+#[case::json_only(StatsOptions::json_only())]
+#[case::none(StatsOptions::none())]
+#[case::empty_columns(StatsOptions::struct_columns(Vec::new()))]
+fn scan_builder_stats_output_schemas_returns_none_without_struct_output(
+    #[case] stats: StatsOptions,
+) {
+    let path = std::fs::canonicalize(PathBuf::from("./tests/data/parsed-stats/")).unwrap();
+    let url = url::Url::from_directory_path(path).unwrap();
+    let engine = SyncEngine::new();
+    let builder = Snapshot::builder_for(url)
+        .build(&engine)
+        .unwrap()
+        .scan_builder()
+        .with_stats(stats);
+
+    assert!(builder.stats_output_schemas().unwrap().is_none());
+}
+
 /// A [`ParquetHandler`] that returns an empty iterator for every `read_parquet_files` call.
 /// Used to simulate a buggy connector that drops all data for a file.
 struct EmptyParquetHandler;
@@ -2319,19 +2704,19 @@ impl ParquetHandler for EmptyParquetHandler {
         _files: &[FileMeta],
         _schema: schema::SchemaRef,
         _predicate: Option<PredicateRef>,
-    ) -> DeltaResult<FileDataReadResultIterator> {
+    ) -> KernelResult<FileDataReadResultIterator> {
         Ok(Box::new(std::iter::empty()))
     }
 
-    fn read_parquet_footer(&self, _file: &FileMeta) -> DeltaResult<ParquetFooter> {
+    fn read_parquet_footer(&self, _file: &FileMeta) -> KernelResult<ParquetFooter> {
         unimplemented!()
     }
 
     fn write_parquet_file(
         &self,
         _location: url::Url,
-        _data: DeltaResultIteratorStatic<Box<dyn EngineData>>,
-    ) -> DeltaResult<FileSize> {
+        _data: KernelResultIteratorStatic<Box<dyn EngineData>>,
+    ) -> KernelResult<FileSize> {
         unimplemented!()
     }
 }
