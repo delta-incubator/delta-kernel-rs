@@ -239,10 +239,7 @@ impl<Location: AsUrl> ParsedLogPath<Location> {
 
         // Every valid log path has a file extension as its last part. Return None if it's missing.
         let split: Vec<_> = split.collect();
-        let extension = match split.last() {
-            Some(extension) => extension.to_string(),
-            None => return None,
-        };
+        let extension = split.last()?.to_string();
 
         // this check determines if we're in the delta log dir, or in the staged commits dir. The
         // check is:
