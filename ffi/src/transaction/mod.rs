@@ -171,6 +171,7 @@ mod tests {
     use crate::schema_visitor::visit_field_geometry;
     use crate::schema_visitor::{
         visit_field_integer, visit_field_long, visit_field_string, visit_field_struct,
+        EngineMetadata,
     };
     use crate::{
         free_engine, free_schema, free_snapshot, kernel_bytes_slice, kernel_string_slice,
@@ -1988,6 +1989,15 @@ mod tests {
         Ok(())
     }
 
+    extern "C" fn visit_test_field_metadata(
+        metadata: *mut c_void,
+        state: &mut crate::scan::CMetadataMap,
+    ) -> bool {
+        let values = unsafe { &*metadata.cast::<HashMap<String, MetadataValue>>() };
+        *state = values.clone().into();
+        true
+    }
+
     /// Schema visitor callback for tests: encodes the schema stored in the `schema` pointer
     /// (which points to a `Vec<StructField>`) into the kernel's `KernelSchemaVisitorState`.
     /// Only supports primitive fields (no nested structs/arrays/maps) -- sufficient for tests.
@@ -2001,27 +2011,32 @@ mod tests {
             .map(|field| {
                 let name = field.name.as_str();
                 let nullable = field.nullable;
+                let metadata = EngineMetadata {
+                    metadata: field.metadata() as *const HashMap<String, MetadataValue>
+                        as *mut c_void,
+                    visitor: visit_test_field_metadata,
+                };
                 unsafe {
                     ok_or_panic(match field.data_type {
                         DataType::INTEGER => visit_field_integer(
                             state,
                             kernel_string_slice!(name),
                             nullable,
-                            std::ptr::null(),
+                            &metadata,
                             allocate_err,
                         ),
                         DataType::STRING => visit_field_string(
                             state,
                             kernel_string_slice!(name),
                             nullable,
-                            std::ptr::null(),
+                            &metadata,
                             allocate_err,
                         ),
                         DataType::LONG => visit_field_long(
                             state,
                             kernel_string_slice!(name),
                             nullable,
-                            std::ptr::null(),
+                            &metadata,
                             allocate_err,
                         ),
                         _ => panic!("Unsupported test field type: {:?}", field.data_type),
@@ -2792,6 +2807,69 @@ mod tests {
             free_snapshot(snapshot);
             free_engine(engine);
         }
+        Ok(())
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn complete_schema_ffi_preserves_metadata_and_consumes_on_decode_error(
+        #[values(false, true)] invalid: bool,
+    ) -> KernelResult<()> {
+        let (store, test_engine, table_url) =
+            test_utils::engine_store_setup("complete_schema_ffi", None);
+        let snapshot = delta_kernel::transaction::create_table::create_table(
+            table_url.as_str(),
+            schema_ref! { nullable "id": INTEGER },
+            "test",
+            false,
+        )
+        .with_table_properties([("delta.columnMapping.mode", "name")])
+        .build(&test_engine, Box::new(FileSystemCommitter::new()))?
+        .commit(&test_engine)?
+        .unwrap_post_commit_snapshot();
+        let mut field = snapshot.schema().field("id").unwrap().clone();
+        field.metadata.insert(
+            "comment".into(),
+            MetadataValue::String("retained metadata".into()),
+        );
+        let fields = vec![field];
+        let schema = EngineSchema {
+            schema: &fields as *const Vec<StructField> as *mut c_void,
+            visitor: if invalid {
+                visit_invalid_schema_not_struct
+            } else {
+                visit_test_schema
+            },
+        };
+        let engine = engine_handle_for_store(store);
+        let builder: Handle<ExclusiveUpdateTableTransactionBuilder> = Box::new(
+            snapshot
+                .clone()
+                .update_table(UpdateTableOperation::AlterTable, "test", false),
+        )
+        .into();
+        let result = unsafe {
+            update_table_txn_builder_with_updated_schema(builder, &schema, engine.shallow_copy())
+        };
+        if invalid {
+            assert_extern_result_error_contains(
+                result,
+                FFIKernelError::SchemaError,
+                "Final returned id was not a struct",
+            );
+        } else {
+            let transaction = ok_or_panic(unsafe {
+                update_table_txn_builder_build(ok_or_panic(result), engine.shallow_copy())
+            });
+            let committed =
+                ok_or_panic(unsafe { update_table_txn_commit(transaction, engine.shallow_copy()) });
+            assert_eq!(unsafe { version_and_free(committed) }, 1);
+            let fresh =
+                delta_kernel::Snapshot::builder_for(table_url.as_str()).build(&test_engine)?;
+            assert_eq!(fresh.schema().field("id").unwrap(), &fields[0]);
+        }
+        assert_eq!(Arc::strong_count(&snapshot), 1);
+        unsafe { free_engine(engine) };
         Ok(())
     }
 

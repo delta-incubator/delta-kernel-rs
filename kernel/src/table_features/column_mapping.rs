@@ -623,8 +623,8 @@ fn assign_nested_cm_ids(schema: &StructType, max_id: &mut i64) -> KernelResult<S
             DataType::Struct(inner) => Ok(DataType::from(assign_nested_cm_ids(inner, max_id)?)),
             DataType::Array(array_type) => {
                 let element_path = format!("{path}.element");
-                *max_id += 1;
-                nested_ids.insert(element_path.clone(), serde_json::Value::from(*max_id));
+                let id = next_column_mapping_id(max_id)?;
+                nested_ids.insert(element_path.clone(), serde_json::Value::from(id));
                 let new_element =
                     walk(array_type.element_type(), max_id, &element_path, nested_ids)?;
                 Ok(DataType::from(ArrayType::new(
@@ -635,11 +635,11 @@ fn assign_nested_cm_ids(schema: &StructType, max_id: &mut i64) -> KernelResult<S
             DataType::Map(map_type) => {
                 let key_path = format!("{path}.key");
                 let value_path = format!("{path}.value");
-                *max_id += 1;
-                nested_ids.insert(key_path.clone(), serde_json::Value::from(*max_id));
+                let id = next_column_mapping_id(max_id)?;
+                nested_ids.insert(key_path.clone(), serde_json::Value::from(id));
                 let new_key = walk(map_type.key_type(), max_id, &key_path, nested_ids)?;
-                *max_id += 1;
-                nested_ids.insert(value_path.clone(), serde_json::Value::from(*max_id));
+                let id = next_column_mapping_id(max_id)?;
+                nested_ids.insert(value_path.clone(), serde_json::Value::from(id));
                 let new_value = walk(map_type.value_type(), max_id, &value_path, nested_ids)?;
                 Ok(DataType::from(MapType::new(
                     new_key,
@@ -1798,6 +1798,28 @@ mod tests {
             err.contains(violation_kind) && err.contains(key),
             "Expected '{violation_kind}' and '{key}' in error, got: {err}",
         );
+    }
+
+    #[rstest::rstest]
+    #[case::array(ArrayType::new(DataType::INTEGER, true).into(), 0)]
+    #[case::map_key(MapType::new(DataType::STRING, DataType::INTEGER, true).into(), 0)]
+    #[case::map_value(MapType::new(DataType::STRING, DataType::INTEGER, true).into(), 1)]
+    fn nested_mapping_id_allocation_rejects_protocol_overflow(
+        #[case] data_type: DataType,
+        #[case] remaining_ids: i64,
+    ) {
+        let id = i64::from(i32::MAX) - remaining_ids;
+        let field = StructField::nullable("a", data_type).add_metadata([(
+            ColumnMetadataKey::ColumnMappingId.as_ref(),
+            MetadataValue::Number(id),
+        )]);
+        let mut max_id = id;
+        let error =
+            assign_column_mapping_metadata(&schema! { (field) }, &mut max_id, true).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("Cannot allocate column mapping id"));
+        assert_eq!(max_id, i64::from(i32::MAX));
     }
 
     /// `next_column_mapping_id` must reject `i64` overflow rather than wrapping to a negative

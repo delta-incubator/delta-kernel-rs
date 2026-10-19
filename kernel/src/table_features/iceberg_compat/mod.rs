@@ -226,7 +226,7 @@ struct TypeChange {
 /// The widenings legal under Iceberg V2, and therefore under `icebergCompatV1`/`V2`.
 /// `icebergCompatV3` currently also permits exactly this set; if V3 ever allows additional
 /// widenings those must be added separately, not by expanding this list.
-fn is_iceberg_allowed_type_change(from: &DataType, to: &DataType) -> bool {
+pub(crate) fn is_iceberg_allowed_type_change(from: &DataType, to: &DataType) -> bool {
     match (from, to) {
         (DataType::Primitive(Byte), DataType::Primitive(Short | Integer | Long)) => true,
         (DataType::Primitive(Short), DataType::Primitive(Integer | Long)) => true,
