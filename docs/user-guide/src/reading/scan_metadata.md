@@ -249,9 +249,9 @@ If the scan has no predicate, this returns `None`.
 ## Typed partition values
 
 Kernel reads each file's partition values from the Delta log and exposes them on its
-`ScanFile` as a raw string map. `transform_to_logical` materializes them as typed columns. A
-connector that assembles output rows itself instead of using that transform would otherwise need
-to parse the string map per file.
+`ScanFile` as a raw string map. Kernel's `transform_to_logical` could materialize them as
+typed columns. If your connector assembles output rows itself instead of using that transform,
+it parses the string map per file.
 
 To have Kernel hand you the typed values directly, opt in with `with_partition_values`:
 
@@ -270,10 +270,7 @@ To have Kernel hand you the typed values directly, opt in with `with_partition_v
 # let snapshot = Snapshot::builder_for(url).build(&engine)?;
 let scan = snapshot
     .scan_builder()
-    .with_partition_values(
-        PartitionValuesOptions::with_struct()
-            .with_timestamp_timezone("America/Los_Angeles"),
-    )
+    .with_partition_values(PartitionValuesOptions::with_struct())
     .build()?;
 # Ok(())
 # }
@@ -281,23 +278,23 @@ let scan = snapshot
 
 Scan metadata output then gains a top-level `partitionValues_parsed` column with one typed,
 nullable field per partition column (by physical name). You read it as a typed column instead
-of parsing the string map per file. The raw string map is still present, so this option only
-adds the typed column.
+of parsing the string map per file. The raw string map is still present.
 
 By default, offset-less `TIMESTAMP` partition strings are interpreted in UTC. Use
-`with_timestamp_timezone` with a recognized IANA timezone or a normalized `+HH:MM` or `-HH:MM`
-fixed offset when the reader uses another timezone. An explicit offset in a partition value takes
-precedence. This setting affects typed `scan_metadata` output, partition predicate evaluation after
-log replay. Partition-column row transforms used by `Scan::execute` retain UTC parsing. Native
-checkpoint pruning remains enabled for timezone-independent fields but defers configured-timezone
-`TIMESTAMP` predicates until after reparsing. Incremental scans expose the raw partition-value map.
+`PartitionValuesOptions::with_timestamp_timezone` with a recognized IANA timezone or a normalized
+`+HH:MM` or `-HH:MM` fixed offset to interpret offset-less partition values in another timezone.
+An explicit offset in a partition value takes precedence. This setting affects both partition
+pruning and returned parsed partition values. Kernel doesn't support row transforms with a specified
+timezone, so `PartitionValuesOptions::with_timestamp_timezone` omits per-file row transforms.
+As a result, `Scan::execute` returns an error when you set this option.
+`Scan::parallel_scan_metadata` and `Scan::declarative_metadata_scan_plan` also return errors with this
+option. You can use `scan_metadata` and reconstruct logical rows in your connector.
 `TIMESTAMP_NTZ` remains timezone-independent. For daylight-saving transitions, ambiguous local times
 use the earlier instant, and nonexistent local times use the offset from before the transition.
 
 > [!TIP]
-> Kernel reparses surviving commit and checkpoint rows from the raw map for typed output and final
-> predicate evaluation. Checkpoint footer pruning happens first, but it does not evaluate zoned
-> `TIMESTAMP` partition predicates against native values when a timezone is configured.
+> When the checkpoint already stores typed partition values, Kernel reads that column directly
+> and skips parsing entirely.
 
 ## Cancelling a scan
 

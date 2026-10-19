@@ -30,7 +30,6 @@ use crate::log_segment_files::LogSegmentFiles;
 use crate::metrics::events::emit_scan_metadata_completed;
 use crate::metrics::{MetricId, ScanType};
 use crate::parallel::sequential_phase::SequentialPhase;
-use crate::partition_values::TimestampTimezone;
 #[cfg(feature = "declarative-plans")]
 use crate::plans::ir::plan::Plan;
 use crate::scan::log_replay::{
@@ -345,12 +344,13 @@ impl StatsOptions {
 /// When the typed struct is requested, scan metadata output gains a top-level
 /// `partitionValues_parsed` struct column with one typed nullable field per partition column
 /// (physical names, table partition-column order). On non-partitioned tables the column is
-/// omitted. Values are parsed from the canonical string map for both commits and checkpoints.
+/// omitted. Values come directly from the checkpoint's native `partitionValues_parsed` column
+/// when present, otherwise from parsing the string map.
 #[derive(Clone, Debug, Default)]
 pub struct PartitionValuesOptions {
     /// Whether to emit the typed `partitionValues_parsed` struct column.
     pub(crate) parsed_struct: bool,
-    /// Reader timezone used to interpret offset-less zoned timestamp partition strings.
+    /// Timezone used to interpret offset-less `TIMESTAMP` partition strings.
     pub(crate) timestamp_timezone: Option<String>,
 }
 
@@ -369,17 +369,22 @@ impl PartitionValuesOptions {
         }
     }
 
-    /// Interpret offset-less zoned `TIMESTAMP` partition strings in `timestamp_timezone`.
+    /// Interpret offset-less `TIMESTAMP` values in `add.partitionValues` using
+    /// `timestamp_timezone` when no compatible `add.partitionValues_parsed` exists.
     ///
-    /// `timestamp_timezone` must be an IANA time zone identifier recognized by Kernel or a
+    /// `timestamp_timezone` must be an IANA timezone identifier recognized by Kernel or a
     /// normalized fixed offset in `+HH:MM` or `-HH:MM` form. An explicit offset in a partition
-    /// value takes precedence. This option does not affect `TIMESTAMP_NTZ`. It applies to typed
-    /// scan metadata and final partition predicate evaluation. Partition-column row transforms
-    /// used by [`Scan::execute`] retain UTC parsing. Native checkpoint pruning remains enabled for
-    /// timezone-independent fields but defers zoned `TIMESTAMP` predicates until after reparsing.
-    /// Incremental scans continue to expose the raw partition-value map. Without this option,
-    /// Kernel interprets offset-less timestamps as UTC. Invalid values are reported when the scan
-    /// is built.
+    /// value takes precedence. This option applies to both partition pruning and returned parsed
+    /// partition values. It does not affect `TIMESTAMP_NTZ`.
+    ///
+    /// For example, if a `TIMESTAMP` partition column `ts` has
+    /// `add.partitionValues["ts"] = "2024-01-15 12:30:45"`, setting `timestamp_timezone` to
+    /// `"America/Los_Angeles"` (UTC-08:00 on that date) interprets it as `2024-01-15T20:30:45Z`.
+    ///
+    /// Kernel does not support setting a timezone for row transforms, so this option omits them
+    /// as if [`ScanBuilder::without_row_transforms`] were set. Without this option, Kernel
+    /// interprets offset-less timestamps as UTC. Invalid timezones are reported when partition
+    /// values are parsed.
     pub fn with_timestamp_timezone(mut self, timestamp_timezone: impl Into<String>) -> Self {
         self.timestamp_timezone = Some(timestamp_timezone.into());
         self
@@ -559,10 +564,6 @@ impl ScanBuilder {
     /// perform actual data reads.
     #[tracing::instrument(name = "scan_builder.build", skip_all, fields(enable_call_frame), err)]
     pub fn build(self) -> KernelResult<Scan> {
-        if let Some(timestamp_timezone) = self.partition_values.timestamp_timezone.as_deref() {
-            timestamp_timezone.parse::<TimestampTimezone>()?;
-        }
-
         // Predicates may reference columns outside self.logical_read_schema, so resolve against the
         // full table schema
         let table_schema = self.snapshot.schema();
@@ -598,7 +599,8 @@ impl ScanBuilder {
 
         // Retain the transform spec but skip building per-file expressions, which also skips the
         // per-row partition-value parse done only to build them.
-        state_info.skip_row_transforms = self.without_row_transforms;
+        state_info.skip_row_transforms =
+            self.without_row_transforms || self.partition_values.timestamp_timezone.is_some();
 
         let commits_since_checkpoint = self.snapshot.log_segment().commits_since_checkpoint();
         if self.snapshot.skipped_new_checkpoints() && commits_since_checkpoint > 0 {
@@ -1259,7 +1261,8 @@ impl Scan {
     ///
     /// # Errors
     ///
-    /// Returns an error if the engine provides no [`PlanExecutor`](crate::plans::PlanExecutor),
+    /// Returns an error if [`PartitionValuesOptions::with_timestamp_timezone`] was set,
+    /// if the engine provides no [`PlanExecutor`](crate::plans::PlanExecutor),
     /// or if log discovery, checkpoint inspection, or plan construction fails.
     #[tracing::instrument(
         name = "scan.declarative_metadata_scan_plan",
@@ -1271,6 +1274,14 @@ impl Scan {
         &self,
         engine: &dyn Engine,
     ) -> KernelResult<Option<Plan>> {
+        // TODO(#3609): Support session timezone in declarative metadata scans.
+        require!(
+            self.partition_values.timestamp_timezone.is_none(),
+            KernelError::unsupported(
+                "Kernel does not yet support with_timestamp_timezone in \
+                 declarative_metadata_scan_plan; use scan_metadata instead"
+            )
+        );
         // Resolve the checkpoint shape once. Retain the leaf schema only when parsed metadata is
         // needed for output or pruning.
         let plan_executor = engine.require_plan_executor()?;
@@ -1346,13 +1357,6 @@ impl Scan {
         let mut floating_partition_columns = HashSet::new();
         if let Some(schema) = self.state_info.physical_partition_schema.as_ref() {
             for field in schema.fields() {
-                // Native checkpoint values may encode a different instant than reader-timezone
-                // parsing, so they cannot safely prune zoned timestamp partitions.
-                if self.partition_values.timestamp_timezone.is_some()
-                    && field.data_type() == &DataType::TIMESTAMP
-                {
-                    continue;
-                }
                 let column = ColumnName::new([field.name()]);
                 if field.data_type() == &DataType::FLOAT || field.data_type() == &DataType::DOUBLE {
                     floating_partition_columns.insert(column.clone());
@@ -1383,6 +1387,10 @@ impl Scan {
     /// Cancellation is not supported on this path: it errors if a token was set via
     /// [`ScanBuilder::with_cancellation_token`], rather than silently running to completion.
     /// Only [`scan_metadata`](Self::scan_metadata) honors the token today.
+    ///
+    /// Returns an error if [`PartitionValuesOptions::with_timestamp_timezone`] was set,
+    /// since parallel scan metadata does not currently support timestamp timezone.
+    /// Use [`scan_metadata`](Self::scan_metadata) for scans with a timestamp timezone.
     ///
     /// # Example
     ///
@@ -1446,6 +1454,14 @@ impl Scan {
                  use scan_metadata for a cancellable scan",
             ));
         }
+        // TODO(#3609): Support session timezone in parallel metadata scans.
+        require!(
+            self.partition_values.timestamp_timezone.is_none(),
+            KernelError::unsupported(
+                "Kernel does not yet support with_timestamp_timezone in parallel_scan_metadata; \
+                 use scan_metadata"
+            )
+        );
         // For the sequential/parallel phase approach, we use a conservative checkpoint_info
         // since SequentialPhase reads checkpoints via CheckpointManifestReader which doesn't
         // currently support stats_parsed optimization.
@@ -1484,8 +1500,10 @@ impl Scan {
     /// final table data. Generally connectors/engines will want to use [`Scan::scan_metadata`] so
     /// they can have more control over the execution of the scan.
     ///
-    /// Returns an error if the scan was built with [`ScanBuilder::without_row_transforms`]; use
-    /// [`Scan::scan_metadata`] instead.
+    /// Returns an error if row transforms were disabled through
+    /// [`ScanBuilder::without_row_transforms`] or
+    /// [`PartitionValuesOptions::with_timestamp_timezone`]; use [`Scan::scan_metadata`]
+    /// instead.
     // This calls [`Scan::scan_metadata`] to get an iterator of `ScanMetadata` actions for the scan,
     // and then uses the `engine`'s [`crate::ParquetHandler`] to read the actual table data.
     pub fn execute(
@@ -1494,9 +1512,9 @@ impl Scan {
     ) -> KernelResult<impl Iterator<Item = KernelResult<Box<dyn EngineData>>>> {
         if self.state_info.skip_row_transforms {
             return Err(KernelError::unsupported(
-                "Scan::execute is not supported when the scan was built with \
-                 without_row_transforms; use scan_metadata for listing and read data with your \
-                 own reader",
+                "Scan::execute is not supported when row transforms are disabled by \
+                 without_row_transforms or with_timestamp_timezone; use scan_metadata for listing \
+                 and read data with your own reader",
             ));
         }
 
