@@ -399,26 +399,21 @@ pub(crate) struct ManifestInfo {
     #[field_id = 521]
     pub(crate) format_version: i32,
 
-    /// Positions in the referenced leaf manifest that are not live, or `None` when every position
-    /// is live. Encoded as a [Mumbling bitmap](https://iceberg.apache.org/mumbling-spec/).
-    #[field_id = 522]
-    pub(crate) dv: Option<Bytes>,
-
     /// Number of entries with ADDED status in the manifest.
     #[field_id = 504]
     pub(crate) added_files_count: i32,
     /// Number of entries with EXISTING status in the manifest.
     #[field_id = 505]
     pub(crate) existing_files_count: i32,
-    /// Number of entries with MODIFIED status in the manifest.
-    #[field_id = 525]
-    pub(crate) modified_files_count: i32,
     /// Number of entries with DELETED status in the manifest.
     #[field_id = 506]
     pub(crate) deleted_files_count: i32,
     /// Number of entries with REPLACED status in the manifest.
     #[field_id = 523]
     pub(crate) replaced_files_count: i32,
+    /// Number of entries with MODIFIED status in the manifest.
+    #[field_id = 525]
+    pub(crate) modified_files_count: i32,
 
     /// Total row count across all ADDED entries in the manifest.
     #[field_id = 512]
@@ -426,19 +421,24 @@ pub(crate) struct ManifestInfo {
     /// Total row count across all EXISTING entries in the manifest.
     #[field_id = 513]
     pub(crate) existing_rows_count: i64,
-    /// Total row count across all MODIFIED entries in the manifest.
-    #[field_id = 526]
-    pub(crate) modified_rows_count: i64,
     /// Total row count across all DELETED entries in the manifest.
     #[field_id = 514]
     pub(crate) deleted_rows_count: i64,
     /// Total row count across all REPLACED entries in the manifest.
     #[field_id = 524]
     pub(crate) replaced_rows_count: i64,
+    /// Total row count across all MODIFIED entries in the manifest.
+    #[field_id = 526]
+    pub(crate) modified_rows_count: i64,
 
     /// Minimum data sequence number of all live entries in the manifest.
     #[field_id = 516]
     pub(crate) min_sequence_number: i64,
+
+    /// Positions in the referenced leaf manifest that are not live, or `None` when every position
+    /// is live. Encoded as a [Mumbling bitmap](https://iceberg.apache.org/mumbling-spec/).
+    #[field_id = 522]
+    pub(crate) dv: Option<Bytes>,
 }
 
 // === Helpers ===
@@ -574,18 +574,18 @@ mod tests {
     ])]
     #[case::manifest_info(ManifestInfo::to_schema(), &[
         (FORMAT_VERSION, Some(521), false),
-        ("dv", Some(522), true),
         ("addedFilesCount", Some(504), false),
         ("existingFilesCount", Some(505), false),
-        ("modifiedFilesCount", Some(525), false),
         ("deletedFilesCount", Some(506), false),
         ("replacedFilesCount", Some(523), false),
+        ("modifiedFilesCount", Some(525), false),
         ("addedRowsCount", Some(512), false),
         ("existingRowsCount", Some(513), false),
-        ("modifiedRowsCount", Some(526), false),
         ("deletedRowsCount", Some(514), false),
         ("replacedRowsCount", Some(524), false),
+        ("modifiedRowsCount", Some(526), false),
         ("minSequenceNumber", Some(516), false),
+        ("dv", Some(522), true),
     ])]
     #[case::column_file(ColumnFile::to_schema(), &[
         (LOCATION, Some(160), false),
