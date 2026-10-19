@@ -499,7 +499,6 @@ impl Snapshot {
 
     /// Returns statistics for this snapshot's selected replay commit files without I/O.
     ///
-    /// Uses retained file metadata regardless of whether replay has run or a CRC is available.
     /// Returns zero counts and bytes when a checkpoint covers the entire snapshot.
     ///
     /// # Errors
