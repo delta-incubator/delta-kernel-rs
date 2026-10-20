@@ -151,6 +151,8 @@ pub mod tokio {
             // We cannot call `tokio::runtime::Runtime::block_on` here because
             // it panics if called within an async context. So instead we spawn
             // the future on the runtime and send the result back using a channel.
+            #[cfg(feature = "context-alloc-tracking")]
+            let task = delta_kernel_memory_tracking::Tracked::capture(task);
             let (sender, receiver) = channel::<T::Output>();
 
             let fut = Box::pin(async move {
@@ -171,6 +173,8 @@ pub mod tokio {
         where
             F: Future<Output = ()> + Send + 'static,
         {
+            #[cfg(feature = "context-alloc-tracking")]
+            let task = delta_kernel_memory_tracking::Tracked::capture(task);
             self.send_future(Box::pin(task));
         }
 
@@ -179,6 +183,14 @@ pub mod tokio {
             T: FnOnce() -> R + Send + 'static,
             R: Send + 'static,
         {
+            #[cfg(feature = "context-alloc-tracking")]
+            let task = {
+                let context = delta_kernel_memory_tracking::capture();
+                move || {
+                    let _scope = delta_kernel_memory_tracking::Scope::enter(context);
+                    task()
+                }
+            };
             Box::pin(tokio::task::spawn_blocking(task).map_err(KernelError::join_failure))
         }
 
@@ -261,6 +273,8 @@ pub mod tokio {
             // We cannot call `tokio::runtime::Runtime::block_on` here because
             // it panics if called within an async context. So instead we spawn
             // the future on the runtime and send the result back using a channel.
+            #[cfg(feature = "context-alloc-tracking")]
+            let task = delta_kernel_memory_tracking::Tracked::capture(task);
             let (sender, receiver) = channel::<T::Output>();
 
             let fut = Box::pin(async move {
@@ -296,6 +310,8 @@ pub mod tokio {
         where
             F: Future<Output = ()> + Send + 'static,
         {
+            #[cfg(feature = "context-alloc-tracking")]
+            let task = delta_kernel_memory_tracking::Tracked::capture(task);
             self.handle.spawn(task);
         }
 
@@ -304,6 +320,14 @@ pub mod tokio {
             T: FnOnce() -> R + Send + 'static,
             R: Send + 'static,
         {
+            #[cfg(feature = "context-alloc-tracking")]
+            let task = {
+                let context = delta_kernel_memory_tracking::capture();
+                move || {
+                    let _scope = delta_kernel_memory_tracking::Scope::enter(context);
+                    task()
+                }
+            };
             Box::pin(tokio::task::spawn_blocking(task).map_err(KernelError::join_failure))
         }
 
@@ -336,6 +360,46 @@ pub mod tokio {
             });
             let result = receiver.recv().unwrap();
             assert_eq!(result, 4);
+        }
+
+        #[cfg(feature = "context-alloc-tracking")]
+        #[rstest::rstest]
+        #[case::background(TokioBackgroundExecutor::new())]
+        #[case::multithreaded(
+            TokioMultiThreadExecutor::new_owned_runtime(Some(2), Some(2)).unwrap()
+        )]
+        fn context_follows_block_on_spawn_and_blocking_work<T: TaskExecutor>(#[case] executor: T) {
+            let context = delta_kernel_memory_tracking::Context::new(71, None);
+            let _scope = context.enter();
+            let id = executor.block_on(async {
+                tokio::task::yield_now().await;
+                delta_kernel_memory_tracking::capture()
+                    .unwrap()
+                    .snapshot()
+                    .id
+            });
+            assert_eq!(id, 71);
+            let (sender, receiver) = channel();
+            executor.spawn(async move {
+                tokio::task::yield_now().await;
+                sender
+                    .send(
+                        delta_kernel_memory_tracking::capture()
+                            .unwrap()
+                            .snapshot()
+                            .id,
+                    )
+                    .unwrap();
+            });
+            assert_eq!(receiver.recv().unwrap(), 71);
+            let _runtime = executor.enter();
+            let task = executor.spawn_blocking(|| {
+                delta_kernel_memory_tracking::capture()
+                    .unwrap()
+                    .snapshot()
+                    .id
+            });
+            assert_eq!(futures::executor::block_on(task).unwrap(), 71);
         }
 
         #[tokio::test]

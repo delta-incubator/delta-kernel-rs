@@ -1,0 +1,11 @@
+mode,repeat,elapsed_ns,live_after_scan,peak_bytes,allocated_bytes,allocations,live_after_drop,tracking_bytes,retained_after_shutdown,final_peak
+system,1,46828746,0,0,0,0,0,0,0,0
+system,2,44570722,0,0,0,0,0,0,0,0
+system,3,44204558,0,0,0,0,0,0,0,0
+system,4,46616527,0,0,0,0,0,0,0,0
+system,5,42782832,0,0,0,0,0,0,0,0
+system,6,43996865,0,0,0,0,0,0,0,0
+system,7,44405313,0,0,0,0,0,0,0,0
+system,8,41721545,0,0,0,0,0,0,0,0
+system,9,44827631,0,0,0,0,0,0,0,0
+system,10,42981129,0,0,0,0,0,0,0,0

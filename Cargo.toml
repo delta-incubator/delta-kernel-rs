@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "memory-tracking",
     "acceptance",
     "benchmarks",
     "default-engine",

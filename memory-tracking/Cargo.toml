@@ -1,0 +1,27 @@
+[package]
+name = "delta_kernel_memory_tracking"
+description = "Experimental context attribution for native allocation diagnostics"
+edition.workspace = true
+homepage.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+version.workspace = true
+rust-version.workspace = true
+
+[package.metadata.release]
+release = false
+
+[dependencies]
+
+[features]
+default = ["process-totals"]
+# Shared process counters for metrics; can be disabled to isolate their benchmark cost.
+process-totals = []
+
+[dev-dependencies]
+peak_alloc = "0.3.0"
+
+[[bench]]
+name = "allocation_tracking"
+harness = false
