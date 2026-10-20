@@ -80,9 +80,9 @@ static REQUIRED_NON_NULL_COLUMNS: LazyLock<ColumnNamesAndTypes> = LazyLock::new(
 /// (one `Data` entry per input row), suitable for serializing as an AMT root manifest.
 ///
 /// Each input row is a newly added file, producing an [`TrackingStatus::Added`] `Data` entry
-/// (`fileFormat` parquet, `formatVersion` 4, `specId` 0 -- unpartitioned tables only). Both
-/// `sequenceNumber` and `fileSequenceNumber` take the input `defaultRowCommitVersion`; remaining
-/// entry fields are null, and statistics and partition values are omitted from the output schema.
+/// (`fileFormat` parquet, `specId` 0 -- unpartitioned tables only). Both `sequenceNumber` and
+/// `fileSequenceNumber` take the input `defaultRowCommitVersion`; remaining entry fields are null,
+/// and statistics and partition values are omitted from the output schema.
 ///
 /// This path is only valid for AMT tables, which always have row tracking enabled, so every input
 /// row carries an assigned `baseRowId` and `defaultRowCommitVersion`.
