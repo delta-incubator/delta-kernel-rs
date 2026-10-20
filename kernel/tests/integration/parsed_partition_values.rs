@@ -30,7 +30,8 @@ use test_utils::table_builder::{
 };
 use test_utils::{
     add_commit, assert_result_error_with_message, create_default_engine_mt_executor, get_column,
-    install_thread_local_metrics_reporter, test_context, test_table_setup_mt, CountingReporter,
+    install_thread_local_metrics_reporter, load_test_data, test_context, test_table_setup_mt,
+    CountingReporter,
 };
 use url::Url;
 
@@ -578,103 +579,102 @@ async fn offset_less_timestamp_partition_predicates_with_json_and_checkpoint(
     #[case] expected_files_and_timestamps: &[(&str, &str)],
     #[case] write_parsed_partition: bool,
     #[values(false, true)] parsed_struct_on_scan: bool,
+    #[values("none", "id", "name")] cm_mode: &str,
 ) {
-    for cm_mode in ["none", "id", "name"] {
-        let (_temp_dir, table_path, engine) = test_table_setup_mt().unwrap();
-        let snapshot = create_timestamp_partition_table_with_parsed_partition(
-            &table_path,
-            engine.as_ref(),
-            cm_mode,
-            write_parsed_partition,
-        );
+    let (_temp_dir, table_path, engine) = test_table_setup_mt().unwrap();
+    let snapshot = create_timestamp_partition_table_with_parsed_partition(
+        &table_path,
+        engine.as_ref(),
+        cm_mode,
+        write_parsed_partition,
+    );
 
-        insert_raw_timestamp_partitions(
-            &snapshot,
-            &[
-                TimestampPartitionFile {
-                    filename: "offset-less-in-checkpoint.parquet",
-                    timestamp: "2024-01-15 12:30:45.123456",
-                },
-                TimestampPartitionFile {
-                    filename: "utc-in-checkpoint.parquet",
-                    timestamp: "2024-01-15T18:30:45.123456Z",
-                },
-            ],
-        )
-        .await;
-        let snapshot = Snapshot::builder_for(&table_path)
-            .build(engine.as_ref())
-            .unwrap();
-        snapshot.checkpoint(engine.as_ref(), None).unwrap();
+    insert_raw_timestamp_partitions(
+        &snapshot,
+        &[
+            TimestampPartitionFile {
+                filename: "offset-less-in-checkpoint.parquet",
+                timestamp: "2024-01-15 12:30:45.123456",
+            },
+            TimestampPartitionFile {
+                filename: "utc-in-checkpoint.parquet",
+                timestamp: "2024-01-15T18:30:45.123456Z",
+            },
+        ],
+    )
+    .await;
+    let snapshot = Snapshot::builder_for(&table_path)
+        .build(engine.as_ref())
+        .unwrap();
+    snapshot.checkpoint(engine.as_ref(), None).unwrap();
 
-        insert_raw_timestamp_partitions(
-            &snapshot,
-            &[
-                TimestampPartitionFile {
-                    filename: "offset-less-in-json.parquet",
-                    timestamp: "2024-01-15 12:30:45.123456",
-                },
-                TimestampPartitionFile {
-                    filename: "utc-in-json.parquet",
-                    timestamp: "2024-01-15T18:30:45.123456Z",
-                },
-            ],
-        )
-        .await;
-        let snapshot = Snapshot::builder_for(&table_path)
-            .build(engine.as_ref())
-            .unwrap();
-        let physical_names = physical_timestamp_partition_names(&snapshot);
-        let mut options = if parsed_struct_on_scan {
-            PartitionValuesOptions::with_struct()
-        } else {
-            PartitionValuesOptions::string_map_only()
-        };
-        if let Some(tz) = tz {
-            options = options.with_timestamp_timezone(tz);
-        }
-        let scan = snapshot
-            .scan_builder()
-            .with_predicate(Arc::new(predicate.clone()))
-            .with_partition_values(options)
-            .build()
-            .unwrap();
-
-        let mut actual = Vec::new();
-        for metadata in scan.scan_metadata(engine.as_ref()).unwrap() {
-            let (data, selection) = metadata.unwrap().scan_files.into_parts();
-            let batch: RecordBatch = ArrowEngineData::try_from_engine_data(data).unwrap().into();
-            let batch = filter_record_batch(&batch, &BooleanArray::from(selection)).unwrap();
-            let paths = get_column!(batch, "path", StringArray);
-            let timestamps = parsed_struct_on_scan.then(|| {
-                let parsed = get_column!(batch, "partitionValues_parsed", StructArray);
-                get_column!(parsed, &physical_names[0], TimestampMicrosecondArray)
-            });
-            for row in 0..batch.num_rows() {
-                actual.push((
-                    paths.value(row).to_string(),
-                    timestamps.map(|timestamps| {
-                        assert!(!timestamps.is_null(row));
-                        timestamps.value(row)
-                    }),
-                ));
-            }
-        }
-        actual.sort();
-        let expected: Vec<_> = expected_files_and_timestamps
-            .iter()
-            .map(|(path, timestamp)| {
-                (
-                    path.to_string(),
-                    parsed_struct_on_scan.then(|| timestamp_micros(timestamp)),
-                )
-            })
-            .collect();
-        assert_eq!(
-            actual, expected,
-            "tz={tz:?}, cm={cm_mode}, parsed={parsed_struct_on_scan}"
-        );
+    insert_raw_timestamp_partitions(
+        &snapshot,
+        &[
+            TimestampPartitionFile {
+                filename: "offset-less-in-json.parquet",
+                timestamp: "2024-01-15 12:30:45.123456",
+            },
+            TimestampPartitionFile {
+                filename: "utc-in-json.parquet",
+                timestamp: "2024-01-15T18:30:45.123456Z",
+            },
+        ],
+    )
+    .await;
+    let snapshot = Snapshot::builder_for(&table_path)
+        .build(engine.as_ref())
+        .unwrap();
+    let physical_names = physical_timestamp_partition_names(&snapshot);
+    let mut options = if parsed_struct_on_scan {
+        PartitionValuesOptions::with_struct()
+    } else {
+        PartitionValuesOptions::string_map_only()
+    };
+    if let Some(tz) = tz {
+        options = options.with_timestamp_timezone(tz);
     }
+    let scan = snapshot
+        .scan_builder()
+        .with_predicate(Arc::new(predicate.clone()))
+        .with_partition_values(options)
+        .build()
+        .unwrap();
+
+    let mut actual = Vec::new();
+    for metadata in scan.scan_metadata(engine.as_ref()).unwrap() {
+        let (data, selection) = metadata.unwrap().scan_files.into_parts();
+        let batch: RecordBatch = ArrowEngineData::try_from_engine_data(data).unwrap().into();
+        let batch = filter_record_batch(&batch, &BooleanArray::from(selection)).unwrap();
+        let paths = get_column!(batch, "path", StringArray);
+        let timestamps = parsed_struct_on_scan.then(|| {
+            let parsed = get_column!(batch, "partitionValues_parsed", StructArray);
+            get_column!(parsed, &physical_names[0], TimestampMicrosecondArray)
+        });
+        for row in 0..batch.num_rows() {
+            actual.push((
+                paths.value(row).to_string(),
+                timestamps.map(|timestamps| {
+                    assert!(!timestamps.is_null(row));
+                    timestamps.value(row)
+                }),
+            ));
+        }
+    }
+    actual.sort();
+    let expected: Vec<_> = expected_files_and_timestamps
+        .iter()
+        .map(|(path, timestamp)| {
+            (
+                path.to_string(),
+                parsed_struct_on_scan.then(|| timestamp_micros(timestamp)),
+            )
+        })
+        .collect();
+    assert_eq!(
+        actual, expected,
+        "tz={tz:?}, cm={cm_mode}, parsed={parsed_struct_on_scan}"
+    );
 }
 
 #[rstest]
@@ -689,6 +689,7 @@ fn parallel_and_declarative_scans_reject_timestamp_timezone(
         TableConfig::new().write_stats_as_struct(true),
         version_latest(),
     );
+    let engine = Arc::new(engine);
     let options = if parsed_struct {
         PartitionValuesOptions::with_struct()
     } else {
@@ -702,13 +703,76 @@ fn parallel_and_declarative_scans_reject_timestamp_timezone(
 
     #[cfg(feature = "declarative-plans")]
     assert_result_error_with_message(
-        scan.declarative_metadata_scan_plan(&engine),
+        scan.declarative_metadata_scan_plan(engine.as_ref()),
         "with_timestamp_timezone in declarative_metadata_scan_plan",
     );
     assert_result_error_with_message(
-        scan.parallel_scan_metadata(Arc::new(engine)),
+        scan.parallel_scan_metadata(engine.clone()),
         "with_timestamp_timezone in parallel_scan_metadata",
     );
+    assert_result_error_with_message(scan.execute(engine), "row transforms are disabled");
+}
+
+#[rstest]
+#[case::unpartitioned("table-without-dv-small", false, false)]
+#[case::string_partition("basic_partitioned", true, false)]
+#[case::timestamp_ntz_partition("data-reader-timestamp_ntz", true, false)]
+#[case::id_mapped_partition("data-reader-timestamp_ntz-id-mode", true, true)]
+#[case::name_mapped_partition("data-reader-timestamp_ntz-name-mode", true, true)]
+fn timestamp_timezone_preserves_transforms_without_timestamp_partitions(
+    #[case] table: &str,
+    #[case] expects_transform: bool,
+    #[case] golden_data: bool,
+    #[values("UTC", "America/Los_Angeles", "+05:30")] timezone: &str,
+) {
+    let temp_dir = golden_data.then(|| load_test_data("tests/golden_data", table).unwrap());
+    let path = match &temp_dir {
+        Some(temp_dir) => temp_dir.path().join(table).join("delta"),
+        None => std::fs::canonicalize(format!("tests/data/{table}")).unwrap(),
+    };
+    let url = Url::from_directory_path(path).unwrap();
+    let engine: Arc<dyn Engine> =
+        Arc::new(DefaultEngineBuilder::new(Arc::new(LocalFileSystem::new())).build());
+    let snapshot = Snapshot::builder_for(url).build(engine.as_ref()).unwrap();
+    let baseline = snapshot.clone().scan_builder().build().unwrap();
+    let scan = snapshot
+        .scan_builder()
+        .with_partition_values(PartitionValuesOptions::default().with_timestamp_timezone(timezone))
+        .build()
+        .unwrap();
+
+    let mut file_count = 0;
+    for metadata in scan.scan_metadata(engine.as_ref()).unwrap() {
+        file_count = metadata
+            .unwrap()
+            .visit_scan_files(
+                (file_count, expects_transform),
+                |(count, expects_transform), file| {
+                    assert_eq!(file.transform.is_some(), *expects_transform);
+                    *count += 1;
+                },
+            )
+            .unwrap()
+            .0;
+    }
+    assert!(file_count > 0);
+    scan.parallel_scan_metadata(engine.clone()).unwrap();
+
+    let results: Vec<Vec<RecordBatch>> = [baseline, scan]
+        .iter()
+        .map(|scan| {
+            scan.execute(engine.clone())
+                .unwrap()
+                .map(|batch| {
+                    ArrowEngineData::try_from_engine_data(batch.unwrap())
+                        .unwrap()
+                        .into()
+                })
+                .collect()
+        })
+        .collect();
+    assert!(!results[0].is_empty());
+    assert_eq!(results[0], results[1]);
 }
 
 #[test]
@@ -736,6 +800,12 @@ fn scan_metadata_ignores_invalid_timestamp_timezone_for_unpartitioned_table() {
             .unwrap();
     }
     assert_eq!(file_count, 1);
+    let batches = scan
+        .execute(Arc::new(engine))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert!(!batches.is_empty());
 }
 
 #[rstest]

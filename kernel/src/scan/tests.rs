@@ -469,15 +469,15 @@ fn test_without_row_transforms_retains_spec_and_sets_skip(#[case] table: &str) {
     assert!(scan.state_info.skip_row_transforms);
 }
 
-/// Under `without_row_transforms`, `scan_metadata` still lists files and surfaces the partition
-/// values a connector needs to reconstruct rows itself, while every per-file transform is `None`.
+/// Scan metadata preserves partition values when row transforms are explicitly disabled or a
+/// timezone is configured for timezone-independent partition types.
 /// Deletion vectors are covered by the sibling test.
 #[rstest]
 #[case::explicit(None)]
 #[case::utc(Some("UTC"))]
 #[case::named(Some("America/Los_Angeles"))]
 #[case::fixed(Some("+05:30"))]
-fn disabled_row_transforms_preserve_partition_metadata(#[case] timezone: Option<&str>) {
+fn row_transform_options_preserve_partition_metadata(#[case] timezone: Option<&str>) {
     let (engine, snapshot) = without_transforms_snapshot("./tests/data/basic_partitioned/");
     let builder = snapshot.scan_builder();
     let scan = match timezone {
@@ -489,21 +489,18 @@ fn disabled_row_transforms_preserve_partition_metadata(#[case] timezone: Option<
     .build()
     .unwrap();
 
-    // (saw a file, saw non-empty partition values)
-    fn collect(acc: &mut (bool, bool), scan_file: ScanFile) {
+    // (saw a file, saw non-empty partition values, row transforms disabled)
+    fn collect(acc: &mut (bool, bool, bool), scan_file: ScanFile) {
+        assert_eq!(scan_file.transform.is_none(), acc.2);
         acc.0 = true;
         acc.1 |= !scan_file.partition_values.is_empty();
     }
-    let mut acc = (false, false);
+    let mut acc = (false, false, timezone.is_none());
     for metadata in scan.scan_metadata(engine.as_ref()).unwrap() {
         let metadata = metadata.unwrap();
-        assert!(
-            metadata.scan_file_transforms.iter().all(Option::is_none),
-            "every per-file transform must be None under without_row_transforms"
-        );
         acc = metadata.visit_scan_files(acc, collect).unwrap();
     }
-    let (saw_file, saw_partition_values) = acc;
+    let (saw_file, saw_partition_values, _) = acc;
     assert!(
         saw_file,
         "scan_metadata should still list files under without_row_transforms"
@@ -552,7 +549,7 @@ fn test_without_row_transforms_scan_metadata_lists_files_column_mapping() {
 #[case::utc(Some("UTC"))]
 #[case::named(Some("America/Los_Angeles"))]
 #[case::fixed(Some("+05:30"))]
-fn disabled_row_transforms_reject_execute(#[case] timezone: Option<&str>) {
+fn row_transform_options_control_execute(#[case] timezone: Option<&str>) {
     let (engine, snapshot) = without_transforms_snapshot("./tests/data/basic_partitioned/");
     let builder = snapshot.scan_builder();
     let scan = match timezone {
@@ -563,14 +560,13 @@ fn disabled_row_transforms_reject_execute(#[case] timezone: Option<&str>) {
     }
     .build()
     .unwrap();
-    let err = scan
-        .execute(engine)
-        .err()
-        .expect("execute must error when row transforms are skipped");
-    assert!(
-        err.to_string().contains("without_row_transforms"),
-        "unexpected error: {err}"
-    );
+    let result = scan.execute(engine);
+    if timezone.is_some() {
+        let batches = result.unwrap().collect::<KernelResult<Vec<_>>>().unwrap();
+        assert_eq!(batches.iter().map(|batch| batch.len()).sum::<usize>(), 3);
+    } else {
+        assert_result_error_with_message(result, "without_row_transforms");
+    }
 }
 
 /// Row commit version metadata columns require a row-tracking-enabled table, including when row
@@ -718,11 +714,18 @@ fn test_scan_metadata_from_same_version() {
 }
 
 #[rstest]
-fn scan_metadata_from_rejects_timestamp_timezone(
+fn scan_metadata_from_requires_timezone_support_only_for_timestamp_partitions(
     #[values("UTC", "America/Los_Angeles", "+05:30")] timezone: &str,
     #[values(false, true)] parsed_struct: bool,
+    #[values(false, true)] timestamp_partition: bool,
 ) {
-    let (engine, snapshot) = without_transforms_snapshot("./tests/data/basic_partitioned/");
+    let temp_dir = load_test_data("tests/data", "timestamp-partitioned-table").unwrap();
+    let table_path = if timestamp_partition {
+        temp_dir.path().join("timestamp-partitioned-table")
+    } else {
+        std::fs::canonicalize("tests/data/basic_partitioned").unwrap()
+    };
+    let (engine, snapshot) = without_transforms_snapshot(table_path.to_str().unwrap());
     let version = snapshot.version();
     let options = if parsed_struct {
         PartitionValuesOptions::with_struct()
@@ -735,10 +738,12 @@ fn scan_metadata_from_rejects_timestamp_timezone(
         .build()
         .unwrap();
 
-    assert_result_error_with_message(
-        scan.scan_metadata_from(engine.as_ref(), version, Vec::new(), None),
-        "with_timestamp_timezone in scan_metadata_from",
-    );
+    let result = scan.scan_metadata_from(engine.as_ref(), version, Vec::new(), None);
+    if timestamp_partition {
+        assert_result_error_with_message(result, "with_timestamp_timezone in scan_metadata_from");
+    } else {
+        assert_eq!(result.unwrap().count(), 0);
+    }
 }
 
 #[test_log::test]

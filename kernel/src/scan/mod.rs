@@ -371,6 +371,7 @@ impl PartitionValuesOptions {
 
     /// Interpret offset-less `TIMESTAMP` values in `add.partitionValues` using
     /// `timestamp_timezone` when no compatible `add.partitionValues_parsed` exists.
+    /// The provided timezone must match the timezone used to write those offset-less values.
     ///
     /// `timestamp_timezone` must be an IANA timezone identifier recognized by Kernel or a
     /// normalized fixed offset in `+HH:MM` or `-HH:MM` form. An explicit offset in a partition
@@ -381,16 +382,43 @@ impl PartitionValuesOptions {
     /// `add.partitionValues["ts"] = "2024-01-15 12:30:45"`, setting `timestamp_timezone` to
     /// `"America/Los_Angeles"` (UTC-08:00 on that date) interprets it as `2024-01-15T20:30:45Z`.
     ///
-    /// Kernel does not yet support setting a timezone for row transforms, so this option omits them
-    /// as if [`ScanBuilder::without_row_transforms`] were set. Without this option, Kernel
-    /// interprets offset-less timestamps as UTC. Invalid timezones are reported when partition
-    /// values are parsed.
+    /// Note: The [Delta protocol] requires interpreting offset-less timestamps in the writer's
+    /// timezone, but does not record that timezone. As a result, the timezone can only be supplied
+    /// by the connector, and Kernel cannot validate it.
     ///
-    /// TODO(#3609): Row transforms do not reuse existing `partitionValues_parsed`. Support reusing
-    /// those values and enable session timezone support.
+    /// Kernel does not yet support setting a timezone for row transforms on tables with `TIMESTAMP`
+    /// partition columns, so this option omits them as if [`ScanBuilder::without_row_transforms`]
+    /// were set on those tables.
+    ///
+    /// Without this option, Kernel interprets offset-less timestamps as UTC. Invalid timezones
+    /// cause errors only when Kernel uses them to parse partition values, not when this option
+    /// is set or the scan is built.
+    ///
+    /// TODO(#3609): Row transforms always parse `addFile.partitionValues` instead of using
+    /// compatible `partitionValues_parsed` from checkpoints and are not timezone-aware.
+    /// Support using those parsed values and enable timezone support.
+    ///
+    /// [Delta protocol]:
+    /// https://github.com/delta-io/delta/blob/master/PROTOCOL.md#partition-value-serialization
     pub fn with_timestamp_timezone(mut self, timestamp_timezone: impl Into<String>) -> Self {
         self.timestamp_timezone = Some(timestamp_timezone.into());
         self
+    }
+
+    fn requires_timestamp_timezone_support(
+        &self,
+        table_configuration: &TableConfiguration,
+    ) -> bool {
+        self.timestamp_timezone.is_some()
+            && table_configuration
+                .logical_partition_columns()
+                .iter()
+                .any(|name| {
+                    table_configuration
+                        .logical_schema_ref()
+                        .field(name)
+                        .is_some_and(|field| field.data_type() == &DataType::TIMESTAMP)
+                })
     }
 }
 
@@ -602,8 +630,10 @@ impl ScanBuilder {
 
         // Retain the transform spec but skip building per-file expressions, which also skips the
         // per-row partition-value parse done only to build them.
-        state_info.skip_row_transforms =
-            self.without_row_transforms || self.partition_values.timestamp_timezone.is_some();
+        state_info.skip_row_transforms = self.without_row_transforms
+            || self
+                .partition_values
+                .requires_timestamp_timezone_support(self.snapshot.table_configuration());
 
         let commits_since_checkpoint = self.snapshot.log_segment().commits_since_checkpoint();
         if self.snapshot.skipped_new_checkpoints() && commits_since_checkpoint > 0 {
@@ -1093,7 +1123,8 @@ impl Scan {
     ///
     /// # Errors
     ///
-    /// Returns an error if [`PartitionValuesOptions::with_timestamp_timezone`] was set,
+    /// Returns an error if [`PartitionValuesOptions::with_timestamp_timezone`] was set on a table
+    /// with `TIMESTAMP` partition columns,
     /// if `existing_version` exceeds the snapshot version, or if scan metadata cannot be
     /// restored or read.
     #[allow(unused)]
@@ -1106,9 +1137,11 @@ impl Scan {
         _existing_predicate: Option<PredicateRef>,
     ) -> KernelResult<KernelResultIteratorStatic<ScanMetadata>> {
         // TODO(#3609): scan_metadata_from does not reuse existing partitionValues_parsed. Support
-        // reusing those values and enable session timezone support.
+        // reusing those values and enable connector-supplied tz support.
         require!(
-            self.partition_values.timestamp_timezone.is_none(),
+            !self
+                .partition_values
+                .requires_timestamp_timezone_support(self.snapshot.table_configuration()),
             KernelError::unsupported(
                 "Kernel does not yet support with_timestamp_timezone in scan_metadata_from; \
                  use scan_metadata instead"
@@ -1279,7 +1312,8 @@ impl Scan {
     ///
     /// # Errors
     ///
-    /// Returns an error if [`PartitionValuesOptions::with_timestamp_timezone`] was set,
+    /// Returns an error if [`PartitionValuesOptions::with_timestamp_timezone`] was set on a table
+    /// with `TIMESTAMP` partition columns,
     /// if the engine provides no [`PlanExecutor`](crate::plans::PlanExecutor),
     /// or if log discovery, checkpoint inspection, or plan construction fails.
     #[tracing::instrument(
@@ -1292,9 +1326,11 @@ impl Scan {
         &self,
         engine: &dyn Engine,
     ) -> KernelResult<Option<Plan>> {
-        // TODO(#3609): Support session timezone in declarative metadata scans.
+        // TODO(#3609): Support connector-supplied tz in declarative metadata scans.
         require!(
-            self.partition_values.timestamp_timezone.is_none(),
+            !self
+                .partition_values
+                .requires_timestamp_timezone_support(self.snapshot.table_configuration()),
             KernelError::unsupported(
                 "Kernel does not yet support with_timestamp_timezone in \
                  declarative_metadata_scan_plan; use scan_metadata instead"
@@ -1406,8 +1442,9 @@ impl Scan {
     /// [`ScanBuilder::with_cancellation_token`], rather than silently running to completion.
     /// Only [`scan_metadata`](Self::scan_metadata) honors the token today.
     ///
-    /// Returns an error if [`PartitionValuesOptions::with_timestamp_timezone`] was set,
-    /// since parallel scan metadata does not currently support timestamp timezone.
+    /// Returns an error if [`PartitionValuesOptions::with_timestamp_timezone`] was set on a table
+    /// with `TIMESTAMP` partition columns, since parallel scan metadata does not yet support
+    /// timestamp timezone.
     /// Use [`scan_metadata`](Self::scan_metadata) for scans with a timestamp timezone.
     ///
     /// # Example
@@ -1472,9 +1509,11 @@ impl Scan {
                  use scan_metadata for a cancellable scan",
             ));
         }
-        // TODO(#3609): Support session timezone in parallel metadata scans.
+        // TODO(#3609): Support connector-supplied tz in parallel metadata scans.
         require!(
-            self.partition_values.timestamp_timezone.is_none(),
+            !self
+                .partition_values
+                .requires_timestamp_timezone_support(self.snapshot.table_configuration()),
             KernelError::unsupported(
                 "Kernel does not yet support with_timestamp_timezone in parallel_scan_metadata; \
                  use scan_metadata"

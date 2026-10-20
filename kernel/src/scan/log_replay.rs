@@ -1003,17 +1003,15 @@ fn get_add_transform_expr(
 }
 
 /// Build typed partition values from the string map.
-pub(super) fn parsed_partition_values_expr(
+fn parsed_partition_values_expr(
     raw_partition_values: Expression,
     timestamp_timezone: Option<&str>,
 ) -> Expression {
-    match timestamp_timezone {
-        Some(timestamp_timezone) => Expression::map_to_struct(
-            raw_partition_values,
-            MapToStructOptions::default().with_timestamp_timezone(timestamp_timezone),
-        ),
-        None => Expression::map_to_struct(raw_partition_values, MapToStructOptions::default()),
-    }
+    let options = MapToStructOptions::default().fold_with(
+        timestamp_timezone,
+        MapToStructOptions::with_timestamp_timezone,
+    );
+    Expression::map_to_struct(raw_partition_values, options)
 }
 
 // TODO: Move this to transaction/mod.rs once `scan_metadata_from` is pub, as this is used for
@@ -1308,9 +1306,8 @@ mod tests {
     use url::Url;
 
     use super::{
-        get_add_transform_expr, parsed_partition_values_expr, scan_action_iter, InternalScanState,
-        ScanLogReplayProcessor, ScanPartitionValuesOptions, ScanStatsOptions,
-        SerializableScanState,
+        get_add_transform_expr, scan_action_iter, InternalScanState, ScanLogReplayProcessor,
+        ScanPartitionValuesOptions, ScanStatsOptions, SerializableScanState,
     };
     use crate::arrow::array::cast::AsArray;
     use crate::arrow::array::types::TimestampMicrosecondType;
@@ -1318,8 +1315,8 @@ mod tests {
     use crate::engine::arrow_data::EngineDataArrowExt as _;
     use crate::engine::sync::SyncEngine;
     use crate::expressions::{
-        col, column_name, lit, null_lit, BinaryExpressionOp, Expression, MapToStructOptions,
-        OpaquePredicateOp, Predicate, Scalar, ScalarExpressionEvaluator, UnaryExpressionOp,
+        col, column_name, lit, null_lit, BinaryExpressionOp, Expression, OpaquePredicateOp,
+        Predicate, Scalar, ScalarExpressionEvaluator, UnaryExpressionOp,
     };
     use crate::kernel_predicates::{
         DirectDataSkippingPredicateEvaluator, DirectPredicateEvaluator,
@@ -1390,23 +1387,6 @@ mod tests {
             serde_json::from_str(r#"{"parsed_struct":true}"#).unwrap();
         assert!(old.parsed_struct);
         assert_eq!(old.timestamp_timezone, None);
-    }
-
-    #[test]
-    fn parsed_partition_values_expr_parses_map_with_timezone_options() {
-        let raw = col!("add.partitionValues");
-
-        assert_eq!(
-            parsed_partition_values_expr(raw.clone(), None),
-            Expression::map_to_struct(raw.clone(), MapToStructOptions::default())
-        );
-        assert_eq!(
-            parsed_partition_values_expr(raw.clone(), Some("America/Los_Angeles")),
-            Expression::map_to_struct(
-                raw,
-                MapToStructOptions::default().with_timestamp_timezone("America/Los_Angeles"),
-            )
-        );
     }
 
     fn test_checkpoint_info() -> CheckpointReadInfo {

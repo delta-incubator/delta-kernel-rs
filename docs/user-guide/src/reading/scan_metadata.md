@@ -153,8 +153,9 @@ for batch in read_results {
 > [!WARNING]
 > If `ScanFile.transform` is present, you must apply it before returning data. Omitting the
 > transform produces incorrect output — missing partition columns, wrong logical names, or nulls
-> where data should appear. If `transform` is `None`, the physical data already matches the
-> logical schema and no transformation is needed.
+> where data should appear. If you disable row transforms through `without_row_transforms` or
+> `with_timestamp_timezone`, your connector must reconstruct logical rows itself, even though
+> `transform` is `None`. Otherwise, `None` means no per-file transform is needed.
 
 ### Applying deletion vectors
 
@@ -283,12 +284,18 @@ of parsing the string map per file. The raw string map is still present.
 By default, offset-less `TIMESTAMP` partition strings are interpreted in UTC. Use
 `PartitionValuesOptions::with_timestamp_timezone` with a recognized IANA timezone or a normalized
 `+HH:MM` or `-HH:MM` fixed offset to interpret offset-less partition values in another timezone.
-An explicit offset in a partition value takes precedence. This setting affects both partition
-pruning and returned parsed partition values. Kernel doesn't support row transforms with a specified
-timezone, so `PartitionValuesOptions::with_timestamp_timezone` omits per-file row transforms.
-As a result, `Scan::execute` returns an error when you set this option.
-`Scan::parallel_scan_metadata` and `Scan::declarative_metadata_scan_plan` also return errors with this
-option. You can use `scan_metadata` and reconstruct logical rows in your connector.
+An explicit offset in a partition value takes precedence. When Kernel parses the partition string
+map, this setting affects both partition pruning and returned parsed partition values. If the
+checkpoint already stores a compatible typed `partitionValues_parsed` column, Kernel reads it
+directly and the timezone is not applied to those values. Because offset-less values do not record
+their writer timezone, the configured timezone must match the timezone used when they were written.
+
+Kernel doesn't support row transforms with a specified timezone, so
+`PartitionValuesOptions::with_timestamp_timezone` omits per-file row transforms. As a result,
+`Scan::execute`, `Scan::parallel_scan_metadata`, and `Scan::declarative_metadata_scan_plan` all
+return an error when you set this option. You can use `scan_metadata` and reconstruct logical rows
+in your connector.
+
 `TIMESTAMP_NTZ` remains timezone-independent. For daylight-saving transitions, ambiguous local times
 use the earlier instant, and nonexistent local times use the offset from before the transition.
 
