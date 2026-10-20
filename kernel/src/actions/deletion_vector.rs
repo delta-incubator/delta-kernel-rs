@@ -927,28 +927,43 @@ mod tests {
         }
     }
 
-    #[test]
-    fn descriptor_serde_json_round_trips() {
-        for descriptor in [dv_relative(), dv_absolute(), dv_inline()] {
-            let json = serde_json::to_string(&descriptor).unwrap();
-            let value: serde_json::Value = serde_json::from_str(&json).unwrap();
-            // storageType serializes as the renamed enum string ("u"/"i"/"p"), not a nested enum.
-            assert!(
-                value["storageType"].is_string(),
-                "storageType must serialize as a string: {json}"
-            );
-            // A present offset serializes as a number; an absent one as `null`. Keeping the field
-            // present lets positional binary formats (e.g. bincode) round-trip.
-            match descriptor.offset {
-                Some(offset) => assert_eq!(value["offset"].as_i64(), Some(i64::from(offset))),
-                None => assert!(
-                    value["offset"].is_null(),
-                    "offset must serialize as null: {json}"
-                ),
-            }
-            let round_tripped: DeletionVectorDescriptor = serde_json::from_str(&json).unwrap();
-            assert_eq!(round_tripped, descriptor);
+    // Round-trips the descriptor and the DvInfo that wraps it through both serde formats:
+    // JSON (self-describing) and bincode (positional, where an omitted field desyncs the stream).
+    #[rstest::rstest]
+    #[case::relative(dv_relative())]
+    #[case::absolute(dv_absolute())]
+    #[case::inline(dv_inline())]
+    fn descriptor_and_dv_info_serde_round_trips(#[case] descriptor: DeletionVectorDescriptor) {
+        use crate::scan::state::DvInfo;
+
+        // JSON: storageType is a string; a present offset is a number, an absent one is null.
+        let json = serde_json::to_string(&descriptor).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(
+            value["storageType"].is_string(),
+            "storageType must serialize as a string: {json}"
+        );
+        match descriptor.offset {
+            Some(offset) => assert_eq!(value["offset"].as_i64(), Some(i64::from(offset))),
+            None => assert!(
+                value["offset"].is_null(),
+                "offset must serialize as null: {json}"
+            ),
         }
+        assert_eq!(
+            serde_json::from_str::<DeletionVectorDescriptor>(&json).unwrap(),
+            descriptor
+        );
+
+        // bincode (positional) must round-trip the descriptor and the DvInfo wrapper.
+        let bytes = bincode::serialize(&descriptor).unwrap();
+        assert_eq!(
+            bincode::deserialize::<DeletionVectorDescriptor>(&bytes).unwrap(),
+            descriptor
+        );
+        let dv_info = DvInfo::from(descriptor);
+        let bytes = bincode::serialize(&dv_info).unwrap();
+        assert_eq!(bincode::deserialize::<DvInfo>(&bytes).unwrap(), dv_info);
     }
 
     #[cfg(feature = "adaptive-metadata-in-dev")]
@@ -969,25 +984,6 @@ mod tests {
             serde_json::from_str::<DeletionVectorDescriptor>(&json).unwrap(),
             descriptor
         );
-    }
-
-    // Positional binary formats carry no field names, so a skipped/omitted field would desync the
-    // stream; serde must round-trip the descriptor and DvInfo through bincode, not just JSON.
-    #[rstest::rstest]
-    #[case::relative(dv_relative())]
-    #[case::absolute(dv_absolute())]
-    #[case::inline(dv_inline())]
-    fn descriptor_and_dv_info_bincode_round_trip(#[case] descriptor: DeletionVectorDescriptor) {
-        use crate::scan::state::DvInfo;
-
-        let bytes = bincode::serialize(&descriptor).unwrap();
-        let decoded: DeletionVectorDescriptor = bincode::deserialize(&bytes).unwrap();
-        assert_eq!(decoded, descriptor);
-
-        let dv_info = DvInfo::from(descriptor);
-        let bytes = bincode::serialize(&dv_info).unwrap();
-        let decoded: DvInfo = bincode::deserialize(&bytes).unwrap();
-        assert_eq!(decoded, dv_info);
     }
 
     #[test]
