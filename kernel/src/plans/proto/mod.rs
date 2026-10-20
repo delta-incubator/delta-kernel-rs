@@ -15,6 +15,7 @@
 
 use std::sync::Arc;
 
+use delta_kernel_derive::internal_api;
 use prost::Message as _;
 
 use crate::schema::{SchemaRef, StructType};
@@ -46,7 +47,8 @@ mod convert;
 ///
 /// Variant types are opaque in this format. Their inner field structure is not encoded, and
 /// decoding produces the canonical unshredded Variant type.
-pub fn encode_schema(value: &StructType) -> Vec<u8> {
+#[internal_api]
+pub(crate) fn encode_schema(value: &StructType) -> Vec<u8> {
     schema::StructType::from(value).encode_to_vec()
 }
 
@@ -54,7 +56,8 @@ pub fn encode_schema(value: &StructType) -> Vec<u8> {
 ///
 /// Variant types decode to the canonical unshredded form, as described in [`encode_schema`].
 /// Returns an error for malformed protobuf, missing required values, or an invalid schema.
-pub fn decode_schema(bytes: &[u8]) -> KernelResult<SchemaRef> {
+#[internal_api]
+pub(crate) fn decode_schema(bytes: &[u8]) -> KernelResult<SchemaRef> {
     let value = schema::StructType::decode(bytes).map_err(KernelError::generic_err)?;
     Ok(Arc::new(StructType::try_from(value)?))
 }
@@ -72,7 +75,8 @@ pub fn decode_schema(bytes: &[u8]) -> KernelResult<SchemaRef> {
 /// It does not skip table configuration or operation-support checks.
 ///
 /// Returns an error for malformed protobuf, missing required values, or invalid scalar parameters.
-pub fn decode_trusted_schema(bytes: &[u8]) -> KernelResult<SchemaRef> {
+#[internal_api]
+pub(crate) fn decode_trusted_schema(bytes: &[u8]) -> KernelResult<SchemaRef> {
     let value = schema::StructType::decode(bytes).map_err(KernelError::generic_err)?;
     Ok(Arc::new(convert::trusted_struct_type_from_proto(value)?))
 }
