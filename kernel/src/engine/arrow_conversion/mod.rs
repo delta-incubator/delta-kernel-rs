@@ -678,6 +678,7 @@ mod tests {
     use crate::engine::arrow_conversion::ArrowField;
     use crate::engine::arrow_data::unshredded_variant_arrow_type;
     use crate::parquet::arrow::PARQUET_FIELD_ID_META_KEY;
+    use crate::schema::collation_utils::validate_collation_annotations;
     #[cfg(feature = "geo-type-in-dev")]
     use crate::schema::EdgeInterpolationAlgorithm;
     use crate::schema::{
@@ -741,7 +742,7 @@ mod tests {
         let arrow: ArrowSchema = (&kernel_schema).try_into_arrow().unwrap();
         let recovered = StructType::try_from_arrow(&arrow).unwrap();
         assert_eq!(recovered, kernel_schema);
-        crate::schema::collation_utils::validate_collation_annotations(&recovered).unwrap();
+        validate_collation_annotations(&recovered).unwrap();
     }
 
     #[test]
