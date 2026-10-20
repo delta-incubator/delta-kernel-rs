@@ -738,7 +738,7 @@ impl<STATE, MODE: ExecutionMode> Transaction<STATE, MODE> {
     ///
     /// Returns an error if the table has an empty or unsupported schema, or if the table declares
     /// column defaults that the connector has not acknowledged, or if the table has Concurrent
-    /// Identity Columns (writing data to them is not yet supported).
+    /// Identity Columns.
     pub fn write_state(&self) -> KernelResult<Arc<WriteState>> {
         self.ensure_schema_non_empty_for_write_state()?;
         self.ensure_column_defaults_acknowledged()?;
@@ -1126,8 +1126,7 @@ impl<STATE, MODE: ExecutionMode> Transaction<STATE, MODE> {
         Ok(())
     }
 
-    /// Rejects data writes (write-state creation or committing adds) when the table has Concurrent
-    /// Identity Columns.
+    /// Rejects data writes when the table has a Concurrent Identity Column.
     // TODO(#3586): surface the CIC columns to the connector instead of rejecting.
     #[cfg(feature = "concurrent-identity-columns-in-dev")]
     fn ensure_no_concurrent_identity_columns(&self) -> KernelResult<()> {
