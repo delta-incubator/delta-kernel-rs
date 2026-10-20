@@ -927,17 +927,56 @@ impl LogSegment {
     /// log is never scanned.
     ///
     /// # Errors
-    /// Returns an error if this segment does not list the named manifest commit, or that commit
-    /// cannot be read or does not carry the checkpoint action `pointer` describes.
+    /// Returns an error if the commit cannot be read, or if the pointer and the log are
+    /// inconsistent: this segment does not list the commit (commits at or below the checkpoint
+    /// never are), the commit carries no checkpoint action, or its action's content root version
+    /// differs from the pointer's.
     #[cfg(feature = "adaptive-metadata-in-dev")]
     pub(crate) fn find_last_checkpoint_action(
         &self,
         engine: &dyn Engine,
         pointer: Option<&LastManifestCommit>,
     ) -> KernelResult<Option<CheckpointAction>> {
-        pointer
-            .map(|pointer| self.read_manifest_commit_checkpoint_action(engine, pointer))
-            .transpose()
+        let Some(pointer) = pointer else {
+            return Ok(None);
+        };
+        let inconsistent = |detail: String| {
+            KernelError::invalid_log_segment(format!(
+                "lastManifestCommit names manifest commit version {} as the source of content \
+                 root version {}, but {detail}",
+                pointer.version, pointer.content_root_version
+            ))
+        };
+        // Only the listing carries real file metadata and the location of an unpublished catalog
+        // commit. It also bounds the lookup to this snapshot: under time travel, a commit past the
+        // end version exists in storage but is not listed.
+        let commits = &self.listed.ascending_commit_files;
+        let commit = Version::try_from(pointer.version)
+            .ok()
+            .and_then(|version| {
+                let index = commits
+                    .binary_search_by_key(&version, |commit| commit.version)
+                    .ok()?;
+                commits.get(index)
+            })
+            .ok_or_else(|| {
+                inconsistent("this log segment does not list that commit".to_string())
+            })?;
+        let files = std::slice::from_ref(&commit.location);
+        let batches =
+            engine
+                .json_handler()
+                .read_json_files(files, LOG_CHECKPOINT_SCHEMA.clone(), None)?;
+        let action = first_checkpoint_action(batches)?
+            .ok_or_else(|| inconsistent("that commit carries no checkpoint action".to_string()))?;
+        require!(
+            action.content_root_version() == pointer.content_root_version,
+            inconsistent(format!(
+                "that commit's checkpoint action has content root version {}",
+                action.content_root_version()
+            ))
+        );
+        Ok(Some(action))
     }
 
     /// Read this segment's JSON commit/compaction cover as [`ActionsBatch`]es (`is_log_batch =
@@ -1707,58 +1746,6 @@ impl LogSegment {
 
         debug!("Checkpoint schema has compatible partitionValues_parsed for partition pruning");
         true
-    }
-
-    /// The checkpoint action in the manifest commit `pointer` names as the latest one.
-    ///
-    /// # Errors
-    /// Returns an error if the commit cannot be read, or if the pointer and the log are
-    /// inconsistent: this segment does not list the commit (commits at or below the checkpoint
-    /// never are), the commit carries no checkpoint action, or its action's content root version
-    /// differs from the pointer's.
-    #[cfg(feature = "adaptive-metadata-in-dev")]
-    fn read_manifest_commit_checkpoint_action(
-        &self,
-        engine: &dyn Engine,
-        pointer: &LastManifestCommit,
-    ) -> KernelResult<CheckpointAction> {
-        let inconsistent = |detail: String| {
-            KernelError::invalid_log_segment(format!(
-                "lastManifestCommit names manifest commit version {} as the source of content \
-                 root version {}, but {detail}",
-                pointer.version, pointer.content_root_version
-            ))
-        };
-        // Only the listing carries real file metadata and the location of an unpublished catalog
-        // commit. It also bounds the lookup to this snapshot: under time travel, a commit past the
-        // end version exists in storage but is not listed.
-        let commits = &self.listed.ascending_commit_files;
-        let commit = Version::try_from(pointer.version)
-            .ok()
-            .and_then(|version| {
-                let index = commits
-                    .binary_search_by_key(&version, |commit| commit.version)
-                    .ok()?;
-                commits.get(index)
-            })
-            .ok_or_else(|| {
-                inconsistent("this log segment does not list that commit".to_string())
-            })?;
-        let files = std::slice::from_ref(&commit.location);
-        let batches =
-            engine
-                .json_handler()
-                .read_json_files(files, LOG_CHECKPOINT_SCHEMA.clone(), None)?;
-        let action = first_checkpoint_action(batches)?
-            .ok_or_else(|| inconsistent("that commit carries no checkpoint action".to_string()))?;
-        require!(
-            action.content_root_version() == pointer.content_root_version,
-            inconsistent(format!(
-                "that commit's checkpoint action has content root version {}",
-                action.content_root_version()
-            ))
-        );
-        Ok(action)
     }
 }
 
