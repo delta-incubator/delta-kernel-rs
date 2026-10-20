@@ -362,6 +362,8 @@ impl LeafReadContext {
     /// Returns an error if `parent` has a null `sequenceNumber` or `firstRowId`, or if the
     /// evaluator cannot be constructed.
     fn new(engine: &dyn Engine, parent: &TrackingInfo, ctx: &ReadContext) -> KernelResult<Self> {
+        // Root entries always carry explicit tracking values since nothing above them can be
+        // inherited from, so a null here is a malformed root rather than a value to inherit.
         let require = |value: Option<i64>, field: &str| {
             value.ok_or_else(|| {
                 KernelError::missing_data(format!(
@@ -399,7 +401,8 @@ impl LeafReadContext {
         &mut self,
         entries: &dyn EngineData,
     ) -> KernelResult<FilteredEngineData> {
-        // Only update `self` once the whole batch succeeds, so a retried batch gets the same IDs.
+        // Only update `self` once the whole batch succeeds, so a failed batch leaves the cursor
+        // unchanged.
         let (first_row_ids, next_first_row_id) =
             validate_and_assign_first_row_ids(entries, self.next_first_row_id)?;
 
