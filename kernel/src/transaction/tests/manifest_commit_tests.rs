@@ -143,11 +143,11 @@ fn with_root_manifest_file_rejects_when_manifest_commit_staged() -> KernelResult
 #[test]
 fn manifest_commit_allows_checkpoint_covering_the_snapshot() -> KernelResult<()> {
     let (engine, table_root) = setup_table()?;
-    write_commit(
+    write_manifest_commit(
         &engine,
         &table_root,
         1,
-        minimal_checkpoint_action("metadata/root-v1.parquet", 1)?.into_engine_data(&engine)?,
+        minimal_checkpoint_action("metadata/root-v1.parquet", 1)?,
     )?;
     let snapshot = Snapshot::builder_for(table_root).build(&engine)?;
     assert_eq!(snapshot.version(), 1);

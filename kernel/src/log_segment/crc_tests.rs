@@ -777,11 +777,14 @@ async fn test_lagging_checkpoint_action_defers_to_crc_pm() {
         )
         .commit(
             2,
-            [amt_checkpoint_action(
-                0,
-                checkpoint_config.protocol().clone(),
-                checkpoint_config.metadata().clone(),
-            )],
+            [
+                last_manifest_commit_info(2, 0),
+                amt_checkpoint_action(
+                    0,
+                    checkpoint_config.protocol().clone(),
+                    checkpoint_config.metadata().clone(),
+                ),
+            ],
         )
         .build()
         .await

@@ -1,6 +1,8 @@
 //! AMT (adaptiveMetadata) tests for Protocol & Metadata replay: manifest commits whose P&M is
 //! carried by a `checkpoint` action, exercised on both the plan and non-plan replay paths.
 
+#[cfg(feature = "declarative-plans")]
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use rstest::rstest;
@@ -20,6 +22,8 @@ use crate::engine::test_delegating::DelegatingEngine;
 use crate::object_store::memory::InMemory;
 use crate::object_store::ObjectStoreExt as _;
 use crate::path::ParsedLogPath;
+#[cfg(feature = "declarative-plans")]
+use crate::plans::{Operation, PlanExecutor, PlanResult};
 use crate::schema::SchemaRef;
 use crate::table_features::TableFeature;
 use crate::transaction::UpdateTableOperation;
@@ -27,6 +31,8 @@ use crate::unit_test_utils::adaptive_metadata_fixtures::last_manifest_commit_inf
 use crate::unit_test_utils::{
     adaptive_metadata_table_configuration, parse_json_batch, test_schema_flat_with_column_mapping,
 };
+#[cfg(feature = "declarative-plans")]
+use crate::KernelResult;
 use crate::{Engine, FileMeta, KernelError, Snapshot};
 
 fn one_column_schema() -> SchemaRef {
@@ -526,6 +532,27 @@ async fn plan_replay_skips_pointed_commit_when_pm_is_newer() {
     ],
     "that commit's checkpoint action has content root version 0"
 )]
+#[case::newest_action_has_other_content_root(
+    vec![
+        standalone_pm_commit(one_column_schema()),
+        carrying_pointer((1, 1), checkpoint_action(0, &[], one_column_schema())),
+    ],
+    "that commit's checkpoint action has content root version 0"
+)]
+#[case::newest_action_with_older_pointer(
+    vec![
+        checkpoint_commit(0, &[], one_column_schema()),
+        carrying_pointer((0, 0), checkpoint_action(1, &[], one_column_schema())),
+    ],
+    "commit 1 carries a checkpoint action"
+)]
+#[case::newest_action_without_pointer(
+    vec![
+        standalone_pm_commit(one_column_schema()),
+        checkpoint_action(1, &[], one_column_schema()),
+    ],
+    "commit 1 carries a checkpoint action but no lastManifestCommit"
+)]
 #[tokio::test]
 async fn plan_replay_errors_when_pointed_commit_lacks_matching_action(
     #[case] commits: Vec<String>,
@@ -543,6 +570,49 @@ async fn plan_replay_errors_when_pointed_commit_lacks_matching_action(
     let result = Snapshot::builder_for(table_root).build(&engine);
     assert!(matches!(&result, Err(KernelError::InvalidLogSegment(_))));
     assert_result_error_with_message(result, expected_error);
+}
+
+// The P&M plan captures the newest commit's own checkpoint action, so only a pointer to an older
+// manifest commit needs a second plan to read that commit.
+#[cfg(feature = "declarative-plans")]
+#[rstest]
+#[case::newest_commit_is_the_manifest_commit(vec![checkpoint_commit(0, &[], one_column_schema())], 1)]
+#[case::pointer_to_older_manifest_commit(
+    vec![checkpoint_commit(0, &[], one_column_schema()), commit_info(Some((0, 0)))],
+    2
+)]
+#[tokio::test]
+async fn plan_replay_reads_pointed_commit_only_when_older(
+    #[case] commits: Vec<String>,
+    #[case] expected_plans: usize,
+) {
+    let plans = Arc::new(AtomicUsize::new(0));
+    let counter = plans.clone();
+    assert_replay_resolution(&commits, Some(0), move |store| {
+        let engine: Arc<dyn Engine> = Arc::new(SyncEngine::new_with_store(store));
+        let executor = Arc::new(CountingPlanExecutor {
+            inner: engine.plan_executor().unwrap(),
+            plans: counter,
+        });
+        DelegatingEngine::new(engine).with_plan_executor(executor)
+    })
+    .await;
+    assert_eq!(plans.load(Ordering::Relaxed), expected_plans);
+}
+
+// A plan executor that counts the operations it runs.
+#[cfg(feature = "declarative-plans")]
+struct CountingPlanExecutor {
+    inner: Arc<dyn PlanExecutor>,
+    plans: Arc<AtomicUsize>,
+}
+
+#[cfg(feature = "declarative-plans")]
+impl PlanExecutor for CountingPlanExecutor {
+    fn execute_op(&self, op: Operation) -> KernelResult<PlanResult> {
+        self.plans.fetch_add(1, Ordering::Relaxed);
+        self.inner.execute_op(op)
+    }
 }
 
 // A standalone checkpoint written after the manifest commit hides that commit from the segment.
