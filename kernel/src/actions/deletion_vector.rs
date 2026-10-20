@@ -173,7 +173,8 @@ pub struct DeletionVectorDescriptor {
     pub path_or_inline_dv: String,
 
     /// Start of the data for this DV in number of bytes from the beginning of the file it is
-    /// stored in. Always None (absent in JSON) when `storageType = 'i'`.
+    /// stored in. `None` when `storageType = 'i'`. The Delta log omits an absent offset; these
+    /// serde impls serialize it as `null`.
     pub offset: Option<i32>,
 
     /// Size of the serialized DV in bytes (raw data size, i.e. before base85 encoding, if inline).
@@ -827,6 +828,7 @@ mod tests {
 
     use super::{DeletionVectorDescriptor, *};
     use crate::engine::sync::SyncEngine;
+    use crate::scan::state::DvInfo;
     use crate::unit_test_utils::assert_result_error_with_message;
     use crate::Engine;
 
@@ -934,8 +936,6 @@ mod tests {
     #[case::absolute(dv_absolute())]
     #[case::inline(dv_inline())]
     fn descriptor_and_dv_info_serde_round_trips(#[case] descriptor: DeletionVectorDescriptor) {
-        use crate::scan::state::DvInfo;
-
         // JSON: storageType is a string; a present offset is a number, an absent one is null.
         let json = serde_json::to_string(&descriptor).unwrap();
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -945,9 +945,10 @@ mod tests {
         );
         match descriptor.offset {
             Some(offset) => assert_eq!(value["offset"].as_i64(), Some(i64::from(offset))),
-            None => assert!(
-                value["offset"].is_null(),
-                "offset must serialize as null: {json}"
+            None => assert_eq!(
+                value.get("offset"),
+                Some(&serde_json::Value::Null),
+                "{json}"
             ),
         }
         assert_eq!(
