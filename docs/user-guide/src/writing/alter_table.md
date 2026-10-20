@@ -1,8 +1,9 @@
 # Altering a table
 
-To add a column to an existing Delta table, you configure an existing-table transaction with one
-or more schema operations and commit it. A standalone ALTER commit updates the table's schema
-without rewriting data files. The same builder also supports schema evolution alongside a write.
+Configure schema, property, and clustering changes on the existing-table transaction builder.
+Kernel validates the combined result at `build()` and commits it atomically. A standalone ALTER
+changes table metadata without rewriting files; a data operation can apply the same changes
+alongside a write.
 
 Before reading this page, make sure you understand
 [Creating a Table](./create_table.md) and
@@ -23,7 +24,7 @@ Pass it explicitly when you construct the builder. The table shows typical workf
 | Transaction Component | ALTER TABLE | SCHEMA EVOLUTION |
 |--------|------------------------|---------------------------------|
 | Operation | `UpdateTableOperation::AlterTable` | The data operation, such as `UpdateTableOperation::Write` |
-| Schema operations | Required | Queued alongside the data operation |
+| Table changes | At least one schema, property, or clustering request | Optional |
 | Data-file changes | None staged | Staged on the built transaction |
 | `data_change` constructor argument | `false` | `true` if records change; `false` otherwise |
 
@@ -41,9 +42,8 @@ For a rewrite that preserves logical data, select the data operation, such as
 `UpdateTableOperation::Optimize`, and pass `false` to `update_table()`.
 
 > [!NOTE]
-> The supported operations are adding columns and making columns nullable. Other schema operations
-> (drop column, rename, type changes) are not yet available through the
-> transaction builder.
+> Incremental schema operations add columns and relax nullability. Use `with_updated_schema()`
+> for complete-schema changes on column-mapped tables, including drops, renames, and supported widening.
 
 ## Adding a column
 
@@ -109,9 +109,9 @@ column by including it in the `RecordBatch` they pass to
 | Column mapping tables must be protocol-valid | When column mapping is enabled, Kernel assigns or preserves column-mapping IDs and physical names for the added column and updates `delta.columnMapping.maxColumnId`. |
 
 > [!NOTE]
-> Kernel rejects schema changes at `build()` when `icebergCompatV2`, `icebergCompatV3`, or
-> `allowColumnDefaults` is enabled. This restriction applies to both workflows, regardless of the
-> transaction operation or `dataChange` value.
+> Incremental schema operations are rejected when `icebergCompatV2`, `icebergCompatV3`, or
+> `allowColumnDefaults` is enabled. Complete-schema updates validate supported transitions against
+> the final feature configuration. Unsupported writer features remain rejected.
 
 ## Chaining multiple operations
 
@@ -128,9 +128,61 @@ let result = snapshot
     .commit(&engine)?;
 ```
 
-Building an `UpdateTableOperation::AlterTable` transaction without adding a schema operation returns an
-error. The unified builder performs this check at runtime because other operations may combine
-schema evolution with data-file actions.
+An `AlterTable` transaction requires a schema, property, or clustering request. Accepted requests
+whose values are unchanged may still commit. Blind append cannot include any of these table changes.
+
+## Complete schema, properties, and clustering
+
+The following setters accumulate intent and validate together at `build()`, regardless of setter
+order. Each call replaces the previous request for that setter. Complete-schema replacement cannot
+be mixed with incremental schema operations.
+
+| Setter | Contract |
+|--------|----------|
+| `with_updated_schema(schema)` | Requires column mapping. Surviving fields retain mapping IDs and physical names. Supports nullable additions, drops, renames, reordering, comments, relaxed nullability, permitted widening, and supported literal-default changes on existing fields. |
+| `with_table_properties_added(properties)` | Merges ordinary properties, canonicalizes recognized Delta keys, and adds required protocol features. Rejects protected or unsupported Delta settings. |
+| `with_table_properties_removed(keys)` | Removes ordinary properties, including absent keys. Rejects all `delta.*` keys and overlap with additions. |
+| `with_clustering_columns(columns)` | Replaces logical keys in supplied order. Omission retains keys; an explicit empty list clears them. |
+
+Kernel preserves type-change history, mapping allocation, row-tracking names, and in-commit
+timestamp bookkeeping. New fields must omit physical names; Kernel allocates fresh names so they
+cannot expose data from dropped columns. Omitted physical names on surviving fields are restored.
+Retained statistics selections follow column IDs through renames and drops.
+Mapping-mode migrations, row-tracking enablement/disablement, and core IcebergCompatV3 toggles on
+existing tables are unsupported. Feature requests never implicitly remove protocol support.
+Core Iceberg compatibility does not establish Iceberg writer-compatibility support.
+
+Clustering keys resolve against the final schema. Dropping a retained key fails; dropping it while
+replacing or clearing the keys succeeds. A mapped rename preserves the physical reference.
+Clustering requests require an unpartitioned Delta table and valid statistics-eligible keys.
+Every explicit request enables clustering protocol support, even an empty list on an unclustered
+table. Omit the setter if you want to avoid this upgrade.
+
+Connectors must ensure historical files have statistics for newly introduced keys. Kernel enforces
+statistics for new files but does not backfill historical statistics or physically recluster data.
+
+```rust,no_run
+# use delta_kernel::{Engine, KernelResult, SnapshotRef};
+# use delta_kernel::schema::SchemaRef;
+# use delta_kernel::committer::FileSystemCommitter;
+# use delta_kernel::expressions::column_name;
+# use delta_kernel::transaction::UpdateTableOperation;
+# fn configure(snapshot: SnapshotRef, schema: SchemaRef, engine: impl Engine) -> KernelResult<()> {
+let transaction = snapshot
+    .update_table(UpdateTableOperation::AlterTable, "my-app/1.0", false)
+    .with_updated_schema(schema)
+    .with_table_properties_added([("application.owner", "analytics")])
+    .with_table_properties_removed(["application.legacy"])
+    .with_clustering_columns(vec![column_name!("event_time")])
+    .build(&engine, Box::new(FileSystemCommitter::new()))?;
+# let _ = transaction;
+# Ok(())
+# }
+```
+
+Build before obtaining write state or staging files. Validation failures publish nothing. After a
+commit conflict, load a fresh snapshot and prepare the intent again; do not reuse stale metadata.
+The Unity Catalog committer rejects existing-table metadata, protocol, and clustering updates.
 
 ## Evolving a schema while writing
 

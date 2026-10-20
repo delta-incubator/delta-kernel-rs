@@ -4,16 +4,20 @@
 //! using field IDs as the primary mechanism for identifying fields across schema versions.
 //! Supports nested field comparison within structs, arrays, and maps.
 
-// This module is not used outside the diff subsystem; suppress unused-code warnings.
+// The experimental SchemaDiff API has no production callers. Schema preparation uses the
+// field-ID traversal helpers independently of that API.
 #![allow(dead_code)]
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+#[cfg(feature = "schema-diff")]
+use std::collections::HashSet;
 
 use super::{ColumnMetadataKey, ColumnName, DataType, MetadataValue, StructField, StructType};
 use crate::expressions::joined_column_name;
 
 /// Represents the difference between two schemas
 #[derive(Debug, Clone, PartialEq)]
+#[cfg(feature = "schema-diff")]
 pub(crate) struct SchemaDiff {
     /// Fields that were added in the new schema
     pub(crate) added_fields: Vec<FieldChange>,
@@ -27,6 +31,7 @@ pub(crate) struct SchemaDiff {
 
 /// Represents a field change (added or removed) at any nesting level
 #[derive(Debug, Clone, PartialEq)]
+#[cfg(feature = "schema-diff")]
 pub(crate) struct FieldChange {
     /// The field that was added or removed
     pub(crate) field: StructField,
@@ -36,6 +41,7 @@ pub(crate) struct FieldChange {
 
 /// Represents an update to a field between two schema versions
 #[derive(Debug, Clone, PartialEq)]
+#[cfg(feature = "schema-diff")]
 pub(crate) struct FieldUpdate {
     /// The field as it existed in the original schema
     pub(crate) before: StructField,
@@ -49,6 +55,7 @@ pub(crate) struct FieldUpdate {
 
 /// The types of changes that can occur to a field
 #[derive(Debug, Clone, PartialEq)]
+#[cfg(feature = "schema-diff")]
 pub(crate) enum FieldChangeType {
     /// Field was renamed (logical name changed, but field ID stayed the same)
     Renamed,
@@ -92,6 +99,7 @@ pub(crate) enum SchemaDiffError {
     },
 }
 
+#[cfg(feature = "schema-diff")]
 impl SchemaDiff {
     /// Compute the difference between two schemas using field IDs
     pub(crate) fn new(before: &StructType, after: &StructType) -> Result<Self, SchemaDiffError> {
@@ -170,6 +178,30 @@ impl SchemaDiff {
     }
 }
 
+/// Returns struct fields keyed by mapping ID, rejecting missing or duplicate IDs.
+pub(crate) fn fields_by_id(
+    schema: &StructType,
+) -> Result<HashMap<i64, StructField>, SchemaDiffError> {
+    let mut fields = Vec::new();
+    collect_all_fields_with_paths(schema, &ColumnName::default(), &mut fields)?;
+    Ok(build_field_map_by_id(&fields)?
+        .into_iter()
+        .map(|(id, field)| (id, field.field))
+        .collect())
+}
+
+/// Returns logical field paths keyed by mapping ID, rejecting missing or duplicate IDs.
+pub(crate) fn field_paths_by_id(
+    schema: &StructType,
+) -> Result<HashMap<i64, ColumnName>, SchemaDiffError> {
+    let mut fields = Vec::new();
+    collect_all_fields_with_paths(schema, &ColumnName::default(), &mut fields)?;
+    Ok(build_field_map_by_id(&fields)?
+        .into_iter()
+        .map(|(id, field)| (id, field.path))
+        .collect())
+}
+
 /// Internal representation of a field with its path and ID
 #[derive(Debug, Clone)]
 struct FieldWithPath {
@@ -198,6 +230,7 @@ struct FieldWithPath {
 /// # Returns
 /// A `SchemaDiff` describing all changes including nested fields, or an error if the schemas are
 /// invalid
+#[cfg(feature = "schema-diff")]
 fn compute_schema_diff(
     before: &StructType,
     after: &StructType,
@@ -314,6 +347,7 @@ fn compute_schema_diff(
 }
 
 /// Helper function to check if a change type is breaking
+#[cfg(feature = "schema-diff")]
 fn is_breaking_change_type(change_type: &FieldChangeType) -> bool {
     matches!(
         change_type,
@@ -325,6 +359,7 @@ fn is_breaking_change_type(change_type: &FieldChangeType) -> bool {
 }
 
 /// Computes whether the diff contains breaking changes
+#[cfg(feature = "schema-diff")]
 fn compute_has_breaking_changes(
     added_fields: &[FieldChange],
     _removed_fields: &[FieldChange],
@@ -354,6 +389,7 @@ fn compute_has_breaking_changes(
 /// 1. Put all paths in a HashSet for O(1) lookup
 /// 2. For each field, walk up its parent chain
 /// 3. Keep only fields with no ancestor present in the set
+#[cfg(feature = "schema-diff")]
 fn filter_ancestor_fields(fields: Vec<FieldChange>) -> Vec<FieldChange> {
     // Build a set of all paths for O(1) lookup (owned to avoid lifetime issues)
     let all_paths: HashSet<ColumnName> = fields.iter().map(|f| f.path.clone()).collect();
@@ -373,6 +409,7 @@ fn filter_ancestor_fields(fields: Vec<FieldChange>) -> Vec<FieldChange> {
 /// This implementation walks up the parent chain of `path`, checking at each level
 /// if that parent exists in the set. This is O(depth) instead of O(N * depth) where
 /// N is the number of ancestor paths.
+#[cfg(feature = "schema-diff")]
 fn has_added_ancestor(path: &ColumnName, added_ancestor_paths: &HashSet<ColumnName>) -> bool {
     let mut curr = path.parent();
     while let Some(parent) = curr {
@@ -385,6 +422,7 @@ fn has_added_ancestor(path: &ColumnName, added_ancestor_paths: &HashSet<ColumnNa
 }
 
 /// Gets the physical name of a field if present
+#[cfg(feature = "schema-diff")]
 fn physical_name(field: &StructField) -> Option<&str> {
     match field.get_config_value(&ColumnMetadataKey::ColumnMappingPhysicalName) {
         Some(MetadataValue::String(s)) => Some(s.as_str()),
@@ -400,6 +438,7 @@ fn physical_name(field: &StructField) -> Option<&str> {
 /// # Errors
 /// - `PhysicalNameChanged`: Physical name differs between before and after
 /// - `MissingPhysicalName`: Physical name is missing in either version
+#[cfg(feature = "schema-diff")]
 fn validate_physical_name(
     before: &FieldWithPath,
     after: &FieldWithPath,
@@ -536,6 +575,7 @@ fn get_field_id_for_path(field: &StructField, path: &ColumnName) -> Result<i64, 
 }
 
 /// Computes the update for two fields with the same ID, if they differ
+#[cfg(feature = "schema-diff")]
 fn compute_field_update(
     before: &FieldWithPath,
     after: &FieldWithPath,
@@ -587,6 +627,7 @@ fn compute_field_update(
 /// - `Some(FieldChangeType::NullabilityLoosened)` if nullability was relaxed (false -> true)
 /// - `Some(FieldChangeType::NullabilityTightened)` if nullability was restricted (true -> false)
 /// - `None` if nullability didn't change
+#[cfg(feature = "schema-diff")]
 fn check_field_nullability_change(
     before_nullable: bool,
     after_nullable: bool,
@@ -606,6 +647,7 @@ fn check_field_nullability_change(
 /// - `Some(FieldChangeType::ContainerNullabilityTightened)` if nullability was restricted (true ->
 ///   false)
 /// - `None` if nullability didn't change
+#[cfg(feature = "schema-diff")]
 fn check_container_nullability_change(
     before_nullable: bool,
     after_nullable: bool,
@@ -634,6 +676,7 @@ fn check_container_nullability_change(
 ///    - Otherwise, it's a type change
 /// 3. **Map containers**: Similar logic to arrays, but for both key and value types
 /// 4. **Different container types or primitives**: Type change
+#[cfg(feature = "schema-diff")]
 fn classify_data_type_change(before: &DataType, after: &DataType) -> Vec<FieldChangeType> {
     // Early return if types are identical - no change to report
     if before == after {
@@ -708,6 +751,7 @@ fn classify_data_type_change(before: &DataType, after: &DataType) -> Vec<FieldCh
 }
 
 /// Checks if two fields have different metadata (excluding column mapping metadata)
+#[cfg(feature = "schema-diff")]
 fn has_metadata_changes(before: &StructField, after: &StructField) -> bool {
     // Instead of returning a HashMap of references, we'll compare directly
     let before_filtered: HashMap<String, MetadataValue> = before
@@ -731,7 +775,7 @@ fn has_metadata_changes(before: &StructField, after: &StructField) -> bool {
     before_filtered != after_filtered
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "schema-diff"))]
 mod tests {
     use std::collections::HashSet;
 

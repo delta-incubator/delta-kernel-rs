@@ -320,6 +320,7 @@ mod tests {
             "DELETE",
             "OPTIMIZE",
             "CREATE TABLE",
+            "ALTER TABLE",
             "REPLACE TABLE",
             "CREATE TABLE AS SELECT",
             "REPLACE TABLE AS SELECT",

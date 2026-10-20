@@ -117,6 +117,23 @@ containing validated partition values, data schemas, statistics columns, and the
 directory. The transaction registers the resulting files, enforces protocol compliance, assembles
 commit actions, and delegates the atomic commit to a `Committer`.
 
+
+Complete-schema updates use `with_updated_schema` on the existing update builder. Preparation
+matches surviving fields by mapping ID, preserves physical identities and type-change history,
+and validates the transition before constructing write state. Retained clustering keys must resolve
+in the final physical schema. Accepted table-change intent is tracked separately from action emission.
+Property additions and removals prepare protocol dependencies before schema transition validation.
+Existing-table preparation preserves mapping mode and materialized row-tracking names, rejects
+row-tracking and IcebergCompatV3 enablement changes, and records ICT enablement at the actual commit
+version and timestamp.
+
+Clustering updates use the same update builder. Omission retains physical keys; explicit empty input
+clears the domain and enables clustering and domain-metadata protocol support, including on an
+unclustered table. Preparation resolves logical keys against the final schema, validates retained
+references, and supplies effective keys to write-state statistics requirements. Schema, property, protocol, and system-domain actions commit atomically. After a
+conflict, connectors must prepare again from a fresh snapshot. Historical-file statistics and
+physical reclustering remain connector responsibilities.
+
 **Data-write steps:**
 1. Configure an `UpdateTableTransactionBuilder` from a snapshot and build it with a `Committer`
    (e.g. `FileSystemCommitter`)

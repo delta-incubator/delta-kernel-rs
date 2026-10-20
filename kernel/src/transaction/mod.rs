@@ -185,8 +185,8 @@ pub(crate) fn augmented_write_metadata_schema() -> KernelResult<SchemaRef> {
 
 /// Marker type for transactions that update existing tables.
 ///
-/// This is the default state for [`Transaction`] and supports schema changes as well as file
-/// additions, removals, deletion-vector updates, and blind append semantics.
+/// This is the default state for [`Transaction`] and supports schema, property, and clustering
+/// changes as well as file additions, removals, deletion-vector updates, and blind appends.
 #[derive(Debug)]
 pub struct UpdateTable;
 
@@ -210,13 +210,13 @@ pub struct CreateTable;
 /// abstraction over 1) how staged changes are represented and 2) how to inspect the changes. The
 /// default, [`Imperative`], stages [`EngineData`] and provides [`commit`](Self::commit).
 ///
-/// Both states support file additions. Schema-changing transactions use [`UpdateTable`] rather
-/// than a separate schema-only state, allowing schema and file changes in the same transaction.
-/// The builder validates schema intent, and commit validates the staged actions. `ALTER TABLE`
-/// commits reject staged data-file batches and manifest writes.
+/// Both states support file additions. [`UpdateTable`] transactions can commit schema, property,
+/// clustering, and file changes atomically. The builder validates their combined configuration,
+/// and commit validates the staged actions. `ALTER TABLE` commits reject staged data-file batches
+/// and manifest writes.
 ///
-/// Configure schema and data-change intent on the builder. Built transactions do not expose
-/// setters for either, including when the `internal-api` feature is enabled.
+/// Configure schema, property, clustering, and data-change intent on the builder before obtaining
+/// write state. Built transactions do not expose setters for this intent.
 ///
 /// # Examples
 ///
@@ -276,11 +276,12 @@ pub struct Transaction<STATE = UpdateTable, MODE: ExecutionMode = Imperative> {
     // config, this is cloned from the read snapshot; when the config changes (e.g. schema
     // evolution), it is constructed separately with the new schema/protocol.
     effective_table_config: TableConfiguration,
-    // Whether to emit a Protocol action. True for CREATE TABLE, false otherwise.
+    // Emit Protocol when creating a table or adding feature support.
     should_emit_protocol: bool,
-    // Whether to emit a Metadata action. True for CREATE TABLE and transactions with staged
-    // schema changes, false otherwise.
+    // Emit Metadata for table creation, schema changes, and effective property changes.
     should_emit_metadata: bool,
+    // Accepted table intent is independent of which actions are emitted.
+    has_table_change_request: bool,
     committer: Box<dyn Committer>,
     operation: CommitOperation,
     operation_parameters: Option<HashMap<String, Option<String>>>,
@@ -824,6 +825,7 @@ impl<STATE, MODE: ExecutionMode> Transaction<STATE, MODE> {
             effective_table_config,
             should_emit_protocol: false,
             should_emit_metadata: false,
+            has_table_change_request: false,
             committer,
             operation,
             operation_parameters: common_state.operation_parameters,
@@ -1154,10 +1156,10 @@ impl<STATE, MODE: ExecutionMode> Transaction<STATE, MODE> {
         match (self.is_create_table(), &self.operation) {
             (true, CommitOperation::CreateTable) => Ok(()),
             (false, CommitOperation::UpdateTable(UpdateTableOperation::AlterTable))
-                if !self.should_emit_metadata =>
+                if !self.has_table_change_request =>
             {
                 Err(KernelError::invalid_transaction_state(
-                    "ALTER TABLE requires at least one schema change",
+                    "ALTER TABLE requires at least one table change",
                 ))
             }
             (false, CommitOperation::UpdateTable(UpdateTableOperation::AlterTable))
@@ -1228,11 +1230,16 @@ impl<STATE, MODE: ExecutionMode> Transaction<STATE, MODE> {
         // Existing table: enforce monotonicity per the Delta protocol. The timestamp
         // must be the larger of:
         // - The time at which the writer attempted the commit
-        // - One millisecond later than the previous commit's inCommitTimestamp
-        Ok(self
+        // - One millisecond later than the previous commit timestamp (file time before ICT
+        //   enablement)
+        let previous = self
             .read_snapshot()?
-            .get_in_commit_timestamp(engine)?
-            .map(|prev_ict| self.commit_timestamp.max(prev_ict + 1)))
+            .get_timestamp(engine)?
+            .checked_add(1)
+            .ok_or_else(|| {
+                KernelError::invalid_transaction_state("In-commit timestamp overflow")
+            })?;
+        Ok(Some(self.commit_timestamp.max(previous)))
     }
 
     /// Returns the commit version for this transaction.
@@ -2277,6 +2284,7 @@ mod tests {
             effective_table_config,
             should_emit_protocol,
             should_emit_metadata,
+            has_table_change_request,
             committer,
             operation,
             operation_parameters,
@@ -2313,6 +2321,7 @@ mod tests {
         assert_eq!(&effective_table_config, snapshot.table_configuration());
         assert!(!should_emit_protocol);
         assert!(!should_emit_metadata);
+        assert!(!has_table_change_request);
         assert!(!committer.is_catalog_committer());
         assert_eq!(operation, UpdateTableOperation::Write.into());
         assert!(operation_parameters.is_none());
@@ -3675,7 +3684,7 @@ mod tests {
     #[case::alter_without_schema_changes(
         false,
         CommitOperation::UpdateTable(UpdateTableOperation::AlterTable),
-        "ALTER TABLE requires at least one schema change"
+        "ALTER TABLE requires at least one table change"
     )]
     #[case::empty_custom_operation(
         false,

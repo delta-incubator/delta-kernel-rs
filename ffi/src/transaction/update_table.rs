@@ -4,6 +4,7 @@ use delta_kernel::engine_data::FilteredEngineData;
 
 use super::committed::commit_result_to_committed_handle;
 use super::*;
+use crate::delta_types::{FfiColumnNameArray, FfiStringArray, FfiStringMap};
 
 /// A handle for an update-table transaction (`Transaction<UpdateTable>`).
 ///
@@ -144,6 +145,30 @@ fn update_table_txn_builder_build_with_committer_impl(
     let engine = extern_engine.engine();
     let transaction = builder.build(engine.as_ref(), committer);
     Ok(Box::new(transaction?).into())
+}
+
+/// Replaces the requested clustering keys with borrowed logical column paths.
+///
+/// Copies each path segment during the call; dots within a segment remain literal. An empty
+/// array requests clearing and enables clustering protocol support even on an unclustered table.
+/// Omit this call to retain existing keys and avoid that upgrade. Build validates the final
+/// schema, properties, and keys together. Returns a replacement builder or a decoding error.
+///
+/// # Safety
+///
+/// All handles and nested slices must be valid. Borrows `columns` and `engine` for the call,
+/// and unconditionally consumes `builder`, including on error.
+#[no_mangle]
+pub unsafe extern "C" fn update_table_txn_builder_with_clustering_columns(
+    builder: Handle<ExclusiveUpdateTableTransactionBuilder>,
+    columns: &FfiColumnNameArray,
+    engine: Handle<SharedExternEngine>,
+) -> ExternResult<Handle<ExclusiveUpdateTableTransactionBuilder>> {
+    let builder = unsafe { *builder.into_inner() };
+    let engine = unsafe { engine.as_ref() };
+    unsafe { columns.try_to_column_names() }
+        .map(|columns| Box::new(builder.with_clustering_columns(columns)).into())
+        .into_extern_result(&engine)
 }
 
 /// Frees an update-table builder without building it.
@@ -297,6 +322,73 @@ pub unsafe extern "C" fn update_table_txn_builder_with_domain_metadata(
     };
     result
         .map(|builder| Box::new(builder).into())
+        .into_extern_result(&engine)
+}
+
+/// Replaces requested table-property additions with a borrowed string map.
+///
+/// Copies keys and values before returning a replacement builder. Returns decoding errors here;
+/// property and final-state validation runs at build.
+///
+/// # Safety
+///
+/// All handles and nested string slices must be valid for this call. Borrows `properties` and
+/// `engine`, and unconditionally consumes `builder`, including on errors.
+#[no_mangle]
+pub unsafe extern "C" fn update_table_txn_builder_with_table_properties_added(
+    builder: Handle<ExclusiveUpdateTableTransactionBuilder>,
+    properties: &FfiStringMap,
+    engine: Handle<SharedExternEngine>,
+) -> ExternResult<Handle<ExclusiveUpdateTableTransactionBuilder>> {
+    let builder = unsafe { *builder.into_inner() };
+    let engine = unsafe { engine.as_ref() };
+    unsafe { properties.try_to_hash_map() }
+        .map(|properties| Box::new(builder.with_table_properties_added(properties)).into())
+        .into_extern_result(&engine)
+}
+
+/// Replaces requested table-property removals with a borrowed string array.
+///
+/// Copies keys before returning a replacement builder, or a decoding error. Build rejects Delta
+/// property removals and overlap with additions. An absent ordinary key is a successful no-op.
+///
+/// # Safety
+///
+/// All handles and nested string slices must be valid for this call. Borrows `keys` and `engine`
+/// and unconditionally consumes `builder`, including on errors.
+#[no_mangle]
+pub unsafe extern "C" fn update_table_txn_builder_with_table_properties_removed(
+    builder: Handle<ExclusiveUpdateTableTransactionBuilder>,
+    keys: &FfiStringArray,
+    engine: Handle<SharedExternEngine>,
+) -> ExternResult<Handle<ExclusiveUpdateTableTransactionBuilder>> {
+    let builder = unsafe { *builder.into_inner() };
+    let engine = unsafe { engine.as_ref() };
+    unsafe { keys.try_to_strings() }
+        .map(|keys| Box::new(builder.with_table_properties_removed(keys)).into())
+        .into_extern_result(&engine)
+}
+
+/// Requests a complete column-mapped schema, including all field metadata.
+///
+/// Replaces the previous complete-schema request. Returns a replacement builder or a schema
+/// decoding error. Transition validation runs when the builder is built. New fields must omit
+/// physical names so Kernel can allocate names that cannot alias dropped columns.
+///
+/// # Safety
+///
+/// All handles and `schema` must be valid. Borrows `engine` and `schema` for this call and
+/// unconditionally consumes `builder`, including on decoding errors.
+#[no_mangle]
+pub unsafe extern "C" fn update_table_txn_builder_with_updated_schema(
+    builder: Handle<ExclusiveUpdateTableTransactionBuilder>,
+    schema: &EngineSchema,
+    engine: Handle<SharedExternEngine>,
+) -> ExternResult<Handle<ExclusiveUpdateTableTransactionBuilder>> {
+    let builder = unsafe { *builder.into_inner() };
+    let engine = unsafe { engine.as_ref() };
+    decode_engine_schema(schema)
+        .map(|schema| Box::new(builder.with_updated_schema(Arc::new(schema))).into())
         .into_extern_result(&engine)
 }
 

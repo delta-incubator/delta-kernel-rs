@@ -44,6 +44,7 @@ fn committer() -> Box<FileSystemCommitter> {
 #[tokio::test]
 async fn schema_evolution_while_writing_round_trips_new_column(
     #[values("none", "name", "id")] cm_mode: &str,
+    #[values(false, true)] complete: bool,
 ) -> KernelResult<()> {
     let (_temp_dir, table_path, engine) = test_table_setup()?;
     let snapshot = create_table_and_load_snapshot(
@@ -63,11 +64,23 @@ async fn schema_evolution_while_writing_round_trips_new_column(
         write_batch_to_table(&snapshot, engine.as_ref(), old_batch, HashMap::new()).await?;
     let old_max_id = max_column_id(&before);
     assert_eq!(old_max_id.is_some(), cm_mode != "none");
-    let mut transaction = before
+    let builder = before
         .clone()
-        .update_table(UpdateTableOperation::Write, "test-engine", true)
-        .add_column(StructField::nullable("country", DataType::STRING))
-        .build(engine.as_ref(), committer())?;
+        .update_table(UpdateTableOperation::Write, "test-engine", true);
+    let country = StructField::nullable("country", DataType::STRING);
+    let builder = if complete {
+        builder.with_updated_schema(
+            StructType::try_new(before.schema().fields().cloned().chain([country]))?.into(),
+        )
+    } else {
+        builder.add_column(country)
+    };
+    let result = builder.build(engine.as_ref(), committer());
+    if complete && cm_mode == "none" {
+        assert_result_error_with_message(result, "require column mapping");
+        return Ok(());
+    }
+    let mut transaction = result?;
 
     let write_context = transaction.write_state()?.write_context_builder().build()?;
     assert!(write_context.logical_data_schema().contains("country"));
@@ -2034,6 +2047,177 @@ async fn add_column_on_stale_table_leaves_schema_untouched(
     assert_eq!(
         schema.field("added").unwrap().column_mapping_id(),
         expected_added_cm_id
+    );
+    Ok(())
+}
+
+#[rstest]
+#[tokio::test(flavor = "multi_thread")]
+async fn complete_schema_retains_clustering_and_nested_mapping_across_checkpoints(
+    #[values("none", "v2", "v3")] compat: &str,
+) -> KernelResult<()> {
+    let (_dir, path, engine) = test_table_setup_mt()?;
+    let mut builder = create_table(
+        &path,
+        schema_ref! {
+            nullable "id": INTEGER,
+            nullable "items": (ArrayType::new(DataType::INTEGER, true)),
+        },
+        "test",
+        false,
+    )
+    .with_table_properties([("delta.columnMapping.mode", "name")])
+    .with_data_layout(DataLayout::clustered(["id"]));
+    if compat != "none" {
+        let property = if compat == "v2" {
+            "delta.enableIcebergCompatV2"
+        } else {
+            "delta.enableIcebergCompatV3"
+        };
+        builder = builder.with_table_properties([(property, "true")]);
+    }
+    let original = builder
+        .build(engine.as_ref(), committer())?
+        .commit(engine.as_ref())?
+        .unwrap_post_commit_snapshot();
+    let id = original.schema().field("id").unwrap().with_name("renamed");
+    let items = original.schema().field("items").unwrap().clone();
+    let request = schema_ref! { (items.clone()), (id.clone()), nullable "new": STRING };
+    let updated = original
+        .clone()
+        .update_table(UpdateTableOperation::AlterTable, "test", false)
+        .with_updated_schema(schema_ref! { nullable "discarded": STRING })
+        .with_updated_schema(request)
+        .build(engine.as_ref(), committer())?
+        .commit(engine.as_ref())?
+        .unwrap_post_commit_snapshot();
+    let dangling = updated
+        .clone()
+        .update_table(UpdateTableOperation::AlterTable, "test", false)
+        .with_updated_schema(schema_ref! { (items.clone()) })
+        .build(engine.as_ref(), committer());
+    assert!(dangling.is_err());
+    updated.clone().checkpoint(engine.as_ref(), None)?;
+    let fresh = Snapshot::builder_for(&path).build(engine.as_ref())?;
+    let historical = Snapshot::builder_for(&path)
+        .at_version(0)
+        .build(engine.as_ref())?;
+    assert_eq!(historical.schema(), original.schema());
+    for snapshot in [updated, fresh] {
+        assert_eq!(snapshot.version(), 1);
+        assert_eq!(snapshot.schema().field("renamed"), Some(&id));
+        assert_eq!(snapshot.schema().field("items"), Some(&items));
+        assert!(snapshot.schema().contains("new"));
+        assert!(!snapshot.schema().contains("discarded"));
+        assert_eq!(
+            snapshot.get_physical_clustering_columns(engine.as_ref())?,
+            original.get_physical_clustering_columns(engine.as_ref())?
+        );
+    }
+    Ok(())
+}
+
+#[rstest]
+#[tokio::test]
+async fn complete_schema_drop_then_add_cannot_reuse_physical_name(
+    #[values("name", "id")] mapping: &str,
+) -> KernelResult<()> {
+    let (_dir, path, engine) = test_table_setup()?;
+    let original = create_table_and_load_snapshot(
+        &path,
+        simple_schema(),
+        engine.as_ref(),
+        &[("delta.columnMapping.mode", mapping)],
+    )?;
+    let batch = RecordBatch::try_new(
+        Arc::new(original.schema().as_ref().try_into_arrow()?),
+        vec![
+            Arc::new(Int32Array::from(vec![1])),
+            Arc::new(StringArray::from(vec!["dropped value"])),
+        ],
+    )?;
+    let original = write_batch_to_table(&original, engine.as_ref(), batch, HashMap::new()).await?;
+    let old_name = physical_name_for_field(original.schema().field("name").unwrap()).to_string();
+    let retained = original.schema().field("id").unwrap().clone();
+    let dropped = original
+        .clone()
+        .update_table(UpdateTableOperation::AlterTable, "test", false)
+        .with_updated_schema(schema_ref! { (retained.clone()) })
+        .build(engine.as_ref(), committer())?
+        .commit(engine.as_ref())?
+        .unwrap_post_commit_snapshot();
+    let replacement = StructField::nullable("replacement", DataType::STRING).add_metadata([
+        (
+            ColumnMetadataKey::ColumnMappingId.as_ref(),
+            MetadataValue::Number(max_column_id(&dropped).unwrap() + 1),
+        ),
+        (
+            ColumnMetadataKey::ColumnMappingPhysicalName.as_ref(),
+            MetadataValue::String(old_name.clone()),
+        ),
+    ]);
+    let result = dropped
+        .clone()
+        .update_table(UpdateTableOperation::AlterTable, "test", false)
+        .with_updated_schema(schema_ref! { (retained.clone()), (replacement) })
+        .build(engine.as_ref(), committer());
+    assert_result_error_with_message(result, "New fields cannot supply physical names");
+    assert_eq!(
+        Snapshot::builder_for(&path)
+            .build(engine.as_ref())?
+            .version(),
+        dropped.version()
+    );
+
+    let updated = dropped
+        .update_table(UpdateTableOperation::AlterTable, "test", false)
+        .with_updated_schema(schema_ref! { (retained), nullable "replacement": STRING })
+        .build(engine.as_ref(), committer())?
+        .commit(engine.as_ref())?
+        .unwrap_post_commit_snapshot();
+    assert_ne!(
+        physical_name_for_field(updated.schema().field("replacement").unwrap()),
+        old_name
+    );
+    let batches = test_utils::read_scan(&updated.scan_builder().build()?, engine.clone())?;
+    assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 1);
+    for batch in batches {
+        let replacement = batch.column_by_name("replacement").unwrap();
+        assert_eq!(replacement.null_count(), batch.num_rows());
+    }
+    Ok(())
+}
+
+#[rstest]
+#[case::top_level(DataType::unshredded_variant())]
+#[case::structure(schema! { nullable "v": (DataType::unshredded_variant()) }.into())]
+#[case::array(ArrayType::new(DataType::unshredded_variant(), true).into())]
+#[case::map(MapType::new(DataType::STRING, DataType::unshredded_variant(), true).into())]
+#[tokio::test]
+async fn complete_schema_preserves_retained_variant(
+    #[case] data_type: DataType,
+    #[values("name", "id")] mapping: &str,
+) -> KernelResult<()> {
+    let (_dir, path, engine) = test_table_setup()?;
+    let original = create_table_and_load_snapshot(
+        &path,
+        schema_ref! { nullable "payload": (data_type) },
+        engine.as_ref(),
+        &[("delta.columnMapping.mode", mapping)],
+    )?;
+    let updated = original
+        .clone()
+        .update_table(UpdateTableOperation::AlterTable, "test", false)
+        .with_updated_schema(original.schema())
+        .build(engine.as_ref(), committer())?
+        .commit(engine.as_ref())?
+        .unwrap_post_commit_snapshot();
+    assert_eq!(updated.schema(), original.schema());
+    assert_eq!(
+        Snapshot::builder_for(&path)
+            .build(engine.as_ref())?
+            .schema(),
+        original.schema()
     );
     Ok(())
 }

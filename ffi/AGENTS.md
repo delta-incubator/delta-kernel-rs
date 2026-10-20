@@ -3,6 +3,13 @@
 The `delta_kernel_ffi` crate exposes the kernel to C/C++ via a stable FFI boundary using
 cbindgen-generated headers (`.h` and `.hpp`).
 
+## Existing-table DDL
+
+See [the transaction contract](../AGENTS.md#existing-table-ddl) for supported changes and validation.
+FFI setters consume the builder on success and error and copy borrowed inputs during the call.
+Schema decoding preserves field metadata. Segmented clustering paths preserve literal dots;
+an empty array explicitly clears keys, while omission retains them.
+
 ## FFI boundary conventions
 
 Memory ownership drives every choice below. Function inputs can usually borrow memory for the call.

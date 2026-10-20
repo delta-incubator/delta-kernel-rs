@@ -127,7 +127,7 @@ construction; create-table constructors require the path, schema, engine info, a
 and fix the operation to `CREATE TABLE`. These inputs cannot be changed on builders or built
 transactions. `data_change` is never inferred from staged files, including for empty commits.
 `build()` rejects ALTER with `true` and blind append with `false`; `commit()` retains operation and
-staged-file checks. `UpdateTableOperation::AlterTable` records schema-changing DDL without
+staged-file checks. `UpdateTableOperation::AlterTable` records table-metadata DDL without
 introducing a separate transaction type.
 Writers configure transaction intent before `build()`, then call
 `Transaction::write_state`, then bind partition values through the returned `WriteState` to get a
@@ -141,6 +141,15 @@ layers rather than an engine handler. `DefaultEngine` lives in `default-engine/s
 
 **EngineData:** opaque columnar data interface. NEVER access `EngineData` columns
 directly: ALWAYS use the visitor pattern (`visit_rows` with typed `GetData` accessors).
+
+## Existing-table DDL
+
+`Snapshot::update_table` supports complete-schema updates, property additions/removals, and
+clustering replacement/clearing. Setters accumulate intent; build validates the combined final state
+and commit publishes the actions atomically. Complete-schema updates require column mapping and
+cannot mix with incremental schema operations. Repeated collection setters replace their previous
+request. FFI setters consume the builder on success and error and copy borrowed inputs during the
+call. The Unity Catalog committer rejects existing-table metadata, protocol, and clustering changes.
 
 ## Testing
 

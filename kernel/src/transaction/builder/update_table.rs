@@ -1,25 +1,30 @@
 //! Builder for transactions against an existing table.
 
+use std::collections::HashMap;
+
 use delta_kernel_derive::internal_api;
 
+use super::properties::{finalize_properties, prepare_properties, upgrade_protocol};
 use super::state::TransactionBuilderState;
 use super::TransactionBuilder;
+use crate::clustering::{create_clustering_domain_metadata, validate_clustering_columns};
 use crate::committer::Committer;
 use crate::expressions::ColumnName;
-use crate::schema::StructField;
+use crate::schema::validation::validate_schema;
+use crate::schema::{normalize_column_names_to_schema_casing, SchemaRef, StructField};
 use crate::snapshot::SnapshotRef;
 use crate::table_configuration::TableConfiguration;
 use crate::table_features::{
-    validate_iceberg_compat_if_needed, IcebergCompatValidationContext, Operation, TableFeature,
-    V2_VALIDATOR, V3_VALIDATOR,
+    get_any_level_column_physical_name, validate_iceberg_compat_if_needed,
+    IcebergCompatValidationContext, Operation, TableFeature, V2_VALIDATOR, V3_VALIDATOR,
 };
 use crate::transaction::domain_metadata::validate_unique_domains;
-use crate::transaction::schema_evolution::{evolve_table_config, SchemaOperation};
+use crate::transaction::schema_evolution::{evolve_table_config, replace_schema, SchemaOperation};
 use crate::transaction::{ExecutionMode, Transaction, UpdateTable, UpdateTableOperation};
 use crate::utils::{current_time_ms, require};
 use crate::{Engine, KernelError, KernelResult};
 
-/// Configures DML and schema-changing DDL transactions against an existing table.
+/// Configures DML and table-metadata DDL transactions against an existing table.
 ///
 /// This builder does not create or replace tables. Construct it with
 /// [`Snapshot::update_table`](crate::Snapshot::update_table); operation, engine info, and
@@ -55,6 +60,10 @@ pub struct UpdateTableBuilderState {
     snapshot: SnapshotRef,
     operation: UpdateTableOperation,
     schema_changes: Option<Vec<SchemaOperation>>,
+    updated_schema: Option<SchemaRef>,
+    properties_added: Option<HashMap<String, String>>,
+    properties_removed: Option<Vec<String>>,
+    clustering_columns: Option<Vec<ColumnName>>,
     domain_metadata_removals: Vec<String>,
     is_blind_append: bool,
 }
@@ -85,6 +94,10 @@ impl TransactionBuilder<UpdateTable> {
                 snapshot,
                 operation,
                 schema_changes: None,
+                updated_schema: None,
+                properties_added: None,
+                properties_removed: None,
+                clustering_columns: None,
                 domain_metadata_removals: Vec::new(),
                 is_blind_append: false,
             },
@@ -95,7 +108,8 @@ impl TransactionBuilder<UpdateTable> {
     ///
     /// Blind appends add new files without depending on existing table state. Commit validation
     /// requires staged Add metadata and rejects staged Remove metadata or deletion-vector batches.
-    /// Blind append is also invalid for `ALTER TABLE`, schema changes, or `dataChange = false`.
+    /// Blind append is also invalid for `ALTER TABLE`, schema/property/clustering changes, or
+    /// `dataChange = false`.
     pub fn with_blind_append(mut self) -> Self {
         self.local_state.is_blind_append = true;
         self
@@ -124,6 +138,68 @@ impl TransactionBuilder<UpdateTable> {
             .get_or_insert_with(Vec::new)
             .extend(changes);
         Ok(self)
+    }
+
+    /// Requests a complete schema for a column-mapped table, replacing any previous request.
+    ///
+    /// Surviving fields retain their mapping IDs and physical names. New fields must be nullable
+    /// and cannot declare defaults or physical names. Kernel allocates fresh physical names for
+    /// new fields. Build validates renames, drops, widening, and default changes
+    /// against the snapshot and rejects mixing this setter with incremental schema operations.
+    /// Retained clustering keys must resolve. Omitted physical names on surviving fields are
+    /// restored; supplied names must match the snapshot. Statistics selections follow field IDs.
+    /// Returns the builder; validation errors are reported by [`build`](Self::build).
+    pub fn with_updated_schema(mut self, schema: SchemaRef) -> Self {
+        self.local_state.updated_schema = Some(schema);
+        self
+    }
+
+    /// Replaces the requested property additions and updates with `properties`.
+    ///
+    /// Ordinary keys retain their spelling. Build canonicalizes recognized Delta keys, validates
+    /// values and feature dependencies, and rejects protected settings and overlap with removals.
+    /// Returns the builder without validating cross-field intent.
+    pub fn with_table_properties_added<I, K, V>(mut self, properties: I) -> Self
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: Into<String>,
+        V: Into<String>,
+    {
+        self.local_state.properties_added = Some(
+            properties
+                .into_iter()
+                .map(|(k, v)| (k.into(), v.into()))
+                .collect(),
+        );
+        self
+    }
+
+    /// Replaces the requested property removals with `keys` and returns the builder.
+    ///
+    /// Removing an absent ordinary key succeeds. Build rejects case-insensitive `delta.*` keys
+    /// and keys also supplied for addition. Repeated calls replace the previous collection.
+    pub fn with_table_properties_removed(
+        mut self,
+        keys: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.local_state.properties_removed = Some(keys.into_iter().map(Into::into).collect());
+        self
+    }
+
+    /// Replaces the requested clustering keys with logical `columns`, in the supplied order.
+    ///
+    /// Omission retains current keys; an empty list clears them while retaining protocol support.
+    /// Every explicit request, including an empty list on an unclustered table, enables the
+    /// clustering and domain-metadata features. Omit the setter to avoid that protocol upgrade.
+    /// Build resolves keys against the final schema and rejects invalid keys or physical
+    /// partitioning. Returns the builder; repeated calls replace the previous request.
+    ///
+    /// Connectors must ensure historical files have statistics for newly selected keys. Kernel
+    /// enforces statistics on new files, but does not backfill statistics or recluster existing
+    /// data.
+    pub fn with_clustering_columns(mut self, columns: Vec<ColumnName>) -> Self {
+        self.local_state.clustering_columns = Some(columns);
+        self
     }
 
     /// Adds a nullable top-level column to the table schema.
@@ -207,9 +283,8 @@ impl TransactionBuilder<UpdateTable> {
     /// - Conflicting application ids or domain metadata, or reserved or unsupported domains.
     /// - Connector commit information that does not contain exactly one row.
     ///
-    /// Schema changes are rejected when `icebergCompatV2`, `icebergCompatV3`, or
-    /// `allowColumnDefaults` is enabled. This applies to standalone ALTER TABLE transactions and
-    /// schema evolution during data-changing writes.
+    /// Incremental schema operations are rejected when `icebergCompatV2`, `icebergCompatV3`, or
+    /// `allowColumnDefaults` is enabled. Complete schemas use identity-based transition validation.
     pub fn build(
         self,
         engine: &dyn Engine,
@@ -222,14 +297,24 @@ impl TransactionBuilder<UpdateTable> {
     }
 
     fn validate(&self) -> KernelResult<()> {
+        if self.local_state.updated_schema.is_some() && self.local_state.schema_changes.is_some() {
+            return Err(KernelError::invalid_transaction_state(
+                "Cannot mix complete schema replacement with incremental schema operations",
+            ));
+        }
         let operation = &self.local_state.operation;
         operation
             .validate()
             .map_err(KernelError::invalid_transaction_state)?;
         if operation == &UpdateTableOperation::AlterTable {
-            if self.local_state.schema_changes.is_none() {
+            if self.local_state.schema_changes.is_none()
+                && self.local_state.updated_schema.is_none()
+                && self.local_state.properties_added.is_none()
+                && self.local_state.properties_removed.is_none()
+                && self.local_state.clustering_columns.is_none()
+            {
                 return Err(KernelError::invalid_transaction_state(
-                    "ALTER TABLE requires at least one schema change",
+                    "ALTER TABLE requires at least one table change",
                 ));
             }
             if self.local_state.is_blind_append {
@@ -248,9 +333,27 @@ impl TransactionBuilder<UpdateTable> {
                 "blind append requires data_change to be true",
             ));
         }
-        if self.local_state.is_blind_append && self.local_state.schema_changes.is_some() {
+        if self.local_state.is_blind_append
+            && (self.local_state.schema_changes.is_some()
+                || self.local_state.updated_schema.is_some())
+        {
             return Err(KernelError::invalid_transaction_state(
                 "blind append cannot include schema changes",
+            ));
+        }
+
+        if self.local_state.is_blind_append
+            && (self.local_state.properties_added.is_some()
+                || self.local_state.properties_removed.is_some())
+        {
+            return Err(KernelError::invalid_transaction_state(
+                "blind append cannot include table property changes",
+            ));
+        }
+
+        if self.local_state.is_blind_append && self.local_state.clustering_columns.is_some() {
+            return Err(KernelError::invalid_transaction_state(
+                "blind append cannot include clustering changes",
             ));
         }
 
@@ -292,6 +395,10 @@ fn try_new_update_table<MODE: ExecutionMode>(
         snapshot: read_snapshot,
         operation,
         schema_changes,
+        updated_schema,
+        properties_added,
+        properties_removed,
+        clustering_columns: requested_clustering,
         domain_metadata_removals,
         is_blind_append,
     } = local_state;
@@ -301,14 +408,33 @@ fn try_new_update_table<MODE: ExecutionMode>(
         .table_configuration()
         .ensure_operation_supported(Operation::Write)?;
 
-    // TODO(#3240): Validate that delta.enableRowTracking=true has the required protocol support
-    // and materialized column-name properties. Materialized names must be distinct and must not
-    // collide with physical data columns.
+    let mut clustering_columns = match &requested_clustering {
+        Some(_) => None,
+        None => read_snapshot.get_physical_clustering_columns(engine)?,
+    };
 
-    // Read clustering columns from snapshot (returns None if clustering not enabled)
-    let clustering_columns = read_snapshot.get_physical_clustering_columns(engine)?;
-
-    let commit_timestamp = current_time_ms()?;
+    let mut commit_timestamp = current_time_ms()?;
+    let enables_ict = read_snapshot.table_properties().enable_in_commit_timestamps != Some(true)
+        && properties_added.as_ref().is_some_and(|properties| {
+            properties.iter().any(|(key, value)| {
+                key.eq_ignore_ascii_case(crate::table_properties::ENABLE_IN_COMMIT_TIMESTAMPS)
+                    && value.eq_ignore_ascii_case("true")
+            })
+        });
+    if enables_ict {
+        let previous = read_snapshot
+            .get_timestamp(engine)
+            .map_err(|error| {
+                KernelError::invalid_transaction_state(format!(
+                "Cannot enable in-commit timestamps: previous commit timestamp unavailable: {error}"
+            ))
+            })?
+            .checked_add(1)
+            .ok_or_else(|| {
+                KernelError::invalid_transaction_state("In-commit timestamp overflow")
+            })?;
+        commit_timestamp = commit_timestamp.max(previous);
+    }
 
     let span = tracing::info_span!(
         "txn",
@@ -316,32 +442,119 @@ fn try_new_update_table<MODE: ExecutionMode>(
         read_version = read_snapshot.version(),
     );
 
-    let effective_table_config = read_snapshot.table_configuration().clone();
-
-    validate_iceberg_compat_if_needed(
-        &effective_table_config,
-        &V2_VALIDATOR,
-        IcebergCompatValidationContext::Write,
+    let old = read_snapshot.table_configuration();
+    let has_schema_request = schema_changes.is_some() || updated_schema.is_some();
+    let has_table_change_request = has_schema_request
+        || properties_added.is_some()
+        || properties_removed.is_some()
+        || requested_clustering.is_some();
+    let stats_columns_requested = properties_added.as_ref().is_some_and(|properties| {
+        properties.keys().any(|key| {
+            key.eq_ignore_ascii_case(crate::table_properties::DATA_SKIPPING_STATS_COLUMNS)
+        })
+    });
+    let (metadata, protocol) = prepare_properties(
+        old,
+        properties_added,
+        properties_removed,
+        read_snapshot.version() + 1,
+        commit_timestamp,
     )?;
-
-    validate_iceberg_compat_if_needed(
-        &effective_table_config,
-        &V3_VALIDATOR,
-        IcebergCompatValidationContext::Write,
-    )?;
-
-    let should_emit_metadata = schema_changes.is_some();
-    let effective_table_config = match schema_changes {
-        Some(changes) => apply_schema_changes(effective_table_config, changes)?,
-        None => effective_table_config,
+    let effective_table_config = match updated_schema {
+        Some(schema) => replace_schema(old, schema, metadata, protocol, stats_columns_requested)?,
+        None => {
+            let configured = if metadata == *old.metadata() && protocol == *old.protocol() {
+                old.clone()
+            } else {
+                TableConfiguration::try_new_from(
+                    old,
+                    Some(metadata),
+                    Some(protocol),
+                    old.version(),
+                )?
+            };
+            match schema_changes {
+                Some(changes) => apply_schema_changes(configured, changes)?,
+                None => configured,
+            }
+        }
     };
+    let mut effective_table_config = if has_table_change_request {
+        finalize_properties(old, effective_table_config)?
+    } else {
+        effective_table_config
+    };
+    if has_table_change_request {
+        validate_schema(
+            effective_table_config.logical_schema_ref(),
+            effective_table_config.column_mapping_mode(),
+            effective_table_config.is_feature_enabled(&TableFeature::ChangeDataFeed),
+        )?;
+    }
+    let mut system_domain_metadata_additions = Vec::new();
+    if let Some(columns) = requested_clustering {
+        require!(
+            effective_table_config
+                .metadata()
+                .partition_columns()
+                .is_empty(),
+            KernelError::unsupported("Clustering updates require an unpartitioned Delta table")
+        );
+        let schema = effective_table_config.logical_schema();
+        let columns = normalize_column_names_to_schema_casing(&schema, &columns);
+        if !columns.is_empty() {
+            validate_clustering_columns(&schema, &columns)?;
+        }
+        let physical_columns = columns
+            .iter()
+            .map(|column| {
+                get_any_level_column_physical_name(
+                    &schema,
+                    column,
+                    effective_table_config.column_mapping_mode(),
+                )
+            })
+            .collect::<KernelResult<Vec<_>>>()?;
+        let protocol =
+            upgrade_protocol(&effective_table_config, vec![TableFeature::ClusteredTable])?;
+        effective_table_config = TableConfiguration::try_new_from(
+            &effective_table_config,
+            None,
+            Some(protocol),
+            old.version(),
+        )?;
+        system_domain_metadata_additions.push(create_clustering_domain_metadata(&physical_columns));
+        clustering_columns = Some(physical_columns);
+    }
+    if has_schema_request {
+        if let Some(columns) = clustering_columns
+            .as_ref()
+            .filter(|columns| !columns.is_empty())
+        {
+            validate_clustering_columns(&effective_table_config.physical_schema(), columns)?;
+        }
+    }
+    for validator in [&V2_VALIDATOR, &V3_VALIDATOR] {
+        validate_iceberg_compat_if_needed(
+            &effective_table_config,
+            validator,
+            IcebergCompatValidationContext::Write,
+        )?;
+    }
+    effective_table_config.ensure_operation_supported(Operation::Write)?;
+    let should_emit_metadata =
+        has_schema_request || old.metadata() != effective_table_config.metadata();
+    let should_emit_protocol = old.protocol() != effective_table_config.protocol();
 
     Ok(Transaction {
+        has_table_change_request,
+        should_emit_protocol,
         read_snapshot_opt: Some(read_snapshot),
         should_emit_metadata,
         user_domain_removals: domain_metadata_removals,
         is_blind_append,
         physical_clustering_columns: clustering_columns,
+        system_domain_metadata_additions,
         ..Transaction::new(
             common_state,
             effective_table_config,
@@ -615,7 +828,7 @@ mod tests {
     }
 
     #[test]
-    fn alter_table_requires_schema_changes() -> KernelResult<()> {
+    fn alter_table_requires_table_changes() -> KernelResult<()> {
         let (engine, snapshot, _tempdir) = load_test_table("table-without-dv-small")?;
         let error = snapshot
             .update_table(UpdateTableOperation::AlterTable, "test-engine", false)
@@ -624,7 +837,7 @@ mod tests {
 
         assert!(error
             .to_string()
-            .contains("requires at least one schema change"));
+            .contains("requires at least one table change"));
         Ok(())
     }
 
@@ -729,7 +942,7 @@ mod tests {
             let error = result.unwrap_err();
             assert!(
                 matches!(&error, KernelError::InvalidTransactionState(message)
-                if message == "ALTER TABLE requires at least one schema change")
+                if message == "ALTER TABLE requires at least one table change")
             );
         } else {
             let transaction = result.expect("non-ALTER transactions do not require schema changes");
@@ -921,6 +1134,86 @@ mod tests {
             .unwrap_err();
         assert!(matches!(&error, KernelError::InvalidTransactionState(_)));
         assert!(error.to_string().contains(expected), "{error}");
+        Ok(())
+    }
+
+    #[rstest]
+    fn complete_schema_mixing_is_rejected_in_both_orders(
+        #[values(false, true)] complete_first: bool,
+    ) -> KernelResult<()> {
+        let (engine, snapshot, _tempdir) = load_test_table("table-without-dv-small")?;
+        let schema = snapshot.schema();
+        let builder = snapshot.update_table(UpdateTableOperation::AlterTable, "test-engine", false);
+        let field = StructField::nullable("new", DataType::INTEGER);
+        let builder = if complete_first {
+            builder.with_updated_schema(schema).add_column(field)
+        } else {
+            builder.add_column(field).with_updated_schema(schema)
+        };
+        let error = builder
+            .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))
+            .unwrap_err();
+        assert!(error.to_string().contains("Cannot mix"), "{error}");
+        Ok(())
+    }
+
+    #[rstest]
+    #[case::noop(false)]
+    #[case::protocol_only(true)]
+    fn property_requests_preserve_intent_without_metadata(
+        #[case] feature: bool,
+    ) -> KernelResult<()> {
+        let (engine, snapshot, _dir) = load_test_table("table-without-dv-small")?;
+        let builder = snapshot.update_table(UpdateTableOperation::AlterTable, "test", false);
+        let builder = if feature {
+            builder.with_table_properties_added([("delta.feature.timestampNtz", "supported")])
+        } else {
+            builder.with_table_properties_removed(["absent"])
+        };
+        let transaction = builder.build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?;
+        assert!(transaction.has_table_change_request);
+        assert!(!transaction.should_emit_metadata);
+        assert_eq!(transaction.should_emit_protocol, feature);
+        transaction.validate_operation_compatibility()?;
+        Ok(())
+    }
+
+    #[rstest]
+    fn clustering_request_is_domain_only_and_rejects_blind_append(
+        #[values(false, true)] clear: bool,
+        #[values(false, true)] blind: bool,
+    ) -> KernelResult<()> {
+        let (engine, snapshot, _dir) = load_test_table("table-without-dv-small")?;
+        let columns = if clear {
+            vec![]
+        } else {
+            vec![column_name!("value")]
+        };
+        let builder = snapshot
+            .update_table(UpdateTableOperation::Write, "test", true)
+            .with_clustering_columns(columns);
+        let builder = if blind {
+            builder.with_blind_append()
+        } else {
+            builder
+        };
+        let result = builder.build(engine.as_ref(), Box::new(FileSystemCommitter::new()));
+        if blind {
+            assert!(result
+                .unwrap_err()
+                .to_string()
+                .contains("blind append cannot include clustering"));
+        } else {
+            let transaction = result?;
+            assert!(transaction.has_table_change_request);
+            assert!(!transaction.should_emit_metadata);
+            assert!(transaction.should_emit_protocol);
+            assert_eq!(transaction.system_domain_metadata_additions.len(), 1);
+            assert_eq!(
+                transaction.physical_clustering_columns.unwrap().is_empty(),
+                clear
+            );
+        }
         Ok(())
     }
 

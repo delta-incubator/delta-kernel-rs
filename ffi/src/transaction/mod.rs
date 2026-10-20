@@ -122,6 +122,7 @@ mod tests {
     use delta_kernel::engine::arrow_conversion::TryIntoArrow;
     use delta_kernel::engine::arrow_data::ArrowEngineData;
     use delta_kernel::engine_data::FilteredEngineData;
+    use delta_kernel::expressions::ColumnName;
     use delta_kernel::metrics::MetricEvent;
     use delta_kernel::object_store::path::Path;
     use delta_kernel::object_store::{DynObjectStore, ObjectStoreExt as _};
@@ -134,6 +135,7 @@ mod tests {
     use delta_kernel::{KernelResult, Snapshot};
     use delta_kernel_ffi::delta_types::{
         FfiColumnNameArray, FfiNullableStringMap, FfiNullableStringMapEntry, FfiStringArray,
+        FfiStringMap, FfiStringMapEntry,
     };
     use delta_kernel_ffi::engine_data::{get_engine_data, ArrowFFIData};
     use delta_kernel_ffi::error::FFIKernelError;
@@ -171,6 +173,7 @@ mod tests {
     use crate::schema_visitor::visit_field_geometry;
     use crate::schema_visitor::{
         visit_field_integer, visit_field_long, visit_field_string, visit_field_struct,
+        EngineMetadata,
     };
     use crate::{
         free_engine, free_schema, free_snapshot, kernel_bytes_slice, kernel_string_slice,
@@ -1988,6 +1991,15 @@ mod tests {
         Ok(())
     }
 
+    extern "C" fn visit_test_field_metadata(
+        metadata: *mut c_void,
+        state: &mut crate::scan::CMetadataMap,
+    ) -> bool {
+        let values = unsafe { &*metadata.cast::<HashMap<String, MetadataValue>>() };
+        *state = values.clone().into();
+        true
+    }
+
     /// Schema visitor callback for tests: encodes the schema stored in the `schema` pointer
     /// (which points to a `Vec<StructField>`) into the kernel's `KernelSchemaVisitorState`.
     /// Only supports primitive fields (no nested structs/arrays/maps) -- sufficient for tests.
@@ -2001,27 +2013,32 @@ mod tests {
             .map(|field| {
                 let name = field.name.as_str();
                 let nullable = field.nullable;
+                let metadata = EngineMetadata {
+                    metadata: field.metadata() as *const HashMap<String, MetadataValue>
+                        as *mut c_void,
+                    visitor: visit_test_field_metadata,
+                };
                 unsafe {
                     ok_or_panic(match field.data_type {
                         DataType::INTEGER => visit_field_integer(
                             state,
                             kernel_string_slice!(name),
                             nullable,
-                            std::ptr::null(),
+                            &metadata,
                             allocate_err,
                         ),
                         DataType::STRING => visit_field_string(
                             state,
                             kernel_string_slice!(name),
                             nullable,
-                            std::ptr::null(),
+                            &metadata,
                             allocate_err,
                         ),
                         DataType::LONG => visit_field_long(
                             state,
                             kernel_string_slice!(name),
                             nullable,
-                            std::ptr::null(),
+                            &metadata,
                             allocate_err,
                         ),
                         _ => panic!("Unsupported test field type: {:?}", field.data_type),
@@ -2955,6 +2972,240 @@ mod tests {
         Ok(())
     }
 
+    #[rstest]
+    #[tokio::test]
+    async fn complete_schema_ffi_preserves_metadata_and_consumes_on_decode_error(
+        #[values(false, true)] invalid: bool,
+    ) -> KernelResult<()> {
+        let (store, test_engine, table_url) =
+            test_utils::engine_store_setup("complete_schema_ffi", None);
+        let snapshot = delta_kernel::transaction::create_table::create_table(
+            table_url.as_str(),
+            schema_ref! { nullable "id": INTEGER },
+            "test",
+            false,
+        )
+        .with_table_properties([("delta.columnMapping.mode", "name")])
+        .build(&test_engine, Box::new(FileSystemCommitter::new()))?
+        .commit(&test_engine)?
+        .unwrap_post_commit_snapshot();
+        let mut field = snapshot.schema().field("id").unwrap().clone();
+        field.metadata.insert(
+            "comment".into(),
+            MetadataValue::String("retained metadata".into()),
+        );
+        let fields = vec![field];
+        let schema = EngineSchema {
+            schema: &fields as *const Vec<StructField> as *mut c_void,
+            visitor: if invalid {
+                visit_invalid_schema_not_struct
+            } else {
+                visit_test_schema
+            },
+        };
+        let engine = engine_handle_for_store(store);
+        let builder: Handle<ExclusiveUpdateTableTransactionBuilder> = Box::new(
+            snapshot
+                .clone()
+                .update_table(UpdateTableOperation::AlterTable, "test", false),
+        )
+        .into();
+        let result = unsafe {
+            update_table_txn_builder_with_updated_schema(builder, &schema, engine.shallow_copy())
+        };
+        if invalid {
+            assert_extern_result_error_contains(
+                result,
+                FFIKernelError::SchemaError,
+                "Final returned id was not a struct",
+            );
+        } else {
+            let transaction = ok_or_panic(unsafe {
+                update_table_txn_builder_build(ok_or_panic(result), engine.shallow_copy())
+            });
+            let committed =
+                ok_or_panic(unsafe { update_table_txn_commit(transaction, engine.shallow_copy()) });
+            assert_eq!(unsafe { version_and_free(committed) }, 1);
+            let fresh =
+                delta_kernel::Snapshot::builder_for(table_url.as_str()).build(&test_engine)?;
+            assert_eq!(fresh.schema().field("id").unwrap(), &fields[0]);
+        }
+        assert_eq!(Arc::strong_count(&snapshot), 1);
+        unsafe { free_engine(engine) };
+        Ok(())
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn table_property_ffi_copies_inputs_and_consumes_on_decode_error(
+        #[values(false, true)] removal: bool,
+        #[values(false, true)] invalid: bool,
+    ) -> KernelResult<()> {
+        let (url, _store, engine) = setup_domain_metadata_table("property_ffi", false).await?;
+        let snapshot = unsafe { build_snapshot(ffi_str(url.as_str()), engine.shallow_copy()) };
+        let retained = unsafe { snapshot.clone_as_arc() };
+        let builder = ok_or_panic(unsafe {
+            new_update_table_txn_builder(
+                snapshot.shallow_copy(),
+                KernelUpdateTableOperation::AlterTable,
+                ffi_str("test"),
+                false,
+                engine.shallow_copy(),
+            )
+        });
+        let result = {
+            let invalid_bytes = [0xff_u8];
+            let key = if invalid {
+                KernelStringSlice {
+                    ptr: invalid_bytes.as_ptr().cast(),
+                    len: 1,
+                }
+            } else {
+                ffi_str("App.Key")
+            };
+            if removal {
+                let keys = [key];
+                let input = unsafe { FfiStringArray::new_unsafe(&keys) };
+                unsafe {
+                    update_table_txn_builder_with_table_properties_removed(
+                        builder,
+                        &input,
+                        engine.shallow_copy(),
+                    )
+                }
+            } else {
+                let values = [FfiStringMapEntry {
+                    key,
+                    value: ffi_str("copied"),
+                }];
+                let input = unsafe { FfiStringMap::new_unsafe(&values) };
+                unsafe {
+                    update_table_txn_builder_with_table_properties_added(
+                        builder,
+                        &input,
+                        engine.shallow_copy(),
+                    )
+                }
+            }
+        };
+        if invalid {
+            assert_extern_result_error_contains(result, FFIKernelError::Utf8Error, "invalid utf-8");
+        } else {
+            let txn = ok_or_panic(unsafe {
+                update_table_txn_builder_build(ok_or_panic(result), engine.shallow_copy())
+            });
+            let committed =
+                ok_or_panic(unsafe { update_table_txn_commit(txn, engine.shallow_copy()) });
+            assert_eq!(unsafe { version_and_free(committed) }, 1);
+            let fresh = unsafe { build_snapshot(ffi_str(url.as_str()), engine.shallow_copy()) };
+            assert_eq!(
+                unsafe { fresh.as_ref() }
+                    .table_properties()
+                    .unknown_properties
+                    .get("App.Key")
+                    .map(String::as_str),
+                if removal { None } else { Some("copied") }
+            );
+            unsafe { free_snapshot(fresh) };
+        }
+        assert_eq!(Arc::strong_count(&retained), 2);
+        unsafe {
+            free_snapshot(snapshot);
+            free_engine(engine);
+        }
+        Ok(())
+    }
+
+    #[rstest]
+    #[case::nested(0)]
+    #[case::clear(1)]
+    #[case::invalid_utf8(2)]
+    #[case::empty_path(3)]
+    #[tokio::test]
+    async fn clustering_ffi_copies_segmented_paths_and_consumes_errors(
+        #[case] scenario: u8,
+    ) -> KernelResult<()> {
+        let (store, test_engine, table_url) =
+            test_utils::engine_store_setup("clustering_ffi", None);
+        let snapshot = delta_kernel::transaction::create_table::create_table(
+            table_url.as_str(),
+            schema_ref! { (StructField::nullable("parent.with.dot", StructType::try_new([StructField::nullable("child", DataType::INTEGER)])?)) },
+            "test", false,
+        ).with_table_properties([("delta.columnMapping.mode", "name")])
+            .build(&test_engine, Box::new(FileSystemCommitter::new()))?
+            .commit(&test_engine)?.unwrap_post_commit_snapshot();
+        let engine = engine_handle_for_store(store);
+        let builder: Handle<ExclusiveUpdateTableTransactionBuilder> = Box::new(
+            snapshot
+                .clone()
+                .update_table(UpdateTableOperation::AlterTable, "test", false),
+        )
+        .into();
+        let result = {
+            let bad = [0xff_u8];
+            let first = if scenario == 2 {
+                KernelStringSlice {
+                    ptr: bad.as_ptr().cast(),
+                    len: 1,
+                }
+            } else {
+                ffi_str("parent.with.dot")
+            };
+            let path = [first, ffi_str("child")];
+            let path = if scenario == 3 { &path[..0] } else { &path[..] };
+            let names = [FfiColumnName {
+                path: unsafe { FfiStringArray::new_unsafe(path) },
+            }];
+            let names = if scenario == 1 {
+                &names[..0]
+            } else {
+                &names[..]
+            };
+            let input = unsafe { FfiColumnNameArray::new_unsafe(names) };
+            unsafe {
+                update_table_txn_builder_with_clustering_columns(
+                    builder,
+                    &input,
+                    engine.shallow_copy(),
+                )
+            }
+        };
+        if scenario == 2 {
+            assert_extern_result_error_contains(result, FFIKernelError::Utf8Error, "invalid utf-8");
+        } else {
+            let built = unsafe {
+                update_table_txn_builder_build(ok_or_panic(result), engine.shallow_copy())
+            };
+            if scenario == 3 {
+                match built {
+                    ExternResult::Err(error) => {
+                        let _ = unsafe { recover_error(error) };
+                    }
+                    ExternResult::Ok(_) => panic!("empty column path must fail"),
+                }
+            } else {
+                let committed = ok_or_panic(unsafe {
+                    update_table_txn_commit(ok_or_panic(built), engine.shallow_copy())
+                });
+                assert_eq!(unsafe { version_and_free(committed) }, 1);
+                let fresh =
+                    delta_kernel::Snapshot::builder_for(table_url.as_str()).build(&test_engine)?;
+                let columns = fresh.get_clustering_column_infos(&test_engine)?.unwrap();
+                if scenario == 1 {
+                    assert!(columns.is_empty());
+                } else {
+                    assert_eq!(
+                        columns[0].logical_column,
+                        ColumnName::new(["parent.with.dot", "child"])
+                    );
+                }
+            }
+        }
+        assert_eq!(Arc::strong_count(&snapshot), 1);
+        unsafe { free_engine(engine) };
+        Ok(())
+    }
+
     #[derive(Debug)]
     enum InvalidUpdateIntent {
         EmptyCustomOperation,
@@ -3371,7 +3622,7 @@ mod tests {
         assert_extern_result_error_contains(
             unsafe { update_table_txn_builder_build(builder, engine.shallow_copy()) },
             FFIKernelError::InvalidTransactionStateError,
-            "ALTER TABLE requires at least one schema change",
+            "ALTER TABLE requires at least one table change",
         );
         unsafe {
             free_snapshot(snapshot);
