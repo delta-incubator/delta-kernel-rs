@@ -2,13 +2,13 @@
 
 use super::{ColumnMetadataKey, DataType, StructField, StructType, UserDefinedType};
 use crate::transforms::{transform_output_type, SchemaTransform};
-use crate::{KernelError, Result};
+use crate::{KernelError, KernelResult};
 
 /// Rejects generated or identity metadata on UDT fields in `schema`.
 ///
 /// Returns a schema error naming the field and prohibited metadata key. Physical fields inside
 /// a UDT are outside this traversal.
-pub(crate) fn validate_udt_write_metadata(schema: &StructType) -> Result<()> {
+pub(crate) fn validate_udt_write_metadata(schema: &StructType) -> KernelResult<()> {
     UdtWriteMetadataValidator.transform_struct(schema)
 }
 
@@ -30,9 +30,9 @@ pub(super) fn contains_udt(data_type: &DataType) -> bool {
 struct UdtWriteMetadataValidator;
 
 impl<'a> SchemaTransform<'a> for UdtWriteMetadataValidator {
-    transform_output_type!(|'a, T| Result<()>);
+    transform_output_type!(|'a, T| KernelResult<()>);
 
-    fn transform_struct_field(&mut self, field: &'a StructField) -> Result<()> {
+    fn transform_struct_field(&mut self, field: &'a StructField) -> KernelResult<()> {
         if matches!(field.data_type(), DataType::UserDefined(_)) {
             if let Some(key) = field.metadata().keys().find(|key| {
                 key.as_str() == ColumnMetadataKey::GenerationExpression.as_ref()

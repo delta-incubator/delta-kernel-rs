@@ -7,7 +7,8 @@ use delta_kernel::schema::{
 };
 use delta_kernel::transaction::create_table::create_table;
 use delta_kernel::transaction::data_layout::DataLayout;
-use delta_kernel::Result;
+use delta_kernel::transaction::UpdateTableOperation;
+use delta_kernel::KernelResult;
 use rstest::rstest;
 use test_utils::{assert_result_error_with_message, test_table_setup};
 
@@ -23,11 +24,14 @@ fn udt(sql_type: DataType) -> DataType {
 #[rstest]
 #[case::partition(DataLayout::Partitioned { columns: vec![column_name!("value")] }, "non-primitive")]
 #[case::clustering(DataLayout::Clustered { columns: vec![column_name!("value")] }, "unsupported type")]
-fn create_udt_rejects_data_layout(#[case] layout: DataLayout, #[case] error: &str) -> Result<()> {
+fn create_udt_rejects_data_layout(
+    #[case] layout: DataLayout,
+    #[case] error: &str,
+) -> KernelResult<()> {
     let (_temp, table_path, engine) = test_table_setup()?;
     let schema = schema_ref! { nullable "id": LONG, nullable "value": (udt(DataType::LONG)) };
     assert_result_error_with_message(
-        create_table(&table_path, schema, "test")
+        create_table(&table_path, schema, "test", true)
             .with_data_layout(layout)
             .build(engine.as_ref(), Box::new(FileSystemCommitter::new())),
         error,
@@ -50,7 +54,7 @@ fn create_udt_rejects_column_metadata(
     #[case] value: &str,
     #[case] error: &str,
     #[values("top", "struct", "array", "map")] placement: &str,
-) -> Result<()> {
+) -> KernelResult<()> {
     let (_temp, table_path, engine) = test_table_setup()?;
     let field = StructField::nullable("value", udt(DataType::LONG))
         .add_metadata([(key.to_owned(), MetadataValue::String(value.to_owned()))]);
@@ -63,7 +67,7 @@ fn create_udt_rejects_column_metadata(
         _ => unreachable!(),
     };
     assert_result_error_with_message(
-        create_table(&table_path, schema_ref! { (field), }, "test")
+        create_table(&table_path, schema_ref! { (field), }, "test", true)
             .build(engine.as_ref(), Box::new(FileSystemCommitter::new())),
         error,
     );
@@ -78,7 +82,7 @@ fn create_udt_rejects_iceberg_compat(
     #[case] property: &str,
     #[case] error: &str,
     #[values("top", "struct", "array", "map_key", "map_value")] placement: &str,
-) -> Result<()> {
+) -> KernelResult<()> {
     let (_temp, table_path, engine) = test_table_setup()?;
     let value = udt(DataType::LONG);
     let value = match placement {
@@ -94,6 +98,7 @@ fn create_udt_rejects_iceberg_compat(
             &table_path,
             schema_ref! { nullable "value": (value) },
             "test",
+            true,
         )
         .with_table_properties([(property, "true")])
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new())),
@@ -103,18 +108,18 @@ fn create_udt_rejects_iceberg_compat(
 }
 
 #[test]
-fn alter_udt_rejects_changes_inside_physical_type() -> Result<()> {
+fn alter_udt_rejects_changes_inside_physical_type() -> KernelResult<()> {
     let (_temp, table_path, engine) = test_table_setup()?;
     let schema = schema_ref! {
         nullable "value": (udt(schema! { nullable "inner": INTEGER }.into())),
     };
-    let snapshot = create_table(&table_path, schema, "test")
+    let snapshot = create_table(&table_path, schema, "test", true)
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
         .commit(engine.as_ref())?
         .unwrap_post_commit_snapshot();
     assert_result_error_with_message(
         snapshot
-            .alter_table()
+            .update_table(UpdateTableOperation::AlterTable, "test-engine", false)
             .add_column_at(
                 column_name!("value"),
                 StructField::nullable("added", DataType::LONG),
