@@ -209,7 +209,7 @@ impl Snapshot {
                     table_configuration,
                     crc,
                     #[cfg(feature = "adaptive-metadata-in-dev")]
-                    checkpoint_action,
+                    captured_checkpoint_action,
                     #[cfg(feature = "adaptive-metadata-in-dev")]
                     last_manifest_commit,
                 } = Self::prepare_new_from_log_segment(
@@ -230,7 +230,7 @@ impl Snapshot {
                     built_as_latest,
                     false, /* skipped_new_checkpoints */
                     #[cfg(feature = "adaptive-metadata-in-dev")]
-                    checkpoint_action,
+                    captured_checkpoint_action,
                     #[cfg(feature = "adaptive-metadata-in-dev")]
                     last_manifest_commit,
                 );
@@ -312,7 +312,7 @@ impl Snapshot {
             built_as_latest,
             skipped_new_checkpoints,
             #[cfg(feature = "adaptive-metadata-in-dev")]
-            resolution.checkpoint_action,
+            resolution.captured_checkpoint_action,
             #[cfg(feature = "adaptive-metadata-in-dev")]
             resolution.last_manifest_commit,
         );

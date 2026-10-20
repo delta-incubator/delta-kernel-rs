@@ -44,8 +44,8 @@ impl LogSegment {
     /// The `crc` parameter is the CRC eagerly resolved by the caller; it is used to
     /// short-circuit or seed the replay.
     ///
-    /// Under `adaptive-metadata-in-dev`, the result's `checkpoint_action` is the latest AMT
-    /// checkpoint action when replay captured it, for the caller to store on the
+    /// Under `adaptive-metadata-in-dev`, the result's `captured_checkpoint_action` is the latest
+    /// AMT checkpoint action when replay captured it, for the caller to store on the
     /// [`Snapshot`](crate::Snapshot).
     #[instrument(name = "log_seg.load_p_m", skip_all, fields(enable_call_frame), err)]
     pub(crate) fn read_protocol_metadata_opt(
@@ -92,7 +92,7 @@ impl LogSegment {
             // The pruned replay only reads commits after the CRC version, but a hit there is still
             // the latest action: any action at or below the CRC is older.
             #[cfg(feature = "adaptive-metadata-in-dev")]
-            let checkpoint_action = candidate.checkpoint.map(|(_, c)| Arc::new(c));
+            let captured_checkpoint_action = candidate.checkpoint.map(|(_, c)| Arc::new(c));
 
             if metadata_opt.is_some() && protocol_opt.is_some() {
                 info!("Found P&M from pruned log replay");
@@ -101,7 +101,7 @@ impl LogSegment {
                     protocol: protocol_opt,
                     source: ProtocolMetadataSource::CrcSeededPmOnlyReplay,
                     #[cfg(feature = "adaptive-metadata-in-dev")]
-                    checkpoint_action,
+                    captured_checkpoint_action,
                     #[cfg(feature = "adaptive-metadata-in-dev")]
                     last_manifest_commit: LastManifestCommitResolution::Unresolved,
                 });
@@ -116,7 +116,7 @@ impl LogSegment {
                 protocol: protocol_opt.or_else(|| Some(crc.protocol.clone())),
                 source: ProtocolMetadataSource::CrcSeededPmOnlyReplay,
                 #[cfg(feature = "adaptive-metadata-in-dev")]
-                checkpoint_action,
+                captured_checkpoint_action,
                 #[cfg(feature = "adaptive-metadata-in-dev")]
                 last_manifest_commit: LastManifestCommitResolution::Unresolved,
             });
@@ -129,7 +129,7 @@ impl LogSegment {
             protocol: candidate.protocol.map(|(_, p)| p),
             source: ProtocolMetadataSource::FullReplay,
             #[cfg(feature = "adaptive-metadata-in-dev")]
-            checkpoint_action: candidate.checkpoint.map(|(_, c)| Arc::new(c)),
+            captured_checkpoint_action: candidate.checkpoint.map(|(_, c)| Arc::new(c)),
             #[cfg(feature = "adaptive-metadata-in-dev")]
             last_manifest_commit: LastManifestCommitResolution::Unresolved,
         })
@@ -310,7 +310,7 @@ pub(crate) struct PmResolution {
     /// commits after a CRC, or not run at all); the snapshot then follows `lastManifestCommit`
     /// to the action.
     #[cfg(feature = "adaptive-metadata-in-dev")]
-    pub(crate) checkpoint_action: Option<Arc<CheckpointAction>>,
+    pub(crate) captured_checkpoint_action: Option<Arc<CheckpointAction>>,
     /// How the segment's `lastManifestCommit` was resolved. See [`LastManifestCommitResolution`].
     #[cfg(feature = "adaptive-metadata-in-dev")]
     pub(crate) last_manifest_commit: LastManifestCommitResolution,
@@ -325,7 +325,7 @@ impl PmResolution {
             protocol: Some(crc.protocol.clone()),
             source,
             #[cfg(feature = "adaptive-metadata-in-dev")]
-            checkpoint_action: None,
+            captured_checkpoint_action: None,
             #[cfg(feature = "adaptive-metadata-in-dev")]
             last_manifest_commit: LastManifestCommitResolution::Resolved(
                 crc.last_manifest_commit_opt.clone(),

@@ -525,7 +525,7 @@ impl BuiltCrcTest {
         log_segment
             .read_protocol_metadata_opt(&self.engine, crc.as_ref())
             .unwrap()
-            .checkpoint_action
+            .captured_checkpoint_action
     }
 }
 

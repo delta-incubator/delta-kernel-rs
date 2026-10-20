@@ -160,7 +160,7 @@ struct PreparedSnapshot {
     table_configuration: TableConfiguration,
     crc: SnapshotCrc,
     #[cfg(feature = "adaptive-metadata-in-dev")]
-    checkpoint_action: Option<Arc<CheckpointAction>>,
+    captured_checkpoint_action: Option<Arc<CheckpointAction>>,
     #[cfg(feature = "adaptive-metadata-in-dev")]
     last_manifest_commit: LastManifestCommitResolution,
 }
@@ -244,7 +244,9 @@ impl Snapshot {
         )
     }
 
-    /// `checkpoint_action` is the latest checkpoint action when the build already has it in hand.
+    /// `captured_checkpoint_action` is the latest checkpoint action when the build already has it
+    /// in hand; `None` means not captured, not known absent. A captured action is trusted as is,
+    /// without checking it against `lastManifestCommit`.
     /// `last_manifest_commit` is how the build resolved `lastManifestCommit` without the CRC. A CRC
     /// at the snapshot version takes precedence, since it records the value authoritatively,
     /// including its absence.
@@ -254,7 +256,7 @@ impl Snapshot {
         crc: SnapshotCrc,
         built_as_latest: bool,
         skipped_new_checkpoints: bool,
-        #[cfg(feature = "adaptive-metadata-in-dev")] checkpoint_action: Option<
+        #[cfg(feature = "adaptive-metadata-in-dev")] captured_checkpoint_action: Option<
             Arc<CheckpointAction>,
         >,
         #[cfg(feature = "adaptive-metadata-in-dev")]
@@ -281,7 +283,7 @@ impl Snapshot {
             built_as_latest,
             skipped_new_checkpoints,
             #[cfg(feature = "adaptive-metadata-in-dev")]
-            checkpoint_action: match checkpoint_action {
+            checkpoint_action: match captured_checkpoint_action {
                 Some(action) => OnceLock::from(Some(action)),
                 None => OnceLock::new(),
             },
@@ -297,9 +299,9 @@ impl Snapshot {
     ///
     /// # Errors
     /// Returns an error if `lastManifestCommit` or the manifest commit cannot be read, or if the
-    /// pointer and the log disagree (see [`LogSegment::find_last_checkpoint_action`]). The pointer
-    /// comes only from the CRC or the `commitInfo` at this version, so a snapshot with neither (a
-    /// classic checkpoint without its commit) yields [`KernelError::MissingVersion`].
+    /// pointer and the log disagree. On an AMT-enabled snapshot, the pointer comes only from the
+    /// CRC or the `commitInfo` at this version, so a snapshot with neither (a classic checkpoint
+    /// without its commit) yields [`KernelError::MissingVersion`].
     #[cfg(feature = "adaptive-metadata-in-dev")]
     pub(crate) fn latest_checkpoint_action(
         &self,
@@ -334,7 +336,7 @@ impl Snapshot {
             table_configuration,
             crc,
             #[cfg(feature = "adaptive-metadata-in-dev")]
-            checkpoint_action,
+            captured_checkpoint_action,
             #[cfg(feature = "adaptive-metadata-in-dev")]
             last_manifest_commit,
         } = Self::prepare_new_from_log_segment(
@@ -353,7 +355,7 @@ impl Snapshot {
             built_as_latest,
             false, /* skipped_new_checkpoints */
             #[cfg(feature = "adaptive-metadata-in-dev")]
-            checkpoint_action,
+            captured_checkpoint_action,
             #[cfg(feature = "adaptive-metadata-in-dev")]
             last_manifest_commit,
         ))
@@ -412,7 +414,7 @@ impl Snapshot {
             protocol,
             source,
             #[cfg(feature = "adaptive-metadata-in-dev")]
-            checkpoint_action,
+            captured_checkpoint_action,
             #[cfg(feature = "adaptive-metadata-in-dev")]
             last_manifest_commit,
         } = match &crc_at_version {
@@ -448,7 +450,7 @@ impl Snapshot {
             table_configuration,
             crc,
             #[cfg(feature = "adaptive-metadata-in-dev")]
-            checkpoint_action,
+            captured_checkpoint_action,
             #[cfg(feature = "adaptive-metadata-in-dev")]
             last_manifest_commit,
         })

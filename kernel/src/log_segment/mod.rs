@@ -919,18 +919,8 @@ impl LogSegment {
         Ok(result.actions)
     }
 
-    /// Find the latest AMT `checkpoint` action in this segment, returning `None` when the segment
-    /// has no checkpoint action (a classic non-AMT table, or an AMT table that has none yet).
-    ///
-    /// `pointer` is the snapshot's `lastManifestCommit`, naming the latest manifest commit, or
-    /// `None` when there is none yet. It is authoritative: only the named commit is read, and the
-    /// log is never scanned.
-    ///
-    /// # Errors
-    /// Returns an error if the commit cannot be read, or if the pointer and the log are
-    /// inconsistent: this segment does not list the commit (commits at or below the checkpoint
-    /// never are), the commit carries no checkpoint action, or its action's content root version
-    /// differs from the pointer's.
+    /// Read the AMT `checkpoint` action from the manifest commit that `pointer` (the snapshot's
+    /// `lastManifestCommit`) refers to. `None` indicates no checkpoint action.
     #[cfg(feature = "adaptive-metadata-in-dev")]
     pub(crate) fn find_last_checkpoint_action(
         &self,
@@ -947,21 +937,9 @@ impl LogSegment {
                 pointer.version, pointer.content_root_version
             ))
         };
-        // Only the listing carries real file metadata and the location of an unpublished catalog
-        // commit. It also bounds the lookup to this snapshot: under time travel, a commit past the
-        // end version exists in storage but is not listed.
-        let commits = &self.listed.ascending_commit_files;
-        let commit = Version::try_from(pointer.version)
-            .ok()
-            .and_then(|version| {
-                let index = commits
-                    .binary_search_by_key(&version, |commit| commit.version)
-                    .ok()?;
-                commits.get(index)
-            })
-            .ok_or_else(|| {
-                inconsistent("this log segment does not list that commit".to_string())
-            })?;
+        let commit = self.find_pointed_commit(pointer).ok_or_else(|| {
+            inconsistent("this log segment does not list that commit".to_string())
+        })?;
         let files = std::slice::from_ref(&commit.location);
         let batches =
             engine
@@ -977,6 +955,20 @@ impl LogSegment {
             ))
         );
         Ok(Some(action))
+    }
+
+    /// The listed commit at `pointer`'s version, or `None` when this segment does not list it.
+    /// Only the listing carries real file metadata and the location of an unpublished catalog
+    /// commit. It also bounds the lookup to this snapshot: under time travel, a commit past the
+    /// end version exists in storage but is not listed.
+    #[cfg(feature = "adaptive-metadata-in-dev")]
+    fn find_pointed_commit(&self, pointer: &LastManifestCommit) -> Option<&ParsedLogPath> {
+        let version = Version::try_from(pointer.version).ok()?;
+        let commits = &self.listed.ascending_commit_files;
+        let index = commits
+            .binary_search_by_key(&version, |commit| commit.version)
+            .ok()?;
+        commits.get(index)
     }
 
     /// Read this segment's JSON commit/compaction cover as [`ActionsBatch`]es (`is_log_batch =

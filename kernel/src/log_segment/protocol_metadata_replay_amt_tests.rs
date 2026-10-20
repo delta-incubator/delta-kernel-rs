@@ -412,7 +412,9 @@ async fn assert_replay_resolution<E: Engine>(
     let resolution = log_segment
         .read_protocol_metadata_opt(&engine, None)
         .unwrap();
-    let version = resolution.checkpoint_action.map(|action| action.version);
+    let version = resolution
+        .captured_checkpoint_action
+        .map(|action| action.version);
     assert_eq!(version, expected_version);
 }
 
