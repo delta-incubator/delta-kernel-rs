@@ -404,22 +404,6 @@ impl PartitionValuesOptions {
         self.timestamp_timezone = Some(timestamp_timezone.into());
         self
     }
-
-    fn requires_timestamp_timezone_support(
-        &self,
-        table_configuration: &TableConfiguration,
-    ) -> bool {
-        self.timestamp_timezone.is_some()
-            && table_configuration
-                .logical_partition_columns()
-                .iter()
-                .any(|name| {
-                    table_configuration
-                        .logical_schema_ref()
-                        .field(name)
-                        .is_some_and(|field| field.data_type() == &DataType::TIMESTAMP)
-                })
-    }
 }
 
 /// Builder to scan a snapshot of a table.
@@ -631,9 +615,10 @@ impl ScanBuilder {
         // Retain the transform spec but skip building per-file expressions, which also skips the
         // per-row partition-value parse done only to build them.
         state_info.skip_row_transforms = self.without_row_transforms
-            || self
-                .partition_values
-                .requires_timestamp_timezone_support(self.snapshot.table_configuration());
+            || table_requires_timestamp_timezone_support(
+                self.snapshot.table_configuration(),
+                &self.partition_values,
+            );
 
         let commits_since_checkpoint = self.snapshot.log_segment().commits_since_checkpoint();
         if self.snapshot.skipped_new_checkpoints() && commits_since_checkpoint > 0 {
@@ -1140,9 +1125,10 @@ impl Scan {
         // from compatible checkpoints. Support reusing those values and enable connector-supplied
         // timezone support.
         require!(
-            !self
-                .partition_values
-                .requires_timestamp_timezone_support(self.snapshot.table_configuration()),
+            !table_requires_timestamp_timezone_support(
+                self.snapshot.table_configuration(),
+                &self.partition_values,
+            ),
             KernelError::unsupported(
                 "Kernel does not yet support with_timestamp_timezone in scan_metadata_from; \
                  use scan_metadata instead"
@@ -1329,9 +1315,10 @@ impl Scan {
     ) -> KernelResult<Option<Plan>> {
         // TODO(#3609): Support connector-supplied timezone in declarative metadata scans.
         require!(
-            !self
-                .partition_values
-                .requires_timestamp_timezone_support(self.snapshot.table_configuration()),
+            !table_requires_timestamp_timezone_support(
+                self.snapshot.table_configuration(),
+                &self.partition_values,
+            ),
             KernelError::unsupported(
                 "Kernel does not yet support with_timestamp_timezone in \
                  declarative_metadata_scan_plan; use scan_metadata instead"
@@ -1512,9 +1499,10 @@ impl Scan {
         }
         // TODO(#3609): Support connector-supplied timezone in parallel metadata scans.
         require!(
-            !self
-                .partition_values
-                .requires_timestamp_timezone_support(self.snapshot.table_configuration()),
+            !table_requires_timestamp_timezone_support(
+                self.snapshot.table_configuration(),
+                &self.partition_values,
+            ),
             KernelError::unsupported(
                 "Kernel does not yet support with_timestamp_timezone in parallel_scan_metadata; \
                  use scan_metadata"
@@ -1716,4 +1704,23 @@ pub fn selection_vector(
     let storage = engine.storage_handler();
     let dv_treemap = descriptor.read(storage, table_root)?;
     Ok(deletion_treemap_to_bools(dv_treemap))
+}
+
+/// If a table has `TIMESTAMP` partition columns and the connector supplies a timezone, the read
+/// path must support applying it to offset-less timestamp partition values. Unsupported paths,
+/// such as parallel scans, use this check to return an error.
+fn table_requires_timestamp_timezone_support(
+    table_configuration: &TableConfiguration,
+    partition_values: &PartitionValuesOptions,
+) -> bool {
+    partition_values.timestamp_timezone.is_some()
+        && table_configuration
+            .logical_partition_columns()
+            .iter()
+            .any(|name| {
+                table_configuration
+                    .logical_schema_ref()
+                    .field(name)
+                    .is_some_and(|field| field.data_type() == &DataType::TIMESTAMP)
+            })
 }
