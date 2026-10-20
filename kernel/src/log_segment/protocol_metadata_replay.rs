@@ -41,7 +41,9 @@ use crate::schema::{
     column_name, schema_ref, ColumnName, ColumnNamesAndTypes, DataType, MetadataColumnSpec,
     StructField, StructType,
 };
-use crate::{Engine, EngineData, KernelError, KernelResult, KernelResultIterator, Version};
+use crate::{
+    version_as_i64, Engine, EngineData, KernelError, KernelResult, KernelResultIterator, Version,
+};
 
 impl LogSegment {
     /// Read the latest Protocol and Metadata from this log segment, using CRC when available.
@@ -87,21 +89,13 @@ impl LogSegment {
             let candidate = pruned.replay_for_pm(engine)?;
             // Ignore pruned P&M at or below the CRC version: a lagging AMT checkpoint action can
             // carry it, and the CRC's P&M is at least as new.
-            let metadata_opt = candidate
-                .metadata
-                .filter(|(v, _)| *v > crc.version as i64)
-                .map(|(_, m)| m);
-            let protocol_opt = candidate
-                .protocol
-                .filter(|(v, _)| *v > crc.version as i64)
-                .map(|(_, p)| p);
+            let (protocol_opt, metadata_opt) =
+                candidate.pm_newer_than(version_as_i64(crc.version)?);
+            let (protocol_opt, metadata_opt) = (protocol_opt.cloned(), metadata_opt.cloned());
             // The pruned replay only reads commits after the CRC version, but a hit there is still
             // the latest action: any action at or below the CRC is older.
             #[cfg(feature = "adaptive-metadata-in-dev")]
-            let captured_checkpoint_action = candidate.checkpoint.map(|(_, c)| Arc::new(c));
-            #[cfg(feature = "adaptive-metadata-in-dev")]
-            let last_manifest_commit =
-                LastManifestCommitResolution::from_replay(candidate.last_manifest_commit);
+            let (captured_checkpoint_action, last_manifest_commit) = candidate.amt_resolutions();
 
             if metadata_opt.is_some() && protocol_opt.is_some() {
                 info!("Found P&M from pruned log replay");
@@ -133,16 +127,16 @@ impl LogSegment {
 
         // Case 3: Full P&M log replay.
         let candidate = self.replay_for_pm(engine)?;
+        #[cfg(feature = "adaptive-metadata-in-dev")]
+        let (captured_checkpoint_action, last_manifest_commit) = candidate.amt_resolutions();
         Ok(PmResolution {
             metadata: candidate.metadata.map(|(_, m)| m),
             protocol: candidate.protocol.map(|(_, p)| p),
             source: ProtocolMetadataSource::FullReplay,
             #[cfg(feature = "adaptive-metadata-in-dev")]
-            captured_checkpoint_action: candidate.checkpoint.map(|(_, c)| Arc::new(c)),
+            captured_checkpoint_action,
             #[cfg(feature = "adaptive-metadata-in-dev")]
-            last_manifest_commit: LastManifestCommitResolution::from_replay(
-                candidate.last_manifest_commit,
-            ),
+            last_manifest_commit,
         })
     }
 
@@ -183,11 +177,9 @@ impl LogSegment {
         let Some(pointer) = candidate.last_manifest_commit.clone() else {
             return Ok(candidate);
         };
-        // The pointed action's P&M is at or below `pointer.version`, so it can't replace newer P&M.
-        let is_newer = |v: Option<i64>| v.is_some_and(|v| v > pointer.version);
-        if is_newer(candidate.protocol.as_ref().map(|(v, _)| *v))
-            && is_newer(candidate.metadata.as_ref().map(|(v, _)| *v))
-        {
+        // P&M newer than `pointer.version` beat the pointed action's, which are at or below it.
+        let (newer_protocol, newer_metadata) = candidate.pm_newer_than(pointer.version);
+        if newer_protocol.is_some() && newer_metadata.is_some() {
             return Ok(candidate);
         }
         // A pointed commit outside this segment is no newer than the segment's P&M.
@@ -290,7 +282,7 @@ impl LogSegment {
             relevant_action,
             Predicate::and(
                 col!(COMMIT_INFO_NAME, "lastManifestCommit", "version").is_not_null(),
-                col!("version").eq(lit(self.end_version as i64)),
+                col!("version").eq(lit(version_as_i64(self.end_version)?)),
             ),
         );
 
@@ -344,7 +336,7 @@ impl LogSegment {
                     metadata_version,
                     // The plan's filter keeps only the newest commit's `lastManifestCommit`.
                     #[cfg(feature = "adaptive-metadata-in-dev")]
-                    is_latest_commit: true,
+                    is_newest_commit: true,
                     batch,
                 })
             });
@@ -365,7 +357,7 @@ impl LogSegment {
         )?);
         let checkpoint_version = self.checkpoint_version.map(|v| v as i64);
         #[cfg(feature = "adaptive-metadata-in-dev")]
-        let end_version = self.end_version as i64;
+        let end_version = version_as_i64(self.end_version)?;
         let batches = self
             .read_actions_with_projected_checkpoint_actions(
                 engine,
@@ -391,7 +383,7 @@ impl LogSegment {
                 protocol_version: Some(version),
                 metadata_version: Some(version),
                 #[cfg(feature = "adaptive-metadata-in-dev")]
-                is_latest_commit: batch.is_log_batch && version == end_version,
+                is_newest_commit: batch.is_log_batch && version == end_version,
                 batch,
             })
         }))
@@ -474,6 +466,25 @@ struct PmCandidate {
     last_manifest_commit: Option<LastManifestCommit>,
 }
 
+impl PmCandidate {
+    /// The Protocol and Metadata found above `version`, each `None` when it is at or below it.
+    fn pm_newer_than(&self, version: i64) -> (Option<&Protocol>, Option<&Metadata>) {
+        let protocol = self.protocol.as_ref().filter(|(v, _)| *v > version);
+        let metadata = self.metadata.as_ref().filter(|(v, _)| *v > version);
+        (protocol.map(|(_, p)| p), metadata.map(|(_, m)| m))
+    }
+
+    /// The AMT checkpoint action replay captured, if any, and how it resolved `lastManifestCommit`,
+    /// for the snapshot.
+    #[cfg(feature = "adaptive-metadata-in-dev")]
+    fn amt_resolutions(&self) -> (Option<Arc<CheckpointAction>>, LastManifestCommitResolution) {
+        (
+            self.checkpoint.as_ref().map(|(_, c)| Arc::new(c.clone())),
+            LastManifestCommitResolution::from_replay(self.last_manifest_commit.clone()),
+        )
+    }
+}
+
 /// A P&M-projected batch with the versions to rank its Protocol and Metadata at.
 struct VersionedBatch {
     protocol_version: Option<i64>,
@@ -481,7 +492,7 @@ struct VersionedBatch {
     /// Whether the batch comes from the segment's newest commit, whose `lastManifestCommit`
     /// describes the segment's version.
     #[cfg(feature = "adaptive-metadata-in-dev")]
-    is_latest_commit: bool,
+    is_newest_commit: bool,
     batch: ActionsBatch,
 }
 
@@ -500,7 +511,7 @@ fn resolve_pm_batches(
             protocol_version,
             metadata_version,
             #[cfg(feature = "adaptive-metadata-in-dev")]
-            is_latest_commit,
+            is_newest_commit,
             batch,
         } = batch?;
         let batch_version = protocol_version.max(metadata_version);
@@ -509,7 +520,7 @@ fn resolve_pm_batches(
             protocol_version,
             metadata_version,
             #[cfg(feature = "adaptive-metadata-in-dev")]
-            is_latest_commit,
+            is_newest_commit,
         )?;
         metadata = newer(metadata, candidate.metadata);
         protocol = newer(protocol, candidate.protocol);
@@ -629,7 +640,7 @@ fn pm_candidate(
     batch: &ActionsBatch,
     protocol_version: Option<i64>,
     metadata_version: Option<i64>,
-    #[cfg(feature = "adaptive-metadata-in-dev")] is_latest_commit: bool,
+    #[cfg(feature = "adaptive-metadata-in-dev")] is_newest_commit: bool,
 ) -> KernelResult<PmCandidate> {
     let actions = batch.actions.as_ref();
     let protocol = protocol_version.zip(Protocol::try_new_from_data(actions)?);
@@ -650,7 +661,7 @@ fn pm_candidate(
         };
         let (checkpoint_protocol, checkpoint_metadata) =
             checkpoint.as_ref().map(checkpoint_pm).unzip();
-        let last_manifest_commit = if is_latest_commit {
+        let last_manifest_commit = if is_newest_commit {
             LastManifestCommit::try_new_from_data(actions)?
         } else {
             None
