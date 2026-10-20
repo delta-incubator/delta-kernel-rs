@@ -52,8 +52,6 @@ use crate::table_features::TableFeature;
 #[cfg(feature = "check-constraints-in-dev")]
 use crate::table_properties::CheckConstraint;
 use crate::utils::{require, PhantomType};
-#[cfg(feature = "check-constraints-in-dev")]
-use crate::write_expressions::TableWriteExpressions;
 use crate::{
     create_row, version_as_i64, DataType, Engine, EngineData, Expression, FileMeta, KernelResult,
     KernelResultIterator, Predicate, RowVisitor, Version,
@@ -364,16 +362,6 @@ impl<STATE, MODE: ExecutionMode> std::fmt::Debug for Transaction<STATE, MODE> {
     }
 }
 
-#[cfg(feature = "check-constraints-in-dev")]
-impl<STATE, MODE: ExecutionMode> TableWriteExpressions for Transaction<STATE, MODE> {
-    fn check_constraints(&self) -> &[CheckConstraint] {
-        &self
-            .effective_table_config
-            .table_properties()
-            .check_constraints
-    }
-}
-
 /// Builds the projection for converting add file metadata into commit-ready Add actions.
 fn build_add_action_projection(
     input_schema: &StructType,
@@ -552,14 +540,27 @@ impl<STATE> Transaction<STATE, Imperative> {
 // Shared methods available on ALL transaction types
 // =============================================================================
 impl<STATE, MODE: ExecutionMode> Transaction<STATE, MODE> {
+    /// The table's CHECK constraints once this transaction commits, sorted by name and then SQL.
+    /// Empty when the table declares none.
+    ///
+    /// Each constraint is a Boolean SQL expression, stored under `delta.constraints.<name>`, that
+    /// every row in the table must satisfy. See [`Self::ack_check_constraints`] for what a
+    /// connector must do before writing to a table with constraints.
+    #[cfg(feature = "check-constraints-in-dev")]
+    pub fn check_constraints(&self) -> &[CheckConstraint] {
+        &self
+            .effective_table_config
+            .table_properties()
+            .check_constraints
+    }
+
     /// Acknowledges that the connector enforces this table's CHECK constraints.
     ///
     /// Kernel does not see the rows a connector writes, so it does not evaluate constraints. The
     /// connector must:
-    /// - Discover the constraints of this transaction via
-    ///   [`TableWriteExpressions::check_constraints`] and parse each one's
-    ///   [`raw_sql`](crate::table_properties::CheckConstraint::raw_sql) itself. The SQL refers to
-    ///   logical column names.
+    /// - Discover the constraints of this transaction via [`Self::check_constraints`] and parse
+    ///   each one's [`raw_sql`](crate::table_properties::CheckConstraint::raw_sql) itself. The SQL
+    ///   refers to logical column names.
     /// - Reject every written row, including its partition values, for which a constraint evaluates
     ///   to `false` or `NULL`. This includes files written for an earlier commit attempt, such as
     ///   one that conflicted, and validated against an older table version.

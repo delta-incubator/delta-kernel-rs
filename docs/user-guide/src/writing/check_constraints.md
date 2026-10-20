@@ -51,9 +51,10 @@ txn.commit(..)                fails on a constrained table without the acknowled
 
 ### Discovering constraints
 
-The `TableWriteExpressions` trait exposes a table's constraints through `check_constraints()`.
-Both `Snapshot` and `Transaction` implement it. Each `CheckConstraint` provides the constraint's
-name through `name()` and its SQL expression, verbatim from the table, through `raw_sql()`.
+`Snapshot::check_constraints()` returns a table's constraints at the snapshot's version, and
+`Transaction::check_constraints()` returns the ones the table has once the transaction commits.
+Each `CheckConstraint` provides the constraint's name through `name()` and its SQL expression,
+verbatim from the table, through `raw_sql()`.
 
 ```rust,no_run
 # extern crate delta_kernel;
@@ -61,7 +62,6 @@ name through `name()` and its SQL expression, verbatim from the table, through `
 # use delta_kernel_default_engine::DefaultEngine;
 # use delta_kernel_default_engine::storage::store_from_url;
 # use delta_kernel::{KernelResult, Snapshot};
-use delta_kernel::write_expressions::TableWriteExpressions;
 # fn main() -> KernelResult<()> {
 # let url = delta_kernel::try_parse_uri("/tmp/people")?;
 # let engine = DefaultEngine::builder(store_from_url(&url)?).build();
@@ -101,8 +101,6 @@ row. Kernel doesn't provide a SQL evaluator for constraints.
 # use delta_kernel_default_engine::executor::TaskExecutor;
 # use delta_kernel_default_engine::DefaultEngine;
 # type CompiledCheck = Box<dyn Fn(&RecordBatch) -> KernelResult<BooleanArray>>;
-use delta_kernel::write_expressions::TableWriteExpressions;
-
 async fn append_with_check_constraints(
     engine: &DefaultEngine<impl TaskExecutor>,
     snapshot: SnapshotRef,

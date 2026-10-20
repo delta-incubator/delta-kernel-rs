@@ -1,11 +1,11 @@
-//! Integration tests for the `checkConstraints` writer feature: constraint discovery via
-//! [`TableWriteExpressions`] and the `ack_check_constraints` gate on commits and `write_state`.
+//! Integration tests for the `checkConstraints` writer feature: constraint discovery on `Snapshot`
+//! and `Transaction`, and the `ack_check_constraints` gate on commits and `write_state`.
 
 use delta_kernel::committer::FileSystemCommitter;
 use delta_kernel::object_store::local::LocalFileSystem;
 use delta_kernel::schema::{schema_ref, DataType, SchemaRef, StructField};
+use delta_kernel::table_properties::CheckConstraint;
 use delta_kernel::transaction::{Transaction, UpdateTableOperation};
-use delta_kernel::write_expressions::TableWriteExpressions;
 use delta_kernel::{Engine, KernelError, KernelResult, Snapshot, SnapshotRef};
 use rstest::rstest;
 use serde_json::json;
@@ -59,10 +59,9 @@ fn assert_gate_error<T: std::fmt::Debug>(result: KernelResult<T>) {
     );
 }
 
-/// The `(name, raw_sql)` pairs `source` discovers, in the order it returns them.
-fn discovered(source: &impl TableWriteExpressions) -> Vec<(&str, &str)> {
-    source
-        .check_constraints()
+/// The `(name, raw_sql)` pairs of `constraints`, in order.
+fn discovered(constraints: &[CheckConstraint]) -> Vec<(&str, &str)> {
+    constraints
         .iter()
         .map(|constraint| (constraint.name(), constraint.raw_sql()))
         .collect()
@@ -117,7 +116,7 @@ async fn discovers_constraints_from_snapshot_and_transaction(
 
     // Discovery keeps the stored name case, sorts by name, and needs no acknowledgement.
     let snapshot = Snapshot::builder_for(table_url).build(engine.as_ref())?;
-    let from_snapshot = discovered(snapshot.as_ref());
+    let from_snapshot = discovered(snapshot.check_constraints());
     let expected = [
         ("NonEmptyName", "name != ''"),
         ("positive_amount", "amount > 0"),
@@ -125,7 +124,7 @@ async fn discovers_constraints_from_snapshot_and_transaction(
     assert_eq!(from_snapshot, expected);
 
     let txn = write_txn(&snapshot, engine.as_ref())?;
-    let from_txn = discovered(&txn);
+    let from_txn = discovered(txn.check_constraints());
     assert_eq!(from_txn, expected);
     Ok(())
 }
@@ -187,7 +186,7 @@ async fn data_commit_to_table_without_constraints_needs_no_acknowledgement(
     let table_url = write_table(&table_path, writer_features, &[]).await?;
 
     let snapshot = Snapshot::builder_for(table_url).build(engine.as_ref())?;
-    let from_snapshot = discovered(snapshot.as_ref());
+    let from_snapshot = discovered(snapshot.check_constraints());
     assert!(from_snapshot.is_empty());
 
     let mut txn = write_txn(&snapshot, engine.as_ref())?;
@@ -241,7 +240,7 @@ async fn discovers_constraints_after_checkpoint() -> KernelResult<(), Box<dyn st
     // A fresh snapshot reads Metadata from the checkpoint (via the `_last_checkpoint` hint), so
     // discovery and the ack gate must still see the constraint.
     let reloaded = Snapshot::builder_for(table_url).build(engine.as_ref())?;
-    let from_reloaded = discovered(reloaded.as_ref());
+    let from_reloaded = discovered(reloaded.check_constraints());
     assert_eq!(from_reloaded, POSITIVE_AMOUNT);
 
     let mut txn = write_txn(&reloaded, engine.as_ref())?;
@@ -274,7 +273,7 @@ async fn table_with_constraints_but_without_feature_is_readable_but_not_writable
     let table_url = write_table(&table_path, &[], POSITIVE_AMOUNT).await?;
 
     let snapshot = Snapshot::builder_for(table_url).build(engine.as_ref())?;
-    let from_snapshot = discovered(snapshot.as_ref());
+    let from_snapshot = discovered(snapshot.check_constraints());
     assert_eq!(from_snapshot, POSITIVE_AMOUNT);
 
     let result = write_txn(&snapshot, engine.as_ref());
@@ -303,7 +302,7 @@ async fn alter_table_on_constrained_table_requires_acknowledgement(
 
     txn.ack_check_constraints();
     let altered = txn.commit(engine.as_ref())?.unwrap_post_commit_snapshot();
-    let from_altered = discovered(altered.as_ref());
+    let from_altered = discovered(altered.check_constraints());
     assert_eq!(from_altered, POSITIVE_AMOUNT);
     Ok(())
 }

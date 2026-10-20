@@ -46,8 +46,6 @@ use crate::table_properties::CheckConstraint;
 use crate::table_properties::TableProperties;
 use crate::transaction::{UpdateTableOperation, UpdateTableTransactionBuilder};
 use crate::utils::require;
-#[cfg(feature = "check-constraints-in-dev")]
-use crate::write_expressions::TableWriteExpressions;
 use crate::{Engine, KernelError, KernelResult, LogCompactionWriter, Version};
 
 mod builder;
@@ -156,13 +154,6 @@ impl std::fmt::Debug for Snapshot {
             .field("log_segment", &self.log_segment)
             .field("skipped_new_checkpoints", &self.skipped_new_checkpoints)
             .finish()
-    }
-}
-
-#[cfg(feature = "check-constraints-in-dev")]
-impl TableWriteExpressions for Snapshot {
-    fn check_constraints(&self) -> &[CheckConstraint] {
-        &self.table_properties().check_constraints
     }
 }
 
@@ -666,6 +657,17 @@ impl Snapshot {
     /// Get the [`TableProperties`] for this [`Snapshot`].
     pub fn table_properties(&self) -> &TableProperties {
         self.table_configuration().table_properties()
+    }
+
+    /// The table's CHECK constraints at this snapshot's version, sorted by name and then SQL.
+    /// Empty when the table declares none.
+    ///
+    /// A connector writing to the table discovers them from
+    /// [`Transaction::check_constraints`](crate::transaction::Transaction::check_constraints)
+    /// instead, which returns the constraints the table has once the transaction commits.
+    #[cfg(feature = "check-constraints-in-dev")]
+    pub fn check_constraints(&self) -> &[CheckConstraint] {
+        &self.table_properties().check_constraints
     }
 
     /// Returns the protocol-derived table properties as a map of key-value pairs.
