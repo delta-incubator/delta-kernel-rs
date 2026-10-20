@@ -88,9 +88,6 @@ static LEAF_REF_COLUMNS: LazyLock<ColumnNamesAndTypes> = LazyLock::new(|| {
 impl LeafRef {
     /// Parses one root `DataManifest` row from `getters`, which must follow [`LEAF_REF_COLUMNS`]
     /// order. The raw `location` resolves against `table_root` when relative.
-    ///
-    /// # Errors
-    /// Returns an error if `location` cannot be resolved against `table_root`.
     fn try_from_getters<'a>(
         row: usize,
         getters: &[&'a dyn GetData<'a>],
@@ -486,9 +483,6 @@ impl RowVisitor for AddSelectionVisitor {
 /// Collects a [`LeafRef`] for every live `DataManifest` entry of the root-manifest entry batches
 /// it visits, in row order across batches. Non-live `DataManifest` entries and all other entries
 /// are skipped.
-///
-/// Visiting returns an error if a live entry's `location` cannot be resolved against the table
-/// root.
 struct LeafRefVisitor<'u> {
     /// The table root URL relative leaf locations resolve against.
     table_root: &'u Url,

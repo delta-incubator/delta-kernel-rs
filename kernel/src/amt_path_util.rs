@@ -5,9 +5,8 @@
 
 use url::{ParseError, Url};
 
-use crate::actions::to_file_size;
 use crate::path_encoding::uri_encode_path;
-use crate::utils::require;
+use crate::utils::{require, to_file_size};
 use crate::{FileMeta, KernelError, KernelResult};
 
 /// Resolve an AMT `path` (as stored in the log or a manifest) into an absolute [`Url`].

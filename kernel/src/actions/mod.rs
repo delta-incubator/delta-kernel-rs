@@ -31,10 +31,10 @@ use crate::table_features::{
     TABLE_FEATURES_MIN_READER_VERSION, TABLE_FEATURES_MIN_WRITER_VERSION,
 };
 use crate::table_properties::TableProperties;
-use crate::utils::require;
+use crate::utils::{require, to_file_size};
 #[cfg(feature = "adaptive-metadata-in-dev")]
 use crate::{create_row, Engine, Version};
-use crate::{EngineData, FileMeta, FileSize, KernelError, KernelResult, RowVisitor as _};
+use crate::{EngineData, FileMeta, KernelError, KernelResult, RowVisitor as _};
 
 const KERNEL_VERSION: &str = env!("CARGO_PKG_VERSION");
 const SERDE_JSON_RECURSION_LIMIT_ERROR_PREFIX: &str = "recursion limit exceeded";
@@ -1964,16 +1964,6 @@ pub(crate) struct Sidecar {
     pub tags: Option<HashMap<String, String>>,
 }
 
-/// Convert an `i64` byte count from a log action into a [`FileSize`], erroring with `context` (a
-/// short action name, e.g. `"sidecar"`) and the offending value when it is negative.
-pub(crate) fn to_file_size(bytes: i64, context: &str) -> KernelResult<FileSize> {
-    bytes.try_into().map_err(|_| {
-        KernelError::generic(format!(
-            "Failed to convert {context} size {bytes} to FileSize"
-        ))
-    })
-}
-
 impl Sidecar {
     /// Creates a sidecar action.
     #[internal_api]
@@ -2124,7 +2114,8 @@ mod tests {
     use crate::schema::{schema, schema_ref, DataType, MapType, StructField};
     use crate::unit_test_utils::assert_result_error_with_message;
     use crate::{
-        create_row, Engine, EvaluationHandler, JsonHandler, ParquetHandler, StorageHandler,
+        create_row, Engine, EvaluationHandler, FileSize, JsonHandler, ParquetHandler,
+        StorageHandler,
     };
 
     #[rstest]
