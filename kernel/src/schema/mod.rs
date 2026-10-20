@@ -20,6 +20,7 @@ use tracing::warn;
 // re-export because many call sites that use schemas do not necessarily use expressions
 pub(crate) use crate::expressions::{column_name, ColumnName};
 use crate::reserved_field_ids::FILE_NAME;
+use crate::schema::collation_utils::rewrite_collation_field_prefix;
 use crate::table_features::{
     validate_and_extract_column_mapping_annotations, validate_column_mapping_id, ColumnMappingMode,
     StaleAnnotationPolicy,
@@ -35,6 +36,7 @@ pub(crate) mod compare;
 #[cfg(feature = "schema-diff")]
 pub(crate) mod diff;
 
+pub(crate) mod collation_utils;
 #[cfg(feature = "internal-api")]
 pub mod derive_macro_utils;
 #[cfg(not(feature = "internal-api"))]
@@ -229,6 +231,12 @@ impl Display for MetadataValue {
 
 #[derive(Debug)]
 pub enum ColumnMetadataKey {
+    /// Collation identifiers keyed by field-relative path, stored as a JSON object.
+    ///
+    /// Kernel preserves these identifiers; string predicates use UTF-8 binary semantics.
+    /// See [`ScanBuilder::with_predicate`](crate::scan::ScanBuilder::with_predicate) and the
+    /// [collation RFC](https://github.com/delta-io/delta/blob/master/protocol_rfcs/collated-string-type.md).
+    Collations,
     ColumnMappingId,
     ColumnMappingPhysicalName,
     /// Parquet field IDs for the synthesized `element` / `key` / `value` fields of an Array or
@@ -267,6 +275,7 @@ pub enum ColumnMetadataKey {
 impl AsRef<str> for ColumnMetadataKey {
     fn as_ref(&self) -> &str {
         match self {
+            Self::Collations => "__COLLATIONS",
             Self::ColumnMappingId => "delta.columnMapping.id",
             Self::ColumnMappingPhysicalName => "delta.columnMapping.physicalName",
             Self::ColumnMappingNestedIds => "delta.columnMapping.nested.ids",
@@ -712,6 +721,9 @@ impl StructField {
     /// `Id` or `Name`, this is specified in [`ColumnMetadataKey::ColumnMappingPhysicalName`].
     /// Otherwise, the field's logical name is used.
     ///
+    /// Collation annotation paths use the physical field name as their owning-field prefix.
+    /// The logical field's annotations are unchanged.
+    ///
     /// Returns an error if a field has invalid or inconsistent column mapping annotations (e.g.
     /// missing or wrong-typed when column mapping is enabled), or if a metadata column is
     /// encountered (metadata columns should not participate in column mapping). When column
@@ -733,6 +745,12 @@ impl StructField {
     pub(crate) fn has_invariants(&self) -> bool {
         self.metadata
             .contains_key(ColumnMetadataKey::Invariants.as_ref())
+    }
+
+    /// Returns whether this field carries `__COLLATIONS` metadata.
+    pub(crate) fn has_collations(&self) -> bool {
+        self.metadata
+            .contains_key(ColumnMetadataKey::Collations.as_ref())
     }
 
     /// Converts logical schema StructField metadata to physical schema metadata
@@ -794,6 +812,11 @@ impl StructField {
                 base_metadata.remove(parquet_field_id_key);
                 // TODO(#1070): Remove nested column ids when they are supported in kernel
             }
+        }
+        // Keep collation paths rooted at the physical field name, as required by the protocol.
+        let physical_name = self.physical_name(column_mapping_mode);
+        if let Some(annotation) = base_metadata.get_mut(ColumnMetadataKey::Collations.as_ref()) {
+            rewrite_collation_field_prefix(annotation, self.name(), physical_name);
         }
         base_metadata
     }
@@ -1542,13 +1565,13 @@ impl DoubleEndedIterator for StructFieldRefIter<'_> {
     }
 }
 
-struct InvariantChecker;
+struct FieldMetadataKeyChecker(ColumnMetadataKey);
 
-impl<'a> SchemaTransform<'a> for InvariantChecker {
+impl<'a> SchemaTransform<'a> for FieldMetadataKeyChecker {
     transform_output_type!(|'a, T| KernelResult<(), ()>);
 
     fn transform_struct_field(&mut self, field: &'a StructField) -> KernelResult<(), ()> {
-        if field.has_invariants() {
+        if field.metadata.contains_key(self.0.as_ref()) {
             Err(())
         } else {
             self.recurse_into_struct_field(field)
@@ -1561,7 +1584,9 @@ impl<'a> SchemaTransform<'a> for InvariantChecker {
 /// This traverses the entire schema to check for the presence of the `delta.invariants`
 /// metadata key.
 pub(crate) fn schema_has_invariants(schema: &Schema) -> bool {
-    InvariantChecker.transform_struct(schema).is_err()
+    FieldMetadataKeyChecker(ColumnMetadataKey::Invariants)
+        .transform_struct(schema)
+        .is_err()
 }
 
 /// Visitor that reports whether any non-null (`nullable: false`) field exists in a schema.
@@ -3276,6 +3301,69 @@ mod tests {
         };
         let struct_field = stype.fields.get_index(0).unwrap().1;
         assert_eq!(struct_field.name, "d");
+    }
+
+    #[rstest]
+    #[case::string(DataType::STRING, "")]
+    #[case::array(DataType::from(ArrayType::new(DataType::STRING, true)), ".element")]
+    #[case::nested_array(
+        DataType::from(ArrayType::new(ArrayType::new(DataType::STRING, true), true)),
+        ".element.element"
+    )]
+    #[case::map_key(
+        DataType::from(MapType::new(DataType::STRING, DataType::INTEGER, true)),
+        ".key"
+    )]
+    #[case::map_value(
+        DataType::from(MapType::new(DataType::INTEGER, DataType::STRING, true)),
+        ".value"
+    )]
+    #[case::array_map(
+        DataType::from(ArrayType::new(
+            MapType::new(DataType::STRING, DataType::STRING, true),
+            true
+        )),
+        ".element.value"
+    )]
+    fn physical_collation_annotations_resolve_to_physical_fields(
+        #[case] data_type: DataType,
+        #[case] suffix: &str,
+        #[values(
+            ColumnMappingMode::None,
+            ColumnMappingMode::Name,
+            ColumnMappingMode::Id
+        )]
+        mode: ColumnMappingMode,
+    ) {
+        let logical_path = format!("name{suffix}");
+        let annotation = MetadataValue::Other(serde_json::json!({
+            &logical_path: "test.ASCII_CI"
+        }));
+        let logical = StructField::nullable("name", data_type).with_metadata([
+            (ColumnMetadataKey::Collations.as_ref(), annotation.clone()),
+            (
+                ColumnMetadataKey::ColumnMappingId.as_ref(),
+                MetadataValue::Number(1),
+            ),
+            (
+                ColumnMetadataKey::ColumnMappingPhysicalName.as_ref(),
+                MetadataValue::String("col-physical".to_string()),
+            ),
+        ]);
+        let physical = logical.make_physical(mode).unwrap();
+        let physical_path = format!("{}{suffix}", physical.name());
+        assert_eq!(
+            physical.get_config_value(&ColumnMetadataKey::Collations),
+            Some(&MetadataValue::Other(serde_json::json!({
+                physical_path: "test.ASCII_CI"
+            })))
+        );
+        assert_eq!(
+            logical.get_config_value(&ColumnMetadataKey::Collations),
+            Some(&annotation)
+        );
+        collation_utils::validate_collation_annotations(&StructType::try_new([physical]).unwrap())
+            .unwrap();
     }
 
     #[test]
