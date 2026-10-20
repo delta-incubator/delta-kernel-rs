@@ -1215,4 +1215,88 @@ mod tests {
         let msg = format!("{err}");
         assert!(msg.contains("in-commit timestamp"), "got: {msg}");
     }
+
+    #[rstest::rstest]
+    #[case::fail_on_data_loss_errors_at_internal_gap(
+        &[0, 1, 3, 4],
+        true,
+        &[0, 1],
+        Some(KernelError::MissingVersion(2)),
+    )]
+    #[case::no_fail_on_data_loss_skips_internal_gap(
+        &[0, 1, 3, 4],
+        false,
+        &[0, 1, 3, 4],
+        None,
+    )]
+    #[case::fail_on_data_loss_yields_contiguous_commits(
+        &[0, 1, 2, 3],
+        true,
+        &[0, 1, 2, 3],
+        None,
+    )]
+    #[case::fail_on_data_loss_errors_before_earliest_commit(
+        &[2, 3],
+        true,
+        &[],
+        Some(KernelError::StartVersionNotFound { requested: 0, earliest: 2 }),
+    )]
+    #[case::no_fail_on_data_loss_starts_at_earliest_commit(
+        &[2, 3],
+        false,
+        &[2, 3],
+        None,
+    )]
+    #[tokio::test]
+    async fn test_relaxed_commit_files_reports_gaps_per_fail_on_data_loss(
+        #[case] versions: &[Version],
+        #[case] fail_on_data_loss: bool,
+        #[case] expected_versions: &[Version],
+        #[case] expected_err: Option<KernelError>,
+    ) {
+        let commits: Vec<_> = versions.iter().map(|v| (*v, VALID_PROTOCOL_LINE)).collect();
+        let (engine, table_root) = engine_with_commits(&commits).await;
+        let range = CommitRange::builder_for(table_root, 0)
+            .with_commit_range_validation(false)
+            .with_fail_on_data_loss(fail_on_data_loss)
+            .build(engine.as_ref())
+            .unwrap();
+
+        let mut yielded = Vec::new();
+        let mut first_err = None;
+        for file in range.commit_files().unwrap() {
+            match file {
+                Ok(file) => yielded.push(file.version),
+                Err(err) => {
+                    first_err = Some(err);
+                    break;
+                }
+            }
+        }
+
+        assert_eq!(yielded, expected_versions);
+        match (&first_err, &expected_err) {
+            (None, None) => {}
+            (
+                Some(KernelError::MissingVersion(actual)),
+                Some(KernelError::MissingVersion(expected)),
+            ) => {
+                assert_eq!(actual, expected)
+            }
+            (
+                Some(KernelError::StartVersionNotFound {
+                    requested,
+                    earliest,
+                }),
+                Some(KernelError::StartVersionNotFound {
+                    requested: expected_requested,
+                    earliest: expected_earliest,
+                }),
+            ) => assert_eq!(
+                (requested, earliest),
+                (expected_requested, expected_earliest)
+            ),
+            _ => panic!("expected error {expected_err:?}, got {first_err:?}"),
+        }
+    }
 }
