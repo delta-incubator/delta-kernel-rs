@@ -1,13 +1,13 @@
 //! Diagnostic context handles shared with host allocation owners.
 //!
 //! Allocation hooks use only thread-local context lookup, ownership reference counts, and atomic
-//! counters. Handles and snapshot scratch buffers are instrumentation metadata and are not charged.
+//! counters. Handle metadata contributes to untagged process instrumentation, outside query totals.
 
 use std::ptr;
 
 use delta_kernel_memory_tracking::{
-    add_external, capture, process_snapshot, release_external, without_tracking, AllocationSource,
-    Context, Scope,
+    add_external, capture, domain_snapshot, process_snapshot, release_external, without_tracking,
+    AccountingDomain, AllocationSource, Context, Scope, Snapshot,
 };
 
 /// Opaque, reference-counted allocation-origin context. Free with `memory_context_free`.
@@ -112,7 +112,8 @@ pub unsafe extern "C" fn memory_context_leave(scope: *mut MemoryContextScope) {
 }
 
 /// Reads `context` (null means process total) into borrowed `out`.
-/// `source` is extensible: 0=Rust, 1=host Arrow, 2=host ABI, 3=other native, 4=combined.
+/// `source` is extensible: 0=Rust, 1=host Arrow, 2=host ABI, 3=other native, 4=combined,
+/// 5=instrumentation. Instrumentation is normally untagged and absent from query totals.
 /// Returns false for an unsupported source or null output, leaving the output unchanged.
 /// Concurrent reads can mix counter observation times; quiescent reads are consistent.
 ///
@@ -124,25 +125,30 @@ pub unsafe extern "C" fn memory_context_read(
     source: u32,
     out: *mut MemoryStatistics,
 ) -> bool {
-    if source > 4 || out.is_null() {
-        return false;
-    }
     let snapshot = unsafe { context.as_ref() }.map_or_else(process_snapshot, |c| c.0.snapshot());
-    let statistics = if source == 4 {
-        snapshot.total
-    } else {
-        snapshot.sources[source as usize]
+    unsafe { write_statistics(snapshot, source, out) }
+}
+
+/// Reads an aggregate without retaining individual contexts. `domain` is extensible:
+/// 0=process, 1=tagged, 2=untagged. Source selectors match `memory_context_read`.
+/// Tagged allocations are counted once regardless of parent hierarchy; untagged does not mean
+/// uninstrumented. Returns false for unsupported selectors or null output, leaving it unchanged.
+///
+/// # Safety
+/// Non-null `out` must be aligned and writable for one record.
+#[no_mangle]
+pub unsafe extern "C" fn memory_domain_read(
+    domain: u32,
+    source: u32,
+    out: *mut MemoryStatistics,
+) -> bool {
+    let domain = match domain {
+        0 => AccountingDomain::Process,
+        1 => AccountingDomain::Tagged,
+        2 => AccountingDomain::Untagged,
+        _ => return false,
     };
-    unsafe {
-        out.write(MemoryStatistics {
-            live_bytes: statistics.live_bytes,
-            peak_bytes: statistics.peak_bytes,
-            allocated_bytes: statistics.allocated_bytes,
-            allocations: statistics.allocations,
-            tracking_bytes: statistics.tracking_bytes,
-        })
-    };
-    true
+    unsafe { write_statistics(domain_snapshot(domain), source, out) }
 }
 
 /// Adds/releases externally owned allocation bytes in borrowed `context`.
@@ -169,6 +175,7 @@ pub unsafe extern "C" fn memory_context_record(
         1 => AllocationSource::Arrow,
         2 => AllocationSource::Abi,
         3 => AllocationSource::Other,
+        5 => AllocationSource::Instrumentation,
         _ => return false,
     };
     if allocate {
@@ -176,6 +183,27 @@ pub unsafe extern "C" fn memory_context_record(
     } else {
         release_external(context, source, bytes)
     }
+    true
+}
+
+unsafe fn write_statistics(snapshot: Snapshot, source: u32, out: *mut MemoryStatistics) -> bool {
+    if source > 5 || out.is_null() {
+        return false;
+    }
+    let statistics = match source {
+        4 => snapshot.total,
+        5 => snapshot.sources[AllocationSource::Instrumentation as usize],
+        _ => snapshot.sources[source as usize],
+    };
+    unsafe {
+        out.write(MemoryStatistics {
+            live_bytes: statistics.live_bytes,
+            peak_bytes: statistics.peak_bytes,
+            allocated_bytes: statistics.allocated_bytes,
+            allocations: statistics.allocations,
+            tracking_bytes: statistics.tracking_bytes,
+        })
+    };
     true
 }
 
@@ -247,6 +275,28 @@ mod tests {
             assert_eq!(statistics.live_bytes, 42);
             let scope = memory_context_enter(ptr::null());
             assert!(memory_context_capture().is_null());
+            memory_context_leave(scope);
+            memory_context_free(context);
+        }
+    }
+
+    #[test]
+    fn metadata_and_aggregate_domains_are_available_without_charging_the_query() {
+        unsafe {
+            let context = memory_context_new(37, ptr::null());
+            let scope = memory_context_enter(context);
+            let mut statistics = MemoryStatistics::default();
+            assert!(memory_context_read(context, 5, &mut statistics));
+            assert_eq!(statistics.live_bytes, 0);
+            assert!(memory_domain_read(2, 5, &mut statistics));
+            assert!(statistics.live_bytes > 0);
+            assert!(memory_context_record(ptr::null(), 5, 40, true));
+            assert!(memory_context_record(ptr::null(), 5, 40, false));
+            statistics.live_bytes = 42;
+            assert!(!memory_domain_read(u32::MAX, 4, &mut statistics));
+            assert_eq!(statistics.live_bytes, 42);
+            assert!(!memory_domain_read(0, u32::MAX, &mut statistics));
+            assert_eq!(statistics.live_bytes, 42);
             memory_context_leave(scope);
             memory_context_free(context);
         }

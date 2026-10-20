@@ -24,17 +24,20 @@ ancestors inclusively. Never sum a parent and its descendants.
 There is no pointer map, tracking mutex, callback, logging, or metadata allocation in the allocator
 hooks. The underlying system allocator still has its own synchronization. Thread-local scope setup
 and context creation occur outside hooks. Context records, FFI handles, and explicitly suppressed
-instrumentation are excluded from counters, although those allocations still carry prefixes.
+instrumentation are counted as untagged process instrumentation, outside query totals. Their
+prefixes are included in process tracking overhead.
 
-Process-wide totals are enabled by default for metrics reporting, including untagged Rust work.
-Disable `process-totals` only to isolate their cost in experiments. Context counters always remain
-active. Multi-field snapshots can mix observation times while allocations are concurrent. Peaks
-track simultaneously live bytes; a combined peak is not the sum of source peaks.
+Process-wide totals are unconditional when tracking is installed, including untagged Rust work.
+`domain_snapshot` separates process, tagged, and untagged totals; tagged allocations count once
+regardless of context hierarchy. Untagged means no allocation-origin context, not uninstrumented
+memory. Tracking metadata has its own source. Multi-field snapshots can mix observation times while
+allocations are concurrent. Peaks track simultaneously live bytes; a combined peak is not the sum
+of source peaks.
 
 ## Other allocation owners
 
 `add_external`/`release_external` and `Charge` record backing ownership, not logical references.
-The FFI exposes retained context handles, thread-local scopes, source/combined/process snapshots,
+The FFI exposes retained context handles, thread-local scopes, source/combined/aggregate snapshots,
 and external-owner accounting. `context-alloc-tracking` installs the allocator only at the FFI
 library boundary; do not install a global allocator in a general-purpose library. When both FFI
 tracking features are enabled, context tracking supersedes `peak_alloc`.
@@ -44,7 +47,9 @@ allocators. Existing allocator live/peak accounting remains useful independently
 allocation and final backing release; preserve the listener across any accounting-ownership
 transfer. Do not attach the producer listener to foreign Rust-buffer imports: the Rust owner already
 accounts those buffers. Retain/export is not allocation. Ownership transfers to an allocator with a
-different listener require an explicit transfer policy.
+different listener require an explicit transfer policy. A custom backing-allocation owner can
+retain origin independently of ledger transfers and debit on final backing release instead; foreign
+imports must bypass that owner to avoid a duplicate charge.
 
 For host ABI buffers, a scope's requested sizes do not establish the lifetime or retained size of a
 shared pool. Measure logical demand separately, instrument the pool's backing allocator, or use an
@@ -80,19 +85,33 @@ provenance in this allocator wrapper. No new unsafe test is ignored or run with 
 cargo test -p delta_kernel_memory_tracking
 MIRIFLAGS=-Zmiri-tree-borrows cargo +nightly miri test -p delta_kernel_memory_tracking
 TRACKING_ITERATIONS=200000 cargo bench -p delta_kernel_memory_tracking --bench allocation_tracking
-TRACKING_ITERATIONS=200000 cargo bench -p delta_kernel_memory_tracking \
-  --bench allocation_tracking --no-default-features
 ```
 
 The benchmark warms each configuration once, rotates mode order across five reported repeats,
 and tests independent contexts versus threads sharing a context. CSV timings are aggregate
 nanoseconds per alloc/free pair, not individual request latency. `process` uses `peak_alloc`;
 `header` adds context prefixes/counters; `header_external` adds **synthetic** Arrow and ABI charges,
-not actual host allocations. The no-process-totals run still uses process counters in its `process`
-comparator. Use `TRACKING_MODE` and `TRACKING_REPEATS` to select a mode and repetitions.
+not actual host allocations. Use `TRACKING_MODE` and `TRACKING_REPEATS` to select a mode and
+repetitions.
 
-Recorded allocator results are in `measurements/` (Apple M5 Max, arm64, Darwin 25.5.0; release
-build; first payload byte touched; no RSS measurement). For 64-byte allocations, medians in ns/pair:
+Current aggregate-domain/instrumentation results are in `measurements/allocator-wide.csv`.
+With 50,000 iterations per worker and three reported rotating repeats on the same host,
+64-byte allocation/free medians in ns/pair are:
+
+| Threads / contexts | System | Process only | Context + aggregates |
+| --- | ---: | ---: | ---: |
+| 1 / independent | 11.46 | 12.51 | 32.75 |
+| 4 / independent | 3.83 | 30.53 | 118.05 |
+| 4 / shared | 3.99 | 29.27 | 182.92 |
+
+The context configuration always records process totals and exactly one tagged/untagged aggregate,
+in addition to the origin's ancestor counters. This makes shared-counter contention visible.
+
+Historical allocator results are in `measurements/` (Apple M5 Max, arm64, Darwin 25.5.0; release
+build; first payload byte touched; no RSS measurement). These historical measurements precede
+tagged/untagged aggregate and instrumentation accounting. The disabled-process comparison is
+archived data; there is no feature switch to disable process totals. For 64-byte allocations,
+medians in ns/pair:
 
 | Threads / contexts | System | Process only | Context + process | Context without process |
 | --- | ---: | ---: | ---: | ---: |
@@ -103,14 +122,15 @@ build; first payload byte touched; no RSS measurement). For 64-byte allocations,
 These results demonstrate counter contention under allocator-heavy concurrency. They do not
 predict query-level overhead. The separate runs and host scheduling add variability; use the raw
 repeats, larger allocation sizes, and representative workloads before deciding on sharding or
-sampling. Process totals remain enabled; their optional feature switch is an experimental control.
+sampling. Process totals are always enabled; aggregate counters add shared atomic updates, so rerun
+measurements for the current configuration.
 
 A local-table snapshot plus scan-metadata replay probe lives in `mem-test`:
 
 ```sh
 python3 mem-test/generate-context-probe-table.py /tmp/context-memory-table
 TRACKING_BENCH_ALLOCATOR=context cargo run --release -p mem-test --bin context-memory \
-  --features context-alloc-tracking,context-process-totals -- file:///tmp/context-memory-table/ 10
+  --features context-alloc-tracking -- file:///tmp/context-memory-table/ 10
 ```
 
 Build separately with `TRACKING_BENCH_ALLOCATOR=system`, `process`, and `context`. The selection is
@@ -126,6 +146,7 @@ active Add actions (one integer column, per-file min/max/null-count statistics),
 checkpoint. Each iteration loads a new snapshot and consumes its complete scan-metadata stream;
 no data files are read. The engine is shared between iterations, and the filesystem cache is warm.
 Three runs per allocator mode each discard one warmup and record ten iterations; run order rotates.
+These historical results precede aggregate-domain and instrumentation accounting.
 
 | Installed allocator | Median elapsed | Observed range |
 | --- | ---: | ---: |

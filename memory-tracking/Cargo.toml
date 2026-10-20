@@ -14,11 +14,6 @@ release = false
 
 [dependencies]
 
-[features]
-default = ["process-totals"]
-# Shared process counters for metrics; can be disabled to isolate their benchmark cost.
-process-totals = []
-
 [dev-dependencies]
 peak_alloc = "0.3.0"
 

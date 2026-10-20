@@ -14,7 +14,6 @@ version.workspace = true
 release = false
 
 [features]
-context-process-totals = ["delta_kernel_memory_tracking/process-totals"]
 context-alloc-tracking = ["delta_kernel_default_engine/context-alloc-tracking"]
 default = ["arrow"]
 arrow = ["arrow-60"]
@@ -30,7 +29,7 @@ serde_json = "1"
 tempfile = "3"
 tracing = "0.1"
 peak_alloc = "0.3.0"
-delta_kernel_memory_tracking = { path = "../memory-tracking", default-features = false }
+delta_kernel_memory_tracking = { path = "../memory-tracking" }
 url = "2"
 
 [[bin]]

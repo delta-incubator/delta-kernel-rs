@@ -9,9 +9,9 @@
 //!
 //! Counters measure requested bytes, not allocator usable size or RSS. Ancestors include
 //! descendants; do not sum a parent and its children. Individual counters are atomic; multi-field
-//! snapshots are consistent only when allocation activity is quiescent. Process totals are enabled
-//! by default through `process-totals`; disabling it isolates independent context counters. Peaks
-//! use live bytes, never by summing source peaks. Accounting does not enforce a memory budget.
+//! snapshots are consistent only when allocation activity is quiescent. Process totals are always
+//! recorded alongside context counters. Peaks use live bytes, never by summing source peaks.
+//! Accounting does not enforce a memory budget.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::{Cell, RefCell};
@@ -36,6 +36,19 @@ pub enum AllocationSource {
     Abi,
     /// Explicit C or other native allocations.
     Other,
+    /// Accounting records, scopes, and host-side diagnostic scratch.
+    Instrumentation,
+}
+
+/// Aggregate selection independent of an individual context's lifetime.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AccountingDomain {
+    /// All instrumented allocations, including instrumentation metadata.
+    Process,
+    /// Allocations with an origin context, counted once regardless of context hierarchy.
+    Tagged,
+    /// Allocations without an origin context; this does not identify uninstrumented memory.
+    Untagged,
 }
 
 /// Requested-byte statistics for one source or the combined live total.
@@ -63,7 +76,7 @@ pub struct Snapshot {
     /// Combined statistics, whose peak includes overlap across all sources.
     pub total: Statistics,
     /// AllocationSource statistics in [`AllocationSource`] discriminant order.
-    pub sources: [Statistics; 4],
+    pub sources: [Statistics; 5],
 }
 
 #[derive(Default)]
@@ -114,7 +127,7 @@ struct State {
     id: u64,
     parent: Option<Context>,
     total: Counters,
-    sources: [Counters; 4],
+    sources: [Counters; 5],
 }
 
 impl State {
@@ -123,7 +136,7 @@ impl State {
             id,
             parent,
             total: Counters::new(),
-            sources: [const { Counters::new() }; 4],
+            sources: [const { Counters::new() }; 5],
         }
     }
 
@@ -146,8 +159,9 @@ impl State {
     }
 }
 
-#[cfg(feature = "process-totals")]
 static PROCESS: State = State::new(0, None);
+static TAGGED: State = State::new(0, None);
+static UNTAGGED: State = State::new(0, None);
 
 thread_local! {
     static ACTIVE: RefCell<Option<Context>> = const { RefCell::new(None) };
@@ -161,7 +175,7 @@ pub struct Context(Arc<State>);
 impl Context {
     /// Creates an allocation context with caller-supplied `id` and optional inclusive `parent`.
     ///
-    /// IDs are diagnostic labels, not registry keys. Creation metadata is excluded from accounting.
+    /// IDs are diagnostic labels, not registry keys. Creation metadata is process instrumentation.
     /// This function does not enter the context and does not impose a memory limit.
     pub fn new(id: u64, parent: Option<Self>) -> Self {
         without_tracking(|| Self(Arc::new(State::new(id, parent))))
@@ -227,33 +241,31 @@ pub fn capture() -> Option<Context> {
 
 /// Reads inclusive process counters, including allocations made outside a tagged context.
 pub fn process_snapshot() -> Snapshot {
-    #[cfg(feature = "process-totals")]
-    {
-        PROCESS.snapshot()
-    }
-    #[cfg(not(feature = "process-totals"))]
-    {
-        Snapshot::default()
+    domain_snapshot(AccountingDomain::Process)
+}
+
+/// Reads `domain` without retaining individual context handles.
+/// Tagged/untagged partition live bytes, but their independent peaks do not add up
+/// to the process peak. Concurrent multi-counter reads can mix observation times.
+pub fn domain_snapshot(domain: AccountingDomain) -> Snapshot {
+    match domain {
+        AccountingDomain::Process => PROCESS.snapshot(),
+        AccountingDomain::Tagged => TAGGED.snapshot(),
+        AccountingDomain::Untagged => UNTAGGED.snapshot(),
     }
 }
 
 /// Resets the process Rust-source peak to its current live bytes, returning the previous peak.
 /// This operation is not coordinated with allocations and must be serialized for reliable resets.
 pub fn reset_process_rust_peak() -> u64 {
-    #[cfg(feature = "process-totals")]
-    {
-        let counters = &PROCESS.sources[AllocationSource::Rust as usize];
-        counters
-            .peak
-            .swap(counters.live.load(Ordering::Relaxed), Ordering::Relaxed)
-    }
-    #[cfg(not(feature = "process-totals"))]
-    {
-        0
-    }
+    let counters = &PROCESS.sources[AllocationSource::Rust as usize];
+    counters
+        .peak
+        .swap(counters.live.load(Ordering::Relaxed), Ordering::Relaxed)
 }
 
-/// Runs `f` without charging instrumentation metadata. Does not disable the allocator's prefixes.
+/// Runs `f` with allocations charged to process instrumentation, outside any query context.
+/// Does not disable the allocator's prefixes or process accounting.
 pub fn without_tracking<T>(f: impl FnOnce() -> T) -> T {
     struct Restore(bool);
     impl Drop for Restore {
@@ -369,7 +381,7 @@ pub struct TrackingAllocator;
 #[derive(Clone, Copy)]
 struct Header {
     owner: *const State,
-    counted: bool,
+    source: AllocationSource,
 }
 
 unsafe impl GlobalAlloc for TrackingAllocator {
@@ -385,15 +397,13 @@ unsafe impl GlobalAlloc for TrackingAllocator {
         if let Some((backing, offset)) = extended(layout) {
             let base = unsafe { pointer.sub(offset) };
             let header = unsafe { base.cast::<Header>().read() };
-            if header.counted {
-                update(
-                    unsafe { header.owner.as_ref() },
-                    AllocationSource::Rust,
-                    layout.size(),
-                    backing.size() - layout.size(),
-                    false,
-                );
-            }
+            update(
+                unsafe { header.owner.as_ref() },
+                header.source,
+                layout.size(),
+                backing.size() - layout.size(),
+                false,
+            );
             unsafe { System.dealloc(pointer.sub(offset), backing) };
             if !header.owner.is_null() {
                 unsafe { drop(Arc::from_raw(header.owner)) };
@@ -417,29 +427,17 @@ unsafe impl GlobalAlloc for TrackingAllocator {
         if resized.is_null() {
             return ptr::null_mut();
         }
-        if header.counted {
+        {
             let owner = unsafe { header.owner.as_ref() };
             // Reallocation retains the origin and charges only positive growth as allocation
             // volume.
             if new_size >= layout.size() {
-                update(
-                    owner,
-                    AllocationSource::Rust,
-                    new_size - layout.size(),
-                    0,
-                    true,
-                );
+                update(owner, header.source, new_size - layout.size(), 0, true);
             } else {
-                update(
-                    owner,
-                    AllocationSource::Rust,
-                    layout.size() - new_size,
-                    0,
-                    false,
-                );
+                update(owner, header.source, layout.size() - new_size, 0, false);
                 for_state(owner, |state| {
                     state.total.allocations.fetch_add(1, Ordering::Relaxed);
-                    state.sources[AllocationSource::Rust as usize]
+                    state.sources[header.source as usize]
                         .allocations
                         .fetch_add(1, Ordering::Relaxed);
                 });
@@ -447,10 +445,7 @@ unsafe impl GlobalAlloc for TrackingAllocator {
             let old_tracking = backing.size() - layout.size();
             let new_tracking = new_backing.size() - new_size;
             for_state(owner, |state| {
-                for counters in [
-                    &state.total,
-                    &state.sources[AllocationSource::Rust as usize],
-                ] {
+                for counters in [&state.total, &state.sources[header.source as usize]] {
                     if new_tracking >= old_tracking {
                         counters
                             .tracking
@@ -498,8 +493,12 @@ unsafe fn allocate(layout: Layout, zeroed: bool) -> *mut u8 {
     if base.is_null() {
         return base;
     }
-    let counted = !SUPPRESSED.try_with(Cell::get).unwrap_or(true);
-    let owner = if counted {
+    let source = if SUPPRESSED.try_with(Cell::get).unwrap_or(true) {
+        AllocationSource::Instrumentation
+    } else {
+        AllocationSource::Rust
+    };
+    let owner = if source == AllocationSource::Rust {
         active_pointer()
     } else {
         ptr::null()
@@ -507,25 +506,24 @@ unsafe fn allocate(layout: Layout, zeroed: bool) -> *mut u8 {
     if !owner.is_null() {
         unsafe { Arc::increment_strong_count(owner) };
     }
-    unsafe { base.cast::<Header>().write(Header { owner, counted }) };
-    if counted {
-        update(
-            unsafe { owner.as_ref() },
-            AllocationSource::Rust,
-            layout.size(),
-            backing.size() - layout.size(),
-            true,
-        );
-    }
+    unsafe { base.cast::<Header>().write(Header { owner, source }) };
+    update(
+        unsafe { owner.as_ref() },
+        source,
+        layout.size(),
+        backing.size() - layout.size(),
+        true,
+    );
     unsafe { base.add(offset) }
 }
 
 fn for_state(mut owner: Option<&State>, mut f: impl FnMut(&State)) {
+    let tagged = owner.is_some();
     while let Some(state) = owner {
         f(state);
         owner = state.parent.as_ref().map(|parent| parent.0.as_ref());
     }
-    #[cfg(feature = "process-totals")]
+    f(if tagged { &TAGGED } else { &UNTAGGED });
     f(&PROCESS);
 }
 

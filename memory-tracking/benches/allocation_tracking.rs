@@ -15,7 +15,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         .unwrap_or_else(|_| "5".to_owned())
         .parse()?;
     let filter = std::env::var("TRACKING_MODE").ok();
-    println!("repeat,mode,process_totals,bytes,threads,shared_context,iterations,elapsed_ns,ns_per_pair,max_context_peak_bytes");
+    println!("repeat,mode,bytes,threads,shared_context,iterations,elapsed_ns,ns_per_pair,max_context_peak_bytes");
     for repeat in 0..=repeats {
         let mut modes = ["system", "process", "header", "header_external"];
         modes.rotate_left(repeat % 4);
@@ -83,8 +83,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                             .max()
                             .unwrap_or(0);
                         if repeat > 0 {
-                            println!("{repeat},{mode},{},{size},{threads},{shared},{iterations},{elapsed},{ns_per_pair:.2},{max_peak}",
-                        cfg!(feature = "process-totals"));
+                            println!("{repeat},{mode},{size},{threads},{shared},{iterations},{elapsed},{ns_per_pair:.2},{max_peak}");
                         }
                     }
                 }
