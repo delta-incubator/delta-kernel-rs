@@ -1136,8 +1136,9 @@ impl Scan {
         existing_data: impl IntoIterator<Item = Box<dyn EngineData>, IntoIter: Send + 'static>,
         _existing_predicate: Option<PredicateRef>,
     ) -> KernelResult<KernelResultIteratorStatic<ScanMetadata>> {
-        // TODO(#3609): scan_metadata_from does not reuse existing partitionValues_parsed. Support
-        // reusing those values and enable connector-supplied tz support.
+        // TODO(#3609): scan_metadata_from does not reuse existing partitionValues_parsed
+        // from compatible checkpoints. Support reusing those values and enable connector-supplied
+        // timezone support.
         require!(
             !self
                 .partition_values
@@ -1326,7 +1327,7 @@ impl Scan {
         &self,
         engine: &dyn Engine,
     ) -> KernelResult<Option<Plan>> {
-        // TODO(#3609): Support connector-supplied tz in declarative metadata scans.
+        // TODO(#3609): Support connector-supplied timezone in declarative metadata scans.
         require!(
             !self
                 .partition_values
@@ -1509,7 +1510,7 @@ impl Scan {
                  use scan_metadata for a cancellable scan",
             ));
         }
-        // TODO(#3609): Support connector-supplied tz in parallel metadata scans.
+        // TODO(#3609): Support connector-supplied timezone in parallel metadata scans.
         require!(
             !self
                 .partition_values

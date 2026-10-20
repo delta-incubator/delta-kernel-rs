@@ -469,38 +469,33 @@ fn test_without_row_transforms_retains_spec_and_sets_skip(#[case] table: &str) {
     assert!(scan.state_info.skip_row_transforms);
 }
 
-/// Scan metadata preserves partition values when row transforms are explicitly disabled or a
-/// timezone is configured for timezone-independent partition types.
+/// Under `without_row_transforms`, `scan_metadata` still lists files and surfaces the partition
+/// values a connector needs to reconstruct rows itself, while every per-file transform is `None`.
 /// Deletion vectors are covered by the sibling test.
-#[rstest]
-#[case::explicit(None)]
-#[case::utc(Some("UTC"))]
-#[case::named(Some("America/Los_Angeles"))]
-#[case::fixed(Some("+05:30"))]
-fn row_transform_options_preserve_partition_metadata(#[case] timezone: Option<&str>) {
+#[test]
+fn test_without_row_transforms_scan_metadata_lists_files_with_partition_values() {
     let (engine, snapshot) = without_transforms_snapshot("./tests/data/basic_partitioned/");
-    let builder = snapshot.scan_builder();
-    let scan = match timezone {
-        Some(timezone) => builder.with_partition_values(
-            PartitionValuesOptions::string_map_only().with_timestamp_timezone(timezone),
-        ),
-        None => builder.without_row_transforms(),
-    }
-    .build()
-    .unwrap();
+    let scan = snapshot
+        .scan_builder()
+        .without_row_transforms()
+        .build()
+        .unwrap();
 
-    // (saw a file, saw non-empty partition values, row transforms disabled)
-    fn collect(acc: &mut (bool, bool, bool), scan_file: ScanFile) {
-        assert_eq!(scan_file.transform.is_none(), acc.2);
+    // (saw a file, saw non-empty partition values)
+    fn collect(acc: &mut (bool, bool), scan_file: ScanFile) {
         acc.0 = true;
         acc.1 |= !scan_file.partition_values.is_empty();
     }
-    let mut acc = (false, false, timezone.is_none());
+    let mut acc = (false, false);
     for metadata in scan.scan_metadata(engine.as_ref()).unwrap() {
         let metadata = metadata.unwrap();
+        assert!(
+            metadata.scan_file_transforms.iter().all(Option::is_none),
+            "every per-file transform must be None under without_row_transforms"
+        );
         acc = metadata.visit_scan_files(acc, collect).unwrap();
     }
-    let (saw_file, saw_partition_values, _) = acc;
+    let (saw_file, saw_partition_values) = acc;
     assert!(
         saw_file,
         "scan_metadata should still list files under without_row_transforms"
@@ -544,29 +539,22 @@ fn test_without_row_transforms_scan_metadata_lists_files_column_mapping() {
     );
 }
 
-#[rstest]
-#[case::explicit(None)]
-#[case::utc(Some("UTC"))]
-#[case::named(Some("America/Los_Angeles"))]
-#[case::fixed(Some("+05:30"))]
-fn row_transform_options_control_execute(#[case] timezone: Option<&str>) {
+#[test]
+fn test_without_row_transforms_rejects_execute() {
     let (engine, snapshot) = without_transforms_snapshot("./tests/data/basic_partitioned/");
-    let builder = snapshot.scan_builder();
-    let scan = match timezone {
-        Some(timezone) => builder.with_partition_values(
-            PartitionValuesOptions::with_struct().with_timestamp_timezone(timezone),
-        ),
-        None => builder.without_row_transforms(),
-    }
-    .build()
-    .unwrap();
-    let result = scan.execute(engine);
-    if timezone.is_some() {
-        let batches = result.unwrap().collect::<KernelResult<Vec<_>>>().unwrap();
-        assert_eq!(batches.iter().map(|batch| batch.len()).sum::<usize>(), 3);
-    } else {
-        assert_result_error_with_message(result, "without_row_transforms");
-    }
+    let scan = snapshot
+        .scan_builder()
+        .without_row_transforms()
+        .build()
+        .unwrap();
+    let err = scan
+        .execute(engine)
+        .err()
+        .expect("execute must error when row transforms are skipped");
+    assert!(
+        err.to_string().contains("without_row_transforms"),
+        "unexpected error: {err}"
+    );
 }
 
 /// Row commit version metadata columns require a row-tracking-enabled table, including when row

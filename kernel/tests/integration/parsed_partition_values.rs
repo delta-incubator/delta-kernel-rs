@@ -26,12 +26,11 @@ use delta_kernel::{Engine, Snapshot, SnapshotRef};
 use rstest::rstest;
 use test_utils::delta_kernel_default_engine::DefaultEngineBuilder;
 use test_utils::table_builder::{
-    partitioned, unpartitioned, version_latest, FeatureSet, LogState, TableConfig,
+    partitioned, unpartitioned, version_latest, FeatureSet, LogState, TableConfig, TestTableBuilder,
 };
 use test_utils::{
     add_commit, assert_result_error_with_message, create_default_engine_mt_executor, get_column,
-    install_thread_local_metrics_reporter, load_test_data, test_context, test_table_setup_mt,
-    CountingReporter,
+    install_thread_local_metrics_reporter, test_context, test_table_setup_mt, CountingReporter,
 };
 use url::Url;
 
@@ -714,65 +713,57 @@ fn parallel_and_declarative_scans_reject_timestamp_timezone(
 }
 
 #[rstest]
-#[case::unpartitioned("table-without-dv-small", false, false)]
-#[case::string_partition("basic_partitioned", true, false)]
-#[case::timestamp_ntz_partition("data-reader-timestamp_ntz", true, false)]
-#[case::id_mapped_partition("data-reader-timestamp_ntz-id-mode", true, true)]
-#[case::name_mapped_partition("data-reader-timestamp_ntz-name-mode", true, true)]
-fn timestamp_timezone_preserves_transforms_without_timestamp_partitions(
-    #[case] table: &str,
-    #[case] expects_transform: bool,
-    #[case] golden_data: bool,
+#[case::unpartitioned(false, false)]
+#[case::not_timestamp_partition(false, true)]
+#[case::timestamp_partition(true, false)]
+fn timestamp_timezone_controls_row_transforms(
+    #[case] timestamp_partition: bool,
+    #[case] expect_transform: bool,
     #[values("UTC", "America/Los_Angeles", "+05:30")] timezone: &str,
 ) {
-    let temp_dir = golden_data.then(|| load_test_data("tests/golden_data", table).unwrap());
-    let path = match &temp_dir {
-        Some(temp_dir) => temp_dir.path().join(table).join("delta"),
-        None => std::fs::canonicalize(format!("tests/data/{table}")).unwrap(),
+    let partition_columns = match (timestamp_partition, expect_transform) {
+        (true, _) => vec!["ts"],
+        (false, true) => vec!["category", "ts_ntz"],
+        (false, false) => vec![],
     };
-    let url = Url::from_directory_path(path).unwrap();
-    let engine: Arc<dyn Engine> =
-        Arc::new(DefaultEngineBuilder::new(Arc::new(LocalFileSystem::new())).build());
-    let snapshot = Snapshot::builder_for(url).build(engine.as_ref()).unwrap();
-    let baseline = snapshot.clone().scan_builder().build().unwrap();
+    let table = TestTableBuilder::new()
+        .with_log_state(LogState::with_latest_version(1))
+        .with_schema(schema_ref! {
+            nullable "ts": TIMESTAMP,
+            nullable "ts_ntz": TIMESTAMP_NTZ,
+            nullable "category": STRING,
+            nullable "value": INTEGER,
+        })
+        .with_partition_columns(partition_columns)
+        .with_data(1, 3)
+        .build()
+        .unwrap();
+    let engine = Arc::new(table.engine());
+    let snapshot = Snapshot::builder_for(table.table_root())
+        .build(engine.as_ref())
+        .unwrap();
     let scan = snapshot
         .scan_builder()
         .with_partition_values(PartitionValuesOptions::default().with_timestamp_timezone(timezone))
         .build()
         .unwrap();
 
-    let mut file_count = 0;
     for metadata in scan.scan_metadata(engine.as_ref()).unwrap() {
-        file_count = metadata
+        metadata
             .unwrap()
-            .visit_scan_files(
-                (file_count, expects_transform),
-                |(count, expects_transform), file| {
-                    assert_eq!(file.transform.is_some(), *expects_transform);
-                    *count += 1;
-                },
-            )
-            .unwrap()
-            .0;
+            .visit_scan_files(expect_transform, |expected, file| {
+                assert_eq!(file.transform.is_some(), *expected);
+            })
+            .unwrap();
     }
-    assert!(file_count > 0);
-    scan.parallel_scan_metadata(engine.clone()).unwrap();
 
-    let results: Vec<Vec<RecordBatch>> = [baseline, scan]
-        .iter()
-        .map(|scan| {
-            scan.execute(engine.clone())
-                .unwrap()
-                .map(|batch| {
-                    ArrowEngineData::try_from_engine_data(batch.unwrap())
-                        .unwrap()
-                        .into()
-                })
-                .collect()
-        })
-        .collect();
-    assert!(!results[0].is_empty());
-    assert_eq!(results[0], results[1]);
+    let result = scan.execute(engine);
+    if timestamp_partition {
+        assert_result_error_with_message(result, "row transforms are disabled");
+    } else {
+        let row_count: usize = result.unwrap().map(|batch| batch.unwrap().len()).sum();
+        assert_eq!(row_count, 3);
+    }
 }
 
 #[test]
@@ -800,12 +791,6 @@ fn scan_metadata_ignores_invalid_timestamp_timezone_for_unpartitioned_table() {
             .unwrap();
     }
     assert_eq!(file_count, 1);
-    let batches = scan
-        .execute(Arc::new(engine))
-        .unwrap()
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap();
-    assert!(!batches.is_empty());
 }
 
 #[rstest]

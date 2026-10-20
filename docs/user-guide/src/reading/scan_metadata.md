@@ -290,11 +290,11 @@ checkpoint already stores a compatible typed `partitionValues_parsed` column, Ke
 directly and the timezone is not applied to those values. Because offset-less values do not record
 their writer timezone, the configured timezone must match the timezone used when they were written.
 
-Kernel doesn't support row transforms with a specified timezone, so
-`PartitionValuesOptions::with_timestamp_timezone` omits per-file row transforms. As a result,
-`Scan::execute`, `Scan::parallel_scan_metadata`, and `Scan::declarative_metadata_scan_plan` all
-return an error when you set this option. You can use `scan_metadata` and reconstruct logical rows
-in your connector.
+Kernel doesn't yet support timezone-aware row transforms for `TIMESTAMP` partitions.
+`PartitionValuesOptions::with_timestamp_timezone` omits per-file row transforms when the table has
+`TIMESTAMP` partitions. As a result, `Scan::execute` returns an error in this case.
+`Scan::parallel_scan_metadata` and `Scan::declarative_metadata_scan_plan` also return errors in this
+case. You can use `scan_metadata` and reconstruct logical rows in your connector.
 
 `TIMESTAMP_NTZ` remains timezone-independent. For daylight-saving transitions, ambiguous local times
 use the earlier instant, and nonexistent local times use the offset from before the transition.
