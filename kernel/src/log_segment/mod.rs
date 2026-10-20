@@ -1034,6 +1034,7 @@ impl LogSegment {
             checkpoint,
             &LogRoot::new(table_root.clone())?,
             checkpoint_read_schema.clone(),
+            cancellation_token,
         )?;
         Ok(ActionsWithCheckpointInfo {
             actions: Box::new(commits.chain(checkpoint_actions)),
