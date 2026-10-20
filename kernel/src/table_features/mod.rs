@@ -18,7 +18,8 @@ pub(crate) use geospatial::validate_geospatial_feature_support;
 pub(crate) use iceberg_compat::v2::V2_VALIDATOR;
 pub(crate) use iceberg_compat::v3::V3_VALIDATOR;
 pub(crate) use iceberg_compat::{
-    validate_iceberg_compat_if_needed, IcebergCompatValidationContext,
+    is_iceberg_allowed_type_change, validate_iceberg_compat_if_needed,
+    IcebergCompatValidationContext,
 };
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
@@ -607,9 +608,6 @@ static TYPE_WIDENING_INFO: FeatureInfo = FeatureInfo {
     feature_type: FeatureType::ReaderWriter,
     min_legacy_version: None,
     feature_requirements: &[],
-    // TODO(#2492): When type widening is supported on ALTER TABLE, restrict the allowed widenings
-    // on IcebergCompatV3 tables to the subset permitted by Iceberg V3 schema-evolution rules.
-    // Ref: <https://iceberg.apache.org/spec/#schema-evolution>
     kernel_support: KernelSupport::Supported,
     enablement_check: EnablementCheck::EnabledIf(|props| props.enable_type_widening == Some(true)),
 };
@@ -618,9 +616,6 @@ static TYPE_WIDENING_PREVIEW_INFO: FeatureInfo = FeatureInfo {
     feature_type: FeatureType::ReaderWriter,
     min_legacy_version: None,
     feature_requirements: &[],
-    // TODO(#2492): When type widening is supported on ALTER TABLE, restrict the allowed widenings
-    // on IcebergCompatV3 tables to the subset permitted by Iceberg V3 schema-evolution rules.
-    // Ref: <https://iceberg.apache.org/spec/#schema-evolution>
     kernel_support: KernelSupport::Supported,
     enablement_check: EnablementCheck::EnabledIf(|props| props.enable_type_widening == Some(true)),
 };

@@ -300,6 +300,29 @@ pub unsafe extern "C" fn update_table_txn_builder_with_domain_metadata(
         .into_extern_result(&engine)
 }
 
+/// Requests a complete column-mapped schema, including all field metadata.
+///
+/// Replaces the previous complete-schema request. Returns a replacement builder or a schema
+/// decoding error. Transition validation runs when the builder is built. New fields must omit
+/// physical names so Kernel can allocate names that cannot alias dropped columns.
+///
+/// # Safety
+///
+/// All handles and `schema` must be valid. Borrows `engine` and `schema` for this call and
+/// unconditionally consumes `builder`, including on decoding errors.
+#[no_mangle]
+pub unsafe extern "C" fn update_table_txn_builder_with_updated_schema(
+    builder: Handle<ExclusiveUpdateTableTransactionBuilder>,
+    schema: &EngineSchema,
+    engine: Handle<SharedExternEngine>,
+) -> ExternResult<Handle<ExclusiveUpdateTableTransactionBuilder>> {
+    let builder = unsafe { *builder.into_inner() };
+    let engine = unsafe { engine.as_ref() };
+    decode_engine_schema(schema)
+        .map(|schema| Box::new(builder.with_updated_schema(Arc::new(schema))).into())
+        .into_extern_result(&engine)
+}
+
 /// Adds a nullable top-level field described by a single-field engine schema.
 ///
 /// # Safety

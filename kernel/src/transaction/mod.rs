@@ -281,6 +281,8 @@ pub struct Transaction<STATE = UpdateTable, MODE: ExecutionMode = Imperative> {
     // Whether to emit a Metadata action. True for CREATE TABLE and transactions with staged
     // schema changes, false otherwise.
     should_emit_metadata: bool,
+    // Accepted table intent is independent of which actions are emitted.
+    has_table_change_request: bool,
     committer: Box<dyn Committer>,
     operation: CommitOperation,
     operation_parameters: Option<HashMap<String, Option<String>>>,
@@ -824,6 +826,7 @@ impl<STATE, MODE: ExecutionMode> Transaction<STATE, MODE> {
             effective_table_config,
             should_emit_protocol: false,
             should_emit_metadata: false,
+            has_table_change_request: false,
             committer,
             operation,
             operation_parameters: common_state.operation_parameters,
@@ -1154,7 +1157,7 @@ impl<STATE, MODE: ExecutionMode> Transaction<STATE, MODE> {
         match (self.is_create_table(), &self.operation) {
             (true, CommitOperation::CreateTable) => Ok(()),
             (false, CommitOperation::UpdateTable(UpdateTableOperation::AlterTable))
-                if !self.should_emit_metadata =>
+                if !self.has_table_change_request =>
             {
                 Err(KernelError::invalid_transaction_state(
                     "ALTER TABLE requires at least one schema change",
@@ -2277,6 +2280,7 @@ mod tests {
             effective_table_config,
             should_emit_protocol,
             should_emit_metadata,
+            has_table_change_request,
             committer,
             operation,
             operation_parameters,
@@ -2313,6 +2317,7 @@ mod tests {
         assert_eq!(&effective_table_config, snapshot.table_configuration());
         assert!(!should_emit_protocol);
         assert!(!should_emit_metadata);
+        assert!(!has_table_change_request);
         assert!(!committer.is_catalog_committer());
         assert_eq!(operation, UpdateTableOperation::Write.into());
         assert!(operation_parameters.is_none());
