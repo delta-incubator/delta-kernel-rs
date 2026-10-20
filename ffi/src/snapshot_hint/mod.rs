@@ -15,6 +15,8 @@ use crate::{
 };
 
 mod export;
+#[cfg(all(feature = "internal-api", feature = "declarative-plans"))]
+mod externalized;
 
 /// Exports retained snapshot state through one callback without engine I/O.
 ///
