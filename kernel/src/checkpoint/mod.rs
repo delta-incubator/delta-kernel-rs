@@ -379,8 +379,7 @@ impl CheckpointWriter {
             .ensure_read_write_supported()?;
 
         // The adaptiveMetadata protocol forbids classic checkpoints: checkpoint state lives in the
-        // `checkpoint` action instead. Readers rely on this, since a classic checkpoint would hide
-        // the manifest commit named by `lastManifestCommit` from the log segment.
+        // [`CheckpointAction`] action instead.
         #[cfg(feature = "adaptive-metadata-in-dev")]
         if snapshot
             .table_configuration()
