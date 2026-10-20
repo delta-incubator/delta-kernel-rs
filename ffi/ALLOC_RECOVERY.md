@@ -13,10 +13,14 @@ Cargo features do not select a compiler, so use the build wrapper:
 KERNEL_FFI_FEATURES=default-engine-rustls,alloc-recovery,vendored-protoc ./ffi/build-native.sh
 ```
 
-Configure `configure_native_allocation_limit(limit_bytes, recovery_bytes)` while protected
-operations and their executor tasks are idle. Both values must be positive, or both zero to
-disable enforcement. Configuration returns false if unsupported, invalid, busy, or if the
-absolute ceiling would be below existing charged bytes. Zero does not remove the hook.
+Call `configure_native_allocation_limit(limit_bytes, recovery_bytes)` once during single-threaded
+startup, before creating engines or starting native work. Both values must be positive, or both zero
+to keep enforcement off. A successful call fixes the policy for the lifetime of the loaded library;
+later calls are rejected, including attempts to disable enforcement. Failed calls do not consume
+initialization. Configuration returns false if unsupported, invalid, already initialized, or if the
+absolute ceiling would be below existing charged bytes. Allocations before initialization are
+unbounded. Startup ordering is the caller's responsibility; no allocator-side reconfiguration gate
+is installed. Zero does not remove the hook.
 
 The allocator reserves requested bytes atomically before calling `System`. Protected work uses
 `limit_bytes`; recovery and unguarded housekeeping use the absolute ceiling

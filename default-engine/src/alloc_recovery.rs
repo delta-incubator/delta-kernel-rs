@@ -4,7 +4,7 @@ use std::any::Any;
 use std::cell::{Cell, RefCell};
 use std::future::Future;
 use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
-use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 use std::task::Poll;
 
@@ -30,9 +30,6 @@ pub struct AllocationFailure {
     pub requested: usize,
 }
 
-const CONFIGURING: usize = usize::MAX;
-static OPERATIONS: AtomicUsize = AtomicUsize::new(0);
-
 thread_local! {
     static GUARDED: Cell<bool> = const { Cell::new(false) };
     static RECOVERING: Cell<bool> = const { Cell::new(false) };
@@ -48,19 +45,8 @@ pub struct Operation {
 }
 
 impl Operation {
-    /// Creates an operation, preventing configuration changes until all tasks release it.
+    /// Creates shared failure state for an operation and its executor tasks.
     pub fn new() -> Arc<Self> {
-        loop {
-            let count = OPERATIONS.load(Ordering::Acquire);
-            if count != CONFIGURING
-                && OPERATIONS
-                    .compare_exchange_weak(count, count + 1, Ordering::AcqRel, Ordering::Acquire)
-                    .is_ok()
-            {
-                break;
-            }
-            std::hint::spin_loop();
-        }
         Arc::new(Self {
             failure: AtomicU8::new(0),
         })
@@ -80,26 +66,6 @@ impl Operation {
             .failure
             .compare_exchange(0, reason as u8, Ordering::AcqRel, Ordering::Acquire);
     }
-}
-
-impl Drop for Operation {
-    fn drop(&mut self) {
-        OPERATIONS.fetch_sub(1, Ordering::Release);
-    }
-}
-
-/// Runs a configuration update only when no protected operations or their tasks exist.
-/// Returns false without executing `update` when an operation is active.
-pub fn configure_if_idle(update: impl FnOnce() -> bool) -> bool {
-    if OPERATIONS
-        .compare_exchange(0, CONFIGURING, Ordering::AcqRel, Ordering::Acquire)
-        .is_err()
-    {
-        return false;
-    }
-    let result = update();
-    OPERATIONS.store(0, Ordering::Release);
-    result
 }
 
 /// Whether allocations on this thread belong to protected application work.

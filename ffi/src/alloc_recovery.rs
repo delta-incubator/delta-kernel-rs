@@ -19,12 +19,14 @@ pub extern "C" fn alloc_recovery_enabled() -> bool {
     cfg!(feature = "alloc-recovery")
 }
 
-/// Configures the global requested-byte budget for experimental snapshot recovery.
+/// Initializes the immutable requested-byte budget for experimental snapshot recovery.
 ///
+/// Call once during single-threaded startup, before creating engines or starting native work.
 /// `limit_bytes` bounds protected application allocations. `recovery_bytes` provides additional,
-/// bounded capacity for cleanup and runtime housekeeping. Zero for both disables enforcement.
-/// Returns false for unsupported builds, invalid limits, a ceiling below live allocations, or
-/// while any protected operation or its executor tasks remain alive. This is not an RSS limit.
+/// bounded capacity for cleanup and runtime housekeeping. Zero for both keeps enforcement off.
+/// Returns false for unsupported builds, invalid limits, a ceiling below charged allocations, or
+/// an already initialized policy. Failed calls do not consume initialization. This is not an RSS
+/// limit. Allocations before initialization are unbounded.
 #[no_mangle]
 pub extern "C" fn configure_native_allocation_limit(limit_bytes: u64, recovery_bytes: u64) -> bool {
     #[cfg(feature = "alloc-recovery")]

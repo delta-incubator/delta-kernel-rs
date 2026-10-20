@@ -2,7 +2,7 @@ use std::alloc::{GlobalAlloc, Layout, System};
 #[cfg(feature = "test-ffi")]
 use std::cell::Cell;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Once;
+use std::sync::{Once, OnceLock};
 
 use delta_kernel::KernelResult;
 use delta_kernel_default_engine::alloc_recovery::{self as recovery, FailureReason, Operation};
@@ -14,36 +14,17 @@ use crate::kernel_string_slice;
 static LIVE: AtomicUsize = AtomicUsize::new(0);
 static CURRENT: AtomicUsize = AtomicUsize::new(0);
 static PEAK: AtomicUsize = AtomicUsize::new(0);
-static ALLOCATING: AtomicUsize = AtomicUsize::new(0);
-
-struct InFlight;
-impl InFlight {
-    fn enter() -> Self {
-        loop {
-            let count = ALLOCATING.load(Ordering::Acquire);
-            if count != usize::MAX
-                && ALLOCATING
-                    .compare_exchange_weak(count, count + 1, Ordering::AcqRel, Ordering::Acquire)
-                    .is_ok()
-            {
-                return Self;
-            }
-            std::hint::spin_loop();
-        }
-    }
-}
-impl Drop for InFlight {
-    fn drop(&mut self) {
-        ALLOCATING.fetch_sub(1, Ordering::Release);
-    }
-}
 
 fn allocated(bytes: usize) {
     let live = CURRENT.fetch_add(bytes, Ordering::AcqRel) + bytes;
     PEAK.fetch_max(live, Ordering::Relaxed);
 }
-static LIMIT: AtomicUsize = AtomicUsize::new(usize::MAX);
-static CEILING: AtomicUsize = AtomicUsize::new(usize::MAX);
+struct Limits {
+    normal: usize,
+    ceiling: usize,
+}
+
+static LIMITS: OnceLock<Limits> = OnceLock::new();
 static INSTALL_HOOK: Once = Once::new();
 
 #[cfg(feature = "test-ffi")]
@@ -66,11 +47,13 @@ impl BudgetAllocator {
 }
 
 fn reserve(bytes: usize) -> bool {
-    let limit = if recovery::is_guarded() && !recovery::is_recovering() {
-        LIMIT.load(Ordering::Acquire)
-    } else {
-        CEILING.load(Ordering::Acquire)
-    };
+    let limit = LIMITS.get().map_or(usize::MAX, |limits| {
+        if recovery::is_guarded() && !recovery::is_recovering() {
+            limits.normal
+        } else {
+            limits.ceiling
+        }
+    });
     let mut live = LIVE.load(Ordering::Acquire);
     loop {
         let Some(total) = live.checked_add(bytes).filter(|total| *total <= limit) else {
@@ -108,7 +91,6 @@ fn injected() -> bool {
 // Reallocation conservatively charges both blocks while the underlying allocator may move data.
 unsafe impl GlobalAlloc for BudgetAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let _in_flight = InFlight::enter();
         if !reserve(layout.size()) {
             return std::ptr::null_mut();
         }
@@ -127,7 +109,6 @@ unsafe impl GlobalAlloc for BudgetAllocator {
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        let _in_flight = InFlight::enter();
         if !reserve(layout.size()) {
             return std::ptr::null_mut();
         }
@@ -152,7 +133,6 @@ unsafe impl GlobalAlloc for BudgetAllocator {
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        let _in_flight = InFlight::enter();
         if !reserve(new_size) {
             return std::ptr::null_mut();
         }
@@ -189,32 +169,20 @@ pub(super) fn configure(limit: u64, recovery_bytes: u64) -> bool {
     if (limit == 0) != (recovery_bytes == 0) {
         return false;
     }
+    if limit != 0 && ceiling < LIVE.load(Ordering::Acquire) {
+        return false;
+    }
     INSTALL_HOOK.call_once(|| {
         std::alloc::set_alloc_error_hook(|layout| {
             recovery::unwind_allocation_failure(layout.size());
         })
     });
-    recovery::configure_if_idle(|| {
-        if ALLOCATING
-            .compare_exchange(0, usize::MAX, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
-            return false;
-        }
-        let valid = limit == 0 || ceiling >= LIVE.load(Ordering::Acquire);
-        if valid {
-            CEILING.store(
-                if limit == 0 { usize::MAX } else { ceiling },
-                Ordering::Release,
-            );
-            LIMIT.store(
-                if limit == 0 { usize::MAX } else { limit },
-                Ordering::Release,
-            );
-        }
-        ALLOCATING.store(0, Ordering::Release);
-        valid
-    })
+    LIMITS
+        .set(Limits {
+            normal: if limit == 0 { usize::MAX } else { limit },
+            ceiling: if limit == 0 { usize::MAX } else { ceiling },
+        })
+        .is_ok()
 }
 
 #[cfg(feature = "test-ffi")]
@@ -326,20 +294,28 @@ mod tests {
     }
 
     fn scenario_body(scenario: &str) {
-        assert!(configure(0, 0));
         match scenario {
-            "configuration" => {
-                let operation = Operation::new();
-                assert!(!configure(0, 0));
-                drop(operation);
-                assert!(configure(0, 0));
-                assert!(!configure(u64::MAX, 1));
-            }
-            "limit" => {
+            "configuration" | "contention" => {}
+            "limit" | "fallible" | "unprotected" | "double_failure" => {
                 assert!(configure(
                     (LIVE.load(Ordering::Acquire) + 64 * 1024) as u64,
                     1024 * 1024
                 ));
+            }
+            _ => assert!(configure(0, 0)),
+        }
+        match scenario {
+            "configuration" => {
+                assert!(!configure(u64::MAX, 1));
+                assert!(!configure(0, 1));
+                assert!(!configure(1, 0));
+                assert!(!configure(1, 1));
+                let limit = (LIVE.load(Ordering::Acquire) + 64 * 1024) as u64;
+                assert!(configure(limit, 1024 * 1024));
+                assert!(!configure(limit, 1024 * 1024));
+                assert!(!configure(0, 0));
+            }
+            "limit" => {
                 let operation = Operation::new();
                 let result = recovery::run_sync(operation.clone(), || {
                     std::hint::black_box(vec![0u8; LARGE])
@@ -351,21 +327,21 @@ mod tests {
                     FailureReason::Limit
                 );
                 drop(operation);
-                assert!(configure(0, 0));
-                assert_eq!(std::hint::black_box(vec![1u8; LARGE]).len(), LARGE);
+                assert_eq!(
+                    recovery::run_sync(Operation::new(), || {
+                        std::hint::black_box(vec![1u8; 8192]).len()
+                    })
+                    .unwrap(),
+                    8192
+                );
             }
             "fallible" => {
                 let mut data = vec![7u8; 8192];
                 let before = CURRENT.load(Ordering::Acquire);
-                assert!(configure(
-                    (LIVE.load(Ordering::Acquire) + 64 * 1024) as u64,
-                    1024 * 1024
-                ));
                 let result = recovery::run_sync(Operation::new(), || data.try_reserve(LARGE));
                 assert!(result.unwrap().is_err());
                 assert_eq!(data, vec![7u8; 8192]);
                 assert!(CURRENT.load(Ordering::Acquire) < before + 64 * 1024);
-                assert!(configure(0, 0));
             }
             "underlying" => {
                 assert!(inject_failure(0));
@@ -379,7 +355,6 @@ mod tests {
                     FailureReason::Allocator
                 );
                 drop(operation);
-                assert!(configure(0, 0));
             }
             "worker" => {
                 let executor = TokioBackgroundExecutor::new();
@@ -399,7 +374,6 @@ mod tests {
                 assert_eq!(operation.failure(), Some(FailureReason::Allocator));
                 drop(operation);
                 drop(executor);
-                assert!(configure(0, 0));
             }
             "concurrent" => {
                 let barrier = Arc::new(std::sync::Barrier::new(4));
@@ -424,7 +398,6 @@ mod tests {
                 for thread in threads {
                     thread.join().unwrap();
                 }
-                assert!(configure(0, 0));
             }
             "accounting" => {
                 recovery::run_sync(Operation::new(), || unsafe {
@@ -456,6 +429,8 @@ mod tests {
                 let held = Arc::new(std::sync::Barrier::new(9));
                 let release = Arc::new(std::sync::Barrier::new(9));
                 let successes = Arc::new(AtomicUsize::new(0));
+                let limit = LIVE.load(Ordering::Acquire) + 2 * BLOCK + 64 * 1024;
+                assert!(configure(limit as u64, BLOCK as u64));
                 let threads: Vec<_> = (0..8)
                     .map(|_| {
                         let (ready, start, held, release, successes) = (
@@ -485,8 +460,6 @@ mod tests {
                     })
                     .collect();
                 ready.wait();
-                let limit = LIVE.load(Ordering::Acquire) + 2 * BLOCK + 64 * 1024;
-                assert!(configure(limit as u64, BLOCK as u64));
                 start.wait();
                 held.wait();
                 assert_eq!(successes.load(Ordering::Acquire), 2);
@@ -495,13 +468,8 @@ mod tests {
                 for thread in threads {
                     thread.join().unwrap();
                 }
-                assert!(configure(0, 0));
             }
             "unprotected" => {
-                assert!(configure(
-                    (LIVE.load(Ordering::Acquire) + 64 * 1024) as u64,
-                    1024 * 1024
-                ));
                 std::hint::black_box(vec![0u8; LARGE]);
                 panic!("unprotected failure must abort");
             }
@@ -512,10 +480,6 @@ mod tests {
                         std::hint::black_box(vec![0u8; LARGE]);
                     }
                 }
-                assert!(configure(
-                    (LIVE.load(Ordering::Acquire) + 64 * 1024) as u64,
-                    1024 * 1024
-                ));
                 let _ = recovery::run_sync(Operation::new(), || {
                     let _cleanup = AllocatesOnDrop;
                     std::hint::black_box(vec![0u8; LARGE]);
