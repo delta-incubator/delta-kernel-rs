@@ -506,6 +506,7 @@ mod private {
     impl Sealed for False {}
 }
 
+pub(crate) use private::HandleOps;
 pub use private::{Boolean, False, Handle, True, Unconstructable};
 
 #[cfg(test)]

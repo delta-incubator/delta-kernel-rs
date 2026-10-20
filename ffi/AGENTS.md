@@ -1059,6 +1059,8 @@ Feature flags:
 - `arrow-60`, `arrow-59`
 - `delta-kernel-unity-catalog`
 - `tracing`
+- `alloc-recovery` -- experimental nightly-only requested-byte limits and snapshot recovery; see
+  `ALLOC_RECOVERY.md`. Use `build-native.sh` to select the compiler from the feature list.
 - `alloc-tracking` -- installs `peak_alloc` as the tracking global allocator; enables meaningful
   `*_native_bytes` / `alloc_tracking_enabled` getters (cdylib only; conflicts with
   another `#[global_allocator]` if linked as an rlib)

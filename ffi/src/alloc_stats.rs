@@ -1,19 +1,26 @@
-//! FFI access to `peak_alloc`'s process-wide Rust allocation counters.
+//! FFI access to the native library's Rust allocation counters.
 //!
 //! # Scope
 //!
-//! Counters record requested allocation sizes only, so they are a lower bound on process RSS:
-//! C/`mmap` allocations and allocator overhead are not included. Values are process-global and
-//! advisory, rather than measurements for a single operation. `peak_alloc` uses relaxed atomic
-//! operations to update its counters. Its peak reset is not coordinated with allocation, so callers
-//! must serialize a reset against native work when they require a meaningful post-reset peak.
+//! Counters record requested allocation sizes, not resident pages. C/`mmap` allocations and
+//! allocator overhead are not included. Values are global within the native library and
+//! advisory, rather than measurements for a single operation. Neither allocator coordinates peak
+//! reset with allocation, so callers must serialize a reset against native work when they require
+//! a meaningful post-reset peak.
 
-#[cfg(feature = "alloc-tracking")]
+#[cfg(all(feature = "alloc-tracking", not(feature = "alloc-recovery")))]
 use peak_alloc::PeakAlloc;
 
-#[cfg(feature = "alloc-tracking")]
+#[cfg(feature = "alloc-recovery")]
+use crate::alloc_recovery::BudgetAllocator;
+
+#[cfg(all(feature = "alloc-tracking", not(feature = "alloc-recovery")))]
 #[global_allocator]
 static GLOBAL_ALLOC: PeakAlloc = PeakAlloc;
+
+#[cfg(feature = "alloc-recovery")]
+#[global_allocator]
+static GLOBAL_ALLOC: BudgetAllocator = BudgetAllocator;
 
 /// Whether this library was built with allocation tracking.
 ///
@@ -58,7 +65,7 @@ pub extern "C" fn current_native_bytes() -> u64 {
 /// Resets the peak to the current live total and returns the peak sampled immediately before reset.
 ///
 /// This is process-global and cannot provide a per-task baseline while allocation is concurrent.
-/// `peak_alloc` samples and resets separately, so concurrent allocation can cause the returned
+/// Sampling and resetting happen separately, so concurrent allocation can cause the returned
 /// value to understate the cleared peak and leave the reported peak lower than the current total.
 /// Returns zero when built without `alloc-tracking`.
 #[no_mangle]
