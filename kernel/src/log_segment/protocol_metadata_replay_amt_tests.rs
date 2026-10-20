@@ -665,10 +665,51 @@ async fn check_standalone_checkpoint_above_pointed_commit<E: Engine>(
     );
 }
 
+// A segment that ends on a checkpoint does not list the commit at that version, so a checkpoint
+// action among the checkpoint's rows is not taken as that commit's: replay resolves P&M from the
+// checkpoint without requiring a `lastManifestCommit` and leaves the action uncaptured.
+#[tokio::test]
+async fn segment_ending_on_checkpoint_ignores_its_checkpoint_action_rows() {
+    check_segment_ending_on_checkpoint(non_plan_engine).await;
+    #[cfg(feature = "declarative-plans")]
+    check_segment_ending_on_checkpoint(|store| SyncEngine::new_with_store(store)).await;
+}
+
+async fn check_segment_ending_on_checkpoint<E: Engine>(
+    make_engine: impl FnOnce(Arc<InMemory>) -> E,
+) {
+    let (store, table_root) = manifest_commit_table(&[]).await;
+    let checkpoint_rows = format!(
+        "{}\n{}\n{}",
+        serde_json::json!({ "checkpointMetadata": { "version": 0 } }),
+        standalone_pm_commit(one_column_schema()),
+        checkpoint_action(0, &[], one_column_schema())
+    );
+    let checkpoint =
+        delta_path_for_version(0, "checkpoint.3a0d65cd-4056-49b8-937b-95f9e3ee90e5.json");
+    store
+        .put(&checkpoint, checkpoint_rows.into())
+        .await
+        .unwrap();
+
+    let engine = make_engine(store);
+    let storage = engine.storage_handler();
+    let log_root = table_root.join("_delta_log/").unwrap();
+    let log_segment =
+        LogSegment::for_snapshot_impl(storage.as_ref(), log_root, vec![], None, None, None)
+            .unwrap();
+    assert_eq!(log_segment.checkpoint_version, Some(0));
+    let resolution = log_segment
+        .read_protocol_metadata_opt(&engine, None)
+        .unwrap();
+    assert!(resolution.protocol.is_some() && resolution.metadata.is_some());
+    assert!(resolution.captured_checkpoint_action.is_none());
+}
+
 // An incremental update resolves the latest checkpoint action for the updated snapshot: a new
 // commit carrying a newer checkpoint action surfaces that newer action, while a new commit carrying
 // none leaves the action uncaptured, so the accessor follows the new commit's `lastManifestCommit`
-// back to the base's older action.
+// back to the base's older action. Runs on both the plan and non-plan paths.
 #[rstest]
 #[case::new_commit_carries_a_newer_action(checkpoint_commit(1, &[], one_column_schema()), 1)]
 #[case::new_commit_carries_no_action(
@@ -679,6 +720,19 @@ async fn check_standalone_checkpoint_above_pointed_commit<E: Engine>(
 async fn incremental_update_resolves_latest_checkpoint_action(
     #[case] new_commit: String,
     #[case] expected_version: i64,
+) {
+    assert_incremental_update_action(&new_commit, expected_version, non_plan_engine).await;
+    #[cfg(feature = "declarative-plans")]
+    assert_incremental_update_action(&new_commit, expected_version, |store| {
+        SyncEngine::new_with_store(store)
+    })
+    .await;
+}
+
+async fn assert_incremental_update_action<E: Engine>(
+    new_commit: &str,
+    expected_version: i64,
+    make_engine: impl FnOnce(Arc<InMemory>) -> E,
 ) {
     let store = Arc::new(InMemory::new());
     let table_root = url::Url::parse("memory:///").unwrap();
@@ -691,7 +745,7 @@ async fn incremental_update_resolves_latest_checkpoint_action(
     .await
     .unwrap();
 
-    let engine = non_plan_engine(store.clone());
+    let engine = make_engine(store.clone());
     let base = Snapshot::builder_for(table_root.clone())
         .at_version(0)
         .build(&engine)
@@ -703,9 +757,14 @@ async fn incremental_update_resolves_latest_checkpoint_action(
         Some(0)
     );
 
-    add_commit(table_root.as_str(), store.as_ref(), 1, new_commit)
-        .await
-        .unwrap();
+    add_commit(
+        table_root.as_str(),
+        store.as_ref(),
+        1,
+        new_commit.to_string(),
+    )
+    .await
+    .unwrap();
     let updated = Snapshot::builder_from(base).build(&engine).unwrap();
 
     assert_eq!(updated.version(), 1);
