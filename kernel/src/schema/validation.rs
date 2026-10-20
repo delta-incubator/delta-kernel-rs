@@ -4,7 +4,7 @@
 
 use std::collections::HashSet;
 
-use crate::schema::{StructField, StructType};
+use crate::schema::{DataType, StructField, StructType};
 use crate::table_changes::{
     CHANGE_TYPE_COL_NAME, COMMIT_TIMESTAMP_COL_NAME, COMMIT_VERSION_COL_NAME,
 };
@@ -118,6 +118,24 @@ impl SchemaValidator {
 impl<'a> SchemaTransform<'a> for SchemaValidator {
     transform_output_type!(|'a, T| ());
 
+    fn transform_array_element(&mut self, data_type: &'a DataType) {
+        self.current_path.push("element".into());
+        self.transform(data_type);
+        self.current_path.pop();
+    }
+
+    fn transform_map_key(&mut self, data_type: &'a DataType) {
+        self.current_path.push("key".into());
+        self.transform(data_type);
+        self.current_path.pop();
+    }
+
+    fn transform_map_value(&mut self, data_type: &'a DataType) {
+        self.current_path.push("value".into());
+        self.transform(data_type);
+        self.current_path.pop();
+    }
+
     fn transform_struct_field(&mut self, field: &'a StructField) {
         if let Err(e) = validate_field_name(field.name(), self.cm_enabled) {
             self.errors.push(e.to_string());
@@ -201,6 +219,27 @@ mod tests {
     use crate::schema::{
         schema, ArrayType, ColumnMetadataKey, DataType, MetadataValue, StructField, StructType,
     };
+
+    #[rstest]
+    fn map_key_and_value_structs_have_independent_field_paths(
+        #[values(false, true)] nested_array: bool,
+        #[values(
+            ColumnMappingMode::None,
+            ColumnMappingMode::Name,
+            ColumnMappingMode::Id
+        )]
+        mode: ColumnMappingMode,
+    ) {
+        let field = schema! { nullable "id": INTEGER };
+        let map = crate::schema::MapType::new(field.clone(), field, true);
+        let data_type: DataType = if nested_array {
+            ArrayType::new(map, true).into()
+        } else {
+            map.into()
+        };
+        let schema = schema! { nullable "m": (data_type) };
+        validate_schema(&schema, mode, false).unwrap();
+    }
 
     // === Schema builders for test cases ===
 
@@ -488,8 +527,8 @@ mod tests {
     #[rstest]
     #[case::top_level(schema_top_level_invariant(), "x")]
     #[case::nested_struct(schema_nested_invariant(), "parent.child")]
-    #[case::array_nested(schema_array_nested_invariant(), "arr.child")]
-    #[case::map_nested(schema_map_nested_invariant(), "map.child")]
+    #[case::array_nested(schema_array_nested_invariant(), "arr.element.child")]
+    #[case::map_nested(schema_map_nested_invariant(), "map.value.child")]
     fn invariants_metadata_rejected(#[case] schema: StructType, #[case] expected_path: &str) {
         let result = validate_schema(
             &schema,

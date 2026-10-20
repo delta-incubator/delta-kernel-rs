@@ -537,8 +537,13 @@ impl Metadata {
         })
     }
 
-    /// Returns a new Metadata with a single configuration entry inserted (or replaced),
-    /// preserving all other configuration entries and metadata fields.
+    /// Replaces table configuration with the prepared key/value map.
+    pub(crate) fn with_configuration(mut self, configuration: HashMap<String, String>) -> Self {
+        self.configuration = configuration;
+        self
+    }
+
+    /// Returns metadata with one configuration entry inserted or replaced, preserving other fields.
     pub(crate) fn with_configuration_entry(
         mut self,
         key: impl Into<String>,

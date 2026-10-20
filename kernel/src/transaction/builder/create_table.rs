@@ -57,8 +57,8 @@ use crate::{Engine, KernelError, KernelResult, StorageHandler};
 /// Table features allowed to be enabled via `delta.feature.*=supported` during CREATE TABLE.
 ///
 /// Feature signals (`delta.feature.X=supported`) are validated against this list.
-/// Only features in this list can be enabled via feature signals.
-const ALLOWED_DELTA_FEATURES: &[TableFeature] = &[
+/// Existing-table updates derive their supported subset from this list and apply transition checks.
+pub(super) const ALLOWED_DELTA_FEATURES: &[TableFeature] = &[
     // DomainMetadata is required for clustering and other system domain operations
     TableFeature::DomainMetadata,
     // ColumnMapping enables column mapping (name/id mode)
@@ -102,9 +102,9 @@ const ALLOWED_DELTA_FEATURES: &[TableFeature] = &[
     TableFeature::IcebergCompatV3,
 ];
 
-/// The single allow-list of `delta.*` properties accepted during CREATE TABLE. Any `delta.*`
-/// key not present here is rejected.
-const ALLOWED_DELTA_PROPERTIES: &[&str] = &[
+/// Editable `delta.*` properties shared by CREATE TABLE and existing-table updates.
+/// Unknown keys are rejected; each operation also validates its supported transitions.
+pub(super) const ALLOWED_DELTA_PROPERTIES: &[&str] = &[
     // ColumnMapping mode property: triggers column mapping transform
     COLUMN_MAPPING_MODE,
     // InCommitTimestamp enablement property: triggers ICT auto-enablement
@@ -194,13 +194,13 @@ fn ensure_table_does_not_exist(
 }
 
 /// Result of validating and transforming table properties.
-struct ValidatedTableProperties {
+pub(super) struct ValidatedTableProperties {
     /// Table properties with feature signals removed (to be stored in metadata)
-    properties: HashMap<String, String>,
+    pub(super) properties: HashMap<String, String>,
     /// Reader features extracted from feature signals (for ReaderWriter features)
-    reader_features: Vec<TableFeature>,
+    pub(super) reader_features: Vec<TableFeature>,
     /// Writer features extracted from feature signals (for all features)
-    writer_features: Vec<TableFeature>,
+    pub(super) writer_features: Vec<TableFeature>,
 }
 
 impl ValidatedTableProperties {
@@ -713,6 +713,15 @@ fn maybe_apply_column_mapping_for_table_create(
 fn validate_extract_table_features_and_properties(
     properties: HashMap<String, String>,
 ) -> KernelResult<ValidatedTableProperties> {
+    extract_table_features_and_properties(properties, ALLOWED_DELTA_FEATURES, "CREATE TABLE")
+}
+
+/// Extracts supported feature requests and rejects unknown Delta settings for `operation`.
+pub(super) fn extract_table_features_and_properties(
+    properties: HashMap<String, String>,
+    allowed_features: &[TableFeature],
+    operation: &str,
+) -> KernelResult<ValidatedTableProperties> {
     let mut reader_features = Vec::new();
     let mut writer_features = Vec::new();
 
@@ -742,9 +751,9 @@ fn validate_extract_table_features_and_properties(
             .parse()
             .unwrap_or_else(|_| TableFeature::Unknown(feature_name.to_string()));
 
-        if !ALLOWED_DELTA_FEATURES.contains(&feature) {
+        if !allowed_features.contains(&feature) {
             return Err(KernelError::generic(format!(
-                "Enabling feature '{feature_name}' via '{key}' is not supported during CREATE TABLE"
+                "Enabling feature '{feature_name}' via '{key}' is not supported during {operation}"
             )));
         }
 
@@ -765,14 +774,14 @@ fn validate_extract_table_features_and_properties(
     for key in properties.keys() {
         if strip_check_constraint_prefix(key).is_some() {
             return Err(KernelError::generic(format!(
-                "Setting CHECK constraint property '{key}' is not supported during CREATE TABLE"
+                "Setting CHECK constraint property '{key}' is not supported during {operation}"
             )));
         }
         if key.starts_with(DELTA_PROPERTY_PREFIX)
             && !ALLOWED_DELTA_PROPERTIES.contains(&key.as_str())
         {
             return Err(KernelError::generic(format!(
-                "Setting delta property '{key}' is not supported during CREATE TABLE"
+                "Setting delta property '{key}' is not supported during {operation}"
             )));
         }
     }

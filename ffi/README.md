@@ -70,6 +70,19 @@ distinct create-table and update-table handles and function families. Shared set
 common Rust implementation; custom setters remain specific to their transaction type. No generic
 type parameters or builder state cross the C boundary.
 
+
+Use `update_table_txn_builder_with_updated_schema` to supply a complete schema through
+`EngineSchema`, preserving field metadata. This requires column mapping and cannot be combined
+with incremental add-column or nullability setters. The setter consumes the builder even if schema
+decoding fails. Build validates the transition before a write context can be obtained.
+
+Use `update_table_txn_builder_with_table_properties_added` with `FfiStringMap` and
+`update_table_txn_builder_with_table_properties_removed` with `FfiStringArray` to replace the two
+property request collections. Both functions copy borrowed inputs and consume the builder on
+success or error. Build rejects protected Delta settings, Delta-key removals, and overlapping keys;
+ordinary property spelling is preserved. Feature requests update the protocol without persisting
+`delta.feature.*` entries. An unchanged accepted request can commit without a Metadata action.
+
 ## Building
 
 ### Building Kernel and Headers

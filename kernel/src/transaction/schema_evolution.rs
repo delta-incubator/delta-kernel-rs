@@ -1,9 +1,11 @@
 //! This module defines the [`SchemaOperation`] enum and functions that validate and
 //! apply schema changes to produce an evolved schema.
 
+mod complete;
 use std::cmp::Ordering;
 use std::sync::Arc;
 
+pub(crate) use complete::replace_schema;
 use delta_kernel_derive::internal_api;
 
 use crate::error::KernelError;
