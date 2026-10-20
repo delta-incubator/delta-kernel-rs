@@ -378,6 +378,19 @@ impl CheckpointWriter {
             .table_configuration()
             .ensure_read_write_supported()?;
 
+        // The adaptiveMetadata protocol forbids classic checkpoints: checkpoint state lives in the
+        // `checkpoint` action instead. Readers rely on this, since a classic checkpoint would hide
+        // the manifest commit named by `lastManifestCommit` from the log segment.
+        #[cfg(feature = "adaptive-metadata-in-dev")]
+        if snapshot
+            .table_configuration()
+            .is_feature_enabled(&TableFeature::AdaptiveMetadataPreview)
+        {
+            return Err(KernelError::checkpoint_write(
+                "classic checkpoints cannot be written once adaptiveMetadata is enabled",
+            ));
+        }
+
         // We disallow checkpointing if the Snapshot is not published. If we didn't, this could
         // create gaps in the version history, thereby breaking old readers.
         snapshot.log_segment().validate_published()?;
