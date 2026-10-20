@@ -3037,13 +3037,17 @@ mod tests {
         }
     }
 
-    // CREATE does not enable `concurrentIdentityColumns`, so a `sequenceId` is orphaned.
-    #[test]
-    fn create_table_rejects_concurrent_identity_columns() {
+    // Kernel cannot create tables with Concurrent Identity Columns yet.
+    #[rstest]
+    #[case::top_level(concurrent_identity_column("id", "seq-abc", 1, 1, false))]
+    #[case::nested(StructField::nullable(
+        "wrapper",
+        StructType::try_new([concurrent_identity_column("id", "seq-abc", 1, 1, false)]).unwrap(),
+    ))]
+    fn create_table_rejects_concurrent_identity_columns(#[case] field: StructField) {
         let engine = SyncEngine::new_with_store(Arc::new(InMemory::new()));
-        let schema =
-            StructType::try_new([concurrent_identity_column("id", "seq-abc", 1, 1, false)]);
-        let result = create_table("memory:///", Arc::new(schema.unwrap()), "test-engine")
+        let schema = StructType::try_new([field]).unwrap();
+        let result = create_table("memory:///", Arc::new(schema), "test-engine", true)
             .with_table_properties([
                 ("io.unitycatalog.tableId", "cic-test"),
                 ("delta.feature.catalogManaged", "supported"),
@@ -3051,7 +3055,7 @@ mod tests {
             .build(&engine, Box::new(MockCatalogCommitter));
         assert_result_error_with_message(
             result,
-            "does not support the 'concurrentIdentityColumns' feature",
+            "Creating a table with Concurrent Identity Columns is not yet supported",
         );
     }
 
