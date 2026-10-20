@@ -147,7 +147,11 @@ impl DeletionVectorPath {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, ToSchema, IntoStructData, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase", try_from = "DeletionVectorRaw", into = "DeletionVectorRaw")]
+#[serde(
+    rename_all = "camelCase",
+    try_from = "DeletionVectorRaw",
+    into = "DeletionVectorRaw"
+)]
 pub struct DeletionVectorDescriptor {
     /// A single character to indicate how to access the DV. Legal options are: ['u', 'i', 'p'],
     /// plus 'r' when built with the `adaptive-metadata-in-dev` cargo feature.
@@ -905,7 +909,10 @@ mod tests {
             (DeletionVectorStorageType::PersistedAbsolute, "\"p\""),
         ] {
             assert_eq!(serde_json::to_string(&variant).unwrap(), json);
-            assert_eq!(serde_json::from_str::<DeletionVectorStorageType>(json).unwrap(), variant);
+            assert_eq!(
+                serde_json::from_str::<DeletionVectorStorageType>(json).unwrap(),
+                variant
+            );
             // Keep the serde wire string in sync with Display/FromStr, which define the same
             // "u"/"i"/"p"/"r" strings in a second place.
             assert_eq!(
