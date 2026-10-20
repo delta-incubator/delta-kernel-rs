@@ -36,7 +36,7 @@ fn slice(value: &'static str) -> KernelStringSlice {
     unsafe { KernelStringSlice::new_unsafe(value) }
 }
 
-#[cfg(feature = "declarative-plans")]
+#[cfg(all(feature = "internal-api", feature = "declarative-plans"))]
 fn assert_trusted_round_trip(
     snapshot: &Handle<SharedSnapshot>,
     engine: &Handle<SharedExternEngine>,
@@ -45,7 +45,7 @@ fn assert_trusted_round_trip(
     unsafe { free_snapshot(reconstructed) };
 }
 
-#[cfg(feature = "declarative-plans")]
+#[cfg(all(feature = "internal-api", feature = "declarative-plans"))]
 mod planning_tests {
     use rstest::rstest;
 
@@ -648,7 +648,7 @@ fn assert_exported_paths_and_round_trip(snapshot: Handle<SharedSnapshot>) {
         crc_version: None,
         visits: 0,
     };
-    #[cfg(feature = "declarative-plans")]
+    #[cfg(all(feature = "internal-api", feature = "declarative-plans"))]
     assert_trusted_round_trip(&snapshot, &engine);
     assert!(unsafe {
         ok_or_panic(snapshot_to_snapshot_hint(
@@ -821,7 +821,7 @@ fn rebuild_through_visitor(
     snapshot: &Handle<SharedSnapshot>,
     engine: &Handle<SharedExternEngine>,
 ) -> Handle<SharedSnapshot> {
-    #[cfg(feature = "declarative-plans")]
+    #[cfg(all(feature = "internal-api", feature = "declarative-plans"))]
     assert_trusted_round_trip(snapshot, engine);
     let builder = ok_or_panic(install_through_visitor(
         snapshot,
@@ -935,7 +935,7 @@ fn visited_hint_round_trips_explicit_watermark_and_outlives_source(
     let snapshot = unsafe { ok_or_panic(snapshot_builder_build(builder)) };
     let expected_segment = unsafe { snapshot.as_ref() }.log_segment().clone();
     let expected_crc = unsafe { snapshot.as_ref() }.crc_at_version().cloned();
-    #[cfg(feature = "declarative-plans")]
+    #[cfg(all(feature = "internal-api", feature = "declarative-plans"))]
     assert_trusted_round_trip(&snapshot, &engine);
     let mut state = VisitedHint {
         builder: Some(test_builder(&engine)),
@@ -1134,7 +1134,7 @@ fn visited_hint_after_publish_preserves_staged_paths_and_advanced_watermark() {
         source_ref.log_segment().listed.ascending_commit_files
     );
     let published: Handle<SharedSnapshot> = published.into();
-    #[cfg(feature = "declarative-plans")]
+    #[cfg(all(feature = "internal-api", feature = "declarative-plans"))]
     assert_trusted_round_trip(&published, &engine);
     let expected_segment = unsafe { published.as_ref() }.log_segment().listed.clone();
     let builder = unsafe { snapshot_builder_with_max_catalog_version(test_builder(&engine), 1) };

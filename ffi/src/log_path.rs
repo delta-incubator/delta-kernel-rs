@@ -15,7 +15,7 @@ impl LogPathArray {
     ///
     /// The array and all nested strings must be readable for this call, and must contain the
     /// unchanged paths exported by the source snapshot.
-    #[cfg(feature = "declarative-plans")]
+    #[cfg(all(feature = "internal-api", feature = "declarative-plans"))]
     pub(crate) unsafe fn trusted_snapshot_log_paths(
         &self,
         table_root: &Url,
