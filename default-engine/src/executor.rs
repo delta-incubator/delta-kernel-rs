@@ -188,18 +188,7 @@ pub mod tokio {
             T: FnOnce() -> R + Send + 'static,
             R: Send + 'static,
         {
-            #[cfg(feature = "alloc-recovery")]
-            {
-                let task = crate::alloc_recovery::capture_blocking(task);
-                Box::pin(async move {
-                    tokio::task::spawn_blocking(task)
-                        .await
-                        .map_err(KernelError::join_failure)
-                        .map(crate::alloc_recovery::resume_task)
-                })
-            }
-            #[cfg(not(feature = "alloc-recovery"))]
-            Box::pin(tokio::task::spawn_blocking(task).map_err(KernelError::join_failure))
+            spawn_blocking(task)
         }
 
         fn enter(&self) -> EnterGuard<'_> {
@@ -331,23 +320,31 @@ pub mod tokio {
             T: FnOnce() -> R + Send + 'static,
             R: Send + 'static,
         {
-            #[cfg(feature = "alloc-recovery")]
-            {
-                let task = crate::alloc_recovery::capture_blocking(task);
-                Box::pin(async move {
-                    tokio::task::spawn_blocking(task)
-                        .await
-                        .map_err(KernelError::join_failure)
-                        .map(crate::alloc_recovery::resume_task)
-                })
-            }
-            #[cfg(not(feature = "alloc-recovery"))]
-            Box::pin(tokio::task::spawn_blocking(task).map_err(KernelError::join_failure))
+            spawn_blocking(task)
         }
 
         fn enter(&self) -> EnterGuard<'_> {
             self.handle.enter()
         }
+    }
+
+    fn spawn_blocking<T, R>(task: T) -> BoxFuture<'static, KernelResult<R>>
+    where
+        T: FnOnce() -> R + Send + 'static,
+        R: Send + 'static,
+    {
+        #[cfg(feature = "alloc-recovery")]
+        {
+            let task = crate::alloc_recovery::capture_blocking(task);
+            Box::pin(async move {
+                tokio::task::spawn_blocking(task)
+                    .await
+                    .map_err(KernelError::join_failure)
+                    .map(crate::alloc_recovery::resume_task)
+            })
+        }
+        #[cfg(not(feature = "alloc-recovery"))]
+        Box::pin(tokio::task::spawn_blocking(task).map_err(KernelError::join_failure))
     }
 
     #[cfg(test)]

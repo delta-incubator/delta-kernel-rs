@@ -15,10 +15,6 @@ static LIVE: AtomicUsize = AtomicUsize::new(0);
 static CURRENT: AtomicUsize = AtomicUsize::new(0);
 static PEAK: AtomicUsize = AtomicUsize::new(0);
 
-fn allocated(bytes: usize) {
-    let live = CURRENT.fetch_add(bytes, Ordering::AcqRel) + bytes;
-    PEAK.fetch_max(live, Ordering::Relaxed);
-}
 struct Limits {
     normal: usize,
     ceiling: usize,
@@ -46,25 +42,104 @@ impl BudgetAllocator {
     }
 }
 
-fn reserve(bytes: usize) -> bool {
-    let limit = LIMITS.get().map_or(usize::MAX, |limits| {
-        if recovery::is_guarded() && !recovery::is_recovering() {
-            limits.normal
+// SAFETY: All methods reserve before allocation, roll back failures, and never unwind.
+// Reallocation conservatively charges both blocks while the underlying allocator may move data.
+unsafe impl GlobalAlloc for BudgetAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        allocate(layout.size(), 0, || unsafe { System.alloc(layout) })
+    }
+
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        allocate(layout.size(), 0, || unsafe { System.alloc_zeroed(layout) })
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        unsafe { System.dealloc(ptr, layout) };
+        LIVE.fetch_sub(layout.size(), Ordering::AcqRel);
+        CURRENT.fetch_sub(layout.size(), Ordering::AcqRel);
+    }
+
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        allocate(new_size, layout.size(), || unsafe {
+            System.realloc(ptr, layout, new_size)
+        })
+    }
+}
+
+pub(super) fn configure(limit: u64, recovery_bytes: u64) -> bool {
+    let Ok(limit) = usize::try_from(limit) else {
+        return false;
+    };
+    let Ok(recovery_bytes) = usize::try_from(recovery_bytes) else {
+        return false;
+    };
+    let Some(ceiling) = limit.checked_add(recovery_bytes) else {
+        return false;
+    };
+    if (limit == 0) != (recovery_bytes == 0) {
+        return false;
+    }
+    if limit != 0 && ceiling < LIVE.load(Ordering::Acquire) {
+        return false;
+    }
+    install_hook();
+    LIMITS
+        .set(Limits {
+            normal: if limit == 0 { usize::MAX } else { limit },
+            ceiling: if limit == 0 { usize::MAX } else { ceiling },
+        })
+        .is_ok()
+}
+
+#[cfg(feature = "test-ffi")]
+pub(super) fn inject_failure(count: u64) -> bool {
+    install_hook();
+    FAIL_AFTER.with(|slot| slot.set(Some(count)));
+    true
+}
+
+pub(super) unsafe fn protect_handle<H>(
+    allocator: &dyn AllocateError,
+    body: impl FnOnce() -> KernelResult<Handle<H>>,
+) -> ExternResult<Handle<H>>
+where
+    H: HandleDescriptor + HandleOps<H::Target, H::Mutable, H::Sized>,
+{
+    let operation = recovery::current_operation().unwrap_or_else(Operation::new);
+    let result = recovery::run_sync(operation.clone(), || unsafe {
+        let result = body();
+        if let Some(reason) = operation.failure() {
+            recovery::with_recovery(|| match result {
+                Ok(handle) => handle.drop_handle(),
+                Err(error) => drop(error),
+            });
+            Err(reason)
         } else {
-            limits.ceiling
+            Ok(result.into_extern_result(allocator))
         }
     });
-    let mut live = LIVE.load(Ordering::Acquire);
-    loop {
-        let Some(total) = live.checked_add(bytes).filter(|total| *total <= limit) else {
-            recovery::record_refusal(FailureReason::Limit);
-            return false;
+    recovery::with_recovery(|| {
+        let reason = match result {
+            Ok(Ok(result)) => return result,
+            Ok(Err(reason)) => reason,
+            Err(payload) => match recovery::recycle_failure(payload) {
+                Ok(failure) => failure.reason,
+                // Preserve fail-stop behavior for unrelated panics at a C ABI boundary.
+                Err(_) => std::process::abort(),
+            },
         };
-        match LIVE.compare_exchange_weak(live, total, Ordering::AcqRel, Ordering::Acquire) {
-            Ok(_) => return true,
-            Err(actual) => live = actual,
-        }
-    }
+        let (kind, message) = match reason {
+            FailureReason::Limit => (
+                FFIKernelError::AllocationLimitExceeded,
+                "Rust allocation limit exceeded during snapshot loading",
+            ),
+            FailureReason::Allocator => (
+                FFIKernelError::AllocationFailed,
+                "Rust allocator returned null during snapshot loading",
+            ),
+        };
+        ExternResult::Err(unsafe { allocator.allocate_error(kind, kernel_string_slice!(message)) })
+    })
 }
 
 fn injected() -> bool {
@@ -87,161 +162,56 @@ fn injected() -> bool {
     false
 }
 
-// SAFETY: All methods reserve before allocation, roll back failures, and never unwind.
-// Reallocation conservatively charges both blocks while the underlying allocator may move data.
-unsafe impl GlobalAlloc for BudgetAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        if !reserve(layout.size()) {
+fn allocate(new_size: usize, old_size: usize, system_alloc: impl FnOnce() -> *mut u8) -> *mut u8 {
+    let limit = LIMITS.get().map_or(usize::MAX, |limits| {
+        if recovery::is_guarded() && !recovery::is_recovering() {
+            limits.normal
+        } else {
+            limits.ceiling
+        }
+    });
+    let mut live = LIVE.load(Ordering::Acquire);
+    loop {
+        let Some(total) = live.checked_add(new_size).filter(|total| *total <= limit) else {
+            recovery::record_refusal(FailureReason::Limit);
             return std::ptr::null_mut();
-        }
-        let ptr = if injected() {
-            std::ptr::null_mut()
-        } else {
-            unsafe { System.alloc(layout) }
         };
-        if ptr.is_null() {
-            LIVE.fetch_sub(layout.size(), Ordering::AcqRel);
-            recovery::record_refusal(FailureReason::Allocator);
-        } else {
-            allocated(layout.size());
+        match LIVE.compare_exchange_weak(live, total, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => break,
+            Err(actual) => live = actual,
         }
-        ptr
     }
 
-    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        if !reserve(layout.size()) {
-            return std::ptr::null_mut();
-        }
-        let ptr = if injected() {
-            std::ptr::null_mut()
-        } else {
-            unsafe { System.alloc_zeroed(layout) }
-        };
-        if ptr.is_null() {
-            LIVE.fetch_sub(layout.size(), Ordering::AcqRel);
-            recovery::record_refusal(FailureReason::Allocator);
-        } else {
-            allocated(layout.size());
-        }
-        ptr
+    let ptr = if injected() {
+        std::ptr::null_mut()
+    } else {
+        system_alloc()
+    };
+    if ptr.is_null() {
+        LIVE.fetch_sub(new_size, Ordering::AcqRel);
+        recovery::record_refusal(FailureReason::Allocator);
+        return ptr;
     }
 
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        unsafe { System.dealloc(ptr, layout) };
-        LIVE.fetch_sub(layout.size(), Ordering::AcqRel);
-        CURRENT.fetch_sub(layout.size(), Ordering::AcqRel);
+    if old_size != 0 {
+        LIVE.fetch_sub(old_size, Ordering::AcqRel);
     }
-
-    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        if !reserve(new_size) {
-            return std::ptr::null_mut();
-        }
-        let result = if injected() {
-            std::ptr::null_mut()
-        } else {
-            unsafe { System.realloc(ptr, layout, new_size) }
-        };
-        if result.is_null() {
-            LIVE.fetch_sub(new_size, Ordering::AcqRel);
-            recovery::record_refusal(FailureReason::Allocator);
-        } else {
-            LIVE.fetch_sub(layout.size(), Ordering::AcqRel);
-            if new_size >= layout.size() {
-                allocated(new_size - layout.size());
-            } else {
-                CURRENT.fetch_sub(layout.size() - new_size, Ordering::AcqRel);
-            }
-        }
-        result
+    if new_size >= old_size {
+        let added = new_size - old_size;
+        let current = CURRENT.fetch_add(added, Ordering::AcqRel) + added;
+        PEAK.fetch_max(current, Ordering::Relaxed);
+    } else {
+        CURRENT.fetch_sub(old_size - new_size, Ordering::AcqRel);
     }
+    ptr
 }
 
-pub(super) fn configure(limit: u64, recovery_bytes: u64) -> bool {
-    let Ok(limit) = usize::try_from(limit) else {
-        return false;
-    };
-    let Ok(recovery_bytes) = usize::try_from(recovery_bytes) else {
-        return false;
-    };
-    let Some(ceiling) = limit.checked_add(recovery_bytes) else {
-        return false;
-    };
-    if (limit == 0) != (recovery_bytes == 0) {
-        return false;
-    }
-    if limit != 0 && ceiling < LIVE.load(Ordering::Acquire) {
-        return false;
-    }
+fn install_hook() {
     INSTALL_HOOK.call_once(|| {
         std::alloc::set_alloc_error_hook(|layout| {
             recovery::unwind_allocation_failure(layout.size());
         })
     });
-    LIMITS
-        .set(Limits {
-            normal: if limit == 0 { usize::MAX } else { limit },
-            ceiling: if limit == 0 { usize::MAX } else { ceiling },
-        })
-        .is_ok()
-}
-
-#[cfg(feature = "test-ffi")]
-pub(super) fn inject_failure(count: u64) -> bool {
-    // Provision the hook even when only synthetic failure injection is enabled.
-    INSTALL_HOOK.call_once(|| {
-        std::alloc::set_alloc_error_hook(|layout| {
-            recovery::unwind_allocation_failure(layout.size());
-        })
-    });
-    FAIL_AFTER.with(|slot| slot.set(Some(count)));
-    true
-}
-
-pub(super) unsafe fn protect_handle<H>(
-    allocator: &dyn AllocateError,
-    body: impl FnOnce() -> KernelResult<Handle<H>>,
-) -> ExternResult<Handle<H>>
-where
-    H: HandleDescriptor + HandleOps<H::Target, H::Mutable, H::Sized>,
-{
-    let operation = recovery::current_operation().unwrap_or_else(Operation::new);
-    let result = recovery::run_sync(operation.clone(), || unsafe {
-        let result = body();
-        if operation.failure().is_some() {
-            recovery::with_recovery(|| match result {
-                Ok(handle) => handle.drop_handle(),
-                Err(error) => drop(error),
-            });
-            None
-        } else {
-            Some(result.into_extern_result(allocator))
-        }
-    });
-    recovery::with_recovery(|| {
-        let reason = match result {
-            Ok(Some(result)) => return result,
-            Ok(None) => match operation.failure() {
-                Some(reason) => reason,
-                None => std::process::abort(),
-            },
-            Err(payload) => match recovery::recycle_failure(payload) {
-                Ok(failure) => failure.reason,
-                // Preserve fail-stop behavior for unrelated panics at a C ABI boundary.
-                Err(_) => std::process::abort(),
-            },
-        };
-        let (kind, message) = match reason {
-            FailureReason::Limit => (
-                FFIKernelError::AllocationLimitExceeded,
-                "Rust allocation limit exceeded during snapshot loading",
-            ),
-            FailureReason::Allocator => (
-                FFIKernelError::AllocationFailed,
-                "Rust allocator returned null during snapshot loading",
-            ),
-        };
-        ExternResult::Err(unsafe { allocator.allocate_error(kind, kernel_string_slice!(message)) })
-    })
 }
 
 #[cfg(all(test, feature = "test-ffi", unix))]

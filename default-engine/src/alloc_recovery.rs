@@ -103,8 +103,7 @@ impl Guard {
     fn enter(operation: Arc<Operation>) -> Self {
         let recovering = RECOVERING.with(|slot| slot.replace(true));
         // Provision before arming the hook. A failed provision is deliberately fail-stop.
-        let ready = PAYLOAD.with(|slot| slot.borrow().is_some());
-        if !ready {
+        if PAYLOAD.with(|slot| slot.borrow().is_none()) {
             let payload = Box::new(AllocationFailure {
                 reason: FailureReason::Allocator,
                 requested: 0,
@@ -153,14 +152,10 @@ pub fn unwind_allocation_failure(requested: usize) -> ! {
 /// Recovers the typed allocation payload for reuse on the receiving thread.
 /// Returns unrelated panic payloads unchanged.
 pub fn recycle_failure(payload: PanicPayload) -> Result<AllocationFailure, PanicPayload> {
-    match payload.downcast::<AllocationFailure>() {
-        Ok(payload) => {
-            let failure = *payload;
-            PAYLOAD.with(|slot| *slot.borrow_mut() = Some(payload));
-            Ok(failure)
-        }
-        Err(payload) => Err(payload),
-    }
+    let payload = payload.downcast::<AllocationFailure>()?;
+    let failure = *payload;
+    PAYLOAD.with(|slot| *slot.borrow_mut() = Some(payload));
+    Ok(failure)
 }
 
 /// Runs synchronous work inside a prepared allocation-recovery boundary.
