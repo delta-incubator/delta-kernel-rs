@@ -626,11 +626,10 @@ impl<STATE, MODE: ExecutionMode> Transaction<STATE, MODE> {
     /// via [`concurrent_identity_columns`](Self::concurrent_identity_columns)). The connector
     /// reserves ranges from its sequence service and fills every identity column itself. This
     /// method records that responsibility but generates no values. Without this acknowledgement,
-    /// write-state creation fails.
+    /// write-state creation fails, as does committing added files.
     ///
-    /// The acknowledgement is a contract marker, checked only by
-    /// [`write_state`](Self::write_state): kernel does not inspect the identity values in the
-    /// data files.
+    /// The acknowledgement is just for the contract. The kernel does not inspect the identity
+    /// values in the data files.
     #[cfg(feature = "concurrent-identity-columns-in-dev")]
     pub fn ack_concurrent_identity_columns(&mut self) {
         self.concurrent_identity_columns_acknowledged = true;
@@ -1172,7 +1171,6 @@ impl<STATE, MODE: ExecutionMode> Transaction<STATE, MODE> {
 
     /// Rejects data writes when the table has a Concurrent Identity Column and the
     /// connector has not acknowledged filling it.
-    // TODO(#3586): surface the CIC columns to the connector instead of rejecting.
     #[cfg(feature = "concurrent-identity-columns-in-dev")]
     fn ensure_concurrent_identity_columns_acknowledged(&self) -> KernelResult<()> {
         require!(
@@ -1351,7 +1349,7 @@ impl<STATE, MODE: ExecutionMode> Transaction<STATE, MODE> {
         if self.staged_data_changes.has_adds() {
             validate_schema_for_write(&self.effective_table_config.logical_schema())?;
             #[cfg(feature = "concurrent-identity-columns-in-dev")]
-            self.ensure_no_concurrent_identity_columns()?;
+            self.ensure_concurrent_identity_columns_acknowledged()?;
         }
 
         // If a data-changing transaction has add files together with remove files or DV updates,
@@ -2366,6 +2364,8 @@ mod tests {
             data_change,
             column_defaults_acknowledged,
             row_tracking_preservation_acknowledged,
+            #[cfg(feature = "concurrent-identity-columns-in-dev")]
+            concurrent_identity_columns_acknowledged,
             is_blind_append,
             #[cfg(feature = "adaptive-metadata-in-dev")]
             manifest_write,
@@ -2397,6 +2397,8 @@ mod tests {
         assert_eq!(data_change, expected_data_change);
         assert!(!column_defaults_acknowledged);
         assert!(!row_tracking_preservation_acknowledged);
+        #[cfg(feature = "concurrent-identity-columns-in-dev")]
+        assert!(!concurrent_identity_columns_acknowledged);
         assert!(!is_blind_append);
         assert!(dv_matched_files.is_empty());
         assert_eq!(num_dv_updates, 0);
@@ -3131,16 +3133,12 @@ mod tests {
 
     #[cfg(feature = "concurrent-identity-columns-in-dev")]
     #[test]
-    fn write_state_requires_concurrent_identity_columns_ack() {
-        let mut txn = create_cic_table(
-            vec![
-                concurrent_identity_column("id", "seq-abc", 10, 5, false),
-                StructField::nullable("v", DataType::STRING),
-            ],
-            true,
-            DataLayout::None,
-        )
-        .unwrap();
+    fn data_writes_require_concurrent_identity_columns_ack() {
+        let fields = vec![
+            concurrent_identity_column("id", "seq-abc", 10, 5, false),
+            StructField::nullable("v", DataType::STRING),
+        ];
+        let mut txn = create_cic_table(fields.clone(), true, DataLayout::None).unwrap();
 
         let cols = txn.concurrent_identity_columns().unwrap();
         assert_eq!(cols.len(), 1);
@@ -3157,6 +3155,14 @@ mod tests {
         ));
         txn.ack_concurrent_identity_columns();
         txn.write_state().unwrap();
+
+        // A connector that bypasses `write_state` and stages adds directly is rejected at commit.
+        let mut txn = create_cic_table(fields, true, DataLayout::None).unwrap();
+        add_dummy_file(&mut txn);
+        assert_result_error_with_message(
+            txn.commit(&SyncEngine::new()),
+            "ack_concurrent_identity_columns",
+        );
     }
 
     // A classic identity column: `start`/`step`, no `sequenceId`, optionally a high-water mark.
