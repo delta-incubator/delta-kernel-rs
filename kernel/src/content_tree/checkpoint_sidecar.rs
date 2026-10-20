@@ -18,7 +18,6 @@ use crate::{Engine, KernelResult, KernelResultIteratorStatic};
 /// `_delta_log/_sidecars/` directory under `log_root` (see [`Sidecar::to_filemeta`]). The reads
 /// stop with [`KernelError::Cancelled`](crate::KernelError::Cancelled) once `cancellation_token`
 /// is cancelled.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn read_sidecar_actions(
     engine: &dyn Engine,
     log_root: &LogRoot,
