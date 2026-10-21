@@ -24,17 +24,21 @@ use crate::{Engine, KernelResult, PredicateRef, Snapshot};
 
 #[cfg(feature = "udt-in-dev")]
 #[rstest]
-#[case::comparison(Pred::eq(col!("value"), lit(42i64)), ["mixed.parquet", "non_null.parquet", "unknown.parquet"])]
-#[case::is_null(Pred::is_null(col!("value")), ["all_null.parquet", "mixed.parquet", "unknown.parquet"])]
-#[case::is_not_null(Pred::is_not_null(col!("value")), ["mixed.parquet", "non_null.parquet", "unknown.parquet"])]
+#[case::comparison(Pred::eq(col!("value"), lit(42i64)), vec!["mixed.parquet", "non_null.parquet", "unknown.parquet"])]
+#[case::is_null(Pred::is_null(col!("value")), vec!["all_null.parquet", "mixed.parquet", "unknown.parquet"])]
+#[case::is_not_null(Pred::is_not_null(col!("value")), vec!["mixed.parquet", "non_null.parquet", "unknown.parquet"])]
+#[case::ordinary_range(Pred::gt(col!("other"), lit(15i64)), vec!["all_null.parquet", "mixed.parquet", "unknown.parquet"])]
+#[case::ordinary_out_of_range(Pred::gt(col!("other"), lit(1000i64)), vec![])]
+#[case::mixed_and(Pred::and(Pred::eq(col!("value"), lit(42i64)), Pred::gt(col!("other"), lit(15i64))), vec!["mixed.parquet", "unknown.parquet"])]
+#[case::mixed_or(Pred::or(Pred::eq(col!("value"), lit(42i64)), Pred::gt(col!("other"), lit(1000i64))), vec!["mixed.parquet", "non_null.parquet", "unknown.parquet"])]
 #[tokio::test]
 async fn declarative_udt_skipping_uses_only_null_counts(
     #[case] predicate: Pred,
-    #[case] expected: [&str; 3],
+    #[case] expected: Vec<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let store = Arc::new(crate::object_store::memory::InMemory::new());
     let udt = crate::schema::UserDefinedType::try_new(DataType::LONG, Default::default())?;
-    let schema = schema_ref! { nullable "value": (udt) };
+    let schema = schema_ref! { nullable "value": (udt), nullable "other": LONG };
     let mut actions = vec![
         serde_json::json!({"protocol":{"minReaderVersion":1,"minWriterVersion":2}}),
         serde_json::json!({"metaData":{
@@ -43,14 +47,16 @@ async fn declarative_udt_skipping_uses_only_null_counts(
             "configuration":{}, "createdTime":0,
         }}),
     ];
-    for (path, null_count) in [
-        ("non_null.parquet", Some(0)),
-        ("mixed.parquet", Some(1)),
-        ("all_null.parquet", Some(2)),
-        ("unknown.parquet", None),
+    for (path, null_count, other_value) in [
+        ("non_null.parquet", Some(0), 10),
+        ("mixed.parquet", Some(1), 20),
+        ("all_null.parquet", Some(2), 30),
+        ("unknown.parquet", None, 40),
     ] {
-        let stats = serde_json::json!({"numRecords":2, "nullCount":{"value":null_count},
-            "minValues":{"value":100}, "maxValues":{"value":100}});
+        let stats = serde_json::json!({"numRecords":2,
+            "nullCount":{"value":null_count, "other":0},
+            "minValues":{"value":100, "other":other_value},
+            "maxValues":{"value":100, "other":other_value}});
         actions.push(serde_json::json!({"add":{
             "path":path, "size":100, "partitionValues":{}, "modificationTime":0,
             "dataChange":true, "stats":stats.to_string(),

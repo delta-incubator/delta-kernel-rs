@@ -460,7 +460,6 @@ pub(crate) fn is_skipping_eligible_datatype(data_type: &PrimitiveType) -> bool {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(any(feature = "geo-type-in-dev", feature = "udt-in-dev"))]
     use rstest::rstest;
 
     use super::*;
@@ -888,7 +887,7 @@ mod tests {
         assert_eq!(&expected, &stats_schema);
     }
 
-    #[rstest::rstest]
+    #[rstest]
     #[case::num_indexed_cols("delta.dataSkippingNumIndexedCols", "1")]
     #[case::stats_columns("delta.dataSkippingStatsColumns", "iv")]
     fn test_interval_stats_respect_column_selection(

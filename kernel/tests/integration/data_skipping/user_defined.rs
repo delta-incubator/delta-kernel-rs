@@ -1,3 +1,5 @@
+//! Data skipping with UDT null counts and ordinary-column min/max statistics.
+
 use std::sync::Arc;
 
 use delta_kernel::expressions::{col, lit, Predicate};
@@ -17,6 +19,10 @@ use super::{surviving_paths_with_stats, AllNullSource};
 #[case::comparison(Predicate::eq(col!("value"), lit(42i64)), vec!["mixed.parquet", "non_null.parquet"])]
 #[case::is_null(Predicate::is_null(col!("value")), vec!["all_null.parquet", "mixed.parquet"])]
 #[case::is_not_null(Predicate::is_not_null(col!("value")), vec!["mixed.parquet", "non_null.parquet"])]
+#[case::ordinary_range(Predicate::gt(col!("other"), lit(15i64)), vec!["all_null.parquet", "mixed.parquet"])]
+#[case::ordinary_out_of_range(Predicate::gt(col!("other"), lit(1000i64)), vec![])]
+#[case::mixed_and(Predicate::and(Predicate::eq(col!("value"), lit(42i64)), Predicate::gt(col!("other"), lit(15i64))), vec!["mixed.parquet"])]
+#[case::mixed_or(Predicate::or(Predicate::eq(col!("value"), lit(42i64)), Predicate::gt(col!("other"), lit(1000i64))), vec!["mixed.parquet", "non_null.parquet"])]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn udt_skipping_ignores_min_max_and_reads_leaf_null_count(
     #[case] predicate: Predicate,
@@ -41,14 +47,20 @@ async fn udt_skipping_ignores_min_max_and_reads_leaf_null_count(
         DataType::LONG,
         [("class".into(), Some("example.Value".into()))].into(),
     )?;
-    let schema = schema_ref! { nullable "value": (udt) };
+    let schema = schema_ref! { nullable "value": (udt), nullable "other": LONG };
+    let mut max_column_id = 0;
     let schema = if mapping_mode == ColumnMappingMode::None {
         schema
     } else {
-        Arc::new(assign_column_mapping_metadata(&schema, &mut 0, false)?)
+        Arc::new(assign_column_mapping_metadata(
+            &schema,
+            &mut max_column_id,
+            false,
+        )?)
     };
     let physical_name = schema.field("value").unwrap().physical_name(mapping_mode);
-    let struct_only = matches!(source, AllNullSource::CheckpointStructStats);
+    let other_physical_name = schema.field("other").unwrap().physical_name(mapping_mode);
+    let struct_only = source == AllNullSource::CheckpointStructStats;
     let mut configuration = if struct_only {
         json!({"delta.checkpoint.writeStatsAsStruct":"true",
             "delta.checkpoint.writeStatsAsJson":"false"})
@@ -59,7 +71,7 @@ async fn udt_skipping_ignores_min_max_and_reads_leaf_null_count(
         json!({"minReaderVersion":1,"minWriterVersion":2})
     } else {
         configuration["delta.columnMapping.mode"] = json!(mapping_mode);
-        configuration["delta.columnMapping.maxColumnId"] = json!("1");
+        configuration["delta.columnMapping.maxColumnId"] = json!(max_column_id.to_string());
         json!({"minReaderVersion":3,"minWriterVersion":7,
             "readerFeatures":["columnMapping"], "writerFeatures":["columnMapping"]})
     };
@@ -72,14 +84,17 @@ async fn udt_skipping_ignores_min_max_and_reads_leaf_null_count(
             "createdTime":0,
         }}),
     ];
-    for (path, null_count) in [
-        ("non_null.parquet", 0),
-        ("mixed.parquet", 1),
-        ("all_null.parquet", 2),
+    for (path, null_count, other_value) in [
+        ("non_null.parquet", 0, 10),
+        ("mixed.parquet", 1, 20),
+        ("all_null.parquet", 2, 30),
     ] {
         // A reader must ignore UDT min/max even when a log contains them.
-        let stats = json!({"numRecords":2, "nullCount":{(physical_name):null_count},
-            "minValues":{(physical_name):100}, "maxValues":{(physical_name):100}, "tightBounds":true});
+        let stats = json!({"numRecords":2,
+            "nullCount":{(physical_name):null_count, (other_physical_name):0},
+            "minValues":{(physical_name):100, (other_physical_name):other_value},
+            "maxValues":{(physical_name):100, (other_physical_name):other_value},
+            "tightBounds":true});
         actions.push(json!({"add":{
             "path":path, "size":100, "partitionValues":{}, "modificationTime":0,
             "dataChange":true, "stats":stats.to_string(),
@@ -96,11 +111,11 @@ async fn udt_skipping_ignores_min_max_and_reads_leaf_null_count(
             .join("\n"),
     )
     .await?;
-    if !matches!(source, AllNullSource::CommitOnly) {
+    if source != AllNullSource::CommitOnly {
         let snapshot = Snapshot::builder_for(&table_root).build(engine.as_ref())?;
         snapshot.checkpoint(engine.as_ref(), None)?;
     }
-    // Parallel scans only read JSON checkpoint stats; struct-only stats keep all files (#2832).
+    // TODO(#2832): parallel scans need stats_parsed to prune struct-only checkpoint files.
     let expected = if parallel && struct_only {
         vec!["all_null.parquet", "mixed.parquet", "non_null.parquet"]
     } else {

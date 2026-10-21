@@ -12,9 +12,6 @@
 //!   checkpoint parquet row-group filter)
 
 use std::collections::HashMap;
-#[cfg(feature = "udt-in-dev")]
-mod user_defined;
-
 use std::sync::Arc;
 
 use delta_kernel::arrow::array::{Array, BooleanArray, Int64Array, RecordBatch, StructArray};
@@ -45,6 +42,9 @@ use test_utils::{
 use url::Url;
 
 use crate::common::write_utils::set_table_properties;
+
+#[cfg(feature = "udt-in-dev")]
+mod user_defined;
 
 type TestEngine = DefaultEngine<TokioMultiThreadExecutor>;
 
@@ -1346,7 +1346,7 @@ async fn interval_partition_values_do_not_prune_files(
 // from `add.stats` at read time). One exception is captured at the assertion: the parallel scan
 // path does not yet read `stats_parsed`, so it cannot skip an all-null file sourced from a
 // struct-only checkpoint.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum AllNullSource {
     /// All-null file added via a JSON commit, with no checkpoint (the pure delta-log path).
     CommitOnly,
