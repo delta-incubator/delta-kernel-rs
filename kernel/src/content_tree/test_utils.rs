@@ -121,7 +121,6 @@ pub(crate) fn write_manifest(
     }
 }
 
-#[cfg(test)]
 mod tests {
     use std::slice;
 
