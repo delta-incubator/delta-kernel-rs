@@ -153,7 +153,8 @@ pub unsafe extern "C" fn commit_range_builder_with_max_catalog_version(
 /// When `false`, [`commit_range_builder_build`] lists the available commits without validating the
 /// start version or contiguity; [`commit_range_commit_files_next`] then reports gaps lazily
 /// according to [`commit_range_builder_with_fail_on_data_loss`]. Such a relaxed range cannot be
-/// read with [`commit_range_commits`], which returns an `Unsupported` error.
+/// read with [`commit_range_commits`], which returns an `Unsupported` error. Even when `false`,
+/// build fails with `EmptyLogError` if no commits are listed in the range.
 ///
 /// # Safety
 ///
@@ -173,7 +174,8 @@ pub unsafe extern "C" fn commit_range_builder_with_commit_range_validation(
 ///
 /// When `true`, a missing start version or any gap through the range's end version, including one
 /// after the last listed file, surfaces as an error when the commit-files iterator reaches it.
-/// When `false`, available commit files are yielded across gaps.
+/// Without an explicit end version, the range ends at the last listed commit, so a trailing gap
+/// cannot be detected. When `false`, available commit files are yielded across gaps.
 ///
 /// # Safety
 ///
@@ -565,6 +567,8 @@ impl FfiCommitFilesIterator {
     }
 }
 
+/// Commit-files iterator returned by [`commit_range_commit_files`]. Release it with
+/// [`free_commit_files_iter`].
 #[handle_descriptor(target=FfiCommitFilesIterator, mutable=false, sized=true)]
 pub struct SharedCommitFilesIterator;
 
@@ -574,8 +578,7 @@ pub struct SharedCommitFilesIterator;
 /// Version gaps are detected as the iterator advances, according to
 /// [`commit_range_builder_with_fail_on_data_loss`].
 ///
-/// Returns an error if the range was not built in ascending order. The caller owns the returned
-/// iterator and must release it with [`free_commit_files_iter`].
+/// The caller owns the returned iterator and must release it with [`free_commit_files_iter`].
 ///
 /// # Safety
 ///
