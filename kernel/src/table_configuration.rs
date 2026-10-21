@@ -1503,6 +1503,8 @@ mod test {
         MockProtocolBuilder::new().build(),
         WriteSupport::InvalidProtocol
     )]
+    // The protocol allows the expression, so kernel's write support for `generatedColumns`
+    // decides.
     #[case::with_feature(
         generated_event_year_schema(),
         MockProtocolBuilder::new()
@@ -1515,6 +1517,8 @@ mod test {
         MockProtocolBuilder::new().with_versions(1, 2).build(),
         WriteSupport::InvalidProtocol
     )]
+    // Writer version 4 implies `generatedColumns` among other features, so kernel's write support
+    // for those features decides.
     #[case::legacy_writer_at_min_version(
         generated_event_year_schema(),
         MockProtocolBuilder::new().with_versions(1, 4).build(),
@@ -1552,6 +1556,8 @@ mod test {
         MockProtocolBuilder::new().with_versions(1, 2).build(),
         WriteSupport::Supported
     )]
+    // Only top-level columns can be generated columns, so an expression on a nested field defines
+    // no generated column. Delta Spark writes such a table as a normal table.
     #[case::nested_generation_expression(
         schema_ref! {
             nullable "details": (schema! {
@@ -1636,6 +1642,8 @@ mod test {
         true
     )]
     // No top-level generation expressions.
+    // Only top-level columns can be generated columns, so an expression on a nested field defines
+    // no generated column. Delta Spark writes such a table as a normal table.
     #[case::nested_expression_only(
         schema_ref! {
             nullable "details": (schema! {
@@ -1644,6 +1652,8 @@ mod test {
         },
         false
     )]
+    // Column metadata keys are case-sensitive, so only the exact `delta.generationExpression` key
+    // declares an expression.
     #[case::case_variant_key(
         schema_ref! {
             (StructField::nullable("event_year", DataType::INTEGER)
