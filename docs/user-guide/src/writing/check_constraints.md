@@ -65,7 +65,6 @@ verbatim from the table, through `raw_sql()`.
 # fn main() -> KernelResult<()> {
 # let url = delta_kernel::try_parse_uri("/tmp/people")?;
 # let engine = DefaultEngine::builder(store_from_url(&url)?).build();
-
 let snapshot = Snapshot::builder_for(url).build(&engine)?;
 for constraint in snapshot.check_constraints() {
     println!("{}: {}", constraint.name(), constraint.raw_sql());
@@ -81,7 +80,7 @@ valid_age: age > 0
 ```
 
 Constraints are sorted by name. The SQL refers to logical column names, so parse it against the
-table's logical schema. Discovery has no side effects. It doesn't acknowledge anything.
+table's logical schema.
 
 ### Enforcing constraints during an append
 
