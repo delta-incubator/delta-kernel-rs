@@ -8,14 +8,20 @@
 //! action is the file location, size, and row-tracking numbers. `modificationTime` and
 //! `dataChange` have no AMT source and are supplied by the caller via [`ReadContext`].
 
+use std::iter;
 use std::sync::{Arc, LazyLock};
 
+use bytes::Bytes;
+use url::Url;
+
 use crate::actions::{ADD_NAME, ADD_SCHEMA, LOG_ADD_SCHEMA};
+use crate::amt_path_util::amt_manifest_filemeta;
 use crate::content_tree::{
     struct_expr_from_schema, ColumnFile, ContentTreeNodeEntry, DataContentType, DataFileFormat,
     TrackingInfo, TrackingStatus, COLUMN_FILES, CONTENT_TYPE, DV_INFO, FILE_FORMAT,
-    FILE_SIZE_IN_BYTES, FIRST_ROW_ID, LOCATION, MODIFIED_SNAPSHOT_ID, PARTITION_SPEC_ID,
-    RECORD_COUNT, SEQUENCE_NUMBER, TRACKING, TRACKING_STATUS,
+    FILE_SIZE_IN_BYTES, FIRST_ROW_ID, FORMAT_VERSION, LOCATION, MANIFEST_DV, MANIFEST_INFO,
+    MODIFIED_SNAPSHOT_ID, PARTITION_SPEC_ID, RECORD_COUNT, SEQUENCE_NUMBER, TRACKING,
+    TRACKING_COLUMNS, TRACKING_STATUS,
 };
 use crate::engine_data::{
     EngineData, FilteredEngineData, GetData, RowVisitor, StructList, TypedGetData as _,
@@ -29,7 +35,7 @@ use crate::schema::{
     ArrayType, ColumnNamesAndTypes, DataType, MapType, SchemaRef, StructField, StructType,
     ToSchema as _,
 };
-use crate::{Engine, ExpressionEvaluator, KernelError, KernelResult};
+use crate::{Engine, ExpressionEvaluator, FileMeta, KernelError, KernelResult};
 
 /// Values the read path emits into every `Add` action but cannot derive from an AMT entry, so the
 /// caller must supply them.
@@ -42,6 +48,69 @@ pub(crate) struct ReadContext {
     pub(crate) modification_time: i64,
     /// Emitted as `Add.dataChange`.
     pub(crate) data_change: bool,
+}
+
+/// A leaf manifest referenced by a live root `DataManifest` entry: where to read it, and the
+/// parent values its entries inherit or are filtered by.
+struct LeafRef {
+    /// The resolved leaf manifest file to read.
+    file_meta: FileMeta,
+    /// Tracking info of the referencing root `DataManifest` entry.
+    parent_info: TrackingInfo,
+    /// The root entry's `manifestInfo.dv`: a deletion vector over the leaf's entry positions.
+    manifest_dv: Option<Bytes>,
+    /// The root entry's `manifestInfo.formatVersion`: the format version the leaf was written
+    /// with.
+    format_version: i32,
+}
+
+/// The columns [`LeafRef::try_from_getters`] reads, in getter order: the root entry's own fields
+/// followed by [`TRACKING_COLUMNS`].
+static LEAF_REF_COLUMNS: LazyLock<ColumnNamesAndTypes> = LazyLock::new(|| {
+    let (tracking_names, tracking_types) = TRACKING_COLUMNS.as_ref();
+    let names = [
+        ColumnName::new([LOCATION]),
+        ColumnName::new([FILE_SIZE_IN_BYTES]),
+        ColumnName::new([MANIFEST_INFO, MANIFEST_DV]),
+        ColumnName::new([MANIFEST_INFO, FORMAT_VERSION]),
+    ];
+    let types = [
+        DataType::STRING,
+        DataType::LONG,
+        DataType::BINARY,
+        DataType::INTEGER,
+    ];
+    let names = names.into_iter().chain(tracking_names.iter().cloned());
+    let types = types.into_iter().chain(tracking_types.iter().cloned());
+    (names.collect(), types.collect()).into()
+});
+
+impl LeafRef {
+    /// Parses one root `DataManifest` row from `getters`, which must follow [`LEAF_REF_COLUMNS`]
+    /// order. The raw `location` resolves against `table_root` when relative.
+    fn try_from_getters<'a>(
+        row: usize,
+        getters: &[&'a dyn GetData<'a>],
+        table_root: &Url,
+    ) -> KernelResult<Self> {
+        let expected = LEAF_REF_COLUMNS.as_ref().0.len();
+        if getters.len() != expected {
+            return Err(KernelError::internal_error(format!(
+                "Expected {expected} AMT leaf reference getters, got {}",
+                getters.len()
+            )));
+        }
+        let (fields, tracking) = getters.split_at(tracking_start(getters));
+        let location: &str = fields[0].get(row, LOCATION)?;
+        let size: i64 = fields[1].get(row, FILE_SIZE_IN_BYTES)?;
+        let manifest_dv: Option<&[u8]> = fields[2].get_opt(row, MANIFEST_DV)?;
+        Ok(Self {
+            file_meta: amt_manifest_filemeta(location, size, table_root, "AMT leaf manifest")?,
+            parent_info: TrackingInfo::try_from_getters(row, tracking)?,
+            manifest_dv: manifest_dv.map(Bytes::copy_from_slice),
+            format_version: fields[3].get(row, FORMAT_VERSION)?,
+        })
+    }
 }
 
 /// Expressions for the `Add` row-tracking fields whose source differs between root and leaf
@@ -226,6 +295,13 @@ fn entry_schema_with(helpers: &StructType) -> SchemaRef {
     ))
 }
 
+/// Index of the first of the [`TRACKING_COLUMNS`] getters that end `getters`.
+fn tracking_start(getters: &[&dyn GetData<'_>]) -> usize {
+    getters
+        .len()
+        .saturating_sub(TRACKING_COLUMNS.as_ref().0.len())
+}
+
 /// Shared constructor for [`EntryConverter`]: builds the entry->`Add` transform (with the caller's
 /// [`AddFieldSources`]) and its evaluator.
 ///
@@ -398,6 +474,55 @@ impl RowVisitor for AddSelectionVisitor {
                 check_selected_entry(row, location, getters)?;
             }
             self.selection.push(selected);
+        }
+        Ok(())
+    }
+}
+
+/// Collects a [`LeafRef`] for every live `DataManifest` entry of the root-manifest entry batches
+/// it visits, in row order across batches. Non-live `DataManifest` entries and all other entries
+/// are skipped.
+struct LeafRefVisitor<'u> {
+    /// The table root URL relative leaf locations resolve against.
+    table_root: &'u Url,
+    leaves: Vec<LeafRef>,
+}
+
+impl<'u> LeafRefVisitor<'u> {
+    fn new(table_root: &'u Url) -> Self {
+        Self {
+            table_root,
+            leaves: Vec::new(),
+        }
+    }
+}
+
+impl RowVisitor for LeafRefVisitor<'_> {
+    fn selected_column_names_and_types(&self) -> (&'static [ColumnName], &'static [DataType]) {
+        static NAMES_AND_TYPES: LazyLock<ColumnNamesAndTypes> = LazyLock::new(|| {
+            let (names, types) = LEAF_REF_COLUMNS.as_ref();
+            let names = iter::once(ColumnName::new([CONTENT_TYPE])).chain(names.iter().cloned());
+            let types = iter::once(DataType::INTEGER).chain(types.iter().cloned());
+            (names.collect(), types.collect()).into()
+        });
+        NAMES_AND_TYPES.as_ref()
+    }
+
+    fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> KernelResult<()> {
+        // `tracking.status` is the first tracking column; check it before parsing the rest of the
+        // row.
+        let status_index = tracking_start(getters);
+        for row in 0..row_count {
+            let content_type = DataContentType::try_from_repr(getters[0].get(row, CONTENT_TYPE)?)?;
+            if content_type != DataContentType::DataManifest {
+                continue;
+            }
+            let status = getters[status_index].get(row, TRACKING_STATUS)?;
+            if !TrackingStatus::try_from_repr(status)?.is_live() {
+                continue;
+            }
+            let leaf = LeafRef::try_from_getters(row, &getters[1..], self.table_root)?;
+            self.leaves.push(leaf);
         }
         Ok(())
     }
@@ -582,7 +707,7 @@ mod tests {
 
     use super::*;
     use crate::content_tree::test_utils::{
-        added_data_entry, entry_batch, struct_batch, with_field,
+        added_data_entry, data_manifest_entry, entry_batch, struct_batch, with_field,
     };
     use crate::content_tree::{DeletionVectorInfo, ManifestInfo};
     use crate::engine::arrow_conversion::TryFromArrow as _;
@@ -703,6 +828,116 @@ mod tests {
             .evaluation_handler()
             .create_many(LOG_ADD_SCHEMA.clone(), rows.to_vec())
             .unwrap()
+    }
+
+    /// Collects the leaf references of `batches`, visiting each as its own root entry batch.
+    fn collect_leaf_refs(batches: &[&[ContentTreeNodeEntry]]) -> KernelResult<Vec<LeafRef>> {
+        let engine = SyncEngine::new();
+        let table_root = Url::parse("memory:///table/").unwrap();
+        let mut visitor = LeafRefVisitor::new(&table_root);
+        for entries in batches {
+            visitor.visit_rows_of(entry_batch(&engine, entries).as_ref())?;
+        }
+        Ok(visitor.leaves)
+    }
+
+    #[rstest]
+    #[case::relative("metadata/leaf.parquet", "memory:///table/metadata/leaf.parquet")]
+    #[case::absolute("s3://bucket/leaf.parquet", "s3://bucket/leaf.parquet")]
+    fn leaf_ref_resolves_location_against_table_root(
+        #[case] location: &str,
+        #[case] expected: &str,
+    ) {
+        let entry = data_manifest_entry(location, 42, TrackingStatus::Existing);
+        let leaves = collect_leaf_refs(&[&[entry]]).unwrap();
+        assert_eq!(leaves[0].file_meta.location.as_str(), expected);
+        assert_eq!(leaves[0].file_meta.size, 42);
+    }
+
+    #[rstest]
+    fn leaf_ref_carries_parent_fields(#[values(false, true)] with_dv: bool) {
+        let mut entry = data_manifest_entry("leaf.parquet", 1, TrackingStatus::Existing);
+        entry.manifest_info = Some(ManifestInfo {
+            format_version: 9,
+            dv: with_dv.then(|| Bytes::from_static(b"dv")),
+            ..Default::default()
+        });
+        let leaf = collect_leaf_refs(&[&[entry.clone()]])
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(leaf.parent_info, entry.tracking);
+        assert_eq!(leaf.manifest_dv, with_dv.then(|| Bytes::from_static(b"dv")));
+        assert_eq!(leaf.format_version, 9);
+    }
+
+    #[test]
+    fn leaf_ref_rejects_wrong_getter_count() {
+        let table_root = Url::parse("memory:///table/").unwrap();
+        assert_result_error_with_message(
+            LeafRef::try_from_getters(0, &[], &table_root),
+            "AMT leaf reference getters, got 0",
+        );
+    }
+
+    #[test]
+    fn collect_leaf_refs_returns_live_data_manifests_in_order_across_batches() {
+        let first = [
+            added_data_entry("data.parquet", 1, 1, 0, 0),
+            data_manifest_entry("added.parquet", 10, TrackingStatus::Added),
+            data_manifest_entry("deleted.parquet", 2, TrackingStatus::Deleted),
+        ];
+        let second = [
+            data_manifest_entry("existing.parquet", 30, TrackingStatus::Existing),
+            data_manifest_entry("replaced.parquet", 40, TrackingStatus::Replaced),
+            data_manifest_entry("modified.parquet", 50, TrackingStatus::Modified),
+        ];
+        let expected: Vec<_> = [&first[1], &second[0], &second[2]]
+            .iter()
+            .map(|e| {
+                let location = format!("memory:///table/{}", e.location);
+                (location, e.file_size_in_bytes as u64, e.tracking.clone())
+            })
+            .collect();
+
+        let leaves: Vec<_> = collect_leaf_refs(&[&first, &[], &second])
+            .unwrap()
+            .into_iter()
+            .map(|l| {
+                (
+                    l.file_meta.location.to_string(),
+                    l.file_meta.size,
+                    l.parent_info,
+                )
+            })
+            .collect();
+        assert_eq!(leaves, expected);
+    }
+
+    #[rstest]
+    #[case::unknown_content_type(&[CONTENT_TYPE], Scalar::Integer(9), "content type value: 9")]
+    #[case::unknown_status(&[TRACKING, TRACKING_STATUS], Scalar::Integer(9), "status value: 9")]
+    #[case::unresolvable_location(
+        &[LOCATION],
+        Scalar::from("s3://bucket/a/../leaf.parquet"),
+        "s3://bucket/a/../leaf.parquet"
+    )]
+    #[case::negative_size(
+        &[FILE_SIZE_IN_BYTES],
+        Scalar::Long(-1),
+        "AMT leaf manifest 'leaf.parquet' size -1"
+    )]
+    fn collect_leaf_refs_rejects_malformed_entry(
+        #[case] path: &[&str],
+        #[case] value: Scalar,
+        #[case] message: &str,
+    ) {
+        let engine = SyncEngine::new();
+        let table_root = Url::parse("memory:///table/").unwrap();
+        let entry = data_manifest_entry("leaf.parquet", 1, TrackingStatus::Existing);
+        let batch = struct_batch(&engine, &[with_field(&entry.into(), path, value)]);
+        let mut visitor = LeafRefVisitor::new(&table_root);
+        assert_result_error_with_message(visitor.visit_rows_of(batch.as_ref()), message);
     }
 
     #[test]
