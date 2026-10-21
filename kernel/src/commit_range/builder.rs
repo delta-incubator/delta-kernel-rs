@@ -168,10 +168,6 @@ impl CommitRangeBuilder {
                 ))
             );
         }
-        require!(
-            log_tail.iter().all(ParsedLogPath::is_commit),
-            KernelError::generic("Commit range log tail must contain only commits")
-        );
         validate_catalog_managed_log_tail(self.end_version, self.max_catalog_version, log_tail)
     }
 
