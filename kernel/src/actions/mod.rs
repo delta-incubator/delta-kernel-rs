@@ -2113,9 +2113,10 @@ mod tests {
     use crate::expressions::{Scalar, StructData};
     use crate::schema::{schema, schema_ref, DataType, MapType, StructField};
     use crate::unit_test_utils::assert_result_error_with_message;
+    #[cfg(feature = "adaptive-metadata-in-dev")]
+    use crate::FileSize;
     use crate::{
-        create_row, Engine, EvaluationHandler, FileSize, JsonHandler, ParquetHandler,
-        StorageHandler,
+        create_row, Engine, EvaluationHandler, JsonHandler, ParquetHandler, StorageHandler,
     };
 
     #[rstest]
