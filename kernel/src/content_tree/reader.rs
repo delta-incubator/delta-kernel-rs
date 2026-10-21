@@ -56,7 +56,7 @@ struct LeafRef {
     /// The resolved leaf manifest file to read.
     file_meta: FileMeta,
     /// Tracking info of the referencing root `DataManifest` entry.
-    tracking: TrackingInfo,
+    parent_info: TrackingInfo,
     /// The root entry's `manifestInfo.dv`: a deletion vector over the leaf's entry positions.
     manifest_dv: Option<Bytes>,
     /// The root entry's `manifestInfo.formatVersion`: the format version the leaf was written
@@ -106,7 +106,7 @@ impl LeafRef {
         let manifest_dv: Option<&[u8]> = fields[2].get_opt(row, MANIFEST_DV)?;
         Ok(Self {
             file_meta: amt_manifest_filemeta(location, size, table_root, "AMT leaf manifest")?,
-            tracking: TrackingInfo::try_from_getters(row, tracking)?,
+            parent_info: TrackingInfo::try_from_getters(row, tracking)?,
             manifest_dv: manifest_dv.map(Bytes::copy_from_slice),
             format_version: fields[3].get(row, FORMAT_VERSION)?,
         })
@@ -866,7 +866,7 @@ mod tests {
             .unwrap()
             .pop()
             .unwrap();
-        assert_eq!(leaf.tracking, entry.tracking);
+        assert_eq!(leaf.parent_info, entry.tracking);
         assert_eq!(leaf.manifest_dv, with_dv.then(|| Bytes::from_static(b"dv")));
         assert_eq!(leaf.format_version, 9);
     }
@@ -907,7 +907,7 @@ mod tests {
                 (
                     l.file_meta.location.to_string(),
                     l.file_meta.size,
-                    l.tracking,
+                    l.parent_info,
                 )
             })
             .collect();
