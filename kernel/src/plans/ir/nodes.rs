@@ -1515,25 +1515,20 @@ mod tests {
             "[0].id: expected i32, found string",
         );
     }
-    #[test]
-    fn prefix_sum_appends_long_output_matching_input_nullability() {
-        let input = schema(&[("path", false), ("numRecords", true)]);
+    #[rstest::rstest]
+    fn prefix_sum_appends_long_output_matching_input_nullability(
+        #[values(true, false)] nullable: bool,
+    ) {
+        let input = schema(&[("path", false), ("numRecords", nullable)]);
         let prefix =
             PrefixSum::try_new(input.as_ref(), column_name!("numRecords"), "offset").unwrap();
         let names: Vec<&str> = prefix.schema.fields().map(|f| f.name().as_str()).collect();
         assert_eq!(names, ["path", "numRecords", "offset"]);
         let offset = prefix.schema.field("offset").unwrap();
         assert_eq!(offset.data_type(), &DataType::LONG);
-        assert!(offset.nullable);
+        assert_eq!(offset.nullable, nullable);
         assert_eq!(prefix.output, "offset");
         assert_eq!(prefix.input, column_name!("numRecords"));
-    }
-
-    #[test]
-    fn prefix_sum_non_nullable_input_yields_non_nullable_output() {
-        let input = schema(&[("n", false)]);
-        let prefix = PrefixSum::try_new(input.as_ref(), column_name!("n"), "off").unwrap();
-        assert!(!prefix.schema.field("off").unwrap().nullable);
     }
 
     #[test]

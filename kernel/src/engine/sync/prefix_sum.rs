@@ -9,9 +9,6 @@ use crate::plans::ir::nodes::PrefixSum;
 use crate::{KernelError, KernelResult};
 
 /// Evaluates a [`PrefixSum`].
-///
-/// Computes an exclusive prefix sum over rows of `input` batches. The first output value is 0;
-/// NULL inputs do not contribute and emit NULL; zero values contribute 0 to the running total.
 pub(super) fn eval_prefix_sum(
     prefix_sum: &PrefixSum,
     input: &[RecordBatch],
