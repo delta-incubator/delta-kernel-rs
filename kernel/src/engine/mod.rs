@@ -4,9 +4,9 @@
 //! `SyncEngine` is included only in test builds.
 
 mod cancellable_engine;
+pub(crate) use cancellable_engine::CancellableEngine;
 #[cfg(feature = "arrow-expression")]
 use delta_kernel_derive::internal_api;
-pub(crate) use cancellable_engine::CancellableEngine;
 
 #[cfg(feature = "arrow-expression")]
 use crate::parquet::arrow::arrow_reader::ArrowReaderOptions;
