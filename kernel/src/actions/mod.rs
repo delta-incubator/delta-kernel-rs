@@ -3249,7 +3249,7 @@ mod tests {
         "metadata/root.parquet",
         -1,
         "memory:///table/metadata/root.parquet",
-        Err("Failed to convert checkpoint contentRoot size -1")
+        Err("Failed to convert checkpoint contentRoot 'metadata/root.parquet' size -1")
     )]
     fn test_checkpoint_action_root_filemeta(
         #[case] table_root: &str,

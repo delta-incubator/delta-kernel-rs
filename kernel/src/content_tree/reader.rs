@@ -104,9 +104,8 @@ impl LeafRef {
         let location: &str = fields[0].get(row, LOCATION)?;
         let size: i64 = fields[1].get(row, FILE_SIZE_IN_BYTES)?;
         let manifest_dv: Option<&[u8]> = fields[2].get_opt(row, MANIFEST_DV)?;
-        let context = format!("AMT leaf manifest '{location}'");
         Ok(Self {
-            file_meta: amt_manifest_filemeta(location, size, table_root, &context)?,
+            file_meta: amt_manifest_filemeta(location, size, table_root, "AMT leaf manifest")?,
             tracking: TrackingInfo::try_from_getters(row, tracking)?,
             manifest_dv: manifest_dv.map(Bytes::copy_from_slice),
             format_version: fields[3].get(row, FORMAT_VERSION)?,

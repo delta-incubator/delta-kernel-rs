@@ -1,5 +1,6 @@
 //! Various utility functions/macros used throughout the kernel
 use std::borrow::Cow;
+use std::fmt::Display;
 use std::marker::PhantomData;
 use std::ops::Deref;
 use std::path::PathBuf;
@@ -156,7 +157,7 @@ pub(crate) fn current_time_ms() -> KernelResult<i64> {
 
 /// Convert an `i64` byte count into a [`FileSize`], erroring with `context` (a short description
 /// of the source, e.g. `"sidecar"`) and the offending value when it is negative.
-pub(crate) fn to_file_size(bytes: i64, context: &str) -> KernelResult<FileSize> {
+pub(crate) fn to_file_size(bytes: i64, context: impl Display) -> KernelResult<FileSize> {
     bytes.try_into().map_err(|_| {
         KernelError::generic(format!(
             "Failed to convert {context} size {bytes} to FileSize"
