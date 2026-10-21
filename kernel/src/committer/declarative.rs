@@ -25,8 +25,8 @@ pub(crate) fn write_commit_json_declarative(
     let plan = PlanBuilder::write_json(
         actions.into_iter().map(PlanBuilder::relation_source),
         path.clone(),
-        false,
-        true,
+        false, // overwrite
+        true,  // ordered
     )?
     .build()?;
     let file_meta = file_meta_from_batches(

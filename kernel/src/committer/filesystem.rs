@@ -140,31 +140,31 @@ mod tests {
     use crate::{create_row, EngineData};
 
     #[derive(Clone, Copy)]
-    enum CommitPath {
+    enum CommitStyle {
         Imperative,
         #[cfg(feature = "declarative-plans")]
         Declarative,
     }
 
-    fn commit_with_path(
+    fn commit_with_style(
         committer: &FileSystemCommitter,
         engine: &SyncEngine,
         storage: Arc<InMemory>,
-        path: CommitPath,
+        style: CommitStyle,
         action: Box<dyn EngineData>,
         commit_metadata: CommitMetadata,
     ) -> KernelResult<CommitResponse> {
         #[cfg(not(feature = "declarative-plans"))]
         let _ = storage;
-        match path {
-            CommitPath::Imperative => {
+        match style {
+            CommitStyle::Imperative => {
                 let actions = Box::new(std::iter::once(Ok(
                     FilteredEngineData::with_all_rows_selected(action),
                 )));
                 committer.commit(engine, actions, commit_metadata)
             }
             #[cfg(feature = "declarative-plans")]
-            CommitPath::Declarative => {
+            CommitStyle::Declarative => {
                 let batch = ArrowEngineData::try_from_engine_data(action)?.into();
                 let scoped = SyncPlanExecutor::new(Some(storage)).get_scoped();
                 let actions =
@@ -212,13 +212,13 @@ mod tests {
     }
 
     #[rstest]
-    #[case::imperative(CommitPath::Imperative)]
+    #[case::imperative(CommitStyle::Imperative)]
     #[cfg_attr(
         feature = "declarative-plans",
-        case::declarative(CommitPath::Declarative)
+        case::declarative(CommitStyle::Declarative)
     )]
     #[tokio::test]
-    async fn test_filesystem_committer_returns_valid_commit_response(#[case] path: CommitPath) {
+    async fn test_filesystem_committer_returns_valid_commit_response(#[case] style: CommitStyle) {
         let storage = Arc::new(InMemory::new());
         let table_root = Url::parse("memory:///").unwrap();
         let engine = SyncEngine::new_with_store(storage.clone());
@@ -238,11 +238,11 @@ mod tests {
             CommitProtocolMetadata::try_new(Some(protocol), Some(metadata), None, None).unwrap(),
             vec![],
         );
-        let result = commit_with_path(
+        let result = commit_with_style(
             &committer,
             &engine,
             storage.clone(),
-            path,
+            style,
             action,
             commit_metadata,
         )
@@ -259,10 +259,10 @@ mod tests {
 
         match result {
             CommitResponse::Committed { file_meta } => {
-                match path {
-                    CommitPath::Imperative => assert_eq!(file_meta.last_modified, 12345),
+                match style {
+                    CommitStyle::Imperative => assert_eq!(file_meta.last_modified, 12345),
                     #[cfg(feature = "declarative-plans")]
-                    CommitPath::Declarative => {
+                    CommitStyle::Declarative => {
                         let stored_meta = storage
                             .head(&Path::from("_delta_log/00000000000000000001.json"))
                             .await
@@ -285,14 +285,14 @@ mod tests {
     }
 
     #[rstest]
-    #[case::imperative(CommitPath::Imperative)]
+    #[case::imperative(CommitStyle::Imperative)]
     #[cfg_attr(
         feature = "declarative-plans",
-        case::declarative(CommitPath::Declarative)
+        case::declarative(CommitStyle::Declarative)
     )]
     #[tokio::test]
     async fn test_filesystem_committer_returns_conflict_for_existing_version(
-        #[case] path: CommitPath,
+        #[case] style: CommitStyle,
     ) {
         let storage = Arc::new(InMemory::new());
         let table_root = Url::parse("memory:///").unwrap();
@@ -328,22 +328,22 @@ mod tests {
             vec![],
         );
 
-        let first = commit_with_path(
+        let first = commit_with_style(
             &committer,
             &engine,
             storage.clone(),
-            path,
+            style,
             first_action,
             first_metadata,
         )
         .unwrap();
         assert!(matches!(first, CommitResponse::Committed { .. }));
 
-        let second = commit_with_path(
+        let second = commit_with_style(
             &committer,
             &engine,
             storage,
-            path,
+            style,
             second_action,
             second_metadata,
         )
