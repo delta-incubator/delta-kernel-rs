@@ -22,7 +22,10 @@ def resolve_review_base(
 
     Read the current PR's git-stack entry from its full description. Prefer its pinned
     comparison link; otherwise request the immediate parent PR through ``get_json``, which
-    accepts a GitHub API endpoint. Ordinary PRs and stack roots use the GitHub base SHA.
+    accepts a GitHub API endpoint. Ordinary PRs and stack roots without a pinned link use
+    the GitHub base SHA. A merged parent's original head remains the boundary while it is
+    an ancestor of the child; a rebased child uses the GitHub base instead. Stack boundaries
+    are author supplied: ancestry checks do not establish that the selected scope is complete.
     Raise ValueError if a stack boundary is missing, stale, or not an ancestor of the head.
     API errors propagate to the caller rather than expanding the review to ancestor PRs.
     """
@@ -37,6 +40,7 @@ def resolve_review_base(
     if entry is None:
         return github_base
     current, parent = entry
+    parent_merged = False
     current_url = f"https://github.com/{repository}/pull/{metadata['number']}"
     comparison_link = re.search(re.escape(current_url) + r"/files/([^\s)]+)", current)
     if comparison_link is not None:
@@ -53,8 +57,7 @@ def resolve_review_base(
         if parent_link is None:
             raise ValueError("stack parent has no PR or pinned comparison link")
         parent_metadata = get_json(f"repos/{repository}/pulls/{parent_link[1]}")
-        if parent_metadata.get("merged_at"):
-            return github_base
+        parent_merged = bool(parent_metadata.get("merged_at"))
         review_base = parent_metadata["head"]["sha"]
     else:
         return github_base
@@ -66,6 +69,8 @@ def resolve_review_base(
         comparison.get("status") not in {"ahead", "identical"}
         or comparison.get("merge_base_commit", {}).get("sha") != review_base
     ):
+        if parent_merged and comparison.get("status") in {"behind", "diverged"}:
+            return github_base
         raise ValueError("stack parent is not an ancestor of the PR head; refresh the stack")
     return review_base
 
@@ -78,9 +83,25 @@ def _stack_entry(body: str, repository: str, number: int) -> tuple[str, str | No
     entry = None
     in_stack = False
     has_stack = False
+    fence: str | None = None
     for line in body.splitlines():
+        fence_match = re.match(r"^ {0,3}(`{3,}|~{3,})(.*)$", line)
+        if fence is not None:
+            if (
+                fence_match
+                and fence_match[1][0] == fence[0]
+                and len(fence_match[1]) >= len(fence)
+                and not fence_match[2].strip()
+            ):
+                fence = None
+            continue
+        if fence_match:
+            fence = fence_match[1]
+            continue
         if re.match(r"^#{1,6}\s", line):
-            in_stack = "stacked pr" in line.casefold()
+            in_stack = re.fullmatch(
+                r"#{1,6}\s+(?:[^\w\s]+\s+)?Stacked PR\s*#*\s*", line, re.IGNORECASE
+            ) is not None
             has_stack = has_stack or in_stack
             parents.clear()
             continue
@@ -112,7 +133,7 @@ def _main() -> None:
     try:
         metadata = json.loads(args.metadata.read_text())
         review_base = resolve_review_base(metadata, args.repository, _github_json)
-    except (ValueError, subprocess.CalledProcessError) as error:
+    except (KeyError, ValueError, subprocess.CalledProcessError) as error:
         raise SystemExit(f"Cannot resolve PR review scope: {error}") from error
     print(review_base)
 

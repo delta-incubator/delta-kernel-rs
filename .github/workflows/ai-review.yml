@@ -799,6 +799,16 @@ jobs:
             -H "Accept: application/vnd.github.v3.diff" \
             > /tmp/pr_diff.txt
 
+          if [ "$OUTPUT_MODE" = "inline" ]; then
+            if [ "$review_base_sha" = "$base_sha" ]; then
+              cp /tmp/pr_diff.txt /tmp/github_pr_diff.txt
+            else
+              gh api "repos/${REPO}/compare/${base_sha}...${head_sha}" \
+                -H "Accept: application/vnd.github.v3.diff" \
+                > /tmp/github_pr_diff.txt
+            fi
+          fi
+
           echo "base_sha=$base_sha" >> "$GITHUB_OUTPUT"
           echo "review_base_sha=$review_base_sha" >> "$GITHUB_OUTPUT"
           echo "head_sha=$head_sha" >> "$GITHUB_OUTPUT"
@@ -882,7 +892,8 @@ jobs:
               "Review only defects introduced by the supplied diff. Its review base may be a "
               "stack parent even when the GitHub PR targets the default branch. Inherited "
               "changes from ancestor PRs and other code outside this diff are context only, "
-              "including unchanged code in files this PR modifies.\n"
+              "including unchanged code in files this PR modifies. The stack boundary is "
+              "author supplied and verified only for ancestry.\n"
           )
 
           # The parent prompt uses history during consolidation; reviewer_context
@@ -1299,7 +1310,9 @@ jobs:
           python3 .github/omnigent/inline_review.py \
             --review /tmp/review_output.txt \
             --findings /tmp/inline_findings.json \
-            --diff /tmp/pr_diff.txt \
+            --diff /tmp/github_pr_diff.txt \
+            --review-diff /tmp/pr_diff.txt \
+            --fallback-output /tmp/inline-fallback.md \
             --head-sha "$HEAD_SHA" \
             --run-url "$RUN_URL" \
             --history /tmp/pr_history.json \
@@ -1319,8 +1332,7 @@ jobs:
           if ! gh api --method POST "repos/${REPO}/pulls/${PR_NUMBER}/reviews" \
             --input /tmp/inline-review.json --silent; then
             echo "::warning::GitHub rejected the inline review; posting the collapsed review without inline comments."
-            jq -r '.body' /tmp/inline-review.json > /tmp/comment.md
-            gh pr comment "$PR_NUMBER" --repo "$REPO" --body-file /tmp/comment.md
+            gh pr comment "$PR_NUMBER" --repo "$REPO" --body-file /tmp/inline-fallback.md
             exit 0
           fi
           printf 'Posted %s inline finding(s); %s remained in the collapsed review; %s exact duplicate(s) were suppressed.\n' \

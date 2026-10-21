@@ -10,7 +10,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import yaml
 
@@ -95,19 +95,34 @@ class ReviewScopeTest(unittest.TestCase):
             f"    - [stack/sibling]({PR_URL}/5)\n"
             f"    - [**stack/child**]({PR_URL}/2) <- _this PR_\n"
         )
-        self.get_json.side_effect = [
-            {"head": {"sha": PARENT}, "merged_at": None},
-            {"status": "ahead", "merge_base_commit": {"sha": PARENT}},
-        ]
+        for listing in (body, body.replace("- ", "* ").replace("  ", "\t")):
+            with self.subTest(listing=listing):
+                self.get_json.reset_mock()
+                self.get_json.side_effect = [
+                    {"head": {"sha": PARENT}, "merged_at": None},
+                    {"status": "ahead", "merge_base_commit": {"sha": PARENT}},
+                ]
+                self.assertEqual(self.resolve(listing), PARENT)
+                self.assertEqual(
+                    self.get_json.call_args_list[0].args, (f"repos/{REPOSITORY}/pulls/1",)
+                )
 
-        self.assertEqual(self.resolve(body), PARENT)
-        self.assertEqual(self.get_json.call_args_list[0].args, (f"repos/{REPOSITORY}/pulls/1",))
-
-    def test_merged_parent_without_pinned_boundary_uses_github_base(self) -> None:
-        self.get_json.return_value = {"merged_at": "2026-10-21T00:00:00Z"}
-
-        self.assertEqual(self.resolve(_stack_body(f"[parent]({PR_URL}/1)")), GITHUB_BASE)
-        self.get_json.assert_called_once_with(f"repos/{REPOSITORY}/pulls/1")
+    def test_squash_merged_parent_is_excluded_until_child_is_rebased(self) -> None:
+        for status, merge_base, expected in (
+            ("ahead", PARENT, PARENT),
+            ("diverged", "d" * 40, GITHUB_BASE),
+        ):
+            with self.subTest(status=status):
+                self.get_json.reset_mock()
+                self.get_json.side_effect = [
+                    {"head": {"sha": PARENT}, "merged_at": "2026-10-21T00:00:00Z"},
+                    {"status": status, "merge_base_commit": {"sha": merge_base}},
+                ]
+                self.assertEqual(self.resolve(_stack_body(f"[parent]({PR_URL}/1)")), expected)
+                self.assertEqual(
+                    self.get_json.call_args_list[1].args,
+                    (f"repos/{REPOSITORY}/compare/{PARENT}...{HEAD}",),
+                )
 
     def test_other_sections_and_descendant_comparisons_do_not_change_scope(self) -> None:
         body = _stack_body() + (
@@ -121,9 +136,76 @@ class ReviewScopeTest(unittest.TestCase):
         self.get_json.assert_not_called()
 
     def test_stack_header_with_prefix_is_supported(self) -> None:
-        body = _stack_body("stack/parent", PARENT).replace("## Stacked PR", "## prefix Stacked PR")
+        body = _stack_body("stack/parent", PARENT).replace(
+            "## Stacked PR", "## \U0001f95e Stacked PR"
+        )
 
         self.assertEqual(self.resolve(body), PARENT)
+
+    def test_unrelated_headings_and_fenced_examples_leave_ordinary_pr_scope(self) -> None:
+        example = _stack_body("parent", PARENT)
+        for body in (
+            "## Not a stacked PR\nThis change stands alone.",
+            "## Stacked PR migration notes\nRelated work.",
+            f"```markdown\n{example}\n```",
+            f"~~~~markdown\n~~~\n{example}\n~~~~",
+        ):
+            with self.subTest(body=body):
+                self.assertEqual(self.resolve(body), GITHUB_BASE)
+        self.get_json.assert_not_called()
+
+    def test_fenced_stack_example_does_not_override_the_real_boundary(self) -> None:
+        body = f"```markdown\n{_stack_body('example', 'd' * 40)}\n```\n"
+        body += _stack_body("actual parent", PARENT)
+
+        self.assertEqual(self.resolve(body), PARENT)
+
+    def test_repository_and_metadata_sha_guards_stop_before_api_calls(self) -> None:
+        for repository, field, value in (
+            ("../other/repo", "head", HEAD),
+            (REPOSITORY, "head", "not-a-sha"),
+            (REPOSITORY, "base", "not-a-sha"),
+        ):
+            with self.subTest(repository=repository, field=field):
+                metadata = _metadata()
+                metadata[field]["sha"] = value
+                with self.assertRaisesRegex(ValueError, "invalid"):
+                    self.module.resolve_review_base(metadata, repository, self.get_json)
+        self.get_json.assert_not_called()
+
+    def test_invalid_parent_head_stops_before_comparison(self) -> None:
+        self.get_json.return_value = {"head": {"sha": "not-a-sha"}}
+
+        with self.assertRaisesRegex(ValueError, "invalid stack parent SHA"):
+            self.resolve(_stack_body(f"[parent]({PR_URL}/1)"))
+        self.get_json.assert_called_once_with(f"repos/{REPOSITORY}/pulls/1")
+
+    def test_identical_boundary_and_three_dot_comparison_are_supported(self) -> None:
+        body = _stack_body("parent", PARENT).replace(f"{PARENT}..", f"{PARENT}...")
+        self.assertEqual(self.resolve(body), PARENT)
+
+        self.get_json.return_value = {"status": "identical", "merge_base_commit": {"sha": HEAD}}
+        self.assertEqual(self.resolve(_stack_body("parent", HEAD)), HEAD)
+
+    def test_cli_formats_api_and_missing_response_field_errors(self) -> None:
+        responses = (
+            {"side_effect": subprocess.CalledProcessError(1, ["gh", "api"])},
+            {"return_value": {}},
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            metadata_path = Path(directory) / "meta.json"
+            metadata_path.write_text(json.dumps(_metadata(_stack_body(f"[parent]({PR_URL}/1)"))))
+            arguments = [
+                "review_scope.py", "--metadata", str(metadata_path), "--repository", REPOSITORY
+            ]
+            for response in responses:
+                with self.subTest(response=response):
+                    with patch.object(sys, "argv", arguments):
+                        with patch.object(self.module, "_github_json", **response):
+                            with self.assertRaisesRegex(
+                                SystemExit, "Cannot resolve PR review scope"
+                            ):
+                                self.module._main()
 
     def test_stale_malformed_and_missing_boundaries_stop_review(self) -> None:
         valid = _stack_body("stack/parent", PARENT)
@@ -154,6 +236,15 @@ class ReviewScopeTest(unittest.TestCase):
         self.get_json.side_effect = RuntimeError("GitHub unavailable")
 
         with self.assertRaisesRegex(RuntimeError, "GitHub unavailable"):
+            self.resolve(_stack_body(f"[parent]({PR_URL}/1)"))
+
+    def test_merged_parent_with_unknown_ancestry_stops_review(self) -> None:
+        self.get_json.side_effect = [
+            {"head": {"sha": PARENT}, "merged_at": "2026-10-21T00:00:00Z"},
+            {},
+        ]
+
+        with self.assertRaisesRegex(ValueError, "not an ancestor"):
             self.resolve(_stack_body(f"[parent]({PR_URL}/1)"))
 
     def test_workflow_diff_and_all_reviewer_prompts_use_the_resolved_scope(self) -> None:
@@ -191,9 +282,12 @@ class ReviewScopeTest(unittest.TestCase):
                     "with (root / 'api-calls').open('a') as calls:\n"
                     "    calls.write(sys.argv[2] + '\\n')\n"
                     "if '-H' in sys.argv:\n"
-                    "    print('diff --git a/child.rs b/child.rs\\n'\n"
-                    "          '--- a/child.rs\\n+++ b/child.rs\\n'\n"
-                    "          '@@ -0,0 +1 @@\\n+child_change();')\n"
+                    "    diff = ('diff --git a/child.rs b/child.rs\\n'\n"
+                    "            '--- a/child.rs\\n+++ b/child.rs\\n'\n"
+                    "            '@@ -0,0 +1 @@\\n+child_change();')\n"
+                    f"    if '/compare/{GITHUB_BASE}...' in sys.argv[2]:\n"
+                    "        diff += '\\n+ancestor_change();'\n"
+                    "    print(diff)\n"
                     "else:\n"
                     f"    print({comparison_response!r})\n"
                 )
@@ -206,7 +300,7 @@ class ReviewScopeTest(unittest.TestCase):
                         "PATH": f"{temp}:{os.environ['PATH']}",
                         "TEST_ROOT": str(temp),
                         "GITHUB_OUTPUT": str(temp / "github-output"),
-                        "OUTPUT_MODE": "artifact",
+                        "OUTPUT_MODE": "inline",
                         "REPO": REPOSITORY,
                     },
                     capture_output=True,
@@ -221,7 +315,13 @@ class ReviewScopeTest(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 calls = (temp / "api-calls").read_text().splitlines()
                 self.assertTrue(calls)
-                self.assertEqual(set(calls), {f"repos/{REPOSITORY}/compare/{review_base}...{HEAD}"})
+                self.assertEqual(
+                    set(calls),
+                    {
+                        f"repos/{REPOSITORY}/compare/{review_base}...{HEAD}",
+                        f"repos/{REPOSITORY}/compare/{GITHUB_BASE}...{HEAD}",
+                    },
+                )
                 output = (temp / "github-output").read_text()
                 self.assertIn(f"base_sha={GITHUB_BASE}\n", output)
                 self.assertIn(f"review_base_sha={review_base}\n", output)
@@ -230,7 +330,11 @@ class ReviewScopeTest(unittest.TestCase):
                     self.assertIn(f"**Review base SHA:** {review_base}", prompt)
                     self.assertIn(f"**GitHub base SHA:** {GITHUB_BASE}", prompt)
                     self.assertIn("Review only defects introduced by the supplied diff", prompt)
+                    self.assertIn("author supplied and verified only for ancestry", prompt)
                     self.assertIn("+child_change();", prompt)
+                    if review_base != GITHUB_BASE:
+                        self.assertNotIn("+ancestor_change();", prompt)
+                self.assertIn("+ancestor_change();", (temp / "github_pr_diff.txt").read_text())
 
 
 if __name__ == "__main__":
