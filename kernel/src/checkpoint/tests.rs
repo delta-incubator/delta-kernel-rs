@@ -22,6 +22,8 @@ use crate::checkpoint::{
     create_last_checkpoint_data, CheckpointWriter, LastCheckpointHintStats,
     CHECKPOINT_ACTIONS_SCHEMA_V2,
 };
+#[cfg(feature = "adaptive-metadata-in-dev")]
+use crate::checkpoint::{CheckpointSpec, V2CheckpointConfig};
 use crate::committer::FileSystemCommitter;
 use crate::engine::arrow_data::{ArrowEngineData, EngineDataArrowExt};
 use crate::engine::sync::SyncEngine;
@@ -709,8 +711,16 @@ async fn test_no_checkpoint_on_unpublished_snapshot() -> KernelResult<()> {
 }
 
 #[cfg(feature = "adaptive-metadata-in-dev")]
+#[rstest::rstest]
 #[tokio::test]
-async fn test_no_classic_checkpoint_on_adaptive_metadata_table() -> KernelResult<()> {
+async fn test_no_standalone_checkpoint_on_adaptive_metadata_table(
+    #[values(
+        None,
+        Some(CheckpointSpec::V1),
+        Some(CheckpointSpec::V2(V2CheckpointConfig::NoSidecar))
+    )]
+    spec: Option<CheckpointSpec>,
+) -> KernelResult<()> {
     let (store, _) = new_in_memory_store();
     let engine = SyncEngine::new_with_store(store.clone());
     let config = adaptive_metadata_table_configuration(test_schema_flat_with_column_mapping(), &[]);
@@ -726,8 +736,9 @@ async fn test_no_classic_checkpoint_on_adaptive_metadata_table() -> KernelResult
         .unwrap();
 
     let snapshot = Snapshot::builder_for("memory:///").build(&engine)?;
-    let message = "classic checkpoints cannot be written once adaptiveMetadata is enabled";
-    assert_result_error_with_message(snapshot.checkpoint(&engine, None), message);
+    let message =
+        "Standalone checkpoints are not yet supported for tables with adaptiveMetadata enabled";
+    assert_result_error_with_message(snapshot.checkpoint(&engine, spec.as_ref()), message);
     assert_result_error_with_message(snapshot.create_checkpoint_writer(&engine), message);
     Ok(())
 }
