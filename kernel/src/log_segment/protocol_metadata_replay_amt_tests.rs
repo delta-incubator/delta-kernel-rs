@@ -1273,23 +1273,18 @@ async fn post_commit_snapshot_takes_last_manifest_commit_from_the_transaction() 
 async fn snapshot_on_checkpoint_reads_last_manifest_commit_from_commit_file(
     #[case] delete_commit_file: bool,
 ) {
-    // The checkpoint writer needs top-level P&M, so v0 carries them standalone alongside its
-    // checkpoint action. commitInfo stays first, as In-Commit Timestamps require.
-    let store = Arc::new(InMemory::new());
-    let table_root = url::Url::parse("memory:///").unwrap();
-    let commit = format!(
-        "{}\n{}",
-        checkpoint_commit(0, &[], one_column_schema()),
-        standalone_pm_commit(one_column_schema())
-    );
-    add_commit(table_root.as_str(), store.as_ref(), 0, commit)
-        .await
-        .unwrap();
+    // Kernel refuses to write a classic checkpoint on an adaptiveMetadata table, so the checkpoint
+    // carrying v0's P&M is written by hand.
+    let (store, table_root) = manifest_commit_table(&[]).await;
+    let checkpoint_rows = standalone_pm_commit(one_column_schema());
+    add_checkpoint_to_store(
+        &store,
+        parse_json_batch(StringArray::from_iter_values(checkpoint_rows.lines())),
+        &format!("{:020}.checkpoint.parquet", 0),
+    )
+    .await
+    .unwrap();
     let engine = SyncEngine::new_with_store(store.clone());
-    let snapshot = Snapshot::builder_for(table_root.clone())
-        .build(&engine)
-        .unwrap();
-    snapshot.checkpoint(&engine, None).unwrap();
     if delete_commit_file {
         store
             .delete(&delta_path_for_version(0, "json"))

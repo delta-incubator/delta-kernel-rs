@@ -178,7 +178,7 @@ mod tests {
     use crate::transaction::create_table::create_table;
     use crate::unit_test_utils::adaptive_metadata_fixtures::{
         adaptive_metadata_protocol_and_metadata, minimal_checkpoint_action, setup_table,
-        write_commit, write_manifest_commit,
+        write_commit, write_commit_after_manifest_commit, write_manifest_commit,
     };
     use crate::unit_test_utils::{assert_result_error_with_message, MockTableConfigurationBuilder};
     use crate::{create_row, KernelResult};
@@ -277,12 +277,13 @@ mod tests {
     fn compute_checkpoint_action_rejects_a_stale_checkpoint() -> KernelResult<()> {
         let (engine, table_root) = setup_table()?;
         let existing = minimal_checkpoint_action("metadata/root-v1.parquet", 1)?;
-        write_commit(&engine, &table_root, 1, existing.into_engine_data(&engine)?)?;
+        write_manifest_commit(&engine, &table_root, 1, existing)?;
         let domain_metadata = DomainMetadata::new("test.domain".to_string(), "{}".to_string());
-        write_commit(
+        write_commit_after_manifest_commit(
             &engine,
             &table_root,
             2,
+            1,
             create_row(&engine, LOG_DOMAIN_METADATA_SCHEMA.clone(), domain_metadata)?,
         )?;
 

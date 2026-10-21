@@ -407,6 +407,22 @@ pub(crate) mod adaptive_metadata_fixtures {
         write_commit_batches(engine, table_root, version, batches)
     }
 
+    /// Writes a log commit at `version`: a `commitInfo` carrying forward the `lastManifestCommit`
+    /// that names `manifest_version` (whose content root is at that version too), followed by
+    /// `data`.
+    pub(crate) fn write_commit_after_manifest_commit(
+        engine: &SyncEngine,
+        table_root: &Url,
+        version: Version,
+        manifest_version: Version,
+        data: Box<dyn EngineData>,
+    ) -> KernelResult<()> {
+        let manifest_version = version_as_i64(manifest_version)?;
+        let commit_info = last_manifest_commit_info(manifest_version, manifest_version);
+        let commit_info = parse_json_batch(vec![commit_info.to_string()].into());
+        write_commit_batches(engine, table_root, version, vec![commit_info, data])
+    }
+
     /// A `commitInfo` action whose `lastManifestCommit` names `version` and
     /// `content_root_version`.
     pub(crate) fn last_manifest_commit_info(

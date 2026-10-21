@@ -947,7 +947,10 @@ impl LogSegment {
     /// commit. It also bounds the lookup to this snapshot: under time travel, a commit past the
     /// end version exists in storage but is not listed.
     #[cfg(feature = "adaptive-metadata-in-dev")]
-    fn find_pointed_commit(&self, pointer: &LastManifestCommit) -> Option<&ParsedLogPath> {
+    pub(super) fn find_pointed_commit(
+        &self,
+        pointer: &LastManifestCommit,
+    ) -> Option<&ParsedLogPath> {
         let version = Version::try_from(pointer.version).ok()?;
         let commits = &self.listed.ascending_commit_files;
         let index = commits

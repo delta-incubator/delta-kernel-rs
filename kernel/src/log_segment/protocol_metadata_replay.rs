@@ -206,12 +206,7 @@ impl LogSegment {
             return Ok(candidate);
         }
         // A pointed commit outside this segment is no newer than the segment's P&M.
-        let commits = &self.listed.ascending_commit_files;
-        let Some(commit) = Version::try_from(pointer.version)
-            .ok()
-            .and_then(|v| commits.binary_search_by_key(&v, |c| c.version).ok())
-            .and_then(|i| commits.get(i))
-        else {
+        let Some(commit) = self.find_pointed_commit(&pointer) else {
             return Ok(candidate);
         };
         let checkpoint = require_pointed_checkpoint_action(
