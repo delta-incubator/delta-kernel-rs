@@ -707,13 +707,24 @@ fn scan_metadata_from_requires_timezone_support_only_for_timestamp_partitions(
     #[values(false, true)] parsed_struct: bool,
     #[values(false, true)] timestamp_partition: bool,
 ) {
-    let temp_dir = load_test_data("tests/data", "timestamp-partitioned-table").unwrap();
-    let table_path = if timestamp_partition {
-        temp_dir.path().join("timestamp-partitioned-table")
+    let table_root = "memory:///test_table/";
+    let engine = SyncEngine::new_with_store(Arc::new(InMemory::new()));
+    let partition_type = if timestamp_partition {
+        DataType::TIMESTAMP
     } else {
-        std::fs::canonicalize("tests/data/basic_partitioned").unwrap()
+        DataType::STRING
     };
-    let (engine, snapshot) = without_transforms_snapshot(table_path.to_str().unwrap());
+    let schema = schema_ref! {
+        (StructField::nullable("p", partition_type)),
+        nullable "value": INTEGER,
+    };
+    let snapshot = create_table(table_root, schema, "SyncEngine", true)
+        .with_data_layout(DataLayout::partitioned(["p"]))
+        .build(&engine, Box::new(FileSystemCommitter::new()))
+        .unwrap()
+        .commit(&engine)
+        .unwrap()
+        .unwrap_post_commit_snapshot();
     let version = snapshot.version();
     let options = if parsed_struct {
         PartitionValuesOptions::with_struct()
@@ -726,7 +737,7 @@ fn scan_metadata_from_requires_timezone_support_only_for_timestamp_partitions(
         .build()
         .unwrap();
 
-    let result = scan.scan_metadata_from(engine.as_ref(), version, Vec::new(), None);
+    let result = scan.scan_metadata_from(&engine, version, Vec::new(), None);
     if timestamp_partition {
         assert_result_error_with_message(result, "with_timestamp_timezone in scan_metadata_from");
     } else {
