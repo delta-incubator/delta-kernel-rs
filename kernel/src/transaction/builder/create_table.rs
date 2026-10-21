@@ -23,8 +23,8 @@ use crate::expressions::ColumnName;
 use crate::schema::validation::validate_schema;
 use crate::schema::variant_utils::schema_contains_variant_type;
 use crate::schema::{
-    normalize_column_names_to_schema_casing, schema_contains_non_null_fields, DataType, SchemaRef,
-    StructType,
+    normalize_column_names_to_schema_casing, schema_contains_non_null_fields, ColumnMetadataKey,
+    DataType, SchemaRef, StructField, StructType,
 };
 use crate::table_configuration::TableConfiguration;
 use crate::table_features::{
@@ -51,7 +51,8 @@ use crate::table_properties::{
 use crate::transaction::create_table::CreateTableTransaction;
 use crate::transaction::data_layout::DataLayout;
 use crate::transaction::{CommitOperation, CreateTable, ExecutionMode, Transaction};
-use crate::utils::{current_time_ms, try_parse_uri};
+use crate::transforms::{transform_output_type, SchemaTransform};
+use crate::utils::{current_time_ms, require, try_parse_uri};
 use crate::{Engine, KernelError, KernelResult, StorageHandler};
 
 /// Table features allowed to be enabled via `delta.feature.*=supported` during CREATE TABLE.
@@ -784,6 +785,31 @@ fn validate_extract_table_features_and_properties(
     })
 }
 
+/// Rejects a schema in which any field, at any nesting depth, declares a generation expression.
+fn reject_generation_expressions(schema: &StructType) -> KernelResult<()> {
+    GenerationExpressionRejector.transform_struct(schema)
+}
+
+/// Fails on the first field that carries `delta.generationExpression` metadata.
+struct GenerationExpressionRejector;
+
+impl<'a> SchemaTransform<'a> for GenerationExpressionRejector {
+    transform_output_type!(|'a, T| KernelResult<()>);
+
+    fn transform_struct_field(&mut self, field: &'a StructField) -> KernelResult<()> {
+        let key = ColumnMetadataKey::GenerationExpression;
+        require!(
+            field.get_config_value(&key).is_none(),
+            KernelError::schema(format!(
+                "Setting '{}' metadata on column '{}' is not supported during CREATE TABLE",
+                key.as_ref(),
+                field.name()
+            ))
+        );
+        self.recurse_into_struct_field(field)
+    }
+}
+
 /// Builder for configuring a new Delta table.
 ///
 /// Use this to configure table properties before building a [`CreateTableTransaction`].
@@ -927,6 +953,8 @@ impl TransactionBuilder<CreateTable> {
     /// - Checks that the table path is valid
     /// - Verifies the table doesn't already exist
     /// - Rejects schemas with `delta.invariants` metadata annotations (unsupported by kernel)
+    /// - Rejects schemas with `delta.generationExpression` metadata annotations (unsupported by
+    ///   kernel)
     /// - Validates the data layout is valid
     /// - Validates table properties against the allow list
     ///
@@ -947,6 +975,7 @@ impl TransactionBuilder<CreateTable> {
     /// - The table path is invalid
     /// - A table already exists at the given path
     /// - The schema has `delta.invariants` metadata on any column
+    /// - The schema has `delta.generationExpression` metadata on any column
     /// - CDF is enabled and the schema contains a top-level column reserved for CDF
     /// - The data layout is invalid
     /// - Unsupported delta properties or feature flags are specified
@@ -999,6 +1028,7 @@ impl TransactionBuilder<CreateTable> {
             column_mapping_mode,
             validated.is_property_true(ENABLE_CHANGE_DATA_FEED),
         )?;
+        reject_generation_expressions(&effective_schema)?;
 
         // Strip CM metadata in `None` mode: a new table has no prior schema (passed as `None`), so
         // any annotation the caller supplied is newly introduced (see

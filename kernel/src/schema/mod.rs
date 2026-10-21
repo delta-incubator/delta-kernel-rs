@@ -34,6 +34,7 @@ pub(crate) use column_default::{try_collect_column_defaults, validate_column_def
 pub(crate) mod compare;
 #[cfg(feature = "schema-diff")]
 pub(crate) mod diff;
+pub(crate) mod generated_column;
 
 #[cfg(feature = "internal-api")]
 pub mod derive_macro_utils;
