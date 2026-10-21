@@ -43,6 +43,18 @@ pub(crate) const TAGS: &str = "tags";
 
 /// Field names within the [`ManifestInfo`] sub-struct.
 pub(crate) const FORMAT_VERSION: &str = "formatVersion";
+pub(crate) const MANIFEST_DV: &str = "dv";
+pub(crate) const ADDED_FILES_COUNT: &str = "addedFilesCount";
+pub(crate) const EXISTING_FILES_COUNT: &str = "existingFilesCount";
+pub(crate) const DELETED_FILES_COUNT: &str = "deletedFilesCount";
+pub(crate) const REPLACED_FILES_COUNT: &str = "replacedFilesCount";
+pub(crate) const MODIFIED_FILES_COUNT: &str = "modifiedFilesCount";
+pub(crate) const ADDED_ROWS_COUNT: &str = "addedRowsCount";
+pub(crate) const EXISTING_ROWS_COUNT: &str = "existingRowsCount";
+pub(crate) const DELETED_ROWS_COUNT: &str = "deletedRowsCount";
+pub(crate) const REPLACED_ROWS_COUNT: &str = "replacedRowsCount";
+pub(crate) const MODIFIED_ROWS_COUNT: &str = "modifiedRowsCount";
+pub(crate) const MIN_SEQUENCE_NUMBER: &str = "minSequenceNumber";
 
 /// The `manifestInfo.formatVersion` of a manifest written in Iceberg v4. Manifests written by
 /// earlier versions record 0.
@@ -55,6 +67,16 @@ pub(crate) const MODIFIED_SNAPSHOT_ID: &str = "modifiedSnapshotId";
 pub(crate) const SEQUENCE_NUMBER: &str = "sequenceNumber";
 pub(crate) const FILE_SEQUENCE_NUMBER: &str = "fileSequenceNumber";
 pub(crate) const FIRST_ROW_ID: &str = "firstRowId";
+pub(crate) const DELETED_POSITIONS: &str = "deletedPositions";
+pub(crate) const REPLACED_POSITIONS: &str = "replacedPositions";
+
+/// Field names within the [`DeletionVectorInfo`] sub-struct.
+pub(crate) const DV_INFO_OFFSET: &str = "offset";
+pub(crate) const DV_INFO_SIZE_IN_BYTES: &str = "sizeInBytes";
+pub(crate) const DV_INFO_CARDINALITY: &str = "cardinality";
+
+/// Field names within the [`ColumnFile`] sub-struct.
+pub(crate) const FIELD_IDS: &str = "fieldIds";
 
 /// Field names for the different fields within content_stats.
 pub(crate) const LOWER_BOUND: &str = "lower_bound";
@@ -562,34 +584,34 @@ mod tests {
         (SEQUENCE_NUMBER, Some(3), true),
         (FILE_SEQUENCE_NUMBER, Some(4), true),
         (FIRST_ROW_ID, Some(142), true),
-        ("deletedPositions", Some(6), true),
-        ("replacedPositions", Some(7), true),
+        (DELETED_POSITIONS, Some(6), true),
+        (REPLACED_POSITIONS, Some(7), true),
     ])]
     #[case::deletion_vector_info(DeletionVectorInfo::to_schema(), &[
         (LOCATION, Some(155), false),
-        ("offset", Some(144), false),
-        ("sizeInBytes", Some(145), false),
-        ("cardinality", Some(156), false),
+        (DV_INFO_OFFSET, Some(144), false),
+        (DV_INFO_SIZE_IN_BYTES, Some(145), false),
+        (DV_INFO_CARDINALITY, Some(156), false),
         (KEY_METADATA, Some(149), true),
     ])]
     #[case::manifest_info(ManifestInfo::to_schema(), &[
         (FORMAT_VERSION, Some(521), false),
-        ("addedFilesCount", Some(504), false),
-        ("existingFilesCount", Some(505), false),
-        ("deletedFilesCount", Some(506), false),
-        ("replacedFilesCount", Some(523), false),
-        ("modifiedFilesCount", Some(525), false),
-        ("addedRowsCount", Some(512), false),
-        ("existingRowsCount", Some(513), false),
-        ("deletedRowsCount", Some(514), false),
-        ("replacedRowsCount", Some(524), false),
-        ("modifiedRowsCount", Some(526), false),
-        ("minSequenceNumber", Some(516), false),
-        ("dv", Some(522), true),
+        (ADDED_FILES_COUNT, Some(504), false),
+        (EXISTING_FILES_COUNT, Some(505), false),
+        (DELETED_FILES_COUNT, Some(506), false),
+        (REPLACED_FILES_COUNT, Some(523), false),
+        (MODIFIED_FILES_COUNT, Some(525), false),
+        (ADDED_ROWS_COUNT, Some(512), false),
+        (EXISTING_ROWS_COUNT, Some(513), false),
+        (DELETED_ROWS_COUNT, Some(514), false),
+        (REPLACED_ROWS_COUNT, Some(524), false),
+        (MODIFIED_ROWS_COUNT, Some(526), false),
+        (MIN_SEQUENCE_NUMBER, Some(516), false),
+        (MANIFEST_DV, Some(522), true),
     ])]
     #[case::column_file(ColumnFile::to_schema(), &[
         (LOCATION, Some(160), false),
-        ("fieldIds", Some(161), false),
+        (FIELD_IDS, Some(161), false),
         (FILE_FORMAT, Some(163), false),
         (FILE_SIZE_IN_BYTES, Some(164), false),
         (KEY_METADATA, Some(165), true),
