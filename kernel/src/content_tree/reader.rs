@@ -476,7 +476,7 @@ impl LeafActions {
                 leaf.check_readable()?;
                 let location = leaf.file_meta.location.to_string();
                 let context =
-                    LeafReadContext::new(engine, &leaf.tracking, ctx).map_err(|e| match e {
+                    LeafReadContext::new(engine, &leaf.parent_info, ctx).map_err(|e| match e {
                         KernelError::MissingData(msg) => {
                             KernelError::missing_data(format!("{msg} (leaf manifest '{location}')"))
                         }
