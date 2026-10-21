@@ -1060,6 +1060,26 @@ async fn assert_replay_last_manifest_commit<E: Engine>(
     }
 }
 
+// A `lastManifestCommit` naming a version after the commit that carries it is invalid, so replay
+// fails instead of storing a pointer that later reads would trust.
+#[tokio::test]
+async fn replay_rejects_pointer_after_newest_commit() {
+    check_pointer_after_newest_commit(non_plan_engine).await;
+    #[cfg(feature = "declarative-plans")]
+    check_pointer_after_newest_commit(|store| SyncEngine::new_with_store(store)).await;
+}
+
+async fn check_pointer_after_newest_commit<E: Engine>(
+    make_engine: impl FnOnce(Arc<InMemory>) -> E,
+) {
+    let (store, table_root) = manifest_commit_table(&[commit_info(Some((5, 5)))]).await;
+    let engine = make_engine(store);
+    assert_result_error_with_message(
+        Snapshot::builder_for(table_root).build(&engine),
+        "lastManifestCommit version 5 exceeds commit version 1",
+    );
+}
+
 // Log compaction files drop commitInfo, so when a compaction covers the newest commit the plan
 // path still reads that commit's `lastManifestCommit` and follows it to the checkpoint action that
 // carries the latest P&M. Compaction listing is disabled, so the compaction is added by hand.

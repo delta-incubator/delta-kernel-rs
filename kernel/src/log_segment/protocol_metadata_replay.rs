@@ -165,6 +165,8 @@ impl LogSegment {
         #[cfg(feature = "declarative-plans")]
         if let Some(executor) = engine.plan_executor() {
             let candidate = resolve_pm_batches(self.read_pm_batches_via_plan(executor.as_ref())?)?;
+            #[cfg(feature = "adaptive-metadata-in-dev")]
+            candidate.ensure_pointer_at_or_before(self.end_version)?;
             // Use `lastManifestCommit`, when present and needed, to find the checkpoint action.
             #[cfg(feature = "adaptive-metadata-in-dev")]
             let candidate = self.merge_pointed_checkpoint_action(executor.as_ref(), candidate)?;
@@ -172,7 +174,10 @@ impl LogSegment {
             require_newest_pointer(&candidate, self.end_version)?;
             return Ok(candidate);
         }
-        resolve_pm_batches(self.read_pm_batches(engine)?)
+        let candidate = resolve_pm_batches(self.read_pm_batches(engine)?)?;
+        #[cfg(feature = "adaptive-metadata-in-dev")]
+        candidate.ensure_pointer_at_or_before(self.end_version)?;
+        Ok(candidate)
     }
 
     /// Merges in the checkpoint action that `lastManifestCommit` points at, unless the plan
@@ -317,7 +322,9 @@ impl LogSegment {
         );
         // Also keep the newest commit's checkpoint action, so a manifest commit at this version
         // needs no second read. A segment that ends on a checkpoint does not list that commit, and
-        // its checkpoint parts carry the same version.
+        // its checkpoint parts carry the same version. Older checkpoint actions are reached only
+        // through the newest commit's `lastManifestCommit`, which writers carry forward on every
+        // commit after the first manifest commit.
         #[cfg(feature = "adaptive-metadata-in-dev")]
         let relevant_action = if self.newest_commit().is_some() {
             Predicate::or(
@@ -527,6 +534,15 @@ impl PmCandidate {
             self.checkpoint.as_ref().map(|(_, c)| Arc::new(c.clone())),
             LastManifestCommitResolution::from_replay(self.last_manifest_commit.clone()),
         )
+    }
+
+    /// Errors unless the `lastManifestCommit` read from the newest commit, at `version`, names a
+    /// manifest commit at or before it.
+    #[cfg(feature = "adaptive-metadata-in-dev")]
+    fn ensure_pointer_at_or_before(&self, version: Version) -> KernelResult<()> {
+        self.last_manifest_commit
+            .as_ref()
+            .map_or(Ok(()), |pointer| pointer.ensure_at_or_before(version))
     }
 }
 
