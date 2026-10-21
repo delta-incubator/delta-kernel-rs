@@ -303,12 +303,11 @@ pub(crate) struct PmResolution {
     pub(crate) protocol: Option<Protocol>,
     /// How the Protocol and Metadata were resolved.
     pub(crate) source: ProtocolMetadataSource,
-    /// The latest AMT `checkpoint` action, when replay captured it. A hit is the latest action:
-    /// replay keeps the highest `checkpointMetadata.version` across the batches it reaches, and
-    /// checkpoint versions strictly increase, so an early-stopping replay only skips older
-    /// actions. `None` does not prove absence (replay may have stopped early, been pruned to
-    /// commits after a CRC, or not run at all); the snapshot then follows `lastManifestCommit`
-    /// to the action.
+    /// The latest AMT `checkpoint` action, when replay happened to read it. This only saves a
+    /// read: `lastManifestCommit`, which the CRC or the snapshot version's `commitInfo` always
+    /// carries, is the authority on the action and the snapshot follows it when this is `None`.
+    /// A hit is the latest action, since replay keeps the highest `checkpointMetadata.version`
+    /// it reaches and checkpoint versions strictly increase.
     #[cfg(feature = "adaptive-metadata-in-dev")]
     pub(crate) captured_checkpoint_action: Option<Arc<CheckpointAction>>,
     /// How the segment's `lastManifestCommit` was resolved. See [`LastManifestCommitResolution`].

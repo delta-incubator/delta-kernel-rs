@@ -310,11 +310,13 @@ impl Snapshot {
         if let Some(cached) = self.checkpoint_action.get() {
             return Ok(cached.clone());
         }
-        let pointer = self.last_manifest_commit(engine)?;
-        let found = self
-            .log_segment
-            .find_last_checkpoint_action(engine, pointer.as_ref())?
-            .map(Arc::new);
+        let found = match self.last_manifest_commit(engine)? {
+            Some(pointer) => Some(Arc::new(
+                self.log_segment
+                    .read_last_checkpoint_action_from_pointer(engine, &pointer)?,
+            )),
+            None => None,
+        };
         // A concurrent caller may win the race to fill the cell; both read the same commit.
         let _ = self.checkpoint_action.set(found.clone());
         Ok(found)

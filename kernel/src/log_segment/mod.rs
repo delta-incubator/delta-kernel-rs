@@ -920,16 +920,17 @@ impl LogSegment {
     }
 
     /// Read the AMT `checkpoint` action from the manifest commit that `pointer` (the snapshot's
-    /// `lastManifestCommit`) refers to. `None` indicates no checkpoint action.
+    /// `lastManifestCommit`) refers to.
+    ///
+    /// # Errors
+    /// Returns an error if the commit cannot be read, or if this segment does not list the commit,
+    /// the commit carries no checkpoint action, or that action disagrees with `pointer`.
     #[cfg(feature = "adaptive-metadata-in-dev")]
-    pub(crate) fn find_last_checkpoint_action(
+    pub(crate) fn read_last_checkpoint_action_from_pointer(
         &self,
         engine: &dyn Engine,
-        pointer: Option<&LastManifestCommit>,
-    ) -> KernelResult<Option<CheckpointAction>> {
-        let Some(pointer) = pointer else {
-            return Ok(None);
-        };
+        pointer: &LastManifestCommit,
+    ) -> KernelResult<CheckpointAction> {
         let inconsistent = |detail: String| {
             KernelError::invalid_log_segment(format!(
                 "lastManifestCommit names manifest commit version {} as the source of content \
@@ -954,7 +955,7 @@ impl LogSegment {
                 action.content_root_version()
             ))
         );
-        Ok(Some(action))
+        Ok(action)
     }
 
     /// The listed commit at `pointer`'s version, or `None` when this segment does not list it.

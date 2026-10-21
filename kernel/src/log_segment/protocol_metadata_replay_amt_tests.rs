@@ -617,17 +617,12 @@ async fn latest_checkpoint_action_follows_commit_info_pointer(
     assert_eq!(action.map(|a| a.version), expected_version);
 }
 
-// The pointer alone decides the lookup. Without one (AMT enabled, but no manifest commit yet) there
-// is no checkpoint action. A pointer naming a commit the segment does not list, below or above it,
-// is inconsistent. The segment keeps only v1, whose checkpoint action a scan would find.
+// The pointer alone decides the lookup: one naming a commit the segment does not list, below or
+// above it, is inconsistent. The segment keeps only v1, whose checkpoint action a scan would find.
 #[rstest]
-#[case::no_pointer(None, Ok(None))]
-#[case::below_segment(Some(0), Err("this log segment does not list that commit"))]
-#[case::above_segment(Some(5), Err("this log segment does not list that commit"))]
 #[tokio::test]
-async fn find_last_checkpoint_action_follows_pointer_outside_segment(
-    #[case] pointer_version: Option<i64>,
-    #[case] expected: Result<Option<i64>, &str>,
+async fn read_last_checkpoint_action_from_pointer_rejects_commit_outside_segment(
+    #[values(0, 5)] pointer_version: i64,
 ) {
     let store = Arc::new(InMemory::new());
     let table_root = url::Url::parse("memory:///").unwrap();
@@ -650,12 +645,9 @@ async fn find_last_checkpoint_action_follows_pointer_outside_segment(
             .unwrap()
             .segment_after_version(0);
 
-    let pointer = pointer_version.map(|v| LastManifestCommit::new(v, v).unwrap());
-    let result = log_segment.find_last_checkpoint_action(&engine, pointer.as_ref());
-    match expected {
-        Ok(version) => assert_eq!(result.unwrap().map(|a| a.version), version),
-        Err(message) => assert_result_error_with_message(result, message),
-    }
+    let pointer = LastManifestCommit::new(pointer_version, pointer_version).unwrap();
+    let result = log_segment.read_last_checkpoint_action_from_pointer(&engine, &pointer);
+    assert_result_error_with_message(result, "this log segment does not list that commit");
 }
 
 #[rstest]
