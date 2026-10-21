@@ -6,7 +6,7 @@
 mod kernel_engine;
 #[cfg(feature = "arrow-expression")]
 use delta_kernel_derive::internal_api;
-pub(crate) use kernel_engine::KernelEngine;
+pub(crate) use kernel_engine::CancellableEngine;
 
 #[cfg(feature = "arrow-expression")]
 use crate::parquet::arrow::arrow_reader::ArrowReaderOptions;

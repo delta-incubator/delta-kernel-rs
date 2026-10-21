@@ -832,7 +832,7 @@ mod tests {
 
     use super::{DeletionVectorDescriptor, *};
     use crate::engine::sync::SyncEngine;
-    use crate::engine::KernelEngine;
+    use crate::engine::CancellableEngine;
     use crate::scan::state::DvInfo;
     use crate::unit_test_utils::{assert_result_error_with_message, TestCancellationToken};
     use crate::Engine;
@@ -1265,7 +1265,7 @@ mod tests {
         if cancelled {
             token.cancel();
         }
-        let engine = KernelEngine::new(&SyncEngine::new(), token);
+        let engine = CancellableEngine::new(&SyncEngine::new(), token);
         let descriptor = dv_example();
         let info = DvInfo {
             deletion_vector: Some(descriptor.clone()),

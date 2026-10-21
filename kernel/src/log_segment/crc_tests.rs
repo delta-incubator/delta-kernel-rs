@@ -19,7 +19,7 @@ use crate::crc::{
     try_read_crc_file, Crc, DomainMetadataState, FileSizeHistogram, SetTransactionState,
 };
 use crate::engine::sync::SyncEngine;
-use crate::engine::KernelEngine;
+use crate::engine::CancellableEngine;
 use crate::object_store::memory::InMemory;
 use crate::object_store::ObjectStoreExt as _;
 use crate::path::ParsedLogPath;
@@ -1480,7 +1480,7 @@ async fn pick_latest_base_crc_preserves_cancellation_with_in_memory_base(
     if cancelled {
         token.cancel();
     }
-    let engine = KernelEngine::new(&built.engine, token);
+    let engine = CancellableEngine::new(&built.engine, token);
     let result = built.pick_latest_base_crc(&engine, Some(&base));
     if cancelled {
         assert!(matches!(result, Err(KernelError::Cancelled)), "{result:?}");

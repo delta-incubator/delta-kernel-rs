@@ -327,7 +327,7 @@ mod tests {
     use crate::arrow::array::{Array, AsArray, MapArray, StringArray, StructArray};
     use crate::engine::arrow_data::{ArrowEngineData, EngineDataArrowExt};
     use crate::engine::sync::SyncEngine;
-    use crate::engine::KernelEngine;
+    use crate::engine::CancellableEngine;
     use crate::engine_data::RowVisitor;
     use crate::object_store::memory::InMemory;
     use crate::unit_test_utils::TestCancellationToken;
@@ -383,7 +383,7 @@ mod tests {
     fn commit_header_read_preserves_cancellation(#[values(false, true)] cancelled: bool) {
         let (range, engine, snapshot) = open_test_range_at(0);
         let token = Arc::new(TestCancellationToken::default());
-        let engine = Arc::new(KernelEngine::new(engine.as_ref(), token.clone()));
+        let engine = Arc::new(CancellableEngine::new(engine.as_ref(), token.clone()));
         let mut commits = range
             .commits(engine, Some(snapshot), &[DeltaAction::Add])
             .unwrap();

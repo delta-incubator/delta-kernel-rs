@@ -924,7 +924,7 @@ mod tests {
     use crate::actions::{CommitInfo, Metadata, Protocol};
     use crate::engine::sync::SyncEngine;
     use crate::engine::test_delegating::DelegatingEngine;
-    use crate::engine::KernelEngine;
+    use crate::engine::CancellableEngine;
     use crate::object_store::memory::InMemory;
     use crate::schema::{schema_ref, SchemaRef};
     use crate::snapshot::{Snapshot, SnapshotBuilder};
@@ -2105,7 +2105,7 @@ mod tests {
         if cancelled {
             token.cancel();
         }
-        let engine = KernelEngine::new(&engine, token);
+        let engine = CancellableEngine::new(&engine, token);
         let result = get_earliest_commit(&engine, &log_root, None, commit_type);
         if cancelled {
             assert!(matches!(result, Err(KernelError::Cancelled)));
@@ -2130,7 +2130,7 @@ mod tests {
         if cancelled {
             token.cancel();
         }
-        let engine = KernelEngine::new(&original, token);
+        let engine = CancellableEngine::new(&original, token);
         let result = match bound {
             Bound::GreatestLower => latest_version_as_of(&snapshot, &engine, 150, commit_type),
             Bound::LeastUpper => first_version_after(&snapshot, &engine, 150, commit_type),

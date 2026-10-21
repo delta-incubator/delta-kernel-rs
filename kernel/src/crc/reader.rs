@@ -59,7 +59,7 @@ mod tests {
     use super::*;
     use crate::actions::{Format, Metadata, Protocol};
     use crate::engine::sync::SyncEngine;
-    use crate::engine::KernelEngine;
+    use crate::engine::CancellableEngine;
     use crate::metrics::MetricEvent;
     use crate::path::ParsedLogPath;
     use crate::table_features::TableFeature;
@@ -88,7 +88,7 @@ mod tests {
         if cancelled {
             token.cancel();
         }
-        let engine = KernelEngine::new(&SyncEngine::new(), token);
+        let engine = CancellableEngine::new(&SyncEngine::new(), token);
         let result = read_crc_file_or_none(&engine, &crc_path);
         if cancelled {
             assert!(matches!(result, Err(KernelError::Cancelled)), "{result:?}");

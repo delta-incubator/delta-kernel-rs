@@ -6,7 +6,7 @@ use delta_kernel_derive::internal_api;
 use tracing::{info, instrument};
 
 use crate::cancellation::CancellationTokenRef;
-use crate::engine::KernelEngine;
+use crate::engine::CancellableEngine;
 use crate::log_path::LogPath;
 use crate::log_segment::{validate_catalog_managed_log_tail, LogSegment};
 use crate::log_segment_files::CheckpointHandling;
@@ -379,7 +379,8 @@ impl<Mode> SnapshotBuilder<Mode> {
                 incremental_replay,
             )?
         } else {
-            let scoped_engine = cancellation_token.map(|token| KernelEngine::new(engine, token));
+            let scoped_engine =
+                cancellation_token.map(|token| CancellableEngine::new(engine, token));
             let engine = scoped_engine
                 .as_ref()
                 .map_or(engine, |engine| engine as &dyn Engine);

@@ -1,4 +1,9 @@
-//! Engine handlers bound to an operation's read cancellation token.
+//! Applies snapshot-build cancellation to reads through the connector's engine handlers.
+//!
+//! `SnapshotBuilder::build` uses `CancellableEngine` for builds with a token and no snapshot
+//! hint. The wrappers supply that token when loading code calls an ordinary read method,
+//! or a cancellation-aware one with no token of its own, so discovery and replay share
+//! cancellation without threading a token through each helper.
 
 use std::sync::Arc;
 
@@ -16,33 +21,38 @@ use crate::{
     SchemaRef, StorageHandler,
 };
 
-/// An engine adapter that binds an operation's cancellation token to read handlers.
+/// An engine adapter that supplies a default cancellation token to storage, JSON, and
+/// Parquet reads.
 ///
-/// Plain reads and cancellation-aware reads with `None` use the bound token. An explicit token
-/// overrides it and is forwarded unchanged. HEAD checks cancellation before starting; its handler
-/// API cannot interrupt an active request. Parsing, writes, evaluation, and declarative execution
+/// Snapshot builds with cancellation supply one token to [`Self::new`]. The wrapped
+/// handlers use it as the default for reads, so loading helpers inherit cancellation
+/// through the engine.
+///
+/// At the handler API boundary, `*_with_cancellation` methods accept an optional per-call
+/// token. `None` uses the stored default; `Some(token)` overrides it for that read and is
+/// forwarded unchanged.
+///
+/// Write methods delegate unchanged for now. Parsing, evaluation, and declarative execution
 /// retain their underlying behavior.
 ///
 /// Snapshots retain neither the adapter nor its token. Read iterators own their cancellation state
-/// and can outlive the adapter. Cached metadata can be returned without consulting the bound token.
-///
-/// Bind the operation token once on the original engine. Nested adapters each check their bound
-/// token for HEAD, which has no explicit-token override.
-pub(crate) struct KernelEngine {
+/// and can outlive the adapter. Cached metadata can be returned without consulting the default
+/// token.
+pub(crate) struct CancellableEngine {
     /// Original expression evaluator.
     evaluation: Arc<dyn EvaluationHandler>,
-    /// Storage handler bound to the operation's read token.
+    /// Storage handler bound to the default read token.
     storage: Arc<dyn StorageHandler>,
-    /// JSON handler bound to the operation's read token.
+    /// JSON handler bound to the default read token.
     json: Arc<dyn JsonHandler>,
-    /// Parquet handler bound to the operation's read token.
+    /// Parquet handler bound to the default read token.
     parquet: Arc<dyn ParquetHandler>,
     /// Original declarative executor, when available.
     #[cfg(feature = "declarative-plans")]
     plan_executor: Option<Arc<dyn PlanExecutor>>,
 }
 
-impl KernelEngine {
+impl CancellableEngine {
     /// Captures `engine`'s handlers and binds `cancellation_token` without issuing I/O.
     pub(crate) fn new(engine: &dyn Engine, cancellation_token: CancellationTokenRef) -> Self {
         Self {
@@ -65,23 +75,23 @@ impl KernelEngine {
     }
 }
 
-impl Engine for KernelEngine {
+impl Engine for CancellableEngine {
     /// Returns the original expression evaluator.
     fn evaluation_handler(&self) -> Arc<dyn EvaluationHandler> {
         self.evaluation.clone()
     }
 
-    /// Returns the storage handler with the operation's read token.
+    /// Returns the storage handler with the default read token.
     fn storage_handler(&self) -> Arc<dyn StorageHandler> {
         self.storage.clone()
     }
 
-    /// Returns the JSON handler with the operation's read token.
+    /// Returns the JSON handler with the default read token.
     fn json_handler(&self) -> Arc<dyn JsonHandler> {
         self.json.clone()
     }
 
-    /// Returns the Parquet handler with the operation's read token.
+    /// Returns the Parquet handler with the default read token.
     fn parquet_handler(&self) -> Arc<dyn ParquetHandler> {
         self.parquet.clone()
     }
@@ -102,7 +112,7 @@ struct ReadHandler<H: ?Sized> {
     cancellation_token: CancellationTokenRef,
 }
 
-/// Generates plain and explicit-token reads that share token selection.
+/// Generates plain and cancellation-aware reads that share token selection.
 macro_rules! cancellable_read_pair {
     (
         $(#[$doc:meta])*
@@ -127,33 +137,36 @@ macro_rules! cancellable_read_pair {
     };
 }
 
-/// Forwards methods to the inner handler or an engine-selected handler.
+/// Forwards methods to the inner handler unchanged.
 macro_rules! forward_methods {
     ($(
         $(#[$doc:meta])*
-        fn $method:ident($($arg:ident: $ty:ty),* $(,)?) -> $result:ty $(=> $handler:ident)?;
+        fn $method:ident($($arg:ident: $ty:ty),* $(,)?) -> $result:ty;
     )*) => {$(
         $(#[$doc])*
         fn $method(&self, $($arg: $ty),*) -> $result {
-            self.inner$(.$handler())?.$method($($arg),*)
+            self.inner.$method($($arg),*)
         }
     )*};
 }
 
 impl StorageHandler for ReadHandler<dyn StorageHandler> {
     cancellable_read_pair! {
-        /// Lists files using an explicit token or the bound token.
+        /// Lists files using a per-call token or the default token.
         fn list_from, list_from_with_cancellation(path: &Url)
             -> KernelResult<KernelResultIteratorStatic<FileMeta>>;
     }
 
     cancellable_read_pair! {
-        /// Reads byte ranges using an explicit token or the bound token.
+        /// Reads byte ranges using a per-call token or the default token.
         fn read_files, read_files_with_cancellation(files: Vec<FileSlice>)
             -> KernelResult<KernelResultIteratorStatic<Bytes>>;
     }
 
-    /// Returns file metadata after checking the bound token for cancellation.
+    /// Returns file metadata after checking the default token for cancellation.
+    ///
+    /// `StorageHandler::head` accepts no cancellation token, so this wrapper cannot
+    /// interrupt an in-flight request. Nested adapters each check their default token.
     fn head(&self, path: &Url) -> KernelResult<FileMeta> {
         check_cancelled(Some(&self.cancellation_token))?;
         self.inner.head(path)
@@ -173,7 +186,7 @@ impl StorageHandler for ReadHandler<dyn StorageHandler> {
 
 impl JsonHandler for ReadHandler<dyn JsonHandler> {
     cancellable_read_pair! {
-        /// Reads projected JSON batches using an explicit token or the bound token.
+        /// Reads projected JSON batches using a per-call token or the default token.
         fn read_json_files, read_json_files_with_cancellation(
             files: &[FileMeta], schema: SchemaRef, predicate: Option<PredicateRef>,
         ) -> KernelResult<FileDataReadResultIterator>;
@@ -192,14 +205,14 @@ impl JsonHandler for ReadHandler<dyn JsonHandler> {
 
 impl ParquetHandler for ReadHandler<dyn ParquetHandler> {
     cancellable_read_pair! {
-        /// Reads projected Parquet batches using an explicit token or the bound token.
+        /// Reads projected Parquet batches using a per-call token or the default token.
         fn read_parquet_files, read_parquet_files_with_cancellation(
             files: &[FileMeta], schema: SchemaRef, predicate: Option<PredicateRef>,
         ) -> KernelResult<FileDataReadResultIterator>;
     }
 
     cancellable_read_pair! {
-        /// Reads a Parquet footer using an explicit token or the bound token.
+        /// Reads a Parquet footer using a per-call token or the default token.
         fn read_parquet_footer, read_parquet_footer_with_cancellation(file: &FileMeta)
             -> KernelResult<ParquetFooter>;
     }
