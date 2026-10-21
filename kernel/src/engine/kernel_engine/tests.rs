@@ -15,7 +15,7 @@
 //! - Post-build domain metadata, transaction IDs, and clustering reads using the same wrapper.
 //! - Correlated failure metrics through metered handlers, without snapshot success on cancellation.
 //!
-//! Tests using `KernelEngine` directly cover iterator ownership after the wrapper is dropped,
+//! Tests using `CancellableEngine` directly cover iterator ownership after the wrapper is dropped,
 //! release of the build token by completed snapshots, cached snapshot reuse, nested HEAD preflight,
 //! and unchanged parsing, writes, and declarative replay.
 //!
@@ -37,7 +37,7 @@ use crate::committer::FileSystemCommitter;
 use crate::engine::arrow_data::EngineDataArrowExt;
 use crate::engine::sync::SyncEngine;
 use crate::engine::test_delegating::DelegatingEngine;
-use crate::engine::KernelEngine;
+use crate::engine::CancellableEngine;
 use crate::metrics::{LogSegmentLoadType, MeteredDeltaEngine, MetricEvent, SnapshotLoadType};
 use crate::object_store::memory::InMemory;
 use crate::schema::{schema_ref, ColumnName, SchemaRef};
@@ -177,18 +177,20 @@ impl StorageHandler for RecordingReads {
             .read_files_with_cancellation(files, token)
     }
 
-    forward_methods! {
-        /// Writes fixture bytes through the real storage handler.
-        fn put(path: &Url, data: Bytes, overwrite: bool) -> KernelResult<()> => storage_handler;
+    fn put(&self, path: &Url, data: Bytes, overwrite: bool) -> KernelResult<()> {
+        self.inner.storage_handler().put(path, data, overwrite)
+    }
 
-        /// Retrieves fixture metadata through the real storage handler.
-        fn head(path: &Url) -> KernelResult<FileMeta> => storage_handler;
+    fn head(&self, path: &Url) -> KernelResult<FileMeta> {
+        self.inner.storage_handler().head(path)
+    }
 
-        /// Deletes a fixture file through the real storage handler.
-        fn delete(path: &Url) -> KernelResult<()> => storage_handler;
+    fn delete(&self, path: &Url) -> KernelResult<()> {
+        self.inner.storage_handler().delete(path)
+    }
 
-        /// Copies a fixture file atomically through the real storage handler.
-        fn copy_atomic(src: &Url, dest: &Url) -> KernelResult<()> => storage_handler;
+    fn copy_atomic(&self, src: &Url, dest: &Url) -> KernelResult<()> {
+        self.inner.storage_handler().copy_atomic(src, dest)
     }
 }
 
@@ -222,15 +224,23 @@ impl JsonHandler for RecordingReads {
         }
     }
 
-    forward_methods! {
-        /// Parses fixture data through the real JSON handler.
-        fn parse_json(data: Box<dyn EngineData>, schema: SchemaRef)
-            -> KernelResult<Box<dyn EngineData>> => json_handler;
+    fn parse_json(
+        &self,
+        data: Box<dyn EngineData>,
+        schema: SchemaRef,
+    ) -> KernelResult<Box<dyn EngineData>> {
+        self.inner.json_handler().parse_json(data, schema)
+    }
 
-        /// Writes fixture batches through the real JSON handler.
-        fn write_json_file(
-            path: &Url, data: KernelResultIterator<'_, FilteredEngineData>, overwrite: bool,
-        ) -> KernelResult<FileSize> => json_handler;
+    fn write_json_file(
+        &self,
+        path: &Url,
+        data: KernelResultIterator<'_, FilteredEngineData>,
+        overwrite: bool,
+    ) -> KernelResult<FileSize> {
+        self.inner
+            .json_handler()
+            .write_json_file(path, data, overwrite)
     }
 }
 
@@ -270,11 +280,14 @@ impl ParquetHandler for RecordingReads {
             .read_parquet_footer_with_cancellation(file, token)
     }
 
-    forward_methods! {
-        /// Writes fixture batches through the real Parquet handler.
-        fn write_parquet_file(
-            location: Url, data: KernelResultIteratorStatic<Box<dyn EngineData>>,
-        ) -> KernelResult<FileSize> => parquet_handler;
+    fn write_parquet_file(
+        &self,
+        location: Url,
+        data: KernelResultIteratorStatic<Box<dyn EngineData>>,
+    ) -> KernelResult<FileSize> {
+        self.inner
+            .parquet_handler()
+            .write_parquet_file(location, data)
     }
 }
 
@@ -383,7 +396,7 @@ fn engine_reads_inherit_scope_and_explicit_tokens_override_it(
     if cancelled {
         reads.token.cancel();
     }
-    let engine = KernelEngine::new(&reads.engine(), reads.token.clone());
+    let engine = CancellableEngine::new(&reads.engine(), reads.token.clone());
     let result = start_read(&engine, read, api, None)
         .and_then(|mut iter| iter.next().expect("fixture must produce a result"));
     if cancelled {
@@ -394,7 +407,7 @@ fn engine_reads_inherit_scope_and_explicit_tokens_override_it(
     assert_eq!(*reads.events.lock().unwrap(), [read]);
 
     let explicit = RecordingReads::new(None);
-    let engine = KernelEngine::new(
+    let engine = CancellableEngine::new(
         &explicit.engine(),
         Arc::new(TestCancellationToken::cancelled()),
     );
@@ -419,7 +432,7 @@ fn iterators_keep_scope_after_engine_is_dropped(
 ) {
     let token = Arc::new(TestCancellationToken::default());
     let mut iter = {
-        let engine = KernelEngine::new(&SyncEngine::new(), token.clone());
+        let engine = CancellableEngine::new(&SyncEngine::new(), token.clone());
         start_read(&engine, read, ReadApi::Plain, None).unwrap()
     };
     if cancel {
@@ -458,7 +471,7 @@ fn unscoped_engine_reads_pass_none(
 fn builder_token_overrides_bound_read_token() {
     let reads = RecordingReads::new(None);
     let original = reads.engine();
-    let engine = KernelEngine::new(&original, Arc::new(TestCancellationToken::cancelled()));
+    let engine = CancellableEngine::new(&original, Arc::new(TestCancellationToken::cancelled()));
     assert!(Arc::ptr_eq(
         &engine.evaluation_handler(),
         &original.evaluation_handler()
@@ -477,7 +490,7 @@ fn builder_token_overrides_bound_read_token() {
 #[test]
 fn metered_engine_preserves_operation_token() {
     let token = Arc::new(TestCancellationToken::default());
-    let engine = MeteredDeltaEngine::new(Arc::new(KernelEngine::new(
+    let engine = MeteredDeltaEngine::new(Arc::new(CancellableEngine::new(
         &SyncEngine::new(),
         token.clone(),
     )));
@@ -499,12 +512,12 @@ fn cancelled_snapshot_reports_correlated_failure_with_metered_handlers(
     let reads = RecordingReads::new(Some(read));
     let original = reads.engine();
     let engine: Box<dyn Engine> = if meter_outside {
-        Box::new(MeteredDeltaEngine::new(Arc::new(KernelEngine::new(
+        Box::new(MeteredDeltaEngine::new(Arc::new(CancellableEngine::new(
             &original,
             reads.token.clone(),
         ))))
     } else {
-        Box::new(KernelEngine::new(
+        Box::new(CancellableEngine::new(
             &MeteredDeltaEngine::new(Arc::new(original)),
             reads.token.clone(),
         ))
@@ -553,8 +566,8 @@ fn cancelled_snapshot_reports_correlated_failure_with_metered_handlers(
 fn nested_reads_override_tokens_but_head_checks_each_wrapper_and_writes_stay_unscoped() {
     let engine = SyncEngine::new();
     let cancelled: CancellationTokenRef = Arc::new(TestCancellationToken::cancelled());
-    let cancelled_engine = KernelEngine::new(&engine, cancelled);
-    let rebound_engine = KernelEngine::new(
+    let cancelled_engine = CancellableEngine::new(&engine, cancelled);
+    let rebound_engine = CancellableEngine::new(
         &cancelled_engine,
         Arc::new(TestCancellationToken::default()),
     );
@@ -570,7 +583,7 @@ fn nested_reads_override_tokens_but_head_checks_each_wrapper_and_writes_stay_uns
         .storage_handler()
         .put(&path, Bytes::from_static(b"data"), false)
         .unwrap();
-    let live_engine = KernelEngine::new(&engine, Arc::new(TestCancellationToken::default()));
+    let live_engine = CancellableEngine::new(&engine, Arc::new(TestCancellationToken::default()));
     let metadata = live_engine.storage_handler().head(&path).unwrap();
     assert_eq!(metadata.location, path);
     assert_eq!(metadata.size, 4);
@@ -603,7 +616,7 @@ fn parsing_and_writes_ignore_read_cancellation(#[values(false, true)] cancelled:
     if cancelled {
         token.cancel();
     }
-    let engine = KernelEngine::new(&original, token);
+    let engine = CancellableEngine::new(&original, token);
     let schema = schema_ref! { nullable "id": INTEGER };
     let data = || {
         engine
@@ -684,7 +697,7 @@ fn snapshot_reads_keep_builder_token(
     let reads = RecordingReads::new(cancel.then_some(read));
     let path = format!("tests/data/{table}");
     let original = reads.engine();
-    let scoped = KernelEngine::new(&original, reads.token.clone());
+    let scoped = CancellableEngine::new(&original, reads.token.clone());
     let engine: &dyn Engine = if bind_in_builder { &original } else { &scoped };
     let token = bind_in_builder.then(|| reads.token.clone() as CancellationTokenRef);
     let result = if incremental {
@@ -957,7 +970,7 @@ fn post_build_metadata_reads_inherit_operation_token(
     .unwrap_committed();
     let mut reads = RecordingReads::new(None);
     Arc::get_mut(&mut reads).unwrap().inner = Arc::new(original);
-    let engine = KernelEngine::new(&reads.engine(), reads.token.clone());
+    let engine = CancellableEngine::new(&reads.engine(), reads.token.clone());
     let snapshot = Snapshot::builder_for("memory:///").build(&engine).unwrap();
     assert!(snapshot.crc_at_version().is_none());
     reads.events.lock().unwrap().clear();
@@ -999,7 +1012,7 @@ fn declarative_replay_does_not_use_handler_cancellation() {
         .build(&engine)
         .unwrap();
     let token: CancellationTokenRef = Arc::new(TestCancellationToken::cancelled());
-    let engine = KernelEngine::new(&engine, token);
+    let engine = CancellableEngine::new(&engine, token);
     let resolution = snapshot
         .log_segment()
         .read_protocol_metadata_opt(&engine, None)
