@@ -44,8 +44,8 @@ macro_rules! require {
 /// NOTE: this [`Committer`] requires a multi-threaded tokio runtime. That is, whatever
 /// implementation consumes the Committer to commit to the table, must call `commit` from within a
 /// multi-threaded tokio runtime context. Since the default engine uses tokio, this is compatible,
-/// but must ensure that the multi-threaded runtime is used.
-/// This applies to both `commit` and `commit_declarative`.
+/// but must ensure that the multi-threaded runtime is used. This applies to both `commit` and
+/// `commit_declarative`.
 #[derive(Debug, Clone)]
 pub struct UCCommitter<C: UpdateTableClient> {
     update_table_client: Arc<C>,
@@ -263,13 +263,14 @@ impl<C: UpdateTableClient + 'static> Committer for UCCommitter<C> {
     ) -> KernelResult<CommitResponse> {
         if commit_metadata.version() == 0 {
             return self.commit_version_0(&commit_metadata, |path| {
-                let size = engine
-                    .json_handler()
-                    .write_json_file(path, Box::new(actions), false)?;
+                let file_size =
+                    engine
+                        .json_handler()
+                        .write_json_file(path, Box::new(actions), false)?;
                 Ok(FileMeta::new(
                     path.clone(),
                     commit_metadata.in_commit_timestamp(),
-                    size,
+                    file_size,
                 ))
             });
         }

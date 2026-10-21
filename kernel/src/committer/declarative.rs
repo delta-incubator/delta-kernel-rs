@@ -74,16 +74,18 @@ impl crate::RowVisitor for FileMetaVisitor {
     fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> KernelResult<()> {
         for row in 0..row_count {
             if self.file_meta.is_some() {
-                return Err(KernelError::generic(
+                return Err(KernelError::internal_error(
                     "Commit write returned multiple file metadata rows",
                 ));
             }
             let location: String = getters[0].get(row, "location")?;
-            let location = Url::parse(&location)
-                .map_err(|err| KernelError::generic(format!("Invalid written file URL: {err}")))?;
+            let location = Url::parse(&location).map_err(|err| {
+                KernelError::internal_error(format!("Invalid written file URL: {err}"))
+            })?;
             let size: i64 = getters[1].get(row, "size")?;
-            let size = u64::try_from(size)
-                .map_err(|_| KernelError::generic("Commit write returned negative file size"))?;
+            let size = u64::try_from(size).map_err(|_| {
+                KernelError::internal_error("Commit write returned negative file size")
+            })?;
             let last_modified: i64 = getters[2].get(row, "last_modified")?;
             self.file_meta = Some(FileMeta::new(location, last_modified, size));
         }
