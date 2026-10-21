@@ -245,7 +245,6 @@ pub(super) struct ContentTreeNodeEntry {
     #[field_id = 150]
     pub(crate) manifest_info: Option<ManifestInfo>,
 
-    /// Location of the data file if the content_type is  PositionDeletes
     /// Location of affiliated data manifest if content_type is or DeleteManifest or `None` if
     /// delete manifest is unaffiliated. TODO: place holder for referenced file which is no longer
     /// necessary. #[field_id = 143]
@@ -306,8 +305,6 @@ pub(crate) struct ColumnFile {
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum DataContentType {
     Data = 0,
-    PositionDeletes = 1,
-    EqualityDeletes = 2,
     // Types below are only allowed in the root
     DataManifest = 3,   // manifest of data files with inline DV info
     DeleteManifest = 4, // kept for backwards compat reading only
@@ -318,8 +315,6 @@ impl DataContentType {
     pub(crate) fn try_from_repr(value: i32) -> KernelResult<Self> {
         match value {
             0 => Ok(Self::Data),
-            1 => Ok(Self::PositionDeletes),
-            2 => Ok(Self::EqualityDeletes),
             3 => Ok(Self::DataManifest),
             4 => Ok(Self::DeleteManifest),
             other => Err(KernelError::generic(format!(
@@ -535,8 +530,6 @@ mod tests {
 
     #[rstest]
     #[case(0, DataContentType::Data)]
-    #[case(1, DataContentType::PositionDeletes)]
-    #[case(2, DataContentType::EqualityDeletes)]
     #[case(3, DataContentType::DataManifest)]
     #[case(4, DataContentType::DeleteManifest)]
     fn data_content_type_try_from_repr_roundtrips(
@@ -548,6 +541,8 @@ mod tests {
     }
 
     #[rstest]
+    #[case::position_deletes(1)]
+    #[case::equality_deletes(2)]
     #[case(5)]
     #[case(-1)]
     #[case(i32::MAX)]

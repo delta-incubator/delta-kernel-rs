@@ -107,10 +107,10 @@ impl EntryConverter {
     ///
     /// # Errors
     /// Returns an error if an entry carries an unknown content-type or tracking-status value, if a
-    /// delete entry (position/equality deletes or a delete manifest) is live, if a selected (live
-    /// `Data`) entry is not Parquet, has a non-zero partition spec id, or carries a deletion
-    /// vector, column files, or a `modifiedSnapshotId` (none yet supported by the read path),
-    /// if the evaluator fails to evaluate, or if the selection vector length exceeds the batch.
+    /// delete manifest entry is live, if a selected (live `Data`) entry is not Parquet, has a
+    /// non-zero partition spec id, or carries a deletion vector, column files, or a
+    /// `modifiedSnapshotId` (none yet supported by the read path), if the evaluator fails to
+    /// evaluate, or if the selection vector length exceeds the batch.
     pub(crate) fn convert(&self, entries: &dyn EngineData) -> KernelResult<FilteredEngineData> {
         let mut selector = AddSelectionVisitor::default();
         selector.visit_rows_of(entries)?;
@@ -333,8 +333,7 @@ fn partition_values_map_type() -> KernelResult<MapType> {
 ///
 /// Fails closed on entries the read path cannot yet represent as an `Add`, rather than silently
 /// dropping or mis-translating them:
-/// - a live delete entry (position/equality deletes or a delete manifest), since dropping it would
-///   read the rows it deletes back as live;
+/// - a live delete manifest entry, since dropping it would read the rows it deletes back as live;
 /// - a selected entry that is not Parquet or has a non-zero partition spec id;
 /// - a selected entry that carries a deletion vector: the read path does not yet populate
 ///   `Add.deletionVector`, so a DV-less `Add` would read its logically deleted rows back as live;
@@ -385,9 +384,7 @@ impl RowVisitor for AddSelectionVisitor {
             let selected = match content_type {
                 DataContentType::Data => status.is_live(),
                 DataContentType::DataManifest => false,
-                DataContentType::PositionDeletes
-                | DataContentType::EqualityDeletes
-                | DataContentType::DeleteManifest => {
+                DataContentType::DeleteManifest => {
                     if status.is_live() {
                         return Err(KernelError::unsupported(format!(
                             "AMT content-tree read path does not yet support live \
@@ -834,20 +831,14 @@ mod tests {
     }
 
     #[rstest]
-    fn live_delete_entry_errors(
-        #[values(
-            DataContentType::PositionDeletes,
-            DataContentType::EqualityDeletes,
-            DataContentType::DeleteManifest
-        )]
-        content_type: DataContentType,
+    fn live_delete_manifest_entry_errors(
         #[values(TrackingStatus::Existing, TrackingStatus::Added)] status: TrackingStatus,
     ) {
         let mut entry = added_data_entry("deletes.parquet", 1, 1, 0, 0);
-        entry.content_type = content_type;
+        entry.content_type = DataContentType::DeleteManifest;
         entry.tracking.status = status;
         let result = convert(&[entry]);
-        assert_result_error_with_message(result, &format!("live {content_type:?} entry"));
+        assert_result_error_with_message(result, "live DeleteManifest entry");
     }
 
     /// A dropped entry is not validated: an unsupported file format, partition spec, or deletion
@@ -856,8 +847,6 @@ mod tests {
     fn dropped_entry_with_unsupported_fields_is_not_rejected(
         #[values(
             DataContentType::Data,
-            DataContentType::PositionDeletes,
-            DataContentType::EqualityDeletes,
             DataContentType::DataManifest,
             DataContentType::DeleteManifest
         )]
@@ -1232,8 +1221,6 @@ mod tests {
 
     #[rstest]
     #[case::data_manifest(DataContentType::DataManifest)]
-    #[case::position_deletes(DataContentType::PositionDeletes)]
-    #[case::equality_deletes(DataContentType::EqualityDeletes)]
     #[case::delete_manifest(DataContentType::DeleteManifest)]
     fn leaf_non_data_entry_errors(#[case] content_type: DataContentType) {
         let engine = SyncEngine::new();
