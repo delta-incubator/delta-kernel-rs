@@ -793,16 +793,20 @@ jobs:
             exit 1
           fi
 
-          gh api "repos/${REPO}/compare/${base_sha}...${head_sha}" \
+          review_base_sha="$(python3 .github/omnigent/review_scope.py \
+            --metadata /tmp/pr_meta.json --repository "$REPO")"
+          gh api "repos/${REPO}/compare/${review_base_sha}...${head_sha}" \
             -H "Accept: application/vnd.github.v3.diff" \
             > /tmp/pr_diff.txt
 
           echo "base_sha=$base_sha" >> "$GITHUB_OUTPUT"
+          echo "review_base_sha=$review_base_sha" >> "$GITHUB_OUTPUT"
           echo "head_sha=$head_sha" >> "$GITHUB_OUTPUT"
           echo "head_repo=$head_repo" >> "$GITHUB_OUTPUT"
           review_marker="$(openssl rand -hex 16)"
           echo "review_marker=$review_marker" >> "$GITHUB_OUTPUT"
           export REVIEW_MARKER="$review_marker"
+          export REVIEW_BASE_SHA="$review_base_sha"
 
           python3 -u <<'PYEOF'
           import json
@@ -827,6 +831,7 @@ jobs:
           max_prompt_bytes = 120_000
           output_mode = os.environ["OUTPUT_MODE"]
           review_marker = os.environ["REVIEW_MARKER"]
+          review_base_sha = os.environ["REVIEW_BASE_SHA"]
           start_marker = f"<!-- AI_REVIEW_START_{review_marker} -->"
           end_marker = f"<!-- AI_REVIEW_END_{review_marker} -->"
           output_contract = (
@@ -872,6 +877,13 @@ jobs:
           known_issue_policy = KNOWN_ISSUE_POLICY.strip()
           previous_review_policy = PREVIOUS_REVIEW_POLICY.strip()
           pr_description_policy = PR_DESCRIPTION_POLICY.strip()
+          review_scope = (
+              "## Review scope\n"
+              "Review only defects introduced by the supplied diff. Its review base may be a "
+              "stack parent even when the GitHub PR targets the default branch. Inherited "
+              "changes from ancestor PRs and other code outside this diff are context only, "
+              "including unchanged code in files this PR modifies.\n"
+          )
 
           # The parent prompt uses history during consolidation; reviewer_context
           # carries the same bounded text to each independently prompted child.
@@ -881,10 +893,10 @@ jobs:
               "## PR Metadata\n"
               f"- **Title:** {meta['title']}\n"
               f"- **Branch:** {meta['head']['ref']} -> {meta['base']['ref']}\n"
-              f"- **Base SHA:** {meta['base']['sha']}\n"
-              f"- **Head SHA:** {meta['head']['sha']}\n"
-              f"- **Stats:** +{meta['additions']} / -{meta['deletions']} across "
-              f"{meta['changed_files']} file(s)\n\n"
+              f"- **GitHub base SHA:** {meta['base']['sha']}\n"
+              f"- **Review base SHA:** {review_base_sha}\n"
+              f"- **Head SHA:** {meta['head']['sha']}\n\n"
+              f"{review_scope}\n"
               "## PR Description\n"
               f"{body}\n\n"
               "## PR Diff\n\n"
@@ -899,9 +911,11 @@ jobs:
           ## PR Metadata
           - **Title:** {meta['title']}
           - **Branch:** {meta['head']['ref']} -> {meta['base']['ref']}
-          - **Base SHA:** {meta['base']['sha']}
+          - **GitHub base SHA:** {meta['base']['sha']}
+          - **Review base SHA:** {review_base_sha}
           - **Head SHA:** {meta['head']['sha']}
-          - **Stats:** +{meta['additions']} / -{meta['deletions']} across {meta['changed_files']} file(s)
+
+          {review_scope}
 
           ## PR Description
           {body}
