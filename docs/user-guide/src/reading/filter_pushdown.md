@@ -150,8 +150,8 @@ Pass the predicate to `ScanBuilder::with_predicate`:
 # use delta_kernel_default_engine::DefaultEngine;
 # use delta_kernel_default_engine::storage::store_from_url;
 # use delta_kernel::expressions::{col, lit, Predicate};
-# use delta_kernel::{DeltaResult, Snapshot};
-# fn example() -> DeltaResult<()> {
+# use delta_kernel::{KernelResult, Snapshot};
+# fn example() -> KernelResult<()> {
 # let url = delta_kernel::try_parse_uri("/tmp/table")?;
 # let store = store_from_url(&url)?;
 # let engine = DefaultEngine::builder(store).build();
@@ -229,8 +229,8 @@ statistics altogether. This avoids the cost of parsing statistics from checkpoin
 # use delta_kernel_default_engine::DefaultEngine;
 # use delta_kernel_default_engine::storage::store_from_url;
 # use delta_kernel::scan::StatsOptions;
-# use delta_kernel::{DeltaResult, Snapshot};
-# fn example() -> DeltaResult<()> {
+# use delta_kernel::{KernelResult, Snapshot};
+# fn example() -> KernelResult<()> {
 # let url = delta_kernel::try_parse_uri("/tmp/table")?;
 # let store = store_from_url(&url)?;
 # let engine = DefaultEngine::builder(store).build();
@@ -265,8 +265,8 @@ scan metadata, pass `StatsOptions::all_struct()` (structured stats without JSON 
 # use delta_kernel_default_engine::DefaultEngine;
 # use delta_kernel_default_engine::storage::store_from_url;
 # use delta_kernel::scan::StatsOptions;
-# use delta_kernel::{DeltaResult, Snapshot};
-# fn example() -> DeltaResult<()> {
+# use delta_kernel::{KernelResult, Snapshot};
+# fn example() -> KernelResult<()> {
 # let url = delta_kernel::try_parse_uri("/tmp/table")?;
 # let store = store_from_url(&url)?;
 # let engine = DefaultEngine::builder(store).build();
@@ -299,10 +299,10 @@ To receive statistics for only a subset of columns, pass `StatsOptions::struct_c
 # extern crate delta_kernel_default_engine;
 # use delta_kernel_default_engine::DefaultEngine;
 # use delta_kernel_default_engine::storage::store_from_url;
-# use delta_kernel::expressions::ColumnName;
+# use delta_kernel::expressions::column_name;
 # use delta_kernel::scan::StatsOptions;
-# use delta_kernel::{DeltaResult, Snapshot};
-# fn example() -> DeltaResult<()> {
+# use delta_kernel::{KernelResult, Snapshot};
+# fn example() -> KernelResult<()> {
 # let url = delta_kernel::try_parse_uri("/tmp/table")?;
 # let store = store_from_url(&url)?;
 # let engine = DefaultEngine::builder(store).build();
@@ -310,15 +310,16 @@ To receive statistics for only a subset of columns, pass `StatsOptions::struct_c
 let scan = snapshot
     .scan_builder()
     .with_stats(StatsOptions::struct_columns(vec![
-        ColumnName::new(["age"]),
-        ColumnName::new(["city"]),
+        column_name!("age"),
+        column_name!("city"),
     ]))
     .build()?;
 # Ok(())
 # }
 ```
 
-Only the named columns appear in `stats_parsed`.
+Only the named data columns appear in `stats_parsed`. Kernel may read additional statistics for
+data skipping, but it removes predicate-only fields from scan metadata before returning it.
 
 ### Choosing the right mode
 

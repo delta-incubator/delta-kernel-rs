@@ -1,14 +1,14 @@
 //! Commit metadata types for the committer module.
 
 use std::collections::HashMap;
-#[cfg(any(test, feature = "test-utils"))]
-use std::sync::Arc;
 
 use url::Url;
 
 use crate::actions::{DomainMetadata, Metadata, Protocol};
 use crate::path::LogRoot;
-use crate::{DeltaResult, Version};
+#[cfg(any(test, feature = "test-utils"))]
+use crate::schema::schema_ref;
+use crate::{KernelResult, Version};
 
 /// The type of commit operation being performed. This communicates to the committer whether this
 /// is a table creation or a write to an existing table, and whether the table is catalog-managed.
@@ -53,7 +53,7 @@ impl CommitType {
 /// The protocol and metadata state for this commit. Groups the read snapshot state (if any)
 /// and the new state being committed (if any).
 #[derive(Debug)]
-pub(crate) struct CommitProtocolMetadata {
+pub struct CommitProtocolMetadata {
     /// Existing table protocol from read snapshot. `None` for create-table.
     read_protocol: Option<Protocol>,
     /// Existing table metadata from read snapshot. `None` for create-table.
@@ -70,19 +70,19 @@ impl CommitProtocolMetadata {
         read_metadata: Option<Metadata>,
         new_protocol: Option<Protocol>,
         new_metadata: Option<Metadata>,
-    ) -> DeltaResult<Self> {
+    ) -> KernelResult<Self> {
         if read_protocol.is_some() != read_metadata.is_some() {
-            return Err(crate::Error::generic(
+            return Err(crate::KernelError::generic(
                 "read_protocol and read_metadata must both be present or both be absent",
             ));
         }
         if read_protocol.is_none() && new_protocol.is_none() {
-            return Err(crate::Error::generic(
+            return Err(crate::KernelError::generic(
                 "CommitProtocolMetadata requires at least one protocol (read or new)",
             ));
         }
         if read_metadata.is_none() && new_metadata.is_none() {
-            return Err(crate::Error::generic(
+            return Err(crate::KernelError::generic(
                 "CommitProtocolMetadata requires at least one metadata (read or new)",
             ));
         }
@@ -92,6 +92,26 @@ impl CommitProtocolMetadata {
             new_protocol,
             new_metadata,
         })
+    }
+
+    /// Returns the protocol read by the transaction, or `None` for table creation.
+    pub fn read_protocol(&self) -> Option<&Protocol> {
+        self.read_protocol.as_ref()
+    }
+
+    /// Returns the metadata read by the transaction, or `None` for table creation.
+    pub fn read_metadata(&self) -> Option<&Metadata> {
+        self.read_metadata.as_ref()
+    }
+
+    /// Returns the protocol written by the transaction, if it changed.
+    pub fn new_protocol(&self) -> Option<&Protocol> {
+        self.new_protocol.as_ref()
+    }
+
+    /// Returns the metadata written by the transaction, if it changed.
+    pub fn new_metadata(&self) -> Option<&Metadata> {
+        self.new_metadata.as_ref()
     }
 }
 
@@ -143,7 +163,7 @@ impl CommitMetadata {
 
     /// The commit path is the absolute path (e.g. s3://bucket/table/_delta_log/{version}.json) to
     /// the published delta file for this commit.
-    pub fn published_commit_path(&self) -> DeltaResult<Url> {
+    pub fn published_commit_path(&self) -> KernelResult<Url> {
         self.log_root
             .new_commit_path(self.version)
             .map(|p| p.location)
@@ -151,7 +171,7 @@ impl CommitMetadata {
 
     /// The staged commit path is the absolute path (e.g.
     /// s3://bucket/table/_delta_log/{version}.{uuid}.json) to the staged commit file.
-    pub fn staged_commit_path(&self) -> DeltaResult<Url> {
+    pub fn staged_commit_path(&self) -> KernelResult<Url> {
         self.log_root
             .new_staged_commit_path(self.version)
             .map(|p| p.location)
@@ -183,15 +203,25 @@ impl CommitMetadata {
         self.log_root.table_root()
     }
 
+    /// Returns the protocol and metadata state read and written by this transaction.
+    pub fn protocol_metadata(&self) -> &CommitProtocolMetadata {
+        &self.protocol_metadata
+    }
+
+    /// Returns the domain metadata additions and removals written by this transaction.
+    pub fn domain_metadata_changes(&self) -> &[DomainMetadata] {
+        &self.domain_metadata_changes
+    }
+
     /// Returns the effective protocol for this commit. Prefers new_protocol (create-table / ALTER
     /// TABLE), falling back to the read snapshot's protocol.
-    pub(crate) fn effective_protocol(&self) -> DeltaResult<&Protocol> {
+    pub fn effective_protocol(&self) -> KernelResult<&Protocol> {
         let pm = &self.protocol_metadata;
         pm.new_protocol
             .as_ref()
             .or(pm.read_protocol.as_ref())
             .ok_or_else(|| {
-                crate::Error::internal_error(
+                crate::KernelError::internal_error(
                     "CommitProtocolMetadata should have at least one protocol",
                 )
             })
@@ -199,13 +229,13 @@ impl CommitMetadata {
 
     /// Returns the effective metadata for this commit. Prefers new_metadata (create-table / ALTER
     /// TABLE), falling back to the read snapshot's metadata.
-    pub(crate) fn effective_metadata(&self) -> DeltaResult<&Metadata> {
+    pub fn effective_metadata(&self) -> KernelResult<&Metadata> {
         let pm = &self.protocol_metadata;
         pm.new_metadata
             .as_ref()
             .or(pm.read_metadata.as_ref())
             .ok_or_else(|| {
-                crate::Error::internal_error(
+                crate::KernelError::internal_error(
                     "CommitProtocolMetadata should have at least one metadata",
                 )
             })
@@ -254,7 +284,7 @@ impl CommitMetadata {
     ///
     /// Uses a default modern protocol (empty features) and empty metadata.
     #[cfg(any(test, feature = "test-utils"))]
-    pub fn new_unchecked(table_root: Url, version: Version) -> DeltaResult<Self> {
+    pub fn new_unchecked(table_root: Url, version: Version) -> KernelResult<Self> {
         Self::new_unchecked_with(table_root, version, vec![], vec![], HashMap::new())
     }
 
@@ -266,10 +296,10 @@ impl CommitMetadata {
         reader_features: Vec<&str>,
         writer_features: Vec<&str>,
         configuration: HashMap<String, String>,
-    ) -> DeltaResult<Self> {
+    ) -> KernelResult<Self> {
         let log_root = crate::path::LogRoot::new(table_root)?;
         let protocol = Protocol::try_new_modern(reader_features, writer_features)?;
-        let schema = Arc::new(crate::schema::StructType::new_unchecked(vec![]));
+        let schema = schema_ref! {};
         let metadata = Metadata::try_new(None, None, schema, vec![], 0, configuration)?;
         Ok(Self::new(
             log_root,
@@ -332,8 +362,6 @@ pub enum CommitResponse {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use url::Url;
 
     use super::*;
@@ -347,7 +375,7 @@ mod tests {
         let ts = 1234;
         let max_published_version = Some(42);
         let protocol = Protocol::try_new_modern(Vec::<&str>::new(), Vec::<&str>::new()).unwrap();
-        let schema = Arc::new(crate::schema::StructType::new_unchecked(vec![]));
+        let schema = schema_ref! {};
         let metadata = Metadata::try_new(None, None, schema, vec![], 0, HashMap::new()).unwrap();
 
         let commit_metadata = CommitMetadata::new(
@@ -365,6 +393,17 @@ mod tests {
         // in_commit_timestamp
         assert_eq!(commit_metadata.in_commit_timestamp(), 1234);
         assert_eq!(commit_metadata.max_published_version(), Some(42));
+        assert!(commit_metadata
+            .protocol_metadata()
+            .read_protocol()
+            .is_some());
+        assert!(commit_metadata
+            .protocol_metadata()
+            .read_metadata()
+            .is_some());
+        assert!(commit_metadata.protocol_metadata().new_protocol().is_none());
+        assert!(commit_metadata.protocol_metadata().new_metadata().is_none());
+        assert!(commit_metadata.domain_metadata_changes().is_empty());
 
         // published commit path
         let published_path = commit_metadata.published_commit_path().unwrap();
@@ -394,5 +433,42 @@ mod tests {
             .and_then(|s| s.strip_suffix(".json"))
             .expect("Staged path should have expected format");
         uuid::Uuid::parse_str(uuid_str).expect("Staged path should contain a valid UUID");
+    }
+
+    #[test]
+    fn test_commit_protocol_metadata_changes() {
+        let protocol = Protocol::try_new_modern(Vec::<&str>::new(), Vec::<&str>::new()).unwrap();
+        let metadata =
+            Metadata::try_new(None, None, schema_ref! {}, vec![], 0, HashMap::new()).unwrap();
+        let protocol_metadata = CommitProtocolMetadata::try_new(
+            Some(protocol.clone()),
+            Some(metadata.clone()),
+            Some(protocol),
+            Some(metadata),
+        )
+        .unwrap();
+
+        assert!(protocol_metadata.read_protocol().is_some());
+        assert!(protocol_metadata.read_metadata().is_some());
+        assert!(protocol_metadata.new_protocol().is_some());
+        assert!(protocol_metadata.new_metadata().is_some());
+
+        let commit_metadata = CommitMetadata::new(
+            LogRoot::new(Url::parse("s3://my-bucket/path/to/table/").unwrap()).unwrap(),
+            1,
+            CommitType::PathBasedWrite,
+            0,
+            Some(0),
+            protocol_metadata,
+            vec![],
+        );
+        assert!(std::ptr::eq(
+            commit_metadata.effective_protocol().unwrap(),
+            commit_metadata.protocol_metadata().new_protocol().unwrap()
+        ));
+        assert!(std::ptr::eq(
+            commit_metadata.effective_metadata().unwrap(),
+            commit_metadata.protocol_metadata().new_metadata().unwrap()
+        ));
     }
 }

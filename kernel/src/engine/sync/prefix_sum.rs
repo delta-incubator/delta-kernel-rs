@@ -6,7 +6,7 @@ use crate::arrow::array::{Array as _, ArrayRef, Int64Array, RecordBatch};
 use crate::arrow::datatypes::Schema as ArrowSchema;
 use crate::engine::arrow_conversion::TryFromKernel as _;
 use crate::plans::ir::nodes::PrefixSum;
-use crate::{DeltaResult, Error};
+use crate::{KernelError, KernelResult};
 
 /// Evaluates a [`PrefixSum`].
 ///
@@ -15,7 +15,7 @@ use crate::{DeltaResult, Error};
 pub(super) fn eval_prefix_sum(
     prefix_sum: &PrefixSum,
     input: &[RecordBatch],
-) -> DeltaResult<Vec<RecordBatch>> {
+) -> KernelResult<Vec<RecordBatch>> {
     let output_schema = Arc::new(ArrowSchema::try_from_kernel(&prefix_sum.schema)?);
     let mut running_total = 0i64;
     let mut output = Vec::with_capacity(input.len());
@@ -25,8 +25,10 @@ pub(super) fn eval_prefix_sum(
         for row_idx in 0..batch.num_rows() {
             if values.is_valid(row_idx) {
                 offsets.push(Some(running_total));
-                running_total = i64::checked_add(running_total, values.value(row_idx))
-                    .ok_or_else(|| Error::generic("SyncPlanExecutor PrefixSum overflowed i64"))?;
+                running_total =
+                    i64::checked_add(running_total, values.value(row_idx)).ok_or_else(|| {
+                        KernelError::generic("SyncPlanExecutor PrefixSum overflowed i64")
+                    })?;
             } else {
                 offsets.push(None);
             }
@@ -53,7 +55,7 @@ mod tests {
     }
 
     /// Prefix-sums `numRecords` of the fixture schema into an appended `offset` column.
-    fn test_eval_prefix_sum(input: &[RecordBatch]) -> DeltaResult<Vec<RecordBatch>> {
+    fn test_eval_prefix_sum(input: &[RecordBatch]) -> KernelResult<Vec<RecordBatch>> {
         let schema = schema_ref! {
             not_null "path": STRING,
             nullable "numRecords": LONG,
@@ -113,13 +115,13 @@ mod tests {
     fn exclusive_prefix_sum(
         #[case] input: Vec<RecordBatch>,
         #[case] expected: &str,
-    ) -> DeltaResult<()> {
+    ) -> KernelResult<()> {
         assert_batches_eq(&test_eval_prefix_sum(&input)?, expected);
         Ok(())
     }
 
     #[test]
-    fn empty_input_yields_empty_output() -> DeltaResult<()> {
+    fn empty_input_yields_empty_output() -> KernelResult<()> {
         assert!(test_eval_prefix_sum(&[])?.is_empty());
         Ok(())
     }

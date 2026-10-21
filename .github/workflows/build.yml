@@ -59,6 +59,50 @@ env:
 # are installed via taiki-e/install-action, which fetches prebuilt binaries.
 
 jobs:
+  benchmark-scripts:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        with:
+          python-version: "3.12"
+      - name: Test benchmark scripts
+        run: python3 -m unittest discover --start-directory benchmarks/ci --pattern 'test_*.py'
+
+  release-tooling:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+      - uses: taiki-e/install-action@7bc99eee1f1b8902a125006cf790a1f4c8461e63 # v2.69.8
+        with:
+          tool: git-cliff
+      - name: Test release tooling
+        run: .github/scripts/test-release.sh
+      - name: Verify pending release changelog
+        if: startsWith(github.head_ref, 'release/') || startsWith(github.ref_name, 'release/')
+        run: ./release.sh verify-changelog
+
+  ai-review-config:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+      - name: Install AI reviewer config test dependencies
+        run: python3 -m pip install --no-deps PyYAML==6.0.3
+      - name: Validate AI reviewer config
+        run: >-
+          python3 -m unittest discover
+          --start-directory .github/omnigent/tests
+          --pattern 'test_*.py'
+
   format:
     runs-on: ubuntu-latest
     steps:
@@ -150,7 +194,7 @@ jobs:
   # enabled, the kernel will be compiled with those features (even if we specify
   # --no-default-features).
   #
-  # To cope with this, we split build/clippy --no-default-features into two runs:
+  # To cope with this, we split build/clippy --no-default-features into separate runs:
   # 1. build/clippy all packages that depend on the kernel with some features enabled:
   #    - acceptance
   #    - test_utils
@@ -161,17 +205,16 @@ jobs:
   #    - read-table-changes
   #    - read-table-multi-threaded
   #    - read-table-single-threaded
-  # 2. build/clippy all packages that only have no-feature kernel dependency
-  #    - delta_kernel
-  #    - delta_kernel_derive
-  #    - delta_kernel_ffi
-  #    - delta_kernel_ffi_macros
+  # 2. build the kernel by itself, so no other selected package can enable kernel features.
+  # 3. build the default engine by itself with defaults off and an explicit Arrow feature.
+  # 4. lint the remaining packages that only have no-feature kernel dependency.
   build:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
         os:
           - macOS-latest
+          - ubuntu-24.04-arm
           - ubuntu-latest
           - windows-latest
     steps:
@@ -188,9 +231,13 @@ jobs:
       - name: build and lint with clippy
         run: cargo clippy --locked --benches --tests --all-features -- -D warnings
       - name: lint without default features - packages which depend on kernel with features enabled
-        run: cargo clippy --locked --workspace --no-default-features --exclude delta_kernel --exclude delta_kernel_ffi --exclude delta_kernel_derive --exclude delta_kernel_ffi_macros -- -D warnings
+        run: cargo clippy-no-default-kernel-dependents
+      - name: check without default features - kernel
+        run: cargo check-no-default-kernel
+      - name: check without default features - default engine
+        run: cargo check-no-default-engine
       - name: lint without default features - packages which don't depend on kernel with features enabled
-        run: cargo clippy --locked --no-default-features --package delta_kernel --package delta_kernel_ffi --package delta_kernel_derive --package delta_kernel_ffi_macros -- -D warnings
+        run: cargo clippy-no-default-kernel-leaves
       - name: check kernel declarative-plans feature-only build
         run: cargo check --locked -p delta_kernel --no-default-features --features declarative-plans,vendored-protoc
       - name: lint kernel declarative-plans feature-only build
@@ -216,6 +263,7 @@ jobs:
       matrix:
         os:
           - macOS-latest
+          - ubuntu-24.04-arm
           - ubuntu-latest
           - windows-latest
         config:
@@ -290,6 +338,7 @@ jobs:
       matrix:
         os:
           - macOS-latest
+          - ubuntu-24.04-arm
           - ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -334,14 +383,14 @@ jobs:
           cargo build --locked
           popd
           pushd ffi
-          cargo build --locked --features default-engine-rustls,test-ffi,tracing,delta-kernel-unity-catalog
+          cargo build --locked --features default-engine-rustls,test-ffi,tracing,delta-kernel-unity-catalog,geo-type-in-dev,udt-in-dev
           popd
       - name: build and run read-table test
         run: |
           pushd ffi/examples/read-table
           mkdir build
           pushd build
-          cmake ..
+          cmake .. -DGEO_TYPE_IN_DEV=ON -DUDT_IN_DEV=ON
           make
           make test
       - name: build and run visit-expression test
@@ -426,7 +475,7 @@ jobs:
         # frequency, so it does not weaken undefined-behavior or data-race detection.
         run: |
           pushd ffi
-          MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-provenance-gc=1000000" cargo miri nextest run --locked --features default-engine-rustls,delta-kernel-unity-catalog,declarative-plans,vendored-protoc --partition slice:${{ matrix.partition }}/3
+          MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-provenance-gc=1000000" cargo miri nextest run --locked --features default-engine-rustls,delta-kernel-unity-catalog,declarative-plans,vendored-protoc,geo-type-in-dev --partition slice:${{ matrix.partition }}/3
 
   coverage:
     runs-on: ubuntu-latest

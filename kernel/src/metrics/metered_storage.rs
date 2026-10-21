@@ -12,7 +12,10 @@ use url::Url;
 
 use crate::metrics::events::{StorageCopyCompleted, StorageListCompleted, StorageReadCompleted};
 use crate::metrics::{emit_storage_span, MetricsIterator};
-use crate::{DeltaResult, FileMeta, FileSlice, StorageHandler};
+use crate::{
+    CancellationTokenRef, FileMeta, FileSlice, KernelResult, KernelResultIteratorStatic,
+    StorageHandler,
+};
 
 /// Decorator over an engine-provided `Arc<dyn StorageHandler>` that emits the kernel's
 /// standard `"storage"` spans on operations that produce metrics. `put`, `head`, and `delete`
@@ -42,10 +45,7 @@ impl std::fmt::Debug for MeteredStorageHandler {
 }
 
 impl StorageHandler for MeteredStorageHandler {
-    fn list_from(
-        &self,
-        path: &Url,
-    ) -> DeltaResult<Box<dyn Iterator<Item = DeltaResult<FileMeta>>>> {
+    fn list_from(&self, path: &Url) -> KernelResult<KernelResultIteratorStatic<FileMeta>> {
         let start = Instant::now();
         let inner = self.inner.list_from(path)?;
         Ok(Box::new(MetricsIterator::<_, FileMeta>::new(
@@ -55,10 +55,24 @@ impl StorageHandler for MeteredStorageHandler {
         )))
     }
 
-    fn read_files(
+    // Forward the token by identity so a caller can still downcast it to recover their own.
+    fn list_from_with_cancellation(
         &self,
-        files: Vec<FileSlice>,
-    ) -> DeltaResult<Box<dyn Iterator<Item = DeltaResult<Bytes>>>> {
+        path: &Url,
+        cancellation_token: Option<CancellationTokenRef>,
+    ) -> KernelResult<KernelResultIteratorStatic<FileMeta>> {
+        let start = Instant::now();
+        let inner = self
+            .inner
+            .list_from_with_cancellation(path, cancellation_token)?;
+        Ok(Box::new(MetricsIterator::<_, FileMeta>::new(
+            inner,
+            StorageListCompleted::NAME,
+            start,
+        )))
+    }
+
+    fn read_files(&self, files: Vec<FileSlice>) -> KernelResult<KernelResultIteratorStatic<Bytes>> {
         let start = Instant::now();
         let inner = self.inner.read_files(files)?;
         Ok(Box::new(MetricsIterator::<_, Bytes>::new(
@@ -68,22 +82,38 @@ impl StorageHandler for MeteredStorageHandler {
         )))
     }
 
-    fn copy_atomic(&self, src: &Url, dest: &Url) -> DeltaResult<()> {
+    fn read_files_with_cancellation(
+        &self,
+        files: Vec<FileSlice>,
+        cancellation_token: Option<CancellationTokenRef>,
+    ) -> KernelResult<KernelResultIteratorStatic<Bytes>> {
+        let start = Instant::now();
+        let inner = self
+            .inner
+            .read_files_with_cancellation(files, cancellation_token)?;
+        Ok(Box::new(MetricsIterator::<_, Bytes>::new(
+            inner,
+            StorageReadCompleted::NAME,
+            start,
+        )))
+    }
+
+    fn copy_atomic(&self, src: &Url, dest: &Url) -> KernelResult<()> {
         let start = Instant::now();
         let result = self.inner.copy_atomic(src, dest);
         emit_storage_span(StorageCopyCompleted::NAME, start.elapsed(), 0, 0);
         result
     }
 
-    fn put(&self, path: &Url, data: Bytes, overwrite: bool) -> DeltaResult<()> {
+    fn put(&self, path: &Url, data: Bytes, overwrite: bool) -> KernelResult<()> {
         self.inner.put(path, data, overwrite)
     }
 
-    fn head(&self, path: &Url) -> DeltaResult<FileMeta> {
+    fn head(&self, path: &Url) -> KernelResult<FileMeta> {
         self.inner.head(path)
     }
 
-    fn delete(&self, path: &Url) -> DeltaResult<()> {
+    fn delete(&self, path: &Url) -> KernelResult<()> {
         self.inner.delete(path)
     }
 }
@@ -104,10 +134,7 @@ mod tests {
     }
 
     impl StorageHandler for StubStorageHandler {
-        fn list_from(
-            &self,
-            _path: &Url,
-        ) -> DeltaResult<Box<dyn Iterator<Item = DeltaResult<FileMeta>>>> {
+        fn list_from(&self, _path: &Url) -> KernelResult<KernelResultIteratorStatic<FileMeta>> {
             let results: Vec<_> = self.list_results.iter().cloned().map(Ok).collect();
             Ok(Box::new(results.into_iter()))
         }
@@ -115,24 +142,24 @@ mod tests {
         fn read_files(
             &self,
             _files: Vec<FileSlice>,
-        ) -> DeltaResult<Box<dyn Iterator<Item = DeltaResult<Bytes>>>> {
+        ) -> KernelResult<KernelResultIteratorStatic<Bytes>> {
             let results: Vec<_> = self.read_results.iter().cloned().map(Ok).collect();
             Ok(Box::new(results.into_iter()))
         }
 
-        fn copy_atomic(&self, _src: &Url, _dest: &Url) -> DeltaResult<()> {
+        fn copy_atomic(&self, _src: &Url, _dest: &Url) -> KernelResult<()> {
             Ok(())
         }
 
-        fn put(&self, _path: &Url, _data: Bytes, _overwrite: bool) -> DeltaResult<()> {
+        fn put(&self, _path: &Url, _data: Bytes, _overwrite: bool) -> KernelResult<()> {
             Ok(())
         }
 
-        fn head(&self, _path: &Url) -> DeltaResult<FileMeta> {
+        fn head(&self, _path: &Url) -> KernelResult<FileMeta> {
             unreachable!("not exercised in these tests")
         }
 
-        fn delete(&self, _path: &Url) -> DeltaResult<()> {
+        fn delete(&self, _path: &Url) -> KernelResult<()> {
             Ok(())
         }
     }
@@ -231,5 +258,121 @@ mod tests {
         });
         let once: Arc<dyn StorageHandler> = Arc::new(MeteredStorageHandler::new(inner));
         let _twice = MeteredStorageHandler::new(once);
+    }
+
+    /// Records the token it is handed, so a test can check what survived the metered wrapper.
+    #[derive(Default)]
+    struct TokenCapturingStorageHandler {
+        seen: std::sync::Mutex<Option<CancellationTokenRef>>,
+    }
+
+    impl StorageHandler for TokenCapturingStorageHandler {
+        fn list_from(&self, _path: &Url) -> KernelResult<KernelResultIteratorStatic<FileMeta>> {
+            Ok(Box::new(std::iter::empty()))
+        }
+
+        fn list_from_with_cancellation(
+            &self,
+            _path: &Url,
+            cancellation_token: Option<CancellationTokenRef>,
+        ) -> KernelResult<KernelResultIteratorStatic<FileMeta>> {
+            *self.seen.lock().unwrap() = cancellation_token;
+            Ok(Box::new(std::iter::empty()))
+        }
+
+        fn read_files(
+            &self,
+            _files: Vec<FileSlice>,
+        ) -> KernelResult<KernelResultIteratorStatic<Bytes>> {
+            Ok(Box::new(std::iter::empty()))
+        }
+
+        fn read_files_with_cancellation(
+            &self,
+            _files: Vec<FileSlice>,
+            cancellation_token: Option<CancellationTokenRef>,
+        ) -> KernelResult<KernelResultIteratorStatic<Bytes>> {
+            *self.seen.lock().unwrap() = cancellation_token;
+            Ok(Box::new(std::iter::empty()))
+        }
+
+        fn copy_atomic(&self, _src: &Url, _dest: &Url) -> KernelResult<()> {
+            Ok(())
+        }
+
+        fn put(&self, _path: &Url, _data: Bytes, _overwrite: bool) -> KernelResult<()> {
+            Ok(())
+        }
+
+        fn head(&self, _path: &Url) -> KernelResult<FileMeta> {
+            unreachable!("not exercised in these tests")
+        }
+
+        fn delete(&self, _path: &Url) -> KernelResult<()> {
+            Ok(())
+        }
+    }
+
+    // The wrapper forwards to the inner cancellation-aware methods and passes the token through by
+    // identity, so a caller can still downcast it to recover what it supplied.
+    #[rstest::rstest]
+    #[case::list(true)]
+    #[case::read(false)]
+    fn forwards_cancellation_token_by_identity(#[case] list: bool) {
+        let stub = Arc::new(TokenCapturingStorageHandler::default());
+        let storage = MeteredStorageHandler::new(stub.clone());
+        let token: CancellationTokenRef =
+            Arc::new(crate::unit_test_utils::TestCancellationToken::default());
+
+        if list {
+            let iter = storage
+                .list_from_with_cancellation(&fake_url(), Some(token.clone()))
+                .unwrap();
+            let _: Vec<_> = iter.collect();
+        } else {
+            let iter = storage
+                .read_files_with_cancellation(vec![], Some(token.clone()))
+                .unwrap();
+            let _: Vec<_> = iter.collect();
+        }
+
+        let seen = stub
+            .seen
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("inner handler should have received the token");
+        assert!(
+            Arc::ptr_eq(&token, &seen),
+            "the metered wrapper must not wrap or replace the token"
+        );
+    }
+
+    // Metrics are still emitted when the cancellation-aware variants are used.
+    #[test]
+    fn cancellation_variants_still_emit_metrics() {
+        let (reporter, _guard) = install_capture();
+        let inner: Arc<dyn StorageHandler> = Arc::new(StubStorageHandler {
+            list_results: vec![fake_file_meta("00000000000000000000.json")],
+            read_results: vec![Bytes::from(vec![0u8; 4])],
+        });
+        let storage = MeteredStorageHandler::new(inner);
+
+        let _: Vec<_> = storage
+            .list_from_with_cancellation(&fake_url(), None)
+            .unwrap()
+            .collect();
+        let _: Vec<_> = storage
+            .read_files_with_cancellation(vec![], None)
+            .unwrap()
+            .collect();
+
+        let events = reporter.events();
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, MetricEvent::StorageListCompleted(_))));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, MetricEvent::StorageReadCompleted(_))));
     }
 }

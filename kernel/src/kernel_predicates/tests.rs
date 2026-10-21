@@ -8,7 +8,7 @@ use crate::expressions::{
 use crate::kernel_predicates::parquet_stats_skipping::ParquetStatsProvider;
 use crate::scan::data_skipping::as_data_skipping_predicate;
 use crate::schema::ArrayType;
-use crate::{DataType, DeltaResult};
+use crate::{DataType, KernelResult};
 
 /// Helper trait to allow expect_eq! to work with both Option<Scalar> and Option<bool>
 trait LogicalEq {
@@ -265,22 +265,22 @@ fn test_default_scalar_arithmetic() {
     let filter = DefaultKernelPredicateEvaluator::from(Scalar::from(1));
     for ((l, r), (add, sub, mul, div)) in left.iter().zip(right).zip(expected) {
         expect_eq!(
-            filter.eval_expr(&(Expr::literal(l.clone()) + Expr::literal(r.clone()))),
+            filter.eval_expr(&(lit(l.clone()) + lit(r.clone()))),
             Some(add),
             "add({l:?}, {r:?})"
         );
         expect_eq!(
-            filter.eval_expr(&(Expr::literal(l.clone()) - Expr::literal(r.clone()))),
+            filter.eval_expr(&(lit(l.clone()) - lit(r.clone()))),
             Some(sub),
             "sub({l:?}, {r:?})"
         );
         expect_eq!(
-            filter.eval_expr(&(Expr::literal(l.clone()) * Expr::literal(r.clone()))),
+            filter.eval_expr(&(lit(l.clone()) * lit(r.clone()))),
             Some(mul),
             "mul({l:?}, {r:?})"
         );
         expect_eq!(
-            filter.eval_expr(&(Expr::literal(l.clone()) / Expr::literal(r.clone()))),
+            filter.eval_expr(&(lit(l.clone()) / lit(r.clone()))),
             Some(div),
             "div({l:?}, {r:?})"
         );
@@ -288,27 +288,27 @@ fn test_default_scalar_arithmetic() {
 
     // Invalid type combinations
     expect_eq!(
-        filter.eval_expr(&(Expr::literal("hi") + Expr::literal("ho"))),
+        filter.eval_expr(&(lit("hi") + lit("ho"))),
         None,
         "add(string, string)"
     );
     expect_eq!(
-        filter.eval_expr(&(Expr::literal(1i8) + Expr::literal(1i64))),
+        filter.eval_expr(&(lit(1i8) + lit(1i64))),
         None,
         "add(byte, long)"
     );
     expect_eq!(
-        filter.eval_expr(&(Expr::literal(1i8) - Expr::literal(1i64))),
+        filter.eval_expr(&(lit(1i8) - lit(1i64))),
         None,
         "sub(byte, long)"
     );
     expect_eq!(
-        filter.eval_expr(&(Expr::literal(1i8) * Expr::literal(1i64))),
+        filter.eval_expr(&(lit(1i8) * lit(1i64))),
         None,
         "mul(byte, long)"
     );
     expect_eq!(
-        filter.eval_expr(&(Expr::literal(1i8) / Expr::literal(1i64))),
+        filter.eval_expr(&(lit(1i8) / lit(1i64))),
         None,
         "div(byte, long)"
     );
@@ -322,7 +322,7 @@ fn test_default_scalar_arithmetic() {
     ];
     for (l, r) in args {
         expect_eq!(
-            filter.eval_expr(&(Expr::literal(l.clone()) + Expr::literal(r.clone()))),
+            filter.eval_expr(&(lit(l.clone()) + lit(r.clone()))),
             None,
             "add({l:?}, {r:?})"
         );
@@ -337,7 +337,7 @@ fn test_default_scalar_arithmetic() {
     ];
     for (l, r) in args {
         expect_eq!(
-            filter.eval_expr(&(Expr::literal(l.clone()) - Expr::literal(r.clone()))),
+            filter.eval_expr(&(lit(l.clone()) - lit(r.clone()))),
             None,
             "sub({l:?}, {r:?})"
         );
@@ -352,7 +352,7 @@ fn test_default_scalar_arithmetic() {
     ];
     for arg in args {
         expect_eq!(
-            filter.eval_expr(&(Expr::literal(arg.clone()) * Expr::literal(arg.clone()))),
+            filter.eval_expr(&(lit(arg.clone()) * lit(arg.clone()))),
             None,
             "mul({arg:?}, {arg:?})"
         );
@@ -367,7 +367,7 @@ fn test_default_scalar_arithmetic() {
     ];
     for (l, r) in args {
         expect_eq!(
-            filter.eval_expr(&(Expr::literal(l.clone()) / Expr::literal(r.clone()))),
+            filter.eval_expr(&(lit(l.clone()) / lit(r.clone()))),
             None,
             "div({l:?}, {r:?})"
         );
@@ -543,7 +543,7 @@ fn test_eval_is_null() {
         "x IS NULL"
     );
 
-    let expr = Expr::literal(1);
+    let expr = lit(1);
     expect_eq!(
         filter.eval_pred_unary(IsNull, &expr, true),
         Some(true),
@@ -743,7 +743,7 @@ impl OpaqueExpressionOp for OpaqueLessThanOp {
         &self,
         eval_expr: &ScalarExpressionEvaluator<'_>,
         exprs: &[Expr],
-    ) -> DeltaResult<Scalar> {
+    ) -> KernelResult<Scalar> {
         let result = match self.eval_expr_scalar(eval_expr, exprs, false) {
             Some(value) => Scalar::from(value),
             None => Scalar::Null(DataType::BOOLEAN),
@@ -762,7 +762,7 @@ impl OpaquePredicateOp for OpaqueLessThanOp {
         _evaluator: &DirectPredicateEvaluator<'_>,
         exprs: &[Expr],
         inverted: bool,
-    ) -> DeltaResult<Option<bool>> {
+    ) -> KernelResult<Option<bool>> {
         Ok(self.eval_expr_scalar(eval_expr, exprs, inverted))
     }
 
@@ -875,7 +875,7 @@ impl OpaquePredicateOp for OpaqueAndOp {
         evaluator: &DirectPredicateEvaluator<'_>,
         exprs: &[Expr],
         inverted: bool,
-    ) -> DeltaResult<Option<bool>> {
+    ) -> KernelResult<Option<bool>> {
         let mut values = exprs
             .iter()
             .map(|expr| evaluator.eval_pred_expr(expr, inverted));

@@ -4,7 +4,7 @@
 //! [`cdf_scan_row_schema`]. You can convert engine data to this schema using the
 //! [`cdf_scan_row_expression`].
 use std::collections::HashMap;
-use std::sync::{Arc, LazyLock};
+use std::sync::LazyLock;
 
 use delta_kernel_derive::internal_api;
 use itertools::Itertools;
@@ -15,11 +15,9 @@ use crate::actions::visitors::visit_deletion_vector_at;
 use crate::engine_data::{GetData, TypedGetData};
 use crate::expressions::{col, lit, Expression};
 use crate::scan::state::DvInfo;
-use crate::schema::{
-    ColumnName, ColumnNamesAndTypes, DataType, MapType, SchemaRef, StructField, StructType,
-};
+use crate::schema::{lazy_schema_ref, ColumnName, ColumnNamesAndTypes, DataType, SchemaRef};
 use crate::utils::require;
-use crate::{DeltaResult, Error, RowVisitor};
+use crate::{KernelError, KernelResult, RowVisitor};
 
 // The type of action associated with a [`CdfScanFile`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -133,19 +131,19 @@ pub(crate) struct TableChangesFileAction {
 
 impl TableChangesFileAction {
     /// Converts a scan file, preserving both sides of a same-commit deletion-vector update.
-    pub(crate) fn try_from_scan_file(scan_file: CdfScanFile) -> DeltaResult<Self> {
+    pub(crate) fn try_from_scan_file(scan_file: CdfScanFile) -> KernelResult<Self> {
         match scan_file.scan_type {
             CdfScanFileType::Add => {
                 require!(
                     scan_file.base_row_id.is_some(),
-                    Error::missing_data(format!(
+                    KernelError::missing_data(format!(
                         "baseRowId for row-tracking add action at path {} in version {}",
                         scan_file.path, scan_file.commit_version
                     ))
                 );
                 require!(
                     scan_file.default_row_commit_version.is_some(),
-                    Error::missing_data(format!(
+                    KernelError::missing_data(format!(
                         "defaultRowCommitVersion for row-tracking add action at path {} in \
                          version {}",
                         scan_file.path, scan_file.commit_version
@@ -169,7 +167,7 @@ impl TableChangesFileAction {
                     scan_file.dv_info.deletion_vector.clone(),
                 )),
             }),
-            CdfScanFileType::Cdc => Err(Error::internal_error(format!(
+            CdfScanFileType::Cdc => Err(KernelError::internal_error(format!(
                 "Row-tracking change feed listing unexpectedly produced a cdc scan file: \
                  path={}, version={}",
                 scan_file.path, scan_file.commit_version
@@ -199,10 +197,10 @@ impl TableChangesScanFile {
 /// Transforms an iterator of [`TableChangesScanMetadata`] into an iterator of
 /// [`CdfScanFile`] by visiting the engine data.
 pub(crate) fn scan_metadata_to_scan_file(
-    scan_metadata: impl Iterator<Item = DeltaResult<TableChangesScanMetadata>>,
-) -> impl Iterator<Item = DeltaResult<CdfScanFile>> {
+    scan_metadata: impl Iterator<Item = KernelResult<TableChangesScanMetadata>>,
+) -> impl Iterator<Item = KernelResult<CdfScanFile>> {
     scan_metadata
-        .map(|scan_metadata| -> DeltaResult<_> {
+        .map(|scan_metadata| -> KernelResult<_> {
             let scan_metadata = scan_metadata?;
             let callback: CdfScanCallback<Vec<CdfScanFile>> =
                 |context, scan_file| context.push(scan_file);
@@ -242,7 +240,7 @@ pub(crate) fn visit_cdf_scan_files<T>(
     scan_metadata: &TableChangesScanMetadata,
     context: T,
     callback: CdfScanCallback<T>,
-) -> DeltaResult<T> {
+) -> KernelResult<T> {
     let mut visitor = CdfScanFileVisitor {
         callback,
         context,
@@ -312,7 +310,7 @@ fn read_file_side<'a>(
     row_index: usize,
     getters: &[&'a dyn GetData<'a>],
     spec: &FileSideSpec,
-) -> DeltaResult<Option<FileSide>> {
+) -> KernelResult<Option<FileSide>> {
     let Some(path) = getters[spec.start_index].get_opt(row_index, spec.path_field)? else {
         return Ok(None);
     };
@@ -338,10 +336,10 @@ fn read_file_side<'a>(
 }
 
 impl<T> RowVisitor for CdfScanFileVisitor<'_, T> {
-    fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<()> {
+    fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> KernelResult<()> {
         require!(
             getters.len() == CDF_SCAN_FILE_GETTER_COUNT,
-            Error::InternalError(format!(
+            KernelError::InternalError(format!(
                 "Wrong number of CdfScanFileVisitor getters: {}",
                 getters.len()
             ))
@@ -404,48 +402,49 @@ impl<T> RowVisitor for CdfScanFileVisitor<'_, T> {
 
 /// Get the schema that scan rows (from [`TableChanges::scan_metadata`]) will be returned with.
 pub(crate) fn cdf_scan_row_schema() -> SchemaRef {
-    static CDF_SCAN_ROW_SCHEMA: LazyLock<Arc<StructType>> = LazyLock::new(|| {
-        let deletion_vector = StructType::new_unchecked([
-            StructField::nullable("storageType", DataType::STRING),
-            StructField::nullable("pathOrInlineDv", DataType::STRING),
-            StructField::nullable("offset", DataType::INTEGER),
-            StructField::nullable("sizeInBytes", DataType::INTEGER),
-            StructField::nullable("cardinality", DataType::LONG),
-        ]);
-        let partition_values = MapType::new(DataType::STRING, DataType::STRING, true);
-        let file_constant_values =
-            StructType::new_unchecked([StructField::nullable("partitionValues", partition_values)]);
-
-        let add = StructType::new_unchecked([
-            StructField::nullable("path", DataType::STRING),
-            StructField::nullable("deletionVector", deletion_vector.clone()),
-            StructField::nullable("fileConstantValues", file_constant_values.clone()),
-            StructField::nullable("size", DataType::LONG),
-            StructField::nullable("baseRowId", DataType::LONG),
-            StructField::nullable("defaultRowCommitVersion", DataType::LONG),
-        ]);
-        let remove = StructType::new_unchecked([
-            StructField::nullable("path", DataType::STRING),
-            StructField::nullable("deletionVector", deletion_vector),
-            StructField::nullable("fileConstantValues", file_constant_values.clone()),
-            StructField::nullable("size", DataType::LONG),
-            StructField::nullable("baseRowId", DataType::LONG),
-            StructField::nullable("defaultRowCommitVersion", DataType::LONG),
-        ]);
-        let cdc = StructType::new_unchecked([
-            StructField::nullable("path", DataType::STRING),
-            StructField::nullable("fileConstantValues", file_constant_values),
-            StructField::nullable("size", DataType::LONG),
-        ]);
-
-        Arc::new(StructType::new_unchecked([
-            StructField::nullable("add", add),
-            StructField::nullable("remove", remove),
-            StructField::nullable("cdc", cdc),
-            StructField::not_null("timestamp", DataType::LONG),
-            StructField::not_null("commit_version", DataType::LONG),
-        ]))
-    });
+    static CDF_SCAN_ROW_SCHEMA: LazyLock<SchemaRef> = lazy_schema_ref! {
+        nullable "add": {
+            nullable "path": STRING,
+            nullable "deletionVector": {
+                nullable "storageType": STRING,
+                nullable "pathOrInlineDv": STRING,
+                nullable "offset": INTEGER,
+                nullable "sizeInBytes": INTEGER,
+                nullable "cardinality": LONG,
+            },
+            nullable "fileConstantValues": {
+                nullable "partitionValues": { STRING => nullable STRING },
+            },
+            nullable "size": LONG,
+            nullable "baseRowId": LONG,
+            nullable "defaultRowCommitVersion": LONG,
+        },
+        nullable "remove": {
+            nullable "path": STRING,
+            nullable "deletionVector": {
+                nullable "storageType": STRING,
+                nullable "pathOrInlineDv": STRING,
+                nullable "offset": INTEGER,
+                nullable "sizeInBytes": INTEGER,
+                nullable "cardinality": LONG,
+            },
+            nullable "fileConstantValues": {
+                nullable "partitionValues": { STRING => nullable STRING },
+            },
+            nullable "size": LONG,
+            nullable "baseRowId": LONG,
+            nullable "defaultRowCommitVersion": LONG,
+        },
+        nullable "cdc": {
+            nullable "path": STRING,
+            nullable "fileConstantValues": {
+                nullable "partitionValues": { STRING => nullable STRING },
+            },
+            nullable "size": LONG,
+        },
+        not_null "timestamp": LONG,
+        not_null "commit_version": LONG,
+    };
     CDF_SCAN_ROW_SCHEMA.clone()
 }
 
@@ -489,19 +488,22 @@ mod tests {
 
     use super::{scan_metadata_to_scan_file, CdfScanFile, CdfScanFileType, TableChangesFileAction};
     use crate::actions::deletion_vector::{DeletionVectorDescriptor, DeletionVectorStorageType};
-    use crate::actions::{Add, Cdc, Metadata, Protocol, Remove};
+    use crate::actions::{Add, Cdc, Remove};
     use crate::engine::sync::SyncEngine;
     use crate::log_segment::LogSegment;
     use crate::scan::state::DvInfo;
-    use crate::schema::{DataType, StructField, StructType};
+    use crate::schema::schema_ref;
     use crate::table_changes::log_replay::{
         table_changes_action_iter, table_changes_action_iter_with_mode,
     };
     use crate::table_changes::test_utils::{row_tracking_table_config, test_deletion_vector};
     use crate::table_changes::CdfMode;
-    use crate::table_configuration::TableConfiguration;
-    use crate::table_properties::{COLUMN_MAPPING_MODE, ENABLE_CHANGE_DATA_FEED};
-    use crate::unit_test_utils::{assert_result_error_with_message, Action, LocalMockTable};
+    use crate::table_features::ColumnMappingMode;
+    use crate::table_properties::ENABLE_CHANGE_DATA_FEED;
+    use crate::unit_test_utils::{
+        assert_result_error_with_message, Action, LocalMockTable, MockProtocolBuilder,
+        MockTableConfigurationBuilder,
+    };
     use crate::Engine as _;
 
     fn row_tracking_add(
@@ -551,10 +553,10 @@ mod tests {
             None,
         )
         .unwrap();
-        let table_schema = Arc::new(StructType::new_unchecked([
-            StructField::nullable("id", DataType::INTEGER),
-            StructField::nullable("value", DataType::STRING),
-        ]));
+        let table_schema = schema_ref! {
+            nullable "id": INTEGER,
+            nullable "value": STRING,
+        };
         let table_config = row_tracking_table_config(table_root, table_schema.clone());
         let scan_metadata = table_changes_action_iter_with_mode(
             engine,
@@ -650,28 +652,19 @@ mod tests {
         let log_segment =
             LogSegment::for_table_changes(engine.storage_handler().as_ref(), log_root, 0, None)
                 .unwrap();
-        let table_schema = Arc::new(StructType::new_unchecked([
-            StructField::nullable("id", DataType::INTEGER),
-            StructField::nullable("value", DataType::STRING),
-        ]));
+        let table_schema = schema_ref! {
+            nullable "id": INTEGER,
+            nullable "value": STRING,
+        };
 
-        // Create a TableConfiguration for testing
-        let metadata = Metadata::try_new(
-            None,
-            None,
-            table_schema.clone(),
-            vec![],
-            0,
-            HashMap::from([
-                (ENABLE_CHANGE_DATA_FEED.to_string(), "true".to_string()),
-                (COLUMN_MAPPING_MODE.to_string(), "none".to_string()),
-            ]),
-        )
-        .unwrap();
-        // CDF (enableChangeDataFeed) requires min_writer_version = 4
-        let protocol = Protocol::try_new_legacy(1, 4).unwrap();
-        let table_config =
-            TableConfiguration::try_new(metadata, protocol, table_root.clone(), 0).unwrap();
+        let table_config = MockTableConfigurationBuilder::new()
+            .with_schema(table_schema.clone())
+            .with_properties([(ENABLE_CHANGE_DATA_FEED, "true")])
+            .with_column_mapping(ColumnMappingMode::None)
+            // CDF (enableChangeDataFeed) requires min_writer_version = 4
+            .with_protocol(MockProtocolBuilder::new().with_versions(1, 4).build())
+            .with_table_root(&table_root)
+            .build();
 
         let scan_metadata = table_changes_action_iter(
             Arc::new(engine),

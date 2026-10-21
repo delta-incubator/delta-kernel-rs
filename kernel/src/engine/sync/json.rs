@@ -2,6 +2,7 @@ use std::io::{BufReader, Cursor};
 use std::sync::Arc;
 
 use bytes::Bytes;
+use derive_more::Constructor;
 use url::Url;
 
 use super::{put_bytes, read_files_arrow};
@@ -15,18 +16,13 @@ use crate::engine_data::FilteredEngineData;
 use crate::object_store::DynObjectStore;
 use crate::schema::SchemaRef;
 use crate::{
-    DeltaResult, DeltaResultIterator, EngineData, Error, FileDataReadResultIterator, FileMeta,
-    JsonHandler, PredicateRef,
+    EngineData, FileDataReadResultIterator, FileMeta, FileSize, JsonHandler, KernelError,
+    KernelResult, KernelResultIterator, PredicateRef,
 };
 
+#[derive(Constructor)]
 pub(crate) struct SyncJsonHandler {
     store: Option<Arc<DynObjectStore>>,
-}
-
-impl SyncJsonHandler {
-    pub(crate) fn new(store: Option<Arc<DynObjectStore>>) -> Self {
-        Self { store }
-    }
 }
 
 pub(super) fn try_create_from_json(
@@ -34,7 +30,7 @@ pub(super) fn try_create_from_json(
     schema: SchemaRef,
     _predicate: Option<PredicateRef>,
     file_location: String,
-) -> DeltaResult<impl Iterator<Item = DeltaResult<ArrowEngineData>>> {
+) -> KernelResult<impl Iterator<Item = KernelResult<ArrowEngineData>>> {
     let json_schema = Arc::new(json_arrow_schema(&schema)?);
     let reorder_indices = build_json_reorder_indices(&schema)?;
     let json = ReaderBuilder::new(json_schema)
@@ -50,7 +46,7 @@ impl JsonHandler for SyncJsonHandler {
         files: &[FileMeta],
         schema: SchemaRef,
         predicate: Option<PredicateRef>,
-    ) -> DeltaResult<FileDataReadResultIterator> {
+    ) -> KernelResult<FileDataReadResultIterator> {
         let iter = read_files_arrow(
             self.store.as_ref(),
             files,
@@ -65,18 +61,20 @@ impl JsonHandler for SyncJsonHandler {
         &self,
         json_strings: Box<dyn EngineData>,
         output_schema: SchemaRef,
-    ) -> DeltaResult<Box<dyn EngineData>> {
+    ) -> KernelResult<Box<dyn EngineData>> {
         arrow_parse_json(json_strings, output_schema)
     }
 
     fn write_json_file(
         &self,
         path: &Url,
-        data: DeltaResultIterator<'_, FilteredEngineData>,
+        data: KernelResultIterator<'_, FilteredEngineData>,
         overwrite: bool,
-    ) -> DeltaResult<()> {
+    ) -> KernelResult<FileSize> {
         let buf = to_json_bytes(data)?;
-        put_bytes(self.store.as_ref(), path, buf.into(), overwrite)
+        let size = buf.len() as FileSize;
+        put_bytes(self.store.as_ref(), path, buf.into(), overwrite)?;
+        Ok(size)
     }
 }
 
@@ -94,7 +92,7 @@ mod tests {
     use crate::arrow::datatypes::{DataType as ArrowDataType, Field, Schema as ArrowSchema};
 
     // Helper function to create test data
-    fn create_test_data(values: Vec<&str>) -> DeltaResult<Box<dyn EngineData>> {
+    fn create_test_data(values: Vec<&str>) -> KernelResult<Box<dyn EngineData>> {
         let schema = Arc::new(ArrowSchema::new(vec![Field::new(
             "dog",
             ArrowDataType::Utf8,
@@ -106,7 +104,7 @@ mod tests {
     }
 
     // Helper function to read and parse JSON file
-    fn read_json_file(path: &Path) -> DeltaResult<Vec<serde_json::Value>> {
+    fn read_json_file(path: &Path) -> KernelResult<Vec<serde_json::Value>> {
         let file = std::fs::read_to_string(path)?;
         let json: Vec<_> = serde_json::Deserializer::from_str(&file)
             .into_iter::<serde_json::Value>()
@@ -116,16 +114,16 @@ mod tests {
     }
 
     #[test]
-    fn test_write_json_file_without_overwrite() -> DeltaResult<()> {
+    fn test_write_json_file_without_overwrite() -> KernelResult<()> {
         do_test_write_json_file(false)
     }
 
     #[test]
-    fn test_write_json_file_overwrite() -> DeltaResult<()> {
+    fn test_write_json_file_overwrite() -> KernelResult<()> {
         do_test_write_json_file(true)
     }
 
-    fn do_test_write_json_file(overwrite: bool) -> DeltaResult<()> {
+    fn do_test_write_json_file(overwrite: bool) -> KernelResult<()> {
         let test_dir = TempDir::new().unwrap();
         let path = test_dir.path().join("00000000000000000001.json");
         let handler = SyncJsonHandler::new(None);
@@ -137,8 +135,9 @@ mod tests {
         let result =
             handler.write_json_file(&url, Box::new(std::iter::once(filtered_data)), overwrite);
 
-        // Verify the first write is successful
-        assert!(result.is_ok());
+        let written_size = result.unwrap();
+        assert_eq!(written_size, 32);
+        assert_eq!(written_size, std::fs::metadata(&path).unwrap().len());
         let json = read_json_file(&path)?;
         assert_eq!(json, vec![json!({"dog": "remi"}), json!({"dog": "wilson"})]);
 
@@ -149,15 +148,32 @@ mod tests {
             handler.write_json_file(&url, Box::new(std::iter::once(filtered_data)), overwrite);
 
         if overwrite {
-            // Verify the second write is successful
-            assert!(result.is_ok());
+            let written_size = result.unwrap();
+            assert_eq!(written_size, 28);
+            assert_eq!(written_size, std::fs::metadata(&path).unwrap().len());
             let json = read_json_file(&path)?;
             assert_eq!(json, vec![json!({"dog": "seb"}), json!({"dog": "tia"})]);
         } else {
             // Verify the second write fails with FileAlreadyExists error
-            assert!(matches!(result, Err(Error::FileAlreadyExists(_))));
+            assert!(matches!(result, Err(KernelError::FileAlreadyExists(_))));
         }
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_write_empty_json_file_reports_zero_size() -> KernelResult<()> {
+        let test_dir = TempDir::new().unwrap();
+        let path = test_dir.path().join("empty.json");
+        let handler = SyncJsonHandler::new(None);
+        let url = Url::from_file_path(&path).unwrap();
+
+        let written_size = handler
+            .write_json_file(&url, Box::new(std::iter::empty()), false)
+            .unwrap();
+
+        assert_eq!(written_size, 0);
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 0);
         Ok(())
     }
 

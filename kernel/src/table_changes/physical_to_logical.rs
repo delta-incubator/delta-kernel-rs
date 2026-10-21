@@ -4,9 +4,11 @@ use super::scan_file::{CdfScanFile, CdfScanFileType};
 use super::{CHANGE_TYPE_COL_NAME, COMMIT_TIMESTAMP_COL_NAME, COMMIT_VERSION_COL_NAME};
 use crate::expressions::Scalar;
 use crate::scan::state_info::StateInfo;
-use crate::scan::transform_spec::{get_transform_expr, parse_partition_values};
-use crate::schema::{DataType, SchemaRef, StructField, StructType};
-use crate::{DeltaResult, Error, ExpressionRef};
+use crate::scan::transform_spec::{
+    get_transform_expr, parse_partition_values, FileRowTrackingMetadata,
+};
+use crate::schema::{schema_ref, SchemaRef, StructType};
+use crate::{ExpressionRef, KernelError, KernelResult};
 
 /// Gets CDF metadata columns from the logical schema and scan file.
 ///
@@ -15,7 +17,7 @@ use crate::{DeltaResult, Error, ExpressionRef};
 fn get_cdf_columns(
     logical_schema: &SchemaRef,
     scan_file: &CdfScanFile,
-) -> DeltaResult<impl Iterator<Item = (usize, (String, Scalar))>> {
+) -> KernelResult<impl Iterator<Item = (usize, (String, Scalar))>> {
     // Handle _change_type
     let change_type_field = logical_schema.field_with_index(CHANGE_TYPE_COL_NAME);
     let change_type_metadata = match (change_type_field, &scan_file.scan_type) {
@@ -34,8 +36,9 @@ fn get_cdf_columns(
     // Handle _commit_timestamp
     let timestamp_field = logical_schema.field_with_index(COMMIT_TIMESTAMP_COL_NAME);
     let timestamp_metadata = if let Some((idx, field)) = timestamp_field {
-        let value = Scalar::timestamp_from_millis(scan_file.commit_timestamp)
-            .map_err(|e| Error::generic(format!("Failed to process {}: {e}", scan_file.path)))?;
+        let value = Scalar::timestamp_from_millis(scan_file.commit_timestamp).map_err(|e| {
+            KernelError::generic(format!("Failed to process {}: {e}", scan_file.path))
+        })?;
         Some((idx, (field.name().to_string(), value)))
     } else {
         None
@@ -61,11 +64,12 @@ pub(crate) fn scan_file_physical_schema(
     physical_schema: &StructType,
 ) -> SchemaRef {
     if scan_file.scan_type == CdfScanFileType::Cdc {
-        let change_type = StructField::not_null(CHANGE_TYPE_COL_NAME, DataType::STRING);
-        let fields = physical_schema.fields().cloned().chain(Some(change_type));
         // NOTE: We don't validate the fields again because CHANGE_TYPE_COL_NAME should never be
         // used anywhere else
-        StructType::new_unchecked(fields).into()
+        schema_ref! {
+            ..(physical_schema.fields()),
+            not_null CHANGE_TYPE_COL_NAME: STRING,
+        }
     } else {
         physical_schema.clone().into()
     }
@@ -87,7 +91,7 @@ pub(crate) fn get_cdf_transform_expr(
     scan_file: &CdfScanFile,
     state_info: &StateInfo,
     physical_schema: &StructType,
-) -> DeltaResult<Option<ExpressionRef>> {
+) -> KernelResult<Option<ExpressionRef>> {
     let mut partition_values = HashMap::new();
 
     // Get the transform spec from StateInfo (if present)
@@ -120,7 +124,7 @@ pub(crate) fn get_cdf_transform_expr(
         transform_spec,
         partition_values,
         physical_schema,
-        None, /* base_row_id */
+        FileRowTrackingMetadata::default(),
     )
     .map(Some)
 }
@@ -136,25 +140,25 @@ mod tests {
     use crate::scan::state_info::StateInfo;
     use crate::scan::transform_spec::FieldTransformSpec;
     use crate::scan::PhysicalPredicate;
-    use crate::schema::{DataType, StructField, StructType};
+    use crate::schema::{schema, schema_ref, DataType};
     use crate::table_features::ColumnMappingMode;
 
     fn create_test_logical_schema() -> SchemaRef {
-        Arc::new(StructType::new_unchecked(vec![
-            StructField::nullable("id", DataType::STRING),
-            StructField::nullable("age", DataType::LONG),
-            StructField::nullable("name", DataType::STRING),
-            StructField::nullable("_change_type", DataType::STRING),
-            StructField::nullable("_commit_version", DataType::LONG),
-            StructField::nullable("_commit_timestamp", DataType::TIMESTAMP),
-        ]))
+        schema_ref! {
+            nullable "id": STRING,
+            nullable "age": LONG,
+            nullable "name": STRING,
+            nullable "_change_type": STRING,
+            nullable "_commit_version": LONG,
+            nullable "_commit_timestamp": TIMESTAMP,
+        }
     }
 
     fn create_test_physical_schema() -> StructType {
-        StructType::new_unchecked(vec![
-            StructField::nullable("id", DataType::STRING),
-            StructField::nullable("name", DataType::STRING),
-        ])
+        schema! {
+            nullable "id": STRING,
+            nullable "name": STRING,
+        }
     }
 
     fn create_test_cdf_scan_file() -> CdfScanFile {
@@ -188,11 +192,13 @@ mod tests {
             physical_predicate: PhysicalPredicate::None,
             transform_spec: Some(Arc::new(transform_spec)),
             column_mapping_mode: ColumnMappingMode::None,
-            physical_stats_schema: None,
+            physical_stats_schemas: None,
             physical_partition_schema: None,
-            physical_stats_columns: HashSet::new(),
+            eligible_physical_stats_columns: HashSet::new(),
+            requested_physical_stats_columns: Vec::new(),
             is_catalog_managed: false,
             skip_row_transforms: false,
+            dv_normalization_root: None,
         }
     }
 
@@ -293,11 +299,11 @@ mod tests {
 
         let logical_schema = create_test_logical_schema();
         // For CDC, physical schema needs _change_type column
-        let physical_schema = StructType::new_unchecked(vec![
-            StructField::nullable("id", DataType::STRING),
-            StructField::nullable("name", DataType::STRING),
-            StructField::nullable("_change_type", DataType::STRING),
-        ]);
+        let physical_schema = schema! {
+            nullable "id": STRING,
+            nullable "name": STRING,
+            nullable "_change_type": STRING,
+        };
 
         // Request both partition and CDF columns
         let transform_spec = vec![
@@ -395,15 +401,15 @@ mod tests {
         };
 
         // Create a simple schema without CDF metadata columns
-        let logical_schema = Arc::new(StructType::new_unchecked(vec![
-            StructField::nullable("id", DataType::STRING),
-            StructField::nullable("name", DataType::STRING),
-        ]));
+        let logical_schema = schema_ref! {
+            nullable "id": STRING,
+            nullable "name": STRING,
+        };
 
-        let physical_schema = StructType::new_unchecked(vec![
-            StructField::nullable("id", DataType::STRING),
-            StructField::nullable("name", DataType::STRING),
-        ]);
+        let physical_schema = schema! {
+            nullable "id": STRING,
+            nullable "name": STRING,
+        };
 
         // Empty transform spec - no transformation needed.
         let transform_spec = vec![];
@@ -414,11 +420,13 @@ mod tests {
             physical_predicate: PhysicalPredicate::None,
             transform_spec: Some(Arc::new(transform_spec)),
             column_mapping_mode: ColumnMappingMode::None,
-            physical_stats_schema: None,
+            physical_stats_schemas: None,
             physical_partition_schema: None,
-            physical_stats_columns: HashSet::new(),
+            eligible_physical_stats_columns: HashSet::new(),
+            requested_physical_stats_columns: Vec::new(),
             is_catalog_managed: false,
             skip_row_transforms: false,
+            dv_normalization_root: None,
         };
 
         let result = get_cdf_transform_expr(&scan_file, &state_info, &physical_schema);

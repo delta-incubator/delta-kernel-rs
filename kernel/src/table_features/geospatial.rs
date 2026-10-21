@@ -5,7 +5,7 @@ use crate::schema::{PrimitiveType, Schema};
 use crate::table_configuration::TableConfiguration;
 use crate::transforms::{transform_output_type, SchemaTransform};
 use crate::utils::require;
-use crate::{DeltaResult, Error};
+use crate::{KernelError, KernelResult};
 
 /// Returns `true` if the schema contains at least one geometry or geography column,
 /// including nested structs, arrays, and maps.
@@ -16,9 +16,9 @@ fn schema_contains_geospatial(schema: &Schema) -> bool {
 struct UsesGeo;
 
 impl<'a> SchemaTransform<'a> for UsesGeo {
-    transform_output_type!(|'a, T| Result<(), ()>);
+    transform_output_type!(|'a, T| KernelResult<(), ()>);
 
-    fn transform_primitive(&mut self, ptype: &'a PrimitiveType) -> Result<(), ()> {
+    fn transform_primitive(&mut self, ptype: &'a PrimitiveType) -> KernelResult<(), ()> {
         match ptype {
             PrimitiveType::Geometry(_) | PrimitiveType::Geography(_) => Err(()),
             _ => Ok(()),
@@ -28,11 +28,11 @@ impl<'a> SchemaTransform<'a> for UsesGeo {
 
 /// Validates that if a table schema contains geometry or geography columns, the table must have
 /// the `geospatial` feature in both reader and writer features.
-pub(crate) fn validate_geospatial_feature_support(tc: &TableConfiguration) -> DeltaResult<()> {
+pub(crate) fn validate_geospatial_feature_support(tc: &TableConfiguration) -> KernelResult<()> {
     if schema_contains_geospatial(&tc.logical_schema()) {
         require!(
             tc.protocol().has_table_feature(&TableFeature::GeospatialType),
-            Error::unsupported(
+            KernelError::unsupported(
                 "Table contains geometry or geography columns but does not have the required 'geospatial' feature in reader and writer features"
             )
         );
@@ -47,23 +47,26 @@ mod tests {
     use super::*;
     use crate::actions::Protocol;
     use crate::schema::{
-        ArrayType, DataType, EdgeInterpolationAlgorithm, MapType, StructField, StructType,
+        schema, ArrayType, DataType, EdgeInterpolationAlgorithm, MapType, StructType,
     };
     use crate::unit_test_utils::{assert_schema_feature_validation, geography_type, geometry_type};
 
     fn schema_with_field(dt: DataType) -> StructType {
-        StructType::new_unchecked([
-            StructField::new("id", DataType::INTEGER, false),
-            StructField::new("g", dt, true),
-        ])
+        schema! {
+            not_null "id": INTEGER,
+            nullable "g": (dt),
+        }
     }
 
     #[rstest]
     #[case::top_level_geometry(schema_with_field(geometry_type("EPSG:4326")), true)]
     #[case::nested_struct(
-        schema_with_field(DataType::Struct(Box::new(StructType::new_unchecked([
-            StructField::new("inner_geo", geography_type("EPSG:4326", EdgeInterpolationAlgorithm::Spherical), true),
-        ])))),
+        schema_with_field(DataType::from(schema! {
+            nullable "inner_geo": (geography_type(
+                "EPSG:4326",
+                EdgeInterpolationAlgorithm::Spherical,
+            )),
+        })),
         true
     )]
     #[case::in_array(schema_with_field(ArrayType::new(geometry_type("EPSG:4326"), true).into()), true)]
@@ -78,26 +81,23 @@ mod tests {
 
     #[test]
     fn test_geospatial_feature_validation() {
-        let schema_with_geotype = StructType::new_unchecked([
-            StructField::new("id", DataType::INTEGER, false),
-            StructField::new("geom", geometry_type("EPSG:4326"), true),
-        ]);
-        let schema_without_geotype = StructType::new_unchecked([
-            StructField::new("id", DataType::INTEGER, false),
-            StructField::new("name", DataType::STRING, true),
-        ]);
-        let nested_schema_with_geotype = StructType::new_unchecked([
-            StructField::new("id", DataType::INTEGER, false),
-            StructField::new(
-                "nested",
-                DataType::Struct(Box::new(StructType::new_unchecked([StructField::new(
-                    "inner_geo",
-                    geography_type("EPSG:4326", EdgeInterpolationAlgorithm::Spherical),
-                    true,
-                )]))),
-                true,
-            ),
-        ]);
+        let schema_with_geotype = schema! {
+            not_null "id": INTEGER,
+            nullable "geom": (geometry_type("EPSG:4326")),
+        };
+        let schema_without_geotype = schema! {
+            not_null "id": INTEGER,
+            nullable "name": STRING,
+        };
+        let nested_schema_with_geotype = schema! {
+            not_null "id": INTEGER,
+            nullable "nested": {
+                nullable "inner_geo": (geography_type(
+                    "EPSG:4326",
+                    EdgeInterpolationAlgorithm::Spherical,
+                )),
+            },
+        };
         let protocol_with_geotype = Protocol::try_new_modern(
             [TableFeature::GeospatialType],
             [TableFeature::GeospatialType],

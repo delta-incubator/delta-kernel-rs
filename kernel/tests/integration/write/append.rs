@@ -14,17 +14,17 @@ use delta_kernel::engine::arrow_data::ArrowEngineData;
 use delta_kernel::expressions::Scalar;
 use delta_kernel::object_store::path::Path;
 use delta_kernel::object_store::ObjectStoreExt as _;
-use delta_kernel::schema::{schema_ref, DataType, StructField, StructType};
+use delta_kernel::schema::{schema, schema_ref};
 use delta_kernel::table_features::ColumnMappingMode;
 use delta_kernel::transaction::create_table::create_table;
 use delta_kernel::transaction::data_layout::DataLayout;
-use delta_kernel::transaction::Transaction;
-use delta_kernel::{DeltaResult, Error as KernelError, Snapshot};
+use delta_kernel::transaction::{UpdateTableOperation, WriteState};
+use delta_kernel::{KernelError, KernelResult, Snapshot};
 use itertools::Itertools;
 use rstest::rstest;
 use serde_json::{json, Deserializer};
 use test_utils::{
-    assert_result_error_with_message, into_record_batch, load_and_begin_transaction,
+    assert_result_error_with_message, into_record_batch, load_and_begin_transaction_with,
     modify_add_file_partition_keys, set_json_value, setup_test_tables, test_read,
     AddFilePartitionKeyModify,
 };
@@ -35,7 +35,7 @@ use crate::common::write_utils::{
 };
 
 #[tokio::test]
-async fn test_append() -> Result<(), Box<dyn std::error::Error>> {
+async fn test_append() -> KernelResult<(), Box<dyn std::error::Error>> {
     // setup tracing
     let _ = tracing_subscriber::fmt::try_init();
     // create a simple table: one int column named 'number'
@@ -81,7 +81,8 @@ async fn test_append() -> Result<(), Box<dyn std::error::Error>> {
             json!({
                 "commitInfo": {
                     "timestamp": 0,
-                    "operation": "UNKNOWN",
+                    "operation": "WRITE",
+                    "engineInfo": "test-engine",
                     "kernelVersion": format!("v{}", env!("CARGO_PKG_VERSION")),
                     "operationParameters": {},
                     "txnId": ZERO_UUID
@@ -124,7 +125,7 @@ async fn test_append() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[tokio::test]
-async fn test_no_add_actions() -> Result<(), Box<dyn std::error::Error>> {
+async fn test_no_add_actions() -> KernelResult<()> {
     // setup tracing
     let _ = tracing_subscriber::fmt::try_init();
     // create a simple table: one int column named 'number'
@@ -133,8 +134,14 @@ async fn test_no_add_actions() -> Result<(), Box<dyn std::error::Error>> {
     for (table_url, engine, store, table_name) in
         setup_test_tables(schema.clone(), &[], None, "test_table").await?
     {
-        let txn = load_and_begin_transaction(table_url.clone(), &engine)?
-            .with_engine_info("default engine");
+        let txn = load_and_begin_transaction_with(
+            table_url.clone(),
+            &engine,
+            UpdateTableOperation::Write,
+            "default engine",
+            true,
+            |builder| builder,
+        )?;
 
         // Commit without adding any add files
         assert!(txn.commit(&engine)?.is_committed());
@@ -157,7 +164,7 @@ async fn test_no_add_actions() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[tokio::test]
-async fn test_append_twice() -> Result<(), Box<dyn std::error::Error>> {
+async fn test_append_twice() -> KernelResult<()> {
     // setup tracing
     let _ = tracing_subscriber::fmt::try_init();
     // create a simple table: one int column named 'number'
@@ -186,8 +193,13 @@ async fn test_append_twice() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+#[rstest]
+#[case::local_write_state(false)]
+#[case::transported_write_state(true)]
 #[tokio::test]
-async fn test_append_partitioned() -> Result<(), Box<dyn std::error::Error>> {
+async fn test_append_partitioned(
+    #[case] transport_write_state: bool,
+) -> KernelResult<(), Box<dyn std::error::Error>> {
     // setup tracing
     let _ = tracing_subscriber::fmt::try_init();
 
@@ -195,21 +207,26 @@ async fn test_append_partitioned() -> Result<(), Box<dyn std::error::Error>> {
 
     // create a simple partitioned table: one int column named 'number', partitioned by string
     // column named 'partition'
-    let table_schema = Arc::new(StructType::try_new(vec![
-        StructField::nullable("number", DataType::INTEGER),
-        StructField::nullable("partition", DataType::STRING),
-    ])?);
+    let table_schema = schema_ref! {
+        nullable "number": INTEGER,
+        nullable "partition": STRING,
+    };
     let data_schema = schema_ref! { nullable "number": INTEGER };
 
     for (table_url, engine, store, table_name) in
         setup_test_tables(table_schema.clone(), &[partition_col], None, "test_table").await?
     {
-        let mut txn = load_and_begin_transaction(table_url.clone(), &engine)?
-            .with_engine_info("default engine")
-            .with_data_change(false);
+        let mut txn = load_and_begin_transaction_with(
+            table_url.clone(),
+            &engine,
+            UpdateTableOperation::Write,
+            "default engine",
+            false,
+            |builder| builder,
+        )?;
 
         // create two new arrow record batches to append
-        let append_data = [[1, 2, 3], [4, 5, 6]].map(|data| -> DeltaResult<_> {
+        let append_data = [[1, 2, 3], [4, 5, 6]].map(|data| -> KernelResult<_> {
             let data = RecordBatch::try_new(
                 Arc::new(data_schema.as_ref().try_into_arrow()?),
                 vec![Arc::new(Int32Array::from(data.to_vec()))],
@@ -220,22 +237,31 @@ async fn test_append_partitioned() -> Result<(), Box<dyn std::error::Error>> {
 
         // write data out by spawning async tasks to simulate executors
         let engine = Arc::new(engine);
+        let write_state = txn.write_state()?;
+        let encoded_write_state = transport_write_state
+            .then(|| write_state.encode())
+            .transpose()?;
         let tasks = append_data
             .into_iter()
             .zip(partition_vals)
             .map(|(data, partition_val)| {
-                let write_context = Arc::new(
-                    txn.partitioned_write_context(HashMap::from([(
-                        partition_col.to_string(),
-                        Scalar::String(partition_val.into()),
-                    )]))
-                    .unwrap(),
-                );
-                // arc clones
+                let partition_values = HashMap::from([(
+                    partition_col.to_string(),
+                    Scalar::String(partition_val.into()),
+                )]);
+                let state = match &encoded_write_state {
+                    Some(encoded) => WriteState::decode(encoded).unwrap(),
+                    None => Arc::clone(&write_state),
+                };
+                let write_context = state
+                    .write_context_builder()
+                    .with_partition_values(partition_values)
+                    .build()
+                    .unwrap();
                 let engine = engine.clone();
                 tokio::task::spawn(async move {
                     engine
-                        .write_parquet(data.as_ref().unwrap(), write_context.as_ref())
+                        .write_parquet(data.as_ref().unwrap(), &write_context)
                         .await
                 })
             });
@@ -280,7 +306,7 @@ async fn test_append_partitioned() -> Result<(), Box<dyn std::error::Error>> {
             json!({
                 "commitInfo": {
                     "timestamp": 0,
-                    "operation": "UNKNOWN",
+                    "operation": "WRITE",
                     "kernelVersion": format!("v{}", env!("CARGO_PKG_VERSION")),
                     "operationParameters": {},
                     "engineInfo": "default engine",
@@ -331,7 +357,7 @@ async fn test_append_partitioned() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[tokio::test]
-async fn test_append_invalid_schema() -> Result<(), Box<dyn std::error::Error>> {
+async fn test_append_invalid_schema() -> KernelResult<()> {
     // setup tracing
     let _ = tracing_subscriber::fmt::try_init();
     // create a simple table: one int column named 'number'
@@ -342,11 +368,17 @@ async fn test_append_invalid_schema() -> Result<(), Box<dyn std::error::Error>> 
     for (table_url, engine, _store, _table_name) in
         setup_test_tables(table_schema, &[], None, "test_table").await?
     {
-        let txn = load_and_begin_transaction(table_url.clone(), &engine)?
-            .with_engine_info("default engine");
+        let txn = load_and_begin_transaction_with(
+            table_url.clone(),
+            &engine,
+            UpdateTableOperation::Write,
+            "default engine",
+            true,
+            |builder| builder,
+        )?;
 
         // create two new arrow record batches to append
-        let append_data = [["a", "b"], ["c", "d"]].map(|data| -> DeltaResult<_> {
+        let append_data = [["a", "b"], ["c", "d"]].map(|data| -> KernelResult<_> {
             let data = RecordBatch::try_new(
                 Arc::new(data_schema.as_ref().try_into_arrow()?),
                 vec![Arc::new(StringArray::from(data.to_vec()))],
@@ -356,7 +388,7 @@ async fn test_append_invalid_schema() -> Result<(), Box<dyn std::error::Error>> 
 
         // write data out by spawning async tasks to simulate executors
         let engine = Arc::new(engine);
-        let write_context = Arc::new(txn.unpartitioned_write_context().unwrap());
+        let write_context = Arc::new(txn.write_state()?.write_context_builder().build()?);
         let tasks = append_data.into_iter().map(|data| {
             // arc clones
             let engine = engine.clone();
@@ -384,7 +416,7 @@ async fn test_append_invalid_schema() -> Result<(), Box<dyn std::error::Error>> 
 }
 
 #[tokio::test]
-async fn commit_rejects_add_missing_required_field() -> Result<(), Box<dyn std::error::Error>> {
+async fn commit_rejects_add_missing_required_field() -> KernelResult<()> {
     let _ = tracing_subscriber::fmt::try_init();
     let schema = get_simple_int_schema();
 
@@ -396,19 +428,25 @@ async fn commit_rejects_add_missing_required_field() -> Result<(), Box<dyn std::
                 .next()
                 .expect("at least one test table");
         let engine = Arc::new(engine);
-        let mut txn =
-            load_and_begin_transaction(table_url, engine.as_ref())?.with_data_change(true);
+        let mut txn = load_and_begin_transaction_with(
+            table_url,
+            engine.as_ref(),
+            UpdateTableOperation::Write,
+            "test-engine",
+            true,
+            |builder| builder,
+        )?;
 
         let data = ArrowEngineData::new(RecordBatch::try_new(
             Arc::new(schema.as_ref().try_into_arrow()?),
             vec![Arc::new(Int32Array::from(vec![1, 2, 3]))],
         )?);
-        let write_context = Arc::new(txn.unpartitioned_write_context()?);
+        let write_context = txn.write_state()?.write_context_builder().build()?;
 
         // Corrupt the addFile at the second batch.
-        let valid_meta = engine.write_parquet(&data, write_context.as_ref()).await?;
+        let valid_meta = engine.write_parquet(&data, &write_context).await?;
         txn.add_files(valid_meta);
-        let to_be_corrupted_meta = engine.write_parquet(&data, write_context.as_ref()).await?;
+        let to_be_corrupted_meta = engine.write_parquet(&data, &write_context).await?;
 
         let batch = into_record_batch(to_be_corrupted_meta);
         let index = batch.schema().index_of(field)?;
@@ -473,16 +511,16 @@ async fn commit_rejects_add_missing_required_field() -> Result<(), Box<dyn std::
 async fn commit_rejects_add_with_invalid_partition_keys(
     #[case] column_mapping_mode: Option<&str>,
     #[case] modifications: &[AddFilePartitionKeyModify<'_>],
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> KernelResult<()> {
     let _ = tracing_subscriber::fmt::try_init();
 
-    let table_schema = Arc::new(StructType::try_new(vec![
-        StructField::nullable("d", DataType::INTEGER),
-        StructField::nullable("p1", DataType::STRING),
-        StructField::nullable("p2", DataType::INTEGER),
-    ])?);
+    let table_schema = schema_ref! {
+        nullable "d": INTEGER,
+        nullable "p1": STRING,
+        nullable "p2": INTEGER,
+    };
     let (_tmp_dir, table_path, engine) = test_utils::test_table_setup_mt()?;
-    let mut builder = create_table(&table_path, table_schema, "test/1.0")
+    let mut builder = create_table(&table_path, table_schema, "test/1.0", true)
         .with_data_layout(DataLayout::partitioned(["p1", "p2"]));
     if let Some(mode) = column_mapping_mode {
         builder = builder.with_table_properties([("delta.columnMapping.mode", mode)]);
@@ -492,15 +530,16 @@ async fn commit_rejects_add_with_invalid_partition_keys(
         .commit(engine.as_ref())?
         .unwrap_post_commit_snapshot();
 
-    let data_schema: Arc<ArrowSchema> = Arc::new(
-        (&StructType::try_new(vec![StructField::nullable("d", DataType::INTEGER)])?)
-            .try_into_arrow()?,
-    );
-    let make_add = |txn: &Transaction, p1: &str, p2: i32| {
-        let wc = txn.partitioned_write_context(HashMap::from([
-            ("p1".to_string(), Scalar::String(p1.into())),
-            ("p2".to_string(), Scalar::Integer(p2)),
-        ]))?;
+    let data_schema = schema! { nullable "d": INTEGER };
+    let data_schema: Arc<ArrowSchema> = Arc::new((&data_schema).try_into_arrow()?);
+    let make_add = |write_state: &Arc<WriteState>, p1: &str, p2: i32| {
+        let wc = write_state
+            .write_context_builder()
+            .with_partition_values(HashMap::from([
+                ("p1".to_string(), Scalar::String(p1.into())),
+                ("p2".to_string(), Scalar::Integer(p2)),
+            ]))
+            .build()?;
         let data = RecordBatch::try_new(
             data_schema.clone(),
             vec![Arc::new(Int32Array::from(vec![1]))],
@@ -529,9 +568,10 @@ async fn commit_rejects_add_with_invalid_partition_keys(
         })
         .collect();
     let mut txn = snapshot
-        .transaction(Box::new(FileSystemCommitter::new()), engine.as_ref())?
-        .with_data_change(true);
-    let add = make_add(&txn, "b", 6)?;
+        .update_table(UpdateTableOperation::Write, "test-engine", true)
+        .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?;
+    let write_state = txn.write_state()?;
+    let add = make_add(&write_state, "b", 6)?;
     let corrupted = modify_add_file_partition_keys(into_record_batch(add), &modifications);
     txn.add_files(Box::new(ArrowEngineData::new(corrupted)));
     assert_result_error_with_message(txn.commit(engine.as_ref()), "partitionValues keys");

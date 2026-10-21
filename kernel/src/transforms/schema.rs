@@ -1,5 +1,7 @@
 use std::borrow::{Cow, ToOwned};
 
+#[cfg(feature = "udt-in-dev")]
+use crate::schema::UserDefinedType;
 use crate::schema::{ArrayType, DataType, MapType, PrimitiveType, StructField, StructType};
 use crate::transforms::{
     map_owned_children_or_else, map_owned_or_else, map_owned_pair_or_else, transform_output_type,
@@ -43,9 +45,9 @@ use crate::transforms::{
 /// performed. That carrier determines the return type of each transform method.
 ///
 /// For example, a simple read-only visitor would use `()` as a carrier, while a validity checker
-/// could use `DeltaResult<()>` instead. A mutating transform uses `Cow<_>`, returning `Cow::Owned`
+/// could use `Result<()>` instead. A mutating transform uses `Cow<_>`, returning `Cow::Owned`
 /// for changed/replaced nodes, and a filtering transform uses `Option<Cow<_>>`, where `None`
-/// indicates the node should be dropped rather than replaced. `DeltaResult<Cow<_>>` and
+/// indicates the node should be dropped rather than replaced. `Result<Cow<_>>` and
 /// `Result<Option<Cow<_>>, E>` round out the set as fallible mutating and fitering transforms that
 /// short circuit immediately upon `Err`.
 pub trait SchemaTransform<'a> {
@@ -125,6 +127,15 @@ pub trait SchemaTransform<'a> {
         self.recurse_into_struct(stype)
     }
 
+    /// Visits a user-defined type as a leaf, preserving its physical type and annotation.
+    #[cfg(feature = "udt-in-dev")]
+    fn transform_user_defined(
+        &mut self,
+        udt: &'a UserDefinedType,
+    ) -> Self::Output<UserDefinedType> {
+        Carrier::from_inner(Cow::Borrowed(udt))
+    }
+
     /// General entry point for a recursive traversal over any data type. Also invoked internally to
     /// dispatch on nested data types encountered during the traversal.
     fn transform(&mut self, data_type: &'a DataType) -> Self::Output<DataType> {
@@ -148,6 +159,11 @@ pub trait SchemaTransform<'a> {
             DataType::Variant(stype) => {
                 let child = self.transform_variant(stype);
                 map_owned_or_else(data_type, child, |s| DataType::Variant(Box::new(s)))
+            }
+            #[cfg(feature = "udt-in-dev")]
+            DataType::UserDefined(udt) => {
+                let child = self.transform_user_defined(udt);
+                map_owned_or_else(data_type, child, DataType::UserDefined)
             }
         }
     }
@@ -261,75 +277,37 @@ impl<'a> SchemaTransform<'a> for SchemaDepthChecker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::schema::{DataType, StructField};
+    use crate::schema::{schema, DataType};
 
     #[test]
     fn test_depth_checker() {
-        let schema = DataType::try_struct_type([
-            StructField::nullable(
-                "a",
-                ArrayType::new(
-                    DataType::try_struct_type([
-                        StructField::nullable("w", DataType::LONG),
-                        StructField::nullable("x", ArrayType::new(DataType::LONG, true)),
-                        StructField::nullable(
-                            "y",
-                            MapType::new(DataType::LONG, DataType::STRING, true),
-                        ),
-                        StructField::nullable(
-                            "z",
-                            DataType::try_struct_type([
-                                StructField::nullable("n", DataType::LONG),
-                                StructField::nullable("m", DataType::STRING),
-                            ])
-                            .unwrap(),
-                        ),
-                    ])
-                    .unwrap(),
-                    true,
-                ),
-            ),
-            StructField::nullable(
-                "b",
-                DataType::try_struct_type([
-                    StructField::nullable("o", ArrayType::new(DataType::LONG, true)),
-                    StructField::nullable(
-                        "p",
-                        MapType::new(DataType::LONG, DataType::STRING, true),
-                    ),
-                    StructField::nullable(
-                        "q",
-                        DataType::try_struct_type([
-                            StructField::nullable(
-                                "s",
-                                DataType::try_struct_type([
-                                    StructField::nullable("u", DataType::LONG),
-                                    StructField::nullable("v", DataType::LONG),
-                                ])
-                                .unwrap(),
-                            ),
-                            StructField::nullable("t", DataType::LONG),
-                        ])
-                        .unwrap(),
-                    ),
-                    StructField::nullable("r", DataType::LONG),
-                ])
-                .unwrap(),
-            ),
-            StructField::nullable(
-                "c",
-                MapType::new(
-                    DataType::LONG,
-                    DataType::try_struct_type([
-                        StructField::nullable("f", DataType::LONG),
-                        StructField::nullable("g", DataType::STRING),
-                    ])
-                    .unwrap(),
-                    true,
-                ),
-            ),
-        ])
-        .unwrap();
+        let schema = DataType::from(schema! {
+            nullable "a": [ nullable {
+                nullable "w": LONG,
+                nullable "x": [ nullable LONG ],
+                nullable "y": { LONG => nullable STRING },
+                nullable "z": {
+                    nullable "n": LONG,
+                    nullable "m": STRING,
+                },
+            } ],
+            nullable "b": {
+                nullable "o": [ nullable LONG ],
+                nullable "p": { LONG => nullable STRING },
+                nullable "q": {
+                    nullable "s": {
+                        nullable "u": LONG,
+                        nullable "v": LONG,
+                    },
+                    nullable "t": LONG,
+                },
+                nullable "r": LONG,
+            },
+            nullable "c": { LONG => nullable {
+                nullable "f": LONG,
+                nullable "g": STRING,
+            } },
+        });
 
         // Similar to SchemaDepthChecker::check, but also returns call count
         let check_with_call_count =

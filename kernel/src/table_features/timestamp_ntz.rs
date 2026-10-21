@@ -5,16 +5,16 @@ use crate::schema::{PrimitiveType, Schema};
 use crate::table_configuration::TableConfiguration;
 use crate::transforms::{transform_output_type, SchemaTransform};
 use crate::utils::require;
-use crate::{DeltaResult, Error};
+use crate::{KernelError, KernelResult};
 
 /// Validates that if a table schema contains TIMESTAMP_NTZ columns, the table must have the
 /// TimestampWithoutTimezone feature in both reader and writer features.
-pub(crate) fn validate_timestamp_ntz_feature_support(tc: &TableConfiguration) -> DeltaResult<()> {
+pub(crate) fn validate_timestamp_ntz_feature_support(tc: &TableConfiguration) -> KernelResult<()> {
     let protocol = tc.protocol();
     if !protocol.has_table_feature(&TableFeature::TimestampWithoutTimezone) {
         require!(
             !schema_contains_timestamp_ntz(&tc.logical_schema()),
-            Error::unsupported(
+            KernelError::unsupported(
                 "Table contains TIMESTAMP_NTZ columns but does not have the required 'timestampNtz' feature in reader and writer features"
             )
         );
@@ -31,9 +31,9 @@ pub(crate) fn schema_contains_timestamp_ntz(schema: &Schema) -> bool {
 struct UsesTimestampNtz;
 
 impl<'a> SchemaTransform<'a> for UsesTimestampNtz {
-    transform_output_type!(|'a, T| Result<(), ()>);
+    transform_output_type!(|'a, T| KernelResult<(), ()>);
 
-    fn transform_primitive(&mut self, ptype: &'a PrimitiveType) -> Result<(), ()> {
+    fn transform_primitive(&mut self, ptype: &'a PrimitiveType) -> KernelResult<(), ()> {
         match ptype {
             PrimitiveType::TimestampNtz => Err(()),
             _ => Ok(()),
@@ -44,32 +44,26 @@ impl<'a> SchemaTransform<'a> for UsesTimestampNtz {
 #[cfg(test)]
 mod tests {
     use crate::actions::Protocol;
-    use crate::schema::{DataType, PrimitiveType, StructField, StructType};
+    use crate::schema::schema;
     use crate::table_features::TableFeature;
     use crate::unit_test_utils::assert_schema_feature_validation;
 
     #[test]
     fn test_timestamp_ntz_feature_validation() {
-        let schema_with = StructType::new_unchecked([
-            StructField::new("id", DataType::INTEGER, false),
-            StructField::new("ts", DataType::Primitive(PrimitiveType::TimestampNtz), true),
-        ]);
-        let schema_without = StructType::new_unchecked([
-            StructField::new("id", DataType::INTEGER, false),
-            StructField::new("name", DataType::STRING, true),
-        ]);
-        let nested_schema_with = StructType::new_unchecked([
-            StructField::new("id", DataType::INTEGER, false),
-            StructField::new(
-                "nested",
-                StructType::new_unchecked([StructField::new(
-                    "inner_ts",
-                    DataType::Primitive(PrimitiveType::TimestampNtz),
-                    true,
-                )]),
-                true,
-            ),
-        ]);
+        let schema_with = schema! {
+            not_null "id": INTEGER,
+            nullable "ts": TIMESTAMP_NTZ,
+        };
+        let schema_without = schema! {
+            not_null "id": INTEGER,
+            nullable "name": STRING,
+        };
+        let nested_schema_with = schema! {
+            not_null "id": INTEGER,
+            nullable "nested": {
+                nullable "inner_ts": TIMESTAMP_NTZ,
+            },
+        };
         let protocol_with = Protocol::try_new_modern(
             [TableFeature::TimestampWithoutTimezone],
             [TableFeature::TimestampWithoutTimezone],

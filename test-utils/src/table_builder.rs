@@ -68,12 +68,12 @@ use delta_kernel::expressions::Scalar;
 use delta_kernel::object_store::memory::InMemory;
 use delta_kernel::object_store::path::Path;
 use delta_kernel::object_store::{DynObjectStore, Error as ObjectStoreError, ObjectStoreExt as _};
-use delta_kernel::schema::{DataType, PrimitiveType, SchemaRef, StructField, StructType};
+use delta_kernel::schema::{schema_ref, DataType, PrimitiveType, SchemaRef, StructType};
 use delta_kernel::snapshot::ChecksumWriteResult;
 use delta_kernel::table_features::TableFeature;
 use delta_kernel::transaction::create_table::create_table;
 use delta_kernel::transaction::data_layout::DataLayout;
-use delta_kernel::{DeltaResult, Engine, Snapshot};
+use delta_kernel::{Engine, KernelResult, Snapshot};
 use delta_kernel_default_engine::executor::tokio::{
     TokioBackgroundExecutor, TokioMultiThreadExecutor,
 };
@@ -105,10 +105,10 @@ pub const DEFAULT_SWEEP_MID_VERSION: u64 = 5;
 /// A multi-threaded runtime is required so kernel operations that call
 /// `block_in_place` (e.g. `Snapshot::checkpoint`) do not deadlock, which is why
 /// the sync wrappers in this module all route through this helper.
-fn block_on_sync<F, Fut, T>(make_fut: F) -> DeltaResult<T>
+fn block_on_sync<F, Fut, T>(make_fut: F) -> KernelResult<T>
 where
     F: FnOnce() -> Fut + Send,
-    Fut: std::future::Future<Output = DeltaResult<T>>,
+    Fut: std::future::Future<Output = KernelResult<T>>,
     T: Send,
 {
     std::thread::scope(|s| {
@@ -116,7 +116,7 @@ where
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()
-                .map_err(|e| delta_kernel::Error::generic(e.to_string()))?;
+                .map_err(|e| delta_kernel::KernelError::generic(e.to_string()))?;
             runtime.block_on(make_fut())
         })
         .join()
@@ -434,9 +434,15 @@ fn log_file_version(location: &Path) -> Option<u64> {
     prefix.parse::<u64>().ok()
 }
 
-async fn read_hint_bytes(store: &Arc<DynObjectStore>, path: &Path) -> DeltaResult<Vec<u8>> {
-    let result = store.get(path).await.map_err(delta_kernel::Error::from)?;
-    let bytes = result.bytes().await.map_err(delta_kernel::Error::from)?;
+async fn read_hint_bytes(store: &Arc<DynObjectStore>, path: &Path) -> KernelResult<Vec<u8>> {
+    let result = store
+        .get(path)
+        .await
+        .map_err(delta_kernel::KernelError::from)?;
+    let bytes = result
+        .bytes()
+        .await
+        .map_err(delta_kernel::KernelError::from)?;
     Ok(bytes.to_vec())
 }
 
@@ -988,24 +994,24 @@ impl fmt::Display for DataLayoutConfig {
 ///
 /// All columns are nullable. Follow-up: add non-nullable variants to test NOT NULL handling.
 pub fn partitioned_schema() -> SchemaRef {
-    Arc::new(StructType::new_unchecked(vec![
+    schema_ref! {
         // Partition-candidate columns (all valid partition types, matches write::partitioned)
-        StructField::new("part_bool", DataType::BOOLEAN, true),
-        StructField::new("part_byte", DataType::BYTE, true),
-        StructField::new("part_short", DataType::SHORT, true),
-        StructField::new("part_int", DataType::INTEGER, true),
-        StructField::new("part_long", DataType::LONG, true),
-        StructField::new("part_float", DataType::FLOAT, true),
-        StructField::new("part_double", DataType::DOUBLE, true),
-        StructField::new("part_string", DataType::STRING, true),
-        StructField::new("part_binary", DataType::BINARY, true),
-        StructField::new("part_date", DataType::DATE, true),
-        StructField::new("part_ts", DataType::TIMESTAMP, true),
-        StructField::new("part_ts_ntz", DataType::TIMESTAMP_NTZ, true),
-        StructField::new("part_decimal", DataType::decimal(10, 2).unwrap(), true),
+        nullable "part_bool": BOOLEAN,
+        nullable "part_byte": BYTE,
+        nullable "part_short": SHORT,
+        nullable "part_int": INTEGER,
+        nullable "part_long": LONG,
+        nullable "part_float": FLOAT,
+        nullable "part_double": DOUBLE,
+        nullable "part_string": STRING,
+        nullable "part_binary": BINARY,
+        nullable "part_date": DATE,
+        nullable "part_ts": TIMESTAMP,
+        nullable "part_ts_ntz": TIMESTAMP_NTZ,
+        nullable "part_decimal": (DataType::decimal(10, 2).unwrap()),
         // Non-partition data column (required: at least one non-partition column)
-        StructField::new("value", DataType::INTEGER, true),
-    ]))
+        nullable "value": INTEGER,
+    }
 }
 
 /// Schema with all stats-eligible primitive types for clustering. Boolean and Binary are
@@ -1014,22 +1020,22 @@ pub fn partitioned_schema() -> SchemaRef {
 ///
 /// All columns are nullable. Follow-up: add non-nullable variants to test NOT NULL handling.
 pub fn clustered_schema() -> SchemaRef {
-    Arc::new(StructType::new_unchecked(vec![
+    schema_ref! {
         // Clustering-eligible columns (stats-eligible primitive types)
-        StructField::new("clust_byte", DataType::BYTE, true),
-        StructField::new("clust_short", DataType::SHORT, true),
-        StructField::new("clust_int", DataType::INTEGER, true),
-        StructField::new("clust_long", DataType::LONG, true),
-        StructField::new("clust_float", DataType::FLOAT, true),
-        StructField::new("clust_double", DataType::DOUBLE, true),
-        StructField::new("clust_string", DataType::STRING, true),
-        StructField::new("clust_date", DataType::DATE, true),
-        StructField::new("clust_ts", DataType::TIMESTAMP, true),
-        StructField::new("clust_ts_ntz", DataType::TIMESTAMP_NTZ, true),
-        StructField::new("clust_decimal", DataType::decimal(10, 2).unwrap(), true),
+        nullable "clust_byte": BYTE,
+        nullable "clust_short": SHORT,
+        nullable "clust_int": INTEGER,
+        nullable "clust_long": LONG,
+        nullable "clust_float": FLOAT,
+        nullable "clust_double": DOUBLE,
+        nullable "clust_string": STRING,
+        nullable "clust_date": DATE,
+        nullable "clust_ts": TIMESTAMP,
+        nullable "clust_ts_ntz": TIMESTAMP_NTZ,
+        nullable "clust_decimal": (DataType::decimal(10, 2).unwrap()),
         // Non-clustering data column
-        StructField::new("value", DataType::INTEGER, true),
-    ]))
+        nullable "value": INTEGER,
+    }
 }
 
 // Canonical sweep rows for the DataLayoutConfig axis.
@@ -1255,12 +1261,12 @@ impl TestTableBuilder {
     /// # Panics
     /// Panics if [`LastCheckpointHintState::Stale`] is paired with fewer than two
     /// checkpoints.
-    pub fn build(self) -> DeltaResult<TestTable> {
+    pub fn build(self) -> KernelResult<TestTable> {
         validate_log_state(&self.log_state);
         block_on_sync(|| self.build_async())
     }
 
-    async fn build_async(self) -> DeltaResult<TestTable> {
+    async fn build_async(self) -> KernelResult<TestTable> {
         let store: Arc<DynObjectStore> = Arc::new(InMemory::new());
         let table_root = "memory:///";
         let executor = Arc::new(TokioMultiThreadExecutor::new(
@@ -1292,7 +1298,7 @@ impl TestTableBuilder {
             self.log_state.checkpoints_at().iter().copied().collect();
 
         // Version 0: CreateTable
-        let mut builder = create_table(table_root, schema, "TestTableBuilder/1.0");
+        let mut builder = create_table(table_root, schema, "TestTableBuilder/1.0", true);
         let all_properties: Vec<_> = self
             .features
             .table_properties
@@ -1364,7 +1370,7 @@ impl TestTableBuilder {
             LastCheckpointHintState::Present => {}
             LastCheckpointHintState::Missing => match store.delete(&resolved_hint_path).await {
                 Ok(()) | Err(ObjectStoreError::NotFound { .. }) => {}
-                Err(e) => return Err(delta_kernel::Error::from(e)),
+                Err(e) => return Err(delta_kernel::KernelError::from(e)),
             },
             LastCheckpointHintState::Stale => {
                 // Restore the hint bytes captured after the lowest checkpoint write.
@@ -1373,7 +1379,7 @@ impl TestTableBuilder {
                 store
                     .put(&resolved_hint_path, bytes.into())
                     .await
-                    .map_err(delta_kernel::Error::from)?;
+                    .map_err(delta_kernel::KernelError::from)?;
             }
         }
 
@@ -1385,13 +1391,13 @@ impl TestTableBuilder {
             let listing = store
                 .list_with_delimiter(Some(&resolved_log_dir))
                 .await
-                .map_err(delta_kernel::Error::from)?;
+                .map_err(delta_kernel::KernelError::from)?;
             for object in listing.objects {
                 if matches!(log_file_version(&object.location), Some(v) if v < n) {
                     store
                         .delete(&object.location)
                         .await
-                        .map_err(delta_kernel::Error::from)?;
+                        .map_err(delta_kernel::KernelError::from)?;
                 }
             }
         }
@@ -1418,7 +1424,7 @@ impl TestTableBuilder {
 /// Write a CRC file via kernel's checksum writer. Builder invariant: the snapshot
 /// comes from a post-commit handoff on a fresh in-memory table, so the CRC for
 /// that version cannot already exist on disk.
-fn write_crc(snapshot: &Arc<Snapshot>, engine: &dyn Engine) -> DeltaResult<()> {
+fn write_crc(snapshot: &Arc<Snapshot>, engine: &dyn Engine) -> KernelResult<()> {
     let (result, _) = snapshot.write_checksum(engine)?;
     assert_eq!(
         result,
@@ -1431,7 +1437,7 @@ fn write_crc(snapshot: &Arc<Snapshot>, engine: &dyn Engine) -> DeltaResult<()> {
 /// Write a data commit using kernel's transaction + write_parquet path.
 /// Produces `num_files` parquet files with `rows_per_file` rows each. For partitioned
 /// tables, all rows in a file share the same partition values; for unpartitioned or
-/// clustered tables, uses `unpartitioned_write_context`. Non-partition columns get
+/// clustered tables, binds an unpartitioned write context. Non-partition columns get
 /// varying data derived from version and file index. Partition columns are never nulled
 /// so their data matches the declared partition value; all other nullable columns
 /// (including clustering columns, which kernel permits to be null) get sparse nulls.
@@ -1442,15 +1448,19 @@ async fn write_data_commit<E: TaskExecutor>(
     rows_per_file: usize,
     partition_columns: &[String],
     version: u64,
-) -> DeltaResult<delta_kernel::transaction::CommitResult> {
+) -> KernelResult<delta_kernel::transaction::CommitResult> {
     let logical_schema = snapshot.schema().clone();
     let arrow_schema: ArrowSchema = TryFromKernel::try_from_kernel(logical_schema.as_ref())
-        .map_err(|e| delta_kernel::Error::generic(e.to_string()))?;
+        .map_err(|e| delta_kernel::KernelError::generic(e.to_string()))?;
 
     let mut txn = snapshot
-        .transaction(Box::new(FileSystemCommitter::new()), engine)?
-        .with_operation("WRITE".to_string())
-        .with_data_change(true);
+        .update_table(
+            delta_kernel::transaction::UpdateTableOperation::Write,
+            "test-utils",
+            true,
+        )
+        .build(engine, Box::new(FileSystemCommitter::new()))?;
+    let write_state = txn.write_state()?;
 
     let partition_set: HashSet<&str> = partition_columns.iter().map(String::as_str).collect();
 
@@ -1477,17 +1487,20 @@ async fn write_data_commit<E: TaskExecutor>(
         }
         let data_arrow_schema = ArrowSchema::new(data_fields);
         let batch = RecordBatch::try_new(Arc::new(data_arrow_schema), columns)
-            .map_err(|e| delta_kernel::Error::generic(e.to_string()))?;
+            .map_err(|e| delta_kernel::KernelError::generic(e.to_string()))?;
 
         let write_context = if partition_columns.is_empty() {
-            txn.unpartitioned_write_context()?
+            write_state.write_context_builder().build()?
         } else {
             let partition_values = generate_partition_values(
                 logical_schema.as_ref(),
                 partition_columns,
                 partition_seed,
             );
-            txn.partitioned_write_context(partition_values)?
+            write_state
+                .write_context_builder()
+                .with_partition_values(partition_values)
+                .build()?
         };
 
         let add_files = engine
@@ -1856,30 +1869,25 @@ fn scalar_for_type(data_type: &DataType, seed: usize) -> Scalar {
 /// Default schema with all Delta primitive types including TimestampNtz
 /// and a nested column type.
 pub(crate) fn default_schema() -> SchemaRef {
-    Arc::new(StructType::new_unchecked(vec![
-        StructField::new("bool_col", DataType::BOOLEAN, true),
-        StructField::new("byte_col", DataType::BYTE, true),
-        StructField::new("short_col", DataType::SHORT, true),
-        StructField::new("int_col", DataType::INTEGER, true),
-        StructField::new("long_col", DataType::LONG, true),
-        StructField::new("float_col", DataType::FLOAT, true),
-        StructField::new("double_col", DataType::DOUBLE, true),
-        StructField::new("string_col", DataType::STRING, true),
-        StructField::new("binary_col", DataType::BINARY, true),
-        StructField::new("date_col", DataType::DATE, true),
-        StructField::new("ts_col", DataType::TIMESTAMP, true),
-        StructField::new("ts_ntz_col", DataType::TIMESTAMP_NTZ, true),
-        StructField::new("decimal_col", DataType::decimal(10, 2).unwrap(), true),
-        StructField::new(
-            "nested_col",
-            DataType::try_struct_type([
-                StructField::nullable("a", DataType::LONG),
-                StructField::nullable("b", DataType::STRING),
-            ])
-            .unwrap(),
-            true,
-        ),
-    ]))
+    schema_ref! {
+        nullable "bool_col": BOOLEAN,
+        nullable "byte_col": BYTE,
+        nullable "short_col": SHORT,
+        nullable "int_col": INTEGER,
+        nullable "long_col": LONG,
+        nullable "float_col": FLOAT,
+        nullable "double_col": DOUBLE,
+        nullable "string_col": STRING,
+        nullable "binary_col": BINARY,
+        nullable "date_col": DATE,
+        nullable "ts_col": TIMESTAMP,
+        nullable "ts_ntz_col": TIMESTAMP_NTZ,
+        nullable "decimal_col": (DataType::decimal(10, 2).unwrap()),
+        nullable "nested_col": {
+            nullable "a": LONG,
+            nullable "b": STRING,
+        },
+    }
 }
 
 #[cfg(test)]
@@ -1891,7 +1899,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_basic_build() -> DeltaResult<()> {
+    fn test_basic_build() -> KernelResult<()> {
         let table = TestTableBuilder::new().build()?;
         let engine = table.engine();
         let snap = Snapshot::builder_for(table.table_root()).build(&engine)?;
@@ -1900,7 +1908,7 @@ mod tests {
     }
 
     #[test]
-    fn test_commits_only() -> DeltaResult<()> {
+    fn test_commits_only() -> KernelResult<()> {
         let table = TestTableBuilder::new()
             .with_log_state(LogState::with_latest_version(2))
             .build()?;
@@ -1946,7 +1954,7 @@ mod tests {
     }
 
     #[rstest_reuse::apply(feature_sets)]
-    fn test_feature_sets_enable_table_features(feature_set: FeatureSet) -> DeltaResult<()> {
+    fn test_feature_sets_enable_table_features(feature_set: FeatureSet) -> KernelResult<()> {
         let expected_features = feature_set.expected_features();
         let table = TestTableBuilder::new().with_features(feature_set).build()?;
         let engine = table.engine();
@@ -1971,7 +1979,7 @@ mod tests {
     }
 
     #[test]
-    fn test_table_config_properties_applied() -> DeltaResult<()> {
+    fn test_table_config_properties_applied() -> KernelResult<()> {
         let table = TestTableBuilder::new()
             .with_table_config(
                 TableConfig::new()
@@ -1986,7 +1994,7 @@ mod tests {
     }
 
     #[test]
-    fn test_data_skipping_table_properties_in_metadata() -> DeltaResult<()> {
+    fn test_data_skipping_table_properties_in_metadata() -> KernelResult<()> {
         let table = TestTableBuilder::new()
             .with_table_config(
                 TableConfig::new()
@@ -2013,18 +2021,18 @@ mod tests {
     fn read_metadata_configuration(
         store: &Arc<DynObjectStore>,
         version: u64,
-    ) -> DeltaResult<std::collections::HashMap<String, String>> {
+    ) -> KernelResult<std::collections::HashMap<String, String>> {
         let store = store.clone();
         block_on_sync(move || async move {
             crate::read_metadata_configuration_from_store(store.as_ref(), version)
                 .await
-                .map_err(|e| delta_kernel::Error::generic(e.to_string()))
+                .map_err(|e| delta_kernel::KernelError::generic(e.to_string()))
         })
     }
 
     /// Verifies every common table config builds successfully.
     #[rstest_reuse::apply(table_configs)]
-    fn test_all_table_configs_build(table_config: TableConfig) -> DeltaResult<()> {
+    fn test_all_table_configs_build(table_config: TableConfig) -> KernelResult<()> {
         TestTableBuilder::new()
             .with_table_config(table_config)
             .build()?;
@@ -2037,7 +2045,7 @@ mod tests {
     #[rstest::rstest]
     #[case::default_hint(None)]
     #[case::explicit_hint(Some(1))]
-    fn test_v2_sidecars_emit_sidecar_files(#[case] hint: Option<usize>) -> DeltaResult<()> {
+    fn test_v2_sidecars_emit_sidecar_files(#[case] hint: Option<usize>) -> KernelResult<()> {
         let log_state = LogState::with_latest_version(2)
             .with_checkpoint_at([1])
             .with_sidecars_if_enabled(hint);
@@ -2057,7 +2065,7 @@ mod tests {
     /// `with_sidecars_if_enabled` without the `v2Checkpoint` feature is a no-op:
     /// the table builds (no error) and no sidecar directory is produced.
     #[test]
-    fn test_v2_sidecars_silently_ignored_without_v2_feature() -> DeltaResult<()> {
+    fn test_v2_sidecars_silently_ignored_without_v2_feature() -> KernelResult<()> {
         let log_state = LogState::with_latest_version(2)
             .with_checkpoint_at([1])
             .with_sidecars_if_enabled(None);
@@ -2074,7 +2082,7 @@ mod tests {
     }
 
     #[test]
-    fn test_checkpoint_and_commits() -> DeltaResult<()> {
+    fn test_checkpoint_and_commits() -> KernelResult<()> {
         let log_state = LogState::with_latest_version(4).with_checkpoint_at([2]);
         let table = TestTableBuilder::new()
             .with_log_state(log_state.clone())
@@ -2149,7 +2157,7 @@ mod tests {
     )]
     fn test_log_state_checkpoint_shapes_land_on_disk(
         #[case] log_state: LogState,
-    ) -> DeltaResult<()> {
+    ) -> KernelResult<()> {
         let expected_version = log_state.latest_version();
         let table = TestTableBuilder::new()
             .with_log_state(log_state.clone())
@@ -2181,7 +2189,7 @@ mod tests {
     /// forward, and pick up the actual latest checkpoint at the higher version --
     /// not the stale-hinted older one.
     #[test]
-    fn test_stale_hint_recovery_resolves_to_actual_latest_checkpoint() -> DeltaResult<()> {
+    fn test_stale_hint_recovery_resolves_to_actual_latest_checkpoint() -> KernelResult<()> {
         let log_state = LogState::with_latest_version(5)
             .with_checkpoint_at([2, 4])
             .with_last_checkpoint_hint(LastCheckpointHintState::Stale);
@@ -2196,7 +2204,7 @@ mod tests {
     }
 
     #[test]
-    fn test_scan_with_column_mapping() -> DeltaResult<()> {
+    fn test_scan_with_column_mapping() -> KernelResult<()> {
         let table = TestTableBuilder::new()
             .with_log_state(LogState::with_latest_version(1))
             .with_features(FeatureSet::new().column_mapping("name"))
@@ -2213,7 +2221,7 @@ mod tests {
     }
 
     #[test]
-    fn test_scan_with_data() -> DeltaResult<()> {
+    fn test_scan_with_data() -> KernelResult<()> {
         let table = TestTableBuilder::new()
             .with_log_state(LogState::with_latest_version(1))
             .with_data(2, 5)
@@ -2232,7 +2240,7 @@ mod tests {
     /// Uses `rows_per_file = NULL_RATE_EVERY_NTH * 3` so each file has exactly three null
     /// rows per column.
     #[test]
-    fn test_sparse_null_injection_in_generated_data() -> DeltaResult<()> {
+    fn test_sparse_null_injection_in_generated_data() -> KernelResult<()> {
         let rows_per_file = NULL_RATE_EVERY_NTH * 3;
         let table = TestTableBuilder::new()
             .with_log_state(LogState::with_latest_version(1))
@@ -2268,7 +2276,7 @@ mod tests {
     #[rstest::rstest]
     #[case::partitioned(partitioned())]
     #[case::clustered(clustered())]
-    fn test_layout_column_null_injection(#[case] config: DataLayoutConfig) -> DeltaResult<()> {
+    fn test_layout_column_null_injection(#[case] config: DataLayoutConfig) -> KernelResult<()> {
         let rows_per_file = NULL_RATE_EVERY_NTH * 3;
         // Only partition columns are protected from nulling; clustering columns are not.
         let protected_columns = if config.is_partitioned() {
@@ -2315,7 +2323,7 @@ mod tests {
     fn test_data_layout_table(
         #[case] config: DataLayoutConfig,
         #[case] expected_schema: SchemaRef,
-    ) -> DeltaResult<()> {
+    ) -> KernelResult<()> {
         // 2 versions means v0 (create_table) + v1 (1 data commit with 10 rows)
         let table = TestTableBuilder::new()
             .with_log_state(LogState::with_latest_version(1))
@@ -2335,7 +2343,7 @@ mod tests {
     }
 
     #[test]
-    fn test_clustered_table_multiple_versions() -> DeltaResult<()> {
+    fn test_clustered_table_multiple_versions() -> KernelResult<()> {
         // v0=create, v1-v3=data commits, 10 rows each
         let table = TestTableBuilder::new()
             .with_log_state(LogState::with_latest_version(3))
@@ -2355,7 +2363,7 @@ mod tests {
     }
 
     #[test]
-    fn test_with_clustering_columns_directly() -> DeltaResult<()> {
+    fn test_with_clustering_columns_directly() -> KernelResult<()> {
         let table = TestTableBuilder::new()
             .with_log_state(LogState::with_latest_version(1))
             .with_schema(clustered_schema())
@@ -2369,12 +2377,13 @@ mod tests {
     }
 
     #[test]
-    fn test_nested_struct_schema_round_trip() -> DeltaResult<()> {
-        let inner = DataType::try_struct_type([StructField::nullable("a", DataType::LONG)])?;
-        let schema: SchemaRef = Arc::new(StructType::try_new([
-            StructField::nullable("id", DataType::LONG),
-            StructField::nullable("inner", inner),
-        ])?);
+    fn test_nested_struct_schema_round_trip() -> KernelResult<()> {
+        let schema = schema_ref! {
+            nullable "id": LONG,
+            nullable "inner": {
+                nullable "a": LONG,
+            },
+        };
         let table = TestTableBuilder::new()
             .with_schema(schema.clone())
             .build()?;
@@ -2412,7 +2421,7 @@ mod tests {
     fn test_builder_writes_crc_with_correct_content(
         #[case] features: FeatureSet,
         #[case] expect_ict: bool,
-    ) -> DeltaResult<()> {
+    ) -> KernelResult<()> {
         let log_state = LogState::with_latest_version(2)
             .with_checkpoint_at([2])
             .with_crc_at([2]);
@@ -2453,7 +2462,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cleanup_commits_before_deletes_old_files_and_rebuilds() -> DeltaResult<()> {
+    fn test_cleanup_commits_before_deletes_old_files_and_rebuilds() -> KernelResult<()> {
         // Checkpoints at v=1 (below cutoff), v=3 (at cutoff), v=5 (above cutoff)
         // exercise both the deletion and preservation paths for checkpoint files.
         let log_state = LogState::with_latest_version(5)
@@ -2531,7 +2540,7 @@ mod tests {
     /// remains below `cleanup_before`, and the `_last_checkpoint` hint reflects
     /// the declared hint state. Snapshot rebuilds can silently succeed via JSON
     /// replay even when these files are wrong.
-    fn assert_log_state_files_on_disk(table: &TestTable, log_state: &LogState) -> DeltaResult<()> {
+    fn assert_log_state_files_on_disk(table: &TestTable, log_state: &LogState) -> KernelResult<()> {
         let entries = list_log_dir_filenames(table.store())?;
         let cleanup = log_state.cleanup_before().unwrap_or(0);
         for &v in log_state.checkpoints_at() {
@@ -2625,26 +2634,26 @@ mod tests {
     async fn try_read_json(
         store: &DynObjectStore,
         path: &Path,
-    ) -> DeltaResult<Option<serde_json::Value>> {
+    ) -> KernelResult<Option<serde_json::Value>> {
         let bytes = match store.get(path).await {
-            Ok(r) => r.bytes().await.map_err(delta_kernel::Error::from)?,
+            Ok(r) => r.bytes().await.map_err(delta_kernel::KernelError::from)?,
             Err(ObjectStoreError::NotFound { .. }) => return Ok(None),
-            Err(e) => return Err(delta_kernel::Error::from(e)),
+            Err(e) => return Err(delta_kernel::KernelError::from(e)),
         };
         serde_json::from_slice(&bytes)
             .map(Some)
-            .map_err(|e| delta_kernel::Error::generic(e.to_string()))
+            .map_err(|e| delta_kernel::KernelError::generic(e.to_string()))
     }
 
     /// Read and parse the `_last_checkpoint` hint, if present.
-    fn read_last_checkpoint_hint(store: &Arc<DynObjectStore>) -> DeltaResult<Option<HintFile>> {
+    fn read_last_checkpoint_hint(store: &Arc<DynObjectStore>) -> KernelResult<Option<HintFile>> {
         let store = store.clone();
         block_on_sync(move || async move {
             let path = Path::from("_delta_log/_last_checkpoint");
             match try_read_json(&store, &path).await? {
                 Some(parsed) => {
                     let version = parsed["version"].as_u64().ok_or_else(|| {
-                        delta_kernel::Error::generic("hint missing `version` field")
+                        delta_kernel::KernelError::generic("hint missing `version` field")
                     })?;
                     Ok(Some(HintFile { version }))
                 }
@@ -2654,32 +2663,32 @@ mod tests {
     }
 
     /// Read and parse a CRC file at `version`. Errors if the file is absent.
-    fn read_crc_json(store: &Arc<DynObjectStore>, version: u64) -> DeltaResult<serde_json::Value> {
+    fn read_crc_json(store: &Arc<DynObjectStore>, version: u64) -> KernelResult<serde_json::Value> {
         let store = store.clone();
         block_on_sync(move || async move {
             let path = Path::from(format!("_delta_log/{version:020}.crc"));
-            try_read_json(&store, &path)
-                .await?
-                .ok_or_else(|| delta_kernel::Error::generic(format!("CRC at v={version} missing")))
+            try_read_json(&store, &path).await?.ok_or_else(|| {
+                delta_kernel::KernelError::generic(format!("CRC at v={version} missing"))
+            })
         })
     }
 
     /// Helper: list filenames (basenames only) directly under `_delta_log/` in
     /// `store`. Returns just the leaf name so callers can match by suffix without
     /// dealing with `memory:///`-style path quirks.
-    fn list_log_dir_filenames(store: &Arc<DynObjectStore>) -> DeltaResult<Vec<String>> {
+    fn list_log_dir_filenames(store: &Arc<DynObjectStore>) -> KernelResult<Vec<String>> {
         list_dir_filenames(store, "_delta_log")
     }
 
     /// Helper: list filenames at an arbitrary prefix.
-    fn list_dir_filenames(store: &Arc<DynObjectStore>, prefix: &str) -> DeltaResult<Vec<String>> {
+    fn list_dir_filenames(store: &Arc<DynObjectStore>, prefix: &str) -> KernelResult<Vec<String>> {
         let store = store.clone();
         let prefix = Path::from(prefix);
         block_on_sync(move || async move {
             let result = store
                 .list_with_delimiter(Some(&prefix))
                 .await
-                .map_err(delta_kernel::Error::from)?;
+                .map_err(delta_kernel::KernelError::from)?;
             Ok(result
                 .objects
                 .into_iter()

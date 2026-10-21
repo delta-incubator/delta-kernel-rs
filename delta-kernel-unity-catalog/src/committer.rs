@@ -5,7 +5,8 @@ use delta_kernel::committer::{
     CommitMetadata, CommitResponse, CommitType, Committer, PublishMetadata,
 };
 use delta_kernel::{
-    DeltaResult, DeltaResultIterator, Engine, Error as DeltaError, FileMeta, FilteredEngineData,
+    Engine, FileMeta, FilteredEngineData, KernelError as DeltaError, KernelResult,
+    KernelResultIterator,
 };
 use tracing::{debug, info};
 use unity_catalog_delta_client_api::{
@@ -71,7 +72,7 @@ impl<C: UpdateTableClient> UCCommitter<C> {
 
     /// Validates that protocol features and metadata properties are correct for a UC
     /// catalog-managed table.
-    fn validate_catalog_managed_state(&self, commit_metadata: &CommitMetadata) -> DeltaResult<()> {
+    fn validate_catalog_managed_state(&self, commit_metadata: &CommitMetadata) -> KernelResult<()> {
         require!(
             commit_metadata.commit_type() != CommitType::UpgradeToCatalogManaged,
             errors::upgrade_downgrade_unsupported("upgrade")
@@ -114,7 +115,7 @@ impl<C: UpdateTableClient> UCCommitter<C> {
 
     /// Validates that this commit does not include ALTER TABLE changes (protocol, metadata,
     /// or clustering column changes).
-    fn validate_no_alter_table_changes(commit_metadata: &CommitMetadata) -> DeltaResult<()> {
+    fn validate_no_alter_table_changes(commit_metadata: &CommitMetadata) -> KernelResult<()> {
         require!(
             !commit_metadata.has_protocol_change(),
             errors::alter_table_unsupported("protocol")
@@ -135,9 +136,9 @@ impl<C: UpdateTableClient> UCCommitter<C> {
     fn commit_version_0(
         &self,
         engine: &dyn Engine,
-        actions: DeltaResultIterator<'_, FilteredEngineData>,
+        actions: KernelResultIterator<'_, FilteredEngineData>,
         commit_metadata: &CommitMetadata,
-    ) -> DeltaResult<CommitResponse> {
+    ) -> KernelResult<CommitResponse> {
         debug_assert!(
             commit_metadata.version() == 0,
             "commit_version_0 called with version {}",
@@ -150,12 +151,12 @@ impl<C: UpdateTableClient> UCCommitter<C> {
             Box::new(actions),
             false,
         ) {
-            Ok(()) => {
+            Ok(written_size) => {
                 info!("wrote version 0 commit file for UC table creation");
                 let file_meta = FileMeta::new(
                     published_commit_path,
                     commit_metadata.in_commit_timestamp(),
-                    0,
+                    written_size,
                 );
                 Ok(CommitResponse::Committed { file_meta })
             }
@@ -172,9 +173,9 @@ impl<C: UpdateTableClient> UCCommitter<C> {
     fn commit_version_non_zero(
         &self,
         engine: &dyn Engine,
-        actions: DeltaResultIterator<'_, FilteredEngineData>,
+        actions: KernelResultIterator<'_, FilteredEngineData>,
         commit_metadata: CommitMetadata,
-    ) -> DeltaResult<CommitResponse>
+    ) -> KernelResult<CommitResponse>
     where
         C: 'static,
     {
@@ -262,9 +263,9 @@ impl<C: UpdateTableClient + 'static> Committer for UCCommitter<C> {
     fn commit(
         &self,
         engine: &dyn Engine,
-        actions: DeltaResultIterator<'_, FilteredEngineData>,
+        actions: KernelResultIterator<'_, FilteredEngineData>,
         commit_metadata: CommitMetadata,
-    ) -> DeltaResult<CommitResponse> {
+    ) -> KernelResult<CommitResponse> {
         if commit_metadata.version() == 0 {
             return self.commit_version_0(engine, actions, &commit_metadata);
         }
@@ -275,7 +276,7 @@ impl<C: UpdateTableClient + 'static> Committer for UCCommitter<C> {
         true
     }
 
-    fn publish(&self, engine: &dyn Engine, publish_metadata: PublishMetadata) -> DeltaResult<()> {
+    fn publish(&self, engine: &dyn Engine, publish_metadata: PublishMetadata) -> KernelResult<()> {
         if publish_metadata.commits_to_publish().is_empty() {
             return Ok(());
         }
@@ -295,13 +296,13 @@ impl<C: UpdateTableClient + 'static> Committer for UCCommitter<C> {
 }
 
 /// Convert a `u64` to the `i64` the UC wire types use, erroring if it does not fit.
-fn u64_to_wire_i64(value: u64, field: &str) -> DeltaResult<i64> {
+fn u64_to_wire_i64(value: u64, field: &str) -> KernelResult<i64> {
     value
         .try_into()
         .map_err(|_| DeltaError::generic(format!("{field} does not fit into i64 for UC commit")))
 }
 
-fn staged_commit_file_name(path: &url::Url) -> DeltaResult<String> {
+fn staged_commit_file_name(path: &url::Url) -> KernelResult<String> {
     path.path_segments()
         .and_then(|mut segments| segments.next_back())
         .filter(|segment| !segment.is_empty())
@@ -314,9 +315,11 @@ mod tests {
     use std::collections::HashMap;
     use std::fs;
 
+    use delta_kernel::arrow::array::{Array, RecordBatch, StringArray};
     use delta_kernel::committer::{CatalogCommit, CommitMetadata};
+    use delta_kernel::engine::arrow_data::ArrowEngineData;
     use delta_kernel::object_store::local::LocalFileSystem;
-    use delta_kernel::Version;
+    use delta_kernel::{EngineData, FilteredEngineData, Version};
     use delta_kernel_default_engine::DefaultEngine;
     use unity_catalog_delta_client_api::error::Result;
 
@@ -366,13 +369,21 @@ mod tests {
         let commit_metadata = catalog_managed_commit_metadata(table_root.clone(), 0);
         let committer = test_committer();
         let engine = DefaultEngine::builder(Arc::new(LocalFileSystem::new())).build();
+        let action: Box<dyn EngineData> = Box::new(ArrowEngineData::new(
+            RecordBatch::try_from_iter(vec![(
+                "test",
+                Arc::new(StringArray::from(vec!["value"])) as Arc<dyn Array>,
+            )])
+            .unwrap(),
+        ));
+        let actions = Box::new(std::iter::once(Ok(
+            FilteredEngineData::with_all_rows_selected(action),
+        )));
 
         // Create the _delta_log directory
         fs::create_dir_all(tmp_dir.path().join("_delta_log")).unwrap();
 
-        let result = committer
-            .commit(&engine, Box::new(std::iter::empty()), commit_metadata)
-            .unwrap();
+        let result = committer.commit(&engine, actions, commit_metadata).unwrap();
         match result {
             CommitResponse::Committed { file_meta } => {
                 assert!(
@@ -383,10 +394,10 @@ mod tests {
                     "expected published path for version 0, got: {}",
                     file_meta.location
                 );
-                assert_eq!(file_meta.size, 0);
-                // Verify the file was written to disk
                 let commit_path = tmp_dir.path().join("_delta_log/00000000000000000000.json");
-                assert!(commit_path.exists(), "000.json should exist on disk");
+                let stored_size = fs::metadata(&commit_path).unwrap().len();
+                assert!(file_meta.size > 0);
+                assert_eq!(file_meta.size, stored_size);
             }
             CommitResponse::Conflict { .. } => {
                 panic!("expected Committed for version 0, got Conflict")

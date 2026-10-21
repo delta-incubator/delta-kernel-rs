@@ -12,7 +12,7 @@ use crate::schema::{
     ArrayType, ColumnName, DataType, MapType, PrimitiveType, Schema, StructField, StructType,
 };
 use crate::transforms::{transform_output_type, SchemaTransform};
-use crate::DeltaResult;
+use crate::KernelResult;
 
 /// Generates the expected schema for file statistics.
 ///
@@ -27,15 +27,26 @@ use crate::DeltaResult;
 /// It tracks the count of null values for each column. All leaf fields from the base schema
 /// are converted to LONG type (since null counts are always integers).
 ///
-/// Note: Array, Map, and Variant types are included in `nullCount` (null counts are meaningful
-/// for these types) but excluded from `minValues`/`maxValues` (not eligible for data skipping).
-/// They count as leaf columns against the indexed column limit. The `nullCount` schema also
+/// Note: Array and Map types are included in `nullCount` (null counts are meaningful for these
+/// types) but excluded from `minValues`/`maxValues` (not eligible for data skipping). Variant is
+/// treated the same by default; [`StatsConfig::variant_min_max`] opts it into `minValues`/
+/// `maxValues`.
+#[cfg_attr(
+    feature = "geo-type-in-dev",
+    doc = "[`StatsConfig::geometry_min_max`] requests Geometry bounds."
+)]
+#[cfg_attr(
+    not(feature = "geo-type-in-dev"),
+    doc = "The Geometry bounds option requires `geo-type-in-dev`."
+)]
+/// All of them count as leaf columns against the indexed column limit. The `nullCount` schema also
 /// includes primitive types that aren't eligible for min/max (e.g., Boolean, Binary) since null
 /// counts are still meaningful for those types.
 ///
 /// The `minValues`/`maxValues` struct fields are also nested structures mirroring the table's
-/// column hierarchy. They additionally filter out leaf fields with non-eligible data types
-/// (e.g., Boolean, Binary) via [`is_skipping_eligible_datatype`].
+/// column hierarchy. Scalar fields are filtered via [`is_skipping_eligible_datatype`] (excluding
+/// e.g. Boolean and Binary). Variant and Geometry are governed by their separate options above;
+/// including their statistics does not make them eligible for scalar min/max pruning.
 ///
 /// ## Stats value rules
 ///
@@ -43,10 +54,14 @@ use crate::DeltaResult;
 ///
 /// - `numRecords`: the total number of rows in the file.
 /// - `nullCount`: the number of null values in the column. Always present for included columns.
-/// - `minValues`/`maxValues`: the smallest/largest non-null value in the column. When a column
-///   contains only null values, there are no non-null values to aggregate, so the column has no
-///   entry in `minValues`/`maxValues`. The `nullCount` entry is still present and equals
+/// - Scalar `minValues`/`maxValues`: the smallest/largest non-null value in the column. When a
+///   column contains only null values, there are no non-null values to aggregate, so the column has
+///   no entry in `minValues`/`maxValues`. The `nullCount` entry is still present and equals
 ///   `numRecords`.
+/// - Geometry `minValues`/`maxValues`: the lower-left `(min_x, min_y)` and upper-right `(max_x,
+///   max_y)` corner points, respectively, of the column's axis-aligned 2D bounding rectangle for
+///   the file, expressed in the column's CRS. These coordinate bounds do not define scalar ordering
+///   for Geometry values.
 /// - String min/max values must be truncated to a prefix no longer than 32 characters. For min
 ///   values, simple prefix truncation is valid (the truncated value is always <= the original). For
 ///   max values, a tie-breaker character must be appended after truncation to ensure the result is
@@ -134,7 +149,7 @@ pub(crate) fn expected_stats_schema(
     config: &StatsConfig<'_>,
     required_columns: Option<&[ColumnName]>,
     requested_columns: Option<&[ColumnName]>,
-) -> DeltaResult<Schema> {
+) -> KernelResult<Schema> {
     let mut fields = Vec::with_capacity(5);
     fields.push(StructField::nullable(NUM_RECORDS, DataType::LONG));
 
@@ -156,7 +171,11 @@ pub(crate) fn expected_stats_schema(
         ));
 
         // include only min/max skipping eligible fields (data types)
-        let mut min_max_transform = MinMaxStatsTransform;
+        let mut min_max_transform = MinMaxStatsTransform {
+            variant_min_max: config.variant_min_max,
+            #[cfg(feature = "geo-type-in-dev")]
+            geometry_min_max: config.geometry_min_max,
+        };
         if let Some(min_max_schema) = min_max_transform.transform_struct(&base_schema) {
             let min_max_schema = min_max_schema.into_owned();
             fields.push(StructField::nullable(MIN_VALUES, min_max_schema.clone()));
@@ -344,25 +363,35 @@ impl<'a> SchemaTransform<'a> for BaseStatsTransform<'_> {
 // removes all fields with non eligible data types
 //
 // should only be applied to schema processed via `BaseStatsTransform`.
-#[allow(unused)]
-struct MinMaxStatsTransform;
+struct MinMaxStatsTransform {
+    variant_min_max: bool,
+    #[cfg(feature = "geo-type-in-dev")]
+    geometry_min_max: bool,
+}
 
 impl<'a> SchemaTransform<'a> for MinMaxStatsTransform {
     transform_output_type!(|'a, T| Option<Cow<'a, T>>);
 
-    // Array, Map, and Variant fields pass through BaseStatsTransform (for nullCount) but must
-    // be excluded from min/max stats.
+    // Array and Map fields pass through BaseStatsTransform (for nullCount) but must be excluded
+    // from min/max stats.
     fn transform_array(&mut self, _: &'a ArrayType) -> Option<Cow<'a, ArrayType>> {
         None
     }
     fn transform_map(&mut self, _: &'a MapType) -> Option<Cow<'a, MapType>> {
         None
     }
-    fn transform_variant(&mut self, _: &'a StructType) -> Option<Cow<'a, StructType>> {
-        None
+
+    /// Not recursed into: the `metadata` and `value` binaries are the statistic's own encoding, not
+    /// columns that carry statistics of their own.
+    fn transform_variant(&mut self, stype: &'a StructType) -> Option<Cow<'a, StructType>> {
+        self.variant_min_max.then_some(Cow::Borrowed(stype))
     }
 
     fn transform_primitive(&mut self, ptype: &'a PrimitiveType) -> Option<Cow<'a, PrimitiveType>> {
+        #[cfg(feature = "geo-type-in-dev")]
+        if matches!(ptype, PrimitiveType::Geometry(_)) {
+            return self.geometry_min_max.then_some(Cow::Borrowed(ptype));
+        }
         is_skipping_eligible_datatype(ptype).then_some(Cow::Borrowed(ptype))
     }
 }
@@ -403,7 +432,8 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
-    use crate::schema::ArrayType;
+    use crate::expressions::column_name;
+    use crate::schema::schema;
     #[cfg(feature = "geo-type-in-dev")]
     use crate::schema::{EdgeInterpolationAlgorithm, GeographyType, GeometryType};
     use crate::table_properties::TableProperties;
@@ -422,24 +452,25 @@ mod tests {
         StatsConfig {
             data_skipping_stats_columns: properties.data_skipping_stats_columns.as_deref(),
             data_skipping_num_indexed_cols: properties.data_skipping_num_indexed_cols,
+            ..Default::default()
         }
     }
 
     /// Builds an expected stats schema from the given null count and min/max nested schemas.
     fn expected_stats(null_count: StructType, min_max: StructType) -> StructType {
-        StructType::new_unchecked([
-            StructField::nullable(NUM_RECORDS, DataType::LONG),
-            StructField::nullable(NULL_COUNT, null_count),
-            StructField::nullable(MIN_VALUES, min_max.clone()),
-            StructField::nullable(MAX_VALUES, min_max),
-            StructField::nullable(TIGHT_BOUNDS, DataType::BOOLEAN),
-        ])
+        schema! {
+            nullable NUM_RECORDS: LONG,
+            nullable NULL_COUNT: (null_count),
+            nullable MIN_VALUES: (min_max.clone()),
+            nullable MAX_VALUES: (min_max),
+            nullable TIGHT_BOUNDS: BOOLEAN,
+        }
     }
 
     #[test]
     fn test_stats_schema_simple() {
         let properties: TableProperties = [("key", "value")].into();
-        let file_schema = StructType::new_unchecked([StructField::nullable("id", DataType::LONG)]);
+        let file_schema = schema! { nullable "id": LONG };
 
         let stats_schema = expected_stats_schema(
             &file_schema,
@@ -457,14 +488,13 @@ mod tests {
     fn test_stats_schema_nested() {
         let properties: TableProperties = [("key", "value")].into();
 
-        let user_struct = StructType::new_unchecked([
-            StructField::not_null("name", DataType::STRING),
-            StructField::nullable("age", DataType::INTEGER),
-        ]);
-        let file_schema = StructType::new_unchecked([
-            StructField::not_null("id", DataType::LONG),
-            StructField::not_null("user", user_struct.clone()),
-        ]);
+        let file_schema = schema! {
+            not_null "id": LONG,
+            not_null "user": {
+                not_null "name": STRING,
+                nullable "age": INTEGER,
+            },
+        };
         let stats_schema = expected_stats_schema(
             &file_schema,
             &stats_config_from_table_properties(&properties),
@@ -498,17 +528,14 @@ mod tests {
         //   - "tags" (ARRAY) - NOT eligible for data skipping
         //   - "score" (DOUBLE) - eligible for data skipping
 
-        // Create array type for a field that's not eligible for data skipping
-        let array_type = DataType::from(ArrayType::new(DataType::STRING, false));
-        let metadata_struct = StructType::new_unchecked([
-            StructField::nullable("name", DataType::STRING),
-            StructField::nullable("tags", array_type),
-            StructField::nullable("score", DataType::DOUBLE),
-        ]);
-        let file_schema = StructType::new_unchecked([
-            StructField::nullable("id", DataType::LONG),
-            StructField::nullable("metadata", metadata_struct.clone()),
-        ]);
+        let file_schema = schema! {
+            nullable "id": LONG,
+            nullable "metadata": {
+                nullable "name": STRING,
+                nullable "tags": [ not_null STRING ],
+                nullable "score": DOUBLE,
+            },
+        };
 
         let stats_schema = expected_stats_schema(
             &file_schema,
@@ -519,24 +546,22 @@ mod tests {
         .unwrap();
 
         // nullCount includes array fields (tags) as leaf columns
-        let expected_null_nested = StructType::new_unchecked([
-            StructField::nullable("name", DataType::LONG),
-            StructField::nullable("tags", DataType::LONG),
-            StructField::nullable("score", DataType::LONG),
-        ]);
-        let expected_null = StructType::new_unchecked([
-            StructField::nullable("id", DataType::LONG),
-            StructField::nullable("metadata", expected_null_nested),
-        ]);
+        let expected_null = schema! {
+            nullable "id": LONG,
+            nullable "metadata": {
+                nullable "name": LONG,
+                nullable "tags": LONG,
+                nullable "score": LONG,
+            },
+        };
 
-        let expected_nested = StructType::new_unchecked([
-            StructField::nullable("name", DataType::STRING),
-            StructField::nullable("score", DataType::DOUBLE),
-        ]);
-        let expected_fields = StructType::new_unchecked([
-            StructField::nullable("id", DataType::LONG),
-            StructField::nullable("metadata", expected_nested),
-        ]);
+        let expected_fields = schema! {
+            nullable "id": LONG,
+            nullable "metadata": {
+                nullable "name": STRING,
+                nullable "score": DOUBLE,
+            },
+        };
 
         let expected = expected_stats(expected_null, expected_fields);
 
@@ -551,14 +576,13 @@ mod tests {
         )]
         .into();
 
-        let user_struct = StructType::new_unchecked([
-            StructField::nullable("name", DataType::STRING),
-            StructField::nullable("age", DataType::INTEGER),
-        ]);
-        let file_schema = StructType::new_unchecked([
-            StructField::nullable("id", DataType::LONG),
-            StructField::nullable("user.info", user_struct.clone()),
-        ]);
+        let file_schema = schema! {
+            nullable "id": LONG,
+            nullable "user.info": {
+                nullable "name": STRING,
+                nullable "age": INTEGER,
+            },
+        };
 
         let stats_schema = expected_stats_schema(
             &file_schema,
@@ -568,10 +592,11 @@ mod tests {
         )
         .unwrap();
 
-        let expected_nested =
-            StructType::new_unchecked([StructField::nullable("name", DataType::STRING)]);
-        let expected_fields =
-            StructType::new_unchecked([StructField::nullable("user.info", expected_nested)]);
+        let expected_fields = schema! {
+            nullable "user.info": {
+                nullable "name": STRING,
+            },
+        };
         let null_count = NullCountStatsTransform
             .transform_struct(&expected_fields)
             .into_owned();
@@ -591,15 +616,12 @@ mod tests {
         )]
         .into();
 
-        let file_schema = StructType::new_unchecked([
-            StructField::nullable("id", DataType::LONG),
-            StructField::nullable("tags", ArrayType::new(DataType::STRING, false)),
-            StructField::nullable(
-                "metadata",
-                MapType::new(DataType::STRING, DataType::STRING, true),
-            ),
-            StructField::nullable("name", DataType::STRING),
-        ]);
+        let file_schema = schema! {
+            nullable "id": LONG,
+            nullable "tags": [ not_null STRING ],
+            nullable "metadata": { STRING => nullable STRING },
+            nullable "name": STRING,
+        };
 
         let stats_schema = expected_stats_schema(
             &file_schema,
@@ -610,22 +632,15 @@ mod tests {
         .unwrap();
 
         // nullCount: only id and tags (explicitly requested)
-        let expected_null_count = StructType::new_unchecked([
-            StructField::nullable("id", DataType::LONG),
-            StructField::nullable("tags", DataType::LONG),
-        ]);
+        let expected_null_count = schema! {
+            nullable "id": LONG,
+            nullable "tags": LONG,
+        };
 
         // minValues/maxValues: only id (tags excluded by MinMaxStatsTransform)
-        let expected_min_max =
-            StructType::new_unchecked([StructField::nullable("id", DataType::LONG)]);
+        let expected_min_max = schema! { nullable "id": LONG };
 
-        let expected = StructType::new_unchecked([
-            StructField::nullable(NUM_RECORDS, DataType::LONG),
-            StructField::nullable(NULL_COUNT, expected_null_count),
-            StructField::nullable(MIN_VALUES, expected_min_max.clone()),
-            StructField::nullable(MAX_VALUES, expected_min_max),
-            StructField::nullable(TIGHT_BOUNDS, DataType::BOOLEAN),
-        ]);
+        let expected = expected_stats(expected_null_count, expected_min_max);
 
         assert_eq!(&expected, &stats_schema);
     }
@@ -638,10 +653,10 @@ mod tests {
         )]
         .into();
 
-        let logical_schema = StructType::new_unchecked([
-            StructField::nullable("name", DataType::STRING),
-            StructField::nullable("age", DataType::INTEGER),
-        ]);
+        let logical_schema = schema! {
+            nullable "name": STRING,
+            nullable "age": INTEGER,
+        };
 
         let stats_schema = expected_stats_schema(
             &logical_schema,
@@ -651,8 +666,7 @@ mod tests {
         )
         .unwrap();
 
-        let expected_fields =
-            StructType::new_unchecked([StructField::nullable("name", DataType::STRING)]);
+        let expected_fields = schema! { nullable "name": STRING };
         let null_count = NullCountStatsTransform
             .transform_struct(&expected_fields)
             .into_owned();
@@ -671,12 +685,12 @@ mod tests {
         // - "is_active" (BOOLEAN) - eligible for null count but NOT for min/max
         // - "metadata" (BINARY) - eligible for null count but NOT for min/max
         // - "duration" (INTERVAL_DAY_TIME) - eligible for null count but NOT for min/max
-        let file_schema = StructType::new_unchecked([
-            StructField::nullable("id", DataType::LONG),
-            StructField::nullable("is_active", DataType::BOOLEAN),
-            StructField::nullable("metadata", DataType::BINARY),
-            StructField::nullable("duration", DataType::INTERVAL_DAY_TIME),
-        ]);
+        let file_schema = schema! {
+            nullable "id": LONG,
+            nullable "is_active": BOOLEAN,
+            nullable "metadata": BINARY,
+            nullable "duration": INTERVAL_DAY_TIME,
+        };
 
         let stats_schema = expected_stats_schema(
             &file_schema,
@@ -687,16 +701,15 @@ mod tests {
         .unwrap();
 
         // Expected nullCount schema: all fields converted to LONG
-        let expected_null_count = StructType::new_unchecked([
-            StructField::nullable("id", DataType::LONG),
-            StructField::nullable("is_active", DataType::LONG),
-            StructField::nullable("metadata", DataType::LONG),
-            StructField::nullable("duration", DataType::LONG),
-        ]);
+        let expected_null_count = schema! {
+            nullable "id": LONG,
+            nullable "is_active": LONG,
+            nullable "metadata": LONG,
+            nullable "duration": LONG,
+        };
 
         // Expected minValues/maxValues schema: only eligible fields
-        let expected_min_max =
-            StructType::new_unchecked([StructField::nullable("id", DataType::LONG)]);
+        let expected_min_max = schema! { nullable "id": LONG };
 
         let expected = expected_stats(expected_null_count, expected_min_max);
 
@@ -709,18 +722,16 @@ mod tests {
 
         // Create a nested schema where some nested fields are eligible for min/max and others
         // aren't
-        let user_struct = StructType::new_unchecked([
-            StructField::nullable("name", DataType::STRING), // eligible for min/max
-            StructField::nullable("is_admin", DataType::BOOLEAN), // NOT eligible for min/max
-            StructField::nullable("age", DataType::INTEGER), // eligible for min/max
-            StructField::nullable("profile_pic", DataType::BINARY), // NOT eligible for min/max
-        ]);
-
-        let file_schema = StructType::new_unchecked([
-            StructField::nullable("id", DataType::LONG),
-            StructField::nullable("user", user_struct.clone()),
-            StructField::nullable("is_deleted", DataType::BOOLEAN), // NOT eligible for min/max
-        ]);
+        let file_schema = schema! {
+            nullable "id": LONG,
+            nullable "user": {
+                nullable "name": STRING,
+                nullable "is_admin": BOOLEAN,
+                nullable "age": INTEGER,
+                nullable "profile_pic": BINARY,
+            },
+            nullable "is_deleted": BOOLEAN,
+        };
 
         let stats_schema = expected_stats_schema(
             &file_schema,
@@ -731,27 +742,25 @@ mod tests {
         .unwrap();
 
         // Expected nullCount schema: all fields converted to LONG, maintaining structure
-        let expected_null_user = StructType::new_unchecked([
-            StructField::nullable("name", DataType::LONG),
-            StructField::nullable("is_admin", DataType::LONG),
-            StructField::nullable("age", DataType::LONG),
-            StructField::nullable("profile_pic", DataType::LONG),
-        ]);
-        let expected_null_count = StructType::new_unchecked([
-            StructField::nullable("id", DataType::LONG),
-            StructField::nullable("user", expected_null_user),
-            StructField::nullable("is_deleted", DataType::LONG),
-        ]);
+        let expected_null_count = schema! {
+            nullable "id": LONG,
+            nullable "user": {
+                nullable "name": LONG,
+                nullable "is_admin": LONG,
+                nullable "age": LONG,
+                nullable "profile_pic": LONG,
+            },
+            nullable "is_deleted": LONG,
+        };
 
         // Expected minValues/maxValues schema: only eligible fields
-        let expected_minmax_user = StructType::new_unchecked([
-            StructField::nullable("name", DataType::STRING),
-            StructField::nullable("age", DataType::INTEGER),
-        ]);
-        let expected_min_max = StructType::new_unchecked([
-            StructField::nullable("id", DataType::LONG),
-            StructField::nullable("user", expected_minmax_user),
-        ]);
+        let expected_min_max = schema! {
+            nullable "id": LONG,
+            nullable "user": {
+                nullable "name": STRING,
+                nullable "age": INTEGER,
+            },
+        };
 
         let expected = expected_stats(expected_null_count, expected_min_max);
 
@@ -763,12 +772,12 @@ mod tests {
         let properties: TableProperties = [("key", "value")].into();
 
         // Create a schema with only fields that are NOT eligible for min/max skipping
-        let file_schema = StructType::new_unchecked([
-            StructField::nullable("is_active", DataType::BOOLEAN),
-            StructField::nullable("metadata", DataType::BINARY),
-            StructField::nullable("duration", DataType::INTERVAL_DAY_TIME),
-            StructField::nullable("tags", ArrayType::new(DataType::STRING, false)),
-        ]);
+        let file_schema = schema! {
+            nullable "is_active": BOOLEAN,
+            nullable "metadata": BINARY,
+            nullable "duration": INTERVAL_DAY_TIME,
+            nullable "tags": [ not_null STRING ],
+        };
 
         let stats_schema = expected_stats_schema(
             &file_schema,
@@ -779,19 +788,19 @@ mod tests {
         .unwrap();
 
         // nullCount includes all selected non-struct fields
-        let expected_null_count = StructType::new_unchecked([
-            StructField::nullable("is_active", DataType::LONG),
-            StructField::nullable("metadata", DataType::LONG),
-            StructField::nullable("duration", DataType::LONG),
-            StructField::nullable("tags", DataType::LONG),
-        ]);
+        let expected_null_count = schema! {
+            nullable "is_active": LONG,
+            nullable "metadata": LONG,
+            nullable "duration": LONG,
+            nullable "tags": LONG,
+        };
 
         // minValues/maxValues: no fields are eligible
-        let expected = StructType::new_unchecked([
-            StructField::nullable(NUM_RECORDS, DataType::LONG),
-            StructField::nullable(NULL_COUNT, expected_null_count),
-            StructField::nullable(TIGHT_BOUNDS, DataType::BOOLEAN),
-        ]);
+        let expected = schema! {
+            nullable NUM_RECORDS: LONG,
+            nullable NULL_COUNT: (expected_null_count),
+            nullable TIGHT_BOUNDS: BOOLEAN,
+        };
 
         assert_eq!(&expected, &stats_schema);
     }
@@ -805,10 +814,10 @@ mod tests {
         #[case] property_value: &str,
     ) {
         let properties: TableProperties = [(property_name, property_value)].into();
-        let file_schema = StructType::new_unchecked([
-            StructField::nullable("iv", interval),
-            StructField::nullable("value", DataType::LONG),
-        ]);
+        let file_schema = schema! {
+            nullable "iv": (interval),
+            nullable "value": LONG,
+        };
 
         let stats_schema = expected_stats_schema(
             &file_schema,
@@ -818,14 +827,13 @@ mod tests {
         )
         .unwrap();
 
-        let expected = StructType::new_unchecked([
-            StructField::nullable(NUM_RECORDS, DataType::LONG),
-            StructField::nullable(
-                NULL_COUNT,
-                StructType::new_unchecked([StructField::nullable("iv", DataType::LONG)]),
-            ),
-            StructField::nullable(TIGHT_BOUNDS, DataType::BOOLEAN),
-        ]);
+        let expected = schema! {
+            nullable NUM_RECORDS: LONG,
+            nullable NULL_COUNT: {
+                nullable "iv": LONG,
+            },
+            nullable TIGHT_BOUNDS: BOOLEAN,
+        };
         assert_eq!(expected, stats_schema);
     }
 
@@ -842,16 +850,13 @@ mod tests {
         )]
         .into();
 
-        let file_schema = StructType::new_unchecked([
-            StructField::nullable("tags", ArrayType::new(DataType::STRING, false)),
-            StructField::nullable(
-                "metadata",
-                MapType::new(DataType::STRING, DataType::STRING, true),
-            ),
-            StructField::nullable("v", DataType::unshredded_variant()),
-            StructField::nullable("col1", DataType::LONG),
-            StructField::nullable("col2", DataType::STRING),
-        ]);
+        let file_schema = schema! {
+            nullable "tags": [ not_null STRING ],
+            nullable "metadata": { STRING => nullable STRING },
+            nullable "v": unshredded_variant(),
+            nullable "col1": LONG,
+            nullable "col2": STRING,
+        };
 
         let stats_schema = expected_stats_schema(
             &file_schema,
@@ -863,21 +868,137 @@ mod tests {
 
         // nullCount includes array, map, and variant (the first 3 leaf columns).
         // col1/col2 are excluded by the limit.
-        let expected_null_count = StructType::new_unchecked([
-            StructField::nullable("tags", DataType::LONG),
-            StructField::nullable("metadata", DataType::LONG),
-            StructField::nullable("v", DataType::LONG),
-        ]);
+        let expected_null_count = schema! {
+            nullable "tags": LONG,
+            nullable "metadata": LONG,
+            nullable "v": LONG,
+        };
 
         // minValues/maxValues: all 3 complex types are excluded by MinMaxStatsTransform,
         // and col1/col2 are past the limit, so no min/max fields at all.
-        let expected = StructType::new_unchecked([
-            StructField::nullable(NUM_RECORDS, DataType::LONG),
-            StructField::nullable(NULL_COUNT, expected_null_count),
-            StructField::nullable(TIGHT_BOUNDS, DataType::BOOLEAN),
-        ]);
+        let expected = schema! {
+            nullable NUM_RECORDS: LONG,
+            nullable NULL_COUNT: (expected_null_count),
+            nullable TIGHT_BOUNDS: BOOLEAN,
+        };
 
         assert_eq!(&expected, &stats_schema);
+    }
+
+    /// `nullCount` stays a scalar LONG whether or not variant min/max is enabled.
+    #[test]
+    fn test_stats_schema_variant_min_max_is_opt_in() {
+        let properties: TableProperties = [("key", "value")].into();
+        let file_schema = schema! {
+            nullable "id": LONG,
+            nullable "v": unshredded_variant(),
+        };
+        let stats_schema = |variant_min_max| {
+            let config = StatsConfig {
+                variant_min_max,
+                ..stats_config_from_table_properties(&properties)
+            };
+            expected_stats_schema(&file_schema, &config, None, None).unwrap()
+        };
+        let expected_null_count = schema! {
+            nullable "id": LONG,
+            nullable "v": LONG,
+        };
+
+        assert_eq!(
+            stats_schema(false),
+            expected_stats(expected_null_count.clone(), schema! { nullable "id": LONG },),
+        );
+        assert_eq!(
+            stats_schema(true),
+            expected_stats(
+                expected_null_count,
+                schema! {
+                    nullable "id": LONG,
+                    nullable "v": unshredded_variant(),
+                },
+            ),
+        );
+    }
+
+    #[cfg(feature = "geo-type-in-dev")]
+    #[rstest]
+    fn geometry_and_variant_bounds_are_independent_of_scalar_eligibility(
+        #[values(false, true)] geometry_min_max: bool,
+        #[values(false, true)] variant_min_max: bool,
+    ) {
+        let geometry = DataType::from(GeometryType::try_new("EPSG:4326").unwrap());
+        let nested_geometry = DataType::from(GeometryType::try_new("EPSG:3857").unwrap());
+        let file_schema = schema! {
+            not_null "id": LONG,
+            not_null "g": (geometry.clone()),
+            nullable "v": unshredded_variant(),
+            not_null "nested": {
+                not_null "g": (nested_geometry.clone()),
+            },
+        };
+        let config = StatsConfig {
+            geometry_min_max,
+            variant_min_max,
+            ..Default::default()
+        };
+        let actual = expected_stats_schema(&file_schema, &config, None, None).unwrap();
+        let null_count = schema! {
+            nullable "id": LONG,
+            nullable "g": LONG,
+            nullable "v": LONG,
+            nullable "nested": {
+                nullable "g": LONG,
+            },
+        };
+        let mut min_max = vec![StructField::nullable("id", DataType::LONG)];
+        if geometry_min_max {
+            min_max.push(StructField::nullable("g", geometry));
+        }
+        if variant_min_max {
+            min_max.push(StructField::nullable("v", DataType::unshredded_variant()));
+        }
+        if geometry_min_max {
+            min_max.push(StructField::nullable(
+                "nested",
+                schema! { nullable "g": (nested_geometry) },
+            ));
+        }
+        assert_eq!(
+            actual,
+            expected_stats(null_count, StructType::try_new(min_max).unwrap())
+        );
+    }
+
+    #[cfg(feature = "geo-type-in-dev")]
+    #[rstest]
+    fn geometry_min_max_does_not_produce_geography_stat(
+        #[values(false, true)] geometry_min_max: bool,
+        #[values(false, true)] variant_min_max: bool,
+    ) {
+        let geography =
+            GeographyType::try_new("EPSG:4326", EdgeInterpolationAlgorithm::Spherical).unwrap();
+        let file_schema = schema! {
+            nullable "geography": (geography.clone()),
+            nullable "nested": { nullable "geography": (geography) },
+        };
+        let config = StatsConfig {
+            geometry_min_max,
+            variant_min_max,
+            ..Default::default()
+        };
+        let actual = expected_stats_schema(&file_schema, &config, None, None).unwrap();
+        assert_eq!(
+            actual,
+            schema! {
+                nullable NUM_RECORDS: LONG,
+                nullable NULL_COUNT: {
+                    nullable "geography": LONG,
+                    nullable "nested": { nullable "geography": LONG },
+                },
+                nullable TIGHT_BOUNDS: BOOLEAN,
+            }
+        );
     }
 
     #[test]
@@ -891,11 +1012,11 @@ mod tests {
         )]
         .into();
 
-        let file_schema = StructType::new_unchecked([
-            StructField::nullable("id", DataType::LONG),
-            StructField::nullable("tags", ArrayType::new(DataType::STRING, false)),
-            StructField::nullable("name", DataType::STRING),
-        ]);
+        let file_schema = schema! {
+            nullable "id": LONG,
+            nullable "tags": [ not_null STRING ],
+            nullable "name": STRING,
+        };
 
         let stats_schema = expected_stats_schema(
             &file_schema,
@@ -906,22 +1027,15 @@ mod tests {
         .unwrap();
 
         // nullCount: id and tags (first 2 leaf columns). name is excluded.
-        let expected_null_count = StructType::new_unchecked([
-            StructField::nullable("id", DataType::LONG),
-            StructField::nullable("tags", DataType::LONG),
-        ]);
+        let expected_null_count = schema! {
+            nullable "id": LONG,
+            nullable "tags": LONG,
+        };
 
         // minValues/maxValues: only id (tags excluded by MinMaxStatsTransform, name past limit)
-        let expected_min_max =
-            StructType::new_unchecked([StructField::nullable("id", DataType::LONG)]);
+        let expected_min_max = schema! { nullable "id": LONG };
 
-        let expected = StructType::new_unchecked([
-            StructField::nullable(NUM_RECORDS, DataType::LONG),
-            StructField::nullable(NULL_COUNT, expected_null_count),
-            StructField::nullable(MIN_VALUES, expected_min_max.clone()),
-            StructField::nullable(MAX_VALUES, expected_min_max),
-            StructField::nullable(TIGHT_BOUNDS, DataType::BOOLEAN),
-        ]);
+        let expected = expected_stats(expected_null_count, expected_min_max);
 
         assert_eq!(&expected, &stats_schema);
     }
@@ -932,28 +1046,24 @@ mod tests {
     fn test_stats_column_names_default() {
         let properties: TableProperties = [("key", "value")].into();
 
-        let user_struct = StructType::new_unchecked([
-            StructField::nullable("name", DataType::STRING),
-            StructField::nullable("age", DataType::INTEGER),
-        ]);
-        let file_schema = StructType::new_unchecked([
-            StructField::nullable("id", DataType::LONG),
-            StructField::nullable("user", user_struct),
-        ]);
-
-        let config = StatsConfig {
-            data_skipping_stats_columns: properties.data_skipping_stats_columns.as_deref(),
-            data_skipping_num_indexed_cols: properties.data_skipping_num_indexed_cols,
+        let file_schema = schema! {
+            nullable "id": LONG,
+            nullable "user": {
+                nullable "name": STRING,
+                nullable "age": INTEGER,
+            },
         };
+
+        let config = stats_config_from_table_properties(&properties);
         let columns = stats_column_names(&file_schema, &config, None);
 
         // With default settings, all leaf columns should be included
         assert_eq!(
             columns,
             vec![
-                ColumnName::new(["id"]),
-                ColumnName::new(["user", "name"]),
-                ColumnName::new(["user", "age"]),
+                column_name!("id"),
+                column_name!("user.name"),
+                column_name!("user.age"),
             ]
         );
     }
@@ -966,24 +1076,18 @@ mod tests {
         )]
         .into();
 
-        let file_schema = StructType::new_unchecked([
-            StructField::nullable("a", DataType::LONG),
-            StructField::nullable("b", DataType::STRING),
-            StructField::nullable("c", DataType::INTEGER),
-            StructField::nullable("d", DataType::DOUBLE),
-        ]);
-
-        let config = StatsConfig {
-            data_skipping_stats_columns: properties.data_skipping_stats_columns.as_deref(),
-            data_skipping_num_indexed_cols: properties.data_skipping_num_indexed_cols,
+        let file_schema = schema! {
+            nullable "a": LONG,
+            nullable "b": STRING,
+            nullable "c": INTEGER,
+            nullable "d": DOUBLE,
         };
+
+        let config = stats_config_from_table_properties(&properties);
         let columns = stats_column_names(&file_schema, &config, None);
 
         // Only first 2 columns should be included
-        assert_eq!(
-            columns,
-            vec![ColumnName::new(["a"]), ColumnName::new(["b"]),]
-        );
+        assert_eq!(columns, vec![column_name!("a"), column_name!("b"),]);
     }
 
     #[test]
@@ -994,59 +1098,46 @@ mod tests {
         )]
         .into();
 
-        let user_struct = StructType::new_unchecked([
-            StructField::nullable("name", DataType::STRING),
-            StructField::nullable("age", DataType::INTEGER),
-        ]);
-        let file_schema = StructType::new_unchecked([
-            StructField::nullable("id", DataType::LONG),
-            StructField::nullable("user", user_struct),
-            StructField::nullable("extra", DataType::STRING),
-        ]);
-
-        let config = StatsConfig {
-            data_skipping_stats_columns: properties.data_skipping_stats_columns.as_deref(),
-            data_skipping_num_indexed_cols: properties.data_skipping_num_indexed_cols,
+        let file_schema = schema! {
+            nullable "id": LONG,
+            nullable "user": {
+                nullable "name": STRING,
+                nullable "age": INTEGER,
+            },
+            nullable "extra": STRING,
         };
+
+        let config = stats_config_from_table_properties(&properties);
         let columns = stats_column_names(&file_schema, &config, None);
 
         // Only specified columns should be included (user.name and extra excluded)
-        assert_eq!(
-            columns,
-            vec![ColumnName::new(["id"]), ColumnName::new(["user", "age"]),]
-        );
+        assert_eq!(columns, vec![column_name!("id"), column_name!("user.age"),]);
     }
 
     #[test]
     fn test_stats_column_names_includes_complex_types() {
         let properties: TableProperties = [("key", "value")].into();
 
-        let file_schema = StructType::new_unchecked([
-            StructField::nullable("id", DataType::LONG),
-            StructField::nullable("tags", ArrayType::new(DataType::STRING, false)),
-            StructField::nullable(
-                "metadata",
-                MapType::new(DataType::STRING, DataType::STRING, true),
-            ),
-            StructField::nullable("v", DataType::unshredded_variant()),
-            StructField::nullable("name", DataType::STRING),
-        ]);
-
-        let config = StatsConfig {
-            data_skipping_stats_columns: properties.data_skipping_stats_columns.as_deref(),
-            data_skipping_num_indexed_cols: properties.data_skipping_num_indexed_cols,
+        let file_schema = schema! {
+            nullable "id": LONG,
+            nullable "tags": [ not_null STRING ],
+            nullable "metadata": { STRING => nullable STRING },
+            nullable "v": unshredded_variant(),
+            nullable "name": STRING,
         };
+
+        let config = stats_config_from_table_properties(&properties);
         let columns = stats_column_names(&file_schema, &config, None);
 
         // Array, Map, and Variant are leaf columns and included in the stats column list
         assert_eq!(
             columns,
             vec![
-                ColumnName::new(["id"]),
-                ColumnName::new(["tags"]),
-                ColumnName::new(["metadata"]),
-                ColumnName::new(["v"]),
-                ColumnName::new(["name"]),
+                column_name!("id"),
+                column_name!("tags"),
+                column_name!("metadata"),
+                column_name!("v"),
+                column_name!("name"),
             ]
         );
     }
@@ -1062,14 +1153,14 @@ mod tests {
         )]
         .into();
 
-        let file_schema = StructType::new_unchecked([
-            StructField::nullable("a", DataType::LONG),
-            StructField::nullable("b", DataType::STRING),
-            StructField::nullable("c", DataType::INTEGER),
-        ]);
+        let file_schema = schema! {
+            nullable "a": LONG,
+            nullable "b": STRING,
+            nullable "c": INTEGER,
+        };
 
         // "c" is a clustering column, should be included even though limit is 1
-        let clustering_columns = vec![ColumnName::new(["c"])];
+        let clustering_columns = vec![column_name!("c")];
         let stats_schema = expected_stats_schema(
             &file_schema,
             &stats_config_from_table_properties(&properties),
@@ -1079,14 +1170,14 @@ mod tests {
         .unwrap();
 
         // Only "a" (first column) and "c" (clustering) should be included
-        let expected_null_count = StructType::new_unchecked([
-            StructField::nullable("a", DataType::LONG),
-            StructField::nullable("c", DataType::LONG),
-        ]);
-        let expected_min_max = StructType::new_unchecked([
-            StructField::nullable("a", DataType::LONG),
-            StructField::nullable("c", DataType::INTEGER),
-        ]);
+        let expected_null_count = schema! {
+            nullable "a": LONG,
+            nullable "c": LONG,
+        };
+        let expected_min_max = schema! {
+            nullable "a": LONG,
+            nullable "c": INTEGER,
+        };
 
         let expected = expected_stats(expected_null_count, expected_min_max);
 
@@ -1098,13 +1189,13 @@ mod tests {
     #[test]
     fn test_requested_filters_to_single_column() {
         let properties: TableProperties = [("key", "value")].into();
-        let file_schema = StructType::new_unchecked([
-            StructField::nullable("id", DataType::LONG),
-            StructField::nullable("name", DataType::STRING),
-            StructField::nullable("value", DataType::INTEGER),
-        ]);
+        let file_schema = schema! {
+            nullable "id": LONG,
+            nullable "name": STRING,
+            nullable "value": INTEGER,
+        };
 
-        let columns = [ColumnName::new(["id"])];
+        let columns = [column_name!("id")];
         let stats_schema = expected_stats_schema(
             &file_schema,
             &stats_config_from_table_properties(&properties),
@@ -1113,8 +1204,7 @@ mod tests {
         )
         .unwrap();
 
-        let expected_nested =
-            StructType::new_unchecked([StructField::nullable("id", DataType::LONG)]);
+        let expected_nested = schema! { nullable "id": LONG };
 
         let expected = expected_stats(expected_nested.clone(), expected_nested);
 
@@ -1125,10 +1215,10 @@ mod tests {
     fn test_none_requested_returns_full_schema() {
         // None for requested_columns means no output filtering — include all columns
         let properties: TableProperties = [("key", "value")].into();
-        let file_schema = StructType::new_unchecked([
-            StructField::nullable("id", DataType::LONG),
-            StructField::nullable("name", DataType::STRING),
-        ]);
+        let file_schema = schema! {
+            nullable "id": LONG,
+            nullable "name": STRING,
+        };
 
         let with_none = expected_stats_schema(
             &file_schema,
@@ -1152,13 +1242,13 @@ mod tests {
     fn test_requested_column_outside_limit_excluded() {
         // requested_columns alone does NOT bypass the column limit — only required_columns does
         let properties: TableProperties = [("delta.dataSkippingNumIndexedCols", "1")].into();
-        let file_schema = StructType::new_unchecked([
-            StructField::nullable("id", DataType::LONG),
-            StructField::nullable("name", DataType::STRING),
-        ]);
+        let file_schema = schema! {
+            nullable "id": LONG,
+            nullable "name": STRING,
+        };
 
         // "name" is outside the limit (limit is 1), and is only requested, not required
-        let columns = [ColumnName::new(["name"])];
+        let columns = [column_name!("name")];
         let stats_schema = expected_stats_schema(
             &file_schema,
             &stats_config_from_table_properties(&properties),
@@ -1168,10 +1258,10 @@ mod tests {
         .unwrap();
 
         // No data columns pass both filters, so only numRecords + tightBounds
-        let expected = StructType::new_unchecked([
-            StructField::nullable(NUM_RECORDS, DataType::LONG),
-            StructField::nullable(TIGHT_BOUNDS, DataType::BOOLEAN),
-        ]);
+        let expected = schema! {
+            nullable NUM_RECORDS: LONG,
+            nullable TIGHT_BOUNDS: BOOLEAN,
+        };
 
         assert_eq!(&expected, &stats_schema);
     }
@@ -1181,12 +1271,12 @@ mod tests {
         // When a column is both required AND requested, it bypasses the limit and
         // appears in the output. This is the pattern used by the read path.
         let properties: TableProperties = [("delta.dataSkippingNumIndexedCols", "1")].into();
-        let file_schema = StructType::new_unchecked([
-            StructField::nullable("id", DataType::LONG),
-            StructField::nullable("name", DataType::STRING),
-        ]);
+        let file_schema = schema! {
+            nullable "id": LONG,
+            nullable "name": STRING,
+        };
 
-        let columns = [ColumnName::new(["name"])];
+        let columns = [column_name!("name")];
         let stats_schema = expected_stats_schema(
             &file_schema,
             &stats_config_from_table_properties(&properties),
@@ -1195,10 +1285,8 @@ mod tests {
         )
         .unwrap();
 
-        let expected_nested =
-            StructType::new_unchecked([StructField::nullable("name", DataType::STRING)]);
-        let expected_null =
-            StructType::new_unchecked([StructField::nullable("name", DataType::LONG)]);
+        let expected_nested = schema! { nullable "name": STRING };
+        let expected_null = schema! { nullable "name": LONG };
 
         let expected = expected_stats(expected_null, expected_nested);
 
@@ -1211,13 +1299,13 @@ mod tests {
         // requested_columns=["name"] filters the output to just "name",
         // but "id" still counts toward the limit (so "value" stays excluded).
         let properties: TableProperties = [("delta.dataSkippingNumIndexedCols", "2")].into();
-        let file_schema = StructType::new_unchecked([
-            StructField::nullable("id", DataType::LONG),
-            StructField::nullable("name", DataType::STRING),
-            StructField::nullable("value", DataType::INTEGER),
-        ]);
+        let file_schema = schema! {
+            nullable "id": LONG,
+            nullable "name": STRING,
+            nullable "value": INTEGER,
+        };
 
-        let columns = [ColumnName::new(["name"])];
+        let columns = [column_name!("name")];
         let stats_schema = expected_stats_schema(
             &file_schema,
             &stats_config_from_table_properties(&properties),
@@ -1227,10 +1315,8 @@ mod tests {
         .unwrap();
 
         // Only "name" appears in the output (filtered), even though "id" counted toward the limit
-        let expected_nested =
-            StructType::new_unchecked([StructField::nullable("name", DataType::STRING)]);
-        let expected_null =
-            StructType::new_unchecked([StructField::nullable("name", DataType::LONG)]);
+        let expected_nested = schema! { nullable "name": STRING };
+        let expected_null = schema! { nullable "name": LONG };
 
         let expected = expected_stats(expected_null, expected_nested);
 
@@ -1240,13 +1326,13 @@ mod tests {
     #[test]
     fn test_multiple_requested_columns() {
         let properties: TableProperties = [("key", "value")].into();
-        let file_schema = StructType::new_unchecked([
-            StructField::nullable("id", DataType::LONG),
-            StructField::nullable("name", DataType::STRING),
-            StructField::nullable("value", DataType::INTEGER),
-        ]);
+        let file_schema = schema! {
+            nullable "id": LONG,
+            nullable "name": STRING,
+            nullable "value": INTEGER,
+        };
 
-        let columns = [ColumnName::new(["id"]), ColumnName::new(["name"])];
+        let columns = [column_name!("id"), column_name!("name")];
         let stats_schema = expected_stats_schema(
             &file_schema,
             &stats_config_from_table_properties(&properties),
@@ -1255,14 +1341,14 @@ mod tests {
         )
         .unwrap();
 
-        let expected_nested = StructType::new_unchecked([
-            StructField::nullable("id", DataType::LONG),
-            StructField::nullable("name", DataType::STRING),
-        ]);
-        let expected_null = StructType::new_unchecked([
-            StructField::nullable("id", DataType::LONG),
-            StructField::nullable("name", DataType::LONG),
-        ]);
+        let expected_nested = schema! {
+            nullable "id": LONG,
+            nullable "name": STRING,
+        };
+        let expected_null = schema! {
+            nullable "id": LONG,
+            nullable "name": LONG,
+        };
 
         let expected = expected_stats(expected_null, expected_nested);
 
@@ -1272,16 +1358,15 @@ mod tests {
     #[test]
     fn test_nested_requested_column() {
         let properties: TableProperties = [("key", "value")].into();
-        let user_struct = StructType::new_unchecked([
-            StructField::nullable("name", DataType::STRING),
-            StructField::nullable("age", DataType::INTEGER),
-        ]);
-        let file_schema = StructType::new_unchecked([
-            StructField::nullable("id", DataType::LONG),
-            StructField::nullable("user", user_struct),
-        ]);
+        let file_schema = schema! {
+            nullable "id": LONG,
+            nullable "user": {
+                nullable "name": STRING,
+                nullable "age": INTEGER,
+            },
+        };
 
-        let columns = [ColumnName::new(["user", "name"])];
+        let columns = [column_name!("user.name")];
         let stats_schema = expected_stats_schema(
             &file_schema,
             &stats_config_from_table_properties(&properties),
@@ -1290,15 +1375,16 @@ mod tests {
         )
         .unwrap();
 
-        let expected_user_nested =
-            StructType::new_unchecked([StructField::nullable("name", DataType::STRING)]);
-        let expected_nested =
-            StructType::new_unchecked([StructField::nullable("user", expected_user_nested)]);
-
-        let expected_user_null =
-            StructType::new_unchecked([StructField::nullable("name", DataType::LONG)]);
-        let expected_null =
-            StructType::new_unchecked([StructField::nullable("user", expected_user_null)]);
+        let expected_nested = schema! {
+            nullable "user": {
+                nullable "name": STRING,
+            },
+        };
+        let expected_null = schema! {
+            nullable "user": {
+                nullable "name": LONG,
+            },
+        };
 
         let expected = expected_stats(expected_null, expected_nested);
 
@@ -1308,10 +1394,10 @@ mod tests {
     #[test]
     fn test_empty_requested_columns() {
         let properties: TableProperties = [("key", "value")].into();
-        let file_schema = StructType::new_unchecked([
-            StructField::nullable("id", DataType::LONG),
-            StructField::nullable("name", DataType::STRING),
-        ]);
+        let file_schema = schema! {
+            nullable "id": LONG,
+            nullable "name": STRING,
+        };
 
         // Empty columns list should return the full schema (same as None)
         let columns: [ColumnName; 0] = [];
@@ -1336,17 +1422,16 @@ mod tests {
     #[test]
     fn test_mixed_nested_and_top_requested() {
         let properties: TableProperties = [("key", "value")].into();
-        let user_struct = StructType::new_unchecked([
-            StructField::nullable("name", DataType::STRING),
-            StructField::nullable("age", DataType::INTEGER),
-        ]);
-        let file_schema = StructType::new_unchecked([
-            StructField::nullable("id", DataType::LONG),
-            StructField::nullable("user", user_struct),
-            StructField::nullable("value", DataType::DOUBLE),
-        ]);
+        let file_schema = schema! {
+            nullable "id": LONG,
+            nullable "user": {
+                nullable "name": STRING,
+                nullable "age": INTEGER,
+            },
+            nullable "value": DOUBLE,
+        };
 
-        let columns = [ColumnName::new(["id"]), ColumnName::new(["user", "age"])];
+        let columns = [column_name!("id"), column_name!("user.age")];
         let stats_schema = expected_stats_schema(
             &file_schema,
             &stats_config_from_table_properties(&properties),
@@ -1355,19 +1440,19 @@ mod tests {
         )
         .unwrap();
 
-        let expected_user_nested =
-            StructType::new_unchecked([StructField::nullable("age", DataType::INTEGER)]);
-        let expected_nested = StructType::new_unchecked([
-            StructField::nullable("id", DataType::LONG),
-            StructField::nullable("user", expected_user_nested.clone()),
-        ]);
+        let expected_nested = schema! {
+            nullable "id": LONG,
+            nullable "user": {
+                nullable "age": INTEGER,
+            },
+        };
 
-        let expected_user_null =
-            StructType::new_unchecked([StructField::nullable("age", DataType::LONG)]);
-        let expected_null = StructType::new_unchecked([
-            StructField::nullable("id", DataType::LONG),
-            StructField::nullable("user", expected_user_null),
-        ]);
+        let expected_null = schema! {
+            nullable "id": LONG,
+            nullable "user": {
+                nullable "age": LONG,
+            },
+        };
 
         let expected = expected_stats(expected_null, expected_nested);
 

@@ -35,7 +35,7 @@ use crate::path::{LogPathFileType, ParsedLogPath};
 use crate::snapshot::Snapshot;
 use crate::table_configuration::InCommitTimestampEnablement;
 use crate::utils::require;
-use crate::{DeltaResult, Engine, Error as DeltaError, Version};
+use crate::{Engine, KernelError as DeltaError, KernelResult, Version};
 
 pub(crate) mod search;
 
@@ -114,7 +114,7 @@ fn get_timestamp_search_bounds(
     snapshot: &Snapshot,
     log_segment: &LogSegment,
     timestamp: Timestamp,
-) -> Result<TimestampSearchBounds, LogHistoryError> {
+) -> KernelResult<TimestampSearchBounds, LogHistoryError> {
     debug_assert!(log_segment.end_version == snapshot.version());
     let table_config = snapshot.table_configuration();
 
@@ -215,7 +215,7 @@ fn linear_search_file_mod_timestamps(
     commits: &[ParsedLogPath],
     timestamp: Timestamp,
     bound: Bound,
-) -> Result<CommitAt, LogHistoryError> {
+) -> KernelResult<CommitAt, LogHistoryError> {
     if commits.is_empty() {
         return Err(LogHistoryError::out_of_range(
             timestamp,
@@ -287,7 +287,7 @@ fn binary_search_ict_timestamps(
     timestamp: Timestamp,
     bound: Bound,
     engine: &dyn Engine,
-) -> Result<CommitAt, LogHistoryError> {
+) -> KernelResult<CommitAt, LogHistoryError> {
     if commits.is_empty() {
         return Err(LogHistoryError::out_of_range(
             timestamp,
@@ -303,7 +303,7 @@ fn binary_search_ict_timestamps(
         hi_version, "ICT binary search over version range"
     );
 
-    let commit_to_ict = |commit: &ParsedLogPath| -> Result<Timestamp, LogHistoryError> {
+    let commit_to_ict = |commit: &ParsedLogPath| -> KernelResult<Timestamp, LogHistoryError> {
         commit
             .read_in_commit_timestamp(engine)
             .map_err(|e| LogHistoryError::internal("failed to read in-commit timestamp", e))
@@ -384,7 +384,7 @@ pub(crate) fn timestamp_to_version(
     timestamp: Timestamp,
     bound: Bound,
     resolved_commit_type: HistoryCommitType,
-) -> Result<CommitAt, LogHistoryError> {
+) -> KernelResult<CommitAt, LogHistoryError> {
     // Short-circuit: compare against snapshot's timestamp to avoid log segment rebuild.
     // This optimization mirrors Delta Spark and Java Kernel behavior.
     let snap_ts = snapshot
@@ -533,7 +533,7 @@ pub fn latest_version_as_of(
     engine: &dyn Engine,
     timestamp: Timestamp,
     resolved_commit_type: HistoryCommitType,
-) -> DeltaResult<CommitAt> {
+) -> KernelResult<CommitAt> {
     timestamp_to_version(
         snapshot,
         engine,
@@ -574,7 +574,7 @@ pub fn first_version_after(
     engine: &dyn Engine,
     timestamp: Timestamp,
     resolved_commit_type: HistoryCommitType,
-) -> DeltaResult<CommitAt> {
+) -> KernelResult<CommitAt> {
     timestamp_to_version(
         snapshot,
         engine,
@@ -634,7 +634,7 @@ pub fn timestamp_range_to_versions(
     engine: &dyn Engine,
     start_timestamp: Timestamp,
     end_timestamp: Option<Timestamp>,
-) -> DeltaResult<(Version, Option<Version>)> {
+) -> KernelResult<(Version, Option<Version>)> {
     if let Some(end_timestamp) = end_timestamp {
         // The `start_timestamp` must be no greater than the `end_timestamp`.
         require!(
@@ -717,23 +717,30 @@ fn get_earliest_published_commit_version(
     engine: &dyn Engine,
     log_root: &Url,
     earliest_ratified_commit_version: Option<Version>,
-) -> DeltaResult<Version> {
-    list_delta_log_from_storage(engine.storage_handler().as_ref(), log_root, 0, Version::MAX)?
-        .filter_ok(|f| f.file_type == LogPathFileType::Commit)
-        .next()
-        .transpose()?
-        .map(|f| f.version)
-        .ok_or_else(|| {
-            if earliest_ratified_commit_version == Some(0) {
-                return DeltaError::generic(format!(
-                    "expected a published v0 commit for catalog-managed table {log_root}, \
+) -> KernelResult<Version> {
+    // TODO(#3188): thread a cancellation token through the history-manager entry points.
+    list_delta_log_from_storage(
+        engine.storage_handler().as_ref(),
+        log_root,
+        0,
+        Version::MAX,
+        None,
+    )?
+    .filter_ok(|f| f.file_type == LogPathFileType::Commit)
+    .next()
+    .transpose()?
+    .map(|f| f.version)
+    .ok_or_else(|| {
+        if earliest_ratified_commit_version == Some(0) {
+            return DeltaError::generic(format!(
+                "expected a published v0 commit for catalog-managed table {log_root}, \
                        but the log listing returned no commits"
-                ));
-            }
-            DeltaError::from(LogHistoryError::NoCommitsFound {
-                log_root: log_root.clone(),
-            })
+            ));
+        }
+        DeltaError::from(LogHistoryError::NoCommitsFound {
+            log_root: log_root.clone(),
         })
+    })
 }
 
 /// Returns the earliest table version that can be fully reconstructed, and from which we can replay
@@ -752,8 +759,8 @@ fn get_earliest_published_commit_version(
 /// - Propagate any error from listing the log directory.
 /// - [`LogHistoryError::NoCommitsFound`] if the log contains no commit files at all
 /// (empty directory, or only checkpoint files) -- unless `earliest_ratified_commit_version`
-/// is `Some(0)`, in which case it returns a generic [`Error`](crate::Error) flagging the
-/// broken CCv2 invariant (ratified commit 0 with no published filesystem commit).
+/// is `Some(0)`, in which case it returns a generic [`KernelError`](crate::KernelError) flagging
+/// the broken CCv2 invariant (ratified commit 0 with no published filesystem commit).
 /// - [`LogHistoryError::NoRecreatableCommit`] if commits exist but neither
 /// `00...00.json` nor a complete checkpoint that anchors the smallest commit is present.
 #[tracing::instrument(skip(engine), err, ret)]
@@ -761,15 +768,21 @@ fn get_earliest_recreatable_commit(
     engine: &dyn Engine,
     log_root: &Url,
     earliest_ratified_commit_version: Option<Version>,
-) -> DeltaResult<Version> {
+) -> KernelResult<Version> {
     let mut last_complete_checkpoint: Option<Version> = None;
     // Tracks (version, num_parts) -> set of part numbers observed so far, for multi-part
     // checkpoint completeness.
     let mut multi_part_checkpoint_progress = HashMap::<(Version, u32), HashSet<u32>>::new();
     let mut earliest_commit_version: Option<Version> = None;
 
-    let listing =
-        list_delta_log_from_storage(engine.storage_handler().as_ref(), log_root, 0, Version::MAX)?;
+    // TODO(#3188): thread a cancellation token through the history-manager entry points.
+    let listing = list_delta_log_from_storage(
+        engine.storage_handler().as_ref(),
+        log_root,
+        0,
+        Version::MAX,
+        None,
+    )?;
     for parsed_result in listing {
         let parsed_log_path = parsed_result?;
         if !should_process_log_file(&parsed_log_path) {
@@ -878,7 +891,7 @@ pub fn get_earliest_commit(
     log_root: &Url,
     earliest_ratified_commit_version: Option<Version>,
     commit_type: HistoryCommitType,
-) -> DeltaResult<Version> {
+) -> KernelResult<Version> {
     match commit_type {
         HistoryCommitType::Published => get_earliest_published_commit_version(
             engine,
@@ -909,7 +922,7 @@ mod tests {
     use crate::actions::{CommitInfo, Metadata, Protocol};
     use crate::engine::sync::SyncEngine;
     use crate::object_store::memory::InMemory;
-    use crate::schema::{DataType, SchemaRef, StructField, StructType};
+    use crate::schema::{schema_ref, SchemaRef};
     use crate::snapshot::{Snapshot, SnapshotBuilder};
     use crate::table_features::TableFeature;
     use crate::unit_test_utils::{Action, LocalMockTable};
@@ -917,10 +930,9 @@ mod tests {
     use crate::Version;
 
     fn get_test_schema() -> SchemaRef {
-        Arc::new(StructType::new_unchecked([StructField::nullable(
-            "value",
-            DataType::INTEGER,
-        )]))
+        schema_ref! {
+            nullable "value": INTEGER,
+        }
     }
 
     fn set_mod_time(mock_table: &LocalMockTable, version: Version, timestamp: Timestamp) {
@@ -1585,7 +1597,7 @@ mod tests {
     async fn test_timestamp_range_to_versions(
         #[case] start: Timestamp,
         #[case] end: Option<Timestamp>,
-        #[case] expected: Result<(Version, Option<Version>), ()>,
+        #[case] expected: KernelResult<(Version, Option<Version>), ()>,
     ) {
         let timestamps = [
             (50, None),
@@ -1625,7 +1637,7 @@ mod tests {
         assert!(
             matches!(
                 res,
-                Err(crate::Error::LogHistory(ref e))
+                Err(crate::KernelError::LogHistory(ref e))
                     if matches!(**e, LogHistoryError::InvalidTimestampRange { .. })
             ),
             "{res:?}"
@@ -1652,7 +1664,7 @@ mod tests {
         assert!(
             matches!(
                 res,
-                Err(crate::Error::LogHistory(ref e))
+                Err(crate::KernelError::LogHistory(ref e))
                     if matches!(**e, LogHistoryError::EmptyTimestampRange { between_version: 0, .. })
             ),
             "{res:?}"
@@ -2006,7 +2018,7 @@ mod tests {
     async fn test_timestamp_range_file_mod_only(
         #[case] start: Timestamp,
         #[case] end: Option<Timestamp>,
-        #[case] expected: Result<(Version, Option<Version>), ()>,
+        #[case] expected: KernelResult<(Version, Option<Version>), ()>,
     ) {
         let table =
             mock_table_with_timestamps(&[(100, None), (200, None), (300, None)], None).await;
@@ -2035,7 +2047,7 @@ mod tests {
     async fn test_timestamp_range_ict_from_creation(
         #[case] start: Timestamp,
         #[case] end: Option<Timestamp>,
-        #[case] expected: Result<(Version, Option<Version>), ()>,
+        #[case] expected: KernelResult<(Version, Option<Version>), ()>,
     ) {
         let table =
             mock_table_with_timestamps(&[(0, Some(100)), (0, Some(200)), (0, Some(300))], Some(0))

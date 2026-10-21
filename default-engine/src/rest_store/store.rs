@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use delta_kernel::object_store::path::Path;
 use delta_kernel::object_store::{
-    Attributes, CopyOptions, Error as ObjectStoreError, GetOptions, GetRange, GetResult,
+    self, Attributes, CopyOptions, Error as ObjectStoreError, GetOptions, GetRange, GetResult,
     GetResultPayload, ListResult, MultipartUpload, ObjectMeta, ObjectStore, PutMode,
     PutMultipartOptions, PutOptions, PutPayload, PutResult, Result as ObjectStoreResult,
 };
@@ -427,10 +427,7 @@ fn not_supported(op: &str) -> ObjectStoreError {
 
 /// A successful PUT result; this store surfaces no etag or version.
 fn put_result() -> PutResult {
-    PutResult {
-        e_tag: None,
-        version: None,
-    }
+    object_store::delta_kernel_compat::empty_put_result()
 }
 
 /// Outcome of reading a file back to compare against bytes we tried to write.
@@ -500,12 +497,12 @@ impl ObjectStore for RestObjectStore {
             let meta = self.head_meta(path_str, location).await?;
             options.check_preconditions(&meta)?;
             let size = meta.size;
-            return Ok(GetResult {
-                payload: GetResultPayload::Stream(Box::pin(futures::stream::empty())),
-                range: 0..size,
+            return Ok(object_store::delta_kernel_compat::get_result(
+                GetResultPayload::Stream(Box::pin(futures::stream::empty())),
                 meta,
-                attributes: Attributes::new(),
-            });
+                0..size,
+                Attributes::new(),
+            ));
         }
 
         let range_header = options.range.as_ref().map(get_range_to_header);
@@ -565,12 +562,12 @@ impl ObjectStore for RestObjectStore {
         options.check_preconditions(&meta)?;
 
         let stream = Box::pin(futures::stream::once(futures::future::ready(Ok(content))));
-        Ok(GetResult {
-            payload: GetResultPayload::Stream(stream),
+        Ok(object_store::delta_kernel_compat::get_result(
+            GetResultPayload::Stream(stream),
             meta,
             range,
-            attributes: Attributes::new(),
-        })
+            Attributes::new(),
+        ))
     }
 
     async fn put_opts(
@@ -610,7 +607,6 @@ impl ObjectStore for RestObjectStore {
 
     fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, ObjectStoreResult<ObjectMeta>> {
         let prefix = prefix.map(|p| p.as_ref().to_string()).unwrap_or_default();
-        // Both `list` and `list_with_offset` recurse; only `list_with_delimiter` is non-recursive.
         self.list_paginated(prefix, None, None, true)
     }
 
@@ -631,7 +627,12 @@ impl ObjectStore for RestObjectStore {
                 raw.to_string()
             }
         };
-        self.list_paginated(prefix, Some(offset_str), Some(offset.clone()), true)
+        // NOTE: This intentionally diverges from `ObjectStore::list_with_offset`, which is
+        // expected to behave like recursive `list(prefix)` filtered by `offset`. Delta log
+        // continuation only needs direct children because `_delta_log` is flat.
+        // TODO: Split the Delta-log-specific REST listing path from the general `ObjectStore`
+        // method so `list_with_offset` can preserve the recursive trait contract.
+        self.list_paginated(prefix, Some(offset_str), Some(offset.clone()), false)
     }
 
     fn delete_stream(

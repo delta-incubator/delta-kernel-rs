@@ -11,7 +11,7 @@ use crate::arrow::datatypes::{DataType as ArrowDataType, Field as ArrowField, Ti
 use crate::engine::arrow_utils::make_arrow_error;
 use crate::schema::{DataType, MetadataValue, StructField};
 use crate::utils::require;
-use crate::{DeltaResult, Error};
+use crate::{KernelError, KernelResult};
 
 /// Controls how `ensure_data_types` validates struct fields and metadata.
 #[derive(Clone, Copy)]
@@ -45,7 +45,7 @@ pub(crate) fn ensure_data_types(
     kernel_type: &DataType,
     arrow_type: &ArrowDataType,
     mode: ValidationMode,
-) -> DeltaResult<DataTypeCompat> {
+) -> KernelResult<DataTypeCompat> {
     let check = EnsureDataTypes { mode };
     check.ensure_data_types(kernel_type, arrow_type)
 }
@@ -73,7 +73,8 @@ impl EnsureDataTypes {
         &self,
         kernel_type: &DataType,
         arrow_type: &ArrowDataType,
-    ) -> DeltaResult<DataTypeCompat> {
+    ) -> KernelResult<DataTypeCompat> {
+        let kernel_type = kernel_type.physical_type();
         match (kernel_type, arrow_type) {
             (DataType::Primitive(_), _) if arrow_type.is_primitive() => {
                 check_cast_compat(kernel_type.try_into_arrow()?, arrow_type)
@@ -221,11 +222,11 @@ impl EnsureDataTypes {
         desc: &str,
         kernel_field_is_nullable: bool,
         arrow_field_is_nullable: bool,
-    ) -> DeltaResult<()> {
+    ) -> KernelResult<()> {
         if matches!(self.mode, ValidationMode::Full)
             && kernel_field_is_nullable != arrow_field_is_nullable
         {
-            Err(Error::Generic(format!(
+            Err(KernelError::Generic(format!(
                 "{desc} has nullability {kernel_field_is_nullable} in kernel and {arrow_field_is_nullable} in arrow",
             )))
         } else {
@@ -237,7 +238,7 @@ impl EnsureDataTypes {
         &self,
         kernel_field: &StructField,
         arrow_field: &ArrowField,
-    ) -> DeltaResult<()> {
+    ) -> KernelResult<()> {
         self.ensure_nullability(
             &kernel_field.name,
             kernel_field.nullable,
@@ -246,7 +247,7 @@ impl EnsureDataTypes {
         if matches!(self.mode, ValidationMode::Full)
             && !metadata_eq(&kernel_field.metadata, arrow_field.metadata())
         {
-            Err(Error::Generic(format!(
+            Err(KernelError::Generic(format!(
                 "Field {} has metadata {:?} in kernel and {:?} in arrow",
                 kernel_field.name,
                 kernel_field.metadata,
@@ -262,7 +263,7 @@ impl EnsureDataTypes {
 fn check_cast_compat(
     target_type: ArrowDataType,
     source_type: &ArrowDataType,
-) -> DeltaResult<DataTypeCompat> {
+) -> KernelResult<DataTypeCompat> {
     use ArrowDataType::*;
 
     match (source_type, &target_type) {
@@ -286,8 +287,8 @@ fn check_cast_compat(
         // guarantees data files conform to the table schema, so a schema mismatch (e.g. Int32
         // where Date32 is expected) would not occur in normal data files.
         //
-        // NOTE: The kernel-type equivalent lives in `PrimitiveType::is_stats_type_compatible_with`
-        // in `schema/mod.rs`. Changes here must be mirrored there.
+        // Keep these date/timestamp rules aligned with
+        // `PrimitiveType::is_checkpoint_cast_compatible` in `schema/mod.rs`.
         (Int32, Date32) => Ok(DataTypeCompat::NeedsCast(target_type)),
         (Int64, Timestamp(TimeUnit::Microsecond, _)) => Ok(DataTypeCompat::NeedsCast(target_type)),
         _ => Err(make_arrow_error(format!(
@@ -326,23 +327,22 @@ impl PartialEq<String> for MetadataValue {
     }
 }
 
-// allow for comparing our metadata maps to arrow ones. We can't implement PartialEq because both
-// are HashMaps which aren't defined in this crate
-fn metadata_eq(
+// Compare kernel metadata with Arrow's version-specific metadata container.
+fn metadata_eq<'a>(
     kernel_metadata: &HashMap<String, MetadataValue>,
-    arrow_metadata: &HashMap<String, String>,
+    arrow_metadata: impl IntoIterator<Item = (&'a String, &'a String)>,
 ) -> bool {
-    let kernel_len = kernel_metadata.len();
-    if kernel_len != arrow_metadata.len() {
-        return false;
+    let mut arrow_len = 0;
+    for (key, value) in arrow_metadata {
+        arrow_len += 1;
+        if !kernel_metadata
+            .get(key)
+            .is_some_and(|kernel_value| *kernel_value == *value)
+        {
+            return false;
+        }
     }
-    if kernel_len == 0 {
-        // lens are equal, so two empty maps are equal
-        return true;
-    }
-    kernel_metadata
-        .iter()
-        .all(|(key, value)| arrow_metadata.get(key).is_some_and(|v| *value == *v))
+    kernel_metadata.len() == arrow_len
 }
 
 #[cfg(test)]
@@ -354,7 +354,7 @@ mod tests {
     use super::*;
     use crate::arrow::datatypes::{DataType as ArrowDataType, Field as ArrowField, Fields};
     use crate::engine::arrow_conversion::TryFromKernel as _;
-    use crate::schema::{ArrayType, DataType, MapType, StructField};
+    use crate::schema::{schema, ArrayType, CheckpointFieldKind, DataType, MapType, PrimitiveType};
     use crate::unit_test_utils::assert_result_error_with_message;
 
     #[test]
@@ -637,34 +637,24 @@ mod tests {
 
     #[test]
     fn ensure_struct() {
-        let schema = DataType::struct_type_unchecked([StructField::nullable(
-            "a",
-            ArrayType::new(
-                DataType::struct_type_unchecked([
-                    StructField::nullable("w", DataType::LONG),
-                    StructField::nullable("x", ArrayType::new(DataType::LONG, true)),
-                    StructField::nullable(
-                        "y",
-                        MapType::new(DataType::LONG, DataType::STRING, true),
-                    ),
-                    StructField::nullable(
-                        "z",
-                        DataType::struct_type_unchecked([
-                            StructField::nullable("n", DataType::LONG),
-                            StructField::nullable("m", DataType::STRING),
-                        ]),
-                    ),
-                ]),
-                true,
-            ),
-        )]);
+        let schema = DataType::from(schema! {
+            nullable "a": [ nullable {
+                nullable "w": LONG,
+                nullable "x": [ nullable LONG ],
+                nullable "y": { LONG => nullable STRING },
+                nullable "z": {
+                    nullable "n": LONG,
+                    nullable "m": STRING,
+                },
+            } ],
+        });
         let arrow_struct = ArrowDataType::try_from_kernel(&schema).unwrap();
         assert!(ensure_data_types(&schema, &arrow_struct, ValidationMode::Full).is_ok());
 
-        let kernel_simple = DataType::struct_type_unchecked([
-            StructField::nullable("w", DataType::LONG),
-            StructField::nullable("x", DataType::LONG),
-        ]);
+        let kernel_simple = DataType::from(schema! {
+            nullable "w": LONG,
+            nullable "x": LONG,
+        });
 
         let arrow_simple_ok = ArrowField::new_struct(
             "arrow_struct",
@@ -717,10 +707,10 @@ mod tests {
     fn name_based_matching_pairs_fields_by_name_with_interleaved_extra() {
         // The arrow struct has an unselected `extra` field between the matched ones. `x` must be
         // paired with the arrow `x`, not positionally with `extra`.
-        let kernel = DataType::struct_type_unchecked([
-            StructField::nullable("w", DataType::LONG),
-            StructField::nullable("x", DataType::STRING),
-        ]);
+        let kernel = DataType::from(schema! {
+            nullable "w": LONG,
+            nullable "x": STRING,
+        });
         let arrow = ArrowDataType::Struct(Fields::from(vec![
             ArrowField::new("w", ArrowDataType::Int64, true),
             ArrowField::new("extra", ArrowDataType::Int64, true),
@@ -735,10 +725,10 @@ mod tests {
     #[test]
     fn name_based_matching_rejects_wrong_type_behind_interleaved_extra() {
         // An unselected `extra` field must not mask a type mismatch on the real `x` field.
-        let kernel = DataType::struct_type_unchecked([
-            StructField::nullable("w", DataType::LONG),
-            StructField::nullable("x", DataType::LONG),
-        ]);
+        let kernel = DataType::from(schema! {
+            nullable "w": LONG,
+            nullable "x": LONG,
+        });
         let arrow = ArrowDataType::Struct(Fields::from(vec![
             ArrowField::new("w", ArrowDataType::Int64, true),
             ArrowField::new("extra", ArrowDataType::Int64, true),
@@ -915,13 +905,11 @@ mod tests {
         );
     }
 
-    /// Ensures that every kernel-level checkpoint reinterpretation rule in
-    /// `PrimitiveType::is_checkpoint_cast_compatible` has a corresponding Arrow cast
-    /// in `check_cast_compat`. If one side is updated without the other, this test fails.
-    #[test]
-    fn checkpoint_reinterpretation_rules_match_arrow_cast_rules() {
-        use crate::schema::PrimitiveType;
-
+    #[rstest]
+    fn checkpoint_date_timestamp_rules_match_arrow_cast_rules(
+        #[values(CheckpointFieldKind::Stats, CheckpointFieldKind::PartitionValues)]
+        kind: CheckpointFieldKind,
+    ) {
         let reinterpretation_pairs: &[(PrimitiveType, PrimitiveType)] = &[
             (PrimitiveType::Integer, PrimitiveType::Date),
             (PrimitiveType::Long, PrimitiveType::Timestamp),
@@ -930,7 +918,7 @@ mod tests {
         for (source_kernel, target_kernel) in reinterpretation_pairs {
             // Verify the kernel-level rule holds
             assert!(
-                source_kernel.is_checkpoint_cast_compatible(target_kernel),
+                source_kernel.is_checkpoint_cast_compatible(target_kernel, kind),
                 "Kernel should allow {source_kernel:?} -> {target_kernel:?}"
             );
 
@@ -951,10 +939,10 @@ mod tests {
 
     #[test]
     fn types_only_matches_struct_by_ordinal_ignoring_names() {
-        let kernel = DataType::struct_type_unchecked([
-            StructField::nullable("logical_a", DataType::LONG),
-            StructField::nullable("logical_b", DataType::STRING),
-        ]);
+        let kernel = DataType::from(schema! {
+            nullable "logical_a": LONG,
+            nullable "logical_b": STRING,
+        });
         let arrow = ArrowDataType::Struct(
             vec![
                 ArrowField::new("physical_x", ArrowDataType::Int64, true),
@@ -967,10 +955,10 @@ mod tests {
 
     #[test]
     fn types_only_rejects_struct_field_count_mismatch() {
-        let kernel = DataType::struct_type_unchecked([
-            StructField::nullable("a", DataType::LONG),
-            StructField::nullable("b", DataType::LONG),
-        ]);
+        let kernel = DataType::from(schema! {
+            nullable "a": LONG,
+            nullable "b": LONG,
+        });
         let arrow =
             ArrowDataType::Struct(vec![ArrowField::new("x", ArrowDataType::Int64, true)].into());
         assert_result_error_with_message(
@@ -981,10 +969,10 @@ mod tests {
 
     #[test]
     fn types_only_rejects_struct_type_mismatch_by_ordinal() {
-        let kernel = DataType::struct_type_unchecked([
-            StructField::nullable("a", DataType::LONG),
-            StructField::nullable("b", DataType::LONG),
-        ]);
+        let kernel = DataType::from(schema! {
+            nullable "a": LONG,
+            nullable "b": LONG,
+        });
         let arrow = ArrowDataType::Struct(
             vec![
                 ArrowField::new("x", ArrowDataType::Int64, true),

@@ -24,9 +24,9 @@ use crate::object_store::memory::InMemory;
 use crate::object_store::path::Path;
 use crate::object_store::ObjectStoreExt as _;
 use crate::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-use crate::schema::{DataType, StructField, StructType};
+use crate::schema::{schema, schema_ref, DataType, StructType};
 use crate::unit_test_utils::Action;
-use crate::{DeltaResult, Engine, EngineData, Snapshot};
+use crate::{Engine, EngineData, KernelResult, Snapshot};
 
 struct CheckpointParts {
     sidecar_files: Vec<Url>,
@@ -42,7 +42,7 @@ fn generate_checkpoint_parts(
     writer: &CheckpointWriter,
     engine: &dyn Engine,
     file_actions_per_sidecar_hint: usize,
-) -> DeltaResult<CheckpointParts> {
+) -> KernelResult<CheckpointParts> {
     let data_iter = writer.checkpoint_data(engine)?;
     let iter_state = data_iter.state();
     let output_schema = writer.output_schema.clone();
@@ -278,7 +278,7 @@ fn verify_non_file_batches(batches: &[Box<dyn EngineData>], expected: &ExpectedN
 /// Verifies: exactly 1 sidecar file, non-file batches buffered, iterator exhausted,
 /// action counts correct.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_generate_sidecars_single_sidecar() -> DeltaResult<()> {
+async fn test_generate_sidecars_single_sidecar() -> KernelResult<()> {
     let (store, _) = new_in_memory_store();
     let engine = new_sync_engine(store.clone());
 
@@ -341,7 +341,7 @@ async fn test_generate_sidecars_single_sidecar() -> DeltaResult<()> {
 /// batches with both file and non-file actions correctly split, and the row count of the
 /// file and non-file batches is correct.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_generate_sidecars_multiple_chunks() -> DeltaResult<()> {
+async fn test_generate_sidecars_multiple_chunks() -> KernelResult<()> {
     let (store, _) = new_in_memory_store();
     let engine = new_sync_engine(store.clone());
 
@@ -451,7 +451,7 @@ async fn test_generate_sidecars_multiple_chunks() -> DeltaResult<()> {
 /// V2 table with adds across multiple commits, hint=1 (very small).
 /// Verifies: produces multiple sidecar files, splitter is exhausted.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_generate_sidecars_hint_one_per_batch() -> DeltaResult<()> {
+async fn test_generate_sidecars_hint_one_per_batch() -> KernelResult<()> {
     let (store, _) = new_in_memory_store();
     let engine = new_sync_engine(store.clone());
 
@@ -521,7 +521,7 @@ async fn test_generate_sidecars_hint_one_per_batch() -> DeltaResult<()> {
 /// 4. Validate the output schema includes `stats_parsed` and `partitionValues_parsed`.
 /// 5. Validate the actual values in `stats_parsed` and `partitionValues_parsed` match the input.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_generate_sidecars_stats_and_partition_values() -> DeltaResult<()> {
+async fn test_generate_sidecars_stats_and_partition_values() -> KernelResult<()> {
     let (store, _) = new_in_memory_store();
     let engine = new_sync_engine(store.clone());
 
@@ -633,7 +633,7 @@ async fn test_generate_sidecars_stats_and_partition_values() -> DeltaResult<()> 
 /// V2 table with only protocol + metadata (no adds/removes).
 /// Verifies: SidecarSplitter yields no file-action rows and buffers all non-file actions.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_splitter_no_file_actions() -> DeltaResult<()> {
+async fn test_splitter_no_file_actions() -> KernelResult<()> {
     let (store, _) = new_in_memory_store();
     let engine = new_sync_engine(store.clone());
 
@@ -686,30 +686,30 @@ async fn test_splitter_no_file_actions() -> DeltaResult<()> {
 
 /// Dummy struct type used as the data type for add/remove fields in schema validation tests.
 fn dummy_struct() -> DataType {
-    StructType::new_unchecked([]).into()
+    schema! {}.into()
 }
 
 #[rstest]
 #[case::missing_add(
-    StructType::new_unchecked([StructField::nullable("remove", dummy_struct())]),
+    schema! { nullable "remove": (dummy_struct()) },
     "missing 'add'"
 )]
 #[case::missing_remove(
-    StructType::new_unchecked([StructField::nullable("add", dummy_struct())]),
+    schema! { nullable "add": (dummy_struct()) },
     "missing 'remove'"
 )]
 #[case::non_nullable_add(
-    StructType::new_unchecked([
-        StructField::not_null("add", dummy_struct()),
-        StructField::nullable("remove", dummy_struct()),
-    ]),
+    schema! {
+        not_null "add": (dummy_struct()),
+        nullable "remove": (dummy_struct()),
+    },
     "'add' field must be nullable"
 )]
 #[case::non_nullable_remove(
-    StructType::new_unchecked([
-        StructField::nullable("add", dummy_struct()),
-        StructField::not_null("remove", dummy_struct()),
-    ]),
+    schema! {
+        nullable "add": (dummy_struct()),
+        not_null "remove": (dummy_struct()),
+    },
     "'remove' field must be nullable"
 )]
 fn test_splitter_rejects_invalid_schema(#[case] schema: StructType, #[case] expected_msg: &str) {
@@ -725,11 +725,10 @@ fn test_splitter_rejects_invalid_schema(#[case] schema: StructType, #[case] expe
 
 #[test]
 fn test_single_sidecar_data_iterator_rejects_zero_max_file_actions_hint() {
-    let schema: Arc<StructType> = StructType::new_unchecked([
-        StructField::nullable("add", dummy_struct()),
-        StructField::nullable("remove", dummy_struct()),
-    ])
-    .into();
+    let schema = schema_ref! {
+        nullable "add": (dummy_struct()),
+        nullable "remove": (dummy_struct()),
+    };
     let iter = ActionReconciliationIterator::new(Box::new(std::iter::empty()));
     let splitter = SidecarSplitter::new_mut_shared(iter, &ArrowEvaluationHandler, schema).unwrap();
     let result = SingleSidecarDataIterator::new(splitter, 0);

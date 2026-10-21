@@ -25,8 +25,8 @@ use std::sync::Arc;
 
 use delta_kernel::arrow::array::{ArrayRef, Int32Array, StringArray, StructArray};
 use delta_kernel::arrow::datatypes::{DataType as ArrowDataType, Field};
-use delta_kernel::expressions::ColumnName;
-use delta_kernel::schema::{DataType, SchemaRef, StructField, StructType};
+use delta_kernel::expressions::column_name;
+use delta_kernel::schema::{schema_ref, SchemaRef};
 use delta_kernel::transaction::create_table::create_table;
 use delta_kernel::transaction::data_layout::DataLayout;
 use delta_kernel::{Engine, Snapshot};
@@ -40,7 +40,7 @@ use test_utils::{insert_data_with, read_scan};
 use unity_catalog_delta_client_api::{
     CreateStagingTableRequest, LoadTableResponse, TableIdentifier,
 };
-use unity_catalog_delta_rest_client::{ClientConfig, UCClient, UCUpdateTableRestClient};
+use unity_catalog_delta_rest_client::{ClientConfig, UCDeltaTableClient, UCUpdateTableRestClient};
 use url::Url;
 
 /// Returns `(server_url, token)` from the environment, or `None` to signal the caller to skip.
@@ -57,8 +57,8 @@ fn client_config(url: &str, token: &str) -> ClientConfig {
         .expect("failed to build ClientConfig")
 }
 
-fn client(url: &str, token: &str) -> UCClient {
-    UCClient::new(client_config(url, token)).expect("failed to build UCClient")
+fn client(url: &str, token: &str) -> UCDeltaTableClient {
+    UCDeltaTableClient::new(client_config(url, token)).expect("failed to build UCDeltaTableClient")
 }
 
 /// Normalize a UC table location to a root URL ending in `/`. UC returns the location without a
@@ -116,8 +116,8 @@ async fn live_load_table_builds_log_tail() {
     );
 }
 
-/// Live CREATE through the full connector flow: `UCClient::create_staging_table` to reserve,
-/// kernel for the v0 commit, then `UCClient::create_table` to register.
+/// Live CREATE through the full connector flow: `UCDeltaTableClient::create_staging_table` to
+/// reserve, kernel for the v0 commit, then `UCDeltaTableClient::create_table` to register.
 ///
 /// The table enables row tracking and clustering so the create body and the write path exercise the
 /// `delta.rowTracking` and `delta.clustering` domains in one round trip: the initial watermark (-1)
@@ -176,21 +176,14 @@ async fn live_create_table() {
     // ===== Step 3: Define the schema =====
     // A nested struct so clustering can target both a top-level and a nested
     // column.
-    let schema: SchemaRef = Arc::new(
-        StructType::try_new(vec![
-            StructField::not_null("id", DataType::INTEGER),
-            StructField::nullable("name", DataType::STRING),
-            StructField::nullable(
-                "address",
-                StructType::try_new(vec![
-                    StructField::nullable("city", DataType::STRING),
-                    StructField::nullable("zip", DataType::STRING),
-                ])
-                .expect("failed to build nested schema"),
-            ),
-        ])
-        .expect("failed to build schema"),
-    );
+    let schema: SchemaRef = schema_ref! {
+        not_null "id": INTEGER,
+        nullable "name": STRING,
+        nullable "address": {
+            nullable "city": STRING,
+            nullable "zip": STRING,
+        },
+    };
 
     // ===== Step 4: Invoke kernel to write the v0 commit (00.json) via the UC committer =====
     // The v0 path writes directly to storage and does not call the catalog. Enable row tracking so
@@ -203,19 +196,21 @@ async fn live_create_table() {
         resp.table_id.clone(),
         TableIdentifier::new(catalog.clone(), schema_name.clone(), name.to_string()),
     ));
-    create_table(table_root.as_str(), schema, "delta-kernel-rs-live-test")
-        .with_table_properties(disk_props)
-        .with_data_layout(DataLayout::Clustered {
-            columns: vec![
-                ColumnName::new(["name"]),
-                ColumnName::new(["address", "city"]),
-            ],
-        })
-        .build(engine.as_ref(), committer)
-        .expect("failed to build create-table transaction")
-        .commit(engine.as_ref())
-        .expect("failed to commit create-table transaction")
-        .unwrap_committed();
+    create_table(
+        table_root.as_str(),
+        schema,
+        "delta-kernel-rs-live-test",
+        true,
+    )
+    .with_table_properties(disk_props)
+    .with_data_layout(DataLayout::Clustered {
+        columns: vec![column_name!("name"), column_name!("address", "city")],
+    })
+    .build(engine.as_ref(), committer)
+    .expect("failed to build create-table transaction")
+    .commit(engine.as_ref())
+    .expect("failed to commit create-table transaction")
+    .unwrap_committed();
 
     // ===== Step 5: Load the post-commit v0 snapshot =====
     // The table is catalog-managed, so the snapshot build requires the catalog's max version; the

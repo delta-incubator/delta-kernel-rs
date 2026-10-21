@@ -1,18 +1,32 @@
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
+use std::hash::Hash;
 
 use chrono::{DateTime, NaiveDate, NaiveDateTime, TimeZone, Utc};
+use delta_kernel_derive::internal_api;
+use derive_more::From;
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
+use strum::AsRefStr;
 
-use crate::schema::derive_macro_utils::ToDataType;
+use crate::error::add_scalar_path_context;
+use crate::schema::derive_macro_utils::{GetStructField, ToDataType};
 use crate::schema::{
     parse_interval_type, ArrayType, DataType, DecimalType, IntervalField, IntervalFieldRange,
-    MapType, PrimitiveType, StructField,
+    MapType, PrimitiveType, StructField, StructType,
 };
 use crate::utils::require;
-use crate::{DeltaResult, Error};
+use crate::{KernelError, KernelResult};
+
+/// Pairs [`Into<Scalar>`] with [`ToDataType`] for infallible container conversions.
+///
+/// `Option<T: IntoScalar>` is not itself `IntoScalar`: nullability belongs to the owning
+/// struct/array/map rather than its value type. See [`ToDataType`] for the pairing contract.
+#[internal_api]
+pub(crate) trait IntoScalar: Into<Scalar> + ToDataType {}
+
+impl<T: Into<Scalar> + ToDataType> IntoScalar for T {}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DecimalData {
@@ -21,11 +35,11 @@ pub struct DecimalData {
 }
 
 impl DecimalData {
-    pub fn try_new(bits: impl Into<i128>, ty: DecimalType) -> DeltaResult<Self> {
+    pub fn try_new(bits: impl Into<i128>, ty: DecimalType) -> KernelResult<Self> {
         let bits = bits.into();
         require!(
             ty.precision() >= get_decimal_precision(bits),
-            Error::invalid_decimal(format!(
+            KernelError::invalid_decimal(format!(
                 "Decimal value {} exceeds precision {}",
                 bits,
                 ty.precision()
@@ -69,19 +83,19 @@ impl ArrayData {
     pub fn try_new(
         tpe: ArrayType,
         elements: impl IntoIterator<Item = impl Into<Scalar>>,
-    ) -> DeltaResult<Self> {
+    ) -> KernelResult<Self> {
         let elements = elements
             .into_iter()
             .map(|v| {
                 let v = v.into();
                 // disallow nulls if the type is not allowed to contain nulls
                 if !tpe.contains_null() && v.is_null() {
-                    Err(Error::schema(
+                    Err(KernelError::schema(
                         "Array element cannot be null for non-nullable array",
                     ))
                 // check element types match
                 } else if *tpe.element_type() != v.data_type() {
-                    Err(Error::Schema(format!(
+                    Err(KernelError::Schema(format!(
                         "Array scalar type mismatch: expected {}, got {}",
                         tpe.element_type(),
                         v.data_type()
@@ -101,6 +115,39 @@ impl ArrayData {
     pub fn array_elements(&self) -> &[Scalar] {
         &self.elements
     }
+
+    /// Consume this array and return its elements.
+    #[internal_api]
+    pub(crate) fn into_elements(self) -> Vec<Scalar> {
+        self.elements
+    }
+
+    /// Infallible constructor used by `From<Vec<T>>` and `From<Vec<Option<T>>` where we know the
+    /// resulting `Scalar::data_type` is `T:to_data_type`.
+    fn from_elements<T: ToDataType>(
+        elements: impl IntoIterator<Item = impl Into<Scalar>>,
+        contains_null: bool,
+    ) -> Self {
+        Self {
+            tpe: ArrayType::new(T::to_data_type(), contains_null),
+            elements: elements.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+/// Builds [`ArrayData`] from a Rust `Vec` whose element type implements both `Into<Scalar>` and
+/// [`ToSchema`](delta_kernel::schema::ToSchema).
+impl<T: IntoScalar> From<Vec<T>> for ArrayData {
+    fn from(vec: Vec<T>) -> Self {
+        Self::from_elements::<T>(vec, false)
+    }
+}
+
+/// Like [`From<Vec<T>> for ArrayData`], but elements may be null (`contains_null = true`).
+impl<T: IntoScalar> From<Vec<Option<T>>> for ArrayData {
+    fn from(vec: Vec<Option<T>>) -> Self {
+        Self::from_elements::<T>(vec, true)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -113,7 +160,7 @@ impl MapData {
     pub fn try_new(
         data_type: MapType,
         values: impl IntoIterator<Item = (impl Into<Scalar>, impl Into<Scalar>)>,
-    ) -> DeltaResult<Self> {
+    ) -> KernelResult<Self> {
         let key_type = data_type.key_type();
         let val_type = data_type.value_type();
         let pairs = values
@@ -122,24 +169,24 @@ impl MapData {
                 let (k, v) = (key.into(), val.into());
                 // check key types match
                 if k.data_type() != *key_type {
-                    Err(Error::Schema(format!(
+                    Err(KernelError::Schema(format!(
                         "Map scalar type mismatch: expected key type {}, got key type {}",
                         key_type,
                         k.data_type()
                     )))
                 // keys can't be null
                 } else if k.is_null() {
-                    Err(Error::schema("Map key cannot be null"))
+                    Err(KernelError::schema("Map key cannot be null"))
                 // check val types match
                 } else if v.data_type() != *val_type {
-                    Err(Error::Schema(format!(
+                    Err(KernelError::Schema(format!(
                         "Map scalar type mismatch: expected value type {}, got value type {}",
                         val_type,
                         v.data_type()
                     )))
                 // vals can only be null if value_contains_null is true
                 } else if v.is_null() && !data_type.value_contains_null {
-                    Err(Error::schema(
+                    Err(KernelError::schema(
                         "Null map value disallowed if map value_contains_null is false",
                     ))
                 } else {
@@ -159,6 +206,39 @@ impl MapData {
     pub fn map_type(&self) -> &MapType {
         &self.data_type
     }
+
+    /// Consume this map and return its key/value pairs.
+    #[internal_api]
+    pub(crate) fn into_pairs(self) -> Vec<(Scalar, Scalar)> {
+        self.pairs
+    }
+
+    /// Infallible constructor used by `From<HashMap<K, V>>` / `From<HashMap<K, Option<V>>>`
+    /// where key/value scalars are known to match `K`/`V`'s [`ToDataType`].
+    pub(crate) fn from_pairs<K: ToDataType, V: ToDataType>(
+        pairs: impl IntoIterator<Item = (impl Into<Scalar>, impl Into<Scalar>)>,
+        value_contains_null: bool,
+    ) -> Self {
+        Self {
+            data_type: MapType::new(K::to_data_type(), V::to_data_type(), value_contains_null),
+            pairs: Vec::from_iter(pairs.into_iter().map(|(k, v)| (k.into(), v.into()))),
+        }
+    }
+}
+
+/// Builds [`MapData`] from a Rust [`HashMap`] whose key/value types implement both `Into<Scalar>`
+/// and [`ToSchema`](delta_kernel::schema::ToSchema).
+impl<K: IntoScalar, V: IntoScalar> From<HashMap<K, V>> for MapData {
+    fn from(map: HashMap<K, V>) -> Self {
+        Self::from_pairs::<K, V>(map, false)
+    }
+}
+
+/// Like [`From<HashMap<K, V>> for MapData`], but values may be null (`value_contains_null = true`).
+impl<K: IntoScalar, V: IntoScalar> From<HashMap<K, Option<V>>> for MapData {
+    fn from(map: HashMap<K, Option<V>>) -> Self {
+        Self::from_pairs::<K, V>(map, true)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -174,10 +254,10 @@ impl StructData {
     /// - if the number of fields and values do not match
     /// - if the data types of the values do not match the data types of the fields
     /// - if a null value is assigned to a non-nullable field
-    pub fn try_new(fields: Vec<StructField>, values: Vec<Scalar>) -> DeltaResult<Self> {
+    pub fn try_new(fields: Vec<StructField>, values: Vec<Scalar>) -> KernelResult<Self> {
         require!(
             fields.len() == values.len(),
-            Error::invalid_struct_data(format!(
+            KernelError::invalid_struct_data(format!(
                 "Incorrect number of values for Struct fields, expected {} got {}",
                 fields.len(),
                 values.len()
@@ -187,7 +267,7 @@ impl StructData {
         for (f, a) in fields.iter().zip(&values) {
             require!(
                 f.data_type() == &a.data_type(),
-                Error::invalid_struct_data(format!(
+                KernelError::invalid_struct_data(format!(
                     "Incorrect datatype for Struct field {:?}, expected {} got {}",
                     f.name(),
                     f.data_type(),
@@ -197,7 +277,7 @@ impl StructData {
 
             require!(
                 f.is_nullable() || !a.is_null(),
-                Error::invalid_struct_data(format!(
+                KernelError::invalid_struct_data(format!(
                     "Value for non-nullable field {:?} cannot be null, got {}",
                     f.name(),
                     a
@@ -208,12 +288,29 @@ impl StructData {
         Ok(Self { fields, values })
     }
 
+    /// Infallible constructor used by `From<T>` where `schema` and `values` are produced using
+    /// [`ToSchema`](delta_kernel::schema::ToSchema) and `Into<Scalar>`. Does not re-validate types
+    /// or lengths.
+    #[internal_api]
+    pub(crate) fn from_values_unchecked(schema: StructType, values: Vec<Scalar>) -> Self {
+        Self {
+            fields: schema.into_fields().collect(),
+            values,
+        }
+    }
+
     pub fn fields(&self) -> &[StructField] {
         &self.fields
     }
 
     pub fn values(&self) -> &[Scalar] {
         &self.values
+    }
+
+    /// Consume this struct and return its fields and values.
+    #[internal_api]
+    pub(crate) fn into_parts(self) -> (Vec<StructField>, Vec<Scalar>) {
+        (self.fields, self.values)
     }
 }
 
@@ -222,23 +319,32 @@ impl StructData {
 ///
 /// NOTE: `PartialEq` uses physical (structural) comparison semantics.
 /// For SQL NULL semantics, use [`Scalar::logical_eq`] or [`Scalar::logical_partial_cmp`].
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, AsRefStr, From)]
+#[strum(serialize_all = "snake_case")]
 pub enum Scalar {
     /// 32bit integer
+    #[from]
     Integer(i32),
     /// 64bit integer
+    #[from]
     Long(i64),
     /// 16bit integer
+    #[from]
     Short(i16),
     /// 8bit integer
+    #[from]
     Byte(i8),
     /// 32bit floating point
+    #[from]
     Float(f32),
     /// 64bit floating point
+    #[from]
     Double(f64),
     /// utf-8 encoded string.
+    #[from(String, &str)]
     String(String),
     /// true or false value
+    #[from]
     Boolean(bool),
     /// Microsecond precision timestamp, adjusted to UTC.
     Timestamp(i64),
@@ -251,16 +357,21 @@ pub enum Scalar {
     /// Date stored as a signed 32bit int days since UNIX epoch 1970-01-01
     Date(i32),
     /// Binary data
+    #[from(Vec<u8>, &[u8], bytes::Bytes)]
     Binary(Vec<u8>),
     /// Decimal value with a given precision and scale.
+    #[from]
     Decimal(DecimalData),
     /// Null value with a given data type.
     Null(DataType),
     /// Struct value
+    #[from]
     Struct(StructData),
     /// Array Value
+    #[from]
     Array(ArrayData),
     /// Map Value
+    #[from]
     Map(MapData),
 }
 
@@ -306,16 +417,22 @@ impl Scalar {
     }
 
     /// Constructs a Decimal value from raw parts
-    pub fn decimal(bits: impl Into<i128>, precision: u8, scale: u8) -> DeltaResult<Self> {
+    pub fn decimal(bits: impl Into<i128>, precision: u8, scale: u8) -> KernelResult<Self> {
         let dtype = DecimalType::try_new(precision, scale)?;
         let dval = DecimalData::try_new(bits, dtype)?;
         Ok(Self::Decimal(dval))
     }
 
+    /// KernelError for a failed conversion of this scalar into the Rust type named by `target`.
+    #[internal_api]
+    pub(crate) fn conversion_error(&self, target: &str) -> KernelError {
+        KernelError::scalar_conversion(target, self.as_ref())
+    }
+
     /// Constructs a Scalar timestamp (in UTC) from an `i64` millisecond since unix epoch
-    pub(crate) fn timestamp_from_millis(millis: i64) -> DeltaResult<Self> {
+    pub(crate) fn timestamp_from_millis(millis: i64) -> KernelResult<Self> {
         let Some(timestamp) = DateTime::from_timestamp_millis(millis) else {
-            return Err(Error::generic(format!(
+            return Err(KernelError::generic(format!(
                 "Failed to create millisecond timestamp from {millis}"
             )));
         };
@@ -530,171 +647,32 @@ impl Scalar {
     }
 }
 
-impl From<i8> for Scalar {
-    fn from(i: i8) -> Self {
-        Self::Byte(i)
-    }
-}
-
-impl From<i16> for Scalar {
-    fn from(i: i16) -> Self {
-        Self::Short(i)
-    }
-}
-
-impl From<i32> for Scalar {
-    fn from(i: i32) -> Self {
-        Self::Integer(i)
-    }
-}
-
-impl From<i64> for Scalar {
-    fn from(i: i64) -> Self {
-        Self::Long(i)
-    }
-}
-
-impl From<f32> for Scalar {
-    fn from(i: f32) -> Self {
-        Self::Float(i)
-    }
-}
-
-impl From<f64> for Scalar {
-    fn from(i: f64) -> Self {
-        Self::Double(i)
-    }
-}
-
-impl From<bool> for Scalar {
-    fn from(b: bool) -> Self {
-        Self::Boolean(b)
-    }
-}
-
-impl From<DecimalData> for Scalar {
-    fn from(d: DecimalData) -> Self {
-        Self::Decimal(d)
-    }
-}
-
-impl From<&str> for Scalar {
-    fn from(s: &str) -> Self {
-        Self::String(s.into())
-    }
-}
-
-impl From<String> for Scalar {
-    fn from(value: String) -> Self {
-        Self::String(value)
-    }
-}
-
 impl<T: Into<Scalar> + Copy> From<&T> for Scalar {
     fn from(t: &T) -> Self {
         (*t).into()
     }
 }
 
-impl From<&[u8]> for Scalar {
-    fn from(b: &[u8]) -> Self {
-        Self::Binary(b.into())
-    }
-}
-
-impl From<bytes::Bytes> for Scalar {
-    fn from(b: bytes::Bytes) -> Self {
-        Self::Binary(b.into())
-    }
-}
-
-impl<T> TryFrom<Vec<T>> for Scalar
+impl<T> From<Vec<T>> for Scalar
 where
-    T: Into<Scalar> + ToDataType,
+    Vec<T>: Into<ArrayData>,
 {
-    type Error = Error;
-
-    fn try_from(vec: Vec<T>) -> Result<Self, Self::Error> {
-        let array_type = ArrayType::new(T::to_data_type(), false);
-        let array_data = ArrayData::try_new(array_type, vec)?;
-        Ok(array_data.into())
+    fn from(vec: Vec<T>) -> Self {
+        Self::Array(vec.into())
     }
 }
 
-impl<T> TryFrom<Vec<Option<T>>> for Scalar
+impl<K, V> From<HashMap<K, V>> for Scalar
 where
-    T: Into<Scalar> + ToDataType,
+    HashMap<K, V>: Into<MapData>,
 {
-    type Error = Error;
-
-    fn try_from(vec: Vec<Option<T>>) -> Result<Self, Self::Error> {
-        let array_type = ArrayType::new(T::to_data_type(), true);
-        let array_data = ArrayData::try_new(array_type, vec)?;
-        Ok(array_data.into())
-    }
-}
-
-impl<T> TryFrom<Option<Vec<T>>> for Scalar
-where
-    T: Into<Scalar> + ToDataType,
-{
-    type Error = Error;
-
-    fn try_from(opt: Option<Vec<T>>) -> Result<Self, Self::Error> {
-        match opt {
-            Some(vec) => vec.try_into(),
-            None => Ok(Self::Null(ArrayType::new(T::to_data_type(), false).into())),
-        }
-    }
-}
-
-impl<K, V> TryFrom<HashMap<K, V>> for Scalar
-where
-    K: Into<Scalar> + ToDataType,
-    V: Into<Scalar> + ToDataType,
-{
-    type Error = Error;
-
-    fn try_from(map: HashMap<K, V>) -> Result<Self, Self::Error> {
-        let map_type = MapType::new(K::to_data_type(), V::to_data_type(), false);
-        let map_data = MapData::try_new(map_type, map)?;
-        Ok(map_data.into())
-    }
-}
-
-impl<K, V> TryFrom<HashMap<K, Option<V>>> for Scalar
-where
-    K: Into<Scalar> + ToDataType,
-    V: Into<Scalar> + ToDataType,
-{
-    type Error = Error;
-
-    fn try_from(map: HashMap<K, Option<V>>) -> Result<Self, Self::Error> {
-        let map_type = MapType::new(K::to_data_type(), V::to_data_type(), true);
-        let map_data = MapData::try_new(map_type, map)?;
-        Ok(map_data.into())
-    }
-}
-
-impl<K, V> TryFrom<Option<HashMap<K, V>>> for Scalar
-where
-    K: Into<Scalar> + ToDataType,
-    V: Into<Scalar> + ToDataType,
-{
-    type Error = Error;
-
-    fn try_from(opt: Option<HashMap<K, V>>) -> Result<Self, Self::Error> {
-        match opt {
-            Some(map) => map.try_into(),
-            None => Ok(Self::Null(
-                MapType::new(K::to_data_type(), V::to_data_type(), false).into(),
-            )),
-        }
+    fn from(map: HashMap<K, V>) -> Self {
+        Self::Map(map.into())
     }
 }
 
 // NOTE: We "cheat" and use the macro support trait `ToDataType`
-impl<T: Into<Scalar> + ToDataType> From<Option<T>> for Scalar {
+impl<T: IntoScalar> From<Option<T>> for Scalar {
     fn from(t: Option<T>) -> Self {
         match t {
             Some(t) => t.into(),
@@ -703,19 +681,155 @@ impl<T: Into<Scalar> + ToDataType> From<Option<T>> for Scalar {
     }
 }
 
-impl From<ArrayData> for Scalar {
-    fn from(array_data: ArrayData) -> Self {
-        Self::Array(array_data)
+// ===== Scalar -> rust conversions, inverting the `From<T> for Scalar` impls above =====
+
+/// Inverts the corresponding `From<T> for Scalar` conversion. The generated `try_from` matches on
+/// the single `Scalar` variant its forward counterpart produces and returns a conversion error for
+/// every other variant.
+///
+/// Matching is by variant, not by physical representation, so a target type is never produced from
+/// a variant that merely shares its in-memory layout: `i64` accepts `Long` but rejects `Timestamp`,
+/// `TimestampNtz`, and `IntervalDayTime`; `i32` accepts `Integer` but rejects `Date` and
+/// `IntervalYearMonth`. This keeps `Scalar` <-> rust conversions type-preserving, so a value's data
+/// type survives the round trip rather than collapsing onto whichever variant shares its layout.
+macro_rules! impl_try_from_scalar {
+    ( $(($variant:ident, $rust_type:ty)),* $(,)? ) => {
+        $(
+            impl TryFrom<Scalar> for $rust_type {
+                type Error = KernelError;
+
+                fn try_from(scalar: Scalar) -> KernelResult<Self> {
+                    match scalar {
+                        Scalar::$variant(value) => Ok(value.into()),
+                        other => Err(other.conversion_error(stringify!($rust_type))),
+                    }
+                }
+            }
+        )*
+    };
+}
+
+impl_try_from_scalar!(
+    (Byte, i8),
+    (Short, i16),
+    (Integer, i32),
+    (Long, i64),
+    (Float, f32),
+    (Double, f64),
+    (Boolean, bool),
+    (String, String),
+    (Binary, bytes::Bytes),
+    (Decimal, DecimalData),
+    (Array, ArrayData),
+    (Map, MapData),
+    (Struct, StructData),
+);
+
+/// Null becomes `None` when its typed null matches `T::to_data_type`; anything else must convert
+/// to `T`.
+impl<T: TryFrom<Scalar, Error = KernelError> + ToDataType> TryFrom<Scalar> for Option<T> {
+    type Error = KernelError;
+
+    fn try_from(scalar: Scalar) -> KernelResult<Self> {
+        match scalar {
+            Scalar::Null(data_type) => {
+                let expected = T::to_data_type();
+                require!(
+                    data_type == expected,
+                    KernelError::scalar_conversion(expected.kind_name(), data_type.kind_name())
+                );
+                Ok(None)
+            }
+            other => Ok(Some(T::try_from(other)?)),
+        }
     }
 }
 
-impl From<MapData> for Scalar {
-    fn from(map_data: MapData) -> Self {
-        Self::Map(map_data)
+/// Extracts an array scalar's elements. Use `Vec<Option<T>>` for arrays that contain nulls.
+impl<T> TryFrom<Scalar> for Vec<T>
+where
+    T: GetStructField + TryFrom<Scalar, Error = KernelError>,
+{
+    type Error = KernelError;
+
+    fn try_from(scalar: Scalar) -> KernelResult<Self> {
+        let array: ArrayData = scalar.try_into()?;
+        let element = T::get_struct_field("element");
+        let expected = ArrayType::new(element.data_type().clone(), element.is_nullable());
+        require!(
+            array.array_type() == &expected,
+            KernelError::scalar_conversion(
+                format!(
+                    "array<{}, contains_null={}>",
+                    expected.element_type().kind_name(),
+                    expected.contains_null()
+                ),
+                format!(
+                    "array<{}, contains_null={}>",
+                    array.array_type().element_type().kind_name(),
+                    array.array_type().contains_null()
+                ),
+            )
+        );
+        array
+            .into_elements()
+            .into_iter()
+            .enumerate()
+            .map(|(index, value)| {
+                T::try_from(value)
+                    .map_err(|error| add_scalar_path_context(error, format!("[{index}]")))
+            })
+            .try_collect()
     }
 }
 
-// TODO: add more From impls
+/// Extracts a map scalar's entries. Use `HashMap<K, Option<V>>` for maps with null values.
+impl<K, V> TryFrom<Scalar> for HashMap<K, V>
+where
+    K: TryFrom<Scalar, Error = KernelError> + Eq + Hash,
+    V: GetStructField + TryFrom<Scalar, Error = KernelError>,
+    K: ToDataType,
+{
+    type Error = KernelError;
+
+    fn try_from(scalar: Scalar) -> KernelResult<Self> {
+        let map: MapData = scalar.try_into()?;
+        let value = V::get_struct_field("value");
+        let expected = MapType::new(
+            K::to_data_type(),
+            value.data_type().clone(),
+            value.is_nullable(),
+        );
+        require!(
+            map.map_type() == &expected,
+            KernelError::scalar_conversion(
+                format!(
+                    "map<{}, {}, value_contains_null={}>",
+                    expected.key_type().kind_name(),
+                    expected.value_type().kind_name(),
+                    expected.value_contains_null()
+                ),
+                format!(
+                    "map<{}, {}, value_contains_null={}>",
+                    map.map_type().key_type().kind_name(),
+                    map.map_type().value_type().kind_name(),
+                    map.map_type().value_contains_null()
+                ),
+            )
+        );
+        map.into_pairs()
+            .into_iter()
+            .enumerate()
+            .map(|(index, (key, value))| {
+                let key = K::try_from(key)
+                    .map_err(|error| add_scalar_path_context(error, format!("[{index}].key")))?;
+                let value = V::try_from(value)
+                    .map_err(|error| add_scalar_path_context(error, format!("[{index}].value")))?;
+                Ok((key, value))
+            })
+            .try_collect()
+    }
+}
 
 impl PrimitiveType {
     fn data_type(&self) -> DataType {
@@ -738,10 +852,10 @@ impl PrimitiveType {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::ParseError`] if `raw` is not a valid encoding of this type.
+    /// Returns [`KernelError::ParseError`] if `raw` is not a valid encoding of this type.
     ///
     /// [partition value serialization]: https://github.com/delta-io/delta/blob/master/PROTOCOL.md#partition-value-serialization
-    pub fn parse_scalar(&self, raw: &str) -> Result<Scalar, Error> {
+    pub fn parse_scalar(&self, raw: &str) -> KernelResult<Scalar> {
         use PrimitiveType::*;
 
         if raw.is_empty() {
@@ -810,7 +924,7 @@ impl PrimitiveType {
                 .ok_or_else(|| self.parse_error(raw)),
             // Kernel does not support parsing text into Geometry/Geography types yet.
             #[cfg(feature = "geo-type-in-dev")]
-            Geometry(_) | Geography(_) => Err(Error::Unsupported(format!(
+            Geometry(_) | Geography(_) => Err(KernelError::Unsupported(format!(
                 "parse_scalar is not supported for {self:?}"
             ))),
         }
@@ -836,8 +950,8 @@ impl PrimitiveType {
         }
     }
 
-    fn parse_error(&self, raw: &str) -> Error {
-        Error::ParseError(raw.to_string(), self.data_type())
+    fn parse_error(&self, raw: &str) -> KernelError {
+        KernelError::ParseError(raw.to_string(), self.data_type())
     }
 
     /// Parse a string as a scalar value, returning an error if the string is not parseable.
@@ -849,14 +963,14 @@ impl PrimitiveType {
         &self,
         raw: &str,
         f: impl FnOnce(T) -> Scalar,
-    ) -> Result<Scalar, Error> {
+    ) -> KernelResult<Scalar> {
         match raw.parse() {
             Ok(val) => Ok(f(val)),
             Err(..) => Err(self.parse_error(raw)),
         }
     }
 
-    fn parse_decimal(raw: &str, dtype: DecimalType) -> Result<Scalar, Error> {
+    fn parse_decimal(raw: &str, dtype: DecimalType) -> KernelResult<Scalar> {
         let parse_error = || PrimitiveType::from(dtype).parse_error(raw);
         let (base, exp): (&str, i128) = match raw.find(['e', 'E']) {
             None => (raw, 0), // no 'e' or 'E', so there's no exponent
@@ -1079,11 +1193,16 @@ fn parse_day_time_interval(raw: &str) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use std::f32::consts::PI;
+    use std::fmt::Debug;
 
+    use bytes::Bytes;
+    use delta_kernel_derive::{IntoStructData, ToSchema, TryFromStructData};
     use rstest::rstest;
 
     use super::*;
     use crate::expressions::{col, lit, BinaryPredicateOp};
+    use crate::schema::{schema, ToSchema};
+    use crate::table_features::TableFeature;
     use crate::unit_test_utils::assert_result_error_with_message;
     use crate::Predicate as Pred;
 
@@ -1124,7 +1243,7 @@ mod tests {
     fn test_geo_parse_scalar_unsupported(#[case] ptype: PrimitiveType) {
         let err = ptype.parse_scalar("anything").unwrap_err();
         assert!(
-            matches!(err, Error::Unsupported(_)),
+            matches!(err, KernelError::Unsupported(_)),
             "expected Unsupported, got: {err:?}"
         );
     }
@@ -1154,7 +1273,7 @@ mod tests {
         expect_int: i128,
         expect_prec: u8,
         expect_scale: u8,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> KernelResult<()> {
         let s = PrimitiveType::decimal(expect_prec, expect_scale)?;
         match s.parse_scalar(raw)? {
             Scalar::Decimal(val) => {
@@ -1231,7 +1350,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_decimal() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_parse_decimal() -> KernelResult<()> {
         assert_decimal("0.999", 999, 3, 3)?;
         assert_decimal("0", 0, 1, 0)?;
         assert_decimal("0.00", 0, 3, 2)?;
@@ -1251,7 +1370,7 @@ mod tests {
     fn expect_fail_parse(raw: &str, prec: u8, scale: u8) {
         let s = PrimitiveType::decimal(prec, scale).unwrap();
         match s.parse_scalar(raw) {
-            Err(Error::ParseError(..)) => {}
+            Err(KernelError::ParseError(..)) => {}
             other => panic!("expected ParseError for {raw:?}, got {other:?}"),
         }
     }
@@ -1440,15 +1559,47 @@ mod tests {
         assert!(!null.logical_eq(&null));
     }
 
+    fn assert_into_scalar_matches_to_data_type<T: IntoScalar>(value: T) {
+        let scalar: Scalar = value.into();
+        assert!(!scalar.is_null());
+        assert_eq!(scalar.data_type(), T::to_data_type());
+    }
+
     #[test]
-    fn test_hashmap_conversion() -> DeltaResult<()> {
+    fn into_scalar_matches_to_data_type() {
+        assert_into_scalar_matches_to_data_type(true);
+        assert_into_scalar_matches_to_data_type(1i8);
+        assert_into_scalar_matches_to_data_type(1i16);
+        assert_into_scalar_matches_to_data_type(1i32);
+        assert_into_scalar_matches_to_data_type(1i64);
+        assert_into_scalar_matches_to_data_type(1.0f32);
+        assert_into_scalar_matches_to_data_type(1.0f64);
+        assert_into_scalar_matches_to_data_type("x".to_string());
+        assert_into_scalar_matches_to_data_type(Bytes::from_static(b"x"));
+        assert_into_scalar_matches_to_data_type(TableFeature::DeletionVectors);
+
+        assert_into_scalar_matches_to_data_type(vec![1i8, 2, 3]);
+        assert_into_scalar_matches_to_data_type(vec![1, 2, 3]);
+        assert_into_scalar_matches_to_data_type(vec![Some(1i32), None]);
+        assert_into_scalar_matches_to_data_type(HashMap::from([
+            ("key1".to_string(), 42i32),
+            ("key2".to_string(), 100i32),
+        ]));
+        assert_into_scalar_matches_to_data_type(HashMap::from([
+            ("key1".to_string(), Some(42i32)),
+            ("key2".to_string(), None),
+        ]));
+    }
+
+    #[test]
+    fn test_hashmap_conversion() {
         // Create a simple HashMap with string keys and integer values
         let mut map = HashMap::new();
         map.insert("key1".to_string(), 42i32);
         map.insert("key2".to_string(), 100i32);
 
         // Convert HashMap to Scalar
-        let scalar = Scalar::try_from(map)?;
+        let scalar = Scalar::from(map);
 
         // Verify the scalar is of Map type
         assert!(matches!(scalar, Scalar::Map(_)));
@@ -1470,12 +1621,10 @@ mod tests {
         let entry2 = (Scalar::String("key2".to_string()), Scalar::Integer(100));
         assert!(pairs.contains(&entry1), "Missing key1 -> 42 pair");
         assert!(pairs.contains(&entry2), "Missing key2 -> 100 pair");
-
-        Ok(())
     }
 
     #[test]
-    fn test_hashmap_conversion_with_nullable_values() -> DeltaResult<()> {
+    fn test_hashmap_conversion_with_nullable_values() {
         // Create a HashMap with string keys and optional integer values
         let mut map = HashMap::new();
         map.insert("key1".to_string(), Some(42i32));
@@ -1483,7 +1632,7 @@ mod tests {
         map.insert("key3".to_string(), Some(100i32));
 
         // Convert HashMap to Scalar
-        let scalar = Scalar::try_from(map)?;
+        let scalar = Scalar::from(map);
 
         // Verify the scalar is of Map type
         assert!(matches!(scalar, Scalar::Map(_)));
@@ -1510,17 +1659,15 @@ mod tests {
         assert!(pairs.contains(&entry1), "Missing key1 -> 42 pair");
         assert!(pairs.contains(&entry2), "Missing key2 -> null pair");
         assert!(pairs.contains(&entry3), "Missing key3 -> 100 pair");
-
-        Ok(())
     }
 
     #[test]
-    fn test_vec_conversion() -> DeltaResult<()> {
+    fn test_vec_conversion() {
         // Create a simple Vec with integer values
         let vec = vec![42i32, 100i32, 200i32];
 
         // Convert Vec to Scalar
-        let scalar = Scalar::try_from(vec)?;
+        let scalar = Scalar::from(vec);
 
         // Verify the scalar is of Array type
         assert!(matches!(scalar, Scalar::Array(_)));
@@ -1541,17 +1688,15 @@ mod tests {
         assert_eq!(elements[0], Scalar::Integer(42));
         assert_eq!(elements[1], Scalar::Integer(100));
         assert_eq!(elements[2], Scalar::Integer(200));
-
-        Ok(())
     }
 
     #[test]
-    fn test_vec_conversion_with_nullable_values() -> DeltaResult<()> {
+    fn test_vec_conversion_with_nullable_values() {
         // Create a Vec with optional integer values
         let vec = vec![Some(42i32), None, Some(100i32)];
 
         // Convert Vec to Scalar
-        let scalar = Scalar::try_from(vec)?;
+        let scalar = Scalar::from(vec);
 
         // Verify the scalar is of Array type
         assert!(matches!(scalar, Scalar::Array(_)));
@@ -1573,15 +1718,13 @@ mod tests {
         assert_eq!(elements[0], Scalar::Integer(42));
         assert!(elements[1].is_null());
         assert_eq!(elements[2], Scalar::Integer(100));
-
-        Ok(())
     }
 
     #[test]
-    fn test_vec_conversion_different_types() -> DeltaResult<()> {
+    fn test_vec_conversion_different_types() {
         // Test with string Vec
         let string_vec = vec!["hello".to_string(), "world".to_string()];
-        let string_scalar = Scalar::try_from(string_vec)?;
+        let string_scalar = Scalar::from(string_vec);
 
         if let Scalar::Array(array_data) = string_scalar {
             let expected_array_type = ArrayType::new(DataType::STRING, false);
@@ -1592,7 +1735,7 @@ mod tests {
 
         // Test with bool Vec
         let bool_vec = vec![true, false, true];
-        let bool_scalar = Scalar::try_from(bool_vec)?;
+        let bool_scalar = Scalar::from(bool_vec);
 
         if let Scalar::Array(array_data) = bool_scalar {
             let expected_array_type = ArrayType::new(DataType::BOOLEAN, false);
@@ -1600,8 +1743,6 @@ mod tests {
         } else {
             panic!("Expected Array scalar");
         }
-
-        Ok(())
     }
 
     #[test]
@@ -1622,6 +1763,13 @@ mod tests {
         } else {
             panic!("Expected Binary scalar");
         }
+
+        // Owned Vec moves into Binary without reallocation via slice.
+        let owned = vec![9u8, 8, 7];
+        let from_vec: Scalar = owned.into();
+        assert_eq!(from_vec, Scalar::Binary(vec![9, 8, 7]));
+        let from_slice: Scalar = [9u8, 8, 7].as_slice().into();
+        assert_eq!(from_slice, Scalar::Binary(vec![9, 8, 7]));
 
         // Test with empty bytes
         let empty_bytes = bytes::Bytes::new();
@@ -1853,6 +2001,307 @@ mod tests {
         assert_eq!(
             parse_day_time_interval("INTERVAL '0.1234567' SECOND"),
             Some(123_456)
+        );
+    }
+
+    /// `TryFrom<Scalar>` must invert `Into<Scalar>` and produce the expected data type.
+    fn assert_round_trip<T>(value: T, expected_type: impl Into<DataType>)
+    where
+        T: Clone + Debug + PartialEq + Into<Scalar> + TryFrom<Scalar, Error = KernelError>,
+    {
+        let scalar: Scalar = value.clone().into();
+        assert_eq!(scalar.data_type(), expected_type.into());
+        assert_eq!(T::try_from(scalar).unwrap(), value);
+    }
+
+    #[test]
+    fn scalar_conversions_round_trip() {
+        assert_round_trip(1i8, DataType::BYTE);
+        assert_round_trip(2i16, DataType::SHORT);
+        assert_round_trip(3i32, DataType::INTEGER);
+        assert_round_trip(4i64, DataType::LONG);
+        assert_round_trip(PI, DataType::FLOAT);
+        assert_round_trip(6.0f64, DataType::DOUBLE);
+        assert_round_trip(true, DataType::BOOLEAN);
+        assert_round_trip("seven".to_string(), DataType::STRING);
+        assert_round_trip(Bytes::from_static(b"eight"), DataType::BINARY);
+        let decimal_type = DecimalType::try_new(2, 1).unwrap();
+        assert_round_trip(DecimalData::try_new(9, decimal_type).unwrap(), decimal_type);
+        assert_round_trip(vec![10i32, 11], ArrayType::new(DataType::INTEGER, false));
+        assert_round_trip(
+            vec![Some(12i32), None],
+            ArrayType::new(DataType::INTEGER, true),
+        );
+        assert_round_trip(
+            HashMap::from([("k".to_string(), "v".to_string())]),
+            MapType::new(DataType::STRING, DataType::STRING, false),
+        );
+        assert_round_trip(
+            HashMap::from([("k".to_string(), None as Option<String>)]),
+            MapType::new(DataType::STRING, DataType::STRING, true),
+        );
+        assert_round_trip(Some(13i32), DataType::INTEGER);
+        assert_round_trip(None::<i32>, DataType::INTEGER);
+    }
+
+    #[rstest]
+    #[case::long(Scalar::Long(1), "expected i32, found long")]
+    #[case::date(Scalar::Date(1), "expected i32, found date")]
+    #[case::interval_year_month(
+        Scalar::IntervalYearMonth(1),
+        "expected i32, found interval_year_month"
+    )]
+    #[case::string(Scalar::from("1"), "expected i32, found string")]
+    #[case::null(Scalar::null(DataType::INTEGER), "expected i32, found null")]
+    fn i32_conversion_rejects_other_variants(#[case] scalar: Scalar, #[case] expected: &str) {
+        assert_result_error_with_message(i32::try_from(scalar), expected);
+    }
+
+    #[rstest]
+    #[case::timestamp(Scalar::Timestamp(1), "expected i64, found timestamp")]
+    #[case::timestamp_ntz(Scalar::TimestampNtz(1), "expected i64, found timestamp_ntz")]
+    #[case::interval_day_time(Scalar::IntervalDayTime(1), "expected i64, found interval_day_time")]
+    #[case::integer(Scalar::Integer(1), "expected i64, found integer")]
+    fn i64_conversion_rejects_other_variants(#[case] scalar: Scalar, #[case] expected: &str) {
+        assert_result_error_with_message(i64::try_from(scalar), expected);
+    }
+
+    #[test]
+    fn null_option_requires_matching_element_data_type() {
+        assert_eq!(
+            Option::<i32>::try_from(Scalar::null(DataType::INTEGER)).unwrap(),
+            None
+        );
+        assert_result_error_with_message(
+            Option::<i32>::try_from(Scalar::null(DataType::STRING)),
+            "expected integer, found string",
+        );
+    }
+
+    #[test]
+    fn array_with_nulls_requires_optional_element_type() {
+        let scalar = Scalar::from(vec![Some(1i32), None]);
+        assert_result_error_with_message(
+            Vec::<i32>::try_from(scalar),
+            "expected array<integer, contains_null=false>, found array<integer, contains_null=true>",
+        );
+    }
+
+    #[derive(Clone, Debug, PartialEq, ToSchema, IntoStructData, TryFromStructData)]
+    struct Address {
+        city: String,
+        zip: Option<i32>,
+    }
+
+    #[derive(Clone, Debug, PartialEq, ToSchema, IntoStructData, TryFromStructData)]
+    struct Person {
+        id: i32,
+        address: Address,
+        display_names: Vec<String>,
+    }
+
+    #[derive(ToSchema, IntoStructData)]
+    struct OptionalFeatures {
+        features: Option<Vec<TableFeature>>,
+    }
+
+    #[derive(IntoStructData)]
+    struct NullableMapValues {
+        #[allow_null_container_values]
+        values: HashMap<String, String>,
+    }
+
+    impl ToSchema for NullableMapValues {
+        fn to_schema() -> StructType {
+            schema! { not_null "values": { STRING => nullable STRING } }
+        }
+    }
+
+    #[derive(ToSchema, IntoStructData)]
+    struct OptionalNullableMapValues {
+        #[allow_null_container_values]
+        values: Option<HashMap<String, String>>,
+    }
+
+    fn test_person() -> Person {
+        Person {
+            id: 1,
+            address: Address {
+                city: "NYC".to_string(),
+                zip: None,
+            },
+            display_names: vec!["ace".to_string()],
+        }
+    }
+
+    #[test]
+    fn derived_struct_conversions_round_trip() {
+        assert_round_trip(test_person(), Person::to_schema());
+    }
+
+    #[test]
+    fn derived_struct_conversion_preserves_nullable_map_value_type() {
+        let data: StructData = NullableMapValues {
+            values: HashMap::from([("key".to_string(), "value".to_string())]),
+        }
+        .into();
+        let [Scalar::Map(values)] = data.values() else {
+            panic!("expected one map value");
+        };
+        assert!(values.map_type().value_contains_null());
+        StructData::try_new(data.fields().to_vec(), data.values().to_vec())
+            .expect("derived value must match its declared schema");
+    }
+
+    #[rstest]
+    #[case::absent(None)]
+    #[case::empty(Some(HashMap::new()))]
+    #[case::present(Some(HashMap::from([("key".to_string(), "value".to_string())])))]
+    fn derived_optional_struct_conversion_preserves_nullable_map_value_type(
+        #[case] values: Option<HashMap<String, String>>,
+    ) {
+        let data: StructData = OptionalNullableMapValues {
+            values: values.clone(),
+        }
+        .into();
+        StructData::try_new(data.fields().to_vec(), data.values().to_vec())
+            .expect("derived value must match its declared schema");
+        match (values, &data.values()[0]) {
+            (None, Scalar::Null(_)) => {}
+            (Some(expected), Scalar::Map(actual)) => {
+                assert_eq!(actual.pairs().len(), expected.len());
+                for (key, value) in expected {
+                    assert!(actual.pairs().contains(&(key.into(), value.into())));
+                }
+            }
+            (expected, actual) => panic!("expected {expected:?}, got {actual:?}"),
+        }
+    }
+
+    #[test]
+    fn derived_struct_conversion_distinguishes_absent_and_empty_arrays() {
+        let Scalar::Struct(absent) = Scalar::from(OptionalFeatures { features: None }) else {
+            unreachable!()
+        };
+        let Scalar::Struct(empty) = Scalar::from(OptionalFeatures {
+            features: Some(vec![]),
+        }) else {
+            unreachable!()
+        };
+
+        let array_type = ArrayType::new(DataType::STRING, false);
+        assert_eq!(absent.values(), &[Scalar::null(array_type.clone())]);
+        let [Scalar::Array(empty)] = empty.values() else {
+            panic!("expected one array value");
+        };
+        assert_eq!(empty.array_type(), &array_type);
+        assert!(empty.array_elements().is_empty());
+    }
+
+    #[test]
+    fn struct_data_rejects_null_for_non_nullable_field() {
+        assert_result_error_with_message(
+            StructData::try_new(
+                vec![StructField::not_null("value", DataType::STRING)],
+                vec![Scalar::null(DataType::STRING)],
+            ),
+            "Value for non-nullable field \"value\" cannot be null",
+        );
+    }
+
+    #[rstest]
+    #[case::not_a_struct(Scalar::Long(1), "expected Person, found long")]
+    #[case::wrong_field_type(
+        Scalar::Struct(StructData::from_values_unchecked(
+            Person::to_schema(),
+            vec![
+                Scalar::from("not an integer"),
+                Scalar::from(Address { city: "NYC".to_string(), zip: None }),
+                Scalar::from(vec!["ace".to_string()]),
+            ],
+        )),
+        "id: expected i32, found string"
+    )]
+    fn derived_struct_conversion_rejects_mismatched_scalars(
+        #[case] scalar: Scalar,
+        #[case] expected: &str,
+    ) {
+        assert_result_error_with_message(Person::try_from(scalar), expected);
+    }
+
+    #[test]
+    fn derived_struct_conversion_requires_exact_field_count() {
+        let values = vec![Scalar::from(1)];
+        let struct_data = StructData::from_values_unchecked(Person::to_schema(), values);
+        assert_result_error_with_message(
+            Person::try_from(struct_data),
+            "expected 3 struct values, found 1 struct values",
+        );
+    }
+
+    #[test]
+    fn derived_struct_conversion_matches_fields_by_name() {
+        let person = test_person();
+        let Scalar::Struct(data) = Scalar::from(person.clone()) else {
+            unreachable!()
+        };
+        let (mut fields, mut values) = data.into_parts();
+        fields.swap(0, 2);
+        values.swap(0, 2);
+        let reordered = StructData::try_new(fields, values).unwrap();
+        assert_eq!(Person::try_from(reordered).unwrap(), person);
+    }
+
+    #[test]
+    fn derived_struct_conversion_builds_nested_error_path_while_unwinding() {
+        let address = StructData::from_values_unchecked(
+            Address::to_schema(),
+            vec![Scalar::from(7), Scalar::null(DataType::INTEGER)],
+        );
+        let person = StructData::from_values_unchecked(
+            Person::to_schema(),
+            vec![
+                Scalar::from(1),
+                Scalar::from(address),
+                Scalar::from(vec!["ace".to_string()]),
+            ],
+        );
+        assert_result_error_with_message(
+            Person::try_from(person),
+            "address.city: expected String, found integer",
+        );
+    }
+
+    #[test]
+    fn container_conversion_adds_index_to_nested_error_path() {
+        let address = StructData::from_values_unchecked(
+            Address::to_schema(),
+            vec![Scalar::from(7), Scalar::null(DataType::INTEGER)],
+        );
+        let array = ArrayData::try_new(
+            ArrayType::new(Address::to_schema(), false),
+            [Scalar::from(address)],
+        )
+        .unwrap();
+        assert_result_error_with_message(
+            Vec::<Address>::try_from(Scalar::from(array)),
+            "[0].city: expected String, found integer",
+        );
+    }
+
+    #[test]
+    fn derived_struct_conversion_checks_null_field_data_type() {
+        // `Option::try_from` rejects a typed null whose data type does not match `T`.
+        let address = StructData::from_values_unchecked(
+            schema! {
+                not_null "city": STRING,
+                nullable "zip": STRING,
+            },
+            vec![Scalar::from("NYC"), Scalar::null(DataType::STRING)],
+        );
+        assert_result_error_with_message(
+            Address::try_from(address),
+            "zip: expected integer, found string",
         );
     }
 }

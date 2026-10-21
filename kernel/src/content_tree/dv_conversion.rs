@@ -1,13 +1,12 @@
-use std::sync::{Arc, LazyLock};
+use std::sync::LazyLock;
 
 use crate::actions::deletion_vector::{DeletionVectorDescriptor, DeletionVectorStorageType};
+use crate::amt_path_util::validate_table_relative;
 use crate::content_tree::DeletionVectorInfo;
 use crate::engine_data::{GetData, RowVisitor, TypedGetData as _};
 use crate::expressions::{ArrayData, Scalar};
-use crate::schema::{
-    column_name, ArrayType, ColumnName, DataType, SchemaRef, StructField, StructType,
-};
-use crate::{DeltaResult, EngineData, Error};
+use crate::schema::{column_name, lazy_schema_ref, ArrayType, ColumnName, DataType, SchemaRef};
+use crate::{EngineData, KernelError, KernelResult};
 
 /// Extracts deletion vector content from a DeletionVectorDescriptor.
 ///
@@ -19,11 +18,14 @@ use crate::{DeltaResult, EngineData, Error};
 ///
 /// - `PersistedAbsolute`: The `path_or_inline_dv` contains the absolute path to the DV file.
 ///
+/// - `PersistedUnencodedRelative`: The `path_or_inline_dv` is already the raw table-relative path,
+///   so it is used as-is after validating that it is table-relative.
+///
 /// - `Inline`: Currently not supported - returns an error. Inline DVs would need to be persisted
 ///   first before being added to metadata.
 pub(crate) fn extract_deletion_vector_content(
     dv: &DeletionVectorDescriptor,
-) -> DeltaResult<DeletionVectorInfo> {
+) -> KernelResult<DeletionVectorInfo> {
     let location = match dv.storage_type {
         DeletionVectorStorageType::PersistedAbsolute => {
             // Use absolute path as-is
@@ -33,8 +35,14 @@ pub(crate) fn extract_deletion_vector_content(
             // Decode to relative path
             dv.relative_path()?
         }
+        DeletionVectorStorageType::PersistedUnencodedRelative => {
+            // Pub fields let unvalidated descriptors reach here, so re-check before it lands in a
+            // manifest where a scheme-bearing path would resolve as absolute.
+            validate_table_relative(&dv.path_or_inline_dv)?;
+            dv.path_or_inline_dv.clone()
+        }
         DeletionVectorStorageType::Inline => {
-            return Err(Error::DeletionVector(
+            return Err(KernelError::DeletionVector(
                 "Inline deletion vectors are not supported. They must be persisted first."
                     .to_string(),
             ));
@@ -50,6 +58,7 @@ pub(crate) fn extract_deletion_vector_content(
         offset: dv.offset.map_or(1, i64::from),
         size_in_bytes: dv.size_in_bytes as i64 + 8,
         cardinality: dv.cardinality,
+        key_metadata: None,
     })
 }
 
@@ -61,14 +70,12 @@ const DV_SIZE_IN_BYTES: &str = "_dv_size_in_bytes";
 const DV_CARDINALITY: &str = "_dv_cardinality";
 
 /// Schema of [`DV_LOCATION`] etc., for [`EngineData::append_columns`].
-static DV_DECODED_FLAT_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
-    Arc::new(StructType::new_unchecked(vec![
-        StructField::nullable(DV_LOCATION, DataType::STRING),
-        StructField::nullable(DV_OFFSET, DataType::LONG),
-        StructField::nullable(DV_SIZE_IN_BYTES, DataType::LONG),
-        StructField::nullable(DV_CARDINALITY, DataType::LONG),
-    ]))
-});
+static DV_DECODED_FLAT_SCHEMA: LazyLock<SchemaRef> = lazy_schema_ref! {
+    nullable DV_LOCATION: STRING,
+    nullable DV_OFFSET: LONG,
+    nullable DV_SIZE_IN_BYTES: LONG,
+    nullable DV_CARDINALITY: LONG,
+};
 
 /// Types of the DV descriptor leaves [`DecodedDvVisitor`] decodes, in getter order. Shared across
 /// all source layouts: only the *names* (the projection path to the DV struct) vary per layout, so
@@ -175,7 +182,7 @@ impl DecodedDvVisitor {
         self.decoded_paths.iter().any(|s| !s.is_null())
     }
 
-    fn append_decoded_dv_columns(self, data: &dyn EngineData) -> DeltaResult<Box<dyn EngineData>> {
+    fn append_decoded_dv_columns(self, data: &dyn EngineData) -> KernelResult<Box<dyn EngineData>> {
         data.append_columns(
             DV_DECODED_FLAT_SCHEMA.clone(),
             vec![
@@ -196,7 +203,7 @@ impl RowVisitor for DecodedDvVisitor {
         (self.names, &DV_LEAF_TYPES)
     }
 
-    fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<()> {
+    fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> KernelResult<()> {
         for i in 0..row_count {
             // `storageType` is a required (non-null) field of the DV descriptor, so it is null
             // for a row iff the whole `deletionVector` struct is null (the visitor unions parent
@@ -233,7 +240,7 @@ mod tests {
     use crate::actions::deletion_vector::{DeletionVectorDescriptor, DeletionVectorStorageType};
     use crate::engine::sync::SyncEngine;
     use crate::expressions::StructData;
-    use crate::schema::{ColumnNamesAndTypes, ToSchema};
+    use crate::schema::{schema_ref, ColumnNamesAndTypes, StructField, StructType, ToSchema};
     use crate::Engine;
 
     /// Decoded DV columns read back from an augmented batch, one entry per row.
@@ -249,10 +256,10 @@ mod tests {
         fn selected_column_names_and_types(&self) -> (&'static [ColumnName], &'static [DataType]) {
             static COLUMNS: LazyLock<ColumnNamesAndTypes> = LazyLock::new(|| {
                 let names = vec![
-                    ColumnName::new([DV_LOCATION]),
-                    ColumnName::new([DV_OFFSET]),
-                    ColumnName::new([DV_SIZE_IN_BYTES]),
-                    ColumnName::new([DV_CARDINALITY]),
+                    column_name!(DV_LOCATION),
+                    column_name!(DV_OFFSET),
+                    column_name!(DV_SIZE_IN_BYTES),
+                    column_name!(DV_CARDINALITY),
                 ];
                 let types = vec![
                     DataType::STRING,
@@ -269,7 +276,7 @@ mod tests {
             &mut self,
             row_count: usize,
             getters: &[&'a dyn GetData<'a>],
-        ) -> DeltaResult<()> {
+        ) -> KernelResult<()> {
             for i in 0..row_count {
                 self.locations.push(getters[0].get_opt(i, DV_LOCATION)?);
                 self.offsets.push(getters[1].get_opt(i, DV_OFFSET)?);
@@ -344,15 +351,16 @@ mod tests {
     impl DvColumnShape {
         /// Schema projecting `dv_schema` at this shape's location.
         fn schema(self, dv_schema: StructType) -> SchemaRef {
-            let dv_field = StructField::nullable("deletionVector", dv_schema);
-            let root = match self {
-                DvColumnShape::ScanRow => StructType::new_unchecked([dv_field]),
-                DvColumnShape::LogBatch => StructType::new_unchecked([StructField::nullable(
-                    "add",
-                    StructType::new_unchecked([dv_field]),
-                )]),
-            };
-            Arc::new(root)
+            match self {
+                DvColumnShape::ScanRow => schema_ref! {
+                    nullable "deletionVector": (dv_schema),
+                },
+                DvColumnShape::LogBatch => schema_ref! {
+                    nullable "add": {
+                        nullable "deletionVector": (dv_schema),
+                    },
+                },
+            }
         }
 
         /// Wraps a DV struct scalar (or a null placeholder) at this shape's root field, matching
@@ -376,7 +384,7 @@ mod tests {
             let row = vec![self.root_scalar(dv_schema.clone(), dv)];
             SyncEngine::new()
                 .evaluation_handler()
-                .create_many(self.schema(dv_schema), &[row.as_slice()])
+                .create_many(self.schema(dv_schema), vec![row])
                 .unwrap()
         }
 
@@ -395,10 +403,9 @@ mod tests {
                     vec![self.root_scalar(dv_schema.clone(), scalar)]
                 })
                 .collect();
-            let row_refs: Vec<&[Scalar]> = rows.iter().map(Vec::as_slice).collect();
             SyncEngine::new()
                 .evaluation_handler()
-                .create_many(self.schema(dv_schema), &row_refs)
+                .create_many(self.schema(dv_schema), rows)
                 .unwrap()
         }
 
@@ -419,7 +426,7 @@ mod tests {
     fn decode(
         shape: DvColumnShape,
         dvs: &[Option<DeletionVectorDescriptor>],
-    ) -> Result<DecodedColumnsVisitor, Box<dyn std::error::Error>> {
+    ) -> KernelResult<DecodedColumnsVisitor> {
         let data = shape.engine_data(dvs);
         let mut decoder = DecodedDvVisitor::new(shape.columns(), dvs.len());
         decoder.visit_rows_of(data.as_ref())?;
@@ -433,7 +440,7 @@ mod tests {
     #[rstest]
     fn test_visitor_decodes_dv_row(
         #[values(DvColumnShape::ScanRow, DvColumnShape::LogBatch)] shape: DvColumnShape,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> KernelResult<()> {
         let columns = decode(shape, &[Some(sample_dv())])?;
         assert_eq!(
             columns.locations,
@@ -450,7 +457,7 @@ mod tests {
     #[rstest]
     fn test_visitor_row_without_dv_is_null(
         #[values(DvColumnShape::ScanRow, DvColumnShape::LogBatch)] shape: DvColumnShape,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> KernelResult<()> {
         // A null source struct decodes to nulls across all four columns.
         let columns = decode(shape, &[None])?;
         assert_eq!(columns.locations, vec![None]);
@@ -463,7 +470,7 @@ mod tests {
     #[rstest]
     fn test_visitor_mixed_rows(
         #[values(DvColumnShape::ScanRow, DvColumnShape::LogBatch)] shape: DvColumnShape,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> KernelResult<()> {
         // One batch mixing all three row kinds: a relative DV (z85-decoded), an absolute DV (path
         // verbatim), and a row with no DV at all.
         let columns = decode(shape, &[Some(sample_dv()), Some(absolute_dv()), None])?;
@@ -490,7 +497,7 @@ mod tests {
     fn test_has_any_dv(
         #[case] presence: &[Option<()>],
         #[case] expected: bool,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> KernelResult<()> {
         let dvs: Vec<Option<DeletionVectorDescriptor>> =
             presence.iter().map(|p| p.map(|()| sample_dv())).collect();
         let data = DvColumnShape::ScanRow.engine_data(&dvs);
@@ -535,7 +542,7 @@ mod tests {
     #[rstest]
     fn test_visitor_empty_batch_yields_no_rows(
         #[values(DvColumnShape::ScanRow, DvColumnShape::LogBatch)] shape: DvColumnShape,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> KernelResult<()> {
         // A zero-row batch appends four empty decoded columns without error.
         let columns = decode(shape, &[])?;
         assert!(columns.locations.is_empty());
@@ -586,10 +593,15 @@ mod tests {
         (DeletionVectorStorageType::PersistedRelative, "vBn[lx{q8@P<9BNH/isA", None, 36),
         ("deletion_vector_61d16c75-6994-46b7-a15b-8b538852e50e.bin", 1, 44)
     )]
+    // Unencoded-relative preserves the raw table-relative path verbatim (no z85 decode).
+    #[case::unencoded_relative(
+        (DeletionVectorStorageType::PersistedUnencodedRelative, "data/deletion_vector_x.bin", Some(4), 40),
+        ("data/deletion_vector_x.bin", 4, 48)
+    )]
     fn test_extract_deletion_vector_content(
         #[case] input: (DeletionVectorStorageType, &str, Option<i32>, i32),
         #[case] expected: (&str, i64, i64),
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> KernelResult<()> {
         let (expected_location, expected_offset, expected_size_in_bytes) = expected;
         let deletion_vector = extract_deletion_vector_content(&dv(input))?;
 
@@ -620,6 +632,10 @@ mod tests {
     #[case::non_ascii_relative_path(
         (DeletionVectorStorageType::PersistedRelative, "éaaaaaaaaaaaaaaaaaaa", Some(1), 36),
         "Failed to decode DV uuid"
+    )]
+    #[case::unencoded_relative_absolute_url(
+        (DeletionVectorStorageType::PersistedUnencodedRelative, "s3://other/dv.bin", Some(1), 36),
+        "absolute URL"
     )]
     fn test_extract_deletion_vector_content_error(
         #[case] input: (DeletionVectorStorageType, &str, Option<i32>, i32),

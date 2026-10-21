@@ -9,10 +9,13 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use delta_kernel_derive::internal_api;
 use itertools::Itertools;
 use url::Url;
 use uuid::Uuid;
 
+use super::state::TransactionBuilderState;
+use super::TransactionBuilder;
 use crate::actions::{DomainMetadata, Metadata, Protocol};
 use crate::clustering::{create_clustering_domain_metadata, validate_clustering_columns};
 use crate::committer::Committer;
@@ -26,13 +29,16 @@ use crate::schema::{
 use crate::table_configuration::TableConfiguration;
 use crate::table_features::{
     add_feature_to_lists, assign_column_mapping_metadata, auto_enable_property_driven_features,
-    find_max_column_id_in_schema, get_any_level_column_physical_name,
-    get_column_mapping_mode_from_properties, schema_contains_timestamp_ntz,
-    strip_stray_column_mapping_metadata, ColumnMappingMode, TableFeature,
-    SET_TABLE_FEATURE_SUPPORTED_PREFIX, SET_TABLE_FEATURE_SUPPORTED_VALUE,
+    ensure_domain_metadata_dependency, find_max_column_id_in_schema,
+    get_any_level_column_physical_name, get_column_mapping_mode_from_properties,
+    schema_contains_timestamp_ntz, strip_stray_column_mapping_metadata,
+    validate_iceberg_compat_if_needed, ColumnMappingMode, IcebergCompatValidationContext,
+    TableFeature, SET_TABLE_FEATURE_SUPPORTED_PREFIX, SET_TABLE_FEATURE_SUPPORTED_VALUE,
+    V2_VALIDATOR,
 };
 use crate::table_properties::{
-    TableProperties, APPEND_ONLY, CHECKPOINT_INTERVAL, CHECKPOINT_WRITE_STATS_AS_JSON,
+    strip_check_constraint_prefix, CheckpointPolicy, TableProperties, APPEND_ONLY,
+    CHECKPOINT_INTERVAL, CHECKPOINT_POLICY, CHECKPOINT_WRITE_STATS_AS_JSON,
     CHECKPOINT_WRITE_STATS_AS_STRUCT, COLUMN_MAPPING_MAX_COLUMN_ID, COLUMN_MAPPING_MODE,
     DATA_SKIPPING_NUM_INDEXED_COLS, DATA_SKIPPING_STATS_COLUMNS, DELETED_FILE_RETENTION_DURATION,
     DELTA_PROPERTY_PREFIX, ENABLE_CHANGE_DATA_FEED, ENABLE_DELETION_VECTORS,
@@ -44,9 +50,9 @@ use crate::table_properties::{
 };
 use crate::transaction::create_table::CreateTableTransaction;
 use crate::transaction::data_layout::DataLayout;
-use crate::transaction::Transaction;
+use crate::transaction::{CommitOperation, CreateTable, ExecutionMode, Transaction};
 use crate::utils::{current_time_ms, try_parse_uri};
-use crate::{DeltaResult, Engine, Error, StorageHandler};
+use crate::{Engine, KernelError, KernelResult, StorageHandler};
 
 /// Table features allowed to be enabled via `delta.feature.*=supported` during CREATE TABLE.
 ///
@@ -75,6 +81,8 @@ const ALLOWED_DELTA_FEATURES: &[TableFeature] = &[
     TableFeature::ChangeDataFeed,
     TableFeature::TypeWidening,
     TableFeature::RowTracking,
+    TableFeature::VariantType,
+    TableFeature::VariantShredding,
     // Invariants is auto-enabled by `maybe_enable_invariants` when the schema has non-null
     // fields. Allowing explicit `delta.feature.invariants=supported` lets users pre-enable
     // the feature on an all-nullable table so a later ALTER TABLE ADD COLUMN NOT NULL does
@@ -85,6 +93,9 @@ const ALLOWED_DELTA_FEATURES: &[TableFeature] = &[
     // create time is the explicit feature signal
     // `delta.feature.materializePartitionColumns=supported`.
     TableFeature::MaterializePartitionColumns,
+    // IcebergCompatV2 is a writer-only feature that gates Iceberg V2 conversion compatibility.
+    // Dependent features (ColumnMapping) are auto-added during create table.
+    TableFeature::IcebergCompatV2,
     // IcebergCompatV3 is a writer-only feature that gates Iceberg V3 conversion compatibility.
     // Dependent features (ColumnMapping, RowTracking, DomainMetadata) are auto-added during
     // create table.
@@ -115,6 +126,8 @@ const ALLOWED_DELTA_PROPERTIES: &[&str] = &[
     SET_TRANSACTION_RETENTION_DURATION,
     // Parquet format version: controls the Parquet writer version for data files
     PARQUET_FORMAT_VERSION,
+    // IcebergCompatV2 enablement: triggers auto-enablement of ColumnMapping.
+    ENABLE_ICEBERG_COMPAT_V2,
     // IcebergCompatV3 enablement: triggers auto-enablement of ColumnMapping,
     // RowTracking, DomainMetadata.
     ENABLE_ICEBERG_COMPAT_V3,
@@ -124,6 +137,8 @@ const ALLOWED_DELTA_PROPERTIES: &[&str] = &[
     DELETED_FILE_RETENTION_DURATION,
     ENABLE_EXPIRED_LOG_CLEANUP,
     CHECKPOINT_INTERVAL,
+    // Checkpoint policy: "v2" auto-enables the v2Checkpoint feature.
+    CHECKPOINT_POLICY,
 ];
 
 /// Ensures that no Delta table exists at the given path.
@@ -143,19 +158,19 @@ fn ensure_table_does_not_exist(
     storage: &dyn StorageHandler,
     delta_log_url: &Url,
     table_path: &str,
-) -> DeltaResult<()> {
+) -> KernelResult<()> {
     match storage.list_from(delta_log_url) {
         Ok(mut files) => {
-            // files.next() returns Option<DeltaResult<FileMeta>>
+            // files.next() returns Option<KernelResult<FileMeta>>
             // - Some(Ok(_)) means a file exists -> table exists
             // - Some(Err(FileNotFound)) means path doesn't exist -> OK for new table
             // - Some(Err(other)) means real error -> propagate
             // - None means empty iterator -> OK for new table
             match files.next() {
-                Some(Ok(_)) => Err(Error::generic(format!(
-                    "Table already exists at path: {table_path}"
-                ))),
-                Some(Err(Error::FileNotFound(_))) | None => {
+                Some(Ok(_)) => Err(KernelError::TableAlreadyExistsAtPath(
+                    table_path.to_string(),
+                )),
+                Some(Err(KernelError::FileNotFound(_))) | None => {
                     // Path doesn't exist or empty - OK for new table
                     Ok(())
                 }
@@ -165,7 +180,7 @@ fn ensure_table_does_not_exist(
                 }
             }
         }
-        Err(Error::FileNotFound(_)) => {
+        Err(KernelError::FileNotFound(_)) => {
             // Directory doesn't exist - this is expected for a new table.
             // The storage layer will create the full path (including _delta_log/)
             // when the commit writes the first log file via write_json_file().
@@ -197,28 +212,23 @@ impl ValidatedTableProperties {
 
 /// Test-only helper for clustering support during table creation.
 ///
-/// Validates clustering columns, adds the `DomainMetadata` and `ClusteredTable` features
-/// directly, and creates the domain metadata action.
+/// Validates clustering columns, selects `ClusteredTable` and its `DomainMetadata` dependency,
+/// and creates the domain metadata action.
 #[cfg(test)]
 fn validate_clustering_and_make_domain_metadata(
     logical_schema: &SchemaRef,
     logical_columns: &[ColumnName],
     reader_features: &mut Vec<TableFeature>,
     writer_features: &mut Vec<TableFeature>,
-) -> DeltaResult<DomainMetadata> {
+) -> KernelResult<DomainMetadata> {
     validate_clustering_columns(logical_schema, logical_columns)?;
 
-    // Add required features
-    add_feature_to_lists(
-        TableFeature::DomainMetadata,
-        reader_features,
-        writer_features,
-    );
     add_feature_to_lists(
         TableFeature::ClusteredTable,
         reader_features,
         writer_features,
     );
+    ensure_domain_metadata_dependency(reader_features, writer_features);
 
     Ok(create_clustering_domain_metadata(logical_columns))
 }
@@ -252,12 +262,14 @@ struct DataLayoutResult {
 fn validate_partition_columns(
     schema: &StructType,
     partition_columns: &[ColumnName],
-) -> DeltaResult<()> {
+) -> KernelResult<()> {
     if partition_columns.is_empty() {
-        return Err(Error::generic("Partitioning requires at least one column"));
+        return Err(KernelError::generic(
+            "Partitioning requires at least one column",
+        ));
     }
     if partition_columns.len() >= schema.fields().len() {
-        return Err(Error::generic(
+        return Err(KernelError::generic(
             "Table must have at least one non-partition column",
         ));
     }
@@ -266,14 +278,14 @@ fn validate_partition_columns(
     for col in partition_columns {
         let path = col.path();
         if path.len() != 1 {
-            return Err(Error::generic(format!(
+            return Err(KernelError::generic(format!(
                 "Partition column '{}' must be a top-level column (nested paths are not supported)",
                 col
             )));
         }
 
         if !seen.insert(col) {
-            return Err(Error::generic(format!(
+            return Err(KernelError::generic(format!(
                 "Duplicate partition column: '{col}'"
             )));
         }
@@ -281,11 +293,11 @@ fn validate_partition_columns(
         // Safety: path.len() == 1 is enforced by the top-level check above
         let col_name = &path[0];
         let field = schema.field(col_name).ok_or_else(|| {
-            Error::generic(format!("Partition column '{col}' not found in schema"))
+            KernelError::generic(format!("Partition column '{col}' not found in schema"))
         })?;
 
         let DataType::Primitive(_) = field.data_type() else {
-            return Err(Error::generic(format!(
+            return Err(KernelError::generic(format!(
                 "Partition column '{col}' has non-primitive type '{}'. \
                  Partition columns must have primitive types.",
                 field.data_type()
@@ -301,7 +313,7 @@ fn validate_partition_columns(
 ///
 /// - **None**: Returns defaults (no domain metadata, no clustering/partition columns).
 /// - **Clustered**: Validates clustering columns, resolves to physical names, adds the
-///   `DomainMetadata` and `ClusteredTable` features, creates clustering domain metadata.
+///   `ClusteredTable` feature, creates clustering domain metadata.
 /// - **Partitioned**: Validates partition columns and stores logical names. No domain metadata or
 ///   special features are needed (partitioning is a core Delta feature).
 fn apply_data_layout(
@@ -309,7 +321,7 @@ fn apply_data_layout(
     effective_schema: &SchemaRef,
     column_mapping_mode: ColumnMappingMode,
     validated: &mut ValidatedTableProperties,
-) -> DeltaResult<DataLayoutResult> {
+) -> KernelResult<DataLayoutResult> {
     match data_layout {
         DataLayout::None => Ok(DataLayoutResult::default()),
 
@@ -327,11 +339,6 @@ fn apply_data_layout(
                 })
                 .try_collect()?;
 
-            add_feature_to_lists(
-                TableFeature::DomainMetadata,
-                &mut validated.reader_features,
-                &mut validated.writer_features,
-            );
             add_feature_to_lists(
                 TableFeature::ClusteredTable,
                 &mut validated.reader_features,
@@ -457,7 +464,7 @@ fn maybe_set_materialized_row_tracking_column_name_properties(
 /// feature to the protocol and sets the enablement property if not already present.
 fn maybe_enable_ict_for_catalog_managed(
     validated: &mut ValidatedTableProperties,
-) -> DeltaResult<()> {
+) -> KernelResult<()> {
     let has_catalog_managed = validated
         .writer_features
         .contains(&TableFeature::CatalogManaged);
@@ -467,7 +474,7 @@ fn maybe_enable_ict_for_catalog_managed(
             .get(ENABLE_IN_COMMIT_TIMESTAMPS)
             .is_some_and(|v| v != "true")
         {
-            return Err(Error::generic(format!(
+            return Err(KernelError::generic(format!(
                 "Catalog-managed tables require '{ENABLE_IN_COMMIT_TIMESTAMPS}=true', \
                  but it was explicitly set to '{}'",
                 validated.properties[ENABLE_IN_COMMIT_TIMESTAMPS]
@@ -486,31 +493,25 @@ fn maybe_enable_ict_for_catalog_managed(
     Ok(())
 }
 
-/// Witness that all property-flipping passes which must run before column mapping is applied
-/// have completed.
-#[must_use]
-#[derive(Debug)]
-struct PreColumnMappingResolved;
-
-/// When `delta.enableIcebergCompatV3=true` is set, auto-enables V3's required dependencies in
-/// `validated.properties` (defaulting them when absent, rejecting conflicting values).
-///
-/// Specifically:
-///   * Set `delta.columnMapping.mode` to `name` when absent, reject if it's `none`.
-///   * Set `delta.enableRowTracking` to `true` when absent, reject if it's `false`.
-///   * Reject if `delta.rowTrackingSuspended` is `true`.
-///   * Reject if `delta.enableIcebergCompatV1` or `delta.enableIcebergCompatV2` is `true`.
-///
-/// Returns a [`PreColumnMappingResolved`] witness that
-/// [`maybe_apply_column_mapping_for_table_create`] requires, ensuring this pass runs first.
-fn maybe_enable_iceberg_compat_v3_dependencies(
-    validated: &mut ValidatedTableProperties,
-) -> DeltaResult<PreColumnMappingResolved> {
-    if !validated.is_property_true(ENABLE_ICEBERG_COMPAT_V3) {
-        return Ok(PreColumnMappingResolved);
+fn maybe_enable_v2_checkpoint_for_policy(validated: &mut ValidatedTableProperties) {
+    let is_v2_policy = validated
+        .properties
+        .get(CHECKPOINT_POLICY)
+        .and_then(|v| CheckpointPolicy::try_from(v.as_str()).ok())
+        == Some(CheckpointPolicy::V2);
+    if is_v2_policy {
+        add_feature_to_lists(
+            TableFeature::V2Checkpoint,
+            &mut validated.reader_features,
+            &mut validated.writer_features,
+        );
     }
+}
 
-    // Column mapping: require `name` or `id`; default to `name`.
+fn require_iceberg_compat_column_mapping(
+    validated: &mut ValidatedTableProperties,
+    feature_name: &str,
+) -> KernelResult<()> {
     match validated
         .properties
         .get(COLUMN_MAPPING_MODE)
@@ -523,17 +524,82 @@ fn maybe_enable_iceberg_compat_v3_dependencies(
         }
         Some("name") | Some("id") => {}
         Some(other) => {
-            return Err(Error::generic(format!(
-                "IcebergCompatV3 requires '{COLUMN_MAPPING_MODE}' to be 'name' or 'id', got \
+            return Err(KernelError::generic(format!(
+                "{feature_name} requires '{COLUMN_MAPPING_MODE}' to be 'name' or 'id', got \
                  '{other}'"
             )));
         }
     }
+    Ok(())
+}
+
+/// Adds Column Mapping protocol support whenever IcebergCompatV2 is supported. When
+/// `delta.enableIcebergCompatV2=true`, also enables and validates V2's property dependencies.
+///
+/// Specifically:
+///   * Set `delta.columnMapping.mode` to `name` when absent, reject if it's `none`.
+///   * Reject if `delta.enableIcebergCompatV1`, `delta.enableIcebergCompatV3`, or
+///     `delta.enableDeletionVectors` is `true`.
+fn maybe_enable_iceberg_compat_v2_dependencies(
+    validated: &mut ValidatedTableProperties,
+) -> KernelResult<()> {
+    let enabled = validated.is_property_true(ENABLE_ICEBERG_COMPAT_V2);
+    if !enabled
+        && !validated
+            .writer_features
+            .contains(&TableFeature::IcebergCompatV2)
+    {
+        return Ok(());
+    }
+
+    add_feature_to_lists(
+        TableFeature::ColumnMapping,
+        &mut validated.reader_features,
+        &mut validated.writer_features,
+    );
+    if !enabled {
+        return Ok(());
+    }
+
+    require_iceberg_compat_column_mapping(validated, "IcebergCompatV2")?;
+
+    // V1/V3 and deletion vectors must not be active.
+    for key in [
+        ENABLE_ICEBERG_COMPAT_V1,
+        ENABLE_ICEBERG_COMPAT_V3,
+        ENABLE_DELETION_VECTORS,
+    ] {
+        if validated.is_property_true(key) {
+            return Err(KernelError::generic(format!(
+                "IcebergCompatV2 cannot be enabled together with '{key}'"
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+/// When `delta.enableIcebergCompatV3=true` is set, auto-enables V3's required dependencies in
+/// `validated.properties` (defaulting them when absent, rejecting conflicting values).
+///
+/// Specifically:
+///   * Set `delta.columnMapping.mode` to `name` when absent, reject if it's `none`.
+///   * Set `delta.enableRowTracking` to `true` when absent, reject if it's `false`.
+///   * Reject if `delta.rowTrackingSuspended` is `true`.
+///   * Reject if `delta.enableIcebergCompatV1` or `delta.enableIcebergCompatV2` is `true`.
+fn maybe_enable_iceberg_compat_v3_dependencies(
+    validated: &mut ValidatedTableProperties,
+) -> KernelResult<()> {
+    if !validated.is_property_true(ENABLE_ICEBERG_COMPAT_V3) {
+        return Ok(());
+    }
+
+    require_iceberg_compat_column_mapping(validated, "IcebergCompatV3")?;
 
     // Row tracking must not be suspended (suspension cannot coexist with row tracking actively
     // enabled, which V3 requires).
     if validated.is_property_true(ROW_TRACKING_SUSPENDED) {
-        return Err(Error::generic(format!(
+        return Err(KernelError::generic(format!(
             "IcebergCompatV3 cannot be enabled while '{ROW_TRACKING_SUSPENDED}' is 'true'"
         )));
     }
@@ -551,7 +617,7 @@ fn maybe_enable_iceberg_compat_v3_dependencies(
         }
         Some("true") => {}
         Some(other) => {
-            return Err(Error::generic(format!(
+            return Err(KernelError::generic(format!(
                 "IcebergCompatV3 requires '{ENABLE_ROW_TRACKING}' to be 'true', got '{other}'"
             )));
         }
@@ -560,13 +626,13 @@ fn maybe_enable_iceberg_compat_v3_dependencies(
     // V1/V2 must not be active.
     for key in [ENABLE_ICEBERG_COMPAT_V1, ENABLE_ICEBERG_COMPAT_V2] {
         if validated.is_property_true(key) {
-            return Err(Error::generic(format!(
+            return Err(KernelError::generic(format!(
                 "IcebergCompatV3 cannot be enabled together with '{key}'"
             )));
         }
     }
 
-    Ok(PreColumnMappingResolved)
+    Ok(())
 }
 
 /// Conditionally applies column mapping for table creation based on the mode in properties.
@@ -590,8 +656,7 @@ fn maybe_enable_iceberg_compat_v3_dependencies(
 fn maybe_apply_column_mapping_for_table_create(
     schema: &SchemaRef,
     validated: &mut ValidatedTableProperties,
-    _pre_cm: PreColumnMappingResolved,
-) -> DeltaResult<(SchemaRef, ColumnMappingMode)> {
+) -> KernelResult<(SchemaRef, ColumnMappingMode)> {
     let column_mapping_mode = get_column_mapping_mode_from_properties(&validated.properties)?;
 
     let effective_schema = match column_mapping_mode {
@@ -608,10 +673,11 @@ fn maybe_apply_column_mapping_for_table_create(
             // missing piece of that pair, and assign fresh metadata to bare fields (matches
             // delta-spark's `DeltaColumnMapping.assignColumnIdAndPhysicalName`). Seed
             // `max_id` from the schema's existing max so newly assigned IDs cannot collide
-            // with preserved ones. When IcebergCompatV3 is enabled, also allocate nested ids
-            // for `Array.element` and `Map.key`/`Map.value` and store them under
-            // `delta.columnMapping.nested.ids` on the nearest ancestor `StructField`.
-            let assign_nested_field_ids = validated.is_property_true(ENABLE_ICEBERG_COMPAT_V3);
+            // with preserved ones. When IcebergCompatV2 or IcebergCompatV3 is enabled, also
+            // allocate nested ids for `Array.element` and `Map.key`/`Map.value` and store them
+            // under `delta.columnMapping.nested.ids` on the nearest ancestor `StructField`.
+            let assign_nested_field_ids = validated.is_property_true(ENABLE_ICEBERG_COMPAT_V2)
+                || validated.is_property_true(ENABLE_ICEBERG_COMPAT_V3);
             let mut max_id = find_max_column_id_in_schema(schema).unwrap_or(0);
             let transformed_schema =
                 assign_column_mapping_metadata(schema, &mut max_id, assign_nested_field_ids)?;
@@ -646,7 +712,7 @@ fn maybe_apply_column_mapping_for_table_create(
 /// called after validation.
 fn validate_extract_table_features_and_properties(
     properties: HashMap<String, String>,
-) -> DeltaResult<ValidatedTableProperties> {
+) -> KernelResult<ValidatedTableProperties> {
     let mut reader_features = Vec::new();
     let mut writer_features = Vec::new();
 
@@ -666,7 +732,7 @@ fn validate_extract_table_features_and_properties(
 
         // Validate that the value is "supported"
         if value != SET_TABLE_FEATURE_SUPPORTED_VALUE {
-            return Err(Error::generic(format!(
+            return Err(KernelError::generic(format!(
                 "Invalid value '{value}' for '{key}'. Only '{SET_TABLE_FEATURE_SUPPORTED_VALUE}' is allowed."
             )));
         }
@@ -677,30 +743,35 @@ fn validate_extract_table_features_and_properties(
             .unwrap_or_else(|_| TableFeature::Unknown(feature_name.to_string()));
 
         if !ALLOWED_DELTA_FEATURES.contains(&feature) {
-            return Err(Error::generic(format!(
+            return Err(KernelError::generic(format!(
                 "Enabling feature '{feature_name}' via '{key}' is not supported during CREATE TABLE"
             )));
         }
 
-        // Add to appropriate feature lists based on feature type
-        let needs_domain_metadata = feature == TableFeature::RowTracking;
-        add_feature_to_lists(feature, &mut reader_features, &mut writer_features);
-        // RowTracking requires DomainMetadata as a dependency
-        if needs_domain_metadata {
+        // VariantShredding requires VariantType as a dependency
+        if feature == TableFeature::VariantShredding {
             add_feature_to_lists(
-                TableFeature::DomainMetadata,
+                TableFeature::VariantType,
                 &mut reader_features,
                 &mut writer_features,
             );
         }
+
+        // Add to appropriate feature lists based on feature type
+        add_feature_to_lists(feature, &mut reader_features, &mut writer_features);
     }
 
     // Validate remaining delta.* properties against the allow list
     for key in properties.keys() {
+        if strip_check_constraint_prefix(key).is_some() {
+            return Err(KernelError::generic(format!(
+                "Setting CHECK constraint property '{key}' is not supported during CREATE TABLE"
+            )));
+        }
         if key.starts_with(DELTA_PROPERTY_PREFIX)
             && !ALLOWED_DELTA_PROPERTIES.contains(&key.as_str())
         {
-            return Err(Error::generic(format!(
+            return Err(KernelError::generic(format!(
                 "Setting delta property '{key}' is not supported during CREATE TABLE"
             )));
         }
@@ -719,28 +790,39 @@ fn validate_extract_table_features_and_properties(
 /// If the table build fails, no transaction will be created.
 ///
 /// Created via [`create_table()`](super::super::create_table::create_table).
-pub struct CreateTableTransactionBuilder {
+///
+/// cbindgen:ignore
+pub type CreateTableTransactionBuilder = TransactionBuilder<CreateTable>;
+
+/// Opaque state collected by create-table-specific builder setters.
+#[doc(hidden)]
+pub struct CreateTableBuilderState {
     path: String,
     schema: SchemaRef,
-    engine_info: String,
     table_properties: HashMap<String, String>,
     data_layout: DataLayout,
-    correlation_id: Option<Arc<str>>,
 }
 
-impl CreateTableTransactionBuilder {
+impl TransactionBuilder<CreateTable> {
     /// Creates a new CreateTableTransactionBuilder.
     ///
     /// This is typically called via
     /// [`create_table()`](super::super::create_table::create_table) rather than directly.
-    pub fn new(path: impl AsRef<str>, schema: SchemaRef, engine_info: impl Into<String>) -> Self {
+    #[internal_api]
+    pub(crate) fn new(
+        path: impl AsRef<str>,
+        schema: SchemaRef,
+        engine_info: impl Into<String>,
+        data_change: bool,
+    ) -> Self {
         Self {
-            path: path.as_ref().to_string(),
-            schema,
-            engine_info: engine_info.into(),
-            table_properties: HashMap::new(),
-            data_layout: DataLayout::None,
-            correlation_id: None,
+            common_state: TransactionBuilderState::new(engine_info.into(), data_change),
+            local_state: CreateTableBuilderState {
+                path: path.as_ref().to_string(),
+                schema,
+                table_properties: HashMap::new(),
+                data_layout: DataLayout::None,
+            },
         }
     }
 
@@ -764,9 +846,9 @@ impl CreateTableTransactionBuilder {
     /// # use delta_kernel::transaction::create_table::create_table;
     /// # use delta_kernel::schema::{StructType, DataType, StructField};
     /// # use std::sync::Arc;
-    /// # fn example() -> delta_kernel::DeltaResult<()> {
-    /// # let schema = Arc::new(StructType::try_new(vec![StructField::new("id", DataType::INTEGER, true)])?);
-    /// let builder = create_table("/path/to/table", schema, "MyApp/1.0")
+    /// # fn example() -> delta_kernel::KernelResult<()> {
+    /// # let schema = Arc::new(StructType::try_new(vec![StructField::nullable("id", DataType::INTEGER)])?);
+    /// let builder = create_table("/path/to/table", schema, "MyApp/1.0", /* data_change */ true)
     ///     .with_table_properties([
     ///         ("myapp.version", "1.0"),
     ///         ("myapp.author", "test"),
@@ -776,13 +858,15 @@ impl CreateTableTransactionBuilder {
     /// ```
     ///
     /// [`build()`]: CreateTableTransactionBuilder::build
-    pub fn with_table_properties<I, K, V>(mut self, properties: I) -> Self
+    #[internal_api]
+    pub(crate) fn with_table_properties<I, K, V>(mut self, properties: I) -> Self
     where
         I: IntoIterator<Item = (K, V)>,
         K: Into<String>,
         V: Into<String>,
     {
-        self.table_properties
+        self.local_state
+            .table_properties
             .extend(properties.into_iter().map(|(k, v)| (k.into(), v.into())));
         self
     }
@@ -808,30 +892,26 @@ impl CreateTableTransactionBuilder {
     /// # use delta_kernel::transaction::data_layout::DataLayout;
     /// # use delta_kernel::schema::{StructType, DataType, StructField};
     /// # use std::sync::Arc;
-    /// # fn example() -> delta_kernel::DeltaResult<()> {
+    /// # fn example() -> delta_kernel::KernelResult<()> {
     /// # let schema = Arc::new(StructType::try_new(vec![
-    /// #     StructField::new("id", DataType::INTEGER, true),
-    /// #     StructField::new("date", DataType::STRING, true),
+    /// #     StructField::nullable("id", DataType::INTEGER),
+    /// #     StructField::nullable("date", DataType::STRING),
     /// # ])?);
     /// // Clustered layout:
-    /// let builder = create_table("/path/to/table", schema.clone(), "MyApp/1.0")
+    /// let builder = create_table(
+    ///     "/path/to/table", schema.clone(), "MyApp/1.0", /* data_change */ true,
+    /// )
     ///     .with_data_layout(DataLayout::clustered(["id"]));
     ///
     /// // Partitioned layout:
-    /// let builder = create_table("/path/to/table", schema, "MyApp/1.0")
+    /// let builder = create_table("/path/to/table", schema, "MyApp/1.0", /* data_change */ true)
     ///     .with_data_layout(DataLayout::partitioned(["date"]));
     /// # Ok(())
     /// # }
     /// ```
-    pub fn with_data_layout(mut self, layout: DataLayout) -> Self {
-        self.data_layout = layout;
-        self
-    }
-
-    /// Attach an opaque, caller-supplied correlation id for joining the create-table commit's
-    /// metric events to the caller's own request or operation id. An empty id is treated as unset.
-    pub fn with_correlation_id(mut self, correlation_id: impl Into<Arc<str>>) -> Self {
-        self.correlation_id = Some(correlation_id.into()).filter(|id| !id.is_empty());
+    #[internal_api]
+    pub(crate) fn with_data_layout(mut self, layout: DataLayout) -> Self {
+        self.local_state.data_layout = layout;
         self
     }
 
@@ -841,10 +921,12 @@ impl CreateTableTransactionBuilder {
     /// table creation. Operations like removing files, removing domain metadata, or updating
     /// deletion vectors are not available, preventing misuse at compile time.
     ///
+    /// The caller-supplied `data_change` is preserved, including when no files are staged.
+    ///
     /// This method performs validation:
     /// - Checks that the table path is valid
     /// - Verifies the table doesn't already exist
-    /// - Rejects schemas with `delta.invariants` metadata annotations (unsupported by kernel)
+    /// - Validates the schema and metadata annotations
     /// - Validates the data layout is valid
     /// - Validates table properties against the allow list
     ///
@@ -864,40 +946,58 @@ impl CreateTableTransactionBuilder {
     /// Returns an error if:
     /// - The table path is invalid
     /// - A table already exists at the given path
-    /// - The schema has `delta.invariants` metadata on any column
+    /// - Schema or metadata annotation validation fails
     /// - The data layout is invalid
     /// - Unsupported delta properties or feature flags are specified
-    pub fn build(
+    /// - Connector commit information does not contain exactly one row
+    /// - An application transaction identifier occurs more than once
+    #[internal_api]
+    pub(crate) fn build(
         self,
         engine: &dyn Engine,
         committer: Box<dyn Committer>,
-    ) -> DeltaResult<CreateTableTransaction> {
+    ) -> KernelResult<CreateTableTransaction> {
+        self.common_state.validate()?;
+
         // Validate path
-        let table_url = try_parse_uri(&self.path)?;
+        let table_url = try_parse_uri(&self.local_state.path)?;
 
         // Check if table already exists by looking for _delta_log directory
         let delta_log_url = table_url.join("_delta_log/")?;
         let storage = engine.storage_handler();
-        ensure_table_does_not_exist(storage.as_ref(), &delta_log_url, &self.path)?;
+        ensure_table_does_not_exist(storage.as_ref(), &delta_log_url, &self.local_state.path)?;
 
         // Validate and transform table properties
         // - Extracts and validates feature signals
         // - Removes feature signals from properties (they shouldn't be stored in metadata)
         // - Returns reader/writer features to add to protocol
-        let mut validated = validate_extract_table_features_and_properties(self.table_properties)?;
+        let mut validated =
+            validate_extract_table_features_and_properties(self.local_state.table_properties)?;
 
-        // When IcebergCompatV3 is enabled, fill in / validate required dependencies before
-        // column mapping is applied so the CM mode is in place. The returned witness is
-        // required by `maybe_apply_column_mapping_for_table_create` below.
-        let pre_cm = maybe_enable_iceberg_compat_v3_dependencies(&mut validated)?;
+        // When IcebergCompatV2 is enabled, fill in / validate required dependencies before column
+        // mapping is applied so the CM mode is in place. This must run before
+        // `maybe_apply_column_mapping_for_table_create`,
+        // `maybe_auto_enable_property_driven_features`, and
+        // `maybe_set_materialized_row_tracking_column_name_properties`.
+        maybe_enable_iceberg_compat_v2_dependencies(&mut validated)?;
+
+        // When IcebergCompatV3 is enabled, fill in and validate its column-mapping and row-tracking
+        // dependencies. This must run before `maybe_apply_column_mapping_for_table_create`,
+        // `maybe_auto_enable_property_driven_features`, and
+        // `maybe_set_materialized_row_tracking_column_name_properties`.
+        maybe_enable_iceberg_compat_v3_dependencies(&mut validated)?;
 
         // Apply column mapping if mode is name or id (must happen BEFORE data layout)
         let (mut effective_schema, column_mapping_mode) =
-            maybe_apply_column_mapping_for_table_create(&self.schema, &mut validated, pre_cm)?;
+            maybe_apply_column_mapping_for_table_create(&self.local_state.schema, &mut validated)?;
 
-        // Validate schema (column names, duplicates, no `delta.invariants` metadata).
+        // Validate the schema and metadata annotations.
         // Empty schemas are intentionally allowed.
-        validate_schema(&effective_schema, column_mapping_mode)?;
+        validate_schema(
+            &effective_schema,
+            column_mapping_mode,
+            validated.is_property_true(ENABLE_CHANGE_DATA_FEED),
+        )?;
 
         // Strip CM metadata in `None` mode: a new table has no prior schema (passed as `None`), so
         // any annotation the caller supplied is newly introduced (see
@@ -913,7 +1013,7 @@ impl CreateTableTransactionBuilder {
         // Validate data layout and resolve column names (physical for clustering, logical
         // for partitioning). Adds required table features for clustering.
         let data_layout_result = apply_data_layout(
-            &self.data_layout,
+            &self.local_state.data_layout,
             &effective_schema,
             column_mapping_mode,
             &mut validated,
@@ -930,9 +1030,16 @@ impl CreateTableTransactionBuilder {
         // Auto-enable inCommitTimestamp for catalogManaged tables
         maybe_enable_ict_for_catalog_managed(&mut validated)?;
 
+        // Auto-enable v2Checkpoint when checkpointPolicy=v2
+        maybe_enable_v2_checkpoint_for_policy(&mut validated);
+
         // Set materialized row tracking column names when row tracking is enabled.
         maybe_set_materialized_row_tracking_column_name_properties(&mut validated);
 
+        ensure_domain_metadata_dependency(
+            &mut validated.reader_features,
+            &mut validated.writer_features,
+        );
         // Create Protocol action with table features support
         let protocol =
             Protocol::try_new_modern(validated.reader_features, validated.writer_features)?;
@@ -958,15 +1065,51 @@ impl CreateTableTransactionBuilder {
         let table_configuration = TableConfiguration::try_new(metadata, protocol, table_url, 0)?;
 
         // Create Transaction<CreateTable> with the effective table configuration
-        Transaction::try_new_create_table(
+        let transaction = try_new_create_table(
             table_configuration,
-            self.engine_info,
             committer,
             data_layout_result.system_domain_metadata,
             data_layout_result.clustering_columns,
-            self.correlation_id,
-        )
+            self.common_state,
+        )?;
+        transaction.validate_domain_metadata_operations()?;
+        Ok(transaction)
     }
+}
+
+fn try_new_create_table<MODE: ExecutionMode>(
+    effective_table_config: TableConfiguration,
+    committer: Box<dyn Committer>,
+    system_domain_metadata: Vec<DomainMetadata>,
+    clustering_columns: Option<Vec<ColumnName>>,
+    common_state: TransactionBuilderState,
+) -> KernelResult<Transaction<CreateTable, MODE>> {
+    validate_iceberg_compat_if_needed(
+        &effective_table_config,
+        &V2_VALIDATOR,
+        IcebergCompatValidationContext::Write,
+    )?;
+
+    let span = tracing::info_span!(
+        "txn",
+        path = %effective_table_config.table_root(),
+        operation = "CREATE",
+    );
+    let commit_timestamp = current_time_ms()?;
+    Ok(Transaction {
+        should_emit_protocol: true,
+        should_emit_metadata: true,
+        system_domain_metadata_additions: system_domain_metadata,
+        physical_clustering_columns: clustering_columns,
+        ..Transaction::new(
+            common_state,
+            effective_table_config,
+            committer,
+            CommitOperation::CreateTable,
+            span,
+            commit_timestamp,
+        )
+    })
 }
 
 #[cfg(test)]
@@ -976,19 +1119,28 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
-    use crate::expressions::ColumnName;
+    use crate::arrow::array::StringArray;
+    use crate::arrow::datatypes::Schema as ArrowSchema;
+    use crate::arrow::record_batch::RecordBatch;
+    use crate::committer::FileSystemCommitter;
+    use crate::engine::arrow_conversion::TryIntoArrow;
+    use crate::engine::arrow_data::ArrowEngineData;
+    use crate::engine::sync::SyncEngine;
+    use crate::expressions::{column_name, ColumnName};
+    use crate::metrics::MetricEvent;
     use crate::scan::data_skipping::stats_schema::StripFieldMetadataTransform;
     use crate::schema::{
-        schema_ref, ColumnMetadataKey, DataType, MetadataValue, StructField, StructType,
+        schema, schema_ref, try_schema, ColumnMetadataKey, DataType, MetadataValue, StructField,
     };
     use crate::table_features::FeatureType;
     use crate::table_properties::{
-        COLUMN_MAPPING_MAX_COLUMN_ID, ENABLE_ICEBERG_COMPAT_V1, ENABLE_ICEBERG_COMPAT_V3,
-        PARQUET_FORMAT_VERSION,
+        COLUMN_MAPPING_MAX_COLUMN_ID, ENABLE_ICEBERG_COMPAT_V1, ENABLE_ICEBERG_COMPAT_V2,
+        ENABLE_ICEBERG_COMPAT_V3, PARQUET_FORMAT_VERSION,
     };
     use crate::transforms::SchemaTransform;
     use crate::unit_test_utils::{
         assert_result_error_with_message, build_complex_nested_kernel_schema,
+        install_thread_local_metrics_reporter, CapturingReporter,
     };
 
     fn test_schema() -> SchemaRef {
@@ -998,12 +1150,179 @@ mod tests {
     #[test]
     fn test_basic_builder_creation() {
         let schema = test_schema();
-        let builder =
-            CreateTableTransactionBuilder::new("/path/to/table", schema.clone(), "TestApp/1.0");
+        let builder = CreateTableTransactionBuilder::new(
+            "/path/to/table",
+            schema.clone(),
+            "TestApp/1.0",
+            true,
+        );
 
-        assert_eq!(builder.path, "/path/to/table");
-        assert_eq!(builder.engine_info, "TestApp/1.0");
-        assert!(builder.table_properties.is_empty());
+        assert_eq!(builder.local_state.path, "/path/to/table");
+        assert_eq!(builder.common_state.engine_info, "TestApp/1.0");
+        assert!(builder.local_state.table_properties.is_empty());
+    }
+
+    #[rstest]
+    fn common_builder_state_preserves_data_change_through_empty_commit(
+        #[values(false, true)] expected_data_change: bool,
+    ) -> KernelResult<()> {
+        let tempdir = tempfile::tempdir()?;
+        let table_path = tempdir.path().join("table");
+        std::fs::create_dir(&table_path)?;
+        let engine = SyncEngine::new();
+        let reporter = Arc::new(CapturingReporter::default());
+        let _guard = install_thread_local_metrics_reporter(reporter.clone());
+
+        let builder = CreateTableTransactionBuilder::new(
+            table_path.to_string_lossy(),
+            test_schema(),
+            "test-engine",
+            expected_data_change,
+        )
+        .with_correlation_id("test-correlation")
+        .with_operation_parameters([("mode", Some("Create"))])
+        .with_transaction_id("app", 7);
+        let transaction = builder.build(&engine, Box::new(FileSystemCommitter::new()))?;
+
+        assert_eq!(transaction.engine_info, "test-engine");
+        assert_eq!(
+            transaction.correlation_id.as_deref(),
+            Some("test-correlation")
+        );
+        assert_eq!(
+            transaction.operation_parameters.as_ref().unwrap()["mode"].as_deref(),
+            Some("Create")
+        );
+        assert_eq!(transaction.set_transactions[0].app_id, "app");
+        assert_eq!(transaction.set_transactions[0].version, 7);
+        assert_eq!(
+            transaction.set_transactions[0].last_updated,
+            Some(transaction.commit_timestamp)
+        );
+        assert_eq!(transaction.data_change, expected_data_change);
+        let committed = transaction.commit(&engine)?.unwrap_committed();
+        assert_eq!(committed.commit_version(), 0);
+        let metrics = reporter
+            .events()
+            .into_iter()
+            .find_map(|event| match event {
+                MetricEvent::TransactionCommitSuccess(metrics) => Some(metrics),
+                _ => None,
+            })
+            .expect("create-table commit metrics");
+        assert_eq!(metrics.data_change, expected_data_change);
+        assert_eq!(metrics.num_add_files, 0);
+        assert_eq!(metrics.num_remove_files, 0);
+        Ok(())
+    }
+
+    #[rstest]
+    #[case(0)]
+    #[case(2)]
+    fn builder_rejects_non_single_row_commit_info(#[case] row_count: usize) -> KernelResult<()> {
+        let tempdir = tempfile::tempdir()?;
+        let table_path = tempdir.path().join("table");
+        std::fs::create_dir(&table_path)?;
+        let commit_info_schema = schema_ref! { nullable "tag": STRING };
+        let arrow_schema: ArrowSchema = commit_info_schema.as_ref().try_into_arrow()?;
+        let commit_info = Box::new(ArrowEngineData::new(RecordBatch::try_new(
+            Arc::new(arrow_schema),
+            vec![Arc::new(StringArray::from(vec![Some("value"); row_count]))],
+        )?));
+
+        let error = CreateTableTransactionBuilder::new(
+            table_path.to_string_lossy(),
+            test_schema(),
+            "test-engine",
+            true,
+        )
+        .with_commit_info(commit_info, commit_info_schema)
+        .build(&SyncEngine::new(), Box::new(FileSystemCommitter::new()))
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Connector commit info must contain exactly one row"),
+            "{error}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn duplicate_transaction_ids_are_rejected() -> KernelResult<()> {
+        let tempdir = tempfile::tempdir()?;
+        let table_path = tempdir.path().join("table");
+        std::fs::create_dir(&table_path)?;
+        let error = CreateTableTransactionBuilder::new(
+            table_path.to_string_lossy(),
+            test_schema(),
+            "test-engine",
+            true,
+        )
+        .with_transaction_id("app", 1)
+        .with_transaction_id("app", 2)
+        .build(&SyncEngine::new(), Box::new(FileSystemCommitter::new()))
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("app_id app appears more than once"),
+            "{error}"
+        );
+        Ok(())
+    }
+
+    #[rstest]
+    #[case::missing_feature("app.config", None, "domainMetadata")]
+    #[case::reserved_domain(
+        "delta.custom",
+        Some(("delta.feature.domainMetadata", "supported")),
+        "system controlled"
+    )]
+    fn invalid_domain_metadata_is_rejected_during_build(
+        #[case] domain: &str,
+        #[case] property: Option<(&str, &str)>,
+        #[case] expected: &str,
+    ) -> KernelResult<()> {
+        let tempdir = tempfile::tempdir()?;
+        let table_path = tempdir.path().join("table");
+        std::fs::create_dir(&table_path)?;
+        let mut builder = CreateTableTransactionBuilder::new(
+            table_path.to_string_lossy(),
+            test_schema(),
+            "test-engine",
+            true,
+        )
+        .with_domain_metadata(domain, "{}");
+        if let Some(property) = property {
+            builder = builder.with_table_properties([property]);
+        }
+
+        assert_result_error_with_message(
+            builder.build(&SyncEngine::new(), Box::new(FileSystemCommitter::new())),
+            expected,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn user_domain_cannot_conflict_with_generated_clustering_domain() -> KernelResult<()> {
+        let tempdir = tempfile::tempdir()?;
+        let table_path = tempdir.path().join("table");
+        std::fs::create_dir(&table_path)?;
+        let error = CreateTableTransactionBuilder::new(
+            table_path.to_string_lossy(),
+            test_schema(),
+            "test-engine",
+            true,
+        )
+        .with_data_layout(DataLayout::clustered(["id"]))
+        .with_domain_metadata("delta.clustering", "{}")
+        .build(&SyncEngine::new(), Box::new(FileSystemCommitter::new()))
+        .unwrap_err();
+
+        assert!(error.to_string().contains("system controlled"), "{error}");
+        Ok(())
     }
 
     #[test]
@@ -1013,20 +1332,22 @@ mod tests {
             "/path/to/table/nested",
             schema.clone(),
             "TestApp/1.0",
+            true,
         );
 
-        assert_eq!(builder.path, "/path/to/table/nested");
+        assert_eq!(builder.local_state.path, "/path/to/table/nested");
     }
 
     #[test]
     fn test_with_table_properties() {
         let schema = test_schema();
 
-        let builder = CreateTableTransactionBuilder::new("/path/to/table", schema, "TestApp/1.0")
-            .with_table_properties([("key1", "value1")]);
+        let builder =
+            CreateTableTransactionBuilder::new("/path/to/table", schema, "TestApp/1.0", true)
+                .with_table_properties([("key1", "value1")]);
 
         assert_eq!(
-            builder.table_properties.get("key1"),
+            builder.local_state.table_properties.get("key1"),
             Some(&"value1".to_string())
         );
     }
@@ -1035,18 +1356,30 @@ mod tests {
     fn test_with_multiple_table_properties() {
         let schema = test_schema();
 
-        let builder = CreateTableTransactionBuilder::new("/path/to/table", schema, "TestApp/1.0")
-            .with_table_properties([("key1", "value1")])
-            .with_table_properties([("key2", "value2")]);
+        let builder =
+            CreateTableTransactionBuilder::new("/path/to/table", schema, "TestApp/1.0", true)
+                .with_table_properties([("key1", "value1")])
+                .with_table_properties([("key2", "value2")]);
 
         assert_eq!(
-            builder.table_properties.get("key1"),
+            builder.local_state.table_properties.get("key1"),
             Some(&"value1".to_string())
         );
         assert_eq!(
-            builder.table_properties.get("key2"),
+            builder.local_state.table_properties.get("key2"),
             Some(&"value2".to_string())
         );
+    }
+
+    #[rstest]
+    // Names a user would expect.
+    #[case::lowercase_prefix("delta.constraints.positive")]
+    // Unusual names, rejected like any other CHECK constraint key.
+    #[case::bare_prefix("delta.constraints.")]
+    fn create_table_rejects_check_constraint_properties(#[case] key: &str) {
+        let properties = HashMap::from([(key.to_string(), "amount > 0".to_string())]);
+        let result = validate_extract_table_features_and_properties(properties);
+        assert_result_error_with_message(result, "Setting CHECK constraint property");
     }
 
     #[test]
@@ -1141,6 +1474,36 @@ mod tests {
         assert!(validated.writer_features.is_empty());
     }
 
+    #[rstest::rstest]
+    #[case::v2(&[(CHECKPOINT_POLICY, "v2")], true)]
+    #[case::classic(&[(CHECKPOINT_POLICY, "classic")], false)]
+    fn test_checkpoint_policy_feature_enablement(
+        #[case] properties: &[(&str, &str)],
+        #[case] expect_v2_checkpoint_feature: bool,
+    ) {
+        let properties: HashMap<String, String> = properties
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        let mut validated = validate_extract_table_features_and_properties(properties).unwrap();
+
+        maybe_enable_v2_checkpoint_for_policy(&mut validated);
+
+        assert_eq!(
+            validated
+                .reader_features
+                .contains(&TableFeature::V2Checkpoint),
+            expect_v2_checkpoint_feature,
+        );
+        assert_eq!(
+            validated
+                .writer_features
+                .contains(&TableFeature::V2Checkpoint),
+            expect_v2_checkpoint_feature,
+        );
+        assert!(validated.properties.contains_key(CHECKPOINT_POLICY));
+    }
+
     #[test]
     fn test_validate_unsupported_properties() {
         // Delta properties not on allow list are rejected
@@ -1184,19 +1547,19 @@ mod tests {
     #[test]
     fn test_clustering_support_valid() {
         use crate::clustering::CLUSTERING_DOMAIN_NAME;
-        use crate::expressions::ColumnName;
+        use crate::expressions::column_name;
 
-        let schema = Arc::new(StructType::new_unchecked(vec![
-            StructField::new("id", DataType::INTEGER, false),
-            StructField::new("name", DataType::STRING, true),
-        ]));
+        let schema = schema_ref! {
+            not_null "id": INTEGER,
+            nullable "name": STRING,
+        };
 
         let mut reader_features = vec![];
         let mut writer_features = vec![];
 
         let dm = validate_clustering_and_make_domain_metadata(
             &schema,
-            &[ColumnName::new(["id"])],
+            &[column_name!("id")],
             &mut reader_features,
             &mut writer_features,
         )
@@ -1212,20 +1575,20 @@ mod tests {
 
     #[test]
     fn test_clustering_support_multiple_columns() {
-        use crate::expressions::ColumnName;
+        use crate::expressions::column_name;
 
-        let schema = Arc::new(StructType::new_unchecked(vec![
-            StructField::new("id", DataType::INTEGER, false),
-            StructField::new("date", DataType::STRING, true),
-            StructField::new("region", DataType::STRING, true),
-        ]));
+        let schema = schema_ref! {
+            not_null "id": INTEGER,
+            nullable "date": STRING,
+            nullable "region": STRING,
+        };
 
         let mut reader_features = vec![];
         let mut writer_features = vec![];
 
         let dm = validate_clustering_and_make_domain_metadata(
             &schema,
-            &[ColumnName::new(["id"]), ColumnName::new(["date"])],
+            &[column_name!("id"), column_name!("date")],
             &mut reader_features,
             &mut writer_features,
         )
@@ -1241,7 +1604,7 @@ mod tests {
 
     #[test]
     fn test_clustering_column_not_in_schema() {
-        use crate::expressions::ColumnName;
+        use crate::expressions::column_name;
 
         let schema = schema_ref! { not_null "id": INTEGER };
 
@@ -1250,7 +1613,7 @@ mod tests {
 
         let result = validate_clustering_and_make_domain_metadata(
             &schema,
-            &[ColumnName::new(["nonexistent"])],
+            &[column_name!("nonexistent")],
             &mut reader_features,
             &mut writer_features,
         );
@@ -1265,21 +1628,20 @@ mod tests {
     #[test]
     fn test_clustering_nested_column_accepted() {
         use crate::clustering::CLUSTERING_DOMAIN_NAME;
-        use crate::expressions::ColumnName;
+        use crate::expressions::column_name;
 
-        let address_struct = StructType::new_unchecked(vec![
-            StructField::new("city", DataType::STRING, true),
-            StructField::new("zip", DataType::STRING, true),
-        ]);
-        let schema = Arc::new(StructType::new_unchecked(vec![
-            StructField::new("id", DataType::INTEGER, false),
-            StructField::new("address", address_struct, true),
-        ]));
+        let schema = schema_ref! {
+            not_null "id": INTEGER,
+            nullable "address": {
+                nullable "city": STRING,
+                nullable "zip": STRING,
+            },
+        };
 
         let mut reader_features = vec![];
         let mut writer_features = vec![];
 
-        let nested_col = ColumnName::new(["address", "city"]);
+        let nested_col = column_name!("address.city");
         let dm = validate_clustering_and_make_domain_metadata(
             &schema,
             &[nested_col],
@@ -1303,11 +1665,18 @@ mod tests {
     ) {
         let schema = test_schema();
 
-        let builder = CreateTableTransactionBuilder::new("/path/to/table", schema, "TestApp/1.0")
-            .with_data_layout(layout);
+        let builder =
+            CreateTableTransactionBuilder::new("/path/to/table", schema, "TestApp/1.0", true)
+                .with_data_layout(layout);
 
-        assert_eq!(builder.data_layout.is_clustered(), expect_clustered);
-        assert_eq!(builder.data_layout.is_partitioned(), expect_partitioned);
+        assert_eq!(
+            builder.local_state.data_layout.is_clustered(),
+            expect_clustered
+        );
+        assert_eq!(
+            builder.local_state.data_layout.is_partitioned(),
+            expect_partitioned
+        );
     }
 
     #[rstest::rstest]
@@ -1334,11 +1703,11 @@ mod tests {
         &[TableFeature::TimestampWithoutTimezone],
     )]
     #[case::both_variant_and_ntz(
-        Arc::new(StructType::new_unchecked(vec![
-            StructField::new("id", DataType::INTEGER, false),
-            StructField::new("v", DataType::unshredded_variant(), true),
-            StructField::new("ts", DataType::TIMESTAMP_NTZ, true),
-        ])),
+        schema_ref! {
+            not_null "id": INTEGER,
+            nullable "v": unshredded_variant(),
+            nullable "ts": TIMESTAMP_NTZ,
+        },
         &[TableFeature::VariantType, TableFeature::TimestampWithoutTimezone],
     )]
     #[case::no_special_types(
@@ -1467,6 +1836,8 @@ mod tests {
     #[case::append_only(TableFeature::AppendOnly, "appendOnly")]
     #[case::change_data_feed(TableFeature::ChangeDataFeed, "changeDataFeed")]
     #[case::type_widening(TableFeature::TypeWidening, "typeWidening")]
+    #[case::variant_type(TableFeature::VariantType, "variantType")]
+    #[case::variant_shredding(TableFeature::VariantShredding, "variantShredding")]
     #[case::catalog_managed(TableFeature::CatalogManaged, "catalogManaged")]
     #[case::invariants(TableFeature::Invariants, "invariants")]
     fn test_feature_signal_accepted(#[case] feature: TableFeature, #[case] feature_name: &str) {
@@ -1494,12 +1865,34 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_variant_shredding_feature_signal_adds_variant_type_dependency() {
+        let properties = HashMap::from([(
+            "delta.feature.variantShredding".to_string(),
+            "supported".to_string(),
+        )]);
+        let validated = validate_extract_table_features_and_properties(properties).unwrap();
+
+        assert!(validated
+            .reader_features
+            .contains(&TableFeature::VariantType));
+        assert!(validated
+            .reader_features
+            .contains(&TableFeature::VariantShredding));
+        assert!(validated
+            .writer_features
+            .contains(&TableFeature::VariantType));
+        assert!(validated
+            .writer_features
+            .contains(&TableFeature::VariantShredding));
+    }
+
     fn multi_column_schema() -> SchemaRef {
-        Arc::new(StructType::new_unchecked(vec![
-            StructField::new("id", DataType::INTEGER, false),
-            StructField::new("name", DataType::STRING, true),
-            StructField::new("date", DataType::DATE, true),
-        ]))
+        schema_ref! {
+            not_null "id": INTEGER,
+            nullable "name": STRING,
+            nullable "date": DATE,
+        }
     }
 
     struct DataLayoutExpectation {
@@ -1523,20 +1916,20 @@ mod tests {
         has_domain_metadata: true,
         has_clustering_columns: true,
         expected_partition_columns: None,
-        expected_writer_features: vec![TableFeature::DomainMetadata, TableFeature::ClusteredTable],
+        expected_writer_features: vec![TableFeature::ClusteredTable],
     })]
     #[case::partitioned_single(DataLayoutExpectation {
         layout: DataLayout::partitioned(["date"]),
         has_domain_metadata: false,
         has_clustering_columns: false,
-        expected_partition_columns: Some(vec![ColumnName::new(["date"])]),
+        expected_partition_columns: Some(vec![column_name!("date")]),
         expected_writer_features: vec![],
     })]
     #[case::partitioned_multiple(DataLayoutExpectation {
         layout: DataLayout::partitioned(["id", "date"]),
         has_domain_metadata: false,
         has_clustering_columns: false,
-        expected_partition_columns: Some(vec![ColumnName::new(["id"]), ColumnName::new(["date"])]),
+        expected_partition_columns: Some(vec![column_name!("id"), column_name!("date")]),
         expected_writer_features: vec![],
     })]
     fn test_apply_data_layout(#[case] expectation: DataLayoutExpectation) {
@@ -1603,14 +1996,12 @@ mod tests {
 
     #[test]
     fn test_validate_partition_columns_nested_rejected() {
-        let address_struct =
-            StructType::new_unchecked(vec![StructField::new("city", DataType::STRING, true)]);
-        let schema = StructType::new_unchecked(vec![
-            StructField::new("id", DataType::INTEGER, false),
-            StructField::new("address", address_struct, true),
-        ]);
+        let schema = schema! {
+            not_null "id": INTEGER,
+            nullable "address": { nullable "city": STRING },
+        };
 
-        let columns = vec![ColumnName::new(["address", "city"])];
+        let columns = vec![column_name!("address.city")];
         let result = validate_partition_columns(&schema, &columns);
         assert!(result.is_err());
         assert!(result
@@ -1622,7 +2013,7 @@ mod tests {
     #[rstest::rstest]
     #[case::struct_type(
         "struct_col",
-        DataType::from(StructType::new_unchecked(vec![StructField::new("inner", DataType::STRING, false)])),
+        DataType::from(schema! { not_null "inner": STRING }),
     )]
     #[case::array_type(
         "array_col",
@@ -1636,10 +2027,10 @@ mod tests {
         #[case] col_name: &str,
         #[case] data_type: DataType,
     ) {
-        let schema = StructType::new_unchecked(vec![
-            StructField::new("id", DataType::INTEGER, false),
-            StructField::new(col_name, data_type, false),
-        ]);
+        let schema = schema! {
+            not_null "id": INTEGER,
+            not_null col_name: (data_type),
+        };
         let columns = vec![ColumnName::new([col_name])];
         let result = validate_partition_columns(&schema, &columns);
         assert!(result.is_err());
@@ -1653,15 +2044,12 @@ mod tests {
     fn test_validate_partition_columns_nested_interval_types_rejected(
         #[values(DataType::INTERVAL_YEAR_MONTH, DataType::INTERVAL_DAY_TIME)] data_type: DataType,
     ) {
-        let schema = StructType::new_unchecked([
-            StructField::not_null("id", DataType::INTEGER),
-            StructField::not_null(
-                "nested",
-                StructType::new_unchecked([StructField::not_null("col", data_type)]),
-            ),
-        ]);
+        let schema = schema! {
+            not_null "id": INTEGER,
+            not_null "nested": { not_null "col": (data_type) },
+        };
 
-        let error = validate_partition_columns(&schema, &[ColumnName::new(["nested", "col"])])
+        let error = validate_partition_columns(&schema, &[column_name!("nested.col")])
             .expect_err("nested partition columns must be rejected")
             .to_string();
         assert!(error.contains("must be a top-level column"));
@@ -1677,11 +2065,11 @@ mod tests {
     #[case::interval_year_month(DataType::INTERVAL_YEAR_MONTH)]
     #[case::interval_day_time(DataType::INTERVAL_DAY_TIME)]
     fn test_validate_partition_columns_primitive_types_accepted(#[case] data_type: DataType) {
-        let schema = StructType::new_unchecked(vec![
-            StructField::new("id", DataType::INTEGER, false),
-            StructField::new("col", data_type, false),
-        ]);
-        let columns = vec![ColumnName::new(["col"])];
+        let schema = schema! {
+            not_null "id": INTEGER,
+            not_null "col": (data_type),
+        };
+        let columns = vec![column_name!("col")];
         assert!(validate_partition_columns(&schema, &columns).is_ok());
     }
 
@@ -1733,9 +2121,6 @@ mod tests {
         );
     }
 
-    /// Verifies that both activation paths add `RowTracking` and `DomainMetadata` to
-    /// `writer_features`. For the feature-signal path, `delta.enableRowTracking` must NOT
-    /// be present in the properties (signal grants support, not enablement).
     #[rstest::rstest]
     #[case::enablement_property(
         HashMap::from([(ENABLE_ROW_TRACKING.to_string(), "true".to_string())]),
@@ -1745,7 +2130,7 @@ mod tests {
         HashMap::from([("delta.feature.rowTracking".to_string(), "supported".to_string())]),
         false, // enablement property is NOT set
     )]
-    fn test_row_tracking_activation_adds_required_features(
+    fn test_row_tracking_activation_selects_feature(
         #[case] properties: HashMap<String, String>,
         #[case] expect_enablement_property: bool,
     ) {
@@ -1759,10 +2144,10 @@ mod tests {
             "Expected RowTracking in writer_features"
         );
         assert!(
-            validated
+            !validated
                 .writer_features
                 .contains(&TableFeature::DomainMetadata),
-            "Expected DomainMetadata in writer_features"
+            "Feature selection must leave domain dependency resolution to build"
         );
         assert_eq!(
             validated.properties.contains_key(ENABLE_ROW_TRACKING),
@@ -1792,7 +2177,7 @@ mod tests {
         );
     }
 
-    /// Builds the icebergCompatV3 create-table test schema:
+    /// Builds the Iceberg compatibility create-table test schema:
     ///
     /// ```json
     /// {
@@ -1814,19 +2199,23 @@ mod tests {
     ///   ]
     /// }
     /// ```
-    fn build_iceberg_compat_v3_test_schema() -> SchemaRef {
+    fn build_iceberg_compat_test_schema() -> SchemaRef {
         let with_metadata =
             build_complex_nested_kernel_schema(ColumnMetadataKey::ColumnMappingNestedIds.as_ref());
         let complex = StripFieldMetadataTransform
             .transform_struct(&with_metadata)
             .into_owned();
-        let mut fields: Vec<StructField> = complex.fields().cloned().collect();
-        fields.push(StructField::nullable("region", DataType::STRING));
-        Arc::new(StructType::try_new(fields).unwrap())
+        Arc::new(
+            try_schema! {
+                ..(complex.fields()),
+                nullable "region": STRING,
+            }
+            .unwrap(),
+        )
     }
 
     /// V3 create-table flow with the same schema for minimum and maximum feature sets.
-    /// Validates final features, CM id assignments, and nested-id JSON contents.
+    /// Validates selected features, CM id assignments, and nested-id JSON contents.
     #[rstest]
     #[case::v3_only(
         /* extra_props */ &[],
@@ -1834,7 +2223,6 @@ mod tests {
             TableFeature::IcebergCompatV3,
             TableFeature::ColumnMapping,
             TableFeature::RowTracking,
-            TableFeature::DomainMetadata,
         ],
     )]
     #[case::v3_with_cross_features(
@@ -1849,7 +2237,6 @@ mod tests {
             TableFeature::IcebergCompatV3,
             TableFeature::ColumnMapping,
             TableFeature::RowTracking,
-            TableFeature::DomainMetadata,
             TableFeature::DeletionVectors,
             TableFeature::InCommitTimestamp,
             TableFeature::TypeWidening,
@@ -1861,7 +2248,7 @@ mod tests {
         #[case] extra_props: &[(&str, &str)],
         #[case] expected_features: &[TableFeature],
     ) {
-        let schema = build_iceberg_compat_v3_test_schema();
+        let schema = build_iceberg_compat_test_schema();
         let mut props: HashMap<String, String> =
             HashMap::from([(ENABLE_ICEBERG_COMPAT_V3.to_string(), "true".to_string())]);
         for (k, v) in extra_props {
@@ -1870,7 +2257,7 @@ mod tests {
         let mut validated = validate_extract_table_features_and_properties(props).unwrap();
 
         // === V3 dependency defaults ===
-        let pre_cm = maybe_enable_iceberg_compat_v3_dependencies(&mut validated).unwrap();
+        maybe_enable_iceberg_compat_v3_dependencies(&mut validated).unwrap();
         assert_eq!(
             validated
                 .properties
@@ -1888,7 +2275,7 @@ mod tests {
 
         // === Column mapping + nested-id assignment ===
         let (effective_schema, mode) =
-            maybe_apply_column_mapping_for_table_create(&schema, &mut validated, pre_cm).unwrap();
+            maybe_apply_column_mapping_for_table_create(&schema, &mut validated).unwrap();
         assert_eq!(mode, ColumnMappingMode::Name);
 
         // Spark-aligned two-pass numbering:
@@ -2024,9 +2411,8 @@ mod tests {
             "true".to_string(),
         )]))
         .unwrap();
-        let pre_cm = maybe_enable_iceberg_compat_v3_dependencies(&mut validated).unwrap();
-        let err = maybe_apply_column_mapping_for_table_create(&schema, &mut validated, pre_cm)
-            .unwrap_err();
+        maybe_enable_iceberg_compat_v3_dependencies(&mut validated).unwrap();
+        let err = maybe_apply_column_mapping_for_table_create(&schema, &mut validated).unwrap_err();
         assert!(
             err.to_string().contains("has pre-populated"),
             "expected pre-populated metadata error, got: {err}",
@@ -2038,7 +2424,7 @@ mod tests {
     /// applied per the explicit property, but no nested ids are set on Array/Map fields.
     #[test]
     fn test_create_table_v3_supported_but_not_enabled_skips_nested_ids() {
-        let schema = build_iceberg_compat_v3_test_schema();
+        let schema = build_iceberg_compat_test_schema();
         let mut validated = validate_extract_table_features_and_properties(HashMap::from([
             (
                 "delta.feature.icebergCompatV3".to_string(),
@@ -2053,9 +2439,9 @@ mod tests {
                 .contains(&TableFeature::IcebergCompatV3),
             "V3 must be in writerFeatures (supported) for this test to be meaningful",
         );
-        let pre_cm = maybe_enable_iceberg_compat_v3_dependencies(&mut validated).unwrap();
+        maybe_enable_iceberg_compat_v3_dependencies(&mut validated).unwrap();
         let (effective_schema, mode) =
-            maybe_apply_column_mapping_for_table_create(&schema, &mut validated, pre_cm).unwrap();
+            maybe_apply_column_mapping_for_table_create(&schema, &mut validated).unwrap();
         assert_eq!(mode, ColumnMappingMode::Name);
 
         // Top-level Map field gets CM id + physicalName but no nested-ids metadata under
@@ -2070,6 +2456,168 @@ mod tests {
             !top.metadata()
                 .contains_key(ColumnMetadataKey::ParquetFieldNestedIds.as_ref()),
             "top should not carry parquet.field.nested.ids when V3 is not enabled",
+        );
+    }
+
+    /// V2 create-table flow: IcebergCompatV2 must assign nested ids for Array/Map fields.
+    #[test]
+    fn test_create_table_iceberg_compat_v2() {
+        let schema = build_iceberg_compat_test_schema();
+        let props: HashMap<String, String> =
+            HashMap::from([(ENABLE_ICEBERG_COMPAT_V2.to_string(), "true".to_string())]);
+        let mut validated = validate_extract_table_features_and_properties(props).unwrap();
+
+        maybe_enable_iceberg_compat_v2_dependencies(&mut validated).unwrap();
+        assert_eq!(
+            validated
+                .properties
+                .get(COLUMN_MAPPING_MODE)
+                .map(String::as_str),
+            Some("name"),
+        );
+        assert_eq!(validated.properties.get(ENABLE_ROW_TRACKING), None);
+
+        // Column mapping + nested-id assignment
+        let (effective_schema, mode) =
+            maybe_apply_column_mapping_for_table_create(&schema, &mut validated).unwrap();
+        assert_eq!(mode, ColumnMappingMode::Name);
+
+        let top = effective_schema.field("top").expect("missing top");
+        let top_physical = expect_field_id_and_physical_name(top, 1);
+        assert_eq!(
+            extract_nested_ids(top),
+            serde_json::json!({
+                format!("{top_physical}.key"): 4,
+                format!("{top_physical}.key.element"): 5,
+                format!("{top_physical}.value"): 6,
+            }),
+            "top's nested-ids JSON",
+        );
+
+        let DataType::Map(top_map) = top.data_type() else {
+            panic!("top must be a map");
+        };
+        let DataType::Struct(value_struct) = top_map.value_type() else {
+            panic!("top's value must be a struct");
+        };
+        let inner = value_struct.fields().next().expect("missing inner");
+        let inner_physical = expect_field_id_and_physical_name(inner, 2);
+        assert_eq!(
+            extract_nested_ids(inner),
+            serde_json::json!({
+                format!("{inner_physical}.key"): 7,
+                format!("{inner_physical}.value"): 8,
+                format!("{inner_physical}.value.element"): 9,
+            }),
+            "inner's nested-ids JSON",
+        );
+
+        // IcebergCompatV2 + ColumnMapping only
+        maybe_enable_invariants(&effective_schema, &mut validated);
+        maybe_auto_enable_property_driven_features(&mut validated);
+        for f in [TableFeature::IcebergCompatV2, TableFeature::ColumnMapping] {
+            assert!(
+                validated.writer_features.contains(&f) || validated.reader_features.contains(&f),
+                "expected {f:?} in protocol features (writer={:?}, reader={:?})",
+                validated.writer_features,
+                validated.reader_features,
+            );
+        }
+        assert!(
+            !validated
+                .writer_features
+                .contains(&TableFeature::RowTracking),
+            "V2 must not auto-add RowTracking",
+        );
+    }
+
+    /// V2 dependency resolution defaults `delta.columnMapping.mode` to `name` when absent and
+    /// accepts an explicit `name`/`id`.
+    #[rstest]
+    #[case::default_to_name(&[], Some("name"))]
+    #[case::name_ok(&[(COLUMN_MAPPING_MODE, "name")], Some("name"))]
+    #[case::id_ok(&[(COLUMN_MAPPING_MODE, "id")], Some("id"))]
+    fn test_v2_dependencies_sets_column_mapping(
+        #[case] extra_props: &[(&str, &str)],
+        #[case] expected_cm: Option<&str>,
+    ) {
+        let mut properties: HashMap<String, String> =
+            HashMap::from([(ENABLE_ICEBERG_COMPAT_V2.to_string(), "true".to_string())]);
+        for (k, v) in extra_props {
+            properties.insert(k.to_string(), v.to_string());
+        }
+        let mut validated = ValidatedTableProperties {
+            properties,
+            reader_features: Vec::new(),
+            writer_features: Vec::new(),
+        };
+        maybe_enable_iceberg_compat_v2_dependencies(&mut validated).unwrap();
+        assert_eq!(
+            validated
+                .properties
+                .get(COLUMN_MAPPING_MODE)
+                .map(String::as_str),
+            expected_cm,
+        );
+        assert!(
+            validated
+                .reader_features
+                .contains(&TableFeature::ColumnMapping)
+                && validated
+                    .writer_features
+                    .contains(&TableFeature::ColumnMapping)
+        );
+    }
+
+    #[test]
+    fn test_v2_support_adds_column_mapping_support_without_enabling_mode() {
+        let mut validated = ValidatedTableProperties {
+            properties: HashMap::new(),
+            reader_features: Vec::new(),
+            writer_features: vec![TableFeature::IcebergCompatV2],
+        };
+
+        maybe_enable_iceberg_compat_v2_dependencies(&mut validated).unwrap();
+
+        assert!(
+            validated
+                .reader_features
+                .contains(&TableFeature::ColumnMapping)
+                && validated
+                    .writer_features
+                    .contains(&TableFeature::ColumnMapping)
+        );
+        assert!(!validated.properties.contains_key(COLUMN_MAPPING_MODE));
+    }
+
+    /// Property combinations that violate V2's dependency requirements must be rejected by
+    /// `maybe_enable_iceberg_compat_v2_dependencies`.
+    #[rstest]
+    #[case::cm_mode_none(&[(COLUMN_MAPPING_MODE, "none")], "delta.columnMapping.mode")]
+    #[case::v1_concurrent(&[(ENABLE_ICEBERG_COMPAT_V1, "true")], "delta.enableIcebergCompatV1")]
+    #[case::v3_concurrent(&[(ENABLE_ICEBERG_COMPAT_V3, "true")], "delta.enableIcebergCompatV3")]
+    #[case::deletion_vectors_enabled(
+        &[(ENABLE_DELETION_VECTORS, "true")],
+        "delta.enableDeletionVectors",
+    )]
+    fn test_v2_dependencies_rejects_invalid_combinations(
+        #[case] extra_props: &[(&str, &str)],
+        #[case] expected_substring: &str,
+    ) {
+        let mut properties: HashMap<String, String> =
+            HashMap::from([(ENABLE_ICEBERG_COMPAT_V2.to_string(), "true".to_string())]);
+        for (k, v) in extra_props {
+            properties.insert(k.to_string(), v.to_string());
+        }
+        let mut validated = ValidatedTableProperties {
+            properties,
+            reader_features: Vec::new(),
+            writer_features: Vec::new(),
+        };
+        let err = maybe_enable_iceberg_compat_v2_dependencies(&mut validated).unwrap_err();
+        assert!(
+            err.to_string().contains(expected_substring),
+            "expected error mentioning '{expected_substring}', got: {err}",
         );
     }
 

@@ -25,16 +25,18 @@ use delta_kernel::object_store::{DynObjectStore, ObjectStore, ObjectStoreExt};
 use delta_kernel::parquet::file::reader::{FileReader, SerializedFileReader};
 use delta_kernel::parquet::schema::types::Type as ParquetType;
 use delta_kernel::path::ParsedLogPath;
-use delta_kernel::schema::{DataType, SchemaRef, StructField, StructType};
+use delta_kernel::schema::{schema_ref, SchemaRef, StructType};
 use delta_kernel::table_features::ColumnMappingMode;
-use delta_kernel::transaction::{CommitResult, Transaction, WriteContext};
-use delta_kernel::{DeltaResult, Engine, Snapshot, Version};
+use delta_kernel::transaction::{
+    BoundWriteContext, CommitResult, Transaction, UpdateTableOperation,
+};
+use delta_kernel::{Engine, KernelResult, Snapshot, Version};
 use serde_json::json;
 use test_utils::delta_kernel_default_engine::executor::tokio::TokioBackgroundExecutor;
 use test_utils::delta_kernel_default_engine::DefaultEngine;
 use test_utils::{
-    begin_transaction, create_add_files_metadata, create_table, engine_store_setup,
-    load_and_begin_transaction,
+    create_add_files_metadata, create_table, engine_store_setup, into_record_batch,
+    modify_add_file_partition_keys, AddFilePartitionKeyModify,
 };
 use url::Url;
 use uuid::Uuid;
@@ -44,7 +46,7 @@ pub const ZERO_UUID: &str = "00000000-0000-0000-0000-000000000000";
 
 /// Single-column nullable `id: int` schema.
 pub fn get_simple_schema() -> SchemaRef {
-    Arc::new(StructType::try_new(vec![StructField::new("id", DataType::INTEGER, true)]).unwrap())
+    schema_ref! { nullable "id": INTEGER }
 }
 
 /// Builds a `RecordBatch` matching [`get_simple_schema`] from a vector of `id` values.
@@ -165,7 +167,7 @@ pub fn validate_timestamp(commit_info: &serde_json::Value) {
 /// Check that the timestamps in commit_info and add actions are within 10s of SystemTime::now().
 pub fn check_action_timestamps<'a>(
     parsed_commits: impl Iterator<Item = &'a serde_json::Value>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> KernelResult<(), Box<dyn std::error::Error>> {
     let now: i64 = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_millis()
@@ -210,12 +212,18 @@ pub async fn write_data_and_check_result_and_stats(
     schema: SchemaRef,
     engine: Arc<DefaultEngine<TokioBackgroundExecutor>>,
     expected_since_commit: u64,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = test_utils::load_and_begin_transaction(table_url.clone(), engine.as_ref())?
-        .with_data_change(true);
+) -> KernelResult<()> {
+    let mut txn = test_utils::load_and_begin_transaction_with(
+        table_url.clone(),
+        engine.as_ref(),
+        UpdateTableOperation::Write,
+        "test-engine",
+        true,
+        |builder| builder,
+    )?;
 
     // create two new arrow record batches to append
-    let append_data = [[1, 2, 3], [4, 5, 6]].map(|data| -> DeltaResult<_> {
+    let append_data = [[1, 2, 3], [4, 5, 6]].map(|data| -> KernelResult<_> {
         let data = RecordBatch::try_new(
             Arc::new(schema.as_ref().try_into_arrow()?),
             vec![Arc::new(Int32Array::from(data.to_vec()))],
@@ -224,7 +232,7 @@ pub async fn write_data_and_check_result_and_stats(
     });
 
     // write data out by spawning async tasks to simulate executors
-    let write_context = Arc::new(txn.unpartitioned_write_context().unwrap());
+    let write_context = Arc::new(txn.write_state()?.write_context_builder().build()?);
     let tasks = append_data.into_iter().map(|data| {
         // arc clones
         let engine = engine.clone();
@@ -243,7 +251,7 @@ pub async fn write_data_and_check_result_and_stats(
 
     // commit!
     match txn.commit(engine.as_ref())? {
-        CommitResult::CommittedTransaction(committed) => {
+        CommitResult::Committed(committed) => {
             assert_eq!(committed.commit_version(), expected_since_commit as Version);
             assert_eq!(
                 committed.post_commit_stats().commits_since_checkpoint,
@@ -262,7 +270,7 @@ pub async fn write_data_and_check_result_and_stats(
 
 /// A simple schema with a single nullable INTEGER column named `number`.
 pub fn get_simple_int_schema() -> Arc<StructType> {
-    Arc::new(StructType::try_new(vec![StructField::nullable("number", DataType::INTEGER)]).unwrap())
+    schema_ref! { nullable "number": INTEGER }
 }
 
 /// Write a metadata-update commit that sets a table property on the existing table.
@@ -274,7 +282,7 @@ pub fn set_table_properties(
     engine: &dyn Engine,
     current_version: Version,
     properties: &[(&str, &str)],
-) -> Result<Arc<Snapshot>, Box<dyn std::error::Error>> {
+) -> KernelResult<Arc<Snapshot>> {
     let v0_path = std::path::Path::new(table_path).join("_delta_log/00000000000000000000.json");
     let mut meta: serde_json::Value = std::fs::read_to_string(&v0_path)?
         .lines()
@@ -292,7 +300,7 @@ pub fn set_table_properties(
     let new_commit = std::path::Path::new(table_path)
         .join(format!("_delta_log/{:020}.json", current_version + 1));
     std::fs::write(&new_commit, serde_json::to_string(&meta)?)?;
-    Ok(Snapshot::builder_for(table_url.clone()).build(engine)?)
+    Snapshot::builder_for(table_url.clone()).build(engine)
 }
 
 /// Assert that the snapshot's column mapping mode matches the given `cm_mode` string,
@@ -362,29 +370,29 @@ pub fn assert_min_max_stats(
     );
 }
 
-/// Creates a table with deletion vector support and writes the specified files.
+/// Creates a table with deletion vector support and writes files with `partition_values`.
+/// An empty `partition_values` creates an unpartitioned table.
 pub async fn create_dv_table_with_files(
     table_name: &str,
     schema: Arc<StructType>,
+    partition_values: &[(&str, Option<&str>)],
     file_paths: &[&str],
-) -> Result<
-    (
-        Arc<DynObjectStore>,
-        Arc<dyn delta_kernel::Engine>,
-        Url,
-        Vec<String>,
-    ),
-    Box<dyn std::error::Error>,
-> {
+) -> KernelResult<(
+    Arc<DynObjectStore>,
+    Arc<dyn delta_kernel::Engine>,
+    Url,
+    Vec<String>,
+)> {
     let (store, engine, table_url) = engine_store_setup(table_name, None);
     let engine = Arc::new(engine);
+    let partition_columns: Vec<_> = partition_values.iter().map(|(key, _)| *key).collect();
 
     // Create table with DV support (protocol 3/7 with deletionVectors feature)
     create_table(
         store.clone(),
         table_url.clone(),
         schema.clone(),
-        &[],
+        &partition_columns,
         true, // use_37_protocol
         vec!["deletionVectors"],
         vec!["deletionVectors"],
@@ -393,10 +401,12 @@ pub async fn create_dv_table_with_files(
 
     // Write files
     let snapshot = Snapshot::builder_for(table_url.clone()).build(engine.as_ref())?;
-    let mut txn = begin_transaction(snapshot.clone(), engine.as_ref())?
-        .with_engine_info("test engine")
-        .with_operation("WRITE".to_string())
-        .with_data_change(true);
+    let mut txn = snapshot
+        .update_table(UpdateTableOperation::Write, "test engine", true)
+        .build(
+            engine.as_ref(),
+            Box::new(delta_kernel::committer::FileSystemCommitter::new()),
+        )?;
 
     let add_files_schema = txn.add_files_schema();
 
@@ -414,6 +424,18 @@ pub async fn create_dv_table_with_files(
         })
         .collect();
     let metadata = create_add_files_metadata(add_files_schema, files)?;
+    let metadata = if partition_values.is_empty() {
+        metadata
+    } else {
+        let modifications: Vec<_> = partition_values
+            .iter()
+            .map(|(key, value)| AddFilePartitionKeyModify::Insert { key, value: *value })
+            .collect();
+        Box::new(ArrowEngineData::new(modify_add_file_partition_keys(
+            into_record_batch(metadata),
+            &modifications,
+        )))
+    };
     txn.add_files(metadata);
 
     let _ = txn.commit(engine.as_ref())?;
@@ -448,9 +470,11 @@ pub fn sequential_dv_descriptors(
 pub fn get_scan_files(
     snapshot: Arc<Snapshot>,
     engine: &dyn delta_kernel::Engine,
-) -> DeltaResult<Vec<FilteredEngineData>> {
+) -> KernelResult<Vec<FilteredEngineData>> {
     let scan = snapshot.scan_builder().build()?;
-    let all_scan_metadata: Vec<_> = scan.scan_metadata(engine)?.collect::<Result<Vec<_>, _>>()?;
+    let all_scan_metadata: Vec<_> = scan
+        .scan_metadata(engine)?
+        .collect::<KernelResult<Vec<_>>>()?;
 
     Ok(all_scan_metadata
         .into_iter()
@@ -461,10 +485,10 @@ pub fn get_scan_files(
 /// Serialize a deletion vector, write it to the object store, and return its descriptor.
 pub async fn write_deletion_vector_to_store(
     store: &Arc<dyn ObjectStore>,
-    write_context: &WriteContext,
+    write_context: &BoundWriteContext,
     dv: KernelDeletionVector,
     prefix: &str,
-) -> Result<DeletionVectorDescriptor, Box<dyn std::error::Error>> {
+) -> KernelResult<DeletionVectorDescriptor> {
     let dv_path = write_context.new_deletion_vector_path(String::from(prefix));
     let dv_object_path = Path::parse(dv_path.absolute_path()?.path())?;
 
@@ -482,8 +506,12 @@ pub async fn write_deletion_vector_to_store(
 pub fn create_dv_update_transaction(
     table_url: &Url,
     engine: &dyn Engine,
-) -> Result<Transaction, Box<dyn std::error::Error>> {
-    Ok(load_and_begin_transaction(table_url.clone(), engine)?
-        .with_engine_info("test engine")
-        .with_operation("DELETE".to_string()))
+) -> KernelResult<Transaction> {
+    Snapshot::builder_for(table_url.clone())
+        .build(engine)?
+        .update_table(UpdateTableOperation::Delete, "test engine", true)
+        .build(
+            engine,
+            Box::new(delta_kernel::committer::FileSystemCommitter::new()),
+        )
 }

@@ -8,10 +8,12 @@ use std::sync::Arc;
 
 use rstest::rstest;
 use serde_json::{json, Value};
-use test_utils::{assert_result_error_with_message, delta_path_for_version};
+use test_utils::delta_path_for_version;
 use url::Url;
 
 use super::LogSegment;
+#[cfg(feature = "adaptive-metadata-in-dev")]
+use crate::actions::CheckpointAction;
 use crate::actions::{DomainMetadata, Format, Metadata, Protocol, SetTransaction};
 use crate::crc::{
     try_read_crc_file, Crc, DomainMetadataState, FileSizeHistogram, SetTransactionState,
@@ -21,8 +23,14 @@ use crate::object_store::memory::InMemory;
 use crate::object_store::ObjectStoreExt as _;
 use crate::path::ParsedLogPath;
 use crate::snapshot::{IncrementalReplay, SnapshotBuilder, SnapshotRef};
+#[cfg(feature = "adaptive-metadata-in-dev")]
+use crate::table_features::TableFeature;
+#[cfg(feature = "adaptive-metadata-in-dev")]
+use crate::unit_test_utils::{
+    adaptive_metadata_table_configuration, test_schema_flat_with_column_mapping,
+};
 use crate::utils::FoldWithOption as _;
-use crate::{DeltaResult, Engine, Snapshot, Version};
+use crate::{Engine, KernelResult, Snapshot, Version};
 
 // ============================================================================
 // Expected values
@@ -134,6 +142,17 @@ fn protocol(p: Protocol) -> serde_json::Value {
 
 fn metadata(m: Metadata) -> serde_json::Value {
     json!({"metaData": serde_json::to_value(&m).unwrap()})
+}
+
+// A `checkpoint` action carrying `p` and `m` at `checkpoint_version`.
+#[cfg(feature = "adaptive-metadata-in-dev")]
+fn amt_checkpoint_action(checkpoint_version: i64, p: Protocol, m: Metadata) -> Value {
+    json!({ "checkpoint": [
+        { "checkpointMetadata": { "version": checkpoint_version } },
+        { "contentRoot": { "path": "metadata/root.parquet", "sizeInBytes": 1, "version": checkpoint_version } },
+        { "protocol": serde_json::to_value(&p).unwrap() },
+        { "metaData": serde_json::to_value(&m).unwrap() },
+    ] })
 }
 
 fn add(path: &str, size: i64) -> serde_json::Value {
@@ -391,11 +410,11 @@ struct BuiltCrcTest {
 impl BuiltCrcTest {
     /// Construct a `LogSegment` directly from the store state (no `Snapshot`) and run
     /// `build_crc_from_base` against `base`.
-    fn incrementally_build_crc(&self, base: &Crc) -> DeltaResult<Crc> {
+    fn incrementally_build_crc(&self, base: &Crc) -> KernelResult<Crc> {
         let storage = self.engine.storage_handler();
         let log_root = self.url.join("_delta_log/").unwrap();
         let log_segment =
-            LogSegment::for_snapshot_impl(storage.as_ref(), log_root, vec![], None, None)?;
+            LogSegment::for_snapshot_impl(storage.as_ref(), log_root, vec![], None, None, None)?;
         log_segment.build_crc_from_base(&self.engine, base)
     }
 
@@ -403,18 +422,18 @@ impl BuiltCrcTest {
     fn pick_latest_base_crc(
         &self,
         in_memory_base: Option<&Arc<Crc>>,
-    ) -> DeltaResult<Option<Version>> {
+    ) -> KernelResult<Option<Version>> {
         let storage = self.engine.storage_handler();
         let log_root = self.url.join("_delta_log/").unwrap();
         let log_segment =
-            LogSegment::for_snapshot_impl(storage.as_ref(), log_root, vec![], None, None)?;
+            LogSegment::for_snapshot_impl(storage.as_ref(), log_root, vec![], None, None, None)?;
         Ok(log_segment
             .pick_latest_base_crc(&self.engine, in_memory_base)
             .map(|c| c.version))
     }
 
     /// Read the on-disk CRC at `version` from this test's log.
-    fn read_crc_at(&self, version: u64) -> DeltaResult<Crc> {
+    fn read_crc_at(&self, version: u64) -> KernelResult<Crc> {
         try_read_crc_file(
             &self.engine,
             &ParsedLogPath::create_parsed_crc(&self.url, version),
@@ -491,6 +510,22 @@ impl BuiltCrcTest {
         let (snapshot, label) = self.snapshot_at(version.into());
         let ict = snapshot.get_in_commit_timestamp(&self.engine).unwrap();
         assert_eq!(ict, expected_ict, "ICT mismatch at {label}");
+    }
+
+    /// Lists the log, reads the latest on-disk CRC, and runs the unchecked P&M replay, returning
+    /// the latest AMT `checkpoint` action it captured, if any.
+    #[cfg(feature = "adaptive-metadata-in-dev")]
+    fn captured_checkpoint_action(&self) -> Option<Arc<CheckpointAction>> {
+        let storage = self.engine.storage_handler();
+        let log_root = self.url.join("_delta_log/").unwrap();
+        let log_segment =
+            LogSegment::for_snapshot_impl(storage.as_ref(), log_root, vec![], None, None, None)
+                .unwrap();
+        let crc = log_segment.read_latest_crc(&self.engine);
+        log_segment
+            .read_protocol_metadata_opt(&self.engine, crc.as_ref())
+            .unwrap()
+            .captured_checkpoint_action
     }
 }
 
@@ -700,6 +735,165 @@ async fn test_get_m_from_newer_delta_over_older_crc() {
         .assert_p_m(None, &protocol_b(), &metadata_a());
 }
 
+// A lagging checkpoint action (nested version below the CRC) must not override the CRC's newer
+// P&M in a CRC-seeded pruned replay. v1 changes P&M via top-level actions (matching the CRC); v2
+// is a manifest commit whose checkpoint action snapshots the older v0 P&M.
+#[cfg(feature = "adaptive-metadata-in-dev")]
+#[tokio::test]
+async fn test_lagging_checkpoint_action_defers_to_crc_pm() {
+    let crc_config =
+        adaptive_metadata_table_configuration(test_schema_flat_with_column_mapping(), &[]);
+    let checkpoint_config = adaptive_metadata_table_configuration(
+        test_schema_flat_with_column_mapping(),
+        &[TableFeature::TimestampWithoutTimezone],
+    );
+    CrcReadTest::new()
+        .commit(
+            0,
+            [
+                commit_info(DEFAULT_OPERATION, None),
+                protocol(checkpoint_config.protocol().clone()),
+                metadata(checkpoint_config.metadata().clone()),
+            ],
+        )
+        .commit(
+            1,
+            [
+                commit_info(DEFAULT_OPERATION, None),
+                protocol(crc_config.protocol().clone()),
+                metadata(crc_config.metadata().clone()),
+            ],
+        )
+        .crc(
+            1,
+            crc_config.protocol().clone(),
+            crc_config.metadata().clone(),
+            None,
+        )
+        .commit(
+            2,
+            [amt_checkpoint_action(
+                0,
+                checkpoint_config.protocol().clone(),
+                checkpoint_config.metadata().clone(),
+            )],
+        )
+        .build()
+        .await
+        .assert_p_m(None, crc_config.protocol(), crc_config.metadata());
+}
+
+// A CRC-seeded pruned replay (CRC below target) that finds a checkpoint action in the commits
+// after the CRC captures it: those commits include the newest, and checkpoint versions strictly
+// increase, so a hit is the latest action.
+#[cfg(feature = "adaptive-metadata-in-dev")]
+#[tokio::test]
+async fn test_crc_seeded_replay_captures_checkpoint_action_after_crc() {
+    let crc_config =
+        adaptive_metadata_table_configuration(test_schema_flat_with_column_mapping(), &[]);
+    let checkpoint_config = adaptive_metadata_table_configuration(
+        test_schema_flat_with_column_mapping(),
+        &[TableFeature::TimestampWithoutTimezone],
+    );
+    let resolution = CrcReadTest::new()
+        .commit(
+            0,
+            [
+                commit_info(DEFAULT_OPERATION, None),
+                protocol(crc_config.protocol().clone()),
+                metadata(crc_config.metadata().clone()),
+            ],
+        )
+        .crc(
+            0,
+            crc_config.protocol().clone(),
+            crc_config.metadata().clone(),
+            1000, // AMT config enables ICT, so the CRC must carry an inCommitTimestampOpt.
+        )
+        .commit(
+            1,
+            [amt_checkpoint_action(
+                1,
+                checkpoint_config.protocol().clone(),
+                checkpoint_config.metadata().clone(),
+            )],
+        )
+        .build()
+        .await
+        .captured_checkpoint_action();
+    assert!(
+        resolution.is_some_and(|a| a.version == 1),
+        "a checkpoint action after the CRC is the latest and must be captured, not deferred"
+    );
+}
+
+// A CRC at the target version short-circuits before any replay, so no checkpoint action is
+// captured; the accessor follows the CRC's `lastManifestCommit` instead.
+#[cfg(feature = "adaptive-metadata-in-dev")]
+#[tokio::test]
+async fn test_crc_at_target_captures_no_checkpoint_action() {
+    let config = adaptive_metadata_table_configuration(test_schema_flat_with_column_mapping(), &[]);
+    let resolution = CrcReadTest::new()
+        .commit(
+            0,
+            [amt_checkpoint_action(
+                0,
+                config.protocol().clone(),
+                config.metadata().clone(),
+            )],
+        )
+        .crc(
+            0,
+            config.protocol().clone(),
+            config.metadata().clone(),
+            1000, // AMT config enables ICT, so the CRC must carry an inCommitTimestampOpt.
+        )
+        .build()
+        .await
+        .captured_checkpoint_action();
+    assert!(resolution.is_none());
+}
+
+// A CRC-seeded pruned replay that resolves P&M from standalone actions but finds no checkpoint
+// action after the CRC captures none: the latest action may sit at or below the CRC version, which
+// the pruned replay never reads.
+#[cfg(feature = "adaptive-metadata-in-dev")]
+#[tokio::test]
+async fn test_crc_seeded_replay_without_checkpoint_action_captures_none() {
+    let crc_config =
+        adaptive_metadata_table_configuration(test_schema_flat_with_column_mapping(), &[]);
+    let newer_config = adaptive_metadata_table_configuration(
+        test_schema_flat_with_column_mapping(),
+        &[TableFeature::TimestampWithoutTimezone],
+    );
+    let resolution = CrcReadTest::new()
+        .commit(
+            0,
+            [
+                commit_info(DEFAULT_OPERATION, None),
+                protocol(crc_config.protocol().clone()),
+                metadata(crc_config.metadata().clone()),
+            ],
+        )
+        .crc(
+            0,
+            crc_config.protocol().clone(),
+            crc_config.metadata().clone(),
+            1000, // AMT config enables ICT, so the CRC must carry an inCommitTimestampOpt.
+        )
+        .commit(
+            1,
+            [
+                protocol(newer_config.protocol().clone()),
+                metadata(newer_config.metadata().clone()),
+            ],
+        )
+        .build()
+        .await
+        .captured_checkpoint_action();
+    assert!(resolution.is_none());
+}
+
 #[tokio::test]
 async fn test_corrupt_crc_at_non_target_version_falls_back() {
     CrcReadTest::new()
@@ -748,21 +942,14 @@ async fn test_ict_from_crc_at_snapshot_version() {
 }
 
 #[tokio::test]
-async fn test_ict_errors_when_crc_has_no_ict() {
-    let setup = CrcReadTest::new()
+async fn test_ict_enabled_crc_without_ict_is_rejected() {
+    CrcReadTest::new()
         .v2_checkpoint(0, protocol_ict(), metadata_ict())
         .commit(1, [commit_info(DEFAULT_OPERATION, Some(2000))])
         .crc(1, protocol_ict(), metadata_ict(), None)
         .build()
-        .await;
-
-    let (snapshot, _) = setup.snapshot_at(None);
-    let result = snapshot.get_in_commit_timestamp(&setup.engine);
-
-    assert_result_error_with_message(
-        result,
-        "In-Commit Timestamp not found in CRC file at version 1",
-    );
+        .await
+        .assert_ict(None, Some(2000));
 }
 
 // ============================================================================
@@ -1078,6 +1265,25 @@ async fn test_trips_indeterminate(#[case] v1_actions: Vec<Value>) {
     );
 }
 
+#[cfg(feature = "adaptive-metadata-in-dev")]
+#[tokio::test]
+async fn test_replay_rejects_last_manifest_commit_newer_than_newest_commit() {
+    let mut v1 = commit_info("WRITE", None);
+    v1["commitInfo"]["lastManifestCommit"] = json!({"version": 5, "contentRootVersion": 5});
+    let err = CrcReadTest::new()
+        .commit(0, create_table_actions())
+        .commit(1, vec![v1])
+        .build()
+        .await
+        .incrementally_build_crc(&crc_complete_empty_dm_set_txn())
+        .unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("lastManifestCommit version 5 exceeds commit version 1"),
+        "unexpected error: {err}"
+    );
+}
+
 // === On-disk base CRC (exercises serde round-trip) ===
 
 #[tokio::test]
@@ -1231,6 +1437,23 @@ async fn test_stale_crc_advanced_only_within_replay_budget(
         snapshot.crc_at_version().map(|c| c.version),
         expected_crc_version
     );
+}
+
+// Without adaptiveMetadata, CRC replay ignores `commitInfo.lastManifestCommit`, so a value of any
+// shape there cannot break advancing a stale CRC.
+#[cfg(not(feature = "adaptive-metadata-in-dev"))]
+#[tokio::test]
+async fn test_stale_crc_advances_past_foreign_last_manifest_commit() {
+    let mut info = commit_info(DEFAULT_OPERATION, None);
+    info["commitInfo"]["lastManifestCommit"] = json!("not-a-struct");
+    let built = CrcReadTest::new()
+        .v2_checkpoint(0, protocol_a(), metadata_a())
+        .crc(0, protocol_a(), metadata_a(), None)
+        .commit(1, [info])
+        .build()
+        .await;
+    let snapshot = built.snapshot_latest_with_replay(IncrementalReplay::Unlimited);
+    assert_eq!(snapshot.crc_at_version().map(|c| c.version), Some(1));
 }
 
 // A base exactly at the checkpoint version is kept (its tail is (ckpt, end]); a base below it is

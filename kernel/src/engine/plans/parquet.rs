@@ -8,8 +8,8 @@ use url::Url;
 use crate::plans::{IoOperation, Operation, PlanBuilder, PlanExecutor};
 use crate::schema::SchemaRef;
 use crate::{
-    DeltaResult, DeltaResultIteratorStatic, EngineData, Error, FileDataReadResultIterator,
-    FileMeta, ParquetFooter, ParquetHandler, PredicateRef,
+    EngineData, FileDataReadResultIterator, FileMeta, FileSize, KernelError, KernelResult,
+    KernelResultIteratorStatic, ParquetFooter, ParquetHandler, PredicateRef,
 };
 
 /// A [`ParquetHandler`] that delegates to a [`PlanExecutor`].
@@ -41,7 +41,7 @@ impl ParquetHandler for PlanBasedParquetHandler {
         files: &[FileMeta],
         physical_schema: SchemaRef,
         _predicate: Option<PredicateRef>,
-    ) -> DeltaResult<FileDataReadResultIterator> {
+    ) -> KernelResult<FileDataReadResultIterator> {
         // TODO: `_predicate` is dropped. Re-apply it as a Filter node over the scan; the
         // single-node executor can then match the filter -> scan shape.
         let query = PlanBuilder::scan_parquet(files.to_vec(), &[], physical_schema)?.build()?;
@@ -53,10 +53,10 @@ impl ParquetHandler for PlanBasedParquetHandler {
     fn write_parquet_file(
         &self,
         location: Url,
-        data: DeltaResultIteratorStatic<Box<dyn EngineData>>,
-    ) -> DeltaResult<()> {
+        data: KernelResultIteratorStatic<Box<dyn EngineData>>,
+    ) -> KernelResult<FileSize> {
         let Some(fallback) = &self.fallback else {
-            return Err(Error::unsupported(
+            return Err(KernelError::unsupported(
                 "PlanBasedParquetHandler does not support write_parquet_file yet, and no fallback \
                  handler is configured",
             ));
@@ -65,7 +65,7 @@ impl ParquetHandler for PlanBasedParquetHandler {
         fallback.write_parquet_file(location, data)
     }
 
-    fn read_parquet_footer(&self, file: &FileMeta) -> DeltaResult<ParquetFooter> {
+    fn read_parquet_footer(&self, file: &FileMeta) -> KernelResult<ParquetFooter> {
         let op = IoOperation::parquet_footer(file.clone());
         self.executor
             .execute_op(Operation::IoOperation(op))?
@@ -90,7 +90,7 @@ mod tests {
     use crate::engine::sync::plan::SyncPlanExecutor;
     use crate::engine::sync::SyncEngine;
     use crate::parquet::arrow::arrow_writer::ArrowWriter;
-    use crate::schema::{DataType, SchemaRef, StructField, StructType};
+    use crate::schema::{schema_ref, SchemaRef};
     use crate::{Engine as _, EngineData, FileMeta, ParquetHandler as _};
 
     fn make_handler() -> PlanBasedParquetHandler {
@@ -119,9 +119,7 @@ mod tests {
             .unwrap();
 
         // Read it back to confirm the fallback actually wrote the rows.
-        let schema: SchemaRef = Arc::new(
-            StructType::try_new([StructField::nullable("value", DataType::LONG)]).unwrap(),
-        );
+        let schema = schema_ref! { nullable "value": LONG };
         let file_meta = FileMeta {
             location: url,
             last_modified: 0,
@@ -194,9 +192,7 @@ mod tests {
     /// No files -> an absent plan -> a zero-row result (no rows, no error).
     #[test]
     fn test_read_parquet_files_empty_is_empty() {
-        let schema: SchemaRef = Arc::new(
-            StructType::try_new([StructField::nullable("value", DataType::LONG)]).unwrap(),
-        );
+        let schema = schema_ref! { nullable "value": LONG };
         let rows: usize = make_handler()
             .read_parquet_files(&[], schema, None)
             .unwrap()

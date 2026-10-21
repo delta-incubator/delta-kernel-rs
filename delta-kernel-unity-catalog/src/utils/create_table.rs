@@ -14,7 +14,7 @@
 //!
 //! // Step 2: Build and commit the create-table transaction
 //! let disk_props = get_required_properties_for_disk(&staging_info.table_id);
-//! let create_table_txn = kernel::create_table(path, schema, "MyApp/1.0")
+//! let create_table_txn = kernel::create_table(path, schema, "MyApp/1.0", /* data_change */ true)
 //!     .with_table_properties(disk_props)
 //!     .build(engine, committer);
 //! create_table_txn.commit(engine)?;
@@ -28,7 +28,7 @@
 use std::collections::{HashMap, HashSet};
 
 use delta_kernel::actions::Protocol;
-use delta_kernel::{DeltaResult, Engine, Error, Snapshot};
+use delta_kernel::{Engine, KernelError, KernelResult, Snapshot};
 use unity_catalog_delta_client_api::{
     CreateTableRequest, Protocol as WireProtocol, StorageCredential,
 };
@@ -116,9 +116,9 @@ pub fn build_uc_create_table_request(
     snapshot: &Snapshot,
     engine: &dyn Engine,
     table_name: impl Into<String>,
-) -> DeltaResult<CreateTableRequest> {
+) -> KernelResult<CreateTableRequest> {
     if snapshot.version() != 0 {
-        return Err(Error::generic(format!(
+        return Err(KernelError::generic(format!(
             "build_uc_create_table_request is only valid for version 0 (table creation) \
              snapshots, but snapshot is at version {}",
             snapshot.version()
@@ -126,7 +126,7 @@ pub fn build_uc_create_table_request(
     }
 
     let columns = serde_json::to_value(snapshot.schema().as_ref())
-        .map_err(|e| Error::generic(format!("Failed to serialize table schema: {e}")))?;
+        .map_err(|e| KernelError::generic(format!("Failed to serialize table schema: {e}")))?;
 
     let table_config = snapshot.table_configuration();
     let metadata = table_config.metadata();
@@ -146,8 +146,9 @@ pub fn build_uc_create_table_request(
     for (domain, dm) in
         snapshot.get_domain_metadatas_internal(engine, Some(&uc_recognized_domains))?
     {
-        let value = serde_json::from_str(dm.configuration())
-            .map_err(|e| Error::generic(format!("malformed {domain} domain metadata: {e}")))?;
+        let value = serde_json::from_str(dm.configuration()).map_err(|e| {
+            KernelError::generic(format!("malformed {domain} domain metadata: {e}"))
+        })?;
         domain_metadata.insert(domain, value);
     }
 
@@ -192,12 +193,13 @@ fn to_wire_protocol(protocol: &Protocol) -> WireProtocol {
 mod tests {
     use std::sync::Arc;
 
-    use delta_kernel::expressions::ColumnName;
+    use delta_kernel::expressions::column_name;
     use delta_kernel::object_store::memory::InMemory;
-    use delta_kernel::schema::{schema_ref, DataType, SchemaRef, StructField, StructType};
+    use delta_kernel::schema::{schema_ref, SchemaRef};
     use delta_kernel::snapshot::Snapshot;
     use delta_kernel::transaction::create_table::create_table;
     use delta_kernel::transaction::data_layout::DataLayout;
+    use delta_kernel::transaction::UpdateTableOperation;
     use delta_kernel_default_engine::DefaultEngineBuilder;
     use rstest::rstest;
     use test_utils::TestCatalogCommitter;
@@ -213,7 +215,7 @@ mod tests {
         disk_props: HashMap<String, String>,
         data_layout: DataLayout,
     ) -> CreateTableRequest {
-        create_table(table_path, schema, "Test/1.0")
+        create_table(table_path, schema, "Test/1.0", true)
             .with_table_properties(disk_props)
             .with_data_layout(data_layout)
             .build(engine, Box::new(TestCatalogCommitter))
@@ -248,13 +250,10 @@ mod tests {
         let storage = Arc::new(InMemory::new());
         let engine = DefaultEngineBuilder::new(storage).build();
         let table_path = "memory:///test_create_req/";
-        let schema = Arc::new(
-            StructType::try_new(vec![
-                StructField::new("id", DataType::INTEGER, true),
-                StructField::new("region", DataType::STRING, true),
-            ])
-            .unwrap(),
-        );
+        let schema = schema_ref! {
+            nullable "id": INTEGER,
+            nullable "region": STRING,
+        };
 
         let disk_props = get_required_properties_for_disk("test-table-id-456");
         let req = create_v0_and_build_request(
@@ -344,11 +343,11 @@ mod tests {
             "delta.feature.domainMetadata".to_string(),
             "supported".to_string(),
         );
-        create_table(table_path, schema, "Test/1.0")
+        create_table(table_path, schema, "Test/1.0", true)
             .with_table_properties(disk_props)
+            .with_domain_metadata("myApp.retention", r#"{"days":30}"#)
             .build(&engine, Box::new(TestCatalogCommitter))
             .unwrap()
-            .with_domain_metadata("myApp.retention".to_string(), r#"{"days":30}"#.to_string())
             .commit(&engine)
             .unwrap()
             .unwrap_committed();
@@ -394,10 +393,7 @@ mod tests {
             schema,
             disk_props,
             DataLayout::Clustered {
-                columns: vec![
-                    ColumnName::new(["region"]),
-                    ColumnName::new(["address", "city"]),
-                ],
+                columns: vec![column_name!("region"), column_name!("address", "city")],
             },
         );
 
@@ -417,13 +413,11 @@ mod tests {
         let storage = Arc::new(InMemory::new());
         let engine = DefaultEngineBuilder::new(storage).build();
         let table_path = "memory:///test_create_req_version/";
-        let schema = Arc::new(
-            StructType::try_new(vec![StructField::new("id", DataType::INTEGER, true)]).unwrap(),
-        );
+        let schema = schema_ref! { nullable "id": INTEGER };
 
         // Create a table (version 0) and append (version 1).
         let disk_props = get_required_properties_for_disk("test-table-id");
-        let _ = create_table(table_path, schema, "Test/1.0")
+        let _ = create_table(table_path, schema, "Test/1.0", true)
             .with_table_properties(disk_props)
             .build(&engine, Box::new(TestCatalogCommitter))
             .unwrap()
@@ -434,7 +428,8 @@ mod tests {
             .build(&engine)
             .unwrap();
         let result = v0_snapshot
-            .transaction(Box::new(TestCatalogCommitter), &engine)
+            .update_table(UpdateTableOperation::Write, "test-engine", true)
+            .build(&engine, Box::new(TestCatalogCommitter))
             .unwrap()
             .commit(&engine)
             .unwrap();

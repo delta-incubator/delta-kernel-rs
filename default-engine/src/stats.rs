@@ -24,7 +24,7 @@ use delta_kernel::column_trie::ColumnTrie;
 use delta_kernel::engine::arrow_utils::fix_nested_null_masks;
 use delta_kernel::expressions::ColumnName;
 use delta_kernel::schema::{DataType as KernelDataType, StructType};
-use delta_kernel::{DeltaResult, Error};
+use delta_kernel::{KernelError, KernelResult};
 
 /// Maximum prefix length for string statistics (Delta protocol requirement).
 const STRING_PREFIX_LENGTH: usize = 32;
@@ -89,7 +89,8 @@ fn truncate_max_string(s: &str) -> Option<Cow<'_, str>> {
     }
 
     // Start at STRING_PREFIX_LENGTH chars
-    let char_indices: Vec<(usize, char)> = s.char_indices().collect();
+    let char_indices: Vec<(usize, char)> =
+        s.char_indices().take(STRING_EXPANSION_LIMIT + 1).collect();
 
     // We can expand up to STRING_EXPANSION_LIMIT chars looking for a valid truncation point
     let max_chars = char_indices.len().min(STRING_EXPANSION_LIMIT);
@@ -140,14 +141,14 @@ enum Agg {
 }
 
 /// Compute aggregation for a primitive array.
-fn agg_primitive<T>(column: &ArrayRef, agg: Agg) -> DeltaResult<Option<ArrayRef>>
+fn agg_primitive<T>(column: &ArrayRef, agg: Agg) -> KernelResult<Option<ArrayRef>>
 where
     T: ArrowPrimitiveType,
     T::Native: PartialOrd,
     PrimitiveArray<T>: From<Vec<Option<T::Native>>>,
 {
     let array = column.as_primitive_opt::<T>().ok_or_else(|| {
-        Error::generic(format!(
+        KernelError::generic(format!(
             "Failed to downcast column to PrimitiveArray<{}>",
             std::any::type_name::<T>()
         ))
@@ -164,13 +165,13 @@ fn agg_timestamp<T>(
     column: &ArrayRef,
     tz: Option<Arc<str>>,
     agg: Agg,
-) -> DeltaResult<Option<ArrayRef>>
+) -> KernelResult<Option<ArrayRef>>
 where
     T: delta_kernel::arrow::datatypes::ArrowTimestampType,
     PrimitiveArray<T>: From<Vec<Option<i64>>>,
 {
     let array = column.as_primitive_opt::<T>().ok_or_else(|| {
-        Error::generic(format!(
+        KernelError::generic(format!(
             "Failed to downcast column to PrimitiveArray<{}>",
             std::any::type_name::<T>()
         ))
@@ -190,10 +191,10 @@ fn agg_decimal(
     precision: u8,
     scale: i8,
     agg: Agg,
-) -> DeltaResult<Option<ArrayRef>> {
+) -> KernelResult<Option<ArrayRef>> {
     let array = column
         .as_primitive_opt::<Decimal128Type>()
-        .ok_or_else(|| Error::generic("Failed to downcast column to Decimal128Array"))?;
+        .ok_or_else(|| KernelError::generic("Failed to downcast column to Decimal128Array"))?;
     let result = match agg {
         Agg::Min => min(array),
         Agg::Max => max(array),
@@ -205,14 +206,14 @@ fn agg_decimal(
                 .map(|arr| Arc::new(arr) as ArrayRef)
         })
         .transpose()
-        .map_err(|e| Error::generic(format!("Invalid decimal precision/scale: {e}")))
+        .map_err(|e| KernelError::generic(format!("Invalid decimal precision/scale: {e}")))
 }
 
 /// Compute aggregation for a string array.
-fn agg_string(column: &ArrayRef, agg: Agg) -> DeltaResult<Option<ArrayRef>> {
+fn agg_string(column: &ArrayRef, agg: Agg) -> KernelResult<Option<ArrayRef>> {
     let array = column
         .as_string_opt::<i32>()
-        .ok_or_else(|| Error::generic("Failed to downcast column to StringArray"))?;
+        .ok_or_else(|| KernelError::generic("Failed to downcast column to StringArray"))?;
     let result = match agg {
         Agg::Min => min_string(array),
         Agg::Max => max_string(array),
@@ -225,10 +226,10 @@ fn agg_string(column: &ArrayRef, agg: Agg) -> DeltaResult<Option<ArrayRef>> {
 /// Unlike StringArray, Arrow's compute kernels don't provide min/max for LargeStringArray,
 /// so we iterate manually. `iter()` yields `Option<&str>` per element (None for nulls),
 /// and `flatten()` filters out nulls so we only compare non-null values.
-fn agg_large_string(column: &ArrayRef, agg: Agg) -> DeltaResult<Option<ArrayRef>> {
+fn agg_large_string(column: &ArrayRef, agg: Agg) -> KernelResult<Option<ArrayRef>> {
     let array = column
         .as_string_opt::<i64>()
-        .ok_or_else(|| Error::generic("Failed to downcast column to LargeStringArray"))?;
+        .ok_or_else(|| KernelError::generic("Failed to downcast column to LargeStringArray"))?;
     let result = match agg {
         Agg::Min => array.iter().flatten().min(),
         Agg::Max => array.iter().flatten().max(),
@@ -240,10 +241,10 @@ fn agg_large_string(column: &ArrayRef, agg: Agg) -> DeltaResult<Option<ArrayRef>
 ///
 /// Like LargeStringArray, Arrow's compute kernels don't provide min/max for StringViewArray.
 /// See `agg_large_string` for explanation of `iter().flatten()`.
-fn agg_string_view(column: &ArrayRef, agg: Agg) -> DeltaResult<Option<ArrayRef>> {
+fn agg_string_view(column: &ArrayRef, agg: Agg) -> KernelResult<Option<ArrayRef>> {
     let array = column
         .as_string_view_opt()
-        .ok_or_else(|| Error::generic("Failed to downcast column to StringViewArray"))?;
+        .ok_or_else(|| KernelError::generic("Failed to downcast column to StringViewArray"))?;
     let result: Option<&str> = match agg {
         Agg::Min => array.iter().flatten().min(),
         Agg::Max => array.iter().flatten().max(),
@@ -254,7 +255,7 @@ fn agg_string_view(column: &ArrayRef, agg: Agg) -> DeltaResult<Option<ArrayRef>>
 /// Compute min or max for a leaf column based on its data type.
 ///
 /// The result is the raw aggregate; [`truncate_stats_bound`] truncates string bounds.
-fn compute_leaf_agg(column: &ArrayRef, agg: Agg) -> DeltaResult<Option<ArrayRef>> {
+fn compute_leaf_agg(column: &ArrayRef, agg: Agg) -> KernelResult<Option<ArrayRef>> {
     match column.data_type() {
         // Integer types
         DataType::Int8 => agg_primitive::<Int8Type>(column, agg),
@@ -324,7 +325,7 @@ fn compute_column_stats(
     path: &mut Vec<String>,
     filter: &ColumnTrie<'_>,
     null_count_only_filter: &ColumnTrie<'_>,
-) -> DeltaResult<ColumnStats> {
+) -> KernelResult<ColumnStats> {
     match column.data_type() {
         // A struct column that the filter marks as a terminal leaf (e.g. Variant, which is a
         // struct at the Arrow level but a leaf for stats purposes) gets nullCount only, no
@@ -337,7 +338,7 @@ fn compute_column_stats(
         DataType::Struct(fields) => {
             let struct_array = column
                 .as_struct_opt()
-                .ok_or_else(|| Error::generic("Failed to downcast column to StructArray"))?;
+                .ok_or_else(|| KernelError::generic("Failed to downcast column to StructArray"))?;
 
             // Propagate struct-level nulls to all descendants
             let fixed_struct = fix_nested_null_masks(struct_array.clone());
@@ -378,13 +379,13 @@ fn compute_column_stats(
 
             // Build result structs (None if empty)
             let build_struct =
-                |fields: Vec<Field>, arrays: Vec<ArrayRef>| -> DeltaResult<Option<ArrayRef>> {
+                |fields: Vec<Field>, arrays: Vec<ArrayRef>| -> KernelResult<Option<ArrayRef>> {
                     if fields.is_empty() {
                         Ok(None)
                     } else {
                         Ok(Some(Arc::new(
                             StructArray::try_new(fields.into(), arrays, None)
-                                .map_err(|e| Error::generic(format!("stats struct: {e}")))?,
+                                .map_err(|e| KernelError::generic(format!("stats struct: {e}")))?,
                         ) as ArrayRef))
                     }
                 };
@@ -473,12 +474,12 @@ impl StatsAccumulator {
         self.arrays.push(array);
     }
 
-    fn build(self) -> DeltaResult<Option<(Field, Arc<dyn Array>)>> {
+    fn build(self) -> KernelResult<Option<(Field, Arc<dyn Array>)>> {
         if self.fields.is_empty() {
             return Ok(None);
         }
         let struct_arr = StructArray::try_new(self.fields.into(), self.arrays, None)
-            .map_err(|e| Error::generic(format!("Failed to create {}: {e}", self.name)))?;
+            .map_err(|e| KernelError::generic(format!("Failed to create {}: {e}", self.name)))?;
         let field = Field::new(self.name, struct_arr.data_type().clone(), true);
         Ok(Some((field, Arc::new(struct_arr) as Arc<dyn Array>)))
     }
@@ -516,7 +517,7 @@ pub fn collect_stats(
     batch: &RecordBatch,
     stats_columns: &[ColumnName],
     physical_schema: &StructType,
-) -> DeltaResult<StructArray> {
+) -> KernelResult<StructArray> {
     let null_count_only_columns = interval_column_names(physical_schema, stats_columns);
     reduce_stats(&collect_stats_raw(
         batch,
@@ -529,7 +530,7 @@ pub fn collect_stats(
 pub(crate) fn collect_stats_for_test(
     batch: &RecordBatch,
     stats_columns: &[ColumnName],
-) -> DeltaResult<StructArray> {
+) -> KernelResult<StructArray> {
     reduce_stats(&collect_stats_raw(batch, stats_columns, &[])?)
 }
 
@@ -539,7 +540,7 @@ fn collect_stats_raw(
     batch: &RecordBatch,
     stats_columns: &[ColumnName],
     null_count_only_columns: &[ColumnName],
-) -> DeltaResult<StructArray> {
+) -> KernelResult<StructArray> {
     let filter = ColumnTrie::from_columns(stats_columns);
     let null_count_only_filter = ColumnTrie::from_columns(null_count_only_columns);
     let schema = batch.schema();
@@ -584,7 +585,7 @@ fn collect_stats_raw(
     arrays.push(Arc::new(BooleanArray::from(vec![true])));
 
     StructArray::try_new(fields.into(), arrays, None)
-        .map_err(|e| Error::generic(format!("Failed to create stats struct: {e}")))
+        .map_err(|e| KernelError::generic(format!("Failed to create stats struct: {e}")))
 }
 
 // ============================================================================
@@ -624,7 +625,7 @@ fn collect_stats_raw(
 /// # use delta_kernel::expressions::column_name;
 /// # use delta_kernel::schema::{DataType as KernelDataType, StructField, StructType};
 /// # use delta_kernel_default_engine::stats::FileStatsAccumulator;
-/// # fn main() -> delta_kernel::DeltaResult<()> {
+/// # fn main() -> delta_kernel::KernelResult<()> {
 /// let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
 /// let row_group = |ids: Vec<i64>| {
 ///     RecordBatch::try_new(schema.clone(), vec![Arc::new(Int64Array::from(ids))])
@@ -687,22 +688,22 @@ impl FileStatsAccumulator {
     /// Returns an error if the accumulator already failed a merge, or if this one fails: `batch`
     /// has a different Arrow schema than the first batch merged, it produces a different statistics
     /// shape, or statistics collection fails.
-    pub fn merge(&mut self, batch: &RecordBatch) -> DeltaResult<()> {
+    pub fn merge(&mut self, batch: &RecordBatch) -> KernelResult<()> {
         // Catch every error path in one place, so no failure can leave publishable state behind.
         self.try_merge(batch)
             .inspect_err(|_| self.state = AccumulatorState::Failed)
     }
 
-    fn try_merge(&mut self, batch: &RecordBatch) -> DeltaResult<()> {
+    fn try_merge(&mut self, batch: &RecordBatch) -> KernelResult<()> {
         let AccumulatorState::Open(row_groups) = &mut self.state else {
-            return Err(Error::stats_validation(FAILED));
+            return Err(KernelError::stats_validation(FAILED));
         };
         // Comparing derived stats shapes instead would collapse every nullCount-only leaf to the
         // same Int64.
         let first_schema = self.batch_schema.get_or_insert_with(|| batch.schema());
         if first_schema != &batch.schema() {
             // `Debug`: schema equality covers the schema's metadata map, which `Display` omits.
-            return Err(Error::schema(format!(
+            return Err(KernelError::schema(format!(
                 "all row groups in a file must have the same schema; expected {:?} but got {:?}",
                 first_schema,
                 batch.schema(),
@@ -714,7 +715,7 @@ impl FileStatsAccumulator {
         // collection filters on, so equal schemas can still derive different stats shapes.
         if let Some(first) = row_groups.first() {
             if first.data_type() != batch_stats.data_type() {
-                return Err(Error::schema(format!(
+                return Err(KernelError::schema(format!(
                     "all row groups must produce the same statistics shape; batch schemas compare \
                      equal but their nested field names differ: {} vs {}",
                     first.data_type(),
@@ -737,19 +738,19 @@ impl FileStatsAccumulator {
     ///
     /// Returns `Err` if a merge failed, or if the accumulated statistics cannot be reduced into a
     /// single row.
-    pub fn finish(self) -> DeltaResult<Option<StructArray>> {
+    pub fn finish(self) -> KernelResult<Option<StructArray>> {
         let AccumulatorState::Open(row_groups) = self.state else {
-            return Err(Error::stats_validation(FAILED));
+            return Err(KernelError::stats_validation(FAILED));
         };
         if row_groups.is_empty() {
             return Ok(None);
         }
         let rows: Vec<&dyn Array> = row_groups.iter().map(|s| s as &dyn Array).collect();
         let combined = concat(&rows)
-            .map_err(|e| Error::generic(format!("concat per-row-group stats: {e}")))?;
+            .map_err(|e| KernelError::generic(format!("concat per-row-group stats: {e}")))?;
         let combined = combined
             .as_struct_opt()
-            .ok_or_else(|| Error::internal_error("concatenated stats are not a struct"))?;
+            .ok_or_else(|| KernelError::internal_error("concatenated stats are not a struct"))?;
         reduce_stats(combined).map(Some)
     }
 }
@@ -759,7 +760,7 @@ impl FileStatsAccumulator {
 /// truncated per Delta's string rules, `tightBounds` AND-ed.
 ///
 /// Returns `Err` if `stats` is not shaped like the output of `collect_stats_raw`.
-fn reduce_stats(stats: &StructArray) -> DeltaResult<StructArray> {
+fn reduce_stats(stats: &StructArray) -> KernelResult<StructArray> {
     let fields = stats.fields().clone();
     let mut cols: Vec<ArrayRef> = Vec::with_capacity(stats.num_columns());
     for (field, col) in fields.iter().zip(stats.columns()) {
@@ -772,25 +773,25 @@ fn reduce_stats(stats: &StructArray) -> DeltaResult<StructArray> {
             // Keep in sync with the sections `collect_stats_raw` produces. User columns live inside
             // the sub-structs, so an unrecognized top-level name is a kernel bug, not bad input.
             other => {
-                return Err(Error::internal_error(format!(
+                return Err(KernelError::internal_error(format!(
                     "cannot reduce unknown stats section: {other}"
                 )))
             }
         });
     }
     StructArray::try_new(fields, cols, None)
-        .map_err(|e| Error::generic(format!("rebuilding reduced stats struct: {e}")))
+        .map_err(|e| KernelError::generic(format!("rebuilding reduced stats struct: {e}")))
 }
 
 /// Reduce each child of a stats sub-struct (`nullCount`/`minValues`/`maxValues`) to one row,
 /// recursing into nested structs so nested-column stats reduce correctly. `reduce` handles a leaf.
 fn reduce_stats_children(
     array: &ArrayRef,
-    reduce: &dyn Fn(&ArrayRef) -> DeltaResult<ArrayRef>,
-) -> DeltaResult<ArrayRef> {
+    reduce: &dyn Fn(&ArrayRef) -> KernelResult<ArrayRef>,
+) -> KernelResult<ArrayRef> {
     let struct_array = array
         .as_struct_opt()
-        .ok_or_else(|| Error::internal_error("expected struct in stats sub-tree"))?;
+        .ok_or_else(|| KernelError::internal_error("expected struct in stats sub-tree"))?;
     let fields = struct_array.fields().clone();
     let cols = struct_array
         .columns()
@@ -799,9 +800,9 @@ fn reduce_stats_children(
             Some(_) => reduce_stats_children(col, reduce),
             None => reduce(col),
         })
-        .collect::<DeltaResult<Vec<_>>>()?;
+        .collect::<KernelResult<Vec<_>>>()?;
     Ok(Arc::new(StructArray::try_new(fields, cols, None).map_err(
-        |e| Error::generic(format!("rebuilding reduced stats sub-struct: {e}")),
+        |e| KernelError::generic(format!("rebuilding reduced stats sub-struct: {e}")),
     )?))
 }
 
@@ -809,15 +810,15 @@ fn reduce_stats_children(
 ///
 /// A null count is unknown, not zero, and the protocol defines no default for it, so a null leaf is
 /// an error rather than a silently invented count.
-fn reduce_count_leaf(array: &ArrayRef) -> DeltaResult<ArrayRef> {
+fn reduce_count_leaf(array: &ArrayRef) -> KernelResult<ArrayRef> {
     let arr = array
         .as_primitive_opt::<Int64Type>()
-        .ok_or_else(|| Error::internal_error("expected Int64 count leaf in stats"))?;
+        .ok_or_else(|| KernelError::internal_error("expected Int64 count leaf in stats"))?;
     if arr.null_count() != 0 {
-        return Err(Error::internal_error("null count leaf in stats"));
+        return Err(KernelError::internal_error("null count leaf in stats"));
     }
     let sum = sum_checked(arr)
-        .map_err(|e| Error::generic(format!("summing stats count leaf: {e}")))?
+        .map_err(|e| KernelError::generic(format!("summing stats count leaf: {e}")))?
         .unwrap_or(0);
     Ok(Arc::new(Int64Array::from(vec![sum])))
 }
@@ -825,12 +826,14 @@ fn reduce_count_leaf(array: &ArrayRef) -> DeltaResult<ArrayRef> {
 /// AND a Boolean `tightBounds` leaf to one row: tight only if every row group was tight.
 ///
 /// A null is an error rather than an assumed bound tightness.
-fn reduce_bool_and_leaf(array: &ArrayRef) -> DeltaResult<ArrayRef> {
+fn reduce_bool_and_leaf(array: &ArrayRef) -> KernelResult<ArrayRef> {
     let arr = array
         .as_boolean_opt()
-        .ok_or_else(|| Error::internal_error("expected Boolean tightBounds leaf in stats"))?;
+        .ok_or_else(|| KernelError::internal_error("expected Boolean tightBounds leaf in stats"))?;
     if arr.null_count() != 0 {
-        return Err(Error::internal_error("null tightBounds leaf in stats"));
+        return Err(KernelError::internal_error(
+            "null tightBounds leaf in stats",
+        ));
     }
     let all = bool_and(arr).unwrap_or(true);
     Ok(Arc::new(BooleanArray::from(vec![all])))
@@ -841,7 +844,7 @@ fn reduce_bool_and_leaf(array: &ArrayRef) -> DeltaResult<ArrayRef> {
 ///
 /// Reusing `compute_leaf_agg` gives the bound the same ordering a single-pass collection uses (NaN,
 /// decimal precision/scale, timestamp timezone, string byte order).
-fn reduce_minmax_leaf(array: &ArrayRef, agg: Agg) -> DeltaResult<ArrayRef> {
+fn reduce_minmax_leaf(array: &ArrayRef, agg: Agg) -> KernelResult<ArrayRef> {
     let bound = match compute_leaf_agg(array, agg)? {
         Some(bound) => truncate_stats_bound(&bound, agg)?,
         None => None,
@@ -853,7 +856,7 @@ fn reduce_minmax_leaf(array: &ArrayRef, agg: Agg) -> DeltaResult<ArrayRef> {
 ///
 /// `None` when a max string has no representable truncated upper bound: no upper bound may be
 /// published in that case.
-fn truncate_stats_bound(bound: &ArrayRef, agg: Agg) -> DeltaResult<Option<ArrayRef>> {
+fn truncate_stats_bound(bound: &ArrayRef, agg: Agg) -> KernelResult<Option<ArrayRef>> {
     let s = match bound.data_type() {
         DataType::Utf8 => bound.as_string_opt::<i32>().and_then(|a| a.iter().next()),
         DataType::LargeUtf8 => bound.as_string_opt::<i64>().and_then(|a| a.iter().next()),
@@ -862,7 +865,7 @@ fn truncate_stats_bound(bound: &ArrayRef, agg: Agg) -> DeltaResult<Option<ArrayR
     };
     let s = s
         .flatten()
-        .ok_or_else(|| Error::generic("expected a single non-null string stats bound"))?;
+        .ok_or_else(|| KernelError::generic("expected a single non-null string stats bound"))?;
     let Some(truncated) = (match agg {
         Agg::Min => Some(Cow::Borrowed(truncate_min_string(s))),
         Agg::Max => truncate_max_string(s),
@@ -911,7 +914,7 @@ mod tests {
     use delta_kernel::engine::arrow_expression::evaluate_expression::to_json;
     use delta_kernel::expressions::column_name;
     use delta_kernel::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-    use delta_kernel::schema::StructField;
+    use delta_kernel::schema::schema;
     use test_utils::assert_result_error_with_message;
 
     use super::*;
@@ -919,7 +922,7 @@ mod tests {
     fn collect_stats(
         batch: &RecordBatch,
         stats_columns: &[ColumnName],
-    ) -> DeltaResult<StructArray> {
+    ) -> KernelResult<StructArray> {
         super::collect_stats_for_test(batch, stats_columns)
     }
 
@@ -1462,6 +1465,20 @@ mod tests {
             truncate_max_string(&with_max_char).as_deref(),
             Some(expected.as_str())
         );
+
+        // Retain the final searchable position at the expansion limit.
+        let prefix = "a".repeat(STRING_PREFIX_LENGTH);
+        let max_chars = UTF8_MAX_CHAR.to_string().repeat(STRING_PREFIX_LENGTH);
+        let valid_at_limit = format!("{prefix}{max_chars}beyond");
+        let expected = format!("{prefix}{max_chars}{ASCII_MAX_CHAR}");
+        assert_eq!(
+            truncate_max_string(&valid_at_limit).as_deref(),
+            Some(expected.as_str())
+        );
+
+        // No bound exists when every searchable position is U+10FFFF.
+        let no_valid_bound = format!("{prefix}{max_chars}{UTF8_MAX_CHAR}");
+        assert_eq!(truncate_max_string(&no_valid_bound), None);
     }
 
     #[test]
@@ -2517,15 +2534,16 @@ mod tests {
 
     // A malformed stats tree is a kernel bug, not bad caller input, so the guards report
     // `InternalError`.
-    fn assert_internal_error(result: DeltaResult<impl std::fmt::Debug>, needle: &str) {
+    fn assert_internal_error(result: KernelResult<impl std::fmt::Debug>, needle: &str) {
         let err = result.expect_err("must be rejected");
-        // `Error::internal_error` captures a backtrace, which wraps the variant in `Backtraced`.
+        // `KernelError::internal_error` captures a backtrace, which wraps the variant in
+        // `Backtraced`.
         let mut variant = &err;
-        while let Error::Backtraced { source, .. } = variant {
+        while let KernelError::Backtraced { source, .. } = variant {
             variant = source;
         }
         assert!(
-            matches!(variant, Error::InternalError(_)),
+            matches!(variant, KernelError::InternalError(_)),
             "expected an internal error, got: {err}"
         );
         assert!(
@@ -2671,7 +2689,7 @@ mod tests {
             .merge(&second)
             .expect_err("a batch whose schema differs must be rejected");
         assert!(
-            matches!(err, Error::Schema(_)),
+            matches!(err, KernelError::Schema(_)),
             "expected a schema error, got: {err}"
         );
         // A failed merge is terminal, so the first row group can never be published on its own.
@@ -2681,7 +2699,7 @@ mod tests {
             .expect_err("an accumulator that failed a merge must not publish statistics");
         // Its own variant, so callers can match the failure without matching on the message.
         assert!(
-            matches!(&err, Error::StatsValidation(msg) if msg == FAILED),
+            matches!(&err, KernelError::StatsValidation(msg) if msg == FAILED),
             "expected a stats validation error, got: {err}"
         );
     }
@@ -2709,7 +2727,7 @@ mod tests {
             .merge(&renamed)
             .expect_err("a batch deriving a different stats shape must be rejected");
         assert!(
-            matches!(err, Error::Schema(_)),
+            matches!(err, KernelError::Schema(_)),
             "expected a schema error, got: {err}"
         );
         assert_result_error_with_message(acc.finish(), FAILED);
@@ -2723,7 +2741,7 @@ mod tests {
             acc: FileStatsAccumulator,
         }
         impl Writer {
-            fn write_row_group(&mut self, batch: &RecordBatch) -> DeltaResult<()> {
+            fn write_row_group(&mut self, batch: &RecordBatch) -> KernelResult<()> {
                 self.acc.merge(batch)
             }
         }
@@ -2754,11 +2772,10 @@ mod tests {
             Field::new("span", arrow_type.clone(), true),
             Field::new("n", DataType::Int64, true),
         ]));
-        let physical_schema = StructType::try_new([
-            StructField::nullable("span", interval_type),
-            StructField::nullable("n", KernelDataType::LONG),
-        ])
-        .unwrap();
+        let physical_schema = schema! {
+            nullable "span": (interval_type),
+            nullable "n": LONG,
+        };
         let mk = |spans: &[i64], ns: &[i64]| {
             let span: ArrayRef = match arrow_type {
                 DataType::Int32 => Arc::new(Int32Array::from(

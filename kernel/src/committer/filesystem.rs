@@ -5,7 +5,9 @@ use tracing::{info, instrument};
 use super::commit_types::{CommitMetadata, CommitResponse};
 use super::publish_types::PublishMetadata;
 use super::Committer;
-use crate::{DeltaResult, DeltaResultIterator, Engine, Error, FileMeta, FilteredEngineData};
+use crate::{
+    Engine, FileMeta, FilteredEngineData, KernelError, KernelResult, KernelResultIterator,
+};
 
 /// The `FileSystemCommitter` is an internal implementation of the `Committer` trait which
 /// commits to a file system directly via `Engine::json_handler().write_json_file` for
@@ -31,9 +33,9 @@ impl Committer for FileSystemCommitter {
     fn commit(
         &self,
         engine: &dyn Engine,
-        actions: DeltaResultIterator<'_, FilteredEngineData>,
+        actions: KernelResultIterator<'_, FilteredEngineData>,
         commit_metadata: CommitMetadata,
-    ) -> DeltaResult<CommitResponse> {
+    ) -> KernelResult<CommitResponse> {
         let version = commit_metadata.version();
         let published_commit_path = commit_metadata.published_commit_path()?;
 
@@ -42,21 +44,19 @@ impl Committer for FileSystemCommitter {
             Box::new(actions),
             false,
         ) {
-            Ok(()) => {
+            Ok(written_size) => {
                 info!(
                     committed_version = version,
                     "Committed delta file via filesystem committer"
                 );
-                // For now, we don't need the real size of the written file, so we can use 0.
-                // If we need this in the future, we can get it from StorageHandler::head.
                 let file_meta = FileMeta::new(
                     published_commit_path,
                     commit_metadata.in_commit_timestamp(),
-                    0,
+                    written_size,
                 );
                 Ok(CommitResponse::Committed { file_meta })
             }
-            Err(Error::FileAlreadyExists(_)) => {
+            Err(KernelError::FileAlreadyExists(_)) => {
                 info!(
                     conflicting_version = version,
                     "Filesystem commit conflict: target version already exists"
@@ -73,9 +73,9 @@ impl Committer for FileSystemCommitter {
 
     /// The FileSystemCommitter should never be invoked to publish catalog commits. If it is,
     /// something has gone wrong upstream.
-    fn publish(&self, _engine: &dyn Engine, publish_metadata: PublishMetadata) -> DeltaResult<()> {
+    fn publish(&self, _engine: &dyn Engine, publish_metadata: PublishMetadata) -> KernelResult<()> {
         if !publish_metadata.commits_to_publish().is_empty() {
-            return Err(Error::generic(
+            return Err(KernelError::generic(
                 "The FilesystemCommitter does not support publishing catalog commits.",
             ));
         }
@@ -91,13 +91,16 @@ mod tests {
     use url::Url;
 
     use super::*;
-    use crate::actions::{Metadata, Protocol};
+    use crate::actions::{Metadata, Protocol, LOG_METADATA_SCHEMA};
     use crate::committer::{CommitProtocolMetadata, CommitType};
+    use crate::create_row;
     use crate::engine::sync::SyncEngine;
     use crate::object_store::memory::InMemory;
     use crate::object_store::path::Path;
     use crate::object_store::ObjectStoreExt as _;
     use crate::path::LogRoot;
+    use crate::schema::schema_ref;
+    use crate::transaction::UpdateTableOperation;
 
     #[tokio::test]
     async fn disallow_filesystem_committer_for_catalog_managed_tables() {
@@ -121,13 +124,14 @@ mod tests {
         // Try to commit a transaction with FileSystemCommitter
         let committer = Box::new(FileSystemCommitter::new());
         let err = snapshot
-            .transaction(committer, &engine)
+            .update_table(UpdateTableOperation::Write, "test-engine", true)
+            .build(&engine, committer)
             .unwrap()
             .commit(&engine)
             .unwrap_err();
         assert!(matches!(
             err,
-            crate::Error::Generic(e) if e.contains("This table is catalog-managed and requires a catalog committer.")
+            crate::KernelError::Generic(e) if e.contains("This table is catalog-managed and requires a catalog committer.")
         ));
     }
 
@@ -135,13 +139,14 @@ mod tests {
     async fn test_filesystem_committer_returns_valid_commit_response() {
         let storage = Arc::new(InMemory::new());
         let table_root = Url::parse("memory:///").unwrap();
-        let engine = SyncEngine::new_with_store(storage);
+        let engine = SyncEngine::new_with_store(storage.clone());
 
         let committer = FileSystemCommitter::new();
         let log_root = LogRoot::new(table_root).unwrap();
         let protocol = Protocol::try_new_modern(Vec::<&str>::new(), Vec::<&str>::new()).unwrap();
-        let schema = Arc::new(crate::schema::StructType::new_unchecked(vec![]));
+        let schema = schema_ref! {};
         let metadata = Metadata::try_new(None, None, schema, vec![], 0, HashMap::new()).unwrap();
+        let action = create_row(&engine, LOG_METADATA_SCHEMA.clone(), metadata.clone()).unwrap();
         let commit_metadata = CommitMetadata::new(
             log_root,
             1,
@@ -151,14 +156,22 @@ mod tests {
             CommitProtocolMetadata::try_new(Some(protocol), Some(metadata), None, None).unwrap(),
             vec![],
         );
-        let actions = Box::new(std::iter::empty());
+        let actions = Box::new(std::iter::once(Ok(
+            FilteredEngineData::with_all_rows_selected(action),
+        )));
 
         let result = committer.commit(&engine, actions, commit_metadata).unwrap();
+        let stored_size = storage
+            .head(&Path::from("_delta_log/00000000000000000001.json"))
+            .await
+            .unwrap()
+            .size;
 
         match result {
             CommitResponse::Committed { file_meta } => {
                 assert_eq!(file_meta.last_modified, 12345);
-                assert_eq!(file_meta.size, 0);
+                assert!(file_meta.size > 0);
+                assert_eq!(file_meta.size, stored_size);
                 assert!(file_meta
                     .location
                     .as_str()
@@ -176,7 +189,7 @@ mod tests {
 
         let committer = FileSystemCommitter::new();
         let protocol = Protocol::try_new_modern(Vec::<&str>::new(), Vec::<&str>::new()).unwrap();
-        let schema = Arc::new(crate::schema::StructType::new_unchecked(vec![]));
+        let schema = schema_ref! {};
         let metadata1 =
             Metadata::try_new(None, None, schema.clone(), vec![], 0, HashMap::new()).unwrap();
         let metadata2 = Metadata::try_new(None, None, schema, vec![], 0, HashMap::new()).unwrap();
