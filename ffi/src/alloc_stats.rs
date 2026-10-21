@@ -2,11 +2,12 @@
 //!
 //! # Scope
 //!
-//! Counters record requested allocation sizes only, so they are a lower bound on process RSS:
-//! C/`mmap` allocations and allocator overhead are not included. Values are process-global and
-//! advisory, rather than measurements for a single operation. Tracking uses relaxed atomic
-//! operations to update its counters. Peak reset is not coordinated with allocation, so callers
-//! must serialize a reset against native work when they require a meaningful post-reset peak.
+//! Counters record requested allocation sizes, not resident memory. They exclude C/`mmap`
+//! allocations and allocator overhead, and untouched pages need not be resident. Values are
+//! global to the instrumented allocator image and advisory, rather than per-operation measurements.
+//! Tracking uses relaxed atomic operations to update its counters. Peak reset is not coordinated
+//! with allocation, so callers must serialize a reset against native work when they require a
+//! meaningful post-reset peak.
 
 #[cfg(all(feature = "alloc-tracking", not(feature = "context-alloc-tracking")))]
 use peak_alloc::PeakAlloc;

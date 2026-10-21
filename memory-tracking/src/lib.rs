@@ -404,7 +404,7 @@ unsafe impl GlobalAlloc for TrackingAllocator {
                 backing.size() - layout.size(),
                 false,
             );
-            unsafe { System.dealloc(pointer.sub(offset), backing) };
+            unsafe { System.dealloc(base, backing) };
             if !header.owner.is_null() {
                 unsafe { drop(Arc::from_raw(header.owner)) };
             }
@@ -423,41 +423,39 @@ unsafe impl GlobalAlloc for TrackingAllocator {
         };
         let base = unsafe { pointer.sub(offset) };
         let header = unsafe { base.cast::<Header>().read() };
-        let resized = unsafe { System.realloc(pointer.sub(offset), backing, new_backing.size()) };
+        let resized = unsafe { System.realloc(base, backing, new_backing.size()) };
         if resized.is_null() {
             return ptr::null_mut();
         }
-        {
-            let owner = unsafe { header.owner.as_ref() };
-            // Reallocation retains the origin and charges only positive growth as allocation
-            // volume.
-            if new_size >= layout.size() {
-                update(owner, header.source, new_size - layout.size(), 0, true);
-            } else {
-                update(owner, header.source, layout.size() - new_size, 0, false);
-                for_state(owner, |state| {
-                    state.total.allocations.fetch_add(1, Ordering::Relaxed);
-                    state.sources[header.source as usize]
-                        .allocations
-                        .fetch_add(1, Ordering::Relaxed);
-                });
-            }
-            let old_tracking = backing.size() - layout.size();
-            let new_tracking = new_backing.size() - new_size;
+        let owner = unsafe { header.owner.as_ref() };
+        // Reallocation retains the origin and charges only positive growth as allocation
+        // volume.
+        if new_size >= layout.size() {
+            update(owner, header.source, new_size - layout.size(), 0, true);
+        } else {
+            update(owner, header.source, layout.size() - new_size, 0, false);
             for_state(owner, |state| {
-                for counters in [&state.total, &state.sources[header.source as usize]] {
-                    if new_tracking >= old_tracking {
-                        counters
-                            .tracking
-                            .fetch_add((new_tracking - old_tracking) as u64, Ordering::Relaxed);
-                    } else {
-                        counters
-                            .tracking
-                            .fetch_sub((old_tracking - new_tracking) as u64, Ordering::Relaxed);
-                    }
-                }
+                state.total.allocations.fetch_add(1, Ordering::Relaxed);
+                state.sources[header.source as usize]
+                    .allocations
+                    .fetch_add(1, Ordering::Relaxed);
             });
         }
+        let old_tracking = backing.size() - layout.size();
+        let new_tracking = new_backing.size() - new_size;
+        for_state(owner, |state| {
+            for counters in [&state.total, &state.sources[header.source as usize]] {
+                if new_tracking >= old_tracking {
+                    counters
+                        .tracking
+                        .fetch_add((new_tracking - old_tracking) as u64, Ordering::Relaxed);
+                } else {
+                    counters
+                        .tracking
+                        .fetch_sub((old_tracking - new_tracking) as u64, Ordering::Relaxed);
+                }
+            }
+        });
         unsafe { resized.add(offset) }
     }
 }

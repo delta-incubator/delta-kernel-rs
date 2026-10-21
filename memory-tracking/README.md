@@ -5,7 +5,8 @@ Rust's global allocator, host Arrow, host ABI buffers, or other native memory. S
 independent breakdown within each context; Rust is not the unit of query attribution.
 
 This is a diagnostic prototype. It does not reserve memory, reject allocations, change OOM
-handling, or promise RSS coverage.
+handling, or promise RSS coverage. The [coverage audit](COVERAGE.md) identifies concrete native
+dependency bypasses and gaps in query-context propagation.
 
 ## Attribution and lifetime
 
