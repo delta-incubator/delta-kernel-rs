@@ -387,8 +387,7 @@ impl PartitionValuesOptions {
     /// were set on those tables.
     ///
     /// Without this option, Kernel interprets offset-less timestamps as UTC. Invalid timezones
-    /// cause errors only when Kernel uses them to parse partition values, not when this option
-    /// is set or the scan is built.
+    /// cause errors only when Kernel uses them, not when this option is set or the scan is built.
     ///
     /// TODO(#3609): Row transforms always parse `addFile.partitionValues` instead of using
     /// compatible `partitionValues_parsed` from checkpoints and are not timezone-aware.

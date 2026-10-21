@@ -1228,27 +1228,37 @@ fn add_partitioned(path: &str, val: &str) -> String {
 
 async fn partitioned_snapshot(
     timestamp_partition: bool,
+    int_partition: bool,
 ) -> Result<(Arc<DefaultEngine<TokioBackgroundExecutor>>, SnapshotRef), Box<dyn std::error::Error>>
 {
     let (storage, engine, table_url) = setup_test();
     let schema = schema_ref! {
         nullable "p_ts": TIMESTAMP,
+        nullable "p_int": INTEGER,
         nullable "value": INTEGER,
     };
+    let mut partition_columns = Vec::new();
+    let mut partition_values = serde_json::Map::new();
+    if timestamp_partition {
+        partition_columns.push("p_ts");
+        partition_values.insert(
+            "p_ts".into(),
+            serde_json::json!("2024-01-15 12:30:45.123456"),
+        );
+    }
+    if int_partition {
+        partition_columns.push("p_int");
+        partition_values.insert("p_int".into(), serde_json::json!("42"));
+    }
     create_table(table_url.as_str(), schema, "Test/1.0", true)
-        .with_data_layout(if timestamp_partition {
-            DataLayout::partitioned(["p_ts"])
-        } else {
+        .with_data_layout(if partition_columns.is_empty() {
             DataLayout::default()
+        } else {
+            DataLayout::partitioned(partition_columns)
         })
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
         .commit(engine.as_ref())?
         .unwrap_committed();
-    let partition_values = if timestamp_partition {
-        serde_json::json!({"p_ts": "2024-01-15 12:30:45.123456"})
-    } else {
-        serde_json::json!({})
-    };
     add_commit(
         table_url.as_str(),
         storage.as_ref(),
@@ -1277,7 +1287,11 @@ async fn incremental_scan_partition_values_options(
     #[values(None, Some("America/Los_Angeles"), Some("Not/AZone"))] timezone: Option<&str>,
     #[values(false, true)] parsed_struct: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let (engine, target) = partitioned_snapshot(true /* timestamp_partition */).await?;
+    let (engine, target) = partitioned_snapshot(
+        true,  /* timestamp_partition */
+        false, /* int_partition */
+    )
+    .await?;
     let mut partition_values = if parsed_struct {
         PartitionValuesOptions::with_struct()
     } else {
@@ -1362,7 +1376,11 @@ async fn incremental_scan_partition_predicate_uses_timezone(
     #[case] timezone: Option<&str>,
     #[case] expected: Result<usize, &str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let (engine, target) = partitioned_snapshot(true /* timestamp_partition */).await?;
+    let (engine, target) = partitioned_snapshot(
+        true,  /* timestamp_partition */
+        false, /* int_partition */
+    )
+    .await?;
     let mut partition_values = PartitionValuesOptions::default();
     if let Some(timezone) = timezone {
         partition_values = partition_values.with_timestamp_timezone(timezone);
@@ -1383,17 +1401,35 @@ async fn incremental_scan_partition_predicate_uses_timezone(
 }
 
 #[rstest]
-#[case::timestamp_partition(true, true)]
-#[case::unpartitioned(false, false)]
+#[case::timestamp_partition(
+    true /* timestamp_partition */,
+    false /* int_partition */,
+    col!("p_ts").gt(lit(Scalar::Timestamp(0))),
+    true /* expected_error */
+)]
+#[case::int_partition(
+    false /* timestamp_partition */,
+    true /* int_partition */,
+    col!("p_int").gt(lit(0)),
+    true /* expected_error */
+)]
+#[case::unpartitioned(
+    false /* timestamp_partition */,
+    false /* int_partition */,
+    col!("p_ts").gt(lit(Scalar::Timestamp(0))),
+    false /* expected_error */
+)]
 #[tokio::test]
-async fn incremental_scan_reports_invalid_timezone_only_when_parsing_timestamp_partitions(
+async fn incremental_scan_reports_invalid_timezone_only_when_expression_used(
     #[case] timestamp_partition: bool,
+    #[case] int_partition: bool,
+    #[case] predicate: Pred,
     #[case] expected_error: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let (engine, target) = partitioned_snapshot(timestamp_partition).await?;
+    let (engine, target) = partitioned_snapshot(timestamp_partition, int_partition).await?;
     let stream = target
         .incremental_scan_builder(0)
-        .with_predicate(Arc::new(col!("p_ts").gt(lit(Scalar::Timestamp(0)))))
+        .with_predicate(Arc::new(predicate))
         .with_partition_values(
             PartitionValuesOptions::default().with_timestamp_timezone("Not/AZone"),
         )
