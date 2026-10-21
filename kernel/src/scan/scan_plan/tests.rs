@@ -36,7 +36,19 @@ fn normalized_metadata_batch(
         ("modificationTime", field("modificationTime")),
     ];
     if let Some(stats) = json_stats {
-        columns.push(("stats", stats));
+        // JSON object field order depends on the source checkpoint schema, not its meaning.
+        let stats = stats.as_any().downcast_ref::<StringArray>().unwrap();
+        let normalized = stats.iter().map(|value| {
+            value.map(|value| {
+                let mut value: serde_json::Value = serde_json::from_str(value).unwrap();
+                value.sort_all_objects();
+                value.to_string()
+            })
+        });
+        columns.push((
+            "stats",
+            Arc::new(StringArray::from_iter(normalized)) as ArrayRef,
+        ));
     }
     columns.extend([
         ("partitionValues", field("partitionValues")),
@@ -52,7 +64,13 @@ fn normalized_metadata_batch(
     if let Some(partitions) = partitions_parsed {
         columns.push(("partitionValues_parsed", partitions));
     }
-    Ok(RecordBatch::try_from_iter(columns)?)
+    // JSON stats are optional even when synthesis produces a batch without a null buffer.
+    Ok(RecordBatch::try_from_iter_with_nullable(
+        columns.into_iter().map(|(name, column)| {
+            let nullable = name == STATS || column.is_nullable();
+            (name, column, nullable)
+        }),
+    )?)
 }
 
 fn imperative_metadata(scan: Scan, engine: &dyn Engine) -> KernelResult<Vec<RecordBatch>> {
@@ -159,14 +177,14 @@ fn without_columns(batches: &[RecordBatch], excluded: &[&str]) -> KernelResult<V
     batches
         .iter()
         .map(|batch| {
-            RecordBatch::try_from_iter(
+            RecordBatch::try_from_iter_with_nullable(
                 batch
                     .schema()
                     .fields()
                     .iter()
                     .zip(batch.columns())
                     .filter(|(field, _)| !excluded.contains(&field.name().as_str()))
-                    .map(|(field, column)| (field.name(), column.clone())),
+                    .map(|(field, column)| (field.name(), column.clone(), field.is_nullable())),
             )
             .map_err(Into::into)
         })
@@ -303,6 +321,9 @@ fn declarative_metadata_matches_imperative_across_stats_options(
     let no_stats = !stats.synthesize_json && matches!(&struct_stats, StructStats::None);
     let expected_stats = if no_stats {
         StatsOptions::json_only()
+    } else if stats.synthesize_json {
+        // Imperative JSON-only scans do not load the checkpoint struct without a data predicate.
+        StatsOptions::all()
     } else {
         stats.clone()
     };
@@ -314,6 +335,11 @@ fn declarative_metadata_matches_imperative_across_stats_options(
         .with_partition_values(PartitionValuesOptions::with_struct())
         .with_predicate(predicate.clone());
     let expected = imperative_metadata(expected_builder.build()?, engine.as_ref())?;
+    let expected = if matches!(&struct_stats, StructStats::None) {
+        without_columns(&expected, &[STATS_PARSED])?
+    } else {
+        expected
+    };
     let builder = snapshot
         .scan_builder()
         .with_stats(stats.clone())
@@ -427,13 +453,11 @@ const JSON_STATS_FIELDS: &[&str] = &["add.stats"];
 const PARTITION_PARSED_FIELDS: &[&str] = &["add.partitionValues_parsed.part"];
 
 #[rstest]
-#[should_panic(expected = "requested JSON stats must be populated")]
 #[case::json_only_string_map(
     StatsOptions::json_only(),
     PartitionValuesOptions::string_map_only(),
     &[ADD_FIELDS, JSON_STATS_FIELDS]
 )]
-#[should_panic(expected = "requested JSON stats must be populated")]
 #[case::json_only_with_struct(
     StatsOptions::json_only(),
     PartitionValuesOptions::with_struct(),
@@ -469,13 +493,11 @@ const PARTITION_PARSED_FIELDS: &[&str] = &["add.partitionValues_parsed.part"];
     PartitionValuesOptions::with_struct(),
     &[ADD_FIELDS, PARTITION_PARSED_FIELDS]
 )]
-#[should_panic(expected = "requested JSON stats must be populated")]
 #[case::all_string_map(
     StatsOptions::all(),
     PartitionValuesOptions::string_map_only(),
     &[ADD_FIELDS, ALL_STATS_PARSED_FIELDS, JSON_STATS_FIELDS]
 )]
-#[should_panic(expected = "requested JSON stats must be populated")]
 #[case::all_with_struct(
     StatsOptions::all(),
     PartitionValuesOptions::with_struct(),
@@ -659,8 +681,6 @@ fn declarative_metadata_output_options_across_log_shapes(
         .with_sidecars_if_enabled(None),
     FeatureSet::new().v2_checkpoint()
 )]
-// TODO: https://github.com/delta-io/delta-kernel-rs/issues/3040
-#[should_panic(expected = "requested JSON stats must be populated")]
 fn declarative_metadata_synthesizes_json_for_struct_only_checkpoints(
     #[case] log_state: LogState,
     #[case] features: FeatureSet,
@@ -684,6 +704,7 @@ fn assert_metadata_output_options(
     partitions: PartitionValuesOptions,
 ) -> KernelResult<()> {
     let json_requested = stats.synthesize_json;
+    let json_only = json_requested && matches!(&stats.struct_stats, StructStats::None);
     let parsed_partitions_requested = partitions.parsed_struct;
     let table = TestTableBuilder::new()
         .with_log_state(log_state)
@@ -698,11 +719,20 @@ fn assert_metadata_output_options(
         snapshot
             .clone()
             .scan_builder()
-            .with_stats(stats.clone())
+            .with_stats(if json_only {
+                StatsOptions::all()
+            } else {
+                stats.clone()
+            })
             .with_partition_values(partitions.clone())
             .build()?,
         &engine,
     )?;
+    let expected = if json_only {
+        without_columns(&expected, &[STATS_PARSED])?
+    } else {
+        expected
+    };
     let scan = snapshot
         .scan_builder()
         .with_stats(stats)
@@ -819,10 +849,12 @@ fn declarative_metadata_partition_values_prune_without_struct_stats(
             .clone()
             .scan_builder()
             .with_predicate(predicate.clone())
+            .with_stats(StatsOptions::all())
             .with_partition_values(PartitionValuesOptions::with_struct())
             .build()?,
         engine.as_ref(),
     )?;
+    let expected = without_columns(&expected, &[STATS_PARSED])?;
     assert_eq!(metadata_row_count(&expected), expected_count);
 
     let scan = snapshot
