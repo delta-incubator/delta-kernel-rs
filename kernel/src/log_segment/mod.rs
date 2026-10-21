@@ -1724,11 +1724,8 @@ impl LogSegment {
     }
 }
 
-/// Checks that `action`, the first checkpoint action read from the manifest commit `pointer`
-/// names, is the one `pointer` describes, and returns it.
-///
-/// # Errors
-/// Returns an error if `action` is `None` or its content root version differs from the pointer's.
+/// Returns `action`, the first checkpoint action read from the manifest commit `pointer` names,
+/// after checking that it exists and has the pointer's content root version.
 #[cfg(feature = "adaptive-metadata-in-dev")]
 fn require_pointed_checkpoint_action(
     pointer: &LastManifestCommit,

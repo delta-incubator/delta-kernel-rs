@@ -544,7 +544,7 @@ async fn plan_replay_skips_pointed_commit_when_pm_is_newer() {
         checkpoint_commit(0, &[], one_column_schema()),
         carrying_pointer((0, 0), checkpoint_action(1, &[], one_column_schema())),
     ],
-    "commit 1 carries a checkpoint action"
+    "that commit's checkpoint action has content root version 1"
 )]
 #[case::newest_action_without_pointer(
     vec![
@@ -1264,7 +1264,8 @@ async fn post_commit_snapshot_takes_last_manifest_commit_from_the_transaction() 
 
 // A snapshot that sits on a checkpoint (no CRC, no later commits) cannot read commitInfo during
 // replay, so it reads `lastManifestCommit` from the commit file at the checkpoint version, and
-// errors with `MissingVersion` when that file is gone.
+// errors with `MissingVersion` when that file is gone. P&M replay, and so the snapshot build,
+// succeeds either way.
 #[rstest]
 #[case::commit_file_present(false)]
 #[case::commit_file_deleted(true)]

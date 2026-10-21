@@ -8,9 +8,9 @@ use std::sync::{Arc, LazyLock};
 use tracing::{info, instrument};
 use url::Url;
 
-use super::LogSegment;
 #[cfg(all(feature = "adaptive-metadata-in-dev", feature = "declarative-plans"))]
-use super::{inconsistent_pointer, require_pointed_checkpoint_action};
+use super::require_pointed_checkpoint_action;
+use super::LogSegment;
 #[cfg(feature = "adaptive-metadata-in-dev")]
 use crate::actions::visitors::LastManifestCommitVisitor;
 #[cfg(feature = "adaptive-metadata-in-dev")]
@@ -166,12 +166,10 @@ impl LogSegment {
         if let Some(executor) = engine.plan_executor() {
             let candidate = resolve_pm_batches(self.read_pm_batches_via_plan(executor.as_ref())?)?;
             #[cfg(feature = "adaptive-metadata-in-dev")]
-            candidate.ensure_pointer_at_or_before(self.end_version)?;
+            candidate.ensure_newest_pointer(self.end_version)?;
             // Use `lastManifestCommit`, when present and needed, to find the checkpoint action.
             #[cfg(feature = "adaptive-metadata-in-dev")]
             let candidate = self.merge_pointed_checkpoint_action(executor.as_ref(), candidate)?;
-            #[cfg(feature = "adaptive-metadata-in-dev")]
-            require_newest_pointer(&candidate, self.end_version)?;
             return Ok(candidate);
         }
         let candidate = resolve_pm_batches(self.read_pm_batches(engine)?)?;
@@ -184,8 +182,8 @@ impl LogSegment {
     /// already captured it from the newest commit.
     ///
     /// # Errors
-    /// Returns an error if the newest commit carries a checkpoint action its `lastManifestCommit`
-    /// does not name, or if the pointed commit cannot be read or lacks a matching checkpoint
+    /// Returns an error if the newest commit's checkpoint action does not match its
+    /// `lastManifestCommit`, or if the pointed commit cannot be read or lacks a matching checkpoint
     /// action.
     #[cfg(all(feature = "adaptive-metadata-in-dev", feature = "declarative-plans"))]
     fn merge_pointed_checkpoint_action(
@@ -193,18 +191,11 @@ impl LogSegment {
         executor: &dyn PlanExecutor,
         mut candidate: PmCandidate,
     ) -> KernelResult<PmCandidate> {
-        let version = self.end_version;
         let Some(pointer) = candidate.last_manifest_commit.clone() else {
             return Ok(candidate);
         };
         // The plan only captures the newest commit's checkpoint action.
         if let Some((checkpoint_version, action)) = candidate.checkpoint.take() {
-            if pointer.version != version_as_i64(version)? {
-                return Err(inconsistent_pointer(
-                    &pointer,
-                    &format!("commit {version} carries a checkpoint action"),
-                ));
-            }
             let action = require_pointed_checkpoint_action(&pointer, Some(action))?;
             candidate.checkpoint = Some((checkpoint_version, action));
             return Ok(candidate);
@@ -321,10 +312,13 @@ impl LogSegment {
             ),
         );
         // Also keep the newest commit's checkpoint action, so a manifest commit at this version
-        // needs no second read. A segment that ends on a checkpoint does not list that commit, and
-        // its checkpoint parts carry the same version. Older checkpoint actions are reached only
-        // through the newest commit's `lastManifestCommit`, which writers carry forward on every
-        // commit after the first manifest commit.
+        // needs no second read. Matching only the newest commit keeps P&M replay able to stop at
+        // the newest Protocol and Metadata: matching checkpoint actions in every commit would force
+        // reading the whole log, even for tables without adaptive metadata. A segment that ends on
+        // a checkpoint does not list that commit, and its checkpoint parts carry the same version.
+        // Older checkpoint actions are reached only through the newest commit's
+        // `lastManifestCommit`, which writers carry forward on every commit after the first
+        // manifest commit.
         #[cfg(feature = "adaptive-metadata-in-dev")]
         let relevant_action = if self.newest_commit().is_some() {
             Predicate::or(
@@ -544,6 +538,20 @@ impl PmCandidate {
             .as_ref()
             .map_or(Ok(()), |pointer| pointer.ensure_at_or_before(version))
     }
+
+    /// Like [`Self::ensure_pointer_at_or_before`], and also errors when replay captured a
+    /// checkpoint action but no `lastManifestCommit`. For plan replay, which captures only the
+    /// newest commit's action, so that commit must then carry a pointer.
+    #[cfg(all(feature = "adaptive-metadata-in-dev", feature = "declarative-plans"))]
+    fn ensure_newest_pointer(&self, version: Version) -> KernelResult<()> {
+        self.ensure_pointer_at_or_before(version)?;
+        if self.checkpoint.is_some() && self.last_manifest_commit.is_none() {
+            return Err(KernelError::invalid_log_segment(format!(
+                "commit {version} carries a checkpoint action but no lastManifestCommit"
+            )));
+        }
+        Ok(())
+    }
 }
 
 /// A P&M-projected batch with the versions to rank its Protocol and Metadata at.
@@ -606,21 +614,6 @@ fn resolve_pm_batches(
         #[cfg(feature = "adaptive-metadata-in-dev")]
         last_manifest_commit,
     })
-}
-
-/// Checks that a checkpoint action the plan captured comes with a `lastManifestCommit`: the plan
-/// only captures the newest commit's action, and that commit, at `version`, must then carry one.
-///
-/// # Errors
-/// Returns an error if `candidate` holds a checkpoint action but no `lastManifestCommit`.
-#[cfg(all(feature = "adaptive-metadata-in-dev", feature = "declarative-plans"))]
-fn require_newest_pointer(candidate: &PmCandidate, version: Version) -> KernelResult<()> {
-    if candidate.checkpoint.is_some() && candidate.last_manifest_commit.is_none() {
-        return Err(KernelError::invalid_log_segment(format!(
-            "commit {version} carries a checkpoint action but no lastManifestCommit"
-        )));
-    }
-    Ok(())
 }
 
 /// Parses the log version from a batch's `_file` metadata column.
