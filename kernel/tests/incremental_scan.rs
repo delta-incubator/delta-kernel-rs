@@ -8,10 +8,11 @@ use std::collections::{HashMap, HashSet};
 use std::num::NonZero;
 use std::sync::Arc;
 
-use delta_kernel::arrow::array::{Int32Array, RecordBatch};
+use delta_kernel::arrow::array::{Int32Array, MapArray, RecordBatch, StringArray, StructArray};
 use delta_kernel::arrow::datatypes::Schema as ArrowSchema;
+use delta_kernel::committer::FileSystemCommitter;
 use delta_kernel::engine::arrow_conversion::TryIntoArrow as _;
-use delta_kernel::expressions::{col, lit, Predicate as Pred, PredicateRef};
+use delta_kernel::expressions::{col, lit, Predicate as Pred, PredicateRef, Scalar};
 use delta_kernel::incremental_scan::{
     IncrementalListing, IncrementalListingAgainstBase, IncrementalScanStream,
     IncrementalScanSummary,
@@ -21,7 +22,10 @@ use delta_kernel::object_store::memory::InMemory;
 use delta_kernel::object_store::path::Path as ObjectStorePath;
 use delta_kernel::object_store::ObjectStoreExt;
 use delta_kernel::scan::state::ScanFile;
+use delta_kernel::scan::PartitionValuesOptions;
 use delta_kernel::schema::{schema_ref, StructType};
+use delta_kernel::transaction::create_table::create_table;
+use delta_kernel::transaction::data_layout::DataLayout;
 use delta_kernel::{
     Engine, EvaluationHandler, JsonHandler, ParquetHandler, Snapshot, SnapshotRef, StorageHandler,
 };
@@ -35,7 +39,8 @@ use test_utils::{
     actions_to_string, actions_to_string_catalog_managed, actions_to_string_partitioned,
     add_commit, add_staged_commit, assert_result_error_with_message,
     compacted_log_path_for_versions, create_log_path, create_table_and_load_snapshot,
-    delta_path_for_version, test_table_setup_mt, write_batch_to_table, TestAction,
+    delta_path_for_version, get_column, into_record_batch, test_table_setup_mt,
+    write_batch_to_table, TestAction,
 };
 use url::Url;
 
@@ -1219,6 +1224,189 @@ fn add_partitioned(path: &str, val: &str) -> String {
         "{{\"add\":{{\"path\":\"{path}\",\"partitionValues\":{{\"val\":\"{val}\"}},\"size\":100,\
          \"modificationTime\":1700000000000,\"dataChange\":true}}}}"
     )
+}
+
+async fn partitioned_snapshot(
+    timestamp_partition: bool,
+) -> Result<(Arc<DefaultEngine<TokioBackgroundExecutor>>, SnapshotRef), Box<dyn std::error::Error>>
+{
+    let (storage, engine, table_url) = setup_test();
+    let schema = schema_ref! {
+        nullable "p_ts": TIMESTAMP,
+        nullable "value": INTEGER,
+    };
+    create_table(table_url.as_str(), schema, "Test/1.0", true)
+        .with_data_layout(if timestamp_partition {
+            DataLayout::partitioned(["p_ts"])
+        } else {
+            DataLayout::default()
+        })
+        .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
+        .commit(engine.as_ref())?
+        .unwrap_committed();
+    let partition_values = if timestamp_partition {
+        serde_json::json!({"p_ts": "2024-01-15 12:30:45.123456"})
+    } else {
+        serde_json::json!({})
+    };
+    add_commit(
+        table_url.as_str(),
+        storage.as_ref(),
+        1,
+        serde_json::json!({
+            "add": {
+                "path": "part.parquet",
+                "partitionValues": partition_values,
+                "size": 1,
+                "modificationTime": 1700000000000_i64,
+                "dataChange": true,
+            },
+        })
+        .to_string(),
+    )
+    .await?;
+    let snapshot = Snapshot::builder_for(table_url)
+        .at_version(1)
+        .build(engine.as_ref())?;
+    Ok((engine, snapshot))
+}
+
+#[rstest]
+#[tokio::test]
+async fn incremental_scan_partition_values_options(
+    #[values(None, Some("America/Los_Angeles"), Some("Not/AZone"))] timezone: Option<&str>,
+    #[values(false, true)] parsed_struct: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (engine, target) = partitioned_snapshot(true /* timestamp_partition */).await?;
+    let mut partition_values = if parsed_struct {
+        PartitionValuesOptions::with_struct()
+    } else {
+        PartitionValuesOptions::default()
+    };
+    if let Some(timezone) = timezone {
+        partition_values = partition_values.with_timestamp_timezone(timezone);
+    }
+    let result = target
+        .incremental_scan_builder(0)
+        .with_partition_values(partition_values)
+        .build(engine.as_ref());
+    if parsed_struct {
+        assert_result_error_with_message(
+            result,
+            "Kernel does not yet support returning parsed partition values in incremental scans",
+        );
+        return Ok(());
+    }
+
+    let listing = unwrap_listing(result?);
+    assert_eq!(
+        listing.summary.live_adds,
+        HashSet::from([key("part.parquet")])
+    );
+    assert_eq!(live_add_count(&listing), 1);
+    for filtered in listing.add_files {
+        let batch = into_record_batch(filtered.apply_selection_vector()?);
+        let add = get_column!(batch, "add", StructArray);
+        let raw = get_column!(add, "partitionValues", MapArray);
+        assert_eq!(
+            get_column!(raw.entries(), "key", StringArray).value(0),
+            "p_ts"
+        );
+        assert_eq!(
+            get_column!(raw.entries(), "value", StringArray).value(0),
+            "2024-01-15 12:30:45.123456"
+        );
+        assert!(add.column_by_name("partitionValues_parsed").is_none());
+    }
+    Ok(())
+}
+
+// 1_705_334_400_000_000 microseconds since the Unix epoch is 2024-01-15T16:00:00Z.
+#[rstest]
+// Under the default UTC timezone, "2024-01-15 12:30:45.123456" is interpreted as
+// 2024-01-15T12:30:45.123456Z, so the less-than predicate keeps the file.
+#[case::utc_before(
+    col!("p_ts").lt(lit(Scalar::Timestamp(1_705_334_400_000_000))),
+    None, // timezone: default UTC
+    Ok(1) // expected surviving file count
+)]
+// Under the default UTC timezone, "2024-01-15 12:30:45.123456" is interpreted as
+// 2024-01-15T12:30:45.123456Z, so the greater-than predicate filters out the file.
+#[case::utc_after(
+    col!("p_ts").gt(lit(Scalar::Timestamp(1_705_334_400_000_000))),
+    None, // timezone: default UTC
+    Ok(0) // expected surviving file count
+)]
+// Under America/Los_Angeles, "2024-01-15 12:30:45.123456" is interpreted as
+// 2024-01-15T20:30:45.123456Z, so the less-than predicate filters out the file.
+#[case::los_angeles_before(
+    col!("p_ts").lt(lit(Scalar::Timestamp(1_705_334_400_000_000))),
+    Some("America/Los_Angeles"), // timezone
+    Ok(0) // expected surviving file count
+)]
+// Under America/Los_Angeles, "2024-01-15 12:30:45.123456" is interpreted as
+// 2024-01-15T20:30:45.123456Z, so the greater-than predicate keeps the file.
+#[case::los_angeles_after(
+    col!("p_ts").gt(lit(Scalar::Timestamp(1_705_334_400_000_000))),
+    Some("America/Los_Angeles"), // timezone
+    Ok(1) // expected surviving file count
+)]
+#[case::invalid_timezone(
+    col!("p_ts").gt(lit(Scalar::Timestamp(1_705_334_400_000_000))),
+    Some("Not/AZone"), // timezone
+    Err("Not/AZone") // expected parsing error
+)]
+#[tokio::test]
+async fn incremental_scan_partition_predicate_uses_timezone(
+    #[case] predicate: Pred,
+    #[case] timezone: Option<&str>,
+    #[case] expected: Result<usize, &str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (engine, target) = partitioned_snapshot(true /* timestamp_partition */).await?;
+    let mut partition_values = PartitionValuesOptions::default();
+    if let Some(timezone) = timezone {
+        partition_values = partition_values.with_timestamp_timezone(timezone);
+    }
+    let result = target
+        .incremental_scan_builder(0)
+        .with_predicate(Arc::new(predicate))
+        .with_partition_values(partition_values)
+        .build(engine.as_ref())?
+        .expect("expected an incremental scan stream")
+        .into_listing();
+
+    match expected {
+        Ok(count) => assert_eq!(live_add_count(&result?), count),
+        Err(message) => assert_result_error_with_message(result, message),
+    }
+    Ok(())
+}
+
+#[rstest]
+#[case::timestamp_partition(true, true)]
+#[case::unpartitioned(false, false)]
+#[tokio::test]
+async fn incremental_scan_reports_invalid_timezone_only_when_parsing_timestamp_partitions(
+    #[case] timestamp_partition: bool,
+    #[case] expected_error: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (engine, target) = partitioned_snapshot(timestamp_partition).await?;
+    let stream = target
+        .incremental_scan_builder(0)
+        .with_predicate(Arc::new(col!("p_ts").gt(lit(Scalar::Timestamp(0)))))
+        .with_partition_values(
+            PartitionValuesOptions::default().with_timestamp_timezone("Not/AZone"),
+        )
+        .build(engine.as_ref())?
+        .expect("expected an incremental scan stream");
+    let result = stream.into_listing();
+
+    if expected_error {
+        assert_result_error_with_message(result, "Not/AZone");
+    } else {
+        assert_eq!(live_add_count(&result?), 1);
+    }
+    Ok(())
 }
 
 // Build a raw Add carrying both a `val` partition value and `id` stats over `[id_min, id_max]`,

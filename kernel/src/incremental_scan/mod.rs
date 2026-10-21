@@ -7,11 +7,11 @@ use std::sync::{Arc, LazyLock};
 use url::Url;
 
 use crate::engine_data::{FilteredEngineData, GetData, RowVisitor};
-use crate::expressions::{column_name, ColumnName};
+use crate::expressions::{column_name, ColumnName, MapToStructOptions};
 use crate::log_replay::deduplicator::{Deduplicator, FileActionInfo};
 use crate::log_replay::{FileActionDeduplicator, FileActionKey};
 use crate::scan::data_skipping::DataSkippingFilter;
-use crate::scan::{PhysicalPredicate, COMMIT_READ_SCHEMA};
+use crate::scan::{PartitionValuesOptions, PhysicalPredicate, COMMIT_READ_SCHEMA};
 use crate::schema::{ColumnNamesAndTypes, DataType};
 use crate::snapshot::SnapshotRef;
 use crate::table_features::Operation;
@@ -29,6 +29,7 @@ pub struct IncrementalScanBuilder {
     target_snapshot: SnapshotRef,
     base_version: Version,
     predicate: Option<PredicateRef>,
+    partition_values_options: PartitionValuesOptions,
 }
 
 impl IncrementalScanBuilder {
@@ -38,6 +39,7 @@ impl IncrementalScanBuilder {
             target_snapshot: target_snapshot.into(),
             base_version,
             predicate: None,
+            partition_values_options: PartitionValuesOptions::default(),
         }
     }
 
@@ -57,6 +59,20 @@ impl IncrementalScanBuilder {
     /// regardless.
     pub fn with_predicate(mut self, predicate: impl Into<Option<PredicateRef>>) -> Self {
         self.predicate = predicate.into();
+        self
+    }
+
+    /// Configure partition value parsing for the incremental scan. See [`PartitionValuesOptions`].
+    ///
+    /// Defaults to [`PartitionValuesOptions::default`].
+    ///
+    /// Kernel does not yet support [`PartitionValuesOptions::with_struct`] in incremental scans.
+    /// Passing it causes [`Self::build`] to return an error.
+    pub fn with_partition_values(
+        mut self,
+        partition_values_options: PartitionValuesOptions,
+    ) -> Self {
+        self.partition_values_options = partition_values_options;
         self
     }
 
@@ -80,6 +96,7 @@ impl IncrementalScanBuilder {
     ///
     /// # Errors
     /// - `Err` if `base_version >= target_snapshot.version()` (caller error).
+    /// - `Err` if typed partition value output is requested.
     /// - [`KernelError::MissingColumn`] if a [`with_predicate`](Self::with_predicate) predicate
     ///   references a column absent from the table schema.
     /// - `Err` if the target snapshot's protocol contains an unsupported reader feature.
@@ -96,6 +113,13 @@ impl IncrementalScanBuilder {
                 "IncrementalScanBuilder: base_version ({}) must be less than target_version ({})",
                 self.base_version, target_version
             ))
+        );
+        // TODO(#3609): Support returning parsed partition values in incremental scans.
+        require!(
+            !self.partition_values_options.parsed_struct,
+            KernelError::unsupported(
+                "Kernel does not yet support returning parsed partition values in incremental scans"
+            )
         );
         // Resolve the predicate into an Add-side skipping strategy up front so `build` can
         // fail fast on a malformed predicate (e.g. references to unknown columns), rather
@@ -195,10 +219,20 @@ impl IncrementalScanBuilder {
                     physical_predicate,
                     table_configuration,
                     COMMIT_READ_SCHEMA.clone(),
+                    self.map_to_struct_options(),
                 );
                 Ok(filter.map_or(AddSkipping::KeepAll, |f| AddSkipping::Filter(Arc::new(f))))
             }
         }
+    }
+
+    fn map_to_struct_options(&self) -> MapToStructOptions {
+        self.partition_values_options
+            .timestamp_timezone
+            .as_deref()
+            .map_or_else(MapToStructOptions::default, |timezone| {
+                MapToStructOptions::default().with_timestamp_timezone(timezone)
+            })
     }
 }
 

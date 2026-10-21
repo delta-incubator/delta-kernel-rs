@@ -337,15 +337,11 @@ impl StatsOptions {
     }
 }
 
-/// Engine-facing partition value options. Pass to [`ScanBuilder::with_partition_values`] to
-/// declare whether scan metadata output includes the typed `partitionValues_parsed` struct
-/// alongside the raw string map (`fileConstantValues.partitionValues`), which is always present.
+/// Engine-facing partition value options. Pass to scan builders, such as [`ScanBuilder`] and
+/// [`crate::incremental_scan::IncrementalScanBuilder`], to control partition-column related
+/// behavior.
 ///
-/// When the typed struct is requested, scan metadata output gains a top-level
-/// `partitionValues_parsed` struct column with one typed nullable field per partition column
-/// (physical names, table partition-column order). On non-partitioned tables the column is
-/// omitted. Values come directly from the checkpoint's native `partitionValues_parsed` column
-/// when present, otherwise from parsing the string map.
+/// Note: Not all scans support every option. See each scan builder's documentation for limitations.
 #[derive(Clone, Debug, Default)]
 pub struct PartitionValuesOptions {
     /// Whether to emit the typed `partitionValues_parsed` struct column.
@@ -360,8 +356,7 @@ impl PartitionValuesOptions {
         Self::default()
     }
 
-    /// Emit the typed `partitionValues_parsed` struct alongside the raw string map. Lets engines
-    /// consume `partitionValues_parsed` directly instead of parsing the string map per row.
+    /// Emit the typed `partitionValues_parsed` struct alongside the raw string map.
     pub fn with_struct() -> Self {
         Self {
             parsed_struct: true,
@@ -375,8 +370,9 @@ impl PartitionValuesOptions {
     ///
     /// `timestamp_timezone` must be an IANA timezone identifier recognized by Kernel or a
     /// normalized fixed offset in `+HH:MM` or `-HH:MM` form. An explicit offset in a partition
-    /// value takes precedence. This option applies to both partition pruning and returned parsed
-    /// partition values. It does not affect `TIMESTAMP_NTZ`.
+    /// value takes precedence. This option applies to partition pruning in full and incremental
+    /// scans and to returned parsed partition values in full scans. It does not affect
+    /// `TIMESTAMP_NTZ`.
     ///
     /// For example, if a `TIMESTAMP` partition column `ts` has
     /// `add.partitionValues["ts"] = "2024-01-15 12:30:45"`, setting `timestamp_timezone` to
