@@ -213,6 +213,13 @@ pub use snapshot::{Snapshot, SnapshotRef};
 ))]
 pub mod engine;
 
+#[cfg(not(any(
+    feature = "default-engine-base",
+    feature = "arrow-conversion",
+    feature = "declarative-plans"
+)))]
+pub(crate) mod engine;
+
 /// Delta table version is 8 byte unsigned int
 pub type Version = u64;
 
