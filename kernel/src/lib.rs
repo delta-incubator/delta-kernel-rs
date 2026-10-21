@@ -75,7 +75,7 @@ use std::any::Any;
 use std::cmp::Ordering;
 use std::fs::DirEntry;
 use std::ops::Range;
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use bytes::Bytes;
@@ -191,7 +191,6 @@ pub use action_reconciliation::{ActionReconciliationIterator, ActionReconciliati
 use cancellation::{check_cancelled, CancellableIterator};
 pub use cancellation::{CancellationToken, CancellationTokenRef, CancelledFuture};
 pub use delta_kernel_derive;
-use engine_data::TypedGetData as _;
 pub use engine_data::{
     EngineData, FilteredEngineData, FilteredRowVisitor, GetData, RowIndexIterator, RowVisitor,
 };
@@ -199,7 +198,7 @@ pub use error::{
     Error, KernelError, KernelResult, KernelResultIterator, KernelResultIteratorStatic, Result,
     ResultIterator, ResultIteratorStatic,
 };
-use expressions::{column_name, ColumnName, Scalar};
+use expressions::Scalar;
 pub use expressions::{Expression, ExpressionRef, Predicate, PredicateRef};
 pub use log_compaction::{should_compact, LogCompactionWriter};
 #[cfg(feature = "declarative-plans")]
@@ -286,25 +285,6 @@ impl TryFrom<DirEntry> for FileMeta {
     }
 }
 
-/// Converts an iterator of [`EngineData`] batches containing one file metadata row to [`FileMeta`].
-/// Returns an error if the iterator has a different row count or invalid metadata values.
-impl<'a> TryFrom<KernelResultIterator<'a, Box<dyn EngineData>>> for FileMeta {
-    type Error = KernelError;
-
-    fn try_from(batches: KernelResultIterator<'a, Box<dyn EngineData>>) -> KernelResult<Self> {
-        let mut visitor = FileMetaVisitor::default();
-        for batch in batches {
-            let batch = batch?;
-            if !batch.is_empty() {
-                visitor.visit_rows_of(batch.as_ref())?;
-            }
-        }
-        visitor
-            .file_meta
-            .ok_or_else(|| KernelError::generic("File metadata result contained no rows"))
-    }
-}
-
 impl FileMeta {
     /// Create a new instance of `FileMeta`
     pub fn new(location: Url, last_modified: i64, size: u64) -> Self {
@@ -319,45 +299,6 @@ impl FileMeta {
     pub(crate) fn size_as_i64(&self) -> KernelResult<i64> {
         i64::try_from(self.size)
             .map_err(|_| KernelError::generic(format!("file size {} exceeds i64::MAX", self.size)))
-    }
-}
-
-#[derive(Default)]
-struct FileMetaVisitor {
-    file_meta: Option<FileMeta>,
-}
-
-impl RowVisitor for FileMetaVisitor {
-    fn selected_column_names_and_types(&self) -> (&'static [ColumnName], &'static [DataType]) {
-        static NAMES: LazyLock<[ColumnName; 3]> = LazyLock::new(|| {
-            [
-                column_name!("location"),
-                column_name!("size"),
-                column_name!("last_modified"),
-            ]
-        });
-        static TYPES: [DataType; 3] = [DataType::STRING, DataType::LONG, DataType::LONG];
-        (&*NAMES, &TYPES)
-    }
-
-    fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> KernelResult<()> {
-        for row in 0..row_count {
-            if self.file_meta.is_some() {
-                return Err(KernelError::generic(
-                    "File metadata result contained multiple rows",
-                ));
-            }
-            let location: String = getters[0].get(row, "location")?;
-            let location = Url::parse(&location)
-                .map_err(|err| KernelError::generic(format!("Invalid written file URL: {err}")))?;
-            let size: i64 = getters[1].get(row, "size")?;
-            let size = u64::try_from(size).map_err(|_| {
-                KernelError::generic("File metadata result contained negative size")
-            })?;
-            let last_modified: i64 = getters[2].get(row, "last_modified")?;
-            self.file_meta = Some(FileMeta::new(location, last_modified, size));
-        }
-        Ok(())
     }
 }
 

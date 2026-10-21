@@ -1,11 +1,8 @@
-//! A synchronous, test-only [`PlanExecutor`] backed by [`SyncEngine`] handlers.
+//! A synchronous [`PlanExecutor`] for tests, backed by the sync storage helpers.
 //!
-//! Wired into [`SyncEngine::plan_executor`]. The query path evaluates a [`Plan`] eagerly,
-//! materializing every node's output in full before its consumers run. Streaming is not needed
-//! because this executor only serves tests, which never approach memory limits.
-//!
-//! [`SyncEngine`]: super::SyncEngine
-//! [`SyncEngine::plan_executor`]: super::SyncEngine
+//! The query path evaluates a [`Plan`] eagerly, materializing every node's output in full before
+//! its consumers run. Streaming is not needed because this executor only serves tests, which never
+//! approach memory limits.
 //
 // TODO: The `IoOperation` paths will eventually be used to replace SyncEngine with an
 // PlanBasedEngine (backed by this PlanExecutor)

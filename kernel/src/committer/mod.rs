@@ -78,7 +78,8 @@ pub trait Committer: Send {
     /// Commits `actions`, at the version in `commit_metadata`, using a declarative plan `executor`.
     ///
     /// `actions` provides an *ordered* collection of RelationRefs that should be committed.
-    /// Each relation must remain valid within the provided `executor` until this method returns.
+    /// Each relation must have the same schema and remain valid within the provided `executor`
+    /// until this method returns.
     /// Implementations must also provide the same atomicity and conflict behavior as `commit`.
     #[cfg(feature = "declarative-plans")]
     fn commit_declarative(

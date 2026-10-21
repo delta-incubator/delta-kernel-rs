@@ -95,10 +95,7 @@ impl Committer for FileSystemCommitter {
     ) -> KernelResult<CommitResponse> {
         let version = commit_metadata.version();
         let path = commit_metadata.published_commit_path()?;
-        let result = write_commit_json_declarative(executor, actions, path).map(|mut file_meta| {
-            file_meta.last_modified = commit_metadata.in_commit_timestamp();
-            file_meta
-        });
+        let result = write_commit_json_declarative(executor, actions, path);
         Self::commit_response(result, version)
     }
 
@@ -262,7 +259,20 @@ mod tests {
 
         match result {
             CommitResponse::Committed { file_meta } => {
-                assert_eq!(file_meta.last_modified, 12345);
+                match path {
+                    CommitPath::Imperative => assert_eq!(file_meta.last_modified, 12345),
+                    #[cfg(feature = "declarative-plans")]
+                    CommitPath::Declarative => {
+                        let stored_meta = storage
+                            .head(&Path::from("_delta_log/00000000000000000001.json"))
+                            .await
+                            .unwrap();
+                        assert_eq!(
+                            file_meta.last_modified,
+                            stored_meta.last_modified.timestamp_millis()
+                        );
+                    }
+                }
                 assert!(file_meta.size > 0);
                 assert_eq!(file_meta.size, stored.len() as u64);
                 assert!(file_meta
