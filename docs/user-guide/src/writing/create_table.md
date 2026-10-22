@@ -358,13 +358,17 @@ Features enabled when specific column types or annotations appear in the schema.
 | Any field with `nullable: false` in schema | — | `invariants` | — |
 
 > [!NOTE]
-> Support for the `FILE` type is a preview. Kernel creates the table and carries a `FILE` column
-> as the struct of its six fields, but it does not yet write the Parquet `FILE` logical-type
-> annotation, does not yet write the Parquet `field_id` of the sub-fields under column mapping,
-> does not collect statistics for the column, and does not resolve the bytes a value refers to.
-> Data files that Kernel writes to such a table are therefore not yet fully conforming to the
-> `FILE` protocol proposal. Do not rely on them from engines that require the annotation or the
-> field ids.
+> Support for the `FILE` type is a preview. Kernel creates the table and reads a `FILE` column as
+> the struct of its six fields. It does not yet collect statistics for the column or resolve the
+> bytes a value refers to.
+>
+> The default engine's Parquet writer refuses to write a `FILE` column until it writes the
+> Parquet `FILE` logical-type annotation and the sub-field field ids. An engine that writes its
+> own Parquet files must write a `FILE` column as the protocol requires:
+>
+> - annotate the group with the Parquet `FILE` logical type, and
+> - under column mapping, set each sub-field's Parquet `field_id` to the column's field id plus
+>   its offset (`uri` +1, `offset` +2, `size` +3, `content_type` +4, `checksum` +5, `inline` +6).
 
 ### Feature-signal only
 
