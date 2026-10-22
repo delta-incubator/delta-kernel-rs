@@ -20,7 +20,9 @@ use crate::cancellation::{CancellableIterator, CancellationTokenRef};
 #[cfg(feature = "declarative-plans")]
 use crate::checkpoint::CheckpointShape;
 use crate::engine_data::FilteredEngineData;
-use crate::expressions::{column_name, ColumnName, ExpressionRef, Predicate, PredicateRef};
+use crate::expressions::{
+    column_name, ColumnName, ExpressionRef, MapToStructOptions, Predicate, PredicateRef,
+};
 use crate::kernel_predicates::{
     DefaultKernelPredicateEvaluator, EmptyColumnResolver, KernelPredicateEvaluator as _,
 };
@@ -1703,6 +1705,14 @@ pub fn selection_vector(
     let storage = engine.storage_handler();
     let dv_treemap = descriptor.read(storage, table_root)?;
     Ok(deletion_treemap_to_bools(dv_treemap))
+}
+
+/// Returns [`MapToStructOptions`] with the supplied timezone, or the default (UTC) when absent.
+pub(crate) fn map_to_struct_options(timestamp_timezone: Option<&str>) -> MapToStructOptions {
+    MapToStructOptions::default().fold_with(
+        timestamp_timezone,
+        MapToStructOptions::with_timestamp_timezone,
+    )
 }
 
 /// If a table has `TIMESTAMP` partition columns and the connector supplies a timezone, the read

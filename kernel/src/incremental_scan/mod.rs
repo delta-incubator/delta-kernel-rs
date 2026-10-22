@@ -7,11 +7,13 @@ use std::sync::{Arc, LazyLock};
 use url::Url;
 
 use crate::engine_data::{FilteredEngineData, GetData, RowVisitor};
-use crate::expressions::{column_name, ColumnName, MapToStructOptions};
+use crate::expressions::{column_name, ColumnName};
 use crate::log_replay::deduplicator::{Deduplicator, FileActionInfo};
 use crate::log_replay::{FileActionDeduplicator, FileActionKey};
 use crate::scan::data_skipping::DataSkippingFilter;
-use crate::scan::{PartitionValuesOptions, PhysicalPredicate, COMMIT_READ_SCHEMA};
+use crate::scan::{
+    map_to_struct_options, PartitionValuesOptions, PhysicalPredicate, COMMIT_READ_SCHEMA,
+};
 use crate::schema::{ColumnNamesAndTypes, DataType};
 use crate::snapshot::SnapshotRef;
 use crate::table_features::Operation;
@@ -219,20 +221,13 @@ impl IncrementalScanBuilder {
                     physical_predicate,
                     table_configuration,
                     COMMIT_READ_SCHEMA.clone(),
-                    self.map_to_struct_options(),
+                    map_to_struct_options(
+                        self.partition_values_options.timestamp_timezone.as_deref(),
+                    ),
                 );
                 Ok(filter.map_or(AddSkipping::KeepAll, |f| AddSkipping::Filter(Arc::new(f))))
             }
         }
-    }
-
-    fn map_to_struct_options(&self) -> MapToStructOptions {
-        self.partition_values_options
-            .timestamp_timezone
-            .as_deref()
-            .map_or_else(MapToStructOptions::default, |timezone| {
-                MapToStructOptions::default().with_timestamp_timezone(timezone)
-            })
     }
 }
 
