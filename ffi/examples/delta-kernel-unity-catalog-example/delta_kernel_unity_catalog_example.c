@@ -220,17 +220,15 @@ int main(int argc, char* argv[])
 
     SharedSnapshot* snapshot = snapshot_res.ok;
 
-    HandleExclusiveUpdateTableTransactionBuilder txn_builder =
-        new_update_table_txn_builder(snapshot);
-    txn_builder = update_table_txn_builder_with_operation(
-        txn_builder, KernelUpdateTableOperationWrite);
     const char* engine_info = "uc_example_engine";
     KernelStringSlice engine_info_slice = { .ptr = engine_info, .len = strlen(engine_info) };
-    ExternResultHandleExclusiveUpdateTableTransactionBuilder builder_with_info_res =
-        update_table_txn_builder_with_engine_info(txn_builder, engine_info_slice, engine);
-    if (builder_with_info_res.tag != OkHandleExclusiveUpdateTableTransactionBuilder) {
-        print_error("Failed to set builder engine info", (Error*)builder_with_info_res.err);
-        free_error((Error*)builder_with_info_res.err);
+    ExternResultHandleExclusiveUpdateTableTransactionBuilder builder_res =
+        new_update_table_txn_builder(
+            snapshot, KernelUpdateTableOperationWrite, engine_info_slice,
+            /* data_change */ false, engine);
+    if (builder_res.tag != OkHandleExclusiveUpdateTableTransactionBuilder) {
+        print_error("Failed to create transaction builder", (Error*)builder_res.err);
+        free_error((Error*)builder_res.err);
         free_engine(engine);
         free_uc_committer(uc_committer);
         free_uc_commit_client(uc_client);
@@ -239,7 +237,7 @@ int main(int argc, char* argv[])
     }
     ExternResultHandleExclusiveUpdateTableTransaction txn_res =
       update_table_txn_builder_build_with_committer(
-          builder_with_info_res.ok, engine, uc_committer);
+          builder_res.ok, engine, uc_committer);
 
     if (txn_res.tag != OkHandleExclusiveUpdateTableTransaction) {
         print_error("Failed to create transaction with UC committer", (Error*)txn_res.err);
@@ -252,7 +250,8 @@ int main(int argc, char* argv[])
 
     HandleExclusiveUpdateTableTransaction txn_with_info = txn_res.ok;
 
-    // In a real txn we could now add files using update_table_txn_add_files().
+    // This example commits no files. To append new records with update_table_txn_add_files(),
+    // construct the builder with data_change=true.
     // calling commit here will end up calling our callback
     ExternResultHandleExclusiveCommittedTransaction commit_res = update_table_txn_commit(txn_with_info, engine);
 

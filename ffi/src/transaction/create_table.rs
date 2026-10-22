@@ -16,6 +16,32 @@ pub struct ExclusiveCreateTableTransaction;
 // Create-table transaction FFI functions
 // ============================================================================
 
+/// Adds a transaction identifier for application `app_id` at `version` before table creation.
+///
+/// Returns the updated transaction handle, or an error if `app_id` is not valid UTF-8. The
+/// action's `lastUpdated` uses the transaction's commit timestamp. Each application id may occur
+/// only once, including ids added through the builder; duplicates are rejected at commit.
+///
+/// # Safety
+///
+/// `txn` and `engine` must be [valid][Handle#Validity] handles, and `app_id` must be a valid string
+/// slice. This call borrows `engine` and `app_id` for the call and unconditionally consumes `txn`,
+/// including on error. The caller must commit or free the returned handle.
+#[no_mangle]
+pub unsafe extern "C" fn create_table_txn_with_transaction_id(
+    txn: Handle<ExclusiveCreateTableTransaction>,
+    app_id: KernelStringSlice,
+    version: i64,
+    engine: Handle<SharedExternEngine>,
+) -> ExternResult<Handle<ExclusiveCreateTableTransaction>> {
+    let txn = unsafe { *txn.into_inner() };
+    let engine = unsafe { engine.as_ref() };
+    let app_id: KernelResult<String> = unsafe { TryFromStringSlice::try_from_slice(&app_id) };
+    app_id
+        .map(|app_id| Box::new(txn.with_transaction_id(app_id, version)).into())
+        .into_extern_result(&engine)
+}
+
 /// Replaces create-table operation metrics after writing and before commit.
 ///
 /// # Safety
@@ -157,23 +183,6 @@ pub unsafe extern "C" fn create_table_txn_commit(
 #[handle_descriptor(target=CreateTableTransactionBuilder, mutable=true, sized=true)]
 pub struct ExclusiveCreateTableTransactionBuilder;
 
-/// Sets whether files added during creation represent a logical data change.
-///
-/// `data_change` defaults to `true`. Returns the updated builder handle. Consecutive calls
-/// replace the previous value, which is preserved through commit even when no files are added.
-///
-/// # Safety
-///
-/// `builder` must be valid. This unconditionally consumes `builder`.
-#[no_mangle]
-pub unsafe extern "C" fn create_table_txn_builder_with_data_change(
-    builder: Handle<ExclusiveCreateTableTransactionBuilder>,
-    data_change: bool,
-) -> Handle<ExclusiveCreateTableTransactionBuilder> {
-    let builder = unsafe { *builder.into_inner() };
-    Box::new(builder.with_data_change(data_change)).into()
-}
-
 /// Attaches a correlation identifier to create transaction metric events.
 ///
 /// Repeated calls replace the previous value. An empty value clears it.
@@ -190,7 +199,7 @@ pub unsafe extern "C" fn create_table_txn_builder_with_correlation_id(
 ) -> ExternResult<Handle<ExclusiveCreateTableTransactionBuilder>> {
     let builder = unsafe { *builder.into_inner() };
     let engine = unsafe { engine.as_ref() };
-    let correlation_id: Result<String> =
+    let correlation_id: KernelResult<String> =
         unsafe { TryFromStringSlice::try_from_slice(&correlation_id) };
     correlation_id
         .map(|id| Box::new(builder.with_correlation_id(id)).into())
@@ -301,7 +310,7 @@ pub unsafe extern "C" fn create_table_txn_builder_with_transaction_id(
 ) -> ExternResult<Handle<ExclusiveCreateTableTransactionBuilder>> {
     let builder = unsafe { *builder.into_inner() };
     let engine = unsafe { engine.as_ref() };
-    let app_id: Result<String> = unsafe { TryFromStringSlice::try_from_slice(&app_id) };
+    let app_id: KernelResult<String> = unsafe { TryFromStringSlice::try_from_slice(&app_id) };
     app_id
         .map(|app_id| Box::new(builder.with_transaction_id(app_id, version)).into())
         .into_extern_result(&engine)
@@ -349,7 +358,7 @@ pub unsafe extern "C" fn create_table_txn_builder_with_domain_metadata(
 pub(super) unsafe fn collect_create_table_columns(
     columns: *const KernelStringSlice,
     num_columns: usize,
-) -> Result<Vec<String>> {
+) -> KernelResult<Vec<String>> {
     if num_columns == 0 {
         return Ok(Vec::new());
     }
@@ -418,14 +427,18 @@ pub unsafe extern "C" fn create_table_txn_builder_with_partition_columns(
 /// Applies a parsed layout while preserving consuming-handle semantics on parse failure.
 pub(super) fn create_table_txn_builder_with_data_layout_impl(
     builder: CreateTableTransactionBuilder,
-    layout: Result<DataLayout>,
-) -> Result<Handle<ExclusiveCreateTableTransactionBuilder>> {
+    layout: KernelResult<DataLayout>,
+) -> KernelResult<Handle<ExclusiveCreateTableTransactionBuilder>> {
     Ok(Box::new(builder.with_data_layout(layout?)).into())
 }
 
 /// Create a new [`CreateTableTransactionBuilder`] for creating a Delta table at the given path.
 ///
 /// `schema` supplies the table schema through the [`EngineSchema`] visitor callback.
+/// `engine_info` identifies the connector. `data_change` determines whether initial Add actions
+/// change logical data. Use `true` when inserting initial rows, such as `CREATE TABLE AS SELECT`,
+/// and `false` for schema-only creation with no staged files. Both values are immutable. An empty
+/// creation may also use `true`; the supplied value is preserved through commit.
 ///
 /// The returned builder can be configured with [`create_table_txn_builder_with_table_property`]
 /// before building with [`create_table_txn_builder_build`]. The engine is only used for error
@@ -440,24 +453,27 @@ pub unsafe extern "C" fn new_create_table_txn_builder(
     path: KernelStringSlice,
     schema: &EngineSchema,
     engine_info: KernelStringSlice,
+    data_change: bool,
     engine: Handle<SharedExternEngine>,
 ) -> ExternResult<Handle<ExclusiveCreateTableTransactionBuilder>> {
     let engine = unsafe { engine.as_ref() };
     let path = unsafe { TryFromStringSlice::try_from_slice(&path) };
     let info = unsafe { TryFromStringSlice::try_from_slice(&engine_info) };
-    new_create_table_txn_builder_impl(path, schema, info).into_extern_result(&engine)
+    new_create_table_txn_builder_impl(path, schema, info, data_change).into_extern_result(&engine)
 }
 
 fn new_create_table_txn_builder_impl(
-    path: Result<&str>,
+    path: KernelResult<&str>,
     schema: &EngineSchema,
-    engine_info: Result<&str>,
-) -> Result<Handle<ExclusiveCreateTableTransactionBuilder>> {
+    engine_info: KernelResult<&str>,
+    data_change: bool,
+) -> KernelResult<Handle<ExclusiveCreateTableTransactionBuilder>> {
     let schema = decode_engine_schema(schema)?;
     let builder = delta_kernel::transaction::create_table::create_table(
         path?,
         Arc::new(schema),
         engine_info?.to_string(),
+        data_change,
     );
     Ok(Box::new(builder).into())
 }
@@ -489,9 +505,9 @@ pub unsafe extern "C" fn create_table_txn_builder_with_table_property(
 
 fn create_table_txn_builder_with_table_property_impl(
     builder: CreateTableTransactionBuilder,
-    key: Result<String>,
-    value: Result<String>,
-) -> Result<Handle<ExclusiveCreateTableTransactionBuilder>> {
+    key: KernelResult<String>,
+    value: KernelResult<String>,
+) -> KernelResult<Handle<ExclusiveCreateTableTransactionBuilder>> {
     let builder = builder.with_table_properties([(key?, value?)]);
     Ok(Box::new(builder).into())
 }
@@ -541,7 +557,7 @@ fn create_table_txn_builder_build_impl(
     builder: CreateTableTransactionBuilder,
     committer: Box<dyn Committer>,
     extern_engine: &dyn ExternEngine,
-) -> Result<Handle<ExclusiveCreateTableTransaction>> {
+) -> KernelResult<Handle<ExclusiveCreateTableTransaction>> {
     let engine = extern_engine.engine();
     let create_txn = builder.build(engine.as_ref(), committer)?;
     Ok(Box::new(create_txn).into())

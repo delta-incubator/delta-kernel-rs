@@ -9,7 +9,7 @@ use delta_kernel::engine::arrow_data::ArrowEngineData;
 use delta_kernel::schema::{schema_ref, MetadataColumnSpec};
 use delta_kernel::transaction::create_table::create_table as kernel_create_table;
 use delta_kernel::transaction::{RowTrackingMetadataColumns, UpdateTableOperation};
-use delta_kernel::{Engine, Result, Snapshot};
+use delta_kernel::{Engine, KernelResult, Snapshot};
 use test_utils::{
     assert_result_error_with_message, insert_data, into_record_batch, read_scan, test_table_setup,
     test_table_setup_mt,
@@ -63,7 +63,7 @@ mod row_tracking_preservation {
         table_url: &Url,
         commit_version: u64,
         expected: Option<&str>,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> KernelResult<()> {
         let commit_infos = read_actions_from_commit(table_url, commit_version, "commitInfo")?;
         assert_eq!(commit_infos.len(), 1);
         assert_eq!(
@@ -80,7 +80,7 @@ mod row_tracking_preservation {
     #[tokio::test]
     async fn insert_commit_info_preservation_tag_requires_row_tracking_enabled(
         #[case] test_case: CommitInfoTagTestCase,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> KernelResult<()> {
         // === Create a table in the requested Row Tracking state ===
         let (_temp_dir, table_path, engine) = test_table_setup()?;
         let table_url = Url::from_directory_path(&table_path).unwrap();
@@ -88,6 +88,7 @@ mod row_tracking_preservation {
             table_path.as_str(),
             schema_ref! { nullable "number": INTEGER },
             "Test/1.0",
+            true,
         )
         .with_table_properties(test_case.create_table_properties().iter().copied())
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
@@ -119,14 +120,14 @@ mod row_tracking_preservation {
     }
 
     #[test]
-    fn create_table_does_not_emit_row_tracking_preservation_tag(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    fn create_table_does_not_emit_row_tracking_preservation_tag() -> KernelResult<()> {
         let (_temp_dir, table_path, engine) = test_table_setup()?;
         let table_url = Url::from_directory_path(&table_path).unwrap();
         let commit_version = kernel_create_table(
             table_path.as_str(),
             schema_ref! { nullable "number": INTEGER },
             "Test/1.0",
+            true,
         )
         .with_table_properties([("delta.enableRowTracking", "true")])
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
@@ -139,21 +140,21 @@ mod row_tracking_preservation {
     }
 
     #[test]
-    fn alter_table_emits_row_tracking_preservation_tag() -> Result<(), Box<dyn std::error::Error>> {
+    fn alter_table_emits_row_tracking_preservation_tag() -> KernelResult<()> {
         let (_temp_dir, table_path, engine) = test_table_setup()?;
         let table_url = Url::from_directory_path(&table_path).unwrap();
         let snapshot = kernel_create_table(
             table_path.as_str(),
             schema_ref! { nullable "number": INTEGER },
             "Test/1.0",
+            true,
         )
         .with_table_properties([("delta.enableRowTracking", "true")])
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
         .commit(engine.as_ref())?
         .unwrap_post_commit_snapshot();
         let commit_version = snapshot
-            .transaction_builder()
-            .with_operation(UpdateTableOperation::AlterTable)
+            .update_table(UpdateTableOperation::AlterTable, "test-engine", false)
             .add_column(StructField::nullable("added", DataType::INTEGER))
             .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
             .commit(engine.as_ref())?
@@ -171,7 +172,7 @@ mod row_tracking_preservation {
     fn commit_info_preservation_tag_merges_connector_commit_info(
         #[case] test_case: ConnectorCommitInfoTestCase,
         #[values(false, true)] set_commit_info_after_build: bool,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> KernelResult<()> {
         // === Create a Row Tracking table ===
         let (_temp_dir, table_path, engine) = test_table_setup()?;
         let table_url = Url::from_directory_path(&table_path).unwrap();
@@ -179,6 +180,7 @@ mod row_tracking_preservation {
             table_path.as_str(),
             schema_ref! { nullable "number": INTEGER },
             "Test/1.0",
+            true,
         )
         .with_table_properties([("delta.enableRowTracking", "true")])
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
@@ -189,9 +191,7 @@ mod row_tracking_preservation {
         let (connector_commit_info, connector_commit_info_schema) =
             test_case.connector_commit_info()?;
         let commit_info = Box::new(ArrowEngineData::new(connector_commit_info));
-        let builder = snapshot
-            .transaction_builder()
-            .with_operation(UpdateTableOperation::Write);
+        let builder = snapshot.update_table(UpdateTableOperation::Write, "test-engine", true);
         let txn = if set_commit_info_after_build {
             builder
                 .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
@@ -239,9 +239,7 @@ mod row_tracking_preservation {
 
     impl ConnectorCommitInfoTestCase {
         /// Returns `(connector_commit_info, connector_commit_info_schema)` for this case.
-        fn connector_commit_info(
-            self,
-        ) -> Result<(RecordBatch, SchemaRef), Box<dyn std::error::Error>> {
+        fn connector_commit_info(self) -> KernelResult<(RecordBatch, SchemaRef)> {
             match self {
                 Self::PopulatedTags => {
                     let mut tags =
@@ -351,12 +349,12 @@ mod row_tracking_preservation {
     #[tokio::test(flavor = "multi_thread")]
     async fn remove_files_requires_row_tracking_preservation_acknowledgment(
         #[case] test_case: RemoveTestCase,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> KernelResult<()> {
         // === Create the table and insert data ===
         let (_temp_dir, table_path, engine) = test_table_setup_mt()?;
         let schema = schema_ref! { nullable "number": INTEGER };
         let table_url = Url::from_directory_path(&table_path).unwrap();
-        kernel_create_table(table_path.as_str(), schema.clone(), "Test/1.0")
+        kernel_create_table(table_path.as_str(), schema.clone(), "Test/1.0", true)
             .with_table_properties(test_case.create_table_properties().iter().copied())
             .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
             .commit(engine.as_ref())?
@@ -390,9 +388,7 @@ mod row_tracking_preservation {
             .unwrap()?
             .scan_files;
         let mut txn = snapshot
-            .transaction_builder()
-            .with_operation(UpdateTableOperation::Write)
-            .with_data_change(true)
+            .update_table(UpdateTableOperation::Write, "test-engine", true)
             .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?;
         txn.remove_files(scan_files);
         if test_case.acknowledges_preservation() {
@@ -415,8 +411,7 @@ mod row_tracking_preservation {
     }
 
     #[tokio::test]
-    async fn deletion_vector_update_requires_preservation_acknowledgment(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    async fn deletion_vector_update_requires_preservation_acknowledgment() -> KernelResult<()> {
         // === Create a Row Tracking table with deletion vectors and insert data ===
         let tmp_dir = tempfile::tempdir()?;
         let (_schema, table_url, engine, store) = setup_number_table_with_features(
@@ -476,11 +471,11 @@ mod row_tracking_preservation {
     #[tokio::test(flavor = "multi_thread")]
     async fn optimize_preserves_row_tracking_metadata_in_data_and_checkpoint(
         #[case] table_properties: &[(&str, &str)],
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> KernelResult<()> {
         // === Write two source files ===
         let (_temp_dir, table_path, engine) = test_table_setup_mt()?;
         let schema = schema_ref! { nullable "number": INTEGER };
-        let snapshot = kernel_create_table(table_path.as_str(), schema, "Test/1.0")
+        let snapshot = kernel_create_table(table_path.as_str(), schema, "Test/1.0", true)
             .with_table_properties(table_properties.iter().copied())
             .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
             .commit(engine.as_ref())?
@@ -580,7 +575,7 @@ mod row_tracking_preservation {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn optimize_preserves_row_tracking_metadata_after_deletion_vector_update(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> KernelResult<()> {
         // === Write the source file ===
         let (_temp_dir, table_path, engine) = test_table_setup_mt()?;
         let table_url = Url::from_directory_path(&table_path).unwrap();
@@ -588,6 +583,7 @@ mod row_tracking_preservation {
             table_path.as_str(),
             schema_ref! { nullable "number": INTEGER },
             "Test/1.0",
+            true,
         )
         .with_table_properties([
             ("delta.enableDeletionVectors", "true"),
@@ -607,8 +603,7 @@ mod row_tracking_preservation {
         // === Delete rows 20 and 40 with a deletion vector ===
         let mut txn = source_snapshot
             .clone()
-            .transaction_builder()
-            .with_operation(UpdateTableOperation::Delete)
+            .update_table(UpdateTableOperation::Delete, "test-engine", true)
             .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?;
         let write_context = txn.write_state()?.write_context_builder().build()?;
         let mut deletion_vector = KernelDeletionVector::new();
@@ -680,12 +675,10 @@ mod row_tracking_preservation {
         snapshot: Arc<Snapshot>,
         engine: &Arc<DefaultEngine<TokioMultiThreadExecutor>>,
         batch: RecordBatch,
-    ) -> Result<Arc<Snapshot>> {
+    ) -> KernelResult<Arc<Snapshot>> {
         let source_files = get_scan_files(snapshot.clone(), engine.as_ref())?;
         let mut txn = snapshot
-            .transaction_builder()
-            .with_operation(UpdateTableOperation::Optimize)
-            .with_data_change(false)
+            .update_table(UpdateTableOperation::Optimize, "test-engine", false)
             .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?;
         let write_context = txn
             .write_state()?
@@ -758,20 +751,20 @@ mod row_tracking_preservation {
 fn write_context_row_tracking_columns_respect_iceberg_compat_v3(
     #[case] table_properties: &[(&str, &str)],
     #[case] expected_error: Option<&str>,
-) -> Result<()> {
+) -> KernelResult<()> {
     let (_temp_dir, table_path, engine) = test_table_setup()?;
     let snapshot = kernel_create_table(
         table_path.as_str(),
         schema_ref! { nullable "number": INTEGER },
         "Test/1.0",
+        true,
     )
     .with_table_properties(table_properties.iter().copied())
     .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
     .commit(engine.as_ref())?
     .unwrap_post_commit_snapshot();
     let txn = snapshot
-        .transaction_builder()
-        .with_operation(UpdateTableOperation::Write)
+        .update_table(UpdateTableOperation::Write, "test-engine", true)
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?;
     let result = txn
         .write_state()?
@@ -794,11 +787,11 @@ fn write_context_row_tracking_columns_respect_iceberg_compat_v3(
 #[tokio::test(flavor = "multi_thread")]
 async fn write_context_maps_row_tracking_metadata_to_physical(
     #[values("none", "name", "id")] column_mapping_mode: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> KernelResult<()> {
     // === Create table and insert data ===
     let (_temp_dir, table_path, engine) = test_table_setup_mt()?;
     let schema = schema_ref! { nullable "number": INTEGER };
-    let snapshot = kernel_create_table(table_path.as_str(), schema, "Test/1.0")
+    let snapshot = kernel_create_table(table_path.as_str(), schema, "Test/1.0", true)
         .with_table_properties([
             ("delta.columnMapping.mode", column_mapping_mode),
             ("delta.enableRowTracking", "true"),
@@ -849,8 +842,7 @@ async fn write_context_maps_row_tracking_metadata_to_physical(
     // === Build the write context ===
     let txn = source_snapshot
         .clone()
-        .transaction_builder()
-        .with_operation(UpdateTableOperation::Write)
+        .update_table(UpdateTableOperation::Write, "test-engine", true)
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?;
     let write_context = txn
         .write_state()?

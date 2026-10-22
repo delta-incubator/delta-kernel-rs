@@ -1,27 +1,36 @@
 use std::sync::Arc;
 
 use bytes::Bytes;
+#[cfg(test)]
 use derive_more::Constructor;
+#[cfg(test)]
 use url::Url;
 
-use super::{get_bytes, put_bytes, read_files_arrow};
+use super::get_bytes;
+#[cfg(test)]
+use super::{put_bytes, read_files_arrow};
 use crate::engine::arrow_conversion::TryFromArrow as _;
 use crate::engine::arrow_data::ArrowEngineData;
 use crate::engine::arrow_utils::{
     fixup_parquet_read, ordering_needs_row_indexes, parquet_read_plan, RowIndexBuilder,
 };
 use crate::engine::parquet_row_group_skipping::ParquetRowGroupSkipping;
-use crate::engine::{reader_options, writer_options};
+use crate::engine::reader_options;
+#[cfg(test)]
+use crate::engine::writer_options;
 use crate::object_store::DynObjectStore;
 use crate::parquet::arrow::arrow_reader::{ArrowReaderMetadata, ParquetRecordBatchReaderBuilder};
+#[cfg(test)]
 use crate::parquet::arrow::arrow_writer::ArrowWriter;
 use crate::schema::{SchemaRef, StructType};
 use crate::utils::FoldWithOption as _;
+#[cfg(test)]
 use crate::{
-    EngineData, FileDataReadResultIterator, FileMeta, FileSize, KernelResult, ParquetFooter,
-    ParquetHandler, PredicateRef, Result, ResultIteratorStatic,
+    EngineData, FileDataReadResultIterator, FileSize, KernelResultIteratorStatic, ParquetHandler,
 };
+use crate::{FileMeta, KernelResult, ParquetFooter, PredicateRef};
 
+#[cfg(test)]
 #[derive(Constructor)]
 pub(crate) struct SyncParquetHandler {
     store: Option<Arc<DynObjectStore>>,
@@ -58,13 +67,14 @@ pub(super) fn try_create_from_parquet(
     }))
 }
 
+#[cfg(test)]
 impl ParquetHandler for SyncParquetHandler {
     fn read_parquet_files(
         &self,
         files: &[FileMeta],
         schema: SchemaRef,
         predicate: Option<PredicateRef>,
-    ) -> Result<FileDataReadResultIterator> {
+    ) -> KernelResult<FileDataReadResultIterator> {
         let iter = read_files_arrow(
             self.store.as_ref(),
             files,
@@ -87,8 +97,8 @@ impl ParquetHandler for SyncParquetHandler {
     fn write_parquet_file(
         &self,
         location: Url,
-        mut data: ResultIteratorStatic<Box<dyn EngineData>>,
-    ) -> Result<FileSize> {
+        mut data: KernelResultIteratorStatic<Box<dyn EngineData>>,
+    ) -> KernelResult<FileSize> {
         let first_batch = data.next().ok_or_else(|| {
             crate::KernelError::generic("Cannot write parquet file with empty data iterator")
         })??;
@@ -115,7 +125,7 @@ impl ParquetHandler for SyncParquetHandler {
         Ok(size_in_bytes)
     }
 
-    fn read_parquet_footer(&self, file: &FileMeta) -> Result<ParquetFooter> {
+    fn read_parquet_footer(&self, file: &FileMeta) -> KernelResult<ParquetFooter> {
         parquet_footer(self.store.as_ref(), file)
     }
 }
@@ -144,7 +154,7 @@ mod tests {
     use crate::engine::arrow_conversion::TryIntoKernel as _;
     use crate::EngineData;
 
-    fn test_data_iter() -> ResultIteratorStatic<Box<dyn EngineData>> {
+    fn test_data_iter() -> KernelResultIteratorStatic<Box<dyn EngineData>> {
         let engine_data: Box<dyn EngineData> = Box::new(ArrowEngineData::new(
             RecordBatch::try_from_iter(vec![
                 (
@@ -253,7 +263,8 @@ mod tests {
         ));
 
         let batches = vec![Ok(batch1), Ok(batch2), Ok(batch3)];
-        let data_iter: ResultIteratorStatic<Box<dyn EngineData>> = Box::new(batches.into_iter());
+        let data_iter: KernelResultIteratorStatic<Box<dyn EngineData>> =
+            Box::new(batches.into_iter());
 
         handler.write_parquet_file(url.clone(), data_iter).unwrap();
         assert!(file_path.exists());

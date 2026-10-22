@@ -33,7 +33,7 @@ use crate::schema::{
 use crate::struct_patch::{project_struct_preserving_nulls, ProjectionStructPatchBuilder};
 use crate::table_features::ColumnMappingMode;
 use crate::utils::{require, FoldWithOption as _};
-use crate::{Engine, ExpressionEvaluator, KernelError, KernelResult, Result};
+use crate::{Engine, ExpressionEvaluator, KernelError, KernelResult};
 
 /// Read-time stats toggles consumed by [`ScanLogReplayProcessor`].
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
@@ -392,7 +392,7 @@ impl ScanLogReplayProcessor {
     /// undefined behaviour!
     #[internal_api]
     #[allow(unused)]
-    pub(crate) fn into_serializable_state(self) -> Result<SerializableScanState> {
+    pub(crate) fn into_serializable_state(self) -> KernelResult<SerializableScanState> {
         let StateInfo {
             logical_schema,
             physical_schema,
@@ -461,7 +461,7 @@ impl ScanLogReplayProcessor {
     pub(crate) fn from_serializable_state(
         engine: &dyn Engine,
         state: SerializableScanState,
-    ) -> Result<Self> {
+    ) -> KernelResult<Self> {
         // Deserialize internal state from json
         let internal_state: InternalScanState = serde_json::from_slice(&state.internal_state_blob)
             .map_err(KernelError::MalformedJson)?;
@@ -546,7 +546,7 @@ impl ScanLogReplayProcessor {
     fn project_stats_output(
         &self,
         transformed_actions: Box<dyn EngineData>,
-    ) -> Result<Box<dyn EngineData>> {
+    ) -> KernelResult<Box<dyn EngineData>> {
         match &self.stats_output_projection {
             Some(projection) => projection.evaluate(transformed_actions.as_ref()),
             None => Ok(transformed_actions),
@@ -777,7 +777,7 @@ impl<D: Deduplicator> RowVisitor for AddRemoveDedupVisitor<'_, D> {
         }
     }
 
-    fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> Result<()> {
+    fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> KernelResult<()> {
         let start = std::time::Instant::now();
 
         let is_log_batch = self.deduplicator.is_log_batch();
@@ -876,7 +876,7 @@ fn build_stats_output_projection(
     engine: &dyn Engine,
     input_schema: SchemaRef,
     output_stats_schema: Option<&StructType>,
-) -> Result<Option<Arc<dyn ExpressionEvaluator>>> {
+) -> KernelResult<Option<Arc<dyn ExpressionEvaluator>>> {
     let input_stats_schema =
         input_schema
             .field(STATS_PARSED_NAME)
@@ -1030,7 +1030,10 @@ impl ParallelLogReplayProcessor for ScanLogReplayProcessor {
         fields(enable_call_frame),
         err
     )]
-    fn process_actions_batch_parallel(&self, actions_batch: ActionsBatch) -> Result<Self::Output> {
+    fn process_actions_batch_parallel(
+        &self,
+        actions_batch: ActionsBatch,
+    ) -> KernelResult<Self::Output> {
         let ActionsBatch {
             actions,
             is_log_batch,
@@ -1132,7 +1135,7 @@ impl ScanLogReplayProcessor {
     pub(crate) fn process_actions_batch_sequential(
         &mut self,
         actions_batch: ActionsBatch,
-    ) -> Result<ScanMetadata> {
+    ) -> KernelResult<ScanMetadata> {
         let ActionsBatch {
             actions,
             is_log_batch,
@@ -1224,7 +1227,7 @@ impl ScanLogReplayProcessor {
         Ok(scan_metadata)
     }
 
-    fn build_selection_vector(&self, batch: &dyn EngineData) -> Result<Vec<bool>> {
+    fn build_selection_vector(&self, batch: &dyn EngineData) -> KernelResult<Vec<bool>> {
         match &self.data_skipping_filter {
             Some(filter) => filter.apply(batch),
             None => Ok(vec![true; batch.len()]),
@@ -1313,7 +1316,8 @@ mod tests {
     use crate::table_features::ColumnMappingMode;
     use crate::unit_test_utils::assert_result_error_with_message;
     use crate::{
-        EngineData, Expression as Expr, ExpressionEvaluator, ExpressionRef, KernelError, Result,
+        EngineData, Expression as Expr, ExpressionEvaluator, ExpressionRef, KernelError,
+        KernelResult,
     };
 
     /// Test evaluator that fails once before delegating, exposing both timed transform attempts.
@@ -1325,7 +1329,7 @@ mod tests {
 
     impl ExpressionEvaluator for RetryOnceEvaluator {
         /// Delays each attempt for deterministic timing, then triggers exactly one retry.
-        fn evaluate(&self, batch: &dyn EngineData) -> Result<Box<dyn EngineData>> {
+        fn evaluate(&self, batch: &dyn EngineData) -> KernelResult<Box<dyn EngineData>> {
             std::thread::sleep(self.delay);
             if self.calls.fetch_add(1, Ordering::Relaxed) == 0 {
                 Err(KernelError::ParseError(
@@ -1357,7 +1361,7 @@ mod tests {
             _evaluator: &DirectPredicateEvaluator<'_>,
             _exprs: &[Expr],
             _inverted: bool,
-        ) -> Result<Option<bool>> {
+        ) -> KernelResult<Option<bool>> {
             unimplemented!()
         }
 
@@ -1632,7 +1636,9 @@ mod tests {
     #[case::supported_not_enabled(RowTrackingState::SupportedNotEnabled)]
     #[case::enabled(RowTrackingState::Enabled)]
     #[case::suspended(RowTrackingState::Suspended)]
-    fn test_row_commit_version_patch(#[case] row_tracking_state: RowTrackingState) -> Result<()> {
+    fn test_row_commit_version_patch(
+        #[case] row_tracking_state: RowTrackingState,
+    ) -> KernelResult<()> {
         let schema: SchemaRef = schema_ref! { nullable "value": INTEGER };
         let state_info = get_state_info(
             schema,
@@ -2168,7 +2174,7 @@ mod tests {
         obj["new_field"] = serde_json::json!("my_new_value");
         let invalid_blob = obj.to_string();
 
-        let res: Result<InternalScanState, _> = serde_json::from_str(&invalid_blob);
+        let res: KernelResult<InternalScanState, _> = serde_json::from_str(&invalid_blob);
         assert_result_error_with_message(res, "unknown field");
     }
 
@@ -2185,7 +2191,7 @@ mod tests {
         obj["new_field"] = serde_json::json!("my_new_value");
         let invalid_blob = obj.to_string();
 
-        let res: Result<SerializableScanState, _> = serde_json::from_str(&invalid_blob);
+        let res: KernelResult<SerializableScanState, _> = serde_json::from_str(&invalid_blob);
         assert_result_error_with_message(res, "unknown field");
     }
 

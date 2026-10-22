@@ -39,7 +39,7 @@ use crate::table_features::TableFeature;
 use crate::utils::require;
 #[cfg(feature = "adaptive-metadata-in-dev")]
 use crate::FileMeta;
-use crate::{DataType, Engine, Expression, KernelResult, Result};
+use crate::{DataType, Engine, Expression, KernelResult};
 
 // =============================================================================
 // Update table transactions only
@@ -100,7 +100,7 @@ impl<MODE: ExecutionMode> Transaction<UpdateTable, MODE> {
     pub(crate) fn with_row_tracking_high_water_mark(
         mut self,
         high_water_mark: i64,
-    ) -> Result<Self> {
+    ) -> KernelResult<Self> {
         if self.provided_row_tracking_high_water_mark.is_some() {
             return Err(KernelError::generic(
                 "Row-tracking high-water mark already specified in this transaction",
@@ -120,7 +120,7 @@ impl<MODE: ExecutionMode> Transaction<UpdateTable, MODE> {
     /// Returns an error if the table does not support the `adaptiveMetadata-preview` feature, or if
     /// a manifest (content-tree) commit was already staged.
     #[cfg(feature = "adaptive-metadata-in-dev")]
-    pub fn with_root_manifest_file(mut self, file: FileMeta) -> Result<Self> {
+    pub fn with_root_manifest_file(mut self, file: FileMeta) -> KernelResult<Self> {
         require!(
             !matches!(self.manifest_write, Some(ManifestWrite::Commit(_))),
             KernelError::invalid_transaction_state(
@@ -164,7 +164,7 @@ impl Transaction<UpdateTable, Imperative> {
     pub(crate) fn with_manifest_commit(
         &mut self,
         engine: &dyn Engine,
-    ) -> Result<&mut ManifestCommitState> {
+    ) -> KernelResult<&mut ManifestCommitState> {
         match &self.manifest_write {
             Some(ManifestWrite::RootFile(_)) => {
                 return Err(KernelError::invalid_transaction_state(
@@ -212,13 +212,19 @@ impl Transaction<UpdateTable, Imperative> {
     /// # use delta_kernel::Engine;
     /// # use delta_kernel::snapshot::Snapshot;
     /// # use delta_kernel::committer::FileSystemCommitter;
-    /// # fn example(engine: Arc<dyn Engine>, table_url: url::Url) -> delta_kernel::Result<()> {
+    /// # fn example(
+    /// #     engine: Arc<dyn Engine>,
+    /// #     table_url: url::Url,
+    /// # ) -> delta_kernel::KernelResult<()> {
     /// // Create a snapshot and transaction
     /// let snapshot = Snapshot::builder_for(table_url).build(engine.as_ref())?;
     /// let mut txn = snapshot
     ///     .clone()
-    ///     .transaction_builder()
-    ///     .with_operation(delta_kernel::transaction::UpdateTableOperation::Write)
+    ///     .update_table(
+    ///         delta_kernel::transaction::UpdateTableOperation::Write,
+    ///         "my-app/1.0",
+    ///         /* data_change */ true,
+    ///     )
     ///     .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?;
     ///
     /// // Get file metadata from a scan
@@ -264,8 +270,8 @@ impl Transaction<UpdateTable, Imperative> {
     /// txn.update_deletion_vectors(dv_map, files_iter)?;
     /// ```
     pub fn scan_metadata_to_engine_data(
-        scan_metadata: impl Iterator<Item = Result<crate::scan::ScanMetadata>>,
-    ) -> impl Iterator<Item = Result<FilteredEngineData>> {
+        scan_metadata: impl Iterator<Item = KernelResult<crate::scan::ScanMetadata>>,
+    ) -> impl Iterator<Item = KernelResult<FilteredEngineData>> {
         scan_metadata.map(|result| result.map(|metadata| metadata.scan_files))
     }
 
@@ -308,8 +314,7 @@ impl Transaction<UpdateTable, Imperative> {
     /// ```rust,ignore
     /// let mut txn = snapshot
     ///     .clone()
-    ///     .transaction_builder()
-    ///     .with_operation(UpdateTableOperation::Update)
+    ///     .update_table(UpdateTableOperation::Update, "my-app/1.0", /* data_change */ true)
     ///     .build(engine, Box::new(FileSystemCommitter::new()))?;
     ///
     /// let scan = snapshot.scan_builder().build()?;
@@ -337,8 +342,8 @@ impl Transaction<UpdateTable, Imperative> {
     pub(crate) fn update_deletion_vectors(
         &mut self,
         new_dv_descriptors: HashMap<String, DeletionVectorDescriptor>,
-        existing_data_files: impl Iterator<Item = Result<FilteredEngineData>>,
-    ) -> Result<()> {
+        existing_data_files: impl Iterator<Item = KernelResult<FilteredEngineData>>,
+    ) -> KernelResult<()> {
         if self.is_create_table() {
             return Err(KernelError::generic(
                 "Deletion vector operations require an existing table",
@@ -685,7 +690,7 @@ impl FilteredRowVisitor for DvMatchVisitor<'_> {
         &mut self,
         getters: &[&'a dyn GetData<'a>],
         rows: RowIndexIterator<'_>,
-    ) -> Result<()> {
+    ) -> KernelResult<()> {
         static DV_SCHEMA_FIELDS: LazyLock<Vec<StructField>> = LazyLock::new(|| {
             DeletionVectorDescriptor::to_schema()
                 .into_fields()

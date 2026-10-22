@@ -11,7 +11,7 @@ pub mod update_table;
 
 use std::sync::Arc;
 
-use self::state::TransactionBuilderState;
+pub(super) use self::state::TransactionBuilderState;
 use crate::actions::DomainMetadata;
 use crate::schema::SchemaRef;
 use crate::transaction::commit_info::collect_operation_metadata;
@@ -33,14 +33,14 @@ pub trait TransactionType: private::Sealed {
 /// Shared setters preserve the transaction type. Constructors, type-specific setters, and
 /// `build` are provided by the specialized implementations for [`CreateTable`] and [`UpdateTable`].
 /// Use [`create_table`](super::create_table::create_table) or
-/// [`Snapshot::transaction_builder`](crate::Snapshot::transaction_builder) to obtain a builder.
+/// [`Snapshot::update_table`](crate::Snapshot::update_table) to obtain a builder.
 ///
-/// Create-table builders cannot configure existing-table operations:
+/// The operation cannot be changed on a builder:
 ///
 /// ```compile_fail,E0599
-/// use delta_kernel::transaction::{CreateTable, TransactionBuilder, UpdateTableOperation};
+/// use delta_kernel::transaction::{TransactionBuilder, UpdateTableOperation};
 ///
-/// fn configure(builder: TransactionBuilder<CreateTable>) {
+/// fn configure(builder: TransactionBuilder) {
 ///     let _ = builder.with_operation(UpdateTableOperation::Write);
 /// }
 /// ```
@@ -60,20 +60,6 @@ pub struct TransactionBuilder<T: TransactionType = UpdateTable> {
 }
 
 impl<T: TransactionType> TransactionBuilder<T> {
-    /// Sets whether file actions represent a logical data change and returns the updated builder.
-    ///
-    /// `true` indicates that the commit changes the table's logical contents. Use `false` for
-    /// metadata-only commits or rewrites that reorganize data without changing its contents.
-    /// Consecutive calls replace the previous value. Kernel preserves the supplied value through
-    /// commit, including empty commits, without comparing file contents to verify it.
-    ///
-    /// Transaction-specific defaults and inference are documented by the corresponding `build`
-    /// method.
-    pub fn with_data_change(mut self, data_change: bool) -> Self {
-        self.common_state.data_change = Some(data_change);
-        self
-    }
-
     /// Adds an application transaction identifier to emit as a `txn` action.
     ///
     /// Returns the updated builder. The action's `lastUpdated` value uses the transaction's commit
@@ -189,9 +175,11 @@ mod tests {
     }
 
     impl TransactionBuilder<CustomType> {
-        fn with_test_engine_info(mut self, engine_info: &str) -> Self {
-            self.common_state.engine_info = Some(engine_info.into());
-            self
+        fn new(engine_info: &str) -> Self {
+            Self {
+                common_state: TransactionBuilderState::new(engine_info.into(), false),
+                local_state: (),
+            }
         }
     }
 
@@ -204,7 +192,6 @@ mod tests {
             .with_operation_metrics([("numFiles", Some("3"))])
             .with_transaction_id("app", 7)
             .with_domain_metadata("app.domain", "{}")
-            .with_data_change(false)
             .with_commit_info(
                 string_array_to_engine_data(StringArray::from(vec!["tag"])),
                 schema_ref! { nullable "a": STRING },
@@ -212,17 +199,11 @@ mod tests {
     }
 
     #[test]
-    fn custom_type_supports_shared_and_specialized_setters_without_custom_state() {
-        let builder = TransactionBuilder::<CustomType> {
-            common_state: TransactionBuilderState::default(),
-            local_state: (),
-        };
-        let builder = configure_shared_setters(builder).with_test_engine_info("test-engine");
+    fn custom_type_supports_shared_setters_without_custom_state() {
+        let builder = TransactionBuilder::<CustomType>::new("test-engine");
+        let builder = configure_shared_setters(builder);
 
-        assert_eq!(
-            builder.common_state.engine_info.as_deref(),
-            Some("test-engine")
-        );
+        assert_eq!(builder.common_state.engine_info, "test-engine");
         assert_eq!(
             builder.common_state.correlation_id.as_deref(),
             Some("correlation")
@@ -240,7 +221,7 @@ mod tests {
             builder.common_state.domain_metadata_additions[0].domain(),
             "app.domain"
         );
-        assert_eq!(builder.common_state.data_change, Some(false));
+        assert!(!builder.common_state.data_change);
         let (commit_info, schema) = builder.common_state.engine_commit_info.as_ref().unwrap();
         assert_eq!(commit_info.len(), 1);
         assert_eq!(
