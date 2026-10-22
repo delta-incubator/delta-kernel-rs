@@ -39,6 +39,9 @@ pub mod rest_store;
 pub mod stats;
 pub mod storage;
 
+#[cfg(test)]
+mod stats_verifier_tests;
+
 /// Converts a Stream-producing future to a synchronous iterator.
 ///
 /// This method performs the initial blocking call to extract the stream from the future, and each
