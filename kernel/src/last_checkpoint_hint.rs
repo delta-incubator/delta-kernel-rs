@@ -1,5 +1,5 @@
-//! Utilities for reading the `_last_checkpoint` file. Maybe this file should instead go under
-//! log_segment module since it should only really be used there? as hint for listing?
+//! Utilities for reading and writing the `_last_checkpoint` file. Maybe this file should instead go
+//! under log_segment module since it should only really be used there? as hint for listing?
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -31,7 +31,14 @@ const LAST_CHECKPOINT_FILE_NAME: &str = "_last_checkpoint";
 const LAST_CHECKPOINT_SIDECARS_THRESHOLD: usize = 30;
 const LAST_CHECKPOINT_NON_FILE_ACTIONS_THRESHOLD: usize = 30;
 
+/// Maximum length of the `checkpointSchema` JSON that kernel writes. Matches the Delta-Spark
+/// default for `checkpointSchema.writeThresholdLength`, which omits a longer schema:
+/// <https://github.com/delta-io/delta/blob/ad9f4f0ac8eb907928deebdd47c9b66842843d16/spark/src/main/scala/org/apache/spark/sql/delta/sources/DeltaSQLConf.scala#L1435-L1441>
+const LAST_CHECKPOINT_SCHEMA_THRESHOLD_LENGTH: usize = 20_000;
+
 // Note: Schema can not be derived because the checkpoint schema is only known at runtime.
+// Absent optional fields are not serialized: Delta-Spark validates a `checksum` key whenever it is
+// present, so it rejects `"checksum": null`.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[cfg_attr(test, derive(Default))]
 #[serde(rename_all = "camelCase")]
@@ -44,19 +51,27 @@ pub(crate) struct LastCheckpointHint {
     pub(crate) size: i64,
     /// The number of fragments if the last checkpoint was written in multiple parts. `None` means
     /// a single-part or classic checkpoint (i.e. `numParts == 1`).
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) parts: Option<usize>,
     /// The number of bytes of the checkpoint.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) size_in_bytes: Option<i64>,
     /// The number of AddFile actions in the checkpoint.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) num_of_add_files: Option<i64>,
-    /// The schema of the checkpoint file.
+    /// The schema of the checkpoint file: of each part of a multi-part checkpoint, and of the
+    /// top-level file (not the sidecars) of a V2 checkpoint.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) checkpoint_schema: Option<SchemaRef>,
     /// The checksum of the last checkpoint JSON.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) checksum: Option<String>,
     /// Additional metadata about the last checkpoint.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) tags: Option<HashMap<String, String>>,
     /// For a V2 checkpoint, the embedded V2 checkpoint info. Identifies the specific checkpoint
     /// file the hint describes. Absent for V1 / classic checkpoints.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) v2_checkpoint: Option<LastCheckpointV2>,
 
     /// The checkpoint format the writer tagged this hint with, which
@@ -318,6 +333,50 @@ impl LastCheckpointHint {
         .drop_oversized_fields())
     }
 
+    /// Builds the hint for a classic-named, single-file checkpoint whose file has schema
+    /// `checkpoint_schema`. The hint omits a schema whose JSON is longer than
+    /// [`LAST_CHECKPOINT_SCHEMA_THRESHOLD_LENGTH`], so readers then read the checkpoint footer.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `checkpoint_schema` cannot be serialized to JSON.
+    pub(crate) fn for_classic_checkpoint(
+        version: Version,
+        size: i64,
+        size_in_bytes: i64,
+        num_of_add_files: i64,
+        checkpoint_schema: SchemaRef,
+    ) -> KernelResult<Self> {
+        let schema_length = serde_json::to_string(checkpoint_schema.as_ref())?.len();
+        let checkpoint_schema = if schema_length <= LAST_CHECKPOINT_SCHEMA_THRESHOLD_LENGTH {
+            Some(checkpoint_schema)
+        } else {
+            debug!(
+                version,
+                schema_length, "omitting _last_checkpoint checkpointSchema above threshold"
+            );
+            None
+        };
+        Ok(Self {
+            version,
+            size,
+            parts: None,
+            size_in_bytes: Some(size_in_bytes),
+            num_of_add_files: Some(num_of_add_files),
+            checkpoint_schema,
+            // TODO(#838): Write the `checksum` field.
+            checksum: None,
+            // TODO(#1054): Write the `tags` field.
+            tags: None,
+            // TODO(#1052): Write the `v2Checkpoint` field.
+            v2_checkpoint: None,
+            #[cfg(feature = "adaptive-metadata-in-dev")]
+            checkpoint_type: None,
+            #[cfg(feature = "adaptive-metadata-in-dev")]
+            amt_checkpoint: None,
+        })
+    }
+
     /// The version of the manifest commit carrying an AMT hint's checkpoint action, or `None` if
     /// this is not an AMT hint with `amtCheckpoint`.
     #[cfg(feature = "adaptive-metadata-in-dev")]
@@ -488,6 +547,17 @@ impl LastCheckpointHint {
         }
     }
 
+    /// Writes this hint to the `_last_checkpoint` file under `log_root`, replacing an existing
+    /// file.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the hint cannot be serialized or the write fails.
+    pub(crate) fn write(&self, storage: &dyn StorageHandler, log_root: &Url) -> KernelResult<()> {
+        let bytes = serde_json::to_vec(self)?;
+        storage.put(&Self::path(log_root)?, bytes.into(), true)
+    }
+
     /// Succinct summary string for logging purposes.
     fn summary(&self) -> String {
         format!(
@@ -568,12 +638,12 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
-    use crate::schema::schema;
+    use crate::engine::sync::SyncEngine;
+    use crate::object_store::memory::InMemory;
+    use crate::schema::{schema, schema_ref, DataType, StructField, StructType};
     use crate::table_features::TableFeature;
-    use crate::unit_test_utils::create_log_path;
-    use crate::KernelResultIteratorStatic;
-    #[cfg(feature = "adaptive-metadata-in-dev")]
-    use crate::{engine::sync::SyncEngine, object_store::memory::InMemory, Engine};
+    use crate::unit_test_utils::{create_log_path, load_test_table};
+    use crate::{Engine, KernelResultIteratorStatic};
 
     /// A real `_last_checkpoint` for a V2 checkpoint carries a `v2Checkpoint` object; we parse its
     /// `path` and file metadata. An empty `sidecarFiles` (a leaf checkpoint) parses to `Some([])`,
@@ -1235,6 +1305,94 @@ mod tests {
         .is_err());
     }
 
+    /// A one-field schema whose JSON form is `json_length` bytes long.
+    fn schema_with_json_length(json_length: usize) -> SchemaRef {
+        let schema = |name: String| {
+            Arc::new(StructType::new_unchecked([StructField::nullable(
+                name,
+                DataType::LONG,
+            )]))
+        };
+        let unnamed_length = serde_json::to_string(schema(String::new()).as_ref())
+            .unwrap()
+            .len();
+        schema("x".repeat(json_length - unnamed_length))
+    }
+
+    #[rstest]
+    #[case::at_threshold(LAST_CHECKPOINT_SCHEMA_THRESHOLD_LENGTH, true)]
+    #[case::above_threshold(LAST_CHECKPOINT_SCHEMA_THRESHOLD_LENGTH + 1, false)]
+    fn classic_checkpoint_hint_bounds_checkpoint_schema(
+        #[case] schema_json_length: usize,
+        #[case] expect_schema: bool,
+    ) {
+        let schema = schema_with_json_length(schema_json_length);
+        let hint = LastCheckpointHint::for_classic_checkpoint(1, 2, 3, 4, schema.clone()).unwrap();
+        assert_eq!(hint.checkpoint_schema, expect_schema.then_some(schema));
+    }
+
+    /// The written hint has `checkpointSchema` as a JSON object, no absent fields, and `version`
+    /// and `size` first, as Delta-Spark writes them. `try_read` parses it back to the same hint.
+    #[test]
+    fn classic_checkpoint_hint_round_trips_through_last_checkpoint_file() {
+        let log_root = Url::parse("memory:///_delta_log/").unwrap();
+        let engine = SyncEngine::new_with_store(Arc::new(InMemory::new()));
+        let storage = engine.storage_handler();
+        let schema = schema_ref! {
+            nullable "add": { not_null "path": STRING, nullable "size": LONG },
+        };
+        let hint =
+            LastCheckpointHint::for_classic_checkpoint(5, 10, 1234, 3, schema.clone()).unwrap();
+
+        hint.write(storage.as_ref(), &log_root).unwrap();
+
+        let path = LastCheckpointHint::path(&log_root).unwrap();
+        let bytes = storage
+            .read_files(vec![(path, None)])
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap();
+        let json = std::str::from_utf8(&bytes).unwrap();
+        assert!(json.starts_with(r#"{"version":5,"size":10,"#), "{json}");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(json).unwrap(),
+            serde_json::json!({
+                "version": 5,
+                "size": 10,
+                "sizeInBytes": 1234,
+                "numOfAddFiles": 3,
+                "checkpointSchema": schema,
+            })
+        );
+        assert_eq!(
+            LastCheckpointHint::try_read(storage.as_ref(), &log_root, None).unwrap(),
+            Some(hint)
+        );
+    }
+
+    /// Delta-Spark writes the checkpoint file schema as `checkpointSchema`: the schema of each part
+    /// of a multi-part checkpoint, and of the top-level file of a V2 checkpoint.
+    #[rstest]
+    #[case::v1_single_part("v1-single-part-struct-stats-only")]
+    #[case::v1_multi_part("v1-multi-part-struct-stats-only")]
+    #[case::v2_without_sidecars("v2-classic-parquet-struct-stats-only")]
+    #[case::v2_with_sidecars("v2-parquet-sidecars-struct-stats-only")]
+    fn spark_checkpoint_schema_matches_checkpoint_footer(#[case] table: &str) -> KernelResult<()> {
+        let (engine, snapshot, _tempdir) = load_test_table(table)?;
+        let segment = snapshot.log_segment();
+        let hint_schema = segment
+            .checkpoint_hint_schema()
+            .expect("hint applies and has checkpointSchema");
+        for part in &segment.listed.checkpoint_parts {
+            let footer = engine
+                .parquet_handler()
+                .read_parquet_footer(&part.location)?;
+            assert_eq!(hint_schema, footer.schema, "{table}: {}", part.filename);
+        }
+        Ok(())
+    }
+
     /// Returns the single `actions` element matching `extract`, asserting there is exactly one.
     fn one_action<'a, T: 'a>(
         actions: &'a [HintAction],
@@ -1330,8 +1488,6 @@ mod tests {
         config: &[("delta.checkpointPolicy", "v2")],
     })]
     fn v2_last_checkpoint_hint_contents(#[case] expected: ExpectedHint) -> KernelResult<()> {
-        use crate::unit_test_utils::load_test_table;
-
         let ExpectedHint {
             table,
             version: expected_version,

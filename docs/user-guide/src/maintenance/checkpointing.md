@@ -115,6 +115,10 @@ an error if the iterator has not been exhausted. Because `finalize()` reads the 
 counts from the stats struct rather than from the iterator, you build the stats first and
 then pass them to `finalize()`.
 
+`finalize()` also records the schema of the `checkpoint_data` batches in the
+`_last_checkpoint` hint file. Readers use that schema instead of reading the checkpoint file
+footer. So write the batches without adding, dropping, or retyping columns.
+
 ## Checkpoint format
 
 Kernel automatically selects the checkpoint format based on table features:

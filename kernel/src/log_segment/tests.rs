@@ -5079,7 +5079,7 @@ async fn test_try_new_with_checkpoint_rejects_invalid_path(
         ..Default::default()
     })
     .await;
-    let result = log_segment.try_new_with_checkpoint(create_log_path(path));
+    let result = log_segment.try_new_with_checkpoint(create_log_path(path), None);
     assert_result_error_with_message(result, expected_error);
 }
 
@@ -5116,7 +5116,7 @@ async fn test_try_new_with_checkpoint(
     assert!(log_segment.listed.ascending_compaction_files.is_empty());
 
     let result = log_segment
-        .try_new_with_checkpoint(create_log_path(&ckpt_url))
+        .try_new_with_checkpoint(create_log_path(&ckpt_url), None)
         .unwrap();
 
     assert_eq!(result.checkpoint_version, Some(CHECKPOINT_VERSION));
@@ -5146,6 +5146,46 @@ async fn test_try_new_with_checkpoint(
     // Structural fields are preserved
     assert_eq!(result.end_version, log_segment.end_version);
     assert_eq!(result.log_root, log_segment.log_root);
+}
+
+/// The new segment keeps the hint written for its checkpoint and applies it. When no hint was
+/// written because the existing one is newer, the existing hint stays, and it does not apply to the
+/// new checkpoint.
+#[rstest]
+#[case::written_hint(true)]
+#[case::newer_existing_hint(false)]
+#[tokio::test]
+async fn test_try_new_with_checkpoint_keeps_last_checkpoint_hint(#[case] hint_written: bool) {
+    let mut log_segment = create_segment_for(LogSegmentConfig {
+        published_commit_versions: &[0, 1, 2],
+        ..Default::default()
+    })
+    .await;
+    let existing_hint = LastCheckpointHint {
+        version: 9,
+        ..Default::default()
+    };
+    log_segment.last_checkpoint_metadata = Some(existing_hint.clone());
+    let written_hint = LastCheckpointHint {
+        version: 2,
+        checkpoint_schema: Some(schema_ref! { nullable "add": { nullable "path": STRING } }),
+        ..Default::default()
+    };
+
+    let result = log_segment
+        .try_new_with_checkpoint(
+            create_log_path("file:///_delta_log/00000000000000000002.checkpoint.parquet"),
+            hint_written.then(|| written_hint.clone()),
+        )
+        .unwrap();
+
+    let (expected_hint, expected_applied) = if hint_written {
+        (written_hint.clone(), Some(&written_hint))
+    } else {
+        (existing_hint, None)
+    };
+    assert_eq!(result.last_checkpoint_metadata, Some(expected_hint));
+    assert_eq!(result.checkpoint_hint(), expected_applied);
 }
 
 // ============================================================================

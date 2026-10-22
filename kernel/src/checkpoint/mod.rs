@@ -303,17 +303,6 @@ pub enum V2CheckpointConfig {
     },
 }
 
-/// Schema of the `_last_checkpoint` file
-/// We cannot use `LastCheckpointInfo::to_schema()` as it would include the 'checkpoint_schema'
-/// field, which is only known at runtime.
-static LAST_CHECKPOINT_SCHEMA: LazyLock<SchemaRef> = lazy_schema_ref! {
-    not_null "version": LONG,
-    not_null "size": LONG,
-    nullable "parts": LONG,
-    nullable "sizeInBytes": LONG,
-    nullable "numOfAddFiles": LONG,
-};
-
 /// Action fields shared by V1 and V2 checkpoint schemas.
 fn base_checkpoint_action_fields() -> [&'static LazyLock<StructField>; 7] {
     [
@@ -518,22 +507,33 @@ impl CheckpointWriter {
     /// 1. The checkpoint data iterator has been fully exhausted
     /// 2. All data has been successfully written to object storage
     ///
+    /// This method records the schema of the [`Self::checkpoint_data`] batches as the
+    /// `checkpointSchema` of `_last_checkpoint`. Readers use it instead of the checkpoint file
+    /// footer, so the engine must write those batches without changing their schema.
+    ///
     /// # Parameters
     /// - `engine`: Implementation of [`Engine`] APIs.
     /// - `last_checkpoint_stats`: The [`LastCheckpointHintStats`] containing fields needed to write
     ///   the `_last_checkpoint` file.
     ///
     /// # Returns: `Ok` if the checkpoint was successfully finalized
-    // Internally, this method:
-    // 1. Creates the `_last_checkpoint` data with `create_last_checkpoint_data`
-    // 2. Writes the `_last_checkpoint` data to the `_last_checkpoint` file in the delta log
     pub fn finalize(
         self,
         engine: &dyn Engine,
         last_checkpoint_stats: &LastCheckpointHintStats,
     ) -> KernelResult<()> {
-        // Skip writing `_last_checkpoint` if the existing hint already points to a newer
-        // checkpoint, to avoid regressing the hint.
+        self.write_last_checkpoint(engine, last_checkpoint_stats)?;
+        Ok(())
+    }
+
+    /// Writes the `_last_checkpoint` hint for this checkpoint and returns it. Returns `None` and
+    /// writes nothing if the existing hint already points to a newer checkpoint, so that the hint
+    /// does not regress.
+    pub(crate) fn write_last_checkpoint(
+        &self,
+        engine: &dyn Engine,
+        last_checkpoint_stats: &LastCheckpointHintStats,
+    ) -> KernelResult<Option<LastCheckpointHint>> {
         let checkpoint_version = self.snapshot.version();
         if let Some(hint_version) = self.snapshot.log_segment().last_checkpoint_version() {
             if hint_version > checkpoint_version {
@@ -542,29 +542,22 @@ impl CheckpointWriter {
                     checkpoint_version,
                     "Skipping _last_checkpoint write: existing hint is newer than checkpoint"
                 );
-                return Ok(());
+                return Ok(None);
             }
         }
 
-        let data = create_last_checkpoint_data(
-            engine,
-            self.version,
+        let hint = LastCheckpointHint::for_classic_checkpoint(
+            checkpoint_version,
             last_checkpoint_stats.num_actions,
-            last_checkpoint_stats.num_of_add_files,
             last_checkpoint_stats.size_in_bytes,
-        );
-
-        let last_checkpoint_path = LastCheckpointHint::path(&self.snapshot.log_segment().log_root)?;
-
-        // Write the `_last_checkpoint` file to `table/_delta_log/_last_checkpoint`
-        let filtered_data = FilteredEngineData::with_all_rows_selected(data?);
-        engine.json_handler().write_json_file(
-            &last_checkpoint_path,
-            Box::new(std::iter::once(Ok(filtered_data))),
-            true,
+            last_checkpoint_stats.num_of_add_files,
+            self.output_schema.clone(),
         )?;
-
-        Ok(())
+        hint.write(
+            engine.storage_handler().as_ref(),
+            &self.snapshot.log_segment().log_root,
+        )?;
+        Ok(Some(hint))
     }
 
     pub(crate) fn write_v2_checkpoint_with_sidecars(
@@ -779,47 +772,6 @@ pub(crate) fn ensure_standalone_checkpoint_supported(
         ));
     }
     Ok(())
-}
-
-/// Creates the data for the _last_checkpoint file containing checkpoint metadata. Factored out to
-/// facilitate testing.
-///
-/// # Parameters
-/// - `engine`: Engine for data processing
-/// - `version`: Table version number
-/// - `actions_counter`: Total actions count
-/// - `add_actions_counter`: Add actions count
-/// - `size_in_bytes`: Size of the checkpoint file in bytes
-///
-/// # Returns
-/// A new [`EngineData`] batch with the `_last_checkpoint` fields:
-/// - `version` (i64, required): Table version number
-/// - `size` (i64, required): Total actions count
-/// - `parts` (i64, optional): Always None for single-file checkpoints
-/// - `sizeInBytes` (i64, optional): Size of checkpoint file in bytes
-/// - `numOfAddFiles` (i64, optional): Number of Add actions
-///
-/// TODO(#838): Add `checksum` field to `_last_checkpoint` file
-/// TODO(#839): Add `checkpoint_schema` field to `_last_checkpoint` file
-/// TODO(#1054): Add `tags` field to `_last_checkpoint` file
-/// TODO(#1052): Add `v2Checkpoint` field to `_last_checkpoint` file
-pub(crate) fn create_last_checkpoint_data(
-    engine: &dyn Engine,
-    version: i64,
-    actions_counter: i64,
-    add_actions_counter: i64,
-    size_in_bytes: i64,
-) -> KernelResult<Box<dyn EngineData>> {
-    engine.evaluation_handler().create_many(
-        LAST_CHECKPOINT_SCHEMA.clone(),
-        vec![vec![
-            version.into(),
-            actions_counter.into(),
-            None::<i64>.into(), // parts = None since we only support single-part checkpoints
-            size_in_bytes.into(),
-            add_actions_counter.into(),
-        ]],
-    )
 }
 
 /// Writes one sidecar file. Returns `None` if the splitter yielded no rows for this sidecar.
