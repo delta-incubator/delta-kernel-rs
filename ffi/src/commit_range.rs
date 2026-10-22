@@ -153,7 +153,7 @@ pub unsafe extern "C" fn commit_range_builder_with_max_catalog_version(
 /// When `false`, [`commit_range_builder_build`] lists the available commits without validating the
 /// start version or contiguity; [`commit_range_commit_files_next`] then reports gaps lazily
 /// according to [`commit_range_builder_with_fail_on_data_loss`]. Such a relaxed range cannot be
-/// read with [`commit_range_commits`], which returns an `Unsupported` error. Even when `false`,
+/// read with [`commit_range_commits`], which returns a `CommitRangeError`. Even when `false`,
 /// build fails with `EmptyLogError` if no commits are listed in the range.
 ///
 /// # Safety
@@ -416,9 +416,9 @@ pub struct SharedCommitActionsIterator;
 /// - `engine`: performs the per-commit JSON reads and allocates errors.
 /// - `actions` / `actions_len`: the action kinds to project into each commit's read schema.
 ///
-/// Returns an `Unsupported` error if the range was built with commit range validation disabled,
-/// and an error if `actions` is empty or contains duplicate kinds. The caller owns the returned
-/// iterator and must release it with [`free_commit_actions_iter`].
+/// Returns a `CommitRangeError` if the range was built with commit range validation disabled or
+/// `actions` is empty, and an error if `actions` contains duplicate kinds. The caller owns the
+/// returned iterator and must release it with [`free_commit_actions_iter`].
 ///
 /// # Safety
 ///
@@ -444,9 +444,9 @@ pub unsafe extern "C" fn commit_range_commits(
 /// The snapshot's version must match the range's anchor (the start version for ascending ranges,
 /// the end version for descending ranges).
 ///
-/// Returns an `Unsupported` error if the range was built with commit range validation disabled.
-/// Returns an error if `actions` is empty or contains duplicate kinds, or if `start_snapshot`
-/// belongs to a different table, its version does not match the range anchor, or its table does
+/// Returns a `CommitRangeError` if the range was built with commit range validation disabled, if
+/// `actions` is empty, or if `start_snapshot` belongs to a different table or its version does not
+/// match the range anchor. Returns an error if `actions` contains duplicate kinds or the table does
 /// not support scanning. The caller owns the returned iterator and must release it with
 /// [`free_commit_actions_iter`].
 ///
@@ -1112,8 +1112,11 @@ mod tests {
         };
         assert_extern_result_error_with_message(
             result,
-            FFIKernelError::UnsupportedError,
-            Some("Unsupported: Commit action iteration requires commit range validation to be enabled"),
+            FFIKernelError::CommitRangeError,
+            Some(
+                "Commit range error: Commit action iteration requires commit range validation to \
+                 be enabled",
+            ),
         );
 
         unsafe { free_commit_range(range) }
