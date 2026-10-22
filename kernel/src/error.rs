@@ -93,21 +93,29 @@ pub(crate) fn add_scalar_path_context(
     }
 }
 
-/// A [`std::result::Result`] that has the kernel [`KernelError`] as the error variant
-pub type DeltaResult<T, E = KernelError> = std::result::Result<T, E>;
+/// A result whose error is the top-level [`Error`].
+// Note: `delta_kernel::Result` is currently unused as part of the error migration tracked in:
+// https://github.com/delta-io/delta-kernel-rs/issues/3421.
+// First usages will come when the first `KernelError` is migrated to a `DeltaError`.
+pub type Result<T> = std::result::Result<T, Error>;
 
-/// A result whose error is a [`KernelError`].
-pub type KernelResult<T> = std::result::Result<T, KernelError>;
+/// A result whose error defaults to [`KernelError`].
+pub type KernelResult<T, E = KernelError> = std::result::Result<T, E>;
 
-/// A boxed, `Send` iterator of [`DeltaResult<T>`] items.
+/// A boxed, `Send` iterator of [`KernelResult<T>`] items.
+pub type KernelResultIterator<'a, T> = Box<dyn Iterator<Item = KernelResult<T>> + Send + 'a>;
+
+/// A [`KernelResultIterator`] that does not borrow data.
+pub type KernelResultIteratorStatic<T> = KernelResultIterator<'static, T>;
+
+/// A boxed, `Send` iterator of [`Result<T>`] items.
 ///
-/// Convenience alias for the common pattern of returning a streaming, fallible iterator from
-/// kernel APIs.
-pub type DeltaResultIterator<'a, T> = Box<dyn Iterator<Item = DeltaResult<T>> + Send + 'a>;
+/// Convenience alias for fallible streams that return the top-level error envelope.
+pub type ResultIterator<'a, T> = Box<dyn Iterator<Item = Result<T>> + Send + 'a>;
 
-/// `'static` counterpart to [`DeltaResultIterator`] for cases where the iterator does not
+/// `'static` counterpart to [`ResultIterator`] for cases where the iterator does not
 /// reference borrowed data.
-pub type DeltaResultIteratorStatic<T> = DeltaResultIterator<'static, T>;
+pub type ResultIteratorStatic<T> = ResultIterator<'static, T>;
 
 /// An error validating connector-provided state for snapshot construction.
 #[derive(Debug, thiserror::Error)]
@@ -446,6 +454,13 @@ pub enum KernelError {
     #[error("File already exists: {0}")]
     FileAlreadyExists(String),
 
+    /// A Delta table was found during create-table validation.
+    ///
+    /// The payload is the caller-supplied table path, not the normalized table URL. Concurrent
+    /// create attempts that pass validation surface as a commit conflict instead of this error.
+    #[error("Table already exists at path: {0}")]
+    TableAlreadyExistsAtPath(String),
+
     /// Some functionality is currently unsupported
     #[error("Unsupported: {0}")]
     Unsupported(String),
@@ -635,6 +650,16 @@ impl KernelError {
         Self::PlanResultTypeMismatch { expected, actual }
     }
 
+    /// Returns the first error that is not wrapped by [`KernelError::Backtraced`].
+    ///
+    /// If this error has no backtrace wrapper, this returns `self`.
+    pub fn without_backtrace(&self) -> &Self {
+        match self {
+            Self::Backtraced { source, .. } => source.without_backtrace(),
+            error => error,
+        }
+    }
+
     // Capture a backtrace when the error is constructed.
     #[must_use]
     pub fn with_backtrace(self) -> Self {
@@ -683,10 +708,10 @@ impl From<object_store::Error> for KernelError {
     }
 }
 
-/// This impl is needed so the `?` operator can auto-convert `Result<T, Infallible>` to
-/// `DeltaResult<T>`. For example, `TryFrom` impls for infallible conversions use `Infallible` as
+/// This impl is needed so the `?` operator can auto-convert `KernelResult<T, Infallible>` to
+/// `KernelResult<T>`. For example, `TryFrom` impls for infallible conversions use `Infallible` as
 /// their error type, and this allows those results to be propagated with `?` in functions
-/// returning `DeltaResult`. The match is unreachable since `Infallible` has no variants.
+/// returning `KernelResult`. The match is unreachable since `Infallible` has no variants.
 impl From<Infallible> for KernelError {
     fn from(value: Infallible) -> Self {
         match value {}

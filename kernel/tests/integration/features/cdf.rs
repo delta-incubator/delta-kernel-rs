@@ -1,4 +1,3 @@
-use std::error;
 use std::sync::Arc;
 
 use delta_kernel::arrow::array::{RecordBatch, StringArray};
@@ -11,7 +10,7 @@ use delta_kernel::object_store::path::Path as ObjectStorePath;
 use delta_kernel::object_store::ObjectStoreExt as _;
 use delta_kernel::schema::{schema_ref, DataType, SchemaRef};
 use delta_kernel::table_changes::TableChanges;
-use delta_kernel::{DeltaResult, Engine, KernelError, PredicateRef, Version};
+use delta_kernel::{Engine, KernelError, KernelResult, PredicateRef, Version};
 use itertools::Itertools;
 use rstest::rstest;
 use serde_json::{json, Value};
@@ -28,7 +27,7 @@ fn read_cdf_for_table(
     start_version: Version,
     end_version: impl Into<Option<Version>>,
     predicate: impl Into<Option<PredicateRef>>,
-) -> DeltaResult<Vec<RecordBatch>> {
+) -> KernelResult<Vec<RecordBatch>> {
     read_cdf_for_table_with_batch_size(test_name, start_version, end_version, predicate, None)
 }
 
@@ -38,7 +37,7 @@ fn read_cdf_for_table_with_batch_size(
     end_version: impl Into<Option<Version>>,
     predicate: impl Into<Option<PredicateRef>>,
     batch_size: Option<usize>,
-) -> DeltaResult<Vec<RecordBatch>> {
+) -> KernelResult<Vec<RecordBatch>> {
     let test_dir = load_test_data("tests/data", test_name.as_ref()).unwrap();
     let test_path = test_dir.path().join(test_name.as_ref());
     let test_path = delta_kernel::try_parse_uri(test_path.to_str().expect("table path to string"))?;
@@ -68,7 +67,7 @@ fn read_cdf_for_table_with_batch_size(
         ArrowSchema::try_from_kernel(scan.logical_schema().as_ref()).unwrap();
     let batches: Vec<RecordBatch> = scan
         .execute(engine)?
-        .map(|data| -> DeltaResult<_> {
+        .map(|data| -> KernelResult<_> {
             let record_batch = data?.try_into_record_batch()?;
             // Verify that the arrow record batches match the expected schema
             assert_eq!(record_batch.schema().as_ref(), &scan_schema_as_arrow);
@@ -159,7 +158,7 @@ async fn add_cdf_metadata_commit(
     schema: &SchemaRef,
     partition_columns: &[&str],
     column_mapping_mode: CdfColumnMappingMode,
-) -> Result<(), Box<dyn error::Error>> {
+) -> KernelResult<()> {
     let mut actions = Vec::new();
     if version == 0 {
         actions.push(cdf_protocol_action(column_mapping_mode));
@@ -182,7 +181,7 @@ async fn write_single_string_parquet(
     path: &str,
     column_name: &str,
     value: &str,
-) -> Result<usize, Box<dyn error::Error>> {
+) -> KernelResult<usize> {
     let arrow_schema = Arc::new(ArrowSchema::new(vec![Field::new(
         column_name,
         ArrowDataType::Utf8,
@@ -200,17 +199,17 @@ async fn write_single_string_parquet(
     Ok(parquet_size)
 }
 
-fn collect_empty_cdf(table_changes: TableChanges, engine: Arc<dyn Engine>) -> DeltaResult<usize> {
+fn collect_empty_cdf(table_changes: TableChanges, engine: Arc<dyn Engine>) -> KernelResult<usize> {
     table_changes
         .into_scan_builder()
         .build()?
         .execute(engine)?
-        .collect::<DeltaResult<Vec<_>>>()
+        .collect::<KernelResult<Vec<_>>>()
         .map(|batches| batches.len())
 }
 
 #[test]
-fn cdf_with_deletion_vector() -> Result<(), Box<dyn error::Error>> {
+fn cdf_with_deletion_vector() -> KernelResult<()> {
     let batches = read_cdf_for_table("cdf-table-with-dv", 0, None, None)?;
     // Each commit performs the following:
     // 0. Insert  0..=9
@@ -256,7 +255,7 @@ fn cdf_with_deletion_vector() -> Result<(), Box<dyn error::Error>> {
 }
 
 #[test]
-fn cdf_with_deletion_vector_is_batch_size_invariant() -> Result<(), Box<dyn error::Error>> {
+fn cdf_with_deletion_vector_is_batch_size_invariant() -> KernelResult<()> {
     let expected = read_cdf_for_table("cdf-table-with-dv", 0, None, None)?;
     for batch_size in [1usize, 2, 3, 4, 7] {
         let actual = read_cdf_for_table_with_batch_size(
@@ -281,7 +280,7 @@ fn cdf_with_deletion_vector_is_batch_size_invariant() -> Result<(), Box<dyn erro
 }
 
 #[test]
-fn basic_cdf() -> Result<(), Box<dyn error::Error>> {
+fn basic_cdf() -> KernelResult<()> {
     let batches = read_cdf_for_table("cdf-table", 0, None, None)?;
     let mut expected = vec![
         "+----+--------+------------+------------------+-----------------+",
@@ -318,7 +317,7 @@ fn basic_cdf() -> Result<(), Box<dyn error::Error>> {
 }
 
 #[test]
-fn cdf_non_partitioned() -> Result<(), Box<dyn error::Error>> {
+fn cdf_non_partitioned() -> KernelResult<()> {
     let batches = read_cdf_for_table("cdf-table-non-partitioned", 0, None, None)?;
     let mut expected = vec![
              "+----+--------+------------+-------------------+---------------+--------------+----------------+------------------+-----------------+",
@@ -357,7 +356,7 @@ fn cdf_non_partitioned() -> Result<(), Box<dyn error::Error>> {
 }
 
 #[test]
-fn cdf_with_cdc_and_dvs() -> Result<(), Box<dyn error::Error>> {
+fn cdf_with_cdc_and_dvs() -> KernelResult<()> {
     let batches = read_cdf_for_table("cdf-table-with-cdc-and-dvs", 0, None, None)?;
     let mut expected = vec![
         "+----+--------------------+------------------+-----------------+",
@@ -414,7 +413,7 @@ fn cdf_with_cdc_and_dvs() -> Result<(), Box<dyn error::Error>> {
 }
 
 #[test]
-fn simple_cdf_version_ranges() -> DeltaResult<()> {
+fn simple_cdf_version_ranges() -> KernelResult<()> {
     let batches = read_cdf_for_table("cdf-table-simple", 0, 0, None)?;
     let mut expected = vec![
         "+----+--------------+-----------------+",
@@ -508,7 +507,7 @@ fn simple_cdf_version_ranges() -> DeltaResult<()> {
 }
 
 #[test]
-fn update_operations() -> DeltaResult<()> {
+fn update_operations() -> KernelResult<()> {
     let batches = read_cdf_for_table("cdf-table-update-ops", 0, 2, None)?;
     // Note: `update_pre` and `update_post` are technically not part of the delta spec, and instead
     // should be `update_preimage` and `update_postimage` respectively. However, the tests in
@@ -545,7 +544,7 @@ fn update_operations() -> DeltaResult<()> {
 }
 
 #[test]
-fn false_data_change_is_ignored() -> DeltaResult<()> {
+fn false_data_change_is_ignored() -> KernelResult<()> {
     let batches = read_cdf_for_table("cdf-table-data-change", 0, 1, None)?;
     let mut expected = vec![
         "+----+--------------+-----------------+",
@@ -583,7 +582,7 @@ fn invalid_range_start_after_last_version_of_table() {
 }
 
 #[test]
-fn partition_table() -> DeltaResult<()> {
+fn partition_table() -> KernelResult<()> {
     let batches = read_cdf_for_table("cdf-table-partitioned", 0, 2, None)?;
     let mut expected = vec![
         "+----+------+------+------------------+-----------------+",
@@ -609,8 +608,7 @@ fn partition_table() -> DeltaResult<()> {
 }
 
 #[tokio::test]
-async fn cdf_rejects_unmapped_partition_layout_change_with_data_files(
-) -> Result<(), Box<dyn error::Error>> {
+async fn cdf_rejects_unmapped_partition_layout_change_with_data_files() -> KernelResult<()> {
     let (store, engine, table_url) = engine_store_setup("cdf_real_unmapped_partition_change", None);
     let schema = schema_ref! {
         nullable "a": STRING,
@@ -685,7 +683,7 @@ async fn cdf_rejects_partition_column_changes(
     column_mapping_mode: CdfColumnMappingMode,
     #[case] initial_partition_columns: &[&str],
     #[case] read_partition_columns: &[&str],
-) -> Result<(), Box<dyn error::Error>> {
+) -> KernelResult<()> {
     let (store, engine, table_url) = engine_store_setup("cdf_partition_changes", None);
     let schema = cdf_partition_evolution_schema(column_mapping_mode);
     add_cdf_metadata_commit(
@@ -722,7 +720,7 @@ async fn cdf_rejects_partition_column_changes(
 async fn cdf_uses_mapped_partition_layout_at_start_version(
     #[case] initial_partition_columns: &[&str],
     #[case] read_partition_columns: &[&str],
-) -> Result<(), Box<dyn error::Error>> {
+) -> KernelResult<()> {
     let (store, engine, table_url) = engine_store_setup("cdf_partition_change_at_start", None);
     let engine: Arc<dyn Engine> = Arc::new(engine);
     let schema = cdf_partition_evolution_schema(CdfColumnMappingMode::Name);
@@ -756,7 +754,7 @@ async fn cdf_uses_mapped_partition_layout_at_start_version(
 #[tokio::test]
 async fn cdf_rejects_intermediate_partition_column_changes(
     #[case] column_mapping_mode: CdfColumnMappingMode,
-) -> Result<(), Box<dyn error::Error>> {
+) -> KernelResult<()> {
     let (store, engine, table_url) = engine_store_setup("cdf_intermediate_partition_changes", None);
     let engine = Arc::new(engine);
     let schema = cdf_partition_evolution_schema(column_mapping_mode);
@@ -794,15 +792,14 @@ async fn cdf_rejects_intermediate_partition_column_changes(
             .into_scan_builder()
             .build()?
             .execute(engine)?
-            .collect::<DeltaResult<Vec<_>>>(),
+            .collect::<KernelResult<Vec<_>>>(),
         "Change data feed encountered incompatible schema",
     );
     Ok(())
 }
 
 #[tokio::test]
-async fn cdf_rejects_partition_column_type_changes_without_mapping(
-) -> Result<(), Box<dyn error::Error>> {
+async fn cdf_rejects_partition_column_type_changes_without_mapping() -> KernelResult<()> {
     let (store, engine, table_url) = engine_store_setup("cdf_partition_column_type_change", None);
     let initial_schema = cdf_partition_evolution_schema(CdfColumnMappingMode::None);
     let read_schema = schema_ref! {
@@ -836,7 +833,7 @@ async fn cdf_rejects_partition_column_type_changes_without_mapping(
 }
 
 #[test]
-fn backtick_column_names() -> DeltaResult<()> {
+fn backtick_column_names() -> KernelResult<()> {
     let batches = read_cdf_for_table("cdf-table-backtick-column-names", 0, None, None)?;
     let mut expected = vec![
         "+--------+----------+--------------------------+--------------+-----------------+",
@@ -855,7 +852,7 @@ fn backtick_column_names() -> DeltaResult<()> {
 }
 
 #[test]
-fn unconditional_delete() -> DeltaResult<()> {
+fn unconditional_delete() -> KernelResult<()> {
     let batches = read_cdf_for_table("cdf-table-delete-unconditional", 0, None, None)?;
     let mut expected = vec![
         "+----+--------------+-----------------+",
@@ -889,7 +886,7 @@ fn unconditional_delete() -> DeltaResult<()> {
 }
 
 #[test]
-fn conditional_delete_all_rows() -> DeltaResult<()> {
+fn conditional_delete_all_rows() -> KernelResult<()> {
     let batches = read_cdf_for_table("cdf-table-delete-conditional-all-rows", 0, None, None)?;
     let mut expected = vec![
         "+----+--------------+-----------------+",
@@ -923,7 +920,7 @@ fn conditional_delete_all_rows() -> DeltaResult<()> {
 }
 
 #[test]
-fn conditional_delete_two_rows() -> DeltaResult<()> {
+fn conditional_delete_two_rows() -> KernelResult<()> {
     let batches = read_cdf_for_table("cdf-table-delete-conditional-two-rows", 0, None, None)?;
     let mut expected = vec![
         "+----+--------------+-----------------+",
@@ -949,7 +946,7 @@ fn conditional_delete_two_rows() -> DeltaResult<()> {
 }
 
 #[test]
-fn cdf_with_column_mapping_name_mode() -> Result<(), Box<dyn error::Error>> {
+fn cdf_with_column_mapping_name_mode() -> KernelResult<()> {
     // NOTE: these tables only have CDF enabled in version 1+, so we start reading from 1. This is
     // due to pyspark limitation while writing: we were unable to create a table with column
     // mapping + CDF enabled in commit 0, so we created with column mapping and enabled CDF in
@@ -992,7 +989,7 @@ fn cdf_with_column_mapping_name_mode() -> Result<(), Box<dyn error::Error>> {
 /// `table_changes` log-replay, so `execute()` never tries to read the phantom parquet
 /// file and returns zero rows.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn cdf_per_cell_null_on_malformed_stats() -> Result<(), Box<dyn error::Error>> {
+async fn cdf_per_cell_null_on_malformed_stats() -> KernelResult<()> {
     let schema = schema_ref! {
         nullable "EventTime": TIMESTAMP,
         nullable "UserId": LONG,
@@ -1037,7 +1034,7 @@ async fn cdf_per_cell_null_on_malformed_stats() -> Result<(), Box<dyn error::Err
     // the predicate pruned the file before reading.
     let batches: Vec<RecordBatch> = scan
         .execute(engine)?
-        .map(|data| -> DeltaResult<_> { data?.try_into_record_batch() })
+        .map(|data| -> KernelResult<_> { data?.try_into_record_batch() })
         .try_collect()?;
     let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
     assert_eq!(
@@ -1048,7 +1045,7 @@ async fn cdf_per_cell_null_on_malformed_stats() -> Result<(), Box<dyn error::Err
 }
 
 #[test]
-fn cdf_with_column_mapping_id_mode() -> Result<(), Box<dyn error::Error>> {
+fn cdf_with_column_mapping_id_mode() -> KernelResult<()> {
     // NOTE: these tables only have CDF enabled in version 1+, so we start reading from 1. This is
     // due to pyspark limitation while writing: we were unable to create a table with column
     // mapping + CDF enabled in commit 0, so we created with column mapping and enabled CDF in

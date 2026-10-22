@@ -116,7 +116,7 @@ fn setup_clustered_table(
     let table_url = Url::from_directory_path(&table_path).unwrap();
     let engine = create_default_engine_mt_executor(&table_url)?;
 
-    let _ = create_table_txn(table_url.as_str(), schema, "Test/1.0")
+    let _ = create_table_txn(table_url.as_str(), schema, "Test/1.0", true)
         .with_table_properties([("delta.columnMapping.mode", cm_mode)])
         .with_data_layout(DataLayout::Clustered {
             columns: clustering_cols,

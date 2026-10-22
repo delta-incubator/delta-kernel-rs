@@ -18,7 +18,7 @@ use crate::table_properties::{
     MATERIALIZED_ROW_ID_COLUMN_NAME,
 };
 use crate::unit_test_utils::{Action, MockTableConfigurationBuilder};
-use crate::{DeltaResult, Engine, PredicateRef};
+use crate::{Engine, KernelResult, PredicateRef};
 
 pub(crate) const TEST_MATERIALIZED_ROW_ID_COLUMN_NAME: &str = "_row_id";
 pub(crate) const TEST_MATERIALIZED_ROW_COMMIT_VERSION_COLUMN_NAME: &str = "_row_commit_version";
@@ -72,7 +72,7 @@ pub(crate) fn replay_unmapped_unpartitioned_table_changes(
     read_schema: SchemaRef,
     physical_predicate: Option<(PredicateRef, SchemaRef)>,
     mode: CdfMode,
-) -> DeltaResult<impl Iterator<Item = DeltaResult<TableChangesScanMetadata>>> {
+) -> KernelResult<impl Iterator<Item = KernelResult<TableChangesScanMetadata>>> {
     let read_configuration =
         TableChangesReadConfiguration::new_unmapped_unpartitioned_for_test(read_schema);
     table_changes_action_iter(

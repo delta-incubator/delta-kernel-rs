@@ -4,38 +4,36 @@
 
 use std::collections::HashSet;
 
+use crate::schema::collation_utils::validate_collation_annotations;
 use crate::schema::{StructField, StructType};
 use crate::table_changes::{
     CHANGE_TYPE_COL_NAME, COMMIT_TIMESTAMP_COL_NAME, COMMIT_VERSION_COL_NAME,
 };
 use crate::table_features::ColumnMappingMode;
-use crate::transforms::SchemaTransform;
+use crate::transforms::{transform_output_type, SchemaTransform};
 use crate::utils::require;
-use crate::{transform_output_type, DeltaResult, KernelError};
+use crate::{KernelError, KernelResult};
 
 /// Characters that are invalid in Parquet column names when column mapping is disabled.
 /// These characters have special meaning in Parquet schema syntax.
 const INVALID_PARQUET_CHARS: &[char] = &[' ', ',', ';', '{', '}', '(', ')', '\n', '\t', '='];
 
-/// Validates a schema for CREATE TABLE or ALTER TABLE.
+/// Validates a schema and its metadata annotations for CREATE TABLE or ALTER TABLE.
 ///
-/// Performs the following checks:
-/// 1. No duplicate column names (case-insensitive, including nested fields)
-/// 2. Column names contain only valid characters
-/// 3. Rejects fields with `delta.invariants` metadata (SQL expression invariants are not supported
-///    by kernel)
-/// 4. When `cdf_enabled` is true, rejects top-level column names reserved by CDF (case-insensitive)
+/// Applies column-name rules for `column_mapping_mode` and CDF restrictions when `cdf_enabled` is
+/// true. Returns an error if schema or metadata annotation validation fails.
 pub(crate) fn validate_schema(
     schema: &StructType,
     column_mapping_mode: ColumnMappingMode,
     cdf_enabled: bool,
-) -> DeltaResult<()> {
+) -> KernelResult<()> {
     let mut validator = SchemaValidator::new(column_mapping_mode);
     // We reuse the SchemaTransform trait for its recursive traversal machinery.
     // The validator never transforms the schema -- it only inspects fields and
     // collects errors. The return value is intentionally discarded.
     validator.transform_struct(schema);
     validator.into_result()?;
+    validate_collation_annotations(schema)?;
     if cdf_enabled {
         validate_cdf_column_names(schema, column_mapping_mode)?;
     }
@@ -48,7 +46,7 @@ pub(crate) fn validate_schema(
 fn validate_cdf_column_names(
     schema: &StructType,
     column_mapping_mode: ColumnMappingMode,
-) -> DeltaResult<()> {
+) -> KernelResult<()> {
     for field in schema.fields() {
         let name = field.name();
         require!(
@@ -103,7 +101,7 @@ impl SchemaValidator {
         }
     }
 
-    fn into_result(self) -> DeltaResult<()> {
+    fn into_result(self) -> KernelResult<()> {
         if self.errors.is_empty() {
             Ok(())
         } else {
@@ -167,7 +165,7 @@ impl<'a> SchemaTransform<'a> for SchemaValidator {
 /// When column mapping is enabled, only rejects newlines since physical names are
 /// auto-generated but newlines in column names break metadata serialization regardless
 /// of column mapping mode.
-fn validate_field_name(name: &str, cm_enabled: bool) -> DeltaResult<()> {
+fn validate_field_name(name: &str, cm_enabled: bool) -> KernelResult<()> {
     if name.is_empty() {
         return Err(KernelError::generic("Column name cannot be empty"));
     }
@@ -467,6 +465,16 @@ mod tests {
     #[case::top_level_dup(schema_top_level_dup(), ColumnMappingMode::None, &["duplicate"])]
     #[case::array_element_dup(schema_array_dup(), ColumnMappingMode::None, &["duplicate"])]
     #[case::multi_error(schema_multi_bad(), ColumnMappingMode::None, &["bad column", "col;name"])]
+    #[case::malformed_collation_metadata(
+        schema! {
+            (StructField::nullable("field", DataType::STRING).with_metadata([(
+                ColumnMetadataKey::Collations.as_ref(),
+                MetadataValue::Other(serde_json::json!({"field": 12})),
+            )])),
+        },
+        ColumnMappingMode::None,
+        &["__COLLATIONS", "string identifier"]
+    )]
     fn invalid_schema_rejected(
         #[case] schema: StructType,
         #[case] cm: ColumnMappingMode,

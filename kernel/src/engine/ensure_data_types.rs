@@ -11,7 +11,7 @@ use crate::arrow::datatypes::{DataType as ArrowDataType, Field as ArrowField, Ti
 use crate::engine::arrow_utils::make_arrow_error;
 use crate::schema::{DataType, MetadataValue, StructField};
 use crate::utils::require;
-use crate::{DeltaResult, KernelError};
+use crate::{KernelError, KernelResult};
 
 /// Controls how `ensure_data_types` validates struct fields and metadata.
 #[derive(Clone, Copy)]
@@ -45,7 +45,7 @@ pub(crate) fn ensure_data_types(
     kernel_type: &DataType,
     arrow_type: &ArrowDataType,
     mode: ValidationMode,
-) -> DeltaResult<DataTypeCompat> {
+) -> KernelResult<DataTypeCompat> {
     let check = EnsureDataTypes { mode };
     check.ensure_data_types(kernel_type, arrow_type)
 }
@@ -73,7 +73,8 @@ impl EnsureDataTypes {
         &self,
         kernel_type: &DataType,
         arrow_type: &ArrowDataType,
-    ) -> DeltaResult<DataTypeCompat> {
+    ) -> KernelResult<DataTypeCompat> {
+        let kernel_type = kernel_type.physical_type();
         match (kernel_type, arrow_type) {
             (DataType::Primitive(_), _) if arrow_type.is_primitive() => {
                 check_cast_compat(kernel_type.try_into_arrow()?, arrow_type)
@@ -221,7 +222,7 @@ impl EnsureDataTypes {
         desc: &str,
         kernel_field_is_nullable: bool,
         arrow_field_is_nullable: bool,
-    ) -> DeltaResult<()> {
+    ) -> KernelResult<()> {
         if matches!(self.mode, ValidationMode::Full)
             && kernel_field_is_nullable != arrow_field_is_nullable
         {
@@ -237,7 +238,7 @@ impl EnsureDataTypes {
         &self,
         kernel_field: &StructField,
         arrow_field: &ArrowField,
-    ) -> DeltaResult<()> {
+    ) -> KernelResult<()> {
         self.ensure_nullability(
             &kernel_field.name,
             kernel_field.nullable,
@@ -262,7 +263,7 @@ impl EnsureDataTypes {
 fn check_cast_compat(
     target_type: ArrowDataType,
     source_type: &ArrowDataType,
-) -> DeltaResult<DataTypeCompat> {
+) -> KernelResult<DataTypeCompat> {
     use ArrowDataType::*;
 
     match (source_type, &target_type) {
@@ -286,8 +287,8 @@ fn check_cast_compat(
         // guarantees data files conform to the table schema, so a schema mismatch (e.g. Int32
         // where Date32 is expected) would not occur in normal data files.
         //
-        // NOTE: The kernel-type equivalent lives in `PrimitiveType::is_stats_type_compatible_with`
-        // in `schema/mod.rs`. Changes here must be mirrored there.
+        // Keep these date/timestamp rules aligned with
+        // `PrimitiveType::is_checkpoint_cast_compatible` in `schema/mod.rs`.
         (Int32, Date32) => Ok(DataTypeCompat::NeedsCast(target_type)),
         (Int64, Timestamp(TimeUnit::Microsecond, _)) => Ok(DataTypeCompat::NeedsCast(target_type)),
         _ => Err(make_arrow_error(format!(
@@ -326,23 +327,22 @@ impl PartialEq<String> for MetadataValue {
     }
 }
 
-// allow for comparing our metadata maps to arrow ones. We can't implement PartialEq because both
-// are HashMaps which aren't defined in this crate
-fn metadata_eq(
+// Compare kernel metadata with Arrow's version-specific metadata container.
+fn metadata_eq<'a>(
     kernel_metadata: &HashMap<String, MetadataValue>,
-    arrow_metadata: &HashMap<String, String>,
+    arrow_metadata: impl IntoIterator<Item = (&'a String, &'a String)>,
 ) -> bool {
-    let kernel_len = kernel_metadata.len();
-    if kernel_len != arrow_metadata.len() {
-        return false;
+    let mut arrow_len = 0;
+    for (key, value) in arrow_metadata {
+        arrow_len += 1;
+        if !kernel_metadata
+            .get(key)
+            .is_some_and(|kernel_value| *kernel_value == *value)
+        {
+            return false;
+        }
     }
-    if kernel_len == 0 {
-        // lens are equal, so two empty maps are equal
-        return true;
-    }
-    kernel_metadata
-        .iter()
-        .all(|(key, value)| arrow_metadata.get(key).is_some_and(|v| *value == *v))
+    kernel_metadata.len() == arrow_len
 }
 
 #[cfg(test)]
@@ -354,7 +354,7 @@ mod tests {
     use super::*;
     use crate::arrow::datatypes::{DataType as ArrowDataType, Field as ArrowField, Fields};
     use crate::engine::arrow_conversion::TryFromKernel as _;
-    use crate::schema::{schema, ArrayType, DataType, MapType};
+    use crate::schema::{schema, ArrayType, CheckpointFieldKind, DataType, MapType, PrimitiveType};
     use crate::unit_test_utils::assert_result_error_with_message;
 
     #[test]
@@ -905,13 +905,11 @@ mod tests {
         );
     }
 
-    /// Ensures that every kernel-level checkpoint reinterpretation rule in
-    /// `PrimitiveType::is_checkpoint_cast_compatible` has a corresponding Arrow cast
-    /// in `check_cast_compat`. If one side is updated without the other, this test fails.
-    #[test]
-    fn checkpoint_reinterpretation_rules_match_arrow_cast_rules() {
-        use crate::schema::PrimitiveType;
-
+    #[rstest]
+    fn checkpoint_date_timestamp_rules_match_arrow_cast_rules(
+        #[values(CheckpointFieldKind::Stats, CheckpointFieldKind::PartitionValues)]
+        kind: CheckpointFieldKind,
+    ) {
         let reinterpretation_pairs: &[(PrimitiveType, PrimitiveType)] = &[
             (PrimitiveType::Integer, PrimitiveType::Date),
             (PrimitiveType::Long, PrimitiveType::Timestamp),
@@ -920,7 +918,7 @@ mod tests {
         for (source_kernel, target_kernel) in reinterpretation_pairs {
             // Verify the kernel-level rule holds
             assert!(
-                source_kernel.is_checkpoint_cast_compatible(target_kernel),
+                source_kernel.is_checkpoint_cast_compatible(target_kernel, kind),
                 "Kernel should allow {source_kernel:?} -> {target_kernel:?}"
             );
 

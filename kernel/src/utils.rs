@@ -1,5 +1,6 @@
 //! Various utility functions/macros used throughout the kernel
 use std::borrow::Cow;
+use std::fmt::Display;
 use std::marker::PhantomData;
 use std::ops::Deref;
 use std::path::PathBuf;
@@ -8,7 +9,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use delta_kernel_derive::internal_api;
 use url::Url;
 
-use crate::{DeltaResult, KernelError};
+use crate::{FileSize, KernelError, KernelResult};
 
 /// Phantom type parameter `T`: The containing type mentions but does not own any instance of `T`.
 ///
@@ -70,7 +71,7 @@ impl<I: IntoIterator, T: FromIterator<I::Item>> CollectInto<T> for I {
 /// like `/local/paths`, and even `../relative/paths`.
 #[allow(unused)]
 #[internal_api]
-pub(crate) fn try_parse_uri(uri: impl AsRef<str>) -> DeltaResult<Url> {
+pub(crate) fn try_parse_uri(uri: impl AsRef<str>) -> KernelResult<Url> {
     let uri = uri.as_ref();
     let uri_type = resolve_uri_type(uri)?;
     let url = match uri_type {
@@ -115,7 +116,7 @@ enum UriType {
 ///
 /// Will return an error if the path is not valid.
 #[allow(unused)]
-fn resolve_uri_type(table_uri: impl AsRef<str>) -> DeltaResult<UriType> {
+fn resolve_uri_type(table_uri: impl AsRef<str>) -> KernelResult<UriType> {
     let table_uri = table_uri.as_ref();
     let table_uri = if table_uri.ends_with('/') {
         Cow::Borrowed(table_uri)
@@ -141,17 +142,27 @@ fn resolve_uri_type(table_uri: impl AsRef<str>) -> DeltaResult<UriType> {
 }
 
 /// Returns the current time as a Duration since Unix epoch.
-pub(crate) fn current_time_duration() -> DeltaResult<Duration> {
+pub(crate) fn current_time_duration() -> KernelResult<Duration> {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|e| KernelError::generic(format!("System time before Unix epoch: {e}")))
 }
 
 /// Returns the current time in milliseconds since Unix epoch.
-pub(crate) fn current_time_ms() -> DeltaResult<i64> {
+pub(crate) fn current_time_ms() -> KernelResult<i64> {
     let duration = current_time_duration()?;
     i64::try_from(duration.as_millis())
         .map_err(|_| KernelError::generic("Current timestamp exceeds i64 millisecond range"))
+}
+
+/// Convert an `i64` byte count into a [`FileSize`], erroring with `context` (a short description
+/// of the source, e.g. `"sidecar"`) and the offending value when it is negative.
+pub(crate) fn to_file_size(bytes: i64, context: impl Display) -> KernelResult<FileSize> {
+    bytes.try_into().map_err(|_| {
+        KernelError::generic(format!(
+            "Failed to convert {context} size {bytes} to FileSize"
+        ))
+    })
 }
 
 /// Extension trait for folding zero or one value from an [`Option`] into a base value.
@@ -175,8 +186,8 @@ pub(crate) trait FoldWithOption: Sized {
     fn try_fold_with<U, E>(
         self,
         opt: Option<U>,
-        f: impl FnOnce(Self, U) -> Result<Self, E>,
-    ) -> Result<Self, E> {
+        f: impl FnOnce(Self, U) -> KernelResult<Self, E>,
+    ) -> KernelResult<Self, E> {
         match opt {
             Some(value) => f(self, value),
             None => Ok(self),

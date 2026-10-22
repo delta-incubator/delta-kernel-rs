@@ -24,7 +24,7 @@ use crate::engine_data::{EngineData, GetData, RowVisitor, StringArrayAccessor};
 use crate::expressions::ArrayData;
 use crate::schema::{ColumnName, DataType, PrimitiveType, SchemaRef};
 use crate::utils::require;
-use crate::{DeltaResult, KernelError};
+use crate::{KernelError, KernelResult};
 
 /// ArrowEngineData holds an Arrow `RecordBatch`, implements `EngineData` so the kernel can extract
 /// from it.
@@ -41,11 +41,11 @@ pub struct ArrowEngineData {
 /// A trait to allow easy conversion from [`EngineData`] to an arrow [``RecordBatch`]. Returns an
 /// error if called on an `EngineData` that is not an `ArrowEngineData`.
 pub trait EngineDataArrowExt {
-    fn try_into_record_batch(self) -> DeltaResult<RecordBatch>;
+    fn try_into_record_batch(self) -> KernelResult<RecordBatch>;
 }
 
 impl EngineDataArrowExt for Box<dyn EngineData> {
-    fn try_into_record_batch(self) -> DeltaResult<RecordBatch> {
+    fn try_into_record_batch(self) -> KernelResult<RecordBatch> {
         Ok(self
             .into_any()
             .downcast::<ArrowEngineData>()
@@ -54,8 +54,8 @@ impl EngineDataArrowExt for Box<dyn EngineData> {
     }
 }
 
-impl EngineDataArrowExt for DeltaResult<Box<dyn EngineData>> {
-    fn try_into_record_batch(self) -> DeltaResult<RecordBatch> {
+impl EngineDataArrowExt for KernelResult<Box<dyn EngineData>> {
+    fn try_into_record_batch(self) -> KernelResult<RecordBatch> {
         Ok(self?
             .into_any()
             .downcast::<ArrowEngineData>()
@@ -65,7 +65,7 @@ impl EngineDataArrowExt for DeltaResult<Box<dyn EngineData>> {
 }
 
 /// Helper function to extract a RecordBatch from EngineData, ensuring it's ArrowEngineData
-pub(crate) fn extract_record_batch(engine_data: &dyn EngineData) -> DeltaResult<&RecordBatch> {
+pub(crate) fn extract_record_batch(engine_data: &dyn EngineData) -> KernelResult<&RecordBatch> {
     let Some(arrow_data) = engine_data.any_ref().downcast_ref::<ArrowEngineData>() else {
         return Err(KernelError::engine_data_type("ArrowEngineData"));
     };
@@ -88,7 +88,7 @@ impl ArrowEngineData {
     }
 
     /// Utility constructor to get a `Box<ArrowEngineData>` out of a `Box<dyn EngineData>`
-    pub fn try_from_engine_data(engine_data: Box<dyn EngineData>) -> DeltaResult<Box<Self>> {
+    pub fn try_from_engine_data(engine_data: Box<dyn EngineData>) -> KernelResult<Box<Self>> {
         engine_data
             .into_any()
             .downcast::<ArrowEngineData>()
@@ -193,7 +193,7 @@ impl EngineData for ArrowEngineData {
         &self,
         leaf_columns: &[ColumnName],
         visitor: &mut dyn RowVisitor,
-    ) -> DeltaResult<()> {
+    ) -> KernelResult<()> {
         // Make sure the caller passed the correct number of column names
         let leaf_types = visitor.selected_column_names_and_types().1;
         if leaf_types.len() != leaf_columns.len() {
@@ -260,7 +260,7 @@ impl EngineData for ArrowEngineData {
         &self,
         schema: SchemaRef,
         columns: Vec<ArrayData>,
-    ) -> DeltaResult<Box<dyn EngineData>> {
+    ) -> KernelResult<Box<dyn EngineData>> {
         // Combine existing and new schema fields
         let schema: ArrowSchema = schema.as_ref().try_into_arrow()?;
         let mut combined_fields = self.data.schema().fields().to_vec();
@@ -283,7 +283,7 @@ impl EngineData for ArrowEngineData {
     fn apply_selection_vector(
         self: Box<Self>,
         mut selection_vector: Vec<bool>,
-    ) -> DeltaResult<Box<dyn EngineData>> {
+    ) -> KernelResult<Box<dyn EngineData>> {
         require!(
             selection_vector.len() <= self.len(),
             KernelError::InvalidSelectionVector(format!(
@@ -325,7 +325,7 @@ impl ArrowEngineData {
         path: &mut Vec<String>,
         column_map: &mut HashMap<ColumnName, ColumnState<'a>>,
         data: &'a dyn ProvidesColumnsAndFields,
-    ) -> DeltaResult<()> {
+    ) -> KernelResult<()> {
         for (column, field) in data.columns().iter().zip(data.fields()) {
             path.push(field.name().to_string());
 
@@ -384,7 +384,7 @@ impl ArrowEngineData {
         path: &[String],
         data_type: &DataType,
         col: &'a dyn Array,
-    ) -> DeltaResult<&'a dyn GetData<'a>> {
+    ) -> KernelResult<&'a dyn GetData<'a>> {
         // TODO: Replace with `ArrowDataType::is_string()` once we bump arrow-schema past 57.2.0
         let is_string_type = |dt: &ArrowDataType| {
             matches!(
@@ -417,7 +417,7 @@ impl ArrowEngineData {
                     .then_some(array as _)
             })
         };
-        let result: Result<&'a dyn GetData<'a>, _> = match data_type {
+        let result: KernelResult<&'a dyn GetData<'a>, _> = match data_type {
             &DataType::BOOLEAN => {
                 debug!("Pushing boolean array for {}", ColumnName::new(path));
                 col.as_boolean_opt()
@@ -563,10 +563,10 @@ mod tests {
     use crate::schema::{schema, schema_ref, ArrayType, ColumnName, ColumnNamesAndTypes, DataType};
     use crate::table_features::TableFeature;
     use crate::unit_test_utils::{assert_result_error_with_message, string_array_to_engine_data};
-    use crate::{DeltaResult, Engine as _, EngineData as _};
+    use crate::{Engine as _, EngineData as _, KernelResult};
 
     #[test]
-    fn test_md_extract() -> DeltaResult<()> {
+    fn test_md_extract() -> KernelResult<()> {
         let engine = SyncEngine::new();
         let handler = engine.json_handler();
         let json_strings: StringArray = vec![
@@ -585,7 +585,7 @@ mod tests {
     }
 
     #[test]
-    fn test_protocol_extract() -> DeltaResult<()> {
+    fn test_protocol_extract() -> KernelResult<()> {
         let engine = SyncEngine::new();
         let handler = engine.json_handler();
         let json_strings: StringArray = vec![
@@ -611,7 +611,7 @@ mod tests {
     }
 
     #[test]
-    fn test_append_columns() -> DeltaResult<()> {
+    fn test_append_columns() -> KernelResult<()> {
         // Create initial ArrowEngineData with 2 rows and 2 columns
         let initial_schema = Arc::new(ArrowSchema::new(vec![
             ArrowField::new("id", ArrowDataType::Int32, false),
@@ -677,7 +677,7 @@ mod tests {
     }
 
     #[test]
-    fn test_append_columns_row_mismatch() -> DeltaResult<()> {
+    fn test_append_columns_row_mismatch() -> KernelResult<()> {
         // Create initial ArrowEngineData with 2 rows
         let initial_schema = Arc::new(ArrowSchema::new(vec![ArrowField::new(
             "id",
@@ -706,7 +706,7 @@ mod tests {
     }
 
     #[test]
-    fn test_append_columns_schema_field_count_mismatch() -> DeltaResult<()> {
+    fn test_append_columns_schema_field_count_mismatch() -> KernelResult<()> {
         let initial_schema = Arc::new(ArrowSchema::new(vec![ArrowField::new(
             "id",
             ArrowDataType::Int32,
@@ -737,7 +737,7 @@ mod tests {
     }
 
     #[test]
-    fn test_append_columns_empty_existing_data() -> DeltaResult<()> {
+    fn test_append_columns_empty_existing_data() -> KernelResult<()> {
         // Create empty ArrowEngineData with schema but no rows
         let initial_schema = Arc::new(ArrowSchema::new(vec![ArrowField::new(
             "id",
@@ -769,7 +769,7 @@ mod tests {
     }
 
     #[test]
-    fn test_append_columns_empty_new_columns() -> DeltaResult<()> {
+    fn test_append_columns_empty_new_columns() -> KernelResult<()> {
         // Create ArrowEngineData with some data
         let initial_schema = Arc::new(ArrowSchema::new(vec![ArrowField::new(
             "id",
@@ -796,7 +796,7 @@ mod tests {
     }
 
     #[test]
-    fn test_append_columns_with_nulls() -> DeltaResult<()> {
+    fn test_append_columns_with_nulls() -> KernelResult<()> {
         let initial_schema = Arc::new(ArrowSchema::new(vec![ArrowField::new(
             "id",
             ArrowDataType::Int32,
@@ -839,7 +839,7 @@ mod tests {
     }
 
     #[test]
-    fn test_append_columns_various_data_types() -> DeltaResult<()> {
+    fn test_append_columns_various_data_types() -> KernelResult<()> {
         let initial_schema = Arc::new(ArrowSchema::new(vec![ArrowField::new(
             "id",
             ArrowDataType::Int32,
@@ -884,7 +884,7 @@ mod tests {
     }
 
     #[test]
-    fn test_append_single_column() -> DeltaResult<()> {
+    fn test_append_single_column() -> KernelResult<()> {
         let initial_schema = Arc::new(ArrowSchema::new(vec![
             ArrowField::new("id", ArrowDataType::Int32, false),
             ArrowField::new("name", ArrowDataType::Utf8, true),
@@ -921,7 +921,7 @@ mod tests {
     }
 
     #[test]
-    fn test_binary_column_extraction() -> DeltaResult<()> {
+    fn test_binary_column_extraction() -> KernelResult<()> {
         // Create a RecordBatch with binary data
         let binary_data: Vec<Option<&[u8]>> = vec![
             Some(b"hello"),
@@ -959,7 +959,7 @@ mod tests {
                 &mut self,
                 row_count: usize,
                 getters: &[&'a dyn GetData<'a>],
-            ) -> DeltaResult<()> {
+            ) -> KernelResult<()> {
                 assert_eq!(getters.len(), 1);
                 let getter = getters[0];
 
@@ -988,7 +988,7 @@ mod tests {
     }
 
     #[test]
-    fn test_binary_column_extraction_type_mismatch() -> DeltaResult<()> {
+    fn test_binary_column_extraction_type_mismatch() -> KernelResult<()> {
         // Create a RecordBatch with Int32 data (not binary)
         let data: Vec<Option<i32>> = vec![Some(123)];
         let int_array = Int32Array::from(data);
@@ -1021,7 +1021,7 @@ mod tests {
                 &mut self,
                 row_count: usize,
                 getters: &[&'a dyn GetData<'a>],
-            ) -> DeltaResult<()> {
+            ) -> KernelResult<()> {
                 assert_eq!(getters.len(), 1);
                 let getter = getters[0];
 
@@ -1046,7 +1046,7 @@ mod tests {
     }
 
     #[test]
-    fn test_column_ordering_independence() -> DeltaResult<()> {
+    fn test_column_ordering_independence() -> KernelResult<()> {
         // Schema: field_a, field_b, nested.x, nested.y
         let nested_fields = vec![
             ArrowField::new("x", ArrowDataType::Int32, false),
@@ -1102,7 +1102,7 @@ mod tests {
                 &mut self,
                 row_count: usize,
                 getters: &[&'a dyn GetData<'a>],
-            ) -> DeltaResult<()> {
+            ) -> KernelResult<()> {
                 for i in 0..row_count {
                     self.values.push((
                         getters[0].get(i, "nested.y")?,
@@ -1124,7 +1124,7 @@ mod tests {
     }
 
     #[test]
-    fn test_visit_duplicate_column_error() -> DeltaResult<()> {
+    fn test_visit_duplicate_column_error() -> KernelResult<()> {
         // Create batch with simple columns
         let batch = RecordBatch::try_new(
             Arc::new(ArrowSchema::new(vec![
@@ -1153,7 +1153,7 @@ mod tests {
                 &mut self,
                 _row_count: usize,
                 _getters: &[&'a dyn crate::engine_data::GetData<'a>],
-            ) -> DeltaResult<()> {
+            ) -> KernelResult<()> {
                 Ok(())
             }
         }
@@ -1169,7 +1169,7 @@ mod tests {
     }
 
     #[test]
-    fn test_run_array_out_of_bounds_errors() -> DeltaResult<()> {
+    fn test_run_array_out_of_bounds_errors() -> KernelResult<()> {
         // Test that out of bounds errors include field name for all types
         let run_ends = Int64Array::from(vec![2]);
 
@@ -1217,7 +1217,7 @@ mod tests {
     }
 
     #[test]
-    fn test_run_array_extraction_via_visitor() -> DeltaResult<()> {
+    fn test_run_array_extraction_via_visitor() -> KernelResult<()> {
         // Create RunArray columns with pattern: [val1, val1, null, null, val2]
         // Per Arrow spec: nulls are encoded as runs in the values child array
         let run_ends = Int64Array::from(vec![2, 4, 5]);
@@ -1304,7 +1304,7 @@ mod tests {
                 &mut self,
                 row_count: usize,
                 getters: &[&'a dyn GetData<'a>],
-            ) -> DeltaResult<()> {
+            ) -> KernelResult<()> {
                 for i in 0..row_count {
                     self.data.push((
                         getters[0].get_str(i, "s")?.map(|s| s.to_string()),
@@ -1410,7 +1410,7 @@ mod tests {
     }
 
     #[test]
-    fn test_materialize_matches_get() -> DeltaResult<()> {
+    fn test_materialize_matches_get() -> KernelResult<()> {
         // Create MapArray with various keys
         let map_array = create_map_array(vec![vec![
             ("key1", Some("value1")),
@@ -1433,7 +1433,7 @@ mod tests {
     }
 
     #[test]
-    fn test_materialize_handles_nulls() -> DeltaResult<()> {
+    fn test_materialize_handles_nulls() -> KernelResult<()> {
         // Create MapArray with null values
         let map_array =
             create_map_array(vec![vec![("a", Some("1")), ("b", None), ("c", Some("3"))]]);
@@ -1450,7 +1450,7 @@ mod tests {
     }
 
     #[test]
-    fn test_materialize_empty_map() -> DeltaResult<()> {
+    fn test_materialize_empty_map() -> KernelResult<()> {
         // Create MapArray with empty map
         let map_array = create_map_array(vec![vec![]]);
 
@@ -1462,7 +1462,7 @@ mod tests {
     }
 
     #[test]
-    fn test_materialize_multiple_rows() -> DeltaResult<()> {
+    fn test_materialize_multiple_rows() -> KernelResult<()> {
         // Create MapArray with multiple rows
         let map_array = create_map_array(vec![
             vec![("a", Some("1")), ("b", Some("2"))],
@@ -1484,7 +1484,7 @@ mod tests {
     }
 
     #[test]
-    fn test_get_vs_materialize_consistency_with_duplicates() -> DeltaResult<()> {
+    fn test_get_vs_materialize_consistency_with_duplicates() -> KernelResult<()> {
         // Test that materialize() handles duplicate keys correctly (last wins)
         // and that get() returns the same value as materialize() for duplicate keys
         let map_array = create_map_array(vec![vec![
@@ -1513,7 +1513,7 @@ mod tests {
     }
 
     #[test]
-    fn test_materialize_null_map() -> DeltaResult<()> {
+    fn test_materialize_null_map() -> KernelResult<()> {
         // Create MapArray with 3 elements: 2 entries in first, 1 entry in second (null), 1 entry in
         // third
         let keys_array = Arc::new(StringArray::from(vec![
@@ -1621,7 +1621,7 @@ mod tests {
     #[case::utf8(Arc::new(StringArray::from(vec![Some("alice"), None, Some("charlie")])) as ArrayRef)]
     #[case::large_utf8(Arc::new(LargeStringArray::from(vec![Some("alice"), None, Some("charlie")])) as ArrayRef)]
     #[case::utf8_view(Arc::new(StringViewArray::from(vec![Some("alice"), None, Some("charlie")])) as ArrayRef)]
-    fn test_visit_rows_string_types(#[case] values: ArrayRef) -> DeltaResult<()> {
+    fn test_visit_rows_string_types(#[case] values: ArrayRef) -> KernelResult<()> {
         let batch = RecordBatch::try_new(
             Arc::new(ArrowSchema::new(vec![ArrowField::new(
                 "name",
@@ -1648,7 +1648,7 @@ mod tests {
                 &mut self,
                 row_count: usize,
                 getters: &[&'a dyn GetData<'a>],
-            ) -> DeltaResult<()> {
+            ) -> KernelResult<()> {
                 for i in 0..row_count {
                     self.values
                         .push(getters[0].get_str(i, "name")?.map(|s| s.to_string()));
@@ -1668,7 +1668,7 @@ mod tests {
 
     /// visit_rows must accept LargeBinary columns when the visitor declares DataType::BINARY.
     #[test]
-    fn test_visit_rows_large_binary() -> DeltaResult<()> {
+    fn test_visit_rows_large_binary() -> KernelResult<()> {
         let batch = RecordBatch::try_new(
             Arc::new(ArrowSchema::new(vec![ArrowField::new(
                 "data",
@@ -1699,7 +1699,7 @@ mod tests {
                 &mut self,
                 row_count: usize,
                 getters: &[&'a dyn GetData<'a>],
-            ) -> DeltaResult<()> {
+            ) -> KernelResult<()> {
                 for i in 0..row_count {
                     self.values
                         .push(getters[0].get_binary(i, "data")?.map(|b| b.to_vec()));
@@ -1719,7 +1719,7 @@ mod tests {
 
     /// visit_rows must accept ListView columns when the visitor declares a DataType::Array.
     #[test]
-    fn test_visit_rows_list_view() -> DeltaResult<()> {
+    fn test_visit_rows_list_view() -> KernelResult<()> {
         // Build a ListViewArray with string values: [["a", "b"], ["c"]]
         let values = Arc::new(StringArray::from(vec!["a", "b", "c"])) as ArrayRef;
         let field = Arc::new(ArrowField::new("item", ArrowDataType::Utf8, false));
@@ -1754,7 +1754,7 @@ mod tests {
                 &mut self,
                 row_count: usize,
                 getters: &[&'a dyn GetData<'a>],
-            ) -> DeltaResult<()> {
+            ) -> KernelResult<()> {
                 for i in 0..row_count {
                     let list: ListItem<'_> = getters[0].get(i, "tags")?;
                     self.values.push(list.materialize());
@@ -1776,7 +1776,7 @@ mod tests {
     }
 
     #[test]
-    fn test_visit_rows_string_list() -> DeltaResult<()> {
+    fn test_visit_rows_string_list() -> KernelResult<()> {
         // [["a", "b"], ["c"]] as a plain List<Utf8>.
         let values = Arc::new(StringArray::from(vec!["a", "b", "c"])) as ArrayRef;
         let field = Arc::new(ArrowField::new("item", ArrowDataType::Utf8, false));
@@ -1810,7 +1810,7 @@ mod tests {
                 &mut self,
                 row_count: usize,
                 getters: &[&'a dyn GetData<'a>],
-            ) -> DeltaResult<()> {
+            ) -> KernelResult<()> {
                 for i in 0..row_count {
                     let list: ListItem<'_> = getters[0].get(i, "tags")?;
                     self.values.push(list.materialize());
@@ -1854,7 +1854,7 @@ mod tests {
             &mut self,
             row_count: usize,
             getters: &[&'a dyn GetData<'a>],
-        ) -> DeltaResult<()> {
+        ) -> KernelResult<()> {
             for i in 0..row_count {
                 let mut inner = CollectNVisitor::default();
                 getters[0]
@@ -1868,7 +1868,7 @@ mod tests {
     }
 
     /// Wrap a single `items` column in an `ArrowEngineData`.
-    fn engine_data_with_items(items: ArrayRef) -> DeltaResult<ArrowEngineData> {
+    fn engine_data_with_items(items: ArrayRef) -> KernelResult<ArrowEngineData> {
         let batch = RecordBatch::try_new(
             Arc::new(ArrowSchema::new(vec![ArrowField::new(
                 "items",
@@ -1892,7 +1892,7 @@ mod tests {
             ListFlavor::LargeListView
         )]
         flavor: ListFlavor,
-    ) -> DeltaResult<()> {
+    ) -> KernelResult<()> {
         let items = struct_list_fixture_as(&[&[1, 2], &[3]], flavor);
         let arrow_data = engine_data_with_items(items)?;
 
@@ -1905,7 +1905,7 @@ mod tests {
     /// An `array<struct>` declaring nullable elements is rejected when getters are extracted, where
     /// the offending column can still be named.
     #[test]
-    fn test_visit_rows_struct_list_nullable_elements_rejected() -> DeltaResult<()> {
+    fn test_visit_rows_struct_list_nullable_elements_rejected() -> KernelResult<()> {
         let arrow_data =
             engine_data_with_items(struct_list_fixture_as(&[&[1, 2]], ListFlavor::List))?;
 
@@ -1925,7 +1925,7 @@ mod tests {
                 });
                 NT.as_ref()
             }
-            fn visit<'a>(&mut self, _: usize, _: &[&'a dyn GetData<'a>]) -> DeltaResult<()> {
+            fn visit<'a>(&mut self, _: usize, _: &[&'a dyn GetData<'a>]) -> KernelResult<()> {
                 panic!("visit must not be reached");
             }
         }
@@ -1952,7 +1952,7 @@ mod tests {
             &mut self,
             row_count: usize,
             getters: &[&'a dyn GetData<'a>],
-        ) -> DeltaResult<()> {
+        ) -> KernelResult<()> {
             for i in 0..row_count {
                 self.collected.push(getters[0].get_int(i, "leaf")?);
             }
@@ -1980,7 +1980,7 @@ mod tests {
     fn test_struct_list_element_schema_resolution(
         #[case] declared: &'static LazyLock<ColumnNamesAndTypes>,
         #[case] expect_err_containing: Option<&str>,
-    ) -> DeltaResult<()> {
+    ) -> KernelResult<()> {
         // Elements are `struct<n: int, inner: struct<deep: int>>`, so a multi-segment element path
         // has something to resolve against.
         let deep = Arc::new(Int32Array::from(vec![10, 20])) as ArrayRef;
@@ -2031,7 +2031,7 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_selection_vector_shorter_than_data_keeps_trailing_rows() -> DeltaResult<()> {
+    fn test_apply_selection_vector_shorter_than_data_keeps_trailing_rows() -> KernelResult<()> {
         let data = string_array_to_engine_data(StringArray::from(vec!["a", "b", "c"]));
         let filtered = data.apply_selection_vector(vec![false])?;
         let batch = extract_record_batch(filtered.as_ref())?;

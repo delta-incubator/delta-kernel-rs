@@ -45,7 +45,7 @@ pub(crate) use writer::try_write_crc_file;
 use crate::actions::LastManifestCommit;
 use crate::actions::{Add, DomainMetadata, Metadata, Protocol, SetTransaction};
 use crate::table_properties::ENABLE_IN_COMMIT_TIMESTAMPS;
-use crate::{DeltaResult, KernelError, Version};
+use crate::{KernelError, KernelResult, Version};
 
 // ============================================================================
 // Crc: in-memory representation
@@ -139,7 +139,7 @@ impl Crc {
         #[cfg(feature = "adaptive-metadata-in-dev")] last_manifest_commit_opt: Option<
             LastManifestCommit,
         >,
-    ) -> DeltaResult<Self> {
+    ) -> KernelResult<Self> {
         let crc = Self {
             version,
             metadata,
@@ -171,8 +171,9 @@ impl Crc {
 
     /// Returns the typed file-stats state. Useful for callers that want to inspect the
     /// variant directly (via `matches!` or the `is_*` predicates).
-    #[cfg(any(test, feature = "test-utils"))]
-    pub fn file_stats_state(&self) -> &FileStatsState {
+    #[internal_api]
+    #[cfg_attr(not(feature = "internal-api"), allow(dead_code))]
+    pub(crate) fn file_stats_state(&self) -> &FileStatsState {
         &self.file_stats_state
     }
 
@@ -185,12 +186,48 @@ impl Crc {
     pub fn all_files(&self) -> Option<&[Add]> {
         self.all_files.as_deref()
     }
+
+    /// Returns the transaction identifier, if captured.
+    #[internal_api]
+    #[cfg_attr(not(feature = "internal-api"), allow(dead_code))]
+    pub(crate) fn txn_id(&self) -> Option<&str> {
+        self.txn_id.as_deref()
+    }
+
+    /// Returns the captured number of deleted records.
+    #[internal_api]
+    #[cfg_attr(not(feature = "internal-api"), allow(dead_code))]
+    pub(crate) fn num_deleted_records(&self) -> Option<i64> {
+        self.num_deleted_records_opt
+    }
+
+    /// Returns the captured number of deletion vectors.
+    #[internal_api]
+    #[cfg_attr(not(feature = "internal-api"), allow(dead_code))]
+    pub(crate) fn num_deletion_vectors(&self) -> Option<i64> {
+        self.num_deletion_vectors_opt
+    }
+
+    /// Returns the captured deleted-record-count histogram.
+    #[internal_api]
+    #[cfg_attr(not(feature = "internal-api"), allow(dead_code))]
+    pub(crate) fn deleted_record_counts_histogram(&self) -> Option<&DeletedRecordCountsHistogram> {
+        self.deleted_record_counts_histogram_opt.as_ref()
+    }
+
+    /// Returns the latest manifest commit captured by this CRC, if present.
+    #[cfg(feature = "adaptive-metadata-in-dev")]
+    #[internal_api]
+    #[cfg_attr(not(feature = "internal-api"), allow(dead_code))]
+    pub(crate) fn last_manifest_commit(&self) -> Option<&LastManifestCommit> {
+        self.last_manifest_commit_opt.as_ref()
+    }
 }
 
 /// Refuses to serialize a degraded (non-`Complete`) CRC, so an invalid state can never
 /// round-trip through disk.
 impl Serialize for Crc {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> KernelResult<S::Ok, S::Error> {
         CrcRaw::try_from(self)
             .map_err(serde::ser::Error::custom)?
             .serialize(serializer)
@@ -260,7 +297,7 @@ impl Crc {
     ///
     /// Returns an error for malformed JSON or invalid counts, statistics, or histogram fields.
     #[internal_api]
-    pub(crate) fn try_from_json_bytes(bytes: &[u8], version: Version) -> DeltaResult<Self> {
+    pub(crate) fn try_from_json_bytes(bytes: &[u8], version: Version) -> KernelResult<Self> {
         let raw: CrcRaw = serde_json::from_slice(bytes)?;
         // Per the Delta protocol spec, numMetadata and numProtocol MUST be 1 in any CRC file.
         // Reject malformed files at the deserialization boundary so callers can trust the value.
@@ -319,7 +356,7 @@ impl Crc {
 /// Fails for non-`Complete` file stats: a degraded CRC has no well-defined on-disk shape.
 impl TryFrom<&Crc> for CrcRaw {
     type Error = KernelError;
-    fn try_from(crc: &Crc) -> Result<Self, Self::Error> {
+    fn try_from(crc: &Crc) -> KernelResult<Self> {
         crc.validate()?;
         let FileStatsState::Complete(stats) = &crc.file_stats_state else {
             return Err(KernelError::ChecksumWriteUnsupported(format!(
@@ -364,7 +401,7 @@ impl TryFrom<&Crc> for CrcRaw {
 /// ensuring malformed CRC files are rejected rather than causing panics later.
 fn de_validated_file_size_histogram<'de, D>(
     deserializer: D,
-) -> Result<Option<FileSizeHistogram>, D::Error>
+) -> KernelResult<Option<FileSizeHistogram>, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -394,7 +431,7 @@ where
 }
 
 impl Crc {
-    fn validate(&self) -> DeltaResult<()> {
+    fn validate(&self) -> KernelResult<()> {
         for (name, value) in [
             ("numDeletedRecordsOpt", self.num_deleted_records_opt),
             ("numDeletionVectorsOpt", self.num_deletion_vectors_opt),
@@ -527,6 +564,7 @@ impl Crc {
         #[cfg(feature = "adaptive-metadata-in-dev")]
         if let Some(last_manifest_commit) = &self.last_manifest_commit_opt {
             last_manifest_commit.validate()?;
+            last_manifest_commit.ensure_at_or_before(self.version)?;
         }
         Ok(())
     }
@@ -541,7 +579,7 @@ struct DerivedDeletionStats {
 impl TryFrom<&[Add]> for DerivedDeletionStats {
     type Error = KernelError;
 
-    fn try_from(files: &[Add]) -> DeltaResult<Self> {
+    fn try_from(files: &[Add]) -> KernelResult<Self> {
         let cardinalities = || {
             files.iter().map(|add| {
                 add.deletion_vector
@@ -566,7 +604,7 @@ impl TryFrom<&[Add]> for DerivedDeletionStats {
     }
 }
 
-fn validate_sum(name: &str, values: &[i64], expected: i64) -> DeltaResult<()> {
+fn validate_sum(name: &str, values: &[i64], expected: i64) -> KernelResult<()> {
     let actual = checked_sum(name, values.iter().copied())?;
     if actual != expected {
         return Err(KernelError::generic(format!(
@@ -576,7 +614,7 @@ fn validate_sum(name: &str, values: &[i64], expected: i64) -> DeltaResult<()> {
     Ok(())
 }
 
-fn checked_sum(name: &str, mut values: impl Iterator<Item = i64>) -> DeltaResult<i64> {
+fn checked_sum(name: &str, mut values: impl Iterator<Item = i64>) -> KernelResult<i64> {
     values.try_fold(0_i64, |sum, value| {
         sum.checked_add(value)
             .ok_or_else(|| KernelError::generic(format!("CRC {name} overflow")))
@@ -616,25 +654,32 @@ struct DeletedRecordCountsHistogramRaw {
 impl TryFrom<DeletedRecordCountsHistogramRaw> for DeletedRecordCountsHistogram {
     type Error = KernelError;
 
-    fn try_from(value: DeletedRecordCountsHistogramRaw) -> DeltaResult<Self> {
+    fn try_from(value: DeletedRecordCountsHistogramRaw) -> KernelResult<Self> {
         Self::try_new(value.deleted_record_counts.into())
     }
 }
 
 impl DeletedRecordCountsHistogram {
+    /// Returns the file counts in the deletion-count bins.
+    #[internal_api]
+    #[cfg_attr(not(feature = "internal-api"), allow(dead_code))]
+    pub(crate) fn deleted_record_counts(&self) -> &[i64] {
+        &self.deleted_record_counts
+    }
+
     /// Reconstructs a deleted-record-count histogram from its serialized bins.
     ///
     /// Returns an error unless exactly ten non-negative bin counts are provided.
     #[internal_api]
     #[cfg_attr(not(feature = "internal-api"), allow(dead_code))]
-    pub(crate) fn try_new(deleted_record_counts: Vec<i64>) -> DeltaResult<Self> {
+    pub(crate) fn try_new(deleted_record_counts: Vec<i64>) -> KernelResult<Self> {
         Self::validate(&deleted_record_counts)?;
         Ok(Self {
             deleted_record_counts,
         })
     }
 
-    fn try_from_cardinalities(cardinalities: impl IntoIterator<Item = i64>) -> DeltaResult<Self> {
+    fn try_from_cardinalities(cardinalities: impl IntoIterator<Item = i64>) -> KernelResult<Self> {
         let mut bins = vec![0; 10];
         for cardinality in cardinalities {
             if cardinality < 0 {
@@ -659,7 +704,7 @@ impl DeletedRecordCountsHistogram {
         Self::try_new(bins)
     }
 
-    fn validate(deleted_record_counts: &[i64]) -> DeltaResult<()> {
+    fn validate(deleted_record_counts: &[i64]) -> KernelResult<()> {
         if deleted_record_counts.len() != 10 {
             return Err(KernelError::generic(format!(
                 "deleted-record-count histogram must contain exactly 10 bins, got {}",
@@ -1042,6 +1087,7 @@ mod tests {
             protocol: valid_protocol(),
             file_stats_state: FileStatsState::Complete(FileStats::try_new(0, 0, None).unwrap()),
             last_manifest_commit_opt: Some(LastManifestCommit::new(5, 3).unwrap()),
+            version: 5,
             ..Default::default()
         };
 
@@ -1049,7 +1095,7 @@ mod tests {
         assert_eq!(json["lastManifestCommit"]["version"], 5);
         assert_eq!(json["lastManifestCommit"]["contentRootVersion"], 3);
 
-        let deserialized = Crc::try_from_json_bytes(json.to_string().as_bytes(), 0).unwrap();
+        let deserialized = Crc::try_from_json_bytes(json.to_string().as_bytes(), 5).unwrap();
         assert_eq!(crc, deserialized);
     }
 
@@ -1080,6 +1126,26 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("contentRootVersion 5 exceeds version 3"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[cfg(feature = "adaptive-metadata-in-dev")]
+    #[test]
+    fn de_last_manifest_commit_newer_than_crc_version_is_rejected() {
+        let crc = Crc {
+            protocol: valid_protocol(),
+            file_stats_state: FileStatsState::Complete(FileStats::try_new(0, 0, None).unwrap()),
+            last_manifest_commit_opt: Some(LastManifestCommit::new(5, 3).unwrap()),
+            version: 5,
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&crc).unwrap();
+
+        let err = Crc::try_from_json_bytes(json.to_string().as_bytes(), 4).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("lastManifestCommit version 5 exceeds commit version 4"),
             "unexpected error: {err}"
         );
     }

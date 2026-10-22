@@ -4,6 +4,8 @@ use std::time::Duration;
 
 use serde_json::{from_slice, json, Value};
 use tempfile::tempdir;
+#[cfg(feature = "adaptive-metadata-in-dev")]
+use test_utils::assert_result_error_with_message;
 use test_utils::{actions_to_string, add_commit, delta_path_for_version, TestAction};
 use url::Url;
 
@@ -12,12 +14,16 @@ use crate::action_reconciliation::{
     ActionReconciliationIteratorState, DEFAULT_RETENTION_SECS,
 };
 use crate::actions::{Add, Metadata, Protocol, Remove};
-use crate::arrow::array::{create_array, Array, AsArray, RecordBatch, StructArray};
+use crate::arrow::array::{
+    create_array, Array, AsArray, Int64Array, MapArray, RecordBatch, StructArray,
+};
 use crate::arrow::datatypes::{DataType, Field, Schema};
 use crate::checkpoint::{
     create_last_checkpoint_data, CheckpointWriter, LastCheckpointHintStats,
     CHECKPOINT_ACTIONS_SCHEMA_V2,
 };
+#[cfg(feature = "adaptive-metadata-in-dev")]
+use crate::checkpoint::{CheckpointSpec, V2CheckpointConfig};
 use crate::committer::FileSystemCommitter;
 use crate::engine::arrow_data::{ArrowEngineData, EngineDataArrowExt};
 use crate::engine::sync::SyncEngine;
@@ -28,8 +34,13 @@ use crate::object_store::ObjectStoreExt as _;
 use crate::schema::{schema_ref, DataType as KernelDataType, StructField};
 use crate::table_features::TableFeature;
 use crate::transaction::create_table::create_table;
+use crate::transaction::UpdateTableOperation;
 use crate::unit_test_utils::Action;
-use crate::{DeltaResult, FileMeta, LogPath, Snapshot};
+#[cfg(feature = "adaptive-metadata-in-dev")]
+use crate::unit_test_utils::{
+    adaptive_metadata_table_configuration, test_schema_flat_with_column_mapping,
+};
+use crate::{FileMeta, KernelResult, LogPath, Snapshot};
 
 #[rstest::rstest]
 #[case::default_retention(
@@ -41,7 +52,7 @@ use crate::{DeltaResult, FileMeta, LogPath, Snapshot};
 fn test_deleted_file_retention_timestamp(
     #[case] retention: Option<Duration>,
     #[case] expected_timestamp: i64,
-) -> DeltaResult<()> {
+) -> KernelResult<()> {
     let reference_time_secs = 10_000;
     let reference_time = Duration::from_secs(reference_time_secs);
 
@@ -76,7 +87,7 @@ fn test_verify_written_size(
 }
 
 #[tokio::test]
-async fn test_create_checkpoint_metadata_batch() -> DeltaResult<()> {
+async fn test_create_checkpoint_metadata_batch() -> KernelResult<()> {
     let (store, _) = new_in_memory_store();
     let engine = SyncEngine::new_with_store(store.clone());
 
@@ -94,6 +105,7 @@ async fn test_create_checkpoint_metadata_batch() -> DeltaResult<()> {
 
     let table_root = Url::parse("memory:///")?;
     let snapshot = Snapshot::builder_for(table_root).build(&engine)?;
+    let snapshot_version = snapshot.version();
     let writer = snapshot.create_checkpoint_writer(&engine)?;
 
     // Use V2 schema for the checkpoint metadata batch
@@ -124,6 +136,29 @@ async fn test_create_checkpoint_metadata_batch() -> DeltaResult<()> {
     // Verify we have one row
     assert_eq!(record_batch.num_rows(), 1);
 
+    // Verify the checkpointMetadata action carries the expected tags and version
+    let checkpoint_metadata = record_batch
+        .column_by_name("checkpointMetadata")
+        .expect("Schema should have checkpointMetadata field")
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .expect("checkpointMetadata must be a struct");
+    let tags = checkpoint_metadata
+        .column_by_name("tags")
+        .expect("checkpointMetadata must carry a tags field");
+    assert!(
+        tags.as_any().downcast_ref::<MapArray>().is_some(),
+        "tags must be a map"
+    );
+    assert!(tags.is_null(0), "tags should be written null");
+    let version = checkpoint_metadata
+        .column_by_name("version")
+        .expect("checkpointMetadata must carry a version field")
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .expect("version must be an int64");
+    assert_eq!(version.value(0), snapshot_version as i64);
+
     // Verify action counts
     assert_eq!(checkpoint_batch.actions_count, 1);
     assert_eq!(checkpoint_batch.add_actions_count, 0);
@@ -132,7 +167,7 @@ async fn test_create_checkpoint_metadata_batch() -> DeltaResult<()> {
 }
 
 #[test]
-fn test_create_last_checkpoint_data() -> DeltaResult<()> {
+fn test_create_last_checkpoint_data() -> KernelResult<()> {
     let version = 10;
     let total_actions_counter = 100;
     let add_actions_counter = 75;
@@ -196,7 +231,7 @@ pub(super) async fn write_commit_to_store(
     store: &Arc<InMemory>,
     actions: Vec<Action>,
     version: u64,
-) -> DeltaResult<()> {
+) -> KernelResult<()> {
     let json_lines: Vec<String> = actions
         .into_iter()
         .map(|action| serde_json::to_string(&action).expect("action to string"))
@@ -275,7 +310,7 @@ fn try_finalize_checkpoint(
     engine: &dyn crate::Engine,
     metadata: &FileMeta,
     data_iter: ActionReconciliationIterator,
-) -> DeltaResult<()> {
+) -> KernelResult<()> {
     let state = data_iter.state();
     drop(data_iter);
     let state = Arc::into_inner(state).expect("no other Arc references");
@@ -294,7 +329,7 @@ async fn assert_last_checkpoint_contents(
     expected_size: u64,
     expected_num_add_files: u64,
     expected_size_in_bytes: u64,
-) -> DeltaResult<()> {
+) -> KernelResult<()> {
     let last_checkpoint_data = read_last_checkpoint_file(store).await?;
     let expected_data = json!({
         "version": expected_version,
@@ -307,7 +342,7 @@ async fn assert_last_checkpoint_contents(
 }
 
 /// Reads the `_last_checkpoint` file from storage
-async fn read_last_checkpoint_file(store: &Arc<InMemory>) -> DeltaResult<Value> {
+async fn read_last_checkpoint_file(store: &Arc<InMemory>) -> KernelResult<Value> {
     let path = Path::from("_delta_log/_last_checkpoint");
     let data = store.get(&path).await?;
     let byte_data = data.bytes().await?;
@@ -318,7 +353,7 @@ async fn read_last_checkpoint_file(store: &Arc<InMemory>) -> DeltaResult<Value> 
 /// - A table that does not support v2Checkpoint
 /// - No version specified (latest version is used)
 #[tokio::test]
-async fn test_v1_checkpoint_latest_version_by_default() -> DeltaResult<()> {
+async fn test_v1_checkpoint_latest_version_by_default() -> KernelResult<()> {
     let (store, _) = new_in_memory_store();
     let engine = SyncEngine::new_with_store(store.clone());
 
@@ -396,7 +431,7 @@ async fn test_v1_checkpoint_latest_version_by_default() -> DeltaResult<()> {
 /// - A table that does not support v2Checkpoint
 /// - A specific version specified (version 0)
 #[tokio::test]
-async fn test_v1_checkpoint_specific_version() -> DeltaResult<()> {
+async fn test_v1_checkpoint_specific_version() -> KernelResult<()> {
     let (store, _) = new_in_memory_store();
     let engine = SyncEngine::new_with_store(store.clone());
 
@@ -461,7 +496,7 @@ async fn test_v1_checkpoint_specific_version() -> DeltaResult<()> {
 }
 
 #[tokio::test]
-async fn test_finalize_errors_if_checkpoint_data_iterator_is_not_exhausted() -> DeltaResult<()> {
+async fn test_finalize_errors_if_checkpoint_data_iterator_is_not_exhausted() -> KernelResult<()> {
     let (store, _) = new_in_memory_store();
     let engine = SyncEngine::new_with_store(store.clone());
 
@@ -499,7 +534,7 @@ async fn test_finalize_errors_if_checkpoint_data_iterator_is_not_exhausted() -> 
 }
 
 #[test]
-fn test_last_checkpoint_hint_stats_with_nonzero_num_sidecars() -> DeltaResult<()> {
+fn test_last_checkpoint_hint_stats_with_nonzero_num_sidecars() -> KernelResult<()> {
     let state = ActionReconciliationIteratorState::new_exhausted(5, 2);
     let stats = LastCheckpointHintStats::from_reconciliation_state(state, 100, 3)?;
     assert_eq!(stats.num_actions, 8); // 5 reconciled + 3 sidecar actions
@@ -551,7 +586,7 @@ fn test_last_checkpoint_hint_stats_rejects_invalid_input(
 /// - A table that does supports v2Checkpoint
 /// - No version specified (latest version is used)
 #[tokio::test]
-async fn test_v2_checkpoint_supported_table() -> DeltaResult<()> {
+async fn test_v2_checkpoint_supported_table() -> KernelResult<()> {
     let (store, _) = new_in_memory_store();
     let engine = SyncEngine::new_with_store(store.clone());
 
@@ -626,7 +661,7 @@ async fn test_v2_checkpoint_supported_table() -> DeltaResult<()> {
 }
 
 #[tokio::test]
-async fn test_no_checkpoint_on_unpublished_snapshot() -> DeltaResult<()> {
+async fn test_no_checkpoint_on_unpublished_snapshot() -> KernelResult<()> {
     let (store, _) = new_in_memory_store();
     let engine = SyncEngine::new_with_store(store.clone());
 
@@ -675,6 +710,39 @@ async fn test_no_checkpoint_on_unpublished_snapshot() -> DeltaResult<()> {
     Ok(())
 }
 
+#[cfg(feature = "adaptive-metadata-in-dev")]
+#[rstest::rstest]
+#[tokio::test]
+async fn test_no_standalone_checkpoint_on_adaptive_metadata_table(
+    #[values(
+        None,
+        Some(CheckpointSpec::V1),
+        Some(CheckpointSpec::V2(V2CheckpointConfig::NoSidecar))
+    )]
+    spec: Option<CheckpointSpec>,
+) -> KernelResult<()> {
+    let (store, _) = new_in_memory_store();
+    let engine = SyncEngine::new_with_store(store.clone());
+    let config = adaptive_metadata_table_configuration(test_schema_flat_with_column_mapping(), &[]);
+    let commit = [
+        json!({ "commitInfo": { "timestamp": 1, "inCommitTimestamp": 1 } }),
+        json!({ "protocol": config.protocol() }),
+        json!({ "metaData": config.metadata() }),
+    ]
+    .map(|action| action.to_string())
+    .join("\n");
+    add_commit("memory:///", store.as_ref(), 0, commit)
+        .await
+        .unwrap();
+
+    let snapshot = Snapshot::builder_for("memory:///").build(&engine)?;
+    let message =
+        "Standalone checkpoints are not yet supported for tables with adaptiveMetadata enabled";
+    assert_result_error_with_message(snapshot.checkpoint(&engine, spec.as_ref()), message);
+    assert_result_error_with_message(snapshot.create_checkpoint_writer(&engine), message);
+    Ok(())
+}
+
 /// Create an Add action with JSON stats
 fn create_add_action_with_stats(path: &str, num_records: i64) -> Action {
     let stats = format!(
@@ -689,7 +757,7 @@ fn create_add_action_with_stats(path: &str, num_records: i64) -> Action {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_snapshot_checkpoint() -> DeltaResult<()> {
+async fn test_snapshot_checkpoint() -> KernelResult<()> {
     let (store, _) = new_in_memory_store();
     let engine = SyncEngine::new_with_store(store.clone());
 
@@ -786,7 +854,7 @@ async fn test_snapshot_checkpoint() -> DeltaResult<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_checkpoint_preserves_domain_metadata() -> DeltaResult<()> {
+async fn test_checkpoint_preserves_domain_metadata() -> KernelResult<()> {
     // ===== Setup =====
     let tmp_dir = tempdir().unwrap();
     let table_path = tmp_dir.path();
@@ -825,12 +893,13 @@ async fn test_checkpoint_preserves_domain_metadata() -> DeltaResult<()> {
     // ===== Create Engine =====
     let engine = SyncEngine::new();
 
-    let commit_domain_metadata = |domain: &str, value: &str| -> DeltaResult<()> {
+    let commit_domain_metadata = |domain: &str, value: &str| -> KernelResult<()> {
         let snapshot = Snapshot::builder_for(table_url.clone()).build(&engine)?;
-        let txn = snapshot.transaction(Box::new(FileSystemCommitter::new()), &engine)?;
-        let result = txn
-            .with_domain_metadata(domain.to_string(), value.to_string())
-            .commit(&engine)?;
+        let txn = snapshot
+            .update_table(UpdateTableOperation::Write, "test-engine", true)
+            .with_domain_metadata(domain, value)
+            .build(&engine, Box::new(FileSystemCommitter::new()))?;
+        let result = txn.commit(&engine)?;
         assert!(result.is_committed());
         Ok(())
     };
@@ -859,7 +928,7 @@ async fn test_checkpoint_preserves_domain_metadata() -> DeltaResult<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_checkpoint_excludes_tombstoned_domain_metadata() -> DeltaResult<()> {
+async fn test_checkpoint_excludes_tombstoned_domain_metadata() -> KernelResult<()> {
     // ===== Setup =====
     let tmp_dir = tempdir().unwrap();
     let table_path = tmp_dir.path();
@@ -903,10 +972,11 @@ async fn test_checkpoint_excludes_tombstoned_domain_metadata() -> DeltaResult<()
 
     // ===== Commit domain metadata for "foo" =====
     let snapshot = Snapshot::builder_for(table_url.clone()).build(&engine)?;
-    let txn = snapshot.transaction(Box::new(FileSystemCommitter::new()), &engine)?;
-    let result = txn
-        .with_domain_metadata("foo".to_string(), "bar".to_string())
-        .commit(&engine)?;
+    let txn = snapshot
+        .update_table(UpdateTableOperation::Write, "test-engine", true)
+        .with_domain_metadata("foo", "bar")
+        .build(&engine, Box::new(FileSystemCommitter::new()))?;
+    let result = txn.commit(&engine)?;
     assert!(result.is_committed());
 
     // Verify domain exists before removal
@@ -918,9 +988,10 @@ async fn test_checkpoint_excludes_tombstoned_domain_metadata() -> DeltaResult<()
 
     // ===== Remove domain metadata for "foo" (tombstone) =====
     let snapshot = Snapshot::builder_for(table_url.clone()).build(&engine)?;
-    let txn = snapshot.transaction(Box::new(FileSystemCommitter::new()), &engine)?;
-    let result = txn
-        .with_domain_metadata_removed("foo".to_string())
+    let result = snapshot
+        .update_table(UpdateTableOperation::Write, "test-engine", true)
+        .with_domain_metadata_removed("foo")
+        .build(&engine, Box::new(FileSystemCommitter::new()))?
         .commit(&engine)?;
     assert!(result.is_committed());
 
@@ -941,7 +1012,7 @@ async fn test_checkpoint_excludes_tombstoned_domain_metadata() -> DeltaResult<()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_checkpoint_skips_last_checkpoint_write_when_hint_version_is_newer() -> DeltaResult<()>
+async fn test_checkpoint_skips_last_checkpoint_write_when_hint_version_is_newer() -> KernelResult<()>
 {
     let (store, _) = new_in_memory_store();
     let engine = SyncEngine::new_with_store(store.clone());
@@ -951,6 +1022,7 @@ async fn test_checkpoint_skips_last_checkpoint_write_when_hint_version_is_newer(
         table_root.as_str(),
         schema_ref! { nullable "value": INTEGER },
         "test",
+        true,
     )
     .build(&engine, Box::new(FileSystemCommitter::new()))?
     .commit(&engine)?;
@@ -1047,7 +1119,7 @@ fn verify_checkpoint_schema(
     schema: &Schema,
     expect_stats: bool,
     expect_stats_parsed: bool,
-) -> DeltaResult<()> {
+) -> KernelResult<()> {
     verify_checkpoint_schema_with_partitions(schema, expect_stats, expect_stats_parsed, false)
 }
 
@@ -1057,7 +1129,7 @@ fn verify_checkpoint_schema_with_partitions(
     expect_stats: bool,
     expect_stats_parsed: bool,
     expect_partition_values_parsed: bool,
-) -> DeltaResult<()> {
+) -> KernelResult<()> {
     let add_field = schema
         .field_with_name("add")
         .expect("schema should have 'add' field");
@@ -1103,7 +1175,7 @@ async fn test_stats_config_round_trip(
     #[values(true, false)] struct1: bool,
     #[values(true, false)] json2: bool,
     #[values(true, false)] struct2: bool,
-) -> DeltaResult<()> {
+) -> KernelResult<()> {
     let (store, _) = new_in_memory_store();
     let engine = SyncEngine::new_with_store(store.clone());
     let table_root = Url::parse("memory:///")?;
@@ -1170,7 +1242,7 @@ async fn test_stats_config_round_trip_partitioned(
     #[values(true, false)] struct1: bool,
     #[values(true, false)] json2: bool,
     #[values(true, false)] struct2: bool,
-) -> DeltaResult<()> {
+) -> KernelResult<()> {
     let (store, _) = new_in_memory_store();
     let engine = SyncEngine::new_with_store(store.clone());
     let table_root = Url::parse("memory:///")?;
@@ -1282,7 +1354,7 @@ async fn test_stats_config_round_trip_partitioned(
 // NullCountStatsTransform), but the stats_parsed data from the old checkpoint lacks it,
 // causing an Arrow schema mismatch in the COALESCE expression.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_checkpoint_with_varchar_metadata_on_field() -> DeltaResult<()> {
+async fn test_checkpoint_with_varchar_metadata_on_field() -> KernelResult<()> {
     let (store, _) = new_in_memory_store();
     let engine = SyncEngine::new_with_store(store.clone());
 
