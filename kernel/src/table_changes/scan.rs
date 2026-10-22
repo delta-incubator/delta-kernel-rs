@@ -20,6 +20,7 @@ use crate::{Engine, EngineData, FileMeta, KernelError, KernelResult, PredicateRe
 
 /// The result of building a [`TableChanges`] scan over a table. This can be used to get the change
 /// data feed from the table.
+// TODO(#3609): Support connector-provided timezone in CDF scans.
 #[derive(Debug)]
 pub struct TableChangesScan {
     // The [`TableChanges`] that specifies this scan's start and end versions

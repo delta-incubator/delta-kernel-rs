@@ -58,11 +58,14 @@ impl Default for ScanStatsOptions {
 }
 
 /// Read-time partition value toggles consumed by [`ScanLogReplayProcessor`].
-#[derive(Clone, Copy, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub(crate) struct ScanPartitionValuesOptions {
     /// Emit the typed `partitionValues_parsed` struct column in scan metadata output,
     /// independent of any predicate.
     pub(crate) parsed_struct: bool,
+    /// Timezone used to interpret offset-less `TIMESTAMP` partition strings.
+    #[serde(default)]
+    pub(crate) timestamp_timezone: Option<String>,
 }
 
 /// Internal serializable state (schemas, transform spec, column mapping, etc.)
@@ -82,7 +85,7 @@ struct InternalScanState {
     stats_options: ScanStatsOptions,
     #[serde(default)]
     partition_values_options: ScanPartitionValuesOptions,
-    /// Physical partition schema for checkpoint partition pruning via `partitionValues_parsed`
+    /// Physical partition schema for typed partition output and partition pruning.
     physical_partition_schema: Option<SchemaRef>,
     /// Physical leaf paths eligible for data skipping. Carried alongside
     /// `physical_stats_schemas.read` so the distributed `DataSkippingFilter` rebuilds the same
@@ -260,6 +263,7 @@ impl ScanLogReplayProcessor {
             skip_stats,
             synthesize_json,
         } = stats_options;
+        let timestamp_timezone_name = partition_values_options.timestamp_timezone.as_deref();
 
         // Create metrics first so we can pass them to DataSkippingFilter
         let metrics = Arc::new(ScanMetrics::default());
@@ -333,11 +337,12 @@ impl ScanLogReplayProcessor {
                 COMMIT_READ_SCHEMA.clone(),
                 get_add_transform_expr(
                     stats_schema_for_transform.clone(),
-                    false,
+                    false, /* has_stats_parsed */
                     skip_stats,
                     synthesize_json,
                     partition_schema_for_transform.clone(),
-                    false,
+                    false, /* has_partition_values_parsed */
+                    timestamp_timezone_name,
                 ),
                 output_schema.clone().into(),
             )?,
@@ -351,6 +356,7 @@ impl ScanLogReplayProcessor {
                     synthesize_json,
                     partition_schema_for_transform,
                     has_partition_values_parsed,
+                    timestamp_timezone_name,
                 ),
                 output_schema.into(),
             )?,
@@ -924,6 +930,7 @@ fn build_stats_output_projection(
 /// - `has_partition_values_parsed`: Whether the source carries a native `partitionValues_parsed`
 ///   column (checkpoint). When true it is read directly; otherwise the struct is reconstructed from
 ///   the `partitionValues` string map.
+/// - `timestamp_timezone`: Timezone used to interpret offset-less `TIMESTAMP` partition strings.
 ///
 /// The transform includes `stats_parsed` only when `physical_stats_read_schema` is Some,
 /// and `partitionValues_parsed` only when `partition_schema` is Some.
@@ -935,6 +942,7 @@ fn get_add_transform_expr(
     synthesize_json: bool,
     partition_schema: Option<SchemaRef>,
     has_partition_values_parsed: bool,
+    timestamp_timezone: Option<&str>,
 ) -> ExpressionRef {
     let stats_expr = if skip_stats {
         Arc::new(null_lit(DataType::STRING))
@@ -986,12 +994,24 @@ fn get_add_transform_expr(
             col!("add.partitionValues_parsed")
         } else {
             // No native column (JSON commit): reconstruct from the string map.
-            Expression::map_to_struct(col!("add.partitionValues"), MapToStructOptions::default())
+            parsed_partition_values_expr(col!("add.partitionValues"), timestamp_timezone)
         };
         fields.push(Arc::new(pv_parsed_expr));
     }
 
     Arc::new(Expression::struct_from(fields))
+}
+
+/// Build typed partition values from the string map.
+fn parsed_partition_values_expr(
+    raw_partition_values: Expression,
+    timestamp_timezone: Option<&str>,
+) -> Expression {
+    let options = MapToStructOptions::default().fold_with(
+        timestamp_timezone,
+        MapToStructOptions::with_timestamp_timezone,
+    );
+    Expression::map_to_struct(raw_partition_values, options)
 }
 
 // TODO: Move this to transaction/mod.rs once `scan_metadata_from` is pub, as this is used for
@@ -1289,6 +1309,10 @@ mod tests {
         get_add_transform_expr, scan_action_iter, InternalScanState, ScanLogReplayProcessor,
         ScanPartitionValuesOptions, ScanStatsOptions, SerializableScanState,
     };
+    use crate::arrow::array::cast::AsArray;
+    use crate::arrow::array::types::TimestampMicrosecondType;
+    use crate::arrow::array::StringArray;
+    use crate::engine::arrow_data::EngineDataArrowExt as _;
     use crate::engine::sync::SyncEngine;
     use crate::expressions::{
         col, column_name, lit, null_lit, BinaryExpressionOp, Expression, OpaquePredicateOp,
@@ -1314,9 +1338,9 @@ mod tests {
     use crate::scan::{PhysicalPredicate, StatsOptions, COMMIT_READ_SCHEMA};
     use crate::schema::{schema_ref, DataType, MetadataColumnSpec, SchemaRef};
     use crate::table_features::ColumnMappingMode;
-    use crate::unit_test_utils::assert_result_error_with_message;
+    use crate::unit_test_utils::{assert_result_error_with_message, string_array_to_engine_data};
     use crate::{
-        EngineData, Expression as Expr, ExpressionEvaluator, ExpressionRef, KernelError,
+        Engine, EngineData, Expression as Expr, ExpressionEvaluator, ExpressionRef, KernelError,
         KernelResult,
     };
 
@@ -1340,6 +1364,29 @@ mod tests {
                 self.inner.evaluate(batch)
             }
         }
+    }
+
+    #[test]
+    fn partition_values_options_serde_preserves_timezone() {
+        let options = ScanPartitionValuesOptions {
+            parsed_struct: true,
+            timestamp_timezone: Some("America/Los_Angeles".to_string()),
+        };
+        let encoded = serde_json::to_string(&options).unwrap();
+        let decoded: ScanPartitionValuesOptions = serde_json::from_str(&encoded).unwrap();
+        assert!(decoded.parsed_struct);
+        assert_eq!(
+            decoded.timestamp_timezone.as_deref(),
+            Some("America/Los_Angeles")
+        );
+    }
+
+    #[test]
+    fn partition_values_options_serde_defaults_timezone_when_absent() {
+        let old: ScanPartitionValuesOptions =
+            serde_json::from_str(r#"{"parsed_struct":true}"#).unwrap();
+        assert!(old.parsed_struct);
+        assert_eq!(old.timestamp_timezone, None);
     }
 
     fn test_checkpoint_info() -> CheckpointReadInfo {
@@ -1837,6 +1884,68 @@ mod tests {
             }
             _ => panic!("Expected PhysicalPredicate::Some"),
         }
+    }
+
+    #[test]
+    fn test_serialization_with_timezone() -> KernelResult<()> {
+        let engine = SyncEngine::new();
+        let schema = schema_ref! {
+            nullable "ts": TIMESTAMP,
+            nullable "value": INTEGER,
+        };
+        // Keep timestamps after 2024-01-15 16:00 UTC.
+        let predicate = Arc::new(col!("ts").gt(lit(Scalar::Timestamp(1_705_334_400_000_000))));
+        let mut state_info = get_state_info(
+            schema,
+            vec!["ts".to_string()],
+            Some(predicate),
+            &[],
+            HashMap::new(),
+            vec![],
+        )?;
+        state_info.skip_row_transforms = true;
+
+        let processor = ScanLogReplayProcessor::new(
+            &engine,
+            Arc::new(state_info),
+            test_checkpoint_info(),
+            ScanStatsOptions::default(),
+            ScanPartitionValuesOptions {
+                parsed_struct: true,
+                timestamp_timezone: Some("America/Los_Angeles".to_string()),
+            },
+        )?;
+        let mut deserialized = ScanLogReplayProcessor::from_serializable_state(
+            &engine,
+            processor.into_serializable_state()?,
+        )?;
+
+        let actions = engine.json_handler().parse_json(
+            string_array_to_engine_data(StringArray::from(vec![concat!(
+                r#"{"add":{"path":"f.parquet","partitionValues":{"ts":"2024-01-15 12:30:00"},"#,
+                r#""size":1,"modificationTime":0,"dataChange":true}}"#,
+            )])),
+            COMMIT_READ_SCHEMA.clone(),
+        )?;
+        let metadata =
+            deserialized.process_actions_batch_sequential(ActionsBatch::new(actions, true))?;
+
+        let (data, selection) = metadata.scan_files.into_parts();
+        assert_eq!(selection, vec![true]);
+
+        let batch = data.try_into_record_batch()?;
+        let parsed = batch
+            .column_by_name("partitionValues_parsed")
+            .unwrap()
+            .as_struct();
+        let timestamps = parsed
+            .column_by_name("ts")
+            .unwrap()
+            .as_primitive::<TimestampMicrosecondType>();
+
+        // 12:30 in Los Angeles is 20:30 UTC, so the file survives pruning.
+        assert_eq!(timestamps.value(0), 1_705_350_600_000_000);
+        Ok(())
     }
 
     #[test]
@@ -2405,6 +2514,7 @@ mod tests {
             true,  // synthesize_json
             partition_schema.clone(),
             false, // has_partition_values_parsed
+            None,  // timestamp_timezone
         );
         assert_eq!(
             count_to_json(&with_synthesis),
@@ -2420,6 +2530,7 @@ mod tests {
             false, // synthesize_json
             partition_schema,
             false, // has_partition_values_parsed
+            None,  // timestamp_timezone
         );
         assert_eq!(
             count_to_json(&without_synthesis),
