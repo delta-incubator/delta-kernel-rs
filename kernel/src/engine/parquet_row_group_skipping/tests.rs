@@ -30,7 +30,6 @@ use crate::parquet::file::serialized_reader::SerializedFileReader;
 use crate::parquet::schema::types::{ColumnPath, Type};
 use crate::{DeltaResult, KernelResult, Predicate};
 
-
 /// Empty partition column set for tests that don't need partition columns.
 static NO_PARTITIONS: LazyLock<HashSet<String>> = LazyLock::new(HashSet::new);
 
