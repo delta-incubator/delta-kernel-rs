@@ -884,7 +884,11 @@ mod tests {
                 unsafe { free_commit_actions_iter(iter) }
             }
             None => {
-                assert_extern_result_error_with_message(result, FFIKernelError::GenericError, None);
+                assert_extern_result_error_with_message(
+                    result,
+                    FFIKernelError::CommitRangeError,
+                    None,
+                );
             }
         }
 
@@ -909,7 +913,7 @@ mod tests {
                 0,
             )
         };
-        assert_extern_result_error_with_message(result, FFIKernelError::GenericError, None);
+        assert_extern_result_error_with_message(result, FFIKernelError::CommitRangeError, None);
 
         unsafe { free_commit_range(range) }
         unsafe { free_engine(engine) }

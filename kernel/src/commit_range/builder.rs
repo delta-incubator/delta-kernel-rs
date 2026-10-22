@@ -98,6 +98,9 @@ impl CommitRangeBuilder {
     /// commits are listed in the range without validating the start version, contiguity, or
     /// commit count. Disabling validation is only supported for path-based builders
     /// ([`CommitRange::builder_for`]).
+    ///
+    /// Ranges built without validation support raw [`CommitRange::commit_files`] enumeration,
+    /// while [`CommitRange::commits`] is unavailable.
     #[internal_api]
     #[cfg_attr(not(feature = "internal-api"), allow(dead_code))]
     pub(crate) fn with_commit_range_validation(mut self, commit_range_validation: bool) -> Self {
@@ -128,7 +131,8 @@ impl CommitRangeBuilder {
     /// listed commits are non-contiguous. Returns [`KernelError::StartVersionNotFound`] (carrying
     /// the earliest still-available version) if the requested start is unavailable but later
     /// versions exist, [`KernelError::EmptyLog`] if nothing is available in the requested range at
-    /// all, and a generic error if the resolved version range is invalid (start > end).
+    /// all, and [`KernelError::CommitRange`] if the resolved version range is invalid
+    /// (start > end).
     ///
     /// With commit range validation disabled, only [`KernelError::EmptyLog`] (no commit listed in
     /// the range) and the version-range and catalog-tail errors apply. Returns
@@ -280,7 +284,9 @@ impl CommitRangeBuilder {
             self.log_tail
                 .iter()
                 .all(|path| path.file_type == LogPathFileType::StagedCommit),
-            KernelError::generic("Commit range log tail must contain only staged commits")
+            KernelError::CommitRange(
+                "Commit range log tail must contain only staged commits".to_string()
+            )
         );
         validate_catalog_managed_log_tail(
             self.end_version,
@@ -307,7 +313,7 @@ pub enum CommitOrdering {
 
 fn validate_version_range(start: Version, end: Version) -> KernelResult<()> {
     if start > end {
-        return Err(KernelError::generic(format!(
+        return Err(KernelError::CommitRange(format!(
             "start_version ({start}) must be <= end_version ({end})",
         )));
     }
@@ -506,7 +512,7 @@ mod tests {
             .expect_err("must error");
         assert!(matches!(
             err,
-            KernelError::Generic(message)
+            KernelError::CommitRange(message)
                 if message.contains("start_version (1) must be <= end_version (0)")
         ));
     }
@@ -761,7 +767,9 @@ mod tests {
             .build(&engine)
             .unwrap_err();
 
-        assert!(matches!(err, KernelError::Generic(message) if message.contains("only staged")));
+        assert!(
+            matches!(err, KernelError::CommitRange(message) if message.contains("only staged"))
+        );
     }
 
     #[test]

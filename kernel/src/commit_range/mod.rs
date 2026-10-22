@@ -6,7 +6,7 @@
 //! By default, [`CommitRangeBuilder::build`] validates that the range's commits are present and
 //! contiguous. With the `internal-api` feature, a path-based builder may disable that build-time
 //! validation; `CommitRange::commit_files` then detects version gaps lazily, and
-//! [`CommitRange::commits`] returns [`KernelError::Unsupported`].
+//! [`CommitRange::commits`] returns [`KernelError::CommitRange`].
 //!
 //! Two construction paths, differing only in how `_delta_log/` is listed at build time:
 //! - [`CommitRange::builder_for`]: lists `_delta_log/` for the requested range.
@@ -168,10 +168,15 @@ impl CommitRange {
     /// records and does NOT impose change-data-feed support (`Operation::Cdf`). It does not
     /// materialize a change data feed.
     ///
-    /// Returns [`KernelError::Unsupported`] if the range was built with commit range validation
-    /// disabled. Returns `Err` if `actions` is empty or contains duplicate kinds, or if
-    /// `start_snapshot` belongs to a different table, its version does not match the range anchor,
-    /// or its table does not support scanning.
+    /// In ascending order, each commit is validated against the protocol and metadata carried
+    /// forward from earlier versions, so the range must be contiguous as validated by
+    /// [`CommitRangeBuilder::build`]. Ranges built with commit range validation disabled may
+    /// contain gaps; enumerate their raw files with `commit_files` instead.
+    ///
+    /// Returns [`KernelError::CommitRange`] if the range was built with commit range validation
+    /// disabled, if `actions` is empty, or if `start_snapshot` belongs to a different table or its
+    /// version does not match the range anchor. Returns `Err` if `actions` contains duplicate kinds
+    /// or the table does not support scanning.
     pub fn commits(
         &self,
         engine: Arc<dyn Engine>,
@@ -180,20 +185,21 @@ impl CommitRange {
     ) -> KernelResult<impl KernelResultIterator<CommitAction>> {
         require!(
             self.commit_range_validation,
-            KernelError::unsupported(
+            KernelError::CommitRange(
                 "Commit action iteration requires commit range validation to be enabled"
+                    .to_string()
             )
         );
         if actions.is_empty() {
-            return Err(KernelError::generic(
-                "at least one DeltaAction must be requested",
+            return Err(KernelError::CommitRange(
+                "at least one DeltaAction must be requested".to_string(),
             ));
         }
 
         let (latest_protocol, latest_metadata) = match &start_snapshot {
             Some(snapshot) => {
                 if snapshot.table_root() != &self.table_root {
-                    return Err(KernelError::generic(format!(
+                    return Err(KernelError::CommitRange(format!(
                         "snapshot table root ({}) does not match commit range table root ({})",
                         snapshot.table_root(),
                         self.table_root,
@@ -204,7 +210,7 @@ impl CommitRange {
                     CommitOrdering::DescendingOrder => (self.end_version, "end_version"),
                 };
                 if snapshot.version() != anchor_version {
-                    return Err(KernelError::generic(format!(
+                    return Err(KernelError::CommitRange(format!(
                         "snapshot version {} does not match {anchor_name} ({anchor_version})",
                         snapshot.version(),
                     )));
@@ -936,8 +942,31 @@ mod tests {
             .commits(engine, Some(bad_snapshot), &[DeltaAction::Add])
             .err()
             .unwrap();
-        let msg = format!("{err}");
-        assert!(msg.contains(expected_anchor_name));
+        assert!(matches!(
+            err,
+            KernelError::CommitRange(message) if message.contains(expected_anchor_name)
+        ));
+    }
+
+    #[test]
+    fn test_commits_errors_on_snapshot_table_root_mismatch() {
+        let (range, engine, _) = open_test_range_at(0);
+        let other_path =
+            std::fs::canonicalize(PathBuf::from("./tests/data/table-without-dv-small/")).unwrap();
+        let other_table_root = url::Url::from_directory_path(other_path).unwrap();
+        let other_snapshot = Snapshot::builder_for(other_table_root.as_str())
+            .at_version(0)
+            .build(engine.as_ref())
+            .unwrap();
+
+        let err = range
+            .commits(engine, Some(other_snapshot), &[DeltaAction::Add])
+            .err()
+            .unwrap();
+        assert!(matches!(
+            err,
+            KernelError::CommitRange(message) if message.contains("table root")
+        ));
     }
 
     #[test]
@@ -947,8 +976,10 @@ mod tests {
             .commits(engine, Some(anchor_snapshot), &[])
             .err()
             .unwrap();
-        let msg = format!("{err}");
-        assert!(msg.contains("DeltaAction"), "got: {msg}");
+        assert!(matches!(
+            err,
+            KernelError::CommitRange(message) if message.contains("DeltaAction")
+        ));
     }
 
     #[rstest::rstest]
@@ -1289,8 +1320,8 @@ mod tests {
 
         let result = range.commits(engine, None, &[DeltaAction::Add]);
         assert!(
-            matches!(result, Err(KernelError::Unsupported(_))),
-            "expected Unsupported error"
+            matches!(result, Err(KernelError::CommitRange(_))),
+            "expected CommitRange error"
         );
         assert_result_error_with_message(result, "requires commit range validation to be enabled");
     }
