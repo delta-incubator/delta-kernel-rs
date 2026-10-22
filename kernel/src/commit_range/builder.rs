@@ -133,11 +133,6 @@ impl CommitRangeBuilder {
     /// versions exist, [`KernelError::EmptyLog`] if nothing is available in the requested range at
     /// all, and [`KernelError::CommitRange`] if the resolved version range is invalid
     /// (start > end).
-    ///
-    /// With commit range validation disabled, only [`KernelError::EmptyLog`] (no commit listed in
-    /// the range) and the version-range and catalog-tail errors apply. Returns
-    /// [`KernelError::CommitRange`] if validation is disabled on a snapshot-based builder or with
-    /// [`CommitOrdering::DescendingOrder`].
     pub fn build(self, engine: &dyn Engine) -> KernelResult<CommitRange> {
         self.validate_supported_modes()?;
 
