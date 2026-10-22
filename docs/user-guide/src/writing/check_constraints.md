@@ -52,9 +52,9 @@ txn.commit(..)                fails on a constrained table without the acknowled
 ### Discovering constraints
 
 `Snapshot::check_constraints()` returns a table's constraints at the snapshot's version, and
-`Transaction::check_constraints()` returns the ones the table has once the transaction commits.
-Each `CheckConstraint` provides the constraint's name through `name()` and its SQL expression,
-verbatim from the table, through `raw_sql()`.
+`Transaction::check_constraints()` returns the effective constraints of the transaction. Each
+`CheckConstraint` provides the constraint's name through `name()` and its SQL expression, verbatim
+from the table, through `raw_sql()`.
 
 ```rust,no_run
 # extern crate delta_kernel;

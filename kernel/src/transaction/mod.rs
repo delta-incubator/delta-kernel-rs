@@ -540,8 +540,8 @@ impl<STATE> Transaction<STATE, Imperative> {
 // Shared methods available on ALL transaction types
 // =============================================================================
 impl<STATE, MODE: ExecutionMode> Transaction<STATE, MODE> {
-    /// The table's CHECK constraints once this transaction commits, sorted by name and then SQL.
-    /// Empty when the table declares none.
+    /// The effective CHECK constraints of this transaction, sorted by name and then SQL. Empty when
+    /// the table declares none.
     ///
     /// Each constraint is a Boolean SQL expression, stored under `delta.constraints.<name>`, that
     /// every row in the table must satisfy. See [`Self::ack_check_constraints`] for what a
@@ -565,9 +565,9 @@ impl<STATE, MODE: ExecutionMode> Transaction<STATE, MODE> {
     ///   to `false` or `NULL`. This includes files written for an earlier commit attempt, such as
     ///   one that conflicted, and validated against an older table version.
     ///
-    /// The acknowledgement covers whatever this transaction commits. Without it, on a table that
-    /// has CHECK constraints once this transaction commits,
-    /// [`write_state`](Transaction::write_state) and [`commit`](Self::commit) fail.
+    /// The acknowledgement covers whatever this transaction commits. Without it,
+    /// [`write_state`](Transaction::write_state) and [`commit`](Self::commit) fail whenever
+    /// [`Self::check_constraints`] is not empty.
     #[cfg(feature = "check-constraints-in-dev")]
     pub fn ack_check_constraints(&mut self) {
         self.check_constraints_acknowledged = true;

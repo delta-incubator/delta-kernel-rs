@@ -664,7 +664,7 @@ impl Snapshot {
     ///
     /// A connector writing to the table discovers them from
     /// [`Transaction::check_constraints`](crate::transaction::Transaction::check_constraints)
-    /// instead, which returns the constraints the table has once the transaction commits.
+    /// instead.
     #[cfg(feature = "check-constraints-in-dev")]
     pub fn check_constraints(&self) -> &[CheckConstraint] {
         &self.table_properties().check_constraints
