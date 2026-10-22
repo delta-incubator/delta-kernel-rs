@@ -14,21 +14,22 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use delta_kernel::arrow::array::{Int64Array, RecordBatch};
+use delta_kernel::arrow::array::{Array, BooleanArray, Int64Array, RecordBatch, StructArray};
+use delta_kernel::arrow::compute::filter_record_batch;
 use delta_kernel::arrow::datatypes::Schema as ArrowSchema;
 use delta_kernel::checkpoint::{CheckpointSpec, V2CheckpointConfig};
 use delta_kernel::committer::FileSystemCommitter;
 use delta_kernel::engine::arrow_conversion::TryIntoArrow as _;
 use delta_kernel::expressions::{
-    column_expr, Expression as Expr, Predicate as Pred, PredicateRef, Scalar,
+    col, column_name, lit, Expression as Expr, Predicate as Pred, PredicateRef, Scalar,
 };
 use delta_kernel::metrics::{MetricEvent, ScanType};
 use delta_kernel::object_store::local::LocalFileSystem;
-use delta_kernel::scan::{AfterSequentialScanMetadata, ParallelScanMetadata};
-use delta_kernel::schema::{DataType, SchemaRef, StructField, StructType};
+use delta_kernel::scan::{AfterSequentialScanMetadata, ParallelScanMetadata, Scan, StatsOptions};
+use delta_kernel::schema::{schema, schema_ref, DataType, SchemaRef, StructField, StructType};
 use delta_kernel::transaction::create_table::create_table;
 use delta_kernel::transaction::data_layout::DataLayout;
-use delta_kernel::{Error, Snapshot, SnapshotRef};
+use delta_kernel::{KernelError, Snapshot, SnapshotRef};
 use rstest::rstest;
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -36,7 +37,7 @@ use test_utils::delta_kernel_default_engine::executor::tokio::TokioMultiThreadEx
 use test_utils::delta_kernel_default_engine::DefaultEngine;
 use test_utils::{
     add_commit, create_table_and_load_snapshot, install_thread_local_metrics_reporter,
-    test_table_setup_mt, write_batch_to_table, CapturingReporter,
+    into_record_batch, test_table_setup_mt, write_batch_to_table, CapturingReporter,
 };
 use url::Url;
 
@@ -112,25 +113,19 @@ async fn build_capped_table_with_checkpoint(
     Ok((tmp_dir, table_path, engine))
 }
 
-/// Returns the paths of files surviving data skipping. Exercises the sequential
-/// `Scan::scan_metadata` path when `use_parallel` is `false`, or the two-phase
-/// `Scan::parallel_scan_metadata` + `ParallelScanMetadata` path when `true`. The parallel
-/// branch dispatches one file per `ParallelScanMetadata` to maximize coverage of the worker
-/// rebuild path.
-fn selected_paths(
-    snapshot: SnapshotRef,
+/// Collects scan-file paths through sequential or parallel scan metadata.
+///
+/// Parallel execution assigns one file to each worker. Neither path guarantees result order.
+fn collect_scan_paths(
+    scan: &Scan,
     engine: Arc<TestEngine>,
-    predicate: PredicateRef,
     use_parallel: bool,
 ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-    let scan = snapshot.scan_builder().with_predicate(predicate).build()?;
-
     fn push_path(paths: &mut Vec<String>, scan_file: delta_kernel::scan::state::ScanFile) {
         paths.push(scan_file.path);
     }
 
     let mut paths: Vec<String> = Vec::new();
-
     if use_parallel {
         let mut sequential = scan.parallel_scan_metadata(engine.clone())?;
         for sm in sequential.by_ref() {
@@ -152,8 +147,17 @@ fn selected_paths(
             paths = sm?.visit_scan_files(paths, push_path)?;
         }
     }
-
     Ok(paths)
+}
+
+fn selected_paths(
+    snapshot: SnapshotRef,
+    engine: Arc<TestEngine>,
+    predicate: PredicateRef,
+    use_parallel: bool,
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let scan = snapshot.scan_builder().with_predicate(predicate).build()?;
+    collect_scan_paths(&scan, engine, use_parallel)
 }
 
 /// Loads a fresh snapshot off the same on-disk table and returns the surviving file count
@@ -201,7 +205,7 @@ async fn all_in_cap_prunes(
     #[values(false, true)] use_parallel: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (_tmp_dir, table_path, engine) = build_capped_table_with_checkpoint().await?;
-    let pred = Arc::new(Pred::gt(column_expr!("c0"), Expr::literal(60i64)));
+    let pred = Arc::new(Pred::gt(col!("c0"), lit(60i64)));
     assert_eq!(surviving_files(&table_path, engine, pred, use_parallel)?, 1);
     Ok(())
 }
@@ -212,7 +216,7 @@ async fn all_in_cap_keeps_all(
     #[values(false, true)] use_parallel: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (_tmp_dir, table_path, engine) = build_capped_table_with_checkpoint().await?;
-    let pred = Arc::new(Pred::gt(column_expr!("c0"), Expr::literal(0i64)));
+    let pred = Arc::new(Pred::gt(col!("c0"), lit(0i64)));
     assert_eq!(surviving_files(&table_path, engine, pred, use_parallel)?, 3);
     Ok(())
 }
@@ -223,7 +227,7 @@ async fn all_past_cap_keeps_all(
     #[values(false, true)] use_parallel: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (_tmp_dir, table_path, engine) = build_capped_table_with_checkpoint().await?;
-    let pred = Arc::new(Pred::gt(column_expr!("c4"), Expr::literal(1_000_000i64)));
+    let pred = Arc::new(Pred::gt(col!("c4"), lit(1_000_000i64)));
     assert_eq!(surviving_files(&table_path, engine, pred, use_parallel)?, 3);
     Ok(())
 }
@@ -237,8 +241,8 @@ async fn mixed_and_in_cap_prunes(
     // c0 > 60 prunes files A and B; c4 > 50 is past-cap and folds to NULL.
     // AND(false, NULL) = false keeps the prune; AND(true, NULL) = NULL keeps file C.
     let pred = Arc::new(Pred::and(
-        Pred::gt(column_expr!("c0"), Expr::literal(60i64)),
-        Pred::gt(column_expr!("c4"), Expr::literal(50i64)),
+        Pred::gt(col!("c0"), lit(60i64)),
+        Pred::gt(col!("c4"), lit(50i64)),
     ));
     assert_eq!(surviving_files(&table_path, engine, pred, use_parallel)?, 1);
     Ok(())
@@ -253,8 +257,8 @@ async fn mixed_or_keeps_all(
     // c0 > 1000 would prune all 3 by max; c4 > 50 is past-cap and folds to NULL.
     // OR(false, NULL) = NULL keeps every file.
     let pred = Arc::new(Pred::or(
-        Pred::gt(column_expr!("c0"), Expr::literal(1000i64)),
-        Pred::gt(column_expr!("c4"), Expr::literal(50i64)),
+        Pred::gt(col!("c0"), lit(1000i64)),
+        Pred::gt(col!("c4"), lit(50i64)),
     ));
     assert_eq!(surviving_files(&table_path, engine, pred, use_parallel)?, 3);
     Ok(())
@@ -269,10 +273,259 @@ async fn boundary_c1_prunes_all(
     // c1 max across files is 209 < 250 so the in-cap arm rules out everything.
     // c2 > 50 is past-cap and folds to NULL; AND(false, NULL) = false everywhere.
     let pred = Arc::new(Pred::and(
-        Pred::gt(column_expr!("c1"), Expr::literal(250i64)),
-        Pred::gt(column_expr!("c2"), Expr::literal(50i64)),
+        Pred::gt(col!("c1"), lit(250i64)),
+        Pred::gt(col!("c2"), lit(50i64)),
     ));
     assert_eq!(surviving_files(&table_path, engine, pred, use_parallel)?, 0);
+    Ok(())
+}
+
+/// Builds a table whose JSON commits contain stats beyond the current read cap.
+///
+/// Files are written under the default cap, then the read cap is lowered. With `checkpoint`, a
+/// checkpoint is written after lowering the cap: the default `writeStatsAsJson` preserves the
+/// original `add.stats` verbatim, so the past-cap stats survive into the checkpoint.
+async fn build_table_with_past_cap_stats(
+    checkpoint: bool,
+) -> Result<(tempfile::TempDir, String, Arc<TestEngine>), Box<dyn std::error::Error>> {
+    let schema = capped_schema();
+    let (tmp_dir, table_path, engine) = test_table_setup_mt()?;
+    let table_url = Url::from_directory_path(&table_path)
+        .map_err(|_| "table_path should be a valid file URL")?;
+    let mut snapshot =
+        create_table_and_load_snapshot(&table_path, schema.clone(), engine.as_ref(), &[])?;
+    // Write c2 values 10, 50, and 100 while the default cap records all column stats.
+    for c0_start in [10, 50, 100] {
+        snapshot = write_batch_to_table(
+            &snapshot,
+            engine.as_ref(),
+            long_batch(&schema, c0_start, 10),
+            HashMap::new(),
+        )
+        .await?;
+    }
+    // Lower the read cap without rewriting the existing Add stats.
+    let snapshot = set_table_properties(
+        &table_path,
+        &table_url,
+        engine.as_ref(),
+        snapshot.version(),
+        &[("delta.dataSkippingNumIndexedCols", "2")],
+    )?;
+    if checkpoint {
+        snapshot.checkpoint(engine.as_ref(), None)?;
+    }
+    Ok((tmp_dir, table_path, engine))
+}
+
+/// Returns sorted paths that survive data skipping with the supplied stats options.
+fn surviving_paths_with_stats(
+    table_path: &str,
+    engine: Arc<TestEngine>,
+    predicate: PredicateRef,
+    stats: StatsOptions,
+    use_parallel: bool,
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let url = delta_kernel::try_parse_uri(table_path)?;
+    let snapshot = Snapshot::builder_for(url).build(engine.as_ref())?;
+    let scan = snapshot
+        .scan_builder()
+        .with_predicate(predicate)
+        .with_stats(stats)
+        .build()?;
+    let mut paths = collect_scan_paths(&scan, engine, use_parallel)?;
+    paths.sort();
+    Ok(paths)
+}
+
+/// The pieces of the emitted `stats_parsed` output a test asserts on.
+struct StatsParsedOutput {
+    /// Field names present in `minValues`, i.e. the emitted output columns.
+    min_value_fields: Vec<String>,
+    /// `(min, max)` of the probe column on every emitted file, sorted.
+    probe_min_max: Vec<(i64, i64)>,
+}
+
+/// Reads the emitted field names and per-file `(min, max)` values for `probe` from `stats_parsed`.
+fn read_stats_parsed_output(
+    scan: &Scan,
+    engine: Arc<TestEngine>,
+    probe: &str,
+) -> Result<StatsParsedOutput, Box<dyn std::error::Error>> {
+    let mut min_fields: Option<Vec<String>> = None;
+    let mut min_max = Vec::new();
+    for sm in scan.scan_metadata(engine.as_ref())? {
+        let (data, selection) = sm?.scan_files.into_parts();
+        // Keep only selected rows; deselected rows are non-Add actions with null stats.
+        let batch = filter_record_batch(&into_record_batch(data), &BooleanArray::from(selection))?;
+        let struct_at = |parent: &StructArray, name: &str| -> Result<StructArray, String> {
+            parent
+                .column_by_name(name)
+                .and_then(|c| c.as_any().downcast_ref::<StructArray>())
+                .cloned()
+                .ok_or_else(|| format!("{name} missing or not a struct"))
+        };
+        let stats = batch
+            .column_by_name("stats_parsed")
+            .and_then(|c| c.as_any().downcast_ref::<StructArray>())
+            .cloned()
+            .ok_or("stats_parsed missing from scan output")?;
+        let min_values = struct_at(&stats, "minValues")?;
+        let max_values = struct_at(&stats, "maxValues")?;
+        let null_count = struct_at(&stats, "nullCount")?;
+        assert!(
+            null_count.column_by_name(probe).is_some(),
+            "nullCount should carry {probe}"
+        );
+
+        min_fields.get_or_insert_with(|| {
+            min_values
+                .fields()
+                .iter()
+                .map(|f| f.name().to_string())
+                .collect()
+        });
+        let int_col = |parent: &StructArray, name: &str| -> Result<Int64Array, String> {
+            parent
+                .column_by_name(name)
+                .and_then(|c| c.as_any().downcast_ref::<Int64Array>())
+                .cloned()
+                .ok_or_else(|| format!("{name}.{probe} missing or not i64"))
+        };
+        let probe_min = int_col(&min_values, probe)?;
+        let probe_max = int_col(&max_values, probe)?;
+        for row in 0..batch.num_rows() {
+            min_max.push((probe_min.value(row), probe_max.value(row)));
+        }
+    }
+    min_max.sort_unstable();
+    Ok(StatsParsedOutput {
+        min_value_fields: min_fields.unwrap_or_default(),
+        probe_min_max: min_max,
+    })
+}
+
+/// Verifies that `stats_parsed` contains a past-cap column and its per-file values.
+#[rstest]
+#[case::extra_only_via_all(
+    StatsOptions::all_struct_with_extra_indexed(vec![column_name!("c2")]),
+    &["c0", "c1", "c2"],
+)]
+#[case::requested_only(
+    StatsOptions::struct_columns(vec![column_name!("c2")]),
+    &["c2"],
+)]
+#[case::multiple_requested_columns(
+    StatsOptions::struct_columns(vec![column_name!("c1"), column_name!("c2")]),
+    &["c1", "c2"],
+)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn past_cap_column_surfaces_in_stats_parsed_output(
+    #[case] stats: StatsOptions,
+    #[case] expected_min_fields: &[&str],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (_tmp_dir, table_path, engine) = build_table_with_past_cap_stats(false).await?;
+    let url = delta_kernel::try_parse_uri(&table_path)?;
+    let snapshot = Snapshot::builder_for(url).build(engine.as_ref())?;
+    let scan = snapshot.scan_builder().with_stats(stats).build()?;
+
+    let output = read_stats_parsed_output(&scan, engine, "c2")?;
+    assert_eq!(output.min_value_fields, expected_min_fields);
+    assert_eq!(output.probe_min_max, vec![(10, 10), (50, 50), (100, 100)]);
+    Ok(())
+}
+
+/// The checkpoint case verifies JSON recovery when struct stats omit the past-cap column.
+#[rstest]
+#[case::json_commits(false)]
+#[case::checkpoint(true)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn past_cap_stats_column_enables_pruning(
+    #[case] checkpoint: bool,
+    #[values(false, true)] use_parallel: bool,
+    // Both entry points add requested physical stats columns: `All`'s
+    // best-effort `extra_indexed`, and `Columns`'s explicit `requested`.
+    #[values(
+        StatsOptions::all_struct_with_extra_indexed(vec![column_name!("c2")]),
+        StatsOptions::struct_columns(vec![column_name!("c2")])
+    )]
+    bypass_stats: StatsOptions,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (_tmp_dir, table_path, engine) = build_table_with_past_cap_stats(checkpoint).await?;
+    let predicate = || Arc::new(Pred::gt(col!("c2"), lit(60i64)));
+
+    let default_survivors = surviving_paths_with_stats(
+        &table_path,
+        engine.clone(),
+        predicate(),
+        StatsOptions::all_struct(),
+        use_parallel,
+    )?;
+    assert_eq!(
+        default_survivors.len(),
+        3,
+        "c2 is capped out, so every file survives without the bypass"
+    );
+
+    let pruned =
+        surviving_paths_with_stats(&table_path, engine, predicate(), bypass_stats, use_parallel)?;
+    assert_eq!(
+        pruned.len(),
+        1,
+        "with c2 exempt from the cap, only file C (c2 == 100 > 60) survives"
+    );
+    Ok(())
+}
+
+#[rstest]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn extra_indexed_file_missing_the_stat_is_never_pruned(
+    #[values(false, true)] use_parallel: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let schema = capped_schema();
+    let (_tmp_dir, table_path, engine) = test_table_setup_mt()?;
+    let table_url = Url::from_directory_path(&table_path)
+        .map_err(|_| "table_path should be a valid file URL")?;
+    let mut snapshot =
+        create_table_and_load_snapshot(&table_path, schema.clone(), engine.as_ref(), &[])?;
+    // Write two files while c2 remains indexed.
+    for c0_start in [10, 100] {
+        snapshot = write_batch_to_table(
+            &snapshot,
+            engine.as_ref(),
+            long_batch(&schema, c0_start, 10),
+            HashMap::new(),
+        )
+        .await?;
+    }
+    // Lower the cap before the third write so that file omits c2 stats.
+    snapshot = set_table_properties(
+        &table_path,
+        &table_url,
+        engine.as_ref(),
+        snapshot.version(),
+        &[("delta.dataSkippingNumIndexedCols", "2")],
+    )?;
+    write_batch_to_table(
+        &snapshot,
+        engine.as_ref(),
+        long_batch(&schema, 10, 10),
+        HashMap::new(),
+    )
+    .await?;
+
+    let survivors = surviving_paths_with_stats(
+        &table_path,
+        engine,
+        Arc::new(Pred::gt(col!("c2"), lit(60i64))),
+        StatsOptions::all_struct_with_extra_indexed(vec![column_name!("c2")]),
+        use_parallel,
+    )?;
+    assert_eq!(
+        survivors.len(),
+        2,
+        "matching file C plus the stats-less file D survive; only A is pruned"
+    );
     Ok(())
 }
 
@@ -284,13 +537,43 @@ async fn boundary_c1_prunes_all(
 // batch keep their stats and the predicate prunes them correctly.
 
 fn timestamp_stats_schema() -> SchemaRef {
-    Arc::new(
-        StructType::try_new(vec![
-            StructField::nullable("EventTime", DataType::TIMESTAMP),
-            StructField::nullable("UserId", DataType::LONG),
-        ])
-        .unwrap(),
-    )
+    schema_ref! {
+        nullable "EventTime": TIMESTAMP,
+        nullable "UserId": LONG,
+    }
+}
+
+/// Creates a `timestamp_stats_schema` table and returns the pieces needed to inject raw commits:
+/// `(tmp_dir, table_path, engine, table_url, store)`.
+#[allow(clippy::type_complexity)]
+fn timestamp_stats_table_setup(
+    properties: &[(&str, &str)],
+) -> Result<
+    (
+        tempfile::TempDir,
+        String,
+        Arc<DefaultEngine<TokioMultiThreadExecutor>>,
+        Url,
+        Arc<delta_kernel::object_store::DynObjectStore>,
+    ),
+    Box<dyn std::error::Error>,
+> {
+    let (tmp_dir, table_path, engine) = test_table_setup_mt()?;
+    create_table_and_load_snapshot(
+        &table_path,
+        timestamp_stats_schema(),
+        engine.as_ref(),
+        properties,
+    )?;
+    let store: Arc<delta_kernel::object_store::DynObjectStore> = Arc::new(LocalFileSystem::new());
+    let table_url = Url::from_directory_path(&table_path)
+        .map_err(|_| "table_path should be a valid file URL")?;
+    Ok((tmp_dir, table_path, engine, table_url, store))
+}
+
+/// An `EventTime` predicate against a microsecond bound, e.g. `timestamp_pred(Pred::le, micros)`.
+fn timestamp_pred(op: fn(Expr, Expr) -> Pred, micros: i64) -> PredicateRef {
+    Arc::new(op(col!("EventTime"), lit(Scalar::Timestamp(micros))))
 }
 
 /// Builds a stringified Delta `stats` JSON given EventTime/UserId min/max bounds.
@@ -336,20 +619,7 @@ fn commit_with_remove(version: u64, path: &str, deletion_timestamp: i64) -> Stri
 async fn extended_year_timestamp_stats_dont_collapse_skipping(
     #[values(false, true)] use_parallel: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let (_tmp_dir, table_path, engine) = test_table_setup_mt()?;
-    let _ = create_table_and_load_snapshot(
-        &table_path,
-        timestamp_stats_schema(),
-        engine.as_ref(),
-        &[],
-    )?;
-
-    // Inject Adds via raw JSON commits using a separate `LocalFileSystem` instance pointing
-    // at the same on-disk root the kernel-managed engine uses. The kernel only reads commit
-    // files during scan_metadata, so a fake Add (no backing parquet) is fine for this test.
-    let store: Arc<delta_kernel::object_store::DynObjectStore> = Arc::new(LocalFileSystem::new());
-    let table_url = Url::from_directory_path(&table_path)
-        .map_err(|_| "table_path should be a valid file URL")?;
+    let (_tmp_dir, table_path, engine, table_url, store) = timestamp_stats_table_setup(&[])?;
     let table_url_string = table_url.to_string();
 
     // Co-locate the malformed `file_B` with a valid `file_D` (Sep 2024, out of predicate
@@ -430,10 +700,10 @@ async fn extended_year_timestamp_stats_dont_collapse_skipping(
     let june_first_2024_us: i64 = 1_717_200_000_000_000;
     let predicate = Arc::new(Pred::and(
         Pred::lt(
-            column_expr!("EventTime"),
-            Expr::literal(Scalar::Timestamp(june_first_2024_us)),
+            col!("EventTime"),
+            lit(Scalar::Timestamp(june_first_2024_us)),
         ),
-        Pred::gt(column_expr!("UserId"), Expr::literal(0i64)),
+        Pred::gt(col!("UserId"), lit(0i64)),
     ));
 
     // Expected survivors:
@@ -480,20 +750,11 @@ async fn extended_year_timestamp_stats_dont_collapse_skipping(
 async fn extended_year_timestamp_round_trip_via_checkpoint_and_remove(
     #[values(false, true)] use_parallel: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let (_tmp_dir, table_path, engine) = test_table_setup_mt()?;
-    let table_url = Url::from_directory_path(&table_path)
-        .map_err(|_| "table_path should be a valid file URL")?;
+    // writeStatsAsStruct makes the checkpoint materialize stats_parsed, the column where the
+    // safe-cast result lands.
+    let (_tmp_dir, table_path, engine, table_url, store) =
+        timestamp_stats_table_setup(&[("delta.checkpoint.writeStatsAsStruct", "true")])?;
     let table_url_string = table_url.to_string();
-    let store: Arc<delta_kernel::object_store::DynObjectStore> = Arc::new(LocalFileSystem::new());
-
-    // v0: create table with writeStatsAsStruct enabled so the checkpoint materializes
-    // stats_parsed (the column where the safe-cast result lands).
-    let _v0 = create_table_and_load_snapshot(
-        &table_path,
-        timestamp_stats_schema(),
-        engine.as_ref(),
-        &[("delta.checkpoint.writeStatsAsStruct", "true")],
-    )?;
 
     // v1: file_A + file_B + file_E in one commit. The shared batch is what makes the
     // per-cell NULL property observable during checkpoint write.
@@ -579,10 +840,10 @@ async fn extended_year_timestamp_round_trip_via_checkpoint_and_remove(
     let june_first_2024_us: i64 = 1_717_200_000_000_000;
     let predicate = Arc::new(Pred::and(
         Pred::lt(
-            column_expr!("EventTime"),
-            Expr::literal(Scalar::Timestamp(june_first_2024_us)),
+            col!("EventTime"),
+            lit(Scalar::Timestamp(june_first_2024_us)),
         ),
-        Pred::gt(column_expr!("UserId"), Expr::literal(0i64)),
+        Pred::gt(col!("UserId"), lit(0i64)),
     ));
 
     assert_eq!(
@@ -592,25 +853,85 @@ async fn extended_year_timestamp_round_trip_via_checkpoint_and_remove(
     Ok(())
 }
 
+/// Millisecond-truncated timestamp stats must not over-prune files whose real values live in the
+/// dropped sub-millisecond tail. `adjust_scalar_for_max_stat_truncation` is what makes it safe.
+///
+/// The file holds timestamps in [.298677, .307735], so its truncated stats are [.298, .307]. Every
+/// predicate below selects a real row in the file, so pruning it would drop committed data.
+///
+/// The lower-bound cases are the ones that exercise `adjust_scalar_for_max_stat_truncation`: a
+/// `>=` bound between the stored (truncated) max `.307000` and the real max `.307735` compares
+/// against the max stat, and without the 999us widening the file is wrongly pruned.
+#[rstest]
+// Upper bound inside the truncated range.
+#[case::upper_bound_within_range(timestamp_pred(Pred::le, 1_783_007_755_299_000), 1)]
+// Upper bound in the tail below the real max but above the truncated min.
+#[case::upper_bound_in_truncated_tail(timestamp_pred(Pred::le, 1_783_007_755_298_900), 1)]
+// Upper bound below the file's truncated min: nothing in the file can match, prune is correct.
+#[case::upper_bound_below_min(timestamp_pred(Pred::le, 1_783_007_754_000_000), 0)]
+// Lower bound inside the sub-millisecond tail dropped from the max stat. The file really does
+// hold `.307735`, so it must survive despite the stat claiming `.307000`.
+#[case::lower_bound_in_truncated_tail(timestamp_pred(Pred::ge, 1_783_007_755_307_500), 1)]
+// Lower bound at the real max: still inside the tail, still must survive.
+#[case::lower_bound_at_real_max(timestamp_pred(Pred::ge, 1_783_007_755_307_735), 1)]
+// Lower bound far past the tail (beyond stored max + 999us): pruning is correct here.
+#[case::lower_bound_past_tail(timestamp_pred(Pred::ge, 1_783_007_755_400_000), 0)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn millisecond_truncated_timestamp_stats_dont_overprune(
+    #[case] predicate: PredicateRef,
+    #[case] expected_survivors: usize,
+    #[values(false, true)] use_parallel: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (_tmp_dir, table_path, engine, table_url, store) = timestamp_stats_table_setup(&[])?;
+
+    // Real values span [.298677, .307735]; a protocol-conforming writer floors the stats to
+    // [.298, .307].
+    add_commit(
+        table_url.as_str(),
+        store.as_ref(),
+        1,
+        commit_with_adds(
+            1,
+            &[(
+                "file_streaming.parquet",
+                stats_json(
+                    10,
+                    "2026-07-02T15:55:55.298Z",
+                    "2026-07-02T15:55:55.307Z",
+                    1,
+                    100,
+                ),
+            )],
+        ),
+    )
+    .await?;
+
+    assert_eq!(
+        surviving_files(&table_path, engine, predicate, use_parallel)?,
+        expected_survivors,
+    );
+    Ok(())
+}
+
 /// Replace table may change partition and data column types. A scan after replacement should
 /// remain compatible with the old addFiles.
 #[rstest]
 #[case::partition(
-    Arc::new(Pred::eq(column_expr!("part"), Expr::literal(1i64))),
+    Arc::new(Pred::eq(col!("part"), lit(1i64))),
     &["new-1.parquet"],
     1,
     101
 )]
 #[case::stats(
-    Arc::new(Pred::eq(column_expr!("value"), Expr::literal(20i64))),
+    Arc::new(Pred::eq(col!("value"), lit(20i64))),
     &["new-2.parquet"],
     1,
     102
 )]
 #[case::partition_and_stats(
     Arc::new(Pred::and(
-        Pred::eq(column_expr!("part"), Expr::literal(3i64)),
-        Pred::eq(column_expr!("value"), Expr::literal(30i64)),
+        Pred::eq(col!("part"), lit(3i64)),
+        Pred::eq(col!("value"), lit(30i64)),
     )),
     &["new-3.parquet"],
     1,
@@ -628,11 +949,11 @@ async fn scan_with_replace_table_schema_change(
     let (_tmp_dir, table_path, engine) = test_table_setup_mt()?;
 
     // Commit 1 creates the table with a string partition column.
-    let old_schema = Arc::new(StructType::try_new(vec![
-        StructField::nullable("part", DataType::STRING),
-        StructField::nullable("value", DataType::STRING),
-    ])?);
-    create_table(&table_path, old_schema, "Test/1.0")
+    let old_schema = schema_ref! {
+        nullable "part": STRING,
+        nullable "value": STRING,
+    };
+    create_table(&table_path, old_schema, "Test/1.0", true)
         .with_data_layout(DataLayout::partitioned(["part"]))
         .with_table_properties([("delta.feature.v2Checkpoint", "supported")])
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
@@ -689,10 +1010,10 @@ async fn scan_with_replace_table_schema_change(
     }
 
     // Commit 3 replaces the table metadata and removes the addFiles.
-    let replacement_schema = StructType::try_new(vec![
-        StructField::nullable("part", DataType::LONG),
-        StructField::nullable("value", DataType::LONG),
-    ])?;
+    let replacement_schema = schema! {
+        nullable "part": LONG,
+        nullable "value": LONG,
+    };
     let replacement = [
         json!({
             "commitInfo": {
@@ -789,26 +1110,33 @@ async fn scan_with_replace_table_schema_change(
             .iter()
             .map(|e| e.num_add_files_seen)
             .sum::<u64>(),
-        4
+        6
     );
     assert_eq!(
         scan_events
             .iter()
-            .map(|e| e.num_active_add_files)
+            .map(|e| e.num_add_files_seen_from_delta_files)
+            .sum::<u64>(),
+        if checkpoint_old_add { 3 } else { 6 }
+    );
+    assert_eq!(
+        scan_events
+            .iter()
+            .map(|e| e.num_selected_add_files)
             .sum::<u64>(),
         expected_active_files
     );
     assert_eq!(
         scan_events
             .iter()
-            .map(|e| e.active_add_files_bytes)
+            .map(|e| e.selected_add_files_bytes)
             .sum::<u64>(),
         expected_active_bytes
     );
     assert_eq!(
         scan_events
             .iter()
-            .map(|e| e.num_remove_files_seen)
+            .map(|e| e.num_remove_files_seen_from_delta_files)
             .sum::<u64>(),
         3
     );
@@ -856,8 +1184,8 @@ async fn scan_with_replace_table_schema_change(
     let error = surviving_paths(&table_path, engine, predicate, use_parallel)
         .expect_err("an active incompatible add file should fail the scan");
     assert!(matches!(
-        error.downcast_ref::<Error>(),
-        Some(Error::ParseError(_, _))
+        error.downcast_ref::<KernelError>(),
+        Some(KernelError::ParseError(_, _))
     ));
     Ok(())
 }
@@ -888,11 +1216,11 @@ async fn partition_pruning_honors_rfc3339_offset_partition_values(
     #[values(false, true)] use_parallel: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (_tmp_dir, table_path, engine) = test_table_setup_mt()?;
-    let schema = Arc::new(StructType::try_new(vec![
-        StructField::nullable("ts", DataType::TIMESTAMP),
-        StructField::nullable("v", DataType::LONG),
-    ])?);
-    create_table(&table_path, schema, "Test/1.0")
+    let schema = schema_ref! {
+        nullable "ts": TIMESTAMP,
+        nullable "v": LONG,
+    };
+    create_table(&table_path, schema, "Test/1.0", true)
         .with_data_layout(DataLayout::partitioned(["ts"]))
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
         .commit(engine.as_ref())?
@@ -923,8 +1251,8 @@ async fn partition_pruning_honors_rfc3339_offset_partition_values(
 
     // ts == 09:30Z must keep only file_A (its +05:00 value normalized to 09:30 UTC).
     let predicate = Arc::new(Pred::eq(
-        column_expr!("ts"),
-        Expr::literal(Scalar::Timestamp(nine_thirty_utc_us)),
+        col!("ts"),
+        lit(Scalar::Timestamp(nine_thirty_utc_us)),
     ));
     assert_eq!(
         surviving_files(&table_path, engine.clone(), predicate, use_parallel)?,
@@ -933,8 +1261,8 @@ async fn partition_pruning_honors_rfc3339_offset_partition_values(
 
     // ts == 14:30Z must keep only file_B.
     let predicate = Arc::new(Pred::eq(
-        column_expr!("ts"),
-        Expr::literal(Scalar::Timestamp(fourteen_thirty_utc_us)),
+        col!("ts"),
+        lit(Scalar::Timestamp(fourteen_thirty_utc_us)),
     ));
     assert_eq!(
         surviving_files(&table_path, engine, predicate, use_parallel)?,
@@ -943,7 +1271,6 @@ async fn partition_pruning_honors_rfc3339_offset_partition_values(
     Ok(())
 }
 
-#[cfg(feature = "interval-type-in-dev")]
 #[rstest]
 #[case::year_month(
     DataType::INTERVAL_YEAR_MONTH,
@@ -966,16 +1293,16 @@ async fn interval_partition_values_do_not_prune_files(
     #[values(false, true)] use_parallel: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (_tmp_dir, table_path, engine) = test_table_setup_mt()?;
-    let schema = Arc::new(StructType::try_new(vec![
-        StructField::nullable("period", interval),
-        StructField::nullable("v", DataType::LONG),
-    ])?);
-    let mut snapshot = create_table(&table_path, schema, "Test/1.0")
+    let schema = schema_ref! {
+        nullable "period": (interval),
+        nullable "v": LONG,
+    };
+    let mut snapshot = create_table(&table_path, schema, "Test/1.0", true)
         .with_data_layout(DataLayout::partitioned(["period"]))
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
         .commit(engine.as_ref())?
         .unwrap_post_commit_snapshot();
-    let data_schema = StructType::try_new([StructField::nullable("v", DataType::LONG)])?;
+    let data_schema = schema! { nullable "v": LONG };
     let batch = RecordBatch::try_new(
         Arc::new((&data_schema).try_into_arrow()?),
         vec![Arc::new(Int64Array::from(vec![1]))],
@@ -995,10 +1322,7 @@ async fn interval_partition_values_do_not_prune_files(
     )
     .await?;
 
-    let predicate = Arc::new(Pred::eq(
-        column_expr!("period"),
-        Expr::literal(predicate_value),
-    ));
+    let predicate = Arc::new(Pred::eq(col!("period"), lit(predicate_value)));
     assert_eq!(
         surviving_files(&table_path, engine, predicate, use_parallel)?,
         2
@@ -1053,8 +1377,8 @@ fn value_stats_json(num_records: i64, null_count: i64, bounds: Option<(i64, i64)
 // `eval_sql_where` and `!=` the NOT-wrapped arm. The not-all-null guard is operator-agnostic, and
 // the unit test `test_all_null_pruning_all_comparison_ops` covers all six operators at the rewrite
 // level, so the source/parallel matrix here does not repeat every operator.
-#[case::eq(Pred::eq(column_expr!("value"), Expr::literal(5i64)))]
-#[case::ne(Pred::ne(column_expr!("value"), Expr::literal(5i64)))]
+#[case::eq(Pred::eq(col!("value"), lit(5i64)))]
+#[case::ne(Pred::ne(col!("value"), lit(5i64)))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn all_null_files_pruned_regardless_of_source(
     #[case] predicate: Pred,
@@ -1068,10 +1392,7 @@ async fn all_null_files_pruned_regardless_of_source(
     #[values(false, true)] use_parallel: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (_tmp_dir, table_path, engine) = test_table_setup_mt()?;
-    let schema = Arc::new(StructType::try_new(vec![StructField::nullable(
-        "value",
-        DataType::LONG,
-    )])?);
+    let schema = schema_ref! { nullable "value": LONG };
     // For the struct-stats cases, also disable `writeStatsAsJson` so the checkpoint carries ONLY
     // `stats_parsed`. That forces the scan to read the pre-parsed struct (no JSON fallback),
     // genuinely validating that path. The JSON-stats case keeps the defaults

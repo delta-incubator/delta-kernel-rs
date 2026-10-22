@@ -10,7 +10,7 @@
 //! A generic trait [TaskExecutor] can be implemented with your preferred async
 //! runtime. Behind the `tokio` feature flag, we provide a both a single-threaded
 //! and multi-threaded executor based on Tokio.
-use delta_kernel::DeltaResult;
+use delta_kernel::KernelResult;
 use futures::future::BoxFuture;
 use futures::Future;
 
@@ -40,7 +40,7 @@ pub trait TaskExecutor: Send + Sync + 'static {
     where
         F: Future<Output = ()> + Send + 'static;
 
-    fn spawn_blocking<T, R>(&self, task: T) -> BoxFuture<'_, DeltaResult<R>>
+    fn spawn_blocking<T, R>(&self, task: T) -> BoxFuture<'_, KernelResult<R>>
     where
         T: FnOnce() -> R + Send + 'static,
         R: Send + 'static;
@@ -53,7 +53,7 @@ pub mod tokio {
     use std::mem::ManuallyDrop;
     use std::sync::mpsc::channel;
 
-    use delta_kernel::{DeltaResult, Error};
+    use delta_kernel::{KernelError, KernelResult};
     use futures::future::BoxFuture;
     use futures::{Future, TryFutureExt};
     use tokio::runtime::{EnterGuard, Handle, RuntimeFlavor};
@@ -155,11 +155,9 @@ pub mod tokio {
 
             let fut = Box::pin(async move {
                 let task_output = task.await;
-                tokio::task::spawn_blocking(move || {
-                    sender.send(task_output).ok();
-                })
-                .await
-                .unwrap();
+                // `std::sync::mpsc::Sender::send` never waits for channel capacity, so this
+                // synchronous handoff is safe to do directly from the async task.
+                sender.send(task_output).ok();
             });
 
             self.send_future(fut);
@@ -176,12 +174,12 @@ pub mod tokio {
             self.send_future(Box::pin(task));
         }
 
-        fn spawn_blocking<T, R>(&self, task: T) -> BoxFuture<'_, DeltaResult<R>>
+        fn spawn_blocking<T, R>(&self, task: T) -> BoxFuture<'_, KernelResult<R>>
         where
             T: FnOnce() -> R + Send + 'static,
             R: Send + 'static,
         {
-            Box::pin(tokio::task::spawn_blocking(task).map_err(Error::join_failure))
+            Box::pin(tokio::task::spawn_blocking(task).map_err(KernelError::join_failure))
         }
 
         fn enter(&self) -> EnterGuard<'_> {
@@ -229,7 +227,7 @@ pub mod tokio {
         pub fn new_owned_runtime(
             worker_threads: Option<usize>,
             max_blocking_threads: Option<usize>,
-        ) -> DeltaResult<Self> {
+        ) -> KernelResult<Self> {
             let mut builder = tokio::runtime::Builder::new_multi_thread();
             builder.enable_all();
 
@@ -240,9 +238,9 @@ pub mod tokio {
                 builder.max_blocking_threads(max_blocking);
             }
 
-            let runtime = builder
-                .build()
-                .map_err(|e| Error::generic(format!("Failed to create Tokio runtime: {e}")))?;
+            let runtime = builder.build().map_err(|e| {
+                KernelError::generic(format!("Failed to create Tokio runtime: {e}"))
+            })?;
 
             let handle = runtime.handle().clone();
             Ok(Self {
@@ -255,9 +253,6 @@ pub mod tokio {
     impl TaskExecutor for TokioMultiThreadExecutor {
         type Guard<'a> = EnterGuard<'a>;
 
-        // `block_on` uses `block_in_place`; If concurrent `block_on` calls exceed Tokio's
-        // `max_blocking_threads`, this can deadlock See:
-        // https://docs.rs/tokio/latest/tokio/runtime/struct.Builder.html#method.max_blocking_threads
         fn block_on<T>(&self, task: T) -> T::Output
         where
             T: Future + Send + 'static,
@@ -270,11 +265,9 @@ pub mod tokio {
 
             let fut = Box::pin(async move {
                 let task_output = task.await;
-                tokio::task::spawn_blocking(move || {
-                    sender.send(task_output).ok();
-                })
-                .await
-                .unwrap();
+                // `std::sync::mpsc::Sender::send` never waits for channel capacity, so this
+                // synchronous handoff is safe to do directly from the async task.
+                sender.send(task_output).ok();
             });
 
             // We throw away the handle, but it should continue on.
@@ -306,12 +299,12 @@ pub mod tokio {
             self.handle.spawn(task);
         }
 
-        fn spawn_blocking<T, R>(&self, task: T) -> BoxFuture<'_, DeltaResult<R>>
+        fn spawn_blocking<T, R>(&self, task: T) -> BoxFuture<'_, KernelResult<R>>
         where
             T: FnOnce() -> R + Send + 'static,
             R: Send + 'static,
         {
-            Box::pin(tokio::task::spawn_blocking(task).map_err(Error::join_failure))
+            Box::pin(tokio::task::spawn_blocking(task).map_err(KernelError::join_failure))
         }
 
         fn enter(&self) -> EnterGuard<'_> {
@@ -414,47 +407,51 @@ pub mod tokio {
         }
 
         #[test]
-        fn test_owned_runtime_small_pool_nested_block_on_deadlocks() {
+        fn test_owned_runtime_small_blocking_pool_completes_many_block_on_calls() {
             use std::sync::Arc;
             use std::time::Duration;
 
-            // Create a small pool
             let executor = Arc::new(
-                TokioMultiThreadExecutor::new_owned_runtime(Some(1), Some(1))
+                TokioMultiThreadExecutor::new_owned_runtime(Some(2), Some(1))
                     .expect("Failed to create executor"),
             );
-            let e1 = executor.clone();
-            let e2 = executor.clone();
-            let e3 = executor.clone();
 
             let (tx, rx) = channel::<i32>();
-
-            // Spawn a thread to do deeply nested block_on calls
-            std::thread::spawn(move || {
-                let result = executor.block_on(async move {
-                    e1.block_on(async move {
-                        e2.block_on(async move {
-                            e3.block_on(async {
+            let handles = executor.block_on({
+                let executor = executor.clone();
+                let tx = tx.clone();
+                async move {
+                    let mut handles = Vec::new();
+                    for value in 0..8 {
+                        let executor = executor.clone();
+                        let tx = tx.clone();
+                        handles.push(tokio::task::spawn_blocking(move || {
+                            let result = executor.block_on(async move {
                                 tokio::time::sleep(Duration::from_millis(1)).await;
-                                42
-                            })
-                        })
-                    })
-                });
-                tx.send(result).ok();
+                                value
+                            });
+                            tx.send(result).ok();
+                        }));
+                    }
+                    handles
+                }
             });
+            drop(tx);
 
-            // With 1 worker thread, 1 blocking thread and 4 nested block_on calls, this should
-            // deadlock
-            let timeout = Duration::from_millis(500);
-            let result = rx.recv_timeout(timeout);
+            let mut results = Vec::new();
+            for _ in 0..handles.len() {
+                results.push(
+                    rx.recv_timeout(Duration::from_secs(5))
+                        .expect("Timeout - likely deadlock in TokioMultiThreadExecutor::block_on"),
+                );
+            }
 
-            // Test passes if we got a timeout (deadlock occurred as expected)
-            // Test fails if we got a result (no deadlock - unexpected)
-            assert!(
-                result.is_err(),
-                "Expected deadlock with 1 worker thread, 1 blocking thread and 4 nested block_on calls",
-            );
+            for handle in handles {
+                executor.block_on(handle).expect("blocking task panicked");
+            }
+
+            results.sort_unstable();
+            assert_eq!(results, (0..8).collect::<Vec<_>>());
         }
 
         #[test]

@@ -39,11 +39,14 @@
 //! # use delta_kernel::Engine;
 //! # use delta_kernel::Snapshot;
 //! # use delta_kernel::SnapshotRef;
-//! # use delta_kernel::DeltaResult;
-//! # use delta_kernel::Error;
+//! # use delta_kernel::KernelResult;
+//! # use delta_kernel::KernelError;
 //! # use delta_kernel::FileMeta;
 //! # use url::Url;
-//! fn write_checkpoint_file(path: Url, data: ActionReconciliationIterator) -> DeltaResult<FileMeta> {
+//! fn write_checkpoint_file(
+//!     path: Url,
+//!     data: ActionReconciliationIterator,
+//! ) -> KernelResult<FileMeta> {
 //!     todo!() /* engine-specific logic to write data to object storage*/
 //! }
 //!
@@ -70,7 +73,7 @@
 //!
 //! // Build the [`LastCheckpointHintStats`] from the exhausted iterator state
 //! let state = std::sync::Arc::into_inner(state)
-//!     .ok_or(Error::internal_error("checkpoint state Arc still has other references"))?;
+//!     .ok_or(KernelError::internal_error("checkpoint state Arc still has other references"))?;
 //! let last_checkpoint_stats =
 //!     delta_kernel::checkpoint::LastCheckpointHintStats::from_reconciliation_state(
 //!         state,
@@ -81,7 +84,7 @@
 //! // Finalize the checkpoint by passing the stats
 //! writer.finalize(engine, &last_checkpoint_stats)?;
 //!
-//! # Ok::<_, Error>(())
+//! # Ok::<_, KernelError>(())
 //! ```
 //!
 //! ## Warning
@@ -101,6 +104,7 @@
 //! [`Snapshot::create_checkpoint_writer`]: crate::Snapshot::create_checkpoint_writer
 use std::sync::{Arc, LazyLock, Mutex};
 
+use itertools::Itertools;
 use tracing::info;
 use url::Url;
 
@@ -111,23 +115,23 @@ use crate::action_reconciliation::{
     ActionReconciliationIterator, ActionReconciliationIteratorState, RetentionCalculator,
 };
 use crate::actions::{
-    ADD_FIELD, CHECKPOINT_METADATA_NAME, DOMAIN_METADATA_FIELD, METADATA_FIELD, PROTOCOL_FIELD,
-    REMOVE_FIELD, SET_TRANSACTION_FIELD, SIDECAR_FIELD,
+    CheckpointMetadata, ADD_FIELD, CHECKPOINT_METADATA_FIELD, CHECKPOINT_METADATA_NAME,
+    DOMAIN_METADATA_FIELD, METADATA_FIELD, PROTOCOL_FIELD, REMOVE_FIELD, SET_TRANSACTION_FIELD,
+    SIDECAR_FIELD,
 };
 use crate::engine_data::FilteredEngineData;
-use crate::expressions::{
-    lit, Expression, ExpressionRef, ExpressionStructPatchBuilder, Scalar, StructData,
-};
+use crate::expressions::{ExpressionRef, Scalar};
 use crate::last_checkpoint_hint::LastCheckpointHint;
-use crate::log_replay::LogReplayProcessor;
+use crate::log_replay::HasSelectionVector;
 use crate::path::{self, ParsedLogPath};
-use crate::schema::{lazy_schema_ref, DataType, SchemaRef, StructField, StructType};
+use crate::schema::{lazy_schema_ref, SchemaRef, StructField};
 use crate::snapshot::SnapshotRef;
+use crate::table_configuration::TableConfiguration;
 use crate::table_features::TableFeature;
 use crate::table_properties::TableProperties;
 use crate::{
-    version_as_i64, DeltaResult, DeltaResultIteratorStatic, Engine, EngineData, Error,
-    EvaluationHandlerExtension, FileMeta, Version,
+    version_as_i64, Engine, EngineData, FileMeta, KernelError, KernelResult,
+    KernelResultIteratorStatic, Version,
 };
 
 #[cfg(feature = "declarative-plans")]
@@ -195,24 +199,24 @@ impl LastCheckpointHintStats {
         state: ActionReconciliationIteratorState,
         size_in_bytes: u64,
         num_sidecars: u64,
-    ) -> DeltaResult<Self> {
+    ) -> KernelResult<Self> {
         if !state.is_exhausted() {
-            return Err(Error::checkpoint_write(
+            return Err(KernelError::checkpoint_write(
                 "Cannot build LastCheckpointHintStats: the reconciliation iterator must be fully \
                  consumed and all data written to storage before finalizing",
             ));
         }
         let size_in_bytes = i64::try_from(size_in_bytes).map_err(|e| {
-            Error::checkpoint_write(format!("size_in_bytes {size_in_bytes} exceeds i64: {e}"))
+            KernelError::checkpoint_write(format!("size_in_bytes {size_in_bytes} exceeds i64: {e}"))
         })?;
         let num_sidecars_i64 = i64::try_from(num_sidecars).map_err(|e| {
-            Error::checkpoint_write(format!("num_sidecars {num_sidecars} exceeds i64: {e}"))
+            KernelError::checkpoint_write(format!("num_sidecars {num_sidecars} exceeds i64: {e}"))
         })?;
         let num_actions = state
             .actions_count()
             .checked_add(num_sidecars_i64)
             .ok_or_else(|| {
-                Error::checkpoint_write(format!(
+                KernelError::checkpoint_write(format!(
                     "checkpoint action count overflowed i64: {} + {num_sidecars}",
                     state.actions_count()
                 ))
@@ -302,16 +306,13 @@ pub enum V2CheckpointConfig {
 /// Schema of the `_last_checkpoint` file
 /// We cannot use `LastCheckpointInfo::to_schema()` as it would include the 'checkpoint_schema'
 /// field, which is only known at runtime.
-static LAST_CHECKPOINT_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
-    StructType::new_unchecked([
-        StructField::not_null("version", DataType::LONG),
-        StructField::not_null("size", DataType::LONG),
-        StructField::nullable("parts", DataType::LONG),
-        StructField::nullable("sizeInBytes", DataType::LONG),
-        StructField::nullable("numOfAddFiles", DataType::LONG),
-    ])
-    .into()
-});
+static LAST_CHECKPOINT_SCHEMA: LazyLock<SchemaRef> = lazy_schema_ref! {
+    not_null "version": LONG,
+    not_null "size": LONG,
+    nullable "parts": LONG,
+    nullable "sizeInBytes": LONG,
+    nullable "numOfAddFiles": LONG,
+};
 
 /// Action fields shared by V1 and V2 checkpoint schemas.
 fn base_checkpoint_action_fields() -> [&'static LazyLock<StructField>; 7] {
@@ -330,20 +331,11 @@ fn base_checkpoint_action_fields() -> [&'static LazyLock<StructField>; 7] {
 static CHECKPOINT_ACTIONS_SCHEMA_V1: LazyLock<SchemaRef> =
     lazy_schema_ref! { ..(base_checkpoint_action_fields()) };
 
-/// Schema for the checkpointMetadata field in V2 checkpoints.
-/// We cannot use `CheckpointMetadata::to_schema()` as it would include the 'tags' field which
-/// we're not supporting yet due to the lack of map support TODO(#880).
-fn checkpoint_metadata_field() -> StructField {
-    StructField::nullable(
-        CHECKPOINT_METADATA_NAME,
-        DataType::struct_type_unchecked([StructField::not_null("version", DataType::LONG)]),
-    )
-}
-
-/// Schema for V2 checkpoints (includes checkpointMetadata action)
+/// Schema for V2 checkpoints (includes checkpointMetadata action). JSON checkpoints do not embed
+/// a schema, so readers assume this schema for them.
 static CHECKPOINT_ACTIONS_SCHEMA_V2: LazyLock<SchemaRef> = lazy_schema_ref! {
     ..(base_checkpoint_action_fields()),
-    (checkpoint_metadata_field()),
+    (&CHECKPOINT_METADATA_FIELD),
 };
 
 /// Orchestrates the process of creating a checkpoint for a table.
@@ -382,7 +374,13 @@ impl RetentionCalculator for CheckpointWriter {
 
 impl CheckpointWriter {
     /// Creates a new [`CheckpointWriter`] for the given snapshot.
-    pub(crate) fn try_new(snapshot: SnapshotRef, engine: &dyn Engine) -> DeltaResult<Self> {
+    pub(crate) fn try_new(snapshot: SnapshotRef, engine: &dyn Engine) -> KernelResult<Self> {
+        snapshot
+            .table_configuration()
+            .ensure_read_write_supported()?;
+
+        ensure_standalone_checkpoint_supported(snapshot.table_configuration())?;
+
         // We disallow checkpointing if the Snapshot is not published. If we didn't, this could
         // create gaps in the version history, thereby breaking old readers.
         snapshot.log_segment().validate_published()?;
@@ -420,7 +418,7 @@ impl CheckpointWriter {
     ///
     /// For example, if the table root is `s3://bucket/path` and the version is `10`,
     /// the checkpoint path will be: `s3://bucket/path/00000000000000000010.checkpoint.parquet`
-    pub fn checkpoint_path(&self) -> DeltaResult<Url> {
+    pub fn checkpoint_path(&self) -> KernelResult<Url> {
         ParsedLogPath::new_classic_parquet_checkpoint(
             self.snapshot.table_root(),
             self.snapshot.version(),
@@ -450,7 +448,7 @@ impl CheckpointWriter {
     /// }
     /// drop(checkpoint_data);
     /// let state = Arc::into_inner(state)
-    ///     .ok_or(Error::internal_error("checkpoint state Arc still has other references"))?;
+    ///     .ok_or(KernelError::internal_error("checkpoint state Arc still has other references"))?;
     /// let last_checkpoint_stats =
     ///     LastCheckpointHintStats::from_reconciliation_state(state, size_in_bytes, 0)?;
     /// writer.finalize(&engine, &last_checkpoint_stats)?;
@@ -464,7 +462,7 @@ impl CheckpointWriter {
     pub fn checkpoint_data(
         &self,
         engine: &dyn Engine,
-    ) -> DeltaResult<ActionReconciliationIterator> {
+    ) -> KernelResult<ActionReconciliationIterator> {
         // Read actions from log segment
         let actions = self
             .snapshot
@@ -472,11 +470,14 @@ impl CheckpointWriter {
             .read_actions(engine, self.read_schema.clone())?;
 
         // Process actions through reconciliation
-        let checkpoint_data = ActionReconciliationProcessor::new(
+        let mut processor = ActionReconciliationProcessor::new(
             self.deleted_file_retention_timestamp()?,
             self.get_transaction_expiration_timestamp()?,
-        )
-        .process_actions_iter(actions);
+            self.snapshot.table_configuration().dv_normalization_root(),
+        );
+        let checkpoint_data = actions
+            .map(move |batch| processor.process_actions_batch(batch?))
+            .filter_ok(HasSelectionVector::has_selected_rows);
 
         // Create the expression evaluator for the checkpoint transform.
         // The transform is applied to reconciled action batches only (not checkpoint metadata).
@@ -530,7 +531,7 @@ impl CheckpointWriter {
         self,
         engine: &dyn Engine,
         last_checkpoint_stats: &LastCheckpointHintStats,
-    ) -> DeltaResult<()> {
+    ) -> KernelResult<()> {
         // Skip writing `_last_checkpoint` if the existing hint already points to a newer
         // checkpoint, to avoid regressing the hint.
         let checkpoint_version = self.snapshot.version();
@@ -570,7 +571,7 @@ impl CheckpointWriter {
         &self,
         engine: &dyn Engine,
         file_actions_per_sidecar_hint: usize,
-    ) -> DeltaResult<WrittenCheckpointInfo> {
+    ) -> KernelResult<WrittenCheckpointInfo> {
         let data_iter = self.checkpoint_data(engine)?;
         let iter_state = data_iter.state();
 
@@ -594,7 +595,9 @@ impl CheckpointWriter {
             }
             let is_exhausted = splitter
                 .lock()
-                .map_err(|e| Error::internal_error(format!("sidecar splitter lock poisoned: {e}")))?
+                .map_err(|e| {
+                    KernelError::internal_error(format!("sidecar splitter lock poisoned: {e}"))
+                })?
                 .is_exhausted();
             if is_exhausted {
                 break;
@@ -604,10 +607,12 @@ impl CheckpointWriter {
         // Collect non-file action batches(e.g., `protocol`, `metaData`, `txn`, etc.)
         let non_file_batches = Arc::into_inner(splitter)
             .ok_or_else(|| {
-                Error::internal_error("sidecar splitter Arc should have no other references")
+                KernelError::internal_error("sidecar splitter Arc should have no other references")
             })?
             .into_inner()
-            .map_err(|e| Error::internal_error(format!("sidecar splitter lock poisoned: {e}")))?
+            .map_err(|e| {
+                KernelError::internal_error(format!("sidecar splitter lock poisoned: {e}"))
+            })?
             .into_non_file_batches();
 
         // Create sidecar action rows for the main checkpoint file. Each row populates only
@@ -619,9 +624,9 @@ impl CheckpointWriter {
 
         // Write main checkpoint file: non-file actions + sidecar references
         let checkpoint_path = self.checkpoint_path()?;
-        let main_data: DeltaResultIteratorStatic<Box<dyn EngineData>> =
+        let main_data: KernelResultIteratorStatic<Box<dyn EngineData>> =
             Box::new(non_file_batches.into_iter().chain(sidecar_batch).map(Ok));
-        engine
+        let main_size = engine
             .parquet_handler()
             .write_parquet_file(checkpoint_path.clone(), main_data)?;
 
@@ -629,12 +634,13 @@ impl CheckpointWriter {
         let sidecar_sizes_sum = sidecar_metas
             .iter()
             .try_fold(0u64, |acc, (_, m)| acc.checked_add(m.size))
-            .ok_or_else(|| Error::internal_error("sidecar sizes sum overflowed u64"))?;
+            .ok_or_else(|| KernelError::internal_error("sidecar sizes sum overflowed u64"))?;
         let sidecar_count = sidecar_metas.len() as u64;
         build_written_checkpoint_info(
             engine,
             &checkpoint_path,
             iter_state,
+            main_size,
             sidecar_sizes_sum,
             sidecar_count,
         )
@@ -645,12 +651,12 @@ impl CheckpointWriter {
     pub(crate) fn write_checkpoint_without_sidecars(
         &self,
         engine: &dyn Engine,
-    ) -> DeltaResult<WrittenCheckpointInfo> {
+    ) -> KernelResult<WrittenCheckpointInfo> {
         let checkpoint_path = self.checkpoint_path()?;
         let data_iter = self.checkpoint_data(engine)?;
         let state = data_iter.state();
         let lazy_data = data_iter.map(|r| r.and_then(|f| f.apply_selection_vector()));
-        engine
+        let main_size = engine
             .parquet_handler()
             .write_parquet_file(checkpoint_path.clone(), Box::new(lazy_data))?;
 
@@ -658,6 +664,7 @@ impl CheckpointWriter {
             engine,
             &checkpoint_path,
             state,
+            main_size,
             0, /* sidecar_sizes_sum */
             0, /* sidecar_count */
         )
@@ -667,7 +674,7 @@ impl CheckpointWriter {
     ///
     /// This function generates the [`CheckpointMetadata`] action that must be included in the
     /// V2 spec checkpoint file. This action contains metadata about the checkpoint, particularly
-    /// its version.
+    /// its version and tags.
     ///
     /// # Implementation Details
     ///
@@ -687,27 +694,29 @@ impl CheckpointWriter {
         &self,
         engine: &dyn Engine,
         schema: &SchemaRef,
-    ) -> DeltaResult<ActionReconciliationBatch> {
-        // Start with an all-null row
-        let null_row = engine.evaluation_handler().null_row(schema.clone())?;
+    ) -> KernelResult<ActionReconciliationBatch> {
+        // Build the checkpointMetadata struct value. `tags` is left unset (null) since kernel
+        // does not currently emit checkpoint tags.
+        let checkpoint_metadata_value: Scalar = CheckpointMetadata {
+            version: self.version,
+            tags: None,
+        }
+        .into();
 
-        // Build the checkpointMetadata struct value
-        let checkpoint_metadata_value = Scalar::Struct(StructData::try_new(
-            vec![StructField::not_null("version", DataType::LONG)],
-            vec![Scalar::from(self.version)],
-        )?);
-
-        // Use a struct patch to set just the checkpointMetadata field, keeping others null
-        let patch = ExpressionStructPatchBuilder::new()
-            .replace(CHECKPOINT_METADATA_NAME, lit(checkpoint_metadata_value));
-
-        let evaluator = engine.evaluation_handler().new_expression_evaluator(
-            schema.clone(),
-            Arc::new(Expression::struct_patch(patch)?),
-            schema.clone().into(),
-        )?;
-
-        let checkpoint_metadata_batch = evaluator.evaluate(null_row.as_ref())?;
+        // Build an action row with only the checkpointMetadata field set; all others null.
+        let row: Vec<Scalar> = schema
+            .fields()
+            .map(|field| {
+                if field.name() == CHECKPOINT_METADATA_NAME {
+                    checkpoint_metadata_value.clone()
+                } else {
+                    Scalar::null(field.data_type().clone())
+                }
+            })
+            .collect();
+        let checkpoint_metadata_batch = engine
+            .evaluation_handler()
+            .create_many(schema.clone(), vec![row])?;
 
         let filtered_data = FilteredEngineData::with_all_rows_selected(checkpoint_metadata_batch);
 
@@ -722,7 +731,7 @@ impl CheckpointWriter {
     fn checkpoint_schema_context(
         snapshot: &SnapshotRef,
         engine: &dyn Engine,
-    ) -> DeltaResult<CheckpointSchemaContext> {
+    ) -> KernelResult<CheckpointSchemaContext> {
         let tc = snapshot.table_configuration();
         let config = StatsTransformConfig::from_table_properties(snapshot.table_properties());
 
@@ -740,8 +749,9 @@ impl CheckpointWriter {
         // Get stats schema from table configuration.
         // This already excludes partition columns and applies column mapping.
         let stats_schema = tc
-            .build_expected_stats_schemas(physical_clustering_columns.as_deref(), None)?
-            .physical;
+            .stats_schema_builder()
+            .with_required_physical_columns(physical_clustering_columns.as_deref())
+            .build()?;
 
         // Build partition schema for partitionValues_parsed (None for non-partitioned tables)
         let partition_schema = tc.build_partition_values_parsed_schema();
@@ -755,8 +765,24 @@ impl CheckpointWriter {
     }
 }
 
-/// Creates the data for the _last_checkpoint file containing checkpoint
-/// metadata with the `create_one` method. Factored out to facilitate testing.
+/// Returns an error if Kernel does not support writing standalone (V1/V2) checkpoints for the
+/// table.
+#[cfg_attr(not(feature = "adaptive-metadata-in-dev"), allow(unused_variables))]
+pub(crate) fn ensure_standalone_checkpoint_supported(
+    table_configuration: &TableConfiguration,
+) -> KernelResult<()> {
+    // TODO(#3683): support standalone checkpoints for adaptiveMetadata tables.
+    #[cfg(feature = "adaptive-metadata-in-dev")]
+    if table_configuration.is_feature_enabled(&TableFeature::AdaptiveMetadataPreview) {
+        return Err(KernelError::unsupported(
+            "Standalone checkpoints are not yet supported for tables with adaptiveMetadata enabled",
+        ));
+    }
+    Ok(())
+}
+
+/// Creates the data for the _last_checkpoint file containing checkpoint metadata. Factored out to
+/// facilitate testing.
 ///
 /// # Parameters
 /// - `engine`: Engine for data processing
@@ -783,16 +809,16 @@ pub(crate) fn create_last_checkpoint_data(
     actions_counter: i64,
     add_actions_counter: i64,
     size_in_bytes: i64,
-) -> DeltaResult<Box<dyn EngineData>> {
-    engine.evaluation_handler().create_one(
+) -> KernelResult<Box<dyn EngineData>> {
+    engine.evaluation_handler().create_many(
         LAST_CHECKPOINT_SCHEMA.clone(),
-        &[
+        vec![vec![
             version.into(),
             actions_counter.into(),
             None::<i64>.into(), // parts = None since we only support single-part checkpoints
             size_in_bytes.into(),
             add_actions_counter.into(),
-        ],
+        ]],
     )
 }
 
@@ -803,34 +829,52 @@ fn write_single_sidecar(
     file_actions_per_sidecar_hint: usize,
     table_root: &Url,
     version: Version,
-) -> DeltaResult<Option<(String, FileMeta)>> {
+) -> KernelResult<Option<(String, FileMeta)>> {
     let mut iter =
         SingleSidecarDataIterator::new(splitter.clone(), file_actions_per_sidecar_hint)?.peekable();
     if iter.peek().is_none() {
         return Ok(None);
     }
     let (filename, sidecar_url) = path::new_sidecar(table_root, version)?;
-    engine
+    let written_size = engine
         .parquet_handler()
         .write_parquet_file(sidecar_url.clone(), Box::new(iter))?;
     let meta = engine.storage_handler().head(&sidecar_url)?;
+    verify_written_size(&sidecar_url, written_size, meta.size)?;
     Ok(Some((filename, meta)))
+}
+
+/// Verifies that the size the parquet writer reported matches the size the storage layer reports
+/// via `head`, guarding against a truncated or partially-written file. `path` names the file in
+/// the error message.
+fn verify_written_size(path: &Url, written_size: u64, observed_size: u64) -> KernelResult<()> {
+    if written_size != observed_size {
+        return Err(KernelError::generic(format!(
+            "parquet file size mismatch at {path}: writer reported {written_size} bytes, \
+             storage reports {observed_size} bytes"
+        )));
+    }
+    Ok(())
 }
 
 fn build_written_checkpoint_info(
     engine: &dyn Engine,
     checkpoint_path: &Url,
     state: Arc<ActionReconciliationIteratorState>,
+    written_size: u64,
     sidecar_sizes_sum: u64,
     sidecar_count: u64,
-) -> DeltaResult<WrittenCheckpointInfo> {
+) -> KernelResult<WrittenCheckpointInfo> {
     let file_meta = engine.storage_handler().head(checkpoint_path)?;
+    verify_written_size(checkpoint_path, written_size, file_meta.size)?;
     let total_size_in_bytes = file_meta
         .size
         .checked_add(sidecar_sizes_sum)
-        .ok_or_else(|| Error::internal_error("checkpoint total size_in_bytes overflowed u64"))?;
+        .ok_or_else(|| {
+            KernelError::internal_error("checkpoint total size_in_bytes overflowed u64")
+        })?;
     let state = Arc::into_inner(state).ok_or_else(|| {
-        Error::internal_error("ActionReconciliationIteratorState Arc has other references")
+        KernelError::internal_error("ActionReconciliationIteratorState Arc has other references")
     })?;
     let last_checkpoint_stats = LastCheckpointHintStats::from_reconciliation_state(
         state,

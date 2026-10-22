@@ -20,13 +20,13 @@ use delta_kernel::engine::arrow_expression::evaluate_expression::evaluate_expres
 use delta_kernel::engine::arrow_expression::opaque::{
     ArrowOpaquePredicate as _, ArrowOpaquePredicateOp,
 };
-use delta_kernel::expressions::{Expression, ExpressionRef, Scalar, ScalarExpressionEvaluator};
+use delta_kernel::expressions::{null_lit, Expression, ExpressionRef, ScalarExpressionEvaluator};
 use delta_kernel::kernel_predicates::{
     DirectDataSkippingPredicateEvaluator, DirectPredicateEvaluator,
     IndirectDataSkippingPredicateEvaluator, KernelPredicateEvaluator,
 };
 use delta_kernel::schema::DataType;
-use delta_kernel::{DeltaResult, Error, Predicate};
+use delta_kernel::{KernelError, KernelResult, Predicate};
 
 use super::opaque_eval::{COpaqueEvalCallbacks, FfiOpaqueEvalCallbacks};
 use crate::engine_data::ArrowFFIData;
@@ -120,7 +120,7 @@ impl Eq for FfiOpaquePredicateOp {}
 ///
 /// `Expression::Struct` args (produced by the stats-mode rewrite) get a dedicated path because
 /// kernel's evaluator needs a `DataType::Struct` result type to name fields, which we don't have.
-fn evaluate_args(args: &[Expression], batch: &RecordBatch) -> DeltaResult<RecordBatch> {
+fn evaluate_args(args: &[Expression], batch: &RecordBatch) -> KernelResult<RecordBatch> {
     // Zero-arg ops (e.g. NOW(), RAND()): empty-schema batch with explicit row count so the
     // engine knows how many rows to emit.
     if args.is_empty() {
@@ -130,7 +130,9 @@ fn evaluate_args(args: &[Expression], batch: &RecordBatch) -> DeltaResult<Record
             vec![],
             &delta_kernel::arrow::array::RecordBatchOptions::new().with_row_count(Some(n_rows)),
         )
-        .map_err(|e| Error::Generic(format!("zero-arg opaque eval batch construction: {e}")));
+        .map_err(|e| {
+            KernelError::Generic(format!("zero-arg opaque eval batch construction: {e}"))
+        });
     }
 
     let arrays: Vec<ArrayRef> = args
@@ -139,7 +141,7 @@ fn evaluate_args(args: &[Expression], batch: &RecordBatch) -> DeltaResult<Record
             Expression::Struct(fields, _nullability) => evaluate_struct_arg(fields, batch),
             _ => evaluate_expression(arg, batch, None),
         })
-        .collect::<DeltaResult<_>>()?;
+        .collect::<KernelResult<_>>()?;
 
     let fields: Vec<Field> = arrays
         .iter()
@@ -149,7 +151,7 @@ fn evaluate_args(args: &[Expression], batch: &RecordBatch) -> DeltaResult<Record
     let schema = Arc::new(Schema::new(fields));
 
     RecordBatch::try_new(schema, arrays)
-        .map_err(|e| Error::Generic(format!("opaque eval batch construction: {e}")))
+        .map_err(|e| KernelError::Generic(format!("opaque eval batch construction: {e}")))
 }
 
 /// Lift a column type hint from the first `Literal` arg (kernel-native lifts the same way from
@@ -177,7 +179,7 @@ fn rewrite_stat_arg(
     arg: &Expression,
     type_hint: Option<&DataType>,
 ) -> Option<Expression> {
-    let null_long = || Expression::literal(Scalar::Null(DataType::LONG));
+    let null_long = || null_lit(DataType::LONG);
     match arg {
         Expression::Column(col) => {
             // The two column kinds go through the same call: a partition column resolves to its
@@ -202,11 +204,11 @@ fn rewrite_stat_arg(
 /// (`minValues.<col>`, `maxValues.<col>`, nullcount, rowcount); evaluating them against the stats
 /// batch resolves each to the actual per-file values. The results are packed into a `StructArray`
 /// with positional field names (`f0`, `f1`, ...) since the engine reads the struct by index.
-fn evaluate_struct_arg(fields: &[ExpressionRef], batch: &RecordBatch) -> DeltaResult<ArrayRef> {
+fn evaluate_struct_arg(fields: &[ExpressionRef], batch: &RecordBatch) -> KernelResult<ArrayRef> {
     let arrays: Vec<ArrayRef> = fields
         .iter()
         .map(|f| evaluate_expression(f, batch, None))
-        .collect::<DeltaResult<_>>()?;
+        .collect::<KernelResult<_>>()?;
     let arrow_fields: Fields = arrays
         .iter()
         .enumerate()
@@ -214,17 +216,17 @@ fn evaluate_struct_arg(fields: &[ExpressionRef], batch: &RecordBatch) -> DeltaRe
         .collect();
     StructArray::try_new(arrow_fields, arrays, None)
         .map(|sa| Arc::new(sa) as ArrayRef)
-        .map_err(|e| Error::Generic(format!("struct arg construction: {e}")))
+        .map_err(|e| KernelError::Generic(format!("struct arg construction: {e}")))
 }
 
 /// Import an engine-produced `ArrowFFIData` into an `ArrayRef`, consuming the Arrow C Data
 /// Interface handles.
-fn import_ffi_array(ffi: ArrowFFIData) -> DeltaResult<ArrayRef> {
+fn import_ffi_array(ffi: ArrowFFIData) -> KernelResult<ArrayRef> {
     // A released (empty) array means the engine reported success without populating the result
     // slot. This check is load-bearing: `from_ffi` asserts on the empty structs' null pointers,
     // and kernel must never panic -- so reject the unpopulated case with an error up front.
     if ffi.array.is_released() {
-        return Err(Error::Generic(
+        return Err(KernelError::Generic(
             "engine callback returned success but no result array".into(),
         ));
     }
@@ -234,13 +236,13 @@ fn import_ffi_array(ffi: ArrowFFIData) -> DeltaResult<ArrayRef> {
     // SAFETY: the engine promised these structs are valid Arrow C Data
     // Interface payloads it produced and handed to us.
     let array_data = unsafe { from_ffi(array, &schema) }
-        .map_err(|e| Error::Generic(format!("from_ffi: {e}")))?;
+        .map_err(|e| KernelError::Generic(format!("from_ffi: {e}")))?;
     Ok(make_array(array_data))
 }
 
-fn require_boolean_array(arr: ArrayRef, expected_rows: usize) -> DeltaResult<BooleanArray> {
+fn require_boolean_array(arr: ArrayRef, expected_rows: usize) -> KernelResult<BooleanArray> {
     if arr.len() != expected_rows {
-        return Err(Error::Generic(format!(
+        return Err(KernelError::Generic(format!(
             "opaque predicate eval_pred returned {} rows, expected {expected_rows}",
             arr.len()
         )));
@@ -249,7 +251,7 @@ fn require_boolean_array(arr: ArrayRef, expected_rows: usize) -> DeltaResult<Boo
         .downcast_ref::<BooleanArray>()
         .cloned()
         .ok_or_else(|| {
-            Error::Generic(format!(
+            KernelError::Generic(format!(
                 "opaque predicate eval_pred returned non-boolean array of type {:?}",
                 arr.data_type()
             ))
@@ -262,7 +264,7 @@ fn call_eval_pred(
     args_batch: RecordBatch,
     mode: EvalMode,
     inverted: bool,
-) -> DeltaResult<BooleanArray> {
+) -> KernelResult<BooleanArray> {
     let num_rows = args_batch.num_rows();
     let args_ffi = ArrowFFIData::try_from_record_batch(args_batch)?;
 
@@ -286,7 +288,7 @@ fn call_eval_pred(
         EngineExecResult::Success(result_ffi) => result_ffi,
         EngineExecResult::Failure(err) => return Err(err.into()),
         EngineExecResult::Uninit => {
-            return Err(Error::Generic(format!(
+            return Err(KernelError::Generic(format!(
                 "engine opaque-eval callback for `{op_name}` returned without writing a result"
             )))
         }
@@ -308,7 +310,7 @@ impl ArrowOpaquePredicateOp for FfiOpaquePredicateOp {
         args: &[Expression],
         batch: &RecordBatch,
         inverted: bool,
-    ) -> DeltaResult<BooleanArray> {
+    ) -> KernelResult<BooleanArray> {
         // Materialize the args batch. StatsMode pruning is best-effort: if the rewrite referenced a
         // stats column the batch doesn't carry, abstain (keep every file) rather than abort the
         // scan. RowMode has no safe abstain, so its errors propagate.
@@ -341,7 +343,7 @@ impl ArrowOpaquePredicateOp for FfiOpaquePredicateOp {
         _eval_pred: &DirectPredicateEvaluator<'_>,
         _exprs: &[Expression],
         _inverted: bool,
-    ) -> DeltaResult<Option<bool>> {
+    ) -> KernelResult<Option<bool>> {
         // Abstains from scalar evaluation (e.g. partition pruning).
         // TODO: support it by invoking the engine callback with a one-row stats batch.
         Ok(None)
@@ -400,8 +402,7 @@ mod tests {
     };
     use delta_kernel::arrow::datatypes::{DataType as ArrowDataType, Field, Schema};
     use delta_kernel::engine::arrow_expression::evaluate_expression::evaluate_predicate;
-    use delta_kernel::engine::arrow_expression::opaque::ArrowOpaquePredicate as _;
-    use delta_kernel::expressions::{column_expr, Expression, Predicate};
+    use delta_kernel::expressions::{col, lit, Expression, Predicate};
 
     use super::*;
     use crate::expressions::opaque_eval::EngineEvalRowsFn;
@@ -556,7 +557,7 @@ mod tests {
     fn composite_starts_with_lower_predicate_round_trips() {
         let pred = Predicate::arrow_opaque(
             FfiOpaquePredicateOp::new("STARTS_WITH_LOWER", callbacks_for(engine_starts_with_lower)),
-            [column_expr!("col"), Expression::literal("foo")],
+            [col!("col"), lit("foo")],
         );
 
         let batch = batch_with_col(vec![Some("FOOBAR"), Some("Apple"), None, Some("foozzz")]);
@@ -574,7 +575,7 @@ mod tests {
         // Plain op (no LOWER) matches exactly, so case matters here -- unlike the LOWER variant.
         let pred = Predicate::arrow_opaque(
             FfiOpaquePredicateOp::new("STARTS_WITH", callbacks_for(engine_starts_with)),
-            [column_expr!("col"), Expression::literal("foo")],
+            [col!("col"), lit("foo")],
         );
         let batch = batch_with_col(vec![Some("foobar"), Some("FOOBAR")]);
         let result = evaluate_predicate(&pred, &batch, false).unwrap();
@@ -586,7 +587,7 @@ mod tests {
     fn inversion_flips_verdicts() {
         let pred = Predicate::arrow_opaque(
             FfiOpaquePredicateOp::new("STARTS_WITH_LOWER", callbacks_for(engine_starts_with_lower)),
-            [column_expr!("col"), Expression::literal("foo")],
+            [col!("col"), lit("foo")],
         );
         let batch = batch_with_col(vec![Some("FOOBAR"), Some("Apple")]);
         let result = evaluate_predicate(&pred, &batch, true).unwrap();
@@ -601,11 +602,11 @@ mod tests {
         let cb = callbacks_for(engine_starts_with);
         let lhs = Predicate::arrow_opaque(
             FfiOpaquePredicateOp::new("STARTS_WITH", cb.clone()),
-            [column_expr!("col"), Expression::literal("F")],
+            [col!("col"), lit("F")],
         );
         let rhs = Predicate::arrow_opaque(
             FfiOpaquePredicateOp::new("STARTS_WITH", cb),
-            [column_expr!("col"), Expression::literal("FO")],
+            [col!("col"), lit("FO")],
         );
         let and_pred = Predicate::and_from([lhs, rhs]);
 
@@ -631,7 +632,7 @@ mod tests {
         }
         let pred = Predicate::arrow_opaque(
             FfiOpaquePredicateOp::new("WRITES_NOTHING", callbacks_for(engine_noop)),
-            [column_expr!("col")],
+            [col!("col")],
         );
         let batch = batch_with_col(vec![Some("x")]);
         let err = evaluate_predicate(&pred, &batch, false).unwrap_err();
@@ -652,14 +653,14 @@ mod tests {
         ) {
             let _ = unsafe { take_ffi_record_batch(args_in) };
             let err = crate::error::EngineExecError {
-                etype: crate::error::KernelError::GenericError,
+                etype: crate::error::FFIKernelError::GenericError,
                 message: Box::new("boom from engine".to_string()).into(),
             };
             unsafe { *out = EngineExecResult::Failure(err) };
         }
         let pred = Predicate::arrow_opaque(
             FfiOpaquePredicateOp::new("FAILS", callbacks_for(engine_fail)),
-            [column_expr!("col")],
+            [col!("col")],
         );
         let batch = batch_with_col(vec![Some("x")]);
         let err = evaluate_predicate(&pred, &batch, false).unwrap_err();
@@ -684,7 +685,7 @@ mod tests {
         }
         let pred = Predicate::arrow_opaque(
             FfiOpaquePredicateOp::new("RETURNS_INT", callbacks_for(engine_int)),
-            [column_expr!("col")],
+            [col!("col")],
         );
         let batch = batch_with_col(vec![Some("x"), Some("y"), Some("z")]);
         let err = evaluate_predicate(&pred, &batch, false).unwrap_err();
@@ -706,7 +707,7 @@ mod tests {
         }
         let pred = Predicate::arrow_opaque(
             FfiOpaquePredicateOp::new("RETURNS_SHORT", callbacks_for(engine_short)),
-            [column_expr!("col")],
+            [col!("col")],
         );
         let batch = batch_with_col(vec![Some("x"), Some("y"), Some("z")]);
         let err = evaluate_predicate(&pred, &batch, false).unwrap_err();
@@ -731,7 +732,7 @@ mod tests {
         }
         let pred = Predicate::arrow_opaque(
             FfiOpaquePredicateOp::new("EMPTY", callbacks_for(engine_empty)),
-            [column_expr!("col")],
+            [col!("col")],
         );
         let batch = batch_with_col(vec![Some("x")]);
         let err = evaluate_predicate(&pred, &batch, false).unwrap_err();
@@ -816,10 +817,8 @@ mod tests {
         let batch = batch_with_col(vec![Some("x")]);
 
         // RowMode (default) routes to eval_pred_rows only.
-        let row_pred = Predicate::arrow_opaque(
-            FfiOpaquePredicateOp::new("OP", callbacks()),
-            [column_expr!("col")],
-        );
+        let row_pred =
+            Predicate::arrow_opaque(FfiOpaquePredicateOp::new("OP", callbacks()), [col!("col")]);
         evaluate_predicate(&row_pred, &batch, false).unwrap();
         assert_eq!(ROWS.load(AtomicOrdering::SeqCst), 1);
         assert_eq!(
@@ -831,7 +830,7 @@ mod tests {
         // StatsMode routes to eval_pred_stats only.
         let stats_pred = Predicate::arrow_opaque(
             FfiOpaquePredicateOp::new("OP", callbacks()).with_mode(EvalMode::StatsMode),
-            [column_expr!("col")],
+            [col!("col")],
         );
         evaluate_predicate(&stats_pred, &batch, false).unwrap();
         assert_eq!(
@@ -850,10 +849,9 @@ mod tests {
 
         use delta_kernel::arrow::array::Int64Array;
         use delta_kernel::arrow::datatypes::DataType as ArrowDataType;
-        use delta_kernel::engine::arrow_expression::opaque::ArrowOpaquePredicateOp as _;
         use delta_kernel::expressions::{
-            column_expr, BinaryExpressionOp, BinaryPredicateOp, ColumnName, Expression,
-            JunctionPredicateOp, OpaquePredicateOpRef, Scalar,
+            col, column_name, joined_column_expr, lit, BinaryExpressionOp, BinaryPredicateOp,
+            ColumnName, Expression, JunctionPredicateOp, OpaquePredicateOpRef, Scalar,
         };
         use delta_kernel::kernel_predicates::DataSkippingPredicateEvaluator;
         use delta_kernel::schema::DataType;
@@ -870,19 +868,19 @@ mod tests {
         }
 
         fn stats_col(prefix: &str, col: &ColumnName) -> Expression {
-            let mut name = ColumnName::new(["stats_parsed", prefix]);
-            name = name.join(col);
-            Expression::from(name)
+            Expression::from(
+                column_name!("stats_parsed")
+                    .join(&ColumnName::new([prefix]))
+                    .join(col),
+            )
         }
 
         fn partition_col(col: &ColumnName) -> Expression {
-            let mut name = ColumnName::new(["partitionValues_parsed"]);
-            name = name.join(col);
-            Expression::from(name)
+            joined_column_expr!("partitionValues_parsed", col)
         }
 
         fn stats_col_numrecords() -> Expression {
-            Expression::from(ColumnName::new(["stats_parsed", "numRecords"]))
+            col!("stats_parsed.numRecords")
         }
 
         /// Single-file stats batch: `stats_parsed { minValues.col=1, maxValues.col=10,
@@ -1012,7 +1010,7 @@ mod tests {
                     Ordering::Greater => BinaryPredicateOp::GreaterThan,
                     Ordering::Equal => BinaryPredicateOp::Equal,
                 };
-                let pred = Predicate::binary(base_op, col, Expression::literal(val.clone()));
+                let pred = Predicate::binary(base_op, col, lit(val.clone()));
                 Some(if inverted { Predicate::not(pred) } else { pred })
             }
         }
@@ -1107,7 +1105,7 @@ mod tests {
 
             // Stats batch: a single file with id in [1, 10]. Target 11 is above the whole range.
             let op = FfiOpaquePredicateOp::new("GE", callbacks_for(engine_ge));
-            let args = [column_expr!("col"), Expression::literal(11i64)];
+            let args = [col!("col"), lit(11i64)];
             let stats_batch = single_col_int64_stats_batch();
 
             // GE(col, 11): max 10 < 11 -> prune.
@@ -1130,7 +1128,7 @@ mod tests {
         #[test]
         fn wraps_column_in_min_max_nullcount_rowcount_struct() {
             let op = op_with_callbacks("STARTS_WITH");
-            let args = [column_expr!("col"), Expression::literal("foo")];
+            let args = [col!("col"), lit("foo")];
             let pred = rewrite(&op, &args, &rewriter(), false).expect("rewrite should succeed");
 
             let Predicate::Opaque(opaque) = pred else {
@@ -1141,20 +1139,11 @@ mod tests {
                 panic!("expected Struct arg, got {:?}", opaque.exprs[0]);
             };
             assert_eq!(fields.len(), 4);
-            assert_eq!(
-                *fields[0],
-                stats_col("minValues", &ColumnName::new(["col"]))
-            );
-            assert_eq!(
-                *fields[1],
-                stats_col("maxValues", &ColumnName::new(["col"]))
-            );
-            assert_eq!(
-                *fields[2],
-                Expression::literal(Scalar::Null(DataType::LONG))
-            );
+            assert_eq!(*fields[0], stats_col("minValues", &column_name!("col")));
+            assert_eq!(*fields[1], stats_col("maxValues", &column_name!("col")));
+            assert_eq!(*fields[2], null_lit(DataType::LONG));
             assert_eq!(*fields[3], stats_col_numrecords());
-            assert_eq!(opaque.exprs[1], Expression::literal("foo"));
+            assert_eq!(opaque.exprs[1], lit("foo"));
         }
 
         /// A data column with no sibling literal gives no type hint, so min/max stats can't be
@@ -1162,26 +1151,26 @@ mod tests {
         #[test]
         fn abstains_when_data_column_has_no_type_hint() {
             let op = op_with_callbacks("IS_DEFINED");
-            let args = [column_expr!("col")];
+            let args = [col!("col")];
             assert!(rewrite(&op, &args, &rewriter(), false).is_none());
         }
 
         #[test]
         fn passes_literals_through_unchanged() {
             let op = op_with_callbacks("OP");
-            let args = [Expression::literal("foo")];
+            let args = [lit("foo")];
             let pred = rewrite(&op, &args, &rewriter(), false).expect("rewrite should succeed");
             let Predicate::Opaque(opaque) = pred else {
                 panic!("expected Opaque");
             };
             assert_eq!(opaque.exprs.len(), 1, "arity preserved");
-            assert_eq!(opaque.exprs[0], Expression::literal("foo"));
+            assert_eq!(opaque.exprs[0], lit("foo"));
         }
 
         #[test]
         fn recursively_rewrites_predicate_child() {
             let op = op_with_callbacks("OP");
-            let inner = Predicate::lt(column_expr!("col"), Expression::literal(5i64));
+            let inner = Predicate::lt(col!("col"), lit(5i64));
             let args = [Expression::Predicate(Box::new(inner))];
 
             let pred = rewrite(&op, &args, &rewriter(), false).expect("rewrite should succeed");
@@ -1204,8 +1193,8 @@ mod tests {
             let op = op_with_callbacks("OP");
             let args = [Expression::binary(
                 BinaryExpressionOp::Plus,
-                column_expr!("col"),
-                Expression::literal(1i64),
+                col!("col"),
+                lit(1i64),
             )];
             assert!(rewrite(&op, &args, &rewriter(), false).is_none());
         }
@@ -1215,7 +1204,7 @@ mod tests {
         #[test]
         fn column_without_stats_falls_back_to_rowcount_only() {
             let op = op_with_callbacks("OP");
-            let args = [column_expr!("col"), Expression::literal(1i64)];
+            let args = [col!("col"), lit(1i64)];
             let pred =
                 rewrite(&op, &args, &no_stats_rewriter(), false).expect("rewrite should succeed");
             let Predicate::Opaque(opaque) = pred else {
@@ -1224,28 +1213,19 @@ mod tests {
             let Expression::Struct(fields, _) = &opaque.exprs[0] else {
                 panic!("expected Struct arg");
             };
-            assert_eq!(
-                *fields[0],
-                Expression::literal(Scalar::Null(DataType::LONG))
-            );
-            assert_eq!(
-                *fields[1],
-                Expression::literal(Scalar::Null(DataType::LONG))
-            );
-            assert_eq!(
-                *fields[2],
-                Expression::literal(Scalar::Null(DataType::LONG))
-            );
+            assert_eq!(*fields[0], null_lit(DataType::LONG));
+            assert_eq!(*fields[1], null_lit(DataType::LONG));
+            assert_eq!(*fields[2], null_lit(DataType::LONG));
             assert_eq!(*fields[3], stats_col_numrecords());
         }
 
         #[test]
         fn preserves_arity_for_mixed_args() {
             let op = op_with_callbacks("OP");
-            let inner = Predicate::lt(column_expr!("y"), Expression::literal(5i64));
+            let inner = Predicate::lt(col!("y"), lit(5i64));
             let args = [
-                column_expr!("col"),
-                Expression::literal(1i64),
+                col!("col"),
+                lit(1i64),
                 Expression::Predicate(Box::new(inner)),
             ];
 
@@ -1283,7 +1263,7 @@ mod tests {
             }
 
             let op = FfiOpaquePredicateOp::new("OP", callbacks_for(engine_count));
-            let args = [column_expr!("col"), Expression::literal(5i64)];
+            let args = [col!("col"), lit(5i64)];
             let rewritten =
                 rewrite(&op, &args, &rewriter(), false).expect("rewrite should succeed");
 
@@ -1336,7 +1316,7 @@ mod tests {
 
             let op =
                 FfiOpaquePredicateOp::new("NEEDS_NULLCOUNT", callbacks_for(engine_check_nullcount));
-            let args = [column_expr!("col"), Expression::literal(5i64)];
+            let args = [col!("col"), lit(5i64)];
             let rewritten =
                 rewrite(&op, &args, &rewriter(), false).expect("rewrite should succeed");
 
@@ -1383,7 +1363,7 @@ mod tests {
             }
 
             let op = FfiOpaquePredicateOp::new("OP", callbacks_for(engine_keep_on_null_bounds));
-            let args = [column_expr!("col"), Expression::literal(5i64)];
+            let args = [col!("col"), lit(5i64)];
             // `no_stats_rewriter` models a row with no collected stats (e.g. a Remove): null
             // min/max.
             let rewritten = rewrite(&op, &args, &no_stats_rewriter(), false)
@@ -1402,7 +1382,7 @@ mod tests {
         #[test]
         fn partition_column_rewrites_to_exact_value_bounds() {
             let op = op_with_callbacks("OP");
-            let args = [column_expr!("part_col"), Expression::literal("X")];
+            let args = [col!("part_col"), lit("X")];
             let pred = rewrite(&op, &args, &partition_rewriter(), false)
                 .expect("rewrite should succeed for partition column");
             let Predicate::Opaque(opaque) = pred else {
@@ -1413,19 +1393,15 @@ mod tests {
             };
             assert_eq!(fields.len(), 4);
             // Exact partition value serves as both bounds.
-            assert_eq!(*fields[0], partition_col(&ColumnName::new(["part_col"])));
-            assert_eq!(*fields[1], partition_col(&ColumnName::new(["part_col"])));
+            assert_eq!(*fields[0], partition_col(&column_name!("part_col")));
+            assert_eq!(*fields[1], partition_col(&column_name!("part_col")));
             // Rowcount is the same `numRecords` ref as for data columns.
             assert_eq!(*fields[3], stats_col_numrecords());
         }
 
         #[test]
         fn type_hint_picks_first_literal_when_multiple_present() {
-            let exprs = [
-                column_expr!("c"),
-                Expression::literal("s"),
-                Expression::literal(1i64),
-            ];
+            let exprs = [col!("c"), lit("s"), lit(1i64)];
             assert_eq!(
                 super::super::pick_column_type_hint(&exprs),
                 Some(DataType::STRING),
@@ -1459,7 +1435,7 @@ mod tests {
             }
 
             let op = FfiOpaquePredicateOp::new("OP", callbacks_for(engine_count));
-            let args = [column_expr!("col"), Expression::literal(5i64)];
+            let args = [col!("col"), lit(5i64)];
             let rewritten =
                 rewrite(&op, &args, &rewriter(), false).expect("rewrite should succeed");
 

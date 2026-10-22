@@ -1,6 +1,6 @@
 # Writing to partitioned tables
 
-To write data to a partitioned table, you create a `WriteContext` for each distinct
+To write data to a partitioned table, you create a `BoundWriteContext` for each distinct
 set of partition values, write Parquet files through the engine for each one, and
 commit. Kernel validates partition values, serializes them per the Delta protocol,
 and constructs the correct directory paths.
@@ -11,20 +11,20 @@ Before reading this page, make sure you understand
 
 ## How partitioned writes differ
 
-For unpartitioned tables, you create one `WriteContext` and write all data through it.
-For partitioned tables, you create one `WriteContext` per distinct partition value
-combination. Partition values are file-constant metadata baked into the `WriteContext`
+For unpartitioned tables, you create one `BoundWriteContext` and write all data through it.
+For partitioned tables, you create one `BoundWriteContext` per distinct partition value
+combination. Partition values are file-constant metadata baked into the `BoundWriteContext`
 at creation time, not data columns passed at write time.
 
 ```text
-Unpartitioned:  1 WriteContext  -->  write all data
-Partitioned:    1 WriteContext per distinct partition  -->  write that partition's data
+Unpartitioned:  1 BoundWriteContext  -->  write all data
+Partitioned:    1 BoundWriteContext per distinct partition  -->  write that partition's data
 ```
 
 ## The write flow
 
 The pattern for partitioned writes is: **group your data by partition values, create a
-`WriteContext` per group, and write each group**.
+`BoundWriteContext` per group, and write each group**.
 
 ```rust,no_run
 # extern crate delta_kernel;
@@ -33,28 +33,37 @@ The pattern for partitioned writes is: **group your data by partition values, cr
 # use std::collections::HashMap;
 # use delta_kernel::arrow::array::RecordBatch;
 # use delta_kernel::committer::FileSystemCommitter;
+# use delta_kernel::transaction::UpdateTableOperation;
 # use delta_kernel::engine::arrow_data::ArrowEngineData;
 # use delta_kernel_default_engine::DefaultEngine;
 # use delta_kernel_default_engine::storage::store_from_url;
 # use delta_kernel::expressions::Scalar;
-# use delta_kernel::{DeltaResult, Snapshot};
+# use delta_kernel::{KernelResult, Snapshot};
 # #[tokio::main]
-# async fn main() -> DeltaResult<()> {
+# async fn main() -> KernelResult<()> {
 # let url = delta_kernel::try_parse_uri("/tmp/partitioned_table")?;
 # let engine = DefaultEngine::builder(store_from_url(&url)?).build();
 let snapshot = Snapshot::builder_for(url).build(&engine)?;
 let mut txn = snapshot
-    .transaction(Box::new(FileSystemCommitter::new()), &engine)?
-    .with_operation("INSERT".to_string())
-    .with_data_change(true);
+    .update_table(
+        UpdateTableOperation::Custom("INSERT".to_string()),
+        "my-app/1.0",
+        /* data_change */ true,
+    )
+    .build(&engine, Box::new(FileSystemCommitter::new()))?;
+
+// Build the write state before iterating over partitions.
+let write_state = txn.write_state()?;
 
 // Suppose you have data grouped by partition values already.
-// For each partition, create a WriteContext and write.
 let partitions: Vec<(HashMap<String, Scalar>, RecordBatch)> = todo!("group your data");
 
 for (partition_values, batch) in partitions {
-    // 1. Create a WriteContext for this partition
-    let wc = txn.partitioned_write_context(partition_values)?;
+    // 1. Create a BoundWriteContext for this partition
+    let wc = write_state
+        .write_context_builder()
+        .with_partition_values(partition_values)
+        .build()?;
 
     // 2. Write the data (the logical write schema excludes partition columns)
     let data = ArrowEngineData::new(batch);
@@ -70,15 +79,35 @@ txn.commit(&engine)?;
 # }
 ```
 
-Each `partitioned_write_context` call takes a `HashMap<String, Scalar>` mapping logical
-partition column names to typed values:
+Each builder can take a `HashMap<String, Scalar>` mapping logical partition column names to typed
+values:
 
 ```rust,ignore
 let partition_values = HashMap::from([
     ("year".to_string(), Scalar::Integer(2024)),
     ("month".to_string(), Scalar::Integer(3)),
 ]);
-let wc = txn.partitioned_write_context(partition_values)?;
+let wc = write_state
+    .write_context_builder()
+    .with_partition_values(partition_values)
+    .build()?;
+```
+
+For distributed writes, encode the state on the coordinator and decode it on each worker before
+binding that worker's partition values. The transport representation only supports the same
+delta-kernel version on both sides.
+
+```rust,ignore
+// Coordinator
+let encoded = txn.write_state()?.encode()?;
+send_to_workers(encoded);
+
+// Worker
+let write_state = WriteState::decode(&encoded)?;
+let wc = write_state
+    .write_context_builder()
+    .with_partition_values(partition_values)
+    .build()?;
 ```
 
 Key points:
@@ -89,7 +118,7 @@ Key points:
 - **Case-insensitive keys**: `"YEAR"` matches schema column `"year"`. Kernel normalizes
   to the schema case.
 - **No partition columns in your logical data**: your data batches should follow the logical write
-  schema (`wc.logical_schema()`), which excludes partition columns.
+  schema (`wc.logical_data_schema()`), which excludes partition columns.
 - **Materialization is automatic**: some table features (such as
   `materializePartitionColumns` and `icebergCompatV3`) require partition values to also be
   written into the data files as regular columns. Kernel handles this through the
@@ -103,17 +132,17 @@ Key points:
 ## Grouping data by partition values
 
 How you group data by partition values is up to your connector. Kernel's contract is
-that each `partitioned_write_context` call receives a `HashMap<String, Scalar>` for one
-distinct partition, and the corresponding data files contain only that partition's rows.
+that each write-context builder receives a `HashMap<String, Scalar>` for one distinct partition,
+and the corresponding data files contain only that partition's rows.
 
 Kernel provides `serialize_partition_value` as a public utility for building hashable
-group keys from `Scalar` values. It returns a `DeltaResult<Option<String>>` per value,
+group keys from `Scalar` values. It returns a `KernelResult<Option<String>>` per value,
 which you can collect into a `Vec<Option<String>>` group key for use in a `HashMap`.
 
 ## Partition value validation
 
-`partitioned_write_context` validates the provided values before creating the
-`WriteContext`:
+`BoundWriteContextBuilder::build` validates the provided values before creating the
+`BoundWriteContext`:
 
 | Check | Example |
 |-------|---------|
@@ -122,13 +151,12 @@ which you can collect into a `Vec<Option<String>>` group key for use in a `HashM
 | Type mismatch | `Scalar::String("2024")` for an `INTEGER` column |
 | Duplicate after case normalization | Both `"YEAR"` and `"year"` provided |
 
-If validation fails, `partitioned_write_context` returns an error before any data reaches
-disk.
+If validation fails, `build` returns an error before any data reaches disk.
 
 ## What Kernel handles
 
-When you call `partitioned_write_context`, Kernel performs the following steps internally.
-Your connector does not need to implement any of this:
+When you build a partitioned write context, Kernel performs the following steps internally. Your
+connector does not need to implement any of this:
 
 1. **Key validation**: all partition columns present, no extra keys
 2. **Case normalization**: keys matched case-insensitively against the schema
@@ -138,7 +166,7 @@ Your connector does not need to implement any of this:
 5. **Key translation**: logical column names translated to physical names when
    column mapping is enabled
 
-`write_dir()` on the resulting `WriteContext` returns the directory where data files
+`write_dir()` on the resulting `BoundWriteContext` returns the directory where data files
 should be written. Without column mapping, this is a Hive-style path like
 `<table_root>/year=2024/month=3/`. With column mapping enabled, this is a
 random two-character prefix directory like `<table_root>/aB/` that avoids

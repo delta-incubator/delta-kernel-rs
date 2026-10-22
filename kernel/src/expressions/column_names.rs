@@ -2,14 +2,29 @@ use std::borrow::Borrow;
 use std::fmt::{Display, Formatter};
 use std::hash::{Hash, Hasher};
 use std::iter::Peekable;
-use std::ops::Deref;
+
+use delta_kernel_derive::pub_macro;
+use derive_more::Deref;
 
 use crate::utils::CollectInto;
-use crate::{DeltaResult, Error};
+use crate::{KernelError, KernelResult};
 
 /// A (possibly nested) column name.
-#[derive(Debug, Clone, Default, PartialEq, PartialOrd, Eq, Ord, Serialize, Deserialize)]
+///
+/// When recursing into an array element, map key or map value use
+/// "element", "key" or "value" respectively.
+///
+/// # Examples
+///
+/// {id: INT, my_array: ARRAY<STRUCT<first_name: STRING, last_name: STRING>>}
+/// The field named first_name would be represented as ["my_array", "element", "first_name"].
+///
+/// {id: INT, my_map: MAP<STRING, STRUCT<first_name: STRING, last_name: STRING>>}
+/// The field named first_name would be represented as ["my_map", "value", "first_name"].
+/// The map key would be represented as ["my_map", "key"].
+#[derive(Debug, Clone, Default, Deref, PartialEq, PartialOrd, Eq, Ord, Serialize, Deserialize)]
 pub struct ColumnName {
+    #[deref(forward)]
     path: Vec<String>,
 }
 
@@ -48,7 +63,7 @@ impl ColumnName {
     ///     &[ColumnName::new(["a", "b"]), ColumnName::new(["c", "d , e", "f"])]
     /// );
     /// ```
-    pub fn parse_column_name_list(names: impl AsRef<str>) -> DeltaResult<Vec<ColumnName>> {
+    pub fn parse_column_name_list(names: impl AsRef<str>) -> KernelResult<Vec<ColumnName>> {
         let names = names.as_ref();
         let chars = &mut names.chars().peekable();
 
@@ -140,14 +155,6 @@ impl IntoIterator for ColumnName {
 
     fn into_iter(self) -> Self::IntoIter {
         self.path.into_iter()
-    }
-}
-
-impl Deref for ColumnName {
-    type Target = [String];
-
-    fn deref(&self) -> &[String] {
-        &self.path
     }
 }
 
@@ -261,11 +268,13 @@ fn drop_leading_whitespace(iter: &mut Peekable<impl Iterator<Item = char>>) {
 /// assert_eq!(parsed.to_string(), "a.`b.``c``.d`.e");
 /// ```
 impl std::str::FromStr for ColumnName {
-    type Err = Error;
+    type Err = KernelError;
 
-    fn from_str(s: &str) -> DeltaResult<Self> {
+    fn from_str(s: &str) -> KernelResult<Self> {
         match parse_column_name(&mut s.chars().peekable())? {
-            (_, FieldEnding::NextColumn) => Err(Error::generic("Trailing comma in column name")),
+            (_, FieldEnding::NextColumn) => {
+                Err(KernelError::generic("Trailing comma in column name"))
+            }
             (col, _) => Ok(col),
         }
     }
@@ -286,7 +295,7 @@ const FIELD_ESCAPE_CHAR: char = '`';
 const FIELD_SEPARATOR: char = '.';
 const COLUMN_SEPARATOR: char = ',';
 
-fn parse_column_name(chars: &mut Chars<'_>) -> DeltaResult<(ColumnName, FieldEnding)> {
+fn parse_column_name(chars: &mut Chars<'_>) -> KernelResult<(ColumnName, FieldEnding)> {
     // Ambiguous case: The empty string `""`could reasonably parse as either `ColumnName::new([""])`
     // or `ColumnName::new([])`. However, `ColumnName::new([""]).to_string()` is `"[]"` and
     // `ColumnName::new([]).to_string()` is `""`, so we choose the latter because it produces a
@@ -315,7 +324,7 @@ fn parse_column_name(chars: &mut Chars<'_>) -> DeltaResult<(ColumnName, FieldEnd
             Some(FIELD_SEPARATOR) => FieldEnding::NextField,
             Some(COLUMN_SEPARATOR) => FieldEnding::NextColumn,
             Some(other) => {
-                return Err(Error::generic(format!(
+                return Err(KernelError::generic(format!(
                     "Invalid character {other:?} after field {field_name:?}",
                 )))
             }
@@ -326,12 +335,12 @@ fn parse_column_name(chars: &mut Chars<'_>) -> DeltaResult<(ColumnName, FieldEnd
 }
 
 /// Parses a simple field name, e.g. 'a.b.c'.
-fn parse_simple_field_name(chars: &mut Chars<'_>) -> DeltaResult<String> {
+fn parse_simple_field_name(chars: &mut Chars<'_>) -> KernelResult<String> {
     let mut name = String::new();
     let mut first = true;
     while let Some(c) = chars.next_if(|c| is_simple_char(*c)) {
         if first && c.is_ascii_digit() {
-            return Err(Error::generic(format!(
+            return Err(KernelError::generic(format!(
                 "Unescaped field name cannot start with a digit {c:?}"
             )));
         }
@@ -346,14 +355,14 @@ fn parse_simple_field_name(chars: &mut Chars<'_>) -> DeltaResult<String> {
 /// check-constraint tokenizer ([`crate::expressions::sql`]) so backtick-quoted column references
 /// parse identically.
 /// Examples: `col` -> col;  `ab `` -> ``ab``. Returns an error if there is no closing backtick.
-pub(crate) fn parse_escaped_field_name(chars: &mut Chars<'_>) -> DeltaResult<String> {
+pub(crate) fn parse_escaped_field_name(chars: &mut Chars<'_>) -> KernelResult<String> {
     let mut name = String::new();
     loop {
         match chars.next() {
             Some(FIELD_ESCAPE_CHAR) if chars.next_if_eq(&FIELD_ESCAPE_CHAR).is_none() => break,
             Some(c) => name.push(c),
             None => {
-                return Err(Error::generic(format!(
+                return Err(KernelError::generic(format!(
                     "No closing {FIELD_ESCAPE_CHAR:?} after field {name:?}"
                 )));
             }
@@ -427,19 +436,14 @@ pub const fn __require_valid_simple_column_segment(s: &str) -> Option<&str> {
 /// # use delta_kernel::expressions::column_name;
 /// let name = column_name!("a..b"); // empty segment
 /// ```
-// NOTE: Macros are only public if exported, which defines them at the root of the crate. But we
-// don't want it there. So, we export a hidden macro and pub use it here where we actually want it.
-#[macro_export]
-#[doc(hidden)]
-macro_rules! __column_name {
+#[pub_macro]
+macro_rules! column_name {
     ( $($segments:tt)+ ) => {{
         const SEGMENTS: &[&str] =
             $crate::delta_kernel_derive::column_name_segments!($($segments)+);
         $crate::expressions::ColumnName::new(SEGMENTS.iter().copied())
     }};
 }
-#[doc(inline)]
-pub use __column_name as column_name;
 
 /// Joins two column names together, when one or both inputs might be literal strings representing
 /// simple (non-nested) column names. For example:
@@ -457,107 +461,68 @@ pub use __column_name as column_name;
 /// let s = "s";
 /// let name = joined_column_name!(s, s);
 /// ```
-#[macro_export]
-#[doc(hidden)]
-macro_rules! __joined_column_name {
+#[pub_macro]
+macro_rules! joined_column_name {
     ( $left:literal, $right:literal ) => {
-        $crate::__column_name!($left).join(&$crate::__column_name!($right))
+        $crate::expressions::column_name!($left).join(&$crate::expressions::column_name!($right))
     };
     ( $left:literal, $right:expr ) => {
-        $crate::__column_name!($left).join(&$right)
+        $crate::expressions::column_name!($left).join(&$right)
     };
     ( $left:expr, $right:literal) => {
-        $left.join(&$crate::__column_name!($right))
+        $left.join(&$crate::expressions::column_name!($right))
     };
     ( $($other:tt)* ) => {
         compile_error!("joined_column_name!() requires at least one string literal input")
     };
 }
-#[doc(inline)]
-pub use __joined_column_name as joined_column_name;
 
-#[macro_export]
-#[doc(hidden)]
-macro_rules! __column_expr {
-    ( $($name:tt)* ) => {
-        $crate::expressions::Expression::from($crate::__column_name!($($name)*))
-    };
-}
-#[doc(inline)]
-pub use __column_expr as column_expr;
-
-/// Builds an [`Expression`] column reference. Accepts two forms:
-///
-/// - A single **string literal** is split on `.` at compile time into a (possibly nested) column
-///   reference: `col!("a.b.c")` is equivalent to `col!("a", "b", "c")`. This is the same
-///   compile-time splitting [`column_expr!`] performs.
-/// - One or more comma-separated arguments build a column whose segments are taken **verbatim**
-///   (never split on `.`). A single non-literal argument is one segment, so `col!(name)` for a
-///   runtime `&str`/`String` is a single-segment column; `col!("a.b", "c")` is two segments.
+/// Convenience macro that builds an [`Expression`](crate::expressions::Expression) column reference
+/// by forwarding all args to [`column_name!`]:
 ///
 /// ```
-/// # use delta_kernel::expressions::{col, column_expr, ColumnName, Expression};
-/// // A string literal splits on dots at compile time (same as `column_expr!`).
+/// # use delta_kernel::expressions::{col, ColumnName, Expression};
 /// assert_eq!(col!("a.b.c"), Expression::Column(ColumnName::new(["a", "b", "c"])));
-/// assert_eq!(col!("a.b.c"), column_expr!("a.b.c"));
 ///
-/// // A single dotless literal is one segment.
-/// assert_eq!(col!("x"), Expression::Column(ColumnName::new(["x"])));
-///
-/// // Multiple args build a multi-segment column, each segment verbatim (not split).
-/// assert_eq!(col!("a.b", "c"), Expression::Column(ColumnName::new(["a.b", "c"])));
-///
-/// // A single runtime value is one verbatim segment.
-/// let name = "runtime";
-/// assert_eq!(col!(name), Expression::Column(ColumnName::new(["runtime"])));
+/// const VERSION: &str = "version";
+/// assert_eq!(
+///     col!(VERSION, "a.b"),
+///     Expression::Column(ColumnName::new(["version", "a", "b"]))
+/// );
 /// ```
-///
-/// [`Expression`]: crate::expressions::Expression
-/// [`column_expr!`]: crate::expressions::column_expr
-#[macro_export]
-#[doc(hidden)]
-macro_rules! __col {
-    // A single string literal: split on `.` at compile time (same as `column_expr!`).
-    ( $name:literal ) => {
-        $crate::expressions::column_expr!($name)
-    };
-    // One or more comma-separated segments, each taken verbatim (never split on `.`).
-    ( $($segments:expr),+ $(,)? ) => {
-        $crate::expressions::Expression::column([$($segments),+])
-    };
-}
-#[doc(inline)]
-pub use __col as col;
-
-#[macro_export]
-#[doc(hidden)]
-macro_rules! __column_expr_ref {
+#[pub_macro]
+macro_rules! col {
     ( $($name:tt)* ) => {
-        std::sync::Arc::new($crate::expressions::Expression::from($crate::__column_name!($($name)*)))
+        $crate::expressions::Expression::from($crate::expressions::column_name!($($name)*))
     };
 }
-#[doc(inline)]
-pub use __column_expr_ref as column_expr_ref;
-
-#[macro_export]
 #[doc(hidden)]
-macro_rules! __column_pred {
-    ( $($name:tt)* ) => {
-        $crate::expressions::Predicate::from($crate::__column_name!($($name)*))
-    };
-}
-#[doc(inline)]
-pub use __column_pred as column_pred;
+pub use col as column_expr;
 
-#[macro_export]
-#[doc(hidden)]
-macro_rules! __joined_column_expr {
+#[pub_macro]
+macro_rules! column_expr_ref {
     ( $($name:tt)* ) => {
-        $crate::expressions::Expression::from($crate::__joined_column_name!($($name)*))
+        std::sync::Arc::new($crate::expressions::Expression::from(
+            $crate::expressions::column_name!($($name)*)
+        ))
     };
 }
-#[doc(inline)]
-pub use __joined_column_expr as joined_column_expr;
+
+#[pub_macro]
+macro_rules! column_pred {
+    ( $($name:tt)* ) => {
+        $crate::expressions::Predicate::from($crate::expressions::column_name!($($name)*))
+    };
+}
+
+#[pub_macro]
+macro_rules! joined_column_expr {
+    ( $($name:tt)* ) => {
+        $crate::expressions::Expression::from(
+            $crate::expressions::joined_column_name!($($name)*)
+        )
+    };
+}
 use serde::{Deserialize, Serialize};
 
 #[cfg(test)]
@@ -718,7 +683,7 @@ mod test {
             ("a`.b``", None),
         ];
         for (input, expected_output) in cases {
-            let output: DeltaResult<ColumnName> = input.parse();
+            let output: KernelResult<ColumnName> = input.parse();
             match (&output, &expected_output) {
                 (Ok(output), Some(expected_output)) => {
                     assert_eq!(output, expected_output, "from {input}")

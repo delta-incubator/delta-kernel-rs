@@ -8,7 +8,7 @@ use delta_kernel::engine::arrow_conversion::TryIntoArrow as _;
 use delta_kernel::engine::arrow_data::ArrowEngineData;
 use delta_kernel::object_store::local::LocalFileSystem;
 use delta_kernel::schema::{
-    ArrayType, ColumnMetadataKey, DataType, MapType, MetadataValue, StructField, StructType,
+    schema, ArrayType, ColumnMetadataKey, DataType, MapType, MetadataValue, StructField, StructType,
 };
 use delta_kernel::{EngineData, ParquetHandler};
 use test_utils::delta_kernel_default_engine::executor::tokio::TokioBackgroundExecutor;
@@ -103,7 +103,10 @@ fn build_kernel_schema(nested_ids_meta_key: &str) -> StructType {
         ],
     );
 
-    StructType::try_new(vec![array_in_map, map_in_list]).unwrap()
+    schema! {
+        (array_in_map),
+        (map_in_list),
+    }
 }
 
 /// Write `record_batch` via the `ParquetHandler::write_parquet_file` trait method to a
@@ -117,7 +120,7 @@ fn write_via_default_engine(record_batch: RecordBatch) -> std::path::PathBuf {
 
     let store = Arc::new(LocalFileSystem::new());
     let handler = DefaultParquetHandler::new(store, Arc::new(TokioBackgroundExecutor::new()));
-    let data: delta_kernel::DeltaResultIteratorStatic<Box<dyn EngineData>> =
+    let data: delta_kernel::KernelResultIteratorStatic<Box<dyn EngineData>> =
         Box::new(std::iter::once(Ok(
             Box::new(ArrowEngineData::new(record_batch)) as Box<dyn EngineData>,
         )));

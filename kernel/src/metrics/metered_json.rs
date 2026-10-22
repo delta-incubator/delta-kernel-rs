@@ -9,8 +9,8 @@ use crate::metrics::events::emit_json_read_completed;
 use crate::metrics::PrecountedMetricsIterator;
 use crate::schema::SchemaRef;
 use crate::{
-    CancellationTokenRef, DeltaResult, DeltaResultIterator, EngineData, FileDataReadResultIterator,
-    FileMeta, FilteredEngineData, JsonHandler, PredicateRef,
+    CancellationTokenRef, EngineData, FileDataReadResultIterator, FileMeta, FileSize,
+    FilteredEngineData, JsonHandler, KernelResult, KernelResultIterator, PredicateRef,
 };
 
 /// Decorator over an engine-provided `Arc<dyn JsonHandler>` that emits a
@@ -59,7 +59,7 @@ impl JsonHandler for MeteredJsonHandler {
         &self,
         json_strings: Box<dyn EngineData>,
         output_schema: SchemaRef,
-    ) -> DeltaResult<Box<dyn EngineData>> {
+    ) -> KernelResult<Box<dyn EngineData>> {
         self.inner.parse_json(json_strings, output_schema)
     }
 
@@ -68,7 +68,7 @@ impl JsonHandler for MeteredJsonHandler {
         files: &[FileMeta],
         physical_schema: SchemaRef,
         predicate: Option<PredicateRef>,
-    ) -> DeltaResult<FileDataReadResultIterator> {
+    ) -> KernelResult<FileDataReadResultIterator> {
         let inner = self
             .inner
             .read_json_files(files, physical_schema, predicate)?;
@@ -81,7 +81,7 @@ impl JsonHandler for MeteredJsonHandler {
         physical_schema: SchemaRef,
         predicate: Option<PredicateRef>,
         cancellation_token: Option<CancellationTokenRef>,
-    ) -> DeltaResult<FileDataReadResultIterator> {
+    ) -> KernelResult<FileDataReadResultIterator> {
         let inner = self.inner.read_json_files_with_cancellation(
             files,
             physical_schema,
@@ -94,9 +94,9 @@ impl JsonHandler for MeteredJsonHandler {
     fn write_json_file(
         &self,
         path: &url::Url,
-        data: DeltaResultIterator<'_, FilteredEngineData>,
+        data: KernelResultIterator<'_, FilteredEngineData>,
         overwrite: bool,
-    ) -> DeltaResult<()> {
+    ) -> KernelResult<FileSize> {
         self.inner.write_json_file(path, data, overwrite)
     }
 }
@@ -112,14 +112,15 @@ mod tests {
     use crate::arrow::datatypes::Schema;
     use crate::engine::arrow_data::ArrowEngineData;
     use crate::metrics::MetricEvent;
-    use crate::schema::{DataType, StructField, StructType};
-    use crate::utils::test_utils::{install_thread_local_metrics_reporter, CapturingReporter};
+    use crate::schema::schema_ref;
+    use crate::unit_test_utils::{install_thread_local_metrics_reporter, CapturingReporter};
 
     #[derive(Debug, Default)]
     struct StubJsonHandler {
         /// Set when the cancellation-aware read variant is invoked, so a test can assert the
         /// metered wrapper forwards to it (rather than the plain read).
         cancellation_read_called: std::sync::atomic::AtomicBool,
+        write_size: Option<FileSize>,
     }
 
     fn empty_batch() -> Box<dyn EngineData> {
@@ -133,7 +134,7 @@ mod tests {
             &self,
             _json_strings: Box<dyn EngineData>,
             _output_schema: SchemaRef,
-        ) -> DeltaResult<Box<dyn EngineData>> {
+        ) -> KernelResult<Box<dyn EngineData>> {
             Ok(empty_batch())
         }
 
@@ -142,7 +143,7 @@ mod tests {
             _files: &[FileMeta],
             _physical_schema: SchemaRef,
             _predicate: Option<PredicateRef>,
-        ) -> DeltaResult<FileDataReadResultIterator> {
+        ) -> KernelResult<FileDataReadResultIterator> {
             Ok(Box::new(std::iter::empty()))
         }
 
@@ -152,7 +153,7 @@ mod tests {
             _physical_schema: SchemaRef,
             _predicate: Option<PredicateRef>,
             _cancellation_token: Option<CancellationTokenRef>,
-        ) -> DeltaResult<FileDataReadResultIterator> {
+        ) -> KernelResult<FileDataReadResultIterator> {
             self.cancellation_read_called
                 .store(true, std::sync::atomic::Ordering::SeqCst);
             Ok(Box::new(std::iter::empty()))
@@ -161,10 +162,12 @@ mod tests {
         fn write_json_file(
             &self,
             _path: &Url,
-            _data: DeltaResultIterator<'_, FilteredEngineData>,
+            _data: KernelResultIterator<'_, FilteredEngineData>,
             _overwrite: bool,
-        ) -> DeltaResult<()> {
-            Ok(())
+        ) -> KernelResult<FileSize> {
+            self.write_size.ok_or_else(|| {
+                crate::KernelError::generic("StubJsonHandler does not support writes")
+            })
         }
     }
 
@@ -183,7 +186,7 @@ mod tests {
     }
 
     fn delta_schema() -> SchemaRef {
-        Arc::new(StructType::try_new([StructField::nullable("x", DataType::INTEGER)]).unwrap())
+        schema_ref! { nullable "x": INTEGER }
     }
 
     #[test]
@@ -282,6 +285,37 @@ mod tests {
         };
         assert_eq!(e.num_files, 0);
         assert_eq!(e.bytes_read, 0);
+    }
+
+    #[test]
+    fn write_json_file_forwards_size_without_emitting_metrics() {
+        let (reporter, _guard) = install_capture();
+        let inner: Arc<dyn JsonHandler> = Arc::new(StubJsonHandler {
+            write_size: Some(42),
+            ..Default::default()
+        });
+        let handler = MeteredJsonHandler::new(inner);
+        let path = Url::parse("memory:///_delta_log/0.json").unwrap();
+
+        let written_size = handler
+            .write_json_file(&path, Box::new(std::iter::empty()), false)
+            .unwrap();
+
+        assert_eq!(written_size, 42);
+        assert!(reporter.events().is_empty());
+    }
+
+    #[test]
+    fn write_json_file_forwards_errors() {
+        let inner: Arc<dyn JsonHandler> = Arc::new(StubJsonHandler::default());
+        let handler = MeteredJsonHandler::new(inner);
+        let path = Url::parse("memory:///_delta_log/0.json").unwrap();
+
+        let error = handler
+            .write_json_file(&path, Box::new(std::iter::empty()), false)
+            .unwrap_err();
+
+        assert!(error.to_string().contains("does not support writes"));
     }
 
     #[test]

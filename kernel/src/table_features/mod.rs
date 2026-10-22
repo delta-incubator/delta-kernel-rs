@@ -6,16 +6,20 @@ pub use column_mapping::ColumnMappingMode;
 #[internal_api]
 pub(crate) use column_mapping::{assign_column_mapping_metadata, find_max_column_id_in_schema};
 pub(crate) use column_mapping::{
-    column_mapping_mode, get_column_mapping_mode_from_properties, physical_to_logical_column_name,
-    schema_has_column_mapping_metadata, strip_stray_column_mapping_metadata,
-    try_assign_flat_column_mapping_info, validate_and_extract_column_mapping_annotations,
-    validate_column_mapping_id, StaleAnnotationPolicy,
+    column_mapping_mode, get_column_mapping_mode_from_properties,
+    physical_to_logical_column_name_and_type, schema_has_column_mapping_metadata,
+    strip_stray_column_mapping_metadata, try_assign_flat_column_mapping_info,
+    validate_and_extract_column_mapping_annotations, validate_column_mapping_id,
+    StaleAnnotationPolicy,
 };
 use delta_kernel_derive::internal_api;
 #[cfg(feature = "geo-type-in-dev")]
 pub(crate) use geospatial::validate_geospatial_feature_support;
-pub(crate) use iceberg_compat::v3::{iceberg_compat_v3_column_defaults_validation, V3_VALIDATOR};
-pub(crate) use iceberg_compat::validate_iceberg_compat_if_needed;
+pub(crate) use iceberg_compat::v2::V2_VALIDATOR;
+pub(crate) use iceberg_compat::v3::V3_VALIDATOR;
+pub(crate) use iceberg_compat::{
+    validate_iceberg_compat_if_needed, IcebergCompatValidationContext,
+};
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use strum::{AsRefStr, Display as StrumDisplay, EnumCount, EnumIter, EnumString};
@@ -29,7 +33,7 @@ use crate::schema::derive_macro_utils::ToDataType;
 use crate::schema::DataType;
 use crate::table_properties::TableProperties;
 use crate::utils::require;
-use crate::{DeltaResult, Error};
+use crate::{KernelError, KernelResult};
 
 mod column_mapping;
 #[cfg(feature = "geo-type-in-dev")]
@@ -121,6 +125,10 @@ pub(crate) enum TableFeature {
     IcebergCompatV2,
     /// Iceberg V3 compatibility support
     IcebergCompatV3,
+    /// Iceberg V4 native interop. Spec: delta-io/delta#7374
+    #[strum(serialize = "icebergNativeV4-preview")]
+    #[serde(rename = "icebergNativeV4-preview")]
+    IcebergNativeV4Preview,
     /// The Clustered Table feature facilitates the physical clustering of rows
     /// that share similar values on a predefined set of clustering columns.
     #[strum(serialize = "clustering")]
@@ -231,6 +239,8 @@ pub(crate) enum EnablementCheck {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[internal_api]
 pub(crate) enum Operation {
+    /// Create a [`Snapshot`](crate::Snapshot) on the table.
+    SnapshotLoad,
     /// Read operations on regular table data
     Scan,
     /// Read operations on change data feed data
@@ -248,7 +258,7 @@ pub(crate) enum KernelSupport {
     /// Custom logic to determine support based on operation type and table properties.
     /// For example: Column Mapping may support Scan but not CDF, or CDF writes may only
     /// be supported when AppendOnly is true.
-    Custom(fn(&Protocol, &TableProperties, Operation) -> DeltaResult<()>),
+    Custom(fn(&Protocol, &TableProperties, Operation) -> KernelResult<()>),
 }
 
 /// Types of requirements for feature dependencies
@@ -263,7 +273,7 @@ pub(crate) enum FeatureRequirement {
     /// Feature must NOT be enabled (may be supported but property must not activate it)
     NotEnabled(TableFeature),
     /// Custom validation logic run against the protocol and table properties.
-    Custom(fn(&Protocol, &TableProperties) -> DeltaResult<()>),
+    Custom(fn(&Protocol, &TableProperties) -> KernelResult<()>),
 }
 
 /// Minimum protocol versions for legacy (pre-feature-list) inference.
@@ -293,9 +303,9 @@ pub(crate) struct FeatureInfo {
     ///
     /// Note: `kernel_support` validation depends on `feature_type`:
     /// WriterOnly features: Only checked during `Operation::Write`
-    /// ReaderWriter features: Checked during all operations (Scan/Write/CDF)
-    /// Read operations (Scan/CDF) only validate reader features, so `kernel_support` for
-    /// WriterOnly features are never invoked for Scan/CDF regardless of the custom check logic.
+    /// ReaderWriter features: Checked during every operation
+    /// Read operations (SnapshotLoad, Scan, Cdf) only validate reader features, so they do not
+    /// invoke `kernel_support` for WriterOnly features.
     pub kernel_support: KernelSupport,
     /// How to check if this feature is enabled in a table
     pub enablement_check: EnablementCheck,
@@ -360,20 +370,15 @@ static IN_COMMIT_TIMESTAMP_INFO: FeatureInfo = FeatureInfo {
     feature_type: FeatureType::WriterOnly,
     min_legacy_version: None,
     feature_requirements: &[],
-    kernel_support: KernelSupport::Custom(|_protocol, _properties, operation| match operation {
-        Operation::Scan | Operation::Write | Operation::Cdf => Ok(()),
-    }),
+    kernel_support: KernelSupport::Supported,
     enablement_check: EnablementCheck::EnabledIf(|props| {
         props.enable_in_commit_timestamps == Some(true)
     }),
 };
 
-// TODO(#2538): Currently we reject `Transaction::commit` when it contains staged remove-file
-// actions on RowTracking-supported (and not-suspended) tables because
-//   1. kernel does not yet materialize stable row IDs / commit versions on write, which blocks COW
-//      rewrites,
-//   2. kernel does not yet validate if remove actions correctly reserved row IDs / commit versions.
-// Unblock after both 1 and 2 are supported.
+// Row Tracking rewrites require connectors to preserve stable row metadata. Kernel records the
+// connector acknowledgment but does not validate materialized values. IcebergCompatV3 removals
+// remain unsupported.
 //
 // TODO: When kernel writes the materialized `row_id` / `row_commit_version` columns, they must
 // use the reserved parquet field IDs defined by the protocol on IcebergCompatV3 tables, not
@@ -418,14 +423,23 @@ static ICEBERG_COMPAT_V1_INFO: FeatureInfo = FeatureInfo {
     }),
 };
 
-// TODO(#1125): IcebergCompatV2 requires schema type validation. Unlike V1, V2 allows Map and Array
-// types but needs validation against an allowlist of supported types.
-// This validation is not yet implemented. The feature is marked as NotSupported for writes until
-// proper validation is added.
-
-// See Delta Spark: IcebergCompat.scala CheckTypeInV2AllowList (lines 450-459)
-// See Java Kernel: IcebergCompatMetadataValidatorAndUpdater.java V2_SUPPORTED_TYPES
-// See https://github.com/delta-io/delta/blob/master/PROTOCOL.md#writer-requirements-for-icebergcompatv2 for more requirements to support.
+/// IcebergCompatV2 ensures that Delta tables can be converted to Iceberg format.
+/// Spec: <https://github.com/delta-io/delta/blob/master/PROTOCOL.md#iceberg-compatibility-v2>.
+/// See
+/// <https://github.com/delta-io/delta/blob/master/PROTOCOL.md#writer-requirements-for-icebergcompatv2>
+/// for more requirements to support.
+///
+/// TODO(#1125): Implement the schema-evolution requirements for IcebergCompatV2.
+/// TODO: Support ALTER TABLE on tables with IcebergCompatV2 enabled.
+///
+/// Requirements to enforce when the corresponding write paths are supported:
+/// - REPLACE TABLE: when supported, partition columns must not change across the replace.
+/// - Timestamp parquet encoding: if/when kernel can write INT96 or INT64, IcebergCompatV2 tables
+///   must always use INT64; INT96 is forbidden.
+/// - ALTER TABLE SET/UNSET TBLPROPERTIES: when supported, reject any property change that would
+///   disable IcebergCompatV2 on an existing table.
+///
+/// Tracking issue: <https://github.com/delta-io/delta-kernel-rs/issues/1125>
 static ICEBERG_COMPAT_V2_INFO: FeatureInfo = FeatureInfo {
     feature_type: FeatureType::WriterOnly,
     min_legacy_version: None,
@@ -435,7 +449,7 @@ static ICEBERG_COMPAT_V2_INFO: FeatureInfo = FeatureInfo {
         FeatureRequirement::NotEnabled(TableFeature::DeletionVectors),
         FeatureRequirement::NotEnabled(TableFeature::IcebergCompatV3),
     ],
-    kernel_support: KernelSupport::NotSupported,
+    kernel_support: KernelSupport::Supported,
     enablement_check: EnablementCheck::EnabledIf(|props| {
         props.enable_iceberg_compat_v2 == Some(true)
     }),
@@ -445,10 +459,10 @@ static ICEBERG_COMPAT_V2_INFO: FeatureInfo = FeatureInfo {
 ///
 /// Spec: <https://github.com/delta-io/delta/blob/master/protocol_rfcs/iceberg-compat-v3.md>
 ///
-/// TODO: Implement the write-side requirements for IcebergCompatV3.
+/// TODO(#2492): Implement the schema-evolution requirements for IcebergCompatV3.
 /// TODO: Support ALTER TABLE on tables with IcebergCompatV3 enabled.
 ///
-/// Attention in the future:
+/// Requirements to enforce when the corresponding write paths are supported:
 /// - Geo types: when supported, they must not be usable as partition columns on IcebergCompatV3
 ///   tables.
 /// - REPLACE TABLE: when supported, partition columns must not change across the replace.
@@ -480,6 +494,33 @@ static ICEBERG_COMPAT_V3_INFO: FeatureInfo = FeatureInfo {
     }),
 };
 
+/// IcebergNativeV4 native interop. Spec: delta-io/delta#7374.
+///
+/// TODO(#2866): gated by `adaptive-metadata-in-dev` until adaptiveMetadata is fully supported.
+static ICEBERG_NATIVE_V4_PREVIEW_INFO: FeatureInfo = FeatureInfo {
+    feature_type: FeatureType::WriterOnly,
+    min_legacy_version: None,
+    feature_requirements: &[
+        // adaptiveMetadata transitively enforces the structural dependencies.
+        FeatureRequirement::Enabled(TableFeature::AdaptiveMetadataPreview),
+        FeatureRequirement::NotEnabled(TableFeature::IcebergCompatV1),
+        FeatureRequirement::NotEnabled(TableFeature::IcebergCompatV2),
+        FeatureRequirement::NotEnabled(TableFeature::IcebergCompatV3),
+        FeatureRequirement::NotEnabled(TableFeature::AppendOnly),
+        FeatureRequirement::NotEnabled(TableFeature::ChangeDataFeed),
+        FeatureRequirement::NotEnabled(TableFeature::Invariants),
+        FeatureRequirement::NotEnabled(TableFeature::CheckConstraints),
+        FeatureRequirement::NotEnabled(TableFeature::GeneratedColumns),
+        FeatureRequirement::NotEnabled(TableFeature::IdentityColumns),
+    ],
+    #[cfg(feature = "adaptive-metadata-in-dev")]
+    kernel_support: KernelSupport::Supported,
+    #[cfg(not(feature = "adaptive-metadata-in-dev"))]
+    kernel_support: KernelSupport::NotSupported,
+    enablement_check: EnablementCheck::AlwaysIfSupported,
+};
+
+// TODO(#3553): Support writing clusteringProvider to AddFile actions.
 static CLUSTERED_TABLE_INFO: FeatureInfo = FeatureInfo {
     feature_type: FeatureType::WriterOnly,
     min_legacy_version: None,
@@ -509,8 +550,8 @@ static CATALOG_MANAGED_INFO: FeatureInfo = FeatureInfo {
     min_legacy_version: None,
     feature_requirements: &[FeatureRequirement::Enabled(TableFeature::InCommitTimestamp)],
     kernel_support: KernelSupport::Custom(|_, _, op| match op {
-        Operation::Scan | Operation::Write => Ok(()),
-        Operation::Cdf => Err(Error::unsupported(
+        Operation::SnapshotLoad | Operation::Scan | Operation::Write => Ok(()),
+        Operation::Cdf => Err(KernelError::unsupported(
             "Feature 'catalogManaged' is not supported for CDF",
         )),
     }),
@@ -522,8 +563,8 @@ static CATALOG_OWNED_PREVIEW_INFO: FeatureInfo = FeatureInfo {
     min_legacy_version: None,
     feature_requirements: &[FeatureRequirement::Enabled(TableFeature::InCommitTimestamp)],
     kernel_support: KernelSupport::Custom(|_, _, op| match op {
-        Operation::Scan | Operation::Write => Ok(()),
-        Operation::Cdf => Err(Error::unsupported(
+        Operation::SnapshotLoad | Operation::Scan | Operation::Write => Ok(()),
+        Operation::Cdf => Err(KernelError::unsupported(
             "Feature 'catalogOwned-preview' is not supported for CDF",
         )),
     }),
@@ -562,35 +603,25 @@ static TIMESTAMP_WITHOUT_TIMEZONE_INFO: FeatureInfo = FeatureInfo {
     enablement_check: EnablementCheck::AlwaysIfSupported,
 };
 
-/// TODO: When type widening is supported on writes, restrict the allowed
-/// widenings on IcebergCompatV3 tables to the subset permitted by the Iceberg v3
-/// schema-evolution rules. Ref: <https://iceberg.apache.org/spec/#schema-evolution>
 static TYPE_WIDENING_INFO: FeatureInfo = FeatureInfo {
     feature_type: FeatureType::ReaderWriter,
     min_legacy_version: None,
     feature_requirements: &[],
-    kernel_support: KernelSupport::Custom(|_, _, op| match op {
-        Operation::Scan | Operation::Cdf => Ok(()),
-        Operation::Write => Err(Error::unsupported(
-            "Feature 'typeWidening' is not supported for writes",
-        )),
-    }),
+    // TODO(#2492): When type widening is supported on ALTER TABLE, restrict the allowed widenings
+    // on IcebergCompatV3 tables to the subset permitted by Iceberg V3 schema-evolution rules.
+    // Ref: <https://iceberg.apache.org/spec/#schema-evolution>
+    kernel_support: KernelSupport::Supported,
     enablement_check: EnablementCheck::EnabledIf(|props| props.enable_type_widening == Some(true)),
 };
 
-/// TODO: When type widening is supported on writes, restrict the allowed
-/// widenings on IcebergCompatV3 tables to the subset permitted by the Iceberg
-/// schema-evolution rules. Ref: <https://iceberg.apache.org/spec/#schema-evolution>
 static TYPE_WIDENING_PREVIEW_INFO: FeatureInfo = FeatureInfo {
     feature_type: FeatureType::ReaderWriter,
     min_legacy_version: None,
     feature_requirements: &[],
-    kernel_support: KernelSupport::Custom(|_, _, op| match op {
-        Operation::Scan | Operation::Cdf => Ok(()),
-        Operation::Write => Err(Error::unsupported(
-            "Feature 'typeWidening-preview' is not supported for writes",
-        )),
-    }),
+    // TODO(#2492): When type widening is supported on ALTER TABLE, restrict the allowed widenings
+    // on IcebergCompatV3 tables to the subset permitted by Iceberg V3 schema-evolution rules.
+    // Ref: <https://iceberg.apache.org/spec/#schema-evolution>
+    kernel_support: KernelSupport::Supported,
     enablement_check: EnablementCheck::EnabledIf(|props| props.enable_type_widening == Some(true)),
 };
 
@@ -642,8 +673,9 @@ static VARIANT_SHREDDING_PREVIEW_INFO: FeatureInfo = FeatureInfo {
     enablement_check: EnablementCheck::AlwaysIfSupported,
 };
 
-// Dependencies per the adaptiveMetadata RFC (delta-io/delta#6978) "Table Feature Enablement"
-// section. Enforcement is covered by `test_adaptive_metadata_feature_requirements`.
+// Dependencies and mutual exclusions per the adaptiveMetadata RFC (delta-io/delta#6978) "Table
+// Feature Enablement" section. Enforcement is covered by
+// `test_adaptive_metadata_feature_requirements`.
 // TODO(#2866): drop the `adaptive-metadata-in-dev` gate once adaptiveMetadata is fully supported.
 static ADAPTIVE_METADATA_PREVIEW_INFO: FeatureInfo = FeatureInfo {
     feature_type: FeatureType::ReaderWriter,
@@ -653,7 +685,7 @@ static ADAPTIVE_METADATA_PREVIEW_INFO: FeatureInfo = FeatureInfo {
         FeatureRequirement::Custom(|_protocol, properties| {
             require!(
                 properties.column_mapping_mode == Some(ColumnMappingMode::Id),
-                Error::invalid_protocol(
+                KernelError::invalid_protocol(
                     "Feature 'adaptiveMetadata-preview' requires column mapping in 'id' mode"
                 )
             );
@@ -663,6 +695,10 @@ static ADAPTIVE_METADATA_PREVIEW_INFO: FeatureInfo = FeatureInfo {
         FeatureRequirement::Enabled(TableFeature::DomainMetadata),
         FeatureRequirement::Enabled(TableFeature::DeletionVectors),
         FeatureRequirement::Enabled(TableFeature::InCommitTimestamp),
+        // adaptiveMetadata and v2Checkpoint are mutually exclusive: once adaptiveMetadata is
+        // enabled, checkpoint state is carried by the `checkpoint` action rather than by V2
+        // checkpoint files, so a table must not enable both.
+        FeatureRequirement::NotSupported(TableFeature::V2Checkpoint),
     ],
     #[cfg(feature = "adaptive-metadata-in-dev")]
     kernel_support: KernelSupport::Supported,
@@ -678,8 +714,8 @@ static GEOSPATIAL_TYPE_INFO: FeatureInfo = FeatureInfo {
     feature_requirements: &[],
     #[cfg(feature = "geo-type-in-dev")]
     kernel_support: KernelSupport::Custom(|_, _, op| match op {
-        Operation::Scan | Operation::Cdf => Ok(()),
-        Operation::Write => Err(Error::unsupported(
+        Operation::SnapshotLoad | Operation::Scan | Operation::Cdf => Ok(()),
+        Operation::Write => Err(KernelError::unsupported(
             "Feature 'geospatial' is not supported for writes",
         )),
     }),
@@ -734,6 +770,7 @@ impl TableFeature {
             | TableFeature::IcebergCompatV1
             | TableFeature::IcebergCompatV2
             | TableFeature::IcebergCompatV3
+            | TableFeature::IcebergNativeV4Preview
             | TableFeature::ClusteredTable
             | TableFeature::MaterializePartitionColumns => FeatureType::WriterOnly,
             TableFeature::AllowColumnDefaults => FeatureType::WriterOnly,
@@ -770,6 +807,7 @@ impl TableFeature {
             TableFeature::IcebergCompatV1 => &ICEBERG_COMPAT_V1_INFO,
             TableFeature::IcebergCompatV2 => &ICEBERG_COMPAT_V2_INFO,
             TableFeature::IcebergCompatV3 => &ICEBERG_COMPAT_V3_INFO,
+            TableFeature::IcebergNativeV4Preview => &ICEBERG_NATIVE_V4_PREVIEW_INFO,
             TableFeature::ClusteredTable => &CLUSTERED_TABLE_INFO,
             TableFeature::MaterializePartitionColumns => &MATERIALIZE_PARTITION_COLUMNS_INFO,
             TableFeature::AllowColumnDefaults => &ALLOW_COLUMN_DEFAULTS_INFO,
@@ -877,8 +915,7 @@ pub(crate) fn add_feature_to_lists(
 /// Enable each `allowed_table_features` entry whose [`EnablementCheck::EnabledIf`] check is
 /// satisfied by `table_properties`, appending it to `reader_features`/`writer_features`
 /// (deduplicated). Features with [`EnablementCheck::AlwaysIfSupported`] are skipped since they need
-/// no property-driven enablement. `RowTracking` additionally pulls in its `DomainMetadata`
-/// dependency.
+/// no property-driven enablement. Dependency resolution is separate from feature selection.
 pub(crate) fn auto_enable_property_driven_features(
     allowed_table_features: &[TableFeature],
     table_properties: &TableProperties,
@@ -889,31 +926,53 @@ pub(crate) fn auto_enable_property_driven_features(
         if let EnablementCheck::EnabledIf(check) = table_feature.info().enablement_check {
             if check(table_properties) {
                 add_feature_to_lists(table_feature.clone(), reader_features, writer_features);
-                if *table_feature == TableFeature::RowTracking {
-                    add_feature_to_lists(
-                        TableFeature::DomainMetadata,
-                        reader_features,
-                        writer_features,
-                    );
-                }
             }
         }
     }
 }
 
+/// Adds `domainMetadata` when a selected feature requires `Supported(DomainMetadata)`.
+pub(crate) fn ensure_domain_metadata_dependency(
+    reader_features: &mut Vec<TableFeature>,
+    writer_features: &mut Vec<TableFeature>,
+) {
+    let required = reader_features
+        .iter()
+        .chain(writer_features.iter())
+        .any(|feature| {
+            feature
+                .info()
+                .feature_requirements
+                .iter()
+                .any(|requirement| {
+                    matches!(
+                        requirement,
+                        FeatureRequirement::Supported(TableFeature::DomainMetadata)
+                    )
+                })
+        });
+    if required {
+        add_feature_to_lists(
+            TableFeature::DomainMetadata,
+            reader_features,
+            writer_features,
+        );
+    }
+}
+
 /// Enforce that `protocol.min_reader_version()` lies within
 /// [`MIN_VALID_RW_VERSION`]..=[`MAX_VALID_READER_VERSION`]. Below the minimum yields
-/// [`Error::InvalidProtocol`]; above the maximum yields [`Error::Unsupported`].
-pub(crate) fn check_reader_version_range(protocol: &Protocol) -> DeltaResult<()> {
+/// [`KernelError::InvalidProtocol`]; above the maximum yields [`KernelError::Unsupported`].
+pub(crate) fn check_reader_version_range(protocol: &Protocol) -> KernelResult<()> {
     require!(
         protocol.min_reader_version() >= MIN_VALID_RW_VERSION,
-        Error::InvalidProtocol(format!(
+        KernelError::InvalidProtocol(format!(
             "min_reader_version must be >= {MIN_VALID_RW_VERSION}, got {}",
             protocol.min_reader_version()
         ))
     );
     if protocol.min_reader_version() > MAX_VALID_READER_VERSION {
-        return Err(Error::unsupported(format!(
+        return Err(KernelError::unsupported(format!(
             "Unsupported minimum reader version {}",
             protocol.min_reader_version()
         )));
@@ -925,14 +984,14 @@ pub(crate) fn check_reader_version_range(protocol: &Protocol) -> DeltaResult<()>
 ///
 /// Unlike `TableConfiguration::ensure_operation_supported`, this does not require a
 /// `Metadata` action or any table properties.
-pub(crate) fn ensure_table_can_be_read(protocol: &Protocol) -> DeltaResult<()> {
+pub(crate) fn ensure_table_can_be_read(protocol: &Protocol) -> KernelResult<()> {
     check_reader_version_range(protocol)?;
 
     for feature in extract_enabled_reader_features(protocol) {
         match feature.info().kernel_support {
             KernelSupport::Supported => {}
             KernelSupport::NotSupported => {
-                return Err(Error::unsupported(format!(
+                return Err(KernelError::unsupported(format!(
                     "Feature '{feature}' is not supported by kernel",
                 )));
             }
@@ -1059,11 +1118,11 @@ mod tests {
         match expected {
             ExpectRead::Ok => result.expect("protocol must be readable"),
             ExpectRead::InvalidProtocol => assert!(
-                matches!(result, Err(Error::InvalidProtocol(_))),
+                matches!(result, Err(KernelError::InvalidProtocol(_))),
                 "expected InvalidProtocol, got: {result:?}"
             ),
             ExpectRead::Unsupported => assert!(
-                matches!(result, Err(Error::Unsupported(_))),
+                matches!(result, Err(KernelError::Unsupported(_))),
                 "expected Unsupported, got: {result:?}"
             ),
         }
@@ -1121,6 +1180,7 @@ mod tests {
                 TableFeature::IcebergCompatV1 => "icebergCompatV1",
                 TableFeature::IcebergCompatV2 => "icebergCompatV2",
                 TableFeature::IcebergCompatV3 => "icebergCompatV3",
+                TableFeature::IcebergNativeV4Preview => "icebergNativeV4-preview",
                 TableFeature::ClusteredTable => "clustering",
                 TableFeature::MaterializePartitionColumns => "materializePartitionColumns",
                 TableFeature::CatalogManaged => "catalogManaged",

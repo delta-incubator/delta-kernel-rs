@@ -7,7 +7,7 @@ use delta_kernel::arrow::ffi::to_ffi;
 use delta_kernel::engine::arrow_data::EngineDataArrowExt;
 use delta_kernel::table_changes::scan::TableChangesScan;
 use delta_kernel::table_changes::TableChanges;
-use delta_kernel::{DeltaResult, DeltaResultIteratorStatic, EngineData, Error, Version};
+use delta_kernel::{EngineData, KernelError, KernelResult, KernelResultIteratorStatic, Version};
 use delta_kernel_ffi_macros::handle_descriptor;
 use tracing::debug;
 use url::Url;
@@ -69,11 +69,11 @@ pub unsafe extern "C" fn table_changes_between_versions(
 }
 
 fn table_changes_impl(
-    url: DeltaResult<Url>,
+    url: KernelResult<Url>,
     extern_engine: &dyn ExternEngine,
     start_version: Version,
     end_version: Option<Version>,
-) -> DeltaResult<Handle<ExclusiveTableChanges>> {
+) -> KernelResult<Handle<ExclusiveTableChanges>> {
     let table_changes = TableChanges::try_new(
         url?,
         extern_engine.engine().as_ref(),
@@ -169,7 +169,7 @@ pub unsafe extern "C" fn table_changes_scan(
 fn table_changes_scan_impl(
     table_changes: TableChanges,
     predicate: Option<&mut EnginePredicate>,
-) -> DeltaResult<Handle<SharedTableChangesScan>> {
+) -> KernelResult<Handle<SharedTableChangesScan>> {
     let mut scan_builder = table_changes.into_scan_builder();
     if let Some(predicate) = predicate {
         let mut visitor_state = KernelExpressionVisitorState::default();
@@ -233,7 +233,7 @@ pub unsafe extern "C" fn table_changes_scan_physical_schema(
     table_changes_scan.physical_schema().clone().into()
 }
 
-type TableChangesData = Mutex<DeltaResultIteratorStatic<Box<dyn EngineData>>>;
+type TableChangesData = Mutex<KernelResultIteratorStatic<Box<dyn EngineData>>>;
 
 pub struct ScanTableChangesIterator {
     data: TableChangesData,
@@ -270,7 +270,7 @@ pub unsafe extern "C" fn table_changes_scan_execute(
 fn table_changes_scan_execute_impl(
     table_changes_scan: &TableChangesScan,
     engine: Arc<dyn ExternEngine>,
-) -> DeltaResult<Handle<SharedScanTableChangesIterator>> {
+) -> KernelResult<Handle<SharedScanTableChangesIterator>> {
     let table_changes_iter = table_changes_scan.execute(engine.engine().clone())?;
     let data = ScanTableChangesIterator {
         data: Mutex::new(Box::new(table_changes_iter)),
@@ -309,11 +309,13 @@ pub unsafe extern "C" fn scan_table_changes_next(
     scan_table_changes_next_impl(data).into_extern_result(&data.engine.as_ref())
 }
 
-fn scan_table_changes_next_impl(data: &ScanTableChangesIterator) -> DeltaResult<*mut ArrowFFIData> {
+fn scan_table_changes_next_impl(
+    data: &ScanTableChangesIterator,
+) -> KernelResult<*mut ArrowFFIData> {
     let mut data = data
         .data
         .lock()
-        .map_err(|_| Error::generic("poisoned scan table changes iterator mutex"))?;
+        .map_err(|_| KernelError::generic("poisoned scan table changes iterator mutex"))?;
 
     let Some(data) = data.next().transpose()? else {
         return Ok(std::ptr::null_mut());
@@ -344,8 +346,8 @@ mod tests {
     use delta_kernel::object_store::memory::InMemory;
     use delta_kernel::object_store::path::Path;
     use delta_kernel::object_store::{DynObjectStore, ObjectStoreExt as _};
-    use delta_kernel::schema::{DataType, StructField, StructType};
-    use delta_kernel::Engine;
+    use delta_kernel::schema::{schema_ref, StructType};
+    use delta_kernel::{Engine, KernelResult};
     use delta_kernel_default_engine::DefaultEngineBuilder;
     use delta_kernel_ffi::engine_data::get_engine_data;
     use itertools::Itertools;
@@ -413,7 +415,7 @@ mod tests {
         storage: &DynObjectStore,
         version: u64,
         file: String,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> KernelResult<()> {
         let metadata = storage.head(&Path::from(file.as_ref())).await?;
         add_commit(
             table_root,
@@ -435,7 +437,7 @@ mod tests {
         storage: &DynObjectStore,
         version: u64,
         file: String,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> KernelResult<()> {
         let metadata = storage.head(&Path::from(file.as_ref())).await?;
         add_commit(
             table_root,
@@ -456,14 +458,14 @@ mod tests {
         storage: &DynObjectStore,
         file: String,
         batch: &RecordBatch,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> KernelResult<()> {
         storage
             .put(&Path::from(file), record_batch_to_bytes(batch).into())
             .await?;
         Ok(())
     }
 
-    pub fn generate_batch_with_id(start_i: i32) -> Result<RecordBatch, ArrowError> {
+    pub fn generate_batch_with_id(start_i: i32) -> KernelResult<RecordBatch, ArrowError> {
         generate_batch(vec![
             (
                 "id",
@@ -474,15 +476,12 @@ mod tests {
     }
 
     pub fn get_batch_schema() -> Arc<StructType> {
-        Arc::new(
-            StructType::try_new(vec![
-                StructField::nullable("id", DataType::INTEGER),
-                StructField::nullable("val", DataType::STRING),
-                StructField::nullable("_change_type", DataType::STRING),
-                StructField::nullable("_commit_version", DataType::INTEGER),
-            ])
-            .unwrap(),
-        )
+        schema_ref! {
+            nullable "id": INTEGER,
+            nullable "val": STRING,
+            nullable "_change_type": STRING,
+            nullable "_commit_version": INTEGER,
+        }
     }
 
     fn check_columns_in_schema(fields: &[&str], schema: &StructType) -> bool {
@@ -492,7 +491,7 @@ mod tests {
     fn read_scan(
         scan: &TableChangesScan,
         engine: Arc<dyn Engine>,
-    ) -> DeltaResult<Vec<RecordBatch>> {
+    ) -> KernelResult<Vec<RecordBatch>> {
         let scan_results = scan.execute(engine)?;
         scan_results
             .map(EngineDataArrowExt::try_into_record_batch)
@@ -534,7 +533,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_table_changes_getters() -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_table_changes_getters() -> KernelResult<()> {
         let storage = Arc::new(InMemory::new());
 
         let batch = generate_batch_with_id(1)?;
@@ -622,7 +621,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_table_changes_scan() -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_table_changes_scan() -> KernelResult<()> {
         let storage = Arc::new(InMemory::new());
 
         let batch = generate_batch_with_id(1)?;
@@ -679,7 +678,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_table_changes_scan_iterator() -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_table_changes_scan_iterator() -> KernelResult<()> {
         let storage = Arc::new(InMemory::new());
 
         let batch = generate_batch_with_id(1)?;
@@ -760,7 +759,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_table_changes_between_commits() -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_table_changes_between_commits() -> KernelResult<()> {
         let storage = Arc::new(InMemory::new());
 
         let batch = generate_batch_with_id(1)?;
@@ -796,12 +795,12 @@ mod tests {
         let batches: Vec<RecordBatch> = batches.into_iter().flatten().collect();
         let filtered_batches: Vec<RecordBatch> = filter_batches(batches);
 
-        let table_schema = Arc::new(StructType::try_new(vec![
-            StructField::nullable("id", DataType::INTEGER),
-            StructField::nullable("val", DataType::STRING),
-            StructField::nullable("_change_type", DataType::STRING),
-            StructField::nullable("_commit_version", DataType::INTEGER),
-        ])?);
+        let table_schema = schema_ref! {
+            nullable "id": INTEGER,
+            nullable "val": STRING,
+            nullable "_change_type": STRING,
+            nullable "_commit_version": INTEGER,
+        };
         let expected = &ArrowEngineData::new(RecordBatch::try_new(
             Arc::new(table_schema.as_ref().try_into_arrow()?),
             vec![

@@ -18,9 +18,9 @@ pub trait Committer: Send {
     fn commit(
         &self,
         engine: &dyn Engine,
-        actions: DeltaResultIterator<'_, FilteredEngineData>,
+        actions: KernelResultIterator<'_, FilteredEngineData>,
         commit_metadata: CommitMetadata,
-    ) -> DeltaResult<CommitResponse>;
+    ) -> KernelResult<CommitResponse>;
 
     fn is_catalog_committer(&self) -> bool;
 
@@ -28,7 +28,7 @@ pub trait Committer: Send {
         &self,
         engine: &dyn Engine,
         publish_metadata: PublishMetadata,
-    ) -> DeltaResult<()>;
+    ) -> KernelResult<()>;
 }
 ```
 
@@ -57,8 +57,8 @@ Kernel constructs `CommitMetadata` and passes it to your `commit()` method. Key 
 
 ```rust,ignore
 impl CommitMetadata {
-    pub fn published_commit_path(&self) -> DeltaResult<Url>;
-    pub fn staged_commit_path(&self) -> DeltaResult<Url>;  // unique UUID each call
+    pub fn published_commit_path(&self) -> KernelResult<Url>;
+    pub fn staged_commit_path(&self) -> KernelResult<Url>;  // unique UUID each call
     pub fn version(&self) -> Version;
     pub fn commit_type(&self) -> CommitType;
     pub fn in_commit_timestamp(&self) -> i64;
@@ -118,13 +118,15 @@ Write the actions to a staged commit file in `_staged_commits/`:
 fn commit(
     &self,
     engine: &dyn Engine,
-    actions: DeltaResultIterator<'_, FilteredEngineData>,
+    actions: KernelResultIterator<'_, FilteredEngineData>,
     commit_metadata: CommitMetadata,
-) -> DeltaResult<CommitResponse> {
+) -> KernelResult<CommitResponse> {
     // Write actions to _staged_commits/<version>.<uuid>.json. `actions` is
     // already a Box<dyn Iterator<...>>, so pass it directly (do not re-box).
     let staged_path = commit_metadata.staged_commit_path()?;
-    engine.json_handler().write_json_file(&staged_path, actions, false)?;
+    let written_size = engine
+        .json_handler()
+        .write_json_file(&staged_path, actions, false)?;
     // ...
 ```
 
@@ -149,29 +151,25 @@ shape:
         commit_metadata.max_published_version(),
     )?;
 
-    // Return the staged file metadata on success. HEAD the file via
-    // engine.storage_handler().head() to get the real byte size, and use
+    // Return the staged file metadata on success and use
     // the in-commit timestamp as the logical commit time (not the filesystem
     // mtime, which reflects when the file was written rather than when the
     // commit took effect).
-    let staged_file = engine.storage_handler().head(&staged_path)?;
     Ok(CommitResponse::Committed {
         file_meta: FileMeta::new(
             staged_path,
             commit_metadata.in_commit_timestamp(),
-            staged_file.size,
+            written_size,
         ),
     })
 }
 ```
 
-Map your catalog's "another writer won this version" error to
-`CommitResponse::Conflict { version: commit_metadata.version() }` rather than
-propagating it as an `Err`. Return other errors as `Err(...)`. Kernel classifies
-only `Error::IOError` as retryable (surfaced as
-`CommitResult::RetryableTransaction`); return `IOError` for transient storage
-failures and other variants for everything else. Do not disguise non-I/O errors
-as `IOError` to opt into retry semantics.
+Map your catalog's "another writer won this version" error to `CommitResponse::Conflict { version:
+commit_metadata.version() }` rather than propagating it as an `Err`. Return other errors as
+`Err(...)`. Kernel classifies only `KernelError::IOError` as retryable (surfaced as
+`CommitResult::Retryable`); return `IOError` for transient storage failures and other variants for
+everything else. Do not disguise non-I/O errors as `IOError` to opt into retry semantics.
 
 ### Step 3: Mark as catalog committer
 
@@ -193,18 +191,18 @@ Kernel passes the commits to publish as a contiguous ascending batch via
   already copied some entries.
 
 ```rust,ignore
-use delta_kernel::Error;
+use delta_kernel::KernelError;
 
 fn publish(
     &self,
     engine: &dyn Engine,
     publish_metadata: PublishMetadata,
-) -> DeltaResult<()> {
+) -> KernelResult<()> {
     for catalog_commit in publish_metadata.commits_to_publish() {
         let src = catalog_commit.location();            // _staged_commits/<v>.<uuid>.json
         let dest = catalog_commit.published_location(); // _delta_log/<v>.json
         match engine.storage_handler().copy_atomic(src, dest) {
-            Ok(()) | Err(Error::FileAlreadyExists(_)) => (), // already published
+            Ok(()) | Err(KernelError::FileAlreadyExists(_)) => (), // already published
             Err(e) => return Err(e),
         }
     }
@@ -219,9 +217,9 @@ catalog's client type and fill in the ratification logic:
 
 ```rust,ignore
 // Imports elided for brevity. In addition to the ones below, you will need
-// Committer, CommitMetadata, CommitResponse, PublishMetadata, DeltaResult,
+// Committer, CommitMetadata, CommitResponse, PublishMetadata, KernelResult,
 // FilteredEngineData, and Engine from delta_kernel.
-use delta_kernel::{Error, FileMeta};
+use delta_kernel::{KernelError, FileMeta};
 
 pub struct MyCatalogCommitter {
     catalog_client: Arc<MyCatalogClient>,
@@ -232,12 +230,14 @@ impl Committer for MyCatalogCommitter {
     fn commit(
         &self,
         engine: &dyn Engine,
-        actions: DeltaResultIterator<'_, FilteredEngineData>,
+        actions: KernelResultIterator<'_, FilteredEngineData>,
         commit_metadata: CommitMetadata,
-    ) -> DeltaResult<CommitResponse> {
+    ) -> KernelResult<CommitResponse> {
         // 1. Stage: write actions to _staged_commits/
         let staged_path = commit_metadata.staged_commit_path()?;
-        engine.json_handler().write_json_file(&staged_path, actions, false)?;
+        let written_size = engine
+            .json_handler()
+            .write_json_file(&staged_path, actions, false)?;
 
         // 2. Ratify: register the staged commit with the catalog. ratify_commit
         //    is an imagined example API; your catalog's signature will differ.
@@ -249,15 +249,13 @@ impl Committer for MyCatalogCommitter {
             commit_metadata.max_published_version(),
         )?;
 
-        // 3. Return success. HEAD the staged file to get the real byte size,
-        //    and use the in-commit timestamp as the logical commit time (not
+        // 3. Return success and use the in-commit timestamp as the logical commit time (not
         //    the filesystem mtime).
-        let staged_file = engine.storage_handler().head(&staged_path)?;
         Ok(CommitResponse::Committed {
             file_meta: FileMeta::new(
                 staged_path,
                 commit_metadata.in_commit_timestamp(),
-                staged_file.size,
+                written_size,
             ),
         })
     }
@@ -270,12 +268,12 @@ impl Committer for MyCatalogCommitter {
         &self,
         engine: &dyn Engine,
         publish_metadata: PublishMetadata,
-    ) -> DeltaResult<()> {
+    ) -> KernelResult<()> {
         for catalog_commit in publish_metadata.commits_to_publish() {
             let src = catalog_commit.location();
             let dest = catalog_commit.published_location();
             match engine.storage_handler().copy_atomic(src, dest) {
-                Ok(()) | Err(Error::FileAlreadyExists(_)) => (),
+                Ok(()) | Err(KernelError::FileAlreadyExists(_)) => (),
                 Err(e) => return Err(e),
             }
         }

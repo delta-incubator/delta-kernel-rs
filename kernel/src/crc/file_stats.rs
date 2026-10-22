@@ -11,11 +11,14 @@
 
 use std::sync::LazyLock;
 
+use delta_kernel_derive::internal_api;
+
 use super::FileSizeHistogram;
 use crate::engine_data::{FilteredEngineData, GetData, TypedGetData as _};
+use crate::expressions::column_name;
 use crate::schema::{ColumnName, ColumnNamesAndTypes, DataType};
 use crate::utils::require;
-use crate::{DeltaResult, EngineData, Error, RowVisitor};
+use crate::{EngineData, KernelError, KernelResult, RowVisitor};
 
 /// File-level statistics for a table version: total file count, size, and histogram.
 ///
@@ -36,6 +39,39 @@ pub struct FileStats {
 }
 
 impl FileStats {
+    /// Creates complete file statistics after validating the aggregate values.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for negative file or byte totals, or negative histogram bins.
+    #[internal_api]
+    #[cfg_attr(not(feature = "internal-api"), allow(dead_code))]
+    pub(crate) fn try_new(
+        num_files: i64,
+        table_size_bytes: i64,
+        file_size_histogram: Option<FileSizeHistogram>,
+    ) -> KernelResult<Self> {
+        for (name, value) in [
+            ("numFiles", num_files),
+            ("tableSizeBytes", table_size_bytes),
+        ] {
+            if value < 0 {
+                return Err(KernelError::generic(format!(
+                    "CRC has invalid {name}: expected a non-negative value, got {value}"
+                )));
+            }
+        }
+        let file_size_histogram = file_size_histogram
+            .map(FileSizeHistogram::check_non_negative)
+            .transpose()
+            .map_err(|error| KernelError::generic(error.to_string()))?;
+        Ok(Self {
+            num_files,
+            table_size_bytes,
+            file_size_histogram,
+        })
+    }
+
     /// Returns the number of active [`Add`](crate::actions::Add) file actions in this table
     /// version.
     pub fn num_files(&self) -> i64 {
@@ -69,6 +105,7 @@ pub(crate) struct FileStatsDelta {
 
 const INCREMENTAL_SAFE_OPS: &[&str] = &[
     "WRITE",
+    "STREAMING UPDATE",
     "MERGE",
     "UPDATE",
     "DELETE",
@@ -121,7 +158,7 @@ impl FileStatsDelta {
         add_files_metadata: &[Box<dyn EngineData>],
         remove_files_metadata: &[FilteredEngineData],
         bin_boundaries: Option<&[i64]>,
-    ) -> DeltaResult<Self> {
+    ) -> KernelResult<Self> {
         let mut histogram = match bin_boundaries {
             Some(b) => FileSizeHistogram::create_empty_with_boundaries(b.to_vec())?,
             None => FileSizeHistogram::create_default(),
@@ -162,9 +199,10 @@ impl FileStatsDelta {
 
 /// Read a file `size` (a non-negative byte count stored as `i64`) as `u64`, erroring on a
 /// negative size (corrupt input).
-pub(crate) fn size_to_u64(size: i64) -> DeltaResult<u64> {
-    u64::try_from(size)
-        .map_err(|_| Error::internal_error(format!("File size must be non-negative, got {size}")))
+pub(crate) fn size_to_u64(size: i64) -> KernelResult<u64> {
+    u64::try_from(size).map_err(|_| {
+        KernelError::internal_error(format!("File size must be non-negative, got {size}"))
+    })
 }
 
 /// Visitor that extracts the `size` column from file metadata and updates a shared histogram.
@@ -212,14 +250,14 @@ impl<'sv, 'h> FileStatsVisitor<'sv, 'h> {
 impl RowVisitor for FileStatsVisitor<'_, '_> {
     fn selected_column_names_and_types(&self) -> (&'static [ColumnName], &'static [DataType]) {
         static NAMES_AND_TYPES: LazyLock<ColumnNamesAndTypes> =
-            LazyLock::new(|| (vec![ColumnName::new(["size"])], vec![DataType::LONG]).into());
+            LazyLock::new(|| (vec![column_name!("size")], vec![DataType::LONG]).into());
         NAMES_AND_TYPES.as_ref()
     }
 
-    fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<()> {
+    fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> KernelResult<()> {
         require!(
             getters.len() == 1,
-            Error::InternalError(format!(
+            KernelError::InternalError(format!(
                 "Wrong number of FileStatsVisitor getters: {}",
                 getters.len()
             ))

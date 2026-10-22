@@ -27,8 +27,8 @@ across the requested range.
 # use delta_kernel_default_engine::DefaultEngine;
 # use delta_kernel_default_engine::storage::store_from_url;
 # use delta_kernel::table_changes::TableChanges;
-# use delta_kernel::DeltaResult;
-# fn example() -> DeltaResult<()> {
+# use delta_kernel::KernelResult;
+# fn example() -> KernelResult<()> {
 # let url = delta_kernel::try_parse_uri("/tmp/my-table")?;
 # let store = store_from_url(&url)?;
 # let engine = DefaultEngine::builder(store).build();
@@ -47,8 +47,8 @@ table at the time of the call.
 # use delta_kernel_default_engine::DefaultEngine;
 # use delta_kernel_default_engine::storage::store_from_url;
 # use delta_kernel::table_changes::TableChanges;
-# use delta_kernel::DeltaResult;
-# fn example() -> DeltaResult<()> {
+# use delta_kernel::KernelResult;
+# fn example() -> KernelResult<()> {
 # let url = delta_kernel::try_parse_uri("/tmp/my-table")?;
 # let store = store_from_url(&url)?;
 # let engine = DefaultEngine::builder(store).build();
@@ -64,7 +64,7 @@ let table_changes = TableChanges::try_new(url, &engine, 0, None)?;
 - The table schema at the start and end versions must be identical.
 - No unsupported reader features (other than deletion vectors) are enabled.
 
-If any check fails, it returns an `Error`.
+If any check fails, it returns a `KernelError`.
 
 ## CDF metadata columns
 
@@ -92,10 +92,10 @@ project columns with `with_schema` and filter rows with `with_predicate`.
 # use std::sync::Arc;
 # use delta_kernel_default_engine::DefaultEngine;
 # use delta_kernel_default_engine::storage::store_from_url;
-# use delta_kernel::expressions::{column_expr, Scalar};
+# use delta_kernel::expressions::{col, lit};
 # use delta_kernel::table_changes::TableChanges;
-# use delta_kernel::{DeltaResult, Predicate};
-# fn example() -> DeltaResult<()> {
+# use delta_kernel::{KernelResult, Predicate};
+# fn example() -> KernelResult<()> {
 # let url = delta_kernel::try_parse_uri("/tmp/my-table")?;
 # let store = store_from_url(&url)?;
 # let engine = DefaultEngine::builder(store).build();
@@ -106,7 +106,7 @@ let schema = table_changes
     .project(&["name", "age", "_change_type", "_commit_version"])?;
 
 // 2. Build a predicate on table columns
-let predicate = Arc::new(Predicate::gt(column_expr!("age"), Scalar::from(25)));
+let predicate = Arc::new(Predicate::gt(col!("age"), lit(25)));
 
 // 3. Build and execute the scan
 let scan = table_changes
@@ -151,8 +151,8 @@ after building the scan), use `scan_builder` on an `Arc<TableChanges>` instead o
 # use delta_kernel_default_engine::DefaultEngine;
 # use delta_kernel_default_engine::storage::store_from_url;
 # use delta_kernel::table_changes::TableChanges;
-# use delta_kernel::DeltaResult;
-# fn example() -> DeltaResult<()> {
+# use delta_kernel::KernelResult;
+# fn example() -> KernelResult<()> {
 # let url = delta_kernel::try_parse_uri("/tmp/my-table")?;
 # let store = store_from_url(&url)?;
 # let engine = DefaultEngine::builder(store).build();

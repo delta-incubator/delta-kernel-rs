@@ -16,12 +16,12 @@
 use std::sync::{Arc, LazyLock};
 
 use crate::actions::{ADD_NAME, STATS_PARSED as STATS_PARSED_FIELD};
-use crate::expressions::{col, Expression, ExpressionRef, UnaryExpressionOp};
+use crate::expressions::{col, Expression, ExpressionRef, MapToStructOptions, UnaryExpressionOp};
 use crate::schema::{DataType, SchemaRef, SchemaStructPatchBuilder, StructField, StructType};
 use crate::struct_patch::ProjectionStructPatchBuilder;
 use crate::table_properties::TableProperties;
 use crate::utils::FoldWithOption as _;
-use crate::{DeltaResult, Error};
+use crate::{KernelError, KernelResult};
 
 pub(crate) const STATS_FIELD: &str = "stats";
 pub(crate) const PARTITION_VALUES_FIELD: &str = "partitionValues";
@@ -84,7 +84,7 @@ pub(crate) fn build_checkpoint_transform(
     read_schema: &StructType,
     stats_schema: &SchemaRef,
     partition_schema: Option<&SchemaRef>,
-) -> DeltaResult<(SchemaRef, ExpressionRef)> {
+) -> KernelResult<(SchemaRef, ExpressionRef)> {
     let mut patch_builder = ProjectionStructPatchBuilder::new(read_schema);
 
     // Handle stats field
@@ -147,16 +147,16 @@ pub(crate) fn build_checkpoint_read_schema(
     base_schema: &StructType,
     stats_schema: &StructType,
     partition_schema: Option<&StructType>,
-) -> DeltaResult<SchemaRef> {
+) -> KernelResult<SchemaRef> {
     transform_add_schema(base_schema, |add_struct| {
         // Validate fields aren't already present
         if add_struct.field(STATS_PARSED_FIELD).is_some() {
-            return Err(Error::generic(
+            return Err(KernelError::generic(
                 "stats_parsed field already exists in Add schema",
             ));
         }
         if partition_schema.is_some() && add_struct.field(PARTITION_VALUES_PARSED_FIELD).is_some() {
-            return Err(Error::generic(
+            return Err(KernelError::generic(
                 "partitionValues_parsed field already exists in Add schema",
             ));
         }
@@ -207,11 +207,19 @@ fn build_stats_parsed_expr(stats_schema: &SchemaRef) -> ExpressionRef {
 /// JSON null on write) reconstructs into the checkpoint identically to how the scan reconstructs it
 /// from a commit.
 ///
+/// Checkpoint construction has no reader timezone. It preserves a native value read from an earlier
+/// checkpoint; for a JSON commit, the fallback parses the raw string map as UTC. The resulting
+/// native value is written to the checkpoint and read back without a reader-timezone
+/// transformation, while the raw `partitionValues` map remains unchanged.
+///
 /// Column paths are relative to the full batch, not the nested Add struct.
 fn build_partition_values_parsed_expr() -> ExpressionRef {
     Arc::new(Expression::coalesce([
         col!(ADD_NAME, PARTITION_VALUES_PARSED_FIELD),
-        Expression::map_to_struct(col!(ADD_NAME, PARTITION_VALUES_FIELD)),
+        Expression::map_to_struct(
+            col!(ADD_NAME, PARTITION_VALUES_FIELD),
+            MapToStructOptions::default(),
+        ),
     ]))
 }
 
@@ -241,15 +249,15 @@ static STATS_JSON_EXPR: LazyLock<ExpressionRef> = LazyLock::new(|| {
 /// - The `add` field is not a struct type
 fn transform_add_schema(
     base_schema: &StructType,
-    transform_fn: impl FnOnce(&StructType) -> DeltaResult<StructType>,
-) -> DeltaResult<SchemaRef> {
+    transform_fn: impl FnOnce(&StructType) -> KernelResult<StructType>,
+) -> KernelResult<SchemaRef> {
     // Find and validate the add field
     let add_field = base_schema
         .field(ADD_NAME)
-        .ok_or_else(|| Error::generic("Expected 'add' field in checkpoint schema"))?;
+        .ok_or_else(|| KernelError::generic("Expected 'add' field in checkpoint schema"))?;
 
     let DataType::Struct(add_struct) = &add_field.data_type else {
-        return Err(Error::generic(format!(
+        return Err(KernelError::generic(format!(
             "Expected 'add' field to be a struct type, got {:?}",
             add_field.data_type
         )));
@@ -272,7 +280,7 @@ mod tests {
     use super::*;
     use crate::actions::NUM_RECORDS;
     use crate::expressions::ExpressionStructPatch;
-    use crate::schema::MapType;
+    use crate::schema::{schema, schema_ref, MapType};
 
     #[test]
     fn test_config_defaults() {
@@ -353,10 +361,9 @@ mod tests {
         stats_schema: &SchemaRef,
         partition_schema: Option<&SchemaRef>,
     ) -> (SchemaRef, ExpressionRef) {
-        let base_schema = StructType::new_unchecked([StructField::nullable(
-            ADD_NAME,
-            add_schema(partition_schema.is_some()),
-        )]);
+        let base_schema = schema! {
+            nullable ADD_NAME: (add_schema(partition_schema.is_some())),
+        };
         let read_schema = build_checkpoint_read_schema(
             &base_schema,
             stats_schema.as_ref(),
@@ -368,15 +375,17 @@ mod tests {
     }
 
     fn add_schema(with_partition_schema: bool) -> StructType {
-        let fields = [
-            Some(StructField::not_null("path", DataType::STRING)),
-            with_partition_schema.then(|| {
-                let partition_values = MapType::new(DataType::STRING, DataType::STRING, true);
-                StructField::nullable(PARTITION_VALUES_FIELD, partition_values)
-            }),
-            Some(StructField::nullable(STATS_FIELD, DataType::STRING)),
-        ];
-        StructType::new_unchecked(fields.into_iter().flatten())
+        let partition_values = with_partition_schema.then(|| {
+            StructField::nullable(
+                PARTITION_VALUES_FIELD,
+                MapType::new(DataType::STRING, DataType::STRING, true),
+            )
+        });
+        schema! {
+            not_null "path": STRING,
+            ..(partition_values),
+            nullable STATS_FIELD: STRING,
+        }
     }
 
     #[test]
@@ -387,7 +396,7 @@ mod tests {
             write_stats_as_json: true,
             write_stats_as_struct: false,
         };
-        let stats_schema = Arc::new(StructType::new_unchecked([]));
+        let stats_schema = schema_ref! {};
         let (_, transform_expr) = build_checkpoint_transform(&config, &stats_schema, None);
 
         let (_, inner) = extract_patches(&transform_expr);
@@ -411,11 +420,11 @@ mod tests {
             write_stats_as_json: true,
             write_stats_as_struct: true,
         };
-        let stats_schema = Arc::new(StructType::new_unchecked([]));
-        let pv_schema = Arc::new(StructType::new_unchecked([
-            StructField::nullable("year", DataType::INTEGER),
-            StructField::nullable("month", DataType::INTEGER),
-        ]));
+        let stats_schema = schema_ref! {};
+        let pv_schema = schema_ref! {
+            nullable "year": INTEGER,
+            nullable "month": INTEGER,
+        };
         let (_, transform_expr) =
             build_checkpoint_transform(&config, &stats_schema, Some(&pv_schema));
 
@@ -479,13 +488,14 @@ mod tests {
             write_stats_as_json,
             write_stats_as_struct,
         };
-        let num_records = StructField::nullable(NUM_RECORDS, DataType::LONG);
-        let stats_schema = Arc::new(StructType::new_unchecked([num_records]));
+        let stats_schema = schema_ref! {
+            nullable NUM_RECORDS: LONG,
+        };
         let pv_schema = with_partition_schema.then(|| {
-            Arc::new(StructType::new_unchecked([
-                StructField::nullable("year", DataType::INTEGER),
-                StructField::nullable("month", DataType::INTEGER),
-            ]))
+            schema_ref! {
+                nullable "year": INTEGER,
+                nullable "month": INTEGER,
+            }
         });
 
         let (output_schema, _) =

@@ -7,13 +7,13 @@
 //!  # use delta_kernel::schema::StructField;
 //!  # use delta_kernel::schema::DataType;
 //!  let schema = StructType::try_new([
-//!     StructField::new("id", DataType::LONG, false),
-//!     StructField::new("value", DataType::STRING, true),
+//!     StructField::not_null("id", DataType::LONG),
+//!     StructField::nullable("value", DataType::STRING),
 //!  ])?;
 //!  let read_schema = StructType::try_new([
-//!     StructField::new("id", DataType::LONG, true),
-//!     StructField::new("value", DataType::STRING, true),
-//!     StructField::new("year", DataType::INTEGER, true),
+//!     StructField::nullable("id", DataType::LONG),
+//!     StructField::nullable("value", DataType::STRING),
+//!     StructField::nullable("year", DataType::INTEGER),
 //!  ])?;
 //!  // Schemas are compatible since the `read_schema` adds a nullable column `year`
 //!  assert!(schema.can_read_as(&read_schema).is_ok());
@@ -50,17 +50,29 @@ pub(crate) enum Error {
 /// A [`std::result::Result`] that has the schema comparison [`Error`] as the error variant.
 pub(crate) type SchemaComparisonResult = Result<(), Error>;
 
-/// Represents a schema compatibility check for the type. If `self` can be read as `read_type`,
-/// this function returns `Ok(())`. Otherwise, this function returns `Err`.
+/// Checks whether data described by a source schema can be read using a target schema.
+///
+/// Use this directional check when nullable additions or relaxed nullability are acceptable.
+/// Use ordinary equality when the complete logical schemas, including UDT annotations, must match.
+/// These methods validate compatibility; they do not convert data or modify either schema.
 pub(crate) trait SchemaComparison {
+    /// Returns `Ok(())` when `self` can be read as `read_type`, allowing supported type widening.
+    /// Returns a comparison error for incompatible fields or types. UDTs require exact equality
+    /// of both the complete physical type and annotations.
     fn can_read_as(&self, read_type: &Self) -> SchemaComparisonResult {
         self.can_read_as_internal(read_type, true)
     }
 
+    /// Returns `Ok(())` when `self` can be read as `read_type` without type widening.
+    /// Nullable additions and relaxed nullability are allowed. UDTs require exact equality,
+    /// including annotations; incompatible schemas return an error.
     fn can_read_as_without_type_widening(&self, read_type: &Self) -> SchemaComparisonResult {
         self.can_read_as_internal(read_type, false)
     }
 
+    /// Implements recursive compatibility with the caller's `allow_type_widening` policy.
+    /// Callers use the wrapper methods to select that policy; implementations propagate it to
+    /// nested comparisons and return an error when `self` cannot be read as `read_type`.
     fn can_read_as_internal(
         &self,
         read_type: &Self,
@@ -166,6 +178,9 @@ impl SchemaComparison for DataType {
     ///     3. For array data types, the nullability may not be tightened in the `read_type`. See
     ///        [`Nullable::can_read_as`]
     ///
+    /// UDTs require identical complete physical types and annotations, even when
+    /// `allow_type_widening` is enabled.
+    ///
     /// [`PrimitiveType::can_widen_to`]: super::PrimitiveType::can_widen_to
     fn can_read_as_internal(
         &self,
@@ -197,7 +212,7 @@ impl SchemaComparison for DataType {
                     .value_type()
                     .can_read_as_internal(read_map.value_type(), allow_type_widening)?;
             }
-            // Exact match
+            // Exact match, including UDT annotations.
             (a, b) if a == b => {}
             // Type widening: smaller primitive types can be read as larger ones
             (Self::Primitive(a), Self::Primitive(b))
@@ -215,7 +230,7 @@ mod tests {
 
     use crate::schema::compare::{Error, SchemaComparison, SchemaComparisonResult};
     use crate::schema::{
-        schema, ArrayType, DataType, MapType, PrimitiveType, StructField, StructType,
+        schema, ArrayType, CheckpointFieldKind, DataType, MapType, PrimitiveType, StructField,
     };
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -298,16 +313,16 @@ mod tests {
     #[test]
     fn different_field_name_case_fails() {
         // names differing only in case are not the same
-        let existing_schema = StructType::new_unchecked([
-            StructField::new("id", DataType::LONG, false),
-            StructField::new("name", DataType::STRING, false),
-            StructField::new("age", DataType::INTEGER, true),
-        ]);
-        let read_schema = StructType::new_unchecked([
-            StructField::new("Id", DataType::LONG, false),
-            StructField::new("name", DataType::STRING, false),
-            StructField::new("age", DataType::INTEGER, true),
-        ]);
+        let existing_schema = schema! {
+            not_null "id": LONG,
+            not_null "name": STRING,
+            nullable "age": INTEGER,
+        };
+        let read_schema = schema! {
+            not_null "Id": LONG,
+            not_null "name": STRING,
+            nullable "age": INTEGER,
+        };
         assert!(matches!(
             existing_schema.can_read_as(&read_schema),
             Err(Error::FieldNameMismatch)
@@ -315,16 +330,16 @@ mod tests {
     }
     #[test]
     fn different_type_fails() {
-        let existing_schema = StructType::new_unchecked([
-            StructField::new("id", DataType::LONG, false),
-            StructField::new("name", DataType::STRING, false),
-            StructField::new("age", DataType::INTEGER, true),
-        ]);
-        let read_schema = StructType::new_unchecked([
-            StructField::new("id", DataType::INTEGER, false),
-            StructField::new("name", DataType::STRING, false),
-            StructField::new("age", DataType::INTEGER, true),
-        ]);
+        let existing_schema = schema! {
+            not_null "id": LONG,
+            not_null "name": STRING,
+            nullable "age": INTEGER,
+        };
+        let read_schema = schema! {
+            not_null "id": INTEGER,
+            not_null "name": STRING,
+            nullable "age": INTEGER,
+        };
         assert!(matches!(
             existing_schema.can_read_as(&read_schema),
             Err(Error::TypeMismatch)
@@ -332,30 +347,30 @@ mod tests {
     }
     #[test]
     fn set_nullable_to_true() {
-        let existing_schema = StructType::new_unchecked([
-            StructField::new("id", DataType::LONG, false),
-            StructField::new("name", DataType::STRING, false),
-            StructField::new("age", DataType::INTEGER, true),
-        ]);
-        let read_schema = StructType::new_unchecked([
-            StructField::new("id", DataType::LONG, false),
-            StructField::new("name", DataType::STRING, true),
-            StructField::new("age", DataType::INTEGER, true),
-        ]);
+        let existing_schema = schema! {
+            not_null "id": LONG,
+            not_null "name": STRING,
+            nullable "age": INTEGER,
+        };
+        let read_schema = schema! {
+            not_null "id": LONG,
+            nullable "name": STRING,
+            nullable "age": INTEGER,
+        };
         assert!(existing_schema.can_read_as(&read_schema).is_ok());
     }
     #[test]
     fn set_nullable_to_false_fails() {
-        let existing_schema = StructType::new_unchecked([
-            StructField::new("id", DataType::LONG, false),
-            StructField::new("name", DataType::STRING, false),
-            StructField::new("age", DataType::INTEGER, true),
-        ]);
-        let read_schema = StructType::new_unchecked([
-            StructField::new("id", DataType::LONG, false),
-            StructField::new("name", DataType::STRING, false),
-            StructField::new("age", DataType::INTEGER, false),
-        ]);
+        let existing_schema = schema! {
+            not_null "id": LONG,
+            not_null "name": STRING,
+            nullable "age": INTEGER,
+        };
+        let read_schema = schema! {
+            not_null "id": LONG,
+            not_null "name": STRING,
+            not_null "age": INTEGER,
+        };
         assert!(matches!(
             existing_schema.can_read_as(&read_schema),
             Err(Error::NullabilityTightening)
@@ -363,18 +378,18 @@ mod tests {
     }
     #[test]
     fn differ_by_nullable_column() {
-        let a = StructType::new_unchecked([
-            StructField::new("id", DataType::LONG, false),
-            StructField::new("name", DataType::STRING, false),
-            StructField::new("age", DataType::INTEGER, true),
-        ]);
+        let a = schema! {
+            not_null "id": LONG,
+            not_null "name": STRING,
+            nullable "age": INTEGER,
+        };
 
-        let b = StructType::new_unchecked([
-            StructField::new("id", DataType::LONG, false),
-            StructField::new("name", DataType::STRING, false),
-            StructField::new("age", DataType::INTEGER, true),
-            StructField::new("location", DataType::STRING, true),
-        ]);
+        let b = schema! {
+            not_null "id": LONG,
+            not_null "name": STRING,
+            nullable "age": INTEGER,
+            nullable "location": STRING,
+        };
 
         // Read `a` as `b`. `b` adds a new nullable column. This is compatible with `a`'s schema.
         assert!(a.can_read_as(&b).is_ok());
@@ -387,18 +402,18 @@ mod tests {
         #[values(ComparisonMode::AllowTypeWidening, ComparisonMode::ForbidTypeWidening)]
         mode: ComparisonMode,
     ) {
-        let a = StructType::new_unchecked([
-            StructField::new("id", DataType::LONG, false),
-            StructField::new("name", DataType::STRING, false),
-            StructField::new("age", DataType::INTEGER, true),
-        ]);
+        let a = schema! {
+            not_null "id": LONG,
+            not_null "name": STRING,
+            nullable "age": INTEGER,
+        };
 
-        let b = StructType::new_unchecked([
-            StructField::new("id", DataType::LONG, false),
-            StructField::new("name", DataType::STRING, false),
-            StructField::new("age", DataType::INTEGER, true),
-            StructField::new("location", DataType::STRING, false),
-        ]);
+        let b = schema! {
+            not_null "id": LONG,
+            not_null "name": STRING,
+            nullable "age": INTEGER,
+            not_null "location": STRING,
+        };
 
         // Read `a` as `b`. `b` has an extra non-nullable column.
         assert!(matches!(
@@ -415,19 +430,19 @@ mod tests {
 
     #[test]
     fn duplicate_field_modulo_case() {
-        let existing_schema = StructType::new_unchecked([
-            StructField::new("id", DataType::LONG, false),
-            StructField::new("Id", DataType::LONG, false),
-            StructField::new("name", DataType::STRING, false),
-            StructField::new("age", DataType::INTEGER, true),
-        ]);
+        let existing_schema = schema! {
+            (StructField::not_null("id", DataType::LONG)),
+            (StructField::not_null("Id", DataType::LONG)),
+            not_null "name": STRING,
+            nullable "age": INTEGER,
+        };
 
-        let read_schema = StructType::new_unchecked([
-            StructField::new("id", DataType::LONG, false),
-            StructField::new("Id", DataType::LONG, false),
-            StructField::new("name", DataType::STRING, false),
-            StructField::new("age", DataType::INTEGER, true),
-        ]);
+        let read_schema = schema! {
+            (StructField::not_null("id", DataType::LONG)),
+            (StructField::not_null("Id", DataType::LONG)),
+            not_null "name": STRING,
+            nullable "age": INTEGER,
+        };
         assert!(matches!(
             existing_schema.can_read_as(&read_schema),
             Err(Error::InvalidSchema)
@@ -506,9 +521,11 @@ mod tests {
         #[case] source: PrimitiveType,
         #[case] target: PrimitiveType,
         #[case] expected: bool,
+        #[values(CheckpointFieldKind::Stats, CheckpointFieldKind::PartitionValues)]
+        kind: CheckpointFieldKind,
     ) {
         assert_eq!(
-            source.is_stats_type_compatible_with(&target),
+            source.is_stats_type_compatible_with(&target, kind),
             expected,
             "{source:?} -> {target:?} should be {expected}"
         );
@@ -519,14 +536,14 @@ mod tests {
         #[values(ComparisonMode::AllowTypeWidening, ComparisonMode::ForbidTypeWidening)]
         mode: ComparisonMode,
     ) {
-        let source = StructType::new_unchecked([
-            StructField::new("id", DataType::INTEGER, false),
-            StructField::new("value", DataType::FLOAT, true),
-        ]);
-        let target = StructType::new_unchecked([
-            StructField::new("id", DataType::LONG, false),
-            StructField::new("value", DataType::DOUBLE, true),
-        ]);
+        let source = schema! {
+            not_null "id": INTEGER,
+            nullable "value": FLOAT,
+        };
+        let target = schema! {
+            not_null "id": LONG,
+            nullable "value": DOUBLE,
+        };
 
         assert_eq!(
             mode.can_read_as(&source, &target).is_ok(),

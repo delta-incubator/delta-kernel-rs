@@ -25,7 +25,7 @@ use crate::table_configuration::TableConfiguration;
 use crate::table_features::{format_features, Operation, TableFeature};
 use crate::utils::require;
 use crate::{
-    DeltaResult, Engine, EngineData, Error, ExpressionEvaluator, FileDataReadResultIterator,
+    Engine, EngineData, ExpressionEvaluator, FileDataReadResultIterator, KernelError, KernelResult,
     PredicateRef, RowVisitor,
 };
 
@@ -58,7 +58,7 @@ pub(crate) fn table_changes_action_iter(
     commit_files: impl IntoIterator<Item = ParsedLogPath>,
     table_schema: SchemaRef,
     physical_predicate: Option<(PredicateRef, SchemaRef)>,
-) -> DeltaResult<impl Iterator<Item = DeltaResult<TableChangesScanMetadata>>> {
+) -> KernelResult<impl Iterator<Item = KernelResult<TableChangesScanMetadata>>> {
     // The data-reading (`execute`) path always uses change-data-file semantics.
     table_changes_action_iter_with_mode(
         engine,
@@ -82,7 +82,7 @@ pub(crate) fn table_changes_action_iter_with_mode(
     table_schema: SchemaRef,
     physical_predicate: Option<(PredicateRef, SchemaRef)>,
     mode: CdfMode,
-) -> DeltaResult<impl Iterator<Item = DeltaResult<TableChangesScanMetadata>>> {
+) -> KernelResult<impl Iterator<Item = KernelResult<TableChangesScanMetadata>>> {
     let prepare_schema = replay_schema(PreparePhaseVisitor::schema())?;
     let scan_schema = replay_schema(CommitScanProcessor::schema())?;
 
@@ -146,7 +146,7 @@ pub(crate) fn table_changes_action_iter_with_mode(
     }))
 }
 
-fn replay_schema(schema: SchemaRef) -> DeltaResult<SchemaRef> {
+fn replay_schema(schema: SchemaRef) -> KernelResult<SchemaRef> {
     schema
         .add_metadata_column(FILE_PATH_COLUMN_NAME, MetadataColumnSpec::FilePath)
         .map(Arc::new)
@@ -166,7 +166,7 @@ struct TableChangesReplay {
 }
 
 impl TableChangesReplay {
-    fn try_next(&mut self) -> DeltaResult<Option<TableChangesScanMetadata>> {
+    fn try_next(&mut self) -> KernelResult<Option<TableChangesScanMetadata>> {
         loop {
             if let Some((index, processor)) = &self.current_scan {
                 if let Some(batch) = self.scan_reader.next_batch_for_commit(*index)? {
@@ -212,7 +212,7 @@ impl CommitBatchReader {
     fn batches_for_commit(
         &mut self,
         commit_file_index: usize,
-    ) -> impl Iterator<Item = DeltaResult<Box<dyn EngineData>>> + '_ {
+    ) -> impl Iterator<Item = KernelResult<Box<dyn EngineData>>> + '_ {
         let mut finished = false;
         std::iter::from_fn(move || {
             if finished {
@@ -227,7 +227,7 @@ impl CommitBatchReader {
     fn next_batch_for_commit(
         &mut self,
         commit_file_index: usize,
-    ) -> DeltaResult<Option<Box<dyn EngineData>>> {
+    ) -> KernelResult<Option<Box<dyn EngineData>>> {
         let (batch_file_index, batch) = match self.pending_batch.take() {
             Some(batch) => batch,
             None => loop {
@@ -242,10 +242,12 @@ impl CommitBatchReader {
                 let mut visitor = FilePathVisitor::default();
                 visitor.visit_rows_of(batch.as_ref())?;
                 let path = visitor.file_path.ok_or_else(|| {
-                    Error::internal_error("table_changes received a JSON batch without a file path")
+                    KernelError::internal_error(
+                        "table_changes received a JSON batch without a file path",
+                    )
                 })?;
                 let batch_file_index = *self.file_indices.get(&path).ok_or_else(|| {
-                    Error::internal_error(format!(
+                    KernelError::internal_error(format!(
                         "table_changes received a JSON batch for unrequested commit file {path}"
                     ))
                 })?;
@@ -253,7 +255,7 @@ impl CommitBatchReader {
             },
         };
         match batch_file_index.cmp(&commit_file_index) {
-            Ordering::Less => Err(Error::internal_error(format!(
+            Ordering::Less => Err(KernelError::internal_error(format!(
                 "table_changes received an out-of-order JSON batch for commit file index \
                  {batch_file_index}"
             ))),
@@ -281,10 +283,10 @@ impl RowVisitor for FilePathVisitor {
         NAMES_AND_TYPES.as_ref()
     }
 
-    fn visit<'b>(&mut self, row_count: usize, getters: &[&'b dyn GetData<'b>]) -> DeltaResult<()> {
+    fn visit<'b>(&mut self, row_count: usize, getters: &[&'b dyn GetData<'b>]) -> KernelResult<()> {
         require!(
             getters.len() == 1,
-            Error::InternalError(format!(
+            KernelError::InternalError(format!(
                 "Wrong number of FilePathVisitor getters: {}",
                 getters.len()
             ))
@@ -366,10 +368,10 @@ impl LogReplayScanner {
     fn try_new(
         table_configuration: &mut TableConfiguration,
         commit_file: ParsedLogPath,
-        action_batches: impl Iterator<Item = DeltaResult<Box<dyn EngineData>>>,
+        action_batches: impl Iterator<Item = KernelResult<Box<dyn EngineData>>>,
         table_schema: &SchemaRef,
         mode: CdfMode,
-    ) -> DeltaResult<Self> {
+    ) -> KernelResult<Self> {
         let mut in_commit_timestamp_opt = None;
         let mut remove_dvs = HashMap::default();
         let mut add_paths = HashSet::default();
@@ -400,7 +402,7 @@ impl LogReplayScanner {
                 // Compatibility is evaluated against the end version's logical schema.
                 require!(
                     mode.schemas_compatible(&schema, table_schema.as_ref()),
-                    Error::change_data_feed_incompatible_schema_at_version(
+                    KernelError::change_data_feed_incompatible_schema_at_version(
                         table_schema,
                         &schema,
                         commit_file.version
@@ -463,7 +465,7 @@ impl LogReplayScanner {
         let timestamp = if table_configuration.is_feature_enabled(&TableFeature::InCommitTimestamp)
         {
             let Some(in_commit_timestamp) = in_commit_timestamp_opt else {
-                return Err(Error::generic(format!(
+                return Err(KernelError::generic(format!(
                     "In-commit timestamp is enabled but not found in commit at version {}",
                     commit_file.version
                 )));
@@ -495,7 +497,7 @@ impl LogReplayScanner {
         self,
         engine: &dyn Engine,
         input_schema: SchemaRef,
-    ) -> DeltaResult<CommitScanProcessor> {
+    ) -> KernelResult<CommitScanProcessor> {
         let Self {
             has_cdc_action,
             remove_dvs,
@@ -507,7 +509,7 @@ impl LogReplayScanner {
         let commit_version = commit_file
             .version
             .try_into()
-            .map_err(|_| Error::generic("Failed to convert commit version to i64"))?;
+            .map_err(|_| KernelError::generic("Failed to convert commit version to i64"))?;
         let evaluator = engine.evaluation_handler().new_expression_evaluator(
             input_schema,
             Arc::new(cdf_scan_row_expression(timestamp, commit_version)),
@@ -541,7 +543,7 @@ impl CommitScanProcessor {
         &self,
         batch: &dyn EngineData,
         filter: Option<&DataSkippingFilter>,
-    ) -> DeltaResult<TableChangesScanMetadata> {
+    ) -> KernelResult<TableChangesScanMetadata> {
         let selection_vector = match filter {
             Some(filter) => filter.apply(batch)?,
             None => vec![true; batch.len()],
@@ -611,10 +613,10 @@ impl RowVisitor for PreparePhaseVisitor<'_> {
         NAMES_AND_TYPES.as_ref()
     }
 
-    fn visit<'b>(&mut self, row_count: usize, getters: &[&'b dyn GetData<'b>]) -> DeltaResult<()> {
+    fn visit<'b>(&mut self, row_count: usize, getters: &[&'b dyn GetData<'b>]) -> KernelResult<()> {
         require!(
             getters.len() == 11,
-            Error::InternalError(format!(
+            KernelError::InternalError(format!(
                 "Wrong number of PreparePhaseVisitor getters: {}",
                 getters.len()
             ))
@@ -682,10 +684,10 @@ impl RowVisitor for FileActionSelectionVisitor<'_> {
         NAMES_AND_TYPES.as_ref()
     }
 
-    fn visit<'b>(&mut self, row_count: usize, getters: &[&'b dyn GetData<'b>]) -> DeltaResult<()> {
+    fn visit<'b>(&mut self, row_count: usize, getters: &[&'b dyn GetData<'b>]) -> KernelResult<()> {
         require!(
             getters.len() == 5,
-            Error::InternalError(format!(
+            KernelError::InternalError(format!(
                 "Wrong number of FileActionSelectionVisitor getters: {}",
                 getters.len()
             ))

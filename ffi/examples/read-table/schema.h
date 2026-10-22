@@ -31,20 +31,42 @@
 
 typedef struct SchemaItemList SchemaItemList;
 
+/** One UDT annotation entry owning its key and optional value as C strings. */
+typedef struct
+{
+  char* key;
+  // NULL represents JSON null; an allocated empty string represents an empty value.
+  char* value;
+} UdtAnnotationEntry;
+
+/** Owned annotation entries retained by the C schema model. */
+typedef struct
+{
+  size_t len;
+  UdtAnnotationEntry* entries;
+} UdtAnnotation;
+
+/** One field in the printable C schema model. */
 typedef struct
 {
   char* name;
   char* type;
   bool is_nullable;
   uintptr_t children;
+  char* column_mapping_id;
+  char* column_mapping_physical_name;
+  // Empty for non-UDT fields.
+  UdtAnnotation udt_annotation;
 } SchemaItem;
 
+/** Ordered fields allocated for one struct, array, map, or UDT physical type. */
 typedef struct SchemaItemList
 {
   uint32_t len;
   SchemaItem* list;
 } SchemaItemList;
 
+/** Owns all field lists produced during one schema visit. */
 typedef struct
 {
   int list_count;
@@ -52,6 +74,7 @@ typedef struct
   SharedExternEngine* engine;
 } SchemaBuilder;
 
+/** Root list and backing allocation for a printable schema. */
 typedef struct
 {
   uintptr_t list_id;
@@ -66,8 +89,18 @@ SchemaItem* add_to_list(SchemaItemList* list, char* name, char* type, bool is_nu
   list->list[idx].name = name;
   list->list[idx].type = type;
   list->list[idx].is_nullable = is_nullable;
+  list->list[idx].column_mapping_id = NULL;
+  list->list[idx].column_mapping_physical_name = NULL;
+  list->list[idx].udt_annotation = (UdtAnnotation){ 0, NULL };
   list->len++;
   return &list->list[idx];
+}
+
+bool field_type_needs_free(char* type)
+{
+  return !strncmp(type, "decimal", 7) ||
+         !strncmp(type, "geometry", 8) ||
+         !strncmp(type, "geography", 9);
 }
 
 // print out all items in a list, recursing into any children they may have
@@ -87,6 +120,9 @@ void print_list(SchemaBuilder* builder, uintptr_t list_id, int indent, int paren
     SchemaItem* item = &list->list[i];
     char* prefix = is_last ? "└" : "├";
     printf("%s─ %s: %s", prefix, item->name, item->type);
+    if (item->column_mapping_id) {
+      printf(" (column mapping id: %s)", item->column_mapping_id);
+    }
     if (strcmp(item->type, "array") == 0) {
       SchemaItemList child_list = builder->lists[item->children];
       if (child_list.len != 1) {
@@ -110,29 +146,39 @@ void print_list(SchemaBuilder* builder, uintptr_t list_id, int indent, int paren
   }
 }
 
-void print_physical_name(const char *name, const CStringMap* metadata, SharedExternEngine* engine)
+// Read a column-mapping value out of a field's typed metadata. Returns a freshly allocated string
+// owned by the caller, or NULL when the key is absent or has the wrong kind.
+char* read_column_mapping_value(
+  const CMetadataMap* metadata,
+  SharedExternEngine* engine,
+  const char* key_str,
+  CMetadataValueKind expected_kind)
 {
-#ifdef VERBOSE
-  char* key_str = "delta.columnMapping.physicalName";
   KernelStringSlice key = { key_str, strlen(key_str) };
-  ExternResultNullableCvoid res = get_from_string_map(metadata, key, allocate_string, engine);
+  CMetadataValueKind kind;
+  ExternResultNullableCvoid res = get_from_metadata_map(metadata, key, &kind, allocate_string, engine);
   if (res.tag != OkNullableCvoid) {
-    printf("Failed to get physical name\n");
     free_error((Error*)res.err);
-    return;
+    return NULL;
   }
   char* value = res.ok;
-  if (value) {
-    printf("Physical name of %s is %s\n", name, value);
+  if (value && kind != expected_kind) {
+    printf("Unexpected metadata kind %d for %s\n", (int)kind, key_str);
     free(value);
-  } else {
-    printf("No physical name\n");
+    return NULL;
   }
-#else
-  (void)name;
-  (void)metadata;
-  (void)engine;
-#endif
+  return value;
+}
+
+void read_column_mapping_metadata(
+  SchemaItem* item,
+  const CMetadataMap* metadata,
+  SharedExternEngine* engine)
+{
+  item->column_mapping_id = read_column_mapping_value(
+    metadata, engine, "delta.columnMapping.id", MetadataNumber);
+  item->column_mapping_physical_name = read_column_mapping_value(
+    metadata, engine, "delta.columnMapping.physicalName", MetadataString);
 }
 
 // declare all our visitor methods
@@ -159,15 +205,62 @@ void visit_struct(
   uintptr_t sibling_list_id,
   struct KernelStringSlice name,
   bool is_nullable,
-  const CStringMap * metadata,
+  const CMetadataMap * metadata,
   uintptr_t child_list_id)
 {
   SchemaBuilder* builder = data;
   char* name_ptr = allocate_string(name);
   PRINT_CHILD_VISIT("struct", name_ptr, sibling_list_id, "Children", child_list_id);
-  print_physical_name(name_ptr, metadata, builder->engine);
   SchemaItem* struct_item = add_to_list(&builder->lists[sibling_list_id], name_ptr, "struct", is_nullable);
   struct_item->children = child_list_id;
+  read_column_mapping_metadata(struct_item, metadata, builder->engine);
+}
+
+/** Copies an annotation into an owned C string, exiting on embedded NULs or allocation failure. */
+static char* copy_udt_annotation_string(KernelStringSlice source)
+{
+  if (source.len && memchr(source.ptr, '\0', source.len)) {
+    fprintf(stderr, "UDT annotations in this example cannot contain embedded NUL bytes\n");
+    exit(EXIT_FAILURE);
+  }
+  char* copy = malloc(source.len + 1);
+  if (!copy) {
+    fprintf(stderr, "Could not allocate UDT annotation\n");
+    exit(EXIT_FAILURE);
+  }
+  if (source.len) {
+    memcpy(copy, source.ptr, source.len);
+  }
+  copy[source.len] = '\0';
+  return copy;
+}
+
+void visit_user_defined(
+  void* data,
+  uintptr_t sibling_list_id,
+  struct KernelStringSlice name,
+  bool is_nullable,
+  const CMetadataMap* metadata,
+  uintptr_t child_list_id,
+  FfiNullableStringMap annotation)
+{
+  SchemaBuilder* builder = data;
+  char* name_ptr = allocate_string(name);
+  SchemaItem* item = add_to_list(&builder->lists[sibling_list_id], name_ptr, "udt", is_nullable);
+  item->children = child_list_id;
+  read_column_mapping_metadata(item, metadata, builder->engine);
+  UdtAnnotationEntry* entries = calloc(annotation.len, sizeof(UdtAnnotationEntry));
+  if (annotation.len && !entries) {
+    fprintf(stderr, "Could not allocate UDT annotation entries\n");
+    exit(EXIT_FAILURE);
+  }
+  for (uintptr_t i = 0; i < annotation.len; i++) {
+    entries[i].key = copy_udt_annotation_string(annotation.ptr[i].key);
+    if (annotation.ptr[i].value.tag == SomeKernelStringSlice) {
+      entries[i].value = copy_udt_annotation_string(annotation.ptr[i].value.some);
+    }
+  }
+  item->udt_annotation = (UdtAnnotation){ annotation.len, entries };
 }
 
 void visit_array(
@@ -175,15 +268,15 @@ void visit_array(
   uintptr_t sibling_list_id,
   struct KernelStringSlice name,
   bool is_nullable,
-  const CStringMap * metadata,
+  const CMetadataMap * metadata,
   uintptr_t child_list_id)
 {
   SchemaBuilder* builder = data;
   char* name_ptr = allocate_string(name);
-  print_physical_name(name_ptr, metadata, builder->engine);
   PRINT_CHILD_VISIT("array", name_ptr, sibling_list_id, "Types", child_list_id);
   SchemaItem* array_item = add_to_list(&builder->lists[sibling_list_id], name_ptr, "array", is_nullable);
   array_item->children = child_list_id;
+  read_column_mapping_metadata(array_item, metadata, builder->engine);
 }
 
 void visit_map(
@@ -191,15 +284,15 @@ void visit_map(
   uintptr_t sibling_list_id,
   struct KernelStringSlice name,
   bool is_nullable,
-  const CStringMap * metadata,
+  const CMetadataMap * metadata,
   uintptr_t child_list_id)
 {
   SchemaBuilder* builder = data;
   char* name_ptr = allocate_string(name);
-  print_physical_name(name_ptr, metadata, builder->engine);
   PRINT_CHILD_VISIT("map", name_ptr, sibling_list_id, "Types", child_list_id);
   SchemaItem* map_item = add_to_list(&builder->lists[sibling_list_id], name_ptr, "map", is_nullable);
   map_item->children = child_list_id;
+  read_column_mapping_metadata(map_item, metadata, builder->engine);
 }
 
 void visit_decimal(
@@ -207,7 +300,7 @@ void visit_decimal(
   uintptr_t sibling_list_id,
   struct KernelStringSlice name,
   bool is_nullable,
-  const CStringMap * metadata,
+  const CMetadataMap * metadata,
   uint8_t precision,
   uint8_t scale)
 {
@@ -215,9 +308,9 @@ void visit_decimal(
   char* name_ptr = allocate_string(name);
   char* type = malloc(19 * sizeof(char));
   snprintf(type, 19, "decimal(%u)(%d)", precision, scale);
-  print_physical_name(name_ptr, metadata, builder->engine);
   PRINT_NO_CHILD_VISIT(type, name_ptr, sibling_list_id);
-  add_to_list(&builder->lists[sibling_list_id], name_ptr, type, is_nullable);
+  SchemaItem* item = add_to_list(&builder->lists[sibling_list_id], name_ptr, type, is_nullable);
+  read_column_mapping_metadata(item, metadata, builder->engine);
 }
 
 void visit_simple_type(
@@ -225,18 +318,18 @@ void visit_simple_type(
   uintptr_t sibling_list_id,
   struct KernelStringSlice name,
   bool is_nullable,
-  const CStringMap * metadata,
+  const CMetadataMap * metadata,
   char* type)
 {
   SchemaBuilder* builder = data;
   char* name_ptr = allocate_string(name);
-  print_physical_name(name_ptr, metadata, builder->engine);
   PRINT_NO_CHILD_VISIT(type, name_ptr, sibling_list_id);
-  add_to_list(&builder->lists[sibling_list_id], name_ptr, type, is_nullable);
+  SchemaItem* item = add_to_list(&builder->lists[sibling_list_id], name_ptr, type, is_nullable);
+  read_column_mapping_metadata(item, metadata, builder->engine);
 }
 
 #define DEFINE_VISIT_SIMPLE_TYPE(typename)                                                                                                  \
-  void visit_##typename(void* data, uintptr_t sibling_list_id, struct KernelStringSlice name, bool is_nullable, const CStringMap * metadata)\
+  void visit_##typename(void* data, uintptr_t sibling_list_id, struct KernelStringSlice name, bool is_nullable, const CMetadataMap * metadata)\
   {                                                                                                                                         \
     visit_simple_type(data, sibling_list_id, name, is_nullable, metadata, #typename);                                                       \
   }
@@ -260,7 +353,7 @@ void visit_interval_year_month(void* data,
                                uintptr_t sibling_list_id,
                                struct KernelStringSlice name,
                                bool is_nullable,
-                               const CStringMap * metadata)
+                               const CMetadataMap * metadata)
 {
   visit_simple_type(data, sibling_list_id, name, is_nullable, metadata, "interval year to month");
 }
@@ -269,9 +362,51 @@ void visit_interval_day_time(void* data,
                              uintptr_t sibling_list_id,
                              struct KernelStringSlice name,
                              bool is_nullable,
-                             const CStringMap * metadata)
+                             const CMetadataMap * metadata)
 {
   visit_simple_type(data, sibling_list_id, name, is_nullable, metadata, "interval day to second");
+}
+
+void visit_geometry(void* data,
+                    uintptr_t sibling_list_id,
+                    struct KernelStringSlice name,
+                    bool is_nullable,
+                    const CMetadataMap * metadata,
+                    struct KernelStringSlice crs)
+{
+  SchemaBuilder* builder = data;
+  char* name_ptr = allocate_string(name);
+  size_t type_size = strlen("geometry()") + crs.len + 1;
+  char* type = malloc(type_size * sizeof(char));
+  snprintf(type, type_size, "geometry(%.*s)", (int)crs.len, crs.ptr);
+  PRINT_NO_CHILD_VISIT(type, name_ptr, sibling_list_id);
+  SchemaItem* item = add_to_list(&builder->lists[sibling_list_id], name_ptr, type, is_nullable);
+  read_column_mapping_metadata(item, metadata, builder->engine);
+}
+
+void visit_geography(void* data,
+                     uintptr_t sibling_list_id,
+                     struct KernelStringSlice name,
+                     bool is_nullable,
+                     const CMetadataMap * metadata,
+                     struct KernelStringSlice crs,
+                     struct KernelStringSlice algorithm)
+{
+  SchemaBuilder* builder = data;
+  char* name_ptr = allocate_string(name);
+  size_t type_size = strlen("geography(, )") + crs.len + algorithm.len + 1;
+  char* type = malloc(type_size * sizeof(char));
+  snprintf(
+    type,
+    type_size,
+    "geography(%.*s, %.*s)",
+    (int)crs.len,
+    crs.ptr,
+    (int)algorithm.len,
+    algorithm.ptr);
+  PRINT_NO_CHILD_VISIT(type, name_ptr, sibling_list_id);
+  SchemaItem* item = add_to_list(&builder->lists[sibling_list_id], name_ptr, type, is_nullable);
+  read_column_mapping_metadata(item, metadata, builder->engine);
 }
 
 // free all the data in the builder and the builder itself
@@ -282,9 +417,16 @@ void free_builder(SchemaBuilder* builder)
     for (uint32_t j = 0; j < list->len; j++) {
       SchemaItem* item = list->list + j;
       free(item->name);
+      free(item->column_mapping_id); // NULL when the field carried no column-mapping id; free(NULL) is a no-op
+      free(item->column_mapping_physical_name);
+      for (size_t k = 0; k < item->udt_annotation.len; k++) {
+        free(item->udt_annotation.entries[k].key);
+        free(item->udt_annotation.entries[k].value);
+      }
+      free(item->udt_annotation.entries);
       // don't free item->type, those are static strings
-      if (!strncmp(item->type, "decimal", 7)) {
-        // except decimal types, we malloc'd those :)
+      if (field_type_needs_free(item->type)) {
+        // except decimal and geo types, we malloc'd those :)
         free(item->type);
       }
     }
@@ -300,8 +442,9 @@ void free_cschema(CSchema *schema) {
   free(schema);
 }
 
-// Get the schema of the snapshot
-CSchema* get_cschema(SharedSnapshot* snapshot, SharedExternEngine* engine)
+// Build a printable CSchema by visiting an already-obtained schema handle. The caller retains
+// ownership of `schema`: this function only borrows it for the duration of the visit.
+CSchema* build_cschema(SharedSchema* schema, SharedExternEngine* engine)
 {
   print_diag("Building schema\n");
   SchemaBuilder* builder = malloc(sizeof(SchemaBuilder));
@@ -311,6 +454,7 @@ CSchema* get_cschema(SharedSnapshot* snapshot, SharedExternEngine* engine)
   EngineSchemaVisitor visitor = {
     .data = builder,
     .make_field_list = make_field_list,
+    .visit_user_defined = visit_user_defined,
     .visit_struct = visit_struct,
     .visit_array = visit_array,
     .visit_map = visit_map,
@@ -327,12 +471,13 @@ CSchema* get_cschema(SharedSnapshot* snapshot, SharedExternEngine* engine)
     .visit_date = visit_date,
     .visit_timestamp = visit_timestamp,
     .visit_timestamp_ntz = visit_timestamp_ntz,
+    .visit_geometry = visit_geometry,
+    .visit_geography = visit_geography,
     .visit_interval_year_month = visit_interval_year_month,
     .visit_interval_day_time = visit_interval_day_time,
     .visit_void = visit_void,
     .visit_variant = visit_variant,
   };
-  SharedSchema* schema = logical_schema(snapshot);
   uintptr_t schema_list_id = visit_schema(schema, &visitor);
 #ifdef VERBOSE
   printf("Schema returned in list %" PRIxPTR "\n", schema_list_id);
@@ -341,13 +486,21 @@ CSchema* get_cschema(SharedSnapshot* snapshot, SharedExternEngine* engine)
   CSchema* cschema = malloc(sizeof(CSchema));
   cschema->list_id = schema_list_id;
   cschema->builder = builder;
+  return cschema;
+}
+
+// Get the schema of the snapshot
+CSchema* get_cschema(SharedSnapshot* snapshot, SharedExternEngine* engine)
+{
+  SharedSchema* schema = logical_schema(snapshot);
+  CSchema* cschema = build_cschema(schema, engine);
   free_schema(schema);
   return cschema;
 }
 
 // Print out a schema
-void print_cschema(CSchema *schema) {
-  printf("Schema:\n");
+void print_cschema(const char *title, CSchema *schema) {
+  printf("%s:\n", title);
   print_list(schema->builder, schema->list_id, 0, 0);
   printf("\n");
 }

@@ -9,8 +9,8 @@ use crate::metrics::events::emit_parquet_read_completed;
 use crate::metrics::PrecountedMetricsIterator;
 use crate::schema::SchemaRef;
 use crate::{
-    CancellationTokenRef, DeltaResult, DeltaResultIteratorStatic, EngineData,
-    FileDataReadResultIterator, FileMeta, ParquetFooter, ParquetHandler, PredicateRef,
+    CancellationTokenRef, EngineData, FileDataReadResultIterator, FileMeta, FileSize, KernelResult,
+    KernelResultIteratorStatic, ParquetFooter, ParquetHandler, PredicateRef,
 };
 
 /// Decorator over an engine-provided `Arc<dyn ParquetHandler>` that emits a
@@ -61,7 +61,7 @@ impl ParquetHandler for MeteredParquetHandler {
         files: &[FileMeta],
         physical_schema: SchemaRef,
         predicate: Option<PredicateRef>,
-    ) -> DeltaResult<FileDataReadResultIterator> {
+    ) -> KernelResult<FileDataReadResultIterator> {
         let inner = self
             .inner
             .read_parquet_files(files, physical_schema, predicate)?;
@@ -74,7 +74,7 @@ impl ParquetHandler for MeteredParquetHandler {
         physical_schema: SchemaRef,
         predicate: Option<PredicateRef>,
         cancellation_token: Option<CancellationTokenRef>,
-    ) -> DeltaResult<FileDataReadResultIterator> {
+    ) -> KernelResult<FileDataReadResultIterator> {
         let inner = self.inner.read_parquet_files_with_cancellation(
             files,
             physical_schema,
@@ -87,12 +87,12 @@ impl ParquetHandler for MeteredParquetHandler {
     fn write_parquet_file(
         &self,
         location: url::Url,
-        data: DeltaResultIteratorStatic<Box<dyn EngineData>>,
-    ) -> DeltaResult<()> {
+        data: KernelResultIteratorStatic<Box<dyn EngineData>>,
+    ) -> KernelResult<FileSize> {
         self.inner.write_parquet_file(location, data)
     }
 
-    fn read_parquet_footer(&self, file: &FileMeta) -> DeltaResult<ParquetFooter> {
+    fn read_parquet_footer(&self, file: &FileMeta) -> KernelResult<ParquetFooter> {
         self.inner.read_parquet_footer(file)
     }
 
@@ -100,7 +100,7 @@ impl ParquetHandler for MeteredParquetHandler {
         &self,
         file: &FileMeta,
         cancellation_token: Option<CancellationTokenRef>,
-    ) -> DeltaResult<ParquetFooter> {
+    ) -> KernelResult<ParquetFooter> {
         self.inner
             .read_parquet_footer_with_cancellation(file, cancellation_token)
     }
@@ -114,8 +114,8 @@ mod tests {
 
     use super::*;
     use crate::metrics::MetricEvent;
-    use crate::schema::{DataType, StructField, StructType};
-    use crate::utils::test_utils::{install_thread_local_metrics_reporter, CapturingReporter};
+    use crate::schema::schema_ref;
+    use crate::unit_test_utils::{install_thread_local_metrics_reporter, CapturingReporter};
 
     #[derive(Debug, Default)]
     struct StubParquetHandler {
@@ -130,7 +130,7 @@ mod tests {
             _files: &[FileMeta],
             _physical_schema: SchemaRef,
             _predicate: Option<PredicateRef>,
-        ) -> DeltaResult<FileDataReadResultIterator> {
+        ) -> KernelResult<FileDataReadResultIterator> {
             Ok(Box::new(std::iter::empty()))
         }
 
@@ -140,7 +140,7 @@ mod tests {
             _physical_schema: SchemaRef,
             _predicate: Option<PredicateRef>,
             _cancellation_token: Option<CancellationTokenRef>,
-        ) -> DeltaResult<FileDataReadResultIterator> {
+        ) -> KernelResult<FileDataReadResultIterator> {
             self.cancellation_read_called
                 .store(true, std::sync::atomic::Ordering::SeqCst);
             Ok(Box::new(std::iter::empty()))
@@ -149,12 +149,12 @@ mod tests {
         fn write_parquet_file(
             &self,
             _location: Url,
-            _data: DeltaResultIteratorStatic<Box<dyn EngineData>>,
-        ) -> DeltaResult<()> {
-            Ok(())
+            _data: KernelResultIteratorStatic<Box<dyn EngineData>>,
+        ) -> KernelResult<FileSize> {
+            Ok(0)
         }
 
-        fn read_parquet_footer(&self, _file: &FileMeta) -> DeltaResult<ParquetFooter> {
+        fn read_parquet_footer(&self, _file: &FileMeta) -> KernelResult<ParquetFooter> {
             unreachable!("not exercised in these tests")
         }
     }
@@ -174,7 +174,7 @@ mod tests {
     }
 
     fn delta_schema() -> SchemaRef {
-        Arc::new(StructType::try_new([StructField::nullable("x", DataType::INTEGER)]).unwrap())
+        schema_ref! { nullable "x": INTEGER }
     }
 
     #[test]

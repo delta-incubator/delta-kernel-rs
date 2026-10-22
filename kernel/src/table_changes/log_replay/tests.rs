@@ -22,15 +22,13 @@ use crate::engine::plans::PlanBasedEngine;
 use crate::engine::sync::plan::SyncPlanExecutor;
 use crate::engine::sync::SyncEngine;
 use crate::engine_data::{GetData, TypedGetData};
-use crate::expressions::{
-    column_expr, column_name, ArrayData, BinaryPredicateOp, ColumnName, Scalar,
-};
+use crate::expressions::{col, column_name, lit, ArrayData, BinaryPredicateOp, ColumnName};
 use crate::log_segment::LogSegment;
 use crate::metrics::{MeteredDeltaEngine, MetricEvent};
 use crate::path::ParsedLogPath;
 use crate::scan::state::DvInfo;
 use crate::scan::PhysicalPredicate;
-use crate::schema::{ColumnNamesAndTypes, DataType, SchemaRef, StructField, StructType};
+use crate::schema::{schema, schema_ref, ColumnNamesAndTypes, DataType, SchemaRef, StructField};
 use crate::table_changes::scan_file::scan_metadata_to_scan_file;
 use crate::table_changes::test_utils::{
     row_tracking_metadata, row_tracking_table_config, test_deletion_vector,
@@ -38,40 +36,35 @@ use crate::table_changes::test_utils::{
 use crate::table_changes::CdfMode;
 use crate::table_configuration::TableConfiguration;
 use crate::table_features::{ColumnMappingMode, TableFeature};
-use crate::table_properties::{ENABLE_ROW_TRACKING, ROW_TRACKING_SUSPENDED};
-use crate::utils::test_utils::{
+use crate::table_properties::{
+    ENABLE_CHANGE_DATA_FEED, ENABLE_ROW_TRACKING, ROW_TRACKING_SUSPENDED,
+};
+use crate::unit_test_utils::{
     assert_result_error_with_message, install_thread_local_metrics_reporter, Action,
-    CapturingReporter, LocalMockTable,
+    CapturingReporter, LocalMockTable, MockProtocolBuilder, MockTableConfigurationBuilder,
 };
 use crate::{
-    DeltaResult, DeltaResultIterator, Engine, EngineData, Error, EvaluationHandler,
-    FileDataReadResultIterator, FileMeta, FilteredEngineData, JsonHandler, ParquetHandler,
-    Predicate, PredicateRef, RowVisitor, StorageHandler, Version,
+    Engine, EngineData, EvaluationHandler, FileDataReadResultIterator, FileMeta, FileSize,
+    FilteredEngineData, JsonHandler, KernelError, KernelResult, KernelResultIterator,
+    ParquetHandler, Predicate, PredicateRef, RowVisitor, StorageHandler, Version,
 };
 
 fn get_schema() -> SchemaRef {
-    Arc::new(StructType::new_unchecked([
-        StructField::nullable("id", DataType::INTEGER),
-        StructField::nullable("value", DataType::STRING),
-    ]))
+    schema_ref! {
+        nullable "id": INTEGER,
+        nullable "value": STRING,
+    }
 }
 
 fn get_default_table_config(table_root: &url::Url) -> TableConfiguration {
-    let metadata = Metadata::try_new(
-        None,
-        None,
-        get_schema(),
-        vec![],
-        0,
-        HashMap::from([
-            ("delta.enableChangeDataFeed".to_string(), "true".to_string()),
-            ("delta.columnMapping.mode".to_string(), "none".to_string()),
-        ]),
-    )
-    .unwrap();
-    // CDF requires min_writer_version = 4
-    let protocol = Protocol::try_new_legacy(1, 4).unwrap();
-    TableConfiguration::try_new(metadata, protocol, table_root.clone(), 0).unwrap()
+    MockTableConfigurationBuilder::new()
+        .with_schema(get_schema())
+        .with_properties([(ENABLE_CHANGE_DATA_FEED, "true")])
+        .with_column_mapping(ColumnMappingMode::None)
+        // CDF requires min_writer_version = 4
+        .with_protocol(MockProtocolBuilder::new().with_versions(1, 4).build())
+        .with_table_root(table_root)
+        .build()
 }
 
 /// Helper to create a Metadata action with the given schema and configuration
@@ -91,7 +84,7 @@ fn execute_row_tracking(
     engine: Arc<dyn Engine>,
     mock_table: &LocalMockTable,
     end_schema: SchemaRef,
-) -> DeltaResult<Vec<TableChangesScanMetadata>> {
+) -> KernelResult<Vec<TableChangesScanMetadata>> {
     let commits = get_segment(engine.as_ref(), mock_table.table_root(), 0, None)?.into_iter();
     let table_root_url = url::Url::from_directory_path(mock_table.table_root()).unwrap();
     let table_config = row_tracking_table_config(table_root_url, get_schema());
@@ -132,7 +125,7 @@ fn execute_table_changes(
     mock_table: &LocalMockTable,
     start_version: Version,
     end_version: Option<Version>,
-) -> DeltaResult<Vec<TableChangesScanMetadata>> {
+) -> KernelResult<Vec<TableChangesScanMetadata>> {
     let commits = get_segment(
         engine.as_ref(),
         mock_table.table_root(),
@@ -157,14 +150,14 @@ fn assert_midstream_failure(engine: Arc<dyn Engine>, mock_table: &LocalMockTable
     // Reading commits 0-1 should fail
     let res_v0_v1 = execute_table_changes(engine.clone(), mock_table, 0, Some(1));
     assert!(
-        matches!(res_v0_v1, Err(Error::ChangeDataFeedUnsupported(_))),
+        matches!(res_v0_v1, Err(KernelError::ChangeDataFeedUnsupported(_))),
         "Reading versions 0-1 should fail"
     );
 
     // Reading just commit 1 should also fail
     let res_v1 = execute_table_changes(engine, mock_table, 1, Some(1));
     assert!(
-        matches!(res_v1, Err(Error::ChangeDataFeedUnsupported(_))),
+        matches!(res_v1, Err(KernelError::ChangeDataFeedUnsupported(_))),
         "Reading version 1 alone should fail"
     );
 }
@@ -174,7 +167,7 @@ fn get_segment(
     path: &Path,
     start_version: Version,
     end_version: impl Into<Option<Version>>,
-) -> DeltaResult<Vec<ParsedLogPath>> {
+) -> KernelResult<Vec<ParsedLogPath>> {
     let table_root = url::Url::from_directory_path(path).unwrap();
     let log_root = table_root.join("_delta_log/")?;
     let log_segment = LogSegment::for_table_changes(
@@ -186,7 +179,7 @@ fn get_segment(
     Ok(log_segment.listed.ascending_commit_files)
 }
 
-fn result_to_sv(iter: impl Iterator<Item = DeltaResult<TableChangesScanMetadata>>) -> Vec<bool> {
+fn result_to_sv(iter: impl Iterator<Item = KernelResult<TableChangesScanMetadata>>) -> Vec<bool> {
     iter.map_ok(|scan_metadata| scan_metadata.selection_vector.into_iter())
         .flatten_ok()
         .try_collect()
@@ -271,7 +264,7 @@ impl Engine for BatchingEngine {
     }
 
     #[cfg(feature = "declarative-plans")]
-    fn plan_executor(&self) -> Arc<dyn crate::plans::PlanExecutor> {
+    fn plan_executor(&self) -> Option<Arc<dyn crate::plans::PlanExecutor>> {
         self.inner.plan_executor()
     }
 }
@@ -316,7 +309,7 @@ impl JsonHandler for BatchingJsonHandler {
         &self,
         json_strings: Box<dyn EngineData>,
         output_schema: SchemaRef,
-    ) -> DeltaResult<Box<dyn EngineData>> {
+    ) -> KernelResult<Box<dyn EngineData>> {
         self.inner.parse_json(json_strings, output_schema)
     }
 
@@ -325,7 +318,7 @@ impl JsonHandler for BatchingJsonHandler {
         files: &[FileMeta],
         schema: SchemaRef,
         predicate: Option<PredicateRef>,
-    ) -> DeltaResult<FileDataReadResultIterator> {
+    ) -> KernelResult<FileDataReadResultIterator> {
         assert!(
             predicate.is_none(),
             "replay must read all actions in both passes"
@@ -338,7 +331,7 @@ impl JsonHandler for BatchingJsonHandler {
         let batch_size = self.batch_sizes[pass];
         let batches = self.inner.read_json_files(files, schema, predicate)?;
         let batches = batches
-            .map(move |batch| -> DeltaResult<_> {
+            .map(move |batch| -> KernelResult<_> {
                 let batch: RecordBatch = ArrowEngineData::try_from_engine_data(batch?)?.into();
                 Ok((0..batch.num_rows())
                     .step_by(batch_size)
@@ -351,10 +344,10 @@ impl JsonHandler for BatchingJsonHandler {
         let live = self.prepare_batches_live.clone();
         let peak = self.prepare_batches_peak.clone();
         let error_at = self.error_at;
-        let batches = batches.map(move |batch| -> DeltaResult<Box<dyn EngineData>> {
+        let batches = batches.map(move |batch| -> KernelResult<Box<dyn EngineData>> {
             let index = read.fetch_add(1, Ordering::Relaxed);
             if error_at == Some((pass, index)) {
-                return Err(Error::generic("injected JSON read failure"));
+                return Err(KernelError::generic("injected JSON read failure"));
             }
             let data = Box::new(ArrowEngineData::new(batch?));
             if pass == 0 {
@@ -378,9 +371,9 @@ impl JsonHandler for BatchingJsonHandler {
     fn write_json_file(
         &self,
         path: &url::Url,
-        data: DeltaResultIterator<'_, FilteredEngineData>,
+        data: KernelResultIterator<'_, FilteredEngineData>,
         overwrite: bool,
-    ) -> DeltaResult<()> {
+    ) -> KernelResult<FileSize> {
         self.inner.write_json_file(path, data, overwrite)
     }
 }
@@ -391,7 +384,7 @@ struct TrackedRead {
 }
 
 impl Iterator for TrackedRead {
-    type Item = DeltaResult<Box<dyn EngineData>>;
+    type Item = KernelResult<Box<dyn EngineData>>;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.batches.next()
@@ -416,7 +409,7 @@ impl Drop for TrackedPrepareBatch {
 }
 
 impl EngineData for TrackedPrepareBatch {
-    fn visit_rows(&self, columns: &[ColumnName], visitor: &mut dyn RowVisitor) -> DeltaResult<()> {
+    fn visit_rows(&self, columns: &[ColumnName], visitor: &mut dyn RowVisitor) -> KernelResult<()> {
         self.data.visit_rows(columns, visitor)
     }
 
@@ -428,11 +421,11 @@ impl EngineData for TrackedPrepareBatch {
         &self,
         schema: SchemaRef,
         columns: Vec<ArrayData>,
-    ) -> DeltaResult<Box<dyn EngineData>> {
+    ) -> KernelResult<Box<dyn EngineData>> {
         self.data.append_columns(schema, columns)
     }
 
-    fn apply_selection_vector(self: Box<Self>, _: Vec<bool>) -> DeltaResult<Box<dyn EngineData>> {
+    fn apply_selection_vector(self: Box<Self>, _: Vec<bool>) -> KernelResult<Box<dyn EngineData>> {
         panic!("preparation must visit all actions without filtering")
     }
 
@@ -449,7 +442,7 @@ fn rejects_batch_without_requested_file_path(
     #[case] expected_error: &str,
 ) {
     let commits = test_commits(1);
-    let batches = vec![Ok::<_, Error>(nullable_file_path_batch(batch_path))];
+    let batches = vec![Ok::<_, KernelError>(nullable_file_path_batch(batch_path))];
 
     let mut reader = commit_batch_reader(&commits, Box::new(batches.into_iter()));
     let mut batches = reader.batches_for_commit(0);
@@ -467,7 +460,7 @@ fn streams_batches_without_materializing_a_commit() {
     let files = commits.clone();
     let batches = [0, 0, 0, 1, 2].into_iter().map(move |index| {
         counter.fetch_add(1, Ordering::Relaxed);
-        Ok::<_, Error>(file_path_batch(files[index].location.location.as_str(), 1))
+        Ok::<_, KernelError>(file_path_batch(files[index].location.location.as_str(), 1))
     });
     let mut reader = commit_batch_reader(&commits, Box::new(batches));
 
@@ -802,7 +795,7 @@ impl RowVisitor for CommitFilePathCollector {
         NAMES_AND_TYPES.as_ref()
     }
 
-    fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> DeltaResult<()> {
+    fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> KernelResult<()> {
         for row in 0..row_count {
             self.rows.push((
                 getters[0].get(row, "_file")?,
@@ -818,7 +811,7 @@ impl RowVisitor for CommitFilePathCollector {
 #[cfg_attr(
     feature = "declarative-plans",
     case::plans(Arc::new(PlanBasedEngine::new(
-        Arc::new(SyncEngine::new()),
+        Some(Arc::new(SyncEngine::new())),
         Arc::new(SyncPlanExecutor::default()),
     )))
 )]
@@ -953,12 +946,15 @@ async fn cdf_not_enabled() {
 
     let table_root_url = url::Url::from_directory_path(mock_table.table_root()).unwrap();
     let table_config = get_default_table_config(&table_root_url);
-    let res: DeltaResult<Vec<_>> =
+    let res: KernelResult<Vec<_>> =
         table_changes_action_iter(engine, &table_config, commits, get_schema(), None)
             .unwrap()
             .try_collect();
 
-    assert!(matches!(res, Err(Error::ChangeDataFeedUnsupported(_))));
+    assert!(matches!(
+        res,
+        Err(KernelError::ChangeDataFeedUnsupported(_))
+    ));
 }
 
 #[tokio::test]
@@ -988,12 +984,15 @@ async fn unsupported_reader_feature() {
 
     let table_root_url = url::Url::from_directory_path(mock_table.table_root()).unwrap();
     let table_config = get_default_table_config(&table_root_url);
-    let res: DeltaResult<Vec<_>> =
+    let res: KernelResult<Vec<_>> =
         table_changes_action_iter(engine, &table_config, commits, get_schema(), None)
             .unwrap()
             .try_collect();
 
-    assert!(matches!(res, Err(Error::ChangeDataFeedUnsupported(_))));
+    assert!(matches!(
+        res,
+        Err(KernelError::ChangeDataFeedUnsupported(_))
+    ));
 }
 
 #[tokio::test]
@@ -1015,10 +1014,10 @@ async fn column_mapping_should_succeed() {
         ]))
     }
 
-    let cm_schema = Arc::new(StructType::new_unchecked([
-        cm_field("id", DataType::INTEGER, 1),
-        cm_field("value", DataType::STRING, 2),
-    ]));
+    let cm_schema = schema_ref! {
+        (cm_field("id", DataType::INTEGER, 1)),
+        (cm_field("value", DataType::STRING, 2)),
+    };
 
     let engine = Arc::new(SyncEngine::new());
     let mut mock_table = LocalMockTable::new();
@@ -1062,7 +1061,7 @@ async fn column_mapping_should_succeed() {
 
     let table_root_url = url::Url::from_directory_path(mock_table.table_root()).unwrap();
     let table_config = get_default_table_config(&table_root_url);
-    let res: DeltaResult<Vec<_>> =
+    let res: KernelResult<Vec<_>> =
         table_changes_action_iter(engine, &table_config, commits, cm_schema, None)
             .unwrap()
             .try_collect();
@@ -1097,7 +1096,7 @@ async fn cdf_disabled_midstream() {
 #[rstest]
 #[case::disabled(&[(ENABLE_ROW_TRACKING, "false")])]
 #[case::suspended(&[
-    (ENABLE_ROW_TRACKING, "true"),
+    (ENABLE_ROW_TRACKING, "false"),
     (ROW_TRACKING_SUSPENDED, "true"),
 ])]
 #[tokio::test]
@@ -1120,15 +1119,13 @@ async fn row_tracking_unavailable_midstream_fails(#[case] properties: &[(&str, &
 
     let res = execute_row_tracking(engine, &mock_table, get_schema()).map(|_| ());
     assert!(
-        matches!(&res, Err(Error::RowTrackingChangeFeedUnsupported(1))),
+        matches!(&res, Err(KernelError::RowTrackingChangeFeedUnsupported(1))),
         "expected row tracking to be unavailable at version 1, got {res:?}"
     );
 }
 
 fn nested_id_type(value_type: DataType) -> DataType {
-    DataType::from(StructType::new_unchecked([StructField::nullable(
-        "value", value_type,
-    )]))
+    DataType::from(schema! { nullable "value": (value_type) })
 }
 
 #[rstest]
@@ -1151,13 +1148,11 @@ async fn row_tracking_schema_compatibility(
     #[case] expect_compatible: bool,
 ) {
     let schema = |id_type: DataType, has_year: bool| {
-        let fields = [
-            StructField::nullable("id", id_type),
-            StructField::nullable("value", DataType::STRING),
-        ]
-        .into_iter()
-        .chain(has_year.then(|| StructField::nullable("year", DataType::INTEGER)));
-        Arc::new(StructType::new_unchecked(fields))
+        schema_ref! {
+            nullable "id": (id_type),
+            nullable "value": STRING,
+            ..(has_year.then(|| StructField::nullable("year", DataType::INTEGER))),
+        }
     };
     let engine = Arc::new(SyncEngine::new());
     let mut mock_table = LocalMockTable::new();
@@ -1176,7 +1171,10 @@ async fn row_tracking_schema_compatibility(
         );
     } else {
         assert!(
-            matches!(&res, Err(Error::ChangeDataFeedIncompatibleSchema(_, _))),
+            matches!(
+                &res,
+                Err(KernelError::ChangeDataFeedIncompatibleSchema(_, _))
+            ),
             "expected incompatible-schema error, got {res:?}"
         );
     }
@@ -1190,8 +1188,11 @@ fn row_tracking_schema_compatibility_checks_nullability(
     #[case] read_nullable: bool,
     #[case] expected: bool,
 ) {
-    let schema =
-        |nullable| StructType::new_unchecked([StructField::new("id", DataType::INTEGER, nullable)]);
+    let schema = |nullable| {
+        schema! {
+            (StructField::new("id", DataType::INTEGER, nullable)),
+        }
+    };
     assert_eq!(
         CdfMode::RowTracking
             .schemas_compatible(&schema(candidate_nullable), &schema(read_nullable),),
@@ -1206,11 +1207,15 @@ fn row_tracking_schema_compatibility_requires_new_columns_to_be_nullable(
     #[case] new_column_nullable: bool,
     #[case] expected: bool,
 ) {
-    let candidate = StructType::new_unchecked([StructField::nullable("id", DataType::INTEGER)]);
-    let read_schema = StructType::new_unchecked([
-        StructField::nullable("id", DataType::INTEGER),
-        StructField::new("new_column", DataType::STRING, new_column_nullable),
-    ]);
+    let candidate = schema! { nullable "id": INTEGER };
+    let read_schema = schema! {
+        nullable "id": INTEGER,
+        (StructField::new(
+            "new_column",
+            DataType::STRING,
+            new_column_nullable,
+        )),
+    };
     assert_eq!(
         CdfMode::RowTracking.schemas_compatible(&candidate, &read_schema),
         expected
@@ -1268,7 +1273,7 @@ async fn row_tracking_protocol_failure_preserves_the_underlying_error() {
 
     let result = execute_row_tracking(engine, &mock_table, get_schema()).map(|_| ());
     assert!(
-        matches!(&result, Err(Error::Unsupported(_))),
+        matches!(&result, Err(KernelError::Unsupported(_))),
         "expected the protocol support error, got {result:?}"
     );
 }
@@ -1299,64 +1304,63 @@ async fn incompatible_schemas_fail() {
 
         let table_root_url = url::Url::from_directory_path(mock_table.table_root()).unwrap();
         let table_config = get_default_table_config(&table_root_url);
-        let res: DeltaResult<Vec<_>> =
+        let res: KernelResult<Vec<_>> =
             table_changes_action_iter(engine, &table_config, commits, cdf_schema, None)
                 .unwrap()
                 .try_collect();
 
         assert!(matches!(
             res,
-            Err(Error::ChangeDataFeedIncompatibleSchema(_, _))
+            Err(KernelError::ChangeDataFeedIncompatibleSchema(_, _))
         ));
     }
 
     // The CDF schema has fields: `id: int` and `value: string`.
     // This commit has schema with fields: `id: long`, `value: string` and `year: int` (nullable).
-    let schema = Arc::new(StructType::new_unchecked([
-        StructField::nullable("id", DataType::LONG),
-        StructField::nullable("value", DataType::STRING),
-        StructField::nullable("year", DataType::INTEGER),
-    ]));
+    let schema = schema_ref! {
+        nullable "id": LONG,
+        nullable "value": STRING,
+        nullable "year": INTEGER,
+    };
     assert_incompatible_schema(schema, get_schema()).await;
 
     // The CDF schema has fields: `id: int` and `value: string`.
     // This commit has schema with fields: `id: long` and `value: string`.
-    let schema = Arc::new(StructType::new_unchecked([
-        StructField::nullable("id", DataType::LONG),
-        StructField::nullable("value", DataType::STRING),
-    ]));
+    let schema = schema_ref! {
+        nullable "id": LONG,
+        nullable "value": STRING,
+    };
     assert_incompatible_schema(schema, get_schema()).await;
 
-    // NOTE: Once type widening is supported, this should not return an error.
-    //
+    // CDF schema compatibility does not apply type-widening rules.
     // The CDF schema has fields: `id: long` and `value: string`.
     // This commit has schema with fields: `id: int` and `value: string`.
-    let cdf_schema = Arc::new(StructType::new_unchecked([
-        StructField::nullable("id", DataType::LONG),
-        StructField::nullable("value", DataType::STRING),
-    ]));
-    let commit_schema = Arc::new(StructType::new_unchecked([
-        StructField::nullable("id", DataType::INTEGER),
-        StructField::nullable("value", DataType::STRING),
-    ]));
+    let cdf_schema = schema_ref! {
+        nullable "id": LONG,
+        nullable "value": STRING,
+    };
+    let commit_schema = schema_ref! {
+        nullable "id": INTEGER,
+        nullable "value": STRING,
+    };
     assert_incompatible_schema(cdf_schema, commit_schema).await;
 
     // Note: Once schema evolution is supported, this should not return an error.
     //
     // The CDF schema has fields: nullable `id`  and nullable `value`.
     // This commit has schema with fields: non-nullable `id` and nullable `value`.
-    let schema = Arc::new(StructType::new_unchecked([
-        StructField::not_null("id", DataType::LONG),
-        StructField::nullable("value", DataType::STRING),
-    ]));
+    let schema = schema_ref! {
+        not_null "id": LONG,
+        nullable "value": STRING,
+    };
     assert_incompatible_schema(schema, get_schema()).await;
 
     // The CDF schema has fields: `id: int` and `value: string`.
     // This commit has schema with fields:`id: string` and `value: string`.
-    let schema = Arc::new(StructType::new_unchecked([
-        StructField::nullable("id", DataType::STRING),
-        StructField::nullable("value", DataType::STRING),
-    ]));
+    let schema = schema_ref! {
+        nullable "id": STRING,
+        nullable "value": STRING,
+    };
     assert_incompatible_schema(schema, get_schema()).await;
 
     // Note: Once schema evolution is supported, this should not return an error.
@@ -1371,7 +1375,7 @@ async fn incompatible_schemas_fail() {
 async fn test_schema_evolution(
     initial_schema: SchemaRef,
     evolved_schema: SchemaRef,
-) -> DeltaResult<Vec<TableChangesScanMetadata>> {
+) -> KernelResult<Vec<TableChangesScanMetadata>> {
     let engine = Arc::new(SyncEngine::new());
     let mut mock_table = LocalMockTable::new();
 
@@ -1422,52 +1426,61 @@ async fn demonstration_schema_evolution_failures() {
     // Scenario 1: Adding a nullable column (safe evolution)
     // Initial: {id: int, value: string}
     // Evolved: {id: int, value: string, new_col: int?}
-    let initial = Arc::new(StructType::new_unchecked([
-        StructField::nullable("id", DataType::INTEGER),
-        StructField::nullable("value", DataType::STRING),
-    ]));
-    let evolved = Arc::new(StructType::new_unchecked([
-        StructField::nullable("id", DataType::INTEGER),
-        StructField::nullable("value", DataType::STRING),
-        StructField::nullable("new_col", DataType::INTEGER),
-    ]));
+    let initial = schema_ref! {
+        nullable "id": INTEGER,
+        nullable "value": STRING,
+    };
+    let evolved = schema_ref! {
+        nullable "id": INTEGER,
+        nullable "value": STRING,
+        nullable "new_col": INTEGER,
+    };
     let res = test_schema_evolution(initial, evolved).await;
     assert!(
-        matches!(res, Err(Error::ChangeDataFeedIncompatibleSchema(_, _))),
+        matches!(
+            res,
+            Err(KernelError::ChangeDataFeedIncompatibleSchema(_, _))
+        ),
         "Expected ChangeDataFeedIncompatibleSchema error for adding nullable column"
     );
 
     // Scenario 2: Type widening (int -> long) - supported by type widening feature
     // Initial: {id: int, value: string}
     // Evolved: {id: long, value: string}
-    let initial = Arc::new(StructType::new_unchecked([
-        StructField::nullable("id", DataType::INTEGER),
-        StructField::nullable("value", DataType::STRING),
-    ]));
-    let evolved = Arc::new(StructType::new_unchecked([
-        StructField::nullable("id", DataType::LONG),
-        StructField::nullable("value", DataType::STRING),
-    ]));
+    let initial = schema_ref! {
+        nullable "id": INTEGER,
+        nullable "value": STRING,
+    };
+    let evolved = schema_ref! {
+        nullable "id": LONG,
+        nullable "value": STRING,
+    };
     let res = test_schema_evolution(initial, evolved).await;
     assert!(
-        matches!(res, Err(Error::ChangeDataFeedIncompatibleSchema(_, _))),
+        matches!(
+            res,
+            Err(KernelError::ChangeDataFeedIncompatibleSchema(_, _))
+        ),
         "Expected ChangeDataFeedIncompatibleSchema error for type widening"
     );
 
     // Scenario 3: Changing nullability from non-null to nullable (safe evolution)
     // Initial: {id: int!, value: string}
     // Evolved: {id: int?, value: string}
-    let initial = Arc::new(StructType::new_unchecked([
-        StructField::not_null("id", DataType::INTEGER),
-        StructField::nullable("value", DataType::STRING),
-    ]));
-    let evolved = Arc::new(StructType::new_unchecked([
-        StructField::nullable("id", DataType::INTEGER),
-        StructField::nullable("value", DataType::STRING),
-    ]));
+    let initial = schema_ref! {
+        not_null "id": INTEGER,
+        nullable "value": STRING,
+    };
+    let evolved = schema_ref! {
+        nullable "id": INTEGER,
+        nullable "value": STRING,
+    };
     let res = test_schema_evolution(initial, evolved).await;
     assert!(
-        matches!(res, Err(Error::ChangeDataFeedIncompatibleSchema(_, _))),
+        matches!(
+            res,
+            Err(KernelError::ChangeDataFeedIncompatibleSchema(_, _))
+        ),
         "Expected ChangeDataFeedIncompatibleSchema error for nullability change"
     );
 }
@@ -1713,11 +1726,7 @@ async fn data_skipping_filter(#[values([1, 2], [2, 1], [usize::MAX; 2])] batch_s
         .await;
 
     // Look for actions with id > 4
-    let predicate = Predicate::binary(
-        BinaryPredicateOp::GreaterThan,
-        column_expr!("id"),
-        Scalar::from(4),
-    );
+    let predicate = Predicate::binary(BinaryPredicateOp::GreaterThan, col!("id"), lit(4));
     let logical_schema = get_schema();
     let predicate =
         match PhysicalPredicate::try_new(&predicate, &logical_schema, ColumnMappingMode::None) {
@@ -1795,28 +1804,20 @@ async fn data_skipping_filter_prunes_partition_values_but_keeps_removes(
         .await;
 
     // Partitioned schema: `part` is the partition column, `id` a data column.
-    let logical_schema: SchemaRef = Arc::new(StructType::new_unchecked([
-        StructField::nullable("id", DataType::INTEGER),
-        StructField::nullable("part", DataType::STRING),
-    ]));
-    let metadata = Metadata::try_new(
-        None,
-        None,
-        logical_schema.clone(),
-        vec!["part".to_string()],
-        0,
-        HashMap::from([("delta.enableChangeDataFeed".to_string(), "true".to_string())]),
-    )
-    .unwrap();
-    let protocol = Protocol::try_new_legacy(1, 4).unwrap();
+    let logical_schema = schema_ref! {
+        nullable "id": INTEGER,
+        nullable "part": STRING,
+    };
     let table_root_url = url::Url::from_directory_path(mock_table.table_root()).unwrap();
-    let table_config = TableConfiguration::try_new(metadata, protocol, table_root_url, 0).unwrap();
+    let table_config = MockTableConfigurationBuilder::new()
+        .with_schema(logical_schema.clone())
+        .with_partition_columns(["part"])
+        .with_properties([(ENABLE_CHANGE_DATA_FEED, "true")])
+        .with_protocol(MockProtocolBuilder::new().with_versions(1, 4).build())
+        .with_table_root(table_root_url)
+        .build();
 
-    let predicate = Predicate::binary(
-        BinaryPredicateOp::Equal,
-        column_expr!("part"),
-        Scalar::from("x"),
-    );
+    let predicate = Predicate::binary(BinaryPredicateOp::Equal, col!("part"), lit("x"));
     let predicate =
         match PhysicalPredicate::try_new(&predicate, &logical_schema, ColumnMappingMode::None) {
             Ok(PhysicalPredicate::Some(p, s)) => Some((p, s)),
@@ -1875,11 +1876,7 @@ async fn data_skipping_filter_prunes_stats_but_keeps_removes(
         .await;
 
     let logical_schema = get_schema();
-    let predicate = Predicate::binary(
-        BinaryPredicateOp::GreaterThan,
-        column_expr!("id"),
-        Scalar::from(4),
-    );
+    let predicate = Predicate::binary(BinaryPredicateOp::GreaterThan, col!("id"), lit(4));
     let predicate =
         match PhysicalPredicate::try_new(&predicate, &logical_schema, ColumnMappingMode::None) {
             Ok(PhysicalPredicate::Some(p, s)) => Some((p, s)),
@@ -1929,7 +1926,7 @@ async fn failing_protocol() {
 
     let table_root_url = url::Url::from_directory_path(mock_table.table_root()).unwrap();
     let table_config = get_default_table_config(&table_root_url);
-    let res: DeltaResult<Vec<_>> =
+    let res: KernelResult<Vec<_>> =
         table_changes_action_iter(engine, &table_config, commits, get_schema(), None)
             .unwrap()
             .try_collect();
@@ -2016,7 +2013,7 @@ async fn print_table_configuration() {
     let table_root_url = url::Url::from_directory_path(mock_table.table_root()).unwrap();
     let table_config = get_default_table_config(&table_root_url);
 
-    let _scan_batches: DeltaResult<Vec<_>> =
+    let _scan_batches: KernelResult<Vec<_>> =
         table_changes_action_iter(engine, &table_config, commits, get_schema(), None)
             .unwrap()
             .try_collect();
@@ -2081,7 +2078,7 @@ async fn print_table_info_post_phase1() {
     let table_root_url = url::Url::from_directory_path(mock_table.table_root()).unwrap();
     let table_config = get_default_table_config(&table_root_url);
 
-    let _scan_batches: DeltaResult<Vec<_>> =
+    let _scan_batches: KernelResult<Vec<_>> =
         table_changes_action_iter(engine, &table_config, commits, get_schema(), None)
             .unwrap()
             .try_collect();
@@ -2125,7 +2122,7 @@ async fn print_table_info_post_phase1_has_cdc() {
     let table_root_url = url::Url::from_directory_path(mock_table.table_root()).unwrap();
     let table_config = get_default_table_config(&table_root_url);
 
-    let _scan_batches: DeltaResult<Vec<_>> =
+    let _scan_batches: KernelResult<Vec<_>> =
         table_changes_action_iter(engine, &table_config, commits, get_schema(), None)
             .unwrap()
             .try_collect();
@@ -2180,7 +2177,7 @@ async fn print_table_info_post_phase1_has_dv() {
 
     let table_root_url = url::Url::from_directory_path(mock_table.table_root()).unwrap();
     let table_config = get_default_table_config(&table_root_url);
-    let _scan_batches: DeltaResult<Vec<_>> =
+    let _scan_batches: KernelResult<Vec<_>> =
         table_changes_action_iter(engine, &table_config, commits, get_schema(), None)
             .unwrap()
             .try_collect();

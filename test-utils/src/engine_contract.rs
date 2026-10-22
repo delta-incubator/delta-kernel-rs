@@ -20,10 +20,10 @@ use delta_kernel::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use delta_kernel::parquet::arrow::arrow_writer::ArrowWriter;
 use delta_kernel::parquet::arrow::{ARROW_SCHEMA_META_KEY, PARQUET_FIELD_ID_META_KEY};
 use delta_kernel::schema::{
-    ColumnMetadataKey, DataType, MetadataColumnSpec, PrimitiveType, SchemaRef, StructField,
-    StructType,
+    schema_ref, ColumnMetadataKey, DataType, MetadataColumnSpec, PrimitiveType, SchemaRef,
+    StructField, StructType,
 };
-use delta_kernel::{DeltaResult, Engine, EngineData, FileMeta, JsonHandler, ParquetHandler};
+use delta_kernel::{Engine, EngineData, FileMeta, JsonHandler, KernelResult, ParquetHandler};
 use itertools::Itertools;
 use tempfile::{tempdir, NamedTempFile};
 use url::Url;
@@ -111,13 +111,10 @@ pub fn assert_json_handler_file_path_contract(
     files: &[FileMeta],
     expected_rows: &[(i32, String)],
 ) {
-    let schema = Arc::new(
-        StructType::try_new([
-            StructField::not_null("x", DataType::INTEGER),
-            StructField::create_metadata_column("_file", MetadataColumnSpec::FilePath),
-        ])
-        .unwrap(),
-    );
+    let schema = schema_ref! {
+        not_null "x": INTEGER,
+        (StructField::create_metadata_column("_file", MetadataColumnSpec::FilePath)),
+    };
 
     let batches = handler.read_json_files(files, schema, None).unwrap();
 
@@ -136,7 +133,7 @@ pub fn assert_json_handler_file_path_contract(
             &mut self,
             row_count: usize,
             getters: &[&'a dyn GetData<'a>],
-        ) -> DeltaResult<()> {
+        ) -> KernelResult<()> {
             for row in 0..row_count {
                 self.rows
                     .push((getters[0].get(row, "x")?, getters[1].get(row, "_file")?));

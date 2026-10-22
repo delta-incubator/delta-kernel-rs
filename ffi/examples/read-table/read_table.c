@@ -11,6 +11,19 @@
 #include "kernel_schema_visitor.h"
 #include "kernel_utils.h"
 
+static void frame_callback(FrameEvent event)
+{
+  switch (event.tag) {
+    case FrameEventOPEN:
+      (void)event.open.span_id;
+      (void)event.open.name;
+      break;
+    case FrameEventCLOSE:
+      (void)event.close.span_id;
+      break;
+  }
+}
+
 // Print the content of a selection vector if `VERBOSE` is defined in read_table.h
 void print_selection_vector(const char* indent, const KernelBoolSlice* selection_vec)
 {
@@ -269,6 +282,56 @@ void free_partition_list(PartitionList* list) {
   free(list);
 }
 
+// Visitor for `visit_file_size_histogram`. The three slices are equal-length and valid only for
+// the duration of this call, so we read (never retain) them here. The boundary is the inclusive
+// lower bound of each bin.
+void print_file_size_histogram(
+  void* engine_context,
+  KernelI64Slice sorted_bin_boundaries,
+  KernelI64Slice file_counts,
+  KernelI64Slice total_bytes)
+{
+  (void)engine_context;
+  int64_t total_files = 0;
+  int64_t total_size = 0;
+  for (uintptr_t i = 0; i < file_counts.len; i++) {
+    total_files += file_counts.ptr[i];
+    total_size += total_bytes.ptr[i];
+  }
+  print_diag("  histogram: %" PRIuPTR " bins, %" PRId64 " files, %" PRId64 " bytes total\n",
+             sorted_bin_boundaries.len, total_files, total_size);
+  for (uintptr_t i = 0; i < sorted_bin_boundaries.len; i++) {
+    if (file_counts.ptr[i] == 0) {
+      continue; // skip empty bins to keep the output readable
+    }
+    print_diag("    bin [>= %" PRId64 " bytes]: %" PRId64 " files, %" PRId64 " bytes\n",
+               sorted_bin_boundaries.ptr[i], file_counts.ptr[i], total_bytes.ptr[i]);
+  }
+}
+
+// Exercise the CRC-derived file statistics: the scalar stats (num_files / table_size_bytes) and
+// the optional variable-length file-size histogram. Both read the snapshot's CRC without I/O and
+// report nothing when the snapshot has no complete CRC file stats. Output is diagnostic-only (see
+// print_diag / VERBOSE) so it does not perturb the example's golden test output; the FFI calls run
+// regardless, exercising the C-side path end to end.
+void print_snapshot_file_stats(SharedSnapshot* snapshot)
+{
+  print_diag("\nSnapshot file statistics (from CRC):\n");
+  OptionalValueFfiFileStats stats = snapshot_file_stats(snapshot);
+  if (stats.tag == SomeFfiFileStats) {
+    print_diag("  num_files: %" PRId64 ", table_size_bytes: %" PRId64 "\n",
+               stats.some.num_files, stats.some.table_size_bytes);
+  } else {
+    print_diag("  no scalar file stats\n");
+  }
+
+  // The visitor prints the histogram detail; kernel invokes it only when a histogram is present.
+  OptionalValueusize num_bins = visit_file_size_histogram(snapshot, NULL, print_file_size_histogram);
+  if (num_bins.tag != Someusize) {
+    print_diag("  no file size histogram\n");
+  }
+}
+
 static const char *LEVEL_STRING[] = {
   "ERROR", "WARN", "INFO", "DEBUG", "TRACE"
 };
@@ -320,8 +383,9 @@ int main(int argc, char* argv[])
 {
   char* requested_cols = NULL;
   bool use_arrow_metadata = false;
+  bool print_scan_schema = false;
   int c;
-  while ((c = getopt (argc, argv, "ac:")) != -1) {
+  while ((c = getopt (argc, argv, "ac:s")) != -1) {
     switch (c) {
     case 'a':
       // Use the Arrow batch-mode scan metadata path (scan_metadata_next_arrow) instead of
@@ -333,6 +397,11 @@ int main(int argc, char* argv[])
       break;
     case 'c':
       requested_cols = optarg;
+      break;
+    case 's':
+      // Print the scan's logical schema (scan_logical_schema) as "Scan schema". Useful to check
+      // that a schema requested with -c was honored.
+      print_scan_schema = true;
       break;
     case '?':
       if (optopt == 'c') {
@@ -353,7 +422,7 @@ int main(int argc, char* argv[])
   }
 
   if (optind != (argc - 1)) {
-    printf("Usage: %s [-a] [-c top_level_column1,top_level_column2] table/path\n", argv[0]);
+    printf("Usage: %s [-a] [-c top_level_column1,top_level_column2] [-s] table/path\n", argv[0]);
     return -1;
   }
 
@@ -377,12 +446,13 @@ int main(int argc, char* argv[])
 #else
   enable_event_tracing(tracing_callback, WARN);
 #endif
+  (void)enable_frame_reporting(frame_callback);
 
   KernelStringSlice table_path_slice = { table_path, strlen(table_path) };
 
-  ExternResultEngineBuilder engine_builder_res =
+  ExternResultHandleExclusiveEngineBuilder engine_builder_res =
     get_engine_builder(table_path_slice, allocate_error);
-  if (engine_builder_res.tag != OkEngineBuilder) {
+  if (engine_builder_res.tag != OkHandleExclusiveEngineBuilder) {
     print_error("Could not get engine builder.", (Error*)engine_builder_res.err);
     free_error((Error*)engine_builder_res.err);
     return -1;
@@ -392,13 +462,13 @@ int main(int argc, char* argv[])
   // keys accepted here come from object_store's configuration vocabulary (e.g. "aws_region",
   // "aws_access_key_id"). They are object-store-specific and only meaningful when the table URL
   // points at that backend -- for a local file:// table the setters have no effect.
-  EngineBuilder* engine_builder = engine_builder_res.ok;
-  if (!set_builder_opt(engine_builder, "aws_region", "us-west-2")) {
+  HandleExclusiveEngineBuilder engine_builder = engine_builder_res.ok;
+  if (!set_builder_opt(&engine_builder, "aws_region", "us-west-2")) {
     return -1;
   }
   // potentially set credentials here
-  // set_builder_opt(engine_builder, "aws_access_key_id" , "[redacted]");
-  // set_builder_opt(engine_builder, "aws_secret_access_key", "[redacted]");
+  // set_builder_opt(&engine_builder, "aws_access_key_id" , "[redacted]");
+  // set_builder_opt(&engine_builder, "aws_secret_access_key", "[redacted]");
   ExternResultHandleSharedExternEngine engine_res = builder_build(engine_builder);
 
   // alternately if we don't care to set any options on the builder:
@@ -413,8 +483,8 @@ int main(int argc, char* argv[])
 
   SharedExternEngine* engine = engine_res.ok;
 
-  ExternResultHandleMutableFfiSnapshotBuilder snapshot_builder_res = get_snapshot_builder(table_path_slice, engine);
-  if (snapshot_builder_res.tag != OkHandleMutableFfiSnapshotBuilder) {
+  ExternResultHandleExclusiveSnapshotBuilder snapshot_builder_res = get_snapshot_builder(table_path_slice, engine);
+  if (snapshot_builder_res.tag != OkHandleExclusiveSnapshotBuilder) {
     print_error("Failed to get snapshot builder.", (Error*)snapshot_builder_res.err);
     free_error((Error*)snapshot_builder_res.err);
     free_engine(engine);
@@ -436,10 +506,12 @@ int main(int argc, char* argv[])
   printf("version: %" PRIu64 "\n\n", v);
 
   CSchema *cschema = get_cschema(snapshot, engine);
-  print_cschema(cschema);
+  print_cschema("Schema", cschema);
 
   char* table_root = snapshot_table_root(snapshot, allocate_string);
   print_diag("Table root: %s\n", table_root);
+
+  print_snapshot_file_stats(snapshot);
 
   PartitionList* partition_cols = get_partition_list(snapshot);
 
@@ -486,6 +558,12 @@ int main(int argc, char* argv[])
 
   SharedSchema* logical_schema = scan_logical_schema(scan);
   SharedSchema* physical_schema = scan_physical_schema(scan);
+
+  if (print_scan_schema) {
+    CSchema* scan_cschema = build_cschema(logical_schema, engine);
+    print_cschema("Scan schema", scan_cschema);
+    free_cschema(scan_cschema);
+  }
   struct EngineContext context = {
     logical_schema,
     physical_schema,
