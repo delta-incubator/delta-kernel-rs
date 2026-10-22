@@ -448,7 +448,7 @@ struct LeafActions {
 }
 
 impl LeafActions {
-    /// Validates and reads all the leaves, with `read_schema` (see [`ManifestReadSchemas::leaf`]),
+    /// Validates and reads all the leaves, with `read_schema` (see [`ManifestReadSchema::leaf`]),
     /// stopping when `cancellation_token` is cancelled.
     ///
     /// # Errors
@@ -560,7 +560,7 @@ fn file_path_of(batch: &dyn EngineData) -> KernelResult<String> {
         .ok_or_else(|| KernelError::missing_data("AMT leaf manifest batch has no `_file` value"))
 }
 
-/// Captures the first row's [`FILE_PATH_COLUMN`] value; see [`file_path_of`].
+/// Captures the first row's [`LEAF_FILE_PATH_COLUMN`] value; see [`file_path_of`].
 #[derive(Default)]
 struct FilePathVisitor {
     file_path: Option<String>,
@@ -570,7 +570,7 @@ impl RowVisitor for FilePathVisitor {
     fn selected_column_names_and_types(&self) -> (&'static [ColumnName], &'static [DataType]) {
         static NAMES_AND_TYPES: LazyLock<ColumnNamesAndTypes> = LazyLock::new(|| {
             (
-                vec![ColumnName::new([FILE_PATH_COLUMN])],
+                vec![ColumnName::new([LEAF_FILE_PATH_COLUMN])],
                 vec![DataType::STRING],
             )
                 .into()
@@ -580,7 +580,7 @@ impl RowVisitor for FilePathVisitor {
 
     fn visit<'a>(&mut self, row_count: usize, getters: &[&'a dyn GetData<'a>]) -> KernelResult<()> {
         if row_count > 0 && self.file_path.is_none() {
-            self.file_path = getters[0].get_opt(0, FILE_PATH_COLUMN)?;
+            self.file_path = getters[0].get_opt(0, LEAF_FILE_PATH_COLUMN)?;
         }
         Ok(())
     }
@@ -1544,7 +1544,7 @@ mod tests {
             batches: None,
         };
         let schema = Arc::new(StructType::new_unchecked([StructField::nullable(
-            FILE_PATH_COLUMN,
+            LEAF_FILE_PATH_COLUMN,
             DataType::STRING,
         )]));
         let batch = engine
