@@ -2280,7 +2280,15 @@ async fn test_commit_cover(
         ..Default::default()
     })
     .await;
-    let cover = log_segment.find_commit_cover();
+    assert_cover(
+        &log_segment,
+        &log_segment.find_commit_cover(),
+        expected_files,
+    );
+}
+
+/// Asserts that `cover`, a commit cover of `log_segment`, reads exactly `expected_files` in order.
+fn assert_cover(log_segment: &LogSegment, cover: &[FileMeta], expected_files: &[ExpectedFile]) {
     // our test-utils include "_delta_log" in the path, which is already in log_segment.log_root, so
     // we don't use them. TODO: Unify this
     let expected_locations = expected_files.iter().map(|ef| match ef {
@@ -2297,6 +2305,61 @@ async fn test_commit_cover(
     for (location, expected_location) in cover.iter().zip(expected_locations) {
         assert_eq!(location.location, expected_location);
     }
+}
+
+// Compaction listing is disabled, so the compactions are added to the listed segment by hand.
+#[cfg(all(feature = "adaptive-metadata-in-dev", feature = "declarative-plans"))]
+#[rstest]
+#[case::replaces_spanning_compaction_with_commits(
+    2,
+    &[
+        ExpectedFile::Commit(4),
+        ExpectedFile::Commit(3),
+        ExpectedFile::Commit(2),
+        ExpectedFile::Compaction(0, 1),
+    ]
+)]
+#[case::spanning_compaction_end(
+    1,
+    &[
+        ExpectedFile::Commit(4),
+        ExpectedFile::Compaction(2, 3),
+        ExpectedFile::Commit(1),
+        ExpectedFile::Commit(0),
+    ]
+)]
+#[case::no_compaction_spans_version(
+    4,
+    &[ExpectedFile::Commit(4), ExpectedFile::Compaction(2, 3), ExpectedFile::Compaction(0, 1)]
+)]
+#[tokio::test]
+async fn commit_cover_reading_version_never_uses_a_compaction_spanning_it(
+    #[case] version: Version,
+    #[case] expected_files: &[ExpectedFile],
+) {
+    let mut log_segment = create_segment_for(LogSegmentConfig {
+        published_commit_versions: &[0, 1, 2, 3, 4],
+        ..Default::default()
+    })
+    .await;
+    let compaction = |lo: Version, hi: Version| {
+        let location = log_segment
+            .log_root
+            .join(&format!("{lo:020}.{hi:020}.compacted.json"))
+            .unwrap();
+        ParsedLogPath::try_from(FileMeta::new(location, 0, 100))
+            .unwrap()
+            .unwrap()
+    };
+    let compactions = vec![compaction(0, 1), compaction(2, 3)];
+    log_segment.listed.ascending_compaction_files = compactions;
+
+    let cover = log_segment
+        .find_commit_cover_paths_reading(version)
+        .into_iter()
+        .map(|path| path.location)
+        .collect_vec();
+    assert_cover(&log_segment, &cover, expected_files);
 }
 
 #[tokio::test]

@@ -947,10 +947,7 @@ impl LogSegment {
     /// commit. It also bounds the lookup to this snapshot: under time travel, a commit past the
     /// end version exists in storage but is not listed.
     #[cfg(feature = "adaptive-metadata-in-dev")]
-    pub(super) fn find_pointed_commit(
-        &self,
-        pointer: &LastManifestCommit,
-    ) -> Option<&ParsedLogPath> {
+    fn find_pointed_commit(&self, pointer: &LastManifestCommit) -> Option<&ParsedLogPath> {
         let version = Version::try_from(pointer.version).ok()?;
         let commits = &self.listed.ascending_commit_files;
         let index = commits
@@ -997,12 +994,38 @@ impl LogSegment {
     }
 
     fn find_commit_cover_paths(&self) -> Vec<ParsedLogPath> {
+        self.commit_cover_paths_using(self.listed.ascending_compaction_files.iter())
+    }
+
+    /// Like [`Self::find_commit_cover_paths`], but never uses a log compaction whose range contains
+    /// `version`, so the cover reads the commit at `version` itself.
+    #[cfg(all(feature = "adaptive-metadata-in-dev", feature = "declarative-plans"))]
+    fn find_commit_cover_paths_reading(&self, version: Version) -> Vec<ParsedLogPath> {
+        let spans_version = |compaction: &&ParsedLogPath| {
+            matches!(
+                compaction.file_type,
+                LogPathFileType::CompactedCommit { hi } if compaction.version <= version && version <= hi
+            )
+        };
+        self.commit_cover_paths_using(
+            self.listed
+                .ascending_compaction_files
+                .iter()
+                .filter(|compaction| !spans_version(compaction)),
+        )
+    }
+
+    /// The commit cover over this segment's commits and the ascending `compactions`.
+    fn commit_cover_paths_using<'a>(
+        &'a self,
+        compactions: impl Iterator<Item = &'a ParsedLogPath>,
+    ) -> Vec<ParsedLogPath> {
         // Create an iterator sorted in ascending order by (initial version, end version), e.g.
         // [00.json, 00.09.compacted.json, 00.99.compacted.json, 01.json, 02.json, ..., 10.json,
         //  10.19.compacted.json, 11.json, ...]
         let all_files = itertools::Itertools::merge_by(
             self.listed.ascending_commit_files.iter(),
-            self.listed.ascending_compaction_files.iter(),
+            compactions,
             |path_a, path_b| path_a.version <= path_b.version,
         );
 
