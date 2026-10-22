@@ -18,7 +18,7 @@ use delta_kernel::object_store::DynObjectStore;
 use delta_kernel::parquet::arrow::ArrowWriter;
 use delta_kernel::scan::state::ScanFile;
 use delta_kernel::scan::PartitionValuesOptions;
-use delta_kernel::schema::schema_ref;
+use delta_kernel::schema::{schema_ref, DataType, StructField};
 use delta_kernel::table_features::{get_any_level_column_physical_name, ColumnMappingMode};
 use delta_kernel::transaction::create_table::create_table;
 use delta_kernel::transaction::data_layout::DataLayout;
@@ -679,23 +679,37 @@ async fn offset_less_timestamp_partition_predicates_with_json_and_checkpoint(
 // Parallel scan, declarative scan, and scan.execute() require timezone support when the table is
 // timestamp partitioned.
 #[rstest]
+#[case::unpartitioned(vec![])]
+#[case::timestamp(vec![("ts", DataType::TIMESTAMP)])]
+#[case::timestamp_ntz(vec![("ts_ntz", DataType::TIMESTAMP_NTZ)])]
+#[case::integer(vec![("id", DataType::INTEGER)])]
+#[case::string(vec![("category", DataType::STRING)])]
 fn different_scans_require_timezone_support_only_for_timestamp_partitions(
     #[values("UTC", "America/Los_Angeles", "+05:30")] tz: &str,
     #[values(false, true)] parsed_struct: bool,
-    #[values(false, true)] timestamp_partitioned: bool,
+    #[case] partition_columns: Vec<(&str, DataType)>,
 ) {
-    let (engine, snapshot, _table) = test_context!(
-        LogState::with_latest_version(1).with_checkpoint_at([1]),
-        FeatureSet::empty(),
-        if timestamp_partitioned {
-            partitioned()
-        } else {
-            unpartitioned()
-        },
-        TableConfig::new().write_stats_as_struct(true),
-        version_latest(),
-    );
-    let engine = Arc::new(engine);
+    let timestamp_partitioned = partition_columns
+        .iter()
+        .any(|(_, data_type)| data_type == &DataType::TIMESTAMP);
+    let (partition_names, partition_fields): (Vec<_>, Vec<_>) = partition_columns
+        .into_iter()
+        .map(|(name, data_type)| (name, StructField::nullable(name, data_type)))
+        .unzip();
+    let table = TestTableBuilder::new()
+        .with_log_state(LogState::with_latest_version(1).with_checkpoint_at([1]))
+        .with_table_config(TableConfig::new().write_stats_as_struct(true))
+        .with_schema(schema_ref! {
+            ..(partition_fields),
+            nullable "value": INTEGER,
+        })
+        .with_partition_columns(partition_names)
+        .build()
+        .unwrap();
+    let engine = Arc::new(table.engine());
+    let snapshot = Snapshot::builder_for(table.table_root())
+        .build(engine.as_ref())
+        .unwrap();
     let options = if parsed_struct {
         PartitionValuesOptions::with_struct()
     } else {

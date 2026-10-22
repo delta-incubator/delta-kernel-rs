@@ -1715,8 +1715,8 @@ pub fn selection_vector(
 /// path must support applying it to offset-less timestamp partition values. Unsupported paths,
 /// such as parallel scans, use this check to return an error.
 ///
-/// NOTE: This is a conservative choice. The scan may not actually use the `TIMESTAMP` partition
-/// columns, for example when they are projected out.
+/// NOTE: This is a conservative choice. The read paths may not actually use the `TIMESTAMP`
+/// partition columns, for example when they are projected out.
 fn table_requires_timestamp_timezone_support(
     table_configuration: &TableConfiguration,
     partition_values: &PartitionValuesOptions,
