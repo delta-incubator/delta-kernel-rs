@@ -33,7 +33,7 @@ use crate::{
 /// Handler entry point selected for a read.
 #[derive(Clone, Copy)]
 enum ReadApi {
-    Plain,
+    Default,
     WithCancellation,
 }
 
@@ -62,7 +62,7 @@ fn start_read(
     let file = FileMeta::new(path.clone(), /* last_modified */ 0, /* size */ 0);
     let schema = LOG_METADATA_SCHEMA.clone();
     match (read, api) {
-        (Read::List, ReadApi::Plain) => {
+        (Read::List, ReadApi::Default) => {
             discard_read_values(engine.storage_handler().list_from(&path))
         }
         (Read::List, ReadApi::WithCancellation) => discard_read_values(
@@ -70,7 +70,7 @@ fn start_read(
                 .storage_handler()
                 .list_from_with_cancellation(&path, token),
         ),
-        (Read::Hint | Read::Crc, ReadApi::Plain) => discard_read_values(
+        (Read::Hint | Read::Crc, ReadApi::Default) => discard_read_values(
             engine
                 .storage_handler()
                 .read_files(vec![(path, /* byte_range */ None)]),
@@ -80,11 +80,11 @@ fn start_read(
                 .storage_handler()
                 .read_files_with_cancellation(vec![(path, /* byte_range */ None)], token),
         ),
-        (Read::Json, ReadApi::Plain) => discard_read_values(engine.json_handler().read_json_files(
-            &[file],
-            schema,
-            /* predicate */ None,
-        )),
+        (Read::Json, ReadApi::Default) => discard_read_values(
+            engine
+                .json_handler()
+                .read_json_files(&[file], schema, /* predicate */ None),
+        ),
         (Read::Json, ReadApi::WithCancellation) => {
             discard_read_values(engine.json_handler().read_json_files_with_cancellation(
                 &[file],
@@ -93,7 +93,7 @@ fn start_read(
                 token,
             ))
         }
-        (Read::Parquet, ReadApi::Plain) => discard_read_values(
+        (Read::Parquet, ReadApi::Default) => discard_read_values(
             engine
                 .parquet_handler()
                 .read_parquet_files(&[file], schema, /* predicate */ None),
@@ -108,7 +108,7 @@ fn start_read(
                     token,
                 ),
         ),
-        (Read::Footer, ReadApi::Plain) => {
+        (Read::Footer, ReadApi::Default) => {
             engine.parquet_handler().read_parquet_footer(&file)?;
             Ok(Box::new(std::iter::once(Ok(()))))
         }
@@ -140,7 +140,7 @@ fn engine_reads_inherit_scope_and_explicit_tokens_override_it(
         Read::Footer
     )]
     read: Read,
-    #[values(ReadApi::Plain, ReadApi::WithCancellation)] api: ReadApi,
+    #[values(ReadApi::Default, ReadApi::WithCancellation)] api: ReadApi,
     #[values(false, true)] cancelled: bool,
 ) {
     let reads = RecordingReads::new(None);
@@ -184,7 +184,7 @@ fn iterators_keep_scope_after_engine_is_dropped(
     let token = Arc::new(TestCancellationToken::default());
     let mut iter = {
         let engine = CancellableEngine::new(&SyncEngine::new(), token.clone());
-        start_read(&engine, read, ReadApi::Plain, None).unwrap()
+        start_read(&engine, read, ReadApi::Default, None).unwrap()
     };
     if cancel {
         token.cancel();
@@ -222,7 +222,7 @@ fn metered_engine_preserves_operation_token() {
         &SyncEngine::new(),
         token.clone(),
     )));
-    let mut iter = start_read(&engine, Read::Json, ReadApi::Plain, None).unwrap();
+    let mut iter = start_read(&engine, Read::Json, ReadApi::Default, None).unwrap();
     token.cancel();
     assert!(matches!(iter.next(), Some(Err(KernelError::Cancelled))));
 }
@@ -299,7 +299,7 @@ fn nested_reads_override_tokens_but_head_checks_each_wrapper_and_writes_stay_uns
         &cancelled_engine,
         Arc::new(TestCancellationToken::default()),
     );
-    start_read(&rebound_engine, Read::Json, ReadApi::Plain, None)
+    start_read(&rebound_engine, Read::Json, ReadApi::Default, None)
         .unwrap()
         .next()
         .unwrap()
