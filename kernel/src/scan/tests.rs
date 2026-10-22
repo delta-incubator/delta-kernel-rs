@@ -2,14 +2,17 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use ::test_utils::table_builder::{LogState, TestTableBuilder};
+use ::test_utils::table_builder::{FeatureSet, LogState, TestTableBuilder, VersionTarget};
 use ::test_utils::{assert_result_error_with_message, get_column, load_test_data};
 use bytes::Bytes;
 use rstest::rstest;
 use url::Url;
 
 use super::*;
-use crate::actions::{MAX_VALUES, MIN_VALUES, NULL_COUNT, NUM_RECORDS, STATS_PARSED};
+use crate::actions::{
+    CHECKPOINT_METADATA_NAME, MAX_VALUES, MIN_VALUES, NULL_COUNT, NUM_RECORDS, SIDECAR_NAME,
+    STATS_PARSED,
+};
 use crate::arrow::array::{Array, BooleanArray, Int64Array, StringArray, StructArray};
 use crate::arrow::compute::filter_record_batch;
 use crate::arrow::datatypes::{DataType as ArrowDataType, Field, Fields, Schema as ArrowSchema};
@@ -1765,6 +1768,14 @@ impl RecordingParquetHandler {
     fn take_reads(&self) -> Vec<RecordedParquetRead> {
         std::mem::take(&mut *self.reads.lock().unwrap())
     }
+
+    /// The top-level column names of each recorded read.
+    fn take_read_columns(&self) -> Vec<Vec<String>> {
+        self.take_reads()
+            .iter()
+            .map(|read| read.physical_schema.field_names().cloned().collect())
+            .collect()
+    }
 }
 
 impl ParquetHandler for RecordingParquetHandler {
@@ -1842,24 +1853,28 @@ fn scan_execute_passes_scan_file_modification_time_to_parquet_handler() {
     assert_eq!(actual, expected);
 }
 
-#[derive(Clone, Copy)]
 enum CheckpointReadPath {
-    FreshLoad,
+    Load(VersionTarget),
     CheckpointResult,
-    IncrementalUpdate,
-    TimeTravel,
 }
 
-/// A kernel-written V1 checkpoint has an all-null `sidecar` column, but no `checkpointMetadata`
-/// column, so a scan reads it with one parquet read and no sidecar lookup.
 #[rstest]
-#[case::fresh_load_from_last_checkpoint(CheckpointReadPath::FreshLoad)]
+#[case::fresh_load_from_last_checkpoint(CheckpointReadPath::Load(VersionTarget::Latest))]
 #[case::snapshot_returned_by_checkpoint(CheckpointReadPath::CheckpointResult)]
-#[case::incremental_update(CheckpointReadPath::IncrementalUpdate)]
-#[case::time_travel_to_checkpoint(CheckpointReadPath::TimeTravel)]
-fn scan_reads_kernel_v1_checkpoint_once(#[case] read_path: CheckpointReadPath) {
+#[case::incremental_update(CheckpointReadPath::Load(VersionTarget::IncrementalToLatest { from: 0 }))]
+#[case::time_travel_to_checkpoint(CheckpointReadPath::Load(VersionTarget::AtVersion(1)))]
+fn scan_looks_up_kernel_checkpoint_sidecars_only_if_v2(
+    #[case] read_path: CheckpointReadPath,
+    #[values(false, true)] v2_checkpoint: bool,
+) {
+    let features = FeatureSet::empty();
     let table = TestTableBuilder::new()
         .with_log_state(LogState::with_latest_version(2).with_checkpoint_at([1]))
+        .with_features(if v2_checkpoint {
+            features.v2_checkpoint()
+        } else {
+            features
+        })
         .build()
         .unwrap();
     let sync = Arc::new(SyncEngine::new_with_store(table.store().clone()));
@@ -1867,26 +1882,34 @@ fn scan_reads_kernel_v1_checkpoint_once(#[case] read_path: CheckpointReadPath) {
     let engine = DelegatingEngine::new(sync).with_parquet_handler(recorder.clone());
     let table_root = table.table_root();
     let snapshot = match read_path {
-        CheckpointReadPath::FreshLoad => Snapshot::builder_for(table_root).build(&engine).unwrap(),
+        CheckpointReadPath::Load(target) => {
+            ::test_utils::build_snapshot!(target, table_root, &engine)
+        }
         CheckpointReadPath::CheckpointResult => {
             let latest = Snapshot::builder_for(table_root).build(&engine).unwrap();
+            recorder.take_reads();
             let (result, checkpointed) = latest.checkpoint(&engine, None).unwrap();
             assert_eq!(result, CheckpointWriteResult::Written);
+            let sidecar_lookups = recorder
+                .take_read_columns()
+                .iter()
+                .filter(|columns| columns[..] == [SIDECAR_NAME])
+                .count();
+            assert_eq!(sidecar_lookups, usize::from(v2_checkpoint));
             checkpointed
         }
-        CheckpointReadPath::IncrementalUpdate => {
-            let base = Snapshot::builder_for(table_root)
-                .at_version(0)
-                .build(&engine)
-                .unwrap();
-            Snapshot::builder_from(base).build(&engine).unwrap()
-        }
-        CheckpointReadPath::TimeTravel => Snapshot::builder_for(table_root)
-            .at_version(1)
-            .build(&engine)
-            .unwrap(),
     };
-    assert!(snapshot.log_segment().checkpoint_version.is_some());
+    let checkpoint = &snapshot.log_segment().listed.checkpoint_parts[0].location;
+    let footer_schema = engine
+        .parquet_handler()
+        .read_parquet_footer(checkpoint)
+        .unwrap()
+        .schema;
+    assert!(footer_schema.contains(SIDECAR_NAME));
+    assert_eq!(
+        footer_schema.contains(CHECKPOINT_METADATA_NAME),
+        v2_checkpoint
+    );
     recorder.take_reads();
 
     let scan = snapshot.scan_builder().build().unwrap();
@@ -1894,12 +1917,12 @@ fn scan_reads_kernel_v1_checkpoint_once(#[case] read_path: CheckpointReadPath) {
         scan_metadata.unwrap();
     }
 
-    let read_columns: Vec<Vec<String>> = recorder
-        .take_reads()
-        .iter()
-        .map(|read| read.physical_schema.field_names().cloned().collect())
-        .collect();
-    assert_eq!(read_columns, [[ADD_NAME]]);
+    let expected_reads: &[&[&str]] = if v2_checkpoint {
+        &[&[SIDECAR_NAME], &[ADD_NAME]]
+    } else {
+        &[&[ADD_NAME]]
+    };
+    assert_eq!(recorder.take_read_columns(), expected_reads);
 }
 
 #[rstest]

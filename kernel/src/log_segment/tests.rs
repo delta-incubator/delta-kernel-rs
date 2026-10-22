@@ -3745,9 +3745,7 @@ async fn test_get_file_actions_schema_multi_part_v1(#[case] use_hint: bool) -> K
     Ok(())
 }
 
-/// The checkpoint holds a `sidecar` action, so a sidecar lookup would find it. Only a schema with
-/// a `checkpointMetadata` column, from the `_last_checkpoint` hint or from the footer, leads to the
-/// lookup.
+/// The checkpoint holds a `sidecar` action, so a sidecar lookup would find it.
 #[rstest]
 #[tokio::test]
 async fn test_sidecar_lookup_requires_checkpoint_metadata_column(
@@ -3764,12 +3762,9 @@ async fn test_sidecar_lookup_requires_checkpoint_metadata_column(
         sidecar_name,
     )
     .await?;
-    let checkpoint_fields: &[&str] = if has_checkpoint_metadata {
-        &[ADD_NAME, SIDECAR_NAME, CHECKPOINT_METADATA_NAME]
-    } else {
-        &[ADD_NAME, SIDECAR_NAME]
-    };
-    let checkpoint_schema = get_all_actions_schema().project(checkpoint_fields)?;
+    let mut checkpoint_fields = vec![ADD_NAME, SIDECAR_NAME];
+    checkpoint_fields.extend(has_checkpoint_metadata.then_some(CHECKPOINT_METADATA_NAME));
+    let checkpoint_schema = get_all_actions_schema().project(&checkpoint_fields)?;
     let checkpoint_name = "00000000000000000001.checkpoint.parquet";
     add_checkpoint_to_store(
         &store,

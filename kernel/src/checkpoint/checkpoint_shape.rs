@@ -118,7 +118,6 @@ impl CheckpointShape {
                     Some(schema) => schema,
                     None => read_parquet_footer_schema(exec, root_checkpoint.clone())?,
                 };
-                // A checkpoint that cannot reference sidecars holds its file actions inline.
                 if !LogSegment::schema_may_reference_sidecars(&cp_schema) {
                     return Ok(Self::new_leaf(needs_leaf_schema.then_some(cp_schema)));
                 }
@@ -317,8 +316,8 @@ mod tests {
 
     use super::*;
     use crate::actions::{
-        CheckpointMetadata, Sidecar, ADD_NAME, MAX_VALUES, MIN_VALUES, NUM_RECORDS,
-        SIDECAR_FILE_SCHEMA_TAG, STATS_PARSED,
+        CheckpointMetadata, Sidecar, ADD_NAME, CHECKPOINT_METADATA_NAME, MAX_VALUES, MIN_VALUES,
+        NUM_RECORDS, SIDECAR_FILE_SCHEMA_TAG, STATS_PARSED,
     };
     use crate::engine::sync::plan::SyncPlanExecutor;
     use crate::engine::sync::SyncEngine;
@@ -330,7 +329,7 @@ mod tests {
     use crate::unit_test_utils::{
         copy_test_table, create_log_path, create_log_path_with_size, load_test_table,
     };
-    use crate::KernelResult;
+    use crate::{Engine, KernelResult};
 
     /// Counts I/O operations and verifies that sidecar discovery queries filter out null paths.
     struct CountingExecutor {
@@ -612,30 +611,76 @@ mod tests {
         );
     }
 
-    /// Kernel writes an all-null `sidecar` column into V1 and V2 checkpoints, but only V2
+    /// A hint without `sidecarFiles` (long lists are dropped) falls back to its `checkpointSchema`,
+    /// which must still lead to the drain.
+    #[test]
+    fn manifest_hint_without_sidecar_files_drains_by_hint_schema() {
+        let (_engine, snapshot, _tempdir) =
+            load_test_table("v2-parquet-sidecars-struct-stats-only").unwrap();
+        let mut log_segment = snapshot.log_segment().clone();
+        let hint = log_segment.last_checkpoint_metadata.as_mut().unwrap();
+        hint.v2_checkpoint.as_mut().unwrap().sidecar_files = None;
+        let snapshot = Snapshot::new(log_segment, snapshot.table_configuration().clone()).unwrap();
+        let exec = CountingExecutor::new();
+
+        let shape = CheckpointShape::try_new(&exec, &snapshot).unwrap();
+
+        assert_eq!(shape.checkpoint_type, CheckpointType::Manifest);
+        assert_eq!(exec.query_scans.load(Ordering::Relaxed), 1);
+        assert_eq!(exec.footer_reads.load(Ordering::Relaxed), 0);
+    }
+
+    /// Kernel writes an all-null `sidecar` column into V1 and inline V2 checkpoints, but only V2
     /// checkpoints have a `checkpointMetadata` column.
     #[rstest]
-    #[case::v1(FeatureSet::new(), 0)]
-    #[case::v2(FeatureSet::new().v2_checkpoint(), 1)]
     fn kernel_checkpoint_drains_sidecar_column_only_if_v2(
-        #[case] features: FeatureSet,
-        #[case] expected_drains: usize,
+        #[values(false, true)] v2_checkpoint: bool,
+        #[values(false, true)] schema_from_hint: bool,
     ) {
+        let features = FeatureSet::empty();
         let table = TestTableBuilder::new()
             .with_log_state(LogState::with_latest_version(1).with_checkpoint_at([1]))
-            .with_features(features)
+            .with_features(if v2_checkpoint {
+                features.v2_checkpoint()
+            } else {
+                features
+            })
             .build()
             .unwrap();
         let engine = SyncEngine::new_with_store(table.store().clone());
         let snapshot = Snapshot::builder_for(table.table_root())
             .build(&engine)
             .unwrap();
+        let mut log_segment = snapshot.log_segment().clone();
+        let checkpoint = &log_segment.listed.checkpoint_parts[0].location;
+        let footer_schema = engine
+            .parquet_handler()
+            .read_parquet_footer(checkpoint)
+            .unwrap()
+            .schema;
+        assert!(footer_schema.contains(SIDECAR_NAME));
+        assert_eq!(
+            footer_schema.contains(CHECKPOINT_METADATA_NAME),
+            v2_checkpoint
+        );
+        if schema_from_hint {
+            let hint = log_segment.last_checkpoint_metadata.as_mut().unwrap();
+            hint.checkpoint_schema = Some(footer_schema);
+        }
+        let snapshot = Snapshot::new(log_segment, snapshot.table_configuration().clone()).unwrap();
         let exec = CountingExecutor::wrapping(SyncPlanExecutor::new(Some(table.store().clone())));
 
-        let shape = CheckpointShape::try_new(&exec, snapshot.as_ref()).unwrap();
+        let shape = CheckpointShape::try_new(&exec, &snapshot).unwrap();
 
         assert_eq!(shape.checkpoint_type, CheckpointType::Leaf);
-        assert_eq!(exec.query_scans.load(Ordering::Relaxed), expected_drains);
+        assert_eq!(
+            exec.query_scans.load(Ordering::Relaxed),
+            usize::from(v2_checkpoint)
+        );
+        assert_eq!(
+            exec.footer_reads.load(Ordering::Relaxed),
+            usize::from(!schema_from_hint)
+        );
     }
 
     /// Builds a `LogSegment` whose applicable hint carries `v2Checkpoint.sidecarFiles == Some([])`

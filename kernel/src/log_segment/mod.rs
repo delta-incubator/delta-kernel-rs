@@ -1131,11 +1131,11 @@ impl LogSegment {
     /// - No checkpoint parts: return (None, [])
     /// - Multi-part (always V1, no sidecars): return checkpoint schema directly
     /// - UUID-named JSON (always V2): extract sidecars, read first sidecar's schema
-    /// - Classic-named or UUID-named parquet (V1 or V2): read checkpoint schema from hint or
-    ///   footer, then check whether it can reference sidecars (see
-    ///   [`Self::schema_may_reference_sidecars`])
-    ///   - Can reference sidecars (V2): extract sidecars, read first sidecar's schema
-    ///   - Cannot reference sidecars: use checkpoint schema directly
+    /// - Classic-named parquet (V1 or V2) or UUID-named parquet (V2): read the checkpoint schema
+    ///   from the hint or footer, then check [`Self::schema_may_reference_sidecars`]
+    ///   - Can reference sidecars: extract sidecars and read the first sidecar's schema, or use the
+    ///     checkpoint schema if there are none
+    ///   - Cannot reference sidecars: use the checkpoint schema directly
     fn get_file_actions_schema_and_sidecars(
         &self,
         engine: &dyn Engine,
@@ -1574,9 +1574,9 @@ impl LogSegment {
     }
 
     /// Whether a parquet checkpoint with this schema can reference sidecar files. Only V2 spec
-    /// checkpoints may hold `sidecar` actions, and each one holds a `checkpointMetadata` action, so
-    /// a checkpoint without a `checkpointMetadata` column cannot. A V1 spec checkpoint can still
-    /// have an all-null `sidecar` column.
+    /// checkpoints may hold `sidecar` actions, and every V2 spec checkpoint holds a
+    /// `checkpointMetadata` action, so a checkpoint without a `checkpointMetadata` column cannot.
+    /// A V1 spec checkpoint can still have an all-null `sidecar` column.
     pub(crate) fn schema_may_reference_sidecars(checkpoint_schema: &StructType) -> bool {
         checkpoint_schema.contains(SIDECAR_NAME)
             && checkpoint_schema.contains(CHECKPOINT_METADATA_NAME)
