@@ -96,7 +96,7 @@ impl CommitRangeBuilder {
     /// When `true`, [`Self::build`] requires the requested start version to be present and the
     /// listed commits to be contiguous. When `false`, [`Self::build`] materializes whatever
     /// commits are listed in the range without validating the start version, contiguity, or
-    /// commit count. Disabling validation is only supported for path-based builders
+    /// end version. Disabling validation is only supported for path-based builders
     /// ([`CommitRange::builder_for`]).
     ///
     /// Ranges built without validation support raw [`CommitRange::commit_files`] enumeration,
