@@ -59,7 +59,7 @@ fn start_read(
     } else {
         log.join(file_name)?
     };
-    let file = FileMeta::new(path.clone(), 0, 0);
+    let file = FileMeta::new(path.clone(), /* last_modified */ 0, /* size */ 0);
     let schema = LOG_METADATA_SCHEMA.clone();
     match (read, api) {
         (Read::List, ReadApi::Plain) => {
@@ -70,31 +70,43 @@ fn start_read(
                 .storage_handler()
                 .list_from_with_cancellation(&path, token),
         ),
-        (Read::Hint | Read::Crc, ReadApi::Plain) => {
-            discard_read_values(engine.storage_handler().read_files(vec![(path, None)]))
-        }
+        (Read::Hint | Read::Crc, ReadApi::Plain) => discard_read_values(
+            engine
+                .storage_handler()
+                .read_files(vec![(path, /* byte_range */ None)]),
+        ),
         (Read::Hint | Read::Crc, ReadApi::WithCancellation) => discard_read_values(
             engine
                 .storage_handler()
-                .read_files_with_cancellation(vec![(path, None)], token),
+                .read_files_with_cancellation(vec![(path, /* byte_range */ None)], token),
         ),
-        (Read::Json, ReadApi::Plain) => {
-            discard_read_values(engine.json_handler().read_json_files(&[file], schema, None))
+        (Read::Json, ReadApi::Plain) => discard_read_values(engine.json_handler().read_json_files(
+            &[file],
+            schema,
+            /* predicate */ None,
+        )),
+        (Read::Json, ReadApi::WithCancellation) => {
+            discard_read_values(engine.json_handler().read_json_files_with_cancellation(
+                &[file],
+                schema,
+                /* predicate */ None,
+                token,
+            ))
         }
-        (Read::Json, ReadApi::WithCancellation) => discard_read_values(
-            engine
-                .json_handler()
-                .read_json_files_with_cancellation(&[file], schema, None, token),
-        ),
         (Read::Parquet, ReadApi::Plain) => discard_read_values(
             engine
                 .parquet_handler()
-                .read_parquet_files(&[file], schema, None),
+                .read_parquet_files(&[file], schema, /* predicate */ None),
         ),
         (Read::Parquet, ReadApi::WithCancellation) => discard_read_values(
             engine
                 .parquet_handler()
-                .read_parquet_files_with_cancellation(&[file], schema, None, token),
+                .read_parquet_files_with_cancellation(
+                    &[file],
+                    schema,
+                    /* predicate */ None,
+                    token,
+                ),
         ),
         (Read::Footer, ReadApi::Plain) => {
             engine.parquet_handler().read_parquet_footer(&file)?;
@@ -116,7 +128,7 @@ fn discard_read_values<T: 'static>(
     Ok(Box::new(result?.map(|item| item.map(|_| ()))))
 }
 
-/// Checks token identity for inherited reads and explicit overrides across the read handlers.
+/// Checks that reads inherit the token bound to `CancellableEngine` unless explicitly overridden.
 #[rstest]
 fn engine_reads_inherit_scope_and_explicit_tokens_override_it(
     #[values(
@@ -614,6 +626,52 @@ fn post_build_metadata_reads_inherit_operation_token(
     }
     assert_eq!(*reads.events.lock().unwrap(), [Read::Json]);
     load(reads.inner.as_ref()).unwrap();
+}
+
+/// Checks that cancelling a JSON read after successful batches terminates its iterator.
+#[rstest]
+fn json_iterator_stops_after_mid_stream_cancellation(#[values(false, true)] cancel: bool) {
+    let token = Arc::new(TestCancellationToken::default());
+    let engine = CancellableEngine::new(&SyncEngine::new(), token.clone());
+    let log = try_parse_uri("tests/data/table-with-cdf")
+        .unwrap()
+        .join("_delta_log/")
+        .unwrap();
+    let files: Vec<_> = (0..5)
+        .map(|version| {
+            FileMeta::new(
+                log.join(&format!("{version:020}.json")).unwrap(),
+                /* last_modified */ 0,
+                /* size */ 0,
+            )
+        })
+        .collect();
+    let mut iter = engine
+        .json_handler()
+        .read_json_files(
+            &files,
+            LOG_METADATA_SCHEMA.clone(),
+            /* predicate */ None,
+        )
+        .unwrap();
+    for _ in 0..3 {
+        iter.next()
+            .expect("fixture must supply three successful batches")
+            .unwrap();
+    }
+    if cancel {
+        token.cancel();
+        assert!(matches!(iter.next(), Some(Err(KernelError::Cancelled))));
+    } else {
+        iter.next()
+            .expect("fixture must have more batches after the cancellation point")
+            .unwrap();
+        for batch in iter.by_ref() {
+            batch.unwrap();
+        }
+    }
+    assert!(iter.next().is_none());
+    assert!(iter.next().is_none());
 }
 
 /// Leaves declarative protocol and metadata replay independent of the wrapper's read token.

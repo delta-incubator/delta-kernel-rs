@@ -97,12 +97,16 @@ fn stale_crc_replay_keeps_builder_token(
     assert_eq!(events.iter().filter(|read| **read == Read::Json).count(), 1);
 }
 
-/// Stops on a cancelled newer CRC but replays malformed CRC content from the retained base.
+/// Verifies JSON fallback for a malformed newer CRC during an incremental snapshot build.
+/// A cancelled CRC read stops the build before reading its contents.
 #[rstest]
 #[case::malformed(false, false)]
 #[case::engine_cancellation(true, false)]
 #[case::caller_token_cancellation(true, true)]
-fn newer_disk_crc_failure_with_retained_base(#[case] cancel_crc: bool, #[case] bind_token: bool) {
+fn only_cancelled_crc_read_blocks_incremental_snapshot_build(
+    #[case] cancel_crc: bool,
+    #[case] bind_token: bool,
+) {
     let (url, _temp) = stale_crc_table();
     let base = Snapshot::builder_for(&url)
         .at_version(0)
