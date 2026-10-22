@@ -7,7 +7,7 @@ use delta_kernel::schema::{
 use delta_kernel::snapshot::Snapshot;
 use delta_kernel::table_features::{ColumnMappingMode, TableFeature};
 use delta_kernel::transaction::create_table::create_table;
-use delta_kernel::DeltaResult;
+use delta_kernel::KernelResult;
 use rstest::rstest;
 use serde_json::json;
 use test_utils::test_table_setup;
@@ -41,12 +41,12 @@ use test_utils::test_table_setup;
 fn v3_create_table_rejects_incompatible_props(
     #[case] extra_props: &[(&str, &str)],
     #[case] err_substring: &str,
-) -> DeltaResult<()> {
+) -> KernelResult<()> {
     let (_temp_dir, table_path, engine) = test_table_setup()?;
     let mut props: Vec<(&str, &str)> = vec![("delta.enableIcebergCompatV3", "true")];
     props.extend_from_slice(extra_props);
 
-    let err = create_table(&table_path, super::simple_schema()?, "Test/1.0")
+    let err = create_table(&table_path, super::simple_schema()?, "Test/1.0", true)
         .with_table_properties(props)
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))
         .unwrap_err()
@@ -73,14 +73,14 @@ fn v3_create_table_rejects_incompatible_props(
     "m",
     MapType::new(DataType::STRING, DataType::VOID, true),
 ))]
-fn v3_create_table_rejects_void_column(#[case] void_field: StructField) -> DeltaResult<()> {
+fn v3_create_table_rejects_void_column(#[case] void_field: StructField) -> KernelResult<()> {
     let (_temp_dir, table_path, engine) = test_table_setup()?;
     let schema = schema_ref! {
         nullable "id": LONG,
         (void_field),
     };
 
-    let err = create_table(&table_path, schema, "Test/1.0")
+    let err = create_table(&table_path, schema, "Test/1.0", true)
         .with_table_properties([("delta.enableIcebergCompatV3", "true")])
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))
         .unwrap_err()
@@ -98,7 +98,7 @@ fn v3_create_table_rejects_void_column(#[case] void_field: StructField) -> Delta
 fn v3_create_table_rejects_interval_column(
     #[values(DataType::INTERVAL_YEAR_MONTH, DataType::INTERVAL_DAY_TIME)] interval: DataType,
     #[values(false, true)] nested: bool,
-) -> DeltaResult<()> {
+) -> KernelResult<()> {
     let (_temp_dir, table_path, engine) = test_table_setup()?;
     let interval_field = if nested {
         StructField::nullable("nested", schema! { nullable "iv": (interval) })
@@ -110,7 +110,7 @@ fn v3_create_table_rejects_interval_column(
         (interval_field),
     };
 
-    let err = create_table(&table_path, schema, "Test/1.0")
+    let err = create_table(&table_path, schema, "Test/1.0", true)
         .with_table_properties([("delta.enableIcebergCompatV3", "true")])
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))
         .unwrap_err()
@@ -126,13 +126,13 @@ fn v3_create_table_rejects_interval_column(
 /// `delta.enableIcebergCompatV3=true` must not activate V3: column mapping stays off and
 /// no nested-id metadata is set on the Map field.
 #[test]
-fn v3_supported_but_not_enabled_skips_cm_and_nested_ids() -> DeltaResult<()> {
+fn v3_supported_but_not_enabled_skips_cm_and_nested_ids() -> KernelResult<()> {
     let (_temp_dir, table_path, engine) = test_table_setup()?;
     let schema = schema_ref! {
         nullable "data": { INTEGER => nullable [nullable INTEGER] },
     };
 
-    let _ = create_table(&table_path, schema, "Test/1.0")
+    let _ = create_table(&table_path, schema, "Test/1.0", true)
         .with_table_properties([("delta.feature.icebergCompatV3", "supported")])
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
         .commit(engine.as_ref())?;
@@ -173,14 +173,14 @@ fn v3_supported_but_not_enabled_skips_cm_and_nested_ids() -> DeltaResult<()> {
 /// and — critically — assigns `delta.columnMapping.nested.ids` to a Map column (regression guard
 /// for the nested-id gate that previously keyed only on V3).
 #[test]
-fn v2_create_table_enables_column_mapping_and_nested_ids() -> DeltaResult<()> {
+fn v2_create_table_enables_column_mapping_and_nested_ids() -> KernelResult<()> {
     let (_temp_dir, table_path, engine) = test_table_setup()?;
     let schema = schema_ref! {
         nullable "id": LONG,
         nullable "data": { STRING => nullable [nullable INTEGER] },
     };
 
-    let _ = create_table(&table_path, schema, "Test/1.0")
+    let _ = create_table(&table_path, schema, "Test/1.0", true)
         .with_table_properties([("delta.enableIcebergCompatV2", "true")])
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
         .commit(engine.as_ref())?;
@@ -222,10 +222,10 @@ fn v2_create_table_enables_column_mapping_and_nested_ids() -> DeltaResult<()> {
 }
 
 #[test]
-fn v2_create_table_rejects_active_deletion_vectors() -> DeltaResult<()> {
+fn v2_create_table_rejects_active_deletion_vectors() -> KernelResult<()> {
     let (_temp_dir, table_path, engine) = test_table_setup()?;
 
-    let err = create_table(&table_path, super::simple_schema()?, "Test/1.0")
+    let err = create_table(&table_path, super::simple_schema()?, "Test/1.0", true)
         .with_table_properties([
             ("delta.enableIcebergCompatV2", "true"),
             ("delta.enableDeletionVectors", "true"),
@@ -241,10 +241,10 @@ fn v2_create_table_rejects_active_deletion_vectors() -> DeltaResult<()> {
 }
 
 #[test]
-fn v2_create_table_allows_supported_inactive_deletion_vectors() -> DeltaResult<()> {
+fn v2_create_table_allows_supported_inactive_deletion_vectors() -> KernelResult<()> {
     let (_temp_dir, table_path, engine) = test_table_setup()?;
 
-    create_table(&table_path, super::simple_schema()?, "Test/1.0")
+    create_table(&table_path, super::simple_schema()?, "Test/1.0", true)
         .with_table_properties([
             ("delta.enableIcebergCompatV2", "true"),
             ("delta.feature.deletionVectors", "supported"),
@@ -255,7 +255,7 @@ fn v2_create_table_allows_supported_inactive_deletion_vectors() -> DeltaResult<(
 }
 
 #[test]
-fn v2_create_table_rejects_unsupported_type_change() -> DeltaResult<()> {
+fn v2_create_table_rejects_unsupported_type_change() -> KernelResult<()> {
     let (_temp_dir, table_path, engine) = test_table_setup()?;
     let widened = StructField::nullable("value", DataType::DOUBLE).add_metadata([(
         ColumnMetadataKey::TypeChanges.as_ref(),
@@ -267,7 +267,7 @@ fn v2_create_table_rejects_unsupported_type_change() -> DeltaResult<()> {
     )]);
     let schema = schema_ref! { (widened) };
 
-    let result = create_table(&table_path, schema, "Test/1.0")
+    let result = create_table(&table_path, schema, "Test/1.0", true)
         .with_table_properties([
             ("delta.enableIcebergCompatV2", "true"),
             ("delta.enableTypeWidening", "true"),

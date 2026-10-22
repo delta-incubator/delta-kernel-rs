@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use crate::expressions::{lit, Expression, ExpressionRef, ExpressionStructPatchBuilder, Scalar};
 use crate::schema::{DataType, SchemaRef, StructType};
 use crate::table_features::ColumnMappingMode;
-use crate::{DeltaResult, Error};
+use crate::{KernelError, KernelResult};
 
 /// A list of field transforms used to convert physical file data to logical scan output.
 // TODO: Rename this physical-to-logical read fixup concept in a follow-up PR. "Transform" used to
@@ -91,9 +91,9 @@ pub(crate) fn parse_partition_value(
     logical_schema: &SchemaRef,
     partition_values: &HashMap<String, String>,
     column_mapping_mode: ColumnMappingMode,
-) -> DeltaResult<(usize, (String, Scalar))> {
+) -> KernelResult<(usize, (String, Scalar))> {
     let Some(field) = logical_schema.field_at_index(field_idx) else {
-        return Err(Error::InternalError(format!(
+        return Err(KernelError::InternalError(format!(
             "out of bounds partition column field index {field_idx}"
         )));
     };
@@ -108,7 +108,7 @@ pub(crate) fn parse_partition_values(
     transform_spec: &TransformSpec,
     partition_values: &HashMap<String, String>,
     column_mapping_mode: ColumnMappingMode,
-) -> DeltaResult<HashMap<usize, (String, Scalar)>> {
+) -> KernelResult<HashMap<usize, (String, Scalar)>> {
     transform_spec
         .iter()
         .filter_map(|field_transform| match field_transform {
@@ -139,7 +139,7 @@ pub(crate) fn get_transform_expr(
     mut metadata_values: HashMap<usize, (String, Scalar)>,
     physical_schema: &StructType,
     row_tracking_metadata: FileRowTrackingMetadata,
-) -> DeltaResult<ExpressionRef> {
+) -> KernelResult<ExpressionRef> {
     let mut patch = ExpressionStructPatchBuilder::new();
 
     for field_transform in transform_spec {
@@ -154,7 +154,7 @@ pub(crate) fn get_transform_expr(
                 row_index_field_name,
             } => {
                 let base_row_id = row_tracking_metadata.base_row_id.ok_or_else(|| {
-                    Error::generic("Asked to generate RowIds, but no baseRowId found.")
+                    KernelError::generic("Asked to generate RowIds, but no baseRowId found.")
                 })?;
                 let expr = Arc::new(Expression::coalesce([
                     Expression::column([field_name]),
@@ -166,7 +166,7 @@ pub(crate) fn get_transform_expr(
                 let default_row_commit_version = row_tracking_metadata
                     .default_row_commit_version
                     .ok_or_else(|| {
-                    Error::missing_data(concat!(
+                    KernelError::missing_data(concat!(
                         "Missing defaultRowCommitVersion for Row Commit Version ",
                         "reconstruction",
                     ))
@@ -182,7 +182,7 @@ pub(crate) fn get_transform_expr(
                 insert_after,
             } => {
                 let Some((_, partition_value)) = metadata_values.remove(field_index) else {
-                    return Err(Error::MissingData(format!(
+                    return Err(KernelError::MissingData(format!(
                         "missing partition value for field index {field_index}"
                     )));
                 };
@@ -209,7 +209,7 @@ pub(crate) fn get_transform_expr(
                 } else {
                     // Column doesn't exist physically - treat as partition column
                     let Some((_, partition_value)) = metadata_values.remove(field_index) else {
-                        return Err(Error::MissingData(format!(
+                        return Err(KernelError::MissingData(format!(
                             "missing partition value for dynamic column '{physical_name}' at index {field_index}"
                         )));
                     };
@@ -244,13 +244,13 @@ fn apply_insert_after(
 pub(crate) fn parse_partition_value_raw(
     raw: Option<&String>,
     data_type: &DataType,
-) -> DeltaResult<Scalar> {
+) -> KernelResult<Scalar> {
     match (raw, data_type.as_primitive_opt()) {
         (Some(v), Some(primitive)) if v.is_empty() => Ok(primitive
             .empty_string_partition_cast()
             .unwrap_or_else(|| Scalar::Null(data_type.clone()))),
         (Some(v), Some(primitive)) => primitive.parse_scalar(v),
-        (Some(_), None) => Err(Error::generic(format!(
+        (Some(_), None) => Err(KernelError::generic(format!(
             "Unexpected partition column type: {data_type:?}"
         ))),
         _ => Ok(Scalar::Null(data_type.clone())),
@@ -265,6 +265,7 @@ mod tests {
     use crate::expressions::{col, BinaryExpressionOp};
     use crate::schema::{schema, schema_ref, DataType, PrimitiveType};
     use crate::unit_test_utils::assert_result_error_with_message;
+    use crate::KernelResult;
 
     // Tests for parse_partition_value function
     #[test]
@@ -689,7 +690,7 @@ mod tests {
     }
 
     #[test]
-    fn get_transform_expr_generates_stable_row_commit_versions() -> DeltaResult<()> {
+    fn get_transform_expr_generates_stable_row_commit_versions() -> KernelResult<()> {
         let transform_spec = vec![FieldTransformSpec::GenerateRowCommitVersion {
             field_name: "row_commit_version_col".to_string(),
         }];

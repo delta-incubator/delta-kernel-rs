@@ -1,5 +1,7 @@
 use std::borrow::{Cow, ToOwned};
 
+#[cfg(feature = "udt-in-dev")]
+use crate::schema::UserDefinedType;
 use crate::schema::{ArrayType, DataType, MapType, PrimitiveType, StructField, StructType};
 use crate::transforms::{
     map_owned_children_or_else, map_owned_or_else, map_owned_pair_or_else, transform_output_type,
@@ -43,9 +45,9 @@ use crate::transforms::{
 /// performed. That carrier determines the return type of each transform method.
 ///
 /// For example, a simple read-only visitor would use `()` as a carrier, while a validity checker
-/// could use `DeltaResult<()>` instead. A mutating transform uses `Cow<_>`, returning `Cow::Owned`
+/// could use `Result<()>` instead. A mutating transform uses `Cow<_>`, returning `Cow::Owned`
 /// for changed/replaced nodes, and a filtering transform uses `Option<Cow<_>>`, where `None`
-/// indicates the node should be dropped rather than replaced. `DeltaResult<Cow<_>>` and
+/// indicates the node should be dropped rather than replaced. `Result<Cow<_>>` and
 /// `Result<Option<Cow<_>>, E>` round out the set as fallible mutating and fitering transforms that
 /// short circuit immediately upon `Err`.
 pub trait SchemaTransform<'a> {
@@ -125,6 +127,15 @@ pub trait SchemaTransform<'a> {
         self.recurse_into_struct(stype)
     }
 
+    /// Visits a user-defined type as a leaf, preserving its physical type and annotation.
+    #[cfg(feature = "udt-in-dev")]
+    fn transform_user_defined(
+        &mut self,
+        udt: &'a UserDefinedType,
+    ) -> Self::Output<UserDefinedType> {
+        Carrier::from_inner(Cow::Borrowed(udt))
+    }
+
     /// General entry point for a recursive traversal over any data type. Also invoked internally to
     /// dispatch on nested data types encountered during the traversal.
     fn transform(&mut self, data_type: &'a DataType) -> Self::Output<DataType> {
@@ -148,6 +159,11 @@ pub trait SchemaTransform<'a> {
             DataType::Variant(stype) => {
                 let child = self.transform_variant(stype);
                 map_owned_or_else(data_type, child, |s| DataType::Variant(Box::new(s)))
+            }
+            #[cfg(feature = "udt-in-dev")]
+            DataType::UserDefined(udt) => {
+                let child = self.transform_user_defined(udt);
+                map_owned_or_else(data_type, child, DataType::UserDefined)
             }
         }
     }

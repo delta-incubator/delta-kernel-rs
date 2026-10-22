@@ -4,8 +4,8 @@ use bytes::Bytes;
 use delta_kernel::object_store::path::Path;
 use delta_kernel::object_store::{self, DynObjectStore, ObjectStoreExt as _, PutMode};
 use delta_kernel::{
-    CancellationTokenRef, DeltaResult, DeltaResultIteratorStatic, Error, FileMeta, FileSlice,
-    StorageHandler,
+    CancellationTokenRef, FileMeta, FileSlice, KernelError, KernelResult,
+    KernelResultIteratorStatic, StorageHandler,
 };
 use futures::stream::{self, BoxStream, StreamExt, TryStreamExt};
 use itertools::Itertools;
@@ -47,7 +47,7 @@ impl<E: TaskExecutor> ObjectStoreStorageHandler<E> {
 async fn list_from_impl(
     store: Arc<DynObjectStore>,
     path: Url,
-) -> DeltaResult<BoxStream<'static, DeltaResult<FileMeta>>> {
+) -> KernelResult<BoxStream<'static, KernelResult<FileMeta>>> {
     // The offset is used for list-after; the prefix is used to restrict the listing to a specific
     // directory. Unfortunately, `Path` provides no easy way to check whether a name is
     // directory-like, because it strips trailing /, so we're reduced to manually checking the
@@ -58,7 +58,7 @@ async fn list_from_impl(
     } else {
         let mut parts = offset.parts().collect_vec();
         if parts.pop().is_none() {
-            return Err(Error::Generic(format!(
+            return Err(KernelError::Generic(format!(
                 "Offset path must not be a root directory. Got: '{path}'",
             )));
         }
@@ -85,7 +85,9 @@ async fn list_from_impl(
         let mut items: Vec<_> = stream.try_collect().await?;
         items.sort_unstable();
         Ok(Box::pin(stream::iter(
-            items.into_iter().map(Ok::<FileMeta, delta_kernel::Error>),
+            items
+                .into_iter()
+                .map(Ok::<FileMeta, delta_kernel::KernelError>),
         )))
     } else {
         Ok(Box::pin(stream))
@@ -97,24 +99,25 @@ async fn read_files_impl(
     store: Arc<DynObjectStore>,
     files: Vec<FileSlice>,
     readahead: usize,
-) -> DeltaResult<BoxStream<'static, DeltaResult<Bytes>>> {
+) -> KernelResult<BoxStream<'static, KernelResult<Bytes>>> {
     let files = stream::iter(files).map(move |(url, range)| {
         let store = store.clone();
         async move {
             // File URLs need OS path conversion. Other schemes need object-store URL decoding so
             // already escaped path segments do not get escaped again.
             let path = if url.scheme() == "file" {
-                let file_path = url
-                    .to_file_path()
-                    .map_err(|_| Error::InvalidTableLocation(format!("Invalid file URL: {url}")))?;
-                Path::from_absolute_path(file_path)
-                    .map_err(|e| Error::InvalidTableLocation(format!("Invalid file path: {e}")))?
+                let file_path = url.to_file_path().map_err(|_| {
+                    KernelError::InvalidTableLocation(format!("Invalid file URL: {url}"))
+                })?;
+                Path::from_absolute_path(file_path).map_err(|e| {
+                    KernelError::InvalidTableLocation(format!("Invalid file path: {e}"))
+                })?
             } else {
                 Path::from_url_path(url.path())?
             };
             if url.is_presigned() {
                 // have to annotate type here or rustc can't figure it out
-                Ok::<bytes::Bytes, Error>(reqwest::get(url).await?.bytes().await?)
+                Ok::<bytes::Bytes, KernelError>(reqwest::get(url).await?.bytes().await?)
             } else if let Some(rng) = range {
                 Ok(store.get_range(&path, rng).await?)
             } else {
@@ -134,7 +137,7 @@ async fn copy_atomic_impl(
     store: Arc<DynObjectStore>,
     src_path: Path,
     dest_path: Path,
-) -> DeltaResult<()> {
+) -> KernelResult<()> {
     // Read source file then write atomically with PutMode::Create. Note that a GET/PUT is not
     // necessarily atomic, but since the source file is immutable, we aren't exposed to the
     // possibility of source file changing while we do the PUT.
@@ -143,7 +146,9 @@ async fn copy_atomic_impl(
         .put_opts(&dest_path, data.into(), PutMode::Create.into())
         .await
         .map_err(|e| match e {
-            object_store::Error::AlreadyExists { .. } => Error::FileAlreadyExists(dest_path.into()),
+            object_store::Error::AlreadyExists { .. } => {
+                KernelError::FileAlreadyExists(dest_path.into())
+            }
             e => e.into(),
         })?;
     Ok(())
@@ -155,7 +160,7 @@ async fn put_impl(
     path: Path,
     data: Bytes,
     overwrite: bool,
-) -> DeltaResult<()> {
+) -> KernelResult<()> {
     let put_mode = if overwrite {
         PutMode::Overwrite
     } else {
@@ -163,14 +168,14 @@ async fn put_impl(
     };
     let result = store.put_opts(&path, data.into(), put_mode.into()).await;
     result.map_err(|e| match e {
-        object_store::Error::AlreadyExists { .. } => Error::FileAlreadyExists(path.into()),
+        object_store::Error::AlreadyExists { .. } => KernelError::FileAlreadyExists(path.into()),
         e => e.into(),
     })?;
     Ok(())
 }
 
 /// Native async implementation for delete.
-async fn delete_impl(store: Arc<DynObjectStore>, path: Path) -> DeltaResult<()> {
+async fn delete_impl(store: Arc<DynObjectStore>, path: Path) -> KernelResult<()> {
     match store.delete(&path).await {
         Ok(()) => Ok(()),
         Err(object_store::Error::NotFound { .. }) => Ok(()),
@@ -179,7 +184,7 @@ async fn delete_impl(store: Arc<DynObjectStore>, path: Path) -> DeltaResult<()> 
 }
 
 /// Native async implementation for head
-async fn head_impl(store: Arc<DynObjectStore>, url: Url) -> DeltaResult<FileMeta> {
+async fn head_impl(store: Arc<DynObjectStore>, url: Url) -> KernelResult<FileMeta> {
     let meta = store.head(&Path::from_url_path(url.path())?).await?;
     Ok(FileMeta {
         location: url,
@@ -189,7 +194,7 @@ async fn head_impl(store: Arc<DynObjectStore>, url: Url) -> DeltaResult<FileMeta
 }
 
 impl<E: TaskExecutor> StorageHandler for ObjectStoreStorageHandler<E> {
-    fn list_from(&self, path: &Url) -> DeltaResult<DeltaResultIteratorStatic<FileMeta>> {
+    fn list_from(&self, path: &Url) -> KernelResult<KernelResultIteratorStatic<FileMeta>> {
         self.list_from_with_cancellation(path, None)
     }
 
@@ -197,7 +202,7 @@ impl<E: TaskExecutor> StorageHandler for ObjectStoreStorageHandler<E> {
         &self,
         path: &Url,
         cancellation_token: Option<CancellationTokenRef>,
-    ) -> DeltaResult<DeltaResultIteratorStatic<FileMeta>> {
+    ) -> KernelResult<KernelResultIteratorStatic<FileMeta>> {
         let future = list_from_impl(self.inner.clone(), path.clone());
         let iter = super::stream_future_to_cancellable_iter(
             self.task_executor.clone(),
@@ -213,7 +218,7 @@ impl<E: TaskExecutor> StorageHandler for ObjectStoreStorageHandler<E> {
     ///
     /// Multiple reads may occur in parallel, depending on the configured readahead.
     /// See [`Self::with_readahead`].
-    fn read_files(&self, files: Vec<FileSlice>) -> DeltaResult<DeltaResultIteratorStatic<Bytes>> {
+    fn read_files(&self, files: Vec<FileSlice>) -> KernelResult<KernelResultIteratorStatic<Bytes>> {
         self.read_files_with_cancellation(files, None)
     }
 
@@ -221,7 +226,7 @@ impl<E: TaskExecutor> StorageHandler for ObjectStoreStorageHandler<E> {
         &self,
         files: Vec<FileSlice>,
         cancellation_token: Option<CancellationTokenRef>,
-    ) -> DeltaResult<DeltaResultIteratorStatic<Bytes>> {
+    ) -> KernelResult<KernelResultIteratorStatic<Bytes>> {
         let future = read_files_impl(self.inner.clone(), files, self.readahead);
         let iter = super::stream_future_to_cancellable_iter(
             self.task_executor.clone(),
@@ -231,25 +236,25 @@ impl<E: TaskExecutor> StorageHandler for ObjectStoreStorageHandler<E> {
         Ok(iter)
     }
 
-    fn put(&self, path: &Url, data: Bytes, overwrite: bool) -> DeltaResult<()> {
+    fn put(&self, path: &Url, data: Bytes, overwrite: bool) -> KernelResult<()> {
         let path = Path::from_url_path(path.path())?;
         self.task_executor
             .block_on(put_impl(self.inner.clone(), path, data, overwrite))
     }
 
-    fn copy_atomic(&self, src: &Url, dest: &Url) -> DeltaResult<()> {
+    fn copy_atomic(&self, src: &Url, dest: &Url) -> KernelResult<()> {
         let src_path = Path::from_url_path(src.path())?;
         let dest_path = Path::from_url_path(dest.path())?;
         let future = copy_atomic_impl(self.inner.clone(), src_path, dest_path);
         self.task_executor.block_on(future)
     }
 
-    fn head(&self, path: &Url) -> DeltaResult<FileMeta> {
+    fn head(&self, path: &Url) -> KernelResult<FileMeta> {
         let future = head_impl(self.inner.clone(), path.clone());
         self.task_executor.block_on(future)
     }
 
-    fn delete(&self, path: &Url) -> DeltaResult<()> {
+    fn delete(&self, path: &Url) -> KernelResult<()> {
         let path = Path::from_url_path(path.path())?;
         self.task_executor
             .block_on(delete_impl(self.inner.clone(), path))
@@ -482,7 +487,7 @@ mod tests {
         // copy to existing fails
         assert!(matches!(
             handler.copy_atomic(&src_url, &dest_url),
-            Err(Error::FileAlreadyExists(_))
+            Err(KernelError::FileAlreadyExists(_))
         ));
 
         // copy from non-existing fails
@@ -523,7 +528,7 @@ mod tests {
         let missing_url = Url::from_file_path(tmp.path().join("missing.txt")).unwrap();
         let result = handler.head(&missing_url);
 
-        assert!(matches!(result, Err(Error::FileNotFound(_))));
+        assert!(matches!(result, Err(KernelError::FileNotFound(_))));
     }
 
     #[test]
@@ -556,7 +561,7 @@ mod tests {
         let new_data = Bytes::from("updated");
         assert!(matches!(
             handler.put(&file_url, new_data.clone(), false),
-            Err(Error::FileAlreadyExists(_))
+            Err(KernelError::FileAlreadyExists(_))
         ));
 
         // Put with overwrite=true should succeed
@@ -584,7 +589,7 @@ mod tests {
 
         assert!(matches!(
             handler.head(&file_url),
-            Err(Error::FileNotFound(_))
+            Err(KernelError::FileNotFound(_))
         ));
     }
 
@@ -595,7 +600,7 @@ mod tests {
         let missing_url = Url::from_file_path(tmp.path().join("missing.txt")).unwrap();
         assert!(matches!(
             handler.head(&missing_url),
-            Err(Error::FileNotFound(_))
+            Err(KernelError::FileNotFound(_))
         ));
         handler.delete(&missing_url).unwrap();
     }
@@ -608,9 +613,9 @@ mod tests {
         let token: CancellationTokenRef = Arc::new(test_utils::TestCancellationToken::cancelled());
 
         let listed = handler.list_from_with_cancellation(&url, Some(token.clone()));
-        assert!(matches!(listed, Err(Error::Cancelled)));
+        assert!(matches!(listed, Err(KernelError::Cancelled)));
 
         let read = handler.read_files_with_cancellation(vec![(url, None)], Some(token));
-        assert!(matches!(read, Err(Error::Cancelled)));
+        assert!(matches!(read, Err(KernelError::Cancelled)));
     }
 }

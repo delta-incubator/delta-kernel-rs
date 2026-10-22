@@ -149,6 +149,54 @@ class InlineReviewTest(unittest.TestCase):
         self.assertIn(self.inline_review._FINDING_ID.pattern, prompt)
         for side in self.inline_review.INLINE_FINDING_SIDES:
             self.assertIn(side, prompt)
+        normalized_prompt = " ".join(prompt.split())
+        self.assertIn(
+            "For a completed review, use this complete response layout",
+            normalized_prompt,
+        )
+        self.assertIn(
+            "For a completed review, the outer review end marker must be the final "
+            "line of your response.",
+            normalized_prompt,
+        )
+
+    def test_inline_prompt_template_round_trips_through_publication_parsers(self) -> None:
+        marker = "a" * 32
+        prompt = self.inline_review.inline_prompt_instructions(marker)
+
+        body = self.review_publish.extract_marked_review(prompt, marker)
+        review, findings = self.inline_review.extract_inline_findings(body, marker)
+
+        self.assertIn("human-readable review", review)
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0]["id"], "Nit1")
+        self.assertNotIn("AI_REVIEW_INLINE_", review)
+
+    def test_inline_publication_requires_findings_inside_review_markers(self) -> None:
+        marker = "a" * 32
+        start = f"<!-- AI_REVIEW_START_{marker} -->"
+        end = f"<!-- AI_REVIEW_END_{marker} -->"
+        inline_block = (
+            f"<!-- AI_REVIEW_INLINE_START_{marker} -->\n"
+            '{"findings":[]}\n'
+            f"<!-- AI_REVIEW_INLINE_END_{marker} -->"
+        )
+        outputs = (
+            ("inside", f"{start}\nReview\n{inline_block}\n{end}"),
+            ("before", f"{inline_block}\n{start}\nReview\n{end}"),
+            ("after", f"{start}\nReview\n{end}\n{inline_block}"),
+        )
+
+        for position, raw in outputs:
+            with self.subTest(position=position):
+                body = self.review_publish.extract_marked_review(raw, marker)
+                if position == "inside":
+                    review, findings = self.inline_review.extract_inline_findings(body, marker)
+                    self.assertEqual(review, "Review")
+                    self.assertEqual(findings, [])
+                else:
+                    with self.assertRaisesRegex(ValueError, "one location block"):
+                        self.inline_review.extract_inline_findings(body, marker)
 
     def test_reviewer_contract_matches_configured_prompt(self) -> None:
         reviewer_dir = Path(__file__).parents[1] / "reviewer"
@@ -196,16 +244,43 @@ class InlineReviewTest(unittest.TestCase):
                 with self.subTest(agent=agent_dir.name, policy=policy.partition("\n")[0]):
                     self.assertIn(policy, (agent_dir / "REVIEW.md").read_text())
                     self.assertIn(policy, _configured_prompt(agent_dir / "config.yaml"))
+        description_policy = review_policy.PR_DESCRIPTION_POLICY.strip()
+        self.assertIn(description_policy, reviewer_contract)
+        self.assertIn("Always dispatch\n`docs-reviewer`", reviewer_contract)
+        self.assertIn("only the PR title and description", reviewer_contract)
+        for agent in (
+            "docs-reviewer",
+        ):
+            with self.subTest(agent=agent, policy="PR description accuracy"):
+                agent_dir = reviewer_dir / "agents" / agent
+                self.assertIn(description_policy, (agent_dir / "REVIEW.md").read_text())
+                self.assertIn(description_policy, _configured_prompt(agent_dir / "config.yaml"))
+        for agent in (
+            "architecture-reviewer",
+            "delta-protocol-reviewer",
+            "disprove-reviewer",
+            "maintainer-claude-reviewer",
+            "maintainer-codex-reviewer",
+            "test-coverage-reviewer",
+        ):
+            with self.subTest(agent=agent, policy="single description reviewer"):
+                agent_dir = reviewer_dir / "agents" / agent
+                self.assertNotIn(description_policy, (agent_dir / "REVIEW.md").read_text())
         self.assertIn(
-            "from review_policy import KNOWN_ISSUE_POLICY, PREVIOUS_REVIEW_POLICY",
+            "PR_DESCRIPTION_POLICY,",
             workflow,
         )
         self.assertIn("known_issue_policy = KNOWN_ISSUE_POLICY.strip()", workflow)
         self.assertIn(
             "previous_review_policy = PREVIOUS_REVIEW_POLICY.strip()", workflow
         )
+        self.assertIn(
+            "pr_description_policy = PR_DESCRIPTION_POLICY.strip()", workflow
+        )
         self.assertEqual(workflow.count("{known_issue_policy}"), 1)
         self.assertEqual(workflow.count("{previous_review_policy}"), 1)
+        self.assertEqual(workflow.count("{pr_description_policy}"), 1)
+        self.assertIn("[PR description truncated at 4096 characters", workflow)
         self.assertIn("format_review_history", workflow)
         self.assertIn("OMNIGENT_BOT_LOGIN: ${{ vars.OMNIGENT_BOT_LOGIN }}", workflow)
         self.assertIn("OMNIGENT_BOT_APP_ID: ${{ vars.OMNIGENT_BOT_APP_ID }}", workflow)
@@ -282,7 +357,11 @@ class InlineReviewTest(unittest.TestCase):
                     "path": "kernel/src/example.rs",
                     "line": 10,
                     "side": "RIGHT",
-                    "body": "**Nit1** This is attached to the added line.",
+                    "body": (
+                        "**Nit1** This is attached to the added line.\n\n---\n"
+                        "<sub>Feedback: react 👍 if helpful, 👎 if unhelpful or incorrect, "
+                        "or 👀 if out of scope.</sub>"
+                    ),
                 }
             ],
         )
@@ -852,7 +931,7 @@ class InlineReviewTest(unittest.TestCase):
                     "path": "kernel/src/example.rs",
                     "line": 10,
                     "side": "RIGHT",
-                    "body": "**Nit1** Finding.",
+                    "body": "**Nit1** Finding." + self.inline_review.INLINE_FEEDBACK_FOOTER,
                 }
             ],
         )
@@ -937,7 +1016,9 @@ class InlineReviewTest(unittest.TestCase):
                                                 "path": finding["path"],
                                                 "line": finding["line"],
                                                 "side": finding["side"],
-                                                "body": "**Nit9** Repeated finding.",
+                                                "body": first_payload["comments"][0]["body"].replace(
+                                                    "**Nit1**", "**Nit9**", 1
+                                                ),
                                             }
                                         ]
                                     },

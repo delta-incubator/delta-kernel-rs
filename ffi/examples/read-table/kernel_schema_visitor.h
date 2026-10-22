@@ -1,3 +1,5 @@
+#include <ctype.h>
+#include <inttypes.h>
 #include <sys/time.h>
 
 /*
@@ -41,6 +43,16 @@ bool visit_schema_item_metadata(void* metadata, CMetadataMap* state)
   return true;
 }
 
+#ifdef DEFINE_GEO_TYPE_IN_DEV
+void trim_trailing_whitespace(char* s)
+{
+  size_t len = strlen(s);
+  while (len > 0 && isspace((unsigned char)s[len - 1])) {
+    s[--len] = '\0';
+  }
+}
+#endif
+
 // This function looks at tahe type field in the schema to figure out which visitor to call. It's a
 // bit gross as the schema code is string based, a real implementation would have a more robust way
 // to represent a schema.
@@ -79,11 +91,69 @@ uintptr_t visit_schema_item(SchemaItem* item, KernelSchemaVisitorState *state, C
     visit_res = visit_field_interval_year_month(state, name, item->is_nullable, &metadata, allocate_error);
   } else if (strcmp(item->type, "interval day to second") == 0) {
     visit_res = visit_field_interval_day_time(state, name, item->is_nullable, &metadata, allocate_error);
+#ifdef DEFINE_GEO_TYPE_IN_DEV
+  } else if (strncmp(item->type, "geometry", 8) == 0) {
+    char crs_buf[256];
+    int end_pos = -1;
+    int matched = sscanf(item->type, "geometry( %255[^)])%n", crs_buf, &end_pos);
+    if (matched != 1 || end_pos < 0 || item->type[end_pos] != '\0') {
+      printf("[ERROR] Invalid geometry type: %s\n", item->type);
+      return 0;
+    }
+    trim_trailing_whitespace(crs_buf);
+    KernelStringSlice crs = { crs_buf, strlen(crs_buf) };
+    visit_res = visit_field_geometry(state, name, crs, item->is_nullable, &metadata, allocate_error);
+  } else if (strncmp(item->type, "geography", 9) == 0) {
+    char crs_buf[256];
+    char algorithm_buf[64];
+    int end_pos = -1;
+    int matched = sscanf(
+      item->type, "geography( %255[^,)], %63[^)])%n", crs_buf, algorithm_buf, &end_pos);
+    if (matched != 2 || end_pos < 0 || item->type[end_pos] != '\0') {
+      printf("[ERROR] Invalid geography type: %s\n", item->type);
+      return 0;
+    }
+    trim_trailing_whitespace(crs_buf);
+    trim_trailing_whitespace(algorithm_buf);
+    KernelStringSlice crs = { crs_buf, strlen(crs_buf) };
+    KernelStringSlice algorithm = { algorithm_buf, strlen(algorithm_buf) };
+    visit_res = visit_field_geography(
+      state, name, crs, algorithm, item->is_nullable, &metadata, allocate_error);
+#endif
   } else if (strncmp(item->type, "decimal", 7) == 0) {
     unsigned int precision;
     int scale;
     sscanf(item->type, "decimal(%u)(%d)", &precision, &scale);
     visit_res = visit_field_decimal(state, name, precision, scale, item->is_nullable, &metadata, allocate_error);
+  } else if (strcmp(item->type, "udt") == 0) {
+    SchemaItemList child_list = cschema->builder->lists[item->children];
+    if (child_list.len != 1) {
+      printf("[ERROR] Invalid UDT child list length: %" PRIu32 "\n", child_list.len);
+      return 0;
+    }
+    uintptr_t child_id = visit_schema_item(&child_list.list[0], state, cschema);
+    if (child_id == 0) {
+      return 0;
+    }
+    FfiNullableStringMapEntry* entries =
+      calloc(item->udt_annotation.len, sizeof(FfiNullableStringMapEntry));
+    if (item->udt_annotation.len && !entries) {
+      fprintf(stderr, "Could not allocate UDT annotation view\n");
+      exit(EXIT_FAILURE);
+    }
+    for (size_t i = 0; i < item->udt_annotation.len; i++) {
+      UdtAnnotationEntry* entry = &item->udt_annotation.entries[i];
+      entries[i].key = (KernelStringSlice){ entry->key, strlen(entry->key) };
+      entries[i].value.tag = entry->value ? SomeKernelStringSlice : NoneKernelStringSlice;
+      if (entry->value) {
+        entries[i].value.some = (KernelStringSlice){ entry->value, strlen(entry->value) };
+      }
+    }
+    // Rust copies the borrowed annotation before returning.
+    FfiNullableStringMap annotation = { entries, item->udt_annotation.len };
+    visit_res = visit_field_user_defined(
+      state, name, child_id, annotation, item->is_nullable, &metadata, allocate_error);
+    free(entries);
   } else if (strcmp(item->type, "array") == 0) {
     SchemaItemList child_list = cschema->builder->lists[item->children];
     // an array should always have 1 child

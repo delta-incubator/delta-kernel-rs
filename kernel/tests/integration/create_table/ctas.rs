@@ -212,7 +212,7 @@ async fn run_ctas_test(
     );
 
     let mut src_snapshot = {
-        let mut builder = create_table(&src_table_path, schema.clone(), "ctas-test");
+        let mut builder = create_table(&src_table_path, schema.clone(), "ctas-test", true);
         if let Some(mode_str) = cm_mode_property(src_cm) {
             builder = builder.with_table_properties([("delta.columnMapping.mode", mode_str)]);
         }
@@ -251,7 +251,7 @@ async fn run_ctas_test(
     let (_tgt_tmp, tgt_table_path, _) = test_table_setup()?;
     let tgt_url = Url::from_directory_path(&tgt_table_path).unwrap();
 
-    let mut tgt_builder = create_table(&tgt_table_path, schema.clone(), "ctas-test");
+    let mut tgt_builder = create_table(&tgt_table_path, schema.clone(), "ctas-test", true);
     if let Some(mode_str) = cm_mode_property(tgt_cm) {
         tgt_builder = tgt_builder.with_table_properties([("delta.columnMapping.mode", mode_str)]);
     }
