@@ -45,9 +45,10 @@ This method handles everything in one call: reads the log, reconciles actions, w
 checkpoint Parquet file, and updates the `_last_checkpoint` hint file.
 
 > [!NOTE]
-> `checkpoint()` calls `ParquetHandler::write_parquet_file` to write the checkpoint and
-> `StorageHandler::head` to retrieve its metadata. The `DefaultEngine` implements both.
-> If you use a custom engine, make sure it provides working implementations of both.
+> `checkpoint()` calls `ParquetHandler::write_parquet_file` to write the checkpoint,
+> `StorageHandler::head` to retrieve its metadata, and `StorageHandler::put` to write the
+> `_last_checkpoint` file. The `DefaultEngine` implements all three. If you use a custom
+> engine, make sure it provides working implementations of all three.
 
 ## After a commit
 
@@ -115,9 +116,12 @@ an error if the iterator has not been exhausted. Because `finalize()` reads the 
 counts from the stats struct rather than from the iterator, you build the stats first and
 then pass them to `finalize()`.
 
-`finalize()` also records the schema of the `checkpoint_data` batches in the
-`_last_checkpoint` hint file. Readers use that schema instead of reading the checkpoint file
-footer. So write the batches without adding, dropping, or retyping columns.
+`finalize()` writes the `_last_checkpoint` hint file with `StorageHandler::put`. It records the
+schema of the `checkpoint_data` batches in that file, and readers use the schema instead of
+reading the checkpoint file footer. So the checkpoint file must not add, drop, or retype any
+column of the batches. If you write a V2 checkpoint with sidecars, this applies to the top-level
+checkpoint file. `finalize()` writes nothing if `_last_checkpoint` already describes a newer
+checkpoint, and it omits the schema if the schema is very large.
 
 ## Checkpoint format
 
