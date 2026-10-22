@@ -39,6 +39,9 @@ pub mod rest_store;
 pub mod stats;
 pub mod storage;
 
+#[cfg(test)]
+mod stats_verifier_tests;
+
 /// Converts a Stream-producing future to a synchronous iterator, each blocking poll raced against
 /// the cancellation token. When the token fires, the iterator yields a single
 /// `Err(KernelError::Cancelled)` and then ends, abandoning the in-flight read (dropping the stream
