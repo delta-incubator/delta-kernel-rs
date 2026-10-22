@@ -31,8 +31,9 @@ use crate::{
 /// token. `None` uses the stored default; `Some(token)` overrides it for that read and is
 /// forwarded unchanged.
 ///
-/// Write methods delegate unchanged for now. Parsing, evaluation, and declarative execution
-/// retain their underlying behavior.
+/// Write methods forward to the underlying handlers without applying this adapter's
+/// cancellation token. Parsing, evaluation, and declarative execution retain their underlying
+/// behavior.
 ///
 /// Snapshots retain neither the adapter nor its token. Read iterators own their cancellation state
 /// and can outlive the adapter. Cached metadata can be returned without consulting the default

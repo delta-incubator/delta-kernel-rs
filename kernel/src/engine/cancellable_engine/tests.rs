@@ -1,34 +1,10 @@
-//! Cancellation and ownership through real engine read paths.
-//!
-//! These unit tests use `SyncEngine` handlers and table fixtures. `RecordingReads` verifies token
-//! identity, records handler requests, and triggers cancellation at read entry or after a JSON
-//! iterator item. It delegates successful reads to the underlying handlers and can inject a
-//! cancellation error without a token to check error propagation.
-//!
-//! The recording tests cover:
-//! - Bound-token inheritance, explicit-token overrides, and unscoped listing, byte-range, JSON,
-//!   Parquet, and footer reads.
-//! - Checkpoint-hint and log discovery, plus full and incremental snapshot loading through CRC,
-//!   JSON commits, and Parquet checkpoints, with builder-bound or caller-wrapped engines.
-//! - CRC reconstruction and optional-read fallback: cancellation propagates, including after a JSON
-//!   batch, while malformed CRC content can fall back to replay.
-//! - Post-build domain metadata, transaction IDs, and clustering reads using the same wrapper.
-//! - Correlated failure metrics through metered handlers, without snapshot success on cancellation.
-//!
-//! Tests using `CancellableEngine` directly cover iterator ownership after the wrapper is dropped,
-//! release of the build token by completed snapshots, cached snapshot reuse, nested HEAD preflight,
-//! and unchanged parsing, writes, and declarative replay.
-//!
-//! This suite checks Kernel token propagation and cancellation handling. Connector-managed
-//! shared-work cancellation and abort latency for in-flight cloud I/O require separate integration
-//! tests.
+//! Adapter token propagation, delegation, and iterator ownership contracts.
 
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 use itertools::Itertools;
 use rstest::rstest;
-use tempfile::TempDir;
 use url::Url;
 
 use crate::actions::LOG_METADATA_SCHEMA;
@@ -38,258 +14,21 @@ use crate::engine::arrow_data::EngineDataArrowExt;
 use crate::engine::sync::SyncEngine;
 use crate::engine::test_delegating::DelegatingEngine;
 use crate::engine::CancellableEngine;
-use crate::metrics::{LogSegmentLoadType, MeteredDeltaEngine, MetricEvent, SnapshotLoadType};
+use crate::metrics::{MeteredDeltaEngine, MetricEvent};
 use crate::object_store::memory::InMemory;
-use crate::schema::{schema_ref, ColumnName, SchemaRef};
-use crate::snapshot::IncrementalReplay;
+use crate::schema::{schema_ref, ColumnName};
 use crate::transaction::create_table::create_table;
 use crate::transaction::data_layout::DataLayout;
+use crate::unit_test_utils::recording_reads::{Read, RecordingReads};
 use crate::unit_test_utils::{
-    copy_test_table, install_thread_local_metrics_reporter, string_array_to_engine_data,
-    CapturingReporter, TestCancellationToken,
+    install_thread_local_metrics_reporter, string_array_to_engine_data, CapturingReporter,
+    TestCancellationToken,
 };
 use crate::utils::try_parse_uri;
 use crate::{
-    CancellationTokenRef, Engine, EngineData, FileDataReadResultIterator, FileMeta, FileSize,
-    FileSlice, FilteredEngineData, JsonHandler, KernelError, KernelResult, KernelResultIterator,
-    KernelResultIteratorStatic, ParquetFooter, ParquetHandler, PredicateRef, Snapshot,
-    StorageHandler,
+    CancellationTokenRef, Engine, EngineData, FileMeta, FileSlice, FilteredEngineData, KernelError,
+    KernelResult, KernelResultIteratorStatic, Snapshot, StorageHandler,
 };
-
-/// Read boundary observed by the recording handlers.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Read {
-    List,
-    Hint,
-    Crc,
-    Json,
-    Parquet,
-    Footer,
-}
-
-/// Records scopes at the real engine's read boundaries; all data comes from the inner handlers.
-struct RecordingReads {
-    /// Engine supplying fixture data and delegated operations.
-    inner: Arc<dyn Engine>,
-    /// Token cancelled by the configured read trigger.
-    token: Arc<TestCancellationToken>,
-    /// Expected token identity or absence at each read boundary.
-    expected_token: Option<CancellationTokenRef>,
-    /// Read boundary that triggers cancellation, when configured.
-    cancel_on: Option<Read>,
-    /// Cancels the test token after each JSON iterator item.
-    cancel_json_after_batch: bool,
-    /// Read boundaries observed in call order.
-    events: Mutex<Vec<Read>>,
-}
-
-impl RecordingReads {
-    /// Creates a recorder that can cancel at a selected read boundary.
-    fn new(cancel_on: Option<Read>) -> Arc<Self> {
-        let token = Arc::new(TestCancellationToken::default());
-        Arc::new(Self {
-            inner: Arc::new(SyncEngine::new()),
-            expected_token: Some(token.clone()),
-            token,
-            cancel_on,
-            cancel_json_after_batch: false,
-            events: Mutex::new(Vec::new()),
-        })
-    }
-
-    /// Builds an engine that records reads through handler-based replay.
-    fn engine(self: &Arc<Self>) -> DelegatingEngine {
-        let engine = DelegatingEngine::new(self.inner.clone())
-            .with_storage_handler(self.clone())
-            .with_json_handler(self.clone())
-            .with_parquet_handler(self.clone());
-        #[cfg(feature = "declarative-plans")]
-        let engine = engine.without_plan_executor();
-        engine
-    }
-
-    /// Verifies token identity, records the read, and applies its cancellation trigger.
-    fn record(&self, read: Read, token: &Option<CancellationTokenRef>) -> KernelResult<()> {
-        match (token, &self.expected_token) {
-            (Some(token), Some(expected)) => assert!(Arc::ptr_eq(token, expected)),
-            (None, None) => {}
-            _ => panic!("missing or replaced token on {read:?}"),
-        }
-        self.events.lock().unwrap().push(read);
-        if self.cancel_on == Some(read) {
-            self.token.cancel();
-            if token.is_none() {
-                return Err(KernelError::Cancelled);
-            }
-        }
-        Ok(())
-    }
-}
-
-/// Routes plain reads through the recorder without supplying a cancellation token.
-macro_rules! plain_reads {
-    ($(
-        $(#[$doc:meta])*
-        fn $plain:ident, $cancellable:ident($($arg:ident: $ty:ty),* $(,)?) -> $result:ty;
-    )*) => {$(
-        $(#[$doc])*
-        fn $plain(&self, $($arg: $ty),*) -> $result {
-            self.$cancellable($($arg,)* None)
-        }
-    )*};
-}
-
-impl StorageHandler for RecordingReads {
-    plain_reads! {
-        /// Records an unscoped listing request.
-        fn list_from, list_from_with_cancellation(path: &Url)
-            -> KernelResult<KernelResultIteratorStatic<FileMeta>>;
-
-        /// Records an unscoped byte-range read.
-        fn read_files, read_files_with_cancellation(files: Vec<FileSlice>)
-            -> KernelResult<KernelResultIteratorStatic<Bytes>>;
-    }
-
-    fn list_from_with_cancellation(
-        &self,
-        path: &Url,
-        token: Option<CancellationTokenRef>,
-    ) -> KernelResult<KernelResultIteratorStatic<FileMeta>> {
-        self.record(Read::List, &token)?;
-        self.inner
-            .storage_handler()
-            .list_from_with_cancellation(path, token)
-    }
-
-    fn read_files_with_cancellation(
-        &self,
-        files: Vec<FileSlice>,
-        token: Option<CancellationTokenRef>,
-    ) -> KernelResult<KernelResultIteratorStatic<Bytes>> {
-        let read = if files.iter().any(|(url, _)| url.path().ends_with(".crc")) {
-            Read::Crc
-        } else {
-            Read::Hint
-        };
-        self.record(read, &token)?;
-        self.inner
-            .storage_handler()
-            .read_files_with_cancellation(files, token)
-    }
-
-    fn put(&self, path: &Url, data: Bytes, overwrite: bool) -> KernelResult<()> {
-        self.inner.storage_handler().put(path, data, overwrite)
-    }
-
-    fn head(&self, path: &Url) -> KernelResult<FileMeta> {
-        self.inner.storage_handler().head(path)
-    }
-
-    fn delete(&self, path: &Url) -> KernelResult<()> {
-        self.inner.storage_handler().delete(path)
-    }
-
-    fn copy_atomic(&self, src: &Url, dest: &Url) -> KernelResult<()> {
-        self.inner.storage_handler().copy_atomic(src, dest)
-    }
-}
-
-impl JsonHandler for RecordingReads {
-    plain_reads! {
-        /// Records an unscoped JSON read.
-        fn read_json_files, read_json_files_with_cancellation(
-            files: &[FileMeta], schema: SchemaRef, predicate: Option<PredicateRef>,
-        ) -> KernelResult<FileDataReadResultIterator>;
-    }
-
-    fn read_json_files_with_cancellation(
-        &self,
-        files: &[FileMeta],
-        schema: SchemaRef,
-        predicate: Option<PredicateRef>,
-        token: Option<CancellationTokenRef>,
-    ) -> KernelResult<FileDataReadResultIterator> {
-        if !files.is_empty() {
-            self.record(Read::Json, &token)?;
-        }
-        let batches = self
-            .inner
-            .json_handler()
-            .read_json_files_with_cancellation(files, schema, predicate, token)?;
-        if self.cancel_json_after_batch {
-            let token = self.token.clone();
-            Ok(Box::new(batches.inspect(move |_| token.cancel())))
-        } else {
-            Ok(batches)
-        }
-    }
-
-    fn parse_json(
-        &self,
-        data: Box<dyn EngineData>,
-        schema: SchemaRef,
-    ) -> KernelResult<Box<dyn EngineData>> {
-        self.inner.json_handler().parse_json(data, schema)
-    }
-
-    fn write_json_file(
-        &self,
-        path: &Url,
-        data: KernelResultIterator<'_, FilteredEngineData>,
-        overwrite: bool,
-    ) -> KernelResult<FileSize> {
-        self.inner
-            .json_handler()
-            .write_json_file(path, data, overwrite)
-    }
-}
-
-impl ParquetHandler for RecordingReads {
-    plain_reads! {
-        /// Records an unscoped Parquet read.
-        fn read_parquet_files, read_parquet_files_with_cancellation(
-            files: &[FileMeta], schema: SchemaRef, predicate: Option<PredicateRef>,
-        ) -> KernelResult<FileDataReadResultIterator>;
-
-        /// Records an unscoped Parquet footer read.
-        fn read_parquet_footer, read_parquet_footer_with_cancellation(file: &FileMeta)
-            -> KernelResult<ParquetFooter>;
-    }
-
-    fn read_parquet_files_with_cancellation(
-        &self,
-        files: &[FileMeta],
-        schema: SchemaRef,
-        predicate: Option<PredicateRef>,
-        token: Option<CancellationTokenRef>,
-    ) -> KernelResult<FileDataReadResultIterator> {
-        self.record(Read::Parquet, &token)?;
-        self.inner
-            .parquet_handler()
-            .read_parquet_files_with_cancellation(files, schema, predicate, token)
-    }
-
-    fn read_parquet_footer_with_cancellation(
-        &self,
-        file: &FileMeta,
-        token: Option<CancellationTokenRef>,
-    ) -> KernelResult<ParquetFooter> {
-        self.record(Read::Footer, &token)?;
-        self.inner
-            .parquet_handler()
-            .read_parquet_footer_with_cancellation(file, token)
-    }
-
-    fn write_parquet_file(
-        &self,
-        location: Url,
-        data: KernelResultIteratorStatic<Box<dyn EngineData>>,
-    ) -> KernelResult<FileSize> {
-        self.inner
-            .parquet_handler()
-            .write_parquet_file(location, data)
-    }
-}
 
 /// Handler entry point selected for a read.
 #[derive(Clone, Copy)]
@@ -443,29 +182,6 @@ fn iterators_keep_scope_after_engine_is_dropped(
     }
 }
 
-/// Verifies that reads through an unwrapped engine reach handlers without a token.
-#[rstest]
-fn unscoped_engine_reads_pass_none(
-    #[values(
-        Read::List,
-        Read::Hint,
-        Read::Crc,
-        Read::Json,
-        Read::Parquet,
-        Read::Footer
-    )]
-    read: Read,
-) {
-    let mut reads = RecordingReads::new(None);
-    Arc::get_mut(&mut reads).unwrap().expected_token = None;
-    start_read(&reads.engine(), read, ReadApi::Plain, None)
-        .unwrap()
-        .next()
-        .unwrap()
-        .unwrap();
-    assert_eq!(*reads.events.lock().unwrap(), [read]);
-}
-
 /// Lets the builder replace a cancelled bound token without replacing the evaluator.
 #[test]
 fn builder_token_overrides_bound_read_token() {
@@ -608,6 +324,64 @@ fn nested_reads_override_tokens_but_head_checks_each_wrapper_and_writes_stay_uns
     cancelled_engine.storage_handler().delete(&path).unwrap();
 }
 
+#[rstest]
+fn copy_atomic_forwards_arguments_and_result(
+    #[values(false, true)] cancelled: bool,
+    #[values(false, true)] fail: bool,
+) {
+    let storage = Arc::new(RecordingCopy {
+        inner: SyncEngine::new().storage_handler(),
+        calls: Mutex::new(Vec::new()),
+        result: Mutex::new(Some(if fail {
+            Err(KernelError::generic("copy failure"))
+        } else {
+            Ok(())
+        })),
+    });
+    let original =
+        DelegatingEngine::new(Arc::new(SyncEngine::new())).with_storage_handler(storage.clone());
+    let token = Arc::new(TestCancellationToken::default());
+    if cancelled {
+        token.cancel();
+    }
+    let engine = CancellableEngine::new(&original, token);
+    let src = Url::parse("memory:///source").unwrap();
+    let dest = Url::parse("memory:///destination").unwrap();
+    let result = engine.storage_handler().copy_atomic(&src, &dest);
+    if fail {
+        assert!(matches!(result, Err(KernelError::Generic(message)) if message == "copy failure"));
+    } else {
+        result.unwrap();
+    }
+    assert_eq!(*storage.calls.lock().unwrap(), [(src, dest)]);
+    assert!(storage.result.lock().unwrap().is_none());
+}
+
+/// Records atomic copies and supplies a caller-selected result.
+struct RecordingCopy {
+    /// Handler for storage operations other than atomic copies.
+    inner: Arc<dyn StorageHandler>,
+    /// Source and destination of each atomic copy.
+    calls: Mutex<Vec<(Url, Url)>>,
+    /// Result consumed by the single expected copy.
+    result: Mutex<Option<KernelResult<()>>>,
+}
+
+impl StorageHandler for RecordingCopy {
+    forward_methods! {
+        fn list_from(path: &Url) -> KernelResult<KernelResultIteratorStatic<FileMeta>>;
+        fn read_files(files: Vec<FileSlice>) -> KernelResult<KernelResultIteratorStatic<Bytes>>;
+        fn put(path: &Url, data: Bytes, overwrite: bool) -> KernelResult<()>;
+        fn head(path: &Url) -> KernelResult<FileMeta>;
+        fn delete(path: &Url) -> KernelResult<()>;
+    }
+
+    fn copy_atomic(&self, src: &Url, dest: &Url) -> KernelResult<()> {
+        self.calls.lock().unwrap().push((src.clone(), dest.clone()));
+        self.result.lock().unwrap().take().unwrap()
+    }
+}
+
 /// Round-trips parsed JSON and Parquet writes even when the read token is cancelled.
 #[rstest]
 fn parsing_and_writes_ignore_read_cancellation(#[values(false, true)] cancelled: bool) {
@@ -729,157 +503,6 @@ fn snapshot_reads_keep_builder_token(
     }
 }
 
-/// Creates a table with CRC at version zero and a newer commit to replay.
-fn stale_crc_table() -> (Url, TempDir) {
-    let (url, temp) = copy_test_table("crc-full").unwrap();
-    std::fs::write(
-        url.to_file_path()
-            .unwrap()
-            .join("_delta_log/00000000000000000001.json"),
-        r#"{"commitInfo":{"operation":"WRITE"}}"#,
-    )
-    .unwrap();
-    (url, temp)
-}
-
-fn ordinary_replay_table() -> (Url, TempDir) {
-    let (url, temp) = copy_test_table("table-without-dv-small").unwrap();
-    std::fs::write(
-        url.to_file_path()
-            .unwrap()
-            .join("_delta_log/00000000000000000001.json"),
-        r#"{"commitInfo":{"operation":"WRITE"}}"#,
-    )
-    .unwrap();
-    (url, temp)
-}
-
-#[test]
-fn ordinary_protocol_metadata_replay_propagates_cancellation_after_batch() {
-    let (url, _temp) = ordinary_replay_table();
-    let mut reads = RecordingReads::new(None);
-    Arc::get_mut(&mut reads).unwrap().cancel_json_after_batch = true;
-    let token: CancellationTokenRef = reads.token.clone();
-    let result = Snapshot::builder_for(url)
-        .with_cancellation_token(token)
-        .build(&reads.engine());
-    assert!(matches!(result, Err(KernelError::Cancelled)), "{result:?}");
-    assert_eq!(
-        reads
-            .events
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|read| **read == Read::Json)
-            .count(),
-        1
-    );
-}
-
-/// Propagates cancellation at JSON read entry or after a batch during stale-CRC reconstruction.
-#[rstest]
-fn stale_crc_replay_keeps_builder_token(
-    #[values(false, true)] incremental: bool,
-    #[values(None, Some(false), Some(true))] cancel_after_batch: Option<bool>,
-) {
-    let (url, _temp) = stale_crc_table();
-    let mut reads = RecordingReads::new((cancel_after_batch == Some(false)).then_some(Read::Json));
-    Arc::get_mut(&mut reads).unwrap().cancel_json_after_batch = cancel_after_batch == Some(true);
-    let engine = reads.engine();
-    let token: CancellationTokenRef = reads.token.clone();
-    let result = if incremental {
-        let base = Snapshot::builder_for(&url)
-            .at_version(0)
-            .build(reads.inner.as_ref())
-            .unwrap();
-        Snapshot::builder_from(base)
-            .with_incremental_crc_replay(IncrementalReplay::Unlimited)
-            .with_cancellation_token(token)
-            .build(&engine)
-    } else {
-        Snapshot::builder_for(&url)
-            .with_incremental_crc_replay(IncrementalReplay::Unlimited)
-            .with_cancellation_token(token)
-            .build(&engine)
-    };
-    if cancel_after_batch.is_some() {
-        assert!(matches!(result, Err(KernelError::Cancelled)));
-    } else {
-        assert_eq!(result.unwrap().crc_at_version().unwrap().version, 1);
-    }
-    let events = reads.events.lock().unwrap();
-    assert_eq!(events.iter().filter(|read| **read == Read::Json).count(), 1);
-}
-
-/// Stops on a cancelled newer CRC but replays malformed CRC content from the retained base.
-#[rstest]
-#[case::cancelled(true)]
-#[case::malformed(false)]
-fn newer_disk_crc_failure_with_retained_base(#[case] cancel_crc: bool) {
-    let (url, _temp) = stale_crc_table();
-    let base = Snapshot::builder_for(&url)
-        .at_version(0)
-        .build(&SyncEngine::new())
-        .unwrap();
-    assert_eq!(base.crc_at_version().unwrap().version, 0);
-    std::fs::write(
-        url.to_file_path()
-            .unwrap()
-            .join("_delta_log/00000000000000000001.crc"),
-        b"malformed",
-    )
-    .unwrap();
-
-    let mut reads = RecordingReads::new(cancel_crc.then_some(Read::Crc));
-    Arc::get_mut(&mut reads).unwrap().expected_token = None;
-    let reporter = Arc::new(CapturingReporter::default());
-    let _guard = install_thread_local_metrics_reporter(reporter.clone());
-    let result = Snapshot::builder_from(base)
-        .with_incremental_crc_replay(IncrementalReplay::Unlimited)
-        .with_correlation_id("incremental-crc-failure")
-        .build(&reads.engine());
-    let read_events = reads.events.lock().unwrap();
-    assert!(read_events.contains(&Read::Crc));
-    if !cancel_crc {
-        let updated = result.unwrap();
-        assert_eq!(updated.version(), 1);
-        assert_eq!(updated.crc_at_version().unwrap().version, 1);
-        assert!(read_events.contains(&Read::Json));
-        return;
-    }
-
-    assert!(matches!(result, Err(KernelError::Cancelled)));
-    assert_eq!(read_events.last(), Some(&Read::Crc));
-    assert!(!read_events.contains(&Read::Json));
-    let events = reporter.events();
-    let failures: Vec<_> = events
-        .iter()
-        .filter(|event| {
-            matches!(
-                event,
-                MetricEvent::ProtocolMetadataLoadFailure(_) | MetricEvent::SnapshotBuildFailure(_)
-            )
-        })
-        .collect();
-    let [MetricEvent::ProtocolMetadataLoadFailure(pm), MetricEvent::SnapshotBuildFailure(build)] =
-        failures.as_slice()
-    else {
-        panic!("expected one protocol/metadata and snapshot failure: {events:?}");
-    };
-    assert_eq!(pm.operation_id, build.operation_id);
-    assert_eq!(
-        pm.correlation_id.as_deref(),
-        Some("incremental-crc-failure")
-    );
-    assert_eq!(pm.correlation_id, build.correlation_id);
-    assert_eq!(pm.load_type, LogSegmentLoadType::Incremental);
-    assert_eq!(build.load_type, SnapshotLoadType::Incremental);
-    assert!(!events.iter().any(|event| matches!(
-        event,
-        MetricEvent::ProtocolMetadataLoadSuccess(_) | MetricEvent::SnapshotBuildSuccess(_)
-    )));
-}
-
 /// Stops snapshot discovery when cancellation arrives at the checkpoint hint or listing read.
 #[rstest]
 #[case(Read::Hint)]
@@ -892,16 +515,6 @@ fn discovery_keeps_builder_token(#[case] read: Read) {
         .build(&reads.engine());
     assert!(matches!(result, Err(KernelError::Cancelled)));
     assert_eq!(reads.events.lock().unwrap().last(), Some(&read));
-}
-
-/// Propagates an engine-reported CRC cancellation even without a caller-supplied token.
-#[test]
-fn engine_reported_crc_cancellation_is_not_optional() {
-    let mut reads = RecordingReads::new(Some(Read::Crc));
-    Arc::get_mut(&mut reads).unwrap().expected_token = None;
-    let result = Snapshot::builder_for("tests/data/crc-full").build(&reads.engine());
-    assert!(matches!(result, Err(KernelError::Cancelled)));
-    assert_eq!(reads.events.lock().unwrap().last(), Some(&Read::Crc));
 }
 
 /// Releases the build token after success and permits cached reuse with a cancelled token.
