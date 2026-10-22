@@ -11,7 +11,6 @@ use tracing::{debug, info, warn};
 use url::Url;
 
 use self::data_skipping::as_checkpoint_skipping_predicate;
-use self::data_skipping::stats_schema::min_max_stats_columns;
 use self::log_replay::{get_scan_metadata_transform_expr, scan_action_iter};
 use crate::actions::deletion_vector::{
     deletion_treemap_to_bools, split_vector, DeletionVectorDescriptor,
@@ -39,6 +38,8 @@ use crate::scan::log_replay::{
 };
 use crate::scan::metrics::ScanMetrics;
 use crate::scan::state_info::StateInfo;
+#[cfg(feature = "udt-in-dev")]
+use crate::schema::UserDefinedType;
 use crate::schema::{
     lazy_schema_ref, schema_ref, ArrayType, DataType, MapType, PrimitiveType, Schema, SchemaRef,
     StructField, StructType, ToSchema as _,
@@ -710,8 +711,8 @@ impl<'a> SchemaTransform<'a> for GetReferencedFields<'a> {
     #[cfg(feature = "udt-in-dev")]
     fn transform_user_defined(
         &mut self,
-        udt: &'a crate::schema::UserDefinedType,
-    ) -> Option<Cow<'a, crate::schema::UserDefinedType>> {
+        udt: &'a UserDefinedType,
+    ) -> Option<Cow<'a, UserDefinedType>> {
         self.record_leaf()?;
         Some(Cow::Borrowed(udt))
     }
@@ -739,7 +740,8 @@ impl<'a> SchemaTransform<'a> for GetReferencedFields<'a> {
 
 impl GetReferencedFields<'_> {
     fn record_leaf(&mut self) -> Option<()> {
-        // Delta column names are case-insensitive; retain each predicate spelling for rewriting.
+        // ApplyColumnMappings looks up the predicate's exact spelling after case-insensitive
+        // resolution, so each spelling must remain a key in column_mappings.
         let pred_cols = self
             .folded_references
             .remove(self.folded_logical_path.as_slice())?;
@@ -1347,11 +1349,9 @@ impl Scan {
             &partition_columns,
             &floating_partition_columns,
             &self.state_info.eligible_physical_stats_columns,
-            &min_max_stats_columns(
-                self.state_info
-                    .physical_stats_read_schema()
-                    .map(AsRef::as_ref),
-            ),
+            self.state_info
+                .physical_stats_read_schema()
+                .map(AsRef::as_ref),
         )?;
 
         let mut prefixer = PrefixColumns {

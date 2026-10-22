@@ -7,8 +7,50 @@ use crate::expressions::{col, column_expr_ref, column_name, lit};
 use crate::kernel_predicates::{
     DefaultKernelPredicateEvaluator, EmptyColumnResolver, UnimplementedColumnResolver,
 };
+use crate::schema::schema;
 #[cfg(feature = "udt-in-dev")]
-use crate::schema::{schema, UserDefinedType};
+use crate::schema::UserDefinedType;
+
+const TRUE: Option<bool> = Some(true);
+const FALSE: Option<bool> = Some(false);
+const NULL: Option<bool> = None;
+
+/// Rewrites with min/max eligibility for every stats column to isolate rewrite mechanics.
+fn as_checkpoint_skipping_predicate_permissive(
+    pred: &Pred,
+    partition_columns: &HashSet<ColumnName>,
+    floating_partition_columns: &HashSet<ColumnName>,
+    stats_columns: &HashSet<ColumnName>,
+) -> Option<Pred> {
+    CheckpointDataSkippingPredicateCreator {
+        data_skipping_columns: DataSkippingColumns::permissive(partition_columns, stats_columns),
+        physical_floating_partition_columns: floating_partition_columns,
+    }
+    .eval(pred)
+}
+
+/// Rewrites with min/max eligibility for every stats column to isolate rewrite mechanics.
+fn as_sql_data_skipping_predicate_permissive(
+    pred: &Pred,
+    partition_columns: &HashSet<ColumnName>,
+    stats_columns: &HashSet<ColumnName>,
+) -> Option<Pred> {
+    DataSkippingPredicateCreator::permissive(partition_columns, stats_columns).eval_sql_where(pred)
+}
+
+macro_rules! expect_eq {
+    ( $expr: expr, $expect: expr, $fmt: literal ) => {
+        let expect = ($expect);
+        let result = ($expr);
+        assert!(
+            result == expect,
+            "Expected {} = {:?}, got {:?}",
+            format!($fmt),
+            expect,
+            result
+        );
+    };
+}
 
 #[cfg(feature = "udt-in-dev")]
 #[rstest]
@@ -42,14 +84,14 @@ fn test_udt_skipping_uses_null_count_without_min_max(
         &predicate,
         &HashSet::new(),
         &stats_columns,
-        &min_max_columns,
+        Some(&stats_schema),
     );
     let checkpoint_pred = super::as_checkpoint_skipping_predicate(
         &predicate,
         &HashSet::new(),
         &HashSet::new(),
         &stats_columns,
-        &min_max_columns,
+        Some(&stats_schema),
     );
     for rewritten in [sql_pred.as_ref(), checkpoint_pred.as_ref()]
         .into_iter()
@@ -93,54 +135,6 @@ fn test_udt_skipping_uses_null_count_without_min_max(
     );
 }
 
-const TRUE: Option<bool> = Some(true);
-const FALSE: Option<bool> = Some(false);
-const NULL: Option<bool> = None;
-
-/// Rewrites with min/max eligibility for every stats column to isolate rewrite mechanics.
-fn as_checkpoint_skipping_predicate_permissive(
-    pred: &Pred,
-    partition_columns: &HashSet<ColumnName>,
-    floating_partition_columns: &HashSet<ColumnName>,
-    stats_columns: &HashSet<ColumnName>,
-) -> Option<Pred> {
-    super::as_checkpoint_skipping_predicate(
-        pred,
-        partition_columns,
-        floating_partition_columns,
-        stats_columns,
-        stats_columns,
-    )
-}
-
-/// Rewrites with min/max eligibility for every stats column to isolate rewrite mechanics.
-fn as_sql_data_skipping_predicate_permissive(
-    pred: &Pred,
-    partition_columns: &HashSet<ColumnName>,
-    stats_columns: &HashSet<ColumnName>,
-) -> Option<Pred> {
-    super::as_sql_data_skipping_predicate_with_stats_columns(
-        pred,
-        partition_columns,
-        stats_columns,
-        stats_columns,
-    )
-}
-
-macro_rules! expect_eq {
-    ( $expr: expr, $expect: expr, $fmt: literal ) => {
-        let expect = ($expect);
-        let result = ($expr);
-        assert!(
-            result == expect,
-            "Expected {} = {:?}, got {:?}",
-            format!($fmt),
-            expect,
-            result
-        );
-    };
-}
-
 #[test]
 fn test_eval_is_null() {
     let col = &col!("x");
@@ -173,6 +167,73 @@ fn test_eval_is_null() {
 
     // all nulls
     do_test(2, &[TRUE, FALSE]);
+}
+
+#[rstest]
+#[case::no_schema(None)]
+#[case::no_stats_fields(Some(schema! { nullable "numRecords": LONG }))]
+#[case::non_struct_stats(Some(schema! {
+    nullable "numRecords": LONG,
+    nullable "minValues": LONG,
+    nullable "nullCount": LONG,
+}))]
+#[case::different_leaf(Some(schema! {
+    nullable "numRecords": LONG,
+    nullable "minValues": { nullable "other": LONG },
+    nullable "nullCount": { nullable "other": LONG },
+}))]
+fn missing_stats_leaves_remain_unknown(
+    #[case] stats_schema: Option<Schema>,
+    #[values(
+        Pred::eq(col!("value"), lit(42i64)),
+        Pred::is_null(col!("value")),
+        Pred::is_not_null(col!("value"))
+    )]
+    predicate: Pred,
+) {
+    let stats_columns = HashSet::from([column_name!("value")]);
+    let partition_columns = HashSet::new();
+    let sql = as_sql_data_skipping_predicate_with_stats_columns(
+        &predicate,
+        &partition_columns,
+        &stats_columns,
+        stats_schema.as_ref(),
+    );
+    let checkpoint = as_checkpoint_skipping_predicate(
+        &predicate,
+        &partition_columns,
+        &HashSet::new(),
+        &stats_columns,
+        stats_schema.as_ref(),
+    );
+    let evaluator = DefaultKernelPredicateEvaluator::from(EmptyColumnResolver);
+    for rewritten in [sql, checkpoint].into_iter().flatten() {
+        assert!(rewritten.references().is_empty());
+        assert_ne!(evaluator.eval(&rewritten), Some(false));
+    }
+}
+
+#[rstest]
+#[case::selected_leaf(column_name!("nested.kept"), true)]
+#[case::unselected_leaf(column_name!("unselected"), false)]
+#[case::absent_leaf(column_name!("missing"), false)]
+fn stat_lookups_require_selected_schema_leaves(#[case] column: ColumnName, #[case] expected: bool) {
+    let schema = crate::schema::schema! {
+        nullable "minValues": { nullable "nested": { nullable "kept": LONG }, nullable "unselected": LONG },
+        nullable "nullCount": { nullable "nested": { nullable "kept": LONG }, nullable "unselected": LONG },
+    };
+    let selected = HashSet::from([column_name!("nested.kept"), column_name!("missing")]);
+    let partitions = HashSet::new();
+    let columns = DataSkippingColumns::new(&partitions, &selected, Some(&schema));
+    assert_eq!(
+        columns.min_stat(&column, &DataType::LONG).is_some(),
+        expected
+    );
+    assert_eq!(
+        columns.max_stat(&column, &DataType::LONG).is_some(),
+        expected
+    );
+    assert_eq!(columns.nullcount_stat(&column).is_some(), expected);
 }
 
 #[test]
@@ -528,7 +589,7 @@ fn test_all_null_pruning_all_comparison_ops(#[case] pred: Pred) {
 fn test_timestamp_stats_enabled() {
     let empty = HashSet::new();
     let stats_columns: HashSet<ColumnName> = [column_name!("timestamp_col")].into_iter().collect();
-    let creator = DataSkippingPredicateCreator::new(&empty, &stats_columns, &stats_columns);
+    let creator = DataSkippingPredicateCreator::permissive(&empty, &stats_columns);
     let col = &column_name!("timestamp_col");
 
     assert!(

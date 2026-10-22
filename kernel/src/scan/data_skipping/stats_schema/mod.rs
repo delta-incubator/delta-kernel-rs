@@ -1,4 +1,4 @@
-//! This module contains logic to compute the expected schema for file statistics
+//! Computes the expected schema for file statistics.
 
 mod column_filter;
 
@@ -31,9 +31,12 @@ use crate::KernelResult;
 /// are converted to LONG type (since null counts are always integers).
 ///
 /// Note: Array, Map, and UDT types are included in `nullCount` (null counts are meaningful for
-/// these types) but excluded from `minValues`/`maxValues` (not eligible for data skipping). Variant
-/// is treated the same by default; [`StatsConfig::variant_min_max`] opts it into `minValues`/
-/// `maxValues`.
+/// these types) but excluded from `minValues`/`maxValues` (not eligible for min/max skipping).
+/// A UDT is a single statistics leaf, including when its `sqlType` is a struct; see the
+/// [UDT RFC's statistics rule]. Variant is treated the same by default;
+/// [`StatsConfig::variant_min_max`] opts it into `minValues`/`maxValues`.
+///
+/// [UDT RFC's statistics rule]: https://github.com/delta-io/delta/blob/master/protocol_rfcs/user-defined-types.md#constraints-and-interactions-with-other-features
 #[cfg_attr(
     feature = "geo-type-in-dev",
     doc = "[`StatsConfig::geometry_min_max`] requests Geometry bounds."
@@ -217,13 +220,13 @@ pub(crate) fn stats_column_names(
 /// Expected schemas give `minValues` and `maxValues` the same shape. Returns an empty set
 /// when the schema is absent or `minValues` is absent or not a struct.
 pub(crate) fn min_max_stats_columns(stats_schema: Option<&Schema>) -> HashSet<ColumnName> {
-    let Some(DataType::Struct(min_values)) = stats_schema
-        .and_then(|schema| schema.field(MIN_VALUES))
-        .map(|field| field.data_type())
-    else {
-        return HashSet::new();
-    };
-    min_values.leaves(None).as_ref().0.iter().cloned().collect()
+    stats_leaf_columns(stats_schema, MIN_VALUES)
+}
+
+/// Returns physical null-count leaf paths, or an empty set when `nullCount` is absent or not a
+/// struct in `stats_schema`.
+pub(crate) fn null_count_stats_columns(stats_schema: Option<&Schema>) -> HashSet<ColumnName> {
+    stats_leaf_columns(stats_schema, NULL_COUNT)
 }
 
 /// Strips field metadata from every field in a schema, at all levels of nesting (nested
@@ -288,10 +291,8 @@ fn make_nullable_field<'a>(
 /// Converts a stats schema into a nullCount schema where all leaf fields become LONG.
 ///
 /// The nullCount struct field tracks the number of null values for each column.
-/// All leaf fields are converted to LONG type
-/// since null counts are always integers, while struct fields are recursed into
-/// to preserve the nested structure. Field metadata (including column mapping info)
-/// is preserved for all fields.
+/// All leaf fields are converted to LONG since null counts are integers. Struct fields preserve
+/// the nested structure, and field metadata (including column mapping info) is preserved.
 pub(crate) struct NullCountStatsTransform;
 impl<'a> SchemaTransform<'a> for NullCountStatsTransform {
     transform_output_type!(|'a, T| Cow<'a, T>);
@@ -316,8 +317,8 @@ impl<'a> SchemaTransform<'a> for NullCountStatsTransform {
 /// that may be considered for stats collection. Depending on the type of stats -
 /// min/max/nullcount/... - additional transformations may be applied.
 ///
-/// All fields in the output are nullable. Clustering columns are always included per
-/// the Delta protocol.
+/// All fields in the output are nullable. Clustering columns are always included per the Delta
+/// protocol.
 #[allow(unused)]
 struct BaseStatsTransform<'col> {
     filter: StatsColumnFilter<'col>,
@@ -396,8 +397,8 @@ struct MinMaxStatsTransform {
 impl<'a> SchemaTransform<'a> for MinMaxStatsTransform {
     transform_output_type!(|'a, T| Option<Cow<'a, T>>);
 
-    // Non-struct complex fields pass through BaseStatsTransform (for nullCount) but must be
-    // excluded from min/max stats unless handled specially below.
+    // Array, Map, and UDT fields contribute only null counts. Variant and Geometry bounds are
+    // controlled by StatsConfig.
     fn transform_array(&mut self, _: &'a ArrayType) -> Option<Cow<'a, ArrayType>> {
         None
     }
@@ -458,6 +459,34 @@ pub(crate) fn is_skipping_eligible_datatype(data_type: &PrimitiveType) -> bool {
     )
 }
 
+fn stats_leaf_columns(stats_schema: Option<&Schema>, stat: &str) -> HashSet<ColumnName> {
+    fn collect_leaves<'a>(
+        schema: &'a Schema,
+        path: &mut Vec<&'a str>,
+        columns: &mut HashSet<ColumnName>,
+    ) {
+        for field in schema.fields() {
+            path.push(field.name());
+            if let DataType::Struct(nested) = field.data_type() {
+                collect_leaves(nested, path, columns);
+            } else {
+                columns.insert(ColumnName::new(path.iter().copied()));
+            }
+            path.pop();
+        }
+    }
+
+    let Some(DataType::Struct(fields)) = stats_schema
+        .and_then(|schema| schema.field(stat))
+        .map(|field| field.data_type())
+    else {
+        return HashSet::new();
+    };
+    let mut columns = HashSet::new();
+    collect_leaves(fields, &mut Vec::new(), &mut columns);
+    columns
+}
+
 #[cfg(test)]
 mod tests {
     use rstest::rstest;
@@ -468,6 +497,29 @@ mod tests {
     #[cfg(feature = "geo-type-in-dev")]
     use crate::schema::{EdgeInterpolationAlgorithm, GeographyType, GeometryType};
     use crate::table_properties::TableProperties;
+
+    #[rstest]
+    #[case::no_schema(None, vec![])]
+    #[case::absent(Some(schema! { nullable "numRecords": LONG }), vec![])]
+    #[case::non_struct(Some(schema! { nullable "minValues": LONG, nullable "nullCount": LONG }), vec![])]
+    #[case::nested(Some(schema! {
+        nullable "minValues": {
+            nullable "nested": { nullable "value": LONG },
+            nullable "literal.dot": LONG,
+        },
+        nullable "nullCount": {
+            nullable "nested": { nullable "value": LONG },
+            nullable "literal.dot": LONG,
+        },
+    }), vec![column_name!("nested.value"), ColumnName::new(["literal.dot"])])]
+    fn stats_leaf_paths_preserve_nested_and_literal_names(
+        #[case] schema: Option<Schema>,
+        #[case] expected: Vec<ColumnName>,
+    ) {
+        let expected = expected.into_iter().collect();
+        assert_eq!(min_max_stats_columns(schema.as_ref()), expected);
+        assert_eq!(null_count_stats_columns(schema.as_ref()), expected);
+    }
 
     #[cfg(feature = "udt-in-dev")]
     #[rstest]
