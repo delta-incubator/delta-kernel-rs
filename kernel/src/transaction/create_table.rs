@@ -12,13 +12,13 @@
 //! use delta_kernel::committer::FileSystemCommitter;
 //! use std::sync::Arc;
 //! # use delta_kernel::Engine;
-//! # fn example(engine: &dyn Engine) -> delta_kernel::Result<()> {
+//! # fn example(engine: &dyn Engine) -> delta_kernel::KernelResult<()> {
 //!
 //! let schema = Arc::new(StructType::try_new(vec![
 //!     StructField::nullable("id", DataType::INTEGER),
 //! ])?);
 //!
-//! let result = create_table("/path/to/table", schema, "MyApp/1.0")
+//! let result = create_table("/path/to/table", schema, "MyApp/1.0", /* data_change */ true)
 //!     .with_table_properties([("myapp.version", "1.0")])
 //!     .build(engine, Box::new(FileSystemCommitter::new()))?
 //!     .commit(engine)?;
@@ -60,13 +60,13 @@ use crate::transaction::{CreateTable, Transaction};
 /// use delta_kernel::committer::FileSystemCommitter;
 /// use std::sync::Arc;
 /// # use delta_kernel::Engine;
-/// # fn example(engine: &dyn Engine) -> delta_kernel::Result<()> {
+/// # fn example(engine: &dyn Engine) -> delta_kernel::KernelResult<()> {
 ///
 /// let schema = Arc::new(StructType::try_new(vec![
 ///     StructField::nullable("id", DataType::INTEGER),
 /// ])?);
 ///
-/// let result = create_table("/path/to/table", schema, "MyApp/1.0")
+/// let result = create_table("/path/to/table", schema, "MyApp/1.0", /* data_change */ true)
 ///     .build(engine, Box::new(FileSystemCommitter::new()))?
 ///     .commit(engine)?;
 /// # Ok(())
@@ -84,6 +84,10 @@ pub type CreateTableTransaction = Transaction<CreateTable>;
 /// * `path` - The file system path where the Delta table will be created
 /// * `schema` - The schema for the new table
 /// * `engine_info` - Information about the engine creating the table (e.g., "MyApp/1.0")
+/// * `data_change` - Whether added files change logical data. Use `true` when inserting initial
+///   rows, such as `CREATE TABLE AS SELECT`, and `false` for schema-only creation with no staged
+///   files. The value cannot be changed later and is preserved even when no files are staged, so an
+///   empty creation may also use `true`.
 ///
 /// Engine info is required at construction:
 ///
@@ -92,6 +96,23 @@ pub type CreateTableTransaction = Transaction<CreateTable>;
 /// # use delta_kernel::transaction::create_table::create_table;
 /// fn configure(schema: SchemaRef) {
 ///     let _ = create_table("/path/to/table", schema);
+/// }
+/// ```
+///
+/// Data-change intent is also required:
+///
+/// ```compile_fail,E0061
+/// # use delta_kernel::schema::SchemaRef;
+/// # use delta_kernel::transaction::create_table::create_table;
+/// fn configure(schema: SchemaRef) {
+///     let _ = create_table("/path/to/table", schema, "my-app/1.0");
+/// }
+/// ```
+///
+/// ```compile_fail,E0599
+/// # use delta_kernel::transaction::create_table::CreateTableTransactionBuilder;
+/// fn configure(builder: CreateTableTransactionBuilder) {
+///     let _ = builder.with_data_change(true);
 /// }
 /// ```
 ///
@@ -105,7 +126,7 @@ pub type CreateTableTransaction = Transaction<CreateTable>;
 /// use test_utils::delta_kernel_default_engine::DefaultEngineBuilder;
 /// use test_utils::delta_kernel_default_engine::storage::store_from_url;
 ///
-/// # fn main() -> delta_kernel::Result<()> {
+/// # fn main() -> delta_kernel::KernelResult<()> {
 /// let schema = Arc::new(StructType::try_new([
 ///     StructField::nullable("id", DataType::INTEGER),
 ///     StructField::nullable("name", DataType::STRING),
@@ -114,7 +135,7 @@ pub type CreateTableTransaction = Transaction<CreateTable>;
 /// let url = url::Url::parse("file:///tmp/my_table")?;
 /// let engine = DefaultEngineBuilder::new(store_from_url(&url)?).build();
 ///
-/// let transaction = create_table("/tmp/my_table", schema, "MyApp/1.0")
+/// let transaction = create_table("/tmp/my_table", schema, "MyApp/1.0", /* data_change */ true)
 ///     .build(&engine, Box::new(FileSystemCommitter::new()))?;
 ///
 /// // Commit the transaction to create the table
@@ -126,6 +147,7 @@ pub fn create_table(
     path: impl AsRef<str>,
     schema: SchemaRef,
     engine_info: impl Into<String>,
+    data_change: bool,
 ) -> CreateTableTransactionBuilder {
-    CreateTableTransactionBuilder::new(path, schema, engine_info)
+    CreateTableTransactionBuilder::new(path, schema, engine_info, data_change)
 }

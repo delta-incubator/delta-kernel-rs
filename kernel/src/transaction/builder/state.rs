@@ -7,7 +7,7 @@ use crate::actions::DomainMetadata;
 use crate::schema::SchemaRef;
 use crate::transaction::domain_metadata::validate_unique_domains;
 use crate::utils::require;
-use crate::{EngineData, KernelError, Result};
+use crate::{EngineData, KernelError, KernelResult};
 
 /// Shared transaction configuration collected before build.
 #[derive(Default)]
@@ -19,7 +19,7 @@ pub(in crate::transaction) struct TransactionBuilderState {
     pub(in crate::transaction) engine_commit_info: Option<(Box<dyn EngineData>, SchemaRef)>,
     pub(in crate::transaction) transaction_ids: Vec<(String, i64)>,
     pub(in crate::transaction) domain_metadata_additions: Vec<DomainMetadata>,
-    pub(in crate::transaction) data_change: Option<bool>,
+    pub(in crate::transaction) data_change: bool,
 }
 
 impl std::fmt::Debug for TransactionBuilderState {
@@ -38,22 +38,15 @@ impl std::fmt::Debug for TransactionBuilderState {
 }
 
 impl TransactionBuilderState {
-    pub(super) fn for_update_table(engine_info: String) -> Self {
+    pub(super) fn new(engine_info: String, data_change: bool) -> Self {
         Self {
             engine_info,
+            data_change,
             ..Self::default()
         }
     }
 
-    pub(super) fn for_create_table(engine_info: String) -> Self {
-        Self {
-            engine_info,
-            data_change: Some(true),
-            ..Self::default()
-        }
-    }
-
-    pub(super) fn validate(&self) -> Result<()> {
+    pub(super) fn validate(&self) -> KernelResult<()> {
         if let Some((commit_info, _)) = &self.engine_commit_info {
             require!(
                 commit_info.len() == 1,

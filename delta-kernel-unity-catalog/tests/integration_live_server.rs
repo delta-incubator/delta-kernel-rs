@@ -196,16 +196,21 @@ async fn live_create_table() {
         resp.table_id.clone(),
         TableIdentifier::new(catalog.clone(), schema_name.clone(), name.to_string()),
     ));
-    create_table(table_root.as_str(), schema, "delta-kernel-rs-live-test")
-        .with_table_properties(disk_props)
-        .with_data_layout(DataLayout::Clustered {
-            columns: vec![column_name!("name"), column_name!("address", "city")],
-        })
-        .build(engine.as_ref(), committer)
-        .expect("failed to build create-table transaction")
-        .commit(engine.as_ref())
-        .expect("failed to commit create-table transaction")
-        .unwrap_committed();
+    create_table(
+        table_root.as_str(),
+        schema,
+        "delta-kernel-rs-live-test",
+        true,
+    )
+    .with_table_properties(disk_props)
+    .with_data_layout(DataLayout::Clustered {
+        columns: vec![column_name!("name"), column_name!("address", "city")],
+    })
+    .build(engine.as_ref(), committer)
+    .expect("failed to build create-table transaction")
+    .commit(engine.as_ref())
+    .expect("failed to commit create-table transaction")
+    .unwrap_committed();
 
     // ===== Step 5: Load the post-commit v0 snapshot =====
     // The table is catalog-managed, so the snapshot build requires the catalog's max version; the

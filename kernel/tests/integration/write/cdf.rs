@@ -62,6 +62,7 @@ async fn write_data_to_table(
         engine.as_ref(),
         UpdateTableOperation::Write,
         "test",
+        true,
         |builder| builder,
     )?;
 
@@ -131,7 +132,8 @@ async fn test_cdf_write_all_removes_succeeds() -> Result<(), Box<dyn std::error:
         engine.as_ref(),
         UpdateTableOperation::Write,
         "cdf remove test",
-        |builder| builder.with_data_change(true),
+        true,
+        |builder| builder,
     )?;
 
     let scan = snapshot.scan_builder().build()?;
@@ -173,7 +175,8 @@ async fn test_cdf_write_mixed_no_data_change_succeeds() -> Result<(), Box<dyn st
         engine.as_ref(),
         UpdateTableOperation::Write,
         "cdf mixed test",
-        |builder| builder.with_data_change(false),
+        false,
+        |builder| builder,
     )?; // dataChange=false is key here
 
     // Add new files
@@ -218,7 +221,8 @@ async fn test_cdf_write_mixed_with_data_change_fails() -> Result<(), Box<dyn std
         engine.as_ref(),
         UpdateTableOperation::Write,
         "cdf mixed fail test",
-        |builder| builder.with_data_change(true),
+        true,
+        |builder| builder,
     )?; // dataChange=true - this should fail
 
     // Add new files
@@ -241,14 +245,16 @@ async fn test_cdf_write_mixed_with_data_change_fails() -> Result<(), Box<dyn std
 }
 
 #[rstest]
-#[case::inferred(None)]
-#[case::logical_preserving(Some(false))]
-#[case::explicit_change(Some(true))]
 #[tokio::test]
-async fn test_file_rewrite_resolves_data_change_before_cdf_validation(
-    #[case] explicit_data_change: Option<bool>,
+async fn test_file_rewrite_validates_explicit_data_change(
+    #[values(false, true)] data_change: bool,
     #[values(false, true)] cdf_enabled: bool,
-    #[values(false, true)] schema_change: bool,
+    #[values(
+        None,
+        Some(UpdateTableOperation::Write),
+        Some(UpdateTableOperation::AlterTable)
+    )]
+    schema_change_operation: Option<UpdateTableOperation>,
     #[values(false, true)] use_dv: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (_temp_dir, table_path, engine) = test_table_setup()?;
@@ -279,26 +285,30 @@ async fn test_file_rewrite_resolves_data_change_before_cdf_validation(
         .commit(engine.as_ref())?
         .unwrap_post_commit_snapshot();
 
-    let operation = if schema_change {
-        UpdateTableOperation::AlterTable
-    } else {
-        UpdateTableOperation::Write
-    };
-    let mut txn = begin_transaction_with(
+    let schema_change = schema_change_operation.is_some();
+    let operation = schema_change_operation.unwrap_or(UpdateTableOperation::Write);
+    let is_alter = operation == UpdateTableOperation::AlterTable;
+    let result = begin_transaction_with(
         before.clone(),
         engine.as_ref(),
         operation,
         "test-engine",
+        data_change,
         |mut builder| {
             if schema_change {
                 builder = builder.add_column(StructField::nullable("added", DataType::INTEGER));
             }
-            if let Some(data_change) = explicit_data_change {
-                builder = builder.with_data_change(data_change);
-            }
             builder
         },
-    )?;
+    );
+    if is_alter && data_change {
+        assert_result_error_with_message(result, "ALTER TABLE requires data_change to be false");
+        let fresh = Snapshot::builder_for(&table_path).build(engine.as_ref())?;
+        assert_eq!(fresh.version(), before.version());
+        assert_eq!(fresh.schema(), before.schema());
+        return Ok(());
+    }
+    let mut txn = result?;
     let new_file = create_add_files_metadata(
         txn.add_files_schema(),
         vec![(
@@ -329,12 +339,13 @@ async fn test_file_rewrite_resolves_data_change_before_cdf_validation(
     }
 
     let commit_result = txn.commit(engine.as_ref());
-    let data_change = explicit_data_change.unwrap_or(true);
-    if cdf_enabled && data_change {
-        assert_result_error_with_message(
-            commit_result,
-            "Cannot add and remove data in the same transaction",
-        );
+    let expected_error = match (is_alter, cdf_enabled && data_change) {
+        (true, _) => Some("ALTER TABLE cannot include data-file actions"),
+        (false, true) => Some("Cannot add and remove data in the same transaction"),
+        (false, false) => None,
+    };
+    if let Some(expected_error) = expected_error {
+        assert_result_error_with_message(commit_result, expected_error);
         let fresh = Snapshot::builder_for(&table_path).build(engine.as_ref())?;
         assert_eq!(fresh.version(), before.version());
         assert_eq!(fresh.schema(), before.schema());

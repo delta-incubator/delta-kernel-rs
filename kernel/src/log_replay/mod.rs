@@ -23,7 +23,7 @@ use url::Url;
 
 use crate::engine_data::GetData;
 use crate::log_replay::deduplicator::{Deduplicator, FileActionInfo};
-use crate::{EngineData, KernelResult, Result};
+use crate::{EngineData, KernelResult};
 
 pub(crate) mod deduplicator;
 
@@ -36,7 +36,10 @@ pub struct FileActionKey {
 }
 
 impl FileActionKey {
-    /// Build a key from a path and optional deletion-vector unique id.
+    /// Build a key from a path and optional deletion-vector unique id. Derive the id with
+    /// [`DeletionVectorDescriptor::unique_id_for`] so it matches the keys kernel produces.
+    ///
+    /// [`DeletionVectorDescriptor::unique_id_for`]: crate::actions::deletion_vector::DeletionVectorDescriptor::unique_id_for
     pub fn new(path: impl Into<String>, dv_unique_id: Option<String>) -> Self {
         let path = path.into();
         Self { path, dv_unique_id }
@@ -86,7 +89,6 @@ pub(crate) struct FileActionDeduplicator<'seen> {
     /// Starting index for remove action deletion vector columns
     remove_dv_start_index: usize,
     /// Table root for normalizing paths. `Some` iff adaptiveMetadata is enabled.
-    #[allow(dead_code)]
     dv_normalization_root: Option<Url>,
 }
 
@@ -215,6 +217,10 @@ impl Deduplicator for FileActionDeduplicator<'_> {
     fn is_log_batch(&self) -> bool {
         self.is_log_batch
     }
+
+    fn dv_normalization_root(&self) -> Option<&Url> {
+        self.dv_normalization_root.as_ref()
+    }
 }
 
 #[internal_api]
@@ -239,7 +245,10 @@ impl ActionsBatch {
 #[internal_api]
 pub(crate) trait ParallelLogReplayProcessor {
     type Output;
-    fn process_actions_batch_parallel(&self, actions_batch: ActionsBatch) -> Result<Self::Output>;
+    fn process_actions_batch_parallel(
+        &self,
+        actions_batch: ActionsBatch,
+    ) -> KernelResult<Self::Output>;
 }
 
 impl<T> ParallelLogReplayProcessor for Arc<T>
@@ -248,7 +257,10 @@ where
 {
     type Output = T::Output;
 
-    fn process_actions_batch_parallel(&self, actions_batch: ActionsBatch) -> Result<Self::Output> {
+    fn process_actions_batch_parallel(
+        &self,
+        actions_batch: ActionsBatch,
+    ) -> KernelResult<Self::Output> {
         T::process_actions_batch_parallel(self, actions_batch)
     }
 }
@@ -270,7 +282,9 @@ mod tests {
     use super::deduplicator::CheckpointDeduplicator;
     use super::*;
     use crate::engine_data::GetData;
-    use crate::Result;
+    #[cfg(feature = "adaptive-metadata-in-dev")]
+    use crate::unit_test_utils::assert_result_error_with_message;
+    use crate::KernelResult;
 
     /// Mock GetData implementation for testing
     struct MockGetData {
@@ -305,7 +319,7 @@ mod tests {
     }
 
     impl<'a> GetData<'a> for MockGetData {
-        fn get_str(&'a self, row_index: usize, field_name: &str) -> Result<Option<&'a str>> {
+        fn get_str(&'a self, row_index: usize, field_name: &str) -> KernelResult<Option<&'a str>> {
             if let Some(error_msg) = self.errors.get(&(row_index, field_name.to_string())) {
                 return Err(crate::KernelError::Generic(error_msg.clone()));
             }
@@ -315,7 +329,7 @@ mod tests {
                 .map(|s| s.as_str()))
         }
 
-        fn get_int(&'a self, row_index: usize, field_name: &str) -> Result<Option<i32>> {
+        fn get_int(&'a self, row_index: usize, field_name: &str) -> KernelResult<Option<i32>> {
             if let Some(error_msg) = self.errors.get(&(row_index, field_name.to_string())) {
                 return Err(crate::KernelError::Generic(error_msg.clone()));
             }
@@ -325,7 +339,7 @@ mod tests {
                 .cloned())
         }
 
-        fn get_long(&'a self, row_index: usize, field_name: &str) -> Result<Option<i64>> {
+        fn get_long(&'a self, row_index: usize, field_name: &str) -> KernelResult<Option<i64>> {
             if let Some(error_msg) = self.errors.get(&(row_index, field_name.to_string())) {
                 return Err(crate::KernelError::Generic(error_msg.clone()));
             }
@@ -341,16 +355,35 @@ mod tests {
         seen: &mut HashSet<FileActionKey>,
         is_log_batch: bool,
     ) -> FileActionDeduplicator<'_> {
+        create_deduplicator_with_root(seen, is_log_batch, None)
+    }
+
+    fn create_deduplicator_with_root(
+        seen: &mut HashSet<FileActionKey>,
+        is_log_batch: bool,
+        dv_normalization_root: Option<Url>,
+    ) -> FileActionDeduplicator<'_> {
         FileActionDeduplicator::new(
             seen,
             is_log_batch,
-            0,    // add_path_index
-            1,    // add_size_index,
-            5,    // remove_path_index
-            2,    // add_dv_start_index
-            6,    // remove_dv_start_index
-            None, // dv_normalization_root (not under adaptiveMetadata)
+            0, // add_path_index
+            1, // add_size_index,
+            5, // remove_path_index
+            2, // add_dv_start_index
+            6, // remove_dv_start_index
+            dv_normalization_root,
         )
+    }
+
+    /// A file action row for `path_field` carrying a DV at offset 4.
+    #[cfg(feature = "adaptive-metadata-in-dev")]
+    fn file_action_with_dv(path_field: &str, storage_type: &str, dv_path: &str) -> MockGetData {
+        let mut mock = MockGetData::new();
+        mock.add_string(0, path_field, "f.parquet");
+        mock.add_string(0, "deletionVector.storageType", storage_type);
+        mock.add_string(0, "deletionVector.pathOrInlineDv", dv_path);
+        mock.add_int(0, "deletionVector.offset", 4);
+        mock
     }
 
     /// Helper to create a getters array with mocks at specific positions
@@ -375,6 +408,82 @@ mod tests {
         ]
     }
 
+    // A newer remove encodes the DV as `'r'` and an older add encodes the same DV file as `'u'`.
+    // Only under adaptiveMetadata (a normalization root) does the remove cancel the add.
+    #[cfg(feature = "adaptive-metadata-in-dev")]
+    #[rstest]
+    #[case::normalized(
+        Some("s3://mytable/"),
+        "rab/deletion_vector_d2c639aa-8816-431a-aaf6-d3fe2512ff61.bin@4",
+        true
+    )]
+    #[case::legacy(None, "uab^-aqEH.-t@S}K{vb[*k^@4", false)]
+    fn test_remove_cancels_add_across_dv_storage_types(
+        #[case] root: Option<&str>,
+        #[case] expected_add_dv_id: &str,
+        #[case] expect_cancelled: bool,
+    ) -> KernelResult<()> {
+        let mut seen = HashSet::new();
+        let root = root.map(|r| Url::parse(r).unwrap());
+        let mut deduplicator = create_deduplicator_with_root(&mut seen, true, root.clone());
+        let remove = file_action_with_dv(
+            "remove.path",
+            "r",
+            "ab/deletion_vector_d2c639aa-8816-431a-aaf6-d3fe2512ff61.bin",
+        );
+        let add = file_action_with_dv("add.path", "u", "ab^-aqEH.-t@S}K{vb[*k^");
+
+        let remove_key = deduplicator
+            .extract_file_action(0, &create_getters_with_mocks(None, Some(&remove)), false)?
+            .unwrap()
+            .key;
+        let add_key = deduplicator
+            .extract_file_action(0, &create_getters_with_mocks(Some(&add), None), false)?
+            .unwrap()
+            .key;
+        assert_eq!(
+            remove_key.dv_unique_id(),
+            Some("rab/deletion_vector_d2c639aa-8816-431a-aaf6-d3fe2512ff61.bin@4")
+        );
+        assert_eq!(add_key.dv_unique_id(), Some(expected_add_dv_id));
+
+        let commit_removes = HashSet::from([remove_key.clone()]);
+        assert!(!deduplicator.check_and_record_seen(remove_key));
+        assert_eq!(
+            deduplicator.check_and_record_seen(add_key),
+            expect_cancelled
+        );
+
+        // The same add read from a checkpoint is filtered against the removes seen in commits.
+        let mut checkpoint = CheckpointDeduplicator::try_new(&commit_removes, 0, 1, 2, root)?;
+        let checkpoint_add_key = checkpoint
+            .extract_file_action(0, &create_getters_with_mocks(Some(&add), None), false)?
+            .unwrap()
+            .key;
+        assert_eq!(
+            checkpoint.check_and_record_seen(checkpoint_add_key),
+            expect_cancelled
+        );
+        Ok(())
+    }
+
+    #[cfg(feature = "adaptive-metadata-in-dev")]
+    #[test]
+    fn test_normalized_dv_identity_rejects_unknown_storage_type() {
+        let mut seen = HashSet::new();
+        let root = Url::parse("s3://mytable/").unwrap();
+        let deduplicator = create_deduplicator_with_root(&mut seen, true, Some(root));
+        let add = file_action_with_dv("add.path", "z", "ABC");
+        assert_result_error_with_message(
+            deduplicator.extract_file_action(
+                0,
+                &create_getters_with_mocks(Some(&add), None),
+                false,
+            ),
+            "unsupported deletion vector storage type: z",
+        );
+    }
+
     #[rstest]
     #[case::valid_size(Some(100), 100)]
     #[case::missing_size_defaults_to_zero(None, 0)]
@@ -382,7 +491,7 @@ mod tests {
     fn test_extract_file_action_add(
         #[case] raw_size: Option<i64>,
         #[case] expected_size: u64,
-    ) -> Result<()> {
+    ) -> KernelResult<()> {
         let mut seen = HashSet::new();
         let deduplicator = create_deduplicator(&mut seen, true);
 
@@ -404,7 +513,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_file_action_remove() -> Result<()> {
+    fn test_extract_file_action_remove() -> KernelResult<()> {
         let mut seen = HashSet::new();
         let deduplicator = create_deduplicator(&mut seen, true);
 
@@ -422,7 +531,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_file_action_with_deletion_vector() -> Result<()> {
+    fn test_extract_file_action_with_deletion_vector() -> KernelResult<()> {
         let mut seen = HashSet::new();
         let deduplicator = create_deduplicator(&mut seen, true);
 
@@ -446,7 +555,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_file_action_skip_removes() -> Result<()> {
+    fn test_extract_file_action_skip_removes() -> KernelResult<()> {
         let mut seen = HashSet::new();
         let deduplicator = create_deduplicator(&mut seen, true);
 
@@ -468,7 +577,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_file_action_no_action_found() -> Result<()> {
+    fn test_extract_file_action_no_action_found() -> KernelResult<()> {
         let mut seen = HashSet::new();
         let deduplicator = create_deduplicator(&mut seen, true);
 
@@ -546,7 +655,7 @@ mod tests {
     // ==================== CheckpointDeduplicator Tests ====================
 
     #[test]
-    fn test_checkpoint_extract_file_action_add() -> Result<()> {
+    fn test_checkpoint_extract_file_action_add() -> KernelResult<()> {
         let seen = HashSet::new();
         let deduplicator = CheckpointDeduplicator::try_new(&seen, 0, 2, 3, None)?;
 
@@ -565,7 +674,7 @@ mod tests {
     }
 
     #[test]
-    fn test_checkpoint_extract_file_action_with_deletion_vector() -> Result<()> {
+    fn test_checkpoint_extract_file_action_with_deletion_vector() -> KernelResult<()> {
         let seen = HashSet::new();
         let deduplicator = CheckpointDeduplicator::try_new(&seen, 0, 1, 2, None)?;
 
@@ -590,7 +699,7 @@ mod tests {
     }
 
     #[test]
-    fn test_checkpoint_deduplicator_filters_commit_duplicates() -> Result<()> {
+    fn test_checkpoint_deduplicator_filters_commit_duplicates() -> KernelResult<()> {
         let mut seen = HashSet::new();
 
         // Files "seen" during commit processing

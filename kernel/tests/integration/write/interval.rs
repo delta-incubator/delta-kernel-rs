@@ -54,7 +54,7 @@ mod supported {
         };
 
         let (_temp_dir, table_path, engine) = test_table_setup_mt()?;
-        let snapshot = create_table_transaction(&table_path, schema.clone(), "Test/1.0")
+        let snapshot = create_table_transaction(&table_path, schema.clone(), "Test/1.0", true)
             .with_table_properties([("delta.checkpoint.writeStatsAsStruct", "true")])
             .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
             .commit(engine.as_ref())?
@@ -66,6 +66,7 @@ mod supported {
             engine.as_ref(),
             delta_kernel::transaction::UpdateTableOperation::Write,
             "default engine",
+            true,
             |builder| builder,
         )?;
         let arrow_schema: ArrowSchema = schema.as_ref().try_into_arrow()?;
@@ -208,7 +209,7 @@ mod supported {
         };
 
         let (_temp_dir, table_path, engine) = test_table_setup()?;
-        let snapshot = create_table_transaction(&table_path, schema.clone(), "Test/1.0")
+        let snapshot = create_table_transaction(&table_path, schema.clone(), "Test/1.0", true)
             .with_table_properties([(property_name, property_value)])
             .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
             .commit(engine.as_ref())?

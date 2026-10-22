@@ -46,9 +46,9 @@ For example:
 ```rust,no_run
 # extern crate delta_kernel;
 # use delta_kernel::scan::state::ScanFile;
-# use delta_kernel::{Result, Engine};
+# use delta_kernel::{KernelResult, Engine};
 # fn perform_read(_chunk: &[ScanFile]) {}
-# fn example(scan: &delta_kernel::scan::Scan, engine: &dyn Engine) -> Result<()> {
+# fn example(scan: &delta_kernel::scan::Scan, engine: &dyn Engine) -> KernelResult<()> {
 fn collect_files(files: &mut Vec<ScanFile>, file: ScanFile) {
     files.push(file);
 }
@@ -262,8 +262,8 @@ To have Kernel hand you the typed values directly, opt in with `with_partition_v
 # use delta_kernel_default_engine::DefaultEngine;
 # use delta_kernel_default_engine::storage::store_from_url;
 # use delta_kernel::scan::PartitionValuesOptions;
-# use delta_kernel::{Result, Snapshot};
-# fn example() -> Result<()> {
+# use delta_kernel::{KernelResult, Snapshot};
+# fn example() -> KernelResult<()> {
 # let url = delta_kernel::try_parse_uri("/tmp/table")?;
 # let store = store_from_url(&url)?;
 # let engine = DefaultEngine::builder(store).build();
@@ -322,9 +322,10 @@ Cancellation can race with successful completion. Work already initiated may com
 results may still be returned. If cancellation stops replay before completion, it surfaces as
 `KernelError::Cancelled` rather than a partial result that appears complete.
 
-Without a token, the scan is not cancellable and runs to completion as usual. Cancellation applies
-to the lazy `scan_metadata()` path; [`parallel_scan_metadata()`](./parallel_scan_metadata.md) does
-not support it and rejects a token rather than silently ignoring it.
+Without a scan token, Kernel leaves I/O cancellation to your engine's handlers. Checks on
+cached scan metadata require a scan token.
+[`parallel_scan_metadata()`](./parallel_scan_metadata.md) rejects a scan token; it doesn't provide
+end-to-end cancellation across its distributed phases.
 
 ## What's next
 

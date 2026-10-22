@@ -32,9 +32,9 @@ may differ.
 # use delta_kernel_default_engine::DefaultEngine;
 # use delta_kernel_default_engine::storage::store_from_url;
 # use delta_kernel::transaction::{CommitResult, UpdateTableOperation};
-# use delta_kernel::{Result, Snapshot};
+# use delta_kernel::{KernelResult, Snapshot};
 # #[tokio::main]
-# async fn main() -> Result<()> {
+# async fn main() -> KernelResult<()> {
 # let url = delta_kernel::try_parse_uri("/tmp/table")?;
 # let engine = DefaultEngine::builder(store_from_url(&url)?).build();
 // 1. Get a snapshot
@@ -42,8 +42,7 @@ let snapshot = Snapshot::builder_for(url).build(&engine)?;
 
 // 2. Create a transaction
 let mut txn = snapshot
-    .update_table(UpdateTableOperation::Write, "my-app/1.0")
-    .with_data_change(true)
+    .update_table(UpdateTableOperation::Write, "my-app/1.0", /* data_change */ true)
     .build(&engine, Box::new(FileSystemCommitter::new()))?;
 
 // 3. Create write state and bind a write context
@@ -91,20 +90,15 @@ writing against:
 
 ```rust,ignore
 let mut txn = snapshot
-    .update_table(UpdateTableOperation::Write, "my-app/1.0")
-    .with_data_change(true)
+    .update_table(UpdateTableOperation::Write, "my-app/1.0", /* data_change */ true)
     .build(&engine, Box::new(FileSystemCommitter::new()))?;
 ```
 
-Pass the operation and connector name/version to `snapshot.update_table(operation, engine_info)`.
-Kernel records both in the commit log. Use `UpdateTableOperation::Custom` for connector-specific
-operation names. You can't change either value on the returned builder or transaction.
-
-The optional builder methods:
-
-| Method | Purpose |
-|--------|---------|
-| `with_data_change(bool)` | Whether this commit materially changes data (`true`) or just reorganizes it (`false`, e.g. OPTIMIZE) |
+Pass the operation, connector name/version, and `data_change` to
+`snapshot.update_table(operation, engine_info, data_change)`. Use `true` for appends that add records.
+Kernel records the operation and connector name/version in the commit log.
+Use `UpdateTableOperation::Custom` for connector-specific operation names.
+These inputs cannot be changed on the returned builder or transaction.
 
 ## WriteState and BoundWriteContext
 
@@ -214,9 +208,9 @@ txn.add_files(add_file_metadata);
 You can call `add_files` multiple times to write multiple files in one transaction.
 
 > [!NOTE]
-> Unless overridden, transactions with schema changes infer `dataChange` from staged file batches:
-> `false` when none are staged and `true` otherwise, including empty or unselected batches.
-> Transactions without schema changes default to `true`.
+> Set `data_change` in the builder constructor. Use `true` when adding records and `false` for
+> rewrites that preserve logical data. Kernel preserves your value, including when no files are
+> staged; it does not infer it from the operation or staged batches.
 
 ## Committing
 
@@ -247,7 +241,11 @@ construction:
 
 ```rust,ignore
 let txn = snapshot
-    .update_table(UpdateTableOperation::Custom("INSERT".to_string()), "my-app/1.0")
+    .update_table(
+        UpdateTableOperation::Custom("INSERT".to_string()),
+        "my-app/1.0",
+        /* data_change */ true,
+    )
     .with_blind_append()
     .build(&engine, Box::new(FileSystemCommitter::new()))?;
 ```
@@ -279,7 +277,11 @@ that action, call `with_commit_info()` with your custom data and its schema:
 
 ```rust,ignore
 let txn = snapshot
-    .update_table(UpdateTableOperation::Custom("INSERT".to_string()), "my-app/1.0")
+    .update_table(
+        UpdateTableOperation::Custom("INSERT".to_string()),
+        "my-app/1.0",
+        /* data_change */ true,
+    )
     .with_operation_parameters([("mode", Some("Append")), ("predicate", None)])
     .with_operation_metrics([("numFiles", Some("1"))])
     .build(&engine, Box::new(FileSystemCommitter::new()))?

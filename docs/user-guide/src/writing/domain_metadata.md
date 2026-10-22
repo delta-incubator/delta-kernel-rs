@@ -27,14 +27,18 @@ while writing to a built transaction before committing it.
 # use delta_kernel_default_engine::DefaultEngine;
 # use delta_kernel_default_engine::storage::store_from_url;
 # use delta_kernel::transaction::UpdateTableOperation;
-# use delta_kernel::{Result, Snapshot};
+# use delta_kernel::{KernelResult, Snapshot};
 # #[tokio::main]
-# async fn main() -> Result<()> {
+# async fn main() -> KernelResult<()> {
 # let url = delta_kernel::try_parse_uri("/tmp/table")?;
 # let engine = DefaultEngine::builder(store_from_url(&url)?).build();
 # let snapshot = Snapshot::builder_for(url).build(&engine)?;
 let txn = snapshot
-    .update_table(UpdateTableOperation::Custom("UPDATE METADATA".to_string()), "my-app/1.0")
+    .update_table(
+        UpdateTableOperation::Custom("UPDATE METADATA".to_string()),
+        "my-app/1.0",
+        /* data_change */ false,
+    )
     .with_domain_metadata(
         "myConnector.settings".to_string(),
         r#"{"version": 1, "compress": true}"#.to_string(),
@@ -84,14 +88,18 @@ that does not exist yet.
 # use delta_kernel_default_engine::DefaultEngine;
 # use delta_kernel_default_engine::storage::store_from_url;
 # use delta_kernel::transaction::UpdateTableOperation;
-# use delta_kernel::{Result, Snapshot};
+# use delta_kernel::{KernelResult, Snapshot};
 # #[tokio::main]
-# async fn main() -> Result<()> {
+# async fn main() -> KernelResult<()> {
 # let url = delta_kernel::try_parse_uri("/tmp/table")?;
 # let engine = DefaultEngine::builder(store_from_url(&url)?).build();
 # let snapshot = Snapshot::builder_for(url).build(&engine)?;
 let txn = snapshot
-    .update_table(UpdateTableOperation::Custom("REMOVE METADATA".to_string()), "my-app/1.0")
+    .update_table(
+        UpdateTableOperation::Custom("REMOVE METADATA".to_string()),
+        "my-app/1.0",
+        /* data_change */ false,
+    )
     .with_domain_metadata_removed("myConnector.settings")
     .build(&engine, Box::new(FileSystemCommitter::new()))?;
 
@@ -122,9 +130,9 @@ To read domain metadata from a table, call `get_domain_metadata()` on a
 # use std::sync::Arc;
 # use delta_kernel_default_engine::DefaultEngine;
 # use delta_kernel_default_engine::storage::store_from_url;
-# use delta_kernel::{Result, Snapshot};
+# use delta_kernel::{KernelResult, Snapshot};
 # #[tokio::main]
-# async fn main() -> Result<()> {
+# async fn main() -> KernelResult<()> {
 # let url = delta_kernel::try_parse_uri("/tmp/table")?;
 # let engine = DefaultEngine::builder(store_from_url(&url)?).build();
 let snapshot = Snapshot::builder_for(url).build(&engine)?;

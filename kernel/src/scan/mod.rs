@@ -47,7 +47,7 @@ use crate::table_features::{ColumnMappingMode, Operation};
 use crate::transforms::{transform_output_type, ExpressionTransform, SchemaTransform};
 use crate::utils::{require, FoldWithOption as _, IteratorExt};
 use crate::{
-    Engine, EngineData, FileMeta, KernelError, KernelResult, Result, ResultIteratorStatic,
+    Engine, EngineData, FileMeta, KernelError, KernelResult, KernelResultIteratorStatic,
     SnapshotRef, Version,
 };
 
@@ -138,6 +138,11 @@ pub struct StatsOptions {
     /// Whether a VARIANT column's min/max statistic is requested. See
     /// [`Self::with_variant_min_max_stats`].
     pub(crate) variant_min_max: bool,
+
+    /// Whether Geometry bounding-box statistics are requested. See
+    /// [`Self::with_geometry_min_max_stats`].
+    #[cfg(feature = "geo-type-in-dev")]
+    pub(crate) geometry_min_max: bool,
 }
 
 /// Controls which struct stats columns appear in `stats_parsed`.
@@ -177,6 +182,8 @@ impl Default for StatsOptions {
             synthesize_json: true,
             struct_stats: StructStats::None,
             variant_min_max: false,
+            #[cfg(feature = "geo-type-in-dev")]
+            geometry_min_max: false,
         }
     }
 }
@@ -272,26 +279,58 @@ impl StatsOptions {
         self
     }
 
+    /// Requests Geometry bounding-box corner points in `stats_parsed.minValues` and
+    /// `stats_parsed.maxValues`, retaining each column's logical Geometry type and CRS. Off by
+    /// default; Geography bounds are not included.
+    ///
+    /// The corner-point statistics encoding is experimental; see the
+    /// [geospatial RFC](https://github.com/delta-io/delta/issues/4725). It is gated by `geo-type-in-dev`.
+    ///
+    /// Kernel does not use these bounds for spatial pruning. This option requires struct stats
+    /// without JSON synthesis, such as [`Self::all_struct`]; [`ScanBuilder::build`] rejects any
+    /// other combination.
+    ///
+    /// The engine passed to [`Scan::scan_metadata`] or another scan execution API must support
+    /// Geometry statistics. Its [`ParseJson`] must decode WKT bounds, and its Parquet handler must
+    /// read WKB bounds into the same logical Geometry type. If the footer schema reports Binary,
+    /// the Parquet handler must validate the file's Geometry annotation and CRS. Kernel does not
+    /// check engine capability or prescribe an in-memory representation.
+    ///
+    /// [`ParseJson`]: crate::expressions::ParseJsonExpression
+    #[cfg(feature = "geo-type-in-dev")]
+    #[cfg_attr(not(feature = "internal-api"), allow(dead_code))]
+    #[internal_api]
+    pub(crate) fn with_geometry_min_max_stats(mut self, include: bool) -> Self {
+        self.geometry_min_max = include;
+        self
+    }
+
     /// Checks that the options form a supported combination.
     ///
     /// # Errors
     ///
-    /// Returns [`KernelError::Unsupported`] if VARIANT min/max stats are requested without struct
-    /// stats output or with JSON stats synthesis.
-    pub(crate) fn validate(&self) -> Result<()> {
-        if self.variant_min_max {
+    /// Returns [`KernelError::Unsupported`] if VARIANT or Geometry min/max stats are requested
+    /// without struct stats output or with JSON stats synthesis.
+    pub(crate) fn validate(&self) -> KernelResult<()> {
+        for (include, option) in [
+            (self.variant_min_max, "with_variant_min_max_stats"),
+            #[cfg(feature = "geo-type-in-dev")]
+            (self.geometry_min_max, "with_geometry_min_max_stats"),
+        ] {
+            if !include {
+                continue;
+            }
             require!(
                 !matches!(self.struct_stats, StructStats::None),
-                KernelError::unsupported(
-                    "StatsOptions::with_variant_min_max_stats requires struct stats output"
-                )
+                KernelError::unsupported(format!(
+                    "StatsOptions::{option} requires struct stats output"
+                ))
             );
             require!(
                 !self.synthesize_json,
-                KernelError::unsupported(
-                    "StatsOptions::with_variant_min_max_stats cannot be combined with JSON stats \
-                     synthesis"
-                )
+                KernelError::unsupported(format!(
+                    "StatsOptions::{option} cannot be combined with JSON stats synthesis"
+                ))
             );
         }
         Ok(())
@@ -341,7 +380,7 @@ pub struct ScanBuilder {
 }
 
 impl std::fmt::Debug for ScanBuilder {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> KernelResult<(), std::fmt::Error> {
         f.debug_struct("ScanBuilder")
             .field("logical_read_schema", &self.logical_read_schema)
             .field("predicate", &self.predicate)
@@ -431,7 +470,7 @@ impl ScanBuilder {
     /// Extra-indexed columns that cannot be resolved are omitted with a warning. Returns an error
     /// when a column requested through [`StatsOptions::struct_columns`] cannot be resolved, or when
     /// the selected fields cannot form a valid statistics schema.
-    pub fn stats_output_schemas(&self) -> Result<Option<StatsOutputSchemas>> {
+    pub fn stats_output_schemas(&self) -> KernelResult<Option<StatsOutputSchemas>> {
         build_stats_output_schemas(self.snapshot.table_configuration(), &self.stats)
     }
 
@@ -480,8 +519,8 @@ impl ScanBuilder {
     ///
     /// Cancellation is cooperative: Kernel forwards the token (if any) to cancellation-aware
     /// [`Engine`] operations, which own cancellation for their I/O and iterators. Work that
-    /// completes concurrently with cancellation may still succeed. Passing `None` means the scan
-    /// is not cancellable.
+    /// completes concurrently with cancellation may still succeed. Passing `None` leaves I/O
+    /// cancellation to the engine's handlers and disables scan-local checks on cached metadata.
     ///
     /// [`CancellationToken`]: crate::CancellationToken
     /// [`KernelError::Cancelled`]: crate::KernelError::Cancelled
@@ -500,7 +539,7 @@ impl ScanBuilder {
     /// [`Scan`] type itself can be used to fetch the files and associated metadata required to
     /// perform actual data reads.
     #[tracing::instrument(name = "scan_builder.build", skip_all, fields(enable_call_frame), err)]
-    pub fn build(self) -> Result<Scan> {
+    pub fn build(self) -> KernelResult<Scan> {
         // Predicates may reference columns outside self.logical_read_schema, so resolve against the
         // full table schema
         let table_schema = self.snapshot.schema();
@@ -809,8 +848,8 @@ pub struct Scan {
     stats: StatsOptions,
     correlation_id: Option<Arc<str>>,
     partition_values: PartitionValuesOptions,
-    /// Optional cooperative cancellation token supplied via
-    /// [`ScanBuilder::with_cancellation_token`]. `None` means the scan is not cancellable.
+    /// Scan-local token for cached metadata checks and I/O; `None` retains engine I/O
+    /// cancellation.
     cancellation_token: Option<CancellationTokenRef>,
 }
 
@@ -822,14 +861,24 @@ fn build_stats_output_schemas(
     match &stats.struct_stats {
         StructStats::None => Ok(None),
         StructStats::AllIndexed { extra_indexed } => table_configuration
-            .build_indexed_stats_output_schemas(extra_indexed, stats.variant_min_max),
+            .build_indexed_stats_output_schemas(
+                extra_indexed,
+                stats.variant_min_max,
+                #[cfg(feature = "geo-type-in-dev")]
+                stats.geometry_min_max,
+            ),
         StructStats::Columns { requested } => table_configuration
-            .build_selected_stats_output_schemas(requested, stats.variant_min_max),
+            .build_selected_stats_output_schemas(
+                requested,
+                stats.variant_min_max,
+                #[cfg(feature = "geo-type-in-dev")]
+                stats.geometry_min_max,
+            ),
     }
 }
 
 impl std::fmt::Debug for Scan {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> KernelResult<(), std::fmt::Error> {
         f.debug_struct("Scan")
             .field("schema", &self.state_info.logical_schema)
             .field("predicate", &self.state_info.physical_predicate)
@@ -965,7 +1014,7 @@ impl Scan {
     pub fn scan_metadata(
         &self,
         engine: &dyn Engine,
-    ) -> Result<impl Iterator<Item = Result<ScanMetadata>>> {
+    ) -> KernelResult<impl Iterator<Item = KernelResult<ScanMetadata>>> {
         let actions_with_checkpoint_info = self.replay_for_scan_metadata(engine)?;
         self.scan_metadata_inner(engine, actions_with_checkpoint_info)
     }
@@ -1020,7 +1069,7 @@ impl Scan {
         existing_version: Version,
         existing_data: impl IntoIterator<Item = Box<dyn EngineData>, IntoIter: Send + 'static>,
         _existing_predicate: Option<PredicateRef>,
-    ) -> Result<ResultIteratorStatic<ScanMetadata>> {
+    ) -> KernelResult<KernelResultIteratorStatic<ScanMetadata>> {
         // TODO(#966): validate that the current predicate is compatible with the hint predicate.
         let existing_data = existing_data.into_iter();
         // Cached metadata bypasses engine handlers, so kernel must poll cancellation while
@@ -1046,7 +1095,7 @@ impl Scan {
             get_scan_metadata_transform_expr(),
             restored_add_schema().clone().into(),
         )?;
-        let apply_transform = move |data: Result<Box<dyn EngineData>>| {
+        let apply_transform = move |data: KernelResult<Box<dyn EngineData>>| {
             let data = data?;
             let data = transform.evaluate(data.as_ref())?;
             Ok(ActionsBatch::new(data, false))
@@ -1194,7 +1243,10 @@ impl Scan {
         fields(enable_call_frame),
         err
     )]
-    pub fn declarative_metadata_scan_plan(&self, engine: &dyn Engine) -> Result<Option<Plan>> {
+    pub fn declarative_metadata_scan_plan(
+        &self,
+        engine: &dyn Engine,
+    ) -> KernelResult<Option<Plan>> {
         // Resolve the checkpoint shape once. Retain the leaf schema only when parsed metadata is
         // needed for output or pruning.
         let plan_executor = engine.require_plan_executor()?;
@@ -1296,21 +1348,22 @@ impl Scan {
     /// checkpoint manifests sequentially. After exhausting this iterator, call `finish()`
     /// to determine if a distributed phase is needed.
     ///
-    /// Cancellation is not supported on this path: it errors if a token was set via
-    /// [`ScanBuilder::with_cancellation_token`], rather than silently running to completion.
-    /// Only [`scan_metadata`](Self::scan_metadata) honors the token today.
+    /// Scan-local cancellation is not supported: a token supplied on the scan builder is rejected.
+    /// I/O can inherit a handler-bound token, but cancellation is not coordinated across
+    /// distributed phases. Use [`scan_metadata`](Self::scan_metadata) for scan-local
+    /// cancellation.
     ///
     /// # Example
     ///
     /// ```no_run
     /// # use std::sync::Arc;
-    /// # use delta_kernel::{Engine, Result};
+    /// # use delta_kernel::{Engine, KernelResult};
     /// # use delta_kernel::scan::{AfterSequentialScanMetadata, ParallelScanMetadata};
     /// # use delta_kernel::Snapshot;
     /// # use url::Url;
     /// # use test_utils::delta_kernel_default_engine::DefaultEngineBuilder;
     /// # use delta_kernel::object_store::local::LocalFileSystem;
-    /// # fn main() -> Result<()> {
+    /// # fn main() -> KernelResult<()> {
     /// let engine = Arc::new(DefaultEngineBuilder::new(Arc::new(LocalFileSystem::new())).build());
     /// let table_root = Url::parse("file:///path/to/table")?;
     ///
@@ -1353,9 +1406,8 @@ impl Scan {
     pub fn parallel_scan_metadata(
         &self,
         engine: Arc<dyn Engine>,
-    ) -> Result<SequentialScanMetadata> {
-        // Fail fast rather than silently ignore a caller-supplied token: the parallel path does
-        // not thread cancellation, so honoring a set token would require dropping it on the floor.
+    ) -> KernelResult<SequentialScanMetadata> {
+        // The scan token is not carried across distributed phases.
         if self.cancellation_token.is_some() {
             return Err(KernelError::unsupported(
                 "cancellation is not supported by parallel_scan_metadata; \
@@ -1407,7 +1459,7 @@ impl Scan {
     pub fn execute(
         &self,
         engine: Arc<dyn Engine>,
-    ) -> Result<impl Iterator<Item = Result<Box<dyn EngineData>>>> {
+    ) -> KernelResult<impl Iterator<Item = KernelResult<Box<dyn EngineData>>>> {
         if self.state_info.skip_row_transforms {
             return Err(KernelError::unsupported(
                 "Scan::execute is not supported when the scan was built with \
@@ -1552,7 +1604,7 @@ pub fn selection_vector(
     engine: &dyn Engine,
     descriptor: &DeletionVectorDescriptor,
     table_root: &Url,
-) -> Result<Vec<bool>> {
+) -> KernelResult<Vec<bool>> {
     let storage = engine.storage_handler();
     let dv_treemap = descriptor.read(storage, table_root)?;
     Ok(deletion_treemap_to_bools(dv_treemap))

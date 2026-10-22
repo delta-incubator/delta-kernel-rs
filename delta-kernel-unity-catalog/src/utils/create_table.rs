@@ -14,7 +14,7 @@
 //!
 //! // Step 2: Build and commit the create-table transaction
 //! let disk_props = get_required_properties_for_disk(&staging_info.table_id);
-//! let create_table_txn = kernel::create_table(path, schema, "MyApp/1.0")
+//! let create_table_txn = kernel::create_table(path, schema, "MyApp/1.0", /* data_change */ true)
 //!     .with_table_properties(disk_props)
 //!     .build(engine, committer);
 //! create_table_txn.commit(engine)?;
@@ -28,7 +28,7 @@
 use std::collections::{HashMap, HashSet};
 
 use delta_kernel::actions::Protocol;
-use delta_kernel::{Engine, KernelError, Result, Snapshot};
+use delta_kernel::{Engine, KernelError, KernelResult, Snapshot};
 use unity_catalog_delta_client_api::{
     CreateTableRequest, Protocol as WireProtocol, StorageCredential,
 };
@@ -116,7 +116,7 @@ pub fn build_uc_create_table_request(
     snapshot: &Snapshot,
     engine: &dyn Engine,
     table_name: impl Into<String>,
-) -> Result<CreateTableRequest> {
+) -> KernelResult<CreateTableRequest> {
     if snapshot.version() != 0 {
         return Err(KernelError::generic(format!(
             "build_uc_create_table_request is only valid for version 0 (table creation) \
@@ -215,7 +215,7 @@ mod tests {
         disk_props: HashMap<String, String>,
         data_layout: DataLayout,
     ) -> CreateTableRequest {
-        create_table(table_path, schema, "Test/1.0")
+        create_table(table_path, schema, "Test/1.0", true)
             .with_table_properties(disk_props)
             .with_data_layout(data_layout)
             .build(engine, Box::new(TestCatalogCommitter))
@@ -343,7 +343,7 @@ mod tests {
             "delta.feature.domainMetadata".to_string(),
             "supported".to_string(),
         );
-        create_table(table_path, schema, "Test/1.0")
+        create_table(table_path, schema, "Test/1.0", true)
             .with_table_properties(disk_props)
             .with_domain_metadata("myApp.retention", r#"{"days":30}"#)
             .build(&engine, Box::new(TestCatalogCommitter))
@@ -417,7 +417,7 @@ mod tests {
 
         // Create a table (version 0) and append (version 1).
         let disk_props = get_required_properties_for_disk("test-table-id");
-        let _ = create_table(table_path, schema, "Test/1.0")
+        let _ = create_table(table_path, schema, "Test/1.0", true)
             .with_table_properties(disk_props)
             .build(&engine, Box::new(TestCatalogCommitter))
             .unwrap()
@@ -428,7 +428,7 @@ mod tests {
             .build(&engine)
             .unwrap();
         let result = v0_snapshot
-            .update_table(UpdateTableOperation::Write, "test-engine")
+            .update_table(UpdateTableOperation::Write, "test-engine", true)
             .build(&engine, Box::new(TestCatalogCommitter))
             .unwrap()
             .commit(&engine)

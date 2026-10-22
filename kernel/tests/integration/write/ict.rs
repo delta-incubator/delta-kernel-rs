@@ -113,6 +113,7 @@ async fn test_ict_commit_e2e() -> Result<(), Box<dyn std::error::Error>> {
         &engine,
         delta_kernel::transaction::UpdateTableOperation::Write,
         "ict test",
+        true,
         |builder| builder,
     )?;
 
@@ -163,6 +164,7 @@ async fn test_ict_commit_e2e() -> Result<(), Box<dyn std::error::Error>> {
         &engine,
         delta_kernel::transaction::UpdateTableOperation::Write,
         "ict test 2",
+        true,
         |builder| builder,
     )?;
 

@@ -22,7 +22,7 @@
 use crate::expressions::{parse_sql, Expression, Scalar};
 use crate::schema::{DataType, StructField, StructType};
 use crate::transforms::{transform_output_type, SchemaTransform};
-use crate::{KernelError, KernelResult, Result};
+use crate::{KernelError, KernelResult};
 
 /// A column-level default parsed from the `CURRENT_DEFAULT` metadata key of a
 /// [`StructField`](crate::schema::StructField).
@@ -94,7 +94,7 @@ impl<'a> ColumnDefault<'a> {
     ///
     /// Returns an error if the parsed default is not a literal. The parser only emits literals, so
     /// this is defensive.
-    pub fn to_scalar(&self) -> Result<Option<Scalar>> {
+    pub fn to_scalar(&self) -> KernelResult<Option<Scalar>> {
         match &self.parsed_sql {
             None => Ok(None),
             Some(Expression::Literal(scalar)) => Ok(Some(scalar.clone())),

@@ -16,7 +16,7 @@ use delta_kernel::table_features::{
 };
 use delta_kernel::transaction::create_table::create_table;
 use delta_kernel::transaction::data_layout::DataLayout;
-use delta_kernel::Result;
+use delta_kernel::KernelResult;
 use test_utils::{
     assert_result_error_with_message, cm_properties, multiple_file_schema, nested_file_schema,
     test_table_setup, top_level_file_schema,
@@ -69,10 +69,10 @@ fn test_create_table_with_file(
     )]
     schema: Arc<StructType>,
     #[values("none", "name", "id")] cm_mode: &str,
-) -> Result<()> {
+) -> KernelResult<()> {
     let (_temp_dir, table_path, engine) = test_table_setup()?;
 
-    let _ = create_table(&table_path, schema.clone(), "Test/1.0")
+    let _ = create_table(&table_path, schema.clone(), "Test/1.0", true)
         .with_table_properties(cm_properties(cm_mode))
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
         .commit(engine.as_ref())?;
@@ -111,7 +111,7 @@ fn test_create_table_with_file(
 
 /// A schema without file columns should not add either file feature.
 #[test]
-fn test_create_table_no_file_no_feature() -> Result<()> {
+fn test_create_table_no_file_no_feature() -> KernelResult<()> {
     let (_temp_dir, table_path, engine) = test_table_setup()?;
 
     let schema = schema_ref! {
@@ -119,7 +119,7 @@ fn test_create_table_no_file_no_feature() -> Result<()> {
         nullable "name": STRING,
     };
 
-    let _ = create_table(&table_path, schema, "Test/1.0")
+    let _ = create_table(&table_path, schema, "Test/1.0", true)
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
         .commit(engine.as_ref())?;
 
@@ -145,11 +145,11 @@ fn test_create_table_no_file_no_feature() -> Result<()> {
     DataType::STRING,
     true
 ))]
-fn test_create_table_file_map_key_rejected(#[case] map: MapType) -> Result<()> {
+fn test_create_table_file_map_key_rejected(#[case] map: MapType) -> KernelResult<()> {
     let (_temp_dir, table_path, engine) = test_table_setup()?;
     let schema = Arc::new(StructType::try_new([StructField::nullable("col", map)])?);
 
-    let result = create_table(&table_path, schema, "Test/1.0")
+    let result = create_table(&table_path, schema, "Test/1.0", true)
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()));
 
     assert_result_error_with_message(result, "map key");
@@ -160,10 +160,10 @@ fn test_create_table_file_map_key_rejected(#[case] map: MapType) -> Result<()> {
 /// Partitioning on a file column is rejected (a `file` value is a group and has no partition-value
 /// serialization).
 #[test]
-fn test_create_table_file_partitioning_rejected() -> Result<()> {
+fn test_create_table_file_partitioning_rejected() -> KernelResult<()> {
     let (_temp_dir, table_path, engine) = test_table_setup()?;
 
-    let result = create_table(&table_path, top_level_file_schema(), "Test/1.0")
+    let result = create_table(&table_path, top_level_file_schema(), "Test/1.0", true)
         .with_data_layout(DataLayout::partitioned(["col"]))
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()));
 
@@ -174,10 +174,10 @@ fn test_create_table_file_partitioning_rejected() -> Result<()> {
 
 /// Clustering on a file column is rejected (a `file` value is not a comparable type).
 #[test]
-fn test_create_table_file_clustering_rejected() -> Result<()> {
+fn test_create_table_file_clustering_rejected() -> KernelResult<()> {
     let (_temp_dir, table_path, engine) = test_table_setup()?;
 
-    let result = create_table(&table_path, top_level_file_schema(), "Test/1.0")
+    let result = create_table(&table_path, top_level_file_schema(), "Test/1.0", true)
         .with_data_layout(DataLayout::clustered(["col"]))
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()));
 

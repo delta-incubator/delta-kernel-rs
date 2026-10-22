@@ -32,8 +32,8 @@ use delta_kernel::schema::{SchemaRef, StructType};
 use delta_kernel::transaction::BoundWriteContext;
 use delta_kernel::{
     CancellationTokenRef, EngineData, FileDataReadResultIterator, FileMeta, FileSize,
-    FoldWithOption as _, KernelError, KernelResult, ParquetFooter, ParquetHandler, PredicateRef,
-    Result, ResultIteratorStatic,
+    FoldWithOption as _, KernelError, KernelResult, KernelResultIteratorStatic, ParquetFooter,
+    ParquetHandler, PredicateRef,
 };
 use futures::stream::{self, BoxStream};
 use futures::{StreamExt, TryStreamExt};
@@ -245,11 +245,8 @@ impl<E: TaskExecutor> DefaultParquetHandler<E> {
     /// Write `data` to a new parquet file under the [`BoundWriteContext::write_dir`] and return
     /// Add action metadata ready for [`Transaction::add_files`].
     ///
-    /// Note that the schema does not contain the dataChange column. In order to set `data_change`
-    /// flag, use
-    /// [`UpdateTableTransactionBuilder::with_data_change`][with_data_change].
-    ///
-    /// [with_data_change]: delta_kernel::transaction::UpdateTableTransactionBuilder::with_data_change
+    /// The metadata schema does not contain the `dataChange` column. Kernel uses the
+    /// `data_change` flag supplied when constructing the transaction builder.
     ///
     /// [`BoundWriteContext::write_dir`]: delta_kernel::transaction::BoundWriteContext::write_dir
     /// [`Transaction::add_files`]: delta_kernel::transaction::Transaction::add_files
@@ -257,7 +254,7 @@ impl<E: TaskExecutor> DefaultParquetHandler<E> {
         &self,
         data: Box<dyn EngineData>,
         write_context: &BoundWriteContext,
-    ) -> Result<Box<dyn EngineData>> {
+    ) -> KernelResult<Box<dyn EngineData>> {
         let file_metadata = self
             .write_parquet(
                 &write_context.write_dir(),
@@ -329,7 +326,7 @@ impl<E: TaskExecutor> ParquetHandler for DefaultParquetHandler<E> {
         files: &[FileMeta],
         physical_schema: SchemaRef,
         predicate: Option<PredicateRef>,
-    ) -> Result<FileDataReadResultIterator> {
+    ) -> KernelResult<FileDataReadResultIterator> {
         self.read_parquet_files_with_cancellation(files, physical_schema, predicate, None)
     }
 
@@ -339,7 +336,7 @@ impl<E: TaskExecutor> ParquetHandler for DefaultParquetHandler<E> {
         physical_schema: SchemaRef,
         predicate: Option<PredicateRef>,
         cancellation_token: Option<CancellationTokenRef>,
-    ) -> Result<FileDataReadResultIterator> {
+    ) -> KernelResult<FileDataReadResultIterator> {
         let future = read_parquet_files_impl(
             self.store.clone(),
             files.to_vec(),
@@ -372,8 +369,8 @@ impl<E: TaskExecutor> ParquetHandler for DefaultParquetHandler<E> {
     fn write_parquet_file(
         &self,
         location: url::Url,
-        mut data: ResultIteratorStatic<Box<dyn EngineData>>,
-    ) -> Result<FileSize> {
+        mut data: KernelResultIteratorStatic<Box<dyn EngineData>>,
+    ) -> KernelResult<FileSize> {
         let store = self.store.clone();
 
         self.task_executor.block_on(async move {
@@ -409,7 +406,7 @@ impl<E: TaskExecutor> ParquetHandler for DefaultParquetHandler<E> {
         })
     }
 
-    fn read_parquet_footer(&self, file: &FileMeta) -> Result<ParquetFooter> {
+    fn read_parquet_footer(&self, file: &FileMeta) -> KernelResult<ParquetFooter> {
         self.read_parquet_footer_with_cancellation(file, None)
     }
 
@@ -417,7 +414,7 @@ impl<E: TaskExecutor> ParquetHandler for DefaultParquetHandler<E> {
         &self,
         file: &FileMeta,
         cancellation_token: Option<CancellationTokenRef>,
-    ) -> Result<ParquetFooter> {
+    ) -> KernelResult<ParquetFooter> {
         let store = self.store.clone();
         let location = file.location.clone();
         let file_size = file.size;
@@ -547,7 +544,11 @@ impl PresignedUrlOpener {
 }
 
 impl FileOpener for PresignedUrlOpener {
-    fn open(&self, file_meta: FileMeta, _range: Option<Range<i64>>) -> Result<FileOpenFuture> {
+    fn open(
+        &self,
+        file_meta: FileMeta,
+        _range: Option<Range<i64>>,
+    ) -> KernelResult<FileOpenFuture> {
         let batch_size = self.batch_size;
         let table_schema = self.table_schema.clone();
         let predicate = self.predicate.clone();
@@ -738,7 +739,7 @@ mod tests {
         }
     }
 
-    async fn read_all_rows_helper(file_meta: FileMeta) -> Result<Vec<RecordBatch>> {
+    async fn read_all_rows_helper(file_meta: FileMeta) -> KernelResult<Vec<RecordBatch>> {
         let store = Arc::new(LocalFileSystem::new());
         let path = Path::from_url_path(file_meta.location.path()).unwrap();
         #[allow(deprecated)]
@@ -775,7 +776,7 @@ mod tests {
             last_modified: 0,
             size: file_size,
         };
-        let data: delta_kernel::Result<_> = read_all_rows_helper(file_meta).await;
+        let data: delta_kernel::KernelResult<_> = read_all_rows_helper(file_meta).await;
         let data = data.unwrap();
 
         assert_eq!(data.len(), 1);
@@ -1208,7 +1209,7 @@ mod tests {
         ));
 
         // Create iterator with single batch
-        let data_iter: ResultIteratorStatic<Box<dyn EngineData>> =
+        let data_iter: KernelResultIteratorStatic<Box<dyn EngineData>> =
             Box::new(std::iter::once(Ok(engine_data)));
 
         // Test writing through the trait method
@@ -1415,7 +1416,7 @@ mod tests {
         ));
 
         // Create iterator with single batch
-        let data_iter: ResultIteratorStatic<Box<dyn EngineData>> =
+        let data_iter: KernelResultIteratorStatic<Box<dyn EngineData>> =
             Box::new(std::iter::once(Ok(engine_data)));
 
         // Write the data
@@ -1806,7 +1807,7 @@ mod tests {
             )])
             .unwrap(),
         ));
-        let data_iter: ResultIteratorStatic<Box<dyn EngineData>> =
+        let data_iter: KernelResultIteratorStatic<Box<dyn EngineData>> =
             Box::new(std::iter::once(Ok(engine_data)));
 
         // WHEN we write a parquet file to that path

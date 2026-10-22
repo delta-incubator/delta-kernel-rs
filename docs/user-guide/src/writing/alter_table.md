@@ -8,17 +8,37 @@ Before reading this page, make sure you understand
 [Creating a Table](./create_table.md) and
 [Appending Data](./append.md).
 
-## When to use alter table
+## ALTER TABLE versus schema evolution
 
-Use `update_table(UpdateTableOperation::AlterTable, engine_info)` when you need to evolve a table's
-schema in place. The common case today is adding a new column to a table that already has data,
-without rewriting the existing files. Existing rows read back `NULL` for the
-new column. Subsequent writes can populate it.
+Use **ALTER TABLE** for a standalone, metadata-only schema change. For example, you can add a nullable
+column without writing or removing data files.
 
-A standalone schema evolution is a metadata-only change. When no file actions are staged, the
-transaction emits an updated `Metadata` action and commits with `data_change: false`. If an ALTER
-commit includes file actions, Kernel defaults `data_change` to `true`. Connectors performing a
-protocol-valid logical-preserving replacement can explicitly select `false`.
+Use **SCHEMA EVOLUTION** to change the schema while writing or rewriting data files in the same
+transaction. For example, you can add a nullable column and append rows containing values for that
+column atomically.
+
+The `dataChange` flag indicates whether file actions change the table's logical data.
+Pass it explicitly when you construct the builder. The table shows typical workflows.
+
+| Transaction Component | ALTER TABLE | SCHEMA EVOLUTION |
+|--------|------------------------|---------------------------------|
+| Operation | `UpdateTableOperation::AlterTable` | The data operation, such as `UpdateTableOperation::Write` |
+| Schema operations | Required | Queued alongside the data operation |
+| Data-file changes | None staged | Staged on the built transaction |
+| `data_change` constructor argument | `false` | `true` if records change; `false` otherwise |
+
+Both workflows use `UpdateTableTransactionBuilder`. You queue all schema operations before `build()`;
+Kernel validates and applies them during `build()`. For schema evolution, you stage data-file changes
+on the returned `Transaction`, whose `WriteState` uses the evolved schema.
+
+`ALTER TABLE` requires `dataChange = false`. Kernel checks this at `build()` and retains a defensive
+check at `commit()`. Commit validation also rejects staged file additions, removals, and
+deletion-vector updates, including empty or fully unselected batches. Staged manifest writes are
+also rejected.
+The supplied value cannot be changed and is preserved even when no file batches are staged.
+
+For a rewrite that preserves logical data, select the data operation, such as
+`UpdateTableOperation::Optimize`, and pass `false` to `update_table()`.
 
 > [!NOTE]
 > The supported operations are adding columns and making columns nullable. Other schema operations
@@ -32,7 +52,7 @@ STRING` with rows for Alice, Bob, and Carol, and you want to add a `country`
 column. The flow is:
 
 1. Load a `Snapshot` of the table.
-2. Call `snapshot.update_table(UpdateTableOperation::AlterTable, "my-app/1.0")` to get an
+2. Call `snapshot.update_table(UpdateTableOperation::AlterTable, "my-app/1.0", false)` to get an
    `UpdateTableTransactionBuilder`.
 3. Call `add_column()` with the new field.
 4. Call `build()` to produce a `Transaction`.
@@ -46,8 +66,8 @@ column. The flow is:
 # use delta_kernel_default_engine::storage::store_from_url;
 # use delta_kernel::schema::{DataType, StructField};
 # use delta_kernel::transaction::{CommitResult, UpdateTableOperation};
-# use delta_kernel::{Result, Snapshot};
-# fn example() -> Result<()> {
+# use delta_kernel::{KernelResult, Snapshot};
+# fn example() -> KernelResult<()> {
 # let url = delta_kernel::try_parse_uri("/tmp/table")?;
 # let engine = DefaultEngine::builder(store_from_url(&url)?).build();
 // 1. Load a snapshot of the existing table.
@@ -55,14 +75,14 @@ let snapshot = Snapshot::builder_for(url).build(&engine)?;
 
 // 2. Build and commit an alter-table transaction that adds a new column.
 let result = snapshot
-    .update_table(UpdateTableOperation::AlterTable, "my-app/1.0")
+    .update_table(UpdateTableOperation::AlterTable, "my-app/1.0", /* data_change */ false)
     .add_column(StructField::nullable("country", DataType::STRING))
     .build(&engine, Box::new(FileSystemCommitter::new()))?
     .commit(&engine)?;
 
 match result {
     CommitResult::Committed(committed) => {
-        println!("Schema evolved at version {}", committed.commit_version());
+        println!("Schema altered at version {}", committed.commit_version());
     }
     _ => eprintln!("alter table did not succeed"),
 }
@@ -89,8 +109,9 @@ column by including it in the `RecordBatch` they pass to
 | Column mapping tables must be protocol-valid | When column mapping is enabled, Kernel assigns or preserves column-mapping IDs and physical names for the added column and updates `delta.columnMapping.maxColumnId`. |
 
 > [!NOTE]
-> `ALTER TABLE` is rejected on tables with unsupported writer features, including
-> `icebergCompatV2`, `icebergCompatV3`, and `allowColumnDefaults`.
+> Kernel rejects schema changes at `build()` when `icebergCompatV2`, `icebergCompatV3`, or
+> `allowColumnDefaults` is enabled. This restriction applies to both workflows, regardless of the
+> transaction operation or `dataChange` value.
 
 ## Chaining multiple operations
 
@@ -100,7 +121,7 @@ validated as a whole before the commit is constructed:
 
 ```rust,ignore
 let result = snapshot
-    .update_table(UpdateTableOperation::AlterTable, "my-app/1.0")
+    .update_table(UpdateTableOperation::AlterTable, "my-app/1.0", /* data_change */ false)
     .add_column(StructField::nullable("country", DataType::STRING))
     .add_column(StructField::nullable("postal_code", DataType::STRING))
     .build(&engine, Box::new(FileSystemCommitter::new()))?
@@ -113,13 +134,14 @@ schema evolution with data-file actions.
 
 ## Evolving a schema while writing
 
-Use `update_table(operation, engine_info)` when the same transaction evolves the schema and writes
-files. Kernel applies the schema operations during `build()`, so the transaction's `WriteState` uses
-the evolved schema.
+Select a data operation, such as `UpdateTableOperation::Write`, rather than `AlterTable` when the
+same transaction evolves the schema and writes files. Choose `data_change` based on whether the
+logical data changes, not merely whether files are written. Kernel applies the schema operations
+during `build()`, so the transaction's `WriteState` uses the evolved schema.
 
 ```rust,ignore
 let mut transaction = snapshot
-    .update_table(UpdateTableOperation::Write, "my-app/1.0")
+    .update_table(UpdateTableOperation::Write, "my-app/1.0", /* data_change */ true)
     .add_column(StructField::nullable("country", DataType::STRING))
     .build(&engine, Box::new(FileSystemCommitter::new()))?;
 

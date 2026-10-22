@@ -93,11 +93,14 @@ pub(crate) fn add_scalar_path_context(
     }
 }
 
-/// A [`std::result::Result`] that has the kernel [`KernelError`] as the error variant
-pub type Result<T, E = KernelError> = std::result::Result<T, E>;
+/// A result whose error is the top-level [`Error`].
+// Note: `delta_kernel::Result` is currently unused as part of the error migration tracked in:
+// https://github.com/delta-io/delta-kernel-rs/issues/3421.
+// First usages will come when the first `KernelError` is migrated to a `DeltaError`.
+pub type Result<T> = std::result::Result<T, Error>;
 
-/// A result whose error is a [`KernelError`].
-pub type KernelResult<T> = std::result::Result<T, KernelError>;
+/// A result whose error defaults to [`KernelError`].
+pub type KernelResult<T, E = KernelError> = std::result::Result<T, E>;
 
 /// A boxed, `Send` iterator of [`KernelResult<T>`] items.
 pub type KernelResultIterator<'a, T> = Box<dyn Iterator<Item = KernelResult<T>> + Send + 'a>;
@@ -107,8 +110,7 @@ pub type KernelResultIteratorStatic<T> = KernelResultIterator<'static, T>;
 
 /// A boxed, `Send` iterator of [`Result<T>`] items.
 ///
-/// Convenience alias for the common pattern of returning a streaming, fallible iterator from
-/// kernel APIs.
+/// Convenience alias for fallible streams that return the top-level error envelope.
 pub type ResultIterator<'a, T> = Box<dyn Iterator<Item = Result<T>> + Send + 'a>;
 
 /// `'static` counterpart to [`ResultIterator`] for cases where the iterator does not
@@ -706,7 +708,7 @@ impl From<object_store::Error> for KernelError {
     }
 }
 
-/// This impl is needed so the `?` operator can auto-convert `Result<T, Infallible>` to
+/// This impl is needed so the `?` operator can auto-convert `KernelResult<T, Infallible>` to
 /// `KernelResult<T>`. For example, `TryFrom` impls for infallible conversions use `Infallible` as
 /// their error type, and this allows those results to be propagated with `?` in functions
 /// returning `KernelResult`. The match is unreachable since `Infallible` has no variants.

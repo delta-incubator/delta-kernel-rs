@@ -20,6 +20,17 @@ log replay or checkpoint writes, kernel receives opaque `EngineData` batches, in
 visitor pattern, updates a selection vector, and hands them back to the engine: it never
 deserializes the full batch into in-memory structs.
 
+## Error Handling
+
+Kernel APIs return `KernelResult<T, E = KernelError>`, preserving `KernelError` by default while
+allowing helpers to specify another error type. `Result<T>` always uses the top-level `Error` enum.
+Converting a kernel error to that envelope requires `Error::Kernel` or `.map_err(Error::Kernel)`.
+There is no implicit `From<KernelError> for Error` conversion.
+
+Fallible kernel streams use `KernelResultIterator` and `KernelResultIteratorStatic`, including
+engine handlers and declarative-plan results. `ResultIterator` and `ResultIteratorStatic` yield
+top-level `Error` values.
+
 ## Snapshot
 
 `Snapshot` (`kernel/src/snapshot/`) is the primary entry point for operations on an existing table.
@@ -50,6 +61,12 @@ typed hint through a callback; connectors must copy any state retained after the
    (`kernel/src/log_segment/`) and resolve Protocol and Metadata through CRC state or log replay.
    Domain metadata is resolved lazily from CRC state or log replay when queried. Snapshot-hint
    builds validate and assemble the supplied state instead.
+   The snapshot builder binds its optional cancellation token through `CancellableEngine`, an owned
+   adapter over the existing engine handlers. Discovery, CRC reads/reconstruction, and imperative
+   replay inherit the build token. `CancellableEngine` is crate-private; connectors configure
+   cancellation through the snapshot builder and pass their original engine.
+   Completed snapshots retain neither the adapter nor its token. Declarative plan execution
+   uses the original executor unchanged.
 2. **Log replay** (`kernel/src/log_replay/`): file-action deduplication via
    `FileActionDeduplicator` and `LogReplayProcessor` trait (distinct from Protocol/Metadata
    replay above)
@@ -89,11 +106,14 @@ file listing without re-scanning the table.
 `TransactionType` trait selects `T::BuilderState`; each type supplies its own constructors, custom
 setters, and build validation. `UpdateTableTransactionBuilder` aliases
 `TransactionBuilder<UpdateTable>` and builds `Transaction<UpdateTable>`, the default transaction
-type. Construct it with `snapshot.update_table(operation, engine_info)`, which requires both values.
+type. Construct it with `snapshot.update_table(operation, engine_info, data_change)`, requiring all
+three values.
 `CreateTableTransactionBuilder` aliases `TransactionBuilder<CreateTable>` and builds
-`Transaction<CreateTable>`. Its constructor requires the path, schema, and engine info and fixes
-the operation to `CREATE TABLE`. Operations and engine info cannot be changed on either builder
-or transaction.
+`Transaction<CreateTable>`. Its constructor requires the path, schema, engine info, and `data_change`
+and fixes the operation to `CREATE TABLE`. These inputs cannot be changed on either builder or
+transaction. Kernel preserves `data_change` even for empty commits rather than inferring it from
+staged files. `build()` rejects ALTER with `true` and blind append with `false`; `commit()` retains
+operation and staged-file validation.
 Schema changes use `UpdateTable`, including the
 `UpdateTableOperation::AlterTable` operation.
 
@@ -136,6 +156,11 @@ handlers below and an optional `PlanExecutor` under the `declarative-plans` feat
 Metrics are emitted as tracing events and collected by tracing layers. A `DefaultEngine` (Arrow +
 `object_store` + Tokio) lives in `default-engine/src/`. Custom engines only need to replace
 specific handlers: they can reuse defaults for the rest.
+
+`CancellableEngine` wraps storage, JSON, and Parquet handlers with a default read token. Ordinary
+handler calls inherit it; per-call tokens on cancellation-aware handler APIs override it. Parsing,
+writes, evaluation, and declarative execution pass through unchanged. HEAD checks the default token,
+without interrupting an active request; nested wrappers each perform this check.
 
 ## EngineData Trait
 

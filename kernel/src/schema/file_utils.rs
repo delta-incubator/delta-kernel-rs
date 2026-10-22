@@ -5,15 +5,15 @@ use crate::table_configuration::TableConfiguration;
 use crate::table_features::TableFeature;
 use crate::transforms::{transform_output_type, SchemaTransform};
 use crate::utils::require;
-use crate::{KernelError, KernelResult, Result};
+use crate::{KernelError, KernelResult};
 
 /// Schema visitor that checks if any column in the schema uses FILE type
 pub(crate) struct UsesFile;
 
 impl<'a> SchemaTransform<'a> for UsesFile {
-    transform_output_type!(|'a, T| Result<(), ()>);
+    transform_output_type!(|'a, T| KernelResult<(), ()>);
 
-    fn transform_file(&mut self, _: &'a StructType) -> Result<(), ()> {
+    fn transform_file(&mut self, _: &'a StructType) -> KernelResult<(), ()> {
         Err(())
     }
 }
@@ -27,9 +27,9 @@ pub(crate) fn schema_contains_file_type(schema: &Schema) -> bool {
 struct FileInMapKey;
 
 impl<'a> SchemaTransform<'a> for FileInMapKey {
-    transform_output_type!(|'a, T| Result<(), ()>);
+    transform_output_type!(|'a, T| KernelResult<(), ()>);
 
-    fn transform_map_key(&mut self, ktype: &'a DataType) -> Result<(), ()> {
+    fn transform_map_key(&mut self, ktype: &'a DataType) -> KernelResult<(), ()> {
         if UsesFile.transform(ktype).is_err() {
             return Err(());
         }

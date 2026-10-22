@@ -777,7 +777,7 @@ fn create_interval_partitioned_table(
     if cm_mode != ColumnMappingMode::None {
         properties.push(("delta.columnMapping.mode", cm_mode_str(cm_mode)));
     }
-    let snapshot = create_table(table_path, schema, "test/1.0")
+    let snapshot = create_table(table_path, schema, "test/1.0", true)
         .with_data_layout(DataLayout::partitioned(["period"]))
         .with_table_properties(properties)
         .build(engine, Box::new(FileSystemCommitter::new()))?
@@ -794,7 +794,7 @@ fn create_partitioned_table(
     cm_mode: ColumnMappingMode,
     write_partition_values_parsed: bool,
 ) -> Result<Arc<Snapshot>, Box<dyn std::error::Error>> {
-    let mut builder = create_table(table_path, schema, "test/1.0")
+    let mut builder = create_table(table_path, schema, "test/1.0", true)
         .with_data_layout(DataLayout::partitioned(partition_cols))
         .with_table_properties([(
             // `delta.checkpoint.writeStatsAsStruct` is what turns on `partitionValues_parsed`,
@@ -994,7 +994,7 @@ async fn test_materialized_partition_columns_excluded_from_stats(
     };
 
     let (_tmp_dir, table_path, engine) = test_table_setup_mt()?;
-    let _ = create_table(&table_path, table_schema.clone(), "test/1.0")
+    let _ = create_table(&table_path, table_schema.clone(), "test/1.0", true)
         .with_data_layout(DataLayout::partitioned([partition_col]))
         .with_table_properties([("delta.feature.materializePartitionColumns", "supported")])
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
@@ -1005,6 +1005,7 @@ async fn test_materialized_partition_columns_excluded_from_stats(
         engine.as_ref(),
         UpdateTableOperation::Write,
         "default engine",
+        true,
         |builder| builder,
     )?;
 
@@ -1077,7 +1078,7 @@ async fn test_materialize_partition_columns_e2e(
     };
 
     let (_tmp_dir, table_path, engine) = test_table_setup_mt()?;
-    let _ = create_table(&table_path, table_schema, "test/1.0")
+    let _ = create_table(&table_path, table_schema, "test/1.0", true)
         .with_data_layout(DataLayout::partitioned(["p1", "p2"]))
         .with_table_properties([
             ("delta.feature.materializePartitionColumns", "supported"),
@@ -1113,8 +1114,7 @@ async fn test_materialize_partition_columns_e2e(
 
     // A single commit writing two distinct partitions.
     let mut txn = snapshot
-        .update_table(UpdateTableOperation::Write, "default engine")
-        .with_data_change(true)
+        .update_table(UpdateTableOperation::Write, "default engine", true)
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?;
     let write_state = txn.write_state()?;
     for (d1, d2, p1, p2) in [
@@ -1193,7 +1193,7 @@ async fn test_materialize_partition_columns_e2e(
 async fn test_materialize_all_primitive_partition_types() -> Result<(), Box<dyn std::error::Error>>
 {
     let (_tmp_dir, table_path, engine) = test_table_setup_mt()?;
-    let _ = create_table(&table_path, all_types_schema(), "test/1.0")
+    let _ = create_table(&table_path, all_types_schema(), "test/1.0", true)
         .with_data_layout(DataLayout::partitioned(PARTITION_COLS.iter().copied()))
         .with_table_properties([("delta.feature.materializePartitionColumns", "supported")])
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
@@ -1255,7 +1255,7 @@ async fn test_input_data_with_partition_column_errors(
     if materialized {
         properties.push(("delta.feature.materializePartitionColumns", "supported"));
     }
-    let _ = create_table(&table_path, table_schema.clone(), "test/1.0")
+    let _ = create_table(&table_path, table_schema.clone(), "test/1.0", true)
         .with_data_layout(DataLayout::partitioned([partition_col]))
         .with_table_properties(properties)
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
@@ -1266,6 +1266,7 @@ async fn test_input_data_with_partition_column_errors(
         engine.as_ref(),
         UpdateTableOperation::Write,
         "default engine",
+        true,
         |builder| builder,
     )?;
 
@@ -1361,7 +1362,7 @@ async fn test_partition_null_validation(
     if materialized {
         properties.push(("delta.feature.materializePartitionColumns", "supported"));
     }
-    let _ = create_table(&table_path, schema, "test/1.0")
+    let _ = create_table(&table_path, schema, "test/1.0", true)
         .with_data_layout(DataLayout::partitioned(["p"]))
         .with_table_properties(properties)
         .build(engine.as_ref(), Box::new(FileSystemCommitter::new()))?
@@ -1373,6 +1374,7 @@ async fn test_partition_null_validation(
         engine.as_ref(),
         UpdateTableOperation::Write,
         "default engine",
+        true,
         |builder| builder,
     )?;
     let write_state = txn.write_state()?;
@@ -1436,6 +1438,7 @@ async fn test_partition_null_validation_mixed_nullability(
         engine.as_ref(),
         UpdateTableOperation::Write,
         "default engine",
+        true,
         |builder| builder,
     )?;
     let write_state = txn.write_state()?;
