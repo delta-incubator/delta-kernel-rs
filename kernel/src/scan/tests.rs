@@ -741,7 +741,8 @@ fn scan_metadata_from_requires_timezone_support_only_for_timestamp_partitions(
     if timestamp_partition {
         assert_result_error_with_message(result, "with_timestamp_timezone in scan_metadata_from");
     } else {
-        assert_eq!(result.unwrap().count(), 0);
+        let metadata: Vec<_> = result.unwrap().try_collect().unwrap();
+        assert!(metadata.is_empty());
     }
 }
 

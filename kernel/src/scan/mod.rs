@@ -384,7 +384,7 @@ impl PartitionValuesOptions {
     ///
     /// Note: The [Delta protocol] requires interpreting offset-less timestamps in the writer's
     /// timezone, but does not record that timezone. As a result, the timezone can only be supplied
-    /// by the connector, and Kernel cannot validate it.
+    /// by the connector, and Kernel cannot verify that it matches the writer's timezone.
     ///
     /// Kernel does not yet support setting a timezone for row transforms on tables with `TIMESTAMP`
     /// partition columns, so this option omits them as if [`ScanBuilder::without_row_transforms`]
@@ -857,12 +857,12 @@ pub struct ScanMetadata {
     ///
     /// - `Some(expr)`: Apply this expression to transform the data to match
     ///   [`Scan::logical_schema()`].
-    /// - `None`: No per-file transformation is provided.
+    /// - `None`: No transformation is needed; the data is already in the correct logical form.
     ///
     /// If row transforms were disabled through [`ScanBuilder::without_row_transforms`] or
-    /// [`PartitionValuesOptions::with_timestamp_timezone`], the connector must reconstruct logical
-    /// rows itself. Otherwise, an absent transform means the data is already in the correct
-    /// logical form.
+    /// [`PartitionValuesOptions::with_timestamp_timezone`] on a table with `TIMESTAMP` partition
+    /// columns, this vector is empty and the connector must reconstruct logical rows itself.
+    /// Otherwise, an absent transform means the data is already in the correct logical form.
     ///
     /// Note: This vector can be indexed by row number, as rows masked by the selection vector will
     /// have corresponding entries that will be `None`.
@@ -1057,13 +1057,8 @@ impl Scan {
     ///   row at index `i` in the above data, if an expression exists at index `i` in the `Vec`, the
     ///   associated expression _must_ be applied to the data read from the file specified by the
     ///   row. The resultant schema for this expression is guaranteed to be
-    ///   [`Self::logical_schema()`]. If the item at index `i` in this `Vec` is `None`, or if the
-    ///   `Vec` contains fewer than `i` elements, no expression is provided.
-    ///
-    /// If row transforms were disabled through [`ScanBuilder::without_row_transforms`] or
-    /// [`PartitionValuesOptions::with_timestamp_timezone`], the connector must reconstruct logical
-    /// rows itself. Otherwise, an absent transform means the data read from disk is already in the
-    /// correct logical state.
+    ///   [`Self::logical_schema()`]. Some entries in this `Vec` may be `None`, and the whole `Vec`
+    ///   may be empty. See [`ScanMetadata::scan_file_transforms`] for details of these cases.
     pub fn scan_metadata(
         &self,
         engine: &dyn Engine,
@@ -1139,8 +1134,8 @@ impl Scan {
                 &self.partition_values,
             ),
             KernelError::unsupported(
-                "Kernel does not yet support with_timestamp_timezone in scan_metadata_from; \
-                 use scan_metadata instead"
+                "Kernel does not yet support with_timestamp_timezone in scan_metadata_from on \
+                 tables with TIMESTAMP partition columns; use scan_metadata instead"
             )
         );
         // TODO(#966): validate that the current predicate is compatible with the hint predicate.
@@ -1330,7 +1325,8 @@ impl Scan {
             ),
             KernelError::unsupported(
                 "Kernel does not yet support with_timestamp_timezone in \
-                 declarative_metadata_scan_plan; use scan_metadata instead"
+                 declarative_metadata_scan_plan on tables with TIMESTAMP partition columns; \
+                 use scan_metadata instead"
             )
         );
         // Resolve the checkpoint shape once. Retain the leaf schema only when parsed metadata is
@@ -1513,8 +1509,8 @@ impl Scan {
                 &self.partition_values,
             ),
             KernelError::unsupported(
-                "Kernel does not yet support with_timestamp_timezone in parallel_scan_metadata; \
-                 use scan_metadata"
+                "Kernel does not yet support with_timestamp_timezone in parallel_scan_metadata on \
+                 tables with TIMESTAMP partition columns; use scan_metadata"
             )
         );
         // For the sequential/parallel phase approach, we use a conservative checkpoint_info
@@ -1557,8 +1553,8 @@ impl Scan {
     ///
     /// Returns an error if row transforms were disabled through
     /// [`ScanBuilder::without_row_transforms`] or
-    /// [`PartitionValuesOptions::with_timestamp_timezone`]; use [`Scan::scan_metadata`]
-    /// instead.
+    /// [`PartitionValuesOptions::with_timestamp_timezone`] on a table with `TIMESTAMP` partition
+    /// columns; use [`Scan::scan_metadata`] instead.
     // This calls [`Scan::scan_metadata`] to get an iterator of `ScanMetadata` actions for the scan,
     // and then uses the `engine`'s [`crate::ParquetHandler`] to read the actual table data.
     pub fn execute(
@@ -1568,8 +1564,8 @@ impl Scan {
         if self.state_info.skip_row_transforms {
             return Err(KernelError::unsupported(
                 "Scan::execute is not supported when row transforms are disabled by \
-                 without_row_transforms or with_timestamp_timezone; use scan_metadata for listing \
-                 and read data with your own reader",
+                 without_row_transforms or by with_timestamp_timezone on a table with TIMESTAMP \
+                 partition columns; use scan_metadata for listing and read data with your own reader",
             ));
         }
 
@@ -1718,6 +1714,9 @@ pub fn selection_vector(
 /// If a table has `TIMESTAMP` partition columns and the connector supplies a timezone, the read
 /// path must support applying it to offset-less timestamp partition values. Unsupported paths,
 /// such as parallel scans, use this check to return an error.
+///
+/// NOTE: This is a conservative choice. The scan may not actually use the `TIMESTAMP` partition
+/// columns, for example when they are projected out.
 fn table_requires_timestamp_timezone_support(
     table_configuration: &TableConfiguration,
     partition_values: &PartitionValuesOptions,

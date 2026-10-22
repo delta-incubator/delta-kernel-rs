@@ -337,7 +337,7 @@ impl ScanLogReplayProcessor {
                 COMMIT_READ_SCHEMA.clone(),
                 get_add_transform_expr(
                     stats_schema_for_transform.clone(),
-                    false,
+                    false, /* has_stats_parsed */
                     skip_stats,
                     synthesize_json,
                     partition_schema_for_transform.clone(),

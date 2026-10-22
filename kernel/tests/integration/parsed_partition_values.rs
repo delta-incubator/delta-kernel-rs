@@ -676,15 +676,22 @@ async fn offset_less_timestamp_partition_predicates_with_json_and_checkpoint(
     );
 }
 
+// Parallel scan, declarative scan, and scan.execute() require timezone support when the table is
+// timestamp partitioned.
 #[rstest]
-fn parallel_and_declarative_scans_reject_timestamp_timezone(
+fn different_scans_require_timezone_support_only_for_timestamp_partitions(
     #[values("UTC", "America/Los_Angeles", "+05:30")] tz: &str,
     #[values(false, true)] parsed_struct: bool,
+    #[values(false, true)] timestamp_partitioned: bool,
 ) {
     let (engine, snapshot, _table) = test_context!(
         LogState::with_latest_version(1).with_checkpoint_at([1]),
         FeatureSet::empty(),
-        partitioned(),
+        if timestamp_partitioned {
+            partitioned()
+        } else {
+            unpartitioned()
+        },
         TableConfig::new().write_stats_as_struct(true),
         version_latest(),
     );
@@ -703,29 +710,40 @@ fn parallel_and_declarative_scans_reject_timestamp_timezone(
     #[cfg(feature = "declarative-plans")]
     assert_result_error_with_message(
         scan.declarative_metadata_scan_plan(engine.as_ref()),
-        "with_timestamp_timezone in declarative_metadata_scan_plan",
+        if timestamp_partitioned {
+            "with_timestamp_timezone in declarative_metadata_scan_plan"
+        } else {
+            "this engine does not provide a PlanExecutor"
+        },
     );
-    assert_result_error_with_message(
-        scan.parallel_scan_metadata(engine.clone()),
-        "with_timestamp_timezone in parallel_scan_metadata",
-    );
-    assert_result_error_with_message(scan.execute(engine), "row transforms are disabled");
+    let parallel_result = scan.parallel_scan_metadata(engine.clone());
+    let execute_result = scan.execute(engine);
+    if timestamp_partitioned {
+        assert_result_error_with_message(
+            parallel_result,
+            "with_timestamp_timezone in parallel_scan_metadata",
+        );
+        assert_result_error_with_message(execute_result, "row transforms are disabled");
+    } else {
+        parallel_result.unwrap();
+        let batches = execute_result
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(!batches.is_empty());
+    }
 }
 
 #[rstest]
-#[case::unpartitioned(false, false)]
-#[case::not_timestamp_partition(false, true)]
-#[case::timestamp_partition(true, false)]
+#[case::unpartitioned(vec![], false /* expect_transform */)]
+#[case::not_timestamp_partition(vec!["category", "ts_ntz"], true /* expect_transform */)]
+#[case::timestamp_partition(vec!["ts"], false /* expect_transform */)]
 fn timestamp_timezone_controls_row_transforms(
-    #[case] timestamp_partition: bool,
+    #[case] partition_columns: Vec<&str>,
     #[case] expect_transform: bool,
     #[values("UTC", "America/Los_Angeles", "+05:30")] timezone: &str,
 ) {
-    let partition_columns = match (timestamp_partition, expect_transform) {
-        (true, _) => vec!["ts"],
-        (false, true) => vec!["category", "ts_ntz"],
-        (false, false) => vec![],
-    };
+    let timestamp_partition = partition_columns.contains(&"ts");
     let table = TestTableBuilder::new()
         .with_log_state(LogState::with_latest_version(1))
         .with_schema(schema_ref! {
@@ -748,14 +766,18 @@ fn timestamp_timezone_controls_row_transforms(
         .build()
         .unwrap();
 
+    let mut file_count = 0;
     for metadata in scan.scan_metadata(engine.as_ref()).unwrap() {
-        metadata
+        let (_, count) = metadata
             .unwrap()
-            .visit_scan_files(expect_transform, |expected, file| {
+            .visit_scan_files((expect_transform, file_count), |(expected, count), file| {
                 assert_eq!(file.transform.is_some(), *expected);
+                *count += 1;
             })
             .unwrap();
+        file_count = count;
     }
+    assert!(file_count > 0);
 
     let result = scan.execute(engine);
     if timestamp_partition {
